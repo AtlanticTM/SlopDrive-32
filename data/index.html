@@ -1,0 +1,488 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>SlopDrive-32</title>
+  <style>
+    * { margin: 0; padding: 0; box-sizing: border-box; }
+    body {
+      font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif;
+      background: #1a1a2e; color: #eee; min-height: 100vh;
+      display: flex; justify-content: center; align-items: flex-start;
+      padding: 20px;
+    }
+    .container { max-width: 500px; width: 100%; }
+    h1 { text-align: center; font-size: 1.8em; margin-bottom: 6px; color: #e94560; }
+    .subtitle { text-align: center; color: #888; font-size: 0.85em; margin-bottom: 20px; }
+
+    .tabs { display: flex; gap: 4px; margin-bottom: 16px; flex-wrap: wrap; }
+    .tab-btn {
+      flex: 1; min-width: 90px; padding: 10px; border: none; background: #16213e; color: #aaa;
+      font-size: 0.9em; cursor: pointer; border-radius: 8px 8px 0 0; transition: all 0.2s;
+    }
+    .tab-btn.active { background: #0f3460; color: #fff; }
+    .tab-content { display: none; }
+    .tab-content.active { display: block; }
+
+    .card {
+      background: #16213e; border-radius: 12px; padding: 20px; margin-bottom: 16px;
+      box-shadow: 0 4px 15px rgba(0,0,0,0.3);
+    }
+    .card h2 { font-size: 1.1em; margin-bottom: 16px; color: #e94560; }
+
+    label { display: block; font-size: 0.85em; color: #aaa; margin-bottom: 6px; }
+    .slider-group { margin-bottom: 20px; }
+    input[type="range"] {
+      width: 100%; height: 8px; -webkit-appearance: none; appearance: none;
+      background: #0f3460; border-radius: 4px; outline: none;
+    }
+    input[type="range"]::-webkit-slider-thumb {
+      -webkit-appearance: none; width: 22px; height: 22px; border-radius: 50%;
+      background: #e94560; cursor: pointer; border: 3px solid #fff;
+    }
+    select {
+      width: 100%; padding: 10px; border-radius: 8px; border: none;
+      background: #0f3460; color: #fff; font-size: 0.95em;
+    }
+    .value-display {
+      text-align: center; font-size: 1.4em; font-weight: bold; color: #e94560; margin-top: 4px;
+    }
+    .hint { font-size: 0.76em; color: #888; line-height: 1.4; margin-top: 4px; }
+
+    button.action-btn {
+      width: 100%; padding: 12px; border: none; border-radius: 8px;
+      font-size: 1em; font-weight: bold; cursor: pointer; transition: all 0.2s; margin-bottom: 8px;
+    }
+    .btn-primary { background: #e94560; color: #fff; }
+    .btn-primary:hover { background: #c73e54; }
+    .btn-secondary { background: #0f3460; color: #fff; }
+    .btn-secondary:hover { background: #1a4a8a; }
+    .btn-danger { background: #ff6b6b; color: #fff; }
+    .btn-danger:hover { background: #ee5a5a; }
+
+    .status-bar {
+      display: flex; justify-content: space-between; align-items: center;
+      padding: 10px 16px; border-radius: 8px; margin-bottom: 12px; font-size: 0.85em;
+    }
+    .status-connected { background: #0a3d2e; color: #4ade80; }
+    .status-disconnected { background: #3d1f1f; color: #ff6b6b; }
+    .status-homed { background: #0a3d2e; color: #4ade80; }
+    .status-not-homed { background: #3d351f; color: #fbbf24; }
+
+    .manual-controls { display: flex; gap: 8px; margin-bottom: 12px; }
+    .manual-controls button { flex: 1; padding: 16px; font-size: 1.2em; }
+    .pos-display {
+      text-align: center; font-size: 2em; font-weight: bold; color: #4ade80;
+      padding: 16px; background: #0f3460; border-radius: 8px; margin-bottom: 12px;
+    }
+
+    .save-indicator {
+      text-align: center; color: #4ade80; font-size: 0.85em; height: 20px; opacity: 0;
+      transition: opacity 0.3s;
+    }
+    .save-indicator.show { opacity: 1; }
+
+    .range-visual {
+      position: relative; height: 40px; background: #0f3460; border-radius: 8px;
+      margin: 12px 0; overflow: hidden;
+    }
+    .range-fill {
+      position: absolute; top: 0; bottom: 0; background: linear-gradient(90deg, #e94560, #ff6b6b);
+      border-radius: 8px; transition: left 0.3s, width 0.3s;
+    }
+    .range-label {
+      display: flex; justify-content: space-between; font-size: 0.75em; color: #888; margin-top: 4px;
+    }
+  </style>
+</head>
+<body>
+<div class="container">
+  <h1>&#x1F680; SlopDrive-32</h1>
+  <div class="subtitle">StrokeEngine Controller v2.0</div>
+
+  <div id="wifiStatus" class="status-bar status-disconnected">
+    <span>WiFi</span><span id="wifiText">Connecting...</span>
+  </div>
+  <div id="homedStatus" class="status-bar status-not-homed">
+    <span>Motor</span><span id="homedText">Not Homed</span>
+  </div>
+
+  <div class="tabs">
+    <button class="tab-btn active" onclick="showTab('settings', this)">Range</button>
+    <button class="tab-btn" onclick="showTab('motor', this)">Motor</button>
+    <button class="tab-btn" onclick="showTab('manual', this)">Manual</button>
+    <button class="tab-btn" onclick="showTab('logs', this)">Log</button>
+  </div>
+
+  <!-- Range / Settings Tab -->
+  <div id="settings" class="tab-content active">
+    <div class="card">
+      <h2>&#x1F4CF; Stroke Range</h2>
+      <label>Minimum Position (inserted)</label>
+      <div class="slider-group">
+        <input type="range" id="rangeMin" min="0" max="240" value="0" step="1" oninput="updateRangeVisual()">
+        <div class="value-display"><span id="rangeMinVal">0</span> mm</div>
+      </div>
+      <label>Maximum Position (extended)</label>
+      <div class="slider-group">
+        <input type="range" id="rangeMax" min="0" max="240" value="240" step="1" oninput="updateRangeVisual()">
+        <div class="value-display"><span id="rangeMaxVal">240</span> mm</div>
+      </div>
+      <label>Usable Stroke Range</label>
+      <div class="range-visual"><div class="range-fill" id="rangeFill"></div></div>
+      <div class="range-label"><span>Home (0mm)</span><span>Full Extent (240mm)</span></div>
+      <div style="text-align:center;margin-top:8px;">Stroke Depth: <strong id="strokeDepth">240</strong> mm</div>
+    </div>
+
+    <div class="card">
+      <h2>&#x1F6A7; Max Speed</h2>
+      <label>Maximum Movement Speed</label>
+      <div class="slider-group">
+        <input type="range" id="maxSpeed" min="50" max="3000" value="800" step="10" oninput="updateSpeedDisplay()">
+        <div class="value-display"><span id="speedVal">800</span> mm/s</div>
+      </div>
+    </div>
+
+    <div class="card">
+      <h2>&#x1F300; Motion Smoothness</h2>
+      <label>Acceleration (higher = snappier, lower = smoother/softer)</label>
+      <div class="slider-group">
+        <input type="range" id="accel" min="200" max="5000" value="1500" step="50" oninput="updateAccelDisplay()">
+        <div class="value-display"><span id="accelVal">1500</span> mm/s&sup2;</div>
+      </div>
+    </div>
+
+    <div class="card">
+      <h2>&#x1F30A; Inertia (Predictive Smoothing)</h2>
+      <label>Lookahead (how far past each point it coasts, in time)</label>
+      <div class="slider-group">
+        <input type="range" id="lookahead" min="0" max="60" value="20" step="1" oninput="updateInertiaDisplay()">
+        <div class="value-display"><span id="lookaheadVal">20</span> ms</div>
+      </div>
+      <label>Max Overshoot (hard cap on coast distance)</label>
+      <div class="slider-group">
+        <input type="range" id="overshoot" min="0" max="30" value="8" step="1" oninput="updateInertiaDisplay()">
+        <div class="value-display"><span id="overshootVal">8</span> mm</div>
+      </div>
+      <div class="hint">Between Intiface's position updates the motor keeps gliding for the
+        Lookahead time so motion stays continuous. Overshoot caps the coast distance.
+        Set both to 0 to disable. Try 20ms / 8mm.</div>
+    </div>
+
+    <div class="card">
+      <h2>&#x23F1; Polling / Timing</h2>
+      <label style="display:flex;align-items:center;gap:10px;cursor:pointer;">
+        <input type="checkbox" id="autoDuration" style="width:20px;height:20px;">
+        Auto Duration (use measured rate instead of app's value)
+      </label>
+      <div style="text-align:center;margin:14px 0;padding:12px;background:#0f3460;border-radius:8px;">
+        Measured app rate: <strong id="measuredHz" style="color:#4ade80;">--</strong> Hz
+        (<span id="measuredMs">--</span> ms)
+      </div>
+      <div class="hint">When ON, each move is sized to the REAL interval measured between
+        incoming commands rather than the app's (often fixed) value.</div>
+    </div>
+
+    <button class="action-btn btn-primary" onclick="saveSettings()">&#x1F4BE; Save Settings</button>
+    <div class="save-indicator" id="saveIndicator">&#x2705; Settings saved!</div>
+  </div>
+
+  <!-- Motor / TMC Tab -->
+  <div id="motor" class="tab-content">
+    <div class="card">
+      <h2>&#x26A1; Motor Driver (TMC2160)</h2>
+      <div class="hint" style="margin-bottom:14px;">Tune live: changes apply to the driver
+        immediately when you press <strong>Apply Live</strong>, so you can feel the difference
+        without saving. <strong>Save</strong> stores them to flash so they persist after reboot.</div>
+
+      <label>Run Current (motor torque while moving)</label>
+      <div class="slider-group">
+        <input type="range" id="runCurrent" min="300" max="3000" value="2000" step="50" oninput="tmcDisp()">
+        <div class="value-display"><span id="runCurrentVal">2000</span> mA</div>
+        <div class="hint">More current = more torque and holding force, but more heat in the motor
+          and driver. Raise if the motor stalls/skips under load; lower if it runs hot. 1500-2500mA
+          is typical for a NEMA17/23 stroker.</div>
+      </div>
+
+      <label>Hold Current (when idle)</label>
+      <div class="slider-group">
+        <input type="range" id="holdCurrent" min="0" max="100" value="50" step="5" oninput="tmcDisp()">
+        <div class="value-display"><span id="holdCurrentVal">50</span> %</div>
+        <div class="hint">Percentage of run current used to hold position when stopped. Lower =
+          cooler and quieter at rest, but weaker holding force. 30-50% is usually fine.</div>
+      </div>
+
+      <label>Chopper Mode</label>
+      <div class="slider-group">
+        <select id="stealthchop" onchange="tmcDisp()">
+          <option value="0">SpreadCycle (more torque, slight hum)</option>
+          <option value="1">StealthChop (near silent, less torque at speed)</option>
+        </select>
+        <div class="hint">SpreadCycle gives the strongest, most consistent torque - best for a
+          machine that pushes against load. StealthChop is whisper-quiet but can lose torque at
+          higher speeds. If you want quiet at low speed AND torque at high speed, pick StealthChop
+          and set the threshold below.</div>
+      </div>
+
+      <label>StealthChop&#x2192;SpreadCycle Threshold (TPWMTHRS)</label>
+      <div class="slider-group">
+        <input type="range" id="tpwmThrs" min="0" max="1000" value="0" step="10" oninput="tmcDisp()">
+        <div class="value-display"><span id="tpwmThrsVal">0</span></div>
+        <div class="hint">Only relevant in StealthChop mode. The driver runs StealthChop below this
+          speed and automatically switches to SpreadCycle above it (for torque). 0 = never switch
+          (stay in the chosen mode always). Higher number = switches at a lower speed. Tune by ear.</div>
+      </div>
+
+      <label>TOFF (chopper off-time / driver enable)</label>
+      <div class="slider-group">
+        <input type="range" id="toff" min="1" max="15" value="4" step="1" oninput="tmcDisp()">
+        <div class="value-display"><span id="toffVal">4</span></div>
+        <div class="hint">Sets the chopper's off-time. Must be 1-15 for the driver to run (0 disables
+          it). Affects audible tone and low-speed smoothness. 3-5 is a safe range; leave at 4 unless
+          chasing a specific noise.</div>
+      </div>
+
+      <label>TBL (blank time)</label>
+      <div class="slider-group">
+        <select id="tbl" onchange="tmcDisp()">
+          <option value="0">16 clocks</option>
+          <option value="1">24 clocks</option>
+          <option value="2">36 clocks</option>
+          <option value="3">54 clocks</option>
+        </select>
+        <div class="hint">Comparator blanking time that ignores switching noise during current
+          sensing. 24 clocks (the middle option) works for almost everything. Increase only if you
+          hear chopper instability/whine.</div>
+      </div>
+
+      <label>Hysteresis Start (HSTRT)</label>
+      <div class="slider-group">
+        <input type="range" id="hstart" min="0" max="7" value="5" step="1" oninput="tmcDisp()">
+        <div class="value-display"><span id="hstartVal">5</span></div>
+      </div>
+      <label>Hysteresis End (HEND)</label>
+      <div class="slider-group">
+        <input type="range" id="hend" min="-3" max="12" value="1" step="1" oninput="tmcDisp()">
+        <div class="value-display"><span id="hendVal">1</span></div>
+        <div class="hint">SpreadCycle current-ripple shaping. These fine-tune mid-range smoothness
+          and motor noise. Defaults (HSTRT 5 / HEND 1) are good; only nudge them if you're chasing a
+          buzz at a particular speed.</div>
+      </div>
+
+      <div class="hint" style="margin:10px 0;">Microsteps are fixed at 16 (with 256-step
+        interpolation) because the position math depends on it - changing it would mis-scale travel.</div>
+
+      <button class="action-btn btn-secondary" onclick="applyTmc(false)">&#x1F39B;&#xFE0F; Apply Live (don't save)</button>
+      <button class="action-btn btn-primary" onclick="applyTmc(true)">&#x1F4BE; Save Motor Settings</button>
+      <button class="action-btn btn-danger" onclick="resetTmc()">&#x267B;&#xFE0F; Reset to Defaults</button>
+      <div class="save-indicator" id="tmcSaveIndicator">&#x2705; Applied!</div>
+    </div>
+  </div>
+
+  <!-- Manual Control Tab -->
+  <div id="manual" class="tab-content">
+    <div class="card">
+      <h2>&#x1F4CD; Current Position</h2>
+      <div class="pos-display"><span id="currentPos">---</span> mm</div>
+      <label>Move to Position</label>
+      <div class="slider-group">
+        <input type="range" id="manualPos" min="0" max="240" value="0" step="1">
+        <div class="value-display"><span id="manualPosVal">0</span> mm</div>
+      </div>
+      <div class="manual-controls">
+        <button class="action-btn btn-secondary" onclick="moveManual(-1)">&#x276F; In</button>
+        <button class="action-btn btn-primary" onclick="goToPosition()">Go</button>
+        <button class="action-btn btn-secondary" onclick="moveManual(1)">Out &#x276F;</button>
+      </div>
+      <button class="action-btn btn-secondary" onclick="moveToHome()">&#x1F3E0; Home</button>
+      <button class="action-btn btn-danger" onclick="stopMotor()">&#x1F6D1; Stop</button>
+    </div>
+  </div>
+
+  <!-- Logs Tab -->
+  <div id="logs" class="tab-content">
+    <div class="card">
+      <h2>&#x1F4DC; Device Log</h2>
+      <div id="serialModeBar" class="status-bar status-connected" style="display:none;">
+        <span>Serial Control</span><span id="serialModeText">Active</span>
+      </div>
+      <div class="hint" style="margin-bottom:10px;">The USB serial port is used by Intiface for
+        commands, so boot/debug messages appear here instead of the serial monitor.</div>
+      <pre id="logBox" style="background:#0f3460;border-radius:8px;padding:12px;font-size:0.72em;
+           line-height:1.4;color:#cfe;white-space:pre-wrap;max-height:340px;overflow-y:auto;
+           margin-bottom:10px;">Loading...</pre>
+      <button class="action-btn btn-secondary" onclick="refreshLog()">&#x1F501; Refresh</button>
+      <label style="display:flex;align-items:center;gap:10px;cursor:pointer;margin-top:6px;">
+        <input type="checkbox" id="autoLog" checked style="width:18px;height:18px;"> Auto-refresh (2s)
+      </label>
+    </div>
+  </div>
+</div>
+
+<script>
+function showTab(name, btn) {
+  document.querySelectorAll('.tab-content').forEach(t => t.classList.remove('active'));
+  document.querySelectorAll('.tab-btn').forEach(b => b.classList.remove('active'));
+  document.getElementById(name).classList.add('active');
+  btn.classList.add('active');
+}
+
+function updateRangeVisual() {
+  const min = parseInt(rangeMin.value), max = parseInt(rangeMax.value);
+  rangeMinVal.textContent = min; rangeMaxVal.textContent = max;
+  const depth = Math.max(max - min, 0); strokeDepth.textContent = depth;
+  rangeFill.style.left = (min / 240 * 100) + '%';
+  rangeFill.style.width = (depth / 240 * 100) + '%';
+}
+function updateSpeedDisplay() { speedVal.textContent = maxSpeed.value; }
+function updateAccelDisplay() { accelVal.textContent = accel.value; }
+function updateInertiaDisplay() {
+  lookaheadVal.textContent = lookahead.value; overshootVal.textContent = overshoot.value;
+}
+manualPos.addEventListener('input', function() { manualPosVal.textContent = this.value; });
+
+async function saveSettings() {
+  const min = parseInt(rangeMin.value), max = parseInt(rangeMax.value);
+  if (min >= max) { alert('Minimum must be less than Maximum'); return; }
+  try {
+    const resp = await fetch('/api/settings', {
+      method: 'POST', headers: {'Content-Type': 'application/json'},
+      body: JSON.stringify({range_min: min, range_max: max, max_speed: parseInt(maxSpeed.value),
+        accel: parseInt(accel.value), lookahead: parseInt(lookahead.value),
+        overshoot: parseInt(overshoot.value), auto_duration: autoDuration.checked})
+    });
+    const data = await resp.json();
+    if (data.ok) { const i = saveIndicator; i.classList.add('show'); setTimeout(() => i.classList.remove('show'), 2000); }
+    else alert('Error: ' + data.error);
+  } catch(e) { alert('Failed to save settings'); }
+}
+
+// ---- Motor / TMC tab ----
+function tmcDisp() {
+  runCurrentVal.textContent = runCurrent.value;
+  holdCurrentVal.textContent = holdCurrent.value;
+  tpwmThrsVal.textContent = tpwmThrs.value;
+  toffVal.textContent = toff.value;
+  hstartVal.textContent = hstart.value;
+  hendVal.textContent = hend.value;
+}
+function tmcPayload(save) {
+  return {
+    run_current: parseInt(runCurrent.value),
+    hold_current: parseInt(holdCurrent.value),
+    stealthchop: parseInt(stealthchop.value),
+    tpwm_thrs: parseInt(tpwmThrs.value),
+    toff: parseInt(toff.value),
+    tbl: parseInt(tbl.value),
+    hstart: parseInt(hstart.value),
+    hend: parseInt(hend.value),
+    save: !!save
+  };
+}
+async function applyTmc(save) {
+  try {
+    const resp = await fetch('/api/tmc', {
+      method: 'POST', headers: {'Content-Type': 'application/json'},
+      body: JSON.stringify(tmcPayload(save))
+    });
+    const data = await resp.json();
+    if (data.ok) {
+      const i = tmcSaveIndicator;
+      i.textContent = save ? '\u2705 Saved!' : '\u2705 Applied!';
+      i.classList.add('show'); setTimeout(() => i.classList.remove('show'), 2000);
+    } else alert('Error: ' + (data.error || 'unknown'));
+  } catch(e) { alert('Failed to apply motor settings'); }
+}
+async function resetTmc() {
+  if (!confirm('Reset all motor/TMC settings to defaults?')) return;
+  try {
+    const resp = await fetch('/api/tmc', {
+      method: 'POST', headers: {'Content-Type': 'application/json'},
+      body: JSON.stringify({reset: true, save: true})
+    });
+    if ((await resp.json()).ok) loadTmc();
+  } catch(e) {}
+}
+async function loadTmc() {
+  try {
+    const data = await (await fetch('/api/tmc')).json();
+    runCurrent.value = data.run_current; holdCurrent.value = data.hold_current;
+    stealthchop.value = data.stealthchop; tpwmThrs.value = data.tpwm_thrs;
+    toff.value = data.toff; tbl.value = data.tbl;
+    hstart.value = data.hstart; hend.value = data.hend;
+    tmcDisp();
+  } catch(e) {}
+}
+
+async function goToPosition() {
+  await fetch('/api/move', {method:'POST', headers:{'Content-Type':'application/json'},
+    body: JSON.stringify({position: parseInt(manualPos.value)})});
+}
+async function moveManual(dir) {
+  const cur = parseInt(currentPos.textContent) || 0;
+  const np = Math.max(0, Math.min(240, cur + dir * 10));
+  manualPos.value = np; manualPosVal.textContent = np;
+  await fetch('/api/move', {method:'POST', headers:{'Content-Type':'application/json'},
+    body: JSON.stringify({position: np})});
+}
+async function moveToHome() { await fetch('/api/home', {method:'POST'}); }
+async function stopMotor() { await fetch('/api/stop', {method:'POST'}); }
+
+async function pollStatus() {
+  try {
+    const data = await (await fetch('/api/status')).json();
+    if (data.wifi_connected) { wifiStatus.className='status-bar status-connected'; wifiText.textContent=data.ip||'Connected'; }
+    else { wifiStatus.className='status-bar status-disconnected'; wifiText.textContent='Disconnected'; }
+    if (data.homed) { homedStatus.className='status-bar status-homed';
+      homedText.textContent='Homed - Buttplug: ' + (data.buttplug_connected?'Connected':'Disconnected'); }
+    else { homedStatus.className='status-bar status-not-homed';
+      homedText.textContent=data.homing?'Homing...':'Not Homed'; }
+    if (data.position !== undefined) currentPos.textContent = data.position.toFixed(1);
+    const sm = serialModeBar;
+    if (data.serial_mode) { sm.style.display='flex';
+      sm.className='status-bar ' + (data.serial_active?'status-connected':'status-not-homed');
+      serialModeText.textContent = data.serial_active?'Active (receiving TCode)':'Waiting for Intiface...'; }
+    else sm.style.display='none';
+    if (data.measured_hz !== undefined) {
+      measuredHz.textContent = data.measured_hz>0?data.measured_hz:'--';
+      measuredMs.textContent = data.measured_interval_ms>0?data.measured_interval_ms:'--';
+    }
+  } catch(e) {}
+}
+
+async function loadSettings() {
+  try {
+    const data = await (await fetch('/api/settings')).json();
+    if (data.range_min !== undefined) {
+      rangeMin.value=data.range_min; rangeMax.value=data.range_max;
+      maxSpeed.value=data.max_speed||800; accel.value=data.accel||1500;
+      lookahead.value=(data.lookahead!==undefined)?data.lookahead:20;
+      overshoot.value=(data.overshoot!==undefined)?data.overshoot:8;
+      autoDuration.checked=(data.auto_duration!==undefined)?data.auto_duration:true;
+      updateRangeVisual(); updateSpeedDisplay(); updateAccelDisplay(); updateInertiaDisplay();
+    }
+  } catch(e) {}
+}
+
+async function refreshLog() {
+  try {
+    const txt = await (await fetch('/api/log')).text();
+    const box = logBox;
+    const atBottom = box.scrollHeight - box.scrollTop - box.clientHeight < 30;
+    box.textContent = txt || '(no log output yet)';
+    if (atBottom) box.scrollTop = box.scrollHeight;
+  } catch(e) {}
+}
+setInterval(() => {
+  if (logs.classList.contains('active') && autoLog.checked) refreshLog();
+}, 2000);
+
+setInterval(pollStatus, 1000);
+loadSettings();
+loadTmc();
+pollStatus();
+refreshLog();
+</script>
+</body>
+</html>

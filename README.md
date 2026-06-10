@@ -50,7 +50,7 @@ safety.**
 - **Settings persist** to NVS (flash) and reload on boot.
 - **Web UI served from LittleFS** (in `data/`), not compiled into the firmware.
 - **Push-to-home** — establish the home position by simply pushing the shaft
-  into the endstop; no separate homing button required.
+  into the endstop; as a safety measure the machine does not move or engage the motor after power loss, either home from the WebUI or push to home.
 
 ---
 
@@ -180,6 +180,10 @@ platformio.ini
 
 ## License
 
-No license is specified yet. Until one is added, treat this as
-**all rights reserved** / personal-use reference code. Provided **as-is, with no
-warranty**.
+SlopDrive-32 is licensed under the **MIT License** — see [`LICENSE`](LICENSE).
+Provided **as-is, with no warranty**.
+
+This project links against third-party Arduino libraries and the Espressif
+Arduino core, each under its own license (MIT / LGPL / Apache-2.0). See
+[`THIRD_PARTY_LICENSES.md`](THIRD_PARTY_LICENSES.md) for the full attribution
+and license details.

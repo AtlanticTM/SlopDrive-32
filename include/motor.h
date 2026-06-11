@@ -3,11 +3,30 @@
 #define MOTOR_H
 
 #include <Arduino.h>
+#include "freertos/FreeRTOS.h"
+#include "freertos/semphr.h"
 #include "config.h"
 
 // Forward declarations
 class TMC2160Stepper;
 class FastAccelStepper;
+
+// Live diagnostics read back from the TMC2160 DRV_STATUS register (0x6F).
+// Populated by MotorController::readDriverStatus(). All flags are latched as the
+// driver reports them at the instant of the read.
+struct DriverStatus {
+    bool     valid       = false;  // false until a successful SPI read happened
+    bool     otpw        = false;  // OverTemperature Pre-Warning (~120degC)
+    bool     ot          = false;  // OverTemperature shutdown (~150degC)
+    bool     s2ga        = false;  // short to ground, coil A
+    bool     s2gb        = false;  // short to ground, coil B
+    bool     ola         = false;  // open load, coil A
+    bool     olb         = false;  // open load, coil B
+    bool     stst        = false;  // standstill (no step in last ~2^20 clocks)
+    uint16_t sg_result   = 0;      // StallGuard load value (0..1023; lower=more load)
+    uint8_t  cs_actual   = 0;      // actual current scaling 0..31
+    uint32_t raw         = 0;      // raw 32-bit register (for debugging)
+};
 
 struct DriverConfig {
     uint16_t microsteps = MICROSTEPS;
@@ -92,11 +111,34 @@ public:
     uint16_t getCurrentmA();
     uint8_t getMicrosteps();
 
+    // --- Live driver health monitoring (TMC2160 DRV_STATUS) ---
+    // Reads the DRV_STATUS register over SPI and returns the decoded flags.
+    // Thread-safe: serialized against applyDriverConfig() with an internal mutex
+    // so the background poll task and config writes don't collide on the bus.
+    DriverStatus readDriverStatus();
+    // StallGuard load as a 0..100% scalar (higher % = more mechanical load).
+    // Derived from sg_result (which falls as load rises). Returns 0 at standstill
+    // or before a valid read.
+    uint8_t getLoadPercent();
+    // Cached copy of the most recent readDriverStatus() (no SPI access).
+    DriverStatus getLastDriverStatus() const { return _last_status; }
+    // Latched safety trip: set true when a short-to-ground is detected. Cleared
+    // only by clearDriverFault().
+    bool isDriverFaulted() const { return _driver_faulted; }
+    void clearDriverFault() { _driver_faulted = false; }
+
     // Unit conversion (static for external use)
     static int32_t mmToSteps(float mm);
     static float stepsToMm(int32_t steps);
 
 private:
+    // Clears all streaming / extrapolation / target-monitor state so that a
+    // stale stream from before a Halt/Home can't keep issuing moveTo() commands
+    // that fight a fresh homing cycle (the "bangs the endstop / home does
+    // nothing after Halt" bug). Safe to call any time.
+    void resetStreamState();
+
+
     TMC2160Stepper* _tmc = nullptr;
     FastAccelStepper* _stepper = nullptr;
     
@@ -119,6 +161,11 @@ private:
     bool     _have_last_sample = false; // seeded after first sample
     bool     _coasting = false;         // currently projected past a sample
     static const uint16_t STREAM_STALL_MS = 80;  // no sample => settle on truth
+
+    // Driver health monitoring
+    DriverStatus     _last_status;            // cached most-recent DRV_STATUS read
+    bool             _driver_faulted = false; // latched short-to-ground trip
+    SemaphoreHandle_t _spi_mutex = nullptr;   // serializes TMC SPI access
 };
 
 #endif // MOTOR_H

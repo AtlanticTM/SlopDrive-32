@@ -1,0 +1,84 @@
+{
+  "$comment": [
+    "Intiface Central user device configuration for SlopDrive-32.",
+    "",
+    "This teaches Intiface to recognize the machine as a TCode v0.3 linear device",
+    "over Bluetooth LE, WebSocket, and USB Serial - all three transports the",
+    "firmware supports. The on-device parser is identical for every transport, so",
+    "one protocol definition (tcode-v03) covers them all.",
+    "",
+    "HOW TO USE:",
+    "  1. Open Intiface Central -> Settings -> 'Device Config File'",
+    "     (older builds: the gear/Advanced page has a 'User Device Config' picker).",
+    "  2. Point it at THIS file. Restart the Intiface engine if prompted.",
+    "  3. Start scanning:",
+    "       - Bluetooth: pick Bluetooth in the machine's web UI (Settings ->",
+    "         Connection), then Start Scanning in Intiface. 'SlopDrive-32' appears.",
+    "       - WebSocket / Serial: these still use the built-in TCode v0.3 device",
+    "         entry too; the BLE block below is the part that actually needs a",
+    "         custom config because Intiface can't auto-detect a custom BLE",
+    "         service without it.",
+    "",
+    "FEATURE / RANGE NOTES:",
+    "  - One linear actuator, command 'L0' (TCode linear axis 0).",
+    "  - StepCount 1000 -> Intiface scales position 0.0-1.0 to integer 0..999,",
+    "    matching the firmware's TCODE_MAGNITUDE_MAX (999). e.g. 0.5 -> 'L0500'.",
+    "  - The web UI's Stroke Window / trim / max-speed math is applied AFTER this",
+    "    on the device, so Intiface always sends the full 0..999 range and the",
+    "    machine maps it into your chosen physical window.",
+    "  - These UUIDs/name MUST stay in sync with include/config.h:",
+    "      BLE_DEVICE_NAME        = SlopDrive-32",
+    "      BLE_NUS_SERVICE_UUID   = 6e400001-b5a3-f393-e0a9-e50e24dcca9e",
+    "      BLE_NUS_RX_CHAR_UUID   = 6e400002-... (host -> device, write)",
+    "      BLE_NUS_TX_CHAR_UUID   = 6e400003-... (device -> host, notify)"
+  ],
+
+  "version": { "major": 3, "minor": 0 },
+
+  "user-configs": {
+    "specifiers": {
+      "tcode-v03": {
+        "$comment": [
+          "Attach the SlopDrive-32 BLE device to the built-in tcode-v03 protocol.",
+          "The Nordic UART Service is used as a transparent serial pipe: Intiface",
+          "writes TCode strings to the 'tx' endpoint (the device's RX char) and",
+          "reads replies from the 'rx' endpoint (the device's TX/notify char)."
+        ],
+        "btle": {
+          "names": [ "SlopDrive-32" ],
+          "services": {
+            "6e400001-b5a3-f393-e0a9-e50e24dcca9e": {
+              "tx": "6e400002-b5a3-f393-e0a9-e50e24dcca9e",
+              "rx": "6e400003-b5a3-f393-e0a9-e50e24dcca9e"
+            }
+          }
+        },
+        "websocket": {
+          "$comment": "Optional: lets Intiface treat the ESP32 WebSocket server as a tcode-v03 device by name as well.",
+          "names": [ "SlopDrive-32" ]
+        }
+      }
+    },
+
+    "configurations": {
+      "tcode-v03": [
+        {
+          "identifier": [ "slopdrive32-0001" ],
+          "name": "SlopDrive-32 Thruster",
+          "features": [
+            {
+              "feature-type": "PositionWithDuration",
+              "actuator-type": "Position",
+              "descriptor": "Linear stroke axis (L0)",
+              "step-range": [ [ 0, 999 ] ],
+              "messages": {
+                "LinearCmd": { "step-range": [ [ 0, 999 ] ] },
+                "StopDeviceCmd": {}
+              }
+            }
+          ]
+        }
+      ]
+    }
+  }
+}

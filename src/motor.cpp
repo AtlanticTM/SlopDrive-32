@@ -2,6 +2,8 @@
 #include "motor.h"
 #include <TMCStepper.h>
 #include <FastAccelStepper.h>
+#include <SPI.h>
+
 #include "freertos/FreeRTOS.h"
 #include "freertos/task.h"
 #include "applog.h"
@@ -29,6 +31,10 @@ static FastAccelStepperEngine _engine;
 MotorController::MotorController() {}
 
 void MotorController::begin() {
+    // Mutex serializes every TMC SPI access (config writes vs the background
+    // DRV_STATUS poll task) so software-SPI transactions never interleave.
+    if (!_spi_mutex) _spi_mutex = xSemaphoreCreateMutex();
+
     // Configure pins
     pinMode(PIN_ENABLE, OUTPUT);
     digitalWrite(PIN_ENABLE, HIGH);  // Disable motor initially (active LOW)
@@ -40,25 +46,57 @@ void MotorController::begin() {
     digitalWrite(PIN_TMC_CS, HIGH);  // Deselect TMC before begin()
     delay(10);
 
-    // Initialize TMC2160 via SW SPI
-    // Constructor: TMC2160Stepper(cs_pin, r_sense, mosi_pin, miso_pin, sck_pin)
-    _tmc = new TMC2160Stepper(
-        PIN_TMC_CS,
-        TMC_R_SENSE,
-        PIN_TMC_MOSI,
-        PIN_TMC_MISO,
-        PIN_TMC_SCLK
-    );
+    // Initialize TMC2160 via HARDWARE SPI.
+    //
+    // We deliberately use the ESP32-S3's silicon SPI peripheral, NOT the
+    // library's software bit-bang mode. Reason: passing all four pins
+    // (cs,rsense,mosi,miso,sck) to the constructor selects SOFTWARE SPI, which
+    // manually toggles the clock in a CPU loop. On an ESP32-S3 running FreeRTOS
+    // + WiFi + BLE + WebSockets, the OS preempts that loop at random; writes
+    // still work (the driver waits), but READS miss the exact moment MISO is
+    // sampled and come back as 0x00000000 / 0xFFFFFFFF - which is why
+    // DRV_STATUS readback never worked. Hardware SPI clocks/samples in silicon,
+    // immune to those interrupts.
+    //
+    // SPI.begin(SCK, MISO, MOSI, SS) binds the HSPI matrix to our custom pins,
+    // and the 2-arg TMC2160Stepper(cs, r_sense) constructor selects HW SPI.
+    //
+    // MISO MUST have a pull-up. The TMC drives MISO only while CS is asserted;
+    // the rest of the time it floats, and a floating MISO reads back as random
+    // 0x00/0xFF words (exactly the failure we were seeing). The reference
+    // example does the same `pinMode(MISO, INPUT_PULLUP)`.
+    pinMode(PIN_TMC_MISO, INPUT_PULLUP);
+    SPI.begin(PIN_TMC_SCLK, PIN_TMC_MISO, PIN_TMC_MOSI, PIN_TMC_CS);
+    _tmc = new TMC2160Stepper(PIN_TMC_CS, TMC_R_SENSE);
+
+    // Keep the TMC SPI clock conservative. TMCStepper defaults to a fast clock
+    // that the ESP32-S3 GPIO-matrix routing (non-native SPI pins) can't reliably
+    // sample on reads, returning 0x00000000 / 0xFFFFFFFF. 1 MHz is well within
+    // the TMC2160's spec and reads cleanly.
+    _tmc->setSPISpeed(1000000UL);
 
     _tmc->begin();
+
+
 
     // CRITICAL: TMC2160 needs time to power up before SPI registers can be written
     // The working reference code uses delay(1000) here
     delay(1000);
 
+    // Definitive SPI sanity check: read the silicon version field from the
+    // TMC's IOIN/GCONF register. A healthy TMC2160 reports version 0x30. If
+    // this comes back 0x00 or 0xFF, SPI is NOT talking (wiring/clock/MISO),
+    // and nothing downstream (DRV_STATUS, StallGuard) will ever read right.
+    uint8_t ver = _tmc->version();
+    MLOGF("TMC2160: SPI version read = 0x%02X (expect 0x30)\n", ver);
+    if (ver == 0x00 || ver == 0xFF) {
+        MLOGLN(F("TMC2160: *** SPI NOT RESPONDING *** check MISO wiring/pull-up & clock"));
+    }
+
     // Clear any faults
     uint32_t gstat = _tmc->GSTAT();
     if (gstat) {
+
         MLOGF("TMC2160 GSTAT before init: 0x%02X (clearing)\n", gstat);
         _tmc->GSTAT(0x07);
     }
@@ -130,6 +168,17 @@ void MotorController::disable() {
     }
 }
 
+// Clears all streaming / extrapolation / target-monitor state. Called whenever
+// we deliberately take over the motor (Halt, Stop, Home) so a stale stream
+// can't keep re-issuing moveTo() commands that fight the new motion.
+void MotorController::resetStreamState() {
+    _moving_to_target = false;
+    _coasting         = false;
+    _have_last_sample = false;
+    _stream_velocity  = 0.0f;
+    _last_sample_ms   = 0;
+}
+
 bool MotorController::home(int32_t home_speed_steps_s) {
     if (_homing) return false;
 
@@ -139,8 +188,24 @@ bool MotorController::home(int32_t home_speed_steps_s) {
     _homing = true;
     _homed = false;
 
+    // Drop any leftover stream/target state from before this home request,
+    // otherwise the motorTask keeps streaming old Intiface targets and fights
+    // the homing runForward() - the motor bangs the endstop and never settles.
+    resetStreamState();
+
+    // Make sure no previous move is still draining the queue before we start
+    // the homing sweep, or runForward() gets ignored.
+    if (_stepper && _stepper->isRunning()) {
+        _stepper->forceStop();
+        uint32_t to = millis() + 300;
+        while (_stepper->isRunning() && millis() < to) {
+            vTaskDelay(pdMS_TO_TICKS(2));
+        }
+    }
+
     // Make sure motor is enabled
     enable();
+
 
     // First, check if we're already at the endstop
     if (digitalRead(PIN_ENDSTOP) == ENDSTOP_ACTIVE_STATE) {
@@ -493,6 +558,9 @@ void MotorController::stop() {
     _enabled = false;
     // Also cancel any homing in progress
     _homing = false;
+    // Drop stale stream/target state so the next Home/move starts clean and
+    // nothing keeps re-issuing the last streamed target.
+    resetStreamState();
 }
 
 void MotorController::hardStop() {
@@ -500,10 +568,19 @@ void MotorController::hardStop() {
     if (_stepper) {
         _stepper->forceStop();
     }
+    // Halt (Pause/Buttplug stop) routes here. Clear the coast/extrapolation
+    // state too, otherwise updateExtrapolation()/the stream keeps streaming the
+    // last target right after the stop - and a later Home gets fought by it.
+    resetStreamState();
 }
+
 
 void MotorController::applyDriverConfig(const DriverConfig& cfg) {
     if (!_tmc) return;
+
+    // Take the SPI mutex so this burst of register writes can't interleave with
+    // the background DRV_STATUS poll task (software SPI is not re-entrant).
+    if (_spi_mutex) xSemaphoreTake(_spi_mutex, portMAX_DELAY);
 
     // NOTE on microsteps: STEPS_PER_MM is a compile-time constant derived from
     // MICROSTEPS (16). Changing the driver's microstepping live would desync
@@ -538,6 +615,83 @@ void MotorController::applyDriverConfig(const DriverConfig& cfg) {
           cfg.run_current_ma, cfg.hold_current_pct, cfg.toff, cfg.tbl,
           cfg.stealthchop ? "stealth" : "spread",
           (unsigned long)cfg.tpwm_thrs, (int)cfg.hstart, (int)cfg.hend);
+
+    if (_spi_mutex) xSemaphoreGive(_spi_mutex);
+}
+
+// Reads the TMC2160 DRV_STATUS register (0x6F) and decodes the health/diagnostic
+// flag. Bit layout is the TMC2130/5160/2160 DRV_STATUS map:
+//   [9:0]  SG_RESULT   StallGuard load value (1023=no load .. 0=stall)
+//   [20:16] CS_ACTUAL  actual current scale 0..31
+//   25 ot, 26 otpw, 27 s2ga, 28 s2gb, 29 ola, 30 olb, 31 stst
+DriverStatus MotorController::readDriverStatus() {
+    DriverStatus s;
+    if (!_tmc) return s;
+
+    if (_spi_mutex) xSemaphoreTake(_spi_mutex, portMAX_DELAY);
+    uint32_t v = _tmc->DRV_STATUS();
+    if (_spi_mutex) xSemaphoreGive(_spi_mutex);
+
+    // Reject obviously bogus reads. A failed/floating SPI transfer commonly comes
+    // back as all-ones (0xFFFFFFFF) or all-zeros (0x00000000). All-ones is the
+    // worst case: every diagnostic bit reads "1", which would falsely trip
+    // ot/otpw/s2ga/s2gb (and latch a phantom short-to-ground fault). Treat both
+    // as INVALID: keep the previous good reading and report valid=false so the UI
+    // shows "waiting for read" instead of bogus faults.
+    s.raw = v;
+    if (v == 0xFFFFFFFFUL || v == 0x00000000UL) {
+        s.valid = false;
+        // preserve the last good snapshot for getLoadPercent()/getLastDriverStatus()
+        DriverStatus prev = _last_status;
+        prev.valid = false;
+        prev.raw = v;
+        _last_status = prev;
+        return s;   // do NOT decode flags or latch a fault from a bad word
+    }
+
+    s.valid     = true;
+    s.sg_result = (uint16_t)(v & 0x3FF);
+    s.cs_actual = (uint8_t)((v >> 16) & 0x1F);
+    s.ot        = (v >> 25) & 0x1;
+    s.otpw      = (v >> 26) & 0x1;
+    s.s2ga      = (v >> 27) & 0x1;
+    s.s2gb      = (v >> 28) & 0x1;
+    s.ola       = (v >> 29) & 0x1;
+    s.olb       = (v >> 30) & 0x1;
+    s.stst      = (v >> 31) & 0x1;
+
+    _last_status = s;
+
+
+    // Latch a hard safety trip on a coil short-to-ground. The driver already
+    // shuts its output stage down internally, but we also cut our enable line
+    // and flag it so the UI/firmware refuse to keep commanding motion until the
+    // user acknowledges/clears the fault.
+    if (s.s2ga || s.s2gb) {
+        if (!_driver_faulted) {
+            MLOGF("DRV_STATUS FAULT: short-to-ground (s2ga=%d s2gb=%d) raw=0x%08lX\n",
+                  (int)s.s2ga, (int)s.s2gb, (unsigned long)v);
+        }
+        _driver_faulted = true;
+        if (_stepper) {
+            _stepper->forceStop();
+            _stepper->disableOutputs();
+        }
+        _enabled = false;
+    }
+
+    return s;
+}
+
+// StallGuard load as a 0..100% scalar. sg_result runs 0 (stalling/max load) to
+// ~1023 (no load), so we invert it. Returns 0 at standstill (sg_result is not
+// meaningful when the motor isn't stepping) or before the first valid read.
+uint8_t MotorController::getLoadPercent() {
+    const DriverStatus& s = _last_status;
+    if (!s.valid || s.stst) return 0;
+    // Invert and scale: high load -> high percentage.
+    float load = (1.0f - ((float)s.sg_result / 1023.0f)) * 100.0f;
+    return (uint8_t)constrain((int)load, 0, 100);
 }
 
 uint16_t MotorController::getCurrentmA() {

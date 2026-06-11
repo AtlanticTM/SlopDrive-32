@@ -2,487 +2,1743 @@
 <html lang="en">
 <head>
   <meta charset="UTF-8">
-  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no">
+  <meta name="theme-color" content="#10101c">
   <title>SlopDrive-32</title>
   <style>
-    * { margin: 0; padding: 0; box-sizing: border-box; }
+    /* ===================== Design tokens ===================== */
+    :root {
+      --bg: #0e0e1a;
+      --bg-2: #16182b;
+      --card: #1b1e35;
+      --card-2: #232744;
+      --line: #2c3158;
+      --text: #e8eaf6;
+      --muted: #9aa0c4;
+      --faint: #6b709a;
+      --accent: #6c8cff;       /* primary action */
+      --accent-2: #8a6cff;
+      --good: #34d399;
+      --warn: #fbbf24;
+      --bad: #fb6f84;
+      --radius: 14px;
+      --radius-sm: 9px;
+      --shadow: 0 8px 30px rgba(0,0,0,.45);
+      --tap: 44px;             /* min touch target */
+      --tabbar: 74px;          /* bottom tab bar height (mobile) */
+    }
+
+    * { margin: 0; padding: 0; box-sizing: border-box; -webkit-tap-highlight-color: transparent; }
+    html, body { height: 100%; }
+    /* Stop the whole page sliding horizontally while dragging sliders on mobile. */
+    html { overflow-x: hidden; }
     body {
-      font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif;
-      background: #1a1a2e; color: #eee; min-height: 100vh;
-      display: flex; justify-content: center; align-items: flex-start;
-      padding: 20px;
+      font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, Helvetica, Arial, sans-serif;
+      background: radial-gradient(1200px 600px at 50% -10%, #1a1d38 0%, var(--bg) 60%);
+      color: var(--text); min-height: 100vh; line-height: 1.45; overflow-x: hidden;
+      /* leave room for the fixed tab bar + the persistent home button above it */
+      padding: env(safe-area-inset-top) 0 calc(env(safe-area-inset-bottom) + var(--tabbar) + 70px);
     }
-    .container { max-width: 500px; width: 100%; }
-    h1 { text-align: center; font-size: 1.8em; margin-bottom: 6px; color: #e94560; }
-    .subtitle { text-align: center; color: #888; font-size: 0.85em; margin-bottom: 20px; }
+    .wrap { max-width: 560px; margin: 0 auto; padding: 16px 16px 0; }
 
-    .tabs { display: flex; gap: 4px; margin-bottom: 16px; flex-wrap: wrap; }
-    .tab-btn {
-      flex: 1; min-width: 90px; padding: 10px; border: none; background: #16213e; color: #aaa;
-      font-size: 0.9em; cursor: pointer; border-radius: 8px 8px 0 0; transition: all 0.2s;
+    /* ===================== Header ===================== */
+    .topbar { display: flex; align-items: center; gap: 10px; margin-bottom: 12px; }
+    .logo {
+      width: 30px; height: 30px; border-radius: 9px; flex: 0 0 auto;
+      background: linear-gradient(135deg, var(--accent), var(--accent-2));
+      display: grid; place-items: center; box-shadow: var(--shadow);
     }
-    .tab-btn.active { background: #0f3460; color: #fff; }
-    .tab-content { display: none; }
-    .tab-content.active { display: block; }
+    .logo svg { width: 17px; height: 17px; color: #fff; }
+    .title h1 { font-size: .98rem; font-weight: 700; letter-spacing: .2px; }
+    .title p { font-size: .64rem; color: var(--muted); }
 
+    /* status chips — never wrap, always one row */
+    .chips { display: flex; gap: 5px; margin-left: auto; flex-wrap: nowrap; justify-content: flex-end; min-width: 0; }
+    .chip {
+      display: inline-flex; align-items: center; gap: 4px; font-size: .62rem; font-weight: 600;
+      padding: 4px 7px; border-radius: 999px; background: var(--card); border: 1px solid var(--line);
+      color: var(--muted); white-space: nowrap;
+    }
+    .dot { width: 7px; height: 7px; border-radius: 50%; background: var(--faint); flex: 0 0 auto; }
+    .dot.good { background: var(--good); box-shadow: 0 0 8px var(--good); }
+    .dot.warn { background: var(--warn); box-shadow: 0 0 8px var(--warn); }
+    .dot.bad  { background: var(--bad);  box-shadow: 0 0 8px var(--bad); }
+    @media (min-width: 620px) {
+      .logo { width: 38px; height: 38px; border-radius: 11px; }
+      .logo svg { width: 22px; height: 22px; }
+      .title h1 { font-size: 1.15rem; } .title p { font-size: .74rem; }
+      .chip { font-size: .72rem; padding: 6px 10px; gap: 6px; }
+      .dot { width: 8px; height: 8px; }
+    }
+
+    /* ===================== Sticky transport bar ===================== */
+    .transport {
+      position: sticky; top: 0; z-index: 45; margin: 0 -16px 14px; padding: 10px 16px;
+      background: rgba(14,14,26,.88); backdrop-filter: blur(12px);
+      border-bottom: 1px solid var(--line); display: flex; gap: 8px;
+    }
+    .transport .tbtn {
+      flex: 1; min-height: 46px; border: 1px solid var(--line); border-radius: var(--radius-sm);
+      cursor: pointer; color: #fff; font-weight: 700; font-size: .82rem; background: var(--card-2);
+      display: flex; flex-direction: column; align-items: center; justify-content: center; gap: 1px;
+      transition: filter .15s, background .15s, box-shadow .15s;
+    }
+    .transport .tbtn small { font-weight: 500; font-size: .62rem; opacity: .8; }
+    .transport .tbtn:active { transform: translateY(1px); }
+    .tbtn.pause { background: rgba(108,140,255,.16); border-color: var(--accent); color: var(--accent); }
+    .tbtn.pause.on { background: linear-gradient(135deg, var(--accent), var(--accent-2)); color: #fff; }
+    .tbtn.halt { background: rgba(251,191,36,.14); border-color: var(--warn); color: var(--warn); }
+    .tbtn.estop { background: rgba(251,111,132,.16); border-color: var(--bad); color: var(--bad); }
+
+    /* ===================== Fault / state banners ===================== */
+    .fault {
+      display: none; align-items: flex-start; gap: 12px; background: linear-gradient(180deg,#3a1b25,#2a1420);
+      border: 1px solid var(--bad); border-radius: var(--radius); padding: 14px; margin-bottom: 14px;
+    }
+    .fault.show { display: flex; }
+    .fault svg { width: 22px; height: 22px; color: var(--bad); flex: 0 0 auto; margin-top: 1px; }
+    .fault .body { font-size: .82rem; color: #ffd9df; }
+    .fault button {
+      margin-top: 10px; padding: 9px 14px; border: none; border-radius: var(--radius-sm);
+      background: var(--bad); color: #2a1420; font-weight: 700; cursor: pointer;
+    }
+    .banner { display:none; border-radius: var(--radius); padding: 12px 14px; margin-bottom: 14px; font-size: .82rem; }
+    .banner.show { display:block; }
+    .banner.amber { background: linear-gradient(180deg,#3a3018,#2a230f); border:1px solid var(--warn); color:#ffe7ad; }
+    .banner.blue  { background: linear-gradient(180deg,#1a2046,#12162f); border:1px solid var(--accent); color:#cdd8ff; }
+
+    /* ===================== Toasts ===================== */
+    .toasts {
+      position: fixed; left: 50%; transform: translateX(-50%); top: calc(env(safe-area-inset-top) + 10px);
+      z-index: 90; display: flex; flex-direction: column; gap: 8px; width: min(420px, calc(100% - 24px)); pointer-events: none;
+    }
+    .toast {
+      display: flex; align-items: center; gap: 10px; padding: 11px 13px; border-radius: var(--radius-sm);
+      background: rgba(27,30,53,.97); border: 1px solid var(--line); box-shadow: var(--shadow);
+      font-size: .82rem; font-weight: 600; color: var(--text); pointer-events: auto;
+      animation: toastIn .25s ease; backdrop-filter: blur(8px);
+    }
+    .toast .ti { width: 22px; height: 22px; flex: 0 0 auto; }
+    .toast.good { border-color: rgba(52,211,153,.6); } .toast.good .ti { color: var(--good); }
+    .toast.warn { border-color: rgba(251,191,36,.6); } .toast.warn .ti { color: var(--warn); }
+    .toast.bad  { border-color: rgba(251,111,132,.7); } .toast.bad .ti { color: var(--bad); }
+    .toast.info .ti { color: var(--accent); }
+    .toast.out { animation: toastOut .25s ease forwards; }
+    @keyframes toastIn  { from { opacity:0; transform: translateY(-10px);} to { opacity:1; transform:none; } }
+    @keyframes toastOut { to { opacity:0; transform: translateY(-10px); } }
+
+    /* ===================== Cards ===================== */
     .card {
-      background: #16213e; border-radius: 12px; padding: 20px; margin-bottom: 16px;
-      box-shadow: 0 4px 15px rgba(0,0,0,0.3);
+      background: linear-gradient(180deg, var(--card), var(--bg-2));
+      border: 1px solid var(--line); border-radius: var(--radius); padding: 18px; margin-bottom: 14px;
+      box-shadow: var(--shadow);
     }
-    .card h2 { font-size: 1.1em; margin-bottom: 16px; color: #e94560; }
+    .card.tight { padding: 14px 18px; }
+    .card-head { display: flex; align-items: center; gap: 10px; margin-bottom: 14px; overflow: visible; }
+    .card.tight .card-head { margin-bottom: 10px; }
+    .card-head > svg, .card-head > [data-ico] { width: 18px; height: 18px; color: var(--accent); flex: 0 0 auto; overflow: visible; }
+    .card-head [data-ico] svg { width: 18px; height: 18px; overflow: visible; }
+    .card-head h2 { font-size: .98rem; font-weight: 700; }
+    .card-head .info { margin-left: auto; }
 
-    label { display: block; font-size: 0.85em; color: #aaa; margin-bottom: 6px; }
-    .slider-group { margin-bottom: 20px; }
+    /* ---- collapsible cards ---- */
+    .card.collapsible > .card-head { cursor: pointer; user-select: none; }
+    .card .caret {
+      width: 18px; height: 18px; flex: 0 0 auto; color: var(--muted);
+      transition: transform .2s; margin-left: 4px;
+    }
+    /* when the info button is present it owns margin-left:auto, so the caret
+       sits right after the title; otherwise push it to the right. */
+    .card-head h2 + .caret { margin-left: auto; }
+    .card.collapsed .caret { transform: rotate(-90deg); }
+    .card .card-body { overflow: hidden; transition: max-height .25s ease, opacity .2s ease; }
+    .card.collapsed .card-body { max-height: 0 !important; opacity: 0; margin: 0; padding: 0; pointer-events: none; }
+
+
+    /* ===================== Tooltips / info ===================== */
+    .info {
+      position: relative; width: 24px; height: 24px; border-radius: 50%; border: 1px solid var(--line);
+      background: var(--card-2); color: var(--muted); display: inline-grid; place-items: center;
+      cursor: pointer; flex: 0 0 auto; font-size: 0;
+    }
+    .info svg { width: 14px; height: 14px; }
+    .info .tip {
+      position: absolute; right: 0; top: calc(100% + 8px); width: 240px; z-index: 30;
+      background: #0b0c18; border: 1px solid var(--line); border-radius: 10px; padding: 11px 12px;
+      font-size: .76rem; font-weight: 400; line-height: 1.5; color: var(--text);
+      box-shadow: var(--shadow); opacity: 0; visibility: hidden; transform: translateY(-4px);
+      transition: opacity .15s, transform .15s, visibility .15s; pointer-events: none; text-align: left;
+    }
+    .info:hover .tip, .info.open .tip { opacity: 1; visibility: visible; transform: translateY(0); }
+    .label-row { display: flex; align-items: center; gap: 8px; margin-bottom: 8px; min-height: 20px; }
+    .label-row label { margin: 0; }
+    .label-row .info { width: 20px; height: 20px; }
+    .label-row .info svg { width: 12px; height: 12px; }
+    .label-row .info .tip { left: 0; right: auto; }
+    /* spacer keeps label rows aligned even when there's no info button (HSTRT/HEND) */
+    .label-row .ispace { width: 20px; height: 20px; flex: 0 0 auto; }
+
+    label { display: block; font-size: .82rem; color: var(--muted); font-weight: 600; }
+    .hint { font-size: .76rem; color: var(--faint); line-height: 1.5; margin-top: 6px; }
+
+    /* ===================== Inputs ===================== */
+    .field { margin-bottom: 18px; }
+    .card.tight .field { margin-bottom: 12px; }
     input[type="range"] {
-      width: 100%; height: 8px; -webkit-appearance: none; appearance: none;
-      background: #0f3460; border-radius: 4px; outline: none;
+      width: 100%; height: 6px; -webkit-appearance: none; appearance: none; margin: 10px 0;
+      background: var(--card-2); border-radius: 999px; outline: none; touch-action: pan-y;
     }
     input[type="range"]::-webkit-slider-thumb {
       -webkit-appearance: none; width: 22px; height: 22px; border-radius: 50%;
-      background: #e94560; cursor: pointer; border: 3px solid #fff;
+      background: var(--thumb, var(--accent)); cursor: pointer; border: 3px solid #fff;
+      box-shadow: 0 2px 6px rgba(0,0,0,.4);
     }
+    input[type="range"]::-moz-range-thumb {
+      width: 20px; height: 20px; border-radius: 50%; background: var(--thumb, var(--accent));
+      cursor: pointer; border: 3px solid #fff;
+    }
+    .num {
+      width: 100%; padding: 11px 12px; border-radius: var(--radius-sm); border: 1px solid var(--line);
+      background: var(--card-2); color: var(--text); font-size: 1rem; font-variant-numeric: tabular-nums;
+    }
+    .num:focus { outline: none; border-color: var(--accent); }
     select {
-      width: 100%; padding: 10px; border-radius: 8px; border: none;
-      background: #0f3460; color: #fff; font-size: 0.95em;
+      width: 100%; padding: 12px; border-radius: var(--radius-sm); border: 1px solid var(--line);
+      background: var(--card-2); color: var(--text); font-size: .95rem; appearance: none;
+      background-image: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 24 24' fill='none' stroke='%239aa0c4' stroke-width='2'%3E%3Cpath d='M6 9l6 6 6-6'/%3E%3C/svg%3E");
+      background-repeat: no-repeat; background-position: right 12px center; background-size: 18px;
     }
-    .value-display {
-      text-align: center; font-size: 1.4em; font-weight: bold; color: #e94560; margin-top: 4px;
-    }
-    .hint { font-size: 0.76em; color: #888; line-height: 1.4; margin-top: 4px; }
+    .readout { display: flex; align-items: baseline; justify-content: center; gap: 6px; margin-top: 4px; }
+    .readout b { font-size: 1.5rem; font-weight: 700; color: var(--text); font-variant-numeric: tabular-nums; }
+    .card.tight .readout b { font-size: 1.3rem; }
+    .readout span { font-size: .8rem; color: var(--muted); }
 
-    button.action-btn {
-      width: 100%; padding: 12px; border: none; border-radius: 8px;
-      font-size: 1em; font-weight: bold; cursor: pointer; transition: all 0.2s; margin-bottom: 8px;
+    .switch { display: flex; align-items: center; gap: 12px; cursor: pointer; user-select: none; }
+    .switch input { display: none; }
+    .switch .track {
+      width: 46px; height: 26px; border-radius: 999px; background: var(--card-2);
+      border: 1px solid var(--line); position: relative; transition: background .2s; flex: 0 0 auto;
     }
-    .btn-primary { background: #e94560; color: #fff; }
-    .btn-primary:hover { background: #c73e54; }
-    .btn-secondary { background: #0f3460; color: #fff; }
-    .btn-secondary:hover { background: #1a4a8a; }
-    .btn-danger { background: #ff6b6b; color: #fff; }
-    .btn-danger:hover { background: #ee5a5a; }
+    .switch .track::after {
+      content: ""; position: absolute; top: 2px; left: 2px; width: 20px; height: 20px; border-radius: 50%;
+      background: var(--faint); transition: transform .2s, background .2s;
+    }
+    .switch input:checked + .track { background: rgba(108,140,255,.25); border-color: var(--accent); }
+    .switch input:checked + .track::after { transform: translateX(20px); background: var(--accent); }
+    .switch .lbl { font-size:.86rem; color:var(--text); font-weight:600; }
+    .switch.full { justify-content: space-between; width:100%; }
 
-    .status-bar {
-      display: flex; justify-content: space-between; align-items: center;
-      padding: 10px 16px; border-radius: 8px; margin-bottom: 12px; font-size: 0.85em;
+    /* ===================== Buttons ===================== */
+    .btn {
+      display: inline-flex; align-items: center; justify-content: center; gap: 8px; width: 100%;
+      min-height: var(--tap); padding: 12px 14px; border: 1px solid var(--line); border-radius: var(--radius-sm);
+      font-size: .92rem; font-weight: 700; cursor: pointer; background: var(--card-2); color: var(--text);
+      transition: transform .05s, filter .15s, background .15s;
     }
-    .status-connected { background: #0a3d2e; color: #4ade80; }
-    .status-disconnected { background: #3d1f1f; color: #ff6b6b; }
-    .status-homed { background: #0a3d2e; color: #4ade80; }
-    .status-not-homed { background: #3d351f; color: #fbbf24; }
+    .btn:active { transform: translateY(1px); }
+    .btn svg { width: 17px; height: 17px; }
+    .btn.primary { background: linear-gradient(135deg, var(--accent), var(--accent-2)); border: none; color: #fff; }
+    .btn.primary:hover { filter: brightness(1.06); }
+    .btn.ghost { background: transparent; }
+    .btn.danger { background: rgba(251,111,132,.14); border-color: var(--bad); color: var(--bad); }
+    .btn.danger:hover { background: rgba(251,111,132,.22); }
+    .btn.sm { min-height: 34px; font-size: .78rem; padding: 6px 10px; width: auto; }
+    .btn-row { display: flex; gap: 10px; }
+    .btn-row .btn { margin: 0; }
+    .stack > .btn { margin-bottom: 10px; }
+    .stack > .btn:last-child { margin-bottom: 0; }
 
-    .manual-controls { display: flex; gap: 8px; margin-bottom: 12px; }
-    .manual-controls button { flex: 1; padding: 16px; font-size: 1.2em; }
-    .pos-display {
-      text-align: center; font-size: 2em; font-weight: bold; color: #4ade80;
-      padding: 16px; background: #0f3460; border-radius: 8px; margin-bottom: 12px;
+    .saved { text-align: center; color: var(--good); font-size: .8rem; height: 18px; opacity: 0; transition: opacity .3s; margin-top: 8px; }
+    .saved.show { opacity: 1; }
+
+    /* ===================== Range designer ===================== */
+    .designer { display: flex; gap: 16px; align-items: stretch; }
+    .track-col { flex: 0 0 96px; display: flex; flex-direction: column; align-items: center; }
+    .track-host {
+      position: relative; flex: 1; width: 72px; min-height: 320px; border-radius: 16px;
+      background:
+        repeating-linear-gradient(180deg, transparent 0, transparent 31px, rgba(255,255,255,.05) 31px, rgba(255,255,255,.05) 32px),
+        linear-gradient(180deg, #11132a, #0c0d1d);
+      border: 1px solid var(--line); overflow: hidden; touch-action: none;
+    }
+    .endcap { position: absolute; left: 0; right: 0; height: 22px; display: grid; place-items: center;
+      font-size: .62rem; letter-spacing: .5px; color: var(--faint); text-transform: uppercase; pointer-events: none; }
+    .endcap.top { top: 0; } .endcap.bot { bottom: 0; }
+    /* live carriage position — a glowing horizontal line that glides smoothly */
+    .posdot {
+      position:absolute; left:2px; right:2px; height:0; pointer-events:none; z-index:4;
+      /* position is eased every animation frame in JS, so no CSS transition here */
+    }
+    .posdot::before {
+      content:""; position:absolute; left:0; right:0; top:-1px; height:3px; border-radius:3px;
+      background: var(--good); box-shadow: 0 0 6px var(--good), 0 0 14px rgba(52,211,153,.7);
+    }
+    .posdot::after {
+      content:""; position:absolute; right:4px; top:-5px; width:11px; height:11px; border-radius:50%;
+      background: var(--good); box-shadow: 0 0 8px var(--good), 0 0 16px rgba(52,211,153,.8);
+      border:2px solid #0c0d1d;
     }
 
-    .save-indicator {
-      text-align: center; color: #4ade80; font-size: 0.85em; height: 20px; opacity: 0;
-      transition: opacity 0.3s;
+    .window {
+      position: absolute; left: 6px; right: 6px; border-radius: 12px; cursor: grab;
+      background: linear-gradient(180deg, rgba(108,140,255,.55), rgba(138,108,255,.45));
+      border: 1px solid rgba(255,255,255,.25); box-shadow: 0 4px 18px rgba(108,140,255,.35);
+      touch-action: none;
     }
-    .save-indicator.show { opacity: 1; }
+    .window:active { cursor: grabbing; }
+    .window .grip {
+      position: absolute; left: 50%; transform: translateX(-50%); width: 34px; height: 5px; border-radius: 3px;
+      background: rgba(255,255,255,.6);
+    }
+    .window .grip.t { top: 6px; } .window .grip.b { bottom: 6px; }
+    .handle {
+      position: absolute; left: -4px; right: -4px; height: 22px; cursor: ns-resize; touch-action: none;
+      display: grid; place-items: center;
+    }
+    .handle.t { top: -11px; } .handle.b { bottom: -11px; }
+    .handle .bar { width: 40px; height: 8px; border-radius: 5px; background: #fff; box-shadow: 0 2px 6px rgba(0,0,0,.5); }
+    .window .mid {
+      position: absolute; inset: 0; display: flex; flex-direction: column; align-items: center;
+      justify-content: center; gap: 2px; pointer-events: none; color: #fff;
+    }
+    .window .mid .big { font-size: 1rem; font-weight: 800; font-variant-numeric: tabular-nums; }
+    .window .mid .small { font-size: .64rem; opacity: .85; }
 
-    .range-visual {
-      position: relative; height: 40px; background: #0f3460; border-radius: 8px;
-      margin: 12px 0; overflow: hidden;
+    .ctl-col { flex: 1; min-width: 0; display: flex; flex-direction: column; gap: 14px; }
+    .nudge { display: grid; grid-template-columns: 1fr 1fr; gap: 8px; }
+    .nudge .btn { min-height: 40px; font-size: .84rem; padding: 8px; }
+    .pair { display: grid; grid-template-columns: 1fr 1fr; gap: 10px; }
+    .mini-label { font-size: .72rem; color: var(--muted); margin-bottom: 5px; font-weight: 600; }
+    .kv { display: flex; justify-content: space-between; font-size: .76rem; color: var(--muted); margin-top: 10px; }
+    .kv b { color: var(--text); font-variant-numeric: tabular-nums; }
+
+    /* ===================== Health ===================== */
+    .flags { display: grid; grid-template-columns: 1fr 1fr; gap: 9px; margin-bottom: 14px; }
+    .flag {
+      display: flex; align-items: center; gap: 9px; padding: 11px 12px; border-radius: var(--radius-sm);
+      background: var(--card-2); border: 1px solid var(--line); font-size: .8rem; font-weight: 600;
     }
-    .range-fill {
-      position: absolute; top: 0; bottom: 0; background: linear-gradient(90deg, #e94560, #ff6b6b);
-      border-radius: 8px; transition: left 0.3s, width 0.3s;
+    .flag .ico { width: 26px; height: 26px; border-radius: 7px; display: grid; place-items: center; flex: 0 0 auto;
+      background: rgba(52,211,153,.16); color: var(--good); }
+    .flag .ico svg { width: 15px; height: 15px; }
+    .flag .st { margin-left: auto; font-size: .68rem; padding: 3px 8px; border-radius: 999px;
+      background: rgba(52,211,153,.16); color: var(--good); }
+    .flag.warn { border-color: rgba(251,191,36,.5); }
+    .flag.warn .ico, .flag.warn .st { background: rgba(251,191,36,.16); color: var(--warn); }
+    .flag.bad { border-color: rgba(251,111,132,.6); }
+    .flag.bad .ico, .flag.bad .st { background: rgba(251,111,132,.18); color: var(--bad); }
+
+    .meter { position: relative; height: 30px; background: var(--card-2); border-radius: var(--radius-sm); overflow: hidden; border: 1px solid var(--line); }
+    .meter .fill { position: absolute; inset: 0 auto 0 0; width: 0%; border-radius: var(--radius-sm);
+      background: linear-gradient(90deg, var(--good), var(--warn) 65%, var(--bad)); transition: width .25s; }
+    .meter .txt { position: absolute; inset: 0; display: flex; align-items: center; justify-content: center; gap: 1px;
+      font-size: .8rem; font-weight: 700; white-space: nowrap; color: #fff; text-shadow: 0 1px 2px rgba(0,0,0,.6); }
+
+    .pos-big { text-align: center; padding: 18px; background: var(--card-2); border: 1px solid var(--line);
+      border-radius: var(--radius-sm); margin-bottom: 14px; }
+    .pos-big b { font-size: 2rem; font-weight: 800; color: var(--good); font-variant-numeric: tabular-nums; }
+    .pos-big span { font-size: .85rem; color: var(--muted); margin-left: 4px; }
+
+    /* segmented control */
+    .seg { display:flex; gap:6px; flex-wrap:wrap; }
+    .seg button { flex:1; min-width:60px; min-height:40px; border:1px solid var(--line); border-radius:var(--radius-sm);
+      background:var(--card-2); color:var(--muted); font-size:.82rem; font-weight:600; cursor:pointer; transition:.12s; }
+    .seg button.active { background:linear-gradient(135deg,var(--accent),var(--accent-2)); color:#fff; border:none; }
+
+    pre.log {
+      background: #0a0b16; border: 1px solid var(--line); border-radius: var(--radius-sm); padding: 12px;
+      font-size: .72rem; line-height: 1.5; color: #b9c2ff; white-space: pre-wrap; word-break: break-word;
+      max-height: 320px; overflow-y: auto; margin-bottom: 12px; font-family: ui-monospace, Menlo, Consolas, monospace;
     }
-    .range-label {
-      display: flex; justify-content: space-between; font-size: 0.75em; color: #888; margin-top: 4px;
+
+    /* ===================== Persistent home button (above tab bar) ===================== */
+    .home-fab {
+      display: none; position: fixed; left: 50%; transform: translateX(-50%); z-index: 41;
+      bottom: calc(var(--tabbar) + env(safe-area-inset-bottom) + 10px);
+      width: min(528px, calc(100% - 32px)); min-height: 46px; gap: 8px;
+      align-items: center; justify-content: center; border: none; border-radius: var(--radius-sm);
+      background: linear-gradient(135deg, var(--warn), #f59e0b); color: #2a1f04; font-weight: 800;
+      font-size: .92rem; cursor: pointer; box-shadow: var(--shadow);
+    }
+    .home-fab.show { display: flex; }
+    .home-fab svg { width: 18px; height: 18px; }
+
+    /* ===================== Bottom tab bar ===================== */
+    .tabs {
+      position: fixed; left: 0; right: 0; bottom: 0; z-index: 42;
+      background: rgba(14,14,26,.96); backdrop-filter: blur(12px); border-top: 1px solid var(--line);
+      display: flex; padding: 8px 8px calc(8px + env(safe-area-inset-bottom)); gap: 4px;
+    }
+    .tab {
+      flex: 1; background: none; border: none; color: var(--faint); cursor: pointer;
+      display: flex; flex-direction: column; align-items: center; gap: 3px; padding: 6px 2px;
+      border-radius: 10px; font-size: .64rem; font-weight: 600; transition: color .15s, background .15s;
+    }
+    .tab svg { width: 22px; height: 22px; }
+    .tab.active { color: var(--accent); background: rgba(108,140,255,.12); }
+
+    .tab-content { display: none; animation: fade .2s ease; }
+    .tab-content.active { display: block; }
+    @keyframes fade { from { opacity: 0; transform: translateY(4px); } to { opacity: 1; transform: none; } }
+
+    @media (min-width: 620px) {
+      .tabs { position: static; max-width: 560px; margin: 0 auto 16px; border-radius: var(--radius);
+        border: 1px solid var(--line); padding: 6px; }
+      .tab { flex-direction: row; gap: 8px; font-size: .82rem; padding: 9px; }
+      body { padding-bottom: 30px; }
+      .home-fab { position: static; transform: none; width: 100%; margin: 0 0 14px; }
     }
   </style>
 </head>
 <body>
-<div class="container">
-  <h1>&#x1F680; SlopDrive-32</h1>
-  <div class="subtitle">StrokeEngine Controller v2.0</div>
 
-  <div id="wifiStatus" class="status-bar status-disconnected">
-    <span>WiFi</span><span id="wifiText">Connecting...</span>
-  </div>
-  <div id="homedStatus" class="status-bar status-not-homed">
-    <span>Motor</span><span id="homedText">Not Homed</span>
-  </div>
+<!-- ===================== SVG icon sprite (Lucide / MIT-licensed paths) ===================== -->
+<svg width="0" height="0" style="position:absolute" aria-hidden="true">
+  <defs>
+    <g id="i-bolt"><path d="M13 2L4.09 12.11a1 1 0 00.78 1.63H11l-1 8 8.91-10.11a1 1 0 00-.78-1.63H12l1-8z"/></g>
+    <g id="i-range"><path d="M12 3v18"/><path d="M8 7l4-4 4 4"/><path d="M8 17l4 4 4-4"/></g>
+    <g id="i-gauge"><path d="M12 14l4-4"/><path d="M3.34 19a10 10 0 1117.32 0"/></g>
+    <g id="i-heart"><path d="M19 14c1.49-1.46 3-3.21 3-5.5A5.5 5.5 0 0016.5 3c-1.76 0-3 .5-4.5 2-1.5-1.5-2.74-2-4.5-2A5.5 5.5 0 002 8.5c0 2.29 1.51 4.04 3 5.5l7 7 7-7z"/></g>
+    <g id="i-sliders"><path d="M4 21v-7"/><path d="M4 10V3"/><path d="M12 21v-9"/><path d="M12 8V3"/><path d="M20 21v-5"/><path d="M20 12V3"/><path d="M1 14h6"/><path d="M9 8h6"/><path d="M17 16h6"/></g>
+    <g id="i-terminal"><path d="M4 17l6-6-6-6"/><path d="M12 19h8"/></g>
+    <g id="i-gear"><path d="M12.22 2h-.44a2 2 0 00-2 2v.18a2 2 0 01-1 1.73l-.43.25a2 2 0 01-2 0l-.15-.08a2 2 0 00-2.73.73l-.22.38a2 2 0 00.73 2.73l.15.1a2 2 0 011 1.72v.51a2 2 0 01-1 1.74l-.15.09a2 2 0 00-.73 2.73l.22.38a2 2 0 002.73.73l.15-.08a2 2 0 012 0l.43.25a2 2 0 011 1.73V20a2 2 0 002 2h.44a2 2 0 002-2v-.18a2 2 0 011-1.73l.43-.25a2 2 0 012 0l.15.08a2 2 0 002.73-.73l.22-.39a2 2 0 00-.73-2.73l-.15-.08a2 2 0 01-1-1.74v-.5a2 2 0 011-1.74l.15-.09a2 2 0 00.73-2.73l-.22-.38a2 2 0 00-2.73-.73l-.15.08a2 2 0 01-2 0l-.43-.25a2 2 0 01-1-1.73V4a2 2 0 00-2-2z"/><circle cx="12" cy="12" r="3"/></g>
+    <g id="i-chevron"><path d="M6 9l6 6 6-6"/></g>
 
-  <div class="tabs">
-    <button class="tab-btn active" onclick="showTab('settings', this)">Range</button>
-    <button class="tab-btn" onclick="showTab('motor', this)">Motor</button>
-    <button class="tab-btn" onclick="showTab('manual', this)">Manual</button>
-    <button class="tab-btn" onclick="showTab('logs', this)">Log</button>
-  </div>
+    <g id="i-info"><circle cx="12" cy="12" r="10"/><path d="M12 16v-4"/><path d="M12 8h.01"/></g>
+    <g id="i-alert"><path d="M10.29 3.86L1.82 18a2 2 0 001.71 3h16.94a2 2 0 001.71-3L13.71 3.86a2 2 0 00-3.42 0z"/><path d="M12 9v4"/><path d="M12 17h.01"/></g>
+    <g id="i-home"><path d="M3 9l9-7 9 7v11a2 2 0 01-2 2H5a2 2 0 01-2-2z"/><path d="M9 22V12h6v10"/></g>
+    <g id="i-stop"><rect x="5" y="5" width="14" height="14" rx="2"/></g>
+    <g id="i-pause"><rect x="6" y="4" width="4" height="16" rx="1"/><rect x="14" y="4" width="4" height="16" rx="1"/></g>
+    <g id="i-play"><path d="M5 3l14 9-14 9V3z"/></g>
+    <g id="i-wave"><path d="M2 12c2-7 4-7 6 0s4 7 6 0 4-7 6 0"/></g>
+    <g id="i-up"><path d="M18 15l-6-6-6 6"/></g>
+    <g id="i-down"><path d="M6 9l6 6 6-6"/></g>
+    <g id="i-save"><path d="M19 21H5a2 2 0 01-2-2V5a2 2 0 012-2h11l5 5v11a2 2 0 01-2 2z"/><path d="M17 21v-8H7v8"/><path d="M7 3v5h8"/></g>
+    <g id="i-reset"><path d="M3 2v6h6"/><path d="M3.51 15a9 9 0 102.13-9.36L3 8"/></g>
+    <g id="i-check"><path d="M20 6L9 17l-5-5"/></g>
+    <g id="i-thermo"><path d="M14 14.76V3.5a2.5 2.5 0 00-5 0v11.26a4.5 4.5 0 105 0z"/></g>
+    <g id="i-zap-off"><path d="M12.41 6.75L13 2l-2.43 2.92"/><path d="M18.57 12.91L21 10h-5.34"/><path d="M8 8l-5 6h7l-1 8 5-6"/><path d="M1 1l22 22"/></g>
+    <g id="i-cable"><path d="M4 9a4 4 0 014-4h0a4 4 0 014 4v6a4 4 0 004 4h0a4 4 0 004-4"/></g>
+    <g id="i-shield"><path d="M12 2l8 4v6c0 5-3.5 8-8 10-4.5-2-8-5-8-10V6z"/></g>
+    <g id="i-target"><circle cx="12" cy="12" r="9"/><circle cx="12" cy="12" r="4"/><circle cx="12" cy="12" r="1"/></g>
+    <g id="i-link"><path d="M10 13a5 5 0 007.07 0l3-3a5 5 0 10-7.07-7.07l-1.72 1.72"/><path d="M14 11a5 5 0 00-7.07 0l-3 3a5 5 0 107.07 7.07l1.72-1.72"/></g>
+  </defs>
+</svg>
 
-  <!-- Range / Settings Tab -->
-  <div id="settings" class="tab-content active">
-    <div class="card">
-      <h2>&#x1F4CF; Stroke Range</h2>
-      <label>Minimum Position (inserted)</label>
-      <div class="slider-group">
-        <input type="range" id="rangeMin" min="0" max="240" value="0" step="1" oninput="updateRangeVisual()">
-        <div class="value-display"><span id="rangeMinVal">0</span> mm</div>
-      </div>
-      <label>Maximum Position (extended)</label>
-      <div class="slider-group">
-        <input type="range" id="rangeMax" min="0" max="240" value="240" step="1" oninput="updateRangeVisual()">
-        <div class="value-display"><span id="rangeMaxVal">240</span> mm</div>
-      </div>
-      <label>Usable Stroke Range</label>
-      <div class="range-visual"><div class="range-fill" id="rangeFill"></div></div>
-      <div class="range-label"><span>Home (0mm)</span><span>Full Extent (240mm)</span></div>
-      <div style="text-align:center;margin-top:8px;">Stroke Depth: <strong id="strokeDepth">240</strong> mm</div>
+<script>
+  function icon(id) {
+    return '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" '
+      + 'stroke-linecap="round" stroke-linejoin="round"><use href="#' + id + '"/></svg>';
+  }
+</script>
+
+<div class="toasts" id="toasts"></div>
+
+<div class="wrap">
+  <!-- Header -->
+  <div class="topbar">
+    <div class="logo" data-ico="i-bolt"></div>
+    <div class="title">
+      <h1>SlopDrive-32</h1>
+      <p>Dynamic Motion Interface</p>
     </div>
-
-    <div class="card">
-      <h2>&#x1F6A7; Max Speed</h2>
-      <label>Maximum Movement Speed</label>
-      <div class="slider-group">
-        <input type="range" id="maxSpeed" min="50" max="3000" value="800" step="10" oninput="updateSpeedDisplay()">
-        <div class="value-display"><span id="speedVal">800</span> mm/s</div>
-      </div>
-    </div>
-
-    <div class="card">
-      <h2>&#x1F300; Motion Smoothness</h2>
-      <label>Acceleration (higher = snappier, lower = smoother/softer)</label>
-      <div class="slider-group">
-        <input type="range" id="accel" min="200" max="5000" value="1500" step="50" oninput="updateAccelDisplay()">
-        <div class="value-display"><span id="accelVal">1500</span> mm/s&sup2;</div>
-      </div>
-    </div>
-
-    <div class="card">
-      <h2>&#x1F30A; Inertia (Predictive Smoothing)</h2>
-      <label>Lookahead (how far past each point it coasts, in time)</label>
-      <div class="slider-group">
-        <input type="range" id="lookahead" min="0" max="60" value="20" step="1" oninput="updateInertiaDisplay()">
-        <div class="value-display"><span id="lookaheadVal">20</span> ms</div>
-      </div>
-      <label>Max Overshoot (hard cap on coast distance)</label>
-      <div class="slider-group">
-        <input type="range" id="overshoot" min="0" max="30" value="8" step="1" oninput="updateInertiaDisplay()">
-        <div class="value-display"><span id="overshootVal">8</span> mm</div>
-      </div>
-      <div class="hint">Between Intiface's position updates the motor keeps gliding for the
-        Lookahead time so motion stays continuous. Overshoot caps the coast distance.
-        Set both to 0 to disable. Try 20ms / 8mm.</div>
-    </div>
-
-    <div class="card">
-      <h2>&#x23F1; Polling / Timing</h2>
-      <label style="display:flex;align-items:center;gap:10px;cursor:pointer;">
-        <input type="checkbox" id="autoDuration" style="width:20px;height:20px;">
-        Auto Duration (use measured rate instead of app's value)
-      </label>
-      <div style="text-align:center;margin:14px 0;padding:12px;background:#0f3460;border-radius:8px;">
-        Measured app rate: <strong id="measuredHz" style="color:#4ade80;">--</strong> Hz
-        (<span id="measuredMs">--</span> ms)
-      </div>
-      <div class="hint">When ON, each move is sized to the REAL interval measured between
-        incoming commands rather than the app's (often fixed) value.</div>
-    </div>
-
-    <button class="action-btn btn-primary" onclick="saveSettings()">&#x1F4BE; Save Settings</button>
-    <div class="save-indicator" id="saveIndicator">&#x2705; Settings saved!</div>
-  </div>
-
-  <!-- Motor / TMC Tab -->
-  <div id="motor" class="tab-content">
-    <div class="card">
-      <h2>&#x26A1; Motor Driver (TMC2160)</h2>
-      <div class="hint" style="margin-bottom:14px;">Tune live: changes apply to the driver
-        immediately when you press <strong>Apply Live</strong>, so you can feel the difference
-        without saving. <strong>Save</strong> stores them to flash so they persist after reboot.</div>
-
-      <label>Run Current (motor torque while moving)</label>
-      <div class="slider-group">
-        <input type="range" id="runCurrent" min="300" max="3000" value="2000" step="50" oninput="tmcDisp()">
-        <div class="value-display"><span id="runCurrentVal">2000</span> mA</div>
-        <div class="hint">More current = more torque and holding force, but more heat in the motor
-          and driver. Raise if the motor stalls/skips under load; lower if it runs hot. 1500-2500mA
-          is typical for a NEMA17/23 stroker.</div>
-      </div>
-
-      <label>Hold Current (when idle)</label>
-      <div class="slider-group">
-        <input type="range" id="holdCurrent" min="0" max="100" value="50" step="5" oninput="tmcDisp()">
-        <div class="value-display"><span id="holdCurrentVal">50</span> %</div>
-        <div class="hint">Percentage of run current used to hold position when stopped. Lower =
-          cooler and quieter at rest, but weaker holding force. 30-50% is usually fine.</div>
-      </div>
-
-      <label>Chopper Mode</label>
-      <div class="slider-group">
-        <select id="stealthchop" onchange="tmcDisp()">
-          <option value="0">SpreadCycle (more torque, slight hum)</option>
-          <option value="1">StealthChop (near silent, less torque at speed)</option>
-        </select>
-        <div class="hint">SpreadCycle gives the strongest, most consistent torque - best for a
-          machine that pushes against load. StealthChop is whisper-quiet but can lose torque at
-          higher speeds. If you want quiet at low speed AND torque at high speed, pick StealthChop
-          and set the threshold below.</div>
-      </div>
-
-      <label>StealthChop&#x2192;SpreadCycle Threshold (TPWMTHRS)</label>
-      <div class="slider-group">
-        <input type="range" id="tpwmThrs" min="0" max="1000" value="0" step="10" oninput="tmcDisp()">
-        <div class="value-display"><span id="tpwmThrsVal">0</span></div>
-        <div class="hint">Only relevant in StealthChop mode. The driver runs StealthChop below this
-          speed and automatically switches to SpreadCycle above it (for torque). 0 = never switch
-          (stay in the chosen mode always). Higher number = switches at a lower speed. Tune by ear.</div>
-      </div>
-
-      <label>TOFF (chopper off-time / driver enable)</label>
-      <div class="slider-group">
-        <input type="range" id="toff" min="1" max="15" value="4" step="1" oninput="tmcDisp()">
-        <div class="value-display"><span id="toffVal">4</span></div>
-        <div class="hint">Sets the chopper's off-time. Must be 1-15 for the driver to run (0 disables
-          it). Affects audible tone and low-speed smoothness. 3-5 is a safe range; leave at 4 unless
-          chasing a specific noise.</div>
-      </div>
-
-      <label>TBL (blank time)</label>
-      <div class="slider-group">
-        <select id="tbl" onchange="tmcDisp()">
-          <option value="0">16 clocks</option>
-          <option value="1">24 clocks</option>
-          <option value="2">36 clocks</option>
-          <option value="3">54 clocks</option>
-        </select>
-        <div class="hint">Comparator blanking time that ignores switching noise during current
-          sensing. 24 clocks (the middle option) works for almost everything. Increase only if you
-          hear chopper instability/whine.</div>
-      </div>
-
-      <label>Hysteresis Start (HSTRT)</label>
-      <div class="slider-group">
-        <input type="range" id="hstart" min="0" max="7" value="5" step="1" oninput="tmcDisp()">
-        <div class="value-display"><span id="hstartVal">5</span></div>
-      </div>
-      <label>Hysteresis End (HEND)</label>
-      <div class="slider-group">
-        <input type="range" id="hend" min="-3" max="12" value="1" step="1" oninput="tmcDisp()">
-        <div class="value-display"><span id="hendVal">1</span></div>
-        <div class="hint">SpreadCycle current-ripple shaping. These fine-tune mid-range smoothness
-          and motor noise. Defaults (HSTRT 5 / HEND 1) are good; only nudge them if you're chasing a
-          buzz at a particular speed.</div>
-      </div>
-
-      <div class="hint" style="margin:10px 0;">Microsteps are fixed at 16 (with 256-step
-        interpolation) because the position math depends on it - changing it would mis-scale travel.</div>
-
-      <button class="action-btn btn-secondary" onclick="applyTmc(false)">&#x1F39B;&#xFE0F; Apply Live (don't save)</button>
-      <button class="action-btn btn-primary" onclick="applyTmc(true)">&#x1F4BE; Save Motor Settings</button>
-      <button class="action-btn btn-danger" onclick="resetTmc()">&#x267B;&#xFE0F; Reset to Defaults</button>
-      <div class="save-indicator" id="tmcSaveIndicator">&#x2705; Applied!</div>
+    <div class="chips">
+      <span class="chip"><span class="dot" id="wifiDot"></span><span id="wifiText">WiFi</span></span>
+      <span class="chip"><span class="dot" id="homeDot"></span><span id="homeText">Motor</span></span>
+      <span class="chip"><span class="dot" id="ifDot"></span><span id="ifText">IF</span></span>
     </div>
   </div>
 
-  <!-- Manual Control Tab -->
-  <div id="manual" class="tab-content">
-    <div class="card">
-      <h2>&#x1F4CD; Current Position</h2>
-      <div class="pos-display"><span id="currentPos">---</span> mm</div>
-      <label>Move to Position</label>
-      <div class="slider-group">
+  <!-- Sticky transport: Pause / Halt / E-Stop -->
+  <div class="transport">
+    <button class="tbtn pause" id="btnPause" onclick="togglePause()">
+      <span style="display:flex;align-items:center;gap:6px"><span style="width:15px;height:15px;display:inline-grid" data-ico="i-pause"></span> Pause</span>
+      <small id="pauseSub">ignore Intiface</small>
+    </button>
+    <button class="tbtn halt" onclick="halt()">
+      <span style="display:flex;align-items:center;gap:6px"><span style="width:15px;height:15px;display:inline-grid" data-ico="i-stop"></span> Halt</span>
+      <small>stop motion</small>
+    </button>
+    <button class="tbtn estop" onclick="estop()">
+      <span style="display:flex;align-items:center;gap:6px"><span style="width:15px;height:15px;display:inline-grid" data-ico="i-alert"></span> E-Stop</span>
+      <small>cut power</small>
+    </button>
+  </div>
+
+  <!-- Hard fault banner -->
+  <div class="fault" id="faultBanner">
+    <span data-ico="i-alert"></span>
+    <div class="body">
+      <strong>Driver fault — short to ground.</strong><br>
+      Motor power was cut for safety. Power down, check the motor wiring for a pinched/shorted
+      coil, then clear the fault and re-home.
+      <button onclick="clearFault()">Clear Fault</button>
+    </div>
+  </div>
+
+  <!-- ===================== DRIVE TAB (merged Range + Control) ===================== -->
+  <div id="drive" class="tab-content active">
+
+    <div id="ovBanner" class="banner amber">⚠ Override active — Intiface is ignored. You have full manual control; toggle off to ease back.</div>
+    <div id="pauseBanner" class="banner blue">⏸ Paused — Intiface ignored. Drive with the slider or generator below; unpausing eases control back.</div>
+
+    <!-- 1. Stroke Window -->
+    <div class="card collapsible">
+      <div class="card-head">
+        <span data-ico="i-range"></span><h2>Stroke Window</h2>
+        <button class="info" data-tip="Drag the highlighted box to slide the whole stroke window toward the front or back of the machine. Drag the white handles to trim each end. The green line shows the live carriage position. The grey track is the machine's full 240&nbsp;mm of travel — 0&nbsp;mm is home (fully in).">
+          <span data-ico="i-info"></span>
+        </button>
+        <span class="caret" data-ico="i-chevron"></span>
+      </div>
+      <div class="card-body">
+      <div class="designer">
+        <div class="track-col">
+          <div class="track-host" id="trackHost">
+            <div class="endcap top">Out / 240</div>
+            <div class="endcap bot">Home / 0</div>
+            <div class="window" id="win">
+              <div class="grip t"></div>
+              <div class="handle t" id="handleTop"><div class="bar"></div></div>
+              <div class="mid">
+                <div class="big"><span id="winLen">100</span></div>
+                <div class="small">mm</div>
+              </div>
+              <div class="handle b" id="handleBot"><div class="bar"></div></div>
+              <div class="grip b"></div>
+            </div>
+            <!-- live carriage position line (sits above the window so it's always visible) -->
+            <div class="posdot" id="posDot"></div>
+          </div>
+        </div>
+
+        <div class="ctl-col">
+          <div>
+            <div class="mini-label">Move whole window</div>
+            <div class="nudge">
+              <button class="btn ghost" onclick="nudgeWindow(5)"><span data-ico="i-up"></span> Toward out</button>
+              <button class="btn ghost" onclick="nudgeWindow(-5)"><span data-ico="i-down"></span> Toward in</button>
+            </div>
+          </div>
+
+          <div class="pair">
+            <div>
+              <div class="mini-label">Min (in)</div>
+              <input class="num" id="minNum" type="number" min="0" max="240" step="1" inputmode="numeric">
+            </div>
+            <div>
+              <div class="mini-label">Max (out)</div>
+              <input class="num" id="maxNum" type="number" min="0" max="240" step="1" inputmode="numeric">
+            </div>
+          </div>
+
+          <div>
+            <div class="mini-label">Trim ends</div>
+            <div class="nudge">
+              <button class="btn ghost" onclick="trim('min',-5)">In &minus;5</button>
+              <button class="btn ghost" onclick="trim('min',5)">In +5</button>
+              <button class="btn ghost" onclick="trim('max',-5)">Out &minus;5</button>
+              <button class="btn ghost" onclick="trim('max',5)">Out +5</button>
+            </div>
+          </div>
+
+          <div class="kv" style="margin-top:2px">
+            <span>Depth <b><span id="depthVal">100</span> mm</b></span>
+            <span>Span <b id="spanVal">10–110</b></span>
+          </div>
+        </div>
+      </div>
+
+      <div class="hint" style="margin-top:14px">Changes apply to the machine instantly as you drag — no save needed. The window is also kept in the saved settings.</div>
+      <div class="saved" id="saveIndRange">Applied</div>
+      </div>
+    </div>
+
+
+    <!-- 2. Position -->
+    <div class="card collapsible">
+      <div class="card-head">
+        <span data-ico="i-target"></span><h2>Position</h2>
+        <button class="info" data-tip="The slider follows the carriage live — drag it and the machine tracks instantly, no Go button. Set as Min/Max snaps the window edge to wherever the carriage is now."><span data-ico="i-info"></span></button>
+        <span class="caret" data-ico="i-chevron"></span>
+      </div>
+      <div class="card-body">
+      <div class="pos-big"><b id="currentPos">--</b><span>mm</span></div>
+
+      <div class="field">
+        <label>Target Position</label>
         <input type="range" id="manualPos" min="0" max="240" value="0" step="1">
-        <div class="value-display"><span id="manualPosVal">0</span> mm</div>
+        <div class="readout"><b id="manualPosVal">0</b><span>mm</span></div>
       </div>
-      <div class="manual-controls">
-        <button class="action-btn btn-secondary" onclick="moveManual(-1)">&#x276F; In</button>
-        <button class="action-btn btn-primary" onclick="goToPosition()">Go</button>
-        <button class="action-btn btn-secondary" onclick="moveManual(1)">Out &#x276F;</button>
+
+      <div class="btn-row" style="margin-bottom:10px">
+        <button class="btn ghost" onclick="setBound('min')"><span data-ico="i-down"></span> Set as Min</button>
+        <button class="btn ghost" onclick="setBound('max')"><span data-ico="i-up"></span> Set as Max</button>
       </div>
-      <button class="action-btn btn-secondary" onclick="moveToHome()">&#x1F3E0; Home</button>
-      <button class="action-btn btn-danger" onclick="stopMotor()">&#x1F6D1; Stop</button>
+
+      <label class="switch full" style="margin-bottom:10px">
+        <span><span class="lbl">Bypass limits</span><div class="hint" style="margin-top:2px">reach the full 0–240 mm, ignoring the window</div></span>
+        <span style="display:flex;align-items:center"><input type="checkbox" id="bypassLimits" onchange="onBypassChange()"><span class="track"></span></span>
+      </label>
+      <label class="switch full">
+        <span><span class="lbl">Override Intiface</span><div class="hint" style="margin-top:2px">take control; releasing eases back to Intiface</div></span>
+        <span style="display:flex;align-items:center"><input type="checkbox" id="overrideTog" onchange="toggleOverride()"><span class="track"></span></span>
+      </label>
+      </div>
+    </div>
+
+    <!-- 3. Motion Generator -->
+    <div class="card collapsible">
+      <div class="card-head">
+        <span data-ico="i-wave"></span><h2>Motion Generator</h2>
+        <button class="info" data-tip="Generates motion on the device itself, so it keeps running even if you close this tab or WiFi drops. Auto-yields if Intiface starts driving (unless you've paused or overridden). The FM/AM modulator slowly drifts the rate or depth for a less mechanical feel. The preview below visualizes the exact waveform the device is producing."><span data-ico="i-info"></span></button>
+        <span class="caret" data-ico="i-chevron"></span>
+      </div>
+      <div class="card-body">
+
+      <label class="switch full" style="margin-bottom:12px">
+        <span><span class="lbl">Waveform preview</span><div class="hint" style="margin-top:2px">visualize the generated motion (browser-side only)</div></span>
+        <span style="display:flex;align-items:center"><input type="checkbox" id="waveVizTog" checked onchange="toggleWaveViz()"><span class="track"></span></span>
+      </label>
+      <div id="waveCanvasWrap" style="margin-bottom:16px">
+        <canvas id="waveCanvas" style="width:100%;height:120px;display:block;background:#0a0b16;border:1px solid var(--line);border-radius:var(--radius-sm)"></canvas>
+      </div>
+
+      <div class="mini-label">Carrier waveform</div>
+
+      <div class="seg" id="waveSeg" style="margin-bottom:14px">
+        <button class="active" data-w="sine">Sine</button>
+        <button data-w="triangle">Triangle</button>
+        <button data-w="square">Square</button>
+        <button data-w="saw">Sawtooth</button>
+      </div>
+
+      <div class="field">
+        <label>Rate</label>
+        <input type="range" id="genRate" min="0.1" max="10" step="0.1" value="0.8" oninput="onLiveSlider('genRateVal',this,'genRate'); pushGenParams()">
+        <div class="readout"><b id="genRateVal">0.8</b><span>Hz</span></div>
+      </div>
+      <div class="field">
+        <label>Depth</label>
+        <input type="range" id="genDepth" min="5" max="100" step="1" value="80" oninput="setRead('genDepthVal',this.value); pushGenParams()">
+        <div class="readout"><b id="genDepthVal">80</b><span>% of window</span></div>
+      </div>
+      <div class="field">
+        <label>Center offset</label>
+        <input type="range" id="genOff" min="0" max="100" step="1" value="50" oninput="setRead('genOffVal',this.value); pushGenParams()">
+        <div class="readout"><b id="genOffVal">50</b><span>%</span></div>
+      </div>
+      <div class="field">
+        <label>Ease (soft ends)</label>
+        <input type="range" id="genEase" min="0" max="100" step="1" value="0" oninput="setRead('genEaseVal',this.value); pushGenParams()">
+        <div class="readout"><b id="genEaseVal">0</b><span>%</span></div>
+      </div>
+
+
+      <div class="mini-label" style="margin-top:4px">FM / AM modulator</div>
+      <div class="seg" id="modSeg" style="margin-bottom:14px">
+        <button class="active" data-m="off">Off</button>
+        <button data-m="rate">Rate FM</button>
+        <button data-m="depth">Depth AM</button>
+      </div>
+      <div id="modControls" style="display:none">
+        <div class="field"><label>Mod shape</label>
+          <select id="modWave" onchange="pushGenParams()"><option value="sine">Sine</option><option value="triangle">Triangle</option><option value="random">Random</option></select>
+        </div>
+        <div class="field"><label>Mod rate</label>
+          <input type="range" id="modRate" min="0.01" max="1" step="0.01" value="0.1" oninput="onLiveSlider('modRateVal',this,'modRate'); pushGenParams()">
+          <div class="readout"><b id="modRateVal">0.10</b><span>Hz</span></div>
+        </div>
+        <div class="field"><label>Mod amplitude</label>
+          <input type="range" id="modAmp" min="0" max="2" step="0.05" value="0.8" oninput="onLiveSlider('modAmpVal',this,'modAmp'); pushGenParams()">
+          <div class="readout"><b id="modAmpVal">0.80</b><span>Hz</span></div>
+        </div>
+
+      </div>
+
+      <button class="btn primary" id="genStartBtn" onclick="toggleGenerator()"><span data-ico="i-play"></span> Start Generator</button>
+      <div class="hint" id="genNote">Generated on the device — keeps running even if you close this tab. Toggle the preview to visualize the motion.</div>
+
+      </div>
+    </div>
+
+    <!-- 4. Live Overrides -->
+    <div class="card collapsible collapsed">
+      <div class="card-head">
+        <span data-ico="i-sliders"></span><h2>Live Overrides</h2>
+        <button class="info" data-tip="Temporarily override the saved defaults in real time. These don't persist — reboot (or Reset to defaults) restores the values saved on the Settings tab."><span data-ico="i-info"></span></button>
+        <span class="caret" data-ico="i-chevron"></span>
+      </div>
+      <div class="card-body">
+      <div class="field">
+        <label>Max Speed</label>
+        <input type="range" id="maxSpeed" min="50" max="3000" value="550" step="10" oninput="onLiveSlider('speedVal',this,'maxSpeed'); pushOverride()">
+        <div class="readout"><b id="speedVal">550</b><span>mm/s</span></div>
+      </div>
+      <div class="field">
+        <label>Acceleration</label>
+        <input type="range" id="accel" min="200" max="8000" value="1500" step="50" oninput="onLiveSlider('accelVal',this,'accel'); pushOverride()">
+        <div class="readout"><b id="accelVal">1500</b><span>mm/s²</span></div>
+      </div>
+      <div class="field">
+        <label>Lookahead</label>
+        <input type="range" id="lookahead" min="0" max="80" value="20" step="1" oninput="onLiveSlider('lookaheadVal',this,'lookahead'); pushOverride()">
+        <div class="readout"><b id="lookaheadVal">20</b><span>ms</span></div>
+      </div>
+      <div class="field" style="margin-bottom:8px">
+        <label>Max Overshoot</label>
+        <input type="range" id="overshoot" min="0" max="40" value="8" step="1" oninput="setRead('overshootVal',this.value); pushOverride()">
+        <div class="readout"><b id="overshootVal">8</b><span>mm</span></div>
+      </div>
+      <button class="btn ghost sm" style="width:100%" onclick="restoreDefaults()"><span data-ico="i-reset"></span> Restore saved defaults</button>
+      </div>
     </div>
   </div>
 
-  <!-- Logs Tab -->
-  <div id="logs" class="tab-content">
+
+  <!-- ===================== HEALTH TAB ===================== -->
+  <div id="health" class="tab-content">
     <div class="card">
-      <h2>&#x1F4DC; Device Log</h2>
-      <div id="serialModeBar" class="status-bar status-connected" style="display:none;">
-        <span>Serial Control</span><span id="serialModeText">Active</span>
+      <div class="card-head">
+        <span data-ico="i-heart"></span><h2>Driver Health</h2>
+        <button class="info" data-tip="Live readback from the TMC2160 over SPI, polled ~5×/sec — real hardware state, not a guess."><span data-ico="i-info"></span></button>
       </div>
-      <div class="hint" style="margin-bottom:10px;">The USB serial port is used by Intiface for
-        commands, so boot/debug messages appear here instead of the serial monitor.</div>
-      <pre id="logBox" style="background:#0f3460;border-radius:8px;padding:12px;font-size:0.72em;
-           line-height:1.4;color:#cfe;white-space:pre-wrap;max-height:340px;overflow-y:auto;
-           margin-bottom:10px;">Loading...</pre>
-      <button class="action-btn btn-secondary" onclick="refreshLog()">&#x1F501; Refresh</button>
-      <label style="display:flex;align-items:center;gap:10px;cursor:pointer;margin-top:6px;">
-        <input type="checkbox" id="autoLog" checked style="width:18px;height:18px;"> Auto-refresh (2s)
+      <div class="chip" id="drvStale" style="display:none;margin-bottom:12px">
+        <span class="dot warn"></span> Waiting for first read…
+      </div>
+      <div class="flags">
+        <div class="flag" id="fOtpw"><div class="ico" data-ico="i-thermo"></div><span>Temp warn</span><span class="st">OK</span></div>
+        <div class="flag" id="fOt"><div class="ico" data-ico="i-thermo"></div><span>Overtemp</span><span class="st">OK</span></div>
+        <div class="flag" id="fS2ga"><div class="ico" data-ico="i-zap-off"></div><span>Short A</span><span class="st">OK</span></div>
+        <div class="flag" id="fS2gb"><div class="ico" data-ico="i-zap-off"></div><span>Short B</span><span class="st">OK</span></div>
+        <div class="flag" id="fOla"><div class="ico" data-ico="i-cable"></div><span>Open A</span><span class="st">OK</span></div>
+        <div class="flag" id="fOlb"><div class="ico" data-ico="i-cable"></div><span>Open B</span><span class="st">OK</span></div>
+      </div>
+      <div class="hint"><b>Temp warn</b> is an early heads-up before the driver gets hot enough to shut down.
+        <b>Short</b> means a coil is shorted to ground (this hard-trips the machine). <b>Open</b> usually just
+        means the motor is idle/disconnected and is safe to ignore while stopped.</div>
+    </div>
+
+    <div class="card">
+      <div class="card-head">
+        <span data-ico="i-gauge"></span><h2>Mechanical Load</h2>
+        <button class="info" data-tip="Derived from the driver's StallGuard sensor — no load cell needed. Higher = working harder. Only meaningful while moving."><span data-ico="i-info"></span></button>
+      </div>
+      <div class="meter"><div class="fill" id="loadBar"></div><div class="txt"><span id="loadPct">--</span><span>%</span></div></div>
+      <div class="kv"><span>StallGuard raw <b id="sgRaw">--</b></span><span>Current scale <b id="csActual">--</b>/31</span></div>
+    </div>
+  </div>
+
+  <!-- ===================== SETTINGS TAB ===================== -->
+  <div id="settings" class="tab-content">
+
+    <!-- Connection / transport mode -->
+    <div class="card tight">
+      <div class="card-head">
+        <span data-ico="i-link"></span><h2>Connection</h2>
+        <button class="info" data-tip="How Intiface / a host talks to the machine. WebSocket and Serial both use Intiface; Bluetooth advertises a BLE serial service a phone app or BLE host can connect to. Only one is active at a time — switching applies instantly and is remembered across reboots."><span data-ico="i-info"></span></button>
+      </div>
+      <div class="seg" id="modeSeg" style="margin-bottom:10px">
+        <button data-mode="WS">WebSocket</button>
+        <button data-mode="SER">Serial</button>
+        <button data-mode="BT">Bluetooth</button>
+      </div>
+      <div class="hint" id="modeHint">Choose how the machine receives motion commands.</div>
+      <div class="chip" id="bleStatus" style="display:none;margin-top:10px">
+        <span class="dot" id="bleStatusDot"></span><span id="bleStatusText">Bluetooth</span>
+      </div>
+    </div>
+
+    <!-- Startup default range -->
+
+    <div class="card tight">
+      <div class="card-head">
+        <span data-ico="i-range"></span><h2>Startup Default Range</h2>
+        <button class="info" data-tip="The working window the machine resets to on boot. Mid-session changes on the Range tab persist too — this is just the home base to fall back to."><span data-ico="i-info"></span></button>
+      </div>
+      <div class="pair">
+        <div><div class="mini-label">Def min (mm)</div><input class="num" id="defMinNum" type="number" min="0" max="240" step="1" inputmode="numeric"></div>
+        <div><div class="mini-label">Def max (mm)</div><input class="num" id="defMaxNum" type="number" min="0" max="240" step="1" inputmode="numeric"></div>
+      </div>
+      <button class="btn ghost sm" style="margin-top:10px" onclick="useCurrentAsDefault()"><span data-ico="i-check"></span> Use current window</button>
+    </div>
+
+    <!-- Default motion (saved; overridable live on Control tab) -->
+    <div class="card tight">
+      <div class="card-head">
+        <span data-ico="i-sliders"></span><h2>Default Motion</h2>
+        <button class="info" data-tip="Saved defaults loaded on boot. You can override any of these live from the Control tab without changing what's saved here."><span data-ico="i-info"></span></button>
+      </div>
+      <div class="field">
+        <label>Max Speed</label>
+        <input type="range" id="defMaxSpeed" min="50" max="3000" value="550" step="10" oninput="onLiveSlider('defSpeedVal',this,'maxSpeed')">
+        <div class="readout"><b id="defSpeedVal">550</b><span>mm/s</span></div>
+      </div>
+      <div class="field">
+        <label>Acceleration</label>
+        <input type="range" id="defAccel" min="200" max="8000" value="1500" step="50" oninput="onLiveSlider('defAccelVal',this,'accel')">
+        <div class="readout"><b id="defAccelVal">1500</b><span>mm/s²</span></div>
+      </div>
+      <div class="field">
+        <label>Lookahead</label>
+        <input type="range" id="defLookahead" min="0" max="80" value="20" step="1" oninput="onLiveSlider('defLookaheadVal',this,'lookahead')">
+        <div class="readout"><b id="defLookaheadVal">20</b><span>ms</span></div>
+      </div>
+      <div class="field" style="margin-bottom:0">
+        <label>Max Overshoot</label>
+        <input type="range" id="defOvershoot" min="0" max="40" value="8" step="1" oninput="setRead('defOvershootVal',this.value)">
+        <div class="readout"><b id="defOvershootVal">8</b><span>mm</span></div>
+      </div>
+    </div>
+
+    <!-- Timing -->
+    <div class="card tight">
+      <div class="card-head">
+        <span data-ico="i-gauge"></span><h2>Timing</h2>
+        <button class="info" data-tip="How raw Intiface position samples become motion. Extrapolate is best when the app sends at a steady rate; Buffered smooths out apps that send in bursts."><span data-ico="i-info"></span></button>
+      </div>
+
+      <div class="mini-label">Input mode</div>
+      <div class="seg" id="inputModeSeg" style="margin-bottom:12px">
+        <button class="active" data-im="extrapolate">Extrapolate</button>
+        <button data-im="buffered">Buffered</button>
+      </div>
+
+      <!-- Extrapolate-only controls -->
+      <div id="extrapPanel">
+        <label class="switch"><input type="checkbox" id="autoDuration"><span class="track"></span><span class="lbl">Auto Duration</span></label>
+        <div class="mini-label" style="margin-top:4px;color:var(--faint)">Sizes each move to the real measured command interval (fixes apps that send a fixed move-duration). Best with a steady packet rate.</div>
+      </div>
+
+      <!-- Buffered-only controls -->
+      <div id="bufPanel" style="display:none">
+        <div class="mini-label" style="color:var(--faint);margin-bottom:8px">Buffers incoming commands and interpolates locally — smooths out apps that send packets sporadically/in bursts.</div>
+        <div class="field">
+          <label>Buffer depth</label>
+          <input type="range" id="bufDepth" min="1" max="5" step="1" value="2" oninput="setRead('bufDepthVal',this.value); pushInterp()">
+          <div class="readout"><b id="bufDepthVal">2</b><span>samples</span></div>
+        </div>
+        <div class="mini-label">Interpolation rate</div>
+        <div class="seg" id="bufTickSeg" style="margin-bottom:12px">
+          <button data-hz="20">20 Hz</button>
+          <button class="active" data-hz="50">50 Hz</button>
+          <button data-hz="100">100 Hz</button>
+        </div>
+        <div class="mini-label">Easing between points</div>
+        <div class="field">
+          <select id="bufEasing" onchange="pushInterp()">
+            <option value="0">Linear</option>
+            <option value="1" selected>Ease in-out (smooth)</option>
+            <option value="2">Ease in (accelerate)</option>
+            <option value="3">Ease out (decelerate)</option>
+            <option value="4">Ease in-out cubic (strong S)</option>
+          </select>
+        </div>
+      </div>
+
+      <div class="kv" style="margin-top:14px;background:var(--card-2);border:1px solid var(--line);border-radius:var(--radius-sm);padding:11px 12px">
+        <span>Measured rate</span><span><b id="measuredHz">--</b> Hz · <b id="measuredMs">--</b> ms</span>
+      </div>
+    </div>
+
+    <!-- Generation rate -->
+    <div class="card tight">
+      <div class="card-head">
+        <span data-ico="i-gauge"></span><h2>Generation rate</h2>
+        <button class="info" data-tip="How often the device recomputes and sends motion to the motor (waveform generator). Higher = smoother but more CPU/step load."><span data-ico="i-info"></span></button>
+      </div>
+      <div class="seg" id="genTickSeg">
+        <button data-hz="20">20 Hz</button>
+        <button class="active" data-hz="50">50 Hz</button>
+        <button data-hz="100">100 Hz</button>
+      </div>
+    </div>
+
+
+    <!-- Motor driver -->
+
+    <div class="card">
+      <div class="card-head">
+        <span data-ico="i-gear"></span><h2>Motor Driver (TMC2160)</h2>
+        <button class="info" data-tip="Apply Live pushes changes to the driver immediately. Save also writes them to flash so they survive a reboot."><span data-ico="i-info"></span></button>
+      </div>
+
+      <div class="field">
+        <div class="label-row"><label>Run Current</label>
+          <button class="info" data-tip="Torque while moving. More current = more force but more heat. The slider warms toward red as heat/wear risk rises."><span data-ico="i-info"></span></button></div>
+        <input type="range" id="runCurrent" min="300" max="3000" value="2000" step="50" oninput="onLiveSlider('runCurrentVal',this,'runCurrent')">
+        <div class="readout"><b id="runCurrentVal">2000</b><span>mA</span></div>
+      </div>
+
+      <div class="field">
+        <div class="label-row"><label>Hold Current</label>
+          <button class="info" data-tip="Percentage of run current used to hold position when stopped. Lower = cooler/quieter at rest. 30–50% is fine."><span data-ico="i-info"></span></button></div>
+        <input type="range" id="holdCurrent" min="0" max="100" value="50" step="5" oninput="setRead('holdCurrentVal',this.value)">
+        <div class="readout"><b id="holdCurrentVal">50</b><span>%</span></div>
+      </div>
+
+      <div class="field">
+        <div class="label-row"><label>Chopper Mode</label>
+          <button class="info" data-tip="SpreadCycle = strongest, most consistent torque. StealthChop = near-silent but can lose torque at speed."><span data-ico="i-info"></span></button></div>
+        <select id="stealthchop">
+          <option value="0">SpreadCycle — more torque</option>
+          <option value="1">StealthChop — near silent</option>
+        </select>
+      </div>
+
+      <div class="field">
+        <div class="label-row"><label>StealthChop → SpreadCycle Threshold</label>
+          <button class="info" data-tip="StealthChop mode only. Below this speed it stays quiet; above it switches to SpreadCycle for torque. 0 = never switch."><span data-ico="i-info"></span></button></div>
+        <input type="range" id="tpwmThrs" min="0" max="1000" value="0" step="10" oninput="setRead('tpwmThrsVal',this.value)">
+        <div class="readout"><b id="tpwmThrsVal">0</b><span>TPWMTHRS</span></div>
+      </div>
+
+      <div class="field">
+        <div class="label-row"><label>TOFF (chopper off-time)</label>
+          <button class="info" data-tip="Must be 1–15 for the driver to run. Affects tone and low-speed smoothness. Leave at 4 unless chasing noise."><span data-ico="i-info"></span></button></div>
+        <input type="range" id="toff" min="1" max="15" value="4" step="1" oninput="setRead('toffVal',this.value)">
+        <div class="readout"><b id="toffVal">4</b><span></span></div>
+      </div>
+
+      <div class="field">
+        <div class="label-row"><label>TBL (blank time)</label>
+          <button class="info" data-tip="Blanking time that ignores switching noise during current sensing. 24 clocks works for almost everything."><span data-ico="i-info"></span></button></div>
+        <select id="tbl">
+          <option value="0">16 clocks</option><option value="1">24 clocks</option>
+          <option value="2">36 clocks</option><option value="3">54 clocks</option>
+        </select>
+      </div>
+
+      <div class="pair">
+        <div class="field" style="margin-bottom:0">
+          <div class="label-row"><label>HSTRT</label><span class="ispace"></span></div>
+          <input type="range" id="hstart" min="0" max="7" value="5" step="1" oninput="setRead('hstartVal',this.value)">
+          <div class="readout"><b id="hstartVal">5</b></div>
+        </div>
+        <div class="field" style="margin-bottom:0">
+          <div class="label-row"><label>HEND</label>
+            <button class="info" data-tip="SpreadCycle current-ripple shaping. Defaults (HSTRT 5 / HEND 1) are good; only nudge to chase a buzz."><span data-ico="i-info"></span></button></div>
+          <input type="range" id="hend" min="-3" max="12" value="1" step="1" oninput="setRead('hendVal',this.value)">
+          <div class="readout"><b id="hendVal">1</b></div>
+        </div>
+      </div>
+
+      <div class="hint" style="margin:12px 0 16px">Microsteps are fixed at 16 (256-step interpolation); the position math depends on it.</div>
+
+      <div class="stack">
+        <button class="btn" onclick="applyTmc(false)"><span data-ico="i-sliders"></span> Apply Live</button>
+        <button class="btn primary" onclick="applyTmc(true)"><span data-ico="i-save"></span> Save Motor Settings</button>
+        <button class="btn danger" onclick="resetTmc()"><span data-ico="i-reset"></span> Reset to Defaults</button>
+      </div>
+      <div class="saved" id="tmcSaved">Applied</div>
+    </div>
+
+    <button class="btn primary" onclick="saveSettings()"><span data-ico="i-save"></span> Save All Settings</button>
+    <div class="saved" id="saveInd">Settings saved</div>
+
+    <!-- Expert / safety — kept at the very bottom of Settings -->
+    <div class="card tight" style="margin-top:14px">
+      <div class="card-head">
+        <span data-ico="i-shield"></span><h2>Safety</h2>
+        <button class="info" data-tip="Expert mode lets the sliders run all the way to the hardware ceiling. Sliders gradient toward red as you approach the limits — the closer to red, the higher the risk of lost steps, heat or wear."><span data-ico="i-info"></span></button>
+      </div>
+      <label class="switch full">
+        <span class="lbl">Expert mode</span>
+        <span style="display:flex;align-items:center"><input type="checkbox" id="expertMode" onchange="syncExpert(this.checked)"><span class="track"></span></span>
       </label>
+      <div id="expBanner" class="banner amber" style="margin-top:10px">⚠ Expert mode on — sliders run to the hardware ceiling. Watch the red zone.</div>
+    </div>
+  </div>
+
+
+  <!-- ===================== LOG TAB ===================== -->
+  <div id="log" class="tab-content">
+    <div class="card">
+      <div class="card-head"><span data-ico="i-terminal"></span><h2>Device Log</h2></div>
+      <div class="chip" id="serialModeBar" style="display:none;margin-bottom:12px">
+        <span class="dot" id="serialDot"></span><span id="serialModeText">Serial</span>
+      </div>
+      <div class="hint" style="margin-bottom:10px">The USB port carries Intiface commands, so boot/debug messages appear here.</div>
+      <pre class="log" id="logBox">Loading…</pre>
+      <div class="btn-row">
+        <button class="btn" onclick="refreshLog()"><span data-ico="i-reset"></span> Refresh</button>
+        <label class="switch" style="flex:1;justify-content:flex-end">
+          <span style="font-size:.8rem;color:var(--muted)">Auto</span>
+          <input type="checkbox" id="autoLog" checked><span class="track"></span>
+        </label>
+      </div>
     </div>
   </div>
 </div>
 
+<!-- Persistent Home button (shows until the device is homed) -->
+<button class="home-fab" id="homeFab" onclick="moveToHome()"><span data-ico="i-home"></span> Home the machine</button>
+
+<!-- Bottom navigation -->
+<nav class="tabs">
+  <button class="tab active" data-tab="drive"  data-ico="i-play"></button>
+  <button class="tab" data-tab="health" data-ico="i-heart"></button>
+  <button class="tab" data-tab="settings" data-ico="i-gear"></button>
+  <button class="tab" data-tab="log"    data-ico="i-terminal"></button>
+</nav>
+
+
 <script>
-function showTab(name, btn) {
-  document.querySelectorAll('.tab-content').forEach(t => t.classList.remove('active'));
-  document.querySelectorAll('.tab-btn').forEach(b => b.classList.remove('active'));
-  document.getElementById(name).classList.add('active');
-  btn.classList.add('active');
+/* ---------- icon injection ---------- */
+document.querySelectorAll('[data-ico]').forEach(el => { el.innerHTML = icon(el.dataset.ico); });
+const TAB_LABELS = { drive:'Drive', health:'Health', settings:'Settings', log:'Log' };
+document.querySelectorAll('.tab').forEach(t => {
+  t.insertAdjacentHTML('beforeend', '<span>' + TAB_LABELS[t.dataset.tab] + '</span>');
+});
+
+/* ---------- collapsible cards ---------- */
+function syncCardBody(card) {
+  const body = card.querySelector('.card-body'); if (!body) return;
+  // measured natural height drives the open transition; collapsed clamps to 0
+  body.style.maxHeight = card.classList.contains('collapsed') ? '0px' : (body.scrollHeight + 40) + 'px';
+}
+document.querySelectorAll('.card.collapsible').forEach(card => {
+  const head = card.querySelector('.card-head');
+  head.addEventListener('click', e => {
+    // don't toggle when tapping the info (?) button or its tooltip
+    if (e.target.closest('.info')) return;
+    card.classList.toggle('collapsed');
+    syncCardBody(card);
+  });
+  // start expanded cards at their natural height so the first collapse animates
+  requestAnimationFrame(() => syncCardBody(card));
+});
+// keep open card heights correct if content/layout changes
+window.addEventListener('resize', () => document.querySelectorAll('.card.collapsible:not(.collapsed)').forEach(syncCardBody));
+
+
+/* ---------- tab switching ---------- */
+document.querySelectorAll('.tab').forEach(btn => {
+  btn.addEventListener('click', () => {
+    document.querySelectorAll('.tab-content').forEach(c => c.classList.remove('active'));
+    document.querySelectorAll('.tab').forEach(b => b.classList.remove('active'));
+    document.getElementById(btn.dataset.tab).classList.add('active');
+    btn.classList.add('active');
+  });
+});
+
+/* ---------- info tooltips ---------- */
+document.querySelectorAll('.info').forEach(b => {
+  const tip = document.createElement('span');
+  tip.className = 'tip'; tip.innerHTML = b.dataset.tip || '';
+  b.appendChild(tip);
+  b.addEventListener('click', e => {
+    e.preventDefault(); e.stopPropagation();
+    const wasOpen = b.classList.contains('open');
+    document.querySelectorAll('.info.open').forEach(o => o.classList.remove('open'));
+    if (!wasOpen) b.classList.add('open');
+  });
+});
+document.addEventListener('click', () => document.querySelectorAll('.info.open').forEach(o => o.classList.remove('open')));
+
+/* ---------- helpers ---------- */
+const $ = id => document.getElementById(id);
+const clamp = (v,a,b) => Math.max(a, Math.min(b, v));
+const TRAVEL = 240;
+const MOVE_THROTTLE_MS = 50;
+function setRead(id, v) { const el=$(id); if (el) el.textContent = v; }
+
+/* ===================== smooth live position line ===================== */
+// Status is polled ~1×/sec; easing the glowing line toward the latest target
+// every animation frame makes it glide instead of snapping once per second.
+let posTarget = 0, posDisplay = 0, posAnimStarted = false;
+function animatePosLine() {
+  // critically-damped-ish ease: move a fraction of the remaining gap each frame
+  posDisplay += (posTarget - posDisplay) * 0.18;
+  if (Math.abs(posTarget - posDisplay) < 0.05) posDisplay = posTarget;
+  const host = $('trackHost'), dot = $('posDot');
+  if (host && dot) {
+    const H = host.clientHeight;
+    dot.style.top = ((1 - clamp(posDisplay, 0, TRAVEL) / TRAVEL) * H) + 'px';
+  }
+  requestAnimationFrame(animatePosLine);
+}
+function startPosAnim() { if (!posAnimStarted) { posAnimStarted = true; requestAnimationFrame(animatePosLine); } }
+
+
+/* ===================== TOASTS ===================== */
+function toast(msg, kind, ico, ms) {
+  const wrap = $('toasts');
+  const t = document.createElement('div');
+  t.className = 'toast ' + (kind||'info');
+  t.innerHTML = '<span class="ti">' + icon(ico||'i-info') + '</span><span>' + msg + '</span>';
+  wrap.appendChild(t);
+  setTimeout(() => { t.classList.add('out'); setTimeout(()=>t.remove(), 260); }, ms||4000);
 }
 
-function updateRangeVisual() {
-  const min = parseInt(rangeMin.value), max = parseInt(rangeMax.value);
-  rangeMinVal.textContent = min; rangeMaxVal.textContent = max;
-  const depth = Math.max(max - min, 0); strokeDepth.textContent = depth;
-  rangeFill.style.left = (min / 240 * 100) + '%';
-  rangeFill.style.width = (depth / 240 * 100) + '%';
+/* ===================== slider gradient colouring ===================== */
+// Tint the filled portion of each slider from accent -> warn -> bad, and set
+// the thumb to the colour at its current value. No hard ceiling; it's a feel.
+function lerp(a,b,t){ return a + (b-a)*t; }
+function hex(c){ return '#' + c.map(x=>Math.round(clamp(x,0,255)).toString(16).padStart(2,'0')).join(''); }
+const C_ACCENT=[108,140,255], C_WARN=[251,191,36], C_BAD=[251,111,132];
+function colorAt(frac){ // frac 0..1 across the slider's full span
+  frac = clamp(frac,0,1);
+  if (frac < 0.5) { const t=frac/0.5; return hex([lerp(C_ACCENT[0],C_WARN[0],t),lerp(C_ACCENT[1],C_WARN[1],t),lerp(C_ACCENT[2],C_WARN[2],t)]); }
+  const t=(frac-0.5)/0.5; return hex([lerp(C_WARN[0],C_BAD[0],t),lerp(C_WARN[1],C_BAD[1],t),lerp(C_WARN[2],C_BAD[2],t)]);
 }
-function updateSpeedDisplay() { speedVal.textContent = maxSpeed.value; }
-function updateAccelDisplay() { accelVal.textContent = accel.value; }
-function updateInertiaDisplay() {
-  lookaheadVal.textContent = lookahead.value; overshootVal.textContent = overshoot.value;
-}
-manualPos.addEventListener('input', function() { manualPosVal.textContent = this.value; });
+// Sliders that use the danger gradient (others stay plain accent).
+const GRADIENT_SLIDERS = ['maxSpeed','accel','lookahead','genRate','runCurrent','defMaxSpeed','defAccel','defLookahead','modRate','modAmp'];
 
-async function saveSettings() {
-  const min = parseInt(rangeMin.value), max = parseInt(rangeMax.value);
-  if (min >= max) { alert('Minimum must be less than Maximum'); return; }
-  try {
-    const resp = await fetch('/api/settings', {
-      method: 'POST', headers: {'Content-Type': 'application/json'},
-      body: JSON.stringify({range_min: min, range_max: max, max_speed: parseInt(maxSpeed.value),
-        accel: parseInt(accel.value), lookahead: parseInt(lookahead.value),
-        overshoot: parseInt(overshoot.value), auto_duration: autoDuration.checked})
+function paintSlider(slider) {
+  if (!GRADIENT_SLIDERS.includes(slider.id)) return;
+  const min = parseFloat(slider.min), max = parseFloat(slider.max), v = parseFloat(slider.value);
+  const frac = (v - min) / (max - min || 1);
+  const thumb = colorAt(frac);
+  // filled track gradient up to the thumb, plain card beyond
+  const pct = (frac*100).toFixed(1) + '%';
+  slider.style.background = 'linear-gradient(90deg, ' + colorAt(0) + ' 0%, ' + thumb + ' ' + pct + ', var(--card-2) ' + pct + ')';
+  slider.style.setProperty('--thumb', thumb);
+}
+function onLiveSlider(readId, slider, key) { setRead(readId, slider.value); paintSlider(slider); }
+
+let state = { paused:false, override:false, expert:false, ifActive:false, position:0, homed:false };
+const EXPERT_MAX = { maxSpeed:3000, accel:8000, lookahead:80, runCurrent:3000, genRate:50, modRate:5, modAmp:10 };
+const SAFE_MAX   = { maxSpeed:1500, accel:4000, lookahead:50, runCurrent:2500, genRate:5, modRate:1, modAmp:2 };
+function applyExpertCaps() {
+  const ex = state.expert;
+  // mirror caps onto both the live (Control) and default (Settings) sliders
+  const groups = { maxSpeed:['maxSpeed','defMaxSpeed'], accel:['accel','defAccel'], lookahead:['lookahead','defLookahead'], runCurrent:['runCurrent'], genRate:['genRate'], modRate:['modRate'], modAmp:['modAmp'] };
+
+  for (const key in groups) {
+    groups[key].forEach(id => {
+      const s = $(id); if (!s) return;
+      s.max = ex ? EXPERT_MAX[key] : SAFE_MAX[key];
+      if (parseFloat(s.value) > parseFloat(s.max)) s.value = s.max;
+      s.dispatchEvent(new Event('input'));
     });
-    const data = await resp.json();
-    if (data.ok) { const i = saveIndicator; i.classList.add('show'); setTimeout(() => i.classList.remove('show'), 2000); }
-    else alert('Error: ' + data.error);
-  } catch(e) { alert('Failed to save settings'); }
+  }
+  $('expBanner').classList.toggle('show', ex);
+  $('expertMode').checked = ex;
+}
+function syncExpert(on) { state.expert = on; applyExpertCaps(); }
+
+/* ===================== TRANSPORT (pause/halt/estop) ===================== */
+async function post(url, body) {
+  try { return await fetch(url, {method:'POST', headers:{'Content-Type':'application/json'}, body: JSON.stringify(body||{})}); }
+  catch(e) { return null; }
+}
+async function togglePause() {
+  const next = !state.paused;
+  await post('/api/pause', {paused: next});
+  state.paused = next; reflectGating();
+  if (next) stopGenerator();
+}
+async function halt() { await post('/api/halt', {}); stopGenerator(); toast('Motion halted', 'warn', 'i-stop'); }
+// E-Stop fires immediately — no confirmation dialog.
+async function estop() {
+  await post('/api/stop', {}); stopGenerator();
+  state.paused = false; state.override = false; reflectGating();
+  toast('E-STOP — power cut, re-home required', 'bad', 'i-alert', 6000);
+}
+async function toggleOverride() {
+  const on = $('overrideTog').checked;
+  await post('/api/override', {override: on});
+  state.override = on; reflectGating();
+}
+function reflectGating() {
+  $('btnPause').classList.toggle('on', state.paused);
+  $('pauseSub').textContent = state.paused ? 'Intiface paused' : 'ignore Intiface';
+  $('ovBanner').classList.toggle('show', state.override);
+  $('pauseBanner').classList.toggle('show', state.paused);
+  $('overrideTog').checked = state.override;
 }
 
-// ---- Motor / TMC tab ----
-function tmcDisp() {
-  runCurrentVal.textContent = runCurrent.value;
-  holdCurrentVal.textContent = holdCurrent.value;
-  tpwmThrsVal.textContent = tpwmThrs.value;
-  toffVal.textContent = toff.value;
-  hstartVal.textContent = hstart.value;
-  hendVal.textContent = hend.value;
+/* ===================== RANGE DESIGNER ===================== */
+let winMin = 10, winMax = 110;
+// Real-time window mapping: as the user drags/trims the window we push the new
+// range to the firmware LIVE (no "Save Window" button) so Intiface's mapped
+// motion follows immediately. Debounced + no_persist:true so we don't hammer
+// NVS on every pointer-move; the window is still written to flash by "Save All
+// Settings" / Set-as-Min/Max. windowReady gates this until the initial
+// loadSettings() has populated winMin/winMax, so boot doesn't push a stale
+// default over the saved range.
+let windowReady = false, windowPushTimer = null;
+function pushWindow() {
+  if (!windowReady) return;
+  clearTimeout(windowPushTimer);
+  windowPushTimer = setTimeout(() => {
+    post('/api/settings', {
+      range_min: Math.round(winMin), range_max: Math.round(winMax),
+      no_persist: true
+    });
+  }, 60);
 }
-function tmcPayload(save) {
+function renderWindow() {
+
+  winMin = clamp(Math.round(winMin), 0, TRAVEL);
+  winMax = clamp(Math.round(winMax), 0, TRAVEL);
+  if (winMax - winMin < 5) winMax = clamp(winMin + 5, 5, TRAVEL);
+  const host = $('trackHost'); const H = host.clientHeight;
+  const topPx = (1 - winMax / TRAVEL) * H;
+  const botPx = (1 - winMin / TRAVEL) * H;
+  const win = $('win');
+  win.style.top = topPx + 'px';
+  win.style.height = Math.max(botPx - topPx, 24) + 'px';
+  $('winLen').textContent = Math.round(winMax - winMin);
+  $('depthVal').textContent = Math.round(winMax - winMin);
+  $('spanVal').textContent = Math.round(winMin) + '–' + Math.round(winMax);
+  $('minNum').value = Math.round(winMin);
+  $('maxNum').value = Math.round(winMax);
+  if (!$('bypassLimits').checked) syncManualWindow();
+  // Real-time mapping: push the live window to the firmware as it changes.
+  pushWindow();
+}
+
+function nudgeWindow(d) {
+  const span = winMax - winMin;
+  let nMin = winMin + d, nMax = winMax + d;
+  if (nMin < 0) { nMin = 0; nMax = span; }
+  if (nMax > TRAVEL) { nMax = TRAVEL; nMin = TRAVEL - span; }
+  winMin = nMin; winMax = nMax; renderWindow();
+}
+function trim(which, d) {
+  if (which === 'min') winMin = clamp(winMin + d, 0, winMax - 5);
+  else winMax = clamp(winMax + d, winMin + 5, TRAVEL);
+  renderWindow();
+}
+$('minNum').addEventListener('change', () => { winMin = clamp(parseInt($('minNum').value)||0, 0, winMax - 5); renderWindow(); });
+$('maxNum').addEventListener('change', () => { winMax = clamp(parseInt($('maxNum').value)||0, winMin + 5, TRAVEL); renderWindow(); });
+
+function pxToMm(clientY) {
+  const host = $('trackHost'); const r = host.getBoundingClientRect();
+  const frac = clamp((clientY - r.top) / r.height, 0, 1);
+  return (1 - frac) * TRAVEL;
+}
+let drag = null, dragStart = null, startMin = 0, startMax = 0;
+function startDrag(mode, e) {
+  drag = mode; dragStart = pxToMm(e.clientY); startMin = winMin; startMax = winMax;
+  e.target.setPointerCapture && e.target.setPointerCapture(e.pointerId);
+  e.preventDefault();
+}
+function onDrag(e) {
+  if (!drag) return;
+  const mm = pxToMm(e.clientY);
+  if (drag === 'move') { const span = startMax - startMin; let delta = mm - dragStart;
+    let nMin = clamp(startMin + delta, 0, TRAVEL - span); winMin = nMin; winMax = nMin + span;
+  } else if (drag === 'top') { winMax = clamp(mm, winMin + 5, TRAVEL);
+  } else if (drag === 'bot') { winMin = clamp(mm, 0, winMax - 5); }
+  renderWindow(); e.preventDefault();
+}
+function endDrag() { drag = null; }
+$('win').addEventListener('pointerdown', e => { if (e.target.closest('.handle')) return; startDrag('move', e); });
+$('handleTop').addEventListener('pointerdown', e => startDrag('top', e));
+$('handleBot').addEventListener('pointerdown', e => startDrag('bot', e));
+window.addEventListener('pointermove', onDrag);
+window.addEventListener('pointerup', endDrag);
+window.addEventListener('pointercancel', endDrag);
+window.addEventListener('resize', renderWindow);
+
+function useCurrentAsDefault() { $('defMinNum').value = Math.round(winMin); $('defMaxNum').value = Math.round(winMax); }
+
+/* ===================== CONTROL — live slider ===================== */
+let lastMoveSent = 0, posDragging = false;
+function manualBounds() {
+  if ($('bypassLimits').checked) return [0, TRAVEL];
+  return [Math.round(winMin), Math.round(winMax)];
+}
+function syncManualWindow() {
+  const [lo,hi] = manualBounds(); const s = $('manualPos');
+  s.min = lo; s.max = hi;
+  s.value = clamp(parseFloat(s.value), lo, hi);
+  $('manualPosVal').textContent = Math.round(s.value);
+}
+function onBypassChange() { syncManualWindow(); }
+function sendMove(pos, force) {
+  const now = performance.now();
+  if (!force && now - lastMoveSent < MOVE_THROTTLE_MS) return;
+  lastMoveSent = now;
+  // stream:true -> firmware uses the non-blocking streamTo() path so rapid
+  // slider drags re-plan smoothly instead of queuing up and snapping at the end.
+  // On pointer-release (force) we send a settling move (stream:false) so the
+  // carriage comes to rest exactly on the final value.
+  post('/api/move', {position: Math.round(pos*10)/10, stream: !force,
+                     bypass_limits: $('bypassLimits').checked});
+}
+
+$('manualPos').addEventListener('pointerdown', () => { posDragging = true; });
+$('manualPos').addEventListener('pointerup',   () => { posDragging = false; sendMove(parseFloat($('manualPos').value), true); });
+$('manualPos').addEventListener('input', function(){ $('manualPosVal').textContent = Math.round(this.value); sendMove(parseFloat(this.value)); });
+async function setBound(which) {
+  const p = Math.round(state.position);
+  if (which === 'min') winMin = clamp(p, 0, winMax - 5);
+  else winMax = clamp(p, winMin + 5, TRAVEL);
+  renderWindow(); await saveSettings(true);
+  toast('Window ' + which + ' set to ' + p + ' mm', 'good', 'i-check');
+}
+async function moveToHome(){ await post('/api/home', {}); toast('Homing…', 'info', 'i-home'); }
+
+/* ---- live overrides: push to firmware without saving ---- */
+let overrideTimer = null;
+function pushOverride() {
+  clearTimeout(overrideTimer);
+  overrideTimer = setTimeout(() => {
+    post('/api/settings', {
+      max_speed: parseInt($('maxSpeed').value), accel: parseInt($('accel').value),
+      lookahead: parseInt($('lookahead').value), overshoot: parseInt($('overshoot').value),
+      no_persist: true
+    });
+  }, 120);
+}
+function restoreDefaults() {
+  $('maxSpeed').value = $('defMaxSpeed').value; onLiveSlider('speedVal', $('maxSpeed'),'maxSpeed');
+  $('accel').value = $('defAccel').value; onLiveSlider('accelVal', $('accel'),'accel');
+  $('lookahead').value = $('defLookahead').value; onLiveSlider('lookaheadVal', $('lookahead'),'lookahead');
+  $('overshoot').value = $('defOvershoot').value; setRead('overshootVal', $('overshoot').value);
+  pushOverride(); toast('Restored saved defaults', 'info', 'i-reset');
+}
+
+/* ===================== GENERATOR (runs on the FIRMWARE) =====================
+   The waveform is now generated on the device, so the browser only (a) pushes
+   parameters to /api/gen and (b) draws an identical local PREVIEW of the
+   deterministic waveform (toggleable). Closing the tab no longer stops motion. */
+const WAVE_IDX = { sine:0, triangle:1, square:2, saw:3 };
+const MOD_IDX  = { off:0, rate:1, depth:2 };
+const MODWAVE_IDX = { sine:0, triangle:1, random:2 };
+let gen = { running:false, wave:'sine', mod:'off' };
+
+// ---- collect current control values into the /api/gen payload ----
+function genPayload() {
   return {
-    run_current: parseInt(runCurrent.value),
-    hold_current: parseInt(holdCurrent.value),
-    stealthchop: parseInt(stealthchop.value),
-    tpwm_thrs: parseInt(tpwmThrs.value),
-    toff: parseInt(toff.value),
-    tbl: parseInt(tbl.value),
-    hstart: parseInt(hstart.value),
-    hend: parseInt(hend.value),
-    save: !!save
+    wave:     WAVE_IDX[gen.wave] ?? 0,
+    rate:     parseFloat($('genRate').value),
+    depth:    parseInt($('genDepth').value),
+    offset:   parseInt($('genOff').value),
+    ease:     parseInt($('genEase').value),
+    mod:      MOD_IDX[gen.mod] ?? 0,
+    mod_wave: MODWAVE_IDX[$('modWave').value] ?? 0,
+    mod_rate: parseFloat($('modRate').value),   // Hz
+    mod_amp:  parseFloat($('modAmp').value)     // Hz (modulation swing)
   };
+}
+
+// Debounced live parameter push (the firmware applies them on the fly).
+let genPushTimer = null;
+function pushGenParams() {
+  clearTimeout(genPushTimer);
+  genPushTimer = setTimeout(() => post('/api/gen', genPayload()), 60);
+}
+
+$('waveSeg').addEventListener('click', e => { const b = e.target.closest('button'); if (!b) return;
+  $('waveSeg').querySelectorAll('button').forEach(x=>x.classList.remove('active')); b.classList.add('active'); gen.wave=b.dataset.w; pushGenParams(); });
+$('modSeg').addEventListener('click', e => { const b = e.target.closest('button'); if (!b) return;
+  $('modSeg').querySelectorAll('button').forEach(x=>x.classList.remove('active')); b.classList.add('active'); gen.mod=b.dataset.m;
+  $('modControls').style.display = gen.mod==='off' ? 'none' : 'block';
+  // Showing/hiding the mod controls changes the card's content height; re-measure
+  // the collapsible body so the Start/Stop button below it isn't clipped away.
+  const card = e.target.closest('.card'); if (card) requestAnimationFrame(() => syncCardBody(card));
+  pushGenParams(); });
+
+
+// ---- local preview math (mirror of the firmware, for the canvas only) ----
+function carrier(wave, p) {
+  switch (wave) {
+    case 'triangle': return p<0.5 ? p*2 : 2-2*p;
+    case 'square':   return p<0.5 ? 1 : 0;
+    case 'saw':      return p;
+    default:         return 0.5 - 0.5*Math.cos(p*2*Math.PI);
+  }
+}
+function easeV(v) { const e = parseFloat($('genEase').value)/100; if (e<=0) return v; const s = v*v*(3-2*v); return v + (s-v)*e; }
+
+// ---- toggleable waveform visualization (drawn in the browser) ----
+let waveVizOn = true, waveVizRAF = null;
+function toggleWaveViz() {
+  waveVizOn = $('waveVizTog').checked;
+  $('waveCanvasWrap').style.display = waveVizOn ? 'block' : 'none';
+  if (waveVizOn && !waveVizRAF) waveVizRAF = requestAnimationFrame(drawWaveViz);
+}
+function drawWaveViz() {
+  waveVizRAF = waveVizOn ? requestAnimationFrame(drawWaveViz) : null;
+  const cv = $('waveCanvas'); if (!cv || !waveVizOn) return;
+  const dpr = window.devicePixelRatio || 1;
+  const w = cv.clientWidth, h = cv.clientHeight;
+  if (cv.width !== w*dpr || cv.height !== h*dpr) { cv.width=w*dpr; cv.height=h*dpr; }
+  const ctx = cv.getContext('2d'); ctx.setTransform(dpr,0,0,dpr,0,0);
+  ctx.clearRect(0,0,w,h);
+
+  const [lo,hi] = manualBounds(); const span = hi-lo || 1;
+  const off = parseFloat($('genOff').value)/100;
+  const baseDepth = parseFloat($('genDepth').value)/100;
+  const center = off;                 // 0..1 within window
+  const t = performance.now()/1000;   // live-scrolling preview
+  const rate = parseFloat($('genRate').value);
+
+  // window bounds as faint guide lines
+  ctx.strokeStyle = 'rgba(154,160,196,.25)'; ctx.lineWidth = 1;
+  ctx.beginPath(); ctx.moveTo(0,2); ctx.lineTo(w,2); ctx.moveTo(0,h-2); ctx.lineTo(w,h-2); ctx.stroke();
+
+  ctx.beginPath();
+  for (let x=0; x<=w; x++) {
+    const ph = ((x/w)*2*rate + t*rate) % 1;   // a couple of cycles, scrolling
+    let depth = baseDepth;
+    // approximate the modulator for the preview (visual only). mod_amp is in Hz;
+    // we normalize it against the carrier rate to get a visual depth factor.
+    if (gen.mod !== 'off') {
+      const mph = (t*parseFloat($('modRate').value)) % 1;
+      const mw = $('modWave').value;
+      let m = mw==='triangle' ? (mph<0.5?mph*2:2-2*mph) : (mw==='random'?0.5:(0.5-0.5*Math.cos(mph*2*Math.PI)));
+      const ampHz = parseFloat($('modAmp').value);
+      if (gen.mod==='depth') {
+        const amt = clamp(ampHz / Math.max(rate, 0.1), 0, 1);
+        depth = clamp(depth*(1-0.5*m*amt),0.02,1);
+      }
+    }
+
+    const c = easeV(carrier(gen.wave, ph));
+    const frac = clamp(center + (c-0.5)*depth, 0, 1);     // 0..1 within window
+    const y = h - (frac*(h-6) + 3);
+    x===0 ? ctx.moveTo(x,y) : ctx.lineTo(x,y);
+  }
+  ctx.strokeStyle = gen.running ? '#34d399' : '#6c8cff';
+  ctx.lineWidth = 2; ctx.stroke();
+}
+
+async function startGenerator() {
+  if (gen.running) return;
+  gen.running = true;
+  await post('/api/gen', Object.assign(genPayload(), {running:true}));
+  $('genStartBtn').innerHTML = icon('i-stop') + ' Stop Generator';
+  $('genStartBtn').classList.remove('primary'); $('genStartBtn').classList.add('danger');
+  $('genNote').textContent = 'Running on the device — safe to close this tab.';
+}
+async function stopGenerator() {
+  if (!gen.running) return;
+  gen.running = false;
+  await post('/api/gen', {running:false});
+  $('genStartBtn').innerHTML = icon('i-play') + ' Start Generator';
+  $('genStartBtn').classList.add('primary'); $('genStartBtn').classList.remove('danger');
+  $('genNote').textContent = 'Generated on the device. Toggle the preview to visualize the motion.';
+}
+function toggleGenerator() { gen.running ? stopGenerator() : startGenerator(); }
+
+
+/* ===================== SETTINGS ===================== */
+async function saveSettings(silent) {
+  if (winMin >= winMax) { if (!silent) alert('Min must be less than Max'); return; }
+  const dmin = clamp(parseInt($('defMinNum').value)||0, 0, TRAVEL);
+  const dmax = clamp(parseInt($('defMaxNum').value)||TRAVEL, 0, TRAVEL);
+  try {
+    const r = await post('/api/settings', {
+      range_min: Math.round(winMin), range_max: Math.round(winMax),
+      // SAVED defaults come from the Settings tab (def* sliders)
+      max_speed: parseInt($('defMaxSpeed').value), accel: parseInt($('defAccel').value),
+      lookahead: parseInt($('defLookahead').value), overshoot: parseInt($('defOvershoot').value),
+      auto_duration: $('autoDuration').checked,
+      default_range_min: dmin, default_range_max: dmax, expert_mode: state.expert
+    });
+    // Also persist input-mode/buffer + generation-rate settings to NVS so they
+    // survive a reboot (these have their own endpoints; we trigger a saving push).
+    pushInterp(true);
+    post('/api/gen', {rate_tick: genTickValue()});
+    const d = await r.json();
+    if (!silent) {
+      ['saveInd','saveIndRange'].forEach(id=>{ const i=$(id); if(i){ i.classList.add('show'); setTimeout(()=>i.classList.remove('show'),1800);} });
+      toast('Settings saved', 'good', 'i-check');
+    }
+
+  } catch(e) { if (!silent) toast('Failed to save', 'bad', 'i-alert'); }
+}
+async function loadSettings() {
+  try {
+    const d = await (await fetch('/api/settings')).json();
+    if (d.range_min !== undefined) {
+      winMin = d.range_min; winMax = d.range_max;
+      $('defMinNum').value = d.default_range_min ?? 0;
+      $('defMaxNum').value = d.default_range_max ?? 240;
+      state.expert = d.expert_mode ?? false;
+      $('autoDuration').checked = d.auto_duration??true;
+      // both saved defaults and the live override sliders start from saved values
+      const spd=d.max_speed||550, acc=d.accel||1500, look=d.lookahead??20, over=d.overshoot??8;
+      $('defMaxSpeed').value=spd; $('maxSpeed').value=spd;
+      $('defAccel').value=acc; $('accel').value=acc;
+      $('defLookahead').value=look; $('lookahead').value=look;
+      $('defOvershoot').value=over; $('overshoot').value=over;
+      applyExpertCaps();
+      [['speedVal','maxSpeed','maxSpeed'],['accelVal','accel','accel'],['lookaheadVal','lookahead','lookahead'],
+       ['defSpeedVal','defMaxSpeed','maxSpeed'],['defAccelVal','defAccel','accel'],['defLookaheadVal','defLookahead','lookahead']]
+        .forEach(([r,id,k])=>onLiveSlider(r,$(id),k));
+      setRead('overshootVal',over); setRead('defOvershootVal',over);
+      paintSlider($('genRate'));
+      // Enable real-time window pushing only AFTER we've loaded the saved range,
+      // so the initial render below doesn't clobber it with a default.
+      windowReady = true;
+      renderWindow();
+    }
+  } catch(e) {}
+}
+
+
+/* ===================== CONNECTION / TRANSPORT MODE ===================== */
+// WS / SER / BT selector. Posts to /api/mode (which applies the transport live
+// and persists it), and the header chip + this card reflect the active mode.
+const MODE_HINTS = {
+  WS:  'WebSocket — Intiface connects over WiFi (ws://device-ip). Add a Websocket device, protocol "TCode v0.3".',
+  SER: 'Serial — Intiface streams TCode over the USB cable. Add a Serial device pointing at this COM port. Lowest latency, no WiFi needed.',
+  BT:  'Bluetooth — the machine advertises as "SlopDrive-32" (BLE serial / Nordic UART). Connect from a BLE host or phone app and write TCode. No WiFi needed.'
+};
+let currentMode = 'WS';
+function reflectMode(mode) {
+  currentMode = mode || 'WS';
+  document.querySelectorAll('#modeSeg button').forEach(b =>
+    b.classList.toggle('active', b.dataset.mode === currentMode));
+  $('modeHint').textContent = MODE_HINTS[currentMode] || '';
+  // Only show the BLE status chip while Bluetooth is the active transport.
+  $('bleStatus').style.display = (currentMode === 'BT') ? 'inline-flex' : 'none';
+}
+async function setMode(mode) {
+  if (mode === currentMode) return;
+  reflectMode(mode);  // optimistic
+  try {
+    const d = await (await post('/api/mode', {mode})).json();
+    reflectMode(d.mode || mode);
+    const names = {WS:'WebSocket', SER:'Serial', BT:'Bluetooth'};
+    toast('Transport: ' + (names[d.mode||mode] || mode), 'good', 'i-link');
+  } catch(e) { toast('Failed to switch transport', 'bad', 'i-alert'); }
+}
+async function loadMode() {
+  try { const d = await (await fetch('/api/mode')).json(); reflectMode(d.mode); } catch(e) {}
+}
+$('modeSeg').addEventListener('click', e => {
+  const b = e.target.closest('button'); if (!b) return; setMode(b.dataset.mode);
+});
+
+/* ===================== INPUT MODE / BUFFERED INTERPOLATION ===================== */
+// Extrapolate vs Buffered + buffer depth / interpolation rate / easing. Pushes
+// to /api/interp (applied live; persisted with Save All Settings). The buffered
+// sub-panel only shows when Buffered is selected.
+let inputMode = 'extrapolate';
+function reflectInputMode(mode) {
+  inputMode = (mode === 'buffered') ? 'buffered' : 'extrapolate';
+  document.querySelectorAll('#inputModeSeg button').forEach(b =>
+    b.classList.toggle('active', b.dataset.im === inputMode));
+  $('extrapPanel').style.display = (inputMode === 'extrapolate') ? 'block' : 'none';
+  $('bufPanel').style.display    = (inputMode === 'buffered')    ? 'block' : 'none';
+}
+function bufTickValue() {
+  const a = document.querySelector('#bufTickSeg button.active');
+  return a ? parseInt(a.dataset.hz) : 50;
+}
+let interpTimer = null;
+function pushInterp(save) {
+  clearTimeout(interpTimer);
+  const body = {
+    mode:   inputMode,
+    depth:  parseInt($('bufDepth').value),
+    tick:   bufTickValue(),
+    easing: parseInt($('bufEasing').value),
+    save:   !!save
+  };
+  interpTimer = setTimeout(() => post('/api/interp', body), 60);
+}
+$('inputModeSeg').addEventListener('click', e => {
+  const b = e.target.closest('button'); if (!b) return;
+  reflectInputMode(b.dataset.im); pushInterp();
+});
+$('bufTickSeg').addEventListener('click', e => {
+  const b = e.target.closest('button'); if (!b) return;
+  $('bufTickSeg').querySelectorAll('button').forEach(x=>x.classList.remove('active'));
+  b.classList.add('active'); pushInterp();
+});
+async function loadInterp() {
+  try {
+    const d = await (await fetch('/api/interp')).json();
+    reflectInputMode(d.mode);
+    if (d.depth)  { $('bufDepth').value = d.depth; setRead('bufDepthVal', d.depth); }
+    if (d.easing !== undefined) $('bufEasing').value = d.easing;
+    const hz = d.tick || 50;
+    document.querySelectorAll('#bufTickSeg button').forEach(b =>
+      b.classList.toggle('active', parseInt(b.dataset.hz) === hz));
+  } catch(e) {}
+}
+
+/* ===================== GENERATION RATE (device tick rate) ===================== */
+// 20/50/100 Hz selector that sets how often the on-device generator recomputes
+// motion. Pushed to /api/gen (rate_tick); persisted with Save All Settings.
+function genTickValue() {
+  const a = document.querySelector('#genTickSeg button.active');
+  return a ? parseInt(a.dataset.hz) : 50;
+}
+$('genTickSeg').addEventListener('click', e => {
+  const b = e.target.closest('button'); if (!b) return;
+  $('genTickSeg').querySelectorAll('button').forEach(x=>x.classList.remove('active'));
+  b.classList.add('active');
+  post('/api/gen', {rate_tick: genTickValue()});
+});
+async function loadGenTick() {
+  try {
+    const d = await (await fetch('/api/gen')).json();
+    const hz = d.rate_tick || 50;
+    document.querySelectorAll('#genTickSeg button').forEach(b =>
+      b.classList.toggle('active', parseInt(b.dataset.hz) === hz));
+  } catch(e) {}
+}
+
+
+/* ===================== TMC ===================== */
+function tmcPayload(save) {
+
+  return { run_current:+$('runCurrent').value, hold_current:+$('holdCurrent').value,
+    stealthchop:+$('stealthchop').value, tpwm_thrs:+$('tpwmThrs').value, toff:+$('toff').value,
+    tbl:+$('tbl').value, hstart:+$('hstart').value, hend:+$('hend').value, save: !!save };
 }
 async function applyTmc(save) {
   try {
-    const resp = await fetch('/api/tmc', {
-      method: 'POST', headers: {'Content-Type': 'application/json'},
-      body: JSON.stringify(tmcPayload(save))
-    });
-    const data = await resp.json();
-    if (data.ok) {
-      const i = tmcSaveIndicator;
-      i.textContent = save ? '\u2705 Saved!' : '\u2705 Applied!';
-      i.classList.add('show'); setTimeout(() => i.classList.remove('show'), 2000);
-    } else alert('Error: ' + (data.error || 'unknown'));
-  } catch(e) { alert('Failed to apply motor settings'); }
+    const d = await (await post('/api/tmc', tmcPayload(save))).json();
+    if (d.ok) { const i=$('tmcSaved'); i.textContent = save?'Saved':'Applied'; i.classList.add('show'); setTimeout(()=>i.classList.remove('show'),1800);
+      toast(save?'Motor settings saved':'Driver updated', 'good', 'i-check'); }
+    else toast('Error: '+(d.error||'unknown'), 'bad', 'i-alert');
+  } catch(e) { toast('Failed to apply', 'bad', 'i-alert'); }
 }
 async function resetTmc() {
-  if (!confirm('Reset all motor/TMC settings to defaults?')) return;
-  try {
-    const resp = await fetch('/api/tmc', {
-      method: 'POST', headers: {'Content-Type': 'application/json'},
-      body: JSON.stringify({reset: true, save: true})
-    });
-    if ((await resp.json()).ok) loadTmc();
-  } catch(e) {}
+  try { if ((await (await post('/api/tmc', {reset:true, save:true})).json()).ok) { loadTmc(); toast('Motor settings reset', 'info', 'i-reset'); } } catch(e) {}
 }
 async function loadTmc() {
   try {
-    const data = await (await fetch('/api/tmc')).json();
-    runCurrent.value = data.run_current; holdCurrent.value = data.hold_current;
-    stealthchop.value = data.stealthchop; tpwmThrs.value = data.tpwm_thrs;
-    toff.value = data.toff; tbl.value = data.tbl;
-    hstart.value = data.hstart; hend.value = data.hend;
-    tmcDisp();
+    const d = await (await fetch('/api/tmc')).json();
+    $('runCurrent').value=d.run_current; onLiveSlider('runCurrentVal', $('runCurrent'), 'runCurrent');
+    $('holdCurrent').value=d.hold_current; setRead('holdCurrentVal', d.hold_current);
+    $('stealthchop').value=d.stealthchop; $('tpwmThrs').value=d.tpwm_thrs; setRead('tpwmThrsVal', d.tpwm_thrs);
+    $('toff').value=d.toff; setRead('toffVal', d.toff); $('tbl').value=d.tbl;
+    $('hstart').value=d.hstart; setRead('hstartVal', d.hstart);
+    $('hend').value=d.hend; setRead('hendVal', d.hend);
   } catch(e) {}
 }
 
-async function goToPosition() {
-  await fetch('/api/move', {method:'POST', headers:{'Content-Type':'application/json'},
-    body: JSON.stringify({position: parseInt(manualPos.value)})});
-}
-async function moveManual(dir) {
-  const cur = parseInt(currentPos.textContent) || 0;
-  const np = Math.max(0, Math.min(240, cur + dir * 10));
-  manualPos.value = np; manualPosVal.textContent = np;
-  await fetch('/api/move', {method:'POST', headers:{'Content-Type':'application/json'},
-    body: JSON.stringify({position: np})});
-}
-async function moveToHome() { await fetch('/api/home', {method:'POST'}); }
-async function stopMotor() { await fetch('/api/stop', {method:'POST'}); }
-
+/* ===================== STATUS POLL + EVENT TOASTS ===================== */
+let prev = { otpw:false, ot:false, faulted:false, buttplug:false, serial:false, ready:false };
 async function pollStatus() {
   try {
-    const data = await (await fetch('/api/status')).json();
-    if (data.wifi_connected) { wifiStatus.className='status-bar status-connected'; wifiText.textContent=data.ip||'Connected'; }
-    else { wifiStatus.className='status-bar status-disconnected'; wifiText.textContent='Disconnected'; }
-    if (data.homed) { homedStatus.className='status-bar status-homed';
-      homedText.textContent='Homed - Buttplug: ' + (data.buttplug_connected?'Connected':'Disconnected'); }
-    else { homedStatus.className='status-bar status-not-homed';
-      homedText.textContent=data.homing?'Homing...':'Not Homed'; }
-    if (data.position !== undefined) currentPos.textContent = data.position.toFixed(1);
-    const sm = serialModeBar;
-    if (data.serial_mode) { sm.style.display='flex';
-      sm.className='status-bar ' + (data.serial_active?'status-connected':'status-not-homed');
-      serialModeText.textContent = data.serial_active?'Active (receiving TCode)':'Waiting for Intiface...'; }
+    const d = await (await fetch('/api/status')).json();
+    state.position = d.position ?? 0;
+    state.homed = !!d.homed;
+    state.ifActive = !!d.buttplug_connected && (d.measured_hz>0);
+    state.paused = !!d.paused; state.override = !!d.manual_override; reflectGating();
+
+    $('wifiDot').className = 'dot ' + (d.wifi_connected ? 'good' : 'bad');
+    $('wifiText').textContent = d.wifi_connected ? (d.ip||'WiFi') : 'Off';
+    if (d.homed) { $('homeDot').className='dot good'; $('homeText').textContent = 'Homed'; }
+    else { $('homeDot').className='dot warn'; $('homeText').textContent = d.homing ? 'Homing' : 'Home'; }
+    // Transport-aware connection chip. The tag changes with the selected mode:
+    //   WS  -> connected = an Intiface/MFP WebSocket client is attached
+    //   SER -> connected = a TCode line has been seen on USB (sticky link)
+    //   BT  -> connected = a BLE central is connected
+    // While connected we show the live command rate (or "idle"); otherwise the
+    // short transport tag (WS / SER / BT) so you always know the active path.
+    {
+      const tport = d.transport || 'WS';
+      let linked, tag = tport;
+      if (tport === 'SER')      linked = !!d.serial_linked;
+      else if (tport === 'BT')  linked = !!d.ble_connected;
+      else                      linked = !!d.buttplug_connected;
+      $('ifDot').className = 'dot ' + (linked ? 'good' : 'bad');
+      $('ifText').textContent = linked ? (d.measured_hz>0 ? d.measured_hz+'Hz' : 'idle') : tag;
+
+      // Keep the Settings → Connection card in sync with the device's actual
+      // active transport (e.g. if it was changed elsewhere or set at boot).
+      if (tport !== currentMode) reflectMode(tport);
+      // Detailed BLE status line (only visible while BT is the active transport).
+      if (tport === 'BT') {
+        const c = !!d.ble_connected, r = !!d.ble_running;
+        $('bleStatusDot').className = 'dot ' + (c ? 'good' : (r ? 'warn' : 'bad'));
+        $('bleStatusText').textContent = c ? 'Bluetooth: host connected'
+          : (r ? 'Bluetooth: advertising "SlopDrive-32"' : 'Bluetooth: off');
+      }
+    }
+
+
+
+
+    // persistent Home button visible until homed
+    $('homeFab').classList.toggle('show', !d.homed);
+
+    if (d.position !== undefined) $('currentPos').textContent = d.position.toFixed(1);
+    // posTarget is what the smooth animator eases the glowing line toward.
+    posTarget = clamp(state.position, 0, TRAVEL);
+    if (!posDragging) { const s=$('manualPos'); s.value = clamp(state.position, parseFloat(s.min), parseFloat(s.max)); $('manualPosVal').textContent = Math.round(state.position); }
+
+
+    const sm = $('serialModeBar');
+    if (d.serial_mode) { sm.style.display='inline-flex';
+      // Green once the link is established (sticky); the text still reflects the
+      // live receiving/idle sub-state. Intiface only streams TCode during motion,
+      // so serial_active drops between strokes - don't let that turn the dot amber.
+      $('serialDot').className = 'dot ' + (d.serial_linked ? 'good' : 'warn');
+      $('serialModeText').textContent = !d.serial_linked ? 'Serial: waiting'
+        : (d.serial_active ? 'Serial: receiving' : 'Serial: linked (idle)'); }
     else sm.style.display='none';
-    if (data.measured_hz !== undefined) {
-      measuredHz.textContent = data.measured_hz>0?data.measured_hz:'--';
-      measuredMs.textContent = data.measured_interval_ms>0?data.measured_interval_ms:'--';
+
+
+    $('measuredHz').textContent = d.measured_hz>0 ? d.measured_hz : '--';
+    $('measuredMs').textContent = d.measured_interval_ms>0 ? d.measured_interval_ms : '--';
+    if (d.driver) updateHealth(d.driver);
+
+    /* ---- event toasts ---- */
+    if (d.buttplug_connected && !prev.buttplug) toast('Intiface connected', 'good', 'i-link');
+    if (!d.buttplug_connected && prev.buttplug) toast('Intiface disconnected', 'warn', 'i-link');
+    // One-shot on the sticky link latch, NOT on serial_active (which drops
+    // between strokes and would re-fire this toast every time motion pauses).
+    if (d.serial_linked && !prev.serial) toast('Serial handshake — receiving TCode', 'good', 'i-link');
+    if (d.homed && !prev.ready) toast('Homed & ready', 'good', 'i-check');
+    prev.buttplug = !!d.buttplug_connected; prev.serial = !!d.serial_linked; prev.ready = !!d.homed;
+
+
+    // auto-pause generator if Intiface takes over
+    if (gen.running && state.ifActive && !state.paused && !state.override) {
+      stopGenerator(); $('genNote').textContent = 'Auto-paused: Intiface is driving. Use Pause or Override to keep local control.';
     }
   } catch(e) {}
 }
+function setFlag(id, active, severity) {
+  const el = $(id); if (!el) return;
+  el.classList.remove('bad','warn'); const st = el.querySelector('.st');
+  if (active) { el.classList.add(severity); st.textContent = severity==='bad' ? 'FAULT' : 'WARN'; } else st.textContent = 'OK';
+}
+function updateHealth(d) {
+  $('drvStale').style.display = d.valid ? 'none' : 'inline-flex';
+  setFlag('fOtpw', d.otpw, 'warn'); setFlag('fOt', d.ot, 'bad');
+  setFlag('fS2ga', d.s2ga, 'bad'); setFlag('fS2gb', d.s2gb, 'bad');
+  setFlag('fOla', d.ola && !d.stst, 'warn'); setFlag('fOlb', d.olb && !d.stst, 'warn');
+  const pct = d.load_pct ?? 0; $('loadBar').style.width = pct + '%'; $('loadPct').textContent = pct;
+  $('sgRaw').textContent = d.sg_result ?? '--'; $('csActual').textContent = d.cs_actual ?? '--';
+  $('faultBanner').classList.toggle('show', !!d.faulted);
 
-async function loadSettings() {
-  try {
-    const data = await (await fetch('/api/settings')).json();
-    if (data.range_min !== undefined) {
-      rangeMin.value=data.range_min; rangeMax.value=data.range_max;
-      maxSpeed.value=data.max_speed||800; accel.value=data.accel||1500;
-      lookahead.value=(data.lookahead!==undefined)?data.lookahead:20;
-      overshoot.value=(data.overshoot!==undefined)?data.overshoot:8;
-      autoDuration.checked=(data.auto_duration!==undefined)?data.auto_duration:true;
-      updateRangeVisual(); updateSpeedDisplay(); updateAccelDisplay(); updateInertiaDisplay();
-    }
-  } catch(e) {}
+  /* ---- health event toasts ---- */
+  if (d.otpw && !prev.otpw) toast('Driver temperature warning', 'warn', 'i-thermo', 6000);
+  if (d.ot && !prev.ot) toast('OVERTEMP — driver shut down', 'bad', 'i-thermo', 8000);
+  if (d.faulted && !prev.faulted) toast('Driver fault — short to ground', 'bad', 'i-alert', 8000);
+  prev.otpw = !!d.otpw; prev.ot = !!d.ot; prev.faulted = !!d.faulted;
+}
+async function clearFault() {
+  try { await post('/api/clearfault', {}); $('faultBanner').classList.remove('show'); toast('Fault cleared — re-home required', 'info', 'i-check'); } catch(e) { toast('Failed to clear fault', 'bad', 'i-alert'); }
 }
 
+/* ===================== LOG ===================== */
 async function refreshLog() {
-  try {
-    const txt = await (await fetch('/api/log')).text();
-    const box = logBox;
-    const atBottom = box.scrollHeight - box.scrollTop - box.clientHeight < 30;
-    box.textContent = txt || '(no log output yet)';
-    if (atBottom) box.scrollTop = box.scrollHeight;
-  } catch(e) {}
+  try { const txt = await (await fetch('/api/log')).text();
+    const box = $('logBox'); const atBottom = box.scrollHeight - box.scrollTop - box.clientHeight < 30;
+    box.textContent = txt || '(no log output yet)'; if (atBottom) box.scrollTop = box.scrollHeight; } catch(e) {}
 }
-setInterval(() => {
-  if (logs.classList.contains('active') && autoLog.checked) refreshLog();
-}, 2000);
+setInterval(() => { if ($('log').classList.contains('active') && $('autoLog').checked) refreshLog(); }, 2000);
 
-setInterval(pollStatus, 1000);
-loadSettings();
-loadTmc();
-pollStatus();
-refreshLog();
+/* ===================== boot ===================== */
+// Poll fast (300ms) so the position readout, slider follow-along and health
+// flags feel live. /api/status reads only cached state (no SPI, no blocking),
+// and httpTask services the socket every 10ms, so ~3 req/s is comfortably
+// within budget and won't starve the motor/control tasks.
+setInterval(pollStatus, 300);
+
+renderWindow(); loadSettings(); loadTmc(); loadMode(); loadInterp(); loadGenTick(); pollStatus(); refreshLog(); startPosAnim();
+
+
+// Start the (default-on) waveform preview animation loop.
+toggleWaveViz();
+
 </script>
 </body>
 </html>

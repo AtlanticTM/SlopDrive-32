@@ -22,6 +22,8 @@
 
 #include "buttplug.h"
 #include "applog.h"
+#include <NimBLEDevice.h>
+
 
 
 // IMPORTANT: The 3rd constructor arg (protocol) MUST be "" (empty).
@@ -65,7 +67,9 @@ void ButtplugServer::pollSerial() {
                 _serial_buf[_serial_len] = '\0';
                 rxFrameCount++;            // count for the rate diagnostic
                 _serial_active = true;
+                _serial_linked = true;     // sticky latch for the green light/toast
                 _serial_last_ms = millis();
+
                 parseTCode(_serial_buf, _serial_len);
                 _serial_len = 0;
             }
@@ -360,3 +364,134 @@ void ButtplugServer::parseTCode(const char* str, size_t len) {
         token = strtok(nullptr, " \t\r\n");
     }
 }
+
+// ============================================================================
+// Bluetooth LE transport (Nordic UART Service)
+// ============================================================================
+//
+// We expose a Nordic-UART-style BLE service. A BLE central (phone app, or a BLE
+// host) writes raw TCode bytes to the RX characteristic; we assemble complete
+// newline-terminated lines and feed them into the SAME parseTCode() pipeline as
+// the WebSocket and Serial transports. TCode replies (D0/D1/D2) are sent back as
+// notifications on the TX characteristic.
+//
+// NimBLE-Arduino is used instead of the stock Bluedroid stack because it's far
+// smaller in flash/RAM, which matters alongside WiFi + the web server.
+
+// ---- Callback shims -------------------------------------------------------
+// NimBLE delivers events to subclasses of its callback interfaces. These thin
+// shims just forward into the owning ButtplugServer instance.
+class BleServerCallbacks : public NimBLEServerCallbacks {
+public:
+    explicit BleServerCallbacks(ButtplugServer* owner) : _owner(owner) {}
+    void onConnect(NimBLEServer* /*srv*/) override {
+        _owner->_onBleConnect();
+    }
+    void onDisconnect(NimBLEServer* srv) override {
+        _owner->_onBleDisconnect();
+        // Resume advertising so the next host can find us again.
+        NimBLEDevice::startAdvertising();
+    }
+private:
+    ButtplugServer* _owner;
+};
+
+class BleRxCallbacks : public NimBLECharacteristicCallbacks {
+public:
+    explicit BleRxCallbacks(ButtplugServer* owner) : _owner(owner) {}
+    void onWrite(NimBLECharacteristic* chr) override {
+        const std::string& v = chr->getValue();
+        if (!v.empty()) {
+            _owner->feedBleBytes((const uint8_t*)v.data(), v.size());
+        }
+    }
+private:
+    ButtplugServer* _owner;
+};
+
+void ButtplugServer::beginBLE() {
+    if (_ble_running) return;
+
+    NimBLEDevice::init(BLE_DEVICE_NAME);
+    // Boost TX power a little for more reliable range.
+    NimBLEDevice::setPower(ESP_PWR_LVL_P9);
+
+    _ble_server = NimBLEDevice::createServer();
+    _ble_server->setCallbacks(new BleServerCallbacks(this));
+
+    NimBLEService* svc = _ble_server->createService(BLE_NUS_SERVICE_UUID);
+
+    // RX: host -> device (TCode in). WRITE + WRITE_NR (no response) for speed.
+    NimBLECharacteristic* rx = svc->createCharacteristic(
+        BLE_NUS_RX_CHAR_UUID,
+        NIMBLE_PROPERTY::WRITE | NIMBLE_PROPERTY::WRITE_NR);
+    rx->setCallbacks(new BleRxCallbacks(this));
+
+    // TX: device -> host (TCode replies). NOTIFY.
+    _ble_tx_char = svc->createCharacteristic(
+        BLE_NUS_TX_CHAR_UUID, NIMBLE_PROPERTY::NOTIFY);
+
+    svc->start();
+
+    NimBLEAdvertising* adv = NimBLEDevice::getAdvertising();
+    adv->addServiceUUID(BLE_NUS_SERVICE_UUID);
+    adv->setName(BLE_DEVICE_NAME);
+    adv->setScanResponse(true);
+    NimBLEDevice::startAdvertising();
+
+    _ble_running = true;
+    applogf("[BLE] Advertising '%s' (Nordic UART service)", BLE_DEVICE_NAME);
+    applog("[BLE] Connect a BLE host and write TCode to the RX characteristic.");
+}
+
+void ButtplugServer::stopBLE() {
+    if (!_ble_running) return;
+    NimBLEDevice::stopAdvertising();
+    NimBLEDevice::deinit(true);
+    _ble_server = nullptr;
+    _ble_tx_char = nullptr;
+    _ble_running = false;
+    _ble_connected = false;
+    applog("[BLE] Stopped");
+}
+
+// Assemble newline-terminated TCode lines from raw BLE bytes and parse them.
+// Mirrors pollSerial() but for the BLE RX characteristic. Some hosts send each
+// TCode command without a trailing newline as a single write; to support that,
+// we also parse on write boundaries if no newline arrived but bytes are present
+// and look complete (start with a known axis/command letter).
+void ButtplugServer::feedBleBytes(const uint8_t* data, size_t len) {
+    for (size_t i = 0; i < len; i++) {
+        char c = (char)data[i];
+        if (c == '\n' || c == '\r') {
+            if (_ble_len > 0) {
+                _ble_buf[_ble_len] = '\0';
+                rxFrameCount++;
+                _ble_linked = true;
+                parseTCode(_ble_buf, _ble_len);
+                _ble_len = 0;
+            }
+        } else {
+            if (_ble_len < sizeof(_ble_buf) - 1) {
+                _ble_buf[_ble_len++] = c;
+            } else {
+                _ble_len = 0;  // overrun: resync
+            }
+        }
+    }
+
+    // Newline-less host: a single write that didn't end in a terminator is
+    // treated as one complete command (the common case for TCode-over-BLE).
+    if (_ble_len > 0 && len > 0) {
+        char last = (char)data[len - 1];
+        if (last != '\n' && last != '\r') {
+            _ble_buf[_ble_len] = '\0';
+            rxFrameCount++;
+            _ble_linked = true;
+            parseTCode(_ble_buf, _ble_len);
+            _ble_len = 0;
+        }
+    }
+}
+
+

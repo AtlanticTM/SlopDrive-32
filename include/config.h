@@ -142,8 +142,50 @@
 
 
 // =============================================================================
+// Transport Mode (how Intiface / a host talks to the machine)
+// =============================================================================
+// The machine can receive TCode over three transports. Exactly ONE is active
+// at a time; the user picks it in the web UI (Settings) and it's persisted to
+// NVS. The status chip shows WS / SER / BT to reflect the live choice.
+//   WS  = WebSocket. The ESP32 runs a TCode WebSocket server (MultiFunPlayer
+//         connects in) AND can connect out to Intiface's WSDM server. Needs WiFi.
+//   SER = USB Serial. Intiface's "serialport" comm manager streams TCode over
+//         USB. Lowest latency, no WiFi needed for control.
+//   BT  = Bluetooth LE. The ESP32 advertises a Nordic-UART-style BLE service;
+//         a BLE host (phone app / Intiface BLE) writes TCode to the RX
+//         characteristic. No WiFi needed for control.
+enum class TransportMode : uint8_t {
+    WS  = 0,
+    SER = 1,
+    BT  = 2,
+};
+
+// Default transport on a fresh device (before any saved selection). SER keeps
+// backwards-compatible behavior with the old SERIAL_CONTROL_MODE build flag.
+#ifndef DEFAULT_TRANSPORT_MODE
+  #if SERIAL_CONTROL_MODE
+    #define DEFAULT_TRANSPORT_MODE  TransportMode::SER
+  #else
+    #define DEFAULT_TRANSPORT_MODE  TransportMode::WS
+  #endif
+#endif
+
+// =============================================================================
+// Bluetooth LE (BLE) Transport
+// =============================================================================
+// Advertised device name (what shows up in a BLE scanner / Intiface).
+#define BLE_DEVICE_NAME        "SlopDrive-32"
+// Nordic UART Service (NUS) UUIDs - the de-facto "BLE serial" profile. A host
+// writes TCode bytes to the RX characteristic; we notify TCode replies on TX.
+#define BLE_NUS_SERVICE_UUID   "8a846175-ea22-4411-88f5-9a8afcc20671"
+#define BLE_NUS_RX_CHAR_UUID   "8a846175-ea22-4411-88f5-9a8afcc20672"  // host -> device (write)
+#define BLE_NUS_TX_CHAR_UUID   "8a846175-ea22-4411-88f5-9a8afcc20673"  // device -> host (notify)
+
+
+// =============================================================================
 // HTTP Server Port
 // =============================================================================
+
 #define HTTP_SERVER_PORT        80
 #define HTTP_PORT               80           // alias used in main.cpp
 

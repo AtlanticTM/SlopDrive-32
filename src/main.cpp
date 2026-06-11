@@ -4,7 +4,9 @@
 #include <ESPmDNS.h>
 #include <Preferences.h>
 #include <esp_wifi.h>
+#include <esp_timer.h>
 #include <ArduinoJson.h>
+
 #include <LittleFS.h>
 
 
@@ -52,6 +54,19 @@ static bool g_homed = false;
 static bool g_homing_in_progress = false;
 static bool g_wifi_ready = false;
 
+// Active transport mode (WS / SER / BT). Chosen in the web UI, persisted to NVS.
+// Exactly one transport receives TCode at a time; the status chip reflects this.
+// SERIAL_CONTROL_MODE still gates whether the USB port is dedicated to TCode at
+// all, but the *runtime* selection here decides which path actually drives the
+// motor and how we report the active transport to the UI.
+static TransportMode g_transport = DEFAULT_TRANSPORT_MODE;
+
+// Forward declarations (definitions live further down).
+static void applyTransport(TransportMode mode);
+static const char* transportName(TransportMode m);
+
+
+
 // Auto-duration: measure the real inter-command interval from the app and use
 // it as the move duration, overriding the (often bogus/fixed) "I" value many
 // apps hardcode (e.g. always "I100"). When commands truly arrive every ~30ms
@@ -65,6 +80,122 @@ static float    g_measured_interval_ms = 0; // smoothed measured cadence (for au
 // (frames per elapsed second) rather than instantaneous interval math, which
 // is far less jittery. Updated once per second from the raw rx frame counter.
 static volatile uint16_t g_measured_hz = 0;
+
+// ---- Control gating / takeover -------------------------------------------
+// g_paused          : "Pause" button — ignore Intiface input; the user may
+//                     instead drive via the manual slider / waveform generator.
+// g_manual_override : "Override Intiface" toggle in the Manual tab — same
+//                     gating as pause but a persistent, deliberate takeover.
+// Both block buttplugLinearCmd() from moving the motor. When either is lifted,
+// we DON'T snap to wherever Intiface currently wants the carriage; instead we
+// blend back over RESUME_BLEND_MS so the toy eases home rather than lurching.
+static bool     g_paused = false;
+static bool     g_manual_override = false;
+static uint32_t g_resume_start_ms = 0;     // millis() when gating was lifted (0 = no blend)
+static const uint32_t RESUME_BLEND_MS = 800;
+
+// Expert mode: when true the web UI unlocks slider ranges past the "safe"
+// zone. Purely advisory on the firmware side (we still clamp to absolute
+// hardware limits), but persisted so the UI remembers it across reboots.
+static bool g_expert_mode = false;
+
+// Startup default range — what range_min/range_max load to on boot. Distinct
+// from the live (possibly session-modified) range so the user always has a
+// "home base" window to snap back to. Falls back to full travel if unset.
+static float g_default_range_min = 0.0f;
+static float g_default_range_max = PHYSICAL_MAX_TRAVEL_MM;
+
+// ---- On-device motion generator -------------------------------------------
+// The waveform generator now runs in firmware (generatorTask) instead of the
+// browser, so it keeps running even if WiFi drops or the web page is closed.
+// Because the math is deterministic, the web UI can still draw an identical
+// preview locally (toggleable) without being the source of motion. Parameters
+// are pushed live from the UI via /api/gen and held here in RAM.
+//
+// Waveform: 0=sine 1=triangle 2=square 3=saw
+// Mod:      0=off  1=rate(FM) 2=depth(AM)
+// ModWave:  0=sine 1=triangle 2=random
+struct GeneratorConfig {
+    volatile bool    running   = false;
+    volatile uint8_t wave      = 0;     // carrier shape
+    volatile float   rate_hz   = 0.8f;  // strokes per second
+    volatile float   depth     = 0.80f; // 0..1 fraction of window used
+    volatile float   offset    = 0.50f; // 0..1 center position within window
+    volatile float   ease      = 0.0f;  // 0..1 smoothing of carrier ends
+    volatile uint8_t mod       = 0;     // modulator type
+    volatile uint8_t mod_wave  = 0;     // modulator shape
+    volatile float   mod_rate  = 0.10f; // modulator rate (Hz)
+    volatile float   mod_amp   = 0.80f; // modulation amplitude / swing (Hz)
+};
+
+static GeneratorConfig g_gen;
+// Generator's running phase (0..1) and modulator clock, advanced in the task.
+static float    g_gen_phase = 0.0f;
+static uint32_t g_gen_last_us = 0;
+static float    g_gen_mod_clock = 0.0f;
+// Whether the generator is actually emitting motion right now (running AND it
+// holds control — i.e. not being overridden by active Intiface input). Surfaced
+// to the UI so it can reflect the auto-pause state.
+static volatile bool g_gen_active = false;
+// True when Intiface has sent a command very recently (used to auto-yield the
+// generator to the app). buttplugLinearCmd() stamps this.
+static uint32_t g_last_intiface_ms = 0;
+
+// Generator local tick rate (Hz). The generator task runs at a fixed cadence;
+// this lets the user trade smoothness (100 Hz) vs CPU/step load (20 Hz). 50 Hz
+// is a good default. Held in RAM, pushed live via /api/gen, persisted in NVS.
+static volatile uint16_t g_gen_rate_tick_hz = 50;
+
+
+// ============================================================================
+// Input control mode (how raw Intiface samples become motion)
+// ============================================================================
+//
+// Two strategies, selectable from the web UI:
+//
+//   EXTRAPOLATE (the original behavior): each incoming sample is sized to the
+//     measured command cadence (Auto Duration) and projected slightly ahead via
+//     streamExtrapolated(). Excellent when the app sends at a STABLE rate.
+//
+//   BUFFERED: we push incoming samples into a small ring buffer and a local
+//     timer task (20/50/100 Hz) interpolates between consecutive buffered points
+//     with a selectable easing curve. Playback is deliberately delayed by
+//     `depth` samples so there's always a "next" point to head toward, which
+//     turns SPORADIC/bursty packet streams into smooth continuous motion.
+//
+// Auto Duration is meaningful only in EXTRAPOLATE mode; in BUFFERED mode the
+// local tick rate + buffer depth control timing instead.
+enum class InputMode : uint8_t { EXTRAPOLATE = 0, BUFFERED = 1 };
+// Default to BUFFERED: the time-delayed jitter buffer is what makes bursty BLE
+// input smooth. EXTRAPOLATE is best only for a perfectly steady command rate.
+static InputMode g_input_mode = InputMode::BUFFERED;
+
+
+// Easing applied between two buffered samples (BUFFERED mode). 0..1 maps the
+// linear time fraction t to a shaped fraction.
+//   0=linear 1=ease-in-out (smoothstep) 2=ease-in (accel) 3=ease-out (decel)
+//   4=ease-in-out-cubic (stronger S)
+static volatile uint8_t g_buf_easing = 1;            // default smoothstep
+static volatile uint8_t g_buf_depth  = 2;            // 1..5 samples of look-behind
+static volatile uint16_t g_buf_tick_hz = 50;         // local interpolation rate
+
+// Sample ring for BUFFERED mode. Each entry is a true Intiface sample: the
+// already-range-mapped target position (mm) and its arrival time. The
+// interpolator walks from _buf_play_pos toward the newest enqueued sample.
+struct BufSample { float pos_mm; uint32_t t_ms; };
+static const uint8_t BUF_CAP = 8;                    // ring capacity (>= max depth+slack)
+static BufSample g_buf[BUF_CAP];
+static volatile uint8_t  g_buf_head = 0;             // next write index
+static volatile uint8_t  g_buf_count = 0;            // valid samples in ring
+static portMUX_TYPE g_buf_mux = portMUX_INITIALIZER_UNLOCKED;
+// Interpolator playback cursor: index of the "from" sample and the fractional
+// progress (0..1) between it and the next sample.
+static float    g_buf_seg_t = 0.0f;                  // progress within current segment
+static uint32_t g_buf_last_tick_us = 0;
+static volatile bool g_buf_active = false;           // emitting motion right now
+
+
+
 
 
 
@@ -123,6 +254,20 @@ static void saveConfig() {
     prefs.putUShort("lookahead", motor.getLookaheadMs());
     prefs.putUShort("overshoot", (uint16_t)motor.getMaxOvershootMm());
     prefs.putBool("auto_dur", g_auto_duration);
+    prefs.putFloat("def_rmin", g_default_range_min);
+    prefs.putFloat("def_rmax", g_default_range_max);
+    prefs.putBool("expert", g_expert_mode);
+    prefs.putUChar("transport", (uint8_t)g_transport);
+
+    // Input mode + buffered interpolation + generator tick rate
+    prefs.putUChar("input_mode", (uint8_t)g_input_mode);
+    prefs.putUChar("buf_easing", g_buf_easing);
+    prefs.putUChar("buf_depth", g_buf_depth);
+    prefs.putUShort("buf_tick", g_buf_tick_hz);
+    prefs.putUShort("gen_tick", g_gen_rate_tick_hz);
+
+
+
 
     // TMC driver tunables (from the Motor tab)
     prefs.putUShort("tmc_run", g_driver.run_current_ma);
@@ -153,6 +298,32 @@ static void loadConfig() {
         uint16_t look = prefs.getUShort("lookahead", 20);
         uint16_t over = prefs.getUShort("overshoot", 8);
         g_auto_duration = prefs.getBool("auto_dur", true);
+        g_default_range_min = prefs.getFloat("def_rmin", 0.0f);
+        g_default_range_max = prefs.getFloat("def_rmax", PHYSICAL_MAX_TRAVEL_MM);
+        g_expert_mode = prefs.getBool("expert", false);
+        g_transport = (TransportMode)prefs.getUChar("transport", (uint8_t)DEFAULT_TRANSPORT_MODE);
+        if ((uint8_t)g_transport > (uint8_t)TransportMode::BT) g_transport = DEFAULT_TRANSPORT_MODE;
+
+        // Input mode + buffered interpolation + generator tick rate
+        g_input_mode = (InputMode)prefs.getUChar("input_mode", (uint8_t)InputMode::BUFFERED);
+
+        if ((uint8_t)g_input_mode > (uint8_t)InputMode::BUFFERED) g_input_mode = InputMode::EXTRAPOLATE;
+        g_buf_easing = constrain((int)prefs.getUChar("buf_easing", g_buf_easing), 0, 4);
+        g_buf_depth  = constrain((int)prefs.getUChar("buf_depth", g_buf_depth), 1, 5);
+        { uint16_t bt = prefs.getUShort("buf_tick", g_buf_tick_hz);
+          g_buf_tick_hz = (bt >= 75) ? 100 : (bt >= 35) ? 50 : 20; }
+        { uint16_t gt = prefs.getUShort("gen_tick", g_gen_rate_tick_hz);
+          g_gen_rate_tick_hz = (gt >= 75) ? 100 : (gt >= 35) ? 50 : 20; }
+
+        // Validate startup defaults; fall back to full travel if nonsensical.
+
+        if (g_default_range_min < 0.0f || g_default_range_min > PHYSICAL_MAX_TRAVEL_MM ||
+            g_default_range_max <= 0.0f || g_default_range_max > PHYSICAL_MAX_TRAVEL_MM ||
+            g_default_range_min >= g_default_range_max) {
+            g_default_range_min = 0.0f;
+            g_default_range_max = PHYSICAL_MAX_TRAVEL_MM;
+        }
+
 
         // TMC tunables
         g_driver.run_current_ma   = prefs.getUShort("tmc_run", g_driver.run_current_ma);
@@ -195,8 +366,51 @@ static void loadConfig() {
 }
 
 // ============================================================================
+// Transport mode management
+// ============================================================================
+
+// Apply the active transport: bring up the chosen path and tear down the others
+// so exactly one transport is live. Safe to call repeatedly.
+//   WS  -> WebSocket server + (if WiFi) Intiface WSDM client; BLE off.
+//   SER -> USB Serial TCode (polled in buttplugTask); BLE off, WSDM off.
+//   BT  -> BLE Nordic-UART service; WSDM client off.
+// Note: the WebSocket SERVER always stays up (it's how MultiFunPlayer connects
+// and is cheap), but we only start the outbound Intiface client in WS mode.
+static void applyTransport(TransportMode mode) {
+    g_transport = mode;
+
+    if (mode == TransportMode::BT) {
+        buttplug.beginBLE();
+        buttplug.disconnectIntiface();
+    } else {
+        if (buttplug.isBleRunning()) buttplug.stopBLE();
+        if (mode == TransportMode::WS) {
+#if INTIFACE_ENABLED
+            if (g_wifi_ready) buttplug.connectIntiface(INTIFACE_HOST, INTIFACE_PORT);
+#endif
+        } else {  // SER
+            buttplug.disconnectIntiface();
+        }
+    }
+
+    const char* name = (mode == TransportMode::WS) ? "WS"
+                     : (mode == TransportMode::SER) ? "SER" : "BT";
+    APPLOGF("Transport mode: %s", name);
+}
+
+// Short tag string for the status chip / API.
+static const char* transportName(TransportMode m) {
+    switch (m) {
+        case TransportMode::SER: return "SER";
+        case TransportMode::BT:  return "BT";
+        default:                 return "WS";
+    }
+}
+
+// ============================================================================
 // HTTP Server - Web UI Pages
 // ============================================================================
+
 
 // The full web UI now lives in data/index.html and is served from the LittleFS
 // filesystem partition (flashed separately via "Upload Filesystem Image").
@@ -221,506 +435,6 @@ const char* htmlFallbackPage = R"RAWHTML(
 </body>
 </html>
 )RAWHTML";
-
-// ----------------------------------------------------------------------------
-// Old inline HTML (kept disabled). The UI was moved to data/index.html on
-// LittleFS; this block is preserved only as reference and is compiled out.
-// ----------------------------------------------------------------------------
-#if 0
-const char* htmlIndexPage = R"RAWHTML(
-<!DOCTYPE html>
-<html lang="en">
-<head>
-  <meta charset="UTF-8">
-  <meta name="viewport" content="width=device-width, initial-scale=1.0">
-  <title>SlopDrive-32</title>
-  <style>
-    * { margin: 0; padding: 0; box-sizing: border-box; }
-    body {
-      font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif;
-      background: #1a1a2e; color: #eee; min-height: 100vh;
-      display: flex; justify-content: center; align-items: flex-start;
-      padding: 20px;
-    }
-    .container { max-width: 500px; width: 100%; }
-    h1 { text-align: center; font-size: 1.8em; margin-bottom: 6px; color: #e94560; }
-    .subtitle { text-align: center; color: #888; font-size: 0.85em; margin-bottom: 20px; }
-
-    /* Tabs */
-    .tabs { display: flex; gap: 4px; margin-bottom: 16px; }
-    .tab-btn {
-      flex: 1; padding: 10px; border: none; background: #16213e; color: #aaa;
-      font-size: 0.95em; cursor: pointer; border-radius: 8px 8px 0 0; transition: all 0.2s;
-    }
-    .tab-btn.active { background: #0f3460; color: #fff; }
-    .tab-content { display: none; }
-    .tab-content.active { display: block; }
-
-    /* Cards */
-    .card {
-      background: #16213e; border-radius: 12px; padding: 20px; margin-bottom: 16px;
-      box-shadow: 0 4px 15px rgba(0,0,0,0.3);
-    }
-    .card h2 { font-size: 1.1em; margin-bottom: 16px; color: #e94560; }
-
-    /* Form Controls */
-    label { display: block; font-size: 0.85em; color: #aaa; margin-bottom: 6px; }
-    .slider-group { margin-bottom: 20px; }
-    input[type="range"] {
-      width: 100%; height: 8px; -webkit-appearance: none; appearance: none;
-      background: #0f3460; border-radius: 4px; outline: none;
-    }
-    input[type="range"]::-webkit-slider-thumb {
-      -webkit-appearance: none; width: 22px; height: 22px; border-radius: 50%;
-      background: #e94560; cursor: pointer; border: 3px solid #fff;
-    }
-    .value-display {
-      text-align: center; font-size: 1.4em; font-weight: bold; color: #e94560; margin-top: 4px;
-    }
-
-    /* Buttons */
-    button.action-btn {
-      width: 100%; padding: 12px; border: none; border-radius: 8px;
-      font-size: 1em; font-weight: bold; cursor: pointer; transition: all 0.2s; margin-bottom: 8px;
-    }
-    .btn-primary { background: #e94560; color: #fff; }
-    .btn-primary:hover { background: #c73e54; }
-    .btn-secondary { background: #0f3460; color: #fff; }
-    .btn-secondary:hover { background: #1a4a8a; }
-    .btn-danger { background: #ff6b6b; color: #fff; }
-    .btn-danger:hover { background: #ee5a5a; }
-
-    /* Status */
-    .status-bar {
-      display: flex; justify-content: space-between; align-items: center;
-      padding: 10px 16px; border-radius: 8px; margin-bottom: 12px; font-size: 0.85em;
-    }
-    .status-connected { background: #0a3d2e; color: #4ade80; }
-    .status-disconnected { background: #3d1f1f; color: #ff6b6b; }
-    .status-homed { background: #0a3d2e; color: #4ade80; }
-    .status-not-homed { background: #3d351f; color: #fbbf24; }
-
-    /* Manual Control */
-    .manual-controls { display: flex; gap: 8px; margin-bottom: 12px; }
-    .manual-controls button { flex: 1; padding: 16px; font-size: 1.2em; }
-    .pos-display {
-      text-align: center; font-size: 2em; font-weight: bold; color: #4ade80;
-      padding: 16px; background: #0f3460; border-radius: 8px; margin-bottom: 12px;
-    }
-
-    /* Save indicator */
-    .save-indicator {
-      text-align: center; color: #4ade80; font-size: 0.85em; height: 20px; opacity: 0;
-      transition: opacity 0.3s;
-    }
-    .save-indicator.show { opacity: 1; }
-
-    /* Range visual */
-    .range-visual {
-      position: relative; height: 40px; background: #0f3460; border-radius: 8px;
-      margin: 12px 0; overflow: hidden;
-    }
-    .range-fill {
-      position: absolute; top: 0; bottom: 0; background: linear-gradient(90deg, #e94560, #ff6b6b);
-      border-radius: 8px; transition: left 0.3s, width 0.3s;
-    }
-    .range-marker {
-      position: absolute; top: -4px; bottom: -4px; width: 4px; background: #fff;
-      border-radius: 2px; cursor: pointer; transition: left 0.3s;
-    }
-    .range-label {
-      display: flex; justify-content: space-between; font-size: 0.75em; color: #888; margin-top: 4px;
-    }
-  </style>
-</head>
-<body>
-<div class="container">
-  <h1>&#x1F680; SlopDrive-32</h1>
-  <div class="subtitle">StrokeEngine Controller v2.0</div>
-
-  <!-- Status Bar -->
-  <div id="wifiStatus" class="status-bar status-disconnected">
-    <span>WiFi</span><span id="wifiText">Connecting...</span>
-  </div>
-  <div id="homedStatus" class="status-bar status-not-homed">
-    <span>Motor</span><span id="homedText">Not Homed</span>
-  </div>
-
-  <!-- Tabs -->
-  <div class="tabs">
-    <button class="tab-btn active" onclick="showTab('settings')">Settings</button>
-    <button class="tab-btn" onclick="showTab('manual')">Manual Control</button>
-    <button class="tab-btn" onclick="showTab('logs')">Serial / Log</button>
-  </div>
-
-  <!-- Settings Tab -->
-  <div id="settings" class="tab-content active">
-    <div class="card">
-      <h2>&#x1F4CF; Stroke Range</h2>
-
-      <label>Minimum Position (inserted)</label>
-      <div class="slider-group">
-        <input type="range" id="rangeMin" min="0" max="240" value="0" step="1"
-               oninput="updateRangeVisual()">
-        <div class="value-display"><span id="rangeMinVal">0</span> mm</div>
-      </div>
-
-      <label>Maximum Position (extended)</label>
-      <div class="slider-group">
-        <input type="range" id="rangeMax" min="0" max="240" value="240" step="1"
-               oninput="updateRangeVisual()">
-        <div class="value-display"><span id="rangeMaxVal">240</span> mm</div>
-      </div>
-
-      <!-- Visual Range Indicator -->
-      <label>Usable Stroke Range</label>
-      <div class="range-visual">
-        <div class="range-fill" id="rangeFill"></div>
-      </div>
-      <div class="range-label"><span>Home (0mm)</span><span>Full Extent (240mm)</span></div>
-      <div style="text-align:center;margin-top:8px;">
-        Stroke Depth: <strong id="strokeDepth">240</strong> mm
-      </div>
-    </div>
-
-    <div class="card">
-      <h2>&#x1F6A7; Max Speed</h2>
-      <label>Maximum Movement Speed</label>
-      <div class="slider-group">
-        <input type="range" id="maxSpeed" min="50" max="3000" value="800" step="10"
-               oninput="updateSpeedDisplay()">
-        <div class="value-display"><span id="speedVal">800</span> mm/s</div>
-      </div>
-    </div>
-
-    <div class="card">
-      <h2>&#x1F300; Motion Smoothness</h2>
-      <label>Acceleration (higher = snappier, lower = smoother/softer)</label>
-      <div class="slider-group">
-        <input type="range" id="accel" min="200" max="5000" value="1500" step="50"
-               oninput="updateAccelDisplay()">
-        <div class="value-display"><span id="accelVal">1500</span> mm/s&sup2;</div>
-      </div>
-      <div style="font-size:0.78em;color:#888;line-height:1.4;">
-        Low values feel gentle and fluid but may lag fast strokes. High values
-        track quick motion tightly but can feel harsh. ~1500 is a good start.
-      </div>
-    </div>
-
-    <div class="card">
-      <h2>&#x1F30A; Inertia (Predictive Smoothing)</h2>
-      <label>Lookahead (how far past each point it coasts, in time)</label>
-      <div class="slider-group">
-        <input type="range" id="lookahead" min="0" max="60" value="20" step="1"
-               oninput="updateInertiaDisplay()">
-        <div class="value-display"><span id="lookaheadVal">20</span> ms</div>
-      </div>
-      <label>Max Overshoot (hard cap on coast distance)</label>
-      <div class="slider-group">
-        <input type="range" id="overshoot" min="0" max="30" value="8" step="1"
-               oninput="updateInertiaDisplay()">
-        <div class="value-display"><span id="overshootVal">8</span> mm</div>
-      </div>
-      <div style="font-size:0.78em;color:#888;line-height:1.4;">
-        Between Intiface's position updates the motor keeps gliding in the same
-        direction for the Lookahead time, so motion stays continuous instead of
-        stuttering at each point. Overshoot caps how far past a point it can
-        coast. Set both to 0 to disable. Try 20ms / 8mm.
-      </div>
-    </div>
-
-    <div class="card">
-      <h2>&#x23F1; Polling / Timing</h2>
-      <label style="display:flex;align-items:center;gap:10px;cursor:pointer;">
-        <input type="checkbox" id="autoDuration" style="width:20px;height:20px;">
-        Auto Duration (use measured rate instead of app's value)
-      </label>
-      <div style="text-align:center;margin:14px 0;padding:12px;background:#0f3460;border-radius:8px;">
-        Measured app rate:
-        <strong id="measuredHz" style="color:#4ade80;">--</strong> Hz
-        (<span id="measuredMs">--</span> ms)
-      </div>
-      <div style="font-size:0.78em;color:#888;line-height:1.4;">
-        Many apps send a fixed move-duration (e.g. always 100ms) even when they
-        actually update faster, which makes the motor plan slow moves it never
-        finishes and feel sluggish. When ON, each move is sized to the REAL
-        interval measured between incoming commands. Watch the measured rate
-        above while the app drives it; if it reads ~30-60 Hz but motion felt
-        slow with this OFF, leaving it ON should feel much snappier.
-      </div>
-    </div>
-
-    <button class="action-btn btn-primary" onclick="saveSettings()">&#x1F4BE; Save Settings</button>
-    <div class="save-indicator" id="saveIndicator">&#x2705; Settings saved!</div>
-  </div>
-
-  <!-- Manual Control Tab -->
-  <div id="manual" class="tab-content">
-    <div class="card">
-      <h2>&#x1F4CD; Current Position</h2>
-      <div class="pos-display"><span id="currentPos">---</span> mm</div>
-
-      <label>Move to Position</label>
-      <div class="slider-group">
-        <input type="range" id="manualPos" min="0" max="240" value="0" step="1">
-        <div class="value-display"><span id="manualPosVal">0</span> mm</div>
-      </div>
-
-      <div class="manual-controls">
-        <button class="action-btn btn-secondary" onclick="moveManual(-1)">&#x276F; In</button>
-        <button class="action-btn btn-primary" onclick="goToPosition()">&#x1F4A9; Go</button>
-        <button class="action-btn btn-secondary" onclick="moveManual(1)">Out &#x276F;</button>
-      </div>
-
-      <button class="action-btn btn-secondary" onclick="moveToHome()">&#x1F3E0; Home</button>
-      <button class="action-btn btn-danger" onclick="stopMotor()">&#x1F6D1; Stop</button>
-    </div>
-  </div>
-
-  <!-- Logs Tab -->
-  <div id="logs" class="tab-content">
-    <div class="card">
-      <h2>&#x1F4DC; Device Log</h2>
-      <div id="serialModeBar" class="status-bar status-connected" style="display:none;">
-        <span>Serial Control</span><span id="serialModeText">Active</span>
-      </div>
-      <div style="font-size:0.78em;color:#888;line-height:1.4;margin-bottom:10px;">
-        The USB serial port is used by Intiface for commands, so boot/debug
-        messages appear here instead of the serial monitor. Auto-refreshes.
-      </div>
-      <pre id="logBox" style="background:#0f3460;border-radius:8px;padding:12px;
-           font-size:0.72em;line-height:1.4;color:#cfe;white-space:pre-wrap;
-           max-height:340px;overflow-y:auto;margin-bottom:10px;">Loading...</pre>
-      <button class="action-btn btn-secondary" onclick="refreshLog()">&#x1F501; Refresh</button>
-      <label style="display:flex;align-items:center;gap:10px;cursor:pointer;margin-top:6px;">
-        <input type="checkbox" id="autoLog" checked style="width:18px;height:18px;">
-        Auto-refresh (2s)
-      </label>
-    </div>
-  </div>
-</div>
-
-<script>
-const API = '';
-
-// Tab switching
-function showTab(name) {
-  document.querySelectorAll('.tab-content').forEach(t => t.classList.remove('active'));
-  document.querySelectorAll('.tab-btn').forEach(b => b.classList.remove('active'));
-  document.getElementById(name).classList.add('active');
-  event.target.classList.add('active');
-}
-
-// Range visual update
-function updateRangeVisual() {
-  const min = parseInt(document.getElementById('rangeMin').value);
-  const max = parseInt(document.getElementById('rangeMax').value);
-  document.getElementById('rangeMinVal').textContent = min;
-  document.getElementById('rangeMaxVal').textContent = max;
-
-  const depth = Math.max(max - min, 0);
-  document.getElementById('strokeDepth').textContent = depth;
-
-  // Update visual bar (240mm total range)
-  const pctLeft = (min / 240) * 100;
-  const pctWidth = (depth / 240) * 100;
-  document.getElementById('rangeFill').style.left = pctLeft + '%';
-  document.getElementById('rangeFill').style.width = pctWidth + '%';
-}
-
-// Speed display update
-function updateSpeedDisplay() {
-  document.getElementById('speedVal').textContent = document.getElementById('maxSpeed').value;
-}
-
-// Acceleration display update
-function updateAccelDisplay() {
-  document.getElementById('accelVal').textContent = document.getElementById('accel').value;
-}
-
-// Inertia (lookahead + overshoot) display update
-function updateInertiaDisplay() {
-  document.getElementById('lookaheadVal').textContent = document.getElementById('lookahead').value;
-  document.getElementById('overshootVal').textContent = document.getElementById('overshoot').value;
-}
-
-// Manual position slider
-document.getElementById('manualPos').addEventListener('input', function() {
-  document.getElementById('manualPosVal').textContent = this.value;
-});
-
-// API calls
-async function saveSettings() {
-  const min = parseInt(document.getElementById('rangeMin').value);
-  const max = parseInt(document.getElementById('rangeMax').value);
-  const speed = parseInt(document.getElementById('maxSpeed').value);
-  const accel = parseInt(document.getElementById('accel').value);
-  const lookahead = parseInt(document.getElementById('lookahead').value);
-  const overshoot = parseInt(document.getElementById('overshoot').value);
-  const autoDuration = document.getElementById('autoDuration').checked;
-
-  // Ensure valid range
-  if (min >= max) {
-    alert('Minimum must be less than Maximum');
-    return;
-  }
-
-  try {
-    const resp = await fetch('/api/settings', {
-      method: 'POST',
-      headers: {'Content-Type': 'application/json'},
-      body: JSON.stringify({range_min: min, range_max: max, max_speed: speed,
-                            accel: accel, lookahead: lookahead, overshoot: overshoot,
-                            auto_duration: autoDuration})
-    });
-    const data = await resp.json();
-
-    if (data.ok) {
-      const ind = document.getElementById('saveIndicator');
-      ind.classList.add('show');
-      setTimeout(() => ind.classList.remove('show'), 2000);
-    } else {
-      alert('Error: ' + data.error);
-    }
-  } catch(e) {
-    alert('Failed to save settings');
-  }
-}
-
-async function goToPosition() {
-  const pos = parseInt(document.getElementById('manualPos').value);
-  await fetch('/api/move', {
-    method: 'POST',
-    headers: {'Content-Type': 'application/json'},
-    body: JSON.stringify({position: pos})
-  });
-}
-
-async function moveManual(dir) {
-  const current = parseInt(document.getElementById('currentPos').textContent) || 0;
-  const newPos = Math.max(0, Math.min(240, current + dir * 10));
-  document.getElementById('manualPos').value = newPos;
-  document.getElementById('manualPosVal').textContent = newPos;
-  await fetch('/api/move', {
-    method: 'POST',
-    headers: {'Content-Type': 'application/json'},
-    body: JSON.stringify({position: newPos})
-  });
-}
-
-async function moveToHome() {
-  await fetch('/api/home', {method: 'POST'});
-}
-
-async function stopMotor() {
-  await fetch('/api/stop', {method: 'POST'});
-}
-
-// Status polling
-async function pollStatus() {
-  try {
-    const resp = await fetch('/api/status');
-    const data = await resp.json();
-
-    // WiFi status
-    if (data.wifi_connected) {
-      document.getElementById('wifiStatus').className = 'status-bar status-connected';
-      document.getElementById('wifiText').textContent = data.ip || 'Connected';
-    } else {
-      document.getElementById('wifiStatus').className = 'status-bar status-disconnected';
-      document.getElementById('wifiText').textContent = 'Disconnected';
-    }
-
-    // Homed status
-    if (data.homed) {
-      document.getElementById('homedStatus').className = 'status-bar status-homed';
-      document.getElementById('homedText').textContent = 'Homed - Buttplug: ' +
-        (data.buttplug_connected ? 'Connected' : 'Disconnected');
-    } else {
-      document.getElementById('homedStatus').className = 'status-bar status-not-homed';
-      document.getElementById('homedText').textContent = data.homing ? 'Homing...' : 'Not Homed';
-    }
-
-    // Current position
-    if (data.position !== undefined) {
-      document.getElementById('currentPos').textContent = data.position.toFixed(1);
-    }
-
-    // Serial control mode indicator (on the Logs tab)
-    const smBar = document.getElementById('serialModeBar');
-    if (smBar) {
-      if (data.serial_mode) {
-        smBar.style.display = 'flex';
-        smBar.className = 'status-bar ' + (data.serial_active ? 'status-connected' : 'status-not-homed');
-        document.getElementById('serialModeText').textContent =
-          data.serial_active ? 'Active (receiving TCode)' : 'Waiting for Intiface...';
-      } else {
-        smBar.style.display = 'none';
-      }
-    }
-
-    // Live measured polling rate from the controlling app
-    if (data.measured_hz !== undefined) {
-      document.getElementById('measuredHz').textContent =
-        data.measured_hz > 0 ? data.measured_hz : '--';
-      document.getElementById('measuredMs').textContent =
-        data.measured_interval_ms > 0 ? data.measured_interval_ms : '--';
-    }
-  } catch(e) {}
-}
-
-// Load settings on page load
-async function loadSettings() {
-  try {
-    const resp = await fetch('/api/settings');
-    const data = await resp.json();
-    if (data.range_min !== undefined) {
-      document.getElementById('rangeMin').value = data.range_min;
-      document.getElementById('rangeMax').value = data.range_max;
-      document.getElementById('maxSpeed').value = data.max_speed || 800;
-      document.getElementById('accel').value = data.accel || 1500;
-      document.getElementById('lookahead').value = (data.lookahead !== undefined) ? data.lookahead : 20;
-      document.getElementById('overshoot').value = (data.overshoot !== undefined) ? data.overshoot : 8;
-      document.getElementById('autoDuration').checked = (data.auto_duration !== undefined) ? data.auto_duration : true;
-      updateRangeVisual();
-      updateSpeedDisplay();
-      updateAccelDisplay();
-      updateInertiaDisplay();
-    }
-  } catch(e) {}
-}
-
-// Device log viewer
-async function refreshLog() {
-  try {
-    const resp = await fetch('/api/log');
-    const txt = await resp.text();
-    const box = document.getElementById('logBox');
-    const atBottom = box.scrollHeight - box.scrollTop - box.clientHeight < 30;
-    box.textContent = txt || '(no log output yet)';
-    if (atBottom) box.scrollTop = box.scrollHeight;
-  } catch(e) {}
-}
-
-// Auto-refresh the log while the Logs tab is visible and the checkbox is on.
-setInterval(() => {
-  const logsTab = document.getElementById('logs');
-  const auto = document.getElementById('autoLog');
-  if (logsTab && logsTab.classList.contains('active') && auto && auto.checked) {
-    refreshLog();
-  }
-}, 2000);
-
-// Poll every second
-setInterval(pollStatus, 1000);
-loadSettings();
-pollStatus();
-refreshLog();
-</script>
-</body>
-</html>
-)RAWHTML";
-#endif  // 0  - end of disabled inline HTML reference block
 
 // ============================================================================
 // HTTP Route Handlers
@@ -758,10 +472,49 @@ void handleApiStatus() {
     doc["auto_duration"] = g_auto_duration;
     doc["serial_mode"] = (bool)SERIAL_CONTROL_MODE;
     doc["serial_active"] = buttplug.isSerialActive();
+    doc["serial_linked"] = buttplug.isSerialLinked();
+
+    // Active transport (WS / SER / BT) + BLE link state for the status chip.
+    doc["transport"] = transportName(g_transport);
+    doc["ble_running"]   = buttplug.isBleRunning();
+    doc["ble_connected"] = buttplug.isBleConnected();
+    doc["ble_linked"]    = buttplug.isBleLinked();
+
+
+    // Control-gating state for the web UI's sticky bar / banners.
+    doc["paused"] = g_paused;
+    doc["manual_override"] = g_manual_override;
+
+
+    // --- Live TMC2160 driver health (from the background diag poll task) ---
+    // These come from the cached DRV_STATUS read (no SPI access in this handler).
+    DriverStatus ds = motor.getLastDriverStatus();
+    JsonObject drv = doc["driver"].to<JsonObject>();
+    drv["valid"]     = ds.valid;
+    drv["otpw"]      = ds.otpw;          // overtemp pre-warning
+    drv["ot"]        = ds.ot;            // overtemp shutdown
+    drv["s2ga"]      = ds.s2ga;          // short-to-ground coil A
+    drv["s2gb"]      = ds.s2gb;          // short-to-ground coil B
+    drv["ola"]       = ds.ola;           // open load coil A
+    drv["olb"]       = ds.olb;           // open load coil B
+    drv["stst"]      = ds.stst;          // standstill
+    drv["sg_result"] = ds.sg_result;     // raw StallGuard 0..1023
+    drv["cs_actual"] = ds.cs_actual;     // actual current scale 0..31
+    drv["load_pct"]  = motor.getLoadPercent();   // 0..100% mechanical load
+    drv["faulted"]   = motor.isDriverFaulted();  // latched safety trip
 
     String json;
     serializeJson(doc, json);
     httpServer.send(200, "application/json", json);
+}
+
+// Clears the latched short-to-ground safety trip. The user must physically fix
+// the wiring fault first; this just re-arms the firmware so motion is allowed
+// again (a re-home is still required since power was cut).
+void handleApiClearFault() {
+    motor.clearDriverFault();
+    APPLOG("Driver fault cleared by user (re-home required)");
+    httpServer.send(200, "application/json", "{\"ok\":true}");
 }
 
 void handleApiSettings() {
@@ -774,11 +527,15 @@ void handleApiSettings() {
         doc["lookahead"] = motor.getLookaheadMs();
         doc["overshoot"] = (uint16_t)motor.getMaxOvershootMm();
         doc["auto_duration"] = g_auto_duration;
+        doc["default_range_min"] = g_default_range_min;
+        doc["default_range_max"] = g_default_range_max;
+        doc["expert_mode"] = g_expert_mode;
 
         String json;
         serializeJson(doc, json);
         httpServer.send(200, "application/json", json);
     } else if (httpServer.method() == HTTP_POST) {
+
         String body = httpServer.arg("plain");
         JsonDocument doc;
         DeserializationError err = deserializeJson(doc, body);
@@ -812,14 +569,32 @@ void handleApiSettings() {
         // Auto-duration toggle (override app's I value with measured cadence).
         g_auto_duration = doc["auto_duration"] | g_auto_duration;
 
+        // Expert mode (unlocks unsafe slider ranges in the UI) + startup default
+        // range. Validate the defaults before accepting them.
+        g_expert_mode = doc["expert_mode"] | g_expert_mode;
+        if (doc["default_range_min"].is<float>() || doc["default_range_max"].is<float>()) {
+            float drmin = doc["default_range_min"] | g_default_range_min;
+            float drmax = doc["default_range_max"] | g_default_range_max;
+            if (drmin >= 0.0f && drmax <= PHYSICAL_MAX_TRAVEL_MM && drmin < drmax) {
+                g_default_range_min = drmin;
+                g_default_range_max = drmax;
+            }
+        }
+
         mapper.setRange(rmin, rmax);
+
         g_config.max_speed_mm_s = (float)speed;
         g_config.acceleration_mm_s2 = (float)accel;
         motor.setMaxSpeed(g_config.max_speed_mm_s);
         motor.setAcceleration(g_config.acceleration_mm_s2);  // applies live + future moves
         motor.setLookaheadMs(lookahead);                     // applies live
         motor.setMaxOvershootMm(overshoot);                  // applies live
-        saveConfig();
+        // Live realtime overrides from the Control tab send no_persist=true so
+        // we apply them to the motor immediately WITHOUT hammering NVS on every
+        // slider tick. Only full "Save" posts (no_persist absent/false) persist.
+        bool no_persist = doc["no_persist"] | false;
+        if (!no_persist) saveConfig();
+
 
         JsonDocument resp;
         resp["ok"] = true;
@@ -841,7 +616,30 @@ void handleApiMove() {
         }
 
         float pos = doc["position"] | 0.0f;
-        motor.moveTo(pos);
+        // bypass_limits lets the user drive past the mapped working window
+        // (e.g. to loosen up or test depth) — we still clamp to physical travel.
+        bool bypass = doc["bypass_limits"] | false;
+        if (bypass) {
+            pos = constrain(pos, 0.0f, PHYSICAL_MAX_TRAVEL_MM);
+        } else {
+            pos = constrain(pos, mapper.getMinMm(), mapper.getMaxMm());
+        }
+        // Streamed slider drags send {"stream":true} (the default for the live
+        // position slider). streamTo() NEVER force-stops + busy-waits, so rapid
+        // consecutive requests re-plan smoothly instead of queuing up and then
+        // snapping to the last one (the "drag lags then makes one big move at the
+        // end" buffering symptom). A one-shot positioning move can pass
+        // {"stream":false} to use the settling moveTo() instead. An optional
+        // per-command "speed" (mm/s) lets the slider cap travel velocity.
+        bool stream = doc["stream"] | true;
+        float speed = doc["speed"] | 0.0f;   // 0 = use configured max speed
+        if (stream) {
+            motor.streamTo(pos, speed);
+        } else {
+            motor.moveTo(pos);
+        }
+
+
 
         JsonDocument resp;
         resp["ok"] = true;
@@ -866,8 +664,60 @@ void handleApiStop() {
     // Motor power is cut - position is unknown, require re-homing
     g_homed = false;
     g_homing_in_progress = false;
+    // E-Stop also clears any control gating - fresh start after re-home.
+    g_paused = false;
+    g_manual_override = false;
+    g_resume_start_ms = 0;
     httpServer.send(200, "application/json", "{\"ok\":true}");
 }
+
+// Pause: ignore Intiface input and stop motion (motor stays homed/powered).
+// While paused the user can drive via the manual slider / waveform generator.
+// POST {"paused": true|false}; omitting it toggles. On UN-pausing we start the
+// slow-resume blend so Intiface eases the toy back rather than snapping.
+void handleApiPause() {
+    JsonDocument doc;
+    deserializeJson(doc, httpServer.arg("plain"));
+    bool was = g_paused;
+    g_paused = doc["paused"] | (!g_paused);
+    if (g_paused && !was) {
+        if (motor.isHomed()) motor.hardStop();   // stop but keep position
+        APPLOG("Paused: ignoring Intiface input");
+    } else if (!g_paused && was) {
+        g_resume_start_ms = millis();             // begin slow resume
+        APPLOG("Unpaused: resuming Intiface input");
+    }
+    String json; JsonDocument r; r["ok"] = true; r["paused"] = g_paused;
+    serializeJson(r, json);
+    httpServer.send(200, "application/json", json);
+}
+
+// Halt: immediate motion stop, motor stays powered and homed. Does NOT change
+// Intiface gating - the next command (manual or Intiface) simply moves again.
+void handleApiHalt() {
+    if (motor.isHomed()) motor.hardStop();
+    APPLOG("Halt: motor stopped (still homed/powered)");
+    httpServer.send(200, "application/json", "{\"ok\":true}");
+}
+
+// Override: persistent manual takeover of Intiface (same gating as pause but a
+// deliberate, sticky state). POST {"override": true|false}.
+void handleApiOverride() {
+    JsonDocument doc;
+    deserializeJson(doc, httpServer.arg("plain"));
+    bool was = g_manual_override;
+    g_manual_override = doc["override"] | (!g_manual_override);
+    if (g_manual_override && !was) {
+        APPLOG("Manual override ON: Intiface input ignored");
+    } else if (!g_manual_override && was) {
+        g_resume_start_ms = millis();   // slow resume back into Intiface
+        APPLOG("Manual override OFF: easing back to Intiface");
+    }
+    String json; JsonDocument r; r["ok"] = true; r["manual_override"] = g_manual_override;
+    serializeJson(r, json);
+    httpServer.send(200, "application/json", json);
+}
+
 
 // Motor / TMC live-tuning endpoint.
 //   GET  -> current TMC settings as JSON (for the Motor tab to load)
@@ -936,14 +786,508 @@ void handleApiLog() {
     httpServer.send(200, "text/plain", out);
 }
 
+// Transport-mode endpoint.
+//   GET  -> {"mode":"WS"|"SER"|"BT", "ble_running":bool, "ble_connected":bool}
+//   POST -> {"mode":"WS"|"SER"|"BT"}  switch transport live + persist to NVS.
+void handleApiMode() {
+    if (httpServer.method() == HTTP_GET) {
+        JsonDocument doc;
+        doc["mode"]          = transportName(g_transport);
+        doc["ble_running"]   = buttplug.isBleRunning();
+        doc["ble_connected"] = buttplug.isBleConnected();
+        String json;
+        serializeJson(doc, json);
+        httpServer.send(200, "application/json", json);
+        return;
+    }
+
+    JsonDocument doc;
+    if (deserializeJson(doc, httpServer.arg("plain"))) {
+        httpServer.send(400, "application/json", "{\"error\":\"Invalid JSON\"}");
+        return;
+    }
+
+    const char* m = doc["mode"] | "";
+    TransportMode mode = g_transport;
+    if      (strcasecmp(m, "WS")  == 0) mode = TransportMode::WS;
+    else if (strcasecmp(m, "SER") == 0) mode = TransportMode::SER;
+    else if (strcasecmp(m, "BT")  == 0) mode = TransportMode::BT;
+    else { httpServer.send(400, "application/json", "{\"error\":\"mode must be WS|SER|BT\"}"); return; }
+
+    applyTransport(mode);
+    saveConfig();   // persist the selection
+
+    JsonDocument resp;
+    resp["ok"]   = true;
+    resp["mode"] = transportName(g_transport);
+    String json;
+    serializeJson(resp, json);
+    httpServer.send(200, "application/json", json);
+}
+
+
+// ============================================================================
+// On-device motion generator
+// ============================================================================
+
+// Evaluate one of the carrier shapes at phase p (0..1), returning 0..1.
+static float genCarrier(uint8_t wave, float p) {
+    switch (wave) {
+        case 1:  return p < 0.5f ? p * 2.0f : 2.0f - 2.0f * p;       // triangle
+        case 2:  return p < 0.5f ? 1.0f : 0.0f;                     // square
+        case 3:  return p;                                          // sawtooth
+        default: return 0.5f - 0.5f * cosf(p * 2.0f * (float)PI);   // sine
+    }
+}
+
+// Modulator shape at modulator-clock m (0..1), returning 0..1.
+static float genModShape(uint8_t shape, float m) {
+    switch (shape) {
+        case 1:  return m < 0.5f ? m * 2.0f : 2.0f - 2.0f * m;      // triangle
+        case 2:  return (float)random(0, 1001) / 1000.0f;          // random
+        default: return 0.5f - 0.5f * cosf(m * 2.0f * (float)PI);   // sine
+    }
+}
+
+// Optional "ease" smoothing pulls the carrier toward an S-curve so the ends of
+// each stroke feel softer (less of a hard reversal). ease 0..1 blends in.
+static float genEase(float v, float ease) {
+    if (ease <= 0.0f) return v;
+    float s = v * v * (3.0f - 2.0f * v);   // smoothstep
+    return v + (s - v) * ease;
+}
+
+// GET  -> current generator parameters + live state
+// POST -> any subset of {running,wave,rate,depth,offset,ease,mod,mod_wave,
+//         mod_rate,mod_amp}. Applied live; held in RAM only (the generator is a
+//         session/play feature, not a persisted setting).
+
+void handleApiGen() {
+    if (httpServer.method() == HTTP_GET) {
+        JsonDocument doc;
+        doc["running"]  = g_gen.running;
+        doc["active"]   = g_gen_active;
+        doc["wave"]     = g_gen.wave;
+        doc["rate"]     = g_gen.rate_hz;
+        doc["depth"]    = (int)roundf(g_gen.depth * 100.0f);
+        doc["offset"]   = (int)roundf(g_gen.offset * 100.0f);
+        doc["ease"]     = (int)roundf(g_gen.ease * 100.0f);
+        doc["mod"]      = g_gen.mod;
+        doc["mod_wave"] = g_gen.mod_wave;
+        doc["mod_rate"] = g_gen.mod_rate;
+        doc["mod_amp"]  = g_gen.mod_amp;
+        doc["rate_tick"] = g_gen_rate_tick_hz;   // local generation rate (Hz)
+        String json;
+
+        serializeJson(doc, json);
+        httpServer.send(200, "application/json", json);
+        return;
+    }
+
+    JsonDocument doc;
+    if (deserializeJson(doc, httpServer.arg("plain"))) {
+        httpServer.send(400, "application/json", "{\"error\":\"Invalid JSON\"}");
+        return;
+    }
+
+    APPLOGF("/api/gen POST: %s", httpServer.arg("plain").c_str());
+
+    // Local generation tick rate (20/50/100 Hz). Snap to the nearest allowed
+    // bucket so the UI radio buttons and firmware always agree.
+    if (doc["rate_tick"].is<int>()) {
+        int r = doc["rate_tick"];
+        g_gen_rate_tick_hz = (r >= 75) ? 100 : (r >= 35) ? 50 : 20;
+    }
+
+
+    // Parameters (percent-based fields arrive 0..100 and are stored 0..1).
+    g_gen.wave     = constrain((int)(doc["wave"]     | (int)g_gen.wave), 0, 3);
+
+    g_gen.rate_hz  = constrain((float)(doc["rate"]   | g_gen.rate_hz), 0.05f, 50.0f);
+    if (doc["depth"].is<float>())  g_gen.depth  = constrain((float)doc["depth"]  / 100.0f, 0.02f, 1.0f);
+    if (doc["offset"].is<float>()) g_gen.offset = constrain((float)doc["offset"] / 100.0f, 0.0f, 1.0f);
+    if (doc["ease"].is<float>())   g_gen.ease   = constrain((float)doc["ease"]   / 100.0f, 0.0f, 1.0f);
+    g_gen.mod      = constrain((int)(doc["mod"]      | (int)g_gen.mod), 0, 2);
+    g_gen.mod_wave = constrain((int)(doc["mod_wave"] | (int)g_gen.mod_wave), 0, 2);
+    g_gen.mod_rate = constrain((float)(doc["mod_rate"] | g_gen.mod_rate), 0.01f, 5.0f);
+    // mod_amp is a modulation SWING in Hz (how far the rate is pushed for FM, or
+    // the equivalent depth-reduction reference for AM).
+    g_gen.mod_amp  = constrain((float)(doc["mod_amp"] | g_gen.mod_amp), 0.0f, 10.0f);
+
+
+    // Start/stop. On a fresh start we reset the phase/clock so motion begins from
+    // the bottom of the stroke rather than wherever the phase happened to be.
+    if (doc["running"].is<bool>()) {
+        bool want = doc["running"];
+        if (want && !g_gen.running) {
+            g_gen_phase = 0.0f;
+            g_gen_mod_clock = 0.0f;
+            g_gen_last_us = micros();
+            APPLOG("Generator started");
+        } else if (!want && g_gen.running) {
+            APPLOG("Generator stopped");
+        }
+        g_gen.running = want;
+    }
+
+    httpServer.send(200, "application/json", "{\"ok\":true}");
+}
+
+// Input-mode / buffered-interpolation endpoint.
+//   GET  -> current mode + buffer settings + live state.
+//   POST -> any subset of {mode,easing,depth,tick,save}. Applied live; if
+//           "save":true also persisted to NVS.
+// Fields:
+//   mode   "extrapolate" | "buffered"
+//   easing 0=linear 1=ease-in-out 2=ease-in 3=ease-out 4=ease-in-out-cubic
+//   depth  1..5  (samples of look-behind before playback starts)
+//   tick   20|50|100 (local interpolation rate, Hz)
+void handleApiInterp() {
+    if (httpServer.method() == HTTP_GET) {
+        JsonDocument doc;
+        doc["mode"]      = (g_input_mode == InputMode::BUFFERED) ? "buffered" : "extrapolate";
+        doc["easing"]    = g_buf_easing;
+        doc["depth"]     = g_buf_depth;
+        doc["tick"]      = g_buf_tick_hz;
+        doc["active"]    = g_buf_active;      // emitting interpolated motion now?
+        doc["buffered"]  = g_buf_count;       // samples currently queued
+        String json;
+        serializeJson(doc, json);
+        httpServer.send(200, "application/json", json);
+        return;
+    }
+
+    JsonDocument doc;
+    if (deserializeJson(doc, httpServer.arg("plain"))) {
+        httpServer.send(400, "application/json", "{\"error\":\"Invalid JSON\"}");
+        return;
+    }
+
+    if (doc["mode"].is<const char*>()) {
+        const char* m = doc["mode"];
+        g_input_mode = (strcasecmp(m, "buffered") == 0) ? InputMode::BUFFERED
+                                                        : InputMode::EXTRAPOLATE;
+    }
+    if (doc["easing"].is<int>()) g_buf_easing = constrain((int)doc["easing"], 0, 4);
+    if (doc["depth"].is<int>())  g_buf_depth  = constrain((int)doc["depth"], 1, 5);
+    if (doc["tick"].is<int>()) {
+        int t = doc["tick"];
+        g_buf_tick_hz = (t >= 75) ? 100 : (t >= 35) ? 50 : 20;   // snap to bucket
+    }
+
+    bool save = doc["save"] | false;
+    if (save) saveConfig();
+
+    APPLOGF("Interp: mode=%s easing=%u depth=%u tick=%uHz",
+            (g_input_mode == InputMode::BUFFERED) ? "buffered" : "extrapolate",
+            g_buf_easing, g_buf_depth, g_buf_tick_hz);
+
+    httpServer.send(200, "application/json", "{\"ok\":true}");
+}
+
+// Generator task: when running, computes the carrier waveform (with optional
+
+// FM/AM modulation) and streams target positions to the motor at ~100 Hz. It
+// auto-yields to Intiface — if real app commands arrived in the last 250 ms and
+// the user hasn't paused/overridden, the generator goes idle so it doesn't fight
+// the app. Motion is mapped into the live stroke window (or full travel while
+// the window is bypassed is NOT used here — the generator always uses the
+// configured working window).
+void generatorTask(void* parameter) {
+    uint32_t last_diag_ms = 0;
+    while (true) {
+        // Local generation rate is user-selectable (20/50/100 Hz). Higher =
+        // smoother motion / more step planning; lower = lighter CPU. Re-read
+        // each loop so live changes from /api/gen take effect immediately.
+        uint16_t ghz = g_gen_rate_tick_hz; if (ghz < 5) ghz = 5; if (ghz > 200) ghz = 200;
+        const TickType_t period = pdMS_TO_TICKS(1000 / ghz);
+
+        bool intiface_recent = (g_last_intiface_ms != 0) &&
+                               (millis() - g_last_intiface_ms < 250);
+        bool user_has_control = g_paused || g_manual_override;
+        bool emit = g_gen.running && g_homed &&
+                    (user_has_control || !intiface_recent);
+        g_gen_active = emit;
+
+        // Diagnostics: while the generator is running, log once per second so the
+        // Log tab reflects what it's doing — either why it's idle, or a heartbeat
+        // with the live target while it's actually driving the motor.
+        if (g_gen.running && (millis() - last_diag_ms > 1000)) {
+            last_diag_ms = millis();
+            if (!g_homed)
+                APPLOG("Generator: waiting - motor not homed");
+            else if (intiface_recent && !user_has_control)
+                APPLOG("Generator: yielding to active Intiface (use Pause/Override to keep control)");
+            else
+                APPLOGF("Generator: running target=%.1fmm phase=%.2f window=[%.0f,%.0f]",
+                        mapper.getMinMm() + g_gen.offset * (mapper.getMaxMm() - mapper.getMinMm())
+                            + (genEase(genCarrier(g_gen.wave, g_gen_phase), g_gen.ease) - 0.5f)
+                              * g_gen.depth * (mapper.getMaxMm() - mapper.getMinMm()),
+                        g_gen_phase, mapper.getMinMm(), mapper.getMaxMm());
+        }
+
+
+
+        if (emit) {
+            uint32_t now_us = micros();
+            float dt = (g_gen_last_us != 0) ? (now_us - g_gen_last_us) / 1e6f : 0.0f;
+            g_gen_last_us = now_us;
+            if (dt < 0.0f || dt > 0.5f) dt = 0.0f;   // guard against wrap/stall
+
+            float rate  = g_gen.rate_hz;
+            float depth = g_gen.depth;
+
+            // Advance the modulator clock and apply FM (rate) or AM (depth).
+            if (g_gen.mod != 0) {
+                g_gen_mod_clock += dt * g_gen.mod_rate;
+                if (g_gen_mod_clock > 1.0f) g_gen_mod_clock -= floorf(g_gen_mod_clock);
+                float m = genModShape(g_gen.mod_wave, g_gen_mod_clock);
+                if (g_gen.mod == 1) {        // rate FM: swing rate by +/- mod_amp Hz
+                    rate = fmaxf(0.05f, rate + (m - 0.5f) * 2.0f * g_gen.mod_amp);
+                } else {                     // depth AM: reduce depth, scaled by mod_amp (Hz) vs rate
+                    float a = constrain(g_gen.mod_amp / fmaxf(g_gen.rate_hz, 0.1f), 0.0f, 1.0f);
+                    depth = constrain(depth * (1.0f - 0.5f * m * a), 0.02f, 1.0f);
+                }
+
+            }
+
+            // Advance carrier phase and map into the working window.
+            g_gen_phase += dt * rate;
+            if (g_gen_phase > 1.0f) g_gen_phase -= floorf(g_gen_phase);
+            float c = genEase(genCarrier(g_gen.wave, g_gen_phase), g_gen.ease);
+
+            float lo = mapper.getMinMm(), hi = mapper.getMaxMm();
+            float span = hi - lo;
+            float center = lo + g_gen.offset * span;
+            float pos = center + (c - 0.5f) * depth * span;
+            pos = constrain(pos, lo, hi);
+
+            // streamTo() re-targets without force-stopping; at 100 Hz the motor
+            // glides smoothly through the waveform. speed 0 => configured max.
+            motor.streamTo(pos, 0.0f);
+        } else {
+            g_gen_last_us = 0;   // reset dt so resume doesn't take a giant step
+        }
+
+        vTaskDelay(period);
+    }
+}
+
+// ============================================================================
+// Buffered interpolation (BUFFERED input mode)
+// ============================================================================
+
+// Apply the selected easing curve to a linear progress t (0..1) -> shaped 0..1.
+static float bufEase(uint8_t kind, float t) {
+    t = constrain(t, 0.0f, 1.0f);
+    switch (kind) {
+        case 1:  return t * t * (3.0f - 2.0f * t);                 // ease-in-out (smoothstep)
+        case 2:  return t * t;                                     // ease-in (accelerate)
+        case 3:  return 1.0f - (1.0f - t) * (1.0f - t);            // ease-out (decelerate)
+        case 4: {                                                  // ease-in-out cubic (stronger S)
+            return (t < 0.5f) ? 4.0f * t * t * t
+                              : 1.0f - powf(-2.0f * t + 2.0f, 3.0f) / 2.0f;
+        }
+        default: return t;                                         // linear
+    }
+}
+
+// Push a true Intiface sample (already range-mapped to mm) into the ring buffer.
+// Called from buttplugLinearCmd() while in BUFFERED mode. The interpolatorTask
+// consumes these by replaying them on a time-delayed playback clock.
+//
+// Timestamps are taken with esp_timer_get_time() (microseconds, monotonic) so
+// the playback clock and the sample times share one wall-clock reference.
+static void bufPushSample(float pos_mm) {
+    portENTER_CRITICAL(&g_buf_mux);
+    g_buf[g_buf_head] = { pos_mm, (uint32_t)(esp_timer_get_time() / 1000ULL) };
+    g_buf_head = (g_buf_head + 1) % BUF_CAP;
+    if (g_buf_count < BUF_CAP) g_buf_count++;
+    portEXIT_CRITICAL(&g_buf_mux);
+}
+
+// Interpolator task — TIME-DELAYED JITTER BUFFER.
+//
+// Why the old "advance a cursor by the assumed tick period" approach jittered:
+//   1. vTaskDelay() is NOT isochronous. With WiFi+BLE+web-server running, this
+//      task is preempted; a "20ms" tick can land anywhere from 18 to 45ms. The
+//      old code advanced the cursor by a FIXED 1000/hz ms regardless, so late
+//      ticks under-advanced and the carriage stuttered.
+//   2. It used each sample's raw BLE arrival delta (b.t_ms - a.t_ms) as the
+//      segment duration. BLE delivers in bursts (connection-interval batching),
+//      so those deltas are themselves jittery — feeding transport jitter
+//      straight into motor velocity.
+//   3. `depth` was only a look-behind COUNT, giving no real time cushion, so any
+//      BLE gap bigger than the tiny backlog drained the ring → freeze → refill.
+//
+// The fix is the standard media jitter-buffer model: timestamp every sample on
+// arrival, then PLAY BACK on a clock that runs a fixed delay (PLAY_DELAY_MS)
+// behind real wall-clock time. Each tick we:
+//   * read the REAL elapsed time (esp_timer, immune to tick jitter),
+//   * compute play_time = now - PLAY_DELAY_MS,
+//   * find the two buffered samples that bracket play_time,
+//   * interpolate by the TRUE time fraction between them.
+// Because we always render "the past", bursty/late arrivals are already in the
+// buffer by the time we need them, and uneven tick spacing is corrected by
+// using real time instead of an assumed step. Result: smooth motion even over
+// jittery BLE.
+void interpolatorTask(void* parameter) {
+    // Playback clock, in the same ms timebase as the sample timestamps. 0 = not
+    // yet started (we latch it on the first tick that has data).
+    static uint32_t play_clock_ms = 0;
+    static uint32_t last_real_us  = 0;
+
+    while (true) {
+        uint16_t hz = g_buf_tick_hz; if (hz < 5) hz = 5; if (hz > 200) hz = 200;
+        TickType_t period = pdMS_TO_TICKS(1000 / hz);
+
+        bool gated = g_paused || g_manual_override || !g_homed;
+        bool run = (g_input_mode == InputMode::BUFFERED) && !gated;
+
+        if (run) {
+            uint32_t now_us = (uint32_t)esp_timer_get_time();
+            uint32_t now_ms = now_us / 1000U;
+
+            // The buffer delay (ms) the user dials in via `depth`. Each depth step
+            // ~= 30ms of cushion (1->30ms .. 5->150ms). More delay = smoother ride
+            // over BLE stalls at the cost of a little extra latency.
+            uint8_t depth = g_buf_depth; if (depth < 1) depth = 1; if (depth > 5) depth = 5;
+            uint32_t play_delay_ms = (uint32_t)depth * 30U;
+
+            // Snapshot the ring.
+            portENTER_CRITICAL(&g_buf_mux);
+            uint8_t count = g_buf_count;
+            uint8_t head  = g_buf_head;
+            BufSample ring[BUF_CAP];
+            for (uint8_t i = 0; i < BUF_CAP; i++) ring[i] = g_buf[i];
+            portEXIT_CRITICAL(&g_buf_mux);
+
+            if (count >= 2) {
+                // Oldest valid sample index and the newest timestamp.
+                uint8_t oldest_i = (uint8_t)((head + BUF_CAP - count) % BUF_CAP);
+                uint8_t newest_i = (uint8_t)((head + BUF_CAP - 1) % BUF_CAP);
+                uint32_t oldest_t = ring[oldest_i].t_ms;
+                uint32_t newest_t = ring[newest_i].t_ms;
+
+                // Advance the playback clock by REAL elapsed time (tick-jitter
+                // immune). On the first primed tick, start it one buffer-delay
+                // behind "now" so we render from the oldest available history.
+                if (play_clock_ms == 0 || !g_buf_active) {
+                    play_clock_ms = (now_ms > play_delay_ms) ? (now_ms - play_delay_ms) : oldest_t;
+                    if (play_clock_ms < oldest_t) play_clock_ms = oldest_t;
+                    last_real_us = now_us;
+                    g_buf_active = true;
+                } else {
+                    uint32_t elapsed_ms = (now_us - last_real_us) / 1000U;
+                    if (elapsed_ms > 0) {
+                        play_clock_ms += elapsed_ms;
+                        last_real_us = now_us;
+                    }
+                }
+
+                // Clamp the playback clock into the available window:
+                //  * never run past the newest sample we have (would extrapolate
+                //    blindly); hold at newest if the buffer starved.
+                //  * never fall so far behind that we'd render ancient history.
+                uint32_t target_lag = newest_t - play_delay_ms;   // ideal play point
+                if ((int32_t)(play_clock_ms - newest_t) > 0) {
+                    play_clock_ms = newest_t;                      // starved: hold newest
+                }
+                // Gentle resync if we've drifted too far from the ideal lag
+                // (keeps latency bounded without snapping).
+                if (newest_t > play_delay_ms &&
+                    (int32_t)(target_lag - play_clock_ms) > (int32_t)(play_delay_ms + 50)) {
+                    play_clock_ms = target_lag;                    // jumped behind: catch up
+                }
+                if (play_clock_ms < oldest_t) play_clock_ms = oldest_t;
+
+                // Find the pair of samples bracketing play_clock_ms.
+                BufSample a = ring[oldest_i];
+                BufSample b = ring[newest_i];
+                for (uint8_t k = 0; k < count - 1; k++) {
+                    uint8_t i0 = (uint8_t)((oldest_i + k) % BUF_CAP);
+                    uint8_t i1 = (uint8_t)((i0 + 1) % BUF_CAP);
+                    if ((int32_t)(play_clock_ms - ring[i0].t_ms) >= 0 &&
+                        (int32_t)(ring[i1].t_ms - play_clock_ms) >= 0) {
+                        a = ring[i0]; b = ring[i1];
+                        break;
+                    }
+                }
+
+                // True time fraction between the bracketing samples.
+                float seg_ms = (float)(b.t_ms - a.t_ms);
+                float t = (seg_ms > 0.5f)
+                              ? ((float)((int32_t)(play_clock_ms - a.t_ms)) / seg_ms)
+                              : 1.0f;
+                t = constrain(t, 0.0f, 1.0f);
+
+                float e = bufEase(g_buf_easing, t);
+                float pos = a.pos_mm + (b.pos_mm - a.pos_mm) * e;
+                pos = constrain(pos, mapper.getMinMm(), mapper.getMaxMm());
+
+                // Velocity to reach the next sample over its real remaining time,
+                // so motion stays continuous (no per-tick speed spikes).
+                float remain_ms = (float)((int32_t)(b.t_ms - play_clock_ms));
+                if (remain_ms < 1.0f) remain_ms = seg_ms > 0.5f ? seg_ms : 20.0f;
+                float dist = fabsf(b.pos_mm - pos);
+                float spd  = (dist / remain_ms) * 1000.0f;
+                spd = constrain(spd, 0.0f, g_config.max_speed_mm_s);
+                motor.streamTo(pos, spd);
+
+                // Retire samples strictly older than what we still need to
+                // interpolate (keep the one just before play_clock_ms as `a`).
+                portENTER_CRITICAL(&g_buf_mux);
+                while (g_buf_count > 2) {
+                    uint8_t o  = (uint8_t)((g_buf_head + BUF_CAP - g_buf_count) % BUF_CAP);
+                    uint8_t o1 = (uint8_t)((o + 1) % BUF_CAP);
+                    // Drop the oldest only if the playback clock has already passed
+                    // its successor (so `a/b` bracketing never loses its left edge).
+                    if ((int32_t)(play_clock_ms - g_buf[o1].t_ms) > 0) g_buf_count--;
+                    else break;
+                }
+                portEXIT_CRITICAL(&g_buf_mux);
+            } else {
+                // Fewer than 2 samples: not enough to interpolate yet. Don't
+                // reset g_buf_active for a brief gap, but do pause the clock so it
+                // doesn't run away while starved.
+                last_real_us = now_us;
+            }
+        } else {
+            // Not in buffered mode (or gated): clear ring/clock so a later switch
+            // back into buffered mode starts fresh.
+            g_buf_active = false;
+            play_clock_ms = 0;
+            last_real_us = 0;
+            portENTER_CRITICAL(&g_buf_mux);
+            g_buf_count = 0; g_buf_head = 0;
+            portEXIT_CRITICAL(&g_buf_mux);
+        }
+
+        vTaskDelay(period);
+    }
+}
+
+
 // ============================================================================
 // Buttplug Callbacks - Map Buttplug position (0.0-1.0) to physical mm
 // ============================================================================
 
+
 static void buttplugLinearCmd(float position, uint32_t duration_ms) {
+
     if (!g_homed) return;
+    // Pause or manual override: ignore Intiface entirely. The user is driving
+    // via the manual slider / waveform generator instead. We also reset the
+    // resume-blend origin so the FIRST command after un-gating starts the ease.
+    if (g_paused || g_manual_override) { g_resume_start_ms = millis(); return; }
+
+    // Stamp Intiface activity so the on-device generator can auto-yield: if real
+    // app commands are arriving, the generator stops emitting motion (unless the
+    // user has paused/overridden, in which case we never reach here anyway).
+    g_last_intiface_ms = millis();
 
     // --- Measure the REAL command cadence from the app ---
+
     // Many apps hardcode the "I" duration (e.g. always I100) regardless of how
     // often they actually send. If they send every ~30ms but each claims 100ms,
     // the motor keeps planning a slow 100ms move it never finishes -> sluggish,
@@ -968,6 +1312,42 @@ static void buttplugLinearCmd(float position, uint32_t duration_ms) {
     // Map Buttplug normalized position (0.0-1.0) to physical mm using range mapper
     // 0.0 = min_position_mm (retracted), 1.0 = max_position_mm (extended)
     float target_mm = mapper.intensityToPosition(position);
+
+    // --- BUFFERED input mode -------------------------------------------------
+    // Instead of driving the motor directly, push this true sample into the ring
+    // and let interpolatorTask resample/smooth it at the local tick rate. This
+    // is the path that fixes sporadic/bursty apps. We still honor the slow-resume
+    // blend by offsetting the FIRST sample after un-gating toward current pos.
+    if (g_input_mode == InputMode::BUFFERED) {
+        if (g_resume_start_ms != 0) {
+            uint32_t elapsed = millis() - g_resume_start_ms;
+            if (elapsed >= RESUME_BLEND_MS) {
+                g_resume_start_ms = 0;
+            } else {
+                float blend = (float)elapsed / (float)RESUME_BLEND_MS;
+                float cur = motor.getPosition();
+                target_mm = cur + blend * (target_mm - cur);
+            }
+        }
+        bufPushSample(target_mm);
+        return;   // motion is emitted by interpolatorTask, not here
+    }
+
+    // Slow resume: just after pause/override is lifted, ease back toward where
+
+    // Intiface wants us instead of snapping. Blend the target from the current
+    // position toward the commanded target over RESUME_BLEND_MS.
+    if (g_resume_start_ms != 0) {
+        uint32_t elapsed = millis() - g_resume_start_ms;
+        if (elapsed >= RESUME_BLEND_MS) {
+            g_resume_start_ms = 0;  // blend complete
+        } else {
+            float blend = (float)elapsed / (float)RESUME_BLEND_MS;
+            float cur = motor.getPosition();
+            target_mm = cur + blend * (target_mm - cur);
+        }
+    }
+
 
     // Derive the speed needed to reach target in 'duration_ms' (the time Intiface
     // wants this move to take). This is the heart of smooth motion: each command
@@ -1050,9 +1430,12 @@ void buttplugTask(void* parameter) {
 
 #if SERIAL_CONTROL_MODE
         // Pull any TCode that Intiface streamed over the USB serial port and
-        // feed it into the parser. This is the WiFi-free control path.
-        buttplug.pollSerial();
+        // feed it into the parser. This is the WiFi-free control path. Only do
+        // this when SER is the selected transport so a stray serial monitor
+        // doesn't inject motion while the user is on WS/BT.
+        if (g_transport == TransportMode::SER) buttplug.pollSerial();
 #endif
+
 
         // Once-per-second diagnostic: print the RAW inbound WebSocket frame rate
         // (counted before any parsing/motor work). This definitively shows
@@ -1083,6 +1466,27 @@ void httpTask(void* parameter) {
     while (true) {
         httpServer.handleClient();
         vTaskDelay(pdMS_TO_TICKS(10));
+    }
+}
+
+// Driver-health monitor. Polls the TMC2160 DRV_STATUS register ~5x/second over
+// SPI (serialized against config writes by the motor's internal mutex) so the
+// web UI always has fresh temperature/short/StallGuard data. readDriverStatus()
+// itself latches the hard short-to-ground safety trip and cuts motor power, so
+// this task is also the active safety watchdog. We additionally surface a
+// one-shot log line on overtemp pre-warning so it shows up in the log viewer.
+void diagTask(void* parameter) {
+    bool last_otpw = false;
+    while (true) {
+        DriverStatus s = motor.readDriverStatus();
+
+        if (s.valid && s.otpw && !last_otpw) {
+            APPLOG("WARNING: TMC2160 overtemperature pre-warning (otpw) - driver is HOT");
+        }
+        last_otpw = s.valid && s.otpw;
+
+        // ~5 Hz: frequent enough to catch a fault fast, light enough on the bus.
+        vTaskDelay(pdMS_TO_TICKS(200));
     }
 }
 
@@ -1127,15 +1531,33 @@ void setup() {
 
     // Setup HTTP server routes
     httpServer.on("/", handleRoot);
+    // The web UI is fully self-contained in data/index.html (CSS + JS inline),
+    // so there's no separate /app.js route to serve.
     httpServer.on("/api/status", HTTP_GET, handleApiStatus);
+
+
     httpServer.on("/api/settings", HTTP_GET, handleApiSettings);
     httpServer.on("/api/settings", HTTP_POST, handleApiSettings);
     httpServer.on("/api/move", HTTP_POST, handleApiMove);
     httpServer.on("/api/home", HTTP_POST, handleApiHome);
     httpServer.on("/api/stop", HTTP_POST, handleApiStop);
+    httpServer.on("/api/pause", HTTP_POST, handleApiPause);
+    httpServer.on("/api/halt", HTTP_POST, handleApiHalt);
+    httpServer.on("/api/override", HTTP_POST, handleApiOverride);
     httpServer.on("/api/tmc", HTTP_GET, handleApiTmc);
+
     httpServer.on("/api/tmc", HTTP_POST, handleApiTmc);
+    httpServer.on("/api/clearfault", HTTP_POST, handleApiClearFault);
+    httpServer.on("/api/gen", HTTP_GET, handleApiGen);
+    httpServer.on("/api/gen", HTTP_POST, handleApiGen);
+    httpServer.on("/api/interp", HTTP_GET, handleApiInterp);
+    httpServer.on("/api/interp", HTTP_POST, handleApiInterp);
     httpServer.on("/api/log", HTTP_GET, handleApiLog);
+
+    httpServer.on("/api/mode", HTTP_GET, handleApiMode);
+    httpServer.on("/api/mode", HTTP_POST, handleApiMode);
+
+
     httpServer.begin();
     APPLOGF("HTTP server on port %d", HTTP_PORT);
 
@@ -1144,25 +1566,33 @@ void setup() {
     buttplug.onLinearStop(buttplugStop);
     buttplug.begin();
 
-    // Connect OUT to Intiface's WSDM device server (if enabled). Intiface
-    // listens for devices when its "Device WebSocket Server" toggle is on; the
-    // ESP32 must connect to it as a client and send the JSON handshake.
-    // Requires WiFi to be up so we can reach the PC running Intiface.
-    // In serial-control mode the WiFi/WSDM path is intentionally NOT used for
-    // control (that's the whole point - serial avoids WiFi latency). The web UI
-    // still runs for configuration, but we skip the outbound WSDM client.
-#if INTIFACE_ENABLED && !SERIAL_CONTROL_MODE
-    if (g_wifi_ready) {
-        buttplug.connectIntiface(INTIFACE_HOST, INTIFACE_PORT);
-    }
-#endif
+    // Bring up the SAVED transport (WS / SER / BT). applyTransport() starts the
+    // chosen path and tears down the others so exactly one is live:
+    //   WS  -> connects out to Intiface's WSDM server (needs WiFi)
+    //   SER -> nothing extra; buttplugTask polls the USB serial port
+    //   BT  -> starts BLE advertising (Nordic UART service)
+    // The WebSocket SERVER (for MultiFunPlayer) is always up via buttplug.begin().
+    applyTransport(g_transport);
+
 
     // Create FreeRTOS tasks
     xTaskCreatePinnedToCore(motorTask, "Motor", 4096, NULL, 3, NULL, 1);
     xTaskCreatePinnedToCore(buttplugTask, "Buttplug", 4096, NULL, 2, NULL, 1);
     xTaskCreatePinnedToCore(httpTask, "HTTP", 4096, NULL, 1, NULL, 0);
+    // Driver-health poll/safety watchdog on core 0 (off the motor/control core).
+    xTaskCreatePinnedToCore(diagTask, "Diag", 3072, NULL, 1, NULL, 0);
+    // On-device waveform generator. Same core as the motor/control tasks so its
+    // streamTo() calls stay coherent with the motion pipeline; priority below
+    // the motor task so step generation always wins.
+    xTaskCreatePinnedToCore(generatorTask, "Generator", 4096, NULL, 2, NULL, 1);
+    // Buffered-interpolation task: resamples sporadic Intiface input at a fixed
+    // local rate (20/50/100 Hz) with easing. Same core/priority as the generator
+    // (both feed streamTo() and are mutually exclusive with it in practice).
+    xTaskCreatePinnedToCore(interpolatorTask, "Interp", 4096, NULL, 2, NULL, 1);
+
 
     APPLOG("System ready - push shaft into endstop to home, or use the web UI");
+
 }
 
 void loop() {

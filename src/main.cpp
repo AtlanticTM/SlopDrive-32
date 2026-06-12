@@ -15,6 +15,7 @@
 #include "buttplug.h"
 #include "range_mapper.h"
 #include "AppLog.h"
+#include "Kinematics.h"
 
 // In serial-control mode the USB Serial port is dedicated to Intiface TCode, so
 // status/debug must go to the web log (applog), NOT Serial. APPLOG()/APPLOGF()
@@ -829,33 +830,7 @@ void handleApiMode() {
 // ============================================================================
 // On-device motion generator
 // ============================================================================
-
-// Evaluate one of the carrier shapes at phase p (0..1), returning 0..1.
-static float genCarrier(uint8_t wave, float p) {
-    switch (wave) {
-        case 1:  return p < 0.5f ? p * 2.0f : 2.0f - 2.0f * p;       // triangle
-        case 2:  return p < 0.5f ? 1.0f : 0.0f;                     // square
-        case 3:  return p;                                          // sawtooth
-        default: return 0.5f - 0.5f * cosf(p * 2.0f * (float)PI);   // sine
-    }
-}
-
-// Modulator shape at modulator-clock m (0..1), returning 0..1.
-static float genModShape(uint8_t shape, float m) {
-    switch (shape) {
-        case 1:  return m < 0.5f ? m * 2.0f : 2.0f - 2.0f * m;      // triangle
-        case 2:  return (float)random(0, 1001) / 1000.0f;          // random
-        default: return 0.5f - 0.5f * cosf(m * 2.0f * (float)PI);   // sine
-    }
-}
-
-// Optional "ease" smoothing pulls the carrier toward an S-curve so the ends of
-// each stroke feel softer (less of a hard reversal). ease 0..1 blends in.
-static float genEase(float v, float ease) {
-    if (ease <= 0.0f) return v;
-    float s = v * v * (3.0f - 2.0f * v);   // smoothstep
-    return v + (s - v) * ease;
-}
+// Waveform/easing math lives in motion/Kinematics.h (namespace kinematics).
 
 // GET  -> current generator parameters + live state
 // POST -> any subset of {running,wave,rate,depth,offset,ease,mod,mod_wave,
@@ -1019,10 +994,10 @@ void generatorTask(void* parameter) {
             else if (intiface_recent && !user_has_control)
                 APPLOG("Generator: yielding to active Intiface (use Pause/Override to keep control)");
             else
-                APPLOGF("Generator: running target=%.1fmm phase=%.2f window=[%.0f,%.0f]",
-                        mapper.getMinMm() + g_gen.offset * (mapper.getMaxMm() - mapper.getMinMm())
-                            + (genEase(genCarrier(g_gen.wave, g_gen_phase), g_gen.ease) - 0.5f)
-                              * g_gen.depth * (mapper.getMaxMm() - mapper.getMinMm()),
+            APPLOGF("Generator: running target=%.1fmm phase=%.2f window=[%.0f,%.0f]",
+                    mapper.getMinMm() + g_gen.offset * (mapper.getMaxMm() - mapper.getMinMm())
+                        + (kinematics::ease(kinematics::carrier(g_gen.wave, g_gen_phase), g_gen.ease) - 0.5f)
+                          * g_gen.depth * (mapper.getMaxMm() - mapper.getMinMm()),
                         g_gen_phase, mapper.getMinMm(), mapper.getMaxMm());
         }
 
@@ -1041,7 +1016,7 @@ void generatorTask(void* parameter) {
             if (g_gen.mod != 0) {
                 g_gen_mod_clock += dt * g_gen.mod_rate;
                 if (g_gen_mod_clock > 1.0f) g_gen_mod_clock -= floorf(g_gen_mod_clock);
-                float m = genModShape(g_gen.mod_wave, g_gen_mod_clock);
+                float m = kinematics::modShape(g_gen.mod_wave, g_gen_mod_clock);
                 if (g_gen.mod == 1) {        // rate FM: swing rate by +/- mod_amp Hz
                     rate = fmaxf(0.05f, rate + (m - 0.5f) * 2.0f * g_gen.mod_amp);
                 } else {                     // depth AM: reduce depth, scaled by mod_amp (Hz) vs rate
@@ -1054,7 +1029,7 @@ void generatorTask(void* parameter) {
             // Advance carrier phase and map into the working window.
             g_gen_phase += dt * rate;
             if (g_gen_phase > 1.0f) g_gen_phase -= floorf(g_gen_phase);
-            float c = genEase(genCarrier(g_gen.wave, g_gen_phase), g_gen.ease);
+            float c = kinematics::ease(kinematics::carrier(g_gen.wave, g_gen_phase), g_gen.ease);
 
             float lo = mapper.getMinMm(), hi = mapper.getMaxMm();
             float span = hi - lo;
@@ -1076,21 +1051,7 @@ void generatorTask(void* parameter) {
 // ============================================================================
 // Buffered interpolation (BUFFERED input mode)
 // ============================================================================
-
-// Apply the selected easing curve to a linear progress t (0..1) -> shaped 0..1.
-static float bufEase(uint8_t kind, float t) {
-    t = constrain(t, 0.0f, 1.0f);
-    switch (kind) {
-        case 1:  return t * t * (3.0f - 2.0f * t);                 // ease-in-out (smoothstep)
-        case 2:  return t * t;                                     // ease-in (accelerate)
-        case 3:  return 1.0f - (1.0f - t) * (1.0f - t);            // ease-out (decelerate)
-        case 4: {                                                  // ease-in-out cubic (stronger S)
-            return (t < 0.5f) ? 4.0f * t * t * t
-                              : 1.0f - powf(-2.0f * t + 2.0f, 3.0f) / 2.0f;
-        }
-        default: return t;                                         // linear
-    }
-}
+// bufEase() lives in motion/Kinematics.h (namespace kinematics).
 
 // Push a true Intiface sample (already range-mapped to mm) into the ring buffer.
 // Called from buttplugLinearCmd() while in BUFFERED mode. The interpolatorTask
@@ -1221,7 +1182,7 @@ void interpolatorTask(void* parameter) {
                               : 1.0f;
                 t = constrain(t, 0.0f, 1.0f);
 
-                float e = bufEase(g_buf_easing, t);
+                float e = kinematics::bufEase(g_buf_easing, t);
                 float pos = a.pos_mm + (b.pos_mm - a.pos_mm) * e;
                 pos = constrain(pos, mapper.getMinMm(), mapper.getMaxMm());
 

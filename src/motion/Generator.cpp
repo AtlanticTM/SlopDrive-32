@@ -1,7 +1,7 @@
 #include "Generator.h"
 #include "Kinematics.h"
 #include "range_mapper.h"
-#include "motor.h"
+#include "MotorDriver.h"
 #include "AppLog.h"
 #include "config_api.h"
 
@@ -22,7 +22,7 @@
 // Generator — constructor / destructor
 // ============================================================================
 
-Generator::Generator(SystemState& state, RangeMapper& mapper, MotorController& motor)
+Generator::Generator(SystemState& state, RangeMapper& mapper, MotorDriver& motor)
     : _state(state), _mapper(mapper), _motor(motor)
 {}
 

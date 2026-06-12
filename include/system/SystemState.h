@@ -5,7 +5,7 @@
 #include <freertos/semphr.h>
 
 #include "config_api.h"
-#include "motor.h"  // for DriverConfig
+#include "MotorDriver.h"  // for DriverConfig
 
 // ============================================================================
 // On-device motion generator configuration

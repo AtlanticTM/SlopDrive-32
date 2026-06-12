@@ -5,7 +5,7 @@
 #include "SystemState.h"
 
 class RangeMapper;
-class MotorController;
+class MotorDriver;
 
 // ============================================================================
 // Interpolator — time-delayed jitter-buffer playback engine
@@ -28,7 +28,7 @@ class MotorController;
 
 class Interpolator {
 public:
-    Interpolator(SystemState& state, RangeMapper& mapper, MotorController& motor);
+    Interpolator(SystemState& state, RangeMapper& mapper, MotorDriver& motor);
     ~Interpolator();
 
     // Create the FreeRTOS task (pinned to Core 1, priority 2, 4k stack).
@@ -48,9 +48,9 @@ public:
     bool isActive() const;
 
 private:
-    SystemState&     _state;
-    RangeMapper&     _mapper;
-    MotorController& _motor;
+    SystemState& _state;
+    RangeMapper& _mapper;
+    MotorDriver& _motor;
 
     TaskHandle_t     _task = nullptr;
 

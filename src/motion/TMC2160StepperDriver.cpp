@@ -1,5 +1,8 @@
-// Motor Controller Implementation - SlopDrive-32
-#include "motor.h"
+// TMC2160StepperDriver — concrete MotorDriver for TMC2160 stepper (V1)
+// Build-guarded behind DRIVER_TMC2160 (set in platformio.ini).
+#if defined(DRIVER_TMC2160)
+
+#include "TMC2160StepperDriver.h"
 #include <TMCStepper.h>
 #include <FastAccelStepper.h>
 #include <SPI.h>
@@ -23,16 +26,19 @@
   #define MLOGLN(s)   Serial.println(s)
 #endif
 
-// FastAccelStepperEngine manages the background stepper task on ESP32
-static FastAccelStepperEngine _engine;
+// FastAccelStepperEngine manages the background stepper task on ESP32.
+// Named _fas_engine to avoid shadowing MotorDriver::_engine.
+static FastAccelStepperEngine _fas_engine;
 
 #define ENDSTOP_ACTIVE_STATE LOW
 
-MotorController::MotorController() {}
+TMC2160StepperDriver::TMC2160StepperDriver() {}
 
-void MotorController::begin() {
-    // Mutex serializes every TMC SPI access (config writes vs the background
-    // DRV_STATUS poll task) so software-SPI transactions never interleave.
+// ---- Lifecycle ---------------------------------------------------------------
+
+void TMC2160StepperDriver::init() {
+    // Mutex serializes every TMC SPI access (config writes vs any background
+    // SPI access) so software-SPI transactions never interleave.
     if (!_spi_mutex) _spi_mutex = xSemaphoreCreateMutex();
 
     // Configure pins
@@ -77,8 +83,6 @@ void MotorController::begin() {
 
     _tmc->begin();
 
-
-
     // CRITICAL: TMC2160 needs time to power up before SPI registers can be written
     // The working reference code uses delay(1000) here
     delay(1000);
@@ -86,7 +90,7 @@ void MotorController::begin() {
     // Definitive SPI sanity check: read the silicon version field from the
     // TMC's IOIN/GCONF register. A healthy TMC2160 reports version 0x30. If
     // this comes back 0x00 or 0xFF, SPI is NOT talking (wiring/clock/MISO),
-    // and nothing downstream (DRV_STATUS, StallGuard) will ever read right.
+    // and nothing downstream will ever work.
     uint8_t ver = _tmc->version();
     MLOGF("TMC2160: SPI version read = 0x%02X (expect 0x30)\n", ver);
     if (ver == 0x00 || ver == 0xFF) {
@@ -96,7 +100,6 @@ void MotorController::begin() {
     // Clear any faults
     uint32_t gstat = _tmc->GSTAT();
     if (gstat) {
-
         MLOGF("TMC2160 GSTAT before init: 0x%02X (clearing)\n", gstat);
         _tmc->GSTAT(0x07);
     }
@@ -120,8 +123,11 @@ void MotorController::begin() {
         MLOGLN(F("TMC2160: SPI OK, driver configured"));
     }
 
+    // Store the engine pointer so subclasses/share can access it (Risk #5).
+    _engine = &_fas_engine;
+
     // Initialize FastAccelStepperEngine - creates background task on ESP32
-    _engine.init();
+    _fas_engine.init();
 
     // Create stepper motor connected to STEP pin only.
     // CRITICAL: stepperConnectToPin() takes ONLY the step pin. The direction
@@ -129,7 +135,7 @@ void MotorController::begin() {
     // passed (STEP, DIR) which is NOT a valid overload - the DIR pin was never
     // set, so the motor could only ever step in one direction (forward toward
     // the endstop worked, but backward/manual moves silently did nothing).
-    _stepper = _engine.stepperConnectToPin(PIN_STEP);
+    _stepper = _fas_engine.stepperConnectToPin(PIN_STEP);
 
     if (_stepper) {
         // Configure direction pin (false = do not invert direction signal)
@@ -151,16 +157,28 @@ void MotorController::begin() {
     setAcceleration(_accel_mm_s2);
 }
 
-void MotorController::enable() {
+void TMC2160StepperDriver::update() {
+    runMotorStep();
+    updateExtrapolation();
+}
+
+void TMC2160StepperDriver::emergencyStop() {
+    hardStop();
+    disable();
+    _homed = false;
+    _homing = false;
+}
+
+// ---- Enable / Disable --------------------------------------------------------
+
+void TMC2160StepperDriver::enable() {
     if (_stepper) {
-        // Use FastAccelStepper's enableOutputs() - drives the enable pin
-        // correctly based on low_active_enables_stepper setting in setEnablePin()
         _stepper->enableOutputs();
         _enabled = true;
     }
 }
 
-void MotorController::disable() {
+void TMC2160StepperDriver::disable() {
     if (_stepper) {
         hardStop();
         _stepper->disableOutputs();
@@ -168,10 +186,9 @@ void MotorController::disable() {
     }
 }
 
-// Clears all streaming / extrapolation / target-monitor state. Called whenever
-// we deliberately take over the motor (Halt, Stop, Home) so a stale stream
-// can't keep re-issuing moveTo() commands that fight the new motion.
-void MotorController::resetStreamState() {
+// ---- Stream-state reset ------------------------------------------------------
+
+void TMC2160StepperDriver::resetStreamState() {
     _moving_to_target = false;
     _coasting         = false;
     _have_last_sample = false;
@@ -179,7 +196,9 @@ void MotorController::resetStreamState() {
     _last_sample_ms   = 0;
 }
 
-bool MotorController::home(int32_t home_speed_steps_s) {
+// ---- Homing ------------------------------------------------------------------
+
+bool TMC2160StepperDriver::home(int32_t home_speed_steps_s) {
     if (_homing) return false;
 
     MLOGLN(F("Homing: Starting..."));
@@ -205,7 +224,6 @@ bool MotorController::home(int32_t home_speed_steps_s) {
 
     // Make sure motor is enabled
     enable();
-
 
     // First, check if we're already at the endstop
     if (digitalRead(PIN_ENDSTOP) == ENDSTOP_ACTIVE_STATE) {
@@ -237,7 +255,7 @@ bool MotorController::home(int32_t home_speed_steps_s) {
     return false;  // Will complete via runHomingStep() calls
 }
 
-void MotorController::runHomingStep() {
+void TMC2160StepperDriver::runHomingStep() {
     if (!_homing) return;
 
     // Periodically log endstop state so user can debug via the web log
@@ -277,7 +295,7 @@ void MotorController::runHomingStep() {
         // Use a bounded moveTo() now that the queue is empty and motor is stopped.
         _stepper->setSpeedInHz(2000);
         _stepper->setAcceleration(50000);
-        int32_t backoff_target = -mmToSteps(5.0f);  // 5mm = step -400
+        int32_t backoff_target = -mmToNative(5.0f);  // 5mm = step -400
         int8_t bret = _stepper->moveTo(backoff_target);
         MLOGF("Homing: backoff moveTo(%d) ret=%d\n", backoff_target, bret);
 
@@ -313,7 +331,7 @@ void MotorController::runHomingStep() {
 // motor is NOT enabled/driven, so the shaft stays free to be pushed by hand;
 // once homed, normal commands re-enable it. Debounced so a momentary bounce
 // doesn't false-trigger.
-bool MotorController::checkPushToHome() {
+bool TMC2160StepperDriver::checkPushToHome() {
     // Only relevant when not already homed and not running the active routine.
     if (_homed || _homing || !_stepper) return false;
 
@@ -341,7 +359,7 @@ bool MotorController::checkPushToHome() {
             // Negative steps = away from endstop toward the front.
             _stepper->setSpeedInHz(2000);
             _stepper->setAcceleration(50000);
-            int32_t backoff_target = -mmToSteps(5.0f);  // 5mm
+            int32_t backoff_target = -mmToNative(5.0f);  // 5mm
             _stepper->moveTo(backoff_target);
 
             // Wait for the backoff move to finish.
@@ -366,7 +384,9 @@ bool MotorController::checkPushToHome() {
     return false;
 }
 
-void MotorController::moveTo(float pos_mm) {
+// ---- Motion ------------------------------------------------------------------
+
+void TMC2160StepperDriver::moveTo(float pos_mm) {
     if (!_homed) {
         MLOGLN(F("Cannot move: not homed!"));
         return;
@@ -380,7 +400,7 @@ void MotorController::moveTo(float pos_mm) {
 
     // Coordinate system: home (endstop) = 0mm = step 0
     // "Out" (extended/front) = positive mm = NEGATIVE steps
-    int32_t target_steps = -mmToSteps(pos_mm);
+    int32_t target_steps = -mmToNative(pos_mm);
 
     if (!_stepper) return;
 
@@ -424,12 +444,12 @@ void MotorController::moveTo(float pos_mm) {
 // force-stops the motor between commands - FastAccelStepper accepts a new
 // moveTo() target while already running and smoothly re-plans the trajectory.
 // The force-stop + busy-wait in moveTo() is what made streamed motion stutter.
-void MotorController::streamTo(float pos_mm, float speed_mm_s) {
+void TMC2160StepperDriver::streamTo(float pos_mm, float speed_mm_s) {
     if (!_homed || !_stepper) return;
     enable();
 
     pos_mm = constrain(pos_mm, 0.0f, PHYSICAL_MAX_TRAVEL_MM);
-    int32_t target_steps = -mmToSteps(pos_mm);  // front = negative steps
+    int32_t target_steps = -mmToNative(pos_mm);  // front = negative steps
 
     // Resolve speed: use per-command speed if given, else configured max.
     float spd = (speed_mm_s > 0.0f) ? speed_mm_s : _max_speed_mm_s;
@@ -453,7 +473,7 @@ void MotorController::streamTo(float pos_mm, float speed_mm_s) {
 // stream and command the motor to a point slightly AHEAD, so it keeps coasting
 // between samples instead of settling on each one. Bounded overshoot + a stall
 // timeout (updateExtrapolation) keep it safe.
-void MotorController::streamExtrapolated(float pos_mm, float speed_mm_s) {
+void TMC2160StepperDriver::streamExtrapolated(float pos_mm, float speed_mm_s) {
     if (!_homed || !_stepper) return;
 
     uint32_t now = millis();
@@ -491,7 +511,7 @@ void MotorController::streamExtrapolated(float pos_mm, float speed_mm_s) {
 
 // Stall fallback: if no new sample has arrived recently, stop coasting and
 // settle exactly on the last TRUE sample so the motor can't run away past it.
-void MotorController::updateExtrapolation() {
+void TMC2160StepperDriver::updateExtrapolation() {
     if (!_coasting || !_have_last_sample || !_stepper) return;
     if (millis() - _last_sample_ms >= STREAM_STALL_MS) {
         _coasting = false;
@@ -501,7 +521,7 @@ void MotorController::updateExtrapolation() {
     }
 }
 
-void MotorController::runMotorStep() {
+void TMC2160StepperDriver::runMotorStep() {
     if (!_moving_to_target || !_stepper) return;
 
     int32_t current = _stepper->getCurrentPosition();
@@ -516,17 +536,19 @@ void MotorController::runMotorStep() {
     if (reached) {
         _stepper->forceStop();
         _moving_to_target = false;
-        _current_position_mm = stepsToMm(-_target_steps);
+        _current_position_mm = nativeToMm(-_target_steps);
         MLOGF("runMotorStep: reached target step %d (actual %d)\n",
               _target_steps, current);
     }
 }
 
-void MotorController::setMaxSpeed(float speed_mm_s) {
+// ---- Speed & Acceleration ----------------------------------------------------
+
+void TMC2160StepperDriver::setMaxSpeed(float speed_mm_s) {
     _max_speed_mm_s = constrain(speed_mm_s, 0.0f, MAX_SPEED_MM_S);
 }
 
-void MotorController::setAcceleration(float accel_mm_s2) {
+void TMC2160StepperDriver::setAcceleration(float accel_mm_s2) {
     _accel_mm_s2 = constrain(accel_mm_s2, 10.0f, 5000.0f);
 
     if (_stepper) {
@@ -534,22 +556,26 @@ void MotorController::setAcceleration(float accel_mm_s2) {
     }
 }
 
-bool MotorController::isMoving() {
+// ---- Status ------------------------------------------------------------------
+
+bool TMC2160StepperDriver::isMoving() {
     return _stepper ? _stepper->isRunning() : false;
 }
 
-float MotorController::getPosition() const {
+float TMC2160StepperDriver::getPosition() const {
     if (!_stepper) return 0.0f;
     // Steps are negative for positive mm positions (endstop=0, front=negative steps)
-    return stepsToMm(-_stepper->getCurrentPosition());
+    return nativeToMm(-_stepper->getCurrentPosition());
 }
 
-float MotorController::getTargetPosition() const {
+float TMC2160StepperDriver::getTargetPosition() const {
     // Approximate: use current position if not moving
     return getPosition();
 }
 
-void MotorController::stop() {
+// ---- Stop / HardStop ---------------------------------------------------------
+
+void TMC2160StepperDriver::stop() {
     // Stop movement and cut motor power
     if (_stepper) {
         _stepper->forceStop();
@@ -563,7 +589,7 @@ void MotorController::stop() {
     resetStreamState();
 }
 
-void MotorController::hardStop() {
+void TMC2160StepperDriver::hardStop() {
     // Immediate stop without deceleration
     if (_stepper) {
         _stepper->forceStop();
@@ -574,12 +600,13 @@ void MotorController::hardStop() {
     resetStreamState();
 }
 
+// ---- Driver config -----------------------------------------------------------
 
-void MotorController::applyDriverConfig(const DriverConfig& cfg) {
+void TMC2160StepperDriver::applyDriverConfig(const DriverConfig& cfg) {
     if (!_tmc) return;
 
     // Take the SPI mutex so this burst of register writes can't interleave with
-    // the background DRV_STATUS poll task (software SPI is not re-entrant).
+    // any other SPI access.
     if (_spi_mutex) xSemaphoreTake(_spi_mutex, portMAX_DELAY);
 
     // NOTE on microsteps: STEPS_PER_MM is a compile-time constant derived from
@@ -619,99 +646,30 @@ void MotorController::applyDriverConfig(const DriverConfig& cfg) {
     if (_spi_mutex) xSemaphoreGive(_spi_mutex);
 }
 
-// Reads the TMC2160 DRV_STATUS register (0x6F) and decodes the health/diagnostic
-// flag. Bit layout is the TMC2130/5160/2160 DRV_STATUS map:
-//   [9:0]  SG_RESULT   StallGuard load value (1023=no load .. 0=stall)
-//   [20:16] CS_ACTUAL  actual current scale 0..31
-//   25 ot, 26 otpw, 27 s2ga, 28 s2gb, 29 ola, 30 olb, 31 stst
-DriverStatus MotorController::readDriverStatus() {
-    DriverStatus s;
-    if (!_tmc) return s;
+// ---- Diagnostics -------------------------------------------------------------
 
-    if (_spi_mutex) xSemaphoreTake(_spi_mutex, portMAX_DELAY);
-    uint32_t v = _tmc->DRV_STATUS();
-    if (_spi_mutex) xSemaphoreGive(_spi_mutex);
-
-    // Reject obviously bogus reads. A failed/floating SPI transfer commonly comes
-    // back as all-ones (0xFFFFFFFF) or all-zeros (0x00000000). All-ones is the
-    // worst case: every diagnostic bit reads "1", which would falsely trip
-    // ot/otpw/s2ga/s2gb (and latch a phantom short-to-ground fault). Treat both
-    // as INVALID: keep the previous good reading and report valid=false so the UI
-    // shows "waiting for read" instead of bogus faults.
-    s.raw = v;
-    if (v == 0xFFFFFFFFUL || v == 0x00000000UL) {
-        s.valid = false;
-        // preserve the last good snapshot for getLoadPercent()/getLastDriverStatus()
-        DriverStatus prev = _last_status;
-        prev.valid = false;
-        prev.raw = v;
-        _last_status = prev;
-        return s;   // do NOT decode flags or latch a fault from a bad word
-    }
-
-    s.valid     = true;
-    s.sg_result = (uint16_t)(v & 0x3FF);
-    s.cs_actual = (uint8_t)((v >> 16) & 0x1F);
-    s.ot        = (v >> 25) & 0x1;
-    s.otpw      = (v >> 26) & 0x1;
-    s.s2ga      = (v >> 27) & 0x1;
-    s.s2gb      = (v >> 28) & 0x1;
-    s.ola       = (v >> 29) & 0x1;
-    s.olb       = (v >> 30) & 0x1;
-    s.stst      = (v >> 31) & 0x1;
-
-    _last_status = s;
-
-
-    // Latch a hard safety trip on a coil short-to-ground. The driver already
-    // shuts its output stage down internally, but we also cut our enable line
-    // and flag it so the UI/firmware refuse to keep commanding motion until the
-    // user acknowledges/clears the fault.
-    if (s.s2ga || s.s2gb) {
-        if (!_driver_faulted) {
-            MLOGF("DRV_STATUS FAULT: short-to-ground (s2ga=%d s2gb=%d) raw=0x%08lX\n",
-                  (int)s.s2ga, (int)s.s2gb, (unsigned long)v);
-        }
-        _driver_faulted = true;
-        if (_stepper) {
-            _stepper->forceStop();
-            _stepper->disableOutputs();
-        }
-        _enabled = false;
-    }
-
-    return s;
-}
-
-// StallGuard load as a 0..100% scalar. sg_result runs 0 (stalling/max load) to
-// ~1023 (no load), so we invert it. Returns 0 at standstill (sg_result is not
-// meaningful when the motor isn't stepping) or before the first valid read.
-uint8_t MotorController::getLoadPercent() {
-    const DriverStatus& s = _last_status;
-    if (!s.valid || s.stst) return 0;
-    // Invert and scale: high load -> high percentage.
-    float load = (1.0f - ((float)s.sg_result / 1023.0f)) * 100.0f;
-    return (uint8_t)constrain((int)load, 0, 100);
-}
-
-uint16_t MotorController::getCurrentmA() {
+uint16_t TMC2160StepperDriver::getCurrentmA() {
     if (_tmc) {
         return _tmc->rms_current();
     }
     return 0;
 }
 
-uint8_t MotorController::getMicrosteps() {
+uint8_t TMC2160StepperDriver::getMicrosteps() {
     if (_tmc) {
         return (uint8_t)_tmc->microsteps();
     }
     return MICROSTEPS;
 }
 
-int32_t MotorController::mmToSteps(float mm) {
+// ---- Unit conversion ---------------------------------------------------------
+
+int32_t TMC2160StepperDriver::mmToNative(float mm) const {
     return (int32_t)(mm * STEPS_PER_MM);
 }
 
-float MotorController::stepsToMm(int32_t steps) {
-    return (float)steps / STEPS_PER_MM;
+float TMC2160StepperDriver::nativeToMm(int32_t native) const {
+    return (float)native / STEPS_PER_MM;
 }
+
+#endif // defined(DRIVER_TMC2160)

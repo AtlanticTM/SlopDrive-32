@@ -6,7 +6,7 @@
 // Forward declarations — ConfigStore operates on these through references
 // without needing the full class definitions in the header.
 class RangeMapper;
-class MotorController;
+class MotorDriver;
 
 // ============================================================================
 // ConfigStore — NVS (non-volatile storage) persistence for runtime settings
@@ -27,9 +27,9 @@ class MotorController;
 class ConfigStore {
 public:
     // Persist all runtime settings to the "strokeengine" NVS namespace.
-    static void save(SystemState& state, RangeMapper& mapper, MotorController& motor);
+    static void save(SystemState& state, RangeMapper& mapper, MotorDriver& motor);
 
     // Load persisted settings (or factory defaults if NVS is empty/unreadable).
     // Populates state, mapper, and motor in-place.
-    static void load(SystemState& state, RangeMapper& mapper, MotorController& motor);
+    static void load(SystemState& state, RangeMapper& mapper, MotorDriver& motor);
 };

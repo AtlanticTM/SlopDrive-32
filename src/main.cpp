@@ -10,7 +10,9 @@
 
 
 #include "config_api.h"
-#include "motor.h"
+#if defined(DRIVER_TMC2160)
+#include "TMC2160StepperDriver.h"
+#endif
 #include "buttplug.h"
 #include "range_mapper.h"
 #include "AppLog.h"
@@ -33,10 +35,18 @@
 
 
 // ============================================================================
+// Driver selection — compile-time via build flag (platformio.ini)
+// ============================================================================
+#if defined(DRIVER_TMC2160)
+  TMC2160StepperDriver motor;
+#else
+  #error "No motor driver selected! Define DRIVER_TMC2160 (or future driver flags) in platformio.ini build_flags."
+#endif
+
+// ============================================================================
 // Global Instances
 // ============================================================================
 
-MotorController motor;
 ButtplugServer buttplug;
 RangeMapper mapper;
 
@@ -232,34 +242,34 @@ void handleApiStatus() {
     doc["manual_override"] = g_state.manual_override;
 
 
-    // --- Live TMC2160 driver health (from the background diag poll task) ---
-    // These come from the cached DRV_STATUS read (no SPI access in this handler).
-    DriverStatus ds = motor.getLastDriverStatus();
+    // --- Driver health (legacy TMC2160 readback REMOVED) ---
+    // The driver{} object is kept with valid:false so the frontend never errors
+    // when it checks for these fields.  The UI can hide the driver-health card
+    // dynamically when it sees valid is false.
     JsonObject drv = doc["driver"].to<JsonObject>();
-    drv["valid"]     = ds.valid;
-    drv["otpw"]      = ds.otpw;          // overtemp pre-warning
-    drv["ot"]        = ds.ot;            // overtemp shutdown
-    drv["s2ga"]      = ds.s2ga;          // short-to-ground coil A
-    drv["s2gb"]      = ds.s2gb;          // short-to-ground coil B
-    drv["ola"]       = ds.ola;           // open load coil A
-    drv["olb"]       = ds.olb;           // open load coil B
-    drv["stst"]      = ds.stst;          // standstill
-    drv["sg_result"] = ds.sg_result;     // raw StallGuard 0..1023
-    drv["cs_actual"] = ds.cs_actual;     // actual current scale 0..31
-    drv["load_pct"]  = motor.getLoadPercent();   // 0..100% mechanical load
-    drv["faulted"]   = motor.isDriverFaulted();  // latched safety trip
+    drv["valid"]     = false;
+    drv["otpw"]      = false;
+    drv["ot"]        = false;
+    drv["s2ga"]      = false;
+    drv["s2gb"]      = false;
+    drv["ola"]       = false;
+    drv["olb"]       = false;
+    drv["stst"]      = false;
+    drv["sg_result"] = 0;
+    drv["cs_actual"] = 0;
+    drv["load_pct"]  = 0;
+    drv["faulted"]   = false;
 
     String json;
     serializeJson(doc, json);
     httpServer.send(200, "application/json", json);
 }
 
-// Clears the latched short-to-ground safety trip. The user must physically fix
-// the wiring fault first; this just re-arms the firmware so motion is allowed
-// again (a re-home is still required since power was cut).
+// Clears the latched short-to-ground safety trip.  With legacy readback
+// removed, this is a no-op stub that keeps the route happy so the frontend
+// doesn't break.  (No SPI reads = no faults to clear.)
 void handleApiClearFault() {
-    motor.clearDriverFault();
-    APPLOG("Driver fault cleared by user (re-home required)");
+    APPLOG("Driver fault clear requested (no-op — readback removed)");
     httpServer.send(200, "application/json", "{\"ok\":true}");
 }
 
@@ -686,7 +696,7 @@ void handleApiInterp() {
     if (doc["mode"].is<const char*>()) {
         const char* m = doc["mode"];
         g_state.setInputMode((strcasecmp(m, "buffered") == 0) ? InputMode::BUFFERED
-                                                              : InputMode::EXTRAPOLATE);
+                                                               : InputMode::EXTRAPOLATE);
     }
     if (doc["easing"].is<int>()) g_state.buf_easing = constrain((int)doc["easing"], 0, 4);
     if (doc["depth"].is<int>())  g_state.buf_depth  = constrain((int)doc["depth"], 1, 5);
@@ -855,13 +865,8 @@ void motorTask(void* parameter) {
             }
         }
 
-
-        // Poll position monitor - stops motor when runForward/runBackward reaches target
-        motor.runMotorStep();
-
-        // Predictive-extrapolation stall safety: if the Intiface sample stream
-        // pauses, settle the motor on the last true sample instead of coasting.
-        motor.updateExtrapolation();
+        // Per-tick driver maintenance (position monitor + extrapolation stall safety).
+        motor.update();
 
         vTaskDelay(pdMS_TO_TICKS(1));  // 1ms = 1000Hz endstop polling
     }
@@ -914,26 +919,9 @@ void httpTask(void* parameter) {
     }
 }
 
-// Driver-health monitor. Polls the TMC2160 DRV_STATUS register ~5x/second over
-// SPI (serialized against config writes by the motor's internal mutex) so the
-// web UI always has fresh temperature/short/StallGuard data. readDriverStatus()
-// itself latches the hard short-to-ground safety trip and cuts motor power, so
-// this task is also the active safety watchdog. We additionally surface a
-// one-shot log line on overtemp pre-warning so it shows up in the log viewer.
-void diagTask(void* parameter) {
-    bool last_otpw = false;
-    while (true) {
-        DriverStatus s = motor.readDriverStatus();
-
-        if (s.valid && s.otpw && !last_otpw) {
-            APPLOG("WARNING: TMC2160 overtemperature pre-warning (otpw) - driver is HOT");
-        }
-        last_otpw = s.valid && s.otpw;
-
-        // ~5 Hz: frequent enough to catch a fault fast, light enough on the bus.
-        vTaskDelay(pdMS_TO_TICKS(200));
-    }
-}
+// NOTE: diagTask (TMC2160 DRV_STATUS poll) has been REMOVED per project owner
+// directive.  Legacy driver readback is dropped; no SPI reads occur in runtime.
+// Config writes are still performed under the SPI mutex in applyDriverConfig().
 
 // ============================================================================
 // Setup & Loop
@@ -963,10 +951,10 @@ void setup() {
     ConfigStore::load(g_state, mapper, motor);
 
 
-    // Initialize motor system
-    // Note: motor.begin() applies TMC2160 config from config.h defaults.
+    // Initialize motor system (driver-specific init via the abstract interface).
+    // Note: motor.init() applies TMC2160 config from config.h defaults.
     // applyDriverConfig() is called after to apply the loaded/saved TMC tunables.
-    motor.begin();
+    motor.init();
 
     // Apply the loaded TMC driver settings (from NVS, or defaults) live.
     motor.applyDriverConfig(g_state.driver);
@@ -999,6 +987,7 @@ void setup() {
     httpServer.on("/api/interp", HTTP_POST, handleApiInterp);
     httpServer.on("/api/log", HTTP_GET, handleApiLog);
 
+
     httpServer.on("/api/mode", HTTP_GET, handleApiMode);
     httpServer.on("/api/mode", HTTP_POST, handleApiMode);
 
@@ -1024,8 +1013,7 @@ void setup() {
     xTaskCreatePinnedToCore(motorTask, "Motor", 4096, NULL, 3, NULL, 1);
     xTaskCreatePinnedToCore(buttplugTask, "Buttplug", 4096, NULL, 2, NULL, 1);
     xTaskCreatePinnedToCore(httpTask, "HTTP", 4096, NULL, 1, NULL, 0);
-    // Driver-health poll/safety watchdog on core 0 (off the motor/control core).
-    xTaskCreatePinnedToCore(diagTask, "Diag", 3072, NULL, 1, NULL, 0);
+    // NOTE: diagTask (driver-health poll) removed — legacy readback is deleted.
     // On-device waveform generator. Same core as the motor/control tasks so its
     // streamTo() calls stay coherent with the motion pipeline; priority below
     // the motor task so step generation always wins.

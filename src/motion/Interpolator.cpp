@@ -1,7 +1,7 @@
 #include "Interpolator.h"
 #include "Kinematics.h"
 #include "range_mapper.h"
-#include "motor.h"
+#include "MotorDriver.h"
 #include "AppLog.h"
 #include "config_api.h"
 
@@ -23,7 +23,7 @@
 // Interpolator — constructor / destructor
 // ============================================================================
 
-Interpolator::Interpolator(SystemState& state, RangeMapper& mapper, MotorController& motor)
+Interpolator::Interpolator(SystemState& state, RangeMapper& mapper, MotorDriver& motor)
     : _state(state), _mapper(mapper), _motor(motor)
 {}
 

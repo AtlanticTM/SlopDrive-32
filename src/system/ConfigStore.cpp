@@ -3,14 +3,14 @@
 #include <Preferences.h>
 #include "AppLog.h"
 #include "config_api.h"
-#include "motor.h"
+#include "MotorDriver.h"
 #include "range_mapper.h"
 
 // ============================================================================
 // ConfigStore::save — persist all runtime settings to NVS
 // ============================================================================
 
-void ConfigStore::save(SystemState& state, RangeMapper& mapper, MotorController& motor) {
+void ConfigStore::save(SystemState& state, RangeMapper& mapper, MotorDriver& motor) {
     Preferences prefs;
     if (!prefs.begin("strokeengine", false)) {   // false = read-WRITE
         applog("saveConfig: failed to open NVS for write!");
@@ -53,7 +53,7 @@ void ConfigStore::save(SystemState& state, RangeMapper& mapper, MotorController&
 // ConfigStore::load — load persisted settings (or factory defaults)
 // ============================================================================
 
-void ConfigStore::load(SystemState& state, RangeMapper& mapper, MotorController& motor) {
+void ConfigStore::load(SystemState& state, RangeMapper& mapper, MotorDriver& motor) {
     // Always start with defaults
     state.config = getDefaultConfig();
     state.driver = DriverConfig();   // default-constructed = config.h defaults

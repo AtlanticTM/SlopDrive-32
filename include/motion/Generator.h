@@ -5,7 +5,7 @@
 #include "SystemState.h"
 
 class RangeMapper;
-class MotorController;
+class MotorDriver;
 
 // ============================================================================
 // Generator — on-device waveform motion generator
@@ -25,7 +25,7 @@ class MotorController;
 
 class Generator {
 public:
-    Generator(SystemState& state, RangeMapper& mapper, MotorController& motor);
+    Generator(SystemState& state, RangeMapper& mapper, MotorDriver& motor);
     ~Generator();
 
     // Create the FreeRTOS task (pinned to Core 1, priority 2, 4k stack).
@@ -42,9 +42,9 @@ public:
     bool isActive()  const;
 
 private:
-    SystemState&     _state;
-    RangeMapper&     _mapper;
-    MotorController& _motor;
+    SystemState& _state;
+    RangeMapper& _mapper;
+    MotorDriver& _motor;
 
     TaskHandle_t     _task = nullptr;
 

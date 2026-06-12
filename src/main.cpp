@@ -16,6 +16,7 @@
 #include "range_mapper.h"
 #include "AppLog.h"
 #include "Kinematics.h"
+#include "SystemState.h"
 
 // In serial-control mode the USB Serial port is dedicated to Intiface TCode, so
 // status/debug must go to the web log (applog), NOT Serial. APPLOG()/APPLOGF()
@@ -39,28 +40,20 @@ RangeMapper mapper;
 WebServer httpServer(HTTP_PORT);
 Preferences prefs;
 
+// Centralised, thread-safe runtime state (replaces ~30 file-scope globals).
+// All cross-core scalars are volatile (32-bit aligned, hardware-atomic on
+// ESP32-S3).  The ring buffer is protected by its own portMUX.
+static SystemState g_state;
+
+
 // ============================================================================
 // Device Configuration (runtime state)
 // ============================================================================
 
-static DeviceConfig g_config;
+// NOTE: All previous file-scope globals (g_config, g_driver, g_homed, etc.)
+// are now fields of g_state.  The struct definitions (GeneratorConfig,
+// InputMode, BufSample) live in include/system/SystemState.h.
 
-// Live TMC driver settings (tunable from the Motor tab). Held in RAM so live
-// "Apply" changes persist across page reloads even before they're saved.
-static DriverConfig g_driver;
-
-// Loading states
-
-static bool g_homed = false;
-static bool g_homing_in_progress = false;
-static bool g_wifi_ready = false;
-
-// Active transport mode (WS / SER / BT). Chosen in the web UI, persisted to NVS.
-// Exactly one transport receives TCode at a time; the status chip reflects this.
-// SERIAL_CONTROL_MODE still gates whether the USB port is dedicated to TCode at
-// all, but the *runtime* selection here decides which path actually drives the
-// motor and how we report the active transport to the UI.
-static TransportMode g_transport = DEFAULT_TRANSPORT_MODE;
 
 // Forward declarations (definitions live further down).
 static void applyTransport(TransportMode mode);
@@ -68,135 +61,9 @@ static const char* transportName(TransportMode m);
 
 
 
-// Auto-duration: measure the real inter-command interval from the app and use
-// it as the move duration, overriding the (often bogus/fixed) "I" value many
-// apps hardcode (e.g. always "I100"). When commands truly arrive every ~30ms
-// but each claims 100ms, the motor keeps planning slow moves it never finishes
-// -> sluggish. Sizing each move to the measured cadence fixes that.
-static bool     g_auto_duration = true;     // toggled from the web UI
-static uint32_t g_last_cmd_ms = 0;          // arrival time of previous command
-static float    g_measured_interval_ms = 0; // smoothed measured cadence (for auto-duration)
 
-// Stable measured rate for the WEB UI, computed as a windowed frame count
-// (frames per elapsed second) rather than instantaneous interval math, which
-// is far less jittery. Updated once per second from the raw rx frame counter.
-static volatile uint16_t g_measured_hz = 0;
-
-// ---- Control gating / takeover -------------------------------------------
-// g_paused          : "Pause" button — ignore Intiface input; the user may
-//                     instead drive via the manual slider / waveform generator.
-// g_manual_override : "Override Intiface" toggle in the Manual tab — same
-//                     gating as pause but a persistent, deliberate takeover.
-// Both block buttplugLinearCmd() from moving the motor. When either is lifted,
-// we DON'T snap to wherever Intiface currently wants the carriage; instead we
-// blend back over RESUME_BLEND_MS so the toy eases home rather than lurching.
-static bool     g_paused = false;
-static bool     g_manual_override = false;
-static uint32_t g_resume_start_ms = 0;     // millis() when gating was lifted (0 = no blend)
+// Control gating blend constant (unchanged).
 static const uint32_t RESUME_BLEND_MS = 800;
-
-// Expert mode: when true the web UI unlocks slider ranges past the "safe"
-// zone. Purely advisory on the firmware side (we still clamp to absolute
-// hardware limits), but persisted so the UI remembers it across reboots.
-static bool g_expert_mode = false;
-
-// Startup default range — what range_min/range_max load to on boot. Distinct
-// from the live (possibly session-modified) range so the user always has a
-// "home base" window to snap back to. Falls back to full travel if unset.
-static float g_default_range_min = 0.0f;
-static float g_default_range_max = PHYSICAL_MAX_TRAVEL_MM;
-
-// ---- On-device motion generator -------------------------------------------
-// The waveform generator now runs in firmware (generatorTask) instead of the
-// browser, so it keeps running even if WiFi drops or the web page is closed.
-// Because the math is deterministic, the web UI can still draw an identical
-// preview locally (toggleable) without being the source of motion. Parameters
-// are pushed live from the UI via /api/gen and held here in RAM.
-//
-// Waveform: 0=sine 1=triangle 2=square 3=saw
-// Mod:      0=off  1=rate(FM) 2=depth(AM)
-// ModWave:  0=sine 1=triangle 2=random
-struct GeneratorConfig {
-    volatile bool    running   = false;
-    volatile uint8_t wave      = 0;     // carrier shape
-    volatile float   rate_hz   = 0.8f;  // strokes per second
-    volatile float   depth     = 0.80f; // 0..1 fraction of window used
-    volatile float   offset    = 0.50f; // 0..1 center position within window
-    volatile float   ease      = 0.0f;  // 0..1 smoothing of carrier ends
-    volatile uint8_t mod       = 0;     // modulator type
-    volatile uint8_t mod_wave  = 0;     // modulator shape
-    volatile float   mod_rate  = 0.10f; // modulator rate (Hz)
-    volatile float   mod_amp   = 0.80f; // modulation amplitude / swing (Hz)
-};
-
-static GeneratorConfig g_gen;
-// Generator's running phase (0..1) and modulator clock, advanced in the task.
-static float    g_gen_phase = 0.0f;
-static uint32_t g_gen_last_us = 0;
-static float    g_gen_mod_clock = 0.0f;
-// Whether the generator is actually emitting motion right now (running AND it
-// holds control — i.e. not being overridden by active Intiface input). Surfaced
-// to the UI so it can reflect the auto-pause state.
-static volatile bool g_gen_active = false;
-// True when Intiface has sent a command very recently (used to auto-yield the
-// generator to the app). buttplugLinearCmd() stamps this.
-static uint32_t g_last_intiface_ms = 0;
-
-// Generator local tick rate (Hz). The generator task runs at a fixed cadence;
-// this lets the user trade smoothness (100 Hz) vs CPU/step load (20 Hz). 50 Hz
-// is a good default. Held in RAM, pushed live via /api/gen, persisted in NVS.
-static volatile uint16_t g_gen_rate_tick_hz = 50;
-
-
-// ============================================================================
-// Input control mode (how raw Intiface samples become motion)
-// ============================================================================
-//
-// Two strategies, selectable from the web UI:
-//
-//   EXTRAPOLATE (the original behavior): each incoming sample is sized to the
-//     measured command cadence (Auto Duration) and projected slightly ahead via
-//     streamExtrapolated(). Excellent when the app sends at a STABLE rate.
-//
-//   BUFFERED: we push incoming samples into a small ring buffer and a local
-//     timer task (20/50/100 Hz) interpolates between consecutive buffered points
-//     with a selectable easing curve. Playback is deliberately delayed by
-//     `depth` samples so there's always a "next" point to head toward, which
-//     turns SPORADIC/bursty packet streams into smooth continuous motion.
-//
-// Auto Duration is meaningful only in EXTRAPOLATE mode; in BUFFERED mode the
-// local tick rate + buffer depth control timing instead.
-enum class InputMode : uint8_t { EXTRAPOLATE = 0, BUFFERED = 1 };
-// Default to BUFFERED: the time-delayed jitter buffer is what makes bursty BLE
-// input smooth. EXTRAPOLATE is best only for a perfectly steady command rate.
-static InputMode g_input_mode = InputMode::BUFFERED;
-
-
-// Easing applied between two buffered samples (BUFFERED mode). 0..1 maps the
-// linear time fraction t to a shaped fraction.
-//   0=linear 1=ease-in-out (smoothstep) 2=ease-in (accel) 3=ease-out (decel)
-//   4=ease-in-out-cubic (stronger S)
-static volatile uint8_t g_buf_easing = 1;            // default smoothstep
-static volatile uint8_t g_buf_depth  = 2;            // 1..5 samples of look-behind
-static volatile uint16_t g_buf_tick_hz = 50;         // local interpolation rate
-
-// Sample ring for BUFFERED mode. Each entry is a true Intiface sample: the
-// already-range-mapped target position (mm) and its arrival time. The
-// interpolator walks from _buf_play_pos toward the newest enqueued sample.
-struct BufSample { float pos_mm; uint32_t t_ms; };
-static const uint8_t BUF_CAP = 8;                    // ring capacity (>= max depth+slack)
-static BufSample g_buf[BUF_CAP];
-static volatile uint8_t  g_buf_head = 0;             // next write index
-static volatile uint8_t  g_buf_count = 0;            // valid samples in ring
-static portMUX_TYPE g_buf_mux = portMUX_INITIALIZER_UNLOCKED;
-// Interpolator playback cursor: index of the "from" sample and the fractional
-// progress (0..1) between it and the next sample.
-static float    g_buf_seg_t = 0.0f;                  // progress within current segment
-static uint32_t g_buf_last_tick_us = 0;
-static volatile bool g_buf_active = false;           // emitting motion right now
-
-
-
 
 
 
@@ -228,7 +95,7 @@ static void setupWiFi() {
             APPLOGF("mDNS: http://%s.local:%d", MDNSServiceName, HTTP_PORT);
         }
 
-        g_wifi_ready = true;
+        g_state.wifi_ready = true;
     } else {
         APPLOG("WiFi connection failed!");
     }
@@ -250,35 +117,35 @@ static void saveConfig() {
     }
     prefs.putFloat("range_min", mapper.getMinMm());
     prefs.putFloat("range_max", mapper.getMaxMm());
-    prefs.putUShort("max_speed", (uint16_t)g_config.max_speed_mm_s);
-    prefs.putUShort("accel", (uint16_t)g_config.acceleration_mm_s2);
+    prefs.putUShort("max_speed", (uint16_t)g_state.config.max_speed_mm_s);
+    prefs.putUShort("accel", (uint16_t)g_state.config.acceleration_mm_s2);
     prefs.putUShort("lookahead", motor.getLookaheadMs());
     prefs.putUShort("overshoot", (uint16_t)motor.getMaxOvershootMm());
-    prefs.putBool("auto_dur", g_auto_duration);
-    prefs.putFloat("def_rmin", g_default_range_min);
-    prefs.putFloat("def_rmax", g_default_range_max);
-    prefs.putBool("expert", g_expert_mode);
-    prefs.putUChar("transport", (uint8_t)g_transport);
+    prefs.putBool("auto_dur", g_state.auto_duration);
+    prefs.putFloat("def_rmin", g_state.default_range_min);
+    prefs.putFloat("def_rmax", g_state.default_range_max);
+    prefs.putBool("expert", g_state.expert_mode);
+    prefs.putUChar("transport", (uint8_t)g_state.getTransport());
 
     // Input mode + buffered interpolation + generator tick rate
-    prefs.putUChar("input_mode", (uint8_t)g_input_mode);
-    prefs.putUChar("buf_easing", g_buf_easing);
-    prefs.putUChar("buf_depth", g_buf_depth);
-    prefs.putUShort("buf_tick", g_buf_tick_hz);
-    prefs.putUShort("gen_tick", g_gen_rate_tick_hz);
+    prefs.putUChar("input_mode", (uint8_t)g_state.getInputMode());
+    prefs.putUChar("buf_easing", g_state.buf_easing);
+    prefs.putUChar("buf_depth", g_state.buf_depth);
+    prefs.putUShort("buf_tick", g_state.buf_tick_hz);
+    prefs.putUShort("gen_tick", g_state.gen_rate_tick_hz);
 
 
 
 
     // TMC driver tunables (from the Motor tab)
-    prefs.putUShort("tmc_run", g_driver.run_current_ma);
-    prefs.putUChar("tmc_hold", g_driver.hold_current_pct);
-    prefs.putUChar("tmc_sc", g_driver.stealthchop);
-    prefs.putUInt("tmc_tpwm", g_driver.tpwm_thrs);
-    prefs.putUChar("tmc_toff", g_driver.toff);
-    prefs.putUChar("tmc_tbl", g_driver.tbl);
-    prefs.putChar("tmc_hs", g_driver.hstart);
-    prefs.putChar("tmc_he", g_driver.hend);
+    prefs.putUShort("tmc_run", g_state.driver.run_current_ma);
+    prefs.putUChar("tmc_hold", g_state.driver.hold_current_pct);
+    prefs.putUChar("tmc_sc", g_state.driver.stealthchop);
+    prefs.putUInt("tmc_tpwm", g_state.driver.tpwm_thrs);
+    prefs.putUChar("tmc_toff", g_state.driver.toff);
+    prefs.putUChar("tmc_tbl", g_state.driver.tbl);
+    prefs.putChar("tmc_hs", g_state.driver.hstart);
+    prefs.putChar("tmc_he", g_state.driver.hend);
 
     prefs.end();
     APPLOG("Config saved to NVS");
@@ -286,71 +153,76 @@ static void saveConfig() {
 
 static void loadConfig() {
     // Always start with defaults
-    g_config = getDefaultConfig();
-    g_driver = DriverConfig();   // default-constructed = config.h defaults
-    mapper.setRange(g_config.min_position_mm, g_config.max_position_mm);
+    g_state.config = getDefaultConfig();
+    g_state.driver = DriverConfig();   // default-constructed = config.h defaults
+    mapper.setRange(g_state.config.min_position_mm, g_state.config.max_position_mm);
 
     // Try to load saved values (read-only mode)
     if (prefs.begin("strokeengine", true)) {
-        float rmin = prefs.getFloat("range_min", g_config.min_position_mm);
-        float rmax = prefs.getFloat("range_max", g_config.max_position_mm);
-        uint16_t spd = prefs.getUShort("max_speed", (uint16_t)g_config.max_speed_mm_s);
-        uint16_t acc = prefs.getUShort("accel", (uint16_t)g_config.acceleration_mm_s2);
+        float rmin = prefs.getFloat("range_min", g_state.config.min_position_mm);
+        float rmax = prefs.getFloat("range_max", g_state.config.max_position_mm);
+        uint16_t spd = prefs.getUShort("max_speed", (uint16_t)g_state.config.max_speed_mm_s);
+        uint16_t acc = prefs.getUShort("accel", (uint16_t)g_state.config.acceleration_mm_s2);
         uint16_t look = prefs.getUShort("lookahead", 20);
         uint16_t over = prefs.getUShort("overshoot", 8);
-        g_auto_duration = prefs.getBool("auto_dur", true);
-        g_default_range_min = prefs.getFloat("def_rmin", 0.0f);
-        g_default_range_max = prefs.getFloat("def_rmax", PHYSICAL_MAX_TRAVEL_MM);
-        g_expert_mode = prefs.getBool("expert", false);
-        g_transport = (TransportMode)prefs.getUChar("transport", (uint8_t)DEFAULT_TRANSPORT_MODE);
-        if ((uint8_t)g_transport > (uint8_t)TransportMode::BT) g_transport = DEFAULT_TRANSPORT_MODE;
+        g_state.auto_duration = prefs.getBool("auto_dur", true);
+        g_state.default_range_min = prefs.getFloat("def_rmin", 0.0f);
+        g_state.default_range_max = prefs.getFloat("def_rmax", PHYSICAL_MAX_TRAVEL_MM);
+        g_state.expert_mode = prefs.getBool("expert", false);
+        {
+            TransportMode t = (TransportMode)prefs.getUChar("transport", (uint8_t)DEFAULT_TRANSPORT_MODE);
+            if ((uint8_t)t > (uint8_t)TransportMode::BT) t = DEFAULT_TRANSPORT_MODE;
+            g_state.setTransport(t);
+        }
 
         // Input mode + buffered interpolation + generator tick rate
-        g_input_mode = (InputMode)prefs.getUChar("input_mode", (uint8_t)InputMode::BUFFERED);
-
-        if ((uint8_t)g_input_mode > (uint8_t)InputMode::BUFFERED) g_input_mode = InputMode::EXTRAPOLATE;
-        g_buf_easing = constrain((int)prefs.getUChar("buf_easing", g_buf_easing), 0, 4);
-        g_buf_depth  = constrain((int)prefs.getUChar("buf_depth", g_buf_depth), 1, 5);
-        { uint16_t bt = prefs.getUShort("buf_tick", g_buf_tick_hz);
-          g_buf_tick_hz = (bt >= 75) ? 100 : (bt >= 35) ? 50 : 20; }
-        { uint16_t gt = prefs.getUShort("gen_tick", g_gen_rate_tick_hz);
-          g_gen_rate_tick_hz = (gt >= 75) ? 100 : (gt >= 35) ? 50 : 20; }
+        {
+            InputMode im = (InputMode)prefs.getUChar("input_mode", (uint8_t)InputMode::BUFFERED);
+            if ((uint8_t)im > (uint8_t)InputMode::BUFFERED) im = InputMode::EXTRAPOLATE;
+            g_state.setInputMode(im);
+        }
+        g_state.buf_easing = constrain((int)prefs.getUChar("buf_easing", g_state.buf_easing), 0, 4);
+        g_state.buf_depth  = constrain((int)prefs.getUChar("buf_depth", g_state.buf_depth), 1, 5);
+        { uint16_t bt = prefs.getUShort("buf_tick", g_state.buf_tick_hz);
+          g_state.buf_tick_hz = (bt >= 75) ? 100 : (bt >= 35) ? 50 : 20; }
+        { uint16_t gt = prefs.getUShort("gen_tick", g_state.gen_rate_tick_hz);
+          g_state.gen_rate_tick_hz = (gt >= 75) ? 100 : (gt >= 35) ? 50 : 20; }
 
         // Validate startup defaults; fall back to full travel if nonsensical.
 
-        if (g_default_range_min < 0.0f || g_default_range_min > PHYSICAL_MAX_TRAVEL_MM ||
-            g_default_range_max <= 0.0f || g_default_range_max > PHYSICAL_MAX_TRAVEL_MM ||
-            g_default_range_min >= g_default_range_max) {
-            g_default_range_min = 0.0f;
-            g_default_range_max = PHYSICAL_MAX_TRAVEL_MM;
+        if (g_state.default_range_min < 0.0f || g_state.default_range_min > PHYSICAL_MAX_TRAVEL_MM ||
+            g_state.default_range_max <= 0.0f || g_state.default_range_max > PHYSICAL_MAX_TRAVEL_MM ||
+            g_state.default_range_min >= g_state.default_range_max) {
+            g_state.default_range_min = 0.0f;
+            g_state.default_range_max = PHYSICAL_MAX_TRAVEL_MM;
         }
 
 
         // TMC tunables
-        g_driver.run_current_ma   = prefs.getUShort("tmc_run", g_driver.run_current_ma);
-        g_driver.hold_current_pct = prefs.getUChar("tmc_hold", g_driver.hold_current_pct);
-        g_driver.stealthchop      = prefs.getUChar("tmc_sc", g_driver.stealthchop);
-        g_driver.tpwm_thrs        = prefs.getUInt("tmc_tpwm", g_driver.tpwm_thrs);
-        g_driver.toff             = prefs.getUChar("tmc_toff", g_driver.toff);
-        g_driver.tbl              = prefs.getUChar("tmc_tbl", g_driver.tbl);
-        g_driver.hstart           = prefs.getChar("tmc_hs", g_driver.hstart);
-        g_driver.hend             = prefs.getChar("tmc_he", g_driver.hend);
+        g_state.driver.run_current_ma   = prefs.getUShort("tmc_run", g_state.driver.run_current_ma);
+        g_state.driver.hold_current_pct = prefs.getUChar("tmc_hold", g_state.driver.hold_current_pct);
+        g_state.driver.stealthchop      = prefs.getUChar("tmc_sc", g_state.driver.stealthchop);
+        g_state.driver.tpwm_thrs        = prefs.getUInt("tmc_tpwm", g_state.driver.tpwm_thrs);
+        g_state.driver.toff             = prefs.getUChar("tmc_toff", g_state.driver.toff);
+        g_state.driver.tbl              = prefs.getUChar("tmc_tbl", g_state.driver.tbl);
+        g_state.driver.hstart           = prefs.getChar("tmc_hs", g_state.driver.hstart);
+        g_state.driver.hend             = prefs.getChar("tmc_he", g_state.driver.hend);
         prefs.end();
 
         // Validate: reject 0 or out-of-range values
-        if (rmin < 0.0f || rmin > PHYSICAL_MAX_TRAVEL_MM) rmin = g_config.min_position_mm;
-        if (rmax <= 0.0f || rmax > PHYSICAL_MAX_TRAVEL_MM) rmax = g_config.max_position_mm;
-        if (rmin >= rmax) { rmin = g_config.min_position_mm; rmax = g_config.max_position_mm; }
-        if (spd == 0 || spd > (uint16_t)MAX_SPEED_MM_S) spd = (uint16_t)g_config.max_speed_mm_s;
-        if (acc == 0 || acc > 5000) acc = (uint16_t)g_config.acceleration_mm_s2;
-        if (g_driver.run_current_ma < 250 || g_driver.run_current_ma > 3000)
-            g_driver.run_current_ma = TMC_RUN_CURRENT_MA;
-        if (g_driver.toff < 1 || g_driver.toff > 15) g_driver.toff = TMC_TOFF;
+        if (rmin < 0.0f || rmin > PHYSICAL_MAX_TRAVEL_MM) rmin = g_state.config.min_position_mm;
+        if (rmax <= 0.0f || rmax > PHYSICAL_MAX_TRAVEL_MM) rmax = g_state.config.max_position_mm;
+        if (rmin >= rmax) { rmin = g_state.config.min_position_mm; rmax = g_state.config.max_position_mm; }
+        if (spd == 0 || spd > (uint16_t)MAX_SPEED_MM_S) spd = (uint16_t)g_state.config.max_speed_mm_s;
+        if (acc == 0 || acc > 5000) acc = (uint16_t)g_state.config.acceleration_mm_s2;
+        if (g_state.driver.run_current_ma < 250 || g_state.driver.run_current_ma > 3000)
+            g_state.driver.run_current_ma = TMC_RUN_CURRENT_MA;
+        if (g_state.driver.toff < 1 || g_state.driver.toff > 15) g_state.driver.toff = TMC_TOFF;
 
         mapper.setRange(rmin, rmax);
-        g_config.max_speed_mm_s = (float)spd;
-        g_config.acceleration_mm_s2 = (float)acc;
-        g_config.run_current_ma = g_driver.run_current_ma;
+        g_state.config.max_speed_mm_s = (float)spd;
+        g_state.config.acceleration_mm_s2 = (float)acc;
+        g_state.config.run_current_ma = g_state.driver.run_current_ma;
 
         // Apply persisted inertia/predictive-smoothing settings to the motor.
         if (look > 200) look = 20;
@@ -359,7 +231,7 @@ static void loadConfig() {
         motor.setMaxOvershootMm((float)over);
 
         APPLOGF("Config: range=[%.1f, %.1f] speed=%.0f accel=%.0f run=%umA look=%u over=%u",
-                rmin, rmax, (float)spd, (float)acc, g_driver.run_current_ma, look, over);
+                rmin, rmax, (float)spd, (float)acc, g_state.driver.run_current_ma, look, over);
     } else {
         prefs.end();
         APPLOG("No saved config, using defaults");
@@ -378,7 +250,7 @@ static void loadConfig() {
 // Note: the WebSocket SERVER always stays up (it's how MultiFunPlayer connects
 // and is cheap), but we only start the outbound Intiface client in WS mode.
 static void applyTransport(TransportMode mode) {
-    g_transport = mode;
+    g_state.setTransport(mode);
 
     if (mode == TransportMode::BT) {
         buttplug.beginBLE();
@@ -387,7 +259,7 @@ static void applyTransport(TransportMode mode) {
         if (buttplug.isBleRunning()) buttplug.stopBLE();
         if (mode == TransportMode::WS) {
 #if INTIFACE_ENABLED
-            if (g_wifi_ready) buttplug.connectIntiface(INTIFACE_HOST, INTIFACE_PORT);
+            if (g_state.wifi_ready) buttplug.connectIntiface(INTIFACE_HOST, INTIFACE_PORT);
 #endif
         } else {  // SER
             buttplug.disconnectIntiface();
@@ -458,33 +330,33 @@ void handleRoot() {
 
 void handleApiStatus() {
     JsonDocument doc;
-    doc["wifi_connected"] = g_wifi_ready;
+    doc["wifi_connected"] = g_state.wifi_ready;
     doc["ip"] = WiFi.localIP().toString();
-    doc["homed"] = g_homed;
-    doc["homing"] = g_homing_in_progress;
+    doc["homed"] = g_state.homed;
+    doc["homing"] = g_state.homing_in_progress;
     doc["buttplug_connected"] = buttplug.isConnected();
     doc["position"] = motor.getPosition();
     // Live measured command cadence from the controlling app. Use the STABLE
     // windowed frame count (frames per 1s window) rather than the jittery
     // instantaneous interval, so the UI reads steady instead of jumping around.
-    uint16_t hz = g_measured_hz;
+    uint16_t hz = g_state.measured_hz;
     doc["measured_hz"] = hz;
     doc["measured_interval_ms"] = (hz > 0) ? (uint16_t)(1000 / hz) : 0;
-    doc["auto_duration"] = g_auto_duration;
+    doc["auto_duration"] = g_state.auto_duration;
     doc["serial_mode"] = (bool)SERIAL_CONTROL_MODE;
     doc["serial_active"] = buttplug.isSerialActive();
     doc["serial_linked"] = buttplug.isSerialLinked();
 
     // Active transport (WS / SER / BT) + BLE link state for the status chip.
-    doc["transport"] = transportName(g_transport);
+    doc["transport"] = transportName(g_state.getTransport());
     doc["ble_running"]   = buttplug.isBleRunning();
     doc["ble_connected"] = buttplug.isBleConnected();
     doc["ble_linked"]    = buttplug.isBleLinked();
 
 
     // Control-gating state for the web UI's sticky bar / banners.
-    doc["paused"] = g_paused;
-    doc["manual_override"] = g_manual_override;
+    doc["paused"] = g_state.paused;
+    doc["manual_override"] = g_state.manual_override;
 
 
     // --- Live TMC2160 driver health (from the background diag poll task) ---
@@ -523,14 +395,14 @@ void handleApiSettings() {
         JsonDocument doc;
         doc["range_min"] = mapper.getMinMm();
         doc["range_max"] = mapper.getMaxMm();
-        doc["max_speed"] = (uint16_t)g_config.max_speed_mm_s;
-        doc["accel"] = (uint16_t)g_config.acceleration_mm_s2;
+        doc["max_speed"] = (uint16_t)g_state.config.max_speed_mm_s;
+        doc["accel"] = (uint16_t)g_state.config.acceleration_mm_s2;
         doc["lookahead"] = motor.getLookaheadMs();
         doc["overshoot"] = (uint16_t)motor.getMaxOvershootMm();
-        doc["auto_duration"] = g_auto_duration;
-        doc["default_range_min"] = g_default_range_min;
-        doc["default_range_max"] = g_default_range_max;
-        doc["expert_mode"] = g_expert_mode;
+        doc["auto_duration"] = g_state.auto_duration;
+        doc["default_range_min"] = g_state.default_range_min;
+        doc["default_range_max"] = g_state.default_range_max;
+        doc["expert_mode"] = g_state.expert_mode;
 
         String json;
         serializeJson(doc, json);
@@ -548,8 +420,8 @@ void handleApiSettings() {
 
         float rmin = doc["range_min"] | mapper.getMinMm();
         float rmax = doc["range_max"] | mapper.getMaxMm();
-        uint16_t speed = doc["max_speed"] | (uint16_t)g_config.max_speed_mm_s;
-        uint16_t accel = doc["accel"] | (uint16_t)g_config.acceleration_mm_s2;
+        uint16_t speed = doc["max_speed"] | (uint16_t)g_state.config.max_speed_mm_s;
+        uint16_t accel = doc["accel"] | (uint16_t)g_state.config.acceleration_mm_s2;
 
         if (rmin >= rmax) {
             httpServer.send(400, "application/json", "{\"error\":\"Min must be less than Max\"}");
@@ -568,26 +440,26 @@ void handleApiSettings() {
         if (overshoot > 50.0f) overshoot = 50.0f;
 
         // Auto-duration toggle (override app's I value with measured cadence).
-        g_auto_duration = doc["auto_duration"] | g_auto_duration;
+        g_state.auto_duration = doc["auto_duration"] | g_state.auto_duration;
 
         // Expert mode (unlocks unsafe slider ranges in the UI) + startup default
         // range. Validate the defaults before accepting them.
-        g_expert_mode = doc["expert_mode"] | g_expert_mode;
+        g_state.expert_mode = doc["expert_mode"] | g_state.expert_mode;
         if (doc["default_range_min"].is<float>() || doc["default_range_max"].is<float>()) {
-            float drmin = doc["default_range_min"] | g_default_range_min;
-            float drmax = doc["default_range_max"] | g_default_range_max;
+            float drmin = doc["default_range_min"] | g_state.default_range_min;
+            float drmax = doc["default_range_max"] | g_state.default_range_max;
             if (drmin >= 0.0f && drmax <= PHYSICAL_MAX_TRAVEL_MM && drmin < drmax) {
-                g_default_range_min = drmin;
-                g_default_range_max = drmax;
+                g_state.default_range_min = drmin;
+                g_state.default_range_max = drmax;
             }
         }
 
         mapper.setRange(rmin, rmax);
 
-        g_config.max_speed_mm_s = (float)speed;
-        g_config.acceleration_mm_s2 = (float)accel;
-        motor.setMaxSpeed(g_config.max_speed_mm_s);
-        motor.setAcceleration(g_config.acceleration_mm_s2);  // applies live + future moves
+        g_state.config.max_speed_mm_s = (float)speed;
+        g_state.config.acceleration_mm_s2 = (float)accel;
+        motor.setMaxSpeed(g_state.config.max_speed_mm_s);
+        motor.setAcceleration(g_state.config.acceleration_mm_s2);  // applies live + future moves
         motor.setLookaheadMs(lookahead);                     // applies live
         motor.setMaxOvershootMm(overshoot);                  // applies live
         // Live realtime overrides from the Control tab send no_persist=true so
@@ -611,7 +483,7 @@ void handleApiMove() {
         JsonDocument doc;
         DeserializationError err = deserializeJson(doc, body);
 
-        if (err || !g_homed) {
+        if (err || !g_state.homed) {
             httpServer.send(400, "application/json", "{\"error\":\"Invalid request or not homed\"}");
             return;
         }
@@ -651,10 +523,10 @@ void handleApiMove() {
 }
 
 void handleApiHome() {
-    // Allow homing if not already homed or homing, OR if previously stopped (g_homed reset)
-    if (!g_homing_in_progress) {
-        g_homed = false;
-        g_homing_in_progress = true;
+    // Allow homing if not already homed or homing, OR if previously stopped (g_state.homed reset)
+    if (!g_state.homing_in_progress) {
+        g_state.homed = false;
+        g_state.homing_in_progress = true;
         motor.home();
     }
     httpServer.send(200, "application/json", "{\"ok\":true}");
@@ -663,12 +535,12 @@ void handleApiHome() {
 void handleApiStop() {
     motor.stop();
     // Motor power is cut - position is unknown, require re-homing
-    g_homed = false;
-    g_homing_in_progress = false;
+    g_state.homed = false;
+    g_state.homing_in_progress = false;
     // E-Stop also clears any control gating - fresh start after re-home.
-    g_paused = false;
-    g_manual_override = false;
-    g_resume_start_ms = 0;
+    g_state.paused = false;
+    g_state.manual_override = false;
+    g_state.resume_start_ms = 0;
     httpServer.send(200, "application/json", "{\"ok\":true}");
 }
 
@@ -679,16 +551,16 @@ void handleApiStop() {
 void handleApiPause() {
     JsonDocument doc;
     deserializeJson(doc, httpServer.arg("plain"));
-    bool was = g_paused;
-    g_paused = doc["paused"] | (!g_paused);
-    if (g_paused && !was) {
+    bool was = g_state.paused;
+    g_state.paused = doc["paused"] | (!g_state.paused);
+    if (g_state.paused && !was) {
         if (motor.isHomed()) motor.hardStop();   // stop but keep position
         APPLOG("Paused: ignoring Intiface input");
-    } else if (!g_paused && was) {
-        g_resume_start_ms = millis();             // begin slow resume
+    } else if (!g_state.paused && was) {
+        g_state.resume_start_ms = millis();             // begin slow resume
         APPLOG("Unpaused: resuming Intiface input");
     }
-    String json; JsonDocument r; r["ok"] = true; r["paused"] = g_paused;
+    String json; JsonDocument r; r["ok"] = true; r["paused"] = g_state.paused;
     serializeJson(r, json);
     httpServer.send(200, "application/json", json);
 }
@@ -706,15 +578,15 @@ void handleApiHalt() {
 void handleApiOverride() {
     JsonDocument doc;
     deserializeJson(doc, httpServer.arg("plain"));
-    bool was = g_manual_override;
-    g_manual_override = doc["override"] | (!g_manual_override);
-    if (g_manual_override && !was) {
+    bool was = g_state.manual_override;
+    g_state.manual_override = doc["override"] | (!g_state.manual_override);
+    if (g_state.manual_override && !was) {
         APPLOG("Manual override ON: Intiface input ignored");
-    } else if (!g_manual_override && was) {
-        g_resume_start_ms = millis();   // slow resume back into Intiface
+    } else if (!g_state.manual_override && was) {
+        g_state.resume_start_ms = millis();   // slow resume back into Intiface
         APPLOG("Manual override OFF: easing back to Intiface");
     }
-    String json; JsonDocument r; r["ok"] = true; r["manual_override"] = g_manual_override;
+    String json; JsonDocument r; r["ok"] = true; r["manual_override"] = g_state.manual_override;
     serializeJson(r, json);
     httpServer.send(200, "application/json", json);
 }
@@ -728,14 +600,14 @@ void handleApiOverride() {
 void handleApiTmc() {
     if (httpServer.method() == HTTP_GET) {
         JsonDocument doc;
-        doc["run_current"]  = g_driver.run_current_ma;
-        doc["hold_current"] = g_driver.hold_current_pct;
-        doc["stealthchop"]  = g_driver.stealthchop;
-        doc["tpwm_thrs"]    = g_driver.tpwm_thrs;
-        doc["toff"]         = g_driver.toff;
-        doc["tbl"]          = g_driver.tbl;
-        doc["hstart"]       = g_driver.hstart;
-        doc["hend"]         = g_driver.hend;
+        doc["run_current"]  = g_state.driver.run_current_ma;
+        doc["hold_current"] = g_state.driver.hold_current_pct;
+        doc["stealthchop"]  = g_state.driver.stealthchop;
+        doc["tpwm_thrs"]    = g_state.driver.tpwm_thrs;
+        doc["toff"]         = g_state.driver.toff;
+        doc["tbl"]          = g_state.driver.tbl;
+        doc["hstart"]       = g_state.driver.hstart;
+        doc["hend"]         = g_state.driver.hend;
         String json;
         serializeJson(doc, json);
         httpServer.send(200, "application/json", json);
@@ -750,22 +622,22 @@ void handleApiTmc() {
     }
 
     if (doc["reset"] | false) {
-        g_driver = DriverConfig();   // back to config.h defaults
+        g_state.driver = DriverConfig();   // back to config.h defaults
     } else {
         // Read with the current value as the default, then clamp to safe ranges.
-        g_driver.run_current_ma   = constrain((int)(doc["run_current"]  | (int)g_driver.run_current_ma), 300, 3000);
-        g_driver.hold_current_pct = constrain((int)(doc["hold_current"] | (int)g_driver.hold_current_pct), 0, 100);
-        g_driver.stealthchop      = (doc["stealthchop"] | (int)g_driver.stealthchop) ? 1 : 0;
-        g_driver.tpwm_thrs        = (uint32_t)(doc["tpwm_thrs"] | (long)g_driver.tpwm_thrs);
-        g_driver.toff             = constrain((int)(doc["toff"]   | (int)g_driver.toff), 1, 15);
-        g_driver.tbl              = constrain((int)(doc["tbl"]    | (int)g_driver.tbl), 0, 3);
-        g_driver.hstart           = constrain((int)(doc["hstart"] | (int)g_driver.hstart), 0, 7);
-        g_driver.hend             = constrain((int)(doc["hend"]   | (int)g_driver.hend), -3, 12);
+        g_state.driver.run_current_ma   = constrain((int)(doc["run_current"]  | (int)g_state.driver.run_current_ma), 300, 3000);
+        g_state.driver.hold_current_pct = constrain((int)(doc["hold_current"] | (int)g_state.driver.hold_current_pct), 0, 100);
+        g_state.driver.stealthchop      = (doc["stealthchop"] | (int)g_state.driver.stealthchop) ? 1 : 0;
+        g_state.driver.tpwm_thrs        = (uint32_t)(doc["tpwm_thrs"] | (long)g_state.driver.tpwm_thrs);
+        g_state.driver.toff             = constrain((int)(doc["toff"]   | (int)g_state.driver.toff), 1, 15);
+        g_state.driver.tbl              = constrain((int)(doc["tbl"]    | (int)g_state.driver.tbl), 0, 3);
+        g_state.driver.hstart           = constrain((int)(doc["hstart"] | (int)g_state.driver.hstart), 0, 7);
+        g_state.driver.hend             = constrain((int)(doc["hend"]   | (int)g_state.driver.hend), -3, 12);
     }
 
-    // Keep g_config.run_current_ma in sync (used elsewhere) and apply live.
-    g_config.run_current_ma = g_driver.run_current_ma;
-    motor.applyDriverConfig(g_driver);
+    // Keep g_state.config.run_current_ma in sync (used elsewhere) and apply live.
+    g_state.config.run_current_ma = g_state.driver.run_current_ma;
+    motor.applyDriverConfig(g_state.driver);
 
     bool save = doc["save"] | false;
     if (save) saveConfig();
@@ -793,7 +665,7 @@ void handleApiLog() {
 void handleApiMode() {
     if (httpServer.method() == HTTP_GET) {
         JsonDocument doc;
-        doc["mode"]          = transportName(g_transport);
+        doc["mode"]          = transportName(g_state.getTransport());
         doc["ble_running"]   = buttplug.isBleRunning();
         doc["ble_connected"] = buttplug.isBleConnected();
         String json;
@@ -809,7 +681,7 @@ void handleApiMode() {
     }
 
     const char* m = doc["mode"] | "";
-    TransportMode mode = g_transport;
+    TransportMode mode = g_state.getTransport();
     if      (strcasecmp(m, "WS")  == 0) mode = TransportMode::WS;
     else if (strcasecmp(m, "SER") == 0) mode = TransportMode::SER;
     else if (strcasecmp(m, "BT")  == 0) mode = TransportMode::BT;
@@ -820,7 +692,7 @@ void handleApiMode() {
 
     JsonDocument resp;
     resp["ok"]   = true;
-    resp["mode"] = transportName(g_transport);
+    resp["mode"] = transportName(g_state.getTransport());
     String json;
     serializeJson(resp, json);
     httpServer.send(200, "application/json", json);
@@ -840,18 +712,18 @@ void handleApiMode() {
 void handleApiGen() {
     if (httpServer.method() == HTTP_GET) {
         JsonDocument doc;
-        doc["running"]  = g_gen.running;
-        doc["active"]   = g_gen_active;
-        doc["wave"]     = g_gen.wave;
-        doc["rate"]     = g_gen.rate_hz;
-        doc["depth"]    = (int)roundf(g_gen.depth * 100.0f);
-        doc["offset"]   = (int)roundf(g_gen.offset * 100.0f);
-        doc["ease"]     = (int)roundf(g_gen.ease * 100.0f);
-        doc["mod"]      = g_gen.mod;
-        doc["mod_wave"] = g_gen.mod_wave;
-        doc["mod_rate"] = g_gen.mod_rate;
-        doc["mod_amp"]  = g_gen.mod_amp;
-        doc["rate_tick"] = g_gen_rate_tick_hz;   // local generation rate (Hz)
+        doc["running"]  = g_state.gen.running;
+        doc["active"]   = g_state.gen_active;
+        doc["wave"]     = g_state.gen.wave;
+        doc["rate"]     = g_state.gen.rate_hz;
+        doc["depth"]    = (int)roundf(g_state.gen.depth * 100.0f);
+        doc["offset"]   = (int)roundf(g_state.gen.offset * 100.0f);
+        doc["ease"]     = (int)roundf(g_state.gen.ease * 100.0f);
+        doc["mod"]      = g_state.gen.mod;
+        doc["mod_wave"] = g_state.gen.mod_wave;
+        doc["mod_rate"] = g_state.gen.mod_rate;
+        doc["mod_amp"]  = g_state.gen.mod_amp;
+        doc["rate_tick"] = g_state.gen_rate_tick_hz;   // local generation rate (Hz)
         String json;
 
         serializeJson(doc, json);
@@ -871,38 +743,38 @@ void handleApiGen() {
     // bucket so the UI radio buttons and firmware always agree.
     if (doc["rate_tick"].is<int>()) {
         int r = doc["rate_tick"];
-        g_gen_rate_tick_hz = (r >= 75) ? 100 : (r >= 35) ? 50 : 20;
+        g_state.gen_rate_tick_hz = (r >= 75) ? 100 : (r >= 35) ? 50 : 20;
     }
 
 
     // Parameters (percent-based fields arrive 0..100 and are stored 0..1).
-    g_gen.wave     = constrain((int)(doc["wave"]     | (int)g_gen.wave), 0, 3);
+    g_state.gen.wave     = constrain((int)(doc["wave"]     | (int)g_state.gen.wave), 0, 3);
 
-    g_gen.rate_hz  = constrain((float)(doc["rate"]   | g_gen.rate_hz), 0.05f, 50.0f);
-    if (doc["depth"].is<float>())  g_gen.depth  = constrain((float)doc["depth"]  / 100.0f, 0.02f, 1.0f);
-    if (doc["offset"].is<float>()) g_gen.offset = constrain((float)doc["offset"] / 100.0f, 0.0f, 1.0f);
-    if (doc["ease"].is<float>())   g_gen.ease   = constrain((float)doc["ease"]   / 100.0f, 0.0f, 1.0f);
-    g_gen.mod      = constrain((int)(doc["mod"]      | (int)g_gen.mod), 0, 2);
-    g_gen.mod_wave = constrain((int)(doc["mod_wave"] | (int)g_gen.mod_wave), 0, 2);
-    g_gen.mod_rate = constrain((float)(doc["mod_rate"] | g_gen.mod_rate), 0.01f, 5.0f);
+    g_state.gen.rate_hz  = constrain((float)(doc["rate"]   | g_state.gen.rate_hz), 0.05f, 50.0f);
+    if (doc["depth"].is<float>())  g_state.gen.depth  = constrain((float)doc["depth"]  / 100.0f, 0.02f, 1.0f);
+    if (doc["offset"].is<float>()) g_state.gen.offset = constrain((float)doc["offset"] / 100.0f, 0.0f, 1.0f);
+    if (doc["ease"].is<float>())   g_state.gen.ease   = constrain((float)doc["ease"]   / 100.0f, 0.0f, 1.0f);
+    g_state.gen.mod      = constrain((int)(doc["mod"]      | (int)g_state.gen.mod), 0, 2);
+    g_state.gen.mod_wave = constrain((int)(doc["mod_wave"] | (int)g_state.gen.mod_wave), 0, 2);
+    g_state.gen.mod_rate = constrain((float)(doc["mod_rate"] | g_state.gen.mod_rate), 0.01f, 5.0f);
     // mod_amp is a modulation SWING in Hz (how far the rate is pushed for FM, or
     // the equivalent depth-reduction reference for AM).
-    g_gen.mod_amp  = constrain((float)(doc["mod_amp"] | g_gen.mod_amp), 0.0f, 10.0f);
+    g_state.gen.mod_amp  = constrain((float)(doc["mod_amp"] | g_state.gen.mod_amp), 0.0f, 10.0f);
 
 
     // Start/stop. On a fresh start we reset the phase/clock so motion begins from
     // the bottom of the stroke rather than wherever the phase happened to be.
     if (doc["running"].is<bool>()) {
         bool want = doc["running"];
-        if (want && !g_gen.running) {
-            g_gen_phase = 0.0f;
-            g_gen_mod_clock = 0.0f;
-            g_gen_last_us = micros();
+        if (want && !g_state.gen.running) {
+            g_state.gen_phase = 0.0f;
+            g_state.gen_mod_clock = 0.0f;
+            g_state.gen_last_us = micros();
             APPLOG("Generator started");
-        } else if (!want && g_gen.running) {
+        } else if (!want && g_state.gen.running) {
             APPLOG("Generator stopped");
         }
-        g_gen.running = want;
+        g_state.gen.running = want;
     }
 
     httpServer.send(200, "application/json", "{\"ok\":true}");
@@ -920,12 +792,12 @@ void handleApiGen() {
 void handleApiInterp() {
     if (httpServer.method() == HTTP_GET) {
         JsonDocument doc;
-        doc["mode"]      = (g_input_mode == InputMode::BUFFERED) ? "buffered" : "extrapolate";
-        doc["easing"]    = g_buf_easing;
-        doc["depth"]     = g_buf_depth;
-        doc["tick"]      = g_buf_tick_hz;
-        doc["active"]    = g_buf_active;      // emitting interpolated motion now?
-        doc["buffered"]  = g_buf_count;       // samples currently queued
+        doc["mode"]      = (g_state.getInputMode() == InputMode::BUFFERED) ? "buffered" : "extrapolate";
+        doc["easing"]    = g_state.buf_easing;
+        doc["depth"]     = g_state.buf_depth;
+        doc["tick"]      = g_state.buf_tick_hz;
+        doc["active"]    = g_state.buf_active;      // emitting interpolated motion now?
+        doc["buffered"]  = g_state.buf_count;       // samples currently queued
         String json;
         serializeJson(doc, json);
         httpServer.send(200, "application/json", json);
@@ -940,22 +812,22 @@ void handleApiInterp() {
 
     if (doc["mode"].is<const char*>()) {
         const char* m = doc["mode"];
-        g_input_mode = (strcasecmp(m, "buffered") == 0) ? InputMode::BUFFERED
-                                                        : InputMode::EXTRAPOLATE;
+        g_state.setInputMode((strcasecmp(m, "buffered") == 0) ? InputMode::BUFFERED
+                                                              : InputMode::EXTRAPOLATE);
     }
-    if (doc["easing"].is<int>()) g_buf_easing = constrain((int)doc["easing"], 0, 4);
-    if (doc["depth"].is<int>())  g_buf_depth  = constrain((int)doc["depth"], 1, 5);
+    if (doc["easing"].is<int>()) g_state.buf_easing = constrain((int)doc["easing"], 0, 4);
+    if (doc["depth"].is<int>())  g_state.buf_depth  = constrain((int)doc["depth"], 1, 5);
     if (doc["tick"].is<int>()) {
         int t = doc["tick"];
-        g_buf_tick_hz = (t >= 75) ? 100 : (t >= 35) ? 50 : 20;   // snap to bucket
+        g_state.buf_tick_hz = (t >= 75) ? 100 : (t >= 35) ? 50 : 20;   // snap to bucket
     }
 
     bool save = doc["save"] | false;
     if (save) saveConfig();
 
     APPLOGF("Interp: mode=%s easing=%u depth=%u tick=%uHz",
-            (g_input_mode == InputMode::BUFFERED) ? "buffered" : "extrapolate",
-            g_buf_easing, g_buf_depth, g_buf_tick_hz);
+            (g_state.getInputMode() == InputMode::BUFFERED) ? "buffered" : "extrapolate",
+            g_state.buf_easing, g_state.buf_depth, g_state.buf_tick_hz);
 
     httpServer.send(200, "application/json", "{\"ok\":true}");
 }
@@ -974,66 +846,66 @@ void generatorTask(void* parameter) {
         // Local generation rate is user-selectable (20/50/100 Hz). Higher =
         // smoother motion / more step planning; lower = lighter CPU. Re-read
         // each loop so live changes from /api/gen take effect immediately.
-        uint16_t ghz = g_gen_rate_tick_hz; if (ghz < 5) ghz = 5; if (ghz > 200) ghz = 200;
+        uint16_t ghz = g_state.gen_rate_tick_hz; if (ghz < 5) ghz = 5; if (ghz > 200) ghz = 200;
         const TickType_t period = pdMS_TO_TICKS(1000 / ghz);
 
-        bool intiface_recent = (g_last_intiface_ms != 0) &&
-                               (millis() - g_last_intiface_ms < 250);
-        bool user_has_control = g_paused || g_manual_override;
-        bool emit = g_gen.running && g_homed &&
+        bool intiface_recent = (g_state.last_intiface_ms != 0) &&
+                               (millis() - g_state.last_intiface_ms < 250);
+        bool user_has_control = g_state.paused || g_state.manual_override;
+        bool emit = g_state.gen.running && g_state.homed &&
                     (user_has_control || !intiface_recent);
-        g_gen_active = emit;
+        g_state.gen_active = emit;
 
         // Diagnostics: while the generator is running, log once per second so the
         // Log tab reflects what it's doing — either why it's idle, or a heartbeat
         // with the live target while it's actually driving the motor.
-        if (g_gen.running && (millis() - last_diag_ms > 1000)) {
+        if (g_state.gen.running && (millis() - last_diag_ms > 1000)) {
             last_diag_ms = millis();
-            if (!g_homed)
+            if (!g_state.homed)
                 APPLOG("Generator: waiting - motor not homed");
             else if (intiface_recent && !user_has_control)
                 APPLOG("Generator: yielding to active Intiface (use Pause/Override to keep control)");
             else
             APPLOGF("Generator: running target=%.1fmm phase=%.2f window=[%.0f,%.0f]",
-                    mapper.getMinMm() + g_gen.offset * (mapper.getMaxMm() - mapper.getMinMm())
-                        + (kinematics::ease(kinematics::carrier(g_gen.wave, g_gen_phase), g_gen.ease) - 0.5f)
-                          * g_gen.depth * (mapper.getMaxMm() - mapper.getMinMm()),
-                        g_gen_phase, mapper.getMinMm(), mapper.getMaxMm());
+                    mapper.getMinMm() + g_state.gen.offset * (mapper.getMaxMm() - mapper.getMinMm())
+                        + (kinematics::ease(kinematics::carrier(g_state.gen.wave, g_state.gen_phase), g_state.gen.ease) - 0.5f)
+                          * g_state.gen.depth * (mapper.getMaxMm() - mapper.getMinMm()),
+                        g_state.gen_phase, mapper.getMinMm(), mapper.getMaxMm());
         }
 
 
 
         if (emit) {
             uint32_t now_us = micros();
-            float dt = (g_gen_last_us != 0) ? (now_us - g_gen_last_us) / 1e6f : 0.0f;
-            g_gen_last_us = now_us;
+            float dt = (g_state.gen_last_us != 0) ? (now_us - g_state.gen_last_us) / 1e6f : 0.0f;
+            g_state.gen_last_us = now_us;
             if (dt < 0.0f || dt > 0.5f) dt = 0.0f;   // guard against wrap/stall
 
-            float rate  = g_gen.rate_hz;
-            float depth = g_gen.depth;
+            float rate  = g_state.gen.rate_hz;
+            float depth = g_state.gen.depth;
 
             // Advance the modulator clock and apply FM (rate) or AM (depth).
-            if (g_gen.mod != 0) {
-                g_gen_mod_clock += dt * g_gen.mod_rate;
-                if (g_gen_mod_clock > 1.0f) g_gen_mod_clock -= floorf(g_gen_mod_clock);
-                float m = kinematics::modShape(g_gen.mod_wave, g_gen_mod_clock);
-                if (g_gen.mod == 1) {        // rate FM: swing rate by +/- mod_amp Hz
-                    rate = fmaxf(0.05f, rate + (m - 0.5f) * 2.0f * g_gen.mod_amp);
+            if (g_state.gen.mod != 0) {
+                g_state.gen_mod_clock += dt * g_state.gen.mod_rate;
+                if (g_state.gen_mod_clock > 1.0f) g_state.gen_mod_clock -= floorf(g_state.gen_mod_clock);
+                float m = kinematics::modShape(g_state.gen.mod_wave, g_state.gen_mod_clock);
+                if (g_state.gen.mod == 1) {        // rate FM: swing rate by +/- mod_amp Hz
+                    rate = fmaxf(0.05f, rate + (m - 0.5f) * 2.0f * g_state.gen.mod_amp);
                 } else {                     // depth AM: reduce depth, scaled by mod_amp (Hz) vs rate
-                    float a = constrain(g_gen.mod_amp / fmaxf(g_gen.rate_hz, 0.1f), 0.0f, 1.0f);
+                    float a = constrain(g_state.gen.mod_amp / fmaxf(g_state.gen.rate_hz, 0.1f), 0.0f, 1.0f);
                     depth = constrain(depth * (1.0f - 0.5f * m * a), 0.02f, 1.0f);
                 }
 
             }
 
             // Advance carrier phase and map into the working window.
-            g_gen_phase += dt * rate;
-            if (g_gen_phase > 1.0f) g_gen_phase -= floorf(g_gen_phase);
-            float c = kinematics::ease(kinematics::carrier(g_gen.wave, g_gen_phase), g_gen.ease);
+            g_state.gen_phase += dt * rate;
+            if (g_state.gen_phase > 1.0f) g_state.gen_phase -= floorf(g_state.gen_phase);
+            float c = kinematics::ease(kinematics::carrier(g_state.gen.wave, g_state.gen_phase), g_state.gen.ease);
 
             float lo = mapper.getMinMm(), hi = mapper.getMaxMm();
             float span = hi - lo;
-            float center = lo + g_gen.offset * span;
+            float center = lo + g_state.gen.offset * span;
             float pos = center + (c - 0.5f) * depth * span;
             pos = constrain(pos, lo, hi);
 
@@ -1041,7 +913,7 @@ void generatorTask(void* parameter) {
             // glides smoothly through the waveform. speed 0 => configured max.
             motor.streamTo(pos, 0.0f);
         } else {
-            g_gen_last_us = 0;   // reset dt so resume doesn't take a giant step
+            g_state.gen_last_us = 0;   // reset dt so resume doesn't take a giant step
         }
 
         vTaskDelay(period);
@@ -1060,11 +932,11 @@ void generatorTask(void* parameter) {
 // Timestamps are taken with esp_timer_get_time() (microseconds, monotonic) so
 // the playback clock and the sample times share one wall-clock reference.
 static void bufPushSample(float pos_mm) {
-    portENTER_CRITICAL(&g_buf_mux);
-    g_buf[g_buf_head] = { pos_mm, (uint32_t)(esp_timer_get_time() / 1000ULL) };
-    g_buf_head = (g_buf_head + 1) % BUF_CAP;
-    if (g_buf_count < BUF_CAP) g_buf_count++;
-    portEXIT_CRITICAL(&g_buf_mux);
+    portENTER_CRITICAL(&g_state.buf_mux);
+    g_state.buf[g_state.buf_head] = { pos_mm, (uint32_t)(esp_timer_get_time() / 1000ULL) };
+    g_state.buf_head = (g_state.buf_head + 1) % SystemState::BUF_CAP;
+    if (g_state.buf_count < SystemState::BUF_CAP) g_state.buf_count++;
+    portEXIT_CRITICAL(&g_state.buf_mux);
 }
 
 // Interpolator task — TIME-DELAYED JITTER BUFFER.
@@ -1099,11 +971,11 @@ void interpolatorTask(void* parameter) {
     static uint32_t last_real_us  = 0;
 
     while (true) {
-        uint16_t hz = g_buf_tick_hz; if (hz < 5) hz = 5; if (hz > 200) hz = 200;
+        uint16_t hz = g_state.buf_tick_hz; if (hz < 5) hz = 5; if (hz > 200) hz = 200;
         TickType_t period = pdMS_TO_TICKS(1000 / hz);
 
-        bool gated = g_paused || g_manual_override || !g_homed;
-        bool run = (g_input_mode == InputMode::BUFFERED) && !gated;
+        bool gated = g_state.paused || g_state.manual_override || !g_state.homed;
+        bool run = (g_state.getInputMode() == InputMode::BUFFERED) && !gated;
 
         if (run) {
             uint32_t now_us = (uint32_t)esp_timer_get_time();
@@ -1112,32 +984,32 @@ void interpolatorTask(void* parameter) {
             // The buffer delay (ms) the user dials in via `depth`. Each depth step
             // ~= 30ms of cushion (1->30ms .. 5->150ms). More delay = smoother ride
             // over BLE stalls at the cost of a little extra latency.
-            uint8_t depth = g_buf_depth; if (depth < 1) depth = 1; if (depth > 5) depth = 5;
+            uint8_t depth = g_state.buf_depth; if (depth < 1) depth = 1; if (depth > 5) depth = 5;
             uint32_t play_delay_ms = (uint32_t)depth * 30U;
 
             // Snapshot the ring.
-            portENTER_CRITICAL(&g_buf_mux);
-            uint8_t count = g_buf_count;
-            uint8_t head  = g_buf_head;
-            BufSample ring[BUF_CAP];
-            for (uint8_t i = 0; i < BUF_CAP; i++) ring[i] = g_buf[i];
-            portEXIT_CRITICAL(&g_buf_mux);
+            portENTER_CRITICAL(&g_state.buf_mux);
+            uint8_t count = g_state.buf_count;
+            uint8_t head  = g_state.buf_head;
+            BufSample ring[SystemState::BUF_CAP];
+            for (uint8_t i = 0; i < SystemState::BUF_CAP; i++) ring[i] = g_state.buf[i];
+            portEXIT_CRITICAL(&g_state.buf_mux);
 
             if (count >= 2) {
                 // Oldest valid sample index and the newest timestamp.
-                uint8_t oldest_i = (uint8_t)((head + BUF_CAP - count) % BUF_CAP);
-                uint8_t newest_i = (uint8_t)((head + BUF_CAP - 1) % BUF_CAP);
+                uint8_t oldest_i = (uint8_t)((head + SystemState::BUF_CAP - count) % SystemState::BUF_CAP);
+                uint8_t newest_i = (uint8_t)((head + SystemState::BUF_CAP - 1) % SystemState::BUF_CAP);
                 uint32_t oldest_t = ring[oldest_i].t_ms;
                 uint32_t newest_t = ring[newest_i].t_ms;
 
                 // Advance the playback clock by REAL elapsed time (tick-jitter
                 // immune). On the first primed tick, start it one buffer-delay
                 // behind "now" so we render from the oldest available history.
-                if (play_clock_ms == 0 || !g_buf_active) {
+                if (play_clock_ms == 0 || !g_state.buf_active) {
                     play_clock_ms = (now_ms > play_delay_ms) ? (now_ms - play_delay_ms) : oldest_t;
                     if (play_clock_ms < oldest_t) play_clock_ms = oldest_t;
                     last_real_us = now_us;
-                    g_buf_active = true;
+                    g_state.buf_active = true;
                 } else {
                     uint32_t elapsed_ms = (now_us - last_real_us) / 1000U;
                     if (elapsed_ms > 0) {
@@ -1166,8 +1038,8 @@ void interpolatorTask(void* parameter) {
                 BufSample a = ring[oldest_i];
                 BufSample b = ring[newest_i];
                 for (uint8_t k = 0; k < count - 1; k++) {
-                    uint8_t i0 = (uint8_t)((oldest_i + k) % BUF_CAP);
-                    uint8_t i1 = (uint8_t)((i0 + 1) % BUF_CAP);
+                    uint8_t i0 = (uint8_t)((oldest_i + k) % SystemState::BUF_CAP);
+                    uint8_t i1 = (uint8_t)((i0 + 1) % SystemState::BUF_CAP);
                     if ((int32_t)(play_clock_ms - ring[i0].t_ms) >= 0 &&
                         (int32_t)(ring[i1].t_ms - play_clock_ms) >= 0) {
                         a = ring[i0]; b = ring[i1];
@@ -1182,7 +1054,7 @@ void interpolatorTask(void* parameter) {
                               : 1.0f;
                 t = constrain(t, 0.0f, 1.0f);
 
-                float e = kinematics::bufEase(g_buf_easing, t);
+                float e = kinematics::bufEase(g_state.buf_easing, t);
                 float pos = a.pos_mm + (b.pos_mm - a.pos_mm) * e;
                 pos = constrain(pos, mapper.getMinMm(), mapper.getMaxMm());
 
@@ -1192,36 +1064,36 @@ void interpolatorTask(void* parameter) {
                 if (remain_ms < 1.0f) remain_ms = seg_ms > 0.5f ? seg_ms : 20.0f;
                 float dist = fabsf(b.pos_mm - pos);
                 float spd  = (dist / remain_ms) * 1000.0f;
-                spd = constrain(spd, 0.0f, g_config.max_speed_mm_s);
+                spd = constrain(spd, 0.0f, g_state.config.max_speed_mm_s);
                 motor.streamTo(pos, spd);
 
                 // Retire samples strictly older than what we still need to
                 // interpolate (keep the one just before play_clock_ms as `a`).
-                portENTER_CRITICAL(&g_buf_mux);
-                while (g_buf_count > 2) {
-                    uint8_t o  = (uint8_t)((g_buf_head + BUF_CAP - g_buf_count) % BUF_CAP);
-                    uint8_t o1 = (uint8_t)((o + 1) % BUF_CAP);
+                portENTER_CRITICAL(&g_state.buf_mux);
+                while (g_state.buf_count > 2) {
+                    uint8_t o  = (uint8_t)((g_state.buf_head + SystemState::BUF_CAP - g_state.buf_count) % SystemState::BUF_CAP);
+                    uint8_t o1 = (uint8_t)((o + 1) % SystemState::BUF_CAP);
                     // Drop the oldest only if the playback clock has already passed
                     // its successor (so `a/b` bracketing never loses its left edge).
-                    if ((int32_t)(play_clock_ms - g_buf[o1].t_ms) > 0) g_buf_count--;
+                    if ((int32_t)(play_clock_ms - g_state.buf[o1].t_ms) > 0) g_state.buf_count--;
                     else break;
                 }
-                portEXIT_CRITICAL(&g_buf_mux);
+                portEXIT_CRITICAL(&g_state.buf_mux);
             } else {
                 // Fewer than 2 samples: not enough to interpolate yet. Don't
-                // reset g_buf_active for a brief gap, but do pause the clock so it
+                // reset g_state.buf_active for a brief gap, but do pause the clock so it
                 // doesn't run away while starved.
                 last_real_us = now_us;
             }
         } else {
             // Not in buffered mode (or gated): clear ring/clock so a later switch
             // back into buffered mode starts fresh.
-            g_buf_active = false;
+            g_state.buf_active = false;
             play_clock_ms = 0;
             last_real_us = 0;
-            portENTER_CRITICAL(&g_buf_mux);
-            g_buf_count = 0; g_buf_head = 0;
-            portEXIT_CRITICAL(&g_buf_mux);
+            portENTER_CRITICAL(&g_state.buf_mux);
+            g_state.buf_count = 0; g_state.buf_head = 0;
+            portEXIT_CRITICAL(&g_state.buf_mux);
         }
 
         vTaskDelay(period);
@@ -1236,16 +1108,16 @@ void interpolatorTask(void* parameter) {
 
 static void buttplugLinearCmd(float position, uint32_t duration_ms) {
 
-    if (!g_homed) return;
+    if (!g_state.homed) return;
     // Pause or manual override: ignore Intiface entirely. The user is driving
     // via the manual slider / waveform generator instead. We also reset the
     // resume-blend origin so the FIRST command after un-gating starts the ease.
-    if (g_paused || g_manual_override) { g_resume_start_ms = millis(); return; }
+    if (g_state.paused || g_state.manual_override) { g_state.resume_start_ms = millis(); return; }
 
     // Stamp Intiface activity so the on-device generator can auto-yield: if real
     // app commands are arriving, the generator stops emitting motion (unless the
     // user has paused/overridden, in which case we never reach here anyway).
-    g_last_intiface_ms = millis();
+    g_state.last_intiface_ms = millis();
 
     // --- Measure the REAL command cadence from the app ---
 
@@ -1255,19 +1127,19 @@ static void buttplugLinearCmd(float position, uint32_t duration_ms) {
     // forcing you to crank acceleration way down. We measure the true interval
     // between arrivals and, when Auto Duration is on, use THAT as the move time.
     uint32_t now = millis();
-    if (g_last_cmd_ms != 0) {
-        uint32_t gap = now - g_last_cmd_ms;
+    if (g_state.last_cmd_ms != 0) {
+        uint32_t gap = now - g_state.last_cmd_ms;
         if (gap > 0 && gap < 1000) {  // ignore pauses/restarts
             // Exponential smoothing to reject single-sample jitter.
-            if (g_measured_interval_ms <= 0.0f) g_measured_interval_ms = (float)gap;
-            else g_measured_interval_ms = 0.7f * g_measured_interval_ms + 0.3f * (float)gap;
+            if (g_state.measured_interval_ms <= 0.0f) g_state.measured_interval_ms = (float)gap;
+            else g_state.measured_interval_ms = 0.7f * g_state.measured_interval_ms + 0.3f * (float)gap;
         }
     }
-    g_last_cmd_ms = now;
+    g_state.last_cmd_ms = now;
 
     // Override the duration with the measured cadence when enabled and valid.
-    if (g_auto_duration && g_measured_interval_ms > 1.0f) {
-        duration_ms = (uint32_t)(g_measured_interval_ms + 0.5f);
+    if (g_state.auto_duration && g_state.measured_interval_ms > 1.0f) {
+        duration_ms = (uint32_t)(g_state.measured_interval_ms + 0.5f);
     }
 
     // Map Buttplug normalized position (0.0-1.0) to physical mm using range mapper
@@ -1279,11 +1151,11 @@ static void buttplugLinearCmd(float position, uint32_t duration_ms) {
     // and let interpolatorTask resample/smooth it at the local tick rate. This
     // is the path that fixes sporadic/bursty apps. We still honor the slow-resume
     // blend by offsetting the FIRST sample after un-gating toward current pos.
-    if (g_input_mode == InputMode::BUFFERED) {
-        if (g_resume_start_ms != 0) {
-            uint32_t elapsed = millis() - g_resume_start_ms;
+    if (g_state.getInputMode() == InputMode::BUFFERED) {
+        if (g_state.resume_start_ms != 0) {
+            uint32_t elapsed = millis() - g_state.resume_start_ms;
             if (elapsed >= RESUME_BLEND_MS) {
-                g_resume_start_ms = 0;
+                g_state.resume_start_ms = 0;
             } else {
                 float blend = (float)elapsed / (float)RESUME_BLEND_MS;
                 float cur = motor.getPosition();
@@ -1298,10 +1170,10 @@ static void buttplugLinearCmd(float position, uint32_t duration_ms) {
 
     // Intiface wants us instead of snapping. Blend the target from the current
     // position toward the commanded target over RESUME_BLEND_MS.
-    if (g_resume_start_ms != 0) {
-        uint32_t elapsed = millis() - g_resume_start_ms;
+    if (g_state.resume_start_ms != 0) {
+        uint32_t elapsed = millis() - g_state.resume_start_ms;
         if (elapsed >= RESUME_BLEND_MS) {
-            g_resume_start_ms = 0;  // blend complete
+            g_state.resume_start_ms = 0;  // blend complete
         } else {
             float blend = (float)elapsed / (float)RESUME_BLEND_MS;
             float cur = motor.getPosition();
@@ -1320,10 +1192,10 @@ static void buttplugLinearCmd(float position, uint32_t duration_ms) {
         if (distance_mm > 0.05f) {
             speed_mm_s = (distance_mm / (float)duration_ms) * 1000.0f;
             // Cap to the user's configured max; never let it crawl to a stall.
-            speed_mm_s = constrain(speed_mm_s, 5.0f, g_config.max_speed_mm_s);
+            speed_mm_s = constrain(speed_mm_s, 5.0f, g_state.config.max_speed_mm_s);
         } else {
             // Tiny/zero move - keep a gentle speed so we don't snap.
-            speed_mm_s = g_config.max_speed_mm_s * 0.25f;
+            speed_mm_s = g_state.config.max_speed_mm_s * 0.25f;
         }
     }
 
@@ -1350,23 +1222,23 @@ void motorTask(void* parameter) {
     while (true) {
         // Poll homing - runHomingStep() checks endstop and completes homing
         // Poll at 1ms intervals for fast endstop response
-        if (g_homing_in_progress) {
+        if (g_state.homing_in_progress) {
             motor.runHomingStep();
 
             // Check if homing just completed
             if (!motor.isHoming()) {
-                g_homing_in_progress = false;
-                g_homed = motor.isHomed();
-                if (g_homed) {
+                g_state.homing_in_progress = false;
+                g_state.homed = motor.isHomed();
+                if (g_state.homed) {
                     APPLOG("System is now homed and ready");
                 }
             }
-        } else if (!g_homed) {
+        } else if (!g_state.homed) {
             // Push-to-home: not homed and not running the active routine, so let
             // the user establish home by simply pushing the shaft into the
             // endstop (or by already resting on it at boot). No web UI needed.
             if (motor.checkPushToHome()) {
-                g_homed = true;
+                g_state.homed = true;
                 APPLOG("System homed via push-to-home and ready");
             }
         }
@@ -1394,7 +1266,7 @@ void buttplugTask(void* parameter) {
         // feed it into the parser. This is the WiFi-free control path. Only do
         // this when SER is the selected transport so a stray serial monitor
         // doesn't inject motion while the user is on WS/BT.
-        if (g_transport == TransportMode::SER) buttplug.pollSerial();
+        if (g_state.getTransport() == TransportMode::SER) buttplug.pollSerial();
 #endif
 
 
@@ -1410,7 +1282,7 @@ void buttplugTask(void* parameter) {
             last_frame_count = frames;
             last_report_ms = now;
             // Publish the stable windowed rate for the web UI (frames/sec).
-            g_measured_hz = (uint16_t)per_sec;
+            g_state.measured_hz = (uint16_t)per_sec;
             if (buttplug.isConnected() || buttplug.isSerialActive()) {
                 APPLOGF("[RATE] rx=%u frames/s", per_sec);
             }
@@ -1475,7 +1347,7 @@ void setup() {
     }
 
     // Load saved configuration (loadConfig handles prefs.begin/end internally).
-    // This also populates g_driver with any saved TMC tunables.
+    // This also populates g_state.driver with any saved TMC tunables.
     loadConfig();
 
 
@@ -1485,7 +1357,7 @@ void setup() {
     motor.begin();
 
     // Apply the loaded TMC driver settings (from NVS, or defaults) live.
-    motor.applyDriverConfig(g_driver);
+    motor.applyDriverConfig(g_state.driver);
 
     // Setup WiFi
     setupWiFi();
@@ -1533,7 +1405,7 @@ void setup() {
     //   SER -> nothing extra; buttplugTask polls the USB serial port
     //   BT  -> starts BLE advertising (Nordic UART service)
     // The WebSocket SERVER (for MultiFunPlayer) is always up via buttplug.begin().
-    applyTransport(g_transport);
+    applyTransport(g_state.getTransport());
 
 
     // Create FreeRTOS tasks

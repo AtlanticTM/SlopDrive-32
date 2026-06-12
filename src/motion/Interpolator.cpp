@@ -8,17 +8,6 @@
 #include <Arduino.h>
 #include <esp_timer.h>
 
-// In serial-control mode the USB Serial port is dedicated to Intiface TCode,
-// so status/debug must go to the web log (applog), NOT Serial.
-// These macros match the ones in main.cpp so logging behaves identically.
-#if SERIAL_CONTROL_MODE
-  #define APPLOG(s)      applog(s)
-  #define APPLOGF(...)   applogf(__VA_ARGS__)
-#else
-  #define APPLOG(s)      Serial.println(s)
-  #define APPLOGF(...)   Serial.printf(__VA_ARGS__)
-#endif
-
 // ============================================================================
 // Interpolator — constructor / destructor
 // ============================================================================

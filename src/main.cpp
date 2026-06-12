@@ -39,18 +39,6 @@
 #include "WebUI.h"
 
 
-// In serial-control mode the USB Serial port is dedicated to Intiface TCode,
-// so status/debug must go to the web log (applog), NOT Serial.
-// APPLOG()/APPLOGF() route accordingly so the same source works in both modes.
-#if SERIAL_CONTROL_MODE
-  #define APPLOG(s)     applog(s)
-  #define APPLOGF(...)  applogf(__VA_ARGS__)
-#else
-  #define APPLOG(s)     Serial.println(s)
-  #define APPLOGF(...)  Serial.printf(__VA_ARGS__)
-#endif
-
-
 // ============================================================================
 // Module instances — driver selected at compile time via build flag
 // ============================================================================
@@ -191,6 +179,12 @@ static void motorTask(void* /*param*/) {
 }
 
 // Core 0 — system: services all active transports and reports inbound rate.
+//
+// Moved to Core 0 per .clinerules §2 (networking/service on Core 0, real-time
+// motion on Core 1). The original monolithic code pinned buttplugTask to Core 1
+// "for coherence with the motion pipeline"; this corrects the architecture at
+// the cost of a cross-core call (motor.streamExtrapolated() from the TCode
+// callback), which on the ESP32-S3 is a sub-microsecond pipelined store.
 static void commsTask(void* /*param*/) {
     uint32_t last_report_ms  = 0;
     uint32_t last_frame_count = 0;

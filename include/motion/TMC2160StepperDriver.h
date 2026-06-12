@@ -2,7 +2,6 @@
 
 #include <Arduino.h>
 #include "freertos/FreeRTOS.h"
-#include "freertos/semphr.h"
 #include "config_api.h"
 #include "MotorDriver.h"
 
@@ -112,6 +111,4 @@ private:
     bool     _coasting           = false;
     static const uint16_t STREAM_STALL_MS = 80;
 
-    // SPI mutex (serializes config writes, even without readback, to be safe).
-    SemaphoreHandle_t _spi_mutex = nullptr;
 };

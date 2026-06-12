@@ -7,17 +7,6 @@
 
 #include <Arduino.h>
 
-// In serial-control mode the USB Serial port is dedicated to Intiface TCode,
-// so status/debug must go to the web log (applog), NOT Serial.
-// These macros match the ones in main.cpp so logging behaves identically.
-#if SERIAL_CONTROL_MODE
-  #define APPLOG(s)      applog(s)
-  #define APPLOGF(...)   applogf(__VA_ARGS__)
-#else
-  #define APPLOG(s)      Serial.println(s)
-  #define APPLOGF(...)   Serial.printf(__VA_ARGS__)
-#endif
-
 // ============================================================================
 // Generator — constructor / destructor
 // ============================================================================
@@ -56,6 +45,10 @@ void Generator::taskFunction(void* param) {
 // ============================================================================
 // Task loop — functionally identical to the original generatorTask() in
 // main.cpp.  No behaviour changes; pure structural refactor.
+//
+// The generator config is now snapshotted under gen_mux at the top of each
+// tick so that live /api/gen writes from Core 0 never produce a torn (half-
+// new, half-old) parameter set for a single computation frame.
 // ============================================================================
 
 void Generator::run() {
@@ -69,17 +62,23 @@ void Generator::run() {
         if (ghz > 200) ghz = 200;
         const TickType_t period = pdMS_TO_TICKS(1000 / ghz);
 
+        // ---- Consistent snapshot of the generator config (Core 1 read side) --
+        GeneratorConfig cfg;
+        portENTER_CRITICAL(&_state.gen_mux);
+        cfg = _state.gen;
+        portEXIT_CRITICAL(&_state.gen_mux);
+
         bool intiface_recent = (_state.last_intiface_ms != 0) &&
                                (millis() - _state.last_intiface_ms < 250);
         bool user_has_control = _state.paused || _state.manual_override;
-        bool emit = _state.gen.running && _state.homed &&
+        bool emit = cfg.running && _state.homed &&
                     (user_has_control || !intiface_recent);
         _state.gen_active = emit;
 
         // Diagnostics: while the generator is running, log once per second so the
         // Log tab reflects what it's doing — either why it's idle, or a heartbeat
         // with the live target while it's actually driving the motor.
-        if (_state.gen.running && (millis() - last_diag_ms > 1000)) {
+        if (cfg.running && (millis() - last_diag_ms > 1000)) {
             last_diag_ms = millis();
             if (!_state.homed)
                 APPLOG("Generator: waiting - motor not homed");
@@ -87,10 +86,10 @@ void Generator::run() {
                 APPLOG("Generator: yielding to active Intiface (use Pause/Override to keep control)");
             else
             APPLOGF("Generator: running target=%.1fmm phase=%.2f window=[%.0f,%.0f]",
-                    _mapper.getMinMm() + _state.gen.offset * (_mapper.getMaxMm() - _mapper.getMinMm())
-                        + (kinematics::ease(kinematics::carrier(_state.gen.wave, _state.gen_phase),
-                                            _state.gen.ease) - 0.5f)
-                          * _state.gen.depth * (_mapper.getMaxMm() - _mapper.getMinMm()),
+                    _mapper.getMinMm() + cfg.offset * (_mapper.getMaxMm() - _mapper.getMinMm())
+                        + (kinematics::ease(kinematics::carrier(cfg.wave, _state.gen_phase),
+                                            cfg.ease) - 0.5f)
+                          * cfg.depth * (_mapper.getMaxMm() - _mapper.getMinMm()),
                         _state.gen_phase, _mapper.getMinMm(), _mapper.getMaxMm());
         }
 
@@ -102,19 +101,19 @@ void Generator::run() {
             _state.gen_last_us = now_us;
             if (dt < 0.0f || dt > 0.5f) dt = 0.0f;   // guard against wrap/stall
 
-            float rate  = _state.gen.rate_hz;
-            float depth = _state.gen.depth;
+            float rate  = cfg.rate_hz;
+            float depth = cfg.depth;
 
             // Advance the modulator clock and apply FM (rate) or AM (depth).
-            if (_state.gen.mod != 0) {
-                _state.gen_mod_clock += dt * _state.gen.mod_rate;
+            if (cfg.mod != 0) {
+                _state.gen_mod_clock += dt * cfg.mod_rate;
                 if (_state.gen_mod_clock > 1.0f)
                     _state.gen_mod_clock -= floorf(_state.gen_mod_clock);
-                float m = kinematics::modShape(_state.gen.mod_wave, _state.gen_mod_clock);
-                if (_state.gen.mod == 1) {        // rate FM: swing rate by +/- mod_amp Hz
-                    rate = fmaxf(0.05f, rate + (m - 0.5f) * 2.0f * _state.gen.mod_amp);
+                float m = kinematics::modShape(cfg.mod_wave, _state.gen_mod_clock);
+                if (cfg.mod == 1) {        // rate FM: swing rate by +/- mod_amp Hz
+                    rate = fmaxf(0.05f, rate + (m - 0.5f) * 2.0f * cfg.mod_amp);
                 } else {                     // depth AM: reduce depth, scaled by mod_amp (Hz) vs rate
-                    float a = constrain(_state.gen.mod_amp / fmaxf(_state.gen.rate_hz, 0.1f), 0.0f, 1.0f);
+                    float a = constrain(cfg.mod_amp / fmaxf(cfg.rate_hz, 0.1f), 0.0f, 1.0f);
                     depth = constrain(depth * (1.0f - 0.5f * m * a), 0.02f, 1.0f);
                 }
             }
@@ -122,12 +121,12 @@ void Generator::run() {
             // Advance carrier phase and map into the working window.
             _state.gen_phase += dt * rate;
             if (_state.gen_phase > 1.0f) _state.gen_phase -= floorf(_state.gen_phase);
-            float c = kinematics::ease(kinematics::carrier(_state.gen.wave, _state.gen_phase),
-                                       _state.gen.ease);
+            float c = kinematics::ease(kinematics::carrier(cfg.wave, _state.gen_phase),
+                                       cfg.ease);
 
             float lo = _mapper.getMinMm(), hi = _mapper.getMaxMm();
             float span = hi - lo;
-            float center = lo + _state.gen.offset * span;
+            float center = lo + cfg.offset * span;
             float pos = center + (c - 0.5f) * depth * span;
             pos = constrain(pos, lo, hi);
 

@@ -35,9 +35,7 @@ void SerialTransport::poll() {
 }
 
 void SerialTransport::installResponseHooks() {
-#if SERIAL_CONTROL_MODE
     _parser.onResponse(_txResponse);
-#endif
 }
 
 void SerialTransport::removeResponseHooks() {

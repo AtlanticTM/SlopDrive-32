@@ -11,23 +11,25 @@
 // On-device motion generator configuration
 // ============================================================================
 // Held in RAM; parameters pushed live from the web UI via /api/gen.
-// Fields crossing Core0→Core1 are marked volatile so that the compiler emits
-// single load/store instructions (32‑bit aligned, hardware‑atomic on ESP32‑S3).
+//
+// gen_mux (portMUX spinlock) serialises writes from Core 0 (WebUI handler)
+// and reads from Core 1 (generator task) so that the task always sees a
+// complete, consistent snapshot — no torn field-by-field reads mid-update.
 //
 // Waveform: 0=sine 1=triangle 2=square 3=saw
 // Mod:      0=off  1=rate(FM) 2=depth(AM)
 // ModWave:  0=sine 1=triangle 2=random
 struct GeneratorConfig {
-    volatile bool    running   = false;
-    volatile uint8_t wave      = 0;     // carrier shape
-    volatile float   rate_hz   = 0.8f;  // strokes per second
-    volatile float   depth     = 0.80f; // 0..1 fraction of window used
-    volatile float   offset    = 0.50f; // 0..1 center position within window
-    volatile float   ease      = 0.0f;  // 0..1 smoothing of carrier ends
-    volatile uint8_t mod       = 0;     // modulator type
-    volatile uint8_t mod_wave  = 0;     // modulator shape
-    volatile float   mod_rate  = 0.10f; // modulator rate (Hz)
-    volatile float   mod_amp   = 0.80f; // modulation amplitude / swing (Hz)
+    bool    running   = false;
+    uint8_t wave      = 0;     // carrier shape
+    float   rate_hz   = 0.8f;  // strokes per second
+    float   depth     = 0.80f; // 0..1 fraction of window used
+    float   offset    = 0.50f; // 0..1 center position within window
+    float   ease      = 0.0f;  // 0..1 smoothing of carrier ends
+    uint8_t mod       = 0;     // modulator type
+    uint8_t mod_wave  = 0;     // modulator shape
+    float   mod_rate  = 0.10f; // modulator rate (Hz)
+    float   mod_amp   = 0.80f; // modulation amplitude / swing (Hz)
 };
 
 // ============================================================================
@@ -65,7 +67,8 @@ struct BufSample {
 // All mutable runtime globals that were previously file-scope statics in
 // main.cpp live here.  Scalars crossing Core0 ↔ Core1 are marked volatile
 // (32-bit aligned loads/stores are hardware-atomic on ESP32-S3).  The ring
-// buffer keeps its existing portMUX critical-section protection.
+// buffer and generator config use portMUX critical-section protection for
+// multi-field updates that must appear atomic.
 //
 // Fields are grouped by subsystem; initial values mirror the original file-
 // scope defaults exactly.
@@ -115,6 +118,7 @@ struct SystemState {
 
     // ---- On-device motion generator ------------------------------------------
     GeneratorConfig        gen;
+    portMUX_TYPE           gen_mux     = portMUX_INITIALIZER_UNLOCKED;
 
     // Generator runtime phase/clock (Core 1 only — generatorTask)
     float                  gen_phase      = 0.0f;

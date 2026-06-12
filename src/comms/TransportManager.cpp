@@ -15,15 +15,6 @@
 #include "WebSocketTransport.h"
 #include "BleTransport.h"
 
-// ---- APPLOG macro (same as main.cpp) ---------------------------------------
-#if SERIAL_CONTROL_MODE
-  #define APPLOG(s)      applog(s)
-  #define APPLOGF(...)   applogf(__VA_ARGS__)
-#else
-  #define APPLOG(s)      Serial.println(s)
-  #define APPLOGF(...)   Serial.printf(__VA_ARGS__)
-#endif
-
 TransportManager::TransportManager(SystemState&        state,
                                    TCodeParser&        parser,
                                    SerialTransport&    serial,

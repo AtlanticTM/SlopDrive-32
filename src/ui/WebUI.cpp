@@ -18,17 +18,6 @@
 #include "config_api.h"
 #include "range_mapper.h"
 
-// ---- Logging macros (identical to the ones in main.cpp) --------------------
-// In serial-control mode the USB Serial port is dedicated to Intiface TCode,
-// so status/debug must go to the web log (applog), NOT Serial.
-#if SERIAL_CONTROL_MODE
-  #define APPLOG(s)      applog(s)
-  #define APPLOGF(...)   applogf(__VA_ARGS__)
-#else
-  #define APPLOG(s)      Serial.println(s)
-  #define APPLOGF(...)   Serial.printf(__VA_ARGS__)
-#endif
-
 // ---- Fallback HTML page (shown when LittleFS /index.html is missing) -------
 static const char* htmlFallbackPage = R"RAWHTML(
 <!DOCTYPE html>
@@ -140,7 +129,7 @@ void WebUI::handleApiStatus() {
     doc["ip"] = WiFi.localIP().toString();
     doc["homed"] = _state.homed;
     doc["homing"] = _state.homing_in_progress;
-    doc["buttplug_connected"] = _wsTransport.isConnected();
+    doc["buttplug_connected"] = _wsTransport.isServerConnected();
     doc["position"] = _motor.getPosition();
     uint16_t hz = _state.measured_hz;
     doc["measured_hz"] = hz;
@@ -438,6 +427,10 @@ void WebUI::handleApiGen() {
         _state.gen_rate_tick_hz = (r >= 75) ? 100 : (r >= 35) ? 50 : 20;
     }
 
+    // ---- Generator config — lock the whole struct so the Core-1 generator -----
+    // ---- task sees a consistent snapshot (no torn writes mid-update). ----------
+    portENTER_CRITICAL(&_state.gen_mux);
+
     _state.gen.wave     = constrain((int)(doc["wave"]     | (int)_state.gen.wave), 0, 3);
     _state.gen.rate_hz  = constrain((float)(doc["rate"]   | _state.gen.rate_hz), 0.05f, 50.0f);
     if (doc["depth"].is<float>())  _state.gen.depth  = constrain((float)doc["depth"]  / 100.0f, 0.02f, 1.0f);
@@ -460,6 +453,8 @@ void WebUI::handleApiGen() {
         }
         _state.gen.running = want;
     }
+
+    portEXIT_CRITICAL(&_state.gen_mux);
 
     _httpServer->send(200, "application/json", "{\"ok\":true}");
 }

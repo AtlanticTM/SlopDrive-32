@@ -95,13 +95,14 @@
 // =============================================================================
 // Serial Control Mode
 // =============================================================================
-// When ON, the USB Serial port is DEDICATED to Intiface TCode (its "serialport"
-// comm manager connects to the ESP32 over USB). This bypasses WiFi entirely -
-// no wireless latency/jitter - so the command rate is limited only by the baud
-// and Intiface's message_gap. While this mode is on, debug output does NOT go
-// to Serial (it would corrupt the TCode stream); view logs in the web UI's
-// "Serial / Log" panel instead. WiFi + the web UI still run for configuration.
-#define SERIAL_CONTROL_MODE     1            // 1 = USB Serial is TCode, 0 = debug
+// This flag no longer gates runtime input — the active transport (WS/SER/BT
+// selected in the web UI and persisted to NVS) is the single source of truth.
+// SERIAL_CONTROL_MODE is now used ONLY to:
+//   1. Set the factory-default transport mode (1 → SER, 0 → WS).
+//   2. Route debug output: when ON, debug goes to the in-memory web log
+//      (applog) so it doesn't corrupt the USB TCode stream.
+//   3. Announce serial-control status via /api/status → serial_mode.
+#define SERIAL_CONTROL_MODE     1            // 1 = USB Serial is default transport, 0 = WiFi
 #define SERIAL_CONTROL_BAUD     115200       // must match Intiface's serial port
 
 // =============================================================================

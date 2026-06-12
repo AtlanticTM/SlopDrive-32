@@ -37,9 +37,9 @@ TMC2160StepperDriver::TMC2160StepperDriver() {}
 // ---- Lifecycle ---------------------------------------------------------------
 
 void TMC2160StepperDriver::init() {
-    // Mutex serializes every TMC SPI access (config writes vs any background
-    // SPI access) so software-SPI transactions never interleave.
-    if (!_spi_mutex) _spi_mutex = xSemaphoreCreateMutex();
+    // DRV_STATUS readback (diagTask) has been removed per project owner
+    // directive. SPI config writes are now serialised by the FreeRTOS scheduler
+    // (Core 1 only), so no explicit mutex is needed.
 
     // Configure pins
     pinMode(PIN_ENABLE, OUTPUT);
@@ -605,10 +605,6 @@ void TMC2160StepperDriver::hardStop() {
 void TMC2160StepperDriver::applyDriverConfig(const DriverConfig& cfg) {
     if (!_tmc) return;
 
-    // Take the SPI mutex so this burst of register writes can't interleave with
-    // any other SPI access.
-    if (_spi_mutex) xSemaphoreTake(_spi_mutex, portMAX_DELAY);
-
     // NOTE on microsteps: STEPS_PER_MM is a compile-time constant derived from
     // MICROSTEPS (16). Changing the driver's microstepping live would desync
     // the position math, so we keep the driver at MICROSTEPS regardless of what
@@ -642,8 +638,6 @@ void TMC2160StepperDriver::applyDriverConfig(const DriverConfig& cfg) {
           cfg.run_current_ma, cfg.hold_current_pct, cfg.toff, cfg.tbl,
           cfg.stealthchop ? "stealth" : "spread",
           (unsigned long)cfg.tpwm_thrs, (int)cfg.hstart, (int)cfg.hend);
-
-    if (_spi_mutex) xSemaphoreGive(_spi_mutex);
 }
 
 // ---- Diagnostics -------------------------------------------------------------

@@ -18,6 +18,7 @@
 #include "SystemState.h"
 #include "ConfigStore.h"
 #include "Generator.h"
+#include "Interpolator.h"
 
 // In serial-control mode the USB Serial port is dedicated to Intiface TCode, so
 // status/debug must go to the web log (applog), NOT Serial. APPLOG()/APPLOGF()
@@ -46,6 +47,7 @@ RangeMapper mapper;
 static SystemState g_state;
 
 Generator generator(g_state, mapper, motor);
+Interpolator interpolator(g_state, mapper, motor);
 WebServer httpServer(HTTP_PORT);
 
 
@@ -667,7 +669,7 @@ void handleApiInterp() {
         doc["easing"]    = g_state.buf_easing;
         doc["depth"]     = g_state.buf_depth;
         doc["tick"]      = g_state.buf_tick_hz;
-        doc["active"]    = g_state.buf_active;      // emitting interpolated motion now?
+        doc["active"]    = interpolator.isActive();  // emitting interpolated motion now?
         doc["buffered"]  = g_state.buf_count;       // samples currently queued
         String json;
         serializeJson(doc, json);
@@ -706,185 +708,9 @@ void handleApiInterp() {
 // The generator task has been extracted to motion/Generator.h/.cpp.
 // See Generator::init() in setup() below.
 
-// ============================================================================
-// Buffered interpolation (BUFFERED input mode)
-// ============================================================================
-// bufEase() lives in motion/Kinematics.h (namespace kinematics).
-
-// Push a true Intiface sample (already range-mapped to mm) into the ring buffer.
-// Called from buttplugLinearCmd() while in BUFFERED mode. The interpolatorTask
-// consumes these by replaying them on a time-delayed playback clock.
-//
-// Timestamps are taken with esp_timer_get_time() (microseconds, monotonic) so
-// the playback clock and the sample times share one wall-clock reference.
-static void bufPushSample(float pos_mm) {
-    portENTER_CRITICAL(&g_state.buf_mux);
-    g_state.buf[g_state.buf_head] = { pos_mm, (uint32_t)(esp_timer_get_time() / 1000ULL) };
-    g_state.buf_head = (g_state.buf_head + 1) % SystemState::BUF_CAP;
-    if (g_state.buf_count < SystemState::BUF_CAP) g_state.buf_count++;
-    portEXIT_CRITICAL(&g_state.buf_mux);
-}
-
-// Interpolator task — TIME-DELAYED JITTER BUFFER.
-//
-// Why the old "advance a cursor by the assumed tick period" approach jittered:
-//   1. vTaskDelay() is NOT isochronous. With WiFi+BLE+web-server running, this
-//      task is preempted; a "20ms" tick can land anywhere from 18 to 45ms. The
-//      old code advanced the cursor by a FIXED 1000/hz ms regardless, so late
-//      ticks under-advanced and the carriage stuttered.
-//   2. It used each sample's raw BLE arrival delta (b.t_ms - a.t_ms) as the
-//      segment duration. BLE delivers in bursts (connection-interval batching),
-//      so those deltas are themselves jittery — feeding transport jitter
-//      straight into motor velocity.
-//   3. `depth` was only a look-behind COUNT, giving no real time cushion, so any
-//      BLE gap bigger than the tiny backlog drained the ring → freeze → refill.
-//
-// The fix is the standard media jitter-buffer model: timestamp every sample on
-// arrival, then PLAY BACK on a clock that runs a fixed delay (PLAY_DELAY_MS)
-// behind real wall-clock time. Each tick we:
-//   * read the REAL elapsed time (esp_timer, immune to tick jitter),
-//   * compute play_time = now - PLAY_DELAY_MS,
-//   * find the two buffered samples that bracket play_time,
-//   * interpolate by the TRUE time fraction between them.
-// Because we always render "the past", bursty/late arrivals are already in the
-// buffer by the time we need them, and uneven tick spacing is corrected by
-// using real time instead of an assumed step. Result: smooth motion even over
-// jittery BLE.
-void interpolatorTask(void* parameter) {
-    // Playback clock, in the same ms timebase as the sample timestamps. 0 = not
-    // yet started (we latch it on the first tick that has data).
-    static uint32_t play_clock_ms = 0;
-    static uint32_t last_real_us  = 0;
-
-    while (true) {
-        uint16_t hz = g_state.buf_tick_hz; if (hz < 5) hz = 5; if (hz > 200) hz = 200;
-        TickType_t period = pdMS_TO_TICKS(1000 / hz);
-
-        bool gated = g_state.paused || g_state.manual_override || !g_state.homed;
-        bool run = (g_state.getInputMode() == InputMode::BUFFERED) && !gated;
-
-        if (run) {
-            uint32_t now_us = (uint32_t)esp_timer_get_time();
-            uint32_t now_ms = now_us / 1000U;
-
-            // The buffer delay (ms) the user dials in via `depth`. Each depth step
-            // ~= 30ms of cushion (1->30ms .. 5->150ms). More delay = smoother ride
-            // over BLE stalls at the cost of a little extra latency.
-            uint8_t depth = g_state.buf_depth; if (depth < 1) depth = 1; if (depth > 5) depth = 5;
-            uint32_t play_delay_ms = (uint32_t)depth * 30U;
-
-            // Snapshot the ring.
-            portENTER_CRITICAL(&g_state.buf_mux);
-            uint8_t count = g_state.buf_count;
-            uint8_t head  = g_state.buf_head;
-            BufSample ring[SystemState::BUF_CAP];
-            for (uint8_t i = 0; i < SystemState::BUF_CAP; i++) ring[i] = g_state.buf[i];
-            portEXIT_CRITICAL(&g_state.buf_mux);
-
-            if (count >= 2) {
-                // Oldest valid sample index and the newest timestamp.
-                uint8_t oldest_i = (uint8_t)((head + SystemState::BUF_CAP - count) % SystemState::BUF_CAP);
-                uint8_t newest_i = (uint8_t)((head + SystemState::BUF_CAP - 1) % SystemState::BUF_CAP);
-                uint32_t oldest_t = ring[oldest_i].t_ms;
-                uint32_t newest_t = ring[newest_i].t_ms;
-
-                // Advance the playback clock by REAL elapsed time (tick-jitter
-                // immune). On the first primed tick, start it one buffer-delay
-                // behind "now" so we render from the oldest available history.
-                if (play_clock_ms == 0 || !g_state.buf_active) {
-                    play_clock_ms = (now_ms > play_delay_ms) ? (now_ms - play_delay_ms) : oldest_t;
-                    if (play_clock_ms < oldest_t) play_clock_ms = oldest_t;
-                    last_real_us = now_us;
-                    g_state.buf_active = true;
-                } else {
-                    uint32_t elapsed_ms = (now_us - last_real_us) / 1000U;
-                    if (elapsed_ms > 0) {
-                        play_clock_ms += elapsed_ms;
-                        last_real_us = now_us;
-                    }
-                }
-
-                // Clamp the playback clock into the available window:
-                //  * never run past the newest sample we have (would extrapolate
-                //    blindly); hold at newest if the buffer starved.
-                //  * never fall so far behind that we'd render ancient history.
-                uint32_t target_lag = newest_t - play_delay_ms;   // ideal play point
-                if ((int32_t)(play_clock_ms - newest_t) > 0) {
-                    play_clock_ms = newest_t;                      // starved: hold newest
-                }
-                // Gentle resync if we've drifted too far from the ideal lag
-                // (keeps latency bounded without snapping).
-                if (newest_t > play_delay_ms &&
-                    (int32_t)(target_lag - play_clock_ms) > (int32_t)(play_delay_ms + 50)) {
-                    play_clock_ms = target_lag;                    // jumped behind: catch up
-                }
-                if (play_clock_ms < oldest_t) play_clock_ms = oldest_t;
-
-                // Find the pair of samples bracketing play_clock_ms.
-                BufSample a = ring[oldest_i];
-                BufSample b = ring[newest_i];
-                for (uint8_t k = 0; k < count - 1; k++) {
-                    uint8_t i0 = (uint8_t)((oldest_i + k) % SystemState::BUF_CAP);
-                    uint8_t i1 = (uint8_t)((i0 + 1) % SystemState::BUF_CAP);
-                    if ((int32_t)(play_clock_ms - ring[i0].t_ms) >= 0 &&
-                        (int32_t)(ring[i1].t_ms - play_clock_ms) >= 0) {
-                        a = ring[i0]; b = ring[i1];
-                        break;
-                    }
-                }
-
-                // True time fraction between the bracketing samples.
-                float seg_ms = (float)(b.t_ms - a.t_ms);
-                float t = (seg_ms > 0.5f)
-                              ? ((float)((int32_t)(play_clock_ms - a.t_ms)) / seg_ms)
-                              : 1.0f;
-                t = constrain(t, 0.0f, 1.0f);
-
-                float e = kinematics::bufEase(g_state.buf_easing, t);
-                float pos = a.pos_mm + (b.pos_mm - a.pos_mm) * e;
-                pos = constrain(pos, mapper.getMinMm(), mapper.getMaxMm());
-
-                // Velocity to reach the next sample over its real remaining time,
-                // so motion stays continuous (no per-tick speed spikes).
-                float remain_ms = (float)((int32_t)(b.t_ms - play_clock_ms));
-                if (remain_ms < 1.0f) remain_ms = seg_ms > 0.5f ? seg_ms : 20.0f;
-                float dist = fabsf(b.pos_mm - pos);
-                float spd  = (dist / remain_ms) * 1000.0f;
-                spd = constrain(spd, 0.0f, g_state.config.max_speed_mm_s);
-                motor.streamTo(pos, spd);
-
-                // Retire samples strictly older than what we still need to
-                // interpolate (keep the one just before play_clock_ms as `a`).
-                portENTER_CRITICAL(&g_state.buf_mux);
-                while (g_state.buf_count > 2) {
-                    uint8_t o  = (uint8_t)((g_state.buf_head + SystemState::BUF_CAP - g_state.buf_count) % SystemState::BUF_CAP);
-                    uint8_t o1 = (uint8_t)((o + 1) % SystemState::BUF_CAP);
-                    // Drop the oldest only if the playback clock has already passed
-                    // its successor (so `a/b` bracketing never loses its left edge).
-                    if ((int32_t)(play_clock_ms - g_state.buf[o1].t_ms) > 0) g_state.buf_count--;
-                    else break;
-                }
-                portEXIT_CRITICAL(&g_state.buf_mux);
-            } else {
-                // Fewer than 2 samples: not enough to interpolate yet. Don't
-                // reset g_state.buf_active for a brief gap, but do pause the clock so it
-                // doesn't run away while starved.
-                last_real_us = now_us;
-            }
-        } else {
-            // Not in buffered mode (or gated): clear ring/clock so a later switch
-            // back into buffered mode starts fresh.
-            g_state.buf_active = false;
-            play_clock_ms = 0;
-            last_real_us = 0;
-            portENTER_CRITICAL(&g_state.buf_mux);
-            g_state.buf_count = 0; g_state.buf_head = 0;
-            portEXIT_CRITICAL(&g_state.buf_mux);
-        }
-
-        vTaskDelay(period);
-    }
-}
+// interpolatorTask() and bufPushSample() have been extracted to
+// motion/Interpolator.h/.cpp.  Use interpolator.pushSample() and
+// interpolator.init() instead.
 
 
 // ============================================================================
@@ -948,8 +774,8 @@ static void buttplugLinearCmd(float position, uint32_t duration_ms) {
                 target_mm = cur + blend * (target_mm - cur);
             }
         }
-        bufPushSample(target_mm);
-        return;   // motion is emitted by interpolatorTask, not here
+        interpolator.pushSample(target_mm);
+        return;   // motion is emitted by Interpolator, not here
     }
 
     // Slow resume: just after pause/override is lifted, ease back toward where
@@ -1207,7 +1033,7 @@ void setup() {
     // Buffered-interpolation task: resamples sporadic Intiface input at a fixed
     // local rate (20/50/100 Hz) with easing. Same core/priority as the generator
     // (both feed streamTo() and are mutually exclusive with it in practice).
-    xTaskCreatePinnedToCore(interpolatorTask, "Interp", 4096, NULL, 2, NULL, 1);
+    interpolator.init();
 
 
     APPLOG("System ready - push shaft into endstop to home, or use the web UI");

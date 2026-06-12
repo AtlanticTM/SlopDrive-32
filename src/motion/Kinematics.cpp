@@ -24,7 +24,9 @@ float modShape(uint8_t shape, float m) {
 }
 
 // Optional "ease" smoothing pulls the carrier toward an S-curve so the ends of
-// each stroke feel softer (less of a hard reversal). ease 0..1 blends in.
+// each stroke feel softer — no abrupt bottom-outs, just a gentle kiss at each
+// turnaround. ease 0..1 blends in. Because nobody likes a jackhammer when they
+// ordered a massage. :3
 float ease(float v, float ease_factor) {
     if (ease_factor <= 0.0f) return v;
     float s = v * v * (3.0f - 2.0f * v);   // smoothstep
@@ -32,6 +34,8 @@ float ease(float v, float ease_factor) {
 }
 
 // Apply the selected easing curve to a linear progress t (0..1) -> shaped 0..1.
+// Think of it as picking your stroke's personality — straight and businesslike,
+// or a coy little S-curve that teases before giving it all. :3
 float bufEase(uint8_t kind, float t) {
     t = constrain(t, 0.0f, 1.0f);
     switch (kind) {

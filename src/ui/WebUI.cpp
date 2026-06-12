@@ -312,10 +312,10 @@ void WebUI::handleApiPause() {
     _state.paused = doc["paused"] | (!_state.paused);
     if (_state.paused && !was) {
         if (_motor.isHomed()) _motor.hardStop();
-        APPLOG("Paused: ignoring Intiface input");
+        APPLOG("Paused: hands off the puppers — Intiface input edged out :3");
     } else if (!_state.paused && was) {
         _state.resume_start_ms = millis();
-        APPLOG("Unpaused: resuming Intiface input");
+        APPLOG("Unpaused: easing back in, letting Intiface take the reins again~ :3");
     }
     String json; JsonDocument r; r["ok"] = true; r["paused"] = _state.paused;
     serializeJson(r, json);
@@ -324,7 +324,7 @@ void WebUI::handleApiPause() {
 
 void WebUI::handleApiHalt() {
     if (_motor.isHomed()) _motor.hardStop();
-    APPLOG("Halt: motor stopped (still homed/powered)");
+    APPLOG("Halt: motor stopped — still homed and ready for round two~ :3");
     _httpServer->send(200, "application/json", "{\"ok\":true}");
 }
 
@@ -334,10 +334,10 @@ void WebUI::handleApiOverride() {
     bool was = _state.manual_override;
     _state.manual_override = doc["override"] | (!_state.manual_override);
     if (_state.manual_override && !was) {
-        APPLOG("Manual override ON: Intiface input ignored");
+        APPLOG("Manual override ON: you're topping now — Intiface can watch but can't touch :3");
     } else if (!_state.manual_override && was) {
         _state.resume_start_ms = millis();
-        APPLOG("Manual override OFF: easing back to Intiface");
+        APPLOG("Manual override OFF: handing the leash back to Intiface~ :3");
     }
     String json; JsonDocument r; r["ok"] = true; r["manual_override"] = _state.manual_override;
     serializeJson(r, json);

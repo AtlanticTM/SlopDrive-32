@@ -20,6 +20,10 @@ void RangeMapper::setRange(float min_mm, float max_mm) {
     }
 }
 
+// Take a raw 0..1 intensity value from Intiface and ram it deep into our
+// physical range, stretching from the rearmost snuggle spot all the way to
+// the forwardmost bulge. The higher the intensity, the deeper we pump it —
+// at 1.0 he's absolutely packed to the hilt with nowhere left to go. :3
 float RangeMapper::intensityToPosition(float intensity) const {
     intensity = clampIntensity(intensity);
     return _range_min_mm + (intensity * getRangeSize());

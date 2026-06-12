@@ -1,9 +1,11 @@
-// In-memory log buffer implementation - SlopDrive-32
+// In-memory log buffer implementation — SlopDrive-32's confessional booth :3
+// Every dirty little thing the system does gets whispered into this ring buffer.
 #include "AppLog.h"
 #include "freertos/FreeRTOS.h"
 #include "freertos/semphr.h"
 
-// Ring buffer of recent log lines. Kept small to bound RAM use.
+// Ring buffer of recent log lines — like a pup's collar, it only holds so much.
+// Kept small to bound RAM use; we're kinky, not wasteful. :3
 static const int   LOG_LINES = 60;
 static const int   LOG_LINE_LEN = 96;
 static char        s_lines[LOG_LINES][LOG_LINE_LEN];

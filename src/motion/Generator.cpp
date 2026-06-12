@@ -48,7 +48,8 @@ void Generator::taskFunction(void* param) {
 //
 // The generator config is now snapshotted under gen_mux at the top of each
 // tick so that live /api/gen writes from Core 0 never produce a torn (half-
-// new, half-old) parameter set for a single computation frame.
+// new, half-old) parameter set for a single computation frame. We don't do
+// half-and-half here — every stroke gets the full treatment. :3
 // ============================================================================
 
 void Generator::run() {
@@ -81,9 +82,9 @@ void Generator::run() {
         if (cfg.running && (millis() - last_diag_ms > 1000)) {
             last_diag_ms = millis();
             if (!_state.homed)
-                APPLOG("Generator: waiting - motor not homed");
+                APPLOG("Generator: waiting - motor not homed (gotta know where home is before we play~ :3)");
             else if (intiface_recent && !user_has_control)
-                APPLOG("Generator: yielding to active Intiface (use Pause/Override to keep control)");
+                APPLOG("Generator: yielding to active Intiface (such a polite sub — use Pause/Override if you wanna top)");
             else
             APPLOGF("Generator: running target=%.1fmm phase=%.2f window=[%.0f,%.0f]",
                     _mapper.getMinMm() + cfg.offset * (_mapper.getMaxMm() - _mapper.getMinMm())
@@ -131,7 +132,8 @@ void Generator::run() {
             pos = constrain(pos, lo, hi);
 
             // streamTo() re-targets without force-stopping; at high Hz the motor
-            // glides smoothly through the waveform. speed 0 => configured max.
+            // glides through the waveform like a well-oiled piston. speed 0 =>
+            // configured max — let the good boy go full throttle. :3
             _motor.streamTo(pos, 0.0f);
         } else {
             _state.gen_last_us = 0;   // reset dt so resume doesn't take a giant step

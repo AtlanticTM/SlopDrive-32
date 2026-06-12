@@ -3,7 +3,8 @@
 #include <Arduino.h>
 
 // =============================================================================
-// Secrets (WiFi password, network addresses) - kept OUT of git
+// Secrets (WiFi password, network addresses) — kept OUT of git like a good
+// pup keeps its leash on. No accidental exposure here. :3
 // =============================================================================
 // Real values live in include/secrets.h (git-ignored). If that file is missing
 // (e.g. a fresh clone before you copy secrets.example.h -> secrets.h), we fall
@@ -100,7 +101,8 @@
 // SERIAL_CONTROL_MODE is now used ONLY to:
 //   1. Set the factory-default transport mode (1 → SER, 0 → WS).
 //   2. Route debug output: when ON, debug goes to the in-memory web log
-//      (applog) so it doesn't corrupt the USB TCode stream.
+//      (applog) so it doesn't spray all over the USB TCode stream like an
+//      overexcited pup. Keep that stream clean for Intiface. :3
 //   3. Announce serial-control status via /api/status → serial_mode.
 #define SERIAL_CONTROL_MODE     1            // 1 = USB Serial is default transport, 0 = WiFi
 #define SERIAL_CONTROL_BAUD     115200       // must match Intiface's serial port
@@ -143,18 +145,19 @@
 
 
 // =============================================================================
-// Transport Mode (how Intiface / a host talks to the machine)
+// Transport Mode — three ways to get dirty talk into this machine. :3
 // =============================================================================
 // The machine can receive TCode over three transports. Exactly ONE is active
-// at a time; the user picks it in the web UI (Settings) and it's persisted to
-// NVS. The status chip shows WS / SER / BT to reflect the live choice.
+// at a time; the user picks it in the web UI (Settings) and we remember it
+// in NVS (we're loyal like that). The status chip shows WS / SER / BT.
 //   WS  = WebSocket. The ESP32 runs a TCode WebSocket server (MultiFunPlayer
 //         connects in) AND can connect out to Intiface's WSDM server. Needs WiFi.
+//         The social butterfly of transports — always making new connections.
 //   SER = USB Serial. Intiface's "serialport" comm manager streams TCode over
-//         USB. Lowest latency, no WiFi needed for control.
+//         USB. Lowest latency, no WiFi needed. The direct, no-nonsense top.
 //   BT  = Bluetooth LE. The ESP32 advertises a Nordic-UART-style BLE service;
 //         a BLE host (phone app / Intiface BLE) writes TCode to the RX
-//         characteristic. No WiFi needed for control.
+//         characteristic. Wireless, personal, intimate. No WiFi needed.
 enum class TransportMode : uint8_t {
     WS  = 0,
     SER = 1,

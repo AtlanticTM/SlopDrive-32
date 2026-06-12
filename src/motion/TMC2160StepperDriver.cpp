@@ -52,25 +52,27 @@ void TMC2160StepperDriver::init() {
     digitalWrite(PIN_TMC_CS, HIGH);  // Deselect TMC before begin()
     delay(10);
 
-    // Initialize TMC2160 via HARDWARE SPI.
+    // Initialize TMC2160 via HARDWARE SPI — we go in RAW, no software bit-bang
+    // foreplay here. :3
     //
     // We deliberately use the ESP32-S3's silicon SPI peripheral, NOT the
-    // library's software bit-bang mode. Reason: passing all four pins
-    // (cs,rsense,mosi,miso,sck) to the constructor selects SOFTWARE SPI, which
-    // manually toggles the clock in a CPU loop. On an ESP32-S3 running FreeRTOS
-    // + WiFi + BLE + WebSockets, the OS preempts that loop at random; writes
-    // still work (the driver waits), but READS miss the exact moment MISO is
-    // sampled and come back as 0x00000000 / 0xFFFFFFFF - which is why
-    // DRV_STATUS readback never worked. Hardware SPI clocks/samples in silicon,
-    // immune to those interrupts.
+    // library's software bit-bang mode. Passing all four pins to the constructor
+    // selects SOFTWARE SPI, which manually toggles the clock in a CPU loop.
+    // On an ESP32-S3 getting gangbanged by FreeRTOS + WiFi + BLE + WebSockets,
+    // the OS preempts that loop at random; writes still work (the driver waits
+    // obediently), but READS miss the exact moment MISO is sampled and come back
+    // as 0x00000000 / 0xFFFFFFFF — total ghosting, just limp nothing. Hardware
+    // SPI clocks/samples in silicon and stays rock hard through any interrupt
+    // storm.
     //
     // SPI.begin(SCK, MISO, MOSI, SS) binds the HSPI matrix to our custom pins,
     // and the 2-arg TMC2160Stepper(cs, r_sense) constructor selects HW SPI.
     //
-    // MISO MUST have a pull-up. The TMC drives MISO only while CS is asserted;
-    // the rest of the time it floats, and a floating MISO reads back as random
-    // 0x00/0xFF words (exactly the failure we were seeing). The reference
-    // example does the same `pinMode(MISO, INPUT_PULLUP)`.
+    // MISO MUST have a pull-up. The TMC only drives MISO while CS is asserted;
+    // the rest of the time it floats, and a floating MISO is basically a shy
+    // sub whispering random 0x00/0xFF — not the kind of dirty talk we want.
+    // The reference example does the same `pinMode(MISO, INPUT_PULLUP)` to keep
+    // that line held nice and firm.
     pinMode(PIN_TMC_MISO, INPUT_PULLUP);
     SPI.begin(PIN_TMC_SCLK, PIN_TMC_MISO, PIN_TMC_MOSI, PIN_TMC_CS);
     _tmc = new TMC2160Stepper(PIN_TMC_CS, TMC_R_SENSE);
@@ -123,18 +125,20 @@ void TMC2160StepperDriver::init() {
         MLOGLN(F("TMC2160: SPI OK, driver configured"));
     }
 
-    // Store the engine pointer so subclasses/share can access it (Risk #5).
+    // Store the engine pointer so everyone can share the toy (Risk #5 — don't
+    // be greedy, pass the pointer around :3).
     _engine = &_fas_engine;
 
     // Initialize FastAccelStepperEngine - creates background task on ESP32
     _fas_engine.init();
 
     // Create stepper motor connected to STEP pin only.
-    // CRITICAL: stepperConnectToPin() takes ONLY the step pin. The direction
-    // pin MUST be configured separately via setDirectionPin(). Previously we
-    // passed (STEP, DIR) which is NOT a valid overload - the DIR pin was never
-    // set, so the motor could only ever step in one direction (forward toward
-    // the endstop worked, but backward/manual moves silently did nothing).
+    // CRITICAL: stepperConnectToPin() takes ONLY the step pin — it's a top,
+    // not a switch. :3 The direction pin MUST be configured separately via
+    // setDirectionPin(). Previously we passed (STEP, DIR) which is NOT a valid
+    // overload — the DIR pin was never set, so the motor could only ever thrust
+    // in one direction (forward toward the endstop worked, but pulling back out
+    // was just a sad little nothing).
     _stepper = _fas_engine.stepperConnectToPin(PIN_STEP);
 
     if (_stepper) {
@@ -208,12 +212,13 @@ bool TMC2160StepperDriver::home(int32_t home_speed_steps_s) {
     _homed = false;
 
     // Drop any leftover stream/target state from before this home request,
-    // otherwise the motorTask keeps streaming old Intiface targets and fights
-    // the homing runForward() - the motor bangs the endstop and never settles.
+    // otherwise the motorTask keeps humping old Intiface targets and fights
+    // the homing runForward() — the motor just bangs the endstop endlessly
+    // without ever finishing. Nobody wants a partner who can't settle down. :3
     resetStreamState();
 
     // Make sure no previous move is still draining the queue before we start
-    // the homing sweep, or runForward() gets ignored.
+    // the homing sweep, or runForward() gets ghosted like a bad hookup.
     if (_stepper && _stepper->isRunning()) {
         _stepper->forceStop();
         uint32_t to = millis() + 300;
@@ -291,8 +296,11 @@ void TMC2160StepperDriver::runHomingStep() {
         MLOGF("Homing: Endstop triggered! Stopped at step pos=%d running=%d\n",
               _stepper->getCurrentPosition(), _stepper->isRunning());
 
-        // Back off from endstop - move NEGATIVE = away from endstop toward front.
-        // Use a bounded moveTo() now that the queue is empty and motor is stopped.
+        // Back off from endstop — pull out just the tip (5mm), don't stay
+        // balls-deep on the switch. Move NEGATIVE = away from endstop toward
+        // front. Use a bounded moveTo() now that the queue is empty and the
+        // motor's finished shuddering against the endstop. Gotta leave some
+        // breathing room or he'll trigger again the second anyone twitches. :3
         _stepper->setSpeedInHz(2000);
         _stepper->setAcceleration(50000);
         int32_t backoff_target = -mmToNative(5.0f);  // 5mm = step -400
@@ -325,12 +333,13 @@ void TMC2160StepperDriver::runHomingStep() {
     // No "stopped before endstop" check needed - motor won't stop on its own.
 }
 
-// Push-to-home: lets the user establish home by simply pushing the shaft into
-// the endstop (no web UI needed). Only acts when we're idle and unhomed. If the
-// endstop reads active, we zero the position right here and mark homed. The
-// motor is NOT enabled/driven, so the shaft stays free to be pushed by hand;
-// once homed, normal commands re-enable it. Debounced so a momentary bounce
-// doesn't false-trigger.
+// Push-to-home: let the user establish home by simply pushing the shaft into
+// the endstop — no web UI needed, just good old-fashioned manual persuasion. :3
+// Only acts when we're idle and unhomed. If the endstop reads active, we zero
+// the position right here and mark homed. The motor stays OFF so the shaft is
+// free to be pushed by hand (consent is important); once homed, normal commands
+// take the reins. Debounced so a momentary twitch doesn't false-trigger —
+// nobody likes a premature homing.
 bool TMC2160StepperDriver::checkPushToHome() {
     // Only relevant when not already homed and not running the active routine.
     if (_homed || _homing || !_stepper) return false;
@@ -469,10 +478,10 @@ void TMC2160StepperDriver::streamTo(float pos_mm, float speed_mm_s) {
     _moving_to_target = false;
 }
 
-// Predictive extrapolation: measure the velocity implied by the incoming sample
-// stream and command the motor to a point slightly AHEAD, so it keeps coasting
-// between samples instead of settling on each one. Bounded overshoot + a stall
-// timeout (updateExtrapolation) keep it safe.
+// Predictive extrapolation: read the heat of the incoming sample stream and
+// command the motor to a point slightly AHEAD, so it keeps coasting between
+// samples instead of bottoming out on each one. Bounded overshoot + a stall
+// timeout (updateExtrapolation) keep it safe — we edge, we don't crash. :3
 void TMC2160StepperDriver::streamExtrapolated(float pos_mm, float speed_mm_s) {
     if (!_homed || !_stepper) return;
 
@@ -485,14 +494,19 @@ void TMC2160StepperDriver::streamExtrapolated(float pos_mm, float speed_mm_s) {
         uint32_t dt = now - _last_sample_ms;
         // Ignore absurdly long gaps (treat as a fresh start) and zero dt.
         if (dt > 0 && dt < STREAM_STALL_MS * 3) {
-            // Velocity implied by the stream (mm/s), smoothed a little to reject
-            // jitter between consecutive samples.
+            // Measure how fast these samples are slamming into us (mm/s).
+            // The velocity between consecutive positions — read their heat,
+            // smooth it just a little to reject jittery little trembles
+            // between thrusts. A steady rhythm means a good pounding. :3
             float v = (pos_mm - _last_sample_mm) / ((float)dt / 1000.0f);
             _stream_velocity = 0.5f * _stream_velocity + 0.5f * v;
 
-            // Project ahead by the lookahead window.
+            // Project ahead — we're not stopping AT the sample, we're ramming
+            // PAST it by the lookahead window, inflating the target deeper than
+            // commanded. The motor overshoots, kept on a tight leash so it
+            // doesn't run away and wreck the furniture.
             float overshoot = _stream_velocity * ((float)_lookahead_ms / 1000.0f);
-            // Bound how far past the sample we are willing to coast.
+            // Bound how far past the sample we're willing to let it stretch.
             overshoot = constrain(overshoot, -_max_overshoot_mm, _max_overshoot_mm);
             projected = pos_mm + overshoot;
             projected = constrain(projected, 0.0f, PHYSICAL_MAX_TRAVEL_MM);
@@ -509,8 +523,9 @@ void TMC2160StepperDriver::streamExtrapolated(float pos_mm, float speed_mm_s) {
     streamTo(projected, speed_mm_s);
 }
 
-// Stall fallback: if no new sample has arrived recently, stop coasting and
-// settle exactly on the last TRUE sample so the motor can't run away past it.
+// Stall fallback: if nobody's been talking dirty to us for a while, stop
+// coasting and settle exactly on the last REAL sample so the motor can't
+// run away past it like an overexcited pup off-leash. :3
 void TMC2160StepperDriver::updateExtrapolation() {
     if (!_coasting || !_have_last_sample || !_stepper) return;
     if (millis() - _last_sample_ms >= STREAM_STALL_MS) {
@@ -595,8 +610,9 @@ void TMC2160StepperDriver::hardStop() {
         _stepper->forceStop();
     }
     // Halt (Pause/Buttplug stop) routes here. Clear the coast/extrapolation
-    // state too, otherwise updateExtrapolation()/the stream keeps streaming the
-    // last target right after the stop - and a later Home gets fought by it.
+    // state too, otherwise updateExtrapolation() keeps humping the last target
+    // right after the stop — and a later Home has to fight it off. Nobody needs
+    // a jealous ex-target clinging on after the scene's over.
     resetStreamState();
 }
 

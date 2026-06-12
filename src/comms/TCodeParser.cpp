@@ -1,4 +1,6 @@
-// TCode v0.3 transport-agnostic parser — implementation
+// TCode v0.3 transport-agnostic parser — the dirty-talk translator :3
+// Takes whatever filthy whispers Intiface sends and turns them into
+// something the motor can actually understand.
 
 #include "TCodeParser.h"
 #include "AppLog.h"

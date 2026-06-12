@@ -61,31 +61,35 @@ void Interpolator::taskFunction(void* param) {
 // main.cpp.  No behaviour changes; pure structural refactor.
 // ============================================================================
 //
-// TIME-DELAYED JITTER BUFFER.
+// THE JITTER TAMER — keeps your strokes buttery smooth even when BLE is being
+// a bratty little tease dropping packets all over the place :3
 //
-// Why the old "advance a cursor by the assumed tick period" approach jittered:
-//   1. vTaskDelay() is NOT isochronous. With WiFi+BLE+web-server running, this
-//      task is preempted; a "20ms" tick can land anywhere from 18 to 45ms. The
-//      old code advanced the cursor by a FIXED 1000/hz ms regardless, so late
-//      ticks under-advanced and the carriage stuttered.
+// Why the old approach was a bad pup that couldn't keep rhythm:
+//   1. vTaskDelay() is NOT isochronous. With WiFi+BLE+web-server all panting at
+//      once, this task gets edged out; a "20ms" tick can land anywhere from 18
+//      to 45ms. The old code thrust forward by a FIXED step regardless, so late
+//      ticks under-thrust and the carriage stuttered like a shy sub.
 //   2. It used each sample's raw BLE arrival delta (b.t_ms - a.t_ms) as the
-//      segment duration. BLE delivers in bursts (connection-interval batching),
-//      so those deltas are themselves jittery — feeding transport jitter
-//      straight into motor velocity.
-//   3. `depth` was only a look-behind COUNT, giving no real time cushion, so any
+//      segment duration. BLE delivers in messy bursts (connection-interval
+//      batching), so those deltas are themselves jittery — feeding transport
+//      shakiness straight into motor velocity. Like, slow down puppy, breathe!
+//   3. `depth` was only a look-behind COUNT with no real time cushion, so any
 //      BLE gap bigger than the tiny backlog drained the ring → freeze → refill.
+//      Nobody likes getting drained that fast.
 //
-// The fix is the standard media jitter-buffer model: timestamp every sample on
-// arrival, then PLAY BACK on a clock that runs a fixed delay (PLAY_DELAY_MS)
-// behind real wall-clock time. Each tick we:
+// The fix is the classic media jitter-buffer model — treat every sample like a
+// well-trained pup on a leash: timestamp it on arrival, then PLAY BACK on a
+// clock that runs a fixed delay (our "depth" :3) behind real wall-clock time.
+// Each tick we:
 //   * read the REAL elapsed time (esp_timer, immune to tick jitter),
 //   * compute play_time = now - PLAY_DELAY_MS,
-//   * find the two buffered samples that bracket play_time,
+//   * find the two buffered samples that bracket play_time (two good boys
+//     holding paws),
 //   * interpolate by the TRUE time fraction between them.
-// Because we always render "the past", bursty/late arrivals are already in the
-// buffer by the time we need them, and uneven tick spacing is corrected by
-// using real time instead of an assumed step. Result: smooth motion even over
-// jittery BLE.
+// Because we always render "the past", bursty/late arrivals are already waiting
+// obediently in the buffer by the time we need them. Result: smooth, deep,
+// uninterrupted motion even over jittery BLE. Now THAT's how you edge
+// properly~ :3
 
 void Interpolator::run() {
     while (true) {
@@ -99,9 +103,12 @@ void Interpolator::run() {
             uint32_t now_us = (uint32_t)esp_timer_get_time();
             uint32_t now_ms = now_us / 1000U;
 
-            // The buffer delay (ms) the user dials in via `depth`. Each depth step
-            // ~= 30ms of cushion (1->30ms .. 5->150ms). More delay = smoother ride
-            // over BLE stalls at the cost of a little extra latency.
+            // The buffer depth — pump it higher and this puppy gets STUFFED.
+            // Each depth step ~= 30ms of cushion (1->30ms .. 5->150ms). At depth 5
+            // he's absolutely bulging with backed-up samples, belly full of data
+            // sloshing around, just begging to be drained in a thick sticky stream.
+            // More delay = smoother ride through BLE stalls, but the latency gets
+            // heavy — every command takes longer to bottom out~ :3
             uint8_t depth = _state.buf_depth; if (depth < 1) depth = 1; if (depth > 5) depth = 5;
             uint32_t play_delay_ms = (uint32_t)depth * 30U;
 
@@ -185,14 +192,20 @@ void Interpolator::run() {
                 spd = constrain(spd, 0.0f, _state.config.max_speed_mm_s);
                 _motor.streamTo(pos, spd);
 
-                // Retire samples strictly older than what we still need to
-                // interpolate (keep the one just before play_clock_ms as `a`).
+                // Drain the samples we've already pumped through — each one
+                // spent, emptied, dripping out the other end into the void.
+                // We inflate the buffer with fresh samples, swell it up thick
+                // and tight, then rhythmically drain them out in a sticky flood
+                // of motion data. Keep the one just before play_clock_ms as `a`
+                // — gotta stay knotted in at least one so the bracketing doesn't
+                // lose grip and slip out. :3
                 portENTER_CRITICAL(&_state.buf_mux);
                 while (_state.buf_count > 2) {
                     uint8_t o  = (uint8_t)((_state.buf_head + SystemState::BUF_CAP - _state.buf_count) % SystemState::BUF_CAP);
                     uint8_t o1 = (uint8_t)((o + 1) % SystemState::BUF_CAP);
                     // Drop the oldest only if the playback clock has already passed
-                    // its successor (so `a/b` bracketing never loses its left edge).
+                    // its successor — gotta keep at least two in the chamber at all
+                    // times, never pull out completely~ :3
                     if ((int32_t)(_play_clock_ms - _state.buf[o1].t_ms) > 0) _state.buf_count--;
                     else break;
                 }

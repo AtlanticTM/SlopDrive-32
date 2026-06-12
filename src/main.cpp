@@ -40,7 +40,8 @@
 
 
 // ============================================================================
-// Module instances — driver selected at compile time via build flag
+// Module instances — one big orgy of objects :3
+// Driver selected at compile time via build flag
 // ============================================================================
 
 #if defined(DRIVER_TMC2160)
@@ -67,10 +68,11 @@ static WebUI webui(g_state, motor, mapper, generator, interpolator,
 
 
 // ============================================================================
-// Glue callbacks — thin free functions wired to the TCode parser
+// Glue callbacks — these good boys sit between TCode and the motor, making
+// sure commands go where they're supposed to and nobody gets overstimulated :3
 // ============================================================================
 
-// Blend duration for resume-from-pause (ms).
+// How long we ease back in after being edged (paused), in ms.
 static const uint32_t RESUME_BLEND_MS = 800;
 
 // Called by TCodeParser on every valid L0 linear command.
@@ -103,7 +105,9 @@ static void buttplugLinearCmd(float position, uint32_t duration_ms) {
 
     float target_mm = mapper.intensityToPosition(position);
 
-    // ---- BUFFERED mode: push into jitter buffer ----
+    // ---- BUFFERED mode: skullfuck this sample deep into the jitter buffer,
+    //      straight down its throat until it's knotted in place. Smooth entry,
+    //      no gag reflex :3 ----
     if (g_state.getInputMode() == InputMode::BUFFERED) {
         if (g_state.resume_start_ms != 0) {
             uint32_t elapsed = millis() - g_state.resume_start_ms;
@@ -157,6 +161,7 @@ static void buttplugStop() {
 // ============================================================================
 
 // Core 1 — real-time: homing state machine + per-tick motor maintenance.
+// This is the dom core — it keeps the shaft disciplined and on time.
 static void motorTask(void* /*param*/) {
     while (true) {
         if (g_state.homing_in_progress) {
@@ -179,12 +184,15 @@ static void motorTask(void* /*param*/) {
 }
 
 // Core 0 — system: services all active transports and reports inbound rate.
+// This is the handler core — it takes all the dirty talk (TCode) and passes
+// orders to the dom core without breaking a sweat :3
 //
 // Moved to Core 0 per .clinerules §2 (networking/service on Core 0, real-time
-// motion on Core 1). The original monolithic code pinned buttplugTask to Core 1
-// "for coherence with the motion pipeline"; this corrects the architecture at
-// the cost of a cross-core call (motor.streamExtrapolated() from the TCode
-// callback), which on the ESP32-S3 is a sub-microsecond pipelined store.
+// motion on Core 1). The original monolithic code pinned the buttplug task to
+// Core 1 "for coherence with the motion pipeline"; this corrects the
+// architecture at the cost of a cross-core call (motor.streamExtrapolated()
+// from the TCode callback), which on the ESP32-S3 is basically a whisper
+// across the core interconnect — sub-microsecond, barely a tease.
 static void commsTask(void* /*param*/) {
     uint32_t last_report_ms  = 0;
     uint32_t last_frame_count = 0;
@@ -274,7 +282,7 @@ void setup() {
     generator.init();    // creates its own task on Core 1, priority 2
     interpolator.init(); // creates its own task on Core 1, priority 2
 
-    APPLOG("System ready - push shaft into endstop to home, or use the web UI");
+    APPLOG("System ready — push that thick shaft all the way in until it bottoms out on the endstop to home, or use the web UI you naughty pup :3");
 }
 
 

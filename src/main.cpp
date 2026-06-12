@@ -17,6 +17,7 @@
 #include "Kinematics.h"
 #include "SystemState.h"
 #include "ConfigStore.h"
+#include "Generator.h"
 
 // In serial-control mode the USB Serial port is dedicated to Intiface TCode, so
 // status/debug must go to the web log (applog), NOT Serial. APPLOG()/APPLOGF()
@@ -37,12 +38,15 @@
 MotorController motor;
 ButtplugServer buttplug;
 RangeMapper mapper;
-WebServer httpServer(HTTP_PORT);
 
 // Centralised, thread-safe runtime state (replaces ~30 file-scope globals).
 // All cross-core scalars are volatile (32-bit aligned, hardware-atomic on
 // ESP32-S3).  The ring buffer is protected by its own portMUX.
+// MUST be declared before Generator / Interpolator / etc. that reference it.
 static SystemState g_state;
+
+Generator generator(g_state, mapper, motor);
+WebServer httpServer(HTTP_PORT);
 
 
 // ============================================================================
@@ -699,93 +703,8 @@ void handleApiInterp() {
     httpServer.send(200, "application/json", "{\"ok\":true}");
 }
 
-// Generator task: when running, computes the carrier waveform (with optional
-
-// FM/AM modulation) and streams target positions to the motor at ~100 Hz. It
-// auto-yields to Intiface — if real app commands arrived in the last 250 ms and
-// the user hasn't paused/overridden, the generator goes idle so it doesn't fight
-// the app. Motion is mapped into the live stroke window (or full travel while
-// the window is bypassed is NOT used here — the generator always uses the
-// configured working window).
-void generatorTask(void* parameter) {
-    uint32_t last_diag_ms = 0;
-    while (true) {
-        // Local generation rate is user-selectable (20/50/100 Hz). Higher =
-        // smoother motion / more step planning; lower = lighter CPU. Re-read
-        // each loop so live changes from /api/gen take effect immediately.
-        uint16_t ghz = g_state.gen_rate_tick_hz; if (ghz < 5) ghz = 5; if (ghz > 200) ghz = 200;
-        const TickType_t period = pdMS_TO_TICKS(1000 / ghz);
-
-        bool intiface_recent = (g_state.last_intiface_ms != 0) &&
-                               (millis() - g_state.last_intiface_ms < 250);
-        bool user_has_control = g_state.paused || g_state.manual_override;
-        bool emit = g_state.gen.running && g_state.homed &&
-                    (user_has_control || !intiface_recent);
-        g_state.gen_active = emit;
-
-        // Diagnostics: while the generator is running, log once per second so the
-        // Log tab reflects what it's doing — either why it's idle, or a heartbeat
-        // with the live target while it's actually driving the motor.
-        if (g_state.gen.running && (millis() - last_diag_ms > 1000)) {
-            last_diag_ms = millis();
-            if (!g_state.homed)
-                APPLOG("Generator: waiting - motor not homed");
-            else if (intiface_recent && !user_has_control)
-                APPLOG("Generator: yielding to active Intiface (use Pause/Override to keep control)");
-            else
-            APPLOGF("Generator: running target=%.1fmm phase=%.2f window=[%.0f,%.0f]",
-                    mapper.getMinMm() + g_state.gen.offset * (mapper.getMaxMm() - mapper.getMinMm())
-                        + (kinematics::ease(kinematics::carrier(g_state.gen.wave, g_state.gen_phase), g_state.gen.ease) - 0.5f)
-                          * g_state.gen.depth * (mapper.getMaxMm() - mapper.getMinMm()),
-                        g_state.gen_phase, mapper.getMinMm(), mapper.getMaxMm());
-        }
-
-
-
-        if (emit) {
-            uint32_t now_us = micros();
-            float dt = (g_state.gen_last_us != 0) ? (now_us - g_state.gen_last_us) / 1e6f : 0.0f;
-            g_state.gen_last_us = now_us;
-            if (dt < 0.0f || dt > 0.5f) dt = 0.0f;   // guard against wrap/stall
-
-            float rate  = g_state.gen.rate_hz;
-            float depth = g_state.gen.depth;
-
-            // Advance the modulator clock and apply FM (rate) or AM (depth).
-            if (g_state.gen.mod != 0) {
-                g_state.gen_mod_clock += dt * g_state.gen.mod_rate;
-                if (g_state.gen_mod_clock > 1.0f) g_state.gen_mod_clock -= floorf(g_state.gen_mod_clock);
-                float m = kinematics::modShape(g_state.gen.mod_wave, g_state.gen_mod_clock);
-                if (g_state.gen.mod == 1) {        // rate FM: swing rate by +/- mod_amp Hz
-                    rate = fmaxf(0.05f, rate + (m - 0.5f) * 2.0f * g_state.gen.mod_amp);
-                } else {                     // depth AM: reduce depth, scaled by mod_amp (Hz) vs rate
-                    float a = constrain(g_state.gen.mod_amp / fmaxf(g_state.gen.rate_hz, 0.1f), 0.0f, 1.0f);
-                    depth = constrain(depth * (1.0f - 0.5f * m * a), 0.02f, 1.0f);
-                }
-
-            }
-
-            // Advance carrier phase and map into the working window.
-            g_state.gen_phase += dt * rate;
-            if (g_state.gen_phase > 1.0f) g_state.gen_phase -= floorf(g_state.gen_phase);
-            float c = kinematics::ease(kinematics::carrier(g_state.gen.wave, g_state.gen_phase), g_state.gen.ease);
-
-            float lo = mapper.getMinMm(), hi = mapper.getMaxMm();
-            float span = hi - lo;
-            float center = lo + g_state.gen.offset * span;
-            float pos = center + (c - 0.5f) * depth * span;
-            pos = constrain(pos, lo, hi);
-
-            // streamTo() re-targets without force-stopping; at 100 Hz the motor
-            // glides smoothly through the waveform. speed 0 => configured max.
-            motor.streamTo(pos, 0.0f);
-        } else {
-            g_state.gen_last_us = 0;   // reset dt so resume doesn't take a giant step
-        }
-
-        vTaskDelay(period);
-    }
-}
+// The generator task has been extracted to motion/Generator.h/.cpp.
+// See Generator::init() in setup() below.
 
 // ============================================================================
 // Buffered interpolation (BUFFERED input mode)
@@ -1284,7 +1203,7 @@ void setup() {
     // On-device waveform generator. Same core as the motor/control tasks so its
     // streamTo() calls stay coherent with the motion pipeline; priority below
     // the motor task so step generation always wins.
-    xTaskCreatePinnedToCore(generatorTask, "Generator", 4096, NULL, 2, NULL, 1);
+    generator.init();
     // Buffered-interpolation task: resamples sporadic Intiface input at a fixed
     // local rate (20/50/100 Hz) with easing. Same core/priority as the generator
     // (both feed streamTo() and are mutually exclusive with it in practice).

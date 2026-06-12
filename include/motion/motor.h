@@ -5,7 +5,7 @@
 #include <Arduino.h>
 #include "freertos/FreeRTOS.h"
 #include "freertos/semphr.h"
-#include "config.h"
+#include "config_api.h"
 
 // Forward declarations
 class TMC2160Stepper;

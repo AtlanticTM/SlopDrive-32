@@ -21,7 +21,7 @@
 
 
 #include "buttplug.h"
-#include "applog.h"
+#include "AppLog.h"
 #include <NimBLEDevice.h>
 
 

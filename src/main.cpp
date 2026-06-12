@@ -10,11 +10,11 @@
 #include <LittleFS.h>
 
 
-#include "config.h"
+#include "config_api.h"
 #include "motor.h"
 #include "buttplug.h"
 #include "range_mapper.h"
-#include "applog.h"
+#include "AppLog.h"
 
 // In serial-control mode the USB Serial port is dedicated to Intiface TCode, so
 // status/debug must go to the web log (applog), NOT Serial. APPLOG()/APPLOGF()

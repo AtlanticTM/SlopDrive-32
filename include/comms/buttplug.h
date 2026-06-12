@@ -27,7 +27,7 @@
 #include <Arduino.h>
 #include <WebSocketsServer.h>
 #include <WebSocketsClient.h>
-#include "config.h"
+#include "config_api.h"
 
 // Forward declarations for NimBLE types so the header stays light (the actual
 // NimBLE includes live in buttplug.cpp).

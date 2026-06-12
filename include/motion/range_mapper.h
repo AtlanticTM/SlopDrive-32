@@ -1,6 +1,6 @@
 #pragma once
 
-#include "config.h"
+#include "config_api.h"
 
 /**
  * RangeMapper - Maps Buttplug intensity (0.0-1.0) to physical positions

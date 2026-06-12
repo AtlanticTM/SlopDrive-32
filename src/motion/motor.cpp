@@ -6,7 +6,7 @@
 
 #include "freertos/FreeRTOS.h"
 #include "freertos/task.h"
-#include "applog.h"
+#include "AppLog.h"
 
 // In serial-control mode the USB Serial port is dedicated to Intiface TCode, so
 // debug output must go to the in-memory web log instead of Serial (which would

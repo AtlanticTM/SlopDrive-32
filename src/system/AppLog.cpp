@@ -1,5 +1,5 @@
 // In-memory log buffer implementation - SlopDrive-32
-#include "applog.h"
+#include "AppLog.h"
 #include "freertos/FreeRTOS.h"
 #include "freertos/semphr.h"
 

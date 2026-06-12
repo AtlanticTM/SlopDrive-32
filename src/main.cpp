@@ -2,7 +2,6 @@
 #include <WiFi.h>
 #include <WebServer.h>
 #include <ESPmDNS.h>
-#include <Preferences.h>
 #include <esp_wifi.h>
 #include <esp_timer.h>
 #include <ArduinoJson.h>
@@ -17,6 +16,7 @@
 #include "AppLog.h"
 #include "Kinematics.h"
 #include "SystemState.h"
+#include "ConfigStore.h"
 
 // In serial-control mode the USB Serial port is dedicated to Intiface TCode, so
 // status/debug must go to the web log (applog), NOT Serial. APPLOG()/APPLOGF()
@@ -38,7 +38,6 @@ MotorController motor;
 ButtplugServer buttplug;
 RangeMapper mapper;
 WebServer httpServer(HTTP_PORT);
-Preferences prefs;
 
 // Centralised, thread-safe runtime state (replaces ~30 file-scope globals).
 // All cross-core scalars are volatile (32-bit aligned, hardware-atomic on
@@ -104,139 +103,7 @@ static void setupWiFi() {
 // ============================================================================
 // Configuration Persistence (Preferences/NVS)
 // ============================================================================
-
-// Persist all settings to NVS. PREVIOUS BUG: this wrote with prefs.* without
-// ever opening the namespace for WRITING - loadConfig() had opened it read-only
-// and then prefs.end()'d it, so every putX() here silently no-op'd and nothing
-// was ever saved. We now open the namespace read-write for the duration of the
-// save and close it afterward.
-static void saveConfig() {
-    if (!prefs.begin("strokeengine", false)) {   // false = read-WRITE
-        APPLOG("saveConfig: failed to open NVS for write!");
-        return;
-    }
-    prefs.putFloat("range_min", mapper.getMinMm());
-    prefs.putFloat("range_max", mapper.getMaxMm());
-    prefs.putUShort("max_speed", (uint16_t)g_state.config.max_speed_mm_s);
-    prefs.putUShort("accel", (uint16_t)g_state.config.acceleration_mm_s2);
-    prefs.putUShort("lookahead", motor.getLookaheadMs());
-    prefs.putUShort("overshoot", (uint16_t)motor.getMaxOvershootMm());
-    prefs.putBool("auto_dur", g_state.auto_duration);
-    prefs.putFloat("def_rmin", g_state.default_range_min);
-    prefs.putFloat("def_rmax", g_state.default_range_max);
-    prefs.putBool("expert", g_state.expert_mode);
-    prefs.putUChar("transport", (uint8_t)g_state.getTransport());
-
-    // Input mode + buffered interpolation + generator tick rate
-    prefs.putUChar("input_mode", (uint8_t)g_state.getInputMode());
-    prefs.putUChar("buf_easing", g_state.buf_easing);
-    prefs.putUChar("buf_depth", g_state.buf_depth);
-    prefs.putUShort("buf_tick", g_state.buf_tick_hz);
-    prefs.putUShort("gen_tick", g_state.gen_rate_tick_hz);
-
-
-
-
-    // TMC driver tunables (from the Motor tab)
-    prefs.putUShort("tmc_run", g_state.driver.run_current_ma);
-    prefs.putUChar("tmc_hold", g_state.driver.hold_current_pct);
-    prefs.putUChar("tmc_sc", g_state.driver.stealthchop);
-    prefs.putUInt("tmc_tpwm", g_state.driver.tpwm_thrs);
-    prefs.putUChar("tmc_toff", g_state.driver.toff);
-    prefs.putUChar("tmc_tbl", g_state.driver.tbl);
-    prefs.putChar("tmc_hs", g_state.driver.hstart);
-    prefs.putChar("tmc_he", g_state.driver.hend);
-
-    prefs.end();
-    APPLOG("Config saved to NVS");
-}
-
-static void loadConfig() {
-    // Always start with defaults
-    g_state.config = getDefaultConfig();
-    g_state.driver = DriverConfig();   // default-constructed = config.h defaults
-    mapper.setRange(g_state.config.min_position_mm, g_state.config.max_position_mm);
-
-    // Try to load saved values (read-only mode)
-    if (prefs.begin("strokeengine", true)) {
-        float rmin = prefs.getFloat("range_min", g_state.config.min_position_mm);
-        float rmax = prefs.getFloat("range_max", g_state.config.max_position_mm);
-        uint16_t spd = prefs.getUShort("max_speed", (uint16_t)g_state.config.max_speed_mm_s);
-        uint16_t acc = prefs.getUShort("accel", (uint16_t)g_state.config.acceleration_mm_s2);
-        uint16_t look = prefs.getUShort("lookahead", 20);
-        uint16_t over = prefs.getUShort("overshoot", 8);
-        g_state.auto_duration = prefs.getBool("auto_dur", true);
-        g_state.default_range_min = prefs.getFloat("def_rmin", 0.0f);
-        g_state.default_range_max = prefs.getFloat("def_rmax", PHYSICAL_MAX_TRAVEL_MM);
-        g_state.expert_mode = prefs.getBool("expert", false);
-        {
-            TransportMode t = (TransportMode)prefs.getUChar("transport", (uint8_t)DEFAULT_TRANSPORT_MODE);
-            if ((uint8_t)t > (uint8_t)TransportMode::BT) t = DEFAULT_TRANSPORT_MODE;
-            g_state.setTransport(t);
-        }
-
-        // Input mode + buffered interpolation + generator tick rate
-        {
-            InputMode im = (InputMode)prefs.getUChar("input_mode", (uint8_t)InputMode::BUFFERED);
-            if ((uint8_t)im > (uint8_t)InputMode::BUFFERED) im = InputMode::EXTRAPOLATE;
-            g_state.setInputMode(im);
-        }
-        g_state.buf_easing = constrain((int)prefs.getUChar("buf_easing", g_state.buf_easing), 0, 4);
-        g_state.buf_depth  = constrain((int)prefs.getUChar("buf_depth", g_state.buf_depth), 1, 5);
-        { uint16_t bt = prefs.getUShort("buf_tick", g_state.buf_tick_hz);
-          g_state.buf_tick_hz = (bt >= 75) ? 100 : (bt >= 35) ? 50 : 20; }
-        { uint16_t gt = prefs.getUShort("gen_tick", g_state.gen_rate_tick_hz);
-          g_state.gen_rate_tick_hz = (gt >= 75) ? 100 : (gt >= 35) ? 50 : 20; }
-
-        // Validate startup defaults; fall back to full travel if nonsensical.
-
-        if (g_state.default_range_min < 0.0f || g_state.default_range_min > PHYSICAL_MAX_TRAVEL_MM ||
-            g_state.default_range_max <= 0.0f || g_state.default_range_max > PHYSICAL_MAX_TRAVEL_MM ||
-            g_state.default_range_min >= g_state.default_range_max) {
-            g_state.default_range_min = 0.0f;
-            g_state.default_range_max = PHYSICAL_MAX_TRAVEL_MM;
-        }
-
-
-        // TMC tunables
-        g_state.driver.run_current_ma   = prefs.getUShort("tmc_run", g_state.driver.run_current_ma);
-        g_state.driver.hold_current_pct = prefs.getUChar("tmc_hold", g_state.driver.hold_current_pct);
-        g_state.driver.stealthchop      = prefs.getUChar("tmc_sc", g_state.driver.stealthchop);
-        g_state.driver.tpwm_thrs        = prefs.getUInt("tmc_tpwm", g_state.driver.tpwm_thrs);
-        g_state.driver.toff             = prefs.getUChar("tmc_toff", g_state.driver.toff);
-        g_state.driver.tbl              = prefs.getUChar("tmc_tbl", g_state.driver.tbl);
-        g_state.driver.hstart           = prefs.getChar("tmc_hs", g_state.driver.hstart);
-        g_state.driver.hend             = prefs.getChar("tmc_he", g_state.driver.hend);
-        prefs.end();
-
-        // Validate: reject 0 or out-of-range values
-        if (rmin < 0.0f || rmin > PHYSICAL_MAX_TRAVEL_MM) rmin = g_state.config.min_position_mm;
-        if (rmax <= 0.0f || rmax > PHYSICAL_MAX_TRAVEL_MM) rmax = g_state.config.max_position_mm;
-        if (rmin >= rmax) { rmin = g_state.config.min_position_mm; rmax = g_state.config.max_position_mm; }
-        if (spd == 0 || spd > (uint16_t)MAX_SPEED_MM_S) spd = (uint16_t)g_state.config.max_speed_mm_s;
-        if (acc == 0 || acc > 5000) acc = (uint16_t)g_state.config.acceleration_mm_s2;
-        if (g_state.driver.run_current_ma < 250 || g_state.driver.run_current_ma > 3000)
-            g_state.driver.run_current_ma = TMC_RUN_CURRENT_MA;
-        if (g_state.driver.toff < 1 || g_state.driver.toff > 15) g_state.driver.toff = TMC_TOFF;
-
-        mapper.setRange(rmin, rmax);
-        g_state.config.max_speed_mm_s = (float)spd;
-        g_state.config.acceleration_mm_s2 = (float)acc;
-        g_state.config.run_current_ma = g_state.driver.run_current_ma;
-
-        // Apply persisted inertia/predictive-smoothing settings to the motor.
-        if (look > 200) look = 20;
-        if (over > 50) over = 8;
-        motor.setLookaheadMs(look);
-        motor.setMaxOvershootMm((float)over);
-
-        APPLOGF("Config: range=[%.1f, %.1f] speed=%.0f accel=%.0f run=%umA look=%u over=%u",
-                rmin, rmax, (float)spd, (float)acc, g_state.driver.run_current_ma, look, over);
-    } else {
-        prefs.end();
-        APPLOG("No saved config, using defaults");
-    }
-}
+// Moved to system/ConfigStore.h/.cpp — use ConfigStore::save() / ConfigStore::load().
 
 // ============================================================================
 // Transport mode management
@@ -466,7 +333,7 @@ void handleApiSettings() {
         // we apply them to the motor immediately WITHOUT hammering NVS on every
         // slider tick. Only full "Save" posts (no_persist absent/false) persist.
         bool no_persist = doc["no_persist"] | false;
-        if (!no_persist) saveConfig();
+        if (!no_persist) ConfigStore::save(g_state, mapper, motor);
 
 
         JsonDocument resp;
@@ -640,7 +507,7 @@ void handleApiTmc() {
     motor.applyDriverConfig(g_state.driver);
 
     bool save = doc["save"] | false;
-    if (save) saveConfig();
+    if (save) ConfigStore::save(g_state, mapper, motor);
 
     JsonDocument resp;
     resp["ok"] = true;
@@ -688,7 +555,7 @@ void handleApiMode() {
     else { httpServer.send(400, "application/json", "{\"error\":\"mode must be WS|SER|BT\"}"); return; }
 
     applyTransport(mode);
-    saveConfig();   // persist the selection
+    ConfigStore::save(g_state, mapper, motor);   // persist the selection
 
     JsonDocument resp;
     resp["ok"]   = true;
@@ -823,7 +690,7 @@ void handleApiInterp() {
     }
 
     bool save = doc["save"] | false;
-    if (save) saveConfig();
+    if (save) ConfigStore::save(g_state, mapper, motor);
 
     APPLOGF("Interp: mode=%s easing=%u depth=%u tick=%uHz",
             (g_state.getInputMode() == InputMode::BUFFERED) ? "buffered" : "extrapolate",
@@ -1346,9 +1213,9 @@ void setup() {
         APPLOG("LittleFS mount FAILED - upload filesystem image (pio run -t uploadfs)");
     }
 
-    // Load saved configuration (loadConfig handles prefs.begin/end internally).
+    // Load saved configuration (NVS persistence lives in ConfigStore).
     // This also populates g_state.driver with any saved TMC tunables.
-    loadConfig();
+    ConfigStore::load(g_state, mapper, motor);
 
 
     // Initialize motor system

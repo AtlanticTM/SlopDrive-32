@@ -144,9 +144,13 @@ function reflectInputMode(mode) {
   if (bp) bp.style.display = (inputMode === 'buffered') ? 'block' : 'none';
 }
 function pushInterp(save) {
+  // Read the active interpolation rate button instead of assuming 50 Hz.
+  // Default to 100 when nothing is selected — we're faster by default now. :3
+  var a = document.querySelector('#bufTickSeg button.active');
+  var tick = a ? parseInt(a.dataset.hz) : 100;
   post('/api/interp', {
     mode: inputMode, depth: parseInt($('bufDepth').value),
-    tick: 50, easing: parseInt($('bufEasing').value), save: !!save
+    tick: tick, easing: parseInt($('bufEasing').value), save: !!save
   });
 }
 async function loadInterp() {
@@ -155,10 +159,10 @@ async function loadInterp() {
 
 function genTickValue() {
   var a = document.querySelector('#genTickSeg button.active');
-  return a ? parseInt(a.dataset.hz) : 50;
+  return a ? parseInt(a.dataset.hz) : 100;
 }
 async function loadGenTick() {
-  try { var d = await get('/api/gen'); if (!d) return; var hz = d.rate_tick || 50; document.querySelectorAll('#genTickSeg button').forEach(function(b) { b.classList.toggle('active', parseInt(b.dataset.hz) === hz); }); } catch (e) {}
+  try { var d = await get('/api/gen'); if (!d) return; var hz = d.rate_tick || 100; document.querySelectorAll('#genTickSeg button').forEach(function(b) { b.classList.toggle('active', parseInt(b.dataset.hz) === hz); }); } catch (e) {}
 }
 
 export function initSettings() {

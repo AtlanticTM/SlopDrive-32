@@ -88,9 +88,9 @@ void ConfigStore::load(SystemState& state, RangeMapper& mapper, MotorDriver& mot
         state.buf_easing = constrain((int)prefs.getUChar("buf_easing", state.buf_easing), 0, 4);
         state.buf_depth  = constrain((int)prefs.getUChar("buf_depth", state.buf_depth), 1, 5);
         { uint16_t bt = prefs.getUShort("buf_tick", state.buf_tick_hz);
-          state.buf_tick_hz = (bt >= 75) ? 100 : (bt >= 35) ? 50 : 20; }
+          state.buf_tick_hz = (bt >= 150) ? 200 : (bt >= 75) ? 100 : (bt >= 35) ? 50 : 20; }
         { uint16_t gt = prefs.getUShort("gen_tick", state.gen_rate_tick_hz);
-          state.gen_rate_tick_hz = (gt >= 75) ? 100 : (gt >= 35) ? 50 : 20; }
+          state.gen_rate_tick_hz = (gt >= 150) ? 200 : (gt >= 75) ? 100 : (gt >= 35) ? 50 : 20; }
 
         // Validate startup defaults; fall back to full travel if nonsensical.
         if (state.default_range_min < 0.0f || state.default_range_min > PHYSICAL_MAX_TRAVEL_MM ||

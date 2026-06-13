@@ -133,13 +133,15 @@ struct SystemState {
     uint32_t               last_intiface_ms = 0;
 
     // Generator local tick rate (cross-core)
-    volatile uint16_t      gen_rate_tick_hz = 50;
-
+    // Default cadence we pound at — 100 Hz gives buttery-smooth position updates
+    // without making the S3 break a sweat. Bump to 200 if you're feeling greedy. :3
+    volatile uint16_t      gen_rate_tick_hz = 100;
+    
     // ---- Input mode & buffer tuning (cross-core) -----------------------------
     volatile uint8_t       input_mode   = static_cast<uint8_t>(InputMode::BUFFERED);
     volatile uint8_t       buf_easing   = 1;    // 0=linear 1=ease-in-out …
     volatile uint8_t       buf_depth    = 2;    // 1..5 samples of look-behind
-    volatile uint16_t      buf_tick_hz  = 50;   // local interpolation rate (Hz)
+    volatile uint16_t      buf_tick_hz  = 100;   // local interpolation rate (Hz)
 
     // --------------------------------------------------------------------------
     // Convenience helpers — zero-cost inline

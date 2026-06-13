@@ -23,6 +23,9 @@ static void _bleTxResponse(const char* msg) {
 // NimBLE delivers events to subclasses of its callback interfaces.  These thin
 // shims just forward into the owning BleTransport instance.
 
+// NimBLE 1.4.x callbacks: plain signatures, no NimBLEConnInfo on the leash.
+// These thin shims just forward the central's filthy little writes into the
+// owning BleTransport. Good pup, takes it and passes it along. :3
 class BleServerCallbacks : public NimBLEServerCallbacks {
 public:
     explicit BleServerCallbacks(BleTransport* owner) : _owner(owner) {}
@@ -31,7 +34,7 @@ public:
     }
     void onDisconnect(NimBLEServer* /*srv*/) override {
         _owner->_onDisconnect();
-        // Resume advertising so the next host can find us again.
+        // Resume advertising so the next host can mount us again. :3
         NimBLEDevice::startAdvertising();
     }
 private:
@@ -62,7 +65,8 @@ void BleTransport::begin() {
     if (_running) return;
 
     NimBLEDevice::init(BLE_DEVICE_NAME);
-    // Boost TX power a little for more reliable range.
+    // NimBLE 1.4.x: setPower() takes the esp_power_level_t enum. P9 = +9 dBm,
+    // the max legal output. We rail this antenna as loud as the spec allows. :3
     NimBLEDevice::setPower(ESP_PWR_LVL_P9);
 
     _server = NimBLEDevice::createServer();
@@ -80,11 +84,14 @@ void BleTransport::begin() {
     _tx_char = svc->createCharacteristic(
         BLE_NUS_TX_CHAR_UUID, NIMBLE_PROPERTY::NOTIFY);
 
+    // NimBLE 1.4.x: the service must be explicitly started before we advertise
+    // it — no implicit auto-start here. Spin it up, then start grinding out
+    // advertising packets so hosts can find us and slide in. The device name
+    // rides along automatically from NimBLEDevice::init(). :3
     svc->start();
 
     NimBLEAdvertising* adv = NimBLEDevice::getAdvertising();
     adv->addServiceUUID(BLE_NUS_SERVICE_UUID);
-    adv->setName(BLE_DEVICE_NAME);
     adv->setScanResponse(true);
     NimBLEDevice::startAdvertising();
 

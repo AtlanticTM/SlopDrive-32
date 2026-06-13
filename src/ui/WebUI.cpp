@@ -452,7 +452,11 @@ void WebUI::handleApiGen() {
 
     if (doc["rate_tick"].is<int>()) {
         int r = doc["rate_tick"];
-        _state.gen_rate_tick_hz = (r >= 75) ? 100 : (r >= 35) ? 50 : 20;
+        // Map the raw Hertz value to the nearest valid tick rate. We keep the
+        // rungs spaced out (20/50/100/200) so the UI buttons map cleanly and
+        // nobody accidentally picks 137 Hz. If the value isn't close to any
+        // rung, snap to the nearest one — we're a good boy, not a brat. :3
+        _state.gen_rate_tick_hz = (r >= 150) ? 200 : (r >= 75) ? 100 : (r >= 35) ? 50 : 20;
     }
 
     // ---- Generator config — lock the whole struct so the Core-1 generator -----
@@ -517,7 +521,10 @@ void WebUI::handleApiInterp() {
     if (doc["depth"].is<int>())  _state.buf_depth  = constrain((int)doc["depth"], 1, 5);
     if (doc["tick"].is<int>()) {
         int t = doc["tick"];
-        _state.buf_tick_hz = (t >= 75) ? 100 : (t >= 35) ? 50 : 20;
+        // Same rung logic as the generator tick — 20/50/100/200, snapped clean.
+        // The interpolator's inner loop already clamps 5..200 on its side, so
+        // all we do here is map the UI value to the nearest valid rung. :3
+        _state.buf_tick_hz = (t >= 150) ? 200 : (t >= 75) ? 100 : (t >= 35) ? 50 : 20;
     }
 
     bool save = doc["save"] | false;

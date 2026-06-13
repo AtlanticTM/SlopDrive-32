@@ -341,7 +341,7 @@
           <div class="field"><label>Buffer depth</label><input type="range" id="bufDepth" min="1" max="5" step="1" value="2"><div class="readout"><b id="bufDepthVal">2</b><span>samples</span></div></div>
           <div class="mini-label">Interpolation rate</div>
           <div class="seg" id="bufTickSeg" style="margin-bottom:12px">
-            <button data-hz="20">20 Hz</button><button class="active" data-hz="50">50 Hz</button><button data-hz="100">100 Hz</button>
+            <button data-hz="20">20 Hz</button><button data-hz="50">50 Hz</button><button class="active" data-hz="100">100 Hz</button><button data-hz="200">200 Hz</button>
           </div>
           <div class="mini-label">Easing between points</div>
           <div class="field"><select id="bufEasing"><option value="0">Linear</option><option value="1" selected>Ease in-out (smooth)</option><option value="2">Ease in (accelerate)</option><option value="3">Ease out (decelerate)</option><option value="4">Ease in-out cubic (strong S)</option></select></div>
@@ -356,7 +356,7 @@
         <div class="card-head"><span data-ico="i-gauge"></span><h2>Generation rate</h2>
           <button class="info" data-tip="How often the device recomputes and sends motion to the motor (waveform generator). Higher = smoother but more CPU/step load."><span data-ico="i-info"></span></button></div>
         <div class="seg" id="genTickSeg">
-          <button data-hz="20">20 Hz</button><button class="active" data-hz="50">50 Hz</button><button data-hz="100">100 Hz</button>
+          <button data-hz="20">20 Hz</button><button data-hz="50">50 Hz</button><button class="active" data-hz="100">100 Hz</button><button data-hz="200">200 Hz</button>
         </div>
       </div>
 

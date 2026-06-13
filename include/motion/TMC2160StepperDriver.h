@@ -88,12 +88,19 @@ private:
     // that fight a fresh homing cycle.
     void resetStreamState();
 
+    // Self-contained homing task — spawned by home(), deletes itself when done.
+    // Mirrors StrokeEngine's _homingProcedure pattern exactly. :3
+    static void _homingTaskImpl(void* param);
+    void        _homingTask();
+    TaskHandle_t _homingTaskHandle = nullptr;
+
     TMC2160Stepper*  _tmc     = nullptr;
     FastAccelStepper* _stepper = nullptr;
 
-    bool _homed  = false;
-    bool _homing = false;
-    bool _enabled = false;
+    bool    _homed  = false;
+    bool    _homing = false;
+    bool    _enabled = false;
+    int32_t _home_speed_steps_s = 4000;  // stored by home(), read by _homingTask()
     bool _moving_to_target = false;
     int32_t _target_steps = 0;
 

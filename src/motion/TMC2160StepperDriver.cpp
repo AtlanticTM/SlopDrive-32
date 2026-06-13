@@ -144,14 +144,17 @@ void TMC2160StepperDriver::init() {
     if (_stepper) {
         // Configure direction pin (false = do not invert direction signal)
         _stepper->setDirectionPin(PIN_DIR, false);
-        // Configure enable pin (true = active LOW enable, matches TMC2160 EN)
+        // Register the enable pin WITH FAS — let FAS own it completely.
+        // enableActiveLow=true matches the TMC2160 EN pin (LOW = enabled).
+        // setAutoEnable(false) means WE call enableOutputs()/disableOutputs()
+        // manually — FAS never auto-enables on move or auto-disables on stop.
+        // This is exactly the StrokeEngine pattern and it's the only way
+        // enableOutputs() + move() work reliably after an E-stop cycle. :3
         _stepper->setEnablePin(PIN_ENABLE, true);
-        // Do NOT use AutoEnable - we manage the enable pin manually
-        // so we can cut power on stop() and control homing precisely
         _stepper->setAutoEnable(false);
-        _stepper->disableOutputs();
+        _stepper->disableOutputs();   // start disabled — motor is soft on boot
         _stepper->setCurrentPosition(0);
-        MLOGLN(F("FastAccelStepper: Motor initialized (STEP/DIR/EN configured)"));
+        MLOGLN(F("FastAccelStepper: Motor initialized (STEP/DIR/EN registered with FAS)"));
     } else {
         MLOGLN(F("FastAccelStepper: Failed to create motor!"));
     }
@@ -174,20 +177,32 @@ void TMC2160StepperDriver::emergencyStop() {
 }
 
 // ---- Enable / Disable --------------------------------------------------------
+//
+// FAS owns the enable pin (registered via setEnablePin in init()). We call
+// enableOutputs()/disableOutputs() through FAS — this is the StrokeEngine
+// pattern and the only way the enable state stays consistent with FAS's
+// internal _outputEnabled flag. When FAS knows the pin is enabled, move()
+// commands execute immediately without any silent no-ops. :3
+//
+// PIN_ENABLE is active LOW (TMC2160 EN pin): LOW = enabled, HIGH = disabled.
+// The `true` passed to setEnablePin() tells FAS about the active-LOW polarity.
 
 void TMC2160StepperDriver::enable() {
-    if (_stepper) {
-        _stepper->enableOutputs();
-        _enabled = true;
-    }
+    // FAS owns this pin — let it drive it. FAS sets the pin LOW (active LOW)
+    // and marks _outputEnabled = true so subsequent move() calls go through
+    // without being silently blocked. The TMC2160 stands at attention. :3
+    if (_stepper) _stepper->enableOutputs();
+    _enabled = true;
 }
 
 void TMC2160StepperDriver::disable() {
     if (_stepper) {
         hardStop();
+        // FAS drives the pin HIGH (disabled) and clears _outputEnabled.
+        // The shaft goes soft, fully tracked by FAS's internal state. :3
         _stepper->disableOutputs();
-        _enabled = false;
     }
+    _enabled = false;
 }
 
 // ---- Stream-state reset ------------------------------------------------------
@@ -201,136 +216,174 @@ void TMC2160StepperDriver::resetStreamState() {
 }
 
 // ---- Homing ------------------------------------------------------------------
+//
+// Architecture: mirrors StrokeEngine's _homingProcedure exactly.
+//
+// home() enables the motor via FAS, then spawns a one-shot FreeRTOS task on
+// Core 1 that owns the entire homing sequence — sweep, poll, stop, backoff,
+// re-zero. The task blocks internally with vTaskDelay(20ms) between endstop
+// polls, which is the same cadence StrokeEngine uses. When done (success or
+// failure) the task sets _homed/_homing and deletes itself. motorTask on Core 1
+// just watches _homing go false and syncs g_state. No runHomingStep() polling
+// needed — the task IS the homing loop. :3
+//
+// Using move() (relative steps) instead of runForward() (indefinite velocity
+// run) is the other key difference from our old approach. move() queues a
+// bounded step count; FAS executes it through its normal trapezoidal planner
+// with the registered enable pin fully tracked. runForward() bypasses some of
+// that planner state and can silently no-op after an E-stop cycle.
+
+// Static trampoline — FreeRTOS needs a plain C function pointer, so we bounce
+// through this into the member function. The `this` pointer rides in as param.
+void TMC2160StepperDriver::_homingTaskImpl(void* param) {
+    static_cast<TMC2160StepperDriver*>(param)->_homingTask();
+}
+
+// The actual homing procedure — runs entirely inside its own task on Core 1.
+// Blocks with vTaskDelay() between polls so the scheduler stays happy. :3
+void TMC2160StepperDriver::_homingTask() {
+    MLOGF("Homing task: endstop pin %d state=%d (active=%d)\n",
+          PIN_ENDSTOP, digitalRead(PIN_ENDSTOP), ENDSTOP_ACTIVE_STATE);
+
+    // Set homing speed and a very high acceleration so the sweep is effectively
+    // constant-velocity (no ramp to worry about). StrokeEngine uses /10 of max
+    // accel for homing — we use a fixed high value since we want instant start.
+    _stepper->setSpeedInHz((uint32_t)_home_speed_steps_s);
+    _stepper->setAcceleration(100000);
+
+    // Check if we're already sitting on the endstop — if so, back off first
+    // then sweep back in, exactly like StrokeEngine does. :3
+    if (digitalRead(PIN_ENDSTOP) == ENDSTOP_ACTIVE_STATE) {
+        MLOGLN(F("Homing: Already at endstop — backing off before sweep"));
+        // Back off 2x keepout (10mm) to clear the switch
+        _stepper->move(-(int32_t)mmToNative(10.0f));  // negative = away from endstop
+        while (_stepper->isRunning()) {
+            vTaskDelay(pdMS_TO_TICKS(20));
+        }
+    }
+
+    // Sweep toward the endstop using move() with a step count large enough to
+    // cover the full physical travel plus margin. move() is a RELATIVE command
+    // that goes through FAS's normal trapezoidal planner with the enable pin
+    // fully tracked — unlike runForward() which can silently no-op after an
+    // E-stop cycle because it bypasses some planner state. We ram it deep,
+    // balls-to-the-wall, until the endstop screams. :3
+    int32_t sweep_steps = (int32_t)(PHYSICAL_MAX_TRAVEL_MM * STEPS_PER_MM * 1.5f);
+    _stepper->move(sweep_steps);  // positive = toward endstop
+
+    MLOGF("Homing: Sweeping %d steps toward endstop at %u Hz\n",
+          sweep_steps, (uint32_t)_home_speed_steps_s);
+
+    // Poll the endstop every 20ms — same cadence as StrokeEngine. The motor
+    // keeps thrusting forward while we watch for the switch to bottom out. :3
+    while (_stepper->isRunning()) {
+        if (digitalRead(PIN_ENDSTOP) == ENDSTOP_ACTIVE_STATE) {
+            // Endstop triggered — slam the brakes and zero the position.
+            // forceStopAndNewPosition() atomically halts the pulse train AND
+            // sets the position counter. setCurrentPosition() silently fails
+            // if the queue is still busy, so we use the atomic version. :3
+            _stepper->forceStopAndNewPosition(0);
+
+            // Wait for the motor to fully stop shuddering before we issue
+            // the backoff move — FAS ignores moveTo() if the queue is busy.
+            uint32_t stop_to = millis() + 500;
+            while (_stepper->isRunning() && millis() < stop_to) {
+                vTaskDelay(pdMS_TO_TICKS(2));
+            }
+
+            MLOGF("Homing: Endstop hit! pos=%d running=%d\n",
+                  _stepper->getCurrentPosition(), _stepper->isRunning());
+
+            // Back off 5mm from the endstop — pull out just the tip, don't
+            // stay balls-deep on the switch or it'll re-trigger the moment
+            // anyone breathes on it. Negative steps = away from endstop. :3
+            _stepper->setSpeedInHz(2000);
+            _stepper->setAcceleration(50000);
+            int32_t backoff = -mmToNative(5.0f);
+            _stepper->moveTo(backoff);
+
+            uint32_t timeout = millis() + 3000;
+            while (_stepper->isRunning() && millis() < timeout) {
+                vTaskDelay(pdMS_TO_TICKS(2));
+            }
+            MLOGF("Homing: backoff done, pos=%d\n", _stepper->getCurrentPosition());
+
+            if (digitalRead(PIN_ENDSTOP) == ENDSTOP_ACTIVE_STATE) {
+                MLOGLN(F("WARNING: Endstop still active after backoff! Check switch/wiring."));
+            } else {
+                MLOGLN(F("Homing: Endstop released OK"));
+            }
+
+            // Re-zero at this backed-off position — this is home (0mm).
+            // The carriage is now 5mm out from the endstop, which is our
+            // coordinate origin. Everything else is measured from here. :3
+            _stepper->forceStopAndNewPosition(0);
+            _current_position_mm = 0.0f;
+            _homed = true;
+            _homing = false;
+
+            MLOGLN(F("Homing: Complete — at home position, ready to pound :3"));
+            _homingTaskHandle = nullptr;
+            vTaskDelete(nullptr);
+            return;
+        }
+        vTaskDelay(pdMS_TO_TICKS(20));
+    }
+
+    // Motor stopped without hitting the endstop — homing failed. Disable the
+    // motor so it doesn't hold position at some unknown location, and leave
+    // _homed = false so the system knows it needs to try again. :3
+    MLOGLN(F("Homing: FAILED — motor stopped before endstop. Check wiring/travel."));
+    _stepper->disableOutputs();
+    _homing = false;
+    _homed  = false;
+
+    _homingTaskHandle = nullptr;
+    vTaskDelete(nullptr);
+}
 
 bool TMC2160StepperDriver::home(int32_t home_speed_steps_s) {
     if (_homing) return false;
 
     MLOGLN(F("Homing: Starting..."));
-    MLOGF("Homing: Endstop pin %d state = %d (active=%d)\n",
-          PIN_ENDSTOP, digitalRead(PIN_ENDSTOP), ENDSTOP_ACTIVE_STATE);
     _homing = true;
-    _homed = false;
+    _homed  = false;
+    _home_speed_steps_s = (home_speed_steps_s > 0) ? home_speed_steps_s : 4000;
 
-    // Drop any leftover stream/target state from before this home request,
-    // otherwise the motorTask keeps humping old Intiface targets and fights
-    // the homing runForward() — the motor just bangs the endstop endlessly
-    // without ever finishing. Nobody wants a partner who can't settle down. :3
+    // Drop any leftover stream/target state — stale Intiface targets fight the
+    // homing sweep and cause the motor to bang the endstop endlessly without
+    // ever finishing. Nobody wants a partner who can't settle down. :3
     resetStreamState();
 
-    // Make sure no previous move is still draining the queue before we start
-    // the homing sweep, or runForward() gets ghosted like a bad hookup.
-    if (_stepper && _stepper->isRunning()) {
-        _stepper->forceStop();
-        uint32_t to = millis() + 300;
-        while (_stepper->isRunning() && millis() < to) {
-            vTaskDelay(pdMS_TO_TICKS(2));
-        }
-    }
+    // Enable the motor via FAS BEFORE spawning the task — exactly like
+    // StrokeEngine's enableAndHome() calls enableOutputs() before creating the
+    // homing task. FAS needs _outputEnabled = true before move() will execute.
+    _stepper->enableOutputs();
+    _enabled = true;
 
-    // Make sure motor is enabled
-    enable();
+    // Spawn the self-contained homing task on Core 1 (same core as motorTask
+    // and the FAS engine). Priority 20 matches StrokeEngine — high enough to
+    // preempt normal motion but below the FAS ISR. The task deletes itself
+    // when homing completes or fails. :3
+    xTaskCreatePinnedToCore(
+        _homingTaskImpl,        // static trampoline
+        "Homing",               // task name
+        4096,                   // stack (bytes) — homing does some string ops
+        this,                   // param = this pointer
+        20,                     // priority — same as StrokeEngine
+        &_homingTaskHandle,     // handle so we can kill it on E-stop
+        1                       // Core 1 — same core as FAS engine
+    );
 
-    // First, check if we're already at the endstop
-    if (digitalRead(PIN_ENDSTOP) == ENDSTOP_ACTIVE_STATE) {
-        MLOGLN(F("Homing: Already at home position"));
-        _stepper->setCurrentPosition(0);
-        _current_position_mm = 0.0f;
-        _homed = true;
-        _homing = false;
-        return true;
-    }
-
-    // Homing speed: 200 steps/s = 2.5mm/s at 16x microsteps (80 steps/mm)
-    // Use runForward() for constant-speed homing with no deceleration target
-    int32_t home_speed_abs = (home_speed_steps_s > 0) ? home_speed_steps_s : 200;
-
-    // Set very high acceleration so motion is effectively instant/linear (no ramp)
-    _stepper->setAcceleration(100000);
-    _stepper->setSpeedInHz(home_speed_abs);
-
-    // Brief delay to ensure driver is fully enabled before stepping
-    delay(100);
-
-    // runForward() moves indefinitely in positive direction (toward endstop)
-    // This avoids the "stopped before endstop" false trigger from moveTo()
-    _stepper->runForward();
-
-    MLOGF("Homing: Running forward at %d steps/s\n", home_speed_abs);
-
-    return false;  // Will complete via runHomingStep() calls
+    return false;  // homing is async — watch isHoming()/isHomed() for completion
 }
 
+// runHomingStep() is a no-op — homing now runs entirely inside its own task.
+// The function is kept to satisfy the MotorDriver interface; motorTask no
+// longer calls it. :3
 void TMC2160StepperDriver::runHomingStep() {
-    if (!_homing) return;
-
-    // Periodically log endstop state so user can debug via the web log
-    static uint32_t _last_log_ms = 0;
-    uint32_t now = millis();
-    if (now - _last_log_ms > 500) {
-        _last_log_ms = now;
-        MLOGF("Homing poll: endstop=%d running=%d pos=%d\n",
-              digitalRead(PIN_ENDSTOP), _stepper->isRunning(),
-              _stepper->getCurrentPosition());
-    }
-
-    // Check endstop during homing
-    if (digitalRead(PIN_ENDSTOP) == ENDSTOP_ACTIVE_STATE) {
-        // Hit the endstop - stop immediately and clear the queue.
-        // forceStopAndNewPosition() clears the command queue AND sets position
-        // atomically. This is REQUIRED: setCurrentPosition() silently fails if
-        // the queue is still busy after a plain forceStop().
-        _stepper->forceStopAndNewPosition(0);
-
-        // Wait until the stepper is fully stopped before issuing a new move.
-        // FastAccelStepper ignores runBackward()/moveTo() if a previous command
-        // is still draining from the queue - this is why backoff never moved.
-        uint32_t stop_to = millis() + 500;
-        while (_stepper->isRunning() && millis() < stop_to) {
-            vTaskDelay(pdMS_TO_TICKS(2));
-        }
-
-        _current_position_mm = 0.0f;
-        _homed = true;
-        _homing = false;
-
-        MLOGF("Homing: Endstop triggered! Stopped at step pos=%d running=%d\n",
-              _stepper->getCurrentPosition(), _stepper->isRunning());
-
-        // Back off from endstop — pull out just the tip (5mm), don't stay
-        // balls-deep on the switch. Move NEGATIVE = away from endstop toward
-        // front. Use a bounded moveTo() now that the queue is empty and the
-        // motor's finished shuddering against the endstop. Gotta leave some
-        // breathing room or he'll trigger again the second anyone twitches. :3
-        _stepper->setSpeedInHz(2000);
-        _stepper->setAcceleration(50000);
-        int32_t backoff_target = -mmToNative(5.0f);  // 5mm = step -400
-        int8_t bret = _stepper->moveTo(backoff_target);
-        MLOGF("Homing: backoff moveTo(%d) ret=%d\n", backoff_target, bret);
-
-        // Wait for backoff move to complete
-        uint32_t timeout = millis() + 3000;
-        while (_stepper->isRunning() && millis() < timeout) {
-            vTaskDelay(pdMS_TO_TICKS(2));
-        }
-        MLOGF("Homing: backoff done, pos=%d\n", _stepper->getCurrentPosition());
-
-        // Verify endstop is released after backoff
-        if (digitalRead(PIN_ENDSTOP) == ENDSTOP_ACTIVE_STATE) {
-            MLOGLN(F("WARNING: Endstop still active after backoff! Check switch/wiring."));
-        } else {
-            MLOGLN(F("Homing: Endstop released OK"));
-        }
-
-        // Re-zero at this backed-off position = home (0mm)
-        _stepper->forceStopAndNewPosition(0);
-        _current_position_mm = 0.0f;
-
-        MLOGLN(F("Homing: Complete - at home position"));
-        return;
-    }
-
-    // Note: with runForward(), motor runs indefinitely until endstop is hit.
-    // No "stopped before endstop" check needed - motor won't stop on its own.
+    // Nothing to do here — the homing task owns the loop now.
+    // motorTask watches _homing go false and syncs g_state. :3
 }
 
 // Push-to-home: let the user establish home by simply pushing the shaft into
@@ -591,14 +644,32 @@ float TMC2160StepperDriver::getTargetPosition() const {
 // ---- Stop / HardStop ---------------------------------------------------------
 
 void TMC2160StepperDriver::stop() {
-    // Stop movement and cut motor power
+    // E-stop: halt the pulse train, kill the homing task if it's running,
+    // disable the motor via FAS (keeps _outputEnabled in sync), and clear all
+    // state. The shaft goes completely soft — no ambiguity, no stale flags. :3
+
+    // Kill the homing task if it's mid-sweep — we're pulling out NOW. :3
+    if (_homingTaskHandle != nullptr) {
+        vTaskDelete(_homingTaskHandle);
+        _homingTaskHandle = nullptr;
+    }
+
     if (_stepper) {
         _stepper->forceStop();
+        // FAS drives PIN_ENABLE HIGH and clears _outputEnabled — consistent
+        // internal state so the next enableOutputs() + move() works cleanly.
         _stepper->disableOutputs();
     }
     _enabled = false;
-    // Also cancel any homing in progress
+    // Cancel any homing in progress — the task is dead, clear the flag.
     _homing = false;
+    // Full E-stop means we're no longer at a known position — the carriage
+    // might've moved while the motor was limp, or someone might've shoved it
+    // around. Clear _homed so the driver's internal state matches g_state.homed,
+    // which handleApiStop() also sets to false. Otherwise isHomed() returns
+    // stale truth and the next home cycle gets confused about where it is.
+    // A pulled plug means nobody knows where the tip is anymore. :3
+    _homed = false;
     // Drop stale stream/target state so the next Home/move starts clean and
     // nothing keeps re-issuing the last streamed target.
     resetStreamState();

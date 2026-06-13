@@ -125,6 +125,10 @@ void WebUI::handleRoot() {
 
 void WebUI::handleApiStatus() {
     JsonDocument doc;
+    // Monotonic uptime in milliseconds so the browser JS can detect an ESP32
+    // reboot (uptime resets to zero) and discard any stale cached state like
+    // homed=true from before the reset. No more confused post-reboot WebUI. :3
+    doc["uptime_ms"] = (uint32_t)millis();
     doc["wifi_connected"] = _state.wifi_ready;
     doc["ip"] = WiFi.localIP().toString();
     doc["homed"] = _state.homed;
@@ -290,13 +294,20 @@ void WebUI::handleApiHome() {
     if (!_state.homing_in_progress) {
         _state.homed = false;
         _state.homing_in_progress = true;
-        _motor.home();
+        // Don't call _motor.home() here from the handler core — that's a
+        // cross-core hookup with no protection. The dom core (Core 1 motorTask)
+        // owns the motor; let it see the flag and mount home() on its own terms.
+        // We just issued the order — he knows what to do. :3
     }
     _httpServer->send(200, "application/json", "{\"ok\":true}");
 }
 
 void WebUI::handleApiStop() {
-    _motor.stop();
+    // Flag-only from the handler core — no _motor.stop() cross-core call.
+    // Core 0 (us) sets the flags, Core 1 (motorTask) sees estop_requested
+    // and calls motor.stop() cleanly from the core that owns the hardware.
+    // Nobody crosses the streams, nobody gets ghosted. :3
+    _state.estop_requested = true;
     _state.homed = false;
     _state.homing_in_progress = false;
     _state.paused = false;

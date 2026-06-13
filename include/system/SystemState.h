@@ -91,6 +91,7 @@ struct SystemState {
     // ---- Loading / flow (cross-core) -----------------------------------------
     volatile bool          homed               = false;
     volatile bool          homing_in_progress  = false;
+    volatile bool          estop_requested     = false;   // Core 0 sets, Core 1 clears
     bool                   wifi_ready          = false;   // Core 0 only
 
     // ---- Config snapshots ----------------------------------------------------

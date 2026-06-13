@@ -162,20 +162,54 @@ static void buttplugStop() {
 
 // Core 1 — real-time: homing state machine + per-tick motor maintenance.
 // This is the dom core — it keeps the shaft disciplined and on time.
+//
+// The handler core (Core 0) sets flags (homing_in_progress, estop_requested)
+// to issue orders. We detect those flags here and call ALL motor hardware
+// operations from Core 1, where the FastAccelStepper engine lives. No cross-
+// core racing on the stepper object — the handler asks, the dom core does. :3
+//
+// Homing is now fully self-contained: motor.home() spawns its own FreeRTOS
+// task (mirroring StrokeEngine's _homingProcedure) that runs the sweep, polls
+// the endstop, does the backoff, and sets _homed/_homing when done. motorTask
+// just calls home() once to kick it off, then watches isHoming() go false. No
+// more runHomingStep() polling — the homing task IS the loop. :3
 static void motorTask(void* /*param*/) {
+    bool homing_started = false;
     while (true) {
-        if (g_state.homing_in_progress) {
-            motor.runHomingStep();
-            if (!motor.isHoming()) {
+        // ---- E-stop requested: the red button got slapped. Cut power NOW,
+        //      clear all motion state, make the shaft go completely soft.
+        //      We do this FIRST so it overrides any homing/streaming. :3 ----
+        if (g_state.estop_requested) {
+            motor.stop();            // kills homing task + forceStop + disableOutputs
+            homing_started = false;
+            g_state.estop_requested = false;
+            APPLOG("E-Stop handled — shaft is soft, waiting for orders~ :3");
+        }
+        // ---- Homing in progress: spawn the homing task ONCE, then watch
+        //      isHoming() go false when the task finishes. No polling needed —
+        //      the task owns the loop. :3 ----
+        else if (g_state.homing_in_progress) {
+            if (!motor.isHoming() && !homing_started) {
+                motor.home();          // spawns self-contained homing task on Core 1
+                homing_started = true;
+            }
+            // Once the homing task finishes (success or fail), sync g_state.
+            if (!motor.isHoming() && homing_started) {
                 g_state.homing_in_progress = false;
                 g_state.homed = motor.isHomed();
+                homing_started = false;
                 if (g_state.homed)
-                    APPLOG("System is now homed and ready");
+                    APPLOG("System is now homed and ready to pound :3");
+                else
+                    APPLOG("Homing failed — endstop not found. Check wiring.");
             }
-        } else if (!g_state.homed) {
-            if (motor.checkPushToHome()) {
-                g_state.homed = true;
-                APPLOG("System homed via push-to-home and ready");
+        } else {
+            homing_started = false;
+            if (!g_state.homed) {
+                if (motor.checkPushToHome()) {
+                    g_state.homed = true;
+                    APPLOG("System homed via push-to-home and ready");
+                }
             }
         }
         motor.update();

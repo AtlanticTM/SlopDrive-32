@@ -1,0 +1,417 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no">
+  <meta name="theme-color" content="#10101c">
+  <title>SlopDrive-32</title>
+</head>
+<body>
+<!-- Shell: this is all the static HTML. Feature cards that are build-flagged
+     get injected by their respective feature modules at init time. -->
+<div class="toasts" id="toasts"></div>
+
+<!-- ===== UNIFIED HEADER: topbar + transport merged into one sticky bar, because
+     nobody wants a transport bar eating vertical inches on a big screen. :3 ===== -->
+<header>
+  <div class="topbar">
+    <div class="logo" data-ico="i-bolt"></div>
+    <div class="title">
+      <h1>SlopDrive-32</h1>
+      <p>Dynamic Motion Interface</p>
+    </div>
+    <div class="chips">
+      <span class="chip"><span class="dot" id="wifiDot"></span><span id="wifiText">WiFi</span></span>
+      <span class="chip"><span class="dot" id="homeDot"></span><span id="homeText">Motor</span></span>
+      <span class="chip"><span class="dot" id="ifDot"></span><span id="ifText">IF</span></span>
+    </div>
+  </div>
+  <div class="transport" id="transportBar">
+    <button class="tbtn pause" id="btnPause">
+      <span style="display:flex;align-items:center;gap:6px"><span style="width:15px;height:15px;display:inline-grid" data-ico="i-pause"></span> Pause</span>
+      <small id="pauseSub">ignore Intiface</small>
+    </button>
+    <button class="tbtn halt">
+      <span style="display:flex;align-items:center;gap:6px"><span style="width:15px;height:15px;display:inline-grid" data-ico="i-stop"></span> Halt</span>
+      <small>stop motion</small>
+    </button>
+    <button class="tbtn estop">
+      <span style="display:flex;align-items:center;gap:6px"><span style="width:15px;height:15px;display:inline-grid" data-ico="i-alert"></span> E-Stop</span>
+      <small>cut power</small>
+    </button>
+    <!-- Focus Mode — strips the UI down to essentials so the top can focus on the
+         pounding without extra chrome in the way. Saved to localStorage. :3 -->
+    <button class="tbtn focus-btn" id="btnFocus" title="Focus Mode — hide secondary controls">
+      <span style="display:flex;align-items:center;gap:4px"><span style="width:15px;height:15px;display:inline-grid" data-ico="i-target"></span> Focus</span>
+      <small>minimal UI</small>
+    </button>
+    <!-- Desktop Home button — lives in the header bar where it can't be missed.
+         Styled to match the transport buttons so it looks like it belongs. :3 -->
+    <button class="tbtn home-header-btn" id="homeBtnHeader" style="display:none" title="Home the machine">
+      <span style="display:flex;align-items:center;gap:4px"><span style="width:15px;height:15px;display:inline-grid" data-ico="i-home"></span> Home</span>
+      <small>bottom out</small>
+    </button>
+  </div>
+</header>
+
+<!-- ===== BANNERS: always visible regardless of active tab, because you NEED to
+     know when the machine is being bratty or when Intiface has been leashed. ===== -->
+<div class="banners-host">
+  <div id="ovBanner" class="banner amber">⚠ Override active — Intiface is ignored. You have full manual control; toggle off to ease back.</div>
+  <div id="pauseBanner" class="banner blue">⏸ Paused — Intiface ignored. Drive with the slider or generator below; unpausing eases control back.</div>
+  <div class="fault" id="faultBanner">
+    <span data-ico="i-alert"></span>
+    <div class="body">
+      <strong>Driver fault — short to ground.</strong><br>
+      Motor power was cut for safety. Power down, check the motor wiring for a pinched/shorted
+      coil, then clear the fault and re-home.
+      <button>Clear Fault</button>
+    </div>
+  </div>
+</div>
+
+<!-- ===== DESKTOP LAYOUT WRAPPER: on big screens this becomes a two-column
+     dashboard. On mobile it collapses into the single-column scroll we love. ===== -->
+<div class="desktop-layout">
+
+  <!-- Left sidebar — these cards are always visible on desktop so the operator
+       can tweak the stroke window and position without tab-switching. On mobile
+       the cards live inside the Drive tab and this sidebar is hidden. :3 -->
+  <aside class="sidebar" id="sidebarHost">
+    <div class="sidebar-cards" id="sidebarCards"></div>
+    <!-- Sidebar scrolls vertically, padding is handled by the sidebar itself. -->
+  </aside>
+
+  <!-- Resize handle — drag to resize the sidebar on desktop. The operator
+       gets to decide how thick they want their stroke window to be. :3 -->
+  <div class="resize-handle" id="resizeHandle" aria-hidden="true"><div class="resize-line"></div></div>
+
+  <!-- Right panel — the tab system lives here. Tab pills at the top, content
+       scrolls below. Each tab's cards get all the vertical room they crave. -->
+  <main class="main-panel">
+    <!-- Desktop tab bar — horizontal pills at the top of the right panel.
+         On mobile this whole nav is hidden; the bottom tab bar takes over. -->
+    <nav class="tabs tabs-desktop">
+      <button class="tab active" data-tab="drive"  data-ico="i-play"></button>
+      <button class="tab" data-tab="health" data-ico="i-heart"></button>
+      <button class="tab" data-tab="settings" data-ico="i-gear"></button>
+      <button class="tab" data-tab="log"    data-ico="i-terminal"></button>
+    </nav>
+
+    <div class="tab-contents-host">
+
+    <!-- ===================== DRIVE TAB (desktop: Motion Generator + Live Overrides only;
+         Stroke Window + Position cards move to the sidebar on big screens) ===================== -->
+    <div id="drive" class="tab-content active">
+
+      <!-- 1. Stroke Window (moves to sidebar on desktop) -->
+      <div class="card collapsible" data-sidebar-card="stroke">
+        <div class="card-head">
+          <span data-ico="i-range"></span><h2>Stroke Window</h2>
+          <button class="info" data-tip="Drag the highlighted box to slide the whole stroke window toward the front or back of the machine. Drag the white handles to trim each end. The green line shows the live carriage position. The grey track is the machine's full 240&nbsp;mm of travel — 0&nbsp;mm is home (fully in).">
+            <span data-ico="i-info"></span>
+          </button>
+          <span class="caret" data-ico="i-chevron"></span>
+        </div>
+        <div class="card-body">
+        <div class="designer">
+          <div class="track-col">
+            <div class="track-host" id="trackHost">
+              <div class="endcap top">Out / 240</div>
+              <div class="endcap bot">Home / 0</div>
+              <div class="window" id="win">
+                <div class="grip t"></div>
+                <div class="handle t" id="handleTop"><div class="bar"></div></div>
+                <div class="mid">
+                  <div class="big"><span id="winLen">100</span></div>
+                  <div class="small">mm</div>
+                </div>
+                <div class="handle b" id="handleBot"><div class="bar"></div></div>
+                <div class="grip b"></div>
+              </div>
+              <div class="posdot" id="posDot"></div>
+            </div>
+          </div>
+
+          <div class="ctl-col">
+            <div>
+              <div class="mini-label">Move whole window</div>
+              <div class="nudge">
+                <button class="btn ghost" data-action="nudgeWindow" data-arg="5"><span data-ico="i-up"></span> Toward out</button>
+                <button class="btn ghost" data-action="nudgeWindow" data-arg="-5"><span data-ico="i-down"></span> Toward in</button>
+              </div>
+            </div>
+
+            <div class="pair">
+              <div>
+                <div class="mini-label">Min (in)</div>
+                <input class="num" id="minNum" type="number" min="0" max="240" step="1" inputmode="numeric">
+              </div>
+              <div>
+                <div class="mini-label">Max (out)</div>
+                <input class="num" id="maxNum" type="number" min="0" max="240" step="1" inputmode="numeric">
+              </div>
+            </div>
+
+            <div>
+              <div class="mini-label">Trim ends</div>
+              <div class="nudge">
+                <button class="btn ghost" data-action="trim" data-arg="min,-5">In &minus;5</button>
+                <button class="btn ghost" data-action="trim" data-arg="min,5">In +5</button>
+                <button class="btn ghost" data-action="trim" data-arg="max,-5">Out &minus;5</button>
+                <button class="btn ghost" data-action="trim" data-arg="max,5">Out +5</button>
+              </div>
+            </div>
+
+            <div class="kv" style="margin-top:2px">
+              <span>Depth <b><span id="depthVal">100</span> mm</b></span>
+              <span>Span <b id="spanVal">10–110</b></span>
+            </div>
+          </div>
+        </div>
+
+        <div class="hint" style="margin-top:14px">Changes apply to the machine instantly as you drag — no save needed. The window is also kept in the saved settings.</div>
+        <div class="saved" id="saveIndRange">Applied</div>
+        </div>
+      </div>
+
+      <!-- 2. Position (moves to sidebar on desktop) -->
+      <div class="card collapsible" data-sidebar-card="position">
+        <div class="card-head">
+          <span data-ico="i-target"></span><h2>Position</h2>
+          <button class="info" data-tip="The slider follows the carriage live — drag it and the machine tracks instantly, no Go button. Set as Min/Max snaps the window edge to wherever the carriage is now."><span data-ico="i-info"></span></button>
+          <span class="caret" data-ico="i-chevron"></span>
+        </div>
+        <div class="card-body">
+        <div class="pos-big"><b id="currentPos">--</b><span>mm</span></div>
+
+        <div class="field">
+          <label>Target Position</label>
+          <input type="range" id="manualPos" min="0" max="240" value="0" step="1">
+          <div class="readout"><b id="manualPosVal">0</b><span>mm</span></div>
+        </div>
+
+        <div class="btn-row" style="margin-bottom:10px">
+          <button class="btn ghost" data-action="setBound" data-arg="min"><span data-ico="i-down"></span> Set as Min</button>
+          <button class="btn ghost" data-action="setBound" data-arg="max"><span data-ico="i-up"></span> Set as Max</button>
+        </div>
+
+        <label class="switch full" style="margin-bottom:10px">
+          <span><span class="lbl">Bypass limits</span><div class="hint" style="margin-top:2px">reach the full 0–240 mm, ignoring the window</div></span>
+          <span style="display:flex;align-items:center"><input type="checkbox" id="bypassLimits"><span class="track"></span></span>
+        </label>
+        <label class="switch full">
+          <span><span class="lbl">Override Intiface</span><div class="hint" style="margin-top:2px">take control; releasing eases back to Intiface</div></span>
+          <span style="display:flex;align-items:center"><input type="checkbox" id="overrideTog"><span class="track"></span></span>
+        </label>
+        </div>
+      </div>
+
+      <!-- 3. Motion Generator -->
+      <div class="card collapsible">
+        <div class="card-head">
+          <span data-ico="i-wave"></span><h2>Motion Generator</h2>
+          <button class="info" data-tip="Generates motion on the device itself, so it keeps running even if you close this tab or WiFi drops. Auto-yields if Intiface starts driving (unless you've paused or overridden). The FM/AM modulator slowly drifts the rate or depth for a less mechanical feel. The preview below visualizes the exact waveform the device is producing."><span data-ico="i-info"></span></button>
+          <span class="caret" data-ico="i-chevron"></span>
+        </div>
+        <div class="card-body">
+
+        <label class="switch full" style="margin-bottom:12px">
+          <span><span class="lbl">Waveform preview</span><div class="hint" style="margin-top:2px">visualize the generated motion (browser-side only)</div></span>
+          <span style="display:flex;align-items:center"><input type="checkbox" id="waveVizTog" checked><span class="track"></span></span>
+        </label>
+        <div id="waveCanvasWrap" style="margin-bottom:16px">
+          <canvas id="waveCanvas" style="width:100%;height:120px;display:block;background:#0a0b16;border:1px solid var(--line);border-radius:var(--radius-sm)"></canvas>
+        </div>
+
+        <div class="mini-label">Carrier waveform</div>
+
+        <div class="seg" id="waveSeg" style="margin-bottom:14px">
+          <button class="active" data-w="sine">Sine</button>
+          <button data-w="triangle">Triangle</button>
+          <button data-w="square">Square</button>
+          <button data-w="saw">Sawtooth</button>
+        </div>
+
+        <!-- Generator controls -->
+        <div class="field" id="genRateField"><label>Rate</label><input type="range" id="genRate" min="0.1" max="10" step="0.1" value="0.8"><div class="readout"><b id="genRateVal">0.8</b><span>Hz</span></div></div>
+        <div class="field" id="genDepthField"><label>Depth</label><input type="range" id="genDepth" min="5" max="100" step="1" value="80"><div class="readout"><b id="genDepthVal">80</b><span>% of window</span></div></div>
+        <div class="field" id="genOffField"><label>Center offset</label><input type="range" id="genOff" min="0" max="100" step="1" value="50"><div class="readout"><b id="genOffVal">50</b><span>%</span></div></div>
+        <div class="field" id="genEaseField"><label>Ease (soft ends)</label><input type="range" id="genEase" min="0" max="100" step="1" value="0"><div class="readout"><b id="genEaseVal">0</b><span>%</span></div></div>
+
+        <div class="mini-label" style="margin-top:4px">FM / AM modulator</div>
+        <div class="seg" id="modSeg" style="margin-bottom:14px">
+          <button class="active" data-m="off">Off</button>
+          <button data-m="rate">Rate FM</button>
+          <button data-m="depth">Depth AM</button>
+        </div>
+        <div id="modControls" style="display:none">
+          <div class="field"><label>Mod shape</label><select id="modWave"><option value="sine">Sine</option><option value="triangle">Triangle</option><option value="random">Random</option></select></div>
+          <div class="field"><label>Mod rate</label><input type="range" id="modRate" min="0.01" max="1" step="0.01" value="0.1"><div class="readout"><b id="modRateVal">0.10</b><span>Hz</span></div></div>
+          <div class="field"><label>Mod amplitude</label><input type="range" id="modAmp" min="0" max="2" step="0.05" value="0.8"><div class="readout"><b id="modAmpVal">0.80</b><span>Hz</span></div></div>
+        </div>
+
+        <button class="btn primary" id="genStartBtn"><span data-ico="i-play"></span> Start Generator</button>
+        <div class="hint" id="genNote">Generated on the device — keeps running even if you close this tab. Toggle the preview to visualize the motion.</div>
+
+        </div>
+      </div>
+
+      <!-- 4. Live Overrides -->
+      <div class="card collapsible">
+        <div class="card-head">
+          <span data-ico="i-sliders"></span><h2>Live Overrides</h2>
+          <button class="info" data-tip="Temporarily override the saved defaults in real time. These don't persist — reboot (or Reset to defaults) restores the values saved on the Settings tab."><span data-ico="i-info"></span></button>
+          <span class="caret" data-ico="i-chevron"></span>
+        </div>
+        <div class="card-body">
+        <div class="field"><label>Max Speed</label><input type="range" id="maxSpeed" min="50" max="3000" value="550" step="10"><div class="readout"><b id="speedVal">550</b><span>mm/s</span></div></div>
+        <div class="field"><label>Acceleration</label><input type="range" id="accel" min="200" max="8000" value="1500" step="50"><div class="readout"><b id="accelVal">1500</b><span>mm/s²</span></div></div>
+        <div class="field"><label>Lookahead</label><input type="range" id="lookahead" min="0" max="80" value="20" step="1"><div class="readout"><b id="lookaheadVal">20</b><span>ms</span></div></div>
+        <div class="field" style="margin-bottom:8px"><label>Max Overshoot</label><input type="range" id="overshoot" min="0" max="40" value="8" step="1"><div class="readout"><b id="overshootVal">8</b><span>mm</span></div></div>
+        <button class="btn ghost sm" style="width:100%" data-action="restoreDefaults"><span data-ico="i-reset"></span> Restore saved defaults</button>
+        </div>
+      </div>
+    </div>
+
+    <!-- ===================== HEALTH TAB ===================== -->
+    <div id="health" class="tab-content">
+      <div class="card" id="healthCard"><div class="card-body" style="text-align:center;padding:20px;color:var(--muted)">Driver health not available — no driver module loaded.</div></div>
+      <div class="card" id="loadCard"><div class="card-body" style="text-align:center;padding:20px;color:var(--muted)">Load monitoring not available.</div></div>
+    </div>
+
+    <!-- ===================== SETTINGS TAB ===================== -->
+    <div id="settings" class="tab-content">
+
+      <!-- Transport / connection -->
+      <div class="card tight" id="connCard">
+        <div class="card-head">
+          <span data-ico="i-link"></span><h2>Connection</h2>
+          <button class="info" data-tip="How Intiface / a host talks to the machine. WebSocket and Serial both use Intiface; Bluetooth advertises a BLE serial service a phone app or BLE host can connect to. Only one is active at a time — switching applies instantly and is remembered across reboots."><span data-ico="i-info"></span></button>
+        </div>
+        <div class="seg" id="modeSeg" style="margin-bottom:10px">
+          <button data-mode="WS">WebSocket</button>
+          <button data-mode="SER">Serial</button>
+          <button id="btModeBtn" data-mode="BT" style="display:none">Bluetooth</button>
+        </div>
+        <div class="hint" id="modeHint">Choose how the machine receives motion commands.</div>
+        <div class="chip" id="bleStatus" style="display:none;margin-top:10px">
+          <span class="dot" id="bleStatusDot"></span><span id="bleStatusText">Bluetooth</span>
+        </div>
+      </div>
+
+      <!-- Startup default range -->
+      <div class="card tight">
+        <div class="card-head">
+          <span data-ico="i-range"></span><h2>Startup Default Range</h2>
+          <button class="info" data-tip="The working window the machine resets to on boot. Mid-session changes on the Range tab persist too — this is just the home base to fall back to."><span data-ico="i-info"></span></button>
+        </div>
+        <div class="pair">
+          <div><div class="mini-label">Def min (mm)</div><input class="num" id="defMinNum" type="number" min="0" max="240" step="1" inputmode="numeric"></div>
+          <div><div class="mini-label">Def max (mm)</div><input class="num" id="defMaxNum" type="number" min="0" max="240" step="1" inputmode="numeric"></div>
+        </div>
+        <button class="btn ghost sm" style="margin-top:10px" data-action="useCurrentAsDefault"><span data-ico="i-check"></span> Use current window</button>
+      </div>
+
+      <!-- Default motion -->
+      <div class="card tight">
+        <div class="card-head"><span data-ico="i-sliders"></span><h2>Default Motion</h2>
+          <button class="info" data-tip="Saved defaults loaded on boot. You can override any of these live from the Control tab without changing what's saved here."><span data-ico="i-info"></span></button></div>
+        <div class="field"><label>Max Speed</label><input type="range" id="defMaxSpeed" min="50" max="3000" value="550" step="10"><div class="readout"><b id="defSpeedVal">550</b><span>mm/s</span></div></div>
+        <div class="field"><label>Acceleration</label><input type="range" id="defAccel" min="200" max="8000" value="1500" step="50"><div class="readout"><b id="defAccelVal">1500</b><span>mm/s²</span></div></div>
+        <div class="field"><label>Lookahead</label><input type="range" id="defLookahead" min="0" max="80" value="20" step="1"><div class="readout"><b id="defLookaheadVal">20</b><span>ms</span></div></div>
+        <div class="field" style="margin-bottom:0"><label>Max Overshoot</label><input type="range" id="defOvershoot" min="0" max="40" value="8" step="1"><div class="readout"><b id="defOvershootVal">8</b><span>mm</span></div></div>
+      </div>
+
+      <!-- Timing -->
+      <div class="card tight">
+        <div class="card-head"><span data-ico="i-gauge"></span><h2>Timing</h2>
+          <button class="info" data-tip="How raw Intiface position samples become motion. Extrapolate is best when the app sends at a steady rate; Buffered smooths out apps that send in bursts."><span data-ico="i-info"></span></button></div>
+        <div class="mini-label">Input mode</div>
+        <div class="seg" id="inputModeSeg" style="margin-bottom:12px">
+          <button class="active" data-im="extrapolate">Extrapolate</button>
+          <button data-im="buffered">Buffered</button>
+        </div>
+        <div id="extrapPanel">
+          <label class="switch"><input type="checkbox" id="autoDuration"><span class="track"></span><span class="lbl">Auto Duration</span></label>
+          <div class="mini-label" style="margin-top:4px;color:var(--faint)">Sizes each move to the real measured command interval (fixes apps that send a fixed move-duration). Best with a steady packet rate.</div>
+        </div>
+        <div id="bufPanel" style="display:none">
+          <div class="mini-label" style="color:var(--faint);margin-bottom:8px">Buffers incoming commands and interpolates locally — smooths out apps that send packets sporadically/in bursts.</div>
+          <div class="field"><label>Buffer depth</label><input type="range" id="bufDepth" min="1" max="5" step="1" value="2"><div class="readout"><b id="bufDepthVal">2</b><span>samples</span></div></div>
+          <div class="mini-label">Interpolation rate</div>
+          <div class="seg" id="bufTickSeg" style="margin-bottom:12px">
+            <button data-hz="20">20 Hz</button><button class="active" data-hz="50">50 Hz</button><button data-hz="100">100 Hz</button>
+          </div>
+          <div class="mini-label">Easing between points</div>
+          <div class="field"><select id="bufEasing"><option value="0">Linear</option><option value="1" selected>Ease in-out (smooth)</option><option value="2">Ease in (accelerate)</option><option value="3">Ease out (decelerate)</option><option value="4">Ease in-out cubic (strong S)</option></select></div>
+        </div>
+        <div class="kv" style="margin-top:14px;background:var(--card-2);border:1px solid var(--line);border-radius:var(--radius-sm);padding:11px 12px">
+          <span>Measured rate</span><span><b id="measuredHz">--</b> Hz · <b id="measuredMs">--</b> ms</span>
+        </div>
+      </div>
+
+      <!-- Generation rate -->
+      <div class="card tight">
+        <div class="card-head"><span data-ico="i-gauge"></span><h2>Generation rate</h2>
+          <button class="info" data-tip="How often the device recomputes and sends motion to the motor (waveform generator). Higher = smoother but more CPU/step load."><span data-ico="i-info"></span></button></div>
+        <div class="seg" id="genTickSeg">
+          <button data-hz="20">20 Hz</button><button class="active" data-hz="50">50 Hz</button><button data-hz="100">100 Hz</button>
+        </div>
+      </div>
+
+      <!-- Motor driver card (injected by tmc.js) -->
+      <div id="tmcCardTarget"></div>
+
+      <button class="btn primary" onclick="saveSettings()"><span data-ico="i-save"></span> Save All Settings</button>
+      <div class="saved" id="saveInd">Settings saved</div>
+
+      <!-- Expert / safety -->
+      <div class="card tight" style="margin-top:14px">
+        <div class="card-head"><span data-ico="i-shield"></span><h2>Safety</h2>
+          <button class="info" data-tip="Expert mode lets the sliders run all the way to the hardware ceiling. Sliders gradient toward red as you approach the limits — the closer to red, the higher the risk of lost steps, heat or wear."><span data-ico="i-info"></span></button></div>
+        <label class="switch full"><span class="lbl">Expert mode</span>
+          <span style="display:flex;align-items:center"><input type="checkbox" id="expertMode"><span class="track"></span></span></label>
+        <div id="expBanner" class="banner amber" style="margin-top:10px">⚠ Expert mode on — sliders run to the hardware ceiling. Watch the red zone.</div>
+      </div>
+    </div>
+
+    <!-- ===================== LOG TAB ===================== -->
+    <div id="log" class="tab-content">
+      <div class="card">
+        <div class="card-head"><span data-ico="i-terminal"></span><h2>Device Log</h2></div>
+        <div class="chip" id="serialModeBar" style="display:none;margin-bottom:12px">
+          <span class="dot" id="serialDot"></span><span id="serialModeText">Serial</span>
+        </div>
+        <div class="hint" style="margin-bottom:10px">The USB port carries Intiface commands, so boot/debug messages appear here.</div>
+        <pre class="log" id="logBox">Loading…</pre>
+        <div class="btn-row">
+          <button class="btn" id="refreshLogBtn"><span data-ico="i-reset"></span> Refresh</button>
+          <label class="switch" style="flex:1;justify-content:flex-end">
+            <span style="font-size:.8rem;color:var(--muted)">Auto</span>
+            <input type="checkbox" id="autoLog" checked><span class="track"></span>
+          </label>
+        </div>
+      </div>
+    </div>
+
+    </div><!-- .tab-contents-host -->
+  </main><!-- .main-panel -->
+
+</div><!-- .desktop-layout -->
+
+<!-- Persistent Home button (mobile FAB — hidden on desktop in favour of the
+     compact sidebar button so it doesn't dominate the whole page width. :3) -->
+<button class="home-fab" id="homeFab"><span data-ico="i-home"></span> Home the machine</button>
+
+<!-- Bottom navigation (mobile only — hidden on desktop, replaced by tabs-desktop pills) -->
+<nav class="tabs tabs-mobile">
+  <button class="tab active" data-tab="drive"  data-ico="i-play"></button>
+  <button class="tab" data-tab="health" data-ico="i-heart"></button>
+  <button class="tab" data-tab="settings" data-ico="i-gear"></button>
+  <button class="tab" data-tab="log"    data-ico="i-terminal"></button>
+</nav>
+
+<script type="module" src="./src/main.js"></script>
+</body>
+</html>

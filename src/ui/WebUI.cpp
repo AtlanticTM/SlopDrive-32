@@ -112,6 +112,22 @@ void WebUI::update() {
 // ============================================================================
 
 void WebUI::handleRoot() {
+    // Serve the gzipped bundle first — it's the production build from the
+    // Vite pipeline, smaller and faster over-the-wire. :3
+    //
+    // IMPORTANT: streamFile() on ESP32 Arduino auto-detects ".gz" by filename
+    // extension and adds Content-Encoding: gzip itself. We must NOT also call
+    // sendHeader("Content-Encoding","gzip") or the browser gets a double header
+    // and chokes with ERR_CONTENT_DECODING_FAILED. Let streamFile do its thing. :3
+    if (LittleFS.exists("/index.html.gz")) {
+        File f = LittleFS.open("/index.html.gz", "r");
+        if (f) {
+            _httpServer->streamFile(f, "text/html");
+            f.close();
+            return;
+        }
+    }
+    // Fallback: uncompressed index.html (dev convenience, manual upload)
     if (LittleFS.exists("/index.html")) {
         File f = LittleFS.open("/index.html", "r");
         if (f) {
@@ -120,6 +136,7 @@ void WebUI::handleRoot() {
             return;
         }
     }
+    // Last resort: the built-in error page (filesystem not uploaded yet)
     _httpServer->send(200, "text/html", htmlFallbackPage);
 }
 

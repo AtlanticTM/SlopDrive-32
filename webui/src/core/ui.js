@@ -184,7 +184,11 @@ function colorAt(frac) {
   return hex([lerp(C_WARN[0], C_BAD[0], t), lerp(C_WARN[1], C_BAD[1], t), lerp(C_WARN[2], C_BAD[2], t)]);
 }
 
-const GRADIENT_SLIDERS = ['maxSpeed', 'accel', 'lookahead', 'genRate', 'runCurrent', 'defMaxSpeed', 'defAccel', 'defLookahead', 'modRate', 'modAmp'];
+// All sliders that get the gradient fill treatment. The accel/speed sliders
+// are in both the Live Overrides card and the Default Motion card — both IDs
+// are listed here so paintSlider() colours them correctly regardless of which
+// card the operator is looking at. :3
+const GRADIENT_SLIDERS = ['maxSpeed', 'accel', 'lookahead', 'overshoot', 'genRate', 'runCurrent', 'defMaxSpeed', 'defAccel', 'defLookahead', 'defOvershoot', 'modRate', 'modAmp'];
 
 export function paintSlider(slider) {
   if (!slider || !GRADIENT_SLIDERS.includes(slider.id)) return;

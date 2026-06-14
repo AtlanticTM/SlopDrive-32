@@ -11,6 +11,10 @@
 // ============================================================================
 
 void ConfigStore::save(SystemState& state, RangeMapper& mapper, MotorDriver& motor) {
+    // Inflate the NVS storage with the current running state — every stroke
+    // window limit, every current setting, every tune knob the user has
+    // lubed up gets packed tight and sealed away. Next boot, it all leaks
+    // back out exactly as it was, like a well-trained bladder holding it in. :3
     Preferences prefs;
     if (!prefs.begin("strokeengine", false)) {   // false = read-WRITE
         applog("saveConfig: failed to open NVS for write!");
@@ -20,8 +24,11 @@ void ConfigStore::save(SystemState& state, RangeMapper& mapper, MotorDriver& mot
     prefs.putFloat("range_max", mapper.getMaxMm());
     prefs.putUShort("max_speed", (uint16_t)state.config.max_speed_mm_s);
     prefs.putUShort("accel", (uint16_t)state.config.acceleration_mm_s2);
-    prefs.putUShort("lookahead", motor.getLookaheadMs());
-    prefs.putUShort("overshoot", (uint16_t)motor.getMaxOvershootMm());
+    // Continuous-blend policy (1=let-it-land, 2=allow-reversal, 3=hybrid).
+    // Replaces the old lookahead/overshoot NVS keys — those tunables retired
+    // when the predictive extrapolator got thrown out. :3
+    prefs.putUChar("blend_mode", motor.getBlendMode());
+
     prefs.putBool("auto_dur", state.auto_duration);
     prefs.putFloat("def_rmin", state.default_range_min);
     prefs.putFloat("def_rmax", state.default_range_max);
@@ -67,9 +74,9 @@ void ConfigStore::load(SystemState& state, RangeMapper& mapper, MotorDriver& mot
         float rmax = prefs.getFloat("range_max", state.config.max_position_mm);
         uint16_t spd = prefs.getUShort("max_speed", (uint16_t)state.config.max_speed_mm_s);
         uint16_t acc = prefs.getUShort("accel", (uint16_t)state.config.acceleration_mm_s2);
-        uint16_t look = prefs.getUShort("lookahead", 20);
-        uint16_t over = prefs.getUShort("overshoot", 8);
+        uint8_t blend = prefs.getUChar("blend_mode", 1);  // 1=let-it-land default
         state.auto_duration = prefs.getBool("auto_dur", true);
+
         state.default_range_min = prefs.getFloat("def_rmin", 0.0f);
         state.default_range_max = prefs.getFloat("def_rmax", PHYSICAL_MAX_TRAVEL_MM);
         state.expert_mode = prefs.getBool("expert", false);
@@ -88,9 +95,9 @@ void ConfigStore::load(SystemState& state, RangeMapper& mapper, MotorDriver& mot
         state.buf_easing = constrain((int)prefs.getUChar("buf_easing", state.buf_easing), 0, 4);
         state.buf_depth  = constrain((int)prefs.getUChar("buf_depth", state.buf_depth), 1, 5);
         { uint16_t bt = prefs.getUShort("buf_tick", state.buf_tick_hz);
-          state.buf_tick_hz = (bt >= 75) ? 100 : (bt >= 35) ? 50 : 20; }
+          state.buf_tick_hz = (bt >= 150) ? 200 : (bt >= 75) ? 100 : (bt >= 35) ? 50 : 20; }
         { uint16_t gt = prefs.getUShort("gen_tick", state.gen_rate_tick_hz);
-          state.gen_rate_tick_hz = (gt >= 75) ? 100 : (gt >= 35) ? 50 : 20; }
+          state.gen_rate_tick_hz = (gt >= 150) ? 200 : (gt >= 75) ? 100 : (gt >= 35) ? 50 : 20; }
 
         // Validate startup defaults; fall back to full travel if nonsensical.
         if (state.default_range_min < 0.0f || state.default_range_min > PHYSICAL_MAX_TRAVEL_MM ||
@@ -116,7 +123,15 @@ void ConfigStore::load(SystemState& state, RangeMapper& mapper, MotorDriver& mot
         if (rmax <= 0.0f || rmax > PHYSICAL_MAX_TRAVEL_MM) rmax = state.config.max_position_mm;
         if (rmin >= rmax) { rmin = state.config.min_position_mm; rmax = state.config.max_position_mm; }
         if (spd == 0 || spd > (uint16_t)MAX_SPEED_MM_S) spd = (uint16_t)state.config.max_speed_mm_s;
-        if (acc == 0 || acc > 5000) acc = (uint16_t)state.config.acceleration_mm_s2;
+        // Clamp: floor at 10 (anything lower is a corrupt/zero NVS write),
+        // ceiling at 20000 mm/s² (matches WebUI and setAcceleration() limits).
+        // The old floor of 2000 was silently rejecting valid low-accel values
+        // like 1500 and resetting them to the 8000 default — so the WebUI
+        // showed 1500 but the motor ran at 8000 the whole time. owo
+        // Now any value 10..20000 is accepted as-is. :3
+        if (acc < 10 || acc > 20000) acc = (uint16_t)state.config.acceleration_mm_s2;
+
+
         if (state.driver.run_current_ma < 250 || state.driver.run_current_ma > 3000)
             state.driver.run_current_ma = TMC_RUN_CURRENT_MA;
         if (state.driver.toff < 1 || state.driver.toff > 15) state.driver.toff = TMC_TOFF;
@@ -126,14 +141,14 @@ void ConfigStore::load(SystemState& state, RangeMapper& mapper, MotorDriver& mot
         state.config.acceleration_mm_s2 = (float)acc;
         state.config.run_current_ma = state.driver.run_current_ma;
 
-        // Apply persisted inertia/predictive-smoothing settings to the motor.
-        if (look > 200) look = 20;
-        if (over > 50) over = 8;
-        motor.setLookaheadMs(look);
-        motor.setMaxOvershootMm((float)over);
+        // Apply persisted continuous-blend policy to the motor. Clamp 1..3 so a
+        // corrupt/legacy NVS value can't put us in an undefined mode. :3
+        if (blend < 1 || blend > 3) blend = 1;
+        motor.setBlendMode(blend);
 
-        applogf("Config: range=[%.1f, %.1f] speed=%.0f accel=%.0f run=%umA look=%u over=%u",
-                rmin, rmax, (float)spd, (float)acc, state.driver.run_current_ma, look, over);
+        applogf("Config: range=[%.1f, %.1f] speed=%.0f accel=%.0f run=%umA blend=%u",
+                rmin, rmax, (float)spd, (float)acc, state.driver.run_current_ma, blend);
+
     } else {
         prefs.end();
         applog("No saved config, using defaults");

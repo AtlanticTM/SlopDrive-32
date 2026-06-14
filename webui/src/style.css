@@ -20,6 +20,13 @@
   --tabbar: 74px;          /* bottom tab bar height (mobile) */
 }
 
+/* ===================== Custom scrollbars ===================== */
+::-webkit-scrollbar { width: 6px; height: 6px; }
+::-webkit-scrollbar-track { background: var(--bg); }
+::-webkit-scrollbar-thumb { background: var(--line); border-radius: 3px; }
+::-webkit-scrollbar-thumb:hover { background: var(--faint); }
+* { scrollbar-width: thin; scrollbar-color: var(--line) var(--bg); }
+
 * { margin: 0; padding: 0; box-sizing: border-box; -webkit-tap-highlight-color: transparent; }
 html, body { height: 100%; }
 /* Stop the whole page sliding horizontally while dragging sliders on mobile. */
@@ -475,7 +482,7 @@ pre.log {
     flex-direction: column;
     overflow-y: auto;
     overflow-x: hidden;
-    padding: 16px 14px 12px;
+    padding: 16px 20px 12px;
   }
   /* In desktop the sidebar cards are NOT collapsible — they're always open
      because they're the primary reason the sidebar exists. :3 */
@@ -533,14 +540,53 @@ pre.log {
     overflow: hidden;
   }
 
-  /* ---- Desktop tab bar — horizontal pills at the top of the right panel ---- */
+  /* ---- Graph panel — sits above the tab pills on desktop so the motion
+     graph is always visible no matter which tab you're on. Full-width,
+     non-collapsible, canvas fills available space. :3 ---- */
+  .graph-panel {
+    flex: 0 0 auto;
+    display: block;
+    padding: 8px 20px 12px;
+  }
+  .graph-panel:empty {
+    display: none;
+  }
+  .graph-panel .card {
+    margin-bottom: 0;
+    max-width: none !important;
+  }
+  .graph-panel .card.collapsible {
+    cursor: default;
+  }
+  .graph-panel .card.collapsible > .card-head {
+    cursor: default;
+  }
+  .graph-panel .card .caret {
+    display: none !important;
+  }
+  .graph-panel .card .card-body {
+    max-height: none !important;
+    opacity: 1;
+    pointer-events: auto;
+  }
+  .graph-panel .graph-body canvas {
+    height: 220px;
+  }
+  @media (min-height: 900px) {
+    .graph-panel .graph-body canvas { height: 280px; }
+  }
+  @media (min-height: 1100px) {
+    .graph-panel .graph-body canvas { height: 340px; }
+  }
+
   .tabs-desktop {
     flex: 0 0 auto;
     display: flex;
-    margin: 0;
-    padding: 10px 16px;
+    margin: 0 20px;
+    padding: 10px 20px 8px;
     gap: 6px;
-    background: none;
+    background: var(--card);
+    border-top: 1px solid var(--line);
     border-bottom: 1px solid var(--line);
     position: static;
     max-width: none;
@@ -668,17 +714,89 @@ body.focus-mode .hint { display: none !important; }
 body.focus-mode .tab[data-tab="log"] { display: none !important; } /* no logs in the heat of it */
 body.focus-mode .card .kv { display: none !important; }
 body.focus-mode .card .saved { display: none !important; }
-body.focus-mode #waveVizTog { display: none !important; }
-body.focus-mode #waveVizTog + .track { display: none !important; } /* hide waveform preview toggle */
 body.focus-mode .switch .lbl { font-size: .82rem; } /* slightly smaller labels */
-body.focus-mode #waveCanvasWrap { display: none !important; } /* hide waveform canvas */
 body.focus-mode #modSeg { display: none !important; } /* FM/AM modulator selector */
 body.focus-mode #modControls { display: none !important; }
 body.focus-mode [data-action="useCurrentAsDefault"] { display: none !important; } /* "Use current window" */
 body.focus-mode [data-action="restoreDefaults"] { display: none !important; } /* "Restore saved defaults" */
 body.focus-mode #genEaseField { display: none !important; } /* ease — expert knob */
+body.focus-mode .graph-legend { display: none !important; } /* keep focus graph clean */
 /* In focus mode the sidebar position card still shows the slider + readout,
    but we hide the "Set as Min/Max" buttons and the bypass/override switches
    since those are "settings" actions not "operate" actions during a scene. */
 body.focus-mode .sidebar .btn-row { display: none !important; }
 body.focus-mode .sidebar .switch.full { display: none !important; }
+
+/* ===================== Told-vs-took target marker ===================== */
+/* The amber TARGET marker rides behind the green actual-position dot so you
+   can see the gap between where the host TOLD the shaft to go and where it
+   actually TOOK it. The deeper the divergence, the harder it's struggling. :3 */
+.posdot.tgtdot { z-index: 3; }
+.posdot.tgtdot:before {
+  background: var(--warn);
+  box-shadow: 0 0 6px var(--warn), 0 0 14px rgba(251, 191, 36, .7);
+  opacity: .9;
+}
+.posdot.tgtdot:after {
+  left: 4px; right: auto;
+  background: var(--warn);
+  box-shadow: 0 0 8px var(--warn), 0 0 16px rgba(251, 191, 36, .8);
+  border-color: #0c0d1d;
+}
+
+/* Told-vs-took legend + live numeric readouts under the Position card. */
+.ttlegend {
+  display: flex; gap: 14px; justify-content: center; margin-bottom: 12px;
+  font-size: .74rem; color: var(--muted);
+}
+.ttlegend .dotmk {
+  display: inline-block; width: 10px; height: 10px; border-radius: 50%;
+  margin-right: 5px; vertical-align: middle;
+}
+.ttlegend .mk-took { background: var(--good); box-shadow: 0 0 6px var(--good); }
+.ttlegend .mk-told { background: var(--warn); box-shadow: 0 0 6px var(--warn); }
+.ttlegend b { color: var(--text); font-variant-numeric: tabular-nums; }
+
+/* ===================== Motion Graph =====================
+   Big enough to actually read on a 16:9. Canvas gets a tall
+   minimum height and the card drops its max-width restriction
+   so the graph stretches to fill available space. An inline
+   legend sits below the canvas so you know which trace is which
+   without opening a tooltip. :3 */
+.graph-card {
+  /* override the 680px card cap — the graph needs room to breathe */
+  max-width: none !important;
+}
+.graph-body {
+  padding: 0 !important; /* canvas hugs the card edges */
+}
+.graph-body canvas {
+  display: block;
+  width: 100%;
+  height: 280px;
+  background: #0a0b16;
+  border: 1px solid var(--line);
+  border-radius: var(--radius-sm);
+}
+/* On smaller screens (tablet / narrow desktop) shrink a bit */
+@media (max-width: 1280px) {
+  .graph-body canvas { height: 220px; }
+}
+@media (max-width: 1024px) {
+  .graph-body canvas { height: 180px; }
+}
+/* Inline legend — sits below the canvas in a compact row */
+.graph-legend {
+  display: flex; gap: 18px; justify-content: center; align-items: center;
+  padding: 8px 0 2px;
+  font-size: .72rem; color: var(--muted); font-weight: 500;
+}
+.graph-legend .gleg {
+  display: inline-block; width: 12px; height: 3px; border-radius: 2px;
+  margin-right: 5px; vertical-align: middle;
+}
+.gleg-took  { background: var(--good); box-shadow: 0 0 5px var(--good); }
+.gleg-told  { background: var(--warn); opacity: .85; border: 1px dashed var(--warn); height: 2px; width: 11px; }
+.gleg-asked { background: rgba(96,165,250,0.7); border: 1px dotted rgba(96,165,250,0.9); height: 2px; width: 11px; }
+
+

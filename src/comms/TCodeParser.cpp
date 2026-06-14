@@ -16,7 +16,9 @@
 // (Step 8 rule: behaviour must not change).
 
 void TCodeParser::feedLine(const char* str, size_t len) {
-    // Count the raw frame BEFORE parsing for rate diagnostics.
+    // Every frame that arrives is another pulse of Intiface's filthy stream
+    // flooding into the parser's greedy throat. Count it BEFORE we swallow
+    // so the rate diagnostic sees exactly how hard the host is pumping us. :3
     rxFrameCount++;
 
     // Null-terminated working copy (TCode lines are short).
@@ -66,13 +68,34 @@ void TCodeParser::feedLine(const char* str, size_t len) {
                 continue;
             }
 
-            // --- Decode magnitude (FIXED scale, NOT digit-count based) ---
+            // --- Decode magnitude (TCode v0.3 fractional, digit-count based) ---
+            // In TCode v0.3 the magnitude after the channel is a DECIMAL FRACTION
+            // with an implied leading "0." — the number of digits IS the scale.
+            // So L0500 = 0.500, L05000 = 0.5000, L09999 = 0.9999, etc. The spec
+            // puts NO upper bound on digit count, so a horny app can ram us with
+            // as much fractional precision as it likes (L0500000…). We must NOT
+            // assume a fixed 3-digit (TCODE_MAGNITUDE_MAX=999) scale — that was
+            // the bug: a 5-digit value like 50000 / 999 = 50.0, clamped to 1.0,
+            // which made every fast high-precision stroke slam to the wall. :3
+            //
+            // Fix: divide by 10^digits so the scale always matches what we were
+            // actually given. We cap accumulation at TCODE_MAGNITUDE_MAX_DIGITS
+            // (truncating any excess digits — float can't resolve them anyway,
+            // ~7 significant figures) so a pathologically long magnitude can
+            // never overflow uint32 or stall the parse loop. Extra digits past
+            // the cap are read and discarded, keeping the divisor in lockstep
+            // with the digits we kept. We take exactly what we can handle and
+            // spit the rest out — no choking, no overflow. :3
             const char* p = token + 2;
             uint32_t mag_value = 0;
-            int mag_digits = 0;
+            int mag_digits = 0;        // digits we actually KEPT (sets the scale)
             while (*p && isdigit((unsigned char)*p)) {
-                mag_value = mag_value * 10 + (uint32_t)(*p - '0');
-                mag_digits++;
+                if (mag_digits < TCODE_MAGNITUDE_MAX_DIGITS) {
+                    mag_value = mag_value * 10 + (uint32_t)(*p - '0');
+                    mag_digits++;
+                }
+                // else: excess precision — read past it but don't let it touch
+                // mag_value or the scale. Truncated, drained, ignored. :3
                 p++;
             }
 
@@ -81,8 +104,14 @@ void TCodeParser::feedLine(const char* str, size_t len) {
                 continue;
             }
 
-            float position = (float)mag_value / TCODE_MAGNITUDE_MAX;
+            // Scale = 10^mag_digits. Build it as an integer power of ten so the
+            // fraction is exact for the digits we kept (no fixed-magic divisor).
+            float scale = 1.0f;
+            for (int d = 0; d < mag_digits; d++) scale *= 10.0f;
+
+            float position = (float)mag_value / scale;
             position = constrain(position, 0.0f, 1.0f);
+
 
             // --- Optional modifier: I (interval ms) or S (speed units/100ms) ---
             uint32_t duration_ms = 0;

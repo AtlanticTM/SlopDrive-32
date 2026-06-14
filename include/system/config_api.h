@@ -75,7 +75,12 @@
 #define DEFAULT_MAX_SPEED_MM_S      550.0f   // alias for config defaults
 
 // Default acceleration mm/s^2
-#define DEFAULT_ACCEL_MM_S2     1500.0f
+// Needs to be high enough to cover a full stroke in the shortest expected
+// interval. For a 120mm stroke at 250ms: a = 4×dist/T² = 4×120/0.0625 = 7680.
+// 8000 gives comfortable margin. The planner uses this as the cruise accel;
+// the raise-only guard in streamTo() keeps it from softening mid-flight. :3
+#define DEFAULT_ACCEL_MM_S2     8000.0f
+
 
 // =============================================================================
 // TMC2160 Driver Defaults
@@ -83,10 +88,10 @@
 #define TMC_R_SENSE             0.15f   // Ohms (match original StrokeEngine board)
 #define TMC_RUN_CURRENT_MA      2000     // mA (default run current for TMC2160)
 #define TMC_STALLGUARD_DMA      -64
-#define TMC_TOFF                4        // off-time regulation (match original)
+#define TMC_TOFF                3        // off-time regulation (match original)
 #define TMC_TSTEP_REG           255
 #define TMC_HOLD_CURRENT_PCT    50       // % of run current while idle
-#define TMC_TBL                 1        // blank time code (1 = 24 clocks, typical)
+#define TMC_TBL                 2        // blank time code (1 = 24 clocks, typical)
 #define TMC_STEALTHCHOP         0        // 0 = SpreadCycle (more torque), 1 = quiet
 #define TMC_TPWM_THRS           0        // 0 = never auto-switch stealth<->spread
 #define TMC_HSTART              5        // chopper hysteresis start
@@ -135,13 +140,37 @@
 #define INTIFACE_IDENTIFIER    "tcode-v03"
 #define INTIFACE_ADDRESS       "slopdrive32-0001"
 
-// TCode magnitude scaling. Intiface scales a normalized position (0.0-1.0) to
-// the feature's declared `value` range and emits the integer as the TCode
-// magnitude - WITHOUT guaranteed zero padding (e.g. it sends "L086", not
-// "L0086"). So the magnitude must be divided by a FIXED maximum, not by
-// 10^(digit count). This value MUST equal the high end of the tcode-v03
-// feature's `value` range in the Intiface device config ([0, 999]).
+// TCode magnitude scaling — DEPRECATED, NO LONGER USED IN THE DECODE PATH. :3
+//
+// Old assumption (WRONG): Intiface emits the magnitude against a fixed 0–999
+// scale unpadded ("L086" = 86/999), so we divided by this constant. That broke
+// the moment a sender used more (or fewer) digits — a 5-digit value like 50000
+// got divided by 999 = 50.0, clamped to 1.0, and every fast high-precision
+// stroke slammed into the wall.
+//
+// Correct TCode v0.3 (what we do now, in TCodeParser): the magnitude is an
+// IMPLICIT DECIMAL FRACTION of arbitrary length — strip the axis+channel, then
+// treat the entire remaining digit string as if prefixed with "0." So:
+//   L0500    → 0.500       (leading zeros are decimal placeholders!)
+//   L0086    → 0.086
+//   V0010000 → 0.010000
+// The divisor is 10^(digit count), never a fixed magic number, which is
+// immune to Intiface's occasional extra-leading-zero padding glitch. Kept here
+// only because docs / the Intiface device-config JSON still reference the
+// historical [0,999] range. Don't wire it back into the parser. :3
 #define TCODE_MAGNITUDE_MAX    999.0f
+
+
+// Max fractional digits we KEEP when decoding a TCode v0.3 magnitude. The spec
+// puts no ceiling on how many digits a sender can cram after the channel
+// (L0500 = 0.5, L050000 = 0.5 too — just more precision), so we truncate
+// anything past this. 6 digits = ~1 part in a million, comfortably finer than a
+// float's ~7 significant figures and WAY finer than the stepper can physically
+// resolve. Capping here also keeps mag_value safely inside uint32 no matter how
+// long a greedy app makes the value. Take six, spit the rest — that's all this
+// good boy can swallow without overflowing. :3
+#define TCODE_MAGNITUDE_MAX_DIGITS  6
+
 
 
 // =============================================================================

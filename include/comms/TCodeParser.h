@@ -28,7 +28,9 @@
 // ---- Callback type definitions ----
 
 /// Called when a valid L0 (linear axis 0) command is received.
-/// @param position     0.0 – 1.0 (normalised, already divided by TCODE_MAGNITUDE_MAX)
+/// @param position     0.0 – 1.0 (normalised — the TCode magnitude decoded as an
+///                     implicit decimal fraction, i.e. mag / 10^digits)
+
 /// @param duration_ms  time to reach position in ms (0 = use configured speed)
 typedef void (*LinearCmdCallback)(float position, uint32_t duration_ms);
 

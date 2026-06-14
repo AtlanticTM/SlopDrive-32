@@ -7,9 +7,7 @@ rich web UI for configuration and real-time telemetry.
 The firmware maps incoming normalized position commands (`0.0`–`1.0`) from the
 buttplug/TCode ecosystem onto a user-configurable slice of the machine's physical
 travel, so you can move and resize the active stroke region anywhere across the full
-mechanical range without touching the firmware or recompiling. It's tight, filling
-every last millimeter of that 240mm rail until you physically can't give it more—and
-it'll beg for all of it. :3
+mechanical range without touching the firmware or recompiling.
 
 ---
 ---

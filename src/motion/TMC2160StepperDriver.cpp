@@ -618,8 +618,59 @@ void TMC2160StepperDriver::streamTo(float pos_mm, float speed_mm_s) {
     _have_last_target = true;
 }
 
+// ============================================================================
+// streamToSteps() — pre-planned native-step dispatch from motionConsumerTask
+// ============================================================================
+//
+// Called exclusively from Core 1 (motionConsumerTask). Speed and accel arrive
+// already converted to steps/s and steps/s² by the consumer — no unit math
+// here, just arm the watchdog and fire straight to FAS. The raise-only accel
+// guard is applied by the consumer BEFORE calling this function, so finalAccel
+// is already the correct value to hand to FAS. :3
+//
+// This is the clean path: the consumer owns all the kinematic math, this
+// function owns the hardware dispatch. Single responsibility, no cross-core
+// touching. The shaft gets told exactly what to do and does it. :3
+void TMC2160StepperDriver::streamToSteps(int32_t target_steps,
+                                          uint32_t speed_steps_s,
+                                          uint32_t accel_steps_s2) {
+    if (!_homed || !_stepper) return;
+    enable();
+
+    // Arm the stall watchdog — convert target_steps back to mm for the
+    // existing watchdog logic (which works in mm). If the host goes quiet,
+    // update() will settle here. :3
+    float pos_mm = nativeToMm(-target_steps);  // negative because front=negative steps
+    _last_sample_mm  = pos_mm;
+    _last_sample_ms  = millis();
+    _have_last_sample = true;
+
+    // GRIT FIX: only call setAcceleration()/setSpeedInHz() when the values
+    // actually change. Calling them on every waypoint (30–100x/sec) forces FAS
+    // to recalculate its ramp on every single call — even mid-flight. That
+    // recalc is the source of the gritty/stuttery feel: the motor gets a new
+    // ramp profile injected into it 100 times a second whether it needs one or
+    // not. OSSM avoids this by only updating when the value differs. :3
+    //
+    // We cache the last-sent values and skip the FAS call when they match.
+    // The first call always goes through (cache starts at 0). :3
+    if (accel_steps_s2 != _last_accel_steps_s2) {
+        _stepper->setAcceleration(accel_steps_s2);
+        _last_accel_steps_s2 = accel_steps_s2;
+    }
+    if (speed_steps_s != _last_speed_steps_s) {
+        _stepper->setSpeedInHz(speed_steps_s);
+        _last_speed_steps_s = speed_steps_s;
+    }
+
+    // moveTo() is non-blocking: FAS re-plans from current velocity to the new
+    // target. No force-stop, no busy-wait. The shaft just gets told where to go
+    // and keeps thrusting without missing a beat. :3
+    _stepper->moveTo(target_steps);
+}
+
 void TMC2160StepperDriver::runMotorStep() {
-    // NOP — moveTo()/streamTo() retarget through FAS directly.
+    // NOP — moveTo()/streamTo()/streamToSteps() retarget through FAS directly.
     // Stream stall watchdog (streamTo() stashing) lives in update().
     // This stub exists to satisfy the MotorDriver interface.
 }
@@ -640,6 +691,16 @@ void TMC2160StepperDriver::setAcceleration(float accel_mm_s2) {
     if (_stepper) {
         _stepper->setAcceleration((int32_t)(_accel_mm_s2 * STEPS_PER_MM));
     }
+}
+
+uint32_t TMC2160StepperDriver::getLiveAcceleration() const {
+    // Return the acceleration currently active inside the FAS ramp engine —
+    // NOT the configured ceiling. This is what OSSM reads with
+    // stepper->getAcceleration() in its raise-only guard. The full
+    // FastAccelStepper header is available here (included at the top of this
+    // .cpp), so the call resolves correctly. The header only has a forward
+    // declaration, which is why this can't be inline there. :3
+    return _stepper ? (uint32_t)_stepper->getAcceleration() : 0u;
 }
 
 // ---- Status ------------------------------------------------------------------

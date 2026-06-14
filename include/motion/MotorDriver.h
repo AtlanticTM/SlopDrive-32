@@ -66,6 +66,14 @@ public:
     virtual void moveTo(float pos_mm)                              = 0;
     virtual void streamTo(float pos_mm, float speed_mm_s)          = 0;
 
+    // Dispatch a pre-planned move in native steps — called exclusively from
+    // Core 1 (motionConsumerTask). Speed and accel are already in steps/s and
+    // steps/s² (converted by the consumer before calling). No unit conversion
+    // happens inside this function — it goes straight to FAS. :3
+    virtual void streamToSteps(int32_t target_steps,
+                               uint32_t speed_steps_s,
+                               uint32_t accel_steps_s2)            = 0;
+
     virtual void stop()      = 0;    // decelerate stop + cut power
 
     virtual void hardStop()  = 0;    // immediate stop, motor stays powered
@@ -73,9 +81,13 @@ public:
     virtual void disable()   = 0;
 
     // ---- Speed & Acceleration -----------------------------------------------
-    virtual void  setMaxSpeed(float speed_mm_s)     = 0;
-    virtual void  setAcceleration(float accel_mm_s2) = 0;
-    virtual float getMaxSpeed() const                = 0;
+    virtual void     setMaxSpeed(float speed_mm_s)      = 0;
+    virtual void     setAcceleration(float accel_mm_s2)  = 0;
+    virtual float    getMaxSpeed()          const        = 0;
+    // Returns the acceleration currently active inside the FAS ramp engine —
+    // NOT the configured ceiling. Used by the raise-only guard in
+    // motionConsumerTask to match OSSM's stepper->getAcceleration() call. :3
+    virtual uint32_t getLiveAcceleration()  const        = 0;
 
     // ---- Status -------------------------------------------------------------
     virtual bool  isMoving()            = 0;

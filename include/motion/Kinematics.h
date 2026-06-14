@@ -26,27 +26,38 @@ float ease(float v, float ease_factor);
 float bufEase(uint8_t kind, float t);
 
 // ============================================================================
-// Trapezoidal motion planner — the ONE TRUE PATH now :3
+// Trapezoidal motion planner — OSSM pipeline, ported verbatim :3
 // ============================================================================
 //
-// Given where the shaft is, where the host wants it, and how long it has to get
-// there, solve for the cruise speed (and a sane acceleration) of a classic
-// trapezoidal velocity profile so we bottom out right on the beat — no jitter
-// buffer foreplay, no predictive coast, just honest planned thrusting.
+// All units are NATIVE STEPPER STEPS — unit conversion happens once at the
+// call site (motionConsumerTask), not scattered across the planner. This
+// matches OSSM's streaming.cpp exactly.
 //
-// All inputs/outputs are physical millimetres / mm·s⁻¹ / mm·s⁻². The target is
-// clamped into [min_mm, max_mm] before the math so we never plan to ram past
-// the safe stroke window. duration_s <= 0 means "no cadence info" → we fall back
-// to a gentle quarter-speed nudge toward the target.
+// current_steps    : stepper->getCurrentPosition() — last commanded position
+//                    (open-loop: no encoder feedback, same as OSSM)
+// target_steps_raw : TCode position mapped to native steps (pre-clamp)
+// time_s           : command interval in seconds (TCode I-parameter / 1000)
+// speed_limit      : max speed in steps/s (config ceiling)
+// accel_limit      : max accel in steps/s² (config ceiling)
+// min_steps        : stroke window minimum (native steps, may be negative)
+// max_steps        : stroke window maximum (native steps, may be negative)
+//
+// Returns a PlanResult with the back-calculated speed, acceleration, and
+// clamped target ready to hand directly to FAS. :3
 struct PlanResult {
-    float clamped_target_mm;   // target after window clamp
-    float speed_mm_s;          // planned cruise speed (>= 0)
-    float accel_mm_s2;         // planned acceleration (>= a floor)
+    int32_t  target_steps;      // final clamped target in native steps
+    uint32_t speed_steps_s;     // peak speed in steps/s  (2×dist/T triangle peak)
+    uint32_t accel_steps_s2;    // back-calculated acceleration in steps/s²
+    bool     distance_clamped;  // true if the move was shortened by the physics guard
 };
 
-PlanResult planTrapezoid(float current_mm, float target_mm, float duration_s,
-                         float max_speed_mm_s, float max_accel_mm_s2,
-                         float min_mm, float max_mm);
+PlanResult planTrapezoid(int32_t  current_steps,
+                         int32_t  target_steps_raw,
+                         float    time_s,
+                         uint32_t speed_limit,
+                         uint32_t accel_limit,
+                         int32_t  min_steps,
+                         int32_t  max_steps);
 
 } // namespace kinematics
 

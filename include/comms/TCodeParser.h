@@ -68,6 +68,12 @@ public:
     /// Increments rxFrameCount exactly once per call (the frame is the line).
     void feedLine(const char* str, size_t len);
 
+    // ---- Programmatic stop (transport-initiated) -----------------------------
+    /// Fire the registered stop callback directly — used by transports that
+    /// detect a host disconnect and need to issue a synthetic DSTOP without
+    /// going through feedLine(). Safe to call from any context. :3
+    void triggerStop() { if (_onStop) _onStop(); }
+
     // ---- Raw frame counter (pre-parse, for rate diagnostics) -----------------
     volatile uint32_t rxFrameCount = 0;
 

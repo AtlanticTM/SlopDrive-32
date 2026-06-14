@@ -128,7 +128,10 @@ void WebUI::update() {
 // rhythm it sees on-screen exactly mirrors the rhythm the shaft was driven at. :3
 void WebUI::telemetryTimerCb(void* arg) {
     WebUI* self = static_cast<WebUI*>(arg);
-    self->captureTelemetry(self->_motor.getPosition(),
+    // Read actual_position_mm atomically — written by Core 1 motionConsumerTask,
+    // safe to read here on Core 0 with no mutex. memory_order_relaxed is correct
+    // for display-only telemetry — no ordering dependency with other variables. :3
+    self->captureTelemetry(self->_state.actual_position_mm.load(std::memory_order_relaxed),
                            self->_state.commanded_target_mm,
                            self->_state.commanded_raw_mm);
 

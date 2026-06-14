@@ -58,6 +58,13 @@ public:
     void moveTo(float pos_mm) override;
     void streamTo(float pos_mm, float speed_mm_s) override;
 
+    // Pre-planned native-step dispatch — called from Core 1 motionConsumerTask.
+    // Speed and accel arrive already converted to steps/s and steps/s².
+    // Arms the stall watchdog and fires straight to FAS — no unit math here. :3
+    void streamToSteps(int32_t target_steps,
+                       uint32_t speed_steps_s,
+                       uint32_t accel_steps_s2) override;
+
     void stop() override;
 
     void hardStop() override;
@@ -65,9 +72,13 @@ public:
     void disable() override;
 
     // ---- Speed & Acceleration -----------------------------------------------
-    void  setMaxSpeed(float speed_mm_s) override;
-    void  setAcceleration(float accel_mm_s2) override;
-    float getMaxSpeed() const override { return _max_speed_mm_s; }
+    void     setMaxSpeed(float speed_mm_s) override;
+    void     setAcceleration(float accel_mm_s2) override;
+    float    getMaxSpeed() const override { return _max_speed_mm_s; }
+    // Returns the live FAS acceleration — what the ramp engine is actually
+    // using right now, not the configured ceiling. Mirrors OSSM's
+    // stepper->getAcceleration() call in the raise-only guard. :3
+    uint32_t getLiveAcceleration() const override;
 
     // ---- Status -------------------------------------------------------------
     bool  isMoving() override;
@@ -145,6 +156,13 @@ private:
     uint32_t _last_sample_ms     = 0;
     bool     _have_last_sample   = false;
     static const uint16_t STREAM_STALL_MS = 80;
+
+    // Speed/accel cache for streamToSteps() — only call FAS setters when the
+    // value actually changes. Calling them every waypoint forces a ramp recalc
+    // mid-flight on every single command, which is the source of gritty motion.
+    // Cache starts at 0 so the first call always goes through. :3
+    uint32_t _last_speed_steps_s  = 0;
+    uint32_t _last_accel_steps_s2 = 0;
 
     // Hybrid (mode 3): below this remaining in-flight distance we allow the
     // reversal instead of letting the stroke finish. ~1.5mm worth of steps.

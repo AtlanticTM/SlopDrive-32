@@ -1,5 +1,6 @@
 #pragma once
 
+#include <atomic>
 #include <cstdint>
 #include <freertos/FreeRTOS.h>
 #include <freertos/semphr.h>
@@ -149,6 +150,15 @@ struct SystemState {
     // all three (raw → planned → actual) side by side lets us see exactly which
     // stage mangles the motion path. Same hardware-atomic float deal, no mutex. :3
     volatile float         commanded_raw_mm = 0.0f;
+
+    // ---- Actual dispatched position (cross-core) -----------------------------
+    // Written by Core 1 (motionConsumerTask) after each FAS dispatch — the step
+    // target we just sent to the motor, converted back to mm. Read by Core 0's
+    // telemetry timer (WebUI::telemetryTimerCb) to feed the position graph.
+    // std::atomic<float> gives the no-tear guarantee with zero overhead on S3.
+    // memory_order_relaxed is correct — telemetry is display-only, no ordering
+    // dependency with any other variable. :3
+    std::atomic<float>     actual_position_mm{0.0f};
 
 
     // Generator local tick rate (cross-core)

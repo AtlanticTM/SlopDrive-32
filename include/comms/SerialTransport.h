@@ -38,11 +38,12 @@ public:
 
 private:
     TCodeParser& _parser;
-    bool     _active      = false;
-    bool     _linked      = false;
-    uint32_t _last_ms     = 0;
+    bool     _active         = false;
+    bool     _linked         = false;
+    uint32_t _last_ms        = 0;
     char     _buf[128];
-    uint8_t  _len         = 0;
+    uint8_t  _len            = 0;
+
 
     static void _txResponse(const char* msg);
 };

@@ -1,6 +1,12 @@
 /**
- * Settings tab — transport mode, defaults, timing, generation rate.
- * Uses setWinMin/setWinMax to avoid ESM import-reassignment errors. :3
+ * Settings tab — transport mode, defaults, timing, generation rate,
+ * and the continuous-blend reversal policy. :3
+ *
+ * blend_mode is loaded from /api/settings (GET) and saved back on
+ * "Save All Settings". The segmented control reflects the firmware's
+ * current mode and lets the operator pick 1/2/3 without a page reload.
+ * Old firmware that doesn't advertise blend_mode just gets the default
+ * (1 = let-it-land) — backward-compatible, no drama. :3
  */
 import { $, setRead, onLiveSlider, clamp, icon, toast } from '../core/ui.js';
 import { post, get } from '../core/api.js';
@@ -49,8 +55,13 @@ var expertMode = false;
 
 function applyExpertCaps() {
   var ex = expertMode;
-  var EM = { maxSpeed: 3000, accel: 8000, lookahead: 80, runCurrent: 3000, genRate: 50, modRate: 5, modAmp: 10 };
-  var SM = { maxSpeed: 1500, accel: 4000, lookahead: 50, runCurrent: 2500, genRate: 5, modRate: 1, modAmp: 2 };
+  // Expert mode unlocks the hardware ceiling; normal mode caps at safe-ish values.
+  // Speed: 3000 mm/s normal / 3000 mm/s expert (same — 3000 is already the ceiling).
+  // Accel: 8000 mm/s² normal / 20000 mm/s² expert.
+  // These match the HTML slider max attributes so the gradient fills correctly. :3
+  var EM = { maxSpeed: 3000, accel: 20000, lookahead: 80, runCurrent: 3000, genRate: 50, modRate: 5, modAmp: 10 };
+  var SM = { maxSpeed: 3000, accel: 8000,  lookahead: 50, runCurrent: 2500, genRate: 5, modRate: 1, modAmp: 2 };
+
   var groups = {
     maxSpeed: ['maxSpeed', 'defMaxSpeed'], accel: ['accel', 'defAccel'],
     lookahead: ['lookahead', 'defLookahead'], runCurrent: ['runCurrent'],
@@ -68,20 +79,47 @@ function applyExpertCaps() {
   var em = $('#expertMode'); if (em) em.checked = ex;
 }
 
+// ---- Continuous-blend mode state ----------------------------------------
+// Tracks which reversal policy the firmware is currently running.
+// 1 = let-it-land (default), 2 = allow-reversal, 3 = hybrid.
+// Loaded from /api/settings on init; saved back with "Save All Settings".
+// The segmented control in #blendModeSeg reflects this live. :3
+var blendMode = 1;
+
+var BLEND_HINTS = {
+  1: 'Finish the current stroke before reversing — smoothest ride, may drop a waypoint at extreme Hz. :3',
+  2: 'Retarget immediately on reversal — tighter tracking, one clean decel per true turnaround.',
+  3: 'Hybrid: let-it-land while the remaining distance is large, allow reversal when close to the end.'
+};
+
+function reflectBlendMode(mode) {
+  blendMode = (mode >= 1 && mode <= 3) ? mode : 1;
+  document.querySelectorAll('#blendModeSeg button').forEach(function(b) {
+    b.classList.toggle('active', parseInt(b.dataset.bm) === blendMode);
+  });
+  var hint = $('#blendModeHint');
+  if (hint) hint.textContent = BLEND_HINTS[blendMode] || '';
+}
+
 var overrideTimer = null;
 function pushOverride() {
   clearTimeout(overrideTimer);
+  // Live-override POST: only send the fields the firmware actually uses now.
+  // lookahead/overshoot are gone — the firmware ignores unknown keys anyway,
+  // but there's no point whispering dead commands into the void. :3
   overrideTimer = setTimeout(function() {
     post('/api/settings', {
       max_speed: parseInt($('maxSpeed').value), accel: parseInt($('accel').value),
-      lookahead: parseInt($('lookahead').value), overshoot: parseInt($('overshoot').value),
       no_persist: true
     });
   }, 120);
 }
 
 export function restoreDefaults() {
-  ['maxSpeed', 'accel', 'lookahead', 'overshoot'].forEach(function(id) {
+  // Restore speed + accel from the saved-defaults sliders. lookahead/overshoot
+  // sliders are legacy UI that §4 will clean up — skip them here so we don't
+  // try to read elements that may already be gone. :3
+  ['maxSpeed', 'accel'].forEach(function(id) {
     var cap = id.charAt(0).toUpperCase() + id.slice(1);
     var s = $(id), d = $('def' + cap);
     if (s && d) s.value = d.value;
@@ -94,10 +132,13 @@ export function restoreDefaults() {
 export async function saveSettings(silent) {
   if (winMin >= winMax) { if (!silent) alert('Min must be less than Max'); return; }
   try {
+    // blend_mode is included so the firmware persists the operator's chosen
+    // reversal policy alongside speed/accel. Additive key — old firmware that
+    // doesn't know about it just ignores it. :3
     await post('/api/settings', {
       range_min: Math.round(winMin), range_max: Math.round(winMax),
       max_speed: parseInt($('defMaxSpeed').value), accel: parseInt($('defAccel').value),
-      lookahead: parseInt($('defLookahead').value), overshoot: parseInt($('defOvershoot').value),
+      blend_mode: blendMode,
       auto_duration: $('#autoDuration').checked,
       default_range_min: clamp(parseInt($('defMinNum').value) || 0, 0, TRAVEL),
       default_range_max: clamp(parseInt($('defMaxNum').value) || TRAVEL, 0, TRAVEL),
@@ -129,6 +170,10 @@ async function loadSettings() {
     ['defAccel', 'accel'].forEach(function(id) { var e = $(id); if (e) e.value = acc; });
     ['defLookahead', 'lookahead'].forEach(function(id) { var e = $(id); if (e) e.value = look; });
     ['defOvershoot', 'overshoot'].forEach(function(id) { var e = $(id); if (e) e.value = over; });
+    // Reflect the firmware's current blend mode — default to 1 (let-it-land)
+    // if the field is absent (old firmware). The card is always shown; the
+    // firmware just keeps pounding with whatever mode it was last told. :3
+    reflectBlendMode(d.blend_mode || 1);
     applyExpertCaps();
   } catch (e) {}
 }
@@ -194,6 +239,7 @@ export function initSettings() {
     gts.querySelectorAll('button').forEach(function(x) { x.classList.remove('active'); });
     b.classList.add('active'); post('/api/gen', { rate_tick: genTickValue() });
   });
+  // Live Overrides sliders — update readout + gradient + push to firmware.
   ['maxSpeed', 'accel', 'lookahead', 'overshoot'].forEach(function(id) {
     var s = $(id); if (!s) return;
     s.addEventListener('input', function() {
@@ -201,10 +247,33 @@ export function initSettings() {
       pushOverride();
     });
   });
+  // Default Motion sliders — update readout + gradient only (no live push;
+  // these are saved on "Save All Settings"). The readout IDs follow the
+  // def<Cap>Val pattern (defSpeedVal, defAccelVal, etc.). :3
+  [['defMaxSpeed','defSpeedVal'], ['defAccel','defAccelVal'],
+   ['defLookahead','defLookaheadVal'], ['defOvershoot','defOvershootVal']].forEach(function(pair) {
+    var s = $(pair[0]); if (!s) return;
+    s.addEventListener('input', function() { onLiveSlider(pair[1], s, pair[0]); });
+  });
   var rb = document.querySelector("[data-action='restoreDefaults']");
   if (rb) rb.addEventListener('click', restoreDefaults);
   var uc = document.querySelector("[data-action='useCurrentAsDefault']");
   if (uc) uc.addEventListener('click', useCurrentAsDefault);
+  // ---- Continuous-blend segmented control ---------------------------------
+  // Clicking a mode button updates the local blendMode state and reflects it
+  // immediately in the UI. The new mode is sent to the firmware right away
+  // (no_persist) so the operator can feel the difference live — it gets
+  // persisted when they hit "Save All Settings". :3
+  var bms = $('#blendModeSeg');
+  if (bms) bms.addEventListener('click', function(e) {
+    var b = e.target.closest('button'); if (!b || !b.dataset.bm) return;
+    var m = parseInt(b.dataset.bm);
+    reflectBlendMode(m);
+    // Push the new mode to the firmware immediately so the pounding changes
+    // right now — no save required to feel the difference. :3
+    post('/api/settings', { blend_mode: blendMode, no_persist: true });
+  });
+
   var ad = $('#autoDuration');
   if (ad) ad.addEventListener('change', pushInterp);
   loadSettings(); loadMode(); loadInterp(); loadGenTick();

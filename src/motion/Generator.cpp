@@ -106,6 +106,15 @@ void Generator::run() {
             float depth = cfg.depth;
 
             // Advance the modulator clock and apply FM (rate) or AM (depth).
+            //
+            // The FM path literally stretches and contracts the rhythm—each
+            // stroke rides an irregular pulse that slams deep at the peak then
+            // pulls back shallow when the modulator bottoms out.  AM is the
+            // greedy one: it throttles the stroke depth in real time, making
+            // the shaft inflate and deflate inside, going from a teasing rim
+            // to a full stomach-bulging stretch and back.  The mod clock wraps
+            // each cycle so the hole never gets a predictable beat to clench on
+            // — it just gets rhythmically fisted open wider owo
             if (cfg.mod != 0) {
                 _state.gen_mod_clock += dt * cfg.mod_rate;
                 if (_state.gen_mod_clock > 1.0f)
@@ -119,7 +128,13 @@ void Generator::run() {
                 }
             }
 
-            // Advance carrier phase and map into the working window.
+            // Advance carrier phase — this is the heartbeat. Each tick nudges
+            // the wave forward a tiny bit; when it tips past 1.0 we wrap it
+            // back so the shaft cycles: thrust in, stretch the walls to the
+            // point they almost tear, then slowly pull back until the tip is
+            // barely kissing the rim before the next ram.  The wrap is the
+            // moment the stroke bottoms out and starts the withdrawal — that
+            // delicious instant where maximum fullness flips to emptiness. :3
             _state.gen_phase += dt * rate;
             if (_state.gen_phase > 1.0f) _state.gen_phase -= floorf(_state.gen_phase);
             float c = kinematics::ease(kinematics::carrier(cfg.wave, _state.gen_phase),
@@ -135,6 +150,17 @@ void Generator::run() {
             // glides through the waveform like a well-oiled piston. speed 0 =>
             // configured max — let the good boy go full throttle. :3
             _motor.streamTo(pos, 0.0f);
+
+            // Publish what we just demanded so the UI's target trace tracks the
+            // generator too — same "told vs took" overlay as the TCode path. :3
+            _state.commanded_target_mm = pos;
+            // The generator computes its position straight from the waveform —
+            // there's no separate "raw vs planned" stage like the TCode path, so
+            // the raw trace just mirrors the demand. Keeps all three lines valid
+            // on the graph whether we're driven by Intiface or self-pleasuring. :3
+            _state.commanded_raw_mm = pos;
+
+
         } else {
             _state.gen_last_us = 0;   // reset dt so resume doesn't take a giant step
         }

@@ -19,8 +19,9 @@ import './style.css';
 import { injectIcons, initTabs, initCollapsibleCards, initTooltips, wireActions, toast, icon, $, setRead, clamp, onLiveSlider, paintSlider } from './core/ui.js';
 import { post, get, getText } from './core/api.js';
 import { TRAVEL, initRangeDesigner, renderWindow, setPosTarget, startPosAnim, syncManualWindow, nudgeWindow, trim, setBound, useCurrentAsDefault } from './core/range.js';
-import { initGenerator, startGenerator, stopGenerator, toggleWaveViz, gen } from './features/generator.js';
+import { initGenerator, startGenerator, stopGenerator, gen } from './features/generator.js';
 import { currentMode, reflectMode, initSettings, saveSettings, restoreDefaults } from './features/settings.js';
+import { pushTelemetryBatch, initMotionGraph } from './features/motiongraph.js';
 
 // Expose action handlers on window so [data-action] buttons wired by
 // wireActions() can find them. These functions live in ES module scope,
@@ -72,9 +73,24 @@ function sendMove(pos, force) {
 }
 
 var prevStatus = { buttplug: false, serial: false, ready: false };
+// Monotonic telemetry cursor — the seq of the last sample we've already
+// pulled. We hand it back to the firmware as ?since= so it only ships the
+// NEW samples since our last poll. Nothing resent, nothing dropped. :3
+var teleSince = 0;
+// Poll mutex — the one rule that kills duplicate traces. pollStatus() is async
+// and was fired on a flat setInterval, so if the ESP32 was busy (fat page
+// transfer, BLE storm) a poll could still be in-flight when the next tick
+// fired. Both requests then carried the SAME stale teleSince, the firmware
+// re-shipped the SAME sample window, and motiongraph drew it twice — two lines
+// gaping over each other. We refuse to start a second poll until the first
+// finishes its business and pulls out. One hose at a time. :3
+var pollInFlight = false;
 async function pollStatus() {
+  if (pollInFlight) return;
+  pollInFlight = true;
   try {
-    var d = await get('/api/status'); if (!d) return;
+    var d = await get('/api/status?since=' + teleSince); if (!d) return;
+
     state.position = d.position || 0; state.homed = !!d.homed;
     state.ifActive = !!d.buttplug_connected && d.measured_hz > 0;
     state.paused = !!d.paused; state.override = !!d.manual_override; reflectGating();
@@ -91,7 +107,27 @@ async function pollStatus() {
     // Show Home button on both mobile FAB and desktop header button
     var hf = $('#homeFab'); if (hf) hf.classList.toggle('show', !d.homed);
     var hh = $('#homeBtnHeader'); if (hh) hh.style.display = d.homed ? 'none' : '';
-    setRead('currentPos', (d.position || 0).toFixed(1)); setPosTarget(state.position);
+    setRead('currentPos', (d.position || 0).toFixed(1));
+    // ---- Feed the telemetry batch into the motion-graph playback engine. ----
+    // The firmware ships only the samples NEW since our last poll — each one
+    // is [actual_pos_mm, commanded_target_mm], spaced a fixed tele_dt (10ms)
+    // apart. We advance our seq cursor (tele_seq) so the next poll asks for
+    // exactly what comes after, and hand the batch to motiongraph.js which
+    // replays it at that 10ms spacing on its own monotonic clock — no firmware
+    // timestamps, so an ESP32 reboot can't desync the playback. When batches
+    // flow, motiongraph owns posTarget via requestAnimationFrame; when the
+    // machine is idle we fall back to the instant position. :3
+    if (typeof d.tele_seq === 'number') teleSince = d.tele_seq;
+    if (d.samples && d.samples.length) {
+      // Hand the batch over WITH its absolute starting seq (tele_from). The
+      // graph computes each sample's true seq as tele_from + index and refuses
+      // to plot any it's already swallowed — belt-and-suspenders dedupe so even
+      // a stale/overlapping response can never smear a second line on top. :3
+      pushTelemetryBatch(d.samples, d.tele_dt || 10, d.tele_from);
+    } else {
+      setPosTarget(state.position);
+    }
+
     if (!posDragging) { var mp = $('#manualPos'); if (mp) { mp.value = clamp(state.position, parseFloat(mp.min), parseFloat(mp.max)); setRead('manualPosVal', Math.round(state.position)); } }
     var sm = $('#serialModeBar'); var sd = $('#serialDot');
     if (d.serial_mode && sm) { sm.style.display = 'inline-flex'; if (sd) sd.className = 'dot ' + (d.serial_linked ? 'good' : 'warn'); }
@@ -104,7 +140,14 @@ async function pollStatus() {
     if (d.homed && !prevStatus.ready) toast('Homed & ready', 'good', 'i-check');
     prevStatus.buttplug = !!d.buttplug_connected; prevStatus.serial = !!d.serial_linked; prevStatus.ready = !!d.homed;
     if (gen.running && state.ifActive && !state.paused && !state.override) { stopGenerator(); var gn = $('#genNote'); if (gn) gn.textContent = 'Auto-paused'; }
-  } catch (e) {}
+  } catch (e) {
+    // swallow — a single dropped poll is a non-event; the next one catches up.
+  } finally {
+    // ALWAYS release the hose, even if a poll bailed early (!d) or threw.
+    // Forgetting this would leave pollInFlight stuck true and freeze all
+    // future polling — a permanently limp graph. uhoh. :3
+    pollInFlight = false;
+  }
 }
 
 async function refreshLog() {
@@ -192,9 +235,54 @@ function restoreSidebarCards() {
 function handleSidebarBreakpoint(e) {
   if (e.matches && !sidebarCloned) {
     cloneSidebarCards();
+    cloneGraphCard();
   } else if (!e.matches && sidebarCloned) {
     restoreSidebarCards();
+    restoreGraphCard();
   }
+}
+
+// ===================== Desktop graph-card movement =====================
+// On desktop (≥1024px) we pull the motion graph card OUT of the Drive tab
+// and into #graphPanelHost above the tab pills, so it's always visible
+// regardless of which tab is active. On mobile it stays in the Drive tab.
+// Uses same matchMedia pattern as the sidebar — appendChild moves the DOM
+// node, event listeners stay attached, no deep-clone. :3
+
+var graphCloned = false;
+
+function cloneGraphCard() {
+  var panel = $('#graphPanelHost');
+  if (!panel) return;
+  var graphCard = document.querySelector('[data-graph-card]');
+  if (!graphCard || panel.contains(graphCard)) return;
+  panel.appendChild(graphCard);
+  graphCloned = true;
+  // Desktop: non-collapsible, no caret, always fully open
+  graphCard.classList.remove('collapsible');
+  graphCard.classList.remove('collapsed');
+  var caret = graphCard.querySelector('.caret');
+  if (caret) caret.style.display = 'none';
+  var body = graphCard.querySelector('.card-body');
+  if (body) { body.style.maxHeight = 'none'; body.style.opacity = '1'; body.style.pointerEvents = 'auto'; }
+}
+
+function restoreGraphCard() {
+  var driveTab = $('#drive');
+  if (!driveTab) return;
+  var panel = $('#graphPanelHost');
+  if (!panel) return;
+  var graphCard = panel.querySelector('[data-graph-card]');
+  if (!graphCard) return;
+  // Insert back into the Drive tab — after sidebar cards, before the generator
+  driveTab.insertBefore(graphCard, driveTab.children[2] || null);
+  graphCloned = false;
+  // Restore collapsibility on mobile
+  graphCard.classList.add('collapsible');
+  var caret = graphCard.querySelector('.caret');
+  if (caret) caret.style.display = '';
+  var body = graphCard.querySelector('.card-body');
+  if (body) { body.style.maxHeight = ''; body.style.opacity = ''; body.style.pointerEvents = ''; }
 }
 
 // ===================== Resizable sidebar =====================
@@ -262,6 +350,7 @@ function init() {
 
   initTabs(); initCollapsibleCards(); initTooltips(); wireActions();
   initRangeDesigner(); renderWindow(); initGenerator(); initSettings();
+  initMotionGraph();    // batched-telemetry playback + canvas motion plot :3
   initFocusMode();
   initResizableSidebar();
 
@@ -278,8 +367,13 @@ function init() {
   var hh = $('#homeBtnHeader'); if (hh) hh.addEventListener('click', moveToHome);
   var fb = document.querySelector('#faultBanner button'); if (fb) fb.addEventListener('click', clearFault);
   var rl = $('#refreshLogBtn'); if (rl) rl.addEventListener('click', refreshLog);
-  toggleWaveViz(); startPosAnim();
+  startPosAnim();
   setInterval(function () { var lt = $('#log'), al = $('#autoLog'); if (lt && lt.classList.contains('active') && al && al.checked) refreshLog(); }, 2000);
-  setInterval(pollStatus, 300); pollStatus(); refreshLog();
+  // Poll at ~100ms — the firmware's 10ms sampler stuffs ~10 fresh samples
+  // into the ring between each poll, and we drain exactly those and replay
+  // them 10ms apart. 100ms poll + 250ms ring = comfy headroom if a poll runs
+  // late, and the motion graph glides instead of stuttering at the wire rate. :3
+  setInterval(pollStatus, 100); pollStatus(); refreshLog();
+
 }
 init();

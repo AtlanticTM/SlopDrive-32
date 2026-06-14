@@ -5,7 +5,12 @@
   <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no">
   <meta name="theme-color" content="#10101c">
   <title>SlopDrive-32</title>
+  <!-- Told-vs-took target-marker + legend styling lives in src/style.css now
+       (the bundled stylesheet) — no inline <style> here so Vite's HTML proxy
+       doesn't choke on the build. :3 -->
 </head>
+
+
 <body>
 <!-- Shell: this is all the static HTML. Feature cards that are build-flagged
      get injected by their respective feature modules at init time. -->
@@ -86,11 +91,17 @@
        gets to decide how thick they want their stroke window to be. :3 -->
   <div class="resize-handle" id="resizeHandle" aria-hidden="true"><div class="resize-line"></div></div>
 
-  <!-- Right panel — the tab system lives here. Tab pills at the top, content
-       scrolls below. Each tab's cards get all the vertical room they crave. -->
+  <!-- Right panel — the tab system lives here. On desktop the motion graph
+       floats above the tabs so it's always visible; on mobile it stays inside
+       the Drive tab where it belongs. Tab pills sit below the graph, content
+       scrolls under everything. -->
   <main class="main-panel">
-    <!-- Desktop tab bar — horizontal pills at the top of the right panel.
-         On mobile this whole nav is hidden; the bottom tab bar takes over. -->
+    <!-- Motion Graph panel — on desktop (≥1024px) the graph card gets moved
+         here by JS so it's permanently visible above the tab pills. On mobile
+         the card stays in the Drive tab and this panel is hidden. :3 -->
+    <div class="graph-panel" id="graphPanelHost"></div>
+    <!-- Desktop tab bar — horizontal pills below the graph. On mobile this
+         whole nav is hidden; the bottom tab bar takes over. -->
     <nav class="tabs tabs-desktop">
       <button class="tab active" data-tab="drive"  data-ico="i-play"></button>
       <button class="tab" data-tab="health" data-ico="i-heart"></button>
@@ -130,7 +141,12 @@
                 <div class="grip b"></div>
               </div>
               <div class="posdot" id="posDot"></div>
+              <!-- Target marker — the amber "where the host TOLD us to go" line.
+                   Rides beside the green actual-position dot so you can see how
+                   hard the shaft is struggling to keep up. :3 -->
+              <div class="posdot tgtdot" id="tgtDot"></div>
             </div>
+
           </div>
 
           <div class="ctl-col">
@@ -185,7 +201,16 @@
         <div class="card-body">
         <div class="pos-big"><b id="currentPos">--</b><span>mm</span></div>
 
+        <!-- Told-vs-took live readout: green = where the shaft actually got to,
+             amber = where the host commanded it. The gap is the real tracking
+             error — watch it widen when you pound it too fast for the accel. :3 -->
+        <div class="ttlegend">
+          <span><span class="dotmk mk-took"></span>Took <b id="posNowVal">0</b>&nbsp;mm</span>
+          <span><span class="dotmk mk-told"></span>Told <b id="posTgtVal">0</b>&nbsp;mm</span>
+        </div>
+
         <div class="field">
+
           <label>Target Position</label>
           <input type="range" id="manualPos" min="0" max="240" value="0" step="1">
           <div class="readout"><b id="manualPosVal">0</b><span>mm</span></div>
@@ -207,6 +232,26 @@
         </div>
       </div>
 
+      <!-- 2.5 Motion Graph — on mobile this lives inside the Drive tab.
+           On desktop (≥1024px) JS moves it above the tab pills so it's
+           always visible no matter which tab you're on. :3 -->
+      <div class="card collapsible graph-card" id="motionGraphCard" data-graph-card>
+        <div class="card-head">
+          <span data-ico="i-wave"></span><h2>Motion Graph &mdash; <span style="font-size:.7rem;color:var(--muted);font-weight:400">live position trace &middot; 10s window</span></h2>
+          <button class="info" data-tip="Rolling 10‑second live position trace. Green = actual carriage position (&lsquo;took&rsquo;), amber dashed = planner target (&lsquo;told&rsquo;), blue dotted = raw TCode demand pre-planner (&lsquo;asked&rsquo;). The dot at the right edge is right now. Grid lines every 2s horizontally, every 25% travel vertically. No extra polling — the same 10ms telemetry feed drives the stroke-window dot too. :3"><span data-ico="i-info"></span></button>
+          <span class="caret" data-ico="i-chevron"></span>
+        </div>
+        <div class="card-body graph-body">
+          <canvas id="motionGraphCanvas"></canvas>
+          <!-- Inline legend so the operator knows which trace is which at a glance -->
+          <div class="graph-legend">
+            <span><span class="gleg gleg-took"></span>Took</span>
+            <span><span class="gleg gleg-told"></span>Told</span>
+            <span><span class="gleg gleg-asked"></span>Asked</span>
+          </div>
+        </div>
+      </div>
+
       <!-- 3. Motion Generator -->
       <div class="card collapsible">
         <div class="card-head">
@@ -215,14 +260,6 @@
           <span class="caret" data-ico="i-chevron"></span>
         </div>
         <div class="card-body">
-
-        <label class="switch full" style="margin-bottom:12px">
-          <span><span class="lbl">Waveform preview</span><div class="hint" style="margin-top:2px">visualize the generated motion (browser-side only)</div></span>
-          <span style="display:flex;align-items:center"><input type="checkbox" id="waveVizTog" checked><span class="track"></span></span>
-        </label>
-        <div id="waveCanvasWrap" style="margin-bottom:16px">
-          <canvas id="waveCanvas" style="width:100%;height:120px;display:block;background:#0a0b16;border:1px solid var(--line);border-radius:var(--radius-sm)"></canvas>
-        </div>
 
         <div class="mini-label">Carrier waveform</div>
 
@@ -265,11 +302,32 @@
           <span class="caret" data-ico="i-chevron"></span>
         </div>
         <div class="card-body">
-        <div class="field"><label>Max Speed</label><input type="range" id="maxSpeed" min="50" max="3000" value="550" step="10"><div class="readout"><b id="speedVal">550</b><span>mm/s</span></div></div>
-        <div class="field"><label>Acceleration</label><input type="range" id="accel" min="200" max="8000" value="1500" step="50"><div class="readout"><b id="accelVal">1500</b><span>mm/s²</span></div></div>
-        <div class="field"><label>Lookahead</label><input type="range" id="lookahead" min="0" max="80" value="20" step="1"><div class="readout"><b id="lookaheadVal">20</b><span>ms</span></div></div>
-        <div class="field" style="margin-bottom:8px"><label>Max Overshoot</label><input type="range" id="overshoot" min="0" max="40" value="8" step="1"><div class="readout"><b id="overshootVal">8</b><span>mm</span></div></div>
+        <div class="field">
+          <div class="label-row">
+            <label>Max Speed</label>
+            <button class="info" data-tip="Maximum carriage velocity in mm/s. The firmware passes this directly to FastAccelStepper after converting to steps/s internally (steps/s = mm/s × steps-per-mm). Typical safe range: 200–800 mm/s. Expert mode unlocks up to 3000 mm/s."><span data-ico="i-info"></span></button>
+          </div>
+          <input type="range" id="maxSpeed" min="50" max="3000" value="550" step="10">
+
+          <div class="readout"><b id="speedVal">550</b><span>mm/s</span></div>
+        </div>
+        <div class="field">
+          <div class="label-row">
+            <label>Acceleration</label>
+            <button class="info" data-tip="Ramp rate in mm/s². The firmware converts this to steps/s² before passing it to FastAccelStepper (steps/s² = mm/s² × steps-per-mm). Higher values = snappier starts and stops; too high causes lost steps. Typical safe range: 500–3000 mm/s². Expert mode unlocks up to 8000 mm/s²."><span data-ico="i-info"></span></button>
+          </div>
+          <input type="range" id="accel" min="200" max="8000" value="1500" step="50">
+
+          <div class="readout"><b id="accelVal">1500</b><span>mm/s²</span></div>
+        </div>
+        <!-- Lookahead + Max Overshoot sliders RETIRED. They drove the old
+             predictive-extrapolation overshoot, which we yanked out for the
+             continuous-velocity blend. The shaft keeps its rhythm through the
+             stream now instead of guessing ahead and overshooting — no more
+             premature lunging. Tune the reversal feel via Settings → Continuous
+             Blend instead. :3 -->
         <button class="btn ghost sm" style="width:100%" data-action="restoreDefaults"><span data-ico="i-reset"></span> Restore saved defaults</button>
+
         </div>
       </div>
     </div>
@@ -317,11 +375,27 @@
       <div class="card tight">
         <div class="card-head"><span data-ico="i-sliders"></span><h2>Default Motion</h2>
           <button class="info" data-tip="Saved defaults loaded on boot. You can override any of these live from the Control tab without changing what's saved here."><span data-ico="i-info"></span></button></div>
-        <div class="field"><label>Max Speed</label><input type="range" id="defMaxSpeed" min="50" max="3000" value="550" step="10"><div class="readout"><b id="defSpeedVal">550</b><span>mm/s</span></div></div>
-        <div class="field"><label>Acceleration</label><input type="range" id="defAccel" min="200" max="8000" value="1500" step="50"><div class="readout"><b id="defAccelVal">1500</b><span>mm/s²</span></div></div>
-        <div class="field"><label>Lookahead</label><input type="range" id="defLookahead" min="0" max="80" value="20" step="1"><div class="readout"><b id="defLookaheadVal">20</b><span>ms</span></div></div>
-        <div class="field" style="margin-bottom:0"><label>Max Overshoot</label><input type="range" id="defOvershoot" min="0" max="40" value="8" step="1"><div class="readout"><b id="defOvershootVal">8</b><span>mm</span></div></div>
+        <div class="field">
+          <div class="label-row">
+            <label>Max Speed</label>
+            <button class="info" data-tip="Maximum carriage velocity in mm/s. Stored as mm/s; the firmware converts to steps/s when commanding FastAccelStepper. Typical safe range: 200–800 mm/s. Expert mode unlocks up to 3000 mm/s."><span data-ico="i-info"></span></button>
+          </div>
+          <input type="range" id="defMaxSpeed" min="50" max="1500" value="550" step="10">
+          <div class="readout"><b id="defSpeedVal">550</b><span>mm/s</span></div>
+        </div>
+        <div class="field">
+          <div class="label-row">
+            <label>Acceleration</label>
+            <button class="info" data-tip="Ramp rate in mm/s². Stored as mm/s²; the firmware multiplies by steps-per-mm before calling FastAccelStepper's setAcceleration() (which expects steps/s²). Typical safe range: 500–3000 mm/s². Expert mode unlocks up to 8000 mm/s²."><span data-ico="i-info"></span></button>
+          </div>
+          <input type="range" id="defAccel" min="200" max="4000" value="1500" step="50">
+          <div class="readout"><b id="defAccelVal">1500</b><span>mm/s²</span></div>
+        </div>
+        <!-- Lookahead + Max Overshoot defaults RETIRED alongside the predictive
+             extrapolation. Continuous-velocity blending keeps the rhythm now;
+             reversal feel lives in Settings → Continuous Blend. :3 -->
       </div>
+
 
       <!-- Timing -->
       <div class="card tight">
@@ -358,6 +432,24 @@
         <div class="seg" id="genTickSeg">
           <button data-hz="20">20 Hz</button><button data-hz="50">50 Hz</button><button class="active" data-hz="100">100 Hz</button><button data-hz="200">200 Hz</button>
         </div>
+      </div>
+
+      <!-- Continuous Blend mode — how streamTo() handles a new waypoint that
+           reverses direction while a stroke is still in flight. Built from the
+           API-advertised blend_mode value so old clients that don't know about
+           this card just get the firmware default. :3 -->
+      <div class="card tight" id="blendCard">
+        <div class="card-head">
+          <span data-ico="i-wave"></span><h2>Continuous Blend</h2>
+          <button class="info" data-tip="Controls how the motor handles a new waypoint that reverses direction while a stroke is still in flight. Let-it-land (default) finishes the current stroke before reversing — smoothest, may drop a waypoint at extreme Hz. Allow-reversal retargets immediately for tighter tracking. Hybrid lets it land only when the remaining distance is large, otherwise allows the reversal."><span data-ico="i-info"></span></button>
+        </div>
+        <div class="mini-label" style="margin-bottom:8px">Reversal policy</div>
+        <div class="seg" id="blendModeSeg" style="margin-bottom:10px">
+          <button class="active" data-bm="1">Let-it-land</button>
+          <button data-bm="2">Allow reversal</button>
+          <button data-bm="3">Hybrid</button>
+        </div>
+        <div class="hint" id="blendModeHint">Finish the current stroke before reversing — smoothest ride, may drop a waypoint at extreme Hz. :3</div>
       </div>
 
       <!-- Motor driver card (injected by tmc.js) -->

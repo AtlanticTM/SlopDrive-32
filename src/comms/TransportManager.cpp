@@ -59,7 +59,10 @@ bool TransportManager::setupWiFi() {
 // ---- Transport selection ---------------------------------------------------
 
 void TransportManager::applyTransport(TransportMode mode) {
-    // Remove old response hooks.
+    // Rip out the old transport's tongue from the parser's mouth — we're about
+    // to plug a different pipe in. Each transport slobbers its own response hook
+    // into the parser, and two at once means crossed streams and garbled D0/D1/D2
+    // replies. Clean the palate, then let the new hose fill it. :3
     _serial.removeResponseHooks();
     _ws.removeResponseHooks();
     _ble.removeResponseHooks();

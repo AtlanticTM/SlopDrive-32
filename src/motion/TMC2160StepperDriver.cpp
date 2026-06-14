@@ -166,8 +166,19 @@ void TMC2160StepperDriver::init() {
 
 void TMC2160StepperDriver::update() {
     runMotorStep();
-    updateExtrapolation();
+
+    // Stream stall watchdog: if the host has gone quiet (no fresh waypoint for
+    // STREAM_STALL_MS) but we're still mid-thrust toward a streamed target,
+    // settle firmly on the last REAL sample so the carriage can't keep coasting
+    // toward a stale target after the stream drops. We don't extrapolate past
+    // it — that toy got thrown out. We just stay put where we were last told. :3
+    if (_have_last_sample && _stepper &&
+        (millis() - _last_sample_ms >= STREAM_STALL_MS)) {
+        _have_last_sample = false;   // one-shot; re-armed on the next streamTo()
+        streamTo(_last_sample_mm, 0.0f);
+    }
 }
+
 
 void TMC2160StepperDriver::emergencyStop() {
     hardStop();
@@ -208,12 +219,16 @@ void TMC2160StepperDriver::disable() {
 // ---- Stream-state reset ------------------------------------------------------
 
 void TMC2160StepperDriver::resetStreamState() {
-    _moving_to_target = false;
-    _coasting         = false;
-    _have_last_sample = false;
-    _stream_velocity  = 0.0f;
-    _last_sample_ms   = 0;
+    _have_last_sample  = false;
+    _last_sample_ms    = 0;
+    // Forget the in-flight target/direction so the next stream starts a fresh
+    // blend instead of inheriting a stale reversal decision from before the
+    // Halt/Home. Clean slate, ready to be told what to do again. :3
+    _have_last_target  = false;
+    _last_target_steps = 0;
+    _last_dir          = 0;
 }
+
 
 // ---- Homing ------------------------------------------------------------------
 //
@@ -496,16 +511,44 @@ void TMC2160StepperDriver::moveTo(float pos_mm) {
     // Now the queue is empty - a normal absolute moveTo() works correctly.
     int8_t mret = _stepper->moveTo(target_steps);
 
-    _moving_to_target = false;  // moveTo() handles its own deceleration to target
-
     MLOGF("moveTo: %.1fmm -> step %d (from %d) at %u Hz ret=%d\n",
           pos_mm, target_steps, pos_before, speed_hz, mret);
 }
 
+// ============================================================================
+// streamTo() — CONTINUOUS POSITION STREAMING (the Decel-Trap killer) :3
+// ============================================================================
+//
 // Smooth streaming move for Intiface/TCode. Unlike moveTo(), this NEVER
-// force-stops the motor between commands - FastAccelStepper accepts a new
-// moveTo() target while already running and smoothly re-plans the trajectory.
-// The force-stop + busy-wait in moveTo() is what made streamed motion stutter.
+// force-stops between commands — FastAccelStepper accepts a fresh moveTo()
+// target while already running and re-plans on the fly. This is the exact
+// pattern the proven position-streaming engines (OSSM-Sauce / OSSM-stream /
+// StrokeEngine) use: EVERY incoming sample is the latest truth about where the
+// shaft should be, so we ALWAYS retarget — we never drop a waypoint. :3
+//
+// CRITICAL LESSON (the bug this replaced): we previously had a "let-it-land"
+// blend policy that DROPPED any sample which reversed direction while a stroke
+// was still in flight. For a sine wave that's fatal — MFP streams points up to
+// the peak then back down, and every falling sample near the top got dropped
+// because the rising stroke "wasn't done." The carriage turned around early and
+// NEVER reached the window extremes (100mm collapsed to ~50mm + stutter). The
+// fix is simple and matches OSSM: don't be a brat, take every command. FAS does
+// a clean decel→reverse on a true turnaround all by itself. :3
+//
+// The one safety we DO keep:
+//   RAISE-ONLY ACCELERATION (the universal crash-avoidance pattern): once we're
+//   moving, never SOFTEN the acceleration. FAS computes its braking distance
+//   from the current accel; lowering it mid-flight means FAS suddenly needs a
+//   longer brake ramp than the distance that's left, so it overshoots and
+//   lurches. We only ever ramp accel UP while running. Stay firm, never go
+//   limp early. :3
+//
+// _blend_mode is retained as a tuning knob for HOW aggressively a reversal is
+// taken, but NONE of the modes drop samples anymore — tracking always wins:
+//   1 = standard (default): always retarget, raise-only accel. The OSSM way.
+//   2 = firm: same retarget, but force the configured accel on reversals so
+//       turnarounds snap tighter (good for fast, short strokes).
+//   3 = hybrid: standard, reserved for future per-segment tuning.
 void TMC2160StepperDriver::streamTo(float pos_mm, float speed_mm_s) {
     if (!_homed || !_stepper) return;
     enable();
@@ -513,7 +556,39 @@ void TMC2160StepperDriver::streamTo(float pos_mm, float speed_mm_s) {
     pos_mm = constrain(pos_mm, 0.0f, PHYSICAL_MAX_TRAVEL_MM);
     int32_t target_steps = -mmToNative(pos_mm);  // front = negative steps
 
-    // Resolve speed: use per-command speed if given, else configured max.
+    // Arm the stall watchdog with this REAL commanded sample (update() settles
+    // here if the host ghosts us). Heads-up: speed 0 means "settle" and is
+    // re-issued BY the watchdog itself — don't let that re-arm the timer or
+    // we'd never time out. :3
+    if (speed_mm_s > 0.0f) {
+        _last_sample_mm = pos_mm;
+        _last_sample_ms = millis();
+        _have_last_sample = true;
+    }
+
+    // ---- Direction of THIS commanded move (native-step sign) ----------------
+    // Tracked for telemetry / future tuning only. We NO LONGER drop reversals —
+    // every sample retargets. Dropping reversals is what collapsed the range. :3
+    int32_t cur_steps = _stepper->getCurrentPosition();
+    int32_t delta     = target_steps - cur_steps;
+    int8_t  new_dir   = (delta > 0) ? 1 : (delta < 0) ? -1 : 0;
+
+    // ---- Speed / acceleration -----------------------------------------------
+    //
+    // Always command the full configured accel — no raise-only guard. The old
+    // guard was meant to prevent overshoot by never softening mid-flight, but
+    // it was locking in stale accel values from previous segments and preventing
+    // the configured 8000 mm/s² from ever taking effect. FAS handles mid-flight
+    // retargets cleanly at any accel — it re-plans from current velocity. :3
+    //
+    // S-curve (jerk limiting): setLinearAcceleration(N) makes FAS ramp the
+    // acceleration linearly from 0 to the target over N steps, producing a
+    // smooth S-curve instead of a hard trapezoid corner. This eliminates the
+    // mechanical jerk at stroke reversals — the shaft eases into and out of
+    // each direction change instead of snapping. N=0 disables it (pure trapezoid).
+    // We use a small fixed value so the S-curve is tight enough to not eat
+    // the interval budget but smooth enough to feel silky. :3
+
     float spd = (speed_mm_s > 0.0f) ? speed_mm_s : _max_speed_mm_s;
     spd = constrain(spd, 1.0f, _max_speed_mm_s);
 
@@ -525,89 +600,28 @@ void TMC2160StepperDriver::streamTo(float pos_mm, float speed_mm_s) {
     _stepper->setSpeedInHz(speed_hz);
     _stepper->setAcceleration(accel_hz);
 
+    // NOTE: setLinearAcceleration() is NOT called here. Calling it on every
+    // streamTo() (30-100x/sec) triggers FAS's recalc_ramp_steps flag on every
+    // single call, forcing a full ramp recalculation mid-flight — that IS the
+    // bumpy/gritty feel. It's set ONCE in init() and never touched again during
+    // streaming. The S-curve is baked in at boot, not re-applied every thrust. :3
+
     // No force-stop, no busy-wait: just retarget. If the new target equals the
     // current commanded target FastAccelStepper ignores it cheaply.
     _stepper->moveTo(target_steps);
-    _moving_to_target = false;
-}
 
-// Predictive extrapolation: read the heat of the incoming sample stream and
-// command the motor to a point slightly AHEAD, so it keeps coasting between
-// samples instead of bottoming out on each one. Bounded overshoot + a stall
-// timeout (updateExtrapolation) keep it safe — we edge, we don't crash. :3
-void TMC2160StepperDriver::streamExtrapolated(float pos_mm, float speed_mm_s) {
-    if (!_homed || !_stepper) return;
-
-    uint32_t now = millis();
-    pos_mm = constrain(pos_mm, 0.0f, PHYSICAL_MAX_TRAVEL_MM);
-
-    float projected = pos_mm;
-
-    if (_have_last_sample) {
-        uint32_t dt = now - _last_sample_ms;
-        // Ignore absurdly long gaps (treat as a fresh start) and zero dt.
-        if (dt > 0 && dt < STREAM_STALL_MS * 3) {
-            // Measure how fast these samples are slamming into us (mm/s).
-            // The velocity between consecutive positions — read their heat,
-            // smooth it just a little to reject jittery little trembles
-            // between thrusts. A steady rhythm means a good pounding. :3
-            float v = (pos_mm - _last_sample_mm) / ((float)dt / 1000.0f);
-            _stream_velocity = 0.5f * _stream_velocity + 0.5f * v;
-
-            // Project ahead — we're not stopping AT the sample, we're ramming
-            // PAST it by the lookahead window, inflating the target deeper than
-            // commanded. The motor overshoots, kept on a tight leash so it
-            // doesn't run away and wreck the furniture.
-            float overshoot = _stream_velocity * ((float)_lookahead_ms / 1000.0f);
-            // Bound how far past the sample we're willing to let it stretch.
-            overshoot = constrain(overshoot, -_max_overshoot_mm, _max_overshoot_mm);
-            projected = pos_mm + overshoot;
-            projected = constrain(projected, 0.0f, PHYSICAL_MAX_TRAVEL_MM);
-            _coasting = true;
-        }
-    }
-
-    _last_sample_mm = pos_mm;
-    _last_sample_ms = now;
-    _have_last_sample = true;
-
-    // Drive to the projected (slightly-ahead) target. streamTo() never
-    // force-stops, so consecutive projections blend into continuous motion.
-    streamTo(projected, speed_mm_s);
-}
-
-// Stall fallback: if nobody's been talking dirty to us for a while, stop
-// coasting and settle exactly on the last REAL sample so the motor can't
-// run away past it like an overexcited pup off-leash. :3
-void TMC2160StepperDriver::updateExtrapolation() {
-    if (!_coasting || !_have_last_sample || !_stepper) return;
-    if (millis() - _last_sample_ms >= STREAM_STALL_MS) {
-        _coasting = false;
-        _stream_velocity = 0.0f;
-        // Ease back to the real last sample at the configured max speed.
-        streamTo(_last_sample_mm, 0.0f);
-    }
+    // Remember this stroke's target + direction so the NEXT command can detect
+    // a reversal against it. Direction 0 (no move) leaves the last real
+    // direction intact so a tiny no-op sample doesn't wipe our reversal memory.
+    _last_target_steps = target_steps;
+    if (new_dir != 0) _last_dir = new_dir;
+    _have_last_target = true;
 }
 
 void TMC2160StepperDriver::runMotorStep() {
-    if (!_moving_to_target || !_stepper) return;
-
-    int32_t current = _stepper->getCurrentPosition();
-
-    // Check if we've reached or passed the target
-    // _target_steps is negative for positive mm (e.g. -800 for 10mm)
-    // runBackward() decrements position, runForward() increments
-    bool reached = (_target_steps < 0)
-        ? (current <= _target_steps)   // moving backward (negative): stop when <= target
-        : (current >= _target_steps);  // moving forward (positive): stop when >= target
-
-    if (reached) {
-        _stepper->forceStop();
-        _moving_to_target = false;
-        _current_position_mm = nativeToMm(-_target_steps);
-        MLOGF("runMotorStep: reached target step %d (actual %d)\n",
-              _target_steps, current);
-    }
+    // NOP — moveTo()/streamTo() retarget through FAS directly.
+    // Stream stall watchdog (streamTo() stashing) lives in update().
+    // This stub exists to satisfy the MotorDriver interface.
 }
 
 // ---- Speed & Acceleration ----------------------------------------------------
@@ -617,7 +631,11 @@ void TMC2160StepperDriver::setMaxSpeed(float speed_mm_s) {
 }
 
 void TMC2160StepperDriver::setAcceleration(float accel_mm_s2) {
-    _accel_mm_s2 = constrain(accel_mm_s2, 10.0f, 5000.0f);
+    // Ceiling raised to 20000 mm/s² — 5000 was rejecting the new 8000 default
+    // and silently clamping every stroke to a crawl. 20000 is well within what
+    // the TMC2160 + NEMA17 can handle for short bursts. :3
+    _accel_mm_s2 = constrain(accel_mm_s2, 10.0f, 20000.0f);
+
 
     if (_stepper) {
         _stepper->setAcceleration((int32_t)(_accel_mm_s2 * STEPS_PER_MM));
@@ -680,11 +698,12 @@ void TMC2160StepperDriver::hardStop() {
     if (_stepper) {
         _stepper->forceStop();
     }
-    // Halt (Pause/Buttplug stop) routes here. Clear the coast/extrapolation
-    // state too, otherwise updateExtrapolation() keeps humping the last target
-    // right after the stop — and a later Home has to fight it off. Nobody needs
-    // a jealous ex-target clinging on after the scene's over.
+    // Halt (Pause/Buttplug stop) routes here. Clear the blend/stream state too,
+    // otherwise the stall watchdog keeps humping the last target right after the
+    // stop — and a later Home has to fight it off. Nobody needs a jealous
+    // ex-target clinging on after the scene's over. :3
     resetStreamState();
+
 }
 
 // ---- Driver config -----------------------------------------------------------

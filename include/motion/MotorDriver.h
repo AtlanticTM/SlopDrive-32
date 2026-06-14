@@ -65,10 +65,9 @@ public:
     // ---- Motion -------------------------------------------------------------
     virtual void moveTo(float pos_mm)                              = 0;
     virtual void streamTo(float pos_mm, float speed_mm_s)          = 0;
-    virtual void streamExtrapolated(float pos_mm, float speed_mm_s) = 0;
-    virtual void updateExtrapolation()                             = 0;
 
     virtual void stop()      = 0;    // decelerate stop + cut power
+
     virtual void hardStop()  = 0;    // immediate stop, motor stays powered
     virtual void enable()    = 0;
     virtual void disable()   = 0;
@@ -90,11 +89,13 @@ public:
     virtual uint16_t getCurrentmA()  = 0;
     virtual uint8_t  getMicrosteps() = 0;
 
-    // ---- Predictive extrapolation tuning ------------------------------------
-    virtual void     setLookaheadMs(uint16_t ms)  = 0;
-    virtual void     setMaxOvershootMm(float mm)  = 0;
-    virtual uint16_t getLookaheadMs()     const   = 0;
-    virtual float    getMaxOvershootMm()  const   = 0;
+    // ---- Continuous-blend tuning --------------------------------------------
+    // Selects how a streamed retarget that reverses direction mid-stroke is
+    // handled: 1=let-it-land, 2=allow-reversal, 3=hybrid. Drivers that don't
+    // do continuous blending may treat this as a no-op.
+    virtual void    setBlendMode(uint8_t mode) = 0;
+    virtual uint8_t getBlendMode() const       = 0;
+
 
     // ---- Unit conversion (driver-owned — Risk #4) ---------------------------
     // Convert a physical millimetre position to the driver's native unit

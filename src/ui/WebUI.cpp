@@ -5,12 +5,14 @@
 #include <LittleFS.h>
 #include <WebServer.h>
 #include <WiFi.h>
+#include <esp_timer.h>
+
 
 #include "AppLog.h"
 #include "ConfigStore.h"
 #include "Generator.h"
-#include "Interpolator.h"
 #include "MotorDriver.h"
+
 #include "TransportManager.h"
 #include "SerialTransport.h"
 #include "WebSocketTransport.h"
@@ -47,7 +49,6 @@ WebUI::WebUI(SystemState&        state,
              MotorDriver&        motor,
              RangeMapper&        mapper,
              Generator&          generator,
-             Interpolator&       interpolator,
              TransportManager&   transportMgr,
              SerialTransport&    serialTransport,
              WebSocketTransport& wsTransport,
@@ -56,8 +57,8 @@ WebUI::WebUI(SystemState&        state,
     , _motor(motor)
     , _mapper(mapper)
     , _generator(generator)
-    , _interpolator(interpolator)
     , _transportMgr(transportMgr)
+
     , _serialTransport(serialTransport)
     , _wsTransport(wsTransport)
     , _bleTransport(bleTransport)
@@ -89,6 +90,10 @@ void WebUI::init() {
     _httpServer->on("/api/clearfault",HTTP_POST, [this]() { handleApiClearFault(); });
     _httpServer->on("/api/gen",       HTTP_GET,  [this]() { handleApiGen(); });
     _httpServer->on("/api/gen",       HTTP_POST, [this]() { handleApiGen(); });
+    // /api/interp is still wired so the UI config card renders, but the
+    // actual jitter-buffer engine got yanked out. The route returns the
+    // stored params and lets the UI tweak them — just nobody's home to
+    // actually do the thrusting. Dormant but polite about it. yippie! :3
     _httpServer->on("/api/interp",    HTTP_GET,  [this]() { handleApiInterp(); });
     _httpServer->on("/api/interp",    HTTP_POST, [this]() { handleApiInterp(); });
     _httpServer->on("/api/log",       HTTP_GET,  [this]() { handleApiLog(); });
@@ -97,7 +102,13 @@ void WebUI::init() {
 
     _httpServer->begin();
     APPLOGF("HTTP server on port %d", HTTP_PORT);
+
+    // Arm the dedicated 10ms telemetry sampler so the UI gets a steady, even
+    // stream of position/target samples to replay — independent of how busy
+    // the HTTP loop gets. The shaft's rhythm, captured faithfully. :3
+    startTelemetrySampler();
 }
+
 
 // ============================================================================
 // update() — service the HTTP server (was httpTask body)
@@ -105,7 +116,58 @@ void WebUI::init() {
 
 void WebUI::update() {
     _httpServer->handleClient();
+    // Telemetry sampling no longer rides on this loop — it's driven by a
+    // dedicated 10ms esp_timer (startTelemetrySampler) so the sample cadence
+    // is rock-solid even when handleClient() blocks on a fat page transfer. :3
 }
+
+// ---- Dedicated 10ms telemetry sampler --------------------------------------
+// A periodic esp_timer fires every TELEMETRY_SAMPLE_INTERVAL_MS and snapshots
+// {actual position, commanded target} into the ring at a strict, even cadence.
+// The browser drains the new ones each poll and replays them 10ms apart, so the
+// rhythm it sees on-screen exactly mirrors the rhythm the shaft was driven at. :3
+void WebUI::telemetryTimerCb(void* arg) {
+    WebUI* self = static_cast<WebUI*>(arg);
+    self->captureTelemetry(self->_motor.getPosition(),
+                           self->_state.commanded_target_mm,
+                           self->_state.commanded_raw_mm);
+
+}
+
+void WebUI::startTelemetrySampler() {
+    static esp_timer_handle_t handle = nullptr;
+    if (handle) return;  // already pounding away
+    esp_timer_create_args_t args = {};
+    args.callback        = &WebUI::telemetryTimerCb;
+    args.arg             = this;
+    args.dispatch_method = ESP_TIMER_TASK;   // runs in the esp_timer task (Core 0)
+    args.name            = "tele10ms";
+    if (esp_timer_create(&args, &handle) == ESP_OK) {
+        esp_timer_start_periodic(handle, TELEMETRY_SAMPLE_INTERVAL_MS * 1000ULL);
+        APPLOG("Telemetry sampler armed — sampling the shaft every 10ms :3");
+    } else {
+        APPLOG("Telemetry sampler FAILED to arm — graph will be limp. :<");
+    }
+}
+
+// ---- Batched telemetry ring capture ---------------------------------------
+// Writes one sample at slot (seq % SIZE), then bumps the monotonic seq. The
+// spinlock makes the {pos, tgt, seq} update atomic against the HTTP-thread
+// drain in handleApiStatus — no torn reads, no half-written sample. seq lets
+// the browser ask for "everything newer than what I last saw" so we never
+// resend or skip a thrust. :3
+void WebUI::captureTelemetry(float position_mm, float target_mm, float raw_mm) {
+    portENTER_CRITICAL(&_telemetry_mux);
+    uint32_t seq = _telemetry_seq;
+    size_t idx = seq % TELEMETRY_RING_SIZE;
+    _telemetry_ring[idx].position_mm = position_mm;
+    _telemetry_ring[idx].target_mm   = target_mm;
+    _telemetry_ring[idx].raw_mm      = raw_mm;
+    _telemetry_seq = seq + 1;
+    portEXIT_CRITICAL(&_telemetry_mux);
+}
+
+
 
 // ============================================================================
 // Route handlers
@@ -170,6 +232,54 @@ void WebUI::handleApiStatus() {
     doc["paused"] = _state.paused;
     doc["manual_override"] = _state.manual_override;
 
+    // ---- Batched telemetry samples — drain only what's NEW since the browser
+    //      last polled (it sends ?since=<seq>). The firmware stuffs one sample
+    //      every 10ms; the browser replays them 10ms apart on its own clock so
+    //      the position markers + graph glide at the exact rhythm we drove. :3
+    //
+    //      We send each sample as just [actual_pos_mm, commanded_target_mm] —
+    //      no per-sample timestamp needed, because the spacing is a fixed 10ms
+    //      and the browser schedules playback locally. We also send the current
+    //      tele_seq so the browser knows what to ask for next time, plus
+    //      tele_dt so it knows the playback spacing without hardcoding it. :3 ----
+    uint32_t since = 0;
+    if (_httpServer->hasArg("since")) since = (uint32_t)strtoul(_httpServer->arg("since").c_str(), nullptr, 10);
+
+    // Snapshot the ring under the spinlock into a tiny local buffer so the
+    // 10ms timer can't write mid-serialize. 25 samples max — cheap on stack. :3
+    TelemetrySample snap[TELEMETRY_RING_SIZE];
+    uint32_t        snap_first_seq = 0;
+    size_t          snap_n = 0;
+    portENTER_CRITICAL(&_telemetry_mux);
+    uint32_t head = _telemetry_seq;   // next seq to be written = total written
+    // Oldest seq still resident in the ring.
+    uint32_t oldest = (head > TELEMETRY_RING_SIZE) ? (head - TELEMETRY_RING_SIZE) : 0;
+    // Start at whichever is newer: what the browser hasn't seen, or the oldest
+    // sample we still hold (if the browser fell behind > 250ms we skip the gap).
+    uint32_t from = (since > oldest) ? since : oldest;
+    for (uint32_t s = from; s < head && snap_n < TELEMETRY_RING_SIZE; s++) {
+        snap[snap_n++] = _telemetry_ring[s % TELEMETRY_RING_SIZE];
+    }
+    snap_first_seq = from;
+    portEXIT_CRITICAL(&_telemetry_mux);
+
+    doc["tele_seq"] = head;                              // ask for this next time
+    doc["tele_dt"]  = TELEMETRY_SAMPLE_INTERVAL_MS;      // playback spacing (ms)
+    doc["tele_from"] = snap_first_seq;                   // seq of samples[0]
+    JsonArray samples = doc["samples"].to<JsonArray>();
+    for (size_t i = 0; i < snap_n; i++) {
+        // [actual_pos_mm, planned_target_mm, raw_mapped_mm] — the full pipeline:
+        // "took" (where the shaft got) vs "told" (planner output) vs "asked"
+        // (raw TCode+RangeMapper, pre-planner). Three traces, three stages, so
+        // we can see exactly where the motion path gets mangled. :3
+        JsonArray s = samples.add<JsonArray>();
+        s.add(snap[i].position_mm);
+        s.add(snap[i].target_mm);
+        s.add(snap[i].raw_mm);
+    }
+
+
+
     // --- Driver health (legacy TMC2160 readback REMOVED) ---
     JsonObject drv = doc["driver"].to<JsonObject>();
     drv["valid"]     = false;
@@ -202,8 +312,11 @@ void WebUI::handleApiSettings() {
         doc["range_max"] = _mapper.getMaxMm();
         doc["max_speed"] = (uint16_t)_state.config.max_speed_mm_s;
         doc["accel"] = (uint16_t)_state.config.acceleration_mm_s2;
-        doc["lookahead"] = _motor.getLookaheadMs();
-        doc["overshoot"] = (uint16_t)_motor.getMaxOvershootMm();
+        // Continuous-blend policy: 1=let-it-land, 2=allow-reversal, 3=hybrid.
+        // Replaces the old predictive lookahead/overshoot — we keep velocity
+        // through the stream now instead of guessing ahead of it. :3
+        doc["blend_mode"] = _motor.getBlendMode();
+
         doc["auto_duration"] = _state.auto_duration;
         doc["default_range_min"] = _state.default_range_min;
         doc["default_range_max"] = _state.default_range_max;
@@ -233,16 +346,23 @@ void WebUI::handleApiSettings() {
             return;
         }
 
-        if (accel < 200) accel = 200;
-        if (accel > 5000) accel = 5000;
+        // Clamp raised to match setAcceleration()'s ceiling of 20000 mm/s².
+        // The old 5000 cap was silently rejecting every value above 5000 —
+        // so "8000" in the UI was actually running at 5000 the whole time. owo
+        // Floor at 10 so a zero/garbage value doesn't brick the planner. :3
+        if (accel < 10)    accel = 10;
+        if (accel > 20000) accel = 20000;
 
-        uint16_t lookahead = doc["lookahead"] | (uint16_t)_motor.getLookaheadMs();
-        float overshoot = doc["overshoot"] | _motor.getMaxOvershootMm();
-        if (lookahead > 200) lookahead = 200;
-        if (overshoot < 0.0f) overshoot = 0.0f;
-        if (overshoot > 50.0f) overshoot = 50.0f;
+
+        // Continuous-blend policy (1=let-it-land, 2=allow-reversal, 3=hybrid).
+        // Default to the driver's current mode if the field is absent so a
+        // partial settings POST doesn't clobber it. Clamped 1..3. :3
+        uint8_t blend_mode = doc["blend_mode"] | (uint8_t)_motor.getBlendMode();
+        if (blend_mode < 1) blend_mode = 1;
+        if (blend_mode > 3) blend_mode = 3;
 
         _state.auto_duration = doc["auto_duration"] | _state.auto_duration;
+
 
         _state.expert_mode = doc["expert_mode"] | _state.expert_mode;
         if (doc["default_range_min"].is<float>() || doc["default_range_max"].is<float>()) {
@@ -260,9 +380,9 @@ void WebUI::handleApiSettings() {
         _state.config.acceleration_mm_s2 = (float)accel;
         _motor.setMaxSpeed(_state.config.max_speed_mm_s);
         _motor.setAcceleration(_state.config.acceleration_mm_s2);
-        _motor.setLookaheadMs(lookahead);
-        _motor.setMaxOvershootMm(overshoot);
+        _motor.setBlendMode(blend_mode);
         bool no_persist = doc["no_persist"] | false;
+
         if (!no_persist) ConfigStore::save(_state, _mapper, _motor);
 
         JsonDocument resp;
@@ -494,13 +614,17 @@ void WebUI::handleApiGen() {
 void WebUI::handleApiInterp() {
     if (_httpServer->method() == HTTP_GET) {
         JsonDocument doc;
-        doc["mode"]      = (_state.getInputMode() == InputMode::BUFFERED) ? "buffered" : "extrapolate";
+        // Interpolation/extrapolation are compiled out of this build — motion
+        // is trapezoidal-planner only now. We still answer this endpoint so the
+        // WebUI doesn't choke, but we advertise the real state honestly. :3
+        doc["mode"]      = "trapezoidal";
         doc["easing"]    = _state.buf_easing;
         doc["depth"]     = _state.buf_depth;
         doc["tick"]      = _state.buf_tick_hz;
-        doc["active"]    = _interpolator.isActive();
-        doc["buffered"]  = _state.buf_count;
+        doc["active"]    = false;   // no interpolator task in this build
+        doc["buffered"]  = 0;
         String json;
+
         serializeJson(doc, json);
         _httpServer->send(200, "application/json", json);
         return;

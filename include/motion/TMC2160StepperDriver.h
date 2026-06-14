@@ -22,8 +22,14 @@ class FastAccelStepper;
 //
 // Lifecycle:
 //   begin() → init()      — SPI setup, TMC init, FastAccelStepper creation
-//   update() → runMotorStep() + updateExtrapolation()  (per-tick, Core 1)
+//   update() → runMotorStep()  (per-tick, Core 1)
 //   emergencyStop()        — hardStop + disable, clear state
+//
+// CONTINUOUS BLENDING (the Decel-Trap fix): streamTo() never softens a committed
+// brake ramp (raise-only accel) and handles same-direction vs. reversal per the
+// selectable _blend_mode. No more stop-and-go stutter between waypoints — we keep
+// pounding through the stream instead of edging to a dead stop on every sample. :3
+
 
 class TMC2160StepperDriver : public MotorDriver {
 public:
@@ -39,6 +45,10 @@ public:
     void runHomingStep() override;
     bool isHomed()  const override { return _homed; }
     bool isHoming() const override { return _homing; }
+    // Force the driver's internal homed flag. Only for bench/remote testing
+    // builds (HOMING_DISABLED) — do NOT call on real hardware with a motor
+    // plugged in, or the firmware will cheerfully ram the endstop. :3
+    void forceHomeState(bool homed) { _homed = homed; }
     bool checkPushToHome() override;
 
     // ---- Position monitor ---------------------------------------------------
@@ -47,10 +57,9 @@ public:
     // ---- Motion -------------------------------------------------------------
     void moveTo(float pos_mm) override;
     void streamTo(float pos_mm, float speed_mm_s) override;
-    void streamExtrapolated(float pos_mm, float speed_mm_s) override;
-    void updateExtrapolation() override;
 
     void stop() override;
+
     void hardStop() override;
     void enable() override;
     void disable() override;
@@ -72,21 +81,29 @@ public:
     uint16_t getCurrentmA()  override;
     uint8_t  getMicrosteps() override;
 
-    // ---- Predictive extrapolation tuning ------------------------------------
-    void     setLookaheadMs(uint16_t ms) override { _lookahead_ms = ms; }
-    void     setMaxOvershootMm(float mm) override { _max_overshoot_mm = constrain(mm, 0.0f, 50.0f); }
-    uint16_t getLookaheadMs()    const override { return _lookahead_ms; }
-    float    getMaxOvershootMm() const override { return _max_overshoot_mm; }
+    // ---- Continuous-blend tuning --------------------------------------------
+    // Blend mode picks how streamTo() handles a new waypoint that reverses
+    // direction while a stroke is still in flight:
+    //   1 = let-it-land (DEFAULT) — finish the current stroke, ignore the
+    //       reversing retarget. Smoothest; may drop a waypoint at extreme Hz.
+    //   2 = allow-reversal        — retarget immediately; FAS does a clean
+    //       decel→reverse. Tighter tracking, one decel per true turnaround.
+    //   3 = hybrid                — let-it-land only while the remaining
+    //       in-flight distance is large; otherwise allow the reversal.
+    void    setBlendMode(uint8_t mode) { _blend_mode = constrain((int)mode, 1, 3); }
+    uint8_t getBlendMode() const       { return _blend_mode; }
+
 
     // ---- Unit conversion (static for external use) --------------------------
     int32_t mmToNative(float mm)        const override;
     float   nativeToMm(int32_t native)  const override;
 
 private:
-    // Clears all streaming / extrapolation / target-monitor state so that a
-    // stale stream from before a Halt/Home can't keep issuing moveTo() commands
-    // that fight a fresh homing cycle.
+    // Clears all streaming / blend / target-monitor state so that a stale stream
+    // from before a Halt/Home can't keep issuing moveTo() commands that fight a
+    // fresh homing cycle.
     void resetStreamState();
+
 
     // Self-contained homing task — spawned by home(), deletes itself when done.
     // Mirrors StrokeEngine's _homingProcedure pattern exactly. :3
@@ -101,21 +118,38 @@ private:
     bool    _homing = false;
     bool    _enabled = false;
     int32_t _home_speed_steps_s = 4000;  // stored by home(), read by _homingTask()
-    bool _moving_to_target = false;
-    int32_t _target_steps = 0;
 
-    float _max_speed_mm_s = MAX_SPEED_MM_S;
-    float _accel_mm_s2 = DEFAULT_ACCEL_MM_S2;
-    float _current_position_mm = 0.0f;
+    float    _max_speed_mm_s       = MAX_SPEED_MM_S;
+    float    _accel_mm_s2          = DEFAULT_ACCEL_MM_S2;
+    float    _current_position_mm  = 0.0f;
 
-    // Predictive extrapolation state
-    uint16_t _lookahead_ms       = 20;
-    float    _max_overshoot_mm   = 8.0f;
+    // S-curve jerk limiting: FAS ramps acceleration linearly from 0 to the
+    // target over this many steps at each stroke start/reversal. 0 = pure
+    // trapezoid (sharp corners). ~40 steps at 80 steps/mm = 0.5mm of S-curve
+    // lead-in — silky smooth without eating the interval budget. The shaft
+    // eases into each thrust instead of snapping like a jackhammer. :3
+    uint32_t _linear_accel_steps   = 40;
+
+
+    // ---- Continuous-blend / stream state ------------------------------------
+    // Blend mode: 1=let-it-land (default), 2=allow-reversal, 3=hybrid.
+    uint8_t  _blend_mode         = 1;
+    // Last commanded target + its direction sign, so streamTo() can detect a
+    // reversal vs. the in-flight move and apply the selected blend policy.
+    int32_t  _last_target_steps  = 0;
+    int8_t   _last_dir           = 0;       // -1, 0, +1 (native-step sign)
+    bool     _have_last_target   = false;
+    // Watchdog: if the host stops talking dirty to us, settle on the last real
+    // sample so the carriage can't keep coasting toward a stale target. :3
     float    _last_sample_mm     = 0.0f;
-    float    _stream_velocity    = 0.0f;
     uint32_t _last_sample_ms     = 0;
     bool     _have_last_sample   = false;
-    bool     _coasting           = false;
     static const uint16_t STREAM_STALL_MS = 80;
 
+    // Hybrid (mode 3): below this remaining in-flight distance we allow the
+    // reversal instead of letting the stroke finish. ~1.5mm worth of steps.
+    static const int32_t BLEND_REVERSAL_THRESHOLD_STEPS = (int32_t)(1.5f * STEPS_PER_MM);
+
 };
+
+

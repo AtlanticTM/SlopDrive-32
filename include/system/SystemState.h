@@ -83,11 +83,11 @@ struct SystemState {
     volatile uint8_t       buf_count  = 0;   // valid samples in ring
     portMUX_TYPE           buf_mux    = portMUX_INITIALIZER_UNLOCKED;
 
-    // Interpolator playback state (Core 1 only)
-    float                  buf_seg_t          = 0.0f;
-    uint32_t               buf_last_tick_us   = 0;
-    volatile bool          buf_active         = false;  // emitting motion now?
-
+    // Interpolator playback state — DORMANT (Interpolator engine removed)
+    // The ring-buffer config fields (buf_easing, buf_depth, buf_tick_hz) are
+    // retained for persisted settings compatibility and the WebUI config card.
+    // buf_active is always false now — no engine is behind it to thrust. :3
+    volatile bool          buf_active         = false;
     // ---- Loading / flow (cross-core) -----------------------------------------
     volatile bool          homed               = false;
     volatile bool          homing_in_progress  = false;
@@ -132,7 +132,27 @@ struct SystemState {
     // Timestamp of last Intiface command (Core 1 only — buttplugLinearCmd stamps)
     uint32_t               last_intiface_ms = 0;
 
+    // ---- Commanded target (cross-core) ---------------------------------------
+    // The position the host/generator just TOLD us to go to (mm), before FAS
+    // has actually pounded its way there. Written by whoever issues the move
+    // (buttplugLinearCmd on the TCode path, generatorTask on the gen path),
+    // read by Core 0's telemetry capture so the UI can draw "what we were asked
+    // for" right next to "where the shaft actually is." 32-bit aligned float =
+    // hardware-atomic on the S3, no mutex needed. :3
+    volatile float         commanded_target_mm = 0.0f;
+
+    // ---- Raw parsed target (cross-core) --------------------------------------
+    // The position the TCode parser + RangeMapper spat out (mm), BEFORE the
+    // kinematics planner gets its hands on it. This is the rawest "what the host
+    // actually asked for, mapped into our stroke window" — one stage upstream of
+    // commanded_target_mm (which is the planner's clamped/shaped result). Drawing
+    // all three (raw → planned → actual) side by side lets us see exactly which
+    // stage mangles the motion path. Same hardware-atomic float deal, no mutex. :3
+    volatile float         commanded_raw_mm = 0.0f;
+
+
     // Generator local tick rate (cross-core)
+
     // Default cadence we pound at — 100 Hz gives buttery-smooth position updates
     // without making the S3 break a sweat. Bump to 200 if you're feeling greedy. :3
     volatile uint16_t      gen_rate_tick_hz = 100;

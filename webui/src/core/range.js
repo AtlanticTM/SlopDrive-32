@@ -191,18 +191,37 @@ export async function setBound(which, position) {
 // dot toward the latest target so it glides instead of snapping 1/sec.
 let posTarget = 0, posDisplay = 0, posAnimStarted = false;
 
-export function setPosTarget(v) { posTarget = clamp(v, 0, TRAVEL); }
+// The COMMANDED target marker — where the host TOLD the shaft to go. Rides
+// alongside the actual-position dot so you can see "told vs took" right on
+// the stroke window. tgtTarget is fed by the motion-graph playback cursor. :3
+let tgtTarget = 0, tgtDisplay = 0;
 
+export function setPosTarget(v) { posTarget = clamp(v, 0, TRAVEL); }
+export function setTargetMarker(v) { tgtTarget = clamp(v, 0, TRAVEL); }
+
+// Easing factor: 0.55 snaps the dot to the interpolated position within
+// ~3 frames at 60 FPS — tight enough to track the batched playback cursor
+// without visible lag, loose enough to avoid pixel jitter on a static shaft. :3
 function animatePosLine() {
-  posDisplay += (posTarget - posDisplay) * 0.18;
-  if (Math.abs(posTarget - posDisplay) < 0.05) posDisplay = posTarget;
-  const host = $('trackHost'), dot = $('posDot');
+  posDisplay += (posTarget - posDisplay) * 0.55;
+  if (Math.abs(posTarget - posDisplay) < 0.1) posDisplay = posTarget;
+  // The target marker chases just as eagerly so the gap you see is the REAL
+  // tracking error, not animation lag. :3
+  tgtDisplay += (tgtTarget - tgtDisplay) * 0.55;
+  if (Math.abs(tgtTarget - tgtDisplay) < 0.1) tgtDisplay = tgtTarget;
+
+  const host = $('trackHost'), dot = $('posDot'), tdot = $('tgtDot');
   if (host && dot) {
     const H = host.clientHeight;
     dot.style.top = ((1 - clamp(posDisplay, 0, TRAVEL) / TRAVEL) * H) + 'px';
+    if (tdot) tdot.style.top = ((1 - clamp(tgtDisplay, 0, TRAVEL) / TRAVEL) * H) + 'px';
   }
+  // Live numeric readouts: actual + commanded target, in mm.
+  setRead('posNowVal', Math.round(posDisplay));
+  setRead('posTgtVal', Math.round(tgtDisplay));
   requestAnimationFrame(animatePosLine);
 }
+
 
 export function startPosAnim() {
   if (!posAnimStarted) {

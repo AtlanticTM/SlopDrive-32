@@ -108,6 +108,22 @@ struct SystemState {
     // ---- Transport (cross-core) ----------------------------------------------
     volatile uint8_t       transport = static_cast<uint8_t>(DEFAULT_TRANSPORT_MODE);
 
+    // ---- Intiface parser workaround (cross-core) -----------------------------
+    // Intiface's buttplug→TCode bridge does fuckshit to the magnitude: instead
+    // of the spec-correct variable-digit fraction (L0500 = 0.500) that MFP and
+    // the TCode v0.3 spec use, it emits values that only decode correctly when
+    // scaled against the legacy fixed /999 magnitude ceiling. With the normal
+    // digit-count decode, an Intiface "full depth" command lands shallow and
+    // the stroke never fully gapes. :3
+    //
+    // When TRUE: parser scales magnitude as mag / TCODE_MAGNITUDE_MAX (legacy
+    //            Intiface/buttplug convention).
+    // When FALSE (default): parser uses spec-correct mag / 10^digits — the
+    //            decode MFP needs. We had a hard-coded Intiface fix before and
+    //            it broke MFP; a per-source toggle lets each app get what it
+    //            wants without one stealing the other's lube. :3
+    volatile bool          intiface_compat      = false;
+
     // ---- Cadence / auto-duration ---------------------------------------------
     volatile bool          auto_duration        = true;
     uint32_t               last_cmd_ms          = 0;      // Core 1 only

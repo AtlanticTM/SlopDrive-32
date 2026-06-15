@@ -30,6 +30,10 @@ void ConfigStore::save(SystemState& state, RangeMapper& mapper, MotorDriver& mot
     prefs.putUChar("blend_mode", motor.getBlendMode());
 
     prefs.putBool("auto_dur", state.auto_duration);
+    // Intiface compat — whether we decode magnitudes against the legacy /999
+    // ceiling (Intiface's mangled scale) or the spec-correct digit count (MFP).
+    // Persisted so the operator's chosen app stays satisfied across reboots. :3
+    prefs.putBool("if_compat", state.intiface_compat);
     prefs.putFloat("def_rmin", state.default_range_min);
     prefs.putFloat("def_rmax", state.default_range_max);
     prefs.putBool("expert", state.expert_mode);
@@ -76,6 +80,10 @@ void ConfigStore::load(SystemState& state, RangeMapper& mapper, MotorDriver& mot
         uint16_t acc = prefs.getUShort("accel", (uint16_t)state.config.acceleration_mm_s2);
         uint8_t blend = prefs.getUChar("blend_mode", 1);  // 1=let-it-land default
         state.auto_duration = prefs.getBool("auto_dur", true);
+        // Intiface compat — default false (spec-correct/MFP decode) when the key
+        // was never written. main.cpp pushes this into TCodeParser::intifaceCompat
+        // right after load() so the parser is in lockstep from the first frame. :3
+        state.intiface_compat = prefs.getBool("if_compat", false);
 
         state.default_range_min = prefs.getFloat("def_rmin", 0.0f);
         state.default_range_max = prefs.getFloat("def_rmax", PHYSICAL_MAX_TRAVEL_MM);

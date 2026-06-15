@@ -397,32 +397,12 @@
       </div>
 
 
-      <!-- Timing -->
+      <!-- Intiface Compatibility -->
       <div class="card tight">
-        <div class="card-head"><span data-ico="i-gauge"></span><h2>Timing</h2>
-          <button class="info" data-tip="How raw Intiface position samples become motion. Extrapolate is best when the app sends at a steady rate; Buffered smooths out apps that send in bursts."><span data-ico="i-info"></span></button></div>
-        <div class="mini-label">Input mode</div>
-        <div class="seg" id="inputModeSeg" style="margin-bottom:12px">
-          <button class="active" data-im="extrapolate">Extrapolate</button>
-          <button data-im="buffered">Buffered</button>
-        </div>
-        <div id="extrapPanel">
-          <label class="switch"><input type="checkbox" id="autoDuration"><span class="track"></span><span class="lbl">Auto Duration</span></label>
-          <div class="mini-label" style="margin-top:4px;color:var(--faint)">Sizes each move to the real measured command interval (fixes apps that send a fixed move-duration). Best with a steady packet rate.</div>
-        </div>
-        <div id="bufPanel" style="display:none">
-          <div class="mini-label" style="color:var(--faint);margin-bottom:8px">Buffers incoming commands and interpolates locally — smooths out apps that send packets sporadically/in bursts.</div>
-          <div class="field"><label>Buffer depth</label><input type="range" id="bufDepth" min="1" max="5" step="1" value="2"><div class="readout"><b id="bufDepthVal">2</b><span>samples</span></div></div>
-          <div class="mini-label">Interpolation rate</div>
-          <div class="seg" id="bufTickSeg" style="margin-bottom:12px">
-            <button data-hz="20">20 Hz</button><button data-hz="50">50 Hz</button><button class="active" data-hz="100">100 Hz</button><button data-hz="200">200 Hz</button>
-          </div>
-          <div class="mini-label">Easing between points</div>
-          <div class="field"><select id="bufEasing"><option value="0">Linear</option><option value="1" selected>Ease in-out (smooth)</option><option value="2">Ease in (accelerate)</option><option value="3">Ease out (decelerate)</option><option value="4">Ease in-out cubic (strong S)</option></select></div>
-        </div>
-        <div class="kv" style="margin-top:14px;background:var(--card-2);border:1px solid var(--line);border-radius:var(--radius-sm);padding:11px 12px">
-          <span>Measured rate</span><span><b id="measuredHz">--</b> Hz · <b id="measuredMs">--</b> ms</span>
-        </div>
+        <div class="card-head"><span data-ico="i-gauge"></span><h2>Intiface Compatibility</h2>
+          <button class="info" data-tip="Intiface's buttplug bridge scales position values differently than MultiFunPlayer. If strokes from Intiface feel too shallow (never reaching full depth), turn this ON. Leave OFF for MultiFunPlayer."><span data-ico="i-info"></span></button></div>
+        <label class="switch"><input type="checkbox" id="intifaceCompat"><span class="track"></span><span class="lbl">Intiface position fix</span></label>
+        <div class="mini-label" style="margin-top:6px;color:var(--faint)">Rescales incoming position values for Intiface, which mangles the TCode magnitude. Turn <b>ON</b> when driving from Intiface if strokes never reach full depth. Turn <b>OFF</b> for MultiFunPlayer (which sends spec-correct values). :3</div>
       </div>
 
       <!-- Generation rate -->

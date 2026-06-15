@@ -14,6 +14,7 @@
 #include "MotorDriver.h"
 
 #include "TransportManager.h"
+#include "TCodeParser.h"
 #include "SerialTransport.h"
 #include "WebSocketTransport.h"
 #include "BleTransport.h"
@@ -321,6 +322,7 @@ void WebUI::handleApiSettings() {
         doc["blend_mode"] = _motor.getBlendMode();
 
         doc["auto_duration"] = _state.auto_duration;
+        doc["intiface_compat"] = _state.intiface_compat;
         doc["default_range_min"] = _state.default_range_min;
         doc["default_range_max"] = _state.default_range_max;
         doc["expert_mode"] = _state.expert_mode;
@@ -366,6 +368,12 @@ void WebUI::handleApiSettings() {
 
         _state.auto_duration = doc["auto_duration"] | _state.auto_duration;
 
+        // Intiface compat toggle: flip both the persisted state flag AND the
+        // parser's live static so the change takes effect on the very next
+        // TCode frame — no reboot needed. When ON, Intiface's mangled
+        // magnitudes get the /999 decode; when OFF, MFP's spec decode. :3
+        _state.intiface_compat = doc["intiface_compat"] | _state.intiface_compat;
+        TCodeParser::intifaceCompat = _state.intiface_compat;
 
         _state.expert_mode = doc["expert_mode"] | _state.expert_mode;
         if (doc["default_range_min"].is<float>() || doc["default_range_max"].is<float>()) {

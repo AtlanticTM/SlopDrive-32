@@ -6,6 +6,11 @@
 #include "AppLog.h"
 #include "config_api.h"
 
+// Intiface compat flag — default OFF so MultiFunPlayer (spec-correct decode)
+// works out of the box. The WebUI flips this on when you're driving from
+// Intiface and it's ramming mangled magnitudes at us. :3
+volatile bool TCodeParser::intifaceCompat = false;
+
 // ============================================================================
 // feedLine — parse one or more whitespace-separated TCode commands
 // ============================================================================
@@ -104,12 +109,26 @@ void TCodeParser::feedLine(const char* str, size_t len) {
                 continue;
             }
 
-            // Scale = 10^mag_digits. Build it as an integer power of ten so the
-            // fraction is exact for the digits we kept (no fixed-magic divisor).
-            float scale = 1.0f;
-            for (int d = 0; d < mag_digits; d++) scale *= 10.0f;
-
-            float position = (float)mag_value / scale;
+            // --- Pick the divisor: spec-correct vs Intiface compat ------------
+            // DEFAULT (intifaceCompat == false): divide by 10^digits so the
+            // scale always matches the digit count — the MFP / TCode v0.3 way.
+            //
+            // INTIFACE COMPAT (intifaceCompat == true): Intiface's buttplug
+            // bridge does fuckshit and emits magnitudes meant to be read against
+            // the legacy fixed /TCODE_MAGNITUDE_MAX (999) ceiling. Under the
+            // digit-count decode those land shallow and the hole never fully
+            // gapes. Flip the toggle in the WebUI and we scale against the fixed
+            // ceiling instead so Intiface strokes go balls-deep again. :3
+            float position;
+            if (intifaceCompat) {
+                position = (float)mag_value / TCODE_MAGNITUDE_MAX;
+            } else {
+                // Scale = 10^mag_digits. Integer power of ten so the fraction is
+                // exact for the digits we kept (no fixed-magic divisor).
+                float scale = 1.0f;
+                for (int d = 0; d < mag_digits; d++) scale *= 10.0f;
+                position = (float)mag_value / scale;
+            }
             position = constrain(position, 0.0f, 1.0f);
 
 

@@ -77,6 +77,15 @@ public:
     // ---- Raw frame counter (pre-parse, for rate diagnostics) -----------------
     volatile uint32_t rxFrameCount = 0;
 
+    // ---- Intiface compatibility flag (set by the WebUI handler) ---------------
+    // Static so the WebUI can flip it without threading a SystemState ref into
+    // this transport-agnostic parser. When true, feedLine() decodes the L0
+    // magnitude against the fixed TCODE_MAGNITUDE_MAX (/999) scale that
+    // Intiface's buttplug bridge expects, instead of the spec-correct
+    // mag/10^digits decode that MultiFunPlayer needs. One bool, two apps, no
+    // more fighting over the same hole. :3
+    static volatile bool intifaceCompat;
+
 private:
     LinearCmdCallback _onLinearCmd = nullptr;
     StopCallback      _onStop      = nullptr;

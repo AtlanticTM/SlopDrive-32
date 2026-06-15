@@ -269,14 +269,65 @@ static void motionConsumerTask(void* /*param*/) {
     lastPt.inTime       = 250;
     lastPt.has_set_time = false;
 
-    while (true) {
-        PositionTime pt;
+    // ---- One-deep carry buffer (requeue-free, high-rate safe) ---------------
+    // We always keep AT MOST one un-dispatched packet in a local "carry" slot
+    // (carryPt). Each loop pops exactly ONE fresh packet from the queue and
+    // never pushes anything back — so the queue ordering can't be scrambled and
+    // nothing is ever dropped by a failed requeue. This is what broke at 60Hz:
+    // the old xQueueSendToFront collided with the producer and silently lost a
+    // waypoint every cycle once the 8-slot queue filled. Gone now. :3
+    //
+    // The rule:
+    //   - carryPt holds the packet we're about to dispatch.
+    //   - We pop the NEXT packet (incoming). If carryPt had NO time (inTime==0),
+    //     we steal its duration from (incoming.setTime - carryPt.setTime) — the
+    //     OSSM position-only trick. If carryPt already had a real I-param (the
+    //     golden MFP path), we leave it exactly as-is: zero added behavior.
+    //   - Dispatch carryPt, then promote incoming -> carryPt for next loop.
+    //
+    // Net latency: exactly one packet of lookahead (~16ms at 60Hz), the minimum
+    // possible to measure a duration. Timed packets are NOT slowed — they get
+    // their own I-param honored; the one-packet hold is just pipeline depth. :3
+    bool         haveCarry = false;
+    PositionTime carryPt    = {};
 
-        // Block up to 50ms waiting for a waypoint. If nothing arrives, loop
-        // back — the stream stall watchdog in motorTask handles settle behavior.
-        if (xQueueReceive(g_waypoint_queue, &pt, pdMS_TO_TICKS(50)) != pdTRUE) {
+    while (true) {
+        PositionTime incoming;
+
+        // Block up to 50ms waiting for the next waypoint.
+        bool gotNew = (xQueueReceive(g_waypoint_queue, &incoming, pdMS_TO_TICKS(50)) == pdTRUE);
+
+        if (!haveCarry) {
+            // Prime the pipeline with the first packet, then loop to fetch the
+            // one after it so we can measure a duration if needed. :3
+            if (gotNew) { carryPt = incoming; haveCarry = true; }
             continue;
         }
+
+        // We have a carried packet to dispatch this cycle.
+        PositionTime pt = carryPt;
+
+        if (gotNew) {
+            // Only derive timing if the carried packet lacked an explicit one.
+            // Timed packets (MFP golden path) keep their own I-param untouched.
+            if (pt.inTime == 0 && pt.has_set_time && incoming.has_set_time) {
+                int32_t gap_ms = (int32_t)std::chrono::duration_cast<
+                    std::chrono::milliseconds>(incoming.setTime - pt.setTime).count();
+                if (gap_ms > 0 && gap_ms < 1000) pt.inTime = (uint16_t)gap_ms;
+            }
+            carryPt = incoming;          // promote for next loop, no requeue
+        } else {
+            // Stream went quiet (50ms). Flush the carried packet and empty the
+            // pipeline so we re-prime cleanly when the stream resumes. :3
+            haveCarry = false;
+        }
+
+        // Last-resort duration floor for a still-timeless carried packet
+        // (e.g. stream stalled right after a position-only command). :3
+        if (pt.inTime == 0)
+            pt.inTime = (g_state.measured_interval_ms > 1.0f)
+                      ? (uint16_t)(g_state.measured_interval_ms + 0.5f)
+                      : 100;
 
         // ---- Direction gating: REMOVED ----------------------------------------
         // We previously held reversal waypoints in the queue and retried every
@@ -447,6 +498,13 @@ void setup() {
 
     // Load persisted settings (or factory defaults on first boot).
     ConfigStore::load(g_state, mapper, motor);
+
+    // Sync the persisted Intiface-compat flag into the parser's live static so
+    // the very first TCode frame after boot gets decoded with the right scale.
+    // Without this the parser would default to OFF (MFP decode) until the user
+    // touched the toggle — and an Intiface user's first strokes would land
+    // shallow. Push it in now so we're balls-deep from frame one. :3
+    TCodeParser::intifaceCompat = g_state.intiface_compat;
 
     // Motor hardware init + apply saved driver config.
     motor.init();

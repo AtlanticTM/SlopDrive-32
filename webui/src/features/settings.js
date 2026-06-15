@@ -139,7 +139,7 @@ export async function saveSettings(silent) {
       range_min: Math.round(winMin), range_max: Math.round(winMax),
       max_speed: parseInt($('defMaxSpeed').value), accel: parseInt($('defAccel').value),
       blend_mode: blendMode,
-      auto_duration: $('#autoDuration').checked,
+      intiface_compat: !!($('#intifaceCompat') && $('#intifaceCompat').checked),
       default_range_min: clamp(parseInt($('defMinNum').value) || 0, 0, TRAVEL),
       default_range_max: clamp(parseInt($('defMaxNum').value) || TRAVEL, 0, TRAVEL),
       expert_mode: expertMode
@@ -163,7 +163,10 @@ async function loadSettings() {
     var dn = $('#defMinNum'); if (dn) dn.value = d.default_range_min || 0;
     var dx = $('#defMaxNum'); if (dx) dx.value = d.default_range_max || 240;
     expertMode = d.expert_mode || false;
-    var ad = $('#autoDuration'); if (ad) ad.checked = d.auto_duration || true;
+    // Reflect the Intiface compat toggle — default OFF (MFP spec decode) when
+    // the firmware doesn't advertise it. Note: explicit !! so an absent field
+    // reads as unchecked rather than undefined. :3
+    var ic = $('#intifaceCompat'); if (ic) ic.checked = !!d.intiface_compat;
     var spd = d.max_speed || 550, acc = d.accel || 1500;
     var look = d.lookahead || 20, over = d.overshoot || 8;
     ['defMaxSpeed', 'maxSpeed'].forEach(function(id) { var e = $(id); if (e) e.value = spd; });
@@ -274,7 +277,14 @@ export function initSettings() {
     post('/api/settings', { blend_mode: blendMode, no_persist: true });
   });
 
-  var ad = $('#autoDuration');
-  if (ad) ad.addEventListener('change', pushInterp);
-  loadSettings(); loadMode(); loadInterp(); loadGenTick();
+  // Intiface compat toggle — apply live (no_persist) the instant it's flipped
+  // so the operator can A/B it against a running stream without saving, then
+  // bake it in with "Save All Settings". Default state comes from loadSettings.
+  var ic = $('#intifaceCompat');
+  if (ic) ic.addEventListener('change', function() {
+    post('/api/settings', { intiface_compat: ic.checked, no_persist: true });
+    toast(ic.checked ? 'Intiface position fix ON' : 'Intiface position fix OFF',
+          'info', 'i-gauge');
+  });
+  loadSettings(); loadMode(); loadGenTick();
 }

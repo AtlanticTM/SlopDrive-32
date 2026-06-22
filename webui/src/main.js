@@ -32,6 +32,9 @@ window.setBound = setBound;
 window.useCurrentAsDefault = useCurrentAsDefault;
 window.saveSettings = saveSettings;
 window.restoreDefaults = restoreDefaults;
+// Expose the telemetry feed for console injection — lets us pump fake samples
+// into the graph for screenshots when the hardware isn't around. :3
+window.pushTelemetryBatch = pushTelemetryBatch;
 
 export const state = { paused: false, override: false, ifActive: false, position: 0, homed: false };
 let lastMoveSent = 0, posDragging = false;
@@ -100,7 +103,14 @@ async function pollStatus() {
     if (d.homed) { if (hd) hd.className = 'dot good'; setRead('homeText', 'Homed'); }
     else { if (hd) hd.className = 'dot warn'; setRead('homeText', d.homing ? 'Homing' : 'Home'); }
     var tport = d.transport || 'WS';
-    var linked = tport === 'SER' ? !!d.serial_linked : tport === 'BT' ? !!d.ble_connected : !!d.buttplug_connected;
+    // DONGLE: linked when the UART has seen a TCode frame in the last 2s.
+    // WS: linked when buttplug (MFP) is connected.
+    // SER: linked when the serial handshake is complete.
+    // BT: linked when a BLE client is connected. :3
+    var linked = tport === 'SER'    ? !!d.serial_linked
+               : tport === 'BT'     ? !!d.ble_connected
+               : tport === 'DONGLE' ? !!d.dongle_active
+               :                      !!d.buttplug_connected;
     var ifd = $('#ifDot'); if (ifd) ifd.className = 'dot ' + (linked ? 'good' : 'bad');
     setRead('ifText', linked ? (d.measured_hz > 0 ? d.measured_hz + 'Hz' : 'idle') : tport);
     if (tport !== currentMode) reflectMode(tport);

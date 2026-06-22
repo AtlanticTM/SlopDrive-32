@@ -52,110 +52,126 @@ float bufEase(uint8_t kind, float t) {
 }
 
 // ============================================================================
-// Trapezoidal motion planner — the OSSM model, ported verbatim. :3
+// planTrapezoid — OSSM streaming pipeline, ported verbatim. :3
 // ============================================================================
 //
-// After three wrong guesses (average-speed, then peak-trapezoid-quadratic, then
-// √(a·dist)) we did the smart thing and read how the proven engine does it:
-// OSSM's streaming_logic::planMotion. Two surprises that fix the lag:
+// All units are NATIVE STEPPER STEPS. Unit conversion (mm → steps) happens
+// once at the call site (motionConsumerTask), not scattered through the math.
+// This matches OSSM's streaming.cpp lines 97–138 exactly.
 //
-//   1. OSSM does NOT use feed-forward / lookahead at all. The lag was never
-//      meant to be cancelled by predicting ahead — it's killed by commanding a
-//      HIGH ENOUGH peak speed in the first place. So the lookahead in main.cpp
-//      can stay (it's a harmless small lead) but it was never the real lever.
+// The seven-step pipeline:
+//   1. Clamp target into stroke window
+//   2. Compute live distance from last commanded position (open-loop, same as OSSM)
+//   3. Distance clamping — physics guard (shortens stroke if physically impossible)
+//   4. Triangle peak speed: v = 2×dist/T
+//   5. Speed clamping to configured ceiling
+//   6. Trapezoid proportion: what fraction of the move is at cruise speed
+//   7. Back-calculated acceleration: derived from speed + proportion
 //
-//   2. The peak speed for a streamed hop is a TRIANGLE peak: v = 2·dist/T.
-//      A symmetric triangle's AVERAGE speed is half its peak, so to average
-//      dist/T (cover dist in T) the PEAK must be 2·dist/T. Every earlier
-//      version of this function commanded something at or below dist/T — i.e.
-//      AT MOST half the speed actually needed. THAT is the "commanded to
-//      accelerate/move slower than it should" you felt in your gut. We were
-//      literally telling the motor to go half speed. :3
+// The distance clamp (Step 3) was removed from the old mm-unit planner because
+// it collapsed full-depth strokes to ~20mm on old hardware (a_max=1500 mm/s²,
+// T=250ms → maxDist=23mm). On V2 hardware (57AIM30, a_max≥8000 mm/s²) the
+// clamp fires at 125mm for a 250ms interval — beyond any physical stroke. It
+// is now a pure safety valve that only activates for genuinely impossible
+// commands (e.g. 150mm in 50ms). Phase-lock is preserved; amplitude degrades
+// gracefully instead of the motor falling forever behind schedule. :3
 //
-//   3. If the requested distance can't be done in the time budget (accel- or
-//      speed-limited), OSSM CLAMPS THE DISTANCE (shortens the stroke) instead
-//      of crawling late. The shaft reaches a nearer target on the beat rather
-//      than chasing the far one and falling behind forever. Tracking stays
-//      phase-locked; only the depth gives a little when you ask the impossible.
-//
-// Ported from OSSM streaming_logic.h planMotion(), kept in mm/s units (FAS gets
-// the steps conversion downstream). stepsPerMm guard term becomes a 2mm margin.
-PlanResult planTrapezoid(float current_mm, float target_mm, float duration_s,
-                         float max_speed_mm_s, float max_accel_mm_s2,
-                         float min_mm, float max_mm) {
-    PlanResult r;
+// The raise-only acceleration guard (Step 8 in OSSM) is applied in the
+// motionConsumerTask AFTER this function returns, not inside the planner.
+// The planner is pure math — it never touches the stepper object. :3
+PlanResult planTrapezoid(int32_t  current_steps,
+                         int32_t  target_steps_raw,
+                         float    time_s,
+                         uint32_t speed_limit,
+                         uint32_t accel_limit,
+                         int32_t  min_steps,
+                         int32_t  max_steps) {
+    PlanResult r = {};
 
-    // Clamp the commanded target into the safe stroke window first.
-    r.clamped_target_mm = constrain(target_mm, min_mm, max_mm);
+    // Step 1: Clamp target into stroke window.
+    // constrain() on int32_t — min_steps may be more negative than max_steps
+    // because the coordinate system is inverted (endstop=0, front=negative).
+    // We use a manual clamp to handle the sign correctly. :3
+    if (min_steps <= max_steps) {
+        r.target_steps = constrain(target_steps_raw, min_steps, max_steps);
+    } else {
+        // Inverted window (front=negative steps): clamp into [max_steps, min_steps]
+        r.target_steps = constrain(target_steps_raw, max_steps, min_steps);
+    }
 
-    float dist = fabsf(r.clamped_target_mm - current_mm);
+    // Step 2: Live distance from last commanded position (open-loop).
+    // getCurrentPosition() returns the last commanded step count — no encoder.
+    // This is identical to OSSM's behavior and is correct for open-loop servos.
+    int32_t distance = abs(r.target_steps - current_steps);
 
-    // No cadence info → gentle quarter-speed nudge, gentle accel. We don't
-    // jackhammer when we don't know the rhythm yet. :3
-    if (duration_s <= 0.0f) {
-        r.speed_mm_s  = max_speed_mm_s * 0.25f;
-        r.accel_mm_s2 = constrain(max_accel_mm_s2, 10.0f, max_accel_mm_s2);
+    // No cadence info or trivial move — gentle quarter-speed nudge so the
+    // carriage settles instead of twitching on a zero-distance command. :3
+    if (time_s <= 0.01f || distance < 2) {
+        r.speed_steps_s  = speed_limit / 4u;
+        r.accel_steps_s2 = accel_limit;
         return r;
     }
 
-    // Tiny move → hold a soft cruise so the carriage settles instead of twitching.
-    if (dist <= 0.05f) {
-        r.speed_mm_s  = max_speed_mm_s * 0.25f;
-        r.accel_mm_s2 = constrain(max_accel_mm_s2, 10.0f, max_accel_mm_s2);
-        return r;
+    // Step 3: Distance clamping — the physics guard.
+    // Computes the maximum distance achievable in time_s given the acceleration
+    // and speed ceilings. If the commanded distance exceeds this, the stroke is
+    // shortened to the maximum achievable distance (preserving direction).
+    // This keeps the motor phase-locked with the content even when asked to do
+    // the physically impossible — amplitude degrades, timing does not. :3
+    //
+    // maxDist from accel: triangle area = a × (T/2)² (half-triangle each way)
+    // maxDist from speed: simple distance = v × T
+    // Take the minimum — whichever limit bites first.
+    int32_t maxDist = (int32_t)((float)accel_limit * (time_s * 0.5f) * (time_s * 0.5f));
+    int32_t speedDist = (int32_t)((float)speed_limit * time_s);
+    if (speedDist < maxDist) maxDist = speedDist;
+
+    if (distance > maxDist) {
+        // Shorten stroke by 2 steps safety margin (mirrors OSSM's 2mm margin).
+        // Clamp to at least 1 step so we always issue a real move. :3
+        distance = maxDist - 2;
+        if (distance < 1) distance = 1;
+        if (r.target_steps > current_steps)
+            r.target_steps = current_steps + distance;
+        else
+            r.target_steps = current_steps - distance;
+        r.distance_clamped = true;
     }
 
-    float a_max = constrain(max_accel_mm_s2, 10.0f, max_accel_mm_s2);
+    // Step 4: Triangle peak speed = 2 × dist / T.
+    // A symmetric triangle profile has average speed = peak/2. To cover
+    // `distance` in `time_s` the AVERAGE must be dist/T, so the PEAK must be
+    // 2×dist/T. Commanding the peak means the motor is still moving at full
+    // speed when it reaches the target — the next moveTo() catches it mid-flight
+    // and redirects without a stop. Fluid continuous pounding, not staccato. :3
+    uint32_t requiredSpeed = (uint32_t)(2.0f * (float)distance / time_s);
 
-    // ---- NO DISTANCE CLAMPING for streaming --------------------------------
-    //
-    // Imagine you're trying to fist someone properly — you've got the lube, the
-    // angle, and a nice steady rhythm going. But every time you try to push past
-    // the knuckles and really stretch them toward that stomach-bulging depth,
-    // some overeager safety mechanism slaps your hand back to 20mm. That's what
-    // the OSSM distance-clamp WAS doing. With a_max=1500 mm/s² and T=250ms the
-    // clamp fired at 23mm, turning every 120mm full-depth command into a 21mm
-    // twitch. The target chain compounded the error: start each segment from
-    // 21mm, clamp the next to 20mm, next to 19mm — the motor literally shrinks
-    // the stroke until it's just edging the entrance without ever bottoming out.
-    // Blue-balled by the physics math. owo
-    //
-    // The fix: command the REAL target, let FAS chase it with the full peak
-    // speed, and if the motor can't quite arrive before the next waypoint
-    // redirects it — fine. The shaft tracks the wave as tightly as physics
-    // allows instead of being permanently trapped at a phantom shallow depth.
-    // We aim for the actual hole and let the hardware stretch to meet it,
-    // even if it's a little late to the party. No more cursed 20mm prison. :3
+    // Step 5: Speed clamping — floor at 100 steps/s, ceiling at config limit.
+    if (requiredSpeed < 100u)          requiredSpeed = 100u;
+    if (requiredSpeed > speed_limit)   requiredSpeed = speed_limit;
 
-    // ---- PEAK speed = 2 × dist / T (the triangle peak, NOT the cruise) ------
-    //
-    // This is how a sustained deep fisting works: you don't just glide in at
-    // the average pace and stop halfway. You PUSH — you accelerate into the
-    // stretch, hit peak depth at maximum pressure where the walls are screaming,
-    // and then immediately ease off so the next thrust can pick up from that
-    // residual momentum. The 2× multiplier is the physics of "commit fully to
-    // each stroke or don't bother." FAS's moveTo() ALWAYS plans a decel-to-zero
-    // at the target. By commanding the PEAK (2×dist/T), the motor is still
-    // moving at full speed when it reaches the target — the NEXT command catches
-    // it at that velocity and redirects without a stop. The shaft blends
-    // continuously from one stroke into the next: a fluid pounding, not a
-    // staccato series of tiny stops. Yippie! :3
-    //
-    // The old value (dist/T) was the AVERAGE — the motor reached zero speed
-    // well before T, sat there twitching in place, then jerked alive again.
-    // That micro-stop buzz is what made the machine feel like it was edging
-    // itself to death. 2×dist/T keeps the motion thick and continuous. :3
-    float v = 2.0f * dist / duration_s;
-    v = constrain(v, 5.0f, max_speed_mm_s);
+    // Step 6: Trapezoid proportion.
+    // If requiredSpeed was clamped DOWN in Step 5 (it exceeded speed_limit),
+    // the profile becomes a trapezoid: accel → cruise at speed_limit → decel.
+    // proportion is the fraction of time spent at cruise vs. accelerating.
+    //   proportion = 1.0 → pure triangle (all accel/decel, no cruise)
+    //   proportion < 1.0 → trapezoid (some cruise, less accel ramp)
+    //   max(..., 0.01) prevents division by zero in Step 7. :3
+    float vt = (float)requiredSpeed * time_s;
+    float proportion = -(2.0f * (float)distance - 2.0f * vt) / vt;
+    if (proportion < 0.01f) proportion = 0.01f;
 
-    // Acceleration: command it HIGH so the ramp-up at segment start is fast
-    // and doesn't eat the interval budget. Full configured ceiling.
-    float a = a_max;
+    // Step 7: Back-calculated acceleration.
+    // Derived from speed and proportion to create an exact-timed trajectory.
+    // This is the opposite of the old approach (use a_max and hope timing works):
+    // OSSM computes the precise acceleration needed to arrive exactly on schedule.
+    // Clamped to [100, accel_limit] for safety. :3
+    uint32_t requiredAccel = (uint32_t)((float)requiredSpeed / (time_s * proportion * 0.5f));
+    if (requiredAccel < 100u)          requiredAccel = 100u;
+    if (requiredAccel > accel_limit)   requiredAccel = accel_limit;
 
-
-
-    r.speed_mm_s  = v;
-    r.accel_mm_s2 = a;
+    r.speed_steps_s  = requiredSpeed;
+    r.accel_steps_s2 = requiredAccel;
     return r;
 }
 

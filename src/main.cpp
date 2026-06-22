@@ -21,9 +21,16 @@
 
 #include "range_mapper.h"
 #include "Kinematics.h"
+#include "PositionTime.h"
+#include "freertos/queue.h"
+#include <chrono>
 
 #if defined(DRIVER_TMC2160)
 #include "TMC2160StepperDriver.h"
+#endif
+
+#if defined(DRIVER_57AIM_SERVO)
+#include "57AIMServoDriver.h"
 #endif
 
 #include "Generator.h"
@@ -32,6 +39,7 @@
 #include "SerialTransport.h"
 #include "WebSocketTransport.h"
 #include "BleTransport.h"
+#include "DongleTransport.h"
 #include "TransportManager.h"
 
 #include "WebUI.h"
@@ -44,8 +52,10 @@
 
 #if defined(DRIVER_TMC2160)
   TMC2160StepperDriver motor;
+#elif defined(DRIVER_57AIM_SERVO)
+  Ai57AIMServoDriver motor;
 #else
-  #error "No motor driver selected. Define DRIVER_TMC2160 (or a future driver flag) in platformio.ini build_flags."
+  #error "No motor driver selected. Define DRIVER_TMC2160 or DRIVER_57AIM_SERVO in platformio.ini build_flags."
 #endif
 
 static SystemState        g_state;
@@ -56,24 +66,38 @@ static TCodeParser        tcodeParser;
 static SerialTransport    serialTransport(tcodeParser);
 static WebSocketTransport wsTransport(tcodeParser);
 static BleTransport       bleTransport(tcodeParser);
+// The T-Dongle C5 relay — Serial2 on pins 8/9. Opened only when DONGLE mode
+// is selected; otherwise the UART stays closed and the pins are free. :3
+static DongleTransport    dongleTransport(tcodeParser);
 static TransportManager   transportMgr(g_state, tcodeParser,
-                                        serialTransport, wsTransport, bleTransport);
+                                        serialTransport, wsTransport, bleTransport,
+                                        dongleTransport);
 
 static WebUI webui(g_state, motor, mapper, generator,
                    transportMgr, serialTransport, wsTransport, bleTransport);
 
 
 // ============================================================================
+// Waypoint queue — Core 0 pushes, Core 1 pops. The ONLY cross-core motion
+// handoff. Core 0 never touches the stepper object after setup(). :3
+//
+// 8 slots = 80ms of buffer at 100Hz TCode. Deep enough to absorb a WiFi
+// jitter spike; shallow enough that a stale burst doesn't play out after
+// the stream stops. If the queue fills, the newest waypoint is dropped —
+// a 10ms gap at 100Hz, completely imperceptible. :3
+// ============================================================================
+static constexpr size_t WAYPOINT_QUEUE_DEPTH = 8;
+static QueueHandle_t    g_waypoint_queue     = nullptr;
+
+
+// ============================================================================
 // Glue callbacks — the good boys sitting between TCode and the motor :3
 // ============================================================================
 
-// How long we ease back in after being edged (paused), in ms.
-static const uint32_t RESUME_BLEND_MS = 800;
-
 // Called by TCodeParser on every valid L0 linear command.
-// This is where the dirty talk becomes actual thrusting. :3
+// Core 0 ONLY: measure cadence, build PositionTime, push to queue.
+// No motor calls, no kinematics, no FAS touching. Pure data handoff. :3
 static void buttplugLinearCmd(float position, uint32_t duration_ms) {
-
     if (!g_state.homed) return;
     if (g_state.paused || g_state.manual_override) {
         g_state.resume_start_ms = millis();
@@ -82,9 +106,9 @@ static void buttplugLinearCmd(float position, uint32_t duration_ms) {
 
     g_state.last_intiface_ms = millis();
 
-    // Measure inter-command cadence — always track the real arrival gap so the
-    // Hz display and the auto-duration fallback stay calibrated. We do this
-    // regardless of whether the command carried an explicit I-duration. :3
+    // ---- Cadence measurement (Core 0 only) ----------------------------------
+    // Feeds the Hz display and the auto-duration fallback. EMA filter smooths
+    // out the occasional WiFi hiccup so the Hz chip doesn't flicker. :3
     uint32_t now = millis();
     if (g_state.last_cmd_ms != 0) {
         uint32_t gap = now - g_state.last_cmd_ms;
@@ -98,100 +122,26 @@ static void buttplugLinearCmd(float position, uint32_t duration_ms) {
     }
     g_state.last_cmd_ms = now;
 
-    // Auto Duration: ONLY substitute the measured gap when the TCode command
-    // carried NO explicit I-duration (duration_ms == 0). If the host (MFP,
-    // Intiface, etc.) sent an explicit interval we MUST honour it — overriding
-    // it with our own measurement was the "jitter half a mm" bug: the measured
-    // gap was often 10–30ms, which made the planner's distance-clamp fire and
-    // reduce every stroke to a sub-millimetre twitch. Trust the host. :3
+    // Auto Duration: substitute measured gap ONLY when the host sent no I-param.
+    // If the host sent an explicit interval, honour it — overriding it was the
+    // "jitter half a mm" bug. Trust the host. :3
     if (duration_ms == 0 && g_state.auto_duration && g_state.measured_interval_ms > 1.0f)
         duration_ms = (uint32_t)(g_state.measured_interval_ms + 0.5f);
 
-    float target_mm = mapper.intensityToPosition(position);
+    // Stash raw mapped demand for the UI motion graph (Core 0 only). :3
+    g_state.commanded_raw_mm = mapper.intensityToPosition(position);
 
-    // Stash the raw mapped demand for the UI motion graph (stage 1 of 3:
-    // raw → planned → actual). The graph reads this from g_state. :3
-    g_state.commanded_raw_mm = target_mm;
+    // ---- Build waypoint and push to queue -----------------------------------
+    // Non-blocking (0 timeout): if the queue is full, drop this waypoint.
+    // Core 0 NEVER blocks waiting for Core 1. The motion consumer on Core 1
+    // will drain the queue at its own pace. :3
+    PositionTime pt;
+    pt.position     = (uint8_t)constrain((int)(position * 100.0f), 0, 100);
+    pt.inTime       = (uint16_t)constrain((int)duration_ms, 0, 65535);
+    pt.has_set_time = true;
+    pt.setTime      = std::chrono::steady_clock::now();
 
-    // ---- VELOCITY FEED-FORWARD (lookahead, currently OFF) -------------------
-    // Kept as a live knob: LOOKAHEAD_FRAC = 0.0 matches OSSM exactly (lag
-    // killed by correct cruise speed, not prediction). Nudge toward 0.3–0.5
-    // if residual trail remains; leave at 0 if it overshoots. :3
-    static float    s_last_raw_mm   = 0.0f;
-    static uint32_t s_last_raw_ms   = 0;
-    static bool     s_have_last_raw = false;
-    {
-        uint32_t t_now = millis();
-        if (s_have_last_raw) {
-            float dt_ms = (float)(t_now - s_last_raw_ms);
-            if (dt_ms > 0.5f && dt_ms < 1000.0f) {
-                float vel_mm_per_ms = (target_mm - s_last_raw_mm) / dt_ms;
-
-                const float LOOKAHEAD_FRAC = 0.0f;
-
-                float lead_ms = (g_state.measured_interval_ms > 1.0f)
-                                    ? g_state.measured_interval_ms
-                                    : dt_ms;
-                float predicted = target_mm + vel_mm_per_ms * (lead_ms * LOOKAHEAD_FRAC);
-
-                // Safety leash: never lead more than half the stroke window. :3
-                float window   = mapper.getMaxMm() - mapper.getMinMm();
-                float max_lead = window * 0.5f;
-                predicted = constrain(predicted,
-                                      target_mm - max_lead,
-                                      target_mm + max_lead);
-                target_mm = predicted;
-            }
-        }
-        s_last_raw_mm   = g_state.commanded_raw_mm;
-        s_last_raw_ms   = t_now;
-        s_have_last_raw = true;
-    }
-
-    // ---- Slow resume blend after being edged (paused) -----------------------
-    if (g_state.resume_start_ms != 0) {
-        uint32_t elapsed = millis() - g_state.resume_start_ms;
-        if (elapsed >= RESUME_BLEND_MS) {
-            g_state.resume_start_ms = 0;
-        } else {
-            float blend = (float)elapsed / (float)RESUME_BLEND_MS;
-            float cur   = motor.getPosition();
-            target_mm   = cur + blend * (target_mm - cur);
-        }
-    }
-
-    // ---- THE ONE TRUE PATH: trapezoidal planner -----------------------------
-    //
-    // Chain targets, not positions. Each segment goes from "where I told it to
-    // be last time" to "where I'm telling it to go now", at the cruise speed
-    // dist/T. The motor's actual position is irrelevant to the planning math —
-    // FAS handles the real-world physics. We keep the command chain geometrically
-    // consistent so the speed math is always sane. :3
-    //
-    // On first command (no previous target), fall back to actual position so
-    // we don't plan a phantom hop from 0mm. After that, pure target chaining.
-    static float s_last_target_mm = -1.0f;  // -1 = "not yet initialized"
-    float plan_from_mm = (s_last_target_mm < 0.0f)
-                             ? motor.getPosition()
-                             : s_last_target_mm;
-
-    auto plan = kinematics::planTrapezoid(
-        plan_from_mm, target_mm,
-        (float)duration_ms * 0.001f,
-        g_state.config.max_speed_mm_s,
-        g_state.config.acceleration_mm_s2,
-        mapper.getMinMm(), mapper.getMaxMm());
-
-    // Remember this command's clamped target for the next interval's planning.
-    // Use the clamped target so the chain stays inside the stroke window —
-    // no phantom debt from a target that got clipped. :3
-    s_last_target_mm = plan.clamped_target_mm;
-
-    motor.setAcceleration(plan.accel_mm_s2);
-    motor.streamTo(plan.clamped_target_mm, plan.speed_mm_s);
-
-    // Stash the planned target for the UI motion graph (stage 2 of 3). :3
-    g_state.commanded_target_mm = plan.clamped_target_mm;
+    xQueueSend(g_waypoint_queue, &pt, 0);
 }
 
 // Called by TCodeParser on DSTOP — pull out cleanly. :3
@@ -264,10 +214,16 @@ static void commsTask(void* /*param*/) {
     uint32_t last_report_ms   = 0;
     uint32_t last_frame_count = 0;
     while (true) {
-        // In SER mode skip WebSocket networking — the RX FIFO needs every
-        // microsecond we can give it. :3
-        if (g_state.getTransport() == TransportMode::SER) {
+        // Route polling to the active transport. SER and DONGLE skip WebSocket
+        // networking to give the RX FIFO every microsecond we can spare. :3
+        TransportMode activeMode = g_state.getTransport();
+        if (activeMode == TransportMode::SER) {
             serialTransport.poll();
+        } else if (activeMode == TransportMode::DONGLE) {
+            // Drain the UART from the T-Dongle C5 relay. WiFi stays up for
+            // the web UI — we just don't run the WS TCode server poll here
+            // so the UART gets full attention. :3
+            dongleTransport.poll();
         } else {
             wsTransport.run();
         }
@@ -280,7 +236,7 @@ static void commsTask(void* /*param*/) {
             last_frame_count = frames;
             last_report_ms   = now;
             g_state.measured_hz = (uint16_t)per_sec;
-            if (wsTransport.isConnected() || serialTransport.isActive())
+            if (wsTransport.isConnected() || serialTransport.isActive() || dongleTransport.isActive())
                 APPLOGF("[RATE] rx=%u frames/s", per_sec);
         }
 
@@ -294,6 +250,247 @@ static void httpTask(void* param) {
     while (true) {
         ui->update();
         vTaskDelay(pdMS_TO_TICKS(10));
+    }
+}
+
+// ============================================================================
+// motionConsumerTask — Core 1, priority 4
+// ============================================================================
+//
+// The ONLY task that touches the motor driver after setup(). Pops PositionTime
+// waypoints from g_waypoint_queue, runs the OSSM kinematic pipeline, and
+// dispatches to FAS via motor.streamToSteps(). All FAS calls happen on Core 1
+// — same core as the FAS engine and ISR. No cross-core racing. :3
+//
+// The absolute timeline (best) self-corrects each cycle: it advances by
+// inTime regardless of actual wall-clock drift, so the playback rate stays
+// locked to the content's intended tempo even if individual waypoints arrive
+// a few ms late. OSSM calls this the "self-correcting clock." :3
+//
+// Direction gating: if a new waypoint reverses direction while the motor is
+// still mid-stroke, we put it back at the front of the queue and wait 1ms.
+// This prevents commanding a reversal while the motor is mid-acceleration —
+// FAS would need a longer brake ramp than the remaining distance, causing
+// overshoot. We wait for the stroke to complete, THEN reverse. :3
+//
+// Raise-only acceleration guard: once moving, acceleration can only increase.
+// Lowering it mid-flight means FAS's braking ramp is suddenly longer than the
+// remaining distance — overshoot. We take the max of the back-calculated accel
+// and the current FAS accel. Stay firm, never go limp early. :3
+static void motionConsumerTask(void* /*param*/) {
+    // Absolute timeline anchor — advances by inTime each cycle. :3
+    auto best = std::chrono::steady_clock::now();
+
+    PositionTime lastPt;
+    lastPt.position     = 50;
+    lastPt.inTime       = 250;
+    lastPt.has_set_time = false;
+
+    // ---- One-deep carry buffer (requeue-free, high-rate safe) ---------------
+    // We always keep AT MOST one un-dispatched packet in a local "carry" slot
+    // (carryPt). Each loop pops exactly ONE fresh packet from the queue and
+    // never pushes anything back — so the queue ordering can't be scrambled and
+    // nothing is ever dropped by a failed requeue. This is what broke at 60Hz:
+    // the old xQueueSendToFront collided with the producer and silently lost a
+    // waypoint every cycle once the 8-slot queue filled. Gone now. :3
+    //
+    // The rule:
+    //   - carryPt holds the packet we're about to dispatch.
+    //   - We pop the NEXT packet (incoming). If carryPt had NO time (inTime==0),
+    //     we steal its duration from (incoming.setTime - carryPt.setTime) — the
+    //     OSSM position-only trick. If carryPt already had a real I-param (the
+    //     golden MFP path), we leave it exactly as-is: zero added behavior.
+    //   - Dispatch carryPt, then promote incoming -> carryPt for next loop.
+    //
+    // Net latency: exactly one packet of lookahead (~16ms at 60Hz), the minimum
+    // possible to measure a duration. Timed packets are NOT slowed — they get
+    // their own I-param honored; the one-packet hold is just pipeline depth. :3
+    bool         haveCarry = false;
+    PositionTime carryPt    = {};
+
+    while (true) {
+        PositionTime incoming;
+
+        // Block up to 50ms waiting for the next waypoint.
+        bool gotNew = (xQueueReceive(g_waypoint_queue, &incoming, pdMS_TO_TICKS(50)) == pdTRUE);
+
+        if (!haveCarry) {
+            // Prime the pipeline with the first packet, then loop to fetch the
+            // one after it so we can measure a duration if needed. :3
+            if (gotNew) { carryPt = incoming; haveCarry = true; }
+            continue;
+        }
+
+        // We have a carried packet to dispatch this cycle.
+        PositionTime pt = carryPt;
+
+        if (gotNew) {
+            // Only derive timing if the carried packet lacked an explicit one.
+            // Timed packets (MFP golden path) keep their own I-param untouched.
+            if (pt.inTime == 0 && pt.has_set_time && incoming.has_set_time) {
+                int32_t gap_ms = (int32_t)std::chrono::duration_cast<
+                    std::chrono::milliseconds>(incoming.setTime - pt.setTime).count();
+                if (gap_ms > 0 && gap_ms < 1000) pt.inTime = (uint16_t)gap_ms;
+            }
+            carryPt = incoming;          // promote for next loop, no requeue
+        } else {
+            // Stream went quiet (50ms). Flush the carried packet and empty the
+            // pipeline so we re-prime cleanly when the stream resumes. :3
+            haveCarry = false;
+        }
+
+        // Last-resort duration floor for a still-timeless carried packet
+        // (e.g. stream stalled right after a position-only command). :3
+        if (pt.inTime == 0)
+            pt.inTime = (g_state.measured_interval_ms > 1.0f)
+                      ? (uint16_t)(g_state.measured_interval_ms + 0.5f)
+                      : 100;
+
+        // ---- Direction gating: REMOVED ----------------------------------------
+        // We previously held reversal waypoints in the queue and retried every
+        // 1ms until the motor stopped. At fast speeds (100Hz, 10ms intervals)
+        // the motor needs 3–5ms to decelerate — that's 3–5 retries × 1ms each
+        // = 3–5ms of dead time at EVERY reversal. At high speed that eats 30–50%
+        // of the interval budget, producing the flat-topped peaks and notched
+        // valleys visible in the motion graph. :3
+        //
+        // The raise-only acceleration guard (getLiveAcceleration() below) already
+        // prevents overshoot by ensuring FAS never gets a softer brake ramp than
+        // it's currently running. That guard IS the correct protection. The
+        // direction gate was belt-and-suspenders that added more latency than it
+        // prevented overshoot. FAS handles mid-flight reversals cleanly when the
+        // raise-only guard is in place — it re-plans from current velocity with
+        // the same or higher acceleration. No gate needed. :3
+        //
+        // This matches OSSM's actual behavior: OSSM's direction gate only fires
+        // when the queue has a reversal AND the motor is still running the
+        // previous stroke. In OSSM's single-task architecture that's a rare edge
+        // case. In our queued architecture it fires on EVERY reversal because the
+        // queue always has the next waypoint ready before the motor finishes the
+        // current one. Removing it makes our behavior match OSSM's intent. :3
+
+        float timeSeconds = pt.inTime / 1000.0f;
+
+        // ---- OSSM latency compensation --------------------------------------
+        // Uses the RX timestamp to measure actual transport lag and adjusts
+        // timeSeconds up to 25% shorter to resynchronize if we're falling behind.
+        // bufTarget = 100ms: we aim to stay ~100ms ahead of the playback clock.
+        // If we're behind, shorten the current segment to catch up. :3
+        if (pt.has_set_time) {
+            const int16_t bufTarget = 100;  // ms — target buffer depth
+            int16_t currentBuffer = (int16_t)std::chrono::duration_cast<
+                std::chrono::milliseconds>(
+                    std::chrono::steady_clock::now() - best).count();
+            int16_t lag = (int16_t)std::chrono::duration_cast<
+                std::chrono::milliseconds>(
+                    pt.setTime - best).count();
+
+            // If lag is wildly out of range (stream restart, clock jump), re-anchor.
+            if (lag < 0 || lag > bufTarget * 10) {
+                best = pt.setTime;
+                lag  = 0;
+            }
+            best += std::chrono::milliseconds(pt.inTime);
+
+            // Offset: positive = we're ahead (slow down), negative = behind (speed up).
+            // Cap the speedup at 25% of the segment duration. :3
+            int16_t offset = bufTarget - currentBuffer;
+            if (offset < 0) {
+                int16_t maxSpeedup = -(int16_t)(pt.inTime / 4);
+                if (offset < maxSpeedup) offset = maxSpeedup;
+            }
+            timeSeconds += offset / 1000.0f;
+        } else {
+            best = std::chrono::steady_clock::now();
+        }
+
+        lastPt = pt;
+
+        if (timeSeconds <= 0.01f) { vTaskDelay(pdMS_TO_TICKS(1)); continue; }
+
+        // ---- Map TCode 0–100 to native steps --------------------------------
+        // 0 = fully retracted (min_mm), 100 = fully inserted (max_mm).
+        // Coordinate system: endstop = 0 steps, front = negative steps.
+        // The negative sign converts mm→steps in the correct direction. :3
+        float   frac         = pt.position / 100.0f;
+        float   target_mm    = mapper.getMinMm() + frac * (mapper.getMaxMm() - mapper.getMinMm());
+        int32_t target_steps = -motor.mmToNative(target_mm);
+
+        int32_t min_steps = -motor.mmToNative(mapper.getMaxMm());
+        int32_t max_steps = -motor.mmToNative(mapper.getMinMm());
+
+        // ---- OSSM kinematic pipeline ----------------------------------------
+        // getCurrentPosition() returns last COMMANDED step count (open-loop).
+        // Identical to OSSM's behavior — correct for open-loop servos. :3
+        // Use motor.mmToNative() for all unit conversion — this is driver-
+        // agnostic and works for both TMC2160 (80 steps/mm) and 57AIMServo
+        // (20 steps/mm) without hardcoding STEPS_PER_MM here. :3
+        int32_t current_steps = -motor.mmToNative(motor.getPosition());
+
+        uint32_t speed_limit = (uint32_t)motor.mmToNative(g_state.config.max_speed_mm_s);
+        uint32_t accel_limit = (uint32_t)motor.mmToNative(g_state.config.acceleration_mm_s2);
+
+        kinematics::PlanResult plan = kinematics::planTrapezoid(
+            current_steps,
+            target_steps,
+            timeSeconds,
+            speed_limit,
+            accel_limit,
+            min_steps,
+            max_steps
+        );
+
+        // ---- Raise-only acceleration guard (OSSM-exact) ---------------------
+        // Once moving, acceleration can only increase. Lowering it mid-flight
+        // means FAS needs a longer brake ramp than the remaining distance —
+        // the motor overshoots the peak and lurches. :3
+        //
+        // CRITICAL: compare against stepper->getAcceleration() — the LIVE FAS
+        // value — NOT the config ceiling. This is exactly what OSSM does:
+        //   requiredAccel = max(stepper->getAcceleration(), requiredAccel);
+        //
+        // The bug: we were comparing against g_state.config.acceleration_mm_s2
+        // (a constant). At the peak of a fast stroke, planTrapezoid back-
+        // calculates a huge requiredAccel (tiny distance, short time), which
+        // gets clamped to accel_limit inside the planner. Our guard then
+        // compared the clamped value against the same constant — they matched,
+        // no raise happened. But FAS was running at whatever accel the PREVIOUS
+        // waypoint set, which could be higher. We were silently lowering FAS's
+        // active accel at the exact moment it needed maximum braking authority
+        // to stop at the peak. That's the grittiness. :3
+        uint32_t finalAccel = plan.accel_steps_s2;
+        if (motor.isMoving()) {
+            uint32_t liveAccel = motor.getLiveAcceleration();
+            if (liveAccel > finalAccel) finalAccel = liveAccel;
+        }
+
+        // ---- Dispatch to FAS (non-blocking retarget) ------------------------
+        // All FAS calls happen on Core 1 — same core as the FAS engine. Safe.
+        motor.streamToSteps(plan.target_steps, plan.speed_steps_s, finalAccel);
+
+        // ---- Telemetry (atomic write — no mutex needed on S3) ---------------
+        // Core 0's telemetry timer reads this with memory_order_relaxed. :3
+        float actual_mm = motor.nativeToMm(-plan.target_steps);
+        g_state.actual_position_mm.store(actual_mm, std::memory_order_relaxed);
+        g_state.commanded_target_mm = actual_mm;
+
+        // OSSM-exact pacing: yield 1ms after every dispatch. This matches
+        // OSSM streaming.cpp line 142: vTaskDelay(1).
+        //
+        // This is NOT just a scheduler yield — it is a REQUIRED pacing delay.
+        // Without it, motionConsumerTask drains the entire queue in a tight loop
+        // (all 8 waypoints) before FAS has moved even one step. Every call to
+        // motor.getPosition() returns the same stale position because FAS hasn't
+        // had CPU time to execute. So current_steps is identical for all 8
+        // waypoints, distance ≈ 0 for waypoints 2–8, and the planner generates
+        // near-zero speed commands — the motor barely twitches. That's the flat
+        // green line. :3
+        //
+        // 1ms gives FAS one tick to start executing the move and update its
+        // internal position counter before we plan the next waypoint. At 100Hz
+        // (10ms intervals) this costs 10% of the budget — acceptable because
+        // without it the motor doesn't move at all. OSSM accepts this same cost.
+        vTaskDelay(pdMS_TO_TICKS(1));
     }
 }
 
@@ -320,6 +517,13 @@ void setup() {
     // Load persisted settings (or factory defaults on first boot).
     ConfigStore::load(g_state, mapper, motor);
 
+    // Sync the persisted Intiface-compat flag into the parser's live static so
+    // the very first TCode frame after boot gets decoded with the right scale.
+    // Without this the parser would default to OFF (MFP decode) until the user
+    // touched the toggle — and an Intiface user's first strokes would land
+    // shallow. Push it in now so we're balls-deep from frame one. :3
+    TCodeParser::intifaceCompat = g_state.intiface_compat;
+
     // Motor hardware init + apply saved driver config.
     motor.init();
     motor.applyDriverConfig(g_state.driver);
@@ -340,12 +544,25 @@ void setup() {
     // Bring up the saved transport (WS / SER / BT).
     transportMgr.applyTransport(g_state.getTransport());
 
+    // ---- Waypoint queue — must exist before any task that touches it --------
+    // Created here, before task creation, so both Core 0 (buttplugLinearCmd)
+    // and Core 1 (motionConsumerTask) see a valid handle from their first tick.
+    // configASSERT panics on OOM — if this fails, nothing else matters. :3
+    g_waypoint_queue = xQueueCreate(WAYPOINT_QUEUE_DEPTH, sizeof(PositionTime));
+    configASSERT(g_waypoint_queue != nullptr);
+
     // ---- Create FreeRTOS tasks with correct core pinning (.clinerules §2) ----
-    //   Core 1 (real-time):  motorTask, Generator
+    //   Core 1 (real-time):  motorTask, motionConsumerTask, Generator
     //   Core 0 (system):     commsTask, httpTask
-    xTaskCreatePinnedToCore(motorTask, "Motor", 4096, nullptr, 3, nullptr, 1);
-    xTaskCreatePinnedToCore(commsTask, "Comms", 4096, nullptr, 2, nullptr, 0);
-    xTaskCreatePinnedToCore(httpTask,  "HTTP",  4096, &webui,  1, nullptr, 0);
+    xTaskCreatePinnedToCore(motorTask,           "Motor",    4096, nullptr, 3, nullptr, 1);
+    // motionConsumerTask: priority 4 — above motorTask (3), below FAS ISR.
+    // Owns ALL FAS dispatch after setup(). Core 0 never touches motor again. :3
+    xTaskCreatePinnedToCore(motionConsumerTask,  "MotionCon", 4096, nullptr, 4, nullptr, 1);
+    // Stack bumped to 6144: feedLine() allocates a 256-byte local buf on every
+    // call, and under a disconnect burst it can be called many times per tick.
+    // 4096 was tight enough to overflow under that load — 6144 gives headroom. :3
+    xTaskCreatePinnedToCore(commsTask,           "Comms",    6144, nullptr, 2, nullptr, 0);
+    xTaskCreatePinnedToCore(httpTask,            "HTTP",     4096, &webui,  1, nullptr, 0);
 
     generator.init();    // creates its own task on Core 1, priority 2
 

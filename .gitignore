@@ -25,3 +25,7 @@ tools/
 # Python cache
 __pycache__/
 *.pyc
+waypoint_kinematics_audit.md
+graph_screenshot_temp.html
+compile_commands.json
+PCB Layout.diy

@@ -22,6 +22,7 @@ class TCodeParser;
 class SerialTransport;
 class WebSocketTransport;
 class BleTransport;
+class DongleTransport;
 
 class TransportManager {
 public:
@@ -29,7 +30,8 @@ public:
                      TCodeParser&        parser,
                      SerialTransport&    serial,
                      WebSocketTransport& ws,
-                     BleTransport&       ble);
+                     BleTransport&       ble,
+                     DongleTransport&    dongle);
 
     /// Bring up WiFi in STA mode + mDNS.  Safe to call once at boot.
     /// Returns true if connected.
@@ -40,8 +42,12 @@ public:
     /// D0/D1/D2 response hooks are installed on the active transport.
     void applyTransport(TransportMode mode);
 
-    /// Short tag string for the status chip / API ("WS" / "SER" / "BT").
+    /// Short tag string for the status chip / API ("WS" / "SER" / "BT" / "DONGLE").
     static const char* transportName(TransportMode m);
+
+    /// True when the DONGLE UART has received a valid TCode frame in the last 2s.
+    /// Used by /api/status so the WebUI indicator can show Hz instead of "DONGLE". :3
+    bool isDongleActive() const;
 
 private:
     SystemState&        _state;
@@ -49,6 +55,7 @@ private:
     SerialTransport&    _serial;
     WebSocketTransport& _ws;
     BleTransport&       _ble;
+    DongleTransport&    _dongle;
 };
 
 #endif // TRANSPORT_MANAGER_H

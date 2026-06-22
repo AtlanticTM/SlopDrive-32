@@ -1,3 +1,8 @@
 {
-    "discord.enabled": true
+    "discord.enabled": true,
+    "clangd.arguments": [
+        "--compile-commands-dir=c:/Users/Atlan/Documents/SlopDrive-32/.cache/clangd",
+        "--query-driver=C:/Users/Atlan/.platformio/packages/toolchain-*/bin/*,C:/Users/Atlan/.platformio/packages/tool-*/bin/*"
+    ],
+    "clangd.path": "C:\\Users\\Atlan\\.platformio\\packages\\tool-clangd-esp\\bin\\clangd.exe"
 }

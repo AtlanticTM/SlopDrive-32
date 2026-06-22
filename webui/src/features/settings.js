@@ -10,14 +10,15 @@
  */
 import { $, setRead, onLiveSlider, clamp, icon, toast } from '../core/ui.js';
 import { post, get } from '../core/api.js';
-import { TRAVEL, winMin, winMax, setWinMin, setWinMax, setWindowReady, renderWindow, useCurrentAsDefault } from '../core/range.js';
+import { TRAVEL, setTravel, winMin, winMax, setWinMin, setWinMax, setWindowReady, renderWindow, useCurrentAsDefault } from '../core/range.js';
 
 export var currentMode = 'WS';
 
 var MODE_HINTS = {
-  WS: 'WebSocket — Intiface over WiFi',
-  SER: 'Serial — Intiface over USB',
-  BT: 'Bluetooth — BLE serial'
+  WS:     'WebSocket — Intiface over WiFi',
+  SER:    'Serial — Intiface over USB',
+  BT:     'Bluetooth — BLE serial',
+  DONGLE: 'Dongle — T-Dongle C5 relay via UART (pins 8/9). MFP connects to the dongle USB port; WiFi stays up for the web UI. :3'
 };
 
 export function reflectMode(mode) {
@@ -55,12 +56,14 @@ var expertMode = false;
 
 function applyExpertCaps() {
   var ex = expertMode;
-  // Expert mode unlocks the hardware ceiling; normal mode caps at safe-ish values.
-  // Speed: 3000 mm/s normal / 3000 mm/s expert (same — 3000 is already the ceiling).
-  // Accel: 8000 mm/s² normal / 20000 mm/s² expert.
-  // These match the HTML slider max attributes so the gradient fills correctly. :3
-  var EM = { maxSpeed: 3000, accel: 20000, lookahead: 80, runCurrent: 3000, genRate: 50, modRate: 5, modAmp: 10 };
-  var SM = { maxSpeed: 3000, accel: 8000,  lookahead: 50, runCurrent: 2500, genRate: 5, modRate: 1, modAmp: 2 };
+  // Normal mode: 5000 mm/s speed, 50000 mm/s² accel.
+  // Expert mode: 10000 mm/s speed, 100000 mm/s² accel.
+  // Expert mode is for people who know what they're doing and want to
+  // absolutely fist the machine until the carriage bulges. You asked for it. yippie! :3
+  // The 57AIM servo drive at 800 steps/rev × 10 steps/mm is a closed-loop
+  // servo — it won't skip steps, it'll just go. Strap in. owo
+  var EM = { maxSpeed: 10000, accel: 100000, lookahead: 80, runCurrent: 3000, genRate: 50, modRate: 5, modAmp: 10 };
+  var SM = { maxSpeed: 5000,  accel: 50000,  lookahead: 50, runCurrent: 2500, genRate: 5,  modRate: 1, modAmp: 2  };
 
   var groups = {
     maxSpeed: ['maxSpeed', 'defMaxSpeed'], accel: ['accel', 'defAccel'],
@@ -130,40 +133,57 @@ export function restoreDefaults() {
 }
 
 export async function saveSettings(silent) {
-  if (winMin >= winMax) { if (!silent) alert('Min must be less than Max'); return; }
+  // Guard: winMin/winMax must be valid before we try to save. If they're
+  // still at the module default (10/110) because loadSettings() hasn't
+  // returned yet, we just wait — don't block the user with an alert. :3
+  if (winMin >= winMax) { if (!silent) toast('Range invalid — min must be less than max', 'bad', 'i-alert'); return; }
   try {
     // blend_mode is included so the firmware persists the operator's chosen
     // reversal policy alongside speed/accel. Additive key — old firmware that
     // doesn't know about it just ignores it. :3
-    await post('/api/settings', {
+    var r = await post('/api/settings', {
       range_min: Math.round(winMin), range_max: Math.round(winMax),
       max_speed: parseInt($('defMaxSpeed').value), accel: parseInt($('defAccel').value),
       blend_mode: blendMode,
-      auto_duration: $('#autoDuration').checked,
+      intiface_compat: !!($('#intifaceCompat') && $('#intifaceCompat').checked),
       default_range_min: clamp(parseInt($('defMinNum').value) || 0, 0, TRAVEL),
       default_range_max: clamp(parseInt($('defMaxNum').value) || TRAVEL, 0, TRAVEL),
       expert_mode: expertMode
     });
+    // Check the HTTP response — a 400 from the firmware (e.g. rmin>=rmax)
+    // doesn't throw, so we must check r.ok explicitly. :3
+    if (!r || !r.ok) {
+      var errBody = r ? await r.text() : 'no response';
+      if (!silent) toast('Save failed: ' + errBody, 'bad', 'i-alert');
+      return;
+    }
     ['saveInd', 'saveIndRange'].forEach(function(id) {
       var i = $(id);
       if (i) { i.classList.add('show'); setTimeout(function() { i.classList.remove('show'); }, 1800); }
     });
     if (!silent) toast('Settings saved', 'good', 'i-check');
-  } catch (e) { if (!silent) toast('Failed to save', 'bad', 'i-alert'); }
+  } catch (e) { if (!silent) toast('Failed to save: ' + e, 'bad', 'i-alert'); }
 }
 
 async function loadSettings() {
   try {
     var d = await get('/api/settings');
     if (!d || d.range_min === undefined) return;
+    // Set TRAVEL FIRST so renderWindow() clamps against the real rail length,
+    // not the hardcoded 240 default. If we set winMax=260 then renderWindow()
+    // before setTravel(260), the clamp fires at 240 and silently truncates it. :3
+    if (d.max_travel) setTravel(d.max_travel);
     setWinMin(d.range_min);
     setWinMax(d.range_max);
     setWindowReady(true);
     renderWindow();
     var dn = $('#defMinNum'); if (dn) dn.value = d.default_range_min || 0;
-    var dx = $('#defMaxNum'); if (dx) dx.value = d.default_range_max || 240;
+    var dx = $('#defMaxNum'); if (dx) dx.value = d.default_range_max || TRAVEL;
     expertMode = d.expert_mode || false;
-    var ad = $('#autoDuration'); if (ad) ad.checked = d.auto_duration || true;
+    // Reflect the Intiface compat toggle — default OFF (MFP spec decode) when
+    // the firmware doesn't advertise it. Note: explicit !! so an absent field
+    // reads as unchecked rather than undefined. :3
+    var ic = $('#intifaceCompat'); if (ic) ic.checked = !!d.intiface_compat;
     var spd = d.max_speed || 550, acc = d.accel || 1500;
     var look = d.lookahead || 20, over = d.overshoot || 8;
     ['defMaxSpeed', 'maxSpeed'].forEach(function(id) { var e = $(id); if (e) e.value = spd; });
@@ -274,7 +294,14 @@ export function initSettings() {
     post('/api/settings', { blend_mode: blendMode, no_persist: true });
   });
 
-  var ad = $('#autoDuration');
-  if (ad) ad.addEventListener('change', pushInterp);
-  loadSettings(); loadMode(); loadInterp(); loadGenTick();
+  // Intiface compat toggle — apply live (no_persist) the instant it's flipped
+  // so the operator can A/B it against a running stream without saving, then
+  // bake it in with "Save All Settings". Default state comes from loadSettings.
+  var ic = $('#intifaceCompat');
+  if (ic) ic.addEventListener('change', function() {
+    post('/api/settings', { intiface_compat: ic.checked, no_persist: true });
+    toast(ic.checked ? 'Intiface position fix ON' : 'Intiface position fix OFF',
+          'info', 'i-gauge');
+  });
+  loadSettings(); loadMode(); loadGenTick();
 }

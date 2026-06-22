@@ -14,19 +14,22 @@
 #include "SerialTransport.h"
 #include "WebSocketTransport.h"
 #include "BleTransport.h"
+#include "DongleTransport.h"
 
 TransportManager::TransportManager(SystemState&        state,
                                    TCodeParser&        parser,
                                    SerialTransport&    serial,
                                    WebSocketTransport& ws,
-                                   BleTransport&       ble)
-    : _state(state), _parser(parser), _serial(serial), _ws(ws), _ble(ble) {}
+                                   BleTransport&       ble,
+                                   DongleTransport&    dongle)
+    : _state(state), _parser(parser), _serial(serial), _ws(ws), _ble(ble), _dongle(dongle) {}
 
 // ---- WiFi + mDNS -----------------------------------------------------------
 
 bool TransportManager::setupWiFi() {
     WiFi.mode(WIFI_STA);
-    WiFi.setAutoConnect(true);
+    // WiFi.setAutoConnect() was removed in arduino-esp32 3.x — setAutoReconnect()
+    // is the surviving equivalent. The S3 reconnects automatically on drop. :3
     WiFi.setAutoReconnect(true);
 
     APPLOGF("Connecting to WiFi: %s", WIFI_SSID);
@@ -66,6 +69,13 @@ void TransportManager::applyTransport(TransportMode mode) {
     _serial.removeResponseHooks();
     _ws.removeResponseHooks();
     _ble.removeResponseHooks();
+    _dongle.removeResponseHooks();
+
+    // Close dongle UART if we're switching away from DONGLE mode — free the
+    // pins so they can be used for other things. :3
+    if (mode != TransportMode::DONGLE && _dongle.isOpen()) {
+        _dongle.end();
+    }
 
     _state.setTransport(mode);
 
@@ -73,6 +83,13 @@ void TransportManager::applyTransport(TransportMode mode) {
         _ble.begin();
         _ws.disconnectIntiface();
         _ble.installResponseHooks();
+    } else if (mode == TransportMode::DONGLE) {
+        // DONGLE: open Serial2 and listen for TCode relayed from the T-Dongle C5.
+        // WiFi stays up for the web UI — best of both holes. :3
+        if (_ble.isRunning()) _ble.stop();
+        _ws.disconnectIntiface();
+        _dongle.begin();
+        _dongle.installResponseHooks();
     } else {
         if (_ble.isRunning()) _ble.stop();
         if (mode == TransportMode::WS) {
@@ -93,8 +110,16 @@ void TransportManager::applyTransport(TransportMode mode) {
 // static
 const char* TransportManager::transportName(TransportMode m) {
     switch (m) {
-        case TransportMode::SER: return "SER";
-        case TransportMode::BT:  return "BT";
-        default:                 return "WS";
+        case TransportMode::SER:    return "SER";
+        case TransportMode::BT:     return "BT";
+        case TransportMode::DONGLE: return "DONGLE";
+        default:                    return "WS";
     }
+}
+
+// Delegate straight to DongleTransport::isActive() — true when the UART has
+// received at least one valid TCode frame in the last 2s. The WebUI uses this
+// to show Hz in the indicator instead of just "DONGLE". :3
+bool TransportManager::isDongleActive() const {
+    return _dongle.isActive();
 }

@@ -10,7 +10,27 @@
 import { $, clamp, setRead, icon, toast } from './ui.js';
 import { post } from './api.js';
 
-export const TRAVEL = 240;
+// TRAVEL is now dynamic — set from /api/settings max_travel on boot so the
+// range designer, motion graph, and all clamps use the actual rail length
+// instead of a hardcoded 240mm. Default 240 until the API responds. :3
+export let TRAVEL = 240;
+export function setTravel(mm) {
+  if (mm <= 0) return;
+  TRAVEL = mm;
+  // Patch every DOM element that hardcodes the travel limit so the UI
+  // reflects the real rail length the moment the API responds. :3
+  var t = Math.round(mm);
+  var ec = document.getElementById('endcapTop');
+  if (ec) ec.textContent = 'Out / ' + t;
+  var bh = document.getElementById('bypassHint');
+  if (bh) bh.textContent = 'reach the full 0\u2013' + t + ' mm, ignoring the window';
+  ['minNum','maxNum','manualPos'].forEach(function(id) {
+    var el = document.getElementById(id); if (el) el.max = t;
+  });
+  ['defMinNum','defMaxNum'].forEach(function(id) {
+    var el = document.getElementById(id); if (el) el.max = t;
+  });
+}
 
 // Shared state — exported so generator, settings, and status poll can reference.
 // Importers must use setWinMin/setWinMax to reassign (ESM export let is read-only).

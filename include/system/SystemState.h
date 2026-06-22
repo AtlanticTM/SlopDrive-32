@@ -132,7 +132,7 @@ struct SystemState {
 
     // ---- Default range (Core 0 only) -----------------------------------------
     float                  default_range_min = 0.0f;
-    float                  default_range_max = PHYSICAL_MAX_TRAVEL_MM;
+    float                  default_range_max = MACHINE_MAX_TRAVEL_MM;
 
     // ---- On-device motion generator ------------------------------------------
     GeneratorConfig        gen;

@@ -42,6 +42,13 @@ typedef void (*StopCallback)();
 /// @param msg  null-terminated response string (includes trailing \n)
 typedef void (*ResponseCallback)(const char* msg);
 
+/// Called when feedLine() encounters a token that is NOT a recognised TCode
+/// command (not L/R/V/D-prefixed). This is the extensibility hook — any
+/// custom sideband commands transmitted alongside TCode (e.g. "SPEED:50",
+/// "PRESET:edge", future protocol extensions) land here instead of being
+/// silently dropped. The token is null-terminated. :3
+typedef void (*UnknownCmdCallback)(const char* token);
+
 // ============================================================================
 // TCodeParser — pure, transport-agnostic TCode v0.3 line parser
 // ============================================================================
@@ -61,6 +68,12 @@ public:
     /// replies go to the right place.  May be nullptr (responses are silently
     /// dropped).
     void onResponse(ResponseCallback cb) { _onResponse = cb; }
+
+    /// Set the unknown-command hook. Any token that doesn't match a recognised
+    /// TCode prefix (L/R/V/D) is passed here verbatim. Use this to handle
+    /// custom sideband commands sent alongside TCode. May be nullptr (unknown
+    /// tokens are silently dropped — same as before). :3
+    void onUnknownCmd(UnknownCmdCallback cb) { _onUnknownCmd = cb; }
 
     // ---- Feed a complete TCode line ------------------------------------------
     /// Parse one or more whitespace-separated TCode commands.
@@ -87,9 +100,10 @@ public:
     static volatile bool intifaceCompat;
 
 private:
-    LinearCmdCallback _onLinearCmd = nullptr;
-    StopCallback      _onStop      = nullptr;
-    ResponseCallback  _onResponse  = nullptr;
+    LinearCmdCallback  _onLinearCmd    = nullptr;
+    StopCallback       _onStop         = nullptr;
+    ResponseCallback   _onResponse     = nullptr;
+    UnknownCmdCallback _onUnknownCmd   = nullptr;
 };
 
 #endif // TCODE_PARSER_H

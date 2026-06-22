@@ -231,6 +231,9 @@ void WebUI::handleApiStatus() {
     doc["ble_running"]   = _bleTransport.isRunning();
     doc["ble_connected"] = _bleTransport.isConnected();
     doc["ble_linked"]    = _bleTransport.isLinked();
+    // DONGLE: true when the UART has received at least one valid TCode frame
+    // in the last 2s. The JS indicator uses this to show Hz instead of "DONGLE". :3
+    doc["dongle_active"] = _transportMgr.isDongleActive();
 
     // Control-gating state
     doc["paused"] = _state.paused;
@@ -314,8 +317,11 @@ void WebUI::handleApiSettings() {
         JsonDocument doc;
         doc["range_min"] = _mapper.getMinMm();
         doc["range_max"] = _mapper.getMaxMm();
-        doc["max_speed"] = (uint16_t)_state.config.max_speed_mm_s;
-        doc["accel"] = (uint16_t)_state.config.acceleration_mm_s2;
+        // Serialize as uint32_t — accel can be up to 100000 mm/s² in expert mode,
+        // which overflows uint16_t (max 65535). The JS slider reads this value on
+        // load and would be capped at 65535 if we cast wrong here. :3
+        doc["max_speed"] = (uint32_t)_state.config.max_speed_mm_s;
+        doc["accel"] = (uint32_t)_state.config.acceleration_mm_s2;
         // Continuous-blend policy: 1=let-it-land, 2=allow-reversal, 3=hybrid.
         // Replaces the old predictive lookahead/overshoot — we keep velocity
         // through the stream now instead of guessing ahead of it. :3
@@ -326,6 +332,10 @@ void WebUI::handleApiSettings() {
         doc["default_range_min"] = _state.default_range_min;
         doc["default_range_max"] = _state.default_range_max;
         doc["expert_mode"] = _state.expert_mode;
+        // Advertise the physical rail length so the WebUI can set TRAVEL
+        // dynamically instead of hardcoding 240mm. The UI reads this on boot
+        // and scales all sliders, the range designer, and the motion graph. :3
+        doc["max_travel"] = (float)MACHINE_MAX_TRAVEL_MM;
 
         String json;
         serializeJson(doc, json);
@@ -343,20 +353,30 @@ void WebUI::handleApiSettings() {
 
         float rmin = doc["range_min"] | _mapper.getMinMm();
         float rmax = doc["range_max"] | _mapper.getMaxMm();
-        uint16_t speed = doc["max_speed"] | (uint16_t)_state.config.max_speed_mm_s;
-        uint16_t accel = doc["accel"] | (uint16_t)_state.config.acceleration_mm_s2;
+        // Speed and accel use uint32_t — accel can reach 100000 mm/s² in expert
+        // mode which overflows uint16_t (max 65535). Using uint32_t here means
+        // the JSON value is read and clamped correctly before being stored as
+        // float. The old uint16_t silently truncated anything above 65535 and
+        // wrote garbage to NVS — that was the "accel doesn't save" bug. uhoh :3
+        uint32_t speed = doc["max_speed"] | (uint32_t)_state.config.max_speed_mm_s;
+        uint32_t accel = doc["accel"] | (uint32_t)_state.config.acceleration_mm_s2;
 
         if (rmin >= rmax) {
             _httpServer->send(400, "application/json", "{\"error\":\"Min must be less than Max\"}");
             return;
         }
 
-        // Clamp raised to match setAcceleration()'s ceiling of 20000 mm/s².
-        // The old 5000 cap was silently rejecting every value above 5000 —
-        // so "8000" in the UI was actually running at 5000 the whole time. owo
-        // Floor at 10 so a zero/garbage value doesn't brick the planner. :3
-        if (accel < 10)    accel = 10;
-        if (accel > 20000) accel = 20000;
+        // Speed clamp: floor at 1 mm/s, ceiling at MAX_SPEED_MM_S (10000).
+        // Expert mode UI sends up to 10000, normal mode up to 5000 — firmware
+        // accepts anything in range and lets the operator enjoy the ride. :3
+        if (speed < 1)                          speed = 1;
+        if (speed > (uint32_t)MAX_SPEED_MM_S)   speed = (uint32_t)MAX_SPEED_MM_S;
+
+        // Accel clamp: floor at 10 (zero/garbage = bricked planner), ceiling at
+        // MAX_ACCEL_MM_S2 (100000). Expert mode UI sends up to 100000, normal
+        // mode up to 50000 — the servo drive can absolutely take it. yippie! :3
+        if (accel < 10)                          accel = 10;
+        if (accel > (uint32_t)MAX_ACCEL_MM_S2)   accel = (uint32_t)MAX_ACCEL_MM_S2;
 
 
         // Continuous-blend policy (1=let-it-land, 2=allow-reversal, 3=hybrid).
@@ -379,7 +399,7 @@ void WebUI::handleApiSettings() {
         if (doc["default_range_min"].is<float>() || doc["default_range_max"].is<float>()) {
             float drmin = doc["default_range_min"] | _state.default_range_min;
             float drmax = doc["default_range_max"] | _state.default_range_max;
-            if (drmin >= 0.0f && drmax <= PHYSICAL_MAX_TRAVEL_MM && drmin < drmax) {
+            if (drmin >= 0.0f && drmax <= MACHINE_MAX_TRAVEL_MM && drmin < drmax) {
                 _state.default_range_min = drmin;
                 _state.default_range_max = drmax;
             }
@@ -418,7 +438,9 @@ void WebUI::handleApiMove() {
         float pos = doc["position"] | 0.0f;
         bool bypass = doc["bypass_limits"] | false;
         if (bypass) {
-            pos = constrain(pos, 0.0f, PHYSICAL_MAX_TRAVEL_MM);
+            // Bypass ignores the stroke window but still respects the physical
+            // rail limit — MACHINE_MAX_TRAVEL_MM is 260mm on the 57AIM build. :3
+            pos = constrain(pos, 0.0f, MACHINE_MAX_TRAVEL_MM);
         } else {
             pos = constrain(pos, _mapper.getMinMm(), _mapper.getMaxMm());
         }
@@ -587,7 +609,9 @@ void WebUI::handleApiGen() {
         // rungs spaced out (20/50/100/200) so the UI buttons map cleanly and
         // nobody accidentally picks 137 Hz. If the value isn't close to any
         // rung, snap to the nearest one — we're a good boy, not a brat. :3
-        _state.gen_rate_tick_hz = (r >= 150) ? 200 : (r >= 75) ? 100 : (r >= 35) ? 50 : 20;
+        // Rungs: 20 / 50 / 100 / 250 / 500 Hz. Snap to nearest.
+        // 500Hz is the new ceiling — absolute rail on the generator. yippie! :3
+        _state.gen_rate_tick_hz = (r >= 375) ? 500 : (r >= 175) ? 250 : (r >= 75) ? 100 : (r >= 35) ? 50 : 20;
     }
 
     // ---- Generator config — lock the whole struct so the Core-1 generator -----
@@ -699,10 +723,11 @@ void WebUI::handleApiMode() {
 
     const char* m = doc["mode"] | "";
     TransportMode mode = _state.getTransport();
-    if      (strcasecmp(m, "WS")  == 0) mode = TransportMode::WS;
-    else if (strcasecmp(m, "SER") == 0) mode = TransportMode::SER;
-    else if (strcasecmp(m, "BT")  == 0) mode = TransportMode::BT;
-    else { _httpServer->send(400, "application/json", "{\"error\":\"mode must be WS|SER|BT\"}"); return; }
+    if      (strcasecmp(m, "WS")     == 0) mode = TransportMode::WS;
+    else if (strcasecmp(m, "SER")    == 0) mode = TransportMode::SER;
+    else if (strcasecmp(m, "BT")     == 0) mode = TransportMode::BT;
+    else if (strcasecmp(m, "DONGLE") == 0) mode = TransportMode::DONGLE;
+    else { _httpServer->send(400, "application/json", "{\"error\":\"mode must be WS|SER|BT|DONGLE\"}"); return; }
 
     _transportMgr.applyTransport(mode);
     ConfigStore::save(_state, _mapper, _motor);

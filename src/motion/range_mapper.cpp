@@ -2,7 +2,7 @@
 
 RangeMapper::RangeMapper()
     : _range_min_mm(0.0f)
-    , _range_max_mm(PHYSICAL_MAX_TRAVEL_MM) {}
+    , _range_max_mm(MACHINE_MAX_TRAVEL_MM) {}
 
 void RangeMapper::setRange(float min_mm, float max_mm) {
     // Validate range
@@ -42,7 +42,10 @@ float RangeMapper::getCenterPosition() const {
 }
 
 float RangeMapper::clampToPhysicalLimits(float pos_mm) {
-    return constrain(pos_mm, 0.0f, PHYSICAL_MAX_TRAVEL_MM);
+    // Use MACHINE_MAX_TRAVEL_MM so the 57AIM build clamps to 260mm, not 240mm.
+    // PHYSICAL_MAX_TRAVEL_MM is the TMC-era constant — it stays for the TMC
+    // build but we can't use it here without breaking the 57AIM rail. :3
+    return constrain(pos_mm, 0.0f, MACHINE_MAX_TRAVEL_MM);
 }
 
 float RangeMapper::clampIntensity(float intensity) {

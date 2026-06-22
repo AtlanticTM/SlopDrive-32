@@ -29,12 +29,17 @@
 #include "TMC2160StepperDriver.h"
 #endif
 
+#if defined(DRIVER_57AIM_SERVO)
+#include "57AIMServoDriver.h"
+#endif
+
 #include "Generator.h"
 
 #include "TCodeParser.h"
 #include "SerialTransport.h"
 #include "WebSocketTransport.h"
 #include "BleTransport.h"
+#include "DongleTransport.h"
 #include "TransportManager.h"
 
 #include "WebUI.h"
@@ -47,8 +52,10 @@
 
 #if defined(DRIVER_TMC2160)
   TMC2160StepperDriver motor;
+#elif defined(DRIVER_57AIM_SERVO)
+  Ai57AIMServoDriver motor;
 #else
-  #error "No motor driver selected. Define DRIVER_TMC2160 (or a future driver flag) in platformio.ini build_flags."
+  #error "No motor driver selected. Define DRIVER_TMC2160 or DRIVER_57AIM_SERVO in platformio.ini build_flags."
 #endif
 
 static SystemState        g_state;
@@ -59,8 +66,12 @@ static TCodeParser        tcodeParser;
 static SerialTransport    serialTransport(tcodeParser);
 static WebSocketTransport wsTransport(tcodeParser);
 static BleTransport       bleTransport(tcodeParser);
+// The T-Dongle C5 relay — Serial2 on pins 8/9. Opened only when DONGLE mode
+// is selected; otherwise the UART stays closed and the pins are free. :3
+static DongleTransport    dongleTransport(tcodeParser);
 static TransportManager   transportMgr(g_state, tcodeParser,
-                                        serialTransport, wsTransport, bleTransport);
+                                        serialTransport, wsTransport, bleTransport,
+                                        dongleTransport);
 
 static WebUI webui(g_state, motor, mapper, generator,
                    transportMgr, serialTransport, wsTransport, bleTransport);
@@ -203,10 +214,16 @@ static void commsTask(void* /*param*/) {
     uint32_t last_report_ms   = 0;
     uint32_t last_frame_count = 0;
     while (true) {
-        // In SER mode skip WebSocket networking — the RX FIFO needs every
-        // microsecond we can give it. :3
-        if (g_state.getTransport() == TransportMode::SER) {
+        // Route polling to the active transport. SER and DONGLE skip WebSocket
+        // networking to give the RX FIFO every microsecond we can spare. :3
+        TransportMode activeMode = g_state.getTransport();
+        if (activeMode == TransportMode::SER) {
             serialTransport.poll();
+        } else if (activeMode == TransportMode::DONGLE) {
+            // Drain the UART from the T-Dongle C5 relay. WiFi stays up for
+            // the web UI — we just don't run the WS TCode server poll here
+            // so the UART gets full attention. :3
+            dongleTransport.poll();
         } else {
             wsTransport.run();
         }
@@ -219,7 +236,7 @@ static void commsTask(void* /*param*/) {
             last_frame_count = frames;
             last_report_ms   = now;
             g_state.measured_hz = (uint16_t)per_sec;
-            if (wsTransport.isConnected() || serialTransport.isActive())
+            if (wsTransport.isConnected() || serialTransport.isActive() || dongleTransport.isActive())
                 APPLOGF("[RATE] rx=%u frames/s", per_sec);
         }
 
@@ -405,12 +422,13 @@ static void motionConsumerTask(void* /*param*/) {
         // ---- OSSM kinematic pipeline ----------------------------------------
         // getCurrentPosition() returns last COMMANDED step count (open-loop).
         // Identical to OSSM's behavior — correct for open-loop servos. :3
-        int32_t current_steps = motor.mmToNative(motor.getPosition());
-        // getPosition() returns mm (positive), convert to steps with sign:
-        current_steps = -(int32_t)(motor.getPosition() * STEPS_PER_MM);
+        // Use motor.mmToNative() for all unit conversion — this is driver-
+        // agnostic and works for both TMC2160 (80 steps/mm) and 57AIMServo
+        // (20 steps/mm) without hardcoding STEPS_PER_MM here. :3
+        int32_t current_steps = -motor.mmToNative(motor.getPosition());
 
-        uint32_t speed_limit = (uint32_t)(g_state.config.max_speed_mm_s    * STEPS_PER_MM);
-        uint32_t accel_limit = (uint32_t)(g_state.config.acceleration_mm_s2 * STEPS_PER_MM);
+        uint32_t speed_limit = (uint32_t)motor.mmToNative(g_state.config.max_speed_mm_s);
+        uint32_t accel_limit = (uint32_t)motor.mmToNative(g_state.config.acceleration_mm_s2);
 
         kinematics::PlanResult plan = kinematics::planTrapezoid(
             current_steps,

@@ -58,6 +58,21 @@ void TCodeParser::feedLine(const char* str, size_t len) {
             continue;
         }
 
+        // ---- Unknown / sideband commands — extensibility hook ---------------
+        // Any token that doesn't start with a recognised TCode axis letter gets
+        // routed to the onUnknownCmd callback. This is the slot for future
+        // custom commands sent alongside TCode — "SPEED:50", "PRESET:edge",
+        // whatever filthy new protocol extensions we dream up. They arrive here
+        // intact, null-terminated, ready to be evaluated. yippie! :3
+        //
+        // We check this BEFORE the L/R/V block so the fall-through is clean:
+        // if axis is not D, L, R, or V — it's unknown. Route it and continue.
+        if (axis != 'D' && axis != 'L' && axis != 'R' && axis != 'V') {
+            if (_onUnknownCmd) _onUnknownCmd(token);
+            token = strtok(nullptr, " \t\r\n");
+            continue;
+        }
+
         // ---- Linear / Rotation / Vibration axes (we only use L0) ----
         if (axis == 'L' || axis == 'R' || axis == 'V') {
             if (tlen < 2) {

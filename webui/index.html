@@ -119,7 +119,7 @@
       <div class="card collapsible" data-sidebar-card="stroke">
         <div class="card-head">
           <span data-ico="i-range"></span><h2>Stroke Window</h2>
-          <button class="info" data-tip="Drag the highlighted box to slide the whole stroke window toward the front or back of the machine. Drag the white handles to trim each end. The green line shows the live carriage position. The grey track is the machine's full 240&nbsp;mm of travel — 0&nbsp;mm is home (fully in).">
+          <button class="info" data-tip="Drag the highlighted box to slide the whole stroke window toward the front or back of the machine. Drag the white handles to trim each end. The green line shows the live carriage position. The grey track is the machine's full travel — 0&nbsp;mm is home (fully in).">
             <span data-ico="i-info"></span>
           </button>
           <span class="caret" data-ico="i-chevron"></span>
@@ -128,7 +128,7 @@
         <div class="designer">
           <div class="track-col">
             <div class="track-host" id="trackHost">
-              <div class="endcap top">Out / 240</div>
+              <div class="endcap top" id="endcapTop">Out / 260</div>
               <div class="endcap bot">Home / 0</div>
               <div class="window" id="win">
                 <div class="grip t"></div>
@@ -161,11 +161,11 @@
             <div class="pair">
               <div>
                 <div class="mini-label">Min (in)</div>
-                <input class="num" id="minNum" type="number" min="0" max="240" step="1" inputmode="numeric">
+                <input class="num" id="minNum" type="number" min="0" max="260" step="1" inputmode="numeric">
               </div>
               <div>
                 <div class="mini-label">Max (out)</div>
-                <input class="num" id="maxNum" type="number" min="0" max="240" step="1" inputmode="numeric">
+                <input class="num" id="maxNum" type="number" min="0" max="260" step="1" inputmode="numeric">
               </div>
             </div>
 
@@ -212,7 +212,7 @@
         <div class="field">
 
           <label>Target Position</label>
-          <input type="range" id="manualPos" min="0" max="240" value="0" step="1">
+          <input type="range" id="manualPos" min="0" max="260" value="0" step="1">
           <div class="readout"><b id="manualPosVal">0</b><span>mm</span></div>
         </div>
 
@@ -222,7 +222,7 @@
         </div>
 
         <label class="switch full" style="margin-bottom:10px">
-          <span><span class="lbl">Bypass limits</span><div class="hint" style="margin-top:2px">reach the full 0–240 mm, ignoring the window</div></span>
+          <span><span class="lbl">Bypass limits</span><div class="hint" id="bypassHint" style="margin-top:2px">reach the full 0–260 mm, ignoring the window</div></span>
           <span style="display:flex;align-items:center"><input type="checkbox" id="bypassLimits"><span class="track"></span></span>
         </label>
         <label class="switch full">
@@ -351,6 +351,7 @@
           <button data-mode="WS">WebSocket</button>
           <button data-mode="SER">Serial</button>
           <button id="btModeBtn" data-mode="BT" style="display:none">Bluetooth</button>
+          <button data-mode="DONGLE">Dongle</button>
         </div>
         <div class="hint" id="modeHint">Choose how the machine receives motion commands.</div>
         <div class="chip" id="bleStatus" style="display:none;margin-top:10px">
@@ -365,8 +366,8 @@
           <button class="info" data-tip="The working window the machine resets to on boot. Mid-session changes on the Range tab persist too — this is just the home base to fall back to."><span data-ico="i-info"></span></button>
         </div>
         <div class="pair">
-          <div><div class="mini-label">Def min (mm)</div><input class="num" id="defMinNum" type="number" min="0" max="240" step="1" inputmode="numeric"></div>
-          <div><div class="mini-label">Def max (mm)</div><input class="num" id="defMaxNum" type="number" min="0" max="240" step="1" inputmode="numeric"></div>
+          <div><div class="mini-label">Def min (mm)</div><input class="num" id="defMinNum" type="number" min="0" max="260" step="1" inputmode="numeric"></div>
+          <div><div class="mini-label">Def max (mm)</div><input class="num" id="defMaxNum" type="number" min="0" max="260" step="1" inputmode="numeric"></div>
         </div>
         <button class="btn ghost sm" style="margin-top:10px" data-action="useCurrentAsDefault"><span data-ico="i-check"></span> Use current window</button>
       </div>
@@ -410,7 +411,7 @@
         <div class="card-head"><span data-ico="i-gauge"></span><h2>Generation rate</h2>
           <button class="info" data-tip="How often the device recomputes and sends motion to the motor (waveform generator). Higher = smoother but more CPU/step load."><span data-ico="i-info"></span></button></div>
         <div class="seg" id="genTickSeg">
-          <button data-hz="20">20 Hz</button><button data-hz="50">50 Hz</button><button class="active" data-hz="100">100 Hz</button><button data-hz="200">200 Hz</button>
+          <button data-hz="20">20 Hz</button><button data-hz="50">50 Hz</button><button class="active" data-hz="100">100 Hz</button><button data-hz="250">250 Hz</button><button data-hz="500">500 Hz</button>
         </div>
       </div>
 

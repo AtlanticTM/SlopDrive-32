@@ -1,0 +1,288 @@
+// =============================================================================
+// ST7735 driver implementation — pure Arduino SPI, no register hacks.
+// Sourced from LilyGO T-Dongle-C5 official repo, extended for performance.
+//
+// PERFORMANCE UPGRADES (because the original was dribbling when it should
+// have been gushing):
+//
+//   1. SPI clock bumped to 40MHz — ST7735 write cycle is 15ns (66MHz max).
+//      The original 20MHz was leaving half the bandwidth on the table. We're
+//      now stuffing data in twice as fast. yippie! :3
+//
+//   2. fillRect / fillScreen now use SPI.transferBytes() with a line-sized
+//      DMA buffer instead of SPI.transfer16() in a CPU-polled loop. The old
+//      loop was one 16-bit SPI transaction per pixel — 80×160 = 12800 separate
+//      SPI transactions for a full clear. Now it's one DMA burst per row.
+//      The hole takes the whole fist at once instead of one finger at a time.
+//      hehee :3
+//
+//   3. writePixels() already used transferBytes() — kept as-is. owo
+// =============================================================================
+
+#include "st7735.h"
+
+// 40MHz — safe for ST7735 (datasheet: 15ns write cycle = 66MHz max).
+// Doubles throughput vs the original 20MHz. Absolutely railing it. :3
+static constexpr uint32_t SPI_FREQ = 40000000UL;
+
+// Line buffer for DMA-burst fillRect — one row of pixels, big-endian 565.
+// 160px × 2 bytes = 320 bytes. Stack-allocated, reused every call. :3
+// We use the landscape width (160) as the max so portrait (80) always fits.
+static uint8_t s_line_buf[160 * 2];
+
+Adafruit_ST7735::Adafruit_ST7735(int8_t cs, int8_t dc, int8_t rst, int8_t sck, int8_t mosi)
+    : _cs(cs), _dc(dc), _rst(rst), _sck(sck), _mosi(mosi), _colmod(0x05) {}
+
+void Adafruit_ST7735::begin()
+{
+    pinMode(_rst, OUTPUT);
+    pinMode(_dc, OUTPUT);
+    pinMode(_cs, OUTPUT);
+
+    // Hardware reset — hold it down, let it breathe, bring it back up. yippie!
+    digitalWrite(_rst, HIGH);
+    delay(100);
+    digitalWrite(_rst, LOW);
+    delay(100);
+    digitalWrite(_rst, HIGH);
+    delay(120);
+
+    if (_sck != -1 || _mosi != -1)
+    {
+        SPI.begin(_sck, -1, _mosi, -1);
+    }
+    else
+    {
+        SPI.begin();
+    }
+    SPI.setBitOrder(MSBFIRST);
+    SPI.setDataMode(SPI_MODE0);
+
+    sendInitCommands();
+}
+
+void Adafruit_ST7735::setRotation(uint8_t m)
+{
+    _rotation = m % 4;
+    if (_rotation == 1 || _rotation == 3)
+    {
+        _width = 160;
+        _height = 80;
+    }
+    else
+    {
+        _width = 80;
+        _height = 160;
+    }
+
+    static const uint8_t rotation_config[4] = {
+        0x00, // Portrait 0
+        0x60, // Landscape 1: MX+MV
+        0xC0, // Portrait 2: MX+MY
+        0xA0  // Landscape 3: MY+MV
+    };
+
+    if (m > 3) m = 3;
+
+    _madctl = (rotation_config[m] & 0xF7) | 0x08;
+    writeCommand(ST7735_MADCTL);
+    spiWrite(_madctl);
+}
+
+void Adafruit_ST7735::startWrite()
+{
+    // 40MHz — twice the throughput of the original 20MHz. The display can
+    // handle 66MHz; we're leaving headroom for cable capacitance. :3
+    SPI.beginTransaction(SPISettings(SPI_FREQ, MSBFIRST, SPI_MODE0));
+    digitalWrite(_cs, LOW);
+    _inTransaction = true;
+}
+
+void Adafruit_ST7735::writePixels(uint16_t *pixels, uint32_t len)
+{
+    // Pump the pixels in — stuffing the framebuffer until it's full and leaking
+    // out the other side. Every pixel a drop, DMA does the heavy lifting. owo
+    digitalWrite(_dc, HIGH);
+    SPI.transferBytes((uint8_t *)pixels, nullptr, len * 2);
+}
+
+void Adafruit_ST7735::endWrite()
+{
+    _inTransaction = false;
+    digitalWrite(_cs, HIGH);
+    SPI.endTransaction();
+}
+
+void Adafruit_ST7735::drawPixel(int16_t x, int16_t y, uint16_t color)
+{
+    if (x < 0 || x >= (int16_t)_width || y < 0 || y >= (int16_t)_height) return;
+    startWrite();
+    setAddrWindow(x, y, x, y);
+    digitalWrite(_dc, HIGH);
+    // Single pixel — transfer16 is fine, no DMA overhead for 2 bytes. :3
+    SPI.transfer16(color);
+    endWrite();
+}
+
+void Adafruit_ST7735::fillScreen(uint16_t color)
+{
+    // Flood the whole screen — one DMA burst per row instead of one SPI
+    // transaction per pixel. 80 rows × 1 DMA burst vs 12800 polled writes.
+    // Like fisting the whole thing open in one push instead of one finger
+    // at a time. The stomach bulges, the data flows. hehee :3
+    startWrite();
+    setAddrWindow(0, 0, _width - 1, _height - 1);
+    digitalWrite(_dc, HIGH);
+
+    // Pre-fill the line buffer with the color (big-endian 565). :3
+    uint8_t hi = color >> 8;
+    uint8_t lo = color & 0xFF;
+    for (int i = 0; i < _width * 2; i += 2) {
+        s_line_buf[i]     = hi;
+        s_line_buf[i + 1] = lo;
+    }
+    // Blast each row as a single DMA transfer. :3
+    for (int row = 0; row < _height; row++) {
+        SPI.transferBytes(s_line_buf, nullptr, _width * 2);
+    }
+    endWrite();
+}
+
+void Adafruit_ST7735::fillRect(int16_t x, int16_t y, int16_t w, int16_t h, uint16_t color)
+{
+    if (x >= (int16_t)_width || y >= (int16_t)_height || w <= 0 || h <= 0) return;
+    if (x < 0) { w += x; x = 0; }
+    if (y < 0) { h += y; y = 0; }
+    if (x + w > (int16_t)_width)  w = _width  - x;
+    if (y + h > (int16_t)_height) h = _height - y;
+
+    startWrite();
+    setAddrWindow(x, y, x + w - 1, y + h - 1);
+    digitalWrite(_dc, HIGH);
+
+    // Pre-fill line buffer with the color — one DMA burst per row.
+    // For small rects (w ≤ 8) the DMA overhead isn't worth it so we fall
+    // back to transfer16 — but for anything bar-sized this is a huge win. :3
+    if (w > 8) {
+        uint8_t hi = color >> 8;
+        uint8_t lo = color & 0xFF;
+        for (int i = 0; i < w * 2; i += 2) {
+            s_line_buf[i]     = hi;
+            s_line_buf[i + 1] = lo;
+        }
+        for (int row = 0; row < h; row++) {
+            SPI.transferBytes(s_line_buf, nullptr, w * 2);
+        }
+    } else {
+        for (int32_t i = 0; i < (int32_t)w * h; i++)
+            SPI.transfer16(color);
+    }
+    endWrite();
+}
+
+void Adafruit_ST7735::drawFastHLine(int16_t x, int16_t y, int16_t w, uint16_t color)
+{
+    fillRect(x, y, w, 1, color);
+}
+
+void Adafruit_ST7735::sendInitCommands()
+{
+    const uint8_t initCmds[] = {
+        ST7735_SWRESET, DELAY, 150,
+        ST7735_SLPOUT,  DELAY, 255,
+        ST7735_FRMCTR1, 3, 0x01, 0x2C, 0x2D,
+        ST7735_FRMCTR2, 3, 0x01, 0x2C, 0x2D,
+        ST7735_FRMCTR3, 6, 0x01, 0x2C, 0x2D, 0x01, 0x2C, 0x2D,
+        ST7735_INVCTR,  1, 0x07,
+        ST7735_PWCTR1,  3, 0xA2, 0x02, 0x84,
+        ST7735_PWCTR2,  1, 0xC5,
+        ST7735_PWCTR3,  2, 0x0A, 0x00,
+        ST7735_PWCTR4,  2, 0x8A, 0x2A,
+        ST7735_PWCTR5,  2, 0x8A, 0xEE,
+        ST7735_VMCTR1,  1, 0x0E,
+        ST7735_INVON,   0,
+        ST7735_COLMOD,  1, _colmod,
+        ST7735_MADCTL,  1, _madctl,
+        ST7735_GMCTRP1, 16, 0x02, 0x1c, 0x07, 0x12, 0x37, 0x32, 0x29, 0x2d,
+                            0x29, 0x25, 0x2B, 0x39, 0x00, 0x01, 0x03, 0x10,
+        ST7735_GMCTRN1, 16, 0x03, 0x1d, 0x07, 0x06, 0x2E, 0x2C, 0x29, 0x2D,
+                            0x2E, 0x2E, 0x37, 0x3F, 0x00, 0x00, 0x02, 0x10,
+        ST7735_NORON,   DELAY, 10,
+        ST7735_DISPON,  DELAY, 100,
+        0x00
+    };
+
+    uint8_t *cmd = (uint8_t *)initCmds;
+    while (cmd[0] != 0x00)
+    {
+        writeCommand(cmd[0]);
+        if (cmd[1] == DELAY)
+        {
+            delay(cmd[2]);
+            cmd += 3;
+        }
+        else
+        {
+            for (uint8_t i = 0; i < cmd[1]; i++)
+                spiWrite(cmd[2 + i]);
+            cmd += (2 + cmd[1]);
+        }
+    }
+}
+
+void Adafruit_ST7735::setAddrWindow(uint16_t x0, uint16_t y0, uint16_t x1, uint16_t y1)
+{
+    // Apply the panel's physical offset — the display is offset 26 cols and 1 row
+    // inside the controller's address space. Without this the image is shifted
+    // and you get a gaping black stripe on one side. uhoh :3
+    if (_rotation == 1 || _rotation == 3)
+    {
+        x0 += y_gap; x1 += y_gap;
+        y0 += x_gap; y1 += x_gap;
+    }
+    else
+    {
+        x0 += x_gap; x1 += x_gap;
+        y0 += y_gap; y1 += y_gap;
+    }
+
+    writeCommand(ST7735_CASET);
+    spiWrite(x0 >> 8); spiWrite(x0 & 0xFF);
+    spiWrite(x1 >> 8); spiWrite(x1 & 0xFF);
+    writeCommand(ST7735_RASET);
+    spiWrite(y0 >> 8); spiWrite(y0 & 0xFF);
+    spiWrite(y1 >> 8); spiWrite(y1 & 0xFF);
+    writeCommand(ST7735_RAMWR);
+}
+
+void Adafruit_ST7735::writeCommand(uint8_t c)
+{
+    digitalWrite(_dc, LOW);
+    if (!_inTransaction)
+    {
+        SPI.beginTransaction(SPISettings(SPI_FREQ, MSBFIRST, SPI_MODE0));
+        digitalWrite(_cs, LOW);
+    }
+    SPI.transfer(c);
+    if (!_inTransaction)
+    {
+        digitalWrite(_cs, HIGH);
+        SPI.endTransaction();
+    }
+}
+
+void Adafruit_ST7735::spiWrite(uint8_t d)
+{
+    digitalWrite(_dc, HIGH);
+    if (!_inTransaction)
+    {
+        SPI.beginTransaction(SPISettings(SPI_FREQ, MSBFIRST, SPI_MODE0));
+        digitalWrite(_cs, LOW);
+    }
+    SPI.transfer(d);
+    if (!_inTransaction)
+    {
+        digitalWrite(_cs, HIGH);
+        SPI.endTransaction();
+    }
+}

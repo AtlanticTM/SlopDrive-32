@@ -27,7 +27,7 @@
 
 
 // =============================================================================
-// Device Geometry
+// Device Geometry — TMC2160 build (DRIVER_TMC2160)
 // =============================================================================
 // Physical travel limit in millimeters
 #define PHYSICAL_MAX_TRAVEL_MM  240.0f
@@ -42,17 +42,63 @@
 #define MM_PER_MOTOR_REV        (PULLEY_TEETH * BELT_PITCH_MM)  // 40mm
 
 // =============================================================================
-// Motor Driver Pins (ESP32-S3) - MATCH ORIGINAL STROKEENGINE WIRING
+// Device Geometry — 57AIMServo build (DRIVER_57AIM_SERVO)
 // =============================================================================
-#define PIN_STEP                21	 // Step signal
-#define PIN_DIR                 20	 // Direction signal
-#define PIN_ENABLE              19	 // Enable signal (active low)
-#define PIN_ENDSTOP             47	 // Endstop limit switch (active LOW, normally open to GND)
+// 57AIM30 closed-loop servo drive, HTD 5M belt, 16-tooth pulley.
+// The drive's DIP switches set 800 pulses/rev internally — no microstepping
+// register to write, no SPI, no drama. Just pulse it and it goes. :3
+//
+//   STEPS_PER_REV: 800   (drive DIP switch setting — new motor, half the old count)
+//   MM_PER_REV:    80.0  (16 teeth × 5mm pitch = 80mm per revolution)
+//   STEPS_PER_MM:  800 / 80 = 10 steps/mm
+//   MAX_TRAVEL:    260.0 mm
+//   HOMING_BACKOFF: 10.0 mm — pull out 10mm after the endstop triggers,
+//                   enough clearance that the switch releases cleanly and
+//                   the carriage isn't sitting balls-deep on the sensor. :3
+#define AIM_STEPS_PER_REV       800
+#define AIM_MM_PER_REV          80.0f
+#define AIM_STEPS_PER_MM        (AIM_STEPS_PER_REV / AIM_MM_PER_REV)   // 10.0
+#define AIM_MAX_TRAVEL_MM       260.0f
+#define AIM_HOMING_BACKOFF_MM   10.0f
 
-#define PIN_TMC_CS              11	 // TMC Chip Select
-#define PIN_TMC_SCLK            12	 // TMC Clock
-#define PIN_TMC_MOSI            13	 // TMC Master Out Slave In
-#define PIN_TMC_MISO            10	 // TMC Master In Slave Out
+// Homing sweep speed: 50 mm/s × 10 steps/mm = 500 steps/s.
+// 260mm rail homes in ~5 seconds. forceStopAndNewPosition() kills the pulse
+// train the instant the endstop triggers — no coasting at this speed. :3
+#define AIM_HOMING_SPEED_STEPS_S  500
+
+// =============================================================================
+// MACHINE_MAX_TRAVEL_MM — driver-agnostic travel limit
+// =============================================================================
+// Single macro that resolves to the correct physical travel for whichever
+// driver is compiled in. Use this everywhere instead of PHYSICAL_MAX_TRAVEL_MM
+// so ConfigStore, RangeMapper, and the WebUI all agree on the rail length
+// regardless of which build flag is active. :3
+#if defined(DRIVER_57AIM_SERVO)
+  #define MACHINE_MAX_TRAVEL_MM  AIM_MAX_TRAVEL_MM   // 260.0 mm
+#else
+  #define MACHINE_MAX_TRAVEL_MM  PHYSICAL_MAX_TRAVEL_MM  // 240.0 mm (TMC build)
+#endif
+
+// =============================================================================
+// Motor Driver Pins (ESP32-S3)
+// =============================================================================
+// --- TMC2160 build (DRIVER_TMC2160) ---
+#define PIN_STEP                21   // Step signal
+#define PIN_DIR                 20   // Direction signal
+#define PIN_ENABLE              19   // Enable signal (active low)
+#define PIN_ENDSTOP             47   // Endstop limit switch (active LOW, normally open to GND)
+
+#define PIN_TMC_CS              11   // TMC Chip Select
+#define PIN_TMC_SCLK            12   // TMC Clock
+#define PIN_TMC_MOSI            13   // TMC Master Out Slave In
+#define PIN_TMC_MISO            10   // TMC Master In Slave Out
+
+// --- 57AIMServo build (DRIVER_57AIM_SERVO) ---
+// PUL → GPIO 5, DIR → GPIO 4, ENDSTOP → GPIO 12 (active LOW, optocoupler).
+// No enable pin — the 57AIM30 drive is always energized when powered. :3
+#define AIM_PIN_STEP            5    // PUL — pulse train to the servo drive
+#define AIM_PIN_DIR             4    // DIR — direction signal
+#define AIM_PIN_ENDSTOP         12   // Endstop (active LOW via optocoupler)
 
 // =============================================================================
 // RGB Status LED (NeoPixel)
@@ -70,16 +116,24 @@
 //              = (200 * 16) / 40 = 80 steps/mm
 #define STEPS_PER_MM            ((MOTOR_STEPS_PER_REV * MICROSTEPS) / MM_PER_MOTOR_REV)
 
-// Maximum motor speed in mm/s
-#define MAX_SPEED_MM_S              550.0f
-#define DEFAULT_MAX_SPEED_MM_S      550.0f   // alias for config defaults
+// Maximum motor speed in mm/s.
+// Normal UI cap: 5000 mm/s. Expert mode UI cap: 10000 mm/s.
+// This firmware ceiling is set to 10000 so expert mode values aren't rejected
+// by the ConfigStore validator. The WebUI enforces the normal/expert split. :3
+// The 57AIM servo drive at 800 steps/rev × 10 steps/mm can push this — it's
+// a closed-loop servo, not a stepper, so it won't skip steps. Strap in. :3
+#define MAX_SPEED_MM_S              10000.0f
+#define DEFAULT_MAX_SPEED_MM_S      550.0f   // factory default on fresh boot
 
 // Default acceleration mm/s^2
-// Needs to be high enough to cover a full stroke in the shortest expected
-// interval. For a 120mm stroke at 250ms: a = 4×dist/T² = 4×120/0.0625 = 7680.
-// 8000 gives comfortable margin. The planner uses this as the cruise accel;
-// the raise-only guard in streamTo() keeps it from softening mid-flight. :3
+// Normal UI cap: 50000 mm/s². Expert mode UI cap: 100000 mm/s².
+// The 57AIM servo drive can hit these — it's a closed-loop servo that will
+// absolutely fist the carriage into the endstop if you let it. yippie! :3
+// Firmware ceiling is 100000 — the WebUI enforces the normal/expert split.
+// NOTE: accel is stored as uint32_t in NVS (not uint16_t) — values above
+// 65535 would silently overflow a uint16_t and corrupt the saved setting. :3
 #define DEFAULT_ACCEL_MM_S2     8000.0f
+#define MAX_ACCEL_MM_S2         100000.0f
 
 
 // =============================================================================
@@ -188,9 +242,16 @@
 //         a BLE host (phone app / Intiface BLE) writes TCode to the RX
 //         characteristic. Wireless, personal, intimate. No WiFi needed.
 enum class TransportMode : uint8_t {
-    WS  = 0,
-    SER = 1,
-    BT  = 2,
+    WS     = 0,
+    SER    = 1,
+    BT     = 2,
+    // DONGLE: T-Dongle C5 connected via hardware UART (Serial2).
+    // The dongle receives TCode over USB from MFP and relays it to the S3
+    // over a physical UART wire — TX/RX on pins defined below. This lets
+    // MFP talk to the dongle's USB port while the S3 stays on WiFi for the
+    // web UI. The dongle is basically a wireless-capable USB-to-UART bridge
+    // that also shows a pretty display. yippie! :3
+    DONGLE = 3,
 };
 
 // Default transport on a fresh device (before any saved selection). SER keeps
@@ -202,6 +263,19 @@ enum class TransportMode : uint8_t {
     #define DEFAULT_TRANSPORT_MODE  TransportMode::WS
   #endif
 #endif
+
+// =============================================================================
+// Dongle UART Transport — Serial2 on the ESP32-S3
+// =============================================================================
+// The T-Dongle C5 relays TCode from MFP over a physical UART wire to the S3.
+// Pins 8 (TX from S3 → dongle RX) and 9 (RX on S3 ← dongle TX).
+// If TX and RX are swapped, just swap the wires — no firmware change needed. :3
+#define DONGLE_UART_TX_PIN      8    // S3 TX → Dongle RX
+#define DONGLE_UART_RX_PIN      9    // S3 RX ← Dongle TX
+// 460800 baud: each byte takes ~22µs vs 87µs at 115200. A 12-byte TCode frame
+// arrives in ~260µs instead of ~1ms — cuts per-frame UART jitter by ~4×.
+// The dongle firmware must match this baud or every byte will be garbage. :3
+#define DONGLE_UART_BAUD        460800
 
 // =============================================================================
 // Bluetooth LE (BLE) Transport
@@ -274,8 +348,8 @@ struct DeviceConfig {
 inline DeviceConfig getDefaultConfig() {
     DeviceConfig cfg;
     cfg.min_position_mm = 0.0f;
-    cfg.max_position_mm = PHYSICAL_MAX_TRAVEL_MM;
-    cfg.max_speed_mm_s = MAX_SPEED_MM_S;
+    cfg.max_position_mm = MACHINE_MAX_TRAVEL_MM;  // driver-aware: 260mm (57AIM) or 240mm (TMC)
+    cfg.max_speed_mm_s = DEFAULT_MAX_SPEED_MM_S;  // 550 mm/s factory default; UI allows up to 3000
     cfg.acceleration_mm_s2 = DEFAULT_ACCEL_MM_S2;
     cfg.control_mode = (uint8_t)ControlMode::BUTTPLUG;
     cfg.microsteps = MICROSTEPS;

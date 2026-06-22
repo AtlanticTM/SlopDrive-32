@@ -22,8 +22,13 @@ void ConfigStore::save(SystemState& state, RangeMapper& mapper, MotorDriver& mot
     }
     prefs.putFloat("range_min", mapper.getMinMm());
     prefs.putFloat("range_max", mapper.getMaxMm());
+    // Speed stored as UShort (max 65535) — max speed is 10000 mm/s, fits fine.
+    // Accel stored as UInt (uint32_t) — expert mode allows 100000 mm/s² which
+    // overflows a uint16_t (max 65535). Old "accel key" was UShort and silently
+    // truncated anything above 65535 — that was the save bug. New key "accel32"
+    // uses putUInt so the full 100000 survives the round-trip. yippie! :3
     prefs.putUShort("max_speed", (uint16_t)state.config.max_speed_mm_s);
-    prefs.putUShort("accel", (uint16_t)state.config.acceleration_mm_s2);
+    prefs.putUInt("accel32", (uint32_t)state.config.acceleration_mm_s2);
     // Continuous-blend policy (1=let-it-land, 2=allow-reversal, 3=hybrid).
     // Replaces the old lookahead/overshoot NVS keys — those tunables retired
     // when the predictive extrapolator got thrown out. :3
@@ -57,7 +62,10 @@ void ConfigStore::save(SystemState& state, RangeMapper& mapper, MotorDriver& mot
     prefs.putChar("tmc_he", state.driver.hend);
 
     prefs.end();
-    applog("Config saved to NVS");
+    applogf("Config saved to NVS: range=[%.1f,%.1f] speed=%.0f accel=%.0f blend=%u",
+            mapper.getMinMm(), mapper.getMaxMm(),
+            state.config.max_speed_mm_s, state.config.acceleration_mm_s2,
+            motor.getBlendMode());
 }
 
 // ============================================================================
@@ -77,7 +85,20 @@ void ConfigStore::load(SystemState& state, RangeMapper& mapper, MotorDriver& mot
         float rmin = prefs.getFloat("range_min", state.config.min_position_mm);
         float rmax = prefs.getFloat("range_max", state.config.max_position_mm);
         uint16_t spd = prefs.getUShort("max_speed", (uint16_t)state.config.max_speed_mm_s);
-        uint16_t acc = prefs.getUShort("accel", (uint16_t)state.config.acceleration_mm_s2);
+        // Read accel from the new uint32_t key "accel32" first. If it's absent
+        // (device was previously saved with the old uint16_t "accel" key), fall
+        // back to the old key so existing saves aren't silently reset to default.
+        // Once the user saves again, "accel32" gets written and the old key is
+        // ignored forever. Smooth migration, no data loss. yippie! :3
+        uint32_t acc32_saved = prefs.getUInt("accel32", 0);
+        uint32_t acc;
+        if (acc32_saved > 0) {
+            acc = acc32_saved;
+        } else {
+            // Legacy fallback: old uint16_t key — max it could hold was 65535.
+            // If the old key is also absent, getUShort returns the default. :3
+            acc = (uint32_t)prefs.getUShort("accel", (uint16_t)state.config.acceleration_mm_s2);
+        }
         uint8_t blend = prefs.getUChar("blend_mode", 1);  // 1=let-it-land default
         state.auto_duration = prefs.getBool("auto_dur", true);
         // Intiface compat — default false (spec-correct/MFP decode) when the key
@@ -86,7 +107,7 @@ void ConfigStore::load(SystemState& state, RangeMapper& mapper, MotorDriver& mot
         state.intiface_compat = prefs.getBool("if_compat", false);
 
         state.default_range_min = prefs.getFloat("def_rmin", 0.0f);
-        state.default_range_max = prefs.getFloat("def_rmax", PHYSICAL_MAX_TRAVEL_MM);
+        state.default_range_max = prefs.getFloat("def_rmax", MACHINE_MAX_TRAVEL_MM);
         state.expert_mode = prefs.getBool("expert", false);
         {
             TransportMode t = (TransportMode)prefs.getUChar("transport", (uint8_t)DEFAULT_TRANSPORT_MODE);
@@ -104,15 +125,18 @@ void ConfigStore::load(SystemState& state, RangeMapper& mapper, MotorDriver& mot
         state.buf_depth  = constrain((int)prefs.getUChar("buf_depth", state.buf_depth), 1, 5);
         { uint16_t bt = prefs.getUShort("buf_tick", state.buf_tick_hz);
           state.buf_tick_hz = (bt >= 150) ? 200 : (bt >= 75) ? 100 : (bt >= 35) ? 50 : 20; }
+        // Gen tick rungs updated: 20/50/100/250/500 Hz. Old saved value of 200
+        // snaps to 250 on load — close enough, and the operator can re-save. :3
         { uint16_t gt = prefs.getUShort("gen_tick", state.gen_rate_tick_hz);
-          state.gen_rate_tick_hz = (gt >= 150) ? 200 : (gt >= 75) ? 100 : (gt >= 35) ? 50 : 20; }
+          state.gen_rate_tick_hz = (gt >= 375) ? 500 : (gt >= 175) ? 250 : (gt >= 75) ? 100 : (gt >= 35) ? 50 : 20; }
 
         // Validate startup defaults; fall back to full travel if nonsensical.
-        if (state.default_range_min < 0.0f || state.default_range_min > PHYSICAL_MAX_TRAVEL_MM ||
-            state.default_range_max <= 0.0f || state.default_range_max > PHYSICAL_MAX_TRAVEL_MM ||
+        // Uses MACHINE_MAX_TRAVEL_MM so the 57AIM build clamps to 260mm, not 240mm. :3
+        if (state.default_range_min < 0.0f || state.default_range_min > MACHINE_MAX_TRAVEL_MM ||
+            state.default_range_max <= 0.0f || state.default_range_max > MACHINE_MAX_TRAVEL_MM ||
             state.default_range_min >= state.default_range_max) {
             state.default_range_min = 0.0f;
-            state.default_range_max = PHYSICAL_MAX_TRAVEL_MM;
+            state.default_range_max = MACHINE_MAX_TRAVEL_MM;
         }
 
         // TMC tunables
@@ -126,18 +150,21 @@ void ConfigStore::load(SystemState& state, RangeMapper& mapper, MotorDriver& mot
         state.driver.hend             = prefs.getChar("tmc_he", state.driver.hend);
         prefs.end();
 
-        // Validate: reject 0 or out-of-range values
-        if (rmin < 0.0f || rmin > PHYSICAL_MAX_TRAVEL_MM) rmin = state.config.min_position_mm;
-        if (rmax <= 0.0f || rmax > PHYSICAL_MAX_TRAVEL_MM) rmax = state.config.max_position_mm;
+        // Validate: reject 0 or out-of-range values. MACHINE_MAX_TRAVEL_MM is
+        // driver-aware (260mm for 57AIM, 240mm for TMC) so a saved 250mm range_max
+        // doesn't get clamped back to 240 on the 57AIM build. :3
+        if (rmin < 0.0f || rmin > MACHINE_MAX_TRAVEL_MM) rmin = state.config.min_position_mm;
+        if (rmax <= 0.0f || rmax > MACHINE_MAX_TRAVEL_MM) rmax = state.config.max_position_mm;
         if (rmin >= rmax) { rmin = state.config.min_position_mm; rmax = state.config.max_position_mm; }
+        // Speed: floor at 1, ceiling at MAX_SPEED_MM_S (10000). Anything outside
+        // that window is a corrupt NVS write — reset to the running default. :3
         if (spd == 0 || spd > (uint16_t)MAX_SPEED_MM_S) spd = (uint16_t)state.config.max_speed_mm_s;
-        // Clamp: floor at 10 (anything lower is a corrupt/zero NVS write),
-        // ceiling at 20000 mm/s² (matches WebUI and setAcceleration() limits).
-        // The old floor of 2000 was silently rejecting valid low-accel values
-        // like 1500 and resetting them to the 8000 default — so the WebUI
-        // showed 1500 but the motor ran at 8000 the whole time. owo
-        // Now any value 10..20000 is accepted as-is. :3
-        if (acc < 10 || acc > 20000) acc = (uint16_t)state.config.acceleration_mm_s2;
+        // Accel: floor at 10 (zero/garbage = bricked planner), ceiling at
+        // MAX_ACCEL_MM_S2 (100000). Expert mode can write up to 100000 mm/s²
+        // and the servo drive can take it — we just need to not reject it on
+        // load. The old ceiling of 30000 was silently resetting any expert-mode
+        // accel save back to the 8000 default. That was the bug. Fixed. :3
+        if (acc < 10 || acc > (uint32_t)MAX_ACCEL_MM_S2) acc = (uint32_t)state.config.acceleration_mm_s2;
 
 
         if (state.driver.run_current_ma < 250 || state.driver.run_current_ma > 3000)

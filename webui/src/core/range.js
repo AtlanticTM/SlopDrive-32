@@ -10,12 +10,15 @@
 import { $, clamp, setRead, icon, toast } from './ui.js';
 import { post } from './api.js';
 
-// TRAVEL is now dynamic — set from /api/settings max_travel on boot so the
-// range designer, motion graph, and all clamps use the actual rail length
-// instead of a hardcoded 240mm. Default 240 until the API responds. :3
-export let TRAVEL = 240;
+// TRAVEL is dynamic — set from /api/settings or /api/capabilities on boot so
+// the range designer, motion graph, and all clamps use the actual rail length
+// the firmware advertises. Default 260 is the geometry ceiling for the 57AIM
+// build — the UI is safe at this value even before the API responds. setTravel()
+// patches it to the real measured stroke when data arrives. :3
+export let TRAVEL = 260;
 export function setTravel(mm) {
   if (mm <= 0) return;
+  var changed = (Math.abs(TRAVEL - mm) > 0.5);
   TRAVEL = mm;
   // Patch every DOM element that hardcodes the travel limit so the UI
   // reflects the real rail length the moment the API responds. :3
@@ -30,6 +33,10 @@ export function setTravel(mm) {
   ['defMinNum','defMaxNum'].forEach(function(id) {
     var el = document.getElementById(id); if (el) el.max = t;
   });
+  // Re-render the stroke window whenever TRAVEL actually changes — covers
+  // both the initial API load AND a re-home that produces a different
+  // measured stroke (applyCapabilities → setTravel → rescale window). :3
+  if (changed) renderWindow();
 }
 
 // Shared state — exported so generator, settings, and status poll can reference.
@@ -62,8 +69,11 @@ export function pushWindow() {
 
 /**
  * Re-render the visual window position and update all readouts.
+ * Guarded by TRAVEL > 0 — skips silently before the API responds
+ * so we never divide by zero and produce a NaN-broken stroke window. :3
  */
 export function renderWindow() {
+  if (TRAVEL <= 0) { windowReady = false; return; }
   winMin = clamp(Math.round(winMin), 0, TRAVEL);
   winMax = clamp(Math.round(winMax), 0, TRAVEL);
   if (winMax - winMin < 5) winMax = clamp(winMin + 5, 5, TRAVEL);

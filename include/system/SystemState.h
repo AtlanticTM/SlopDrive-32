@@ -95,6 +95,17 @@ struct SystemState {
     volatile bool          estop_requested     = false;   // Core 0 sets, Core 1 clears
     bool                   wifi_ready          = false;   // Core 0 only
 
+    // ---- WiFi link telemetry (Core 0 only — written by TransportManager's
+    // event handler + poll timer, read by WebUI::handleApiStatus. Both run on
+    // Core 0 (WiFi event task + httpTask), so no cross-core mutex needed —
+    // this is a simple diagnostic readout, not a control path. :3 ----------
+    int8_t                 wifi_rssi                = 0;      // dBm, 0 = unknown
+    uint8_t                wifi_channel             = 0;
+    char                   wifi_bssid[18]           = {0};    // "AA:BB:CC:DD:EE:FF\0" — proves which AP we're actually on (band-steering evidence)
+    uint32_t               wifi_reconnects          = 0;      // count of STA_DISCONNECTED events since boot
+    uint8_t                wifi_last_disconnect_reason = 0;   // esp_wifi disconnect reason code
+    uint32_t               wifi_last_disconnect_ms  = 0;      // millis() at last disconnect
+
     // ---- Config snapshots ----------------------------------------------------
     DeviceConfig           config;                        // read cross-core
     DriverConfig           driver;                        // Core 0 only
@@ -205,5 +216,23 @@ struct SystemState {
     }
     void setInputMode(InputMode m) {
         input_mode = static_cast<uint8_t>(m);
+    }
+
+    // ---- Safe-approach soft start (config_api.h SAFE_*) ----------------------
+    // Returns the speed ceiling (mm/s) to use RIGHT NOW. For the first
+    // SAFE_RESUME_RAMP_MS after resume_start_ms was stamped (un-pause, override
+    // off, new stream, generator start, homing complete, window jump) the cap
+    // ramps linearly from SAFE_APPROACH_SPEED_MM_S up to configured_max, so the
+    // first move after a discontinuity glides instead of lunging. After the
+    // ramp (or if never stamped) this returns configured_max unchanged. :3
+    float safeSpeedCap(float configured_max, uint32_t now_ms) const {
+        uint32_t t0 = resume_start_ms;
+        if (t0 == 0) return configured_max;
+        uint32_t dt = now_ms - t0;
+        if (dt >= SAFE_RESUME_RAMP_MS) return configured_max;
+        if (configured_max <= SAFE_APPROACH_SPEED_MM_S) return configured_max;
+        float f = (float)dt / (float)SAFE_RESUME_RAMP_MS;   // 0..1
+        return SAFE_APPROACH_SPEED_MM_S
+             + f * (configured_max - SAFE_APPROACH_SPEED_MM_S);
     }
 };

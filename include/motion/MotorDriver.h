@@ -108,6 +108,42 @@ public:
     virtual void    setBlendMode(uint8_t mode) = 0;
     virtual uint8_t getBlendMode() const       = 0;
 
+    // Usable stroke (mm) measured by sensorless homing between the two hard
+    // stops. Default 0 = "not measured / not supported" so drivers without
+    // sensorless homing (TMC endstop build) don't have to implement it. The
+    // 57AIM servo driver overrides this once it's felt out both ends. :3
+    virtual float   getMeasuredStrokeMm() const { return 0.0f; }
+
+    // ---- Live bus telemetry (INA228 on the 57AIM board) ---------------------
+    // Instantaneous motor-bus current in AMPS and the 36V rail voltage. Only the
+    // 57AIM servo driver has an INA228 to gulp these off the shunt; every other
+    // driver returns 0 so the WebUI just shows a flat, harmless zero. This is
+    // the live readout the operator watches during bring-up to confirm the
+    // sensor is alive BEFORE trusting sensorless homing not to ram anything. :3
+    virtual float   getBusCurrentA() const { return 0.0f; }
+    virtual float   getBusVoltageV() const { return 0.0f; }
+    // True when a real current sensor is present and calibrated. Lets the UI
+    // grey out / hide the readout on boards that don't have one. :3
+    virtual bool    hasCurrentSensor() const { return false; }
+
+    // ---- Extended power telemetry (INA228 full measurement set) -------------
+    // NEW virtuals alongside the existing current/voltage ones above — kept
+    // separate so drivers that only implemented the basic pair don't need any
+    // changes. Every driver without a power monitor returns a harmless 0/false
+    // default, same pattern as getBusCurrentA()/getBusVoltageV(). :3
+    virtual float   getBusPowerW()      const { return 0.0f; }
+    virtual float   getDieTempC()       const { return 0.0f; }
+    // Highest |current| seen since boot / since the last resetPeaks() call —
+    // lets the operator glance at the Health tab after a session and see how
+    // hard the machine strained without having to watch the live number. :3
+    virtual float   getPeakBusCurrentA() const { return 0.0f; }
+    // True when the driver has a real power monitor (INA228 or similar) that
+    // exposes power/temp/peak telemetry beyond basic current/voltage. Lets the
+    // UI show/hide the extended Health-tab power card. :3
+    virtual bool    hasPowerMonitor()   const { return false; }
+
+
+
 
     // ---- Unit conversion (driver-owned — Risk #4) ---------------------------
     // Convert a physical millimetre position to the driver's native unit

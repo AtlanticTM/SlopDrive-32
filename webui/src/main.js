@@ -22,6 +22,7 @@ import { TRAVEL, initRangeDesigner, renderWindow, setPosTarget, startPosAnim, sy
 import { initGenerator, startGenerator, stopGenerator, gen } from './features/generator.js';
 import { currentMode, reflectMode, initSettings, saveSettings, restoreDefaults } from './features/settings.js';
 import { pushTelemetryBatch, initMotionGraph } from './features/motiongraph.js';
+import { fetchAndApplyCapabilities, refreshHealthCards } from './core/capabilities.js';
 
 // Expose action handlers on window so [data-action] buttons wired by
 // wireActions() can find them. These functions live in ES module scope,
@@ -38,6 +39,9 @@ window.pushTelemetryBatch = pushTelemetryBatch;
 
 export const state = { paused: false, override: false, ifActive: false, position: 0, homed: false };
 let lastMoveSent = 0, posDragging = false;
+// Last measured_stroke_mm seen in the status poll — used to detect when a
+// homing cycle has produced a fresh rail measurement so we can resync. :3
+let lastMeasuredStroke = -1;
 
 function reflectGating() {
   var bp = $('#btnPause'); if (bp) bp.classList.toggle('on', state.paused);
@@ -88,13 +92,72 @@ var teleSince = 0;
 // gaping over each other. We refuse to start a second poll until the first
 // finishes its business and pulls out. One hose at a time. :3
 var pollInFlight = false;
+
+// ---- Dropped-packet hardening (plan.md §6) ---------------------------------
+// Exponential backoff on poll failure + stale-data indicator after N missed
+// polls. When the firmware goes quiet (WiFi flap, reboot, out of range) we
+// slow the polling cadence so we're not hammering an absent server, and show
+// a "Stale data" banner the instant the data ages past the stale threshold.
+// On the first successful poll after a failure streak, we snap back to the
+// fast interval and clear the stale flag. :3
+var pollFailures  = 0;          // consecutive failed polls
+var pollBackoffMs = 100;        // current poll cadence (ms) — starts at 100ms
+var POLL_NOMINAL  = 100;        // normal poll interval
+var POLL_MAX      = 2000;       // backoff ceiling
+var POLL_STALE_N  = 8;          // show stale indicator after this many misses
+var pollLastSuccessMs = 0;      // performance.now() of last successful poll
+var staleIndicatorShown = false;
+
+function showStaleIndicator(on) {
+  staleIndicatorShown = on;
+  var sc = $('#staleChip');
+  if (on) {
+    if (!sc) {
+      sc = document.createElement('span');
+      sc.id = 'staleChip';
+      sc.className = 'chip';
+      sc.innerHTML = '<span class="dot bad"></span><span>Stale data</span>';
+      var chips = document.querySelector('.chips');
+      if (chips) chips.appendChild(sc);
+    }
+    sc.style.display = '';
+  } else if (sc) {
+    sc.style.display = 'none';
+  }
+}
+
 async function pollStatus() {
+  var nowMs = performance.now();
+  // Backoff guard: skip polls when we're in a failure backoff window
+  var backoffElapsed = nowMs - (pollLastSuccessMs || nowMs);
+  if (pollFailures > 0 && backoffElapsed < pollBackoffMs) return;
   if (pollInFlight) return;
   pollInFlight = true;
   try {
-    var d = await get('/api/status?since=' + teleSince); if (!d) return;
+    var d = await get('/api/status?since=' + teleSince); if (!d) {
+      // fetch returned null — network error or firmware not responding
+      pollFailures++;
+      pollBackoffMs = Math.min(pollBackoffMs * 2, POLL_MAX);
+      if (pollFailures >= POLL_STALE_N) showStaleIndicator(true);
+      return;
+    }
+    // Successful poll — reset backoff, clear stale indicator
+    pollFailures = 0;
+    pollBackoffMs = POLL_NOMINAL;
+    pollLastSuccessMs = performance.now();
+    if (staleIndicatorShown) showStaleIndicator(false);
 
     state.position = d.position || 0; state.homed = !!d.homed;
+    // ---- Live measured-stroke resync -------------------------------------
+    // The firmware mirrors measured_stroke_mm into /api/status so we can
+    // notice the moment homing produces a NEW measurement — even if we missed
+    // the not-homed→homed edge (page already open, poll backoff, re-home).
+    // Whenever the value changes we re-fetch capabilities, which rescales the
+    // travel (mm) everywhere: endcap label, sliders, range designer, graph. :3
+    if (typeof d.measured_stroke_mm === 'number' && d.measured_stroke_mm !== lastMeasuredStroke) {
+      lastMeasuredStroke = d.measured_stroke_mm;
+      fetchAndApplyCapabilities();
+    }
     state.ifActive = !!d.buttplug_connected && d.measured_hz > 0;
     state.paused = !!d.paused; state.override = !!d.manual_override; reflectGating();
     var wd = $('#wifiDot'); if (wd) wd.className = 'dot ' + (d.wifi_connected ? 'good' : 'bad');
@@ -113,7 +176,55 @@ async function pollStatus() {
                :                      !!d.buttplug_connected;
     var ifd = $('#ifDot'); if (ifd) ifd.className = 'dot ' + (linked ? 'good' : 'bad');
     setRead('ifText', linked ? (d.measured_hz > 0 ? d.measured_hz + 'Hz' : 'idle') : tport);
+
+    // ---- Live motor-bus current chip (INA228 on the 57AIM board) ------------
+    // Only show it when the firmware advertises a real sensor. The number is
+    // the live gulp off the 5mΩ shunt — near-0A gliding free, climbing hard
+    // when the carriage stuffs itself against a wall. Colour the dot amber past
+    // ~8A and red past ~15A so a stall or bind is obvious at a glance. :3
+    var curChip = $('#currentChip');
+    if (curChip) {
+        if (d.has_current_sensor) {
+            curChip.style.display = '';
+            var amps = (typeof d.bus_current_a === 'number') ? d.bus_current_a : 0;
+            setRead('currentText', amps.toFixed(2) + ' A');
+            var cd = $('#currentDot');
+            if (cd) {
+                var mag = Math.abs(amps);
+                cd.className = 'dot ' + (mag >= 15 ? 'bad' : mag >= 8 ? 'warn' : 'good');
+            }
+        } else {
+            curChip.style.display = 'none';
+        }
+    }
+
+    // ---- Bus voltage chip (INA228, sibling to the current chip) -------------
+    // Only shown when the firmware advertises a power monitor. Threshold
+    // coloring per plan.md §4: green nominal, amber sag (<22V), red (<20V
+    // under load) — a sagging 36V-nominal bus is an early warning the supply
+    // or wiring can't keep up with the draw. :3
+    var voltChip = $('#voltageChip');
+    if (voltChip) {
+        if (d.has_power_monitor) {
+            voltChip.style.display = '';
+            var volts = (typeof d.bus_voltage_v === 'number') ? d.bus_voltage_v : 0;
+            setRead('voltageText', volts.toFixed(1) + ' V');
+            var vd = $('#voltageDot');
+            if (vd) {
+                vd.className = 'dot ' + (volts < 20 ? 'bad' : volts < 22 ? 'warn' : 'good');
+            }
+        } else {
+            voltChip.style.display = 'none';
+        }
+    }
+
+    // ---- Refresh Health tab cards from the status payload ----------------
+    // Same poll data that drives the toolbar chips also feeds the Load card
+    // (INA228 power/temp/peak) and Link card (WiFi RSSI/channel/BSSID). :3
+    refreshHealthCards(d);
+
     if (tport !== currentMode) reflectMode(tport);
+
     // Show Home button on both mobile FAB and desktop header button
     var hf = $('#homeFab'); if (hf) hf.classList.toggle('show', !d.homed);
     var hh = $('#homeBtnHeader'); if (hh) hh.style.display = d.homed ? 'none' : '';
@@ -147,7 +258,14 @@ async function pollStatus() {
     if (d.buttplug_connected && !prevStatus.buttplug) toast('Intiface connected', 'good', 'i-link');
     if (!d.buttplug_connected && prevStatus.buttplug) toast('Intiface disconnected', 'warn', 'i-link');
     if (d.serial_linked && !prevStatus.serial) toast('Serial handshake', 'good', 'i-link');
-    if (d.homed && !prevStatus.ready) toast('Homed & ready', 'good', 'i-check');
+    if (d.homed && !prevStatus.ready) {
+      toast('Homed & ready', 'good', 'i-check');
+      // Homing just completed — re-fetch capabilities so measured_stroke_mm
+      // (the REAL usable rail length felt out by sensorless homing) rescales
+      // TRAVEL, the range designer, and the motion graph live, without a
+      // page reload. :3
+      fetchAndApplyCapabilities();
+    }
     prevStatus.buttplug = !!d.buttplug_connected; prevStatus.serial = !!d.serial_linked; prevStatus.ready = !!d.homed;
     if (gen.running && state.ifActive && !state.paused && !state.override) { stopGenerator(); var gn = $('#genNote'); if (gn) gn.textContent = 'Auto-paused'; }
   } catch (e) {
@@ -363,6 +481,12 @@ function init() {
   initMotionGraph();    // batched-telemetry playback + canvas motion plot :3
   initFocusMode();
   initResizableSidebar();
+
+  // Fetch /api/capabilities once at boot — patches every travel/ceiling/feature
+  // DOM element in a single pass and builds Health-tab cards dynamically. Do
+  // this BEFORE the first pollStatus() so the health cards exist when data
+  // starts flowing in. :3
+  fetchAndApplyCapabilities();
 
   if (import.meta.env.VITE_BLE_ENABLED === 'true') { var bt = $('#btModeBtn'); if (bt) bt.style.display = ''; }
   var bP = $('#btnPause'); if (bP) bP.addEventListener('click', togglePause);

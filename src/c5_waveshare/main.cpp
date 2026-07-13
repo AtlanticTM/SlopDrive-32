@@ -106,8 +106,15 @@ static LedState  s_led_prev_state = LED_IDLE;  // state to return to after flash
 static uint32_t  s_led_flash_ms   = 0;         // when the flash started
 static uint32_t  s_led_pulse_ms   = 0;         // phase counter for idle pulse
 
-static constexpr uint32_t FLASH_DURATION_MS = 60;   // green flash length
-static constexpr uint32_t PULSE_PERIOD_MS   = 2000; // idle pulse period
+// LED refresh tripled — the old board's pixel felt laggy af because the breathe
+// period was a sluggish 2s and each packet-flash clung on for 60ms, so at high
+// packet rates the green stacked and the whole thing looked stuck/gooey. We cut
+// both ~3× so the idle breathe is snappy and every packet gives a crisp, quick
+// flash instead of a long smeared drip. Tight, responsive, twitchy — the way a
+// good hole clenches the instant it's touched instead of lazily gaping. :3
+static constexpr uint32_t FLASH_DURATION_MS = 20;   // green flash length (was 60 — 3× snappier)
+static constexpr uint32_t PULSE_PERIOD_MS   = 666;  // idle pulse period (was 2000 — 3× faster breathe)
+
 
 static void ledSetError() {
     s_led_state = LED_ERROR;

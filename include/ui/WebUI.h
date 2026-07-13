@@ -15,6 +15,10 @@ class SerialTransport;
 class WebSocketTransport;
 class BleTransport;
 
+#if defined(FEATURE_RS485_MODBUS)
+class ServoModbus;
+#endif
+
 // Forward-declared to avoid pulling <WebServer.h> into every translation unit
 // that includes this header (works around a PlatformIO include-path quirk when
 // framework headers are included from a subdirectory header).
@@ -104,6 +108,12 @@ public:
     /// Start the dedicated 10ms telemetry sampler (called from init()).
     void startTelemetrySampler();
 
+#if defined(FEATURE_RS485_MODBUS)
+    /// Set the ServoModbus reference after construction (we can't pass it
+    /// through the ctor without touching every env's wiring). Called from
+    /// setup() once before tasks launch. :3
+    void setServoModbus(ServoModbus& modbus) { _servoModbus = &modbus; }
+#endif
 
 private:
     // ---- Injected dependencies ----
@@ -120,9 +130,15 @@ private:
     // ---- Owned instance (pointer — allocated in constructor, freed in dtor) --
     WebServer*          _httpServer = nullptr;
 
+#if defined(FEATURE_RS485_MODBUS)
+    // RS485 Modbus telemetry — set by setServoModbus() in setup(). :3
+    ServoModbus*        _servoModbus = nullptr;
+#endif
+
     // ---- Handler methods (one per route) ------------------------------------
     void handleRoot();
     void handleApiStatus();
+    void handleApiCapabilities();
     void handleApiClearFault();
     void handleApiSettings();
     void handleApiMove();

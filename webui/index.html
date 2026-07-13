@@ -29,7 +29,16 @@
       <span class="chip"><span class="dot" id="wifiDot"></span><span id="wifiText">WiFi</span></span>
       <span class="chip"><span class="dot" id="homeDot"></span><span id="homeText">Motor</span></span>
       <span class="chip"><span class="dot" id="ifDot"></span><span id="ifText">IF</span></span>
+      <!-- Live motor-bus current sipped off the INA228 shunt. Hidden until the
+           firmware says it has a sensor (57AIM board only). Watch this during
+           bring-up to confirm the machine can actually feel itself before you
+           trust it to home without ramming anything. yippie! :3 -->
+      <span class="chip" id="currentChip" style="display:none"><span class="dot" id="currentDot"></span><span id="currentText">-- A</span></span>
+      <!-- Bus voltage chip — sibling to the current chip, same INA228 feed.
+           Threshold-colored: green nominal, amber sag (<22V), red (<20V). :3 -->
+      <span class="chip" id="voltageChip" style="display:none"><span class="dot" id="voltageDot"></span><span id="voltageText">-- V</span></span>
     </div>
+
   </div>
   <div class="transport" id="transportBar">
     <button class="tbtn pause" id="btnPause">
@@ -128,7 +137,8 @@
         <div class="designer">
           <div class="track-col">
             <div class="track-host" id="trackHost">
-              <div class="endcap top" id="endcapTop">Out / 260</div>
+              <!-- Endcap label patched by setTravel() from /api; "--" = not yet loaded. -->
+              <div class="endcap top" id="endcapTop">Out / --</div>
               <div class="endcap bot">Home / 0</div>
               <div class="window" id="win">
                 <div class="grip t"></div>
@@ -161,11 +171,12 @@
             <div class="pair">
               <div>
                 <div class="mini-label">Min (in)</div>
-                <input class="num" id="minNum" type="number" min="0" max="260" step="1" inputmode="numeric">
+                <!-- max patched by setTravel() from API; generic safe ceiling until then. -->
+                <input class="num" id="minNum" type="number" min="0" max="9999" step="1" inputmode="numeric">
               </div>
               <div>
                 <div class="mini-label">Max (out)</div>
-                <input class="num" id="maxNum" type="number" min="0" max="260" step="1" inputmode="numeric">
+                <input class="num" id="maxNum" type="number" min="0" max="9999" step="1" inputmode="numeric">
               </div>
             </div>
 
@@ -212,7 +223,8 @@
         <div class="field">
 
           <label>Target Position</label>
-          <input type="range" id="manualPos" min="0" max="260" value="0" step="1">
+          <!-- max patched by setTravel() from API; generic safe ceiling until then. -->
+          <input type="range" id="manualPos" min="0" max="9999" value="0" step="1">
           <div class="readout"><b id="manualPosVal">0</b><span>mm</span></div>
         </div>
 
@@ -222,7 +234,8 @@
         </div>
 
         <label class="switch full" style="margin-bottom:10px">
-          <span><span class="lbl">Bypass limits</span><div class="hint" id="bypassHint" style="margin-top:2px">reach the full 0–260 mm, ignoring the window</div></span>
+          <!-- bypassHint patched by setTravel() from API; "--" = not yet loaded. -->
+          <span><span class="lbl">Bypass limits</span><div class="hint" id="bypassHint" style="margin-top:2px">reach the full 0–-- mm, ignoring the window</div></span>
           <span style="display:flex;align-items:center"><input type="checkbox" id="bypassLimits"><span class="track"></span></span>
         </label>
         <label class="switch full">
@@ -366,8 +379,9 @@
           <button class="info" data-tip="The working window the machine resets to on boot. Mid-session changes on the Range tab persist too — this is just the home base to fall back to."><span data-ico="i-info"></span></button>
         </div>
         <div class="pair">
-          <div><div class="mini-label">Def min (mm)</div><input class="num" id="defMinNum" type="number" min="0" max="260" step="1" inputmode="numeric"></div>
-          <div><div class="mini-label">Def max (mm)</div><input class="num" id="defMaxNum" type="number" min="0" max="260" step="1" inputmode="numeric"></div>
+          <!-- max patched by setTravel() from API; generic safe ceiling until then. -->
+          <div><div class="mini-label">Def min (mm)</div><input class="num" id="defMinNum" type="number" min="0" max="9999" step="1" inputmode="numeric"></div>
+          <div><div class="mini-label">Def max (mm)</div><input class="num" id="defMaxNum" type="number" min="0" max="9999" step="1" inputmode="numeric"></div>
         </div>
         <button class="btn ghost sm" style="margin-top:10px" data-action="useCurrentAsDefault"><span data-ico="i-check"></span> Use current window</button>
       </div>

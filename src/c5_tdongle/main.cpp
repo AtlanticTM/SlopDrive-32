@@ -9,6 +9,12 @@
 // changes color depending on how fast the data is pumping, and a status line
 // at the bottom so you know if the serial link is alive. yippie! :3
 //
+// WiFi/ESP-NOW starts OFF at boot and only turns on when the host opens the
+// COM port (DTR asserted). After the host closes the port, if no new connection
+// arrives within 5 minutes, WiFi shuts down completely to save power. The
+// dongle sits there tight and quiet until someone plugs in again — like a
+// needy hole waiting for the cable to slide back in. hehee :3
+//
 // Display layout (portrait 80×160) — full 160px used, no dead zones:
 //   Y 0–15:    Header — [WIFI] left, RDY/TX right (16px)
 //   Y 16:      Divider line (1px)
@@ -19,7 +25,7 @@
 //                             POS label + position in mm
 //                             PKT label + loss % (app-layer ACK)
 //   Y 137:     Divider line (1px)
-//   Y 138–159: Footer — "serial: CONN" / "RDY" / "IDLE" (22px)
+//   Y 138–159: Footer — "serial: CONN" / "RDY" / "WiFi:OFF" (22px)
 //
 // Hz color coding:
 //   < 50 Hz  → RED    (barely dribbling, something is wrong)
@@ -41,8 +47,8 @@
 // instead of pumping one cc at a time — the stomach bulges all at once. hehee :3
 //
 // APA102 LED status (CI=4, DI=5):
-//   WHITE  — waiting for serial data / idle
-//   PURPLE — actively receiving and forwarding T-Code
+//   WHITE  — WiFi off, waiting for serial data / idle
+//   CYAN   — actively receiving and forwarding T-Code
 //   BLUE   — ESP-NOW ready but no serial activity
 //   RED    — error / ESP-NOW not ready
 //
@@ -377,8 +383,8 @@ static void ledWrite(uint8_t r, uint8_t g, uint8_t b) {
 }
 
 enum class LedState : uint8_t {
-    WAITING,   // dim white — no serial data yet
-    WORKING,   // purple   — actively relaying T-Code
+    WAITING,   // dim white — WiFi off or no serial data yet
+    WORKING,   // cyan     — actively relaying T-Code
     IDLE,      // blue     — ESP-NOW ready, no recent serial
     ERROR,     // red      — ESP-NOW init failed
 };
@@ -391,7 +397,7 @@ static void applyLed(LedState state) {
     s_led_last = state;
     switch (state) {
         case LedState::WAITING: ledWrite(15, 15, 15);   break;  // dim white
-        case LedState::WORKING: ledWrite(80, 0,  80);   break;  // purple
+        case LedState::WORKING: ledWrite(0,  80, 80);   break;  // cyan
         case LedState::IDLE:    ledWrite(0,  0,  50);   break;  // blue
         case LedState::ERROR:   ledWrite(80, 0,  0);    break;  // red
     }
@@ -484,6 +490,15 @@ static bool              g_last_flipped  = false;
 static volatile bool     g_serial_active = false;
 
 // =============================================================================
+// WiFi power management — WiFi starts OFF at boot, turns on when host opens COM
+// port (DTR asserted), shuts down after 5 minutes of no open port. :3
+// =============================================================================
+static constexpr uint32_t IDLE_SHUTDOWN_MS = 300000;  // 5 minutes
+static bool     s_wifi_on         = false;   // WiFi + ESP-NOW currently active
+static bool     s_wifi_starting   = false;   // init task in flight (prevents double-start)
+static uint32_t s_idle_start_ms   = 0;       // when Serial last dropped (DTR de-asserted)
+
+// =============================================================================
 // TFT instance
 // =============================================================================
 static Adafruit_ST7735 tft(PIN_TFT_CS, PIN_TFT_DC, PIN_TFT_RST,
@@ -563,8 +578,30 @@ static void initDisplay(bool flipped);
 static bool s_espnow_ready = false;
 
 // =============================================================================
+// Forward declarations for WiFi power management. :3
+// =============================================================================
+static void startWiFi();
+static void stopWiFi();
+
+// Bundle state — declared here so stopWiFi() can clear the accumulator. :3
+static constexpr uint8_t  BUNDLE_MAX_CMDS   = 4;
+static constexpr uint8_t  BUNDLE_CMD_MAXLEN = 60;   // max bytes per T-Code cmd
+static constexpr uint32_t BUNDLE_INTERVAL_MS = 10;  // send bundle every 10ms = 100Hz
+
+struct BundleCmd {
+    char    data[BUNDLE_CMD_MAXLEN];
+    uint8_t len;
+    uint8_t rel_ms;  // ms since bundle window opened
+};
+
+static BundleCmd  s_bundle[BUNDLE_MAX_CMDS];
+static uint8_t    s_bundle_count    = 0;
+static uint32_t   s_bundle_start_ms = 0;  // when the current window opened
+
+// =============================================================================
 // Wi-Fi + ESP-NOW init task — background so USB CDC stays alive during init.
 // Without this, Windows fires "semaphore timeout" when WiFi.mode() blocks. :3
+// Called by startWiFi() only when the host opens the COM port. :3
 // =============================================================================
 static void espNowInitTask(void* arg) {
     vTaskDelay(pdMS_TO_TICKS(50));
@@ -587,6 +624,7 @@ static void espNowInitTask(void* arg) {
     esp_err_t now_err = esp_now_init();
     if (now_err != ESP_OK) {
         Serial.printf("[espnow] FATAL: esp_now_init(): %s\n", esp_err_to_name(now_err));
+        s_wifi_starting = false;
         s_led_state = LedState::ERROR;
         vTaskDelete(NULL);
         return;
@@ -595,9 +633,59 @@ static void espNowInitTask(void* arg) {
     // NOTE: We do NOT register a send callback — broadcast always returns FAIL
     // and it's useless noise. App-layer ACK via onEspNowRecv() is the real deal. :3
     s_espnow_ready = true;
+    s_wifi_on      = true;
+    s_wifi_starting = false;
     s_led_state = LedState::IDLE;
     Serial.println("[espnow] Ready. yippie! :3");
     vTaskDelete(NULL);
+}
+
+// =============================================================================
+// startWiFi — fires up the WiFi radio and ESP-NOW when the host plugs in.
+// Guarded against double-start (s_wifi_on / s_wifi_starting flags). :3
+// The dongle goes from cold and tight to radiating heat in under 2 seconds. owo
+// =============================================================================
+static void startWiFi() {
+    if (s_wifi_on || s_wifi_starting) return;
+    s_wifi_starting = true;
+    Serial.println("[power] Host connected — waking WiFi. yippie! :3");
+    xTaskCreate(espNowInitTask, "espnow_init", 4096, NULL, 1, NULL);
+}
+
+// =============================================================================
+// stopWiFi — shuts down ESP-NOW and WiFi radio after the idle timeout.
+// Clears the bundle accumulator so no stale packets try to send post-deinit.
+// The dongle goes soft and quiet, saving power until the next cable slides in. :3
+// =============================================================================
+static void stopWiFi() {
+    if (!s_wifi_on) return;
+
+    // Clear the bundle accumulator — we're about to kill ESP-NOW. No stale sends. :3
+    s_bundle_count = 0;
+    s_bundle_start_ms = 0;
+
+    if (s_espnow_ready) {
+        esp_now_deinit();
+        s_espnow_ready = false;
+    }
+
+    WiFi.disconnect();
+    WiFi.mode(WIFI_OFF);
+
+    s_wifi_on = false;
+    s_led_state = LedState::WAITING;
+
+    // Clear serial-active too — no point showing stale data. :3
+    g_serial_active = false;
+
+    // Reset the ACK tracking counters for a clean slate on next connect. :3
+    s_seq_sent_total  = 0;
+    s_seq_acked_total = 0;
+    s_seq_tx          = 0;
+    g_loss_pct        = 0.0f;
+    memset(s_ack_dedup, 0, sizeof(s_ack_dedup));
+
+    Serial.println("[power] Idle timeout — WiFi off. Going soft... :3");
 }
 
 // =============================================================================
@@ -622,7 +710,7 @@ static uint16_t hzColor(float hz) {
 //   VDiv (X 38):       1px deep purple vertical line
 //   Stats (Y 17–136):  X 39–79: RATE/Hz, POS/mm, PKT/loss%
 //   Divider (Y 137):   1px deep purple line
-//   Footer (Y 138–159): centered "serial: CONN/RDY/IDLE"
+//   Footer (Y 138–159): "serial: CONN" / "RDY" / "WiFi:OFF"
 //
 // The bar uses a cached fill height to avoid clearing the whole bar every frame.
 // Only the delta pixels get redrawn in the framebuffer — then the whole thing
@@ -737,7 +825,7 @@ static void renderFrame(float hz, float position, float loss_pct,
             state_str = "RDY";
             state_col = COL_LABEL;
         } else {
-            state_str = "INIT";
+            state_str = "WiFi:OFF";
             state_col = COL_AMBER;
         }
         // "serial: CONN" = 12 chars × 6px = 72px → center at x=4. :3
@@ -784,15 +872,23 @@ void setup() {
     digitalWrite(PIN_TFT_BL, HIGH);  // backlight OFF during init
     pinMode(PIN_BUTTON, INPUT_PULLUP);
 
-    // APA102 LED — start dim white (waiting)
+    // APA102 LED — start dim white (WiFi off, waiting for host to plug in). :3
     pinMode(PIN_LED_CI, OUTPUT);
     pinMode(PIN_LED_DI, OUTPUT);
     digitalWrite(PIN_LED_CI, LOW);
     digitalWrite(PIN_LED_DI, LOW);
     ledWrite(15, 15, 15);
 
-    // Kick off heavy init in background — keeps USB CDC alive. :3
-    xTaskCreate(espNowInitTask, "espnow_init", 4096, NULL, 1, NULL);
+    // Init the display immediately so it's not black — WiFi starts later
+    // only when the host opens the COM port. Lazy WiFi = cool dongle. :3
+    tft.begin();
+    s_tft_ptr = &tft;
+    initDisplay(false);
+    digitalWrite(PIN_TFT_BL, LOW);  // backlight ON
+
+    // Render the "WiFi:OFF" boot screen once before loop takes over. :3
+    renderFrame(0.0f, 0.0f, 0.0f, false, false);
+    fbFlush();
 }
 
 // =============================================================================
@@ -829,20 +925,6 @@ void setup() {
 //   rel_ms preserves inter-command spacing exactly.
 //   Even a 2ms late arrival still fires in the correct order. :3
 // =============================================================================
-
-static constexpr uint8_t  BUNDLE_MAX_CMDS   = 4;
-static constexpr uint8_t  BUNDLE_CMD_MAXLEN = 60;   // max bytes per T-Code cmd
-static constexpr uint32_t BUNDLE_INTERVAL_MS = 10;  // send bundle every 10ms = 100Hz
-
-struct BundleCmd {
-    char    data[BUNDLE_CMD_MAXLEN];
-    uint8_t len;
-    uint8_t rel_ms;  // ms since bundle window opened
-};
-
-static BundleCmd  s_bundle[BUNDLE_MAX_CMDS];
-static uint8_t    s_bundle_count    = 0;
-static uint32_t   s_bundle_start_ms = 0;  // when the current window opened
 
 // Flush the accumulated bundle over ESP-NOW. Called from loop() every 10ms. :3
 // Packs all queued commands into one packet and blasts it out as broadcast.
@@ -950,10 +1032,34 @@ static void pollSerial() {
 }
 
 // =============================================================================
-// loop() — non-blocking, no delay(). Pumps serial, renders frame, flushes. :3
+// loop() — non-blocking, no delay(). Pumps serial, renders frame, flushes.
+// Handles lazy WiFi start on COM port open and 5-minute idle shutdown. :3
 // =============================================================================
 void loop() {
     uint32_t now_ms = millis();
+
+    // ---- WiFi power management: turn on when host opens COM, off after 5 min idle ----
+    // `(bool)Serial` returns true when DTR is asserted (host has port open).
+    // The CDC driver's operator bool checks the DTR/RTS line state. :3
+    bool host_connected = (bool)Serial;
+
+    if (host_connected && !s_wifi_on && !s_wifi_starting) {
+        startWiFi();
+        s_idle_start_ms = 0;  // reset idle timer
+    }
+
+    if (!host_connected && s_wifi_on) {
+        if (s_idle_start_ms == 0) {
+            s_idle_start_ms = now_ms;  // start the 5-minute countdown
+        } else if (now_ms - s_idle_start_ms >= IDLE_SHUTDOWN_MS) {
+            stopWiFi();
+            s_idle_start_ms = 0;
+        }
+    }
+
+    if (host_connected && s_idle_start_ms != 0) {
+        s_idle_start_ms = 0;  // host reconnected before timeout — reset timer
+    }
 
     // ---- LATENCY CRITICAL: drain serial first ----
     pollSerial();
@@ -1001,8 +1107,10 @@ void loop() {
     }
 
     // ---- LED state machine ----
-    if (!s_espnow_ready) {
+    if (!s_wifi_on) {
         s_led_state = LedState::WAITING;
+    } else if (!s_espnow_ready) {
+        s_led_state = LedState::WAITING;  // still initializing
     } else if (g_serial_active) {
         s_led_state = LedState::WORKING;
     } else {
@@ -1018,7 +1126,10 @@ void loop() {
     static uint32_t s_disp_last_ms = 0;
     if (s_tft_ptr != nullptr && (now_ms - s_disp_last_ms) >= 33) {
         s_disp_last_ms = now_ms;
-        renderFrame(g_hz, g_position, g_loss_pct, s_espnow_ready, g_serial_active);
+        // Pass s_wifi_on (not s_espnow_ready) so the footer shows "WiFi:OFF"
+        // before init finishes and after idle shutdown. :3
+        bool show_wifi_up = s_wifi_on && s_espnow_ready;
+        renderFrame(g_hz, g_position, g_loss_pct, show_wifi_up, g_serial_active);
         fbFlush();
     }
     // No delay() — let it pump freely. The C5 at 240MHz can handle it. :3

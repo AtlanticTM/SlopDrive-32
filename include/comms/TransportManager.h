@@ -14,6 +14,7 @@
 #define TRANSPORT_MANAGER_H
 
 #include <Arduino.h>
+#include <WiFi.h>   // arduino_event_id_t / arduino_event_info_t for the onEvent hook
 #include "config_api.h"
 #include "SystemState.h"
 
@@ -49,7 +50,18 @@ public:
     /// Used by /api/status so the WebUI indicator can show Hz instead of "DONGLE". :3
     bool isDongleActive() const;
 
+    /// Poll RSSI/channel/BSSID into SystemState. Cheap — call from a Core-0
+    /// timer/task (e.g. once per second from commsTask or httpTask). Not an
+    /// ISR/interrupt path, so no mutex needed — plain scalar writes, same
+    /// core reads them back (WebUI::handleApiStatus). :3
+    void pollWifiLink();
+
 private:
+    // ---- WiFi event handler (static — bridges to instance via _instance) ----
+    // Espressif's onEvent() wants a free function or lambda without capture
+    // for the raw NetworkEventCb variant; we use the std::function overload
+    // instead so we can bind a member function directly. Hooked in setupWiFi().
+    void onWifiEvent(arduino_event_id_t event, arduino_event_info_t info);
     SystemState&        _state;
     TCodeParser&        _parser;
     SerialTransport&    _serial;

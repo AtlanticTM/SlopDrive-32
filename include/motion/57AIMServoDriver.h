@@ -4,6 +4,8 @@
 #include "freertos/FreeRTOS.h"
 #include "config_api.h"
 #include "MotorDriver.h"
+#include "CurrentSensor.h"
+
 
 // Forward declarations — we only need the FAS types here, full headers in .cpp
 class FastAccelStepper;
@@ -20,17 +22,18 @@ class FastAccelStepper;
 // We just send PUL (pulse) and DIR (direction) signals and let the drive do
 // its thing. Clean, simple, and absolutely relentless. :3
 //
-// Hardware pinout (defined in config_api.h):
-//   PIN_STEP    → PUL (GPIO 5)  — pulse train, one step per rising edge
-//   PIN_DIR     → DIR (GPIO 4)  — direction signal
-//   PIN_ENDSTOP → ENDSTOP (GPIO 12) — active LOW via optocoupler
+// Hardware pinout (defined in config_api.h — custom v0.0 Nano ESP32 board):
+//   AIM_PIN_STEP → PUL (GPIO 5, D2) — pulse train, one step per rising edge
+//   AIM_PIN_DIR  → DIR (GPIO 6, D3) — direction signal
+//   NO ENDSTOP   → homing is SENSORLESS via the INA228 current sensor. :3
 //
-// Machine geometry:
-//   MAX_TRAVEL:    260.0 mm
-//   STEPS_PER_REV: 1600 (set on the 57AIM30 drive's DIP switches)
-//   MM_PER_REV:    80.0 mm  (HTD 5M belt, 16T pulley: 16 × 5mm = 80mm)
-//   STEPS_PER_MM:  1600 / 80 = 20 steps/mm
+// Machine geometry (capstan drum, 2:1 motor->drum reduction):
+//   MAX_TRAVEL:    260.0 mm (geometry ceiling; homing measures real stroke)
+//   STEPS_PER_REV: 1600 per DRUM rev (800 motor steps × 2:1 reduction)
+//   MM_PER_REV:    π × 25mm drum = 78.5398 mm/drum-rev
+//   STEPS_PER_MM:  1600 / 78.5398 = ~20.372 steps/mm
 //   HOMING_BACKOFF: 10.0 mm
+
 //
 // No enable pin — the 57AIM30 is always energized when powered. The driver
 // enable/disable calls are no-ops that satisfy the MotorDriver interface.
@@ -139,14 +142,58 @@ private:
     // Mirrors StrokeEngine's _homingProcedure pattern exactly. :3
     static void _homingTaskImpl(void* param);
     void        _homingTask();
+    // Sweep in one direction (dir_sign +1 rear / -1 front) until an INA228
+    // current spike says we've buried the carriage against a hard stop.
+    // Returns true on stall, false if the full sweep ran with no wall. :3
+    bool        _sweepToStall(int8_t dir_sign);
     TaskHandle_t _homingTaskHandle = nullptr;
 
+
     FastAccelStepper* _stepper = nullptr;
+
+    // INA228 current sensor — the machine's sense of feel. Sensorless homing
+    // reads this to know when the carriage has buried itself against the hard
+    // stop (current spikes as it strains). Owned by the driver, initialised in
+    // init() after the caller has brought up the Wire bus. :3
+    CurrentSensor _current;
 
     bool    _homed   = false;
     bool    _homing  = false;
     bool    _enabled = false;
-    int32_t _home_speed_steps_s = AIM_HOMING_SPEED_STEPS_S;  // 500 steps/s = 25 mm/s
+    int32_t _home_speed_steps_s = AIM_HOMING_SPEED_STEPS_S;  // 400 steps/s ≈ 20 mm/s
+
+    // Measured usable stroke (mm), discovered by sensorless homing between the
+    // two hard stops minus safety margins. 0 = not yet measured → fall back to
+    // AIM_MAX_TRAVEL_MM geometry ceiling. The WebUI reads this so the stroke
+    // designer rescales to the REAL rail length once we've felt both ends. :3
+    float   _measured_stroke_mm = 0.0f;
+public:
+    // Measured stroke accessor for the WebUI / status layer. Returns 0 until
+    // homing has measured both ends. :3
+    float getMeasuredStrokeMm() const override { return _measured_stroke_mm; }
+
+    // ---- Live INA228 bus telemetry for the WebUI toolbar --------------------
+    // These return the CACHED last reading (no I2C from the HTTP thread). The
+    // cache is refreshed by update() on Core 1 at a low rate and by the homing
+    // loop while it runs. Lets the operator watch the current live during
+    // bring-up and confirm the sensor works before trusting homing. :3
+    float getBusCurrentA()  const override { return _current.cachedCurrentA(); }
+    float getBusVoltageV()  const override { return _current.cachedBusV(); }
+    bool  hasCurrentSensor() const override { return _current.isReady(); }
+
+    // ---- Extended INA228 power telemetry for the WebUI Health tab -----------
+    // Same cached, I2C-free pattern as the current/voltage pair above — safe
+    // to call from the Core 0 HTTP handler at any time. :3
+    float getBusPowerW()      const override { return _current.cachedPowerW(); }
+    float getDieTempC()       const override { return _current.cachedDieTempC(); }
+    float getPeakBusCurrentA() const override { return _current.getPeakCurrentA(); }
+    bool  hasPowerMonitor()   const override { return _current.isReady(); }
+private:
+    // Throttle for the update()-driven telemetry refresh. We only need the
+    // toolbar number a few times a second, not every motion tick. :3
+    uint32_t _last_current_poll_ms = 0;
+
+
 
     float    _max_speed_mm_s      = MAX_SPEED_MM_S;
     float    _accel_mm_s2         = DEFAULT_ACCEL_MM_S2;

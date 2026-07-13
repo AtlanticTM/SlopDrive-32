@@ -149,7 +149,16 @@ void Generator::run() {
             // streamTo() re-targets without force-stopping; at high Hz the motor
             // glides through the waveform like a well-oiled piston. speed 0 =>
             // configured max — let the good boy go full throttle. :3
-            _motor.streamTo(pos, 0.0f);
+            //
+            // Safe-approach soft start: right after the generator engages (or
+            // pause/override releases) the waveform's target can be far from
+            // the parked carriage. safeSpeedCap() ramps the speed ceiling up
+            // from SAFE_APPROACH_SPEED_MM_S over SAFE_RESUME_RAMP_MS so the
+            // first stroke glides in instead of lunging. Once the ramp expires
+            // it returns the configured max — we pass 0.0f then so streamTo
+            // keeps its normal "use configured max" fast path. :3
+            float cap = _state.safeSpeedCap(_state.config.max_speed_mm_s, millis());
+            _motor.streamTo(pos, (cap < _state.config.max_speed_mm_s) ? cap : 0.0f);
 
             // Publish what we just demanded so the UI's target trace tracks the
             // generator too — same "told vs took" overlay as the TCode path. :3

@@ -21,6 +21,9 @@ data/index.html.gz
 
 # Dev tools & diagnostic scripts — not part of the firmware
 tools/
+.clangd
+.clang-format
+.cache/
 
 # Python cache
 __pycache__/
@@ -29,3 +32,11 @@ waypoint_kinematics_audit.md
 graph_screenshot_temp.html
 compile_commands.json
 PCB Layout.diy
+NewPCB.md
+.gitignore
+AIM_servo_modbus_reference.md
+AIM_Servo_Motor_Datasheet_EN_with_images.pdf
+HANDOFF.md
+.gitignore
+plan.md
+PLAN_NewPCB_Migration.md

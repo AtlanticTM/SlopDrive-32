@@ -13,11 +13,14 @@
 
 #include <Arduino.h>
 #include <LittleFS.h>
+#include <Wire.h>
 
 #include "config_api.h"
+
 #include "AppLog.h"
 #include "SystemState.h"
 #include "ConfigStore.h"
+#include "StatusLeds.h"
 
 #include "range_mapper.h"
 #include "Kinematics.h"
@@ -43,6 +46,10 @@
 #include "TransportManager.h"
 
 #include "WebUI.h"
+
+#if defined(FEATURE_RS485_MODBUS)
+#include "ServoModbus.h"
+#endif
 
 
 // ============================================================================
@@ -76,6 +83,13 @@ static TransportManager   transportMgr(g_state, tcodeParser,
 static WebUI webui(g_state, motor, mapper, generator,
                    transportMgr, serialTransport, wsTransport, bleTransport);
 
+#if defined(FEATURE_RS485_MODBUS)
+// RS485 Modbus telemetry on Serial1, GPIO17/18 (config_api.h: AIM_PIN_485_TX/RX).
+// The XY-G485 auto-direction module handles DE/RE from TX — no explicit pin.
+// Slave address 1 per AIM servo datasheet default. :3
+static ServoModbus     servoModbus(Serial1, /* addr */ 1);
+#endif
+
 
 // ============================================================================
 // Waypoint queue — Core 0 pushes, Core 1 pops. The ONLY cross-core motion
@@ -102,6 +116,18 @@ static void buttplugLinearCmd(float position, uint32_t duration_ms) {
     if (g_state.paused || g_state.manual_override) {
         g_state.resume_start_ms = millis();
         return;
+    }
+
+    // ---- New-stream soft start ------------------------------------------------
+    // If the stream has been quiet for >2s (or never spoke), this waypoint could
+    // demand a jump from wherever the carriage sits to anywhere in the window.
+    // Stamp resume_start_ms so safeSpeedCap() ramps the speed ceiling up from
+    // SAFE_APPROACH_SPEED_MM_S instead of lunging at full configured speed. :3
+    {
+        uint32_t now0 = millis();
+        if (g_state.last_intiface_ms == 0 ||
+            (now0 - g_state.last_intiface_ms) > 2000)
+            g_state.resume_start_ms = now0;
     }
 
     g_state.last_intiface_ms = millis();
@@ -187,10 +213,14 @@ static void motorTask(void* /*param*/) {
                 g_state.homing_in_progress = false;
                 g_state.homed = motor.isHomed();
                 homing_started = false;
-                if (g_state.homed)
+                if (g_state.homed) {
+                    // Soft start after homing — the first commanded move can be
+                    // anywhere in the window while we sit at the home backoff. :3
+                    g_state.resume_start_ms = millis();
                     APPLOG("System is now homed and ready to pound :3");
-                else
+                } else {
                     APPLOG("Homing failed — endstop not found. Check wiring.");
+                }
             }
         } else {
             // ---- Push-to-home: shove the carriage into the endstop manually. :3
@@ -238,17 +268,28 @@ static void commsTask(void* /*param*/) {
             g_state.measured_hz = (uint16_t)per_sec;
             if (wsTransport.isConnected() || serialTransport.isActive() || dongleTransport.isActive())
                 APPLOGF("[RATE] rx=%u frames/s", per_sec);
+
+            // WiFi link telemetry (RSSI/channel/BSSID) — piggybacks on the same
+            // 1Hz cadence as the rate report. Cheap scalar reads, Core 0 only. :3
+            transportMgr.pollWifiLink();
         }
 
         vTaskDelay(pdMS_TO_TICKS(2));
     }
 }
 
-// Core 0 — system: HTTP server (delegates entirely to WebUI::update()). :3
+// Core 0 — system: HTTP server (delegates entirely to WebUI::update()).
+// Also tickles the ServoModbus poll state machine if RS485 is compiled in. :3
 static void httpTask(void* param) {
     WebUI* ui = static_cast<WebUI*>(param);
     while (true) {
         ui->update();
+#if defined(FEATURE_RS485_MODBUS)
+        servoModbus.update();     // non-blocking state machine, 2Hz internals
+#endif
+        // Onboard LED feedback — heartbeat breath, amber activity pulse, RGB
+        // machine state. Cheap GPIO/PWM writes, 10ms cadence, Core 0. :3
+        statusLedsUpdate(g_state);
         vTaskDelay(pdMS_TO_TICKS(10));
     }
 }
@@ -427,7 +468,12 @@ static void motionConsumerTask(void* /*param*/) {
         // (20 steps/mm) without hardcoding STEPS_PER_MM here. :3
         int32_t current_steps = -motor.mmToNative(motor.getPosition());
 
-        uint32_t speed_limit = (uint32_t)motor.mmToNative(g_state.config.max_speed_mm_s);
+        // Safe-approach soft start: for the first SAFE_RESUME_RAMP_MS after a
+        // motion discontinuity (new stream, un-pause, override off, homing
+        // complete) the speed ceiling ramps up from SAFE_APPROACH_SPEED_MM_S so
+        // the first stroke glides to position instead of lunging at full tilt. :3
+        float speed_cap_mm_s = g_state.safeSpeedCap(g_state.config.max_speed_mm_s, millis());
+        uint32_t speed_limit = (uint32_t)motor.mmToNative(speed_cap_mm_s);
         uint32_t accel_limit = (uint32_t)motor.mmToNative(g_state.config.acceleration_mm_s2);
 
         kinematics::PlanResult plan = kinematics::planTrapezoid(
@@ -508,7 +554,26 @@ void setup() {
     applog("Add a 'Serial' device in Intiface pointing at this COM port.");
 #endif
 
+#if defined(DRIVER_57AIM_SERVO)
+    // ---- SAFETY FIRST: pin STEP/DIR LOW before ANYTHING else ----------------
+    // The SN74AHCT125 buffer feeding the motor's opto inputs is ALWAYS enabled
+    // (OE tied low), so any boot glitch on these GPIOs propagates straight to
+    // the drive. Drive them LOW the instant we can so a floating pin can't
+    // twitch the shaft during bring-up. No unexpected thrusting on power-on. :3
+    pinMode(AIM_PIN_STEP, OUTPUT); digitalWrite(AIM_PIN_STEP, LOW);
+    pinMode(AIM_PIN_DIR,  OUTPUT); digitalWrite(AIM_PIN_DIR,  LOW);
+
+    // ---- Bring up the shared I2C bus for the INA228 current sensor ----------
+    // Explicit pins — the Nano ESP32 default is A4/A5, but our board routes SDA/
+    // SCL to D5/D6 (GPIO8/9). Must be up BEFORE motor.init() probes the INA228.
+    // This is the machine's sense of feel coming online, ready to read every
+    // strain and pressure spike as the carriage stuffs itself home. :3
+    Wire.begin(PIN_I2C_SDA, PIN_I2C_SCL);
+    Wire.setClock(400000);   // 400kHz fast-mode — plenty for 200Hz current polls
+#endif
+
     // Mount filesystem (web assets served from LittleFS).
+
     if (LittleFS.begin(true))
         APPLOG("LittleFS mounted");
     else
@@ -528,11 +593,25 @@ void setup() {
     motor.init();
     motor.applyDriverConfig(g_state.driver);
 
+    // Onboard status LEDs — heartbeat/amber/RGB. Init here, after boot has
+    // settled, because the green LED shares strapping pin GPIO0. :3
+    statusLedsInit();
+
     // WiFi + mDNS (prerequisite for WS transport and the web UI).
     transportMgr.setupWiFi();
 
     // Register all HTTP routes and start the web server.
     webui.init();
+
+#if defined(FEATURE_RS485_MODBUS)
+    // ---- RS485 Modbus servo telemetry (plan.md §7) -------------------------
+    // Open Serial1 on the RS485 pins (GPIO17/18), probe the drive, and hand
+    // the instance to WebUI so /api/status can surface the telemetry. The
+    // XY-G485 auto-direction module handles DE/RE from TX — no explicit pin. :3
+    Serial1.begin(19200, SERIAL_8N1, AIM_PIN_485_RX, AIM_PIN_485_TX);
+    servoModbus.init();
+    webui.setServoModbus(servoModbus);
+#endif
 
     // Wire TCode parser callbacks to the motion layer.
     tcodeParser.onLinearRampTo(buttplugLinearCmd);

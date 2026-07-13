@@ -11,6 +11,7 @@
 import { $, setRead, onLiveSlider, clamp, icon, toast } from '../core/ui.js';
 import { post, get } from '../core/api.js';
 import { TRAVEL, setTravel, winMin, winMax, setWinMin, setWinMax, setWindowReady, renderWindow, useCurrentAsDefault } from '../core/range.js';
+import { applyExpertCeilings, expertMode, setExpertMode } from '../core/capabilities.js';
 
 export var currentMode = 'WS';
 
@@ -52,34 +53,12 @@ async function loadMode() {
   try { var d = await get('/api/mode'); if (d) reflectMode(d.mode); } catch (e) {}
 }
 
-var expertMode = false;
-
+// expertMode state is now owned by capabilities.js (plan.md §5.10.1 / §5.13).
+// The old hardcoded 10000/5000 ceilings in applyExpertCaps() are replaced by
+// applyExpertCeilings() which re-derives from the /api/capabilities payload
+// — no more baked-in literals, the API is the sole source of truth. :3
 function applyExpertCaps() {
-  var ex = expertMode;
-  // Normal mode: 5000 mm/s speed, 50000 mm/s² accel.
-  // Expert mode: 10000 mm/s speed, 100000 mm/s² accel.
-  // Expert mode is for people who know what they're doing and want to
-  // absolutely fist the machine until the carriage bulges. You asked for it. yippie! :3
-  // The 57AIM servo drive at 800 steps/rev × 10 steps/mm is a closed-loop
-  // servo — it won't skip steps, it'll just go. Strap in. owo
-  var EM = { maxSpeed: 10000, accel: 100000, lookahead: 80, runCurrent: 3000, genRate: 50, modRate: 5, modAmp: 10 };
-  var SM = { maxSpeed: 5000,  accel: 50000,  lookahead: 50, runCurrent: 2500, genRate: 5,  modRate: 1, modAmp: 2  };
-
-  var groups = {
-    maxSpeed: ['maxSpeed', 'defMaxSpeed'], accel: ['accel', 'defAccel'],
-    lookahead: ['lookahead', 'defLookahead'], runCurrent: ['runCurrent'],
-    genRate: ['genRate'], modRate: ['modRate'], modAmp: ['modAmp']
-  };
-  for (var key in groups) {
-    groups[key].forEach(function(id) {
-      var s = $(id); if (!s) return;
-      s.max = ex ? EM[key] : SM[key];
-      if (parseFloat(s.value) > parseFloat(s.max)) s.value = s.max;
-      s.dispatchEvent(new Event('input'));
-    });
-  }
-  var eb = $('#expBanner'); if (eb) eb.classList.toggle('show', ex);
-  var em = $('#expertMode'); if (em) em.checked = ex;
+  applyExpertCeilings();               // re-derive ALL slider max attrs from capsCache
 }
 
 // ---- Continuous-blend mode state ----------------------------------------
@@ -172,14 +151,24 @@ async function loadSettings() {
     // Set TRAVEL FIRST so renderWindow() clamps against the real rail length,
     // not the hardcoded 240 default. If we set winMax=260 then renderWindow()
     // before setTravel(260), the clamp fires at 240 and silently truncates it. :3
-    if (d.max_travel) setTravel(d.max_travel);
+    //
+    // measured_stroke is the REAL usable rail length felt out by sensorless
+    // homing (both hard stops stuffed and measured). When it's > 0 we prefer it
+    // over the geometry ceiling max_travel — the machine told us exactly how
+    // deep it can take it, so the whole range designer rescales to that. Until
+    // homing runs it's 0 and we fall back to the geometry ceiling. yippie! :3
+    var travel = (d.measured_stroke && d.measured_stroke > 0)
+               ? d.measured_stroke
+               : d.max_travel;
+    if (travel) setTravel(travel);
+
     setWinMin(d.range_min);
     setWinMax(d.range_max);
     setWindowReady(true);
     renderWindow();
     var dn = $('#defMinNum'); if (dn) dn.value = d.default_range_min || 0;
     var dx = $('#defMaxNum'); if (dx) dx.value = d.default_range_max || TRAVEL;
-    expertMode = d.expert_mode || false;
+    setExpertMode(d.expert_mode || false);
     // Reflect the Intiface compat toggle — default OFF (MFP spec decode) when
     // the firmware doesn't advertise it. Note: explicit !! so an absent field
     // reads as unchecked rather than undefined. :3
@@ -237,7 +226,7 @@ export function initSettings() {
   });
   var eb = $('#expertMode');
   if (eb) eb.addEventListener('change', function() {
-    expertMode = eb.checked; applyExpertCaps();
+    setExpertMode(eb.checked); applyExpertCaps();
   });
   var ims = $('#inputModeSeg');
   if (ims) ims.addEventListener('click', function(e) {

@@ -1,0 +1,46 @@
+{
+  "build": {
+    "arduino": {
+      "memory_type": "qio_opi",
+      "partitions": "default_16MB.csv"
+    },
+    "core": "esp32",
+    "extra_flags": [
+      "-DARDUINO_NANO_ESP32",
+      "-DARDUINO_RUNNING_CORE=1",
+      "-DARDUINO_EVENT_RUNNING_CORE=1",
+      "-DBOARD_HAS_PSRAM"
+    ],
+    "f_cpu": "240000000L",
+    "f_flash": "80000000L",
+    "flash_mode": "qio",
+    "hwids": [
+      ["0x2341", "0x0070"],
+      ["0x2341", "0x0770"],
+      ["0x303A", "0x1001"]
+    ],
+    "mcu": "esp32s3",
+    "variant": "esp32s3"
+  },
+  "connectivity": [
+    "wifi",
+    "bluetooth"
+  ],
+  "debug": {
+    "openocd_target": "esp32s3.cfg"
+  },
+  "frameworks": [
+    "arduino",
+    "espidf"
+  ],
+  "name": "Arduino Nano ESP32 (u-blox NORA-W106 / ESP32-S3)",
+  "upload": {
+    "flash_size": "16MB",
+    "maximum_ram_size": 327680,
+    "maximum_size": 16777216,
+    "require_upload_port": true,
+    "speed": 921600
+  },
+  "url": "https://store.arduino.cc/products/nano-esp32",
+  "vendor": "Arduino"
+}

@@ -3,9 +3,8 @@
 An open-source ESP32-S3 / ESP32-C5 multi-node firmware for a belt-driven linear
 stroke machine, controlled over [Intiface](https://intiface.com/) /
 [buttplug.io](https://buttplug.io) with a rich web UI for configuration and
-real-time telemetry. Now spanning a three-device network architecture — one
-brains, one muscle, one display — so the pounding can be distributed across the
-room while you watch the action live on a dongle display. :3
+real-time telemetry. Now spanning a three-device network architecture with a
+main controller, a receiver node, and a USB dongle with live display.
 
 The firmware maps incoming normalized position commands (`0.0`–`1.0`) from the
 buttplug/TCode ecosystem onto a user-configurable slice of the machine's physical
@@ -38,16 +37,15 @@ safety.**
 ## Multi-Node Network Architecture
 
 SlopDrive-32 now spans **three ESP32 devices** chained together in a
-distributed pounding network. One brain, one muscle, one display — each
-specialized, each pumping data to the next, the whole chain thrusting in
-sync like a well-oiled train.
+distributed control network — main controller, receiver node, and USB
+dongle with live display.
 
 | Node | Device | Role | Description |
 |------|--------|------|-------------|
-| **Main Controller** | ESP32-S3 (DevKitC-1) | Brain + Muscle | Runs the web UI, WiFi, mDNS, WebSocket server, LittleFS asset serving, BLE transport, TCode parsing, kinematics planner, and the 57AIM30 servo step pulse generation on Core 1. The central command post — every command flows through here. This is where the shaft gets told exactly where to go, how fast, and how hard. |
-| **Node A (Receiver)** | ESP32-C5 (Waveshare Full-Size DevKit) | Remote Receiver | Dedicated receiver node listening for motion commands over ESP-NOW / WiFi. Sits near the actuator, takes the position stream deep, and relays it to the motion pipeline. The belly of the beast — positioned wherever the action is. |
-| **Node B (Transmitter)** | ESP32-C5 (LilyGO T-Dongle C5) | Display + Bridge | USB dongle that sits between the host (MultiFunPlayer / Intiface) and the S3. MFP talks to the dongle's USB-CDC port; the dongle relays TCode over a physical UART wire to the S3's Serial2. The dongle's ST7735 160×80 LCD display shows live position, stroke depth, and command frequency so you can watch the data stream pump in and out while the machine pounds away. Also handles ESP-NOW broadcast of motion state. |
-| **Node C (Planned)** | ESP32-C5 (TBD) | Remote Controller | A handheld wireless remote — physical knobs, buttons, maybe a small display — for direct manual stroke control. Still in the design/planning phase. Will speak SharedProtocol over ESP-NOW and let you fist the machine by hand. yippie! :3 |
+| **Main Controller** | ESP32-S3 (DevKitC-1) | Brain + Muscle | Runs the web UI, WiFi, mDNS, WebSocket server, LittleFS asset serving, BLE transport, TCode parsing, kinematics planner, and the 57AIM30 servo step pulse generation on Core 1. The central command post — every command flows through here. |
+| **Node A (Receiver)** | ESP32-C5 (Waveshare Full-Size DevKit) | Remote Receiver | Dedicated receiver node listening for motion commands over ESP-NOW / WiFi. Sits near the actuator and relays the position stream to the motion pipeline. |
+| **Node B (Transmitter)** | ESP32-C5 (LilyGO T-Dongle C5) | Display + Bridge | USB dongle that sits between the host (MultiFunPlayer / Intiface) and the S3. MFP talks to the dongle's USB-CDC port; the dongle relays TCode over a physical UART wire to the S3's Serial2. The dongle's ST7735 160×80 LCD display shows live position and command frequency. Also handles ESP-NOW broadcast of motion state. |
+| **Node C (Planned)** | ESP32-C5 (TBD) | Remote Controller | A handheld wireless remote — physical knobs, buttons, maybe a small display — for direct manual stroke control. Still in the design/planning phase. Will speak SharedProtocol over ESP-NOW for low-latency wireless control. |
 
 ### SharedProtocol — The Common Tongue
 
@@ -58,15 +56,14 @@ hardware-agnostic binary packet framing library that defines:
 - **`MessageType`** enum — `HEARTBEAT`, `MOTION_COMMAND`, `MOTION_STATE`,
   `CONFIG_UPDATE`, `EMERGENCY_STOP`
 - **`PacketHeader`** — `{'S','D'}` magic bytes, protocol version, message type,
-  sender role, payload length, checksum — the header wraps every packet like a
-  tight ring gripping the shaft.
+  sender role, payload length, and checksum for data integrity.
 - **`MotionCommand`** / **`MotionState`** — compact binary structs for
   normalized position, speed, acceleration, homing/fault flags, and timestamps.
-  No JSON overhead on the wire — raw bytes straight into the hole.
+  No JSON overhead on the wire — raw binary, minimal latency.
 
 The protocol is compiled into every node from the same shared library, so all
-three devices speak the same filthy language regardless of whether they're on
-ESP32-S3 or ESP32-C5 silicon. yippie! :3
+three devices communicate seamlessly regardless of whether they're on
+ESP32-S3 or ESP32-C5 silicon.
 
 ---
 
@@ -117,21 +114,18 @@ classes (Abstract Base Classes with pure virtual functions):
   57AIM30 handles all the closed-loop magic internally via its own DSP. We just
   send PUL (pulse) and DIR (direction) signals via FastAccelStepper and let the
   drive do its thing — 1600 steps/rev, 80mm belt travel per revolution, 20
-  steps/mm. The drive is always energized when powered (no enable pin), so the
-  shaft is ready to thrust the moment you tell it to.
+  steps/mm.
 
 - **Continuous Motion Blending** — `streamTo()` never softens a committed brake
   ramp between waypoints. It handles same-direction continuation vs. reversal
   through a selectable blend mode (let-it-land / allow-reversal / hybrid). No
-  stop-and-go stutter between position samples — the shaft keeps thrusting,
-  relentless and full, stuffed all the way in until the belly bulges and it
-  can't take anymore yippie! :3
+  stop-and-go stutter between position samples — motion stays smooth through
+  every waypoint with configurable blend strategies for direction changes.
 
 - **Predictive Interpolation** — between discrete position updates, the
   kinematics planner generates continuous step schedules with configurable
-  acceleration and max-speed caps. No stuttering between commands — the shaft
-  glides smoothly into every target, filling the gap between updates with
-  mathematically continuous motion.
+  acceleration and max-speed caps. No stuttering between commands — smooth,
+  mathematically continuous motion through every target.
 
 - **Auto-Duration Timing** — the firmware measures the *actual* inter-command
   cadence from the host and sizes each move to fit, rather than trusting an
@@ -145,9 +139,7 @@ classes (Abstract Base Classes with pure virtual functions):
 - **Deceleration Guard** — when the commanded target moves faster than the
   hardware can physically accelerate, the planner softens the approach rather
   than slamming into the limit. The web UI's motion graph makes this visible in
-  real time — target vs. actual divergence literally draws the struggle on
-  screen, two lines that spread wider the deeper you push, until the shaft is
-  stretching to keep up with what it's being fed. yippie! :3
+  real time — target vs. actual divergence shows the struggle on screen.
 
 - **Range Mapping** — incoming normalized `0.0`–`1.0` commands are remapped
   onto a user-trimmable window of the physical rail. The full input stroke is
@@ -186,7 +178,7 @@ physical_mm = min_position_mm + normalized × (max_position_mm − min_position_
 | **BLE** | NimBLE-based GATT server advertising a TCode characteristic. Enables wireless control from mobile apps or BLE-capable hosts. |
 | **WebSocket Server** | Direct TCode WebSocket server on port `55555` — compatible with MultiFunPlayer and other WebSocket-based controllers. |
 | **WiFi / WSDM Client** | The device connects outward to Intiface's Device WebSocket Server as a client. |
-| **Dongle Transport** | UART relay from the T-Dongle C5 (Node B). MFP talks USB-CDC to the dongle; the dongle forwards TCode over a physical UART wire to the S3's `Serial2` (pins 8/9). `DongleTransport` reads that UART and feeds the parser exactly like `SerialTransport` does for USB — same line-buffering, same null-byte filtering, same disconnect detection. D0/D1/D2 TCode replies are echoed back to the dongle so MFP sees responses. Best of both holes — the S3 stays on WiFi for the web UI while MFP gets a dedicated USB port on the dongle. hehee :3 |
+| **Dongle Transport** | UART relay from the T-Dongle C5 (Node B). MFP talks USB-CDC to the dongle; the dongle forwards TCode over a physical UART wire to the S3's `Serial2` (pins 8/9). `DongleTransport` reads that UART and feeds the parser exactly like `SerialTransport` does for USB — same line-buffering, same null-byte filtering, same disconnect detection. D0/D1/D2 TCode replies are echoed back to the dongle so MFP sees responses. The S3 stays on WiFi for the web UI while MFP gets a dedicated USB port on the dongle. |
 
 - **USB Crash Fix** — the firmware deliberately avoids `ARDUINO_USB_MODE=1` /
   `ARDUINO_USB_CDC_ON_BOOT=1` build flags on the S3, which would switch
@@ -223,8 +215,7 @@ physical_mm = min_position_mm + normalized × (max_position_mm − min_position_
   - **Inertia / Predictive Smoothing** — controls how aggressively the planner
     anticipates the next target.
   - **Continuous Blend Mode** — select let-it-land, allow-reversal, or hybrid
-    blending for streamed position commands so you can tune how the shaft
-    handles direction changes mid-stroke.
+    blending for streamed position commands.
   - **Serial / Log Viewer** — since the USB serial port is busy with TCode,
     debug output is streamed to the web UI via WebSocket.
   - **Telemetry Settings** — configure the sampling rate and poll interval for
@@ -241,14 +232,14 @@ physical_mm = min_position_mm + normalized × (max_position_mm − min_position_
   (pure Arduino SPI transactions, no chip-specific register poking). TFT_eSPI
   is explicitly NOT used because it accesses SPI registers (`VSPI_HOST`,
   `SPI_MOSI_DLEN_REG`) that don't exist on the ESP32-C5's SPI peripheral. The
-  bundled library just works — clean SPI, no drama. yippie! :3
+  bundled library just works — clean SPI, no drama.
 - **Live Position Bar** — horizontal bar showing the current stroke position
-  in real time. Watch the shaft's depth on a tiny glowing screen.
+  in real time on a tiny glowing screen.
 - **Command Frequency Readout** — Hz counter showing how fast the host is
-  feeding position commands. Higher Hz = more relentless pounding.
+  feeding position commands.
 - **ESP-NOW State Broadcast** — the dongle beams `MotionState` packets back
-  to the main controller over ESP-NOW so the web UI always knows where the
-  shaft is even when the dongle is the active transport path.
+  to the main controller over ESP-NOW so the web UI always knows the current
+  position when the dongle is the active transport path.
 
 ### Persistence
 
@@ -380,7 +371,7 @@ pio run -e c5_tdongle -t upload
 > The `platformio.ini` `targets = uploadfs, upload` line is commented out by
 > default — use explicit `-t uploadfs -t upload` when the board is connected.
 > Leaving it active causes `pio run` to fail with COM-not-found when building
-> offline. :3
+> offline.
 
 ### 3. Web UI Build Pipeline
 
@@ -412,10 +403,8 @@ Connect to the device's IP (printed to Serial on boot) or
 
 The [`intiface/`](intiface/) directory contains the device-config JSON for
 registering SlopDrive-32 as a `tcode-v03` stroker in Intiface. The config
-declares a positional stroker with a `[0, 999]` value range and the
-`"L0"`/`"L"` TCode axis commands. It's a perfectly respectable JSON blob —
-right up until it tells the machine to plunge in and not stop until the
-stomach bulges. owo
+declares a standard positional stroker with a `[0, 999]` value range and
+`"L0"`/`"L"` TCode axis commands.
 
 The firmware itself uses implicit-decimal-fraction TCode parsing (any digit
 length is valid), but the config JSON keeps the historical `[0, 999]` range
@@ -524,8 +513,6 @@ SlopDrive-32/
 - ST7735 LCD driver derived from [LilyGO's T-Dongle-C5 library](https://github.com/Xinyuan-LilyGO/T-Dongle-C5).
 - ESP32-C5 platform support via the [pioarduino community fork](https://github.com/pioarduino/platform-espressif32).
 - The rest: vibes. 🤖
-- Also, if you've read this far into the README, you already know what kind of
-  machine this is. Don't pretend you don't. :3
 
 ---
 

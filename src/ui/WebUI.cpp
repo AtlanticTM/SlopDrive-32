@@ -7,9 +7,13 @@
 #include <WiFi.h>
 #include <esp_timer.h>
 
+#if defined(FEATURE_RS485_MODBUS)
+#include "ServoModbus.h"
+#endif
 
 #include "AppLog.h"
 #include "ConfigStore.h"
+#include "StatusLeds.h"
 #include "Generator.h"
 #include "MotorDriver.h"
 
@@ -78,19 +82,22 @@ WebUI::~WebUI() {
 void WebUI::init() {
     _httpServer->on("/",          [this]() { handleRoot(); });
     _httpServer->on("/api/status",    HTTP_GET,  [this]() { handleApiStatus(); });
+    _httpServer->on("/api/capabilities", HTTP_GET, [this]() { handleApiCapabilities(); });
     _httpServer->on("/api/settings",  HTTP_GET,  [this]() { handleApiSettings(); });
-    _httpServer->on("/api/settings",  HTTP_POST, [this]() { handleApiSettings(); });
-    _httpServer->on("/api/move",      HTTP_POST, [this]() { handleApiMove(); });
-    _httpServer->on("/api/home",      HTTP_POST, [this]() { handleApiHome(); });
-    _httpServer->on("/api/stop",      HTTP_POST, [this]() { handleApiStop(); });
-    _httpServer->on("/api/pause",     HTTP_POST, [this]() { handleApiPause(); });
-    _httpServer->on("/api/halt",      HTTP_POST, [this]() { handleApiHalt(); });
-    _httpServer->on("/api/override",  HTTP_POST, [this]() { handleApiOverride(); });
+    // POST routes blink the amber activity LED — every operator command gets a
+    // visible RX pulse on the board (statusLedsActivity). GET polls don't. :3
+    _httpServer->on("/api/settings",  HTTP_POST, [this]() { statusLedsActivity(); handleApiSettings(); });
+    _httpServer->on("/api/move",      HTTP_POST, [this]() { statusLedsActivity(); handleApiMove(); });
+    _httpServer->on("/api/home",      HTTP_POST, [this]() { statusLedsActivity(); handleApiHome(); });
+    _httpServer->on("/api/stop",      HTTP_POST, [this]() { statusLedsActivity(); handleApiStop(); });
+    _httpServer->on("/api/pause",     HTTP_POST, [this]() { statusLedsActivity(); handleApiPause(); });
+    _httpServer->on("/api/halt",      HTTP_POST, [this]() { statusLedsActivity(); handleApiHalt(); });
+    _httpServer->on("/api/override",  HTTP_POST, [this]() { statusLedsActivity(); handleApiOverride(); });
     _httpServer->on("/api/tmc",       HTTP_GET,  [this]() { handleApiTmc(); });
-    _httpServer->on("/api/tmc",       HTTP_POST, [this]() { handleApiTmc(); });
-    _httpServer->on("/api/clearfault",HTTP_POST, [this]() { handleApiClearFault(); });
+    _httpServer->on("/api/tmc",       HTTP_POST, [this]() { statusLedsActivity(); handleApiTmc(); });
+    _httpServer->on("/api/clearfault",HTTP_POST, [this]() { statusLedsActivity(); handleApiClearFault(); });
     _httpServer->on("/api/gen",       HTTP_GET,  [this]() { handleApiGen(); });
-    _httpServer->on("/api/gen",       HTTP_POST, [this]() { handleApiGen(); });
+    _httpServer->on("/api/gen",       HTTP_POST, [this]() { statusLedsActivity(); handleApiGen(); });
     // /api/interp is still wired so the UI config card renders, but the
     // actual jitter-buffer engine got yanked out. The route returns the
     // stored params and lets the UI tweak them — just nobody's home to
@@ -214,14 +221,54 @@ void WebUI::handleApiStatus() {
     doc["uptime_ms"] = (uint32_t)millis();
     doc["wifi_connected"] = _state.wifi_ready;
     doc["ip"] = WiFi.localIP().toString();
+
+    // ---- WiFi link telemetry (RSSI/channel/BSSID/reconnects) ----------------
+    // Populated on Core 0 by TransportManager::pollWifiLink() (1Hz, commsTask)
+    // and the onWifiEvent() disconnect handler. Lets the operator see WHICH ap
+    // they're actually associated to (band-steering evidence) and whether the
+    // "close AP is worse than the far one" symptom correlates with RSSI dips
+    // or a rising reconnect count. :3
+    doc["rssi"] = _state.wifi_rssi;
+    doc["wifi_channel"] = _state.wifi_channel;
+    doc["wifi_bssid"] = _state.wifi_bssid;
+    doc["wifi_reconnects"] = _state.wifi_reconnects;
+    doc["wifi_last_disconnect_reason"] = _state.wifi_last_disconnect_reason;
+
     doc["homed"] = _state.homed;
     doc["homing"] = _state.homing_in_progress;
     doc["buttplug_connected"] = _wsTransport.isServerConnected();
     doc["position"] = _motor.getPosition();
+
+    // ---- Live INA228 bus telemetry (57AIM board) ----------------------------
+    // The operator watches this on the toolbar during bring-up to confirm the
+    // current sensor actually works BEFORE trusting sensorless homing not to
+    // ram anything. On boards without a sensor hasCurrentSensor() is false and
+    // the UI just hides the readout. Cached values — no I2C from this thread. :3
+    doc["has_current_sensor"] = _motor.hasCurrentSensor();
+    if (_motor.hasCurrentSensor()) {
+        doc["bus_current_a"] = _motor.getBusCurrentA();
+        doc["bus_voltage_v"] = _motor.getBusVoltageV();
+    }
+
+    // ---- Extended INA228 power telemetry (57AIM board) -----------------------
+    // Only advertised when the driver reports a real power monitor present —
+    // the UI hides the Load card's power/temp/peak rows on boards without one.
+    doc["has_power_monitor"] = _motor.hasPowerMonitor();
+    if (_motor.hasPowerMonitor()) {
+        doc["bus_power_w"] = _motor.getBusPowerW();
+        doc["die_temp_c"] = _motor.getDieTempC();
+        doc["peak_current_a"] = _motor.getPeakBusCurrentA();
+    }
+
     uint16_t hz = _state.measured_hz;
     doc["measured_hz"] = hz;
     doc["measured_interval_ms"] = (hz > 0) ? (uint16_t)(1000 / hz) : 0;
     doc["auto_duration"] = _state.auto_duration;
+    // Measured usable stroke — also in /api/capabilities, but mirrored here so
+    // the 100ms status poll can notice when homing produces a NEW measurement
+    // and resync travel immediately. The old edge-trigger (not-homed→homed)
+    // missed re-homes and any poll hiccup around the transition. :3
+    doc["measured_stroke_mm"] = _motor.getMeasuredStrokeMm();
     doc["serial_mode"] = (bool)SERIAL_CONTROL_MODE;
     doc["serial_active"] = _serialTransport.isActive();
     doc["serial_linked"] = _serialTransport.isLinked();
@@ -307,6 +354,63 @@ void WebUI::handleApiStatus() {
     _httpServer->send(200, "application/json", json);
 }
 
+void WebUI::handleApiCapabilities() {
+    // Served once at load — the UI builds/hides cards and derives slider
+    // ceilings from this instead of baking assumptions into index.html
+    // (plan.md §3a / §5.13 applyCapabilities() central binder). :3
+    JsonDocument doc;
+
+    // ---- Machine geometry ----------------------------------------------------
+    doc["max_travel_mm"] = (float)MACHINE_MAX_TRAVEL_MM;
+    // 0 until sensorless homing has felt out both hard stops — the UI treats
+    // 0 as "not measured yet" and falls back to max_travel_mm. :3
+    doc["measured_stroke_mm"] = _motor.getMeasuredStrokeMm();
+
+    // ---- Speed / accel ceilings (normal vs expert) ----------------------------
+    // Single source of truth for every bound slider's `max` attribute. When
+    // #expertMode flips, the UI re-derives ALL of #maxSpeed/#accel/#defMaxSpeed/
+    // #defAccel (+ their *Val readouts) from these two objects in one pass —
+    // no more "only half the sliders updated" (plan.md §5.10.1). :3
+    JsonObject speed = doc["speed_ceiling_mm_s"].to<JsonObject>();
+    speed["normal"] = (uint32_t)NORMAL_MAX_SPEED_MM_S;
+    speed["expert"] = (uint32_t)EXPERT_MAX_SPEED_MM_S;
+
+    JsonObject accel = doc["accel_ceiling_mm_s2"].to<JsonObject>();
+    accel["normal"] = (uint32_t)NORMAL_MAX_ACCEL_MM_S2;
+    accel["expert"] = (uint32_t)EXPERT_MAX_ACCEL_MM_S2;
+
+    // ---- Feature flags ---------------------------------------------------------
+    // The UI shows/hides every optional card purely from these — no compiled-in
+    // assumptions. Add a flag here BEFORE wiring the matching UI card so the
+    // frontend can always ask "am I allowed to show this" first. :3
+    JsonObject feat = doc["features"].to<JsonObject>();
+    feat["has_current_sensor"] = _motor.hasCurrentSensor();
+    feat["has_power_monitor"]  = _motor.hasPowerMonitor();
+    // RS485/Modbus servo telemetry (plan.md §7) — advertised when the module
+    // is compiled in (FEATURE_RS485_MODBUS build flag). The WebUI shows the
+    // Servo (RS485) card in the Health tab only when this is true. :3
+#if defined(FEATURE_RS485_MODBUS)
+    feat["has_rs485"] = true;
+#else
+    feat["has_rs485"] = false;
+#endif
+#if defined(BLE_ENABLED)
+    feat["has_ble"] = true;
+#else
+    feat["has_ble"] = false;
+#endif
+    // Dongle relay transport (T-Dongle C5 over hardware UART, Serial2) is
+    // always wired on this board — TransportMode::DONGLE exists unconditionally
+    // regardless of whether a dongle is actually plugged in right now. :3
+    feat["has_dongle"] = true;
+    feat["blend_mode"] = _motor.getBlendMode();
+    feat["expert_ceilings"] = _state.expert_mode;
+
+    String json;
+    serializeJson(doc, json);
+    _httpServer->send(200, "application/json", json);
+}
+
 void WebUI::handleApiClearFault() {
     APPLOG("Driver fault clear requested (no-op — readback removed)");
     _httpServer->send(200, "application/json", "{\"ok\":true}");
@@ -336,6 +440,15 @@ void WebUI::handleApiSettings() {
         // dynamically instead of hardcoding 240mm. The UI reads this on boot
         // and scales all sliders, the range designer, and the motion graph. :3
         doc["max_travel"] = (float)MACHINE_MAX_TRAVEL_MM;
+
+        // Measured usable stroke from sensorless homing. 0 until both hard
+        // stops have been felt out — the UI treats 0 as "not measured yet" and
+        // falls back to max_travel. Once homing has stuffed the carriage into
+        // both ends, this is the REAL rail length and the stroke designer
+        // rescales to it so the depth slider maps to actual mm. :3
+        doc["measured_stroke"] = _motor.getMeasuredStrokeMm();
+
+
 
         String json;
         serializeJson(doc, json);
@@ -634,6 +747,10 @@ void WebUI::handleApiGen() {
             _state.gen_phase = 0.0f;
             _state.gen_mod_clock = 0.0f;
             _state.gen_last_us = micros();
+            // Soft start: the waveform's first target can be anywhere in the
+            // window relative to the parked carriage — ramp the speed cap up
+            // from SAFE_APPROACH_SPEED_MM_S instead of lunging. :3
+            _state.resume_start_ms = millis();
             APPLOG("Generator started");
         } else if (!want && _state.gen.running) {
             APPLOG("Generator stopped");

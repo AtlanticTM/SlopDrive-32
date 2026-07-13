@@ -44,27 +44,52 @@
 // =============================================================================
 // Device Geometry — 57AIMServo build (DRIVER_57AIM_SERVO)
 // =============================================================================
-// 57AIM30 closed-loop servo drive, HTD 5M belt, 16-tooth pulley.
-// The drive's DIP switches set 800 pulses/rev internally — no microstepping
-// register to write, no SPI, no drama. Just pulse it and it goes. :3
+// 57AIM30 closed-loop servo drive on a CAPSTAN DRUM (custom v0.0 controller).
+// The Dyneema line wraps the drum, so linear travel = drum circumference per
+// drum revolution — no belt teeth, just a slick wrap that pulls the carriage
+// in balls-deep and lets it slide back out with zero backlash. :3
 //
-//   STEPS_PER_REV: 800   (drive DIP switch setting — new motor, half the old count)
-//   MM_PER_REV:    80.0  (16 teeth × 5mm pitch = 80mm per revolution)
-//   STEPS_PER_MM:  800 / 80 = 10 steps/mm
-//   MAX_TRAVEL:    260.0 mm
-//   HOMING_BACKOFF: 10.0 mm — pull out 10mm after the endstop triggers,
-//                   enough clearance that the switch releases cleanly and
-//                   the carriage isn't sitting balls-deep on the sensor. :3
-#define AIM_STEPS_PER_REV       800
-#define AIM_MM_PER_REV          80.0f
-#define AIM_STEPS_PER_MM        (AIM_STEPS_PER_REV / AIM_MM_PER_REV)   // 10.0
-#define AIM_MAX_TRAVEL_MM       260.0f
-#define AIM_HOMING_BACKOFF_MM   10.0f
+// Drive train math (motor -> drum through a 2:1 reduction):
+//   MOTOR_STEPS_PER_REV: 800   (drive DIP switch, at the motor shaft)
+//   REDUCTION:           2.0   (drum turns once per two motor revs — motor->drum)
+//   STEPS_PER_REV:       800 × 2 = 1600 steps per DRUM revolution
+//   DRUM_DIAMETER:       25.0 mm  → circumference = π × 25 = 78.5398 mm/drum-rev
+//   STEPS_PER_MM:        1600 / 78.5398 = ~20.372 steps/mm
+//   MAX_TRAVEL:          260.0 mm  (geometry ceiling; sensorless homing measures
+//                        the real usable stroke and overrides this at runtime)
+//   HOMING_BACKOFF:      10.0 mm — pull out 10mm after the stall so the carriage
+//                        isn't grinding balls-deep against the hard stop. :3
+//
+// Keep AIM_STEPS_PER_MM a FLOAT — 20.372 truncated to an int would slowly drift
+// the carriage off by mm over a long stroke. Single-precision float feeds the
+// FPU and keeps every thrust landing exactly where it's told. :3
+#define AIM_MOTOR_STEPS_PER_REV   800                                     // @ motor shaft
+#define AIM_REDUCTION             2.0f                                    // 2:1 motor -> drum
+#define AIM_STEPS_PER_REV         ((int32_t)(AIM_MOTOR_STEPS_PER_REV * AIM_REDUCTION))  // 1600 / drum rev
+#define AIM_DRUM_DIAMETER_MM      25.0f
+#define AIM_MM_PER_REV            (3.14159265f * AIM_DRUM_DIAMETER_MM)    // 78.5398 mm/drum-rev
+#define AIM_STEPS_PER_MM          (AIM_STEPS_PER_REV / AIM_MM_PER_REV)    // ~20.372 steps/mm
+#define AIM_MAX_TRAVEL_MM         260.0f
+#define AIM_HOMING_BACKOFF_MM     10.0f
 
-// Homing sweep speed: 50 mm/s × 10 steps/mm = 500 steps/s.
-// 260mm rail homes in ~5 seconds. forceStopAndNewPosition() kills the pulse
-// train the instant the endstop triggers — no coasting at this speed. :3
-#define AIM_HOMING_SPEED_STEPS_S  500
+// Homing sweep speed: ~20 mm/s crawl × 20.372 steps/mm ≈ 407 steps/s. We round
+// down to 400 so the capstan noses into the hard stop gently — slow enough that
+// a stall is a soft nudge, not a freight-train slam. forceStopAndNewPosition()
+// kills the pulse train the instant we detect the current spike. :3
+#define AIM_HOMING_SPEED_STEPS_S  600
+
+// ---- Sensorless homing tunables (INA228 current-stall detection) ----
+// The new PCB has NO endstop switch — we feel our way to the hard stop by
+// watching motor current on the INA228. Free travel draws low single-digit
+// amps; when the carriage buries itself against the stop the current climbs
+// fast toward the drive's limit. We call it a stall when current sits above the
+// free-run baseline by STALL_MARGIN_A for STALL_CONSEC consecutive polls. :3
+// Tune these empirically on the real machine — start gentle, tighten later.
+#define AIM_HOME_STALL_MARGIN_A     3.0f   // amps above free-run baseline = stall
+#define AIM_HOME_STALL_CONSEC       4      // consecutive over-threshold samples
+#define AIM_HOME_POLL_HZ            150    // INA228 poll rate during homing (Hz)
+#define AIM_HOME_BASELINE_SAMPLES   20     // samples averaged for the free-run baseline
+
 
 // =============================================================================
 // MACHINE_MAX_TRAVEL_MM — driver-agnostic travel limit
@@ -93,18 +118,72 @@
 #define PIN_TMC_MOSI            13   // TMC Master Out Slave In
 #define PIN_TMC_MISO            10   // TMC Master In Slave Out
 
-// --- 57AIMServo build (DRIVER_57AIM_SERVO) ---
-// PUL → GPIO 5, DIR → GPIO 4, ENDSTOP → GPIO 12 (active LOW, optocoupler).
-// No enable pin — the 57AIM30 drive is always energized when powered. :3
-#define AIM_PIN_STEP            5    // PUL — pulse train to the servo drive
-#define AIM_PIN_DIR             4    // DIR — direction signal
-#define AIM_PIN_ENDSTOP         12   // Endstop (active LOW via optocoupler)
+// --- 57AIMServo build (DRIVER_57AIM_SERVO) — CUSTOM v0.0 CONTROLLER (Nano ESP32) ---
+// New board routes the servo drive through an SN74AHCT125 buffer -> opto inputs.
+// PUL → GPIO 5 (D2), DIR → GPIO 6 (D3). No endstop on this board — homing is
+// sensorless via the INA228 current sensor (see below). The old GPIO12 endstop
+// is kept only for the legacy HOMING_USE_ENDSTOP fallback. :3
+//
+// The AHCT125's output-enable is tied LOW (always on), so ANY boot glitch on
+// PUL/DIR squirts straight through to the motor's opto inputs — pull both LOW
+// as early as possible in setup(). No premature twitching before we're ready. :3
+#define AIM_PIN_STEP            5    // PUL — pulse train to the servo drive (D2)
+#define AIM_PIN_DIR             6    // DIR — direction signal (D3) [was GPIO4 on old PCB]
+#define AIM_PIN_ENDSTOP         12   // Legacy endstop (only used if HOMING_USE_ENDSTOP)
 
 // =============================================================================
-// RGB Status LED (NeoPixel)
+// I2C bus (INA228 current sensor @ 0x40, AS5600 encoder @ 0x36 — deferred)
 // =============================================================================
+// Nano ESP32 does NOT default I2C to these pins — call Wire.begin(SDA, SCL)
+// explicitly. INA228 lives behind an ISO1640 isolator but is transparent to
+// software. The bus is where the machine feels itself out — every current
+// reading is the drive telling us how hard it's straining. :3
+#define PIN_I2C_SDA             8    // D5
+#define PIN_I2C_SCL             9    // D6
+
+// INA228 high-side current/voltage monitor on the 36V bus. Register map differs
+// from the INA226 — use an INA228-specific library. 5mΩ shunt, ADCRANGE=0. :3
+#define INA228_I2C_ADDR         0x40
+#define INA228_SHUNT_OHMS       0.005f   // 5 mΩ, 2W
+#define INA228_MAX_CURRENT_A    32.768f  // ADCRANGE=0 full scale (163.84mV / 5mΩ)
+
+// =============================================================================
+// RS485 / Modbus to motor — DEFERRED (do not implement this pass)
+// =============================================================================
+// XY-G485 auto-direction module, 19200 8N1. Gives access to the motor's
+// internal 15-bit encoder, temps, fault codes. Wired but not yet driven. :3
+#define AIM_PIN_485_TX          17   // D8 (deferred)
+#define AIM_PIN_485_RX          18   // D9 (deferred)
+
+// =============================================================================
+// Status LEDs — Arduino Nano ESP32 (NOT a NeoPixel!)
+// =============================================================================
+// The Nano ESP32's onboard "RGB" is three DISCRETE LEDs on separate pins, plus
+// a standalone orange user LED. All of them are ACTIVE-LOW (drive the pin LOW to
+// light it). There is NO addressable NeoPixel on this board — the old
+// Adafruit_NeoPixel status path must drive these discrete pins instead. :3
+//
+//   Orange user LED : GPIO48 (was the old NeoPixel data pin — now just a dumb LED)
+//   RGB Red         : GPIO46
+//   RGB Green       : GPIO0   ⚠ strapping pin — drive ONLY after boot settles
+//   RGB Blue        : GPIO45
+//
+// Heartbeat LED (yellow-green on the PCB, ACTIVE-HIGH): GPIO21 (D10). Blinks to
+// prove the S3 is alive during bring-up before the displays are wired. :3
+#define PIN_LED_ORANGE          48
+#define PIN_LED_R               46
+#define PIN_LED_G               0    // strapping pin — init after boot
+#define PIN_LED_B               45
+#define LED_ACTIVE_LOW          1    // onboard LEDs sink current — LOW = lit
+#define PIN_HB_LED              21   // heartbeat, ACTIVE-HIGH (PCB yellow-green LED, D10)
+#define HB_LED_ACTIVE_HIGH      1
+
+// Legacy alias — some status code still references PIN_NEOPIXEL_PIN. Point it at
+// the orange LED so it compiles; the status module should migrate to the RGB
+// pins above. There is no real NeoPixel to drive. :3
 #define PIN_NEOPIXEL_PIN        48
 #define NEOPIXEL_COUNT          1
+
 
 // =============================================================================
 // Motor Defaults
@@ -125,6 +204,14 @@
 #define MAX_SPEED_MM_S              10000.0f
 #define DEFAULT_MAX_SPEED_MM_S      550.0f   // factory default on fresh boot
 
+// Split ceilings the WebUI's expert-mode toggle switches between. Advertised
+// via /api/capabilities so the UI derives its slider `max` attrs from the API
+// instead of hardcoding 3000/8000 literals (the "half-updated slider" bug in
+// plan.md §5.10.1). Firmware itself always accepts anything up to the hard
+// MAX_SPEED_MM_S/MAX_ACCEL_MM_S2 ceiling above — these are UI-only guardrails. :3
+#define NORMAL_MAX_SPEED_MM_S       5000.0f
+#define EXPERT_MAX_SPEED_MM_S       MAX_SPEED_MM_S      // 10000
+
 // Default acceleration mm/s^2
 // Normal UI cap: 50000 mm/s². Expert mode UI cap: 100000 mm/s².
 // The 57AIM servo drive can hit these — it's a closed-loop servo that will
@@ -134,6 +221,26 @@
 // 65535 would silently overflow a uint16_t and corrupt the saved setting. :3
 #define DEFAULT_ACCEL_MM_S2     8000.0f
 #define MAX_ACCEL_MM_S2         100000.0f
+
+// Split accel ceilings — same expert-mode split as speed above.
+#define NORMAL_MAX_ACCEL_MM_S2      50000.0f
+#define EXPERT_MAX_ACCEL_MM_S2      MAX_ACCEL_MM_S2     // 100000
+
+// =============================================================================
+// Safe-approach soft start — no more scary full-speed lunges. :3
+// =============================================================================
+// Whenever motion (re)engages after a discontinuity — a brand-new stream
+// connection, un-pausing, turning manual override OFF, the generator starting,
+// or a target that jumps from outside the stroke window into it — the first
+// move can be arbitrarily far from the carriage's current position. Dispatching
+// that at the configured max speed produces a sudden, violent lunge.
+//
+// Instead, for the first SAFE_RESUME_RAMP_MS after (re)engagement the speed
+// ceiling ramps linearly from SAFE_APPROACH_SPEED_MM_S up to the configured
+// max. The carriage glides to where the stream wants it, THEN opens the
+// throttle. Ease in first — nobody likes being slammed into from cold. :3
+#define SAFE_APPROACH_SPEED_MM_S    100.0f   // initial speed cap on re-engage (mm/s)
+#define SAFE_RESUME_RAMP_MS         1200u    // ramp duration back to full speed (ms)
 
 
 // =============================================================================
@@ -268,10 +375,13 @@ enum class TransportMode : uint8_t {
 // Dongle UART Transport — Serial2 on the ESP32-S3
 // =============================================================================
 // The T-Dongle C5 relays TCode from MFP over a physical UART wire to the S3.
-// Pins 8 (TX from S3 → dongle RX) and 9 (RX on S3 ← dongle TX).
+// On the custom v0.0 board the relay goes to the onboard C5-Zero over GPIO43/44
+// (D1/D0), NOT the old 8/9 — those now belong to the I2C bus (INA228/AS5600).
+// Leaving these on 8/9 would fight the current sensor for the same pins. :3
 // If TX and RX are swapped, just swap the wires — no firmware change needed. :3
-#define DONGLE_UART_TX_PIN      8    // S3 TX → Dongle RX
-#define DONGLE_UART_RX_PIN      9    // S3 RX ← Dongle TX
+#define DONGLE_UART_TX_PIN      43   // S3 TX → C5 RX (D1/TX)  [was GPIO8 on old PCB]
+#define DONGLE_UART_RX_PIN      44   // S3 RX ← C5 TX (D0/RX)  [was GPIO9 on old PCB]
+
 // 460800 baud: each byte takes ~22µs vs 87µs at 115200. A 12-byte TCode frame
 // arrives in ~260µs instead of ~1ms — cuts per-frame UART jitter by ~4×.
 // The dongle firmware must match this baud or every byte will be garbage. :3

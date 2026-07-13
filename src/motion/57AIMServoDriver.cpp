@@ -34,9 +34,11 @@
 static FastAccelStepperEngine _fas_engine;
 
 // Endstop is active LOW — the optocoupler pulls the pin LOW when the carriage
-// slams home. HIGH = clear, LOW = triggered. The carriage bottoms out and
-// screams into the switch like it's trying to get as deep as possible. :3
+// slams home. HIGH = clear, LOW = triggered. Only relevant on the LEGACY
+// endstop path (HOMING_USE_ENDSTOP) — the new v0.0 board has no switch and
+// feels its way home on motor current instead. :3
 #define ENDSTOP_ACTIVE_STATE LOW
+
 
 Ai57AIMServoDriver::Ai57AIMServoDriver() {}
 
@@ -48,14 +50,25 @@ void Ai57AIMServoDriver::init() {
     // drive is already sitting there, energized, waiting to be told what to do.
     // Plug it in and it's ready to take everything we give it. :3
 
-    // Endstop pin — INPUT_PULLUP keeps the line HIGH when the switch is open.
-    // The optocoupler pulls it LOW when the carriage hits the endstop. If we
-    // left it floating it'd false-trigger constantly — a twitchy, unreliable
-    // mess. Pull it up and it only screams when it means it. :3
+#if defined(HOMING_USE_ENDSTOP)
+    // LEGACY path only: endstop pin — INPUT_PULLUP keeps the line HIGH when the
+    // switch is open. The new v0.0 board has NO switch; this is compiled out by
+    // default and only exists for a bench rig with an endstop wired in. :3
     pinMode(AIM_PIN_ENDSTOP, INPUT_PULLUP);
+#endif
+
+    // Bring up the INA228 current sensor — the machine's sense of feel, and the
+    // ONLY way it knows it's hit a hard stop now that there's no switch. The
+    // Wire bus must already be up (main setup calls Wire.begin(SDA,SCL)); we
+    // just probe our device on it. If it's missing, homing will refuse rather
+    // than blindly ram the frame. :3
+    if (!_current.init()) {
+        MLOGLN(F("57AIMServo: WARNING — INA228 not found, sensorless homing DISABLED. uhoh :3"));
+    }
 
     // Store the engine pointer so everyone can share the toy. :3
     _engine = &_fas_engine;
+
 
     // Initialize FastAccelStepperEngine — creates the background timer task
     // on ESP32. This is the engine that generates the actual step pulses in
@@ -112,6 +125,21 @@ void Ai57AIMServoDriver::init() {
 
 void Ai57AIMServoDriver::update() {
     runMotorStep();
+
+    // Refresh the INA228 telemetry cache a few times a second so the WebUI
+    // toolbar can show a live current/voltage readout. We skip this while the
+    // homing task is running — homing owns the I2C bus and refreshes the cache
+    // itself every poll, and we don't want two callers gulping the same shunt
+    // at once. Throttled to ~5Hz: plenty for a human-readable number, and light
+    // enough that it never steals time from the motion pulse train. :3
+    if (!_homing && _current.isReady()) {
+        uint32_t now = millis();
+        if (now - _last_current_poll_ms >= 200) {   // ~5Hz refresh
+            _last_current_poll_ms = now;
+            _current.poll();   // one quick I2C sip, stashes into the cache
+        }
+    }
+
 
     // Stream stall watchdog: if the host has gone quiet (no fresh waypoint for
     // STREAM_STALL_MS) but we're still mid-thrust toward a streamed target,
@@ -206,130 +234,214 @@ void Ai57AIMServoDriver::_homingTaskImpl(void* param) {
 // The backoff uses move(-backoff_steps) to pull away from it.
 // If the carriage moves the WRONG way on sweep, flip AIM_PIN_DIR in
 // config_api.h or invert the setDirectionPin() bool in init(). :3
+// ----------------------------------------------------------------------------
+// _sweepToStall() — drive in one direction until the carriage buries itself
+// against a hard stop, detected by an INA228 current spike.
+// ----------------------------------------------------------------------------
+// dir_sign: +1 = sweep toward the rear (positive steps), -1 = toward the front.
+// Returns true if a stall was detected, false if the full sweep completed
+// without one (mechanical/electrical fault — carriage never hit a wall).
+//
+// This is the whole game now that there's no switch: we nose the carriage in
+// slow and steady, feeling the current with every poll. Free travel is a light
+// trickle; the instant it stuffs itself balls-deep against the hard stop the
+// current gushes as the servo strains, the belly can't take another mm, and we
+// know we've bottomed out. We stop the SECOND we feel that pressure spike. :3
+bool Ai57AIMServoDriver::_sweepToStall(int8_t dir_sign) {
+    // Crawl speed + high accel so it's effectively constant velocity from the
+    // first step — no ramp to confuse the current baseline. :3
+    _stepper->setSpeedInHz((uint32_t)_home_speed_steps_s);
+    _stepper->setAcceleration(10000);
+
+    // 1.2× the geometry ceiling of travel in the requested direction. The stall
+    // poll stops us long before we run out of steps; if we DO run out, it means
+    // we never felt a wall and homing fails. :3
+    int32_t sweep = (int32_t)(AIM_MAX_TRAVEL_MM * AIM_STEPS_PER_MM * 1.2f);
+    _stepper->move(dir_sign >= 0 ? sweep : -sweep);
+
+    // Let the pulse train actually spin up and let any residual stall current
+    // from a previous sweep decay out of the INA228's 16-sample averaging
+    // window BEFORE we start collecting the free-run baseline. Sampling too
+    // early poisons the baseline with leftover strain current and the next
+    // wall never reads as a spike. :3
+    vTaskDelay(pdMS_TO_TICKS(150));
+    if (!_stepper->isRunning()) {
+        MLOGLN(F("57AIMServo Homing: sweep move refused by FAS — stepper never started. uhoh :C"));
+        return false;
+    }
+
+    const uint32_t poll_ms   = 1000u / AIM_HOME_POLL_HZ;   // ~6-7ms @150Hz
+    float    baseline_a      = 0.0f;
+    uint32_t baseline_taken  = 0;
+    float    baseline_sum    = 0.0f;
+    uint16_t over_count      = 0;
+    uint32_t last_log_ms     = 0;
+
+    while (_stepper->isRunning()) {
+        float amps = fabsf(_current.readCurrentA());
+
+        // Build the free-run baseline from the FIRST N samples — while the
+        // carriage is still gliding freely and drawing its light idle trickle.
+        // Everything after is measured against this. :3
+        if (baseline_taken < AIM_HOME_BASELINE_SAMPLES) {
+            baseline_sum += amps;
+            if (++baseline_taken == AIM_HOME_BASELINE_SAMPLES) {
+                baseline_a = baseline_sum / (float)AIM_HOME_BASELINE_SAMPLES;
+                MLOGF("57AIMServo Homing: free-run baseline = %.2f A\n", baseline_a);
+            }
+        } else {
+            // Stall = current sitting above baseline+margin for N consecutive
+            // polls. One spike could be noise; N in a row is the carriage
+            // genuinely stuffed against the wall, straining, unable to go
+            // deeper. :3
+            if (amps > baseline_a + AIM_HOME_STALL_MARGIN_A) {
+                if (++over_count >= AIM_HOME_STALL_CONSEC) {
+                    // STOP NOW — no coasting on a 180W servo.
+                    _stepper->forceStop();
+                    MLOGF("57AIMServo Homing: *** STALL *** %.2f A (base %.2f + margin %.1f) "
+                          "for %u polls, pos=%d\n",
+                          amps, baseline_a, AIM_HOME_STALL_MARGIN_A, over_count,
+                          _stepper->getCurrentPosition());
+                    // Wait for the pulse train to fully drain before returning.
+                    uint32_t to = millis() + 500;
+                    while (_stepper->isRunning() && millis() < to) {
+                        vTaskDelay(pdMS_TO_TICKS(2));
+                    }
+                    return true;
+                }
+            } else {
+                over_count = 0;  // dropped back under threshold — reset the run
+            }
+        }
+
+        uint32_t now_ms = millis();
+        if (now_ms - last_log_ms >= 500) {
+            MLOGF("57AIMServo Homing: sweeping dir=%d I=%.2fA base=%.2f over=%u pos=%d\n",
+                  dir_sign, amps, baseline_a, over_count, _stepper->getCurrentPosition());
+            last_log_ms = now_ms;
+        }
+        vTaskDelay(pdMS_TO_TICKS(poll_ms));
+    }
+    return false;  // ran the whole sweep without a stall — no wall found. uhoh :C
+}
+
 void Ai57AIMServoDriver::_homingTask() {
-    // Dump full endstop state at entry so we can see it in the web log.
-    // This is the first thing we check — if it's already LOW at boot,
-    // the optocoupler may be wired normally-closed or the pin is floating. :3
-    int endstop_now = digitalRead(AIM_PIN_ENDSTOP);
-    MLOGF("57AIMServo Homing: START — endstop GPIO%d = %d (active=%d = LOW)\n",
-          AIM_PIN_ENDSTOP, endstop_now, ENDSTOP_ACTIVE_STATE);
-    MLOGF("57AIMServo Homing: speed=%u steps/s (%.1f mm/s)\n",
+    MLOGF("57AIMServo Homing: START (SENSORLESS via INA228) speed=%u steps/s (%.1f mm/s)\n",
           (uint32_t)_home_speed_steps_s,
           (float)_home_speed_steps_s / AIM_STEPS_PER_MM);
 
-    // Crawl speed for the entire homing sequence — same speed for sweep AND
-    // backoff. 180W servo is not a toy; we keep it slow until we trust it. :3
+    // No current sensor = no way to feel the wall. Refuse rather than blindly
+    // ram the frame at speed. The servo's own foldback is the last-ditch
+    // backstop, but we don't rely on it for a normal home. :3
+    if (!_current.isReady()) {
+        MLOGLN(F("57AIMServo Homing: ABORT — INA228 not ready, cannot sense stalls. uhoh :C"));
+        _homing = false;
+        _homed  = false;
+        _homingTaskHandle = nullptr;
+        vTaskDelete(nullptr);
+        return;
+    }
+
+    // --- Stall #1: find the FRONT hard stop first — rams toward the out end :3
+    MLOGLN(F("57AIMServo Homing: sweeping toward FRONT hard stop..."));
+    if (!_sweepToStall(-1)) {
+        MLOGLN(F("57AIMServo Homing: FAILED — no stall on front sweep. Check current"));
+        MLOGLN(F("  threshold (AIM_HOME_STALL_MARGIN_A), wiring, and travel distance."));
+        _homing = false;
+        _homed  = false;
+        _homingTaskHandle = nullptr;
+        vTaskDelete(nullptr);
+        return;
+    }
+
+    // Record the front stall position before we zero at the rear. :3
+    int32_t front_steps = _stepper->getCurrentPosition();
+    MLOGF("57AIMServo Homing: front wall touched at %d steps\n", front_steps);
+
+    // CRITICAL: forceStopAndNewPosition re-syncs the FAS position counter and
+    // clears the internal stopped/paused state. Without this, the `move()` call
+    // inside the NEXT _sweepToStall() is silently ignored — FAS is still stuck
+    // in its post-forceStop limbo and refuses to plan a new trajectory. This
+    // is the same re-sync the old A→B→A code had between every _sweepToStall. :3
+    _stepper->forceStopAndNewPosition(front_steps);
+    vTaskDelay(pdMS_TO_TICKS(50));   // let the pulse train fully settle
+
+    // Pull off the front wall a few mm before starting the rear sweep. If we
+    // begin the sweep while still jammed balls-deep against the stop, the
+    // servo is straining to break free and those elevated readings become the
+    // "free-run" baseline — making the rear wall undetectable. Back out,
+    // breathe, let the current fall back to its idle trickle, THEN sweep. :3
     _stepper->setSpeedInHz((uint32_t)_home_speed_steps_s);
-    // High accel so the ramp is negligible at crawl speed — effectively
-    // constant velocity from the first step. :3
     _stepper->setAcceleration(10000);
+    _stepper->move((int32_t)mmToNative(AIM_HOMING_BACKOFF_MM));  // + = toward rear
+    {
+        uint32_t free_to = millis() + 5000;
+        while (_stepper->isRunning() && millis() < free_to) vTaskDelay(pdMS_TO_TICKS(10));
+    }
+    vTaskDelay(pdMS_TO_TICKS(250));  // drain the stall spike out of the INA228 average
 
-    // If already on the endstop at boot, back off first then re-sweep.
-    // Use move() (relative) so we don't need a known position. :3
-    if (digitalRead(AIM_PIN_ENDSTOP) == ENDSTOP_ACTIVE_STATE) {
-        MLOGLN(F("57AIMServo Homing: Already at endstop — backing off 20mm before sweep"));
-        // Negative = away from endstop (toward front of machine). :3
-        _stepper->move(-(int32_t)mmToNative(AIM_HOMING_BACKOFF_MM * 2.0f));
-        while (_stepper->isRunning()) {
-            vTaskDelay(pdMS_TO_TICKS(20));
-        }
-        MLOGF("57AIMServo Homing: pre-backoff done, endstop now=%d\n",
-              digitalRead(AIM_PIN_ENDSTOP));
+    // --- Stall #2: sweep back to the REAR hard stop (this becomes home / 0mm) ---
+    MLOGLN(F("57AIMServo Homing: sweeping toward REAR hard stop to establish home..."));
+    if (!_sweepToStall(+1)) {
+        MLOGLN(F("57AIMServo Homing: FAILED — no stall on rear sweep. Check current"));
+        MLOGLN(F("  threshold (AIM_HOME_STALL_MARGIN_A), wiring, and travel distance."));
+        _homing = false;
+        _homed  = false;
+        _homingTaskHandle = nullptr;
+        vTaskDelete(nullptr);
+        return;
     }
 
-    // Sweep toward the endstop. Positive steps = toward endstop (rear).
-    // 1.5× travel gives plenty of margin — the endstop poll stops us before
-    // we run out of steps. If the motor runs the full sweep without triggering,
-    // homing fails and we log it. :3
-    int32_t sweep_steps = (int32_t)(AIM_MAX_TRAVEL_MM * AIM_STEPS_PER_MM * 1.5f);
-    _stepper->move(sweep_steps);
+    // Capture the rear stall position BEFORE zeroing — the true rail span is
+    // rear-minus-front. In the new front→rear flow, front_steps is relative to
+    // wherever the carriage happened to sit at boot, so |front_steps| alone is
+    // NOT the span anymore. :3
+    int32_t rear_steps = _stepper->getCurrentPosition();
 
-    MLOGF("57AIMServo Homing: Sweeping +%d steps toward endstop at %u steps/s\n",
-          sweep_steps, (uint32_t)_home_speed_steps_s);
+    // Zero at the rear stop, then back off AIM_HOMING_BACKOFF_MM so the carriage
+    // isn't grinding balls-deep against the wall. This backed-off spot = home. :3
+    _stepper->forceStopAndNewPosition(0);
+    vTaskDelay(pdMS_TO_TICKS(100));
+    _stepper->setSpeedInHz((uint32_t)_home_speed_steps_s);
+    _stepper->setAcceleration(10000);
+    int32_t backoff_steps = (int32_t)mmToNative(AIM_HOMING_BACKOFF_MM);
+    _stepper->move(-backoff_steps);   // negative = away from rear, toward front
+    uint32_t to = millis() + 30000;
+    while (_stepper->isRunning() && millis() < to) vTaskDelay(pdMS_TO_TICKS(20));
+    _stepper->forceStopAndNewPosition(0);   // re-zero: THIS is home (0mm)
+    _current_position_mm = 0.0f;
+    MLOGF("57AIMServo Homing: rear found, backed off %.1fmm — HOME set at 0mm :3\n",
+          AIM_HOMING_BACKOFF_MM);
 
-    // Poll every 20ms. Log the endstop state every 500ms so we can watch it
-    // change in the web log without flooding it. :3
-    uint32_t last_log_ms = 0;
-    while (_stepper->isRunning()) {
-        int es = digitalRead(AIM_PIN_ENDSTOP);
+    // --- Measure usable stroke from front stall to rear ---
+    // Span = distance between the two stall positions (both measured in the
+    // same pre-zero counter frame). Subtract the backoff margin. :3
+    int32_t span_steps = rear_steps - front_steps;   // rear is +dir, front is -dir
+    if (span_steps > 0) {
+        float   raw_span_mm = fabsf(nativeToMm(span_steps));
+        float   usable_mm   = raw_span_mm - AIM_HOMING_BACKOFF_MM;
+        if (usable_mm < 0.0f) usable_mm = 0.0f;
+        if (usable_mm > AIM_MAX_TRAVEL_MM) usable_mm = AIM_MAX_TRAVEL_MM;
+        _measured_stroke_mm = usable_mm;
 
-        // Verbose periodic log — shows endstop state + step position every 500ms
-        uint32_t now_ms = millis();
-        if (now_ms - last_log_ms >= 500) {
-            MLOGF("57AIMServo Homing: polling... endstop=%d pos=%d\n",
-                  es, _stepper->getCurrentPosition());
-            last_log_ms = now_ms;
-        }
-
-        if (es == ENDSTOP_ACTIVE_STATE) {
-            // Endstop triggered — STOP IMMEDIATELY. forceStopAndNewPosition()
-            // atomically halts the pulse train AND sets the position counter.
-            // This is the only safe stop for a 180W servo — no coasting. :3
-            _stepper->forceStopAndNewPosition(0);
-            MLOGF("57AIMServo Homing: *** ENDSTOP HIT *** pos zeroed, running=%d\n",
-                  _stepper->isRunning());
-
-            // Wait for the drive to fully settle before issuing the backoff.
-            // FAS ignores moveTo() if the queue is still busy. :3
-            uint32_t stop_to = millis() + 500;
-            while (_stepper->isRunning() && millis() < stop_to) {
-                vTaskDelay(pdMS_TO_TICKS(2));
-            }
-
-            // Back off at the same crawl speed — no sudden fast moves on a
-            // 180W servo. Negative steps = away from endstop (toward front).
-            // We use move() (relative) so the direction is unambiguous. :3
-            _stepper->setSpeedInHz((uint32_t)_home_speed_steps_s);
-            _stepper->setAcceleration(10000);
-            int32_t backoff_steps = (int32_t)mmToNative(AIM_HOMING_BACKOFF_MM);
-            _stepper->move(-backoff_steps);  // negative = away from endstop
-
-            MLOGF("57AIMServo Homing: backing off %d steps (%.1f mm) at %u steps/s\n",
-                  backoff_steps, AIM_HOMING_BACKOFF_MM, (uint32_t)_home_speed_steps_s);
-
-            uint32_t timeout = millis() + 30000;  // 30s timeout at crawl speed
-            while (_stepper->isRunning() && millis() < timeout) {
-                vTaskDelay(pdMS_TO_TICKS(20));
-            }
-            MLOGF("57AIMServo Homing: backoff done, pos=%d endstop=%d\n",
-                  _stepper->getCurrentPosition(), digitalRead(AIM_PIN_ENDSTOP));
-
-            if (digitalRead(AIM_PIN_ENDSTOP) == ENDSTOP_ACTIVE_STATE) {
-                MLOGLN(F("WARNING: Endstop still active after backoff! Check wiring/direction."));
-            } else {
-                MLOGLN(F("57AIMServo Homing: Endstop released OK"));
-            }
-
-            // Re-zero at this backed-off position — this is home (0mm).
-            // The carriage is now AIM_HOMING_BACKOFF_MM (10mm) away from the
-            // endstop. All subsequent moves are measured from here. :3
-            _stepper->forceStopAndNewPosition(0);
-            _current_position_mm = 0.0f;
-            _homed  = true;
-            _homing = false;
-
-            MLOGLN(F("57AIMServo Homing: Complete — homed at 0mm, ready :3"));
-            _homingTaskHandle = nullptr;
-            vTaskDelete(nullptr);
-            return;
-        }
-        vTaskDelay(pdMS_TO_TICKS(20));
+        MLOGF("57AIMServo Homing: front-to-rear span %.1fmm -> usable stroke %.1fmm "
+              "(ceiling %.1fmm) :3\n", raw_span_mm, _measured_stroke_mm, AIM_MAX_TRAVEL_MM);
+    } else {
+        // Non-positive span — something's off, fall back to geometry
+        // ceiling. We still have a valid home from the rear sweep. :3
+        _measured_stroke_mm = 0.0f;
+        MLOGLN(F("57AIMServo Homing: unexpected front position — using geometry ceiling."));
     }
 
-    // Motor stopped without hitting the endstop — homing failed.
-    // Log the final endstop state so we know if it was a wiring issue or a
-    // travel issue. The carriage is at an unknown position. uhoh. :3
-    MLOGF("57AIMServo Homing: FAILED — motor stopped before endstop. endstop=%d\n",
-          digitalRead(AIM_PIN_ENDSTOP));
-    MLOGLN(F("  Check: 1) direction (does carriage move toward endstop?)"));
-    MLOGLN(F("         2) endstop wiring (GPIO12 should read HIGH when open)"));
-    MLOGLN(F("         3) travel distance (AIM_MAX_TRAVEL_MM large enough?)"));
+    _current_position_mm = 0.0f;
+    _homed  = true;
     _homing = false;
-    _homed  = false;
-
+    MLOGF("57AIMServo Homing: COMPLETE — homed at 0mm, usable stroke %.1fmm. yippie! :3\n",
+          _measured_stroke_mm > 0.0f ? _measured_stroke_mm : AIM_MAX_TRAVEL_MM);
     _homingTaskHandle = nullptr;
     vTaskDelete(nullptr);
 }
+
 
 bool Ai57AIMServoDriver::home(int32_t home_speed_steps_s) {
     if (_homing) return false;
@@ -337,6 +449,14 @@ bool Ai57AIMServoDriver::home(int32_t home_speed_steps_s) {
     MLOGLN(F("57AIMServo Homing: Starting..."));
     _homing = true;
     _homed  = false;
+
+    // Fresh peak-current/peak-power tracking (and the INA228's own hardware
+    // energy accumulator) for this homing cycle — the operator wants to know
+    // how hard THIS home strained, not a stale number left over from the last
+    // one. Only meaningful if the sensor is actually ready. :3
+    if (_current.isReady()) {
+        _current.resetPeaks();
+    }
     // Default to AIM_HOMING_SPEED_STEPS_S (500 steps/s = 25 mm/s) — safe and
     // controlled. The old 4000 default was inherited from the TMC build where
     // 80 steps/mm made it 50 mm/s. At 20 steps/mm, 4000 = 200 mm/s — the
@@ -385,12 +505,19 @@ void Ai57AIMServoDriver::runHomingStep() {
 // zero there, back off 10mm, and we're homed. Consent is important — the
 // machine waits for the user to push it in before it takes over. :3
 bool Ai57AIMServoDriver::checkPushToHome() {
+#if !defined(HOMING_USE_ENDSTOP)
+    // The v0.0 board has NO endstop switch — push-to-home relied on reading it,
+    // so it's a no-op here. Homing is done via the sensorless current-stall
+    // sweep (home()). This whole body only compiles on a legacy endstop rig. :3
+    return false;
+#else
     if (_homed || _homing || !_stepper) return false;
 
     static uint32_t active_since = 0;
     uint32_t now = millis();
 
     if (digitalRead(AIM_PIN_ENDSTOP) == ENDSTOP_ACTIVE_STATE) {
+
         // Endstop pressed — start/continue debounce window.
         if (active_since == 0) active_since = now;
 
@@ -433,9 +560,11 @@ bool Ai57AIMServoDriver::checkPushToHome() {
         active_since = 0;
     }
     return false;
+#endif // HOMING_USE_ENDSTOP
 }
 
 // ---- Motion ------------------------------------------------------------------
+
 
 void Ai57AIMServoDriver::moveTo(float pos_mm) {
     if (!_homed) {
@@ -711,11 +840,12 @@ void Ai57AIMServoDriver::applyDriverConfig(const DriverConfig& cfg) {
 // ---- Unit conversion ---------------------------------------------------------
 
 int32_t Ai57AIMServoDriver::mmToNative(float mm) const {
-    // Convert mm to steps using the 57AIM30's geometry.
-    // AIM_STEPS_PER_MM = 20.0 (1600 steps/rev ÷ 80mm/rev).
-    // The result is a step count — positive = toward endstop. :3
+    // Convert mm to steps using the capstan-drum geometry.
+    // AIM_STEPS_PER_MM ≈ 20.372 (1600 steps/drum-rev ÷ π×25mm circumference).
+    // The result is a step count — positive = toward the rear hard stop. :3
     return (int32_t)(mm * AIM_STEPS_PER_MM);
 }
+
 
 float Ai57AIMServoDriver::nativeToMm(int32_t native) const {
     // Convert steps back to mm. Inverse of mmToNative(). :3

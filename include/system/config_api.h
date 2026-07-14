@@ -349,9 +349,10 @@
 //         a BLE host (phone app / Intiface BLE) writes TCode to the RX
 //         characteristic. Wireless, personal, intimate. No WiFi needed.
 enum class TransportMode : uint8_t {
-    WS     = 0,
-    SER    = 1,
-    BT     = 2,
+    WS      = 0,
+    SER     = 1,
+    BT      = 2,
+    OSSM_BLE = 4,
     // DONGLE: T-Dongle C5 connected via hardware UART (Serial2).
     // The dongle receives TCode over USB from MFP and relays it to the S3
     // over a physical UART wire — TX/RX on pins defined below. This lets

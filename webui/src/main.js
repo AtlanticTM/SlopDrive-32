@@ -19,7 +19,7 @@ import './style.css';
 import { injectIcons, initTabs, initCollapsibleCards, initTooltips, wireActions, toast, icon, $, setRead, clamp, onLiveSlider, paintSlider } from './core/ui.js';
 import { post, get, getText } from './core/api.js';
 import { TRAVEL, initRangeDesigner, renderWindow, setPosTarget, startPosAnim, syncManualWindow, nudgeWindow, trim, setBound, useCurrentAsDefault } from './core/range.js';
-import { initGenerator, startGenerator, stopGenerator, gen } from './features/generator.js';
+import { initPattern, startPattern, stopPattern, pat } from './features/pattern.js';
 import { currentMode, reflectMode, initSettings, saveSettings, restoreDefaults } from './features/settings.js';
 import { pushTelemetryBatch, initMotionGraph } from './features/motiongraph.js';
 import { fetchAndApplyCapabilities, refreshHealthCards } from './core/capabilities.js';
@@ -53,11 +53,11 @@ function reflectGating() {
 
 async function togglePause() {
   var next = !state.paused; await post('/api/pause', { paused: next });
-  state.paused = next; reflectGating(); if (next) stopGenerator();
+  state.paused = next; reflectGating(); if (next) stopPattern();
 }
-async function halt() { await post('/api/halt', {}); stopGenerator(); toast('Motion halted', 'warn', 'i-stop'); }
+async function halt() { await post('/api/halt', {}); stopPattern(); toast('Motion halted', 'warn', 'i-stop'); }
 async function estop() {
-  await post('/api/stop', {}); stopGenerator();
+  await post('/api/stop', {}); stopPattern();
   state.paused = false; state.override = false; reflectGating();
   toast('E-STOP — power cut, re-home required', 'bad', 'i-alert', 6000);
 }
@@ -267,7 +267,7 @@ async function pollStatus() {
       fetchAndApplyCapabilities();
     }
     prevStatus.buttplug = !!d.buttplug_connected; prevStatus.serial = !!d.serial_linked; prevStatus.ready = !!d.homed;
-    if (gen.running && state.ifActive && !state.paused && !state.override) { stopGenerator(); var gn = $('#genNote'); if (gn) gn.textContent = 'Auto-paused'; }
+    if (pat.running && state.ifActive && !state.paused && !state.override) { stopPattern(); var gn = $('#patNote'); if (gn) gn.textContent = 'Auto-paused'; }
   } catch (e) {
     // swallow — a single dropped poll is a non-event; the next one catches up.
   } finally {
@@ -284,7 +284,7 @@ async function refreshLog() {
 
 // ===================== Focus Mode =====================
 // Strips the UI down to the essentials — stroke window, position slider,
-// generator start/stop, and transport. Everything else gets the leash
+// pattern start/stop, and transport. Everything else gets the leash
 // yanked from under it. Persisted to localStorage so it survives reloads
 // and the vibe is maintained across sessions. :3
 
@@ -351,7 +351,7 @@ function restoreSidebarCards() {
   if (!sidebarCards) return;
   // Move cards back from sidebar to their original spots inside the drive tab
   var cards = sidebarCards.querySelectorAll('[data-sidebar-card]');
-  // Insert them at the top of the drive tab (before the Motion Generator card)
+  // Insert them at the top of the drive tab (before the Pattern Engine card)
   cards.forEach(function (card) {
     driveTab.insertBefore(card, driveTab.firstChild);
   });
@@ -402,7 +402,7 @@ function restoreGraphCard() {
   if (!panel) return;
   var graphCard = panel.querySelector('[data-graph-card]');
   if (!graphCard) return;
-  // Insert back into the Drive tab — after sidebar cards, before the generator
+  // Insert back into the Drive tab — after sidebar cards, before the pattern card
   driveTab.insertBefore(graphCard, driveTab.children[2] || null);
   graphCloned = false;
   // Restore collapsibility on mobile
@@ -477,7 +477,7 @@ function init() {
   mq.addEventListener('change', handleSidebarBreakpoint);
 
   initTabs(); initCollapsibleCards(); initTooltips(); wireActions();
-  initRangeDesigner(); renderWindow(); initGenerator(); initSettings();
+  initRangeDesigner(); renderWindow(); initPattern(); initSettings();
   initMotionGraph();    // batched-telemetry playback + canvas motion plot :3
   initFocusMode();
   initResizableSidebar();

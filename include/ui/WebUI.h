@@ -6,9 +6,7 @@
 // Forward declarations — WebUI stores references to these, not values.
 class MotorDriver;
 class RangeMapper;
-class Generator;
-// NOTE: Interpolator removed — jitter-buffer interpolation is compiled out for
-// the trapezoidal-only troubleshooting build. :3
+class PatternEngine;
 class TransportManager;
 
 class SerialTransport;
@@ -69,7 +67,7 @@ public:
     WebUI(SystemState&        state,
           MotorDriver&        motor,
           RangeMapper&        mapper,
-          Generator&          generator,
+          PatternEngine&      patternEngine,
           TransportManager&   transportMgr,
 
           SerialTransport&    serialTransport,
@@ -120,7 +118,7 @@ private:
     SystemState&        _state;
     MotorDriver&        _motor;
     RangeMapper&        _mapper;
-    Generator&          _generator;
+    PatternEngine&      _patternEngine;
     TransportManager&   _transportMgr;
 
     SerialTransport&    _serialTransport;
@@ -148,8 +146,7 @@ private:
     void handleApiHalt();
     void handleApiOverride();
     void handleApiTmc();
-    void handleApiGen();
-    void handleApiInterp();
+    void handleApiPattern();
     void handleApiLog();
     void handleApiMode();
 };

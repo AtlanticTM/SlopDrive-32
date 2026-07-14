@@ -16,6 +16,7 @@ text always lives with each upstream project.
 | ArduinoJson | Benoît Blanchon | MIT | https://github.com/bblanchon/ArduinoJson |
 | arduinoWebSockets | Markus Sattler (Links2004) | LGPL-2.1 | https://github.com/Links2004/arduinoWebSockets |
 | Arduino-ESP32 core | Espressif Systems | LGPL-2.1 (+ Apache-2.0 components) | https://github.com/espressif/arduino-esp32 |
+| OSSM StrokeEngine / pattern classes | theelims (vendored from KinkyMakers/OSSM-hardware) | MIT | https://github.com/KinkyMakers/OSSM-hardware |
 
 > **Note on LGPL libraries** (Adafruit NeoPixel, arduinoWebSockets, the
 > Espressif Arduino core): the LGPL permits use and linking in projects under
@@ -57,6 +58,7 @@ Individual MIT-licensed libraries retain their own copyright notices:
 - **TMCStepper** — Copyright (c) Teemu Mäntykallio
 - **FastAccelStepper** — Copyright (c) Jochen Kiemes
 - **ArduinoJson** — Copyright (c) Benoît Blanchon
+- **StrokeEngine** — Copyright (C) 2021-2022 theelims <elims@gmx.net>. Vendored from KinkyMakers/OSSM-hardware, Software/lib/StrokeEngine/src/. The pattern code (pattern.h, PatternMath.h) carries: "This software may be modified and distributed under the terms of the MIT license."
 
 ### LGPL-3.0 (Adafruit NeoPixel)
 

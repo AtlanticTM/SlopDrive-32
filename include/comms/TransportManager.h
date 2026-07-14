@@ -24,6 +24,7 @@ class SerialTransport;
 class WebSocketTransport;
 class BleTransport;
 class DongleTransport;
+class OssmBleService;
 
 class TransportManager {
 public:
@@ -32,7 +33,8 @@ public:
                      SerialTransport&    serial,
                      WebSocketTransport& ws,
                      BleTransport&       ble,
-                     DongleTransport&    dongle);
+                     DongleTransport&    dongle,
+                     OssmBleService&     ossm);
 
     /// Bring up WiFi in STA mode + mDNS.  Safe to call once at boot.
     /// Returns true if connected.
@@ -68,6 +70,7 @@ private:
     WebSocketTransport& _ws;
     BleTransport&       _ble;
     DongleTransport&    _dongle;
+    OssmBleService&     _ossm;
 };
 
 #endif // TRANSPORT_MANAGER_H

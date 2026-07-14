@@ -36,7 +36,8 @@
 #include "57AIMServoDriver.h"
 #endif
 
-#include "Generator.h"
+#include "PatternEngine.h"
+#include "OssmBleService.h"
 
 #include "TCodeParser.h"
 #include "SerialTransport.h"
@@ -49,6 +50,30 @@
 
 #if defined(FEATURE_RS485_MODBUS)
 #include "ServoModbus.h"
+#endif
+
+#if defined(BLE_ENABLED)
+// ============================================================================
+// KEEP THE BLE CONTROLLER MEMORY — do not let initArduino() free it!
+//
+// Arduino core 3.x releases the ~36KB BT controller static memory back to the
+// heap during initArduino() unless bleInUse() returns true. That flag is only
+// set by the core's OWN BLE libraries (via esp32-hal-alloc-ble-mem.h); the
+// third-party NimBLE-Arduino library never sets it. With the memory released,
+// any later esp_bt_controller_init() (inside NimBLEDevice::init()) loads the
+// controller's ROM-patch data straight over live heap blocks — corrupting the
+// TLSF free list and crashing with a deterministic LoadProhibited wild pointer
+// on the very next malloc. esp32-hal-bt.c documents this exact failure:
+// "If any memory required for this mode has already been released,
+//  esp_bt_controller_init() will crash."
+//
+// This strong override of the core's weak bleInUse() tells initArduino() the
+// BLE radio belongs to us, keeping the controller memory reserved so NimBLE
+// (native NUS transport AND the OSSM masquerade service) can init at any time,
+// including at runtime from the web UI transport switch. Costs ~36KB DRAM we
+// were always going to spend on BLE anyway. :3
+// ============================================================================
+extern "C" bool bleInUse(void) { return true; }
 #endif
 
 
@@ -67,7 +92,7 @@
 
 static SystemState        g_state;
 static RangeMapper        mapper;
-static Generator          generator(g_state, mapper, motor);
+static PatternEngine      patternEngine(g_state, mapper, motor);
 
 static TCodeParser        tcodeParser;
 static SerialTransport    serialTransport(tcodeParser);
@@ -76,12 +101,13 @@ static BleTransport       bleTransport(tcodeParser);
 // The T-Dongle C5 relay — Serial2 on pins 8/9. Opened only when DONGLE mode
 // is selected; otherwise the UART stays closed and the pins are free. :3
 static DongleTransport    dongleTransport(tcodeParser);
+static OssmBleService     ossmBleService(g_state, patternEngine, mapper, nullptr);
 static TransportManager   transportMgr(g_state, tcodeParser,
                                         serialTransport, wsTransport, bleTransport,
-                                        dongleTransport);
+                                        dongleTransport, ossmBleService);
 
-static WebUI webui(g_state, motor, mapper, generator,
-                   transportMgr, serialTransport, wsTransport, bleTransport);
+static WebUI webui(g_state, motor, mapper, patternEngine,
+                    transportMgr, serialTransport, wsTransport, bleTransport);
 
 #if defined(FEATURE_RS485_MODBUS)
 // RS485 Modbus telemetry on Serial1, GPIO17/18 (config_api.h: AIM_PIN_485_TX/RX).
@@ -287,6 +313,8 @@ static void httpTask(void* param) {
 #if defined(FEATURE_RS485_MODBUS)
         servoModbus.update();     // non-blocking state machine, 2Hz internals
 #endif
+        // OSSM BLE service heartbeat + disconnect safety ramp
+        ossmBleService.update();
         // Onboard LED feedback — heartbeat breath, amber activity pulse, RGB
         // machine state. Cheap GPIO/PWM writes, 10ms cadence, Core 0. :3
         statusLedsUpdate(g_state);
@@ -641,9 +669,21 @@ void setup() {
     // call, and under a disconnect burst it can be called many times per tick.
     // 4096 was tight enough to overflow under that load — 6144 gives headroom. :3
     xTaskCreatePinnedToCore(commsTask,           "Comms",    6144, nullptr, 2, nullptr, 0);
-    xTaskCreatePinnedToCore(httpTask,            "HTTP",     4096, &webui,  1, nullptr, 0);
+    // httpTask stack bumped 4096 -> 8192. WebUI::handleApiMode() can switch the
+    // transport to OSSM/BT, which calls NimBLEDevice::init() ->
+    // esp_bt_controller_init() several frames deep inside the synchronous
+    // WebServer request handler. The BT controller bring-up is extremely
+    // stack-hungry — at 4096 it overflowed httpTask's stack into the adjacent
+    // heap-allocated task stack, corrupting TLSF free-list metadata and causing
+    // a LoadProhibited fault on the next malloc inside BT init. 8192 gives the
+    // controller init the headroom it needs. :3
+    xTaskCreatePinnedToCore(httpTask,            "HTTP",     8192, &webui,  1, nullptr, 0);
 
-    generator.init();    // creates its own task on Core 1, priority 2
+    // Set the waypoint queue handle (created above) so the OSSM stream bridge
+    // can push PositionTime waypoints into the existing pipeline. :3
+    ossmBleService.setWaypointQueue(g_waypoint_queue);
+    ossmBleService.init();
+    patternEngine.init();    // creates its own task on Core 1, priority 2
 
 #if HOMING_DISABLED
     // >>>> HOMING DISABLED: force homed flags for bench/remote testing only.

@@ -265,44 +265,24 @@
         </div>
       </div>
 
-      <!-- 3. Motion Generator -->
-      <div class="card collapsible">
+      <!-- 3. Pattern Engine (StrokeEngine patterns) -->
+      <div class="card collapsible" id="patternCard">
         <div class="card-head">
-          <span data-ico="i-wave"></span><h2>Motion Generator</h2>
-          <button class="info" data-tip="Generates motion on the device itself, so it keeps running even if you close this tab or WiFi drops. Auto-yields if Intiface starts driving (unless you've paused or overridden). The FM/AM modulator slowly drifts the rate or depth for a less mechanical feel. The preview below visualizes the exact waveform the device is producing."><span data-ico="i-info"></span></button>
+          <span data-ico="i-wave"></span><h2>Pattern Engine</h2>
+          <button class="info" data-tip="OSSM StrokeEngine patterns running on-device. Select a pattern, tune the sliders, then Start. The machine will cycle the selected pattern inside the stroke window. Auto-yields if Intiface starts driving (unless you've paused or overridden)."><span data-ico="i-info"></span></button>
           <span class="caret" data-ico="i-chevron"></span>
         </div>
         <div class="card-body">
 
-        <div class="mini-label">Carrier waveform</div>
+        <div class="field" id="patSelField"><label>Pattern</label><select id="patSelect"><option value="0">Simple Stroke</option><option value="1">Teasing Pounding</option><option value="2">Robo Stroke</option><option value="3">Half'n'Half</option><option value="4">Deeper</option><option value="5">Stop'n'Go</option><option value="6">Insist</option></select></div>
 
-        <div class="seg" id="waveSeg" style="margin-bottom:14px">
-          <button class="active" data-w="sine">Sine</button>
-          <button data-w="triangle">Triangle</button>
-          <button data-w="square">Square</button>
-          <button data-w="saw">Sawtooth</button>
-        </div>
+        <div class="field" id="patSpeedField"><label>Speed</label><input type="range" id="patSpeed" min="0" max="100" step="1" value="50"><div class="readout"><b id="patSpeedVal">50</b><span>%</span></div></div>
+        <div class="field" id="patDepthField"><label>Depth</label><input type="range" id="patDepth" min="0" max="100" step="1" value="100"><div class="readout"><b id="patDepthVal">100</b><span>%</span></div></div>
+        <div class="field" id="patStrokeField"><label>Stroke</label><input type="range" id="patStroke" min="0" max="100" step="1" value="100"><div class="readout"><b id="patStrokeVal">100</b><span>%</span></div></div>
+        <div class="field" id="patSensField"><label>Sensation</label><input type="range" id="patSensation" min="0" max="100" step="1" value="50"><div class="readout"><b id="patSensVal">50</b><span>%</span></div></div>
 
-        <!-- Generator controls -->
-        <div class="field" id="genRateField"><label>Rate</label><input type="range" id="genRate" min="0.1" max="10" step="0.1" value="0.8"><div class="readout"><b id="genRateVal">0.8</b><span>Hz</span></div></div>
-        <div class="field" id="genDepthField"><label>Depth</label><input type="range" id="genDepth" min="5" max="100" step="1" value="80"><div class="readout"><b id="genDepthVal">80</b><span>% of window</span></div></div>
-        <div class="field" id="genOffField"><label>Center offset</label><input type="range" id="genOff" min="0" max="100" step="1" value="50"><div class="readout"><b id="genOffVal">50</b><span>%</span></div></div>
-        <div class="field" id="genEaseField"><label>Ease (soft ends)</label><input type="range" id="genEase" min="0" max="100" step="1" value="0"><div class="readout"><b id="genEaseVal">0</b><span>%</span></div></div>
-
-        <div class="mini-label" style="margin-top:4px">FM / AM modulator</div>
-        <div class="seg" id="modSeg" style="margin-bottom:14px">
-          <button class="active" data-m="off">Off</button>
-          <button data-m="rate">Rate FM</button>
-          <button data-m="depth">Depth AM</button>
-        </div>
-        <div id="modControls" style="display:none">
-          <div class="field"><label>Mod shape</label><select id="modWave"><option value="sine">Sine</option><option value="triangle">Triangle</option><option value="random">Random</option></select></div>
-          <div class="field"><label>Mod rate</label><input type="range" id="modRate" min="0.01" max="1" step="0.01" value="0.1"><div class="readout"><b id="modRateVal">0.10</b><span>Hz</span></div></div>
-          <div class="field"><label>Mod amplitude</label><input type="range" id="modAmp" min="0" max="2" step="0.05" value="0.8"><div class="readout"><b id="modAmpVal">0.80</b><span>Hz</span></div></div>
-        </div>
-
-        <button class="btn primary" id="genStartBtn"><span data-ico="i-play"></span> Start Generator</button>
-        <div class="hint" id="genNote">Generated on the device — keeps running even if you close this tab. Toggle the preview to visualize the motion.</div>
+        <button class="btn primary" id="patStartBtn"><span data-ico="i-play"></span> Start Pattern</button>
+        <div class="hint" id="patNote">Patterns run on-device — they keep going even if you close this tab. Stop before switching patterns.</div>
 
         </div>
       </div>
@@ -365,6 +345,7 @@
           <button data-mode="SER">Serial</button>
           <button id="btModeBtn" data-mode="BT" style="display:none">Bluetooth</button>
           <button data-mode="DONGLE">Dongle</button>
+          <button data-mode="OSSM">BLE (OSSM)</button>
         </div>
         <div class="hint" id="modeHint">Choose how the machine receives motion commands.</div>
         <div class="chip" id="bleStatus" style="display:none;margin-top:10px">

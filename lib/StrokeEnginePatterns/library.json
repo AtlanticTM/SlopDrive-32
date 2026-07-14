@@ -1,0 +1,25 @@
+{
+    "name": "StrokeEnginePatterns",
+    "version": "1.0.0",
+    "description": "Vendored StrokeEngine pattern classes from the KinkyMakers OSSM-hardware project (main branch). Contains only the pattern math (pattern.h + PatternMath.h + shim header) — NO motor code, homing, tasks, or FastAccelStepper dependencies. Used by SlopDrive-32's PatternEngine module.",
+    "authors": [
+        {
+            "name": "theelims",
+            "url": "https://github.com/theelims/StrokeEngine"
+        },
+        {
+            "name": "KinkyMakers / OSSM-hardware contributors",
+            "url": "https://github.com/KinkyMakers/OSSM-hardware"
+        }
+    ],
+    "license": "MIT",
+    "frameworks": "arduino",
+    "platforms": "espressif32",
+    "headers": ["pattern.h", "PatternMath.h", "patternShim.h"],
+    "upstream": {
+        "repository": "https://github.com/KinkyMakers/OSSM-hardware",
+        "branch": "main",
+        "path": "Software/lib/StrokeEngine/src/",
+        "commit-date": "2026-07-13 (vendored)"
+    }
+}

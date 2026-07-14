@@ -14,7 +14,7 @@
 #include "AppLog.h"
 #include "ConfigStore.h"
 #include "StatusLeds.h"
-#include "Generator.h"
+#include "PatternEngine.h"
 #include "MotorDriver.h"
 
 #include "TransportManager.h"
@@ -53,7 +53,7 @@ static const char* htmlFallbackPage = R"RAWHTML(
 WebUI::WebUI(SystemState&        state,
              MotorDriver&        motor,
              RangeMapper&        mapper,
-             Generator&          generator,
+             PatternEngine&      patternEngine,
              TransportManager&   transportMgr,
              SerialTransport&    serialTransport,
              WebSocketTransport& wsTransport,
@@ -61,7 +61,7 @@ WebUI::WebUI(SystemState&        state,
     : _state(state)
     , _motor(motor)
     , _mapper(mapper)
-    , _generator(generator)
+    , _patternEngine(patternEngine)
     , _transportMgr(transportMgr)
 
     , _serialTransport(serialTransport)
@@ -96,14 +96,10 @@ void WebUI::init() {
     _httpServer->on("/api/tmc",       HTTP_GET,  [this]() { handleApiTmc(); });
     _httpServer->on("/api/tmc",       HTTP_POST, [this]() { statusLedsActivity(); handleApiTmc(); });
     _httpServer->on("/api/clearfault",HTTP_POST, [this]() { statusLedsActivity(); handleApiClearFault(); });
-    _httpServer->on("/api/gen",       HTTP_GET,  [this]() { handleApiGen(); });
-    _httpServer->on("/api/gen",       HTTP_POST, [this]() { statusLedsActivity(); handleApiGen(); });
-    // /api/interp is still wired so the UI config card renders, but the
-    // actual jitter-buffer engine got yanked out. The route returns the
-    // stored params and lets the UI tweak them — just nobody's home to
-    // actually do the thrusting. Dormant but polite about it. yippie! :3
-    _httpServer->on("/api/interp",    HTTP_GET,  [this]() { handleApiInterp(); });
-    _httpServer->on("/api/interp",    HTTP_POST, [this]() { handleApiInterp(); });
+    _httpServer->on("/api/pattern",   HTTP_GET,  [this]() { handleApiPattern(); });
+    _httpServer->on("/api/pattern",   HTTP_POST, [this]() { statusLedsActivity(); handleApiPattern(); });
+    // /api/gen and /api/interp are REMOVED — replaced by /api/pattern above.
+    // The vendored StrokeEngine patterns are the only on-device motion generator.
     _httpServer->on("/api/log",       HTTP_GET,  [this]() { handleApiLog(); });
     _httpServer->on("/api/mode",      HTTP_GET,  [this]() { handleApiMode(); });
     _httpServer->on("/api/mode",      HTTP_POST, [this]() { handleApiMode(); });
@@ -687,21 +683,17 @@ void WebUI::handleApiTmc() {
     _httpServer->send(200, "application/json", json);
 }
 
-void WebUI::handleApiGen() {
+void WebUI::handleApiPattern() {
     if (_httpServer->method() == HTTP_GET) {
         JsonDocument doc;
-        doc["running"]  = _state.gen.running;
-        doc["active"]   = _state.gen_active;
-        doc["wave"]     = _state.gen.wave;
-        doc["rate"]     = _state.gen.rate_hz;
-        doc["depth"]    = (int)roundf(_state.gen.depth * 100.0f);
-        doc["offset"]   = (int)roundf(_state.gen.offset * 100.0f);
-        doc["ease"]     = (int)roundf(_state.gen.ease * 100.0f);
-        doc["mod"]      = _state.gen.mod;
-        doc["mod_wave"] = _state.gen.mod_wave;
-        doc["mod_rate"] = _state.gen.mod_rate;
-        doc["mod_amp"]  = _state.gen.mod_amp;
-        doc["rate_tick"] = _state.gen_rate_tick_hz;
+        doc["running"]    = _patternEngine.isRunning();
+        doc["active"]     = _state.gen_active;
+        doc["speed"]      = (int)roundf(_patternEngine.getSpeedPercent());
+        doc["depth"]      = (int)roundf(_patternEngine.getDepthPercent());
+        doc["stroke"]     = (int)roundf(_patternEngine.getStrokePercent());
+        doc["sensation"]  = (int)roundf(_patternEngine.getSensationPercent());
+        doc["pattern"]    = _patternEngine.getPatternIdx();
+        doc["rate_tick"]  = _state.gen_rate_tick_hz;
         String json;
         serializeJson(doc, json);
         _httpServer->send(200, "application/json", json);
@@ -714,101 +706,35 @@ void WebUI::handleApiGen() {
         return;
     }
 
-    APPLOGF("/api/gen POST: %s", _httpServer->arg("plain").c_str());
+    APPLOGF("/api/pattern POST: %s", _httpServer->arg("plain").c_str());
 
     if (doc["rate_tick"].is<int>()) {
         int r = doc["rate_tick"];
-        // Map the raw Hertz value to the nearest valid tick rate. We keep the
-        // rungs spaced out (20/50/100/200) so the UI buttons map cleanly and
-        // nobody accidentally picks 137 Hz. If the value isn't close to any
-        // rung, snap to the nearest one — we're a good boy, not a brat. :3
-        // Rungs: 20 / 50 / 100 / 250 / 500 Hz. Snap to nearest.
-        // 500Hz is the new ceiling — absolute rail on the generator. yippie! :3
         _state.gen_rate_tick_hz = (r >= 375) ? 500 : (r >= 175) ? 250 : (r >= 75) ? 100 : (r >= 35) ? 50 : 20;
     }
 
-    // ---- Generator config — lock the whole struct so the Core-1 generator -----
-    // ---- task sees a consistent snapshot (no torn writes mid-update). ----------
-    portENTER_CRITICAL(&_state.gen_mux);
-
-    _state.gen.wave     = constrain((int)(doc["wave"]     | (int)_state.gen.wave), 0, 3);
-    _state.gen.rate_hz  = constrain((float)(doc["rate"]   | _state.gen.rate_hz), 0.05f, 50.0f);
-    if (doc["depth"].is<float>())  _state.gen.depth  = constrain((float)doc["depth"]  / 100.0f, 0.02f, 1.0f);
-    if (doc["offset"].is<float>()) _state.gen.offset = constrain((float)doc["offset"] / 100.0f, 0.0f, 1.0f);
-    if (doc["ease"].is<float>())   _state.gen.ease   = constrain((float)doc["ease"]   / 100.0f, 0.0f, 1.0f);
-    _state.gen.mod      = constrain((int)(doc["mod"]      | (int)_state.gen.mod), 0, 2);
-    _state.gen.mod_wave = constrain((int)(doc["mod_wave"] | (int)_state.gen.mod_wave), 0, 2);
-    _state.gen.mod_rate = constrain((float)(doc["mod_rate"] | _state.gen.mod_rate), 0.01f, 5.0f);
-    _state.gen.mod_amp  = constrain((float)(doc["mod_amp"] | _state.gen.mod_amp), 0.0f, 10.0f);
+    // ---- Pattern parameters (Core 0 writes, Core 1 reads — volatile fields) ---
+    if (doc["speed"].is<float>())     _patternEngine.setSpeed(doc["speed"]);
+    if (doc["depth"].is<float>())     _patternEngine.setDepth(doc["depth"]);
+    if (doc["stroke"].is<float>())    _patternEngine.setStroke(doc["stroke"]);
+    if (doc["sensation"].is<float>()) _patternEngine.setSensation(doc["sensation"]);
+    if (doc["pattern"].is<int>())     _patternEngine.setPattern(doc["pattern"]);
 
     if (doc["running"].is<bool>()) {
         bool want = doc["running"];
-        if (want && !_state.gen.running) {
-            _state.gen_phase = 0.0f;
-            _state.gen_mod_clock = 0.0f;
-            _state.gen_last_us = micros();
-            // Soft start: the waveform's first target can be anywhere in the
-            // window relative to the parked carriage — ramp the speed cap up
-            // from SAFE_APPROACH_SPEED_MM_S instead of lunging. :3
+        if (want && !_patternEngine.isRunning()) {
+            if (!_state.homed) {
+                _httpServer->send(400, "application/json", "{\"error\":\"Not homed\"}");
+                return;
+            }
             _state.resume_start_ms = millis();
-            APPLOG("Generator started");
-        } else if (!want && _state.gen.running) {
-            APPLOG("Generator stopped");
+            _patternEngine.start();
+            APPLOG("PatternEngine started");
+        } else if (!want && _patternEngine.isRunning()) {
+            _patternEngine.stop();
+            APPLOG("PatternEngine stopped");
         }
-        _state.gen.running = want;
     }
-
-    portEXIT_CRITICAL(&_state.gen_mux);
-
-    _httpServer->send(200, "application/json", "{\"ok\":true}");
-}
-
-void WebUI::handleApiInterp() {
-    if (_httpServer->method() == HTTP_GET) {
-        JsonDocument doc;
-        // Interpolation/extrapolation are compiled out of this build — motion
-        // is trapezoidal-planner only now. We still answer this endpoint so the
-        // WebUI doesn't choke, but we advertise the real state honestly. :3
-        doc["mode"]      = "trapezoidal";
-        doc["easing"]    = _state.buf_easing;
-        doc["depth"]     = _state.buf_depth;
-        doc["tick"]      = _state.buf_tick_hz;
-        doc["active"]    = false;   // no interpolator task in this build
-        doc["buffered"]  = 0;
-        String json;
-
-        serializeJson(doc, json);
-        _httpServer->send(200, "application/json", json);
-        return;
-    }
-
-    JsonDocument doc;
-    if (deserializeJson(doc, _httpServer->arg("plain"))) {
-        _httpServer->send(400, "application/json", "{\"error\":\"Invalid JSON\"}");
-        return;
-    }
-
-    if (doc["mode"].is<const char*>()) {
-        const char* m = doc["mode"];
-        _state.setInputMode((strcasecmp(m, "buffered") == 0) ? InputMode::BUFFERED
-                                                               : InputMode::EXTRAPOLATE);
-    }
-    if (doc["easing"].is<int>()) _state.buf_easing = constrain((int)doc["easing"], 0, 4);
-    if (doc["depth"].is<int>())  _state.buf_depth  = constrain((int)doc["depth"], 1, 5);
-    if (doc["tick"].is<int>()) {
-        int t = doc["tick"];
-        // Same rung logic as the generator tick — 20/50/100/200, snapped clean.
-        // The interpolator's inner loop already clamps 5..200 on its side, so
-        // all we do here is map the UI value to the nearest valid rung. :3
-        _state.buf_tick_hz = (t >= 150) ? 200 : (t >= 75) ? 100 : (t >= 35) ? 50 : 20;
-    }
-
-    bool save = doc["save"] | false;
-    if (save) ConfigStore::save(_state, _mapper, _motor);
-
-    APPLOGF("Interp: mode=%s easing=%u depth=%u tick=%uHz",
-            (_state.getInputMode() == InputMode::BUFFERED) ? "buffered" : "extrapolate",
-            _state.buf_easing, _state.buf_depth, _state.buf_tick_hz);
 
     _httpServer->send(200, "application/json", "{\"ok\":true}");
 }
@@ -844,7 +770,8 @@ void WebUI::handleApiMode() {
     else if (strcasecmp(m, "SER")    == 0) mode = TransportMode::SER;
     else if (strcasecmp(m, "BT")     == 0) mode = TransportMode::BT;
     else if (strcasecmp(m, "DONGLE") == 0) mode = TransportMode::DONGLE;
-    else { _httpServer->send(400, "application/json", "{\"error\":\"mode must be WS|SER|BT|DONGLE\"}"); return; }
+    else if (strcasecmp(m, "OSSM") == 0) mode = TransportMode::OSSM_BLE;
+    else { _httpServer->send(400, "application/json", "{\"error\":\"mode must be WS|SER|BT|DONGLE|OSSM\"}"); return; }
 
     _transportMgr.applyTransport(mode);
     ConfigStore::save(_state, _mapper, _motor);

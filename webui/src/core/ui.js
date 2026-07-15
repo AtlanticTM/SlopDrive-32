@@ -68,6 +68,97 @@ export function setRead(id, v) {
   if (el) el.textContent = v;
 }
 
+// ===================== pad() — constant-length numeral formatter =====================
+/**
+ * Zero-pad a value to a constant-length string. Negative numbers steal a
+ * leading digit slot for the sign so the total length never changes.
+ *
+ *   pad(72,   3, 1)    → "072.0"
+ *   pad(0.42, 2, 2)    → "00.42"
+ *   pad(-52,  4, 0)    → "-052"   (sign steals one of the 4 int slots)
+ *   pad(52,   4, 0)    → "0052"   (same length as -052)
+ *   pad(8.3,  2, 1,'A')→ "08.3A"
+ *
+ * @param {number} value
+ * @param {number} intDigits  — total integer-column width (incl. sign if negative)
+ * @param {number} fracDigits — decimal places (0 = no decimal point)
+ * @param {string} [unit]     — optional unit suffix appended after the digits
+ * @returns {string}
+ */
+export function pad(value, intDigits, fracDigits, unit) {
+  var neg = value < 0;
+  var abs = Math.abs(value);
+  var fixed = abs.toFixed(fracDigits || 0);
+  var parts = fixed.split('.');
+  var intStr = neg
+    ? '-' + parts[0].padStart(intDigits - 1, '0')
+    : parts[0].padStart(intDigits, '0');
+  var fracStr = (fracDigits > 0 && parts[1]) ? '.' + parts[1] : '';
+  return intStr + fracStr + (unit || '');
+}
+
+// ===================== .vv measurement — fix character width at wdth 112 =====================
+// The .vv component needs a FIXED box width so the variable-axis alarm swell
+// (wdth 95→112) grows leftward into reserved space with zero layout shift.
+// We measure one character of Martian Mono at "wdth" 112 once at init and
+// store it as --mm-ch on :root. Then .vv uses width: calc(var(--vv-chars) * var(--mm-ch)).
+
+function _measureNow() {
+  var probe = document.createElement('span');
+  probe.style.cssText = 'position:absolute;visibility:hidden;font-family:"Martian Mono",monospace;font-size:1em;font-variation-settings:"wght" 400,"wdth" 112;white-space:pre;';
+  probe.textContent = '0';
+  document.body.appendChild(probe);
+  var w = probe.getBoundingClientRect().width;
+  // Guard: fallback fonts can measure narrow; use em-relative floor
+  document.documentElement.style.setProperty('--mm-ch', w + 'px');
+  document.body.removeChild(probe);
+}
+
+export function measureMartianMonoCh() {
+  _measureNow();
+  // Fonts load async (font-display:block + base64, but still async decode).
+  // A pre-font measurement uses the fallback monospace metrics, which are
+  // narrower than Martian Mono at wdth 112 — that's the "numbers cut off"
+  // bug. Re-measure once all fonts are ready.
+  if (document.fonts && document.fonts.ready) {
+    document.fonts.ready.then(function() { _measureNow(); });
+  }
+}
+
+// ===================== setVV — set a .vv element's text + char count =====================
+/**
+ * Format a value with pad() and write it into a .vv element, auto-setting
+ * the --vv-chars custom property so the fixed-width box is sized correctly.
+ *
+ * @param {string} id — element id (with or without #)
+ * @param {number} value
+ * @param {number} intDigits
+ * @param {number} fracDigits
+ * @param {string} [unit]
+ */
+export function setVV(id, value, intDigits, fracDigits, unit) {
+  var el = $(id);
+  if (!el) return;
+  var s = pad(value, intDigits, fracDigits, unit);
+  el.textContent = s;
+  // Set --vv-chars based on the formatted string length (excluding unit suffix)
+  var digitsLen = pad(value, intDigits, fracDigits).length;
+  el.style.setProperty('--vv-chars', digitsLen);
+}
+
+/**
+ * Apply alarm state class (.w1/.w2) to a .vv element based on a threshold.
+ * @param {string} id — element id
+ * @param {number} level — 0=nominal, 1=warn, 2=bad
+ */
+export function setVVState(id, level) {
+  var el = $(id);
+  if (!el) return;
+  el.classList.remove('w1', 'w2');
+  if (level === 1) el.classList.add('w1');
+  else if (level === 2) el.classList.add('w2');
+}
+
 // ===================== Toasts =====================
 
 /**

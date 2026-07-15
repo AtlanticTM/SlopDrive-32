@@ -307,7 +307,10 @@ void PatternEngine::run() {
                 // Dispatch through MotorDriver — NEVER call FastAccelStepper directly.
                 _motor.streamTo(pos_mm, effective_speed);
 
-                // Publish telemetry for the position graph.
+                // Publish telemetry for the position graph — ACTUAL position must
+                // be stored so the Core 0 telemetry sampler captures live motion,
+                // not a stale value from the last TCode waypoint (Wave 1.5 fix).
+                _state.actual_position_mm.store(pos_mm, std::memory_order_relaxed);
                 _state.commanded_target_mm = pos_mm;
                 _state.commanded_raw_mm    = pos_mm;
 

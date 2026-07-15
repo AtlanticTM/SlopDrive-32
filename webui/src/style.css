@@ -1,459 +1,1345 @@
-/* ===================== Design tokens ===================== */
-:root {
-  --bg: #0e0e1a;
-  --bg-2: #16182b;
-  --card: #1b1e35;
-  --card-2: #232744;
-  --line: #2c3158;
-  --text: #e8eaf6;
-  --muted: #9aa0c4;
-  --faint: #6b709a;
-  --accent: #6c8cff;       /* primary action */
-  --accent-2: #8a6cff;
-  --good: #34d399;
-  --warn: #fbbf24;
-  --bad: #fb6f84;
-  --radius: 14px;
-  --radius-sm: 9px;
-  --shadow: 0 8px 30px rgba(0,0,0,.45);
-  --tap: 44px;             /* min touch target */
-  --tabbar: 74px;          /* bottom tab bar height (mobile) */
+/* ===================== Self-hosted fonts =====================
+   Chakra Petch 400/500 — labels, buttons, headings, wordmark.
+   Martian Mono variable (wght 100–800, wdth 75–112.5) — ALL numerals.
+   WOFF2 only, font-display:block, zero external requests.
+   Vite inlines these as base64 data URIs (assetsInlineLimit raised in
+   vite.config.js) so they ship inside the single-file bundle. */
+@font-face {
+  font-family: 'Chakra Petch';
+  font-style: normal;
+  font-weight: 400;
+  font-display: block;
+  src: url('./fonts/ChakraPetch-400.woff2') format('woff2');
+}
+@font-face {
+  font-family: 'Chakra Petch';
+  font-style: normal;
+  font-weight: 500;
+  font-display: block;
+  src: url('./fonts/ChakraPetch-500.woff2') format('woff2');
+}
+@font-face {
+  font-family: 'Martian Mono';
+  font-style: normal;
+  font-weight: 100 800;
+  font-display: block;
+  src: url('./fonts/MartianMono.woff2') format('woff2');
 }
 
-/* ===================== Custom scrollbars ===================== */
-::-webkit-scrollbar { width: 6px; height: 6px; }
-::-webkit-scrollbar-track { background: var(--bg); }
-::-webkit-scrollbar-thumb { background: var(--line); border-radius: 3px; }
-::-webkit-scrollbar-thumb:hover { background: var(--faint); }
-* { scrollbar-width: thin; scrollbar-color: var(--line) var(--bg); }
+/* ===================== Design tokens (Appendix A — FROZEN) ===================== */
+:root {
+  --ink:        #08090B;   /* page AND panel background — identical, always */
+  --screen:     #040507;   /* recessed displays only (scopes, log) */
+  --chip:       #111318;   /* lighter surface = a live value lives here / value unset */
+  --chip-line:  #1D2026;
+  --line-0:     #121419;   /* outer nested frame */
+  --line-1:     #1D2026;   /* inner panel frame, dividers */
+  --line-2:     #272B31;   /* dim glyphs, hairline emphasis */
+  --line-3:     #33373E;   /* brackets, ruler majors */
+  --line-4:     #454A54;   /* bracket highlight (scan origin) */
+  --tx-hi:      #E4E7EC;   /* headings */
+  --tx:         #B7BCC4;   /* body */
+  --tx-val:     #9AA0AA;   /* nominal numerals (quiet) */
+  --tx-mut:     #575C66;   /* labels */
+  --tx-ghost:   #41454D;   /* hints, ruler numerals */
+  --tx-faint:   #2C3037;   /* index numerals, watermarks */
+  --reality:    #4DA6FF;   /* BLUE — measured truth, live motion, active controls */
+  --intent:     #A78BFA;   /* PURPLE — commanded/desired/unconfirmed */
+  --warn:       #F5B94D;
+  --bad:        #FF4757;
+  --glow-reality: 0 0 18px rgba(77,166,255,.5), 0 0 42px rgba(77,166,255,.16);
+  --glow-intent:  0 0 14px rgba(139,92,246,.16);
 
+  /* ---- Backward-compat aliases (JS inline styles reference old names) ---- */
+  --muted:  var(--tx-mut);
+  --faint:  var(--tx-ghost);
+  --text:   var(--tx);
+  --accent: var(--reality);
+  --good:   var(--reality);
+  --card:   var(--ink);
+  --card-2: var(--chip);
+  --bg:     var(--ink);
+  --bg-2:   var(--ink);
+  --line:   var(--line-1);
+
+  /* ---- Layout metrics ---- */
+  /* Global scale factor — Section E scale pass. Control dims (--tap,
+     --tabbar) derive from it; border widths / outline-offset / radius /
+     corner brackets / glow radii are EXEMPT (always literal). */
+  --s: 1.12;
+  --tap:    calc(var(--s) * 44px);
+  --tabbar: calc(var(--s) * 64px);
+  --radius: 2px;
+  --glow-warn: 0 0 18px rgba(245,185,77,.5), 0 0 42px rgba(245,185,77,.16);
+}
+
+/* Scale clamp for narrow phones — if 1.12x breaks the 380px layout, fall
+   back to 1.0 rather than redesigning (per Section E implementation notes). */
+@media (max-width: 480px) {
+  :root { --s: 1; }
+}
+
+/* ===================== Reset ===================== */
 * { margin: 0; padding: 0; box-sizing: border-box; -webkit-tap-highlight-color: transparent; }
 html, body { height: 100%; }
-/* Stop the whole page sliding horizontally while dragging sliders on mobile. */
 html { overflow-x: hidden; }
+/* Global scale pass (Section E): scaling the root em/rem base cascades the
+   1.12x factor through EVERY rem-based font-size, padding, and gap in this
+   stylesheet in one shot — the least error-prone way to scale ~200 rules
+   uniformly without thickening any hairline (border/outline widths below
+   are px-literal and never touch rem). Explicitly-called-out px metrics
+   (control dims, rail geometry, letter-spacing) are scaled individually
+   below via calc(var(--s) * Npx) where rem inheritance doesn't reach them. */
+html { font-size: calc(var(--s) * 16px); }
 body {
-  font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, Helvetica, Arial, sans-serif;
-  background: radial-gradient(1200px 600px at 50% -10%, #1a1d38 0%, var(--bg) 60%);
-  color: var(--text); min-height: 100vh; line-height: 1.45; overflow-x: hidden;
-  /* leave room for the fixed tab bar + the persistent home button above it */
+  font-family: 'Chakra Petch', -apple-system, sans-serif;
+  background: var(--ink);
+  color: var(--tx);
+  min-height: 100vh;
+  line-height: 1.45;
+  overflow-x: hidden;
   padding: env(safe-area-inset-top) 0 calc(env(safe-area-inset-bottom) + var(--tabbar) + 70px);
+  font-weight: 400;
 }
-.wrap { max-width: 560px; margin: 0 auto; padding: 16px 16px 0; }
 
-/* ===================== Header ===================== */
-.topbar { display: flex; align-items: center; gap: 10px; margin-bottom: 12px; }
-.logo {
-  width: 30px; height: 30px; border-radius: 9px; flex: 0 0 auto;
-  background: linear-gradient(135deg, var(--accent), var(--accent-2));
-  display: grid; place-items: center; box-shadow: var(--shadow);
+/* ===================== Scrollbars ===================== */
+::-webkit-scrollbar { width: 4px; height: 4px; }
+::-webkit-scrollbar-track { background: var(--ink); }
+::-webkit-scrollbar-thumb { background: var(--line-2); border-radius: 0; }
+* { scrollbar-width: thin; scrollbar-color: var(--line-2) var(--ink); }
+
+/* ===================== Focus-visible (reality ring on everything) ===================== */
+*:focus-visible {
+  outline: 2px solid var(--reality);
+  outline-offset: 1px;
 }
-.logo svg { width: 17px; height: 17px; color: #fff; }
-.title h1 { font-size: .98rem; font-weight: 700; letter-spacing: .2px; }
-.title p { font-size: .64rem; color: var(--muted); }
 
-/* status chips — never wrap, always one row */
-.chips { display: flex; gap: 5px; margin-left: auto; flex-wrap: nowrap; justify-content: flex-end; min-width: 0; }
+/* ===================== Numerals — Martian Mono everywhere ===================== */
+.readout b, .pos-big b, .kv b, .meter .txt, .num,
+input[type="number"], .window .mid .big,
+.ttlegend b, .chip, .wordmark {
+  font-family: 'Martian Mono', 'Chakra Petch', monospace;
+  font-variant-numeric: tabular-nums;
+}
+
+/* ===================== .vv — fixed-box variable-axis numeral =====================
+   Martian Mono variable, display:inline-block, right-aligned, width fixed in
+   ch sized for the string length at "wdth" 112 (measured once via
+   measureMartianMonoCh → --mm-ch on :root). Alarm swell grows leftward into
+   reserved space — zero layout shift, ever. */
+.vv {
+  display: inline-block;
+  text-align: right;
+  font-family: 'Martian Mono', monospace;
+  font-variant-numeric: tabular-nums;
+  font-weight: 400;
+  /* Width reserved at the WIDEST axis setting (wdth 112) so swell never
+     reflows. min-width (not width) + overflow visible: if the measured
+     --mm-ch is ever slightly narrow (pre-font fallback metrics), digits
+     may not be clipped — worst case the box grows a hair instead of
+     amputating the numerals. */
+  min-width: calc(var(--vv-chars, 4) * var(--mm-ch, 0.62em));
+  /* nominal state */
+  font-variation-settings: "wght" 400, "wdth" 95;
+  color: var(--tx-val);
+  transition: font-variation-settings .5s ease, color .35s, text-shadow .35s;
+  white-space: pre;
+  overflow: visible;
+  vertical-align: baseline;
+}
+/* .w1 — warn: medium weight, slightly wider, amber, soft glow */
+.vv.w1 {
+  font-variation-settings: "wght" 620, "wdth" 103;
+  color: var(--warn);
+  text-shadow: 0 0 8px rgba(245,185,77,.4);
+}
+/* .w2 — bad: heaviest weight, widest, red, strong glow */
+.vv.w2 {
+  font-variation-settings: "wght" 800, "wdth" 112;
+  color: var(--bad);
+  text-shadow: 0 0 12px rgba(255,71,87,.5), 0 0 24px rgba(255,71,87,.2);
+}
+/* .intent — commanded/desired value: purple, no bloom */
+.vv.intent {
+  color: var(--intent);
+  text-shadow: none;
+}
+
+/* ===================== .hero-cp — optional Chakra Petch hero numeral =====================
+   Per brief §2: the single big actual-position numeral MAY use Chakra Petch 500
+   via per-character fixed em-width inline-blocks in a fixed ch container.
+   SHIP Martian Mono as default; this is the opt-in mechanism. */
+.hero-cp {
+  font-family: 'Chakra Petch', sans-serif;
+  font-weight: 500;
+  font-variation-settings: normal;
+  letter-spacing: 0;
+}
+
+/* ===================== .stat — stat instrument =====================
+   label (Chakra Petch, --tx-mut) + .vv value + 2px glow bar underneath.
+   Bar width ∝ value/range, color thresholds blue/amber/red. */
+.stat {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  margin-bottom: 10px;
+}
+.stat-label {
+  font-family: 'Chakra Petch', sans-serif;
+  font-size: .72rem;
+  color: var(--tx-mut);
+  font-weight: 500;
+}
+.stat-value {
+  font-size: 1.1rem;
+}
+.stat-bar {
+  height: 2px;
+  background: var(--line-1);
+  border-radius: 1px;
+  overflow: hidden;
+  position: relative;
+}
+.stat-bar-fill {
+  position: absolute;
+  inset: 0 auto 0 0;
+  width: 0%;
+  background: var(--reality);
+  box-shadow: 0 0 6px rgba(77,166,255,.4);
+  transition: width .5s cubic-bezier(.3,.7,.3,1), background .35s, box-shadow .35s;
+}
+.stat-bar-fill.w1 {
+  background: var(--warn);
+  box-shadow: 0 0 6px rgba(245,185,77,.4);
+}
+.stat-bar-fill.w2 {
+  background: var(--bad);
+  box-shadow: 0 0 8px rgba(255,71,87,.5);
+}
+
+/* ===================== Header (ONE row) ===================== */
+header {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  padding: 8px 16px;
+  background: var(--ink);
+  border-bottom: 1px solid var(--line-1);
+  position: sticky;
+  top: 0;
+  z-index: 50;
+  min-height: 44px;
+}
+.header-left {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  flex: 0 0 auto;
+}
+.barcode {
+  width: 20px;
+  height: 16px;
+  color: var(--line-3);
+  flex: 0 0 auto;
+}
+.wordmark {
+  font-family: 'Chakra Petch', sans-serif;
+  font-weight: 500;
+  font-size: 1rem;
+  color: var(--tx-hi);
+  letter-spacing: calc(var(--s) * 1px);
+  white-space: nowrap;
+}
+.link-dot {
+  width: 7px;
+  height: 7px;
+  border-radius: 50%;
+  background: var(--line-2);
+  flex: 0 0 auto;
+  transition: background .2s, box-shadow .2s;
+}
+.link-dot.good {
+  background: var(--reality);
+  box-shadow: var(--glow-reality);
+}
+.link-dot.bad {
+  background: var(--line-2);
+  box-shadow: none;
+}
+.link-dot.warn {
+  background: var(--warn);
+  box-shadow: 0 0 8px var(--warn);
+}
+
+/* ---- Chips (right side of header) ---- */
+.chips {
+  display: flex;
+  gap: 4px;
+  margin-left: auto;
+  flex-wrap: nowrap;
+  justify-content: flex-end;
+  min-width: 0;
+}
 .chip {
-  display: inline-flex; align-items: center; gap: 4px; font-size: .62rem; font-weight: 600;
-  padding: 4px 7px; border-radius: 999px; background: var(--card); border: 1px solid var(--line);
-  color: var(--muted); white-space: nowrap;
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  font-size: .62rem;
+  font-weight: 400;
+  padding: 3px 6px;
+  border-radius: var(--radius);
+  background: var(--chip);
+  border: 1px solid var(--chip-line);
+  color: var(--tx-val);
+  white-space: nowrap;
+  font-variation-settings: "wght" 400, "wdth" 90;
 }
-.dot { width: 7px; height: 7px; border-radius: 50%; background: var(--faint); flex: 0 0 auto; }
-.dot.good { background: var(--good); box-shadow: 0 0 8px var(--good); }
-.dot.warn { background: var(--warn); box-shadow: 0 0 8px var(--warn); }
-.dot.bad  { background: var(--bad);  box-shadow: 0 0 8px var(--bad); }
+
+/* ---- Header chip truncation (Appendix D §3) ----
+   Narrow viewports drop chips in priority order: ip first, then bus (voltage).
+   draw (current) and rssi always survive; stale always wins space (it is
+   appended after ipChip in the DOM and its own display toggle takes priority
+   — see showStaleIndicator in main.js). Breakpoints tuned to the 380px
+   phone-portrait test matrix entry. */
+@media (max-width: 480px) {
+  #ipChip { display: none !important; }
+}
+@media (max-width: 400px) {
+  #voltageChip { display: none !important; }
+}
+.dot {
+  width: 6px;
+  height: 6px;
+  border-radius: 50%;
+  background: var(--line-2);
+  flex: 0 0 auto;
+  transition: background .2s, box-shadow .2s;
+}
+.dot.good { background: var(--reality); box-shadow: 0 0 6px rgba(77,166,255,.5); }
+.dot.warn { background: var(--warn); box-shadow: 0 0 6px var(--warn); }
+.dot.bad  { background: var(--bad); box-shadow: 0 0 6px var(--bad); }
+
+/* ---- Registration crosshair (top-right of app frame) ---- */
+.crosshair {
+  position: fixed;
+  top: 8px;
+  right: 8px;
+  width: 14px;
+  height: 14px;
+  color: var(--line-3);
+  z-index: 60;
+  pointer-events: none;
+}
+
 @media (min-width: 620px) {
-  .logo { width: 38px; height: 38px; border-radius: 11px; }
-  .logo svg { width: 22px; height: 22px; }
-  .title h1 { font-size: 1.15rem; } .title p { font-size: .74rem; }
-  .chip { font-size: .72rem; padding: 6px 10px; gap: 6px; }
-  .dot { width: 8px; height: 8px; }
+  .wordmark { font-size: 1.1rem; }
+  .chip { font-size: .7rem; padding: 4px 8px; gap: 5px; }
+  .dot { width: 7px; height: 7px; }
+  .link-dot { width: 8px; height: 8px; }
 }
 
-/* ===================== Sticky transport bar ===================== */
-.transport {
-  position: sticky; top: 0; z-index: 45; margin: 0 -16px 14px; padding: 10px 16px;
-  background: rgba(14,14,26,.88); backdrop-filter: blur(12px);
-  border-bottom: 1px solid var(--line); display: flex; gap: 8px;
+/* ===================== Banners host (reserved space) ===================== */
+.banners-host {
+  min-height: 0;
+  padding: 0 16px;
 }
-.transport .tbtn {
-  flex: 1; min-height: 46px; border: 1px solid var(--line); border-radius: var(--radius-sm);
-  cursor: pointer; color: #fff; font-weight: 700; font-size: .82rem; background: var(--card-2);
-  display: flex; flex-direction: column; align-items: center; justify-content: center; gap: 1px;
-  transition: filter .15s, background .15s, box-shadow .15s;
+.banner {
+  display: none;
+  border-radius: var(--radius);
+  padding: 8px 12px;
+  margin-bottom: 6px;
+  font-size: .78rem;
+  border: 1px solid var(--line-2);
+  background: var(--ink);
+  color: var(--tx);
 }
-.transport .tbtn small { font-weight: 500; font-size: .62rem; opacity: .8; }
-.transport .tbtn:active { transform: translateY(1px); }
-.tbtn.pause { background: rgba(108,140,255,.16); border-color: var(--accent); color: var(--accent); }
-.tbtn.pause.on { background: linear-gradient(135deg, var(--accent), var(--accent-2)); color: #fff; }
-.tbtn.halt { background: rgba(251,191,36,.14); border-color: var(--warn); color: var(--warn); }
-.tbtn.estop { background: rgba(251,111,132,.16); border-color: var(--bad); color: var(--bad); }
+.banner.show { display: block; }
+.banner.amber { border-color: var(--warn); color: var(--warn); }
+.banner.blue  { border-color: var(--reality); color: var(--reality); }
 
-/* ===================== Fault / state banners ===================== */
 .fault {
-  display: none; align-items: flex-start; gap: 12px; background: linear-gradient(180deg,#3a1b25,#2a1420);
-  border: 1px solid var(--bad); border-radius: var(--radius); padding: 14px; margin-bottom: 14px;
+  display: none;
+  align-items: flex-start;
+  gap: 10px;
+  background: var(--ink);
+  border: 1px solid var(--bad);
+  border-radius: var(--radius);
+  padding: 12px;
+  margin-bottom: 6px;
+  background-image: repeating-linear-gradient(135deg, rgba(255,71,87,.09) 0 5px, rgba(255,71,87,.012) 5px 10px);
 }
 .fault.show { display: flex; }
-.fault svg { width: 22px; height: 22px; color: var(--bad); flex: 0 0 auto; margin-top: 1px; }
-.fault .body { font-size: .82rem; color: #ffd9df; }
+.fault svg, .fault [data-ico] { width: 18px; height: 18px; color: var(--bad); flex: 0 0 auto; }
+.fault .body { font-size: .78rem; color: var(--tx); }
 .fault button {
-  margin-top: 10px; padding: 9px 14px; border: none; border-radius: var(--radius-sm);
-  background: var(--bad); color: #2a1420; font-weight: 700; cursor: pointer;
+  margin-top: 8px;
+  padding: 6px 12px;
+  border: 1px solid var(--bad);
+  border-radius: var(--radius);
+  background: transparent;
+  color: var(--bad);
+  font-family: 'Chakra Petch', sans-serif;
+  font-weight: 500;
+  font-size: .78rem;
+  cursor: pointer;
 }
-.banner { display:none; border-radius: var(--radius); padding: 12px 14px; margin-bottom: 14px; font-size: .82rem; }
-.banner.show { display:block; }
-.banner.amber { background: linear-gradient(180deg,#3a3018,#2a230f); border:1px solid var(--warn); color:#ffe7ad; }
-.banner.blue  { background: linear-gradient(180deg,#1a2046,#12162f); border:1px solid var(--accent); color:#cdd8ff; }
+.fault button:active { border-color: var(--reality); color: var(--reality); }
 
-/* ===================== Toasts ===================== */
-.toasts {
-  position: fixed; left: 50%; transform: translateX(-50%); top: calc(env(safe-area-inset-top) + 10px);
-  z-index: 90; display: flex; flex-direction: column; gap: 8px; width: min(420px, calc(100% - 24px)); pointer-events: none;
+/* ===================== Row 2 — Hero strip (heroes + transport) ===================== */
+.hero-strip {
+  display: flex;
+  align-items: flex-end;
+  justify-content: space-between;
+  gap: 12px;
+  padding: 10px 16px 8px;
+  background: var(--ink);
+  border-bottom: 1px solid var(--line-1);
 }
-.toast {
-  display: flex; align-items: center; gap: 10px; padding: 11px 13px; border-radius: var(--radius-sm);
-  background: rgba(27,30,53,.97); border: 1px solid var(--line); box-shadow: var(--shadow);
-  font-size: .82rem; font-weight: 600; color: var(--text); pointer-events: auto;
-  animation: toastIn .25s ease; backdrop-filter: blur(8px);
-}
-.toast .ti { width: 22px; height: 22px; flex: 0 0 auto; }
-.toast.good { border-color: rgba(52,211,153,.6); } .toast.good .ti { color: var(--good); }
-.toast.warn { border-color: rgba(251,191,36,.6); } .toast.warn .ti { color: var(--warn); }
-.toast.bad  { border-color: rgba(251,111,132,.7); } .toast.bad .ti { color: var(--bad); }
-.toast.info .ti { color: var(--accent); }
-.toast.out { animation: toastOut .25s ease forwards; }
-@keyframes toastIn  { from { opacity:0; transform: translateY(-10px);} to { opacity:1; transform:none; } }
-@keyframes toastOut { to { opacity:0; transform: translateY(-10px); } }
 
-/* ===================== Cards ===================== */
+/* ===================== Row 3 — Rail panel (flagship travel instrument) ===================== */
+/* .rail-panel.panel beats the generic .panel rule (declared later in the
+   file) on specificity, so the compact padding sticks. */
+/* Rail panel padding — 18px 16px 8px BASE (spec §A), scaled by --s. Not
+   edge-to-edge: it sits inside the page gutter like every other panel. */
+.rail-panel.panel {
+  padding: calc(var(--s) * 18px) calc(var(--s) * 16px) calc(var(--s) * 8px);
+  margin-bottom: 0;
+  background: var(--ink);
+}
+.spine-rail-host {
+  height: calc(var(--s) * 72px);
+  min-height: calc(var(--s) * 72px);
+  position: relative;
+  background: var(--screen);
+  box-shadow: inset 0 2px 8px rgba(0,0,0,.7);
+  border: 1px solid var(--line-1);
+  border-radius: var(--radius);
+  overflow: hidden;
+  touch-action: none;
+  cursor: crosshair;
+}
+.rail-hint {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  margin-top: 4px;
+  font-family: 'Martian Mono', monospace;
+  font-size: .54rem;
+  color: var(--tx-ghost);
+  font-variation-settings: "wght" 400, "wdth" 90;
+}
+
+/* Static layer (ruler, endcaps, triangles, trk mark) */
+.rail-static {
+  position: absolute;
+  inset: 0;
+  pointer-events: none;
+}
+.rail-ruler-svg {
+  position: absolute;
+  inset: 0;
+  width: 100%;
+  height: 100%;
+}
+.rail-endcap {
+  position: absolute;
+  font-family: 'Martian Mono', monospace;
+  font-size: .56rem;
+  color: var(--tx-ghost);
+  font-variation-settings: "wght" 400, "wdth" 90;
+}
+.spine-rail-host.horizontal .rail-endcap.lo { left: 4px; bottom: 2px; }
+.spine-rail-host.horizontal .rail-endcap.hi { right: 4px; bottom: 2px; }
+
+.rail-tri {
+  position: absolute;
+  width: 0; height: 0;
+  border-style: solid;
+}
+.spine-rail-host.horizontal .rail-tri.lo { left: 0; top: 50%; transform: translateY(-50%); border-width: 4px 0 4px 6px; border-color: transparent transparent transparent var(--line-3); }
+.spine-rail-host.horizontal .rail-tri.hi { right: 0; top: 50%; transform: translateY(-50%); border-width: 4px 6px 4px 0; border-color: transparent var(--line-3) transparent transparent; }
+
+.rail-ghost {
+  position: absolute;
+  font-family: 'Martian Mono', monospace;
+  font-size: .72rem;
+  color: var(--tx-ghost);
+  font-variation-settings: "wght" 400, "wdth" 90;
+  opacity: .5;
+}
+.spine-rail-host.horizontal .rail-ghost { left: 50%; top: 50%; transform: translate(-50%, -50%); }
+
+/* Canvas overlay */
+.rail-canvas {
+  position: absolute;
+  inset: 0;
+  width: 100%;
+  height: 100%;
+  touch-action: none;
+}
+
+/* Band (DOM, pointer events) — Spec §A.3: a faint edge-lit strip, NOT a
+   filled box. top:18px height:30px BASE (scaled by --s), left/right border
+   only (no top/bottom border), soft outer glow + inner glow via box-shadow.
+   left/width (position along the rail) are set inline by rail.js;
+   top/height/background/border/shadow all live here so JS never overrides
+   the scaled geometry. */
+.rail-band {
+  position: absolute;
+  top: calc(var(--s) * 18px);
+  height: calc(var(--s) * 30px);
+  background: rgba(139,92,246,.08);
+  border-left: 1px solid var(--intent);
+  border-right: 1px solid var(--intent);
+  box-shadow: 0 0 14px rgba(139,92,246,.16), inset 0 0 18px rgba(139,92,246,.07);
+  cursor: grab;
+  touch-action: none;
+}
+.rail-band:active { cursor: grabbing; }
+.rail-band.pending { border-left-style: dashed; border-right-style: dashed; }
+/* .rail-band-fill kept as a no-op full-bleed layer (structure unchanged,
+   band itself now carries the visible background/border per spec). */
+.rail-band-fill {
+  position: absolute;
+  inset: 0;
+  pointer-events: none;
+}
+.rail-band-label {
+  position: absolute;
+  top: calc(var(--s) * -17px);
+  left: 50%;
+  transform: translateX(-50%);
+  font-family: 'Martian Mono', monospace;
+  font-size: calc(var(--s) * 10px);
+  color: var(--intent);
+  font-variation-settings: "wght" 400, "wdth" 90;
+  white-space: nowrap;
+  pointer-events: none;
+}
+/* Edge handles — Spec §A.3: 12px-wide hit zones straddling the band edges
+   (left:-6px / right:-6px), full band height +4px overshoot, cursor:ew-resize.
+   Each contains a visible 3px(literal)×16px(BASE, scaled) purple bar. */
+.rail-band-handle {
+  position: absolute;
+  top: calc(var(--s) * -2px);
+  height: calc(100% + var(--s) * 4px);
+  width: calc(var(--s) * 12px);
+  cursor: ew-resize;
+  touch-action: none;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+}
+.rail-band-handle.lo { left: calc(var(--s) * -6px); }
+.rail-band-handle.hi { right: calc(var(--s) * -6px); }
+/* The visible bar inside each handle zone — 3px width is NEVER scaled
+   (hairline-adjacent exclusion), 16px length scales with --s. */
+.rail-band-handle::before {
+  content: "";
+  width: 3px;
+  height: calc(var(--s) * 16px);
+  background: var(--intent);
+  box-shadow: 0 0 8px rgba(167,139,250,.65);
+}
+
+/* Hero numerals — Row 2. The "actual" numeral is the flagship: its tiny
+   label (with + crosshair glyph) sits ABOVE it; commanded + lag ride the
+   same baseline beside it at a smaller size. */
+.hero-item {
+  display: flex;
+  align-items: baseline;
+  gap: 4px;
+}
+.hero-item.hero-primary {
+  flex-direction: column;
+  align-items: flex-start;
+  gap: 2px;
+}
+.hero-item.hero-secondary {
+  flex-direction: column;
+  align-items: flex-start;
+  gap: 2px;
+}
+.hero-label {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  font-family: 'Chakra Petch', sans-serif;
+  font-size: .6rem;
+  color: var(--tx-mut);
+  font-weight: 500;
+  text-transform: lowercase;
+  letter-spacing: .06em;
+}
+.hero-label svg { width: 8px; height: 8px; color: var(--tx-ghost); }
+.hero-val {
+  font-size: 1.15rem;
+}
+/* Big blue "actual" numeral — always lit like the concept mock.
+   Spec §E: hero numeral clamp(49px, 5.6vw, 72px) — this value is already
+   the scaled (1.12x) target, so it is a baked literal, not calc(var(--s)*…). */
+#heroActual {
+  font-size: clamp(49px, 5.6vw, 72px);
+  line-height: 0.95;
+  color: var(--reality);
+  text-shadow: var(--glow-reality);
+  font-variation-settings: "wght" 500, "wdth" 100;
+}
+/* Purple commanded numeral */
+#heroCmd {
+  color: var(--intent);
+}
+.hero-val.glow {
+  color: var(--reality);
+  text-shadow: 0 0 8px rgba(77,166,255,.4);
+}
+body.stale #heroActual {
+  color: var(--tx-ghost);
+  text-shadow: none;
+}
+.hero-unit {
+  font-family: 'Chakra Petch', sans-serif;
+  font-size: .6rem;
+  color: var(--tx-mut);
+}
+.spine-heroes {
+  display: flex;
+  gap: 18px;
+  align-items: flex-end;
+  flex: 0 0 auto;
+  min-width: 0;
+}
+.spine-transport {
+  display: flex;
+  gap: 4px;
+  flex: 0 0 auto;
+}
+
+/* ---- Hero strip wrap (narrow portrait) ----
+   At narrow widths heroes + transport together don't fit one row, so the
+   strip wraps to two rows: row 1 = actual/commanded/lag heroes,
+   row 2 = full-width transport buttons. No horizontal page scroll ever. */
+@media (max-width: 1023px) {
+  .hero-strip {
+    flex-wrap: wrap;
+    row-gap: 6px;
+    padding: 8px 12px 6px;
+  }
+  .spine-heroes {
+    flex: 1 1 auto;
+    justify-content: space-between;
+    gap: 8px;
+    min-width: 0;
+  }
+  #heroActual { font-size: clamp(38px, 8vw, 49px); }
+  .spine-transport {
+    flex: 1 1 100%;
+    order: 3;
+  }
+  .transport {
+    width: 100%;
+    justify-content: space-between;
+  }
+  .transport .tbtn {
+    flex: 1;
+    min-width: 0;
+  }
+}
+
+/* ---- Transport buttons (inside spine strip) ---- */
+.transport {
+  display: flex;
+  gap: 4px;
+  align-items: center;
+}
+.transport .tbtn {
+  min-height: 36px;
+  min-width: 48px;
+  padding: 4px 10px;
+  border: 1px solid var(--line-2);
+  border-radius: var(--radius);
+  background: transparent;
+  color: var(--tx);
+  font-family: 'Chakra Petch', sans-serif;
+  font-weight: 500;
+  font-size: .72rem;
+  cursor: pointer;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  gap: 0;
+  transition: border-color .12s, color .12s;
+}
+.transport .tbtn small {
+  font-size: .56rem;
+  color: var(--tx-mut);
+  font-weight: 400;
+}
+.transport .tbtn:hover { border-color: var(--line-4); }
+.transport .tbtn:active { border-color: var(--reality); color: var(--reality); }
+.transport .tbtn .ti { width: 14px; height: 14px; display: inline-grid; }
+.transport .tbtn [data-ico] { width: 14px; height: 14px; }
+.transport .tbtn [data-ico] svg { width: 14px; height: 14px; }
+
+.tbtn.pause.on {
+  border-color: var(--reality);
+  color: var(--reality);
+  box-shadow: var(--glow-reality);
+}
+.tbtn.halt { border-color: var(--line-2); }
+.tbtn.estop {
+  border-color: var(--line-2);
+  background-image: repeating-linear-gradient(135deg, rgba(255,71,87,.09) 0 5px, rgba(255,71,87,.012) 5px 10px);
+  color: var(--tx);
+}
+.tbtn.estop:active { border-color: var(--bad); color: var(--bad); }
+
+/* Desktop Home button in spine strip — Spec §C: armed warning styling:
+   1px #F5B94D border, #F5B94D text, soft glow (var(--glow-warn), radii
+   exempt from the scale pass per spec §E exclusion list). */
+.home-header-btn {
+  border-color: var(--warn) !important;
+  color: var(--warn) !important;
+  box-shadow: var(--glow-warn);
+}
+
+/* ===================== Panel component =====================
+   One reusable pattern: background --ink; inner border 1px solid var(--line-1);
+   outer frame outline:1px solid var(--line-0); outline-offset:4px;
+   four 8×8px two-sided corner brackets on the inner frame. */
+.panel,
 .card {
-  background: linear-gradient(180deg, var(--card), var(--bg-2));
-  border: 1px solid var(--line); border-radius: var(--radius); padding: 18px; margin-bottom: 14px;
-  box-shadow: var(--shadow);
+  position: relative;
+  background-color: var(--ink);
+  border: 1px solid var(--line-1);
+  outline: 1px solid var(--line-0);
+  outline-offset: 4px;
+  padding: 16px;
+  margin-bottom: 14px;
+  /* Corner brackets: TL=--line-4, TR=--line-2, BL=--line-2, BR=--line-3 */
+  background-image:
+    url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 8 8'%3E%3Cpath d='M8 0L0 0L0 8' stroke='%23454A54' stroke-width='1' fill='none'/%3E%3C/svg%3E"),
+    url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 8 8'%3E%3Cpath d='M0 0L8 0L8 8' stroke='%23272B31' stroke-width='1' fill='none'/%3E%3C/svg%3E"),
+    url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 8 8'%3E%3Cpath d='M8 8L0 8L0 0' stroke='%23272B31' stroke-width='1' fill='none'/%3E%3C/svg%3E"),
+    url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 8 8'%3E%3Cpath d='M0 8L8 8L8 0' stroke='%2333373E' stroke-width='1' fill='none'/%3E%3C/svg%3E");
+  background-position: top left, top right, bottom left, bottom right;
+  background-size: 8px 8px;
+  background-repeat: no-repeat;
 }
-.card.tight { padding: 14px 18px; }
-.card-head { display: flex; align-items: center; gap: 10px; margin-bottom: 14px; overflow: visible; }
-.card.tight .card-head { margin-bottom: 10px; }
-.card-head > svg, .card-head > [data-ico] { width: 18px; height: 18px; color: var(--accent); flex: 0 0 auto; overflow: visible; }
-.card-head [data-ico] svg { width: 18px; height: 18px; overflow: visible; }
-.card-head h2 { font-size: .98rem; font-weight: 700; }
+.card.tight { padding: 12px 16px; }
+
+/* ---- Panel title row: ▸ caret + Chakra Petch 500 title + mono index ---- */
+/* CSS counter for panel indices (01, 02, …) */
+body { counter-reset: panel-index; }
+.panel, .card { counter-increment: panel-index; }
+
+.card-head {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  margin-bottom: 12px;
+}
+.card.tight .card-head { margin-bottom: 8px; }
+/* Hide the old leading icon — ▸ replaces it */
+.card-head > [data-ico]:not(.info):not(.info [data-ico]) {
+  display: none;
+}
+/* ▸ caret glyph before the title */
+.card-head h2 {
+  font-family: 'Chakra Petch', sans-serif;
+  font-weight: 500;
+  font-size: .88rem;
+  color: var(--tx-hi);
+  letter-spacing: calc(var(--s) * .3px);
+}
+.card-head h2::before {
+  content: "\25B8 ";
+  color: var(--line-3);
+  font-weight: 500;
+  margin-right: 2px;
+}
+/* Faint mono index after the title */
+.card-head h2::after {
+  content: counter(panel-index, decimal-leading-zero);
+  font-family: 'Martian Mono', monospace;
+  font-size: .6rem;
+  color: var(--tx-faint);
+  margin-left: 8px;
+  font-weight: 400;
+  font-variation-settings: "wght" 400, "wdth" 90;
+}
 .card-head .info { margin-left: auto; }
 
-/* ---- collapsible cards ---- */
+/* ---- Collapsible cards (keep JS hooks working) ---- */
 .card.collapsible > .card-head { cursor: pointer; user-select: none; }
 .card .caret {
-  width: 18px; height: 18px; flex: 0 0 auto; color: var(--muted);
+  width: 16px; height: 16px; flex: 0 0 auto; color: var(--tx-mut);
   transition: transform .2s; margin-left: 4px;
 }
-/* when the info button is present it owns margin-left:auto, so the caret
-   sits right after the title; otherwise push it to the right. */
 .card-head h2 + .caret { margin-left: auto; }
 .card.collapsed .caret { transform: rotate(-90deg); }
 .card .card-body { overflow: hidden; transition: max-height .25s ease, opacity .2s ease; }
 .card.collapsed .card-body { max-height: 0 !important; opacity: 0; margin: 0; padding: 0; pointer-events: none; }
 
+/* ---- Wave scope (Generator card recessed waveform preview) ---- */
+.wave-scope {
+  position: relative;
+  height: 120px;
+  margin-bottom: 12px;
+  overflow: hidden;
+}
+.wave-scope canvas { display: block; width: 100%; height: 100%; }
+@media (min-width: 1024px) { .wave-scope { height: 140px; } }
+
+/* ===================== Screen (recessed displays only) ===================== */
+.screen {
+  background: var(--screen);
+  box-shadow: inset 0 2px 8px rgba(0,0,0,.7);
+  border: 1px solid var(--line-1);
+  border-radius: var(--radius);
+}
+
 /* ===================== Tooltips / info ===================== */
 .info {
-  position: relative; width: 24px; height: 24px; border-radius: 50%; border: 1px solid var(--line);
-  background: var(--card-2); color: var(--muted); display: inline-grid; place-items: center;
-  cursor: pointer; flex: 0 0 auto; font-size: 0;
+  position: relative;
+  width: 20px; height: 20px;
+  border-radius: var(--radius);
+  border: 1px solid var(--line-2);
+  background: transparent;
+  color: var(--tx-mut);
+  display: inline-grid;
+  place-items: center;
+  cursor: pointer;
+  flex: 0 0 auto;
+  font-size: 0;
 }
-.info svg { width: 14px; height: 14px; }
+.info svg { width: 12px; height: 12px; }
 .info .tip {
-  position: absolute; right: 0; top: calc(100% + 8px); width: 240px; z-index: 30;
-  background: #0b0c18; border: 1px solid var(--line); border-radius: 10px; padding: 11px 12px;
-  font-size: .76rem; font-weight: 400; line-height: 1.5; color: var(--text);
-  box-shadow: var(--shadow); opacity: 0; visibility: hidden; transform: translateY(-4px);
-  transition: opacity .15s, transform .15s, visibility .15s; pointer-events: none; text-align: left;
+  position: absolute;
+  right: 0;
+  top: calc(100% + 6px);
+  width: 240px;
+  z-index: 30;
+  background: var(--ink);
+  border: 1px solid var(--line-1);
+  outline: 1px solid var(--line-0);
+  outline-offset: 2px;
+  padding: 10px 12px;
+  font-size: .74rem;
+  font-weight: 400;
+  line-height: 1.5;
+  color: var(--tx);
+  opacity: 0;
+  visibility: hidden;
+  transform: translateY(-4px);
+  transition: opacity .12s, transform .12s, visibility .12s;
+  pointer-events: none;
+  text-align: left;
 }
 .info:hover .tip, .info.open .tip { opacity: 1; visibility: visible; transform: translateY(0); }
-.label-row { display: flex; align-items: center; gap: 8px; margin-bottom: 8px; min-height: 20px; }
-.label-row label { margin: 0; }
-.label-row .info { width: 20px; height: 20px; }
-.label-row .info svg { width: 12px; height: 12px; }
-.label-row .info .tip { left: 0; right: auto; }
-/* spacer keeps label rows aligned even when there's no info button (HSTRT/HEND) */
-.label-row .ispace { width: 20px; height: 20px; flex: 0 0 auto; }
 
-label { display: block; font-size: .82rem; color: var(--muted); font-weight: 600; }
-.hint { font-size: .76rem; color: var(--faint); line-height: 1.5; margin-top: 6px; }
+.label-row { display: flex; align-items: center; gap: 6px; margin-bottom: 6px; min-height: 20px; }
+.label-row label { margin: 0; }
+.label-row .info { width: 18px; height: 18px; }
+.label-row .info svg { width: 11px; height: 11px; }
+.label-row .info .tip { left: 0; right: auto; }
+.label-row .ispace { width: 18px; height: 18px; flex: 0 0 auto; }
+
+label { display: block; font-size: .76rem; color: var(--tx-mut); font-weight: 500; font-family: 'Chakra Petch', sans-serif; }
+.hint { font-size: .72rem; color: var(--tx-ghost); line-height: 1.5; margin-top: 4px; font-family: 'Chakra Petch', sans-serif; }
 
 /* ===================== Inputs ===================== */
-.field { margin-bottom: 18px; }
-.card.tight .field { margin-bottom: 12px; }
+.field { margin-bottom: 14px; }
+.card.tight .field { margin-bottom: 10px; }
+
+/* ---- Sliders: 1px hairline track, 11px thumb --ink fill + --tx-val ring ---- */
 input[type="range"] {
-  width: 100%; height: 6px; -webkit-appearance: none; appearance: none; margin: 10px 0;
-  background: var(--card-2); border-radius: 999px; outline: none; touch-action: pan-y;
+  width: 100%;
+  height: 1px;
+  -webkit-appearance: none;
+  appearance: none;
+  margin: 12px 0;
+  background: var(--line-2);
+  outline: none;
+  touch-action: pan-y;
 }
 input[type="range"]::-webkit-slider-thumb {
-  -webkit-appearance: none; width: 22px; height: 22px; border-radius: 50%;
-  background: var(--thumb, var(--accent)); cursor: pointer; border: 3px solid #fff;
-  box-shadow: 0 2px 6px rgba(0,0,0,.4);
+  -webkit-appearance: none;
+  width: 11px;
+  height: 11px;
+  border-radius: 50%;
+  background: var(--ink);
+  border: 1px solid var(--tx-val);
+  cursor: pointer;
+  box-shadow: 0 0 0 2px var(--ink);
+  transition: border-color .12s, box-shadow .12s;
 }
 input[type="range"]::-moz-range-thumb {
-  width: 20px; height: 20px; border-radius: 50%; background: var(--thumb, var(--accent));
-  cursor: pointer; border: 3px solid #fff;
+  width: 11px;
+  height: 11px;
+  border-radius: 50%;
+  background: var(--ink);
+  border: 1px solid var(--tx-val);
+  cursor: pointer;
+  box-shadow: 0 0 0 2px var(--ink);
+  transition: border-color .12s, box-shadow .12s;
 }
-.num {
-  width: 100%; padding: 11px 12px; border-radius: var(--radius-sm); border: 1px solid var(--line);
-  background: var(--card-2); color: var(--text); font-size: 1rem; font-variant-numeric: tabular-nums;
+/* Thumb ignites --reality + glow while dragged */
+input[type="range"]:active::-webkit-slider-thumb {
+  border-color: var(--reality);
+  box-shadow: 0 0 0 2px var(--ink), 0 0 10px rgba(77,166,255,.5);
 }
-.num:focus { outline: none; border-color: var(--accent); }
-select {
-  width: 100%; padding: 12px; border-radius: var(--radius-sm); border: 1px solid var(--line);
-  background: var(--card-2); color: var(--text); font-size: .95rem; appearance: none;
-  background-image: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 24 24' fill='none' stroke='%239aa0c4' stroke-width='2'%3E%3Cpath d='M6 9l6 6 6-6'/%3E%3C/svg%3E");
-  background-repeat: no-repeat; background-position: right 12px center; background-size: 18px;
+input[type="range"]:active::-moz-range-thumb {
+  border-color: var(--reality);
+  box-shadow: 0 0 0 2px var(--ink), 0 0 10px rgba(77,166,255,.5);
 }
-.readout { display: flex; align-items: baseline; justify-content: center; gap: 6px; margin-top: 4px; }
-.readout b { font-size: 1.5rem; font-weight: 700; color: var(--text); font-variant-numeric: tabular-nums; }
-.card.tight .readout b { font-size: 1.3rem; }
-.readout span { font-size: .8rem; color: var(--muted); }
 
-.switch { display: flex; align-items: center; gap: 12px; cursor: pointer; user-select: none; }
+.num {
+  width: 100%;
+  padding: 8px 10px;
+  border-radius: var(--radius);
+  border: 1px solid var(--line-2);
+  background: var(--ink);
+  color: var(--tx-val);
+  font-size: .9rem;
+  font-family: 'Martian Mono', monospace;
+  font-variation-settings: "wght" 400, "wdth" 90;
+}
+.num:focus { outline: none; border-color: var(--reality); }
+
+select {
+  width: 100%;
+  padding: 8px 10px;
+  border-radius: var(--radius);
+  border: 1px solid var(--line-2);
+  background: var(--ink);
+  color: var(--tx);
+  font-size: .82rem;
+  font-family: 'Chakra Petch', sans-serif;
+  appearance: none;
+  background-image: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 24 24' fill='none' stroke='%23575C66' stroke-width='2'%3E%3Cpath d='M6 9l6 6 6-6'/%3E%3C/svg%3E");
+  background-repeat: no-repeat;
+  background-position: right 8px center;
+  background-size: 14px;
+}
+select:focus { outline: none; border-color: var(--reality); }
+
+.readout { display: flex; align-items: baseline; justify-content: center; gap: 4px; margin-top: 4px; }
+.readout b {
+  font-size: 1.3rem;
+  font-weight: 400;
+  color: var(--tx-val);
+  font-variation-settings: "wght" 400, "wdth" 95;
+}
+.card.tight .readout b { font-size: 1.1rem; }
+.readout span { font-size: .72rem; color: var(--tx-mut); font-family: 'Chakra Petch', sans-serif; }
+
+/* ---- Toggles ---- */
+.switch { display: flex; align-items: center; gap: 10px; cursor: pointer; user-select: none; }
 .switch input { display: none; }
 .switch .track {
-  width: 46px; height: 26px; border-radius: 999px; background: var(--card-2);
-  border: 1px solid var(--line); position: relative; transition: background .2s; flex: 0 0 auto;
+  width: 40px;
+  height: 22px;
+  border-radius: var(--radius);
+  background: var(--ink);
+  border: 1px solid var(--line-2);
+  position: relative;
+  transition: border-color .15s;
+  flex: 0 0 auto;
 }
 .switch .track::after {
-  content: ""; position: absolute; top: 2px; left: 2px; width: 20px; height: 20px; border-radius: 50%;
-  background: var(--faint); transition: transform .2s, background .2s;
+  content: "";
+  position: absolute;
+  top: 2px;
+  left: 2px;
+  width: 16px;
+  height: 16px;
+  border-radius: var(--radius);
+  background: var(--tx-mut);
+  transition: transform .15s, background .15s;
 }
-.switch input:checked + .track { background: rgba(108,140,255,.25); border-color: var(--accent); }
-.switch input:checked + .track::after { transform: translateX(20px); background: var(--accent); }
-.switch .lbl { font-size:.86rem; color:var(--text); font-weight:600; }
-.switch.full { justify-content: space-between; width:100%; }
+.switch input:checked + .track { border-color: var(--reality); }
+.switch input:checked + .track::after { transform: translateX(18px); background: var(--reality); box-shadow: 0 0 6px rgba(77,166,255,.4); }
+.switch .lbl { font-size: .8rem; color: var(--tx); font-weight: 500; font-family: 'Chakra Petch', sans-serif; }
+.switch.full { justify-content: space-between; width: 100%; }
 
 /* ===================== Buttons ===================== */
 .btn {
-  display: inline-flex; align-items: center; justify-content: center; gap: 8px; width: 100%;
-  min-height: var(--tap); padding: 12px 14px; border: 1px solid var(--line); border-radius: var(--radius-sm);
-  font-size: .92rem; font-weight: 700; cursor: pointer; background: var(--card-2); color: var(--text);
-  transition: transform .05s, filter .15s, background .15s;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  gap: 6px;
+  width: 100%;
+  min-height: var(--tap);
+  padding: 10px 12px;
+  border: 1px solid var(--line-2);
+  border-radius: var(--radius);
+  font-size: .82rem;
+  font-weight: 500;
+  font-family: 'Chakra Petch', sans-serif;
+  cursor: pointer;
+  background: transparent;
+  color: var(--tx);
+  transition: border-color .12s, color .12s;
 }
-.btn:active { transform: translateY(1px); }
-.btn svg { width: 17px; height: 17px; }
-.btn.primary { background: linear-gradient(135deg, var(--accent), var(--accent-2)); border: none; color: #fff; }
-.btn.primary:hover { filter: brightness(1.06); }
+.btn:hover { border-color: var(--line-4); }
+.btn:active { border-color: var(--reality); color: var(--reality); }
+.btn svg { width: 15px; height: 15px; }
+.btn.primary {
+  border-color: var(--reality);
+  color: var(--reality);
+}
+.btn.primary:hover { box-shadow: var(--glow-reality); }
 .btn.ghost { background: transparent; }
-.btn.danger { background: rgba(251,111,132,.14); border-color: var(--bad); color: var(--bad); }
-.btn.danger:hover { background: rgba(251,111,132,.22); }
-.btn.sm { min-height: 34px; font-size: .78rem; padding: 6px 10px; width: auto; }
-.btn-row { display: flex; gap: 10px; }
+.btn.danger { border-color: var(--bad); color: var(--bad); }
+.btn.danger:hover { box-shadow: 0 0 10px rgba(255,71,87,.2); }
+.btn.sm { min-height: 30px; font-size: .72rem; padding: 4px 8px; width: auto; }
+.btn-row { display: flex; gap: 8px; }
 .btn-row .btn { margin: 0; }
-.stack > .btn { margin-bottom: 10px; }
+.stack > .btn { margin-bottom: 8px; }
 .stack > .btn:last-child { margin-bottom: 0; }
 
-.saved { text-align: center; color: var(--good); font-size: .8rem; height: 18px; opacity: 0; transition: opacity .3s; margin-top: 8px; }
+/* .on state for any button = reality-blue border + text + soft glow */
+.btn.on, .tbtn.on {
+  border-color: var(--reality);
+  color: var(--reality);
+  box-shadow: var(--glow-reality);
+}
+
+.saved { text-align: center; color: var(--reality); font-size: .72rem; height: 16px; opacity: 0; transition: opacity .3s; margin-top: 6px; font-family: 'Chakra Petch', sans-serif; }
 .saved.show { opacity: 1; }
 
-/* ===================== Range designer ===================== */
-.designer { display: flex; gap: 16px; align-items: stretch; }
-.track-col { flex: 0 0 96px; display: flex; flex-direction: column; align-items: center; }
+/* ---- Segmented control ---- */
+.seg { display: flex; gap: 4px; flex-wrap: wrap; }
+.seg button {
+  flex: 1;
+  min-width: 50px;
+  min-height: 36px;
+  border: 1px solid var(--line-2);
+  border-radius: var(--radius);
+  background: transparent;
+  color: var(--tx-mut);
+  font-size: .76rem;
+  font-weight: 500;
+  font-family: 'Chakra Petch', sans-serif;
+  cursor: pointer;
+  transition: border-color .12s, color .12s;
+}
+.seg button:hover { border-color: var(--line-4); }
+.seg button.active {
+  border-color: var(--reality);
+  color: var(--reality);
+  box-shadow: var(--glow-reality);
+}
+
+/* ===================== Range designer (restyled, kept functional) ===================== */
+.designer { display: flex; gap: 12px; align-items: stretch; }
+/* The old vertical track designer is superseded by the spine/side RAIL —
+   the rail IS the stroke-window editor now (drag band + handles). We keep
+   the DOM (range.js still writes to #win/#posDot/#tgtDot and JS handlers
+   remain wired) but hide the visual so there's exactly ONE window editor
+   on screen. The nudge/trim/min-max controls in .ctl-col stay visible. */
+.track-col { display: none; }
 .track-host {
-  position: relative; flex: 1; width: 72px; min-height: 320px; border-radius: 16px;
-  background:
-    repeating-linear-gradient(180deg, transparent 0, transparent 31px, rgba(255,255,255,.05) 31px, rgba(255,255,255,.05) 32px),
-    linear-gradient(180deg, #11132a, #0c0d1d);
-  border: 1px solid var(--line); overflow: hidden; touch-action: none;
+  position: relative;
+  flex: 1;
+  width: 60px;
+  min-height: 280px;
+  background: var(--screen);
+  box-shadow: inset 0 2px 8px rgba(0,0,0,.7);
+  border: 1px solid var(--line-1);
+  overflow: hidden;
+  touch-action: none;
 }
-.endcap { position: absolute; left: 0; right: 0; height: 22px; display: grid; place-items: center;
-  font-size: .62rem; letter-spacing: .5px; color: var(--faint); text-transform: uppercase; pointer-events: none; }
+.endcap {
+  position: absolute;
+  left: 0; right: 0;
+  height: 18px;
+  display: grid;
+  place-items: center;
+  font-size: .56rem;
+  letter-spacing: calc(var(--s) * .5px);
+  color: var(--tx-ghost);
+  text-transform: uppercase;
+  pointer-events: none;
+  font-family: 'Martian Mono', monospace;
+  font-variation-settings: "wght" 400, "wdth" 90;
+}
 .endcap.top { top: 0; } .endcap.bot { bottom: 0; }
-/* live carriage position — a glowing horizontal line that glides smoothly */
-.posdot {
-  position:absolute; left:2px; right:2px; height:0; pointer-events:none; z-index:4;
-}
+
+/* Live carriage position — reality-blue (measured truth) */
+.posdot { position: absolute; left: 2px; right: 2px; height: 0; pointer-events: none; z-index: 4; }
 .posdot::before {
-  content:""; position:absolute; left:0; right:0; top:-1px; height:3px; border-radius:3px;
-  background: var(--good); box-shadow: 0 0 6px var(--good), 0 0 14px rgba(52,211,153,.7);
+  content: ""; position: absolute; left: 0; right: 0; top: -1px; height: 2px;
+  background: var(--reality); box-shadow: 0 0 6px var(--reality);
 }
 .posdot::after {
-  content:""; position:absolute; right:4px; top:-5px; width:11px; height:11px; border-radius:50%;
-  background: var(--good); box-shadow: 0 0 8px var(--good), 0 0 16px rgba(52,211,153,.8);
-  border:2px solid #0c0d1d;
+  content: ""; position: absolute; right: 3px; top: -4px; width: 9px; height: 9px; border-radius: 50%;
+  background: var(--reality); box-shadow: 0 0 8px var(--reality);
+  border: 1px solid var(--ink);
+}
+
+/* Commanded target marker — intent purple */
+.posdot.tgtdot { z-index: 3; }
+.posdot.tgtdot::before {
+  background: var(--intent);
+  box-shadow: 0 0 6px var(--intent);
+  opacity: .8;
+}
+.posdot.tgtdot::after {
+  left: 3px; right: auto;
+  background: var(--intent);
+  box-shadow: 0 0 8px var(--intent);
+  border-color: var(--ink);
 }
 
 .window {
-  position: absolute; left: 6px; right: 6px; border-radius: 12px; cursor: grab;
-  background: linear-gradient(180deg, rgba(108,140,255,.55), rgba(138,108,255,.45));
-  border: 1px solid rgba(255,255,255,.25); box-shadow: 0 4px 18px rgba(108,140,255,.35);
+  position: absolute;
+  left: 4px; right: 4px;
+  cursor: grab;
+  background: rgba(167,139,250,.14);
+  border: 1px solid var(--intent);
+  box-shadow: var(--glow-intent);
   touch-action: none;
 }
 .window:active { cursor: grabbing; }
 .window .grip {
-  position: absolute; left: 50%; transform: translateX(-50%); width: 34px; height: 5px; border-radius: 3px;
-  background: rgba(255,255,255,.6);
+  position: absolute; left: 50%; transform: translateX(-50%);
+  width: 28px; height: 3px;
+  background: var(--intent);
+  opacity: .5;
 }
-.window .grip.t { top: 6px; } .window .grip.b { bottom: 6px; }
+.window .grip.t { top: 4px; } .window .grip.b { bottom: 4px; }
 .handle {
-  position: absolute; left: -4px; right: -4px; height: 22px; cursor: ns-resize; touch-action: none;
+  position: absolute; left: -3px; right: -3px; height: 20px;
+  cursor: ns-resize; touch-action: none;
   display: grid; place-items: center;
 }
-.handle.t { top: -11px; } .handle.b { bottom: -11px; }
-.handle .bar { width: 40px; height: 8px; border-radius: 5px; background: #fff; box-shadow: 0 2px 6px rgba(0,0,0,.5); }
-.window .mid {
-  position: absolute; inset: 0; display: flex; flex-direction: column; align-items: center;
-  justify-content: center; gap: 2px; pointer-events: none; color: #fff;
+.handle.t { top: -10px; } .handle.b { bottom: -10px; }
+.handle .bar {
+  width: 32px; height: 4px;
+  background: var(--intent);
+  box-shadow: 0 0 4px var(--intent);
 }
-.window .mid .big { font-size: 1rem; font-weight: 800; font-variant-numeric: tabular-nums; }
-.window .mid .small { font-size: .64rem; opacity: .85; }
+.window .mid {
+  position: absolute; inset: 0;
+  display: flex; flex-direction: column; align-items: center;
+  justify-content: center; gap: 1px;
+  pointer-events: none; color: var(--intent);
+}
+.window .mid .big {
+  font-size: .9rem; font-weight: 400;
+  font-variation-settings: "wght" 500, "wdth" 95;
+}
+.window .mid .small { font-size: .56rem; opacity: .7; font-family: 'Chakra Petch', sans-serif; }
 
-.ctl-col { flex: 1; min-width: 0; display: flex; flex-direction: column; gap: 14px; }
-.nudge { display: grid; grid-template-columns: 1fr 1fr; gap: 8px; }
-.nudge .btn { min-height: 40px; font-size: .84rem; padding: 8px; }
-.pair { display: grid; grid-template-columns: 1fr 1fr; gap: 10px; }
-.mini-label { font-size: .72rem; color: var(--muted); margin-bottom: 5px; font-weight: 600; }
-.kv { display: flex; justify-content: space-between; font-size: .76rem; color: var(--muted); margin-top: 10px; }
-.kv b { color: var(--text); font-variant-numeric: tabular-nums; }
+.ctl-col { flex: 1; min-width: 0; display: flex; flex-direction: column; gap: 10px; }
+.nudge { display: grid; grid-template-columns: 1fr 1fr; gap: 6px; }
+.nudge .btn { min-height: 34px; font-size: .76rem; padding: 6px; }
+.pair { display: grid; grid-template-columns: 1fr 1fr; gap: 8px; }
+.mini-label { font-size: .68rem; color: var(--tx-mut); margin-bottom: 4px; font-weight: 500; font-family: 'Chakra Petch', sans-serif; }
+.kv { display: flex; justify-content: space-between; font-size: .72rem; color: var(--tx-mut); margin-top: 8px; font-family: 'Chakra Petch', sans-serif; }
+.kv b { color: var(--tx-val); font-family: 'Martian Mono', monospace; font-variation-settings: "wght" 400, "wdth" 90; }
+
+/* ===================== Told-vs-took legend ===================== */
+.ttlegend {
+  display: flex; gap: 12px; justify-content: center; margin-bottom: 10px;
+  font-size: .7rem; color: var(--tx-mut); font-family: 'Chakra Petch', sans-serif;
+}
+.ttlegend .dotmk {
+  display: inline-block; width: 8px; height: 8px; border-radius: 50%;
+  margin-right: 4px; vertical-align: middle;
+}
+.ttlegend .mk-took { background: var(--reality); box-shadow: 0 0 4px var(--reality); }
+.ttlegend .mk-told { background: var(--intent); box-shadow: 0 0 4px var(--intent); }
+.ttlegend b { color: var(--tx-val); font-family: 'Martian Mono', monospace; font-variation-settings: "wght" 400, "wdth" 90; }
+
+/* ===================== Position big readout ===================== */
+.pos-big {
+  text-align: center; padding: 14px;
+  background: var(--ink);
+  border: 1px solid var(--line-1);
+  outline: 1px solid var(--line-0);
+  outline-offset: 3px;
+  margin-bottom: 12px;
+}
+.pos-big b {
+  font-size: 1.8rem; font-weight: 400; color: var(--reality);
+  font-variation-settings: "wght" 400, "wdth" 100;
+}
+.pos-big span { font-size: .76rem; color: var(--tx-mut); margin-left: 4px; font-family: 'Chakra Petch', sans-serif; }
 
 /* ===================== Health ===================== */
-.flags { display: grid; grid-template-columns: 1fr 1fr; gap: 9px; margin-bottom: 14px; }
+.flags { display: grid; grid-template-columns: 1fr 1fr; gap: 6px; margin-bottom: 10px; }
 .flag {
-  display: flex; align-items: center; gap: 9px; padding: 11px 12px; border-radius: var(--radius-sm);
-  background: var(--card-2); border: 1px solid var(--line); font-size: .8rem; font-weight: 600;
+  display: flex; align-items: center; gap: 8px; padding: 8px 10px;
+  border: 1px solid var(--line-2); border-radius: var(--radius);
+  background: var(--ink); font-size: .76rem; font-weight: 500; font-family: 'Chakra Petch', sans-serif;
 }
-.flag .ico { width: 26px; height: 26px; border-radius: 7px; display: grid; place-items: center; flex: 0 0 auto;
-  background: rgba(52,211,153,.16); color: var(--good); }
-.flag .ico svg { width: 15px; height: 15px; }
-.flag .st { margin-left: auto; font-size: .68rem; padding: 3px 8px; border-radius: 999px;
-  background: rgba(52,211,153,.16); color: var(--good); }
-.flag.warn { border-color: rgba(251,191,36,.5); }
-.flag.warn .ico, .flag.warn .st { background: rgba(251,191,36,.16); color: var(--warn); }
-.flag.bad { border-color: rgba(251,111,132,.6); }
-.flag.bad .ico, .flag.bad .st { background: rgba(251,111,132,.18); color: var(--bad); }
+.flag .ico { width: 22px; height: 22px; display: grid; place-items: center; flex: 0 0 auto; color: var(--reality); }
+.flag .ico svg { width: 13px; height: 13px; }
+.flag .st { margin-left: auto; font-size: .62rem; padding: 2px 6px; border: 1px solid var(--reality); color: var(--reality); border-radius: var(--radius); }
+.flag.warn { border-color: var(--warn); }
+.flag.warn .ico, .flag.warn .st { color: var(--warn); border-color: var(--warn); }
+.flag.bad { border-color: var(--bad); }
+.flag.bad .ico, .flag.bad .st { color: var(--bad); border-color: var(--bad); }
 
-.meter { position: relative; height: 30px; background: var(--card-2); border-radius: var(--radius-sm); overflow: hidden; border: 1px solid var(--line); }
-.meter .fill { position: absolute; inset: 0 auto 0 0; width: 0%; border-radius: var(--radius-sm);
-  background: linear-gradient(90deg, var(--good), var(--warn) 65%, var(--bad)); transition: width .25s; }
-.meter .txt { position: absolute; inset: 0; display: flex; align-items: center; justify-content: center; gap: 1px;
-  font-size: .8rem; font-weight: 700; white-space: nowrap; color: #fff; text-shadow: 0 1px 2px rgba(0,0,0,.6); }
-
-.pos-big { text-align: center; padding: 18px; background: var(--card-2); border: 1px solid var(--line);
-  border-radius: var(--radius-sm); margin-bottom: 14px; }
-.pos-big b { font-size: 2rem; font-weight: 800; color: var(--good); font-variant-numeric: tabular-nums; }
-.pos-big span { font-size: .85rem; color: var(--muted); margin-left: 4px; }
-
-/* segmented control */
-.seg { display:flex; gap:6px; flex-wrap:wrap; }
-.seg button { flex:1; min-width:60px; min-height:40px; border:1px solid var(--line); border-radius:var(--radius-sm);
-  background:var(--card-2); color:var(--muted); font-size:.82rem; font-weight:600; cursor:pointer; transition:.12s; }
-.seg button.active { background:linear-gradient(135deg,var(--accent),var(--accent-2)); color:#fff; border:none; }
-
-pre.log {
-  background: #0a0b16; border: 1px solid var(--line); border-radius: var(--radius-sm); padding: 12px;
-  font-size: .72rem; line-height: 1.5; color: #b9c2ff; white-space: pre-wrap; word-break: break-word;
-  max-height: 320px; overflow-y: auto; margin-bottom: 12px; font-family: ui-monospace, Menlo, Consolas, monospace;
+.meter { position: relative; height: 26px; background: var(--screen); border: 1px solid var(--line-1); border-radius: var(--radius); overflow: hidden; }
+.meter .fill { position: absolute; inset: 0 auto 0 0; width: 0%; background: var(--reality); transition: width .25s; }
+.meter .txt {
+  position: absolute; inset: 0; display: flex; align-items: center; justify-content: center; gap: 1px;
+  font-size: .72rem; font-weight: 400; white-space: nowrap; color: var(--tx-hi);
+  font-variation-settings: "wght" 400, "wdth" 90;
 }
 
-/* ===================== Persistent home button (above tab bar) ===================== */
+/* ===================== Log console (screen) ===================== */
+pre.log, .screen.log {
+  padding: 10px;
+  font-size: .68rem;
+  line-height: 1.5;
+  color: var(--tx-val);
+  white-space: pre-wrap;
+  word-break: break-word;
+  max-height: 300px;
+  overflow-y: auto;
+  margin-bottom: 10px;
+  font-family: 'Martian Mono', monospace;
+  font-variation-settings: "wght" 400, "wdth" 85;
+}
+
+/* ===================== Toasts ===================== */
+.toasts {
+  position: fixed; left: 50%; transform: translateX(-50%);
+  top: calc(env(safe-area-inset-top) + 50px);
+  z-index: 90; display: flex; flex-direction: column; gap: 6px;
+  width: min(380px, calc(100% - 24px)); pointer-events: none;
+}
+.toast {
+  display: flex; align-items: center; gap: 8px; padding: 8px 10px;
+  border: 1px solid var(--line-2); border-radius: var(--radius);
+  background: var(--ink); outline: 1px solid var(--line-0); outline-offset: 2px;
+  font-size: .76rem; font-weight: 500; color: var(--tx); pointer-events: auto;
+  font-family: 'Chakra Petch', sans-serif;
+  animation: toastIn .2s ease;
+}
+.toast .ti { width: 16px; height: 16px; flex: 0 0 auto; }
+.toast.good { border-color: var(--reality); } .toast.good .ti { color: var(--reality); }
+.toast.warn { border-color: var(--warn); } .toast.warn .ti { color: var(--warn); }
+.toast.bad  { border-color: var(--bad); } .toast.bad .ti { color: var(--bad); }
+.toast.info .ti { color: var(--tx); }
+.toast.out { animation: toastOut .2s ease forwards; }
+@keyframes toastIn  { from { opacity: 0; transform: translateY(-8px); } to { opacity: 1; transform: none; } }
+@keyframes toastOut { to { opacity: 0; transform: translateY(-8px); } }
+
+/* ===================== Home FAB (mobile) ===================== */
 .home-fab {
-  display: none; position: fixed; left: 50%; transform: translateX(-50%); z-index: 41;
-  bottom: calc(var(--tabbar) + env(safe-area-inset-bottom) + 10px);
-  width: min(528px, calc(100% - 32px)); min-height: 46px; gap: 8px;
-  align-items: center; justify-content: center; border: none; border-radius: var(--radius-sm);
-  background: linear-gradient(135deg, var(--warn), #f59e0b); color: #2a1f04; font-weight: 800;
-  font-size: .92rem; cursor: pointer; box-shadow: var(--shadow);
+  display: none;
+  position: fixed; left: 50%; transform: translateX(-50%); z-index: 41;
+  bottom: calc(var(--tabbar) + env(safe-area-inset-bottom) + 8px);
+  width: min(480px, calc(100% - 24px));
+  min-height: 40px; gap: 6px;
+  align-items: center; justify-content: center;
+  border: 1px solid var(--warn); border-radius: var(--radius);
+  background: var(--ink); color: var(--warn);
+  font-weight: 500; font-size: .82rem; font-family: 'Chakra Petch', sans-serif;
+  cursor: pointer;
 }
 .home-fab.show { display: flex; }
-.home-fab svg { width: 18px; height: 18px; }
+.home-fab svg { width: 16px; height: 16px; }
 
-/* ===================== Bottom tab bar ===================== */
+/* ===================== Bottom tab bar (mobile) ===================== */
 .tabs {
   position: fixed; left: 0; right: 0; bottom: 0; z-index: 42;
-  background: rgba(14,14,26,.96); backdrop-filter: blur(12px); border-top: 1px solid var(--line);
-  display: flex; padding: 8px 8px calc(8px + env(safe-area-inset-bottom)); gap: 4px;
+  background: var(--ink); border-top: 1px solid var(--line-1);
+  display: flex; padding: 6px 6px calc(6px + env(safe-area-inset-bottom)); gap: 2px;
 }
 .tab {
-  flex: 1; background: none; border: none; color: var(--faint); cursor: pointer;
-  display: flex; flex-direction: column; align-items: center; gap: 3px; padding: 6px 2px;
-  border-radius: 10px; font-size: .64rem; font-weight: 600; transition: color .15s, background .15s;
+  flex: 1; background: none; border: 1px solid transparent; border-radius: var(--radius);
+  color: var(--tx-ghost); cursor: pointer;
+  display: flex; flex-direction: column; align-items: center; gap: 2px; padding: 4px 2px;
+  font-size: .58rem; font-weight: 500; font-family: 'Chakra Petch', sans-serif;
+  transition: color .12s, border-color .12s;
+  min-height: var(--tap);
 }
-.tab svg { width: 22px; height: 22px; }
-.tab.active { color: var(--accent); background: rgba(108,140,255,.12); }
+.tab svg { width: 18px; height: 18px; }
+.tab.active { color: var(--reality); border-color: var(--line-2); }
 
-.tab-content { display: none; animation: fade .2s ease; }
+.tab-content { display: none; animation: fade .15s ease; }
 .tab-content.active { display: block; }
-@keyframes fade { from { opacity: 0; transform: translateY(4px); } to { opacity: 1; transform: none; } }
+@keyframes fade { from { opacity: 0; transform: translateY(2px); } to { opacity: 1; transform: none; } }
 
 @media (min-width: 620px) {
-  .tabs { position: static; max-width: 560px; margin: 0 auto 16px; border-radius: var(--radius);
-    border: 1px solid var(--line); padding: 6px; }
-  .tab { flex-direction: row; gap: 8px; font-size: .82rem; padding: 9px; }
-  body { padding-bottom: 30px; }
-  .home-fab { position: static; transform: none; width: 100%; margin: 0 0 14px; }
+  .tabs { position: static; max-width: 560px; margin: 0 auto 12px; border: 1px solid var(--line-1); padding: 4px; }
+  .tab { flex-direction: row; gap: 6px; font-size: .76rem; padding: 6px; }
+  body { padding-bottom: 20px; }
+  .home-fab { position: static; transform: none; width: 100%; margin: 0 0 12px; }
 }
 
-/* ===================== DESKTOP LAYOUT (≥1024px) =====================
-   Two-column dashboard. Left sidebar holds the Stroke Window + Position
-   cards always-visible so the operator can tweak them without tab-switching.
-   Right panel holds the tab system with Motion Generator, Live Overrides,
-   Health, Settings, and Log.
-   The unified header bar spans full width with status chips + transport
-   buttons in one row — no more sticky transport eating vertical space. :3
-   ==================================================================== */
+/* ===================== Motion Graph (kept until Task 9 deletes it) ===================== */
+.graph-card { max-width: none !important; }
+.graph-body { padding: 0 !important; }
+.graph-body canvas {
+  display: block; width: 100%; height: 220px;
+  background: var(--screen);
+  box-shadow: inset 0 2px 8px rgba(0,0,0,.7);
+  border: 1px solid var(--line-1);
+  border-radius: var(--radius);
+}
+@media (max-width: 1280px) { .graph-body canvas { height: 180px; } }
+@media (max-width: 1024px) { .graph-body canvas { height: 160px; } }
+.graph-legend {
+  display: flex; gap: 14px; justify-content: center; align-items: center;
+  padding: 6px 0 2px;
+  font-size: .68rem; color: var(--tx-mut); font-weight: 500; font-family: 'Chakra Petch', sans-serif;
+}
+.graph-legend .gleg {
+  display: inline-block; width: 10px; height: 2px; border-radius: 1px;
+  margin-right: 4px; vertical-align: middle;
+}
+.gleg-took  { background: var(--reality); box-shadow: 0 0 4px var(--reality); }
+.gleg-told  { background: var(--intent); opacity: .8; border: 1px dashed var(--intent); height: 2px; width: 10px; }
+.gleg-asked { background: rgba(77,166,250,.5); border: 1px dotted rgba(77,166,250,.7); height: 2px; width: 10px; }
+
+/* ===================== App shell flex layout (base — all breakpoints) =====================
+   .desktop-layout is a flex row holding sidebar + resize handle + main panel.
+   On mobile the sidebar/resize-handle are hidden and the main panel takes
+   the full width (body-level scroll). */
+.desktop-layout {
+  display: flex;
+  align-items: flex-start;
+}
+.sidebar {
+  display: none;
+}
+.resize-handle {
+  display: none;
+}
+.main-panel {
+  flex: 1;
+  min-width: 0;
+}
+
+/* ===================== DESKTOP LAYOUT (≥1024px) ===================== */
 @media (min-width: 1024px) {
+  /* Body becomes a flex column so the desktop-layout row can flex-fill
+     whatever height remains under header + hero strip + rail panel —
+     no fragile calc() of stacked row heights. */
   body {
-    /* We're using flex layout on the header + banners + desktop-layout
-       wrapper, so body padding goes away. Full-height dashboard, no wasted
-       bottom padding for mobile-only tab bar or FAB. */
     padding: 0;
-    overflow-y: hidden;
-  }
-
-  /* ---- Desktop header: topbar + transport as one sticky horizontal bar ---- */
-  header {
     display: flex;
-    align-items: center;
-    gap: 14px;
-    padding: 10px 20px;
-    background: rgba(14,14,26,.94);
-    backdrop-filter: blur(14px);
-    border-bottom: 1px solid var(--line);
-    position: sticky;
-    top: 0;
-    z-index: 50;
-  }
-  header .topbar {
-    flex: 0 0 auto;
-    margin-bottom: 0;
-  }
-  header .transport {
-    flex: 1;
-    margin: 0;
-    padding: 0;
-    background: none;
-    backdrop-filter: none;
-    border-bottom: none;
-    position: static;
-    justify-content: flex-end;
-    gap: 6px;
-  }
-  header .transport .tbtn {
-    flex: 0 0 auto;
-    min-width: 64px;
-    min-height: 36px;
-    font-size: .74rem;
-    padding: 6px 10px;
-  }
-  header .transport .tbtn small {
-    font-size: .58rem;
-  }
-  /* Focus button — distinctive accent to stand out from the safety buttons */
-  .focus-btn {
-    background: rgba(108,140,255,.12) !important;
-    border-color: var(--accent) !important;
-    color: var(--accent) !important;
-  }
-  .focus-btn.on {
-    background: var(--accent) !important;
-    color: #fff !important;
-    box-shadow: 0 0 10px rgba(108,140,255,.5);
+    flex-direction: column;
+    height: 100vh;
+    overflow: hidden;
   }
 
-  /* ---- Banners host: below header, full width ---- */
+  /* ---- Header: one row, full width ---- */
+  header {
+    padding: 6px 20px;
+  }
+
+  /* ---- Banners host ---- */
   .banners-host {
     max-width: 100%;
     padding: 0 20px;
@@ -465,71 +1351,54 @@ pre.log {
     border-radius: 0;
   }
 
+  /* ---- Hero strip + rail panel gutters ---- */
+  .hero-strip { padding: 10px 20px 8px; }
+  .rail-panel.panel { padding: 10px 20px 6px; }
+
   /* ---- Two-column desktop layout ---- */
   .desktop-layout {
     display: flex;
     flex: 1;
-    height: calc(100vh - 56px); /* header height */
+    min-height: 0;
     overflow: hidden;
   }
 
   /* ---- Left sidebar ---- */
   .sidebar {
     flex: 0 0 340px;
-    border-right: 1px solid var(--line);
-    background: rgba(14,14,26,.45);
+    border-right: 1px solid var(--line-1);
+    background: var(--ink);
     display: flex;
     flex-direction: column;
     overflow-y: auto;
     overflow-x: hidden;
-    padding: 16px 20px 12px;
+    padding: 12px 16px;
   }
-  /* In desktop the sidebar cards are NOT collapsible — they're always open
-     because they're the primary reason the sidebar exists. :3 */
-  .sidebar .card.collapsible {
-    cursor: default;
-  }
-  .sidebar .card.collapsible > .card-head {
-    cursor: default;
-  }
-  .sidebar .card.collapsible .caret {
-    display: none; /* no collapse toggle — these are pinned open */
-  }
-  .sidebar .card.collapsible .card-body {
-    max-height: none !important;
-    opacity: 1;
-    pointer-events: auto;
-  }
-  .sidebar .card.collapsible {
-    padding: 14px;
-    margin-bottom: 12px;
-  }
-  .sidebar .card.collapsible .card-head {
-    margin-bottom: 10px;
-  }
-  .sidebar .card.collapsible .card-head h2 {
-    font-size: .88rem;
-  }
-  /* Hide the .hint and .saved text in sidebar cards — keep it clean */
+  .sidebar .card.collapsible { cursor: default; }
+  .sidebar .card.collapsible > .card-head { cursor: default; }
+  .sidebar .card.collapsible .caret { display: none; }
+  .sidebar .card.collapsible .card-body { max-height: none !important; opacity: 1; pointer-events: auto; }
+  .sidebar .card.collapsible { padding: 12px; margin-bottom: 10px; }
   .sidebar .card .hint { display: none; }
   .sidebar .card .saved { display: none; }
 
-  /* Desktop Home button — lives in the header bar, styled to match transport
-     buttons. When the machine isn't homed, this button glows gold so the
-     operator knows it's time to get into position. :3 */
+  /* ---- Collapsibles disabled everywhere on desktop (Appendix D: "collapsibles
+     disabled (always open)" at >=1024px) — Generator/Limits cards remain in
+     .tab-contents-host (not cloned to sidebar) but must still render fully
+     expanded with no caret/click affordance. JS click handler stays wired
+     (toggles .collapsed) but these rules force the body visible regardless. */
+  .tab-contents-host .card.collapsible { cursor: default; }
+  .tab-contents-host .card.collapsible > .card-head { cursor: default; }
+  .tab-contents-host .card.collapsible .caret { display: none; }
+  .tab-contents-host .card.collapsible .card-body { max-height: none !important; opacity: 1; pointer-events: auto; }
+
+  /* Desktop Home button in hero strip */
   .home-header-btn {
-    background: rgba(251,191,36,.14) !important;
-    border-color: var(--warn) !important;
-    color: var(--warn) !important;
     flex: 0 0 auto;
-    min-width: 56px;
+    min-width: 48px;
     min-height: 36px;
-    font-size: .74rem;
-    padding: 6px 10px;
-    margin-left: 6px;
-  }
-  .home-header-btn small {
-    font-size: .58rem;
+    font-size: .72rem;
+    padding: 4px 10px;
   }
 
   /* ---- Main panel (right) ---- */
@@ -540,92 +1409,62 @@ pre.log {
     overflow: hidden;
   }
 
-  /* ---- Graph panel — sits above the tab pills on desktop so the motion
-     graph is always visible no matter which tab you're on. Full-width,
-     non-collapsible, canvas fills available space. :3 ---- */
+  /* ---- Graph panel (above tab pills, kept until Task 9) ---- */
   .graph-panel {
     flex: 0 0 auto;
     display: block;
-    padding: 8px 20px 12px;
+    padding: 6px 20px 8px;
   }
-  .graph-panel:empty {
-    display: none;
-  }
-  .graph-panel .card {
-    margin-bottom: 0;
-    max-width: none !important;
-  }
-  .graph-panel .card.collapsible {
-    cursor: default;
-  }
-  .graph-panel .card.collapsible > .card-head {
-    cursor: default;
-  }
-  .graph-panel .card .caret {
-    display: none !important;
-  }
-  .graph-panel .card .card-body {
-    max-height: none !important;
-    opacity: 1;
-    pointer-events: auto;
-  }
-  .graph-panel .graph-body canvas {
-    height: 220px;
-  }
-  @media (min-height: 900px) {
-    .graph-panel .graph-body canvas { height: 280px; }
-  }
-  @media (min-height: 1100px) {
-    .graph-panel .graph-body canvas { height: 340px; }
-  }
+  .graph-panel:empty { display: none; }
+  .graph-panel .card { margin-bottom: 0; max-width: none !important; }
+  .graph-panel .card.collapsible { cursor: default; }
+  .graph-panel .card.collapsible > .card-head { cursor: default; }
+  .graph-panel .card .caret { display: none !important; }
+  .graph-panel .card .card-body { max-height: none !important; opacity: 1; pointer-events: auto; }
+  .graph-panel .graph-body canvas { height: 180px; }
+  @media (min-height: 900px) { .graph-panel .graph-body canvas { height: 240px; } }
+  @media (min-height: 1100px) { .graph-panel .graph-body canvas { height: 300px; } }
 
+  /* ---- Desktop tab pills ---- */
   .tabs-desktop {
     flex: 0 0 auto;
     display: flex;
     margin: 0 20px;
-    padding: 10px 20px 8px;
-    gap: 6px;
-    background: var(--card);
-    border-top: 1px solid var(--line);
-    border-bottom: 1px solid var(--line);
+    padding: 8px 16px 6px;
+    gap: 4px;
+    background: var(--ink);
+    border-top: 1px solid var(--line-1);
+    border-bottom: 1px solid var(--line-1);
     position: static;
     max-width: none;
   }
   .tabs-desktop .tab {
     flex: 0 0 auto;
     flex-direction: row;
-    gap: 8px;
-    font-size: .82rem;
-    padding: 9px 14px;
-    border-radius: var(--radius-sm);
+    gap: 6px;
+    font-size: .76rem;
+    padding: 6px 12px;
+    border-radius: var(--radius);
+    min-height: 34px;
   }
 
-  /* ---- Tab content host: scrollable area with multi-column tiling.
-     When multiple tabs are open, their content tiles side-by-side
-     in columns that each get at least 320px. Single tabs fill the
-     full width. The operator arranges their dashboard by toggling
-     tabs on and off. :3 ---- */
+  /* ---- Tab content host ---- */
   .tab-contents-host {
     flex: 1;
     overflow-y: auto;
     overflow-x: hidden;
-    padding: 16px 20px 24px;
+    padding: 12px 20px 20px;
     display: flex;
     flex-wrap: wrap;
     align-content: flex-start;
-    gap: 16px;
+    gap: 14px;
   }
-  /* Each tab-content is hidden by default; when active it becomes a
-     flexible column that fills available space. */
   .tab-contents-host .tab-content.active {
     display: block;
     flex: 1 1 360px;
     min-width: 320px;
     max-width: 100%;
   }
-  /* Cards and tab-level buttons get a max-width so they don't stretch
-     absurdly wide on 1440p+ screens. The operator's eyes shouldn't need
-     to scan across a football field to find the Rate slider. :3 */
   .tab-contents-host .card,
   .tab-contents-host > .tab-content > .btn,
   .tab-contents-host > .tab-content > .saved {
@@ -633,170 +1472,366 @@ pre.log {
   }
 
   /* ---- Hide mobile-only elements ---- */
-  .tabs-mobile {
-    display: none !important;
-  }
-  .home-fab {
-    display: none !important; /* mobile FAB gone on desktop */
-  }
+  .tabs-mobile { display: none !important; }
+  .home-fab { display: none !important; }
 
-  /* ---- Sidebar card cloning — on desktop, [data-sidebar-card] cards are
-     moved from the Drive tab into the sidebar. JavaScript handles the DOM
-     transplant at init. Until then they live in the tab-content (mobile
-     fallback). ---- */
-  .sidebar-cards > .card {
-    /* Sidebar cards get no bottom margin — the sidebar handles spacing */
-  }
-
-  /* Remove the old .wrap constraint — we're full-width now */
-  .wrap { max-width: none; }
-
-  /* ---- Track designer tweaks for sidebar ---- */
-  .sidebar .track-host {
-    min-height: 260px; /* slightly shorter than mobile to fit sidebar */
-  }
-  .sidebar .designer {
-    gap: 12px;
-  }
-  .sidebar .track-col {
-    flex: 0 0 80px;
-  }
-
-  /* ---- kv rows and misc cards stay clean ---- */
-  .sidebar .kv { display: none; } /* sidebar position card doesn't need the kv */
-
-  /* ---- Resize handle — the draggable grab line between sidebar and main panel.
-     The operator drags this to adjust how thicc their stroke window gets. :3 ---- */
+  /* ---- Resize handle ---- */
   .resize-handle {
-    display: block; /* hidden on mobile */
-    flex: 0 0 6px;
+    display: block;
+    flex: 0 0 4px;
     cursor: col-resize;
-    background: var(--line);
+    background: var(--line-1);
     position: relative;
-    transition: background .15s;
+    transition: background .12s;
     user-select: none;
     touch-action: none;
   }
   .resize-handle .resize-line {
-    position: absolute;
-    top: 50%;
-    left: 50%;
-    transform: translate(-50%, -50%);
-    width: 20px;
-    height: 32px;
-    border-radius: 4px;
-    background: var(--accent);
+    position: absolute; top: 50%; left: 50%; transform: translate(-50%, -50%);
+    width: 16px; height: 24px;
+    background: var(--line-3);
     opacity: 0;
-    transition: opacity .15s;
+    transition: opacity .12s;
   }
-  .resize-handle:hover,
-  .resize-handle.active {
-    background: var(--accent);
-  }
-  .resize-handle:hover .resize-line,
-  .resize-handle.active .resize-line {
-    opacity: 1;
-  }
-  .sidebar {
-    transition: flex-basis .05s ease-out;
+  .resize-handle:hover, .resize-handle.active { background: var(--line-3); }
+  .resize-handle:hover .resize-line, .resize-handle.active .resize-line { opacity: 1; }
+  .sidebar { transition: flex-basis .05s ease-out; }
+
+  /* ---- Sidebar track designer tweaks ---- */
+  .sidebar .designer { gap: 10px; }
+  .sidebar .kv { display: none; }
+}
+
+/* ===================== Reduced motion ===================== */
+@media (prefers-reduced-motion: reduce) {
+  *, *::before, *::after {
+    transition-duration: 0.01ms !important;
+    animation-duration: 0.01ms !important;
   }
 }
 
-/* ===================== FOCUS MODE =====================
-   Activated by the Focus button in the header (or localStorage).
-   Hides all secondary chrome, tooltips, hints, and cruft so the
-   top can concentrate on nothing but the pounding. Everything
-   essential — transport, designer, position slider, generator
-   start/stop — stays visible. :3
-   ====================================================== */
-body.focus-mode .card-head .info { display: none !important; }
-body.focus-mode .hint { display: none !important; }
-body.focus-mode .tab[data-tab="log"] { display: none !important; } /* no logs in the heat of it */
-body.focus-mode .card .kv { display: none !important; }
-body.focus-mode .card .saved { display: none !important; }
-body.focus-mode .switch .lbl { font-size: .82rem; } /* slightly smaller labels */
-body.focus-mode #modSeg { display: none !important; } /* FM/AM modulator selector */
-body.focus-mode #modControls { display: none !important; }
-body.focus-mode [data-action="useCurrentAsDefault"] { display: none !important; } /* "Use current window" */
-body.focus-mode [data-action="restoreDefaults"] { display: none !important; } /* "Restore saved defaults" */
-body.focus-mode #genEaseField { display: none !important; } /* ease — expert knob */
-body.focus-mode .graph-legend { display: none !important; } /* keep focus graph clean */
-/* In focus mode the sidebar position card still shows the slider + readout,
-   but we hide the "Set as Min/Max" buttons and the bypass/override switches
-   since those are "settings" actions not "operate" actions during a scene. */
-body.focus-mode .sidebar .btn-row { display: none !important; }
-body.focus-mode .sidebar .switch.full { display: none !important; }
+/* ============================================================================
+   Task 8R — Shadow state hooks + staleness visual polish
+   Review findings (Task 8R):
+   1. FIXED: banner host id was missing (index.html had no id="bannerHost")
+   2. FIXED: --font-label reference does not exist — replaced with literal 'Chakra Petch'
+   3. FIXED: currentPos duplicate rule conflict (lines set color:transparent then overwrite)
+   4. FIXED: stale chip w2 used --warn color on dot, not --bad
+   5. FIXED: degraded link-dot now shows hollow warn-hairline per spec
+   6. FIXED: banner host min-height reseved → 0 with inline padding; banners overlay
+   7. FIXED: .vv intent during stale now properly desaturates
+   8. FIXED: posDot/tgtDot/ttlegend markers desaturated during stale
+   9. FIXED: recovering transitions explicitly remove text-stroke
+   10. FIXED: settings slider desired-vs-confirmed pairing styled
+   11. FIXED: empty CSS rule blocks (just closing braces) removed
+   12. FIXED: .w2 on band handles during overdue now has proper red glow
+   ============================================================================ */
 
-/* ===================== Told-vs-took target marker ===================== */
-/* The amber TARGET marker rides behind the green actual-position dot so you
-   can see the gap between where the host TOLD the shaft to go and where it
-   actually TOOK it. The deeper the divergence, the harder it's struggling. :3 */
-.posdot.tgtdot { z-index: 3; }
-.posdot.tgtdot:before {
+/* --- .pending — desired ≠ reported, intent overlay is visible --- */
+
+/* Band edges dashed purple when pending */
+#spineRailHost.pending .rail-band-fill,
+#trackHost.pending .win {
+  border-color: var(--intent);
+  border-style: dashed;
+}
+#spineRailHost.pending .rail-band-handle,
+#trackHost.pending .handle .bar {
+  border-color: var(--intent) !important;
+  background: var(--intent);
+}
+
+/* Slider desired-vs-confirmed numeral pairing:
+   The readout shows BOTH values in adjacent fixed boxes.
+   Confirmed = gray (--tx-val), desired = purple (--intent) next to it.
+   On echo they merge into the confirmed box. */
+.readout .vv.intent {
+  /* Desired beside confirmed — renders in purple, no bloom */
+  color: var(--intent);
+  text-shadow: none;
+}
+.readout .vv.intent + span {
+  color: var(--intent);
+}
+
+/* Chip stays --chip, not lit-up */
+.chip.pending {
+  background: var(--chip);
+  border-color: var(--chip-line);
+}
+
+/* Cards with pending control get a subtle intent outline on the whole card */
+.card.pending {
+  outline-color: var(--intent);
+  outline-width: 1px;
+}
+
+/* ---- .settle — intent→reality convergence animation ≤300ms ---- */
+.settle {
+  transition: all 0.3s ease-out;
+}
+.settle .rail-band-fill,
+.settle .win {
+  border-style: solid;
+  transition: border-color 0.3s ease-out;
+}
+/* Settling numerals: intent→confirmed color crossfade */
+.settle .vv.intent {
+  animation: settleIntent 0.3s ease-out forwards;
+}
+@keyframes settleIntent {
+  from { color: var(--intent); }
+  to   { color: var(--tx-val); }
+}
+
+/* ---- Overdue escalation on pending controls ---- */
+
+/* 500ms: w1 = warn border + amber glow on handles */
+.pending.overdue1 .rail-band-handle,
+.pending.overdue1 .handle .bar,
+#spineRailHost.overdue1 .rail-band-handle {
+  border-color: var(--warn) !important;
   background: var(--warn);
-  box-shadow: 0 0 6px var(--warn), 0 0 14px rgba(251, 191, 36, .7);
-  opacity: .9;
+  box-shadow: 0 0 8px rgba(245,185,77,.35);
 }
-.posdot.tgtdot:after {
-  left: 4px; right: auto;
-  background: var(--warn);
-  box-shadow: 0 0 8px var(--warn), 0 0 16px rgba(251, 191, 36, .8);
-  border-color: #0c0d1d;
+/* 2s: w2 = bad border + red glow on handles */
+.pending.overdue2 .rail-band-handle,
+.pending.overdue2 .handle .bar,
+#spineRailHost.overdue2 .rail-band-handle {
+  border-color: var(--bad) !important;
+  background: var(--bad);
+  box-shadow: 0 0 12px rgba(255,71,87,.4);
+}
+/* Overdue card outline escalates */
+#spineRailHost.overdue1 {
+  outline-color: var(--warn);
+}
+#spineRailHost.overdue2 {
+  outline-color: var(--bad);
 }
 
-/* Told-vs-took legend + live numeric readouts under the Position card. */
-.ttlegend {
-  display: flex; gap: 14px; justify-content: center; margin-bottom: 12px;
-  font-size: .74rem; color: var(--muted);
+/* ---- .fault — retries exhausted, terminal state ---- */
+.pending.fault {
+  opacity: 0.6;
+  pointer-events: none;
 }
-.ttlegend .dotmk {
-  display: inline-block; width: 10px; height: 10px; border-radius: 50%;
-  margin-right: 5px; vertical-align: middle;
-}
-.ttlegend .mk-took { background: var(--good); box-shadow: 0 0 6px var(--good); }
-.ttlegend .mk-told { background: var(--warn); box-shadow: 0 0 6px var(--warn); }
-.ttlegend b { color: var(--text); font-variant-numeric: tabular-nums; }
 
-/* ===================== Motion Graph =====================
-   Big enough to actually read on a 16:9. Canvas gets a tall
-   minimum height and the card drops its max-width restriction
-   so the graph stretches to fill available space. An inline
-   legend sits below the canvas so you know which trace is which
-   without opening a tooltip. :3 */
-.graph-card {
-  /* override the 680px card cap — the graph needs room to breathe */
-  max-width: none !important;
-}
-.graph-body {
-  padding: 0 !important; /* canvas hugs the card edges */
-}
-.graph-body canvas {
-  display: block;
-  width: 100%;
-  height: 280px;
-  background: #0a0b16;
-  border: 1px solid var(--line);
-  border-radius: var(--radius-sm);
-}
-/* On smaller screens (tablet / narrow desktop) shrink a bit */
-@media (max-width: 1280px) {
-  .graph-body canvas { height: 220px; }
-}
-@media (max-width: 1024px) {
-  .graph-body canvas { height: 180px; }
-}
-/* Inline legend — sits below the canvas in a compact row */
-.graph-legend {
-  display: flex; gap: 18px; justify-content: center; align-items: center;
-  padding: 8px 0 2px;
-  font-size: .72rem; color: var(--muted); font-weight: 500;
-}
-.graph-legend .gleg {
-  display: inline-block; width: 12px; height: 3px; border-radius: 2px;
-  margin-right: 5px; vertical-align: middle;
-}
-.gleg-took  { background: var(--good); box-shadow: 0 0 5px var(--good); }
-.gleg-told  { background: var(--warn); opacity: .85; border: 1px dashed var(--warn); height: 2px; width: 11px; }
-.gleg-asked { background: rgba(96,165,250,0.7); border: 1px dotted rgba(96,165,250,0.9); height: 2px; width: 11px; }
+/* ============================================================================
+   Task 8R — Staleness visual language (polished)
+   ============================================================================ */
 
+/* --- body.stale : >150ms no 0x01 data ---
+   Desaturation: all reality-blue elements → --tx-ghost.
+   Glows extinguished. Numerals render hollow via text-stroke.
+   Decision of record: -webkit-text-stroke:1px + color:transparent.
+   Firefox fallback: opacity 0.35 on --tx-ghost. */
 
+/* Link-alive dot → ghost */
+body.stale .link-dot.good { background: var(--tx-ghost); box-shadow: none; }
+body.stale .link-dot { box-shadow: none; }
+
+/* Header dots: good → ghost, warn → half-opacity, bad → faint */
+body.stale .dot.good { background: var(--tx-ghost); box-shadow: none; }
+body.stale .dot.warn { opacity: 0.5; box-shadow: none; }
+body.stale .dot.bad  { opacity: 0.3; box-shadow: none; }
+body.stale .chip .dot { box-shadow: none; }
+
+/* Big position numeral: hollow via text-stroke */
+body.stale #currentPos {
+  -webkit-text-stroke: 1px currentColor;
+  color: transparent;
+  text-shadow: none;
+}
+@-moz-document url-prefix() {
+  body.stale #currentPos {
+    -webkit-text-stroke: unset;
+    color: var(--tx-ghost);
+    opacity: 0.35;
+  }
+}
+
+/* All .vv numerals (non-intent): hollow via text-stroke */
+body.stale .vv:not(.intent) {
+  -webkit-text-stroke: 1px currentColor;
+  color: transparent;
+  text-shadow: none;
+}
+@-moz-document url-prefix() {
+  body.stale .vv:not(.intent) {
+    -webkit-text-stroke: unset;
+    color: var(--tx-ghost);
+    opacity: 0.35;
+  }
+}
+
+/* Intent/purple numerals during stale → ghost, no bloom */
+body.stale .vv.intent { color: var(--tx-ghost); text-shadow: none; }
+
+/* Reality-colored elements: desaturate */
+body.stale .reality,
+body.stale [style*="var(--reality)"] {
+  color: var(--tx-ghost) !important;
+  text-shadow: none !important;
+}
+body.stale .glow { text-shadow: none !important; }
+
+/* Active/on buttons → ghost border */
+body.stale .btn.on {
+  border-color: var(--tx-ghost);
+  color: var(--tx-ghost);
+  box-shadow: none;
+}
+body.stale .tbtn.pause.on {
+  border-color: var(--tx-ghost);
+  color: var(--tx-ghost);
+  box-shadow: none;
+}
+
+/* Legend markers (told/took) → ghost */
+body.stale .ttlegend .mk-took {
+  background: var(--tx-ghost);
+  box-shadow: none;
+}
+body.stale .ttlegend .mk-told {
+  background: var(--tx-ghost);
+  box-shadow: none;
+}
+
+/* Pos dots on old track designer → ghost */
+body.stale .posdot::before,
+body.stale .posdot::after {
+  background: var(--tx-ghost);
+  box-shadow: none;
+}
+
+/* Rail marker freeze: canvas opacity reduced */
+body.stale .rail-canvas { opacity: 0.4; }
+
+/* Hero numeral glow → extinguished */
+body.stale .hero-val.glow {
+  color: var(--tx-ghost);
+  text-shadow: none;
+}
+
+/* Segmented control active → ghost */
+body.stale .seg button.active {
+  border-color: var(--tx-ghost);
+  color: var(--tx-ghost);
+  box-shadow: none;
+}
+
+/* Stale chip severity levels (managed by shadow.js, styled here) */
+#staleChip { transition: opacity 0.3s; }
+#staleChip.w1 .dot { background: var(--warn); box-shadow: 0 0 4px rgba(245,185,77,.35); }
+#staleChip.w2 .dot { background: var(--warn); box-shadow: 0 0 6px rgba(245,185,77,.45); }
+#staleChip.bad .dot { background: var(--bad); box-shadow: 0 0 8px rgba(255,71,87,.5); }
+#staleChip.bad     { border-color: var(--bad); }
+
+/* --- body.suspended : >1s no data, controls blocked --- */
+body.suspended .btn,
+body.suspended .tbtn,
+body.suspended .seg button,
+body.suspended input,
+body.suspended select {
+  opacity: 0.35;
+  pointer-events: none;
+}
+body.suspended input[type="range"] {
+  opacity: 0.3;
+}
+body.suspended .vv {
+  opacity: 0.4;
+}
+body.suspended .panel,
+body.suspended .card {
+  opacity: 0.7;
+}
+body.suspended .chip {
+  opacity: 0.5;
+}
+body.suspended .rail-canvas {
+  opacity: 0.15;
+}
+
+/* --- body.degraded : in HTTP fallback mode (--warn hairline, no hazard texture) --- */
+body.degraded .link-dot {
+  background: transparent;
+  border: 1px solid var(--warn);
+  border-radius: 50%;
+  box-shadow: 0 0 6px rgba(245,185,77,.25);
+}
+/* Degraded banner: warn hairline border, subtle amber fill, NO hazard */
+.degraded-banner {
+  border-color: var(--warn) !important;
+  color: var(--warn);
+  background: rgba(245,185,77,.06);
+  font-family: 'Chakra Petch', sans-serif;
+}
+
+/* --- body.recovering : WS reconnected, animate back within 300ms --- */
+body.recovering .vv {
+  transition: color 0.3s ease, text-shadow 0.3s ease, -webkit-text-stroke 0.3s ease, opacity 0.3s ease;
+}
+body.recovering .vv:not(.intent) {
+  -webkit-text-stroke: 0px transparent;
+  color: var(--tx-val);
+}
+body.recovering .link-dot,
+body.recovering .dot {
+  transition: background 0.3s ease, box-shadow 0.3s ease;
+}
+body.recovering #currentPos {
+  -webkit-text-stroke: 0px transparent;
+  color: var(--tx-val);
+  transition: color 0.3s ease, text-shadow 0.3s ease, -webkit-text-stroke 0.3s ease;
+}
+body.recovering .rail-canvas {
+  opacity: 1;
+  transition: opacity 0.3s ease;
+}
+body.recovering .btn.on {
+  transition: border-color 0.3s ease, color 0.3s ease, box-shadow 0.3s ease;
+}
+body.recovering .ttlegend .mk-took,
+body.recovering .ttlegend .mk-told {
+  transition: background 0.3s ease, box-shadow 0.3s ease;
+}
+body.recovering .hero-val.glow {
+  transition: color 0.3s ease, text-shadow 0.3s ease;
+}
+
+/* --- Banner host discipline: zero reflow ---
+   Banners mount into #bannerHost without shifting the spine strip below.
+   The host has min-height:0 so empty = zero space; banners get abs-position-like
+   overlay via max-height/opacity transitions but stay in-flow with 0 height. */
+.banner-host {
+  min-height: 0;
+  overflow: visible;
+}
+.banner-host .banner {
+  padding: 6px 14px;
+  font-family: 'Chakra Petch', sans-serif;
+  font-size: 12px;
+  font-weight: 500;
+  border: 1px solid var(--line-1);
+  border-radius: var(--radius);
+  margin-bottom: 0;
+  transition: opacity 0.25s ease, max-height 0.25s ease;
+  max-height: 36px;
+  opacity: 1;
+  overflow: hidden;
+}
+.banner-host .banner.warn {
+  border-color: var(--warn);
+  color: var(--warn);
+  background: rgba(245,185,77,.06);
+}
+.banner-host .banner.bad {
+  border-color: var(--bad);
+  color: var(--bad);
+  background: repeating-linear-gradient(135deg, rgba(255,71,87,.09) 0 5px, rgba(255,71,87,.012) 5px 10px);
+}
+.banner-host .banner.info {
+  border-color: var(--reality);
+  color: var(--reality);
+}

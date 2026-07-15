@@ -7,8 +7,10 @@
  * This is the visual topdog of the Drive tab. Slide the whole window, trim
  * the ends — the hardware obeys in real time. No save button needed. :3
  */
-import { $, clamp, setRead, icon, toast } from './ui.js';
+import { $, clamp, setRead, icon, toast, pad } from './ui.js';
 import { post } from './api.js';
+import * as cmd from './cmd.js';
+import { OP_SET_WINDOW } from './wire.js';
 
 // TRAVEL is dynamic — set from /api/settings or /api/capabilities on boot so
 // the range designer, motion graph, and all clamps use the actual rail length
@@ -49,6 +51,10 @@ export function setWinMax(v) { winMax = v; }
 export let windowReady = false;
 export function setWindowReady(v) { windowReady = v; }
 
+/** Gate: suppress pushWindow during init load so page refresh doesn't overwrite a live session. */
+export let suppressPush = false;
+export function setSuppressPush(v) { suppressPush = v; }
+
 let windowPushTimer = null;
 
 /**
@@ -56,10 +62,10 @@ let windowPushTimer = null;
  * Debounced 60ms so rapid dragging doesn't flood the REST handler.
  */
 export function pushWindow() {
-  if (!windowReady) return;
+  if (!windowReady || suppressPush) return;
   clearTimeout(windowPushTimer);
   windowPushTimer = setTimeout(() => {
-    post('/api/settings', {
+    cmd.send(OP_SET_WINDOW, {
       range_min: Math.round(winMin),
       range_max: Math.round(winMax),
       no_persist: true,
@@ -88,9 +94,9 @@ export function renderWindow() {
     win.style.top = topPx + 'px';
     win.style.height = Math.max(botPx - topPx, 24) + 'px';
   }
-  setRead('winLen', Math.round(winMax - winMin));
-  setRead('depthVal', Math.round(winMax - winMin));
-  setRead('spanVal', Math.round(winMin) + '\u2013' + Math.round(winMax));
+  setRead('winLen', pad(Math.round(winMax - winMin), 3, 0));
+  setRead('depthVal', pad(Math.round(winMax - winMin), 3, 0));
+  setRead('spanVal', pad(Math.round(winMin), 3, 0) + '\u2013' + pad(Math.round(winMax), 3, 0));
   const minNum = $('minNum'), maxNum = $('maxNum');
   if (minNum) minNum.value = Math.round(winMin);
   if (maxNum) maxNum.value = Math.round(winMax);
@@ -133,56 +139,10 @@ export function syncManualWindow() {
   setRead('manualPosVal', Math.round(s.value));
 }
 
-/* ---- Pointer drag state for the range designer ---- */
-let drag = null, dragStart = 0, startMin = 0, startMax = 0;
-
-function pxToMm(clientY) {
-  const host = $('trackHost');
-  if (!host) return 0;
-  const r = host.getBoundingClientRect();
-  const frac = clamp((clientY - r.top) / r.height, 0, 1);
-  return (1 - frac) * TRAVEL;
-}
-
-function startDrag(mode, e) {
-  drag = mode;
-  dragStart = pxToMm(e.clientY);
-  startMin = winMin;
-  startMax = winMax;
-  e.target.setPointerCapture && e.target.setPointerCapture(e.pointerId);
-  e.preventDefault();
-}
-
-function onDrag(e) {
-  if (!drag) return;
-  const mm = pxToMm(e.clientY);
-  if (drag === 'move') {
-    const span = startMax - startMin;
-    let delta = mm - dragStart;
-    let nMin = clamp(startMin + delta, 0, TRAVEL - span);
-    winMin = nMin; winMax = nMin + span;
-  } else if (drag === 'top') {
-    winMax = clamp(mm, winMin + 5, TRAVEL);
-  } else if (drag === 'bot') {
-    winMin = clamp(mm, 0, winMax - 5);
-  }
-  renderWindow();
-  e.preventDefault();
-}
-
-function endDrag() { drag = null; }
-
-export function initRangeDesigner() {
-  const win = $('win'), top = $('handleTop'), bot = $('handleBot');
-  if (win) win.addEventListener('pointerdown', e => { if (e.target.closest('.handle')) return; startDrag('move', e); });
-  if (top) top.addEventListener('pointerdown', e => startDrag('top', e));
-  if (bot) bot.addEventListener('pointerdown', e => startDrag('bot', e));
-  window.addEventListener('pointermove', onDrag);
-  window.addEventListener('pointerup', endDrag);
-  window.addEventListener('pointercancel', endDrag);
-  window.addEventListener('resize', renderWindow);
-
-  // Number input binding
+// Number input binding for Window panel min/max fields (moved out of the old
+// track designer; wired here so they survive the widget retirement). The rail
+// band handles these same values via rail.js's drag/resize → setWinMin/setWinMax.
+export function initWindowInputs() {
   const minNum = $('minNum'), maxNum = $('maxNum');
   if (minNum) minNum.addEventListener('change', () => { winMin = clamp(parseInt(minNum.value) || 0, 0, winMax - 5); renderWindow(); });
   if (maxNum) maxNum.addEventListener('change', () => { winMax = clamp(parseInt(maxNum.value) || 0, winMin + 5, TRAVEL); renderWindow(); });
@@ -190,6 +150,20 @@ export function initRangeDesigner() {
   // Bypass limits toggle
   const bypass = $('bypassLimits');
   if (bypass) bypass.addEventListener('change', syncManualWindow);
+
+  // Target Position slider — send move on release
+  const manualPos = $('manualPos');
+  if (manualPos) {
+    manualPos.addEventListener('input', function() {
+      setRead('manualPosVal', Math.round(manualPos.value));
+    });
+    manualPos.addEventListener('change', function() {
+      const mm = parseFloat(manualPos.value);
+      if (!isNaN(mm) && typeof window.__sendMove === 'function') {
+        window.__sendMove(mm, true);
+      }
+    });
+  }
 }
 
 export function useCurrentAsDefault() {
@@ -216,46 +190,10 @@ export async function setBound(which, position) {
   toast('Window ' + which + ' set to ' + p + ' mm', 'good', 'i-check');
 }
 
-// ===================== Smooth position line animator =====================
-// The status poll updates posTarget; this RAF loop eases the glowing green
-// dot toward the latest target so it glides instead of snapping 1/sec.
-let posTarget = 0, posDisplay = 0, posAnimStarted = false;
-
-// The COMMANDED target marker — where the host TOLD the shaft to go. Rides
-// alongside the actual-position dot so you can see "told vs took" right on
-// the stroke window. tgtTarget is fed by the motion-graph playback cursor. :3
-let tgtTarget = 0, tgtDisplay = 0;
+// Current position target — kept as a module-level fallback for setBound()
+// (Set-as-Min/Max buttons use this when no explicit position is provided).
+// The travel rail updates this from its interpolated display position.
+let posTarget = 0;
 
 export function setPosTarget(v) { posTarget = clamp(v, 0, TRAVEL); }
-export function setTargetMarker(v) { tgtTarget = clamp(v, 0, TRAVEL); }
 
-// Easing factor: 0.55 snaps the dot to the interpolated position within
-// ~3 frames at 60 FPS — tight enough to track the batched playback cursor
-// without visible lag, loose enough to avoid pixel jitter on a static shaft. :3
-function animatePosLine() {
-  posDisplay += (posTarget - posDisplay) * 0.55;
-  if (Math.abs(posTarget - posDisplay) < 0.1) posDisplay = posTarget;
-  // The target marker chases just as eagerly so the gap you see is the REAL
-  // tracking error, not animation lag. :3
-  tgtDisplay += (tgtTarget - tgtDisplay) * 0.55;
-  if (Math.abs(tgtTarget - tgtDisplay) < 0.1) tgtDisplay = tgtTarget;
-
-  const host = $('trackHost'), dot = $('posDot'), tdot = $('tgtDot');
-  if (host && dot) {
-    const H = host.clientHeight;
-    dot.style.top = ((1 - clamp(posDisplay, 0, TRAVEL) / TRAVEL) * H) + 'px';
-    if (tdot) tdot.style.top = ((1 - clamp(tgtDisplay, 0, TRAVEL) / TRAVEL) * H) + 'px';
-  }
-  // Live numeric readouts: actual + commanded target, in mm.
-  setRead('posNowVal', Math.round(posDisplay));
-  setRead('posTgtVal', Math.round(tgtDisplay));
-  requestAnimationFrame(animatePosLine);
-}
-
-
-export function startPosAnim() {
-  if (!posAnimStarted) {
-    posAnimStarted = true;
-    requestAnimationFrame(animatePosLine);
-  }
-}

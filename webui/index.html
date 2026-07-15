@@ -3,76 +3,57 @@
 <head>
   <meta charset="UTF-8">
   <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no">
-  <meta name="theme-color" content="#10101c">
-  <title>SlopDrive-32</title>
-  <!-- Told-vs-took target-marker + legend styling lives in src/style.css now
-       (the bundled stylesheet) — no inline <style> here so Vite's HTML proxy
-       doesn't choke on the build. :3 -->
+  <meta name="theme-color" content="#08090B">
+  <title>SD·32</title>
 </head>
 
-
 <body>
-<!-- Shell: this is all the static HTML. Feature cards that are build-flagged
-     get injected by their respective feature modules at init time. -->
+<!-- Registration crosshair — pinned top-right of the app frame -->
+<svg class="crosshair" viewBox="0 0 14 14" fill="none" stroke="currentColor" stroke-width="1" aria-hidden="true">
+  <path d="M7 0v14M0 7h14"/>
+  <circle cx="7" cy="7" r="2.5"/>
+</svg>
+
 <div class="toasts" id="toasts"></div>
 
-<!-- ===== UNIFIED HEADER: topbar + transport merged into one sticky bar, because
-     nobody wants a transport bar eating vertical inches on a big screen. :3 ===== -->
+<!-- ===== HEADER: ONE row — barcode + wordmark + link dot | chips ===== -->
 <header>
-  <div class="topbar">
-    <div class="logo" data-ico="i-bolt"></div>
-    <div class="title">
-      <h1>SlopDrive-32</h1>
-      <p>Dynamic Motion Interface</p>
-    </div>
-    <div class="chips">
-      <span class="chip"><span class="dot" id="wifiDot"></span><span id="wifiText">WiFi</span></span>
-      <span class="chip"><span class="dot" id="homeDot"></span><span id="homeText">Motor</span></span>
-      <span class="chip"><span class="dot" id="ifDot"></span><span id="ifText">IF</span></span>
-      <!-- Live motor-bus current sipped off the INA228 shunt. Hidden until the
-           firmware says it has a sensor (57AIM board only). Watch this during
-           bring-up to confirm the machine can actually feel itself before you
-           trust it to home without ramming anything. yippie! :3 -->
-      <span class="chip" id="currentChip" style="display:none"><span class="dot" id="currentDot"></span><span id="currentText">-- A</span></span>
-      <!-- Bus voltage chip — sibling to the current chip, same INA228 feed.
-           Threshold-colored: green nominal, amber sag (<22V), red (<20V). :3 -->
-      <span class="chip" id="voltageChip" style="display:none"><span class="dot" id="voltageDot"></span><span id="voltageText">-- V</span></span>
-    </div>
-
+  <div class="header-left">
+    <!-- Barcode identity mark — hairline vertical bars at --line-3 -->
+    <svg class="barcode" viewBox="0 0 20 16" fill="currentColor" aria-hidden="true">
+      <rect x="0"  y="0" width="1" height="16"/>
+      <rect x="2"  y="0" width="2" height="16"/>
+      <rect x="5"  y="0" width="1" height="16"/>
+      <rect x="7"  y="0" width="3" height="16"/>
+      <rect x="11" y="0" width="1" height="16"/>
+      <rect x="13" y="0" width="2" height="16"/>
+      <rect x="16" y="0" width="1" height="16"/>
+      <rect x="18" y="0" width="2" height="16"/>
+    </svg>
+    <span class="wordmark">SD·32</span>
+    <!-- Link-alive dot: reality-blue when polling succeeds, extinguished otherwise.
+         JS wires this via the existing wifi/poll state (id kept: wifiDot). -->
+    <span class="link-dot" id="wifiDot"></span>
   </div>
-  <div class="transport" id="transportBar">
-    <button class="tbtn pause" id="btnPause">
-      <span style="display:flex;align-items:center;gap:6px"><span style="width:15px;height:15px;display:inline-grid" data-ico="i-pause"></span> Pause</span>
-      <small id="pauseSub">ignore Intiface</small>
-    </button>
-    <button class="tbtn halt">
-      <span style="display:flex;align-items:center;gap:6px"><span style="width:15px;height:15px;display:inline-grid" data-ico="i-stop"></span> Halt</span>
-      <small>stop motion</small>
-    </button>
-    <button class="tbtn estop">
-      <span style="display:flex;align-items:center;gap:6px"><span style="width:15px;height:15px;display:inline-grid" data-ico="i-alert"></span> E-Stop</span>
-      <small>cut power</small>
-    </button>
-    <!-- Focus Mode — strips the UI down to essentials so the top can focus on the
-         pounding without extra chrome in the way. Saved to localStorage. :3 -->
-    <button class="tbtn focus-btn" id="btnFocus" title="Focus Mode — hide secondary controls">
-      <span style="display:flex;align-items:center;gap:4px"><span style="width:15px;height:15px;display:inline-grid" data-ico="i-target"></span> Focus</span>
-      <small>minimal UI</small>
-    </button>
-    <!-- Desktop Home button — lives in the header bar where it can't be missed.
-         Styled to match the transport buttons so it looks like it belongs. :3 -->
-    <button class="tbtn home-header-btn" id="homeBtnHeader" style="display:none" title="Home the machine">
-      <span style="display:flex;align-items:center;gap:4px"><span style="width:15px;height:15px;display:inline-grid" data-ico="i-home"></span> Home</span>
-      <small>bottom out</small>
-    </button>
+
+  <div class="chips">
+    <!-- Existing chips kept with their ids; restyled.
+         Homing state is NOT a chip — it lives as the Home button in the
+         hero strip (appears when un-homed, disappears once homed). -->
+    <span class="chip"><span class="dot" id="ifDot"></span><span id="ifText">IF</span></span>
+    <!-- draw chip (INA228 current) -->
+    <span class="chip" id="currentChip" style="display:none"><span class="dot" id="currentDot"></span><span id="currentText">-- A</span></span>
+    <!-- bus chip (INA228 voltage) -->
+    <span class="chip" id="voltageChip" style="display:none"><span class="dot" id="voltageDot"></span><span id="voltageText">-- V</span></span>
+    <!-- ip chip (device IP address) — first to drop on narrow viewports -->
+    <span class="chip" id="ipChip"><span class="dot good"></span><span id="wifiText">--</span></span>
   </div>
 </header>
 
-<!-- ===== BANNERS: always visible regardless of active tab, because you NEED to
-     know when the machine is being bratty or when Intiface has been leashed. ===== -->
-<div class="banners-host">
-  <div id="ovBanner" class="banner amber">⚠ Override active — Intiface is ignored. You have full manual control; toggle off to ease back.</div>
-  <div id="pauseBanner" class="banner blue">⏸ Paused — Intiface ignored. Drive with the slider or generator below; unpausing eases control back.</div>
+<!-- ===== BANNERS HOST: reserved space between header and spine strip ===== -->
+<div class="banners-host" id="bannerHost">
+  <div id="ovBanner" class="banner amber">Override active — Intiface is ignored. You have full manual control; toggle off to ease back.</div>
+  <div id="pauseBanner" class="banner blue">Paused — Intiface ignored. Drive with the slider or generator below; unpausing eases control back.</div>
   <div class="fault" id="faultBanner">
     <span data-ico="i-alert"></span>
     <div class="body">
@@ -84,33 +65,56 @@
   </div>
 </div>
 
-<!-- ===== DESKTOP LAYOUT WRAPPER: on big screens this becomes a two-column
-     dashboard. On mobile it collapses into the single-column scroll we love. ===== -->
+<!-- ===== ROW 2 — HERO STRIP: huge actual numeral + cmd + lag | transport ===== -->
+<div class="hero-strip">
+  <div class="spine-heroes" id="spineHeroes"><!-- rail.js builds the hero numerals --></div>
+  <div class="spine-transport">
+    <div class="transport" id="transportBar">
+      <button class="tbtn pause" id="btnPause">
+        <span style="display:flex;align-items:center;gap:4px"><span style="width:14px;height:14px;display:inline-grid" data-ico="i-pause"></span> Pause</span>
+        <small id="pauseSub">ignore Intiface</small>
+      </button>
+      <button class="tbtn halt">
+        <span style="display:flex;align-items:center;gap:4px"><span style="width:14px;height:14px;display:inline-grid" data-ico="i-stop"></span> Halt</span>
+        <small>stop motion</small>
+      </button>
+      <button class="tbtn estop">
+        <span style="display:flex;align-items:center;gap:4px"><span style="width:14px;height:14px;display:inline-grid" data-ico="i-alert"></span> E-Stop</span>
+        <small>cut power</small>
+      </button>
+      <!-- Home button — appears here (styled .on in --warn) when un-homed;
+           JS hides it once homed. -->
+      <button class="tbtn home-header-btn on" id="homeBtnHeader" style="display:inline-flex" title="Home the machine">
+        <span style="display:flex;align-items:center;gap:4px"><span style="width:14px;height:14px;display:inline-grid" data-ico="i-home"></span> Home</span>
+        <small>bottom out</small>
+      </button>
+    </div>
+  </div>
+</div>
+
+<!-- ===== ROW 3 — RAIL PANEL: the flagship travel instrument, full width ===== -->
+<div class="rail-panel panel">
+  <div class="spine-rail-host horizontal" id="spineRailHost"><!-- rail.js: ruler + canvas + band --></div>
+  <div class="rail-hint">
+    <span>drag band &middot; drag edges &middot; tap to command</span>
+    <span class="rail-trk">trk 00</span>
+  </div>
+</div>
+
+<!-- ===== DESKTOP LAYOUT WRAPPER ===== -->
 <div class="desktop-layout">
 
-  <!-- Left sidebar — these cards are always visible on desktop so the operator
-       can tweak the stroke window and position without tab-switching. On mobile
-       the cards live inside the Drive tab and this sidebar is hidden. :3 -->
+  <!-- Left sidebar — Stroke Window + Position cards (kept, resize logic untouched) -->
   <aside class="sidebar" id="sidebarHost">
     <div class="sidebar-cards" id="sidebarCards"></div>
-    <!-- Sidebar scrolls vertically, padding is handled by the sidebar itself. -->
   </aside>
 
-  <!-- Resize handle — drag to resize the sidebar on desktop. The operator
-       gets to decide how thick they want their stroke window to be. :3 -->
+  <!-- Resize handle — drag to resize the sidebar on desktop -->
   <div class="resize-handle" id="resizeHandle" aria-hidden="true"><div class="resize-line"></div></div>
 
-  <!-- Right panel — the tab system lives here. On desktop the motion graph
-       floats above the tabs so it's always visible; on mobile it stays inside
-       the Drive tab where it belongs. Tab pills sit below the graph, content
-       scrolls under everything. -->
+  <!-- Right panel — tab system -->
   <main class="main-panel">
-    <!-- Motion Graph panel — on desktop (≥1024px) the graph card gets moved
-         here by JS so it's permanently visible above the tab pills. On mobile
-         the card stays in the Drive tab and this panel is hidden. :3 -->
-    <div class="graph-panel" id="graphPanelHost"></div>
-    <!-- Desktop tab bar — horizontal pills below the graph. On mobile this
-         whole nav is hidden; the bottom tab bar takes over. -->
+    <!-- Desktop tab bar — horizontal pills -->
     <nav class="tabs tabs-desktop">
       <button class="tab active" data-tab="drive"  data-ico="i-play"></button>
       <button class="tab" data-tab="health" data-ico="i-heart"></button>
@@ -120,15 +124,14 @@
 
     <div class="tab-contents-host">
 
-    <!-- ===================== DRIVE TAB (desktop: Motion Generator + Live Overrides only;
-         Stroke Window + Position cards move to the sidebar on big screens) ===================== -->
+    <!-- ===================== DRIVE TAB ===================== -->
     <div id="drive" class="tab-content active">
 
       <!-- 1. Stroke Window (moves to sidebar on desktop) -->
-      <div class="card collapsible" data-sidebar-card="stroke">
+      <div class="card panel collapsible" data-sidebar-card="stroke">
         <div class="card-head">
           <span data-ico="i-range"></span><h2>Stroke Window</h2>
-          <button class="info" data-tip="Drag the highlighted box to slide the whole stroke window toward the front or back of the machine. Drag the white handles to trim each end. The green line shows the live carriage position. The grey track is the machine's full travel — 0&nbsp;mm is home (fully in).">
+          <button class="info" data-tip="Drag the highlighted box to slide the whole stroke window toward the front or back of the machine. Drag the white handles to trim each end. The blue line shows the live carriage position. The grey track is the machine's full travel — 0 mm is home (fully in).">
             <span data-ico="i-info"></span>
           </button>
           <span class="caret" data-ico="i-chevron"></span>
@@ -137,7 +140,6 @@
         <div class="designer">
           <div class="track-col">
             <div class="track-host" id="trackHost">
-              <!-- Endcap label patched by setTravel() from /api; "--" = not yet loaded. -->
               <div class="endcap top" id="endcapTop">Out / --</div>
               <div class="endcap bot">Home / 0</div>
               <div class="window" id="win">
@@ -151,12 +153,8 @@
                 <div class="grip b"></div>
               </div>
               <div class="posdot" id="posDot"></div>
-              <!-- Target marker — the amber "where the host TOLD us to go" line.
-                   Rides beside the green actual-position dot so you can see how
-                   hard the shaft is struggling to keep up. :3 -->
               <div class="posdot tgtdot" id="tgtDot"></div>
             </div>
-
           </div>
 
           <div class="ctl-col">
@@ -171,7 +169,6 @@
             <div class="pair">
               <div>
                 <div class="mini-label">Min (in)</div>
-                <!-- max patched by setTravel() from API; generic safe ceiling until then. -->
                 <input class="num" id="minNum" type="number" min="0" max="9999" step="1" inputmode="numeric">
               </div>
               <div>
@@ -203,27 +200,22 @@
       </div>
 
       <!-- 2. Position (moves to sidebar on desktop) -->
-      <div class="card collapsible" data-sidebar-card="position">
+      <div class="card panel collapsible" data-sidebar-card="position">
         <div class="card-head">
           <span data-ico="i-target"></span><h2>Position</h2>
           <button class="info" data-tip="The slider follows the carriage live — drag it and the machine tracks instantly, no Go button. Set as Min/Max snaps the window edge to wherever the carriage is now."><span data-ico="i-info"></span></button>
           <span class="caret" data-ico="i-chevron"></span>
         </div>
         <div class="card-body">
-        <div class="pos-big"><b id="currentPos">--</b><span>mm</span></div>
+        <div class="pos-big"><b id="currentPos" class="vv">--</b><span>mm</span></div>
 
-        <!-- Told-vs-took live readout: green = where the shaft actually got to,
-             amber = where the host commanded it. The gap is the real tracking
-             error — watch it widen when you pound it too fast for the accel. :3 -->
         <div class="ttlegend">
-          <span><span class="dotmk mk-took"></span>Took <b id="posNowVal">0</b>&nbsp;mm</span>
-          <span><span class="dotmk mk-told"></span>Told <b id="posTgtVal">0</b>&nbsp;mm</span>
+          <span><span class="dotmk mk-took"></span>Took <b id="posNowVal" class="vv">000</b>&nbsp;mm</span>
+          <span><span class="dotmk mk-told"></span>Told <b id="posTgtVal" class="vv intent">000</b>&nbsp;mm</span>
         </div>
 
         <div class="field">
-
           <label>Target Position</label>
-          <!-- max patched by setTravel() from API; generic safe ceiling until then. -->
           <input type="range" id="manualPos" min="0" max="9999" value="0" step="1">
           <div class="readout"><b id="manualPosVal">0</b><span>mm</span></div>
         </div>
@@ -234,7 +226,6 @@
         </div>
 
         <label class="switch full" style="margin-bottom:10px">
-          <!-- bypassHint patched by setTravel() from API; "--" = not yet loaded. -->
           <span><span class="lbl">Bypass limits</span><div class="hint" id="bypassHint" style="margin-top:2px">reach the full 0–-- mm, ignoring the window</div></span>
           <span style="display:flex;align-items:center"><input type="checkbox" id="bypassLimits"><span class="track"></span></span>
         </label>
@@ -245,36 +236,26 @@
         </div>
       </div>
 
-      <!-- 2.5 Motion Graph — on mobile this lives inside the Drive tab.
-           On desktop (≥1024px) JS moves it above the tab pills so it's
-           always visible no matter which tab you're on. :3 -->
-      <div class="card collapsible graph-card" id="motionGraphCard" data-graph-card>
+      <!-- Generator 01 — Pattern Engine + Wave Scope -->
+      <div class="card panel collapsible" id="patternCard">
         <div class="card-head">
-          <span data-ico="i-wave"></span><h2>Motion Graph &mdash; <span style="font-size:.7rem;color:var(--muted);font-weight:400">live position trace &middot; 10s window</span></h2>
-          <button class="info" data-tip="Rolling 10‑second live position trace. Green = actual carriage position (&lsquo;took&rsquo;), amber dashed = planner target (&lsquo;told&rsquo;), blue dotted = raw TCode demand pre-planner (&lsquo;asked&rsquo;). The dot at the right edge is right now. Grid lines every 2s horizontally, every 25% travel vertically. No extra polling — the same 10ms telemetry feed drives the stroke-window dot too. :3"><span data-ico="i-info"></span></button>
-          <span class="caret" data-ico="i-chevron"></span>
-        </div>
-        <div class="card-body graph-body">
-          <canvas id="motionGraphCanvas"></canvas>
-          <!-- Inline legend so the operator knows which trace is which at a glance -->
-          <div class="graph-legend">
-            <span><span class="gleg gleg-took"></span>Took</span>
-            <span><span class="gleg gleg-told"></span>Told</span>
-            <span><span class="gleg gleg-asked"></span>Asked</span>
-          </div>
-        </div>
-      </div>
-
-      <!-- 3. Pattern Engine (StrokeEngine patterns) -->
-      <div class="card collapsible" id="patternCard">
-        <div class="card-head">
-          <span data-ico="i-wave"></span><h2>Pattern Engine</h2>
+          <span data-ico="i-wave"></span><h2>Generator</h2>
           <button class="info" data-tip="OSSM StrokeEngine patterns running on-device. Select a pattern, tune the sliders, then Start. The machine will cycle the selected pattern inside the stroke window. Auto-yields if Intiface starts driving (unless you've paused or overridden)."><span data-ico="i-info"></span></button>
           <span class="caret" data-ico="i-chevron"></span>
         </div>
         <div class="card-body">
 
-        <div class="field" id="patSelField"><label>Pattern</label><select id="patSelect"><option value="0">Simple Stroke</option><option value="1">Teasing Pounding</option><option value="2">Robo Stroke</option><option value="3">Half'n'Half</option><option value="4">Deeper</option><option value="5">Stop'n'Go</option><option value="6">Insist</option></select></div>
+        <!-- Wave scope — recessed .screen canvas previewing the generator waveform -->
+        <div class="wave-scope screen">
+          <canvas id="waveScopeCanvas"></canvas>
+        </div>
+
+        <!-- Pattern select as segmented control -->
+        <div class="field">
+          <label>Pattern</label>
+          <div class="seg" id="patSelectSeg"></div>
+          <select id="patSelect" style="display:none"><option value="0">Simple Stroke</option><option value="1">Teasing Pounding</option><option value="2">Robo Stroke</option><option value="3">Half'n'Half</option><option value="4">Deeper</option><option value="5">Stop'n'Go</option><option value="6">Insist</option></select>
+        </div>
 
         <div class="field" id="patSpeedField"><label>Speed</label><input type="range" id="patSpeed" min="0" max="100" step="1" value="50"><div class="readout"><b id="patSpeedVal">50</b><span>%</span></div></div>
         <div class="field" id="patDepthField"><label>Depth</label><input type="range" id="patDepth" min="0" max="100" step="1" value="100"><div class="readout"><b id="patDepthVal">100</b><span>%</span></div></div>
@@ -287,10 +268,10 @@
         </div>
       </div>
 
-      <!-- 4. Live Overrides -->
-      <div class="card collapsible">
+      <!-- Limits 02 — Live speed/accel overrides -->
+      <div class="card panel collapsible">
         <div class="card-head">
-          <span data-ico="i-sliders"></span><h2>Live Overrides</h2>
+          <span data-ico="i-sliders"></span><h2>Limits</h2>
           <button class="info" data-tip="Temporarily override the saved defaults in real time. These don't persist — reboot (or Reset to defaults) restores the values saved on the Settings tab."><span data-ico="i-info"></span></button>
           <span class="caret" data-ico="i-chevron"></span>
         </div>
@@ -298,44 +279,35 @@
         <div class="field">
           <div class="label-row">
             <label>Max Speed</label>
-            <button class="info" data-tip="Maximum carriage velocity in mm/s. The firmware passes this directly to FastAccelStepper after converting to steps/s internally (steps/s = mm/s × steps-per-mm). Typical safe range: 200–800 mm/s. Expert mode unlocks up to 3000 mm/s."><span data-ico="i-info"></span></button>
+            <button class="info" data-tip="Maximum carriage velocity in mm/s. The firmware passes this directly to FastAccelStepper after converting to steps/s internally. Typical safe range: 200–800 mm/s. Expert mode unlocks up to 3000 mm/s."><span data-ico="i-info"></span></button>
           </div>
           <input type="range" id="maxSpeed" min="50" max="3000" value="550" step="10">
-
           <div class="readout"><b id="speedVal">550</b><span>mm/s</span></div>
         </div>
         <div class="field">
           <div class="label-row">
             <label>Acceleration</label>
-            <button class="info" data-tip="Ramp rate in mm/s². The firmware converts this to steps/s² before passing it to FastAccelStepper (steps/s² = mm/s² × steps-per-mm). Higher values = snappier starts and stops; too high causes lost steps. Typical safe range: 500–3000 mm/s². Expert mode unlocks up to 8000 mm/s²."><span data-ico="i-info"></span></button>
+            <button class="info" data-tip="Ramp rate in mm/s². The firmware converts this to steps/s² before passing it to FastAccelStepper. Higher values = snappier starts and stops; too high causes lost steps. Typical safe range: 500–3000 mm/s². Expert mode unlocks up to 8000 mm/s²."><span data-ico="i-info"></span></button>
           </div>
           <input type="range" id="accel" min="200" max="8000" value="1500" step="50">
-
           <div class="readout"><b id="accelVal">1500</b><span>mm/s²</span></div>
         </div>
-        <!-- Lookahead + Max Overshoot sliders RETIRED. They drove the old
-             predictive-extrapolation overshoot, which we yanked out for the
-             continuous-velocity blend. The shaft keeps its rhythm through the
-             stream now instead of guessing ahead and overshooting — no more
-             premature lunging. Tune the reversal feel via Settings → Continuous
-             Blend instead. :3 -->
         <button class="btn ghost sm" style="width:100%" data-action="restoreDefaults"><span data-ico="i-reset"></span> Restore saved defaults</button>
-
         </div>
       </div>
     </div>
 
     <!-- ===================== HEALTH TAB ===================== -->
     <div id="health" class="tab-content">
-      <div class="card" id="healthCard"><div class="card-body" style="text-align:center;padding:20px;color:var(--muted)">Driver health not available — no driver module loaded.</div></div>
-      <div class="card" id="loadCard"><div class="card-body" style="text-align:center;padding:20px;color:var(--muted)">Load monitoring not available.</div></div>
+      <div class="card panel" id="healthCard"><div class="card-body" style="text-align:center;padding:20px;color:var(--tx-mut)">Driver health not available — no driver module loaded.</div></div>
+      <div class="card panel" id="loadCard"><div class="card-body" style="text-align:center;padding:20px;color:var(--tx-mut)">Load monitoring not available.</div></div>
     </div>
 
     <!-- ===================== SETTINGS TAB ===================== -->
     <div id="settings" class="tab-content">
 
       <!-- Transport / connection -->
-      <div class="card tight" id="connCard">
+      <div class="card panel tight" id="connCard">
         <div class="card-head">
           <span data-ico="i-link"></span><h2>Connection</h2>
           <button class="info" data-tip="How Intiface / a host talks to the machine. WebSocket and Serial both use Intiface; Bluetooth advertises a BLE serial service a phone app or BLE host can connect to. Only one is active at a time — switching applies instantly and is remembered across reboots."><span data-ico="i-info"></span></button>
@@ -354,13 +326,12 @@
       </div>
 
       <!-- Startup default range -->
-      <div class="card tight">
+      <div class="card panel tight">
         <div class="card-head">
           <span data-ico="i-range"></span><h2>Startup Default Range</h2>
           <button class="info" data-tip="The working window the machine resets to on boot. Mid-session changes on the Range tab persist too — this is just the home base to fall back to."><span data-ico="i-info"></span></button>
         </div>
         <div class="pair">
-          <!-- max patched by setTravel() from API; generic safe ceiling until then. -->
           <div><div class="mini-label">Def min (mm)</div><input class="num" id="defMinNum" type="number" min="0" max="9999" step="1" inputmode="numeric"></div>
           <div><div class="mini-label">Def max (mm)</div><input class="num" id="defMaxNum" type="number" min="0" max="9999" step="1" inputmode="numeric"></div>
         </div>
@@ -368,7 +339,7 @@
       </div>
 
       <!-- Default motion -->
-      <div class="card tight">
+      <div class="card panel tight">
         <div class="card-head"><span data-ico="i-sliders"></span><h2>Default Motion</h2>
           <button class="info" data-tip="Saved defaults loaded on boot. You can override any of these live from the Control tab without changing what's saved here."><span data-ico="i-info"></span></button></div>
         <div class="field">
@@ -382,27 +353,23 @@
         <div class="field">
           <div class="label-row">
             <label>Acceleration</label>
-            <button class="info" data-tip="Ramp rate in mm/s². Stored as mm/s²; the firmware multiplies by steps-per-mm before calling FastAccelStepper's setAcceleration() (which expects steps/s²). Typical safe range: 500–3000 mm/s². Expert mode unlocks up to 8000 mm/s²."><span data-ico="i-info"></span></button>
+            <button class="info" data-tip="Ramp rate in mm/s². Stored as mm/s²; the firmware multiplies by steps-per-mm before calling FastAccelStepper's setAcceleration(). Typical safe range: 500–3000 mm/s². Expert mode unlocks up to 8000 mm/s²."><span data-ico="i-info"></span></button>
           </div>
           <input type="range" id="defAccel" min="200" max="4000" value="1500" step="50">
           <div class="readout"><b id="defAccelVal">1500</b><span>mm/s²</span></div>
         </div>
-        <!-- Lookahead + Max Overshoot defaults RETIRED alongside the predictive
-             extrapolation. Continuous-velocity blending keeps the rhythm now;
-             reversal feel lives in Settings → Continuous Blend. :3 -->
       </div>
 
-
       <!-- Intiface Compatibility -->
-      <div class="card tight">
+      <div class="card panel tight">
         <div class="card-head"><span data-ico="i-gauge"></span><h2>Intiface Compatibility</h2>
           <button class="info" data-tip="Intiface's buttplug bridge scales position values differently than MultiFunPlayer. If strokes from Intiface feel too shallow (never reaching full depth), turn this ON. Leave OFF for MultiFunPlayer."><span data-ico="i-info"></span></button></div>
         <label class="switch"><input type="checkbox" id="intifaceCompat"><span class="track"></span><span class="lbl">Intiface position fix</span></label>
-        <div class="mini-label" style="margin-top:6px;color:var(--faint)">Rescales incoming position values for Intiface, which mangles the TCode magnitude. Turn <b>ON</b> when driving from Intiface if strokes never reach full depth. Turn <b>OFF</b> for MultiFunPlayer (which sends spec-correct values). :3</div>
+        <div class="mini-label" style="margin-top:6px;color:var(--tx-ghost)">Rescales incoming position values for Intiface, which mangles the TCode magnitude. Turn <b>ON</b> when driving from Intiface if strokes never reach full depth. Turn <b>OFF</b> for MultiFunPlayer (which sends spec-correct values).</div>
       </div>
 
       <!-- Generation rate -->
-      <div class="card tight">
+      <div class="card panel tight">
         <div class="card-head"><span data-ico="i-gauge"></span><h2>Generation rate</h2>
           <button class="info" data-tip="How often the device recomputes and sends motion to the motor (waveform generator). Higher = smoother but more CPU/step load."><span data-ico="i-info"></span></button></div>
         <div class="seg" id="genTickSeg">
@@ -410,11 +377,8 @@
         </div>
       </div>
 
-      <!-- Continuous Blend mode — how streamTo() handles a new waypoint that
-           reverses direction while a stroke is still in flight. Built from the
-           API-advertised blend_mode value so old clients that don't know about
-           this card just get the firmware default. :3 -->
-      <div class="card tight" id="blendCard">
+      <!-- Continuous Blend mode -->
+      <div class="card panel tight" id="blendCard">
         <div class="card-head">
           <span data-ico="i-wave"></span><h2>Continuous Blend</h2>
           <button class="info" data-tip="Controls how the motor handles a new waypoint that reverses direction while a stroke is still in flight. Let-it-land (default) finishes the current stroke before reversing — smoothest, may drop a waypoint at extreme Hz. Allow-reversal retargets immediately for tighter tracking. Hybrid lets it land only when the remaining distance is large, otherwise allows the reversal."><span data-ico="i-info"></span></button>
@@ -425,7 +389,7 @@
           <button data-bm="2">Allow reversal</button>
           <button data-bm="3">Hybrid</button>
         </div>
-        <div class="hint" id="blendModeHint">Finish the current stroke before reversing — smoothest ride, may drop a waypoint at extreme Hz. :3</div>
+        <div class="hint" id="blendModeHint">Finish the current stroke before reversing — smoothest ride, may drop a waypoint at extreme Hz.</div>
       </div>
 
       <!-- Motor driver card (injected by tmc.js) -->
@@ -435,28 +399,28 @@
       <div class="saved" id="saveInd">Settings saved</div>
 
       <!-- Expert / safety -->
-      <div class="card tight" style="margin-top:14px">
+      <div class="card panel tight" style="margin-top:14px">
         <div class="card-head"><span data-ico="i-shield"></span><h2>Safety</h2>
-          <button class="info" data-tip="Expert mode lets the sliders run all the way to the hardware ceiling. Sliders gradient toward red as you approach the limits — the closer to red, the higher the risk of lost steps, heat or wear."><span data-ico="i-info"></span></button></div>
+          <button class="info" data-tip="Expert mode lets the sliders run all the way to the hardware ceiling."><span data-ico="i-info"></span></button></div>
         <label class="switch full"><span class="lbl">Expert mode</span>
           <span style="display:flex;align-items:center"><input type="checkbox" id="expertMode"><span class="track"></span></span></label>
-        <div id="expBanner" class="banner amber" style="margin-top:10px">⚠ Expert mode on — sliders run to the hardware ceiling. Watch the red zone.</div>
+        <div id="expBanner" class="banner amber" style="margin-top:10px">Expert mode on — sliders run to the hardware ceiling. Watch the red zone.</div>
       </div>
     </div>
 
     <!-- ===================== LOG TAB ===================== -->
     <div id="log" class="tab-content">
-      <div class="card">
+      <div class="card panel">
         <div class="card-head"><span data-ico="i-terminal"></span><h2>Device Log</h2></div>
         <div class="chip" id="serialModeBar" style="display:none;margin-bottom:12px">
           <span class="dot" id="serialDot"></span><span id="serialModeText">Serial</span>
         </div>
         <div class="hint" style="margin-bottom:10px">The USB port carries Intiface commands, so boot/debug messages appear here.</div>
-        <pre class="log" id="logBox">Loading…</pre>
+        <pre class="log screen" id="logBox">Loading…</pre>
         <div class="btn-row">
           <button class="btn" id="refreshLogBtn"><span data-ico="i-reset"></span> Refresh</button>
           <label class="switch" style="flex:1;justify-content:flex-end">
-            <span style="font-size:.8rem;color:var(--muted)">Auto</span>
+            <span style="font-size:.76rem;color:var(--tx-mut)">Auto</span>
             <input type="checkbox" id="autoLog" checked><span class="track"></span>
           </label>
         </div>
@@ -468,11 +432,10 @@
 
 </div><!-- .desktop-layout -->
 
-<!-- Persistent Home button (mobile FAB — hidden on desktop in favour of the
-     compact sidebar button so it doesn't dominate the whole page width. :3) -->
-<button class="home-fab" id="homeFab"><span data-ico="i-home"></span> Home the machine</button>
+<!-- Persistent Home button (mobile FAB) -->
+<button class="home-fab show" id="homeFab"><span data-ico="i-home"></span> Home the machine</button>
 
-<!-- Bottom navigation (mobile only — hidden on desktop, replaced by tabs-desktop pills) -->
+<!-- Bottom navigation (mobile only) -->
 <nav class="tabs tabs-mobile">
   <button class="tab active" data-tab="drive"  data-ico="i-play"></button>
   <button class="tab" data-tab="health" data-ico="i-heart"></button>

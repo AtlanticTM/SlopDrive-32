@@ -47,6 +47,7 @@
 #include "TransportManager.h"
 
 #include "WebUI.h"
+#include "UiSocket.h"
 
 #if defined(FEATURE_RS485_MODBUS)
 #include "ServoModbus.h"
@@ -106,6 +107,7 @@ static TransportManager   transportMgr(g_state, tcodeParser,
                                         serialTransport, wsTransport, bleTransport,
                                         dongleTransport, ossmBleService);
 
+static UiSocket        uiSocket(g_state);
 static WebUI webui(g_state, motor, mapper, patternEngine,
                     transportMgr, serialTransport, wsTransport, bleTransport);
 
@@ -222,10 +224,13 @@ static void motorTask(void* /*param*/) {
     bool homing_started = false;
     while (true) {
         // ---- E-stop: the red button got slapped. Cut power NOW. :3 ----------
-        if (g_state.estop_requested) {
+        // exchange() atomically reads-then-clears, closing the TOCTOU window
+        // where a Core 0 set arriving between read and clear was silently lost.
+        if (g_state.estop_requested.exchange(false)) {
             motor.stop();
             homing_started = false;
-            g_state.estop_requested = false;
+            g_state.homing_in_progress = false;   // prevent double-homing-task spawn on next tick (F-002)
+            g_state.homed = false;                // Core 1 is authoritative for homed clear (F-002)
             APPLOG("E-Stop handled — shaft is soft, waiting for orders~ :3");
         }
         // ---- Homing in progress: spawn the homing task ONCE, then watch
@@ -310,6 +315,7 @@ static void httpTask(void* param) {
     WebUI* ui = static_cast<WebUI*>(param);
     while (true) {
         ui->update();
+        uiSocket.update();         // binary WS UI plane (Core 0, same task as HTTP)
 #if defined(FEATURE_RS485_MODBUS)
         servoModbus.update();     // non-blocking state machine, 2Hz internals
 #endif
@@ -630,6 +636,17 @@ void setup() {
 
     // Register all HTTP routes and start the web server.
     webui.init();
+
+    // Wire the telemetry ring into UiSocket so the sender task can drain it
+    uiSocket.setTelemetryRing(webui._telemetry_ring, &webui._telemetry_seq, &webui._telemetry_mux);
+    uiSocket.setMotorDriver(&motor);
+    // Wire the WebUI command dispatcher — without this, 0x10 CMD frames
+    // (Home, Pause, Halt, E-Stop, Override, Move, etc.) are silently
+    // dropped because UiSocket::_handleEvent() requires _webui to be set.
+    uiSocket.setWebUI(&webui);
+
+    // Binary WS UI control plane + telemetry stream (0x00/0x01/0x02/0x03)
+    uiSocket.init();
 
 #if defined(FEATURE_RS485_MODBUS)
     // ---- RS485 Modbus servo telemetry (plan.md §7) -------------------------

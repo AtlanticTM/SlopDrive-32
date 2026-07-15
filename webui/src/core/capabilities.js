@@ -15,7 +15,7 @@
  *
  * Per plan.md §5.13 / §5.10.1.
  */
-import { $, setRead, clamp } from './ui.js';
+import { $, setRead, clamp, pad } from './ui.js';
 import { TRAVEL, setTravel } from '../core/range.js';
 
 /** Ceilings and feature flags cached after the API responds. */
@@ -159,18 +159,32 @@ function buildHealthCards(caps, feat) {
         <button class="info" data-tip="Live INA228 readings off the 5mΩ shunt on the 36V motor bus. Bus current is the total draw — motor + logic. Die temp is the INA228's internal temperature sensor on the same die as the shunt amp. Peak current is the highest |A| seen since boot."><span data-ico="i-info"></span></button>
       </div>
       <div class="card-body">
-        <div class="kv">
-          <span>Bus Voltage <b id="loadBusV">-- V</b></span>
-          <span>Bus Current <b id="loadBusA">-- A</b></span>
+        <div class="stat">
+          <span class="stat-label">Bus Voltage</span>
+          <span class="vv stat-value" id="loadBusV">00.0V</span>
+          <div class="stat-bar"><div class="stat-bar-fill" id="loadBusVBar"></div></div>
         </div>
-        <div class="kv">
-          <span>Bus Power <b id="loadBusW">-- W</b></span>
-          <span>Die Temp <b id="loadDieC">-- °C</b></span>
+        <div class="stat">
+          <span class="stat-label">Bus Current</span>
+          <span class="vv stat-value" id="loadBusA">00.00A</span>
+          <div class="stat-bar"><div class="stat-bar-fill" id="loadBusABar"></div></div>
         </div>
-        <div class="kv">
-          <span>Peak Current <b id="loadPeakA">-- A</b></span>
-          <span><button class="btn ghost sm" id="resetPeaksBtn" style="margin-top:4px"><span data-ico="i-reset"></span> Reset peaks</button></span>
+        <div class="stat">
+          <span class="stat-label">Bus Power</span>
+          <span class="vv stat-value" id="loadBusW">000.0W</span>
+          <div class="stat-bar"><div class="stat-bar-fill" id="loadBusWBar"></div></div>
         </div>
+        <div class="stat">
+          <span class="stat-label">Die Temp</span>
+          <span class="vv stat-value" id="loadDieC">00.0°C</span>
+          <div class="stat-bar"><div class="stat-bar-fill" id="loadDieCBar"></div></div>
+        </div>
+        <div class="stat">
+          <span class="stat-label">Peak Current</span>
+          <span class="vv stat-value" id="loadPeakA">00.00A</span>
+          <div class="stat-bar"><div class="stat-bar-fill" id="loadPeakABar"></div></div>
+        </div>
+        <button class="btn ghost sm" id="resetPeaksBtn" style="margin-top:6px"><span data-ico="i-reset"></span> Reset peaks</button>
       </div>`;
     // Re-inject icons into the newly created DOM
     if (typeof window.injectIcons === 'function') window.injectIcons();
@@ -228,14 +242,47 @@ function buildHealthCards(caps, feat) {
  * Update the Health tab's Load + Link cards from a status poll payload.
  * Called from pollStatus() each cycle alongside the toolbar chips. :3
  */
+// Helper: set a .vv stat value + its bar fill width + threshold class
+function setStat(id, value, intDigits, fracDigits, unit, pct, thresholds) {
+  var el = $(id);
+  if (el) {
+    el.textContent = pad(value, intDigits, fracDigits, unit);
+    el.style.setProperty('--vv-chars', pad(value, intDigits, fracDigits).length);
+    el.classList.remove('w1', 'w2');
+    if (thresholds) {
+      if (value >= thresholds.w2) el.classList.add('w2');
+      else if (value >= thresholds.w1) el.classList.add('w1');
+    }
+  }
+  var bar = $(id + 'Bar');
+  if (bar) {
+    bar.style.width = clamp(pct, 0, 100) + '%';
+    bar.classList.remove('w1', 'w2');
+    if (thresholds) {
+      if (value >= thresholds.w2) bar.classList.add('w2');
+      else if (value >= thresholds.w1) bar.classList.add('w1');
+    }
+  }
+}
+
 export function refreshHealthCards(d) {
-  // ---- Load card ----
+  // ---- Load card — .stat instruments with threshold bars ----
   if (d.has_power_monitor) {
-    setRead('loadBusV', (d.bus_voltage_v || 0).toFixed(1) + ' V');
-    setRead('loadBusA', (d.bus_current_a || 0).toFixed(2) + ' A');
-    setRead('loadBusW', (d.bus_power_w || 0).toFixed(1) + ' W');
-    setRead('loadDieC', (d.die_temp_c || 0).toFixed(1) + ' °C');
-    setRead('loadPeakA', (d.peak_current_a || 0).toFixed(2) + ' A');
+    var volts = d.bus_voltage_v || 0;
+    var amps = Math.abs(d.bus_current_a || 0);
+    var power = d.bus_power_w || 0;
+    var dieC = d.die_temp_c || 0;
+    var peakA = Math.abs(d.peak_current_a || 0);
+    // Bus voltage: 20-40V range, w1<22, w2<20
+    setStat('loadBusV', volts, 2, 1, 'V', (volts / 40) * 100, { w1: -Infinity, w2: -Infinity });
+    // Bus current: 0-20A range, w1>=8, w2>=15
+    setStat('loadBusA', amps, 2, 2, 'A', (amps / 20) * 100, { w1: 8, w2: 15 });
+    // Bus power: 0-800W range
+    setStat('loadBusW', power, 3, 1, 'W', (power / 800) * 100, null);
+    // Die temp: 0-100°C range, w1>=70, w2>=85
+    setStat('loadDieC', dieC, 2, 1, '°C', (dieC / 100) * 100, { w1: 70, w2: 85 });
+    // Peak current: 0-20A range, w1>=8, w2>=15
+    setStat('loadPeakA', peakA, 2, 2, 'A', (peakA / 20) * 100, { w1: 8, w2: 15 });
   }
 
   // ---- Link card ----

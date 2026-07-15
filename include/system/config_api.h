@@ -404,6 +404,13 @@ enum class TransportMode : uint8_t {
 // HTTP Server Port
 // =============================================================================
 
+#define UI_WS_PORT              81           // binary WebSocket UI control plane
+// NOTE: WiFi power-save (WIFI_PS_*) is never touched anywhere in this
+// firmware — the device is permanently wall-powered via a brick, so there's
+// no power budget to protect and toggling PS modes only adds WiFi radio
+// latency/jitter. TransportManager::setupWiFi() calls WiFi.setSleep(false)
+// once at boot and that's the end of it. :3
+
 #define HTTP_SERVER_PORT        80
 #define HTTP_PORT               80           // alias used in main.cpp
 

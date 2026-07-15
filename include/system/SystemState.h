@@ -92,7 +92,7 @@ struct SystemState {
     // ---- Loading / flow (cross-core) -----------------------------------------
     volatile bool          homed               = false;
     volatile bool          homing_in_progress  = false;
-    volatile bool          estop_requested     = false;   // Core 0 sets, Core 1 clears
+    std::atomic<bool>      estop_requested{false};        // Core 0 stores, Core 1 exchanges — atomic RMW closes TOCTOU window
     bool                   wifi_ready          = false;   // Core 0 only
 
     // ---- WiFi link telemetry (Core 0 only — written by TransportManager's
@@ -138,7 +138,7 @@ struct SystemState {
     // ---- Cadence / auto-duration ---------------------------------------------
     volatile bool          auto_duration        = true;
     uint32_t               last_cmd_ms          = 0;      // Core 1 only
-    float                  measured_interval_ms = 0.0f;   // Core 1 only
+    volatile float         measured_interval_ms = 0.0f;   // written Core 0 (commsTask), read Core 1 — mark volatile (F-024)
     volatile uint16_t      measured_hz          = 0;      // written Core 1, read Core 0
 
     // ---- Default range (Core 0 only) -----------------------------------------
@@ -186,6 +186,13 @@ struct SystemState {
     // memory_order_relaxed is correct — telemetry is display-only, no ordering
     // dependency with any other variable. :3
     std::atomic<float>     actual_position_mm{0.0f};
+
+    // ---- WS UI config generation counter (Core 0 only, atomic) ---------------
+    // Incremented on every applied settings change (HTTP, WS, serial/BLE).
+    // Sent in HELLO and 0x02 STATUS so clients can detect stale state and
+    // request a full resync via get_cfg. uint16_t wraps harmlessly — clients
+    // detect a difference, not a direction. :3
+    std::atomic<uint16_t>  cfg_gen{0};
 
 
     // Generator local tick rate (cross-core)

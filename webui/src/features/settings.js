@@ -10,7 +10,9 @@
  */
 import { $, setRead, onLiveSlider, clamp, icon, toast } from '../core/ui.js';
 import { post, get } from '../core/api.js';
-import { TRAVEL, setTravel, winMin, winMax, setWinMin, setWinMax, setWindowReady, renderWindow, useCurrentAsDefault } from '../core/range.js';
+import * as cmd from '../core/cmd.js';
+import { OP_SET_SPEED, OP_SET_ACCEL, OP_BLEND, OP_MODE, OP_SAVE } from '../core/wire.js';
+import { TRAVEL, setTravel, winMin, winMax, setWinMin, setWinMax, setWindowReady, renderWindow, useCurrentAsDefault, suppressPush, setSuppressPush } from '../core/range.js';
 import { applyExpertCeilings, expertMode, setExpertMode } from '../core/capabilities.js';
 
 export var currentMode = 'WS';
@@ -90,10 +92,8 @@ function pushOverride() {
   // lookahead/overshoot are gone — the firmware ignores unknown keys anyway,
   // but there's no point whispering dead commands into the void. :3
   overrideTimer = setTimeout(function() {
-    post('/api/settings', {
-      max_speed: parseInt($('maxSpeed').value), accel: parseInt($('accel').value),
-      no_persist: true
-    });
+    cmd.send(OP_SET_SPEED, { mm_s: parseInt($('maxSpeed').value) });
+    cmd.send(OP_SET_ACCEL, { mm_s2: parseInt($('accel').value) });
   }, 120);
 }
 
@@ -117,9 +117,8 @@ export async function saveSettings(silent) {
   // returned yet, we just wait — don't block the user with an alert. :3
   if (winMin >= winMax) { if (!silent) toast('Range invalid — min must be less than max', 'bad', 'i-alert'); return; }
   try {
-    // blend_mode is included so the firmware persists the operator's chosen
-    // reversal policy alongside speed/accel. Additive key — old firmware that
-    // doesn't know about it just ignores it. :3
+    // Fire save via WS control plane AND HTTP for response validation
+    cmd.send(OP_SAVE, {});
     var r = await post('/api/settings', {
       range_min: Math.round(winMin), range_max: Math.round(winMax),
       max_speed: parseInt($('defMaxSpeed').value), accel: parseInt($('defAccel').value),
@@ -146,18 +145,13 @@ export async function saveSettings(silent) {
 
 async function loadSettings() {
   try {
-    var d = await get('/api/settings');
+    const d = await get('/api/settings');
     if (!d || d.range_min === undefined) return;
-    // Set TRAVEL FIRST so renderWindow() clamps against the real rail length,
-    // not the hardcoded 240 default. If we set winMax=260 then renderWindow()
-    // before setTravel(260), the clamp fires at 240 and silently truncates it. :3
-    //
-    // measured_stroke is the REAL usable rail length felt out by sensorless
-    // homing (both hard stops stuffed and measured). When it's > 0 we prefer it
-    // over the geometry ceiling max_travel — the machine told us exactly how
-    // deep it can take it, so the whole range designer rescales to that. Until
-    // homing runs it's 0 and we fall back to the geometry ceiling. yippie! :3
-    var travel = (d.measured_stroke && d.measured_stroke > 0)
+    // Prevent pushing defaults DOWN to a live device on page refresh (P3-002/C4.2).
+    // Load is READ-ONLY: populate DOM from device truth, never dispatch settings back.
+    setSuppressPush(true);
+
+    const travel = (d.measured_stroke && d.measured_stroke > 0)
                ? d.measured_stroke
                : d.max_travel;
     if (travel) setTravel(travel);
@@ -166,24 +160,21 @@ async function loadSettings() {
     setWinMax(d.range_max);
     setWindowReady(true);
     renderWindow();
-    var dn = $('#defMinNum'); if (dn) dn.value = d.default_range_min || 0;
-    var dx = $('#defMaxNum'); if (dx) dx.value = d.default_range_max || TRAVEL;
+    const dn = $('#defMinNum'); if (dn) dn.value = d.default_range_min || 0;
+    const dx = $('#defMaxNum'); if (dx) dx.value = d.default_range_max || TRAVEL;
     setExpertMode(d.expert_mode || false);
-    // Reflect the Intiface compat toggle — default OFF (MFP spec decode) when
-    // the firmware doesn't advertise it. Note: explicit !! so an absent field
-    // reads as unchecked rather than undefined. :3
-    var ic = $('#intifaceCompat'); if (ic) ic.checked = !!d.intiface_compat;
-    var spd = d.max_speed || 550, acc = d.accel || 1500;
-    var look = d.lookahead || 20, over = d.overshoot || 8;
-    ['defMaxSpeed', 'maxSpeed'].forEach(function(id) { var e = $(id); if (e) e.value = spd; });
-    ['defAccel', 'accel'].forEach(function(id) { var e = $(id); if (e) e.value = acc; });
-    ['defLookahead', 'lookahead'].forEach(function(id) { var e = $(id); if (e) e.value = look; });
-    ['defOvershoot', 'overshoot'].forEach(function(id) { var e = $(id); if (e) e.value = over; });
-    // Reflect the firmware's current blend mode — default to 1 (let-it-land)
-    // if the field is absent (old firmware). The card is always shown; the
-    // firmware just keeps pounding with whatever mode it was last told. :3
+    const ic = $('#intifaceCompat'); if (ic) ic.checked = !!d.intiface_compat;
+    const spd = d.max_speed || 550, acc = d.accel || 1500;
+    const look = d.lookahead || 20, over = d.overshoot || 8;
+    ['defMaxSpeed', 'maxSpeed'].forEach(function(id) { const e = $(id); if (e) e.value = spd; });
+    ['defAccel', 'accel'].forEach(function(id) { const e = $(id); if (e) e.value = acc; });
+    ['defLookahead', 'lookahead'].forEach(function(id) { const e = $(id); if (e) e.value = look; });
+    ['defOvershoot', 'overshoot'].forEach(function(id) { const e = $(id); if (e) e.value = over; });
     reflectBlendMode(d.blend_mode || 1);
     applyExpertCaps();
+
+    // Re-arm push after init so user drags/inputs push normally
+    setSuppressPush(false);
   } catch (e) {}
 }
 
@@ -280,7 +271,7 @@ export function initSettings() {
     reflectBlendMode(m);
     // Push the new mode to the firmware immediately so the pounding changes
     // right now — no save required to feel the difference. :3
-    post('/api/settings', { blend_mode: blendMode, no_persist: true });
+    cmd.send(OP_BLEND, { bm: blendMode });
   });
 
   // Intiface compat toggle — apply live (no_persist) the instant it's flipped

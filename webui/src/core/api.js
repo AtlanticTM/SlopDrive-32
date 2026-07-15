@@ -4,13 +4,21 @@
  * from httpTask and routes them to the right doms. :3
  */
 
+const FETCH_TIMEOUT_MS = 5000;   // A-007: AbortController timeout on all fetches
+
+function _fetchWithTimeout(url, opts = {}) {
+  const signal = AbortSignal.timeout ? AbortSignal.timeout(FETCH_TIMEOUT_MS)
+    : (() => { const c = new AbortController(); setTimeout(() => c.abort(), FETCH_TIMEOUT_MS); return c.signal; })();
+  return fetch(url, Object.assign({ signal }, opts));
+}
+
 /**
  * POST a JSON body to a firmware endpoint. Returns the raw fetch Response
  * (or null on network error). Callers should .json() it themselves.
  */
 export async function post(url, body = {}) {
   try {
-    return await fetch(url, {
+    return await _fetchWithTimeout(url, {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify(body),
@@ -25,7 +33,7 @@ export async function post(url, body = {}) {
  */
 export async function get(url) {
   try {
-    const r = await fetch(url);
+    const r = await _fetchWithTimeout(url);
     return await r.json();
   } catch (e) {
     return null;
@@ -37,7 +45,7 @@ export async function get(url) {
  */
 export async function getText(url) {
   try {
-    const r = await fetch(url);
+    const r = await _fetchWithTimeout(url);
     return await r.text();
   } catch (e) {
     return null;

@@ -1,7 +1,9 @@
 #pragma once
 
 #include <Arduino.h>
+#include <ArduinoJson.h>
 #include "SystemState.h"
+#include "UiProtocol.h"
 
 // Forward declarations — WebUI stores references to these, not values.
 class MotorDriver;
@@ -12,6 +14,7 @@ class TransportManager;
 class SerialTransport;
 class WebSocketTransport;
 class BleTransport;
+class UiSocket;
 
 #if defined(FEATURE_RS485_MODBUS)
 class ServoModbus;
@@ -34,13 +37,16 @@ struct TelemetrySample {
     float    position_mm;   // where the shaft ACTUALLY is (motor.getPosition) — "took"
     float    target_mm;     // where the PLANNER told it to go (post-kinematics) — "told"
     float    raw_mm;        // rawest demand: TCode parser + RangeMapper, pre-planner — "asked"
+    uint32_t t_dev_us;      // esp_timer_get_time() truncated u32 — device clock at capture
 };
 
-
-// 25 slots × 10ms = 250ms of buffered playback before the oldest gets lapped.
-// Tight on RAM, plenty of headroom for a poll that runs a little late. :3
-#define TELEMETRY_RING_SIZE 25
-#define TELEMETRY_SAMPLE_INTERVAL_MS 10
+// 64 slots × 4166µs = 266ms of buffered history at 240Hz.
+// Grown from 25 to feed the WS 0x01 batching without wrap-around collisions
+// at 40–50Hz drain rates (6 samples per batch at 240Hz × 50Hz = enough headroom).
+// LittleFS BSS overhead is the real flash hog — 64 samples (24 bytes each = 1.5KB)
+// is negligible against the 320KB heap. :3
+#define TELEMETRY_RING_SIZE 64
+#define TELEMETRY_SAMPLE_INTERVAL_MS 4   // 240Hz = ~4166µs, rounded to 4ms (250Hz)
 
 
 // ============================================================================
@@ -56,11 +62,6 @@ struct TelemetrySample {
 // Lifecycle:
 //   init()          — registers every route + calls httpServer.begin()
 //   update()        — httpServer.handleClient(); call frequently (was httpTask)
-//
-// Paired with Step 7 cleanup (Risk #2):  handleApiStatus emits a stub
-// driver{} block (valid:false) and handleApiClearFault is a no-op.  The
-// frontend can hide those cards dynamically via feature-advertised flags
-// (JSON modularity per .clinerules §3).
 
 class WebUI {
 public:
@@ -83,16 +84,6 @@ public:
     void update();
 
     // ---- Batched telemetry ring buffer (Core 0) ----------------------------
-    // Filled at a strict 10ms cadence by a dedicated esp_timer callback so the
-    // sample spacing is rock-solid regardless of how busy the HTTP loop is. The
-    // status poll drains only the samples newer than the browser's last-seen
-    // seq, so no sample is ever sent twice and none are silently skipped (unless
-    // the ring genuinely overflowed past 250ms of un-polled backlog). :3
-    //
-    // _telemetry_seq is a monotonic write counter (never wraps in any practical
-    // session — 32 bits @ 100Hz = ~497 days). The slot for seq N is
-    // N % TELEMETRY_RING_SIZE. The spinlock keeps the multi-field write atomic
-    // against the HTTP-thread drain. :3
     TelemetrySample _telemetry_ring[TELEMETRY_RING_SIZE];
     volatile uint32_t _telemetry_seq = 0;   // total samples ever written
     portMUX_TYPE      _telemetry_mux = portMUX_INITIALIZER_UNLOCKED;
@@ -100,18 +91,42 @@ public:
     /// Append one sample to the ring. Called from the 10ms esp_timer callback.
     void captureTelemetry(float position_mm, float target_mm, float raw_mm);
 
-
     /// Bridge for the C-style esp_timer callback to reach the instance.
     static void telemetryTimerCb(void* arg);
     /// Start the dedicated 10ms telemetry sampler (called from init()).
     void startTelemetrySampler();
 
 #if defined(FEATURE_RS485_MODBUS)
-    /// Set the ServoModbus reference after construction (we can't pass it
-    /// through the ctor without touching every env's wiring). Called from
-    /// setup() once before tasks launch. :3
+    /// Set the ServoModbus reference after construction.
     void setServoModbus(ServoModbus& modbus) { _servoModbus = &modbus; }
 #endif
+
+    // ---- 0x10 CMD dispatch (called from UiSocket via lambda) ----------------
+    /// Parse a 0x10 CMD WS frame op, apply the mutation, return {ok, response_json}.
+    /// The caller (UiSocket) wraps this in a 0x11 ECHO with idempotency.
+    /// Returns true on success, false on failure (but still sets payload_out["ok"]=false).
+    bool handleCommand(uint8_t op, JsonDocument& payload_in,
+                       JsonDocument& payload_out);
+
+    // ---- Shared apply functions (used by both HTTP handlers and WS ops) ------
+    // Every apply path bumps _state.cfg_gen via _bumpGen() — called at the end
+    // of each mutation.  Returns the post-apply response JSON doc.
+
+    /// Apply a settings change (window, speed, accel, blend, auto_dur, intiface_compat, expert, default_range).
+    /// payload_in: {range_min?, range_max?, max_speed?, accel?, blend_mode?, no_persist?, auto_duration?, intiface_compat?, expert_mode?, default_range_min?, default_range_max?}
+    bool applySettings(JsonDocument& payload_in, JsonDocument& payload_out);
+
+    /// Apply a manual move command.  payload_in: {position, stream?, bypass_limits?, speed?}
+    bool applyMove(JsonDocument& payload_in, JsonDocument& payload_out);
+
+    /// Apply a pattern/generator config change.  payload_in: {speed?, depth?, stroke?, sensation?, pattern?, rate_tick?, running?}
+    bool applyPattern(JsonDocument& payload_in, JsonDocument& payload_out);
+
+    /// Apply a transport mode change.  payload_in: {mode}
+    bool applyMode(JsonDocument& payload_in, JsonDocument& payload_out);
+
+    /// Apply driver config change.  payload_in: {run_current?, hold_current?, stealthchop?, tpwm_thrs?, toff?, tbl?, hstart?, hend?, reset?, save?}
+    bool applyDriverConfig(JsonDocument& payload_in, JsonDocument& payload_out);
 
 private:
     // ---- Injected dependencies ----
@@ -129,11 +144,13 @@ private:
     WebServer*          _httpServer = nullptr;
 
 #if defined(FEATURE_RS485_MODBUS)
-    // RS485 Modbus telemetry — set by setServoModbus() in setup(). :3
     ServoModbus*        _servoModbus = nullptr;
 #endif
 
-    // ---- Handler methods (one per route) ------------------------------------
+    // ---- cfg_gen helper ------------------------------------------------------
+    void _bumpGen() { _state.cfg_gen.store(_state.cfg_gen.load(std::memory_order_relaxed) + 1, std::memory_order_relaxed); }
+
+    // ---- HTTP handler methods (one per route) --------------------------------
     void handleRoot();
     void handleApiStatus();
     void handleApiCapabilities();

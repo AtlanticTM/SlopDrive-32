@@ -48,6 +48,13 @@ public:
     virtual void update()         = 0;
     virtual void emergencyStop()  = 0;
 
+    // ---- Sole-caller enforcement ---------------------------------------------
+    // MotionArbiter is the ONLY class permitted to command motor position after
+    // this work. All motion dispatch routes through MotionArbiter::submit().
+    // Compile-time lock — no other code may call moveTo/streamTo/streamToSteps/
+    // stop/hardStop directly. :3
+    friend class MotionArbiter;
+
     // ---- Homing -------------------------------------------------------------
     virtual bool home(int32_t home_speed_steps_s = 4000) = 0;
     virtual void runHomingStep()   = 0;

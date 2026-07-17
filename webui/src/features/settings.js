@@ -11,7 +11,7 @@
 import { $, setRead, onLiveSlider, clamp, icon, toast } from '../core/ui.js';
 import { post, get } from '../core/api.js';
 import * as cmd from '../core/cmd.js';
-import { OP_SET_SPEED, OP_SET_ACCEL, OP_BLEND, OP_MODE, OP_SAVE } from '../core/wire.js';
+import { OP_SET_SPEED, OP_SET_ACCEL, OP_BLEND, OP_MODE, OP_SAVE, OP_STREAM_MODE, OP_OVERSHOOT } from '../core/wire.js';
 import { TRAVEL, setTravel, winMin, winMax, setWinMin, setWinMax, setWindowReady, renderWindow, useCurrentAsDefault, suppressPush, setSuppressPush } from '../core/range.js';
 import { applyExpertCeilings, expertMode, setExpertMode } from '../core/capabilities.js';
 
@@ -85,25 +85,84 @@ function reflectBlendMode(mode) {
   if (hint) hint.textContent = BLEND_HINTS[blendMode] || '';
 }
 
-var overrideTimer = null;
+// ---- Stream speed-feed A/B state ----------------------------------------
+// 0 = ceiling-pegged (hold input speed limit as cruise feed),
+// 1 = velocity-matched (derive feed from distance + command cadence).
+// The lever most likely to fix the v3-fails-at-slow-speeds stall. Pushed live
+// via the WS control plane (OP_STREAM_MODE) so it can be A/B'd against a
+// running stream; the firmware echoes it back in the cfg snapshot. :3
+var streamMode = 0;
+
+var STREAM_HINTS = {
+  0: 'Hold the input speed ceiling as the cruise feed — flat-out tracking, may stall very slow moves.',
+  1: 'Derive the feed from stroke distance and command cadence — gentle inputs get gentle-but-sufficient speed.'
+};
+
+function reflectStreamMode(mode) {
+  streamMode = (mode === 1) ? 1 : 0;
+  document.querySelectorAll('#streamModeSeg button').forEach(function(b) {
+    b.classList.toggle('active', parseInt(b.dataset.sm) === streamMode);
+  });
+  var hint = $('#streamModeHint');
+  if (hint) hint.textContent = STREAM_HINTS[streamMode] || '';
+}
+
+// ---- v4 overshoot-clamp A/B state ---------------------------------------
+// 0 = off (raw MFP end-slope shaping — the cubic may bulge past the endpoint),
+// 1 = on  (monotone Fritsch–Carlson tangent limit — the cubic can never leave
+//          [start,end], killing the invented overshoot-then-return micromotion).
+// Pushed live via OP_OVERSHOOT so it can be A/B'd against a running v4 stream
+// while watching the rail interp overlay + the 0x05 Overshoot anomaly counter;
+// the firmware echoes overshoot_clamp back in the cfg snapshot. :3
+var overshootClamp = 0;
+
+var OVERSHOOT_HINTS = {
+  0: 'Raw MFP slope shaping — steep G tangents can bulge the cubic past the target and back (invented micromotion you can feel).',
+  1: 'Monotone tangent clamp — the interpolated path can never overshoot the commanded endpoint. Watch the Overshoot anomaly count drop to zero.'
+};
+
+function reflectOvershoot(on) {
+  overshootClamp = on ? 1 : 0;
+  document.querySelectorAll('#overshootSeg button').forEach(function(b) {
+    b.classList.toggle('active', parseInt(b.dataset.oc) === overshootClamp);
+  });
+  var hint = $('#overshootHint');
+  if (hint) hint.textContent = OVERSHOOT_HINTS[overshootClamp] || '';
+}
+
+var _lastPushToastMs = 0;
 function pushOverride() {
   clearTimeout(overrideTimer);
-  // Live-override POST: only send the fields the firmware actually uses now.
-  // lookahead/overshoot are gone — the firmware ignores unknown keys anyway,
-  // but there's no point whispering dead commands into the void. :3
   overrideTimer = setTimeout(function() {
-    cmd.send(OP_SET_SPEED, { mm_s: parseInt($('maxSpeed').value) });
-    cmd.send(OP_SET_ACCEL, { mm_s2: parseInt($('accel').value) });
+    var us = parseInt($('userMaxSpeed').value);
+    var ua = parseInt($('userAccel').value);
+    var is = parseInt($('inputMaxSpeed').value);
+    var ia = parseInt($('inputAccel').value);
+    post('/api/settings', {
+      user_max_speed: us, user_max_accel: ua,
+      input_max_speed: is, input_max_accel: ia,
+      no_persist: true
+    }).then(function() {
+      // Realtime feedback — brief toast on limit commit
+      var now = Date.now();
+      if (now - _lastPushToastMs > 1500) {
+        _lastPushToastMs = now;
+        toast('Limits applied — User: ' + us + '/' + ua + ' | Input: ' + is + '/' + ia, 'info', 'i-sliders');
+      }
+    }).catch(function(){});
   }, 120);
 }
 
 export function restoreDefaults() {
-  // Restore speed + accel from the saved-defaults sliders. lookahead/overshoot
-  // sliders are legacy UI that §4 will clean up — skip them here so we don't
-  // try to read elements that may already be gone. :3
-  ['maxSpeed', 'accel'].forEach(function(id) {
-    var cap = id.charAt(0).toUpperCase() + id.slice(1);
-    var s = $(id), d = $('def' + cap);
+  // Restore dual limit sets from the default-settings sliders. Format:
+  // live slider id → 'def' + corresponding default slider id, e.g.:
+  // userMaxSpeed → defMaxSpeed, inputMaxSpeed → defMaxSpeed (both seed from legacy).
+  var map = {
+    userMaxSpeed: 'defMaxSpeed', userAccel: 'defAccel',
+    inputMaxSpeed: 'defMaxSpeed', inputAccel: 'defAccel'
+  };
+  Object.keys(map).forEach(function(liveId) {
+    var s = $(liveId), d = $(map[liveId]);
     if (s && d) s.value = d.value;
     if (s) s.dispatchEvent(new Event('input'));
   });
@@ -163,13 +222,27 @@ async function loadSettings() {
     const dn = $('#defMinNum'); if (dn) dn.value = d.default_range_min || 0;
     const dx = $('#defMaxNum'); if (dx) dx.value = d.default_range_max || TRAVEL;
     setExpertMode(d.expert_mode || false);
+    if (typeof d.stream_speed_mode === 'number') reflectStreamMode(d.stream_speed_mode);
+    if (typeof d.overshoot_clamp !== 'undefined') reflectOvershoot(!!d.overshoot_clamp);
     const ic = $('#intifaceCompat'); if (ic) ic.checked = !!d.intiface_compat;
     const spd = d.max_speed || 550, acc = d.accel || 1500;
     const look = d.lookahead || 20, over = d.overshoot || 8;
-    ['defMaxSpeed', 'maxSpeed'].forEach(function(id) { const e = $(id); if (e) e.value = spd; });
-    ['defAccel', 'accel'].forEach(function(id) { const e = $(id); if (e) e.value = acc; });
-    ['defLookahead', 'lookahead'].forEach(function(id) { const e = $(id); if (e) e.value = look; });
-    ['defOvershoot', 'overshoot'].forEach(function(id) { const e = $(id); if (e) e.value = over; });
+    // Seed default-motion sliders from the legacy max_speed/accel fields
+    ['defMaxSpeed', 'defAccel'].forEach(function(pair) {
+      var id = pair; var val = (pair === 'defMaxSpeed') ? spd : acc;
+      var e = $(id); if (e) e.value = val;
+    });
+    // Seed live dual-limit sliders from the dual-limit API fields
+    var us = d.user_max_speed || spd, ua = d.user_max_accel || acc;
+    var is = d.input_max_speed || spd, ia = d.input_max_accel || acc;
+    var els = { userMaxSpeed: us, userAccel: ua, inputMaxSpeed: is, inputAccel: ia };
+    Object.keys(els).forEach(function(id) {
+      var e = $(id); if (e) e.value = els[id];
+    });
+    // Seed the old combined sliders for backward compat (they still exist in
+    // the Settings tab "Default Motion" card, driving the "Save All" defaults).
+    var eSp = $('maxSpeed'); if (eSp) eSp.value = spd;
+    var eAc = $('accel'); if (eAc) eAc.value = acc;
     reflectBlendMode(d.blend_mode || 1);
     applyExpertCaps();
 
@@ -239,19 +312,17 @@ export function initSettings() {
     gts.querySelectorAll('button').forEach(function(x) { x.classList.remove('active'); });
     b.classList.add('active'); post('/api/gen', { rate_tick: genTickValue() });
   });
-  // Live Overrides sliders — update readout + gradient + push to firmware.
-  ['maxSpeed', 'accel', 'lookahead', 'overshoot'].forEach(function(id) {
-    var s = $(id); if (!s) return;
+  // Dual-limit live-override sliders — update readout + push to firmware.
+  [['userMaxSpeed','userSpeedVal'], ['userAccel','userAccelVal'],
+   ['inputMaxSpeed','inputSpeedVal'], ['inputAccel','inputAccelVal']].forEach(function(pair) {
+    var s = $(pair[0]); if (!s) return;
     s.addEventListener('input', function() {
-      onLiveSlider(id === 'maxSpeed' ? 'speedVal' : id + 'Val', s, id);
+      onLiveSlider(pair[1], s, pair[0]);
       pushOverride();
     });
   });
-  // Default Motion sliders — update readout + gradient only (no live push;
-  // these are saved on "Save All Settings"). The readout IDs follow the
-  // def<Cap>Val pattern (defSpeedVal, defAccelVal, etc.). :3
-  [['defMaxSpeed','defSpeedVal'], ['defAccel','defAccelVal'],
-   ['defLookahead','defLookaheadVal'], ['defOvershoot','defOvershootVal']].forEach(function(pair) {
+  // Default Motion sliders — update readout only (no live push; saved on "Save All Settings").
+  [['defMaxSpeed','defSpeedVal'], ['defAccel','defAccelVal']].forEach(function(pair) {
     var s = $(pair[0]); if (!s) return;
     s.addEventListener('input', function() { onLiveSlider(pair[1], s, pair[0]); });
   });
@@ -272,6 +343,35 @@ export function initSettings() {
     // Push the new mode to the firmware immediately so the pounding changes
     // right now — no save required to feel the difference. :3
     cmd.send(OP_BLEND, { bm: blendMode });
+  });
+
+  // ---- Stream speed-feed A/B segmented control ----------------------------
+  // Flips the streaming cruise-feed policy live so the operator can A/B it
+  // against a running MFP stream while watching the rail interp overlay. The
+  // firmware applies it on the next cruise feed (no re-home, no save needed).
+  var sms = $('#streamModeSeg');
+  if (sms) sms.addEventListener('click', function(e) {
+    var b = e.target.closest('button'); if (!b || b.dataset.sm === undefined) return;
+    var m = parseInt(b.dataset.sm);
+    reflectStreamMode(m);
+    cmd.send(OP_STREAM_MODE, { mode: streamMode });
+    toast(streamMode === 1 ? 'Speed-feed: velocity-matched' : 'Speed-feed: ceiling-pegged',
+          'info', 'i-gauge');
+  });
+
+  // ---- v4 overshoot-clamp A/B segmented control ---------------------------
+  // Flips the monotone tangent limiter live so the operator can A/B it against
+  // a running MFP v4 stream while watching the rail interp overlay and the
+  // Overshoot anomaly counter. Applied on the next committed segment — no
+  // re-home, no save needed to feel the difference. :3
+  var ocs = $('#overshootSeg');
+  if (ocs) ocs.addEventListener('click', function(e) {
+    var b = e.target.closest('button'); if (!b || b.dataset.oc === undefined) return;
+    var on = parseInt(b.dataset.oc);
+    reflectOvershoot(on);
+    cmd.send(OP_OVERSHOOT, { on: !!overshootClamp });
+    toast(overshootClamp ? 'Overshoot clamp ON — monotone path' : 'Overshoot clamp OFF — raw slope',
+          'info', 'i-gauge');
   });
 
   // Intiface compat toggle — apply live (no_persist) the instant it's flipped

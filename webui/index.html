@@ -45,6 +45,8 @@
     <span class="chip" id="currentChip" style="display:none"><span class="dot" id="currentDot"></span><span id="currentText">-- A</span></span>
     <!-- bus chip (INA228 voltage) -->
     <span class="chip" id="voltageChip" style="display:none"><span class="dot" id="voltageDot"></span><span id="voltageText">-- V</span></span>
+    <!-- mot chip (motion mode) — D4 planner diagnostics: DERIVED vs PEAK speed -->
+    <span class="chip" id="motChip"><span class="dot" id="motDot"></span><span id="motText">mot --</span></span>
     <!-- ip chip (device IP address) — first to drop on narrow viewports -->
     <span class="chip" id="ipChip"><span class="dot good"></span><span id="wifiText">--</span></span>
   </div>
@@ -268,29 +270,34 @@
         </div>
       </div>
 
-      <!-- Limits 02 — Live speed/accel overrides -->
+      <!-- Limits 02 — Dual limit sets (User / Input) -->
       <div class="card panel collapsible">
         <div class="card-head">
           <span data-ico="i-sliders"></span><h2>Limits</h2>
-          <button class="info" data-tip="Temporarily override the saved defaults in real time. These don't persist — reboot (or Reset to defaults) restores the values saved on the Settings tab."><span data-ico="i-info"></span></button>
+          <button class="info" data-tip="TWO sets of ceilings: USER governs manual moves (rail tap, slider), INPUT governs streams (TCode, PatternEngine, OSSM). Each set is independent — slow and gentle cursor, fast and hard automated pounding. Saves with Settings."><span data-ico="i-info"></span></button>
           <span class="caret" data-ico="i-chevron"></span>
         </div>
         <div class="card-body">
         <div class="field">
-          <div class="label-row">
-            <label>Max Speed</label>
-            <button class="info" data-tip="Maximum carriage velocity in mm/s. The firmware passes this directly to FastAccelStepper after converting to steps/s internally. Typical safe range: 200–800 mm/s. Expert mode unlocks up to 3000 mm/s."><span data-ico="i-info"></span></button>
-          </div>
-          <input type="range" id="maxSpeed" min="50" max="3000" value="550" step="10">
-          <div class="readout"><b id="speedVal">550</b><span>mm/s</span></div>
+          <div class="label-row"><label>User Speed</label><button class="info" data-tip="Ceiling for manual moves: rail tap, position slider, nudge buttons. Only constrains your own hand — streams are unaffected."><span data-ico="i-info"></span></button></div>
+          <input type="range" id="userMaxSpeed" min="50" max="3000" value="550" step="10">
+          <div class="readout"><b id="userSpeedVal">550</b><span>mm/s</span></div>
         </div>
         <div class="field">
-          <div class="label-row">
-            <label>Acceleration</label>
-            <button class="info" data-tip="Ramp rate in mm/s². The firmware converts this to steps/s² before passing it to FastAccelStepper. Higher values = snappier starts and stops; too high causes lost steps. Typical safe range: 500–3000 mm/s². Expert mode unlocks up to 8000 mm/s²."><span data-ico="i-info"></span></button>
-          </div>
-          <input type="range" id="accel" min="200" max="8000" value="1500" step="50">
-          <div class="readout"><b id="accelVal">1500</b><span>mm/s²</span></div>
+          <div class="label-row"><label>User Accel</label><button class="info" data-tip="Ramp rate for manual moves only."><span data-ico="i-info"></span></button></div>
+          <input type="range" id="userAccel" min="200" max="8000" value="1500" step="50">
+          <div class="readout"><b id="userAccelVal">1500</b><span>mm/s²</span></div>
+        </div>
+        <div style="margin:14px 0 10px; border-top:1px solid var(--line-1)"></div>
+        <div class="field">
+          <div class="label-row"><label>Input Speed</label><button class="info" data-tip="Ceiling for TCode streams, PatternEngine, and OSSM BLE. The automated pounding speed limit."><span data-ico="i-info"></span></button></div>
+          <input type="range" id="inputMaxSpeed" min="50" max="3000" value="550" step="10">
+          <div class="readout"><b id="inputSpeedVal">550</b><span>mm/s</span></div>
+        </div>
+        <div class="field">
+          <div class="label-row"><label>Input Accel</label><button class="info" data-tip="Ramp rate for streams and patterns."><span data-ico="i-info"></span></button></div>
+          <input type="range" id="inputAccel" min="200" max="8000" value="1500" step="50">
+          <div class="readout"><b id="inputAccelVal">1500</b><span>mm/s²</span></div>
         </div>
         <button class="btn ghost sm" style="width:100%" data-action="restoreDefaults"><span data-ico="i-reset"></span> Restore saved defaults</button>
         </div>
@@ -392,6 +399,34 @@
         <div class="hint" id="blendModeHint">Finish the current stroke before reversing — smoothest ride, may drop a waypoint at extreme Hz.</div>
       </div>
 
+      <!-- Stream speed-feed (v0.4 A/B) -->
+      <div class="card panel tight" id="streamModeCard">
+        <div class="card-head">
+          <span data-ico="i-gauge"></span><h2>Stream Speed-Feed</h2>
+          <button class="info" data-tip="How the streaming motion sampler feeds speed to the motor. Ceiling-pegged holds the input speed limit as the cruise feed — flat-out tracking, but can starve slow moves so they never leave the ground (v3-at-slow-speed stall). Velocity-matched derives the feed from the distance and the position command cadence, so gentle inputs get gentle-but-sufficient speed. Flip live while watching the rail overlay to A/B the stutter."><span data-ico="i-info"></span></button>
+        </div>
+        <div class="mini-label" style="margin-bottom:8px">Cruise feed policy</div>
+        <div class="seg" id="streamModeSeg" style="margin-bottom:10px">
+          <button class="active" data-sm="0">Ceiling-pegged</button>
+          <button data-sm="1">Velocity-matched</button>
+        </div>
+        <div class="hint" id="streamModeHint">Hold the input speed ceiling as the cruise feed — flat-out tracking, may stall very slow moves.</div>
+      </div>
+
+      <!-- v4 overshoot clamp (monotone tangent limiter A/B) -->
+      <div class="card panel tight" id="overshootCard">
+        <div class="card-head">
+          <span data-ico="i-gauge"></span><h2>Overshoot Clamp</h2>
+          <button class="info" data-tip="Tames the v4 (MFP) gradient cubic. MFP sends a G&lt;slope&gt; end-tangent with each point; a steep tangent can bulge the interpolated path past the commanded endpoint and swing back — invented overshoot-then-return micromotion you can feel. ON applies a monotone Fritsch–Carlson tangent limit so the path can never leave the [start,end] envelope, at the cost of slightly softer slope shaping. Flip live while watching the rail interp overlay and the Overshoot anomaly counter in the Log tab."><span data-ico="i-info"></span></button>
+        </div>
+        <div class="mini-label" style="margin-bottom:8px">Gradient tangent policy (v4 / MFP)</div>
+        <div class="seg" id="overshootSeg" style="margin-bottom:10px">
+          <button class="active" data-oc="0">Raw slope</button>
+          <button data-oc="1">Monotone clamp</button>
+        </div>
+        <div class="hint" id="overshootHint">Raw MFP slope shaping — steep G tangents can bulge the cubic past the target and back (invented micromotion you can feel).</div>
+      </div>
+
       <!-- Motor driver card (injected by tmc.js) -->
       <div id="tmcCardTarget"></div>
 
@@ -424,6 +459,22 @@
             <input type="checkbox" id="autoLog" checked><span class="track"></span>
           </label>
         </div>
+      </div>
+
+      <!-- Interpolator anomaly log — 0x05 ANOMALY frames. Event-driven feed of
+           the motion-path anomalies the interpolator invents (overshoot micro-
+           motion, dropped bare points, decel overruns, duration fallbacks) —
+           the exact events behind the v3/v4 stutter + slow-speed dropout. -->
+      <div class="card panel">
+        <div class="card-head"><span data-ico="i-alert"></span><h2>Interp Anomalies</h2></div>
+        <div class="hint" style="margin-bottom:10px">Live motion-path anomaly events from the on-device interpolator. Newest first.</div>
+        <div class="chips" id="anomCounts" style="margin-bottom:10px">
+          <span class="chip"><span class="dot" id="anomDotOvershoot"></span><span id="anomCntOvershoot">Overshoot 0</span></span>
+          <span class="chip"><span class="dot" id="anomDotPointDropped"></span><span id="anomCntPointDropped">PointDropped 0</span></span>
+          <span class="chip"><span class="dot" id="anomDotDecelOverrun"></span><span id="anomCntDecelOverrun">DecelOverrun 0</span></span>
+          <span class="chip"><span class="dot" id="anomDotDurFallback"></span><span id="anomCntDurFallback">DurFallback 0</span></span>
+        </div>
+        <pre class="log screen" id="anomBox">No anomalies yet — clean path. :3</pre>
       </div>
     </div>
 

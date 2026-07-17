@@ -433,11 +433,19 @@ struct DeviceConfig {
     float min_position_mm;     // default: 0mm (rearmost)
     float max_position_mm;     // default: 240mm (forwardmost)
 
-    // Speed limit (mm/s) - caps all motion regardless of source
+    // Speed limit (mm/s) - legacy; migrated to input_max_speed_mm_s on save
     float max_speed_mm_s;      // default: 550
 
-    // Acceleration (mm/s^2)
+    // Acceleration (mm/s^2) - legacy; migrated to input_max_accel_mm_s2 on save
     float acceleration_mm_s2;  // default: 1500
+
+    // Dual limit sets (v0.4 / D4 Phase 3)
+    // USER set: manual moves, UI controls, rail tap, nudges
+    float user_max_speed_mm_s;     // default: 550
+    float user_max_accel_mm_s2;    // default: 1500
+    // INPUT set: TCode streams, PatternEngine, OSSM
+    float input_max_speed_mm_s;    // default: 550
+    float input_max_accel_mm_s2;   // default: 1500
 
     // Control mode
     uint8_t control_mode;      // 0=Manual, 1=Buttplug
@@ -467,8 +475,13 @@ inline DeviceConfig getDefaultConfig() {
     DeviceConfig cfg;
     cfg.min_position_mm = 0.0f;
     cfg.max_position_mm = MACHINE_MAX_TRAVEL_MM;  // driver-aware: 260mm (57AIM) or 240mm (TMC)
-    cfg.max_speed_mm_s = DEFAULT_MAX_SPEED_MM_S;  // 550 mm/s factory default; UI allows up to 3000
+    cfg.max_speed_mm_s = DEFAULT_MAX_SPEED_MM_S;  // 550 mm/s factory default
     cfg.acceleration_mm_s2 = DEFAULT_ACCEL_MM_S2;
+    // Seed dual limit sets from legacy — user can split them later
+    cfg.user_max_speed_mm_s   = DEFAULT_MAX_SPEED_MM_S;
+    cfg.user_max_accel_mm_s2  = DEFAULT_ACCEL_MM_S2;
+    cfg.input_max_speed_mm_s  = DEFAULT_MAX_SPEED_MM_S;
+    cfg.input_max_accel_mm_s2 = DEFAULT_ACCEL_MM_S2;
     cfg.control_mode = (uint8_t)ControlMode::BUTTPLUG;
     cfg.microsteps = MICROSTEPS;
     cfg.run_current_ma = TMC_RUN_CURRENT_MA;

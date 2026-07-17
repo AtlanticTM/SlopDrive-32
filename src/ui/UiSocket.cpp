@@ -459,7 +459,64 @@ void UiSocket::sendStatus(uint8_t num) {
 }
 
 // ============================================================================
-// broadcastTelemetry() / broadcastStatus()
+// sendInterp(num) — 0x04 INTERP frame, v0.4 interpolator debug snapshot
+// ============================================================================
+//
+// Layout defined in UiProtocol.h (INTERP_FRAME_SIZE = 19 bytes). All fields
+// are read straight from SystemState (published by Core 1's streamSamplerTask).
+// A torn read across the individual scalars is visually harmless at UI rates.
+
+void UiSocket::sendInterp(uint8_t num) {
+    WsLock lock(_wsMutex);
+    if (!_ws.clientIsConnected(num)) return;
+
+    uint8_t frame[INTERP_FRAME_SIZE];
+    size_t off = 0;
+    frame[off++] = WS_FRAME_INTERP;   // 0x04
+
+    uint8_t flags = 0;
+    if (_state.interp_active)    flags |= (1 << 0);
+    if (_state.interp_live_mode) flags |= (1 << 1);
+    if (_state.interp_grad_mode) flags |= (1 << 2);
+    frame[off++] = flags;
+    frame[off++] = _state.interp_style;
+
+    auto putU16 = [&](float norm) {
+        if (norm < 0.0f) norm = 0.0f;
+        if (norm > 1.0f) norm = 1.0f;
+        uint16_t v = (uint16_t)(norm * 10000.0f + 0.5f);
+        frame[off++] = (uint8_t)(v & 0xFF);
+        frame[off++] = (uint8_t)(v >> 8);
+    };
+    putU16(_state.interp_start_pos);
+    putU16(_state.interp_end_pos);
+    putU16(_state.interp_cur_pos);
+
+    // Signed velocity: units/second * 1000, clamped to i16 range.
+    float velq = _state.interp_cur_vel * 1000.0f;
+    if (velq >  32767.0f) velq =  32767.0f;
+    if (velq < -32768.0f) velq = -32768.0f;
+    int16_t vi = (int16_t)(velq >= 0.0f ? velq + 0.5f : velq - 0.5f);
+    frame[off++] = (uint8_t)((uint16_t)vi & 0xFF);
+    frame[off++] = (uint8_t)((uint16_t)vi >> 8);
+
+    uint32_t dur = _state.interp_duration_us;
+    frame[off++] = (uint8_t)(dur & 0xFF);
+    frame[off++] = (uint8_t)((dur >> 8) & 0xFF);
+    frame[off++] = (uint8_t)((dur >> 16) & 0xFF);
+    frame[off++] = (uint8_t)((dur >> 24) & 0xFF);
+
+    uint32_t ela = _state.interp_elapsed_us;
+    frame[off++] = (uint8_t)(ela & 0xFF);
+    frame[off++] = (uint8_t)((ela >> 8) & 0xFF);
+    frame[off++] = (uint8_t)((ela >> 16) & 0xFF);
+    frame[off++] = (uint8_t)((ela >> 24) & 0xFF);
+
+    _ws.sendBIN(num, frame, INTERP_FRAME_SIZE);
+}
+
+// ============================================================================
+// broadcastTelemetry() / broadcastStatus() / broadcastInterp()
 // ============================================================================
 
 void UiSocket::broadcastTelemetry() {
@@ -473,6 +530,96 @@ void UiSocket::broadcastStatus() {
     WsLock lock(_wsMutex);
     for (uint8_t i = 0; i < MAX_CLIENTS; i++) {
         if (_ws.clientIsConnected(i)) sendStatus(i);
+    }
+}
+
+void UiSocket::broadcastInterp() {
+    WsLock lock(_wsMutex);
+    for (uint8_t i = 0; i < MAX_CLIENTS; i++) {
+        if (_ws.clientIsConnected(i)) sendInterp(i);
+    }
+}
+
+// ============================================================================
+// broadcastAnomaly() — 0x05 ANOMALY, drain cross-core ring, fan to all clients
+// ============================================================================
+//
+// Event-driven, not rate-driven: drains SystemState::anom_ring ONCE under its
+// portMUX into a local batch, then packs each event and sends it to every
+// connected client. Draining once (rather than per-client) guarantees an event
+// isn't consumed by only the first client — the same batch fans to all. The
+// producer (Core 1 sampler) laps-clamp is enforced here on the read side.
+
+void UiSocket::broadcastAnomaly() {
+    // ---- Drain the cross-core ring under its spinlock -----------------------
+    InterpAnomaly batch[SystemState::ANOM_CAP];
+    uint8_t n = 0;
+
+    portENTER_CRITICAL(&_state.anom_mux);
+    uint32_t w = _state.anom_write;
+    uint32_t r = _state.anom_read;
+    // Lap-clamp: if the producer got more than CAP ahead, the oldest unread
+    // events were already overwritten in the ring — skip forward to the newest
+    // CAP window so we never read a slot that's been clobbered mid-flight.
+    if (w - r > SystemState::ANOM_CAP) r = w - SystemState::ANOM_CAP;
+    while (r < w && n < SystemState::ANOM_CAP) {
+        batch[n++] = _state.anom_ring[r % SystemState::ANOM_CAP];
+        r++;
+    }
+    _state.anom_read = r;
+    portEXIT_CRITICAL(&_state.anom_mux);
+
+    if (n == 0) return;
+
+    // ---- Pack + fan each event to all connected clients ---------------------
+    WsLock lock(_wsMutex);
+    for (uint8_t k = 0; k < n; k++) {
+        const InterpAnomaly& a = batch[k];
+
+        uint8_t frame[ANOMALY_FRAME_SIZE];
+        size_t off = 0;
+        frame[off++] = WS_FRAME_ANOMALY;   // 0x05
+        frame[off++] = a.kind;
+
+        frame[off++] = (uint8_t)(a.seq & 0xFF);
+        frame[off++] = (uint8_t)(a.seq >> 8);
+
+        frame[off++] = (uint8_t)(a.tDevUs & 0xFF);
+        frame[off++] = (uint8_t)((a.tDevUs >> 8) & 0xFF);
+        frame[off++] = (uint8_t)((a.tDevUs >> 16) & 0xFF);
+        frame[off++] = (uint8_t)((a.tDevUs >> 24) & 0xFF);
+
+        auto putU16n = [&](float norm) {
+            if (norm < 0.0f) norm = 0.0f;
+            if (norm > 1.0f) norm = 1.0f;
+            uint16_t v = (uint16_t)(norm * 10000.0f + 0.5f);
+            frame[off++] = (uint8_t)(v & 0xFF);
+            frame[off++] = (uint8_t)(v >> 8);
+        };
+        putU16n(a.targetPos);
+        putU16n(a.startPos);
+
+        auto putF32 = [&](float f) {
+            uint32_t bits;
+            memcpy(&bits, &f, sizeof(bits));   // raw IEEE754 LE
+            frame[off++] = (uint8_t)(bits & 0xFF);
+            frame[off++] = (uint8_t)((bits >> 8) & 0xFF);
+            frame[off++] = (uint8_t)((bits >> 16) & 0xFF);
+            frame[off++] = (uint8_t)((bits >> 24) & 0xFF);
+        };
+        putF32(a.startVel);
+        putF32(a.endSlope);
+
+        frame[off++] = (uint8_t)(a.durationUs & 0xFF);
+        frame[off++] = (uint8_t)((a.durationUs >> 8) & 0xFF);
+        frame[off++] = (uint8_t)((a.durationUs >> 16) & 0xFF);
+        frame[off++] = (uint8_t)((a.durationUs >> 24) & 0xFF);
+
+        putF32(a.extra);
+
+        for (uint8_t i = 0; i < MAX_CLIENTS; i++) {
+            if (_ws.clientIsConnected(i)) _ws.sendBIN(i, frame, ANOMALY_FRAME_SIZE);
+        }
     }
 }
 
@@ -504,6 +651,14 @@ void UiSocket::senderTask(void* arg) {
         }
 
         self->broadcastTelemetry();
+        // 0x04 INTERP rides the same ~45Hz tick as telemetry so the WebUI's
+        // planned-path overlay renders as smoothly as the position graph.
+        self->broadcastInterp();
+        // 0x05 ANOMALY drains the cross-core anomaly ring on the same tick.
+        // It's event-driven (no-op when the ring is empty), so riding the 45Hz
+        // sender costs nothing when motion is clean and surfaces events within
+        // ~22ms when it isn't. :3
+        self->broadcastAnomaly();
 
         uint32_t now = millis();
         if (now - self->_lastStatusMs >= 500) {

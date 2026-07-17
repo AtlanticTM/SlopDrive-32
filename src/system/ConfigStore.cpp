@@ -34,6 +34,12 @@ void ConfigStore::save(SystemState& state, RangeMapper& mapper, MotorDriver& mot
     // when the predictive extrapolator got thrown out. :3
     prefs.putUChar("blend_mode", motor.getBlendMode());
 
+    // Dual limit sets (v0.4 / D4 Phase 3) — persist per-source ceilings
+    prefs.putUShort("user_spd", (uint16_t)state.config.user_max_speed_mm_s);
+    prefs.putUInt("user_acc", (uint32_t)state.config.user_max_accel_mm_s2);
+    prefs.putUShort("inp_spd", (uint16_t)state.config.input_max_speed_mm_s);
+    prefs.putUInt("inp_acc", (uint32_t)state.config.input_max_accel_mm_s2);
+
     prefs.putBool("auto_dur", state.auto_duration);
     // Intiface compat — whether we decode magnitudes against the legacy /999
     // ceiling (Intiface's mangled scale) or the spec-correct digit count (MFP).
@@ -100,6 +106,24 @@ void ConfigStore::load(SystemState& state, RangeMapper& mapper, MotorDriver& mot
             acc = (uint32_t)prefs.getUShort("accel", (uint16_t)state.config.acceleration_mm_s2);
         }
         uint8_t blend = prefs.getUChar("blend_mode", 1);  // 1=let-it-land default
+
+        // Dual limit sets (v0.4 / D4 Phase 3) — load with legacy migration.
+        // If the new keys exist, use them. Otherwise seed both sets from the
+        // legacy max_speed/accel values already loaded above (spd, acc).
+        float usr_spd = spd, usr_acc = (float)acc, inp_spd = spd, inp_acc = (float)acc;
+        uint16_t usr_spd_saved = prefs.getUShort("user_spd", 0);
+        uint32_t usr_acc_saved = prefs.getUInt("user_acc", 0);
+        uint16_t inp_spd_saved = prefs.getUShort("inp_spd", 0);
+        uint32_t inp_acc_saved = prefs.getUInt("inp_acc", 0);
+        if (usr_spd_saved > 0) usr_spd = (float)usr_spd_saved;
+        if (usr_acc_saved > 0) usr_acc = (float)usr_acc_saved;
+        if (inp_spd_saved > 0) inp_spd = (float)inp_spd_saved;
+        if (inp_acc_saved > 0) inp_acc = (float)inp_acc_saved;
+        state.config.user_max_speed_mm_s   = usr_spd;
+        state.config.user_max_accel_mm_s2  = usr_acc;
+        state.config.input_max_speed_mm_s  = inp_spd;
+        state.config.input_max_accel_mm_s2 = inp_acc;
+
         state.auto_duration = prefs.getBool("auto_dur", true);
         // Intiface compat — default false (spec-correct/MFP decode) when the key
         // was never written. main.cpp pushes this into TCodeParser::intifaceCompat

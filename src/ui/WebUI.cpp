@@ -22,6 +22,7 @@
 #include "SerialTransport.h"
 #include "WebSocketTransport.h"
 #include "BleTransport.h"
+#include "MotionArbiter.h"
 #include "config_api.h"
 #include "range_mapper.h"
 
@@ -117,10 +118,15 @@ void WebUI::update() {
 // ---- Dedicated telemetry sampler -------------------------------------------
 void WebUI::telemetryTimerCb(void* arg) {
     WebUI* self = static_cast<WebUI*>(arg);
-    // actual = planner output (FAS position). commanded = pre-planner TCode demand
-    // so the caret diverges from the marker when the planner must back off.
-    self->captureTelemetry(self->_state.actual_position_mm.load(std::memory_order_relaxed),
-                           self->_state.commanded_raw_mm,
+    // D4: actual = stepper.getCurrentPosition() ONLY — FAS truth, never the planner's inbox.
+    // The position graph draws three lines:
+    //   took (actual)  = motor position NOW           → reality blue
+    //   told (target)  = planner output after clamping → intent purple
+    //   asked (raw)    = TCode parser + mapper demand  → dotted asked
+    // When the planner derives a slower profile (gentle command), the gap
+    // between "told" and "took" shows exactly how much the planner backed off.
+    self->captureTelemetry(self->_motor.getPosition(),
+                           self->_state.commanded_target_mm,
                            self->_state.commanded_raw_mm);
 }
 
@@ -224,6 +230,18 @@ void WebUI::handleApiStatus() {
     doc["paused"] = _state.paused;
     doc["manual_override"] = _state.manual_override;
 
+    // ---- Motion-generation diagnostics (D4: intent rate + plan dynamics) ----
+    if (_arbiter) {
+        PlanReport rpt = _arbiter->lastReport();
+        doc["intent_count"] = _arbiter->totalIntents();
+        doc["plan_derived_spd"] = (uint32_t)rpt.derived_speed_mm_s;
+        doc["plan_clamped_spd"] = (uint32_t)rpt.clamped_speed_mm_s;
+        doc["plan_derived_acc"] = (uint32_t)rpt.derived_accel_mm_s2;
+        doc["plan_clamped_acc"] = (uint32_t)rpt.clamped_accel_mm_s2;
+        doc["plan_feasible"] = rpt.deadline_feasible;
+        doc["plan_late"] = rpt.deadline_late;
+    }
+
     uint32_t since = 0;
     if (_httpServer->hasArg("since")) since = (uint32_t)strtoul(_httpServer->arg("since").c_str(), nullptr, 10);
 
@@ -321,12 +339,18 @@ void WebUI::handleApiSettings() {
         doc["range_max"] = _mapper.getMaxMm();
         doc["max_speed"] = (uint32_t)_state.config.max_speed_mm_s;
         doc["accel"] = (uint32_t)_state.config.acceleration_mm_s2;
+        // Dual limit sets (v0.4 / D4 Phase 3) — same shape as the WS echo
+        doc["user_max_speed"] = (uint32_t)_state.config.user_max_speed_mm_s;
+        doc["user_max_accel"] = (uint32_t)_state.config.user_max_accel_mm_s2;
+        doc["input_max_speed"] = (uint32_t)_state.config.input_max_speed_mm_s;
+        doc["input_max_accel"] = (uint32_t)_state.config.input_max_accel_mm_s2;
         doc["blend_mode"] = _motor.getBlendMode();
         doc["auto_duration"] = _state.auto_duration;
         doc["intiface_compat"] = _state.intiface_compat;
         doc["default_range_min"] = _state.default_range_min;
         doc["default_range_max"] = _state.default_range_max;
         doc["expert_mode"] = _state.expert_mode;
+        doc["stream_speed_mode"] = (uint8_t)_state.stream_speed_mode;
         doc["max_travel"] = (float)MACHINE_MAX_TRAVEL_MM;
         doc["measured_stroke"] = _motor.getMeasuredStrokeMm();
 
@@ -366,6 +390,26 @@ bool WebUI::applySettings(JsonDocument& doc, JsonDocument& resp) {
     float rmax = doc["range_max"] | _mapper.getMaxMm();
     uint32_t speed = doc["max_speed"] | (uint32_t)_state.config.max_speed_mm_s;
     uint32_t accel = doc["accel"] | (uint32_t)_state.config.acceleration_mm_s2;
+
+    // Dual limit sets — accept from WebUI, seed into arbiter + config
+    if (doc["user_max_speed"].is<uint32_t>() || doc["user_max_accel"].is<uint32_t>()) {
+        float us = doc["user_max_speed"] | _state.config.user_max_speed_mm_s;
+        float ua = doc["user_max_accel"] | _state.config.user_max_accel_mm_s2;
+        if (us < 1.0f) us = 1.0f; if (us > MAX_SPEED_MM_S) us = MAX_SPEED_MM_S;
+        if (ua < 10.0f) ua = 10.0f; if (ua > MAX_ACCEL_MM_S2) ua = MAX_ACCEL_MM_S2;
+        _state.config.user_max_speed_mm_s = us;
+        _state.config.user_max_accel_mm_s2 = ua;
+        if (_arbiter) { _arbiter->setUserSpeedLimit(us); _arbiter->setUserAccelLimit(ua); }
+    }
+    if (doc["input_max_speed"].is<uint32_t>() || doc["input_max_accel"].is<uint32_t>()) {
+        float is = doc["input_max_speed"] | _state.config.input_max_speed_mm_s;
+        float ia = doc["input_max_accel"] | _state.config.input_max_accel_mm_s2;
+        if (is < 1.0f) is = 1.0f; if (is > MAX_SPEED_MM_S) is = MAX_SPEED_MM_S;
+        if (ia < 10.0f) ia = 10.0f; if (ia > MAX_ACCEL_MM_S2) ia = MAX_ACCEL_MM_S2;
+        _state.config.input_max_speed_mm_s = is;
+        _state.config.input_max_accel_mm_s2 = ia;
+        if (_arbiter) { _arbiter->setInputSpeedLimit(is); _arbiter->setInputAccelLimit(ia); }
+    }
 
     if (rmin >= rmax) {
         resp["ok"] = false;
@@ -414,6 +458,10 @@ bool WebUI::applySettings(JsonDocument& doc, JsonDocument& resp) {
     resp["range_max"] = _mapper.getMaxMm();
     resp["max_speed"] = (uint32_t)_motor.getMaxSpeed();
     resp["accel"] = (uint32_t)_state.config.acceleration_mm_s2;
+    resp["user_max_speed"] = (uint32_t)_state.config.user_max_speed_mm_s;
+    resp["user_max_accel"] = (uint32_t)_state.config.user_max_accel_mm_s2;
+    resp["input_max_speed"] = (uint32_t)_state.config.input_max_speed_mm_s;
+    resp["input_max_accel"] = (uint32_t)_state.config.input_max_accel_mm_s2;
     resp["blend_mode"] = _motor.getBlendMode();
     resp["auto_duration"] = _state.auto_duration;
     resp["intiface_compat"] = _state.intiface_compat;
@@ -897,6 +945,31 @@ bool WebUI::handleCommand(uint8_t op, JsonDocument& payload_in,
         return true;
     }
 
+    case WS_OP_STREAM_MODE: {
+        // v0.4 stream speed-feed A/B: 0=ceiling-pegged, 1=velocity-matched.
+        // Core 1's streamSamplerTask reads _state.stream_speed_mode each cruise
+        // feed; a plain volatile write is sufficient (single producer here).
+        uint8_t m = (uint8_t)(payload_in["mode"] | (int)_state.stream_speed_mode);
+        if (m > SystemState::SPEED_VELOCITY_MATCHED) m = SystemState::SPEED_VELOCITY_MATCHED;
+        _state.stream_speed_mode = m;
+        payload_out["ok"] = true;
+        payload_out["stream_speed_mode"] = m;
+        _bumpGen();
+        return true;
+    }
+
+    case WS_OP_OVERSHOOT: {
+        // Monotone (Fritsch–Carlson) tangent clamp on the v4 gradient cubic.
+        // Core 1's streamSamplerTask pushes _state.interp_clamp_overshoot into
+        // the interpolator each tick; a plain volatile write is sufficient.
+        bool on = payload_in["on"] | (bool)_state.interp_clamp_overshoot;
+        _state.interp_clamp_overshoot = on;
+        payload_out["ok"] = true;
+        payload_out["overshoot_clamp"] = on;
+        _bumpGen();
+        return true;
+    }
+
     // ---- Read-only: get_cfg snapshot -------------------------------------
     case WS_OP_GET_CFG: {
         // Full config snapshot — same shape as /api/settings GET
@@ -925,6 +998,8 @@ bool WebUI::handleCommand(uint8_t op, JsonDocument& payload_in,
         payload_out["manual_override"] = _state.manual_override;
         payload_out["transport"] = TransportManager::transportName(_state.getTransport());
         payload_out["homed"] = _state.homed;
+        payload_out["stream_speed_mode"] = (uint8_t)_state.stream_speed_mode;
+        payload_out["overshoot_clamp"] = (bool)_state.interp_clamp_overshoot;
         payload_out["ok"] = true;
         // No cfg_gen bump for reads
         return true;

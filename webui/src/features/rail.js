@@ -628,6 +628,11 @@ function drawCanvas(nowMs, glowActive) {
   var markY1 = (52 / BASE_H) * h;
   var dotY = (34 / BASE_H) * h;
 
+  // (a2) v0.4 interpolator planned-segment overlay (amber/green). Reads the
+  // latest 0x04 INTERP snapshot from window.__INTERP (fed by main.js at ~45Hz).
+  // Drawn beneath the markers so the live took/told lines stay on top.
+  drawInterpOverlay(h);
+
   // (b) Commanded caret — purple, crisp point (no trail, F4)
   S.ctx.globalCompositeOperation = 'source-over';
   S.ctx.strokeStyle = S.intentColor;
@@ -683,6 +688,63 @@ function drawCanvas(nowMs, glowActive) {
   _prevPx = px;
   _prevTx = tx;
   _prevDrawn = true;
+}
+
+
+function drawInterpOverlay(h) {
+  var it = window.__INTERP;
+  if (!it || !it.active) return;
+  // Freshness gate — a stale snapshot means the stream stopped; don't leave a
+  // frozen ghost segment painted on the rail.
+  if (performance.now() - it.lastRxMs > 250) return;
+
+  var span = winMax - winMin;
+  if (span <= 0) return;
+
+  // Interp positions are normalized 0..1 within the ACTIVE stroke window, so
+  // map through winMin..winMax → mm → px. With this mapping the amber progress
+  // dot should ride directly under the purple commanded caret; if it drifts,
+  // the interpolator and the mapper disagree — exactly the kind of divergence
+  // we're hunting. (If firmware normalizes over full travel instead, drop the
+  // winMin offset and use TRAVEL directly.)
+  var sMm = winMin + clamp(it.startPos, 0, 1) * span;
+  var eMm = winMin + clamp(it.endPos,   0, 1) * span;
+  var cMm = winMin + clamp(it.curPos,   0, 1) * span;
+  var sx = (clamp(sMm, 0, TRAVEL) / (TRAVEL || 1)) * S.rect.w;
+  var ex = (clamp(eMm, 0, TRAVEL) / (TRAVEL || 1)) * S.rect.w;
+  var cx = (clamp(cMm, 0, TRAVEL) / (TRAVEL || 1)) * S.rect.w;
+
+  var BASE_H = 72;
+  var planY = (60 / BASE_H) * h;   // just below the baseline, clear of the marker band
+
+  S.ctx.globalCompositeOperation = 'source-over';
+  S.ctx.setLineDash(DASH_NONE);
+
+  // Planned span (start → end): thin rule with endpoint ticks. Green marks a
+  // v4 gradient segment (G-slope), amber a ramped/eased v3-style segment.
+  var planColor = it.gradMode ? '#7CD992' : '#F5A623';
+  S.ctx.strokeStyle = planColor;
+  S.ctx.lineWidth = 1;
+  S.ctx.shadowColor = it.gradMode ? 'rgba(124,217,146,.5)' : 'rgba(245,166,35,.5)';
+  S.ctx.shadowBlur = 4;
+  S.ctx.beginPath();
+  S.ctx.moveTo(sx, planY);
+  S.ctx.lineTo(ex, planY);
+  S.ctx.stroke();
+  S.ctx.beginPath();
+  S.ctx.moveTo(sx, planY - 3); S.ctx.lineTo(sx, planY + 3);
+  S.ctx.moveTo(ex, planY - 3); S.ctx.lineTo(ex, planY + 3);
+  S.ctx.stroke();
+
+  // Progress marker at curPos.
+  S.ctx.shadowBlur = 6;
+  S.ctx.fillStyle = it.gradMode ? '#B6F0C4' : '#FFD08A';
+  S.ctx.beginPath();
+  S.ctx.arc(cx, planY, 2.5, 0, Math.PI * 2);
+  S.ctx.fill();
+
+  S.ctx.shadowBlur = 0;
+  S.ctx.fillStyle = '#000';
 }
 
 // ===================== Export for external position updates =====================

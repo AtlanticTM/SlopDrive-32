@@ -2,6 +2,7 @@
 #include "pattern.h"         // vendored core pattern classes (lib/StrokeEnginePatterns/src/)
 #include "patternExtended.h" // extended patterns from community branches
 #include "range_mapper.h"
+#include "MotionArbiter.h"
 #include "MotorDriver.h"
 #include "AppLog.h"
 #include "config_api.h"
@@ -128,9 +129,6 @@ void PatternEngine::setStroke(float stroke) {
 }
 
 void PatternEngine::setSensation(float sensation) {
-    // External representation: 0..100 (same as web UI slider).
-    // Internal representation: -100..+100 (same as OSSM's pattern classes).
-    // Map: 0-> -100, 50->0, 100->+100 linearly.
     if (sensation < 0.0f) sensation = 0.0f;
     if (sensation > 100.0f) sensation = 100.0f;
     _sensation = (sensation - 50.0f) * 2.0f;   // 0→-100, 50→0, 100→+100
@@ -143,12 +141,19 @@ void PatternEngine::setPattern(int idx) {
 }
 
 // ============================================================================
+// Set the arbiter reference — called from main.cpp after arbiter is created.
+// ============================================================================
+
+void PatternEngine::setArbiter(MotionArbiter* arbiter) {
+    _arbiter = arbiter;
+}
+
+// ============================================================================
 // Unit conversion / parameter plumbing
 // ============================================================================
 
 float PatternEngine::stepToMm(int step) const {
     return (float)step / (float)MAX_ABSTRACT_STEPS;
-    // Returns [0..1] fraction, later multiplied by the mapper's mm span.
 }
 
 int PatternEngine::mmToStep(float mm) const {
@@ -176,16 +181,12 @@ void PatternEngine::_recalcParameters() {
     float lo = _mapper.getMinMm(), hi = _mapper.getMaxMm();
     float span = hi - lo;
 
-    // Stroke in mm from the user-facing 0..100 slider.
     float stroke_mm = (_stroke / 100.0f) * span;
-    _stroke_steps = mmToStep(lo + stroke_mm) - mmToStep(lo);  // relative stroke in steps
+    _stroke_steps = mmToStep(lo + stroke_mm) - mmToStep(lo);
 
-    // Depth in mm — where the tip ends up at full insertion.
     float depth_mm = lo + (_depth / 100.0f) * span;
     _depth_steps = mmToStep(depth_mm);
 
-    // Max speed — the fastest the pattern is allowed to demand.
-    // We peg this to the user's configured max speed converted into step-space.
     _max_steps_per_second = mmPerSecToStepsPerSec(_state.config.max_speed_mm_s);
 }
 
@@ -212,23 +213,34 @@ void PatternEngine::taskFunction(void* param) {
 }
 
 // ============================================================================
-// Task loop — pattern evaluation on Core 1
+// Task loop — D4 REFACTORED: emit ONE intent per stroke segment (event-driven)
 // ============================================================================
+//
+// The old disease (v3 era): tick at gen_rate_tick_hz, emit dense position
+// points, replan at MAX accel. Gone.
+//
+// The cure (D4): ONE COMMAND → ONE PLAN → FAS EXECUTES. The pattern's
+// nextTarget() generates a motionParameter {stroke, speed, accel, skip}
+// for the next half-stroke. We convert that into a MotionIntent with the
+// segment's deadline (derived from the pattern's speed parameter), submit
+// it to the arbiter, and SLEEP for the segment duration. The task wakes
+// only to emit the next stroke — no periodic clock, no chase loop.
+//
+// StopNGo's skip=true segments: the task simply blocks for the pattern's
+// internal delay without submitting an intent.
+//
+// D4 bidirectionality: the task reads MachineState and publishes
+// telemetry AFTER the arbiter returns — the report contains derived/
+// clamped dynamics from the actual plan.
+//
+// gen_rate_tick_hz: legacy, kept parsed but the task no longer ticks at
+// this rate. Used only for diagnostics cadence and WebUI reporting.
+// Marked deprecated.
 
 void PatternEngine::run() {
-    uint32_t last_diag_ms   = 0;
-    uint32_t last_tick_us   = 0;
-    bool     stroke_in_progress = false;  // true during the "in" half of a cycle
-    bool     emitted_this_stroke = false;  // did we send a move command this idx?
+    uint32_t last_diag_ms = 0;
 
     while (true) {
-        // ---- Tick rate — mirror Generator's gen_rate_tick_hz. We run at the
-        //      same cadence so the motor sees consistent update frequency. ----
-        uint16_t ghz = _state.gen_rate_tick_hz;
-        if (ghz < 5) ghz = 5;
-        if (ghz > 200) ghz = 200;
-        const TickType_t period = pdMS_TO_TICKS(1000 / ghz);
-
         // ---- Consistent snapshot of user parameters (Core 1 read side) ----
         float  speed     = _speed;
         float  depth     = _depth;
@@ -237,42 +249,37 @@ void PatternEngine::run() {
         int    pat_idx   = _pattern_idx;
         bool   running   = _running;
 
-        // ---- Gate checks — IDENTICAL to Generator's ---------------------------------
+        // ---- Gate checks — IDENTICAL to current semantics -----------------
         bool intiface_recent = (_state.last_intiface_ms != 0) &&
                                (millis() - _state.last_intiface_ms < 250);
         bool user_has_control = _state.paused || _state.manual_override;
-        bool emit = running && _state.homed &&
-                    (user_has_control || !intiface_recent);
+        bool emit_ok = running && _state.homed &&
+                       (user_has_control || !intiface_recent);
 
-        // Expose activity state for WebUI so it can draw a "running" indicator.
-        _state.gen_active = emit;
+        // Expose activity state for WebUI
+        _state.gen_active = emit_ok;
 
-        // ---- Diagnostics ------------------------------------------------------------
+        // ---- Diagnostics --------------------------------------------------
         _diagnostics(last_diag_ms);
 
-        if (emit) {
-            // ---- Select active pattern (may have changed via setPattern) ------
+        if (emit_ok && _arbiter) {
+            // ---- Select active pattern -----------------------------------
             int idx = pat_idx;
             if (idx < 0) idx = 0;
             if (idx >= PATTERN_COUNT) idx = PATTERN_COUNT - 1;
             _active_pattern = _patterns[idx];
 
-            // ---- Recompute step-space params each tick they may have changed --
+            // ---- Recompute step-space params -----------------------------
             _recalcParameters();
 
-            // ---- Feed pattern the current user params --------------------------
-            // OSSM maps speed (0..100%) to time-of-stroke. In the stock firmware,
-            // timeOfStroke = (stroke_steps / maxStepsPerSecond) / (speed% / 100).
-            // That yields a time in seconds; the pattern uses it to compute peak
-            // step rate. We replicate that here so the pattern math stays
-            // byte-compatible.
+            // ---- Feed pattern the current user params ---------------------
             float timeOfStroke = 0.0f;
             if (speed > 0.0f && _max_steps_per_second > 0.0f) {
                 float peak_rate_s = (speed / 100.0f) * _max_steps_per_second;
                 if (peak_rate_s > 1.0f)
                     timeOfStroke = (float)_stroke_steps / peak_rate_s;
             }
-            if (timeOfStroke <= 0.0f) timeOfStroke = 0.1f;  // floor to avoid div/0
+            if (timeOfStroke <= 0.0f) timeOfStroke = 0.1f;
 
             _active_pattern->setTimeOfStroke(timeOfStroke);
             _active_pattern->setStroke(_stroke_steps);
@@ -280,84 +287,92 @@ void PatternEngine::run() {
             _active_pattern->setSensation(sensation);
             _active_pattern->setSpeedLimit((unsigned int)_max_steps_per_second,
                                            (unsigned int)_max_steps_per_second,
-                                           1);  // stepsPerMM=1 (we handle mm conv ourselves)
+                                           1);
 
-            // ---- Ask the pattern for the NEXT target --------------------------
+            // ---- Ask the pattern for the NEXT target ----------------------
             motionParameter mp = _active_pattern->nextTarget(_stroke_index);
 
-            // If the pattern says "skip" (StopNGo pauses), hold position.
-            // Otherwise convert step-space output to mm and dispatch.
-            if (!mp.skip) {
-                // Convert the pattern's absolute step-space position into a physical
-                // mm position within the user's configured range window.
-                float lo = _mapper.getMinMm(), hi = _mapper.getMaxMm();
-                float span  = hi - lo;
-                float pos_mm = lo + stepToMm(mp.stroke) * span;
-                pos_mm = constrain(pos_mm, lo, hi);
-
-                // Convert the pattern's step/s speed to mm/s for the motor.
-                float speed_mm_s = stepsPerSecToMmPerSec(mp.speed);
-                if (speed_mm_s > _state.config.max_speed_mm_s)
-                    speed_mm_s = _state.config.max_speed_mm_s;
-
-                // Safe-approach soft start — same as Generator's path.
-                float cap = _state.safeSpeedCap(_state.config.max_speed_mm_s, millis());
-                float effective_speed = (cap < _state.config.max_speed_mm_s) ? cap : speed_mm_s;
-
-                // Dispatch through MotorDriver — NEVER call FastAccelStepper directly.
-                _motor.streamTo(pos_mm, effective_speed);
-
-                // Publish telemetry for the position graph — ACTUAL position must
-                // be stored so the Core 0 telemetry sampler captures live motion,
-                // not a stale value from the last TCode waypoint (Wave 1.5 fix).
-                _state.actual_position_mm.store(pos_mm, std::memory_order_relaxed);
-                _state.commanded_target_mm = pos_mm;
-                _state.commanded_raw_mm    = pos_mm;
-
-                emitted_this_stroke = true;
+            if (mp.skip) {
+                // StopNGo pause: the pattern has an internal millis() timer.
+                // nextTarget() returns skip=true while the delay is active,
+                // then returns skip=false with a real move when the timer
+                // expires. We poll by calling nextTarget() repeatedly — each
+                // call checks the timer internally. This is exactly what the
+                // old tick-based loop did, but now we only run this polling
+                // during StopNGo pauses (not during normal stroke execution).
+                //
+                // The pattern's _isStillDelayed() is protected, so we can't
+                // call it directly from PatternEngine. Instead we rely on the
+                // skip-handshake: sleep 10ms, re-call nextTarget(), repeat
+                // until skip becomes false. This is the only polling remnant
+                // in the entire D4 architecture.
+                while (_running) {
+                    vTaskDelay(pdMS_TO_TICKS(10));
+                    if (!_running) break;
+                    mp = _active_pattern->nextTarget(_stroke_index);
+                    if (!mp.skip) break;  // delay expired, we have a real move
+                }
+                if (!_running) continue;
             }
 
-            // ---- Advance stroke index -----------------------------------------
-            // OSSM's StrokeEngine increments the index after every OUT stroke
-            // (odd index = moving out), but the index is always incremented
-            // regardless when a stroke completes. We track stroke completion by
-            // alternating between in (even) and out (odd) cycles per tick.
+            // ---- Convert pattern output to MotionIntent -------------------
+            float lo = _mapper.getMinMm(), hi = _mapper.getMaxMm();
+            float span  = hi - lo;
+            float pos_mm = lo + stepToMm(mp.stroke) * span;
+            pos_mm = constrain(pos_mm, lo, hi);
+
+            // Segment duration: half the stroke time (one in OR out segment).
+            // The pattern's timeOfStroke is for a full in+out cycle; each
+            // nextTarget() call produces one half-stroke.
+            float half_stroke_s = timeOfStroke / 2.0f;
+            if (half_stroke_s < 0.005f) half_stroke_s = 0.005f;
+            uint32_t segment_ms = (uint32_t)(half_stroke_s * 1000.0f);
+            if (segment_ms < 5) segment_ms = 5;
+
+            // Pattern speed in mm/s (from the pattern's derived dynamics)
+            float speed_mm_s = stepsPerSecToMmPerSec(mp.speed);
+
+            MotionIntent intent;
+            intent.source        = MotionSource::PATTERN;
+            intent.target_mm     = pos_mm;
+            intent.deadline_ms   = segment_ms;
+            intent.speed_hint_mm_s = speed_mm_s;
+            // No ramp data from patterns — use identity (1.0)
+            intent.seq           = _stroke_index;
+
+            // ---- Submit to the arbiter — ONE intent, ONE plan, FAS executes
+            PlanReport report = _arbiter->submit(intent);
+
+            // ---- Publish telemetry ----------------------------------------
+            // D4: actual_position_mm is NEVER written — the telemetry sampler
+            // reads _motor.getPosition() directly. We only set commanded_target
+            // (what the pattern told the machine to do) and raw (pre-planner demand).
+            _state.commanded_target_mm = pos_mm;
+            _state.commanded_raw_mm    = pos_mm;
+
+            // ---- Advance stroke index -------------------------------------
+            _stroke_index++;
+
+            // ---- D4 pacing: sleep for the segment duration ----------------
+            // The arbiter dispatched to FAS non-blockingly. We sleep here
+            // so the next stroke arrives when the current segment should
+            // have completed. This is the event-driven clock replacement.
+            // No loop, no tick, no chase — the task blocks until it's time
+            // for the NEXT intent.
             //
-            // Simple approach: increment the index each tick. The pattern's own
-            // nextTarget() uses index%2 to decide in vs out direction. This
-            // matches how OSSM's _stroking() loop works — it calls moveTo() for
-            // each stroke, waits for the motor to reach target, then increments
-            // _index and calls nextTarget() again.
-            //
-            // Since we're streaming at 100 Hz (not waiting for completion), we
-            // pace index advancement at a rate that matches the pattern's
-            // expected tempo.  Each "stroke" (in or out) should take
-            // timeOfStroke/2 seconds.  At our tick rate, that's roughly:
-            //
-            //   ticks_per_half_stroke = (timeOfStroke / 2) * gen_rate_tick_hz
-            //
-            // We accumulate a phase counter and increment _stroke_index only
-            // when a half-stroke's worth of ticks has elapsed.
-            static float stroke_phase_accum = 0.0f;
-            float dt = (last_tick_us != 0)
-                           ? (float)(int32_t)(micros() - last_tick_us) / 1e6f
-                           : 0.0f;
-            if (dt < 0.0f || dt > 0.5f) dt = 0.0f;
-            last_tick_us = micros();
-            stroke_phase_accum += dt;
-            float half_stroke_dur = timeOfStroke / 2.0f;
-            if (half_stroke_dur < 0.005f) half_stroke_dur = 0.005f;
-            while (stroke_phase_accum >= half_stroke_dur) {
-                stroke_phase_accum -= half_stroke_dur;
-                _stroke_index++;
-                stroke_in_progress = !stroke_in_progress;
+            // This also handles the pulse train stall watchdog: if the
+            // pattern stops (running=false), the while() exits cleanly
+            // and we don't keep submitting.
+            uint32_t wake_at = millis() + segment_ms;
+            while (_running && (int32_t)(millis() - wake_at) < 0) {
+                vTaskDelay(pdMS_TO_TICKS(5));
             }
         } else {
-            // Idle: reset timestamp so resume doesn't take a giant step.
-            last_tick_us = 0;
-            stroke_in_progress = false;
+            // Idle: nothing to submit. Sleep briefly.
+            vTaskDelay(pdMS_TO_TICKS(50));
         }
 
-        vTaskDelay(period);
+        // No vTaskDelay at the bottom — the per-segment delay above handles pacing.
+        // The only fallthrough to here would be from emit_ok=false or no arbiter yet.
     }
 }

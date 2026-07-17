@@ -11,8 +11,8 @@
  */
 
 import {
-  FRAME_HELLO, FRAME_TELEMETRY, FRAME_STATUS, FRAME_CLOCK, FRAME_ECHO,
-  parseHello, parseTelemetry, parseStatus, parseClockReply,
+  FRAME_HELLO, FRAME_TELEMETRY, FRAME_STATUS, FRAME_CLOCK, FRAME_INTERP, FRAME_ANOMALY, FRAME_ECHO,
+  parseHello, parseTelemetry, parseStatus, parseClockReply, parseInterp, parseAnomaly,
   buildClock, clockCalc, frameType
 } from './wire.js';
 import { setClockState, feedWireSamples } from './telebuf.js';
@@ -59,6 +59,8 @@ var _synced = false;
 // Frame dispatch callbacks
 var _onTelemetryCb = null;
 var _onStatusCb = null;
+var _onInterpCb = null;
+var _onAnomalyCb = null;
 var _onDegradedCb = null;
 var _onRestoredCb = null;
 var _onDisconnectedCb = null;
@@ -84,6 +86,8 @@ export function isFallback() { return _fallbackActive; }
 
 export function onTelemetry(cb)  { _onTelemetryCb = cb; }
 export function onStatus(cb)     { _onStatusCb = cb; }
+export function onInterp(cb)     { _onInterpCb = cb; }
+export function onAnomaly(cb)    { _onAnomalyCb = cb; }
 export function onDegraded(cb)   { _onDegradedCb = cb; }
 export function onRestored(cb)   { _onRestoredCb = cb; }
 export function onDisconnected(cb){ _onDisconnectedCb = cb; }
@@ -163,6 +167,8 @@ function _onMessage(event) {
     case FRAME_TELEMETRY: _handleTelemetry(dv, data.byteLength); break;
     case FRAME_STATUS:    _handleStatus(dv); break;
     case FRAME_CLOCK:     _handleClockReply(dv); break;
+    case FRAME_INTERP:    _handleInterp(dv, data.byteLength); break;
+    case FRAME_ANOMALY:   _handleAnomaly(dv, data.byteLength); break;
     case FRAME_ECHO:      processEcho(dv, data.byteLength); break;
   }
 }
@@ -223,6 +229,22 @@ function _handleStatus(dv) {
   _stats.p95JitterUs = _p95JitterUs;
   _stats.wsRttUs = _lastRtt;
   if (_onStatusCb) _onStatusCb(s);
+}
+
+// ---- INTERP ---------------------------------------------------------------
+
+function _handleInterp(dv, byteLength) {
+  var it = parseInterp(dv, byteLength);
+  if (!it) return;
+  if (_onInterpCb) _onInterpCb(it);
+}
+
+// ---- ANOMALY --------------------------------------------------------------
+
+function _handleAnomaly(dv, byteLength) {
+  var a = parseAnomaly(dv, byteLength);
+  if (!a) return;
+  if (_onAnomalyCb) _onAnomalyCb(a);
 }
 
 // ---- CLOCK reply ----------------------------------------------------------

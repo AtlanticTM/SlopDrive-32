@@ -64,6 +64,9 @@ public:
     void setSensation(float sensation);  // 0..100 external; maps to -100..+100 internal
     void setPattern(int idx);            // 0..patternCount()-1; out-of-range clamps
 
+    // ---- Arbiter wiring — called once from setup() after arbiter is created -- 
+    void setArbiter(class MotionArbiter* arbiter);
+
     // ---- Metadata -----------------------------------------------------------
     static int   patternCount();
     static const char* patternName(int idx);
@@ -130,4 +133,7 @@ private:
 
     // Debug heartbeat — mirrors Generator's APPLOG heartbeat pattern.
     void _diagnostics(uint32_t& last_diag_ms);
+
+    // ---- D4: MotionArbiter reference (set once by main.cpp) ------------------
+    MotionArbiter* _arbiter = nullptr;
 };

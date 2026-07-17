@@ -28,6 +28,7 @@ import { fetchAndApplyCapabilities, refreshHealthCards } from './core/capabiliti
 
 // ---- Task 7: new core modules ---------------------------------------------
 import { initLink, onTelemetry as _onWsTelemetry, onStatus as _onWsStatus,
+         onInterp as _onWsInterp, onAnomaly as _onWsAnomaly,
          onDegraded, onRestored, isFallback, getStats as getLinkStats,
          isConnected as _wsConnected } from './core/link.js';
 import { initTeleBuf, feedHttpSamples, sampleAt, stableRenderTime,
@@ -37,7 +38,8 @@ import * as cmd from './core/cmd.js';
 import {
   OP_SET_WINDOW, OP_SET_SPEED, OP_SET_ACCEL, OP_GEN_CFG, OP_GEN_RUN,
   OP_MODE, OP_BLEND, OP_PAUSE, OP_HALT, OP_ESTOP, OP_HOME,
-  OP_OVERRIDE, OP_BYPASS, OP_CLEAR_FAULT, OP_SAVE, OP_MOVE
+  OP_OVERRIDE, OP_BYPASS, OP_CLEAR_FAULT, OP_SAVE, OP_MOVE,
+  OP_STREAM_MODE, OP_OVERSHOOT, SPEED_CEILING_PEGGED, SPEED_VELOCITY_MATCHED
 } from './core/wire.js';
 import { initShadow, processEcho, processConfig, tick as shadowTick,
          wireStaleness, notifyRecovery } from './core/shadow.js';
@@ -54,6 +56,42 @@ window.restoreDefaults = restoreDefaults;
 window.__sendMove = sendMove;
 
 export const state = { paused: false, override: false, ifActive: false, position: 0, homed: false };
+
+// ---- Latest 0x04 INTERP snapshot (interpolator debug) ----------------------
+// Updated at ~45Hz from the WS interp frame. Exposed on window for the debug
+// overlay / rail renderer to read without a per-frame callback chain.
+export const interpState = {
+  active: false, liveMode: false, gradMode: false, style: 0, styleName: '-',
+  startPos: 0.5, endPos: 0.5, curPos: 0.5, curVel: 0, durationUs: 0, elapsedUs: 0,
+  lastRxMs: 0
+};
+window.__INTERP = interpState;
+
+// ---- 0x05 ANOMALY event log (interpolator path anomalies) ------------------
+// Event-driven, not periodic. The firmware fires one frame per anomaly the
+// interpolator invents (Overshoot / PointDropped / DecelOverrun / DurFallback)
+// — exactly the events behind the v3/v4 stutter + slow-speed dropout. We keep a
+// bounded ring here for the Log/Health surface. Newest at the FRONT (unshift).
+export const ANOMALY_LOG_CAP = 100;
+export const anomalyLog = [];
+// Rolling per-kind counters so the operator sees frequency, not just the tail.
+export const anomalyCounts = { Overshoot: 0, PointDropped: 0, DecelOverrun: 0, DurFallback: 0 };
+window.__ANOMALY_LOG = anomalyLog;
+window.__ANOMALY_COUNTS = anomalyCounts;
+
+// Send the stream speed-feed A/B mode (0=ceiling-pegged, 1=velocity-matched).
+function sendStreamMode(mode) {
+  cmd.send(OP_STREAM_MODE, { mode: mode });
+}
+window.__sendStreamMode = sendStreamMode;
+
+// Send the v4 overshoot-clamp toggle (monotone Fritsch–Carlson tangent limiter).
+// on=true → the interpolator can never bulge the cubic past [start,end]; kills
+// the invented overshoot-then-return micromotion. Firmware echoes overshoot_clamp.
+function sendOvershoot(on) {
+  cmd.send(OP_OVERSHOOT, { on: !!on });
+}
+window.__sendOvershoot = sendOvershoot;
 
 // ---- HTTP fallback poll control -------------------------------------------
 var _fallbackPollInterval = null;
@@ -344,13 +382,43 @@ async function pollStatus() {
             voltChip.style.display = '';
             var volts = (typeof d.bus_voltage_v === 'number') ? d.bus_voltage_v : 0;
             setRead('voltageText', pad(volts, 2, 1, 'V'));
-            // 36V bus: bad < 22V, warn < 24V, else nominal quiet gray. :3
             var vd = $('#voltageDot');
             if (vd) vd.className = 'dot ' + (volts < 22 ? 'bad' : volts < 24 ? 'warn' : 'good');
             var vt = $('#voltageText');
             if (vt) { vt.classList.remove('w1','w2'); if (volts < 22) vt.classList.add('w2'); else if (volts < 24) vt.classList.add('w1'); }
         } else {
             voltChip.style.display = 'none';
+        }
+    }
+
+    // ---- Motion-mode chip (D4 planner diagnostics) ----------------------------
+    // Shows whether the planner is deriving gentle motion (D4 sparse profiling)
+    // or running flat-out at the limit set (position-only retarget at ceiling).
+    // Format: "mot DV:128 C:128" or "mot PEAK" or "mot LATE".
+    var motChip = $('#motChip'); var motDot = $('#motDot'); var motText = $('#motText');
+    if (motChip && motText) {
+        motChip.style.display = '';
+        var dspd = d.plan_derived_spd || 0, cspd = d.plan_clamped_spd || 0;
+        var dacc = d.plan_derived_acc || 0, cacc = d.plan_clamped_acc || 0;
+        if (dspd > 0 || cspd > 0) {
+            if (d.plan_late) {
+                motText.textContent = 'LATE';
+                if (motDot) motDot.className = 'dot bad';
+                motText.className = 'w2';
+            } else if (cspd < dspd || cacc < dacc) {
+                var ratio = dspd > 0 ? Math.round(cspd / dspd * 100) : 100;
+                motText.textContent = 'C:' + ratio + '%';
+                if (motDot) motDot.className = 'dot warn';
+                motText.className = 'w1';
+            } else {
+                motText.textContent = 'DV';
+                if (motDot) motDot.className = 'dot good';
+                motText.className = '';
+            }
+        } else {
+            motText.textContent = 'mot --';
+            if (motDot) motDot.className = 'dot';
+            motText.className = '';
         }
     }
 
@@ -396,6 +464,53 @@ async function pollStatus() {
 
 async function refreshLog() {
   try { var txt = await getText('/api/log'); var box = $('#logBox'); if (!box) return; var atBottom = box.scrollHeight - box.scrollTop - box.clientHeight < 30; box.textContent = txt || '(no output)'; if (atBottom) box.scrollTop = box.scrollHeight; } catch (e) {}
+}
+
+// ===================== Anomaly surface (0x05) ===============================
+// Renders one interpolator anomaly event into the Log-tab panel: bumps the
+// per-kind count chip (with a severity dot) and prepends a formatted line to
+// the anomBox. Pure DOM writes — the ring + counters live in module state so
+// the panel can be rebuilt on tab switch without losing history.
+
+// Per-kind dot severity: overshoot/decel invent MOTION (bad — you feel these);
+// dropped/fallback are TIMING guesses (warn — usually benign but diagnostic).
+var ANOM_SEV = {
+  Overshoot: 'bad', DecelOverrun: 'bad', PointDropped: 'warn', DurFallback: 'warn'
+};
+
+function _fmtAnomLine(a) {
+  // us→ms for humans; positions as 0..1 with 3 decimals. `extra` is kind-
+  // specific — label it so the meaning is legible on the wire, not just a number.
+  var t = (a.rxMs != null ? a.rxMs : performance.now());
+  var hhmmss = new Date().toLocaleTimeString('en-GB'); // 24h, stable width
+  var extraLabel = a.kindName === 'Overshoot'    ? 'peak+' + (a.extra * 100).toFixed(1) + '%'
+                 : a.kindName === 'PointDropped' ? 'gap ' + (a.extra / 1000).toFixed(1) + 'ms'
+                 : a.kindName === 'DecelOverrun' ? 'vEnd ' + a.extra.toFixed(3)
+                 : a.kindName === 'DurFallback'  ? 'dur ' + (a.durationUs / 1000).toFixed(1) + 'ms'
+                 : String(a.extra);
+  return hhmmss + '  ' + a.kindName.padEnd(13) +
+         ' s=' + a.startPos.toFixed(3) + ' →t=' + a.targetPos.toFixed(3) +
+         ' v0=' + a.startVel.toFixed(3) + ' G=' + a.endSlope.toFixed(3) +
+         ' [' + extraLabel + ']';
+}
+
+function renderAnomaly(a) {
+  // Count chip + severity dot
+  var cnt = anomalyCounts[a.kindName];
+  if (cnt != null) {
+    var cntEl = $('#anomCnt' + a.kindName);
+    if (cntEl) cntEl.textContent = a.kindName + ' ' + cnt;
+    var dotEl = $('#anomDot' + a.kindName);
+    if (dotEl) dotEl.className = 'dot ' + (ANOM_SEV[a.kindName] || 'warn');
+  }
+  // Prepend the line; keep the box bounded to the ring capacity so the DOM
+  // never grows unbounded on a long pounding session.
+  var box = $('#anomBox');
+  if (box) {
+    var lines = anomalyLog.map(_fmtAnomLine);
+    box.textContent = lines.join('\n');
+    box.scrollTop = 0; // newest is at the top
+  }
 }
 
 // ===================== Desktop sidebar card cloning =========================
@@ -551,6 +666,38 @@ function init() {
       // >1s control-suspension gate never trips on a healthy-but-idle link.
       noteLinkAlive();
       _applyWsStatusToUI(s);
+    });
+
+    // ---- 0x04 INTERP — interpolator debug snapshot (~45Hz) ------------------
+    // Mirror the frame into interpState for the debug overlay / rail planned-
+    // path renderer. Pure data capture; no DOM writes here to keep it cheap.
+    _onWsInterp(function(it) {
+      interpState.active     = it.active;
+      interpState.liveMode   = it.liveMode;
+      interpState.gradMode   = it.gradMode;
+      interpState.style      = it.style;
+      interpState.styleName  = it.styleName;
+      interpState.startPos   = it.startPos;
+      interpState.endPos     = it.endPos;
+      interpState.curPos     = it.curPos;
+      interpState.curVel     = it.curVel;
+      interpState.durationUs = it.durationUs;
+      interpState.elapsedUs  = it.elapsedUs;
+      interpState.lastRxMs   = performance.now();
+    });
+
+    // ---- 0x05 ANOMALY — interpolator path-anomaly events (event-driven) -----
+    // One frame per invented micromotion / dropped point / decel overrun /
+    // duration fallback. Push into the bounded log + bump the kind counter, then
+    // hand to renderAnomaly() for the Log-tab surface. This is the diagnostic
+    // that tells us WHICH of the stutter causes actually fired on the wire. :3
+    _onWsAnomaly(function(a) {
+      if (Object.prototype.hasOwnProperty.call(anomalyCounts, a.kindName))
+        anomalyCounts[a.kindName]++;
+      a.rxMs = performance.now();
+      anomalyLog.unshift(a);
+      if (anomalyLog.length > ANOMALY_LOG_CAP) anomalyLog.pop();
+      renderAnomaly(a);
     });
 
     // ---- Fallback / restore -------------------------------------------------

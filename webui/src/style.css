@@ -1407,6 +1407,19 @@ pre.log, .screen.log {
     display: flex;
     flex-direction: column;
     overflow: hidden;
+    min-height: 0;
+  }
+  .tab-contents-host {
+    flex: 1;
+    overflow-y: auto;
+    overflow-x: hidden;
+    min-height: 0;
+    padding: 12px 20px 20px;
+    display: block; /* single-column scroll — NO flex-wrap */
+  }
+  .tab-contents-host .tab-content.active {
+    display: block !important;
+    max-width: 680px;
   }
 
   /* ---- Graph panel (above tab pills, kept until Task 9) ---- */
@@ -1446,29 +1459,6 @@ pre.log, .screen.log {
     padding: 6px 12px;
     border-radius: var(--radius);
     min-height: 34px;
-  }
-
-  /* ---- Tab content host ---- */
-  .tab-contents-host {
-    flex: 1;
-    overflow-y: auto;
-    overflow-x: hidden;
-    padding: 12px 20px 20px;
-    display: flex;
-    flex-wrap: wrap;
-    align-content: flex-start;
-    gap: 14px;
-  }
-  .tab-contents-host .tab-content.active {
-    display: block;
-    flex: 1 1 360px;
-    min-width: 320px;
-    max-width: 100%;
-  }
-  .tab-contents-host .card,
-  .tab-contents-host > .tab-content > .btn,
-  .tab-contents-host > .tab-content > .saved {
-    max-width: 680px;
   }
 
   /* ---- Hide mobile-only elements ---- */

@@ -6,7 +6,8 @@
 #include <freertos/semphr.h>
 
 #include "config_api.h"
-#include "MotorDriver.h"  // for DriverConfig
+#include "MotorDriver.h"           // for DriverConfig
+#include "MotionInterpolator.h"    // for InterpAnomaly (cross-core ring)
 
 // ============================================================================
 // On-device motion generator configuration
@@ -206,6 +207,60 @@ struct SystemState {
     volatile uint8_t       buf_easing   = 1;    // 0=linear 1=ease-in-out …
     volatile uint8_t       buf_depth    = 2;    // 1..5 samples of look-behind
     volatile uint16_t      buf_tick_hz  = 100;   // local interpolation rate (Hz)
+
+    // ---- Stream sampler speed-feed mode (cross-core) -------------------------
+    // Selects how the Core-1 streamSamplerTask feeds FAS speed each tick while
+    // following the MotionInterpolator's cubic. Written by Core 0 (WebUI toggle),
+    // read by Core 1 (sampler). 32-bit read/write is hardware-atomic on the S3.
+    //   0 = CEILING_PEGGED  (default): feed a constant high speed; the 1kHz
+    //       micro-target position deltas themselves shape velocity. Keeps the
+    //       57AIM grit-cache quiet (speed/accel steady → no FAS ramp re-plan).
+    //   1 = VELOCITY_MATCHED: feed |interp velocity| each tick so FAS coasts the
+    //       exact cubic speed. Truer curve, but rewrites setSpeedInHz per tick.
+    // Exposed as a live A/B toggle so it can be felt on real hardware. :3
+    enum StreamSpeedMode : uint8_t { SPEED_CEILING_PEGGED = 0, SPEED_VELOCITY_MATCHED = 1 };
+    volatile uint8_t       stream_speed_mode = SPEED_CEILING_PEGGED;
+
+    // ---- Interpolator overshoot clamp (cross-core) ---------------------------
+    // WebUI toggle. When true, Core 1's streamSamplerTask pushes the flag into
+    // the MotionInterpolator so the v4 gradient cubic's Hermite tangents get
+    // monotone-limited (Fritsch–Carlson) before setCubic — the invented
+    // overshoot-then-return micromotion is eliminated at the cost of slightly
+    // softer MFP slope shaping. Written by Core 0 (handler), read by Core 1
+    // (sampler). 32-bit aligned bool → hardware-atomic on the S3, no mutex. :3
+    volatile bool          interp_clamp_overshoot = false;
+
+    // ---- Interpolator telemetry (cross-core, display-only) -------------------
+    // Written by Core 1 (streamSamplerTask) once per tick from the live
+    // MotionInterpolator snapshot; read by Core 0 telemetry for the WebUI's
+    // high-refresh planned-path / interp-state overlay. Each field is an
+    // independently-readable aligned scalar — no lock needed for a display feed
+    // (a torn set across fields is visually harmless at UI refresh rates). :3
+    volatile float         interp_start_pos   = 0.5f;  // segment start (0..1)
+    volatile float         interp_end_pos     = 0.5f;  // segment target (0..1)
+    volatile float         interp_cur_pos     = 0.5f;  // sampled position (0..1)
+    volatile float         interp_cur_vel     = 0.0f;  // units/second (signed)
+    volatile uint32_t      interp_duration_us = 0;     // active segment length
+    volatile uint32_t      interp_elapsed_us  = 0;     // time into segment
+    volatile bool          interp_live_mode   = false; // v3 high-rate live extrapolation
+    volatile bool          interp_grad_mode   = false; // v4 G<slope> gradient segment
+    volatile uint8_t       interp_style       = 0;     // InterpStyle enum
+    volatile bool          interp_active       = false; // sampler currently driving motion
+
+    // ---- Interpolator anomaly ring (cross-core) ------------------------------
+    // Core 1's streamSamplerTask drains the MotionInterpolator's local anomaly
+    // ring each tick and publishes events here; Core 0's UiSocket sender drains
+    // them into 0x05 ANOMALY frames. Seq-counter ring identical in spirit to the
+    // telemetry ring: the producer bumps anom_write, the consumer tracks how far
+    // it has read. portMUX serialises the multi-field InterpAnomaly copy so a
+    // reader never sees a torn event. Overflow (producer laps consumer by > CAP)
+    // is clamped on the read side — oldest unread events are dropped, newest win,
+    // since a fresh anomaly is always more actionable than a stale one. :3
+    static constexpr uint8_t ANOM_CAP = 32;
+    InterpAnomaly          anom_ring[ANOM_CAP] {};
+    volatile uint32_t      anom_write = 0;   // total events ever enqueued (Core 1)
+    volatile uint32_t      anom_read  = 0;   // total events drained    (Core 0)
+    portMUX_TYPE           anom_mux   = portMUX_INITIALIZER_UNLOCKED;
 
     // --------------------------------------------------------------------------
     // Convenience helpers — zero-cost inline

@@ -118,7 +118,7 @@ export function applyExpertCeilings() {
   const accMax = expertMode ? (accel.expert || 100000) : (accel.normal || 50000);
 
   // Patch every speed slider
-  ['maxSpeed', 'defMaxSpeed'].forEach(function(id) {
+  ['maxSpeed', 'defMaxSpeed', 'userMaxSpeed', 'inputMaxSpeed'].forEach(function(id) {
     const s = $(id); if (!s) return;
     s.max = spdMax;
     if (parseFloat(s.value) > parseFloat(s.max)) s.value = s.max;
@@ -126,7 +126,7 @@ export function applyExpertCeilings() {
   });
 
   // Patch every accel slider
-  ['accel', 'defAccel'].forEach(function(id) {
+  ['accel', 'defAccel', 'userAccel', 'inputAccel'].forEach(function(id) {
     const s = $(id); if (!s) return;
     s.max = accMax;
     if (parseFloat(s.value) > parseFloat(s.max)) s.value = s.max;
@@ -273,8 +273,11 @@ export function refreshHealthCards(d) {
     var power = d.bus_power_w || 0;
     var dieC = d.die_temp_c || 0;
     var peakA = Math.abs(d.peak_current_a || 0);
-    // Bus voltage: 20-40V range, w1<22, w2<20
-    setStat('loadBusV', volts, 2, 1, 'V', (volts / 40) * 100, { w1: -Infinity, w2: -Infinity });
+    // Bus voltage: 20-40V range. 36V nominal is healthy — blue.
+    // setStat uses ">= w2 = bad, >= w1 = warn". Voltage is UNDERVOLTAGE-bad
+    // (lower is worse), but the >= logic only detects "too high". Set thresholds
+    // ABOVE the healthy range so 36V never triggers either → blue/good.
+    setStat('loadBusV', volts, 2, 1, 'V', (volts / 40) * 100, { w1: 40, w2: 45 });
     // Bus current: 0-20A range, w1>=8, w2>=15
     setStat('loadBusA', amps, 2, 2, 'A', (amps / 20) * 100, { w1: 8, w2: 15 });
     // Bus power: 0-800W range

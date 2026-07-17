@@ -141,17 +141,17 @@ void Ai57AIMServoDriver::update() {
     }
 
 
-    // Stream stall watchdog: if the host has gone quiet (no fresh waypoint for
-    // STREAM_STALL_MS) but we're still mid-thrust toward a streamed target,
-    // settle firmly on the last REAL sample so the carriage can't keep coasting
-    // toward a stale target after the stream drops. We don't extrapolate past
-    // it — that toy got thrown out. We just stay put where we were last told.
-    // Like a good hole that holds position until it gets new instructions. :3
-    if (_have_last_sample && _stepper &&
-        (millis() - _last_sample_ms >= STREAM_STALL_MS)) {
-        _have_last_sample = false;   // one-shot; re-armed on the next streamTo()
-        streamTo(_last_sample_mm, 0.0f);
-    }
+    // Stream stall watchdog: DISABLED in D4 event-driven mode. In the D4
+    // architecture (MotionArbiter), intents are event-driven — the normal
+    // case is sporadic retarget intents separated by arbitrary intervals.
+    // The old watchdog was designed for the high-rate push-model where a
+    // stream at 100+Hz could leave the carriage coasting if the host dropped.
+    //
+    // In D4, a gate-blocked intent (pause, override, not-homed) is a valid
+    // state — the arbiter will retarget when the gate reopens. The watchdog
+    // would fire during any pause/override lasting >80ms and permanently
+    // disable motion by one-shot-settling the motor, requiring a reboot.
+    // Gone. D4 doesn't need it. :3
 }
 
 void Ai57AIMServoDriver::emergencyStop() {

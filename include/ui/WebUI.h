@@ -10,6 +10,7 @@ class MotorDriver;
 class RangeMapper;
 class PatternEngine;
 class TransportManager;
+class MotionArbiter;
 
 class SerialTransport;
 class WebSocketTransport;
@@ -149,6 +150,12 @@ private:
 
     // ---- cfg_gen helper ------------------------------------------------------
     void _bumpGen() { _state.cfg_gen.store(_state.cfg_gen.load(std::memory_order_relaxed) + 1, std::memory_order_relaxed); }
+
+    // ---- Arbiter reference (set once from setup(), used by applySettings) -----
+    MotionArbiter* _arbiter = nullptr;
+public:
+    void setArbiter(MotionArbiter* arb) { _arbiter = arb; }
+private:
 
     // ---- HTTP handler methods (one per route) --------------------------------
     void handleRoot();

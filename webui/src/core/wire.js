@@ -10,6 +10,8 @@ export const FRAME_HELLO     = 0x00;
 export const FRAME_TELEMETRY = 0x01;
 export const FRAME_STATUS    = 0x02;
 export const FRAME_CLOCK     = 0x03;
+export const FRAME_INTERP    = 0x04;
+export const FRAME_ANOMALY   = 0x05;
 export const FRAME_CMD       = 0x10;
 export const FRAME_ECHO      = 0x11;
 
@@ -31,6 +33,34 @@ export const OP_CLEAR_FAULT = 0x0E;
 export const OP_SAVE        = 0x0F;
 export const OP_GET_CFG     = 0x10;
 export const OP_MOVE        = 0x11;
+export const OP_STREAM_MODE = 0x12;
+// Monotone (Fritsch–Carlson) tangent clamp on the v4 gradient cubic. Kills the
+// invented overshoot-then-return micromotion. Firmware op WS_OP_OVERSHOOT. :3
+export const OP_OVERSHOOT    = 0x13;
+
+// ---- Stream speed-feed modes (mirrors SystemState::StreamSpeedMode) --------
+export const SPEED_CEILING_PEGGED   = 0;
+export const SPEED_VELOCITY_MATCHED = 1;
+
+// ---- Interp style enum (mirrors InterpStyle in MotionInterpolator.h) -------
+export const INTERP_STYLE_NAMES = ['Ramped', 'EaseIn', 'EaseOut', 'EaseBoth', 'Gradient'];
+
+// ---- Anomaly kind enum (mirrors InterpAnomalyType in MotionInterpolator.h)
+// index 0 = None (never sent). Names double as UI labels + tooltip keys.
+export const ANOMALY_KIND_NAMES = ['None', 'Overshoot', 'PointDropped', 'DecelOverrun', 'DurFallback'];
+// Human-readable one-liners for the WebUI anomaly log — what each event MEANS
+// for the motion path so the operator can act on it, not just see a code.
+export const ANOMALY_KIND_DESC = {
+  Overshoot:    'Steep G tangent bulged the cubic past the [start,end] envelope (invented overshoot-then-return micromotion).',
+  PointDropped: 'A bare v3 point arrived after a gap and was dropped — the "fails to move at slow speed" case.',
+  DecelOverrun: 'A live/gradient segment starved (no successor packet) → decel-to-stop was invented.',
+  DurFallback:  'MFP sent G<slope> without a usable I<ms> — segment duration was invented from the rolling mean interval.'
+};
+
+// ---- Flag bit positions for 0x04 INTERP -----------------------------------
+export const INTERP_FLAG_ACTIVE = 0x01;
+export const INTERP_FLAG_LIVE   = 0x02;
+export const INTERP_FLAG_GRAD   = 0x04;
 
 // ---- Flag bit positions for 0x01 ------------------------------------------
 export const FLAG_HOMED           = 0x01;
@@ -164,6 +194,70 @@ export function parseEcho(dv, byteLength) {
 }
 
 /**
+ * Parse a 0x04 INTERP frame (device→client, ~45Hz) — interpolator debug.
+ * Layout (LE, 19 bytes) mirrors UiProtocol.h INTERP_FRAME_SIZE:
+ *   u8 type, u8 flags, u8 style,
+ *   u16 startPos_1e4, u16 endPos_1e4, u16 curPos_1e4,
+ *   i16 curVel_1e3, u32 durationUs, u32 elapsedUs
+ * Positions returned normalized 0..1; velocity in units/second (signed).
+ *
+ * @param {DataView} dv — positioned at the type byte
+ * @param {number} byteLength
+ * @returns {{active:boolean, liveMode:boolean, gradMode:boolean, style:number, styleName:string, startPos:number, endPos:number, curPos:number, curVel:number, durationUs:number, elapsedUs:number}|null}
+ */
+export function parseInterp(dv, byteLength) {
+  if (byteLength < 19) return null;
+  var flags = dv.getUint8(1);
+  var style = dv.getUint8(2);
+  return {
+    active:     (flags & INTERP_FLAG_ACTIVE) !== 0,
+    liveMode:   (flags & INTERP_FLAG_LIVE)   !== 0,
+    gradMode:   (flags & INTERP_FLAG_GRAD)   !== 0,
+    style:      style,
+    styleName:  INTERP_STYLE_NAMES[style] || ('?' + style),
+    startPos:   dv.getUint16(3, true)  / 10000,
+    endPos:     dv.getUint16(5, true)  / 10000,
+    curPos:     dv.getUint16(7, true)  / 10000,
+    curVel:     dv.getInt16(9, true)   / 1000,
+    durationUs: dv.getUint32(11, true),
+    elapsedUs:  dv.getUint32(15, true)
+  };
+}
+
+/**
+ * Parse a 0x05 ANOMALY frame (device→client, event-driven) — interpolator
+ * anomaly event. Layout (LE, 28 bytes) mirrors UiProtocol.h ANOMALY_FRAME_SIZE:
+ *   u8 type, u8 kind, u16 seq, u32 tDevUs,
+ *   u16 targetPos_1e4, u16 startPos_1e4,
+ *   f32 startVel, f32 endSlope, u32 durationUs, f32 extra
+ * Positions returned normalized 0..1. startVel/endSlope/extra are raw floats;
+ * `extra` is kind-specific (overshoot fraction / gap_us / vEnd) — see
+ * ANOMALY_KIND_DESC for what each means.
+ *
+ * @param {DataView} dv — positioned at the type byte
+ * @param {number} byteLength
+ * @returns {{kind:number, kindName:string, desc:string, seq:number, tDevUs:number, targetPos:number, startPos:number, startVel:number, endSlope:number, durationUs:number, extra:number}|null}
+ */
+export function parseAnomaly(dv, byteLength) {
+  if (byteLength < 28) return null;
+  var kind = dv.getUint8(1);
+  var kindName = ANOMALY_KIND_NAMES[kind] || ('?' + kind);
+  return {
+    kind:       kind,
+    kindName:   kindName,
+    desc:       ANOMALY_KIND_DESC[kindName] || '',
+    seq:        dv.getUint16(2, true),
+    tDevUs:     dv.getUint32(4, true),
+    targetPos:  dv.getUint16(8,  true) / 10000,
+    startPos:   dv.getUint16(10, true) / 10000,
+    startVel:   dv.getFloat32(12, true),
+    endSlope:   dv.getFloat32(16, true),
+    durationUs: dv.getUint32(20, true),
+    extra:      dv.getFloat32(24, true)
+  };
+}
+
+/**
  * Parse a 0x03 CLOCK reply (device→client).
  * u8 type, u32 t0_echo, u32 t1_dev_us, u32 t2_dev_us
  *
@@ -236,6 +330,8 @@ export function frameType(dv) {
     case FRAME_TELEMETRY: return FRAME_TELEMETRY;
     case FRAME_STATUS:    return FRAME_STATUS;
     case FRAME_CLOCK:     return FRAME_CLOCK;
+    case FRAME_INTERP:    return FRAME_INTERP;
+    case FRAME_ANOMALY:   return FRAME_ANOMALY;
     case FRAME_ECHO:      return FRAME_ECHO;
     default:              return -1;
   }

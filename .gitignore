@@ -50,3 +50,9 @@ SD32-WAVE1-FIX-NOW.md
 SD32-WAVE2-FIX-ONCE-WAVE1-WORKS.md
 SD32-WAVE3-FIX-WHENEVER.md
 build/slopdrive32_s3_main_merged.bin
+SD32-TCODE-V04-ARBITER-PROMPT.md
+.gitignore
+build/capture.csv
+.gitignore
+build/tcode_capture.log
+build/temp_index.html

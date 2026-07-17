@@ -10,6 +10,11 @@
 // Core assignment (.clinerules §2):
 //   Core 1 (real-time):  motorTask, Generator task
 //   Core 0 (system):     commsTask, httpTask
+//
+// D4 (event-driven): TCode callbacks submit MotionIntent via arbiter
+// (Core 0 → Core 1 single-slot deferral). PatternEngine emits one intent
+// per stroke segment. motorTask processes deferred intents on Core 1.
+// No periodic motion tick, no chase loop. ONE COMMAND → ONE PLAN → FAS.
 
 #include <Arduino.h>
 #include <LittleFS.h>
@@ -26,6 +31,7 @@
 #include "Kinematics.h"
 #include "PositionTime.h"
 #include "freertos/queue.h"
+#include <esp_timer.h>
 #include <chrono>
 
 #if defined(DRIVER_TMC2160)
@@ -36,6 +42,8 @@
 #include "57AIMServoDriver.h"
 #endif
 
+#include "MotionArbiter.h"
+#include "MotionInterpolator.h"
 #include "PatternEngine.h"
 #include "OssmBleService.h"
 
@@ -54,33 +62,12 @@
 #endif
 
 #if defined(BLE_ENABLED)
-// ============================================================================
-// KEEP THE BLE CONTROLLER MEMORY — do not let initArduino() free it!
-//
-// Arduino core 3.x releases the ~36KB BT controller static memory back to the
-// heap during initArduino() unless bleInUse() returns true. That flag is only
-// set by the core's OWN BLE libraries (via esp32-hal-alloc-ble-mem.h); the
-// third-party NimBLE-Arduino library never sets it. With the memory released,
-// any later esp_bt_controller_init() (inside NimBLEDevice::init()) loads the
-// controller's ROM-patch data straight over live heap blocks — corrupting the
-// TLSF free list and crashing with a deterministic LoadProhibited wild pointer
-// on the very next malloc. esp32-hal-bt.c documents this exact failure:
-// "If any memory required for this mode has already been released,
-//  esp_bt_controller_init() will crash."
-//
-// This strong override of the core's weak bleInUse() tells initArduino() the
-// BLE radio belongs to us, keeping the controller memory reserved so NimBLE
-// (native NUS transport AND the OSSM masquerade service) can init at any time,
-// including at runtime from the web UI transport switch. Costs ~36KB DRAM we
-// were always going to spend on BLE anyway. :3
-// ============================================================================
 extern "C" bool bleInUse(void) { return true; }
 #endif
 
 
 // ============================================================================
-// Module instances — one big orgy of objects :3
-// Driver selected at compile time via build flag.
+// Module instances
 // ============================================================================
 
 #if defined(DRIVER_TMC2160)
@@ -94,13 +81,29 @@ extern "C" bool bleInUse(void) { return true; }
 static SystemState        g_state;
 static RangeMapper        mapper;
 static PatternEngine      patternEngine(g_state, mapper, motor);
+static MotionArbiter      arbiter(g_state, mapper, motor);
+
+// v0.4 on-device interpolator — Core-1-owned cubic motion generator.
+// buttplugLinearCmd (Core 0) builds InterpSegments and hands them across via
+// g_interp_queue; streamSamplerTask (Core 1) commits them onto the curve and
+// samples it at ~1kHz into arbiter.submitStreamSample(). This is the fix for
+// the v4 microstutter (C1-continuous cubic instead of per-point FAS re-plan)
+// and the v3 slow-speed dropout (live-mode extrapolation). :3
+static MotionInterpolator g_interp(0.5f);
+static constexpr size_t   INTERP_QUEUE_DEPTH     = 16;
+static QueueHandle_t      g_interp_queue         = nullptr;
+// After this idle gap with no L0 command the sampler stops feeding FAS and
+// yields the motor back to PatternEngine / manual moves.
+static constexpr uint32_t STREAM_IDLE_TIMEOUT_MS = 500;
+
+// v0.4 axis state — L0 ("Stroke") is ALWAYS registered.
+// Additional axes are registered conditionally when hardware pins exist.
+static TCodeAxisState     axisL0("Stroke", {AxisType::Linear, 0}, 0.5f);
 
 static TCodeParser        tcodeParser;
 static SerialTransport    serialTransport(tcodeParser);
 static WebSocketTransport wsTransport(tcodeParser);
 static BleTransport       bleTransport(tcodeParser);
-// The T-Dongle C5 relay — Serial2 on pins 8/9. Opened only when DONGLE mode
-// is selected; otherwise the UART stays closed and the pins are free. :3
 static DongleTransport    dongleTransport(tcodeParser);
 static OssmBleService     ossmBleService(g_state, patternEngine, mapper, nullptr);
 static TransportManager   transportMgr(g_state, tcodeParser,
@@ -112,45 +115,29 @@ static WebUI webui(g_state, motor, mapper, patternEngine,
                     transportMgr, serialTransport, wsTransport, bleTransport);
 
 #if defined(FEATURE_RS485_MODBUS)
-// RS485 Modbus telemetry on Serial1, GPIO17/18 (config_api.h: AIM_PIN_485_TX/RX).
-// The XY-G485 auto-direction module handles DE/RE from TX — no explicit pin.
-// Slave address 1 per AIM servo datasheet default. :3
 static ServoModbus     servoModbus(Serial1, /* addr */ 1);
 #endif
 
 
-// ============================================================================
-// Waypoint queue — Core 0 pushes, Core 1 pops. The ONLY cross-core motion
-// handoff. Core 0 never touches the stepper object after setup(). :3
-//
-// 8 slots = 80ms of buffer at 100Hz TCode. Deep enough to absorb a WiFi
-// jitter spike; shallow enough that a stale burst doesn't play out after
-// the stream stops. If the queue fills, the newest waypoint is dropped —
-// a 10ms gap at 100Hz, completely imperceptible. :3
-// ============================================================================
+// LEGACY: waypoint queue — retained behind LEGACY_STREAM_PIPELINE for A/B bring-up.
+// D4 replaces this with single-slot deferral via MotionArbiter.
 static constexpr size_t WAYPOINT_QUEUE_DEPTH = 8;
 static QueueHandle_t    g_waypoint_queue     = nullptr;
 
 
 // ============================================================================
-// Glue callbacks — the good boys sitting between TCode and the motor :3
+// Glue callbacks — D4: submit MotionIntent to arbiter (Core 0 → Core 1)
 // ============================================================================
 
-// Called by TCodeParser on every valid L0 linear command.
-// Core 0 ONLY: measure cadence, build PositionTime, push to queue.
-// No motor calls, no kinematics, no FAS touching. Pure data handoff. :3
-static void buttplugLinearCmd(float position, uint32_t duration_ms) {
+static void buttplugLinearCmd(float position, uint32_t duration_ms,
+                              float slope, bool hasSlope, bool hasDuration) {
     if (!g_state.homed) return;
     if (g_state.paused || g_state.manual_override) {
         g_state.resume_start_ms = millis();
         return;
     }
 
-    // ---- New-stream soft start ------------------------------------------------
-    // If the stream has been quiet for >2s (or never spoke), this waypoint could
-    // demand a jump from wherever the carriage sits to anywhere in the window.
-    // Stamp resume_start_ms so safeSpeedCap() ramps the speed ceiling up from
-    // SAFE_APPROACH_SPEED_MM_S instead of lunging at full configured speed. :3
+    // New-stream soft start — stamp resume so safeSpeedCap eases the first move
     {
         uint32_t now0 = millis();
         if (g_state.last_intiface_ms == 0 ||
@@ -158,11 +145,9 @@ static void buttplugLinearCmd(float position, uint32_t duration_ms) {
             g_state.resume_start_ms = now0;
     }
 
-    g_state.last_intiface_ms = millis();
-
-    // ---- Cadence measurement (Core 0 only) ----------------------------------
-    // Feeds the Hz display and the auto-duration fallback. EMA filter smooths
-    // out the occasional WiFi hiccup so the Hz chip doesn't flicker. :3
+    // Cadence measurement (Core 0 only) — EMA filter. The interpolator derives
+    // its own live-mode timing from segment arrival, but we still keep this for
+    // the WebUI rate readout and the auto-duration fallback below.
     uint32_t now = millis();
     if (g_state.last_cmd_ms != 0) {
         uint32_t gap = now - g_state.last_cmd_ms;
@@ -174,33 +159,46 @@ static void buttplugLinearCmd(float position, uint32_t duration_ms) {
                     0.7f * g_state.measured_interval_ms + 0.3f * (float)gap;
         }
     }
-    g_state.last_cmd_ms = now;
+    g_state.last_cmd_ms      = now;
+    g_state.last_intiface_ms = now;   // marks the stream active for the sampler
 
-    // Auto Duration: substitute measured gap ONLY when the host sent no I-param.
-    // If the host sent an explicit interval, honour it — overriding it was the
-    // "jitter half a mm" bug. Trust the host. :3
-    if (duration_ms == 0 && g_state.auto_duration && g_state.measured_interval_ms > 1.0f)
-        duration_ms = (uint32_t)(g_state.measured_interval_ms + 0.5f);
-
-    // Stash raw mapped demand for the UI motion graph (Core 0 only). :3
+    // Raw target telemetry (pre-planner) — mapped into the stroke window.
     g_state.commanded_raw_mm = mapper.intensityToPosition(position);
 
-    // ---- Build waypoint and push to queue -----------------------------------
-    // Non-blocking (0 timeout): if the queue is full, drop this waypoint.
-    // Core 0 NEVER blocks waiting for Core 1. The motion consumer on Core 1
-    // will drain the queue at its own pace. :3
+    // Build a POD InterpSegment and hand it to the Core-1 sampler. The
+    // interpolator owns ALL curve shaping (v3 live extrapolation, v4 Hermite
+    // gradient); main.cpp only translates parser output into a segment.
+    //   targetPos   : normalized 0..1 magnitude (interp window == TCode 0..1)
+    //   durationUs  : I<ms> * 1000 (0 when absent → interp derives from cadence)
+    //   endSlope    : RAW wire G — the interpolator applies /1000 → dp/dtau,
+    //                 byte-for-byte with TempestMAx's Axis::setCubic.
+    //   isLivePoint : bare high-rate v3 point (no I, no G)
+    InterpSegment seg;
+    seg.targetPos   = position;
+    seg.durationUs  = duration_ms * 1000UL;
+    seg.endSlope    = slope;
+    seg.hasSlope    = hasSlope;
+    seg.hasDuration = hasDuration;
+    seg.isLivePoint = (!hasSlope && !hasDuration);
+    if (g_interp_queue) xQueueSend(g_interp_queue, &seg, 0);
+
+    // LEGACY fallback — keep the waypoint queue alive for A/B testing
+#if defined(LEGACY_STREAM_PIPELINE)
     PositionTime pt;
     pt.position     = (uint8_t)constrain((int)(position * 100.0f), 0, 100);
     pt.inTime       = (uint16_t)constrain((int)duration_ms, 0, 65535);
     pt.has_set_time = true;
     pt.setTime      = std::chrono::steady_clock::now();
-
     xQueueSend(g_waypoint_queue, &pt, 0);
+#endif
 }
 
-// Called by TCodeParser on DSTOP — pull out cleanly. :3
 static void buttplugStop() {
-    if (motor.isHomed()) motor.hardStop();
+    // DSTOP = stop moving now. Mark the stream idle so the Core-1 sampler stops
+    // feeding FAS and releases the motor, then force-stop FAS. hardStop() keeps
+    // homed + stream state — DSTOP is "stop moving," not "cut power forever."
+    g_state.last_intiface_ms = 0;
+    arbiter.hardStopMotion();
 }
 
 
@@ -208,33 +206,19 @@ static void buttplugStop() {
 // FreeRTOS Tasks
 // ============================================================================
 
-// Core 1 — real-time: homing state machine + per-tick motor maintenance.
-// This is the dom core — it keeps the shaft disciplined and on time. :3
-//
-// The handler core (Core 0) sets flags (homing_in_progress, estop_requested)
-// to issue orders. We detect those flags here and call ALL motor hardware
-// operations from Core 1, where the FastAccelStepper engine lives. No cross-
-// core racing on the stepper object — the handler asks, the dom core does. :3
-//
-// Homing is fully self-contained: motor.home() spawns its own FreeRTOS task
-// that runs the sweep, polls the endstop, does the backoff, and sets the homed
-// flag when done. motorTask just kicks it off once and watches isHoming() go
-// false. No polling — the homing task IS the loop. :3
+// Core 1 — real-time: homing + D4 deferred-intent consumer
 static void motorTask(void* /*param*/) {
     bool homing_started = false;
     while (true) {
-        // ---- E-stop: the red button got slapped. Cut power NOW. :3 ----------
-        // exchange() atomically reads-then-clears, closing the TOCTOU window
-        // where a Core 0 set arriving between read and clear was silently lost.
+        // E-stop
         if (g_state.estop_requested.exchange(false)) {
-            motor.stop();
+            arbiter.emergencyStop();
             homing_started = false;
-            g_state.homing_in_progress = false;   // prevent double-homing-task spawn on next tick (F-002)
-            g_state.homed = false;                // Core 1 is authoritative for homed clear (F-002)
+            g_state.homing_in_progress = false;
+            g_state.homed = false;
             APPLOG("E-Stop handled — shaft is soft, waiting for orders~ :3");
         }
-        // ---- Homing in progress: spawn the homing task ONCE, then watch
-        //      isHoming() go false when the task finishes. :3 -----------------
+        // Homing
         else if (g_state.homing_in_progress) {
             if (!motor.isHoming() && !homing_started) {
                 motor.home();
@@ -245,8 +229,6 @@ static void motorTask(void* /*param*/) {
                 g_state.homed = motor.isHomed();
                 homing_started = false;
                 if (g_state.homed) {
-                    // Soft start after homing — the first commanded move can be
-                    // anywhere in the window while we sit at the home backoff. :3
                     g_state.resume_start_ms = millis();
                     APPLOG("System is now homed and ready to pound :3");
                 } else {
@@ -254,7 +236,6 @@ static void motorTask(void* /*param*/) {
                 }
             }
         } else {
-            // ---- Push-to-home: shove the carriage into the endstop manually. :3
             homing_started = false;
             if (!g_state.homed) {
                 if (motor.checkPushToHome()) {
@@ -264,32 +245,129 @@ static void motorTask(void* /*param*/) {
             }
         }
         motor.update();
+        // D4: process any Core 0 → Core 1 deferred intents
+        arbiter.processDeferred();
         vTaskDelay(pdMS_TO_TICKS(1));
     }
 }
 
-// Core 0 — system: services all active transports and reports inbound rate.
-// This is the handler core — takes all the dirty talk (TCode) and passes
-// orders to the dom core without breaking a sweat. :3
+// Core 1 — real-time: v0.4 interpolator sampler. Commits Core-0 segments onto
+// the MotionInterpolator, samples its cubic at ~1kHz, and feeds the arbiter's
+// stream fast-path (submitStreamSample). Publishes interp telemetry for the
+// WebUI overlay. Only drives motion while a TCode stream is recently active —
+// otherwise it yields the motor to PatternEngine / manual moves. :3
+static void streamSamplerTask(void* /*param*/) {
+    TickType_t lastWake     = xTaskGetTickCount();
+    bool       wasActive    = false;
+    uint32_t   lastMotionMs = 0;   // wall-clock of the last tick the curve was gliding
+    while (true) {
+        uint64_t nowUs  = (uint64_t)esp_timer_get_time();
+        uint32_t now_ms = millis();
+
+        bool gatesOk = g_state.homed && !g_state.paused && !g_state.manual_override &&
+                       !g_state.estop_requested.load(std::memory_order_relaxed);
+        // A stream is "active" if a packet arrived recently OR the interpolator
+        // still has an in-flight segment to render. The second clause is the fix
+        // for the sparse-v4 freeze: v4 lands points ~700-1000 ms apart — longer
+        // than STREAM_IDLE_TIMEOUT_MS — so a packet-cadence-only gate declared
+        // the stream idle BETWEEN every point and froze motion partway through a
+        // move (e.g. ~499 ms into a 933 ms stroke). Gating on interp.isBusy()
+        // lets the SEGMENT decide when a move is done: we keep sampling through
+        // the whole cubic, and only start the idle countdown once the curve has
+        // genuinely settled to a hold. The recent-packet clause still holds the
+        // motor for the timeout AFTER the last move completes so a same-position
+        // re-command doesn't drop-then-reacquire. :3
+        bool recentPacket = g_state.last_intiface_ms != 0 &&
+                            (now_ms - g_state.last_intiface_ms < STREAM_IDLE_TIMEOUT_MS);
+        bool interpBusy   = g_interp.isBusy(nowUs);
+
+        // Trailing hold measured from MOVE-END, not packet arrival. While the
+        // curve is gliding we keep stamping lastMotionMs; once it settles to a
+        // hold we keep the motor for one more STREAM_IDLE_TIMEOUT_MS window. This
+        // is the operator's requested \"finish the move, THEN hold ~500 ms\" — a
+        // long final segment (e.g. 933 ms) no longer releases with 0 ms trailing
+        // hold just because the last packet arrived >500 ms ago. recentPacket
+        // still covers the between-packets case on a live stream. :3
+        if (interpBusy) lastMotionMs = now_ms;
+        bool postMoveHold = lastMotionMs != 0 &&
+                            (now_ms - lastMotionMs < STREAM_IDLE_TIMEOUT_MS);
+        bool streamActive = gatesOk && (interpBusy || recentPacket || postMoveHold);
+
+        // Rising edge: seed the interpolator at the actual current position so a
+        // new stream starts from where the shaft really is (no stale segment).
+        if (streamActive && !wasActive) {
+            float span      = mapper.getMaxMm() - mapper.getMinMm();
+            float actual_mm = g_state.actual_position_mm.load(std::memory_order_relaxed);
+            float norm      = (span > 0.01f) ? (actual_mm - mapper.getMinMm()) / span : 0.5f;
+            g_interp.reset(constrain(norm, 0.0f, 1.0f));
+        }
+
+        // Push the live WebUI overshoot-clamp toggle into the interpolator so a
+        // change takes effect on the next committed segment. Cheap bool store on
+        // the same core that reads it in commit() — no lock needed.
+        g_interp.setClampOvershoot(g_state.interp_clamp_overshoot);
+
+        // Drain the Core-0 → Core-1 segment handoff, committing each onto the curve.
+        InterpSegment seg;
+        while (xQueueReceive(g_interp_queue, &seg, 0) == pdTRUE) {
+            g_interp.commit(seg, nowUs);
+        }
+
+        if (streamActive) {
+            float pos = g_interp.positionAt(nowUs);
+            float vel = g_interp.velocityAt(nowUs);
+            arbiter.submitStreamSample(pos, vel);
+
+            // Publish interp telemetry for the WebUI planned-path overlay.
+            InterpDebug d = g_interp.snapshot(nowUs);
+            g_state.interp_start_pos   = d.startPos;
+            g_state.interp_end_pos     = d.endPos;
+            g_state.interp_cur_pos     = d.curPos;
+            g_state.interp_cur_vel     = d.curVel;
+            g_state.interp_duration_us = d.durationUs;
+            g_state.interp_elapsed_us  = d.elapsedUs;
+            g_state.interp_live_mode   = d.liveMode;
+            g_state.interp_grad_mode   = d.gradMode;
+            g_state.interp_style       = d.style;
+            g_state.interp_active      = true;
+        } else if (wasActive) {
+            g_state.interp_active = false;
+        }
+
+        // Drain the interpolator's Core-1-local anomaly ring into the cross-core
+        // ring for the WebUI's 0x05 ANOMALY feed. Done unconditionally (not gated
+        // on streamActive) so a decel-overrun fired as a stream ends still lands.
+        // popAnomaly() is a cheap FIFO pop; the portMUX section is only entered
+        // when there's actually something to publish. :3
+        {
+            InterpAnomaly ev;
+            while (g_interp.popAnomaly(ev)) {
+                portENTER_CRITICAL(&g_state.anom_mux);
+                g_state.anom_ring[g_state.anom_write % SystemState::ANOM_CAP] = ev;
+                g_state.anom_write++;
+                portEXIT_CRITICAL(&g_state.anom_mux);
+            }
+        }
+
+        wasActive = streamActive;
+        vTaskDelayUntil(&lastWake, pdMS_TO_TICKS(1));
+    }
+}
+
+// Core 0 — services all active transports, reports inbound rate
 static void commsTask(void* /*param*/) {
     uint32_t last_report_ms   = 0;
     uint32_t last_frame_count = 0;
     while (true) {
-        // Route polling to the active transport. SER and DONGLE skip WebSocket
-        // networking to give the RX FIFO every microsecond we can spare. :3
         TransportMode activeMode = g_state.getTransport();
         if (activeMode == TransportMode::SER) {
             serialTransport.poll();
         } else if (activeMode == TransportMode::DONGLE) {
-            // Drain the UART from the T-Dongle C5 relay. WiFi stays up for
-            // the web UI — we just don't run the WS TCode server poll here
-            // so the UART gets full attention. :3
             dongleTransport.poll();
         } else {
             wsTransport.run();
         }
 
-        // Once-per-second rate diagnostic — feeds the Hz chip in the UI. :3
         uint32_t now = millis();
         if (now - last_report_ms >= 1000) {
             uint32_t frames  = tcodeParser.rxFrameCount;
@@ -299,9 +377,6 @@ static void commsTask(void* /*param*/) {
             g_state.measured_hz = (uint16_t)per_sec;
             if (wsTransport.isConnected() || serialTransport.isActive() || dongleTransport.isActive())
                 APPLOGF("[RATE] rx=%u frames/s", per_sec);
-
-            // WiFi link telemetry (RSSI/channel/BSSID) — piggybacks on the same
-            // 1Hz cadence as the rate report. Cheap scalar reads, Core 0 only. :3
             transportMgr.pollWifiLink();
         }
 
@@ -309,51 +384,26 @@ static void commsTask(void* /*param*/) {
     }
 }
 
-// Core 0 — system: HTTP server (delegates entirely to WebUI::update()).
-// Also tickles the ServoModbus poll state machine if RS485 is compiled in. :3
+// Core 0 — HTTP server + OSSM BLE + Status LEDs
 static void httpTask(void* param) {
     WebUI* ui = static_cast<WebUI*>(param);
     while (true) {
         ui->update();
-        uiSocket.update();         // binary WS UI plane (Core 0, same task as HTTP)
+        uiSocket.update();
 #if defined(FEATURE_RS485_MODBUS)
-        servoModbus.update();     // non-blocking state machine, 2Hz internals
+        servoModbus.update();
 #endif
-        // OSSM BLE service heartbeat + disconnect safety ramp
         ossmBleService.update();
-        // Onboard LED feedback — heartbeat breath, amber activity pulse, RGB
-        // machine state. Cheap GPIO/PWM writes, 10ms cadence, Core 0. :3
         statusLedsUpdate(g_state);
         vTaskDelay(pdMS_TO_TICKS(10));
     }
 }
 
-// ============================================================================
-// motionConsumerTask — Core 1, priority 4
-// ============================================================================
-//
-// The ONLY task that touches the motor driver after setup(). Pops PositionTime
-// waypoints from g_waypoint_queue, runs the OSSM kinematic pipeline, and
-// dispatches to FAS via motor.streamToSteps(). All FAS calls happen on Core 1
-// — same core as the FAS engine and ISR. No cross-core racing. :3
-//
-// The absolute timeline (best) self-corrects each cycle: it advances by
-// inTime regardless of actual wall-clock drift, so the playback rate stays
-// locked to the content's intended tempo even if individual waypoints arrive
-// a few ms late. OSSM calls this the "self-correcting clock." :3
-//
-// Direction gating: if a new waypoint reverses direction while the motor is
-// still mid-stroke, we put it back at the front of the queue and wait 1ms.
-// This prevents commanding a reversal while the motor is mid-acceleration —
-// FAS would need a longer brake ramp than the remaining distance, causing
-// overshoot. We wait for the stroke to complete, THEN reverse. :3
-//
-// Raise-only acceleration guard: once moving, acceleration can only increase.
-// Lowering it mid-flight means FAS's braking ramp is suddenly longer than the
-// remaining distance — overshoot. We take the max of the back-calculated accel
-// and the current FAS accel. Stay firm, never go limp early. :3
+
+// LEGACY_STREAM_PIPELINE: old waypoint-queue consumer (off by default)
+// D4 replaces this with event-driven MotionArbiter.
+#if defined(LEGACY_STREAM_PIPELINE)
 static void motionConsumerTask(void* /*param*/) {
-    // Absolute timeline anchor — advances by inTime each cycle. :3
     auto best = std::chrono::steady_clock::now();
 
     PositionTime lastPt;
@@ -361,114 +411,52 @@ static void motionConsumerTask(void* /*param*/) {
     lastPt.inTime       = 250;
     lastPt.has_set_time = false;
 
-    // ---- One-deep carry buffer (requeue-free, high-rate safe) ---------------
-    // We always keep AT MOST one un-dispatched packet in a local "carry" slot
-    // (carryPt). Each loop pops exactly ONE fresh packet from the queue and
-    // never pushes anything back — so the queue ordering can't be scrambled and
-    // nothing is ever dropped by a failed requeue. This is what broke at 60Hz:
-    // the old xQueueSendToFront collided with the producer and silently lost a
-    // waypoint every cycle once the 8-slot queue filled. Gone now. :3
-    //
-    // The rule:
-    //   - carryPt holds the packet we're about to dispatch.
-    //   - We pop the NEXT packet (incoming). If carryPt had NO time (inTime==0),
-    //     we steal its duration from (incoming.setTime - carryPt.setTime) — the
-    //     OSSM position-only trick. If carryPt already had a real I-param (the
-    //     golden MFP path), we leave it exactly as-is: zero added behavior.
-    //   - Dispatch carryPt, then promote incoming -> carryPt for next loop.
-    //
-    // Net latency: exactly one packet of lookahead (~16ms at 60Hz), the minimum
-    // possible to measure a duration. Timed packets are NOT slowed — they get
-    // their own I-param honored; the one-packet hold is just pipeline depth. :3
     bool         haveCarry = false;
     PositionTime carryPt    = {};
 
     while (true) {
         PositionTime incoming;
-
-        // Block up to 50ms waiting for the next waypoint.
         bool gotNew = (xQueueReceive(g_waypoint_queue, &incoming, pdMS_TO_TICKS(50)) == pdTRUE);
 
         if (!haveCarry) {
-            // Prime the pipeline with the first packet, then loop to fetch the
-            // one after it so we can measure a duration if needed. :3
             if (gotNew) { carryPt = incoming; haveCarry = true; }
             continue;
         }
 
-        // We have a carried packet to dispatch this cycle.
         PositionTime pt = carryPt;
 
         if (gotNew) {
-            // Only derive timing if the carried packet lacked an explicit one.
-            // Timed packets (MFP golden path) keep their own I-param untouched.
             if (pt.inTime == 0 && pt.has_set_time && incoming.has_set_time) {
                 int32_t gap_ms = (int32_t)std::chrono::duration_cast<
                     std::chrono::milliseconds>(incoming.setTime - pt.setTime).count();
                 if (gap_ms > 0 && gap_ms < 1000) pt.inTime = (uint16_t)gap_ms;
             }
-            carryPt = incoming;          // promote for next loop, no requeue
+            carryPt = incoming;
         } else {
-            // Stream went quiet (50ms). Flush the carried packet and empty the
-            // pipeline so we re-prime cleanly when the stream resumes. :3
             haveCarry = false;
         }
 
-        // Last-resort duration floor for a still-timeless carried packet
-        // (e.g. stream stalled right after a position-only command). :3
         if (pt.inTime == 0)
             pt.inTime = (g_state.measured_interval_ms > 1.0f)
                       ? (uint16_t)(g_state.measured_interval_ms + 0.5f)
                       : 100;
 
-        // ---- Direction gating: REMOVED ----------------------------------------
-        // We previously held reversal waypoints in the queue and retried every
-        // 1ms until the motor stopped. At fast speeds (100Hz, 10ms intervals)
-        // the motor needs 3–5ms to decelerate — that's 3–5 retries × 1ms each
-        // = 3–5ms of dead time at EVERY reversal. At high speed that eats 30–50%
-        // of the interval budget, producing the flat-topped peaks and notched
-        // valleys visible in the motion graph. :3
-        //
-        // The raise-only acceleration guard (getLiveAcceleration() below) already
-        // prevents overshoot by ensuring FAS never gets a softer brake ramp than
-        // it's currently running. That guard IS the correct protection. The
-        // direction gate was belt-and-suspenders that added more latency than it
-        // prevented overshoot. FAS handles mid-flight reversals cleanly when the
-        // raise-only guard is in place — it re-plans from current velocity with
-        // the same or higher acceleration. No gate needed. :3
-        //
-        // This matches OSSM's actual behavior: OSSM's direction gate only fires
-        // when the queue has a reversal AND the motor is still running the
-        // previous stroke. In OSSM's single-task architecture that's a rare edge
-        // case. In our queued architecture it fires on EVERY reversal because the
-        // queue always has the next waypoint ready before the motor finishes the
-        // current one. Removing it makes our behavior match OSSM's intent. :3
-
         float timeSeconds = pt.inTime / 1000.0f;
 
-        // ---- OSSM latency compensation --------------------------------------
-        // Uses the RX timestamp to measure actual transport lag and adjusts
-        // timeSeconds up to 25% shorter to resynchronize if we're falling behind.
-        // bufTarget = 100ms: we aim to stay ~100ms ahead of the playback clock.
-        // If we're behind, shorten the current segment to catch up. :3
         if (pt.has_set_time) {
-            const int16_t bufTarget = 100;  // ms — target buffer depth
+            const int16_t bufTarget = 100;
             int16_t currentBuffer = (int16_t)std::chrono::duration_cast<
                 std::chrono::milliseconds>(
                     std::chrono::steady_clock::now() - best).count();
             int16_t lag = (int16_t)std::chrono::duration_cast<
                 std::chrono::milliseconds>(
                     pt.setTime - best).count();
-
-            // If lag is wildly out of range (stream restart, clock jump), re-anchor.
             if (lag < 0 || lag > bufTarget * 10) {
                 best = pt.setTime;
                 lag  = 0;
             }
             best += std::chrono::milliseconds(pt.inTime);
 
-            // Offset: positive = we're ahead (slow down), negative = behind (speed up).
-            // Cap the speedup at 25% of the segment duration. :3
             int16_t offset = bufTarget - currentBuffer;
             if (offset < 0) {
                 int16_t maxSpeedup = -(int16_t)(pt.inTime / 4);
@@ -483,10 +471,6 @@ static void motionConsumerTask(void* /*param*/) {
 
         if (timeSeconds <= 0.01f) { vTaskDelay(pdMS_TO_TICKS(1)); continue; }
 
-        // ---- Map TCode 0–100 to native steps --------------------------------
-        // 0 = fully retracted (min_mm), 100 = fully inserted (max_mm).
-        // Coordinate system: endstop = 0 steps, front = negative steps.
-        // The negative sign converts mm→steps in the correct direction. :3
         float   frac         = pt.position / 100.0f;
         float   target_mm    = mapper.getMinMm() + frac * (mapper.getMaxMm() - mapper.getMinMm());
         int32_t target_steps = -motor.mmToNative(target_mm);
@@ -494,85 +478,32 @@ static void motionConsumerTask(void* /*param*/) {
         int32_t min_steps = -motor.mmToNative(mapper.getMaxMm());
         int32_t max_steps = -motor.mmToNative(mapper.getMinMm());
 
-        // ---- OSSM kinematic pipeline ----------------------------------------
-        // getCurrentPosition() returns last COMMANDED step count (open-loop).
-        // Identical to OSSM's behavior — correct for open-loop servos. :3
-        // Use motor.mmToNative() for all unit conversion — this is driver-
-        // agnostic and works for both TMC2160 (80 steps/mm) and 57AIMServo
-        // (20 steps/mm) without hardcoding STEPS_PER_MM here. :3
         int32_t current_steps = -motor.mmToNative(motor.getPosition());
 
-        // Safe-approach soft start: for the first SAFE_RESUME_RAMP_MS after a
-        // motion discontinuity (new stream, un-pause, override off, homing
-        // complete) the speed ceiling ramps up from SAFE_APPROACH_SPEED_MM_S so
-        // the first stroke glides to position instead of lunging at full tilt. :3
         float speed_cap_mm_s = g_state.safeSpeedCap(g_state.config.max_speed_mm_s, millis());
         uint32_t speed_limit = (uint32_t)motor.mmToNative(speed_cap_mm_s);
         uint32_t accel_limit = (uint32_t)motor.mmToNative(g_state.config.acceleration_mm_s2);
 
         kinematics::PlanResult plan = kinematics::planTrapezoid(
-            current_steps,
-            target_steps,
-            timeSeconds,
-            speed_limit,
-            accel_limit,
-            min_steps,
-            max_steps
-        );
+            current_steps, target_steps, timeSeconds,
+            speed_limit, accel_limit, min_steps, max_steps);
 
-        // ---- Raise-only acceleration guard (OSSM-exact) ---------------------
-        // Once moving, acceleration can only increase. Lowering it mid-flight
-        // means FAS needs a longer brake ramp than the remaining distance —
-        // the motor overshoots the peak and lurches. :3
-        //
-        // CRITICAL: compare against stepper->getAcceleration() — the LIVE FAS
-        // value — NOT the config ceiling. This is exactly what OSSM does:
-        //   requiredAccel = max(stepper->getAcceleration(), requiredAccel);
-        //
-        // The bug: we were comparing against g_state.config.acceleration_mm_s2
-        // (a constant). At the peak of a fast stroke, planTrapezoid back-
-        // calculates a huge requiredAccel (tiny distance, short time), which
-        // gets clamped to accel_limit inside the planner. Our guard then
-        // compared the clamped value against the same constant — they matched,
-        // no raise happened. But FAS was running at whatever accel the PREVIOUS
-        // waypoint set, which could be higher. We were silently lowering FAS's
-        // active accel at the exact moment it needed maximum braking authority
-        // to stop at the peak. That's the grittiness. :3
         uint32_t finalAccel = plan.accel_steps_s2;
         if (motor.isMoving()) {
             uint32_t liveAccel = motor.getLiveAcceleration();
             if (liveAccel > finalAccel) finalAccel = liveAccel;
         }
 
-        // ---- Dispatch to FAS (non-blocking retarget) ------------------------
-        // All FAS calls happen on Core 1 — same core as the FAS engine. Safe.
         motor.streamToSteps(plan.target_steps, plan.speed_steps_s, finalAccel);
 
-        // ---- Telemetry (atomic write — no mutex needed on S3) ---------------
-        // Core 0's telemetry timer reads this with memory_order_relaxed. :3
         float actual_mm = motor.nativeToMm(-plan.target_steps);
         g_state.actual_position_mm.store(actual_mm, std::memory_order_relaxed);
         g_state.commanded_target_mm = actual_mm;
 
-        // OSSM-exact pacing: yield 1ms after every dispatch. This matches
-        // OSSM streaming.cpp line 142: vTaskDelay(1).
-        //
-        // This is NOT just a scheduler yield — it is a REQUIRED pacing delay.
-        // Without it, motionConsumerTask drains the entire queue in a tight loop
-        // (all 8 waypoints) before FAS has moved even one step. Every call to
-        // motor.getPosition() returns the same stale position because FAS hasn't
-        // had CPU time to execute. So current_steps is identical for all 8
-        // waypoints, distance ≈ 0 for waypoints 2–8, and the planner generates
-        // near-zero speed commands — the motor barely twitches. That's the flat
-        // green line. :3
-        //
-        // 1ms gives FAS one tick to start executing the move and update its
-        // internal position counter before we plan the next waypoint. At 100Hz
-        // (10ms intervals) this costs 10% of the budget — acceptable because
-        // without it the motor doesn't move at all. OSSM accepts this same cost.
         vTaskDelay(pdMS_TO_TICKS(1));
     }
 }
+#endif // LEGACY_STREAM_PIPELINE
 
 
 // ============================================================================
@@ -582,129 +513,102 @@ static void motionConsumerTask(void* /*param*/) {
 void setup() {
     Serial.begin(SERIAL_CONTROL_BAUD);
     applogBegin();
-    APPLOG("=== SlopDrive-32 v2.0 ===");
+    APPLOG("=== SlopDrive-32 v2.0 — D4 event-driven ===");
 #if SERIAL_CONTROL_MODE
     applog("Serial control mode ON: USB Serial is dedicated to Intiface TCode.");
     applog("Add a 'Serial' device in Intiface pointing at this COM port.");
 #endif
 
 #if defined(DRIVER_57AIM_SERVO)
-    // ---- SAFETY FIRST: pin STEP/DIR LOW before ANYTHING else ----------------
-    // The SN74AHCT125 buffer feeding the motor's opto inputs is ALWAYS enabled
-    // (OE tied low), so any boot glitch on these GPIOs propagates straight to
-    // the drive. Drive them LOW the instant we can so a floating pin can't
-    // twitch the shaft during bring-up. No unexpected thrusting on power-on. :3
     pinMode(AIM_PIN_STEP, OUTPUT); digitalWrite(AIM_PIN_STEP, LOW);
     pinMode(AIM_PIN_DIR,  OUTPUT); digitalWrite(AIM_PIN_DIR,  LOW);
-
-    // ---- Bring up the shared I2C bus for the INA228 current sensor ----------
-    // Explicit pins — the Nano ESP32 default is A4/A5, but our board routes SDA/
-    // SCL to D5/D6 (GPIO8/9). Must be up BEFORE motor.init() probes the INA228.
-    // This is the machine's sense of feel coming online, ready to read every
-    // strain and pressure spike as the carriage stuffs itself home. :3
     Wire.begin(PIN_I2C_SDA, PIN_I2C_SCL);
-    Wire.setClock(400000);   // 400kHz fast-mode — plenty for 200Hz current polls
+    Wire.setClock(400000);
 #endif
-
-    // Mount filesystem (web assets served from LittleFS).
 
     if (LittleFS.begin(true))
         APPLOG("LittleFS mounted");
     else
         APPLOG("LittleFS mount FAILED - upload filesystem image (pio run -t uploadfs)");
 
-    // Load persisted settings (or factory defaults on first boot).
     ConfigStore::load(g_state, mapper, motor);
 
-    // Sync the persisted Intiface-compat flag into the parser's live static so
-    // the very first TCode frame after boot gets decoded with the right scale.
-    // Without this the parser would default to OFF (MFP decode) until the user
-    // touched the toggle — and an Intiface user's first strokes would land
-    // shallow. Push it in now so we're balls-deep from frame one. :3
     TCodeParser::intifaceCompat = g_state.intiface_compat;
 
-    // Motor hardware init + apply saved driver config.
     motor.init();
     motor.applyDriverConfig(g_state.driver);
 
-    // Onboard status LEDs — heartbeat/amber/RGB. Init here, after boot has
-    // settled, because the green LED shares strapping pin GPIO0. :3
     statusLedsInit();
 
-    // WiFi + mDNS (prerequisite for WS transport and the web UI).
     transportMgr.setupWiFi();
 
-    // Register all HTTP routes and start the web server.
     webui.init();
 
-    // Wire the telemetry ring into UiSocket so the sender task can drain it
     uiSocket.setTelemetryRing(webui._telemetry_ring, &webui._telemetry_seq, &webui._telemetry_mux);
     uiSocket.setMotorDriver(&motor);
-    // Wire the WebUI command dispatcher — without this, 0x10 CMD frames
-    // (Home, Pause, Halt, E-Stop, Override, Move, etc.) are silently
-    // dropped because UiSocket::_handleEvent() requires _webui to be set.
     uiSocket.setWebUI(&webui);
-
-    // Binary WS UI control plane + telemetry stream (0x00/0x01/0x02/0x03)
     uiSocket.init();
 
 #if defined(FEATURE_RS485_MODBUS)
-    // ---- RS485 Modbus servo telemetry (plan.md §7) -------------------------
-    // Open Serial1 on the RS485 pins (GPIO17/18), probe the drive, and hand
-    // the instance to WebUI so /api/status can surface the telemetry. The
-    // XY-G485 auto-direction module handles DE/RE from TX — no explicit pin. :3
     Serial1.begin(19200, SERIAL_8N1, AIM_PIN_485_RX, AIM_PIN_485_TX);
     servoModbus.init();
     webui.setServoModbus(servoModbus);
 #endif
 
-    // Wire TCode parser callbacks to the motion layer.
+    // D4: init the arbiter — sole caller of motor for positioning
+    arbiter.init();
+    // Seed the dual limit sets from the persisted fields (migrated from legacy
+    // on first boot after upgrade — ConfigStore fills both from the old
+    // max_speed/accel if the new keys haven't been written yet).
+    arbiter.setUserSpeedLimit(g_state.config.user_max_speed_mm_s);
+    arbiter.setUserAccelLimit(g_state.config.user_max_accel_mm_s2);
+    arbiter.setInputSpeedLimit(g_state.config.input_max_speed_mm_s);
+    arbiter.setInputAccelLimit(g_state.config.input_max_accel_mm_s2);
+
+    // Wire PatternEngine to the arbiter so it submits intents instead of
+    // calling motor directly.
+    patternEngine.setArbiter(&arbiter);
+
+    // Wire WebUI to the arbiter so the UI's applySettings can dispatch
+    // live limit-set updates directly through the sole caller.
+    webui.setArbiter(&arbiter);
+
+    // Register L0 axis with the parser (v0.4 multi-axis model)
+    tcodeParser.registerAxis(&axisL0);
+
+    // Wire TCode parser callbacks
     tcodeParser.onLinearRampTo(buttplugLinearCmd);
     tcodeParser.onLinearStop(buttplugStop);
 
-    // Start the WS TCode server (always up — MultiFunPlayer can connect). :3
     wsTransport.begin();
 
-    // Bring up the saved transport (WS / SER / BT).
     transportMgr.applyTransport(g_state.getTransport());
 
-    // ---- Waypoint queue — must exist before any task that touches it --------
-    // Created here, before task creation, so both Core 0 (buttplugLinearCmd)
-    // and Core 1 (motionConsumerTask) see a valid handle from their first tick.
-    // configASSERT panics on OOM — if this fails, nothing else matters. :3
+    // Waypoint queue — retained for LEGACY_STREAM_PIPELINE A/B
     g_waypoint_queue = xQueueCreate(WAYPOINT_QUEUE_DEPTH, sizeof(PositionTime));
     configASSERT(g_waypoint_queue != nullptr);
 
-    // ---- Create FreeRTOS tasks with correct core pinning (.clinerules §2) ----
-    //   Core 1 (real-time):  motorTask, motionConsumerTask, Generator
-    //   Core 0 (system):     commsTask, httpTask
-    xTaskCreatePinnedToCore(motorTask,           "Motor",    4096, nullptr, 3, nullptr, 1);
-    // motionConsumerTask: priority 4 — above motorTask (3), below FAS ISR.
-    // Owns ALL FAS dispatch after setup(). Core 0 never touches motor again. :3
-    xTaskCreatePinnedToCore(motionConsumerTask,  "MotionCon", 4096, nullptr, 4, nullptr, 1);
-    // Stack bumped to 6144: feedLine() allocates a 256-byte local buf on every
-    // call, and under a disconnect burst it can be called many times per tick.
-    // 4096 was tight enough to overflow under that load — 6144 gives headroom. :3
-    xTaskCreatePinnedToCore(commsTask,           "Comms",    6144, nullptr, 2, nullptr, 0);
-    // httpTask stack bumped 4096 -> 8192. WebUI::handleApiMode() can switch the
-    // transport to OSSM/BT, which calls NimBLEDevice::init() ->
-    // esp_bt_controller_init() several frames deep inside the synchronous
-    // WebServer request handler. The BT controller bring-up is extremely
-    // stack-hungry — at 4096 it overflowed httpTask's stack into the adjacent
-    // heap-allocated task stack, corrupting TLSF free-list metadata and causing
-    // a LoadProhibited fault on the next malloc inside BT init. 8192 gives the
-    // controller init the headroom it needs. :3
-    xTaskCreatePinnedToCore(httpTask,            "HTTP",     8192, &webui,  1, nullptr, 0);
+    // v0.4 interpolator segment queue — Core 0 (buttplugLinearCmd) → Core 1 sampler
+    g_interp_queue = xQueueCreate(INTERP_QUEUE_DEPTH, sizeof(InterpSegment));
+    configASSERT(g_interp_queue != nullptr);
 
-    // Set the waypoint queue handle (created above) so the OSSM stream bridge
-    // can push PositionTime waypoints into the existing pipeline. :3
+    // Create FreeRTOS tasks
+    // motorTask: Core 1, priority 3 — homing + D4 deferred-intent consumer
+    xTaskCreatePinnedToCore(motorTask, "Motor", 4096, nullptr, 3, nullptr, 1);
+    // streamSamplerTask: Core 1, priority 4 — v0.4 interpolator cubic sampler
+    xTaskCreatePinnedToCore(streamSamplerTask, "Sampler", 4096, nullptr, 4, nullptr, 1);
+    // motionConsumerTask: Core 1, priority 4 — ONLY compiled in LEGACY mode
+#if defined(LEGACY_STREAM_PIPELINE)
+    xTaskCreatePinnedToCore(motionConsumerTask, "MotionCon", 4096, nullptr, 4, nullptr, 1);
+#endif
+    xTaskCreatePinnedToCore(commsTask, "Comms", 6144, nullptr, 2, nullptr, 0);
+    xTaskCreatePinnedToCore(httpTask, "HTTP", 8192, &webui, 1, nullptr, 0);
+
     ossmBleService.setWaypointQueue(g_waypoint_queue);
     ossmBleService.init();
-    patternEngine.init();    // creates its own task on Core 1, priority 2
+    patternEngine.init();    // creates its own Core 1 task
 
 #if HOMING_DISABLED
-    // >>>> HOMING DISABLED: force homed flags for bench/remote testing only.
-    // Re-enable homing before running on real hardware. <<<<
     g_state.homed = true;
     motor.forceHomeState(true);
     APPLOG("!!! HOMING DISABLED — bench-test build only. Remove -DHOMING_DISABLED for real hardware.");
@@ -715,7 +619,7 @@ void setup() {
 
 
 // ============================================================================
-// loop() — idle; all work is done in FreeRTOS tasks
+// loop() — idle
 // ============================================================================
 
 void loop() {

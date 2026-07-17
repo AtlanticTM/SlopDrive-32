@@ -76,11 +76,19 @@ public:
     // ---- Sender task ---------------------------------------------------------
     static void senderTask(void* arg);
 
-    // ---- 0x01 / 0x02 frame builders -----------------------------------------
+    // ---- 0x01 / 0x02 / 0x04 frame builders ----------------------------------
     void sendTelemetry(uint8_t num);
     void sendStatus(uint8_t num);
+    void sendInterp(uint8_t num);       // 0x04 INTERP — interpolator debug snapshot
     void broadcastTelemetry();
     void broadcastStatus();
+    void broadcastInterp();
+
+    // ---- 0x05 ANOMALY — drain the cross-core anomaly ring, send one frame per
+    // event to a single client. Event-driven: only emits when new anomalies are
+    // present. broadcastAnomaly() drains ONCE and fans the same events to all
+    // connected clients so an event isn't consumed by only the first client.
+    void broadcastAnomaly();
 
     // ---- 0x11 ECHO + idempotency (control plane) ------------------------------
     /// Send a 0x11 ECHO frame. Returns true if sent successfully.

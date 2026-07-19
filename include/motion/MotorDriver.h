@@ -138,6 +138,28 @@ public:
     // measurement when it completes. :3
     virtual void    setMeasuredStrokeMm(float /*mm*/) {}
 
+    // ---- Max rail length (rail-length-agnostic ceiling) ---------------------
+    // The machine is agnostic to the physical rail length; there is NO fixed
+    // geometry ceiling. This is the user-configured max rail length (WebUI
+    // setting, persisted to NVS, default DEFAULT_MAX_RAIL_MM = 500mm). It bounds
+    // the sensorless homing search sweep and serves as the position ceiling
+    // BEFORE homing has measured the real stroke. Written from Core 0
+    // (WebUI/ConfigStore), read from Core 1 (arbiter + driver clamps). An aligned
+    // 32-bit float is atomic on the ESP32-S3, same as _measured_stroke_mm. :3
+    virtual void    setMaxRailMm(float mm) { if (mm > 0.0f) _max_rail_mm = mm; }
+    virtual float   getMaxRailMm() const   { return _max_rail_mm; }
+
+    // Effective physical position ceiling (mm): once sensorless homing has felt
+    // out the real front wall the MEASURED stroke is the source of truth and
+    // wins (it may even exceed the configured rail length — the search sweep
+    // bounds hunting, not the result). Until then, fall back to the configured
+    // max rail length. This is the true outer bound every position command is
+    // clamped to, regardless of source. :3
+    virtual float   effectiveCeilingMm() const {
+        float m = getMeasuredStrokeMm();
+        return (m > 0.0f) ? m : getMaxRailMm();
+    }
+
     // ---- Live bus telemetry (INA228 on the 57AIM board) ---------------------
     // Instantaneous motor-bus current in AMPS and the 36V rail voltage. Only the
     // 57AIM servo driver has an INA228 to gulp these off the shunt; every other
@@ -182,4 +204,10 @@ protected:
     // Created once by the first driver's init(); must be forward-declared to
     // avoid pulling the full header into every compilation unit.
     FastAccelStepperEngine* _engine = nullptr;
+
+    // User-configured max rail length (mm). Literal default mirrors
+    // DEFAULT_MAX_RAIL_MM in config_api.h (not included here to keep this
+    // interface header dependency-free). ConfigStore overwrites it at boot with
+    // the persisted value; the WebUI updates it live via setMaxRailMm(). :3
+    float _max_rail_mm = 500.0f;
 };

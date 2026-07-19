@@ -32,7 +32,7 @@
 // Bumped by hand on each firmware change so an OTA can be verified as landed
 // (surfaced via /api/capabilities → "fw_version" and the boot log). This is the
 // single source of truth for "which build is actually running." :3
-#define FIRMWARE_VERSION        "2.1.4"
+#define FIRMWARE_VERSION        "2.1.5"
 
 // =============================================================================
 // WiFi Configuration (values come from secrets.h)
@@ -84,7 +84,7 @@
 #define MM_PER_MOTOR_REV        (PULLEY_TEETH * BELT_PITCH_MM)  // 40mm
 
 // =============================================================================
-// Device Geometry — 57AIMServo build (DRIVER_57AIM_SERVO)
+// Device Geometry — AIMServo build (DRIVER_AIM_SERVO)
 // =============================================================================
 // 57AIM30 closed-loop servo drive on a CAPSTAN DRUM (custom v0.0 controller).
 // The Dyneema line wraps the drum, so linear travel = drum circumference per
@@ -97,8 +97,11 @@
 //   STEPS_PER_REV:       800 × 2 = 1600 steps per DRUM revolution
 //   DRUM_DIAMETER:       25.0 mm  → circumference = π × 25 = 78.5398 mm/drum-rev
 //   STEPS_PER_MM:        1600 / 78.5398 = ~20.372 steps/mm
-//   MAX_TRAVEL:          260.0 mm  (geometry ceiling; sensorless homing measures
-//                        the real usable stroke and overrides this at runtime)
+//   MAX_TRAVEL:          rail-length agnostic — there is NO fixed geometry
+//                        ceiling. The user's configured max rail length
+//                        (DEFAULT_MAX_RAIL_MM, runtime-set) bounds the homing
+//                        search sweep, and sensorless homing MEASURES the real
+//                        usable stroke between the two hard stops. :3
 //   HOMING_BACKOFF:      10.0 mm — pull out 10mm after the stall so the carriage
 //                        isn't grinding balls-deep against the hard stop. :3
 //
@@ -111,7 +114,6 @@
 #define AIM_DRUM_DIAMETER_MM      25.0f
 #define AIM_MM_PER_REV            (3.14159265f * AIM_DRUM_DIAMETER_MM)    // 78.5398 mm/drum-rev
 #define AIM_STEPS_PER_MM          (AIM_STEPS_PER_REV / AIM_MM_PER_REV)    // ~20.372 steps/mm
-#define AIM_MAX_TRAVEL_MM         260.0f
 #define AIM_HOMING_BACKOFF_MM     10.0f
 
 // Homing sweep speed: ~20 mm/s crawl × 20.372 steps/mm ≈ 407 steps/s. We round
@@ -134,17 +136,21 @@
 
 
 // =============================================================================
-// MACHINE_MAX_TRAVEL_MM — driver-agnostic travel limit
+// DEFAULT_MAX_RAIL_MM — rail-length-agnostic default ceiling
 // =============================================================================
-// Single macro that resolves to the correct physical travel for whichever
-// driver is compiled in. Use this everywhere instead of PHYSICAL_MAX_TRAVEL_MM
-// so ConfigStore, RangeMapper, and the WebUI all agree on the rail length
-// regardless of which build flag is active. :3
-#if defined(DRIVER_57AIM_SERVO)
-  #define MACHINE_MAX_TRAVEL_MM  AIM_MAX_TRAVEL_MM   // 260.0 mm
-#else
-  #define MACHINE_MAX_TRAVEL_MM  PHYSICAL_MAX_TRAVEL_MM  // 240.0 mm (TMC build)
-#endif
+// This firmware is agnostic to the physical length of the rail — you can run
+// it on a machine of ANY stroke. There is NO hardcoded geometry ceiling. The
+// "max rail length" is a RUNTIME user setting (state.config.max_rail_mm,
+// editable in the WebUI and persisted to NVS) whose only jobs are:
+//   1. Bound the sensorless homing search sweep so homing can't hunt forever
+//      when a wall is never felt (electrical/mechanical fault).
+//   2. Serve as the position ceiling BEFORE homing has measured the real
+//      stroke. Once homing feels out both hard stops, the MEASURED stroke is
+//      the source of truth and governs the usable range (measurement wins).
+// This macro is only the factory default that seeds that setting — 500mm is a
+// sane, generous rail length. The compile-time PHYSICAL_MAX_TRAVEL_MM /
+// geometry constants above remain purely for the drive-train math. :3
+#define DEFAULT_MAX_RAIL_MM  500.0f
 
 // =============================================================================
 // Motor Driver Pins (ESP32-S3)
@@ -160,7 +166,7 @@
 #define PIN_TMC_MOSI            13   // TMC Master Out Slave In
 #define PIN_TMC_MISO            10   // TMC Master In Slave Out
 
-// --- 57AIMServo build (DRIVER_57AIM_SERVO) — CUSTOM v0.0 CONTROLLER (Nano ESP32) ---
+// --- AIMServo build (DRIVER_AIM_SERVO) — CUSTOM v0.0 CONTROLLER (Nano ESP32) ---
 // New board routes the servo drive through an SN74AHCT125 buffer -> opto inputs.
 // PUL → GPIO 5 (D2), DIR → GPIO 6 (D3). No endstop on this board — homing is
 // sensorless via the INA228 current sensor (see below). The old GPIO12 endstop
@@ -478,7 +484,12 @@ enum class ControlMode : uint8_t {
 struct DeviceConfig {
     // Range mapping (mm) - where buttplug 0.0 and 1.0 map to physically
     float min_position_mm;     // default: 0mm (rearmost)
-    float max_position_mm;     // default: 240mm (forwardmost)
+    float max_position_mm;     // default: DEFAULT_MAX_RAIL_MM (forwardmost)
+
+    // Max rail length (mm) — user-set, rail-length-agnostic ceiling. Bounds the
+    // homing search sweep and acts as the position ceiling until homing measures
+    // the real stroke. Default DEFAULT_MAX_RAIL_MM (500mm). :3
+    float max_rail_mm;         // default: 500mm
 
     // Speed limit (mm/s) - legacy; migrated to input_max_speed_mm_s on save
     float max_speed_mm_s;      // default: 550
@@ -521,7 +532,8 @@ struct DeviceConfig {
 inline DeviceConfig getDefaultConfig() {
     DeviceConfig cfg;
     cfg.min_position_mm = 0.0f;
-    cfg.max_position_mm = MACHINE_MAX_TRAVEL_MM;  // driver-aware: 260mm (57AIM) or 240mm (TMC)
+    cfg.max_rail_mm     = DEFAULT_MAX_RAIL_MM;     // agnostic default rail ceiling (500mm)
+    cfg.max_position_mm = DEFAULT_MAX_RAIL_MM;     // seeds the startup range until homing measures
     cfg.max_speed_mm_s = DEFAULT_MAX_SPEED_MM_S;  // 550 mm/s factory default
     cfg.acceleration_mm_s2 = DEFAULT_ACCEL_MM_S2;
     // Seed dual limit sets from legacy — user can split them later

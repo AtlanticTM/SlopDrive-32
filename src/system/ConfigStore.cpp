@@ -31,6 +31,9 @@ void ConfigStore::save(SystemState& state, RangeMapper& mapper, MotorDriver& mot
     }
     prefs.putFloat("range_min", mapper.getMinMm());
     prefs.putFloat("range_max", mapper.getMaxMm());
+    // Max rail length (mm) — rail-length-agnostic ceiling. Persisted so the
+    // homing sweep bound + pre-homing scale survive a reboot. :3
+    prefs.putFloat("rail_mm", state.config.max_rail_mm);
     // Speed stored as UShort (max 65535) — max speed is 10000 mm/s, fits fine.
     // Accel stored as UInt (uint32_t) — expert mode allows 100000 mm/s² which
     // overflows a uint16_t (max 65535). Old "accel key" was UShort and silently
@@ -96,12 +99,25 @@ void ConfigStore::load(SystemState& state, RangeMapper& mapper, MotorDriver& mot
     // Always start with defaults
     state.config = getDefaultConfig();
     state.driver = DriverConfig();   // default-constructed = config.h defaults
+    // Seed the rail-length ceiling everywhere from the default BEFORE clamping
+    // any ranges, so the no-NVS path is still rail-length aware. :3
+    motor.setMaxRailMm(state.config.max_rail_mm);
+    mapper.setMaxRailMm(state.config.max_rail_mm);
     mapper.setRange(state.config.min_position_mm, state.config.max_position_mm);
 
     Preferences prefs;
 
     // Try to load saved values (read-only mode)
     if (prefs.begin("strokeengine", true)) {
+        // Max rail length FIRST — every range/default validation below clamps
+        // against it. Sanity-bound 10..2000mm so a corrupt NVS write can't set a
+        // nonsensical ceiling. Pushed to the motor + mapper once resolved. :3
+        float rail = prefs.getFloat("rail_mm", state.config.max_rail_mm);
+        if (rail < 10.0f || rail > 2000.0f) rail = DEFAULT_MAX_RAIL_MM;
+        state.config.max_rail_mm = rail;
+        motor.setMaxRailMm(rail);
+        mapper.setMaxRailMm(rail);
+
         float rmin = prefs.getFloat("range_min", state.config.min_position_mm);
         float rmax = prefs.getFloat("range_max", state.config.max_position_mm);
         uint16_t spd = prefs.getUShort("max_speed", (uint16_t)state.config.max_speed_mm_s);
@@ -145,7 +161,7 @@ void ConfigStore::load(SystemState& state, RangeMapper& mapper, MotorDriver& mot
         state.intiface_compat = prefs.getBool("if_compat", false);
 
         state.default_range_min = prefs.getFloat("def_rmin", 0.0f);
-        state.default_range_max = prefs.getFloat("def_rmax", MACHINE_MAX_TRAVEL_MM);
+        state.default_range_max = prefs.getFloat("def_rmax", state.config.max_rail_mm);
         state.expert_mode = prefs.getBool("expert", false);
         {
             TransportMode t = (TransportMode)prefs.getUChar("transport", (uint8_t)DEFAULT_TRANSPORT_MODE);
@@ -168,13 +184,13 @@ void ConfigStore::load(SystemState& state, RangeMapper& mapper, MotorDriver& mot
         { uint16_t gt = prefs.getUShort("gen_tick", state.gen_rate_tick_hz);
           state.gen_rate_tick_hz = (gt >= 375) ? 500 : (gt >= 175) ? 250 : (gt >= 75) ? 100 : (gt >= 35) ? 50 : 20; }
 
-        // Validate startup defaults; fall back to full travel if nonsensical.
-        // Uses MACHINE_MAX_TRAVEL_MM so the 57AIM build clamps to 260mm, not 240mm. :3
-        if (state.default_range_min < 0.0f || state.default_range_min > MACHINE_MAX_TRAVEL_MM ||
-            state.default_range_max <= 0.0f || state.default_range_max > MACHINE_MAX_TRAVEL_MM ||
+        // Validate startup defaults; fall back to full rail if nonsensical.
+        // Clamps against the configured max rail length (rail-length agnostic). :3
+        if (state.default_range_min < 0.0f || state.default_range_min > state.config.max_rail_mm ||
+            state.default_range_max <= 0.0f || state.default_range_max > state.config.max_rail_mm ||
             state.default_range_min >= state.default_range_max) {
             state.default_range_min = 0.0f;
-            state.default_range_max = MACHINE_MAX_TRAVEL_MM;
+            state.default_range_max = state.config.max_rail_mm;
         }
 
         // TMC tunables
@@ -195,12 +211,12 @@ void ConfigStore::load(SystemState& state, RangeMapper& mapper, MotorDriver& mot
 
         prefs.end();
 
-        // Validate: reject 0 or out-of-range values. MACHINE_MAX_TRAVEL_MM is
-        // driver-aware (260mm for 57AIM, 240mm for TMC) so a saved 250mm range_max
-        // doesn't get clamped back to 240 on the 57AIM build. :3
-        if (rmin < 0.0f || rmin > MACHINE_MAX_TRAVEL_MM) rmin = state.config.min_position_mm;
-        if (rmax <= 0.0f || rmax > MACHINE_MAX_TRAVEL_MM) rmax = state.config.max_position_mm;
-        if (rmin >= rmax) { rmin = state.config.min_position_mm; rmax = state.config.max_position_mm; }
+        // Validate: reject 0 or out-of-range values against the configured max
+        // rail length (rail-length agnostic) — a saved range_max within the
+        // user's rail survives the round-trip untouched. :3
+        if (rmin < 0.0f || rmin > state.config.max_rail_mm) rmin = state.config.min_position_mm;
+        if (rmax <= 0.0f || rmax > state.config.max_rail_mm) rmax = state.config.max_rail_mm;
+        if (rmin >= rmax) { rmin = state.config.min_position_mm; rmax = state.config.max_rail_mm; }
         // Speed: floor at 1, ceiling at MAX_SPEED_MM_S (10000). Anything outside
         // that window is a corrupt NVS write — reset to the running default. :3
         if (spd == 0 || spd > (uint16_t)MAX_SPEED_MM_S) spd = (uint16_t)state.config.max_speed_mm_s;

@@ -1,13 +1,13 @@
-// 57AIMServoDriver — concrete MotorDriver for the 57AIM30 closed-loop servo.
-// Build-guarded behind DRIVER_57AIM_SERVO (set in platformio.ini).
+// AIMServoDriver — concrete MotorDriver for the 57AIM30 closed-loop servo.
+// Build-guarded behind DRIVER_AIM_SERVO (set in platformio.ini).
 //
 // This is a dumb Step/Direction driver. No SPI. No Modbus. No register soup.
 // The 57AIM30 handles its own closed-loop control internally — we just send
 // pulses and direction and it obeys like a very well-trained hole. :3
 // Fisting the motion pipeline with raw step pulses, no lube required. yippie!
-#if defined(DRIVER_57AIM_SERVO)
+#if defined(DRIVER_AIM_SERVO)
 
-#include "57AIMServoDriver.h"
+#include "AIMServoDriver.h"
 #include <FastAccelStepper.h>
 
 #include "freertos/FreeRTOS.h"
@@ -40,11 +40,11 @@ static FastAccelStepperEngine _fas_engine;
 #define ENDSTOP_ACTIVE_STATE LOW
 
 
-Ai57AIMServoDriver::Ai57AIMServoDriver() {}
+AIMServoDriver::AIMServoDriver() {}
 
 // ---- Lifecycle ---------------------------------------------------------------
 
-void Ai57AIMServoDriver::init() {
+void AIMServoDriver::init() {
     // No SPI bus to bring up. No TMC registers to write. No chip select to
     // assert. We just configure two GPIO pins and hand them to FAS. The 57AIM30
     // drive is already sitting there, energized, waiting to be told what to do.
@@ -63,7 +63,7 @@ void Ai57AIMServoDriver::init() {
     // just probe our device on it. If it's missing, homing will refuse rather
     // than blindly ram the frame. :3
     if (!_current.init()) {
-        MLOGLN(F("57AIMServo: WARNING — INA228 not found, sensorless homing DISABLED. uhoh :3"));
+        MLOGLN(F("AIMServo: WARNING — INA228 not found, sensorless homing DISABLED. uhoh :3"));
     }
 
     // Store the engine pointer so everyone can share the toy. :3
@@ -107,14 +107,14 @@ void Ai57AIMServoDriver::init() {
         _enabled = true;
         _stepper->setCurrentPosition(0);
 
-        MLOGLN(F("57AIMServo: FastAccelStepper initialized (PUL/DIR registered)"));
-        MLOGF("57AIMServo: PUL=GPIO%d DIR=GPIO%d ENDSTOP=GPIO%d\n",
+        MLOGLN(F("AIMServo: FastAccelStepper initialized (PUL/DIR registered)"));
+        MLOGF("AIMServo: PUL=GPIO%d DIR=GPIO%d ENDSTOP=GPIO%d\n",
               AIM_PIN_STEP, AIM_PIN_DIR, AIM_PIN_ENDSTOP);
-        MLOGF("57AIMServo: %u steps/rev, %.1f mm/rev, %.1f steps/mm, %.1f mm travel\n",
+        MLOGF("AIMServo: %u steps/rev, %.1f mm/rev, %.1f steps/mm, %.1f mm max rail\n",
               (uint32_t)AIM_STEPS_PER_REV, AIM_MM_PER_REV,
-              AIM_STEPS_PER_MM, AIM_MAX_TRAVEL_MM);
+              AIM_STEPS_PER_MM, _max_rail_mm);
     } else {
-        MLOGLN(F("57AIMServo: ERROR — FastAccelStepper failed to connect to PUL pin!"));
+        MLOGLN(F("AIMServo: ERROR — FastAccelStepper failed to connect to PUL pin!"));
     }
 
     // Set initial speed/acceleration in mm units. These get converted to
@@ -123,7 +123,7 @@ void Ai57AIMServoDriver::init() {
     setAcceleration(_accel_mm_s2);
 }
 
-void Ai57AIMServoDriver::update() {
+void AIMServoDriver::update() {
     runMotorStep();
 
     // Refresh the INA228 telemetry cache. Two tiers (both skipped while the
@@ -163,7 +163,7 @@ void Ai57AIMServoDriver::update() {
     // Gone. D4 doesn't need it. :3
 }
 
-void Ai57AIMServoDriver::emergencyStop() {
+void AIMServoDriver::emergencyStop() {
     // The red button got slapped. Cut the pulse train NOW. The 57AIM30 will
     // decelerate on its own internal ramp — we just stop commanding it.
     // Everything goes soft. No ambiguity. No stale flags. :3
@@ -178,14 +178,14 @@ void Ai57AIMServoDriver::emergencyStop() {
 // These calls satisfy the MotorDriver interface but do nothing to hardware.
 // The drive is always ready. Always full. Always waiting. :3
 
-void Ai57AIMServoDriver::enable() {
+void AIMServoDriver::enable() {
     // No enable pin. The 57AIM30 is always on. We track the flag for interface
     // compatibility but there's nothing to toggle. It's always hard. :3
     if (_stepper) _stepper->enableOutputs();
     _enabled = true;
 }
 
-void Ai57AIMServoDriver::disable() {
+void AIMServoDriver::disable() {
     // Same deal — no hardware to disable. We stop the pulse train so the drive
     // stops receiving commands, but it stays energized and holding position.
     // The shaft stays firm even when we stop talking to it. :3
@@ -198,7 +198,7 @@ void Ai57AIMServoDriver::disable() {
 
 // ---- Stream-state reset ------------------------------------------------------
 
-void Ai57AIMServoDriver::resetStreamState() {
+void AIMServoDriver::resetStreamState() {
     _have_last_sample  = false;
     _last_sample_ms    = 0;
     // Forget the in-flight target/direction so the next stream starts a fresh
@@ -226,8 +226,8 @@ void Ai57AIMServoDriver::resetStreamState() {
 
 // Static trampoline — FreeRTOS needs a plain C function pointer, so we bounce
 // through this into the member function. The `this` pointer rides in as param.
-void Ai57AIMServoDriver::_homingTaskImpl(void* param) {
-    static_cast<Ai57AIMServoDriver*>(param)->_homingTask();
+void AIMServoDriver::_homingTaskImpl(void* param) {
+    static_cast<AIMServoDriver*>(param)->_homingTask();
 }
 
 // The actual homing procedure — runs entirely inside its own task on Core 1.
@@ -256,16 +256,19 @@ void Ai57AIMServoDriver::_homingTaskImpl(void* param) {
 // trickle; the instant it stuffs itself balls-deep against the hard stop the
 // current gushes as the servo strains, the belly can't take another mm, and we
 // know we've bottomed out. We stop the SECOND we feel that pressure spike. :3
-bool Ai57AIMServoDriver::_sweepToStall(int8_t dir_sign) {
+bool AIMServoDriver::_sweepToStall(int8_t dir_sign) {
     // Crawl speed + high accel so it's effectively constant velocity from the
     // first step — no ramp to confuse the current baseline. :3
     _stepper->setSpeedInHz((uint32_t)_home_speed_steps_s);
     _stepper->setAcceleration(10000);
 
-    // 1.2× the geometry ceiling of travel in the requested direction. The stall
-    // poll stops us long before we run out of steps; if we DO run out, it means
-    // we never felt a wall and homing fails. :3
-    int32_t sweep = (int32_t)(AIM_MAX_TRAVEL_MM * AIM_STEPS_PER_MM * 1.2f);
+    // 1.2× the configured max rail length in the requested direction — this is
+    // the whole point of the rail-length setting: it bounds how far we hunt for
+    // a wall so homing can't run forever on an infinitely long (or faulted)
+    // rail. The stall poll normally stops us long before we run out of steps; if
+    // we DO run out, we never felt a wall within the configured rail and homing
+    // fails. :3
+    int32_t sweep = (int32_t)(_max_rail_mm * AIM_STEPS_PER_MM * 1.2f);
     _stepper->move(dir_sign >= 0 ? sweep : -sweep);
 
     // Let the pulse train actually spin up and let any residual stall current
@@ -275,7 +278,7 @@ bool Ai57AIMServoDriver::_sweepToStall(int8_t dir_sign) {
     // wall never reads as a spike. :3
     vTaskDelay(pdMS_TO_TICKS(150));
     if (!_stepper->isRunning()) {
-        MLOGLN(F("57AIMServo Homing: sweep move refused by FAS — stepper never started. uhoh :C"));
+        MLOGLN(F("AIMServo Homing: sweep move refused by FAS — stepper never started. uhoh :C"));
         return false;
     }
 
@@ -296,7 +299,7 @@ bool Ai57AIMServoDriver::_sweepToStall(int8_t dir_sign) {
             baseline_sum += amps;
             if (++baseline_taken == AIM_HOME_BASELINE_SAMPLES) {
                 baseline_a = baseline_sum / (float)AIM_HOME_BASELINE_SAMPLES;
-                MLOGF("57AIMServo Homing: free-run baseline = %.2f A\n", baseline_a);
+                MLOGF("AIMServo Homing: free-run baseline = %.2f A\n", baseline_a);
             }
         } else {
             // Stall = current sitting above baseline+margin for N consecutive
@@ -307,7 +310,7 @@ bool Ai57AIMServoDriver::_sweepToStall(int8_t dir_sign) {
                 if (++over_count >= AIM_HOME_STALL_CONSEC) {
                     // STOP NOW — no coasting on a 180W servo.
                     _stepper->forceStop();
-                    MLOGF("57AIMServo Homing: *** STALL *** %.2f A (base %.2f + margin %.1f) "
+                    MLOGF("AIMServo Homing: *** STALL *** %.2f A (base %.2f + margin %.1f) "
                           "for %u polls, pos=%d\n",
                           amps, baseline_a, AIM_HOME_STALL_MARGIN_A, over_count,
                           _stepper->getCurrentPosition());
@@ -325,7 +328,7 @@ bool Ai57AIMServoDriver::_sweepToStall(int8_t dir_sign) {
 
         uint32_t now_ms = millis();
         if (now_ms - last_log_ms >= 500) {
-            MLOGF("57AIMServo Homing: sweeping dir=%d I=%.2fA base=%.2f over=%u pos=%d\n",
+            MLOGF("AIMServo Homing: sweeping dir=%d I=%.2fA base=%.2f over=%u pos=%d\n",
                   dir_sign, amps, baseline_a, over_count, _stepper->getCurrentPosition());
             last_log_ms = now_ms;
         }
@@ -334,8 +337,8 @@ bool Ai57AIMServoDriver::_sweepToStall(int8_t dir_sign) {
     return false;  // ran the whole sweep without a stall — no wall found. uhoh :C
 }
 
-void Ai57AIMServoDriver::_homingTask() {
-    MLOGF("57AIMServo Homing: START (SENSORLESS via INA228) speed=%u steps/s (%.1f mm/s)\n",
+void AIMServoDriver::_homingTask() {
+    MLOGF("AIMServo Homing: START (SENSORLESS via INA228) speed=%u steps/s (%.1f mm/s)\n",
           (uint32_t)_home_speed_steps_s,
           (float)_home_speed_steps_s / AIM_STEPS_PER_MM);
 
@@ -343,7 +346,7 @@ void Ai57AIMServoDriver::_homingTask() {
     // ram the frame at speed. The servo's own foldback is the last-ditch
     // backstop, but we don't rely on it for a normal home. :3
     if (!_current.isReady()) {
-        MLOGLN(F("57AIMServo Homing: ABORT — INA228 not ready, cannot sense stalls. uhoh :C"));
+        MLOGLN(F("AIMServo Homing: ABORT — INA228 not ready, cannot sense stalls. uhoh :C"));
         _homing = false;
         _homed  = false;
         _homingTaskHandle = nullptr;
@@ -352,9 +355,9 @@ void Ai57AIMServoDriver::_homingTask() {
     }
 
     // --- Stall #1: find the FRONT hard stop first — rams toward the out end :3
-    MLOGLN(F("57AIMServo Homing: sweeping toward FRONT hard stop..."));
+    MLOGLN(F("AIMServo Homing: sweeping toward FRONT hard stop..."));
     if (!_sweepToStall(-1)) {
-        MLOGLN(F("57AIMServo Homing: FAILED — no stall on front sweep. Check current"));
+        MLOGLN(F("AIMServo Homing: FAILED — no stall on front sweep. Check current"));
         MLOGLN(F("  threshold (AIM_HOME_STALL_MARGIN_A), wiring, and travel distance."));
         _homing = false;
         _homed  = false;
@@ -365,7 +368,7 @@ void Ai57AIMServoDriver::_homingTask() {
 
     // Record the front stall position before we zero at the rear. :3
     int32_t front_steps = _stepper->getCurrentPosition();
-    MLOGF("57AIMServo Homing: front wall touched at %d steps\n", front_steps);
+    MLOGF("AIMServo Homing: front wall touched at %d steps\n", front_steps);
 
     // CRITICAL: forceStopAndNewPosition re-syncs the FAS position counter and
     // clears the internal stopped/paused state. Without this, the `move()` call
@@ -390,9 +393,9 @@ void Ai57AIMServoDriver::_homingTask() {
     vTaskDelay(pdMS_TO_TICKS(250));  // drain the stall spike out of the INA228 average
 
     // --- Stall #2: sweep back to the REAR hard stop (this becomes home / 0mm) ---
-    MLOGLN(F("57AIMServo Homing: sweeping toward REAR hard stop to establish home..."));
+    MLOGLN(F("AIMServo Homing: sweeping toward REAR hard stop to establish home..."));
     if (!_sweepToStall(+1)) {
-        MLOGLN(F("57AIMServo Homing: FAILED — no stall on rear sweep. Check current"));
+        MLOGLN(F("AIMServo Homing: FAILED — no stall on rear sweep. Check current"));
         MLOGLN(F("  threshold (AIM_HOME_STALL_MARGIN_A), wiring, and travel distance."));
         _homing = false;
         _homed  = false;
@@ -419,7 +422,7 @@ void Ai57AIMServoDriver::_homingTask() {
     while (_stepper->isRunning() && millis() < to) vTaskDelay(pdMS_TO_TICKS(20));
     _stepper->forceStopAndNewPosition(0);   // re-zero: THIS is home (0mm)
     _current_position_mm = 0.0f;
-    MLOGF("57AIMServo Homing: rear found, backed off %.1fmm — HOME set at 0mm :3\n",
+    MLOGF("AIMServo Homing: rear found, backed off %.1fmm — HOME set at 0mm :3\n",
           AIM_HOMING_BACKOFF_MM);
 
     // --- Measure usable stroke from front stall to rear ---
@@ -430,32 +433,36 @@ void Ai57AIMServoDriver::_homingTask() {
         float   raw_span_mm = fabsf(nativeToMm(span_steps));
         float   usable_mm   = raw_span_mm - AIM_HOMING_BACKOFF_MM;
         if (usable_mm < 0.0f) usable_mm = 0.0f;
-        if (usable_mm > AIM_MAX_TRAVEL_MM) usable_mm = AIM_MAX_TRAVEL_MM;
+        // MEASUREMENT WINS: the span between the two physically-detected hard
+        // stops is ground truth for the usable stroke. We do NOT clamp it down
+        // to the configured max rail length — that setting only bounds the
+        // search sweep, not the result. A wall felt slightly past the expected
+        // rail length is a real wall, so we trust it. :3
         _measured_stroke_mm = usable_mm;
 
-        MLOGF("57AIMServo Homing: front-to-rear span %.1fmm -> usable stroke %.1fmm "
-              "(ceiling %.1fmm) :3\n", raw_span_mm, _measured_stroke_mm, AIM_MAX_TRAVEL_MM);
+        MLOGF("AIMServo Homing: front-to-rear span %.1fmm -> usable stroke %.1fmm "
+              "(rail-length bound %.1fmm) :3\n", raw_span_mm, _measured_stroke_mm, _max_rail_mm);
     } else {
-        // Non-positive span — something's off, fall back to geometry
-        // ceiling. We still have a valid home from the rear sweep. :3
+        // Non-positive span — something's off, fall back to the configured rail
+        // length. We still have a valid home from the rear sweep. :3
         _measured_stroke_mm = 0.0f;
-        MLOGLN(F("57AIMServo Homing: unexpected front position — using geometry ceiling."));
+        MLOGLN(F("AIMServo Homing: unexpected front position — using configured rail length."));
     }
 
     _current_position_mm = 0.0f;
     _homed  = true;
     _homing = false;
-    MLOGF("57AIMServo Homing: COMPLETE — homed at 0mm, usable stroke %.1fmm. yippie! :3\n",
-          _measured_stroke_mm > 0.0f ? _measured_stroke_mm : AIM_MAX_TRAVEL_MM);
+    MLOGF("AIMServo Homing: COMPLETE — homed at 0mm, usable stroke %.1fmm. yippie! :3\n",
+          _measured_stroke_mm > 0.0f ? _measured_stroke_mm : _max_rail_mm);
     _homingTaskHandle = nullptr;
     vTaskDelete(nullptr);
 }
 
 
-bool Ai57AIMServoDriver::home(int32_t home_speed_steps_s) {
+bool AIMServoDriver::home(int32_t home_speed_steps_s) {
     if (_homing) return false;
 
-    MLOGLN(F("57AIMServo Homing: Starting..."));
+    MLOGLN(F("AIMServo Homing: Starting..."));
     _homing = true;
     _homed  = false;
 
@@ -503,7 +510,7 @@ bool Ai57AIMServoDriver::home(int32_t home_speed_steps_s) {
 
 // runHomingStep() is a no-op — homing now runs entirely inside its own task.
 // The function is kept to satisfy the MotorDriver interface. :3
-void Ai57AIMServoDriver::runHomingStep() {
+void AIMServoDriver::runHomingStep() {
     // Nothing to do here — the homing task owns the loop now.
     // motorTask watches _homing go false and syncs g_state. :3
 }
@@ -517,7 +524,7 @@ void Ai57AIMServoDriver::runHomingStep() {
 // enable()) and zero the position counter, exactly like a real home does at its
 // final step, so the very first move has a valid 0mm reference to travel from.
 // Do NOT call on real hardware you don't want moving without a genuine home. :3
-void Ai57AIMServoDriver::forceHomeState(bool homed) {
+void AIMServoDriver::forceHomeState(bool homed) {
     if (homed) {
         if (_stepper) {
             _stepper->enableOutputs();               // pulse train can now go out
@@ -527,10 +534,10 @@ void Ai57AIMServoDriver::forceHomeState(bool homed) {
         _current_position_mm = 0.0f;
         _homing = false;
         _homed  = true;
-        MLOGLN(F("57AIMServo: forceHomeState(true) — bench fake-home, outputs live at 0mm :3"));
+        MLOGLN(F("AIMServo: forceHomeState(true) — bench fake-home, outputs live at 0mm :3"));
     } else {
         _homed = false;
-        MLOGLN(F("57AIMServo: forceHomeState(false) — cleared, real homing required."));
+        MLOGLN(F("AIMServo: forceHomeState(false) — cleared, real homing required."));
     }
 }
 
@@ -539,7 +546,7 @@ void Ai57AIMServoDriver::forceHomeState(bool homed) {
 // The user shoves the carriage all the way in until the endstop triggers, we
 // zero there, back off 10mm, and we're homed. Consent is important — the
 // machine waits for the user to push it in before it takes over. :3
-bool Ai57AIMServoDriver::checkPushToHome() {
+bool AIMServoDriver::checkPushToHome() {
 #if !defined(HOMING_USE_ENDSTOP)
     // The v0.0 board has NO endstop switch — push-to-home relied on reading it,
     // so it's a no-op here. Homing is done via the sensorless current-stall
@@ -587,7 +594,7 @@ bool Ai57AIMServoDriver::checkPushToHome() {
             _current_position_mm = 0.0f;
             _homed = true;
 
-            MLOGLN(F("57AIMServo Push-to-home: endstop pressed — backed off 10mm, HOMED at 0"));
+            MLOGLN(F("AIMServo Push-to-home: endstop pressed — backed off 10mm, HOMED at 0"));
             return true;
         }
     } else {
@@ -601,17 +608,19 @@ bool Ai57AIMServoDriver::checkPushToHome() {
 // ---- Motion ------------------------------------------------------------------
 
 
-void Ai57AIMServoDriver::moveTo(float pos_mm) {
+void AIMServoDriver::moveTo(float pos_mm) {
     if (!_homed) {
-        MLOGLN(F("57AIMServo: Cannot move — not homed!"));
+        MLOGLN(F("AIMServo: Cannot move — not homed!"));
         return;
     }
 
     enable();
 
-    // Clamp to physical limits — we don't let the carriage go past the end of
-    // the rail. The machine has limits. Even the greediest hole has a bottom. :3
-    pos_mm = constrain(pos_mm, 0.0f, AIM_MAX_TRAVEL_MM);
+    // Clamp to the effective physical ceiling — the measured stroke once homing
+    // has felt out the real wall, else the configured max rail length. We don't
+    // let the carriage go past the end of the rail. The machine has limits. Even
+    // the greediest hole has a bottom. :3
+    pos_mm = constrain(pos_mm, 0.0f, effectiveCeilingMm());
 
     // Coordinate system: home (endstop) = 0mm = step 0
     // "Out" (extended/front) = positive mm = NEGATIVE steps
@@ -630,7 +639,7 @@ void Ai57AIMServoDriver::moveTo(float pos_mm) {
     int32_t pos_before = _stepper->getCurrentPosition();
 
     if (target_steps == pos_before) {
-        MLOGF("57AIMServo moveTo: %.1fmm already at target step %d\n",
+        MLOGF("AIMServo moveTo: %.1fmm already at target step %d\n",
               pos_mm, target_steps);
         return;
     }
@@ -650,7 +659,7 @@ void Ai57AIMServoDriver::moveTo(float pos_mm) {
     // Cast to int for the log — the numeric value is identical. :3
     int mret = (int)_stepper->moveTo(target_steps);
 
-    MLOGF("57AIMServo moveTo: %.1fmm -> step %d (from %d) at %u Hz ret=%d\n",
+    MLOGF("AIMServo moveTo: %.1fmm -> step %d (from %d) at %u Hz ret=%d\n",
           pos_mm, target_steps, pos_before, speed_hz, mret);
 }
 
@@ -673,11 +682,11 @@ void Ai57AIMServoDriver::moveTo(float pos_mm) {
 // FAS computes its braking distance from the current accel; lowering it
 // mid-flight means FAS suddenly needs a longer brake ramp than the distance
 // that's left, so it overshoots and lurches. Stay firm, never go limp. :3
-void Ai57AIMServoDriver::streamTo(float pos_mm, float speed_mm_s) {
+void AIMServoDriver::streamTo(float pos_mm, float speed_mm_s) {
     if (!_homed || !_stepper) return;
     enable();
 
-    pos_mm = constrain(pos_mm, 0.0f, AIM_MAX_TRAVEL_MM);
+    pos_mm = constrain(pos_mm, 0.0f, effectiveCeilingMm());
     int32_t target_steps = -mmToNative(pos_mm);  // front = negative steps
 
     // Arm the stall watchdog with this REAL commanded sample. Speed 0 means
@@ -735,7 +744,7 @@ void Ai57AIMServoDriver::streamTo(float pos_mm, float speed_mm_s) {
 // touching. The shaft gets told exactly what to do and does it. Obedient,
 // precise, and absolutely relentless. Like a good hole that takes every
 // command without question and holds position until the next one. :3
-void Ai57AIMServoDriver::streamToSteps(int32_t target_steps,
+void AIMServoDriver::streamToSteps(int32_t target_steps,
                                         uint32_t speed_steps_s,
                                         uint32_t accel_steps_s2) {
     if (!_homed || !_stepper) return;
@@ -770,7 +779,7 @@ void Ai57AIMServoDriver::streamToSteps(int32_t target_steps,
     _stepper->moveTo(target_steps);
 }
 
-void Ai57AIMServoDriver::runMotorStep() {
+void AIMServoDriver::runMotorStep() {
     // NOP — moveTo()/streamTo()/streamToSteps() retarget through FAS directly.
     // Stream stall watchdog (streamTo() stashing) lives in update().
     // This stub exists to satisfy the MotorDriver interface. :3
@@ -778,11 +787,11 @@ void Ai57AIMServoDriver::runMotorStep() {
 
 // ---- Speed & Acceleration ----------------------------------------------------
 
-void Ai57AIMServoDriver::setMaxSpeed(float speed_mm_s) {
+void AIMServoDriver::setMaxSpeed(float speed_mm_s) {
     _max_speed_mm_s = constrain(speed_mm_s, 0.0f, MAX_SPEED_MM_S);
 }
 
-void Ai57AIMServoDriver::setAcceleration(float accel_mm_s2) {
+void AIMServoDriver::setAcceleration(float accel_mm_s2) {
     // Ceiling at 20000 mm/s² — well within what the 57AIM30 can handle for
     // short bursts. The planner uses this as the cruise accel; the raise-only
     // guard in streamToSteps() keeps it from softening mid-flight. :3
@@ -793,7 +802,7 @@ void Ai57AIMServoDriver::setAcceleration(float accel_mm_s2) {
     }
 }
 
-uint32_t Ai57AIMServoDriver::getLiveAcceleration() const {
+uint32_t AIMServoDriver::getLiveAcceleration() const {
     // Return the acceleration currently active inside the FAS ramp engine —
     // NOT the configured ceiling. This is what OSSM reads with
     // stepper->getAcceleration() in its raise-only guard. The full
@@ -804,23 +813,23 @@ uint32_t Ai57AIMServoDriver::getLiveAcceleration() const {
 
 // ---- Status ------------------------------------------------------------------
 
-bool Ai57AIMServoDriver::isMoving() {
+bool AIMServoDriver::isMoving() {
     return _stepper ? _stepper->isRunning() : false;
 }
 
-float Ai57AIMServoDriver::getPosition() const {
+float AIMServoDriver::getPosition() const {
     if (!_stepper) return 0.0f;
     // Steps are negative for positive mm positions (endstop=0, front=negative steps)
     return nativeToMm(-_stepper->getCurrentPosition());
 }
 
-float Ai57AIMServoDriver::getTargetPosition() const {
+float AIMServoDriver::getTargetPosition() const {
     return getPosition();
 }
 
 // ---- Stop / HardStop ---------------------------------------------------------
 
-void Ai57AIMServoDriver::stop() {
+void AIMServoDriver::stop() {
     // E-stop: halt the pulse train, kill the homing task if it's running,
     // disable outputs via FAS, and clear all state. The shaft goes completely
     // soft — no ambiguity, no stale flags. The scene is over. :3
@@ -846,7 +855,7 @@ void Ai57AIMServoDriver::stop() {
     resetStreamState();
 }
 
-void Ai57AIMServoDriver::hardStop() {
+void AIMServoDriver::hardStop() {
     // Immediate stop without deceleration — the pulse train cuts off NOW.
     // The 57AIM30 will decelerate on its own internal ramp, but we stop
     // commanding it immediately. Clear the blend/stream state too, otherwise
@@ -860,7 +869,7 @@ void Ai57AIMServoDriver::hardStop() {
 
 // ---- Driver config -----------------------------------------------------------
 
-void Ai57AIMServoDriver::applyDriverConfig(const DriverConfig& cfg) {
+void AIMServoDriver::applyDriverConfig(const DriverConfig& cfg) {
     // The 57AIM30 is configured via its own front-panel DIP switches and
     // parameter software (RS485 Modbus, future feature). There are no SPI
     // registers to write from here. We accept the struct so the rest of the
@@ -869,12 +878,12 @@ void Ai57AIMServoDriver::applyDriverConfig(const DriverConfig& cfg) {
     // Speed and acceleration from the config ARE applied — those go to FAS,
     // not to the drive itself. The drive just follows the pulse rate. :3
     (void)cfg;  // suppress unused-parameter warning
-    MLOGLN(F("57AIMServo: applyDriverConfig() — dumb drive, no registers to write"));
+    MLOGLN(F("AIMServo: applyDriverConfig() — dumb drive, no registers to write"));
 }
 
 // ---- Unit conversion ---------------------------------------------------------
 
-int32_t Ai57AIMServoDriver::mmToNative(float mm) const {
+int32_t AIMServoDriver::mmToNative(float mm) const {
     // Convert mm to steps using the capstan-drum geometry.
     // AIM_STEPS_PER_MM ≈ 20.372 (1600 steps/drum-rev ÷ π×25mm circumference).
     // The result is a step count — positive = toward the rear hard stop. :3
@@ -882,9 +891,9 @@ int32_t Ai57AIMServoDriver::mmToNative(float mm) const {
 }
 
 
-float Ai57AIMServoDriver::nativeToMm(int32_t native) const {
+float AIMServoDriver::nativeToMm(int32_t native) const {
     // Convert steps back to mm. Inverse of mmToNative(). :3
     return (float)native / AIM_STEPS_PER_MM;
 }
 
-#endif // defined(DRIVER_57AIM_SERVO)
+#endif // defined(DRIVER_AIM_SERVO)

@@ -475,9 +475,9 @@ void UiSocket::sendStatus(uint8_t num) {
     if (_motor) {
         float ms = _motor->getMeasuredStrokeMm();
         stroke_10um = (ms > 0.0f) ? (uint32_t)(ms * 100.0f + 0.5f)
-                                   : (uint32_t)(MACHINE_MAX_TRAVEL_MM * 100.0f + 0.5f);
+                                   : (uint32_t)(_motor->getMaxRailMm() * 100.0f + 0.5f);
     } else {
-        stroke_10um = (uint32_t)(MACHINE_MAX_TRAVEL_MM * 100.0f + 0.5f);
+        stroke_10um = (uint32_t)(DEFAULT_MAX_RAIL_MM * 100.0f + 0.5f);
     }
     frame[off++] = (uint8_t)(stroke_10um & 0xFF);
     frame[off++] = (uint8_t)((stroke_10um >> 8) & 0xFF);

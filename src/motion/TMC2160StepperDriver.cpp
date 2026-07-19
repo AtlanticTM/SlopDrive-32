@@ -283,7 +283,7 @@ void TMC2160StepperDriver::_homingTask() {
     // fully tracked — unlike runForward() which can silently no-op after an
     // E-stop cycle because it bypasses some planner state. We ram it deep,
     // balls-to-the-wall, until the endstop screams. :3
-    int32_t sweep_steps = (int32_t)(PHYSICAL_MAX_TRAVEL_MM * STEPS_PER_MM * 1.5f);
+    int32_t sweep_steps = (int32_t)(_max_rail_mm * STEPS_PER_MM * 1.5f);
     _stepper->move(sweep_steps);  // positive = toward endstop
 
     MLOGF("Homing: Sweeping %d steps toward endstop at %u Hz\n",
@@ -472,8 +472,9 @@ void TMC2160StepperDriver::moveTo(float pos_mm) {
     // Always ensure motor is enabled before moving
     enable();
 
-    // Clamp to physical limits
-    pos_mm = constrain(pos_mm, 0.0f, PHYSICAL_MAX_TRAVEL_MM);
+    // Clamp to the effective physical ceiling (measured stroke once homed, else
+    // the configured max rail length) — rail-length agnostic. :3
+    pos_mm = constrain(pos_mm, 0.0f, effectiveCeilingMm());
 
     // Coordinate system: home (endstop) = 0mm = step 0
     // "Out" (extended/front) = positive mm = NEGATIVE steps
@@ -553,7 +554,7 @@ void TMC2160StepperDriver::streamTo(float pos_mm, float speed_mm_s) {
     if (!_homed || !_stepper) return;
     enable();
 
-    pos_mm = constrain(pos_mm, 0.0f, PHYSICAL_MAX_TRAVEL_MM);
+    pos_mm = constrain(pos_mm, 0.0f, effectiveCeilingMm());
     int32_t target_steps = -mmToNative(pos_mm);  // front = negative steps
 
     // Arm the stall watchdog with this REAL commanded sample (update() settles

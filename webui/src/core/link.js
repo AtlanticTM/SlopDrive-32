@@ -65,7 +65,7 @@ var _onDegradedCb = null;
 var _onRestoredCb = null;
 var _onDisconnectedCb = null;
 
-// Stats exposure (read by Health tab)
+// Stats exposure (read by Health tab + connection-health dot / diag hazard shading)
 var _stats = {
   wsRttUs: 0,
   clockOffsetUs: 0,
@@ -73,8 +73,17 @@ var _stats = {
   txDrops: 0,
   reconnectCount: 0,
   connected: false,
-  fallback: false
+  fallback: false,
+  droppedFrames: 0,   // cumulative telemetry frames lost (0x01 seq discontinuities)
+  lastTeleMs: 0,      // performance.now() of the most recent 0x01 telemetry frame
+  lastGapMs: 0,       // performance.now() of the most recent detected drop
+  lastStatusMs: 0     // performance.now() of the most recent STATUS heartbeat
 };
+
+// Last 0x01 telemetry sequence number seen — for dropped-frame detection. -1 =
+// no baseline yet (fresh connect / after a reset), so the first frame just seeds
+// it without counting a phantom drop. :3
+var _lastSeq = -1;
 
 // ============================================================================
 // Public API
@@ -147,6 +156,7 @@ function _connect() {
 
 function _onOpen() {
   if (window.__DEBUG_LINK) console.log('[link] _onOpen — waiting for HELLO');
+  _lastSeq = -1;                  // fresh socket → reseed seq baseline, don't count a phantom drop
   _reconnectScheduled = false;    // connection confirmed, reset guard (F-006)
   if (_helloTimeout) clearTimeout(_helloTimeout);
   _helloTimeout = setTimeout(function() {
@@ -214,6 +224,23 @@ function _handleTelemetry(dv, byteLength) {
   var t = parseTelemetry(dv, byteLength);
   if (!t) return;
   var nowMs = performance.now();
+
+  // Dropped-frame detection via the 0x01 sequence counter. A jump of >1 means
+  // one or more frames never arrived (poor connection). Guard the delta to a
+  // sane window so a legitimate u16 wrap or a post-reconnect seq reset doesn't
+  // register as thousands of phantom drops. :3
+  _stats.lastTeleMs = nowMs;
+  if (typeof t.seq === 'number') {
+    if (_lastSeq >= 0) {
+      var d = (t.seq - _lastSeq) & 0xFFFF;
+      if (d > 1 && d < 1000) {
+        _stats.droppedFrames += (d - 1);
+        _stats.lastGapMs = nowMs;
+      }
+    }
+    _lastSeq = t.seq;
+  }
+
   feedWireSamples(t, nowMs);
   if (_onTelemetryCb) _onTelemetryCb(t);
 }
@@ -223,6 +250,10 @@ function _handleTelemetry(dv, byteLength) {
 function _handleStatus(dv) {
   var s = parseStatus(dv);
   if (!s) return;
+  // STATUS is the ~2Hz heartbeat that proves the link is alive even when the
+  // machine is idle and emitting no 0x01 motion frames. The health dot uses its
+  // age to tell "idle but connected" from "connection stalled". :3
+  _stats.lastStatusMs = performance.now();
   noteCfgGen(s.cfg_gen);
   _stats.txDrops = s.tx_drops;
   _stats.clockOffsetUs = _clockOffsetUs;

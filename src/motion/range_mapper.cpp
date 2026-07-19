@@ -2,7 +2,16 @@
 
 RangeMapper::RangeMapper()
     : _range_min_mm(0.0f)
-    , _range_max_mm(MACHINE_MAX_TRAVEL_MM) {}
+    , _range_max_mm(DEFAULT_MAX_RAIL_MM)
+    , _max_rail_mm(DEFAULT_MAX_RAIL_MM) {}
+
+// Update the physical ceiling and re-clamp the current window to it so a
+// shortened rail immediately trims an over-long window. :3
+void RangeMapper::setMaxRailMm(float mm) {
+    if (mm <= 0.0f) return;
+    _max_rail_mm = mm;
+    setRange(_range_min_mm, _range_max_mm);   // re-clamp to the new ceiling
+}
 
 void RangeMapper::setRange(float min_mm, float max_mm) {
     // Validate range
@@ -41,11 +50,11 @@ float RangeMapper::getCenterPosition() const {
     return (_range_min_mm + _range_max_mm) * 0.5f;
 }
 
-float RangeMapper::clampToPhysicalLimits(float pos_mm) {
-    // Use MACHINE_MAX_TRAVEL_MM so the 57AIM build clamps to 260mm, not 240mm.
-    // PHYSICAL_MAX_TRAVEL_MM is the TMC-era constant — it stays for the TMC
-    // build but we can't use it here without breaking the 57AIM rail. :3
-    return constrain(pos_mm, 0.0f, MACHINE_MAX_TRAVEL_MM);
+float RangeMapper::clampToPhysicalLimits(float pos_mm) const {
+    // Rail-length agnostic: clamp to the user-set max rail length. There is no
+    // hardcoded geometry ceiling anymore — _max_rail_mm is pushed from
+    // ConfigStore/WebUI (default DEFAULT_MAX_RAIL_MM = 500mm). :3
+    return constrain(pos_mm, 0.0f, _max_rail_mm);
 }
 
 float RangeMapper::clampIntensity(float intensity) {

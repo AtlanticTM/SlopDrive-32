@@ -29,6 +29,10 @@
     <!-- Link-alive dot: reality-blue when polling succeeds, extinguished otherwise.
          JS wires this via the existing wifi/poll state (id kept: wifiDot). -->
     <span class="link-dot" id="wifiDot"></span>
+    <!-- Telemetry-gap dot: connection health of the binary WS stream. Green =
+         flowing clean, amber = dropped frames / gapping, red = stalled/offline.
+         Driven by features/conn.js from link.js seq-gap + heartbeat stats. -->
+    <span class="link-dot" id="teleDot" title="Telemetry link"></span>
   </div>
 
   <div class="chips">
@@ -383,6 +387,17 @@
         <div class="hint" id="modeHint">Choose how the machine receives motion commands.</div>
         <div class="chip" id="bleStatus" style="display:none;margin-top:10px">
           <span class="dot" id="bleStatusDot"></span><span id="bleStatusText">Bluetooth</span>
+        </div>
+      </div>
+
+      <!-- Machine rail length — rail-length-agnostic ceiling -->
+      <div class="card panel tight">
+        <div class="card-head">
+          <span data-ico="i-range"></span><h2>Machine Rail Length</h2>
+          <button class="info" data-tip="The maximum rail length of your machine. This firmware is agnostic to rail length — it works on a rail of any length. This value bounds the homing search sweep (so homing can't run forever if it never feels a wall) and sets the scale until sensorless homing measures your real usable stroke. Default 500 mm."><span data-ico="i-info"></span></button>
+        </div>
+        <div class="pair">
+          <div><div class="mini-label">Max rail (mm)</div><input class="num" id="railMaxNum" type="number" min="10" max="2000" step="1" inputmode="numeric"></div>
         </div>
       </div>
 

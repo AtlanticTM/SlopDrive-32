@@ -297,7 +297,10 @@ void WebUI::handleApiStatus() {
 void WebUI::handleApiCapabilities() {
     JsonDocument doc;
     doc["fw_version"] = FIRMWARE_VERSION;   // OTA verification: prove which build is live
-    doc["max_travel_mm"] = (float)MACHINE_MAX_TRAVEL_MM;
+    // Rail-length agnostic: max_travel_mm is the user-configured max rail length
+    // (the pre-homing scale + homing sweep bound), not a fixed geometry ceiling.
+    doc["max_travel_mm"] = _state.config.max_rail_mm;
+    doc["max_rail_mm"]   = _state.config.max_rail_mm;
     doc["measured_stroke_mm"] = _motor.getMeasuredStrokeMm();
 
     JsonObject speed = doc["speed_ceiling_mm_s"].to<JsonObject>();
@@ -358,7 +361,10 @@ void WebUI::handleApiSettings() {
         doc["default_range_max"] = _state.default_range_max;
         doc["expert_mode"] = _state.expert_mode;
         doc["stream_speed_mode"] = (uint8_t)_state.stream_speed_mode;
-        doc["max_travel"] = (float)MACHINE_MAX_TRAVEL_MM;
+        // max_travel = pre-homing rail scale (= configured max rail length);
+        // max_rail is the explicit setting the WebUI edits. :3
+        doc["max_travel"] = _state.config.max_rail_mm;
+        doc["max_rail"] = _state.config.max_rail_mm;
         doc["measured_stroke"] = _motor.getMeasuredStrokeMm();
 
         String json;
@@ -438,10 +444,23 @@ bool WebUI::applySettings(JsonDocument& doc, JsonDocument& resp) {
     TCodeParser::intifaceCompat = _state.intiface_compat;
 
     _state.expert_mode = doc["expert_mode"] | _state.expert_mode;
+
+    // Max rail length (mm) — rail-length-agnostic ceiling. Apply BEFORE the
+    // window/default-range clamps below so they validate against the new rail.
+    // Sanity-bound 10..2000mm. Pushed live to the motor + mapper. :3
+    if (doc["max_rail"].is<float>() || doc["max_rail"].is<int>()) {
+        float rail = doc["max_rail"] | _state.config.max_rail_mm;
+        if (rail < 10.0f)   rail = 10.0f;
+        if (rail > 2000.0f) rail = 2000.0f;
+        _state.config.max_rail_mm = rail;
+        _motor.setMaxRailMm(rail);
+        _mapper.setMaxRailMm(rail);   // re-clamps the current window to the new rail
+    }
+
     if (doc["default_range_min"].is<float>() || doc["default_range_max"].is<float>()) {
         float drmin = doc["default_range_min"] | _state.default_range_min;
         float drmax = doc["default_range_max"] | _state.default_range_max;
-        if (drmin >= 0.0f && drmax <= MACHINE_MAX_TRAVEL_MM && drmin < drmax) {
+        if (drmin >= 0.0f && drmax <= _state.config.max_rail_mm && drmin < drmax) {
             _state.default_range_min = drmin;
             _state.default_range_max = drmax;
         }
@@ -463,6 +482,7 @@ bool WebUI::applySettings(JsonDocument& doc, JsonDocument& resp) {
     resp["ok"] = true;
     resp["range_min"] = _mapper.getMinMm();
     resp["range_max"] = _mapper.getMaxMm();
+    resp["max_rail"] = _state.config.max_rail_mm;   // post-clamp rail length echo
     resp["max_speed"] = (uint32_t)_motor.getMaxSpeed();
     resp["accel"] = (uint32_t)_state.config.acceleration_mm_s2;
     resp["user_max_speed"] = (uint32_t)_state.config.user_max_speed_mm_s;
@@ -522,7 +542,9 @@ bool WebUI::applyMove(JsonDocument& doc, JsonDocument& resp) {
     float pos = doc["position"] | 0.0f;
     bool bypass = doc["bypass_limits"] | false;
     if (bypass) {
-        pos = constrain(pos, 0.0f, MACHINE_MAX_TRAVEL_MM);
+        // Bypass the window but NOT the machine: clamp to the effective physical
+        // ceiling (measured stroke once homed, else configured max rail). :3
+        pos = constrain(pos, 0.0f, _motor.effectiveCeilingMm());
     } else {
         pos = constrain(pos, _mapper.getMinMm(), _mapper.getMaxMm());
     }
@@ -1101,7 +1123,8 @@ bool WebUI::handleCommand(uint8_t op, JsonDocument& payload_in,
         payload_out["default_range_min"] = _state.default_range_min;
         payload_out["default_range_max"] = _state.default_range_max;
         payload_out["expert_mode"] = _state.expert_mode;
-        payload_out["max_travel"] = (float)MACHINE_MAX_TRAVEL_MM;
+        payload_out["max_travel"] = _state.config.max_rail_mm;
+        payload_out["max_rail"] = _state.config.max_rail_mm;
         payload_out["measured_stroke"] = _motor.getMeasuredStrokeMm();
 
         payload_out["speed"]     = (int)roundf(_patternEngine.getSpeedPercent());

@@ -11,16 +11,18 @@
 class FastAccelStepper;
 
 // ============================================================================
-// 57AIMServoDriver — concrete MotorDriver for the 57AIM30 closed-loop servo
+// AIMServoDriver — concrete MotorDriver for the AIM-class closed-loop servos
 // ============================================================================
 //
-// Build-guarded behind DRIVER_57AIM_SERVO (set in platformio.ini).
+// Build-guarded behind DRIVER_AIM_SERVO (set in platformio.ini).
 // Uses FastAccelStepper for pulse generation on ESP32-S3.
 //
-// This is a "dumb" Step/Direction driver — no SPI, no Modbus, no register
-// config. The 57AIM30 servo drive handles all the closed-loop magic internally.
-// We just send PUL (pulse) and DIR (direction) signals and let the drive do
-// its thing. Clean, simple, and absolutely relentless. :3
+// This driver targets the whole AIM family of Step/Direction closed-loop servo
+// drives (57AIM30 and functionally-compatible siblings), NOT one specific
+// motor. It's a "dumb" Step/Direction driver — no SPI, no Modbus, no register
+// config. The AIM drive handles all the closed-loop magic internally. We just
+// send PUL (pulse) and DIR (direction) signals and let the drive do its thing.
+// Clean, simple, and absolutely relentless. :3
 //
 // Hardware pinout (defined in config_api.h — custom v0.0 Nano ESP32 board):
 //   AIM_PIN_STEP → PUL (GPIO 5, D2) — pulse train, one step per rising edge
@@ -28,14 +30,16 @@ class FastAccelStepper;
 //   NO ENDSTOP   → homing is SENSORLESS via the INA228 current sensor. :3
 //
 // Machine geometry (capstan drum, 2:1 motor->drum reduction):
-//   MAX_TRAVEL:    260.0 mm (geometry ceiling; homing measures real stroke)
+//   MAX_TRAVEL:    rail-length agnostic — no fixed ceiling. The user's max rail
+//                  length setting bounds the homing sweep; homing MEASURES the
+//                  real usable stroke between the two hard stops.
 //   STEPS_PER_REV: 1600 per DRUM rev (800 motor steps × 2:1 reduction)
 //   MM_PER_REV:    π × 25mm drum = 78.5398 mm/drum-rev
 //   STEPS_PER_MM:  1600 / 78.5398 = ~20.372 steps/mm
 //   HOMING_BACKOFF: 10.0 mm
 
 //
-// No enable pin — the 57AIM30 is always energized when powered. The driver
+// No enable pin — the AIM drive is always energized when powered. The driver
 // enable/disable calls are no-ops that satisfy the MotorDriver interface.
 //
 // CONTINUOUS BLENDING: streamTo() never softens a committed brake ramp
@@ -45,9 +49,9 @@ class FastAccelStepper;
 // sample. The shaft just keeps thrusting, relentless and full, stuffed all
 // the way in until the belly bulges and it can't take anymore yippie! :3
 
-class Ai57AIMServoDriver : public MotorDriver {
+class AIMServoDriver : public MotorDriver {
 public:
-    Ai57AIMServoDriver();
+    AIMServoDriver();
 
     // ---- Lifecycle ----------------------------------------------------------
     void init() override;
@@ -168,8 +172,9 @@ private:
 
     // Measured usable stroke (mm), discovered by sensorless homing between the
     // two hard stops minus safety margins. 0 = not yet measured → fall back to
-    // AIM_MAX_TRAVEL_MM geometry ceiling. The WebUI reads this so the stroke
-    // designer rescales to the REAL rail length once we've felt both ends. :3
+    // the configured max rail length (getMaxRailMm()). The WebUI reads this so
+    // the stroke designer rescales to the REAL rail length once we've felt both
+    // ends. :3
     float   _measured_stroke_mm = 0.0f;
 public:
     // Measured stroke accessor for the WebUI / status layer. Returns 0 until
@@ -179,7 +184,10 @@ public:
     // correct at boot BEFORE the first homing cycle. Homing itself overwrites
     // this with a fresh measurement when it completes. :3
     void setMeasuredStrokeMm(float mm) override {
-        if (mm > 0.0f && mm <= AIM_MAX_TRAVEL_MM) _measured_stroke_mm = mm;
+        // Sanity bound only — NOT a rail-length clamp (measurement wins). The
+        // homing sweep already caps how far a real span can be; this just
+        // rejects a garbage value from a corrupt NVS restore. :3
+        if (mm > 0.0f && mm < 2000.0f) _measured_stroke_mm = mm;
     }
 
     // ---- Live INA228 bus telemetry for the WebUI toolbar --------------------

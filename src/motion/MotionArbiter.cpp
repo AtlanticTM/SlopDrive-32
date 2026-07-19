@@ -129,7 +129,9 @@ bool MotionArbiter::submitStreamSample(float norm_pos, float norm_vel_per_s) {
     int32_t target_steps = -_motor.mmToNative(target_mm);
 
     // ---- HARD STEP BOUNDS — machine envelope, always enforced ----------------
-    int32_t hard_min_steps = -_motor.mmToNative(MACHINE_MAX_TRAVEL_MM);
+    // Ceiling is the effective physical bound: measured stroke once homed, else
+    // the configured max rail length (rail-length agnostic). :3
+    int32_t hard_min_steps = -_motor.mmToNative(_motor.effectiveCeilingMm());
     int32_t hard_max_steps = 0;
     target_steps = constrain(target_steps, hard_min_steps, hard_max_steps);
 
@@ -254,8 +256,9 @@ bool MotionArbiter::_gatesPass(const MotionIntent& intent) {
 
 float MotionArbiter::_clampToWindow(float mm, MotionSource source) {
     if (source == MotionSource::MANUAL) {
-        // Manual moves can go anywhere 0..MAX_TRAVEL_MM
-        return constrain(mm, 0.0f, MACHINE_MAX_TRAVEL_MM);
+        // Manual moves can go anywhere 0 .. the effective physical ceiling
+        // (measured stroke once homed, else the configured max rail length).
+        return constrain(mm, 0.0f, _motor.effectiveCeilingMm());
     }
     // Stream/pattern/OSSM moves are clamped to the user's configured range window
     float lo = _mapper.getMinMm(), hi = _mapper.getMaxMm();
@@ -485,10 +488,12 @@ PlanReport MotionArbiter::_planAndDispatch(const MotionIntent& intent, bool /*lo
     // ---- HARD STEP BOUNDS — last line of defense, ALWAYS enforced -----------
     // The machine's native step coordinate system:
     //   home (rear endstop)  = 0 steps
-    //   front (max extended) = -mmToNative(MACHINE_MAX_TRAVEL_MM) steps
-    // No dispatch may EVER target outside this absolute physical envelope,
-    // regardless of source (MANUAL bypasses the WINDOW but NOT the machine).
-    int32_t hard_min_steps = -_motor.mmToNative(MACHINE_MAX_TRAVEL_MM);  // most negative allowed
+    //   front (max extended) = -mmToNative(effectiveCeilingMm()) steps
+    // The ceiling is the measured stroke once homing has felt out the real wall,
+    // else the configured max rail length (rail-length agnostic). No dispatch
+    // may EVER target outside this absolute physical envelope, regardless of
+    // source (MANUAL bypasses the WINDOW but NOT the machine).
+    int32_t hard_min_steps = -_motor.mmToNative(_motor.effectiveCeilingMm());  // most negative allowed
     int32_t hard_max_steps = 0;                                            // home — cannot go past
     int32_t clamped_target = constrain(target_steps, hard_min_steps, hard_max_steps);
     if (clamped_target != target_steps) {

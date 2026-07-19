@@ -1,11 +1,11 @@
 // CurrentSensor — INA228 driver implementation for the 36V motor bus.
-// Build-guarded behind DRIVER_57AIM_SERVO.
+// Build-guarded behind DRIVER_AIM_SERVO.
 //
 // The register map differs from the INA226 — this uses RobTillaart/INA228.
 // We drink the current straight off the 5mΩ shunt: full travel is a thirsty
 // gulp, a stall is the drive choking as the carriage stuffs itself against the
 // hard stop until it can't take another step. yippie! :3
-#if defined(DRIVER_57AIM_SERVO)
+#if defined(DRIVER_AIM_SERVO)
 
 #include "CurrentSensor.h"
 #include <Wire.h>
@@ -151,4 +151,4 @@ void CurrentSensor::resetPeaks() {
 }
 
 
-#endif // defined(DRIVER_57AIM_SERVO)
+#endif // defined(DRIVER_AIM_SERVO)

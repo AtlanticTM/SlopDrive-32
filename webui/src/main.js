@@ -21,6 +21,7 @@ import { currentMode, reflectMode, initSettings, saveSettings, restoreDefaults }
 import { initRail, railUpdatePosition, setRailManualMode } from './features/rail.js';
 import { initPlanStrip } from './features/planstrip.js';
 import { initDiag } from './features/diag.js';
+import { initConn } from './features/conn.js';
 import { applyTheme, currentThemeId, initThemeUI, ACCENT } from './core/theme.js';
 import { fetchAndApplyCapabilities, refreshHealthCards, setLinkBssid } from './core/capabilities.js';
 
@@ -1006,6 +1007,8 @@ function init() {
     // keep the per-frame path allocation-free.
     var _diagPow = { v: 0, a: 0 };
     initDiag(function () { _diagPow.v = _lastBusV; _diagPow.a = _liveBusmA / 1000; return _diagPow; });
+    initConn();   // header telemetry-gap / connection-health dot
+
     console.log('[SD32] sidebar...');
     initResizableSidebar();
     console.log('[SD32] capabilities...');

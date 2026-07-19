@@ -109,8 +109,9 @@ classes (Abstract Base Classes with pure virtual functions):
 
 - **`MotorDriver`** — abstracts stepper/servo communication, including bus
   current/voltage/power telemetry getters. Implemented today by
-  `Ai57AIMServoDriver` (the 57AIM30 closed-loop servo, current production
-  driver) and `TMC2160StepperDriver` (the legacy belt-drive stepper build).
+  `AIMServoDriver` (the AIM-class closed-loop servos — 57AIM30 and compatible
+  siblings — current production driver) and `TMC2160StepperDriver` (the legacy
+  belt-drive stepper build).
   **`MotionArbiter` is the only class permitted to call a driver's motion
   methods** (`moveTo`/`streamTo`/`streamToSteps`/`stop`/`hardStop`) — this is
   enforced at compile time via a `friend class MotionArbiter` declaration on
@@ -121,7 +122,7 @@ classes (Abstract Base Classes with pure virtual functions):
   Dongle UART relay, OSSM BLE). `TransportManager` routes data between the
   active transport and the TCode parser; exactly one transport is active at a
   time, selectable from the web UI.
-- Build-flags (`-DDRIVER_57AIM_SERVO`, `-DBLE_ENABLED`, `-DFEATURE_RS485_MODBUS`)
+- Build-flags (`-DDRIVER_AIM_SERVO`, `-DBLE_ENABLED`, `-DFEATURE_RS485_MODBUS`)
   gate driver/feature code inclusion; unused drivers are not compiled into the
   binary.
 
@@ -138,8 +139,9 @@ arrival, into a plan computed from the machine's actual live position and
 velocity, with speed/accel derived from what the intent requires and clamped
 at configured ceilings.
 
-- **`Ai57AIMServoDriver`** — the production motor driver: a "dumb" step/direction
-  pulse generator for the 57AIM30 closed-loop servo drive, via FastAccelStepper.
+- **`AIMServoDriver`** — the production motor driver: a "dumb" step/direction
+  pulse generator for the AIM-class closed-loop servo drives (57AIM30 and
+  compatible siblings), via FastAccelStepper.
   No SPI, no Modbus, no register config for motion itself — the 57AIM30 handles
   closed-loop control internally via its own DSP; we just send PUL/DIR pulses.
   On the v0.0 board this drives a **capstan drum + Dyneema line**, not a belt:
@@ -194,7 +196,9 @@ at configured ceilings.
   self-contained FreeRTOS task sweeps the carriage to both hard stops, detecting
   a stall via a sustained current spike on the INA228 current sensor (see
   below), backs off 10mm from the rear stop to zero, and records the actually-
-  measured usable stroke (which can be shorter than the 260mm geometry ceiling).
+  measured usable stroke. The firmware is **rail-length agnostic** — it works on
+  a rail of any length; a configurable **Max Rail Length** setting (default
+  500mm, in the web UI) only bounds how far homing hunts for a wall.
   Homing must be explicitly triggered from the web UI — the machine never moves
   on power-up. The old endstop-switch push-to-home path still exists in code but
   is compiled out by default (`HOMING_USE_ENDSTOP` isn't defined in any current
@@ -334,8 +338,8 @@ at configured ceilings.
 - **Configuration Panels** — live-adjustable settings, discovered and
   ceiling-clamped at runtime from the device rather than hardcoded:
   - **Stroke Range** — drag/resize the active stroke window anywhere along the
-    measured travel (not a fixed 0–260mm default; the true ceiling comes from
-    sensorless homing).
+    measured travel (rail-length agnostic; the true ceiling comes from sensorless
+    homing, bounded by the configurable Max Rail Length setting).
   - **Dual limit sets** — independent max-speed/acceleration ceilings for
     manual (user) vs. TCode/pattern/OSSM (input) moves.
   - **Continuous Blend Mode** — let-it-land / allow-reversal / hybrid selector
@@ -426,7 +430,7 @@ this is the default deployment path for routine changes, no cable required:
 | **Driver** | 57AIM30 closed-loop servo drive (step/direction), buffered through an SN74AHCT125 → opto inputs |
 | **Motor** | 57AIM30 integrated servo, 800 steps/rev at the motor shaft (DIP-switch configured), 2:1 reduction to the drum |
 | **Mechanics** | Capstan drum + Dyneema line — 25mm drum diameter, ~78.54mm travel/drum-rev, **1600 steps/drum-rev, ~20.37 steps/mm** |
-| **Travel** | 260mm geometry ceiling; actual usable stroke is measured at homing time and may be shorter |
+| **Travel** | Rail-length agnostic — no fixed ceiling. Actual usable stroke is measured at homing time; a configurable Max Rail Length setting (default 500mm) bounds the homing search sweep |
 | **Homing** | Sensorless — current-stall detection via the INA228, no endstop switch on this board |
 | **Current/Power Sensing** | INA228 20-bit monitor on the 36V bus (behind an ISO1640 isolator), 5mΩ shunt, 32.768A full scale |
 | **Status LEDs** | Three discrete active-low LEDs (not a NeoPixel) — R/G/B on GPIO 46/0/45 — plus a standalone active-low orange user LED and an active-high heartbeat LED |
@@ -631,7 +635,7 @@ SlopDrive-32/
 │   │   ├── TransportManager.h
 │   │   └── WebSocketTransport.h
 │   ├── motion/                            # Motion engine interfaces
-│   │   ├── 57AIMServoDriver.h             # 57AIM30 closed-loop servo (step/dir), capstan-drum math
+│   │   ├── AIMServoDriver.h               # AIM-class closed-loop servo (step/dir), capstan-drum math
 │   │   ├── CurrentSensor.h                # INA228 bus current/voltage/power wrapper
 │   │   ├── Kinematics.h                   # Legacy trapezoid planner (dormant by default)
 │   │   ├── MotionArbiter.h                # Sole caller of MotorDriver; arbitration + safety gates

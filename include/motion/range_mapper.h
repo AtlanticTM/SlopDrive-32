@@ -35,8 +35,14 @@ public:
     // Get the center position of the configured range
     float getCenterPosition() const;
 
-    // Validate and clamp a position to physical limits
-    static float clampToPhysicalLimits(float pos_mm);
+    // Set the max rail length (mm) — the rail-length-agnostic physical ceiling
+    // the window is clamped to. Pushed from ConfigStore/WebUI whenever the user
+    // changes the max rail length setting. Re-clamps the current range. :3
+    void setMaxRailMm(float mm);
+    float getMaxRailMm() const { return _max_rail_mm; }
+
+    // Validate and clamp a position to physical limits (0 .. max rail length)
+    float clampToPhysicalLimits(float pos_mm) const;
 
     // Validate and clamp an intensity value
     static float clampIntensity(float intensity);
@@ -44,4 +50,5 @@ public:
 private:
     float _range_min_mm;  // Start of usable range (mm from home)
     float _range_max_mm;  // End of usable range (mm from home)
+    float _max_rail_mm;   // Physical ceiling (mm) — user-set max rail length
 };

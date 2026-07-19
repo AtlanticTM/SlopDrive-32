@@ -1968,6 +1968,11 @@ pre.log, .screen.log {
   animation: toastIn .2s ease;
 }
 .toast .ti { width: 16px; height: 16px; flex: 0 0 auto; }
+/* icon() returns a width/height-less <svg> — without this it renders at the
+   default replaced-element size (~300x150) and blows the toast layout apart.
+   Every other icon container in this sheet has the equivalent rule. :3 */
+.toast .ti svg { width: 16px; height: 16px; display: block; }
+.toast > span:last-child { flex: 1 1 auto; min-width: 0; overflow-wrap: anywhere; }
 .toast.good { border-color: var(--reality); } .toast.good .ti { color: var(--reality); }
 .toast.warn { border-color: var(--warn); } .toast.warn .ti { color: var(--warn); }
 .toast.bad  { border-color: var(--bad); } .toast.bad .ti { color: var(--bad); }

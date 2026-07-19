@@ -38,8 +38,8 @@
 #include "TMC2160StepperDriver.h"
 #endif
 
-#if defined(DRIVER_57AIM_SERVO)
-#include "57AIMServoDriver.h"
+#if defined(DRIVER_AIM_SERVO)
+#include "AIMServoDriver.h"
 #endif
 
 #include "MotionArbiter.h"
@@ -73,10 +73,10 @@ extern "C" bool bleInUse(void) { return true; }
 
 #if defined(DRIVER_TMC2160)
   TMC2160StepperDriver motor;
-#elif defined(DRIVER_57AIM_SERVO)
-  Ai57AIMServoDriver motor;
+#elif defined(DRIVER_AIM_SERVO)
+  AIMServoDriver motor;
 #else
-  #error "No motor driver selected. Define DRIVER_TMC2160 or DRIVER_57AIM_SERVO in platformio.ini build_flags."
+  #error "No motor driver selected. Define DRIVER_TMC2160 or DRIVER_AIM_SERVO in platformio.ini build_flags."
 #endif
 
 static SystemState        g_state;
@@ -578,7 +578,7 @@ void setup() {
     applog("Add a 'Serial' device in Intiface pointing at this COM port.");
 #endif
 
-#if defined(DRIVER_57AIM_SERVO)
+#if defined(DRIVER_AIM_SERVO)
     pinMode(AIM_PIN_STEP, OUTPUT); digitalWrite(AIM_PIN_STEP, LOW);
     pinMode(AIM_PIN_DIR,  OUTPUT); digitalWrite(AIM_PIN_DIR,  LOW);
     Wire.begin(PIN_I2C_SDA, PIN_I2C_SCL);

@@ -7,6 +7,8 @@ CLAUDE.md
 .vscode/ipch
 .VSCodeCounter/
 .gitignore
+.cache/
+.claude/
 
 # Real secrets - never commit. Use secrets.example.h as the shared template.
 include/secrets.h

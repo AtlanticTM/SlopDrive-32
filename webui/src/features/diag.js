@@ -27,6 +27,7 @@ import { $, clamp, pad } from '../core/ui.js';
 import { TRAVEL, winMin, winMax } from '../core/range.js';
 import { sampleAt, stableRenderTime } from '../core/telebuf.js';
 import { ACCENT, ac } from '../core/theme.js';
+import { getStats as linkStats } from '../core/link.js';
 
 var N = 2048;               // ring capacity (~34s at 60fps — > the 10s window)
 var WINDOW_MS = 10000;      // visible time span
@@ -38,6 +39,7 @@ var tgtR = new Float64Array(N);
 var itpR = new Float64Array(N);   // interpolator-reported pos (NaN when idle)
 var vR = new Float64Array(N);
 var wR = new Float64Array(N);
+var gapR = new Uint8Array(N);     // 1 = telemetry gap / dropped-frame span at this sample
 var head = -1, len = 0;
 
 var S = {
@@ -48,10 +50,10 @@ var S = {
   lastLegendMs: 0,
 };
 
-function push(t, pos, tgt, itp, v, w) {
+function push(t, pos, tgt, itp, v, w, gap) {
   head = (head + 1) % N;
   tR[head] = t; posR[head] = pos; tgtR[head] = tgt; itpR[head] = itp;
-  vR[head] = v; wR[head] = w;
+  vR[head] = v; wR[head] = w; gapR[head] = gap ? 1 : 0;
   if (len < N) len++;
 }
 
@@ -92,7 +94,19 @@ function frame(nowMs) {
   }
   var v = 0, a = 0;
   if (S.supplier) { var p = S.supplier(); v = p.v || 0; a = p.a || 0; }
-  push(performance.now(), s.pos, s.tgt, itp, v, Math.abs(v * a));
+
+  // Telemetry-gap flag for this sample — SAME connection-trouble signal the
+  // header dot uses (link.js seq-gap + heartbeat), so the shading agrees with
+  // the dot. NOT plain motion staleness: an idle-but-connected rig emits no
+  // 0x01 frames yet must not read as a gap. We shade when the link is actually
+  // down, OR the buffer is stale AND the link reported real trouble. :3
+  var ls = linkStats();
+  var pnow = performance.now();
+  var linkDown  = !ls.connected || ls.fallback;
+  var recentDrop = ls.lastGapMs > 0 && (pnow - ls.lastGapMs) < 1500;
+  var hbStale    = ls.lastStatusMs > 0 && (pnow - ls.lastStatusMs) > 1500;
+  var gap = linkDown || (s.stale && (recentDrop || hbStale)) ? 1 : 0;
+  push(performance.now(), s.pos, s.tgt, itp, v, Math.abs(v * a), gap);
 
   // ---- Draw (only while open) --------------------------------------------
   if (S.on) draw(nowMs);
@@ -194,6 +208,37 @@ function draw(nowMs) {
     ctx.beginPath(); ctx.moveTo(x0, y); ctx.lineTo(x1, y); ctx.stroke();
   });
   ctx.setLineDash([]);
+
+  // ---- Hazard shading: telemetry-gap / dropped-frame spans ----------------
+  // Full-height yellow-hazard bands over contiguous spans where the connection
+  // gapped (same signal as the header telemetry dot). Drawn UNDER the traces so
+  // the held/extrapolated line stays readable on top. Iterates oldest→newest so
+  // bandStartX is the left (older) edge and bandEndX the right (newer) edge. :3
+  ctx.fillStyle = 'rgba(245,185,77,0.16)';
+  ctx.strokeStyle = 'rgba(245,185,77,0.55)';
+  ctx.lineWidth = 1;
+  var bandY = padT, bandH = H - padT - padB;
+  var bandStartX = null, bandEndX = 0;
+  var flushBand = function () {
+    if (bandStartX === null) return;
+    var w = Math.max(bandEndX - bandStartX, 2);
+    ctx.fillRect(bandStartX, bandY, w, bandH);
+    ctx.beginPath(); ctx.moveTo(bandStartX, bandY); ctx.lineTo(bandStartX + w, bandY); ctx.stroke();
+    bandStartX = null;
+  };
+  for (var gi = len - 1; gi >= 0; gi--) {
+    var gidx = (head - gi + N) % N;
+    var ageG = tNow - tR[gidx];
+    if (ageG > WINDOW_MS) continue;
+    var xG = x1 - (ageG / WINDOW_MS) * (x1 - x0);
+    if (gapR[gidx]) {
+      if (bandStartX === null) bandStartX = xG;
+      bandEndX = xG;
+    } else {
+      flushBand();
+    }
+  }
+  flushBand();
 
   // ---- L1: lag shading between actual & commanded -------------------------
   // Forward pass along commanded, backward along actual, filled amber — the

@@ -4,7 +4,7 @@
 // CurrentSensor — INA228 high-side current/voltage monitor on the 36V bus
 // ============================================================================
 //
-// Build-guarded behind DRIVER_57AIM_SERVO. The custom v0.0 controller replaced
+// Build-guarded behind DRIVER_AIM_SERVO. The custom v0.0 controller replaced
 // the OSSM reference board's analog Hall sensor with a proper 20-bit INA228
 // sitting on the DIRTY side behind an ISO1640 I2C isolator — but from the S3's
 // point of view it's just a normal device on the Wire bus. Transparent. :3
@@ -22,7 +22,7 @@
 //   CURRENT_LSB: 62.5 µA
 //   ALERT:     not wired — all limiting is polled in software. :3
 
-#if defined(DRIVER_57AIM_SERVO)
+#if defined(DRIVER_AIM_SERVO)
 
 #include <Arduino.h>
 
@@ -136,4 +136,4 @@ private:
 };
 
 
-#endif // defined(DRIVER_57AIM_SERVO)
+#endif // defined(DRIVER_AIM_SERVO)

@@ -178,7 +178,7 @@ export async function saveSettings(silent) {
   try {
     // Fire save via WS control plane AND HTTP for response validation
     cmd.send(OP_SAVE, {});
-    var r = await post('/api/settings', {
+    var body = {
       range_min: Math.round(winMin), range_max: Math.round(winMax),
       max_speed: parseInt($('defMaxSpeed').value), accel: parseInt($('defAccel').value),
       blend_mode: blendMode,
@@ -186,7 +186,14 @@ export async function saveSettings(silent) {
       default_range_min: clamp(parseInt($('defMinNum').value) || 0, 0, TRAVEL),
       default_range_max: clamp(parseInt($('defMaxNum').value) || TRAVEL, 0, TRAVEL),
       expert_mode: expertMode
-    });
+    };
+    // Max rail length — only send a REAL value (ground-truth doctrine: never
+    // push an invented default onto a live device). Field is seeded from the
+    // device in loadSettings; if it's somehow blank we omit it entirely. :3
+    var railEl = $('#railMaxNum');
+    var railVal = railEl ? parseInt(railEl.value) : NaN;
+    if (!isNaN(railVal)) body.max_rail = clamp(railVal, 10, 2000);
+    var r = await post('/api/settings', body);
     // Check the HTTP response — a 400 from the firmware (e.g. rmin>=rmax)
     // doesn't throw, so we must check r.ok explicitly. :3
     if (!r || !r.ok) {
@@ -221,6 +228,14 @@ async function loadSettings() {
                : 0;
     const travel = measured || (d.max_travel ? Math.round(d.max_travel) : 0);
     if (travel) setTravel(travel);
+
+    // Max rail length — seed the input from device truth ONLY (never invent a
+    // value). This is the configured rail ceiling, distinct from the measured
+    // stroke shown by TRAVEL above. :3
+    const railEl = $('#railMaxNum');
+    if (railEl && typeof d.max_rail === 'number' && d.max_rail > 0) {
+      railEl.value = Math.round(d.max_rail);
+    }
 
     setWinMin(d.range_min);
     setWinMax(d.range_max);

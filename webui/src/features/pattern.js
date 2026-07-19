@@ -1,23 +1,52 @@
 /**
- * Pattern Engine panel — Generator 01.
+ * Pattern Engine panel — Pattern (01).
  *
- * Pattern select as segmented control, speed/depth/stroke/sensation sliders
- * with .vv readouts, start/stop through cmd.js (gen_cfg/gen_run ops), and
- * a recessed .screen wave scope canvas previewing the generator waveform.
+ * Registry-driven glyph tile grid (§2.1a/b), speed/depth/stroke/sensation
+ * sliders with .vv readouts, start/stop through cmd.js (gen_cfg/gen_run
+ * ops), and a recessed .screen wave scope canvas tracing the REAL commanded
+ * position off telebuf (not a synthetic waveform — see the wave-scope
+ * section below for the R2 finding/fix).
  *
- * The wave scope traces the pattern waveform: --line-3 at standby,
- * --reality + bloom when running, with a leading dot at the write head.
- * The rAF/canvas loop is allocation-free (Task 3R discipline applies).
+ * The wave scope: --line-3 at standby (flat — no data flowing), --reality +
+ * bloom when running, with a leading dot at the write head. The rAF/canvas
+ * loop is allocation-free (Task 3R discipline applies).
  */
 import { $, setRead, icon, toast, pad, setVV } from "../core/ui.js";
 import { post, get } from "../core/api.js";
 import * as cmd from "../core/cmd.js";
 import { OP_GEN_CFG, OP_GEN_RUN } from "../core/wire.js";
 import { TRAVEL, winMin, winMax } from "../core/range.js";
+import { capsCache } from "../core/capabilities.js";
+import { sampleAt, stableRenderTime } from "../core/telebuf.js";
+import { ACCENT } from "../core/theme.js";
 
 export let pat = { running: false };
 
-// Pattern names for the segmented control
+// ===================== Pattern registry (§2.1b) =====================
+// Runtime list, never a hardcoded DOM — the grid renders from whichever
+// source is present. capabilities.js's cached caps object may eventually
+// advertise a `patterns` array ({id, name, glyph?}); when absent (true of
+// the current firmware — this IS the live V1 test per the spec) we fall
+// back to the built-in seven with the approved-mock glyph set. An entry
+// with no glyph renders the dashed ghost tile. This decouples the future
+// generator-library swap from all UI work — the grid just handles any count.
+var FALLBACK_PATTERN_REGISTRY = [
+    { id: 0, name: 'Simple', tip: 'Smooth sine strokes',                glyph: 'M2,11 C8,2 14,2 20,11 S32,20 38,11 S50,2 56,11' },
+    { id: 1, name: 'Tease',  tip: 'Long dwell, sharp stroke',           glyph: 'M2,16 L14,16 L20,4 L26,16 L38,16 L44,4 L50,16 L56,16' },
+    { id: 2, name: 'Robo',   tip: 'Square in-out holds',                glyph: 'M2,16 L10,16 L10,4 L22,4 L22,16 L34,16 L34,4 L46,4 L46,16 L56,16' },
+    { id: 3, name: 'Half',   tip: 'Alternating half and full strokes',  glyph: 'M2,10 C6,6 10,6 14,10 S22,14 26,10 C32,2 40,2 46,10 S54,16 56,12' },
+    { id: 4, name: 'Deeper', tip: 'Each stroke reaches further',        glyph: 'M2,12 C6,9 10,9 14,12 C19,7 25,7 30,12 C36,4 44,4 50,12 L56,12' },
+    { id: 5, name: 'StopGo', tip: 'Bursts with pauses',                 glyph: 'M2,11 C6,4 10,4 14,11 L26,11 C30,4 34,4 38,11 L50,11 C53,7 55,7 56,9' },
+    { id: 6, name: 'Insist', tip: 'Dense relentless rhythm',            glyph: 'M2,11 C5,3 8,3 11,11 S17,19 20,11 S26,3 29,11 S35,19 38,11 S44,3 47,11 S53,19 56,11' }
+];
+var GHOST_GLYPH = 'M2,11 L8,11 M14,11 L20,11 M26,11 L32,11 M38,11 L44,11 M50,11 L56,11';
+
+function patternRegistry() {
+    if (capsCache && Array.isArray(capsCache.patterns) && capsCache.patterns.length) return capsCache.patterns;
+    return FALLBACK_PATTERN_REGISTRY;
+}
+
+// Pattern names — kept for the hidden #patSelect <option> labels only.
 var PATTERN_NAMES = [
     'Simple', 'Tease', 'Robo', 'Half\'n\'Half', 'Deeper', 'Stop\'n\'Go', 'Insist'
 ];
@@ -40,18 +69,28 @@ export function pushPatParams() {
     }, 60);
 }
 
-// ===================== Wave scope =====================
-// Recessed .screen canvas previewing the generator waveform.
-// Allocation-free rAF loop: no per-frame object/array literals, canvas state
-// set once, rect cached on resize.
+// ===================== Wave scope — telemetry-fed (§2.1d / R2) =====================
+// R2 FINDING: the prior implementation computed a pure synthetic waveform
+// from slider values (waveformSample/trapezoid below), never touching
+// telemetry — a Ground Truth Doctrine violation. Rewired to draw the REAL
+// commanded ("told") position: a trailing-window ring buffer sampled once
+// per rAF tick from the same telebuf.sampleAt()/stableRenderTime() exports
+// main.js's rail loop already calls (telebuf INTERNALS stay untouched —
+// only its public API is used, same as main.js does). Flat centered line
+// when nothing is commanding movement (idle naturally holds a flat tgt, no
+// special-cased "standby" branch needed); glow only while pat.running.
+// Allocation-free: fixed Float64Array ring, no per-frame object/array
+// literals, canvas state set once, rect cached on resize.
+
+var SCOPE_RING_N = 300; // ~5s trailing window at 60fps
 
 var _scope = {
     cv: null, ctx: null, dpr: 1,
     rect: { w: 0, h: 0 },
     animRunning: false,
     reducedMotion: false,
-    // Waveform phase (advances when running)
-    phase: 0,
+    ringX: new Float64Array(SCOPE_RING_N), // normalized -1..1, oldest..newest
+    ringHead: 0, ringLen: 0,
     // Pre-allocated dash arrays
     DASH_NONE: [],
 };
@@ -85,59 +124,21 @@ function sizeScopeCanvas() {
     _scope.rect.h = h;
 }
 
-// Compute a waveform sample at phase t (0..1) for the given pattern index.
-// Returns 0..1 (normalized position within the stroke window).
-function waveformSample(t, patternIndex, sensation) {
-    var s = sensation / 100; // -1..1
-
-    switch (patternIndex) {
-        case 0: // Simple Stroke — trapezoidal, 1/3 accel, 1/3 coast, 1/3 decel
-            return trapezoid(t, 1/3, 1/3);
-        case 1: // TeasingPounding — asymmetric in/out speeds
-            var ratio = s > 0 ? 1 / (1 + s * 4) : (1 + (-s) * 4) / (1 + (-s) * 4 + 1);
-            return trapezoid(t, ratio * 0.5, ratio * 0.5);
-        case 2: // RoboStroke — variable accel/decel ratio
-            var x = s >= 0 ? (1/3 + s * (0.5 - 1/3)) : (1/3 + (-s) * (0.05 - 1/3));
-            return trapezoid(t, x, 1 - x);
-        case 3: // Half'n'Half — every second stroke is half depth
-            var half = Math.floor(t * 2) % 2 === 0;
-            var localT = (t * 2) % 1;
-            return half ? trapezoid(localT, 1/3, 1/3) * 0.5 : trapezoid(localT, 1/3, 1/3);
-        case 4: // Deeper — ramping amplitude
-            var cycle = Math.floor(t * 4) % 4;
-            var amp = (cycle + 1) / 4;
-            var localT = (t * 4) % 1;
-            return trapezoid(localT, 1/3, 1/3) * amp;
-        case 5: // Stop'n'Go — pauses between stroke series
-            var inPause = (t * 3) % 1 > 0.7;
-            if (inPause) return 0;
-            return trapezoid((t * 3) % 1 / 0.7, 1/3, 1/3);
-        case 6: // Insist — fractional stroke, vibrational
-            var frac = (100 - Math.abs(sensation)) / 100;
-            return trapezoid(t, 0.15, 0.15) * frac + (1 - frac) * 0.5;
-        default:
-            return trapezoid(t, 1/3, 1/3);
+// Push the current commanded position (telebuf's "told" channel) into the
+// trailing ring, normalized to the stroke window (-1..1, 0 = window center).
+function pushScopeSample(tgt) {
+    var mid = (winMin + winMax) / 2;
+    var half = (winMax - winMin) / 2 || 1;
+    var norm = Math.max(-1, Math.min(1, (tgt - mid) / half));
+    var idx = (_scope.ringHead + _scope.ringLen) % SCOPE_RING_N;
+    if (_scope.ringLen === SCOPE_RING_N) {
+        _scope.ringHead = (_scope.ringHead + 1) % SCOPE_RING_N;
+        _scope.ringLen--;
+        idx = (_scope.ringHead + _scope.ringLen) % SCOPE_RING_N;
     }
+    _scope.ringX[idx] = norm;
+    _scope.ringLen++;
 }
-
-// Trapezoidal waveform: accel for `accel` fraction, coast, decel for `decel` fraction.
-// Returns 0..1 (0 = out, 1 = in).
-function trapezoid(t, accel, decel) {
-    var half = t % 1;
-    var goingIn = half < 0.5;
-    var localT = goingIn ? half * 2 : (half - 0.5) * 2; // 0..1 for each half
-    var pos;
-    if (localT < accel) {
-        pos = 0.5 * (localT / accel);
-    } else if (localT < 1 - decel) {
-        pos = 0.5;
-    } else {
-        pos = 0.5 + 0.5 * ((localT - (1 - decel)) / (decel || 0.001));
-    }
-    return goingIn ? pos : 1 - pos;
-}
-
-var _lastScopeFrameTs = 0;
 
 function startScopeLoop() {
     if (_scope.animRunning) return;
@@ -145,6 +146,7 @@ function startScopeLoop() {
     requestAnimationFrame(scopeFrame);
 }
 
+var _scopeWasRunning = false;
 function scopeFrame(nowMs) {
     _scope.animRunning = true;
     if (!_scope.ctx || _scope.rect.w === 0) {
@@ -152,31 +154,32 @@ function scopeFrame(nowMs) {
         return;
     }
 
-    var dtMs = nowMs - _lastScopeFrameTs;
-    if (dtMs <= 0 || dtMs > 500) dtMs = 16.667;
-    _lastScopeFrameTs = nowMs;
-
-    // Advance phase when running
+    // Trace ONLY while the pattern engine is running. The told channel also
+    // moves during TCode/MFP streaming, but tracing that here was redundant
+    // (the plan strip under the rail is the streaming diagnostics surface)
+    // and made "wave · told" read as a second, confusing stream monitor.
+    // This scope is the PATTERN's preview — flat in every other state.
     if (pat.running) {
-        var speed = parseInt($('#patSpeed') ? $('#patSpeed').value : 0);
-        // Speed slider 0-100 maps to stroke period ~0.3s..5s. At speed 0 the
-        // generator idles at a standstill (period → very long) and ramps up
-        // from nothing — no forced 50% floor. :3
-        var periodMs = 5000 - speed * 45; // 5000ms at 0, 500ms at 100
-        _scope.phase += dtMs / periodMs;
-        if (_scope.phase > 1) _scope.phase -= 1;
+        var s = sampleAt(stableRenderTime(nowMs));
+        if (s && typeof s.tgt === 'number') pushScopeSample(s.tgt);
+        _scopeWasRunning = true;
+    } else if (_scopeWasRunning) {
+        // Pattern just stopped — clear the ring once so the trace collapses
+        // to the flat standby line instead of freezing mid-waveform.
+        _scope.ringHead = 0;
+        _scope.ringLen = 0;
+        _scopeWasRunning = false;
     }
 
-    drawScope(nowMs);
+    drawScope();
     requestAnimationFrame(scopeFrame);
 }
 
 // Pre-allocated canvas style constants
-var SCOPE_LINE_DIM = '#33373E';   // --line-3
-var SCOPE_LINE_LIVE = '#4DA6FF';  // --reality
+var SCOPE_LINE_DIM = '#33373E';   // --line-3 (neutral — identical across themes)
 var SCOPE_FILL = '#000';
 
-function drawScope(nowMs) {
+function drawScope() {
     var ctx = _scope.ctx;
     var w = _scope.rect.w;
     var h = _scope.rect.h;
@@ -201,74 +204,116 @@ function drawScope(nowMs) {
         ctx.stroke();
     }
 
-    // Draw waveform
-    var patternIndex = parseInt($('#patSelect') ? $('#patSelect').value : 0);
-    var sensation = parseInt($('#patSensation') ? $('#patSensation').value : 50);
     var isRunning = pat.running;
-    var lineColor = isRunning ? SCOPE_LINE_LIVE : SCOPE_LINE_DIM;
+    var lineColor = isRunning ? ACCENT.reality : SCOPE_LINE_DIM;
 
     ctx.strokeStyle = lineColor;
     ctx.lineWidth = 1.5;
     ctx.lineJoin = 'round';
 
     if (isRunning) {
-        ctx.shadowColor = SCOPE_LINE_LIVE;
+        ctx.shadowColor = ACCENT.reality;
         ctx.shadowBlur = 8;
     } else {
         ctx.shadowBlur = 0;
     }
 
-    // Draw 2 cycles of the waveform
-    var N = Math.max(w, 80);
-    ctx.beginPath();
-    for (var i = 0; i <= N; i++) {
-        var x = (i / N) * w;
-        // Map x to phase: show 2 cycles
-        var t = (i / N) * 2 + _scope.phase;
-        var sample = waveformSample(t, patternIndex, sensation);
-        var py = h - sample * h;
-        if (i === 0) ctx.moveTo(x, py);
-        else ctx.lineTo(x, py);
-    }
-    ctx.stroke();
-
-    // Leading dot at write head (right edge) when running
-    if (isRunning) {
-        ctx.shadowBlur = 12;
-        ctx.fillStyle = SCOPE_LINE_LIVE;
-        var headT = 1 + _scope.phase;
-        var headSample = waveformSample(headT, patternIndex, sensation);
-        var headY = h - headSample * h;
+    var len = _scope.ringLen;
+    var lastX = w / 2, lastY = h / 2;
+    if (len > 1) {
+        var span = len - 1;
         ctx.beginPath();
-        ctx.arc(w - 4, headY, 3, 0, Math.PI * 2);
+        for (var i = 0; i < len; i++) {
+            var idx = (_scope.ringHead + i) % SCOPE_RING_N;
+            var x = (i / span) * w;
+            var y = h / 2 - _scope.ringX[idx] * (h / 2 - 4);
+            if (i === 0) ctx.moveTo(x, y); else ctx.lineTo(x, y);
+            lastX = x; lastY = y;
+        }
+        ctx.stroke();
+    } else {
+        // No samples yet — flat centered line (standby, matches R2: never a
+        // synthetic approximation, just the honest "no data" state).
+        ctx.beginPath();
+        ctx.moveTo(0, h / 2);
+        ctx.lineTo(w, h / 2);
+        ctx.stroke();
+    }
+
+    // Leading dot at the write head (rightmost sample) when running
+    if (isRunning && len > 0) {
+        ctx.shadowBlur = 12;
+        ctx.fillStyle = ACCENT.reality;
+        ctx.beginPath();
+        ctx.arc(lastX, lastY, 3, 0, Math.PI * 2);
         ctx.fill();
     }
 
     ctx.shadowBlur = 0;
 }
 
-// ===================== Pattern select segmented control =====================
+// ===================== Pattern glyph tile grid (§2.1a/b) =====================
+// Renders from patternRegistry() — a runtime list, never a hardcoded DOM.
+// Handles any count (wraps to new 4-wide rows via CSS grid). Click still
+// drives the exact same patPayload()/pushPatParams()/hidden #patSelect sync
+// path the old segmented control used — no new endpoint (R4).
 
-function buildPatternSeg() {
-    var host = $('#patSelectSeg');
+function selectedPatternId() {
+    var sel = $('#patSelect');
+    var v = sel ? parseInt(sel.value) : 0;
+    return isNaN(v) ? 0 : v;
+}
+
+function buildPatternGrid() {
+    var host = $('#patGrid');
     if (!host) return;
+    var registry = patternRegistry();
+    var selected = selectedPatternId();
     host.innerHTML = '';
-    for (var i = 0; i < PATTERN_NAMES.length; i++) {
-        var btn = document.createElement('button');
-        btn.dataset.pat = i;
-        btn.textContent = PATTERN_NAMES[i];
-        if (i === 0) btn.classList.add('active');
-        host.appendChild(btn);
+    registry.forEach(function (p) {
+        var tile = document.createElement('button');
+        tile.type = 'button';
+        tile.className = 'pat-tile' + (p.id === selected ? ' on' : '') + (!p.glyph ? ' ghost' : '');
+        tile.dataset.pat = p.id;
+        tile.setAttribute('data-tip', p.tip || p.name);
+        var glyphPath = p.glyph || GHOST_GLYPH;
+        tile.innerHTML = '<svg viewBox="0 0 58 20" aria-hidden="true"><path d="' + glyphPath + '"/></svg><span>' + p.name + '</span>';
+        host.appendChild(tile);
+    });
+    // Trailing "from fw" ghost tile while running on the built-in fallback
+    // set — advertises that the grid is firmware-extensible (mock r6's .pg
+    // .ghost). Non-interactive: a <div> with no data-pat, so the grid click
+    // handler's parseInt guard ignores it. Dropped automatically the day the
+    // firmware actually advertises its own `patterns` registry.
+    if (registry === FALLBACK_PATTERN_REGISTRY) {
+        var ghost = document.createElement('div');
+        ghost.className = 'pat-tile ghost';
+        ghost.setAttribute('data-tip', 'Patterns the firmware advertises appear here automatically — the grid grows with the generator library');
+        ghost.innerHTML = '<svg viewBox="0 0 58 20" aria-hidden="true"><path d="' + GHOST_GLYPH + '"/></svg><span>from fw</span>';
+        host.appendChild(ghost);
     }
-    host.addEventListener('click', function(e) {
-        var b = e.target.closest('button');
-        if (!b) return;
-        host.querySelectorAll('button').forEach(function(x) { x.classList.remove('active'); });
-        b.classList.add('active');
-        // Update hidden select for patPayload compat
+}
+
+/** Re-render the grid — called once at init and again once capabilities.js
+ *  resolves /api/capabilities, in case the firmware advertises `patterns`. */
+export function rebuildPatternGrid() {
+    buildPatternGrid();
+}
+
+function initPatternGrid() {
+    buildPatternGrid();
+    var host = $('#patGrid');
+    if (!host) return;
+    host.addEventListener('click', function (e) {
+        var tile = e.target.closest('.pat-tile');
+        if (!tile) return;
+        var id = parseInt(tile.dataset.pat);
+        if (isNaN(id)) return; // "from fw" ghost tile — display-only
+        host.querySelectorAll('.pat-tile').forEach(function (t) { t.classList.toggle('on', t === tile); });
         var sel = $('#patSelect');
-        if (sel) sel.value = b.dataset.pat;
+        if (sel) sel.value = id;
         pushPatParams();
+        updatePatState();
     });
 }
 
@@ -282,7 +327,8 @@ function seedPatSlider(id, readId, val) {
     if (typeof val !== 'number') return;   // no device truth → leave gated/blank
     e.value = val;
     e.disabled = false;
-    var r = $('#' + readId); if (r) r.textContent = Math.round(val);
+    // Zero-padded 3-digit mono chip ("050"), matching the mock's .fv format.
+    var r = $('#' + readId); if (r) r.textContent = pad(Math.round(val), 3, 0);
 }
 
 // Pull the generator's live params from the device and seed the sliders. Runs
@@ -296,30 +342,34 @@ export async function loadPatternParams() {
         seedPatSlider('patDepth',     'patDepthVal', typeof d.depth === 'number' ? d.depth : undefined);
         seedPatSlider('patStroke',    'patStrokeVal', typeof d.stroke === 'number' ? d.stroke : undefined);
         seedPatSlider('patSensation', 'patSensVal', typeof d.sensation === 'number' ? d.sensation : undefined);
-        // Reflect the selected pattern in the hidden select + segmented control.
+        // Reflect the selected pattern in the hidden select + glyph grid.
         if (typeof d.pattern === 'number') {
             var sel = $('#patSelect'); if (sel) sel.value = d.pattern;
-            var host = $('#patSelectSeg');
-            if (host) host.querySelectorAll('button').forEach(function(b) {
-                b.classList.toggle('active', parseInt(b.dataset.pat) === d.pattern);
+            var host = $('#patGrid');
+            if (host) host.querySelectorAll('.pat-tile').forEach(function(t) {
+                t.classList.toggle('on', parseInt(t.dataset.pat) === d.pattern);
             });
         }
     } catch (e) {}
 }
 
 export function initPattern() {
-    // Build segmented control
-    buildPatternSeg();
+    // Build the pattern glyph tile grid
+    initPatternGrid();
 
     // Seed the generator sliders from device truth (un-gates them).
     loadPatternParams();
 
-    // Slider inputs — push params on drag
-    ["patSpeed", "patDepth", "patStroke", "patSensation"].forEach(function (id) {
-        var s = $(id);
+    // Slider inputs — push params on drag. Explicit slider→chip id map: the
+    // old `id + "Val"` convention silently broke for patSensation (chip id
+    // is patSensVal, not patSensationVal), so the Sensation readout never
+    // updated during a drag — only on the next full param reload.
+    [["patSpeed", "patSpeedVal"], ["patDepth", "patDepthVal"],
+     ["patStroke", "patStrokeVal"], ["patSensation", "patSensVal"]].forEach(function (pair) {
+        var s = $(pair[0]);
         if (!s) return;
         s.addEventListener("input", function () {
-            setRead(id + "Val", s.value);
+            setRead(pair[1], pad(parseInt(s.value) || 0, 3, 0));
             pushPatParams();
         });
     });
@@ -354,8 +404,6 @@ export async function startPattern() {
         return;
     }
     setPatternButton();
-    const note = $("patNote");
-    if (note) note.textContent = "Pattern running on the device — keeps going even if you close this tab.";
 }
 
 export async function stopPattern() {
@@ -371,16 +419,36 @@ export async function stopPattern() {
         pat.running = false;
     }
     setPatternButton();
-    const note = $("patNote");
-    if (note) note.textContent = "Patterns run on-device — they keep going even if you close this tab. Stop before switching patterns.";
 }
 
-function setPatternButton() {
+// Card-head status sub-label (§2.1f) — replaces the old #patNote hint block.
+// "standby" / "running · <name>", sourced from confirmed pat.running + the
+// selected registry entry — existing state, just relocated.
+function updatePatState() {
+    var el = $('#patState');
+    if (!el) return;
+    if (pat.running) {
+        var id = selectedPatternId();
+        var entry = patternRegistry().filter(function (p) { return p.id === id; })[0];
+        el.textContent = 'running · ' + (entry ? entry.name.toLowerCase() : id);
+    } else {
+        el.textContent = 'standby';
+    }
+}
+
+// Idle: neutral border "▶ START PATTERN". Running: amber border/glow
+// "■ STOP PATTERN" (.running class — amber = attention; NEVER .danger's
+// red, which is reserved for hazard/e-stop contexts per R1). Exported so
+// main.js's 0x01-telemetry-flag handler (the actual confirmed-state path,
+// V2) can call the same reflection instead of keeping its own duplicate.
+export function setPatternButton() {
     const btn = $("patStartBtn");
-    if (!btn) return;
-    btn.innerHTML = pat.running ? icon("i-stop") + " Stop Pattern" : icon("i-play") + " Start Pattern";
-    btn.classList.toggle("primary", !pat.running);
-    btn.classList.toggle("danger", pat.running);
+    if (btn) {
+        btn.innerHTML = pat.running ? icon("i-stop") + " STOP PATTERN" : icon("i-play") + " START PATTERN";
+        btn.classList.toggle("primary", !pat.running);
+        btn.classList.toggle("running", pat.running);
+    }
+    updatePatState();
 }
 
 export function togglePattern() {
@@ -393,12 +461,7 @@ export async function refreshPatternState() {
     const d = await get('/api/pattern');
     if (d && typeof d.running === 'boolean' && d.running !== pat.running) {
       pat.running = d.running;
-      const btn = $('#patStartBtn');
-      if (btn) {
-        btn.innerHTML = pat.running ? icon('i-stop') + ' Stop Pattern' : icon('i-play') + ' Start Pattern';
-        btn.classList.toggle('primary', !pat.running);
-        btn.classList.toggle('danger', pat.running);
-      }
+      setPatternButton();
     }
   } catch (e) {}
 }

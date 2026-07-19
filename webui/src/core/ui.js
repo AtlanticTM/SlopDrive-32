@@ -3,6 +3,7 @@
  * tooltips, slider gradient painting, and general DOM sugar.
  * Imported by main.js at boot; works on the static HTML shell.
  */
+import { ACCENT } from './theme.js';
 
 // ===================== SVG icon sprite (Lucide / MIT-licensed paths) =====================
 const ICONS = {
@@ -185,7 +186,8 @@ export function toast(msg, kind = 'info', ico = 'i-info', ms = 4000) {
 
 // ===================== Tab switching =====================
 
-const TAB_LABELS = { drive: 'Drive', health: 'Health', settings: 'Settings', log: 'Log' };
+const TAB_LABELS = { drive: 'Drive', settings: 'Settings', log: 'Log' };
+const PANE_BREAKPOINT = '(max-width: 760px)';
 
 export function initTabs() {
   // Label injection + ARIA tab semantics
@@ -197,40 +199,104 @@ export function initTabs() {
     t.setAttribute('aria-selected', t.classList.contains('active') ? 'true' : 'false');
   });
 
-  // Tab switching — strict single-select. The old code toggled `active` on the
-  // clicked tab/content ONLY, never clearing the previously-active pair, so two
-  // panels could stack (the "tabs don't open next to each other" bug) or every
-  // tab could be deselected leaving a blank void. Now: exactly one tab is
-  // active at all times. Clicking the already-active tab is a no-op (you can't
-  // strand the operator on an empty screen mid-session). Both the mobile and
-  // desktop tab bars share data-tab ids, so we sync the `active` class across
-  // *all* .tab buttons for a given id, not just the one clicked. :3
-  function activateTab(id) {
+  // ===== Split-pane doctrine (§1.6b) =====
+  // Desktop (>760px): Drive is always present; clicking SETTINGS/LOG opens a
+  // sticky pane beside it (mainGrid.split + .paneView.active), click again
+  // closes it back to Drive-only. Below 760px: classic three-tab — driveMain/
+  // sidePane get .m-active, the DRIVE pill reappears, the pane goes static.
+  // This REPLACES the old single-active-tab-content model entirely (both tab
+  // bars still share data-tab ids, so one activateTab() drives both).
+  const mainGrid  = document.getElementById('mainGrid');
+  const driveMain = document.getElementById('driveMain');
+  const sidePane  = document.getElementById('sidePane');
+  const isSplitUi = !!(mainGrid && driveMain && sidePane);
+  const isMobile  = () => window.matchMedia(PANE_BREAKPOINT).matches;
+  let openPane = null;
+
+  function showPaneView(name) {
+    document.querySelectorAll('.paneView').forEach(v => v.classList.remove('active'));
+    if (name) {
+      const v = document.getElementById('pv-' + name);
+      if (v) v.classList.add('active');
+    }
+  }
+  function setTabActive(name) {
     document.querySelectorAll('.tab').forEach(t => {
-      const on = t.dataset.tab === id;
+      const on = t.dataset.tab === name;
       t.classList.toggle('active', on);
       t.setAttribute('aria-selected', on ? 'true' : 'false');
     });
-    document.querySelectorAll('.tab-content').forEach(c => {
-      c.classList.toggle('active', c.id === id);
-    });
+  }
+  function scrollToTop() {
     // Fresh panel → start scrolled at the top so the operator always sees the
     // head of the list, never a random mid-scroll position from last visit.
-    // Desktop scrolls inside .tab-contents-host; mobile scrolls the whole body
-    // (the tab bar is position:fixed), so reset BOTH so neither layout strands
-    // the operator mid-scroll on the previous panel's tail. :3
-    const host = document.querySelector('.tab-contents-host');
+    const host = sidePane || document.querySelector('.tab-contents-host');
     if (host) host.scrollTop = 0;
     if (window.scrollTo) window.scrollTo(0, 0);
+  }
+
+  function activateTab(id) {
+    // Buttons without data-tab (the DIAG toggle) share .tab styling but are
+    // NOT panes — ignore them entirely or they'd clear every active state.
+    if (!id) return;
+    if (!isSplitUi) {
+      // Defensive fallback for the old single-tab-content model, in case any
+      // markup still uses it — keeps this function harmless if ever reused.
+      document.querySelectorAll('.tab-content').forEach(c => c.classList.toggle('active', c.id === id));
+      setTabActive(id);
+      scrollToTop();
+      return;
+    }
+    if (isMobile()) {
+      driveMain.classList.toggle('m-active', id === 'drive');
+      sidePane.classList.toggle('m-active', id !== 'drive');
+      showPaneView(id === 'drive' ? null : id);
+      setTabActive(id);
+      openPane = null;
+    } else {
+      if (id === 'drive') return; // Drive pill is hidden above the breakpoint
+      if (openPane === id) {
+        openPane = null;
+        mainGrid.classList.remove('split');
+        showPaneView(null);
+        setTabActive('drive');
+      } else {
+        openPane = id;
+        mainGrid.classList.add('split');
+        showPaneView(id);
+        setTabActive(id);
+      }
+    }
+    scrollToTop();
+    // Newly-visible canvases (scope/spark/heatmap) need a resize pass to pick
+    // up their now-correct clientWidth/clientHeight — they no-op if unaffected.
+    window.dispatchEvent(new Event('resize'));
   }
   window.__activateTab = activateTab;
 
   document.querySelectorAll('.tab').forEach(btn => {
-    btn.addEventListener('click', () => {
-      if (btn.classList.contains('active')) return; // already here — no-op
-      activateTab(btn.dataset.tab);
-    });
+    btn.addEventListener('click', () => activateTab(btn.dataset.tab));
   });
+
+  // Live breakpoint crossing — mirrors the click-time isMobile() branch above
+  // so a mid-session resize (or DevTools device toggle) lands in a consistent
+  // state instead of stranding an open desktop pane under the mobile layout.
+  if (isSplitUi) {
+    window.matchMedia(PANE_BREAKPOINT).addEventListener('change', m => {
+      if (m.matches) {
+        mainGrid.classList.remove('split');
+        driveMain.classList.add('m-active');
+        sidePane.classList.remove('m-active');
+        showPaneView(null);
+        setTabActive('drive');
+        openPane = null;
+      } else {
+        driveMain.classList.add('m-active');
+        sidePane.classList.remove('m-active');
+      }
+      window.dispatchEvent(new Event('resize'));
+    });
+  }
 
   // Arrow-key navigation within each tab bar (roving between sibling tabs).
   document.querySelectorAll('[role="tablist"], .tabs').forEach(bar => {
@@ -244,6 +310,30 @@ export function initTabs() {
       next.focus();
       activateTab(next.dataset.tab);
     });
+  });
+}
+
+// ===================== Panel index numbering (§3.1) =========================
+// Assigns "01", "02", … to each .card-head h2 in DOM order, continuing across
+// Drive/Settings/Log. A JS walk (not a CSS counter) because querySelectorAll
+// sees every element regardless of display:none — a CSS counter would skip
+// (and silently renumber everything after) any card sitting inside whichever
+// .paneView/#driveMain happens to be hidden at the moment. Call once at boot
+// and again whenever the DOM's card set can change (capabilities resolving
+// builds Power/RS485 cards). Cheap enough to not need debouncing.
+export function renumberPanels() {
+  let i = 1;
+  document.querySelectorAll('.panel, .card').forEach(el => {
+    // The rail panel has no visible numeral (matches the mock's bare .pn
+    // rail assembly, no .pidx) and retired hidden cards (Stroke Window /
+    // Controls — kept only so range.js/main.js have elements to read/write)
+    // must not consume a slot ahead of Pattern=01.
+    if (el.classList.contains('rail-panel')) return;
+    if (el.getAttribute('aria-hidden') === 'true') return;
+    const h2 = el.querySelector('.card-head h2');
+    if (!h2) return; // e.g. #loadCard before capabilities resolves — no head yet
+    h2.setAttribute('data-pidx', i < 10 ? '0' + i : String(i));
+    i++;
   });
 }
 
@@ -323,12 +413,15 @@ export function initTooltips() {
 
 function lerp(a, b, t) { return a + (b - a) * t; }
 function hex(c) { return '#' + c.map(x => Math.round(clamp(x, 0, 255)).toString(16).padStart(2, '0')).join(''); }
-const C_ACCENT = [108, 140, 255], C_WARN = [251, 191, 36], C_BAD = [251, 111, 132];
+// Accent endpoint follows the live theme (ACCENT.realityArr); warn/bad are
+// safety colors and stay literal in every theme.
+const C_WARN = [251, 191, 36], C_BAD = [251, 111, 132];
 
 function colorAt(frac) {
   frac = clamp(frac, 0, 1);
   if (frac < 0.5) {
     const t = frac / 0.5;
+    const C_ACCENT = ACCENT.realityArr;
     return hex([lerp(C_ACCENT[0], C_WARN[0], t), lerp(C_ACCENT[1], C_WARN[1], t), lerp(C_ACCENT[2], C_WARN[2], t)]);
   }
   const t = (frac - 0.5) / 0.5;

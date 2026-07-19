@@ -107,6 +107,18 @@ public:
         readEnergyWh();
     }
 
+    // Fast-path cache refresh — ONLY the two motion-diagnosis signals (bus
+    // current + bus voltage), 2 I2C transactions (~0.3ms at 400kHz) instead
+    // of poll()'s 6. Safe at 40Hz: matches the chip's own conversion cadence
+    // (540µs conversions × AVG16 ≈ one fresh conversion every ~26ms), so
+    // polling faster than this would just re-read the same conversion. The
+    // hardware 16-sample averaging is what keeps the signal clean — the
+    // refresh RATE and the noise floor are decoupled on this chip. :3
+    void  pollFast() {
+        readCurrentA();
+        readBusV();
+    }
+
 private:
     bool _ready = false;
     // Last live readings, updated on every read*() call. The WebUI sips these

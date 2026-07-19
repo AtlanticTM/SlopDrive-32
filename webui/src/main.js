@@ -2,15 +2,10 @@
  * SlopDrive-32 WebUI — main entry point.
  * CSS must be imported here so Vite/vite-plugin-singlefile inlines it.
  *
- * Desktop layout: on >=1024px screens the Stroke Window + Position cards get
- * cloned into a permanent left sidebar. The right panel hosts the tab system
- * (Drive / Health / Settings / Log). On mobile (<1024px) everything stays in
- * the single-column scroll — the sidebar is hidden and the bottom tab bar runs
- * the show.
- *
- * Resizable sidebar: a drag handle between sidebar and main panel lets the
- * operator decide how wide they want their stroke window to be. Width is
- * persisted to localStorage so it survives reloads.
+ * Elastic-rack layout (>=761px): Drive (Pattern + Power cluster) is always
+ * visible; Settings/Log open as a sticky side pane beside it (pane-controller
+ * lives in ui.js's initTabs()). Below 761px it's classic three-tab with a
+ * fixed bottom bar. See SD32-PAGE-SYSTEM-SONNET-PROMPT.md §1.6b.
  *
  * Task 7: binary WS transport via link.js, clock-synced telebuf.js, control
  * plane via cmd.js. HTTP polling is the fallback (gated behind isFallback()).
@@ -18,13 +13,20 @@
  */
 console.log('[SD32] booting — imports loaded');
 import './style.css';
-import { injectIcons, initTabs, initCollapsibleCards, initTooltips, wireActions, toast, icon, $, setRead, clamp, onLiveSlider, paintSlider, pad, setVV, setVVState, measureMartianMonoCh } from './core/ui.js';
+import { injectIcons, initTabs, initCollapsibleCards, initTooltips, wireActions, toast, $, setRead, clamp, onLiveSlider, paintSlider, pad, setVV, setVVState, measureMartianMonoCh, renumberPanels } from './core/ui.js';
 import { post, get, getText } from './core/api.js';
 import { TRAVEL, renderWindow, setPosTarget, syncManualWindow, nudgeWindow, trim, setBound, useCurrentAsDefault, initWindowInputs, winMin, winMax, setWinMin, setWinMax, setWindowReady } from './core/range.js';
-import { initPattern, startPattern, stopPattern, pat, refreshPatternState } from './features/pattern.js';
+import { initPattern, startPattern, stopPattern, pat, refreshPatternState, setPatternButton, rebuildPatternGrid } from './features/pattern.js';
 import { currentMode, reflectMode, initSettings, saveSettings, restoreDefaults } from './features/settings.js';
 import { initRail, railUpdatePosition, setRailManualMode } from './features/rail.js';
-import { fetchAndApplyCapabilities, refreshHealthCards } from './core/capabilities.js';
+import { initPlanStrip } from './features/planstrip.js';
+import { initDiag } from './features/diag.js';
+import { applyTheme, currentThemeId, initThemeUI, ACCENT } from './core/theme.js';
+import { fetchAndApplyCapabilities, refreshHealthCards, setLinkBssid } from './core/capabilities.js';
+
+// Apply the stored theme IMMEDIATELY at module evaluation — before init()
+// and the first canvas frame — so there's no flash of default accents.
+applyTheme(currentThemeId());
 
 // ---- Task 7: new core modules ---------------------------------------------
 import { initLink, onTelemetry as _onWsTelemetry, onStatus as _onWsStatus,
@@ -94,6 +96,57 @@ function sendOvershoot(on) {
 }
 window.__sendOvershoot = sendOvershoot;
 
+// ===================== Header activity heatmap ==============================
+// 14x3 netdata-style canvas in the header (spec §1.6d). Rows: |velocity|
+// (from real position samples in the rail telemetry loop), bus current (the
+// same live value the header current chip shows), link activity (WS frame
+// arrival rate). Real telemetry only — no synthetic fill, no decoration.
+// ~220ms bucket cadence via setInterval, not per rAF frame.
+var AG_COLS = 14, AG_ROWS = 3, AG_CELL = 4, AG_GAP = 1;
+var agData = [];
+for (var _agi = 0; _agi < AG_COLS; _agi++) agData.push([0, 0, 0]);
+var agCanvas = null, agCtx = null;
+var _agLastPos = null, _agVelEma = 0;
+var _agLastAmps = 0;
+var _agLinkMsgs = 0;
+
+function _agNoteVel(pos) {
+  if (_agLastPos !== null) {
+    var dv = Math.abs(pos - _agLastPos);
+    _agVelEma = _agVelEma * 0.7 + dv * 0.3;
+  }
+  _agLastPos = pos;
+}
+function _agNoteLinkMsg() { _agLinkMsgs++; }
+
+function initActivityGrid() {
+  agCanvas = $('#actGrid');
+  if (!agCanvas) return;
+  agCtx = agCanvas.getContext('2d');
+  setInterval(function () {
+    if (!agCtx) return;
+    // Heuristic ceilings so a fully-lit cell means "clearly moving/loaded",
+    // not "hit some invented max" — velEma is mm of travel per ~16ms tick,
+    // ampFrac reuses the same 12A header-chip badge scale, linkFrac assumes
+    // a healthy multi-frame-per-bucket telemetry rate.
+    var velFrac = Math.min(1, _agVelEma / 3);
+    var ampFrac = Math.min(1, Math.abs(_agLastAmps) / 12);
+    var linkFrac = Math.min(1, _agLinkMsgs / 4);
+    _agLinkMsgs = 0;
+    agData.shift();
+    agData.push([velFrac, ampFrac, linkFrac]);
+    agCtx.clearRect(0, 0, agCanvas.width, agCanvas.height);
+    for (var c = 0; c < AG_COLS; c++) {
+      for (var r = 0; r < AG_ROWS; r++) {
+        var v = agData[c][r];
+        var a = 0.06 + v * 0.85;
+        agCtx.fillStyle = 'rgba(' + ACCENT.realityRgb + ',' + a.toFixed(2) + ')';
+        agCtx.fillRect(c * (AG_CELL + AG_GAP), r * (AG_CELL + AG_GAP + 1), AG_CELL, AG_CELL);
+      }
+    }
+  }, 220);
+}
+
 // ---- HTTP fallback poll control -------------------------------------------
 var _fallbackPollInterval = null;
 var _wsLive = false;             // true when WS is connected and not in fallback
@@ -106,6 +159,9 @@ var _wsStatusCache = null;
 // ---- Live bus current from 0x01 telemetry (mA). The 0x02 peak_mA field is a
 // peak-hold value that spikes once a second — never show it as "draw".
 var _liveBusmA = 0;
+// Latest bus voltage (V) — from 0x02 STATUS in WS mode, /api/status in HTTP
+// fallback. Feeds the diag graph's power supplier alongside _liveBusmA.
+var _lastBusV = 0;
 
 // ---- Staleness flag exposed for cmd.js suspension -------------------------
 window.__CMD_SUSPENDED = false;
@@ -218,7 +274,9 @@ function _applyWsStatusToUI(s) {
 
   // ---- Bus current chip: live draw from 0x01 telemetry, NOT peak-hold ------
   var busV = s.bus_mV / 1000; // mV -> V
+  _lastBusV = busV;
   var amps = _wsLive ? (_liveBusmA / 1000) : (s.peak_mA / 1000);
+  _agLastAmps = amps;
   var curChip = $('#currentChip');
   if (curChip) {
     curChip.style.display = '';
@@ -288,12 +346,7 @@ function _applyWsFlags(flags) {
   const patRunning = !!(flags & 0x02);
   if (patRunning !== pat.running) {
     pat.running = patRunning;
-    const btn = $('#patStartBtn');
-    if (btn) {
-      btn.innerHTML = pat.running ? icon('i-stop') + ' Stop Pattern' : icon('i-play') + ' Start Pattern';
-      btn.classList.toggle('primary', !pat.running);
-      btn.classList.toggle('danger', pat.running);
-    }
+    setPatternButton();
   }
   reflectGating();
 
@@ -343,7 +396,7 @@ async function pollStatus() {
 
     if (typeof d.measured_stroke_mm === 'number' && d.measured_stroke_mm !== lastMeasuredStroke) {
       lastMeasuredStroke = d.measured_stroke_mm;
-      fetchAndApplyCapabilities();
+      fetchAndApplyCapabilities().then(function (caps) { if (caps) { rebuildPatternGrid(); renumberPanels(); } });
     }
     state.ifActive = !!d.buttplug_connected && d.measured_hz > 0;
     state.paused = !!d.paused; state.override = !!d.manual_override; reflectGating();
@@ -425,6 +478,10 @@ async function pollStatus() {
 
     refreshHealthCards(d);
 
+    // Keep the diag-graph power supplier fresh on the HTTP-fallback path too.
+    if (typeof d.bus_voltage_v === 'number') _lastBusV = d.bus_voltage_v;
+    if (typeof d.bus_current_a === 'number') _liveBusmA = d.bus_current_a * 1000;
+
     if (tport !== currentMode) reflectMode(tport);
 
     var hf = $('#homeFab'); if (hf) hf.classList.toggle('show', !d.homed);
@@ -450,7 +507,7 @@ async function pollStatus() {
     if (d.serial_linked && !prevStatus.serial) toast('Serial handshake', 'good', 'i-link');
     if (d.homed && !prevStatus.ready) {
       toast('Homed & ready', 'good', 'i-check');
-      fetchAndApplyCapabilities();
+      fetchAndApplyCapabilities().then(function (caps) { if (caps) { rebuildPatternGrid(); renumberPanels(); } });
     }
     prevStatus.buttplug = !!d.buttplug_connected; prevStatus.serial = !!d.serial_linked; prevStatus.ready = !!d.homed;
     // Firmware yields internally via PatternEngine emit gate — UI trusts it (PB-003/PB-012)
@@ -464,7 +521,22 @@ async function pollStatus() {
 // ===================== Log refresh ==========================================
 
 async function refreshLog() {
-  try { var txt = await getText('/api/log'); var box = $('#logBox'); if (!box) return; var atBottom = box.scrollHeight - box.scrollTop - box.clientHeight < 30; box.textContent = txt || '(no output)'; if (atBottom) box.scrollTop = box.scrollHeight; } catch (e) {}
+  try {
+    var txt = await getText('/api/log');
+    var box = $('#logBox');
+    if (!box) return;
+    var atBottom = box.scrollHeight - box.scrollTop - box.clientHeight < 30;
+    box.textContent = txt || '(no output)';
+    // Terminal blinking cursor (§4.1) — textContent above wipes any prior
+    // child, so it's re-appended at the tail on every refresh rather than
+    // living as static markup.
+    var cur = document.createElement('span');
+    cur.className = 'term-cursor';
+    cur.id = 'logCursor';
+    cur.textContent = '▌';
+    box.appendChild(cur);
+    if (atBottom) box.scrollTop = box.scrollHeight;
+  } catch (e) {}
 }
 
 // ===================== Connected-clients panel (Health tab) =================
@@ -494,13 +566,13 @@ async function refreshClients() {
       : (c.streaming ? '<span class="chip" style="color:var(--good)">● streaming</span>'
                      : '<span class="chip" style="color:var(--tx-mut)">○ muted (idle)</span>');
     var mine = (c.streaming && c.most_recent) ? ' — likely this tab' : '';
-    return '<div class="client-row" style="display:flex;align-items:center;gap:10px;padding:6px 0;border-top:1px solid var(--line)">'
-      +   '<code style="flex:0 0 auto">#' + c.num + ' ' + c.ip + '</code>'
-      +   '<span style="flex:1 1 auto;font-size:.85em;color:var(--tx-mut)">' + badge + ' · last active ' + _fmtIdle(c.idle_ms) + mine + '</span>'
+    return '<div class="client-row">'
+      +   '<code>#' + c.num + ' ' + c.ip + '</code>'
+      +   '<span class="client-row-meta">' + badge + ' · last active ' + _fmtIdle(c.idle_ms) + mine + '</span>'
       +   '<button class="btn ghost sm" data-kick="' + c.num + '"><span data-ico="i-stop"></span> Kick</button>'
       + '</div>';
   }).join('');
-  body.innerHTML = '<div style="font-size:.8em;color:var(--tx-mut);margin-bottom:4px">'
+  body.innerHTML = '<div class="hint" style="margin-bottom:6px">'
     + data.clients.length + ' / ' + data.max + ' slots · muted after '
     + Math.round(data.active_window_ms / 1000) + 's idle (unless it\'s the last-active tab)</div>' + rows;
 
@@ -765,6 +837,7 @@ function _startRailTelemetryLoop() {
       setVV('currentPos', s.pos, 3, 1);
       setPosTarget(s.pos);
       railUpdatePosition(s.pos, s.tgt);
+      _agNoteVel(s.pos);
     }
 
     // Task 8: shadow overdue escalation tick
@@ -791,6 +864,7 @@ function init() {
     _onWsTelemetry(function(t) {
       _applyWsFlags(t.flags);
       if (typeof t.i_bus_mA === 'number') _liveBusmA = t.i_bus_mA;
+      _agNoteLinkMsg();
       // telebuf is auto-fed from link.js's feedWireSamples
       // Poll disarm is now owned by onRestored only (A-004).
     });
@@ -800,6 +874,7 @@ function init() {
       // idle and emitting no 0x01 motion telemetry. Feed it to telebuf so the
       // >1s control-suspension gate never trips on a healthy-but-idle link.
       noteLinkAlive();
+      _agNoteLinkMsg();
       _applyWsStatusToUI(s);
     });
 
@@ -871,7 +946,7 @@ function init() {
       // cmd.onConfig) applies it. Also re-fetch capabilities so the measured
       // rail length + ceilings resync after a re-home during a dropout. :3
       cmd.send(OP_GET_CFG, {});
-      fetchAndApplyCapabilities();
+      fetchAndApplyCapabilities().then(function (caps) { if (caps) { rebuildPatternGrid(); renumberPanels(); } });
     });
 
     // ---- Staleness escalation -----------------------------------------------
@@ -910,6 +985,12 @@ function init() {
 
     console.log('[SD32] tabs+collapse+tooltips+wire...');
     initTabs(); initCollapsibleCards(); initTooltips(); wireActions();
+    renumberPanels();
+    initThemeUI();
+    initActivityGrid();
+    // Footer "ui" chip — build-time constant (git short hash, vite.config.js
+    // __UI_BUILD__ define), never the device's own fw_version.
+    setRead('uiChip', typeof __UI_BUILD__ !== 'undefined' ? __UI_BUILD__ : '--');
     console.log('[SD32] window+pattern+settings...');
     initWindowInputs(); renderWindow(); initPattern(); initSettings();
     console.log('[SD32] rail...');
@@ -919,14 +1000,32 @@ function init() {
     });
     console.log('[SD32] rail topbar...');
     initRailTopbar();
+    initPlanStrip();
+    // Diagnostics graph — supplier hands it the freshest bus V/A the UI has
+    // (0x01 telemetry mA at ~45Hz + 0x02/HTTP voltage), reused object to
+    // keep the per-frame path allocation-free.
+    var _diagPow = { v: 0, a: 0 };
+    initDiag(function () { _diagPow.v = _lastBusV; _diagPow.a = _liveBusmA / 1000; return _diagPow; });
     console.log('[SD32] sidebar...');
     initResizableSidebar();
     console.log('[SD32] capabilities...');
-    fetchAndApplyCapabilities();
+    fetchAndApplyCapabilities().then(function (caps) { if (caps) { rebuildPatternGrid(); renumberPanels(); } });
 
     // Start the rail telemetry loop (runs continuously, reads from telebuf)
     _startRailTelemetryLoop();
     console.log('[SD32] rail loop started');
+
+    // Slow link-meta poll — the ONE link fact the binary 0x02 status frame
+    // can't carry is the bssid string, so in WS mode the footer's bssid chip
+    // had no source at all. One tiny HTTP status fetch at boot + every 30s
+    // fills it (and only it — everything else stays on the WS path).
+    function pollLinkMeta() {
+      get('/api/status').then(function (d) {
+        if (d) setLinkBssid(d.wifi_bssid);
+      }).catch(function () {});
+    }
+    pollLinkMeta();
+    setInterval(pollLinkMeta, 30000);
 
     // Start HTTP polling UNLESS WS is already live. The degraded/restored
     // callbacks handle the start/stop transitions.
@@ -951,7 +1050,11 @@ function init() {
     var hh = $('#homeBtnHeader'); if (hh) hh.addEventListener('click', moveToHome);
     var fb = document.querySelector('#faultBanner button'); if (fb) fb.addEventListener('click', clearFault);
     var rl = $('#refreshLogBtn'); if (rl) rl.addEventListener('click', refreshLog);
-    setInterval(function () { if (document.hidden) return; var lt = $('#log'), al = $('#autoLog'); if (lt && lt.classList.contains('active') && al && al.checked) refreshLog(); }, 2000);
+    // #log was the old tab-content wrapper; the Log pane is now #pv-log
+    // (.paneView.active on desktop-pane-open, or just visible via the mobile
+    // .m-active branch — the pane controller in ui.js keeps #pv-log.active
+    // in sync in both cases, so this one check covers both layouts).
+    setInterval(function () { if (document.hidden) return; var lt = $('#pv-log'), al = $('#autoLog'); if (lt && lt.classList.contains('active') && al && al.checked) refreshLog(); }, 2000);
     refreshLog();
 
     // Poll the connected-clients panel while it's actually on-screen (offsetParent

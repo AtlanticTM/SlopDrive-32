@@ -1,5 +1,6 @@
 import { defineConfig } from 'vite';
 import { viteSingleFile } from 'vite-plugin-singlefile';
+import { execSync } from 'node:child_process';
 
 /**
  * Vite builds the single-file HTML bundle (JS/CSS/fonts inlined).
@@ -13,8 +14,24 @@ import { viteSingleFile } from 'vite-plugin-singlefile';
  *
  * Gzipping is handled by build_webui.py (PlatformIO pre-build script).
  */
+
+// UI bundle build identifier — the footer "ui" chip (§1.6h). Short git hash
+// when available (matches how the firmware's own fw_version tracks commits);
+// falls back to a UTC build timestamp in a repo-less checkout so the chip is
+// never a hand-maintained literal.
+function uiBuildId() {
+  try {
+    return execSync('git rev-parse --short HEAD', { cwd: __dirname }).toString().trim();
+  } catch (e) {
+    return 'b' + new Date().toISOString().slice(0, 16).replace(/[-:T]/g, '');
+  }
+}
+
 export default defineConfig({
   plugins: [viteSingleFile()],
+  define: {
+    __UI_BUILD__: JSON.stringify(uiBuildId()),
+  },
   build: {
     cssCodeSplit: false,
     minify: 'esbuild',

@@ -15,8 +15,10 @@
  *
  * Per plan.md §5.13 / §5.10.1.
  */
-import { $, setRead, clamp, pad } from './ui.js';
+import { $, setRead, clamp } from './ui.js';
 import { TRAVEL, setTravel } from '../core/range.js';
+import { Meter } from './meter.js';
+import { ac } from './theme.js';
 
 /** Ceilings and feature flags cached after the API responds. */
 export let capsCache = null;
@@ -89,14 +91,9 @@ export function applyCapabilities(caps) {
       buildRs485Card(caps);
     }
 
-    // Update the driver health placeholder to show relevant context
-    var hc = $('#healthCard');
-    if (hc) {
-      var msg = 'Servo drive active — step/dir closed-loop via FAS. Health telemetry via INA228';
-      if (feat.has_rs485) msg += ' and RS485 Modbus';
-      msg += '.';
-      hc.innerHTML = '<div class="card-body" style="text-align:center;padding:20px;color:var(--muted)">' + msg + '</div>';
-    }
+  // ---- Footer "fw" chip — the OTA verification surface (§1.6h). Always the
+  // device-reported version, never a baked-in string. ----------------------
+  if (caps.fw_version) setRead('fwChip', caps.fw_version);
 
   // ---- 4. Dev assertion — log any element still carrying a stale literal ---
   if (typeof window.__CAPS_DEBUG === 'function') {
@@ -160,157 +157,222 @@ function buildHealthCards(caps, feat) {
   const healthTab = $('#health');
   if (!healthTab) return;
 
-  // --- Load card (INA228 power monitor) ---
+  // --- Power card (02) — 5 Meter instances + 60s sparkline (§2.2) ---------
+  // The old standalone driver-health placeholder card is folded into this
+  // card's .info tooltip (§2.2d) instead of a separate sentence-in-a-box.
   const loadCard = $('#loadCard');
   if (loadCard && feat.has_power_monitor) {
-    loadCard.innerHTML = `
-      <div class="card-head">
-        <span data-ico="i-zap-off"></span><h2>Power Load</h2>
-        <button class="info" data-tip="Live INA228 readings off the 5mΩ shunt on the 36V motor bus. Bus current is the total draw — motor + logic. Die temp is the INA228's internal temperature sensor on the same die as the shunt amp. Peak current is the highest |A| seen since boot."><span data-ico="i-info"></span></button>
-      </div>
-      <div class="card-body">
-        <div class="stat">
-          <span class="stat-label">Bus Voltage</span>
-          <span class="vv stat-value" id="loadBusV">00.0V</span>
-          <div class="stat-bar"><div class="stat-bar-fill" id="loadBusVBar"></div></div>
-        </div>
-        <div class="stat">
-          <span class="stat-label">Bus Current</span>
-          <span class="vv stat-value" id="loadBusA">00.00A</span>
-          <div class="stat-bar"><div class="stat-bar-fill" id="loadBusABar"></div></div>
-        </div>
-        <div class="stat">
-          <span class="stat-label">Bus Power</span>
-          <span class="vv stat-value" id="loadBusW">000.0W</span>
-          <div class="stat-bar"><div class="stat-bar-fill" id="loadBusWBar"></div></div>
-        </div>
-        <div class="stat">
-          <span class="stat-label">Die Temp</span>
-          <span class="vv stat-value" id="loadDieC">00.0°C</span>
-          <div class="stat-bar"><div class="stat-bar-fill" id="loadDieCBar"></div></div>
-        </div>
-        <div class="stat">
-          <span class="stat-label">Peak Current</span>
-          <span class="vv stat-value" id="loadPeakA">00.00A</span>
-          <div class="stat-bar"><div class="stat-bar-fill" id="loadPeakABar"></div></div>
-        </div>
-        <button class="btn ghost sm" id="resetPeaksBtn" style="margin-top:6px"><span data-ico="i-reset"></span> Reset peaks</button>
-      </div>`;
-    // Re-inject icons into the newly created DOM
+    var driverMsg = 'Live INA228 readings off the 5mΩ shunt on the 36V motor bus. Bus current is the total draw — motor + logic. Die temp is the INA228’s internal temperature sensor, same die as the shunt amp. Peak current is the highest |A| seen since boot. Servo drive active — step/dir closed-loop via FastAccelStepper' +
+      (feat.has_rs485 ? ', cross-checked over RS485 Modbus.' : '.');
+    loadCard.innerHTML =
+      '<div class="card-head">' +
+        '<span data-ico="i-zap-off"></span><h2>Power</h2>' +
+        '<span class="card-state">36V bus · INA228</span>' +
+        '<button class="info" data-tip="' + driverMsg + '"><span data-ico="i-info"></span></button>' +
+      '</div>' +
+      '<div class="card-body">' +
+        '<div id="meters"></div>' +
+        '<div id="sparkWrap" class="wave-scope screen" data-tip="Bus power over the last 60 seconds"><canvas id="sparkCanvas"></canvas><span class="mn scr-tag">load · 60s</span></div>' +
+        '<button class="btn ghost sm" id="resetPeaksBtn" style="margin-top:10px"><span data-ico="i-reset"></span> Reset peaks</button>' +
+      '</div>';
     if (typeof window.injectIcons === 'function') window.injectIcons();
-    // Wire the reset-peaks button
+
+    // Hazard zone numbers — reused from the app's OWN existing thresholds,
+    // not invented (§2.2a "derive... log the numbers used"):
+    //  - BUS V: LOW-end hazard, warn <24V (matches main.js's header bus-
+    //    voltage dot logic: `busV < 24 ? 'warn'` / `< 22 ? 'bad'`) — the
+    //    prior .stat implementation could only flag "too high" and set
+    //    thresholds impossibly above 36V nominal to suppress false positives,
+    //    so undervoltage was NEVER actually highlighted. This Meter hazard
+    //    zone is a real fix, not just a reskin.
+    //  - BUS A / PEAK A: warn >=8A (prior setStat w1, 0-20A range).
+    //  - DIE °C: warn >=70°C (prior setStat w1, 0-100°C range).
+    //  - BUS W: no prior threshold existed; derived as
+    //    currentHazardA(8) * nominalBusV(36) = 288W within a 0-800W range.
+    var mHost = $('#meters');
+    if (mHost) {
+      _powerMeters = {
+        busV: new Meter(mHost, { label: 'BUS V', min: 20, max: 40, decimals: 1, hazards: [[0, 0.2]], tip: 'Bus voltage · hazard at the LOW end — undervoltage is the fault (warn <24V)' }),
+        busA: new Meter(mHost, { label: 'BUS A', min: 0, max: 20, decimals: 2, hazards: [[0.4, 0.6]], peakHold: 'ratchet', tip: 'Bus current · total draw, motor + logic · amber caret holds the peak since boot' }),
+        busW: new Meter(mHost, { label: 'BUS W', min: 0, max: 800, decimals: 1, hazards: [[0.36, 0.64]], peakHold: 'ratchet', tip: 'Bus power · voltage × current · amber caret holds the peak since boot' }),
+        dieC: new Meter(mHost, { label: 'DIE °C', min: 0, max: 100, decimals: 1, hazards: [[0.7, 0.3]], tip: 'INA228 die temperature · same die as the shunt amplifier' }),
+        peakA: new Meter(mHost, { label: 'PEAK A', min: 0, max: 20, decimals: 2, hazards: [[0.4, 0.6]], tip: 'Highest current seen since boot (device-reported) · Reset peaks clears it' })
+      };
+    }
+    initPowerSparkline();
+
     var rp = $('#resetPeaksBtn');
     if (rp) rp.addEventListener('click', async function() {
       try { await fetch('/api/settings', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ reset_peaks: true }) }); } catch(e) {}
+      if (_powerMeters) { _powerMeters.busA.resetPeak(); _powerMeters.busW.resetPeak(); }
     });
   } else if (loadCard && !feat.has_power_monitor) {
-    loadCard.innerHTML = '<div class="card-body" style="text-align:center;padding:20px;color:var(--muted)">Load monitoring not available — no INA228 power monitor on this board.</div>';
+    loadCard.innerHTML = '<div class="card-body" style="text-align:center;padding:20px;color:var(--tx-mut)">Load monitoring not available — no INA228 power monitor on this board.</div>';
   }
 
-  // --- Link card (WiFi telemetry) ---
-  // Always shown when WiFi is connected — RSSI, channel, BSSID, reconnect count.
-  // We append it after the load card (or driver health card if that's first).
-  var existingLink = $('#linkCard');
-  if (!existingLink) {
-    const linkCard = document.createElement('div');
-    linkCard.className = 'card';
-    linkCard.id = 'linkCard';
-    linkCard.innerHTML = `
-      <div class="card-head">
-        <span data-ico="i-link"></span><h2>WiFi Link</h2>
-        <button class="info" data-tip="Live WiFi telemetry. RSSI quality bar helps spot dead zones. Channel + BSSID prove which AP you're actually connected to (band-steering evidence — if the far AP works better than the near one, the near one may be on a congested channel). Reconnect count and last disconnect reason help track flapping radios."><span data-ico="i-info"></span></button>
-      </div>
-      <div class="card-body">
-        <div class="kv">
-          <span>RSSI <b id="linkRssi">-- dBm</b></span>
-          <span><div class="rssi-bar" id="rssiBar" style="width:100%;height:4px;background:var(--card-2);border-radius:2px;margin-top:2px"><div id="rssiFill" style="height:100%;width:0%;background:var(--accent);border-radius:2px;transition:width 0.3s"></div></div></span>
-        </div>
-        <div class="kv">
-          <span>Channel <b id="linkCh">--</b></span>
-          <span>Reconnects <b id="linkRec">--</b></span>
-        </div>
-        <div class="kv" style="margin-bottom:0">
-          <span>BSSID <b id="linkBssid" style="font-size:.7rem">--</b></span>
-          <span>Last disc. reason <b id="linkDisc">--</b></span>
-        </div>
-      </div>`;
-    // Insert after the load card (or driver health card)
-    const driverCard = $('#healthCard');
-    const afterEl = loadCard || driverCard;
-    if (afterEl) {
-      afterEl.insertAdjacentElement('afterend', linkCard);
-    } else {
-      healthTab.appendChild(linkCard);
-    }
-    if (typeof window.injectIcons === 'function') window.injectIcons();
-    // Wire collapsible
-    if (typeof window.initCollapsibleCards === 'function') window.initCollapsibleCards();
+  // Link telemetry (RSSI/ch/bssid/disc) now lives in the page footer (§1.6h/
+  // §2.3) — static markup in index.html, written by refreshHealthCards()
+  // below. No dynamic #linkCard is built here anymore.
+}
+
+// ===================== Power sparkline (§2.2c) =====================
+// 60s bus-power history, recessed .screen canvas. Ring buffer of
+// (timestamp, watts) pairs pruned by AGE at draw time (not sample count) so
+// the 60s window holds regardless of push cadence, which varies between WS
+// mode (~500ms, 0x02 STATUS) and HTTP fallback (~100ms poll) — mirrors the
+// rail comet-trail's own age-based ring idiom without touching rail.js.
+// Allocation-free: fixed typed arrays, drawn at a throttled ~3Hz gate (not
+// per push) — "2-4Hz is plenty, it's history, not the rail" per spec.
+var SPARK_CAP = 400;
+var _sparkT = new Float64Array(SPARK_CAP);
+var _sparkW = new Float64Array(SPARK_CAP);
+var _sparkHead = 0, _sparkLen = 0;
+var SPARK_WINDOW_MS = 60000;
+var SPARK_DRAW_INTERVAL_MS = 300;
+var _sparkCv = null, _sparkCtx = null, _sparkDpr = 1, _sparkRectW = 0, _sparkRectH = 0;
+var _sparkLastDrawMs = 0;
+var _powerMeters = null;
+
+function sizeSparkCanvas() {
+  if (!_sparkCv) return;
+  var w = _sparkCv.clientWidth, h = _sparkCv.clientHeight;
+  _sparkDpr = window.devicePixelRatio || 1;
+  var cw = Math.round(w * _sparkDpr), ch = Math.round(h * _sparkDpr);
+  if (_sparkCv.width !== cw || _sparkCv.height !== ch) { _sparkCv.width = cw; _sparkCv.height = ch; }
+  _sparkRectW = w; _sparkRectH = h;
+}
+
+function initPowerSparkline() {
+  _sparkCv = $('#sparkCanvas');
+  if (!_sparkCv) return;
+  _sparkCtx = _sparkCv.getContext('2d');
+  sizeSparkCanvas();
+  window.addEventListener('resize', sizeSparkCanvas);
+  if (typeof ResizeObserver !== 'undefined') {
+    var ro = new ResizeObserver(function () { sizeSparkCanvas(); });
+    ro.observe(_sparkCv);
   }
+}
+
+function pushSparkSample(nowMs, watts) {
+  var idx = (_sparkHead + _sparkLen) % SPARK_CAP;
+  if (_sparkLen === SPARK_CAP) {
+    _sparkHead = (_sparkHead + 1) % SPARK_CAP;
+    _sparkLen--;
+    idx = (_sparkHead + _sparkLen) % SPARK_CAP;
+  }
+  _sparkT[idx] = nowMs;
+  _sparkW[idx] = watts;
+  _sparkLen++;
+}
+
+function drawSparkline(nowMs) {
+  if (!_sparkCtx || _sparkRectW === 0) return;
+  if (nowMs - _sparkLastDrawMs < SPARK_DRAW_INTERVAL_MS) return;
+  _sparkLastDrawMs = nowMs;
+  var ctx = _sparkCtx, w = _sparkRectW, h = _sparkRectH;
+  ctx.setTransform(_sparkDpr, 0, 0, _sparkDpr, 0, 0);
+  ctx.clearRect(0, 0, w, h);
+  if (_sparkLen < 2) return;
+  var maxW = 50; // floor so a quiet bus doesn't zoom the trace into noise
+  var i, idx, age;
+  for (i = 0; i < _sparkLen; i++) {
+    idx = (_sparkHead + i) % SPARK_CAP;
+    if (_sparkW[idx] > maxW) maxW = _sparkW[idx];
+  }
+  ctx.strokeStyle = ac('r', 0.7);
+  ctx.lineWidth = 1;
+  ctx.shadowColor = ac('r', 0.35);
+  ctx.shadowBlur = 4;
+  ctx.beginPath();
+  var started = false;
+  for (i = 0; i < _sparkLen; i++) {
+    idx = (_sparkHead + i) % SPARK_CAP;
+    age = nowMs - _sparkT[idx];
+    if (age > SPARK_WINDOW_MS) continue;
+    var x = w - (age / SPARK_WINDOW_MS) * w;
+    var y = h - 4 - (_sparkW[idx] / maxW) * (h - 8);
+    if (!started) { ctx.moveTo(x, y); started = true; } else { ctx.lineTo(x, y); }
+  }
+  if (started) ctx.stroke();
+  ctx.shadowBlur = 0;
+}
+
+// Zero-pad a small integer to 3 digits (footer "ch"/"disc" chips, matching
+// the mock's `06`/`002` look) — '--' when the value is genuinely absent.
+function pad3(v) {
+  var n = typeof v === 'number' ? v : parseInt(v, 10);
+  if (isNaN(n)) return '--';
+  n = Math.max(0, Math.min(999, n));
+  return (n < 10 ? '00' : n < 100 ? '0' : '') + n;
+}
+// First 3 octets only (short form, §2.3) — enough to identify the AP without
+// the full MAC's width.
+function shortBssid(b) {
+  if (!b || typeof b !== 'string') return '--';
+  var parts = b.split(':');
+  return parts.length >= 3 ? parts.slice(0, 3).join(':') : b;
 }
 
 /**
- * Update the Health tab's Load + Link cards from a status poll payload.
+ * Update the Power card + footer LINK strip from a status poll payload.
  * Called from pollStatus() each cycle alongside the toolbar chips. :3
  */
-// Helper: set a .vv stat value + its bar fill width + threshold class
-function setStat(id, value, intDigits, fracDigits, unit, pct, thresholds) {
-  var el = $(id);
-  if (el) {
-    el.textContent = pad(value, intDigits, fracDigits, unit);
-    el.style.setProperty('--vv-chars', pad(value, intDigits, fracDigits).length);
-    el.classList.remove('w1', 'w2');
-    if (thresholds) {
-      if (value >= thresholds.w2) el.classList.add('w2');
-      else if (value >= thresholds.w1) el.classList.add('w1');
-    }
-  }
-  var bar = $(id + 'Bar');
-  if (bar) {
-    bar.style.width = clamp(pct, 0, 100) + '%';
-    bar.classList.remove('w1', 'w2');
-    if (thresholds) {
-      if (value >= thresholds.w2) bar.classList.add('w2');
-      else if (value >= thresholds.w1) bar.classList.add('w1');
-    }
-  }
-}
-
 export function refreshHealthCards(d) {
-  // ---- Load card — .stat instruments with threshold bars ----
-  if (d.has_power_monitor) {
+  // ---- Power card — 5 Meter instances + sparkline ----
+  if (d.has_power_monitor && _powerMeters) {
     var volts = d.bus_voltage_v || 0;
     var amps = Math.abs(d.bus_current_a || 0);
     var power = d.bus_power_w || 0;
     var dieC = d.die_temp_c || 0;
     var peakA = Math.abs(d.peak_current_a || 0);
-    // Bus voltage: 20-40V range. 36V nominal is healthy — blue.
-    // setStat uses ">= w2 = bad, >= w1 = warn". Voltage is UNDERVOLTAGE-bad
-    // (lower is worse), but the >= logic only detects "too high". Set thresholds
-    // ABOVE the healthy range so 36V never triggers either → blue/good.
-    setStat('loadBusV', volts, 2, 1, 'V', (volts / 40) * 100, { w1: 40, w2: 45 });
-    // Bus current: 0-20A range, w1>=8, w2>=15
-    setStat('loadBusA', amps, 2, 2, 'A', (amps / 20) * 100, { w1: 8, w2: 15 });
-    // Bus power: 0-800W range
-    setStat('loadBusW', power, 3, 1, 'W', (power / 800) * 100, null);
-    // Die temp: 0-100°C range, w1>=70, w2>=85
-    setStat('loadDieC', dieC, 2, 1, '°C', (dieC / 100) * 100, { w1: 70, w2: 85 });
-    // Peak current: 0-20A range, w1>=8, w2>=15
-    setStat('loadPeakA', peakA, 2, 2, 'A', (peakA / 20) * 100, { w1: 8, w2: 15 });
+    _powerMeters.busV.set(volts);
+    _powerMeters.busA.set(amps);
+    _powerMeters.busW.set(power);
+    _powerMeters.dieC.set(dieC);
+    _powerMeters.peakA.set(peakA);
+    var nowMs = performance.now();
+    pushSparkSample(nowMs, power);
+    drawSparkline(nowMs);
   }
 
-  // ---- Link card ----
+  // ---- Footer LINK strip (§1.6h/§2.3) ----
   if (d.wifi_connected) {
     const rssi = d.rssi || 0;
-    setRead('linkRssi', rssi + ' dBm');
-    // RSSI bar: map -90..-30 → 0..100%
-    var rssiPct = clamp((rssi + 90) / 60 * 100, 0, 100);
+    // EMA-smooth the displayed dBm — raw RSSI jitters a few dB between
+    // polls, which made the footer number (and bar) wiggle constantly.
+    // Seed on first sample; ~0.2 alpha settles a step change in ~2s at the
+    // status cadence while flattening the sample-to-sample flutter.
+    if (_rssiEma === null) _rssiEma = rssi;
+    _rssiEma += 0.2 * (rssi - _rssiEma);
+    var shown = Math.round(_rssiEma);
+    setRead('linkRssi', shown + ' dBm');
+    // RSSI bar: map -90..-30 → 0..100% (from the smoothed value, so the bar
+    // glides instead of twitching; the CSS width transition does the rest)
+    var rssiPct = clamp((shown + 90) / 60 * 100, 0, 100);
     var rf = $('#rssiFill');
     if (rf) rf.style.width = rssiPct + '%';
-    setRead('linkCh', d.wifi_channel || '--');
-    setRead('linkRec', d.wifi_reconnects || 0);
-    setRead('linkBssid', d.wifi_bssid || '--');
-    setRead('linkDisc', d.wifi_last_disconnect_reason || '--');
+    setRead('linkCh', pad3(d.wifi_channel));
+    // bssid is a STRING the binary 0x02 status frame cannot carry — in WS
+    // mode it arrives only via the slow HTTP link-meta poll (main.js).
+    // Sticky: only overwrite when a real value is present, so a WS-status
+    // refresh between HTTP polls can't blank an already-known AP.
+    if (typeof d.wifi_bssid === 'string' && d.wifi_bssid) {
+      setRead('linkBssid', shortBssid(d.wifi_bssid));
+    }
+    // "disc" = disconnect/reconnect count since boot (mock's own tooltip
+    // wording) — the separate last-disconnect-reason display from the old
+    // Health-tab link card was retired; the footer's chip set is exactly
+    // RSSI + ch/bssid/disc + fw/ui, matching the approved mock (R0).
+    setRead('linkDisc', pad3(d.wifi_reconnects));
   }
+}
+var _rssiEma = null;
+
+/** Direct footer-bssid write for the slow HTTP link-meta poll (main.js) —
+ *  the binary WS status path has no bssid field to feed refreshHealthCards. */
+export function setLinkBssid(b) {
+  if (typeof b === 'string' && b) setRead('linkBssid', shortBssid(b));
 }
 
 /**

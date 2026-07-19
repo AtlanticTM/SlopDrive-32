@@ -16,20 +16,15 @@
 
 <div class="toasts" id="toasts"></div>
 
-<!-- ===== HEADER: ONE row — barcode + wordmark + link dot | chips ===== -->
+<!-- ===== HEADER: ONE row — activity heatmap + wordmark + link dot | chips ===== -->
 <header>
+  <div class="hdr-row">
   <div class="header-left">
-    <!-- Barcode identity mark — hairline vertical bars at --line-3 -->
-    <svg class="barcode" viewBox="0 0 20 16" fill="currentColor" aria-hidden="true">
-      <rect x="0"  y="0" width="1" height="16"/>
-      <rect x="2"  y="0" width="2" height="16"/>
-      <rect x="5"  y="0" width="1" height="16"/>
-      <rect x="7"  y="0" width="3" height="16"/>
-      <rect x="11" y="0" width="1" height="16"/>
-      <rect x="13" y="0" width="2" height="16"/>
-      <rect x="16" y="0" width="1" height="16"/>
-      <rect x="18" y="0" width="2" height="16"/>
-    </svg>
+    <!-- Activity heatmap — replaces the decorative barcode. Real telemetry,
+         14x3 cells: rows = |velocity| / bus current / link activity, columns
+         = time (~220ms buckets). Wired in main.js (initActivityGrid). -->
+    <canvas class="act-grid" id="actGrid" width="70" height="17"
+      data-tip="Activity · rows: |velocity| / bus current / link · last ~3s"></canvas>
     <span class="wordmark">SD·32</span>
     <!-- Link-alive dot: reality-blue when polling succeeds, extinguished otherwise.
          JS wires this via the existing wifi/poll state (id kept: wifiDot). -->
@@ -50,6 +45,7 @@
     <!-- ip chip (device IP address) — first to drop on narrow viewports -->
     <span class="chip" id="ipChip"><span class="dot good"></span><span id="wifiText">--</span></span>
   </div>
+  </div>
 </header>
 
 <!-- ===== BANNERS HOST: reserved space between header and spine strip ===== -->
@@ -69,6 +65,7 @@
 
 <!-- ===== ROW 2 — HERO STRIP: huge actual numeral + cmd + lag | transport ===== -->
 <div class="hero-strip">
+  <div class="hero-row">
   <div class="spine-heroes" id="spineHeroes"><!-- rail.js builds the hero numerals --></div>
   <div class="spine-transport">
     <div class="transport" id="transportBar">
@@ -97,6 +94,7 @@
         <small>bottom out</small>
       </button>
     </div>
+  </div>
   </div>
 </div>
 
@@ -128,6 +126,23 @@
     </div>
   </div>
   <div class="spine-rail-host horizontal" id="spineRailHost"><!-- rail.js: ruler + canvas + band --></div>
+  <!-- Plan strip — canvas diagnostics lane for the in-flight streamed
+       segment (§D8). Its x-axis is the rail's x-axis (same mm->px mapping),
+       so segment endpoints land pixel-aligned under the rail above. Height
+       always reserved (opacity-only show/hide via .on) so streaming
+       start/stop never shifts the page. Wired in features/planstrip.js. -->
+  <div class="plan-strip" id="planStrip" data-tip="The in-flight plan · purple segment = current intent from &rarr; to · bright sweep head = where the interpolation says the machine should be right now · amber = duration was invented (DurFallback), arriving late at ceiling">
+    <div class="plan-lane"><canvas id="planCv"></canvas></div>
+    <div class="plan-meta">
+      <span class="plan-lab">plan &middot; stream</span>
+      <span class="plan-read">
+        <span class="mn plan-lv" id="planSeg" data-tip="Current segment · from &rarr; to in mm">--- &rarr; ---</span>
+        <span class="mn plan-lv" id="planV">v ----</span>
+        <span class="mn plan-lv" id="planA">a -----</span>
+        <span class="mn plan-lv" id="planDl">dl ---</span>
+      </span>
+    </div>
+  </div>
   <!-- Manual mode actions — Set Min/Max by feel. Hidden in default mode,
        shown only when .manual-mode is on the panel (Thing 5). Scrub the
        carriage to where you want the edge, then tap Set Min or Set Max. -->
@@ -144,19 +159,39 @@
 <!-- ===== DESKTOP LAYOUT WRAPPER ===== -->
 <div class="desktop-layout">
 
-  <!-- Right panel — tab system -->
+  <!-- Right panel — Drive is always present on desktop; Settings/Log open as
+       a sticky side pane beside it (§1.6b). Below 760px it's classic three-tab. -->
   <main class="main-panel">
-    <!-- Desktop tab bar — horizontal pills -->
+    <!-- Desktop tab bar — DRIVE pill hidden ≥760px (Drive is always visible
+         there); SETTINGS/LOG float right with the split-pane pictogram and
+         toggle a sticky pane open/closed. Pane-controller logic lives in
+         ui.js (initTabs), wired the same way as the mobile bottom bar below
+         (shared data-tab ids). -->
     <nav class="tabs tabs-desktop" role="tablist" aria-label="Sections">
-      <button class="tab active" data-tab="drive"  data-ico="i-play" title="Drive" aria-label="Drive"></button>
-      <button class="tab" data-tab="settings" data-ico="i-gear" title="Settings" aria-label="Settings"></button>
-      <button class="tab" data-tab="log"    data-ico="i-terminal" title="Log" aria-label="Log"></button>
+      <!-- DIAG — toggles the full-width diagnostics graph in place of the
+           panel area below (features/diag.js). Not a pane: no data-tab, so
+           the pane controller ignores it entirely. Sits left, apart from
+           the pane pills. -->
+      <button class="tab diag-toggle" id="diagToggle" type="button"
+        data-tip="Full-width diagnostics graph — actual vs commanded vs interpolator, tracking lag, bus V/W on one scrolling timeline · click again to return">
+        <svg class="pane-ico" viewBox="0 0 15 12" aria-hidden="true"><polyline points="0.5,9 3.5,4 6.5,8 9.5,2 12,6 14.5,5" fill="none" stroke="currentColor"/></svg>
+        <span>Diag</span>
+      </button>
+      <button class="tab drive-tab active" data-tab="drive" aria-label="Drive"></button>
+      <button class="tab tab-pane" data-tab="settings" aria-label="Settings"
+        data-tip="Opens as a panel beside Drive · click again to close">
+        <svg class="pane-ico" viewBox="0 0 15 12" aria-hidden="true"><rect x="0.5" y="0.5" width="14" height="11" fill="none" stroke="currentColor"/><rect class="fill-half" x="8.5" y="0.5" width="6" height="11" fill="currentColor"/></svg>
+      </button>
+      <button class="tab tab-pane" data-tab="log" aria-label="Log"
+        data-tip="Opens as a panel beside Drive · click again to close">
+        <svg class="pane-ico" viewBox="0 0 15 12" aria-hidden="true"><rect x="0.5" y="0.5" width="14" height="11" fill="none" stroke="currentColor"/><rect class="fill-half" x="8.5" y="0.5" width="6" height="11" fill="currentColor"/></svg>
+      </button>
     </nav>
 
-    <div class="tab-contents-host">
+    <div class="main" id="mainGrid">
 
-    <!-- ===================== DRIVE TAB ===================== -->
-    <div id="drive" class="tab-content active">
+    <!-- ===================== DRIVE (always visible on desktop) ============= -->
+    <div id="driveMain" class="m-active">
 
       <!-- 1. Stroke Window — RETIRED from the visible layout (the rail band is
            the single stroke-window editor now; this card kept going stale).
@@ -257,83 +292,77 @@
         </div>
       </div>
 
-      <!-- Generator 01 — Pattern Engine + Wave Scope -->
+      <!-- Rack order per §2: cluster row = PATTERN | POWER -->
+      <div class="clu">
+
+      <!-- Pattern (01) — glyph tile registry + telemetry-fed wave scope -->
       <div class="card panel collapsible" id="patternCard">
         <div class="card-head">
-          <span data-ico="i-wave"></span><h2>Generator</h2>
-          <button class="info" data-tip="OSSM StrokeEngine patterns running on-device. Select a pattern, tune the sliders, then Start. The machine will cycle the selected pattern inside the stroke window. Auto-yields if Intiface starts driving (unless you've paused or overridden)."><span data-ico="i-info"></span></button>
+          <span data-ico="i-wave"></span><h2>Pattern</h2>
+          <span class="card-state" id="patState">standby</span>
+          <button class="info" data-tip="OSSM StrokeEngine patterns running on-device. Select a pattern, tune the sliders, then Start. The machine will cycle the selected pattern inside the stroke window. Auto-yields if Intiface starts driving (unless you've paused or overridden). Patterns keep running even if you close this tab — stop before switching patterns."><span data-ico="i-info"></span></button>
           <span class="caret" data-ico="i-chevron"></span>
         </div>
         <div class="card-body">
 
-        <!-- Wave scope — recessed .screen canvas previewing the generator waveform -->
-        <div class="wave-scope screen">
+        <!-- Glyph tile grid — renders from the pattern registry (§2.1a/b),
+             built/wired in pattern.js. Firmware-tolerant: falls back to the
+             built-in seven with approved-mock glyphs when capabilities lacks
+             a `patterns` field (true of current firmware). -->
+        <div class="pat-grid" id="patGrid"></div>
+        <select id="patSelect" style="display:none"><option value="0">Simple Stroke</option><option value="1">Teasing Pounding</option><option value="2">Robo Stroke</option><option value="3">Half'n'Half</option><option value="4">Deeper</option><option value="5">Stop'n'Go</option><option value="6">Insist</option></select>
+
+        <!-- 2-col compact slider grid per mock r6 (.fld2) — labels lowercase
+             via CSS, values zero-padded 3-digit mono chips, no unit. -->
+        <div class="fld2">
+          <div class="field" id="patSpeedField">
+            <div class="label-row"><label data-tip="Stroke rate · how fast the pattern cycles">Speed</label><span class="field-val"><span id="patSpeedVal">—</span></span></div>
+            <input type="range" id="patSpeed" min="0" max="100" step="1" disabled>
+          </div>
+          <div class="field" id="patDepthField">
+            <div class="label-row"><label data-tip="How much of the window's depth the pattern reaches">Depth</label><span class="field-val"><span id="patDepthVal">—</span></span></div>
+            <input type="range" id="patDepth" min="0" max="100" step="1" disabled>
+          </div>
+          <div class="field" id="patStrokeField">
+            <div class="label-row"><label data-tip="Stroke length as a fraction of the window">Stroke</label><span class="field-val"><span id="patStrokeVal">—</span></span></div>
+            <input type="range" id="patStroke" min="0" max="100" step="1" disabled>
+          </div>
+          <div class="field" id="patSensField">
+            <div class="label-row"><label data-tip="Pattern-specific character · aggression, dwell, variation">Sensation</label><span class="field-val"><span id="patSensVal">—</span></span></div>
+            <input type="range" id="patSensation" min="0" max="100" step="1" disabled>
+          </div>
+        </div>
+
+        <!-- Wave scope — recessed .screen canvas tracing the REAL commanded
+             ("told") position off telebuf; flat at standby, live trace +
+             glow only while running (R2 — never a synthetic waveform). -->
+        <div class="wave-scope screen" data-tip="Live commanded waveform from telemetry · flat when idle">
           <canvas id="waveScopeCanvas"></canvas>
+          <span class="mn scr-tag">wave &middot; told</span>
         </div>
 
-        <!-- Pattern select as segmented control -->
-        <div class="field">
-          <label>Pattern</label>
-          <div class="seg" id="patSelectSeg"></div>
-          <select id="patSelect" style="display:none"><option value="0">Simple Stroke</option><option value="1">Teasing Pounding</option><option value="2">Robo Stroke</option><option value="3">Half'n'Half</option><option value="4">Deeper</option><option value="5">Stop'n'Go</option><option value="6">Insist</option></select>
-        </div>
-
-        <div class="field" id="patSpeedField"><label>Speed</label><input type="range" id="patSpeed" min="0" max="100" step="1" disabled><div class="readout"><b id="patSpeedVal">—</b><span>%</span></div></div>
-        <div class="field" id="patDepthField"><label>Depth</label><input type="range" id="patDepth" min="0" max="100" step="1" disabled><div class="readout"><b id="patDepthVal">—</b><span>%</span></div></div>
-        <div class="field" id="patStrokeField"><label>Stroke</label><input type="range" id="patStroke" min="0" max="100" step="1" disabled><div class="readout"><b id="patStrokeVal">—</b><span>%</span></div></div>
-        <div class="field" id="patSensField"><label>Sensation</label><input type="range" id="patSensation" min="0" max="100" step="1" disabled><div class="readout"><b id="patSensVal">—</b><span>%</span></div></div>
-
-        <button class="btn primary" id="patStartBtn"><span data-ico="i-play"></span> Start Pattern</button>
-        <div class="hint" id="patNote">Patterns run on-device — they keep going even if you close this tab. Stop before switching patterns.</div>
+        <button class="btn primary" id="patStartBtn"><span data-ico="i-play"></span> START PATTERN</button>
 
         </div>
       </div>
 
-      <!-- Limits 02 — Dual limit sets (User / Input) -->
-      <div class="card panel collapsible">
-        <div class="card-head">
-          <span data-ico="i-sliders"></span><h2>Limits</h2>
-          <button class="info" data-tip="TWO sets of ceilings: USER governs manual moves (rail tap, slider), INPUT governs streams (TCode, PatternEngine, OSSM). Each set is independent — slow and gentle cursor, fast and hard automated pounding. Saves with Settings."><span data-ico="i-info"></span></button>
-          <span class="caret" data-ico="i-chevron"></span>
-        </div>
-        <div class="card-body">
-        <div class="field">
-          <div class="label-row"><label>User Speed</label><button class="info" data-tip="Ceiling for manual moves: rail tap, position slider, nudge buttons. Only constrains your own hand — streams are unaffected."><span data-ico="i-info"></span></button></div>
-          <input type="range" id="userMaxSpeed" min="50" max="1000" step="10" disabled>
-          <div class="readout"><b id="userSpeedVal">—</b><span>mm/s</span></div>
-        </div>
-        <div class="field">
-          <div class="label-row"><label>User Accel</label><button class="info" data-tip="Ramp rate for manual moves only."><span data-ico="i-info"></span></button></div>
-          <input type="range" id="userAccel" min="200" max="20000" step="50" disabled>
-          <div class="readout"><b id="userAccelVal">—</b><span>mm/s²</span></div>
-        </div>
-        <div style="margin:14px 0 10px; border-top:1px solid var(--line-1)"></div>
-        <div class="field">
-          <div class="label-row"><label>Input Speed</label><button class="info" data-tip="Ceiling for TCode streams, PatternEngine, and OSSM BLE. The automated pounding speed limit."><span data-ico="i-info"></span></button></div>
-          <input type="range" id="inputMaxSpeed" min="50" max="1000" step="10" disabled>
-          <div class="readout"><b id="inputSpeedVal">—</b><span>mm/s</span></div>
-        </div>
-        <div class="field">
-          <div class="label-row"><label>Input Accel</label><button class="info" data-tip="Ramp rate for streams and patterns."><span data-ico="i-info"></span></button></div>
-          <input type="range" id="inputAccel" min="200" max="20000" step="50" disabled>
-          <div class="readout"><b id="inputAccelVal">—</b><span>mm/s²</span></div>
-        </div>
-        <button class="btn ghost sm" style="width:100%" data-action="restoreDefaults"><span data-ico="i-reset"></span> Restore saved defaults</button>
-        </div>
-      </div>
-
-      <!-- ===== HEALTH (merged into Drive) =====
-           Formerly its own tab; the standalone tab was mostly empty air.
-           capabilities.js keeps appending link/driver/load/RS485 cards into
-           #health — the id is load-bearing, only the tab-content class went. -->
+      <!-- ===== POWER (02) — Health host. capabilities.js builds the card
+           body into #loadCard (5 Meter instances + sparkline) via innerHTML
+           — id is load-bearing. The old standalone #healthCard driver-health
+           placeholder was folded into this card's .info tooltip (§2.2d);
+           RS485 telemetry (when present) also appends into #health. -->
       <div id="health" class="health-host">
-        <div class="card panel" id="healthCard"><div class="card-body" style="text-align:center;padding:20px;color:var(--tx-mut)">Driver health not available — no driver module loaded.</div></div>
         <div class="card panel" id="loadCard"><div class="card-body" style="text-align:center;padding:20px;color:var(--tx-mut)">Load monitoring not available.</div></div>
       </div>
-    </div>
 
-    <!-- ===================== SETTINGS TAB ===================== -->
-    <div id="settings" class="tab-content">
+      </div><!-- .clu -->
+    </div><!-- #driveMain -->
+
+    <!-- ===================== SIDE PANE (Settings / Log) ===================== -->
+    <div id="sidePane">
+
+    <div class="paneView" id="pv-settings">
+      <div class="setgrid">
 
       <!-- Transport / connection -->
       <div class="card panel tight" id="connCard">
@@ -341,12 +370,15 @@
           <span data-ico="i-link"></span><h2>Connection</h2>
           <button class="info" data-tip="How Intiface / a host talks to the machine. WebSocket and Serial both use Intiface; Bluetooth advertises a BLE serial service a phone app or BLE host can connect to. Only one is active at a time — switching applies instantly and is remembered across reboots."><span data-ico="i-info"></span></button>
         </div>
-        <div class="seg" id="modeSeg" style="margin-bottom:10px">
-          <button data-mode="WS">WebSocket</button>
-          <button data-mode="SER">Serial</button>
-          <button id="btModeBtn" data-mode="BT" style="display:none">Bluetooth</button>
-          <button data-mode="DONGLE">Dongle</button>
-          <button data-mode="OSSM">BLE (OSSM)</button>
+        <!-- Mono port chips (§3.2) — same #modeSeg id / data-mode attrs /
+             click wiring as the old .seg control; ACTIVE = confirmed device
+             transport (reality-blue), not the clicked one until confirmed. -->
+        <div class="port-row" id="modeSeg">
+          <button class="port" data-mode="WS" data-tip="Intiface / MFP over WebSocket">WS</button>
+          <button class="port" data-mode="SER" data-tip="Intiface over USB serial">SERIAL</button>
+          <button class="port" id="btModeBtn" data-mode="BT" style="display:none" data-tip="BLE serial service for phone apps">BT</button>
+          <button class="port" data-mode="DONGLE" data-tip="ESP32 dongle bridge">DONGLE</button>
+          <button class="port" data-mode="OSSM" data-tip="OSSM remote protocol over BLE">OSSM</button>
         </div>
         <div class="hint" id="modeHint">Choose how the machine receives motion commands.</div>
         <div class="chip" id="bleStatus" style="display:none;margin-top:10px">
@@ -367,6 +399,40 @@
         <button class="btn ghost sm" style="margin-top:10px" data-action="useCurrentAsDefault"><span data-ico="i-check"></span> Use current window</button>
       </div>
 
+      <!-- User Limits — manual-move ceilings (relocated from the old combined
+           Drive-tab Limits card; split to match the mock's card boundaries). -->
+      <div class="card panel tight">
+        <div class="card-head">
+          <span data-ico="i-sliders"></span><h2>User Limits</h2>
+          <button class="info" data-tip="Ceilings for manual moves — tape/rail tap, position slider, nudge buttons. Only constrains your own hand; streams are unaffected."><span data-ico="i-info"></span></button>
+        </div>
+        <div class="field">
+          <div class="label-row"><label>User Speed</label><button class="info" data-tip="Ceiling for manual moves: rail tap, position slider, nudge buttons. Only constrains your own hand — streams are unaffected."><span data-ico="i-info"></span></button><span class="field-val"><span id="userSpeedVal">—</span><em>mm/s</em></span></div>
+          <input type="range" id="userMaxSpeed" min="50" max="1000" step="10" disabled>
+        </div>
+        <div class="field">
+          <div class="label-row"><label>User Accel</label><button class="info" data-tip="Ramp rate for manual moves only."><span data-ico="i-info"></span></button><span class="field-val"><span id="userAccelVal">—</span><em>mm/s²</em></span></div>
+          <input type="range" id="userAccel" min="200" max="20000" step="50" disabled>
+        </div>
+      </div>
+
+      <!-- Input Limits — stream/generator ceilings -->
+      <div class="card panel tight">
+        <div class="card-head">
+          <span data-ico="i-sliders"></span><h2>Input Limits</h2>
+          <button class="info" data-tip="Ceilings for the generator and every transport — TCode streams, PatternEngine, OSSM BLE. Streamed motion derives its own speed/accel; these only clamp it."><span data-ico="i-info"></span></button>
+        </div>
+        <div class="field">
+          <div class="label-row"><label>Input Speed</label><button class="info" data-tip="Ceiling for TCode streams, PatternEngine, and OSSM BLE. The automated pounding speed limit."><span data-ico="i-info"></span></button><span class="field-val"><span id="inputSpeedVal">—</span><em>mm/s</em></span></div>
+          <input type="range" id="inputMaxSpeed" min="50" max="1000" step="10" disabled>
+        </div>
+        <div class="field">
+          <div class="label-row"><label>Input Accel</label><button class="info" data-tip="Ramp rate for streams and patterns."><span data-ico="i-info"></span></button><span class="field-val"><span id="inputAccelVal">—</span><em>mm/s²</em></span></div>
+          <input type="range" id="inputAccel" min="200" max="20000" step="50" disabled>
+        </div>
+        <button class="btn ghost sm" style="width:100%" data-action="restoreDefaults"><span data-ico="i-reset"></span> Restore saved defaults</button>
+      </div>
+
       <!-- Default motion -->
       <div class="card panel tight">
         <div class="card-head"><span data-ico="i-sliders"></span><h2>Default Motion</h2>
@@ -375,17 +441,17 @@
           <div class="label-row">
             <label>Max Speed</label>
             <button class="info" data-tip="Maximum carriage velocity in mm/s. Stored as mm/s; the firmware converts to steps/s when commanding FastAccelStepper. Typical safe range: 200–800 mm/s. Expert mode unlocks up to 3000 mm/s."><span data-ico="i-info"></span></button>
+            <span class="field-val"><span id="defSpeedVal">—</span><em>mm/s</em></span>
           </div>
           <input type="range" id="defMaxSpeed" min="50" max="1000" step="10" disabled>
-          <div class="readout"><b id="defSpeedVal">—</b><span>mm/s</span></div>
         </div>
         <div class="field">
           <div class="label-row">
             <label>Acceleration</label>
             <button class="info" data-tip="Ramp rate in mm/s². Stored as mm/s²; the firmware multiplies by steps-per-mm before calling FastAccelStepper's setAcceleration(). Typical safe range: 500–3000 mm/s². Expert mode unlocks up to 8000 mm/s²."><span data-ico="i-info"></span></button>
+            <span class="field-val"><span id="defAccelVal">—</span><em>mm/s²</em></span>
           </div>
           <input type="range" id="defAccel" min="200" max="20000" step="50" disabled>
-          <div class="readout"><b id="defAccelVal">—</b><span>mm/s²</span></div>
         </div>
       </div>
 
@@ -463,17 +529,37 @@
           <span style="display:flex;align-items:center"><input type="checkbox" id="expertMode"><span class="track"></span></span></label>
         <div id="expBanner" class="banner amber" style="margin-top:10px">Expert mode on — sliders run to the hardware ceiling. Watch the red zone.</div>
       </div>
-    </div>
 
-    <!-- ===================== LOG TAB ===================== -->
-    <div id="log" class="tab-content">
+      <!-- Theme — client-side accent palette. Swatches built by core/theme.js
+           (initThemeUI) from its THEMES registry; choice persists in this
+           browser's localStorage only. NOT machine state — nothing is sent to
+           the device, so the ground-truth echo doctrine doesn't apply here. -->
+      <div class="card panel tight">
+        <div class="card-head"><span data-ico="i-sliders"></span><h2>Theme</h2>
+          <button class="info" data-tip="Recolors the accent pair — reality (measured truth) and intent (commanded) — across the whole instrument: rail, meters, scopes, buttons. Warn amber and hazard red never change; they mean the same thing in every theme. Stored in this browser only; the machine is unaffected."><span data-ico="i-info"></span></button></div>
+        <div class="theme-row" id="themeRow"></div>
+        <div class="hint" style="margin-top:8px">Accent colors only — safety amber/red are identical in every theme.</div>
+      </div>
+
+      </div><!-- .setgrid -->
+    </div><!-- #pv-settings -->
+
+    <div class="paneView" id="pv-log">
+      <!-- Log (07) — terminal treatment (§4.1). Anomaly dot+count chips and
+           the serial-mode chip both moved INTO the head (§4.2) — same ids,
+           same counts/dot-class source (main.js renderAnomaly()/pollStatus()),
+           just relocated + restyled. -->
       <div class="card panel">
-        <div class="card-head"><span data-ico="i-terminal"></span><h2>Device Log</h2></div>
-        <div class="chip" id="serialModeBar" style="display:none;margin-bottom:12px">
-          <span class="dot" id="serialDot"></span><span id="serialModeText">Serial</span>
+        <div class="card-head">
+          <span data-ico="i-terminal"></span><h2>Log</h2>
+          <span class="acnt" data-tip="Overshoot anomalies since boot — invented micromotion from a steep MFP gradient tangent"><span class="dot" id="anomDotOvershoot"></span><span class="mn" id="anomCntOvershoot">Overshoot 0</span></span>
+          <span class="acnt" data-tip="Waypoints dropped bare (no gradient/duration) since boot"><span class="dot" id="anomDotPointDropped"></span><span class="mn" id="anomCntPointDropped">PointDropped 0</span></span>
+          <span class="acnt" data-tip="Decel-phase overruns since boot"><span class="dot" id="anomDotDecelOverrun"></span><span class="mn" id="anomCntDecelOverrun">DecelOverrun 0</span></span>
+          <span class="acnt" data-tip="Duration fallbacks since boot"><span class="dot" id="anomDotDurFallback"></span><span class="mn" id="anomCntDurFallback">DurFallback 0</span></span>
+          <span class="chip card-state" id="serialModeBar" style="display:none"><span class="dot" id="serialDot"></span><span id="serialModeText">ser · tcode · 115200</span></span>
         </div>
         <div class="hint" style="margin-bottom:10px">The USB port carries Intiface commands, so boot/debug messages appear here.</div>
-        <pre class="log screen" id="logBox">Loading…</pre>
+        <pre class="log screen term" id="logBox">Loading…</pre>
         <div class="btn-row">
           <button class="btn" id="refreshLogBtn"><span data-ico="i-reset"></span> Refresh</button>
           <label class="switch" style="flex:1;justify-content:flex-end">
@@ -483,20 +569,16 @@
         </div>
       </div>
 
-      <!-- Interpolator anomaly log — 0x05 ANOMALY frames. Event-driven feed of
-           the motion-path anomalies the interpolator invents (overshoot micro-
-           motion, dropped bare points, decel overruns, duration fallbacks) —
-           the exact events behind the v3/v4 stutter + slow-speed dropout. -->
-      <div class="card panel">
-        <div class="card-head"><span data-ico="i-alert"></span><h2>Interp Anomalies</h2></div>
+      <!-- Interpolator anomaly detail log — 0x05 ANOMALY frames, one line per
+           event. This is the "detailed anomaly box" §4.2 keeps, collapsed by
+           default (existing .card.collapsible mechanism — no new collapse
+           logic) now that the counts themselves live in the Log card head. -->
+      <div class="card panel collapsible collapsed">
+        <div class="card-head"><span data-ico="i-alert"></span><h2>Anomaly Detail</h2><span class="caret" data-ico="i-chevron"></span></div>
+        <div class="card-body">
         <div class="hint" style="margin-bottom:10px">Live motion-path anomaly events from the on-device interpolator. Newest first.</div>
-        <div class="chips" id="anomCounts" style="margin-bottom:10px">
-          <span class="chip"><span class="dot" id="anomDotOvershoot"></span><span id="anomCntOvershoot">Overshoot 0</span></span>
-          <span class="chip"><span class="dot" id="anomDotPointDropped"></span><span id="anomCntPointDropped">PointDropped 0</span></span>
-          <span class="chip"><span class="dot" id="anomDotDecelOverrun"></span><span id="anomCntDecelOverrun">DecelOverrun 0</span></span>
-          <span class="chip"><span class="dot" id="anomDotDurFallback"></span><span id="anomCntDurFallback">DurFallback 0</span></span>
+        <pre class="log screen term" id="anomBox">No anomalies yet — clean path. :3</pre>
         </div>
-        <pre class="log screen" id="anomBox">No anomalies yet — clean path. :3</pre>
       </div>
 
       <!-- Connected clients — active tabs streaming from the device. The device
@@ -509,12 +591,56 @@
         </div>
         <div class="card-body" id="clientsBody" style="color:var(--tx-mut)">No clients.</div>
       </div>
-    </div>
+    </div><!-- #pv-log -->
 
-    </div><!-- .tab-contents-host -->
+    </div><!-- #sidePane -->
+
+    </div><!-- .main -->
+
+    <!-- ===== DIAGNOSTICS GRAPH (features/diag.js) =====================
+         Full-width strip chart shown in PLACE of .main while the DIAG
+         toggle is on. Legend swatches use theme vars; canvas traces read
+         the same ACCENT table. Collection runs always (last 10s is ready
+         the moment this opens); rendering only while visible. -->
+    <div id="diagHost">
+      <div class="diag-head">
+        <span class="diag-key"><i style="background:var(--reality)"></i>actual <b class="mn" id="dgActual">---.-</b></span>
+        <span class="diag-key"><i style="background:var(--intent)"></i>commanded <b class="mn" id="dgCmd">---.-</b></span>
+        <span class="diag-key"><i class="dashed" style="background:rgba(var(--intent-rgb),.6)"></i>interp <b class="mn" id="dgItp">---.-</b></span>
+        <span class="diag-key"><i style="background:var(--warn)"></i>lag <b class="mn" id="dgLag">--.-</b></span>
+        <span class="diag-key"><i style="background:#8A93A6"></i>bus V <b class="mn" id="dgV">--.-</b></span>
+        <span class="diag-key"><i style="background:#ECEFF4"></i>bus W <b class="mn" id="dgW">---.-</b></span>
+        <span class="diag-note mn">10s window &middot; render-clock aligned &middot; amber shading = actual&harr;commanded gap</span>
+      </div>
+      <div class="diag-canvas-wrap screen"><canvas id="diagCv"></canvas></div>
+    </div>
   </main><!-- .main-panel -->
 
 </div><!-- .desktop-layout -->
+
+<!-- ===== LINK — full-width page footer (§1.6h), visible on every tab.
+     Content wired in capabilities.js's refreshHealthCards() (retargeted from
+     the old dynamically-built #linkCard). fw chip is the OTA verification
+     surface — always device-reported, never baked. -->
+<footer>
+  <div class="foot">
+    <span class="pidx-label" data-tip="Link status · WiFi association to the access point">&#9656; LINK</span>
+    <div class="lmeter">
+      <span class="mn lmeter-val" id="linkRssi">-- dBm</span>
+      <div class="lbar-wrap" data-tip="Signal strength">
+        <div class="lbar-bg"></div>
+        <div id="rssiFill"></div>
+      </div>
+    </div>
+    <div class="lchips">
+      <span class="lchip" data-tip="WiFi channel"><b>ch</b><span class="mn lv" id="linkCh">--</span></span>
+      <span class="lchip" data-tip="Access point currently associated"><b>bssid</b><span class="mn lv" id="linkBssid">--</span></span>
+      <span class="lchip" data-tip="Disconnect / reconnect count since boot"><b>disc</b><span class="mn lv" id="linkDisc">--</span></span>
+      <span class="lchip" data-tip="Firmware build · from /api/capabilities after every OTA"><b>fw</b><span class="mn lv" id="fwChip">--</span></span>
+      <span class="lchip" data-tip="Web UI bundle build shipped via uploadfs"><b>ui</b><span class="mn lv" id="uiChip">--</span></span>
+    </div>
+  </div>
+</footer>
 
 <!-- Persistent Home button (mobile FAB) -->
 <button class="home-fab show" id="homeFab"><span data-ico="i-home"></span> Home the machine</button>

@@ -14,6 +14,7 @@
  */
 import { $, clamp, pad, setVV, setVVState } from '../core/ui.js';
 import { TRAVEL, winMin, winMax, setWinMin, setWinMax, renderWindow, pushWindow, setRailSync } from '../core/range.js';
+import { ACCENT, ac } from '../core/theme.js';
 
 // ===================== Single reused state object (no per-frame allocation) =====================
 var S = {
@@ -268,8 +269,14 @@ function positionHazards() {
   if (!S.hzLo || TRAVEL <= 0) return;
   var lo = clamp(winMin, 0, TRAVEL);
   var hi = clamp(winMax, 0, TRAVEL);
-  S.hzLo.style.width = (lo / TRAVEL * 100) + '%';
-  S.hzHi.style.width = ((TRAVEL - hi) / TRAVEL * 100) + '%';
+  // Both ribbons are FULL-track-width boxes (CSS: left:0; right:0) revealed
+  // by clip-path only. The old approach resized the boxes themselves, and
+  // since the repeating hatch is anchored to the box origin, dragging the
+  // window max made the .hi ribbon's stripes visibly slide along with the
+  // edge. With a static box only the clip edge moves — the stripes stay
+  // pinned to the track.
+  S.hzLo.style.clipPath = 'inset(0 ' + (100 - lo / TRAVEL * 100) + '% 0 0)';
+  S.hzHi.style.clipPath = 'inset(0 0 0 ' + (hi / TRAVEL * 100) + '%)';
   // Vertical: thin ribbon centered on the mid-rail baseline (33/72 of height).
   var baselineY = (33 / 72) * S.rect.h;
   var hh = S.hzLo.offsetHeight || 9;
@@ -506,9 +513,19 @@ function buildHeroes() {
 
   var actWrap = document.createElement('div');
   actWrap.className = 'hero-item hero-primary';
-  // Plain crosshair glyph in the label (avoids inline SVG markup).
+  // Drawn crosshair reticle (DELTA D6) \u2014 was a plain \u2295 character styled
+  // via ::first-letter; replaced with the mock's inline SVG (circle + four
+  // tick marks + center dot) so it reads as an instrument mark, not a glyph.
   actWrap.innerHTML =
-    '<span class="hero-label">\u2295 actual \u00b7 mm</span>' +
+    '<span class="hero-label">' +
+    '<svg class="hero-reticle" width="12" height="12" viewBox="0 0 12 12" aria-hidden="true">' +
+    '<circle cx="6" cy="6" r="4" fill="none" stroke="currentColor" stroke-width="1"/>' +
+    '<line x1="6" y1="0" x2="6" y2="2.6" stroke="currentColor" stroke-width="1"/>' +
+    '<line x1="6" y1="9.4" x2="6" y2="12" stroke="currentColor" stroke-width="1"/>' +
+    '<line x1="0" y1="6" x2="2.6" y2="6" stroke="currentColor" stroke-width="1"/>' +
+    '<line x1="9.4" y1="6" x2="12" y2="6" stroke="currentColor" stroke-width="1"/>' +
+    '<circle cx="6" cy="6" r="0.9" fill="currentColor"/>' +
+    '</svg>actual \u00b7 mm</span>' +
     '<span class="vv hero-val" id="heroActual">000.0</span>';
   host.appendChild(actWrap);
 
@@ -792,6 +809,11 @@ function referenceSpeedPxPerMs() {
 function drawCanvas(nowMs, glowActive) {
   if (!S.ctx || !S.cv || S.rect.w === 0) return;
 
+  // Refresh accents from the live theme each frame (plain assignments —
+  // ACCENT is mutated in place on theme switch, ac() memoizes per theme).
+  S.realityColor = ACCENT.reality;
+  S.intentColor = ACCENT.intent;
+
   S.ctx.setTransform(S.dpr, 0, 0, S.dpr, 0, 0);
 
   var posFrac = clamp(S.posDisplay, 0, TRAVEL) / (TRAVEL || 1);
@@ -833,8 +855,10 @@ function drawCanvas(nowMs, glowActive) {
   var midY = (markY0 + markY1) / 2;
   var H = markY1 - markY0;   // full marker-line span (section 3.4 thickness ref)
 
-  // v0.4 interpolator planned-segment overlay (amber/green). Beneath markers.
-  drawInterpOverlay(h);
+  // The v0.4 interpolator planned-segment overlay used to draw here (amber/
+  // green line on the rail canvas itself) — DELTA D8 replaced it with the
+  // dedicated plan strip (features/planstrip.js), a separate canvas below
+  // the rail with its own render loop. Green is gone from the palette.
 
   // COMET TRAIL — one filled, tapered gradient ribbon per direction-run.
   if (S.reducedMotion) {
@@ -850,7 +874,7 @@ function drawCanvas(nowMs, glowActive) {
   // Commanded caret — purple, crisp, redrawn every frame, NO trail (3.1).
   S.ctx.strokeStyle = S.intentColor;
   S.ctx.lineWidth = 1;
-  S.ctx.shadowColor = 'rgba(167,139,250,.7)';
+  S.ctx.shadowColor = ac('i', 0.7);
   S.ctx.shadowBlur = 6;
   S.ctx.globalAlpha = 1;
   S.ctx.beginPath();
@@ -861,7 +885,7 @@ function drawCanvas(nowMs, glowActive) {
   // Full-height marker line — crisp, NO trail (3.1).
   S.ctx.strokeStyle = S.realityColor;
   S.ctx.lineWidth = 1;
-  S.ctx.shadowColor = 'rgba(77,166,255,.55)';
+  S.ctx.shadowColor = ac('r', 0.55);
   S.ctx.shadowBlur = 4;
   S.ctx.beginPath();
   S.ctx.moveTo(px, markY0);
@@ -869,9 +893,9 @@ function drawCanvas(nowMs, glowActive) {
   S.ctx.stroke();
 
   // Bright core dot at the live leading edge.
-  S.ctx.shadowColor = 'rgba(77,166,255,.9)';
+  S.ctx.shadowColor = ac('r', 0.9);
   S.ctx.shadowBlur = glowActive ? 12 : 8;
-  S.ctx.fillStyle = '#DCEEFF';
+  S.ctx.fillStyle = ACCENT.core;
   S.ctx.beginPath();
   S.ctx.arc(px, midY, 2.6, 0, Math.PI * 2);
   S.ctx.fill();
@@ -896,7 +920,7 @@ function drawCometRibbons(nowMs, midY, headHalf, glowActive) {
   S.ctx.globalCompositeOperation = 'source-over';
   S.ctx.setLineDash(DASH_NONE);
   // One soft glow pass over the fills (section 3.3).
-  S.ctx.shadowColor = 'rgba(77,166,255,.6)';
+  S.ctx.shadowColor = ac('r', 0.6);
   S.ctx.shadowBlur = glowActive ? 8 : 5;
 
   var idx = trailHead;
@@ -944,8 +968,8 @@ function flushRibbon(startI, endI, midY) {
   var tailX = _polyX[endI];
   // ONE gradient along x from head (alpha ~.55) to tail (transparent).
   var g = S.ctx.createLinearGradient(headX, 0, tailX, 0);
-  g.addColorStop(0, 'rgba(77,166,255,.55)');
-  g.addColorStop(1, 'rgba(77,166,255,0)');
+  g.addColorStop(0, ac('r', 0.55));
+  g.addColorStop(1, ac('r', 0));
   S.ctx.fillStyle = g;
   S.ctx.beginPath();
   // top edge newest to oldest
@@ -978,51 +1002,6 @@ function drawReducedTrail(nowMs, midY) {
   }
   S.ctx.stroke();
   S.ctx.globalAlpha = 1;
-}
-
-function drawInterpOverlay(h) {
-  var it = window.__INTERP;
-  if (!it || !it.active) return;
-  if (performance.now() - it.lastRxMs > 250) return;
-
-  var span = winMax - winMin;
-  if (span <= 0) return;
-
-  var sMm = winMin + clamp(it.startPos, 0, 1) * span;
-  var eMm = winMin + clamp(it.endPos,   0, 1) * span;
-  var cMm = winMin + clamp(it.curPos,   0, 1) * span;
-  var sx = (clamp(sMm, 0, TRAVEL) / (TRAVEL || 1)) * S.rect.w;
-  var ex = (clamp(eMm, 0, TRAVEL) / (TRAVEL || 1)) * S.rect.w;
-  var cx = (clamp(cMm, 0, TRAVEL) / (TRAVEL || 1)) * S.rect.w;
-
-  var BASE_H = 72;
-  var planY = (60 / BASE_H) * h;
-
-  S.ctx.globalCompositeOperation = 'source-over';
-  S.ctx.setLineDash(DASH_NONE);
-
-  var planColor = it.gradMode ? '#7CD992' : '#F5A623';
-  S.ctx.strokeStyle = planColor;
-  S.ctx.lineWidth = 1;
-  S.ctx.shadowColor = it.gradMode ? 'rgba(124,217,146,.5)' : 'rgba(245,166,35,.5)';
-  S.ctx.shadowBlur = 4;
-  S.ctx.beginPath();
-  S.ctx.moveTo(sx, planY);
-  S.ctx.lineTo(ex, planY);
-  S.ctx.stroke();
-  S.ctx.beginPath();
-  S.ctx.moveTo(sx, planY - 3); S.ctx.lineTo(sx, planY + 3);
-  S.ctx.moveTo(ex, planY - 3); S.ctx.lineTo(ex, planY + 3);
-  S.ctx.stroke();
-
-  S.ctx.shadowBlur = 6;
-  S.ctx.fillStyle = it.gradMode ? '#B6F0C4' : '#FFD08A';
-  S.ctx.beginPath();
-  S.ctx.arc(cx, planY, 2.5, 0, Math.PI * 2);
-  S.ctx.fill();
-
-  S.ctx.shadowBlur = 0;
-  S.ctx.fillStyle = '#000';
 }
 
 // ===================== Export for external position updates =====================

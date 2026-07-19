@@ -49,8 +49,16 @@
   --intent:     #A78BFA;   /* PURPLE — commanded/desired/unconfirmed */
   --warn:       #F5B94D;
   --bad:        #FF4757;
-  --glow-reality: 0 0 18px rgba(77,166,255,.5), 0 0 42px rgba(77,166,255,.16);
-  --glow-intent:  0 0 14px rgba(139,92,246,.16);
+  /* Accent rgb triplets — every accent glow/gradient in this sheet derives
+     from these (rgba(var(--reality-rgb),.5) etc.) so a theme swap recolors
+     ALL of them by overriding four custom properties. Themes live in
+     core/theme.js (single source of truth — it injects the :root[data-theme]
+     override blocks); --warn/--bad are SAFETY colors and never themed. */
+  --reality-rgb:     77,166,255;
+  --intent-rgb:      167,139,250;
+  --intent-deep-rgb: 139,92,246;
+  --glow-reality: 0 0 18px rgba(var(--reality-rgb),.5), 0 0 42px rgba(var(--reality-rgb),.16);
+  --glow-intent:  0 0 14px rgba(var(--intent-deep-rgb),.16);
 
   /* ---- Backward-compat aliases (JS inline styles reference old names) ---- */
   --muted:  var(--tx-mut);
@@ -160,6 +168,13 @@ input[type="number"], .window .mid .big,
   font-family: 'Martian Mono', 'Chakra Petch', monospace;
   font-variant-numeric: tabular-nums;
 }
+/* Bare Martian Mono utility — plain numerals/labels that aren't .vv/.chip
+   (footer link strip, meter values that skip the fixed-box swell). */
+.mn {
+  font-family: 'Martian Mono', monospace;
+  font-variant-numeric: tabular-nums;
+  font-variation-settings: "wght" 400, "wdth" 95;
+}
 
 /* ===================== .vv — fixed-box variable-axis numeral =====================
    Martian Mono variable, display:inline-block, right-aligned, width fixed in
@@ -245,7 +260,7 @@ input[type="number"], .window .mid .big,
   inset: 0 auto 0 0;
   width: 0%;
   background: var(--reality);
-  box-shadow: 0 0 6px rgba(77,166,255,.4);
+  box-shadow: 0 0 6px rgba(var(--reality-rgb),.4);
   transition: width .5s cubic-bezier(.3,.7,.3,1), background .35s, box-shadow .35s;
 }
 .stat-bar-fill.w1 {
@@ -257,11 +272,90 @@ input[type="number"], .window .mid .big,
   box-shadow: 0 0 8px rgba(255,71,87,.5);
 }
 
-/* ===================== Header (ONE row) ===================== */
-header {
+/* ===================== .mtr — reusable instrument (core/meter.js) =====
+   label + live value + recessed threshold track. Public component: the
+   Power card is five instantiations; future Modbus register banks reuse
+   it verbatim. Hazard hatch reuses the EXACT rail keep-out recipe (see
+   .rail-hz above) — one hatch language app-wide, never a second one.
+   Namespaced .mtr-* (NOT .meter/.m-*, DELTA D1): a legacy .meter progress-
+   bar widget already exists below (Health section, ~line 1690) — same
+   specificity, later-in-file wins, so the shared name silently clamped
+   every power meter to 26px/overflow:hidden. Never rename this back to
+   .meter without deleting the legacy widget first. */
+.mtr { margin-bottom: 10px; }
+.mtr .mtr-row {
   display: flex;
-  align-items: center;
-  gap: 12px;
+  justify-content: space-between;
+  align-items: baseline;
+  margin-bottom: 4px;
+}
+.mtr .mtr-label {
+  font-family: 'Chakra Petch', sans-serif;
+  font-size: .68rem;
+  letter-spacing: .1em;
+  color: var(--tx-mut);
+  font-weight: 500;
+}
+.mtr .mtr-value {
+  font-family: 'Martian Mono', monospace;
+  font-variant-numeric: tabular-nums;
+  font-variation-settings: "wght" 400, "wdth" 95;
+  font-size: .92rem;
+  color: var(--reality);
+  text-shadow: 0 0 8px rgba(var(--reality-rgb),.35);
+  transition: color .2s, text-shadow .2s;
+}
+.mtr .mtr-value.mtr-in-hazard {
+  color: var(--warn);
+  text-shadow: 0 0 8px rgba(245,185,77,.4);
+}
+.mtr .mtr-track {
+  position: relative;
+  height: calc(var(--s) * 8px);
+  background: var(--screen);
+  border: 1px solid var(--line-1);
+  box-shadow: inset 0 1px 4px rgba(0,0,0,.7);
+}
+.mtr .mtr-fill {
+  position: absolute;
+  left: 1px; top: 1px; bottom: 1px;
+  background: linear-gradient(90deg, rgba(var(--reality-rgb),.22), rgba(var(--reality-rgb),.7));
+  transition: width .4s cubic-bezier(.3,.7,.3,1);
+}
+.mtr .mtr-peak {
+  position: absolute;
+  top: -2px; bottom: -2px;
+  width: 2px;
+  background: var(--warn);
+  box-shadow: 0 0 6px rgba(245,185,77,.7);
+  transition: left .25s ease;
+}
+.mtr .mtr-hazard {
+  position: absolute;
+  top: 0; bottom: 0;
+  background: repeating-linear-gradient(135deg, rgba(255,71,87,.26) 0 2px, transparent 2px 6px);
+}
+/* Hazard zones dissolve gradually toward safe territory instead of ending
+   at a hard threshold line — dense at the rail end of the track, fading
+   across the zone's inner 65%. -lo hugs the left end (undervoltage) and
+   fades rightward; -hi hugs the right end and fades leftward. Classes set
+   by Meter() from each zone's position. */
+.mtr .mtr-hazard.mtr-hz-lo {
+  -webkit-mask-image: linear-gradient(90deg, #000 0%, #000 35%, transparent 100%);
+  mask-image: linear-gradient(90deg, #000 0%, #000 35%, transparent 100%);
+}
+.mtr .mtr-hazard.mtr-hz-hi {
+  -webkit-mask-image: linear-gradient(270deg, #000 0%, #000 35%, transparent 100%);
+  mask-image: linear-gradient(270deg, #000 0%, #000 35%, transparent 100%);
+}
+
+/* ===================== Header (ONE row) ===================== */
+/* header = full-bleed sticky bar (background/border-bottom read as a page
+   divider, kept edge-to-edge intentionally); .hdr-row = its content, which
+   DELTA D4 constrains to the shared width:min(80vw,96%) column at ≥761px
+   (see the ELASTIC RACK DESKTOP block) — same two-layer pattern as
+   footer/.foot below. */
+header {
   padding: 8px 16px;
   background: var(--ink);
   border-bottom: 1px solid var(--line-1);
@@ -270,16 +364,21 @@ header {
   z-index: 50;
   min-height: 44px;
 }
+.hdr-row {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+}
 .header-left {
   display: flex;
   align-items: center;
   gap: 8px;
   flex: 0 0 auto;
 }
-.barcode {
-  width: 20px;
-  height: 16px;
-  color: var(--line-3);
+.act-grid {
+  width: 70px;
+  height: 17px;
+  image-rendering: pixelated;
   flex: 0 0 auto;
 }
 .wordmark {
@@ -355,7 +454,7 @@ header {
   flex: 0 0 auto;
   transition: background .2s, box-shadow .2s;
 }
-.dot.good { background: var(--reality); box-shadow: 0 0 6px rgba(77,166,255,.5); }
+.dot.good { background: var(--reality); box-shadow: 0 0 6px rgba(var(--reality-rgb),.5); }
 .dot.warn { background: var(--warn); box-shadow: 0 0 6px var(--warn); }
 .dot.bad  { background: var(--bad); box-shadow: 0 0 6px var(--bad); }
 
@@ -426,14 +525,19 @@ header {
 .fault button:active { border-color: var(--reality); color: var(--reality); }
 
 /* ===================== Row 2 — Hero strip (heroes + transport) ===================== */
+/* Same two-layer pattern as header/.hdr-row (DELTA D4): .hero-strip stays a
+   full-bleed bar, .hero-row is the content constrained to the shared column
+   at ≥761px. */
 .hero-strip {
+  padding: 10px 16px 8px;
+  background: var(--ink);
+  border-bottom: 1px solid var(--line-1);
+}
+.hero-row {
   display: flex;
   align-items: flex-end;
   justify-content: space-between;
   gap: 12px;
-  padding: 10px 16px 8px;
-  background: var(--ink);
-  border-bottom: 1px solid var(--line-1);
 }
 
 /* ===================== Row 3 — Rail panel (flagship travel instrument) ===================== */
@@ -510,9 +614,9 @@ header {
   align-items: center;
   justify-content: center;
   background:
-    repeating-linear-gradient(90deg, rgba(167,139,250,.10) 0 1px, transparent 1px 7px),
+    repeating-linear-gradient(90deg, rgba(var(--intent-rgb),.10) 0 1px, transparent 1px 7px),
     var(--screen);
-  border: 1px solid rgba(167,139,250,.45);
+  border: 1px solid rgba(var(--intent-rgb),.45);
   border-radius: var(--radius);
   box-shadow: inset 0 2px 6px rgba(0,0,0,.6);
   cursor: pointer;
@@ -535,7 +639,7 @@ header {
   top: 0; bottom: 0;
   width: 2px;
   background: var(--intent);
-  box-shadow: 0 0 10px rgba(167,139,250,.7);
+  box-shadow: 0 0 10px rgba(var(--intent-rgb),.7);
   opacity: 0;
   pointer-events: none;
   transition: opacity .1s ease;
@@ -550,7 +654,7 @@ header {
 /* Manual mode — tape spans full travel, full --intent treatment. */
 .rail-panel.manual-mode .rail-tape {
   border-color: var(--intent);
-  box-shadow: inset 0 2px 6px rgba(0,0,0,.6), 0 0 14px rgba(167,139,250,.28);
+  box-shadow: inset 0 2px 6px rgba(0,0,0,.6), 0 0 14px rgba(var(--intent-rgb),.28);
 }
 /* Drag-live — kill the tape slide transition so preview tracks the finger 1:1. */
 .rail-panel.drag-live .rail-tape {
@@ -563,16 +667,23 @@ header {
    phosphor or the band. Width follows the SAME (wMin,wMax) as the band + tape
    (ground-truth doctrine). Width transitions instant during drag, 250ms ease on
    programmatic change; manual mode fades them to .18 (limits unenforced). */
+/* Both ribbons span the FULL track (static box → static hatch pattern);
+   rail.js reveals only the keep-out region via clip-path, so dragging a
+   window edge moves the clip line, never the stripes underneath. */
 .rail-hz {
   position: absolute;
+  left: 0;
+  right: 0;
   height: calc(var(--s) * 9px);
   pointer-events: none;
   background: repeating-linear-gradient(135deg, rgba(255,71,87,.22) 0 3px, rgba(255,71,87,.03) 3px 7px);
-  transition: width .25s ease, opacity .25s ease;
+  transition: clip-path .25s ease, opacity .25s ease;
   z-index: 1;
 }
-.rail-hz.lo { left: 0; }
-.rail-hz.hi { right: 0; }
+/* Boot state (before rail.js's first positionHazards()) — fully clipped so
+   neither ribbon flashes across the whole track. */
+.rail-hz.lo { clip-path: inset(0 100% 0 0); }
+.rail-hz.hi { clip-path: inset(0 0 0 100%); }
 .rail-panel.drag-live .rail-hz { transition: opacity .25s ease; }
 .rail-panel.manual-mode .rail-hz { opacity: .18; }
 
@@ -602,10 +713,10 @@ header {
    only the pressed state styling remains here: intent purple so manual mode
    is unmistakable at a glance. */
 .rail-manual-toggle[aria-pressed="true"] {
-  background: rgba(167,139,250,.14);
+  background: rgba(var(--intent-rgb),.14);
   border-color: var(--intent) !important;
   color: var(--intent) !important;
-  box-shadow: 0 0 14px rgba(167,139,250,.3);
+  box-shadow: 0 0 14px rgba(var(--intent-rgb),.3);
 }
 .rail-manual-toggle[aria-pressed="true"] small { color: var(--intent); }
 
@@ -623,7 +734,55 @@ header {
 .rail-panel.manual-mode .spine-rail-host {
   cursor: ew-resize;
   border-color: var(--intent);
-  box-shadow: inset 0 2px 8px rgba(0,0,0,.7), 0 0 0 1px rgba(167,139,250,.35);
+  box-shadow: inset 0 2px 8px rgba(0,0,0,.7), 0 0 0 1px rgba(var(--intent-rgb),.35);
+}
+
+/* ===== Plan strip (§D8) — in-flight streamed-segment diagnostics =========
+   Full-width canvas lane directly under the rail, x-axis identical to the
+   rail's own mm->px mapping. Presence is opacity-only (height always
+   reserved) so streaming start/stop never shifts the page; PRESENCE fades
+   over ~350ms, but features/planstrip.js delays the fade-OUT ~1s after the
+   stream actually stops so a brief gap between points doesn't flicker it. */
+.plan-strip {
+  margin-top: calc(var(--s) * 8px);
+  opacity: 0;
+  transition: opacity .35s ease;
+  pointer-events: none;
+}
+.plan-strip.on { opacity: 1; pointer-events: auto; }
+.plan-lane {
+  position: relative;
+  height: calc(var(--s) * 18px);
+  background: var(--screen);
+  border: 1px solid var(--line-1);
+  box-shadow: inset 0 1px 4px rgba(0,0,0,.7);
+}
+.plan-lane canvas { position: absolute; inset: 0; width: 100%; height: 100%; }
+.plan-meta {
+  display: flex;
+  justify-content: space-between;
+  align-items: baseline;
+  margin-top: 4px;
+}
+.plan-lab {
+  font-family: 'Chakra Petch', sans-serif;
+  font-size: calc(var(--s) * 10px);
+  letter-spacing: .1em;
+  text-transform: lowercase;
+  color: color-mix(in srgb, var(--intent) 78%, var(--tx-mut));
+}
+.plan-read { display: flex; gap: 9px; align-items: baseline; }
+.plan-lv {
+  color: var(--tx-val);
+  background: var(--chip);
+  border: 1px solid var(--chip-line);
+  padding: 1px 6px;
+  font-size: calc(var(--s) * 10px);
+  border-radius: var(--radius);
+}
+.plan-lv.late {
+  color: var(--warn);
+  border-color: rgba(245,185,77,.4);
 }
 
 /* Manual mode actions — Set Min/Max by feel. Hidden in default mode, shown
@@ -642,7 +801,7 @@ header {
   color: var(--intent);
 }
 .rail-manual-actions .btn:active {
-  background: rgba(167,139,250,.12);
+  background: rgba(var(--intent-rgb),.12);
 }
 .spine-rail-host {
   height: calc(var(--s) * 72px);
@@ -726,10 +885,10 @@ header {
   position: absolute;
   top: calc(var(--s) * 18px);
   height: calc(var(--s) * 30px);
-  background: rgba(139,92,246,.08);
+  background: rgba(var(--intent-deep-rgb),.08);
   border-left: 1px solid var(--intent);
   border-right: 1px solid var(--intent);
-  box-shadow: 0 0 14px rgba(139,92,246,.16), inset 0 0 18px rgba(139,92,246,.07);
+  box-shadow: 0 0 14px rgba(var(--intent-deep-rgb),.16), inset 0 0 18px rgba(var(--intent-deep-rgb),.07);
   cursor: grab;
   touch-action: none;
 }
@@ -777,7 +936,7 @@ header {
   width: 3px;
   height: calc(var(--s) * 16px);
   background: var(--intent);
-  box-shadow: 0 0 8px rgba(167,139,250,.65);
+  box-shadow: 0 0 8px rgba(var(--intent-rgb),.65);
 }
 
 /* Hero numerals — Row 2. The "actual" numeral is the flagship: its tiny
@@ -801,7 +960,7 @@ header {
 .hero-label {
   display: inline-flex;
   align-items: center;
-  gap: 4px;
+  gap: 6px;
   font-family: 'Chakra Petch', sans-serif;
   font-size: .68rem;
   color: var(--tx-mut);
@@ -809,7 +968,17 @@ header {
   text-transform: lowercase;
   letter-spacing: .06em;
 }
-.hero-label svg { width: 8px; height: 8px; color: var(--tx-ghost); }
+/* Reticle glyph beside the "actual" label (DELTA D6) — drawn SVG crosshair,
+   built in rail.js's buildHeroes(). Whole label tints reality-blue like the
+   mock's .lbl.re; the glyph gets a soft glow via drop-shadow. */
+.hero-item.hero-primary .hero-label {
+  color: var(--reality);
+}
+.hero-reticle {
+  flex: 0 0 auto;
+  filter: drop-shadow(0 0 3px rgba(var(--reality-rgb),.5));
+}
+.hero-label svg:not(.hero-reticle) { width: 8px; height: 8px; color: var(--tx-ghost); }
 .hero-val {
   font-size: 1.35rem;
 }
@@ -829,7 +998,7 @@ header {
 }
 .hero-val.glow {
   color: var(--reality);
-  text-shadow: 0 0 8px rgba(77,166,255,.4);
+  text-shadow: 0 0 8px rgba(var(--reality-rgb),.4);
 }
 body.stale #heroActual {
   color: var(--tx-ghost);
@@ -859,9 +1028,11 @@ body.stale #heroActual {
    row 2 = full-width transport buttons. No horizontal page scroll ever. */
 @media (max-width: 1023px) {
   .hero-strip {
+    padding: 8px 12px 6px;
+  }
+  .hero-row {
     flex-wrap: wrap;
     row-gap: 6px;
-    padding: 8px 12px 6px;
   }
   .spine-heroes {
     flex: 1 1 auto;
@@ -968,9 +1139,16 @@ body.stale #heroActual {
 .card.tight { padding: 12px 16px; }
 
 /* ---- Panel title row: ▸ caret + Chakra Petch 500 title + mono index ---- */
-/* CSS counter for panel indices (01, 02, …) */
-body { counter-reset: panel-index; }
-.panel, .card { counter-increment: panel-index; }
+/* Index numerals are assigned by ui.js's renumberPanels() (data-pidx attr on
+   each .card-head h2), NOT a CSS counter. A CSS counter looked right at
+   first (§3.1 "continuing index numerals in DOM order") but breaks the
+   moment any card sits inside a hidden .paneView or a mobile-hidden
+   #driveMain — counter-increment doesn't run on display:none elements, so
+   numbers would silently shift depending on which pane happens to be open.
+   renumberPanels() walks the full DOM (display state irrelevant to
+   querySelectorAll) so numbering stays stable across tab/pane switches and
+   the variable optional cards (Power/RS485 only exist once capabilities
+   resolve). */
 
 .card-head {
   display: flex;
@@ -983,13 +1161,16 @@ body { counter-reset: panel-index; }
 .card-head > [data-ico]:not(.info):not(.info [data-ico]) {
   display: none;
 }
-/* ▸ caret glyph before the title */
+/* Mock r6 head format: "01 ▸ PATTERN" — faint mono index FIRST, then caret,
+   then the uppercase letterspaced title in mid-gray (mock .pidx/.pt).
+   Index digits come from ui.js's renumberPanels() (data-pidx attr). */
 .card-head h2 {
   font-family: 'Chakra Petch', sans-serif;
   font-weight: 500;
-  font-size: .88rem;
-  color: var(--tx-hi);
-  letter-spacing: calc(var(--s) * .3px);
+  font-size: .8rem;
+  color: var(--tx-val);
+  letter-spacing: .12em;
+  text-transform: uppercase;
 }
 .card-head h2::before {
   content: "\25B8 ";
@@ -997,15 +1178,18 @@ body { counter-reset: panel-index; }
   font-weight: 500;
   margin-right: 2px;
 }
-/* Faint mono index after the title */
-.card-head h2::after {
-  content: counter(panel-index, decimal-leading-zero);
+/* Numbered cards: index + caret share the one ::before slot (mono, faint —
+   --tx-faint and the caret's old --line-3 are near-identical greys, so the
+   single color reads fine). Beats the bare-caret rule on specificity. */
+.card-head h2[data-pidx]::before {
+  content: attr(data-pidx) "\2002\25B8\2002";
   font-family: 'Martian Mono', monospace;
-  font-size: .6rem;
+  font-size: .62rem;
   color: var(--tx-faint);
-  margin-left: 8px;
   font-weight: 400;
   font-variation-settings: "wght" 400, "wdth" 90;
+  margin-right: 0;
+  vertical-align: 1px;
 }
 .card-head .info { margin-left: auto; }
 
@@ -1020,15 +1204,99 @@ body { counter-reset: panel-index; }
 .card .card-body { overflow: hidden; transition: max-height .25s ease, opacity .2s ease; }
 .card.collapsed .card-body { max-height: 0 !important; opacity: 0; margin: 0; padding: 0; pointer-events: none; }
 
-/* ---- Wave scope (Generator card recessed waveform preview) ---- */
+/* ---- Wave scope (Generator card recessed waveform preview) ----
+   DELTA D5: was 120px (140px ≥761px) — inside the fixed height:100vh;
+   overflow:hidden desktop shell that ate most of a laptop viewport's Drive
+   column before the Power card was reachable. Mock's strip is ~66px; one
+   height at every width, no desktop override. */
 .wave-scope {
   position: relative;
-  height: 120px;
+  height: calc(var(--s) * 66px);
   margin-bottom: 12px;
   overflow: hidden;
 }
 .wave-scope canvas { display: block; width: 100%; height: 100%; }
-@media (min-width: 1024px) { .wave-scope { height: 140px; } }
+
+/* ===================== Pattern glyph tile grid (§2.1a/b) =====================
+   Always 4 columns (module internals are immutable at every width, §1.3) —
+   wraps to new 4-wide rows for any registry count. */
+.pat-grid {
+  display: grid;
+  grid-template-columns: repeat(4, 1fr);
+  gap: 7px;
+  margin: 0 0 14px;
+}
+.pat-tile {
+  border: 1px solid var(--line-2);
+  border-radius: var(--radius);
+  padding: 7px 4px 5px;
+  cursor: pointer;
+  text-align: center;
+  background: transparent;
+  transition: border-color .15s, box-shadow .2s;
+}
+.pat-tile svg { display: block; width: 100%; height: 22px; }
+.pat-tile path {
+  stroke: var(--tx-ghost);
+  fill: none;
+  stroke-width: 1.5;
+  transition: stroke .15s;
+}
+.pat-tile span {
+  display: block;
+  font-size: .66rem;
+  letter-spacing: .04em;
+  color: var(--tx-mut);
+  margin-top: 3px;
+  font-family: 'Chakra Petch', sans-serif;
+}
+.pat-tile.on {
+  border-color: var(--intent);
+  box-shadow: 0 0 12px rgba(var(--intent-deep-rgb),.25), inset 0 0 14px rgba(var(--intent-deep-rgb),.08);
+}
+.pat-tile.on span { color: var(--intent); }
+.pat-tile.on path { stroke: var(--intent); }
+.pat-tile.ghost { border-style: dashed; opacity: .6; cursor: default; }
+
+/* ---- .fld2 — compact 2-col slider grid (mock r6, Pattern card) ----
+   Grid gap owns the rhythm; the .field's flow margin is zeroed inside. */
+.fld2 {
+  display: grid;
+  grid-template-columns: 1fr 1fr;
+  gap: 12px 16px;
+  margin-bottom: 12px;
+}
+.fld2 .field { margin-bottom: 0; }
+.fld2 label { text-transform: lowercase; letter-spacing: .08em; }
+.fld2 input[type="range"] { margin: 8px 0 2px; }
+
+/* ---- .scr-tag — corner label inside a recessed .screen/.wave-scope
+   (mock's .scrTag: "wave · told", "load · 60s") ---- */
+.scr-tag {
+  position: absolute;
+  top: 5px;
+  right: 8px;
+  font-size: .6rem;
+  color: var(--tx-ghost);
+  pointer-events: none;
+}
+
+/* ---- Card-head status sub-label (§2.1f) — mono, sits right of the title,
+   pushed to the head's trailing edge (absorbs the .info button's own
+   margin-left:auto, which becomes a harmless no-op once this claims it). ---- */
+.card-state {
+  margin-left: auto;
+  font-family: 'Martian Mono', monospace;
+  font-size: .64rem;
+  letter-spacing: .04em;
+  color: var(--tx-ghost);
+  font-variation-settings: "wght" 400, "wdth" 90;
+  white-space: nowrap;
+}
+/* When a .card-state shares the head with an .info button, only ONE of them
+   may own margin-left:auto — two autos split the free space and strand the
+   sub-label mid-card instead of right-aligned beside the button. */
+.card-head:has(.card-state) .info { margin-left: 0; }
 
 /* ===================== Screen (recessed displays only) ===================== */
 .screen {
@@ -1036,6 +1304,50 @@ body { counter-reset: panel-index; }
   box-shadow: inset 0 2px 8px rgba(0,0,0,.7);
   border: 1px solid var(--line-1);
   border-radius: var(--radius);
+}
+
+/* ===================== [data-tip] — lightweight CSS-only tooltip =========
+   Companion to the .info popover system above (kept as-is for the longer,
+   multi-sentence explanations it already carries). This one hangs off ANY
+   element via a plain attribute — chips, tab pills, pattern tiles, meter
+   labels, footer chips — anywhere a one-line hint earns its keep without a
+   dedicated button. Pure :hover/:focus-visible ::after, no JS. */
+[data-tip] { position: relative; }
+[data-tip]:hover::after, [data-tip]:focus-visible::after {
+  content: attr(data-tip);
+  position: absolute;
+  bottom: calc(100% + 8px);
+  left: 50%;
+  transform: translateX(-50%);
+  background: var(--ink);
+  border: 1px solid var(--line-3);
+  color: var(--tx-mut);
+  font-family: 'Chakra Petch', sans-serif;
+  font-size: .72rem;
+  font-weight: 400;
+  letter-spacing: .01em;
+  padding: 6px 10px;
+  width: max-content;
+  max-width: 280px;
+  white-space: normal;
+  text-align: left;
+  line-height: 1.45;
+  z-index: 55;
+  pointer-events: none;
+  box-shadow: 0 6px 18px rgba(0,0,0,.6);
+}
+[data-tip]:hover::before, [data-tip]:focus-visible::before {
+  content: "";
+  position: absolute;
+  bottom: calc(100% + 3px);
+  left: 50%;
+  transform: translateX(-50%) rotate(45deg);
+  width: 8px; height: 8px;
+  background: var(--ink);
+  border-right: 1px solid var(--line-3);
+  border-bottom: 1px solid var(--line-3);
+  z-index: 56;
+  pointer-events: none;
 }
 
 /* ===================== Tooltips / info ===================== */
@@ -1084,6 +1396,31 @@ body { counter-reset: panel-index; }
 .label-row .info .tip { left: 0; right: auto; }
 .label-row .ispace { width: 18px; height: 18px; flex: 0 0 auto; }
 
+/* ---- Recessed value chip + ghost unit, riding in the field's label row ----
+   Replaces the old below-slider .readout: the live value sits inline with
+   its label instead of centered underneath (Appendix/spec §2.1c/§3.3). */
+.label-row .field-val { margin-left: auto; }
+.field-val {
+  font-family: 'Martian Mono', monospace;
+  font-variant-numeric: tabular-nums;
+  font-variation-settings: "wght" 400, "wdth" 95;
+  color: var(--tx-val);
+  background: var(--chip);
+  border: 1px solid var(--chip-line);
+  border-radius: var(--radius);
+  padding: 1px 6px;
+  font-size: .76rem;
+  white-space: nowrap;
+}
+.field-val em {
+  font-style: normal;
+  color: var(--tx-ghost);
+  margin-left: 3px;
+  font-size: .64rem;
+  font-family: 'Chakra Petch', sans-serif;
+  font-weight: 500;
+}
+
 label { display: block; font-size: .76rem; color: var(--tx-mut); font-weight: 500; font-family: 'Chakra Petch', sans-serif; }
 .hint { font-size: .72rem; color: var(--tx-ghost); line-height: 1.5; margin-top: 4px; font-family: 'Chakra Petch', sans-serif; }
 
@@ -1091,10 +1428,10 @@ label { display: block; font-size: .76rem; color: var(--tx-mut); font-weight: 50
 .field { margin-bottom: 14px; }
 .card.tight .field { margin-bottom: 10px; }
 
-/* ---- Sliders: 1px hairline track, 11px thumb --ink fill + --tx-val ring ---- */
+/* ---- Sliders: thin 2px hairline track, rectangular thumb --ink fill + --tx-val ring ---- */
 input[type="range"] {
   width: 100%;
-  height: 1px;
+  height: 2px;
   -webkit-appearance: none;
   appearance: none;
   margin: 12px 0;
@@ -1104,9 +1441,9 @@ input[type="range"] {
 }
 input[type="range"]::-webkit-slider-thumb {
   -webkit-appearance: none;
-  width: 11px;
-  height: 11px;
-  border-radius: 50%;
+  width: calc(var(--s) * 11px);
+  height: calc(var(--s) * 18px);
+  border-radius: 0;
   background: var(--ink);
   border: 1px solid var(--tx-val);
   cursor: pointer;
@@ -1114,9 +1451,9 @@ input[type="range"]::-webkit-slider-thumb {
   transition: border-color .12s, box-shadow .12s;
 }
 input[type="range"]::-moz-range-thumb {
-  width: 11px;
-  height: 11px;
-  border-radius: 50%;
+  width: calc(var(--s) * 11px);
+  height: calc(var(--s) * 18px);
+  border-radius: 0;
   background: var(--ink);
   border: 1px solid var(--tx-val);
   cursor: pointer;
@@ -1126,11 +1463,11 @@ input[type="range"]::-moz-range-thumb {
 /* Thumb ignites --reality + glow while dragged */
 input[type="range"]:active::-webkit-slider-thumb {
   border-color: var(--reality);
-  box-shadow: 0 0 0 2px var(--ink), 0 0 10px rgba(77,166,255,.5);
+  box-shadow: 0 0 0 2px var(--ink), 0 0 10px rgba(var(--reality-rgb),.5);
 }
 input[type="range"]:active::-moz-range-thumb {
   border-color: var(--reality);
-  box-shadow: 0 0 0 2px var(--ink), 0 0 10px rgba(77,166,255,.5);
+  box-shadow: 0 0 0 2px var(--ink), 0 0 10px rgba(var(--reality-rgb),.5);
 }
 
 /* Hide native number-input spinners — they clash with the instrument styling
@@ -1144,8 +1481,9 @@ input[type="range"]:active::-moz-range-thumb {
   width: 100%;
   padding: 8px 10px;
   border-radius: var(--radius);
-  border: 1px solid var(--line-2);
-  background: var(--ink);
+  border: 1px solid var(--line-1);
+  background: var(--screen);
+  box-shadow: inset 0 2px 5px rgba(0,0,0,.6);
   color: var(--tx-val);
   font-size: .9rem;
   font-family: 'Martian Mono', monospace;
@@ -1217,7 +1555,7 @@ select:focus { outline: none; border-color: var(--reality); }
   transition: transform .15s, background .15s;
 }
 .switch input:checked + .track { border-color: var(--reality); }
-.switch input:checked + .track::after { transform: translateX(18px); background: var(--reality); box-shadow: 0 0 6px rgba(77,166,255,.4); }
+.switch input:checked + .track::after { transform: translateX(18px); background: var(--reality); box-shadow: 0 0 6px rgba(var(--reality-rgb),.4); }
 .switch .lbl { font-size: .8rem; color: var(--tx); font-weight: 500; font-family: 'Chakra Petch', sans-serif; }
 .switch.full { justify-content: space-between; width: 100%; }
 
@@ -1256,6 +1594,11 @@ select:focus { outline: none; border-color: var(--reality); }
 .btn.ghost { background: transparent; }
 .btn.danger { border-color: var(--bad); color: var(--bad); }
 .btn.danger:hover { box-shadow: 0 0 10px rgba(255,71,87,.2); }
+/* Running-state transport button (Pattern start/stop, §2.1e) — amber =
+   attention, NEVER red (--bad is reserved for hazard/e-stop contexts). */
+.btn.running { border-color: var(--warn); color: var(--warn); box-shadow: var(--glow-warn); letter-spacing: .14em; }
+.btn.running:hover { box-shadow: var(--glow-warn); }
+#patStartBtn { letter-spacing: .14em; padding: 12px; }
 .btn.sm { min-height: 30px; font-size: .72rem; padding: 4px 8px; width: auto; }
 .btn-row { display: flex; gap: 8px; }
 .btn-row .btn { margin: 0; }
@@ -1295,6 +1638,89 @@ select:focus { outline: none; border-color: var(--reality); }
   color: var(--reality);
   box-shadow: var(--glow-reality);
 }
+
+/* ---- Mono port chips (§3.2, Connection card transport select) ----------
+   Rectangular, Martian Mono, letterspaced. ACTIVE = reality-blue — it is
+   the device's CONFIRMED transport (ground truth doctrine), not merely the
+   clicked one until the /api/mode echo lands. Same #modeSeg id/data-mode
+   attrs/click wiring as the control it replaces. */
+.port-row { display: flex; gap: 7px; flex-wrap: wrap; margin-bottom: 10px; }
+.port {
+  font-family: 'Martian Mono', monospace;
+  font-size: .68rem;
+  letter-spacing: .1em;
+  color: var(--tx-mut);
+  background: transparent;
+  border: 1px solid var(--line-2);
+  border-radius: var(--radius);
+  padding: 7px 12px;
+  cursor: pointer;
+  font-variation-settings: "wght" 400, "wdth" 90;
+  transition: border-color .15s, color .15s, box-shadow .15s, background .15s;
+}
+.port:hover { border-color: var(--line-4); }
+.port.active {
+  color: var(--reality);
+  border-color: var(--reality);
+  box-shadow: var(--glow-reality);
+  background: color-mix(in srgb, var(--reality) 8%, transparent);
+}
+
+/* ---- Theme swatch chips (Settings · Theme card, built by core/theme.js) --
+   Port-chip language: mono, letterspaced, active = current-theme reality
+   accent (which is itself themed, so the active ring always matches the
+   theme it selects). Each chip previews its own palette via two inline-
+   colored dots — those are static per swatch, deliberately NOT themed. */
+.theme-row { display: flex; gap: 7px; flex-wrap: wrap; }
+.theme-chip {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  font-family: 'Martian Mono', monospace;
+  font-size: .64rem;
+  letter-spacing: .08em;
+  color: var(--tx-mut);
+  background: transparent;
+  border: 1px solid var(--line-2);
+  border-radius: var(--radius);
+  padding: 7px 10px;
+  cursor: pointer;
+  font-variation-settings: "wght" 400, "wdth" 90;
+  transition: border-color .15s, color .15s, box-shadow .15s;
+}
+.theme-chip:hover { border-color: var(--line-4); }
+.theme-chip.active {
+  color: var(--reality);
+  border-color: var(--reality);
+  box-shadow: var(--glow-reality);
+  background: color-mix(in srgb, var(--reality) 8%, transparent);
+}
+.theme-chip .tdot {
+  width: 8px;
+  height: 8px;
+  border-radius: 50%;
+  flex: 0 0 auto;
+}
+/* Custom pair: CUSTOM chip + two native color pickers, one inline group. */
+.theme-custom {
+  display: inline-flex;
+  align-items: stretch;
+  gap: 4px;
+}
+.theme-custom input[type="color"] {
+  -webkit-appearance: none;
+  appearance: none;
+  width: 30px;
+  height: auto;
+  padding: 2px;
+  background: transparent;
+  border: 1px solid var(--line-2);
+  border-radius: var(--radius);
+  cursor: pointer;
+}
+.theme-custom input[type="color"]:hover { border-color: var(--line-4); }
+.theme-custom input[type="color"]::-webkit-color-swatch-wrapper { padding: 1px; }
+.theme-custom input[type="color"]::-webkit-color-swatch { border: none; border-radius: 1px; }
 
 /* ===================== Range designer (restyled, kept functional) ===================== */
 .designer { display: flex; gap: 12px; align-items: stretch; }
@@ -1361,7 +1787,7 @@ select:focus { outline: none; border-color: var(--reality); }
   position: absolute;
   left: 4px; right: 4px;
   cursor: grab;
-  background: rgba(167,139,250,.14);
+  background: rgba(var(--intent-rgb),.14);
   border: 1px solid var(--intent);
   box-shadow: var(--glow-intent);
   touch-action: none;
@@ -1472,6 +1898,60 @@ pre.log, .screen.log {
   font-variation-settings: "wght" 400, "wdth" 85;
 }
 
+/* ---- Terminal treatment (§4.1) — phosphor-blue-tinted text, blinking
+   block cursor at the tail. .screen already gives the recessed bg/inset
+   shadow/border; this layers the terminal-specific text color + cursor. ---- */
+.log.term {
+  color: var(--term-tx, #7C97B8);
+  font-size: .7rem;
+}
+.term-cursor {
+  animation: termBlink 1.06s steps(1) infinite;
+}
+@keyframes termBlink { 50% { opacity: 0; } }
+@media (prefers-reduced-motion: reduce) {
+  .term-cursor { animation: none; }
+}
+
+/* ---- Anomaly count chips in the Log card head (§4.2) — dot lights amber
+   when count>0 (existing .dot.warn/.dot.bad classes, set by main.js's
+   renderAnomaly(), untouched). Compact enough for 4 to share the head with
+   the title. ---- */
+.acnt {
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+  font-size: .62rem;
+  color: var(--tx-mut);
+  white-space: nowrap;
+}
+.acnt .dot { width: 5px; height: 5px; }
+.card-head { flex-wrap: wrap; row-gap: 6px; }
+
+/* ---- Clients card rows (§4.3) — recessed row, mono client id/ip ---- */
+.client-row {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  padding: 8px 10px;
+  background: var(--chip);
+  border: 1px solid var(--chip-line);
+  border-radius: var(--radius);
+  margin-bottom: 6px;
+}
+.client-row code {
+  flex: 0 0 auto;
+  font-family: 'Martian Mono', monospace;
+  font-size: .74rem;
+  color: var(--tx-val);
+  font-variation-settings: "wght" 400, "wdth" 90;
+}
+.client-row-meta {
+  flex: 1 1 auto;
+  font-size: .72rem;
+  color: var(--tx-mut);
+}
+
 /* ===================== Toasts ===================== */
 .toasts {
   position: fixed; left: 50%; transform: translateX(-50%);
@@ -1534,7 +2014,7 @@ pre.log, .screen.log {
 .tab.active {
   color: var(--reality);
   border-color: var(--line-2);
-  background: rgba(108,140,255,.10);
+  background: rgba(var(--reality-rgb),.10);
 }
 
 .tab-content { display: none; animation: fade .15s ease; }
@@ -1542,9 +2022,42 @@ pre.log, .screen.log {
 @keyframes fade { from { opacity: 0; transform: translateY(2px); } to { opacity: 1; transform: none; } }
 
 /* Desktop tab pills are hidden on mobile/tablet — only the fixed bottom
-   bar (.tabs-mobile) runs below 1024px. Without this, both tab bars
-   render simultaneously fixed at the bottom (the adjacency glitch). */
+   bar (.tabs-mobile) runs below the elastic-rack breakpoint. Without this,
+   both tab bars render simultaneously fixed at the bottom. */
 .tabs-desktop { display: none; }
+
+/* ===================== Elastic rack — split-pane doctrine (§1.6b) ==========
+   ONE breakpoint (761px), matching the approved mock's literal value (R0
+   overrides the spec text's "~680px"). Base rules below are the MOBILE
+   shape (single column, classic three-tab, driveMain/sidePane swap via
+   .m-active); the >=761px media query turns on the desktop shape (Drive
+   always visible, Settings/Log as a sticky side pane). State is toggled by
+   ui.js's initTabs() pane controller — no other JS drives these classes. */
+.main { display: block; }
+#driveMain { display: none; }
+#driveMain.m-active { display: block; }
+#sidePane { display: none; }
+#sidePane.m-active { display: block; }
+.paneView { display: none; }
+.paneView.active { display: block; }
+/* ONE spacing value everywhere (user: "make sure all paddings around all
+   elements is equal") — grid gap owns ALL inter-card spacing. Cards keep a
+   global margin-bottom:14px for plain-flow contexts, but inside these grids
+   that margin silently ADDED to the gap (grid margins don't collapse), so
+   vertical spacing was 34px while columns sat 20px apart. Margin zeroed
+   in-grid; 14px gap matches the cards' own flow rhythm. */
+.clu { display: grid; grid-template-columns: 1fr; gap: 14px; }
+.setgrid { display: grid; grid-template-columns: 1fr; gap: 14px; }
+.clu .card, .setgrid .card { margin-bottom: 0; }
+
+/* Split-pane pictogram (Settings/Log desktop tabs) — hidden on mobile where
+   the tab is a plain icon/label pill like every other .tabs-mobile button. */
+.pane-ico { display: none; }
+/* Diagnostics panel — hidden at every width until the desktop DIAG toggle
+   turns it on (the toggle itself lives in .tabs-desktop, desktop-only). */
+#diagHost { display: none; }
+/* .tab.drive-tab is visible by default (mobile) — hidden only above the
+   breakpoint (see the >=761px media query below). */
 
 @media (min-width: 620px) {
   .tabs { position: static; max-width: 560px; margin: 0 auto 12px; border: 1px solid var(--line-1); padding: 4px; }
@@ -1576,32 +2089,35 @@ pre.log, .screen.log {
 }
 .gleg-took  { background: var(--reality); box-shadow: 0 0 4px var(--reality); }
 .gleg-told  { background: var(--intent); opacity: .8; border: 1px dashed var(--intent); height: 2px; width: 10px; }
-.gleg-asked { background: rgba(77,166,250,.5); border: 1px dotted rgba(77,166,250,.7); height: 2px; width: 10px; }
+.gleg-asked { background: rgba(var(--reality-rgb),.5); border: 1px dotted rgba(var(--reality-rgb),.7); height: 2px; width: 10px; }
 
-/* ===================== App shell flex layout (base — all breakpoints) =====================
-   .desktop-layout is a flex row holding sidebar + resize handle + main panel.
-   On mobile the sidebar/resize-handle are hidden and the main panel takes
-   the full width (body-level scroll). */
+/* ===================== App shell flex layout (base — all breakpoints) ===================== */
+/* align-items:stretch (DELTA D2 fix — was flex-start, a leftover from the
+   pre-elastic-rack sidebar layout where .desktop-layout held two
+   uneven-height siblings). With .main-panel as its only child now,
+   flex-start left .main-panel's height driven purely by its own content —
+   it grew to fit everything (1416px in one repro) and just overflowed
+   silently past .desktop-layout's bounded/clipped box, which is why
+   max-height:100% never resolved anywhere in the #driveMain/#sidePane/
+   #pv-log chain below: the grid container feeding those percentages was
+   never actually height-constrained in the first place. stretch makes
+   .main-panel fill .desktop-layout's real height, which is what every
+   max-height:100% descendant needs to work at all. */
 .desktop-layout {
   display: flex;
-  align-items: flex-start;
-}
-.sidebar {
-  display: none;
-}
-.resize-handle {
-  display: none;
+  align-items: stretch;
 }
 .main-panel {
   flex: 1;
   min-width: 0;
 }
 
-/* ===================== DESKTOP LAYOUT (≥1024px) ===================== */
-@media (min-width: 1024px) {
-  /* Body becomes a flex column so the desktop-layout row can flex-fill
-     whatever height remains under header + hero strip + rail panel —
-     no fragile calc() of stacked row heights. */
+/* ===================== ELASTIC RACK DESKTOP (>=761px) =====================
+   The mock's single breakpoint, expressed mobile-first (matching the rest of
+   this file's convention — base = mobile, this query ADDS the desktop
+   shape) rather than the mock's own desktop-first authoring. Same resulting
+   behavior at the threshold either way. */
+@media (min-width: 761px) {
   body {
     padding: 0;
     display: flex;
@@ -1610,150 +2126,190 @@ pre.log, .screen.log {
     overflow: hidden;
   }
 
-  /* ---- Header: one row, full width ---- */
-  header {
-    padding: 6px 20px;
-  }
-
-  /* ---- Banners host ---- */
-  .banners-host {
-    max-width: 100%;
-    padding: 0 20px;
-  }
+  /* DELTA D4 — shared width:min(80vw,96%) column, matching the mock exactly.
+     header/.hero-strip/footer stay full-bleed bars (background/border);
+     their content (.hdr-row/.hero-row/.foot) is what centers. .rail-panel
+     and .main have no separate outer bar, so the column width goes directly
+     on them (rail-panel's own border becomes the column edge, exactly like
+     the mock's .railBreak > .pn). Decision logged in the D4 executor entry:
+     .main itself (not an inner wrapper) carries the width, since D2 already
+     moved scrolling down to #driveMain/#pv-settings/#pv-log — each column's
+     own scrollbar sits at ITS column edge (inside the centered .main), not
+     the viewport edge. */
+  /* DELTA D7 — position:sticky is dead weight here: body doesn't scroll at
+     this breakpoint (overflow:hidden above), so sticky never has anything to
+     stick against. Left as sticky it misleads the next reader; pin it back
+     to static explicitly. */
+  header { padding: 6px 0; position: static; }
+  .hdr-row { width: min(80vw, 96%); margin: 0 auto; }
+  .banners-host { max-width: 100%; padding: 0 20px; }
   .banners-host .banner.show,
-  .banners-host .fault.show {
-    display: block;
-    margin-bottom: 0;
-    border-radius: 0;
-  }
+  .banners-host .fault.show { display: block; margin-bottom: 0; border-radius: 0; }
+  .hero-strip { padding: 10px 0 8px; }
+  .hero-row { width: min(80vw, 96%); margin: 0 auto; }
+  /* 10px vertical margins: the panel's outer outline is drawn 5px OUTSIDE
+     its border box (outline-offset 4 + 1px line) — at margin 0 it overlapped
+     the hero strip's border above and the tab bar below. */
+  .rail-panel.panel { width: min(80vw, 96%); margin: 10px auto; padding: 10px 20px 6px; }
 
-  /* ---- Hero strip + rail panel gutters ---- */
-  .hero-strip { padding: 10px 20px 8px; }
-  .rail-panel.panel { padding: 10px 20px 6px; }
+  .desktop-layout { display: flex; flex: 1; min-height: 0; overflow: hidden; }
+  .home-header-btn { flex: 0 0 auto; min-width: 48px; min-height: 36px; font-size: .72rem; padding: 4px 10px; }
 
-  /* ---- Two-column desktop layout ---- */
-  .desktop-layout {
-    display: flex;
+  .main-panel { flex: 1; display: flex; flex-direction: column; overflow: hidden; min-height: 0; }
+
+  /* ---- Collapsibles disabled on desktop — every card renders fully open,
+     no caret/click affordance (JS click handler stays wired, harmless). ---- */
+  .main .card.collapsible { cursor: default; }
+  .main .card.collapsible > .card-head { cursor: default; }
+  .main .card.collapsible .caret { display: none; }
+  .main .card.collapsible .card-body { max-height: none !important; opacity: 1; pointer-events: auto; }
+  /* Exception (DELTA D2 finding): Anomaly Detail lives inside #pv-log, whose
+     height is bounded and non-scrolling (single-scroller doctrine — the
+     terminal is the only thing that scrolls there). Forcing it open like
+     every other desktop card ate enough height at 1440x800 to push the
+     Clients card below the fold, clipped invisible. It's collapsed-by-
+     default for a reason (§4.2 — the head already surfaces the counts);
+     restore real collapse behavior for it specifically. */
+  #pv-log .card.collapsible { cursor: pointer; }
+  #pv-log .card.collapsible > .card-head { cursor: pointer; }
+  #pv-log .card.collapsible .caret { display: block; }
+  #pv-log .card.collapsible.collapsed .card-body { max-height: 0 !important; opacity: 0; margin: 0; padding: 0; pointer-events: none; }
+  .main .card { padding: 20px 22px; }
+  .main .card.tight { padding: 16px 22px; }
+  #health { display: contents; }
+
+  /* ---- .main — Drive always visible, Settings/Log open as a sticky pane --
+     Scroll architecture (DELTA D2): exactly ONE scroll owner per visible
+     column, all heights derived from the flex parent (never vh — vh measures
+     the viewport, but .main's actual scrollport sits ~250-320px lower than
+     the viewport top once header/banners/hero/rail are accounted for, so a
+     vh-based max-height on a nested pane is taller than the space it lives
+     in). .main itself no longer scrolls; #driveMain and #pv-settings each own
+     their column's scroll, #pv-log delegates to its terminal so the card
+     head (anomaly chips) stays pinned while the log body scrolls. */
+  .main {
     flex: 1;
+    display: grid;
+    grid-template-columns: 1fr;
+    /* Without an explicit row track, grid rows are auto-sized to fit their
+       tallest item's CONTENT — which can't resolve the max-height:100%
+       chains below (#driveMain/#sidePane/#pv-log/.screen.log) since those
+       percentages need a DEFINITE parent height, not a content-driven one.
+       minmax(0,1fr) makes the row exactly .main's own (already-definite,
+       flex:1-derived) height, breaking that circularity — the classic CSS
+       Grid "child won't scroll" fix (found via DELTA D2 verification: without
+       this, #sidePane silently grew to 1334px content height instead of the
+       ~615px actually available, and only .main's own outer overflow:hidden
+       clipped the excess, indiscriminately, at the very bottom). */
+    grid-template-rows: minmax(0, 1fr);
+    gap: 14px;
+    align-items: stretch;
     min-height: 0;
     overflow: hidden;
+    padding: 14px 0;
+    width: min(80vw, 96%);
+    margin: 0 auto;
   }
-
-  /* ---- Left sidebar ---- */
-  .sidebar {
-    flex: 0 0 340px;
-    border-right: 1px solid var(--line-1);
-    background: var(--ink);
-    display: flex;
-    flex-direction: column;
+  .main.split { grid-template-columns: minmax(0, 1.45fr) minmax(340px, 1fr); }
+  #driveMain {
+    display: block;
+    padding-top: 5px;
+    min-height: 0;
+    max-height: 100%;
     overflow-y: auto;
-    overflow-x: hidden;
-    padding: 12px 16px;
+    padding-right: 6px;
+    scrollbar-width: thin;
+    scrollbar-color: var(--line-2) transparent;
   }
-  .sidebar .card.collapsible { cursor: default; }
-  .sidebar .card.collapsible > .card-head { cursor: default; }
-  .sidebar .card.collapsible .caret { display: none; }
-  .sidebar .card.collapsible .card-body { max-height: none !important; opacity: 1; pointer-events: auto; }
-  .sidebar .card.collapsible { padding: 12px; margin-bottom: 10px; }
-  .sidebar .card .hint { display: none; }
-  .sidebar .card .saved { display: none; }
-
-  /* ---- Collapsibles disabled everywhere on desktop (Appendix D: "collapsibles
-     disabled (always open)" at >=1024px) — Generator/Limits cards remain in
-     .tab-contents-host (not cloned to sidebar) but must still render fully
-     expanded with no caret/click affordance. JS click handler stays wired
-     (toggles .collapsed) but these rules force the body visible regardless. */
-  .tab-contents-host .card.collapsible { cursor: default; }
-  .tab-contents-host .card.collapsible > .card-head { cursor: default; }
-  .tab-contents-host .card.collapsible .caret { display: none; }
-  .tab-contents-host .card.collapsible .card-body { max-height: none !important; opacity: 1; pointer-events: auto; }
-
-  /* Desktop Home button in hero strip */
-  .home-header-btn {
-    flex: 0 0 auto;
-    min-width: 48px;
-    min-height: 36px;
-    font-size: .72rem;
-    padding: 4px 10px;
-  }
-
-  /* ---- Main panel (right) ---- */
-  .main-panel {
-    flex: 1;
-    display: flex;
+  #driveMain::-webkit-scrollbar { width: 6px; }
+  #driveMain::-webkit-scrollbar-thumb { background: var(--line-2); }
+  .clu { grid-template-columns: 1.22fr 1fr; }
+  .main.split .clu { grid-template-columns: 1fr; }
+  #sidePane {
+    display: none;
+    position: static;
+    min-height: 0;
+    max-height: 100%;
     flex-direction: column;
     overflow: hidden;
-    min-height: 0;
+    padding: 5px 6px 8px 5px;
   }
-  .tab-contents-host {
-    flex: 1;
+  .main.split #sidePane { display: flex; }
+  #pv-settings {
+    min-height: 0;
+    max-height: 100%;
     overflow-y: auto;
-    overflow-x: hidden;
+    padding-right: 6px;
+    scrollbar-width: thin;
+    scrollbar-color: var(--line-2) transparent;
+  }
+  #pv-settings::-webkit-scrollbar { width: 6px; }
+  #pv-settings::-webkit-scrollbar-thumb { background: var(--line-2); }
+  /* #pv-log.active, not bare #pv-log — an ID selector setting display:flex
+     unconditionally would beat .paneView{display:none} on specificity
+     regardless of the .active class JS toggles, so the Log pane would
+     render (and bleed through, verified: Log's head + counts appeared
+     overlapping the Settings pane in a screenshot) even while Settings was
+     the open pane. Gating on .active keeps ID specificity for the properties
+     that matter while falling back to .paneView's display:none when closed. */
+  #pv-log.active {
+    display: flex;
+    flex-direction: column;
     min-height: 0;
-    padding: 12px 20px 20px;
-    display: block; /* single-column scroll — NO flex-wrap */
+    max-height: 100%;
+    overflow: hidden;
   }
-  /* ---- Card masonry — info density pass v2 ----
-     The auto-fill grid left ragged holes under short cards (every row was as
-     tall as its tallest card). CSS multicol gives a true masonry pack: cards
-     stack top-to-bottom per column with no dead air, and columns appear only
-     when the viewport affords them. Wrapper divs (#health, #tmcCardTarget)
-     dissolve via display:contents so their cards join the flow directly.
-     Full-width elements (Save button, saved indicator) use column-span:all. */
-  .tab-contents-host .tab-content.active {
-    display: block !important;
-    columns: 440px;
-    column-gap: 24px;
-    max-width: none;
-    margin: 0;
+  /* Every card gets overflow:hidden — without it, a card shrunk below its
+     own content's natural height (DELTA D2 debugging turned this up) doesn't
+     clip cleanly; its text spills out and overlaps the NEXT card instead.
+     The Log card additionally gets flex:1 so it (and its internal scrolling
+     terminal) is what absorbs available space first; Anomaly Detail
+     (collapsed by default) and Clients keep their natural size as long as
+     there's room, only shrinking once the Log card is already at its floor
+     (head+hint+button-row, with the terminal itself down to 0). */
+  #pv-log .card { display: flex; flex-direction: column; min-height: 0; overflow: hidden; }
+  #pv-log .card:first-child { flex: 1 1 auto; }
+  /* shrink:0 — Anomaly Detail/Clients keep their natural size; the Log card
+     (shrink:1 above) absorbs the entire deficit alone. Equal shrink factors
+     on all three would size-weight the shrink toward whichever card had the
+     MOST content — which was the Log card already, making it shrink first
+     AND hardest, the opposite of the intended priority. */
+  #pv-log .card:not(:first-child) { flex: 0 0 auto; }
+  #pv-log .screen.log {
+    flex: 1;
+    min-height: 0;
+    max-height: none;
+    overflow-y: auto;
+    scrollbar-width: thin;
+    scrollbar-color: var(--line-2) transparent;
   }
-  .tab-contents-host .tab-content.active > .card,
-  #health > .card,
-  #tmcCardTarget > .card {
-    break-inside: avoid;
-    margin-bottom: 22px;
-  }
-  /* Cards get breathing room at desktop widths — 16px padding was tuned for
-     phones; with 440px columns the content can afford real margins. */
-  .tab-contents-host .card { padding: 20px 22px; }
-  .tab-contents-host .card.tight { padding: 16px 22px; }
-  .tab-contents-host .tab-content.active > #health,
-  .tab-contents-host .tab-content.active > #tmcCardTarget { display: contents; }
-  .tab-contents-host .tab-content.active > .btn,
-  .tab-contents-host .tab-content.active > .saved {
-    column-span: all;
-    margin-bottom: 14px;
-  }
-  /* Log tab wants WIDE columns — preformatted device/anomaly logs are line-
-     oriented and unreadable at 340px. Two fat columns max, taller screens. */
-  .tab-contents-host #log.active { columns: 600px; }
-  #log .log.screen { min-height: 340px; max-height: 60vh; }
 
-  /* ---- Graph panel (above tab pills, kept until Task 9) ---- */
-  .graph-panel {
-    flex: 0 0 auto;
-    display: block;
-    padding: 6px 20px 8px;
-  }
-  .graph-panel:empty { display: none; }
-  .graph-panel .card { margin-bottom: 0; max-width: none !important; }
-  .graph-panel .card.collapsible { cursor: default; }
-  .graph-panel .card.collapsible > .card-head { cursor: default; }
-  .graph-panel .card .caret { display: none !important; }
-  .graph-panel .card .card-body { max-height: none !important; opacity: 1; pointer-events: auto; }
-  .graph-panel .graph-body canvas { height: 180px; }
-  @media (min-height: 900px) { .graph-panel .graph-body canvas { height: 240px; } }
-  @media (min-height: 1100px) { .graph-panel .graph-body canvas { height: 300px; } }
-
-  /* ---- Desktop tab pills ---- */
+  /* ---- Desktop tab pills ----
+     Two bugs fixed here: (1) the bar used a fixed margin:0 20px instead of
+     the shared width:min(80vw,96%) column every other region uses (D4), so
+     at wide viewports its right edge extended past .main's content below
+     it — reads as "too wide"/misaligned. (2) ".tab-pane:first-of-type"
+     never matched anything: :first-of-type counts by TAG among siblings,
+     and the first <button> sibling is the hidden .drive-tab, not a
+     .tab-pane — so margin-left:auto never applied and the pills sat
+     left-aligned with a large dead gap to their right. justify-content:
+     flex-end on the bar itself floats them right, robustly, without
+     depending on sibling order. */
+  /* Mock r6's underline treatment: a single hairline under the whole bar,
+     borderless text buttons, active = 2px reality underline riding on top
+     of the bar's hairline (margin-bottom:-1px). Replaces the old boxy
+     pill-in-a-double-bordered-bar look, which read as a thick band crowding
+     the rail above it. */
   .tabs-desktop {
     flex: 0 0 auto;
     display: flex;
-    margin: 0 20px;
-    padding: 8px 16px 6px;
-    gap: 4px;
+    align-items: center;
+    justify-content: flex-end;
+    width: min(80vw, 96%);
+    margin: 0 auto;
+    padding: 0;
+    gap: 2px;
     background: var(--ink);
-    border-top: 1px solid var(--line-1);
     border-bottom: 1px solid var(--line-1);
     position: static;
     max-width: none;
@@ -1761,43 +2317,147 @@ pre.log, .screen.log {
   .tabs-desktop .tab {
     flex: 0 0 auto;
     flex-direction: row;
-    gap: 6px;
+    gap: 8px;
     font-size: .76rem;
-    padding: 6px 12px;
-    border-radius: var(--radius);
-    min-height: 34px;
+    letter-spacing: .14em;
+    text-transform: uppercase;
+    padding: 9px 18px;
+    border: none;
+    border-bottom: 2px solid transparent;
+    margin-bottom: -1px;
+    border-radius: 0;
+    min-height: 0;
+    background: none;
+    color: var(--tx-ghost);
   }
+  .tabs-desktop .tab:hover { color: var(--tx-val); }
+  .tabs-desktop .tab.active {
+    color: var(--tx);
+    border-bottom-color: var(--reality);
+    background: none;
+    border-top: none;
+    border-left: none;
+    border-right: none;
+  }
+  .tab.drive-tab { display: none; }
+  /* DIAG toggle sits left, apart from the right-aligned pane pills. */
+  .tabs-desktop .diag-toggle { margin-right: auto; }
+
+  /* ---- Diagnostics graph (features/diag.js) — replaces .main while on ---- */
+  .main-panel.diag-on .main { display: none; }
+  .main-panel.diag-on #diagHost {
+    display: flex;
+    flex-direction: column;
+    flex: 1;
+    min-height: 0;
+    width: min(80vw, 96%);
+    margin: 0 auto;
+    padding: 14px 0;
+    gap: 8px;
+  }
+  .diag-head {
+    display: flex;
+    gap: 16px;
+    align-items: baseline;
+    flex-wrap: wrap;
+    flex: 0 0 auto;
+  }
+  .diag-key {
+    display: inline-flex;
+    gap: 6px;
+    align-items: center;
+    font-family: 'Chakra Petch', sans-serif;
+    font-size: .68rem;
+    color: var(--tx-mut);
+  }
+  .diag-key i { width: 10px; height: 2px; display: inline-block; flex: 0 0 auto; }
+  .diag-key i.dashed { background-image: repeating-linear-gradient(90deg, currentColor 0 3px, transparent 3px 6px); }
+  .diag-key b { font-weight: 400; color: var(--tx-val); font-variant-numeric: tabular-nums; }
+  .diag-note { margin-left: auto; font-size: .6rem; color: var(--tx-ghost); }
+  .diag-canvas-wrap { flex: 1; min-height: 0; position: relative; }
+  .diag-canvas-wrap canvas { position: absolute; inset: 0; width: 100%; height: 100%; }
+  /* .tab svg (generic bottom-nav icon rule, 22x22) would otherwise stretch
+     this 15x12 pictogram into a distorted square (DELTA D3) — beat it with
+     an id-free but more specific selector. */
+  .tabs-desktop .tab .pane-ico {
+    display: block;
+    width: 15px;
+    height: 12px;
+    flex: 0 0 auto;
+    opacity: .7;
+    color: currentColor;
+  }
+  .tab.active .pane-ico { opacity: 1; }
+  .pane-ico .fill-half { opacity: .35; }
+  .tab.active .pane-ico .fill-half { opacity: .8; }
 
   /* ---- Hide mobile-only elements ---- */
   .tabs-mobile { display: none !important; }
   .home-fab { display: none !important; }
-
-  /* ---- Resize handle ---- */
-  .resize-handle {
-    display: block;
-    flex: 0 0 4px;
-    cursor: col-resize;
-    background: var(--line-1);
-    position: relative;
-    transition: background .12s;
-    user-select: none;
-    touch-action: none;
-  }
-  .resize-handle .resize-line {
-    position: absolute; top: 50%; left: 50%; transform: translate(-50%, -50%);
-    width: 16px; height: 24px;
-    background: var(--line-3);
-    opacity: 0;
-    transition: opacity .12s;
-  }
-  .resize-handle:hover, .resize-handle.active { background: var(--line-3); }
-  .resize-handle:hover .resize-line, .resize-handle.active .resize-line { opacity: 1; }
-  .sidebar { transition: flex-basis .05s ease-out; }
-
-  /* ---- Sidebar track designer tweaks ---- */
-  .sidebar .designer { gap: 10px; }
-  .sidebar .kv { display: none; }
 }
+
+/* ===================== Footer — LINK strip (§1.6h / §2.3) =================
+   Full-width page footer, visible on every tab (outside the tab/pane
+   system entirely) — the fw chip is the OTA verification surface. Content
+   wired in capabilities.js (retargeted from the old dynamic #linkCard). */
+footer {
+  margin-top: 26px;
+  border-top: 1px solid var(--line-1);
+}
+.foot {
+  width: min(80vw, 96%);
+  margin: 0 auto;
+  padding: 13px 16px;
+  display: flex;
+  align-items: center;
+  gap: 18px;
+  flex-wrap: wrap;
+}
+.pidx-label {
+  font-family: 'Martian Mono', monospace;
+  font-size: .62rem;
+  letter-spacing: .08em;
+  color: var(--tx-faint);
+  flex: 0 0 auto;
+}
+.lmeter { flex: 1; display: flex; align-items: center; gap: 10px; min-width: 160px; }
+.lmeter-val {
+  font-size: .78rem;
+  color: var(--reality);
+  text-shadow: 0 0 8px rgba(var(--reality-rgb),.4);
+}
+.lbar-wrap { flex: 1; position: relative; height: 14px; min-width: 100px; }
+.lbar-bg {
+  position: absolute; inset: 0;
+  background: var(--screen);
+  border: 1px solid var(--line-1);
+  box-shadow: inset 0 2px 4px rgba(0,0,0,.6);
+}
+#rssiFill {
+  position: absolute; left: 1px; top: 1px; bottom: 1px;
+  width: 0%;
+  background: linear-gradient(90deg, rgba(var(--reality-rgb),.25), rgba(var(--reality-rgb),.75));
+  box-shadow: 0 0 8px rgba(var(--reality-rgb),.3);
+  transition: width .3s ease;
+}
+.lchips { display: flex; gap: 13px; flex-wrap: wrap; }
+.lchip { display: flex; gap: 6px; align-items: baseline; font-size: .68rem; }
+.lchip b {
+  color: var(--tx-faint);
+  font-weight: 400;
+  font-size: .6rem;
+  font-family: 'Martian Mono', monospace;
+}
+.lchip .lv {
+  color: var(--tx-val);
+  background: var(--chip);
+  border: 1px solid var(--chip-line);
+  padding: 2px 6px;
+  border-radius: var(--radius);
+}
+/* DELTA D4/D7 — the old ≥761px override (width:100%) fought .foot's own
+   width:min(80vw,96%) rule above; deleted so the footer joins the same
+   shared column as header/hero/rail/main at every width. */
 
 /* ===================== Reduced motion ===================== */
 @media (prefers-reduced-motion: reduce) {
@@ -2010,8 +2670,9 @@ body.stale .hero-val.glow {
   text-shadow: none;
 }
 
-/* Segmented control active → ghost */
-body.stale .seg button.active {
+/* Segmented control / port chip active → ghost */
+body.stale .seg button.active,
+body.stale .port.active {
   border-color: var(--tx-ghost);
   color: var(--tx-ghost);
   box-shadow: none;
@@ -2028,6 +2689,8 @@ body.stale .seg button.active {
 body.suspended .btn,
 body.suspended .tbtn,
 body.suspended .seg button,
+body.suspended .port,
+body.suspended .pat-tile,
 body.suspended input,
 body.suspended select {
   opacity: 0.35;

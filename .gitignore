@@ -5,6 +5,7 @@
 .vscode/launch.json
 .vscode/ipch
 .VSCodeCounter/
+.gitignore
 
 # Real secrets - never commit. Use secrets.example.h as the shared template.
 include/secrets.h
@@ -28,31 +29,26 @@ tools/
 # Python cache
 __pycache__/
 *.pyc
+
+# Working docs, audits, plans & UI mockups — scratch, not firmware
+SD32-*.md
+sd32-preview-*.html
 waypoint_kinematics_audit.md
 graph_screenshot_temp.html
 compile_commands.json
-PCB Layout.diy
 NewPCB.md
-.gitignore
-AIM_servo_modbus_reference.md
-AIM_Servo_Motor_Datasheet_EN_with_images.pdf
 HANDOFF.md
-.gitignore
 plan.md
 PLAN_NewPCB_Migration.md
 PLAN_OSSM_Parity.md
-SD32-overhaul-plan-prompt.md
-SD32-FULL-AUDIT-REPORT.md
-SD32-overhaul-plan.md
-SD32-PASS2-AUDIT-REPORT.md
-SD32-PASS3-AUDIT-REPORT.md
-SD32-WAVE1-FIX-NOW.md
-SD32-WAVE2-FIX-ONCE-WAVE1-WORKS.md
-SD32-WAVE3-FIX-WHENEVER.md
+
+# Reference hardware docs / binaries — not source
+PCB Layout.diy
+AIM_servo_modbus_reference.md
+AIM_Servo_Motor_Datasheet_EN_with_images.pdf
+
+# Build outputs & captures
 build/slopdrive32_s3_main_merged.bin
-SD32-TCODE-V04-ARBITER-PROMPT.md
-.gitignore
 build/capture.csv
-.gitignore
 build/tcode_capture.log
 build/temp_index.html

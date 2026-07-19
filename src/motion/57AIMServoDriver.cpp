@@ -126,17 +126,26 @@ void Ai57AIMServoDriver::init() {
 void Ai57AIMServoDriver::update() {
     runMotorStep();
 
-    // Refresh the INA228 telemetry cache a few times a second so the WebUI
-    // toolbar can show a live current/voltage readout. We skip this while the
-    // homing task is running — homing owns the I2C bus and refreshes the cache
-    // itself every poll, and we don't want two callers gulping the same shunt
-    // at once. Throttled to ~5Hz: plenty for a human-readable number, and light
-    // enough that it never steals time from the motion pulse train. :3
+    // Refresh the INA228 telemetry cache. Two tiers (both skipped while the
+    // homing task owns the I2C bus — it refreshes the cache itself):
+    //  - FAST (40Hz): bus current + bus voltage only — 2 I2C transactions,
+    //    ~0.3ms at 400kHz. 25ms matches the chip's own conversion cadence
+    //    (540µs conversions × AVG16 ≈ 26ms per fresh result), so this is the
+    //    fastest rate that yields NEW data; the hardware 16-sample averaging
+    //    is untouched, so the noise floor is identical to the old 5Hz poll.
+    //    This is what makes the 0x01 telemetry mA and the diagnostics graph
+    //    actually live instead of 5Hz step-plateaus.
+    //  - FULL (1Hz): temp/shunt/power/energy — the slow health set, 6
+    //    transactions, no reason to burn bus time on it 40× a second. :3
     if (!_homing && _current.isReady()) {
         uint32_t now = millis();
-        if (now - _last_current_poll_ms >= 200) {   // ~5Hz refresh
+        if (now - _last_current_poll_ms >= 25) {    // ~40Hz fast refresh
             _last_current_poll_ms = now;
-            _current.poll();   // one quick I2C sip, stashes into the cache
+            _current.pollFast();   // current + busV only
+        }
+        if (now - _last_current_full_poll_ms >= 1000) {  // 1Hz full refresh
+            _last_current_full_poll_ms = now;
+            _current.poll();       // temp/shunt/power/energy too
         }
     }
 

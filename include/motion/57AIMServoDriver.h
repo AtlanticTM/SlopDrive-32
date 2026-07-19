@@ -201,7 +201,8 @@ public:
 private:
     // Throttle for the update()-driven telemetry refresh. We only need the
     // toolbar number a few times a second, not every motion tick. :3
-    uint32_t _last_current_poll_ms = 0;
+    uint32_t _last_current_poll_ms = 0;       // fast poll (current+busV, 40Hz)
+    uint32_t _last_current_full_poll_ms = 0;  // full poll (temp/energy/shunt, 1Hz)
 
 
 

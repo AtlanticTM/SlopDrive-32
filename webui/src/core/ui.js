@@ -171,6 +171,11 @@ export function setVVState(id, level) {
 export function toast(msg, kind = 'info', ico = 'i-info', ms = 4000) {
   const wrap = $('toasts');
   if (!wrap) return;
+  // Announce toasts to assistive tech without stealing focus.
+  if (!wrap.hasAttribute('aria-live')) {
+    wrap.setAttribute('aria-live', 'polite');
+    wrap.setAttribute('role', 'status');
+  }
   const t = document.createElement('div');
   t.className = 'toast ' + kind;
   t.innerHTML = '<span class="ti">' + icon(ico) + '</span><span>' + msg + '</span>';
@@ -183,21 +188,61 @@ export function toast(msg, kind = 'info', ico = 'i-info', ms = 4000) {
 const TAB_LABELS = { drive: 'Drive', health: 'Health', settings: 'Settings', log: 'Log' };
 
 export function initTabs() {
-  // Label injection
+  // Label injection + ARIA tab semantics
   document.querySelectorAll('.tab').forEach(t => {
     if (!t.querySelector('span')) {
       t.insertAdjacentHTML('beforeend', '<span>' + (TAB_LABELS[t.dataset.tab] || '') + '</span>');
     }
+    t.setAttribute('role', 'tab');
+    t.setAttribute('aria-selected', t.classList.contains('active') ? 'true' : 'false');
   });
 
-  // Tab switching — toggleable: clicking an active tab deselects it,
-  // collapsing the content area so nothing is shown. Clicking an inactive
-  // tab shows its content. Only one tab can be active at a time. :3
+  // Tab switching — strict single-select. The old code toggled `active` on the
+  // clicked tab/content ONLY, never clearing the previously-active pair, so two
+  // panels could stack (the "tabs don't open next to each other" bug) or every
+  // tab could be deselected leaving a blank void. Now: exactly one tab is
+  // active at all times. Clicking the already-active tab is a no-op (you can't
+  // strand the operator on an empty screen mid-session). Both the mobile and
+  // desktop tab bars share data-tab ids, so we sync the `active` class across
+  // *all* .tab buttons for a given id, not just the one clicked. :3
+  function activateTab(id) {
+    document.querySelectorAll('.tab').forEach(t => {
+      const on = t.dataset.tab === id;
+      t.classList.toggle('active', on);
+      t.setAttribute('aria-selected', on ? 'true' : 'false');
+    });
+    document.querySelectorAll('.tab-content').forEach(c => {
+      c.classList.toggle('active', c.id === id);
+    });
+    // Fresh panel → start scrolled at the top so the operator always sees the
+    // head of the list, never a random mid-scroll position from last visit.
+    // Desktop scrolls inside .tab-contents-host; mobile scrolls the whole body
+    // (the tab bar is position:fixed), so reset BOTH so neither layout strands
+    // the operator mid-scroll on the previous panel's tail. :3
+    const host = document.querySelector('.tab-contents-host');
+    if (host) host.scrollTop = 0;
+    if (window.scrollTo) window.scrollTo(0, 0);
+  }
+  window.__activateTab = activateTab;
+
   document.querySelectorAll('.tab').forEach(btn => {
     btn.addEventListener('click', () => {
-      const target = document.getElementById(btn.dataset.tab);
-      btn.classList.toggle('active');
-      if (target) target.classList.toggle('active');
+      if (btn.classList.contains('active')) return; // already here — no-op
+      activateTab(btn.dataset.tab);
+    });
+  });
+
+  // Arrow-key navigation within each tab bar (roving between sibling tabs).
+  document.querySelectorAll('[role="tablist"], .tabs').forEach(bar => {
+    bar.addEventListener('keydown', e => {
+      if (e.key !== 'ArrowRight' && e.key !== 'ArrowLeft') return;
+      const tabs = Array.from(bar.querySelectorAll('.tab'));
+      const idx = tabs.indexOf(document.activeElement);
+      if (idx === -1) return;
+      e.preventDefault();
+      const next = tabs[(idx + (e.key === 'ArrowRight' ? 1 : tabs.length - 1)) % tabs.length];
+      next.focus();
+      activateTab(next.dataset.tab);
     });
   });
 }
@@ -226,10 +271,24 @@ export function initCollapsibleCards() {
   document.querySelectorAll('.card.collapsible').forEach(card => {
     const head = card.querySelector('.card-head');
     if (!head) return;
+    // Keyboard-operable collapse: the head acts as a disclosure button.
+    head.setAttribute('tabindex', '0');
+    head.setAttribute('role', 'button');
+    head.setAttribute('aria-expanded', card.classList.contains('collapsed') ? 'false' : 'true');
+    const toggle = () => {
+      card.classList.toggle('collapsed');
+      head.setAttribute('aria-expanded', card.classList.contains('collapsed') ? 'false' : 'true');
+      syncCardBody(card);
+    };
     head.addEventListener('click', e => {
       if (e.target.closest('.info')) return;
-      card.classList.toggle('collapsed');
-      syncCardBody(card);
+      toggle();
+    });
+    head.addEventListener('keydown', e => {
+      if (e.key !== 'Enter' && e.key !== ' ') return;
+      if (e.target.closest('.info')) return;
+      e.preventDefault();
+      toggle();
     });
     requestAnimationFrame(() => syncCardBody(card));
   });
@@ -246,6 +305,7 @@ export function initTooltips() {
     tip.className = 'tip';
     tip.innerHTML = b.dataset.tip || '';
     b.appendChild(tip);
+    if (!b.hasAttribute('aria-label')) b.setAttribute('aria-label', 'More info');
     b.addEventListener('click', e => {
       e.preventDefault();
       e.stopPropagation();

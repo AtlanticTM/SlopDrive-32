@@ -19,12 +19,54 @@
   #define SECRET_INTIFACE_PORT   54817
 #endif
 
+// If secrets.h predates the OTA feature (older clone), it won't define
+// SECRET_OTA_PASSWORD. Fall back to an empty string — OtaService treats an
+// empty password as "HTTP OTA hard-refused + ArduinoOTA unauthenticated" and
+// logs a loud warning, so a stale secrets.h fails safe rather than silently
+// exposing an open flash endpoint. Copy the new line from secrets.example.h. :3
+#if !defined(SECRET_OTA_PASSWORD)
+  #define SECRET_OTA_PASSWORD    ""
+#endif
+
+// ---- Firmware version --------------------------------------------------------
+// Bumped by hand on each firmware change so an OTA can be verified as landed
+// (surfaced via /api/capabilities → "fw_version" and the boot log). This is the
+// single source of truth for "which build is actually running." :3
+#define FIRMWARE_VERSION        "2.1.3"
+
 // =============================================================================
 // WiFi Configuration (values come from secrets.h)
 // =============================================================================
 #define WIFI_SSID      SECRET_WIFI_SSID
 #define WIFI_PASSWORD  SECRET_WIFI_PASSWORD
 
+// Per-credential-set connect timeout at boot. setupWiFi() tries the primary
+// (secrets.h) creds for this long, then the NVS-stored secondary creds for the
+// same window, before dropping to serial TCode control. 10s is enough for a
+// normal WPA2 associate + DHCP without stalling boot for a network that isn't
+// there. Boot-only blocking — never hit on the real-time path. :3
+#define WIFI_CONNECT_TIMEOUT_MS   10000
+
+// ---- Boot-time / reconnect strongest-AP selection --------------------------
+// Our deployment is a multi-AP network sharing ONE SSID. The ESP32 default
+// fast-scan latches onto the first-heard AP (often the weakest) and never
+// roams. The rig is stationary during use, so a full scan + strongest-BSSID
+// pin at every WiFi bring-up (cold boot AND every reconnect-from-disconnected
+// cycle) is the complete fix. See TransportManager::_connectBest(). :3
+#define WIFI_SCAN_PIN_ENABLED       1
+// Consecutive pinned-connect failures tolerated before a bring-up cycle falls
+// back to an unpinned WiFi.begin() (lets the core associate with ANY live AP so
+// a dead/deauthing pinned BSSID can't strand the device). The next reconnect
+// cycle re-scans and re-pins the current strongest AP.
+#define WIFI_PIN_MAX_ATTEMPTS       3
+// APs for our SSID weaker than this (dBm) are still connectable but are omitted
+// from the per-candidate applog dump to keep the boot log readable. The chosen
+// AP is ALWAYS logged regardless of this threshold.
+#define WIFI_MIN_RSSI_LOG_DBM       (-90)
+// While the link is down, minimum spacing between supervised reconnect cycles.
+// Keeps a WiFi outage from turning into a continuous scan storm on the comms
+// task (each cycle blocks ~scan + connect-wait). :3
+#define WIFI_RECONNECT_INTERVAL_MS  5000
 
 // =============================================================================
 // Device Geometry — TMC2160 build (DRIVER_TMC2160)
@@ -209,7 +251,11 @@
 // instead of hardcoding 3000/8000 literals (the "half-updated slider" bug in
 // plan.md §5.10.1). Firmware itself always accepts anything up to the hard
 // MAX_SPEED_MM_S/MAX_ACCEL_MM_S2 ceiling above — these are UI-only guardrails. :3
-#define NORMAL_MAX_SPEED_MM_S       5000.0f
+//
+// Normal mode is confirmed safe up to 1000 mm/s for regular use. Expert mode
+// unlocks the full hardware ceiling for those who know what they're asking for.
+// The machine advertises these — the UI only ever asks, never assumes. :3
+#define NORMAL_MAX_SPEED_MM_S       1000.0f
 #define EXPERT_MAX_SPEED_MM_S       MAX_SPEED_MM_S      // 10000
 
 // Default acceleration mm/s^2
@@ -223,7 +269,8 @@
 #define MAX_ACCEL_MM_S2         100000.0f
 
 // Split accel ceilings — same expert-mode split as speed above.
-#define NORMAL_MAX_ACCEL_MM_S2      50000.0f
+// Normal mode confirmed safe to 20000 mm/s²; expert unlocks the full ceiling.
+#define NORMAL_MAX_ACCEL_MM_S2      20000.0f
 #define EXPERT_MAX_ACCEL_MM_S2      MAX_ACCEL_MM_S2     // 100000
 
 // =============================================================================

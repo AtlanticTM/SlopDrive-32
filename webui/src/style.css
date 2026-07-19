@@ -37,11 +37,13 @@
   --line-2:     #272B31;   /* dim glyphs, hairline emphasis */
   --line-3:     #33373E;   /* brackets, ruler majors */
   --line-4:     #454A54;   /* bracket highlight (scan origin) */
-  --tx-hi:      #E4E7EC;   /* headings */
-  --tx:         #B7BCC4;   /* body */
-  --tx-val:     #9AA0AA;   /* nominal numerals (quiet) */
-  --tx-mut:     #575C66;   /* labels */
-  --tx-ghost:   #41454D;   /* hints, ruler numerals */
+  /* Text ramp — nudged one step brighter across the board for legibility
+     (contrast bump; hierarchy and hue preserved). */
+  --tx-hi:      #ECEFF4;   /* headings */
+  --tx:         #C3C8D1;   /* body */
+  --tx-val:     #A8AEB9;   /* nominal numerals (quiet) */
+  --tx-mut:     #666C78;   /* labels */
+  --tx-ghost:   #4D525C;   /* hints, ruler numerals */
   --tx-faint:   #2C3037;   /* index numerals, watermarks */
   --reality:    #4DA6FF;   /* BLUE — measured truth, live motion, active controls */
   --intent:     #A78BFA;   /* PURPLE — commanded/desired/unconfirmed */
@@ -77,6 +79,43 @@
    back to 1.0 rather than redesigning (per Section E implementation notes). */
 @media (max-width: 480px) {
   :root { --s: 1; }
+}
+
+/* ===================== Thing 1 — coarse-pointer hit-target boost =====================
+   The page SCALE reads great; what's hard is HITTING controls one-handed with
+   no dexterity to spare. Rather than reflow the whole rem base (which risks the
+   380px layout), we enlarge only the INTERACTIVE surfaces on touch devices —
+   fat thumbs, taller buttons, deeper form fields — while leaving typography and
+   panel geometry untouched. Fine-pointer (mouse) desktops are unaffected. :3 */
+@media (pointer: coarse) {
+  /* Bigger baseline tap unit cascades into every min-height: var(--tap) button */
+  :root { --tap: calc(var(--s) * 52px); }
+
+  /* Fatter slider thumbs + a thicker touch band so the 1px hairline track is
+     actually grabbable without pixel-hunting. */
+  input[type="range"] { height: 2px; margin: 16px 0; }
+  input[type="range"]::-webkit-slider-thumb { width: 20px; height: 20px; }
+  input[type="range"]::-moz-range-thumb    { width: 20px; height: 20px; }
+
+  /* Nudge / trim grid buttons — the primary in-window micro-adjust controls */
+  .nudge .btn { min-height: 46px; font-size: .82rem; }
+
+  /* Segmented + small buttons get real height */
+  .seg button { min-height: 46px; }
+  .btn.sm { min-height: 40px; }
+
+  /* Form fields deeper for finger accuracy */
+  .num, select { padding: 12px 12px; }
+
+  /* Band edge handles on the rail — widen the invisible hit zone so resizing
+     the stroke window doesn't demand precision. */
+  .rail-band-handle { width: calc(var(--s) * 18px); }
+  .rail-band-handle.lo { left: calc(var(--s) * -9px); }
+  .rail-band-handle.hi { right: calc(var(--s) * -9px); }
+
+  /* Info dots become tappable (were 20px, below the 44px floor) */
+  .info { width: 26px; height: 26px; }
+  .info svg { width: 14px; height: 14px; }
 }
 
 /* ===================== Reset ===================== */
@@ -407,6 +446,204 @@ header {
   margin-bottom: 0;
   background: var(--ink);
 }
+
+/* ===== Rail topbar (Thing 6) — quick-move strip + manual-mode toggle =====
+   The topbar sits above the rail. In DEFAULT mode the quick-move strip gives a
+   fat, dexterity-friendly tap target that commands a move without hunting the
+   thin rail. The Manual toggle (top-right) flips the rail into a distinct
+   scrub instrument. */
+/* The topbar is a positioning context, NOT a flex row. The quick-move strip
+   spans the FULL width so it lines up edge-for-edge with the rail below it,
+   and the manual toggle is absolutely pinned to the top-right so it can never
+   slide across the bar when the strip shows/hides (Thing 5 jump fix). We keep
+   a min-height so the toggle stays anchored even when the strip is hidden in
+   manual mode — otherwise the collapsed topbar would drop it onto the rail. */
+/* Topbar retired — the manual toggle moved into the transport bar and the
+   rail itself is directly tappable, so the quick-move strip was redundant
+   info-density-wise. DOM kept (JS wiring stays inert), visuals gone. */
+.rail-topbar {
+  display: none;
+}
+/* ===== Input tape — command surface above the rail (supersedes quickmove) =====
+   Normal mode: the tape spans EXACTLY the reported window extent, so mapping the
+   tape's local x to [wMin..wMax] makes it geometrically impossible to command
+   outside the window. Manual mode: the tape spans full travel and steps up to
+   full --intent treatment. The dashed full-travel guides on the track show where
+   full travel IS even when the tape doesn't cover it. */
+.rail-tape-assembly {
+  width: 100%;
+  margin-bottom: calc(var(--s) * 8px);
+}
+.rail-tape-labels {
+  display: flex;
+  justify-content: space-between;
+  align-items: baseline;
+  margin-bottom: calc(var(--s) * 4px);
+}
+.rail-tape-mode {
+  font-family: 'Chakra Petch', sans-serif;
+  font-size: calc(var(--s) * 10px);
+  letter-spacing: .14em;
+  text-transform: lowercase;
+  color: color-mix(in srgb, var(--intent) 78%, var(--tx-mut));
+}
+.rail-tape-extent {
+  font-family: 'Martian Mono', monospace;
+  font-size: calc(var(--s) * 10px);
+  color: var(--tx-ghost);
+  font-variation-settings: "wght" 400, "wdth" 90;
+}
+/* Track spans the full rail width with dashed guides top/bottom marking where
+   full travel is even when the tape (normal mode) covers only the window. */
+.rail-tape-track {
+  position: relative;
+  width: 100%;
+  height: calc(var(--s) * 26px);
+  border-top: 1px dashed var(--line-1);
+  border-bottom: 1px dashed var(--line-1);
+}
+.rail-tape {
+  position: absolute;
+  top: 0; bottom: 0;
+  left: 0; width: 100%;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  background:
+    repeating-linear-gradient(90deg, rgba(167,139,250,.10) 0 1px, transparent 1px 7px),
+    var(--screen);
+  border: 1px solid rgba(167,139,250,.45);
+  border-radius: var(--radius);
+  box-shadow: inset 0 2px 6px rgba(0,0,0,.6);
+  cursor: pointer;
+  touch-action: none;
+  overflow: hidden;
+  transition: left .25s cubic-bezier(.3,.7,.3,1), width .25s cubic-bezier(.3,.7,.3,1),
+              border-color .2s ease, box-shadow .2s ease;
+}
+.rail-tape-micro {
+  font-family: 'Martian Mono', monospace;
+  font-size: calc(var(--s) * 9px);
+  letter-spacing: .18em;
+  color: var(--tx-ghost);
+  pointer-events: none;
+  white-space: nowrap;
+}
+/* Scrub pip — rides under the pointer while the tape is pressed. */
+.rail-tape-pip {
+  position: absolute;
+  top: 0; bottom: 0;
+  width: 2px;
+  background: var(--intent);
+  box-shadow: 0 0 10px rgba(167,139,250,.7);
+  opacity: 0;
+  pointer-events: none;
+  transition: opacity .1s ease;
+  transform: translateX(-1px);
+}
+.rail-tape-pip.on { opacity: 1; }
+/* Pending window shadow → dashed tape border (matches the band convention),
+   escalating to warn/bad on overdue — mirrored from #spineRailHost by rail.js. */
+.rail-tape-assembly.pending .rail-tape { border-style: dashed; }
+.rail-tape-assembly.overdue1 .rail-tape { border-color: var(--warn); }
+.rail-tape-assembly.overdue2 .rail-tape { border-color: var(--bad); }
+/* Manual mode — tape spans full travel, full --intent treatment. */
+.rail-panel.manual-mode .rail-tape {
+  border-color: var(--intent);
+  box-shadow: inset 0 2px 6px rgba(0,0,0,.6), 0 0 14px rgba(167,139,250,.28);
+}
+/* Drag-live — kill the tape slide transition so preview tracks the finger 1:1. */
+.rail-panel.drag-live .rail-tape {
+  transition: border-color .2s ease, box-shadow .2s ease;
+}
+
+/* ===== Hazard zones — thin red keep-out hatching outside the window =====
+   Two ribbons inside #spineRailHost, siblings of the band, below the canvas in
+   z-order, pointer-events:none. Whisper-level --bad hatch — never outshines the
+   phosphor or the band. Width follows the SAME (wMin,wMax) as the band + tape
+   (ground-truth doctrine). Width transitions instant during drag, 250ms ease on
+   programmatic change; manual mode fades them to .18 (limits unenforced). */
+.rail-hz {
+  position: absolute;
+  height: calc(var(--s) * 9px);
+  pointer-events: none;
+  background: repeating-linear-gradient(135deg, rgba(255,71,87,.22) 0 3px, rgba(255,71,87,.03) 3px 7px);
+  transition: width .25s ease, opacity .25s ease;
+  z-index: 1;
+}
+.rail-hz.lo { left: 0; }
+.rail-hz.hi { right: 0; }
+.rail-panel.drag-live .rail-hz { transition: opacity .25s ease; }
+.rail-panel.manual-mode .rail-hz { opacity: .18; }
+
+/* Amber shove-flash (set-min/max yielding-bounds) — additive to the pending /
+   settle visuals, never a replacement. 700ms pulse on the yielding handle +
+   band label. */
+@keyframes railFlashWarn {
+  0%, 50%, 100% { opacity: 1; }
+  25%, 75% { opacity: .3; }
+}
+.rail-flash-warn { animation: railFlashWarn .7s ease; }
+.rail-band-handle.rail-flash-warn::before {
+  background: var(--warn);
+  box-shadow: 0 0 10px rgba(245,185,77,.7);
+}
+.rail-band-label.rail-flash-warn {
+  color: var(--warn);
+  text-shadow: 0 0 8px rgba(245,185,77,.5);
+}
+
+/* Pinned to the top-right of the topbar, overlaying the quick-move strip's
+   corner. Absolute positioning means it holds this exact spot whether the
+   strip is visible (default mode) or collapsed (manual mode) — it can never
+   slide across the page on toggle (Thing 5 jump fix). z-index keeps it above
+   the strip so the tap target is never occluded. */
+/* Manual toggle now lives in the transport bar (left of Pause) as a .tbtn —
+   only the pressed state styling remains here: intent purple so manual mode
+   is unmistakable at a glance. */
+.rail-manual-toggle[aria-pressed="true"] {
+  background: rgba(167,139,250,.14);
+  border-color: var(--intent) !important;
+  color: var(--intent) !important;
+  box-shadow: 0 0 14px rgba(167,139,250,.3);
+}
+.rail-manual-toggle[aria-pressed="true"] small { color: var(--intent); }
+
+/* Manual mode active — the quick-move strip is redundant while scrubbing the
+   rail directly, so collapse it and let the rail host carry the interaction.
+   The window band is hidden (manual mode overrides the window entirely) and
+   the rail host gets a distinct purple-edged treatment so the two modes are
+   visually unmistakable at a glance (Thing 5). */
+.rail-panel.manual-mode .rail-quickmove { display: none; }
+/* Band stays VISIBLE in manual mode so the window geometry reads and the §4
+   Set-Min/Max amber shove-flash (on handle + label) is actually seen. The rail
+   is display-only in manual mode, so the band no longer intercepts pointer
+   events — the tape owns commanding, the Set Min/Max buttons own bound edits. */
+.rail-panel.manual-mode .rail-band { pointer-events: none; }
+.rail-panel.manual-mode .spine-rail-host {
+  cursor: ew-resize;
+  border-color: var(--intent);
+  box-shadow: inset 0 2px 8px rgba(0,0,0,.7), 0 0 0 1px rgba(167,139,250,.35);
+}
+
+/* Manual mode actions — Set Min/Max by feel. Hidden in default mode, shown
+   as a compact button row below the rail only when .manual-mode is active. */
+.rail-manual-actions {
+  display: none;
+  gap: 8px;
+  margin-top: calc(var(--s) * 6px);
+}
+.rail-panel.manual-mode .rail-manual-actions {
+  display: flex;
+}
+.rail-manual-actions .btn {
+  flex: 1;
+  border-color: var(--intent);
+  color: var(--intent);
+}
+.rail-manual-actions .btn:active {
+  background: rgba(167,139,250,.12);
+}
 .spine-rail-host {
   height: calc(var(--s) * 72px);
   min-height: calc(var(--s) * 72px);
@@ -566,7 +803,7 @@ header {
   align-items: center;
   gap: 4px;
   font-family: 'Chakra Petch', sans-serif;
-  font-size: .6rem;
+  font-size: .68rem;
   color: var(--tx-mut);
   font-weight: 500;
   text-transform: lowercase;
@@ -574,13 +811,13 @@ header {
 }
 .hero-label svg { width: 8px; height: 8px; color: var(--tx-ghost); }
 .hero-val {
-  font-size: 1.15rem;
+  font-size: 1.35rem;
 }
 /* Big blue "actual" numeral — always lit like the concept mock.
    Spec §E: hero numeral clamp(49px, 5.6vw, 72px) — this value is already
    the scaled (1.12x) target, so it is a baked literal, not calc(var(--s)*…). */
 #heroActual {
-  font-size: clamp(49px, 5.6vw, 72px);
+  font-size: clamp(54px, 6.2vw, 80px);
   line-height: 0.95;
   color: var(--reality);
   text-shadow: var(--glow-reality);
@@ -632,7 +869,7 @@ body.stale #heroActual {
     gap: 8px;
     min-width: 0;
   }
-  #heroActual { font-size: clamp(38px, 8vw, 49px); }
+  #heroActual { font-size: clamp(42px, 8.5vw, 54px); }
   .spine-transport {
     flex: 1 1 100%;
     order: 3;
@@ -896,6 +1133,13 @@ input[type="range"]:active::-moz-range-thumb {
   box-shadow: 0 0 0 2px var(--ink), 0 0 10px rgba(77,166,255,.5);
 }
 
+/* Hide native number-input spinners — they clash with the instrument styling
+   and are too small to be useful touch targets anyway (nudge/trim buttons
+   cover the increment use-case). */
+.num::-webkit-outer-spin-button,
+.num::-webkit-inner-spin-button { -webkit-appearance: none; margin: 0; }
+.num[type="number"] { -moz-appearance: textfield; appearance: textfield; }
+
 .num {
   width: 100%;
   padding: 8px 10px;
@@ -938,7 +1182,19 @@ select:focus { outline: none; border-color: var(--reality); }
 
 /* ---- Toggles ---- */
 .switch { display: flex; align-items: center; gap: 10px; cursor: pointer; user-select: none; }
-.switch input { display: none; }
+/* Keep the checkbox focusable for keyboard users (display:none removed it
+   from the tab order entirely) — visually hidden, focus ring drawn on track. */
+.switch input {
+  position: absolute;
+  opacity: 0;
+  width: 1px;
+  height: 1px;
+  pointer-events: none;
+}
+.switch input:focus-visible + .track {
+  outline: 2px solid var(--reality);
+  outline-offset: 1px;
+}
 .switch .track {
   width: 40px;
   height: 22px;
@@ -986,6 +1242,11 @@ select:focus { outline: none; border-color: var(--reality); }
 }
 .btn:hover { border-color: var(--line-4); }
 .btn:active { border-color: var(--reality); color: var(--reality); }
+.btn:disabled, .btn[aria-disabled="true"] {
+  opacity: .45;
+  cursor: not-allowed;
+  pointer-events: none;
+}
 .btn svg { width: 15px; height: 15px; }
 .btn.primary {
   border-color: var(--reality);
@@ -1028,6 +1289,7 @@ select:focus { outline: none; border-color: var(--reality); }
   transition: border-color .12s, color .12s;
 }
 .seg button:hover { border-color: var(--line-4); }
+.seg button:disabled { opacity: .45; cursor: not-allowed; }
 .seg button.active {
   border-color: var(--reality);
   color: var(--reality);
@@ -1204,6 +1466,7 @@ pre.log, .screen.log {
   word-break: break-word;
   max-height: 300px;
   overflow-y: auto;
+  overscroll-behavior: contain; /* log scroll never chains to the page */
   margin-bottom: 10px;
   font-family: 'Martian Mono', monospace;
   font-variation-settings: "wght" 400, "wdth" 85;
@@ -1253,22 +1516,35 @@ pre.log, .screen.log {
 .tabs {
   position: fixed; left: 0; right: 0; bottom: 0; z-index: 42;
   background: var(--ink); border-top: 1px solid var(--line-1);
-  display: flex; padding: 6px 6px calc(6px + env(safe-area-inset-bottom)); gap: 2px;
+  display: flex; padding: 8px 8px calc(8px + env(safe-area-inset-bottom)); gap: 4px;
 }
 .tab {
   flex: 1; background: none; border: 1px solid transparent; border-radius: var(--radius);
   color: var(--tx-ghost); cursor: pointer;
-  display: flex; flex-direction: column; align-items: center; gap: 2px; padding: 4px 2px;
-  font-size: .58rem; font-weight: 500; font-family: 'Chakra Petch', sans-serif;
-  transition: color .12s, border-color .12s;
-  min-height: var(--tap);
+  display: flex; flex-direction: column; align-items: center; justify-content: center; gap: 3px; padding: 6px 2px;
+  font-size: .66rem; font-weight: 500; font-family: 'Chakra Petch', sans-serif;
+  transition: color .12s, border-color .12s, background .12s;
+  min-height: calc(var(--tap) + 6px);
+  -webkit-tap-highlight-color: transparent;
 }
-.tab svg { width: 18px; height: 18px; }
-.tab.active { color: var(--reality); border-color: var(--line-2); }
+.tab svg { width: 22px; height: 22px; }
+/* Active tab gets a filled chip, not just a hairline — glanceable at arm's
+   length with imprecise touch. The phosphor accent reads clearly against the
+   ink bar even in peripheral vision. :3 */
+.tab.active {
+  color: var(--reality);
+  border-color: var(--line-2);
+  background: rgba(108,140,255,.10);
+}
 
 .tab-content { display: none; animation: fade .15s ease; }
 .tab-content.active { display: block; }
 @keyframes fade { from { opacity: 0; transform: translateY(2px); } to { opacity: 1; transform: none; } }
+
+/* Desktop tab pills are hidden on mobile/tablet — only the fixed bottom
+   bar (.tabs-mobile) runs below 1024px. Without this, both tab bars
+   render simultaneously fixed at the bottom (the adjacency glitch). */
+.tabs-desktop { display: none; }
 
 @media (min-width: 620px) {
   .tabs { position: static; max-width: 560px; margin: 0 auto 12px; border: 1px solid var(--line-1); padding: 4px; }
@@ -1417,10 +1693,41 @@ pre.log, .screen.log {
     padding: 12px 20px 20px;
     display: block; /* single-column scroll — NO flex-wrap */
   }
+  /* ---- Card masonry — info density pass v2 ----
+     The auto-fill grid left ragged holes under short cards (every row was as
+     tall as its tallest card). CSS multicol gives a true masonry pack: cards
+     stack top-to-bottom per column with no dead air, and columns appear only
+     when the viewport affords them. Wrapper divs (#health, #tmcCardTarget)
+     dissolve via display:contents so their cards join the flow directly.
+     Full-width elements (Save button, saved indicator) use column-span:all. */
   .tab-contents-host .tab-content.active {
     display: block !important;
-    max-width: 680px;
+    columns: 440px;
+    column-gap: 24px;
+    max-width: none;
+    margin: 0;
   }
+  .tab-contents-host .tab-content.active > .card,
+  #health > .card,
+  #tmcCardTarget > .card {
+    break-inside: avoid;
+    margin-bottom: 22px;
+  }
+  /* Cards get breathing room at desktop widths — 16px padding was tuned for
+     phones; with 440px columns the content can afford real margins. */
+  .tab-contents-host .card { padding: 20px 22px; }
+  .tab-contents-host .card.tight { padding: 16px 22px; }
+  .tab-contents-host .tab-content.active > #health,
+  .tab-contents-host .tab-content.active > #tmcCardTarget { display: contents; }
+  .tab-contents-host .tab-content.active > .btn,
+  .tab-contents-host .tab-content.active > .saved {
+    column-span: all;
+    margin-bottom: 14px;
+  }
+  /* Log tab wants WIDE columns — preformatted device/anomaly logs are line-
+     oriented and unreadable at 340px. Two fat columns max, taller screens. */
+  .tab-contents-host #log.active { columns: 600px; }
+  #log .log.screen { min-height: 340px; max-height: 60vh; }
 
   /* ---- Graph panel (above tab pills, kept until Task 9) ---- */
   .graph-panel {

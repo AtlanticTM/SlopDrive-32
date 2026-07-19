@@ -58,12 +58,47 @@ public:
     /// core reads them back (WebUI::handleApiStatus). :3
     void pollWifiLink();
 
+    /// Supervise the WiFi link on the reconnect-from-disconnected path. Call
+    /// from the same Core-0 1s cadence as pollWifiLink(). No-op while connected
+    /// (or while WiFi was never brought up). When the link is down it re-runs
+    /// the full scan + strongest-AP pin (rate-limited to WIFI_RECONNECT_INTERVAL_MS).
+    /// We own reconnection deliberately — WiFi.setAutoReconnect() would just
+    /// re-associate with the last (possibly now-weakest/dead) pinned BSSID and
+    /// never re-scan, which is the exact bug this feature fixes. :3
+    void superviseWifi();
+
 private:
     // ---- WiFi event handler (static — bridges to instance via _instance) ----
     // Espressif's onEvent() wants a free function or lambda without capture
     // for the raw NetworkEventCb variant; we use the std::function overload
     // instead so we can bind a member function directly. Hooked in setupWiFi().
     void onWifiEvent(arduino_event_id_t event, arduino_event_info_t info);
+
+    // Attempt a single SSID/password with a bounded, boot-only blocking wait.
+    // Returns true on WL_CONNECTED. Used by setupWiFi() for the NVS-secondary
+    // credential stage (unpinned recovery for an unknown network). :3
+    bool _connectWith(const char* ssid, const char* pass, uint32_t timeoutMs);
+
+    // Full-scan the given SSID, applog every candidate AP, pin WiFi.begin() to
+    // the strongest BSSID, and wait (bounded) for association. On WIFI_PIN_MAX_ATTEMPTS
+    // consecutive pinned failures — or when no candidate is seen — falls back to
+    // an unpinned begin(). Returns true on WL_CONNECTED. Used for the primary
+    // creds at boot and by superviseWifi() on every reconnect cycle. :3
+    bool _connectBest(const char* ssid, const char* pass, uint32_t timeoutMs);
+
+    // Bounded blocking wait for WL_CONNECTED (500ms poll slices). Boot/reconnect
+    // only — never on the real-time path. Shared by _connectWith/_connectBest. :3
+    bool _waitConnected(uint32_t timeoutMs);
+
+    // Reconnect supervisor state. _wifiEnabled gates superviseWifi() so we only
+    // drive reconnection when WiFi actually came up at boot (not when we gave up
+    // and fell to serial TCode). _pinFailStreak counts consecutive pinned-connect
+    // failures for the rule-2 unpinned fallback. _nextReconnectMs rate-limits the
+    // supervisor while the link is down. :3
+    bool     _wifiEnabled    = false;
+    uint8_t  _pinFailStreak  = 0;
+    uint32_t _nextReconnectMs = 0;
+
     SystemState&        _state;
     TCodeParser&        _parser;
     SerialTransport&    _serial;

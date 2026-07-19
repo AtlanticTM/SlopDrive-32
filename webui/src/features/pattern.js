@@ -10,7 +10,7 @@
  * The rAF/canvas loop is allocation-free (Task 3R discipline applies).
  */
 import { $, setRead, icon, toast, pad, setVV } from "../core/ui.js";
-import { post } from "../core/api.js";
+import { post, get } from "../core/api.js";
 import * as cmd from "../core/cmd.js";
 import { OP_GEN_CFG, OP_GEN_RUN } from "../core/wire.js";
 import { TRAVEL, winMin, winMax } from "../core/range.js";
@@ -158,8 +158,10 @@ function scopeFrame(nowMs) {
 
     // Advance phase when running
     if (pat.running) {
-        var speed = parseInt($('#patSpeed') ? $('#patSpeed').value : 50);
-        // Speed slider 0-100 maps to stroke period ~0.3s..5s
+        var speed = parseInt($('#patSpeed') ? $('#patSpeed').value : 0);
+        // Speed slider 0-100 maps to stroke period ~0.3s..5s. At speed 0 the
+        // generator idles at a standstill (period → very long) and ramps up
+        // from nothing — no forced 50% floor. :3
         var periodMs = 5000 - speed * 45; // 5000ms at 0, 500ms at 100
         _scope.phase += dtMs / periodMs;
         if (_scope.phase > 1) _scope.phase -= 1;
@@ -270,9 +272,47 @@ function buildPatternSeg() {
     });
 }
 
+// seedPatSlider — set a generator slider's value from a REAL device number,
+// refresh its readout, and un-gate it. The markup ships every generator slider
+// `disabled` with a `—` readout so NOTHING is prepopulated with an invented
+// number on boot; the field only comes alive once the firmware's own value
+// lands here. If the field is genuinely absent the slider stays gated/blank. :3
+function seedPatSlider(id, readId, val) {
+    var e = $(id); if (!e) return;
+    if (typeof val !== 'number') return;   // no device truth → leave gated/blank
+    e.value = val;
+    e.disabled = false;
+    var r = $('#' + readId); if (r) r.textContent = Math.round(val);
+}
+
+// Pull the generator's live params from the device and seed the sliders. Runs
+// once on init so the Generator card reflects machine truth instead of the
+// retired hardcoded 0/100/100/50 markup values. :3
+export async function loadPatternParams() {
+    try {
+        const d = await get('/api/pattern');
+        if (!d) return;
+        seedPatSlider('patSpeed',     'patSpeedVal', typeof d.speed === 'number' ? d.speed : undefined);
+        seedPatSlider('patDepth',     'patDepthVal', typeof d.depth === 'number' ? d.depth : undefined);
+        seedPatSlider('patStroke',    'patStrokeVal', typeof d.stroke === 'number' ? d.stroke : undefined);
+        seedPatSlider('patSensation', 'patSensVal', typeof d.sensation === 'number' ? d.sensation : undefined);
+        // Reflect the selected pattern in the hidden select + segmented control.
+        if (typeof d.pattern === 'number') {
+            var sel = $('#patSelect'); if (sel) sel.value = d.pattern;
+            var host = $('#patSelectSeg');
+            if (host) host.querySelectorAll('button').forEach(function(b) {
+                b.classList.toggle('active', parseInt(b.dataset.pat) === d.pattern);
+            });
+        }
+    } catch (e) {}
+}
+
 export function initPattern() {
     // Build segmented control
     buildPatternSeg();
+
+    // Seed the generator sliders from device truth (un-gates them).
+    loadPatternParams();
 
     // Slider inputs — push params on drag
     ["patSpeed", "patDepth", "patStroke", "patSensation"].forEach(function (id) {

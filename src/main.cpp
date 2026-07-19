@@ -56,6 +56,7 @@
 
 #include "WebUI.h"
 #include "UiSocket.h"
+#include "OtaService.h"
 
 #if defined(FEATURE_RS485_MODBUS)
 #include "ServoModbus.h"
@@ -113,6 +114,11 @@ static TransportManager   transportMgr(g_state, tcodeParser,
 static UiSocket        uiSocket(g_state);
 static WebUI webui(g_state, motor, mapper, patternEngine,
                     transportMgr, serialTransport, wsTransport, bleTransport);
+
+// WiFi OTA path (firmware + LittleFS bundle). Owns the shared safety gate for
+// both ArduinoOTA (espota) and the HTTP /api/ota endpoints. Serviced from the
+// Core-0 httpTask only — never the motion-critical core. :3
+static OtaService      otaService(g_state, arbiter, patternEngine, uiSocket);
 
 #if defined(FEATURE_RS485_MODBUS)
 static ServoModbus     servoModbus(Serial1, /* addr */ 1);
@@ -199,6 +205,57 @@ static void buttplugStop() {
     // homed + stream state — DSTOP is "stop moving," not "cut power forever."
     g_state.last_intiface_ms = 0;
     arbiter.hardStopMotion();
+}
+
+
+// ============================================================================
+// WIFI sideband command — set secondary credentials over USB serial
+// ============================================================================
+//
+// `WIFI <ssid> <password>` arrives here (un-tokenised tail) via the TCodeParser
+// WifiCmdCallback hook. This is the recovery path for a rig on an unknown
+// network: the operator plugs in USB, opens a serial monitor, types the creds,
+// and reboots — setupWiFi() then tries these NVS-stored creds as its second
+// stage. We split on the FIRST space: everything before is the SSID, the rest
+// (which may itself contain spaces) is the password. `WIFI CLEAR` wipes the
+// stored secondary creds. The reply goes back on the same serial hose. :3
+static void handleWifiCmd(const char* args) {
+    if (!args || args[0] == '\0') {
+        Serial.print("WIFI ERR empty\n");
+        return;
+    }
+
+    // `WIFI CLEAR` — wipe stored secondary creds.
+    if (strncasecmp(args, "CLEAR", 5) == 0 && (args[5] == '\0' || args[5] == ' ')) {
+        ConfigStore::clearWifiCreds();
+        Serial.print("WIFI OK cleared\n");
+        return;
+    }
+
+    // Split SSID (first token) from password (remainder after first space).
+    const char* sp = strchr(args, ' ');
+    if (!sp) {
+        Serial.print("WIFI ERR need <ssid> <password>\n");
+        return;
+    }
+    char ssid[33];
+    size_t ssid_len = (size_t)(sp - args);
+    if (ssid_len == 0 || ssid_len >= sizeof(ssid)) {
+        Serial.print("WIFI ERR ssid length\n");
+        return;
+    }
+    memcpy(ssid, args, ssid_len);
+    ssid[ssid_len] = '\0';
+
+    const char* pass = sp + 1;
+    while (*pass == ' ') pass++;   // skip extra spaces between ssid and pass
+    if (*pass == '\0') {
+        Serial.print("WIFI ERR empty password\n");
+        return;
+    }
+
+    ConfigStore::saveWifiCreds(ssid, pass);
+    Serial.printf("WIFI OK saved SSID='%s' — reboot to connect\n", ssid);
 }
 
 
@@ -378,6 +435,7 @@ static void commsTask(void* /*param*/) {
             if (wsTransport.isConnected() || serialTransport.isActive() || dongleTransport.isActive())
                 APPLOGF("[RATE] rx=%u frames/s", per_sec);
             transportMgr.pollWifiLink();
+            transportMgr.superviseWifi();   // re-scan + re-pin if link dropped
         }
 
         vTaskDelay(pdMS_TO_TICKS(2));
@@ -390,6 +448,7 @@ static void httpTask(void* param) {
     while (true) {
         ui->update();
         uiSocket.update();
+        otaService.handle();   // service ArduinoOTA + deferred HTTP reboot (Core 0)
 #if defined(FEATURE_RS485_MODBUS)
         servoModbus.update();
 #endif
@@ -540,14 +599,26 @@ void setup() {
 
     statusLedsInit();
 
-    transportMgr.setupWiFi();
+    bool wifi_ok = transportMgr.setupWiFi();
 
     webui.init();
 
     uiSocket.setTelemetryRing(webui._telemetry_ring, &webui._telemetry_seq, &webui._telemetry_mux);
     uiSocket.setMotorDriver(&motor);
     uiSocket.setWebUI(&webui);
+    webui.setUiSocket(&uiSocket);   // Health-tab /api/clients enumerate + kick
     uiSocket.init();
+
+    // OTA — only meaningful when WiFi actually came up. ArduinoOTA needs the
+    // network stack; the HTTP endpoints ride the WebServer webui.init() just
+    // started. Register both here so a network flash works the moment we boot.
+    if (wifi_ok) {
+        otaService.begin(MDNSServiceName, SECRET_OTA_PASSWORD);
+        otaService.registerHttpRoutes(webui.server());
+        APPLOGF("[OTA] ready — hostname '%s', fw %s", MDNSServiceName, FIRMWARE_VERSION);
+    } else {
+        APPLOG("[OTA] skipped — WiFi down at boot (serial rescue path only)");
+    }
 
 #if defined(FEATURE_RS485_MODBUS)
     Serial1.begin(19200, SERIAL_8N1, AIM_PIN_485_RX, AIM_PIN_485_TX);
@@ -579,6 +650,17 @@ void setup() {
     // Wire TCode parser callbacks
     tcodeParser.onLinearRampTo(buttplugLinearCmd);
     tcodeParser.onLinearStop(buttplugStop);
+    tcodeParser.onWifiCmd(handleWifiCmd);
+
+    // WiFi-dependent transport fallback: if WiFi never associated at boot and
+    // the persisted transport is WS (which needs the network), drop to USB
+    // serial so the machine stays controllable. The operator can then send
+    // `WIFI <ssid> <password>` over serial to store creds and reboot. :3
+    if (!wifi_ok && g_state.getTransport() == TransportMode::WS) {
+        APPLOG("WiFi down at boot — falling back to USB serial transport. "
+               "Send 'WIFI <ssid> <password>' over serial, then reboot.");
+        g_state.setTransport(TransportMode::SER);
+    }
 
     wsTransport.begin();
 

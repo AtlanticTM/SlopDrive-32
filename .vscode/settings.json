@@ -1,8 +1,43 @@
 {
     "discord.enabled": true,
+
+    // ========================================================================
+    // C/C++ IntelliSense ownership — clangd ONLY (fixes the dual-engine fight)
+    // ========================================================================
+    // The Microsoft C/C++ extension (ms-vscode.cpptools) is pulled in as a hard
+    // dependency of the PlatformIO IDE extension. By default its OWN IntelliSense
+    // engine runs alongside clangd — both parse every translation unit and fight
+    // over squiggles, hover, completion, and go-to-definition (the "conflict").
+    //
+    // clangd is the single source of truth here: it's the Espressif fork
+    // (tool-clangd-esp) that understands BOTH the xtensa (S3) and riscv (C5)
+    // esp targets via --query-driver, and it reads the real per-file compile
+    // flags from compile_commands.json. So we DISABLE the cpptools engine and
+    // let clangd own all C/C++ language features.
+    //
+    // NOTE: cpptools is NOT uninstalled — PlatformIO needs it, and it still
+    // provides the debugger. We only silence its IntelliSense/parsing.
+    "C_Cpp.intelliSenseEngine": "disabled",
+    "C_Cpp.autocomplete": "disabled",
+    "C_Cpp.errorSquiggles": "disabled",
+    "C_Cpp.formatting": "disabled",
+    "C_Cpp.codeAnalysis.runAutomatically": false,
+
+    // ========================================================================
+    // clangd (Espressif fork — xtensa + riscv esp toolchains)
+    // ========================================================================
+    // --compile-commands-dir points at .cache/clangd, whose compile_commands.json
+    // is the MERGED database of every built env (see tools/gen_clangd_db.py).
+    // Because each PlatformIO env compiles a disjoint src tree (build_src_filter),
+    // the merge gives every project file its own correct per-env flags — so
+    // src/c5_*/ files parse with the C5 defines and src/main.cpp with the S3 ones.
+    "clangd.path": "C:\\Users\\Atlan\\.platformio\\packages\\tool-clangd-esp\\bin\\clangd.exe",
     "clangd.arguments": [
         "--compile-commands-dir=c:/Users/Atlan/Documents/SlopDrive-32/.cache/clangd",
-        "--query-driver=C:/Users/Atlan/.platformio/packages/toolchain-*/bin/*,C:/Users/Atlan/.platformio/packages/tool-*/bin/*"
+        "--query-driver=C:/Users/Atlan/.platformio/packages/toolchain-*/bin/*,C:/Users/Atlan/.platformio/packages/tool-*/bin/*",
+        "--header-insertion=never",
+        "--pch-storage=memory",
+        "--limit-results=100"
     ],
-    "clangd.path": "C:\\Users\\Atlan\\.platformio\\packages\\tool-clangd-esp\\bin\\clangd.exe"
+    "clangd.onConfigChanged": "restart"
 }

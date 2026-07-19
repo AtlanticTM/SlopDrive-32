@@ -12,19 +12,21 @@ import { post } from './api.js';
 import * as cmd from './cmd.js';
 import { OP_SET_WINDOW } from './wire.js';
 
-// TRAVEL is dynamic — set from /api/settings or /api/capabilities on boot so
-// the range designer, motion graph, and all clamps use the actual rail length
-// the firmware advertises. Default 260 is the geometry ceiling for the 57AIM
-// build — the UI is safe at this value even before the API responds. setTravel()
-// patches it to the real measured stroke when data arrives. :3
-export let TRAVEL = 260;
+// TRAVEL is fully machine-driven — the rail is length-agnostic. The firmware
+// MEASURES the usable stroke during homing and advertises it; the UI never
+// assumes a length. Until the machine tells us, TRAVEL is 0 (unknown) and the
+// window/clamps stay gated (renderWindow bails on TRAVEL<=0, windowReady stays
+// false). setTravel() populates it from the measured stroke, rounded to the
+// nearest 1mm — the safety zone means sub-mm precision is meaningless. :3
+export let TRAVEL = 0;
 export function setTravel(mm) {
   if (mm <= 0) return;
+  mm = Math.round(mm);   // nearest 1mm — nobody needs finer than the safety zone
   var changed = (Math.abs(TRAVEL - mm) > 0.5);
   TRAVEL = mm;
-  // Patch every DOM element that hardcodes the travel limit so the UI
-  // reflects the real rail length the moment the API responds. :3
-  var t = Math.round(mm);
+  // Patch every DOM element that reflects the travel limit so the UI shows the
+  // real, measured rail length the moment the machine reports it. :3
+  var t = TRAVEL;
   var ec = document.getElementById('endcapTop');
   if (ec) ec.textContent = 'Out / ' + t;
   var bh = document.getElementById('bypassHint');
@@ -55,6 +57,25 @@ export function setWindowReady(v) { windowReady = v; }
 export let suppressPush = false;
 export function setSuppressPush(v) { suppressPush = v; }
 
+/** Gate: settingsAuthoritative becomes true AFTER loadSettings() completes its
+ *  authoritative HTTP pull on boot. Until then, processConfig (WS config push)
+ *  MUST NOT overwrite the window — it can arrive before the HTTP response and
+ *  carry stale/default bounds from a racing cfg snapshot. renderWindow() still
+ *  bails on TRAVEL<=0 regardless, so controls render in neutral "loading" state
+ *  until the authoritative pull resolves. :3 */
+export let settingsAuthoritative = false;
+export function setSettingsAuthoritative(v) { settingsAuthoritative = v; }
+
+// Rail-sync hook — the rail (features/rail.js) is the PRIMARY window editor now,
+// but it renders on a separate canvas/DOM band that renderWindow() historically
+// never touched (the band only moved on a direct drag, so on boot it stayed
+// invisible until the user nudged it — the repeated "window doesn't appear"
+// regression). rail.js registers a callback here via setRailSync(); renderWindow
+// and setTravel invoke it so the band position AND the ruler ticks repaint the
+// instant authoritative travel/window values arrive. :3
+let onRailSync = null;
+export function setRailSync(fn) { onRailSync = fn; if (fn && TRAVEL > 0) fn(); }
+
 let windowPushTimer = null;
 
 /**
@@ -84,15 +105,20 @@ export function renderWindow() {
   winMax = clamp(Math.round(winMax), 0, TRAVEL);
   if (winMax - winMin < 5) winMax = clamp(winMin + 5, 5, TRAVEL);
 
+  // Legacy hidden vertical track designer — may be absent from the DOM now that
+  // the rail is the window editor. Guard it locally instead of early-returning
+  // the whole function (the old `if (!host) return` short-circuited the readout
+  // + rail sync below, which is why the band never painted on boot). :3
   const host = $('trackHost');
-  if (!host) return;
-  const H = host.clientHeight;
-  const topPx = (1 - winMax / TRAVEL) * H;
-  const botPx = (1 - winMin / TRAVEL) * H;
-  const win = $('win');
-  if (win) {
-    win.style.top = topPx + 'px';
-    win.style.height = Math.max(botPx - topPx, 24) + 'px';
+  if (host) {
+    const H = host.clientHeight;
+    const topPx = (1 - winMax / TRAVEL) * H;
+    const botPx = (1 - winMin / TRAVEL) * H;
+    const win = $('win');
+    if (win) {
+      win.style.top = topPx + 'px';
+      win.style.height = Math.max(botPx - topPx, 24) + 'px';
+    }
   }
   setRead('winLen', pad(Math.round(winMax - winMin), 3, 0));
   setRead('depthVal', pad(Math.round(winMax - winMin), 3, 0));
@@ -103,6 +129,11 @@ export function renderWindow() {
 
   const bypass = $('bypassLimits');
   if (bypass && !bypass.checked) syncManualWindow();
+
+  // Repaint the rail band + ruler ticks (the real window editor). Without this
+  // the band only moved on a direct drag, so on boot the saved window was
+  // invisible until touched. :3
+  if (onRailSync) onRailSync();
 
   pushWindow();
 }

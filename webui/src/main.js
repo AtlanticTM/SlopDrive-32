@@ -23,7 +23,7 @@ import { post, get, getText } from './core/api.js';
 import { TRAVEL, renderWindow, setPosTarget, syncManualWindow, nudgeWindow, trim, setBound, useCurrentAsDefault, initWindowInputs, winMin, winMax, setWinMin, setWinMax, setWindowReady } from './core/range.js';
 import { initPattern, startPattern, stopPattern, pat, refreshPatternState } from './features/pattern.js';
 import { currentMode, reflectMode, initSettings, saveSettings, restoreDefaults } from './features/settings.js';
-import { initRail, railUpdatePosition } from './features/rail.js';
+import { initRail, railUpdatePosition, setRailManualMode } from './features/rail.js';
 import { fetchAndApplyCapabilities, refreshHealthCards } from './core/capabilities.js';
 
 // ---- Task 7: new core modules ---------------------------------------------
@@ -39,7 +39,8 @@ import {
   OP_SET_WINDOW, OP_SET_SPEED, OP_SET_ACCEL, OP_GEN_CFG, OP_GEN_RUN,
   OP_MODE, OP_BLEND, OP_PAUSE, OP_HALT, OP_ESTOP, OP_HOME,
   OP_OVERRIDE, OP_BYPASS, OP_CLEAR_FAULT, OP_SAVE, OP_MOVE,
-  OP_STREAM_MODE, OP_OVERSHOOT, SPEED_CEILING_PEGGED, SPEED_VELOCITY_MATCHED
+  OP_STREAM_MODE, OP_OVERSHOOT, OP_GET_CFG, OP_HOME_OVERRIDE,
+  SPEED_CEILING_PEGGED, SPEED_VELOCITY_MATCHED
 } from './core/wire.js';
 import { initShadow, processEcho, processConfig, tick as shadowTick,
          wireStaleness, notifyRecovery } from './core/shadow.js';
@@ -466,6 +467,53 @@ async function refreshLog() {
   try { var txt = await getText('/api/log'); var box = $('#logBox'); if (!box) return; var atBottom = box.scrollHeight - box.scrollTop - box.clientHeight < 30; box.textContent = txt || '(no output)'; if (atBottom) box.scrollTop = box.scrollHeight; } catch (e) {}
 }
 
+// ===================== Connected-clients panel (Health tab) =================
+// Lists WS clients from /api/clients. The device streams only to the
+// most-recently-active tab (+ any active within active_window_ms); the rest
+// are muted (harmless). "Kick" force-disconnects to reclaim a slot.
+
+function _fmtIdle(ms) {
+  if (ms == null) return '—';
+  if (ms < 1000) return 'now';
+  var s = Math.round(ms / 1000);
+  if (s < 60) return s + 's ago';
+  var m = Math.floor(s / 60);
+  return m + 'm' + (s % 60) + 's ago';
+}
+
+async function refreshClients() {
+  var body = $('#clientsBody');
+  if (!body) return;
+  var data = await get('/api/clients');
+  if (!data || !Array.isArray(data.clients)) { body.textContent = 'Client list unavailable.'; return; }
+  if (data.clients.length === 0) { body.textContent = 'No clients connected.'; return; }
+
+  var rows = data.clients.map(function (c) {
+    var badge = c.most_recent
+      ? '<span class="chip" style="color:var(--good)">● active (this session)</span>'
+      : (c.streaming ? '<span class="chip" style="color:var(--good)">● streaming</span>'
+                     : '<span class="chip" style="color:var(--tx-mut)">○ muted (idle)</span>');
+    var mine = (c.streaming && c.most_recent) ? ' — likely this tab' : '';
+    return '<div class="client-row" style="display:flex;align-items:center;gap:10px;padding:6px 0;border-top:1px solid var(--line)">'
+      +   '<code style="flex:0 0 auto">#' + c.num + ' ' + c.ip + '</code>'
+      +   '<span style="flex:1 1 auto;font-size:.85em;color:var(--tx-mut)">' + badge + ' · last active ' + _fmtIdle(c.idle_ms) + mine + '</span>'
+      +   '<button class="btn ghost sm" data-kick="' + c.num + '"><span data-ico="i-stop"></span> Kick</button>'
+      + '</div>';
+  }).join('');
+  body.innerHTML = '<div style="font-size:.8em;color:var(--tx-mut);margin-bottom:4px">'
+    + data.clients.length + ' / ' + data.max + ' slots · muted after '
+    + Math.round(data.active_window_ms / 1000) + 's idle (unless it\'s the last-active tab)</div>' + rows;
+
+  body.querySelectorAll('[data-kick]').forEach(function (btn) {
+    btn.addEventListener('click', async function () {
+      var num = parseInt(btn.getAttribute('data-kick'), 10);
+      btn.disabled = true;
+      await post('/api/clients', { kick: num });
+      setTimeout(refreshClients, 300);
+    });
+  });
+}
+
 // ===================== Anomaly surface (0x05) ===============================
 // Renders one interpolator anomaly event into the Log-tab panel: bumps the
 // per-kind count chip (with a severity dot) and prepends a formatted line to
@@ -604,6 +652,93 @@ function initResizableSidebar() {
   window.addEventListener('pointercancel', onUp);
 }
 
+// ===================== Rail topbar (Thing 6: manual mode + quick-move) ======
+// Two controls live above the rail:
+//  • #railQuickMove — a fat, finger-friendly tap strip for DEFAULT mode.
+//    Tapping (or dragging) maps the x-position across the strip to 0..TRAVEL
+//    and fires a quick move, so you can dab a position without hunting the thin
+//    rail band. Mirrors the rail's tap-to-command with a bigger target.
+//  • #manualModeToggle — flips the rail into manual scrub mode (rail.js owns
+//    the actual behavior); here we just reflect aria-pressed + the .on state
+//    and dim the now-redundant quick strip.
+function initRailTopbar() {
+  var strip = $('#railQuickMove');
+  if (strip) {
+    // Ghost pip that rides under the finger (CSS: .rail-quickmove-pip, shown
+    // via the .armed class). Build it once and reuse — no per-event alloc.
+    var pip = strip.querySelector('.rail-quickmove-pip');
+    if (!pip) {
+      pip = document.createElement('div');
+      pip.className = 'rail-quickmove-pip';
+      strip.appendChild(pip);
+    }
+    var stripDrag = false;
+    var placePip = function(frac) { pip.style.left = (frac * 100) + '%'; };
+    var fireFromEvent = function(e) {
+      var r = strip.getBoundingClientRect();
+      if (r.width <= 0 || TRAVEL <= 0) return;
+      var frac = clamp((e.clientX - r.left) / r.width, 0, 1);
+      placePip(frac);
+      sendMove(frac * TRAVEL, true);
+      if (pat.running) stopPattern();
+    };
+    var disarm = function() {
+      stripDrag = false;
+      strip.classList.remove('armed');
+    };
+    strip.addEventListener('pointerdown', function(e) {
+      if (strip.classList.contains('disabled')) return;
+      stripDrag = true;
+      strip.classList.add('armed');
+      if (strip.setPointerCapture) { try { strip.setPointerCapture(e.pointerId); } catch (err) {} }
+      fireFromEvent(e);
+      e.preventDefault();
+    });
+    strip.addEventListener('pointermove', function(e) {
+      if (!stripDrag) return;
+      fireFromEvent(e);
+      e.preventDefault();
+    });
+    strip.addEventListener('pointerup', function(e) { disarm(); e.preventDefault(); });
+    strip.addEventListener('pointercancel', disarm);
+  }
+
+  var toggle = $('#manualModeToggle');
+  if (toggle) {
+    // Manual mode now OWNS bypass-limits: engaging Manual checks the hidden
+    // #bypassLimits input (so scrubs + sendMove() span the full measured
+    // travel), and exiting restores whatever state it had before. The
+    // checkbox's existing 'change' listeners (range.js syncManualWindow +
+    // the wiring below) do the actual work — we just drive the input.
+    var _bypassBeforeManual = false;
+    toggle.addEventListener('click', function() {
+      var on = setRailManualMode(toggle.getAttribute('aria-pressed') !== 'true');
+      toggle.setAttribute('aria-pressed', on ? 'true' : 'false');
+      toggle.classList.toggle('on', on);
+      if (strip) strip.classList.toggle('disabled', on);
+      var bp = $('#bypassLimits');
+      if (bp) {
+        if (on) {
+          _bypassBeforeManual = bp.checked;
+          if (!bp.checked) {
+            bp.checked = true;
+            bp.dispatchEvent(new Event('change', { bubbles: true }));
+          }
+        } else if (bp.checked !== _bypassBeforeManual) {
+          bp.checked = _bypassBeforeManual;
+          bp.dispatchEvent(new Event('change', { bubbles: true }));
+        }
+      }
+      // Update the hint text to reflect the active mode so the operator
+      // always knows what the rail will do (Thing 5). :3
+      var hint = $('#railHintText');
+      if (hint) hint.textContent = on
+        ? 'drag anywhere to scrub \u00b7 full travel \u00b7 set min/max by feel'
+        : 'drag band \u00b7 drag edges \u00b7 tap to command';
+    });
+  }
+}
+
 // ===================== WS telemetry → rail bridge ===========================
 // When WS is live, the rail reads from telebuf.sampleAt(). The rail's rAF
 // loop uses stableRenderTime() to get the clock-synced render time and
@@ -729,6 +864,14 @@ function init() {
       window.__CMD_SUSPENDED = false;
       document.body.classList.remove('stale', 'suspended', 'degraded');
       notifyRecovery();
+      // Thing #3 — the UI must NEVER assume config on (re)connect. Pull the
+      // machine's authoritative cfg snapshot the instant the link is live so
+      // window / speeds / accel / mode all populate from device truth instead
+      // of whatever stale defaults the DOM booted with. processConfig() (via
+      // cmd.onConfig) applies it. Also re-fetch capabilities so the measured
+      // rail length + ceilings resync after a re-home during a dropout. :3
+      cmd.send(OP_GET_CFG, {});
+      fetchAndApplyCapabilities();
     });
 
     // ---- Staleness escalation -----------------------------------------------
@@ -774,6 +917,8 @@ function init() {
       onTap: function(mm) { sendMove(mm, true); },
       onPatternStop: function() { if (pat.running) stopPattern(); }
     });
+    console.log('[SD32] rail topbar...');
+    initRailTopbar();
     console.log('[SD32] sidebar...');
     initResizableSidebar();
     console.log('[SD32] capabilities...');
@@ -808,6 +953,14 @@ function init() {
     var rl = $('#refreshLogBtn'); if (rl) rl.addEventListener('click', refreshLog);
     setInterval(function () { if (document.hidden) return; var lt = $('#log'), al = $('#autoLog'); if (lt && lt.classList.contains('active') && al && al.checked) refreshLog(); }, 2000);
     refreshLog();
+
+    // Poll the connected-clients panel while it's actually on-screen (offsetParent
+    // is null when its tab is hidden) — cheap, and it stops when you tab away.
+    setInterval(function () {
+      if (document.hidden) return;
+      var card = $('#clientsCard');
+      if (card && card.offsetParent !== null) refreshClients();
+    }, 3000);
 
     // Expose Health metrics for the Health tab (link stats)
     window.__LINK_STATS = getLinkStats;

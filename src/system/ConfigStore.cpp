@@ -11,6 +11,15 @@
 // ============================================================================
 
 void ConfigStore::save(SystemState& state, RangeMapper& mapper, MotorDriver& motor) {
+    // OTA flash-write guard (.clinerules §2 / OTA §4): if an over-the-air update
+    // is in flight, a concurrent NVS write would touch the flash cache during the
+    // OTA write window and can reset the chip mid-flash. Defer the save — the
+    // gated state stops motion anyway, so nothing config-worthy is changing, and
+    // a successful OTA reboots into freshly-loaded config regardless. :3
+    if (state.ota_active.load()) {
+        applog("saveConfig: deferred - OTA update in flight");
+        return;
+    }
     // Inflate the NVS storage with the current running state — every stroke
     // window limit, every current setting, every tune knob the user has
     // lubed up gets packed tight and sealed away. Next boot, it all leaks
@@ -56,6 +65,11 @@ void ConfigStore::save(SystemState& state, RangeMapper& mapper, MotorDriver& mot
     prefs.putUChar("buf_depth", state.buf_depth);
     prefs.putUShort("buf_tick", state.buf_tick_hz);
     prefs.putUShort("gen_tick", state.gen_rate_tick_hz);
+
+    // Measured stroke from sensorless homing — persists across reboot so the
+    // rail scale is correct before the first homing cycle runs. Rounded to the
+    // nearest 1mm because the safety zone makes sub-mm precision meaningless. :3
+    prefs.putFloat("stroke_mm", motor.getMeasuredStrokeMm());
 
     // TMC driver tunables (from the Motor tab)
     prefs.putUShort("tmc_run", state.driver.run_current_ma);
@@ -172,6 +186,13 @@ void ConfigStore::load(SystemState& state, RangeMapper& mapper, MotorDriver& mot
         state.driver.tbl              = prefs.getUChar("tmc_tbl", state.driver.tbl);
         state.driver.hstart           = prefs.getChar("tmc_hs", state.driver.hstart);
         state.driver.hend             = prefs.getChar("tmc_he", state.driver.hend);
+
+        // Restore previously-measured stroke from NVS so the rail scale is
+        // correct at boot BEFORE the first homing cycle. The homing task
+        // overwrites this with a fresh measurement when it completes. :3
+        float saved_stroke = prefs.getFloat("stroke_mm", 0.0f);
+        if (saved_stroke > 0.0f) motor.setMeasuredStrokeMm(saved_stroke);
+
         prefs.end();
 
         // Validate: reject 0 or out-of-range values. MACHINE_MAX_TRAVEL_MM is
@@ -212,4 +233,53 @@ void ConfigStore::load(SystemState& state, RangeMapper& mapper, MotorDriver& mot
         prefs.end();
         applog("No saved config, using defaults");
     }
+}
+
+// ============================================================================
+// Secondary WiFi credentials — serial-settable NVS fallback
+// ============================================================================
+//
+// A second SSID/password pair, tried by setupWiFi() after the compile-time
+// primary (secrets.h) fails. Written over USB serial via the `WIFI <ssid>
+// <pass>` command so a rig on an unknown network can be recovered without a
+// reflash. Uses the same "strokeengine" namespace with putString/getString —
+// the first string fields in this store. Keys stay ≤15 chars for NVS. :3
+
+void ConfigStore::saveWifiCreds(const char* ssid, const char* pass) {
+    Preferences prefs;
+    if (!prefs.begin("strokeengine", false)) {   // false = read-WRITE
+        applog("saveWifiCreds: failed to open NVS for write!");
+        return;
+    }
+    prefs.putString("wifi_ssid2", ssid ? ssid : "");
+    prefs.putString("wifi_pass2", pass ? pass : "");
+    prefs.end();
+    applogf("Secondary WiFi creds saved to NVS: SSID='%s'", ssid ? ssid : "");
+}
+
+bool ConfigStore::loadWifiCreds(char* ssid, size_t ssidLen, char* pass, size_t passLen) {
+    if (!ssid || ssidLen == 0 || !pass || passLen == 0) return false;
+    ssid[0] = '\0';
+    pass[0] = '\0';
+    Preferences prefs;
+    if (!prefs.begin("strokeengine", true)) {     // true = read-only
+        prefs.end();
+        return false;
+    }
+    String s = prefs.getString("wifi_ssid2", "");
+    String p = prefs.getString("wifi_pass2", "");
+    prefs.end();
+    if (s.length() == 0) return false;            // no secondary creds stored
+    strlcpy(ssid, s.c_str(), ssidLen);
+    strlcpy(pass, p.c_str(), passLen);
+    return true;
+}
+
+void ConfigStore::clearWifiCreds() {
+    Preferences prefs;
+    if (!prefs.begin("strokeengine", false)) return;
+    prefs.remove("wifi_ssid2");
+    prefs.remove("wifi_pass2");
+    prefs.end();
+    applog("Secondary WiFi creds cleared from NVS");
 }

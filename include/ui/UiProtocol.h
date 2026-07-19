@@ -80,6 +80,9 @@
 #define WS_OP_MOVE         0x11   // {position:float, stream:bool, bypass_limits:bool, speed?:float}
 #define WS_OP_STREAM_MODE  0x12   // {mode:u8}  0=ceiling-pegged, 1=velocity-matched (stream speed-feed A/B)
 #define WS_OP_OVERSHOOT    0x13   // {on:bool}  monotone (Fritsch-Carlson) tangent clamp on v4 gradient cubic
+#define WS_OP_HOME_OVERRIDE 0x14  // {on:bool, stroke?:float}  TEST/bench: fake-home without a motor.
+                                  // on:true  → force homed, report stroke (default 250mm) so the UI populates.
+                                  // on:false → clear the override (back to real motor homing).
 
 // ---- Idempotency -----------------------------------------------------------
 // Per-client ring of last N seen (id, echo) pairs.

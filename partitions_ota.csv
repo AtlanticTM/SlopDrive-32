@@ -1,0 +1,25 @@
+# SlopDrive-32 - OTA partition table (16MB Arduino Nano ESP32 / NORA-W106)
+#
+# BYTE-IDENTICAL to the Arduino-bundled default_16MB.csv the device already
+# runs. Because every offset and size is unchanged, the one-time serial flash
+# that installs the first OTA-capable firmware does NOT relocate NVS or the
+# LittleFS (spiffs) region - saved config AND the web-UI image both survive the
+# migration. We vendor it into the repo (instead of relying on the framework's
+# built-in) so the layout is version-controlled and cannot silently change when
+# the arduino-esp32 package updates.
+#
+# Layout math (16MB = 0x1000000):
+#   nvs      0x5000   (20 KB)   - persisted config (RangeMapper, limits, driver, wifi creds)
+#   otadata  0x2000   (8 KB)    - active-slot selector for the bootloader
+#   ota_0    0x640000 (6.5 MB)  - app slot A; current app ~1.54MB => 4.2x headroom
+#   ota_1    0x640000 (6.5 MB)  - app slot B; A/B ping-pong OTA target
+#   spiffs   0x360000 (3.375MB) - LittleFS web bundle (current image ~3.37MB)
+#   coredump 0x10000  (64 KB)   - crash coredump region (preserved from current table)
+#
+# Name,   Type, SubType, Offset,  Size, Flags
+nvs,      data, nvs,     0x9000,  0x5000,
+otadata,  data, ota,     0xe000,  0x2000,
+app0,     app,  ota_0,   0x10000, 0x640000,
+app1,     app,  ota_1,   0x650000,0x640000,
+spiffs,   data, spiffs,  0xc90000,0x360000,
+coredump, data, coredump,0xFF0000,0x10000,

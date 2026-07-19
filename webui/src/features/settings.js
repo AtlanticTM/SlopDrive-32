@@ -12,7 +12,7 @@ import { $, setRead, onLiveSlider, clamp, icon, toast } from '../core/ui.js';
 import { post, get } from '../core/api.js';
 import * as cmd from '../core/cmd.js';
 import { OP_SET_SPEED, OP_SET_ACCEL, OP_BLEND, OP_MODE, OP_SAVE, OP_STREAM_MODE, OP_OVERSHOOT } from '../core/wire.js';
-import { TRAVEL, setTravel, winMin, winMax, setWinMin, setWinMax, setWindowReady, renderWindow, useCurrentAsDefault, suppressPush, setSuppressPush } from '../core/range.js';
+import { TRAVEL, setTravel, winMin, winMax, setWinMin, setWinMax, setWindowReady, renderWindow, useCurrentAsDefault, suppressPush, setSuppressPush, setSettingsAuthoritative } from '../core/range.js';
 import { applyExpertCeilings, expertMode, setExpertMode } from '../core/capabilities.js';
 
 export var currentMode = 'WS';
@@ -210,9 +210,16 @@ async function loadSettings() {
     // Load is READ-ONLY: populate DOM from device truth, never dispatch settings back.
     setSuppressPush(true);
 
-    const travel = (d.measured_stroke && d.measured_stroke > 0)
-               ? d.measured_stroke
-               : d.max_travel;
+    // Rail length is MEASURED at homing and reported rounded to the nearest
+    // 1mm — the machine is length-agnostic, 260 is only the geometry ceiling.
+    // Measured stroke is the sole source of truth once homed; before that we
+    // fall back to the advertised ceiling purely so the rail can draw at all,
+    // but the number the operator sees is always the device's, never invented
+    // client-side. :3
+    const measured = (typeof d.measured_stroke === 'number' && d.measured_stroke > 0)
+               ? Math.round(d.measured_stroke)
+               : 0;
+    const travel = measured || (d.max_travel ? Math.round(d.max_travel) : 0);
     if (travel) setTravel(travel);
 
     setWinMin(d.range_min);
@@ -225,29 +232,57 @@ async function loadSettings() {
     if (typeof d.stream_speed_mode === 'number') reflectStreamMode(d.stream_speed_mode);
     if (typeof d.overshoot_clamp !== 'undefined') reflectOvershoot(!!d.overshoot_clamp);
     const ic = $('#intifaceCompat'); if (ic) ic.checked = !!d.intiface_compat;
-    const spd = d.max_speed || 550, acc = d.accel || 1500;
-    const look = d.lookahead || 20, over = d.overshoot || 8;
-    // Seed default-motion sliders from the legacy max_speed/accel fields
-    ['defMaxSpeed', 'defAccel'].forEach(function(pair) {
-      var id = pair; var val = (pair === 'defMaxSpeed') ? spd : acc;
-      var e = $(id); if (e) e.value = val;
-    });
-    // Seed live dual-limit sliders from the dual-limit API fields
-    var us = d.user_max_speed || spd, ua = d.user_max_accel || acc;
-    var is = d.input_max_speed || spd, ia = d.input_max_accel || acc;
-    var els = { userMaxSpeed: us, userAccel: ua, inputMaxSpeed: is, inputAccel: ia };
-    Object.keys(els).forEach(function(id) {
-      var e = $(id); if (e) e.value = els[id];
-    });
+    // GOLDEN RULE: the UI never invents a setting value — it pulls device
+    // truth. The firmware always advertises max_speed/accel from _state.config,
+    // so these are read straight from the payload. We only skip seeding a slider
+    // when its field is genuinely absent (old firmware), rather than fabricating
+    // a 550/1500 that would silently misrepresent the machine's real config. :3
+    const spd = (typeof d.max_speed === 'number') ? d.max_speed : undefined;
+    const acc = (typeof d.accel === 'number') ? d.accel : undefined;
+    // seedSlider — set a slider's value from a REAL device number, refresh its
+    // readout, and un-gate it. The markup ships every machine-owned slider
+    // `disabled` with a `—` readout so NOTHING is ever prepopulated with an
+    // invented number on boot; the field only comes alive once the firmware's
+    // own value lands here. If the field is genuinely absent (old firmware) the
+    // slider stays disabled/blank rather than fabricating a value. :3
+    function seedSlider(id, readId, val) {
+      var e = $(id); if (!e) return;
+      if (typeof val !== 'number') return;   // no device truth → leave gated/blank
+      e.value = val;
+      e.disabled = false;
+      // Refresh the readout via the shared live-slider formatter (falls back to
+      // a plain number write if it's unavailable for any reason).
+      if (readId) { try { onLiveSlider(readId, e, id); } catch (err) { var r = $('#' + readId); if (r) r.textContent = Math.round(val); } }
+    }
+    // Seed default-motion sliders ONLY from real device values.
+    seedSlider('defMaxSpeed', 'defSpeedVal', spd);
+    seedSlider('defAccel',    'defAccelVal', acc);
+    // Seed live dual-limit sliders from the dual-limit API fields, falling back
+    // to the (real) combined values only when the dual-limit keys are absent.
+    var us = (typeof d.user_max_speed === 'number') ? d.user_max_speed : spd;
+    var ua = (typeof d.user_max_accel === 'number') ? d.user_max_accel : acc;
+    var is = (typeof d.input_max_speed === 'number') ? d.input_max_speed : spd;
+    var ia = (typeof d.input_max_accel === 'number') ? d.input_max_accel : acc;
+    seedSlider('userMaxSpeed',  'userSpeedVal',  us);
+    seedSlider('userAccel',     'userAccelVal',  ua);
+    seedSlider('inputMaxSpeed', 'inputSpeedVal', is);
+    seedSlider('inputAccel',    'inputAccelVal', ia);
     // Seed the old combined sliders for backward compat (they still exist in
     // the Settings tab "Default Motion" card, driving the "Save All" defaults).
     var eSp = $('maxSpeed'); if (eSp) eSp.value = spd;
     var eAc = $('accel'); if (eAc) eAc.value = acc;
-    reflectBlendMode(d.blend_mode || 1);
+    if (typeof d.blend_mode === 'number') reflectBlendMode(d.blend_mode);
     applyExpertCaps();
 
     // Re-arm push after init so user drags/inputs push normally
     setSuppressPush(false);
+
+    // Thing 3: signal that the authoritative HTTP pull is complete. From this
+    // point forward, WS config pushes (processConfig) are allowed to overwrite
+    // the window — before this flag, they were blocked to prevent the "wrong
+    // window on boot" race where a WS cfg snapshot arrives before the HTTP
+    // response and paints stale bounds. :3
+    setSettingsAuthoritative(true);
   } catch (e) {}
 }
 
@@ -280,7 +315,12 @@ function genTickValue() {
   return a ? parseInt(a.dataset.hz) : 100;
 }
 async function loadGenTick() {
-  try { var d = await get('/api/gen'); if (!d) return; var hz = d.rate_tick || 100; document.querySelectorAll('#genTickSeg button').forEach(function(b) { b.classList.toggle('active', parseInt(b.dataset.hz) === hz); }); } catch (e) {}
+  try {
+    var d = await get('/api/gen');
+    if (!d || typeof d.rate_tick !== 'number') return;   // no device truth → leave un-selected
+    var hz = d.rate_tick;
+    document.querySelectorAll('#genTickSeg button').forEach(function(b) { b.classList.toggle('active', parseInt(b.dataset.hz) === hz); });
+  } catch (e) {}
 }
 
 export function initSettings() {

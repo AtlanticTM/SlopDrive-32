@@ -93,8 +93,22 @@ struct SystemState {
     // ---- Loading / flow (cross-core) -----------------------------------------
     volatile bool          homed               = false;
     volatile bool          homing_in_progress  = false;
+    // WebUI "home override" (bench test, no motor): when >0 the UI is told the
+    // machine is homed and this value is reported as the measured stroke (mm) so
+    // the rail populates without a real homing cycle. 0 = normal (use motor). :3
+    volatile float         test_stroke_override_mm = 0.0f;
     std::atomic<bool>      estop_requested{false};        // Core 0 stores, Core 1 exchanges — atomic RMW closes TOCTOU window
     bool                   wifi_ready          = false;   // Core 0 only
+
+    // ---- OTA update in flight (cross-core, Core 0 sets/clears) ----------------
+    // Raised by OtaService::prepareForOta() the instant an over-the-air update
+    // is accepted, BEFORE the first flash write. While true, ConfigStore::save()
+    // (the only NVS flash writer reachable from the gated state) DEFERS instead
+    // of writing — a flash-cache access during an OTA write window can reset the
+    // chip. Cleared on OTA failure; on success the device reboots so the flag is
+    // moot. Read/written only on Core 0 but atomic for a clean cross-core read
+    // barrier from any diagnostic path. :3
+    std::atomic<bool>      ota_active{false};
 
     // ---- WiFi link telemetry (Core 0 only — written by TransportManager's
     // event handler + poll timer, read by WebUI::handleApiStatus. Both run on

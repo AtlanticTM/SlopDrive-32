@@ -61,6 +61,17 @@ public:
     virtual bool isHomed()  const  = 0;
     virtual bool isHoming() const  = 0;
 
+    // Bench/test override: force the driver's internal homed flag WITHOUT a real
+    // homing cycle, so HOME_OVERRIDE can actually drive step/dir pulses out to a
+    // (possibly disconnected) motor for bench testing. Setting _state.homed
+    // alone only opens the MotionArbiter gate — the concrete driver's own
+    // moveTo()/streamTo()/streamToSteps() still refuse every command while their
+    // internal _homed is false. This hook flips that flag (and enables outputs)
+    // so pulses genuinely go out. Default no-op: drivers that don't support a
+    // fake-home are simply unaffected. Do NOT call on real hardware you don't
+    // want to move without homing first. :3
+    virtual void forceHomeState(bool /*homed*/) {}
+
     // Push-to-home: when NOT homed and NOT actively homing, the user can simply
     // push the shaft into the endstop to establish home.  Returns true the
     // instant it completes homing this call.
@@ -120,6 +131,12 @@ public:
     // sensorless homing (TMC endstop build) don't have to implement it. The
     // 57AIM servo driver overrides this once it's felt out both ends. :3
     virtual float   getMeasuredStrokeMm() const { return 0.0f; }
+    // Restore a previously-measured stroke from NVS after boot. Default no-op
+    // for drivers that don't support sensorless homing — ConfigStore calls this
+    // with the persisted value so the rail scale is correct before the first
+    // homing cycle runs. The homing task itself overwrites this with a fresh
+    // measurement when it completes. :3
+    virtual void    setMeasuredStrokeMm(float /*mm*/) {}
 
     // ---- Live bus telemetry (INA228 on the 57AIM board) ---------------------
     // Instantaneous motor-bus current in AMPS and the 36V rail voltage. Only the

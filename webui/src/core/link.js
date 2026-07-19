@@ -345,10 +345,25 @@ function _activateFallback() {
 function _startClockSync() {
   if (_clockSyncTimer) clearInterval(_clockSyncTimer);
   _clockSyncTimer = setInterval(_sendClockPing, CLOCK_SYNC_INTERVAL_MS);
+
+  // Visibility fast-path for the device-side activity gate. A clock ping is the
+  // inbound signal the device uses to decide which tabs to stream to. When this
+  // tab is hidden we stop pinging, so it deterministically falls out of the
+  // device's active window and gets muted (unless it's the last-active tab,
+  // which the device keeps live regardless). On refocus we ping immediately, so
+  // streaming resumes within one tick instead of waiting for the next interval.
+  if (typeof document !== 'undefined' && document.addEventListener) {
+    document.addEventListener('visibilitychange', function () {
+      if (!document.hidden) _sendClockPing();
+    });
+  }
 }
 
 function _sendClockPing() {
   if (!_ws || _ws.readyState !== WebSocket.OPEN) return;
+  // Skip while hidden — a backgrounded tab that isn't rendering doesn't need
+  // clock sync, and its silence is what lets the device mute it (see above).
+  if (typeof document !== 'undefined' && document.hidden) return;
   var t0_us = Math.round(performance.now() * 1000);
   sendBinary(buildClock(t0_us));
 }

@@ -1,58 +1,57 @@
 /**
  * Travel rail + stroke-window band — the spine control surface.
  *
- * Canvas phosphor trail (blue actual marker + purple commanded caret) with a
- * purple translucent stroke-window band (drag/resize/tap). Replaces the old
- * vertical track designer and Position slider as the primary control surface.
+ * Command surface = the INPUT TAPE above the rail (normal mode: spans the
+ * reported window exactly, so it is geometrically impossible to command outside
+ * it; manual mode: spans full travel). The rail itself is display + window
+ * editing only (band body drag = move window, handles = resize). Hazard ribbons
+ * hatch the keep-out zones outside the window. The phosphor comet is a single
+ * tapered gradient ribbon per direction-run (no per-segment banding).
  *
- * The rAF/canvas loop is allocation-free: no object/array literals, no closures
- * created in the loop, canvas state set once, rect cached on resize.
+ * Ground-truth doctrine (R1/section 5.1): band, tape (normal extent) and both
+ * hazard ribbons all position from the SAME (winMin,winMax) pair via
+ * layoutWindow().
  */
 import { $, clamp, pad, setVV, setVVState } from '../core/ui.js';
-import { TRAVEL, winMin, winMax, setWinMin, setWinMax, renderWindow, pushWindow } from '../core/range.js';
+import { TRAVEL, winMin, winMax, setWinMin, setWinMax, renderWindow, pushWindow, setRailSync } from '../core/range.js';
 
 // ===================== Single reused state object (no per-frame allocation) =====================
 var S = {
-  // Canvas
   cv: null, ctx: null, dpr: 1,
   rect: { w: 0, h: 0, x: 0, y: 0 },
-  // Orientation: 'horizontal' (desktop) or 'vertical' (portrait)
   orient: 'horizontal',
-  // Host elements
-  host: null, railSvg: null, bandEl: null, bandFill: null, bandHandleLo: null, bandHandleHi: null, bandLabel: null,
-  // Hero numerals
+  host: null, panel: null, railSvg: null, bandEl: null, bandFill: null, bandHandleLo: null, bandHandleHi: null, bandLabel: null,
   heroActual: null, heroCmd: null, heroLag: null,
-  // Telemetry feed (time-indexed, ring buffer)
+  // Input tape (command surface above the rail) + hazard ribbons
+  tapeAssembly: null, tapeTrack: null, tapeBar: null, tapePip: null,
+  tapeMode: null, tapeExtent: null, tapeDrag: false,
+  hzLo: null, hzHi: null,
   queue: [], qHead: 0, qTail: 0, qLen: 0, QCAP: 256,
   lastScheduledTs: 0, defaultDtMs: 10, lastSeenSeq: -1,
-  // Interpolated display values
   posDisplay: 0, tgtDisplay: 0, posTarget: 0, tgtTarget: 0,
-  // Drag state
   drag: null, dragStartMm: 0, dragStartMin: 0, dragStartMax: 0,
-  // Flags
   reducedMotion: false, animRunning: false, moving: false, lastMoveTs: 0,
-  // Callbacks (set by initRail)
   onTap: null, onPatternStop: null,
-  // Cached canvas style strings (set once)
+  // Manual mode — when true the rail is display-only and the tape (full-width)
+  // is the live scrub instrument.
+  manual: false,
   fadeAlpha: 'rgba(0,0,0,0.10)',
   realityColor: '#4DA6FF',
   intentColor: '#A78BFA',
 };
 
-// Pre-allocate the queue as a typed array ring (no per-frame push/shift)
-// Each sample: {ts, pos, tgt} — stored in 3 parallel Float64Arrays
 var qTs = new Float64Array(S.QCAP);
 var qPos = new Float64Array(S.QCAP);
 var qTgt = new Float64Array(S.QCAP);
 
-// Pre-allocate dash arrays for setLineDash (avoids per-frame array literal allocation)
+// Shared minimum window length (mm). Unified with the band handle-drag clamps
+// and the section-4 set-min/max yielding-bounds rule.
+var MINLEN = 5;
+
 var DASH_CMD = [4, 3];
 var DASH_NONE = [];
 
-// Fade timing (frame-rate-independent destination-out)
 var lastFrameTs = 0;
-
-// Interpolation smoothing timing (separate clock from the fade)
 var lastInterpTs = 0;
 
 // ===================== Init =====================
@@ -64,56 +63,65 @@ export function initRail(opts) {
 
   S.host = $('#spineRailHost');
   if (!S.host) return;
+  S.panel = document.getElementById('railPanel');
 
-  // Detect orientation from viewport
   updateOrientation();
-
-  // Build static DOM layer (ruler, endcaps, triangles, trk mark)
   buildStaticLayer();
 
-  // Build canvas overlay
   S.cv = document.createElement('canvas');
   S.cv.className = 'rail-canvas';
   // pointer-events:none — the canvas must NEVER intercept pointer events.
-  // Root cause of the dead tap handler (task spec §B diagnosis): with the
-  // canvas painted on top of the rail at full inset and no pointer-events
-  // override, clicks on empty rail (not covered by the DOM band) hit the
-  // canvas element. Because the host's delegated listener still receives
-  // the bubbled event today, this alone wasn't fully fatal — but leaving
-  // the canvas hit-testable is fragile (any future z-index/composite change
-  // silently breaks tap-to-command again) and violates the explicit spec
-  // requirement. Locking it down here.
   S.cv.style.cssText = 'position:absolute;inset:0;width:100%;height:100%;touch-action:none;pointer-events:none;';
   S.host.appendChild(S.cv);
   S.ctx = S.cv.getContext('2d');
 
-  // Build band (DOM, not canvas — pointer events are easier)
+  // Hazard ribbons — inserted BEFORE the canvas so they sit BELOW it in
+  // z-order (spec section 2), siblings of the band.
+  buildHazards();
+
   buildBand();
 
-  // Build hero numerals in #spineHeroes (hero strip, Row 2)
+  // Cache + wire the input tape (markup lives in index.html).
+  cacheTape();
+
+  // Wire the manual-mode Set-min/Set-max buttons (section 4).
+  var minBtn = document.getElementById('railSetMinBtn');
+  var maxBtn = document.getElementById('railSetMaxBtn');
+  if (minBtn) minBtn.addEventListener('click', function() { railSetBoundHere('min'); });
+  if (maxBtn) maxBtn.addEventListener('click', function() { railSetBoundHere('max'); });
+
   buildHeroes();
 
-  // Size canvas + cache rect
   sizeCanvas();
-  window.addEventListener('resize', function() { updateOrientation(); sizeCanvas(); positionBand(); drawStaticLayer(); });
+  window.addEventListener('resize', function() { updateOrientation(); sizeCanvas(); layoutWindow(); drawStaticLayer(); });
 
-  // ResizeObserver for the host
   if (typeof ResizeObserver !== 'undefined') {
-    var ro = new ResizeObserver(function() { sizeCanvas(); positionBand(); });
+    var ro = new ResizeObserver(function() { sizeCanvas(); layoutWindow(); });
     ro.observe(S.host);
   }
 
-  // Pointer events for band + tap
   wirePointerEvents();
 
-  // Start rAF loop
+  // Mirror the window-shadow state (pending/overdue) from the rail host onto the
+  // tape assembly so the tape border goes dashed while the window is in-flight
+  // (spec section 5.2).
+  mirrorShadowToTape();
+
+  // Register the rail-sync hook so range.js repaints band + tape + hazards +
+  // ruler whenever the authoritative window/travel changes (boot, echo, config
+  // adoption, cold path).
+  setRailSync(function() {
+    sizeCanvas();
+    drawStaticLayer();
+    layoutWindow();
+  });
+
   startAnimLoop();
 }
 
 // ===================== Orientation =====================
 
 function updateOrientation() {
-  // The rail panel is a full-width horizontal instrument at every breakpoint.
   S.orient = 'horizontal';
   if (S.host) {
     S.host.classList.remove('vertical');
@@ -124,7 +132,6 @@ function updateOrientation() {
 // ===================== Static layer (ruler, endcaps, triangles) =====================
 
 function buildStaticLayer() {
-  // Clear host (keep canvas + band which are added after)
   var existing = S.host.querySelector('.rail-static');
   if (existing) existing.remove();
 
@@ -132,7 +139,6 @@ function buildStaticLayer() {
   layer.className = 'rail-static';
   layer.style.cssText = 'position:absolute;inset:0;pointer-events:none;';
 
-  // Endcap labels
   var endLo = document.createElement('div');
   endLo.className = 'rail-endcap lo';
   endLo.textContent = '0';
@@ -140,18 +146,15 @@ function buildStaticLayer() {
   endHi.className = 'rail-endcap hi';
   endHi.textContent = '--';
 
-  // Inward triangle glyphs
   var triLo = document.createElement('div');
   triLo.className = 'rail-tri lo';
   var triHi = document.createElement('div');
   triHi.className = 'rail-tri hi';
 
-  // Ghost mid-scale numeral
   var ghost = document.createElement('div');
   ghost.className = 'rail-ghost';
   ghost.textContent = '--';
 
-  // Ruler ticks (SVG)
   var svg = document.createElementNS('http://www.w3.org/2000/svg', 'svg');
   svg.setAttribute('class', 'rail-ruler-svg');
   svg.setAttribute('preserveAspectRatio', 'none');
@@ -174,12 +177,9 @@ function buildStaticLayer() {
 function drawStaticLayer() {
   if (!S.railSvg) return;
   var travel = Math.round(TRAVEL);
-  // Update endcap
   if (S.endHi) S.endHi.textContent = String(travel);
-  // Update ghost mid-scale
   if (S.ghost) S.ghost.textContent = String(Math.round(travel / 2));
 
-  // Build ticks: 26 ticks, majors every 5
   var svg = S.railSvg;
   var w = S.rect.w || S.host.clientWidth;
   var h = S.rect.h || S.host.clientHeight;
@@ -187,36 +187,39 @@ function drawStaticLayer() {
   svg.setAttribute('width', w);
   svg.setAttribute('height', h);
 
-  // Clear existing ticks
   while (svg.firstChild) svg.removeChild(svg.firstChild);
 
-  // Spec §A.1 — tick ruler geometry, expressed as fractions of the 72px BASE
-  // rail height (scaled automatically since h already carries --s): ticks
-  // anchored at top:26px/72px, majors 14px/72px long, minors 7px/72px long,
-  // baseline hairline at top:33px/72px full width. All scale with h.
   var BASE_H = 72;
   var tickTop = (26 / BASE_H) * h;
   var majorLen = (14 / BASE_H) * h;
   var minorLen = (7 / BASE_H) * h;
   var baselineY = (33 / BASE_H) * h;
+  var midLen = (10 / BASE_H) * h;
 
-  var n = 26;
-  for (var i = 0; i <= n; i++) {
-    var isMajor = (i % 5 === 0);
-    var frac = i / n;
+  var railMm = Math.max(Math.round(travel), 1);
+  var pxPerMm = w / railMm;
+  var minorStep = 1;
+  if (pxPerMm < 2) minorStep = 2;
+  if (pxPerMm < 1) minorStep = 5;
+  if (railMm / minorStep > 600) minorStep = Math.ceil(railMm / 600);
+
+  for (var mm = 0; mm <= railMm; mm += minorStep) {
+    var isMajor = (mm % 10 === 0);
+    var isMid = !isMajor && (mm % 5 === 0);
+    var frac = mm / railMm;
     var line = document.createElementNS('http://www.w3.org/2000/svg', 'line');
     var x = frac * w;
-    var len = isMajor ? majorLen : minorLen;
+    var len = isMajor ? majorLen : (isMid ? midLen : minorLen);
     line.setAttribute('x1', x);
     line.setAttribute('y1', tickTop);
     line.setAttribute('x2', x);
     line.setAttribute('y2', tickTop + len);
     line.setAttribute('stroke', isMajor ? 'var(--line-3)' : 'var(--line-1)');
     line.setAttribute('stroke-width', '1');
+    line.setAttribute('opacity', isMajor ? '1' : (isMid ? '0.85' : '0.5'));
     svg.appendChild(line);
   }
 
-  // Baseline hairline — full width, 1px, at top:33px/72px
   var baseline = document.createElementNS('http://www.w3.org/2000/svg', 'line');
   baseline.setAttribute('x1', 0);
   baseline.setAttribute('y1', baselineY);
@@ -244,6 +247,35 @@ function sizeCanvas() {
   S.rect.h = h;
   S.rect.x = 0;
   S.rect.y = 0;
+}
+
+// ===================== Hazard ribbons (keep-out hatching) =====================
+
+function buildHazards() {
+  var lo = document.createElement('div');
+  lo.className = 'rail-hz lo';
+  var hi = document.createElement('div');
+  hi.className = 'rail-hz hi';
+  // Insert BEFORE the canvas so both ribbons sit below the phosphor in z-order.
+  S.host.insertBefore(lo, S.cv);
+  S.host.insertBefore(hi, S.cv);
+  S.hzLo = lo;
+  S.hzHi = hi;
+  positionHazards();
+}
+
+function positionHazards() {
+  if (!S.hzLo || TRAVEL <= 0) return;
+  var lo = clamp(winMin, 0, TRAVEL);
+  var hi = clamp(winMax, 0, TRAVEL);
+  S.hzLo.style.width = (lo / TRAVEL * 100) + '%';
+  S.hzHi.style.width = ((TRAVEL - hi) / TRAVEL * 100) + '%';
+  // Vertical: thin ribbon centered on the mid-rail baseline (33/72 of height).
+  var baselineY = (33 / 72) * S.rect.h;
+  var hh = S.hzLo.offsetHeight || 9;
+  var top = (baselineY - hh / 2) + 'px';
+  S.hzLo.style.top = top;
+  S.hzHi.style.top = top;
 }
 
 // ===================== Band (DOM, pointer events) =====================
@@ -291,18 +323,177 @@ function positionBand() {
 
   var left = fracLo * S.rect.w;
   var width = (fracHi - fracLo) * S.rect.w;
-  // Only position along the rail (left/width) here. top/height/background/
-  // border/box-shadow are owned by the .rail-band CSS rule (spec §A.3:
-  // top:18px height:30px BASE, scaled by --s) — setting them inline here
-  // previously stomped the CSS with top:0/height:100%, turning the faint
-  // edge-lit band into a full-height filled box. Never override those two
-  // properties from JS again.
+  // Only position along the rail (left/width). top/height/background/border/
+  // box-shadow are owned by the .rail-band CSS rule.
   S.bandEl.style.left = left + 'px';
   S.bandEl.style.width = Math.max(width, 8) + 'px';
 
-  // Label: min–max · lengthmm — Spec §A.3 exact format `010–110 · 100mm`
   if (S.bandLabel) {
     S.bandLabel.textContent = pad(Math.round(lo), 3, 0) + '\u2013' + pad(Math.round(hi), 3, 0) + ' \u00b7 ' + pad(Math.round(hi - lo), 3, 0) + 'mm';
+  }
+}
+
+// ===================== Input tape (command surface) =====================
+
+function cacheTape() {
+  S.tapeAssembly = document.getElementById('railTape');
+  S.tapeTrack = document.getElementById('railTapeTrack');
+  S.tapeBar = document.getElementById('railTapeBar');
+  S.tapePip = document.getElementById('railTapePip');
+  S.tapeMode = document.getElementById('railTapeMode');
+  S.tapeExtent = document.getElementById('railTapeExtent');
+  if (S.tapeBar) wireTapeEvents();
+  positionTape();
+  updateTapeLabels();
+}
+
+function positionTape() {
+  if (!S.tapeBar || TRAVEL <= 0) return;
+  if (S.manual) {
+    // Manual mode — the tape spans the full rail width.
+    S.tapeBar.style.left = '0%';
+    S.tapeBar.style.width = '100%';
+  } else {
+    // Normal mode — the tape spans EXACTLY the reported window extent, so
+    // mapping local x to [wMin..wMax] can never command outside the window.
+    var lo = clamp(winMin, 0, TRAVEL);
+    var hi = clamp(winMax, 0, TRAVEL);
+    S.tapeBar.style.left = (lo / TRAVEL * 100) + '%';
+    S.tapeBar.style.width = ((hi - lo) / TRAVEL * 100) + '%';
+  }
+}
+
+function updateTapeLabels() {
+  if (S.tapeMode) {
+    S.tapeMode.textContent = S.manual ? 'input \u00b7 full travel \u00b7 manual' : 'input \u00b7 window';
+  }
+  if (S.tapeExtent) {
+    var lo, hi;
+    if (S.manual) { lo = 0; hi = Math.round(TRAVEL); }
+    else { lo = Math.round(clamp(winMin, 0, TRAVEL)); hi = Math.round(clamp(winMax, 0, TRAVEL)); }
+    S.tapeExtent.textContent = pad(lo, 3, 0) + '\u2013' + pad(hi, 3, 0);
+  }
+}
+
+// Map the tape's LOCAL x-fraction to a commandable mm. Normal: [wMin..wMax];
+// manual: [0..TRAVEL]. Also parks the scrub pip under the pointer.
+function tapeMm(e) {
+  var r = S.tapeBar.getBoundingClientRect();
+  if (r.width <= 0 || TRAVEL <= 0) return 0;
+  var frac = clamp((e.clientX - r.left) / r.width, 0, 1);
+  if (S.tapePip) S.tapePip.style.left = (frac * 100) + '%';
+  if (S.manual) return frac * TRAVEL;
+  return winMin + frac * (winMax - winMin);
+}
+
+// Command through the EXISTING move sender (window.__sendMove). force=true on
+// the initial press (immediate); force=false while dragging so the sender's own
+// rate limit applies (do not add another).
+function sendTape(mm, force) {
+  if (typeof window.__sendMove === 'function') window.__sendMove(mm, force);
+}
+
+function wireTapeEvents() {
+  var bar = S.tapeBar;
+  bar.addEventListener('pointerdown', function(e) {
+    if (TRAVEL <= 0) return;
+    S.tapeDrag = true;
+    if (bar.setPointerCapture) { try { bar.setPointerCapture(e.pointerId); } catch (err) {} }
+    // Manual wins: a running pattern is stopped by the first touch.
+    S.onPatternStop();
+    if (S.tapePip) S.tapePip.classList.add('on');
+    var mm = tapeMm(e);
+    sendTape(mm, true);
+    e.preventDefault();
+  });
+  bar.addEventListener('pointermove', function(e) {
+    if (!S.tapeDrag) return;
+    var mm = tapeMm(e);
+    sendTape(mm, false);
+    e.preventDefault();
+  });
+  var up = function(e) {
+    if (!S.tapeDrag) return;
+    S.tapeDrag = false;
+    if (S.tapePip) S.tapePip.classList.remove('on');
+    if (e && e.preventDefault) e.preventDefault();
+  };
+  bar.addEventListener('pointerup', up);
+  bar.addEventListener('pointercancel', up);
+}
+
+// ===================== One layout owner (band + tape + hazards) =====================
+// Ground-truth doctrine (R1/section 5.1): every writer of window geometry routes
+// through here so band, tape (normal extent) and both hazard ribbons render from
+// the SAME (winMin,winMax) pair. Local drag updates winMin/winMax for preview;
+// settle/echo/config-adoption update them from reported state and call
+// renderWindow() -> setRailSync -> this function.
+function layoutWindow() {
+  positionBand();
+  positionHazards();
+  positionTape();
+  updateTapeLabels();
+}
+
+// ===================== Shadow mirror (pending/overdue -> tape) =====================
+
+function mirrorShadowToTape() {
+  if (!S.host || !S.tapeAssembly || typeof MutationObserver === 'undefined') return;
+  var apply = function() {
+    S.tapeAssembly.classList.toggle('pending', S.host.classList.contains('pending'));
+    S.tapeAssembly.classList.toggle('overdue1', S.host.classList.contains('overdue1'));
+    S.tapeAssembly.classList.toggle('overdue2', S.host.classList.contains('overdue2'));
+  };
+  var obs = new MutationObserver(apply);
+  obs.observe(S.host, { attributes: true, attributeFilter: ['class'] });
+  apply();
+}
+
+// ===================== Section 4 — Set min / max from current position =====================
+// Acts on the CURRENT ACTUAL displayed position (interpolated), rounded to
+// 0.1mm. Yielding-bounds rule: the stated bound lands exactly where the carriage
+// stood; the other bound yields to preserve MINLEN and the shove is announced by
+// an amber 700ms flash on the yielding handle + band label. Dispatch goes
+// through the SAME debounced window-set path the band uses.
+function flashWarn(el) {
+  if (!el) return;
+  el.classList.remove('rail-flash-warn');
+  void el.offsetWidth;   // force reflow so the animation restarts
+  el.classList.add('rail-flash-warn');
+  setTimeout(function() { el.classList.remove('rail-flash-warn'); }, 700);
+}
+
+function railSetBoundHere(which) {
+  if (TRAVEL <= 0) return;
+  var pos = Math.round(clamp(S.posDisplay, 0, TRAVEL) * 10) / 10;
+  var nMin = winMin, nMax = winMax;
+  var shoved = false, flashHandle = null;
+
+  if (which === 'min') {
+    nMin = clamp(pos, 0, TRAVEL - MINLEN);
+    if (nMax < nMin + MINLEN) {
+      nMax = Math.min(TRAVEL, nMin + MINLEN);
+      shoved = true;
+      flashHandle = S.bandHandleHi;   // HI handle yields
+    }
+  } else {
+    nMax = clamp(pos, MINLEN, TRAVEL);
+    if (nMin > nMax - MINLEN) {
+      nMin = Math.max(0, nMax - MINLEN);
+      shoved = true;
+      flashHandle = S.bandHandleLo;   // LO handle yields
+    }
+  }
+
+  setWinMin(nMin);
+  setWinMax(nMax);
+  // Debounced window-set path — shadow pending, echo confirms, overdue states
+  // apply unchanged. renderWindow re-clamps + repaints via setRailSync.
+  renderWindow();
+
+  if (shoved) {
+    flashWarn(flashHandle);
+    flashWarn(S.bandLabel);
   }
 }
 
@@ -311,24 +502,21 @@ function positionBand() {
 function buildHeroes() {
   var host = $('#spineHeroes');
   if (!host) return;
-  // Clear existing
   host.innerHTML = '';
 
-  // actual — flagship numeral. Label sits ABOVE, with the + crosshair glyph.
   var actWrap = document.createElement('div');
   actWrap.className = 'hero-item hero-primary';
+  // Plain crosshair glyph in the label (avoids inline SVG markup).
   actWrap.innerHTML =
-    '<span class="hero-label"><svg viewBox="0 0 10 10" aria-hidden="true"><path d="M5 0v10M0 5h10" stroke="currentColor" stroke-width="1" fill="none"/></svg>actual \u00b7 mm</span>' +
+    '<span class="hero-label">\u2295 actual \u00b7 mm</span>' +
     '<span class="vv hero-val" id="heroActual">000.0</span>';
   host.appendChild(actWrap);
 
-  // commanded (purple .vv.intent, baseline-aligned beside actual)
   var cmdWrap = document.createElement('div');
   cmdWrap.className = 'hero-item hero-secondary';
   cmdWrap.innerHTML = '<span class="hero-label">commanded</span><span class="vv hero-val intent" id="heroCmd">000.0</span>';
   host.appendChild(cmdWrap);
 
-  // lag (gray .vv, .w1 >5mm, .w2 >15mm)
   var lagWrap = document.createElement('div');
   lagWrap.className = 'hero-item hero-secondary';
   lagWrap.innerHTML = '<span class="hero-label">lag</span><span class="vv hero-val" id="heroLag">00.0</span>';
@@ -339,28 +527,23 @@ function buildHeroes() {
   S.heroLag = $('#heroLag');
 }
 
-// ===================== Pointer events (band drag/resize + tap) =====================
+// ===================== Pointer events (band drag/resize only) =====================
+// The rail LOSES tap-to-command in normal mode (section 1): it is display +
+// window editing only. Band body drag = move window; handles = resize. In manual
+// mode the rail is display-only (scrubbing happens on the full-width tape).
 
 function wirePointerEvents() {
   if (!S.host) return;
 
   S.host.addEventListener('pointerdown', function(e) {
     if (TRAVEL <= 0) return;
+    // Manual mode: rail is display-only. The tape owns scrubbing now.
+    if (S.manual) return;
     var mm = pxToMm(e);
-    // Check if on a handle
     if (e.target === S.bandHandleLo) { startDrag('lo', e, mm); return; }
     if (e.target === S.bandHandleHi) { startDrag('hi', e, mm); return; }
-    // Check if on band body
     if (e.target === S.bandEl || e.target === S.bandFill || e.target === S.bandLabel) { startDrag('move', e, mm); return; }
-    // Otherwise: tap-to-command (handled on pointerup). Capture on the HOST,
-    // not e.target — capturing on the canvas caused the pointerup to be
-    // retargeted/lost in some browsers so the tap never fired. :3
-    S.drag = 'tap';
-    S.dragStartMm = mm;
-    if (S.host.setPointerCapture) {
-      try { S.host.setPointerCapture(e.pointerId); } catch (err) {}
-    }
-    e.preventDefault();
+    // Otherwise: nothing. The rail surface no longer commands moves (section 1).
   });
 
   S.host.addEventListener('pointermove', function(e) {
@@ -371,19 +554,19 @@ function wirePointerEvents() {
       var delta = mm - S.dragStartMm;
       var nMin = clamp(S.dragStartMin + delta, 0, TRAVEL - span);
       setWinMin(nMin); setWinMax(nMin + span);
-      positionBand();
+      layoutWindow();
       S.bandEl.classList.add('pending');
       pushWindow();
     } else if (S.drag === 'lo') {
-      var nLo = clamp(mm, 0, winMax - 5);
+      var nLo = clamp(mm, 0, winMax - MINLEN);
       setWinMin(nLo);
-      positionBand();
+      layoutWindow();
       S.bandEl.classList.add('pending');
       pushWindow();
     } else if (S.drag === 'hi') {
-      var nHi = clamp(mm, winMin + 5, TRAVEL);
+      var nHi = clamp(mm, winMin + MINLEN, TRAVEL);
       setWinMax(nHi);
-      positionBand();
+      layoutWindow();
       S.bandEl.classList.add('pending');
       pushWindow();
     }
@@ -392,22 +575,16 @@ function wirePointerEvents() {
 
   S.host.addEventListener('pointerup', function(e) {
     if (!S.drag) return;
-    if (S.drag === 'tap') {
-      // Tap-to-command: sendMove + stop pattern
-      var mm = pxToMm(e);
-      S.onTap(mm);
-      S.onPatternStop();
-    } else {
-      // End drag: persist window
-      S.bandEl.classList.remove('pending');
-      renderWindow(); // persist via range.js
-    }
+    S.bandEl.classList.remove('pending');
+    if (S.panel) S.panel.classList.remove('drag-live');
+    renderWindow();
     S.drag = null;
     e.preventDefault();
   });
 
   S.host.addEventListener('pointercancel', function() {
-    if (S.drag && S.drag !== 'tap' && S.bandEl) S.bandEl.classList.remove('pending');
+    if (S.drag && S.bandEl) S.bandEl.classList.remove('pending');
+    if (S.panel) S.panel.classList.remove('drag-live');
     S.drag = null;
   });
 }
@@ -424,8 +601,9 @@ function startDrag(mode, e, mm) {
   S.dragStartMm = mm;
   S.dragStartMin = winMin;
   S.dragStartMax = winMax;
-  // Capture on the host so pointermove/up keep flowing to our listeners
-  // even when the pointer leaves the element that was pressed.
+  // drag-live kills the tape/hazard slide transitions so preview tracks the
+  // finger 1:1 (section 2: width transitions instant during drag).
+  if (S.panel) S.panel.classList.add('drag-live');
   if (S.host && S.host.setPointerCapture) {
     try { S.host.setPointerCapture(e.pointerId); } catch (err) {}
   }
@@ -438,7 +616,6 @@ export function railFeed(samples, dtMs, fromSeq) {
   if (!samples || samples.length === 0) return;
   if (typeof dtMs === 'number' && dtMs > 0) S.defaultDtMs = dtMs;
 
-  // Seq dedupe
   var skip = 0;
   if (typeof fromSeq === 'number') {
     if (fromSeq + samples.length - 1 <= S.lastSeenSeq) return;
@@ -488,19 +665,14 @@ function interpolate(nowMs) {
   lastInterpTs = nowMs;
 
   if (S.qLen === 0) {
-    // No sample queue (JSON/1Hz fallback or between bursts): exponentially
-    // approach the target instead of snapping — frame-rate independent
-    // (~85ms time constant), so sparse updates still read as smooth motion.
     var a = 1 - Math.pow(0.82, dtMs / 16.667);
     S.posDisplay += (S.posTarget - S.posDisplay) * a;
     S.tgtDisplay += (S.tgtTarget - S.tgtDisplay) * a;
-    // Snap when within a hair to avoid asymptotic shimmer
     if (Math.abs(S.posTarget - S.posDisplay) < 0.05) S.posDisplay = S.posTarget;
     if (Math.abs(S.tgtTarget - S.tgtDisplay) < 0.05) S.tgtDisplay = S.tgtTarget;
     return;
   }
 
-  // Advance head past consumed samples
   while (S.qLen > 1) {
     var nextIdx = (S.qHead + 1) % S.QCAP;
     if (qTs[nextIdx] <= nowMs) {
@@ -518,24 +690,22 @@ function interpolate(nowMs) {
     return;
   }
 
-  var nextIdx = (S.qHead + 1) % S.QCAP;
-  if (nowMs >= qTs[nextIdx]) {
-    // Past the last scheduled sample — ease onto it rather than snapping,
-    // which hides the seam between telemetry bursts.
+  var nextIdx2 = (S.qHead + 1) % S.QCAP;
+  if (nowMs >= qTs[nextIdx2]) {
     var a2 = 1 - Math.pow(0.82, dtMs / 16.667);
-    S.posDisplay += (qPos[nextIdx] - S.posDisplay) * a2;
-    S.tgtDisplay += (qTgt[nextIdx] - S.tgtDisplay) * a2;
-    if (Math.abs(qPos[nextIdx] - S.posDisplay) < 0.05) S.posDisplay = qPos[nextIdx];
-    if (Math.abs(qTgt[nextIdx] - S.tgtDisplay) < 0.05) S.tgtDisplay = qTgt[nextIdx];
-    S.posTarget = qPos[nextIdx];
-    S.tgtTarget = qTgt[nextIdx];
+    S.posDisplay += (qPos[nextIdx2] - S.posDisplay) * a2;
+    S.tgtDisplay += (qTgt[nextIdx2] - S.tgtDisplay) * a2;
+    if (Math.abs(qPos[nextIdx2] - S.posDisplay) < 0.05) S.posDisplay = qPos[nextIdx2];
+    if (Math.abs(qTgt[nextIdx2] - S.tgtDisplay) < 0.05) S.tgtDisplay = qTgt[nextIdx2];
+    S.posTarget = qPos[nextIdx2];
+    S.tgtTarget = qTgt[nextIdx2];
     return;
   }
 
-  var span = qTs[nextIdx] - qTs[curIdx];
+  var span = qTs[nextIdx2] - qTs[curIdx];
   var frac = span > 0 ? clamp((nowMs - qTs[curIdx]) / span, 0, 1) : 1;
-  S.posDisplay = qPos[curIdx] + (qPos[nextIdx] - qPos[curIdx]) * frac;
-  S.tgtDisplay = qTgt[curIdx] + (qTgt[nextIdx] - qTgt[curIdx]) * frac;
+  S.posDisplay = qPos[curIdx] + (qPos[nextIdx2] - qPos[curIdx]) * frac;
+  S.tgtDisplay = qTgt[curIdx] + (qTgt[nextIdx2] - qTgt[curIdx]) * frac;
   S.posTarget = S.posDisplay;
   S.tgtTarget = S.tgtDisplay;
 }
@@ -553,16 +723,13 @@ function animFrame(nowMs) {
 
   interpolate(nowMs);
 
-  // Detect motion for hero glow
   var lag = Math.abs(S.posDisplay - S.tgtDisplay);
   var isMoving = lag > 0.5;
   if (isMoving) S.lastMoveTs = nowMs;
   var glowActive = (nowMs - S.lastMoveTs) < 300;
 
-  // Draw canvas
   drawCanvas(nowMs, glowActive);
 
-  // Update hero numerals
   if (S.heroActual) {
     setVV('heroActual', S.posDisplay, 3, 1);
     if (glowActive) S.heroActual.classList.add('glow');
@@ -581,12 +748,44 @@ function animFrame(nowMs) {
   requestAnimationFrame(animFrame);
 }
 
-// Smooth velocity for speed-aware fade (EMA a=0.2, clamped)
+// ===================== Comet trail (section 3 — smooth speed-scaled ribbon) =====================
 var _velSmooth = 0;
-
-// Previous frame's marker positions for bridge segments
 var _prevPx = 0, _prevTx = 0;
 var _prevDrawn = false;
+
+// Position-history ring of the CENTER DOT's interpolated position (section
+// 3.1/3.2). Fixed-size Float64Array ring, retained ~850ms, no per-frame alloc.
+var TRAIL_CAP = 320;
+var trailX = new Float64Array(TRAIL_CAP);
+var trailT = new Float64Array(TRAIL_CAP);
+var trailHead = 0, trailLen = 0;
+var TRAIL_MS = 850;
+
+// Scratch arrays for building ONE tapered polygon per direction-run (reuse, no
+// per-frame allocation). Sized to the ring capacity.
+var _polyX = new Float64Array(TRAIL_CAP);
+var _polyW = new Float64Array(TRAIL_CAP);
+
+// Reference speed (px/ms) the head half-width normalizes against (section 3.4).
+// Derived from the input-set max speed mapped to px/ms at the current rail
+// width; falls back to a sane constant when unavailable. Logged once.
+var _refLogged = false;
+function referenceSpeedPxPerMs() {
+  var mmPerS = 0;
+  var el = document.getElementById('maxSpeed');
+  if (el) { var v = parseFloat(el.value); if (isFinite(v) && v > 0) mmPerS = v; }
+  var pxPerMm = (TRAVEL > 0 && S.rect.w > 0) ? (S.rect.w / TRAVEL) : 0;
+  var ref;
+  if (mmPerS > 0 && pxPerMm > 0) {
+    ref = (mmPerS * pxPerMm) / 1000;   // mm/s -> px/ms
+    if (!_refLogged) { console.log('[rail] comet reference speed from maxSpeed=' + mmPerS + 'mm/s -> ' + ref.toFixed(4) + ' px/ms'); _refLogged = true; }
+  } else {
+    ref = 0.9;
+    if (!_refLogged) { console.log('[rail] comet reference speed FALLBACK ' + ref + ' px/ms (maxSpeed/travel unavailable)'); _refLogged = true; }
+  }
+  if (!isFinite(ref) || ref <= 0.05) ref = 0.9;
+  return ref;
+}
 
 // ===================== Canvas drawing (state set once, no per-frame alloc) =====================
 
@@ -600,113 +799,195 @@ function drawCanvas(nowMs, glowActive) {
   var px = posFrac * S.rect.w;
   var tx = tgtFrac * S.rect.w;
 
-  // (a) Speed-aware phosphor fade (F3)
-  if (!S.reducedMotion) {
-    var dtMs = nowMs - lastFrameTs;
-    if (dtMs <= 0 || dtMs > 500) dtMs = 16.667;
-    lastFrameTs = nowMs;
-    // Compute instantaneous velocity in px/ms, EMA-smooth
-    var instVel = _prevDrawn ? Math.abs(px - _prevPx) / Math.max(dtMs, 1) : 0;
-    _velSmooth += 0.2 * (instVel - _velSmooth);
-    // Speed-aware fade: ~0.06 at rest → ~0.16 at max speed (~200px/16ms ≈ 12.5 px/ms)
-    var fadeAlpha = clamp(0.06 + _velSmooth * 0.008, 0.06, 0.16);
-    S.ctx.globalCompositeOperation = 'destination-out';
-    S.ctx.globalAlpha = fadeAlpha;
-    S.ctx.fillStyle = '#000';
-    S.ctx.fillRect(0, 0, S.rect.w, S.rect.h);
-    S.ctx.globalAlpha = 1;
+  // FULLY clear every frame (section 3.1) — no destination-out persistence. The
+  // entire comet is rebuilt from the position history, so there is no
+  // accumulated-blit banding and no bright-dot string.
+  S.ctx.clearRect(0, 0, S.rect.w, S.rect.h);
+
+  var dtMs = nowMs - lastFrameTs;
+  if (dtMs <= 0 || dtMs > 500) dtMs = 16.667;
+  lastFrameTs = nowMs;
+
+  // Record this frame's dot position into the history ring. Dedupe tiny idle
+  // jitter, but keep the head timestamp fresh so the comet head tracks live.
+  if (trailLen === 0) {
+    trailX[0] = px; trailT[0] = nowMs; trailHead = 0; trailLen = 1;
+  } else if (nowMs - trailT[trailHead] >= 8 || Math.abs(px - trailX[trailHead]) >= 0.35) {
+    trailHead = (trailHead + 1) % TRAIL_CAP;
+    trailX[trailHead] = px; trailT[trailHead] = nowMs;
+    if (trailLen < TRAIL_CAP) trailLen++;
   } else {
-    S.ctx.clearRect(0, 0, S.rect.w, S.rect.h);
+    trailX[trailHead] = px; trailT[trailHead] = nowMs;
   }
 
-  // Precompute y-coordinates (fractional of 72px BASE)
+  // Instantaneous velocity px/ms, EMA-smoothed (section 3.4, alpha ~0.2).
+  var instVel = _prevDrawn ? Math.abs(px - _prevPx) / Math.max(dtMs, 1) : 0;
+  _velSmooth += 0.2 * (instVel - _velSmooth);
+
   var BASE_H = 72;
   var h = S.rect.h;
   var caretY0 = (22 / BASE_H) * h;
   var caretY1 = (46 / BASE_H) * h;
   var markY0 = (16 / BASE_H) * h;
   var markY1 = (52 / BASE_H) * h;
-  var dotY = (34 / BASE_H) * h;
+  var midY = (markY0 + markY1) / 2;
+  var H = markY1 - markY0;   // full marker-line span (section 3.4 thickness ref)
 
-  // (a2) v0.4 interpolator planned-segment overlay (amber/green). Reads the
-  // latest 0x04 INTERP snapshot from window.__INTERP (fed by main.js at ~45Hz).
-  // Drawn beneath the markers so the live took/told lines stay on top.
+  // v0.4 interpolator planned-segment overlay (amber/green). Beneath markers.
   drawInterpOverlay(h);
 
-  // (b) Commanded caret — purple, crisp point (no trail, F4)
-  S.ctx.globalCompositeOperation = 'source-over';
+  // COMET TRAIL — one filled, tapered gradient ribbon per direction-run.
+  if (S.reducedMotion) {
+    drawReducedTrail(nowMs, midY);
+  } else {
+    var ref = referenceSpeedPxPerMs();
+    var speedNorm = clamp(_velSmooth / ref, 0, 1);
+    var headHalf = 1 + (0.25 * H - 1) * speedNorm;   // lerp(1px, 0.25*H, speedNorm)
+    if (headHalf < 1) headHalf = 1;
+    drawCometRibbons(nowMs, midY, headHalf, glowActive);
+  }
+
+  // Commanded caret — purple, crisp, redrawn every frame, NO trail (3.1).
   S.ctx.strokeStyle = S.intentColor;
   S.ctx.lineWidth = 1;
   S.ctx.shadowColor = 'rgba(167,139,250,.7)';
   S.ctx.shadowBlur = 6;
-  S.ctx.setLineDash(DASH_NONE);
+  S.ctx.globalAlpha = 1;
   S.ctx.beginPath();
   S.ctx.moveTo(tx, caretY0);
   S.ctx.lineTo(tx, caretY1);
   S.ctx.stroke();
 
-  // (c) Actual marker — bridge segment from prev position (F2)
+  // Full-height marker line — crisp, NO trail (3.1).
   S.ctx.strokeStyle = S.realityColor;
-  S.ctx.lineWidth = 2;
-  S.ctx.shadowColor = 'rgba(77,166,255,.9)';
-  S.ctx.shadowBlur = glowActive ? 14 : 10;
-  S.ctx.setLineDash(DASH_NONE);
-  if (_prevDrawn) {
-    // Draw continuous segment spanning from last frame's position
-    S.ctx.beginPath();
-    S.ctx.moveTo(_prevPx, markY0);
-    S.ctx.lineTo(px, markY0);
-    S.ctx.lineTo(px, markY1);
-    S.ctx.lineTo(_prevPx, markY1);
-    S.ctx.closePath();
-    S.ctx.fillStyle = 'rgba(77,166,255,0.15)';
-    S.ctx.fill();
-    // Main stroke line along the center of the trail
-    S.ctx.shadowBlur = 8;
-    S.ctx.beginPath();
-    S.ctx.moveTo(_prevPx, (markY0 + markY1) / 2);
-    S.ctx.lineTo(px, (markY0 + markY1) / 2);
-    S.ctx.stroke();
-    S.ctx.fillStyle = '#000'; // reset fillStyle
-  }
-  // Always draw the current vertical marker line
-  S.ctx.shadowBlur = glowActive ? 14 : 10;
+  S.ctx.lineWidth = 1;
+  S.ctx.shadowColor = 'rgba(77,166,255,.55)';
+  S.ctx.shadowBlur = 4;
   S.ctx.beginPath();
   S.ctx.moveTo(px, markY0);
   S.ctx.lineTo(px, markY1);
   S.ctx.stroke();
 
-  // (d) Bright core dot at current position
+  // Bright core dot at the live leading edge.
+  S.ctx.shadowColor = 'rgba(77,166,255,.9)';
   S.ctx.shadowBlur = glowActive ? 12 : 8;
   S.ctx.fillStyle = '#DCEEFF';
   S.ctx.beginPath();
-  S.ctx.arc(px, dotY, 2, 0, Math.PI * 2);
+  S.ctx.arc(px, midY, 2.6, 0, Math.PI * 2);
   S.ctx.fill();
 
   S.ctx.shadowBlur = 0;
+  S.ctx.globalAlpha = 1;
+  S.ctx.lineCap = 'butt';
+  S.ctx.lineJoin = 'miter';
 
   _prevPx = px;
   _prevTx = tx;
   _prevDrawn = true;
 }
 
+// Section 3.3 — build ONE filled tapered polygon per contiguous same-direction
+// run, filled with ONE linear gradient (head -> transparent tail). A single
+// gradient fill cannot band. Ribbons split at direction reversals so polygons
+// never self-intersect.
+function drawCometRibbons(nowMs, midY, headHalf, glowActive) {
+  if (trailLen < 2) return;
+
+  S.ctx.globalCompositeOperation = 'source-over';
+  S.ctx.setLineDash(DASH_NONE);
+  // One soft glow pass over the fills (section 3.3).
+  S.ctx.shadowColor = 'rgba(77,166,255,.6)';
+  S.ctx.shadowBlur = glowActive ? 8 : 5;
+
+  var idx = trailHead;
+  var runStart = 0;     // index into _poly arrays where current run began
+  var runDir = 0;       // -1, 0, +1
+  var m = 0;            // points buffered so far (newest to oldest)
+
+  for (var k = 0; k < trailLen; k++) {
+    var age = nowMs - trailT[idx];
+    if (age > TRAIL_MS) break;
+    var f = 1 - (age / TRAIL_MS);
+    if (f < 0) f = 0;
+    var taper = f * f;                       // (1 - age/850)^2 (section 3.3)
+    var x = trailX[idx];
+    if (m > 0) {
+      var dx = x - _polyX[m - 1];            // newer minus this (older)
+      var dir = dx > 0.001 ? 1 : (dx < -0.001 ? -1 : runDir);
+      if (runDir !== 0 && dir !== 0 && dir !== runDir) {
+        // Direction reversed — flush [runStart .. m-1], start a new run that
+        // SHARES the boundary point so ribbons visually connect.
+        flushRibbon(runStart, m - 1, midY);
+        runStart = m - 1;
+        runDir = dir;
+      } else if (runDir === 0) {
+        runDir = dir;
+      }
+    }
+    _polyX[m] = x;
+    _polyW[m] = Math.max(headHalf * taper, 0.15);
+    m++;
+    idx = (idx - 1 + TRAIL_CAP) % TRAIL_CAP;
+  }
+  // Flush the final (oldest) run.
+  if (m - 1 > runStart) flushRibbon(runStart, m - 1, midY);
+
+  S.ctx.shadowBlur = 0;
+  S.ctx.globalAlpha = 1;
+}
+
+// Points _polyX[startI..endI] / _polyW[..] are ordered newest to oldest.
+function flushRibbon(startI, endI, midY) {
+  var nPts = endI - startI + 1;
+  if (nPts < 2) return;
+  var headX = _polyX[startI];
+  var tailX = _polyX[endI];
+  // ONE gradient along x from head (alpha ~.55) to tail (transparent).
+  var g = S.ctx.createLinearGradient(headX, 0, tailX, 0);
+  g.addColorStop(0, 'rgba(77,166,255,.55)');
+  g.addColorStop(1, 'rgba(77,166,255,0)');
+  S.ctx.fillStyle = g;
+  S.ctx.beginPath();
+  // top edge newest to oldest
+  S.ctx.moveTo(_polyX[startI], midY - _polyW[startI]);
+  for (var i = startI + 1; i <= endI; i++) S.ctx.lineTo(_polyX[i], midY - _polyW[i]);
+  // bottom edge oldest to newest
+  for (var j = endI; j >= startI; j--) S.ctx.lineTo(_polyX[j], midY + _polyW[j]);
+  S.ctx.closePath();
+  S.ctx.fill();
+}
+
+// prefers-reduced-motion trail: static thin 40%-opacity polyline, no ribbon.
+function drawReducedTrail(nowMs, midY) {
+  if (trailLen < 2) return;
+  S.ctx.globalCompositeOperation = 'source-over';
+  S.ctx.setLineDash(DASH_NONE);
+  S.ctx.shadowBlur = 0;
+  S.ctx.globalAlpha = 0.4;
+  S.ctx.strokeStyle = S.realityColor;
+  S.ctx.lineWidth = 1;
+  S.ctx.beginPath();
+  var idx = trailHead;
+  var started = false;
+  for (var k = 0; k < trailLen; k++) {
+    var age = nowMs - trailT[idx];
+    if (age > TRAIL_MS) break;
+    if (!started) { S.ctx.moveTo(trailX[idx], midY); started = true; }
+    else S.ctx.lineTo(trailX[idx], midY);
+    idx = (idx - 1 + TRAIL_CAP) % TRAIL_CAP;
+  }
+  S.ctx.stroke();
+  S.ctx.globalAlpha = 1;
+}
 
 function drawInterpOverlay(h) {
   var it = window.__INTERP;
   if (!it || !it.active) return;
-  // Freshness gate — a stale snapshot means the stream stopped; don't leave a
-  // frozen ghost segment painted on the rail.
   if (performance.now() - it.lastRxMs > 250) return;
 
   var span = winMax - winMin;
   if (span <= 0) return;
 
-  // Interp positions are normalized 0..1 within the ACTIVE stroke window, so
-  // map through winMin..winMax → mm → px. With this mapping the amber progress
-  // dot should ride directly under the purple commanded caret; if it drifts,
-  // the interpolator and the mapper disagree — exactly the kind of divergence
-  // we're hunting. (If firmware normalizes over full travel instead, drop the
-  // winMin offset and use TRAVEL directly.)
   var sMm = winMin + clamp(it.startPos, 0, 1) * span;
   var eMm = winMin + clamp(it.endPos,   0, 1) * span;
   var cMm = winMin + clamp(it.curPos,   0, 1) * span;
@@ -715,13 +996,11 @@ function drawInterpOverlay(h) {
   var cx = (clamp(cMm, 0, TRAVEL) / (TRAVEL || 1)) * S.rect.w;
 
   var BASE_H = 72;
-  var planY = (60 / BASE_H) * h;   // just below the baseline, clear of the marker band
+  var planY = (60 / BASE_H) * h;
 
   S.ctx.globalCompositeOperation = 'source-over';
   S.ctx.setLineDash(DASH_NONE);
 
-  // Planned span (start → end): thin rule with endpoint ticks. Green marks a
-  // v4 gradient segment (G-slope), amber a ramped/eased v3-style segment.
   var planColor = it.gradMode ? '#7CD992' : '#F5A623';
   S.ctx.strokeStyle = planColor;
   S.ctx.lineWidth = 1;
@@ -736,7 +1015,6 @@ function drawInterpOverlay(h) {
   S.ctx.moveTo(ex, planY - 3); S.ctx.lineTo(ex, planY + 3);
   S.ctx.stroke();
 
-  // Progress marker at curPos.
   S.ctx.shadowBlur = 6;
   S.ctx.fillStyle = it.gradMode ? '#B6F0C4' : '#FFD08A';
   S.ctx.beginPath();
@@ -753,4 +1031,25 @@ export function railUpdatePosition(pos, tgt) {
   S.posTarget = clamp(pos, 0, TRAVEL);
   S.tgtTarget = clamp(tgt, 0, TRAVEL);
   if (!S.animRunning) startAnimLoop();
+}
+
+// ===================== Manual mode =====================
+// Toggle the rail between DEFAULT mode (window band editing; the tape spans the
+// window) and MANUAL mode (the tape spans full travel and is the live scrub
+// instrument; the rail is display-only). The band is left in the DOM so it
+// re-appears untouched when manual mode is switched off; CSS
+// (.rail-panel.manual-mode) hides it and re-skins the host while active.
+export function setRailManualMode(on) {
+  S.manual = !!on;
+  var panel = $('#railPanel');
+  if (panel) panel.classList.toggle('manual-mode', S.manual);
+  if (!S.manual && S.bandEl) S.bandEl.classList.remove('pending');
+  S.drag = null;
+  // Re-lay the tape/hazards for the new mode (extent + labels swap).
+  layoutWindow();
+  return S.manual;
+}
+
+export function isRailManualMode() {
+  return S.manual;
 }

@@ -32,4 +32,15 @@ public:
     // Load persisted settings (or factory defaults if NVS is empty/unreadable).
     // Populates state, mapper, and motor in-place.
     static void load(SystemState& state, RangeMapper& mapper, MotorDriver& motor);
+
+    // ---- Secondary WiFi credentials (serial-settable fallback) --------------
+    // A second SSID/password pair stored in NVS, tried by setupWiFi() when the
+    // compile-time primary creds (secrets.h) fail to connect. Set over USB
+    // serial with the `WIFI <ssid> <password>` command so a rig on an unknown
+    // network can be recovered without a reflash. Stored as NVS strings in the
+    // same "strokeengine" namespace (keys "wifi_ssid2" / "wifi_pass2"). :3
+    static void saveWifiCreds(const char* ssid, const char* pass);
+    // Returns true and fills the buffers when a non-empty secondary SSID exists.
+    static bool loadWifiCreds(char* ssid, size_t ssidLen, char* pass, size_t passLen);
+    static void clearWifiCreds();
 };

@@ -37,6 +37,9 @@ export const OP_STREAM_MODE = 0x12;
 // Monotone (Fritsch–Carlson) tangent clamp on the v4 gradient cubic. Kills the
 // invented overshoot-then-return micromotion. Firmware op WS_OP_OVERSHOOT. :3
 export const OP_OVERSHOOT    = 0x13;
+// TEST/bench: fake-home without a motor so the UI populates. {on:bool, stroke?:float}.
+// Firmware op WS_OP_HOME_OVERRIDE. on:true forces homed + reports stroke (default 250mm). :3
+export const OP_HOME_OVERRIDE = 0x14;
 
 // ---- Stream speed-feed modes (mirrors SystemState::StreamSpeedMode) --------
 export const SPEED_CEILING_PEGGED   = 0;

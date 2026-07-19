@@ -16,6 +16,7 @@
 #include "StatusLeds.h"
 #include "PatternEngine.h"
 #include "MotorDriver.h"
+#include "UiSocket.h"
 
 #include "TransportManager.h"
 #include "TCodeParser.h"
@@ -100,6 +101,8 @@ void WebUI::init() {
     _httpServer->on("/api/log",       HTTP_GET,  [this]() { handleApiLog(); });
     _httpServer->on("/api/mode",      HTTP_GET,  [this]() { handleApiMode(); });
     _httpServer->on("/api/mode",      HTTP_POST, [this]() { handleApiMode(); });
+    _httpServer->on("/api/clients",   HTTP_GET,  [this]() { handleApiClients(); });
+    _httpServer->on("/api/clients",   HTTP_POST, [this]() { statusLedsActivity(); handleApiClients(); });
 
     _httpServer->begin();
     APPLOGF("HTTP server on port %d", HTTP_PORT);
@@ -216,7 +219,10 @@ void WebUI::handleApiStatus() {
     doc["measured_hz"] = hz;
     doc["measured_interval_ms"] = (hz > 0) ? (uint16_t)(1000 / hz) : 0;
     doc["auto_duration"] = _state.auto_duration;
-    doc["measured_stroke_mm"] = _motor.getMeasuredStrokeMm();
+    doc["measured_stroke_mm"] = (_state.test_stroke_override_mm > 0.0f)
+                                ? _state.test_stroke_override_mm
+                                : _motor.getMeasuredStrokeMm();
+    doc["home_override"] = (_state.test_stroke_override_mm > 0.0f);
     doc["serial_mode"] = (bool)SERIAL_CONTROL_MODE;
     doc["serial_active"] = _serialTransport.isActive();
     doc["serial_linked"] = _serialTransport.isLinked();
@@ -290,6 +296,7 @@ void WebUI::handleApiStatus() {
 
 void WebUI::handleApiCapabilities() {
     JsonDocument doc;
+    doc["fw_version"] = FIRMWARE_VERSION;   // OTA verification: prove which build is live
     doc["max_travel_mm"] = (float)MACHINE_MAX_TRAVEL_MM;
     doc["measured_stroke_mm"] = _motor.getMeasuredStrokeMm();
 
@@ -604,6 +611,66 @@ void WebUI::handleApiOverride() {
 }
 
 // ============================================================================
+// handleApiClients (HTTP GET list / POST kick) — Health-tab client admin
+// ============================================================================
+//
+// GET  /api/clients            → {clients:[{num, ip, idle_ms, streaming,
+//                                            most_recent}], max, active_window_ms}
+// POST /api/clients  {kick:N}   → force-disconnect client slot N (reclaim slot).
+//
+// "streaming" = passes the activity gate right now; "most_recent" = the single
+// always-live last-active client. A muted (streaming:false) tab is the
+// forgotten one costing you nothing — kick it only if you want its slot back.
+
+void WebUI::handleApiClients() {
+    if (!_uiSocket) {
+        _httpServer->send(503, "application/json", "{\"error\":\"no UiSocket\"}");
+        return;
+    }
+
+    // POST → kick
+    if (_httpServer->method() == HTTP_POST) {
+        JsonDocument doc;
+        deserializeJson(doc, _httpServer->arg("plain"));
+        if (!doc["kick"].is<int>()) {
+            _httpServer->send(400, "application/json", "{\"error\":\"kick (client num) required\"}");
+            return;
+        }
+        int num = doc["kick"].as<int>();
+        bool ok = (num >= 0 && num < UiSocket::MAX_CLIENTS)
+                    ? _uiSocket->kickClient((uint8_t)num) : false;
+        String json; JsonDocument r; r["ok"] = ok; r["kicked"] = num;
+        serializeJson(r, json);
+        _httpServer->send(ok ? 200 : 404, "application/json", json);
+        return;
+    }
+
+    // GET → list
+    UiSocket::ClientInfo info[UiSocket::MAX_CLIENTS];
+    uint8_t n = _uiSocket->enumerateClients(info, UiSocket::MAX_CLIENTS);
+
+    JsonDocument r;
+    r["max"] = UiSocket::MAX_CLIENTS;
+    r["active_window_ms"] = UiSocket::CLIENT_ACTIVE_WINDOW_MS;
+    JsonArray arr = r["clients"].to<JsonArray>();
+    for (uint8_t i = 0; i < n; i++) {
+        JsonObject c = arr.add<JsonObject>();
+        c["num"]         = info[i].num;
+        char ips[16];
+        snprintf(ips, sizeof(ips), "%u.%u.%u.%u",
+                 info[i].ip[0], info[i].ip[1], info[i].ip[2], info[i].ip[3]);
+        c["ip"]          = ips;
+        c["idle_ms"]     = info[i].idle_ms;
+        c["streaming"]   = info[i].streaming;
+        c["most_recent"] = info[i].most_recent;
+    }
+
+    String json;
+    serializeJson(r, json);
+    _httpServer->send(200, "application/json", json);
+}
+
+// ============================================================================
 // handleApiTmc (HTTP GET + POST) — delegates to applyDriverConfig
 // ============================================================================
 
@@ -723,9 +790,22 @@ void WebUI::handleApiPattern() {
 // ============================================================================
 
 bool WebUI::applyPattern(JsonDocument& doc, JsonDocument& resp) {
+    // gen_rate_tick_hz is the ONLY field this handler touches that ConfigStore
+    // persists. The old code mutated it but never saved — so a changed generator
+    // tick rate silently reverted on the next boot (part of the "NVS works for
+    // some settings, not others" bug). We now persist it, but ONLY when it
+    // actually changes: applyPattern is also the hot path for live speed/depth/
+    // stroke slider streaming while a pattern runs, and blindly saving on every
+    // call would pound NVS flash into an early grave. Guarding on a real change
+    // means one write per rate-rung change, zero writes during live scrubbing. :3
+    bool persistTick = false;
     if (doc["rate_tick"].is<int>()) {
         int r = doc["rate_tick"];
-        _state.gen_rate_tick_hz = (r >= 375) ? 500 : (r >= 175) ? 250 : (r >= 75) ? 100 : (r >= 35) ? 50 : 20;
+        uint16_t newTick = (r >= 375) ? 500 : (r >= 175) ? 250 : (r >= 75) ? 100 : (r >= 35) ? 50 : 20;
+        if (newTick != _state.gen_rate_tick_hz) {
+            _state.gen_rate_tick_hz = newTick;
+            persistTick = true;
+        }
     }
 
     if (doc["speed"].is<float>())     _patternEngine.setSpeed(doc["speed"]);
@@ -750,6 +830,10 @@ bool WebUI::applyPattern(JsonDocument& doc, JsonDocument& resp) {
             APPLOG("PatternEngine stopped");
         }
     }
+
+    // Persist only when the generator tick rung actually moved (see the guard
+    // note above) — the live speed/depth/stroke stream must never touch flash.
+    if (persistTick) ConfigStore::save(_state, _mapper, _motor);
 
     resp["ok"] = true;
     resp["running"]   = _patternEngine.isRunning();
@@ -888,6 +972,40 @@ bool WebUI::handleCommand(uint8_t op, JsonDocument& payload_in,
         payload_out["ok"] = true;
         _bumpGen();
         return true;
+
+    case WS_OP_HOME_OVERRIDE: {
+        // TEST/bench: pretend the machine is homed without a motor so the WebUI
+        // (rail, window, telemetry) populates for debugging. on:false clears it.
+        bool on = payload_in["on"] | true;
+        if (on) {
+            float stroke = payload_in["stroke"] | 250.0f;   // generic bench value
+            if (stroke < 1.0f) stroke = 250.0f;
+            _state.test_stroke_override_mm = stroke;
+            _state.homing_in_progress = false;
+            _state.homed = true;
+            _state.resume_start_ms = millis();   // soft-start guard like a real home
+            // CRITICAL: flip the DRIVER'S own _homed flag too — setting
+            // _state.homed alone only opens the MotionArbiter gate; the driver's
+            // moveTo()/streamTo()/streamToSteps() all bail on `if (!_homed)`, so
+            // no pulses ever leave the board. forceHomeState() energizes the FAS
+            // outputs and zeroes position so a bench move genuinely drives step/
+            // dir out to a (possibly disconnected) motor. :3
+            _motor.forceHomeState(true);
+            APPLOG("WS Home-Override: faking homed for bench test — no motor required :3");
+            payload_out["measured_stroke"] = stroke;
+        } else {
+            _state.test_stroke_override_mm = 0.0f;
+            _state.homed = false;
+            _motor.forceHomeState(false);   // clear the driver flag too
+            APPLOG("WS Home-Override: cleared — back to real homing.");
+            payload_out["measured_stroke"] = _motor.getMeasuredStrokeMm();
+        }
+        payload_out["ok"] = true;
+        payload_out["home_override"] = on;
+        payload_out["homed"] = _state.homed;
+        _bumpGen();
+        return true;
+    }
 
     case WS_OP_HALT:
         if (_motor.isHomed()) _motor.hardStop();

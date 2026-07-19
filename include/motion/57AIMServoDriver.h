@@ -60,10 +60,14 @@ public:
     bool isHomed()  const override { return _homed; }
     bool isHoming() const override { return _homing; }
 
-    // Force the driver's internal homed flag. Only for bench/remote testing
-    // builds (HOMING_DISABLED) — do NOT call on real hardware with a motor
-    // plugged in, or the firmware will cheerfully ram the endstop. :3
-    void forceHomeState(bool homed) { _homed = homed; }
+    // Force the driver's internal homed flag for bench/remote testing WITHOUT a
+    // real homing cycle. Unlike the old inline flag-flip, this also enables FAS
+    // outputs and establishes a zero reference so moveTo()/streamTo()/
+    // streamToSteps() actually emit step/dir pulses to a (possibly disconnected)
+    // motor — the whole point of a bench HOME_OVERRIDE. Implementation lives in
+    // the .cpp because it has to touch the FastAccelStepper instance. Do NOT
+    // call on real hardware you don't want moving without a genuine home. :3
+    void forceHomeState(bool homed) override;
     bool checkPushToHome() override;
 
     // ---- Position monitor ---------------------------------------------------
@@ -171,6 +175,12 @@ public:
     // Measured stroke accessor for the WebUI / status layer. Returns 0 until
     // homing has measured both ends. :3
     float getMeasuredStrokeMm() const override { return _measured_stroke_mm; }
+    // Restore a previously-measured stroke from NVS so the rail scale is
+    // correct at boot BEFORE the first homing cycle. Homing itself overwrites
+    // this with a fresh measurement when it completes. :3
+    void setMeasuredStrokeMm(float mm) override {
+        if (mm > 0.0f && mm <= AIM_MAX_TRAVEL_MM) _measured_stroke_mm = mm;
+    }
 
     // ---- Live INA228 bus telemetry for the WebUI toolbar --------------------
     // These return the CACHED last reading (no I2C from the HTTP thread). The

@@ -70,6 +70,13 @@ typedef void (*ResponseCallback)(const char* msg);
 /// silently dropped. The token is null-terminated. :3
 typedef void (*UnknownCmdCallback)(const char* token);
 
+/// Called when a `WIFI <ssid> <password>` sideband line is received over a
+/// text transport (USB serial). The whole argument string after the "WIFI "
+/// prefix is passed verbatim (null-terminated, un-tokenised) so SSIDs with
+/// spaces survive. The application parses it and stores secondary creds in
+/// NVS. Kept as a callback so the parser stays hardware/NVS-agnostic. :3
+typedef void (*WifiCmdCallback)(const char* args);
+
 // ============================================================================
 // TCodeParser — pure, transport-agnostic TCode v0.3 line parser
 // ============================================================================
@@ -95,6 +102,11 @@ public:
 /// tokens are silently dropped). Unregistered R/V/A channels are silently
 /// consumed (spec-tolerant), NOT routed to this hook.
     void onUnknownCmd(UnknownCmdCallback cb) { _onUnknownCmd = cb; }
+
+    /// Set the WiFi-command hook. A line beginning with "WIFI " (case-insensitive)
+    /// routes its argument tail here instead of the normal token path. May be
+    /// nullptr (the line is then treated as ordinary tokens). :3
+    void onWifiCmd(WifiCmdCallback cb) { _onWifiCmd = cb; }
 
     // ---- Axis registry (v0.4 multi-axis model) --------------------------------
     /// Register an axis. The parser accepts commands for registered axes and
@@ -146,6 +158,7 @@ private:
     StopCallback       _onStop         = nullptr;
     ResponseCallback   _onResponse     = nullptr;
     UnknownCmdCallback _onUnknownCmd   = nullptr;
+    WifiCmdCallback    _onWifiCmd      = nullptr;
     ActualPositionCallback _onActualPos = nullptr;
 
     // ---- Axis registry (up to 12 slots — L0–L9 + R/V/A overflow) ------------

@@ -41,6 +41,29 @@ public:
     // Per-client read position in the shared telemetry ring.
     static constexpr uint8_t MAX_CLIENTS = 5;
 
+    // ---- Activity gate ------------------------------------------------------
+    // A client is streamed telemetry/interp/anomaly/status ONLY if it has sent
+    // an inbound application frame (clock ping / command) within this window,
+    // OR it is the single most-recently-active connected client (which always
+    // stays live — see _shouldStream()). A foregrounded tab clock-pings every
+    // ~2s; a backgrounded tab's setInterval is throttled to ≥~1/min or paused,
+    // so it falls out of the window and is auto-muted — no fan-out cost, no
+    // head-of-line stall behind its backed-up socket. It resumes within one
+    // tick the moment it's refocused (a ping re-stamps it). Requires ZERO
+    // cooperation from the client, so it evicts an already-open forgotten tab
+    // running an old bundle. :3
+    static constexpr uint32_t CLIENT_ACTIVE_WINDOW_MS = 10000;
+
+    // Public snapshot for the Health-tab client panel (/api/clients).
+    struct ClientInfo {
+        uint8_t  num;
+        bool     connected;
+        bool     streaming;    // passes the activity gate this instant
+        bool     most_recent;  // the always-live last-active client
+        uint32_t idle_ms;      // ms since last inbound application frame
+        uint8_t  ip[4];
+    };
+
     // ---- Idempotency ring entry (per-client, per-command-id) ----------------
     struct IdemEntry {
         uint16_t id;
@@ -70,11 +93,29 @@ public:
     bool clientIsConnected(uint8_t num) { return _ws.clientIsConnected(num); }
     void onFrame(FrameHandler handler) { _frameHandler = handler; }
 
+    // ---- Client admin (Health tab) ------------------------------------------
+    /// Fill `out` with one ClientInfo per connected client (up to maxOut).
+    /// Returns the number written. Thread-safe (takes _wsMutex).
+    uint8_t enumerateClients(ClientInfo* out, uint8_t maxOut);
+    /// Force-disconnect one client (frees its slot). Returns true if it was
+    /// connected. Note: the WebUI reconnects, so this is a deliberate slot
+    /// reclaim, not a permanent ban.
+    bool kickClient(uint8_t num);
+
     void onClientConnect();
     void onClientDisconnect();
 
     // ---- Sender task ---------------------------------------------------------
     static void senderTask(void* arg);
+
+    // ---- OTA safety gate (Core 0) --------------------------------------------
+    // Suspend/resume the telemetry+status broadcast task. During an OTA flash
+    // write window the sender must be quiesced: it broadcasts from flash-resident
+    // code and touches the WS library every ~20ms; a flash-cache stall mid-write
+    // causes resets (.clinerules §2 / OTA §2). suspendSender() blocks until the
+    // task is actually parked. resumeSender() is a no-op if never suspended. :3
+    void suspendSender();
+    void resumeSender();
 
     // ---- 0x01 / 0x02 / 0x04 frame builders ----------------------------------
     void sendTelemetry(uint8_t num);
@@ -116,6 +157,42 @@ private:
 
     // Per-client read head
     uint32_t _clientHead[MAX_CLIENTS];
+
+    // Per-client last inbound application-frame timestamp (millis()). 0 = never.
+    // Stamped on WStype_CONNECTED and every inbound WStype_BIN — NOT on
+    // WStype_PONG (a backgrounded browser auto-pongs at the protocol layer
+    // without waking its JS, which is exactly why heartbeat can't reap it and
+    // why we must gate on real application traffic instead). :3
+    uint32_t _lastInboundMs[MAX_CLIENTS];
+
+    // Per-client send-stall mute. A backed-up socket makes sendBIN return false
+    // (after the capped TCP timeout). Rather than DISCONNECT the client (which
+    // turned slow-but-alive tabs into a drop→reconnect loop), we just drop it
+    // FROM THE STREAM: set _sendStalled and stop sending. The connection stays
+    // up. It's un-muted the moment the client sends an inbound frame (its clock
+    // ping / a command) — proof it's draining and alive — so a transient blip
+    // self-heals within one ping cycle and a genuinely wedged/backgrounded tab
+    // stays muted (costing nothing) instead of being dropped. :3
+    bool     _sendStalled[MAX_CLIENTS];
+    uint32_t _sendStalledSince[MAX_CLIENTS];   // millis() when the stall began
+
+    // A client that has been send-stalled continuously for this long WITHOUT
+    // sending any inbound frame is a dead half-open socket (tab closed / network
+    // dropped with no FIN/RST). It MUST be reaped: _ws.loop() (in the httpTask)
+    // keeps servicing that socket — heartbeat pings + reads block on it for
+    // seconds and starve HTTP for every other client. A healthy tab clears its
+    // stall via a clock ping every ~2s, well under this, so it's never reaped;
+    // a backgrounded tab still drains at the TCP layer so it never stalls at
+    // all (just muted by the activity gate). Only true zombies hit this. :3
+    static constexpr uint32_t STALL_REAP_MS = 4000;
+
+    // Reap dead half-open clients (see STALL_REAP_MS). Called each sender tick.
+    void _reapDeadClients();
+
+    // Activity gate: true if client `num` should receive the telemetry stream.
+    // Recently-active OR the single most-recently-active connected client.
+    // Caller MUST hold _wsMutex (touches _ws.clientIsConnected).
+    bool _shouldStream(uint8_t num);
 
     // Sender task state
     TaskHandle_t _senderHandle = nullptr;

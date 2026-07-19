@@ -16,6 +16,15 @@
 #define SECRET_WIFI_SSID       "YourWiFiName"
 #define SECRET_WIFI_PASSWORD   "YourWiFiPassword"
 
+// ---- OTA (over-the-air firmware + web-UI updates over WiFi) ----
+// Shared secret guarding BOTH OTA paths:
+//   1. ArduinoOTA / espota  (pio run -e sd32-ota -t upload / -t uploadfs)
+//   2. HTTP endpoints        (curl POST /api/ota and /api/ota/fs, X-OTA-Token)
+// The PlatformIO sd32-ota env feeds this same value to espota via --auth
+// (see tools/ota_auth.py). Pick something long/random; it's the only thing
+// standing between your network and a firmware flash. :3
+#define SECRET_OTA_PASSWORD    "ChangeMeToALongRandomOtaSecret"
+
 // ---- Intiface (only used in WiFi/WSDM mode; ignored in serial-control mode) ----
 // IP of the PC running Intiface, and the WSDM device-server port it prints.
 #define SECRET_INTIFACE_HOST   "192.168.1.100"

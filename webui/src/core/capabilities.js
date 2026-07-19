@@ -114,24 +114,34 @@ export function applyExpertCeilings() {
   const speed = capsCache.speed_ceiling_mm_s || {};
   const accel = capsCache.accel_ceiling_mm_s2 || {};
 
-  const spdMax = expertMode ? (speed.expert || 10000) : (speed.normal || 5000);
-  const accMax = expertMode ? (accel.expert || 100000) : (accel.normal || 50000);
+  // GOLDEN RULE (Thing 5): the safe ceilings live on the MACHINE, the UI just
+  // asks. Normal mode is 1000 mm/s / 20000 mm/s², expert goes higher — but the
+  // UI never bakes those numbers in. We read them straight from the advertised
+  // /api/capabilities payload. If a tier is genuinely absent (old firmware),
+  // we leave that slider's max untouched rather than inventing a ceiling the
+  // firmware never authorized. :3
+  const spdMax = expertMode ? speed.expert : speed.normal;
+  const accMax = expertMode ? accel.expert : accel.normal;
 
-  // Patch every speed slider
-  ['maxSpeed', 'defMaxSpeed', 'userMaxSpeed', 'inputMaxSpeed'].forEach(function(id) {
-    const s = $(id); if (!s) return;
-    s.max = spdMax;
-    if (parseFloat(s.value) > parseFloat(s.max)) s.value = s.max;
-    s.dispatchEvent(new Event('input'));
-  });
+  // Patch every speed slider — only when the machine advertised a real ceiling.
+  if (typeof spdMax === 'number' && spdMax > 0) {
+    ['maxSpeed', 'defMaxSpeed', 'userMaxSpeed', 'inputMaxSpeed'].forEach(function(id) {
+      const s = $(id); if (!s) return;
+      s.max = spdMax;
+      if (parseFloat(s.value) > parseFloat(s.max)) s.value = s.max;
+      s.dispatchEvent(new Event('input'));
+    });
+  }
 
-  // Patch every accel slider
-  ['accel', 'defAccel', 'userAccel', 'inputAccel'].forEach(function(id) {
-    const s = $(id); if (!s) return;
-    s.max = accMax;
-    if (parseFloat(s.value) > parseFloat(s.max)) s.value = s.max;
-    s.dispatchEvent(new Event('input'));
-  });
+  // Patch every accel slider — only when the machine advertised a real ceiling.
+  if (typeof accMax === 'number' && accMax > 0) {
+    ['accel', 'defAccel', 'userAccel', 'inputAccel'].forEach(function(id) {
+      const s = $(id); if (!s) return;
+      s.max = accMax;
+      if (parseFloat(s.value) > parseFloat(s.max)) s.value = s.max;
+      s.dispatchEvent(new Event('input'));
+    });
+  }
 
   // Other ceilings (genRate, modRate, modAmp) keep their fixed ranges —
   // they're not machine-specific.

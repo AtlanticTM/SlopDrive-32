@@ -280,6 +280,25 @@ void TCodeParser::feedLine(const char* str, size_t len) {
     memcpy(buf, str, copy_len);
     buf[copy_len] = '\0';
 
+    // ---- WIFI sideband intercept (must run BEFORE tokenizing) ---------------
+    // `WIFI <ssid> <password>` sets the secondary NVS credentials over a text
+    // transport (USB serial). SSIDs and passwords can contain spaces, so we
+    // must NOT let strtok chew the line into whitespace-separated tokens — pass
+    // the whole tail after the "WIFI " prefix to the app callback verbatim.
+    // Strip a trailing CR/LF the transport may have left on the copy. :3\n
+    if (strncasecmp(buf, "WIFI ", 5) == 0) {
+        char* args = buf + 5;
+        while (*args == ' ' || *args == '\t') args++;   // skip leading spaces
+        // Trim trailing whitespace/newline
+        size_t alen = strlen(args);
+        while (alen > 0 && (args[alen - 1] == '\r' || args[alen - 1] == '\n' ||
+                            args[alen - 1] == ' '  || args[alen - 1] == '\t')) {
+            args[--alen] = '\0';
+        }
+        if (_onWifiCmd) _onWifiCmd(args);
+        return;
+    }
+
     char* token = strtok(buf, " \t\r\n");
     while (token != nullptr) {
         size_t tlen = strlen(token);

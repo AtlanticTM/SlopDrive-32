@@ -499,6 +499,32 @@ void Ai57AIMServoDriver::runHomingStep() {
     // motorTask watches _homing go false and syncs g_state. :3
 }
 
+// ---- Bench/test fake-home ----------------------------------------------------
+// Flip the driver's OWN _homed flag WITHOUT a real homing cycle so that
+// moveTo()/streamTo()/streamToSteps() actually emit step/dir pulses. Setting
+// _state.homed alone only opens the MotionArbiter gate — every motion entry
+// point in THIS driver bails on `if (!_homed) return;`, so nothing reaches FAS
+// until we flip the flag here. We also energize the FAS outputs (mirrors
+// enable()) and zero the position counter, exactly like a real home does at its
+// final step, so the very first move has a valid 0mm reference to travel from.
+// Do NOT call on real hardware you don't want moving without a genuine home. :3
+void Ai57AIMServoDriver::forceHomeState(bool homed) {
+    if (homed) {
+        if (_stepper) {
+            _stepper->enableOutputs();               // pulse train can now go out
+            _stepper->forceStopAndNewPosition(0);    // establish 0mm reference
+            _enabled = true;
+        }
+        _current_position_mm = 0.0f;
+        _homing = false;
+        _homed  = true;
+        MLOGLN(F("57AIMServo: forceHomeState(true) — bench fake-home, outputs live at 0mm :3"));
+    } else {
+        _homed = false;
+        MLOGLN(F("57AIMServo: forceHomeState(false) — cleared, real homing required."));
+    }
+}
+
 // Push-to-home: let the user establish home by simply pushing the shaft into
 // the endstop — no web UI needed, just good old-fashioned manual persuasion.
 // The user shoves the carriage all the way in until the endstop triggers, we

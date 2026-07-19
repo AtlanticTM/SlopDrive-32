@@ -72,6 +72,12 @@
   <div class="spine-heroes" id="spineHeroes"><!-- rail.js builds the hero numerals --></div>
   <div class="spine-transport">
     <div class="transport" id="transportBar">
+      <!-- Manual mode toggle — promoted from the rail into the transport bar
+           (left of Pause) so all mode/motion controls live in one strip. -->
+      <button class="tbtn rail-manual-toggle" id="manualModeToggle" title="Manual mode — scrub the carriage directly across the full travel, ignoring the window" aria-pressed="false">
+        <span style="display:flex;align-items:center;gap:4px"><span style="width:14px;height:14px;display:inline-grid" data-ico="i-target"></span> Manual</span>
+        <small>full travel</small>
+      </button>
       <button class="tbtn pause" id="btnPause">
         <span style="display:flex;align-items:center;gap:4px"><span style="width:14px;height:14px;display:inline-grid" data-ico="i-pause"></span> Pause</span>
         <small id="pauseSub">ignore Intiface</small>
@@ -95,10 +101,42 @@
 </div>
 
 <!-- ===== ROW 3 — RAIL PANEL: the flagship travel instrument, full width ===== -->
-<div class="rail-panel panel">
+<div class="rail-panel panel" id="railPanel">
+  <!-- Rail topbar: quick-move tap strip (normal mode) + manual-mode toggle.
+       Thing 6 — in the DEFAULT mode you can still tap the rail to command, and
+       this strip above it gives a fat, dexterity-friendly target for quick
+       taps without hunting the thin rail. The Manual toggle (top-right) flips
+       the whole rail into a distinct scrub instrument. -->
+  <!-- Rail topbar retired — the manual toggle moved to the transport bar and
+       the rail itself is directly tappable. The quick-move strip stays in the
+       DOM (hidden via CSS) so its JS wiring stays inert but non-throwing. -->
+  <!-- Input tape — the command surface above the rail. In normal mode the tape
+       spans exactly the reported stroke window (so it is geometrically
+       impossible to command outside it); in manual mode it spans full travel.
+       Tap/scrub the tape to command; the rail below is display + window
+       editing only. Supersedes the retired quick-move strip. -->
+  <div class="rail-tape-assembly" id="railTape">
+    <div class="rail-tape-labels">
+      <span class="rail-tape-mode" id="railTapeMode">input &middot; window</span>
+      <span class="rail-tape-extent" id="railTapeExtent">000&#8211;000</span>
+    </div>
+    <div class="rail-tape-track" id="railTapeTrack">
+      <div class="rail-tape" id="railTapeBar">
+        <span class="rail-tape-micro">TAP &middot; SCRUB</span>
+        <div class="rail-tape-pip" id="railTapePip"></div>
+      </div>
+    </div>
+  </div>
   <div class="spine-rail-host horizontal" id="spineRailHost"><!-- rail.js: ruler + canvas + band --></div>
+  <!-- Manual mode actions — Set Min/Max by feel. Hidden in default mode,
+       shown only when .manual-mode is on the panel (Thing 5). Scrub the
+       carriage to where you want the edge, then tap Set Min or Set Max. -->
+  <div class="rail-manual-actions" id="railManualActions">
+    <button class="btn" id="railSetMinBtn">&#10232; Set min here</button>
+    <button class="btn" id="railSetMaxBtn">Set max here &#10233;</button>
+  </div>
   <div class="rail-hint">
-    <span>drag band &middot; drag edges &middot; tap to command</span>
+    <span id="railHintText">drag band &middot; drag edges &middot; tap to command</span>
     <span class="rail-trk">trk 00</span>
   </div>
 </div>
@@ -106,22 +144,13 @@
 <!-- ===== DESKTOP LAYOUT WRAPPER ===== -->
 <div class="desktop-layout">
 
-  <!-- Left sidebar — Stroke Window + Position cards (kept, resize logic untouched) -->
-  <aside class="sidebar" id="sidebarHost">
-    <div class="sidebar-cards" id="sidebarCards"></div>
-  </aside>
-
-  <!-- Resize handle — drag to resize the sidebar on desktop -->
-  <div class="resize-handle" id="resizeHandle" aria-hidden="true"><div class="resize-line"></div></div>
-
   <!-- Right panel — tab system -->
   <main class="main-panel">
     <!-- Desktop tab bar — horizontal pills -->
-    <nav class="tabs tabs-desktop">
-      <button class="tab active" data-tab="drive"  data-ico="i-play"></button>
-      <button class="tab" data-tab="health" data-ico="i-heart"></button>
-      <button class="tab" data-tab="settings" data-ico="i-gear"></button>
-      <button class="tab" data-tab="log"    data-ico="i-terminal"></button>
+    <nav class="tabs tabs-desktop" role="tablist" aria-label="Sections">
+      <button class="tab active" data-tab="drive"  data-ico="i-play" title="Drive" aria-label="Drive"></button>
+      <button class="tab" data-tab="settings" data-ico="i-gear" title="Settings" aria-label="Settings"></button>
+      <button class="tab" data-tab="log"    data-ico="i-terminal" title="Log" aria-label="Log"></button>
     </nav>
 
     <div class="tab-contents-host">
@@ -129,8 +158,11 @@
     <!-- ===================== DRIVE TAB ===================== -->
     <div id="drive" class="tab-content active">
 
-      <!-- 1. Stroke Window (moves to sidebar on desktop) -->
-      <div class="card panel collapsible" data-sidebar-card="stroke">
+      <!-- 1. Stroke Window — RETIRED from the visible layout (the rail band is
+           the single stroke-window editor now; this card kept going stale).
+           DOM kept hidden because range.js still reads/writes #win, #minNum,
+           #maxNum, #posDot etc. -->
+      <div class="card panel collapsible" data-sidebar-card="stroke" style="display:none" aria-hidden="true">
         <div class="card-head">
           <span data-ico="i-range"></span><h2>Stroke Window</h2>
           <button class="info" data-tip="Drag the highlighted box to slide the whole stroke window toward the front or back of the machine. Drag the white handles to trim each end. The blue line shows the live carriage position. The grey track is the machine's full travel — 0 mm is home (fully in).">
@@ -148,7 +180,7 @@
                 <div class="grip t"></div>
                 <div class="handle t" id="handleTop"><div class="bar"></div></div>
                 <div class="mid">
-                  <div class="big"><span id="winLen">100</span></div>
+                  <div class="big"><span id="winLen">—</span></div>
                   <div class="small">mm</div>
                 </div>
                 <div class="handle b" id="handleBot"><div class="bar"></div></div>
@@ -190,8 +222,8 @@
             </div>
 
             <div class="kv" style="margin-top:2px">
-              <span>Depth <b><span id="depthVal">100</span> mm</b></span>
-              <span>Span <b id="spanVal">10–110</b></span>
+              <span>Depth <b><span id="depthVal">—</span> mm</b></span>
+              <span>Span <b id="spanVal">—</b></span>
             </div>
           </div>
         </div>
@@ -201,32 +233,19 @@
         </div>
       </div>
 
-      <!-- 2. Position (moves to sidebar on desktop) -->
-      <div class="card panel collapsible" data-sidebar-card="position">
+      <!-- 2. Controls — RETIRED from the visible layout. Override is redundant
+           with Pause (both wrest control from Intiface), and Bypass-limits is
+           now driven automatically by Manual mode (engaging Manual checks
+           #bypassLimits so the scrub spans the full travel; exiting restores
+           it). The hidden inputs stay because main.js/range.js/shadow.js still
+           read #bypassLimits + #overrideTog. -->
+      <div class="card panel collapsible" data-sidebar-card="position" style="display:none" aria-hidden="true">
         <div class="card-head">
-          <span data-ico="i-target"></span><h2>Position</h2>
-          <button class="info" data-tip="The slider follows the carriage live — drag it and the machine tracks instantly, no Go button. Set as Min/Max snaps the window edge to wherever the carriage is now."><span data-ico="i-info"></span></button>
+          <span data-ico="i-target"></span><h2>Controls</h2>
+          <button class="info" data-tip="Bypass limits lets the carriage reach the full measured travel, ignoring the stroke window. Override Intiface takes control from the streaming input; releasing eases back."><span data-ico="i-info"></span></button>
           <span class="caret" data-ico="i-chevron"></span>
         </div>
         <div class="card-body">
-        <div class="pos-big"><b id="currentPos" class="vv">--</b><span>mm</span></div>
-
-        <div class="ttlegend">
-          <span><span class="dotmk mk-took"></span>Took <b id="posNowVal" class="vv">000</b>&nbsp;mm</span>
-          <span><span class="dotmk mk-told"></span>Told <b id="posTgtVal" class="vv intent">000</b>&nbsp;mm</span>
-        </div>
-
-        <div class="field">
-          <label>Target Position</label>
-          <input type="range" id="manualPos" min="0" max="9999" value="0" step="1">
-          <div class="readout"><b id="manualPosVal">0</b><span>mm</span></div>
-        </div>
-
-        <div class="btn-row" style="margin-bottom:10px">
-          <button class="btn ghost" data-action="setBound" data-arg="min"><span data-ico="i-down"></span> Set as Min</button>
-          <button class="btn ghost" data-action="setBound" data-arg="max"><span data-ico="i-up"></span> Set as Max</button>
-        </div>
-
         <label class="switch full" style="margin-bottom:10px">
           <span><span class="lbl">Bypass limits</span><div class="hint" id="bypassHint" style="margin-top:2px">reach the full 0–-- mm, ignoring the window</div></span>
           <span style="display:flex;align-items:center"><input type="checkbox" id="bypassLimits"><span class="track"></span></span>
@@ -259,10 +278,10 @@
           <select id="patSelect" style="display:none"><option value="0">Simple Stroke</option><option value="1">Teasing Pounding</option><option value="2">Robo Stroke</option><option value="3">Half'n'Half</option><option value="4">Deeper</option><option value="5">Stop'n'Go</option><option value="6">Insist</option></select>
         </div>
 
-        <div class="field" id="patSpeedField"><label>Speed</label><input type="range" id="patSpeed" min="0" max="100" step="1" value="50"><div class="readout"><b id="patSpeedVal">50</b><span>%</span></div></div>
-        <div class="field" id="patDepthField"><label>Depth</label><input type="range" id="patDepth" min="0" max="100" step="1" value="100"><div class="readout"><b id="patDepthVal">100</b><span>%</span></div></div>
-        <div class="field" id="patStrokeField"><label>Stroke</label><input type="range" id="patStroke" min="0" max="100" step="1" value="100"><div class="readout"><b id="patStrokeVal">100</b><span>%</span></div></div>
-        <div class="field" id="patSensField"><label>Sensation</label><input type="range" id="patSensation" min="0" max="100" step="1" value="50"><div class="readout"><b id="patSensVal">50</b><span>%</span></div></div>
+        <div class="field" id="patSpeedField"><label>Speed</label><input type="range" id="patSpeed" min="0" max="100" step="1" disabled><div class="readout"><b id="patSpeedVal">—</b><span>%</span></div></div>
+        <div class="field" id="patDepthField"><label>Depth</label><input type="range" id="patDepth" min="0" max="100" step="1" disabled><div class="readout"><b id="patDepthVal">—</b><span>%</span></div></div>
+        <div class="field" id="patStrokeField"><label>Stroke</label><input type="range" id="patStroke" min="0" max="100" step="1" disabled><div class="readout"><b id="patStrokeVal">—</b><span>%</span></div></div>
+        <div class="field" id="patSensField"><label>Sensation</label><input type="range" id="patSensation" min="0" max="100" step="1" disabled><div class="readout"><b id="patSensVal">—</b><span>%</span></div></div>
 
         <button class="btn primary" id="patStartBtn"><span data-ico="i-play"></span> Start Pattern</button>
         <div class="hint" id="patNote">Patterns run on-device — they keep going even if you close this tab. Stop before switching patterns.</div>
@@ -280,34 +299,37 @@
         <div class="card-body">
         <div class="field">
           <div class="label-row"><label>User Speed</label><button class="info" data-tip="Ceiling for manual moves: rail tap, position slider, nudge buttons. Only constrains your own hand — streams are unaffected."><span data-ico="i-info"></span></button></div>
-          <input type="range" id="userMaxSpeed" min="50" max="3000" value="550" step="10">
-          <div class="readout"><b id="userSpeedVal">550</b><span>mm/s</span></div>
+          <input type="range" id="userMaxSpeed" min="50" max="1000" step="10" disabled>
+          <div class="readout"><b id="userSpeedVal">—</b><span>mm/s</span></div>
         </div>
         <div class="field">
           <div class="label-row"><label>User Accel</label><button class="info" data-tip="Ramp rate for manual moves only."><span data-ico="i-info"></span></button></div>
-          <input type="range" id="userAccel" min="200" max="8000" value="1500" step="50">
-          <div class="readout"><b id="userAccelVal">1500</b><span>mm/s²</span></div>
+          <input type="range" id="userAccel" min="200" max="20000" step="50" disabled>
+          <div class="readout"><b id="userAccelVal">—</b><span>mm/s²</span></div>
         </div>
         <div style="margin:14px 0 10px; border-top:1px solid var(--line-1)"></div>
         <div class="field">
           <div class="label-row"><label>Input Speed</label><button class="info" data-tip="Ceiling for TCode streams, PatternEngine, and OSSM BLE. The automated pounding speed limit."><span data-ico="i-info"></span></button></div>
-          <input type="range" id="inputMaxSpeed" min="50" max="3000" value="550" step="10">
-          <div class="readout"><b id="inputSpeedVal">550</b><span>mm/s</span></div>
+          <input type="range" id="inputMaxSpeed" min="50" max="1000" step="10" disabled>
+          <div class="readout"><b id="inputSpeedVal">—</b><span>mm/s</span></div>
         </div>
         <div class="field">
           <div class="label-row"><label>Input Accel</label><button class="info" data-tip="Ramp rate for streams and patterns."><span data-ico="i-info"></span></button></div>
-          <input type="range" id="inputAccel" min="200" max="8000" value="1500" step="50">
-          <div class="readout"><b id="inputAccelVal">1500</b><span>mm/s²</span></div>
+          <input type="range" id="inputAccel" min="200" max="20000" step="50" disabled>
+          <div class="readout"><b id="inputAccelVal">—</b><span>mm/s²</span></div>
         </div>
         <button class="btn ghost sm" style="width:100%" data-action="restoreDefaults"><span data-ico="i-reset"></span> Restore saved defaults</button>
         </div>
       </div>
-    </div>
 
-    <!-- ===================== HEALTH TAB ===================== -->
-    <div id="health" class="tab-content">
-      <div class="card panel" id="healthCard"><div class="card-body" style="text-align:center;padding:20px;color:var(--tx-mut)">Driver health not available — no driver module loaded.</div></div>
-      <div class="card panel" id="loadCard"><div class="card-body" style="text-align:center;padding:20px;color:var(--tx-mut)">Load monitoring not available.</div></div>
+      <!-- ===== HEALTH (merged into Drive) =====
+           Formerly its own tab; the standalone tab was mostly empty air.
+           capabilities.js keeps appending link/driver/load/RS485 cards into
+           #health — the id is load-bearing, only the tab-content class went. -->
+      <div id="health" class="health-host">
+        <div class="card panel" id="healthCard"><div class="card-body" style="text-align:center;padding:20px;color:var(--tx-mut)">Driver health not available — no driver module loaded.</div></div>
+        <div class="card panel" id="loadCard"><div class="card-body" style="text-align:center;padding:20px;color:var(--tx-mut)">Load monitoring not available.</div></div>
+      </div>
     </div>
 
     <!-- ===================== SETTINGS TAB ===================== -->
@@ -354,16 +376,16 @@
             <label>Max Speed</label>
             <button class="info" data-tip="Maximum carriage velocity in mm/s. Stored as mm/s; the firmware converts to steps/s when commanding FastAccelStepper. Typical safe range: 200–800 mm/s. Expert mode unlocks up to 3000 mm/s."><span data-ico="i-info"></span></button>
           </div>
-          <input type="range" id="defMaxSpeed" min="50" max="1500" value="550" step="10">
-          <div class="readout"><b id="defSpeedVal">550</b><span>mm/s</span></div>
+          <input type="range" id="defMaxSpeed" min="50" max="1000" step="10" disabled>
+          <div class="readout"><b id="defSpeedVal">—</b><span>mm/s</span></div>
         </div>
         <div class="field">
           <div class="label-row">
             <label>Acceleration</label>
             <button class="info" data-tip="Ramp rate in mm/s². Stored as mm/s²; the firmware multiplies by steps-per-mm before calling FastAccelStepper's setAcceleration(). Typical safe range: 500–3000 mm/s². Expert mode unlocks up to 8000 mm/s²."><span data-ico="i-info"></span></button>
           </div>
-          <input type="range" id="defAccel" min="200" max="4000" value="1500" step="50">
-          <div class="readout"><b id="defAccelVal">1500</b><span>mm/s²</span></div>
+          <input type="range" id="defAccel" min="200" max="20000" step="50" disabled>
+          <div class="readout"><b id="defAccelVal">—</b><span>mm/s²</span></div>
         </div>
       </div>
 
@@ -380,7 +402,7 @@
         <div class="card-head"><span data-ico="i-gauge"></span><h2>Generation rate</h2>
           <button class="info" data-tip="How often the device recomputes and sends motion to the motor (waveform generator). Higher = smoother but more CPU/step load."><span data-ico="i-info"></span></button></div>
         <div class="seg" id="genTickSeg">
-          <button data-hz="20">20 Hz</button><button data-hz="50">50 Hz</button><button class="active" data-hz="100">100 Hz</button><button data-hz="250">250 Hz</button><button data-hz="500">500 Hz</button>
+          <button data-hz="20">20 Hz</button><button data-hz="50">50 Hz</button><button data-hz="100">100 Hz</button><button data-hz="250">250 Hz</button><button data-hz="500">500 Hz</button>
         </div>
       </div>
 
@@ -392,11 +414,11 @@
         </div>
         <div class="mini-label" style="margin-bottom:8px">Reversal policy</div>
         <div class="seg" id="blendModeSeg" style="margin-bottom:10px">
-          <button class="active" data-bm="1">Let-it-land</button>
+          <button data-bm="1">Let-it-land</button>
           <button data-bm="2">Allow reversal</button>
           <button data-bm="3">Hybrid</button>
         </div>
-        <div class="hint" id="blendModeHint">Finish the current stroke before reversing — smoothest ride, may drop a waypoint at extreme Hz.</div>
+        <div class="hint" id="blendModeHint"></div>
       </div>
 
       <!-- Stream speed-feed (v0.4 A/B) -->
@@ -407,10 +429,10 @@
         </div>
         <div class="mini-label" style="margin-bottom:8px">Cruise feed policy</div>
         <div class="seg" id="streamModeSeg" style="margin-bottom:10px">
-          <button class="active" data-sm="0">Ceiling-pegged</button>
+          <button data-sm="0">Ceiling-pegged</button>
           <button data-sm="1">Velocity-matched</button>
         </div>
-        <div class="hint" id="streamModeHint">Hold the input speed ceiling as the cruise feed — flat-out tracking, may stall very slow moves.</div>
+        <div class="hint" id="streamModeHint"></div>
       </div>
 
       <!-- v4 overshoot clamp (monotone tangent limiter A/B) -->
@@ -421,10 +443,10 @@
         </div>
         <div class="mini-label" style="margin-bottom:8px">Gradient tangent policy (v4 / MFP)</div>
         <div class="seg" id="overshootSeg" style="margin-bottom:10px">
-          <button class="active" data-oc="0">Raw slope</button>
+          <button data-oc="0">Raw slope</button>
           <button data-oc="1">Monotone clamp</button>
         </div>
-        <div class="hint" id="overshootHint">Raw MFP slope shaping — steep G tangents can bulge the cubic past the target and back (invented micromotion you can feel).</div>
+        <div class="hint" id="overshootHint"></div>
       </div>
 
       <!-- Motor driver card (injected by tmc.js) -->
@@ -476,6 +498,17 @@
         </div>
         <pre class="log screen" id="anomBox">No anomalies yet — clean path. :3</pre>
       </div>
+
+      <!-- Connected clients — active tabs streaming from the device. The device
+           only streams to the last tab you actually touched (+ any active in the
+           window); the rest are muted (harmless). Kick to reclaim a slot. -->
+      <div class="card panel" id="clientsCard">
+        <div class="card-head">
+          <span data-ico="i-link"></span><h2>Connected Clients</h2>
+          <button class="info" data-tip="Browser tabs connected to the device. Only the most-recently-active tab (and any active in the last few seconds) is streamed live telemetry — the rest are muted so a forgotten background tab can't lag the UI. A muted tab costs nothing; kick one only to free a connection slot."><span data-ico="i-info"></span></button>
+        </div>
+        <div class="card-body" id="clientsBody" style="color:var(--tx-mut)">No clients.</div>
+      </div>
     </div>
 
     </div><!-- .tab-contents-host -->
@@ -487,11 +520,10 @@
 <button class="home-fab show" id="homeFab"><span data-ico="i-home"></span> Home the machine</button>
 
 <!-- Bottom navigation (mobile only) -->
-<nav class="tabs tabs-mobile">
-  <button class="tab active" data-tab="drive"  data-ico="i-play"></button>
-  <button class="tab" data-tab="health" data-ico="i-heart"></button>
-  <button class="tab" data-tab="settings" data-ico="i-gear"></button>
-  <button class="tab" data-tab="log"    data-ico="i-terminal"></button>
+<nav class="tabs tabs-mobile" role="tablist" aria-label="Sections">
+  <button class="tab active" data-tab="drive"  data-ico="i-play" title="Drive" aria-label="Drive"></button>
+  <button class="tab" data-tab="settings" data-ico="i-gear" title="Settings" aria-label="Settings"></button>
+  <button class="tab" data-tab="log"    data-ico="i-terminal" title="Log" aria-label="Log"></button>
 </nav>
 
 <script type="module" src="./src/main.js"></script>

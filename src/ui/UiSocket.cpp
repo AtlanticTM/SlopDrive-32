@@ -19,6 +19,9 @@ UiSocket::UiSocket(SystemState& state, uint16_t port)
         _clientHead[i] = 0;
         _idemWrite[i] = 0;
         _idemCount[i] = 0;
+        _lastInboundMs[i] = 0;
+        _sendStalled[i] = false;
+        _sendStalledSince[i] = 0;
     }
     // Recursive mutex: httpTask (update()->_ws.loop()) and senderTask
     // (broadcastTelemetry/Status) both touch the non-thread-safe
@@ -56,6 +59,11 @@ void UiSocket::init() {
 
     WsLock lock(_wsMutex);
     _ws.begin();
+    // Lenient heartbeat (original values). An aggressive heartbeat was dropping
+    // slow-but-alive clients on WiFi/Tailscale jitter — the exact "connections
+    // keep dropping" regression. Dead-socket reaping isn't urgent: a wedged or
+    // backgrounded client is already muted by the activity gate / send-stall
+    // mute (_shouldStream), so it costs nothing while it lingers. :3
     _ws.enableHeartbeat(15000, 5000, 3);
 
     _ws.onEvent([this](uint8_t num, WStype_t type, uint8_t* payload, size_t length) {
@@ -204,6 +212,15 @@ void UiSocket::_handleEvent(uint8_t num, WStype_t type, uint8_t* payload, size_t
         if (_teleSeq && num < MAX_CLIENTS) {
             _clientHead[num] = *_teleSeq;
         }
+        // Do NOT stamp activity on connect. A freshly-(re)connected client
+        // must EARN the stream by sending an inbound frame (its clock ping,
+        // ~2s after open). This is the fix for the hang: after a reboot every
+        // tab — including a slow/backgrounded/remote zombie — reconnects at
+        // once; if connect counted as activity they'd all be streamed for the
+        // window, and one wedged socket stalls the shared WS mutex → HTTP
+        // hangs. A backgrounded tab won't ping, so it stays muted and never
+        // enters the send loop. Cost: ~2s to first telemetry on a fresh open.
+        if (num < MAX_CLIENTS) { _lastInboundMs[num] = 0; _sendStalled[num] = false; _sendStalledSince[num] = 0; }
         // Reset idempotency ring for new client
         _idemWrite[num] = 0;
         _idemCount[num] = 0;
@@ -212,10 +229,16 @@ void UiSocket::_handleEvent(uint8_t num, WStype_t type, uint8_t* payload, size_t
     }
     case WStype_DISCONNECTED:
         APPLOGF("[UiSocket] DISCONNECTED client#%u", num);
+        if (num < MAX_CLIENTS) { _lastInboundMs[num] = 0; _sendStalled[num] = false; _sendStalledSince[num] = 0; }
         onClientDisconnect();
         break;
     case WStype_BIN: {
         if (length < 1) return;
+        // Inbound application traffic = this client is live and draining. Stamp
+        // activity (re-activates a refocused tab) AND clear any send-stall mute:
+        // the client just proved it's alive, so give it the stream back (and
+        // cancel any pending dead-client reap).
+        if (num < MAX_CLIENTS) { _lastInboundMs[num] = millis(); _sendStalled[num] = false; _sendStalledSince[num] = 0; }
         uint8_t ft = payload[0];
         if (ft == 0x03 && length >= 5) {
             // CLOCK
@@ -375,6 +398,18 @@ void UiSocket::sendTelemetry(uint8_t num) {
     bool ok = _ws.sendBIN(num, frame, off);
     if (!ok) {
         _tx_drops++;
+        // A backed-up socket returns false after the (capped) TCP timeout.
+        // Mute this client from the stream — do NOT disconnect it. Muting stops
+        // the per-tick mutex stall immediately (one failed send, not a loop),
+        // keeps the connection alive (no drop→reconnect churn), and lets the
+        // client earn the stream back by sending an inbound frame once it has
+        // drained (handled in _handleEvent), or be reaped if it never does
+        // (_reapDeadClients). :3
+        if (!_sendStalled[num]) {
+            _sendStalled[num] = true;
+            _sendStalledSince[num] = millis();
+            APPLOGF("[UiSocket] client#%u send stalled — muting stream (kept connected)", num);
+        }
     }
 }
 
@@ -516,27 +551,141 @@ void UiSocket::sendInterp(uint8_t num) {
 }
 
 // ============================================================================
+// _shouldStream — the activity gate
+// ============================================================================
+//
+// Returns true if client `num` should receive the telemetry stream this tick:
+//   (a) it sent an inbound application frame within CLIENT_ACTIVE_WINDOW_MS, OR
+//   (b) it is the single most-recently-active connected client — which ALWAYS
+//       stays live, even when quiet, so the last tab you actually touched keeps
+//       working in the background until a NEWER client takes over.
+// Muted clients (neither) get zero sends, so a backed-up/forgotten socket can't
+// stall the fan-out for everyone else. Caller MUST hold _wsMutex. :3
+
+bool UiSocket::_shouldStream(uint8_t num) {
+    if (num >= MAX_CLIENTS) return false;
+    if (!_ws.clientIsConnected(num)) return false;
+
+    // Send-stalled clients are muted (kept connected) until they prove they're
+    // draining via an inbound frame — overrides even the most-recent rule so a
+    // wedged last-active tab can't keep stalling the shared mutex.
+    if (_sendStalled[num]) return false;
+
+    uint32_t now = millis();
+
+    // (a) recently active
+    if (_lastInboundMs[num] != 0 && (now - _lastInboundMs[num]) < CLIENT_ACTIVE_WINDOW_MS)
+        return true;
+
+    // (b) the single most-recently-active connected client (wrap-safe compare)
+    uint8_t  best  = 0xFF;
+    uint32_t bestT = 0;
+    for (uint8_t i = 0; i < MAX_CLIENTS; i++) {
+        if (!_ws.clientIsConnected(i)) continue;
+        if (_lastInboundMs[i] == 0) continue;
+        if (best == 0xFF || (int32_t)(_lastInboundMs[i] - bestT) > 0) {
+            best = i;
+            bestT = _lastInboundMs[i];
+        }
+    }
+    return (best == num);
+}
+
+// ============================================================================
+// _reapDeadClients — kill half-open zombie sockets before they starve HTTP
+// ============================================================================
+//
+// A client that has been send-stalled continuously for STALL_REAP_MS without a
+// single inbound frame is a dead half-open TCP connection (tab closed / network
+// dropped with no FIN/RST). If left connected, _ws.loop() — which runs in the
+// httpTask — keeps servicing it: heartbeat pings and reads block on the dead
+// socket for seconds every iteration, starving HTTP for EVERY other client (the
+// "page takes forever to load" bug). We can't rely on the WS heartbeat to reap
+// it, because the heartbeat runs inside that same blocked _ws.loop(). So the
+// sender task reaps it directly. Healthy tabs clear their stall via a clock
+// ping every ~2s (< STALL_REAP_MS) and are never reaped. :3
+
+void UiSocket::_reapDeadClients() {
+    WsLock lock(_wsMutex);
+    uint32_t now = millis();
+    for (uint8_t i = 0; i < MAX_CLIENTS; i++) {
+        if (!_ws.clientIsConnected(i)) continue;
+        if (!_sendStalled[i]) continue;
+        if ((now - _sendStalledSince[i]) < STALL_REAP_MS) continue;
+        APPLOGF("[UiSocket] client#%u dead (stalled %ums, no inbound) — reaping half-open socket", i, now - _sendStalledSince[i]);
+        _sendStalled[i] = false;
+        _sendStalledSince[i] = 0;
+        _lastInboundMs[i] = 0;
+        _ws.disconnect(i);
+    }
+}
+
+// ============================================================================
+// enumerateClients / kickClient — Health-tab admin
+// ============================================================================
+
+uint8_t UiSocket::enumerateClients(ClientInfo* out, uint8_t maxOut) {
+    if (!out || maxOut == 0) return 0;
+    WsLock lock(_wsMutex);
+    uint32_t now = millis();
+    uint8_t written = 0;
+    for (uint8_t i = 0; i < MAX_CLIENTS && written < maxOut; i++) {
+        if (!_ws.clientIsConnected(i)) continue;
+        ClientInfo& c = out[written];
+        c.num         = i;
+        c.connected   = true;
+        c.streaming   = _shouldStream(i);
+        c.idle_ms     = (_lastInboundMs[i] == 0) ? 0 : (now - _lastInboundMs[i]);
+        IPAddress ip  = _ws.remoteIP(i);
+        c.ip[0] = ip[0]; c.ip[1] = ip[1]; c.ip[2] = ip[2]; c.ip[3] = ip[3];
+        c.most_recent = false;  // filled below
+        written++;
+    }
+    // Mark the single most-recently-active as most_recent (for the UI badge).
+    uint8_t  best = 0xFF; uint32_t bestT = 0;
+    for (uint8_t i = 0; i < MAX_CLIENTS; i++) {
+        if (!_ws.clientIsConnected(i) || _lastInboundMs[i] == 0) continue;
+        if (best == 0xFF || (int32_t)(_lastInboundMs[i] - bestT) > 0) { best = i; bestT = _lastInboundMs[i]; }
+    }
+    for (uint8_t w = 0; w < written; w++) if (out[w].num == best) out[w].most_recent = true;
+    return written;
+}
+
+bool UiSocket::kickClient(uint8_t num) {
+    if (num >= MAX_CLIENTS) return false;
+    WsLock lock(_wsMutex);
+    if (!_ws.clientIsConnected(num)) return false;
+    APPLOGF("[UiSocket] kickClient#%u — admin disconnect (slot reclaim)", num);
+    _lastInboundMs[num] = 0;
+    _ws.disconnect(num);
+    return true;
+}
+
+// ============================================================================
 // broadcastTelemetry() / broadcastStatus() / broadcastInterp()
 // ============================================================================
+//
+// All gated by _shouldStream(): muted (quiet, non-most-recent) clients are
+// skipped entirely so their backed-up socket can't stall the fan-out. :3
 
 void UiSocket::broadcastTelemetry() {
     WsLock lock(_wsMutex);
     for (uint8_t i = 0; i < MAX_CLIENTS; i++) {
-        if (_ws.clientIsConnected(i)) sendTelemetry(i);
+        if (_shouldStream(i)) sendTelemetry(i);
     }
 }
 
 void UiSocket::broadcastStatus() {
     WsLock lock(_wsMutex);
     for (uint8_t i = 0; i < MAX_CLIENTS; i++) {
-        if (_ws.clientIsConnected(i)) sendStatus(i);
+        if (_shouldStream(i)) sendStatus(i);
     }
 }
 
 void UiSocket::broadcastInterp() {
     WsLock lock(_wsMutex);
     for (uint8_t i = 0; i < MAX_CLIENTS; i++) {
-        if (_ws.clientIsConnected(i)) sendInterp(i);
+        if (_shouldStream(i)) sendInterp(i);
     }
 }
 
@@ -618,7 +767,7 @@ void UiSocket::broadcastAnomaly() {
         putF32(a.extra);
 
         for (uint8_t i = 0; i < MAX_CLIENTS; i++) {
-            if (_ws.clientIsConnected(i)) _ws.sendBIN(i, frame, ANOMALY_FRAME_SIZE);
+            if (_shouldStream(i)) _ws.sendBIN(i, frame, ANOMALY_FRAME_SIZE);
         }
     }
 }
@@ -650,6 +799,10 @@ void UiSocket::senderTask(void* arg) {
             continue;
         }
 
+        // Reap dead half-open sockets first — a zombie left connected starves
+        // _ws.loop() (and thus HTTP) for everyone else. See _reapDeadClients().
+        self->_reapDeadClients();
+
         self->broadcastTelemetry();
         // 0x04 INTERP rides the same ~45Hz tick as telemetry so the WebUI's
         // planned-path overlay renders as smoothly as the position graph.
@@ -665,5 +818,30 @@ void UiSocket::senderTask(void* arg) {
             self->_lastStatusMs = now;
             self->broadcastStatus();
         }
+    }
+}
+
+// ============================================================================
+// suspendSender / resumeSender — OTA flash-write safety gate (.clinerules §2)
+// ============================================================================
+//
+// The sender task broadcasts telemetry/status/interp/anomaly from flash-resident
+// code every ~22ms and hammers the WS library. During an OTA flash write the
+// flash cache is disabled for the active partition; any task executing XIP code
+// or touching flash-resident data during that window faults/resets the chip.
+// prepareForOta() parks this task BEFORE Update.begin() and finishOta() revives
+// it. We suspend the task outright (not a flag) so not one WS byte is emitted
+// during the write. The 22ms tick means the task is virtually always sitting in
+// vTaskDelayUntil() when suspended, so no half-sent frame is left on the wire. :3
+
+void UiSocket::suspendSender() {
+    if (_senderHandle) {
+        vTaskSuspend(_senderHandle);
+    }
+}
+
+void UiSocket::resumeSender() {
+    if (_senderHandle) {
+        vTaskResume(_senderHandle);
     }
 }

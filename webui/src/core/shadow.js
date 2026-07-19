@@ -25,6 +25,7 @@ import { OP_SET_WINDOW, OP_SET_SPEED, OP_SET_ACCEL, OP_GEN_CFG,
          OP_HOME, OP_OVERRIDE, OP_BYPASS, OP_CLEAR_FAULT, OP_MOVE,
          OP_GET_CFG } from './wire.js';
 import { isFallback } from './link.js';
+import { settingsAuthoritative } from '../core/range.js';
 
 // ============================================================================
 // Shadow records — one per mutable control key
@@ -210,16 +211,39 @@ export function processEcho(ev) {
 export function processConfig(cfg) {
   if (!cfg) return;
 
-  _applyConfigField('window',   { min: cfg.range_min, max: cfg.range_max });
-  // Immediately push device-authored window values into the DOM band (P5 cold path)
-  (async () => {
-    const rangeModule = await import('./range.js');
-    if (rangeModule.setWinMin && rangeModule.setWinMax && rangeModule.renderWindow) {
-      rangeModule.setWinMin(cfg.range_min);
-      rangeModule.setWinMax(cfg.range_max);
-      rangeModule.renderWindow();
+  // GOLDEN RULE: only apply device-authored window bounds when they are REAL.
+  // A cfg snapshot that arrives before the machine has homed/populated its
+  // window can carry 0/0 or garbage; blindly stamping that over the correct
+  // HTTP-loaded window is exactly the "wrong window on boot" defect. We reject
+  // non-finite or degenerate (min>=max) bounds, and we never clobber a window
+  // the operator is actively dragging (pending shadow). :3
+  var _wMin = cfg.range_min, _wMax = cfg.range_max;
+  var _wValid = (typeof _wMin === 'number' && typeof _wMax === 'number' &&
+                 isFinite(_wMin) && isFinite(_wMax) && _wMax > _wMin);
+  var _wState = getState('window');
+  var _wPending = (_wState === 'pending' || _wState === 'overdue1' || _wState === 'overdue2');
+  if (_wValid && !_wPending) {
+    // Thing 3 guard: NEVER apply a WS config-push window before the
+    // authoritative HTTP /api/settings pull completes. The WS cmd path
+    // (WS_OP_GET_CFG echo or config push) can fire before loadSettings()
+    // returns and carry stale/wrong bounds from before the machine was homed.
+    // Once settingsAuthoritative is true we know loadSettings() has seeded
+    // winMin/winMax correctly and we can safely accept config pushes. :3
+    if (settingsAuthoritative) {
+      _applyConfigField('window', { min: _wMin, max: _wMax });
+      // Push device-authored window values into the DOM band (P5 cold path), but
+      // only once range.js actually knows the measured travel — renderWindow()
+      // bails on TRAVEL<=0 and would flip windowReady back off otherwise. :3
+      (async () => {
+        const rangeModule = await import('./range.js');
+        if (rangeModule.TRAVEL > 0 && rangeModule.setWinMin && rangeModule.setWinMax && rangeModule.renderWindow) {
+          rangeModule.setWinMin(_wMin);
+          rangeModule.setWinMax(_wMax);
+          rangeModule.renderWindow();
+        }
+      })();
     }
-  })();
+  }
   _applyConfigField('speed',    { mm_s: cfg.max_speed });
   _applyConfigField('accel',    { mm_s2: cfg.accel });
   _applyConfigField('blend',    { bm: cfg.blend_mode });

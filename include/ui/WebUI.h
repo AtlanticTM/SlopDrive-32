@@ -84,6 +84,14 @@ public:
     /// Service the HTTP server (was httpTask body).  Call frequently.
     void update();
 
+    /// Expose the owned WebServer so OtaService can register its POST /api/ota
+    /// routes on the SAME server instance (no second listener on port 80).
+    WebServer* server() { return _httpServer; }
+
+    /// Set the UiSocket reference (after both are constructed) so the Health
+    /// tab's /api/clients endpoint can enumerate + kick live WS clients.
+    void setUiSocket(UiSocket* s) { _uiSocket = s; }
+
     // ---- Batched telemetry ring buffer (Core 0) ----------------------------
     TelemetrySample _telemetry_ring[TELEMETRY_RING_SIZE];
     volatile uint32_t _telemetry_seq = 0;   // total samples ever written
@@ -144,6 +152,9 @@ private:
     // ---- Owned instance (pointer — allocated in constructor, freed in dtor) --
     WebServer*          _httpServer = nullptr;
 
+    // ---- UiSocket ref (set from setup(), used by /api/clients) ---------------
+    UiSocket*           _uiSocket = nullptr;
+
 #if defined(FEATURE_RS485_MODBUS)
     ServoModbus*        _servoModbus = nullptr;
 #endif
@@ -173,4 +184,5 @@ private:
     void handleApiPattern();
     void handleApiLog();
     void handleApiMode();
+    void handleApiClients();   // GET list of WS clients / POST kick — Health tab
 };

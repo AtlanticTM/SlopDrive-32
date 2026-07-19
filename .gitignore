@@ -47,8 +47,6 @@ PCB Layout.diy
 AIM_servo_modbus_reference.md
 AIM_Servo_Motor_Datasheet_EN_with_images.pdf
 
-# Build outputs & captures
-build/slopdrive32_s3_main_merged.bin
-build/capture.csv
-build/tcode_capture.log
-build/temp_index.html
+# Build outputs, captures & scratch artifacts — generated, not source
+build/
+$null

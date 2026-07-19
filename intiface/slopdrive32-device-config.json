@@ -26,11 +26,11 @@
     "  - The web UI's Stroke Window / trim / max-speed math is applied AFTER this",
     "    on the device, so Intiface always sends the full 0..999 range and the",
     "    machine maps it into your chosen physical window.",
-    "  - These UUIDs/name MUST stay in sync with include/config.h:",
+    "  - These UUIDs/name MUST stay in sync with include/system/config_api.h:",
     "      BLE_DEVICE_NAME        = SlopDrive-32",
-    "      BLE_NUS_SERVICE_UUID   = 6e400001-b5a3-f393-e0a9-e50e24dcca9e",
-    "      BLE_NUS_RX_CHAR_UUID   = 6e400002-... (host -> device, write)",
-    "      BLE_NUS_TX_CHAR_UUID   = 6e400003-... (device -> host, notify)"
+    "      BLE_NUS_SERVICE_UUID   = 8a846175-ea22-4411-88f5-9a8afcc20671",
+    "      BLE_NUS_RX_CHAR_UUID   = 8a846175-ea22-4411-88f5-9a8afcc20672 (host -> device, write)",
+    "      BLE_NUS_TX_CHAR_UUID   = 8a846175-ea22-4411-88f5-9a8afcc20673 (device -> host, notify)"
   ],
 
   "version": { "major": 3, "minor": 0 },
@@ -47,9 +47,9 @@
         "btle": {
           "names": [ "SlopDrive-32" ],
           "services": {
-            "6e400001-b5a3-f393-e0a9-e50e24dcca9e": {
-              "tx": "6e400002-b5a3-f393-e0a9-e50e24dcca9e",
-              "rx": "6e400003-b5a3-f393-e0a9-e50e24dcca9e"
+            "8a846175-ea22-4411-88f5-9a8afcc20671": {
+              "tx": "8a846175-ea22-4411-88f5-9a8afcc20672",
+              "rx": "8a846175-ea22-4411-88f5-9a8afcc20673"
             }
           }
         },

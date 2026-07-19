@@ -22,14 +22,14 @@ protocol so the position commands flow through unchanged.
 
 ## Keep it in sync with the firmware
 
-The UUIDs, name, and range in the JSON **must** match `include/config.h`:
+The UUIDs, name, and range in the JSON **must** match `include/system/config_api.h`:
 
-| JSON | `config.h` |
+| JSON | `config_api.h` |
 |------|-----------|
 | name `SlopDrive-32` | `BLE_DEVICE_NAME` |
-| service `6e400001-…` | `BLE_NUS_SERVICE_UUID` |
-| `tx` (Intiface→device write) `6e400002-…` | `BLE_NUS_RX_CHAR_UUID` |
-| `rx` (device→Intiface notify) `6e400003-…` | `BLE_NUS_TX_CHAR_UUID` |
+| service `8a846175-…71` | `BLE_NUS_SERVICE_UUID` |
+| `tx` (Intiface→device write) `8a846175-…72` | `BLE_NUS_RX_CHAR_UUID` |
+| `rx` (device→Intiface notify) `8a846175-…73` | `BLE_NUS_TX_CHAR_UUID` |
 | identifier `slopdrive32-0001` | `INTIFACE_ADDRESS` |
 | step range `[0, 999]` | `TCODE_MAGNITUDE_MAX` (999) |
 

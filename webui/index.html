@@ -48,6 +48,13 @@
     <span class="chip" id="motChip"><span class="dot" id="motDot"></span><span id="motText">mot --</span></span>
     <!-- ip chip (device IP address) — first to drop on narrow viewports -->
     <span class="chip" id="ipChip"><span class="dot good"></span><span id="wifiText">--</span></span>
+    <!-- High-legibility toggle (L2c) — brighter/heavier text. Browser-only UI
+         preference (shares state with the Settings row via data-hivis-toggle);
+         never touches device settings. Icon tints --reality when active. -->
+    <button class="chip hivis-chip" id="hivisBtn" type="button" data-hivis-toggle aria-pressed="false"
+      aria-label="High legibility" data-tip="High legibility · brighter text, heavier numerals · hierarchy preserved">
+      <span class="hivis-ico" data-ico="i-eye"></span>
+    </button>
   </div>
   </div>
 </header>
@@ -59,10 +66,11 @@
   <div class="fault" id="faultBanner">
     <span data-ico="i-alert"></span>
     <div class="body">
-      <strong>Driver fault — short to ground.</strong><br>
-      Motor power was cut for safety. Power down, check the motor wiring for a pinched/shorted
-      coil, then clear the fault and re-home.
-      <button>Clear Fault</button>
+      <strong>E-STOP — motion halted.</strong><br>
+      The device reports an emergency stop (this UI, another client, or a transport command).
+      All motion commands are blocked. Check the machine is safe, then re-home to resume —
+      this banner clears only when the device confirms.
+      <button>Re-Home</button>
     </div>
   </div>
 </div>
@@ -296,18 +304,93 @@
         </div>
       </div>
 
-      <!-- Rack order per §2: cluster row = PATTERN | POWER -->
+      <!-- Rack order per §2: two independent column stacks. The tall PATTERN
+           card sits alone in the main (left) column; the short POWER / SERVO /
+           SESSION cards stack in the side (right) column. Independent columns
+           (not a 2-col grid) decouple the row heights so PATTERN's height no
+           longer strands dead space beside POWER. Wrappers are display:contents
+           on mobile, so the single-column flow and the dynamic RS485 insertion
+           into #health are unchanged. -->
       <div class="clu">
 
+      <div class="clu-col clu-col-main">
       <!-- Pattern (01) — glyph tile registry + telemetry-fed wave scope -->
       <div class="card panel collapsible" id="patternCard">
         <div class="card-head">
           <span data-ico="i-wave"></span><h2>Pattern</h2>
           <span class="card-state" id="patState">standby</span>
-          <button class="info" data-tip="OSSM StrokeEngine patterns running on-device. Select a pattern, tune the sliders, then Start. The machine will cycle the selected pattern inside the stroke window. Auto-yields if Intiface starts driving (unless you've paused or overridden). Patterns keep running even if you close this tab — stop before switching patterns."><span data-ico="i-info"></span></button>
+          <button class="info" data-tip="On-device stroke generators. ADVANCED (fray-d port): per-direction depth/speed/accel with cyclic per-stroke modifiers. CLASSIC: the OSSM StrokeEngine pattern list. Tune, then Start — runs inside the stroke window, auto-yields if Intiface starts driving (unless paused/overridden), and keeps running if you close this tab."><span data-ico="i-info"></span></button>
           <span class="caret" data-ico="i-chevron"></span>
         </div>
         <div class="card-body">
+
+        <!-- Generator mode — ADVANCED (fray-d advanced-penetration port) vs
+             CLASSIC (vendored StrokeEngine pattern list). Hidden until the
+             firmware advertises features.advanced_pattern; ACTIVE = the
+             device's confirmed ap_mode (POST response / page-load GET),
+             never an optimistic flip. -->
+        <div class="seg" id="patModeSeg" hidden style="margin-bottom:10px">
+          <button type="button" data-apmode="1" data-tip="Per-direction depth, speed &amp; accel with stroke-cycle modifiers">ADVANCED</button>
+          <button type="button" data-apmode="0" data-tip="Classic OSSM StrokeEngine pattern list">CLASSIC</button>
+        </div>
+
+        <!-- ===== ADVANCED panel (fray-d port) — visual curve editor. Hidden
+             until the device reports ap_mode:true; both surfaces render
+             "awaiting device state" and accept no input until seeded from
+             device truth. ===== -->
+        <div id="apPanel" hidden>
+          <div class="field" id="apSpeedField">
+            <div class="label-row"><label data-tip="Master speed · 0 stops and holds position">Speed</label><span class="field-val"><span id="apSpeedVal">—</span></span></div>
+            <input type="range" id="apSpeed" min="0" max="100" step="1" disabled>
+          </div>
+
+          <!-- Preset picker — custom dropdown (native select can't host the
+               user-preset delete buttons / section divider). Factory presets +
+               your saved user presets, all COMMANDS layered on the reset
+               baseline (speeds/accels/modifiers only — never depth window or
+               master speed). SAVE appears when the loaded preset is edited.
+               Menu contents + all wiring live in pattern.js. -->
+          <div class="ap-preset-row">
+            <div class="ap-dd" id="apPresetDD">
+              <button type="button" class="ap-dd-btn" id="apPresetBtn" data-tip="fray-d factory presets + your saved presets · applies stroke character on the reset baseline">
+                <span id="apPresetLabel">— apply a preset —</span>
+                <span class="ap-dd-caret" data-ico="i-chevron"></span>
+              </button>
+              <div class="ap-dd-menu" id="apPresetMenu" hidden></div>
+            </div>
+            <button type="button" class="btn" id="apSaveBtn" hidden data-tip="Save the current stroke shape as a user preset (on the device, shared to every client)">SAVE</button>
+            <button type="button" class="btn" id="apResetBtn" data-tip="Reset speeds, accels &amp; all modifiers to defaults · depths &amp; master speed untouched">RESET</button>
+          </div>
+          <input type="file" id="apImportFile" accept="application/json,.json" hidden>
+
+          <!-- Stroke-shape editor: drag peak/valley = depth, edge midpoints =
+               per-direction speed, corner diamonds = per-direction punch. -->
+          <div class="ap-editor screen" data-tip="Drag the peak &amp; valley for depth, the edge dots sideways for in/out speed, the diamonds toward a corner for a harder snap">
+            <svg id="apWaveSvg"></svg>
+            <span class="mn scr-tag">stroke &middot; shape</span>
+          </div>
+
+          <!-- Rhythm modifier — advanced, collapsed by default. Makes one
+               control drift over a repeating cycle of strokes (e.g. ramp max
+               depth gradually deeper, hold, ease back). Off unless you open it. -->
+          <div class="ap-mod-section">
+            <button type="button" class="ap-mod-toggle" id="apModToggle" aria-expanded="false">
+              <span class="ap-mod-caret" data-ico="i-chevron"></span>
+              <span class="ap-mod-title">Rhythm modifier</span>
+              <span class="ap-mod-hint">vary a control across strokes · advanced</span>
+            </button>
+            <div class="ap-mod-body" id="apModBody" hidden>
+              <p class="ap-mod-explain">Make one control <b>drift over a repeating cycle of strokes</b> — e.g. max depth ramps gradually to a minimum, holds, then climbs back. Each bar in the staircase is one stroke. Pick the control, drag the <b>step handles</b> to set how many strokes each phase lasts (<b>to min</b> / <b>at min</b> / <b>to max</b> / <b>at max</b>), and the <b>left fader</b> (amplitude) for how far it drifts — 100 means no change. The <b>offset</b> marker on the lower track shifts where the cycle starts, so two controls can drift <b>out of step</b> — e.g. depth dips while speed is still climbing.</p>
+              <div class="ap-chips" id="apModChips" data-tip="Which control the cycle below modulates · lit dot = a modifier is active on it"></div>
+              <div class="ap-editor ap-env screen" data-tip="One modulation cycle across successive strokes · each bar is a stroke · drag the step handles for phase lengths, the left fader for amplitude, the lower marker for offset">
+                <svg id="apEnvSvg"></svg>
+              </div>
+            </div>
+          </div>
+        </div>
+
+        <!-- ===== CLASSIC panel — the original StrokeEngine pattern UI ===== -->
+        <div id="legacyPanel">
 
         <!-- Glyph tile grid — renders from the pattern registry (§2.1a/b),
              built/wired in pattern.js. Firmware-tolerant: falls back to the
@@ -337,6 +420,8 @@
           </div>
         </div>
 
+        </div><!-- /#legacyPanel -->
+
         <!-- Wave scope — recessed .screen canvas tracing the REAL commanded
              ("told") position off telebuf; flat at standby, live trace +
              glow only while running (R2 — never a synthetic waveform). -->
@@ -349,7 +434,9 @@
 
         </div>
       </div>
+      </div><!-- .clu-col-main -->
 
+      <div class="clu-col clu-col-side">
       <!-- ===== POWER (02) — Health host. capabilities.js builds the card
            body into #loadCard (5 Meter instances + sparkline) via innerHTML
            — id is load-bearing. The old standalone #healthCard driver-health
@@ -358,6 +445,25 @@
       <div id="health" class="health-host">
         <div class="card panel" id="loadCard"><div class="card-body" style="text-align:center;padding:20px;color:var(--tx-mut)">Load monitoring not available.</div></div>
       </div>
+
+      <!-- SESSION (03) — odometer: distance, energy, peak speed, strokes, uptime.
+           Fed by the 0x06 STATS frame (or /api/status fallback), rendered in
+           main.js. Live CURRENT speed lives in the hero strip, not here. -->
+      <div class="card panel" id="sessionCard">
+        <div class="card-head">
+          <span data-ico="i-gauge"></span><h2>Session</h2>
+          <button class="info" data-tip="Cumulative stats since boot or the last reset. Energy is read from the INA228's own hardware Wh accumulator; distance and strokes are integrated from the live position stream at 240Hz."><span data-ico="i-info"></span></button>
+          <button class="btn ghost sm" id="sessionResetBtn" style="margin-left:auto"><span data-ico="i-reset"></span> Reset</button>
+        </div>
+        <div class="card-body">
+          <div class="kv"><span>Distance</span><b id="sessDist">&mdash;</b></div>
+          <div class="kv"><span>Energy</span><b id="sessEnergy">&mdash;</b></div>
+          <div class="kv"><span>Max speed</span><b id="sessMaxSpd">&mdash;</b></div>
+          <div class="kv"><span>Strokes</span><b id="sessStrokes">&mdash;</b></div>
+          <div class="kv"><span>Session time</span><b id="sessTime">&mdash;</b></div>
+        </div>
+      </div>
+      </div><!-- .clu-col-side -->
 
       </div><!-- .clu -->
     </div><!-- #driveMain -->
@@ -545,6 +651,17 @@
         <div id="expBanner" class="banner amber" style="margin-top:10px">Expert mode on — sliders run to the hardware ceiling. Watch the red zone.</div>
       </div>
 
+      <!-- Legibility — client-side accessibility preference (L2c). Same hivis
+           state as the header eye button (data-hivis-toggle). Browser-only;
+           never sent to the device. -->
+      <div class="card panel tight">
+        <div class="card-head"><span data-ico="i-eye"></span><h2>Legibility</h2>
+          <button class="info" data-tip="High-legibility mode brightens and slightly thickens text for low-vision use, without flattening the hierarchy. Font sizes stay put; only contrast and numeral weight rise. Auto-enables if your OS asks for more contrast. Stored in this browser only."><span data-ico="i-info"></span></button></div>
+        <label class="switch full"><span class="lbl">High legibility</span>
+          <span style="display:flex;align-items:center"><input type="checkbox" id="hivisSwitch" data-hivis-toggle><span class="track"></span></span></label>
+        <div class="hint" style="margin-top:8px">Brighter, heavier text · hierarchy preserved. Also on the header eye button.</div>
+      </div>
+
       <!-- Theme — client-side accent palette. Swatches built by core/theme.js
            (initThemeUI) from its THEMES registry; choice persists in this
            browser's localStorage only. NOT machine state — nothing is sent to
@@ -651,6 +768,8 @@
       <span class="lchip" data-tip="WiFi channel"><b>ch</b><span class="mn lv" id="linkCh">--</span></span>
       <span class="lchip" data-tip="Access point currently associated"><b>bssid</b><span class="mn lv" id="linkBssid">--</span></span>
       <span class="lchip" data-tip="Disconnect / reconnect count since boot"><b>disc</b><span class="mn lv" id="linkDisc">--</span></span>
+      <span class="lchip" data-tip="Free heap · on-device RAM headroom (low = memory pressure)"><b>heap</b><span class="mn lv" id="heapChip">--</span></span>
+      <span class="lchip" data-tip="Telemetry TX drops · frames the device couldn't push to a backed-up socket"><b>drops</b><span class="mn lv" id="dropsChip">--</span></span>
       <span class="lchip" data-tip="Firmware build · from /api/capabilities after every OTA"><b>fw</b><span class="mn lv" id="fwChip">--</span></span>
       <span class="lchip" data-tip="Web UI bundle build shipped via uploadfs"><b>ui</b><span class="mn lv" id="uiChip">--</span></span>
     </div>

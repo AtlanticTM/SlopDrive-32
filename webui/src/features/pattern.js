@@ -19,6 +19,7 @@ import { TRAVEL, winMin, winMax } from "../core/range.js";
 import { capsCache } from "../core/capabilities.js";
 import { sampleAt, stableRenderTime } from "../core/telebuf.js";
 import { ACCENT } from "../core/theme.js";
+import { initApEditor, setApEditorState, getApEditorBaseFields, getApSnapshot } from "./apEditor.js";
 
 export let pat = { running: false };
 
@@ -67,6 +68,445 @@ export function pushPatParams() {
     pp = setTimeout(function () {
         cmd.send(OP_GEN_CFG, patPayload());
     }, 60);
+}
+
+// ===================== Advanced mode (fray-d port) =====================
+// Reported device truth: apMode is null until the device says otherwise (old
+// firmware never says — the seg + panel simply never appear). The visual
+// curve editor (apEditor.js) owns the base-parameter and modifier surfaces;
+// this module owns the transport: live drags stream over the same gen_cfg
+// path the sliders used, and every drag release reconciles the editor from
+// GET /api/pattern so it converges to the device's post-clamp truth.
+var apMode = null;
+
+function apBasePayload() {
+    var out = getApEditorBaseFields();
+    var s = $('apSpeed');
+    if (s && !s.disabled) out.ap_speed = parseInt(s.value);
+    return out;
+}
+
+var apPP = null;
+function pushApParams() {
+    clearTimeout(apPP);
+    apPP = setTimeout(function () {
+        cmd.send(OP_GEN_CFG, apBasePayload());
+    }, 60);
+}
+
+// Editor live-drag sends — either the full base set or one {ap_mod} block.
+// Same 60ms debounce cadence as the sliders had; latest payload wins.
+var apLiveT = null, apLivePending = null;
+function pushApLive(fields) {
+    apLivePending = fields;
+    clearTimeout(apLiveT);
+    apLiveT = setTimeout(function () {
+        if (apLivePending) cmd.send(OP_GEN_CFG, apLivePending);
+        apLivePending = null;
+    }, 60);
+    // Live-edit → re-evaluate whether the current shape still matches the
+    // loaded preset; toggles the SAVE button and the " *" dirty marker.
+    recomputeApDirty();
+}
+
+// Drag released → adopt the device's post-clamp truth back into the editor.
+// Delayed past the last in-flight cmd's apply/echo so the GET reads the
+// settled state, not a race with our own final send.
+var apRecT = null;
+function apReconcile() {
+    clearTimeout(apRecT);
+    apRecT = setTimeout(async function () {
+        try {
+            const d = await get('/api/pattern');
+            adoptApState(d);
+        } catch (e) {}
+    }, 250);
+}
+
+// ---- fray-d factory presets --------------------------------------------
+// Decoded from OSSM-Lite advanced_penetration_strings.h factoryReset().
+// Every preset is a DELTA on the reset baseline (in/out speed 100, accels
+// 40, all modifiers off) — the firmware applies {ap_reset:true, …deltas}
+// atomically. Depths and master speed are never part of a preset (fray-d
+// semantics: presets change stroke character, not your safety window).
+// mods keys are advpat ctrl ids: 0=max depth, 1=min depth, 2=in speed,
+// 3=out speed, 4=in accel, 5=out accel.
+var AP_PRESETS = [
+    { name: 'Simple' },
+    { name: 'Teasing',    base: { ap_in_speed: 50 } },
+    { name: 'Pounding',   base: { ap_out_speed: 50 } },
+    { name: 'Robo',       base: { ap_in_accel: 100, ap_out_accel: 100 } },
+    { name: "Half'n'half", mods: { 0: { amplitude: 50 } } },
+    { name: 'Deeper',     mods: { 0: { amplitude: 15, out_step: 10 } } },
+    { name: 'Insist',     mods: { 1: { amplitude: 15, in_step: 10 } } },
+    { name: 'Jackhammer', base: { ap_out_accel: 0 },
+      mods: { 0: { amplitude: 15, out_step: 9 },
+              1: { amplitude: 15, in_step: 9 },
+              3: { amplitude: 50, in_wait: 8 } } },
+    { name: 'Progressive',
+      mods: { 0: { amplitude: 15, in_step: 10, in_wait: 1, out_step: 10 },
+              1: { amplitude: 15, in_step: 10, in_wait: 1, out_step: 10, offset: 11 } } },
+    { name: 'Mid',
+      mods: { 0: { amplitude: 15, in_step: 10, in_wait: 1, out_step: 10 },
+              1: { amplitude: 15, in_step: 10, in_wait: 1, out_step: 10 } } },
+    { name: 'Knot (75%)',
+      mods: { 0: { amplitude: 75 }, 1: { amplitude: 25 },
+              2: { amplitude: 25, offset: 1 }, 3: { amplitude: 2 } } },
+    { name: 'Knot (50%)',
+      mods: { 0: { amplitude: 50 }, 1: { amplitude: 50 },
+              2: { amplitude: 25, offset: 1 }, 3: { amplitude: 2 } } }
+];
+
+var AP_MOD_DEFAULTS = { amplitude: 100, in_step: 1, in_wait: 0, out_step: 1, out_wait: 0, offset: 0 };
+
+// A canonical preset "def" = the full stroke-shape snapshot:
+//   { in_speed, out_speed, in_accel, out_accel, mods:[6 full blocks] }
+// Factory presets are authored sparse (base deltas + mods); factoryDef()
+// expands one into a canonical def so factory + user presets load, compare
+// (dirty), and save through ONE code path.
+function factoryDef(p) {
+    var b = p.base || {};
+    var def = {
+        in_speed:  typeof b.ap_in_speed  === 'number' ? b.ap_in_speed  : 100,
+        out_speed: typeof b.ap_out_speed === 'number' ? b.ap_out_speed : 100,
+        in_accel:  typeof b.ap_in_accel  === 'number' ? b.ap_in_accel  : 40,
+        out_accel: typeof b.ap_out_accel === 'number' ? b.ap_out_accel : 40,
+        mods: []
+    };
+    for (var id = 0; id < 6; id++) {
+        var m = Object.assign({ ctrl: id }, AP_MOD_DEFAULTS);
+        if (p.mods && p.mods[id]) Object.assign(m, p.mods[id]);
+        def.mods.push(m);
+    }
+    return def;
+}
+var RESET_DEF = factoryDef({});   // the fray-d baseline
+
+// Order-stable string key of a def — the basis for dirty-detection.
+function defKey(def) {
+    if (!def) return '';
+    var parts = [def.in_speed, def.out_speed, def.in_accel, def.out_accel];
+    (def.mods || []).slice().sort(function (a, b) { return a.ctrl - b.ctrl; })
+        .forEach(function (m) {
+            parts.push(m.ctrl, m.amplitude, m.in_step, m.in_wait, m.out_step, m.out_wait, m.offset);
+        });
+    return parts.join(',');
+}
+
+// def → /api/pattern apply body (reset baseline + the def's values).
+function defToApplyBody(def) {
+    return {
+        ap_reset: true,
+        ap_in_speed: def.in_speed, ap_out_speed: def.out_speed,
+        ap_in_accel: def.in_accel, ap_out_accel: def.out_accel,
+        ap_mods: (def.mods || []).map(function (m) {
+            return { ctrl: m.ctrl, amplitude: m.amplitude, in_step: m.in_step, in_wait: m.in_wait,
+                     out_step: m.out_step, out_wait: m.out_wait, offset: m.offset };
+        })
+    };
+}
+
+function escHtml(s) {
+    return String(s).replace(/[&<>"']/g, function (c) {
+        return { '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[c];
+    });
+}
+
+// ---- Preset state ---------------------------------------------------------
+var LS_KEY = 'sd32_ap_presets';
+var apUserPresets = [];       // [{name, def}] mirrored from device NVS
+var apLoadedName  = null;     // currently loaded preset name (factory OR user)
+var apLoadedIsUser = false;
+var apLoadedKey   = null;     // defKey of the loaded preset, for dirty compare
+var apDirtyState  = false;
+var apMenuOpen    = false;
+var apDeleteArm   = null;     // user-preset name armed for delete
+var apDeleteTimer = null;
+
+function findUserPreset(name) {
+    for (var i = 0; i < apUserPresets.length; i++)
+        if (apUserPresets[i].name === name) return apUserPresets[i];
+    return null;
+}
+function normalizePresets(list) {
+    return (Array.isArray(list) ? list : [])
+        .filter(function (p) { return p && p.name && p.def; })
+        .map(function (p) { return { name: String(p.name), def: p.def }; });
+}
+function mirrorLS() { try { localStorage.setItem(LS_KEY, JSON.stringify(apUserPresets)); } catch (e) {} }
+function readLS()   { try { var s = localStorage.getItem(LS_KEY); return s ? normalizePresets(JSON.parse(s)) : null; } catch (e) { return null; } }
+
+// ---- Dirty / label --------------------------------------------------------
+function setApLoadedLabel() {
+    var el = $('apPresetLabel');
+    if (!el) return;
+    el.textContent = apLoadedName ? (apLoadedName + (apDirtyState ? ' *' : '')) : '— apply a preset —';
+}
+function setApDirty(on) {
+    apDirtyState = !!on;
+    var sb = $('apSaveBtn'); if (sb) sb.hidden = !apDirtyState;
+    setApLoadedLabel();
+}
+// Recomputed on every editor live-edit: dirty = state differs from the loaded
+// preset (or, with nothing loaded, from the reset baseline → offers a Save).
+function recomputeApDirty() {
+    var snap = getApSnapshot();
+    if (!snap) { setApDirty(false); return; }
+    setApDirty(defKey(snap) !== (apLoadedKey || defKey(RESET_DEF)));
+}
+
+// ---- Apply / load ---------------------------------------------------------
+async function applyApDef(def, name, isUser) {
+    try {
+        const r = await post('/api/pattern', defToApplyBody(def));
+        if (!r) { toast('Preset apply failed — no response', 'bad', 'i-alert'); return; }
+        const d = await r.json();
+        if (!d || !d.ok) { toast('Preset rejected by device', 'bad', 'i-alert'); return; }
+        apLoadedName = name; apLoadedIsUser = !!isUser; apLoadedKey = defKey(def);
+        setApDirty(false);
+        apReconcile();     // editor → confirmed device truth
+        toast('Preset loaded: ' + name, 'good', 'i-wave');
+    } catch (e) {}
+}
+function loadFactoryPreset(idx) { var p = AP_PRESETS[idx]; if (p) applyApDef(factoryDef(p), p.name, false); }
+function loadUserPreset(name)   { var u = findUserPreset(name); if (u) applyApDef(u.def, name, true); }
+
+async function apResetCmd() {
+    try {
+        const r = await post('/api/pattern', { ap_reset: true });
+        if (!r) { toast('Reset failed — no response', 'bad', 'i-alert'); return; }
+        const d = await r.json();
+        if (d && d.ok) {
+            apLoadedName = null; apLoadedIsUser = false; apLoadedKey = null;
+            setApDirty(false);
+            apReconcile();
+            toast('Advanced controls reset to defaults', 'info', 'i-wave');
+        }
+    } catch (e) {}
+}
+
+// ---- Save / delete / import / export --------------------------------------
+async function saveApPreset() {
+    var snap = getApSnapshot();
+    if (!snap) return;
+    var name;
+    if (apLoadedName && apLoadedIsUser) {
+        name = apLoadedName;                 // overwrite the loaded user preset
+    } else {
+        name = window.prompt('Save preset as:', apLoadedName ? (apLoadedName + ' copy') : 'My Pattern');
+        if (name === null) return;
+        name = name.trim();
+        if (!name) return;
+    }
+    try {
+        const r = await post('/api/pattern/presets', { name: name, def: snap });
+        if (!r) { toast('Save failed — no response', 'bad', 'i-alert'); return; }
+        const d = await r.json();
+        if (!d || !d.ok) { toast('Save failed: ' + ((d && d.error) || 'device error'), 'bad', 'i-alert'); return; }
+        apUserPresets = normalizePresets(d.presets); mirrorLS();
+        apLoadedName = name; apLoadedIsUser = true; apLoadedKey = defKey(snap);
+        setApDirty(false); buildPresetMenu();
+        toast('Preset saved: ' + name, 'good', 'i-check');
+    } catch (e) { toast('Save failed', 'bad', 'i-alert'); }
+}
+
+function armDelete(name) {
+    if (apDeleteArm === name) {               // second click → delete
+        clearTimeout(apDeleteTimer); apDeleteArm = null;
+        deleteUserPreset(name);
+        return;
+    }
+    apDeleteArm = name;                       // first click → arm (red ?)
+    buildPresetMenu();
+    clearTimeout(apDeleteTimer);
+    apDeleteTimer = setTimeout(function () { apDeleteArm = null; buildPresetMenu(); }, 3000);
+}
+async function deleteUserPreset(name) {
+    try {
+        const r = await post('/api/pattern/presets', { name: name, delete: true });
+        if (!r) { toast('Delete failed — no response', 'bad', 'i-alert'); return; }
+        const d = await r.json();
+        if (!d || !d.ok) { toast('Delete failed', 'bad', 'i-alert'); return; }
+        apUserPresets = normalizePresets(d.presets); mirrorLS();
+        if (apLoadedName === name && apLoadedIsUser) { apLoadedIsUser = false; }  // now unsaved
+        buildPresetMenu();
+        toast('Preset deleted: ' + name, 'info', 'i-trash');
+    } catch (e) {}
+}
+
+function exportApPresets() {
+    var data = JSON.stringify({ type: 'sd32-advanced-presets', v: 1, presets: apUserPresets }, null, 2);
+    var url = URL.createObjectURL(new Blob([data], { type: 'application/json' }));
+    var a = document.createElement('a');
+    a.href = url; a.download = 'sd32-presets.json';
+    document.body.appendChild(a); a.click(); a.remove();
+    setTimeout(function () { URL.revokeObjectURL(url); }, 1000);
+    closePresetMenu();
+    toast('Exported ' + apUserPresets.length + ' preset' + (apUserPresets.length === 1 ? '' : 's'), 'good', 'i-down');
+}
+async function importApPresets(file) {
+    try {
+        var obj = JSON.parse(await file.text());
+        var list = normalizePresets(Array.isArray(obj) ? obj : (obj && obj.presets));
+        if (!list.length) { toast('No presets in file', 'warn', 'i-alert'); return; }
+        var ok = 0;
+        for (var i = 0; i < list.length; i++) {
+            const r = await post('/api/pattern/presets', { name: list[i].name, def: list[i].def });
+            if (r) { const d = await r.json(); if (d && d.ok) { ok++; apUserPresets = normalizePresets(d.presets); } }
+        }
+        mirrorLS(); buildPresetMenu();
+        toast('Imported ' + ok + ' preset' + (ok === 1 ? '' : 's'), 'good', 'i-check');
+    } catch (e) { toast('Import failed — bad file', 'bad', 'i-alert'); }
+}
+
+async function loadApUserPresets() {
+    try {
+        const d = await get('/api/pattern/presets');
+        if (d && Array.isArray(d.presets)) { apUserPresets = normalizePresets(d.presets); mirrorLS(); }
+    } catch (e) {
+        var ls = readLS(); if (ls) apUserPresets = ls;   // device down → LS backup
+    }
+    buildPresetMenu();
+}
+
+// ---- Custom dropdown ------------------------------------------------------
+function buildPresetMenu() {
+    var menu = $('apPresetMenu'); if (!menu) return;
+    var h = '<div class="ap-dd-sec">FACTORY</div>';
+    AP_PRESETS.forEach(function (p, i) {
+        h += '<button type="button" class="ap-dd-fac" data-idx="' + i + '">' + escHtml(p.name) + '</button>';
+    });
+    if (apUserPresets.length) {
+        h += '<div class="ap-dd-div"></div><div class="ap-dd-sec">MY PRESETS</div>';
+        apUserPresets.forEach(function (u) {
+            var armed = apDeleteArm === u.name;
+            h += '<div class="ap-dd-userrow">'
+               +   '<button type="button" class="ap-dd-load" data-name="' + escHtml(u.name) + '">' + escHtml(u.name) + '</button>'
+               +   '<button type="button" class="ap-dd-del' + (armed ? ' arm' : '') + '" data-name="' + escHtml(u.name) + '" '
+               +     'title="' + (armed ? 'Click again to delete' : 'Delete') + '">' + (armed ? '?' : icon('i-trash')) + '</button>'
+               + '</div>';
+        });
+    }
+    h += '<div class="ap-dd-div"></div><div class="ap-dd-foot">'
+       +   '<button type="button" class="ap-dd-mini" id="apExportBtn">' + icon('i-down') + ' Export</button>'
+       +   '<button type="button" class="ap-dd-mini" id="apImportBtn">' + icon('i-up') + ' Import</button>'
+       + '</div>';
+    menu.innerHTML = h;
+}
+function openPresetMenu() {
+    apMenuOpen = true; buildPresetMenu();
+    var m = $('apPresetMenu'); if (m) m.hidden = false;
+    var dd = $('apPresetDD'); if (dd) dd.classList.add('open');
+}
+function closePresetMenu() {
+    apMenuOpen = false;
+    var m = $('apPresetMenu'); if (m) m.hidden = true;
+    var dd = $('apPresetDD'); if (dd) dd.classList.remove('open');
+    if (apDeleteArm) { apDeleteArm = null; clearTimeout(apDeleteTimer); }
+}
+function onPresetMenuClick(e) {
+    var del = e.target.closest('.ap-dd-del');
+    if (del) { e.stopPropagation(); armDelete(del.dataset.name); return; }
+    var load = e.target.closest('.ap-dd-load');
+    if (load) { loadUserPreset(load.dataset.name); closePresetMenu(); return; }
+    var fac = e.target.closest('.ap-dd-fac');
+    if (fac) { loadFactoryPreset(parseInt(fac.dataset.idx)); closePresetMenu(); return; }
+    if (e.target.closest('#apExportBtn')) { exportApPresets(); return; }
+    if (e.target.closest('#apImportBtn')) { var f = $('apImportFile'); if (f) f.click(); closePresetMenu(); return; }
+}
+
+// Panel + seg reflection from the device's CONFIRMED mode. Never called with
+// an assumed value — only from GET /api/pattern or a POST response.
+function applyApMode(mode) {
+    apMode = !!mode;
+    var seg = $('#patModeSeg');
+    if (seg) {
+        seg.hidden = false;
+        seg.querySelectorAll('button').forEach(function (b) {
+            b.classList.toggle('active', (b.dataset.apmode === '1') === apMode);
+        });
+    }
+    var ap = $('#apPanel'); if (ap) ap.hidden = !apMode;
+    var lg = $('#legacyPanel'); if (lg) lg.hidden = apMode;
+    updatePatState();
+}
+
+// Adopt advanced-mode state from a full /api/pattern readback (page load /
+// reconnect / mode-toggle response / drag-release reconcile).
+function adoptApState(d) {
+    if (!d || typeof d.ap_mode !== 'boolean') return;   // old firmware: no advanced UI
+    seedPatSlider('apSpeed', 'apSpeedVal', typeof d.ap_speed === 'number' ? d.ap_speed : undefined);
+    setApEditorState(d);
+    applyApMode(d.ap_mode);
+}
+
+async function setApModeOnDevice(mode) {
+    try {
+        const r = await post('/api/pattern', { ap_mode: mode });
+        if (!r) { toast('Mode switch failed — no response', 'bad', 'i-alert'); return; }
+        const d = await r.json();
+        if (d && typeof d.ap_mode === 'boolean') {
+            applyApMode(d.ap_mode);   // device's confirmed answer, not our request
+        }
+    } catch (e) {}
+}
+
+function initAdvancedPanel() {
+    // Visual curve editor — owns depth/speed/accel handles + modifier cycle.
+    initApEditor({ onLive: pushApLive, onCommit: apReconcile });
+
+    // Master speed stays a slider: it's the throttle, not a shape.
+    var s = $('apSpeed');
+    if (s) s.addEventListener('input', function () {
+        setRead('apSpeedVal', pad(parseInt(s.value) || 0, 3, 0));
+        pushApParams();
+    });
+
+    // Preset picker — custom dropdown (factory + user sections, delete buttons,
+    // import/export). Loading a preset is a COMMAND; the editor re-renders from
+    // the device's confirmed post-apply readback.
+    var pbtn = $('apPresetBtn');
+    if (pbtn) pbtn.addEventListener('click', function (e) {
+        e.stopPropagation();
+        apMenuOpen ? closePresetMenu() : openPresetMenu();
+    });
+    var pmenu = $('apPresetMenu');
+    if (pmenu) pmenu.addEventListener('click', onPresetMenuClick);
+    document.addEventListener('click', function (e) {
+        if (!apMenuOpen) return;
+        var dd = $('apPresetDD');
+        if (dd && !dd.contains(e.target)) closePresetMenu();
+    });
+    var sb = $('apSaveBtn');
+    if (sb) sb.addEventListener('click', saveApPreset);
+    var imp = $('apImportFile');
+    if (imp) imp.addEventListener('change', function () {
+        if (imp.files && imp.files[0]) importApPresets(imp.files[0]);
+        imp.value = '';
+    });
+    loadApUserPresets();
+
+    var rb = $('apResetBtn');
+    if (rb) rb.addEventListener('click', apResetCmd);
+
+    // Rhythm-modifier collapsible — advanced, off by default.
+    var mt = $('apModToggle');
+    if (mt) mt.addEventListener('click', function () {
+        var body = $('apModBody');
+        if (!body) return;
+        var opening = body.hidden;
+        body.hidden = !opening;
+        mt.setAttribute('aria-expanded', opening ? 'true' : 'false');
+        mt.classList.toggle('open', opening);
+    });
+
+    // Mode seg — sends the request, renders only the device's answer.
+    var seg = $('#patModeSeg');
+    if (seg) seg.addEventListener('click', function (e) {
+        var b = e.target.closest('button');
+        if (!b || !('apmode' in b.dataset)) return;
+        setApModeOnDevice(b.dataset.apmode === '1');
+    });
 }
 
 // ===================== Wave scope — telemetry-fed (§2.1d / R2) =====================
@@ -350,12 +790,18 @@ export async function loadPatternParams() {
                 t.classList.toggle('on', parseInt(t.dataset.pat) === d.pattern);
             });
         }
+        // Advanced mode: seed sliders + modifier cache, adopt the device's
+        // reported mode (reveals the seg; old firmware → no-op).
+        adoptApState(d);
     } catch (e) {}
 }
 
 export function initPattern() {
     // Build the pattern glyph tile grid
     initPatternGrid();
+
+    // Advanced panel wiring (sliders/modifier editor/mode seg)
+    initAdvancedPanel();
 
     // Seed the generator sliders from device truth (un-gates them).
     loadPatternParams();
@@ -410,13 +856,20 @@ export async function stopPattern() {
     if (!pat.running) return;
     cmd.send(OP_GEN_RUN, { run: false });
     const r = await post("/api/pattern", { running: false });
-    if (!r) { toast("Pattern stop failed — no response", "warn", "i-alert"); return; }
+    if (!r) {
+        // No response — we do NOT know the machine stopped. Keep showing
+        // running: falsely showing standby while the pattern still moves
+        // suppresses the operator's cue to hit the physical E-stop. :3
+        toast("Pattern stop UNCONFIRMED — no response; device may still be running!", "bad", "i-alert", 6000);
+        return;
+    }
     const d = await r.json();
-    if (d && d.ok && !d.running) {
-        pat.running = false;
-    } else {
-        // still set false optimistically — stop is safer than stale-running
-        pat.running = false;
+    // Ground truth: render the device's ACTUAL reported running flag, never an
+    // assumed standby. (The old code set pat.running=false in both branches,
+    // discarding the device's answer entirely.) :3
+    pat.running = d ? !!d.running : pat.running;
+    if (pat.running) {
+        toast("Pattern stop FAILED — device still reports RUNNING!", "bad", "i-alert", 6000);
     }
     setPatternButton();
 }
@@ -428,9 +881,13 @@ function updatePatState() {
     var el = $('#patState');
     if (!el) return;
     if (pat.running) {
-        var id = selectedPatternId();
-        var entry = patternRegistry().filter(function (p) { return p.id === id; })[0];
-        el.textContent = 'running · ' + (entry ? entry.name.toLowerCase() : id);
+        if (apMode) {
+            el.textContent = 'running · advanced';
+        } else {
+            var id = selectedPatternId();
+            var entry = patternRegistry().filter(function (p) { return p.id === id; })[0];
+            el.textContent = 'running · ' + (entry ? entry.name.toLowerCase() : id);
+        }
     } else {
         el.textContent = 'standby';
     }
@@ -463,5 +920,8 @@ export async function refreshPatternState() {
       pat.running = d.running;
       setPatternButton();
     }
+    // Re-adopt advanced state too — a reconnect may bridge a mode/param
+    // change made from another client or a firmware update.
+    adoptApState(d);
   } catch (e) {}
 }

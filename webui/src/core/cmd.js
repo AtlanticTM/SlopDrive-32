@@ -15,7 +15,7 @@ import {
   OP_GEN_CFG, OP_GEN_RUN, OP_MODE, OP_BLEND,
   OP_PAUSE, OP_HALT, OP_ESTOP, OP_HOME,
   OP_OVERRIDE, OP_BYPASS, OP_CLEAR_FAULT, OP_SAVE,
-  OP_GET_CFG, OP_MOVE,
+  OP_GET_CFG, OP_MOVE, OP_STREAM_MODE, OP_OVERSHOOT,
   buildCmd, parseEcho
 } from './wire.js';
 import { post } from './api.js';
@@ -51,6 +51,8 @@ var _coalesceKeys = {
   'override':  [OP_OVERRIDE],
   'bypass':    [OP_BYPASS],
   'move':      [OP_MOVE],
+  'stream_mode': [OP_STREAM_MODE],
+  'overshoot':   [OP_OVERSHOOT],
 };
 
 // Build reverse lookup: op → coalesceKey
@@ -274,10 +276,21 @@ _FALLBACK_ROUTES[OP_CLEAR_FAULT] = { url: '/api/clearfault', body: function() { 
 _FALLBACK_ROUTES[OP_SAVE]        = { url: '/api/settings', body: function() { return { no_persist: false }; } };
 _FALLBACK_ROUTES[OP_GET_CFG]     = { url: '/api/settings', body: function() { return {}; }, isGet: true };
 _FALLBACK_ROUTES[OP_MOVE]        = { url: '/api/move', body: function(d) { return { position: d.position, stream: d.stream != null ? d.stream : false, bypass_limits: d.bypass_limits || false }; } };
+// Stream speed-feed + overshoot clamp — previously ABSENT here, so under HTTP
+// fallback these controls sent nothing while the UI still flipped. The
+// firmware accepts both via /api/settings (session-only, no_persist). :3
+_FALLBACK_ROUTES[OP_STREAM_MODE] = { url: '/api/settings', body: function(d) { return { stream_speed_mode: d.mode != null ? d.mode : 0, no_persist: true }; } };
+_FALLBACK_ROUTES[OP_OVERSHOOT]   = { url: '/api/settings', body: function(d) { return { overshoot_clamp: !!(d && d.on), no_persist: true }; } };
 
 function _fallbackSend(op, desired, id) {
   var route = _FALLBACK_ROUTES[op];
-  if (!route) return;
+  if (!route) {
+    // No HTTP mapping for this op — the command CANNOT reach the device in
+    // fallback mode. Fire the fault path so the UI never silently no-ops. :3
+    console.warn('[cmd] no HTTP fallback route for op 0x' + op.toString(16) + ' — command dropped');
+    if (_onFault) _onFault({ id: id, op: op, desired: desired });
+    return;
+  }
 
   var body = route.body(desired);
   if (route.isGet) {
@@ -293,7 +306,22 @@ function _fallbackSend(op, desired, id) {
       } catch(e) {}
     })();
   } else {
-    post(route.url, body);
+    // POST — parse the response and feed it through the same echo pipeline as
+    // the WS path, so shadows reconcile to post-clamp device truth in fallback
+    // mode too, and a failed POST fires the fault path instead of vanishing. :3
+    (async function() {
+      try {
+        var r = await post(route.url, body);
+        if (r && r.ok) {
+          var json = await r.json();
+          if (_onEcho) _onEcho({ id: id, ok: (json && json.ok === false) ? 0 : 1, op: op, reported: json, cfg_gen: _cfgGen });
+        } else if (_onFault) {
+          _onFault({ id: id, op: op, desired: desired });
+        }
+      } catch(e) {
+        if (_onFault) _onFault({ id: id, op: op, desired: desired });
+      }
+    })();
   }
 }
 

@@ -23,7 +23,7 @@ import * as cmd from './cmd.js';
 import { OP_SET_WINDOW, OP_SET_SPEED, OP_SET_ACCEL, OP_GEN_CFG,
          OP_GEN_RUN, OP_MODE, OP_BLEND, OP_PAUSE, OP_HALT, OP_ESTOP,
          OP_HOME, OP_OVERRIDE, OP_BYPASS, OP_CLEAR_FAULT, OP_MOVE,
-         OP_GET_CFG } from './wire.js';
+         OP_GET_CFG, OP_STREAM_MODE, OP_OVERSHOOT } from './wire.js';
 import { isFallback } from './link.js';
 import { settingsAuthoritative } from '../core/range.js';
 
@@ -108,7 +108,28 @@ var _keyConfig = {
       _applyElState(sh, sh.elIds);
     }
   },
+  // Stream speed-feed + overshoot clamp segmented controls (settings.js
+  // registers external renderers that reflect the confirmed value). :3
+  'stream_mode': {
+    elIds: ['streamModeSeg'],
+    render: function(sh) { _applyElState(sh, sh.elIds); }
+  },
+  'overshoot': {
+    elIds: ['overshootSeg'],
+    render: function(sh) { _applyElState(sh, sh.elIds); }
+  },
 };
+
+// External renderers — feature modules (settings.js) register a callback per
+// key so device-confirmed values drive their own reflect functions (the fix
+// for controls whose visible selection was only ever set locally on click). :3
+var _externalRenderers = {};
+
+export function registerRenderer(key, fn) {
+  _externalRenderers[key] = fn;
+  var sh = _shadows[key];
+  if (sh) _render(sh);   // reflect current truth immediately on registration
+}
 
 // Map op codes → shadow key (for cmd.onEcho dispatch)
 var _opToKey = {};
@@ -123,6 +144,8 @@ _opToKey[OP_PAUSE]      = 'pause';
 _opToKey[OP_OVERRIDE]   = 'override';
 _opToKey[OP_BYPASS]     = 'bypass';
 _opToKey[OP_MOVE]       = 'move';
+_opToKey[OP_STREAM_MODE] = 'stream_mode';
+_opToKey[OP_OVERSHOOT]   = 'overshoot';
 
 // Timing thresholds
 var OVERDUE1_MS = 500;
@@ -140,6 +163,7 @@ export function register(key, initialReported) {
   // Use keyConfig if available, else generic
   var cfg = _keyConfig[key] || { elIds: [], render: null };
   _shadows[key] = {
+    key: key,
     reported: initialReported,
     desired: null,
     state: 'confirmed',
@@ -161,8 +185,9 @@ export function register(key, initialReported) {
 export function noteSent(key, desired, cmdid) {
   var sh = _shadows[key];
   if (!sh) {
-    // Auto-register with null reported
-    sh = { reported: null, desired: null, state: 'confirmed', sentAt: 0, settleAt: 0, id: 0, elIds: [], renderFn: null };
+    // Auto-register with null reported (keyConfig render/elIds if defined)
+    var kc = _keyConfig[key] || { elIds: [], render: null };
+    sh = { key: key, reported: null, desired: null, state: 'confirmed', sentAt: 0, settleAt: 0, id: 0, elIds: kc.elIds || [], renderFn: kc.render || null };
     _shadows[key] = sh;
   }
 
@@ -250,12 +275,19 @@ export function processConfig(cfg) {
   _applyConfigField('mode',     { transport: cfg.mode });
   _applyConfigField('override', { on: cfg.manual_override || false });
   _applyConfigField('bypass',   { on: cfg.bypass_limits || false });
+  // Stream speed-feed + overshoot clamp — device-authored pushes drive these
+  // controls too (previously they only ever reflected local click state). :3
+  if (typeof cfg.stream_speed_mode === 'number')
+    _applyConfigField('stream_mode', { mode: cfg.stream_speed_mode });
+  if (typeof cfg.overshoot_clamp !== 'undefined')
+    _applyConfigField('overshoot', { on: !!cfg.overshoot_clamp });
 }
 
 function _applyConfigField(key, reported) {
   const sh = _shadows[key];
   if (!sh) {
-    _shadows[key] = { reported: _cloneDeep(reported), desired: null, state: 'confirmed', sentAt: 0, settleAt: 0, id: 0, elIds: [], renderFn: null };
+    var kc = _keyConfig[key] || { elIds: [], render: null };
+    _shadows[key] = { key: key, reported: _cloneDeep(reported), desired: null, state: 'confirmed', sentAt: 0, settleAt: 0, id: 0, elIds: kc.elIds || [], renderFn: kc.render || null };
     _render(_shadows[key]);
     return;
   }
@@ -327,6 +359,10 @@ function _render(sh) {
 
   // Call custom render function
   if (sh.renderFn) sh.renderFn(sh);
+
+  // Call any externally-registered renderer (feature-module reflect hooks)
+  var ext = sh.key ? _externalRenderers[sh.key] : null;
+  if (ext) ext(sh);
 }
 
 /**

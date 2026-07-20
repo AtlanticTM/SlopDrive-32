@@ -11,8 +11,8 @@
  */
 
 import {
-  FRAME_HELLO, FRAME_TELEMETRY, FRAME_STATUS, FRAME_CLOCK, FRAME_INTERP, FRAME_ANOMALY, FRAME_ECHO,
-  parseHello, parseTelemetry, parseStatus, parseClockReply, parseInterp, parseAnomaly,
+  FRAME_HELLO, FRAME_TELEMETRY, FRAME_STATUS, FRAME_CLOCK, FRAME_INTERP, FRAME_ANOMALY, FRAME_STATS, FRAME_ECHO,
+  parseHello, parseTelemetry, parseStatus, parseClockReply, parseInterp, parseAnomaly, parseStats,
   buildClock, clockCalc, frameType
 } from './wire.js';
 import { setClockState, feedWireSamples } from './telebuf.js';
@@ -59,6 +59,7 @@ var _synced = false;
 // Frame dispatch callbacks
 var _onTelemetryCb = null;
 var _onStatusCb = null;
+var _onStatsCb = null;
 var _onInterpCb = null;
 var _onAnomalyCb = null;
 var _onDegradedCb = null;
@@ -77,7 +78,9 @@ var _stats = {
   droppedFrames: 0,   // cumulative telemetry frames lost (0x01 seq discontinuities)
   lastTeleMs: 0,      // performance.now() of the most recent 0x01 telemetry frame
   lastGapMs: 0,       // performance.now() of the most recent detected drop
-  lastStatusMs: 0     // performance.now() of the most recent STATUS heartbeat
+  lastStatusMs: 0,    // performance.now() of the most recent STATUS heartbeat
+  unknownFrames: 0,   // frames whose type byte matched nothing (firmware ahead of UI?)
+  txSendErrors: 0     // ws.send() threw — outbound frame lost
 };
 
 // Last 0x01 telemetry sequence number seen — for dropped-frame detection. -1 =
@@ -95,6 +98,7 @@ export function isFallback() { return _fallbackActive; }
 
 export function onTelemetry(cb)  { _onTelemetryCb = cb; }
 export function onStatus(cb)     { _onStatusCb = cb; }
+export function onStats(cb)      { _onStatsCb = cb; }
 export function onInterp(cb)     { _onInterpCb = cb; }
 export function onAnomaly(cb)    { _onAnomalyCb = cb; }
 export function onDegraded(cb)   { _onDegradedCb = cb; }
@@ -125,7 +129,16 @@ export function initLink(opts) {
  */
 export function sendBinary(data) {
   if (_ws && _ws.readyState === WebSocket.OPEN) {
-    try { _ws.send(data); return true; } catch(e) { return false; }
+    try {
+      _ws.send(data);
+      return true;
+    } catch(e) {
+      // A throw here means an outbound frame was LOST on an open socket —
+      // distinguishable from "socket not open" only if we say so. :3
+      _stats.txSendErrors++;
+      console.warn('[link] ws.send() threw — outbound frame lost:', e);
+      return false;
+    }
   }
   return false;
 }
@@ -179,7 +192,19 @@ function _onMessage(event) {
     case FRAME_CLOCK:     _handleClockReply(dv); break;
     case FRAME_INTERP:    _handleInterp(dv, data.byteLength); break;
     case FRAME_ANOMALY:   _handleAnomaly(dv, data.byteLength); break;
+    case FRAME_STATS:     _handleStats(dv); break;
     case FRAME_ECHO:      processEcho(dv, data.byteLength); break;
+    default:
+      // Unmatched frame type (firmware ahead of this bundle, or a decode gap
+      // like the 0x06 STATS one this replaced). Count + warn instead of
+      // vanishing with zero trace. :3
+      _stats.unknownFrames++;
+      if (_stats.unknownFrames <= 10 || (_stats.unknownFrames % 100) === 0) {
+        console.warn('[link] unhandled frame type 0x' +
+          (dv.byteLength ? dv.getUint8(0).toString(16).padStart(2, '0') : '??') +
+          ' (' + data.byteLength + 'B) — dropped (total ' + _stats.unknownFrames + ')');
+      }
+      break;
   }
 }
 
@@ -260,6 +285,14 @@ function _handleStatus(dv) {
   _stats.p95JitterUs = _p95JitterUs;
   _stats.wsRttUs = _lastRtt;
   if (_onStatusCb) _onStatusCb(s);
+}
+
+// ---- STATS (0x06 session odometer) ----------------------------------------
+
+function _handleStats(dv) {
+  var st = parseStats(dv);
+  if (!st) return;
+  if (_onStatsCb) _onStatsCb(st);
 }
 
 // ---- INTERP ---------------------------------------------------------------

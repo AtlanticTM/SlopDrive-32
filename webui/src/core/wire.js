@@ -12,6 +12,7 @@ export const FRAME_STATUS    = 0x02;
 export const FRAME_CLOCK     = 0x03;
 export const FRAME_INTERP    = 0x04;
 export const FRAME_ANOMALY   = 0x05;
+export const FRAME_STATS     = 0x06;
 export const FRAME_CMD       = 0x10;
 export const FRAME_ECHO      = 0x11;
 
@@ -66,10 +67,13 @@ export const INTERP_FLAG_LIVE   = 0x02;
 export const INTERP_FLAG_GRAD   = 0x04;
 
 // ---- Flag bit positions for 0x01 ------------------------------------------
+// Mirrors UiSocket::sendTelemetry's flags byte exactly. The old table here
+// called bit1 "FAULT" and bit2 "GEN_RUNNING" — wrong: firmware sets bit1 =
+// pattern running (PB-004) and bit2 = gen_active (compat mirror). :3
 export const FLAG_HOMED           = 0x01;
-export const FLAG_FAULT           = 0x02;
-export const FLAG_GEN_RUNNING     = 0x04;
-export const FLAG_ESTOP           = 0x08;
+export const FLAG_GEN_RUNNING     = 0x02;   // PatternEngine running (PB-004)
+export const FLAG_GEN_ACTIVE      = 0x04;   // generator emitting (compat mirror)
+export const FLAG_ESTOP           = 0x08;   // e-stopped (latched until re-home)
 export const FLAG_PAUSED          = 0x10;
 export const FLAG_OVERRIDE        = 0x20;
 export const FLAG_INTIFACE_ACTIVE = 0x40;
@@ -165,6 +169,23 @@ export function parseStatus(dv) {
       dv.getUint8(26),
       dv.getUint8(27)
     ]
+  };
+}
+
+/**
+ * Parse a 0x06 STATS frame (device→client, ~2Hz). Session odometer totals.
+ * Layout: u8 type, u16 max_speed_mm_s, u32 distance_mm, u32 energy_mwh,
+ * u32 strokes, u32 session_ms  (19 bytes total). See UiProtocol.h.
+ * @param {DataView} dv — positioned at the type byte
+ * @returns {{max_speed_mm_s:number, distance_mm:number, energy_wh:number, strokes:number, session_ms:number}}
+ */
+export function parseStats(dv) {
+  return {
+    max_speed_mm_s: dv.getUint16(1, true),
+    distance_mm:    dv.getUint32(3, true),
+    energy_wh:      dv.getUint32(7, true) / 1000,   // milli-Wh → Wh
+    strokes:        dv.getUint32(11, true),
+    session_ms:     dv.getUint32(15, true)
   };
 }
 
@@ -335,6 +356,10 @@ export function frameType(dv) {
     case FRAME_CLOCK:     return FRAME_CLOCK;
     case FRAME_INTERP:    return FRAME_INTERP;
     case FRAME_ANOMALY:   return FRAME_ANOMALY;
+    // 0x06 STATS was missing from this switch, so link.js's FRAME_STATS
+    // dispatch was unreachable and the SESSION card froze while live on WS —
+    // it only ever updated via the HTTP fallback poll. :3
+    case FRAME_STATS:     return FRAME_STATS;
     case FRAME_ECHO:      return FRAME_ECHO;
     default:              return -1;
   }

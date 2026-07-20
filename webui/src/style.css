@@ -81,12 +81,108 @@
   --tabbar: calc(var(--s) * 64px);
   --radius: 2px;
   --glow-warn: 0 0 18px rgba(245,185,77,.5), 0 0 42px rgba(245,185,77,.16);
+
+  /* ---- L1 FLUID COLUMN — the ONE width formula for every shared-column region.
+     min(80vw,96%) never switched (80vw is always < 96% of the viewport), so
+     every screen ate fixed 10% margins. This clamp lerps them instead:
+       ≤~900px viewport → 96% (near-full width, margins stop wasting space)
+       ~900–1700px      → linear blend (62vw + 306px)
+       ≥~1700px         → 80vw (the approved 10% margins)
+     Continuous, no breakpoint pop. All seven consumers reference var(--colW);
+     nothing declares its own width formula anymore. */
+  --colW: clamp(80vw, 62vw + 306px, 96%);
+
+  /* Nominal numeral weight — every wght-400 Martian Mono readout references
+     this instead of a literal 400 so html.hivis can lift them all to 480 in
+     one flip (L2b) WITHOUT touching the alarm-swell weights (.vv.w1/.w2 stay
+     literal 620/800) or the already-heavier titles (500). Martian Mono is
+     monospace: the weight axis does NOT change glyph advance, so .vv fixed
+     boxes (sized at wdth 112) never reflow when this lifts. */
+  --nwght: 400;
 }
 
 /* Scale clamp for narrow phones — if 1.12x breaks the 380px layout, fall
    back to 1.0 rather than redesigning (per Section E implementation notes). */
 @media (max-width: 480px) {
   :root { --s: 1; }
+}
+
+/* ===================== L2 — HIGH-LEGIBILITY MODE (html.hivis) =====================
+   Brighter, heavier text for low-vision use, WITHOUT flattening hierarchy:
+   every text tier moves up by a comparable perceptual step so the contrast
+   BETWEEN elements (label vs value vs ghost) is preserved — only contrast
+   against the background rises. Accent colors (--reality/--intent/--warn/--bad)
+   are untouched (already high-chroma, semantic). No font-size change to hero
+   numerals, card titles, buttons, or any layout-critical size.
+
+   Text ramp (before → after), ordering + roughly even spacing preserved:
+     --tx-hi    #ECEFF4 → #F7F9FC   (headings)
+     --tx       #C3C8D1 → #EEF1F6   (body)
+     --tx-val   #A8AEB9 → #D3D8E1   (nominal numerals)
+     --tx-mut   #666C78 → #A8B0BC   (labels)
+     --tx-ghost #4D525C → #8B93A0   (hints, ruler numerals)
+     --tx-faint #2C3037 → #5E6570   (index numerals, watermarks)
+   Hairlines one step UP too, so panel structure keeps pace with the brighter
+   text (never washed-out). NOTE (executor): the delta brief listed
+   --line-2 → #1B1E24, but this build's --line-2 (#272B31) is the BRIGHT
+   emphasis hairline (brighter than --line-1), the reverse of the mock's ramp
+   ordering — applying #1B1E24 literally would DARKEN it and invert the ramp.
+   Kept the build's monotonic order instead: each hairline stepped up, so
+   --line-2 → #31353D (up from #272B31, still above --line-1's hivis value). */
+html.hivis {
+  --tx-hi:      #F7F9FC;
+  --tx:         #EEF1F6;
+  --tx-val:     #D3D8E1;
+  --tx-mut:     #A8B0BC;
+  --tx-ghost:   #8B93A0;
+  --tx-faint:   #5E6570;
+  --line-1:     #262A31;
+  --line-2:     #31353D;
+  --line-3:     #3A3F48;
+  --line-4:     #646B7A;
+  --chip-line:  #262A31;
+  --chip:       #161A20;
+  /* Log terminal phosphor tint one step brighter (#7C97B8 → #A9BFD9). */
+  --term-tx:    #A9BFD9;
+  /* All wght-400 numerals lift to 480 (see --nwght note); wdth unchanged. */
+  --nwght:      480;
+}
+/* L2b small-text size bump — SMALL tiers only get ~+1px under hivis; hero
+   numerals, card titles, buttons and layout-critical sizes stay put. Sizes
+   are rem (root = --s x 16px, --s 1.12 desktop / 1.0 <=480px), so these are
+   rem deltas of ~+0.04rem (~+0.7px desktop) rather than the brief's literal
+   px — the build has no fixed-px small text to target. Kept modest to avoid
+   wrap/overflow. */
+html.hivis .mini-label,
+html.hivis .diag-key { font-size: .72rem; }          /* labels/legends .68 → .72rem */
+html.hivis .hint { font-size: .76rem; }              /* hint/help .72 → .76rem */
+html.hivis .lchip { font-size: .72rem; }             /* chips .68 → .72rem */
+html.hivis .lchip b { font-size: .64rem; }           /* chip label .6 → .64rem */
+html.hivis .log.term, html.hivis pre.log { font-size: .74rem; } /* log terminal .7 → .74rem */
+html.hivis .pidx-label { font-size: .66rem; }        /* footer index .62 → .66rem */
+html.hivis .rail-hint,                                /* micro ghost tags — each a real bump: */
+html.hivis .rail-endcap,                              /* .rail-hint .58, .rail-endcap .56, */
+html.hivis .scr-tag { font-size: .62rem; }           /* .scr-tag .6  → .62rem */
+/* NOTE: base `label` is already .76rem (~13.6px desktop) — above the small-tier
+   threshold and layout-critical, so it is intentionally NOT bumped (a bump
+   would have shrunk it). Hero numerals / card titles / buttons unchanged too. */
+
+/* L2d AUTO — with no explicit choice stored, follow the OS "more contrast"
+   request. A lighter lift than full hivis (structure stays subtle); the
+   explicit toggle (which adds html.hivis / html.hivis-off) always wins because
+   html.hivis-off suppresses this, and html.hivis (below/above in the cascade)
+   is a stronger, complete override. */
+@media (prefers-contrast: more) {
+  html:not(.hivis):not(.hivis-off) {
+    --tx-hi:      #F2F5FA;
+    --tx:         #E4E8EE;
+    --tx-val:     #C9CFDA;
+    --tx-mut:     #9AA2AF;
+    --tx-ghost:   #7E8692;
+    --tx-faint:   #4A505A;
+    --line-1:     #242830;
+    --line-4:     #5A616E;
+  }
 }
 
 /* ===================== Thing 1 — coarse-pointer hit-target boost =====================
@@ -156,9 +252,11 @@ body {
 * { scrollbar-width: thin; scrollbar-color: var(--line-2) var(--ink); }
 
 /* ===================== Focus-visible (reality ring on everything) ===================== */
+/* L2e — keyboard focus ring. Build already carried one; offset lifted to 2px
+   to match the accessibility-pass spec (was 1px). */
 *:focus-visible {
   outline: 2px solid var(--reality);
-  outline-offset: 1px;
+  outline-offset: 2px;
 }
 
 /* ===================== Numerals — Martian Mono everywhere ===================== */
@@ -173,7 +271,7 @@ input[type="number"], .window .mid .big,
 .mn {
   font-family: 'Martian Mono', monospace;
   font-variant-numeric: tabular-nums;
-  font-variation-settings: "wght" 400, "wdth" 95;
+  font-variation-settings: "wght" var(--nwght), "wdth" 95;
 }
 
 /* ===================== .vv — fixed-box variable-axis numeral =====================
@@ -194,7 +292,7 @@ input[type="number"], .window .mid .big,
      amputating the numerals. */
   min-width: calc(var(--vv-chars, 4) * var(--mm-ch, 0.62em));
   /* nominal state */
-  font-variation-settings: "wght" 400, "wdth" 95;
+  font-variation-settings: "wght" var(--nwght), "wdth" 95;
   color: var(--tx-val);
   transition: font-variation-settings .5s ease, color .35s, text-shadow .35s;
   white-space: pre;
@@ -299,7 +397,7 @@ input[type="number"], .window .mid .big,
 .mtr .mtr-value {
   font-family: 'Martian Mono', monospace;
   font-variant-numeric: tabular-nums;
-  font-variation-settings: "wght" 400, "wdth" 95;
+  font-variation-settings: "wght" var(--nwght), "wdth" 95;
   font-size: .92rem;
   color: var(--reality);
   text-shadow: 0 0 8px rgba(var(--reality-rgb),.35);
@@ -431,7 +529,23 @@ header {
   border: 1px solid var(--chip-line);
   color: var(--tx-val);
   white-space: nowrap;
-  font-variation-settings: "wght" 400, "wdth" 90;
+  font-variation-settings: "wght" var(--nwght), "wdth" 90;
+}
+
+/* ---- High-legibility toggle chip-button (L2c) ---- */
+.hivis-chip {
+  cursor: pointer;
+  padding: 3px 7px;
+  transition: color .18s, border-color .18s, box-shadow .18s;
+}
+.hivis-chip .hivis-ico { width: 14px; height: 14px; display: inline-grid; place-items: center; }
+.hivis-chip .hivis-ico svg { width: 14px; height: 14px; }
+.hivis-chip:hover { border-color: var(--line-4); }
+/* Active = --reality tint on the eye (icon carries the state) */
+html.hivis .hivis-chip {
+  color: var(--reality);
+  border-color: color-mix(in srgb, var(--reality) 45%, var(--chip-line));
+  box-shadow: 0 0 10px rgba(var(--reality-rgb),.22);
 }
 
 /* ---- Header chip truncation (Appendix D §3) ----
@@ -595,7 +709,7 @@ header {
   font-family: 'Martian Mono', monospace;
   font-size: calc(var(--s) * 10px);
   color: var(--tx-ghost);
-  font-variation-settings: "wght" 400, "wdth" 90;
+  font-variation-settings: "wght" var(--nwght), "wdth" 90;
 }
 /* Track spans the full rail width with dashed guides top/bottom marking where
    full travel is even when the tape (normal mode) covers only the window. */
@@ -821,9 +935,11 @@ header {
   align-items: center;
   margin-top: 4px;
   font-family: 'Martian Mono', monospace;
-  font-size: .54rem;
+  /* L2b default floor — was .54rem (~9.7px desktop, the one sub-10px straggler);
+     lifted to .58rem so nothing renders below ~10px in default mode either. */
+  font-size: .58rem;
   color: var(--tx-ghost);
-  font-variation-settings: "wght" 400, "wdth" 90;
+  font-variation-settings: "wght" var(--nwght), "wdth" 90;
 }
 
 /* Static layer (ruler, endcaps, triangles, trk mark) */
@@ -843,7 +959,7 @@ header {
   font-family: 'Martian Mono', monospace;
   font-size: .56rem;
   color: var(--tx-ghost);
-  font-variation-settings: "wght" 400, "wdth" 90;
+  font-variation-settings: "wght" var(--nwght), "wdth" 90;
 }
 .spine-rail-host.horizontal .rail-endcap.lo { left: 4px; bottom: 2px; }
 .spine-rail-host.horizontal .rail-endcap.hi { right: 4px; bottom: 2px; }
@@ -861,7 +977,7 @@ header {
   font-family: 'Martian Mono', monospace;
   font-size: .72rem;
   color: var(--tx-ghost);
-  font-variation-settings: "wght" 400, "wdth" 90;
+  font-variation-settings: "wght" var(--nwght), "wdth" 90;
   opacity: .5;
 }
 .spine-rail-host.horizontal .rail-ghost { left: 50%; top: 50%; transform: translate(-50%, -50%); }
@@ -909,7 +1025,7 @@ header {
   font-family: 'Martian Mono', monospace;
   font-size: calc(var(--s) * 10px);
   color: var(--intent);
-  font-variation-settings: "wght" 400, "wdth" 90;
+  font-variation-settings: "wght" var(--nwght), "wdth" 90;
   white-space: nowrap;
   pointer-events: none;
 }
@@ -1187,7 +1303,7 @@ body.stale #heroActual {
   font-size: .62rem;
   color: var(--tx-faint);
   font-weight: 400;
-  font-variation-settings: "wght" 400, "wdth" 90;
+  font-variation-settings: "wght" var(--nwght), "wdth" 90;
   margin-right: 0;
   vertical-align: 1px;
 }
@@ -1290,7 +1406,7 @@ body.stale #heroActual {
   font-size: .64rem;
   letter-spacing: .04em;
   color: var(--tx-ghost);
-  font-variation-settings: "wght" 400, "wdth" 90;
+  font-variation-settings: "wght" var(--nwght), "wdth" 90;
   white-space: nowrap;
 }
 /* When a .card-state shares the head with an .info button, only ONE of them
@@ -1306,49 +1422,43 @@ body.stale #heroActual {
   border-radius: var(--radius);
 }
 
-/* ===================== [data-tip] — lightweight CSS-only tooltip =========
-   Companion to the .info popover system above (kept as-is for the longer,
-   multi-sentence explanations it already carries). This one hangs off ANY
-   element via a plain attribute — chips, tab pills, pattern tiles, meter
-   labels, footer chips — anywhere a one-line hint earns its keep without a
-   dedicated button. Pure :hover/:focus-visible ::after, no JS. */
+/* ===================== [data-tip] — shared #tipbox hover hint (L4a) =========
+   ONE renderer for every one-to-two-line hover hint (chips, tab pills, pattern
+   tiles, meter labels, footer chips, labels — anywhere a short hint earns its
+   keep). Replaces the old per-element ::after/::before tooltips, which were
+   positioned RELATIVE to their element (bottom:100%) and so landed off-screen
+   for anything near a viewport edge (header chips, footer). The replacement is
+   a single #tipbox node, position:fixed, measured after content is set and
+   CLAMPED into the viewport (8px gutters), preferring above and flipping below
+   when there's no headroom — so placement is computed, not inherited. Wired in
+   core/ui.js (initHoverTips). The long-form ".info" click-popovers keep their
+   own role (below) and are explicitly excluded from #tipbox — no element ever
+   shows two help affordances. position:relative retained so nothing that
+   relied on it for child positioning regresses. */
 [data-tip] { position: relative; }
-[data-tip]:hover::after, [data-tip]:focus-visible::after {
-  content: attr(data-tip);
-  position: absolute;
-  bottom: calc(100% + 8px);
-  left: 50%;
-  transform: translateX(-50%);
+#tipbox {
+  position: fixed;
+  z-index: 200;
+  top: 0; left: 0;
   background: var(--ink);
-  border: 1px solid var(--line-3);
+  border: 1px solid var(--line-4);
   color: var(--tx-mut);
   font-family: 'Chakra Petch', sans-serif;
   font-size: .72rem;
   font-weight: 400;
   letter-spacing: .01em;
+  line-height: 1.45;
   padding: 6px 10px;
-  width: max-content;
-  max-width: 280px;
+  max-width: 300px;
   white-space: normal;
   text-align: left;
-  line-height: 1.45;
-  z-index: 55;
-  pointer-events: none;
   box-shadow: 0 6px 18px rgba(0,0,0,.6);
-}
-[data-tip]:hover::before, [data-tip]:focus-visible::before {
-  content: "";
-  position: absolute;
-  bottom: calc(100% + 3px);
-  left: 50%;
-  transform: translateX(-50%) rotate(45deg);
-  width: 8px; height: 8px;
-  background: var(--ink);
-  border-right: 1px solid var(--line-3);
-  border-bottom: 1px solid var(--line-3);
-  z-index: 56;
   pointer-events: none;
+  opacity: 0;
+  transition: opacity .12s;
 }
+#tipbox.show { opacity: 1; }
+html.hivis #tipbox { color: var(--tx-val); font-size: .76rem; }
 
 /* ===================== Tooltips / info ===================== */
 .info {
@@ -1403,7 +1513,7 @@ body.stale #heroActual {
 .field-val {
   font-family: 'Martian Mono', monospace;
   font-variant-numeric: tabular-nums;
-  font-variation-settings: "wght" 400, "wdth" 95;
+  font-variation-settings: "wght" var(--nwght), "wdth" 95;
   color: var(--tx-val);
   background: var(--chip);
   border: 1px solid var(--chip-line);
@@ -1487,7 +1597,7 @@ input[type="range"]:active::-moz-range-thumb {
   color: var(--tx-val);
   font-size: .9rem;
   font-family: 'Martian Mono', monospace;
-  font-variation-settings: "wght" 400, "wdth" 90;
+  font-variation-settings: "wght" var(--nwght), "wdth" 90;
 }
 .num:focus { outline: none; border-color: var(--reality); }
 
@@ -1513,7 +1623,7 @@ select:focus { outline: none; border-color: var(--reality); }
   font-size: 1.3rem;
   font-weight: 400;
   color: var(--tx-val);
-  font-variation-settings: "wght" 400, "wdth" 95;
+  font-variation-settings: "wght" var(--nwght), "wdth" 95;
 }
 .card.tight .readout b { font-size: 1.1rem; }
 .readout span { font-size: .72rem; color: var(--tx-mut); font-family: 'Chakra Petch', sans-serif; }
@@ -1639,6 +1749,133 @@ select:focus { outline: none; border-color: var(--reality); }
   box-shadow: var(--glow-reality);
 }
 
+/* ---- Advanced pattern curve editor (fray-d port, apEditor.js) -----------
+   Two recessed .screen surfaces: stroke shape + modifier cycle. Handles are
+   reality-blue when showing CONFIRMED device state and flip to --intent
+   purple only while being dragged (desired/unconfirmed) — the drag release
+   reconciles from /api/pattern and converges them back to blue. */
+.ap-editor { position: relative; height: 216px; padding: 0; margin-bottom: 8px; }
+.ap-editor svg { width: 100%; height: 100%; display: block; touch-action: none; user-select: none; }
+.ap-editor.ap-env { height: 140px; }
+/* Faint halo ring advertising each handle's true (thumb-sized) grab zone */
+.ap-halo    { fill: rgba(var(--reality-rgb), .05); stroke: rgba(var(--reality-rgb), .12); stroke-width: 1; }
+.ap-preset-row { display: flex; gap: 8px; margin-bottom: 8px; align-items: stretch; }
+/* .btn is width:100% globally — that width feeds flex-basis:auto and lets a
+   button swallow the whole row. Pin SAVE/RESET to their content width. */
+.ap-preset-row .btn { flex: 0 0 auto; width: auto; min-height: 44px; padding: 0 16px; }
+
+/* ---- Custom preset dropdown (factory + user sections, delete, import/export) */
+.ap-dd { position: relative; flex: 1 1 auto; min-width: 0; }
+.ap-dd-btn {
+  width: 100%; min-height: 44px; box-sizing: border-box;
+  display: flex; align-items: center; justify-content: space-between; gap: 8px;
+  padding: 0 12px; border: 1px solid var(--line-2); border-radius: var(--radius);
+  background: transparent; color: var(--tx); cursor: pointer;
+  font-family: 'Chakra Petch', sans-serif; font-size: .82rem;
+}
+.ap-dd-btn:hover { border-color: var(--line-4); }
+.ap-dd-btn > span:first-child { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.ap-dd-caret { width: 16px; height: 16px; flex: 0 0 auto; color: var(--tx-mut); transition: transform .15s; }
+.ap-dd-caret svg { width: 16px; height: 16px; display: block; }
+.ap-dd.open .ap-dd-caret { transform: rotate(180deg); }
+.ap-dd-menu {
+  position: absolute; top: calc(100% + 4px); left: 0; right: 0; z-index: 60;
+  max-height: 340px; overflow-y: auto; padding: 4px;
+  background: var(--ink); border: 1px solid var(--line-2); border-radius: var(--radius);
+  box-shadow: 0 8px 24px rgba(0,0,0,.5);
+}
+.ap-dd-sec { font: 600 .58rem/1 'Martian Mono', ui-monospace, monospace; letter-spacing: .1em; color: var(--tx-ghost); padding: 8px 8px 4px; }
+.ap-dd-div { height: 1px; background: var(--line-1); margin: 4px 6px; }
+.ap-dd-fac, .ap-dd-load {
+  display: block; width: 100%; text-align: left; padding: 9px 10px;
+  border: none; border-radius: 6px; background: transparent; color: var(--tx);
+  font-family: 'Chakra Petch', sans-serif; font-size: .8rem; cursor: pointer;
+  overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
+}
+.ap-dd-fac:hover, .ap-dd-load:hover { background: rgba(var(--reality-rgb), .10); }
+.ap-dd-userrow { display: flex; align-items: center; gap: 4px; }
+.ap-dd-userrow .ap-dd-load { flex: 1 1 auto; min-width: 0; }
+.ap-dd-del {
+  flex: 0 0 auto; width: 36px; height: 36px; display: flex; align-items: center; justify-content: center;
+  border: none; border-radius: 6px; background: transparent; color: var(--tx-mut); cursor: pointer;
+}
+.ap-dd-del svg { width: 15px; height: 15px; }
+.ap-dd-del:hover { background: color-mix(in srgb, var(--bad) 14%, transparent); color: var(--bad); }
+.ap-dd-del.arm { color: var(--bad); font-weight: 700; font-size: 1.1rem; background: color-mix(in srgb, var(--bad) 16%, transparent); }
+.ap-dd-foot { display: flex; gap: 4px; padding: 4px; }
+.ap-dd-mini {
+  flex: 1; display: flex; align-items: center; justify-content: center; gap: 5px; padding: 8px;
+  border: 1px solid var(--line-2); border-radius: 6px; background: transparent; color: var(--tx-mut);
+  font-family: 'Chakra Petch', sans-serif; font-size: .72rem; cursor: pointer;
+}
+.ap-dd-mini svg { width: 14px; height: 14px; }
+.ap-dd-mini:hover { border-color: var(--line-4); color: var(--tx); }
+.ap-grid    { stroke: rgba(51,55,62,.35); stroke-width: .5; }
+.ap-guide   { stroke: var(--line-3); stroke-width: 1; stroke-dasharray: 4 4; }
+.ap-axis    { fill: var(--line-4); font: 400 9px/1 'Martian Mono', ui-monospace, monospace; }
+.ap-curve   { fill: none; stroke: var(--reality); stroke-width: 1.5; stroke-linejoin: round;
+              filter: drop-shadow(0 0 6px rgba(var(--reality-rgb), .35)); }
+.ap-curve.env.off { stroke: var(--line-4); filter: none; }
+/* Modifier trapezoid — filled area, segment labels, amplitude fader + offset
+   track. Fill is a faint reality tint; goes neutral when the modifier is off
+   (amplitude 100). */
+.ap-env-fill { fill: rgba(var(--reality-rgb), .10); stroke: none; }
+.ap-env-fill.off { fill: rgba(255,255,255,.03); }
+.ap-seg-lbl { fill: var(--tx-mut); font: 500 9px/1 'Martian Mono', ui-monospace, monospace; pointer-events: none; }
+.ap-env-hint { fill: var(--tx-mut); font: 400 11px/1 'Chakra Petch', sans-serif; pointer-events: none; }
+
+/* ---- Rhythm-modifier collapsible (advanced, off by default) ------------- */
+.ap-mod-section { margin-top: 6px; border-top: 1px solid var(--line-1); padding-top: 8px; }
+.ap-mod-toggle {
+  display: flex; align-items: center; gap: 8px; width: 100%;
+  padding: 6px 2px; background: transparent; border: none; cursor: pointer;
+  color: var(--tx); font-family: 'Chakra Petch', sans-serif; font-size: .82rem; text-align: left;
+}
+.ap-mod-caret { width: 15px; height: 15px; flex: 0 0 auto; color: var(--tx-mut); transition: transform .15s; }
+.ap-mod-caret svg { width: 15px; height: 15px; display: block; }
+.ap-mod-toggle.open .ap-mod-caret { transform: rotate(90deg); }
+.ap-mod-title { font-weight: 600; }
+.ap-mod-hint { color: var(--tx-ghost); font-size: .68rem; margin-left: auto; }
+.ap-mod-explain { margin: 4px 2px 10px; color: var(--tx-mut); font-size: .72rem; line-height: 1.5; font-family: 'Chakra Petch', sans-serif; }
+.ap-mod-explain b { color: var(--tx); font-weight: 600; }
+.ap-amp-track { stroke: var(--line-3); stroke-width: 2; stroke-linecap: round; }
+.ap-track { stroke: var(--line-3); stroke-width: 1.5; stroke-linecap: round; }
+.ap-off-marker { fill: var(--reality); }
+.ap-off-marker.drag { fill: var(--intent); }
+.ap-off-lbl { fill: var(--tx-mut); font: 500 9px/1 'Martian Mono', ui-monospace, monospace; pointer-events: none; }
+.ap-handle  { fill: var(--bg-2, #111); stroke: var(--reality); stroke-width: 1.5; cursor: grab; }
+.ap-handle.drag { fill: var(--intent); stroke: var(--intent); cursor: grabbing; }
+.ap-val     { fill: var(--reality); font: 500 10px/1 'Martian Mono', ui-monospace, monospace; }
+.ap-val.drag { fill: var(--intent); }
+.ap-divider { stroke: var(--line-4); stroke-width: 1.5; cursor: ew-resize; }
+.ap-divider.drag { stroke: var(--intent); }
+.ap-divider-grip { fill: var(--line-4); cursor: ew-resize; }
+.ap-divider-grip.drag { fill: var(--intent); }
+.ap-region  { fill: transparent; }
+.ap-region.hold { fill: rgba(var(--reality-rgb), .05); }
+.ap-region.rest { fill: rgba(255, 255, 255, .02); }
+.ap-chips   { display: flex; gap: 4px; flex-wrap: wrap; margin: 2px 0 8px; }
+.ap-chip {
+  flex: 1;
+  min-width: 78px;
+  min-height: 36px;
+  padding: 8px 6px;
+  border: 1px solid var(--line-2);
+  border-radius: var(--radius);
+  background: transparent;
+  color: var(--tx-mut);
+  font: 500 .62rem/1 'Martian Mono', ui-monospace, monospace;
+  letter-spacing: .04em;
+  cursor: pointer;
+  transition: border-color .12s, color .12s;
+  white-space: nowrap;
+}
+.ap-chip:hover { border-color: var(--line-4); }
+.ap-chip.active { border-color: var(--reality); color: var(--reality); }
+.ap-chip-dot { width: 5px; height: 5px; border-radius: 50%; background: var(--line-3);
+               display: inline-block; margin-right: 5px; vertical-align: 1px; }
+.ap-chip.modded .ap-chip-dot { background: var(--reality); box-shadow: 0 0 5px rgba(var(--reality-rgb), .5); }
+
 /* ---- Mono port chips (§3.2, Connection card transport select) ----------
    Rectangular, Martian Mono, letterspaced. ACTIVE = reality-blue — it is
    the device's CONFIRMED transport (ground truth doctrine), not merely the
@@ -1655,7 +1892,7 @@ select:focus { outline: none; border-color: var(--reality); }
   border-radius: var(--radius);
   padding: 7px 12px;
   cursor: pointer;
-  font-variation-settings: "wght" 400, "wdth" 90;
+  font-variation-settings: "wght" var(--nwght), "wdth" 90;
   transition: border-color .15s, color .15s, box-shadow .15s, background .15s;
 }
 .port:hover { border-color: var(--line-4); }
@@ -1685,7 +1922,7 @@ select:focus { outline: none; border-color: var(--reality); }
   border-radius: var(--radius);
   padding: 7px 10px;
   cursor: pointer;
-  font-variation-settings: "wght" 400, "wdth" 90;
+  font-variation-settings: "wght" var(--nwght), "wdth" 90;
   transition: border-color .15s, color .15s, box-shadow .15s;
 }
 .theme-chip:hover { border-color: var(--line-4); }
@@ -1753,7 +1990,7 @@ select:focus { outline: none; border-color: var(--reality); }
   text-transform: uppercase;
   pointer-events: none;
   font-family: 'Martian Mono', monospace;
-  font-variation-settings: "wght" 400, "wdth" 90;
+  font-variation-settings: "wght" var(--nwght), "wdth" 90;
 }
 .endcap.top { top: 0; } .endcap.bot { bottom: 0; }
 
@@ -1829,7 +2066,7 @@ select:focus { outline: none; border-color: var(--reality); }
 .pair { display: grid; grid-template-columns: 1fr 1fr; gap: 8px; }
 .mini-label { font-size: .68rem; color: var(--tx-mut); margin-bottom: 4px; font-weight: 500; font-family: 'Chakra Petch', sans-serif; }
 .kv { display: flex; justify-content: space-between; font-size: .72rem; color: var(--tx-mut); margin-top: 8px; font-family: 'Chakra Petch', sans-serif; }
-.kv b { color: var(--tx-val); font-family: 'Martian Mono', monospace; font-variation-settings: "wght" 400, "wdth" 90; }
+.kv b { color: var(--tx-val); font-family: 'Martian Mono', monospace; font-variation-settings: "wght" var(--nwght), "wdth" 90; }
 
 /* ===================== Told-vs-took legend ===================== */
 .ttlegend {
@@ -1842,7 +2079,7 @@ select:focus { outline: none; border-color: var(--reality); }
 }
 .ttlegend .mk-took { background: var(--reality); box-shadow: 0 0 4px var(--reality); }
 .ttlegend .mk-told { background: var(--intent); box-shadow: 0 0 4px var(--intent); }
-.ttlegend b { color: var(--tx-val); font-family: 'Martian Mono', monospace; font-variation-settings: "wght" 400, "wdth" 90; }
+.ttlegend b { color: var(--tx-val); font-family: 'Martian Mono', monospace; font-variation-settings: "wght" var(--nwght), "wdth" 90; }
 
 /* ===================== Position big readout ===================== */
 .pos-big {
@@ -1855,7 +2092,7 @@ select:focus { outline: none; border-color: var(--reality); }
 }
 .pos-big b {
   font-size: 1.8rem; font-weight: 400; color: var(--reality);
-  font-variation-settings: "wght" 400, "wdth" 100;
+  font-variation-settings: "wght" var(--nwght), "wdth" 100;
 }
 .pos-big span { font-size: .76rem; color: var(--tx-mut); margin-left: 4px; font-family: 'Chakra Petch', sans-serif; }
 
@@ -1879,7 +2116,7 @@ select:focus { outline: none; border-color: var(--reality); }
 .meter .txt {
   position: absolute; inset: 0; display: flex; align-items: center; justify-content: center; gap: 1px;
   font-size: .72rem; font-weight: 400; white-space: nowrap; color: var(--tx-hi);
-  font-variation-settings: "wght" 400, "wdth" 90;
+  font-variation-settings: "wght" var(--nwght), "wdth" 90;
 }
 
 /* ===================== Log console (screen) ===================== */
@@ -1895,7 +2132,7 @@ pre.log, .screen.log {
   overscroll-behavior: contain; /* log scroll never chains to the page */
   margin-bottom: 10px;
   font-family: 'Martian Mono', monospace;
-  font-variation-settings: "wght" 400, "wdth" 85;
+  font-variation-settings: "wght" var(--nwght), "wdth" 85;
 }
 
 /* ---- Terminal treatment (§4.1) — phosphor-blue-tinted text, blinking
@@ -1944,7 +2181,7 @@ pre.log, .screen.log {
   font-family: 'Martian Mono', monospace;
   font-size: .74rem;
   color: var(--tx-val);
-  font-variation-settings: "wght" 400, "wdth" 90;
+  font-variation-settings: "wght" var(--nwght), "wdth" 90;
 }
 .client-row-meta {
   flex: 1 1 auto;
@@ -1957,7 +2194,12 @@ pre.log, .screen.log {
   position: fixed; left: 50%; transform: translateX(-50%);
   top: calc(env(safe-area-inset-top) + 50px);
   z-index: 90; display: flex; flex-direction: column; gap: 6px;
-  width: min(380px, calc(100% - 24px)); pointer-events: none;
+  /* vw (not %) so the width always resolves against the viewport. A `%` here
+     resolves against the fixed element's containing block, which becomes a
+     transformed/filtered ancestor (body.stale, hivis, theme filters …) instead
+     of the viewport — collapsing the toast to ~1ch and stacking the message
+     one letter per line. The min-width floor below is the belt to this brace. */
+  width: min(380px, calc(100vw - 24px)); pointer-events: none;
 }
 .toast {
   display: flex; align-items: center; gap: 8px; padding: 8px 10px;
@@ -1966,13 +2208,19 @@ pre.log, .screen.log {
   font-size: .76rem; font-weight: 500; color: var(--tx); pointer-events: auto;
   font-family: 'Chakra Petch', sans-serif;
   animation: toastIn .2s ease;
+  /* Hard floor so the message can never collapse to a vertical column of
+     single characters, no matter what the container width resolves to. */
+  min-width: min(240px, calc(100vw - 24px)); box-sizing: border-box;
 }
 .toast .ti { width: 16px; height: 16px; flex: 0 0 auto; }
 /* icon() returns a width/height-less <svg> — without this it renders at the
    default replaced-element size (~300x150) and blows the toast layout apart.
    Every other icon container in this sheet has the equivalent rule. :3 */
 .toast .ti svg { width: 16px; height: 16px; display: block; }
-.toast > span:last-child { flex: 1 1 auto; min-width: 0; overflow-wrap: anywhere; }
+/* break-word (not anywhere): only breaks genuinely unbreakable long words and
+   does NOT shrink the flex item's min-content size, so normal messages never
+   go one-letter-per-line even under container pressure. */
+.toast > span:last-child { flex: 1 1 auto; min-width: 0; overflow-wrap: break-word; }
 .toast.good { border-color: var(--reality); } .toast.good .ti { color: var(--reality); }
 .toast.warn { border-color: var(--warn); } .toast.warn .ti { color: var(--warn); }
 .toast.bad  { border-color: var(--bad); } .toast.bad .ti { color: var(--bad); }
@@ -2054,6 +2302,10 @@ pre.log, .screen.log {
 .clu { display: grid; grid-template-columns: 1fr; gap: 14px; }
 .setgrid { display: grid; grid-template-columns: 1fr; gap: 14px; }
 .clu .card, .setgrid .card { margin-bottom: 0; }
+/* Mobile: the column wrappers dissolve so every card flows in one column in
+   DOM order (pattern, power, servo, session) exactly as before. The desktop
+   media query below turns them into two independent flex stacks. */
+.clu-col { display: contents; }
 
 /* Split-pane pictogram (Settings/Log desktop tabs) — hidden on mobile where
    the tab is a plain icon/label pill like every other .tabs-mobile button. */
@@ -2146,16 +2398,16 @@ pre.log, .screen.log {
      stick against. Left as sticky it misleads the next reader; pin it back
      to static explicitly. */
   header { padding: 6px 0; position: static; }
-  .hdr-row { width: min(80vw, 96%); margin: 0 auto; }
+  .hdr-row { width: var(--colW); margin: 0 auto; }
   .banners-host { max-width: 100%; padding: 0 20px; }
   .banners-host .banner.show,
   .banners-host .fault.show { display: block; margin-bottom: 0; border-radius: 0; }
   .hero-strip { padding: 10px 0 8px; }
-  .hero-row { width: min(80vw, 96%); margin: 0 auto; }
+  .hero-row { width: var(--colW); margin: 0 auto; }
   /* 10px vertical margins: the panel's outer outline is drawn 5px OUTSIDE
      its border box (outline-offset 4 + 1px line) — at margin 0 it overlapped
      the hero strip's border above and the tab bar below. */
-  .rail-panel.panel { width: min(80vw, 96%); margin: 10px auto; padding: 10px 20px 6px; }
+  .rail-panel.panel { width: var(--colW); margin: 10px auto; padding: 10px 20px 6px; }
 
   .desktop-layout { display: flex; flex: 1; min-height: 0; overflow: hidden; }
   .home-header-btn { flex: 0 0 auto; min-width: 48px; min-height: 36px; font-size: .72rem; padding: 4px 10px; }
@@ -2212,7 +2464,7 @@ pre.log, .screen.log {
     min-height: 0;
     overflow: hidden;
     padding: 14px 0;
-    width: min(80vw, 96%);
+    width: var(--colW);
     margin: 0 auto;
   }
   .main.split { grid-template-columns: minmax(0, 1.45fr) minmax(340px, 1fr); }
@@ -2228,8 +2480,16 @@ pre.log, .screen.log {
   }
   #driveMain::-webkit-scrollbar { width: 6px; }
   #driveMain::-webkit-scrollbar-thumb { background: var(--line-2); }
-  .clu { grid-template-columns: 1.22fr 1fr; }
-  .main.split .clu { grid-template-columns: 1fr; }
+  /* Two independent column stacks — heights decoupled so the tall PATTERN
+     card no longer forces a tall grid row that strands dead space beside the
+     short POWER card. The side column packs POWER / SERVO / SESSION tight. */
+  .clu { display: flex; align-items: flex-start; gap: 14px; }
+  .clu-col { display: flex; flex-direction: column; gap: 14px; min-width: 0; }
+  .clu-col-main { flex: 1.22 1 0; }
+  .clu-col-side { flex: 1 1 0; }
+  /* Split view (Settings/Log pane open) collapses back to a single stack. */
+  .main.split .clu { display: block; }
+  .main.split .clu-col { display: contents; }
   #sidePane {
     display: none;
     position: static;
@@ -2310,7 +2570,7 @@ pre.log, .screen.log {
     display: flex;
     align-items: center;
     justify-content: flex-end;
-    width: min(80vw, 96%);
+    width: var(--colW);
     margin: 0 auto;
     padding: 0;
     gap: 2px;
@@ -2355,7 +2615,7 @@ pre.log, .screen.log {
     flex-direction: column;
     flex: 1;
     min-height: 0;
-    width: min(80vw, 96%);
+    width: var(--colW);
     margin: 0 auto;
     padding: 14px 0;
     gap: 8px;
@@ -2410,7 +2670,7 @@ footer {
   border-top: 1px solid var(--line-1);
 }
 .foot {
-  width: min(80vw, 96%);
+  width: var(--colW);
   margin: 0 auto;
   padding: 13px 16px;
   display: flex;

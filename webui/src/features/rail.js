@@ -15,6 +15,7 @@
 import { $, clamp, pad, setVV, setVVState } from '../core/ui.js';
 import { TRAVEL, winMin, winMax, setWinMin, setWinMax, renderWindow, pushWindow, setRailSync } from '../core/range.js';
 import { ACCENT, ac } from '../core/theme.js';
+import { getBufferStats } from '../core/telebuf.js';
 
 // ===================== Single reused state object (no per-frame allocation) =====================
 var S = {
@@ -22,7 +23,7 @@ var S = {
   rect: { w: 0, h: 0, x: 0, y: 0 },
   orient: 'horizontal',
   host: null, panel: null, railSvg: null, bandEl: null, bandFill: null, bandHandleLo: null, bandHandleHi: null, bandLabel: null,
-  heroActual: null, heroCmd: null, heroLag: null,
+  heroActual: null, heroCmd: null, heroLag: null, heroSpeed: null, heroSpeedEma: 0,
   // Input tape (command surface above the rail) + hazard ribbons
   tapeAssembly: null, tapeTrack: null, tapeBar: null, tapePip: null,
   tapeMode: null, tapeExtent: null, tapeDrag: false,
@@ -539,9 +540,18 @@ function buildHeroes() {
   lagWrap.innerHTML = '<span class="hero-label">lag</span><span class="vv hero-val" id="heroLag">00.0</span>';
   host.appendChild(lagWrap);
 
+  // Live speed — same size/role as lag, sits to its right. Derived from the
+  // telemetry stream (telebuf), so it tracks real shaft motion and eases to 0
+  // when idle. :3
+  var spdWrap = document.createElement('div');
+  spdWrap.className = 'hero-item hero-secondary';
+  spdWrap.innerHTML = '<span class="hero-label">speed</span><span class="vv hero-val" id="heroSpeed">000</span>';
+  host.appendChild(spdWrap);
+
   S.heroActual = $('#heroActual');
   S.heroCmd = $('#heroCmd');
   S.heroLag = $('#heroLag');
+  S.heroSpeed = $('#heroSpeed');
 }
 
 // ===================== Pointer events (band drag/resize only) =====================
@@ -760,6 +770,13 @@ function animFrame(nowMs) {
     S.heroLag.classList.remove('w1', 'w2');
     if (lag > 15) S.heroLag.classList.add('w2');
     else if (lag > 5) S.heroLag.classList.add('w1');
+  }
+  if (S.heroSpeed) {
+    // telebuf lastVel is mm/ms → ×1000 = mm/s; abs (magnitude, not direction).
+    // Light EMA so the numeral doesn't jitter frame-to-frame.
+    var spd = Math.abs(getBufferStats().lastVel) * 1000;
+    S.heroSpeedEma += 0.2 * (spd - S.heroSpeedEma);
+    setVV('heroSpeed', S.heroSpeedEma, 3, 0, 'mm/s');
   }
 
   requestAnimationFrame(animFrame);

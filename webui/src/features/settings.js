@@ -11,6 +11,7 @@
 import { $, setRead, onLiveSlider, clamp, icon, toast } from '../core/ui.js';
 import { post, get } from '../core/api.js';
 import * as cmd from '../core/cmd.js';
+import { registerRenderer } from '../core/shadow.js';
 import { OP_SET_SPEED, OP_SET_ACCEL, OP_BLEND, OP_MODE, OP_SAVE, OP_STREAM_MODE, OP_OVERSHOOT } from '../core/wire.js';
 import { TRAVEL, setTravel, winMin, winMax, setWinMin, setWinMax, setWindowReady, renderWindow, useCurrentAsDefault, suppressPush, setSuppressPush, setSettingsAuthoritative } from '../core/range.js';
 import { applyExpertCeilings, expertMode, setExpertMode } from '../core/capabilities.js';
@@ -131,26 +132,63 @@ function reflectOvershoot(on) {
 }
 
 var _lastPushToastMs = 0;
-function pushOverride() {
+// persist=false (default, during drag): apply live only (no_persist) to avoid
+// flogging NVS every slider tick. persist=true (on release / restore): commit to
+// NVS so the limit survives a reboot WITHOUT hunting for "Save All Settings" —
+// the "my speed keeps reverting" fix. :3
+function pushOverride(persist) {
   clearTimeout(overrideTimer);
   overrideTimer = setTimeout(function() {
     var us = parseInt($('userMaxSpeed').value);
     var ua = parseInt($('userAccel').value);
     var is = parseInt($('inputMaxSpeed').value);
     var ia = parseInt($('inputAccel').value);
-    post('/api/settings', {
+    var body = {
       user_max_speed: us, user_max_accel: ua,
-      input_max_speed: is, input_max_accel: ia,
-      no_persist: true
-    }).then(function() {
-      // Realtime feedback — brief toast on limit commit
+      input_max_speed: is, input_max_accel: ia
+    };
+    if (!persist) body.no_persist = true;
+    post('/api/settings', body).then(async function(r) {
+      // Ground Truth Doctrine: read the firmware's POST-CLAMP echo and report
+      // THOSE values, never the raw slider numbers we sent. Reconcile any
+      // clamped slider back to device truth (the old code discarded the
+      // response entirely and toasted the pre-clamp request). :3
+      if (!r || !r.ok) {
+        var errBody = r ? await r.text() : 'no response';
+        toast('Limit apply FAILED: ' + errBody, 'bad', 'i-alert', 4000);
+        return;
+      }
+      var d = await r.json();
+      // Reconcile sliders + readouts to the applied (post-clamp) values.
+      [['userMaxSpeed', 'userSpeedVal', 'user_max_speed'],
+       ['userAccel', 'userAccelVal', 'user_max_accel'],
+       ['inputMaxSpeed', 'inputSpeedVal', 'input_max_speed'],
+       ['inputAccel', 'inputAccelVal', 'input_max_accel']
+      ].forEach(function(t) {
+        var el = $(t[0]);
+        if (el && typeof d[t[2]] === 'number') {
+          el.value = d[t[2]];
+          onLiveSlider(t[1], el, t[0], true);   // confirmed device value
+        }
+      });
+      var aus = (typeof d.user_max_speed === 'number') ? d.user_max_speed : us;
+      var aua = (typeof d.user_max_accel === 'number') ? d.user_max_accel : ua;
+      var ais = (typeof d.input_max_speed === 'number') ? d.input_max_speed : is;
+      var aia = (typeof d.input_max_accel === 'number') ? d.input_max_accel : ia;
       var now = Date.now();
       if (now - _lastPushToastMs > 1500) {
         _lastPushToastMs = now;
-        toast('Limits applied — User: ' + us + '/' + ua + ' | Input: ' + is + '/' + ia, 'info', 'i-sliders');
+        toast((persist ? 'Limits saved' : 'Limits applied') +
+              ' — User: ' + aus + '/' + aua + ' | Input: ' + ais + '/' + aia,
+              persist ? 'good' : 'info', persist ? 'i-check' : 'i-sliders');
       }
-    }).catch(function(){});
-  }, 120);
+    }).catch(function(e) {
+      // A swallowed network failure here left the sliders lying about applied
+      // limits with zero signal — say it out loud. :3
+      console.warn('[settings] pushOverride failed:', e);
+      toast('Limit apply FAILED — network error; device limits unchanged', 'bad', 'i-alert', 4000);
+    });
+  }, persist ? 0 : 120);
 }
 
 export function restoreDefaults() {
@@ -166,7 +204,7 @@ export function restoreDefaults() {
     if (s && d) s.value = d.value;
     if (s) s.dispatchEvent(new Event('input'));
   });
-  pushOverride();
+  pushOverride(true);   // restore should stick across reboot, not just apply live
   toast('Restored saved defaults', 'info', 'i-reset');
 }
 
@@ -187,6 +225,21 @@ export async function saveSettings(silent) {
       default_range_max: clamp(parseInt($('defMaxNum').value) || TRAVEL, 0, TRAVEL),
       expert_mode: expertMode
     };
+    // Dual limit sets — the live-override sliders push with no_persist during
+    // drag, so "Save All Settings" is the ONLY place they get baked into NVS.
+    // Include them here (from real device-seeded slider values) so User/Input
+    // speed+accel actually survive a reboot instead of reverting to defaults.
+    // Only send a slider that carries a real value (seeded from the device) —
+    // never fabricate one for a gated/blank control (ground-truth doctrine). :3
+    [['userMaxSpeed','user_max_speed'], ['userAccel','user_max_accel'],
+     ['inputMaxSpeed','input_max_speed'], ['inputAccel','input_max_accel']
+    ].forEach(function(pair) {
+      var el = $(pair[0]);
+      if (el && !el.disabled) {
+        var v = parseInt(el.value);
+        if (!isNaN(v)) body[pair[1]] = v;
+      }
+    });
     // Max rail length — only send a REAL value (ground-truth doctrine: never
     // push an invented default onto a live device). Field is seeded from the
     // device in loadSettings; if it's somehow blank we omit it entirely. :3
@@ -201,6 +254,18 @@ export async function saveSettings(silent) {
       if (!silent) toast('Save failed: ' + errBody, 'bad', 'i-alert');
       return;
     }
+    // Reconcile the default-motion sliders to the firmware's POST-CLAMP echo
+    // and clear their unconfirmed (.intent) readout styling — the number shown
+    // is now what the device actually applied, not the raw drag value. :3
+    var saved = await r.json();
+    [['defMaxSpeed', 'defSpeedVal', 'max_speed'], ['defAccel', 'defAccelVal', 'accel']]
+      .forEach(function(t) {
+        var el = $(t[0]);
+        if (el && typeof saved[t[2]] === 'number') {
+          el.value = saved[t[2]];
+          onLiveSlider(t[1], el, t[0], true);
+        }
+      });
     ['saveInd', 'saveIndRange'].forEach(function(id) {
       var i = $(id);
       if (i) { i.classList.add('show'); setTimeout(function() { i.classList.remove('show'); }, 1800); }
@@ -267,7 +332,7 @@ async function loadSettings() {
       e.disabled = false;
       // Refresh the readout via the shared live-slider formatter (falls back to
       // a plain number write if it's unavailable for any reason).
-      if (readId) { try { onLiveSlider(readId, e, id); } catch (err) { var r = $('#' + readId); if (r) r.textContent = Math.round(val); } }
+      if (readId) { try { onLiveSlider(readId, e, id, true); } catch (err) { var r = $('#' + readId); if (r) r.textContent = Math.round(val); } }
     }
     // Seed default-motion sliders ONLY from real device values.
     seedSlider('defMaxSpeed', 'defSpeedVal', spd);
@@ -338,6 +403,25 @@ async function loadGenTick() {
   } catch (e) {}
 }
 
+// ---- Shadow value extractors ---------------------------------------------
+// While a command is in flight show the DESIRED value (shadow adds .pending
+// styling to the seg), otherwise the device-REPORTED ground truth. Each value
+// may arrive under its command-payload name or its cfg/echo name. :3
+function _shadowSrc(sh) {
+  var pending = sh.state === 'pending' || sh.state === 'overdue1' || sh.state === 'overdue2';
+  return (pending && sh.desired) ? sh.desired : sh.reported;
+}
+function _pickNum(sh, keys) {
+  var o = _shadowSrc(sh); if (!o) return null;
+  for (var i = 0; i < keys.length; i++) if (typeof o[keys[i]] === 'number') return o[keys[i]];
+  return null;
+}
+function _pickBool(sh, keys) {
+  var o = _shadowSrc(sh); if (!o) return null;
+  for (var i = 0; i < keys.length; i++) if (typeof o[keys[i]] !== 'undefined') return !!o[keys[i]];
+  return null;
+}
+
 export function initSettings() {
   var ms = $('#modeSeg');
   if (ms) ms.addEventListener('click', function(e) {
@@ -373,7 +457,10 @@ export function initSettings() {
     var s = $(pair[0]); if (!s) return;
     s.addEventListener('input', function() {
       onLiveSlider(pair[1], s, pair[0]);
-      pushOverride();
+      pushOverride();          // live-apply during drag (no persist)
+    });
+    s.addEventListener('change', function() {
+      pushOverride(true);      // commit to NVS on release — no "Save All" needed
     });
   });
   // Default Motion sliders — update readout only (no live push; saved on "Save All Settings").
@@ -393,40 +480,47 @@ export function initSettings() {
   var bms = $('#blendModeSeg');
   if (bms) bms.addEventListener('click', function(e) {
     var b = e.target.closest('button'); if (!b || !b.dataset.bm) return;
-    var m = parseInt(b.dataset.bm);
-    reflectBlendMode(m);
-    // Push the new mode to the firmware immediately so the pounding changes
-    // right now — no save required to feel the difference. :3
-    cmd.send(OP_BLEND, { bm: blendMode });
+    // Send only — the shadow renderer registered below reflects the desired
+    // value (with .pending styling) and converges to the device's echo. :3
+    cmd.send(OP_BLEND, { bm: parseInt(b.dataset.bm) });
   });
 
   // ---- Stream speed-feed A/B segmented control ----------------------------
-  // Flips the streaming cruise-feed policy live so the operator can A/B it
-  // against a running MFP stream while watching the rail interp overlay. The
-  // firmware applies it on the next cruise feed (no re-home, no save needed).
+  // Ground Truth Doctrine: the click only SENDS the command — the visible
+  // selection flips when the device's echo (or a cfg push) confirms, via the
+  // shadow renderer registered below. The seg shows .pending styling while the
+  // command is in flight. (Previously the UI flipped before sending, and under
+  // HTTP fallback flipped while sending NOTHING.) :3
   var sms = $('#streamModeSeg');
   if (sms) sms.addEventListener('click', function(e) {
     var b = e.target.closest('button'); if (!b || b.dataset.sm === undefined) return;
-    var m = parseInt(b.dataset.sm);
-    reflectStreamMode(m);
-    cmd.send(OP_STREAM_MODE, { mode: streamMode });
-    toast(streamMode === 1 ? 'Speed-feed: velocity-matched' : 'Speed-feed: ceiling-pegged',
-          'info', 'i-gauge');
+    cmd.send(OP_STREAM_MODE, { mode: parseInt(b.dataset.sm) });
   });
 
   // ---- v4 overshoot-clamp A/B segmented control ---------------------------
-  // Flips the monotone tangent limiter live so the operator can A/B it against
-  // a running MFP v4 stream while watching the rail interp overlay and the
-  // Overshoot anomaly counter. Applied on the next committed segment — no
-  // re-home, no save needed to feel the difference. :3
+  // Same echo-confirmed lifecycle as the stream-mode control above. :3
   var ocs = $('#overshootSeg');
   if (ocs) ocs.addEventListener('click', function(e) {
     var b = e.target.closest('button'); if (!b || b.dataset.oc === undefined) return;
-    var on = parseInt(b.dataset.oc);
-    reflectOvershoot(on);
-    cmd.send(OP_OVERSHOOT, { on: !!overshootClamp });
-    toast(overshootClamp ? 'Overshoot clamp ON — monotone path' : 'Overshoot clamp OFF — raw slope',
-          'info', 'i-gauge');
+    cmd.send(OP_OVERSHOOT, { on: !!parseInt(b.dataset.oc) });
+  });
+
+  // ---- Shadow renderers: device-confirmed values drive the reflect fns -----
+  // These fire on every ECHO and every device-authored cfg push (cfg_gen
+  // bump / reconnect resync), so another client changing blend / stream-mode /
+  // overshoot updates THIS browser's controls too — the fix for the segmented
+  // controls that only ever tracked local click state. :3
+  registerRenderer('blend', function(sh) {
+    var v = _pickNum(sh, ['bm', 'blend_mode']);
+    if (v != null) reflectBlendMode(v);
+  });
+  registerRenderer('stream_mode', function(sh) {
+    var v = _pickNum(sh, ['mode', 'stream_speed_mode']);
+    if (v != null) reflectStreamMode(v);
+  });
+  registerRenderer('overshoot', function(sh) {
+    var v = _pickBool(sh, ['on', 'overshoot_clamp']);
+    if (v != null) reflectOvershoot(v ? 1 : 0);
   });
 
   // Intiface compat toggle — apply live (no_persist) the instant it's flipped

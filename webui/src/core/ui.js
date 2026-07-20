@@ -33,6 +33,8 @@ const ICONS = {
   'i-shield':   '<path d="M12 2l8 4v6c0 5-3.5 8-8 10-4.5-2-8-5-8-10V6z"/>',
   'i-target':   '<circle cx="12" cy="12" r="9"/><circle cx="12" cy="12" r="4"/><circle cx="12" cy="12" r="1"/>',
   'i-link':     '<path d="M10 13a5 5 0 007.07 0l3-3a5 5 0 10-7.07-7.07l-1.72 1.72"/><path d="M14 11a5 5 0 00-7.07 0l-3 3a5 5 0 107.07 7.07l1.72-1.72"/>',
+  'i-eye':      '<path d="M2 12s3-7 10-7 10 7 10 7-3 7-10 7-10-7-10-7z"/><circle cx="12" cy="12" r="3"/>',
+  'i-trash':    '<path d="M3 6h18"/><path d="M8 6V4a1 1 0 011-1h6a1 1 0 011 1v2"/><path d="M19 6l-1 14a2 2 0 01-2 2H8a2 2 0 01-2-2L5 6"/>',
 };
 
 /**
@@ -409,6 +411,142 @@ export function initTooltips() {
   });
 }
 
+// ===================== Shared hover-hint renderer (#tipbox, L4a) =====================
+/**
+ * ONE tooltip renderer for every [data-tip] element. A single position:fixed
+ * node, measured after content is set and CLAMPED into the viewport (8px
+ * gutters), preferring above the target and flipping below when there's no
+ * headroom. Replaces the old per-element ::after CSS, which positioned
+ * relative to the element and landed off-screen near viewport edges.
+ *
+ * Roles (L4b): the long-form ".info" click-popovers own their own affordance
+ * and are EXCLUDED here, so no element ever shows two hints. Short hints live
+ * on [data-tip]; delegated listeners mean dynamically-added elements just work.
+ */
+export function initHoverTips() {
+  if (document.getElementById('tipbox')) return; // idempotent
+  const box = document.createElement('div');
+  box.id = 'tipbox';
+  box.setAttribute('role', 'tooltip');
+  document.body.appendChild(box);
+
+  const GUT = 8;        // viewport gutter
+  const GAP = 8;        // gap between target and box
+  const DELAY = 180;    // hover intent delay (ms)
+  let showTimer = null, curEl = null;
+
+  // A [data-tip] carrier that should get the hover hint — but never a .info
+  // button (it has its own click-popover) nor anything inside one.
+  function tipTarget(node) {
+    if (!node || !node.closest) return null;
+    const el = node.closest('[data-tip]');
+    if (!el) return null;
+    if (el.classList.contains('info') || el.closest('.info')) return null;
+    const txt = el.getAttribute('data-tip');
+    return (txt && txt.trim()) ? el : null;
+  }
+
+  function place(el) {
+    const txt = el.getAttribute('data-tip');
+    if (!txt) return;
+    box.textContent = txt;
+    box.classList.add('show');
+    // Measure with content set, box at (0,0), then position.
+    const r = el.getBoundingClientRect();
+    const bw = box.offsetWidth, bh = box.offsetHeight;
+    const vw = document.documentElement.clientWidth;
+    const vh = document.documentElement.clientHeight;
+    // Horizontal: centre on the target, then clamp to the viewport gutters.
+    let x = r.left + r.width / 2 - bw / 2;
+    x = Math.max(GUT, Math.min(x, vw - bw - GUT));
+    // Vertical: prefer above; flip below when there isn't headroom.
+    let y = r.top - bh - GAP;
+    if (y < GUT) {
+      const below = r.bottom + GAP;
+      y = (below + bh + GUT <= vh) ? below : Math.max(GUT, y);
+    }
+    box.style.left = x + 'px';
+    box.style.top = y + 'px';
+  }
+
+  function show(el) {
+    curEl = el;
+    clearTimeout(showTimer);
+    showTimer = setTimeout(() => { if (curEl === el) place(el); }, DELAY);
+  }
+  function hide() {
+    curEl = null;
+    clearTimeout(showTimer);
+    box.classList.remove('show');
+  }
+
+  // Pointer: enter/leave via delegation (covers dynamically-added elements).
+  document.addEventListener('pointerover', e => {
+    if (e.pointerType === 'touch') return; // touch has no hover; skip
+    const el = tipTarget(e.target);
+    if (el && el !== curEl) show(el);
+  });
+  document.addEventListener('pointerout', e => {
+    if (!curEl) return;
+    const to = e.relatedTarget;
+    if (to && curEl.contains(to)) return; // moved within the same target
+    if (tipTarget(e.target) === curEl) hide();
+  });
+  // Keyboard: show on focus-visible, hide on blur.
+  document.addEventListener('focusin', e => {
+    const el = tipTarget(e.target);
+    if (el && el.matches(':focus-visible')) { curEl = el; place(el); }
+  });
+  document.addEventListener('focusout', () => hide());
+  // Any scroll or resize invalidates the computed placement — hide it.
+  window.addEventListener('scroll', hide, true);
+  window.addEventListener('resize', hide);
+}
+
+// ===================== High-legibility toggle (html.hivis, L2c/d) =====================
+const HIVIS_KEY = 'ui_hivis';
+
+/** Reflect the hivis state onto <html> and any wired toggle controls. */
+export function applyHivis(on) {
+  const de = document.documentElement;
+  de.classList.toggle('hivis', on);
+  de.classList.toggle('hivis-off', !on);
+  document.querySelectorAll('[data-hivis-toggle]').forEach(el => {
+    if (el.tagName === 'INPUT') el.checked = on;
+    else el.setAttribute('aria-pressed', on ? 'true' : 'false');
+  });
+}
+
+/** Resolve the effective hivis state: explicit choice wins, else OS contrast. */
+export function hivisInitialState() {
+  let st = null;
+  try { st = localStorage.getItem(HIVIS_KEY); } catch (e) {}
+  if (st === '1') return true;
+  if (st === '0') return false;
+  return window.matchMedia && window.matchMedia('(prefers-contrast: more)').matches;
+}
+
+/**
+ * Wire the header chip-button + the Settings row to one shared hivis state.
+ * Persistence: localStorage 'ui_hivis' = '1'|'0'|unset; unset follows
+ * prefers-contrast. An explicit toggle always wins and persists. This is a
+ * browser UI preference — it never touches device settings / cfg_gen.
+ */
+export function initHivis() {
+  applyHivis(hivisInitialState()); // re-assert (module-eval set the class early)
+  const setHivis = (on) => {
+    applyHivis(on);
+    try { localStorage.setItem(HIVIS_KEY, on ? '1' : '0'); } catch (e) {}
+  };
+  document.querySelectorAll('[data-hivis-toggle]').forEach(el => {
+    if (el.tagName === 'INPUT') {
+      el.addEventListener('change', () => setHivis(el.checked));
+    } else {
+      el.addEventListener('click', () => setHivis(!document.documentElement.classList.contains('hivis')));
+    }
+  });
+}
+
 // ===================== Slider gradient painting =====================
 
 function lerp(a, b, t) { return a + (b - a) * t; }
@@ -444,9 +582,17 @@ export function paintSlider(slider) {
   slider.style.setProperty('--thumb', thumb);
 }
 
-export function onLiveSlider(readId, slider, key) {
+/**
+ * Live-slider readout update. During a drag the value is a raw, UNCONFIRMED
+ * request — it gets the purple `.intent` styling so it can't masquerade as
+ * confirmed device state (Ground Truth Doctrine). Pass confirmed=true when
+ * writing a device-echoed / device-seeded value to clear the intent mark.
+ */
+export function onLiveSlider(readId, slider, key, confirmed) {
   setRead(readId, slider.value);
   paintSlider(slider);
+  var r = document.getElementById(readId);
+  if (r) r.classList.toggle('intent', !confirmed);
 }
 
 // ===================== Data-action attribute wiring =====================
@@ -462,6 +608,7 @@ export function wireActions() {
     el.addEventListener('click', () => {
       const fn = window[action];
       if (typeof fn === 'function') fn(...args);
+      else console.warn('[ui] data-action="' + action + '" resolved to nothing — button is wired to a missing handler');
     });
   });
 }

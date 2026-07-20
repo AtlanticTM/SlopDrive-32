@@ -80,6 +80,12 @@ export function applyCapabilities(caps) {
   const blendCard = $('#blendCard');
   if (blendCard) blendCard.style.display = feat.blend_mode ? '' : 'none';
 
+  // Advanced pattern mode seg (fray-d port) — the toggle only exists when
+  // the firmware carries the engine. Panel visibility itself follows the
+  // device's reported ap_mode via pattern.js adoptApState().
+  const patSeg = $('#patModeSeg');
+  if (patSeg && feat.advanced_pattern) patSeg.hidden = false;
+
   // Current / voltage chips are already patched by pollStatus() each cycle
   // based on has_current_sensor / has_power_monitor — no static patch needed.
 

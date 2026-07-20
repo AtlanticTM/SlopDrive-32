@@ -13,7 +13,7 @@
  */
 console.log('[SD32] booting — imports loaded');
 import './style.css';
-import { injectIcons, initTabs, initCollapsibleCards, initTooltips, wireActions, toast, $, setRead, clamp, onLiveSlider, paintSlider, pad, setVV, setVVState, measureMartianMonoCh, renumberPanels } from './core/ui.js';
+import { injectIcons, initTabs, initCollapsibleCards, initTooltips, initHoverTips, initHivis, applyHivis, hivisInitialState, wireActions, toast, $, setRead, clamp, onLiveSlider, paintSlider, pad, setVV, setVVState, measureMartianMonoCh, renumberPanels } from './core/ui.js';
 import { post, get, getText } from './core/api.js';
 import { TRAVEL, renderWindow, setPosTarget, syncManualWindow, nudgeWindow, trim, setBound, useCurrentAsDefault, initWindowInputs, winMin, winMax, setWinMin, setWinMax, setWindowReady } from './core/range.js';
 import { initPattern, startPattern, stopPattern, pat, refreshPatternState, setPatternButton, rebuildPatternGrid } from './features/pattern.js';
@@ -28,9 +28,14 @@ import { fetchAndApplyCapabilities, refreshHealthCards, setLinkBssid } from './c
 // Apply the stored theme IMMEDIATELY at module evaluation — before init()
 // and the first canvas frame — so there's no flash of default accents.
 applyTheme(currentThemeId());
+// Same for high-legibility (L2d) — set the html.hivis class before first paint
+// so brightened text/tokens don't flash in from the default ramp. initHivis()
+// re-asserts and wires the controls once the DOM is ready.
+applyHivis(hivisInitialState());
 
 // ---- Task 7: new core modules ---------------------------------------------
 import { initLink, onTelemetry as _onWsTelemetry, onStatus as _onWsStatus,
+         onStats as _onWsStats,
          onInterp as _onWsInterp, onAnomaly as _onWsAnomaly,
          onDegraded, onRestored, isFallback, getStats as getLinkStats,
          isConnected as _wsConnected } from './core/link.js';
@@ -43,6 +48,8 @@ import {
   OP_MODE, OP_BLEND, OP_PAUSE, OP_HALT, OP_ESTOP, OP_HOME,
   OP_OVERRIDE, OP_BYPASS, OP_CLEAR_FAULT, OP_SAVE, OP_MOVE,
   OP_STREAM_MODE, OP_OVERSHOOT, OP_GET_CFG, OP_HOME_OVERRIDE,
+  FLAG_HOMED, FLAG_GEN_RUNNING, FLAG_ESTOP, FLAG_PAUSED,
+  FLAG_OVERRIDE, FLAG_INTIFACE_ACTIVE,
   SPEED_CEILING_PEGGED, SPEED_VELOCITY_MATCHED
 } from './core/wire.js';
 import { initShadow, processEcho, processConfig, tick as shadowTick,
@@ -59,7 +66,7 @@ window.saveSettings = saveSettings;
 window.restoreDefaults = restoreDefaults;
 window.__sendMove = sendMove;
 
-export const state = { paused: false, override: false, ifActive: false, position: 0, homed: false };
+export const state = { paused: false, override: false, ifActive: false, position: 0, homed: false, estopped: false };
 
 // ---- Latest 0x04 INTERP snapshot (interpolator debug) ----------------------
 // Updated at ~45Hz from the WS interp frame. Exposed on window for the debug
@@ -208,34 +215,39 @@ function reflectGating() {
 
 // ===================== Actions (routed through cmd.js) ======================
 
+// Ground Truth Doctrine: none of these mutate state.* locally. The pause pill /
+// override checkbox / banners render only from CONFIRMED device state — the
+// next 0x01 flags frame (~45Hz) or /api/status poll updates them, so a
+// rejected command can never leave the UI lying about machine state. :3
 function togglePause() {
   var next = !state.paused;
   cmd.send(OP_PAUSE, { paused: next });
-  state.paused = next; reflectGating(); if (next) stopPattern();
+  if (next) stopPattern();
 }
 function halt() {
   cmd.send(OP_HALT, {}); stopPattern();
-  toast('Motion halted', 'warn', 'i-stop');
+  toast('Halt sent', 'warn', 'i-stop');
 }
 function estop() {
   cmd.send(OP_ESTOP, {});
   stopPattern();
-  state.paused = false; state.override = false; reflectGating();
-  toast('E-STOP — power cut, re-home required', 'bad', 'i-alert', 6000);
+  toast('E-STOP sent — waiting for device confirmation', 'bad', 'i-alert', 6000);
 }
 function toggleOverride() {
   var ov = $('#overrideTog'); var on = ov ? ov.checked : false;
   cmd.send(OP_OVERRIDE, { on: on });
-  state.override = on; reflectGating();
 }
 function moveToHome() {
   cmd.send(OP_HOME, {});
   toast('Homing…', 'info', 'i-home');
 }
 function clearFault() {
+  // The banner is driven by the device's latched e-stop flag (FLAG_ESTOP) —
+  // never hidden locally. Exiting the e-stopped state requires a re-home, so
+  // that's what the banner button requests; the banner drops when the device
+  // confirms via the flags frame. :3
   cmd.send(OP_CLEAR_FAULT, {});
-  var fb = $('#faultBanner'); if (fb) fb.classList.remove('show');
-  toast('Fault cleared', 'info', 'i-check');
+  moveToHome();
 }
 
 var lastMoveSent = 0;
@@ -254,6 +266,82 @@ function sendMove(pos, force) {
 
 var prevStatus = { buttplug: false, serial: false, ready: false };
 var lastMeasuredStroke = -1;
+
+// ---- SESSION card (0x06 STATS frame / /api/status fallback) ----------------
+function _fmtDist(mm) {
+  if (!(mm > 0)) return '0 mm';
+  if (mm < 1000) return Math.round(mm) + ' mm';
+  if (mm < 1e6)  return (mm / 1000).toFixed(2) + ' m';
+  return (mm / 1e6).toFixed(2) + ' km';
+}
+function _fmtEnergy(wh) {
+  if (!(wh > 0)) return '0 Wh';
+  if (wh < 1)    return (wh * 1000).toFixed(0) + ' mWh';
+  if (wh < 1000) return wh.toFixed(2) + ' Wh';
+  return (wh / 1000).toFixed(2) + ' kWh';
+}
+function _fmtDur(ms) {
+  var s = Math.floor((ms || 0) / 1000);
+  var h = Math.floor(s / 3600); s -= h * 3600;
+  var m = Math.floor(s / 60);   s -= m * 60;
+  if (h > 0) return h + 'h ' + m + 'm';
+  if (m > 0) return m + 'm ' + s + 's';
+  return s + 's';
+}
+// ---- L3 — session-time clock ----------------------------------------------
+// #sessTime shows the DEVICE session odometer (session_ms since boot / last
+// Reset — the semantic this build intends: it survives a WS drop/reconnect and
+// zeroes only on the Session Reset button, NOT on a new socket). session_ms
+// arrives only on ~2Hz STATS frames — and stops entirely when this tab isn't
+// the streamed client — so the readout used to freeze between (or without)
+// frames. We anchor the last reported value to a performance.now() timestamp
+// and a shared 1Hz interval (startUiClock) extrapolates it forward, re-syncing
+// on every STATS frame, so it ticks every second. Format is zero-padded
+// hh:mm:ss (fixed-width Martian Mono) so the seconds visibly advance.
+var _sessionAnchor = null; // { ms:<session_ms>, at:<performance.now()> }
+
+function _fmtClock(ms) {
+  var s = Math.max(0, Math.floor((ms || 0) / 1000));
+  var h = Math.floor(s / 3600); s -= h * 3600;
+  var m = Math.floor(s / 60);   s -= m * 60;
+  var p = function (n) { return (n < 10 ? '0' : '') + n; };
+  return p(h) + ':' + p(m) + ':' + p(s);
+}
+
+function _tickSessionTime() {
+  var t = $('#sessTime');
+  if (!t || !_sessionAnchor) return;
+  // performance.now() keeps advancing while the tab is hidden, so on return
+  // this yields the correct jumped value with no extra bookkeeping.
+  t.textContent = _fmtClock(_sessionAnchor.ms + (performance.now() - _sessionAnchor.at));
+}
+
+// One shared 1Hz UI clock for every time-derived readout. Pauses while the tab
+// is hidden (cheap); resyncs immediately on return.
+function startUiClock() {
+  if (window.__uiClock) return;
+  window.__uiClock = setInterval(function () {
+    if (document.hidden) return;
+    _tickSessionTime();
+    // (future time-derived readouts — device uptime, "last seen / ago" — go here)
+  }, 1000);
+  document.addEventListener('visibilitychange', function () {
+    if (!document.hidden) _tickSessionTime();
+  });
+}
+
+function renderSessionCard(st) {
+  if (!st) return;
+  var d = $('#sessDist');    if (d  && typeof st.distance_mm === 'number')    d.textContent  = _fmtDist(st.distance_mm);
+  var e = $('#sessEnergy');  if (e  && typeof st.energy_wh === 'number')      e.textContent  = _fmtEnergy(st.energy_wh);
+  var x = $('#sessMaxSpd');  if (x  && typeof st.max_speed_mm_s === 'number') x.textContent  = Math.round(st.max_speed_mm_s) + ' mm/s';
+  var k = $('#sessStrokes'); if (k  && typeof st.strokes === 'number')        k.textContent  = String(st.strokes);
+  // Re-anchor the session clock on each STATS frame; the 1Hz clock ticks it.
+  if (typeof st.session_ms === 'number') {
+    _sessionAnchor = { ms: st.session_ms, at: performance.now() };
+    _tickSessionTime(); // reflect the fresh value now, don't wait up to 1s
+  }
+}
 
 // ---- Patch the header chips + Health from 0x02 WS status -------------------
 function _applyWsStatusToUI(s) {
@@ -335,19 +423,39 @@ function _applyWsStatusToUI(s) {
     cfg_gen: s.cfg_gen
   };
   refreshHealthCards(healthPayload);
+
+  // Footer diagnostics — surface heap + tx-drops (parsed but previously unused).
+  var hc = $('#heapChip');
+  if (hc && typeof s.heap_free === 'number')
+    hc.textContent = (s.heap_free >= 1024) ? (s.heap_free / 1024).toFixed(0) + 'k' : String(s.heap_free);
+  var dc = $('#dropsChip');
+  if (dc && typeof s.tx_drops === 'number') dc.textContent = String(s.tx_drops);
 }
 
 // ---- Apply 0x01 flags to UI state -----------------------------------------
 function _applyWsFlags(flags) {
-  state.homed = !!(flags & 0x01);
-  state.paused = !!(flags & 0x10);
-  state.override = !!(flags & 0x20);
-  state.ifActive = !!(flags & 0x40);
+  state.homed = !!(flags & FLAG_HOMED);
+  state.paused = !!(flags & FLAG_PAUSED);
+  state.override = !!(flags & FLAG_OVERRIDE);
+  state.ifActive = !!(flags & FLAG_INTIFACE_ACTIVE);
   // Pattern running flag from telemetry (PB-004) — single source of truth
-  const patRunning = !!(flags & 0x02);
+  const patRunning = !!(flags & FLAG_GEN_RUNNING);
   if (patRunning !== pat.running) {
     pat.running = patRunning;
     setPatternButton();
+  }
+
+  // ---- E-STOP from confirmed device state (FLAG_ESTOP, latched firmware-side)
+  // This is the ONLY thing that raises/drops the fault banner — so an e-stop
+  // from a hardware switch, watchdog, another client, or a serial/BT transport
+  // shows here too, and the banner can never be dismissed while the device
+  // still reports the e-stopped state. :3
+  var estopped = !!(flags & FLAG_ESTOP);
+  if (estopped !== state.estopped) {
+    state.estopped = estopped;
+    var fb = $('#faultBanner');
+    if (fb) fb.classList.toggle('show', estopped);
+    if (estopped) toast('Device E-STOPPED — motion blocked until re-home', 'bad', 'i-alert', 6000);
   }
   reflectGating();
 
@@ -401,6 +509,14 @@ async function pollStatus() {
     }
     state.ifActive = !!d.buttplug_connected && d.measured_hz > 0;
     state.paused = !!d.paused; state.override = !!d.manual_override; reflectGating();
+
+    // E-stop banner from confirmed device state (fallback-path mirror of the
+    // FLAG_ESTOP handling in _applyWsFlags). :3
+    if (typeof d.estopped === 'boolean' && d.estopped !== state.estopped) {
+      state.estopped = d.estopped;
+      var fbn = $('#faultBanner'); if (fbn) fbn.classList.toggle('show', d.estopped);
+      if (d.estopped) toast('Device E-STOPPED — motion blocked until re-home', 'bad', 'i-alert', 6000);
+    }
 
     var wd = $('#wifiDot'); if (wd) wd.className = 'link-dot ' + (d.wifi_connected ? 'good' : 'bad');
     setRead('wifiText', d.wifi_connected ? (d.ip || 'WiFi') : 'Off');
@@ -478,6 +594,7 @@ async function pollStatus() {
     }
 
     refreshHealthCards(d);
+    renderSessionCard(d);   // /api/status carries the same session-stat fields
 
     // Keep the diag-graph power supplier fresh on the HTTP-fallback path too.
     if (typeof d.bus_voltage_v === 'number') _lastBusV = d.bus_voltage_v;
@@ -879,6 +996,9 @@ function init() {
       _applyWsStatusToUI(s);
     });
 
+    // ---- 0x06 STATS — session odometer (~2Hz) → SESSION card ---------------
+    _onWsStats(function(st) { renderSessionCard(st); });
+
     // ---- 0x04 INTERP — interpolator debug snapshot (~45Hz) ------------------
     // Mirror the frame into interpState for the debug overlay / rail planned-
     // path renderer. Pure data capture; no DOM writes here to keep it cheap.
@@ -975,6 +1095,19 @@ function init() {
       processConfig(cfg);
       if (window.__DEBUG_CFG) console.log('[cfg]', cfg);
     });
+    // Command exhausted its WS retries — the device never acked. Without this
+    // subscription every transport-level command failure was completely silent
+    // (no toast, no log) while the control's pending state quietly aged out. :3
+    var _lastFaultToastMs = 0;
+    cmd.onFault(function(ev) {
+      console.warn('[SD32] command FAILED after retries — op=0x' +
+        (ev.op || 0).toString(16), ev.desired);
+      var now = performance.now();
+      if (now - _lastFaultToastMs > 2000) {
+        _lastFaultToastMs = now;
+        toast('Command not confirmed by device — change may not have applied', 'bad', 'i-alert', 4000);
+      }
+    });
 
     wireStaleness();
 
@@ -986,6 +1119,9 @@ function init() {
 
     console.log('[SD32] tabs+collapse+tooltips+wire...');
     initTabs(); initCollapsibleCards(); initTooltips(); wireActions();
+    initHoverTips();   // shared #tipbox hover-hint renderer (L4a)
+    initHivis();       // high-legibility toggle: header eye + settings row (L2c/d)
+    startUiClock();    // 1Hz clock for time-derived readouts, e.g. session time (L3)
     renumberPanels();
     initThemeUI();
     initActivityGrid();
@@ -1053,6 +1189,12 @@ function init() {
     var hh = $('#homeBtnHeader'); if (hh) hh.addEventListener('click', moveToHome);
     var fb = document.querySelector('#faultBanner button'); if (fb) fb.addEventListener('click', clearFault);
     var rl = $('#refreshLogBtn'); if (rl) rl.addEventListener('click', refreshLog);
+    var srb = $('#sessionResetBtn');
+    if (srb) srb.addEventListener('click', async function () {
+      try { await post('/api/settings', { reset_stats: true, no_persist: true }); } catch (e) {}
+      renderSessionCard({ distance_mm: 0, energy_wh: 0, max_speed_mm_s: 0, strokes: 0, session_ms: 0 });
+      toast('Session stats reset', 'good', 'i-reset');
+    });
     // #log was the old tab-content wrapper; the Log pane is now #pv-log
     // (.paneView.active on desktop-pane-open, or just visible via the mobile
     // .m-active branch — the pane controller in ui.js keeps #pv-log.active

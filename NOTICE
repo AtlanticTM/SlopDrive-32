@@ -1,0 +1,42 @@
+SlopDrive-32
+Copyright (c) 2026 AtlanticTM
+
+This project is licensed under the CERN Open Hardware Licence Version 2 -
+Strongly Reciprocal (CERN-OHL-S v2). The full, unmodified licence text is in
+the LICENSE file.
+
+--------------------------------------------------------------------------------
+Why CERN-OHL-S v2
+--------------------------------------------------------------------------------
+SlopDrive-32 incorporates source ported from fray-d/OSSM-Lite
+(https://github.com/fray-d/OSSM-Lite), which is distributed under CERN-OHL-S v2.
+CERN-OHL-S is strongly reciprocal: any Product or Source that conveys a Covered
+Work derived from it must be made Available under CERN-OHL-S v2. Accordingly the
+whole of SlopDrive-32 is licensed under CERN-OHL-S v2.
+
+Ported from fray-d/OSSM-Lite (CERN-OHL-S v2):
+  - The "Advanced Penetration" pattern algorithm: per-direction min/max depth,
+    in/out speed and in/out acceleration, the master-speed feel curve, and the
+    cyclic per-stroke modifier math (ramp-to-min / at-min / ramp-to-max /
+    at-max, amplitude, offset).
+      -> include/motion/AdvancedPattern.h, src/motion/AdvancedPattern.cpp
+  - The twelve factory presets (Simple, Teasing, Pounding, Robo, Half'n'half,
+    Deeper, Insist, Jackhammer, Progressive, Mid, Knot 75%, Knot 50%), decoded
+    from OSSM-Lite's preset strings.
+      -> webui/src/features/pattern.js (AP_PRESETS)
+
+The BLE characteristic plumbing, on-device display UI, and NVS preset string
+codecs from OSSM-Lite were not used; only the motion numerics were ported.
+
+--------------------------------------------------------------------------------
+Vendored components under their own (permissive) licences
+--------------------------------------------------------------------------------
+These remain under their original MIT licences; their notices are retained in
+THIRD_PARTY_LICENSES.md and/or the component sources:
+
+  - StrokeEngine pattern math (elims / OSSM community) — MIT
+  - TempestMAx OSR2/SR6 "Axis" Hermite curve generator — MIT
+  - jcfain TCodeESP32 v0.4 AxisRampData struct shape — MIT
+
+See THIRD_PARTY_LICENSES.md for third-party Arduino libraries and the Espressif
+Arduino core, each under its own licence (MIT / LGPL / Apache-2.0).

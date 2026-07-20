@@ -719,6 +719,11 @@ SlopDrive-32/
 
 ## Credits
 
+- **Advanced Penetration** pattern engine ported from
+  [fray-d/OSSM-Lite](https://github.com/fray-d/OSSM-Lite) (CERN-OHL-S v2) —
+  the per-direction depth/speed/accel math and the cyclic per-stroke modifiers
+  (`AdvancedPattern`), plus the twelve factory presets. **This is why the
+  whole project is CERN-OHL-S** (see License below).
 - Concepts and wiring originally derived from **StrokeEngine** by the OSSM
   community (theelims / KinkyMakers, MIT-licensed) — both the original
   transport rework inspiration and, later, the vendored pattern math behind
@@ -740,10 +745,20 @@ SlopDrive-32/
 
 ## License
 
-SlopDrive-32 is licensed under the **MIT License** — see [`LICENSE`](LICENSE).
-Provided **as-is, with no warranty**.
+SlopDrive-32 is licensed under the **CERN Open Hardware Licence Version 2 –
+Strongly Reciprocal (CERN-OHL-S v2)** — see [`LICENSE`](LICENSE) and
+[`NOTICE`](NOTICE). Provided **as-is, with no warranty**.
 
-This project links against third-party Arduino libraries and the Espressif
-Arduino core, each under its own license (MIT / LGPL / Apache-2.0). See
-[`THIRD_PARTY_LICENSES.md`](THIRD_PARTY_LICENSES.md) for full attribution and
-license details.
+**Why CERN-OHL-S:** this firmware incorporates the Advanced Penetration
+pattern engine ported from [fray-d/OSSM-Lite](https://github.com/fray-d/OSSM-Lite),
+which is CERN-OHL-S v2. That licence is *strongly reciprocal*, so any work that
+conveys its covered Source — including this project — must be made available
+under the same licence. Anyone distributing SlopDrive-32 (or hardware/firmware
+based on it) must likewise provide the Complete Source under CERN-OHL-S v2.
+
+Vendored components retain their original permissive licences (MIT) and their
+notices are preserved — the StrokeEngine pattern math, TempestMAx's `Axis`
+Hermite interpolation, and jcfain's TCode ramp struct. This project also links
+against third-party Arduino libraries and the Espressif Arduino core, each
+under its own licence (MIT / LGPL / Apache-2.0). See
+[`THIRD_PARTY_LICENSES.md`](THIRD_PARTY_LICENSES.md) for full attribution.

@@ -168,6 +168,18 @@ static void buttplugLinearCmd(float position, uint32_t duration_ms,
     g_state.last_cmd_ms      = now;
     g_state.last_intiface_ms = now;   // marks the stream active for the sampler
 
+    // Yield-on-MOTION stamp: only a packet that moves the commanded target
+    // counts as "the stream is driving". Keep-alive packets repeating the same
+    // position hold the sampler (recentPacket) but no longer suppress a
+    // user-started pattern indefinitely.
+    {
+        static float s_prev_stream_pos = -1.0f;
+        if (s_prev_stream_pos < 0.0f || fabsf(position - s_prev_stream_pos) > 0.003f) {
+            g_state.last_intiface_move_ms = now;
+            s_prev_stream_pos = position;
+        }
+    }
+
     // Raw target telemetry (pre-planner) — mapped into the stroke window.
     g_state.commanded_raw_mm = mapper.intensityToPosition(position);
 
@@ -186,7 +198,20 @@ static void buttplugLinearCmd(float position, uint32_t duration_ms,
     seg.hasSlope    = hasSlope;
     seg.hasDuration = hasDuration;
     seg.isLivePoint = (!hasSlope && !hasDuration);
-    if (g_interp_queue) xQueueSend(g_interp_queue, &seg, 0);
+    // Live motion-command path: a full queue means the Core-1 sampler is
+    // stalled or overloaded and this segment is LOST. Count it and log
+    // (rate-limited) — a silently-dropped TCode segment is a motion glitch
+    // with no trace otherwise. :3
+    if (g_interp_queue && xQueueSend(g_interp_queue, &seg, 0) != pdTRUE) {
+        static uint32_t interp_drops = 0, last_drop_log_ms = 0;
+        interp_drops++;
+        uint32_t now_drop = millis();
+        if (now_drop - last_drop_log_ms > 2000) {
+            last_drop_log_ms = now_drop;
+            APPLOGF("Interp queue FULL — %lu TCode segment(s) dropped; sampler stalled?",
+                    (unsigned long)interp_drops);
+        }
+    }
 
     // LEGACY fallback — keep the waypoint queue alive for A/B testing
 #if defined(LEGACY_STREAM_PIPELINE)
@@ -195,7 +220,14 @@ static void buttplugLinearCmd(float position, uint32_t duration_ms,
     pt.inTime       = (uint16_t)constrain((int)duration_ms, 0, 65535);
     pt.has_set_time = true;
     pt.setTime      = std::chrono::steady_clock::now();
-    xQueueSend(g_waypoint_queue, &pt, 0);
+    if (xQueueSend(g_waypoint_queue, &pt, 0) != pdTRUE) {
+        static uint32_t wp_last_drop_log_ms = 0;
+        uint32_t now_wp = millis();
+        if (now_wp - wp_last_drop_log_ms > 2000) {
+            wp_last_drop_log_ms = now_wp;
+            APPLOG("Waypoint queue FULL — legacy waypoint dropped");
+        }
+    }
 #endif
 }
 
@@ -203,7 +235,8 @@ static void buttplugStop() {
     // DSTOP = stop moving now. Mark the stream idle so the Core-1 sampler stops
     // feeding FAS and releases the motor, then force-stop FAS. hardStop() keeps
     // homed + stream state — DSTOP is "stop moving," not "cut power forever."
-    g_state.last_intiface_ms = 0;
+    g_state.last_intiface_ms      = 0;
+    g_state.last_intiface_move_ms = 0;
     arbiter.hardStopMotion();
 }
 
@@ -227,7 +260,7 @@ static void handleWifiCmd(const char* args) {
 
     // `WIFI CLEAR` — wipe stored secondary creds.
     if (strncasecmp(args, "CLEAR", 5) == 0 && (args[5] == '\0' || args[5] == ' ')) {
-        ConfigStore::clearWifiCreds();
+        ConfigStore::clearWifiCreds(g_state);
         Serial.print("WIFI OK cleared\n");
         return;
     }
@@ -254,7 +287,7 @@ static void handleWifiCmd(const char* args) {
         return;
     }
 
-    ConfigStore::saveWifiCreds(ssid, pass);
+    ConfigStore::saveWifiCreds(g_state, ssid, pass);
     Serial.printf("WIFI OK saved SSID='%s' — reboot to connect\n", ssid);
 }
 
@@ -348,7 +381,17 @@ static void streamSamplerTask(void* /*param*/) {
         if (interpBusy) lastMotionMs = now_ms;
         bool postMoveHold = lastMotionMs != 0 &&
                             (now_ms - lastMotionMs < STREAM_IDLE_TIMEOUT_MS);
-        bool streamActive = gatesOk && (interpBusy || recentPacket || postMoveHold);
+
+        // Pattern reclaim: a USER-STARTED pattern takes the machine back once
+        // the stream stops actually driving (no target movement for 1.5s and
+        // no in-flight curve). Keep-alive packets alone no longer pin the
+        // sampler — last active driver wins, both directions.
+        bool intifaceDriving = g_state.last_intiface_move_ms != 0 &&
+                               (now_ms - g_state.last_intiface_move_ms < 1500);
+        bool patternClaims = g_state.pattern_running && !intifaceDriving && !interpBusy;
+
+        bool streamActive = gatesOk && !patternClaims &&
+                            (interpBusy || recentPacket || postMoveHold);
 
         // Rising edge: seed the interpolator at the actual current position so a
         // new stream starts from where the shaft really is (no stale segment).
@@ -412,17 +455,30 @@ static void streamSamplerTask(void* /*param*/) {
 }
 
 // Core 0 — services all active transports, reports inbound rate
+// Permanent Core-0 stall watchdog shared by commsTask + httpTask. Logs WHICH
+// Core-0 call blocked, and for how long, once it returns. The heartbeat lives
+// at the tail of httpTask, so any blocked step freezes the breath; this names
+// the offender in the web log ([STALL] ...) instead of guesswork. Near-zero
+// cost — only two millis() reads per step, logs only when a step exceeds the
+// threshold. Keep it: it's how the WS-loop-on-httpTask freeze was found. :3
+#define STALL_LOG_MS 120u
+#define TIME_STEP(call, name) do {                                            \
+        uint32_t _s0 = millis(); call; uint32_t _dt = millis() - _s0;         \
+        if (_dt > STALL_LOG_MS) APPLOGF("[STALL] " name " blocked %lums", (unsigned long)_dt); \
+    } while (0)
 static void commsTask(void* /*param*/) {
     uint32_t last_report_ms   = 0;
     uint32_t last_frame_count = 0;
     while (true) {
         TransportMode activeMode = g_state.getTransport();
+        // DIAG: commsTask is prio 2 (> httpTask prio 1) — a block here preempts
+        // and freezes the heartbeat too. Time the transport poll + wifi supervise.
         if (activeMode == TransportMode::SER) {
-            serialTransport.poll();
+            TIME_STEP(serialTransport.poll(), "comms:serial.poll");
         } else if (activeMode == TransportMode::DONGLE) {
-            dongleTransport.poll();
+            TIME_STEP(dongleTransport.poll(), "comms:dongle.poll");
         } else {
-            wsTransport.run();
+            TIME_STEP(wsTransport.run(), "comms:wsTransport.run");
         }
 
         uint32_t now = millis();
@@ -443,16 +499,24 @@ static void commsTask(void* /*param*/) {
 }
 
 // Core 0 — HTTP server + OSSM BLE + Status LEDs
+// Each step is wrapped in TIME_STEP (the Core-0 stall watchdog, defined above
+// commsTask). The heartbeat is at the tail, so a blocked step freezes the
+// breath; the [STALL] web-log line names which call blocked.
 static void httpTask(void* param) {
     WebUI* ui = static_cast<WebUI*>(param);
     while (true) {
-        ui->update();
-        uiSocket.update();
-        otaService.handle();   // service ArduinoOTA + deferred HTTP reboot (Core 0)
+        TIME_STEP(ui->update(),           "http:ui.update");
+        // NOTE: uiSocket.update() (_ws.loop()) was MOVED to UiSocket::senderTask.
+        // Servicing the telemetry WebSocket here let a wedged/half-open client's
+        // blocking socket ops (up to WEBSOCKETS_TCP_TIMEOUT × connected sockets,
+        // ~2.6s observed) freeze this task — and with it the heartbeat + HTTP +
+        // OTA on Core 0. Isolating WS onto the sender task means a stuck client
+        // can only delay telemetry, never the heartbeat/HTTP/motion. :3
+        TIME_STEP(otaService.handle(),    "http:ota.handle");
 #if defined(FEATURE_RS485_MODBUS)
-        servoModbus.update();
+        TIME_STEP(servoModbus.update(),   "http:servoModbus");
 #endif
-        ossmBleService.update();
+        TIME_STEP(ossmBleService.update(),"http:ossmBle");
         statusLedsUpdate(g_state);
         vTaskDelay(pdMS_TO_TICKS(10));
     }
@@ -530,34 +594,20 @@ static void motionConsumerTask(void* /*param*/) {
 
         if (timeSeconds <= 0.01f) { vTaskDelay(pdMS_TO_TICKS(1)); continue; }
 
-        float   frac         = pt.position / 100.0f;
-        float   target_mm    = mapper.getMinMm() + frac * (mapper.getMaxMm() - mapper.getMinMm());
-        int32_t target_steps = -motor.mmToNative(target_mm);
+        float frac      = pt.position / 100.0f;
+        float target_mm = mapper.getMinMm() + frac * (mapper.getMaxMm() - mapper.getMinMm());
 
-        int32_t min_steps = -motor.mmToNative(mapper.getMaxMm());
-        int32_t max_steps = -motor.mmToNative(mapper.getMinMm());
-
-        int32_t current_steps = -motor.mmToNative(motor.getPosition());
-
-        float speed_cap_mm_s = g_state.safeSpeedCap(g_state.config.max_speed_mm_s, millis());
-        uint32_t speed_limit = (uint32_t)motor.mmToNative(speed_cap_mm_s);
-        uint32_t accel_limit = (uint32_t)motor.mmToNative(g_state.config.acceleration_mm_s2);
-
-        kinematics::PlanResult plan = kinematics::planTrapezoid(
-            current_steps, target_steps, timeSeconds,
-            speed_limit, accel_limit, min_steps, max_steps);
-
-        uint32_t finalAccel = plan.accel_steps_s2;
-        if (motor.isMoving()) {
-            uint32_t liveAccel = motor.getLiveAcceleration();
-            if (liveAccel > finalAccel) finalAccel = liveAccel;
-        }
-
-        motor.streamToSteps(plan.target_steps, plan.speed_steps_s, finalAccel);
-
-        float actual_mm = motor.nativeToMm(-plan.target_steps);
-        g_state.actual_position_mm.store(actual_mm, std::memory_order_relaxed);
-        g_state.commanded_target_mm = actual_mm;
+        // Sole-caller rule (CLAUDE.md §2): even the legacy A/B pipeline submits
+        // through the MotionArbiter — it no longer plans + dispatches to the
+        // driver itself, which bypassed every e-stop/pause/override/window
+        // gate. This task runs on Core 1, so direct submit() is allowed; the
+        // arbiter derives the trapezoid from the deadline exactly like the old
+        // kinematics::planTrapezoid path did. :3
+        MotionIntent intent = {};
+        intent.source      = MotionSource::TCODE_STREAM;
+        intent.target_mm   = target_mm;
+        intent.deadline_ms = (uint32_t)(timeSeconds * 1000.0f);
+        arbiter.submit(intent);
 
         vTaskDelay(pdMS_TO_TICKS(1));
     }
@@ -674,17 +724,27 @@ void setup() {
     g_interp_queue = xQueueCreate(INTERP_QUEUE_DEPTH, sizeof(InterpSegment));
     configASSERT(g_interp_queue != nullptr);
 
-    // Create FreeRTOS tasks
+    // Create FreeRTOS tasks. Every creation is checked — a boot-critical task
+    // that fails to spin up under heap pressure (motorTask IS the homing +
+    // e-stop servicer) must halt loudly, not boot a device that silently can't
+    // home, e-stop, or move. Same configASSERT discipline as the queue
+    // creations above. :3
+    BaseType_t task_ok;
     // motorTask: Core 1, priority 3 — homing + D4 deferred-intent consumer
-    xTaskCreatePinnedToCore(motorTask, "Motor", 4096, nullptr, 3, nullptr, 1);
+    task_ok = xTaskCreatePinnedToCore(motorTask, "Motor", 4096, nullptr, 3, nullptr, 1);
+    configASSERT(task_ok == pdPASS);
     // streamSamplerTask: Core 1, priority 4 — v0.4 interpolator cubic sampler
-    xTaskCreatePinnedToCore(streamSamplerTask, "Sampler", 4096, nullptr, 4, nullptr, 1);
+    task_ok = xTaskCreatePinnedToCore(streamSamplerTask, "Sampler", 4096, nullptr, 4, nullptr, 1);
+    configASSERT(task_ok == pdPASS);
     // motionConsumerTask: Core 1, priority 4 — ONLY compiled in LEGACY mode
 #if defined(LEGACY_STREAM_PIPELINE)
-    xTaskCreatePinnedToCore(motionConsumerTask, "MotionCon", 4096, nullptr, 4, nullptr, 1);
+    task_ok = xTaskCreatePinnedToCore(motionConsumerTask, "MotionCon", 4096, nullptr, 4, nullptr, 1);
+    configASSERT(task_ok == pdPASS);
 #endif
-    xTaskCreatePinnedToCore(commsTask, "Comms", 6144, nullptr, 2, nullptr, 0);
-    xTaskCreatePinnedToCore(httpTask, "HTTP", 8192, &webui, 1, nullptr, 0);
+    task_ok = xTaskCreatePinnedToCore(commsTask, "Comms", 6144, nullptr, 2, nullptr, 0);
+    configASSERT(task_ok == pdPASS);
+    task_ok = xTaskCreatePinnedToCore(httpTask, "HTTP", 8192, &webui, 1, nullptr, 0);
+    configASSERT(task_ok == pdPASS);
 
     ossmBleService.setWaypointQueue(g_waypoint_queue);
     ossmBleService.init();

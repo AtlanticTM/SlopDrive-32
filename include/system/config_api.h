@@ -32,7 +32,7 @@
 // Bumped by hand on each firmware change so an OTA can be verified as landed
 // (surfaced via /api/capabilities → "fw_version" and the boot log). This is the
 // single source of truth for "which build is actually running." :3
-#define FIRMWARE_VERSION        "2.1.5"
+#define FIRMWARE_VERSION        "2.1.12"
 
 // =============================================================================
 // WiFi Configuration (values come from secrets.h)
@@ -251,6 +251,16 @@
 // a closed-loop servo, not a stepper, so it won't skip steps. Strap in. :3
 #define MAX_SPEED_MM_S              10000.0f
 #define DEFAULT_MAX_SPEED_MM_S      550.0f   // factory default on fresh boot
+
+// USER limit-set factory defaults — deliberately gentle. The USER set caps the
+// operator's own hand (manual moves) AND the "glide into the window" entry move
+// when a machine-driven source starts from outside the stroke window. A soft
+// 50 mm/s / 200 mm/s² means the carriage eases into the window instead of
+// lunging to the edge at the input ceiling. Raise them in Settings once you've
+// felt the machine out. Distinct from DEFAULT_MAX_SPEED/ACCEL which seed the
+// INPUT set (streams/patterns). :3
+#define DEFAULT_USER_MAX_SPEED_MM_S  50.0f    // gentle user/manual speed default
+#define DEFAULT_USER_ACCEL_MM_S2     200.0f   // gentle user/manual accel default
 
 // Split ceilings the WebUI's expert-mode toggle switches between. Advertised
 // via /api/capabilities so the UI derives its slider `max` attrs from the API
@@ -498,9 +508,9 @@ struct DeviceConfig {
     float acceleration_mm_s2;  // default: 1500
 
     // Dual limit sets (v0.4 / D4 Phase 3)
-    // USER set: manual moves, UI controls, rail tap, nudges
-    float user_max_speed_mm_s;     // default: 550
-    float user_max_accel_mm_s2;    // default: 1500
+    // USER set: manual moves, UI controls, rail tap, nudges, window-entry glide
+    float user_max_speed_mm_s;     // default: 50 (gentle)
+    float user_max_accel_mm_s2;    // default: 200 (gentle)
     // INPUT set: TCode streams, PatternEngine, OSSM
     float input_max_speed_mm_s;    // default: 550
     float input_max_accel_mm_s2;   // default: 1500
@@ -524,7 +534,10 @@ struct DeviceConfig {
     float manual_depth;        // 0.0-1.0 position within trimmed range
     float manual_speed;        // 0.0-1.0 speed ratio
 
-    // Checksum for validation (simple XOR of all bytes)
+    // NVS corruption defense: FNV-1a hash over the raw stored config values,
+    // computed by ConfigStore::save() (stored under "cfg_crc") and verified by
+    // ConfigStore::load() — a mismatch is logged as possible corruption. This
+    // field mirrors the last computed hash for diagnostics. :3
     uint32_t checksum;
 };
 
@@ -536,9 +549,10 @@ inline DeviceConfig getDefaultConfig() {
     cfg.max_position_mm = DEFAULT_MAX_RAIL_MM;     // seeds the startup range until homing measures
     cfg.max_speed_mm_s = DEFAULT_MAX_SPEED_MM_S;  // 550 mm/s factory default
     cfg.acceleration_mm_s2 = DEFAULT_ACCEL_MM_S2;
-    // Seed dual limit sets from legacy — user can split them later
-    cfg.user_max_speed_mm_s   = DEFAULT_MAX_SPEED_MM_S;
-    cfg.user_max_accel_mm_s2  = DEFAULT_ACCEL_MM_S2;
+    // Dual limit sets. USER set defaults gentle (glide-into-window + manual);
+    // INPUT set seeds from the legacy full-speed default (streams/patterns). :3
+    cfg.user_max_speed_mm_s   = DEFAULT_USER_MAX_SPEED_MM_S;   // 50 mm/s
+    cfg.user_max_accel_mm_s2  = DEFAULT_USER_ACCEL_MM_S2;      // 200 mm/s²
     cfg.input_max_speed_mm_s  = DEFAULT_MAX_SPEED_MM_S;
     cfg.input_max_accel_mm_s2 = DEFAULT_ACCEL_MM_S2;
     cfg.control_mode = (uint8_t)ControlMode::BUTTPLUG;

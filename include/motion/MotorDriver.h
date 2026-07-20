@@ -49,10 +49,13 @@ public:
     virtual void emergencyStop()  = 0;
 
     // ---- Sole-caller enforcement ---------------------------------------------
-    // MotionArbiter is the ONLY class permitted to command motor position after
-    // this work. All motion dispatch routes through MotionArbiter::submit().
-    // Compile-time lock — no other code may call moveTo/streamTo/streamToSteps/
-    // stop/hardStop directly. :3
+    // MotionArbiter is the ONLY class permitted to command motor position.
+    // All motion dispatch routes through MotionArbiter::submit(). The motion
+    // methods (moveTo/streamTo/streamToSteps/stop/hardStop) live in the
+    // `protected:` section below, so any direct call from an input source (UI,
+    // transport, pattern, BLE) through a MotorDriver& is a COMPILE ERROR — this
+    // friend grant is the single door in. Concrete drivers must keep their
+    // overrides protected too, or the lock leaks through the derived type. :3
     friend class MotionArbiter;
 
     // ---- Homing -------------------------------------------------------------
@@ -80,8 +83,15 @@ public:
     // ---- Position monitor (call frequently to stop motor at target) ---------
     virtual void runMotorStep()    = 0;
 
-    // ---- Motion -------------------------------------------------------------
-    virtual void moveTo(float pos_mm)                              = 0;
+protected:
+    // ---- Motion (MotionArbiter-only — sole-caller rule, CLAUDE.md §2) --------
+    // Protected + `friend class MotionArbiter` above: access is checked on the
+    // static type (MotorDriver&), so no input source can dispatch motion
+    // directly. Everything routes through MotionArbiter::submit() and its
+    // stop/hardStop/emergencyStop helpers, which own every safety gate. :3
+    // moveTo returns true when FAS accepted the move (false = refused/not homed)
+    // so a silently-rejected move is distinguishable at the call site.
+    virtual bool moveTo(float pos_mm)                              = 0;
     virtual void streamTo(float pos_mm, float speed_mm_s)          = 0;
 
     // Dispatch a pre-planned move in native steps — called exclusively from
@@ -92,9 +102,11 @@ public:
                                uint32_t speed_steps_s,
                                uint32_t accel_steps_s2)            = 0;
 
-    virtual void stop()      = 0;    // decelerate stop + cut power
+    virtual void stop()      = 0;    // full stop + cut power (also clears homed)
 
     virtual void hardStop()  = 0;    // immediate stop, motor stays powered
+
+public:
     virtual void enable()    = 0;
     virtual void disable()   = 0;
 
@@ -102,6 +114,10 @@ public:
     virtual void     setMaxSpeed(float speed_mm_s)      = 0;
     virtual void     setAcceleration(float accel_mm_s2)  = 0;
     virtual float    getMaxSpeed()          const        = 0;
+    // Acceleration ACTUALLY applied by the driver (mm/s², post-internal-clamp).
+    // The driver may cap lower than config_api.h's MAX_ACCEL_MM_S2 ceiling —
+    // Ground Truth Doctrine: echoes must report this, never the raw request. :3
+    virtual float    getAcceleration()      const        = 0;
     // Returns the acceleration currently active inside the FAS ramp engine —
     // NOT the configured ceiling. Used by the raise-only guard in
     // motionConsumerTask to match OSSM's stepper->getAcceleration() call. :3
@@ -187,6 +203,15 @@ public:
     // exposes power/temp/peak telemetry beyond basic current/voltage. Lets the
     // UI show/hide the extended Health-tab power card. :3
     virtual bool    hasPowerMonitor()   const { return false; }
+
+    // Session energy in WATT-HOURS from the power monitor's own hardware
+    // accumulator (integrates continuously in the chip). Drives the dashboard
+    // SESSION card. Zeroed by resetPowerStats(). 0 when no monitor. :3
+    virtual float   getBusEnergyWh()    const { return 0.0f; }
+    // Reset the session power stats — software peaks AND the hardware energy
+    // accumulator — back to zero. Called on home and by the reset-session
+    // control. No-op on drivers without a monitor. :3
+    virtual void    resetPowerStats()   {}
 
 
 

@@ -98,6 +98,13 @@ struct SystemState {
     // the rail populates without a real homing cycle. 0 = normal (use motor). :3
     volatile float         test_stroke_override_mm = 0.0f;
     std::atomic<bool>      estop_requested{false};        // Core 0 stores, Core 1 exchanges — atomic RMW closes TOCTOU window
+    // Latched "device is in an e-stopped state" flag. estop_requested is a
+    // transient REQUEST (motorTask consumes it within ~1ms), so telemetry
+    // sampling at ~45Hz almost never catches it — the UI could never learn an
+    // e-stop happened from another client/transport. This latch is set when an
+    // e-stop is requested, cleared when a new homing cycle starts, and is what
+    // the 0x01 telemetry flags bit3 actually reports. :3
+    volatile bool          estop_latched = false;
     bool                   wifi_ready          = false;   // Core 0 only
 
     // ---- OTA update in flight (cross-core, Core 0 sets/clears) ----------------
@@ -172,8 +179,31 @@ struct SystemState {
     // Whether the generator is actually emitting motion (cross-core)
     volatile bool          gen_active      = false;
 
-    // Timestamp of last Intiface command (Core 1 only — buttplugLinearCmd stamps)
-    uint32_t               last_intiface_ms = 0;
+    // Timestamp of last Intiface command (cross-core!). Written on Core 0
+    // (commsTask → buttplugLinearCmd/buttplugStop in main.cpp), read on Core 1
+    // in hot gating paths (streamSamplerTask's recent-packet gate and the
+    // arbiter's Intiface-recency gate in _gatesPass). 32-bit aligned store is
+    // hardware-atomic on the S3; volatile keeps the Core-1 reads fresh. The
+    // old "Core 1 only" comment here was factually wrong. :3
+    volatile uint32_t      last_intiface_ms = 0;
+
+    // ---- Stream-vs-pattern arbitration (yield on MOTION, not packets) --------
+    // Streaming hosts (Intiface/XToys) keep sending position packets as
+    // keep-alives while connected, so packet recency alone held the pattern
+    // gated off FOREVER after any stream session ("running" in the UI, machine
+    // dead still). last_intiface_move_ms stamps only packets that actually
+    // MOVED the commanded target (>0.3% of the window); the pattern yields to
+    // that, and a user-started pattern (pattern_running) reclaims the sampler
+    // when the stream stops driving. Last active driver wins — both ways.
+    volatile uint32_t      last_intiface_move_ms = 0;  // Core 0 writes, Core 1 reads
+    volatile bool          pattern_running       = false; // PatternEngine user start/stop
+
+    // ---- Bypass-limits toggle (cross-core, Core 0 writes) --------------------
+    // Set by WS_OP_BYPASS, honored by applyMove when a move doesn't carry its
+    // own per-request bypass_limits field, exposed in WS_OP_GET_CFG so clients
+    // can resync the real state on reconnect. Session-only (not persisted) —
+    // a reboot always comes back with limits enforced. :3
+    volatile bool          bypass_limits = false;
 
     // ---- Commanded target (cross-core) ---------------------------------------
     // The position the host/generator just TOLD us to go to (mm), before FAS
@@ -201,6 +231,18 @@ struct SystemState {
     // memory_order_relaxed is correct — telemetry is display-only, no ordering
     // dependency with any other variable. :3
     std::atomic<float>     actual_position_mm{0.0f};
+
+    // ---- Session odometer stats (single-writer: WebUI::captureTelemetry 240Hz) --
+    // Derived from the position stream: live/peak speed, cumulative distance, and
+    // a stroke (direction-reversal) count. Read by the 0x06 STATS frame + the
+    // dashboard SESSION card. Only the telemetry timer writes them; every other
+    // core only loads → relaxed read-modify-write in the single writer is safe.
+    // Zeroed by resetSessionStats() (also resets the INA228 Wh accumulator). :3
+    std::atomic<float>     live_speed_mm_s{0.0f};    // EMA-smoothed current speed
+    std::atomic<float>     max_speed_mm_s{0.0f};     // session peak speed
+    std::atomic<float>     session_distance_mm{0.0f};// cumulative |Δposition|
+    std::atomic<uint32_t>  stroke_count{0};          // direction reversals
+    volatile uint32_t      session_start_ms{0};      // millis() at boot / last reset
 
     // ---- WS UI config generation counter (Core 0 only, atomic) ---------------
     // Incremented on every applied settings change (HTTP, WS, serial/BLE).

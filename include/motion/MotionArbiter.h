@@ -92,6 +92,12 @@ struct MotionIntent {
     float        target_mm;         // post window-mapping, pre-clamp
     uint32_t     deadline_ms;       // 0 = none (point move: plan at ceilings)
     float        speed_hint_mm_s;   // from S-extension when present, else 0
+    // Pattern-derived accel demand (Advanced pattern mode). When BOTH hints are
+    // present the planner takes them as the derived dynamics verbatim — the
+    // pattern already derived them from its own stroke geometry (D4: derived
+    // from what the intent requires) — and the ceiling clamps still apply.
+    // 0 = absent: accel is derived from distance + deadline as before.
+    float        accel_hint_mm_s2 = 0.0f;
     RampShape    rampIn;            // entry accel multiplier (1.0 = disabled)
     RampShape    rampOut;           // exit accel multiplier (1.0 = disabled)
     uint16_t     seq;               // per-source monotonic, telemetry attribution
@@ -155,8 +161,8 @@ public:
 
     // ---- Emergency / gate helpers (Core 0 or Core 1) --------------------------
     void emergencyStop();
-    void stopMotion();     // decel stop (halt)
-    void hardStopMotion(); // immediate stop
+    void stopMotion();     // full stop: halts pulse train, cuts power, clears homed (MotorDriver::stop())
+    void hardStopMotion(); // immediate stop, motor stays powered (MotorDriver::hardStop())
     void pause();
     void resume();
 
@@ -174,6 +180,10 @@ public:
     // ---- Telemetry — last plan report (atomic, any core) ----------------------
     PlanReport lastReport() const;
     uint32_t   totalIntents() const { return _intent_count; }
+    // Intents rejected by a gate (not-homed / e-stop / paused / override /
+    // Intiface-recency). Surfaced in /api/status so a gated-off stream is
+    // distinguishable from "no commands arrived" in the diagnostics. :3
+    uint32_t   rejectedIntents() const { return _rejected_count; }
 
     // ---- Blend/reversal policy (stored, but currently all alias to "allow") ---
     void setBlendMode(uint8_t mode);   // 1=let-it-land 2=allow 3=hybrid
@@ -185,8 +195,8 @@ private:
     MotorDriver&  _motor;
 
     // ---- Limit sets -----------------------------------------------------------
-    float _user_speed_limit_mm_s  = DEFAULT_MAX_SPEED_MM_S;
-    float _user_accel_limit_mm_s2 = DEFAULT_ACCEL_MM_S2;
+    float _user_speed_limit_mm_s  = DEFAULT_USER_MAX_SPEED_MM_S;   // gentle (50)
+    float _user_accel_limit_mm_s2 = DEFAULT_USER_ACCEL_MM_S2;      // gentle (200)
     float _input_speed_limit_mm_s  = DEFAULT_MAX_SPEED_MM_S;
     float _input_accel_limit_mm_s2 = DEFAULT_ACCEL_MM_S2;
 
@@ -206,7 +216,12 @@ private:
     // ---- Telemetry ------------------------------------------------------------
     PlanReport           _last_report = {};
     volatile uint32_t    _intent_count = 0;
+    volatile uint32_t    _rejected_count = 0;
     mutable portMUX_TYPE _telemetry_mux = portMUX_INITIALIZER_UNLOCKED;
+
+    // Rate-limited (2s) log + counter bump for a gate-rejected intent, so a
+    // rejected stream leaves a trace instead of vanishing silently. :3
+    void _logRejected(const char* reason, MotionSource source);
 
     // ---- Per-source sequence counters -----------------------------------------
     uint16_t _seq_manual      = 0;
@@ -227,6 +242,14 @@ private:
 
     // ---- Window clamping ------------------------------------------------------
     float _clampToWindow(float mm, MotionSource source);
+
+    // ---- Window-entry detection -----------------------------------------------
+    // True when p0_mm is currently OUTSIDE the configured stroke window (with a
+    // small epsilon). Machine-driven sources (stream/pattern/OSSM) honor the
+    // gentle USER limits on the move that carries the carriage from outside the
+    // window into it, so it glides in instead of lunging to the edge at the
+    // input ceiling. Once inside, the normal INPUT set resumes. :3
+    bool _isOutsideWindow(float p0_mm) const;
 };
 
 // ============================================================================

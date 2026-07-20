@@ -84,6 +84,7 @@ void PatternEngine::init() {
 
 void PatternEngine::emergencyStop() {
     _running = false;
+    _state.pattern_running = false;
 }
 
 bool PatternEngine::isRunning() const { return _running; }
@@ -100,10 +101,15 @@ void PatternEngine::start() {
     if (!_state.homed) return;
     _running        = true;
     _stroke_index   = 0;   // fresh start
+    // Explicit user claim: starting the pattern takes the machine back from a
+    // chattering (keep-alive-only) stream. A stream that actually MOVES again
+    // re-stamps last_intiface_move_ms and reclaims — see the yield gate.
+    _state.pattern_running = true;
 }
 
 void PatternEngine::stop() {
     _running = false;
+    _state.pattern_running = false;
 }
 
 // ============================================================================
@@ -138,6 +144,72 @@ void PatternEngine::setPattern(int idx) {
     if (idx < 0) idx = 0;
     if (idx >= PATTERN_COUNT) idx = PATTERN_COUNT - 1;
     _pattern_idx = idx;
+}
+
+// ============================================================================
+// Advanced-mode setters (Core 0 — single volatile u8 writes, hardware-atomic).
+// Every write bumps _ap_gen so a stroke in flight retargets immediately
+// (fray-d semantics: sliders act now, not at the next stroke boundary).
+// ============================================================================
+
+void PatternEngine::setAdvancedMode(bool on) {
+    if (_advanced == on) return;
+    _advanced = on;
+    _stroke_index = 0;      // fresh parity/modifier cycle on mode entry
+    _ap_gen = _ap_gen + 1;
+}
+
+void PatternEngine::setApMaster(int v) {
+    _ap.master.set(v);
+    _ap_gen = _ap_gen + 1;
+}
+
+void PatternEngine::setApBase(uint8_t base_id, int v) {
+    advpat::BaseControl* c = _ap.byId(base_id);
+    if (!c) return;
+    c->set(v);
+    // fray-d setDepthLimits: the depth pair may never cross.
+    if (base_id == advpat::DEPTH_MAX || base_id == advpat::DEPTH_MIN)
+        _ap.coupleDepths();
+    _ap_gen = _ap_gen + 1;
+}
+
+int PatternEngine::getApBase(uint8_t base_id) const {
+    const advpat::BaseControl* c = _ap.byId(base_id);
+    return c ? (int)c->value : 0;
+}
+
+void PatternEngine::resetAdvanced() {
+    _ap.in_speed.set(100);
+    _ap.out_speed.set(100);
+    _ap.in_accel.set(40);
+    _ap.out_accel.set(40);
+    for (uint8_t id = 0; id < advpat::BASE_COUNT; id++) {
+        advpat::BaseControl* c = _ap.byId(id);
+        if (!c) continue;
+        advpat::Modifier& m = c->modifier;
+        m.amplitude = 100;
+        m.in_step   = 1;
+        m.in_wait   = 0;
+        m.out_step  = 1;
+        m.out_wait  = 0;
+        m.offset    = 0;
+    }
+    _ap_gen = _ap_gen + 1;
+}
+
+void PatternEngine::setApModifier(uint8_t base_id, int amplitude, int in_step, int in_wait,
+                                  int out_step, int out_wait, int offset) {
+    advpat::BaseControl* c = _ap.byId(base_id);
+    if (!c) return;
+    advpat::Modifier& m = c->modifier;
+    m.amplitude = (uint8_t)constrain(amplitude, 0, 100);
+    m.in_step   = (uint8_t)constrain(in_step,   1, 25);
+    m.in_wait   = (uint8_t)constrain(in_wait,   0, 25);
+    m.out_step  = (uint8_t)constrain(out_step,  1, 25);
+    m.out_wait  = (uint8_t)constrain(out_wait,  0, 25);
+    m.offset    = (uint8_t)constrain(offset,    0, 100);
+    _ap_gen = _ap_gen + 1;
 }
 
 // ============================================================================
@@ -199,6 +271,13 @@ void PatternEngine::_diagnostics(uint32_t& last_diag_ms) {
     if (millis() - last_diag_ms <= 1000) return;
     last_diag_ms = millis();
 
+    if (_advanced) {
+        APPLOGF("PatternEngine: ADVANCED master=%u depth=%u..%u v_in=%u v_out=%u a_in=%u a_out=%u stroke#%u",
+                (unsigned)_ap.master.value, (unsigned)_ap.min_depth.value, (unsigned)_ap.max_depth.value,
+                (unsigned)_ap.in_speed.value, (unsigned)_ap.out_speed.value,
+                (unsigned)_ap.in_accel.value, (unsigned)_ap.out_accel.value, _stroke_index);
+        return;
+    }
     const char* pname = patternName(_pattern_idx);
     APPLOGF("PatternEngine: running pattern[%d]=\"%s\" speed=%.0f depth=%.0f stroke=%.0f sens=%.0f",
             _pattern_idx, pname, _speed, _depth, _stroke, _sensation);
@@ -249,12 +328,16 @@ void PatternEngine::run() {
         int    pat_idx   = _pattern_idx;
         bool   running   = _running;
 
-        // ---- Gate checks — IDENTICAL to current semantics -----------------
-        bool intiface_recent = (_state.last_intiface_ms != 0) &&
-                               (millis() - _state.last_intiface_ms < 250);
+        // ---- Gate checks — yield to stream MOTION, not stream packets -----
+        // Packet recency (last_intiface_ms) let keep-alive-only hosts pin the
+        // pattern off forever. The pattern now yields only while the stream is
+        // actually driving the target (moved within 1.5s) — matching the
+        // sampler's reclaim window in streamSamplerTask.
+        bool intiface_driving = (_state.last_intiface_move_ms != 0) &&
+                                (millis() - _state.last_intiface_move_ms < 1500);
         bool user_has_control = _state.paused || _state.manual_override;
         bool emit_ok = running && _state.homed &&
-                       (user_has_control || !intiface_recent);
+                       (user_has_control || !intiface_driving);
 
         // Expose activity state for WebUI
         _state.gen_active = emit_ok;
@@ -262,7 +345,12 @@ void PatternEngine::run() {
         // ---- Diagnostics --------------------------------------------------
         _diagnostics(last_diag_ms);
 
-        if (emit_ok && _arbiter) {
+        if (emit_ok && _arbiter && _advanced) {
+            // ---- Advanced mode (fray-d Advanced Penetration port) ---------
+            // One half-stroke per call; the wait happens inside so a live
+            // parameter write retargets the stroke in flight.
+            _advancedStroke();
+        } else if (emit_ok && _arbiter) {
             // ---- Select active pattern -----------------------------------
             int idx = pat_idx;
             if (idx < 0) idx = 0;
@@ -343,6 +431,22 @@ void PatternEngine::run() {
             // ---- Submit to the arbiter — ONE intent, ONE plan, FAS executes
             PlanReport report = _arbiter->submit(intent);
 
+            // Deadline-feasibility feedback: if the plan got clamped at the
+            // INPUT limit set, the pattern is running slower/softer than the
+            // operator dialed in. Surface that (rate-limited) instead of
+            // silently degrading the stroke. :3
+            if (report.deadline_late) {
+                static uint32_t last_late_log_ms = 0;
+                uint32_t now_late = millis();
+                if (now_late - last_late_log_ms > 2000) {
+                    last_late_log_ms = now_late;
+                    APPLOGF("PatternEngine CLAMPED: stroke wants %.0f mm/s @ %.0f mm/s² "
+                            "but input limits allow %.0f/%.0f — pattern runs slower than configured",
+                            report.derived_speed_mm_s, report.derived_accel_mm_s2,
+                            report.clamped_speed_mm_s, report.clamped_accel_mm_s2);
+                }
+            }
+
             // ---- Publish telemetry ----------------------------------------
             // D4: actual_position_mm is NEVER written — the telemetry sampler
             // reads _motor.getPosition() directly. We only set commanded_target
@@ -375,4 +479,118 @@ void PatternEngine::run() {
         // No vTaskDelay at the bottom — the per-segment delay above handles pacing.
         // The only fallthrough to here would be from emit_ok=false or no arbiter yet.
     }
+}
+
+// ============================================================================
+// Advanced mode — one half-stroke, event-driven (fray-d Advanced Penetration)
+// ============================================================================
+//
+// D4 preserved: ONE intent per half-stroke, dynamics DERIVED from the stroke's
+// own geometry (per-direction speed/accel controls), arbiter clamps at the
+// INPUT ceilings. The wait below is not a motion clock — it sleeps out the
+// stroke and wakes for exactly two events: the stroke completing (next intent
+// due) or a parameter write (_ap_gen bump → retarget the stroke in flight,
+// which is fray-d's live-slider semantics).
+
+void PatternEngine::_advancedStroke() {
+    advpat::StrokePlan sp = _ap.planStroke(_stroke_index);
+    if (!sp.moving) {                       // master speed 0 → hold position
+        vTaskDelay(pdMS_TO_TICKS(50));
+        return;
+    }
+
+    uint32_t gen_seen   = _ap_gen;
+    float    expected_s = _submitApStroke(_stroke_index, sp);
+    if (expected_s < 0.0f) {
+        // No meaningful travel (depths pinched together) — keep parity
+        // advancing so modifier cycles don't stall, then breathe.
+        _stroke_index++;
+        vTaskDelay(pdMS_TO_TICKS(50));
+        return;
+    }
+
+    uint32_t       started_ms  = millis();
+    uint32_t       expect_ms   = (uint32_t)(expected_s * 1000.0f);
+    const uint32_t hard_cap_ms = expect_ms * 3u + 2000u;  // wedge guard: ceiling-clamped
+                                                          // strokes run long, never forever
+    while (_running && _advanced) {
+        vTaskDelay(pdMS_TO_TICKS(5));
+
+        if (_ap_gen != gen_seen) {
+            gen_seen = _ap_gen;
+            advpat::StrokePlan rp = _ap.planStroke(_stroke_index);
+            if (!rp.moving) {
+                // Master speed hit 0 mid-stroke: decelerate to a stop where we
+                // are instead of finishing the plunge. Deadline-less intent =
+                // plan at the input ceilings, i.e. stop as fast as allowed.
+                MotionIntent halt = {};
+                halt.source    = MotionSource::PATTERN;
+                halt.target_mm = _motor.getPosition();
+                halt.seq       = (uint16_t)_stroke_index;
+                _arbiter->submit(halt);
+                _state.commanded_target_mm = halt.target_mm;
+                _state.commanded_raw_mm    = halt.target_mm;
+                break;
+            }
+            float t = _submitApStroke(_stroke_index, rp);
+            if (t >= 0.0f) {
+                started_ms = millis();
+                expect_ms  = (uint32_t)(t * 1000.0f);
+            }
+        }
+
+        uint32_t elapsed = millis() - started_ms;
+        if (elapsed >= expect_ms && !_motor.isMoving()) break;  // stroke landed
+        if (elapsed >= hard_cap_ms) break;
+    }
+    _stroke_index++;
+}
+
+// Convert one StrokePlan into a MotionIntent and submit it. fray-d's dynamics:
+// cruise speed v = speed_frac × input ceiling; accel spans 1×..10× of the
+// minimum accel that can reach v over this distance (minA = v²/d — at 1× the
+// profile is a pure triangle peaking at v, at 10× it's nearly all cruise).
+// The deadline is the trapezoid's own duration T = d/v + v/a, so the pacing
+// wait and the planner agree on when the stroke should land.
+float PatternEngine::_submitApStroke(uint32_t stroke_count, const advpat::StrokePlan& sp) {
+    float lo = _mapper.getMinMm(), hi = _mapper.getMaxMm();
+    float span = hi - lo;
+    if (span <= 0.0f) return -1.0f;
+
+    float target_mm = lo + sp.target_frac * span;
+    float d = fabsf(target_mm - _motor.getPosition());
+    if (d < 0.25f) return -1.0f;            // sub-quarter-mm: nothing worth dispatching
+
+    float v = sp.speed_frac * _state.config.max_speed_mm_s;
+    if (v < 1.0f) v = 1.0f;                 // keep the deadline finite at knob extremes
+
+    float min_a = (v * v) / d;
+    float a     = min_a * (1.0f + 9.0f * sp.accel_knob);
+    float T     = d / v + v / a;
+
+    MotionIntent intent = {};
+    intent.source           = MotionSource::PATTERN;
+    intent.target_mm        = target_mm;
+    intent.deadline_ms      = (uint32_t)(T * 1000.0f) + 1;
+    intent.speed_hint_mm_s  = v;
+    intent.accel_hint_mm_s2 = a;
+    intent.seq              = (uint16_t)stroke_count;
+
+    PlanReport report = _arbiter->submit(intent);
+
+    if (report.deadline_late) {
+        static uint32_t last_late_log_ms = 0;
+        uint32_t now_late = millis();
+        if (now_late - last_late_log_ms > 2000) {
+            last_late_log_ms = now_late;
+            APPLOGF("PatternEngine ADV CLAMPED: stroke wants %.0f mm/s @ %.0f mm/s² "
+                    "but input limits allow %.0f/%.0f — running softer than dialed",
+                    report.derived_speed_mm_s, report.derived_accel_mm_s2,
+                    report.clamped_speed_mm_s, report.clamped_accel_mm_s2);
+        }
+    }
+
+    _state.commanded_target_mm = target_mm;
+    _state.commanded_raw_mm    = target_mm;
+    return T;
 }

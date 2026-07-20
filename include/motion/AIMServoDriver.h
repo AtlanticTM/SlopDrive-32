@@ -77,8 +77,11 @@ public:
     // ---- Position monitor ---------------------------------------------------
     void runMotorStep() override;
 
-    // ---- Motion -------------------------------------------------------------
-    void moveTo(float pos_mm) override;
+protected:
+    // ---- Motion (MotionArbiter-only — see MotorDriver.h sole-caller lock) ----
+    // Kept protected in the derived class too so the compile-time lock can't be
+    // bypassed by holding a concrete AIMServoDriver& instead of a MotorDriver&.
+    bool moveTo(float pos_mm) override;
     void streamTo(float pos_mm, float speed_mm_s) override;
 
     // Pre-planned native-step dispatch — called from Core 1 motionConsumerTask.
@@ -92,6 +95,7 @@ public:
     void stop() override;
     void hardStop() override;
 
+public:
     // No enable pin on the 57AIM30 — always energized when powered.
     // These satisfy the interface but do nothing to hardware. :3
     void enable()  override;
@@ -101,6 +105,9 @@ public:
     void     setMaxSpeed(float speed_mm_s) override;
     void     setAcceleration(float accel_mm_s2) override;
     float    getMaxSpeed() const override { return _max_speed_mm_s; }
+    // The accel ACTUALLY applied (post the driver's internal 20000 mm/s² clamp)
+    // — this is what settings echoes report back, never the raw request. :3
+    float    getAcceleration() const override { return _accel_mm_s2; }
 
     // Returns the live FAS acceleration — what the ramp engine is actually
     // using right now, not the configured ceiling. Mirrors OSSM's
@@ -206,6 +213,8 @@ public:
     float getDieTempC()       const override { return _current.cachedDieTempC(); }
     float getPeakBusCurrentA() const override { return _current.getPeakCurrentA(); }
     bool  hasPowerMonitor()   const override { return _current.isReady(); }
+    float getBusEnergyWh()    const override { return _current.cachedEnergyWh(); }
+    void  resetPowerStats()   override { _current.resetPeaks(); }  // clears peaks + INA228 Wh accumulator
 private:
     // Throttle for the update()-driven telemetry refresh. We only need the
     // toolbar number a few times a second, not every motion tick. :3

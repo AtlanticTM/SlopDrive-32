@@ -47,7 +47,14 @@ bool CurrentSensor::init() {
     int rc = _ina.setMaxCurrentShunt(INA228_MAX_CURRENT_A, INA228_SHUNT_OHMS);
 
     if (rc != 0) {
-        CLOGF("INA228: setMaxCurrentShunt() returned %d (non-zero = warning) :3\n", rc);
+        // A failed calibration means every current reading is mis-scaled — a
+        // stall at the hard stop might never trip the threshold. Do NOT mark
+        // the sensor ready: sensorless homing gates on isReady() and must
+        // refuse rather than trust garbage feel. :3
+        CLOGF("INA228: setMaxCurrentShunt() FAILED (rc=%d) — calibration invalid, "
+              "current sensing DISABLED, sensorless homing will refuse. uhoh :3\n", rc);
+        _ready = false;
+        return false;
     }
 
     // ADCRANGE = 0 -> ±163.84mV full scale. Do NOT use range 1 (±40.96mV) — it

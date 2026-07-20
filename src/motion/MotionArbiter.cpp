@@ -135,14 +135,27 @@ bool MotionArbiter::submitStreamSample(float norm_pos, float norm_vel_per_s) {
     int32_t hard_max_steps = 0;
     target_steps = constrain(target_steps, hard_min_steps, hard_max_steps);
 
+    // ---- Window-entry gentleness (honor USER limits on the way in) -----------
+    // If the carriage is currently OUTSIDE the stroke window, the sample that
+    // carries it in honors the gentle USER limits instead of the input ceiling
+    // — the same "glide, don't lunge" rule as the trapezoid planner. Once the
+    // carriage is inside the window, the normal INPUT set resumes. :3
+    bool entering = _isOutsideWindow(_motor.getPosition());
+
     // ---- Speed ceiling (with safe-approach soft-start) -----------------------
-    float speed_ceiling = _input_speed_limit_mm_s;
+    float speed_ceiling = entering ? fminf(_input_speed_limit_mm_s, _user_speed_limit_mm_s)
+                                   : _input_speed_limit_mm_s;
     {
         uint32_t now_ms = millis();
         float safe_cap = _state.safeSpeedCap(speed_ceiling, now_ms);
         if (safe_cap < speed_ceiling) speed_ceiling = safe_cap;
     }
-    float accel_ceiling = _input_accel_limit_mm_s2;
+    float accel_ceiling = entering ? fminf(_input_accel_limit_mm_s2, _user_accel_limit_mm_s2)
+                                   : _input_accel_limit_mm_s2;
+
+    // Safe-approach floor, capped at the active ceiling so a gentle window-entry
+    // ceiling (USER limit, possibly < SAFE_APPROACH_SPEED_MM_S) isn't overridden.
+    float speed_floor = fminf(SAFE_APPROACH_SPEED_MM_S, speed_ceiling);
 
     // ---- Speed feed — mode dependent -----------------------------------------
     float speed_mm_s;
@@ -151,13 +164,13 @@ bool MotionArbiter::submitStreamSample(float norm_pos, float norm_vel_per_s) {
         // the window span, so FAS coasts the cubic's exact instantaneous speed.
         float span_mm = _mapper.getMaxMm() - _mapper.getMinMm();
         speed_mm_s = fabsf(norm_vel_per_s) * span_mm;
-        if (speed_mm_s > speed_ceiling)             speed_mm_s = speed_ceiling;
-        if (speed_mm_s < SAFE_APPROACH_SPEED_MM_S)  speed_mm_s = SAFE_APPROACH_SPEED_MM_S;
+        if (speed_mm_s > speed_ceiling)  speed_mm_s = speed_ceiling;
+        if (speed_mm_s < speed_floor)    speed_mm_s = speed_floor;
     } else {
         // Ceiling-pegged: constant speed; the 1ms micro-target position deltas
         // themselves shape velocity, keeping the grit-cache quiet.
         speed_mm_s = speed_ceiling;
-        if (speed_mm_s < SAFE_APPROACH_SPEED_MM_S)  speed_mm_s = SAFE_APPROACH_SPEED_MM_S;
+        if (speed_mm_s < speed_floor)    speed_mm_s = speed_floor;
     }
 
     uint32_t speed_steps_s  = (uint32_t)(speed_mm_s   * AIM_STEPS_PER_MM);
@@ -182,8 +195,9 @@ bool MotionArbiter::submitStreamSample(float norm_pos, float norm_vel_per_s) {
 
 PlanReport MotionArbiter::submit(const MotionIntent& intent) {
     if (!_state.homed && intent.source != MotionSource::MANUAL) {
-        // Not homed and not a manual override — silently drop. Manual moves
-        // bypass homed check (push-to-home scenario).
+        // Not homed and not a manual override — drop, but leave a trace.
+        // Manual moves bypass homed check (push-to-home scenario).
+        _logRejected("not-homed", intent.source);
         PlanReport rpt = {};
         return rpt;
     }
@@ -191,12 +205,14 @@ PlanReport MotionArbiter::submit(const MotionIntent& intent) {
     // E-stop check — absolute gate, no source bypass. If the red button
     // was slapped, nothing moves. Period.
     if (_state.estop_requested.load(std::memory_order_relaxed)) {
+        _logRejected("e-stop", intent.source);
         PlanReport rpt = {};
         return rpt;
     }
 
     // Evaluate per-source gates (paused, manual_override, window, etc.)
     if (!_gatesPass(intent)) {
+        _logRejected("gates (paused/override/intiface-recency)", intent.source);
         PlanReport rpt = {};
         rpt.deadline_feasible = false;
         return rpt;
@@ -242,9 +258,12 @@ bool MotionArbiter::_gatesPass(const MotionIntent& intent) {
     // control (paused/override), Intiface stream commands take priority over
     // PatternEngine.
     if (intent.source == MotionSource::PATTERN) {
-        bool intiface_recent = (_state.last_intiface_ms != 0) &&
-                               (millis() - _state.last_intiface_ms < 250);
-        if (intiface_recent) return false;
+        // Yield on stream MOTION, not packets (keep-alive-only hosts must not
+        // pin the pattern off) — same rule as PatternEngine's emit gate and
+        // streamSamplerTask's reclaim.
+        bool intiface_driving = (_state.last_intiface_move_ms != 0) &&
+                                (millis() - _state.last_intiface_move_ms < 1500);
+        if (intiface_driving) return false;
     }
 
     return true;
@@ -263,6 +282,16 @@ float MotionArbiter::_clampToWindow(float mm, MotionSource source) {
     // Stream/pattern/OSSM moves are clamped to the user's configured range window
     float lo = _mapper.getMinMm(), hi = _mapper.getMaxMm();
     return constrain(mm, lo, hi);
+}
+
+// ============================================================================
+// Window-entry detection — is the carriage currently outside the stroke window?
+// ============================================================================
+
+bool MotionArbiter::_isOutsideWindow(float p0_mm) const {
+    const float eps = 0.5f;  // 0.5mm slack — sub-safety-zone, avoids edge chatter
+    float lo = _mapper.getMinMm(), hi = _mapper.getMaxMm();
+    return (p0_mm < lo - eps) || (p0_mm > hi + eps);
 }
 
 // ============================================================================
@@ -366,6 +395,17 @@ PlanReport MotionArbiter::_planAndDispatch(const MotionIntent& intent, bool /*lo
     int32_t target_steps = -_motor.mmToNative(target_mm);
     float distance_mm = fabsf(target_mm - p0_mm);
 
+    // ---- Window-entry gentleness (honor USER limits on the way in) -----------
+    // A machine-driven source currently sitting OUTSIDE the stroke window is
+    // about to be dragged to the clamped window edge. Doing that at the INPUT
+    // ceiling is the "shoot to the window" lunge. Instead, cap this move at the
+    // gentle USER limits so the carriage glides into the window; once it's
+    // inside, subsequent intents fall back to the normal input set. :3
+    if (intent.source != MotionSource::MANUAL && _isOutsideWindow(p0_mm)) {
+        speed_ceiling = fminf(speed_ceiling, _user_speed_limit_mm_s);
+        accel_ceiling = fminf(accel_ceiling, _user_accel_limit_mm_s2);
+    }
+
     // ---- Even for zero-distance, dispatch to FAS to re-arm the stall watchdog.
     // The 57AIM driver has a stream stall watchdog (STREAM_STALL_MS = 80ms):
     // if no streamToSteps() call is received within that window, it one-shot
@@ -414,7 +454,15 @@ PlanReport MotionArbiter::_planAndDispatch(const MotionIntent& intent, bool /*lo
         float triangle_speed = 2.0f * distance_mm / T;
         float triangle_accel = 4.0f * distance_mm / (T * T);
 
-        if (intent.speed_hint_mm_s > 0.0f && intent.speed_hint_mm_s < triangle_speed) {
+        if (intent.speed_hint_mm_s > 0.0f && intent.accel_hint_mm_s2 > 0.0f) {
+            // Advanced pattern mode: the pattern derived BOTH cruise speed and
+            // accel from its own per-direction stroke geometry. Deadline+hint
+            // alone cannot carry an independent accel demand (the T terms
+            // cancel to a fixed 2v²/d), so the explicit hint is taken as the
+            // derived dynamics. Ceilings still clamp below — never exceeded.
+            derived_speed_mm_s  = intent.speed_hint_mm_s;
+            derived_accel_mm_s2 = intent.accel_hint_mm_s2;
+        } else if (intent.speed_hint_mm_s > 0.0f && intent.speed_hint_mm_s < triangle_speed) {
             // Speed hint is LOWER than triangle peak — use it as cruise speed,
             // which means there IS a cruise phase: longer time, lower accel.
             // This is a gentle trapezoid: accel to hint speed, cruise, decel.
@@ -524,8 +572,13 @@ PlanReport MotionArbiter::_planAndDispatch(const MotionIntent& intent, bool /*lo
     // velocity when we keep the speed/accel pegged at meaningful values.
     // This exactly matches main-branch v3 behavior at 333Hz where small
     // distances always planned at the full accel ceiling. :3
-    if (clamped_speed < SAFE_APPROACH_SPEED_MM_S && distance_mm > 0.01f) {
-        clamped_speed = SAFE_APPROACH_SPEED_MM_S;
+    // Floor the dispatch speed at the safe-approach minimum — but never ABOVE
+    // the active ceiling. During a window-entry glide the ceiling is the gentle
+    // USER limit (e.g. 50 mm/s), which is below SAFE_APPROACH_SPEED_MM_S (100);
+    // flooring at the raw constant there would undo the gentleness. :3
+    float speed_floor = fminf(SAFE_APPROACH_SPEED_MM_S, speed_ceiling);
+    if (clamped_speed < speed_floor && distance_mm > 0.01f) {
+        clamped_speed = speed_floor;
     }
 
     uint32_t speed_steps_s  = (uint32_t)(clamped_speed * AIM_STEPS_PER_MM);
@@ -568,7 +621,12 @@ void MotionArbiter::emergencyStop() {
 }
 
 void MotionArbiter::stopMotion() {
-    _motor.hardStop();
+    // Full stop with power cut — the driver's stop() semantics (halts the pulse
+    // train, kills any homing task, disables outputs, clears homed). This is
+    // deliberately DIFFERENT from hardStopMotion(), which halts but keeps the
+    // motor powered and homed. Previously both called hardStop(), making this
+    // method's documented "stop + cut power" a lie. :3
+    _motor.stop();
 }
 
 void MotionArbiter::hardStopMotion() {
@@ -582,6 +640,21 @@ void MotionArbiter::pause() {
 void MotionArbiter::resume() {
     _state.paused = false;
     _state.resume_start_ms = millis();  // stamp for safeSpeedCap soft-start
+}
+
+// ============================================================================
+// Rejected-intent trace — rate-limited so a gated 333Hz stream can't log-flood
+// ============================================================================
+
+void MotionArbiter::_logRejected(const char* reason, MotionSource source) {
+    _rejected_count = _rejected_count + 1;
+    static uint32_t last_log_ms = 0;
+    uint32_t now = millis();
+    if (now - last_log_ms > 2000) {
+        last_log_ms = now;
+        APPLOGF("MotionArbiter REJECT: %s (src=%u) — %lu intents rejected total",
+                reason, (unsigned)source, (unsigned long)_rejected_count);
+    }
 }
 
 // ============================================================================

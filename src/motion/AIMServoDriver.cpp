@@ -164,9 +164,17 @@ void AIMServoDriver::update() {
 }
 
 void AIMServoDriver::emergencyStop() {
-    // The red button got slapped. Cut the pulse train NOW. The 57AIM30 will
-    // decelerate on its own internal ramp — we just stop commanding it.
-    // Everything goes soft. No ambiguity. No stale flags. :3
+    // The red button got slapped. Kill the homing task FIRST — mid-sweep it
+    // would just see its wait loop end, roll into the next sweep, and later
+    // re-assert _homed = true, resuming motion right after the E-stop. Same
+    // kill stop() does. THEN cut the pulse train. The 57AIM30 will decelerate
+    // on its own internal ramp — we just stop commanding it. Everything goes
+    // soft. No ambiguity. No stale flags. :3
+    if (_homingTaskHandle != nullptr) {
+        vTaskDelete(_homingTaskHandle);
+        _homingTaskHandle = nullptr;
+        MLOGLN(F("AIMServo E-stop: homing task killed mid-sweep."));
+    }
     hardStop();
     _homed  = false;
     _homing = false;
@@ -495,7 +503,7 @@ bool AIMServoDriver::home(int32_t home_speed_steps_s) {
     // and the FAS engine). Priority 20 matches StrokeEngine — high enough to
     // preempt normal motion but below the FAS ISR. The task deletes itself
     // when homing completes or fails. :3
-    xTaskCreatePinnedToCore(
+    BaseType_t created = xTaskCreatePinnedToCore(
         _homingTaskImpl,        // static trampoline
         "AIMHoming",            // task name
         4096,                   // stack (bytes)
@@ -504,6 +512,14 @@ bool AIMServoDriver::home(int32_t home_speed_steps_s) {
         &_homingTaskHandle,     // handle so we can kill it on E-stop
         1                       // Core 1 — same core as FAS engine
     );
+    if (created != pdPASS) {
+        // Task never spawned (heap pressure). Without this rollback _homing
+        // stays true forever and home() refuses until reboot — silently. :3
+        _homing = false;
+        _homingTaskHandle = nullptr;
+        MLOGLN(F("AIMServo Homing: FAILED to create homing task (out of memory?) — homing aborted. uhoh :C"));
+        return false;
+    }
 
     return false;  // homing is async — watch isHoming()/isHomed() for completion
 }
@@ -608,10 +624,10 @@ bool AIMServoDriver::checkPushToHome() {
 // ---- Motion ------------------------------------------------------------------
 
 
-void AIMServoDriver::moveTo(float pos_mm) {
+bool AIMServoDriver::moveTo(float pos_mm) {
     if (!_homed) {
         MLOGLN(F("AIMServo: Cannot move — not homed!"));
-        return;
+        return false;
     }
 
     enable();
@@ -626,7 +642,7 @@ void AIMServoDriver::moveTo(float pos_mm) {
     // "Out" (extended/front) = positive mm = NEGATIVE steps
     int32_t target_steps = -mmToNative(pos_mm);
 
-    if (!_stepper) return;
+    if (!_stepper) return false;
 
     uint32_t speed_hz = (uint32_t)(_max_speed_mm_s * AIM_STEPS_PER_MM);
     if (speed_hz < 1) speed_hz = 1;
@@ -641,7 +657,7 @@ void AIMServoDriver::moveTo(float pos_mm) {
     if (target_steps == pos_before) {
         MLOGF("AIMServo moveTo: %.1fmm already at target step %d\n",
               pos_mm, target_steps);
-        return;
+        return true;   // already there — a satisfied move, not a refusal
     }
 
     // If a previous move is still draining the queue, force-stop and re-sync
@@ -656,11 +672,14 @@ void AIMServoDriver::moveTo(float pos_mm) {
     }
 
     // FAS 0.34.0+ returns MoveResultCode (an enum) instead of int8_t.
-    // Cast to int for the log — the numeric value is identical. :3
+    // Cast to int for the log — the numeric value is identical. 0 = OK. :3
     int mret = (int)_stepper->moveTo(target_steps);
 
     MLOGF("AIMServo moveTo: %.1fmm -> step %d (from %d) at %u Hz ret=%d\n",
           pos_mm, target_steps, pos_before, speed_hz, mret);
+    // Propagate FAS's verdict — a silently-refused move must be visible to the
+    // caller (MotionArbiter), not just this log line. :3
+    return mret == 0;
 }
 
 // ============================================================================

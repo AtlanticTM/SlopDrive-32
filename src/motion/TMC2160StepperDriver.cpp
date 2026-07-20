@@ -181,6 +181,14 @@ void TMC2160StepperDriver::update() {
 
 
 void TMC2160StepperDriver::emergencyStop() {
+    // Kill the homing task FIRST — mid-sweep it would just see its wait loop
+    // end, proceed into the next phase, and later re-assert _homed = true,
+    // resuming motion right after the E-stop. Same kill stop() does. :3
+    if (_homingTaskHandle != nullptr) {
+        vTaskDelete(_homingTaskHandle);
+        _homingTaskHandle = nullptr;
+        MLOGLN(F("E-stop: homing task killed mid-sweep."));
+    }
     hardStop();
     disable();
     _homed = false;
@@ -380,7 +388,7 @@ bool TMC2160StepperDriver::home(int32_t home_speed_steps_s) {
     // and the FAS engine). Priority 20 matches StrokeEngine — high enough to
     // preempt normal motion but below the FAS ISR. The task deletes itself
     // when homing completes or fails. :3
-    xTaskCreatePinnedToCore(
+    BaseType_t created = xTaskCreatePinnedToCore(
         _homingTaskImpl,        // static trampoline
         "Homing",               // task name
         4096,                   // stack (bytes) — homing does some string ops
@@ -389,6 +397,14 @@ bool TMC2160StepperDriver::home(int32_t home_speed_steps_s) {
         &_homingTaskHandle,     // handle so we can kill it on E-stop
         1                       // Core 1 — same core as FAS engine
     );
+    if (created != pdPASS) {
+        // Task never spawned (heap pressure). Without this rollback _homing
+        // stays true forever and home() refuses until reboot — silently. :3
+        _homing = false;
+        _homingTaskHandle = nullptr;
+        MLOGLN(F("Homing: FAILED to create homing task (out of memory?) — homing aborted."));
+        return false;
+    }
 
     return false;  // homing is async — watch isHoming()/isHomed() for completion
 }
@@ -463,10 +479,10 @@ bool TMC2160StepperDriver::checkPushToHome() {
 
 // ---- Motion ------------------------------------------------------------------
 
-void TMC2160StepperDriver::moveTo(float pos_mm) {
+bool TMC2160StepperDriver::moveTo(float pos_mm) {
     if (!_homed) {
         MLOGLN(F("Cannot move: not homed!"));
-        return;
+        return false;
     }
 
     // Always ensure motor is enabled before moving
@@ -480,7 +496,7 @@ void TMC2160StepperDriver::moveTo(float pos_mm) {
     // "Out" (extended/front) = positive mm = NEGATIVE steps
     int32_t target_steps = -mmToNative(pos_mm);
 
-    if (!_stepper) return;
+    if (!_stepper) return false;
 
     // Speed must be set before moveTo() on FastAccelStepper
     uint32_t speed_hz = (uint32_t)(_max_speed_mm_s * STEPS_PER_MM);
@@ -496,7 +512,7 @@ void TMC2160StepperDriver::moveTo(float pos_mm) {
     // If target == current, nothing to do
     if (target_steps == pos_before) {
         MLOGF("moveTo: %.1fmm already at target step %d\n", pos_mm, target_steps);
-        return;
+        return true;   // already there — a satisfied move, not a refusal
     }
 
     // If a previous move is still draining the queue, force-stop and re-sync
@@ -510,10 +526,13 @@ void TMC2160StepperDriver::moveTo(float pos_mm) {
     }
 
     // Now the queue is empty - a normal absolute moveTo() works correctly.
-    int8_t mret = _stepper->moveTo(target_steps);
+    int8_t mret = (int8_t)_stepper->moveTo(target_steps);
 
     MLOGF("moveTo: %.1fmm -> step %d (from %d) at %u Hz ret=%d\n",
           pos_mm, target_steps, pos_before, speed_hz, mret);
+    // Propagate FAS's verdict — a silently-refused move must be visible to the
+    // caller (MotionArbiter), not just this log line. 0 = OK. :3
+    return mret == 0;
 }
 
 // ============================================================================
@@ -802,10 +821,22 @@ void TMC2160StepperDriver::applyDriverConfig(const DriverConfig& cfg) {
     _tmc->pwm_autoscale(true);          // required for StealthChop to self-tune
     _tmc->TPWMTHRS(cfg.tpwm_thrs);
 
-    MLOGF("Driver: run=%umA hold=%u%% toff=%u tbl=%u sc=%s tpwmthrs=%lu hs=%d he=%d\n",
-          cfg.run_current_ma, cfg.hold_current_pct, cfg.toff, cfg.tbl,
+    // Readback verification — same check init() does after its register writes.
+    // A transient SPI glitch on a live settings change would otherwise leave the
+    // TMC silently running the OLD settings while UI + driver both believe the
+    // new config took effect. Microsteps is the canary (exact-match readback);
+    // rms_current readback is quantized so we log it rather than compare. :3
+    uint16_t rb_ms  = _tmc->microsteps();
+    uint32_t rb_cur = _tmc->rms_current();
+    if (rb_ms != MICROSTEPS) {
+        MLOGF("WARNING: TMC readback MISMATCH after config write (microsteps set=%u read=%u) "
+              "— SPI glitch, settings may NOT be active!\n", MICROSTEPS, rb_ms);
+    }
+
+    MLOGF("Driver: run=%umA (rb=%lumA) hold=%u%% toff=%u tbl=%u sc=%s tpwmthrs=%lu hs=%d he=%d rb_ms=%u\n",
+          cfg.run_current_ma, (unsigned long)rb_cur, cfg.hold_current_pct, cfg.toff, cfg.tbl,
           cfg.stealthchop ? "stealth" : "spread",
-          (unsigned long)cfg.tpwm_thrs, (int)cfg.hstart, (int)cfg.hend);
+          (unsigned long)cfg.tpwm_thrs, (int)cfg.hstart, (int)cfg.hend, rb_ms);
 }
 
 // ---- Diagnostics -------------------------------------------------------------

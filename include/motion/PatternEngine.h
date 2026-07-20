@@ -3,6 +3,7 @@
 #include <freertos/FreeRTOS.h>
 #include <freertos/task.h>
 #include "SystemState.h"
+#include "AdvancedPattern.h"
 
 class RangeMapper;
 class MotorDriver;
@@ -51,6 +52,26 @@ public:
     float getStrokePercent()    const { return _stroke; }
     float getSensationPercent() const { return (_sensation + 100.0f) / 2.0f; }  // -100..+100 → 0..100
     int   getPatternIdx()       const { return _pattern_idx; }
+
+    // ---- Advanced mode (fray-d Advanced Penetration port) -------------------
+    // Advanced is the PRIMARY pattern generator; the vendored StrokeEngine
+    // pattern list above stays available as the legacy/classic option.
+    bool  isAdvancedMode() const { return _advanced; }
+    void  setAdvancedMode(bool on);
+    void  setApMaster(int v);                       // 0..100, 0 = stopped/hold
+    void  setApBase(uint8_t base_id, int v);        // advpat::BaseId, clamps + depth coupling
+    int   getApMaster() const { return _ap.master.value; }
+    int   getApBase(uint8_t base_id) const;
+    // Full-modifier write for one base control (single Core-0 writer; the
+    // WebUI reads current values via apSettings() and overrides the fields
+    // the request carried).
+    void  setApModifier(uint8_t base_id, int amplitude, int in_step, int in_wait,
+                        int out_step, int out_wait, int offset);
+    // fray-d "reset" baseline: speeds/accels to defaults, all modifiers off.
+    // Depths and master speed deliberately untouched — presets change stroke
+    // character, never the user's safety window or throttle.
+    void  resetAdvanced();
+    const advpat::Settings& apSettings() const { return _ap; }
 
     // ---- User-facing controls (Core 0 — WebUI / API) ------------------------
     // Must already be homed.  Boots in stopped state.
@@ -106,6 +127,11 @@ private:
     volatile int   _pattern_idx = 0;
     volatile bool  _running     = false;
 
+    // ---- Advanced mode state --------------------------------------------------
+    advpat::Settings  _ap;                  // Core 0 writes via setters, Core 1 reads
+    volatile bool     _advanced = true;     // advanced IS the default generator
+    volatile uint32_t _ap_gen   = 0;        // bumped on any advanced write → live retarget
+
     // ---- Virtual step system --------------------------------------------------
     // The vendored pattern classes work in integer "steps". We define a fixed
     // abstract step range; all conversions to/from mm happen in this module.
@@ -121,6 +147,15 @@ private:
 
     // The actual task loop (runs on Core 1).
     void run();
+
+    // ---- Advanced-mode stroke cycle (Core 1) ---------------------------------
+    // One half-stroke: plan → submit ONE intent → event-driven wait (with live
+    // retarget when a parameter write bumps _ap_gen mid-stroke).
+    void _advancedStroke();
+    // Convert a StrokePlan into a MotionIntent and submit. Returns the
+    // expected stroke duration in seconds, or -1 if there was no meaningful
+    // travel (nothing dispatched).
+    float _submitApStroke(uint32_t stroke_count, const advpat::StrokePlan& sp);
 
     // ---- Unit conversion helpers (all inline, float) --------------------------
     float stepToMm(int step) const;

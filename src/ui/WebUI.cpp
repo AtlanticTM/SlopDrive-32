@@ -3,6 +3,7 @@
 #include <ArduinoJson.h>
 #include <ESPmDNS.h>
 #include <LittleFS.h>
+#include <Preferences.h>
 #include <WebServer.h>
 #include <WiFi.h>
 #include <esp_timer.h>
@@ -98,6 +99,8 @@ void WebUI::init() {
     _httpServer->on("/api/clearfault",HTTP_POST, [this]() { statusLedsActivity(); handleApiClearFault(); });
     _httpServer->on("/api/pattern",   HTTP_GET,  [this]() { handleApiPattern(); });
     _httpServer->on("/api/pattern",   HTTP_POST, [this]() { statusLedsActivity(); handleApiPattern(); });
+    _httpServer->on("/api/pattern/presets", HTTP_GET,  [this]() { handleApiPatternPresets(); });
+    _httpServer->on("/api/pattern/presets", HTTP_POST, [this]() { statusLedsActivity(); handleApiPatternPresets(); });
     _httpServer->on("/api/log",       HTTP_GET,  [this]() { handleApiLog(); });
     _httpServer->on("/api/mode",      HTTP_GET,  [this]() { handleApiMode(); });
     _httpServer->on("/api/mode",      HTTP_POST, [this]() { handleApiMode(); });
@@ -143,13 +146,58 @@ void WebUI::startTelemetrySampler() {
     args.name            = "tele10ms";
     if (esp_timer_create(&args, &handle) == ESP_OK) {
         esp_timer_start_periodic(handle, 4166ULL);
+        _state.session_start_ms = millis();   // stamp the session odometer clock
         APPLOG("Telemetry sampler armed — sampling the shaft at 240Hz :3");
     } else {
         APPLOG("Telemetry sampler FAILED to arm — graph will be limp. :<");
     }
 }
 
+void WebUI::resetSessionStats() {
+    _state.live_speed_mm_s.store(0.0f, std::memory_order_relaxed);
+    _state.max_speed_mm_s.store(0.0f, std::memory_order_relaxed);
+    _state.session_distance_mm.store(0.0f, std::memory_order_relaxed);
+    _state.stroke_count.store(0, std::memory_order_relaxed);
+    _state.session_start_ms = millis();
+    _motor.resetPowerStats();   // zero the INA228 Wh accumulator + software peaks
+    APPLOG("Session stats reset :3");
+}
+
 void WebUI::captureTelemetry(float position_mm, float target_mm, float raw_mm) {
+    // ---- Session odometer stats (single-writer: this 240Hz timer task) --------
+    // Derive live/peak speed, accumulate distance, and count strokes (direction
+    // reversals) straight from the position stream. Cheap float math; publishes
+    // to SystemState atomics that the 0x06 STATS frame + SESSION card read. :3
+    {
+        static float    last_pos_mm = position_mm;
+        static uint32_t last_us     = (uint32_t)(esp_timer_get_time() & 0xFFFFFFFFu);
+        static float    spd_ema     = 0.0f;
+        static int8_t   last_dir    = 0;
+        uint32_t now_us = (uint32_t)(esp_timer_get_time() & 0xFFFFFFFFu);
+        float dt = (float)(now_us - last_us) * 1e-6f;      // seconds
+        if (dt > 1e-4f && dt < 1.0f) {                     // ignore stalls/wraps
+            float dpos  = position_mm - last_pos_mm;
+            float adpos = fabsf(dpos);
+            if (adpos > 0.002f) {                          // ignore sub-2µm jitter
+                _state.session_distance_mm.store(
+                    _state.session_distance_mm.load(std::memory_order_relaxed) + adpos,
+                    std::memory_order_relaxed);
+            }
+            float inst = adpos / dt;                        // instantaneous mm/s
+            spd_ema += 0.25f * (inst - spd_ema);            // ~17ms time constant
+            _state.live_speed_mm_s.store(spd_ema, std::memory_order_relaxed);
+            if (spd_ema > _state.max_speed_mm_s.load(std::memory_order_relaxed))
+                _state.max_speed_mm_s.store(spd_ema, std::memory_order_relaxed);
+            // A "stroke" = a direction reversal with meaningful travel.
+            int8_t dir = (dpos > 0.05f) ? 1 : (dpos < -0.05f) ? -1 : last_dir;
+            if (dir != 0 && last_dir != 0 && dir != last_dir)
+                _state.stroke_count.fetch_add(1, std::memory_order_relaxed);
+            last_dir = dir;
+        }
+        last_pos_mm = position_mm;
+        last_us     = now_us;
+    }
+
     portENTER_CRITICAL_ISR(&_telemetry_mux);
     uint32_t seq = _telemetry_seq;
     size_t idx = seq % TELEMETRY_RING_SIZE;
@@ -213,7 +261,15 @@ void WebUI::handleApiStatus() {
         doc["bus_power_w"] = _motor.getBusPowerW();
         doc["die_temp_c"] = _motor.getDieTempC();
         doc["peak_current_a"] = _motor.getPeakBusCurrentA();
+        doc["energy_wh"] = _motor.getBusEnergyWh();
     }
+
+    // Session odometer stats (also carried in the 0x06 STATS WS frame).
+    doc["live_speed_mm_s"]  = _state.live_speed_mm_s.load(std::memory_order_relaxed);
+    doc["max_speed_mm_s"]   = _state.max_speed_mm_s.load(std::memory_order_relaxed);
+    doc["distance_mm"]      = _state.session_distance_mm.load(std::memory_order_relaxed);
+    doc["strokes"]          = _state.stroke_count.load(std::memory_order_relaxed);
+    doc["session_ms"]       = (uint32_t)(millis() - _state.session_start_ms);
 
     uint16_t hz = _state.measured_hz;
     doc["measured_hz"] = hz;
@@ -235,11 +291,13 @@ void WebUI::handleApiStatus() {
 
     doc["paused"] = _state.paused;
     doc["manual_override"] = _state.manual_override;
+    doc["estopped"] = (bool)_state.estop_latched;   // latched e-stop state for the fallback poll
 
     // ---- Motion-generation diagnostics (D4: intent rate + plan dynamics) ----
     if (_arbiter) {
         PlanReport rpt = _arbiter->lastReport();
         doc["intent_count"] = _arbiter->totalIntents();
+        doc["intent_rejected"] = _arbiter->rejectedIntents();
         doc["plan_derived_spd"] = (uint32_t)rpt.derived_speed_mm_s;
         doc["plan_clamped_spd"] = (uint32_t)rpt.clamped_speed_mm_s;
         doc["plan_derived_acc"] = (uint32_t)rpt.derived_accel_mm_s2;
@@ -275,19 +333,14 @@ void WebUI::handleApiStatus() {
         s.add(snap[i].raw_mm);
     }
 
+    // Driver-health block: NO live fault readback exists on either driver (TMC
+    // DRV_STATUS polling was removed; the AIM drive exposes none over step/dir).
+    // Report that honestly instead of a hardcoded all-clear (otpw/ot/s2g/faulted
+    // all false) that would show "no fault" during a real overtemperature or
+    // short-to-ground event. valid:false = this block carries no live data. :3
     JsonObject drv = doc["driver"].to<JsonObject>();
+    drv["supported"] = false;
     drv["valid"]     = false;
-    drv["otpw"]      = false;
-    drv["ot"]        = false;
-    drv["s2ga"]      = false;
-    drv["s2gb"]      = false;
-    drv["ola"]       = false;
-    drv["olb"]       = false;
-    drv["stst"]      = false;
-    drv["sg_result"] = 0;
-    drv["cs_actual"] = 0;
-    drv["load_pct"]  = 0;
-    drv["faulted"]   = false;
 
     String json;
     serializeJson(doc, json);
@@ -327,6 +380,9 @@ void WebUI::handleApiCapabilities() {
     feat["has_dongle"] = true;
     feat["blend_mode"] = _motor.getBlendMode();
     feat["expert_ceilings"] = _state.expert_mode;
+    // Advanced pattern mode (fray-d port) — the UI builds the Advanced/Classic
+    // pattern card split only when the firmware actually has the engine.
+    feat["advanced_pattern"] = true;
 
     String json;
     serializeJson(doc, json);
@@ -334,8 +390,13 @@ void WebUI::handleApiCapabilities() {
 }
 
 void WebUI::handleApiClearFault() {
-    APPLOG("Driver fault clear requested (no-op — readback removed)");
-    _httpServer->send(200, "application/json", "{\"ok\":true}");
+    // No driver fault readback exists on this build — there is no fault state
+    // to clear and no way to verify a clear took effect. Say so explicitly
+    // (cleared:false) instead of an unqualified ok that implies a fault was
+    // observed and cleared. :3
+    APPLOG("Clear-fault requested — no driver fault readback on this build (nothing to clear/verify)");
+    _httpServer->send(200, "application/json",
+                      "{\"ok\":true,\"cleared\":false,\"reason\":\"no_fault_readback\"}");
 }
 
 // ============================================================================
@@ -347,8 +408,10 @@ void WebUI::handleApiSettings() {
         JsonDocument doc;
         doc["range_min"] = _mapper.getMinMm();
         doc["range_max"] = _mapper.getMaxMm();
-        doc["max_speed"] = (uint32_t)_state.config.max_speed_mm_s;
-        doc["accel"] = (uint32_t)_state.config.acceleration_mm_s2;
+        // Ground truth: speed + accel read back from the DRIVER (post its
+        // internal clamps), never the raw config request. :3
+        doc["max_speed"] = (uint32_t)_motor.getMaxSpeed();
+        doc["accel"] = (uint32_t)_motor.getAcceleration();
         // Dual limit sets (v0.4 / D4 Phase 3) — same shape as the WS echo
         doc["user_max_speed"] = (uint32_t)_state.config.user_max_speed_mm_s;
         doc["user_max_accel"] = (uint32_t)_state.config.user_max_accel_mm_s2;
@@ -399,6 +462,10 @@ void WebUI::handleApiSettings() {
 // ============================================================================
 
 bool WebUI::applySettings(JsonDocument& doc, JsonDocument& resp) {
+    // Session-odometer reset — the SESSION card's reset button posts this
+    // (with no_persist). Handle it up front so a reset-only POST works. :3
+    if (doc["reset_stats"] | false) resetSessionStats();
+
     float rmin = doc["range_min"] | _mapper.getMinMm();
     float rmax = doc["range_max"] | _mapper.getMaxMm();
     uint32_t speed = doc["max_speed"] | (uint32_t)_state.config.max_speed_mm_s;
@@ -445,6 +512,18 @@ bool WebUI::applySettings(JsonDocument& doc, JsonDocument& resp) {
 
     _state.expert_mode = doc["expert_mode"] | _state.expert_mode;
 
+    // Stream speed-feed mode + overshoot clamp — accepted here too so the WS
+    // ops (WS_OP_STREAM_MODE / WS_OP_OVERSHOOT) have a working HTTP-fallback
+    // route. Session-only volatile state, same semantics as the WS ops. :3
+    if (doc["stream_speed_mode"].is<int>()) {
+        uint8_t m = (uint8_t)(doc["stream_speed_mode"] | (int)_state.stream_speed_mode);
+        if (m > SystemState::SPEED_VELOCITY_MATCHED) m = SystemState::SPEED_VELOCITY_MATCHED;
+        _state.stream_speed_mode = m;
+    }
+    if (doc["overshoot_clamp"].is<bool>()) {
+        _state.interp_clamp_overshoot = (bool)(doc["overshoot_clamp"] | (bool)_state.interp_clamp_overshoot);
+    }
+
     // Max rail length (mm) — rail-length-agnostic ceiling. Apply BEFORE the
     // window/default-range clamps below so they validate against the new rail.
     // Sanity-bound 10..2000mm. Pushed live to the motor + mapper. :3
@@ -477,14 +556,16 @@ bool WebUI::applySettings(JsonDocument& doc, JsonDocument& resp) {
 
     if (!no_persist) ConfigStore::save(_state, _mapper, _motor);
 
-    // Echo post-clamp values — speed from driver (it caps), accel from config
-    // (the driver may cap lower than config_api.h ceiling; align in Phase 3 §4)
+    // Echo post-clamp values — BOTH speed and accel read back from the driver.
+    // The driver hard-clamps accel lower (20000) than config_api.h's ceiling
+    // (100000); echoing the config value here reported a number the motor was
+    // never going to run at. Ground Truth Doctrine: echo what was APPLIED. :3
     resp["ok"] = true;
     resp["range_min"] = _mapper.getMinMm();
     resp["range_max"] = _mapper.getMaxMm();
     resp["max_rail"] = _state.config.max_rail_mm;   // post-clamp rail length echo
     resp["max_speed"] = (uint32_t)_motor.getMaxSpeed();
-    resp["accel"] = (uint32_t)_state.config.acceleration_mm_s2;
+    resp["accel"] = (uint32_t)_motor.getAcceleration();
     resp["user_max_speed"] = (uint32_t)_state.config.user_max_speed_mm_s;
     resp["user_max_accel"] = (uint32_t)_state.config.user_max_accel_mm_s2;
     resp["input_max_speed"] = (uint32_t)_state.config.input_max_speed_mm_s;
@@ -495,6 +576,8 @@ bool WebUI::applySettings(JsonDocument& doc, JsonDocument& resp) {
     resp["expert_mode"] = _state.expert_mode;
     resp["default_range_min"] = _state.default_range_min;
     resp["default_range_max"] = _state.default_range_max;
+    resp["stream_speed_mode"] = (uint8_t)_state.stream_speed_mode;
+    resp["overshoot_clamp"] = (bool)_state.interp_clamp_overshoot;
 
     _bumpGen();
     return true;
@@ -540,7 +623,9 @@ bool WebUI::applyMove(JsonDocument& doc, JsonDocument& resp) {
     }
 
     float pos = doc["position"] | 0.0f;
-    bool bypass = doc["bypass_limits"] | false;
+    // Per-request bypass wins; otherwise honor the stored WS_OP_BYPASS state so
+    // the toggle actually does what its echo claims. :3
+    bool bypass = doc["bypass_limits"] | (bool)_state.bypass_limits;
     if (bypass) {
         // Bypass the window but NOT the machine: clamp to the effective physical
         // ceiling (measured stroke once homed, else configured max rail). :3
@@ -549,15 +634,37 @@ bool WebUI::applyMove(JsonDocument& doc, JsonDocument& resp) {
         pos = constrain(pos, _mapper.getMinMm(), _mapper.getMaxMm());
     }
     bool stream = doc["stream"] | true;
-    float speed = doc["speed"] | 0.0f;
-    if (stream) {
-        _motor.streamTo(pos, speed);
+
+    // Sole-Caller doctrine (CLAUDE.md §2): the UI is an input source — it MUST
+    // submit intents to the MotionArbiter, never call the driver directly. This
+    // is also what makes a manual move honor the USER speed/accel limit set: a
+    // MANUAL point move (deadline 0) plans AT the user ceiling instead of lunging
+    // at the driver's raw max_speed. MANUAL bypasses the window inside the arbiter
+    // (already clamped above per bypass_limits), and bypasses homed/pause gates.
+    // Deferred push: applyMove runs on Core 0; the arbiter dispatches to FAS on
+    // Core 1 (drained by processDeferred every ~1ms). :3
+    if (_arbiter) {
+        MotionIntent intent = {};
+        intent.source          = MotionSource::MANUAL;
+        intent.target_mm       = pos;     // already clamped to window / ceiling above
+        intent.deadline_ms     = 0;       // point move → plan at USER ceilings
+        intent.speed_hint_mm_s = 0.0f;
+        intent.seq             = 0;
+        _arbiter->submitDeferred(intent);
     } else {
-        _motor.moveTo(pos);
+        // No direct-driver fallback — the sole-caller rule is compile-enforced
+        // now (MotorDriver motion methods are arbiter-only). An unwired arbiter
+        // is a boot-order bug; refuse loudly instead of bypassing every gate. :3
+        APPLOG("applyMove REFUSED: MotionArbiter not wired — no motion dispatched");
+        resp["ok"] = false;
+        resp["error"] = "Motion arbiter unavailable";
+        return false;
     }
 
-    // Store the commanded position so the telemetry sampler captures live manual moves
-    // (the TCode path does this in motionConsumerTask; manual moves bypass it entirely).
+    // Seed the "where the shaft is" atomic the stream rising-edge reads
+    // (main.cpp) so a stream started right after a manual move begins from the
+    // manual endpoint, not a stale sample. The live posdot/readout reads
+    // _motor.getPosition() directly, so this is only the stream-seed hint. :3
     _state.actual_position_mm.store(pos, std::memory_order_relaxed);
     _state.commanded_target_mm = pos;
 
@@ -574,6 +681,7 @@ void WebUI::handleApiHome() {
     if (!_state.homing_in_progress) {
         _state.homed = false;
         _state.homing_in_progress = true;
+        _state.estop_latched = false;   // a fresh homing cycle exits the e-stopped state
         _state.resume_start_ms = millis();   // arm soft-start NOW so the first post-rehome move doesn't lunge (F-003)
     }
     _httpServer->send(200, "application/json", "{\"ok\":true}");
@@ -581,6 +689,7 @@ void WebUI::handleApiHome() {
 
 void WebUI::handleApiStop() {
     _state.estop_requested.store(true);
+    _state.estop_latched = true;   // latched for telemetry — UI fault banner rises from this
     _state.homed = false;
     _state.homing_in_progress = false;
     _state.paused = false;
@@ -596,7 +705,7 @@ void WebUI::handleApiPause() {
     bool was = _state.paused;
     _state.paused = doc["paused"] | (!_state.paused);
     if (_state.paused && !was) {
-        if (_motor.isHomed()) _motor.hardStop();
+        if (_motor.isHomed() && _arbiter) _arbiter->hardStopMotion();
         APPLOG("Paused: hands off the puppers — Intiface input edged out :3");
     } else if (!_state.paused && was) {
         _state.resume_start_ms = millis();
@@ -609,7 +718,7 @@ void WebUI::handleApiPause() {
 }
 
 void WebUI::handleApiHalt() {
-    if (_motor.isHomed()) _motor.hardStop();
+    if (_motor.isHomed() && _arbiter) _arbiter->hardStopMotion();
     APPLOG("Halt: motor stopped — still homed and ready for round two~ :3");
     _bumpGen();
     _httpServer->send(200, "application/json", "{\"ok\":true}");
@@ -769,6 +878,35 @@ bool WebUI::applyDriverConfig(JsonDocument& doc, JsonDocument& resp) {
 // handleApiPattern (HTTP GET + POST) — delegates to applyPattern
 // ============================================================================
 
+// Advanced-mode readback (post-clamp device truth — Ground Truth Doctrine).
+// Base values always; the six modifier blocks only when include_mods (the GET
+// page-load adoption path — echoes stay lean and only carry the touched one).
+static void apStateToJson(const PatternEngine& pe, JsonDocument& doc, bool include_mods) {
+    doc["ap_mode"]      = pe.isAdvancedMode();
+    doc["ap_speed"]     = pe.getApMaster();
+    doc["ap_max_depth"] = pe.getApBase(advpat::DEPTH_MAX);
+    doc["ap_min_depth"] = pe.getApBase(advpat::DEPTH_MIN);
+    doc["ap_in_speed"]  = pe.getApBase(advpat::SPEED_IN);
+    doc["ap_out_speed"] = pe.getApBase(advpat::SPEED_OUT);
+    doc["ap_in_accel"]  = pe.getApBase(advpat::ACCEL_IN);
+    doc["ap_out_accel"] = pe.getApBase(advpat::ACCEL_OUT);
+    if (include_mods) {
+        JsonArray mods = doc["ap_mods"].to<JsonArray>();
+        for (uint8_t id = 0; id < advpat::BASE_COUNT; id++) {
+            const advpat::BaseControl* c = pe.apSettings().byId(id);
+            if (!c) continue;
+            JsonObject m = mods.add<JsonObject>();
+            m["ctrl"]      = id;
+            m["amplitude"] = (int)c->modifier.amplitude;
+            m["in_step"]   = (int)c->modifier.in_step;
+            m["in_wait"]   = (int)c->modifier.in_wait;
+            m["out_step"]  = (int)c->modifier.out_step;
+            m["out_wait"]  = (int)c->modifier.out_wait;
+            m["offset"]    = (int)c->modifier.offset;
+        }
+    }
+}
+
 void WebUI::handleApiPattern() {
     if (_httpServer->method() == HTTP_GET) {
         JsonDocument doc;
@@ -780,6 +918,7 @@ void WebUI::handleApiPattern() {
         doc["sensation"]  = (int)roundf(_patternEngine.getSensationPercent());
         doc["pattern"]    = _patternEngine.getPatternIdx();
         doc["rate_tick"]  = _state.gen_rate_tick_hz;
+        apStateToJson(_patternEngine, doc, true);
         String json;
         serializeJson(doc, json);
         _httpServer->send(200, "application/json", json);
@@ -802,6 +941,116 @@ void WebUI::handleApiPattern() {
         return;
     }
 
+    String json;
+    serializeJson(resp, json);
+    _httpServer->send(200, "application/json", json);
+}
+
+// ============================================================================
+// handleApiPatternPresets — NVS-backed user-preset store (fray-d port)
+// ============================================================================
+//
+// One NVS string key "list" in namespace "advpreset" holds a JSON array of
+// {name, def} objects. `def` is the opaque advanced-mode snapshot the UI
+// assembled (in/out speed, in/out accel, and the six modifier blocks — never
+// depths or master speed, matching the factory-preset model). The firmware
+// stores/echoes it verbatim; the UI is the sole interpreter, so the preset
+// schema can evolve without a firmware change. Bounded so a runaway client
+// can't exhaust NVS.
+
+static constexpr size_t AP_PRESET_STORE_BUDGET = 3600;  // bytes of serialized JSON
+static constexpr int    AP_PRESET_MAX_COUNT    = 24;
+
+void WebUI::handleApiPatternPresets() {
+    Preferences prefs;
+
+    if (_httpServer->method() == HTTP_GET) {
+        String stored;
+        if (prefs.begin("advpreset", true)) {          // read-only
+            stored = prefs.getString("list", "[]");
+            prefs.end();
+        } else {
+            stored = "[]";
+        }
+        JsonDocument doc;
+        JsonObject root = doc.to<JsonObject>();
+        JsonDocument listDoc;
+        if (deserializeJson(listDoc, stored) || !listDoc.is<JsonArray>())
+            listDoc.to<JsonArray>();                    // corrupt/empty → []
+        root["presets"] = listDoc.as<JsonArray>();
+        String json;
+        serializeJson(doc, json);
+        _httpServer->send(200, "application/json", json);
+        return;
+    }
+
+    // ---- POST: save or delete -------------------------------------------------
+    JsonDocument body;
+    if (deserializeJson(body, _httpServer->arg("plain"))) {
+        _httpServer->send(400, "application/json", "{\"ok\":false,\"error\":\"Invalid JSON\"}");
+        return;
+    }
+    String name = body["name"] | "";
+    name.trim();
+    if (name.length() == 0 || name.length() > 40) {
+        _httpServer->send(400, "application/json", "{\"ok\":false,\"error\":\"Name required (1-40 chars)\"}");
+        return;
+    }
+
+    // Load current list (read-write session).
+    if (!prefs.begin("advpreset", false)) {
+        _httpServer->send(500, "application/json", "{\"ok\":false,\"error\":\"NVS unavailable\"}");
+        return;
+    }
+    String stored = prefs.getString("list", "[]");
+    JsonDocument listDoc;
+    if (deserializeJson(listDoc, stored) || !listDoc.is<JsonArray>())
+        listDoc.to<JsonArray>();
+    JsonArray arr = listDoc.as<JsonArray>();
+
+    // Remove any existing entry with this name (save = overwrite; delete = drop).
+    for (int i = (int)arr.size() - 1; i >= 0; i--) {
+        if (name == (const char*)(arr[i]["name"] | "")) arr.remove(i);
+    }
+
+    bool isDelete = body["delete"] | false;
+    if (!isDelete) {
+        if (!body["def"].is<JsonObject>()) {
+            prefs.end();
+            _httpServer->send(400, "application/json", "{\"ok\":false,\"error\":\"Missing def\"}");
+            return;
+        }
+        if ((int)arr.size() >= AP_PRESET_MAX_COUNT) {
+            prefs.end();
+            _httpServer->send(507, "application/json", "{\"ok\":false,\"error\":\"Preset store full\"}");
+            return;
+        }
+        JsonObject e = arr.add<JsonObject>();
+        e["name"] = name;
+        e["def"]  = body["def"];                        // deep-copies the snapshot
+    }
+
+    String out;
+    serializeJson(listDoc, out);
+    if (!isDelete && out.length() > AP_PRESET_STORE_BUDGET) {
+        prefs.end();
+        _httpServer->send(507, "application/json",
+                          "{\"ok\":false,\"error\":\"Preset store full (size)\"}");
+        return;
+    }
+    size_t written = prefs.putString("list", out);
+    prefs.end();
+    if (written == 0 && out.length() > 2) {
+        _httpServer->send(500, "application/json", "{\"ok\":false,\"error\":\"NVS write failed\"}");
+        return;
+    }
+
+    APPLOGF("AdvPreset %s: \"%s\" (%u presets, %u bytes)",
+            isDelete ? "delete" : "save", name.c_str(), (unsigned)arr.size(), (unsigned)out.length());
+
+    JsonDocument resp;
+    resp["ok"] = true;
+    resp["presets"] = listDoc.as<JsonArray>();
     String json;
     serializeJson(resp, json);
     _httpServer->send(200, "application/json", json);
@@ -836,6 +1085,44 @@ bool WebUI::applyPattern(JsonDocument& doc, JsonDocument& resp) {
     if (doc["sensation"].is<float>()) _patternEngine.setSensation(doc["sensation"]);
     if (doc["pattern"].is<int>())     _patternEngine.setPattern(doc["pattern"]);
 
+    // ---- Advanced mode (fray-d port) — all fields optional/additive ---------
+    // ap_reset FIRST: preset application layers deltas on the fray-d reset
+    // baseline in a single atomic request ({ap_reset:true, <deltas>, ap_mods}).
+    if (doc["ap_reset"].is<bool>() && doc["ap_reset"].as<bool>())
+        _patternEngine.resetAdvanced();
+
+    if (doc["ap_mode"].is<bool>())      _patternEngine.setAdvancedMode(doc["ap_mode"]);
+    if (doc["ap_speed"].is<int>())      _patternEngine.setApMaster(doc["ap_speed"]);
+    if (doc["ap_max_depth"].is<int>())  _patternEngine.setApBase(advpat::DEPTH_MAX, doc["ap_max_depth"]);
+    if (doc["ap_min_depth"].is<int>())  _patternEngine.setApBase(advpat::DEPTH_MIN, doc["ap_min_depth"]);
+    if (doc["ap_in_speed"].is<int>())   _patternEngine.setApBase(advpat::SPEED_IN,  doc["ap_in_speed"]);
+    if (doc["ap_out_speed"].is<int>())  _patternEngine.setApBase(advpat::SPEED_OUT, doc["ap_out_speed"]);
+    if (doc["ap_in_accel"].is<int>())   _patternEngine.setApBase(advpat::ACCEL_IN,  doc["ap_in_accel"]);
+    if (doc["ap_out_accel"].is<int>())  _patternEngine.setApBase(advpat::ACCEL_OUT, doc["ap_out_accel"]);
+
+    // Modifier blocks: ap_mod (one control) or ap_mods (array — preset apply).
+    // Missing fields keep their current value (read back from the engine —
+    // single Core-0 writer, no race).
+    auto applyModObject = [this](JsonObject m) -> int {
+        if (!m["ctrl"].is<int>()) return -1;
+        int ctrl = m["ctrl"];
+        const advpat::BaseControl* c = _patternEngine.apSettings().byId((uint8_t)ctrl);
+        if (!c) return -1;
+        int amp = m["amplitude"].is<int>() ? m["amplitude"].as<int>() : (int)c->modifier.amplitude;
+        int is_ = m["in_step"].is<int>()   ? m["in_step"].as<int>()   : (int)c->modifier.in_step;
+        int iw  = m["in_wait"].is<int>()   ? m["in_wait"].as<int>()   : (int)c->modifier.in_wait;
+        int os_ = m["out_step"].is<int>()  ? m["out_step"].as<int>()  : (int)c->modifier.out_step;
+        int ow  = m["out_wait"].is<int>()  ? m["out_wait"].as<int>()  : (int)c->modifier.out_wait;
+        int off = m["offset"].is<int>()    ? m["offset"].as<int>()    : (int)c->modifier.offset;
+        _patternEngine.setApModifier((uint8_t)ctrl, amp, is_, iw, os_, ow, off);
+        return ctrl;
+    };
+    int ap_mod_ctrl = -1;
+    if (doc["ap_mod"].is<JsonObject>())
+        ap_mod_ctrl = applyModObject(doc["ap_mod"].as<JsonObject>());
+    if (doc["ap_mods"].is<JsonArray>())
+        for (JsonObject m : doc["ap_mods"].as<JsonArray>()) applyModObject(m);
+
     if (doc["running"].is<bool>()) {
         bool want = doc["running"];
         if (want && !_patternEngine.isRunning()) {
@@ -865,6 +1152,21 @@ bool WebUI::applyPattern(JsonDocument& doc, JsonDocument& resp) {
     resp["sensation"] = (int)roundf(_patternEngine.getSensationPercent());
     resp["pattern"]   = _patternEngine.getPatternIdx();
     resp["rate_tick"] = _state.gen_rate_tick_hz;
+    apStateToJson(_patternEngine, resp, false);
+    if (ap_mod_ctrl >= 0) {
+        // Echo the APPLIED (post-clamp) modifier block for the touched control.
+        const advpat::BaseControl* c = _patternEngine.apSettings().byId((uint8_t)ap_mod_ctrl);
+        if (c) {
+            JsonObject m = resp["ap_mod"].to<JsonObject>();
+            m["ctrl"]      = ap_mod_ctrl;
+            m["amplitude"] = (int)c->modifier.amplitude;
+            m["in_step"]   = (int)c->modifier.in_step;
+            m["in_wait"]   = (int)c->modifier.in_wait;
+            m["out_step"]  = (int)c->modifier.out_step;
+            m["out_wait"]  = (int)c->modifier.out_wait;
+            m["offset"]    = (int)c->modifier.offset;
+        }
+    }
 
     _bumpGen();
     return true;
@@ -967,12 +1269,18 @@ bool WebUI::handleCommand(uint8_t op, JsonDocument& payload_in,
 
     // ---- Driver config ---------------------------------------------------
     case WS_OP_CLEAR_FAULT:
-        // "clear_fault" same as /api/tmc with save=false and no new params — no-op driver reset
+        // No driver fault readback exists on this build — nothing to clear or
+        // verify. Re-apply the current driver config (on the TMC this rewrites
+        // the SPI registers with readback verification, a genuine recovery from
+        // a transient glitch) but say honestly that no fault was cleared. :3
         {
             JsonDocument dummy;
-            dummy["reset"] = false;  // don't reset, just apply current (no-op)
+            dummy["reset"] = false;  // don't reset, just re-apply current config
             applyDriverConfig(dummy, payload_out);
         }
+        payload_out["cleared"] = false;
+        payload_out["reason"] = "no_fault_readback";
+        APPLOG("WS clear-fault: driver config re-applied — no fault readback exists to clear/verify");
         return true;
 
     case WS_OP_SAVE: {
@@ -990,6 +1298,7 @@ bool WebUI::handleCommand(uint8_t op, JsonDocument& payload_in,
         if (!_state.homing_in_progress) {
             _state.homed = false;
             _state.homing_in_progress = true;
+            _state.estop_latched = false;   // a fresh homing cycle exits the e-stopped state
         }
         payload_out["ok"] = true;
         _bumpGen();
@@ -999,6 +1308,7 @@ bool WebUI::handleCommand(uint8_t op, JsonDocument& payload_in,
         // TEST/bench: pretend the machine is homed without a motor so the WebUI
         // (rail, window, telemetry) populates for debugging. on:false clears it.
         bool on = payload_in["on"] | true;
+        if (on) _state.estop_latched = false;   // bench-home exits the e-stopped state
         if (on) {
             float stroke = payload_in["stroke"] | 250.0f;   // generic bench value
             if (stroke < 1.0f) stroke = 250.0f;
@@ -1030,7 +1340,7 @@ bool WebUI::handleCommand(uint8_t op, JsonDocument& payload_in,
     }
 
     case WS_OP_HALT:
-        if (_motor.isHomed()) _motor.hardStop();
+        if (_motor.isHomed() && _arbiter) _arbiter->hardStopMotion();
         APPLOG("WS Halt: motor stopped — still homed and ready~ :3");
         payload_out["ok"] = true;
         _bumpGen();
@@ -1039,6 +1349,7 @@ bool WebUI::handleCommand(uint8_t op, JsonDocument& payload_in,
     case WS_OP_ESTOP:
         // Same code path as /api/stop (safety parity)
         _state.estop_requested.store(true);
+        _state.estop_latched = true;   // latched for telemetry — UI fault banner rises from this
         _state.homed = false;
         _state.homing_in_progress = false;
         _state.paused = false;
@@ -1053,7 +1364,7 @@ bool WebUI::handleCommand(uint8_t op, JsonDocument& payload_in,
         bool was = _state.paused;
         _state.paused = wanted;
         if (_state.paused && !was) {
-            if (_motor.isHomed()) _motor.hardStop();
+            if (_motor.isHomed() && _arbiter) _arbiter->hardStopMotion();
         } else if (!_state.paused && was) {
             _state.resume_start_ms = millis();
         }
@@ -1077,10 +1388,16 @@ bool WebUI::handleCommand(uint8_t op, JsonDocument& payload_in,
     }
 
     case WS_OP_BYPASS: {
-        // Bypass limits toggle — stored in payload_out["on"], applied by subsequent moves
+        // Bypass limits toggle — STORED in SystemState (previously this echoed
+        // the requested value without storing anything, so the echo was a lie
+        // and there was no truth to resync on reconnect). applyMove honors it
+        // when a move doesn't carry a per-request bypass field; GET_CFG exposes
+        // it. Session-only, never persisted. :3
         bool val = payload_in["on"] | false;
+        _state.bypass_limits = val;
+        APPLOGF("WS bypass-limits: %s", val ? "ON (window clamp bypassed, physical ceiling still enforced)" : "OFF");
         payload_out["ok"] = true;
-        payload_out["bypass_limits"] = val;
+        payload_out["bypass_limits"] = (bool)_state.bypass_limits;
         _bumpGen();
         return true;
     }
@@ -1115,8 +1432,10 @@ bool WebUI::handleCommand(uint8_t op, JsonDocument& payload_in,
         // Full config snapshot — same shape as /api/settings GET
         payload_out["range_min"] = _mapper.getMinMm();
         payload_out["range_max"] = _mapper.getMaxMm();
-        payload_out["max_speed"] = (uint32_t)_state.config.max_speed_mm_s;
-        payload_out["accel"] = (uint32_t)_state.config.acceleration_mm_s2;
+        // Ground truth: read back from the driver (post-internal-clamp), same
+        // as the applySettings echo. :3
+        payload_out["max_speed"] = (uint32_t)_motor.getMaxSpeed();
+        payload_out["accel"] = (uint32_t)_motor.getAcceleration();
         payload_out["blend_mode"] = _motor.getBlendMode();
         payload_out["auto_duration"] = _state.auto_duration;
         payload_out["intiface_compat"] = _state.intiface_compat;
@@ -1141,6 +1460,7 @@ bool WebUI::handleCommand(uint8_t op, JsonDocument& payload_in,
         payload_out["homed"] = _state.homed;
         payload_out["stream_speed_mode"] = (uint8_t)_state.stream_speed_mode;
         payload_out["overshoot_clamp"] = (bool)_state.interp_clamp_overshoot;
+        payload_out["bypass_limits"] = (bool)_state.bypass_limits;
         payload_out["ok"] = true;
         // No cfg_gen bump for reads
         return true;

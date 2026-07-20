@@ -7,6 +7,59 @@
 #include "range_mapper.h"
 
 // ============================================================================
+// Config checksum — FNV-1a over the raw stored values, in canonical key order
+// ============================================================================
+//
+// DeviceConfig::checksum was declared but never computed or checked — a
+// bit-flipped NVS value that still fell inside a field's accepted range passed
+// through undetected. This actually implements the defense: save() writes the
+// hash of everything it stored under "cfg_crc"; load() recomputes from the raw
+// stored values and warns on mismatch (per-field validation still clamps any
+// out-of-range value regardless). Reading the keys back keeps save/load
+// byte-identical without threading thirty values through two functions. :3
+
+static uint32_t nvsConfigChecksum(Preferences& prefs) {
+    uint32_t crc = 2166136261u;                       // FNV-1a offset basis
+    auto mixU32 = [&crc](uint32_t v) {
+        for (int i = 0; i < 4; i++) { crc ^= (uint8_t)(v >> (8 * i)); crc *= 16777619u; }
+    };
+    auto mixF = [&mixU32](float f) {
+        uint32_t bits; memcpy(&bits, &f, sizeof(bits)); mixU32(bits);
+    };
+    mixF(prefs.getFloat("range_min", 0.0f));
+    mixF(prefs.getFloat("range_max", 0.0f));
+    mixF(prefs.getFloat("rail_mm", 0.0f));
+    mixU32(prefs.getUShort("max_speed", 0));
+    mixU32(prefs.getUInt("accel32", 0));
+    mixU32(prefs.getUChar("blend_mode", 0));
+    mixU32(prefs.getUShort("user_spd", 0));
+    mixU32(prefs.getUInt("user_acc", 0));
+    mixU32(prefs.getUShort("inp_spd", 0));
+    mixU32(prefs.getUInt("inp_acc", 0));
+    mixU32(prefs.getBool("auto_dur", false) ? 1u : 0u);
+    mixU32(prefs.getBool("if_compat", false) ? 1u : 0u);
+    mixF(prefs.getFloat("def_rmin", 0.0f));
+    mixF(prefs.getFloat("def_rmax", 0.0f));
+    mixU32(prefs.getBool("expert", false) ? 1u : 0u);
+    mixU32(prefs.getUChar("transport", 0));
+    mixU32(prefs.getUChar("input_mode", 0));
+    mixU32(prefs.getUChar("buf_easing", 0));
+    mixU32(prefs.getUChar("buf_depth", 0));
+    mixU32(prefs.getUShort("buf_tick", 0));
+    mixU32(prefs.getUShort("gen_tick", 0));
+    mixF(prefs.getFloat("stroke_mm", 0.0f));
+    mixU32(prefs.getUShort("tmc_run", 0));
+    mixU32(prefs.getUChar("tmc_hold", 0));
+    mixU32(prefs.getUChar("tmc_sc", 0));
+    mixU32(prefs.getUInt("tmc_tpwm", 0));
+    mixU32(prefs.getUChar("tmc_toff", 0));
+    mixU32(prefs.getUChar("tmc_tbl", 0));
+    mixU32((uint32_t)(int32_t)prefs.getChar("tmc_hs", 0));
+    mixU32((uint32_t)(int32_t)prefs.getChar("tmc_he", 0));
+    return crc;
+}
+
+// ============================================================================
 // ConfigStore::save — persist all runtime settings to NVS
 // ============================================================================
 
@@ -29,66 +82,83 @@ void ConfigStore::save(SystemState& state, RangeMapper& mapper, MotorDriver& mot
         applog("saveConfig: failed to open NVS for write!");
         return;
     }
-    prefs.putFloat("range_min", mapper.getMinMm());
-    prefs.putFloat("range_max", mapper.getMaxMm());
+    // Every put*() returns bytes written — 0 on failure (full partition,
+    // brownout mid-write). Count failures instead of discarding them, so a
+    // save that DIDN'T persist is never logged as a success. :3
+    uint32_t fails = 0;
+    auto ck = [&fails](size_t written) { if (written == 0) fails++; };
+
+    ck(prefs.putFloat("range_min", mapper.getMinMm()));
+    ck(prefs.putFloat("range_max", mapper.getMaxMm()));
     // Max rail length (mm) — rail-length-agnostic ceiling. Persisted so the
     // homing sweep bound + pre-homing scale survive a reboot. :3
-    prefs.putFloat("rail_mm", state.config.max_rail_mm);
+    ck(prefs.putFloat("rail_mm", state.config.max_rail_mm));
     // Speed stored as UShort (max 65535) — max speed is 10000 mm/s, fits fine.
     // Accel stored as UInt (uint32_t) — expert mode allows 100000 mm/s² which
     // overflows a uint16_t (max 65535). Old "accel key" was UShort and silently
     // truncated anything above 65535 — that was the save bug. New key "accel32"
     // uses putUInt so the full 100000 survives the round-trip. yippie! :3
-    prefs.putUShort("max_speed", (uint16_t)state.config.max_speed_mm_s);
-    prefs.putUInt("accel32", (uint32_t)state.config.acceleration_mm_s2);
+    ck(prefs.putUShort("max_speed", (uint16_t)state.config.max_speed_mm_s));
+    ck(prefs.putUInt("accel32", (uint32_t)state.config.acceleration_mm_s2));
     // Continuous-blend policy (1=let-it-land, 2=allow-reversal, 3=hybrid).
     // Replaces the old lookahead/overshoot NVS keys — those tunables retired
     // when the predictive extrapolator got thrown out. :3
-    prefs.putUChar("blend_mode", motor.getBlendMode());
+    ck(prefs.putUChar("blend_mode", motor.getBlendMode()));
 
     // Dual limit sets (v0.4 / D4 Phase 3) — persist per-source ceilings
-    prefs.putUShort("user_spd", (uint16_t)state.config.user_max_speed_mm_s);
-    prefs.putUInt("user_acc", (uint32_t)state.config.user_max_accel_mm_s2);
-    prefs.putUShort("inp_spd", (uint16_t)state.config.input_max_speed_mm_s);
-    prefs.putUInt("inp_acc", (uint32_t)state.config.input_max_accel_mm_s2);
+    ck(prefs.putUShort("user_spd", (uint16_t)state.config.user_max_speed_mm_s));
+    ck(prefs.putUInt("user_acc", (uint32_t)state.config.user_max_accel_mm_s2));
+    ck(prefs.putUShort("inp_spd", (uint16_t)state.config.input_max_speed_mm_s));
+    ck(prefs.putUInt("inp_acc", (uint32_t)state.config.input_max_accel_mm_s2));
 
-    prefs.putBool("auto_dur", state.auto_duration);
+    ck(prefs.putBool("auto_dur", state.auto_duration));
     // Intiface compat — whether we decode magnitudes against the legacy /999
     // ceiling (Intiface's mangled scale) or the spec-correct digit count (MFP).
     // Persisted so the operator's chosen app stays satisfied across reboots. :3
-    prefs.putBool("if_compat", state.intiface_compat);
-    prefs.putFloat("def_rmin", state.default_range_min);
-    prefs.putFloat("def_rmax", state.default_range_max);
-    prefs.putBool("expert", state.expert_mode);
-    prefs.putUChar("transport", (uint8_t)state.getTransport());
+    ck(prefs.putBool("if_compat", state.intiface_compat));
+    ck(prefs.putFloat("def_rmin", state.default_range_min));
+    ck(prefs.putFloat("def_rmax", state.default_range_max));
+    ck(prefs.putBool("expert", state.expert_mode));
+    ck(prefs.putUChar("transport", (uint8_t)state.getTransport()));
 
     // Input mode + buffered interpolation + generator tick rate
-    prefs.putUChar("input_mode", (uint8_t)state.getInputMode());
-    prefs.putUChar("buf_easing", state.buf_easing);
-    prefs.putUChar("buf_depth", state.buf_depth);
-    prefs.putUShort("buf_tick", state.buf_tick_hz);
-    prefs.putUShort("gen_tick", state.gen_rate_tick_hz);
+    ck(prefs.putUChar("input_mode", (uint8_t)state.getInputMode()));
+    ck(prefs.putUChar("buf_easing", state.buf_easing));
+    ck(prefs.putUChar("buf_depth", state.buf_depth));
+    ck(prefs.putUShort("buf_tick", state.buf_tick_hz));
+    ck(prefs.putUShort("gen_tick", state.gen_rate_tick_hz));
 
     // Measured stroke from sensorless homing — persists across reboot so the
     // rail scale is correct before the first homing cycle runs. Rounded to the
     // nearest 1mm because the safety zone makes sub-mm precision meaningless. :3
-    prefs.putFloat("stroke_mm", motor.getMeasuredStrokeMm());
+    ck(prefs.putFloat("stroke_mm", motor.getMeasuredStrokeMm()));
 
     // TMC driver tunables (from the Motor tab)
-    prefs.putUShort("tmc_run", state.driver.run_current_ma);
-    prefs.putUChar("tmc_hold", state.driver.hold_current_pct);
-    prefs.putUChar("tmc_sc", state.driver.stealthchop);
-    prefs.putUInt("tmc_tpwm", state.driver.tpwm_thrs);
-    prefs.putUChar("tmc_toff", state.driver.toff);
-    prefs.putUChar("tmc_tbl", state.driver.tbl);
-    prefs.putChar("tmc_hs", state.driver.hstart);
-    prefs.putChar("tmc_he", state.driver.hend);
+    ck(prefs.putUShort("tmc_run", state.driver.run_current_ma));
+    ck(prefs.putUChar("tmc_hold", state.driver.hold_current_pct));
+    ck(prefs.putUChar("tmc_sc", state.driver.stealthchop));
+    ck(prefs.putUInt("tmc_tpwm", state.driver.tpwm_thrs));
+    ck(prefs.putUChar("tmc_toff", state.driver.toff));
+    ck(prefs.putUChar("tmc_tbl", state.driver.tbl));
+    ck(prefs.putChar("tmc_hs", state.driver.hstart));
+    ck(prefs.putChar("tmc_he", state.driver.hend));
+
+    // Corruption defense: hash what actually landed in NVS (read back raw) and
+    // store it. load() recomputes + compares. See nvsConfigChecksum(). :3
+    uint32_t crc = nvsConfigChecksum(prefs);
+    ck(prefs.putUInt("cfg_crc", crc));
+    state.config.checksum = crc;
 
     prefs.end();
-    applogf("Config saved to NVS: range=[%.1f,%.1f] speed=%.0f accel=%.0f blend=%u",
-            mapper.getMinMm(), mapper.getMaxMm(),
-            state.config.max_speed_mm_s, state.config.acceleration_mm_s2,
-            motor.getBlendMode());
+    if (fails > 0) {
+        applogf("Config save: %lu NVS write(s) FAILED — settings may NOT persist across reboot! "
+                "(partition full or flash error)", (unsigned long)fails);
+    } else {
+        applogf("Config saved to NVS: range=[%.1f,%.1f] speed=%.0f accel=%.0f blend=%u crc=%08lX",
+                mapper.getMinMm(), mapper.getMaxMm(),
+                state.config.max_speed_mm_s, state.config.acceleration_mm_s2,
+                motor.getBlendMode(), (unsigned long)crc);
+    }
 }
 
 // ============================================================================
@@ -109,6 +179,23 @@ void ConfigStore::load(SystemState& state, RangeMapper& mapper, MotorDriver& mot
 
     // Try to load saved values (read-only mode)
     if (prefs.begin("strokeengine", true)) {
+        // Corruption check FIRST — recompute the FNV-1a over the raw stored
+        // values and compare with the hash save() stored. A mismatch means at
+        // least one value changed outside a save() (bit-flip / partial write).
+        // We warn rather than reject: the per-field validation below clamps
+        // anything out of range, and an in-range corrupt value is at least now
+        // VISIBLE instead of silently trusted. stored==0 → pre-checksum save,
+        // nothing to verify yet. :3
+        uint32_t stored_crc = prefs.getUInt("cfg_crc", 0);
+        if (stored_crc != 0) {
+            uint32_t crc = nvsConfigChecksum(prefs);
+            state.config.checksum = crc;
+            if (crc != stored_crc) {
+                applogf("Config NVS checksum MISMATCH (stored=%08lX computed=%08lX) — "
+                        "possible corruption; per-field validation will clamp bad values",
+                        (unsigned long)stored_crc, (unsigned long)crc);
+            }
+        }
         // Max rail length FIRST — every range/default validation below clamps
         // against it. Sanity-bound 10..2000mm so a corrupt NVS write can't set a
         // nonsensical ceiling. Pushed to the motor + mapper once resolved. :3
@@ -138,9 +225,14 @@ void ConfigStore::load(SystemState& state, RangeMapper& mapper, MotorDriver& mot
         uint8_t blend = prefs.getUChar("blend_mode", 1);  // 1=let-it-land default
 
         // Dual limit sets (v0.4 / D4 Phase 3) — load with legacy migration.
-        // If the new keys exist, use them. Otherwise seed both sets from the
-        // legacy max_speed/accel values already loaded above (spd, acc).
-        float usr_spd = spd, usr_acc = (float)acc, inp_spd = spd, inp_acc = (float)acc;
+        // If the new keys exist, use them. The INPUT set migrates from the legacy
+        // max_speed/accel (streams should inherit the old full-speed default).
+        // The USER set falls back to its GENTLE factory default (50/200) — NOT
+        // the legacy values — so a fresh device (or one that only ever saved the
+        // legacy keys) boots gentle for manual moves + window-entry glides. :3
+        float usr_spd = state.config.user_max_speed_mm_s;   // 50 (gentle default)
+        float usr_acc = state.config.user_max_accel_mm_s2;  // 200 (gentle default)
+        float inp_spd = spd, inp_acc = (float)acc;
         uint16_t usr_spd_saved = prefs.getUShort("user_spd", 0);
         uint32_t usr_acc_saved = prefs.getUInt("user_acc", 0);
         uint16_t inp_spd_saved = prefs.getUShort("inp_spd", 0);
@@ -233,6 +325,13 @@ void ConfigStore::load(SystemState& state, RangeMapper& mapper, MotorDriver& mot
         if (state.driver.toff < 1 || state.driver.toff > 15) state.driver.toff = TMC_TOFF;
 
         mapper.setRange(rmin, rmax);
+        // Write the resolved range back into state.config too — SystemState.h
+        // documents config as cross-core-read state, and config_api.h's
+        // mapToPosition/mapFromPosition/getUsableRange helpers consume exactly
+        // these fields. Leaving them at compile-time defaults after loading a
+        // custom range was a silent divergence from the mapper's real range. :3
+        state.config.min_position_mm = rmin;
+        state.config.max_position_mm = rmax;
         state.config.max_speed_mm_s = (float)spd;
         state.config.acceleration_mm_s2 = (float)acc;
         state.config.run_current_ma = state.driver.run_current_ma;
@@ -261,16 +360,26 @@ void ConfigStore::load(SystemState& state, RangeMapper& mapper, MotorDriver& mot
 // reflash. Uses the same "strokeengine" namespace with putString/getString —
 // the first string fields in this store. Keys stay ≤15 chars for NVS. :3
 
-void ConfigStore::saveWifiCreds(const char* ssid, const char* pass) {
+void ConfigStore::saveWifiCreds(const SystemState& state, const char* ssid, const char* pass) {
+    // Same OTA flash-contention guard as save() — a `WIFI ...` serial command
+    // landing mid-OTA must not write NVS during the flash write window. :3
+    if (state.ota_active.load()) {
+        applog("saveWifiCreds: REFUSED — OTA update in flight, retry after it completes");
+        return;
+    }
     Preferences prefs;
     if (!prefs.begin("strokeengine", false)) {   // false = read-WRITE
         applog("saveWifiCreds: failed to open NVS for write!");
         return;
     }
-    prefs.putString("wifi_ssid2", ssid ? ssid : "");
-    prefs.putString("wifi_pass2", pass ? pass : "");
+    size_t w1 = prefs.putString("wifi_ssid2", ssid ? ssid : "");
+    size_t w2 = prefs.putString("wifi_pass2", pass ? pass : "");
     prefs.end();
-    applogf("Secondary WiFi creds saved to NVS: SSID='%s'", ssid ? ssid : "");
+    if ((ssid && ssid[0] && w1 == 0) || (pass && pass[0] && w2 == 0)) {
+        applog("saveWifiCreds: NVS write FAILED — creds NOT stored!");
+    } else {
+        applogf("Secondary WiFi creds saved to NVS: SSID='%s'", ssid ? ssid : "");
+    }
 }
 
 bool ConfigStore::loadWifiCreds(char* ssid, size_t ssidLen, char* pass, size_t passLen) {
@@ -291,9 +400,17 @@ bool ConfigStore::loadWifiCreds(char* ssid, size_t ssidLen, char* pass, size_t p
     return true;
 }
 
-void ConfigStore::clearWifiCreds() {
+void ConfigStore::clearWifiCreds(const SystemState& state) {
+    // Same OTA flash-contention guard as save()/saveWifiCreds(). :3
+    if (state.ota_active.load()) {
+        applog("clearWifiCreds: REFUSED — OTA update in flight, retry after it completes");
+        return;
+    }
     Preferences prefs;
-    if (!prefs.begin("strokeengine", false)) return;
+    if (!prefs.begin("strokeengine", false)) {
+        applog("clearWifiCreds: failed to open NVS for write!");
+        return;
+    }
     prefs.remove("wifi_ssid2");
     prefs.remove("wifi_pass2");
     prefs.end();

@@ -120,9 +120,11 @@ public:
     // ---- 0x01 / 0x02 / 0x04 frame builders ----------------------------------
     void sendTelemetry(uint8_t num);
     void sendStatus(uint8_t num);
+    void sendStats(uint8_t num);        // 0x06 STATS — session odometer totals
     void sendInterp(uint8_t num);       // 0x04 INTERP — interpolator debug snapshot
     void broadcastTelemetry();
     void broadcastStatus();
+    void broadcastStats();
     void broadcastInterp();
 
     // ---- 0x05 ANOMALY — drain the cross-core anomaly ring, send one frame per
@@ -188,6 +190,13 @@ private:
 
     // Reap dead half-open clients (see STALL_REAP_MS). Called each sender tick.
     void _reapDeadClients();
+
+    // Guarded sendBIN — the ONE way any frame leaves this class. Checks the
+    // result and applies the send-stall mute (the "WS send blocks HTTP mutex"
+    // fix) on failure, so a backed-up socket can't re-block the shared mutex on
+    // HELLO/STATUS/STATS/INTERP/ANOMALY/CLOCK/ECHO the way it once could on
+    // telemetry. Caller MUST hold _wsMutex. Returns sendBIN's verdict. :3
+    bool _sendGuarded(uint8_t num, const uint8_t* frame, size_t len, const char* what);
 
     // Activity gate: true if client `num` should receive the telemetry stream.
     // Recently-active OR the single most-recently-active connected client.

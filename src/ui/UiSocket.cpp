@@ -70,9 +70,14 @@ void UiSocket::init() {
         this->_handleEvent(num, type, payload, length);
     });
 
-    // Spawn sender task pinned to Core 0, priority 3 (above httpTask=1)
+    // Spawn sender task pinned to Core 0, priority 3 (above httpTask=1).
+    // Stack is 10240 (not the old 4096): this task now also runs _ws.loop() —
+    // moved off httpTask so a wedged client can't freeze the heartbeat/HTTP —
+    // which services inbound WS commands (512-byte JSON buffer + deserializeJson
+    // + sendEcho). That handling used to live in httpTask's 8192 stack; on the
+    // old 4096 sender stack it overflowed and crash-looped the device. :3
     xTaskCreatePinnedToCore(
-        uiStreamTask, "UiStream", 4096, this, 3, &_senderHandle, 0);
+        uiStreamTask, "UiStream", 10240, this, 3, &_senderHandle, 0);
 
     APPLOG("[UiSocket] ready — ws://<ip>:81/ + sender task on Core 0 prio 3");
 }
@@ -97,6 +102,30 @@ void UiSocket::emergencyStop() {
 }
 
 // ============================================================================
+// _sendGuarded — checked sendBIN + send-stall mute (caller holds _wsMutex)
+// ============================================================================
+//
+// The "WS send blocks HTTP mutex" regression fix, applied to EVERY frame type.
+// Previously only sendTelemetry checked its sendBIN result and muted the
+// stalled client; every other frame (HELLO/STATUS/STATS/INTERP/ANOMALY/CLOCK/
+// ECHO) ignored it, so a backed-up socket reproduced the exact mutex stall on
+// those paths. One failed send → mute (kept connected) → the client earns the
+// stream back with an inbound frame, or gets reaped by _reapDeadClients(). :3
+
+bool UiSocket::_sendGuarded(uint8_t num, const uint8_t* frame, size_t len, const char* what) {
+    bool ok = _ws.sendBIN(num, const_cast<uint8_t*>(frame), len);
+    if (!ok && num < MAX_CLIENTS) {
+        _tx_drops++;
+        if (!_sendStalled[num]) {
+            _sendStalled[num] = true;
+            _sendStalledSince[num] = millis();
+            APPLOGF("[UiSocket] client#%u %s send stalled — muting stream (kept connected)", num, what);
+        }
+    }
+    return ok;
+}
+
+// ============================================================================
 // HELLO
 // ============================================================================
 
@@ -108,7 +137,7 @@ void UiSocket::sendHello(uint8_t num) {
     frame[2] = (uint8_t)(gen & 0xFF);
     frame[3] = (uint8_t)(gen >> 8);
     WsLock lock(_wsMutex);
-    _ws.sendBIN(num, frame, HELLO_FRAME_SIZE);
+    _sendGuarded(num, frame, HELLO_FRAME_SIZE, "HELLO");
 }
 
 // ============================================================================
@@ -152,8 +181,15 @@ bool UiSocket::sendEcho(uint8_t num, uint16_t id, uint8_t ok, const String& json
     off += payload_len;
 
     bool sent;
-    { WsLock lock(_wsMutex); sent = _ws.sendBIN(num, buf, off); }
+    { WsLock lock(_wsMutex); sent = _sendGuarded(num, buf, off, "ECHO"); }
     if (buf != stack_buf) delete[] buf;
+    if (!sent) {
+        // The command was already APPLIED by the time the echo goes out — an
+        // ack lost in flight must be distinguishable from an ack delivered,
+        // or the client's pending-state machine waits forever in silence. The
+        // idempotency ring will re-echo if the client retries the same id. :3
+        APPLOGF("[UiSocket] ECHO id=%u to client#%u FAILED to send — command applied, ack lost", id, num);
+    }
     return sent;
 }
 
@@ -254,7 +290,7 @@ void UiSocket::_handleEvent(uint8_t num, WStype_t type, uint8_t* payload, size_t
             uint32_t t2 = (uint32_t)(esp_timer_get_time() & 0xFFFFFFFFu);
             r[9] = (uint8_t)(t2 & 0xFF); r[10] = (uint8_t)((t2 >> 8) & 0xFF);
             r[11] = (uint8_t)((t2 >> 16) & 0xFF); r[12] = (uint8_t)((t2 >> 24) & 0xFF);
-            _ws.sendBIN(num, r, CLOCK_REPLY_SIZE);  // already under WsLock from top of _handleEvent
+            _sendGuarded(num, r, CLOCK_REPLY_SIZE, "CLOCK");  // already under WsLock from top of _handleEvent
 
         } else if (ft == WS_FRAME_CMD && _webui && length >= 4) {
             // 0x10 CMD: u8 type, u16 id (LE), u8 op, remaining = JSON payload (UTF-8)
@@ -302,10 +338,35 @@ void UiSocket::_handleEvent(uint8_t num, WStype_t type, uint8_t* payload, size_t
         } else if (ft == 0x10 && _frameHandler) {
             // Legacy fallback — if _webui not set and frameHandler is wired
             _frameHandler(num, payload, length);
+        } else if (ft == WS_FRAME_CMD) {
+            // CMD frame too short (< 4 bytes) or arrived before the WebUI
+            // handler was wired — previously this fell through BOTH branches
+            // with total silence. Tell the client (when the id is readable)
+            // and leave a log trace either way. :3
+            if (length >= 3) {
+                uint16_t cmd_id = (uint16_t)payload[1] | ((uint16_t)payload[2] << 8);
+                sendEcho(num, cmd_id, 0, "{\"ok\":false,\"error\":\"Malformed CMD frame\"}");
+            }
+            APPLOGF("[UiSocket] CMD client#%u DROPPED: len=%u webui_wired=%d — malformed or too early",
+                    num, (unsigned)length, _webui != nullptr);
+        } else {
+            APPLOGF("[UiSocket] unknown inbound frame 0x%02X len=%u from client#%u — dropped",
+                    ft, (unsigned)length, num);
         }
         break;
     }
-    default: break;
+    case WStype_ERROR:
+        // The WS library reported a socket-level error for this client — the
+        // one event type that must never vanish without a trace. :3
+        APPLOGF("[UiSocket] WS ERROR client#%u (payload len=%u)", num, (unsigned)length);
+        break;
+    case WStype_PING:
+    case WStype_PONG:
+        break;   // library heartbeat — expected, uninteresting
+    default:
+        APPLOGF("[UiSocket] unhandled WS event type=%d client#%u len=%u",
+                (int)type, num, (unsigned)length);
+        break;
     }
 }
 
@@ -357,7 +418,11 @@ void UiSocket::sendTelemetry(uint8_t num) {
     if (_state.homed)             flags |= (1 << 0);
     if (_state.gen_active)       flags |= (1 << 1);  // pattern/generator _running flag (PB-004)
     if (_state.gen_active)       flags |= (1 << 2);  // gen_active (emitting) — keep for compat
-    if (_state.estop_requested.load())  flags |= (1 << 3);
+    // bit3: e-stopped. estop_requested is a transient request consumed by
+    // motorTask within ~1ms — sampled at ~45Hz it would almost never be seen.
+    // estop_latched is the durable "device is e-stopped" state (cleared when a
+    // new homing cycle starts), so the UI fault banner can rise from truth. :3
+    if (_state.estop_requested.load() || _state.estop_latched)  flags |= (1 << 3);
     if (_state.paused)           flags |= (1 << 4);
     if (_state.manual_override)  flags |= (1 << 5);
     // bit 6: FLAG_INTIFACE_ACTIVE — set when Intiface was recently active
@@ -395,22 +460,14 @@ void UiSocket::sendTelemetry(uint8_t num) {
     frame[off++] = (uint8_t)(i_mA & 0xFF);
     frame[off++] = (uint8_t)(i_mA >> 8);
 
-    bool ok = _ws.sendBIN(num, frame, off);
-    if (!ok) {
-        _tx_drops++;
-        // A backed-up socket returns false after the (capped) TCP timeout.
-        // Mute this client from the stream — do NOT disconnect it. Muting stops
-        // the per-tick mutex stall immediately (one failed send, not a loop),
-        // keeps the connection alive (no drop→reconnect churn), and lets the
-        // client earn the stream back by sending an inbound frame once it has
-        // drained (handled in _handleEvent), or be reaped if it never does
-        // (_reapDeadClients). :3
-        if (!_sendStalled[num]) {
-            _sendStalled[num] = true;
-            _sendStalledSince[num] = millis();
-            APPLOGF("[UiSocket] client#%u send stalled — muting stream (kept connected)", num);
-        }
-    }
+    // A backed-up socket returns false after the (capped) TCP timeout.
+    // _sendGuarded mutes this client from the stream — does NOT disconnect it.
+    // Muting stops the per-tick mutex stall immediately (one failed send, not a
+    // loop), keeps the connection alive (no drop→reconnect churn), and lets the
+    // client earn the stream back by sending an inbound frame once it has
+    // drained (handled in _handleEvent), or be reaped if it never does
+    // (_reapDeadClients). :3
+    _sendGuarded(num, frame, off, "TELEMETRY");
 }
 
 // ============================================================================
@@ -490,7 +547,47 @@ void UiSocket::sendStatus(uint8_t num) {
     frame[off++] = ip[2];
     frame[off++] = ip[3];
 
-    _ws.sendBIN(num, frame, STATUS_FRAME_SIZE);
+    _sendGuarded(num, frame, STATUS_FRAME_SIZE, "STATUS");
+}
+
+// ============================================================================
+// sendStats(num) — 0x06 STATS frame, session odometer totals (~2Hz)
+// ============================================================================
+// Layout in UiProtocol.h (STATS_FRAME_SIZE = 19). Slow-changing session
+// totals for the dashboard SESSION card. Live current speed is NOT here — the
+// hero numeral derives that from the telemetry stream for a snappier readout.
+
+void UiSocket::sendStats(uint8_t num) {
+    WsLock lock(_wsMutex);
+    if (!_ws.clientIsConnected(num)) return;
+
+    uint8_t frame[STATS_FRAME_SIZE];
+    size_t off = 0;
+    frame[off++] = WS_FRAME_STATS;   // 0x06
+
+    auto putU16 = [&](uint32_t v) {
+        if (v > 65535) v = 65535;
+        frame[off++] = (uint8_t)(v & 0xFF); frame[off++] = (uint8_t)(v >> 8);
+    };
+    auto putU32 = [&](uint32_t v) {
+        frame[off++] = (uint8_t)(v & 0xFF);        frame[off++] = (uint8_t)((v >> 8) & 0xFF);
+        frame[off++] = (uint8_t)((v >> 16) & 0xFF); frame[off++] = (uint8_t)((v >> 24) & 0xFF);
+    };
+
+    float    wh         = _motor ? _motor->getBusEnergyWh() : 0.0f;
+    uint16_t max_spd    = (uint16_t)(_state.max_speed_mm_s.load(std::memory_order_relaxed) + 0.5f);
+    uint32_t dist_mm    = (uint32_t)(_state.session_distance_mm.load(std::memory_order_relaxed) + 0.5f);
+    uint32_t energy_mwh = (wh > 0.0f) ? (uint32_t)(wh * 1000.0f + 0.5f) : 0;
+    uint32_t strokes    = _state.stroke_count.load(std::memory_order_relaxed);
+    uint32_t session_ms = (uint32_t)(millis() - _state.session_start_ms);
+
+    putU16(max_spd);
+    putU32(dist_mm);
+    putU32(energy_mwh);
+    putU32(strokes);
+    putU32(session_ms);
+
+    _sendGuarded(num, frame, STATS_FRAME_SIZE, "STATS");
 }
 
 // ============================================================================
@@ -547,7 +644,7 @@ void UiSocket::sendInterp(uint8_t num) {
     frame[off++] = (uint8_t)((ela >> 16) & 0xFF);
     frame[off++] = (uint8_t)((ela >> 24) & 0xFF);
 
-    _ws.sendBIN(num, frame, INTERP_FRAME_SIZE);
+    _sendGuarded(num, frame, INTERP_FRAME_SIZE, "INTERP");
 }
 
 // ============================================================================
@@ -682,6 +779,13 @@ void UiSocket::broadcastStatus() {
     }
 }
 
+void UiSocket::broadcastStats() {
+    WsLock lock(_wsMutex);
+    for (uint8_t i = 0; i < MAX_CLIENTS; i++) {
+        if (_shouldStream(i)) sendStats(i);
+    }
+}
+
 void UiSocket::broadcastInterp() {
     WsLock lock(_wsMutex);
     for (uint8_t i = 0; i < MAX_CLIENTS; i++) {
@@ -767,7 +871,7 @@ void UiSocket::broadcastAnomaly() {
         putF32(a.extra);
 
         for (uint8_t i = 0; i < MAX_CLIENTS; i++) {
-            if (_shouldStream(i)) _ws.sendBIN(i, frame, ANOMALY_FRAME_SIZE);
+            if (_shouldStream(i)) _sendGuarded(i, frame, ANOMALY_FRAME_SIZE, "ANOMALY");
         }
     }
 }
@@ -785,6 +889,19 @@ void UiSocket::senderTask(void* arg) {
 
     while (true) {
         vTaskDelayUntil(&lastWake, PERIOD);
+
+        // WS server servicing lives HERE now (moved off httpTask). _ws.loop()
+        // accepts new connections, reads inbound frames, and runs the library
+        // heartbeat — all of which can block on a wedged/half-open client socket.
+        // Keeping it on this dedicated task means such a block delays only
+        // telemetry, never the Core-0 heartbeat/HTTP/OTA. Must run every tick
+        // (even with zero clients) so new connections are still accepted. :3
+        {
+            uint32_t _s0 = millis();
+            self->update();                       // _ws.loop() under _wsMutex
+            uint32_t _dt = millis() - _s0;
+            if (_dt > 120) APPLOGF("[STALL] sender:ws.loop blocked %lums", (unsigned long)_dt);
+        }
 
         bool anyConnected = false;
         {
@@ -817,6 +934,7 @@ void UiSocket::senderTask(void* arg) {
         if (now - self->_lastStatusMs >= 500) {
             self->_lastStatusMs = now;
             self->broadcastStatus();
+            self->broadcastStats();     // 0x06 session odometer, same ~2Hz cadence
         }
     }
 }

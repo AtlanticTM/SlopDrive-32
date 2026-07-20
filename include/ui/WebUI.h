@@ -105,6 +105,11 @@ public:
     /// Start the dedicated 10ms telemetry sampler (called from init()).
     void startTelemetrySampler();
 
+    /// Zero the session odometer stats (distance/max/strokes) + the INA228 Wh
+    /// accumulator, and restamp the session clock. Called by the reset-session
+    /// control (POST /api/settings {reset_stats:true}).
+    void resetSessionStats();
+
 #if defined(FEATURE_RS485_MODBUS)
     /// Set the ServoModbus reference after construction.
     void setServoModbus(ServoModbus& modbus) { _servoModbus = &modbus; }
@@ -182,6 +187,12 @@ private:
     void handleApiOverride();
     void handleApiTmc();
     void handleApiPattern();
+    // User-preset store for Advanced mode (fray-d port). GET → list all saved
+    // presets {name, def}; POST {name, def} → save/overwrite; POST {name,
+    // delete:true} → remove. Persisted in NVS (namespace "advpreset") so they
+    // survive reboots AND web-UI (LittleFS) reflashes — the UI mirrors them to
+    // localStorage and can import/export for sharing.
+    void handleApiPatternPresets();
     void handleApiLog();
     void handleApiMode();
     void handleApiClients();   // GET list of WS clients / POST kick — Health tab

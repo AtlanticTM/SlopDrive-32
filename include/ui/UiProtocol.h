@@ -21,6 +21,7 @@
 //   0x05 ANOMALY — interpolator anomaly event (event-driven), see below
 #define WS_FRAME_INTERP  0x04   // device → client:  interpolator planned-path snapshot
 #define WS_FRAME_ANOMALY 0x05   // device → client:  interpolator anomaly event
+#define WS_FRAME_STATS   0x06   // device → client:  session odometer stats (~2Hz)
 #define WS_FRAME_CMD   0x10   // client → device:  {type, id:u16, op:u8, payload:JSON}
 #define WS_FRAME_ECHO  0x11   // device → client:  {type, id:u16, ok:u8, cfg_gen:u16, payload:JSON}
 
@@ -60,11 +61,34 @@
 // Total: 28 bytes.
 #define ANOMALY_FRAME_SIZE 28
 
+// ---- 0x06 STATS frame layout (device → client, ~2Hz) ----------------------
+// Session "odometer" totals for the dashboard SESSION card. Cleared by the
+// reset-session control (POST /api/settings {reset_stats:true}) which also
+// zeroes the INA228 hardware energy accumulator. Little-endian. Live current
+// speed is NOT here — the hero numeral derives it from the telemetry stream
+// (telebuf) for a snappier readout; this frame carries the slow totals + peak.
+//   off  type  field
+//   0    u8    0x06
+//   1    u16   max_speed_mm_s     (session peak speed, mm/s)
+//   3    u32   distance_mm        (session distance travelled, mm)
+//   7    u32   energy_mwh         (session energy, milli-Wh = Wh*1000)
+//   11   u32   strokes            (session direction-reversal count)
+//   15   u32   session_ms         (elapsed since boot / last reset)
+// Total: 19 bytes.
+#define STATS_FRAME_SIZE 19
+
 // ---- 0x10 CMD op codes -----------------------------------------------------
 #define WS_OP_SET_WINDOW   0x01   // {min, max, no_persist?}
 #define WS_OP_SET_SPEED    0x02   // {mm_s}
 #define WS_OP_SET_ACCEL    0x03   // {mm_s2}
 #define WS_OP_GEN_CFG      0x04   // {speed, depth, stroke, sensation, pattern, rate_tick}
+                                  // + Advanced mode (fray-d port), all optional/additive:
+                                  //   {ap_mode:bool, ap_speed, ap_min_depth, ap_max_depth,
+                                  //    ap_in_speed, ap_out_speed, ap_in_accel, ap_out_accel,
+                                  //    ap_mod:{ctrl:0..5, amplitude, in_step, in_wait,
+                                  //            out_step, out_wait, offset},
+                                  //    ap_reset:bool (fray-d baseline; applied FIRST),
+                                  //    ap_mods:[<ap_mod objects>] (preset apply)}
 #define WS_OP_GEN_RUN      0x05   // {run:bool}
 #define WS_OP_MODE         0x06   // {transport}  "WS"|"SER"|"BT"|"DONGLE"|"OSSM"
 #define WS_OP_BLEND        0x07   // {bm}  1=let-it-land, 2=allow-reversal, 3=hybrid

@@ -633,6 +633,10 @@ void setup() {
     pinMode(AIM_PIN_DIR,  OUTPUT); digitalWrite(AIM_PIN_DIR,  LOW);
     Wire.begin(PIN_I2C_SDA, PIN_I2C_SCL);
     Wire.setClock(400000);
+    // Runtime steps/mm — load the persisted motor steps/rev (drive reg 0x0B
+    // mirror) BEFORE any motion math runs. Reprogramming steps/rev from the
+    // Configure pane updates this live (+ forces a re-home) — no reboot. :3
+    aimGeometryInit();
 #endif
 
     if (LittleFS.begin(true))

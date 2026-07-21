@@ -199,10 +199,9 @@ function buildHealthCards(caps, feat) {
     if (mHost) {
       _powerMeters = {
         busV: new Meter(mHost, { label: 'BUS V', min: 20, max: 40, decimals: 1, hazards: [[0, 0.2]], tip: 'Bus voltage · hazard at the LOW end — undervoltage is the fault (warn <24V)' }),
-        busA: new Meter(mHost, { label: 'BUS A', min: 0, max: 20, decimals: 2, hazards: [[0.4, 0.6]], peakHold: 'ratchet', tip: 'Bus current · total draw, motor + logic · amber caret holds the peak since boot' }),
-        busW: new Meter(mHost, { label: 'BUS W', min: 0, max: 800, decimals: 1, hazards: [[0.36, 0.64]], peakHold: 'ratchet', tip: 'Bus power · voltage × current · amber caret holds the peak since boot' }),
-        dieC: new Meter(mHost, { label: 'DIE °C', min: 0, max: 100, decimals: 1, hazards: [[0.7, 0.3]], tip: 'INA228 die temperature · same die as the shunt amplifier' }),
-        peakA: new Meter(mHost, { label: 'PEAK A', min: 0, max: 20, decimals: 2, hazards: [[0.4, 0.6]], tip: 'Highest current seen since boot (device-reported) · Reset peaks clears it' })
+        busA: new Meter(mHost, { label: 'BUS A', min: 0, max: 20, decimals: 2, hazards: [[0.4, 0.6]], peakHold: 'ratchet', tip: 'Bus current · total draw, motor + logic · amber caret + number hold the device-reported peak since boot' }),
+        busW: new Meter(mHost, { label: 'BUS W', min: 0, max: 800, decimals: 1, hazards: [[0.36, 0.64]], peakHold: 'ratchet', tip: 'Bus power · voltage × current · amber caret + number hold the peak since boot' }),
+        dieC: new Meter(mHost, { label: 'DIE °C', min: 0, max: 100, decimals: 1, hazards: [[0.7, 0.3]], tip: 'INA228 die temperature · same die as the shunt amplifier' })
       };
     }
     initPowerSparkline();
@@ -336,7 +335,9 @@ export function refreshHealthCards(d) {
     _powerMeters.busA.set(amps);
     _powerMeters.busW.set(power);
     _powerMeters.dieC.set(dieC);
-    _powerMeters.peakA.set(peakA);
+    // Device-reported peak rides the BUS A caret (the old PEAK A row is gone);
+    // authoritative both ways so a device-side reset lowers the caret too.
+    _powerMeters.busA.setPeak(peakA);
     var nowMs = performance.now();
     pushSparkSample(nowMs, power);
     drawSparkline(nowMs);
@@ -396,10 +397,11 @@ function buildRs485Card(caps) {
   card.innerHTML = `
     <div class="card-head">
       <span data-ico="i-cable"></span><h2>Servo (RS485)</h2>
-      <button class="info" data-tip="Modbus RTU telemetry from the AIM servo drive over RS485. Live drive-reported voltage, current, temperature, and alarm flags — cross-checks the INA228 on the motor bus. Config writes (enable, speed/accel, gains, DIR polarity, save-to-flash) available from this card."><span data-ico="i-info"></span></button>
+      <span class="card-state" id="rs485State">probing…</span>
+      <button class="info" data-tip="Modbus RTU telemetry read straight from the AIM servo drive over RS485 — the drive's OWN voltage, current, speed, temperature and alarm registers, cross-checking the INA228 on the motor bus. Programming and live tuning live in the Configure pane."><span data-ico="i-info"></span></button>
     </div>
-    <div class="card-body" style="text-align:center;padding:20px;color:var(--muted)">
-      RS485 Modbus telemetry will be displayed here once the module is wired.
+    <div class="card-body" id="rs485Body" style="text-align:center;padding:20px;color:var(--tx-mut)">
+      Waiting for the servo drive to answer on RS485…
     </div>`;
   healthTab.appendChild(card);
   if (typeof window.injectIcons === 'function') window.injectIcons();

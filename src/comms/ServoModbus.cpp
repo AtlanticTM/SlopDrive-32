@@ -230,33 +230,89 @@ void ServoModbus::update() {
         return;
     }
 
-    // ---- Ready: single-register poll cycle ----------------------------------
+    // ---- Ready: writes > config scan > telemetry poll -----------------------
     // One register per transaction — the gold-motor tool's access pattern.
-    // Values stage into _staged[] and commit to _telemetry as one consistent
-    // snapshot when the cycle wraps. :3
+    // Writes preempt reads but only launch from IDLE, so a write echo can
+    // never masquerade as a poll response (the next read's flush eats it). :3
     switch (_rx_state) {
     case RxState::IDLE:
-        // Rate-limit per-register polls to POLL_INTERVAL_MS
+        // 1. Drain the write queue first (user-facing config writes).
+        if (_wq_count > 0) {
+            if (now - _last_write_ms < WRITE_SPACING_MS) return;
+            WriteOp& op = _wq[_wq_head];
+            sendWriteCommand(op.reg, op.val);
+            _last_write_ms = now;
+            if (op.rep > 1) {
+                op.rep--;
+            } else {
+                // Follow a device-address change so the bus keeps talking to
+                // the drive it just renamed. :3
+                if (op.reg == 0x15 && op.val >= 1 && op.val <= 247) {
+                    _addr = (uint8_t)op.val;
+                    APPLOGF("ServoModbus: following device-address change -> %u", _addr);
+                }
+                _wq_head = (_wq_head + 1) % WRITE_Q_LEN;
+                _wq_count--;
+            }
+            return;
+        }
+
+        // 2. Config scan (on demand, faster cadence than telemetry).
+        if (_scan_active) {
+            if (now - _last_poll_ms < SCAN_INTERVAL_MS) return;
+            _last_poll_ms = now;
+            _rx_expected  = sendReadRequest((uint16_t)_scan_idx, 1);
+            _rx_start_ms  = now;
+            _pending_kind = PendingKind::SCAN;
+            _rx_state     = RxState::WAITING;
+            return;
+        }
+
+        // 3. Telemetry poll cycle, rate-limited to POLL_INTERVAL_MS.
         if (now - _last_poll_ms < POLL_INTERVAL_MS) return;
         _last_poll_ms = now;
-        _rx_expected = sendReadRequest(POLL_REGS[_reg_idx], 1);
-        _rx_start_ms = now;
-        _rx_state = RxState::WAITING;
+        _rx_expected  = sendReadRequest(POLL_REGS[_reg_idx], 1);
+        _rx_start_ms  = now;
+        _pending_kind = PendingKind::TELE;
+        _rx_state     = RxState::WAITING;
         break;
 
     case RxState::WAITING: {
         // Check if enough bytes have arrived yet
         if (_port.available() < (int)_rx_expected) {
             // Give it up to 80ms — far longer than the ~4ms the UART needs.
-            // If we time out, reset to IDLE and retry the SAME register.
             if (now - _rx_start_ms > 80) {
+                if (_pending_kind == PendingKind::SCAN) {
+                    // A register that times out 3× is marked unknown and
+                    // skipped — some drive variants stop at 0x14. :3
+                    if (++_scan_retries >= 3) {
+                        _scan_retries = 0;
+                        _cfg_staged[_scan_idx] = 0;
+                        _scanAdvance(now);
+                    }
+                }
                 _rx_state = RxState::IDLE;
             }
             return;
         }
 
         uint16_t val = 0;
-        if (tryReadResponse(&val, 1)) {
+        bool ok = tryReadResponse(&val, 1);
+
+        if (_pending_kind == PendingKind::SCAN) {
+            if (ok) {
+                _cfg_staged[_scan_idx] = val;
+                _scan_known |= (1UL << _scan_idx);
+                _scan_retries = 0;
+                _scanAdvance(now);
+            }
+            // Garbled: retry the same register next cycle (retries counted on
+            // timeout only — a CRC-fail retry is free).
+            _rx_state = RxState::IDLE;
+            break;
+        }
+
+        if (ok) {
             _staged[_reg_idx] = val;
             _reg_idx++;
             if (_reg_idx >= POLL_REG_COUNT) {
@@ -287,11 +343,73 @@ void ServoModbus::update() {
     } // switch
 }
 
+// Advance the config scan to the next register; commit the mirror as one
+// consistent snapshot when the last register lands. :3
+void ServoModbus::_scanAdvance(uint32_t now) {
+    _scan_idx++;
+    if (_scan_idx < CFG_REG_COUNT) return;
+    portENTER_CRITICAL(&_mux);
+    _cfg.valid    = true;
+    _cfg.stamp_ms = now;
+    _cfg.known    = _scan_known;
+    memcpy(_cfg.regs, _cfg_staged, sizeof(_cfg.regs));
+    portEXIT_CRITICAL(&_mux);
+    _scan_active = false;
+    APPLOGF("ServoModbus: config scan complete (known=0x%08lX) :3", (unsigned long)_scan_known);
+}
+
 void ServoModbus::emergencyStop() {
     if (!_ready) return;
+    // Never keep programming through an e-stop — drop everything queued. :3
+    _wq_count = 0;
+    _scan_active = false;
     // Disable the drive output — reg 0x01 = 0. Fire-and-forget. :3
     sendWriteCommand(0x01, 0);
     APPLOG("ServoModbus: drive output disabled (emergency stop)");
+}
+
+// ============================================================================
+// Configure-pane plumbing — config mirror, scan, write queue
+// ============================================================================
+
+ServoConfig ServoModbus::getConfig() const {
+    ServoConfig snap;
+    portENTER_CRITICAL(&_mux);
+    snap = _cfg;
+    portEXIT_CRITICAL(&_mux);
+    snap.scanning = _scan_active;
+    return snap;
+}
+
+void ServoModbus::requestConfigScan() {
+    if (!_ready || _scan_active) return;
+    _scan_active  = true;
+    _scan_idx     = 0;
+    _scan_retries = 0;
+    _scan_known   = 0;
+    memset(_cfg_staged, 0, sizeof(_cfg_staged));
+}
+
+bool ServoModbus::queueWrite(uint16_t reg, uint16_t value, uint8_t repeat) {
+    if (!_ready) return false;
+    if (repeat < 1) repeat = 1;
+    if (_wq_count >= WRITE_Q_LEN) {
+        APPLOG("ServoModbus: write queue FULL — write dropped");
+        return false;
+    }
+    size_t tail = (_wq_head + _wq_count) % WRITE_Q_LEN;
+    _wq[tail] = { reg, value, repeat };
+    _wq_count++;
+    return true;
+}
+
+size_t ServoModbus::pendingWrites() const {
+    // Count each remaining repeat as one pending wire-write so the UI's
+    // progress hint drains linearly. :3
+    size_t n = 0;
+    for (size_t i = 0; i < _wq_count; i++)
+        n += _wq[(_wq_head + i) % WRITE_Q_LEN].rep;
+    return n;
 }
 
 // ============================================================================

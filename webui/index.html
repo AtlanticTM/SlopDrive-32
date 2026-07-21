@@ -190,6 +190,12 @@
         <span>Diag</span>
       </button>
       <button class="tab drive-tab active" data-tab="drive" aria-label="Drive"></button>
+      <!-- CONFIGURE — servo drive programmer pane (features/servo.js). Hidden
+           until the firmware advertises has_rs485 AND the drive answers. -->
+      <button class="tab tab-pane" id="cfgTabDesk" data-tab="configure" aria-label="Configure" style="display:none"
+        data-tip="Servo drive programmer — Modbus telemetry, live tuning, register programming · opens as a panel beside Drive">
+        <svg class="pane-ico" viewBox="0 0 15 12" aria-hidden="true"><rect x="0.5" y="0.5" width="14" height="11" fill="none" stroke="currentColor"/><rect class="fill-half" x="8.5" y="0.5" width="6" height="11" fill="currentColor"/></svg>
+      </button>
       <button class="tab tab-pane" data-tab="settings" aria-label="Settings"
         data-tip="Opens as a panel beside Drive · click again to close">
         <svg class="pane-ico" viewBox="0 0 15 12" aria-hidden="true"><rect x="0.5" y="0.5" width="14" height="11" fill="none" stroke="currentColor"/><rect class="fill-half" x="8.5" y="0.5" width="6" height="11" fill="currentColor"/></svg>
@@ -434,21 +440,11 @@
 
         </div>
       </div>
-      </div><!-- .clu-col-main -->
-
-      <div class="clu-col clu-col-side">
-      <!-- ===== POWER (02) — Health host. capabilities.js builds the card
-           body into #loadCard (5 Meter instances + sparkline) via innerHTML
-           — id is load-bearing. The old standalone #healthCard driver-health
-           placeholder was folded into this card's .info tooltip (§2.2d);
-           RS485 telemetry (when present) also appends into #health. -->
-      <div id="health" class="health-host">
-        <div class="card panel" id="loadCard"><div class="card-body" style="text-align:center;padding:20px;color:var(--tx-mut)">Load monitoring not available.</div></div>
-      </div>
 
       <!-- SESSION (03) — odometer: distance, energy, peak speed, strokes, uptime.
            Fed by the 0x06 STATS frame (or /api/status fallback), rendered in
-           main.js. Live CURRENT speed lives in the hero strip, not here. -->
+           main.js. Live CURRENT speed lives in the hero strip, not here.
+           Lives under the pattern generator in the main column. -->
       <div class="card panel" id="sessionCard">
         <div class="card-head">
           <span data-ico="i-gauge"></span><h2>Session</h2>
@@ -463,6 +459,18 @@
           <div class="kv"><span>Session time</span><b id="sessTime">&mdash;</b></div>
         </div>
       </div>
+      </div><!-- .clu-col-main -->
+
+      <div class="clu-col clu-col-side">
+      <!-- ===== POWER (02) — Health host. capabilities.js builds the card
+           body into #loadCard (5 Meter instances + sparkline) via innerHTML
+           — id is load-bearing. The old standalone #healthCard driver-health
+           placeholder was folded into this card's .info tooltip (§2.2d);
+           RS485 telemetry (when present) also appends into #health. -->
+      <div id="health" class="health-host">
+        <div class="card panel" id="loadCard"><div class="card-body" style="text-align:center;padding:20px;color:var(--tx-mut)">Load monitoring not available.</div></div>
+      </div>
+
       </div><!-- .clu-col-side -->
 
       </div><!-- .clu -->
@@ -676,6 +684,129 @@
       </div><!-- .setgrid -->
     </div><!-- #pv-settings -->
 
+    <!-- ===================== CONFIGURE (servo drive programmer) ============ -->
+    <!-- Pane logic + all dynamic content: features/servo.js. Ground Truth:
+         every field ADOPTS the drive's register mirror (async scan readback);
+         a write is only "done" once the rescan confirms it landed. -->
+    <div class="paneView" id="pv-configure">
+      <div class="setgrid">
+
+      <!-- Drive status + link -->
+      <div class="card panel tight">
+        <div class="card-head">
+          <span data-ico="i-cable"></span><h2>Servo Drive</h2>
+          <span class="card-state" id="svLinkState">—</span>
+          <button class="info" data-tip="AIM servo drive on the RS485 Modbus bus. Motion always runs over step/dir — this pane only reads telemetry and writes configuration registers. Every value shown is read back from the drive itself."><span data-ico="i-info"></span></button>
+        </div>
+        <div class="sv-chiprow">
+          <span class="chip" data-tip="Modbus link to the drive"><span class="dot" id="svLinkDot"></span><span id="svLinkTxt">RS485</span></span>
+          <span class="chip" data-tip="Drive alarm register 0x0E"><span class="dot" id="svAlarmDot"></span><span id="svAlarmTxt">no alarm</span></span>
+          <span class="chip" data-tip="Modbus device address"><b>addr</b>&nbsp;<span class="mn" id="svAddr">–</span></span>
+          <span class="chip" data-tip="Config writes still queued on the wire"><b>queue</b>&nbsp;<span class="mn" id="svQueue">0</span></span>
+        </div>
+        <div class="btn-row" style="margin-top:10px">
+          <button class="btn" id="svScanBtn"><span data-ico="i-reset"></span> Read registers</button>
+          <button class="btn ghost" id="svSaveBtn" data-tip="Write drive register 0x14 = 1 — persists the CURRENT drive parameters to its internal EEPROM so they survive a power cycle"><span data-ico="i-save"></span> Save to drive flash</button>
+        </div>
+        <div class="hint" id="svScanHint" style="margin-top:8px">Registers are read one at a time over the bus — a full scan takes about a second.</div>
+      </div>
+
+      <!-- Re-home banner (shown after a structural change unhomes the machine) -->
+      <div class="banner amber" id="svRehomeBanner" style="margin:0">
+        Geometry changed — steps/mm was recalculated live and the machine is <b>UNHOMED</b>.
+        Motion is blocked until you re-home. <span id="svRehomeDetail"></span>
+      </div>
+
+      <!-- Live tuning — safe registers, applied instantly -->
+      <div class="card panel tight">
+        <div class="card-head">
+          <span data-ico="i-sliders"></span><h2>Live Tuning</h2>
+          <button class="info" data-tip="Servo loop registers that are safe to change while the machine runs — they shape how the drive follows the step/dir pulse train, they never move the motor by themselves. Applied instantly (written twice for bus reliability), verified by readback. NOT saved to the drive's EEPROM until you hit Save to drive flash."><span data-ico="i-info"></span></button>
+        </div>
+        <div class="pair">
+          <div>
+            <div class="mini-label" data-tip="Drive-side hard speed ceiling for following the pulse train · range 0–3000 r/min · OSSM standard 1500. HIGHER: more carriage top speed (see the mm/s readout below). LOWER: a mechanical safety cap that no firmware bug or runaway command can exceed — the drive simply won't spin faster. If set below what patterns demand, fast strokes flatten out and following error grows.">Max speed <span class="mn">0x02</span> (r/min)</div>
+            <input class="num" id="svR02" type="number" min="0" max="3000" step="10" data-reg="2">
+            <div class="hint mn" id="svR02Mms" style="margin-top:4px" data-tip="What this rpm ceiling means in carriage speed, at the machine's current gearing (steps/rev ÷ steps/mm)"></div>
+          </div>
+          <div><div class="mini-label" data-tip="Drive-internal accel ramp · range 0–60098 · OSSM standard 50000. BELOW 60000: ramp rate in (r/min)/s — lower is smoother/softer but lags the commanded motion more. EXACTLY 60000: ramp OFF, deceleration governed purely by Position KP — crispest response, most overshoot risk. 60001–60098: the last two digits become 0–98% position feed-forward — less pulse-following lag, but too much causes hunting/vibration.">Accel <span class="mn">0x03</span> ((r/min)/s)</div><input class="num" id="svR03" type="number" min="0" max="60098" step="100" data-reg="3"></div>
+        </div>
+        <div class="pair">
+          <div><div class="mini-label" data-tip="Velocity-loop proportional gain · range 0–10000 (= 0.0–10.0) · OSSM standard 3000. HIGHER: stiffer speed tracking under load, better bury-to-the-hilt consistency — too high buzzes, hums at standstill, and oscillates. LOWER: quieter and softer, but speed sags under load and tracking lags. Caution: the UNITS digit's parity also selects pulse edge polarity (even = falling edge, odd = rising) — keep the parity of a known-working value.">Speed loop KP <span class="mn">0x05</span></div><input class="num" id="svR05" type="number" min="0" max="10000" step="10" data-reg="5"></div>
+          <div><div class="mini-label" data-tip="Velocity-loop integral time · range 2–2000 ms · OSSM standard 10. LOWER: stiffer — steady-state speed error is corrected faster, but expect more overshoot and hunting near direction changes. HIGHER: smoother and more forgiving, but slower to recover speed after a load spike.">Speed loop Ti <span class="mn">0x06</span> (ms)</div><input class="num" id="svR06" type="number" min="2" max="2000" step="1" data-reg="6"></div>
+        </div>
+        <div class="pair">
+          <div><div class="mini-label" data-tip="Position-loop proportional gain · range 60–30000 · OSSM standard 3000. HIGHER: tighter position hold and faster settling at stroke ends — too high overshoots and rings against the hard stops. LOWER: softer landings and quieter holds, but spongier tracking and larger following error at speed. Also governs decel when Accel = 60000. Caution: the UNITS digit's parity sets the alarm output normally-open/closed — keep the parity of a working value.">Position KP <span class="mn">0x07</span></div><input class="num" id="svR07" type="number" min="60" max="30000" step="10" data-reg="7"></div>
+          <div><div class="mini-label" data-tip="Output power/torque ceiling · OSSM standard 600. LOWER: gentler maximum force — stalls trip sooner and pinch force drops, a genuine safety lever for play. Too low and aggressive strokes stall or lose depth under load. HIGHER: more torque headroom for heavy toys/loads at the cost of more force when something goes wrong.">Max output <span class="mn">0x18</span></div><input class="num" id="svR18" type="number" min="0" max="32767" step="10" data-reg="24"></div>
+        </div>
+        <div class="hint" style="margin-bottom:8px">Hover any label for the full pros/cons. OSSM standard: speed 1500 · accel 50000 · KP 3000/3000 · Ti 10 · output 600.</div>
+        <button class="btn primary sm" id="svApplyLiveBtn" style="width:auto"><span data-ico="i-check"></span> Apply live tuning</button>
+      </div>
+
+      <!-- Programming — structural registers, guarded sequence -->
+      <div class="card panel tight">
+        <div class="card-head">
+          <span data-ico="i-shield"></span><h2>Drive Programming</h2>
+          <button class="info" data-tip="Structural drive registers. Programming follows the proven OSSM gold-motor sequence: Modbus enable, motor output OFF, each setting written three times, output restored, saved to drive EEPROM, then verified by reading every register back. The machine must be idle, and direction/gear changes force a re-home."><span data-ico="i-info"></span></button>
+        </div>
+        <div class="banner amber show" style="margin:0 0 10px">Programming briefly <b>disables motor output</b> and is blocked while a pattern runs. Direction or gear changes unhome the machine.</div>
+        <div class="mini-label" style="margin-bottom:6px" data-tip="Which electrical DIR level means 'inward' · OSSM standard 1. Flip ONLY if the carriage moves the wrong way on the very first slow test — flipping inverts homing direction too, so the machine unhomes and every direction assumption resets. Never flip to 'fix' a motion bug; that's treating the symptom.">DIR polarity <span class="mn">0x09</span></div>
+        <div class="seg" id="svDirSeg" style="margin-bottom:10px">
+          <button data-dir="0">0 · normal</button>
+          <button data-dir="1">1 · inverted</button>
+        </div>
+        <div class="pair">
+          <div><div class="mini-label" data-tip="Field-weakening parameter — internal motor commutation tuning · OSSM standard 495. The datasheet says DO NOT set manually: wrong values waste current as heat, sap torque, or destabilize high-rpm behavior. Only touch it to restore 495.">Field-weaken <span class="mn">0x04</span></div><input class="num" id="svR04" type="number" min="0" max="65535" step="1" data-reg="4"></div>
+          <div><div class="mini-label" data-tip="Velocity feed-forward · 327 = 1 V/kRPM, so OSSM standard 3900 ≈ 11.9 V/kRPM. Feeds commanded speed straight to the output stage to shrink following lag. The datasheet says don't hand-tune: too much overshoots every stroke end, too little lags. Only touch it to restore 3900.">Speed feed-fwd <span class="mn">0x08</span></div><input class="num" id="svR08" type="number" min="0" max="65535" step="1" data-reg="8"></div>
+        </div>
+        <div class="pair">
+          <div><div class="mini-label" data-tip="Electronic gear numerator · range 0–65535 · OSSM standard 32768 (= the encoder's counts/rev, making Steps/rev below read directly in pulses per revolution). Setting 0 switches the drive into special-function mode (Modbus homing commands) — never leave it at 0 on this machine.">E-gear numerator <span class="mn">0x0A</span></div><input class="num" id="svR0A" type="number" min="0" max="65535" step="1" data-reg="10"></div>
+          <div><div class="mini-label" data-tip="Modbus slave ID · range 1–247 · standard 1. Only matters if you daisy-chain multiple drives on one RS485 bus — each needs a unique address. The firmware follows the change automatically, but a typo here means re-finding the drive by trial.">Device address <span class="mn">0x15</span></div><input class="num" id="svR15" type="number" min="1" max="247" step="1" data-reg="21"></div>
+        </div>
+        <div class="hint" style="margin-bottom:4px">Hover any label for details. Field-weaken and speed feed-forward are internal drive parameters — only touch them to restore the standards (495 / 3900).</div>
+
+        <!-- STEPS/REV — the dangerous one. -->
+        <div class="sv-danger">
+          <div class="sv-danger-head"><span data-ico="i-alert"></span> Steps / revolution <span class="mn">0x0B</span></div>
+          <div class="sv-danger-text">
+            <b>THIS REWIRES THE MACHINE'S ENTIRE SENSE OF DISTANCE.</b> Steps/rev is the
+            electronic-gear denominator: every speed, position, stroke window and safety
+            ceiling is computed through it. Set it wrong and <b>a commanded 10&nbsp;mm stroke
+            becomes a 400&nbsp;mm ram at full force</b>. Only change it if you know exactly why
+            (OSSM standard: <b>800</b>). The firmware recalculates steps/mm live the moment
+            it's programmed, and the machine is <b>unhomed and blocked from all motion until
+            you re-home</b>.
+          </div>
+          <div class="pair" style="margin-top:8px">
+            <div><div class="mini-label" data-tip="Pulses per motor revolution (e-gear denominator, with numerator 32768) · accepted range 50–32767 · OSSM standard 800. HIGHER: finer positioning resolution but lower top speed at the same pulse rate (the ESP32's pulse generator becomes the ceiling). LOWER: faster at the same pulse rate but coarser steps. Drive and firmware are reprogrammed together in one guarded sequence.">Steps/rev (motor shaft)</div><input class="num" id="svR0B" type="number" min="50" max="32767" step="1" data-reg="11"></div>
+            <div><div class="mini-label" data-tip="The firmware's live steps-per-millimetre, derived from steps/rev × drum reduction ÷ drum circumference. Every mm of motion, every speed and every safety ceiling is converted through this number — it updates the instant steps/rev is programmed.">Firmware steps/mm</div><div class="mn" id="svStepsMm" style="padding:8px 0">–</div></div>
+          </div>
+        </div>
+
+        <div class="btn-row" style="margin-top:10px">
+          <button class="btn primary" id="svProgramBtn"><span data-ico="i-shield"></span> Program drive</button>
+          <button class="btn ghost" id="svDefaultsBtn" data-tip="Fill every field with the OSSM gold-motor standard values (steps/rev 800, speed 1500, accel 50000, KP 3000/3000, Ti 10, feed-forward 3900, field-weaken 495, e-gear 32768, max output 600, DIR 1) — then review and hit Program drive"><span data-ico="i-reset"></span> Load OSSM defaults</button>
+        </div>
+      </div>
+
+      <!-- Raw register table + expert write -->
+      <div class="card panel collapsible collapsed">
+        <div class="card-head"><span data-ico="i-terminal"></span><h2>Registers (raw)</h2><span class="caret" data-ico="i-chevron"></span></div>
+        <div class="card-body">
+          <div class="hint" style="margin-bottom:8px">Raw mirror of drive registers 0x00–0x19 from the last scan. Newest scan wins — values the drive never answered show as <span class="mn">--</span>.</div>
+          <pre class="log screen term" id="svRegTable">No scan yet.</pre>
+          <div class="pair" style="margin-top:10px">
+            <div><div class="mini-label">Reg (hex or dec)</div><input class="num" id="svRawReg" type="text" inputmode="text" placeholder="0x05"></div>
+            <div><div class="mini-label">Value</div><input class="num" id="svRawVal" type="number" min="0" max="65535" step="1"></div>
+          </div>
+          <button class="btn ghost sm" id="svRawBtn" style="margin-top:8px;width:auto"><span data-ico="i-alert"></span> Raw write</button>
+          <div class="hint" style="margin-top:6px">Expert only — no validation beyond blocking position/gear/address registers (use the cards above for those). You ball, you own it.</div>
+        </div>
+      </div>
+
+      </div><!-- .setgrid -->
+    </div><!-- #pv-configure -->
+
     <div class="paneView" id="pv-log">
       <!-- Log (07) — terminal treatment (§4.1). Anomaly dot+count chips and
            the serial-mode chip both moved INTO the head (§4.2) — same ids,
@@ -782,6 +913,7 @@
 <!-- Bottom navigation (mobile only) -->
 <nav class="tabs tabs-mobile" role="tablist" aria-label="Sections">
   <button class="tab active" data-tab="drive"  data-ico="i-play" title="Drive" aria-label="Drive"></button>
+  <button class="tab" id="cfgTabMob" data-tab="configure" data-ico="i-cable" title="Configure" aria-label="Configure" style="display:none"></button>
   <button class="tab" data-tab="settings" data-ico="i-gear" title="Settings" aria-label="Settings"></button>
   <button class="tab" data-tab="log"    data-ico="i-terminal" title="Log" aria-label="Log"></button>
 </nav>

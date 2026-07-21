@@ -420,6 +420,22 @@ input[type="number"], .window .mid .big,
   background: linear-gradient(90deg, rgba(var(--reality-rgb),.22), rgba(var(--reality-rgb),.7));
   transition: width .4s cubic-bezier(.3,.7,.3,1);
 }
+/* Ratchet meters: widen the row→track gap so the peak number has a lane */
+.mtr.mtr-haspeak .mtr-row { margin-bottom: 15px; }
+.mtr .mtr-peak-val {
+  position: absolute;
+  top: -14px;
+  transform: translateX(-50%);
+  font-family: 'Martian Mono', monospace;
+  font-variant-numeric: tabular-nums;
+  font-size: .58rem;
+  line-height: 1;
+  color: var(--warn);
+  text-shadow: 0 0 6px rgba(245,185,77,.4);
+  pointer-events: none;
+  white-space: nowrap;
+  transition: left .25s ease;
+}
 .mtr .mtr-peak {
   position: absolute;
   top: -2px; bottom: -2px;
@@ -2500,7 +2516,7 @@ pre.log, .screen.log {
     padding: 5px 6px 8px 5px;
   }
   .main.split #sidePane { display: flex; }
-  #pv-settings {
+  #pv-settings, #pv-configure {
     min-height: 0;
     max-height: 100%;
     overflow-y: auto;
@@ -2508,8 +2524,8 @@ pre.log, .screen.log {
     scrollbar-width: thin;
     scrollbar-color: var(--line-2) transparent;
   }
-  #pv-settings::-webkit-scrollbar { width: 6px; }
-  #pv-settings::-webkit-scrollbar-thumb { background: var(--line-2); }
+  #pv-settings::-webkit-scrollbar, #pv-configure::-webkit-scrollbar { width: 6px; }
+  #pv-settings::-webkit-scrollbar-thumb, #pv-configure::-webkit-scrollbar-thumb { background: var(--line-2); }
   /* #pv-log.active, not bare #pv-log — an ID selector setting display:flex
      unconditionally would beat .paneView{display:none} on specificity
      regardless of the .active class JS toggles, so the Log pane would
@@ -3060,3 +3076,75 @@ body.recovering .hero-val.glow {
   border-color: var(--reality);
   color: var(--reality);
 }
+
+/* ===================== Configure pane (features/servo.js) ==================
+   Servo drive programmer — status chips, danger block for steps/rev, dirty-
+   field accents, RS485 telemetry card chips, and the confirm overlay. */
+.sv-chiprow { display: flex; flex-wrap: wrap; gap: 8px; }
+.sv-chiprow .chip b { color: var(--tx-mut); font-weight: 500; }
+
+/* Field edited but not yet confirmed by the drive's readback — intent accent,
+   NOT reality blue: the number on screen is a request, not machine truth. */
+input.num.sv-dirty {
+  border-color: var(--intent);
+  box-shadow: 0 0 0 1px var(--intent);
+}
+/* Readback landed and disagrees with what we asked for — the drive refused. */
+input.num.sv-reject {
+  border-color: var(--bad);
+  box-shadow: 0 0 0 1px var(--bad);
+}
+
+/* Steps/rev danger block — permanent heavy warning, not a dismissible banner */
+.sv-danger {
+  margin-top: 12px;
+  border: 1px solid var(--bad);
+  border-radius: var(--radius);
+  padding: 10px 12px;
+  background: repeating-linear-gradient(135deg, rgba(255,71,87,.07) 0 6px, rgba(255,71,87,.015) 6px 12px);
+}
+.sv-danger-head {
+  display: flex; align-items: center; gap: 6px;
+  color: var(--bad); font-weight: 700; font-size: .82rem;
+  text-transform: uppercase; letter-spacing: .04em;
+  margin-bottom: 6px;
+}
+.sv-danger-head [data-ico], .sv-danger-head svg { width: 16px; height: 16px; color: var(--bad); }
+.sv-danger-text { font-size: .78rem; line-height: 1.45; color: var(--tx-mut); }
+.sv-danger-text b { color: var(--bad); }
+
+/* RS485 telemetry card status chips row (built by servo.js in #rs485Body) */
+.sv-telechips { display: flex; flex-wrap: wrap; gap: 8px; margin-bottom: 10px; }
+
+/* Confirm overlay — one modal for program/defaults/raw confirmation */
+.sv-overlay {
+  position: fixed; inset: 0; z-index: 300;
+  display: none; align-items: center; justify-content: center;
+  background: rgba(6, 8, 12, .72); backdrop-filter: blur(3px);
+}
+.sv-overlay.show { display: flex; }
+.sv-modal {
+  width: min(480px, calc(100vw - 32px));
+  max-height: min(80vh, 640px); overflow-y: auto;
+  background: var(--bg-1, #12151c);
+  border: 1px solid var(--line-1); border-radius: var(--radius);
+  padding: 16px;
+  box-shadow: 0 12px 48px rgba(0,0,0,.5);
+}
+.sv-modal h3 {
+  margin: 0 0 10px; font-size: .9rem; letter-spacing: .03em;
+  display: flex; align-items: center; gap: 8px;
+}
+.sv-modal h3.danger { color: var(--bad); }
+.sv-modal .sv-changes {
+  font-size: .78rem; margin: 10px 0; padding: 8px 10px;
+  border: 1px solid var(--line-1); border-radius: 6px;
+}
+.sv-modal .sv-changes div { display: flex; justify-content: space-between; padding: 2px 0; }
+.sv-modal .sv-changes .mn { color: var(--tx-mut); }
+.sv-typegate { margin: 12px 0; }
+.sv-typegate .mini-label b { color: var(--bad); }
+
+/* DIR seg selection not yet confirmed by the drive's readback */
+#svDirSeg button.sv-pending { border-color: var(--intent); color: var(--intent); }
+

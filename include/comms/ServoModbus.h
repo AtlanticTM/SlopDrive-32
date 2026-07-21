@@ -44,6 +44,18 @@ struct ServoTelemetry {
     float    pwm_pct    = 0.0f;   // PWM duty cycle in % (reg 0x13 ÷ 100, signed)
 };
 
+// ---- Full config-register mirror (regs 0x00..0x19) -------------------------
+// Populated by an on-demand async scan (requestConfigScan) — one register per
+// transaction, same access pattern as telemetry. `known` is a bitmask of which
+// registers actually answered (a drive variant may not implement 0x15+). :3
+struct ServoConfig {
+    bool     valid    = false;   // at least one full scan has completed
+    bool     scanning = false;   // a scan is in flight right now
+    uint32_t stamp_ms = 0;       // millis() when the last scan committed
+    uint32_t known    = 0;       // bit N set = regs[N] answered on the last scan
+    uint16_t regs[0x1A] = {0};   // raw register values 0x00..0x19
+};
+
 // ---- Alarm bitfield values (register 0x0E) per datasheet -------------------
 //   0x10 = battery power-loss alarm (indication only — motor does not stop)
 //   0x12 = overcurrent alarm (motor stops)
@@ -88,6 +100,29 @@ public:
     void setAccel(uint16_t rpm_s); // reg 0x03
     void setDirPolarity(bool invert); // reg 0x09 (0=active-low, 1=active-high)
     void saveToFlash();            // reg 0x14
+
+    // ---- Configure-pane plumbing (async, drained by update()) -----------------
+    static constexpr size_t CFG_REG_COUNT = 0x1A;   // regs 0x00..0x19
+
+    /// Snapshot of the config-register mirror (thread-safe copy).
+    ServoConfig getConfig() const;
+
+    /// Kick off an async scan of regs 0x00..0x19. One register per transaction
+    /// at SCAN_INTERVAL_MS spacing (~0.7s total). No-op while already scanning.
+    void requestConfigScan();
+
+    /// Queue an FC 0x06 write, sent `repeat` times WRITE_SPACING_MS apart (the
+    /// OSSM gold-motor tool writes each setting 3× as a serial-reliability
+    /// workaround — same idea). Returns false if the queue is full or the
+    /// drive never answered a probe. Writing reg 0x15 retargets _addr so the
+    /// bus follows a device-address change. Verification is by rescan, never
+    /// by trusting the echo — Ground Truth Doctrine applies to drives too. :3
+    bool queueWrite(uint16_t reg, uint16_t value, uint8_t repeat = 1);
+
+    /// Total writes (incl. repeats) still waiting to go out on the wire.
+    size_t pendingWrites() const;
+
+    uint8_t address() const { return _addr; }
 
 private:
     HardwareSerial& _port;
@@ -138,6 +173,36 @@ private:
     size_t   _reg_idx = 0;
     uint16_t _staged[POLL_REG_COUNT] = {0};
 
+    // Which kind of read is in flight — a WAITING response routes to either
+    // the telemetry stager or the config-scan stager. :3
+    enum class PendingKind : uint8_t { TELE, SCAN };
+    PendingKind _pending_kind = PendingKind::TELE;
+
+    // ---- Config scan state (regs 0x00..0x19, on demand) -----------------------
+    // Faster spacing than telemetry (a scan is a user-facing "Read registers"
+    // action): 26 regs × 25ms ≈ 0.7s. A register that times out 3× is marked
+    // unknown (bit cleared in `known`) and skipped — some drive variants stop
+    // at 0x14. Committed as one snapshot under the spinlock. :3
+    static constexpr uint32_t SCAN_INTERVAL_MS = 25;
+    bool     _scan_active  = false;
+    size_t   _scan_idx     = 0;
+    uint8_t  _scan_retries = 0;
+    uint32_t _scan_known   = 0;
+    uint16_t _cfg_staged[CFG_REG_COUNT] = {0};
+    ServoConfig _cfg;              // committed mirror — guarded by _mux
+
+    // ---- Write queue (drained by update(), WRITE_SPACING_MS apart) ------------
+    // Fire-and-forget FC 0x06 frames; the drive's echo is discarded (flushed by
+    // the next request). Writes preempt reads but only launch from IDLE so an
+    // echo can never masquerade as a poll response. emergencyStop() clears the
+    // queue — never keep programming through an e-stop. :3
+    struct WriteOp { uint16_t reg; uint16_t val; uint8_t rep; };
+    static constexpr size_t   WRITE_Q_LEN     = 64;
+    static constexpr uint32_t WRITE_SPACING_MS = 20;
+    WriteOp  _wq[WRITE_Q_LEN];
+    size_t   _wq_head = 0, _wq_count = 0;
+    uint32_t _last_write_ms = 0;
+
     // ---- Modbus primitives ---------------------------------------------------
     uint16_t crc16(const uint8_t* buf, size_t len) const;
 
@@ -151,6 +216,9 @@ private:
 
     /// Fire-and-forget FC 0x06 write — we don't wait for the echo. :3
     void sendWriteCommand(uint16_t reg, uint16_t value);
+
+    /// Advance the config scan; commits the mirror when the last reg lands.
+    void _scanAdvance(uint32_t now);
 };
 
 #endif // defined(FEATURE_RS485_MODBUS)

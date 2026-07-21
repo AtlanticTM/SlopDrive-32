@@ -188,7 +188,7 @@ export function toast(msg, kind = 'info', ico = 'i-info', ms = 4000) {
 
 // ===================== Tab switching =====================
 
-const TAB_LABELS = { drive: 'Drive', settings: 'Settings', log: 'Log' };
+const TAB_LABELS = { drive: 'Drive', configure: 'Configure', settings: 'Settings', log: 'Log' };
 const PANE_BREAKPOINT = '(max-width: 760px)';
 
 export function initTabs() {

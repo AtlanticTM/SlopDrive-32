@@ -51,33 +51,61 @@ export function Meter(host, opts) {
     hazardHtml += '<div class="mtr-hazard mtr-hz-' + edge + '" style="left:' + (z[0] * 100) + '%;width:' + (z[1] * 100) + '%"></div>';
   });
 
+  // Ratchet meters carry a little numeric readout riding above the amber
+  // peak caret (replaces the old dedicated PEAK row) — the row/track gap
+  // widens via .mtr-haspeak to give the number its own lane.
+  if (opts.peakHold === 'ratchet') el.classList.add('mtr-haspeak');
   el.innerHTML =
     '<div class="mtr-row"><span class="mtr-label">' + opts.label + '</span><span class="mtr-value">--</span></div>' +
     '<div class="mtr-track">' + hazardHtml + '<div class="mtr-fill" style="width:0%"></div>' +
     (opts.peakHold ? '<div class="mtr-peak" style="left:0%"></div>' : '') +
+    (opts.peakHold === 'ratchet' ? '<div class="mtr-peak-val" style="display:none"></div>' : '') +
     '</div>';
   host.appendChild(el);
 
   var valueEl = el.querySelector('.mtr-value');
   var fillEl = el.querySelector('.mtr-fill');
   var peakEl = el.querySelector('.mtr-peak');
+  var peakValEl = el.querySelector('.mtr-peak-val');
   var peakFrac = 0;
+  var peakVal = null;   // highest value seen (or device-reported via setPeak)
+
+  function frToPct(fr) { return (fr * 98) + '%'; }
+  function paintPeak() {
+    if (!peakEl) return;
+    peakEl.style.left = frToPct(peakFrac);
+    if (!peakValEl) return;
+    if (peakVal === null) { peakValEl.style.display = 'none'; return; }
+    peakValEl.style.display = '';
+    peakValEl.textContent = peakVal.toFixed(decimals);
+    // Keep the label on the track — clamp so it can't hang off either rail.
+    peakValEl.style.left = Math.max(4, Math.min(94, peakFrac * 98)) + '%';
+  }
 
   this.set = function (v) {
     valueEl.textContent = v.toFixed(decimals);
     var frac = Math.max(0, Math.min(1, (v - min) / (max - min)));
-    fillEl.style.width = (frac * 98) + '%';
+    fillEl.style.width = frToPct(frac);
     if (peakEl) {
       if (opts.peakHold === 'ratchet') {
-        peakFrac = Math.max(peakFrac, frac);
-        peakEl.style.left = (peakFrac * 98) + '%';
+        if (peakVal === null || v > peakVal) { peakVal = v; peakFrac = frac; paintPeak(); }
       } else {
-        peakEl.style.left = (frac * 98) + '%';
+        peakEl.style.left = frToPct(frac);
       }
     }
     var inHazard = (opts.hazards || []).some(function (z) { return frac >= z[0] && frac <= z[0] + z[1]; });
     valueEl.classList.toggle('mtr-in-hazard', inHazard);
   };
 
-  this.resetPeak = function () { peakFrac = 0; };
+  /** Authoritative (device-reported) peak — overrides the local ratchet in
+   *  BOTH directions, so a device-side peak reset actually lowers the caret
+   *  (Ground Truth: the machine's accumulator wins, not the UI's memory). */
+  this.setPeak = function (v) {
+    if (opts.peakHold !== 'ratchet') return;
+    peakVal = v;
+    peakFrac = Math.max(0, Math.min(1, (v - min) / (max - min)));
+    paintPeak();
+  };
+
+  this.resetPeak = function () { peakFrac = 0; peakVal = null; paintPeak(); };
 }

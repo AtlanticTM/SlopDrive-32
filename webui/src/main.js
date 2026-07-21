@@ -24,6 +24,7 @@ import { initDiag } from './features/diag.js';
 import { initConn } from './features/conn.js';
 import { applyTheme, currentThemeId, initThemeUI, ACCENT } from './core/theme.js';
 import { fetchAndApplyCapabilities, refreshHealthCards, setLinkBssid } from './core/capabilities.js';
+import { initServo } from './features/servo.js';
 
 // Apply the stored theme IMMEDIATELY at module evaluation — before init()
 // and the first canvas frame — so there's no flash of default accents.
@@ -1148,7 +1149,12 @@ function init() {
     console.log('[SD32] sidebar...');
     initResizableSidebar();
     console.log('[SD32] capabilities...');
-    fetchAndApplyCapabilities().then(function (caps) { if (caps) { rebuildPatternGrid(); renumberPanels(); } });
+    fetchAndApplyCapabilities().then(function (caps) {
+      if (caps) { rebuildPatternGrid(); renumberPanels(); }
+      // Servo drive (RS485 Modbus): telemetry card + Configure pane. Only
+      // starts polling when the firmware actually carries the feature.
+      if (caps && caps.features && caps.features.has_rs485) initServo();
+    });
 
     // Start the rail telemetry loop (runs continuously, reads from telebuf)
     _startRailTelemetryLoop();

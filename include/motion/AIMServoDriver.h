@@ -251,5 +251,7 @@ private:
 
     // Hybrid (mode 3): below this remaining in-flight distance we allow the
     // reversal instead of letting the stroke finish. ~1.5mm worth of steps.
-    static const int32_t BLEND_REVERSAL_THRESHOLD_STEPS = (int32_t)(1.5f * AIM_STEPS_PER_MM);
+    // Uses the compile-time DEFAULT steps/mm (in-class constant needs a
+    // constant expression); currently unused by the .cpp.
+    static const int32_t BLEND_REVERSAL_THRESHOLD_STEPS = (int32_t)(1.5f * AIM_STEPS_PER_MM_DEFAULT);
 };

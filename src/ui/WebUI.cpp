@@ -96,6 +96,8 @@ void WebUI::init() {
     _httpServer->on("/api/override",  HTTP_POST, [this]() { statusLedsActivity(); handleApiOverride(); });
     _httpServer->on("/api/tmc",       HTTP_GET,  [this]() { handleApiTmc(); });
     _httpServer->on("/api/tmc",       HTTP_POST, [this]() { statusLedsActivity(); handleApiTmc(); });
+    _httpServer->on("/api/servo",     HTTP_GET,  [this]() { handleApiServo(); });
+    _httpServer->on("/api/servo",     HTTP_POST, [this]() { statusLedsActivity(); handleApiServo(); });
     _httpServer->on("/api/clearfault",HTTP_POST, [this]() { statusLedsActivity(); handleApiClearFault(); });
     _httpServer->on("/api/pattern",   HTTP_GET,  [this]() { handleApiPattern(); });
     _httpServer->on("/api/pattern",   HTTP_POST, [this]() { statusLedsActivity(); handleApiPattern(); });
@@ -872,6 +874,219 @@ bool WebUI::applyDriverConfig(JsonDocument& doc, JsonDocument& resp) {
 
     _bumpGen();
     return true;
+}
+
+// ============================================================================
+// handleApiServo — AIM servo drive over RS485 Modbus (Configure pane + card)
+// ============================================================================
+//
+// GET  → live telemetry snapshot + config-register mirror + runtime geometry.
+// POST → {"scan":true}                    start async register scan
+//        {"live":{"<reg>":val,...}}       live-tune whitelist writes (×2 each)
+//        {"program":{...},"save":bool}    full gold-motor sequence (idle-only)
+//        {"raw":{"reg":N,"val":V}}        single arbitrary write (expert)
+//        {"save":true}                    persist drive params (reg 0x14)
+//        {"output":bool}                  drive output enable toggle
+//
+// The program sequence mirrors the proven OSSM gold-motor tool: modbus-enable,
+// output OFF, write settings ×3 (serial-reliability workaround), output
+// restore, save-to-flash, then verify by rescan (Ground Truth — the UI adopts
+// the mirror, never its own request). Writing steps/rev (reg 0x0B) recalcs the
+// firmware's steps/mm LIVE and forces a re-home: the step<->mm meaning of the
+// position reference is void across an electronic-gear change. No reboot. :3
+
+#if defined(FEATURE_RS485_MODBUS)
+// Live-tunable while running: speed/accel ceilings, loop gains, feed-forward,
+// max output. These never move the motor and don't touch the gear train.
+static bool servoIsLiveReg(uint16_t r) {
+    return r == 0x02 || r == 0x03 || r == 0x05 || r == 0x06 || r == 0x07 ||
+           r == 0x08 || r == 0x18;
+}
+// Programmable via the guarded sequence: live set + field-weakening, DIR
+// polarity, e-gear pair, device address. NEVER 0x0C/0x0D (position) or 0x14
+// (save flag — managed by the sequence itself).
+static bool servoIsProgReg(uint16_t r) {
+    return servoIsLiveReg(r) || r == 0x04 || r == 0x09 || r == 0x0A ||
+           r == 0x0B || r == 0x15;
+}
+#endif
+
+void WebUI::handleApiServo() {
+#if !defined(FEATURE_RS485_MODBUS)
+    _httpServer->send(404, "application/json", "{\"error\":\"no_rs485\"}");
+#else
+    if (!_servoModbus) {
+        _httpServer->send(404, "application/json", "{\"error\":\"no_rs485\"}");
+        return;
+    }
+
+    if (_httpServer->method() == HTTP_GET) {
+        JsonDocument doc;
+        doc["ready"] = _servoModbus->isReady();
+        doc["addr"]  = _servoModbus->address();
+        doc["queue"] = (uint32_t)_servoModbus->pendingWrites();
+
+        ServoTelemetry t = _servoModbus->getTelemetry();
+        JsonObject tele = doc["tele"].to<JsonObject>();
+        tele["valid"]     = t.valid;
+        tele["enabled"]   = t.enabled;
+        tele["output_on"] = t.output_on;
+        tele["alarm"]     = t.alarm;
+        tele["current_a"] = t.current_a;
+        tele["speed_rpm"] = t.speed_rpm;
+        tele["voltage_v"] = t.voltage_v;
+        tele["temp_c"]    = t.temp_c;
+        tele["pwm_pct"]   = t.pwm_pct;
+
+        ServoConfig c = _servoModbus->getConfig();
+        JsonObject cfg = doc["cfg"].to<JsonObject>();
+        cfg["valid"]    = c.valid;
+        cfg["scanning"] = c.scanning;
+        cfg["age_ms"]   = c.valid ? (uint32_t)(millis() - c.stamp_ms) : 0;
+        cfg["known"]    = c.known;
+        JsonArray regs = cfg["regs"].to<JsonArray>();
+        for (size_t i = 0; i < ServoModbus::CFG_REG_COUNT; i++) regs.add(c.regs[i]);
+
+        JsonObject g = doc["geom"].to<JsonObject>();
+#if defined(DRIVER_AIM_SERVO)
+        g["motor_steps_per_rev"] = aimMotorStepsPerRev();
+        g["steps_per_mm"]        = aimStepsPerMm();
+#endif
+        g["homed"] = _state.homed;
+
+        String json;
+        serializeJson(doc, json);
+        _httpServer->send(200, "application/json", json);
+        return;
+    }
+
+    // ---- POST ----------------------------------------------------------------
+    JsonDocument doc;
+    if (deserializeJson(doc, _httpServer->arg("plain"))) {
+        _httpServer->send(400, "application/json", "{\"error\":\"Invalid JSON\"}");
+        return;
+    }
+
+    JsonDocument resp;
+    resp["ok"] = true;
+    bool rehome = false;
+
+    if (doc["scan"] | false) _servoModbus->requestConfigScan();
+
+    if (doc["output"].is<bool>()) {
+        _servoModbus->queueWrite(0x00, 1, 1);
+        _servoModbus->queueWrite(0x01, doc["output"].as<bool>() ? 1 : 0, 1);
+    }
+
+    if (doc["live"].is<JsonObject>()) {
+        JsonObject live = doc["live"];
+        _servoModbus->queueWrite(0x00, 1, 1);   // writes need Modbus enabled
+        for (JsonPair kv : live) {
+            uint16_t reg = (uint16_t)strtoul(kv.key().c_str(), nullptr, 0);
+            if (!servoIsLiveReg(reg)) {
+                resp["ok"] = false;
+                resp["error"] = "reg_not_live";
+                resp["reg"] = reg;
+                continue;
+            }
+            uint16_t val = (uint16_t)(kv.value().as<uint32_t>() & 0xFFFF);
+            _servoModbus->queueWrite(reg, val, 2);
+        }
+        _servoModbus->requestConfigScan();      // verify by readback
+    }
+
+    if (doc["raw"].is<JsonObject>()) {
+        uint16_t reg = doc["raw"]["reg"] | 0xFFFF;
+        uint16_t val = doc["raw"]["val"] | 0;
+        // Position regs never; structural regs only via "program" (sequence +
+        // geometry recalc + forced re-home) so a raw poke can't silently
+        // desync steps/mm or the bus address. :3
+        if (reg >= ServoModbus::CFG_REG_COUNT || reg == 0x0C || reg == 0x0D ||
+            reg == 0x09 || reg == 0x0A || reg == 0x0B || reg == 0x15) {
+            resp["ok"] = false;
+            resp["error"] = "raw_reg_blocked";
+        } else {
+            _servoModbus->queueWrite(0x00, 1, 1);
+            _servoModbus->queueWrite(reg, val, 1);
+            _servoModbus->requestConfigScan();
+        }
+    }
+
+    if (doc["program"].is<JsonObject>()) {
+        bool busy = _state.pattern_running || _state.homing_in_progress || _motor.isMoving();
+        if (busy) {
+            resp["ok"] = false;
+            resp["error"] = "machine_busy";
+        } else {
+            JsonObject prog = doc["program"];
+            // Validate the WHOLE batch first — rejecting mid-sequence would
+            // leave the drive half-programmed with output disabled.
+            bool valid = true;
+            uint16_t bad_reg = 0;
+            for (JsonPair kv : prog) {
+                uint16_t reg = (uint16_t)strtoul(kv.key().c_str(), nullptr, 0);
+                uint32_t val = kv.value().as<uint32_t>();
+                if (!servoIsProgReg(reg) || val > 0xFFFF) { valid = false; bad_reg = reg; break; }
+                // Steps/rev sanity band — mirrors MotionGeometry's clamp, but
+                // reject instead of silently clamping (drive + firmware MUST
+                // agree exactly, or every commanded mm is a lie).
+                if (reg == 0x0B && (val < 50 || val > 32767)) { valid = false; bad_reg = reg; break; }
+            }
+            if (!valid) {
+                resp["ok"] = false;
+                resp["error"] = "bad_program_reg";
+                resp["reg"] = bad_reg;
+            } else {
+                ServoConfig c = _servoModbus->getConfig();
+                // Restore whatever output-enable value the drive had (gold
+                // register doc says some variants use 7 = max, not 1).
+                uint16_t restore_output =
+                    (c.valid && (c.known & (1UL << 1)) && c.regs[1] != 0) ? c.regs[1] : 1;
+                bool save = doc["save"] | true;   // structural changes default to persist
+
+                _servoModbus->queueWrite(0x00, 1, 1);           // modbus enable
+                _servoModbus->queueWrite(0x01, 0, 2);           // output OFF during config
+                for (JsonPair kv : prog) {
+                    uint16_t reg = (uint16_t)strtoul(kv.key().c_str(), nullptr, 0);
+                    uint16_t val = (uint16_t)(kv.value().as<uint32_t>() & 0xFFFF);
+                    _servoModbus->queueWrite(reg, val, 3);      // gold tool writes ×3
+                    if (reg == 0x0B) {
+#if defined(DRIVER_AIM_SERVO)
+                        // LIVE steps/mm recalc + NVS persist — the whole point.
+                        aimSetMotorStepsPerRev(val, true);
+#endif
+                        rehome = true;
+                    }
+                    if (reg == 0x09) rehome = true;             // direction flip → reference void
+                }
+                _servoModbus->queueWrite(0x01, restore_output, 2);
+                if (save) _servoModbus->queueWrite(0x14, 1, 1); // persist in drive EEPROM
+                _servoModbus->requestConfigScan();              // verify by readback
+
+                if (rehome) {
+                    _state.homed = false;
+                    _motor.forceHomeState(false);
+                    APPLOG("ServoProgram: structural change applied — machine UNHOMED, re-home before motion");
+                }
+            }
+        }
+    }
+
+    if ((doc["save"] | false) && !doc["program"].is<JsonObject>()) {
+        _servoModbus->queueWrite(0x00, 1, 1);
+        _servoModbus->queueWrite(0x14, 1, 1);
+    }
+
+    resp["queued"] = (uint32_t)_servoModbus->pendingWrites();
+    resp["rehome_required"] = rehome;
+#if defined(DRIVER_AIM_SERVO)
+    resp["motor_steps_per_rev"] = aimMotorStepsPerRev();
+    resp["steps_per_mm"]        = aimStepsPerMm();
+#endif
+    String json;
+    serializeJson(resp, json);
+    _httpServer->send(200, "application/json", json);
+#endif // FEATURE_RS485_MODBUS
 }
 
 // ============================================================================

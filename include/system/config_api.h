@@ -32,7 +32,7 @@
 // Bumped by hand on each firmware change so an OTA can be verified as landed
 // (surfaced via /api/capabilities → "fw_version" and the boot log). This is the
 // single source of truth for "which build is actually running." :3
-#define FIRMWARE_VERSION        "2.1.12"
+#define FIRMWARE_VERSION        "2.1.13"
 
 // =============================================================================
 // WiFi Configuration (values come from secrets.h)
@@ -108,19 +108,46 @@
 // Keep AIM_STEPS_PER_MM a FLOAT — 20.372 truncated to an int would slowly drift
 // the carriage off by mm over a long stroke. Single-precision float feeds the
 // FPU and keeps every thrust landing exactly where it's told. :3
-#define AIM_MOTOR_STEPS_PER_REV   800                                     // @ motor shaft
+//
+// RUNTIME GEOMETRY: the AIM drive's steps/rev is an electronic-gear register
+// (0x0B) reprogrammable over RS485 Modbus, so steps/mm is a RUNTIME value —
+// seeded from NVS at boot (default below), recalculated live when the drive is
+// reprogrammed from the Configure pane. Every consumer goes through
+// aimStepsPerMm(); a steps/rev change forces a re-home (the step<->mm mapping
+// of the current position reference is void), no reboot required.
+#define AIM_MOTOR_STEPS_PER_REV_DEFAULT 800                               // @ motor shaft (drive reg 0x0B factory/OSSM standard)
 #define AIM_REDUCTION             2.0f                                    // 2:1 motor -> drum
-#define AIM_STEPS_PER_REV         ((int32_t)(AIM_MOTOR_STEPS_PER_REV * AIM_REDUCTION))  // 1600 / drum rev
 #define AIM_DRUM_DIAMETER_MM      25.0f
 #define AIM_MM_PER_REV            (3.14159265f * AIM_DRUM_DIAMETER_MM)    // 78.5398 mm/drum-rev
-#define AIM_STEPS_PER_MM          (AIM_STEPS_PER_REV / AIM_MM_PER_REV)    // ~20.372 steps/mm
+#define AIM_STEPS_PER_MM_DEFAULT  ((AIM_MOTOR_STEPS_PER_REV_DEFAULT * AIM_REDUCTION) / AIM_MM_PER_REV)  // ~20.372
 #define AIM_HOMING_BACKOFF_MM     10.0f
 
-// Homing sweep speed: ~20 mm/s crawl × 20.372 steps/mm ≈ 407 steps/s. We round
-// down to 400 so the capstan noses into the hard stop gently — slow enough that
-// a stall is a soft nudge, not a freight-train slam. forceStopAndNewPosition()
-// kills the pulse train the instant we detect the current spike. :3
-#define AIM_HOMING_SPEED_STEPS_S  600
+#if defined(DRIVER_AIM_SERVO)
+// Runtime geometry accessors — defined in src/system/MotionGeometry.cpp.
+// aimGeometryInit() loads the persisted motor steps/rev from NVS (namespace
+// "servocfg") in setup(); aimSetMotorStepsPerRev() recomputes steps/mm live
+// (32-bit float store is atomic on Xtensa — Core 1 sees old or new, never torn).
+void     aimGeometryInit();
+void     aimSetMotorStepsPerRev(uint16_t steps_per_rev, bool persist);
+uint16_t aimMotorStepsPerRev();          // per MOTOR rev (mirrors drive reg 0x0B)
+int32_t  aimStepsPerRev();               // per DRUM rev (motor × reduction)
+float    aimStepsPerMm();
+#define AIM_MOTOR_STEPS_PER_REV   (aimMotorStepsPerRev())
+#define AIM_STEPS_PER_REV         (aimStepsPerRev())
+#define AIM_STEPS_PER_MM          (aimStepsPerMm())
+#else
+#define AIM_MOTOR_STEPS_PER_REV   AIM_MOTOR_STEPS_PER_REV_DEFAULT
+#define AIM_STEPS_PER_REV         ((int32_t)(AIM_MOTOR_STEPS_PER_REV_DEFAULT * AIM_REDUCTION))
+#define AIM_STEPS_PER_MM          AIM_STEPS_PER_MM_DEFAULT
+#endif
+
+// Homing sweep speed: fixed in mm/s and converted through the LIVE steps/mm so
+// a reprogrammed steps/rev can never turn the gentle homing crawl into a
+// freight-train slam (600 steps/s was ~29.5 mm/s at the default 20.372
+// steps/mm — same crawl, now invariant). forceStopAndNewPosition() kills the
+// pulse train the instant we detect the current spike. :3
+#define AIM_HOMING_SPEED_MM_S     29.5f
+#define AIM_HOMING_SPEED_STEPS_S  ((int32_t)(AIM_HOMING_SPEED_MM_S * AIM_STEPS_PER_MM))
 
 // ---- Sensorless homing tunables (INA228 current-stall detection) ----
 // The new PCB has NO endstop switch — we feel our way to the hard stop by

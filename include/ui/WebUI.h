@@ -186,6 +186,10 @@ private:
     void handleApiHalt();
     void handleApiOverride();
     void handleApiTmc();
+    // AIM servo drive over RS485 Modbus — GET: telemetry + config-register
+    // mirror + runtime geometry; POST ops: scan / live-tune / program (full
+    // gold-motor sequence, structural regs, forces re-home) / raw / save.
+    void handleApiServo();
     void handleApiPattern();
     // User-preset store for Advanced mode (fray-d port). GET → list all saved
     // presets {name, def}; POST {name, def} → save/overwrite; POST {name,

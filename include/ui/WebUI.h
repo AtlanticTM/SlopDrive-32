@@ -21,6 +21,10 @@ class UiSocket;
 class ServoModbus;
 #endif
 
+#if defined(FEATURE_RS485_MODBUS) && defined(DRIVER_AIM_SERVO)
+class EncoderValidator;
+#endif
+
 // Forward-declared to avoid pulling <WebServer.h> into every translation unit
 // that includes this header (works around a PlatformIO include-path quirk when
 // framework headers are included from a subdirectory header).
@@ -115,6 +119,11 @@ public:
     void setServoModbus(ServoModbus& modbus) { _servoModbus = &modbus; }
 #endif
 
+#if defined(FEATURE_RS485_MODBUS) && defined(DRIVER_AIM_SERVO)
+    /// Set the FAS-vs-encoder validator reference after construction.
+    void setEncoderValidator(EncoderValidator& v) { _encValidator = &v; }
+#endif
+
     // ---- 0x10 CMD dispatch (called from UiSocket via lambda) ----------------
     /// Parse a 0x10 CMD WS frame op, apply the mutation, return {ok, response_json}.
     /// The caller (UiSocket) wraps this in a 0x11 ECHO with idempotency.
@@ -162,6 +171,10 @@ private:
 
 #if defined(FEATURE_RS485_MODBUS)
     ServoModbus*        _servoModbus = nullptr;
+#endif
+
+#if defined(FEATURE_RS485_MODBUS) && defined(DRIVER_AIM_SERVO)
+    EncoderValidator*   _encValidator = nullptr;
 #endif
 
     // ---- cfg_gen helper ------------------------------------------------------

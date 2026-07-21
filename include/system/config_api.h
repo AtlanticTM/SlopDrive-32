@@ -32,7 +32,7 @@
 // Bumped by hand on each firmware change so an OTA can be verified as landed
 // (surfaced via /api/capabilities → "fw_version" and the boot log). This is the
 // single source of truth for "which build is actually running." :3
-#define FIRMWARE_VERSION        "2.1.13"
+#define FIRMWARE_VERSION        "2.1.16"
 
 // =============================================================================
 // WiFi Configuration (values come from secrets.h)
@@ -121,6 +121,20 @@
 #define AIM_MM_PER_REV            (3.14159265f * AIM_DRUM_DIAMETER_MM)    // 78.5398 mm/drum-rev
 #define AIM_STEPS_PER_MM_DEFAULT  ((AIM_MOTOR_STEPS_PER_REV_DEFAULT * AIM_REDUCTION) / AIM_MM_PER_REV)  // ~20.372
 #define AIM_HOMING_BACKOFF_MM     10.0f
+
+// ---- Encoder cross-check (FAS commanded vs drive-reported position) ---------
+// The AIM encoder is 15-bit absolute, 32768 counts per MOTOR rev (fixed silicon
+// resolution — independent of the e-gear steps/rev, so this ratio never changes
+// when the drive is reprogrammed). counts/mm ≈ 834.4 on the 25mm drum @ 2:1.
+#define AIM_ENC_COUNTS_PER_REV    32768.0f
+#define AIM_ENC_COUNTS_PER_MM     ((AIM_ENC_COUNTS_PER_REV * AIM_REDUCTION) / AIM_MM_PER_REV)
+// Standstill deviation beyond this (for 3 consecutive steady samples) raises
+// the lost-steps warning. ~1.5mm ≈ 61 steps @ 40.7 steps/mm — far above noise,
+// far below anything that could hurt. Report-only: it never gates motion. :3
+#define AIM_ENC_DEV_WARN_MM       1.5f
+// Excursion (mm of FAS travel) needed before the validator trusts a measured
+// encoder direction + scale and starts scoring deviation.
+#define AIM_ENC_SIGN_DETECT_MM    8.0f
 
 #if defined(DRIVER_AIM_SERVO)
 // Runtime geometry accessors — defined in src/system/MotionGeometry.cpp.

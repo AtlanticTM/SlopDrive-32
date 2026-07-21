@@ -42,6 +42,16 @@ struct ServoTelemetry {
     float    voltage_v  = 0.0f;   // system voltage in VOLTS (reg 0x11 ÷ 327)
     float    temp_c     = 0.0f;   // drive temperature in °C (reg 0x12, signed)
     float    pwm_pct    = 0.0f;   // PWM duty cycle in % (reg 0x13 ÷ 100, signed)
+
+    // ---- Absolute encoder position (regs 0x16 LO / 0x17 HI) ----------------
+    // Raw signed 32-bit encoder counts, 32768/motor-rev, zero = wherever the
+    // shaft sat at drive power-on. Confirmed live on the 57AIM30: the pair
+    // answers and tracks the shaft; 0x0C/0x0D is the (stale) move target, NOT
+    // feedback. Committed the moment the pair lands — fresher than the rest of
+    // the snapshot, stamped so consumers can tell a new sample from a re-read.
+    bool     enc_valid    = false;
+    int32_t  enc_counts   = 0;
+    uint32_t enc_stamp_ms = 0;    // millis() when this sample committed
 };
 
 // ---- Full config-register mirror (regs 0x00..0x19) -------------------------
@@ -83,6 +93,12 @@ public:
     /// Non-blocking poll. Call from Core 0 (httpTask / commsTask) at any rate;
     /// internally rate-limits to POLL_INTERVAL_MS. Thread-safe telemetry update.
     void update();
+
+    /// Blocking single-register read — INIT CONTEXT ONLY (setup(), before the
+    /// RTOS tasks are live; same exception as init()'s probe). Used by boot
+    /// geometry adoption to read the drive's e-gear register. Returns true and
+    /// fills `out` on a CRC-valid response.
+    bool readRegisterBlocking(uint16_t reg, uint16_t& out, uint32_t timeout_ms = 80);
 
     /// Disable the drive output via Modbus write (FC 0x06, reg 0x01 = 0).
     void emergencyStop();
@@ -134,12 +150,11 @@ private:
     ServoTelemetry       _telemetry;
 
     uint32_t _last_poll_ms = 0;
-    // Per-register poll spacing. The known-working OSSM "gold motor" tool only
-    // ever reads ONE register per transaction — these drives commonly ignore
-    // multi-register FC 0x03 requests entirely. So we cycle through the
-    // register list one read at a time; 100ms spacing → full telemetry
-    // refresh every ~0.8s. :3
-    static constexpr uint32_t POLL_INTERVAL_MS = 100;
+    // Per-register poll spacing. We cycle through the register list one read
+    // at a time (gold-motor access pattern); 25ms spacing — the same pacing
+    // the config scan has run reliably at since it shipped — gives a full
+    // telemetry refresh every ~0.3s (8 singles + the encoder pair slot). :3
+    static constexpr uint32_t POLL_INTERVAL_MS = 25;
 
     // When the boot-time probe failed (drive off, wiring wrong, no power on the
     // 36V rail yet), keep re-probing every few seconds instead of going silent
@@ -167,16 +182,35 @@ private:
     // Single-register poll cycle (matches the gold-motor tool's access pattern):
     // 0x00 enable, 0x01 output, 0x0E alarm, 0x0F current, 0x10 speed,
     // 0x11 voltage, 0x12 temp, 0x13 PWM. Values land in _staged[] and commit
-    // to _telemetry under the spinlock once a full cycle completes. :3
+    // to _telemetry under the spinlock once a full cycle completes. After the
+    // 8 singles, _reg_idx == POLL_REG_COUNT is the encoder-pair slot (and
+    // POLL_REG_COUNT+1 the HI half in single-read fallback mode). :3
     static constexpr size_t POLL_REG_COUNT = 8;
     static const uint16_t POLL_REGS[POLL_REG_COUNT];
     size_t   _reg_idx = 0;
     uint16_t _staged[POLL_REG_COUNT] = {0};
 
-    // Which kind of read is in flight — a WAITING response routes to either
-    // the telemetry stager or the config-scan stager. :3
-    enum class PendingKind : uint8_t { TELE, SCAN };
+    // Which kind of read is in flight — a WAITING response routes to the
+    // telemetry stager, the config-scan stager, or the encoder assembler. :3
+    enum class PendingKind : uint8_t { TELE, SCAN, ENC_PAIR, ENC_LO, ENC_HI };
     PendingKind _pending_kind = PendingKind::TELE;
+
+    // ---- Encoder position read (regs 0x16/0x17) ------------------------------
+    // Preferred path is ONE FC 0x03 read of count=2 so the LO/HI words are a
+    // consistent snapshot (a pair torn across two transactions mid-motion can
+    // be off by 65536 counts = 2 motor revs). The 57AIM30 on the bench answers
+    // multi-register reads; if a drive variant doesn't (the gold tool never
+    // batches), 3 consecutive pair timeouts latch _enc_single_mode and we fall
+    // back to two back-to-back single reads — tear-prone only while moving,
+    // and the validator gates its verdicts on standstill anyway. :3
+    static constexpr uint16_t REG_ENC_LO = 0x16;
+    static constexpr uint16_t REG_ENC_HI = 0x17;
+    bool     _enc_single_mode = false;
+    uint8_t  _enc_pair_fails  = 0;
+    uint16_t _enc_lo_staged   = 0;
+
+    /// Commit a freshly assembled encoder sample under the spinlock.
+    void _commitEncoder(int32_t counts, uint32_t now);
 
     // ---- Config scan state (regs 0x00..0x19, on demand) -----------------------
     // Faster spacing than telemetry (a scan is a user-facing "Read registers"

@@ -132,8 +132,10 @@ async function pollServo() {
   if (document.hidden) { schedulePoll(1500); return; }
   const d = await get('/api/servo');
   if (d) render(d);
+  // 500ms base: the firmware's Modbus cycle refreshes every ~0.3s now, so a
+  // 1s card poll would throw away half the samples it fought for.
   const fast = d && (d.queue > 0 || (d.cfg && d.cfg.scanning) || performance.now() < _fastUntil);
-  schedulePoll(fast ? 300 : 1000);
+  schedulePoll(fast ? 300 : 500);
 }
 
 // ---- Render (both surfaces) -------------------------------------------------
@@ -165,6 +167,10 @@ function buildTeleCard() {
       '<span class="chip" data-tip="Register 0x01 — motor power stage enabled"><span class="dot" id="rsOutDot"></span><span>output</span></span>' +
     '</div>' +
     '<div id="rs485Meters"></div>' +
+    '<div id="rsEncRow" style="display:none;margin-top:8px;align-items:center;gap:8px;flex-wrap:wrap">' +
+      '<span class="chip" data-tip="Drive encoder (regs 0x16/0x17) vs FastAccelStepper commanded position. Verdicts are scored at standstill only — the live delta is timing-noisy while moving."><span class="dot" id="rsEncDot"></span><span id="rsEncTxt">encoder</span></span>' +
+      '<span class="mn" id="rsEncDetail" style="font-size:11px;opacity:.75"></span>' +
+    '</div>' +
     '<button class="btn ghost sm" id="rsClearPeakBtn" style="margin-top:10px;width:auto"><span data-ico="i-reset"></span> Clear peak</button>';
   const host = $('#rs485Meters');
   _meters = {
@@ -208,6 +214,47 @@ function renderTeleCard(d) {
   const enDot = $('#rsEnDot'), outDot = $('#rsOutDot');
   if (enDot) enDot.className = 'dot ' + (t.enabled ? 'ok' : '');
   if (outDot) outDot.className = 'dot ' + (t.output_on ? 'ok' : 'warn');
+
+  renderEncoder(d.enc);
+}
+
+/** FAS-vs-encoder cross-check row. Ground Truth: everything shown here is the
+ *  firmware's own verdict — the UI never computes deviation itself. */
+function renderEncoder(e) {
+  const row = $('#rsEncRow');
+  if (!row) return;
+  if (!e || !e.valid) { row.style.display = 'none'; return; }
+  row.style.display = 'flex';
+
+  const dot = $('#rsEncDot'), txt = $('#rsEncTxt'), det = $('#rsEncDetail');
+  const fmt = function (v) { return (v >= 0 ? '+' : '') + v.toFixed(2); };
+
+  if (e.warn) {
+    if (dot) dot.className = 'dot bad';
+    if (txt) txt.textContent = 'LOST STEPS? Δ ' + fmt(e.dev_steady_mm) + ' mm — re-home';
+  } else if (e.state === 2) {
+    if (dot) dot.className = 'dot ok';
+    if (txt) txt.textContent = 'encoder Δ ' + fmt(e.dev_mm) + ' mm';
+  } else if (e.state === 1) {
+    if (dot) dot.className = 'dot warn';
+    if (txt) txt.textContent = 'encoder · measuring direction…';
+  } else {
+    if (dot) dot.className = 'dot';
+    if (txt) txt.textContent = 'encoder · awaiting home';
+  }
+
+  if (det) {
+    let s = e.counts + ' cnt';
+    if (e.state === 2) {
+      s += ' · steady ' + fmt(e.dev_steady_mm) + ' · max ' + e.max_steady_mm.toFixed(2) + ' mm';
+      // Measured vs theoretical counts/mm — flags a wrong geometry model.
+      if (e.cpmm_meas > 0 && e.cpmm_theory > 0) {
+        const pct = (e.cpmm_meas / e.cpmm_theory) * 100;
+        if (pct < 90 || pct > 110) s += ' · scale ' + pct.toFixed(0) + '%!';
+      }
+    }
+    det.textContent = s;
+  }
 }
 
 // ---- Configure pane ---------------------------------------------------------

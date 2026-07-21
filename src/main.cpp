@@ -62,6 +62,10 @@
 #include "ServoModbus.h"
 #endif
 
+#if defined(FEATURE_RS485_MODBUS) && defined(DRIVER_AIM_SERVO)
+#include "EncoderValidator.h"
+#endif
+
 #if defined(BLE_ENABLED)
 extern "C" bool bleInUse(void) { return true; }
 #endif
@@ -122,6 +126,12 @@ static OtaService      otaService(g_state, arbiter, patternEngine, uiSocket);
 
 #if defined(FEATURE_RS485_MODBUS)
 static ServoModbus     servoModbus(Serial1, /* addr */ 1);
+#endif
+
+#if defined(FEATURE_RS485_MODBUS) && defined(DRIVER_AIM_SERVO)
+// Report-only FAS-vs-encoder cross-check — reads servoModbus telemetry + the
+// motor's step counter, never commands anything. Lives on httpTask Core 0. :3
+static EncoderValidator encoderValidator(servoModbus, motor);
 #endif
 
 
@@ -516,6 +526,9 @@ static void httpTask(void* param) {
 #if defined(FEATURE_RS485_MODBUS)
         TIME_STEP(servoModbus.update(),   "http:servoModbus");
 #endif
+#if defined(FEATURE_RS485_MODBUS) && defined(DRIVER_AIM_SERVO)
+        TIME_STEP(encoderValidator.update(), "http:encValidator");
+#endif
         TIME_STEP(ossmBleService.update(),"http:ossmBle");
         statusLedsUpdate(g_state);
         vTaskDelay(pdMS_TO_TICKS(10));
@@ -678,6 +691,30 @@ void setup() {
     Serial1.begin(19200, SERIAL_8N1, AIM_PIN_485_RX, AIM_PIN_485_TX);
     servoModbus.init();
     webui.setServoModbus(servoModbus);
+#if defined(DRIVER_AIM_SERVO)
+    webui.setEncoderValidator(encoderValidator);
+
+    // Ground Truth for geometry: the drive's own e-gear register (0x0B, saved
+    // in ITS EEPROM by the programmer) is the authority on steps/rev. Adopt it
+    // at boot whenever the drive answers — this heals the NVS-mirror-lost case
+    // where the firmware would otherwise boot at the 800 default while the
+    // drive physically needs 1600 pulses/rev, silently halving every commanded
+    // millimetre until the mismatch is noticed. Machine is unhomed at this
+    // point, so the forced re-home semantics of a steps/rev change are free. :3
+    if (servoModbus.isReady()) {
+        uint16_t drive_spr = 0;
+        if (servoModbus.readRegisterBlocking(0x0B, drive_spr) &&
+            drive_spr >= 50 && drive_spr <= 32767) {
+            if (drive_spr != aimMotorStepsPerRev()) {
+                APPLOGF("Boot geometry: drive reg 0x0B says %u steps/rev, NVS mirror had %u — adopting the drive's value",
+                        (unsigned)drive_spr, (unsigned)aimMotorStepsPerRev());
+                aimSetMotorStepsPerRev(drive_spr, /*persist=*/true);
+            }
+        } else {
+            APPLOG("Boot geometry: could not read drive reg 0x0B — keeping NVS/default steps/rev");
+        }
+    }
+#endif
 #endif
 
     // D4: init the arbiter — sole caller of motor for positioning

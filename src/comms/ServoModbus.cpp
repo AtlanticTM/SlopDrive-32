@@ -185,6 +185,20 @@ bool ServoModbus::init() {
     return false;
 }
 
+bool ServoModbus::readRegisterBlocking(uint16_t reg, uint16_t& out, uint32_t timeout_ms) {
+    if (!_ready) return false;
+    // Two attempts, same as the init() probe — RS485 first-contact flakiness.
+    for (int attempt = 0; attempt < 2; attempt++) {
+        size_t expected = sendReadRequest(reg, 1);
+        unsigned long start = millis();
+        while (_port.available() < (int)expected && (millis() - start) < timeout_ms) {
+            delay(1);   // acceptable: init context, no RTOS tasks running yet
+        }
+        if (tryReadResponse(&out, 1)) return true;
+    }
+    return false;
+}
+
 void ServoModbus::update() {
     uint32_t now = millis();
 
@@ -269,11 +283,25 @@ void ServoModbus::update() {
         }
 
         // 3. Telemetry poll cycle, rate-limited to POLL_INTERVAL_MS.
+        //    Slots 0..7 are the single telemetry registers; slot 8 is the
+        //    encoder-position pair (one count=2 read, or LO/HI singles in
+        //    fallback mode with slot 9 as the HI half). :3
         if (now - _last_poll_ms < POLL_INTERVAL_MS) return;
         _last_poll_ms = now;
-        _rx_expected  = sendReadRequest(POLL_REGS[_reg_idx], 1);
+        if (_reg_idx < POLL_REG_COUNT) {
+            _rx_expected  = sendReadRequest(POLL_REGS[_reg_idx], 1);
+            _pending_kind = PendingKind::TELE;
+        } else if (!_enc_single_mode) {
+            _rx_expected  = sendReadRequest(REG_ENC_LO, 2);
+            _pending_kind = PendingKind::ENC_PAIR;
+        } else if (_reg_idx == POLL_REG_COUNT) {
+            _rx_expected  = sendReadRequest(REG_ENC_LO, 1);
+            _pending_kind = PendingKind::ENC_LO;
+        } else {
+            _rx_expected  = sendReadRequest(REG_ENC_HI, 1);
+            _pending_kind = PendingKind::ENC_HI;
+        }
         _rx_start_ms  = now;
-        _pending_kind = PendingKind::TELE;
         _rx_state     = RxState::WAITING;
         break;
 
@@ -290,14 +318,54 @@ void ServoModbus::update() {
                         _cfg_staged[_scan_idx] = 0;
                         _scanAdvance(now);
                     }
+                } else if (_pending_kind == PendingKind::ENC_PAIR) {
+                    // A drive that rejects count=2 answers with a 5-byte
+                    // exception frame (< the 9 we expect) — lands here too.
+                    // 3 strikes latches the single-read fallback for good. :3
+                    if (++_enc_pair_fails >= 3 && !_enc_single_mode) {
+                        _enc_single_mode = true;
+                        APPLOG("ServoModbus: drive ignores 2-reg reads — encoder falls back to single-register LO/HI");
+                    }
+                    _reg_idx = 0;   // skip the encoder this cycle
+                } else if (_pending_kind == PendingKind::ENC_LO ||
+                           _pending_kind == PendingKind::ENC_HI) {
+                    _reg_idx = 0;   // abort — never pair a stale LO with a late HI
                 }
                 _rx_state = RxState::IDLE;
             }
             return;
         }
 
+        // Encoder pair (count=2) responses carry two registers — handle first.
+        if (_pending_kind == PendingKind::ENC_PAIR) {
+            uint16_t pair[2] = {0, 0};
+            if (tryReadResponse(pair, 2)) {
+                _enc_pair_fails = 0;
+                _commitEncoder((int32_t)(((uint32_t)pair[1] << 16) | pair[0]), now);
+            }
+            // Garbled frame: just skip — the next cycle retries in ~25ms.
+            _reg_idx  = 0;
+            _rx_state = RxState::IDLE;
+            break;
+        }
+
         uint16_t val = 0;
         bool ok = tryReadResponse(&val, 1);
+
+        if (_pending_kind == PendingKind::ENC_LO) {
+            // Stage LO and go straight for HI; a garble aborts the pair so a
+            // fresh LO is always matched with its own HI. :3
+            _reg_idx  = ok ? (POLL_REG_COUNT + 1) : 0;
+            if (ok) _enc_lo_staged = val;
+            _rx_state = RxState::IDLE;
+            break;
+        }
+        if (_pending_kind == PendingKind::ENC_HI) {
+            if (ok) _commitEncoder((int32_t)(((uint32_t)val << 16) | _enc_lo_staged), now);
+            _reg_idx  = 0;
+            _rx_state = RxState::IDLE;
+            break;
+        }
 
         if (_pending_kind == PendingKind::SCAN) {
             if (ok) {
@@ -316,9 +384,11 @@ void ServoModbus::update() {
             _staged[_reg_idx] = val;
             _reg_idx++;
             if (_reg_idx >= POLL_REG_COUNT) {
-                _reg_idx = 0;
                 // Full cycle complete — commit the snapshot under the spinlock
-                // so getTelemetry() never sees a torn read. :3
+                // so getTelemetry() never sees a torn read. _reg_idx parks at
+                // POLL_REG_COUNT: the encoder-pair slot runs next, then wraps.
+                // enc_* fields are untouched here — they commit on their own
+                // cadence in _commitEncoder(). :3
                 portENTER_CRITICAL(&_mux);
                 _telemetry.valid     = true;
                 _telemetry.enabled   = (_staged[0] != 0);            // 0x00
@@ -356,6 +426,17 @@ void ServoModbus::_scanAdvance(uint32_t now) {
     portEXIT_CRITICAL(&_mux);
     _scan_active = false;
     APPLOGF("ServoModbus: config scan complete (known=0x%08lX) :3", (unsigned long)_scan_known);
+}
+
+// Commit a freshly assembled encoder sample. Separate from the 8-reg snapshot
+// commit so the position is as fresh as the wire allows (~3.7 Hz) and stamped
+// — the EncoderValidator keys off enc_stamp_ms to spot NEW samples. :3
+void ServoModbus::_commitEncoder(int32_t counts, uint32_t now) {
+    portENTER_CRITICAL(&_mux);
+    _telemetry.enc_valid    = true;
+    _telemetry.enc_counts   = counts;
+    _telemetry.enc_stamp_ms = now;
+    portEXIT_CRITICAL(&_mux);
 }
 
 void ServoModbus::emergencyStop() {

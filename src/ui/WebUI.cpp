@@ -10,6 +10,9 @@
 
 #if defined(FEATURE_RS485_MODBUS)
 #include "ServoModbus.h"
+#if defined(DRIVER_AIM_SERVO)
+#include "EncoderValidator.h"
+#endif
 #endif
 
 #include "AppLog.h"
@@ -953,6 +956,27 @@ void WebUI::handleApiServo() {
         g["steps_per_mm"]        = aimStepsPerMm();
 #endif
         g["homed"] = _state.homed;
+
+#if defined(DRIVER_AIM_SERVO)
+        // FAS-vs-encoder cross-check (report-only). dev_mm is noisy while
+        // moving (Modbus timing skew); steady/max/warn are standstill-scored.
+        if (_encValidator) {
+            const EncoderValidation& ev = _encValidator->get();
+            JsonObject enc = doc["enc"].to<JsonObject>();
+            enc["valid"]      = t.enc_valid;
+            enc["counts"]     = t.enc_counts;
+            enc["age_ms"]     = t.enc_valid ? (uint32_t)(millis() - t.enc_stamp_ms) : 0;
+            enc["state"]      = ev.state;      // 0 idle · 1 sign-detect · 2 tracking
+            enc["have_dev"]   = ev.have_dev;
+            enc["dev_mm"]     = ev.dev_mm;
+            enc["dev_steady_mm"] = ev.dev_steady_mm;
+            enc["max_steady_mm"] = ev.max_steady_mm;
+            enc["sign"]       = ev.sign;
+            enc["cpmm_meas"]  = ev.cpmm_meas;
+            enc["cpmm_theory"] = (float)AIM_ENC_COUNTS_PER_MM;
+            enc["warn"]       = ev.warn;
+        }
+#endif
 
         String json;
         serializeJson(doc, json);

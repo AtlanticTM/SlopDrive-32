@@ -15,7 +15,8 @@
 #endif
 #endif
 
-#include "AppLog.h"
+#include "AppLog.h"          // bridge only: applogDump/applogSerialQuiet (/api/log)
+#include "sloplog/sloplog.h"
 #include "ConfigStore.h"
 #include "MachineConfig.h"
 #include "SlopGlowBoard.h"
@@ -117,7 +118,7 @@ void WebUI::init() {
     _httpServer->on("/api/machine/homeoverride", HTTP_POST, [this]() { slopglowActivity(); handleApiHomeOverride(); });
 
     _httpServer->begin();
-    APPLOGF("HTTP server on port %d", HTTP_PORT);
+    SLOGI("ui", "HTTP server on port %d", HTTP_PORT);
 
     startTelemetrySampler();
 }
@@ -161,9 +162,9 @@ void WebUI::startTelemetrySampler() {
     if (esp_timer_create(&args, &handle) == ESP_OK) {
         esp_timer_start_periodic(handle, 4166ULL);
         _state.session_start_ms = millis();   // stamp the session odometer clock
-        APPLOG("Telemetry sampler armed — sampling the shaft at 240Hz :3");
+        SLOGI("ui", "Telemetry sampler armed — sampling the shaft at 240Hz :3");
     } else {
-        APPLOG("Telemetry sampler FAILED to arm — graph will be limp. :<");
+        SLOGE("ui", "Telemetry sampler FAILED to arm — graph will be limp. :<");
     }
 }
 
@@ -174,7 +175,7 @@ void WebUI::resetSessionStats() {
     _state.stroke_count.store(0, std::memory_order_relaxed);
     _state.session_start_ms = millis();
     _motor.resetPowerStats();   // zero the INA228 Wh accumulator + software peaks
-    APPLOG("Session stats reset :3");
+    SLOGI("ui", "Session stats reset :3");
 }
 
 void WebUI::captureTelemetry(float position_mm, float target_mm, float raw_mm) {
@@ -437,7 +438,7 @@ void WebUI::handleApiClearFault() {
     // to clear and no way to verify a clear took effect. Say so explicitly
     // (cleared:false) instead of an unqualified ok that implies a fault was
     // observed and cleared. :3
-    APPLOG("Clear-fault requested — no driver fault readback on this build (nothing to clear/verify)");
+    SLOGI("ui", "Clear-fault requested — no driver fault readback on this build (nothing to clear/verify)");
     _httpServer->send(200, "application/json",
                       "{\"ok\":true,\"cleared\":false,\"reason\":\"no_fault_readback\"}");
 }
@@ -698,7 +699,7 @@ bool WebUI::applyMove(JsonDocument& doc, JsonDocument& resp) {
         // No direct-driver fallback — the sole-caller rule is compile-enforced
         // now (MotorDriver motion methods are arbiter-only). An unwired arbiter
         // is a boot-order bug; refuse loudly instead of bypassing every gate. :3
-        APPLOG("applyMove REFUSED: MotionArbiter not wired — no motion dispatched");
+        SLOGW("ui", "applyMove REFUSED: MotionArbiter not wired — no motion dispatched");
         resp["ok"] = false;
         resp["error"] = "Motion arbiter unavailable";
         return false;
@@ -749,10 +750,10 @@ void WebUI::handleApiPause() {
     _state.paused = doc["paused"] | (!_state.paused);
     if (_state.paused && !was) {
         if (_motor.isHomed() && _arbiter) _arbiter->hardStopMotion();
-        APPLOG("Paused: hands off the puppers — Intiface input edged out :3");
+        SLOGI("ui", "Paused: hands off the puppers — Intiface input edged out :3");
     } else if (!_state.paused && was) {
         _state.resume_start_ms = millis();
-        APPLOG("Unpaused: easing back in, letting Intiface take the reins again~ :3");
+        SLOGI("ui", "Unpaused: easing back in, letting Intiface take the reins again~ :3");
     }
     _bumpGen();
     String json; JsonDocument r; r["ok"] = true; r["paused"] = _state.paused;
@@ -762,7 +763,7 @@ void WebUI::handleApiPause() {
 
 void WebUI::handleApiHalt() {
     if (_motor.isHomed() && _arbiter) _arbiter->hardStopMotion();
-    APPLOG("Halt: motor stopped — still homed and ready for round two~ :3");
+    SLOGI("ui", "Halt: motor stopped — still homed and ready for round two~ :3");
     _bumpGen();
     _httpServer->send(200, "application/json", "{\"ok\":true}");
 }
@@ -773,10 +774,10 @@ void WebUI::handleApiOverride() {
     bool was = _state.manual_override;
     _state.manual_override = doc["override"] | (!_state.manual_override);
     if (_state.manual_override && !was) {
-        APPLOG("Manual override ON: you're topping now — Intiface can watch but can't touch :3");
+        SLOGI("ui", "Manual override ON: you're topping now — Intiface can watch but can't touch :3");
     } else if (!_state.manual_override && was) {
         _state.resume_start_ms = millis();
-        APPLOG("Manual override OFF: handing the leash back to Intiface~ :3");
+        SLOGI("ui", "Manual override OFF: handing the leash back to Intiface~ :3");
     }
     _bumpGen();
     String json; JsonDocument r; r["ok"] = true; r["manual_override"] = _state.manual_override;
@@ -1073,7 +1074,7 @@ void WebUI::handleApiServo() {
     // (clamped 4..50ms inside ServoModbus). :3
     if (doc["sp_period_ms"].is<int>()) {
         _servoModbus->setSpPeriodMs((uint8_t)doc["sp_period_ms"].as<int>());
-        APPLOGF("ServoBench: sp_period_ms -> %u", (unsigned)_servoModbus->spPeriodMs());
+        SLOGI("ui", "ServoBench: sp_period_ms -> %u", (unsigned)_servoModbus->spPeriodMs());
     }
 
     if (doc["output"].is<bool>()) {
@@ -1176,7 +1177,7 @@ void WebUI::handleApiServo() {
                 if (rehome) {
                     _state.homed = false;
                     _motor.forceHomeState(false);
-                    APPLOG("ServoProgram: structural change applied — machine UNHOMED, re-home before motion");
+                    SLOGW("ui", "ServoProgram: structural change applied — machine UNHOMED, re-home before motion");
                 }
             }
         }
@@ -1256,7 +1257,7 @@ void WebUI::handleApiPattern() {
         return;
     }
 
-    APPLOGF("/api/pattern POST: %s", _httpServer->arg("plain").c_str());
+    SLOGD("ui", "/api/pattern POST: %s", _httpServer->arg("plain").c_str());
 
     JsonDocument resp;
     if (!applyPattern(doc, resp)) {
@@ -1370,8 +1371,8 @@ void WebUI::handleApiPatternPresets() {
         return;
     }
 
-    APPLOGF("AdvPreset %s: \"%s\" (%u presets, %u bytes)",
-            isDelete ? "delete" : "save", name.c_str(), (unsigned)arr.size(), (unsigned)out.length());
+    SLOGI("ui", "AdvPreset %s: \"%s\" (%u presets, %u bytes)",
+          isDelete ? "delete" : "save", name.c_str(), (unsigned)arr.size(), (unsigned)out.length());
 
     JsonDocument resp;
     resp["ok"] = true;
@@ -1458,10 +1459,10 @@ bool WebUI::applyPattern(JsonDocument& doc, JsonDocument& resp) {
             }
             _state.resume_start_ms = millis();
             _patternEngine.start();
-            APPLOG("PatternEngine started");
+            SLOGI("ui", "PatternEngine started");
         } else if (!want && _patternEngine.isRunning()) {
             _patternEngine.stop();
-            APPLOG("PatternEngine stopped");
+            SLOGI("ui", "PatternEngine stopped");
         }
     }
 
@@ -1502,6 +1503,9 @@ void WebUI::handleApiLog() {
     out.reserve(2048);
     applogDump(out);
     _httpServer->send(200, "text/plain", out);
+    // The UI has provably received the log stream — serial's job is done.
+    // From here serial carries Warn+ only; the web ring is primary.
+    applogSerialQuiet();
 }
 
 // ============================================================================
@@ -1587,13 +1591,13 @@ void WebUI::handleApiMachineCommit() {
     // 115200 and moves on — not a bricked link either way. :3
     if (_machine_backend == 1 && backend == 0 && _servoModbus) {
         bool ok = _servoModbus->reprogramBaud(19200);
-        APPLOGF("[MACHINE] backend commit: best-effort baud restore to 19200 %s",
-                ok ? "OK" : "FAILED (harmless — next boot's probe finds whatever it finds)");
+        SLOGI("ui", "backend commit: best-effort baud restore to 19200 %s",
+              ok ? "OK" : "FAILED (harmless — next boot's probe finds whatever it finds)");
     }
 #endif
 
     machineBackendStore((uint8_t)backend);
-    APPLOGF("[MACHINE] backend commit: %u -> %d — rebooting to apply", _machine_backend, backend);
+    SLOGI("ui", "backend commit: %u -> %d — rebooting to apply", _machine_backend, backend);
     _httpServer->send(200, "application/json", "{\"ok\":true,\"rebooting\":true}");
 
     _machineReboot.arm(500, "motion-backend change commit");
@@ -1624,13 +1628,13 @@ void WebUI::handleApiHomeOverride() {
         _state.homed = true;
         _state.resume_start_ms = millis(); // soft-start guard like a real home
         _motor.forceHomeState(true);       // driver-side flag + (Modbus) wire re-anchor
-        APPLOG("HTTP Home-Override: faking homed for bench test :3");
+        SLOGI("ui", "HTTP Home-Override: faking homed for bench test :3");
         resp["measured_stroke"] = stroke;
     } else {
         _state.test_stroke_override_mm = 0.0f;
         _state.homed = false;
         _motor.forceHomeState(false);
-        APPLOG("HTTP Home-Override: cleared — back to real homing.");
+        SLOGI("ui", "HTTP Home-Override: cleared — back to real homing.");
         resp["measured_stroke"] = _motor.getMeasuredStrokeMm();
     }
     resp["ok"] = true;
@@ -1744,7 +1748,7 @@ bool WebUI::handleCommand(uint8_t op, JsonDocument& payload_in,
         }
         payload_out["cleared"] = false;
         payload_out["reason"] = "no_fault_readback";
-        APPLOG("WS clear-fault: driver config re-applied — no fault readback exists to clear/verify");
+        SLOGI("ui", "WS clear-fault: driver config re-applied — no fault readback exists to clear/verify");
         return true;
 
     case WS_OP_SAVE: {
@@ -1787,13 +1791,13 @@ bool WebUI::handleCommand(uint8_t op, JsonDocument& payload_in,
             // outputs and zeroes position so a bench move genuinely drives step/
             // dir out to a (possibly disconnected) motor. :3
             _motor.forceHomeState(true);
-            APPLOG("WS Home-Override: faking homed for bench test — no motor required :3");
+            SLOGI("ui", "WS Home-Override: faking homed for bench test — no motor required :3");
             payload_out["measured_stroke"] = stroke;
         } else {
             _state.test_stroke_override_mm = 0.0f;
             _state.homed = false;
             _motor.forceHomeState(false);   // clear the driver flag too
-            APPLOG("WS Home-Override: cleared — back to real homing.");
+            SLOGI("ui", "WS Home-Override: cleared — back to real homing.");
             payload_out["measured_stroke"] = _motor.getMeasuredStrokeMm();
         }
         payload_out["ok"] = true;
@@ -1805,7 +1809,7 @@ bool WebUI::handleCommand(uint8_t op, JsonDocument& payload_in,
 
     case WS_OP_HALT:
         if (_motor.isHomed() && _arbiter) _arbiter->hardStopMotion();
-        APPLOG("WS Halt: motor stopped — still homed and ready~ :3");
+        SLOGI("ui", "WS Halt: motor stopped — still homed and ready~ :3");
         payload_out["ok"] = true;
         _bumpGen();
         return true;
@@ -1859,7 +1863,7 @@ bool WebUI::handleCommand(uint8_t op, JsonDocument& payload_in,
         // it. Session-only, never persisted. :3
         bool val = payload_in["on"] | false;
         _state.bypass_limits = val;
-        APPLOGF("WS bypass-limits: %s", val ? "ON (window clamp bypassed, physical ceiling still enforced)" : "OFF");
+        SLOGW("ui", "WS bypass-limits: %s", val ? "ON (window clamp bypassed, physical ceiling still enforced)" : "OFF");
         payload_out["ok"] = true;
         payload_out["bypass_limits"] = (bool)_state.bypass_limits;
         _bumpGen();

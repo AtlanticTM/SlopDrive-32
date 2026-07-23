@@ -4,7 +4,7 @@
 // GetAssignedAxisValues, bidirectional actual-position queries (D4).
 
 #include "TCodeParser.h"
-#include "AppLog.h"
+#include "sloplog/sloplog.h"
 #include "config_api.h"
 
 volatile bool TCodeParser::intifaceCompat = false;
@@ -80,7 +80,7 @@ void TCodeParser::_handleDeviceCmd(const char* token) {
     size_t tlen = strlen(token);
 
     if (strncasecmp(token, "DSTOP", 5) == 0) {
-        applog("[TCode] DSTOP - stop motion");
+        SLOGI("tcode", "DSTOP - stop motion");
         if (_onStop) _onStop();
         return;
     }
@@ -249,15 +249,10 @@ void TCodeParser::_decodeAndDispatch(const char* token, size_t tlen) {
     // All other registered axes store state but don't fire motion callbacks
     // (they're polled by the application layer for aux outputs).
     if (atype == AxisType::Linear && channel == 0) {
-        // Rate-limit logging to ~2/sec
-        static uint32_t s_last_log_ms = 0;
-        uint32_t now_log = millis();
-        if (now_log - s_last_log_ms >= 500) {
-            s_last_log_ms = now_log;
-            applogf("[TCode] L0: pos=%.4f dur=%lums Graw=%.0f hasG=%d hasT=%d (digits=%d)",
-                    position, (unsigned long)duration_ms, slope_raw,
-                    (int)hasSlope, (int)hasDuration, mag_digits);
-        }
+        SLOGD_EVERY_MS(500, "tcode",
+                       "L0: pos=%.4f dur=%lums Graw=%.0f hasG=%d hasT=%d (digits=%d)",
+                       position, (unsigned long)duration_ms, slope_raw,
+                       (int)hasSlope, (int)hasDuration, mag_digits);
 
         if (_onLinearCmd) {
             _onLinearCmd(position, duration_ms, slope_raw, hasSlope, hasDuration);

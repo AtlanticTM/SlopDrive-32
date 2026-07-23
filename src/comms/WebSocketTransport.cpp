@@ -3,7 +3,7 @@
 // Extracted verbatim from ButtplugServer in buttplug.cpp (Step 8).
 
 #include "WebSocketTransport.h"
-#include "AppLog.h"
+#include "sloplog/sloplog.h"
 #include "config_api.h"
 
 // ---- Static pointer for response-hook thunk ---------------------------------
@@ -33,9 +33,9 @@ void WebSocketTransport::begin(uint16_t port) {
     _ws.onEvent([this](uint8_t num, WStype_t type, uint8_t* payload, size_t length) {
         this->onWSEvent(num, type, payload, length);
     });
-    applogf("[TCode] WebSocket server on port %u", BUTTPLUG_WEBSOCKET_PORT);
-    applog("[TCode] In Intiface: add Websocket device, protocol 'TCode v0.3'");
-    applogf("[TCode] Address: ws://<this-esp32-ip>:%u", BUTTPLUG_WEBSOCKET_PORT);
+    SLOGI("wsdm", "WebSocket server on port %u", BUTTPLUG_WEBSOCKET_PORT);
+    SLOGI("wsdm", "In Intiface: add Websocket device, protocol 'TCode v0.3'");
+    SLOGI("wsdm", "Address: ws://<this-esp32-ip>:%u", BUTTPLUG_WEBSOCKET_PORT);
 }
 
 void WebSocketTransport::run() {
@@ -60,7 +60,7 @@ void WebSocketTransport::removeResponseHooks() {
 void WebSocketTransport::sendServerResponse(const char* msg) {
     if (_client_idx < 0) return;
     _ws.sendTXT((uint8_t)_client_idx, msg);
-    applogf("[TCode] TX: %s", msg);  // msg already ends with \n
+    SLOGD("wsdm", "TX: %s", msg);  // msg already ends with \n (sink strips it)
 }
 
 // ---- WS server event handler -----------------------------------------------
@@ -68,7 +68,7 @@ void WebSocketTransport::sendServerResponse(const char* msg) {
 void WebSocketTransport::onWSEvent(uint8_t num, WStype_t type, uint8_t* payload, size_t length) {
     switch (type) {
         case WStype_DISCONNECTED:
-            applogf("[TCode] Client %u disconnected", num);
+            SLOGI("wsdm", "Client %u disconnected", num);
             if (_client_idx == (int8_t)num) {
                 _client_idx = -1;
                 _srv_connected = false;
@@ -77,7 +77,7 @@ void WebSocketTransport::onWSEvent(uint8_t num, WStype_t type, uint8_t* payload,
 
         case WStype_CONNECTED: {
             IPAddress ip = _ws.remoteIP(num);
-            applogf("[TCode] Intiface connected from %s", ip.toString().c_str());
+            SLOGI("wsdm", "Intiface connected from %s", ip.toString().c_str());
             _client_idx = (int8_t)num;
             _srv_connected = true;
             break;
@@ -105,7 +105,7 @@ void WebSocketTransport::connectIntiface(const char* host, uint16_t port) {
     _intiface_connected = false;
     _intiface_handshaked = false;
 
-    Serial.printf("[WSDM] Connecting to Intiface device server at ws://%s:%u\n", host, port);
+    SLOGI("wsdm", "Connecting to Intiface device server at ws://%s:%u", host, port);
 
     _client.onEvent([this](WStype_t type, uint8_t* payload, size_t length) {
         this->onIntifaceEvent(type, payload, length);
@@ -124,7 +124,7 @@ void WebSocketTransport::disconnectIntiface() {
     _intiface_connected = false;
     _intiface_handshaked = false;
     _client.disconnect();
-    Serial.println("[WSDM] Intiface client disconnected");
+    SLOGI("wsdm", "Intiface client disconnected");
 }
 
 void WebSocketTransport::sendIntifaceHandshake() {
@@ -134,19 +134,19 @@ void WebSocketTransport::sendIntifaceHandshake() {
              INTIFACE_IDENTIFIER, INTIFACE_ADDRESS);
     _client.sendTXT(msg);
     _intiface_handshaked = true;
-    Serial.printf("[WSDM] TX handshake: %s\n", msg);
+    SLOGI("wsdm", "TX handshake: %s", msg);
 }
 
 void WebSocketTransport::onIntifaceEvent(WStype_t type, uint8_t* payload, size_t length) {
     switch (type) {
         case WStype_CONNECTED:
-            Serial.println("[WSDM] Connected to Intiface - sending handshake");
+            SLOGI("wsdm", "Connected to Intiface - sending handshake");
             _intiface_connected = true;
             sendIntifaceHandshake();
             break;
 
         case WStype_DISCONNECTED:
-            Serial.println("[WSDM] Disconnected from Intiface");
+            SLOGI("wsdm", "Disconnected from Intiface");
             _intiface_connected = false;
             _intiface_handshaked = false;
             break;

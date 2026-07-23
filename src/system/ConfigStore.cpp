@@ -1,7 +1,7 @@
 #include "ConfigStore.h"
 
 #include <Preferences.h>
-#include "AppLog.h"
+#include "sloplog/sloplog.h"
 #include "config_api.h"
 #include "MotorDriver.h"
 #include "range_mapper.h"
@@ -70,7 +70,7 @@ void ConfigStore::save(SystemState& state, RangeMapper& mapper, MotorDriver& mot
     // gated state stops motion anyway, so nothing config-worthy is changing, and
     // a successful OTA reboots into freshly-loaded config regardless. :3
     if (state.ota_active.load()) {
-        applog("saveConfig: deferred - OTA update in flight");
+        SLOGW("cfg", "saveConfig: deferred - OTA update in flight");
         return;
     }
     // Inflate the NVS storage with the current running state — every stroke
@@ -79,7 +79,7 @@ void ConfigStore::save(SystemState& state, RangeMapper& mapper, MotorDriver& mot
     // back out exactly as it was, like a well-trained bladder holding it in. :3
     Preferences prefs;
     if (!prefs.begin("strokeengine", false)) {   // false = read-WRITE
-        applog("saveConfig: failed to open NVS for write!");
+        SLOGE("cfg", "saveConfig: failed to open NVS for write!");
         return;
     }
     // Every put*() returns bytes written — 0 on failure (full partition,
@@ -151,11 +151,11 @@ void ConfigStore::save(SystemState& state, RangeMapper& mapper, MotorDriver& mot
 
     prefs.end();
     if (fails > 0) {
-        applogf("Config save: %lu NVS write(s) FAILED — settings may NOT persist across reboot! "
-                "(partition full or flash error)", (unsigned long)fails);
+        SLOGE("cfg", "Config save: %lu NVS write(s) FAILED — settings may NOT persist across reboot! "
+              "(partition full or flash error)", (unsigned long)fails);
     } else {
-        applogf("Config saved to NVS: range=[%.1f,%.1f] speed=%.0f accel=%.0f blend=%u crc=%08lX",
-                mapper.getMinMm(), mapper.getMaxMm(),
+        SLOGI("cfg", "Config saved to NVS: range=[%.1f,%.1f] speed=%.0f accel=%.0f blend=%u crc=%08lX",
+              mapper.getMinMm(), mapper.getMaxMm(),
                 state.config.max_speed_mm_s, state.config.acceleration_mm_s2,
                 motor.getBlendMode(), (unsigned long)crc);
     }
@@ -191,8 +191,8 @@ void ConfigStore::load(SystemState& state, RangeMapper& mapper, MotorDriver& mot
             uint32_t crc = nvsConfigChecksum(prefs);
             state.config.checksum = crc;
             if (crc != stored_crc) {
-                applogf("Config NVS checksum MISMATCH (stored=%08lX computed=%08lX) — "
-                        "possible corruption; per-field validation will clamp bad values",
+                SLOGW("cfg", "Config NVS checksum MISMATCH (stored=%08lX computed=%08lX) — "
+                      "possible corruption; per-field validation will clamp bad values",
                         (unsigned long)stored_crc, (unsigned long)crc);
             }
         }
@@ -341,12 +341,12 @@ void ConfigStore::load(SystemState& state, RangeMapper& mapper, MotorDriver& mot
         if (blend < 1 || blend > 3) blend = 1;
         motor.setBlendMode(blend);
 
-        applogf("Config: range=[%.1f, %.1f] speed=%.0f accel=%.0f run=%umA blend=%u",
-                rmin, rmax, (float)spd, (float)acc, state.driver.run_current_ma, blend);
+        SLOGI("cfg", "Config: range=[%.1f, %.1f] speed=%.0f accel=%.0f run=%umA blend=%u",
+              rmin, rmax, (float)spd, (float)acc, state.driver.run_current_ma, blend);
 
     } else {
         prefs.end();
-        applog("No saved config, using defaults");
+        SLOGI("cfg", "No saved config, using defaults");
     }
 }
 
@@ -364,21 +364,21 @@ void ConfigStore::saveWifiCreds(const SystemState& state, const char* ssid, cons
     // Same OTA flash-contention guard as save() — a `WIFI ...` serial command
     // landing mid-OTA must not write NVS during the flash write window. :3
     if (state.ota_active.load()) {
-        applog("saveWifiCreds: REFUSED — OTA update in flight, retry after it completes");
+        SLOGW("cfg", "saveWifiCreds: REFUSED — OTA update in flight, retry after it completes");
         return;
     }
     Preferences prefs;
     if (!prefs.begin("strokeengine", false)) {   // false = read-WRITE
-        applog("saveWifiCreds: failed to open NVS for write!");
+        SLOGE("cfg", "saveWifiCreds: failed to open NVS for write!");
         return;
     }
     size_t w1 = prefs.putString("wifi_ssid2", ssid ? ssid : "");
     size_t w2 = prefs.putString("wifi_pass2", pass ? pass : "");
     prefs.end();
     if ((ssid && ssid[0] && w1 == 0) || (pass && pass[0] && w2 == 0)) {
-        applog("saveWifiCreds: NVS write FAILED — creds NOT stored!");
+        SLOGE("cfg", "saveWifiCreds: NVS write FAILED — creds NOT stored!");
     } else {
-        applogf("Secondary WiFi creds saved to NVS: SSID='%s'", ssid ? ssid : "");
+        SLOGI("cfg", "Secondary WiFi creds saved to NVS: SSID='%s'", ssid ? ssid : "");
     }
 }
 
@@ -403,16 +403,16 @@ bool ConfigStore::loadWifiCreds(char* ssid, size_t ssidLen, char* pass, size_t p
 void ConfigStore::clearWifiCreds(const SystemState& state) {
     // Same OTA flash-contention guard as save()/saveWifiCreds(). :3
     if (state.ota_active.load()) {
-        applog("clearWifiCreds: REFUSED — OTA update in flight, retry after it completes");
+        SLOGW("cfg", "clearWifiCreds: REFUSED — OTA update in flight, retry after it completes");
         return;
     }
     Preferences prefs;
     if (!prefs.begin("strokeengine", false)) {
-        applog("clearWifiCreds: failed to open NVS for write!");
+        SLOGE("cfg", "clearWifiCreds: failed to open NVS for write!");
         return;
     }
     prefs.remove("wifi_ssid2");
     prefs.remove("wifi_pass2");
     prefs.end();
-    applog("Secondary WiFi creds cleared from NVS");
+    SLOGI("cfg", "Secondary WiFi creds cleared from NVS");
 }

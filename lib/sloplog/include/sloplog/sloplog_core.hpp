@@ -86,11 +86,31 @@ public:
     void setFloor(Level l) { _floor = l; }
     Level floor() const { return _floor; }
 
-    bool addSink(ISink* s) {
+    // Sinks may carry their own floor: a sink at Warn stays registered but
+    // only sees Warn+. setSinkFloor() retunes a live sink (e.g. demote the
+    // serial sink once the web UI has proven it is receiving logs).
+    bool addSink(ISink* s, Level sinkFloor = Level::Trace) {
         if (s == nullptr || _sinkCount >= MaxSinks) return false;
-        _sinks[_sinkCount++] = s;
+        _sinks[_sinkCount] = s;
+        _sinkFloors[_sinkCount] = sinkFloor;
+        ++_sinkCount;
         return true;
     }
+
+    bool setSinkFloor(ISink* s, Level sinkFloor) {
+        for (size_t i = 0; i < _sinkCount; ++i) {
+            if (_sinks[i] == s) {
+                _sinkFloors[i] = sinkFloor;
+                return true;
+            }
+        }
+        return false;
+    }
+
+    // Boot mode: while set, every commit drains synchronously to the sinks.
+    // ONLY safe while a single task is running (setup(), before the
+    // scheduler spawns other producers) — flip it off before task creation.
+    void setImmediateDrain(bool on) { _immediateDrain = on; }
 
     // Format-and-commit. Bounded: one vsnprintf into a stack Record, one
     // locked copy. Truncation is silent and fine (kMsgBytes is the contract).
@@ -127,6 +147,7 @@ public:
         slot.lost = _lostSinceDrain;  // rides on the next record a reader sees
         _write++;
         _port.unlock();
+        if (_immediateDrain) drain();
     }
 
     // Fan out up to `maxRecords` pending records to every sink. Returns how
@@ -144,7 +165,9 @@ public:
             _read++;
             _lostSinceDrain = 0;
             _port.unlock();
-            for (size_t i = 0; i < _sinkCount; ++i) _sinks[i]->write(r);
+            for (size_t i = 0; i < _sinkCount; ++i) {
+                if (r.level >= _sinkFloors[i]) _sinks[i]->write(r);
+            }
             ++n;
         }
         return n;
@@ -174,7 +197,9 @@ private:
     uint16_t _lostSinceDrain = 0;
     uint32_t _totalLostShadow = 0;
     ISink* _sinks[MaxSinks] = {};
+    Level _sinkFloors[MaxSinks] = {};
     size_t _sinkCount = 0;
+    bool _immediateDrain = false;
 };
 
 }  // namespace sloplog

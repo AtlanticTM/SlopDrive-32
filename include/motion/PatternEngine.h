@@ -166,8 +166,8 @@ private:
     // Re-derive step-space parameters from user-facing 0..100 values.
     void _recalcParameters();
 
-    // Debug heartbeat — mirrors Generator's APPLOG heartbeat pattern.
-    void _diagnostics(uint32_t& last_diag_ms);
+    // Debug heartbeat — per-call-site throttled via SLOGD_EVERY_MS.
+    void _diagnostics();
 
     // ---- D4: MotionArbiter reference (set once by main.cpp) ------------------
     MotionArbiter* _arbiter = nullptr;

@@ -9,22 +9,7 @@
 
 #include "freertos/FreeRTOS.h"
 #include "freertos/task.h"
-#include "AppLog.h"
-
-// In serial-control mode the USB Serial port is dedicated to Intiface TCode, so
-// debug output must go to the in-memory web log instead of Serial (which would
-// corrupt the command stream). These macros redirect this file's logging to
-// applog when SERIAL_CONTROL_MODE is on, and to Serial otherwise. The F()
-// wrapper used by some println() calls is harmless for applog (plain string).
-#if SERIAL_CONTROL_MODE
-  #define MLOGF(...)  applogf(__VA_ARGS__)
-  // String() accepts both plain "..." and F("...") literals, then .c_str()
-  // gives applog a normal const char*.
-  #define MLOGLN(s)   applog(String(s).c_str())
-#else
-  #define MLOGF(...)  Serial.printf(__VA_ARGS__)
-  #define MLOGLN(s)   Serial.println(s)
-#endif
+#include "sloplog/sloplog.h"
 
 // FastAccelStepperEngine manages the background stepper task on ESP32.
 // Named _fas_engine to avoid shadowing MotorDriver::_engine.
@@ -94,15 +79,15 @@ void TMC2160StepperDriver::init() {
     // this comes back 0x00 or 0xFF, SPI is NOT talking (wiring/clock/MISO),
     // and nothing downstream will ever work.
     uint8_t ver = _tmc->version();
-    MLOGF("TMC2160: SPI version read = 0x%02X (expect 0x30)\n", ver);
+    SLOGI("tmc", "TMC2160: SPI version read = 0x%02X (expect 0x30)", ver);
     if (ver == 0x00 || ver == 0xFF) {
-        MLOGLN(F("TMC2160: *** SPI NOT RESPONDING *** check MISO wiring/pull-up & clock"));
+        SLOGE("tmc", "TMC2160: *** SPI NOT RESPONDING *** check MISO wiring/pull-up & clock");
     }
 
     // Clear any faults
     uint32_t gstat = _tmc->GSTAT();
     if (gstat) {
-        MLOGF("TMC2160 GSTAT before init: 0x%02X (clearing)\n", gstat);
+        SLOGD("tmc", "TMC2160 GSTAT before init: 0x%02X (clearing)", gstat);
         _tmc->GSTAT(0x07);
     }
 
@@ -116,13 +101,13 @@ void TMC2160StepperDriver::init() {
     // Read back to verify SPI communication is working
     uint16_t actual_ms = _tmc->microsteps();
     uint32_t actual_cur = _tmc->rms_current();
-    MLOGF("TMC2160: microsteps set=%u read=%u | current set=%u read=%u mA\n",
+    SLOGI("tmc", "TMC2160: microsteps set=%u read=%u | current set=%u read=%u mA",
           MICROSTEPS, actual_ms, TMC_RUN_CURRENT_MA, actual_cur);
 
     if (actual_ms != MICROSTEPS) {
-        MLOGLN(F("WARNING: TMC2160 microstep readback mismatch - SPI may not be working!"));
+        SLOGW("tmc", "WARNING: TMC2160 microstep readback mismatch - SPI may not be working!");
     } else {
-        MLOGLN(F("TMC2160: SPI OK, driver configured"));
+        SLOGI("tmc", "TMC2160: SPI OK, driver configured");
     }
 
     // Store the engine pointer so everyone can share the toy (Risk #5 — don't
@@ -154,9 +139,9 @@ void TMC2160StepperDriver::init() {
         _stepper->setAutoEnable(false);
         _stepper->disableOutputs();   // start disabled — motor is soft on boot
         _stepper->setCurrentPosition(0);
-        MLOGLN(F("FastAccelStepper: Motor initialized (STEP/DIR/EN registered with FAS)"));
+        SLOGI("tmc", "FastAccelStepper: Motor initialized (STEP/DIR/EN registered with FAS)");
     } else {
-        MLOGLN(F("FastAccelStepper: Failed to create motor!"));
+        SLOGE("tmc", "FastAccelStepper: Failed to create motor!");
     }
 
     // Set initial speed/acceleration in mm units
@@ -187,7 +172,7 @@ void TMC2160StepperDriver::emergencyStop() {
     if (_homingTaskHandle != nullptr) {
         vTaskDelete(_homingTaskHandle);
         _homingTaskHandle = nullptr;
-        MLOGLN(F("E-stop: homing task killed mid-sweep."));
+        SLOGW("tmc", "E-stop: homing task killed mid-sweep.");
     }
     hardStop();
     disable();
@@ -265,7 +250,7 @@ void TMC2160StepperDriver::_homingTaskImpl(void* param) {
 // The actual homing procedure — runs entirely inside its own task on Core 1.
 // Blocks with vTaskDelay() between polls so the scheduler stays happy. :3
 void TMC2160StepperDriver::_homingTask() {
-    MLOGF("Homing task: endstop pin %d state=%d (active=%d)\n",
+    SLOGI("tmc", "Homing task: endstop pin %d state=%d (active=%d)",
           PIN_ENDSTOP, digitalRead(PIN_ENDSTOP), ENDSTOP_ACTIVE_STATE);
 
     // Set homing speed and a very high acceleration so the sweep is effectively
@@ -277,7 +262,7 @@ void TMC2160StepperDriver::_homingTask() {
     // Check if we're already sitting on the endstop — if so, back off first
     // then sweep back in, exactly like StrokeEngine does. :3
     if (digitalRead(PIN_ENDSTOP) == ENDSTOP_ACTIVE_STATE) {
-        MLOGLN(F("Homing: Already at endstop — backing off before sweep"));
+        SLOGI("tmc", "Homing: Already at endstop — backing off before sweep");
         // Back off 2x keepout (10mm) to clear the switch
         _stepper->move(-(int32_t)mmToNative(10.0f));  // negative = away from endstop
         while (_stepper->isRunning()) {
@@ -294,7 +279,7 @@ void TMC2160StepperDriver::_homingTask() {
     int32_t sweep_steps = (int32_t)(_max_rail_mm * STEPS_PER_MM * 1.5f);
     _stepper->move(sweep_steps);  // positive = toward endstop
 
-    MLOGF("Homing: Sweeping %d steps toward endstop at %u Hz\n",
+    SLOGI("tmc", "Homing: Sweeping %d steps toward endstop at %u Hz",
           sweep_steps, (uint32_t)_home_speed_steps_s);
 
     // Poll the endstop every 20ms — same cadence as StrokeEngine. The motor
@@ -314,7 +299,7 @@ void TMC2160StepperDriver::_homingTask() {
                 vTaskDelay(pdMS_TO_TICKS(2));
             }
 
-            MLOGF("Homing: Endstop hit! pos=%d running=%d\n",
+            SLOGI("tmc", "Homing: Endstop hit! pos=%d running=%d",
                   _stepper->getCurrentPosition(), _stepper->isRunning());
 
             // Back off 5mm from the endstop — pull out just the tip, don't
@@ -329,12 +314,12 @@ void TMC2160StepperDriver::_homingTask() {
             while (_stepper->isRunning() && millis() < timeout) {
                 vTaskDelay(pdMS_TO_TICKS(2));
             }
-            MLOGF("Homing: backoff done, pos=%d\n", _stepper->getCurrentPosition());
+            SLOGI("tmc", "Homing: backoff done, pos=%d", _stepper->getCurrentPosition());
 
             if (digitalRead(PIN_ENDSTOP) == ENDSTOP_ACTIVE_STATE) {
-                MLOGLN(F("WARNING: Endstop still active after backoff! Check switch/wiring."));
+                SLOGW("tmc", "WARNING: Endstop still active after backoff! Check switch/wiring.");
             } else {
-                MLOGLN(F("Homing: Endstop released OK"));
+                SLOGI("tmc", "Homing: Endstop released OK");
             }
 
             // Re-zero at this backed-off position — this is home (0mm).
@@ -345,7 +330,7 @@ void TMC2160StepperDriver::_homingTask() {
             _homed = true;
             _homing = false;
 
-            MLOGLN(F("Homing: Complete — at home position, ready to pound :3"));
+            SLOGI("tmc", "Homing: Complete — at home position, ready to pound :3");
             _homingTaskHandle = nullptr;
             vTaskDelete(nullptr);
             return;
@@ -356,7 +341,7 @@ void TMC2160StepperDriver::_homingTask() {
     // Motor stopped without hitting the endstop — homing failed. Disable the
     // motor so it doesn't hold position at some unknown location, and leave
     // _homed = false so the system knows it needs to try again. :3
-    MLOGLN(F("Homing: FAILED — motor stopped before endstop. Check wiring/travel."));
+    SLOGW("tmc", "Homing: FAILED — motor stopped before endstop. Check wiring/travel.");
     _stepper->disableOutputs();
     _homing = false;
     _homed  = false;
@@ -368,7 +353,7 @@ void TMC2160StepperDriver::_homingTask() {
 bool TMC2160StepperDriver::home(int32_t home_speed_steps_s) {
     if (_homing) return false;
 
-    MLOGLN(F("Homing: Starting..."));
+    SLOGI("tmc", "Homing: Starting...");
     _homing = true;
     _homed  = false;
     _home_speed_steps_s = (home_speed_steps_s > 0) ? home_speed_steps_s : 4000;
@@ -402,7 +387,7 @@ bool TMC2160StepperDriver::home(int32_t home_speed_steps_s) {
         // stays true forever and home() refuses until reboot — silently. :3
         _homing = false;
         _homingTaskHandle = nullptr;
-        MLOGLN(F("Homing: FAILED to create homing task (out of memory?) — homing aborted."));
+        SLOGE("tmc", "Homing: FAILED to create homing task (out of memory?) — homing aborted.");
         return false;
     }
 
@@ -467,7 +452,7 @@ bool TMC2160StepperDriver::checkPushToHome() {
             _current_position_mm = 0.0f;
             _homed = true;
 
-            MLOGLN(F("Push-to-home: endstop pressed by hand - backed off 5mm, HOMED at 0"));
+            SLOGI("tmc", "Push-to-home: endstop pressed by hand - backed off 5mm, HOMED at 0");
             return true;
         }
     } else {
@@ -481,7 +466,7 @@ bool TMC2160StepperDriver::checkPushToHome() {
 
 bool TMC2160StepperDriver::moveTo(float pos_mm) {
     if (!_homed) {
-        MLOGLN(F("Cannot move: not homed!"));
+        SLOGW("tmc", "Cannot move: not homed!");
         return false;
     }
 
@@ -511,7 +496,7 @@ bool TMC2160StepperDriver::moveTo(float pos_mm) {
 
     // If target == current, nothing to do
     if (target_steps == pos_before) {
-        MLOGF("moveTo: %.1fmm already at target step %d\n", pos_mm, target_steps);
+        SLOGD("tmc", "moveTo: %.1fmm already at target step %d", pos_mm, target_steps);
         return true;   // already there — a satisfied move, not a refusal
     }
 
@@ -528,7 +513,7 @@ bool TMC2160StepperDriver::moveTo(float pos_mm) {
     // Now the queue is empty - a normal absolute moveTo() works correctly.
     int8_t mret = (int8_t)_stepper->moveTo(target_steps);
 
-    MLOGF("moveTo: %.1fmm -> step %d (from %d) at %u Hz ret=%d\n",
+    SLOGD("tmc", "moveTo: %.1fmm -> step %d (from %d) at %u Hz ret=%d",
           pos_mm, target_steps, pos_before, speed_hz, mret);
     // Propagate FAS's verdict — a silently-refused move must be visible to the
     // caller (MotionArbiter), not just this log line. 0 = OK. :3
@@ -829,11 +814,11 @@ void TMC2160StepperDriver::applyDriverConfig(const DriverConfig& cfg) {
     uint16_t rb_ms  = _tmc->microsteps();
     uint32_t rb_cur = _tmc->rms_current();
     if (rb_ms != MICROSTEPS) {
-        MLOGF("WARNING: TMC readback MISMATCH after config write (microsteps set=%u read=%u) "
-              "— SPI glitch, settings may NOT be active!\n", MICROSTEPS, rb_ms);
+        SLOGW("tmc", "WARNING: TMC readback MISMATCH after config write (microsteps set=%u read=%u) "
+              "— SPI glitch, settings may NOT be active!", MICROSTEPS, rb_ms);
     }
 
-    MLOGF("Driver: run=%umA (rb=%lumA) hold=%u%% toff=%u tbl=%u sc=%s tpwmthrs=%lu hs=%d he=%d rb_ms=%u\n",
+    SLOGI("tmc", "Driver: run=%umA (rb=%lumA) hold=%u%% toff=%u tbl=%u sc=%s tpwmthrs=%lu hs=%d he=%d rb_ms=%u",
           cfg.run_current_ma, (unsigned long)rb_cur, cfg.hold_current_pct, cfg.toff, cfg.tbl,
           cfg.stealthchop ? "stealth" : "spread",
           (unsigned long)cfg.tpwm_thrs, (int)cfg.hstart, (int)cfg.hend, rb_ms);

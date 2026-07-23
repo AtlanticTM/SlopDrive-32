@@ -86,7 +86,6 @@ private:
     bool     _have_prev = false;  // _prev_fas_mm carries a real sample
     uint8_t  _steady_streak = 0;  // consecutive samples with the machine still
     uint8_t  _over_count = 0;     // consecutive steady samples over threshold
-    uint32_t _last_warn_log_ms = 0;
 
     void _reset();
 };

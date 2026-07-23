@@ -24,7 +24,7 @@
 #if defined(DRIVER_AIM_SERVO)
 
 #include <Preferences.h>
-#include "AppLog.h"
+#include "sloplog/sloplog.h"
 
 static volatile float    s_steps_per_mm  = AIM_STEPS_PER_MM_DEFAULT;
 static volatile uint16_t s_motor_spr     = AIM_MOTOR_STEPS_PER_REV_DEFAULT;
@@ -53,9 +53,9 @@ void aimGeometryInit() {
     if (spr < SPR_MIN || spr > SPR_MAX) spr = AIM_MOTOR_STEPS_PER_REV_DEFAULT;
     s_motor_spr    = spr;
     s_steps_per_mm = computeStepsPerMm(spr);
-    APPLOGF("MotionGeometry: steps/rev=%u (motor) -> %.3f steps/mm%s",
-            (unsigned)spr, s_steps_per_mm,
-            (spr == AIM_MOTOR_STEPS_PER_REV_DEFAULT) ? " (default)" : " (NVS)");
+    SLOGI("geom", "MotionGeometry: steps/rev=%u (motor) -> %.3f steps/mm%s",
+          (unsigned)spr, s_steps_per_mm,
+          (spr == AIM_MOTOR_STEPS_PER_REV_DEFAULT) ? " (default)" : " (NVS)");
 }
 
 void aimSetMotorStepsPerRev(uint16_t steps_per_rev, bool persist) {
@@ -72,9 +72,9 @@ void aimSetMotorStepsPerRev(uint16_t steps_per_rev, bool persist) {
             prefs.end();
         }
     }
-    APPLOGF("MotionGeometry: steps/rev %u -> %u, steps/mm %.3f -> %.3f%s — RE-HOME REQUIRED",
-            (unsigned)old_spr, (unsigned)steps_per_rev, old_spm, s_steps_per_mm,
-            persist ? " (persisted)" : "");
+    SLOGW("geom", "MotionGeometry: steps/rev %u -> %u, steps/mm %.3f -> %.3f%s — RE-HOME REQUIRED",
+          (unsigned)old_spr, (unsigned)steps_per_rev, old_spm, s_steps_per_mm,
+          persist ? " (persisted)" : "");
 }
 
 uint16_t aimMotorStepsPerRev() { return s_motor_spr; }

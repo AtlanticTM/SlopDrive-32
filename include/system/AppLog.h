@@ -1,15 +1,14 @@
-// AppLog — compatibility shim over SlopLog (lib/sloplog).
+// AppLog — the SlopLog sink bridge for the S3 main controller.
 //
-// Historically this was its own mutex'd line ring for the web UI. It is now
-// a thin facade: APPLOG/APPLOGF and applog/applogf feed the SlopLog core
-// (level Info, tag "app"), and the web ring (/api/log) plus Serial are just
-// SlopLog SINKS registered in applogBegin(). SERIAL_CONTROL_MODE no longer
-// branches the macros — it decides whether the Serial sink gets registered
+// The migration to SlopLog is complete: all firmware logging goes through
+// SLOGx("tag", ...) from <sloplog/sloplog.h> (real levels, tags, per-call-site
+// throttling). The old APPLOG/APPLOGF macros and applog()/applogf() producers
+// are GONE — this header now exposes ONLY the plumbing that wires SlopLog's
+// output to the two device-specific sinks:
+//   - the /api/log web ring (the WebUI's primary log surface), and
+//   - the USB Serial handoff (full at boot, Warn+ once the WebUI is receiving).
+// SERIAL_CONTROL_MODE decides whether the Serial sink is registered at all
 // (the USB port stays clean for Intiface TCode either way).
-//
-// New code should prefer SLOGx("tag", ...) from <sloplog/sloplog.h> directly
-// — real levels, tags, and per-call-site throttling (SLOGW_EVERY_MS). These
-// macros exist so 200+ legacy call sites keep working during the migration.
 #ifndef APPLOG_H
 #define APPLOG_H
 
@@ -17,15 +16,6 @@
 
 #include "config_api.h"
 #include "sloplog/sloplog.h"
-
-#define APPLOG(s)      applog(s)
-#define APPLOGF(...)   applogf(__VA_ARGS__)
-
-// printf-style, level Info, tag "app". Never blocks; bounded truncation.
-void applogf(const char* fmt, ...);
-
-// Plain string line, level Info, tag "app".
-void applog(const char* line);
 
 // Concatenate the web ring's buffered lines (oldest first) for /api/log.
 void applogDump(String& out);
@@ -37,5 +27,10 @@ void applogBegin();
 
 // Pump: fan buffered records out to the sinks. Call from httpTask (Core 0).
 void applogDrain();
+
+// The serial handoff: boot logs stream to serial in full; once the WebUI
+// proves it is receiving logs (first /api/log serve), serial demotes to
+// Warn+ — the web ring is the primary log surface from then on.
+void applogSerialQuiet();
 
 #endif  // APPLOG_H

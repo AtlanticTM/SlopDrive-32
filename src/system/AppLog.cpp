@@ -1,10 +1,9 @@
-// AppLog — compatibility facade over SlopLog. The web line-ring (/api/log)
-// is now a SlopLog sink; applog/applogf are Info-level producers. See the
-// header for the migration story.
+// AppLog — the SlopLog sink bridge for the S3 main controller. The web
+// line-ring (/api/log) is a SlopLog sink; the four bridge functions register
+// the sinks and pump/gate them. All logging now flows through SLOGx directly
+// — see the header for the migration story.
 
 #include "AppLog.h"
-
-#include <cstdarg>
 
 #include "freertos/FreeRTOS.h"
 
@@ -75,19 +74,19 @@ void applogBegin() {
     // USB serial is free for humans — mirror everything there too.
     sloplog::logger().addSink(&sloplog::serialSink());
 #endif
+    // Boot mode: drain synchronously after every line so the whole boot
+    // narrates to serial in real time (single-task phase only — main.cpp
+    // flips this off right before the FreeRTOS tasks spawn).
+    sloplog::logger().setImmediateDrain(true);
 }
 
 void applogDrain() { sloplog::drainToSinks(); }
 
-void applog(const char* line) {
-    sloplog::logger().logf(sloplog::Level::Info, "app", "%s", line);
-}
-
-void applogf(const char* fmt, ...) {
-    va_list ap;
-    va_start(ap, fmt);
-    sloplog::logger().vlogf(sloplog::Level::Info, "app", fmt, ap);
-    va_end(ap);
+void applogSerialQuiet() {
+#if !SERIAL_CONTROL_MODE
+    sloplog::logger().setSinkFloor(&sloplog::serialSink(), sloplog::Level::Warn);
+#endif
 }
 
 void applogDump(String& out) { webRing().dump(out); }
+

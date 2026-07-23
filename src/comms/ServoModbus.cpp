@@ -29,7 +29,7 @@
 #include <HardwareSerial.h>
 #include <algorithm>
 
-#include "AppLog.h"
+#include "sloplog/sloplog.h"
 
 // ============================================================================
 // Constructor / destructor
@@ -210,15 +210,15 @@ void ServoModbus::setSetpointFraming(uint8_t fc, bool le) {
     _sp_fc = fc;
     _sp_le = le;
     _sp_exception_logged = false;   // fresh knob, fresh one-shot diagnostic
-    APPLOGF("ServoModbus: setpoint framing -> FC 0x%02X, payload %s-endian (bench knob)",
-            fc, le ? "little" : "big");
+    SLOGI("servobus", "ServoModbus: setpoint framing -> FC 0x%02X, payload %s-endian (bench knob)",
+          fc, le ? "little" : "big");
 }
 
 void ServoModbus::setSetpointNoEcho(bool noecho) {
     _sp_noecho = noecho;
     if (noecho) _sp_fail_streak = 0;   // clear any latched streak so the watchdog re-arms clean later
-    APPLOGF("ServoModbus: setpoint no-echo mode %s %s", noecho ? "ON" : "OFF",
-            noecho ? "— BENCH ONLY, watchdog blind to setpoint loss!" : "— echo validation restored");
+    SLOGI("servobus", "ServoModbus: setpoint no-echo mode %s %s", noecho ? "ON" : "OFF",
+          noecho ? "— BENCH ONLY, watchdog blind to setpoint loss!" : "— echo validation restored");
 }
 
 bool ServoModbus::sendSetpoint(int32_t pos_counts) {
@@ -315,7 +315,7 @@ bool ServoModbus::init() {
     // style to 115200; rebaud the port and probe again. Whichever baud
     // answers wins and _baud latches to it for every subsequent transaction
     // (including the not-ready reprobe in update()). :3
-    APPLOGF("ServoModbus: probing drive @ addr %d (19200)...", _addr);
+    SLOGI("servobus", "ServoModbus: probing drive @ addr %d (19200)...", _addr);
 
     // Try to read alarm register (0x0E) as a quick health check.
     // Two attempts — RS485 can be temperamental on first contact. :3
@@ -336,14 +336,14 @@ bool ServoModbus::init() {
             _baud = 19200;
             _telemetry.valid = true;
             _telemetry.alarm = val;
-            APPLOGF("ServoModbus: drive @ addr %d answers @19200 (alarm=0x%04X) — RS485 is live :3",
-                    _addr, val);
+            SLOGI("servobus", "ServoModbus: drive @ addr %d answers @19200 (alarm=0x%04X) — RS485 is live :3",
+                  _addr, val);
             return true;
         }
     }
 
-    APPLOGF("ServoModbus: drive @ addr %d did NOT answer @19200 — trying 115200 (OSSM-RS-style reprogrammed drive)...",
-            _addr);
+    SLOGI("servobus", "ServoModbus: drive @ addr %d did NOT answer @19200 — trying 115200 (OSSM-RS-style reprogrammed drive)...",
+          _addr);
     _port.updateBaudRate(115200);
 
     for (int attempt = 0; attempt < 2; attempt++) {
@@ -361,8 +361,8 @@ bool ServoModbus::init() {
             _baud = 115200;
             _telemetry.valid = true;
             _telemetry.alarm = val;
-            APPLOGF("ServoModbus: drive @ addr %d answers @115200 (alarm=0x%04X) — RS485 is live :3",
-                    _addr, val);
+            SLOGI("servobus", "ServoModbus: drive @ addr %d answers @115200 (alarm=0x%04X) — RS485 is live :3",
+                  _addr, val);
             return true;
         }
     }
@@ -372,7 +372,7 @@ bool ServoModbus::init() {
     // from. :3
     _port.updateBaudRate(19200);
     _baud = 19200;
-    APPLOGF("ServoModbus: drive @ addr %d did NOT answer at either baud — RS485 probe failed.", _addr);
+    SLOGW("servobus", "ServoModbus: drive @ addr %d did NOT answer at either baud — RS485 probe failed.", _addr);
     _ready = false;
     return false;
 }
@@ -430,8 +430,8 @@ void ServoModbus::update() {
                 _telemetry.alarm = val;
                 portEXIT_CRITICAL(&_mux);
                 _ready = true;
-                APPLOGF("ServoModbus: drive @ addr %d answered on re-probe @%lu baud (alarm=0x%04X) — RS485 is live :3",
-                        _addr, (unsigned long)_baud, val);
+                SLOGI("servobus", "ServoModbus: drive @ addr %d answered on re-probe @%lu baud (alarm=0x%04X) — RS485 is live :3",
+                      _addr, (unsigned long)_baud, val);
             }
             _rx_state = RxState::IDLE;
             break;
@@ -478,7 +478,7 @@ void ServoModbus::update() {
                 // the drive it just renamed. :3
                 if (op.reg == 0x15 && op.val >= 1 && op.val <= 247) {
                     _addr = (uint8_t)op.val;
-                    APPLOGF("ServoModbus: following device-address change -> %u", _addr);
+                    SLOGI("servobus", "ServoModbus: following device-address change -> %u", _addr);
                 }
             }
             return;
@@ -543,8 +543,8 @@ void ServoModbus::update() {
                         size_t n = _port.readBytes(_rx_buf, (avail < (int)MAX_RSP_LEN) ? avail : MAX_RSP_LEN);
                         if (n >= 5 && _rx_buf[0] == _addr && _rx_buf[1] == (uint8_t)(_sp_last_fc | 0x80)) {
                             _sp_exception_logged = true;
-                            APPLOGF("ServoModbus: drive REJECTED setpoint FC 0x%02X — Modbus exception code %u",
-                                    _sp_last_fc, _rx_buf[2]);
+                            SLOGW("servobus", "ServoModbus: drive REJECTED setpoint FC 0x%02X — Modbus exception code %u",
+                                  _sp_last_fc, _rx_buf[2]);
                         }
                     }
                     _sp_fail_streak++;
@@ -562,7 +562,7 @@ void ServoModbus::update() {
                     // 3 strikes latches the single-read fallback for good. :3
                     if (++_enc_pair_fails >= 3 && !_enc_single_mode) {
                         _enc_single_mode = true;
-                        APPLOG("ServoModbus: drive ignores 2-reg reads — encoder falls back to single-register LO/HI");
+                        SLOGW("servobus", "ServoModbus: drive ignores 2-reg reads — encoder falls back to single-register LO/HI");
                     }
                     _reg_idx = 0;   // skip the encoder this cycle
                 } else if (_pending_kind == PendingKind::ENC_LO ||
@@ -686,7 +686,7 @@ void ServoModbus::_scanAdvance(uint32_t now) {
     memcpy(_cfg.regs, _cfg_staged, sizeof(_cfg.regs));
     _scan_active  = false;
     portEXIT_CRITICAL(&_mux);
-    APPLOGF("ServoModbus: config scan complete (known=0x%08lX) :3", (unsigned long)_scan_known);
+    SLOGI("servobus", "ServoModbus: config scan complete (known=0x%08lX) :3", (unsigned long)_scan_known);
 }
 
 // Commit a freshly assembled encoder sample. Separate from the 8-reg snapshot
@@ -715,16 +715,16 @@ bool ServoModbus::reprogramBaud(uint32_t target_baud) {
     if (target_baud == 115200)      baud_code = 803;
     else if (target_baud == 19200)  baud_code = 801;
     else {
-        APPLOGF("ServoModbus: reprogramBaud(%lu) refused — only 19200/115200 are known baud codes.",
-                (unsigned long)target_baud);
+        SLOGW("servobus", "ServoModbus: reprogramBaud(%lu) refused — only 19200/115200 are known baud codes.",
+              (unsigned long)target_baud);
         return false;
     }
 
     uint32_t previous_baud = _baud;
     if (previous_baud == target_baud) return true;   // already there, nothing to do
 
-    APPLOGF("ServoModbus: reprogramBaud() — %lu -> %lu via OSSM-RS magic sequence...",
-            (unsigned long)previous_baud, (unsigned long)target_baud);
+    SLOGI("servobus", "ServoModbus: reprogramBaud() — %lu -> %lu via OSSM-RS magic sequence...",
+          (unsigned long)previous_baud, (unsigned long)target_baud);
 
     // OSSM-RS magic sequence — fire-and-forget FC 0x06 writes, ~30ms gaps.
     // NEVER reg 0x14 (the EEPROM save flag) — this is a deliberately VOLATILE
@@ -756,8 +756,8 @@ bool ServoModbus::reprogramBaud(uint32_t target_baud) {
         uint16_t val = 0;
         if (tryReadResponse(&val, 1)) {
             _baud = target_baud;
-            APPLOGF("ServoModbus: reprogramBaud() CONFIRMED @%lu (alarm=0x%04X) :3",
-                    (unsigned long)target_baud, val);
+            SLOGI("servobus", "ServoModbus: reprogramBaud() CONFIRMED @%lu (alarm=0x%04X) :3",
+                  (unsigned long)target_baud, val);
             return true;
         }
     }
@@ -765,8 +765,8 @@ bool ServoModbus::reprogramBaud(uint32_t target_baud) {
     // Didn't answer at the new baud — restore the PREVIOUS baud and re-probe
     // so the link is left in a KNOWN state, never stranded between two
     // possible speeds. :3
-    APPLOGF("ServoModbus: reprogramBaud() to %lu did NOT confirm — restoring %lu...",
-            (unsigned long)target_baud, (unsigned long)previous_baud);
+    SLOGW("servobus", "ServoModbus: reprogramBaud() to %lu did NOT confirm — restoring %lu...",
+          (unsigned long)target_baud, (unsigned long)previous_baud);
     _port.updateBaudRate(previous_baud);
     for (int attempt = 0; attempt < 2; attempt++) {
         size_t expected = sendReadRequest(0x0E, 1);
@@ -778,8 +778,8 @@ bool ServoModbus::reprogramBaud(uint32_t target_baud) {
         uint16_t val = 0;
         if (tryReadResponse(&val, 1)) {
             _baud = previous_baud;
-            APPLOGF("ServoModbus: restored @%lu (alarm=0x%04X) after failed reprogram.",
-                    (unsigned long)previous_baud, val);
+            SLOGW("servobus", "ServoModbus: restored @%lu (alarm=0x%04X) after failed reprogram.",
+                  (unsigned long)previous_baud, val);
             return false;
         }
     }
@@ -787,8 +787,8 @@ bool ServoModbus::reprogramBaud(uint32_t target_baud) {
     // unrelated reason. Leave _baud at the best-known previous value; the
     // not-ready reprobe loop in update() will keep alternating and find the
     // drive again once it's back. :3
-    APPLOGF("ServoModbus: reprogramBaud() — restore probe at %lu ALSO failed. Link may be down; "
-            "the reprobe loop will keep looking.", (unsigned long)previous_baud);
+    SLOGE("servobus", "ServoModbus: reprogramBaud() — restore probe at %lu ALSO failed. Link may be down; "
+          "the reprobe loop will keep looking.", (unsigned long)previous_baud);
     _baud = previous_baud;
     return false;
 }
@@ -807,7 +807,7 @@ void ServoModbus::emergencyStop() {
     // stay consistent is the drain state above (queue now empty), not this
     // specific transaction. :3
     sendWriteCommand(0x01, 0);
-    APPLOG("ServoModbus: drive output disabled (emergency stop)");
+    SLOGW("servobus", "ServoModbus: drive output disabled (emergency stop)");
 }
 
 // ============================================================================
@@ -856,7 +856,7 @@ bool ServoModbus::queueWrite(uint16_t reg, uint16_t value, uint8_t repeat) {
     }
     portEXIT_CRITICAL(&_mux);
     if (full) {
-        APPLOG("ServoModbus: write queue FULL — write dropped");
+        SLOGW("servobus", "ServoModbus: write queue FULL — write dropped");
         return false;
     }
     return true;
@@ -877,11 +877,11 @@ bool ServoModbus::queuePositionPair(int32_t counts, bool low_first) {
     }
     portEXIT_CRITICAL(&_mux);
     if (full) {
-        APPLOG("ServoModbus: write queue FULL — position pair dropped");
+        SLOGW("servobus", "ServoModbus: write queue FULL — position pair dropped");
         return false;
     }
-    APPLOGF("ServoModbus: queued FC 0x10 position pair 0x0C/0x0D = %ld (%s-word first)",
-            (long)counts, low_first ? "low" : "high");
+    SLOGD("servobus", "ServoModbus: queued FC 0x10 position pair 0x0C/0x0D = %ld (%s-word first)",
+          (long)counts, low_first ? "low" : "high");
     return true;
 }
 
@@ -953,7 +953,7 @@ void ServoModbus::setDirPolarity(bool invert) {
 void ServoModbus::saveToFlash() {
     if (!_ready) return;
     sendWriteCommand(0x14, 1);
-    APPLOG("ServoModbus: saved config to drive flash — will survive a power cycle. :3");
+    SLOGI("servobus", "ServoModbus: saved config to drive flash — will survive a power cycle. :3");
 }
 
 #endif // defined(FEATURE_RS485_MODBUS)

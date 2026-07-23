@@ -4,7 +4,7 @@
 #include "range_mapper.h"
 #include "MotionArbiter.h"
 #include "MotorDriver.h"
-#include "AppLog.h"
+#include "sloplog/sloplog.h"
 #include "config_api.h"
 
 #include <Arduino.h>
@@ -271,21 +271,21 @@ void PatternEngine::_recalcParameters() {
 // Diagnostics — mirrors Generator's heartbeat style
 // ============================================================================
 
-void PatternEngine::_diagnostics(uint32_t& last_diag_ms) {
+void PatternEngine::_diagnostics() {
     if (!_running) return;
-    if (millis() - last_diag_ms <= 1000) return;
-    last_diag_ms = millis();
 
     if (_advanced) {
-        APPLOGF("PatternEngine: ADVANCED master=%u depth=%u..%u v_in=%u v_out=%u a_in=%u a_out=%u stroke#%u",
-                (unsigned)_ap.master.value, (unsigned)_ap.min_depth.value, (unsigned)_ap.max_depth.value,
-                (unsigned)_ap.in_speed.value, (unsigned)_ap.out_speed.value,
-                (unsigned)_ap.in_accel.value, (unsigned)_ap.out_accel.value, _stroke_index);
+        SLOGD_EVERY_MS(1000, "pattern",
+                       "PatternEngine: ADVANCED master=%u depth=%u..%u v_in=%u v_out=%u a_in=%u a_out=%u stroke#%u",
+                       (unsigned)_ap.master.value, (unsigned)_ap.min_depth.value, (unsigned)_ap.max_depth.value,
+                       (unsigned)_ap.in_speed.value, (unsigned)_ap.out_speed.value,
+                       (unsigned)_ap.in_accel.value, (unsigned)_ap.out_accel.value, _stroke_index);
         return;
     }
     const char* pname = patternName(_pattern_idx);
-    APPLOGF("PatternEngine: running pattern[%d]=\"%s\" speed=%.0f depth=%.0f stroke=%.0f sens=%.0f",
-            _pattern_idx, pname, _speed, _depth, _stroke, _sensation);
+    SLOGD_EVERY_MS(1000, "pattern",
+                   "PatternEngine: running pattern[%d]=\"%s\" speed=%.0f depth=%.0f stroke=%.0f sens=%.0f",
+                   _pattern_idx, pname, _speed, _depth, _stroke, _sensation);
 }
 
 // ============================================================================
@@ -322,8 +322,6 @@ void PatternEngine::taskFunction(void* param) {
 // Marked deprecated.
 
 void PatternEngine::run() {
-    uint32_t last_diag_ms = 0;
-
     while (true) {
         // ---- Consistent snapshot of user parameters (Core 1 read side) ----
         float  speed     = _speed;
@@ -348,7 +346,7 @@ void PatternEngine::run() {
         _state.gen_active = emit_ok;
 
         // ---- Diagnostics --------------------------------------------------
-        _diagnostics(last_diag_ms);
+        _diagnostics();
 
         if (emit_ok && _arbiter && _advanced) {
             // ---- Advanced mode (fray-d Advanced Penetration port) ---------
@@ -481,15 +479,11 @@ void PatternEngine::run() {
             // operator dialed in. Surface that (rate-limited) instead of
             // silently degrading the stroke. :3
             if (report.deadline_late) {
-                static uint32_t last_late_log_ms = 0;
-                uint32_t now_late = millis();
-                if (now_late - last_late_log_ms > 2000) {
-                    last_late_log_ms = now_late;
-                    APPLOGF("PatternEngine CLAMPED: stroke wants %.0f mm/s @ %.0f mm/s² "
-                            "but input limits allow %.0f/%.0f — pattern runs slower than configured",
-                            report.derived_speed_mm_s, report.derived_accel_mm_s2,
-                            report.clamped_speed_mm_s, report.clamped_accel_mm_s2);
-                }
+                SLOGW_EVERY_MS(2000, "pattern",
+                               "PatternEngine CLAMPED: stroke wants %.0f mm/s @ %.0f mm/s² "
+                               "but input limits allow %.0f/%.0f — pattern runs slower than configured",
+                               report.derived_speed_mm_s, report.derived_accel_mm_s2,
+                               report.clamped_speed_mm_s, report.clamped_accel_mm_s2);
             }
 
             // ---- Publish telemetry ----------------------------------------
@@ -627,15 +621,11 @@ float PatternEngine::_submitApStroke(uint32_t stroke_count, const advpat::Stroke
     PlanReport report = _arbiter->submit(intent);
 
     if (report.deadline_late) {
-        static uint32_t last_late_log_ms = 0;
-        uint32_t now_late = millis();
-        if (now_late - last_late_log_ms > 2000) {
-            last_late_log_ms = now_late;
-            APPLOGF("PatternEngine ADV CLAMPED: stroke wants %.0f mm/s @ %.0f mm/s² "
-                    "but input limits allow %.0f/%.0f — running softer than dialed",
-                    report.derived_speed_mm_s, report.derived_accel_mm_s2,
-                    report.clamped_speed_mm_s, report.clamped_accel_mm_s2);
-        }
+        SLOGW_EVERY_MS(2000, "pattern",
+                       "PatternEngine ADV CLAMPED: stroke wants %.0f mm/s @ %.0f mm/s² "
+                       "but input limits allow %.0f/%.0f — running softer than dialed",
+                       report.derived_speed_mm_s, report.derived_accel_mm_s2,
+                       report.clamped_speed_mm_s, report.clamped_accel_mm_s2);
     }
 
     _state.commanded_target_mm = target_mm;

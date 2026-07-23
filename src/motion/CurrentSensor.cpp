@@ -11,17 +11,7 @@
 #include <Wire.h>
 #include <INA228.h>
 #include "config_api.h"
-#include "AppLog.h"
-
-// Route debug the same way the servo driver does — keep the USB TCode stream
-// clean when SERIAL_CONTROL_MODE is on. :3
-#if SERIAL_CONTROL_MODE
-  #define CLOGF(...)  applogf(__VA_ARGS__)
-  #define CLOGLN(s)   applog(String(s).c_str())
-#else
-  #define CLOGF(...)  Serial.printf(__VA_ARGS__)
-  #define CLOGLN(s)   Serial.println(s)
-#endif
+#include "sloplog/sloplog.h"
 
 // Single INA228 instance at 0x40 on the default Wire bus. The isolator is
 // transparent, so this is just a normal I2C device to us. :3
@@ -31,7 +21,7 @@ bool CurrentSensor::init() {
     // Wire.begin(SDA, SCL) is the CALLER's job (main setup) — we assume the bus
     // is already up. begin() just probes whether the chip acknowledges. :3
     if (!_ina.begin()) {
-        CLOGF("INA228: NOT FOUND at 0x%02X — current sensing DISABLED, homing will refuse. uhoh :3\n",
+        SLOGE("power", "INA228: NOT FOUND at 0x%02X — current sensing DISABLED, homing will refuse. uhoh :3",
               INA228_I2C_ADDR);
         _ready = false;
         return false;
@@ -51,8 +41,8 @@ bool CurrentSensor::init() {
         // stall at the hard stop might never trip the threshold. Do NOT mark
         // the sensor ready: sensorless homing gates on isReady() and must
         // refuse rather than trust garbage feel. :3
-        CLOGF("INA228: setMaxCurrentShunt() FAILED (rc=%d) — calibration invalid, "
-              "current sensing DISABLED, sensorless homing will refuse. uhoh :3\n", rc);
+        SLOGE("power", "INA228: setMaxCurrentShunt() FAILED (rc=%d) — calibration invalid, "
+              "current sensing DISABLED, sensorless homing will refuse. uhoh :3", rc);
         _ready = false;
         return false;
     }
@@ -70,7 +60,7 @@ bool CurrentSensor::init() {
     _ina.setShuntVoltageConversionTime(4); // ~150µs class
 
     _ready = true;
-    CLOGF("INA228: ready @ 0x%02X — bus=%.1fV current=%.2fA (should be ~36V, ~0A idle) :3\n",
+    SLOGI("power", "INA228: ready @ 0x%02X — bus=%.1fV current=%.2fA (should be ~36V, ~0A idle) :3",
           INA228_I2C_ADDR, readBusV(), readCurrentA());
     return true;
 }

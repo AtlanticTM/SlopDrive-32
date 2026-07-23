@@ -18,10 +18,19 @@ using namespace slopglow;
 
 namespace {
 
+// RGB = the status pixel (engine-driven). The yellow heartbeat LED is its
+// own lamp with its own steady breathe — deliberately NOT tied to the status
+// animation (user decree: heartbeat is heartbeat, status is status). It
+// still freezes with the liveness gate: its phase only advances while the
+// engine isn't frozen, and only while httpTask pumps us at all.
 LedcRgbOutput s_rgb(PIN_LED_R, PIN_LED_G, PIN_LED_B, LED_ACTIVE_LOW == 1);
 LedcMonoOutput s_heartLamp(PIN_HB_LED, HB_LED_ACTIVE_HIGH == 1);
-FanoutOutput<2> s_fanout;
-GlowEngine s_engine(s_fanout);
+GlowEngine s_engine(s_rgb);
+
+uint32_t s_heartPhaseMs = 0;
+uint32_t s_lastHeartMs = 0;
+bool s_heartSeeded = false;
+constexpr uint32_t kHeartPeriodMs = 3000;   // the familiar ~3 s breath
 
 // Amber activity pulse (plain GPIO — it's a discrete LED and 120ms square
 // pulses don't need PWM). 32-bit aligned store is atomic on the S3.
@@ -46,8 +55,6 @@ void slopglowInit() {
     amberWrite(false);
     s_rgb.begin();        // GPIO0 strapping pin: this runs post-boot by contract
     s_heartLamp.begin();
-    s_fanout.add(&s_rgb);
-    s_fanout.add(&s_heartLamp);
 
     // Preserve this board's established color language where the stock spec
     // differs: paused/override has always been magenta here.
@@ -84,6 +91,23 @@ void slopglowUpdate(const SystemState& state) {
     s_engine.set(GlowState::Ready, state.homed);
 
     s_engine.update(now);
+
+    // Yellow heartbeat: independent triangle breathe, gamma'd via luma. Phase
+    // advances only while the liveness gate is happy — a dead core (or a
+    // stalled httpTask, which stops this very call) freezes the breath.
+    if (!s_heartSeeded) {
+        s_heartSeeded = true;
+        s_lastHeartMs = now;
+    }
+    uint32_t dt = now - s_lastHeartMs;
+    s_lastHeartMs = now;
+    if (!s_engine.frozen()) {
+        s_heartPhaseMs = (s_heartPhaseMs + dt) % kHeartPeriodMs;
+        uint32_t ph = s_heartPhaseMs * 512u / kHeartPeriodMs;   // 0..511 triangle
+        uint8_t v = uint8_t(ph < 256 ? ph : 511 - ph);
+        s_heartLamp.set(0, {v, v, v});
+        s_heartLamp.show();
+    }
 
     amberWrite(now - s_last_activity_ms < kActivityPulseMs);
 }

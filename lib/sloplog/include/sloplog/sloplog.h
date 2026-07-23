@@ -52,16 +52,47 @@ inline FirmwareLog& logger() {
 
 // A serial sink you can register at boot (after Serial.begin):
 //   sloplog::logger().addSink(&sloplog::serialSink());
+//
+// NON-BLOCKING BY CONTRACT: on the Nano ESP32, Serial is USB-CDC — writes
+// with no host draining the port can block ~100 ms PER LINE, and this sink
+// runs on the drain task (httpTask), which also serves the WebUI and pumps
+// the LEDs. So we only write when the TX buffer can take the whole line;
+// otherwise the line is dropped and counted (same drop-and-count posture as
+// the core ring). Attach a serial monitor and the stream returns, with a
+// "(serial dropped N)" marker admitting the gap.
 class SerialSink final : public ISink {
 public:
     void write(const Record& r) override {
-        // [ 12.345 W1 arbiter ] message   (seconds, level+core, tag)
-        Serial.printf("[%7lu.%03lu %c%u %-10s] %s",
-                      (unsigned long)(r.ms / 1000u), (unsigned long)(r.ms % 1000u),
-                      levelChar(r.level), r.core, r.tag, r.msg);
-        if (r.lost) Serial.printf("  (+%u lost)", r.lost);
-        Serial.println();
+        char line[192];
+        int n = snprintf(line, sizeof(line), "[%7lu.%03lu %c%u %-10s] %s",
+                         (unsigned long)(r.ms / 1000u), (unsigned long)(r.ms % 1000u),
+                         levelChar(r.level), r.core, r.tag, r.msg);
+        if (n < 0) return;
+        if (n >= int(sizeof(line))) n = int(sizeof(line)) - 1;
+        if (r.lost) {
+            n += snprintf(line + n, sizeof(line) - size_t(n), "  (+%u lost)", r.lost);
+            if (n >= int(sizeof(line))) n = int(sizeof(line)) - 1;
+        }
+        if (_dropped) {
+            char note[40];
+            int m = snprintf(note, sizeof(note), "(serial dropped %lu)",
+                             (unsigned long)_dropped);
+            if (m > 0 && Serial.availableForWrite() >= m + 2) {
+                Serial.write(reinterpret_cast<const uint8_t*>(note), size_t(m));
+                Serial.write("\r\n", 2);
+                _dropped = 0;
+            }
+        }
+        if (Serial.availableForWrite() >= n + 2) {
+            Serial.write(reinterpret_cast<const uint8_t*>(line), size_t(n));
+            Serial.write("\r\n", 2);
+        } else {
+            ++_dropped;  // CDC constipated (no host reading) — never block for it
+        }
     }
+
+private:
+    uint32_t _dropped = 0;
 };
 
 inline SerialSink& serialSink() {

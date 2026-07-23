@@ -11,7 +11,7 @@
 
 #include "ModbusServoDriver.h"
 #include "ServoModbus.h"
-#include "AppLog.h"
+#include "sloplog/sloplog.h"
 #include <math.h>       // lroundf
 #include <esp_timer.h>  // esp_timer_get_time()
 
@@ -26,7 +26,7 @@ void ModbusServoDriver::init() {
     // Bring up the INA228 the same way AIMServoDriver does — the Wire bus is
     // already up (main setup() calls Wire.begin() before motor.init()). :3
     if (!_current.init()) {
-        APPLOG("ModbusServoDriver: WARNING — INA228 not found, live current telemetry unavailable. uhoh :3");
+        SLOGW("servo", "ModbusServoDriver: WARNING — INA228 not found, live current telemetry unavailable. uhoh :3");
     }
 
     // Jerk ceiling for the executor's tracking integrator — OSSM-RS parity
@@ -37,9 +37,9 @@ void ModbusServoDriver::init() {
     // spontaneously energizes anything at boot, exactly like FAS mode never
     // pulses the motor before a home. Output only comes on via
     // forceHomeState(true)/enable() (Phase 4's real home() will do the same). :3
-    APPLOGF("ModbusServoDriver: init — Modbus direct-drive backend, %.1f counts/mm, "
-            "wire_sign=%d (bench-tune AIM_MODBUS_WIRE_SIGN if position runs backwards)",
-            AIM_ENC_COUNTS_PER_MM, (int)_wire_sign);
+    SLOGI("servo", "ModbusServoDriver: init — Modbus direct-drive backend, %.1f counts/mm, "
+          "wire_sign=%d (bench-tune AIM_MODBUS_WIRE_SIGN if position runs backwards)",
+          AIM_ENC_COUNTS_PER_MM, (int)_wire_sign);
 }
 
 void ModbusServoDriver::update() {
@@ -71,16 +71,16 @@ void ModbusServoDriver::update() {
             _homing    = false;
             _homed     = false;
             _bus_fault = true;
-            APPLOGF("ModbusServoDriver: WATCHDOG — %u missed setpoint echoes, E-STOP "
-                    "(output off, re-home required). uhoh :C", (unsigned)health.sp_fail_streak);
+            SLOGE("servo", "ModbusServoDriver: WATCHDOG — %u missed setpoint echoes, E-STOP "
+                  "(output off, re-home required). uhoh :C", (unsigned)health.sp_fail_streak);
         }
     } else if (health.sp_fail_streak >= AIM_SP_FAIL_FREEZE) {
         if (!_fault_freeze_logged) {
             _fault_freeze_logged = true;
             _executor.freeze();
             _bus_fault = true;
-            APPLOGF("ModbusServoDriver: WATCHDOG — %u missed setpoint echoes, FREEZE "
-                    "(holding position, re-home required). uhoh :C", (unsigned)health.sp_fail_streak);
+            SLOGE("servo", "ModbusServoDriver: WATCHDOG — %u missed setpoint echoes, FREEZE "
+                  "(holding position, re-home required). uhoh :C", (unsigned)health.sp_fail_streak);
         }
     } else {
         // Streak dropped back under the freeze threshold — reset the LOG
@@ -98,14 +98,14 @@ void ModbusServoDriver::emergencyStop() {
     _homing  = false;
     _homed   = false;
     _enabled = false;
-    APPLOG("ModbusServoDriver: EMERGENCY STOP — output off, homed cleared.");
+    SLOGW("servo", "ModbusServoDriver: EMERGENCY STOP — output off, homed cleared.");
 }
 
 // ---- Homing ------------------------------------------------------------------
 
 bool ModbusServoDriver::home(int32_t /*home_speed_steps_s*/) {
-    APPLOG("ModbusServoDriver: home() refused — real homing lands in Phase 4. "
-           "Use forceHomeState(true) for bench bring-up.");
+    SLOGW("servo", "ModbusServoDriver: home() refused — real homing lands in Phase 4. "
+          "Use forceHomeState(true) for bench bring-up.");
     return false;
 }
 
@@ -114,8 +114,8 @@ void ModbusServoDriver::forceHomeState(bool homed) {
     if (homed) {
         ServoTelemetry t = _bus.getTelemetry();
         if (!t.enc_valid) {
-            APPLOG("ModbusServoDriver: forceHomeState(true) REFUSED — no valid encoder "
-                   "reading yet (bus not ready / never polled). uhoh :C");
+            SLOGW("servo", "ModbusServoDriver: forceHomeState(true) REFUSED — no valid encoder "
+                  "reading yet (bus not ready / never polled). uhoh :C");
             return;
         }
 
@@ -140,12 +140,12 @@ void ModbusServoDriver::forceHomeState(bool homed) {
         _enabled = true;
         _bus.queueWrite(0x01, 1);   // energize output
 
-        APPLOGF("ModbusServoDriver: forceHomeState(true) — BENCH fake-home, "
-                "wire_offset=%ld counts, wire_sign=%d :3",
-                (long)_wire_offset, (int)AIM_MODBUS_WIRE_SIGN);
+        SLOGI("servo", "ModbusServoDriver: forceHomeState(true) — BENCH fake-home, "
+              "wire_offset=%ld counts, wire_sign=%d :3",
+              (long)_wire_offset, (int)AIM_MODBUS_WIRE_SIGN);
     } else {
         _homed = false;
-        APPLOG("ModbusServoDriver: forceHomeState(false) — cleared, real homing required.");
+        SLOGI("servo", "ModbusServoDriver: forceHomeState(false) — cleared, real homing required.");
     }
 }
 
@@ -153,7 +153,7 @@ void ModbusServoDriver::forceHomeState(bool homed) {
 
 bool ModbusServoDriver::moveTo(float pos_mm) {
     if (!_homed || !_enabled || _bus_fault) {
-        APPLOG("ModbusServoDriver: moveTo() refused — not homed/enabled, or a bus fault is latched.");
+        SLOGW("servo", "ModbusServoDriver: moveTo() refused — not homed/enabled, or a bus fault is latched.");
         return false;
     }
 
@@ -170,8 +170,8 @@ bool ModbusServoDriver::moveTo(float pos_mm) {
     // grit-cache hit later. :3
     _have_last_stream = false;
 
-    APPLOGF("ModbusServoDriver moveTo: %.1fmm -> %.0f counts (v=%.0f a=%.0f counts/s, counts/s^2)",
-            pos_mm, target_counts, speed_counts_s, accel_counts_s2);
+    SLOGD("servo", "ModbusServoDriver moveTo: %.1fmm -> %.0f counts (v=%.0f a=%.0f counts/s, counts/s^2)",
+          pos_mm, target_counts, speed_counts_s, accel_counts_s2);
     return true;
 }
 
@@ -238,7 +238,7 @@ void ModbusServoDriver::stop() {
     _bus.queueWrite(0x01, 0);
     _homed   = false;
     _enabled = false;
-    APPLOG("ModbusServoDriver: stop() — output off (queued), homed cleared.");
+    SLOGI("servo", "ModbusServoDriver: stop() — output off (queued), homed cleared.");
 }
 
 void ModbusServoDriver::hardStop() {
@@ -294,8 +294,8 @@ void ModbusServoDriver::applyDriverConfig(const DriverConfig& cfg) {
     (void)cfg;
     _bus.queueWrite(0x01, _enabled ? 1 : 0);
     _bus.queueWrite(0x18, AIM_MODBUS_STANDSTILL_MAX);
-    APPLOGF("ModbusServoDriver: applyDriverConfig() — queued output=%d, torque clamp reg 0x18=%d",
-            (int)_enabled, (int)AIM_MODBUS_STANDSTILL_MAX);
+    SLOGI("servo", "ModbusServoDriver: applyDriverConfig() — queued output=%d, torque clamp reg 0x18=%d",
+          (int)_enabled, (int)AIM_MODBUS_STANDSTILL_MAX);
 }
 
 // ---- Diagnostics -----------------------------------------------------------------

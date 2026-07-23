@@ -12,19 +12,7 @@
 
 #include "freertos/FreeRTOS.h"
 #include "freertos/task.h"
-#include "AppLog.h"
-
-// In serial-control mode the USB Serial port is dedicated to Intiface TCode,
-// so debug output must go to the in-memory web log instead of Serial (which
-// would corrupt the command stream). These macros redirect this file's logging
-// to applog when SERIAL_CONTROL_MODE is on, and to Serial otherwise. :3
-#if SERIAL_CONTROL_MODE
-  #define MLOGF(...)  applogf(__VA_ARGS__)
-  #define MLOGLN(s)   applog(String(s).c_str())
-#else
-  #define MLOGF(...)  Serial.printf(__VA_ARGS__)
-  #define MLOGLN(s)   Serial.println(s)
-#endif
+#include "sloplog/sloplog.h"
 
 // FastAccelStepperEngine — the background pulse-generation engine on ESP32.
 // One static instance shared across the whole driver. Named _fas_engine to
@@ -63,7 +51,7 @@ void AIMServoDriver::init() {
     // just probe our device on it. If it's missing, homing will refuse rather
     // than blindly ram the frame. :3
     if (!_current.init()) {
-        MLOGLN(F("AIMServo: WARNING — INA228 not found, sensorless homing DISABLED. uhoh :3"));
+        SLOGW("aim", "AIMServo: WARNING — INA228 not found, sensorless homing DISABLED. uhoh :3");
     }
 
     // Store the engine pointer so everyone can share the toy. :3
@@ -107,14 +95,14 @@ void AIMServoDriver::init() {
         _enabled = true;
         _stepper->setCurrentPosition(0);
 
-        MLOGLN(F("AIMServo: FastAccelStepper initialized (PUL/DIR registered)"));
-        MLOGF("AIMServo: PUL=GPIO%d DIR=GPIO%d ENDSTOP=GPIO%d\n",
+        SLOGI("aim", "AIMServo: FastAccelStepper initialized (PUL/DIR registered)");
+        SLOGI("aim", "AIMServo: PUL=GPIO%d DIR=GPIO%d ENDSTOP=GPIO%d",
               AIM_PIN_STEP, AIM_PIN_DIR, AIM_PIN_ENDSTOP);
-        MLOGF("AIMServo: %u steps/rev, %.1f mm/rev, %.1f steps/mm, %.1f mm max rail\n",
+        SLOGI("aim", "AIMServo: %u steps/rev, %.1f mm/rev, %.1f steps/mm, %.1f mm max rail",
               (uint32_t)AIM_STEPS_PER_REV, AIM_MM_PER_REV,
               AIM_STEPS_PER_MM, _max_rail_mm);
     } else {
-        MLOGLN(F("AIMServo: ERROR — FastAccelStepper failed to connect to PUL pin!"));
+        SLOGE("aim", "AIMServo: ERROR — FastAccelStepper failed to connect to PUL pin!");
     }
 
     // Set initial speed/acceleration in mm units. These get converted to
@@ -173,7 +161,7 @@ void AIMServoDriver::emergencyStop() {
     if (_homingTaskHandle != nullptr) {
         vTaskDelete(_homingTaskHandle);
         _homingTaskHandle = nullptr;
-        MLOGLN(F("AIMServo E-stop: homing task killed mid-sweep."));
+        SLOGW("aim", "AIMServo E-stop: homing task killed mid-sweep.");
     }
     hardStop();
     _homed  = false;
@@ -286,7 +274,7 @@ bool AIMServoDriver::_sweepToStall(int8_t dir_sign) {
     // wall never reads as a spike. :3
     vTaskDelay(pdMS_TO_TICKS(150));
     if (!_stepper->isRunning()) {
-        MLOGLN(F("AIMServo Homing: sweep move refused by FAS — stepper never started. uhoh :C"));
+        SLOGW("aim", "AIMServo Homing: sweep move refused by FAS — stepper never started. uhoh :C");
         return false;
     }
 
@@ -295,7 +283,6 @@ bool AIMServoDriver::_sweepToStall(int8_t dir_sign) {
     uint32_t baseline_taken  = 0;
     float    baseline_sum    = 0.0f;
     uint16_t over_count      = 0;
-    uint32_t last_log_ms     = 0;
 
     while (_stepper->isRunning()) {
         float amps = fabsf(_current.readCurrentA());
@@ -307,7 +294,7 @@ bool AIMServoDriver::_sweepToStall(int8_t dir_sign) {
             baseline_sum += amps;
             if (++baseline_taken == AIM_HOME_BASELINE_SAMPLES) {
                 baseline_a = baseline_sum / (float)AIM_HOME_BASELINE_SAMPLES;
-                MLOGF("AIMServo Homing: free-run baseline = %.2f A\n", baseline_a);
+                SLOGI("aim", "AIMServo Homing: free-run baseline = %.2f A", baseline_a);
             }
         } else {
             // Stall = current sitting above baseline+margin for N consecutive
@@ -318,8 +305,8 @@ bool AIMServoDriver::_sweepToStall(int8_t dir_sign) {
                 if (++over_count >= AIM_HOME_STALL_CONSEC) {
                     // STOP NOW — no coasting on a 180W servo.
                     _stepper->forceStop();
-                    MLOGF("AIMServo Homing: *** STALL *** %.2f A (base %.2f + margin %.1f) "
-                          "for %u polls, pos=%d\n",
+                    SLOGI("aim", "AIMServo Homing: *** STALL *** %.2f A (base %.2f + margin %.1f) "
+                          "for %u polls, pos=%d",
                           amps, baseline_a, AIM_HOME_STALL_MARGIN_A, over_count,
                           _stepper->getCurrentPosition());
                     // Wait for the pulse train to fully drain before returning.
@@ -334,19 +321,16 @@ bool AIMServoDriver::_sweepToStall(int8_t dir_sign) {
             }
         }
 
-        uint32_t now_ms = millis();
-        if (now_ms - last_log_ms >= 500) {
-            MLOGF("AIMServo Homing: sweeping dir=%d I=%.2fA base=%.2f over=%u pos=%d\n",
-                  dir_sign, amps, baseline_a, over_count, _stepper->getCurrentPosition());
-            last_log_ms = now_ms;
-        }
+        SLOGD_EVERY_MS(500, "aim",
+                       "AIMServo Homing: sweeping dir=%d I=%.2fA base=%.2f over=%u pos=%d",
+                       dir_sign, amps, baseline_a, over_count, _stepper->getCurrentPosition());
         vTaskDelay(pdMS_TO_TICKS(poll_ms));
     }
     return false;  // ran the whole sweep without a stall — no wall found. uhoh :C
 }
 
 void AIMServoDriver::_homingTask() {
-    MLOGF("AIMServo Homing: START (SENSORLESS via INA228) speed=%u steps/s (%.1f mm/s)\n",
+    SLOGI("aim", "AIMServo Homing: START (SENSORLESS via INA228) speed=%u steps/s (%.1f mm/s)",
           (uint32_t)_home_speed_steps_s,
           (float)_home_speed_steps_s / AIM_STEPS_PER_MM);
 
@@ -354,7 +338,7 @@ void AIMServoDriver::_homingTask() {
     // ram the frame at speed. The servo's own foldback is the last-ditch
     // backstop, but we don't rely on it for a normal home. :3
     if (!_current.isReady()) {
-        MLOGLN(F("AIMServo Homing: ABORT — INA228 not ready, cannot sense stalls. uhoh :C"));
+        SLOGW("aim", "AIMServo Homing: ABORT — INA228 not ready, cannot sense stalls. uhoh :C");
         _homing = false;
         _homed  = false;
         _homingTaskHandle = nullptr;
@@ -363,10 +347,10 @@ void AIMServoDriver::_homingTask() {
     }
 
     // --- Stall #1: find the FRONT hard stop first — rams toward the out end :3
-    MLOGLN(F("AIMServo Homing: sweeping toward FRONT hard stop..."));
+    SLOGI("aim", "AIMServo Homing: sweeping toward FRONT hard stop...");
     if (!_sweepToStall(-1)) {
-        MLOGLN(F("AIMServo Homing: FAILED — no stall on front sweep. Check current"));
-        MLOGLN(F("  threshold (AIM_HOME_STALL_MARGIN_A), wiring, and travel distance."));
+        SLOGW("aim", "AIMServo Homing: FAILED — no stall on front sweep. Check current");
+        SLOGW("aim", "  threshold (AIM_HOME_STALL_MARGIN_A), wiring, and travel distance.");
         _homing = false;
         _homed  = false;
         _homingTaskHandle = nullptr;
@@ -376,7 +360,7 @@ void AIMServoDriver::_homingTask() {
 
     // Record the front stall position before we zero at the rear. :3
     int32_t front_steps = _stepper->getCurrentPosition();
-    MLOGF("AIMServo Homing: front wall touched at %d steps\n", front_steps);
+    SLOGI("aim", "AIMServo Homing: front wall touched at %d steps", front_steps);
 
     // CRITICAL: forceStopAndNewPosition re-syncs the FAS position counter and
     // clears the internal stopped/paused state. Without this, the `move()` call
@@ -401,10 +385,10 @@ void AIMServoDriver::_homingTask() {
     vTaskDelay(pdMS_TO_TICKS(250));  // drain the stall spike out of the INA228 average
 
     // --- Stall #2: sweep back to the REAR hard stop (this becomes home / 0mm) ---
-    MLOGLN(F("AIMServo Homing: sweeping toward REAR hard stop to establish home..."));
+    SLOGI("aim", "AIMServo Homing: sweeping toward REAR hard stop to establish home...");
     if (!_sweepToStall(+1)) {
-        MLOGLN(F("AIMServo Homing: FAILED — no stall on rear sweep. Check current"));
-        MLOGLN(F("  threshold (AIM_HOME_STALL_MARGIN_A), wiring, and travel distance."));
+        SLOGW("aim", "AIMServo Homing: FAILED — no stall on rear sweep. Check current");
+        SLOGW("aim", "  threshold (AIM_HOME_STALL_MARGIN_A), wiring, and travel distance.");
         _homing = false;
         _homed  = false;
         _homingTaskHandle = nullptr;
@@ -430,7 +414,7 @@ void AIMServoDriver::_homingTask() {
     while (_stepper->isRunning() && millis() < to) vTaskDelay(pdMS_TO_TICKS(20));
     _stepper->forceStopAndNewPosition(0);   // re-zero: THIS is home (0mm)
     _current_position_mm = 0.0f;
-    MLOGF("AIMServo Homing: rear found, backed off %.1fmm — HOME set at 0mm :3\n",
+    SLOGI("aim", "AIMServo Homing: rear found, backed off %.1fmm — HOME set at 0mm :3",
           AIM_HOMING_BACKOFF_MM);
 
     // --- Measure usable stroke from front stall to rear ---
@@ -453,19 +437,19 @@ void AIMServoDriver::_homingTask() {
         // rail length is a real wall, so we trust it. :3
         _measured_stroke_mm = usable_mm;
 
-        MLOGF("AIMServo Homing: front-to-rear span %.1fmm -> usable stroke %.1fmm "
-              "(rail-length bound %.1fmm) :3\n", raw_span_mm, _measured_stroke_mm, _max_rail_mm);
+        SLOGI("aim", "AIMServo Homing: front-to-rear span %.1fmm -> usable stroke %.1fmm "
+              "(rail-length bound %.1fmm) :3", raw_span_mm, _measured_stroke_mm, _max_rail_mm);
     } else {
         // Non-positive span — something's off, fall back to the configured rail
         // length. We still have a valid home from the rear sweep. :3
         _measured_stroke_mm = 0.0f;
-        MLOGLN(F("AIMServo Homing: unexpected front position — using configured rail length."));
+        SLOGW("aim", "AIMServo Homing: unexpected front position — using configured rail length.");
     }
 
     _current_position_mm = 0.0f;
     _homed  = true;
     _homing = false;
-    MLOGF("AIMServo Homing: COMPLETE — homed at 0mm, usable stroke %.1fmm. yippie! :3\n",
+    SLOGI("aim", "AIMServo Homing: COMPLETE — homed at 0mm, usable stroke %.1fmm. yippie! :3",
           _measured_stroke_mm > 0.0f ? _measured_stroke_mm : _max_rail_mm);
     _homingTaskHandle = nullptr;
     vTaskDelete(nullptr);
@@ -475,7 +459,7 @@ void AIMServoDriver::_homingTask() {
 bool AIMServoDriver::home(int32_t home_speed_steps_s) {
     if (_homing) return false;
 
-    MLOGLN(F("AIMServo Homing: Starting..."));
+    SLOGI("aim", "AIMServo Homing: Starting...");
     _homing = true;
     _homed  = false;
 
@@ -522,7 +506,7 @@ bool AIMServoDriver::home(int32_t home_speed_steps_s) {
         // stays true forever and home() refuses until reboot — silently. :3
         _homing = false;
         _homingTaskHandle = nullptr;
-        MLOGLN(F("AIMServo Homing: FAILED to create homing task (out of memory?) — homing aborted. uhoh :C"));
+        SLOGE("aim", "AIMServo Homing: FAILED to create homing task (out of memory?) — homing aborted. uhoh :C");
         return false;
     }
 
@@ -555,10 +539,10 @@ void AIMServoDriver::forceHomeState(bool homed) {
         _current_position_mm = 0.0f;
         _homing = false;
         _homed  = true;
-        MLOGLN(F("AIMServo: forceHomeState(true) — bench fake-home, outputs live at 0mm :3"));
+        SLOGI("aim", "AIMServo: forceHomeState(true) — bench fake-home, outputs live at 0mm :3");
     } else {
         _homed = false;
-        MLOGLN(F("AIMServo: forceHomeState(false) — cleared, real homing required."));
+        SLOGI("aim", "AIMServo: forceHomeState(false) — cleared, real homing required.");
     }
 }
 
@@ -615,7 +599,7 @@ bool AIMServoDriver::checkPushToHome() {
             _current_position_mm = 0.0f;
             _homed = true;
 
-            MLOGLN(F("AIMServo Push-to-home: endstop pressed — backed off 10mm, HOMED at 0"));
+            SLOGI("aim", "AIMServo Push-to-home: endstop pressed — backed off 10mm, HOMED at 0");
             return true;
         }
     } else {
@@ -631,7 +615,7 @@ bool AIMServoDriver::checkPushToHome() {
 
 bool AIMServoDriver::moveTo(float pos_mm) {
     if (!_homed) {
-        MLOGLN(F("AIMServo: Cannot move — not homed!"));
+        SLOGW("aim", "AIMServo: Cannot move — not homed!");
         return false;
     }
 
@@ -660,7 +644,7 @@ bool AIMServoDriver::moveTo(float pos_mm) {
     int32_t pos_before = _stepper->getCurrentPosition();
 
     if (target_steps == pos_before) {
-        MLOGF("AIMServo moveTo: %.1fmm already at target step %d\n",
+        SLOGD("aim", "AIMServo moveTo: %.1fmm already at target step %d",
               pos_mm, target_steps);
         return true;   // already there — a satisfied move, not a refusal
     }
@@ -680,7 +664,7 @@ bool AIMServoDriver::moveTo(float pos_mm) {
     // Cast to int for the log — the numeric value is identical. 0 = OK. :3
     int mret = (int)_stepper->moveTo(target_steps);
 
-    MLOGF("AIMServo moveTo: %.1fmm -> step %d (from %d) at %u Hz ret=%d\n",
+    SLOGD("aim", "AIMServo moveTo: %.1fmm -> step %d (from %d) at %u Hz ret=%d",
           pos_mm, target_steps, pos_before, speed_hz, mret);
     // Propagate FAS's verdict — a silently-refused move must be visible to the
     // caller (MotionArbiter), not just this log line. :3
@@ -902,7 +886,7 @@ void AIMServoDriver::applyDriverConfig(const DriverConfig& cfg) {
     // Speed and acceleration from the config ARE applied — those go to FAS,
     // not to the drive itself. The drive just follows the pulse rate. :3
     (void)cfg;  // suppress unused-parameter warning
-    MLOGLN(F("AIMServo: applyDriverConfig() — dumb drive, no registers to write"));
+    SLOGI("aim", "AIMServo: applyDriverConfig() — dumb drive, no registers to write");
 }
 
 // ---- Unit conversion ---------------------------------------------------------

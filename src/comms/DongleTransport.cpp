@@ -9,7 +9,7 @@
 
 #include "DongleTransport.h"
 #include "config_api.h"
-#include "AppLog.h"
+#include "sloplog/sloplog.h"
 
 DongleTransport::DongleTransport(TCodeParser& parser)
     : _parser(parser) {}
@@ -23,7 +23,7 @@ void DongleTransport::begin() {
     _open   = true;
     _active = false;
     _len    = 0;
-    APPLOG("[Dongle] Serial2 open — waiting for TCode from the dongle. :3");
+    SLOGI("dongle", "Serial2 open — waiting for TCode from the dongle. :3");
 }
 
 void DongleTransport::end() {
@@ -32,7 +32,7 @@ void DongleTransport::end() {
     _open   = false;
     _active = false;
     _len    = 0;
-    APPLOG("[Dongle] Serial2 closed. :3");
+    SLOGI("dongle", "Serial2 closed. :3");
 }
 
 void DongleTransport::poll() {

@@ -2,7 +2,7 @@
 #include "PatternEngine.h"
 #include "SystemState.h"
 #include "range_mapper.h"
-#include "AppLog.h"
+#include "sloplog/sloplog.h"
 #include "config_api.h"
 
 #include <NimBLEDevice.h>
@@ -191,13 +191,13 @@ OssmBleService::~OssmBleService() {
 
 void OssmBleService::init() {
     g_ossm = this;
-    APPLOG("OssmBleService: init done");
+    SLOGI("ossm", "OssmBleService: init done");
 }
 
 void OssmBleService::start() {
     if (_running) return;
 
-    APPLOG("OssmBleService: starting NimBLE OSSM service...");
+    SLOGI("ossm", "OssmBleService: starting NimBLE OSSM service...");
 
     // CRITICAL: deinit any prior NimBLE stack before re-initializing.
     // Calling NimBLEDevice::init() twice without an intervening deinit(true)
@@ -285,13 +285,13 @@ void OssmBleService::start() {
     _discoStartMs = 0;
     _ramping = false;
 
-    APPLOG("OssmBleService: advertising as \"OSSM\"");
+    SLOGI("ossm", "OssmBleService: advertising as \"OSSM\"");
 }
 
 void OssmBleService::stop() {
     if (!_running) return;
 
-    APPLOG("OssmBleService: stopping NimBLE...");
+    SLOGI("ossm", "OssmBleService: stopping NimBLE...");
 
     if (_adv) { _adv->stop(); _adv = nullptr; }
 
@@ -310,7 +310,7 @@ void OssmBleService::stop() {
     _ramping      = false;
     _discoStartMs = 0;
 
-    APPLOG("OssmBleService: stopped");
+    SLOGI("ossm", "OssmBleService: stopped");
 }
 
 void OssmBleService::emergencyStop() {
@@ -333,7 +333,7 @@ void OssmBleService::update() {
         if (factor <= 0.01f) {
             _ramping = false;
             _patternEngine.stop();
-            APPLOG("OssmBleService: disconnect ramp complete — motion stopped");
+            SLOGI("ossm", "OssmBleService: disconnect ramp complete — motion stopped");
         } else {
             float speed = _rampStartSpeed * factor;
             _patternEngine.setSpeed(speed);
@@ -359,7 +359,7 @@ void OssmBleService::_onConnect(uint16_t connHandle) {
     _clientConnected = true;
     _ramping = false;
     _discoStartMs = 0;
-    APPLOGF("OssmBleService: client connected (handle=%u)", connHandle);
+    SLOGI("ossm", "OssmBleService: client connected (handle=%u)", connHandle);
 }
 
 void OssmBleService::_onDisconnect(uint16_t connHandle, int reason) {
@@ -373,13 +373,13 @@ void OssmBleService::_onDisconnect(uint16_t connHandle, int reason) {
         if (currentSpeed > 0.0f) {
             _discoStartMs = millis();
             _rampStartSpeed = currentSpeed;
-            APPLOGF("OssmBleService: disconnect while %.0f%% speed — 1s grace before ramp",
-                    currentSpeed);
+            SLOGI("ossm", "OssmBleService: disconnect while %.0f%% speed — 1s grace before ramp",
+                  currentSpeed);
         }
     }
 
-    APPLOGF("OssmBleService: client disconnected (handle=%u, reason=%d)",
-            connHandle, reason);
+    SLOGI("ossm", "OssmBleService: client disconnected (handle=%u, reason=%d)",
+          connHandle, reason);
 
     if (_adv && _running) {
         _adv->start();
@@ -400,7 +400,7 @@ void OssmBleService::_onCommandWrite(NimBLECharacteristic* chr) {
     memcpy(buf, raw.data(), len);
     buf[len] = '\0';
 
-    APPLOGF("OssmBleService: cmd rx: \"%s\"", buf);
+    SLOGD("ossm", "OssmBleService: cmd rx: \"%s\"", buf);
 
     if (strncmp(buf, "set:", 4) == 0) {
         _handleSet(buf + 4);

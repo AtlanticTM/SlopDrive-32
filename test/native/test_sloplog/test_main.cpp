@@ -148,3 +148,47 @@ TEST_CASE("null and overflow sink registration refused") {
     CHECK(log.addSink(&s2));
     CHECK_FALSE(log.addSink(&s3));  // MaxSinks = 2
 }
+
+TEST_CASE("per-sink floor filters and can be retuned live (the serial handoff)") {
+    FakePort port;
+    LogCore<16> log(port);
+    CaptureSink web, serial;
+    log.addSink(&web);                          // full stream
+    log.addSink(&serial, Level::Trace);         // full stream at boot...
+
+    log.logf(Level::Info, "t", "boot line");
+    log.drain();
+    CHECK(web.got.size() == 1);
+    CHECK(serial.got.size() == 1);
+
+    // ...then the UI handshakes: serial demotes to Warn+.
+    CHECK(log.setSinkFloor(&serial, Level::Warn));
+    log.logf(Level::Info, "t", "web only");
+    log.logf(Level::Warn, "t", "both");
+    log.drain();
+    CHECK(web.got.size() == 3);
+    REQUIRE(serial.got.size() == 2);
+    CHECK(std::string(serial.got[1].msg) == "both");
+
+    CaptureSink unregistered;
+    CHECK_FALSE(log.setSinkFloor(&unregistered, Level::Warn));  // unknown sink refused
+}
+
+TEST_CASE("immediate-drain boot mode flushes synchronously, then hands off") {
+    FakePort port;
+    LogCore<16> log(port);
+    CaptureSink sink;
+    log.addSink(&sink);
+
+    log.setImmediateDrain(true);
+    log.logf(Level::Info, "boot", "line 1");
+    CHECK(sink.got.size() == 1);       // no drain() call needed — synchronous
+    CHECK(log.pending() == 0);
+
+    log.setImmediateDrain(false);      // tasks are about to spawn
+    log.logf(Level::Info, "run", "line 2");
+    CHECK(sink.got.size() == 1);       // buffered now...
+    CHECK(log.pending() == 1);
+    log.drain();
+    CHECK(sink.got.size() == 2);       // ...until the task drain runs
+}

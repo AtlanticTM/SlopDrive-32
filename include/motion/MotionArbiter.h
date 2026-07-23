@@ -219,10 +219,6 @@ private:
     volatile uint32_t    _rejected_count = 0;
     mutable portMUX_TYPE _telemetry_mux = portMUX_INITIALIZER_UNLOCKED;
 
-    // Rate-limited (2s) log + counter bump for a gate-rejected intent, so a
-    // rejected stream leaves a trace instead of vanishing silently. :3
-    void _logRejected(const char* reason, MotionSource source);
-
     // ---- Per-source sequence counters -----------------------------------------
     uint16_t _seq_manual      = 0;
     uint16_t _seq_tcode       = 0;

@@ -1,6 +1,6 @@
 #include "MotionArbiter.h"
 #include "range_mapper.h"
-#include "AppLog.h"
+#include "sloplog/sloplog.h"
 #include "config_api.h"
 #include <math.h>              // for fabsf, fminf, sqrtf
 
@@ -48,7 +48,7 @@ MotionArbiter::MotionArbiter(SystemState& state, RangeMapper& mapper, MotorDrive
 void MotionArbiter::init() {
     _defer_queue = xQueueCreate(DEFER_QUEUE_DEPTH, sizeof(MotionIntent));
     configASSERT(_defer_queue != nullptr);
-    APPLOGF("MotionArbiter: initialized — D4, %u-slot defer queue active", DEFER_QUEUE_DEPTH);
+    SLOGI("arbiter", "MotionArbiter: initialized — D4, %u-slot defer queue active", DEFER_QUEUE_DEPTH);
 }
 
 // ============================================================================
@@ -58,12 +58,9 @@ void MotionArbiter::init() {
 void MotionArbiter::submitDeferred(const MotionIntent& intent) {
     // Non-blocking push — drops if full, correct for retarget semantics.
     if (xQueueSend(_defer_queue, &intent, 0) != pdTRUE) {
-        static uint32_t last_drop_log = 0;
-        if (millis() - last_drop_log > 2000) {
-            last_drop_log = millis();
-            APPLOGF("MotionArbiter DROP: defer queue full — intent dropped. "
-                    "Core 1 consumer may be stalled or overloaded.");
-        }
+        SLOGW_EVERY_MS(2000, "arbiter",
+                       "MotionArbiter DROP: defer queue full — intent dropped. "
+                       "Core 1 consumer may be stalled or overloaded.");
     }
 }
 
@@ -82,16 +79,12 @@ void MotionArbiter::processDeferred() {
         if (rpt.plan_us > max_plan_us) max_plan_us = rpt.plan_us;
         drained++;
     }
-    // Diagnostic: log queue metrics every 2s (unconditional — always visible)
-    static uint32_t last_stats_log = 0;
+    // Diagnostic: log queue metrics every 2s. peak_drain is the highest drain
+    // seen since boot — the per-call-site throttle owns the 2s cadence now.
     static uint8_t peak_drain = 0;  // highest drain seen in any tick
     if (drained > peak_drain) peak_drain = drained;
-    if (millis() - last_stats_log > 2000) {
-        last_stats_log = millis();
-        APPLOGF("MotionArbiter STATS: drained=%u peak=%u total=%lu homed=%u",
-                drained, peak_drain, _intent_count, (unsigned)_state.homed);
-        peak_drain = 0;
-    }
+    SLOGD_EVERY_MS(2000, "arbiter", "MotionArbiter STATS: drained=%u peak=%u total=%lu homed=%u",
+                   drained, peak_drain, _intent_count, (unsigned)_state.homed);
 }
 
 // ============================================================================
@@ -194,13 +187,11 @@ bool MotionArbiter::submitStreamSample(float norm_pos, float norm_vel_per_s) {
     // Surface it instead of drifting silently. :3
     {
         float lag_mm = fabsf(target_mm - _motor.getPosition());
-        static uint32_t last_lag_log_ms = 0;
-        uint32_t now_lag = millis();
-        if (lag_mm > 8.0f && now_lag - last_lag_log_ms > 2000) {
-            last_lag_log_ms = now_lag;
-            APPLOGF("Stream LAG: carriage %.1fmm behind commanded curve — content "
-                    "demands more than input max speed (%.0f mm/s); endpoints will clip",
-                    lag_mm, _input_speed_limit_mm_s);
+        if (lag_mm > 8.0f) {
+            SLOGW_EVERY_MS(2000, "arbiter",
+                           "Stream LAG: carriage %.1fmm behind commanded curve — content "
+                           "demands more than input max speed (%.0f mm/s); endpoints will clip",
+                           lag_mm, _input_speed_limit_mm_s);
         }
     }
 
@@ -223,7 +214,9 @@ PlanReport MotionArbiter::submit(const MotionIntent& intent) {
     if (!_state.homed && intent.source != MotionSource::MANUAL) {
         // Not homed and not a manual override — drop, but leave a trace.
         // Manual moves bypass homed check (push-to-home scenario).
-        _logRejected("not-homed", intent.source);
+        _rejected_count = _rejected_count + 1;
+        SLOGW_EVERY_MS(2000, "arbiter", "MotionArbiter REJECT: not-homed (src=%u)",
+                       (unsigned)intent.source);
         PlanReport rpt = {};
         return rpt;
     }
@@ -231,14 +224,19 @@ PlanReport MotionArbiter::submit(const MotionIntent& intent) {
     // E-stop check — absolute gate, no source bypass. If the red button
     // was slapped, nothing moves. Period.
     if (_state.estop_requested.load(std::memory_order_relaxed)) {
-        _logRejected("e-stop", intent.source);
+        _rejected_count = _rejected_count + 1;
+        SLOGW_EVERY_MS(2000, "arbiter", "MotionArbiter REJECT: e-stop (src=%u)",
+                       (unsigned)intent.source);
         PlanReport rpt = {};
         return rpt;
     }
 
     // Evaluate per-source gates (paused, manual_override, window, etc.)
     if (!_gatesPass(intent)) {
-        _logRejected("gates (paused/override/intiface-recency)", intent.source);
+        _rejected_count = _rejected_count + 1;
+        SLOGW_EVERY_MS(2000, "arbiter",
+                       "MotionArbiter REJECT: gates (paused/override/intiface-recency) (src=%u)",
+                       (unsigned)intent.source);
         PlanReport rpt = {};
         rpt.deadline_feasible = false;
         return rpt;
@@ -401,13 +399,10 @@ PlanReport MotionArbiter::_planAndDispatch(const MotionIntent& intent, bool /*lo
     // This tells us whether the TCode stream is producing targets outside the
     // configured window (RangeMapper issue) or the window changed mid-stream.
     if (intent.source != MotionSource::MANUAL && target_mm != intent.target_mm) {
-        static uint32_t last_window_clamp_log = 0;
-        if (millis() - last_window_clamp_log > 2000) {
-            last_window_clamp_log = millis();
-            float lo = _mapper.getMinMm(), hi = _mapper.getMaxMm();
-            APPLOGF("MotionArbiter WINDOW CLAMP: intent=%.1f clamped to %.1f window=[%.1f,%.1f] src=%u",
-                    intent.target_mm, target_mm, lo, hi, (unsigned)intent.source);
-        }
+        float lo = _mapper.getMinMm(), hi = _mapper.getMaxMm();
+        SLOGW_EVERY_MS(2000, "arbiter",
+                       "MotionArbiter WINDOW CLAMP: intent=%.1f clamped to %.1f window=[%.1f,%.1f] src=%u",
+                       intent.target_mm, target_mm, lo, hi, (unsigned)intent.source);
     }
 
     // ---- Read actual machine state --------------------------------------------
@@ -526,14 +521,11 @@ PlanReport MotionArbiter::_planAndDispatch(const MotionIntent& intent, bool /*lo
         if (ramp_mult < 0.01f) ramp_mult = 0.01f;
         derived_accel_mm_s2 *= ramp_mult;
         // Diagnostic: log when ramp interpolation is active
-        static uint32_t last_ramp_log_ms = 0;
-        if (millis() - last_ramp_log_ms > 1000) {
-            last_ramp_log_ms = millis();
-            APPLOGF("MotionArbiter RAMP ACTIVE: mult=%.2f entry=%.2f exit=%.2f accel %.0f→%.0f mm/s²",
-                    ramp_mult, intent.rampIn.entryMultiplier, intent.rampOut.exitMultiplier,
-                    report.derived_accel_mm_s2 / ((ramp_mult > 0.01f) ? ramp_mult : 1.0f),
-                    derived_accel_mm_s2);
-        }
+        SLOGD_EVERY_MS(1000, "arbiter",
+                       "MotionArbiter RAMP ACTIVE: mult=%.2f entry=%.2f exit=%.2f accel %.0f→%.0f mm/s²",
+                       ramp_mult, intent.rampIn.entryMultiplier, intent.rampOut.exitMultiplier,
+                       report.derived_accel_mm_s2 / ((ramp_mult > 0.01f) ? ramp_mult : 1.0f),
+                       derived_accel_mm_s2);
     }
 
     // ---- Record derived values before clamp -----------------------------------
@@ -573,13 +565,10 @@ PlanReport MotionArbiter::_planAndDispatch(const MotionIntent& intent, bool /*lo
     if (clamped_target != target_steps) {
         // Diagnostic — this should never fire. If it does, the window clamp
         // or mm→step conversion has a bug. Log it so we can find it.
-        static uint32_t last_clamp_log_ms = 0;
-        if (millis() - last_clamp_log_ms > 2000) {
-            last_clamp_log_ms = millis();
-            APPLOGF("MotionArbiter HARD CLAMP: target_steps=%d clamped to [%d, %d] src=%u tgt_mm=%.1f",
-                    target_steps, hard_min_steps, hard_max_steps,
-                    (unsigned)intent.source, target_mm);
-        }
+        SLOGW_EVERY_MS(2000, "arbiter",
+                       "MotionArbiter HARD CLAMP: target_steps=%d clamped to [%d, %d] src=%u tgt_mm=%.1f",
+                       target_steps, hard_min_steps, hard_max_steps,
+                       (unsigned)intent.source, target_mm);
         target_steps = clamped_target;
         // Re-derive distance for the report — the effective distance is now
         // shorter than the intent requested.
@@ -671,21 +660,6 @@ void MotionArbiter::resume() {
 }
 
 // ============================================================================
-// Rejected-intent trace — rate-limited so a gated 333Hz stream can't log-flood
-// ============================================================================
-
-void MotionArbiter::_logRejected(const char* reason, MotionSource source) {
-    _rejected_count = _rejected_count + 1;
-    static uint32_t last_log_ms = 0;
-    uint32_t now = millis();
-    if (now - last_log_ms > 2000) {
-        last_log_ms = now;
-        APPLOGF("MotionArbiter REJECT: %s (src=%u) — %lu intents rejected total",
-                reason, (unsigned)source, (unsigned long)_rejected_count);
-    }
-}
-
-// ============================================================================
 // Limit set setters
 // ============================================================================
 
@@ -732,10 +706,10 @@ void MotionArbiter::setBlendMode(uint8_t mode) {
         // reported, just not actively enforced beyond FAS's native behavior.
         static bool warned = false;
         if (!warned) {
-            APPLOGF("MotionArbiter: blend mode %u aliased to 'allow' (2) — "
-                    "FAS retarget handles reversals natively. 'let-it-land' and "
-                    "'hybrid' settings are deprecated and will be removed in a "
-                    "future release.", mode);
+            SLOGW("arbiter", "MotionArbiter: blend mode %u aliased to 'allow' (2) — "
+                  "FAS retarget handles reversals natively. 'let-it-land' and "
+                  "'hybrid' settings are deprecated and will be removed in a "
+                  "future release.", mode);
             warned = true;
         }
     }

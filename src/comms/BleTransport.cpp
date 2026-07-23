@@ -5,7 +5,7 @@
 // from build_flags (saves ~120K flash when not needed).
 
 #include "BleTransport.h"
-#include "AppLog.h"
+#include "sloplog/sloplog.h"
 #include "config_api.h"
 
 #if defined(BLE_ENABLED)
@@ -95,8 +95,8 @@ void BleTransport::begin() {
     NimBLEDevice::startAdvertising();
 
     _running = true;
-    applogf("[BLE] Advertising '%s' (Nordic UART service)", BLE_DEVICE_NAME);
-    applog("[BLE] Connect a BLE host and write TCode to the RX characteristic.");
+    SLOGI("ble", "Advertising '%s' (Nordic UART service)", BLE_DEVICE_NAME);
+    SLOGI("ble", "Connect a BLE host and write TCode to the RX characteristic.");
 }
 
 void BleTransport::stop() {
@@ -107,7 +107,7 @@ void BleTransport::stop() {
     _tx_char = nullptr;
     _running   = false;
     _connected = false;
-    applog("[BLE] Stopped");
+    SLOGI("ble", "Stopped");
 }
 
 // ---- Connection state (called by callback shims) ----------------------------

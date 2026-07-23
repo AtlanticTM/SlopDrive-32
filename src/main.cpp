@@ -22,7 +22,8 @@
 
 #include "config_api.h"
 
-#include "AppLog.h"
+#include "AppLog.h"          // bridge only: applogBegin/applogDrain (SlopLog sinks)
+#include "sloplog/sloplog.h"
 #include "SystemState.h"
 #include "ConfigStore.h"
 #include "SlopGlowBoard.h"
@@ -243,14 +244,10 @@ static void buttplugLinearCmd(float position, uint32_t duration_ms,
     // (rate-limited) — a silently-dropped TCode segment is a motion glitch
     // with no trace otherwise. :3
     if (g_interp_queue && xQueueSend(g_interp_queue, &seg, 0) != pdTRUE) {
-        static uint32_t interp_drops = 0, last_drop_log_ms = 0;
+        static uint32_t interp_drops = 0;
         interp_drops++;
-        uint32_t now_drop = millis();
-        if (now_drop - last_drop_log_ms > 2000) {
-            last_drop_log_ms = now_drop;
-            APPLOGF("Interp queue FULL — %lu TCode segment(s) dropped; sampler stalled?",
-                    (unsigned long)interp_drops);
-        }
+        SLOGW_EVERY_MS(2000, "sys", "Interp queue FULL — %lu TCode segment(s) dropped; sampler stalled?",
+                       (unsigned long)interp_drops);
     }
 
 }
@@ -330,7 +327,7 @@ static void motorTask(void* /*param*/) {
             homing_started = false;
             g_state.homing_in_progress = false;
             g_state.homed = false;
-            APPLOG("E-Stop handled — shaft is soft, waiting for orders~ :3");
+            SLOGW("sys", "E-Stop handled — shaft is soft, waiting for orders~ :3");
         }
         // Homing
         else if (g_state.homing_in_progress) {
@@ -344,9 +341,9 @@ static void motorTask(void* /*param*/) {
                 homing_started = false;
                 if (g_state.homed) {
                     g_state.resume_start_ms = millis();
-                    APPLOG("System is now homed and ready to pound :3");
+                    SLOGI("sys", "System is now homed and ready to pound :3");
                 } else {
-                    APPLOG("Homing failed — endstop not found. Check wiring.");
+                    SLOGW("sys", "Homing failed — endstop not found. Check wiring.");
                 }
             }
         } else {
@@ -354,7 +351,7 @@ static void motorTask(void* /*param*/) {
             if (!g_state.homed) {
                 if (motor.checkPushToHome()) {
                     g_state.homed = true;
-                    APPLOG("System homed via push-to-home and ready :3");
+                    SLOGI("sys", "System homed via push-to-home and ready :3");
                 }
             }
         }
@@ -491,7 +488,7 @@ static void streamSamplerTask(void* /*param*/) {
 #define STALL_LOG_MS 120u
 #define TIME_STEP(call, name) do {                                            \
         uint32_t _s0 = millis(); call; uint32_t _dt = millis() - _s0;         \
-        if (_dt > STALL_LOG_MS) APPLOGF("[STALL] " name " blocked %lums", (unsigned long)_dt); \
+        if (_dt > STALL_LOG_MS) SLOGW("sys", name " blocked %lums", (unsigned long)_dt); \
     } while (0)
 static void commsTask(void* /*param*/) {
     uint32_t last_report_ms   = 0;
@@ -516,7 +513,7 @@ static void commsTask(void* /*param*/) {
             last_report_ms   = now;
             g_state.measured_hz = (uint16_t)per_sec;
             if (wsTransport.isConnected() || serialTransport.isActive() || dongleTransport.isActive())
-                APPLOGF("[RATE] rx=%u frames/s", per_sec);
+                SLOGD("sys", "rx=%u frames/s", per_sec);
             transportMgr.pollWifiLink();
             transportMgr.superviseWifi();   // re-scan + re-pin if link dropped
         }
@@ -557,6 +554,12 @@ static void httpTask(void* param) {
         TIME_STEP(ossmBleService.update(),"http:ossmBle");
         TIME_STEP(applogDrain(),          "http:logDrain");   // SlopLog ring -> web/serial sinks
         slopglowUpdate(g_state);
+        // Heap health beacon: free / low-water / largest-block. maxblock is
+        // the one that kills big allocations (LittleFS streams, WS buffers)
+        // long before free hits zero — fragmentation shows up there first.
+        SLOGI_EVERY_MS(10000, "sys", "heap free=%u min=%u maxblock=%u",
+                       unsigned(ESP.getFreeHeap()), unsigned(ESP.getMinFreeHeap()),
+                       unsigned(ESP.getMaxAllocHeap()));
         vTaskDelay(pdMS_TO_TICKS(10));
     }
 }
@@ -595,10 +598,10 @@ static void servoBusTask(void* /*param*/) {
 void setup() {
     Serial.begin(SERIAL_CONTROL_BAUD);
     applogBegin();
-    APPLOG("=== SlopDrive-32 v2.0 — D4 event-driven ===");
+    SLOGI("boot", "=== SlopDrive-32 v2.0 — D4 event-driven ===");
 #if SERIAL_CONTROL_MODE
-    applog("Serial control mode ON: USB Serial is dedicated to Intiface TCode.");
-    applog("Add a 'Serial' device in Intiface pointing at this COM port.");
+    SLOGI("boot", "Serial control mode ON: USB Serial is dedicated to Intiface TCode.");
+    SLOGI("boot", "Add a 'Serial' device in Intiface pointing at this COM port.");
 #endif
 
 #if defined(DRIVER_AIM_SERVO)
@@ -616,17 +619,17 @@ void setup() {
 #if defined(FEATURE_RS485_MODBUS)
     if (g_motion_backend == 1) {
         motor.bind(mbMotor);
-        APPLOG("Motion backend: MODBUS direct-drive (skeleton mode — no motion until Phase 3)");
+        SLOGI("boot", "Motion backend: MODBUS direct-drive (skeleton mode — no motion until Phase 3)");
     } else {
         motor.bind(fasMotor);
-        APPLOG("Motion backend: FAS step/dir");
+        SLOGI("boot", "Motion backend: FAS step/dir");
     }
 #else
     // Modbus feature not compiled into this build at all — always FAS,
     // regardless of what a stale NVS value might say (machineBackendLoad()
     // already clamps to 0 in this case too — belt and suspenders). :3
     motor.bind(fasMotor);
-    APPLOG("Motion backend: FAS step/dir (FEATURE_RS485_MODBUS not compiled)");
+    SLOGI("boot", "Motion backend: FAS step/dir (FEATURE_RS485_MODBUS not compiled)");
 #endif
     webui.setMachineBackend(g_motion_backend);
 
@@ -641,9 +644,9 @@ void setup() {
 #endif
 
     if (LittleFS.begin(true))
-        APPLOG("LittleFS mounted");
+        SLOGI("boot", "LittleFS mounted");
     else
-        APPLOG("LittleFS mount FAILED - upload filesystem image (pio run -t uploadfs)");
+        SLOGE("boot", "LittleFS mount FAILED - upload filesystem image (pio run -t uploadfs)");
 
     ConfigStore::load(g_state, mapper, motor);
 
@@ -670,9 +673,9 @@ void setup() {
     if (wifi_ok) {
         otaService.begin(MDNSServiceName, SECRET_OTA_PASSWORD);
         otaService.registerHttpRoutes(webui.server());
-        APPLOGF("[OTA] ready — hostname '%s', fw %s", MDNSServiceName, FIRMWARE_VERSION);
+        SLOGI("boot", "OTA ready — hostname '%s', fw %s", MDNSServiceName, FIRMWARE_VERSION);
     } else {
-        APPLOG("[OTA] skipped — WiFi down at boot (serial rescue path only)");
+        SLOGW("boot", "OTA skipped — WiFi down at boot (serial rescue path only)");
     }
 
 #if defined(FEATURE_RS485_MODBUS)
@@ -693,10 +696,10 @@ void setup() {
     // the FINAL baud, not the ephemeral 19200 the probe started at. :3
     if (g_motion_backend == 1 && servoModbus.isReady() && servoModbus.baud() == 19200) {
         if (servoModbus.reprogramBaud(115200)) {
-            APPLOG("Modbus mode: drive reprogrammed 19200 -> 115200 (OSSM-RS magic sequence) :3");
+            SLOGI("boot", "Modbus mode: drive reprogrammed 19200 -> 115200 (OSSM-RS magic sequence) :3");
         } else {
-            APPLOG("Modbus mode: 19200 -> 115200 reprogram FAILED — staying at 19200 "
-                   "(motion still works, just tighter bus budget per plan.md).");
+            SLOGW("boot", "Modbus mode: 19200 -> 115200 reprogram FAILED — staying at 19200 "
+                  "(motion still works, just tighter bus budget per plan.md).");
         }
     }
 
@@ -721,12 +724,12 @@ void setup() {
         if (servoModbus.readRegisterBlocking(0x0B, drive_spr) &&
             drive_spr >= 50 && drive_spr <= 32767) {
             if (drive_spr != aimMotorStepsPerRev()) {
-                APPLOGF("Boot geometry: drive reg 0x0B says %u steps/rev, NVS mirror had %u — adopting the drive's value",
-                        (unsigned)drive_spr, (unsigned)aimMotorStepsPerRev());
+                SLOGI("boot", "Boot geometry: drive reg 0x0B says %u steps/rev, NVS mirror had %u — adopting the drive's value",
+                      (unsigned)drive_spr, (unsigned)aimMotorStepsPerRev());
                 aimSetMotorStepsPerRev(drive_spr, /*persist=*/true);
             }
         } else {
-            APPLOG("Boot geometry: could not read drive reg 0x0B — keeping NVS/default steps/rev");
+            SLOGW("boot", "Boot geometry: could not read drive reg 0x0B — keeping NVS/default steps/rev");
         }
     }
 #endif
@@ -763,8 +766,8 @@ void setup() {
     // serial so the machine stays controllable. The operator can then send
     // `WIFI <ssid> <password>` over serial to store creds and reboot. :3
     if (!wifi_ok && g_state.getTransport() == TransportMode::WS) {
-        APPLOG("WiFi down at boot — falling back to USB serial transport. "
-               "Send 'WIFI <ssid> <password>' over serial, then reboot.");
+        SLOGW("boot", "WiFi down at boot — falling back to USB serial transport. "
+              "Send 'WIFI <ssid> <password>' over serial, then reboot.");
         g_state.setTransport(TransportMode::SER);
     }
 
@@ -781,6 +784,10 @@ void setup() {
     // e-stop servicer) must halt loudly, not boot a device that silently can't
     // home, e-stop, or move. Same configASSERT discipline as the queue
     // creations above. :3
+    // End of the single-task boot phase: from here logs are ring-buffered and
+    // drained by httpTask (immediate synchronous drain is only safe pre-tasks).
+    sloplog::logger().setImmediateDrain(false);
+
     BaseType_t task_ok;
     // motorTask: Core 1, priority 3 — homing + D4 deferred-intent consumer
     task_ok = xTaskCreatePinnedToCore(motorTask, "Motor", 4096, nullptr, 3, nullptr, 1);
@@ -814,14 +821,16 @@ void setup() {
     // Spawns its own Core-0 task ("SlopSyncHub") + the WS server on :82.
     slopSyncHub.setPatternEngine(&patternEngine);
     slopSyncHub.init();
+    SLOGI("sys", "post-slopsync heap free=%u maxblock=%u",
+          unsigned(ESP.getFreeHeap()), unsigned(ESP.getMaxAllocHeap()));
 
 #if HOMING_DISABLED
     g_state.homed = true;
     motor.forceHomeState(true);
-    APPLOG("!!! HOMING DISABLED — bench-test build only. Remove -DHOMING_DISABLED for real hardware.");
+    SLOGW("boot", "!!! HOMING DISABLED — bench-test build only. Remove -DHOMING_DISABLED for real hardware.");
 #endif
 
-    APPLOG("System ready — push that thick shaft all the way in to home, or use the web UI :3");
+    SLOGI("boot", "System ready — push that thick shaft all the way in to home, or use the web UI :3");
 }
 
 

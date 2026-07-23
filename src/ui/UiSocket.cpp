@@ -1,5 +1,5 @@
 #include "UiSocket.h"
-#include "AppLog.h"
+#include "sloplog/sloplog.h"
 #include <ArduinoJson.h>
 #include <esp_timer.h>
 #include <WiFi.h>
@@ -55,7 +55,7 @@ void UiSocket::init() {
     // client connect and restored the "saved" mode on disconnect — an
     // entirely pointless (and mildly risky, since PS-mode toggling can add
     // WiFi radio jitter/latency spikes) dance now removed. :3
-    APPLOGF("[UiSocket] init on port %u", _port);
+    SLOGI("ui-ws", "init on port %u", _port);
 
     WsLock lock(_wsMutex);
     _ws.begin();
@@ -79,7 +79,7 @@ void UiSocket::init() {
     xTaskCreatePinnedToCore(
         uiStreamTask, "UiStream", 10240, this, 3, &_senderHandle, 0);
 
-    APPLOG("[UiSocket] ready — ws://<ip>:81/ + sender task on Core 0 prio 3");
+    SLOGI("ui-ws", "ready — ws://<ip>:81/ + sender task on Core 0 prio 3");
 }
 
 // ============================================================================
@@ -96,7 +96,7 @@ void UiSocket::update() {
 // ============================================================================
 
 void UiSocket::emergencyStop() {
-    APPLOG("[UiSocket] emergencyStop — disconnecting all UI WS clients");
+    SLOGI("ui-ws", "emergencyStop — disconnecting all UI WS clients");
     WsLock lock(_wsMutex);
     _ws.disconnect();
 }
@@ -119,7 +119,7 @@ bool UiSocket::_sendGuarded(uint8_t num, const uint8_t* frame, size_t len, const
         if (!_sendStalled[num]) {
             _sendStalled[num] = true;
             _sendStalledSince[num] = millis();
-            APPLOGF("[UiSocket] client#%u %s send stalled — muting stream (kept connected)", num, what);
+            SLOGW("ui-ws", "client#%u %s send stalled — muting stream (kept connected)", num, what);
         }
     }
     return ok;
@@ -147,13 +147,13 @@ void UiSocket::sendHello(uint8_t num) {
 void UiSocket::onClientConnect() {
     int count;
     { WsLock lock(_wsMutex); count = _ws.connectedClients(); }
-    APPLOGF("[UiSocket] client connected (total=%d)", count);
+    SLOGI("ui-ws", "client connected (total=%d)", count);
 }
 
 void UiSocket::onClientDisconnect() {
     int count;
     { WsLock lock(_wsMutex); count = _ws.connectedClients(); }
-    APPLOGF("[UiSocket] client disconnected (total=%d)", count);
+    SLOGI("ui-ws", "client disconnected (total=%d)", count);
 }
 
 // ============================================================================
@@ -188,7 +188,7 @@ bool UiSocket::sendEcho(uint8_t num, uint16_t id, uint8_t ok, const String& json
         // ack lost in flight must be distinguishable from an ack delivered,
         // or the client's pending-state machine waits forever in silence. The
         // idempotency ring will re-echo if the client retries the same id. :3
-        APPLOGF("[UiSocket] ECHO id=%u to client#%u FAILED to send — command applied, ack lost", id, num);
+        SLOGW("ui-ws", "ECHO id=%u to client#%u FAILED to send — command applied, ack lost", id, num);
     }
     return sent;
 }
@@ -213,7 +213,7 @@ bool UiSocket::checkOrInsertIdem(uint8_t num, uint16_t id, uint8_t ok, const Str
             sendEcho(num, _idemRing[num][idx].id,
                      _idemRing[num][idx].ok,
                      _idemRing[num][idx].payload);
-            APPLOGF("[UiSocket] idem HIT client#%u id=%u — re-echoed, NOT re-applied", num, id);
+            SLOGD("ui-ws", "idem HIT client#%u id=%u — re-echoed, NOT re-applied", num, id);
             return true;
         }
     }
@@ -243,7 +243,7 @@ void UiSocket::_handleEvent(uint8_t num, WStype_t type, uint8_t* payload, size_t
     switch (type) {
     case WStype_CONNECTED: {
         IPAddress ip = _ws.remoteIP(num);
-        APPLOGF("[UiSocket] CONNECTED client#%u from %s", num, ip.toString().c_str());
+        SLOGI("ui-ws", "CONNECTED client#%u from %s", num, ip.toString().c_str());
         onClientConnect();
         if (_teleSeq && num < MAX_CLIENTS) {
             _clientHead[num] = *_teleSeq;
@@ -264,7 +264,7 @@ void UiSocket::_handleEvent(uint8_t num, WStype_t type, uint8_t* payload, size_t
         break;
     }
     case WStype_DISCONNECTED:
-        APPLOGF("[UiSocket] DISCONNECTED client#%u", num);
+        SLOGI("ui-ws", "DISCONNECTED client#%u", num);
         if (num < MAX_CLIENTS) { _lastInboundMs[num] = 0; _sendStalled[num] = false; _sendStalledSince[num] = 0; }
         onClientDisconnect();
         break;
@@ -312,7 +312,7 @@ void UiSocket::_handleEvent(uint8_t num, WStype_t type, uint8_t* payload, size_t
                 String fail_json = "{\"ok\":false,\"error\":\"Invalid JSON\"}";
                 checkOrInsertIdem(num, cmd_id, 0, fail_json);
                 sendEcho(num, cmd_id, 0, fail_json);
-                APPLOGF("[UiSocket] CMD client#%u id=%u op=0x%02X — JSON parse FAILED", num, cmd_id, op);
+                SLOGW("ui-ws", "CMD client#%u id=%u op=0x%02X — JSON parse FAILED", num, cmd_id, op);
                 break;
             }
 
@@ -333,7 +333,7 @@ void UiSocket::_handleEvent(uint8_t num, WStype_t type, uint8_t* payload, size_t
                 sendEcho(num, cmd_id, echo_ok, echo_json);
             }
 
-            APPLOGF("[UiSocket] CMD client#%u id=%u op=0x%02X ok=%d", num, cmd_id, op, ok);
+            SLOGD("ui-ws", "CMD client#%u id=%u op=0x%02X ok=%d", num, cmd_id, op, ok);
 
         } else if (ft == WS_FRAME_CMD) {
             // CMD frame too short (< 4 bytes) or arrived before the WebUI
@@ -344,25 +344,25 @@ void UiSocket::_handleEvent(uint8_t num, WStype_t type, uint8_t* payload, size_t
                 uint16_t cmd_id = (uint16_t)payload[1] | ((uint16_t)payload[2] << 8);
                 sendEcho(num, cmd_id, 0, "{\"ok\":false,\"error\":\"Malformed CMD frame\"}");
             }
-            APPLOGF("[UiSocket] CMD client#%u DROPPED: len=%u webui_wired=%d — malformed or too early",
-                    num, (unsigned)length, _webui != nullptr);
+            SLOGW("ui-ws", "CMD client#%u DROPPED: len=%u webui_wired=%d — malformed or too early",
+                  num, (unsigned)length, _webui != nullptr);
         } else {
-            APPLOGF("[UiSocket] unknown inbound frame 0x%02X len=%u from client#%u — dropped",
-                    ft, (unsigned)length, num);
+            SLOGW("ui-ws", "unknown inbound frame 0x%02X len=%u from client#%u — dropped",
+                  ft, (unsigned)length, num);
         }
         break;
     }
     case WStype_ERROR:
         // The WS library reported a socket-level error for this client — the
         // one event type that must never vanish without a trace. :3
-        APPLOGF("[UiSocket] WS ERROR client#%u (payload len=%u)", num, (unsigned)length);
+        SLOGW("ui-ws", "WS ERROR client#%u (payload len=%u)", num, (unsigned)length);
         break;
     case WStype_PING:
     case WStype_PONG:
         break;   // library heartbeat — expected, uninteresting
     default:
-        APPLOGF("[UiSocket] unhandled WS event type=%d client#%u len=%u",
-                (int)type, num, (unsigned)length);
+        SLOGD("ui-ws", "unhandled WS event type=%d client#%u len=%u",
+              (int)type, num, (unsigned)length);
         break;
     }
 }
@@ -706,7 +706,7 @@ void UiSocket::_reapDeadClients() {
         if (!_ws.clientIsConnected(i)) continue;
         if (!_sendStalled[i]) continue;
         if ((now - _sendStalledSince[i]) < STALL_REAP_MS) continue;
-        APPLOGF("[UiSocket] client#%u dead (stalled %ums, no inbound) — reaping half-open socket", i, now - _sendStalledSince[i]);
+        SLOGW("ui-ws", "client#%u dead (stalled %ums, no inbound) — reaping half-open socket", i, now - _sendStalledSince[i]);
         _sendStalled[i] = false;
         _sendStalledSince[i] = 0;
         _lastInboundMs[i] = 0;
@@ -749,7 +749,7 @@ bool UiSocket::kickClient(uint8_t num) {
     if (num >= MAX_CLIENTS) return false;
     WsLock lock(_wsMutex);
     if (!_ws.clientIsConnected(num)) return false;
-    APPLOGF("[UiSocket] kickClient#%u — admin disconnect (slot reclaim)", num);
+    SLOGI("ui-ws", "kickClient#%u — admin disconnect (slot reclaim)", num);
     _lastInboundMs[num] = 0;
     _ws.disconnect(num);
     return true;
@@ -897,7 +897,7 @@ void UiSocket::senderTask(void* arg) {
             uint32_t _s0 = millis();
             self->update();                       // _ws.loop() under _wsMutex
             uint32_t _dt = millis() - _s0;
-            if (_dt > 120) APPLOGF("[STALL] sender:ws.loop blocked %lums", (unsigned long)_dt);
+            if (_dt > 120) SLOGW("ui-ws", "sender:ws.loop blocked %lums", (unsigned long)_dt);
         }
 
         bool anyConnected = false;

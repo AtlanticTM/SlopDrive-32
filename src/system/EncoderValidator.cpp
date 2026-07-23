@@ -14,7 +14,7 @@
 
 #include "ServoModbus.h"
 #include "MotorDriver.h"
-#include "AppLog.h"
+#include "sloplog/sloplog.h"
 
 // Standstill gates: FAS moved < this between samples AND the drive reports
 // (near) zero rpm. Samples are ~270ms apart, so 0.05mm ≈ < 0.2 mm/s.
@@ -23,7 +23,6 @@ static constexpr float STEADY_RPM     = 3.0f;
 // Consecutive steady samples over threshold before the warning latches (~1s
 // of sustained disagreement — a single glitched frame can't trip it).
 static constexpr uint8_t WARN_SAMPLES = 3;
-static constexpr uint32_t WARN_LOG_INTERVAL_MS = 30000;
 
 EncoderValidator::EncoderValidator(ServoModbus& bus, MotorDriver& motor)
     : _bus(bus)
@@ -47,7 +46,7 @@ void EncoderValidator::update() {
     // covers steps/mm reprogramming (that path force-unhomes the machine). :3
     if (!_motor.isHomed() || !t.enc_valid) {
         if (_v.state != 0) {
-            APPLOG("EncoderValidator: reference dropped (unhomed) — will re-latch on next home");
+            SLOGI("enc", "EncoderValidator: reference dropped (unhomed) — will re-latch on next home");
             _reset();
         }
         return;
@@ -85,8 +84,8 @@ void EncoderValidator::update() {
         _enc0 = t.enc_counts;
         _fas0 = fas_mm;
         _v.state = 1;
-        APPLOGF("EncoderValidator: reference latched at standstill (enc=%ld, fas=%.2fmm) — measuring direction",
-                (long)_enc0, _fas0);
+        SLOGI("enc", "EncoderValidator: reference latched at standstill (enc=%ld, fas=%.2fmm) — measuring direction",
+              (long)_enc0, _fas0);
         return;
     }
 
@@ -102,17 +101,17 @@ void EncoderValidator::update() {
             _v.cpmm_meas = fabsf((float)d_enc / d_fas);
             _v.state     = 2;
             float ratio = _v.cpmm_meas / AIM_ENC_COUNTS_PER_MM;
-            APPLOGF("EncoderValidator: sign=%+d, measured %.1f counts/mm (theory %.1f, ratio %.3f) — tracking",
-                    (int)_v.sign, _v.cpmm_meas, (float)AIM_ENC_COUNTS_PER_MM, ratio);
+            SLOGI("enc", "EncoderValidator: sign=%+d, measured %.1f counts/mm (theory %.1f, ratio %.3f) — tracking",
+                  (int)_v.sign, _v.cpmm_meas, (float)AIM_ENC_COUNTS_PER_MM, ratio);
             // Scale disagreement means the geometry model (drum/reduction/
             // 32768-counts-per-rev) is wrong — louder finding than drift.
             // Both anchors are standstill-clean now, so a real mismatch reads
             // as a crisp ratio; the band stays generous vs the 2× errors this
             // hunts (an e-gear/geometry mismatch is never a subtle 10%).
             if (ratio < 0.75f || ratio > 1.25f) {
-                APPLOGF("EncoderValidator: WARNING — encoder scale %.1f counts/mm is %.0f%% of theory. "
-                        "Deviation numbers are suspect until geometry is reconciled.",
-                        _v.cpmm_meas, ratio * 100.0f);
+                SLOGW("enc", "EncoderValidator: WARNING — encoder scale %.1f counts/mm is %.0f%% of theory. "
+                      "Deviation numbers are suspect until geometry is reconciled.",
+                      _v.cpmm_meas, ratio * 100.0f);
             }
         }
         return;
@@ -133,13 +132,10 @@ void EncoderValidator::update() {
         if (_over_count < 255) _over_count++;
         if (_over_count >= WARN_SAMPLES) {
             _v.warn = true;
-            uint32_t now = millis();
-            if (now - _last_warn_log_ms > WARN_LOG_INTERVAL_MS) {
-                _last_warn_log_ms = now;
-                APPLOGF("EncoderValidator: LOST-STEPS WARNING — encoder disagrees with FAS by %+.2fmm "
-                        "at standstill (threshold %.1fmm). Position reference is suspect: re-home.",
-                        dev, (float)AIM_ENC_DEV_WARN_MM);
-            }
+            SLOGW_EVERY_MS(30000, "enc",
+                           "EncoderValidator: LOST-STEPS WARNING — encoder disagrees with FAS by %+.2fmm "
+                           "at standstill (threshold %.1fmm). Position reference is suspect: re-home.",
+                           dev, (float)AIM_ENC_DEV_WARN_MM);
         }
     } else {
         _over_count = 0;

@@ -10,7 +10,7 @@
 #include <string.h>   // memcpy for BSSID pin
 
 #include "config_api.h"
-#include "AppLog.h"
+#include "sloplog/sloplog.h"
 #include "ConfigStore.h"
 #include "TCodeParser.h"
 #include "SerialTransport.h"
@@ -49,7 +49,7 @@ bool TransportManager::_waitConnected(uint32_t timeoutMs) {
 // scanned BSSID buys nothing there. :3
 bool TransportManager::_connectWith(const char* ssid, const char* pass, uint32_t timeoutMs) {
     if (!ssid || ssid[0] == '\0') return false;
-    APPLOGF("Connecting to WiFi: %s", ssid);
+    SLOGI("transport", "Connecting to WiFi: %s", ssid);
     WiFi.begin(ssid, pass);
     return _waitConnected(timeoutMs);
 }
@@ -70,7 +70,7 @@ bool TransportManager::_connectBest(const char* ssid, const char* pass, uint32_t
     uint32_t scanStart = millis();
     int n = WiFi.scanNetworks(/*async=*/false, /*show_hidden=*/false);
     uint32_t scanMs = millis() - scanStart;
-    APPLOGF("WiFi scan for '%s': %d net(s) seen in %lums", ssid, n, (unsigned long)scanMs);
+    SLOGI("transport", "WiFi scan for '%s': %d net(s) seen in %lums", ssid, n, (unsigned long)scanMs);
 
     int     bestIdx  = -1;
     int32_t bestRssi = -128;
@@ -85,7 +85,7 @@ bool TransportManager::_connectBest(const char* ssid, const char* pass, uint32_t
                  b[0], b[1], b[2], b[3], b[4], b[5]);
         // Log every candidate strong enough to matter — this is the V1 evidence.
         if (rssi >= WIFI_MIN_RSSI_LOG_DBM)
-            APPLOGF("  AP %s ch%d %ddBm", bs, (int)WiFi.channel(i), (int)rssi);
+            SLOGD("transport", "  AP %s ch%d %ddBm", bs, (int)WiFi.channel(i), (int)rssi);
         if (rssi > bestRssi) { bestRssi = rssi; bestIdx = i; }
     }
 
@@ -97,8 +97,8 @@ bool TransportManager::_connectBest(const char* ssid, const char* pass, uint32_t
         char bs[18];
         snprintf(bs, sizeof(bs), "%02X:%02X:%02X:%02X:%02X:%02X",
                  bss[0], bss[1], bss[2], bss[3], bss[4], bss[5]);
-        APPLOGF("Pinning WiFi to strongest AP %s ch%d %ddBm (best of %d candidate%s)",
-                bs, (int)ch, (int)bestRssi, candidates, candidates == 1 ? "" : "s");
+        SLOGI("transport", "Pinning WiFi to strongest AP %s ch%d %ddBm (best of %d candidate%s)",
+              bs, (int)ch, (int)bestRssi, candidates, candidates == 1 ? "" : "s");
         WiFi.scanDelete();
         WiFi.begin(ssid, pass, ch, bss);
         if (_waitConnected(timeoutMs)) {
@@ -106,18 +106,18 @@ bool TransportManager::_connectBest(const char* ssid, const char* pass, uint32_t
             return true;
         }
         _pinFailStreak++;
-        APPLOGF("Pinned connect to %s failed (streak %u/%u)",
-                bs, _pinFailStreak, (unsigned)WIFI_PIN_MAX_ATTEMPTS);
+        SLOGW("transport", "Pinned connect to %s failed (streak %u/%u)",
+              bs, _pinFailStreak, (unsigned)WIFI_PIN_MAX_ATTEMPTS);
         return false;
     }
 
     // Fallback branch: no candidate heard, or the pin streak is exhausted.
     WiFi.scanDelete();
     if (bestIdx < 0)
-        APPLOGF("WiFi scan saw no '%s' AP — unpinned begin() fallback", ssid);
+        SLOGW("transport", "WiFi scan saw no '%s' AP — unpinned begin() fallback", ssid);
     else
-        APPLOGF("Pin streak hit %u — unpinned begin() fallback so a dead AP can't strand us",
-                (unsigned)WIFI_PIN_MAX_ATTEMPTS);
+        SLOGW("transport", "Pin streak hit %u — unpinned begin() fallback so a dead AP can't strand us",
+              (unsigned)WIFI_PIN_MAX_ATTEMPTS);
 #endif  // WIFI_SCAN_PIN_ENABLED
 
     WiFi.begin(ssid, pass);
@@ -150,7 +150,7 @@ bool TransportManager::setupWiFi() {
     if (!connected) {
         char ssid2[33], pass2[65];
         if (ConfigStore::loadWifiCreds(ssid2, sizeof(ssid2), pass2, sizeof(pass2))) {
-            APPLOG("Primary WiFi failed — trying NVS secondary creds");
+            SLOGW("transport", "Primary WiFi failed — trying NVS secondary creds");
             WiFi.disconnect(true, true);
             delay(100);
             connected = _connectWith(ssid2, pass2, WIFI_CONNECT_TIMEOUT_MS);
@@ -158,12 +158,12 @@ bool TransportManager::setupWiFi() {
     }
 
     if (connected) {
-        APPLOGF("WiFi connected! IP: %s", WiFi.localIP().toString().c_str());
+        SLOGI("transport", "WiFi connected! IP: %s", WiFi.localIP().toString().c_str());
 
         if (MDNS.begin(MDNSServiceName)) {
             MDNS.addService("http", "tcp", HTTP_PORT);
             MDNS.addService("ws", "tcp", BUTTPLUG_WEBSOCKET_PORT);
-            APPLOGF("mDNS: http://%s.local:%d", MDNSServiceName, HTTP_PORT);
+            SLOGI("transport", "mDNS: http://%s.local:%d", MDNSServiceName, HTTP_PORT);
         }
 
         _state.wifi_ready = true;
@@ -174,7 +174,7 @@ bool TransportManager::setupWiFi() {
         // Both credential sets failed. Stop the STA radio so it isn't burning
         // cycles endlessly retrying a network that isn't there — the caller
         // (main.cpp) drops us to serial TCode control so the rig still runs. :3
-        APPLOG("WiFi connection failed (primary + secondary) — falling back to serial TCode");
+        SLOGW("transport", "WiFi connection failed (primary + secondary) — falling back to serial TCode");
         WiFi.disconnect(true, true);
         WiFi.mode(WIFI_OFF);
         _state.wifi_ready = false;
@@ -191,8 +191,8 @@ void TransportManager::onWifiEvent(arduino_event_id_t event, arduino_event_info_
             _state.wifi_last_disconnect_reason = info.wifi_sta_disconnected.reason;
             _state.wifi_last_disconnect_ms = millis();
             _state.wifi_ready = false;
-            APPLOGF("WiFi disconnected (reason=%u, total drops=%lu)",
-                    _state.wifi_last_disconnect_reason,
+            SLOGW("transport", "WiFi disconnected (reason=%u, total drops=%lu)",
+                  _state.wifi_last_disconnect_reason,
                     (unsigned long)_state.wifi_reconnects);
             break;
         case ARDUINO_EVENT_WIFI_STA_GOT_IP:
@@ -226,9 +226,9 @@ void TransportManager::superviseWifi() {
     if (now < _nextReconnectMs) return;             // rate-limit while down
     _nextReconnectMs = now + WIFI_RECONNECT_INTERVAL_MS;
 
-    APPLOG("WiFi link down — re-scanning to re-pin strongest AP");
+    SLOGW("transport", "WiFi link down — re-scanning to re-pin strongest AP");
     if (_connectBest(WIFI_SSID, WIFI_PASSWORD, WIFI_CONNECT_TIMEOUT_MS)) {
-        APPLOGF("WiFi reconnected! IP: %s", WiFi.localIP().toString().c_str());
+        SLOGI("transport", "WiFi reconnected! IP: %s", WiFi.localIP().toString().c_str());
         _state.wifi_ready = true;
         pollWifiLink();
     }
@@ -283,7 +283,7 @@ void TransportManager::applyTransport(TransportMode mode) {
     }
 
     const char* name = transportName(mode);
-    APPLOGF("Transport mode: %s", name);
+    SLOGI("transport", "Transport mode: %s", name);
 }
 
 // static

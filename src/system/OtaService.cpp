@@ -5,7 +5,7 @@
 #include <Update.h>
 #include <string.h>
 
-#include "AppLog.h"
+#include "sloplog/sloplog.h"
 #include "SystemState.h"
 #include "MotionArbiter.h"
 #include "PatternEngine.h"
@@ -32,7 +32,7 @@ void OtaService::begin(const char* hostname, const char* password) {
     if (_password.length()) {
         ArduinoOTA.setPassword(_password.c_str());
     } else {
-        APPLOG("[OTA] WARNING: no OTA password set — ArduinoOTA is UNAUTHENTICATED");
+        SLOGW("ota", "WARNING: no OTA password set — ArduinoOTA is UNAUTHENTICATED");
     }
 
     ArduinoOTA.onStart([this]() {
@@ -48,13 +48,13 @@ void OtaService::begin(const char* hostname, const char* password) {
     });
 
     ArduinoOTA.onError([this](ota_error_t error) {
-        APPLOGF("[OTA] ArduinoOTA error [%u]", (unsigned)error);
+        SLOGE("ota", "ArduinoOTA error [%u]", (unsigned)error);
         // Failed OTA NEVER resumes motion by itself — telemetry back, motion held.
         finishOta(false, "ArduinoOTA");
     });
 
     ArduinoOTA.begin();
-    APPLOGF("[OTA] ArduinoOTA ready — hostname='%s' (espota)", hostname);
+    SLOGI("ota", "ArduinoOTA ready — hostname='%s' (espota)", hostname);
 }
 
 // ----------------------------------------------------------------------------
@@ -78,11 +78,11 @@ void OtaService::handle() {
 bool OtaService::prepareForOta(const char* source) {
     bool expected = false;
     if (!_active.compare_exchange_strong(expected, true)) {
-        APPLOGF("[OTA] refused (%s) — an update is already in flight", source);
+        SLOGW("ota", "refused (%s) — an update is already in flight", source);
         return false;
     }
 
-    APPLOGF("[OTA] start (%s) — stopping motion + suspending telemetry BEFORE flash write", source);
+    SLOGI("ota", "start (%s) — stopping motion + suspending telemetry BEFORE flash write", source);
 
     // (1) Refuse/stop all motion first. Stop the pattern engine, hard-stop the
     //     motor via the existing stop semantics, and latch the e-stop flag so
@@ -114,13 +114,13 @@ bool OtaService::prepareForOta(const char* source) {
 
 void OtaService::finishOta(bool success, const char* what) {
     if (success) {
-        APPLOGF("[OTA] %s complete — device will reboot; motion stays stopped until it comes back", what);
+        SLOGI("ota", "%s complete — device will reboot; motion stays stopped until it comes back", what);
         // Intentionally do NOT resume telemetry or clear the gate: the device
         // reboots (ArduinoOTA auto, or HTTP scheduled) and boots fresh.
         return;
     }
 
-    APPLOGF("[OTA] %s FAILED — old image kept, telemetry resumed, MOTION STAYS STOPPED", what);
+    SLOGE("ota", "%s FAILED — old image kept, telemetry resumed, MOTION STAYS STOPPED", what);
     _uiSocket.resumeSender();
     _state.ota_active.store(false);
     _active.store(false);
@@ -209,7 +209,7 @@ void OtaService::registerHttpRoutes(WebServer* server) {
         },
         [this]() { handleUpload(U_SPIFFS); });
 
-    APPLOG("[OTA] HTTP routes: POST /api/ota (app), POST /api/ota/fs (LittleFS) — X-OTA-Token auth");
+    SLOGI("ota", "HTTP routes: POST /api/ota (app), POST /api/ota/fs (LittleFS) — X-OTA-Token auth");
 }
 
 // ----------------------------------------------------------------------------
@@ -228,7 +228,7 @@ void OtaService::handleUpload(int command) {
         // ever written to flash; the final handler answers 401.
         _uploadAuthOk = checkAuthToken();
         if (!_uploadAuthOk) {
-            APPLOGF("[OTA] HTTP upload REJECTED (bad/missing X-OTA-Token) file=%s", up.filename.c_str());
+            SLOGW("ota", "HTTP upload REJECTED (bad/missing X-OTA-Token) file=%s", up.filename.c_str());
             return;
         }
         // Safety gate — also enforces single-in-flight / refuse-if-ArduinoOTA.
@@ -238,13 +238,13 @@ void OtaService::handleUpload(int command) {
         }
         if (!Update.begin(UPDATE_SIZE_UNKNOWN, command)) {
             _uploadError = String("begin failed: ") + Update.errorString();
-            APPLOGF("[OTA] Update.begin failed: %s", Update.errorString());
+            SLOGE("ota", "Update.begin failed: %s", Update.errorString());
             // Roll the gate back — nothing was written.
             finishOta(false, command == U_FLASH ? "HTTP app" : "HTTP fs");
             return;
         }
         _uploadBegun = true;
-        APPLOGF("[OTA] HTTP flash begun (%s)", command == U_FLASH ? "app" : "fs");
+        SLOGI("ota", "HTTP flash begun (%s)", command == U_FLASH ? "app" : "fs");
         break;
     }
 
@@ -252,7 +252,7 @@ void OtaService::handleUpload(int command) {
         if (_uploadAuthOk && _uploadBegun && _uploadError.length() == 0) {
             if (Update.write(up.buf, up.currentSize) != up.currentSize) {
                 _uploadError = String("write failed: ") + Update.errorString();
-                APPLOGF("[OTA] Update.write failed: %s", Update.errorString());
+                SLOGE("ota", "Update.write failed: %s", Update.errorString());
             }
         }
         break;
@@ -261,9 +261,9 @@ void OtaService::handleUpload(int command) {
         if (_uploadAuthOk && _uploadBegun && _uploadError.length() == 0) {
             if (!Update.end(true)) {   // true = set the size to what was written
                 _uploadError = String("end failed: ") + Update.errorString();
-                APPLOGF("[OTA] Update.end failed: %s", Update.errorString());
+                SLOGE("ota", "Update.end failed: %s", Update.errorString());
             } else {
-                APPLOGF("[OTA] HTTP flash finalized — %u bytes", (unsigned)up.totalSize);
+                SLOGI("ota", "HTTP flash finalized — %u bytes", (unsigned)up.totalSize);
             }
         } else if (_uploadBegun) {
             Update.abort();
@@ -273,7 +273,7 @@ void OtaService::handleUpload(int command) {
     case UPLOAD_FILE_ABORTED:
         if (_uploadBegun) Update.abort();
         _uploadError = "aborted";
-        APPLOG("[OTA] HTTP upload aborted mid-transfer — old image intact");
+        SLOGW("ota", "HTTP upload aborted mid-transfer — old image intact");
         break;
 
     default:

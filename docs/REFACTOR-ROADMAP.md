@@ -33,6 +33,7 @@ Compat is layered, not middleware:
 | Module | Status |
 |---|---|
 | **SlopSync** (protocol + lib + firmware hub) | LIVE — verified on hardware end-to-end, probe 8/8 |
+| **SlopMotion** (Ruckig motion core, §1) | PART 1 — lib/slopmotion + vendored Ruckig v0.19.4, 11 native suites green, trace bench + graphs; firmware wiring is part 2 |
 | **SlopLog** | LIVE — all legacy sites migrated, boot narration, serial handoff |
 | **SlopGlow** | LIVE — liveness gate field-proven on day one |
 | TMC2160 | 🪦 nuked (fw 2.1.38) |

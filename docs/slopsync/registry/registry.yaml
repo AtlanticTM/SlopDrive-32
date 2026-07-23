@@ -159,6 +159,24 @@ probe_result_keys:
   4: { name: rtt_ms,         note: "measured round-trip time, ms" }
 
 # ---------------------------------------------------------------------------
+# session-events channel (0x0007) event_kind values (§9.4, §11.4).
+# ---------------------------------------------------------------------------
+session_event_kinds:
+  1: { name: takeover,       note: "control source ownership transferred (§11.4)" }
+  2: { name: session_joined, note: "a session reached GRANTED" }
+  3: { name: session_left,   note: "a session ended (any reason)" }
+
+# ---------------------------------------------------------------------------
+# safety-intents channel (0x0005) op codes — `value` map key 1 (§11).
+# ---------------------------------------------------------------------------
+safety_intent_ops:
+  1: { name: estop_clear, note: "clear the ESTOP latch (§11.2 conditions apply; NACK CLEAR_REFUSED otherwise)" }
+  2: { name: stop,        note: "controlled decel stop (§11.1)" }
+  3: { name: hold,        note: "position hold (§11.1)" }
+  4: { name: pause,       note: "pattern pause (§11.1)" }
+  5: { name: resume,      note: "resume from HOLD/PAUSE (§11.1)" }
+
+# ---------------------------------------------------------------------------
 # NACK / GOODBYE reason codes (u16, ranged).
 # ---------------------------------------------------------------------------
 nack_codes:
@@ -176,6 +194,7 @@ nack_codes:
   0x0105: { name: SESSION_EVICTED,      note: "slow-consumer or admin kick (GOODBYE code)" }
   0x0106: { name: DUPLICATE_INSTANCE,   note: "instance_id already in live session; old session evicted instead — see §6.8" }
   0x0107: { name: NORMAL_CLOSURE,       note: "clean voluntary teardown (GOODBYE code, either direction) — not an error" }
+  0x0108: { name: DEADMAN_TIMEOUT,      note: "hub-initiated session teardown: silence exceeded the deadman window (§11.3, GOODBYE code)" }
   # 0x02xx — subscription / QoS
   0x0200: { name: UNKNOWN_CHANNEL,      note: "channel id not in catalog" }
   0x0201: { name: ACCESS_DENIED,        note: "channel access level above session role" }

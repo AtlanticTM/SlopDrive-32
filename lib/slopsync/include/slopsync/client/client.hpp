@@ -18,6 +18,7 @@
 #include "slopsync/core/clock.hpp"
 #include "slopsync/core/result.hpp"
 #include "slopsync/core/rng.hpp"
+#include "slopsync/session/safety.hpp"
 #include "slopsync/session/session.hpp"
 #include "slopsync/transport/transport.hpp"
 #include "slopsync/wire/catalog_chunks.hpp"
@@ -25,7 +26,10 @@
 #include "slopsync/wire/messages/hello.hpp"
 #include "slopsync/wire/messages/intent.hpp"
 #include "slopsync/wire/messages/nack.hpp"
+#include "slopsync/wire/messages/pair.hpp"
+#include "slopsync/wire/messages/probe_report.hpp"
 #include "slopsync/wire/messages/welcome.hpp"
+#include "slopsync/wire/raw/probe.hpp"
 
 namespace slopsync {
 
@@ -43,6 +47,12 @@ public:
     virtual void onEvent(uint16_t channel_id, std::span<const std::byte> encodedPayload) { (void)channel_id; (void)encodedPayload; }
     // §6.7: pending intent died with the session — reconcile at app level.
     virtual void onPendingDropped(uint16_t intent_id) = 0;
+
+    // ---- M5 addition (§12.2), additive: default no-op keeps every existing
+    // ClientDelegate valid. Fires when a PAIR_GRANT arrives for a PAIR_REQ
+    // this client sent (see Client::sendPairReq) — `token` is the 16-byte
+    // value to persist and present in a future HELLO's `token` field.
+    virtual void onPairGrant(std::span<const std::byte> token, AccessLevel roles) { (void)token; (void)roles; }
 };
 
 class Client {
@@ -68,8 +78,15 @@ public:
     // §9.3: send an INTENT (absolute values only — the API takes a value
     // map, never deltas). Returns the assigned intent_id (monotonic per
     // session) or nullopt when not LIVE / send failed. Pending until ECHO.
+    // `takeover` (M5 addition, §11.4): forwarded as the intent's `takeover`
+    // (32) flag for source-mapped channels — default false reproduces the M4
+    // signature's behavior exactly (always sent explicitly false rather than
+    // omitted; NackCode selection in the hub's intent pipeline only checks
+    // its truth value, so "explicitly false" and "absent" are equivalent on
+    // the wire for every purpose this library cares about).
     std::optional<uint16_t> sendIntent(uint16_t channel_id, const IntentValueMap& values,
-                                       std::optional<uint16_t> preconditionCfgGen = std::nullopt);
+                                       std::optional<uint16_t> preconditionCfgGen = std::nullopt,
+                                       bool takeover = false);
 
     // §11.2: initiate ESTOP — sends the 12-byte frame now and re-sends every
     // limits::estop_repeat_interval_ms until the safety channel's latched
@@ -93,6 +110,25 @@ public:
     // Count of CATALOG_REQ frames this client has sent (ever). Drives S-02's
     // "no CATALOG_REQ observed on a matching-etag reconnect" assertion.
     size_t catalogReqCount() const;
+
+    // ---- M5 additions -------------------------------------------------------
+    // §12.2: this session's WELCOME nonce (empty/all-zero before WELCOME) —
+    // pair with wire/hmac_sha256.hpp's pairingPinProof(pin, nonce()) to build
+    // the pin_proof sendPairReq() below expects.
+    std::span<const std::byte> nonce() const;
+    // Sends PAIR_REQ with this instance's identity + an already-computed
+    // 16-byte pin_proof. Returns false on a malformed-size proof or send
+    // failure. The resulting PAIR_GRANT/NACK surfaces via
+    // ClientDelegate::onPairGrant / onNack.
+    bool sendPairReq(std::span<const std::byte> pinProof);
+    // §6.4: sends PROBE and starts measuring the hub's burst; a PROBE_REPORT
+    // is sent automatically once probe_max_duration_ms has elapsed (from
+    // update()). Returns false when not LIVE or the send fails.
+    bool runProbe();
+    // §9.1/§11.1 shadow reads of the safety channel (0x0003), extended
+    // beyond M4's estop-only observation to the full bitfield word.
+    std::optional<uint8_t> safetyWord() const;
+    bool stopLatched() const;
 
 private:
     // CONTRACT NOTE (for the implementing pass): everything PUBLIC above,
@@ -175,6 +211,16 @@ private:
     uint32_t _estopAttempts = 0;
     uint32_t _lastEstopSendMs = 0;
 
+    // ---- M5: pairing nonce + probe state ------------------------------------
+    std::array<std::byte, 8> _nonce{};  // §12.2, from the most recent WELCOME
+
+    bool _probeActive = false;
+    uint32_t _probeStartMs = 0;
+    uint32_t _probeBytesReceived = 0;
+    uint32_t _probeFramesReceived = 0;
+    uint16_t _probeMaxIndexSeen = 0;
+    bool _probeAnyIndexSeen = false;
+
     // ---- internal helpers, defined in client_impl.hpp (included below) ----
     bool sendFrame(FrameType type, uint16_t channel, std::span<const std::byte> payload);
     void flushPending();
@@ -187,6 +233,9 @@ private:
     void handleEvent(uint16_t channel, std::span<const std::byte> payload);
     void handleCatalogChunk(std::span<const std::byte> payload, uint32_t nowMs);
     void handlePing(std::span<const std::byte> payload);
+    void handlePairGrant(std::span<const std::byte> payload);
+    void handleProbeFrame(std::span<const std::byte> payload);
+    void pumpProbe(uint32_t nowMs);
     void sendCatalogReq();
     void checkLiveTransition();
     void pumpEstopRepeat(uint32_t nowMs);

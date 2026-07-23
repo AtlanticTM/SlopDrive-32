@@ -22,7 +22,10 @@
 #include "slopsync/wire/messages/echo.hpp"
 #include "slopsync/wire/messages/goodbye.hpp"
 #include "slopsync/wire/messages/grant.hpp"
+#include "slopsync/wire/messages/pair.hpp"
+#include "slopsync/wire/messages/probe_report.hpp"
 #include "slopsync/wire/raw/ping_pong.hpp"
+#include "slopsync/wire/raw/probe.hpp"
 #include "slopsync/wire/sha256.hpp"
 
 namespace slopsync {
@@ -140,6 +143,7 @@ inline void Client::update(uint32_t nowUs) {
     }
 
     pumpEstopRepeat(nowMs);
+    pumpProbe(nowMs);
 }
 
 // ============================================================================
@@ -211,6 +215,12 @@ inline void Client::handleFrame(const FrameBuffer& fb, uint32_t nowMs) {
         case FrameType::PING:
             handlePing(payload);
             break;
+        case FrameType::PAIR_GRANT:
+            handlePairGrant(payload);
+            break;
+        case FrameType::PROBE:
+            handleProbeFrame(payload);
+            break;
         case FrameType::GOODBYE:
             setState(ClientSessionState::CLOSED);
             flushPending();
@@ -236,6 +246,7 @@ inline void Client::handleWelcome(std::span<const std::byte> payload, uint32_t n
     _cfgGen = w.cfg_gen;
     _roles = AccessLevel(w.roles);
     _hubEtag = w.catalog_etag;
+    _nonce = w.nonce;  // §12.2: needed for a subsequent PAIR_REQ's pin_proof
 
     for (auto& g : _grants) g = GrantEntry{};
     for (uint32_t i = 0; i < w.grants_count && i < kMaxGrants; ++i) {
@@ -464,7 +475,7 @@ inline void Client::handlePing(std::span<const std::byte> payload) {
 // ============================================================================
 
 inline std::optional<uint16_t> Client::sendIntent(uint16_t channel_id, const IntentValueMap& values,
-                                                   std::optional<uint16_t> preconditionCfgGen) {
+                                                   std::optional<uint16_t> preconditionCfgGen, bool takeover) {
     if (_state != ClientSessionState::LIVE) return std::nullopt;
     if (_pendingCount >= kMaxPendingIntents) return std::nullopt;
 
@@ -477,6 +488,8 @@ inline std::optional<uint16_t> Client::sendIntent(uint16_t channel_id, const Int
         m.has_precondition = true;
         m.precondition = *preconditionCfgGen;
     }
+    m.has_takeover = true;
+    m.takeover = takeover;
 
     std::array<std::byte, 300> buf{};
     size_t n = encodeIntent(m, std::span<std::byte>(buf));
@@ -560,5 +573,103 @@ inline std::optional<float> Client::grantedRateHz(uint16_t channel_id) const {
 }
 
 inline size_t Client::catalogReqCount() const { return _catalogReqSentCount; }
+
+// ============================================================================
+// M5: pairing (§12.2)
+// ============================================================================
+
+inline std::span<const std::byte> Client::nonce() const { return std::span<const std::byte>(_nonce); }
+
+inline bool Client::sendPairReq(std::span<const std::byte> pinProof) {
+    if (pinProof.size() != kPinProofBytes) return false;
+
+    PairReqMsg m{};
+    m.instance_id = _id.instance_id;
+    std::memcpy(m.pin_proof.data(), pinProof.data(), pinProof.size());
+
+    std::array<std::byte, 64> buf{};
+    size_t n = encodePairReq(m, std::span<std::byte>(buf));
+    if (n == 0) return false;
+    return sendFrame(FrameType::PAIR_REQ, 0, std::span<const std::byte>(buf.data(), n));
+}
+
+inline void Client::handlePairGrant(std::span<const std::byte> payload) {
+    auto res = decodePairGrant(payload);
+    if (!res) return;
+    const PairGrantMsg& m = res.value();
+    _delegate.onPairGrant(std::span<const std::byte>(m.token), AccessLevel(m.roles));
+}
+
+// ============================================================================
+// M5: network probe (§6.4) — client side: request the burst, measure it,
+// report back.
+// ============================================================================
+
+inline bool Client::runProbe() {
+    if (_state != ClientSessionState::LIVE) return false;
+    if (!sendFrame(FrameType::PROBE, 0, std::span<const std::byte>())) return false;
+
+    _probeActive = true;
+    _probeStartMs = _clock.nowMs();
+    _probeBytesReceived = 0;
+    _probeFramesReceived = 0;
+    _probeMaxIndexSeen = 0;
+    _probeAnyIndexSeen = false;
+    return true;
+}
+
+inline void Client::handleProbeFrame(std::span<const std::byte> payload) {
+    if (!_probeActive) return;  // a stray/late burst frame after we already reported: ignore (§4.3-style tolerance)
+    auto idx = decodeProbeFrame(payload);
+    if (!idx) return;
+
+    ++_probeFramesReceived;
+    _probeBytesReceived += uint32_t(payload.size());
+    if (!_probeAnyIndexSeen || idx.value() > _probeMaxIndexSeen) {
+        _probeMaxIndexSeen = idx.value();
+        _probeAnyIndexSeen = true;
+    }
+}
+
+inline void Client::pumpProbe(uint32_t nowMs) {
+    if (!_probeActive) return;
+    if (!timeReached(nowMs, _probeStartMs + limits::probe_max_duration_ms)) return;
+
+    // Finalize and report (§6.4 step 2): loss vs the highest index observed
+    // — indices are 0-based and monotonic within one burst, so
+    // (maxIndexSeen + 1) is how many frames the hub actually sent toward us.
+    uint32_t expected = _probeAnyIndexSeen ? uint32_t(_probeMaxIndexSeen) + 1 : 0;
+    uint32_t lost = (expected > _probeFramesReceived) ? (expected - _probeFramesReceived) : 0;
+
+    ProbeReportMsg m{};
+    m.probe_result.bytes_received = _probeBytesReceived;
+    m.probe_result.span_ms = timeDelta(nowMs, _probeStartMs) > 0 ? uint32_t(timeDelta(nowMs, _probeStartMs)) : 0;
+    m.probe_result.loss_pct_x100 = expected > 0 ? uint32_t((uint64_t(lost) * 10000u) / expected) : 0;
+    m.probe_result.rtt_ms = 0;  // not measured by this minimal client-side path (see runProbe()'s doc comment)
+
+    std::array<std::byte, 64> buf{};
+    size_t n = encodeProbeReport(m, std::span<std::byte>(buf));
+    if (n > 0) sendFrame(FrameType::PROBE_REPORT, 0, std::span<const std::byte>(buf.data(), n));
+
+    _probeActive = false;
+}
+
+// ============================================================================
+// M5: safety shadow accessors (§9.1/§11.1), extended from M4's estop-only read
+// ============================================================================
+
+inline std::optional<uint8_t> Client::safetyWord() const {
+    for (const auto& e : _shadows) {
+        if (e.used && e.channel_id == channels::safety && e.slot.valid && e.slot.size >= 1) {
+            return uint8_t(e.slot.value[0]);
+        }
+    }
+    return std::nullopt;
+}
+
+inline bool Client::stopLatched() const {
+    auto w = safetyWord();
+    return w.has_value() && (*w & safety_bits::STOP) != 0;
+}
 
 }  // namespace slopsync

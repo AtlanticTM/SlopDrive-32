@@ -6,8 +6,10 @@
 // MotionArbiter (sole-caller doctrine, §3.1: normative).
 //
 // M4 scope note: liveness bookkeeping and the safety channel's ESTOP latch
-// are implemented here (E-04 needs the latch as the acknowledgement, §11.2);
-// full deadman policy dispatch, takeover, shedding and pairing land in M5.
+// are implemented here (E-04 needs the latch as the acknowledgement, §11.2).
+// M5 additions (this file): deadman policy dispatch (§11.3), source
+// ownership + takeover (§11.4), congestion-driven shedding + slow-consumer
+// eviction (§10.4), pairing (§12.2), and the network probe (§6.4).
 #pragma once
 
 #include <array>
@@ -20,13 +22,17 @@
 #include "slopsync/core/clock.hpp"
 #include "slopsync/core/result.hpp"
 #include "slopsync/core/rng.hpp"
+#include "slopsync/session/pairing.hpp"
+#include "slopsync/session/safety.hpp"
 #include "slopsync/session/session.hpp"
+#include "slopsync/session/shedding.hpp"
 #include "slopsync/transport/transport.hpp"
 #include "slopsync/wire/estop_frame.hpp"
 #include "slopsync/wire/messages/goodbye.hpp"
 #include "slopsync/wire/messages/grant.hpp"
 #include "slopsync/wire/messages/intent.hpp"
 #include "slopsync/wire/messages/nack.hpp"
+#include "slopsync/wire/messages/probe_report.hpp"
 #include "slopsync/wire/messages/welcome.hpp"
 
 namespace slopsync {
@@ -61,6 +67,31 @@ public:
     // Roster visibility (§16.2) — optional.
     virtual void onSessionJoined(uint32_t session_id) { (void)session_id; }
     virtual void onSessionLeft(uint32_t session_id) { (void)session_id; }
+
+    // ---- M5 safety hooks (§11) — defaults keep source-free delegates valid.
+    // Map an INTENT channel to a control source id (nullopt = no source
+    // semantics). Intents on mapped channels acquire the source (§11.4:
+    // exclusive ownership; SOURCE_CONFLICT / takeover) BEFORE applyIntent.
+    virtual std::optional<uint8_t> sourceForChannel(uint16_t channel_id) {
+        (void)channel_id; return std::nullopt;
+    }
+    // §11.3: loss policy per source. Initiator-bound (streams, live control)
+    // default Stop; hub-autonomous (pattern) returns Continue.
+    virtual SourceLossPolicy sourcePolicy(uint8_t source_id) {
+        (void)source_id; return SourceLossPolicy::Stop;
+    }
+    // §11.3: deadman fired on a Stop-policy source — STOP MOTION NOW (the
+    // hub latches STOP in the safety word AFTER this returns).
+    virtual void onDeadmanStop(uint8_t source_id) { (void)source_id; }
+    // §11.4: ownership transitions (reason: 0 acquire, 1 takeover, 2 release,
+    // 3 deadman-release, 4 session-loss-release). owner_session 0 = released.
+    virtual void onSourceOwnership(uint8_t source_id, uint32_t owner_session,
+                                   uint8_t reason) {
+        (void)source_id; (void)owner_session; (void)reason;
+    }
+    // §11.2: application-side clear precondition (velocity zero, fault gone —
+    // machine domain the library can't see). false -> NACK CLEAR_REFUSED.
+    virtual bool canClearEstop() { return true; }
 };
 
 // The hub. Construction wires the catalog (client-invariant, §8.6), clock,
@@ -99,6 +130,37 @@ public:
     uint32_t bootId() const;
     size_t sessionCount() const;
 
+    // ---- M5: pairing (§12.2) -----------------------------------------------
+    // `pinAscii` must outlive the window (it's also what the app displays).
+    void openPairingWindow(std::span<const char> pinAscii);
+    void closePairingWindow();
+    PairingManager& pairing();  // revocation UI / NVS persistence adapter
+
+    // ---- M5: safety (§11) --------------------------------------------------
+    // §11.2 clearing: hub-side conditions (latched, no pending escalation) +
+    // delegate.canClearEstop(). Clearing never restarts motion. Returns false
+    // (and the intent path NACKs CLEAR_REFUSED) when refused.
+    bool clearEstop();
+    bool stopLatched() const;
+    uint8_t safetyWord() const;
+
+    // ---- M5: congestion input (§10.3) --------------------------------------
+    // The in-process binding's congestion signal is Simulated (§13.1): the
+    // test/sim injects it here per slot. Real bindings feed their native
+    // signals through the same choke point. Levels: 0 clear, 1 congested
+    // (shed per §10.4 steps 1–3), 2 stalled (never-shed can't drain —
+    // §10.4 step 4 eviction clock runs).
+    void setCongestionLevel(size_t slotIdx, uint8_t level);
+
+    // ---- M5: network probe (§6.4) -------------------------------------------
+    // The client's most recently received PROBE_REPORT for the session in
+    // `slotIdx`, nullopt if none has arrived yet. M5 scope is deliberately
+    // minimal per the milestone brief: this just surfaces the counters:
+    // deciding to raise a grant off of them (§6.4 step 3, "hub MAY raise
+    // grants accordingly") is a policy left to a future milestone/delegate
+    // hook — not implemented here.
+    std::optional<ProbeResult> probeReportFor(size_t slotIdx) const;
+
     // Test/observability access (read-only).
     const HubSession* sessionBySlot(size_t i) const;
 
@@ -116,6 +178,7 @@ private:
         uint16_t channel_id = 0;
         uint16_t lastSeq = 0;
         bool valid = false;
+        uint32_t shedCounter = 0;  // §10.4: counts natural push opportunities for N:1 decimation
     };
 
     // One physical transport <-> at most one session. `pushRecords` is
@@ -128,6 +191,14 @@ private:
         ITransport* transport = nullptr;
         HubSession session;
         std::array<PushRecord, limits::max_subscriptions_per_session> pushRecords{};
+
+        // ---- M5 additions (§10.3/§10.4 congestion+shedding, §12.2 pairing) --
+        std::array<std::byte, 8> nonce{};   // this session's WELCOME nonce (§6.3 key 29), needed to verify PAIR_REQ
+        uint8_t congestionLevel = 0;        // §10.3: 0 clear, 1 congested, 2 stalled — injected via setCongestionLevel()
+        bool criticalStalling = false;      // §10.4 step 4: a never-shed send has been failing since criticalStallSinceMs
+        uint32_t criticalStallSinceMs = 0;
+        bool hasProbeReport = false;        // §6.4
+        ProbeResult lastProbeReport{};
     };
 
     // Physical transport-tracking capacity is deliberately ONE MORE than
@@ -164,8 +235,19 @@ private:
     size_t _catalogEncodedLen = 0;
     uint32_t _bootId = 0;
     uint16_t _cfgGen = 1;
-    bool _estopLatched = false;
+
+    // ---- Safety word state (§11.1): bit0 ESTOP, bit1 STOP, bit2 HOLD,
+    // bit3 PAUSE — the exact bitfield the `safety` (0x0003) STATE layout
+    // publishes. M4 only ever set bit0; M5 adds STOP (deadman) + the general
+    // cause/owner bookkeeping the table describes.
+    uint8_t _safetyWord = 0;
+    uint8_t _safetyCause = 0;       // 0 user, 1 deadman, 2 fault, 3 relay (§11.1)
+    uint32_t _safetyOwnerSession = 0;
     uint16_t _estopSeq = 0;
+
+    // ---- M5: pairing (§12.2) + source ownership (§11.4) ---------------------
+    PairingManager _pairing;
+    SourceOwnershipTable _ownership;
 
     // ---- internal helpers, defined in hub_impl.hpp (included below) --------
     size_t occupiedCount(const Slot* exclude) const;
@@ -186,8 +268,29 @@ private:
     bool sendFrameTo(ITransport& t, FrameType type, uint16_t channel, std::span<const std::byte> payload,
                      uint16_t seq = 0) const;
     void sendNack(ITransport& t, const NackMsg& n) const;
-    std::array<std::byte, 8> buildSafetyPayload(uint8_t cause) const;
+    std::array<std::byte, 8> buildSafetyPayload() const;
     void broadcastSafetyNow(uint32_t nowMs);
+
+    // ---- M5 helpers, defined in hub_impl.hpp --------------------------------
+    void publishSafetySnapshot();                       // republish 0x0003 from _safetyWord/_safetyCause/...
+    void publishControlOwnerStateIfPresent();            // republish 0x0004 iff the catalog declares it (§11.4)
+    std::array<std::byte, 20> buildControlOwnerPayload() const;
+    void emitTakeoverEvent(uint8_t source_id, uint32_t newOwnerSession, uint32_t nowMs);  // §11.4, session-events 0x0007
+    bool anySubscribed(uint16_t channel_id) const;
+
+    void pumpDeadman(Slot& slot, uint32_t nowMs);         // §11.3
+
+    // §12.2 pairing wire handling; §6.4 probe.
+    void handlePairReq(Slot& slot, std::span<const std::byte> payload, uint32_t nowMs);
+    void handleProbeRequest(Slot& slot, uint32_t nowMs);
+    void handleProbeReportFrame(Slot& slot, std::span<const std::byte> payload);
+
+    // §10.4 step 4: never-shed slow-consumer tracking + eviction.
+    void trackCriticalSend(Slot& slot, bool sendOk, uint32_t nowMs);
+    void evictSlot(Slot& slot, NackCode code);
+    bool sendFrameToTracked(Slot& slot, FrameType type, uint16_t channel, std::span<const std::byte> payload,
+                            uint32_t nowMs, uint16_t seq = 0);
+    void sendNackTracked(Slot& slot, const NackMsg& n, uint32_t nowMs);
 };
 
 }  // namespace slopsync

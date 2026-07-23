@@ -51,6 +51,9 @@
 #include "slopsync/channel/event_channel.hpp"
 #include "slopsync/channel/retained_store.hpp"
 #include "slopsync/session/session.hpp"
+#include "slopsync/session/safety.hpp"
+#include "slopsync/session/pairing.hpp"
+#include "slopsync/session/shedding.hpp"
 #include "slopsync/hub/hub.hpp"
 #include "slopsync/client/client.hpp"
-// M5+: deadman policy dispatch, takeover, shedding, pairing.
+// M5: deadman policy dispatch, takeover, shedding, pairing, probe — done.

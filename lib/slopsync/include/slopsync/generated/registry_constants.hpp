@@ -137,6 +137,20 @@ inline constexpr uint8_t loss_pct_x100 = 3;  // loss percentage x100 (2 decimal 
 inline constexpr uint8_t rtt_ms = 4;  // measured round-trip time, ms
 }  // namespace probe_result
 
+namespace session_events {
+inline constexpr uint8_t takeover = 1;  // control source ownership transferred (§11.4)
+inline constexpr uint8_t session_joined = 2;  // a session reached GRANTED
+inline constexpr uint8_t session_left = 3;  // a session ended (any reason)
+}  // namespace session_events
+
+namespace safety_ops {
+inline constexpr uint8_t estop_clear = 1;  // clear the ESTOP latch (§11.2 conditions apply; NACK CLEAR_REFUSED otherwise)
+inline constexpr uint8_t stop = 2;  // controlled decel stop (§11.1)
+inline constexpr uint8_t hold = 3;  // position hold (§11.1)
+inline constexpr uint8_t pause = 4;  // pattern pause (§11.1)
+inline constexpr uint8_t resume = 5;  // resume from HOLD/PAUSE (§11.1)
+}  // namespace safety_ops
+
 enum class NackCode : uint16_t {
     MALFORMED = 0x0000,  // undecodable frame/CBOR
     UNSUPPORTED_VERSION = 0x0001,  // HELLO proto_ver not servable
@@ -150,6 +164,7 @@ enum class NackCode : uint16_t {
     SESSION_EVICTED = 0x0105,  // slow-consumer or admin kick (GOODBYE code)
     DUPLICATE_INSTANCE = 0x0106,  // instance_id already in live session; old session evicted instead — see §6.8
     NORMAL_CLOSURE = 0x0107,  // clean voluntary teardown (GOODBYE code, either direction) — not an error
+    DEADMAN_TIMEOUT = 0x0108,  // hub-initiated session teardown: silence exceeded the deadman window (§11.3, GOODBYE code)
     UNKNOWN_CHANNEL = 0x0200,  // channel id not in catalog
     ACCESS_DENIED = 0x0201,  // channel access level above session role
     CLASS_MISMATCH = 0x0202,  // e.g. SUBSCRIBE to an INTENT channel

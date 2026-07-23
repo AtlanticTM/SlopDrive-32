@@ -86,7 +86,9 @@ def gen(reg: dict) -> str:
 
     # ---- Scoped sub-map key spaces (not the global cbor_keys space) --------
     for section, ns in (("welcome_limits_keys", "welcome_limits"),
-                        ("probe_result_keys", "probe_result")):
+                        ("probe_result_keys", "probe_result"),
+                        ("session_event_kinds", "session_events"),
+                        ("safety_intent_ops", "safety_ops")):
         p(f"namespace {ns} {{\n")
         for k in sorted(reg[section]):
             e = reg[section][k]

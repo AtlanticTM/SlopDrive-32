@@ -19,6 +19,8 @@
 #include <Arduino.h>
 #include <LittleFS.h>
 #include <Wire.h>
+#include <new>              // placement new (SlopSync hub goes into PSRAM)
+#include "esp_heap_caps.h"
 
 #include "config_api.h"
 
@@ -152,9 +154,11 @@ static WebUI webui(g_state, motor, mapper, patternEngine,
                     transportMgr, serialTransport, wsTransport, bleTransport);
 
 // SlopSync hub — the ecosystem sync plane (binary WS :SLOPSYNC_WS_PORT).
-// File-scope static on purpose: its ~100 KB (Catalog32 + 5 hub session
-// slots) lives in BSS as a fixed reservation, never on the heap.
-static slopdrive::SlopSyncHubService slopSyncHub(g_state, webui, arbiter);
+// Lives in PSRAM: as a BSS static its ~100 KB reservation starved internal
+// heap to 13 KB free / 1.6 KB min — the WebUI page-serve death. The S3 has
+// 8 MB of PSRAM for exactly this; placement-new'd there in setup(). Its
+// FreeRTOS task stack stays internal (created inside init(), default heap).
+static slopdrive::SlopSyncHubService* slopSyncHub = nullptr;
 
 // WiFi OTA path (firmware + LittleFS bundle). Owns the shared safety gate for
 // both ArduinoOTA (espota) and the HTTP /api/ota endpoints. Serviced from the
@@ -561,9 +565,9 @@ static void httpTask(void* param) {
         // Heap health beacon: free / low-water / largest-block. maxblock is
         // the one that kills big allocations (LittleFS streams, WS buffers)
         // long before free hits zero — fragmentation shows up there first.
-        SLOGI_EVERY_MS(10000, "sys", "heap free=%u min=%u maxblock=%u",
+        SLOGI_EVERY_MS(10000, "sys", "heap free=%u min=%u maxblock=%u psram=%u",
                        unsigned(ESP.getFreeHeap()), unsigned(ESP.getMinFreeHeap()),
-                       unsigned(ESP.getMaxAllocHeap()));
+                       unsigned(ESP.getMaxAllocHeap()), unsigned(ESP.getFreePsram()));
         vTaskDelay(pdMS_TO_TICKS(10));
     }
 }
@@ -822,11 +826,24 @@ void setup() {
     patternEngine.init();    // creates its own Core 1 task
 
     // SlopSync hub last: WiFi is up, arbiter/webui/patternEngine are wired.
-    // Spawns its own Core-0 task ("SlopSyncHub") + the WS server on :82.
-    slopSyncHub.setPatternEngine(&patternEngine);
-    slopSyncHub.init();
-    SLOGI("sys", "post-slopsync heap free=%u maxblock=%u",
-          unsigned(ESP.getFreeHeap()), unsigned(ESP.getMaxAllocHeap()));
+    // Placement-new into PSRAM (see the declaration comment); refuses to
+    // start rather than eat internal RAM if PSRAM is somehow absent.
+    {
+        void* mem = heap_caps_malloc(sizeof(slopdrive::SlopSyncHubService),
+                                     MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT);
+        if (mem != nullptr) {
+            slopSyncHub = new (mem) slopdrive::SlopSyncHubService(g_state, webui, arbiter);
+            slopSyncHub->setPatternEngine(&patternEngine);
+            slopSyncHub->init();
+            SLOGI("slopsync", "hub service in PSRAM (%u B)",
+                  unsigned(sizeof(slopdrive::SlopSyncHubService)));
+        } else {
+            SLOGE("slopsync", "no PSRAM block for hub service — SlopSync DISABLED this boot");
+        }
+    }
+    SLOGI("sys", "post-slopsync heap free=%u maxblock=%u psram free=%u",
+          unsigned(ESP.getFreeHeap()), unsigned(ESP.getMaxAllocHeap()),
+          unsigned(ESP.getFreePsram()));
 
 #if HOMING_DISABLED
     g_state.homed = true;

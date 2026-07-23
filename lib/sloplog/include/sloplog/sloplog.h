@@ -88,10 +88,21 @@ public:
                 _dropped = 0;
             }
         }
+        // All-or-nothing when the driver reports genuine backpressure (a
+        // NONZERO-but-small availableForWrite is trustworthy; zero is
+        // ambiguous on HWCDC, so zero falls through to an attempted write).
+        // Partial writes still terminate the line so a pressured stream
+        // truncates cleanly instead of interleaving into soup.
+        int avail = Serial.availableForWrite();
+        if (avail > 0 && avail < n + 2) {
+            ++_dropped;
+            return;
+        }
         size_t wrote = Serial.write(reinterpret_cast<const uint8_t*>(line), size_t(n));
         if (wrote == size_t(n)) {
             Serial.write("\r\n", 2);
         } else {
+            if (wrote > 0) Serial.write("\r\n", 2);  // close the mangled line
             ++_dropped;  // buffer full / no listener — dropped, never blocked
         }
     }

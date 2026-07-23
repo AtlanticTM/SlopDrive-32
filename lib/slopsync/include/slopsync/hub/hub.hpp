@@ -27,6 +27,7 @@
 #include "slopsync/session/session.hpp"
 #include "slopsync/session/shedding.hpp"
 #include "slopsync/transport/transport.hpp"
+#include "slopsync/util/serial_arithmetic.hpp"
 #include "slopsync/wire/estop_frame.hpp"
 #include "slopsync/wire/messages/goodbye.hpp"
 #include "slopsync/wire/messages/grant.hpp"
@@ -235,6 +236,7 @@ private:
     size_t _catalogEncodedLen = 0;
     uint32_t _bootId = 0;
     uint16_t _cfgGen = 1;
+    MonotonicMs _monoMs;  // wrap-safe ms derivation for all deadline bookkeeping (§7.2)
 
     // ---- Safety word state (§11.1): bit0 ESTOP, bit1 STOP, bit2 HOLD,
     // bit3 PAUSE — the exact bitfield the `safety` (0x0003) STATE layout

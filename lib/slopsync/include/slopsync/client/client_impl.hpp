@@ -129,7 +129,8 @@ inline void Client::disconnect() {
 // ============================================================================
 
 inline void Client::update(uint32_t nowUs) {
-    uint32_t nowMs = nowUs / 1000u;
+    // NOT nowUs / 1000 — see MonotonicMs in util/serial_arithmetic.hpp.
+    uint32_t nowMs = _monoMs.advance(nowUs);
     while (auto fb = _t.read()) {
         handleFrame(*fb, nowMs);
     }

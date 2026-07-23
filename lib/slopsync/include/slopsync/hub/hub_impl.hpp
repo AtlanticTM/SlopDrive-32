@@ -95,7 +95,10 @@ inline Hub::Slot* Hub::attachedSlotFor(ITransport& t) {
 // ============================================================================
 
 inline void Hub::update(uint32_t nowUs) {
-    uint32_t nowMs = nowUs / 1000u;
+    // NOT nowUs / 1000: the quotient of a wrapping counter is not itself a
+    // mod-2^32 counter, and every ms deadline below relies on timeReached()'s
+    // wrap window (see MonotonicMs in util/serial_arithmetic.hpp).
+    uint32_t nowMs = _monoMs.advance(nowUs);
     for (auto& slot : _slots) {
         if (slot.transport == nullptr) continue;
         pumpSlot(slot, nowMs);

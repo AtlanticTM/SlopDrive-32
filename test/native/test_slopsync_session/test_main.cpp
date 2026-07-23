@@ -753,3 +753,58 @@ TEST_CASE("E-04: initiateEstop survives 30% loss both directions within estop_re
     CHECK(hubDelegate.estopCallCount == 1);
     CHECK_FALSE(client.estopSendFailed());
 }
+
+// ============================================================================
+// §7.2 regression — the 71.6-minute wrap bug. nowUs/1000 does not wrap mod
+// 2^32 (it jumps 4294967 -> 0), which stranded every ms deadline ~71 min in
+// the future at each µs wrap: STATE pacing stalled and liveness went dormant
+// for up to a whole wrap period. Fixed by MonotonicMs (util/serial_arithmetic
+// .hpp) feeding Hub::update()/Client::update(). This session starts 8 s
+// before the wrap and must sail straight through it.
+// ============================================================================
+TEST_CASE("wrap regression: session pushes flow at full rate straight across the u32 microsecond wrap") {
+    Catalog32 catalog = conformance::miniCatalog();
+    ManualClock clock(0xFFFFFFFFu - 8'000'000u);   // 8 s before the µs wrap
+    XorShift32 hubRng(7001);
+    TestHubDelegate hubDelegate;
+    Hub hub(catalog, clock, hubRng, hubDelegate);
+    hubDelegate.hub = &hub;
+
+    auto safetyPayload = makeSafetyPayload(false, 0, 0, 0);
+    REQUIRE(hub.publishState(0x0003, std::span<const std::byte>(safetyPayload)));
+
+    InProcessLink link(clock, hubRng);
+    REQUIRE(hub.attachTransport(link.endpointA()));
+
+    XorShift32 clientRng(7002);
+    ClientIdentity id = makeIdentity(9, false);
+    TestClientDelegate del;
+    Client client(id, link.endpointB(), clock, clientRng, del);
+    client.addSubscriptionWish(0x0082, 10.0f, Priority::normal);   // 10 Hz motion-status
+    REQUIRE(client.connect());
+    pump(hub, clock, {&client}, 10);
+    REQUIRE(client.state() == ClientSessionState::LIVE);
+
+    // One 5 ms tick per round with a fresh publish each time; the 10 Hz grant
+    // paces actual deliveries, so each phase's count reflects pacing health.
+    auto runPhaseMs = [&](int ms) {
+        int before = del.onStateCallCount;
+        uint8_t flip = 0;
+        for (int i = 0; i < ms / 5; ++i) {
+            auto p = makeMotionStatusPayload(++flip);
+            hub.publishState(0x0082, std::span<const std::byte>(p));
+            pump(hub, clock, {&client}, 1, 5000);
+        }
+        return del.onStateCallCount - before;
+    };
+
+    int pre = runPhaseMs(4000);       // entirely pre-wrap: ~40 pushes at 10 Hz
+    CHECK(pre >= 30);
+
+    int across = runPhaseMs(8000);    // the µs wrap happens 4 s into this phase
+    CHECK(client.state() == ClientSessionState::LIVE);  // no spurious eviction
+    CHECK(across >= 60);              // pre-fix: pacing died at the wrap (~40 max)
+
+    int post = runPhaseMs(4000);      // entirely post-wrap epoch
+    CHECK(post >= 30);                // pre-fix: ~0 for up to 71 minutes
+}

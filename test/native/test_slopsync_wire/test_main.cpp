@@ -534,3 +534,47 @@ TEST_CASE("serial_arithmetic: timeDelta/timeReached across the u32 wrap boundary
     CHECK(timeReached(0x00000005u, reference));        // wrapped 21 counts past
     CHECK_FALSE(timeReached(0xFFFFFFDFu, reference));  // clearly before (delta -17)
 }
+
+TEST_CASE("serial_arithmetic: MonotonicMs matches plain division off the wrap") {
+    // §7.2 regression (the 71.6-minute bug): nowUs/1000 does not wrap mod
+    // 2^32, so ms deadlines strand at the µs wrap. MonotonicMs must be
+    // bit-identical to the old division for any non-wrapping run...
+    MonotonicMs m;
+    CHECK(m.advance(5000) == 5);
+    CHECK(m.advance(5999) == 5);   // remainder carried, not truncated away
+    CHECK(m.advance(6000) == 6);
+    CHECK(m.advance(6001) == 6);
+    CHECK(m.advance(1'000'000) == 1000);
+    CHECK(m.advance(1'000'999) == 1000);
+    CHECK(m.advance(1'001'000) == 1001);
+
+    // Seeding mid-stream (first call at an arbitrary time) also matches.
+    MonotonicMs m2;
+    CHECK(m2.advance(123'456'789) == 123'456);
+    CHECK(m2.advance(123'457'788) == 123'457);
+}
+
+TEST_CASE("serial_arithmetic: MonotonicMs is continuous across the u32 microsecond wrap") {
+    // ...and must keep counting smoothly where the division jumps 4294967 -> 0.
+    MonotonicMs m;
+    uint32_t t = 0xFFFFFFFFu - 8'000'000u;  // 8 s before the wrap
+    uint32_t prev = m.advance(t);
+    CHECK(prev == t / 1000u);
+
+    // Step 5 ms at a time through the wrap and 8 s beyond. Every step the
+    // returned ms must advance by exactly 5 — no jump, no stall.
+    for (int i = 0; i < 3200; ++i) {
+        t += 5000;  // wraps mod 2^32 partway through — that's the point
+        uint32_t now = m.advance(t);
+        CHECK(now - prev == 5);
+        prev = now;
+    }
+
+    // A deadline armed before the wrap is reached ON TIME after it: the
+    // pre-fix division would have parked it ~71 minutes in the future.
+    MonotonicMs m3;
+    uint32_t t3 = 0xFFFFFFFFu - 20'000u;            // 20 ms before wrap
+    uint32_t deadlineMs = m3.advance(t3) + 30;      // 30 ms window (deadman-style)
+    t3 += 50'000;                                    // +50 ms, crossing the wrap
+    CHECK(timeReached(m3.advance(t3), deadlineMs));
+}

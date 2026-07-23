@@ -28,4 +28,38 @@ inline bool timeReached(uint32_t now, uint32_t deadline) {
     return timeDelta(now, deadline) >= 0;
 }
 
+// Millisecond bookkeeping over the wrapping µs clock (§7.2). `nowUs / 1000`
+// does NOT wrap mod 2^32 — it jumps 4294967 -> 0 every ~71.6 min — which
+// would strand every ms deadline ~71 min in the future at each wrap (STATE
+// pushes stall, deadman windows go dormant: timeDelta needs a counter that
+// wraps mod 2^32, and the quotient is not one). µs DELTAS are mod-2^32
+// exact, so this accumulates them into a true mod-2^32 ms counter that
+// timeReached() compares safely. Bit-identical to `nowUs / 1000` for any
+// non-wrapping run (the first advance() seeds quotient + remainder).
+// Precondition: advance() is called at least once per half wrap (~35 min) —
+// the same window §7.2 already imposes on all timestamp interpretation.
+class MonotonicMs {
+public:
+    uint32_t advance(uint32_t nowUs) {
+        if (!_init) {
+            _init = true;
+            _lastUs = nowUs;
+            _ms = nowUs / 1000u;
+            _rem = uint16_t(nowUs % 1000u);
+            return _ms;
+        }
+        uint32_t total = uint32_t(nowUs - _lastUs) + _rem;
+        _lastUs = nowUs;
+        _ms += total / 1000u;
+        _rem = uint16_t(total % 1000u);
+        return _ms;
+    }
+
+private:
+    uint32_t _lastUs = 0;
+    uint32_t _ms = 0;
+    uint16_t _rem = 0;
+    bool _init = false;
+};
+
 }  // namespace slopsync

@@ -21,6 +21,7 @@
 #include "slopsync/session/safety.hpp"
 #include "slopsync/session/session.hpp"
 #include "slopsync/transport/transport.hpp"
+#include "slopsync/util/serial_arithmetic.hpp"
 #include "slopsync/wire/catalog_chunks.hpp"
 #include "slopsync/wire/frame_buffer.hpp"
 #include "slopsync/wire/messages/hello.hpp"
@@ -141,6 +142,7 @@ private:
     IClock& _clock;
     IRandom& _rng;
     ClientDelegate& _delegate;
+    MonotonicMs _monoMs;  // wrap-safe ms derivation for all deadline bookkeeping (§7.2)
     ClientSessionState _state = ClientSessionState::CLOSED;
 
     static constexpr size_t kMaxPendingIntents = 8;

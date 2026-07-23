@@ -32,7 +32,7 @@
 // Bumped by hand on each firmware change so an OTA can be verified as landed
 // (surfaced via /api/capabilities → "fw_version" and the boot log). This is the
 // single source of truth for "which build is actually running." :3
-#define FIRMWARE_VERSION        "2.1.16"
+#define FIRMWARE_VERSION        "2.1.31"
 
 // =============================================================================
 // WiFi Configuration (values come from secrets.h)
@@ -121,6 +121,13 @@
 #define AIM_MM_PER_REV            (3.14159265f * AIM_DRUM_DIAMETER_MM)    // 78.5398 mm/drum-rev
 #define AIM_STEPS_PER_MM_DEFAULT  ((AIM_MOTOR_STEPS_PER_REV_DEFAULT * AIM_REDUCTION) / AIM_MM_PER_REV)  // ~20.372
 #define AIM_HOMING_BACKOFF_MM     10.0f
+// Front-end safety margin subtracted from the measured stroke. The stall
+// positions are FAS *commanded* counters captured after the confirm window
+// (4 polls @150Hz) + INA228 averaging lag — the carriage is already parked
+// against the wall while ~1-3mm of phantom steps keep counting, at BOTH ends.
+// Backoff only accounts for the rear (home) side; this margin keeps full
+// extension off the FRONT hard stop instead of commanding into it. :3
+#define AIM_HOMING_FRONT_MARGIN_MM 5.0f
 
 // ---- Encoder cross-check (FAS commanded vs drive-reported position) ---------
 // The AIM encoder is 15-bit absolute, 32768 counts per MOTOR rev (fixed silicon
@@ -174,6 +181,49 @@ float    aimStepsPerMm();
 #define AIM_HOME_STALL_CONSEC       4      // consecutive over-threshold samples
 #define AIM_HOME_POLL_HZ            150    // INA228 poll rate during homing (Hz)
 #define AIM_HOME_BASELINE_SAMPLES   20     // samples averaged for the free-run baseline
+
+// ---- Modbus direct-drive backend tunables (Phase 3 — see plan.md) ----------
+// Streamed-setpoint executor cadence: how often StreamedSetpointExecutor
+// samples the active TrapezoidProfile and streams one 0x7B setpoint while
+// genuinely moving. 10ms matches the OSSM-RS reference cadence and fits
+// comfortably inside the bus budget at 115200 (plan.md "Bus budget"). :3
+#define AIM_SP_PERIOD_MS            10
+// Idle/frozen keep-alive cadence — slower than the motion cadence since
+// nothing's actually changing; also doubles as a passive bus-liveness probe
+// (a keep-alive echo failing is just as valid a health signal as a motion
+// setpoint failing). :3
+#define AIM_SP_KEEPALIVE_MS         250
+// Bus-health watchdog thresholds (consecutive missed 0x7B echoes, see
+// ServoModbus::getBusHealth().sp_fail_streak): FREEZE holds position and
+// latches a soft fault (recoverable by re-home); ESTOP additionally cuts
+// drive output. Both are one-shot logged — this is read on the 1ms
+// motorTask tick and must never spam the ring. :3
+#define AIM_SP_FAIL_FREEZE          3      // ~30ms of silence -> freeze in place
+#define AIM_SP_FAIL_ESTOP           15     // ~150ms of silence -> output off
+// Wire-mapping sign: wire_counts = wire_offset + AIM_MODBUS_WIRE_SIGN * cmd_counts.
+// The drive's own absolute encoder frame (regs 0x16/0x17) has UNKNOWN sign
+// relative to the arbiter's home=0/front=negative convention until confirmed
+// on the bench — this is a PLACEHOLDER default. First bench step: force-home,
+// jog a small positive mm move, watch which way the encoder count actually
+// moves, and flip this if it's backwards. :3
+// Jerk ceiling (mm/s^3) for the Modbus executor's jerk-limited target tracker
+// — OSSM-RS parity (their Ruckig streams at MAX_JERK = 100000 mm/s^3). The
+// tracker glides toward every target under vmax/amax/jmax; this is what
+// killed the "clocked waypoint" texture of raw trapezoid streaming. :3
+#define AIM_MODBUS_JERK_MM_S3       100000.0f
+// BENCH-DETERMINED (fw 2.1.27, first live jog): +1 ran the carriage the wrong
+// way — a positive-depth command must move the same physical direction as the
+// FAS build's negative-step convention, and on this wiring that is encoder
+// NEGATIVE. Flipped to -1 and verified by the operator. :3
+#define AIM_MODBUS_WIRE_SIGN        (-1)
+// Standstill max-output written to drive reg 0x18 whenever Modbus-mode
+// applies its expected register set. BENCH-LEARNED ENCODING (fw 2.1.24): the
+// RAW register packs PWM*10 + alarm-mode digit — factory value reads 600
+// (= PWM 60, alarm 0), and OSSM-RS's "12-60" range describes the DECODED PWM
+// field, not the raw register. Writing a bare 20 here (= PWM 2) made the
+// standstill hold MEGA weak — the operator felt the shaft go limp. 600 =
+// factory full hold. Lower for squish-safety as PWM*10 (e.g. 200 = PWM 20). :3
+#define AIM_MODBUS_STANDSTILL_MAX   600
 
 
 // =============================================================================

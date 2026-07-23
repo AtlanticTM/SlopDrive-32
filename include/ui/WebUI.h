@@ -96,6 +96,13 @@ public:
     /// tab's /api/clients endpoint can enumerate + kick live WS clients.
     void setUiSocket(UiSocket* s) { _uiSocket = s; }
 
+    /// Tell WebUI which motion backend is actually bound (0=FAS, 1=Modbus).
+    /// Called once from setup() right after main.cpp's motor.bind() — this is
+    /// what GET /api/machine and /api/capabilities echo as ground truth. Not
+    /// itself a mutator: the only WRITER of the persisted backend choice is
+    /// POST /api/machine/commit below (reboot-to-apply contract). :3
+    void setMachineBackend(uint8_t active) { _machine_backend = active; }
+
     // ---- Batched telemetry ring buffer (Core 0) ----------------------------
     TelemetrySample _telemetry_ring[TELEMETRY_RING_SIZE];
     volatile uint32_t _telemetry_seq = 0;   // total samples ever written
@@ -185,6 +192,21 @@ private:
 public:
     void setArbiter(MotionArbiter* arb) { _arbiter = arb; }
 private:
+
+    // ---- Machine backend (Phase 2 — /api/machine) -----------------------------
+    // Mirrors what main.cpp actually bound the MotorProxy to (set via
+    // setMachineBackend() above). POST /api/machine/commit is the ONLY writer
+    // of the persisted NVS value — this member is just the live echo. Reboot
+    // scheduling reuses OtaService's deferred-restart pattern: set a pending
+    // flag + deadline here, fire ESP.restart() from update() (never block the
+    // HTTP handler itself so the 200 response actually reaches the browser
+    // before the device goes down). :3
+    uint8_t  _machine_backend        = 0;
+    bool     _machine_reboot_pending = false;
+    uint32_t _machine_reboot_at_ms   = 0;
+    void handleApiMachine();
+    void handleApiMachineCommit();
+    void handleApiHomeOverride();
 
     // ---- HTTP handler methods (one per route) --------------------------------
     void handleRoot();

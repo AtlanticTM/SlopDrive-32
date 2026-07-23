@@ -439,7 +439,12 @@ void AIMServoDriver::_homingTask() {
     int32_t span_steps = rear_steps - front_steps;   // rear is +dir, front is -dir
     if (span_steps > 0) {
         float   raw_span_mm = fabsf(nativeToMm(span_steps));
-        float   usable_mm   = raw_span_mm - AIM_HOMING_BACKOFF_MM;
+        // Subtract the rear backoff (home sits that far off the rear wall) AND
+        // a front margin — the recorded stall positions overrun both physical
+        // walls by the detection latency, so without a front margin the max
+        // command lands INSIDE the front hard stop and the servo strains. :3
+        float   usable_mm   = raw_span_mm - AIM_HOMING_BACKOFF_MM
+                                          - AIM_HOMING_FRONT_MARGIN_MM;
         if (usable_mm < 0.0f) usable_mm = 0.0f;
         // MEASUREMENT WINS: the span between the two physically-detected hard
         // stops is ground truth for the usable stroke. We do NOT clamp it down

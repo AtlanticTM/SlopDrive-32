@@ -17,6 +17,7 @@
 
 #include "AppLog.h"
 #include "ConfigStore.h"
+#include "MachineConfig.h"
 #include "StatusLeds.h"
 #include "PatternEngine.h"
 #include "MotorDriver.h"
@@ -111,6 +112,9 @@ void WebUI::init() {
     _httpServer->on("/api/mode",      HTTP_POST, [this]() { handleApiMode(); });
     _httpServer->on("/api/clients",   HTTP_GET,  [this]() { handleApiClients(); });
     _httpServer->on("/api/clients",   HTTP_POST, [this]() { statusLedsActivity(); handleApiClients(); });
+    _httpServer->on("/api/machine",        HTTP_GET,  [this]() { handleApiMachine(); });
+    _httpServer->on("/api/machine/commit", HTTP_POST, [this]() { statusLedsActivity(); handleApiMachineCommit(); });
+    _httpServer->on("/api/machine/homeoverride", HTTP_POST, [this]() { statusLedsActivity(); handleApiHomeOverride(); });
 
     _httpServer->begin();
     APPLOGF("HTTP server on port %d", HTTP_PORT);
@@ -124,6 +128,17 @@ void WebUI::init() {
 
 void WebUI::update() {
     _httpServer->handleClient();
+
+    // Deferred reboot for the machine-backend commit — same mechanism as
+    // OtaService::handle()'s _rebootPending/_rebootAtMs pair: the HTTP
+    // handler schedules this and returns immediately so its 200 response
+    // actually flushes to the browser before the device goes down. :3
+    if (_machine_reboot_pending && (int32_t)(millis() - _machine_reboot_at_ms) >= 0) {
+        _machine_reboot_pending = false;
+        APPLOG("[MACHINE] rebooting to apply motion-backend change");
+        delay(20);   // boot-adjacent: let the TCP response flush first
+        ESP.restart();
+    }
 }
 
 // ---- Dedicated telemetry sampler -------------------------------------------
@@ -188,16 +203,24 @@ void WebUI::captureTelemetry(float position_mm, float target_mm, float raw_mm) {
                     _state.session_distance_mm.load(std::memory_order_relaxed) + adpos,
                     std::memory_order_relaxed);
             }
-            float inst = adpos / dt;                        // instantaneous mm/s
-            spd_ema += 0.25f * (inst - spd_ema);            // ~17ms time constant
-            _state.live_speed_mm_s.store(spd_ema, std::memory_order_relaxed);
-            if (spd_ema > _state.max_speed_mm_s.load(std::memory_order_relaxed))
-                _state.max_speed_mm_s.store(spd_ema, std::memory_order_relaxed);
-            // A "stroke" = a direction reversal with meaningful travel.
-            int8_t dir = (dpos > 0.05f) ? 1 : (dpos < -0.05f) ? -1 : last_dir;
-            if (dir != 0 && last_dir != 0 && dir != last_dir)
-                _state.stroke_count.fetch_add(1, std::memory_order_relaxed);
-            last_dir = dir;
+            // Speed only on full-width ticks: when the esp_timer fires late and
+            // then bursts, the catch-up callback arrives with a sub-ms dt while
+            // dpos stays step-quantized (~0.049mm/step) — inst comes out 10%+
+            // high and the session PEAK ratchets above the real dispatch
+            // ceiling (a stat the UI must never overstate). Nominal tick is
+            // 4.17ms; anything under ~2.5ms is a burst artifact, skip it. :3
+            if (dt > 2.5e-3f) {
+                float inst = adpos / dt;                    // instantaneous mm/s
+                spd_ema += 0.25f * (inst - spd_ema);        // ~17ms time constant
+                _state.live_speed_mm_s.store(spd_ema, std::memory_order_relaxed);
+                if (spd_ema > _state.max_speed_mm_s.load(std::memory_order_relaxed))
+                    _state.max_speed_mm_s.store(spd_ema, std::memory_order_relaxed);
+                // A "stroke" = a direction reversal with meaningful travel.
+                int8_t dir = (dpos > 0.05f) ? 1 : (dpos < -0.05f) ? -1 : last_dir;
+                if (dir != 0 && last_dir != 0 && dir != last_dir)
+                    _state.stroke_count.fetch_add(1, std::memory_order_relaxed);
+                last_dir = dir;
+            }
         }
         last_pos_mm = position_mm;
         last_us     = now_us;
@@ -388,6 +411,21 @@ void WebUI::handleApiCapabilities() {
     // Advanced pattern mode (fray-d port) — the UI builds the Advanced/Classic
     // pattern card split only when the firmware actually has the engine.
     feat["advanced_pattern"] = true;
+
+    // Phase 2 — runtime motion backend. _machine_backend mirrors whatever
+    // main.cpp actually bound the MotorProxy to (Ground Truth: NOT re-read
+    // from NVS here — this is the live-applied value, which for the FIRST
+    // read after a commit is intentionally the pre-reboot value until the
+    // device actually restarts). available_backends tells the UI whether the
+    // toggle should even be offered. home_style is read live from NVS since
+    // it's not reboot-gated (Phase 4 wires its actual effect). :3
+    feat["motion_backend"] = (_machine_backend == 1) ? "modbus" : "fas";
+    JsonArray backends = feat["available_backends"].to<JsonArray>();
+    backends.add("fas");
+#if defined(FEATURE_RS485_MODBUS)
+    backends.add("modbus");
+#endif
+    feat["home_style"] = machineHomeStyleLoad();
 
     String json;
     serializeJson(doc, json);
@@ -929,6 +967,16 @@ void WebUI::handleApiServo() {
         doc["addr"]  = _servoModbus->address();
         doc["queue"] = (uint32_t)_servoModbus->pendingWrites();
 
+        ServoBusHealth bus = _servoModbus->getBusHealth();
+        JsonObject busObj = doc["bus"].to<JsonObject>();
+        busObj["baud"]           = bus.baud;
+        busObj["sp_fail_streak"] = bus.sp_fail_streak;
+        busObj["sp_sent"]        = bus.sp_sent;
+        busObj["sp_ok"]          = bus.sp_ok;
+        busObj["sp_fc"]          = _servoModbus->setpointFc();
+        busObj["sp_le"]          = _servoModbus->setpointLe();
+        busObj["sp_noecho"]      = _servoModbus->setpointNoEcho();
+
         ServoTelemetry t = _servoModbus->getTelemetry();
         JsonObject tele = doc["tele"].to<JsonObject>();
         tele["valid"]     = t.valid;
@@ -997,6 +1045,37 @@ void WebUI::handleApiServo() {
 
     if (doc["scan"] | false) _servoModbus->requestConfigScan();
 
+    // ---- Setpoint-framing bench knobs (Modbus motion bring-up) ---------------
+    // POST {"sp_fc": 0x78, "sp_le": false} — retunes the motion setpoint frame
+    // LIVE (no reflash) so the bench can hunt this drive variant's real "write
+    // target position" framing. The executor's keep-alive stream immediately
+    // starts using the new shape; watch bus.sp_ok in the GET response. :3
+    if (doc["sp_fc"].is<int>() || doc["sp_le"].is<bool>()) {
+        uint8_t fc = doc["sp_fc"] | (int)_servoModbus->setpointFc();
+        bool    le = doc["sp_le"] | _servoModbus->setpointLe();
+        _servoModbus->setSetpointFraming(fc, le);
+    }
+    // {"sp_noecho": true} — BENCH ONLY: fire-and-forget setpoints, watchdog
+    // blind. For discovering whether the drive executes position frames it
+    // never echoes. Operator hand on the power switch. :3
+    if (doc["sp_noecho"].is<bool>()) {
+        _servoModbus->setSetpointNoEcho(doc["sp_noecho"].as<bool>());
+    }
+    // {"bench_pair":{"val":100,"low_first":true}} — BENCH ONLY: one atomic
+    // FC 0x10 write of a 32-bit value to the position pair 0x0C/0x0D
+    // (torn-half-protection hypothesis). Keep |val| tiny (~100 counts). :3
+    if (doc["bench_pair"].is<JsonObject>()) {
+        int32_t v  = doc["bench_pair"]["val"] | 0;
+        bool    lf = doc["bench_pair"]["low_first"] | true;
+        resp["bench_pair_queued"] = _servoModbus->queuePositionPair(v, lf);
+    }
+    // {"sp_period_ms": 8} — BENCH: live A/B of the delta-stream cadence
+    // (clamped 4..50ms inside ServoModbus). :3
+    if (doc["sp_period_ms"].is<int>()) {
+        _servoModbus->setSpPeriodMs((uint8_t)doc["sp_period_ms"].as<int>());
+        APPLOGF("ServoBench: sp_period_ms -> %u", (unsigned)_servoModbus->spPeriodMs());
+    }
+
     if (doc["output"].is<bool>()) {
         _servoModbus->queueWrite(0x00, 1, 1);
         _servoModbus->queueWrite(0x01, doc["output"].as<bool>() ? 1 : 0, 1);
@@ -1024,8 +1103,15 @@ void WebUI::handleApiServo() {
         uint16_t val = doc["raw"]["val"] | 0;
         // Position regs never; structural regs only via "program" (sequence +
         // geometry recalc + forced re-home) so a raw poke can't silently
-        // desync steps/mm or the bus address. :3
-        if (reg >= ServoModbus::CFG_REG_COUNT || reg == 0x0C || reg == 0x0D ||
+        // desync steps/mm or the bus address.
+        // BENCH EXCEPTION: {"bench_pos":true} alongside "raw" unblocks the
+        // position pair 0x0C/0x0D ONLY — for the operator-present trigger-
+        // discovery experiment (which register write fires an incremental
+        // move on this drive variant, since 0x7B/0x78 proved absent). Keep
+        // experimental deltas tiny (±100 counts ≈ 0.12mm). :3
+        bool bench_pos = doc["bench_pos"] | false;
+        bool pos_reg   = (reg == 0x0C || reg == 0x0D);
+        if (reg >= ServoModbus::CFG_REG_COUNT || (pos_reg && !bench_pos) ||
             reg == 0x09 || reg == 0x0A || reg == 0x0B || reg == 0x15) {
             resp["ok"] = false;
             resp["error"] = "raw_reg_blocked";
@@ -1416,6 +1502,146 @@ void WebUI::handleApiLog() {
     out.reserve(2048);
     applogDump(out);
     _httpServer->send(200, "text/plain", out);
+}
+
+// ============================================================================
+// handleApiMachine (GET) / handleApiMachineCommit (POST) — Phase 2
+// ============================================================================
+//
+// GET  /api/machine         → {backend_active, backend_code, home_style,
+//                               bus:{...}}   (bus only when Modbus is compiled
+//                               in AND a live ServoModbus is wired)
+// POST /api/machine/commit  {backend:0|1}   → THE ONLY WRITER of the
+//   persisted "machcfg"/backend NVS key. Reboot-to-apply contract: NVS is
+//   written ONLY here, on an explicit commit — the UI's confirmation dialog
+//   writes nothing on Cancel/backdrop/Esc, and a dismissed dialog must never
+//   change what boots next. On a genuine change we respond first, THEN
+//   schedule ESP.restart() ~500ms later (WebUI::update(), same deferred
+//   pattern OtaService uses for its post-response reboot) so the 200 actually
+//   reaches the browser before the device drops off the network. :3
+
+void WebUI::handleApiMachine() {
+    JsonDocument doc;
+    doc["backend_active"] = (_machine_backend == 1) ? "modbus" : "fas";
+    doc["backend_code"]   = _machine_backend;
+    doc["home_style"]     = machineHomeStyleLoad();
+
+#if defined(FEATURE_RS485_MODBUS)
+    if (_servoModbus) {
+        ServoBusHealth bus = _servoModbus->getBusHealth();
+        JsonObject busObj = doc["bus"].to<JsonObject>();
+        busObj["baud"]           = bus.baud;
+        busObj["sp_fail_streak"] = bus.sp_fail_streak;
+        busObj["sp_sent"]        = bus.sp_sent;
+        busObj["sp_ok"]          = bus.sp_ok;
+        busObj["sp_fc"]          = _servoModbus->setpointFc();
+        busObj["sp_le"]          = _servoModbus->setpointLe();
+        busObj["sp_noecho"]      = _servoModbus->setpointNoEcho();
+    }
+#endif
+
+    String json;
+    serializeJson(doc, json);
+    _httpServer->send(200, "application/json", json);
+}
+
+void WebUI::handleApiMachineCommit() {
+    JsonDocument doc;
+    if (deserializeJson(doc, _httpServer->arg("plain")) || !doc["backend"].is<int>()) {
+        _httpServer->send(400, "application/json", "{\"ok\":false,\"error\":\"backend (0|1) required\"}");
+        return;
+    }
+    int backend = doc["backend"].as<int>();
+
+    if (backend < 0 || backend > 1) {
+        _httpServer->send(400, "application/json", "{\"ok\":false,\"error\":\"backend out of range\"}");
+        return;
+    }
+#if !defined(FEATURE_RS485_MODBUS)
+    if (backend == 1) {
+        _httpServer->send(400, "application/json", "{\"ok\":false,\"error\":\"modbus backend not compiled into this build\"}");
+        return;
+    }
+#endif
+
+    if ((uint8_t)backend == _machine_backend) {
+        // No-op commit — nothing to persist, nothing to reboot for.
+        _httpServer->send(200, "application/json", "{\"ok\":true,\"rebooting\":false,\"unchanged\":true}");
+        return;
+    }
+
+#if defined(FEATURE_RS485_MODBUS)
+    // Modbus -> FAS: best-effort factory-restore the drive's RUNTIME baud
+    // back to 19200 BEFORE the reboot. Why: FAS mode's own dual-baud probe
+    // would still happily find the drive at 115200 (Phase 1 plumbing), so
+    // this isn't required for FAS to work — it's here so the FAS boot path
+    // looks byte-identical to pre-Phase-3 behavior (telemetry lands on the
+    // first probe attempt instead of the fallback one) and so power-cycling
+    // the drive later doesn't matter either way (factory 19200 is already
+    // where we left it). BEST-EFFORT + accepted race: reprogramBaud() is
+    // normally init-context-only (it bypasses ServoModbus's update() state
+    // machine and touches the port directly), but servoBusTask is still
+    // alive here — we're one commit away from ESP.restart() torching all of
+    // this state anyway, so a garbled frame or two on the way out is a
+    // non-issue. A failed restore just means the NEXT boot's probe finds
+    // 115200 and moves on — not a bricked link either way. :3
+    if (_machine_backend == 1 && backend == 0 && _servoModbus) {
+        bool ok = _servoModbus->reprogramBaud(19200);
+        APPLOGF("[MACHINE] backend commit: best-effort baud restore to 19200 %s",
+                ok ? "OK" : "FAILED (harmless — next boot's probe finds whatever it finds)");
+    }
+#endif
+
+    machineBackendStore((uint8_t)backend);
+    APPLOGF("[MACHINE] backend commit: %u -> %d — rebooting to apply", _machine_backend, backend);
+    _httpServer->send(200, "application/json", "{\"ok\":true,\"rebooting\":true}");
+
+    _machine_reboot_pending = true;
+    _machine_reboot_at_ms   = millis() + 500;
+}
+
+// ============================================================================
+// handleApiHomeOverride (POST) — HTTP twin of WS_OP_HOME_OVERRIDE
+// ============================================================================
+// {"on":true,"stroke":250} / {"on":false}. Added during Modbus bench bring-up:
+// the WS route required console-spawned WebSocket clients, and every one of
+// those leaked a socket that went half-open on the next device reboot —
+// feeding the exact ws-send-blocks-HTTP-mutex wedge the [STALL] watchdog
+// caught at 158s. Plain HTTP request/response leaks nothing. Same state
+// transitions as the WS case, byte for byte. :3
+
+void WebUI::handleApiHomeOverride() {
+    JsonDocument doc;
+    deserializeJson(doc, _httpServer->arg("plain"));   // empty body -> defaults
+    bool on = doc["on"] | true;
+
+    JsonDocument resp;
+    if (on) {
+        float stroke = doc["stroke"] | 250.0f;
+        if (stroke < 1.0f) stroke = 250.0f;
+        _state.estop_latched = false;      // bench-home exits the e-stopped state
+        _state.test_stroke_override_mm = stroke;
+        _state.homing_in_progress = false;
+        _state.homed = true;
+        _state.resume_start_ms = millis(); // soft-start guard like a real home
+        _motor.forceHomeState(true);       // driver-side flag + (Modbus) wire re-anchor
+        APPLOG("HTTP Home-Override: faking homed for bench test :3");
+        resp["measured_stroke"] = stroke;
+    } else {
+        _state.test_stroke_override_mm = 0.0f;
+        _state.homed = false;
+        _motor.forceHomeState(false);
+        APPLOG("HTTP Home-Override: cleared — back to real homing.");
+        resp["measured_stroke"] = _motor.getMeasuredStrokeMm();
+    }
+    resp["ok"] = true;
+    resp["home_override"] = on;
+    resp["homed"] = _state.homed;
+    _bumpGen();
+
+    String json;
+    serializeJson(resp, json);
+    _httpServer->send(200, "application/json", json);
 }
 
 // ============================================================================

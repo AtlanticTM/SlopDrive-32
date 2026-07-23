@@ -58,6 +58,17 @@ public:
     // overrides protected too, or the lock leaks through the derived type. :3
     friend class MotionArbiter;
 
+    // MotorProxy is the runtime-backend forwarding shim (mode dispatch door):
+    // it stands in for the concrete driver so main.cpp can pick FAS vs Modbus
+    // at boot (NVS isn't readable at static-init time) without ever exposing
+    // a raw switch to the input sources. The sole-caller lock is PRESERVED
+    // through it — friendship isn't inherited, so without this grant a
+    // MotorProxy couldn't reach the protected motion methods on the concrete
+    // driver it forwards to. Only MotionArbiter can call motion methods on
+    // the proxy (via the grant above), and only the proxy forwards them on to
+    // whichever concrete driver is bound. One door in, one door further in. :3
+    friend class MotorProxy;
+
     // ---- Homing -------------------------------------------------------------
     virtual bool home(int32_t home_speed_steps_s = 4000) = 0;
     virtual void runHomingStep()   = 0;
@@ -223,6 +234,15 @@ public:
 
     // Convert a driver-native position back to millimetres.
     virtual float   nativeToMm(int32_t native)  const = 0;
+
+    // Native units per millimetre — derived from mmToNative so every driver
+    // gets this for free without a separate override. The arbiter uses this
+    // to convert speed/accel into native units instead of hardcoding the FAS
+    // steps/mm scale (AIM_STEPS_PER_MM): a counts-native driver (encoder
+    // counts, ~834/mm) would otherwise get its dynamics scaled ~41x wrong if
+    // the arbiter assumed steps/mm (~20/mm) universally. Drivers whose native
+    // unit isn't a simple linear scale of mm can still override this. :3
+    virtual float   nativePerMm() const { return (float)mmToNative(1000.0f) / 1000.0f; }
 
 protected:
     // FastAccelStepper engine — shared across ALL concrete drivers (Risk #5).

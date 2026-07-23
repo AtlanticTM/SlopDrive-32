@@ -173,10 +173,36 @@ bool MotionArbiter::submitStreamSample(float norm_pos, float norm_vel_per_s) {
         if (speed_mm_s < speed_floor)    speed_mm_s = speed_floor;
     }
 
-    uint32_t speed_steps_s  = (uint32_t)(speed_mm_s   * AIM_STEPS_PER_MM);
-    uint32_t accel_steps_s2 = (uint32_t)(accel_ceiling * AIM_STEPS_PER_MM);
+    // Driver-owned native scale (Phase 2 fix): nativePerMm() replaces the
+    // hardcoded AIM_STEPS_PER_MM here. For the FAS driver nativePerMm()
+    // resolves to exactly the same value AIM_STEPS_PER_MM does (both derive
+    // from aimStepsPerMm()), so FAS behavior is numerically identical to
+    // before. A counts-native driver (Modbus, ~834/mm) now gets its own
+    // correct scale instead of FAS's ~20/mm — the ~41x unit bug plan.md
+    // flagged, fixed before any Modbus motion exists. :3
+    uint32_t speed_steps_s  = (uint32_t)(speed_mm_s   * _motor.nativePerMm());
+    uint32_t accel_steps_s2 = (uint32_t)(accel_ceiling * _motor.nativePerMm());
     if (speed_steps_s < 1)   speed_steps_s  = 1;
     if (accel_steps_s2 < 10) accel_steps_s2 = 10;
+
+    // ---- Stream-lag diagnostic ------------------------------------------------
+    // The interpolator glides open-loop: if the curve's instantaneous velocity
+    // exceeds the input ceiling, the motor saturates and falls behind the
+    // commanded curve — fast endpoints clip and any catch-up is a full-ceiling
+    // lunge (felt as drift while streaming). Normal chase lag is ~1-2mm; a
+    // sustained gap beyond that means the content is outrunning the machine.
+    // Surface it instead of drifting silently. :3
+    {
+        float lag_mm = fabsf(target_mm - _motor.getPosition());
+        static uint32_t last_lag_log_ms = 0;
+        uint32_t now_lag = millis();
+        if (lag_mm > 8.0f && now_lag - last_lag_log_ms > 2000) {
+            last_lag_log_ms = now_lag;
+            APPLOGF("Stream LAG: carriage %.1fmm behind commanded curve — content "
+                    "demands more than input max speed (%.0f mm/s); endpoints will clip",
+                    lag_mm, _input_speed_limit_mm_s);
+        }
+    }
 
     // ---- Dispatch to FAS ------------------------------------------------------
     // Lockless, matching _planAndDispatch: all motor callers are Core-1 tasks
@@ -581,8 +607,10 @@ PlanReport MotionArbiter::_planAndDispatch(const MotionIntent& intent, bool /*lo
         clamped_speed = speed_floor;
     }
 
-    uint32_t speed_steps_s  = (uint32_t)(clamped_speed * AIM_STEPS_PER_MM);
-    uint32_t accel_steps_s2 = (uint32_t)(clamped_accel * AIM_STEPS_PER_MM);
+    // Driver-owned native scale (Phase 2 fix) — see the submitStreamSample
+    // comment above for the full rationale; identical fix, second site.
+    uint32_t speed_steps_s  = (uint32_t)(clamped_speed * _motor.nativePerMm());
+    uint32_t accel_steps_s2 = (uint32_t)(clamped_accel * _motor.nativePerMm());
 
     if (speed_steps_s < 1)   speed_steps_s  = 1;
     if (accel_steps_s2 < 10) accel_steps_s2 = 10;

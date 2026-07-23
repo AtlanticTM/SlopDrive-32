@@ -40,6 +40,11 @@
 
 #if defined(DRIVER_AIM_SERVO)
 #include "AIMServoDriver.h"
+#include "MotorProxy.h"
+#include "MachineConfig.h"
+#if defined(FEATURE_RS485_MODBUS)
+#include "ModbusServoDriver.h"
+#endif
 #endif
 
 #include "MotionArbiter.h"
@@ -75,13 +80,40 @@ extern "C" bool bleInUse(void) { return true; }
 // Module instances
 // ============================================================================
 
+// ServoModbus — moved ABOVE the motor-driver block (Phase 2) so
+// ModbusServoDriver can take it by reference at construction. Was previously
+// declared further down, right before its own #include block; the transport
+// object itself doesn't care where it's declared, but the new Modbus motor
+// driver needs a live ServoModbus& to bind to. :3
+#if defined(FEATURE_RS485_MODBUS)
+static ServoModbus     servoModbus(Serial1, /* addr */ 1);
+#endif
+
+// Runtime-selectable motion backend (Phase 2 — MotorProxy/plan.md "Design").
+// g_motion_backend (below) picks FAS vs. Modbus; the pick is read from NVS as
+// early as possible in setup() and applied via motor.bind() before ANY other
+// module touches `motor`. Every other module (patternEngine, arbiter, webui,
+// encoderValidator) still captures MotorDriver& motor — the proxy — at
+// static-init time exactly as before; only the bind target is now runtime-
+// selectable instead of compile-time-fixed. TMC2160 branch is UNCHANGED — no
+// proxy, no second backend, it's a single fixed driver as always.
 #if defined(DRIVER_TMC2160)
   TMC2160StepperDriver motor;
 #elif defined(DRIVER_AIM_SERVO)
-  AIMServoDriver motor;
+  AIMServoDriver    fasMotor;
+#if defined(FEATURE_RS485_MODBUS)
+  ModbusServoDriver mbMotor(servoModbus);
+#endif
+  MotorProxy        motor;
 #else
   #error "No motor driver selected. Define DRIVER_TMC2160 or DRIVER_AIM_SERVO in platformio.ini build_flags."
 #endif
+
+// 0 = FAS step/dir (default), 1 = Modbus direct drive. Set once, early in
+// setup(), from machineBackendLoad() — read-only after that point until the
+// next reboot (backend switch is strict reboot-to-apply, see WebUI.cpp
+// POST /api/machine/commit). AIM branch only; meaningless on TMC2160. :3
+static uint8_t g_motion_backend = 0;
 
 static SystemState        g_state;
 static RangeMapper        mapper;
@@ -124,9 +156,8 @@ static WebUI webui(g_state, motor, mapper, patternEngine,
 // Core-0 httpTask only — never the motion-critical core. :3
 static OtaService      otaService(g_state, arbiter, patternEngine, uiSocket);
 
-#if defined(FEATURE_RS485_MODBUS)
-static ServoModbus     servoModbus(Serial1, /* addr */ 1);
-#endif
+// NOTE: servoModbus itself now lives further up (right above the motor-driver
+// block) so ModbusServoDriver can bind to it — see the comment there. :3
 
 #if defined(FEATURE_RS485_MODBUS) && defined(DRIVER_AIM_SERVO)
 // Report-only FAS-vs-encoder cross-check — reads servoModbus telemetry + the
@@ -524,7 +555,14 @@ static void httpTask(void* param) {
         // can only delay telemetry, never the heartbeat/HTTP/motion. :3
         TIME_STEP(otaService.handle(),    "http:ota.handle");
 #if defined(FEATURE_RS485_MODBUS)
-        TIME_STEP(servoModbus.update(),   "http:servoModbus");
+        // In Modbus motion-backend mode the bus is serviced from Core 1
+        // (servoBusTask) instead — single-owner rule, ServoModbus is not
+        // thread-safe to poll from two tasks. In FAS mode (the default,
+        // backend 0) nothing changes: httpTask keeps servicing it here
+        // exactly like before Phase 2. :3
+        if (g_motion_backend == 0) {
+            TIME_STEP(servoModbus.update(),   "http:servoModbus");
+        }
 #endif
 #if defined(FEATURE_RS485_MODBUS) && defined(DRIVER_AIM_SERVO)
         TIME_STEP(encoderValidator.update(), "http:encValidator");
@@ -534,6 +572,32 @@ static void httpTask(void* param) {
         vTaskDelay(pdMS_TO_TICKS(10));
     }
 }
+
+#if defined(FEATURE_RS485_MODBUS) && defined(DRIVER_AIM_SERVO)
+// Core 1 — Modbus bus service task, ONLY created when g_motion_backend == 1.
+// Guarded on DRIVER_AIM_SERVO too (not just FEATURE_RS485_MODBUS) because the
+// body below now calls mbMotor.executorTick() — mbMotor only EXISTS inside
+// the DRIVER_AIM_SERVO branch above. g_motion_backend can only ever be 1
+// there too, so this doesn't lose any real configuration, just keeps a
+// hypothetical FEATURE_RS485_MODBUS-without-DRIVER_AIM_SERVO build compiling.
+// Phase 3 (plan.md "Task/core layout"): setpoint-first priority. Every 2ms
+// tick, mbMotor.executorTick() runs FIRST — it only sends a setpoint from an
+// IDLE bus (StreamedSetpointExecutor::onTick), so a setpoint due this tick
+// always gets first crack at the wire. servoModbus.update() runs SECOND and
+// spends whatever's left of the tick on Configure write-queue drain / config
+// scan / telemetry-and-encoder poll rotation — its own internal spacing
+// constants (POLL_INTERVAL_MS etc.) already keep that traffic from hogging
+// the bus. A poll already in flight when a setpoint comes due can delay that
+// setpoint by up to ~1 transaction (~4ms @19200, less @115200) — acceptable
+// jitter for this phase; reprogramBaud(115200) below shrinks it. :3
+static void servoBusTask(void* /*param*/) {
+    while (true) {
+        mbMotor.executorTick(esp_timer_get_time());
+        servoModbus.update();
+        vTaskDelay(pdMS_TO_TICKS(2));
+    }
+}
+#endif
 
 
 // LEGACY_STREAM_PIPELINE: old waypoint-queue consumer (off by default)
@@ -642,6 +706,34 @@ void setup() {
 #endif
 
 #if defined(DRIVER_AIM_SERVO)
+    // Runtime motion-backend selection (Phase 2 — plan.md "Static-init trap").
+    // Read NVS ("machcfg"/backend) and bind the proxy to a concrete driver as
+    // early as physically possible — BEFORE aimGeometryInit(), BEFORE
+    // ConfigStore::load(), BEFORE motor.init()/applyDriverConfig(), before
+    // ANY call through `motor` at all. Every one of those eventually reaches
+    // MotorProxy::d(), which configASSERTs non-null — an unbound proxy is a
+    // boot-order bug that must halt loudly, not limp along silently. NVS
+    // itself is safe to read this early: the Arduino core's own startup
+    // brings up nvs_flash_init() before setup() ever runs, well before
+    // LittleFS.begin() below. :3
+    g_motion_backend = machineBackendLoad();
+#if defined(FEATURE_RS485_MODBUS)
+    if (g_motion_backend == 1) {
+        motor.bind(mbMotor);
+        APPLOG("Motion backend: MODBUS direct-drive (skeleton mode — no motion until Phase 3)");
+    } else {
+        motor.bind(fasMotor);
+        APPLOG("Motion backend: FAS step/dir");
+    }
+#else
+    // Modbus feature not compiled into this build at all — always FAS,
+    // regardless of what a stale NVS value might say (machineBackendLoad()
+    // already clamps to 0 in this case too — belt and suspenders). :3
+    motor.bind(fasMotor);
+    APPLOG("Motion backend: FAS step/dir (FEATURE_RS485_MODBUS not compiled)");
+#endif
+    webui.setMachineBackend(g_motion_backend);
+
     pinMode(AIM_PIN_STEP, OUTPUT); digitalWrite(AIM_PIN_STEP, LOW);
     pinMode(AIM_PIN_DIR,  OUTPUT); digitalWrite(AIM_PIN_DIR,  LOW);
     Wire.begin(PIN_I2C_SDA, PIN_I2C_SCL);
@@ -693,6 +785,33 @@ void setup() {
     webui.setServoModbus(servoModbus);
 #if defined(DRIVER_AIM_SERVO)
     webui.setEncoderValidator(encoderValidator);
+
+    // ---- Modbus-mode baud auto-config (Phase 3) ------------------------------
+    // OSSM-RS-style: the drive boots factory-19200 every power-cycle (we NEVER
+    // save baud to its EEPROM — see ServoModbus::reprogramBaud() doc — so a
+    // power-cycle always recovers factory state no matter what we did last
+    // session). Only worth the reprogram+rebaud latency when Modbus is the
+    // ACTIVE backend — FAS mode only needs telemetry, and its dual-baud probe
+    // already finds a drive at either speed. Runs BEFORE the reg-0x0B e-gear
+    // adoption below so that read (and everything else in this boot) lands at
+    // the FINAL baud, not the ephemeral 19200 the probe started at. :3
+    if (g_motion_backend == 1 && servoModbus.isReady() && servoModbus.baud() == 19200) {
+        if (servoModbus.reprogramBaud(115200)) {
+            APPLOG("Modbus mode: drive reprogrammed 19200 -> 115200 (OSSM-RS magic sequence) :3");
+        } else {
+            APPLOG("Modbus mode: 19200 -> 115200 reprogram FAILED — staying at 19200 "
+                   "(motion still works, just tighter bus budget per plan.md).");
+        }
+    }
+
+    // Re-apply the driver config now that the bus is actually up: the earlier
+    // motor.applyDriverConfig() call (right after motor.init()) ran BEFORE
+    // servoModbus.init(), so in Modbus mode its queued register writes (output
+    // state, torque clamp 0x18) were dropped by the !_ready guard. FAS mode is
+    // untouched — its applyDriverConfig is a no-op either way. :3
+    if (g_motion_backend == 1 && servoModbus.isReady()) {
+        motor.applyDriverConfig(g_state.driver);
+    }
 
     // Ground Truth for geometry: the drive's own e-gear register (0x0B, saved
     // in ITS EEPROM by the programmer) is the authority on steps/rev. Adopt it
@@ -786,6 +905,20 @@ void setup() {
     configASSERT(task_ok == pdPASS);
     task_ok = xTaskCreatePinnedToCore(httpTask, "HTTP", 8192, &webui, 1, nullptr, 0);
     configASSERT(task_ok == pdPASS);
+#if defined(FEATURE_RS485_MODBUS) && defined(DRIVER_AIM_SERVO)
+    // servoBusTask: Core 1, priority 5 — ONLY when Modbus is the active
+    // backend. Boot-order note: servoModbus.init() already ran earlier in
+    // setup() (in the FEATURE_RS485_MODBUS block above, well before we get
+    // here), so the bus is already probed/ready before this task starts
+    // polling it — verified by reading through setup() top to bottom, not
+    // assumed. In FAS mode (g_motion_backend == 0, the default) this task is
+    // never created at all; httpTask keeps servicing servoModbus as it always
+    // has (see the guard in httpTask above). :3
+    if (g_motion_backend == 1) {
+        task_ok = xTaskCreatePinnedToCore(servoBusTask, "ServoBus", 4096, nullptr, 5, nullptr, 1);
+        configASSERT(task_ok == pdPASS);
+    }
+#endif
 
     ossmBleService.setWaypointQueue(g_waypoint_queue);
     ossmBleService.init();

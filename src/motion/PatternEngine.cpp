@@ -259,7 +259,12 @@ void PatternEngine::_recalcParameters() {
     float depth_mm = lo + (_depth / 100.0f) * span;
     _depth_steps = mmToStep(depth_mm);
 
-    _max_steps_per_second = mmPerSecToStepsPerSec(_state.config.max_speed_mm_s);
+    // Patterns are machine-driven input: their speed authority is the INPUT
+    // limit set (what the arbiter clamps PATTERN intents at), not the generic
+    // max-speed box (which caps the motor driver / manual point moves). Tying
+    // the knob to a different ceiling than the clamp meant the dial lied
+    // whenever the two settings diverged. :3
+    _max_steps_per_second = mmPerSecToStepsPerSec(_state.config.input_max_speed_mm_s);
 }
 
 // ============================================================================
@@ -364,8 +369,14 @@ void PatternEngine::run() {
             float timeOfStroke = 0.0f;
             if (speed > 0.0f && _max_steps_per_second > 0.0f) {
                 float peak_rate_s = (speed / 100.0f) * _max_steps_per_second;
+                // Knob % = fraction of the input ceiling as ACTUAL peak
+                // carriage speed. The SimpleStroke family halves timeOfStroke
+                // per direction and cruises at 1.5×stroke/half — i.e. peak =
+                // 3×stroke/timeOfStroke — so feed it 3× the naive traversal
+                // time. (Before this, 33% on the knob already demanded the
+                // full ceiling and the top ⅔ of the dial did nothing.) :3
                 if (peak_rate_s > 1.0f)
-                    timeOfStroke = (float)_stroke_steps / peak_rate_s;
+                    timeOfStroke = 3.0f * (float)_stroke_steps / peak_rate_s;
             }
             if (timeOfStroke <= 0.0f) timeOfStroke = 0.1f;
 
@@ -409,16 +420,50 @@ void PatternEngine::run() {
             float pos_mm = lo + stepToMm(mp.stroke) * span;
             pos_mm = constrain(pos_mm, lo, hi);
 
-            // Segment duration: half the stroke time (one in OR out segment).
-            // The pattern's timeOfStroke is for a full in+out cycle; each
-            // nextTarget() call produces one half-stroke.
-            float half_stroke_s = timeOfStroke / 2.0f;
-            if (half_stroke_s < 0.005f) half_stroke_s = 0.005f;
-            uint32_t segment_ms = (uint32_t)(half_stroke_s * 1000.0f);
+            // Pattern speed/accel in mm units (from the pattern's derived
+            // dynamics — the linear span/MAX_ABSTRACT_STEPS scaling applies
+            // equally to /s and /s² quantities).
+            float speed_mm_s  = stepsPerSecToMmPerSec(mp.speed);
+            float accel_mm_s2 = stepsPerSecToMmPerSec(mp.acceleration);
+
+            // Segment duration: derive from THIS half-stroke's own dynamics
+            // (trapezoid at cruise v with accel a: T ≈ d/v + v/a), the same
+            // math advanced mode uses. The old uniform timeOfStroke/2 deadline
+            // erased every per-direction asymmetry — sensation's whole job in
+            // most patterns (fast-in/slow-out ratios up to 5×): the fast half
+            // arrived early and idled, the slow half got an infeasible T/2
+            // deadline, fell back to triangle math and executed FAST anyway.
+            // Sensation felt near-dead because pacing overrode the pattern. :3
+            float half_stroke_s = timeOfStroke / 2.0f;   // fallback pacing
+            float d_mm = fabsf(pos_mm - _motor.getPosition());
+            float seg_s;
+            if (speed_mm_s > 1.0f && d_mm > 0.05f) {
+                seg_s = d_mm / speed_mm_s
+                      + ((accel_mm_s2 > 1.0f) ? (speed_mm_s / accel_mm_s2) : 0.0f);
+            } else {
+                seg_s = half_stroke_s;
+            }
+            if (seg_s < 0.005f) seg_s = 0.005f;
+            uint32_t segment_ms = (uint32_t)(seg_s * 1000.0f);
             if (segment_ms < 5) segment_ms = 5;
 
-            // Pattern speed in mm/s (from the pattern's derived dynamics)
-            float speed_mm_s = stepsPerSecToMmPerSec(mp.speed);
+            // ---- Feasibility guard ------------------------------------------
+            // StrokeEngine trapezoids peak at 3× the engine's assumed rate
+            // (patterns halve timeOfStroke per direction, then cruise at
+            // 1.5×d/T), so above ~⅓ on the speed knob the demand exceeds the
+            // input ceiling. Submitting that as-is makes the arbiter clamp the
+            // SPEED while the DEADLINE stays infeasible — every stroke lands
+            // late, the next intent launches from short of the endpoint, and
+            // the stroke drifts. Never ask for more than the machine may give:
+            // clamp the demand at the input ceiling and stretch the deadline
+            // by the same ratio so pacing, planner and motor all agree on when
+            // the stroke lands. :3
+            float input_ceiling = _state.config.input_max_speed_mm_s;
+            if (input_ceiling >= 1.0f && speed_mm_s > input_ceiling) {
+                float stretch = speed_mm_s / input_ceiling;
+                segment_ms   = (uint32_t)((float)segment_ms * stretch);
+                speed_mm_s   = input_ceiling;
+            }
 
             MotionIntent intent;
             intent.source        = MotionSource::PATTERN;
@@ -561,7 +606,10 @@ float PatternEngine::_submitApStroke(uint32_t stroke_count, const advpat::Stroke
     float d = fabsf(target_mm - _motor.getPosition());
     if (d < 0.25f) return -1.0f;            // sub-quarter-mm: nothing worth dispatching
 
-    float v = sp.speed_frac * _state.config.max_speed_mm_s;
+    // Input limit set, not the max-speed box — same authority the arbiter
+    // clamps PATTERN intents at (the header comment always said "input
+    // ceiling"; the code just didn't). :3
+    float v = sp.speed_frac * _state.config.input_max_speed_mm_s;
     if (v < 1.0f) v = 1.0f;                 // keep the deadline finite at knob extremes
 
     float min_a = (v * v) / d;

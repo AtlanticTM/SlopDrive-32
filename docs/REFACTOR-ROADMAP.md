@@ -1,167 +1,149 @@
-# SlopDrive-32 — Refactor & Library Roadmap
+# SlopDrive-32 — Refactor & Library Roadmap (CONSENSUS v1)
 
-*Living document — iterate freely, strike things, reorder. Updated 2026-07-23
-after SlopSync went live-verified (probe 8/8, fw 2.1.37).*
+*Stamped 2026-07-23 after SlopSync went live-verified (probe 8/8). This is the
+agreed map; change it deliberately, not by drift.*
 
 ---
 
-## Where we stand (context, not tasks)
+## The North Star (stamped, do not gloss)
 
-The "mega modularization" now has three proven pillars, all following the same
-pattern — hardware-free core + native doctest suite + thin ESP32 glue,
-vendorable to other boards:
+**SlopSync is end-to-end.** An application implements a SlopSync client
+library and talks directly to the machine — discovery, capability
+negotiation, telemetry, control, AND motion streaming. The transport zoo
+(WSDM server, BLE UART, dongle bridge, TransportManager's exactly-one-live
+arbitration) is scheduled for demolition as SlopSync absorbs each role.
+Compat is layered, not middleware:
+
+1. **Native motion streaming** — STREAM channel, client→hub, timestamped
+   sample bundles (the wire format already supports this by design: ≤32
+   samples / ≤20 ms span, c2h direction). Streaming clients parse TCode /
+   funscript / anything on THEIR side and ship native samples.
+2. **TCode pass-through channel** — raw TCode lines wrapped in a SlopSync
+   channel for dumb-compat clients; hub feeds the existing parser. Bounded
+   compat, never a second control plane.
+3. **Legacy survivor** — raw serial TCode v3 @333 Hz (Intiface-over-USB)
+   keeps its dedicated path indefinitely.
+
+"More compat more better, but not to the point it gets convoluted."
+
+---
+
+## Where we stand
 
 | Module | Status |
 |---|---|
-| **SlopSync** (protocol + lib + firmware hub) | LIVE — spec'd, 14 native suites, verified on hardware end-to-end |
-| **SlopLog** (systemwide logging) | LIVE — all 165 legacy sites migrated, boot narration, serial handoff |
-| **SlopGlow** (semantic LEDs + liveness gate) | LIVE — earned its keep on day one of existence |
-| TMC2160 | 🪦 nuked (it never worked and it knows what it did) |
+| **SlopSync** (protocol + lib + firmware hub) | LIVE — verified on hardware end-to-end, probe 8/8 |
+| **SlopLog** | LIVE — all legacy sites migrated, boot narration, serial handoff |
+| **SlopGlow** | LIVE — liveness gate field-proven on day one |
+| TMC2160 | 🪦 nuked (fw 2.1.38) |
 
 ---
 
-## 1. Libraries to adopt (the original shopping list)
+## 1. Ruckig — STAMPED, top priority, both modes
 
-### 1.1 Ruckig — jerk-limited motion planning ("peak tier")
-The reason we migrated to C++20 in the first place. Community edition is
-time-optimal jerk-limited OTG (online trajectory generation) — the thing that
-makes ossm-rs streaming feel liquid.
+Gold-standard jerk-limited motion calculation, replacing the cubic planner
+entirely. Mode split falls out of what each input can know:
 
-- **Where it lands:** inside the MotionArbiter's planning step. Today a plan is
-  trapezoidal via FastAccelStepper's own ramp; Ruckig would compute the
-  jerk-limited profile and FAS (or the Modbus executor) tracks it. The
-  D4 doctrine (ONE COMMAND → ONE PLAN → execute) is unchanged — Ruckig just
-  makes the PLAN better. Also the natural upgrade path for
-  `ServoMotionExecutor`'s hand-rolled jerk-limited tracker.
-- **Watch out:** Ruckig wants a cyclic update loop for streaming mode — that
-  collides with "event-driven, never clocked" if used naively. The correct
-  marriage: Ruckig in *waypoint/one-shot* mode per intent, not a 1 kHz
-  Ruckig tick. Needs a design pass before code.
-- **Effort:** medium. **Risk:** medium (motion-path change = careful bench time).
+- **TCode v4 / one-command-per-move (interp data included): ONE-SHOT.**
+  A complete move exists → compute the perfect jerk-limited profile from
+  ACTUAL machine state (pos/vel/acc) to target within the commanded
+  duration, execute it faithfully. "A planned move that is perfect" — this
+  is the D4 doctrine with a better planner in the plan step.
+- **TCode v3 / dense point streams (timing sometimes absent): CYCLIC
+  TRACKING.** No move to plan — the future is unknown. Ruckig chases the
+  newest target under v/a/j limits. Replaces the cubic interpolator; the
+  ossm-rs liquid feel.
+- Manual point moves stay FAS trapezoids (fine feel, simple fast path).
+- Execution for both Ruckig modes rides the existing 1 kHz sampler →
+  `submitStreamSample` arbiter path. No new clocked anything; the arbiter
+  doctrine is untouched.
 
-### 1.2 Boost SML — compile-time state machines
-Header-only, compile-time-checked transitions ("catches issues at compile
-time, love it").
+## 2. Boost SML — STAMPED with a scope cut
 
-- **Candidates, in order of payoff:**
-  1. **Homing FSM** (motorTask's hand-rolled homing sequence — the hairiest
-     state logic in the firmware)
-  2. Transport lifecycle in TransportManager (exactly-one-live + fallback)
-  3. OTA lifecycle (idle → preparing → flashing → rebooting/failed)
-- **Non-candidate:** SlopSync session states — the library is frozen-ish,
-  deterministic, and already table-tested; don't churn it.
-- **Effort:** small per-FSM. **Risk:** low (behavior-preserving rewrites with
-  the compiler checking the transition table).
+- **Homing FSM: yes** (hairiest, most safety-adjacent state logic).
+- **OTA lifecycle: later, opportunistic.**
+- **TransportManager: NO** — it is scheduled for demolition under the North
+  Star; we don't renovate the gallows. Each SlopSync absorption step
+  removes transport-manager surface instead.
 
-### 1.3 ETL (Embedded Template Library) — fixed containers
-`etl::vector`, `etl::circular_buffer`, `etl::string` etc. — heap-free,
-bounds-checked.
+## 3. ETL — demoted (final)
 
-- **Honest reassessment:** the strongest original motivation (ad-hoc rings
-  everywhere) has partly evaporated — SlopLog/SlopGlow/slopsync rolled their
-  own fixed structures, and the house SeqRing idiom is small. ETL still earns
-  its slot for *firmware-side* String elimination (ArduinoJson + WebUI String
-  churn in HTTP handlers) and any new comms buffers.
-- **Decision needed:** adopt broadly, adopt only for new code, or drop from
-  the list. My lean: **new code only**, no retrofit crusade.
+Own fixed structures + std cover us; String-churn paths die with
+slopsync-js; no retrofit crusade. Revisit only on concrete need.
 
-### 1.4 Async web server — *deliberately parked*
-ESPAsyncWebServer's callback-context footguns (heap discipline, no blocking in
-handlers) vs the now-tamed sync WebServer + isolated WS tasks. SlopSync over
-WS is the real future control plane; the HTTP side is boot-strap + fallback.
-**Recommendation: park until slopsync-js makes HTTP mostly static-file-only,
-then re-evaluate whether it matters at all.**
+## 4. Async web server — parked (final)
 
----
+Handlers-in-network-task is the failure class we just spent a day
+exorcising. Sync WebServer + isolated WS tasks until HTTP is static-files +
+OTA only, then re-evaluate whether it matters at all.
 
-## 2. Modules to build (Slop* pipeline)
+## 5. slopsync-js — parked until motion + library refactor land
 
-### 2.1 slopsync-js — the WebUI becomes a SlopSync client
-The big one. A browser-side SlopSync client (WS :82, CBOR decode, shadow
-store) that progressively replaces the bespoke UiSocket binary protocol.
+Phasing when it wakes: A read-only STATE cards (dual-plane with UiSocket) →
+B intents (echo-confirmed lifecycle) → hub-side STREAM pacing → C retire
+overlapping UiSocket frames.
 
-- Phase A: read-only — telemetry/status cards driven by SlopSync STATE
-  subscriptions alongside the existing UiSocket (dual-plane, zero risk).
-- Phase B: intents — controls send SlopSync INTENTs, echo-confirmed lifecycle
-  maps 1:1 onto the existing Ground-Truth shadow pattern (`cfg_gen`,
-  applied-values) the UI already implements.
-- Phase C: retire overlapping UiSocket frames (keep the 240 Hz telemetry ring
-  on UiSocket until SlopSync grows hub-side STREAM pacing — see 3.4).
-- JS work — per working agreement, I own this end-to-end and only surface
-  state-sync decisions.
+## 6. SlopSim — STAMPED (name approved)
 
-### 2.2 Simulator — **SlopSim** *(name candidate — approve/veto)*
-Desktop build of the machine: slopsync-core's in-process binding + a motion
-model (mass/velocity/limits) + the real Hub + delegate compiled for host.
-Answers the old question "is the firmware sim exactly the machine or not
-even remotely" — with slopsync-core it can be *literally the same code*.
-- Unlocks: UI development without hardware, protocol fuzzing, deterministic
-  replay of field incidents (the fault-injection binding already exists).
-- **Effort:** medium; most substrate already exists (that was the plan all
-  along).
+As close to the actual machine as makes sense: **motion + planning
+validation at the `MotorDriver` seam** — a sim driver modeling the
+kinematics FAS would execute. Explicitly NOT emulated: power electronics,
+RS485/motor comms, FAS internals. Real Hub + real delegate + in-process
+fault-injection transport + deterministic replay. v2: host-side WS
+transport so the probe/UI/MFP connect to the sim as if it were hardware.
 
-### 2.3 Board capability traits — the "feature table" for the ecosystem
-Constexpr board-trait headers (pins, peripherals, features) so Reference PCB
-(WROOM-32D), our S3, and the v2 C6 build from ONE codebase with per-board
-`#if`-free module wiring. This is the OSSM-ecosystem compatibility play.
-- Builds directly on what config_api.h already does, formalized per-board.
-- Feeds `/api/capabilities` + the SlopSync catalog automatically — a board
-  advertises what it truly has.
+## 7. Board capability traits — STAMPED
 
-### 2.4 C5 node integration
-The two ESP32-C5 nodes (relay + T-Dongle display) join the family:
-- Vendored SlopLog (they have zero logging story) + SlopGlow (they have LEDs).
-- **SlopSync-over-ESP-NOW transport** — second real ITransport binding
-  (ACKMASK/BEACON frames + the AckLossRate congestion signal already exist in
-  the wire layer for exactly this).
-- The display node becomes a SlopSync *client* rendering machine state — the
-  first non-browser ecosystem device. Good dogfood for the protocol.
+Header-per-board (`boards/<name>.h`) defining one constexpr/macro surface,
+zero templates. Built for WILD featureset variance — this is not a
+single-linear-actuator-only idea. **Target single axis until rock solid**;
+expandability is the design constraint, multi-axis is the future reward.
+Board headers feed /api/capabilities + the SlopSync catalog so boards
+advertise what they truly have.
 
----
+## 8. Pairing UX — rough-in only (hardware still in flux)
 
-## 3. Refactor backlog (smaller, ordered by value)
+Plumbing exists (PairingManager, NVS store, SlopGlow Pairing state).
+WebUI card + PIN display when hardware settles.
 
-1. **Pairing enforcement flip** — `SlopDriveHubDelegate::validateToken` is
-   controller-for-all (LAN-trust). Flip to token-gated once a pairing UX
-   exists (PIN display in WebUI + pairing card). Deliberate decision, not a
-   default.
-2. **SeqRing<T,N> promotion** — telemetry ring (WebUI) + anomaly ring
-   (SystemState) are the same idiom; unify. (Idempotency/applog rings are
-   different shapes — leave them.)
-3. **RAII CritSection guard** — replace raw portENTER/EXIT pairs (~30 sites);
-   mechanical, prevents the forgotten-exit class of bug.
-4. **LE byte writers for UiSocket** — ~40 hand-packed frame lines behind
-   `putU16LE`-style helpers (slopsync's byte_io is the in-house prior art).
-   Do together with 2.1 Phase C to avoid double-touching frames.
-5. **Hub-side STREAM pacing** (slopsync-core, additive) — unlocks true
-   timestamped telemetry bundles over SlopSync; prerequisite for retiring
-   UiSocket's 0x01 telemetry frames.
-6. **Deferred deletions** — SystemState dormant `buf[]` ring +
-   `gen_rate_tick_hz` (needs a config-migration story), legacy
-   `esp32-s3-devkitc-1` env (dies at merge). `ServoModbus::sendSetpoint`
-   stays (deliberately-retained future API).
-7. **Compile-floor release profile** — `SLOPLOG_COMPILE_LEVEL=2` (Info+) for
-   release builds once debugging calms down; Debug stays for dev.
+## 9. Trust model — STAMPED: (C) viewer-default
 
----
+Unpaired client = viewer (watch, never drive). Pairing grants controller.
+**Security rider (NON-NEGOTIABLE): OTA rights are NEVER derivable from
+SlopSync roles.** A paired controller can move the machine within limits;
+it can NEVER flash code. OTA stays on its own token plane (HTTP +
+X-OTA-Token, constant-time compare). Hardening backlog: per-boot nonce /
+challenge-response so a sniffed token can't replay; keep admin distinct
+from controller.
 
-## 4. Endgame sequencing (proposal — argue with me)
+## 10. Sequencing — STAMPED
 
 ```
-now ──► slopsync-js Phase A/B          (UI on the protocol, dual-plane)
-    ──► pairing enforcement + UX       (before anyone else's device connects)
-    ──► merge feat/cpp20-slopsync → main   (branch has earned it)
-    ──► SlopSim + board traits         (parallel tracks, both unblock ecosystem)
-    ──► C5 nodes (ESP-NOW transport)   (second transport proves §13 for real)
-    ──► Ruckig planning pass           (motion quality, careful bench cycle)
-    ──► SML homing FSM                 (opportunistic, low risk)
+NOW  ──► Ruckig motion core (v3 cyclic tracker + v4 one-shot planner)
+     ──► SlopSync inbound motion: STREAM c2h handler + TCode pass-through channel
+     ──► MFP plugin (C# SlopSync client) — first external implementation,
+         rock-solid link is the milestone gate
+     ──► merge feat/cpp20-slopsync → main + pairing rough-in (model C)
+     ──► widen: slopsync-js A/B, SlopSim v1 ∥ board traits
+     ──► C5 nodes (ESP-NOW transport — spec pre-fitted: min_transport_payload
+         242 = ESP-NOW 250 minus our 8-byte header)
+     ──► TransportManager demolition as absorption completes
+     ──► SML homing FSM (opportunistic)
 ```
-
-Golden-vector `.bin` generation + the standalone conformance CLI slot in
-whenever a third-party implementer materializes (the OSSM/R&D folks) — the
-manifest + `catalog_check.hpp` engine already exist.
 
 ---
 
-*Naming candidates on the table: **SlopSim** (simulator). Everything else
-either has a name or is an internal class that keeps a plain one.*
+## Refactor backlog (unchanged order)
+
+1. Pairing enforcement flip (model C) — after UX exists.
+2. SeqRing<T,N> promotion (telemetry + anomaly rings).
+3. RAII CritSection guard (~30 raw portENTER/EXIT sites).
+4. LE byte writers for UiSocket — batch with slopsync-js Phase C.
+5. Hub-side STREAM pacing (slopsync-core, additive).
+6. Deferred deletions: SystemState dormant buf[] + gen_rate_tick_hz
+   (config-migration story), legacy esp32-s3-devkitc-1 env at merge.
+   ServoModbus::sendSetpoint stays (deliberate future API).
+7. SLOPLOG_COMPILE_LEVEL=2 release profile when debugging calms.
+8. Motor-tab dead config (stepper-era DriverConfig fields drive nothing on
+   the servo) — batch with #6, needs config migration.
+9. OTA hardening: per-boot nonce / challenge-response (see §9 rider).

@@ -287,7 +287,7 @@ float ModbusServoDriver::getTargetPosition() const {
 // ---- Driver config -------------------------------------------------------------
 
 void ModbusServoDriver::applyDriverConfig(const DriverConfig& cfg) {
-    // No TMC-style register map to apply — the AIM drive's gains live on the
+    // No stepper-chip register map to apply — the AIM drive's gains live on the
     // Configure pane (handleApiServo talks to ServoModbus directly). This is
     // the MINIMAL Modbus-mode expected register set: output state (matches
     // our own _enabled flag) + torque/current clamp. No PID writes. :3

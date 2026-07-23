@@ -220,7 +220,6 @@ private:
     void handleApiPause();
     void handleApiHalt();
     void handleApiOverride();
-    void handleApiTmc();
     // AIM servo drive over RS485 Modbus — GET: telemetry + config-register
     // mirror + runtime geometry; POST ops: scan / live-tune / program (full
     // gold-motor sequence, structural regs, forces re-home) / raw / save.

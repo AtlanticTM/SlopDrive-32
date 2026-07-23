@@ -99,8 +99,6 @@ void WebUI::init() {
     _httpServer->on("/api/pause",     HTTP_POST, [this]() { slopglowActivity(); handleApiPause(); });
     _httpServer->on("/api/halt",      HTTP_POST, [this]() { slopglowActivity(); handleApiHalt(); });
     _httpServer->on("/api/override",  HTTP_POST, [this]() { slopglowActivity(); handleApiOverride(); });
-    _httpServer->on("/api/tmc",       HTTP_GET,  [this]() { handleApiTmc(); });
-    _httpServer->on("/api/tmc",       HTTP_POST, [this]() { slopglowActivity(); handleApiTmc(); });
     _httpServer->on("/api/servo",     HTTP_GET,  [this]() { handleApiServo(); });
     _httpServer->on("/api/servo",     HTTP_POST, [this]() { slopglowActivity(); handleApiServo(); });
     _httpServer->on("/api/clearfault",HTTP_POST, [this]() { slopglowActivity(); handleApiClearFault(); });
@@ -356,9 +354,9 @@ void WebUI::handleApiStatus() {
         s.add(snap[i].raw_mm);
     }
 
-    // Driver-health block: NO live fault readback exists on either driver (TMC
-    // DRV_STATUS polling was removed; the AIM drive exposes none over step/dir).
-    // Report that honestly instead of a hardcoded all-clear (otpw/ot/s2g/faulted
+    // Driver-health block: NO live fault readback exists on the AIM drive — it
+    // exposes no fault status over the step/dir interface. Report that honestly
+    // instead of a hardcoded all-clear (otpw/ot/s2g/faulted
     // all false) that would show "no fault" during a real overtemperature or
     // short-to-ground event. valid:false = this block carries no live data. :3
     JsonObject drv = doc["driver"].to<JsonObject>();
@@ -846,42 +844,7 @@ void WebUI::handleApiClients() {
 }
 
 // ============================================================================
-// handleApiTmc (HTTP GET + POST) — delegates to applyDriverConfig
-// ============================================================================
-
-void WebUI::handleApiTmc() {
-    if (_httpServer->method() == HTTP_GET) {
-        JsonDocument doc;
-        doc["run_current"]  = _state.driver.run_current_ma;
-        doc["hold_current"] = _state.driver.hold_current_pct;
-        doc["stealthchop"]  = _state.driver.stealthchop;
-        doc["tpwm_thrs"]    = _state.driver.tpwm_thrs;
-        doc["toff"]         = _state.driver.toff;
-        doc["tbl"]          = _state.driver.tbl;
-        doc["hstart"]       = _state.driver.hstart;
-        doc["hend"]         = _state.driver.hend;
-        String json;
-        serializeJson(doc, json);
-        _httpServer->send(200, "application/json", json);
-        return;
-    }
-
-    JsonDocument doc;
-    if (deserializeJson(doc, _httpServer->arg("plain"))) {
-        _httpServer->send(400, "application/json", "{\"error\":\"Invalid JSON\"}");
-        return;
-    }
-
-    JsonDocument resp;
-    applyDriverConfig(doc, resp);
-
-    String json;
-    serializeJson(resp, json);
-    _httpServer->send(200, "application/json", json);
-}
-
-// ============================================================================
-// applyDriverConfig — shared mutation used by HTTP POST /api/tmc AND WS op
+// applyDriverConfig — shared driver-config mutation (used by the WS op)
 // ============================================================================
 
 bool WebUI::applyDriverConfig(JsonDocument& doc, JsonDocument& resp) {
@@ -1738,9 +1701,9 @@ bool WebUI::handleCommand(uint8_t op, JsonDocument& payload_in,
     // ---- Driver config ---------------------------------------------------
     case WS_OP_CLEAR_FAULT:
         // No driver fault readback exists on this build — nothing to clear or
-        // verify. Re-apply the current driver config (on the TMC this rewrites
-        // the SPI registers with readback verification, a genuine recovery from
-        // a transient glitch) but say honestly that no fault was cleared. :3
+        // verify. Re-apply the current driver config (on the AIM step/dir drive
+        // this is effectively a no-op refresh, not a register rewrite) but say
+        // honestly that no fault was cleared. :3
         {
             JsonDocument dummy;
             dummy["reset"] = false;  // don't reset, just re-apply current config

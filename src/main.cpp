@@ -35,10 +35,6 @@
 #include "freertos/queue.h"
 #include <esp_timer.h>
 
-#if defined(DRIVER_TMC2160)
-#include "TMC2160StepperDriver.h"
-#endif
-
 #if defined(DRIVER_AIM_SERVO)
 #include "AIMServoDriver.h"
 #include "MotorProxy.h"
@@ -97,24 +93,21 @@ static ServoModbus     servoModbus(Serial1, /* addr */ 1);
 // module touches `motor`. Every other module (patternEngine, arbiter, webui,
 // encoderValidator) still captures MotorDriver& motor — the proxy — at
 // static-init time exactly as before; only the bind target is now runtime-
-// selectable instead of compile-time-fixed. TMC2160 branch is UNCHANGED — no
-// proxy, no second backend, it's a single fixed driver as always.
-#if defined(DRIVER_TMC2160)
-  TMC2160StepperDriver motor;
-#elif defined(DRIVER_AIM_SERVO)
+// selectable instead of compile-time-fixed.
+#if defined(DRIVER_AIM_SERVO)
   AIMServoDriver    fasMotor;
 #if defined(FEATURE_RS485_MODBUS)
   ModbusServoDriver mbMotor(servoModbus);
 #endif
   MotorProxy        motor;
 #else
-  #error "No motor driver selected. Define DRIVER_TMC2160 or DRIVER_AIM_SERVO in platformio.ini build_flags."
+  #error "No motor driver selected. Define DRIVER_AIM_SERVO in platformio.ini build_flags."
 #endif
 
 // 0 = FAS step/dir (default), 1 = Modbus direct drive. Set once, early in
 // setup(), from machineBackendLoad() — read-only after that point until the
 // next reboot (backend switch is strict reboot-to-apply, see WebUI.cpp
-// POST /api/machine/commit). AIM branch only; meaningless on TMC2160. :3
+// POST /api/machine/commit). AIM servo backend only. :3
 static uint8_t g_motion_backend = 0;
 
 static SystemState        g_state;

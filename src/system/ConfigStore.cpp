@@ -133,7 +133,9 @@ void ConfigStore::save(SystemState& state, RangeMapper& mapper, MotorDriver& mot
     // nearest 1mm because the safety zone makes sub-mm precision meaningless. :3
     ck(prefs.putFloat("stroke_mm", motor.getMeasuredStrokeMm()));
 
-    // TMC driver tunables (from the Motor tab)
+    // Driver tunables (from the Motor tab). NVS keys keep their legacy "tmc_"
+    // prefix so saved settings survive across this rename — they're persistence
+    // identifiers, not driver references. :3
     ck(prefs.putUShort("tmc_run", state.driver.run_current_ma));
     ck(prefs.putUChar("tmc_hold", state.driver.hold_current_pct));
     ck(prefs.putUChar("tmc_sc", state.driver.stealthchop));
@@ -285,7 +287,7 @@ void ConfigStore::load(SystemState& state, RangeMapper& mapper, MotorDriver& mot
             state.default_range_max = state.config.max_rail_mm;
         }
 
-        // TMC tunables
+        // Driver tunables (legacy "tmc_" NVS keys — persistence identifiers)
         state.driver.run_current_ma   = prefs.getUShort("tmc_run", state.driver.run_current_ma);
         state.driver.hold_current_pct = prefs.getUChar("tmc_hold", state.driver.hold_current_pct);
         state.driver.stealthchop      = prefs.getUChar("tmc_sc", state.driver.stealthchop);
@@ -321,8 +323,8 @@ void ConfigStore::load(SystemState& state, RangeMapper& mapper, MotorDriver& mot
 
 
         if (state.driver.run_current_ma < 250 || state.driver.run_current_ma > 3000)
-            state.driver.run_current_ma = TMC_RUN_CURRENT_MA;
-        if (state.driver.toff < 1 || state.driver.toff > 15) state.driver.toff = TMC_TOFF;
+            state.driver.run_current_ma = DRIVER_DEFAULT_RUN_CURRENT_MA;
+        if (state.driver.toff < 1 || state.driver.toff > 15) state.driver.toff = DRIVER_DEFAULT_TOFF;
 
         mapper.setRange(rmin, rmax);
         // Write the resolved range back into state.config too — SystemState.h

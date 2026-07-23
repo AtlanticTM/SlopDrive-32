@@ -33,7 +33,7 @@ AIMServoDriver::AIMServoDriver() {}
 // ---- Lifecycle ---------------------------------------------------------------
 
 void AIMServoDriver::init() {
-    // No SPI bus to bring up. No TMC registers to write. No chip select to
+    // No SPI bus to bring up. No driver chip registers to write. No chip select to
     // assert. We just configure two GPIO pins and hand them to FAS. The 57AIM30
     // drive is already sitting there, energized, waiting to be told what to do.
     // Plug it in and it's ready to take everything we give it. :3
@@ -471,7 +471,7 @@ bool AIMServoDriver::home(int32_t home_speed_steps_s) {
         _current.resetPeaks();
     }
     // Default to AIM_HOMING_SPEED_STEPS_S (500 steps/s = 25 mm/s) — safe and
-    // controlled. The old 4000 default was inherited from the TMC build where
+    // controlled. The old 4000 default was inherited from the old stepper build where
     // 80 steps/mm made it 50 mm/s. At 20 steps/mm, 4000 = 200 mm/s — the
     // carriage would slam into the endstop like a freight train. uhoh. :3
     _home_speed_steps_s = (home_speed_steps_s > 0) ? home_speed_steps_s : AIM_HOMING_SPEED_STEPS_S;

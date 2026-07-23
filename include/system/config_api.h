@@ -32,7 +32,7 @@
 // Bumped by hand on each firmware change so an OTA can be verified as landed
 // (surfaced via /api/capabilities → "fw_version" and the boot log). This is the
 // single source of truth for "which build is actually running." :3
-#define FIRMWARE_VERSION        "2.1.37"
+#define FIRMWARE_VERSION        "2.1.38"
 
 // =============================================================================
 // WiFi Configuration (values come from secrets.h)
@@ -67,21 +67,6 @@
 // Keeps a WiFi outage from turning into a continuous scan storm on the comms
 // task (each cycle blocks ~scan + connect-wait). :3
 #define WIFI_RECONNECT_INTERVAL_MS  5000
-
-// =============================================================================
-// Device Geometry — TMC2160 build (DRIVER_TMC2160)
-// =============================================================================
-// Physical travel limit in millimeters
-#define PHYSICAL_MAX_TRAVEL_MM  240.0f
-
-// Stepper + belt mechanics:
-//   NEMA motor: 200 steps/rev
-//   TMC microsteps: configured via driver (see MICROSTEPS below)
-//   Pulley: 20 teeth, 2mm pitch → 40mm per motor revolution
-#define MOTOR_STEPS_PER_REV     200
-#define PULLEY_TEETH            20
-#define BELT_PITCH_MM           2.0f
-#define MM_PER_MOTOR_REV        (PULLEY_TEETH * BELT_PITCH_MM)  // 40mm
 
 // =============================================================================
 // Device Geometry — AIMServo build (DRIVER_AIM_SERVO)
@@ -239,24 +224,13 @@ float    aimStepsPerMm();
 //      stroke. Once homing feels out both hard stops, the MEASURED stroke is
 //      the source of truth and governs the usable range (measurement wins).
 // This macro is only the factory default that seeds that setting — 500mm is a
-// sane, generous rail length. The compile-time PHYSICAL_MAX_TRAVEL_MM /
-// geometry constants above remain purely for the drive-train math. :3
+// sane, generous rail length. The AIM drive-train constants above (steps/mm,
+// drum geometry) remain purely for the motion math. :3
 #define DEFAULT_MAX_RAIL_MM  500.0f
 
 // =============================================================================
 // Motor Driver Pins (ESP32-S3)
 // =============================================================================
-// --- TMC2160 build (DRIVER_TMC2160) ---
-#define PIN_STEP                21   // Step signal
-#define PIN_DIR                 20   // Direction signal
-#define PIN_ENABLE              19   // Enable signal (active low)
-#define PIN_ENDSTOP             47   // Endstop limit switch (active LOW, normally open to GND)
-
-#define PIN_TMC_CS              11   // TMC Chip Select
-#define PIN_TMC_SCLK            12   // TMC Clock
-#define PIN_TMC_MOSI            13   // TMC Master Out Slave In
-#define PIN_TMC_MISO            10   // TMC Master In Slave Out
-
 // --- AIMServo build (DRIVER_AIM_SERVO) — CUSTOM v0.0 CONTROLLER (Nano ESP32) ---
 // New board routes the servo drive through an SN74AHCT125 buffer -> opto inputs.
 // PUL → GPIO 5 (D2), DIR → GPIO 6 (D3). No endstop on this board — homing is
@@ -327,13 +301,6 @@ float    aimStepsPerMm();
 // =============================================================================
 // Motor Defaults
 // =============================================================================
-// Microsteps on the TMC2160 (set via driver config tab, saved in EEPROM)
-#define MICROSTEPS              16
-
-// Steps per mm = (MOTOR_STEPS_PER_REV * MICROSTEPS) / MM_PER_MOTOR_REV
-//              = (200 * 16) / 40 = 80 steps/mm
-#define STEPS_PER_MM            ((MOTOR_STEPS_PER_REV * MICROSTEPS) / MM_PER_MOTOR_REV)
-
 // Maximum motor speed in mm/s.
 // Normal UI cap: 5000 mm/s. Expert mode UI cap: 10000 mm/s.
 // This firmware ceiling is set to 10000 so expert mode values aren't rejected
@@ -398,19 +365,21 @@ float    aimStepsPerMm();
 
 
 // =============================================================================
-// TMC2160 Driver Defaults
+// Driver Tunable Defaults
 // =============================================================================
-#define TMC_R_SENSE             0.15f   // Ohms (match original StrokeEngine board)
-#define TMC_RUN_CURRENT_MA      2000     // mA (default run current for TMC2160)
-#define TMC_STALLGUARD_DMA      -64
-#define TMC_TOFF                3        // off-time regulation (match original)
-#define TMC_TSTEP_REG           255
-#define TMC_HOLD_CURRENT_PCT    50       // % of run current while idle
-#define TMC_TBL                 2        // blank time code (1 = 24 clocks, typical)
-#define TMC_STEALTHCHOP         0        // 0 = SpreadCycle (more torque), 1 = quiet
-#define TMC_TPWM_THRS           0        // 0 = never auto-switch stealth<->spread
-#define TMC_HSTART              5        // chopper hysteresis start
-#define TMC_HEND                1        // chopper hysteresis end
+// Seed DriverConfig / the Motor-tab driver settings, persisted to NVS. These are
+// legacy stepper-chopper params retained for the shared driver-config plumbing;
+// the closed-loop 57AIM servo configures its gains over Modbus and ignores most
+// of them, but the struct is still populated + persisted + echoed to the UI. :3
+#define DRIVER_DEFAULT_RUN_CURRENT_MA   2000     // mA (default run current)
+#define DRIVER_DEFAULT_STALLGUARD_DMA   -64
+#define DRIVER_DEFAULT_TOFF             3        // off-time regulation
+#define DRIVER_DEFAULT_HOLD_CURRENT_PCT 50       // % of run current while idle
+#define DRIVER_DEFAULT_TBL              2        // blank time code (1 = 24 clocks, typical)
+#define DRIVER_DEFAULT_STEALTHCHOP      0        // 0 = SpreadCycle (more torque), 1 = quiet
+#define DRIVER_DEFAULT_TPWM_THRS        0        // 0 = never auto-switch stealth<->spread
+#define DRIVER_DEFAULT_HSTART           5        // chopper hysteresis start
+#define DRIVER_DEFAULT_HEND             1        // chopper hysteresis end
 
 
 // =============================================================================
@@ -613,7 +582,7 @@ struct DeviceConfig {
     // Control mode
     uint8_t control_mode;      // 0=Manual, 1=Buttplug
 
-    // TMC Driver settings (live-tunable from the Motor tab)
+    // Driver settings (live-tunable from the Motor tab)
     uint16_t microsteps;       // 1/2/4/8/16/32/64/128/256 - smoothness vs torque
     uint16_t run_current_ma;   // motor RMS current while moving (torque + heat)
     uint8_t  hold_current_pct; // % of run current when idle (holding torque/heat)
@@ -651,16 +620,16 @@ inline DeviceConfig getDefaultConfig() {
     cfg.input_max_speed_mm_s  = DEFAULT_MAX_SPEED_MM_S;
     cfg.input_max_accel_mm_s2 = DEFAULT_ACCEL_MM_S2;
     cfg.control_mode = (uint8_t)ControlMode::BUTTPLUG;
-    cfg.microsteps = MICROSTEPS;
-    cfg.run_current_ma = TMC_RUN_CURRENT_MA;
-    cfg.hold_current_pct = TMC_HOLD_CURRENT_PCT;
-    cfg.stallguard_dma = TMC_STALLGUARD_DMA;
-    cfg.toff = TMC_TOFF;
-    cfg.tbl = TMC_TBL;
-    cfg.stealthchop = TMC_STEALTHCHOP;
-    cfg.tpwm_thrs = TMC_TPWM_THRS;
-    cfg.hstart = TMC_HSTART;
-    cfg.hend = TMC_HEND;
+    cfg.microsteps = 16;
+    cfg.run_current_ma = DRIVER_DEFAULT_RUN_CURRENT_MA;
+    cfg.hold_current_pct = DRIVER_DEFAULT_HOLD_CURRENT_PCT;
+    cfg.stallguard_dma = DRIVER_DEFAULT_STALLGUARD_DMA;
+    cfg.toff = DRIVER_DEFAULT_TOFF;
+    cfg.tbl = DRIVER_DEFAULT_TBL;
+    cfg.stealthchop = DRIVER_DEFAULT_STEALTHCHOP;
+    cfg.tpwm_thrs = DRIVER_DEFAULT_TPWM_THRS;
+    cfg.hstart = DRIVER_DEFAULT_HSTART;
+    cfg.hend = DRIVER_DEFAULT_HEND;
     cfg.manual_depth = 0.5f;
     cfg.manual_speed = 0.3f;
     return cfg;

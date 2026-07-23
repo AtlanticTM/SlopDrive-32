@@ -120,7 +120,7 @@ public:
     float getTargetPosition() const override;
 
     // ---- Driver config ------------------------------------------------------
-    // No TMC registers to write — the 57AIM30 is configured via its own
+    // No driver chip registers to write — the 57AIM30 is configured via its own
     // front-panel DIP switches and parameter software. This is a no-op that
     // satisfies the interface. We accept the struct so the rest of the system
     // (ConfigStore, WebUI) doesn't need to know we're a dumb drive. :3

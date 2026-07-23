@@ -11,8 +11,8 @@ class FastAccelStepper;
 // ============================================================================
 //
 // All physical hardware interactions (steppers, servos, encoders) MUST be
-// abstracted behind this interface.  Concrete drivers (TMC2160StepperDriver,
-// future V2 brushless servo, etc.) implement these pure virtuals.
+// abstracted behind this interface.  Concrete drivers (AIMServoDriver,
+// ModbusServoDriver, future V2 brushless servo, etc.) implement these pure virtuals.
 //
 // Lifecycle hooks:
 //   init()          — hardware setup, pin config, driver init (called once in setup())
@@ -24,7 +24,7 @@ class FastAccelStepper;
 // degrees, or raw DAC values.  Callers remain unit-agnostic.
 //
 // FastAccelStepper (Risk #5):  the engine lives as a protected member so every
-// concrete driver has access to it — NOT buried inside a TMC-only #if block.
+// concrete driver has access to it — NOT buried inside a driver-specific #if block.
 
 struct DriverConfig {
     uint16_t microsteps       = 16;
@@ -155,7 +155,7 @@ public:
 
     // Usable stroke (mm) measured by sensorless homing between the two hard
     // stops. Default 0 = "not measured / not supported" so drivers without
-    // sensorless homing (TMC endstop build) don't have to implement it. The
+    // sensorless homing (an endstop-switch build) don't have to implement it. The
     // 57AIM servo driver overrides this once it's felt out both ends. :3
     virtual float   getMeasuredStrokeMm() const { return 0.0f; }
     // Restore a previously-measured stroke from NVS after boot. Default no-op

@@ -20,10 +20,16 @@
 // Concatenate the web ring's buffered lines (oldest first) for /api/log.
 void applogDump(String& out);
 
-// Register the SlopLog sinks (web ring always; Serial unless
-// SERIAL_CONTROL_MODE). Call once in setup(). Records logged before this is
+// Register the SlopLog sinks (web ring + serial, ALWAYS — serial gating is
+// runtime, see below). Call once in setup(). Records logged before this is
 // called are buffered in the SlopLog core and flow out on the first drain.
 void applogBegin();
+
+// Runtime serial gating: mute the serial sink completely while serial TCode
+// traffic is actively flowing (Intiface owns the port), restore when idle.
+// Poll from httpTask with serialTransport.isActive(). Composes with
+// applogSerialQuiet() (post-handshake Warn+ floor).
+void applogSerialDedicated(bool dedicated);
 
 // Pump: fan buffered records out to the sinks. Call from httpTask (Core 0).
 void applogDrain();

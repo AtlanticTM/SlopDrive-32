@@ -552,6 +552,10 @@ static void httpTask(void* param) {
         TIME_STEP(encoderValidator.update(), "http:encValidator");
 #endif
         TIME_STEP(ossmBleService.update(),"http:ossmBle");
+        // Serial-log gating follows LIVE serial TCode traffic (not the old
+        // compile-time flag): Intiface streaming -> serial sink mutes; idle ->
+        // full logs return. Self-healing in both directions.
+        applogSerialDedicated(serialTransport.isActive());
         TIME_STEP(applogDrain(),          "http:logDrain");   // SlopLog ring -> web/serial sinks
         slopglowUpdate(g_state);
         // Heap health beacon: free / low-water / largest-block. maxblock is

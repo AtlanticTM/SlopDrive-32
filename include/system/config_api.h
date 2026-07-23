@@ -420,10 +420,13 @@ float    aimStepsPerMm();
 // selected in the web UI and persisted to NVS) is the single source of truth.
 // SERIAL_CONTROL_MODE is now used ONLY to:
 //   1. Set the factory-default transport mode (1 → SER, 0 → WS).
-//   2. Route debug output: when ON, debug goes to the in-memory web log
-//      (applog) so it doesn't spray all over the USB TCode stream like an
-//      overexcited pup. Keep that stream clean for Intiface. :3
-//   3. Announce serial-control status via /api/status → serial_mode.
+//   2. Announce serial-control status via /api/status → serial_mode.
+// It NO LONGER gates debug output — that is runtime now: the SlopLog serial
+// sink mutes itself only while serial TCode traffic is actively flowing
+// (applogSerialDedicated ← serialTransport.isActive()), so the Intiface
+// stream stays clean exactly when it exists and logs flow every other
+// moment. (The old compile-time exclusion silenced ALL serial logging — a
+// diagnosed field incident. Don't bring it back.)
 #define SERIAL_CONTROL_MODE     1            // 1 = USB Serial is default transport, 0 = WiFi
 #define SERIAL_CONTROL_BAUD     115200       // must match Intiface's serial port
 

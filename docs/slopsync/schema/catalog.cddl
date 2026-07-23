@@ -1,0 +1,73 @@
+; SlopSync catalog schema (slopsync/1) — NORMATIVE (SPEC.md §8.1, Appendix C)
+; The catalog_etag (SPEC.md §8.3) is the first 8 bytes of SHA-256 over the
+; catalog encoded per the deterministic CBOR profile (SPEC.md §5.3), entries
+; sorted ascending by id.
+
+catalog = [ * channel-entry ]
+
+channel-entry = {
+  1  => uint,              ; id: u16 channel id
+  2  => tstr .size (1..32),; name
+  3  => class,             ; channel class
+  4  => direction,         ; h2c / c2h
+  5  => access,            ; minimum role to subscribe (or send, for INTENT)
+  6  => float32,           ; max_rate_hz (0.0 = on-change only)
+  7  => priority,          ; default priority class
+  ? 8  => [ + layout-field ],  ; packed classes (STATE, STREAM): wire-order fields
+  ? 9  => { + int => schema-field }, ; CBOR classes (INTENT, EVENT): key -> field
+}
+; Exactly one of key 8 / key 9 MUST be present, matching the class:
+; STATE|STREAM -> 8 (layout), INTENT|EVENT -> 9 (schema).
+
+class     = 0 ; STATE
+          / 1 ; STREAM
+          / 2 ; INTENT
+          / 3 ; EVENT
+
+direction = 0 ; h2c
+          / 1 ; c2h
+
+access    = 0 ; viewer
+          / 1 ; controller
+          / 2 ; admin
+
+priority  = 0 ; background
+          / 1 ; normal
+          / 2 ; elevated
+          / 3 ; critical
+
+; A packed field, in wire order. Wire value = physical value * scale.
+layout-field = {
+  1 => tstr .size (1..24), ; name
+  2 => packed-type,        ; registry packed_field_types
+  3 => tstr .size (0..8),  ; unit ("mm", "mm/s", "mA", "degC", "%", "count", "flag", "")
+  4 => float32,            ; scale (wire = physical * scale); 1.0 for unscaled
+  ? 5 => float32,          ; min (physical units)
+  ? 6 => float32,          ; max (physical units)
+  ? 7 => { + uint => tstr },  ; bits: bit-index -> meaning (bitfield8 only)
+}
+
+packed-type = 0 ; u8
+            / 1 ; i8
+            / 2 ; u16
+            / 3 ; i16
+            / 4 ; u32
+            / 5 ; i32
+            / 6 ; f32
+            / 7 ; bitfield8
+
+; A CBOR-payload field (INTENT value maps / EVENT bodies).
+schema-field = {
+  1 => tstr .size (1..24), ; name
+  2 => cbor-type,
+  3 => tstr .size (0..8),  ; unit
+  ? 5 => float32,          ; min
+  ? 6 => float32,          ; max
+}
+
+cbor-type = 0 ; uint
+          / 1 ; int
+          / 2 ; float32
+          / 3 ; bool
+          / 4 ; tstr
+          / 5 ; bstr

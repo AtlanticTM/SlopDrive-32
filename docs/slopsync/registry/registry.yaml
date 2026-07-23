@@ -1,0 +1,235 @@
+# SlopSync Protocol Registry — SINGLE SOURCE OF TRUTH
+# SPEC.md Appendices A and B are generated from (and MUST match) this file.
+# Allocation policy: additions by PR to this file; numbers are never reused or
+# renumbered once released in a tagged spec version. See SPEC.md §5.7.
+#
+# spec: slopsync/1
+# status: v1-draft
+
+meta:
+  protocol_name: slopsync
+  protocol_version: 1
+  byte_order: little-endian
+  header_bytes: 8
+
+# ---------------------------------------------------------------------------
+# Frame types (u8). Header field `type`.
+# dir: c2h = client→hub, h2c = hub→client, any = either direction.
+# plane: control = CBOR payload (§5.3), data = packed payload (§5.4),
+#        raw = fixed layout defined in its own spec section.
+# ---------------------------------------------------------------------------
+frame_types:
+  0x00: { name: HELLO,          dir: c2h, plane: control, ref: "§6.2" }
+  0x01: { name: WELCOME,        dir: h2c, plane: control, ref: "§6.3" }
+  0x03: { name: PING,           dir: any, plane: raw,     ref: "§6.5" }
+  0x04: { name: PONG,           dir: any, plane: raw,     ref: "§6.5" }
+  0x05: { name: CLOCK,          dir: any, plane: raw,     ref: "§7.1" }
+  0x06: { name: SUBSCRIBE,      dir: c2h, plane: control, ref: "§6.6" }
+  0x07: { name: UNSUBSCRIBE,    dir: c2h, plane: control, ref: "§6.6" }
+  0x08: { name: GRANT,          dir: h2c, plane: control, ref: "§10.2" }  # solicited AND unsolicited (GRANT_UPDATE)
+  0x09: { name: CATALOG_REQ,    dir: c2h, plane: control, ref: "§8.4" }
+  0x0A: { name: CATALOG_CHUNK,  dir: h2c, plane: raw,     ref: "§8.4" }
+  0x0B: { name: STATE,          dir: h2c, plane: data,    ref: "§9.1" }
+  0x0C: { name: STREAM,         dir: any, plane: data,    ref: "§9.2" }
+  0x0D: { name: INTENT,         dir: c2h, plane: control, ref: "§9.3" }
+  0x0E: { name: ECHO,           dir: h2c, plane: control, ref: "§9.3" }
+  0x0F: { name: EVENT,          dir: h2c, plane: control, ref: "§9.4" }
+  0x10: { name: NACK,           dir: h2c, plane: control, ref: "§16.1" }
+  0x11: { name: GOODBYE,        dir: any, plane: control, ref: "§6.8" }
+  0x12: { name: PROBE,          dir: any, plane: raw,     ref: "§6.4" }
+  0x13: { name: PROBE_REPORT,   dir: c2h, plane: control, ref: "§6.4" }
+  0x14: { name: PAIR_REQ,       dir: c2h, plane: control, ref: "§12.2" }
+  0x15: { name: PAIR_GRANT,     dir: h2c, plane: control, ref: "§12.2" }
+  0x16: { name: ACKMASK,        dir: any, plane: raw,     ref: "§13.3" }  # ESP-NOW binding: base_seq:u16 + mask:u32
+  0x17: { name: BEACON,         dir: h2c, plane: raw,     ref: "§13.7" }  # ESP-NOW discovery: hub id + etag + pairing flag
+  0xE5: { name: ESTOP,          dir: any, plane: raw,     ref: "§5.5, §11.2" }
+# 0x02, 0x18–0x3F reserved for spec/core. 0x40–0x7F reserved for future spec use.
+# 0x80–0xDF experimental (never in tagged releases). 0xE0–0xFF reserved except 0xE5.
+
+# ---------------------------------------------------------------------------
+# Header flags (u8). Bits not listed MUST be zero on send, ignored on receive.
+# ---------------------------------------------------------------------------
+header_flags:
+  bit0: { name: FRAG_START, ref: "§5.6" }
+  bit1: { name: FRAG_MORE,  ref: "§5.6" }   # START+MORE=first, MORE=middle, START alone=only, neither+prior frags=last
+
+# ---------------------------------------------------------------------------
+# Channel classes (u8) — used in catalog entries.
+# ---------------------------------------------------------------------------
+channel_classes:
+  0: { name: STATE,  ref: "§9.1" }
+  1: { name: STREAM, ref: "§9.2" }
+  2: { name: INTENT, ref: "§9.3" }
+  3: { name: EVENT,  ref: "§9.4" }
+
+# ---------------------------------------------------------------------------
+# Access levels (u8) — catalog `access`, session roles.
+# ---------------------------------------------------------------------------
+access_levels:
+  0: { name: viewer }
+  1: { name: controller }
+  2: { name: admin }
+
+# ---------------------------------------------------------------------------
+# Priority classes (u8) — subscription priority. Lower number sheds FIRST.
+# ---------------------------------------------------------------------------
+priority_classes:
+  0: { name: background }   # bulk/diagnostic; first to shed
+  1: { name: normal }       # default telemetry
+  2: { name: elevated }     # realtime display feeds
+  3: { name: critical }     # never shed: INTENT/ECHO/ESTOP/safety STATE
+
+# ---------------------------------------------------------------------------
+# Channel id (u16) ranges.
+# ---------------------------------------------------------------------------
+channel_id_ranges:
+  0x0000:            { name: SESSION, note: "session-scoped frames; never subscribable" }
+  0x0001-0x007F:     { name: spec-core, note: "allocated below; spec-governed" }
+  0x0080-0x7FFF:     { name: device-defined, note: "hub firmware allocates; described by catalog" }
+  0x8000-0xFFFF:     { name: reserved }
+
+core_channels:
+  0x0001: { name: catalog,        class: STATE, note: "catalog meta: etag, chunk count, entry count" }
+  0x0002: { name: session-roster, class: STATE, note: "connected sessions: id, kind, name, roles" }
+  0x0003: { name: safety,         class: STATE, note: "latched safety word: estop/stop/hold/pause + cause + owner (§11.1)" }
+  0x0004: { name: control-owner,  class: STATE, note: "active arbiter source + owning session per source (§11.4)" }
+  0x0005: { name: safety-intents, class: INTENT, note: "STOP/HOLD/PAUSE/RESUME/ESTOP_CLEAR/TAKEOVER (§11)" }
+  0x0006: { name: hub-status,     class: STATE, note: "boot_id, fw version, heap, uptime, transport stats" }
+  0x0007: { name: session-events, class: EVENT, note: "join/leave/takeover/eviction notifications" }
+
+# ---------------------------------------------------------------------------
+# CBOR map integer keys (control plane). Global key space — a key means the
+# same thing in every message that uses it. 1–63 core, 64–127 reserved,
+# 128+ experimental. Encoded per deterministic profile §5.3.
+# ---------------------------------------------------------------------------
+cbor_keys:
+  1:  { name: proto_ver,      type: uint,  note: "HELLO/WELCOME: protocol major version" }
+  2:  { name: client_kind,    type: tstr,  note: "e.g. webui, c5-remote, mobile, sim, tcode-bridge" }
+  3:  { name: client_name,    type: tstr,  note: "human-readable, ≤32 UTF-8 bytes" }
+  4:  { name: instance_id,    type: bstr,  note: "8-byte stable client identity (§6.1)" }
+  5:  { name: token,          type: bstr,  note: "16-byte pairing token (§12.2); absent = viewer" }
+  6:  { name: session_id,     type: uint,  note: "u32, hub-assigned (§6.1)" }
+  7:  { name: boot_id,        type: uint,  note: "u32 random per hub boot (§7.2)" }
+  8:  { name: catalog_etag,   type: bstr,  note: "8-byte truncated SHA-256 (§8.3)" }
+  9:  { name: cfg_gen,        type: uint,  note: "u16 config generation (§4.2)" }
+  10: { name: subscriptions,  type: array, note: "of {15:channel,12:rate,13:priority}" }
+  11: { name: publishes,      type: array, note: "of {15:channel,12:rate}" }
+  12: { name: rate_hz,        type: float, note: "requested rate; 0 = on-change only" }
+  13: { name: priority,       type: uint,  note: "priority class 0–3" }
+  14: { name: granted_rate_hz, type: float, note: "GRANT: applied rate after clamp (§10.2)" }
+  15: { name: channel_id,     type: uint,  note: "u16" }
+  16: { name: code,           type: uint,  note: "NACK/GOODBYE reason code (§16.1)" }
+  17: { name: detail,         type: tstr,  note: "optional human-readable diagnostic" }
+  18: { name: intent_id,      type: uint,  note: "u16 idempotency id, session-scoped (§9.3)" }
+  19: { name: applied,        type: map,   note: "ECHO: post-clamp applied values" }
+  20: { name: value,          type: any,   note: "INTENT payload value(s) per catalog schema" }
+  21: { name: timestamp,      type: uint,  note: "hub-ms (control plane events)" }
+  22: { name: limits,         type: map,   note: "WELCOME: hub limits (max_frame, max_subs, max_clients...)" }
+  23: { name: roles,          type: uint,  note: "granted access level (max of session)" }
+  24: { name: deadman_ms,     type: uint,  note: "WELCOME: applied deadman timeout for this session" }
+  25: { name: deadman_policy, type: uint,  note: "0=stop(decel) 1=hold 2=none — per active-source rules §11.3" }
+  26: { name: probe_result,   type: map,   note: "PROBE_REPORT: {bytes, span_ms, loss_pct, rtt_ms}" }
+  27: { name: chunks,         type: array, note: "CATALOG_REQ repair: missing chunk indices" }
+  28: { name: pin_proof,      type: bstr,  note: "PAIR_REQ: HMAC-SHA256(PIN, hello-nonce) truncated 16B (§12.2)" }
+  29: { name: nonce,          type: bstr,  note: "WELCOME: 8-byte pairing nonce" }
+  30: { name: precondition,   type: uint,  note: "INTENT: expected cfg_gen (CAS guard, §9.3)" }
+  31: { name: retry_after_ms, type: uint,  note: "NACK BUSY: earliest reconnect time" }
+  32: { name: takeover,       type: bool,  note: "safety-intent: forcible source takeover flag (§11.4)" }
+  33: { name: event_kind,     type: uint,  note: "EVENT: kind discriminator per catalog entry" }
+  34: { name: seq_of_state,   type: uint,  note: "EVENT: seq of the STATE twin frame it corresponds to (§9.4)" }
+
+# ---------------------------------------------------------------------------
+# NACK / GOODBYE reason codes (u16, ranged).
+# ---------------------------------------------------------------------------
+nack_codes:
+  # 0x00xx — protocol
+  0x0000: { name: MALFORMED,            note: "undecodable frame/CBOR" }
+  0x0001: { name: UNSUPPORTED_VERSION,  note: "HELLO proto_ver not servable" }
+  0x0002: { name: FRAME_TOO_LARGE,      note: "exceeds negotiated max_frame" }
+  0x0003: { name: PROFILE_VIOLATION,    note: "CBOR not in deterministic profile" }
+  # 0x01xx — session / auth
+  0x0100: { name: BUSY,                 note: "client limit reached; carries retry_after_ms" }
+  0x0101: { name: UNAUTHORIZED,         note: "token invalid/revoked" }
+  0x0102: { name: NOT_CONTROLLER,       note: "control op without controller role" }
+  0x0103: { name: PAIRING_REQUIRED,     note: "controller requested, no token, pairing window closed" }
+  0x0104: { name: PAIRING_DENIED,       note: "bad pin_proof or pairing window closed" }
+  0x0105: { name: SESSION_EVICTED,      note: "slow-consumer or admin kick (GOODBYE code)" }
+  0x0106: { name: DUPLICATE_INSTANCE,   note: "instance_id already in live session; old session evicted instead — see §6.8" }
+  # 0x02xx — subscription / QoS
+  0x0200: { name: UNKNOWN_CHANNEL,      note: "channel id not in catalog" }
+  0x0201: { name: ACCESS_DENIED,        note: "channel access level above session role" }
+  0x0202: { name: CLASS_MISMATCH,       note: "e.g. SUBSCRIBE to an INTENT channel" }
+  0x0203: { name: SUB_LIMIT,            note: "per-session subscription cap reached" }
+  # 0x03xx — intent
+  0x0300: { name: CONFLICT,             note: "precondition (cfg_gen CAS) failed" }
+  0x0301: { name: RATE_LIMITED,         note: "ingress intent rate exceeded" }
+  0x0302: { name: INVALID_VALUE,        note: "outside schema min/max or wrong type" }
+  0x0303: { name: UNSUPPORTED_OP,       note: "intent op not implemented on this hub" }
+  # 0x04xx — safety refusals (UIs SHOULD render these distinctly)
+  0x0400: { name: ESTOP_ACTIVE,         note: "refused while e-stop latched" }
+  0x0401: { name: NOT_HOMED,            note: "motion intent before homing" }
+  0x0402: { name: INTERLOCK,            note: "hub-specific safety interlock" }
+  0x0403: { name: SOURCE_CONFLICT,      note: "another session owns this arbiter source" }
+  0x0404: { name: TAKEOVER_REQUIRED,    note: "control exists; retry with takeover flag" }
+  0x0405: { name: CLEAR_REFUSED,        note: "e-stop clear conditions not met (§11.2)" }
+  # 0x05xx — transfer
+  0x0500: { name: CHUNK_UNAVAILABLE,    note: "catalog chunk index out of range" }
+  0x0501: { name: REASSEMBLY_TIMEOUT,   note: "fragment reassembly abandoned (5 s)" }
+  0x0502: { name: ETAG_MISMATCH,        note: "static-profile client etag != hub catalog etag" }
+
+# ---------------------------------------------------------------------------
+# Packed payload field types (catalog schema `type` for STREAM/STATE layouts).
+# ---------------------------------------------------------------------------
+packed_field_types:
+  0: { name: u8 }
+  1: { name: i8 }
+  2: { name: u16 }
+  3: { name: i16 }
+  4: { name: u32 }
+  5: { name: i32 }
+  6: { name: f32 }
+  7: { name: bitfield8, note: "bit meanings enumerated in catalog entry" }
+
+# ---------------------------------------------------------------------------
+# Well-known limits & defaults. SPEC.md Appendix G mirrors this table; the
+# two MUST NOT diverge.
+# ---------------------------------------------------------------------------
+limits:
+  header_bytes: 8
+  min_transport_payload: 242        # ESP-NOW 250 − 8 header; STATE frames must fit this (§9.1)
+  catalog_chunk_payload: 192
+  bundle_max_samples: 32
+  bundle_max_span_ms: 20
+  seq_width_bits: 16
+  seq_newer_window: 32768           # serial arithmetic half-window
+  frag_reassembly_timeout_ms: 5000
+  frag_max_concurrent_per_session: 2
+  idempotency_ring_depth: 32
+  intent_ingress_default_per_s: 50
+  event_queue_depth_per_subscriber: 16
+  never_shed_stall_eviction_ms: 2000
+  catalog_chunk_gap_timeout_ms: 500   # recommended (SHOULD)
+  ping_interval_holding_control_ms: 200
+  ping_interval_idle_ms: 1000
+  deadman_default_ms: 600
+  deadman_min_ms: 250
+  deadman_max_ms: 5000
+  pairing_window_default_s: 120
+  pairing_pin_digits: 4
+  token_bytes: 16
+  instance_id_bytes: 8
+  etag_bytes: 8
+  conformance_min_clients: 4
+  default_max_clients_ws: 8
+  default_max_clients_espnow: 4
+  default_max_clients_ble: 1
+  default_max_clients_serial: 1
+  estop_repeat_interval_ms: 50
+  estop_repeat_max: 20
+  clock_resync_interval_s: 10
+  probe_default_bytes: 8192
+  probe_max_duration_ms: 1500
+  catalog_max_entries: 256
+  max_subscriptions_per_session: 64
+  ws_subprotocol: "slopsync.v1"
+  mdns_service: "_slopsync._tcp"

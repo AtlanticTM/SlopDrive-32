@@ -808,3 +808,35 @@ TEST_CASE("wrap regression: session pushes flow at full rate straight across the
     int post = runPhaseMs(4000);      // entirely post-wrap epoch
     CHECK(post >= 30);                // pre-fix: ~0 for up to 71 minutes
 }
+
+// ============================================================================
+// Probe-found regression (first live hardware session): safety (0x0003) is
+// hub-owned and edge-driven, so a fresh boot held NO retained value for it —
+// violating §9.1's "retained value immediately upon grant". The Hub ctor now
+// seeds the all-clear snapshot whenever the catalog declares the channel.
+// ============================================================================
+TEST_CASE("fresh hub with no publishes still serves the retained safety snapshot") {
+    Catalog32 catalog = conformance::miniCatalog();
+    ManualClock clock;
+    XorShift32 hubRng(8001);
+    TestHubDelegate hubDelegate;
+    Hub hub(catalog, clock, hubRng, hubDelegate);   // note: NO publishState calls
+    hubDelegate.hub = &hub;
+
+    InProcessLink link(clock, hubRng);
+    REQUIRE(hub.attachTransport(link.endpointA()));
+    XorShift32 clientRng(8002);
+    ClientIdentity id = makeIdentity(11, false);
+    TestClientDelegate del;
+    Client client(id, link.endpointB(), clock, clientRng, del);
+    client.addSubscriptionWish(0x0003, 0.0f, Priority::critical);
+    REQUIRE(client.connect());
+    pump(hub, clock, {&client}, 10);
+
+    REQUIRE(client.state() == ClientSessionState::LIVE);
+    REQUIRE(del.lastStateByChannel.count(0x0003) == 1);
+    // All-clear snapshot: word=0 cause=0 owner=0 estop_seq=0 (8 bytes).
+    auto expect = makeSafetyPayload(false, 0, 0, 0);
+    CHECK(bytesEqual(del.lastStateByChannel[0x0003],
+                     std::span<const std::byte>(expect)));
+}

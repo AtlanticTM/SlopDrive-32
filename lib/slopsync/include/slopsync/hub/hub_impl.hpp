@@ -52,6 +52,17 @@ inline Hub::Hub(const Catalog32& catalog, IClock& clock, IRandom& rng, HubDelega
     do {
         _bootId = _rng.nextU32();
     } while (_bootId == 0);
+
+    // Seed the retained SAFETY snapshot (all-clear) when the catalog declares
+    // the channel. Safety is hub-owned and otherwise edge-driven (published
+    // on latch/clear), so without this a fresh boot held NO retained value
+    // for 0x0003 and a subscriber's §9.1 "retained value immediately upon
+    // grant" push never happened — caught live by the conformance probe on
+    // the first real hardware session.
+    if (_catalog.find(channels::safety) != nullptr) {
+        auto snapshot = buildSafetyPayload();
+        _retained.publish(channels::safety, std::span<const std::byte>(snapshot));
+    }
 }
 
 inline bool Hub::attachTransport(ITransport& t) {

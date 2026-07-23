@@ -5,6 +5,7 @@
 
 #include <array>
 #include <cstdint>
+#include <new>  // placement new (HubSession::reset)
 
 #include "slopsync/channel/event_channel.hpp"
 #include "slopsync/channel/intent_registry.hpp"
@@ -56,7 +57,15 @@ struct HubSession {
     uint32_t lastTxMs = 0;                                     // idle-PING scheduling (§6.5)
     uint16_t retainedPending = 0;                              // remaining retained pushes after WELCOME
 
-    void reset() { *this = HubSession(); }  // parens, not braces: IngressRateLimiter's ctor is explicit
+    // In-place destroy + reconstruct, NOT `*this = HubSession()`: the
+    // assignment form materializes a whole-object TEMPORARY on the stack —
+    // ~9 KB for this struct — which blew the hub task's stack canary on
+    // target (panic decoded to exactly this line). Host tests never noticed
+    // (megabyte stacks). Same semantics, zero stack cost.
+    void reset() {
+        this->~HubSession();
+        new (this) HubSession();
+    }
     bool occupied() const { return state != HubSessionState::FREE && state != HubSessionState::CLOSED; }
 };
 

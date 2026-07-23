@@ -318,7 +318,12 @@ void SlopSyncHubService::init() {
     loadPairing();
     _port.begin(&_hub);
 
-    BaseType_t ok = xTaskCreatePinnedToCore(&SlopSyncHubService::taskTrampoline, "SlopSyncHub", 8192, this,
+    // 16 KB stack: the HELLO path proved capable of several KB of frame
+    // buffers + WS-handshake stack on top of baseline (an 8 KB stack blew
+    // its canary in the field even after the ~9 KB HubSession::reset()
+    // temporary was eliminated at the source). Internal RAM is plentiful
+    // post-PSRAM-relocation; this is cheap insurance on the safety plane.
+    BaseType_t ok = xTaskCreatePinnedToCore(&SlopSyncHubService::taskTrampoline, "SlopSyncHub", 16384, this,
                                             2, &_task, 0);
     if (ok != pdPASS) {
         SLOGE("slopsync", "FAILED to create SlopSyncHub task");

@@ -4,6 +4,7 @@
 #include <ArduinoJson.h>
 #include "SystemState.h"
 #include "UiProtocol.h"
+#include "DeferredReboot.h"
 
 // Forward declarations — WebUI stores references to these, not values.
 class MotorDriver;
@@ -202,8 +203,7 @@ private:
     // HTTP handler itself so the 200 response actually reaches the browser
     // before the device goes down). :3
     uint8_t  _machine_backend        = 0;
-    bool     _machine_reboot_pending = false;
-    uint32_t _machine_reboot_at_ms   = 0;
+    DeferredReboot _machineReboot;
     void handleApiMachine();
     void handleApiMachineCommit();
     void handleApiHomeOverride();

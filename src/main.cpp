@@ -25,14 +25,12 @@
 #include "AppLog.h"
 #include "SystemState.h"
 #include "ConfigStore.h"
-#include "StatusLeds.h"
+#include "SlopGlowBoard.h"
 
 #include "range_mapper.h"
 #include "Kinematics.h"
-#include "PositionTime.h"
 #include "freertos/queue.h"
 #include <esp_timer.h>
-#include <chrono>
 
 #if defined(DRIVER_TMC2160)
 #include "TMC2160StepperDriver.h"
@@ -58,6 +56,7 @@
 #include "BleTransport.h"
 #include "DongleTransport.h"
 #include "TransportManager.h"
+#include "SlopSyncHubService.h"
 
 #include "WebUI.h"
 #include "UiSocket.h"
@@ -142,7 +141,7 @@ static SerialTransport    serialTransport(tcodeParser);
 static WebSocketTransport wsTransport(tcodeParser);
 static BleTransport       bleTransport(tcodeParser);
 static DongleTransport    dongleTransport(tcodeParser);
-static OssmBleService     ossmBleService(g_state, patternEngine, mapper, nullptr);
+static OssmBleService     ossmBleService(g_state, patternEngine, mapper);
 static TransportManager   transportMgr(g_state, tcodeParser,
                                         serialTransport, wsTransport, bleTransport,
                                         dongleTransport, ossmBleService);
@@ -150,6 +149,11 @@ static TransportManager   transportMgr(g_state, tcodeParser,
 static UiSocket        uiSocket(g_state);
 static WebUI webui(g_state, motor, mapper, patternEngine,
                     transportMgr, serialTransport, wsTransport, bleTransport);
+
+// SlopSync hub — the ecosystem sync plane (binary WS :SLOPSYNC_WS_PORT).
+// File-scope static on purpose: its ~100 KB (Catalog32 + 5 hub session
+// slots) lives in BSS as a fixed reservation, never on the heap.
+static slopdrive::SlopSyncHubService slopSyncHub(g_state, webui, arbiter);
 
 // WiFi OTA path (firmware + LittleFS bundle). Owns the shared safety gate for
 // both ArduinoOTA (espota) and the HTTP /api/ota endpoints. Serviced from the
@@ -165,11 +169,6 @@ static OtaService      otaService(g_state, arbiter, patternEngine, uiSocket);
 static EncoderValidator encoderValidator(servoModbus, motor);
 #endif
 
-
-// LEGACY: waypoint queue — retained behind LEGACY_STREAM_PIPELINE for A/B bring-up.
-// D4 replaces this with single-slot deferral via MotionArbiter.
-static constexpr size_t WAYPOINT_QUEUE_DEPTH = 8;
-static QueueHandle_t    g_waypoint_queue     = nullptr;
 
 
 // ============================================================================
@@ -254,22 +253,6 @@ static void buttplugLinearCmd(float position, uint32_t duration_ms,
         }
     }
 
-    // LEGACY fallback — keep the waypoint queue alive for A/B testing
-#if defined(LEGACY_STREAM_PIPELINE)
-    PositionTime pt;
-    pt.position     = (uint8_t)constrain((int)(position * 100.0f), 0, 100);
-    pt.inTime       = (uint16_t)constrain((int)duration_ms, 0, 65535);
-    pt.has_set_time = true;
-    pt.setTime      = std::chrono::steady_clock::now();
-    if (xQueueSend(g_waypoint_queue, &pt, 0) != pdTRUE) {
-        static uint32_t wp_last_drop_log_ms = 0;
-        uint32_t now_wp = millis();
-        if (now_wp - wp_last_drop_log_ms > 2000) {
-            wp_last_drop_log_ms = now_wp;
-            APPLOG("Waypoint queue FULL — legacy waypoint dropped");
-        }
-    }
-#endif
 }
 
 static void buttplugStop() {
@@ -378,6 +361,9 @@ static void motorTask(void* /*param*/) {
         motor.update();
         // D4: process any Core 0 → Core 1 deferred intents
         arbiter.processDeferred();
+        // SlopGlow liveness: this pulse is what keeps the status LEDs
+        // animating. If this loop dies, the lights freeze — by design.
+        if (auto* hb = slopglowMotorHeartbeat()) hb->pulse();
         vTaskDelay(pdMS_TO_TICKS(1));
     }
 }
@@ -535,6 +521,7 @@ static void commsTask(void* /*param*/) {
             transportMgr.superviseWifi();   // re-scan + re-pin if link dropped
         }
 
+        if (auto* hb = slopglowCommsHeartbeat()) hb->pulse();  // SlopGlow liveness (Core 0)
         vTaskDelay(pdMS_TO_TICKS(2));
     }
 }
@@ -568,7 +555,8 @@ static void httpTask(void* param) {
         TIME_STEP(encoderValidator.update(), "http:encValidator");
 #endif
         TIME_STEP(ossmBleService.update(),"http:ossmBle");
-        statusLedsUpdate(g_state);
+        TIME_STEP(applogDrain(),          "http:logDrain");   // SlopLog ring -> web/serial sinks
+        slopglowUpdate(g_state);
         vTaskDelay(pdMS_TO_TICKS(10));
     }
 }
@@ -598,98 +586,6 @@ static void servoBusTask(void* /*param*/) {
     }
 }
 #endif
-
-
-// LEGACY_STREAM_PIPELINE: old waypoint-queue consumer (off by default)
-// D4 replaces this with event-driven MotionArbiter.
-#if defined(LEGACY_STREAM_PIPELINE)
-static void motionConsumerTask(void* /*param*/) {
-    auto best = std::chrono::steady_clock::now();
-
-    PositionTime lastPt;
-    lastPt.position     = 50;
-    lastPt.inTime       = 250;
-    lastPt.has_set_time = false;
-
-    bool         haveCarry = false;
-    PositionTime carryPt    = {};
-
-    while (true) {
-        PositionTime incoming;
-        bool gotNew = (xQueueReceive(g_waypoint_queue, &incoming, pdMS_TO_TICKS(50)) == pdTRUE);
-
-        if (!haveCarry) {
-            if (gotNew) { carryPt = incoming; haveCarry = true; }
-            continue;
-        }
-
-        PositionTime pt = carryPt;
-
-        if (gotNew) {
-            if (pt.inTime == 0 && pt.has_set_time && incoming.has_set_time) {
-                int32_t gap_ms = (int32_t)std::chrono::duration_cast<
-                    std::chrono::milliseconds>(incoming.setTime - pt.setTime).count();
-                if (gap_ms > 0 && gap_ms < 1000) pt.inTime = (uint16_t)gap_ms;
-            }
-            carryPt = incoming;
-        } else {
-            haveCarry = false;
-        }
-
-        if (pt.inTime == 0)
-            pt.inTime = (g_state.measured_interval_ms > 1.0f)
-                      ? (uint16_t)(g_state.measured_interval_ms + 0.5f)
-                      : 100;
-
-        float timeSeconds = pt.inTime / 1000.0f;
-
-        if (pt.has_set_time) {
-            const int16_t bufTarget = 100;
-            int16_t currentBuffer = (int16_t)std::chrono::duration_cast<
-                std::chrono::milliseconds>(
-                    std::chrono::steady_clock::now() - best).count();
-            int16_t lag = (int16_t)std::chrono::duration_cast<
-                std::chrono::milliseconds>(
-                    pt.setTime - best).count();
-            if (lag < 0 || lag > bufTarget * 10) {
-                best = pt.setTime;
-                lag  = 0;
-            }
-            best += std::chrono::milliseconds(pt.inTime);
-
-            int16_t offset = bufTarget - currentBuffer;
-            if (offset < 0) {
-                int16_t maxSpeedup = -(int16_t)(pt.inTime / 4);
-                if (offset < maxSpeedup) offset = maxSpeedup;
-            }
-            timeSeconds += offset / 1000.0f;
-        } else {
-            best = std::chrono::steady_clock::now();
-        }
-
-        lastPt = pt;
-
-        if (timeSeconds <= 0.01f) { vTaskDelay(pdMS_TO_TICKS(1)); continue; }
-
-        float frac      = pt.position / 100.0f;
-        float target_mm = mapper.getMinMm() + frac * (mapper.getMaxMm() - mapper.getMinMm());
-
-        // Sole-caller rule (CLAUDE.md §2): even the legacy A/B pipeline submits
-        // through the MotionArbiter — it no longer plans + dispatches to the
-        // driver itself, which bypassed every e-stop/pause/override/window
-        // gate. This task runs on Core 1, so direct submit() is allowed; the
-        // arbiter derives the trapezoid from the deadline exactly like the old
-        // kinematics::planTrapezoid path did. :3
-        MotionIntent intent = {};
-        intent.source      = MotionSource::TCODE_STREAM;
-        intent.target_mm   = target_mm;
-        intent.deadline_ms = (uint32_t)(timeSeconds * 1000.0f);
-        arbiter.submit(intent);
-
-        vTaskDelay(pdMS_TO_TICKS(1));
-    }
-}
-#endif // LEGACY_STREAM_PIPELINE
 
 
 // ============================================================================
@@ -756,7 +652,7 @@ void setup() {
     motor.init();
     motor.applyDriverConfig(g_state.driver);
 
-    statusLedsInit();
+    slopglowInit();
 
     bool wifi_ok = transportMgr.setupWiFi();
 
@@ -876,10 +772,6 @@ void setup() {
 
     transportMgr.applyTransport(g_state.getTransport());
 
-    // Waypoint queue — retained for LEGACY_STREAM_PIPELINE A/B
-    g_waypoint_queue = xQueueCreate(WAYPOINT_QUEUE_DEPTH, sizeof(PositionTime));
-    configASSERT(g_waypoint_queue != nullptr);
-
     // v0.4 interpolator segment queue — Core 0 (buttplugLinearCmd) → Core 1 sampler
     g_interp_queue = xQueueCreate(INTERP_QUEUE_DEPTH, sizeof(InterpSegment));
     configASSERT(g_interp_queue != nullptr);
@@ -896,11 +788,6 @@ void setup() {
     // streamSamplerTask: Core 1, priority 4 — v0.4 interpolator cubic sampler
     task_ok = xTaskCreatePinnedToCore(streamSamplerTask, "Sampler", 4096, nullptr, 4, nullptr, 1);
     configASSERT(task_ok == pdPASS);
-    // motionConsumerTask: Core 1, priority 4 — ONLY compiled in LEGACY mode
-#if defined(LEGACY_STREAM_PIPELINE)
-    task_ok = xTaskCreatePinnedToCore(motionConsumerTask, "MotionCon", 4096, nullptr, 4, nullptr, 1);
-    configASSERT(task_ok == pdPASS);
-#endif
     task_ok = xTaskCreatePinnedToCore(commsTask, "Comms", 6144, nullptr, 2, nullptr, 0);
     configASSERT(task_ok == pdPASS);
     task_ok = xTaskCreatePinnedToCore(httpTask, "HTTP", 8192, &webui, 1, nullptr, 0);
@@ -920,9 +807,13 @@ void setup() {
     }
 #endif
 
-    ossmBleService.setWaypointQueue(g_waypoint_queue);
     ossmBleService.init();
     patternEngine.init();    // creates its own Core 1 task
+
+    // SlopSync hub last: WiFi is up, arbiter/webui/patternEngine are wired.
+    // Spawns its own Core-0 task ("SlopSyncHub") + the WS server on :82.
+    slopSyncHub.setPatternEngine(&patternEngine);
+    slopSyncHub.init();
 
 #if HOMING_DISABLED
     g_state.homed = true;

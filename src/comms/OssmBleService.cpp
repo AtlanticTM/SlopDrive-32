@@ -10,8 +10,6 @@
 #include <NimBLECharacteristic.h>
 #include <NimBLEAdvertising.h>
 #include <math.h>
-#include <chrono>
-#include "PositionTime.h"
 
 // ============================================================================
 // OSSM BLE Protocol constants (from GLOBAL CONTEXT + reference/ossm/BLE_PROTOCOL.md)
@@ -179,8 +177,8 @@ public:
 // ============================================================================
 
 OssmBleService::OssmBleService(SystemState& state, PatternEngine& patternEngine,
-                                 RangeMapper& mapper, QueueHandle_t waypointQueue)
-    : _state(state), _patternEngine(patternEngine), _mapper(mapper), _waypointQueue(waypointQueue)
+                                 RangeMapper& mapper)
+    : _state(state), _patternEngine(patternEngine), _mapper(mapper)
 {}
 
 OssmBleService::~OssmBleService() {
@@ -494,7 +492,7 @@ void OssmBleService::_handleGo(const char* cmd) {
 }
 
 // ============================================================================
-// stream: handler — validate only (Phase 4 bridges to waypoint queue)
+// stream: handler — validate + ack only; does not drive motion
 // ============================================================================
 
 void OssmBleService::_handleStream(const char* cmd) {
@@ -508,24 +506,6 @@ void OssmBleService::_handleStream(const char* cmd) {
     float timeMs = atof(colon + 1);
     if (pos < 0) pos = 0; if (pos > 100) pos = 100;
     if (timeMs < 1) timeMs = 1; if (timeMs > 65535) timeMs = 65535;
-
-    // Bridge to the existing waypoint queue — identical to buttplugLinearCmd
-    float lo = _mapper.getMinMm(), hi = _mapper.getMaxMm();
-    float span = hi - lo;
-    float pos_mm = lo + (pos / 100.0f) * span;
-    float position01 = span > 0.01f ? (pos_mm - lo) / span : 0.0f;
-    if (position01 < 0.0f) position01 = 0.0f;
-    if (position01 > 1.0f) position01 = 1.0f;
-
-    PositionTime pt;
-    pt.position     = (uint8_t)(int)(position01 * 100.0f);
-    pt.inTime       = (uint16_t)(int)timeMs;
-    pt.has_set_time = true;
-    pt.setTime      = std::chrono::steady_clock::now();
-
-    if (_waypointQueue) {
-        xQueueSend(_waypointQueue, &pt, 0);
-    }
 
     char resp[64];
     snprintf(resp, sizeof(resp), "ok:stream:%d:%d", (int)pos, (int)timeMs);

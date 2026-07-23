@@ -224,9 +224,13 @@ struct SystemState {
     volatile float         commanded_raw_mm = 0.0f;
 
     // ---- Actual dispatched position (cross-core) -----------------------------
-    // Written by Core 1 (motionConsumerTask) after each FAS dispatch — the step
-    // target we just sent to the motor, converted back to mm. Read by Core 0's
-    // telemetry timer (WebUI::telemetryTimerCb) to feed the position graph.
+    // Written ONLY by WebUI::applyMove's seed store (Core 0, after a manual
+    // point move lands) — NOT by the arbiter/planner or the telemetry sampler;
+    // MotionArbiter deliberately never writes this from motion dispatch (see
+    // the D4 comments in MotionArbiter.cpp/PatternEngine.cpp), and the live
+    // position readout goes through _motor.getPosition() directly. Read by
+    // Core 1's streamSamplerTask (main.cpp) on a stream's rising edge, to seed
+    // the interpolator from the last known manual endpoint.
     // std::atomic<float> gives the no-tear guarantee with zero overhead on S3.
     // memory_order_relaxed is correct — telemetry is display-only, no ordering
     // dependency with any other variable. :3

@@ -18,7 +18,7 @@
 #include "AppLog.h"
 #include "ConfigStore.h"
 #include "MachineConfig.h"
-#include "StatusLeds.h"
+#include "SlopGlowBoard.h"
 #include "PatternEngine.h"
 #include "MotorDriver.h"
 #include "UiSocket.h"
@@ -91,30 +91,30 @@ void WebUI::init() {
     _httpServer->on("/api/status",    HTTP_GET,  [this]() { handleApiStatus(); });
     _httpServer->on("/api/capabilities", HTTP_GET, [this]() { handleApiCapabilities(); });
     _httpServer->on("/api/settings",  HTTP_GET,  [this]() { handleApiSettings(); });
-    _httpServer->on("/api/settings",  HTTP_POST, [this]() { statusLedsActivity(); handleApiSettings(); });
-    _httpServer->on("/api/move",      HTTP_POST, [this]() { statusLedsActivity(); handleApiMove(); });
-    _httpServer->on("/api/home",      HTTP_POST, [this]() { statusLedsActivity(); handleApiHome(); });
-    _httpServer->on("/api/stop",      HTTP_POST, [this]() { statusLedsActivity(); handleApiStop(); });
-    _httpServer->on("/api/pause",     HTTP_POST, [this]() { statusLedsActivity(); handleApiPause(); });
-    _httpServer->on("/api/halt",      HTTP_POST, [this]() { statusLedsActivity(); handleApiHalt(); });
-    _httpServer->on("/api/override",  HTTP_POST, [this]() { statusLedsActivity(); handleApiOverride(); });
+    _httpServer->on("/api/settings",  HTTP_POST, [this]() { slopglowActivity(); handleApiSettings(); });
+    _httpServer->on("/api/move",      HTTP_POST, [this]() { slopglowActivity(); handleApiMove(); });
+    _httpServer->on("/api/home",      HTTP_POST, [this]() { slopglowActivity(); handleApiHome(); });
+    _httpServer->on("/api/stop",      HTTP_POST, [this]() { slopglowActivity(); handleApiStop(); });
+    _httpServer->on("/api/pause",     HTTP_POST, [this]() { slopglowActivity(); handleApiPause(); });
+    _httpServer->on("/api/halt",      HTTP_POST, [this]() { slopglowActivity(); handleApiHalt(); });
+    _httpServer->on("/api/override",  HTTP_POST, [this]() { slopglowActivity(); handleApiOverride(); });
     _httpServer->on("/api/tmc",       HTTP_GET,  [this]() { handleApiTmc(); });
-    _httpServer->on("/api/tmc",       HTTP_POST, [this]() { statusLedsActivity(); handleApiTmc(); });
+    _httpServer->on("/api/tmc",       HTTP_POST, [this]() { slopglowActivity(); handleApiTmc(); });
     _httpServer->on("/api/servo",     HTTP_GET,  [this]() { handleApiServo(); });
-    _httpServer->on("/api/servo",     HTTP_POST, [this]() { statusLedsActivity(); handleApiServo(); });
-    _httpServer->on("/api/clearfault",HTTP_POST, [this]() { statusLedsActivity(); handleApiClearFault(); });
+    _httpServer->on("/api/servo",     HTTP_POST, [this]() { slopglowActivity(); handleApiServo(); });
+    _httpServer->on("/api/clearfault",HTTP_POST, [this]() { slopglowActivity(); handleApiClearFault(); });
     _httpServer->on("/api/pattern",   HTTP_GET,  [this]() { handleApiPattern(); });
-    _httpServer->on("/api/pattern",   HTTP_POST, [this]() { statusLedsActivity(); handleApiPattern(); });
+    _httpServer->on("/api/pattern",   HTTP_POST, [this]() { slopglowActivity(); handleApiPattern(); });
     _httpServer->on("/api/pattern/presets", HTTP_GET,  [this]() { handleApiPatternPresets(); });
-    _httpServer->on("/api/pattern/presets", HTTP_POST, [this]() { statusLedsActivity(); handleApiPatternPresets(); });
+    _httpServer->on("/api/pattern/presets", HTTP_POST, [this]() { slopglowActivity(); handleApiPatternPresets(); });
     _httpServer->on("/api/log",       HTTP_GET,  [this]() { handleApiLog(); });
     _httpServer->on("/api/mode",      HTTP_GET,  [this]() { handleApiMode(); });
     _httpServer->on("/api/mode",      HTTP_POST, [this]() { handleApiMode(); });
     _httpServer->on("/api/clients",   HTTP_GET,  [this]() { handleApiClients(); });
-    _httpServer->on("/api/clients",   HTTP_POST, [this]() { statusLedsActivity(); handleApiClients(); });
+    _httpServer->on("/api/clients",   HTTP_POST, [this]() { slopglowActivity(); handleApiClients(); });
     _httpServer->on("/api/machine",        HTTP_GET,  [this]() { handleApiMachine(); });
-    _httpServer->on("/api/machine/commit", HTTP_POST, [this]() { statusLedsActivity(); handleApiMachineCommit(); });
-    _httpServer->on("/api/machine/homeoverride", HTTP_POST, [this]() { statusLedsActivity(); handleApiHomeOverride(); });
+    _httpServer->on("/api/machine/commit", HTTP_POST, [this]() { slopglowActivity(); handleApiMachineCommit(); });
+    _httpServer->on("/api/machine/homeoverride", HTTP_POST, [this]() { slopglowActivity(); handleApiHomeOverride(); });
 
     _httpServer->begin();
     APPLOGF("HTTP server on port %d", HTTP_PORT);
@@ -129,16 +129,10 @@ void WebUI::init() {
 void WebUI::update() {
     _httpServer->handleClient();
 
-    // Deferred reboot for the machine-backend commit — same mechanism as
-    // OtaService::handle()'s _rebootPending/_rebootAtMs pair: the HTTP
-    // handler schedules this and returns immediately so its 200 response
-    // actually flushes to the browser before the device goes down. :3
-    if (_machine_reboot_pending && (int32_t)(millis() - _machine_reboot_at_ms) >= 0) {
-        _machine_reboot_pending = false;
-        APPLOG("[MACHINE] rebooting to apply motion-backend change");
-        delay(20);   // boot-adjacent: let the TCP response flush first
-        ESP.restart();
-    }
+    // Deferred reboot for the machine-backend commit: the HTTP handler arms
+    // this and returns immediately so its 200 response actually flushes to
+    // the browser before the device goes down.
+    _machineReboot.poll();
 }
 
 // ---- Dedicated telemetry sampler -------------------------------------------
@@ -411,6 +405,12 @@ void WebUI::handleApiCapabilities() {
     // Advanced pattern mode (fray-d port) — the UI builds the Advanced/Classic
     // pattern card split only when the firmware actually has the engine.
     feat["advanced_pattern"] = true;
+
+    // SlopSync hub — ecosystem clients discover the sync plane from here:
+    // binary WS on its own port, protocol id per docs/slopsync/SPEC.md.
+    feat["slopsync"] = true;
+    doc["slopsync_port"]  = (uint16_t)SLOPSYNC_WS_PORT;
+    doc["slopsync_proto"] = "slopsync/1";
 
     // Phase 2 — runtime motion backend. _machine_backend mirrors whatever
     // main.cpp actually bound the MotorProxy to (Ground Truth: NOT re-read
@@ -1596,8 +1596,7 @@ void WebUI::handleApiMachineCommit() {
     APPLOGF("[MACHINE] backend commit: %u -> %d — rebooting to apply", _machine_backend, backend);
     _httpServer->send(200, "application/json", "{\"ok\":true,\"rebooting\":true}");
 
-    _machine_reboot_pending = true;
-    _machine_reboot_at_ms   = millis() + 500;
+    _machineReboot.arm(500, "motion-backend change commit");
 }
 
 // ============================================================================

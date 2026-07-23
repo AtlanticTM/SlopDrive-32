@@ -11,7 +11,6 @@
 // on inline with blocking work. No delay(), no cross-core directly.
 
 #include <Arduino.h>
-#include <freertos/queue.h>
 
 class PatternEngine;
 class SystemState;
@@ -35,7 +34,7 @@ enum class OssmState : uint8_t {
 class OssmBleService {
 public:
     OssmBleService(SystemState& state, PatternEngine& patternEngine,
-                   RangeMapper& mapper, QueueHandle_t waypointQueue);
+                   RangeMapper& mapper);
     ~OssmBleService();
 
     // ---- Lifecycle -----------------------------------------------------------
@@ -54,7 +53,6 @@ public:
     void setLatencyComp(bool v) { _latencyComp = v; }
     int  getDescCacheIdx() const { return _descCacheIdx; }
     void setDescCacheIdx(int idx) { _descCacheIdx = idx; }
-    void setWaypointQueue(QueueHandle_t q) { _waypointQueue = q; }
 
     String buildStateJson();
     static const char* descriptionForIndex(int idx);
@@ -69,7 +67,6 @@ private:
     SystemState&    _state;
     PatternEngine&  _patternEngine;
     RangeMapper&    _mapper;
-    QueueHandle_t   _waypointQueue;
 
     // NimBLE objects — allocated in init(), freed in stop()
     NimBLEServer*       _server      = nullptr;

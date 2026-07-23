@@ -64,12 +64,7 @@ void OtaService::begin(const char* hostname, const char* password) {
 void OtaService::handle() {
     ArduinoOTA.handle();
 
-    if (_rebootPending && (int32_t)(millis() - _rebootAtMs) >= 0) {
-        _rebootPending = false;
-        APPLOG("[OTA] rebooting into new image");
-        delay(20);          // boot-adjacent: allow the TCP FIN/response to flush
-        ESP.restart();
-    }
+    _reboot.poll();
 }
 
 // ----------------------------------------------------------------------------
@@ -188,8 +183,7 @@ void OtaService::registerHttpRoutes(WebServer* server) {
             }
             _server->send(200, "application/json",
                           "{\"ok\":true,\"target\":\"app\",\"reboot_ms\":500}");
-            _rebootPending = true;
-            _rebootAtMs    = millis() + 500;   // let the response flush first
+            _reboot.arm(500, "OTA app image flashed");   // let the response flush first
             finishOta(true, "HTTP app");
         },
         [this]() { handleUpload(U_FLASH); });
@@ -210,8 +204,7 @@ void OtaService::registerHttpRoutes(WebServer* server) {
             }
             _server->send(200, "application/json",
                           "{\"ok\":true,\"target\":\"fs\",\"reboot_ms\":500}");
-            _rebootPending = true;
-            _rebootAtMs    = millis() + 500;
+            _reboot.arm(500, "OTA LittleFS bundle flashed");
             finishOta(true, "HTTP fs");
         },
         [this]() { handleUpload(U_SPIFFS); });

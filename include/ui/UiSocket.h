@@ -1,7 +1,6 @@
 #pragma once
 
 #include <Arduino.h>
-#include <functional>
 #include <WebSocketsServer.h>
 #include <freertos/FreeRTOS.h>
 #include <freertos/task.h>
@@ -72,8 +71,6 @@ public:
         String   payload;      // JSON of last echo (copied, small — ops are low-rate)
     };
 
-    using FrameHandler = std::function<void(uint8_t num, uint8_t* payload, size_t length)>;
-
     explicit UiSocket(SystemState& state, uint16_t port = UI_WS_PORT);
 
     // ---- Lifecycle hooks (.clinerules §4) ------------------------------------
@@ -91,7 +88,6 @@ public:
 
     int connectedClients() { return _ws.connectedClients(); }
     bool clientIsConnected(uint8_t num) { return _ws.clientIsConnected(num); }
-    void onFrame(FrameHandler handler) { _frameHandler = handler; }
 
     // ---- Client admin (Health tab) ------------------------------------------
     /// Fill `out` with one ClientInfo per connected client (up to maxOut).
@@ -144,7 +140,6 @@ private:
     SystemState&  _state;
     uint16_t      _port;
     WebSocketsServer _ws;
-    FrameHandler  _frameHandler = nullptr;
 
     // Shared telemetry ring (owned by WebUI — we drain, never write)
     TelemetrySample*   _teleRing = nullptr;

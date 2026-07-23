@@ -3,6 +3,8 @@
 #include <Arduino.h>
 #include <atomic>
 
+#include "DeferredReboot.h"
+
 // ============================================================================
 // OtaService — WiFi OTA update path (firmware + LittleFS web bundle)
 // ============================================================================
@@ -89,6 +91,5 @@ private:
     String  _uploadError;
 
     // Deferred reboot after a successful HTTP flash so the JSON response flushes.
-    bool     _rebootPending = false;
-    uint32_t _rebootAtMs    = 0;
+    DeferredReboot _reboot;
 };

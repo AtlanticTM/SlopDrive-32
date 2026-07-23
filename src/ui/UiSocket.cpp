@@ -335,9 +335,6 @@ void UiSocket::_handleEvent(uint8_t num, WStype_t type, uint8_t* payload, size_t
 
             APPLOGF("[UiSocket] CMD client#%u id=%u op=0x%02X ok=%d", num, cmd_id, op, ok);
 
-        } else if (ft == 0x10 && _frameHandler) {
-            // Legacy fallback — if _webui not set and frameHandler is wired
-            _frameHandler(num, payload, length);
         } else if (ft == WS_FRAME_CMD) {
             // CMD frame too short (< 4 bytes) or arrived before the WebUI
             // handler was wired — previously this fell through BOTH branches

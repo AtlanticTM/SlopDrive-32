@@ -1,41 +1,41 @@
-// In-memory log buffer - SlopDrive-32
+// AppLog — compatibility shim over SlopLog (lib/sloplog).
 //
-// The USB Serial port is dedicated to Intiface TCode (serial control mode), so
-// debug output must NOT go to Serial or it would corrupt the command stream.
-// Instead, log lines are stored in a small RAM ring buffer and viewed through
-// the web UI (GET /api/log). Use applogf() exactly like Serial.printf().
+// Historically this was its own mutex'd line ring for the web UI. It is now
+// a thin facade: APPLOG/APPLOGF and applog/applogf feed the SlopLog core
+// (level Info, tag "app"), and the web ring (/api/log) plus Serial are just
+// SlopLog SINKS registered in applogBegin(). SERIAL_CONTROL_MODE no longer
+// branches the macros — it decides whether the Serial sink gets registered
+// (the USB port stays clean for Intiface TCode either way).
+//
+// New code should prefer SLOGx("tag", ...) from <sloplog/sloplog.h> directly
+// — real levels, tags, and per-call-site throttling (SLOGW_EVERY_MS). These
+// macros exist so 200+ legacy call sites keep working during the migration.
 #ifndef APPLOG_H
 #define APPLOG_H
 
 #include <Arduino.h>
+
 #include "config_api.h"
+#include "sloplog/sloplog.h"
 
-// ---- Shared logging macros (used by every .cpp that wants to log) ---------
-// In serial-control mode the USB Serial port is dedicated to Intiface TCode,
-// so status/debug must go to the in-memory web log (applog), NOT Serial.
-// Otherwise log normally to Serial.  Include this header and use APPLOG/APPLOGF.
-// If your file needs different names (e.g. the TMC driver uses MLOGF/MLOGLN),
-// define your own narrow macros — the underlying applog/applogf functions are
-// still available.
-#if SERIAL_CONTROL_MODE
-  #define APPLOG(s)      applog(s)
-  #define APPLOGF(...)   applogf(__VA_ARGS__)
-#else
-  #define APPLOG(s)      Serial.println(s)
-  #define APPLOGF(...)   Serial.printf(__VA_ARGS__)
-#endif
+#define APPLOG(s)      applog(s)
+#define APPLOGF(...)   applogf(__VA_ARGS__)
 
-// Capture a printf-style log line into the ring buffer (thread-safe enough for
-// our use: short critical section guarded by a mutex). Never writes to Serial.
+// printf-style, level Info, tag "app". Never blocks; bounded truncation.
 void applogf(const char* fmt, ...);
 
-// Append a plain string line.
+// Plain string line, level Info, tag "app".
 void applog(const char* line);
 
-// Concatenate all buffered lines (oldest first) into the provided String.
+// Concatenate the web ring's buffered lines (oldest first) for /api/log.
 void applogDump(String& out);
 
-// Initialize the mutex. Call once in setup() before any logging.
+// Register the SlopLog sinks (web ring always; Serial unless
+// SERIAL_CONTROL_MODE). Call once in setup(). Records logged before this is
+// called are buffered in the SlopLog core and flow out on the first drain.
 void applogBegin();
+
+// Pump: fan buffered records out to the sinks. Call from httpTask (Core 0).
+void applogDrain();
 
 #endif  // APPLOG_H

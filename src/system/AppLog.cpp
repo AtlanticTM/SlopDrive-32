@@ -1,56 +1,93 @@
-// In-memory log buffer implementation — SlopDrive-32's confessional booth :3
-// Every dirty little thing the system does gets whispered into this ring buffer.
+// AppLog — compatibility facade over SlopLog. The web line-ring (/api/log)
+// is now a SlopLog sink; applog/applogf are Info-level producers. See the
+// header for the migration story.
+
 #include "AppLog.h"
+
+#include <cstdarg>
+
 #include "freertos/FreeRTOS.h"
-#include "freertos/semphr.h"
 
-// Ring buffer of recent log lines — like a pup's collar, it only holds so much.
-// Kept small to bound RAM use; we're kinky, not wasteful. :3
-static const int   LOG_LINES = 60;
-static const int   LOG_LINE_LEN = 96;
-static char        s_lines[LOG_LINES][LOG_LINE_LEN];
-static int         s_head = 0;     // next write slot
-static int         s_count = 0;    // number of valid lines
-static SemaphoreHandle_t s_mtx = nullptr;
+namespace {
 
-void applogBegin() {
-    if (!s_mtx) s_mtx = xSemaphoreCreateMutex();
+// The /api/log web ring: formatted lines, oldest-first dump. Written only
+// from the drain caller (httpTask), but dumped from HTTP handlers which can
+// interleave on other priorities — a short spinlock keeps the copy honest.
+class WebRingSink final : public sloplog::ISink {
+public:
+    void write(const sloplog::Record& r) override {
+        char line[140];
+        int n = snprintf(line, sizeof(line), "[%5lu.%03lu %c %s] %s",
+                         (unsigned long)(r.ms / 1000u), (unsigned long)(r.ms % 1000u),
+                         sloplog::levelChar(r.level), r.tag, r.msg);
+        if (n < 0) return;
+        if (n >= int(sizeof(line))) n = int(sizeof(line)) - 1;
+        // Legacy call sites often carry their own trailing newline — the
+        // ring is line-oriented, so strip it.
+        while (n > 0 && (line[n - 1] == '\n' || line[n - 1] == '\r')) line[--n] = '\0';
+        if (r.lost && size_t(n) < sizeof(line)) {
+            snprintf(line + n, sizeof(line) - size_t(n), " (+%u lost)", r.lost);
+        }
+        portENTER_CRITICAL(&_mux);
+        strncpy(_lines[_head], line, kLineBytes - 1);
+        _lines[_head][kLineBytes - 1] = '\0';
+        _head = (_head + 1) % kLines;
+        if (_count < kLines) ++_count;
+        portEXIT_CRITICAL(&_mux);
+    }
+
+    void dump(String& out) {
+        // Copy under the lock, then build the String outside it (String
+        // append can reallocate — never allocate in a critical section).
+        static char snapshot[kLines][kLineBytes];  // static: too big for stack
+        size_t count, head;
+        portENTER_CRITICAL(&_mux);
+        count = _count;
+        head = _head;
+        memcpy(snapshot, _lines, sizeof(_lines));
+        portEXIT_CRITICAL(&_mux);
+        size_t start = (head + kLines - count) % kLines;
+        for (size_t i = 0; i < count; ++i) {
+            out += snapshot[(start + i) % kLines];
+            out += '\n';
+        }
+    }
+
+private:
+    static constexpr size_t kLines = 60;
+    static constexpr size_t kLineBytes = 140;
+    char _lines[kLines][kLineBytes] = {};
+    size_t _head = 0;
+    size_t _count = 0;
+    portMUX_TYPE _mux = portMUX_INITIALIZER_UNLOCKED;
+};
+
+WebRingSink& webRing() {
+    static WebRingSink s;
+    return s;
 }
 
+}  // namespace
+
+void applogBegin() {
+    sloplog::logger().addSink(&webRing());
+#if !SERIAL_CONTROL_MODE
+    // USB serial is free for humans — mirror everything there too.
+    sloplog::logger().addSink(&sloplog::serialSink());
+#endif
+}
+
+void applogDrain() { sloplog::drainToSinks(); }
+
 void applog(const char* line) {
-    if (!s_mtx) {  // allow logging before begin() (best effort, no lock)
-        strncpy(s_lines[s_head], line, LOG_LINE_LEN - 1);
-        s_lines[s_head][LOG_LINE_LEN - 1] = '\0';
-        s_head = (s_head + 1) % LOG_LINES;
-        if (s_count < LOG_LINES) s_count++;
-        return;
-    }
-    if (xSemaphoreTake(s_mtx, pdMS_TO_TICKS(20)) == pdTRUE) {
-        strncpy(s_lines[s_head], line, LOG_LINE_LEN - 1);
-        s_lines[s_head][LOG_LINE_LEN - 1] = '\0';
-        s_head = (s_head + 1) % LOG_LINES;
-        if (s_count < LOG_LINES) s_count++;
-        xSemaphoreGive(s_mtx);
-    }
+    sloplog::logger().logf(sloplog::Level::Info, "app", "%s", line);
 }
 
 void applogf(const char* fmt, ...) {
-    char buf[LOG_LINE_LEN];
-    va_list args;
-    va_start(args, fmt);
-    vsnprintf(buf, sizeof(buf), fmt, args);
-    va_end(args);
-    applog(buf);
+    va_list ap;
+    va_start(ap, fmt);
+    sloplog::logger().vlogf(sloplog::Level::Info, "app", fmt, ap);
+    va_end(ap);
 }
 
-void applogDump(String& out) {
-    if (s_mtx) xSemaphoreTake(s_mtx, pdMS_TO_TICKS(20));
-    // Walk from oldest to newest.
-    int start = (s_count < LOG_LINES) ? 0 : s_head;
-    for (int i = 0; i < s_count; i++) {
-        int idx = (start + i) % LOG_LINES;
-        out += s_lines[idx];
-        out += '\n';
-    }
-    if (s_mtx) xSemaphoreGive(s_mtx);
-}
+void applogDump(String& out) { webRing().dump(out); }

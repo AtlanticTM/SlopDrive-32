@@ -46,4 +46,11 @@
 #include "slopsync/wire/fragmentation.hpp"
 #include "slopsync/transport/transport.hpp"
 #include "slopsync/transport/inprocess_binding.hpp"
-// M4+: session engine, hub, client.
+#include "slopsync/channel/intent_registry.hpp"
+#include "slopsync/channel/subscription.hpp"
+#include "slopsync/channel/event_channel.hpp"
+#include "slopsync/channel/retained_store.hpp"
+#include "slopsync/session/session.hpp"
+#include "slopsync/hub/hub.hpp"
+#include "slopsync/client/client.hpp"
+// M5+: deadman policy dispatch, takeover, shedding, pairing.

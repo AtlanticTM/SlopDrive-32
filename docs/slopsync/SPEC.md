@@ -282,7 +282,7 @@ On transport restoration a client sends a fresh HELLO (same `instance_id`, same 
 
 ### 6.8 Teardown
 
-GOODBYE (either direction, CBOR: `code`, optional `detail`) is a courtesy, not a requirement — transports die rudely and every rule above already tolerates it. Hub-initiated GOODBYE codes of note: `SESSION_EVICTED` (slow consumer, §10.4; admin kick), `DUPLICATE_INSTANCE` (§6.3). After GOODBYE the hub frees the session and releases any control ownership per §11.4's loss rules (identical to deadman).
+GOODBYE (either direction, CBOR: `code`, optional `detail`) is a courtesy, not a requirement — transports die rudely and every rule above already tolerates it. Codes of note: `NORMAL_CLOSURE` (clean voluntary teardown, either direction), and hub-initiated `SESSION_EVICTED` (slow consumer, §10.4; admin kick) and `DUPLICATE_INSTANCE` (§6.3). After GOODBYE the hub frees the session and releases any control ownership per §11.4's loss rules (identical to deadman).
 
 ---
 
@@ -742,6 +742,7 @@ The vector manifest and generation plan live in [`vectors/manifest.yaml`](vector
 | Event queue depth per subscriber | 16 | §9.4 |
 | Never-shed stall → eviction | 2 s | §10.4 |
 | Catalog chunk gap re-request (SHOULD) | 500 ms | §8.4 |
+| NACK BUSY default retry_after | 2 s | §6.3 |
 | PING interval (holding control / idle) | 200 ms / 1 s | §6.5 |
 | Deadman default / clamp | 600 ms / 250–5000 ms | §11.3 |
 | Intent ingress default | 50 /s | §9.3, §10.5 |

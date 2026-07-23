@@ -75,6 +75,14 @@ struct IntentValueField {
 
 using IntentValueArray = std::array<IntentValueField, kIntentMaxValueFields>;
 
+// Convenience aggregate for passing a value map through role-layer APIs
+// (HubDelegate::applyIntent, Client::sendIntent): count + fields, mirroring
+// IntentMsg's own value_count/value pair.
+struct IntentValueMap {
+    uint32_t count = 0;
+    IntentValueArray fields{};
+};
+
 // Shared by INTENT's `value`, ECHO's `applied`, and EVENT's optional
 // payload: writes one already-decided scalar. Returns `w` for chaining.
 inline CborWriter& encodeIntentValue(CborWriter& w, const IntentValue& v) {

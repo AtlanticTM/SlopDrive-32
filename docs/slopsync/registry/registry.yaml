@@ -175,6 +175,7 @@ nack_codes:
   0x0104: { name: PAIRING_DENIED,       note: "bad pin_proof or pairing window closed" }
   0x0105: { name: SESSION_EVICTED,      note: "slow-consumer or admin kick (GOODBYE code)" }
   0x0106: { name: DUPLICATE_INSTANCE,   note: "instance_id already in live session; old session evicted instead — see §6.8" }
+  0x0107: { name: NORMAL_CLOSURE,       note: "clean voluntary teardown (GOODBYE code, either direction) — not an error" }
   # 0x02xx — subscription / QoS
   0x0200: { name: UNKNOWN_CHANNEL,      note: "channel id not in catalog" }
   0x0201: { name: ACCESS_DENIED,        note: "channel access level above session role" }
@@ -229,6 +230,7 @@ limits:
   event_queue_depth_per_subscriber: 16
   never_shed_stall_eviction_ms: 2000
   catalog_chunk_gap_timeout_ms: 500   # recommended (SHOULD)
+  busy_retry_after_default_ms: 2000
   ping_interval_holding_control_ms: 200
   ping_interval_idle_ms: 1000
   deadman_default_ms: 600

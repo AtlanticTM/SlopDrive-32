@@ -149,6 +149,7 @@ enum class NackCode : uint16_t {
     PAIRING_DENIED = 0x0104,  // bad pin_proof or pairing window closed
     SESSION_EVICTED = 0x0105,  // slow-consumer or admin kick (GOODBYE code)
     DUPLICATE_INSTANCE = 0x0106,  // instance_id already in live session; old session evicted instead — see §6.8
+    NORMAL_CLOSURE = 0x0107,  // clean voluntary teardown (GOODBYE code, either direction) — not an error
     UNKNOWN_CHANNEL = 0x0200,  // channel id not in catalog
     ACCESS_DENIED = 0x0201,  // channel access level above session role
     CLASS_MISMATCH = 0x0202,  // e.g. SUBSCRIBE to an INTENT channel
@@ -183,6 +184,7 @@ inline constexpr uint32_t intent_ingress_default_per_s = 50;
 inline constexpr uint32_t event_queue_depth_per_subscriber = 16;
 inline constexpr uint32_t never_shed_stall_eviction_ms = 2000;
 inline constexpr uint32_t catalog_chunk_gap_timeout_ms = 500;
+inline constexpr uint32_t busy_retry_after_default_ms = 2000;
 inline constexpr uint32_t ping_interval_holding_control_ms = 200;
 inline constexpr uint32_t ping_interval_idle_ms = 1000;
 inline constexpr uint32_t deadman_default_ms = 600;

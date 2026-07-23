@@ -42,4 +42,8 @@
 #include "slopsync/wire/messages/pair.hpp"
 #include "slopsync/wire/messages/probe_report.hpp"
 #include "slopsync/session/static_profile.hpp"
-// M3+: transport + in-process binding, session engine, hub, client.
+#include "slopsync/wire/frame_buffer.hpp"
+#include "slopsync/wire/fragmentation.hpp"
+#include "slopsync/transport/transport.hpp"
+#include "slopsync/transport/inprocess_binding.hpp"
+// M4+: session engine, hub, client.

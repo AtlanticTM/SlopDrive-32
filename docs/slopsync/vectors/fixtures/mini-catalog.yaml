@@ -1,0 +1,27 @@
+# FROZEN conformance fixture — human-readable mirror of the normative code
+# fixture lib/slopsync/include/slopsync/conformance/mini_catalog.hpp.
+# Referenced by vectors/manifest.yaml (`fixtures.catalog`). DO NOT EDIT after
+# K-suite golden vectors are generated: K-01 pins its encoding, K-02 its etag.
+# Coverage: every packed type, every CBOR field type, both entry forms,
+# two bitfield8s, min/max present and absent.
+entries:
+  - { id: 0x0003, name: safety, class: STATE, dir: h2c, access: viewer, max_rate_hz: 0.0, priority: critical,
+      layout: [ {name: word, type: bitfield8, unit: flag, bits: {0: estop, 1: stop, 2: hold, 3: pause}},
+                {name: cause, type: u8}, {name: owner_session, type: u32}, {name: estop_seq, type: u16, unit: count} ] }
+  - { id: 0x0080, name: position, class: STREAM, dir: h2c, access: viewer, max_rate_hz: 240.0, priority: elevated,
+      layout: [ {name: pos_10um, type: u16, unit: mm, scale: 100.0},
+                {name: tgt_10um, type: u16, unit: mm, scale: 100.0},
+                {name: raw_10um, type: u16, unit: mm, scale: 100.0} ] }
+  - { id: 0x0082, name: motion-status, class: STATE, dir: h2c, access: viewer, max_rate_hz: 10.0, priority: normal,
+      layout: [ {name: flags, type: bitfield8, unit: flag, bits: {0: homed, 1: homing, 2: gen_running, 3: paused, 4: override}},
+                {name: reserved, type: u8} ] }
+  - { id: 0x0084, name: motion-config-set, class: INTENT, dir: c2h, access: controller, max_rate_hz: 10.0, priority: critical,
+      schema: { 1: {name: speed, type: float32, unit: mm/s, min: 0.0, max: 600.0},
+                2: {name: depth_pct, type: uint, unit: "%", min: 0.0, max: 100.0},
+                3: {name: label, type: tstr}, 4: {name: enable, type: bool} } }
+  - { id: 0x008A, name: anomalies, class: EVENT, dir: h2c, access: viewer, max_rate_hz: 0.0, priority: normal,
+      schema: { 1: {name: kind, type: uint}, 2: {name: t_dev, type: uint, unit: ms},
+                3: {name: delta, type: int, unit: mm}, 4: {name: blob, type: bstr} } }
+  - { id: 0x0090, name: diag, class: STATE, dir: h2c, access: viewer, max_rate_hz: 2.0, priority: background,
+      layout: [ {name: d_i8, type: i8, unit: degC}, {name: d_i16, type: i16, unit: mm/s, scale: 10.0, min: -600.0, max: 600.0},
+                {name: d_i32, type: i32, unit: count}, {name: d_u32, type: u32, unit: count}, {name: d_f32, type: f32, unit: mm/s2} ] }

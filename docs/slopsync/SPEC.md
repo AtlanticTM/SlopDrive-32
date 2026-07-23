@@ -183,7 +183,7 @@ Control payloads are CBOR maps with **integer keys** from the global key registr
 - integers in shortest form; map keys sorted ascending by encoded bytes;
 - floats as binary32 only (never binary16/64); integral values that are semantically integers encoded as integers, not floats;
 - no tags, no bignums, no simple values other than `false`/`true`/`null`;
-- maximum nesting depth 4.
+- maximum nesting depth 4 **per decoded document**. (One structure legally exceeds this as a whole: the catalog, whose entries nest to 5 counting its outer array. §8.4 therefore defines the catalog as an outer array header followed by independently-decodable *entry documents*, each within the depth-4 cap — a depth-4 decoder handles it by consuming the array header, then decoding entries one at a time. Caught by implementation; codified here.)
 
 Rationale (informative): exactly one valid encoding exists for any message, which makes golden vectors byte-exact and lets constrained clients ship **pre-encoded templates** — a canned HELLO with value bytes patched in at runtime is guaranteed to be the same bytes a full encoder would produce. A decoder MAY reject profile violations with NACK `PROFILE_VIOLATION`; it MUST NOT crash on them.
 
@@ -332,7 +332,7 @@ The catalog is the hub's machine-readable self-description: an array of channel 
 }
 ```
 
-`layout` describes packed payloads (STATE/STREAM) field-by-field in wire order; `schema` describes CBOR payloads (INTENT/EVENT) key-by-key. `bits` enumerates bitfield8 meanings. Exactly one of the two is present, per class. The normative encoding of the catalog itself is CDDL-defined in [`schema/catalog.cddl`](schema/catalog.cddl) (Appendix C).
+`layout` describes packed payloads (STATE/STREAM) field-by-field in wire order; `schema` describes CBOR payloads (INTENT/EVENT) key-by-key. `bits` enumerates bitfield8 meanings. Exactly one of the two is present, per class. The normative encoding of the catalog itself is CDDL-defined in [`schema/catalog.cddl`](schema/catalog.cddl) (Appendix C). **Encoding structure rule:** the catalog on the wire is its outer array header followed by each entry encoded as an independent, self-delimiting document — every entry document individually satisfies the §5.3 depth-4 cap (entry map → layout array → field map → bits map = 4), and decoders MAY (and depth-4 decoders MUST) process entries with per-entry decoder state. The etag (§8.3) is computed over these exact concatenated bytes.
 
 ### 8.2 Schema language scope
 
@@ -384,7 +384,7 @@ STREAM channels carry timestamped sample bundles (§5.4) in either direction (po
 - **Ordering:** guaranteed only on ordered bindings. On datagram bindings the consumer rules of §7.3 (drop-not-newer, timestamp-driven consumption) are the whole contract. The per-binding guarantee matrix is §13.1; STREAM consumers MUST be written against the weakest line of that table.
 - **Shedding = decimation, newest-biased:** under congestion the hub drops whole bundles or thins samples within bundles, always preserving the most recent samples. It MUST NOT delay-and-burst (a stale motion sample is worse than a missing one — the timestamps make dropped samples recoverable by interpolation, stale delivery is a lie).
 - **No acknowledgements.** STREAM frames are never ACKed at the protocol level, in either direction (X-ref §9.3 for why motion *input* correctness doesn't need it).
-- **Grants bound sample rate**, not frame rate: a 240 Hz grant delivered as 30 fps × 8-sample bundles is conformant and expected.
+- **Grants bound sample rate**, not frame rate: a 240 Hz grant delivered as ~48 fps × 5-sample bundles is conformant and expected. (The §5.4 span cap of 20 ms governs bundle size: at 240 Hz, five samples span 16.7 ms — the sixth would exceed the cap. An earlier draft's "30 fps × 8-sample" example violated the spec's own cap; caught by implementation, corrected here.)
 
 ### 9.3 INTENT / ECHO — the control plane
 

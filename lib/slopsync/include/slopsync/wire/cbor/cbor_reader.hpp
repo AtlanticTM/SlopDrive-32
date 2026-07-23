@@ -44,6 +44,16 @@ public:
 
     explicit CborReader(std::span<const std::byte> in) : _in(in) {}
 
+    // Bytes consumed from `in` so far. Purely additive accessor (no existing
+    // call site uses it, no existing check is affected): it exists so a
+    // caller decoding a structure whose FULL nesting exceeds kMaxDepth can
+    // walk it as a sequence of independent sub-reads, each got its own
+    // fresh CborReader (own _depth budget), chained by re-slicing `in` at
+    // the byte offset this reports — see wire/catalog_codec.hpp's file-level
+    // comment for why the catalog schema (§8.1's 5-deep bitfield-bits case)
+    // needs exactly this.
+    size_t bytesConsumed() const { return _pos; }
+
     // Inspects the next item's major type without consuming anything or
     // touching the container-frame bookkeeping. Used by skipValue() (and
     // available to callers) to decide how to dispatch. Major 6 (Tag) is

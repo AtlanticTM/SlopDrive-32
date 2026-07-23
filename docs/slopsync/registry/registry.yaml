@@ -149,6 +149,16 @@ welcome_limits_keys:
   3: { name: retained_pending, note: "count of retained STATE pushes that will follow WELCOME" }
 
 # ---------------------------------------------------------------------------
+# PROBE_REPORT `probe_result` (key 26) sub-map integer keys — scoped key
+# space local to that nested map (§6.4).
+# ---------------------------------------------------------------------------
+probe_result_keys:
+  1: { name: bytes_received, note: "bytes received during the probe burst" }
+  2: { name: span_ms,        note: "wall time of the burst as observed by the client" }
+  3: { name: loss_pct_x100,  note: "loss percentage x100 (2 decimal fixed-point)" }
+  4: { name: rtt_ms,         note: "measured round-trip time, ms" }
+
+# ---------------------------------------------------------------------------
 # NACK / GOODBYE reason codes (u16, ranged).
 # ---------------------------------------------------------------------------
 nack_codes:

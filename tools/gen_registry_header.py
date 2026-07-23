@@ -84,12 +84,14 @@ def gen(reg: dict) -> str:
         p(f"    {ident(e['name'])} = {k},  // {e['type']}: {e['note']}\n")
     p("};\n\n")
 
-    # ---- WELCOME limits sub-map keys (scoped key space, not global) --------
-    p("namespace welcome_limits {\n")
-    for k in sorted(reg["welcome_limits_keys"]):
-        e = reg["welcome_limits_keys"][k]
-        p(f"inline constexpr uint8_t {ident(e['name'])} = {k};  // {e['note']}\n")
-    p("}  // namespace welcome_limits\n\n")
+    # ---- Scoped sub-map key spaces (not the global cbor_keys space) --------
+    for section, ns in (("welcome_limits_keys", "welcome_limits"),
+                        ("probe_result_keys", "probe_result")):
+        p(f"namespace {ns} {{\n")
+        for k in sorted(reg[section]):
+            e = reg[section][k]
+            p(f"inline constexpr uint8_t {ident(e['name'])} = {k};  // {e['note']}\n")
+        p(f"}}  // namespace {ns}\n\n")
 
     # ---- NACK codes ---------------------------------------------------------
     p("enum class NackCode : uint16_t {\n")

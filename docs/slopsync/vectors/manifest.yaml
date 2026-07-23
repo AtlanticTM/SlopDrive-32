@@ -44,7 +44,7 @@ suites:
     - id: D-01  # STATE snapshot encode/decode for each mini-catalog layout
     - id: D-02  # newest-wins: seq 10 then 9 -> 9 dropped; wraparound 0xFFFE..0x0001
     - id: D-03  # STATE fit rule: 243-byte layout -> conformance tooling MUST flag
-    - id: D-04  # STREAM bundle: 8 samples @240Hz, t_base/t_off exactness
+    - id: D-04  # STREAM bundle: 5 samples @240Hz (span 16.7ms < 20ms cap), t_base/t_off exactness
     - id: D-05  # bundle caps: 33 samples / 21ms span / MTU overflow all rejected
     - id: D-06  # append-only evolution: reader with short layout parses long payload prefix
 

@@ -130,6 +130,13 @@ inline constexpr uint8_t max_subscriptions = 2;  // per-session subscription cap
 inline constexpr uint8_t retained_pending = 3;  // count of retained STATE pushes that will follow WELCOME
 }  // namespace welcome_limits
 
+namespace probe_result {
+inline constexpr uint8_t bytes_received = 1;  // bytes received during the probe burst
+inline constexpr uint8_t span_ms = 2;  // wall time of the burst as observed by the client
+inline constexpr uint8_t loss_pct_x100 = 3;  // loss percentage x100 (2 decimal fixed-point)
+inline constexpr uint8_t rtt_ms = 4;  // measured round-trip time, ms
+}  // namespace probe_result
+
 enum class NackCode : uint16_t {
     MALFORMED = 0x0000,  // undecodable frame/CBOR
     UNSUPPORTED_VERSION = 0x0001,  // HELLO proto_ver not servable

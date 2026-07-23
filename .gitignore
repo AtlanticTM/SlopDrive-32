@@ -23,8 +23,12 @@ webui/.env.local
 data/index.html
 data/index.html.gz
 
-# Dev tools & diagnostic scripts — not part of the firmware
-tools/
+# Dev tools & diagnostic scripts — not part of the firmware.
+# (tools/* not tools/ so specific files CAN be re-included below —
+#  git cannot re-include anything under an excluded directory.)
+tools/*
+# SlopSync registry codegen IS part of the repo: spec<->code lockstep tool.
+!tools/gen_registry_header.py
 .clangd
 .clang-format
 .cache/

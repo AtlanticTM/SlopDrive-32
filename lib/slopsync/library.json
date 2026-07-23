@@ -1,0 +1,15 @@
+{
+  "name": "slopsync",
+  "version": "0.1.0",
+  "description": "SlopSync protocol reference implementation (slopsync/1): hub-and-spoke device-shadow sync with capability negotiation. Hardware-free, zero-dependency C++20. Spec: docs/slopsync/SPEC.md",
+  "keywords": ["protocol", "device-shadow", "state-sync", "slopsync"],
+  "license": "MIT",
+  "frameworks": "*",
+  "platforms": "*",
+  "headers": "slopsync/slopsync.h",
+  "build": {
+    "includeDir": "include",
+    "srcDir": "src",
+    "flags": ["-std=gnu++2b"]
+  }
+}

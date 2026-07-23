@@ -137,6 +137,16 @@ cbor_keys:
   32: { name: takeover,       type: bool,  note: "safety-intent: forcible source takeover flag (§11.4)" }
   33: { name: event_kind,     type: uint,  note: "EVENT: kind discriminator per catalog entry" }
   34: { name: seq_of_state,   type: uint,  note: "EVENT: seq of the STATE twin frame it corresponds to (§9.4)" }
+  35: { name: grants,         type: array, note: "WELCOME: batch grant results — array of {13:priority, 14:granted_rate_hz, 15:channel_id} (§6.3, §10.2)" }
+
+# ---------------------------------------------------------------------------
+# WELCOME `limits` (key 22) sub-map integer keys — a separate tiny key space
+# scoped to that nested map only (NOT the global cbor_keys space).
+# ---------------------------------------------------------------------------
+welcome_limits_keys:
+  1: { name: max_frame,        note: "largest frame this hub accepts, bytes" }
+  2: { name: max_subscriptions, note: "per-session subscription cap" }
+  3: { name: retained_pending, note: "count of retained STATE pushes that will follow WELCOME" }
 
 # ---------------------------------------------------------------------------
 # NACK / GOODBYE reason codes (u16, ranged).

@@ -72,6 +72,10 @@ void applogBegin() {
     sloplog::logger().addSink(&webRing());
 #if !SERIAL_CONTROL_MODE
     // USB serial is free for humans — mirror everything there too.
+    // Zero TX timeout = the CDC driver DROPS when full/unlistened instead of
+    // blocking (~100 ms/line). This is what makes SerialSink's unconditional
+    // writes safe on the log-drain task.
+    Serial.setTxTimeoutMs(0);
     sloplog::logger().addSink(&sloplog::serialSink());
 #endif
     // Boot mode: drain synchronously after every line so the whole boot

@@ -73,21 +73,26 @@ public:
             n += snprintf(line + n, sizeof(line) - size_t(n), "  (+%u lost)", r.lost);
             if (n >= int(sizeof(line))) n = int(sizeof(line)) - 1;
         }
+        // The owner MUST have set Serial.setTxTimeoutMs(0) (applogBegin does):
+        // with a zero TX timeout the CDC driver drops instead of blocking, so
+        // unconditional writes here are safe. We do NOT gate on
+        // availableForWrite() — on HWCDC it reports 0 until the driver's
+        // host-detection heuristic is happy (cat/dumb terminals never satisfy
+        // it), which silently swallowed every line in the field.
         if (_dropped) {
             char note[40];
             int m = snprintf(note, sizeof(note), "(serial dropped %lu)",
                              (unsigned long)_dropped);
-            if (m > 0 && Serial.availableForWrite() >= m + 2) {
-                Serial.write(reinterpret_cast<const uint8_t*>(note), size_t(m));
+            if (m > 0 && Serial.write(reinterpret_cast<const uint8_t*>(note), size_t(m)) == size_t(m)) {
                 Serial.write("\r\n", 2);
                 _dropped = 0;
             }
         }
-        if (Serial.availableForWrite() >= n + 2) {
-            Serial.write(reinterpret_cast<const uint8_t*>(line), size_t(n));
+        size_t wrote = Serial.write(reinterpret_cast<const uint8_t*>(line), size_t(n));
+        if (wrote == size_t(n)) {
             Serial.write("\r\n", 2);
         } else {
-            ++_dropped;  // CDC constipated (no host reading) — never block for it
+            ++_dropped;  // buffer full / no listener — dropped, never blocked
         }
     }
 

@@ -57,3 +57,4 @@ AIM_Servo_Motor_Datasheet_EN_with_images.pdf
 # Build outputs, captures & scratch artifacts — generated, not source
 build/
 $null
+flashpack/

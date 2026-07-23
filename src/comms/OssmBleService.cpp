@@ -56,42 +56,37 @@ static const char* kStateNames[] = {
 static OssmBleService* g_ossm = nullptr;
 
 // ============================================================================
-// NimBLE callback classes — no `override` (NimBLE 1.4.x uses positional args)
+// NimBLE callback classes — NimBLE 2.x signatures (NimBLEConnInfo&), with
+// `override` so any future upstream signature change is a COMPILE error, never
+// a silently-dead callback. :3
 // ============================================================================
 
 class OssmServerCB : public NimBLEServerCallbacks {
 public:
-    void onConnect(NimBLEServer* srv) {
-        if (g_ossm) g_ossm->_onConnect(0);
+    void onConnect(NimBLEServer* srv, NimBLEConnInfo& connInfo) override {
+        if (g_ossm) g_ossm->_onConnect(connInfo.getConnHandle());
     }
-    void onDisconnect(NimBLEServer* srv) {
-        if (g_ossm) g_ossm->_onDisconnect(0, 0);
-    }
-    // NimBLE 1.4.x may pass connInfo as second param
-    void onConnect(NimBLEServer* srv, ble_gap_conn_desc* desc) {
-        if (g_ossm) g_ossm->_onConnect(desc ? desc->conn_handle : 0);
-    }
-    void onDisconnect(NimBLEServer* srv, ble_gap_conn_desc* desc) {
-        if (g_ossm) g_ossm->_onDisconnect(desc ? desc->conn_handle : 0, 0);
+    void onDisconnect(NimBLEServer* srv, NimBLEConnInfo& connInfo, int reason) override {
+        if (g_ossm) g_ossm->_onDisconnect(connInfo.getConnHandle(), reason);
     }
 };
 
 class OssmCmdCB : public NimBLECharacteristicCallbacks {
 public:
-    void onWrite(NimBLECharacteristic* chr) {
+    void onWrite(NimBLECharacteristic* chr, NimBLEConnInfo& connInfo) override {
         if (g_ossm) g_ossm->_onCommandWrite(chr);
     }
-    void onRead(NimBLECharacteristic* chr) {
+    void onRead(NimBLECharacteristic* chr, NimBLEConnInfo& connInfo) override {
         // Last response already stored in char value by _respond()
     }
 };
 
 class OssmKnobCB : public NimBLECharacteristicCallbacks {
 public:
-    void onRead(NimBLECharacteristic* chr) {
+    void onRead(NimBLECharacteristic* chr, NimBLEConnInfo& connInfo) override {
         chr->setValue(g_ossm ? (g_ossm->getKnobLimit() ? "true" : "false") : "false");
     }
-    void onWrite(NimBLECharacteristic* chr) {
+    void onWrite(NimBLECharacteristic* chr, NimBLEConnInfo& connInfo) override {
         if (!g_ossm) return;
         std::string raw = chr->getValue();
         std::string lower;
@@ -110,10 +105,10 @@ public:
 
 class OssmLatCB : public NimBLECharacteristicCallbacks {
 public:
-    void onRead(NimBLECharacteristic* chr) {
+    void onRead(NimBLECharacteristic* chr, NimBLEConnInfo& connInfo) override {
         chr->setValue(g_ossm ? (g_ossm->getLatencyComp() ? "true" : "false") : "false");
     }
-    void onWrite(NimBLECharacteristic* chr) {
+    void onWrite(NimBLECharacteristic* chr, NimBLEConnInfo& connInfo) override {
         if (!g_ossm) return;
         std::string raw = chr->getValue();
         std::string lower;
@@ -132,14 +127,14 @@ public:
 
 class OssmStateCB : public NimBLECharacteristicCallbacks {
 public:
-    void onRead(NimBLECharacteristic* chr) {
+    void onRead(NimBLECharacteristic* chr, NimBLEConnInfo& connInfo) override {
         if (g_ossm) chr->setValue(g_ossm->buildStateJson().c_str());
     }
 };
 
 class OssmListCB : public NimBLECharacteristicCallbacks {
 public:
-    void onRead(NimBLECharacteristic* chr) {
+    void onRead(NimBLECharacteristic* chr, NimBLEConnInfo& connInfo) override {
         int count = PatternEngine::patternCount();
         String json = "[";
         for (int i = 0; i < count; i++) {
@@ -157,14 +152,14 @@ public:
 
 class OssmDescCB : public NimBLECharacteristicCallbacks {
 public:
-    void onRead(NimBLECharacteristic* chr) {
+    void onRead(NimBLECharacteristic* chr, NimBLEConnInfo& connInfo) override {
         if (g_ossm) {
             int idx = g_ossm->getDescCacheIdx();
             if (idx < 0) idx = 0;
             chr->setValue(OssmBleService::descriptionForIndex(idx));
         }
     }
-    void onWrite(NimBLECharacteristic* chr) {
+    void onWrite(NimBLECharacteristic* chr, NimBLEConnInfo& connInfo) override {
         if (!g_ossm) return;
         std::string raw = chr->getValue();
         int idx = 0;
@@ -220,7 +215,7 @@ void OssmBleService::start() {
     // makes nimble_port_stop() pend on a FreeRTOS mutex that was never
     // created — hits `assert(mu->handle)` in npl_freertos_mutex_pend() and
     // reboots the board. Only deinit if NimBLE is actually initialized. :3
-    if (NimBLEDevice::getInitialized()) {
+    if (NimBLEDevice::isInitialized()) {
         NimBLEDevice::deinit(true);
     }
 
@@ -271,15 +266,14 @@ void OssmBleService::start() {
     _descCacheIdx = 0;
     _charDesc->setValue(_descriptionForIndex(0));
 
-    _svc->start();
+    // NimBLE 2.x: services auto-start with the server — no explicit start().
 
     // Advertising
     _adv = NimBLEDevice::getAdvertising();
     _adv->addServiceUUID(OSSM_SVC_UUID);
     _adv->addServiceUUID(NimBLEUUID((uint16_t)0x180A));
-    _adv->setScanResponse(true);
-    _adv->setMinPreferred(6);
-    _adv->setMaxPreferred(12);
+    _adv->enableScanResponse(true);
+    _adv->setPreferredParams(6, 12);
 
     NimBLEAdvertisementData advData;
     advData.setName(OSSM_ADV_NAME);

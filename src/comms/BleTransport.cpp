@@ -23,16 +23,17 @@ static void _bleTxResponse(const char* msg) {
 // NimBLE delivers events to subclasses of its callback interfaces.  These thin
 // shims just forward into the owning BleTransport instance.
 
-// NimBLE 1.4.x callbacks: plain signatures, no NimBLEConnInfo on the leash.
+// NimBLE 2.x callbacks: NimBLEConnInfo& in every signature, `override` kept so
+// upstream signature drift is a compile error, never a silently-dead shim.
 // These thin shims just forward the central's filthy little writes into the
 // owning BleTransport. Good pup, takes it and passes it along. :3
 class BleServerCallbacks : public NimBLEServerCallbacks {
 public:
     explicit BleServerCallbacks(BleTransport* owner) : _owner(owner) {}
-    void onConnect(NimBLEServer* /*srv*/) override {
+    void onConnect(NimBLEServer* /*srv*/, NimBLEConnInfo& /*connInfo*/) override {
         _owner->_onConnect();
     }
-    void onDisconnect(NimBLEServer* /*srv*/) override {
+    void onDisconnect(NimBLEServer* /*srv*/, NimBLEConnInfo& /*connInfo*/, int /*reason*/) override {
         _owner->_onDisconnect();
         // Resume advertising so the next host can mount us again. :3
         NimBLEDevice::startAdvertising();
@@ -44,9 +45,9 @@ private:
 class BleRxCallbacks : public NimBLECharacteristicCallbacks {
 public:
     explicit BleRxCallbacks(BleTransport* owner) : _owner(owner) {}
-    void onWrite(NimBLECharacteristic* chr) override {
-        const std::string& v = chr->getValue();
-        if (!v.empty()) {
+    void onWrite(NimBLECharacteristic* chr, NimBLEConnInfo& /*connInfo*/) override {
+        const NimBLEAttValue v = chr->getValue();
+        if (v.size() > 0) {
             _owner->_feedBytes((const uint8_t*)v.data(), v.size());
         }
     }
@@ -65,9 +66,10 @@ void BleTransport::begin() {
     if (_running) return;
 
     NimBLEDevice::init(BLE_DEVICE_NAME);
-    // NimBLE 1.4.x: setPower() takes the esp_power_level_t enum. P9 = +9 dBm,
-    // the max legal output. We rail this antenna as loud as the spec allows. :3
-    NimBLEDevice::setPower(ESP_PWR_LVL_P9);
+    // NimBLE 2.x: setPower() takes dBm directly as int8_t. +9 dBm = the max
+    // legal output. (Do NOT pass ESP_PWR_LVL_P9 — the enum silently converts
+    // to int8_t and its ORDINAL, not +9, becomes the dBm value. uhoh. :C)
+    NimBLEDevice::setPower(9);
 
     _server = NimBLEDevice::createServer();
     _server->setCallbacks(new BleServerCallbacks(this));
@@ -84,15 +86,12 @@ void BleTransport::begin() {
     _tx_char = svc->createCharacteristic(
         BLE_NUS_TX_CHAR_UUID, NIMBLE_PROPERTY::NOTIFY);
 
-    // NimBLE 1.4.x: the service must be explicitly started before we advertise
-    // it — no implicit auto-start here. Spin it up, then start grinding out
-    // advertising packets so hosts can find us and slide in. The device name
-    // rides along automatically from NimBLEDevice::init(). :3
-    svc->start();
-
+    // NimBLE 2.x: services auto-start when the server starts — the old explicit
+    // svc->start() is a deprecated no-op and is gone. The device name rides
+    // along automatically from NimBLEDevice::init(). :3
     NimBLEAdvertising* adv = NimBLEDevice::getAdvertising();
     adv->addServiceUUID(BLE_NUS_SERVICE_UUID);
-    adv->setScanResponse(true);
+    adv->enableScanResponse(true);
     NimBLEDevice::startAdvertising();
 
     _running = true;

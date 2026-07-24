@@ -161,9 +161,15 @@ from controller.
 ## 10. Sequencing — STAMPED
 
 ```
-NOW  ──► Ruckig motion core (v3 cyclic tracker + v4 one-shot planner)
-     ──► SlopSync inbound motion: STREAM c2h handler + TCode pass-through channel
-     ──► MFP plugin (C# SlopSync client) — first external implementation,
+DONE ──► SlopMotion motion core (quintic waveform + Ruckig chase/guard —
+         fw 2.1.39+, live-tuned via /api/slopmotion)
+DONE ──► SlopSync inbound motion: STREAM c2h (motion-input 0x0084, publish
+         grants, CLOCK responder — fw 2.1.42, probe 11/0: 250 bundles
+         @50 Hz, zero wire loss, gate-verified)
+         [TCode pass-through channel DEFERRED to post-MFP: would race
+         TCodeParser across commsTask/hub task for zero MFP value —
+         bounded compat, not a milestone gate]
+NOW  ──► MFP plugin (C# SlopSync client) — first external implementation,
          rock-solid link is the milestone gate
      ──► merge feat/cpp20-slopsync → main + pairing rough-in (model C)
      ──► widen: slopsync-js A/B, SlopSim v1 ∥ board traits

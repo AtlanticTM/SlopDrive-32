@@ -1,0 +1,57 @@
+<!--
+  Live wire test harness for the SlopSync MFP plugin. Compiles SlopSync.cs
+  standalone (same trick as SlopSync.csproj — MFP dll refs to resolve
+  PluginBase's WPF-derived base types, FileBasedProgram feature to accept the
+  file's leading #: directives) plus LiveWireTest.cs, and links against the
+  plugin's REAL HubClient/SlopWire/CborWriter/CborReader/MdnsDiscovery classes
+  — no codec is duplicated here (contrast WireSelfTest.cs, which deliberately
+  re-implements the codec for a golden-byte comparison).
+
+  This project does NOT instantiate the SlopSync PluginBase itself — it needs
+  the MFP runtime host. It only uses the standalone helper classes.
+
+  HintPaths point into the local MFP install; adjust if yours differs:
+    C:\Users\Atlan\Downloads\MultiFunPlayer-1.34.5-patreon-SelfContained.10.0.300\
+
+  Run:  dotnet run -p clients/mfp-slopsync/LiveWireTest.csproj [ip] [port]
+-->
+
+<Project Sdk="Microsoft.NET.Sdk">
+
+  <PropertyGroup>
+    <OutputType>Exe</OutputType>
+    <TargetFramework>net10.0-windows</TargetFramework>
+    <RuntimeIdentifier>win-x64</RuntimeIdentifier>
+    <UseWPF>true</UseWPF>
+    <EnableDefaultCompileItems>false</EnableDefaultCompileItems>
+    <EnableDefaultPageItems>false</EnableDefaultPageItems>
+    <EnableDefaultApplicationDefinition>false</EnableDefaultApplicationDefinition>
+    <ImplicitUsings>disable</ImplicitUsings>
+    <Nullable>disable</Nullable>
+    <!-- Matches SlopSync.csproj: accept the plugin file's leading #: directives. -->
+    <Features>FileBasedProgram</Features>
+    <AssemblyName>LiveWireTest</AssemblyName>
+  </PropertyGroup>
+
+  <ItemGroup>
+    <!-- Compile ONLY the plugin source + this harness — nothing else. -->
+    <Compile Include="SlopSync.cs" />
+    <Compile Include="LiveWireTest.cs" />
+  </ItemGroup>
+
+  <ItemGroup>
+    <Reference Include="MultiFunPlayer">
+      <HintPath>C:\Users\Atlan\Downloads\MultiFunPlayer-1.34.5-patreon-SelfContained.10.0.300\MultiFunPlayer.dll</HintPath>
+    </Reference>
+    <Reference Include="Newtonsoft.Json">
+      <HintPath>C:\Users\Atlan\Downloads\MultiFunPlayer-1.34.5-patreon-SelfContained.10.0.300\Bin\Newtonsoft.Json.dll</HintPath>
+    </Reference>
+    <Reference Include="NLog">
+      <HintPath>C:\Users\Atlan\Downloads\MultiFunPlayer-1.34.5-patreon-SelfContained.10.0.300\Bin\NLog.dll</HintPath>
+    </Reference>
+    <Reference Include="Stylet">
+      <HintPath>C:\Users\Atlan\Downloads\MultiFunPlayer-1.34.5-patreon-SelfContained.10.0.300\Bin\Stylet.dll</HintPath>
+    </Reference>
+  </ItemGroup>
+
+</Project>

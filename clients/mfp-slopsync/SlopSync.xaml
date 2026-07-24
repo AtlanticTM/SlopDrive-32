@@ -1,0 +1,189 @@
+<plugin:PluginViewBase xmlns="http://schemas.microsoft.com/winfx/2006/xaml/presentation"
+                       xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
+                       xmlns:d="http://schemas.microsoft.com/expression/blend/2008"
+                       xmlns:material="http://materialdesigninxaml.net/winfx/xaml/themes"
+                       xmlns:mc="http://schemas.openxmlformats.org/markup-compatibility/2006"
+                       xmlns:plugin="clr-namespace:MultiFunPlayer.Plugin;assembly=MultiFunPlayer"
+                       xmlns:s="https://github.com/canton7/Stylet"
+                       d:DesignHeight="560"
+                       d:DesignWidth="440"
+                       StatusContent="{Binding Status}"
+                       mc:Ignorable="d">
+    <plugin:PluginViewBase.Style>
+        <Style TargetType="{x:Type plugin:PluginViewBase}">
+            <Setter Property="StatusForeground" Value="{DynamicResource MaterialDesignErrorBrush}"/>
+            <Style.Triggers>
+                <DataTrigger Binding="{Binding Status}" Value="Connected">
+                    <Setter Property="StatusForeground" Value="{DynamicResource MaterialDesignSuccessBrush}"/>
+                </DataTrigger>
+                <DataTrigger Binding="{Binding Status}" Value="Disconnected">
+                    <Setter Property="StatusForeground" Value="{DynamicResource MaterialDesignErrorBrush}"/>
+                </DataTrigger>
+                <DataTrigger Binding="{Binding Status}" Value="Connecting">
+                    <Setter Property="StatusForeground" Value="{DynamicResource MaterialDesignPendingBrush}"/>
+                </DataTrigger>
+                <DataTrigger Binding="{Binding Status}" Value="Disconnecting">
+                    <Setter Property="StatusForeground" Value="{DynamicResource MaterialDesignPendingBrush}"/>
+                </DataTrigger>
+            </Style.Triggers>
+        </Style>
+    </plugin:PluginViewBase.Style>
+
+    <!-- Toolbar: connect/disconnect toggle. Icon swaps Play <-> Stop on Status. -->
+    <plugin:PluginViewBase.ToolBarContent>
+        <StackPanel Orientation="Horizontal">
+            <Button Style="{StaticResource MaterialDesignToolBarButton}"
+                    Padding="8"
+                    Click="{s:Action OnConnectClick}"
+                    ToolTip="Connect / disconnect">
+                <material:PackIcon Width="19" Height="19">
+                    <material:PackIcon.Style>
+                        <Style TargetType="{x:Type material:PackIcon}">
+                            <Setter Property="Kind" Value="Play"/>
+                            <Style.Triggers>
+                                <DataTrigger Binding="{Binding Status}" Value="Connected">
+                                    <Setter Property="Kind" Value="Stop"/>
+                                </DataTrigger>
+                                <DataTrigger Binding="{Binding Status}" Value="Connecting">
+                                    <Setter Property="Kind" Value="Stop"/>
+                                </DataTrigger>
+                            </Style.Triggers>
+                        </Style>
+                    </material:PackIcon.Style>
+                </material:PackIcon>
+            </Button>
+        </StackPanel>
+    </plugin:PluginViewBase.ToolBarContent>
+
+    <ScrollViewer VerticalScrollBarVisibility="Auto">
+        <StackPanel Margin="12">
+
+            <!-- ==== Connection settings ==== -->
+            <TextBlock Text="CONNECTION" FontWeight="Bold" Opacity="0.6" Margin="0,0,0,6"/>
+            <Grid>
+                <Grid.ColumnDefinitions>
+                    <ColumnDefinition Width="*"/>
+                    <ColumnDefinition Width="8"/>
+                    <ColumnDefinition Width="90"/>
+                </Grid.ColumnDefinitions>
+                <TextBox Grid.Column="0"
+                         material:HintAssist.Hint="Address"
+                         Style="{StaticResource MaterialDesignFloatingHintTextBox}"
+                         IsEnabled="{Binding IsEditable}"
+                         Text="{Binding Address, UpdateSourceTrigger=PropertyChanged}"/>
+                <TextBox Grid.Column="2"
+                         material:HintAssist.Hint="Port"
+                         Style="{StaticResource MaterialDesignFloatingHintTextBox}"
+                         IsEnabled="{Binding IsEditable}"
+                         Text="{Binding Port, UpdateSourceTrigger=PropertyChanged}"/>
+            </Grid>
+
+            <Grid Margin="0,10,0,0">
+                <Grid.ColumnDefinitions>
+                    <ColumnDefinition Width="*"/>
+                    <ColumnDefinition Width="8"/>
+                    <ColumnDefinition Width="*"/>
+                    <ColumnDefinition Width="8"/>
+                    <ColumnDefinition Width="*"/>
+                </Grid.ColumnDefinitions>
+                <TextBox Grid.Column="0"
+                         material:HintAssist.Hint="Axis"
+                         Style="{StaticResource MaterialDesignFloatingHintTextBox}"
+                         IsEnabled="{Binding IsEditable}"
+                         Text="{Binding SourceAxis, UpdateSourceTrigger=PropertyChanged}"/>
+                <TextBox Grid.Column="2"
+                         material:HintAssist.Hint="Rate (Hz)"
+                         Style="{StaticResource MaterialDesignFloatingHintTextBox}"
+                         IsEnabled="{Binding IsEditable}"
+                         Text="{Binding UpdateRateHz, UpdateSourceTrigger=PropertyChanged}"/>
+                <TextBox Grid.Column="4"
+                         material:HintAssist.Hint="PIN"
+                         Style="{StaticResource MaterialDesignFloatingHintTextBox}"
+                         IsEnabled="{Binding IsEditable}"
+                         Text="{Binding PairingPin, UpdateSourceTrigger=PropertyChanged}"/>
+            </Grid>
+
+            <!-- ==== Discovery ==== -->
+            <TextBlock Text="DISCOVERY (mDNS)" FontWeight="Bold" Opacity="0.6" Margin="0,18,0,6"/>
+            <Grid>
+                <Grid.ColumnDefinitions>
+                    <ColumnDefinition Width="*"/>
+                    <ColumnDefinition Width="8"/>
+                    <ColumnDefinition Width="Auto"/>
+                </Grid.ColumnDefinitions>
+                <ComboBox Grid.Column="0"
+                          material:HintAssist.Hint="Discovered devices"
+                          Style="{StaticResource MaterialDesignFloatingHintComboBox}"
+                          IsEnabled="{Binding IsEditable}"
+                          ItemsSource="{Binding DiscoveredDevices}"
+                          DisplayMemberPath="Display"
+                          SelectedItem="{Binding SelectedDevice}"/>
+                <Button Grid.Column="2"
+                        VerticalAlignment="Bottom"
+                        Style="{StaticResource MaterialDesignOutlinedButton}"
+                        Click="{s:Action OnDiscoverClick}"
+                        IsEnabled="{Binding IsEditable}"
+                        Content="Discover"/>
+            </Grid>
+            <ProgressBar Style="{StaticResource MaterialDesignLinearProgressBar}"
+                         IsIndeterminate="True"
+                         Height="3"
+                         Margin="0,4,0,0"
+                         Visibility="{Binding IsDiscovering, Converter={StaticResource BooleanToVisibilityConverter}}"/>
+
+            <!-- ==== Live status ==== -->
+            <TextBlock Text="LIVE" FontWeight="Bold" Opacity="0.6" Margin="0,18,0,6"/>
+            <Border Background="{DynamicResource MaterialDesignChipBackground}"
+                    CornerRadius="4" Padding="12">
+                <StackPanel>
+                    <TextBlock Text="{Binding StatusText}" FontWeight="Bold" Margin="0,0,0,6"
+                               Visibility="{Binding StatusText, Converter={StaticResource NullableToVisibilityConverter}}"/>
+                    <Grid>
+                        <Grid.ColumnDefinitions>
+                            <ColumnDefinition Width="Auto"/>
+                            <ColumnDefinition Width="12"/>
+                            <ColumnDefinition Width="*"/>
+                        </Grid.ColumnDefinitions>
+                        <Grid.RowDefinitions>
+                            <RowDefinition Height="Auto"/>
+                            <RowDefinition Height="Auto"/>
+                            <RowDefinition Height="Auto"/>
+                            <RowDefinition Height="Auto"/>
+                            <RowDefinition Height="Auto"/>
+                            <RowDefinition Height="Auto"/>
+                            <RowDefinition Height="Auto"/>
+                            <RowDefinition Height="Auto"/>
+                            <RowDefinition Height="Auto"/>
+                        </Grid.RowDefinitions>
+
+                        <TextBlock Grid.Row="0" Grid.Column="0" Text="Device"   Opacity="0.6"/>
+                        <TextBlock Grid.Row="0" Grid.Column="2" Text="{Binding DeviceInfo}"/>
+                        <TextBlock Grid.Row="1" Grid.Column="0" Text="Session"  Opacity="0.6"/>
+                        <TextBlock Grid.Row="1" Grid.Column="2" Text="{Binding SessionId}"/>
+                        <TextBlock Grid.Row="2" Grid.Column="0" Text="Granted"  Opacity="0.6"/>
+                        <TextBlock Grid.Row="2" Grid.Column="2" Text="{Binding GrantedRate, StringFormat={}{0:F0} Hz}"/>
+                        <TextBlock Grid.Row="3" Grid.Column="0" Text="Clock off" Opacity="0.6"/>
+                        <TextBlock Grid.Row="3" Grid.Column="2" Text="{Binding ClockOffsetUs, StringFormat={}{0} us}"/>
+                        <TextBlock Grid.Row="4" Grid.Column="0" Text="RTT"      Opacity="0.6"/>
+                        <TextBlock Grid.Row="4" Grid.Column="2" Text="{Binding RttUs, StringFormat={}{0} us}"/>
+                        <TextBlock Grid.Row="5" Grid.Column="0" Text="Bundles"  Opacity="0.6"/>
+                        <TextBlock Grid.Row="5" Grid.Column="2" Text="{Binding BundlesSent}"/>
+                        <TextBlock Grid.Row="6" Grid.Column="0" Text="NACKs"    Opacity="0.6"/>
+                        <TextBlock Grid.Row="6" Grid.Column="2" Text="{Binding NackCount}"/>
+                        <TextBlock Grid.Row="7" Grid.Column="0" Text="Rate-limited" Opacity="0.6"/>
+                        <TextBlock Grid.Row="7" Grid.Column="2" Text="{Binding RateLimitedCount}"/>
+                        <TextBlock Grid.Row="8" Grid.Column="0" Text="Last target / uptime" Opacity="0.6"/>
+                        <StackPanel Grid.Row="8" Grid.Column="2" Orientation="Horizontal">
+                            <TextBlock Text="{Binding LastTarget, StringFormat={}{0:F4}}"/>
+                            <TextBlock Text="  ·  "/>
+                            <TextBlock Text="{Binding Uptime}"/>
+                        </StackPanel>
+                    </Grid>
+                </StackPanel>
+            </Border>
+
+            <TextBlock TextWrapping="Wrap" Opacity="0.5" FontSize="11" Margin="0,10,0,0"
+                       Text="Streams the selected axis to the machine over SlopSync channel 0x0084 (motion-input). The machine must be homed before motion runs; the ground-truth doctrine means the device clamps everything — echoed values are what actually applied."/>
+        </StackPanel>
+    </ScrollViewer>
+</plugin:PluginViewBase>

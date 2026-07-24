@@ -80,26 +80,44 @@ OTA only, then re-evaluate whether it matters at all. (Interim mitigation
 landed fw 2.1.40: ETag revalidation — reloads 304 in ~40 ms; only the
 first-load ~600 ms stall remains.)
 
-**Re-evaluation shortlist (recorded 2026-07-23, so we never re-shop this):**
-- **PsychicHttp (esp_http_server) is the candidate** for the static+OTA end
-  state: handlers run in its OWN task (blocking stays contained — NOT the
-  async_tcp/LwIP context), IDF-native/Espressif-maintained underneath,
-  built-in LRU socket purge + per-socket timeouts (our zombie-client
-  defenses, first-class), single-port URI-routed WS possible. Its own
-  benchmark: no crashes under load, best-in-class file serving.
-- **ESPAsyncWebServer: DISQUALIFIED** — architecturally (all handlers move
-  into the LwIP context) AND empirically (PsychicHttp's published loadtests:
-  crashes under heavy load in every 60 s test; ~2 yrs abandoned upstream).
-- **WS caveat — bench gate before trusting PsychicHttp's websockets:** its
-  own numbers show 38 rps/connection round-trip (~26 ms/msg). Our pattern is
-  push-heavy small-binary (SlopSync STREAM ≤50 bundles/s in + STATE ≥20 Hz
-  out per client; TCode 100–333 Hz until absorbed) — if that overhead is
-  per-message, it's disqualifying for the sync socket; if it's their
-  echo-path plumbing, fine. MUST bench our exact pattern first. Escape
-  hatch either way: ITransport keeps the WS layer swappable — PsychicHttp
-  for HTTP/static/OTA + links2004 (proven at 333 Hz today) or raw
-  esp_http_server WS for the sync socket. The halves need not migrate
-  together (costs the single-port prize, nothing else).
+**Re-evaluation shortlist (researched 2026-07-23 — web-verified, so we
+never re-shop this):**
+- **PsychicHttp v3.x is the candidate for BOTH HTTP and websockets.** MIT,
+  weekly releases through mid-2026, native ESP-IDF 5.5 support (v3.0.0),
+  thin wrapper over esp_http_server: handlers/WS run in the server's OWN
+  task (blocking contained — NOT the async_tcp/LwIP context), LRU socket
+  purge + per-socket send timeouts built in. Its WS layer ships OUR
+  failure-mode engineering as first-class features:
+  `PSYCHIC_WS_MAX_PENDING_FRAMES` (=8) caps per-client queued frames (a
+  stalled client is heap-bounded), static RX buffer (no per-frame alloc —
+  multi-day-uptime fragmentation), optional PSRAM payloads, and `sendAll()`
+  keeps serving healthy clients while one is wedged. Single-port URI-routed
+  WS (retire :81/:82/:55555). The old "38 rps/conn" README number predates
+  the v2/v3 rewrite AND measured echo round-trips, not push streaming.
+- **links2004/arduinoWebSockets (incumbent): a NAMED, LIVE upstream defect,
+  not a neutral status quo.** Issue #911 (open since 2024-10, unresolved):
+  sendTXT/sendBIN block INDEFINITELY on slow/wedged connections, no send
+  timeout — the exact `ws-send-blocks-http-mutex` incident we hand-patched
+  (activity gates, stall mute, reaper, 500 ms TCP cap). Still maintained
+  (v2.7.x through 2025-12) and contained by our defenses, but every new WS
+  surface built on it inherits the defect.
+- **ESP32Async/ESPAsyncWebServer (maintained fork): rehabilitated but not
+  chosen.** The fork is active (monthly releases, 2026) and FIXED the old
+  crash class: `WS_MAX_QUEUED_MESSAGES` bounded queues, discard-on-full
+  default, `cleanupClients()` reaping. Still moves all handlers into its
+  own AsyncTCP/LwIP event loop and replaces the HTTP server wholesale — a
+  bigger architectural commitment than the workload needs. (The me-no-dev
+  original remains abandoned/disqualified.)
+- **Raw esp_http_server WS**: sound, bounded (`httpd_queue_work` fails
+  closed), but choosing it = reimplementing PsychicHttp's per-client
+  backpressure policy by hand for no gain.
+- **Mongoose: license-blocked** (GPLv2/commercial dual) for a
+  community-extensible firmware.
+- **BENCH GATE stands:** no public push-streaming (not echo) benchmark
+  exists for ANY candidate. Before migration: bench PsychicHttp v3 at our
+  real pattern — small binary frames, 50–100 msg/s/client both directions,
+  1–5 clients, one deliberately wedged. ITransport keeps the WS layer
+  swappable regardless; HTTP and WS halves need not migrate together.
 
 ## 5. slopsync-js — parked until motion + library refactor land
 

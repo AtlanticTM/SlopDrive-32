@@ -88,6 +88,12 @@ WebUI::~WebUI() {
 // ============================================================================
 
 void WebUI::init() {
+    // WebServer only exposes request headers that were explicitly collected —
+    // without this, header("If-None-Match") is always empty and the ETag
+    // revalidation in handleRoot() silently never fires.
+    static const char* kCollectHeaders[] = { "If-None-Match" };
+    _httpServer->collectHeaders(kCollectHeaders, 1);
+
     _httpServer->on("/",          [this]() { handleRoot(); });
     _httpServer->on("/api/status",    HTTP_GET,  [this]() { handleApiStatus(); });
     _httpServer->on("/api/capabilities", HTTP_GET, [this]() { handleApiCapabilities(); });
@@ -237,21 +243,30 @@ void WebUI::captureTelemetry(float position_mm, float target_mm, float raw_mm) {
 // ============================================================================
 
 void WebUI::handleRoot() {
-    if (LittleFS.exists("/index.html.gz")) {
-        File f = LittleFS.open("/index.html.gz", "r");
-        if (f) {
-            _httpServer->streamFile(f, "text/html");
+    // Streaming the 115 KB bundle out of LittleFS blocks httpTask ~0.5-1 s
+    // per load (sync WebServer — the known roadmap-§4 class; [STALL]
+    // http:ui.update names it). Until that rework: ETag + Cache-Control
+    // no-cache. Every load still REVALIDATES (ground truth — an uploadfs is
+    // picked up immediately because size/mtime change the tag), but an
+    // unchanged bundle answers 304 in ~10 ms instead of restreaming. :3
+    for (const char* path : { "/index.html.gz", "/index.html" }) {
+        if (!LittleFS.exists(path)) continue;
+        File f = LittleFS.open(path, "r");
+        if (!f) continue;
+        String etag = "\"" + String((unsigned long)f.size()) + "-" +
+                      String((unsigned long)f.getLastWrite()) + "\"";
+        if (_httpServer->header("If-None-Match") == etag) {
             f.close();
+            _httpServer->sendHeader("ETag", etag);
+            _httpServer->sendHeader("Cache-Control", "no-cache");
+            _httpServer->send(304, "text/html", "");
             return;
         }
-    }
-    if (LittleFS.exists("/index.html")) {
-        File f = LittleFS.open("/index.html", "r");
-        if (f) {
-            _httpServer->streamFile(f, "text/html");
-            f.close();
-            return;
-        }
+        _httpServer->sendHeader("ETag", etag);
+        _httpServer->sendHeader("Cache-Control", "no-cache");
+        _httpServer->streamFile(f, "text/html");
+        f.close();
+        return;
     }
     _httpServer->send(200, "text/html", htmlFallbackPage);
 }

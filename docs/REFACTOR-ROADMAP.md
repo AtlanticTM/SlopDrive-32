@@ -119,11 +119,114 @@ never re-shop this):**
   1–5 clients, one deliberately wedged. ITransport keeps the WS layer
   swappable regardless; HTTP and WS halves need not migrate together.
 
-## 5. slopsync-js — parked until motion + library refactor land
+## 5. slopsync-js — ACTIVE (the WebUI refactor). Brief for the next agent.
 
-Phasing when it wakes: A read-only STATE cards (dual-plane with UiSocket) →
-B intents (echo-confirmed lifecycle) → hub-side STREAM pacing → C retire
-overlapping UiSocket frames.
+**Operator-reported state (2026-07-24, fw 2.1.45):** the WebUI is slow,
+laggy, takes a long time to reflect device state, and the stroke-window
+control is broken. Expected — we are mid-refactor: the browser still speaks
+the legacy UiSocket plane while every capability it needs now exists,
+verified, on the SlopSync plane. Your job is to move it over, not to patch
+the old plane. Read CLAUDE.md §3 (Ground Truth doctrine) and §8 (SlopSync
+rules) before touching anything.
+
+### 5.1 What the browser does TODAY (measured map, not guesses)
+- Vanilla JS + Vite single-file bundle (`webui/src/`, entry `main.js`;
+  `core/{link,wire,cmd,shadow,range,telebuf,api}.js` is the wire/state
+  layer, `features/*.js` the tabs). ONE WebSocket: `ws://<ip>:81/ws/ui`,
+  custom binary frames (Appendix C, `include/ui/UiProtocol.h`): 0x01
+  telemetry ~45 Hz, 0x02 status 2 Hz, 0x04 interp ~45 Hz, 0x05 anomaly,
+  0x06 stats, 0x10 CMD (JSON payload!) → 0x11 ECHO. Firmware side:
+  `src/ui/UiSocket.cpp` senderTask Core 0 @22 ms + `src/ui/WebUI.cpp`
+  (92 KB, sync WebServer :80, 28 routes, the §4 [STALL] class).
+- The shadow lifecycle (`core/shadow.js`) is ALREADY doctrine-correct:
+  controls render from `reported`, desired is a pending overlay, echoes
+  carry post-clamp applied values, cfg_gen bumps force config resync.
+  KEEP THIS MODEL — it survives the migration; only the wire under it
+  changes.
+- Known lag/breakage suspects to diagnose FIRST (don't assume — verify
+  against the live device): staleness gates (`>150 ms` no telemetry →
+  `body.stale`, `>1 s` → `body.suspended` which DISABLES all controls and
+  blocks sends — a stalling telemetry feed makes the whole UI feel dead
+  and may BE the "window doesn't work" symptom); cmd retry ladder (300 ms
+  ×3) + overdue escalation masking lost echoes; cfg_gen resync clobber
+  guards (`shadow.js:236-284`, `settingsAuthoritative` in `range.js`);
+  the 100 ms HTTP-fallback poll hammering the sync WebServer when the WS
+  degrades; links2004 WS server defects (§4 — sendTXT/sendBIN can block).
+  Diagnose and note root causes in your report even for symptoms the
+  migration will delete — we want to know WHAT was broken.
+
+### 5.2 What SlopSync already offers the browser (all live-verified on hw)
+- Hub WS `:82`, subprotocol `slopsync.v1`, 8-byte LE header + deterministic
+  CBOR payloads. HELLO→WELCOME (session, roles, deadman, grants), CATALOG
+  (self-describing channel list + packed layouts — BUILD THE UI FROM IT,
+  §3 dynamic-modularity doctrine), CLOCK 0x05 (NTP-style, the UiSocket
+  clock sync's replacement), SUBSCRIBE→GRANT at min(wish, catalog rate),
+  retained safety on grant, NACK codes, slow-consumer eviction (never
+  wedges on a stalled tab — the hub sheds it; this deletes the UiSocket
+  activity-gate/reaper machinery wholesale).
+- STATE channels (h2c): 0x0003 safety (retained), 0x0004 control-owner,
+  0x0006 hub-status 1 Hz, 0x0080 motion ≤60 Hz (pos/tgt/speed/flags —
+  replaces 0x01 telemetry), 0x0081 machine-config on-change (replaces
+  config fetch), 0x0082 pattern-state, 0x0083 odometer (replaces 0x06),
+  0x0007 session-events.
+- INTENT channels (c2h) with post-clamp applied-value ECHO 0x0E — the
+  ground-truth confirm the shadow layer needs: 0x0100 move, 0x0101
+  config-set (window_min/window_max/user & input limit sets — THE
+  stroke-window path), 0x0102 pattern-cmd, 0x0103 home; safety-intents
+  0x0005 (stop/hold/pause/resume/estop_clear).
+- Reference implementations for the wire, in order of usefulness:
+  `clients/mfp-slopsync/SlopSync.cs` (complete C# client incl. CBOR codec
+  — port its shape to JS), `tools/slopsync_probe.py` (Python, golden
+  bytes), `test_slopsync_*` native suites. Browser CBOR: hand-roll the
+  same minimal subset (ints/bstr/tstr/arrays/maps/f32); golden-byte-test
+  it against the probe's builders like WireSelfTest.cs does. slopsync-js
+  becomes the THIRD client implementation — same discipline: mirror the
+  probe, never invent bytes.
+
+### 5.3 Phasing (dual-plane, no big-bang cutover)
+- **A — read plane:** slopsync-js core (connect/HELLO/CLOCK/subscribe/
+  CBOR) + catalog-driven read-only cards; motion/safety/config/pattern/
+  odometer STATE feeds the existing renderers alongside UiSocket. Ship,
+  verify visually against the live device, measure staleness.
+- **B — write plane:** intents with the existing shadow lifecycle wired
+  to ECHO 0x0E applied values (stroke window FIRST — it's the reported
+  defect; verify end-to-end: drag → 0x0101 → echo → band renders the
+  device's clamped truth). Then move/pattern/mode/home/safety controls.
+  Roles: viewer sessions render read-only (§9 trust model, enforcement
+  flip comes later — build the UI assuming it).
+- **C — demolition:** retire UiSocket frames one-for-one as their
+  SlopSync replacement is verified (0x01→0x0080, 0x06→0x0083, 0x02→
+  0x0006+0x0081, CMD/ECHO→intents/0x0E, clock→CLOCK). Delete senderTask
+  + UiSocket when empty; port :81 dies (a §10 transport-demolition step).
+  HTTP keeps only: static bundle, OTA, /api/log, /api/capabilities
+  (bootstrap pointer to :82), and the sync-WebServer question then folds
+  into §4's PsychicHttp decision — do NOT migrate the HTTP server in this
+  refactor.
+- SlopMotion plumbing debts ride along (CLAUDE.md §7.6): the 0x05 anomaly
+  feed (currently deliberately silent — SLopLog only), the inert
+  `interp_clamp_overshoot` toggle, and a /api/slopmotion tuning card.
+  Anomalies want a proper SlopSync EVENT channel (new device channel id,
+  catalog entry — follow the 0x0085 authoring pattern), not a UiSocket
+  frame revival.
+
+### 5.4 Constraints & verification (non-negotiable)
+- Firmware-side: hub service is PSRAM-resident, ONE-TASK WS invariant,
+  16 KB task stacks for a reason (see CLAUDE.md §8 field bugs 1-3);
+  new STATE publishers follow the existing SlopSyncHubService publisher
+  pattern; MotionArbiter sole-caller via the delegate, always. Catalog
+  edits bump the etag — fine; the FROZEN conformance mini-catalog is
+  untouchable. Registry discipline for anything wire-visible.
+- Every migrated control: end-to-end verified against the LIVE device
+  (payload sent + device state change + echo adopted) before its legacy
+  path is deleted — a control that renders but drives nothing is a
+  defect; optimistic UI is prohibited (§3). Page load ADOPTS device
+  state. Back-to-back sessions without reboot is a mandatory regression
+  pattern (field bug #3). Version-bump + OTA deploy per CLAUDE.md §6;
+  `uploadfs` for UI-only changes (no reboot), verify with hard refresh.
+- Perf acceptance: first meaningful state < 1 s after page load on LAN;
+  motion card latency ≤ 1 frame at granted rate; dragging the stroke
+  window must never freeze mid-drag on a healthy link. Measure before/
+  after (the browser perf overlay in diag.js, plus hub-status).
 
 ## 6. SlopSim — STAMPED (name approved)
 
@@ -190,8 +293,10 @@ DONE ──► segment streaming (fw 2.1.45): channel 0x0085 motion-segment
          Outputs entry = small upstream PR (~400 lines, template:
          WebSocketOutputTarget); shortcut actions SlopSync::Connection::*
          registered as the native-feel bridge.
-NOW  ──► merge feat/cpp20-slopsync → main + pairing rough-in (model C)
-     ──► widen: slopsync-js A/B, SlopSim v1 ∥ board traits
+NOW  ──► slopsync-js / WebUI refactor (operator call 2026-07-24: UI is the
+         pain point — slow, laggy, stroke window broken. Full brief in §5)
+     ──► merge feat/cpp20-slopsync → main + pairing rough-in (model C)
+     ──► widen: SlopSim v1 ∥ board traits
      ──► C5 nodes (ESP-NOW transport — spec pre-fitted: min_transport_payload
          242 = ESP-NOW 250 minus our 8-byte header)
      ──► TransportManager demolition as absorption completes

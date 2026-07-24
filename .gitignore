@@ -58,3 +58,7 @@ AIM_Servo_Motor_Datasheet_EN_with_images.pdf
 build/
 $null
 flashpack/
+
+# .NET build output (clients/)
+clients/**/bin/
+clients/**/obj/

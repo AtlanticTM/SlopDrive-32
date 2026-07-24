@@ -18,6 +18,7 @@
 #include "BleTransport.h"
 #include "DongleTransport.h"
 #include "OssmBleService.h"
+#include "slopsync/generated/registry_constants.hpp"
 
 TransportManager::TransportManager(SystemState&        state,
                                    TCodeParser&        parser,
@@ -163,7 +164,11 @@ bool TransportManager::setupWiFi() {
         if (MDNS.begin(MDNSServiceName)) {
             MDNS.addService("http", "tcp", HTTP_PORT);
             MDNS.addService("ws", "tcp", BUTTPLUG_WEBSOCKET_PORT);
-            SLOGI("transport", "mDNS: http://%s.local:%d", MDNSServiceName, HTTP_PORT);
+            MDNS.addService("slopsync", "tcp", SLOPSYNC_WS_PORT);
+            MDNS.addServiceTxt("slopsync", "tcp", "proto", slopsync::limits::ws_subprotocol.data());
+            MDNS.addServiceTxt("slopsync", "tcp", "fw", FIRMWARE_VERSION);
+            SLOGI("transport", "mDNS: http://%s.local:%d, slopsync ws :%d",
+                  MDNSServiceName, HTTP_PORT, SLOPSYNC_WS_PORT);
         }
 
         _state.wifi_ready = true;

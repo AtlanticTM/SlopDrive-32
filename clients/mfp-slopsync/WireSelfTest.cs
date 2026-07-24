@@ -69,6 +69,40 @@ internal static class Program
         var goodbye = Wire.BuildGoodbye(0x0107);
         Check("GOODBYE payload", goodbye, "A110190107");
 
+        // ---- Segments mode (0x0085) golden bytes ----------------------------
+        // Hand-derived from the locked wire contract, same STREAM framing as
+        // 0x0084. t_base 0x00010203, single sample at off 0:
+        //   [t_base:03 02 01 00][n:01][rsv:00][off:00 00]
+        //   [target 0.5 → 5000=0x1388 → 88 13]
+        //   [duration 900 → 0x0384 → 84 03]
+        //   [end_vel SENTINEL → INT16_MIN 0x8000 LE → 00 80]
+        var seg = Wire.BuildSegmentBundle(0x00010203,
+            new (ushort, double, int, double, bool)[] { (0, 0.5, 900, 0.0, true) });
+        Check("SEGMENT bundle payload (sentinel end_vel)", seg, "0302010001000000881384030080");
+
+        var segFrame = Wire.EncodeFrame(0x0C, 0x0085, seg, 0);
+        Check("SEGMENT frame (channel 0x0085, len 14)", segFrame,
+            "0C00850000000E000302010001000000881384030080");
+
+        // Real end_vel path: target 0.25 → 2500=0x09C4, duration 500=0x01F4,
+        // end_vel 1.5 norm/s → 1500=0x05DC (LE DC 05) — proves it never collides
+        // with the sentinel and is NOT written as 0x8000.
+        var segReal = Wire.BuildSegmentBundle(0x00010203,
+            new (ushort, double, int, double, bool)[] { (0, 0.25, 500, 1.5, false) });
+        Check("SEGMENT bundle payload (end_vel 1.5)", segReal, "0302010001000000C409F401DC05");
+
+        // ---- PING keepalive frame (raw, empty payload; §6.5) ----------------
+        // Header only: type 0x03, flags 0, channel 0, seq 0, len 0.
+        var ping = Wire.EncodeFrame(0x03, 0, Array.Empty<byte>(), 0);
+        Check("PING frame (raw, empty)", ping, "0300000000000000");
+
+        // ---- BuildHello refactor invariant ----------------------------------
+        // The single-wish overload must be byte-identical to a list-of-one, so
+        // Samples mode's HELLO bytes are unchanged by the multi-wish refactor.
+        var helloListOfOne = Wire.BuildHello("probe", "slopsync_probe.py", inst,
+            new (ushort, double)[] { (0x0084, 100.0) });
+        Check("HELLO single-wish == list-of-one", helloListOfOne, Convert.ToHexString(hello));
+
         Console.WriteLine();
         if (_fail == 0) { Console.WriteLine("ALL PASS"); return 0; }
         Console.WriteLine($"{_fail} FAILED"); return 1;
@@ -95,6 +129,11 @@ internal static class Wire
 
     public static byte[] BuildHello(string clientKind, string clientName, byte[] instanceId,
                                     ushort publishChannel, double publishRateHz, byte[] token16 = null)
+        => BuildHello(clientKind, clientName, instanceId,
+                      new (ushort ch, double rate)[] { (publishChannel, publishRateHz) }, token16);
+
+    public static byte[] BuildHello(string clientKind, string clientName, byte[] instanceId,
+                                    IReadOnlyList<(ushort ch, double rate)> publishes, byte[] token16 = null)
     {
         var w = new Cbor();
         int n = 4 + (token16 != null ? 1 : 0) + 1;
@@ -105,10 +144,13 @@ internal static class Wire
         w.U(KInstanceId); w.B(instanceId);
         if (token16 != null) { w.U(KToken); w.B(token16); }
         w.U(KPublishes);
-        w.Arr(1);
-        w.Map(2);
-        w.U(KRateHz); w.F((float)publishRateHz);
-        w.U(KChannelId); w.U(publishChannel);
+        w.Arr(publishes.Count);
+        foreach (var (ch, rate) in publishes)
+        {
+            w.Map(2);
+            w.U(KRateHz); w.F((float)rate);
+            w.U(KChannelId); w.U(ch);
+        }
         return w.ToArray();
     }
 
@@ -158,6 +200,31 @@ internal static class Wire
             int rawV = Math.Clamp((int)Math.Round(samples[i].vel * 1000.0), -32768, 32767);
             BinaryPrimitives.WriteUInt16LittleEndian(buf.AsSpan(p), (ushort)rawT); p += 2;
             BinaryPrimitives.WriteInt16LittleEndian(buf.AsSpan(p), (short)rawV); p += 2;
+        }
+        return buf;
+    }
+
+    // Mirror of SlopWire.BuildSegmentBundle (0x0085): 6-byte samples
+    // {target:u16 LE ×10000, duration:u16 LE, end_vel:i16 LE ×1000}. Sentinel
+    // encodes INT16_MIN; a real end_vel clamps ±32767 so it can't hit the sentinel.
+    public static byte[] BuildSegmentBundle(uint tBase, IReadOnlyList<(ushort off, double target, int durationMs, double endVel, bool sentinel)> samples)
+    {
+        int n = samples.Count;
+        var buf = new byte[6 + n * 2 + n * 6];
+        int p = 0;
+        BinaryPrimitives.WriteUInt32LittleEndian(buf.AsSpan(p), tBase); p += 4;
+        buf[p++] = (byte)n; buf[p++] = 0;
+        for (int i = 0; i < n; i++) { BinaryPrimitives.WriteUInt16LittleEndian(buf.AsSpan(p), samples[i].off); p += 2; }
+        for (int i = 0; i < n; i++)
+        {
+            int rawT = Math.Clamp((int)Math.Round(samples[i].target * 10000.0), 0, 65535);
+            int rawD = Math.Clamp(samples[i].durationMs, 1, 65535);
+            short rawV = samples[i].sentinel
+                ? short.MinValue
+                : (short)Math.Clamp((int)Math.Round(samples[i].endVel * 1000.0), -32767, 32767);
+            BinaryPrimitives.WriteUInt16LittleEndian(buf.AsSpan(p), (ushort)rawT); p += 2;
+            BinaryPrimitives.WriteUInt16LittleEndian(buf.AsSpan(p), (ushort)rawD); p += 2;
+            BinaryPrimitives.WriteInt16LittleEndian(buf.AsSpan(p), rawV); p += 2;
         }
         return buf;
     }

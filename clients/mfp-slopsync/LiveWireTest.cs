@@ -29,12 +29,16 @@ internal static class LiveWireTest
 
     private static async Task<int> Main(string[] args)
     {
-        string ip = args.Length > 0 ? args[0] : "192.168.1.229";
-        int port = args.Length > 1 ? int.Parse(args[1]) : 82;
+        // --segments selects the 0x0085 timed-segment path; positional args
+        // (ip, port) are read ignoring any --flags.
+        bool segments = Array.Exists(args, a => a == "--segments");
+        var pos = Array.FindAll(args, a => !a.StartsWith("--"));
+        string ip = pos.Length > 0 ? pos[0] : "192.168.1.229";
+        int port = pos.Length > 1 ? int.Parse(pos[1]) : 82;
         string baseUrl = $"http://{ip}";
 
         Console.WriteLine("=============================================================");
-        Console.WriteLine($" SlopSync LiveWireTest — target {ip}:{port}");
+        Console.WriteLine($" SlopSync LiveWireTest — target {ip}:{port}  mode={(segments ? "SEGMENTS (0x0085)" : "SAMPLES (0x0084)")}");
         Console.WriteLine("=============================================================");
 
         using var http = new HttpClient { Timeout = TimeSpan.FromSeconds(5) };
@@ -116,10 +120,23 @@ internal static class LiveWireTest
 
         var client = new HubClient(ws, instanceId, Log);
 
-        Console.WriteLine("[hello] wishing publish on motion-input (0x0084) @ 50 Hz...");
-        var welcome = await client.HelloAsync("mfp", "LiveWireTest", SlopWire.ChMotionInput, 50.0, null, token);
+        WelcomeInfo welcome;
+        double segGranted = double.NaN;
+        if (segments)
+        {
+            Console.WriteLine("[hello] wishing publish on motion-input (0x0084) @ 50 Hz AND motion-segment (0x0085) @ 10 Hz...");
+            welcome = await client.HelloAsync("mfp", "LiveWireTest",
+                new (ushort ch, double rate)[] { (SlopWire.ChMotionInput, 50.0), (SlopWire.ChMotionSegment, 10.0) }, null, token);
+            segGranted = welcome.GrantedPublishRate(SlopWire.ChMotionSegment);
+        }
+        else
+        {
+            Console.WriteLine("[hello] wishing publish on motion-input (0x0084) @ 50 Hz...");
+            welcome = await client.HelloAsync("mfp", "LiveWireTest", SlopWire.ChMotionInput, 50.0, null, token);
+        }
         double granted = welcome.GrantedPublishRate(SlopWire.ChMotionInput);
-        Console.WriteLine($"[welcome] session_id={welcome.SessionId} boot_id=0x{welcome.BootId:X8} granted_publish_rate={granted:F1} Hz (wished 50.0)");
+        Console.WriteLine($"[welcome] session_id={welcome.SessionId} boot_id=0x{welcome.BootId:X8} granted motion-input={granted:F1} Hz (wished 50.0)"
+            + (segments ? $" motion-segment={segGranted:F1} Hz (wished 10.0)" : ""));
         Console.WriteLine();
 
         Console.WriteLine("[subscribe] safety(0x0003) on-change critical + motion(0x0080) @20Hz elevated...");
@@ -176,39 +193,78 @@ internal static class LiveWireTest
         }
         Console.WriteLine();
 
-        // ---- Stream test: 5 s @ granted rate, analytic sine + derivative -----
-        double rateHz = granted > 0 ? granted : 50.0;
-        double periodMs = 1000.0 / rateHz;
-        const double durationS = 5.0;
-        const double freqHz = 0.5;
-        const double amp = 0.2;
-        const double centre = 0.5;
-
-        Console.WriteLine($"[stream] sending {durationS:F0}s @ {rateHz:F1} Hz (target=0.5+0.2*sin(2*pi*0.5*t))...");
+        // ---- Stream test -----------------------------------------------------
         long sends = 0;
-        var sw = Stopwatch.StartNew();
-        double nextMs = 0;
-        while (sw.Elapsed.TotalSeconds < durationS && !token.IsCancellationRequested)
+        if (segments)
         {
-            double nowMs = sw.Elapsed.TotalMilliseconds;
-            if (nowMs < nextMs)
+            // 5 timed segments over ~5 s, alternating target 0.3/0.7, duration
+            // 900 ms each, with a PING keepalive every 400 ms of silence between
+            // them (segments are sparse — without PING the hub's 600 ms deadman
+            // would fire). end_vel alternates sentinel / rest to exercise both.
+            Console.WriteLine("[stream] sending 5 segments over ~5 s (target 0.3/0.7, dur 900 ms) with 400 ms PING keepalive...");
+            var sw2 = Stopwatch.StartNew();
+            double lastSendMs = 0;
+            for (int k = 0; k < 5 && !token.IsCancellationRequested; k++)
             {
-                int sleep = (int)Math.Max(0, Math.Min(nextMs - nowMs, 5));
-                await Task.Delay(sleep, token);
-                continue;
+                double target = (k % 2 == 0) ? 0.3 : 0.7;
+                bool sentinel = (k % 2 == 0);                 // even: no end-vel; odd: rest at target
+                var seg = new SegmentSample(target, 900, sentinel ? 0.0 : 0.0, sentinel);
+                await client.SendSegmentSampleAsync(client.HubNowUs(), seg, token);
+                sends++;
+                lastSendMs = sw2.Elapsed.TotalMilliseconds;
+                Console.WriteLine($"    segment {k}: target={target:F2} dur=900ms end_vel={(sentinel ? "SENTINEL" : "0 (rest)")}");
+
+                // hold ~1 s until the next segment, PINGing when silent > 400 ms
+                double until = lastSendMs + 1000;
+                while (sw2.Elapsed.TotalMilliseconds < until && !token.IsCancellationRequested)
+                {
+                    double nowMs = sw2.Elapsed.TotalMilliseconds;
+                    if (nowMs - lastSendMs >= 400)
+                    {
+                        await client.SendPingAsync(token);
+                        lastSendMs = nowMs;
+                        Console.WriteLine("    ping (keepalive)");
+                    }
+                    await Task.Delay(50, token);
+                }
             }
-            nextMs += periodMs;
-            if (nextMs < nowMs) nextMs = nowMs + periodMs;
-
-            double t = sw.Elapsed.TotalSeconds;
-            double w = 2 * Math.PI * freqHz;
-            double target = centre + amp * Math.Sin(w * t);
-            double vel = amp * w * Math.Cos(w * t);
-
-            await client.SendStreamSampleAsync(client.HubNowUs(), target, vel, token);
-            sends++;
+            Console.WriteLine($"[stream] done: segments={sends} (expected 5)");
         }
-        Console.WriteLine($"[stream] done: sends={sends} (expected ~{(int)Math.Round(rateHz * durationS)})");
+        else
+        {
+            // 5 s @ granted rate, analytic sine + derivative.
+            double rateHz = granted > 0 ? granted : 50.0;
+            double periodMs = 1000.0 / rateHz;
+            const double durationS = 5.0;
+            const double freqHz = 0.5;
+            const double amp = 0.2;
+            const double centre = 0.5;
+
+            Console.WriteLine($"[stream] sending {durationS:F0}s @ {rateHz:F1} Hz (target=0.5+0.2*sin(2*pi*0.5*t))...");
+            var sw = Stopwatch.StartNew();
+            double nextMs = 0;
+            while (sw.Elapsed.TotalSeconds < durationS && !token.IsCancellationRequested)
+            {
+                double nowMs = sw.Elapsed.TotalMilliseconds;
+                if (nowMs < nextMs)
+                {
+                    int sleep = (int)Math.Max(0, Math.Min(nextMs - nowMs, 5));
+                    await Task.Delay(sleep, token);
+                    continue;
+                }
+                nextMs += periodMs;
+                if (nextMs < nowMs) nextMs = nowMs + periodMs;
+
+                double t = sw.Elapsed.TotalSeconds;
+                double w = 2 * Math.PI * freqHz;
+                double target = centre + amp * Math.Sin(w * t);
+                double vel = amp * w * Math.Cos(w * t);
+
+                await client.SendStreamSampleAsync(client.HubNowUs(), target, vel, token);
+                sends++;
+            }
+            Console.WriteLine($"[stream] done: sends={sends} (expected ~{(int)Math.Round(rateHz * durationS)})");
+        }
         Console.WriteLine();
 
         // ---- Drain trailing frames, then close cleanly -----------------------
@@ -241,7 +297,7 @@ internal static class LiveWireTest
         // ---- PASS/FAIL table ----------------------------------------------------
         var checks = new List<(string name, bool pass, string detail)>
         {
-            ("granted publish rate == 50 Hz", Math.Abs(granted - 50.0) < 0.01, $"granted={granted:F2}"),
+            ("granted motion-input rate == 50 Hz", Math.Abs(granted - 50.0) < 0.01, $"granted={granted:F2}"),
             ("CLOCK rtt < 200000 us", haveClock && bestRtt < 200000, haveClock ? $"rtt={bestRtt} us" : "no exchange completed"),
             ("bundles delta == sends (zero wire loss)", dBundles == sends, $"delta={dBundles} sends={sends}"),
             ("samples delta == sends", dSamples == sends, $"delta={dSamples} sends={sends}"),
@@ -250,6 +306,8 @@ internal static class LiveWireTest
             ("STATE frames received > 0", stateCount > 0, $"count={stateCount}"),
             ("NACKs received == 0", nackCount == 0, $"count={nackCount}"),
         };
+        if (segments)
+            checks.Insert(1, ("granted motion-segment rate == 10 Hz", Math.Abs(segGranted - 10.0) < 0.01, $"granted={segGranted:F2}"));
 
         Console.WriteLine("=============================================================");
         Console.WriteLine(" PASS/FAIL");

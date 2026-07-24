@@ -103,6 +103,15 @@
                          Text="{Binding PairingPin, UpdateSourceTrigger=PropertyChanged}"/>
             </Grid>
 
+            <!-- Streaming mode: Samples (50 Hz points) vs Segments (one timed
+                 command per funscript action). Locked while connected. -->
+            <ComboBox Margin="0,10,0,0"
+                      material:HintAssist.Hint="Mode"
+                      Style="{StaticResource MaterialDesignFloatingHintComboBox}"
+                      IsEnabled="{Binding IsEditable}"
+                      ItemsSource="{Binding Modes}"
+                      SelectedItem="{Binding Mode}"/>
+
             <!-- ==== Discovery ==== -->
             <TextBlock Text="DISCOVERY (mDNS)" FontWeight="Bold" Opacity="0.6" Margin="0,18,0,6"/>
             <Grid>
@@ -154,36 +163,51 @@
                             <RowDefinition Height="Auto"/>
                             <RowDefinition Height="Auto"/>
                             <RowDefinition Height="Auto"/>
+                            <RowDefinition Height="Auto"/>
+                            <RowDefinition Height="Auto"/>
                         </Grid.RowDefinitions>
 
-                        <TextBlock Grid.Row="0" Grid.Column="0" Text="Device"   Opacity="0.6"/>
-                        <TextBlock Grid.Row="0" Grid.Column="2" Text="{Binding DeviceInfo}"/>
-                        <TextBlock Grid.Row="1" Grid.Column="0" Text="Session"  Opacity="0.6"/>
-                        <TextBlock Grid.Row="1" Grid.Column="2" Text="{Binding SessionId}"/>
-                        <TextBlock Grid.Row="2" Grid.Column="0" Text="Granted"  Opacity="0.6"/>
-                        <TextBlock Grid.Row="2" Grid.Column="2" Text="{Binding GrantedRate, StringFormat={}{0:F0} Hz}"/>
-                        <TextBlock Grid.Row="3" Grid.Column="0" Text="Clock off" Opacity="0.6"/>
-                        <TextBlock Grid.Row="3" Grid.Column="2" Text="{Binding ClockOffsetUs, StringFormat={}{0} us}"/>
-                        <TextBlock Grid.Row="4" Grid.Column="0" Text="RTT"      Opacity="0.6"/>
-                        <TextBlock Grid.Row="4" Grid.Column="2" Text="{Binding RttUs, StringFormat={}{0} us}"/>
-                        <TextBlock Grid.Row="5" Grid.Column="0" Text="Bundles"  Opacity="0.6"/>
-                        <TextBlock Grid.Row="5" Grid.Column="2" Text="{Binding BundlesSent}"/>
-                        <TextBlock Grid.Row="6" Grid.Column="0" Text="NACKs"    Opacity="0.6"/>
-                        <TextBlock Grid.Row="6" Grid.Column="2" Text="{Binding NackCount}"/>
-                        <TextBlock Grid.Row="7" Grid.Column="0" Text="Rate-limited" Opacity="0.6"/>
-                        <TextBlock Grid.Row="7" Grid.Column="2" Text="{Binding RateLimitedCount}"/>
-                        <TextBlock Grid.Row="8" Grid.Column="0" Text="Last target / uptime" Opacity="0.6"/>
-                        <StackPanel Grid.Row="8" Grid.Column="2" Orientation="Horizontal">
+                        <TextBlock Grid.Row="0" Grid.Column="0" Text="Mode"     Opacity="0.6"/>
+                        <TextBlock Grid.Row="0" Grid.Column="2" Text="{Binding Mode}"/>
+                        <TextBlock Grid.Row="1" Grid.Column="0" Text="Device"   Opacity="0.6"/>
+                        <TextBlock Grid.Row="1" Grid.Column="2" Text="{Binding DeviceInfo}"/>
+                        <TextBlock Grid.Row="2" Grid.Column="0" Text="Session"  Opacity="0.6"/>
+                        <TextBlock Grid.Row="2" Grid.Column="2" Text="{Binding SessionId}"/>
+                        <TextBlock Grid.Row="3" Grid.Column="0" Text="Granted"  Opacity="0.6"/>
+                        <TextBlock Grid.Row="3" Grid.Column="2" Text="{Binding GrantedRate, StringFormat={}{0:F0} Hz}"/>
+                        <TextBlock Grid.Row="4" Grid.Column="0" Text="Clock off" Opacity="0.6"/>
+                        <TextBlock Grid.Row="4" Grid.Column="2" Text="{Binding ClockOffsetUs, StringFormat={}{0} us}"/>
+                        <TextBlock Grid.Row="5" Grid.Column="0" Text="RTT"      Opacity="0.6"/>
+                        <TextBlock Grid.Row="5" Grid.Column="2" Text="{Binding RttUs, StringFormat={}{0} us}"/>
+                        <TextBlock Grid.Row="6" Grid.Column="0" Text="Bundles"  Opacity="0.6"/>
+                        <TextBlock Grid.Row="6" Grid.Column="2" Text="{Binding BundlesSent}"/>
+                        <TextBlock Grid.Row="7" Grid.Column="0" Text="NACKs"    Opacity="0.6"/>
+                        <TextBlock Grid.Row="7" Grid.Column="2" Text="{Binding NackCount}"/>
+                        <TextBlock Grid.Row="8" Grid.Column="0" Text="Rate-limited" Opacity="0.6"/>
+                        <TextBlock Grid.Row="8" Grid.Column="2" Text="{Binding RateLimitedCount}"/>
+                        <!-- Segments sent — only meaningful in Segments mode. -->
+                        <TextBlock Grid.Row="9" Grid.Column="0" Text="Segments sent" Opacity="0.6"
+                                   Visibility="{Binding IsSegmentsMode, Converter={StaticResource BooleanToVisibilityConverter}}"/>
+                        <TextBlock Grid.Row="9" Grid.Column="2" Text="{Binding SegmentsSent}"
+                                   Visibility="{Binding IsSegmentsMode, Converter={StaticResource BooleanToVisibilityConverter}}"/>
+                        <TextBlock Grid.Row="10" Grid.Column="0" Text="Last target / uptime" Opacity="0.6"/>
+                        <StackPanel Grid.Row="10" Grid.Column="2" Orientation="Horizontal">
                             <TextBlock Text="{Binding LastTarget, StringFormat={}{0:F4}}"/>
                             <TextBlock Text="  ·  "/>
                             <TextBlock Text="{Binding Uptime}"/>
                         </StackPanel>
                     </Grid>
+
+                    <!-- Divergence warning (Segments mode): visible only when set. -->
+                    <TextBlock TextWrapping="Wrap" Margin="0,8,0,0" FontSize="11"
+                               Foreground="{DynamicResource MaterialDesignErrorBrush}"
+                               Text="{Binding DivergenceWarning}"
+                               Visibility="{Binding DivergenceWarning, Converter={StaticResource NullableToVisibilityConverter}}"/>
                 </StackPanel>
             </Border>
 
             <TextBlock TextWrapping="Wrap" Opacity="0.5" FontSize="11" Margin="0,10,0,0"
-                       Text="Streams the selected axis to the machine over SlopSync channel 0x0084 (motion-input). The machine must be homed before motion runs; the ground-truth doctrine means the device clamps everything — echoed values are what actually applied."/>
+                       Text="Streams the selected axis to the machine over SlopSync — Samples mode on channel 0x0084 (motion-input, 50 Hz points) or Segments mode on 0x0085 (motion-segment, one timed command per funscript action). The machine must be homed before motion runs; the ground-truth doctrine means the device clamps everything — echoed values are what actually applied."/>
         </StackPanel>
     </ScrollViewer>
 </plugin:PluginViewBase>

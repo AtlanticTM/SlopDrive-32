@@ -169,9 +169,28 @@ DONE ──► SlopSync inbound motion: STREAM c2h (motion-input 0x0084, publish
          [TCode pass-through channel DEFERRED to post-MFP: would race
          TCodeParser across commsTask/hub task for zero MFP value —
          bounded compat, not a milestone gate]
-NOW  ──► MFP plugin (C# SlopSync client) — first external implementation,
-         rock-solid link is the milestone gate
-     ──► merge feat/cpp20-slopsync → main + pairing rough-in (model C)
+DONE ──► MFP plugin (C# SlopSync client) — clients/mfp-slopsync, single-file
+         Roslyn plugin, live-verified 8/8 vs fw 2.1.44 (mDNS discovery of the
+         new _slopsync._tcp advert, 50 Hz granted, 250/250 zero wire loss).
+         The milestone paid for itself: its LiveWireTest found the hub
+         source-ownership teardown leak (dead session owned motion-input
+         until reboot) — fixed across all six teardown paths, SPEC §6.8
+         tightened, SI-11/12/13 added.
+DONE ──► segment streaming (fw 2.1.45): channel 0x0085 motion-segment
+         ({target u16/1e4, duration_ms u16, end_vel i16/1e3 | INT16_MIN
+         sentinel}) feeds SlopMotion's quintic waveform path — one command
+         per funscript action (~2–4 pkt/s vs 50), deadman held by §6.5
+         PING keepalive (no protocol change). Plugin v0.2.0 Segments mode:
+         keyframe-cursor emitter (MFP's own KeyframeCollection helpers),
+         ScriptScale/Invert replicated, divergence watchdog warns when
+         motion-provider/SmartLimit bends the axis. Bonus ground-truth fix:
+         accepted STREAM bundles now clear a latched STOP like intents do
+         (SI-15). Outputs-panel verdict: plugin injection impossible by
+         design (entry-assembly scan + internal interfaces) — native
+         Outputs entry = small upstream PR (~400 lines, template:
+         WebSocketOutputTarget); shortcut actions SlopSync::Connection::*
+         registered as the native-feel bridge.
+NOW  ──► merge feat/cpp20-slopsync → main + pairing rough-in (model C)
      ──► widen: slopsync-js A/B, SlopSim v1 ∥ board traits
      ──► C5 nodes (ESP-NOW transport — spec pre-fitted: min_transport_payload
          242 = ESP-NOW 250 minus our 8-byte header)

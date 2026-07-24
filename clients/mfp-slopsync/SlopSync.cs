@@ -1,5 +1,5 @@
 #:name SlopSync
-#:version 0.1.0
+#:version 0.2.0
 #:author SlopDrive
 #:description Streams a MultiFunPlayer axis to a SlopDrive-32 machine over the native SlopSync protocol (device-shadow + capability negotiation, WebSocket + CBOR).
 #:url https://github.com/AtlanticTM
@@ -23,10 +23,13 @@ using System.Net.Sockets;
 using System.Net.WebSockets;
 using System.Text;
 using System.Threading;
+using System.Threading.Channels;
 using System.Threading.Tasks;
 using MultiFunPlayer.Common;
 using MultiFunPlayer.Plugin;
+using MultiFunPlayer.Script;
 using Newtonsoft.Json;
+using Newtonsoft.Json.Converters;
 using NLog;
 using Stylet;
 
@@ -54,12 +57,25 @@ public class SlopSync : PluginBase
     private int _updateRateHz = 50;
     private string _sourceAxis = "L0";
     private string _pairingPin = "";
+    private StreamMode _mode = StreamMode.Samples;
 
     [JsonProperty] public string Address { get => _address; set => SetAndNotify(ref _address, value); }
     [JsonProperty] public int Port { get => _port; set => SetAndNotify(ref _port, value); }
     [JsonProperty] public int UpdateRateHz { get => _updateRateHz; set => SetAndNotify(ref _updateRateHz, value); }
     [JsonProperty] public string SourceAxis { get => _sourceAxis; set => SetAndNotify(ref _sourceAxis, value); }
     [JsonProperty] public string PairingPin { get => _pairingPin; set => SetAndNotify(ref _pairingPin, value); }
+
+    // Streaming mode (§0x0084 samples vs §0x0085 timed segments). Persisted by
+    // name so reordering the enum can never silently remap a saved value.
+    [JsonProperty][JsonConverter(typeof(StringEnumConverter))]
+    public StreamMode Mode
+    {
+        get => _mode;
+        set { if (SetAndNotify(ref _mode, value)) NotifyOfPropertyChange(nameof(IsSegmentsMode)); }
+    }
+
+    // Bound as the mode ComboBox's ItemsSource (Enum.GetValues gives the members).
+    public Array Modes => Enum.GetValues(typeof(StreamMode));
 
     // ---- Live UI state (not persisted) --------------------------------------
     private ConnectionStatus _status = ConnectionStatus.Disconnected;
@@ -75,6 +91,8 @@ public class SlopSync : PluginBase
     private long _statesReceived;
     private double _lastTarget;
     private string _uptime;
+    private long _segmentsSent;
+    private string _divergenceWarning;
     private DiscoveredDevice _selectedDevice;
     private bool _isDiscovering;
 
@@ -95,9 +113,14 @@ public class SlopSync : PluginBase
     public long StatesReceived { get => _statesReceived; set => SetAndNotify(ref _statesReceived, value); }
     public double LastTarget { get => _lastTarget; set => SetAndNotify(ref _lastTarget, value); }
     public string Uptime { get => _uptime; set => SetAndNotify(ref _uptime, value); }
+    public long SegmentsSent { get => _segmentsSent; set => SetAndNotify(ref _segmentsSent, value); }
+    public string DivergenceWarning { get => _divergenceWarning; set => SetAndNotify(ref _divergenceWarning, value); }
 
     // True only while fully disconnected — the view binds edit boxes' IsEnabled here.
     public bool IsEditable => Status == ConnectionStatus.Disconnected;
+
+    // The view shows the Segments-only rows (counter + divergence line) off this.
+    public bool IsSegmentsMode => Mode == StreamMode.Segments;
 
     public ObservableCollection<DiscoveredDevice> DiscoveredDevices { get; } = new();
     public DiscoveredDevice SelectedDevice
@@ -119,6 +142,26 @@ public class SlopSync : PluginBase
     private Task _task;
     private CancellationTokenSource _cancellationSource;
 
+    // ---- Segments-mode engine state -----------------------------------------
+    // Event-driven cursor: MFP pushes media/script messages on ITS thread, and
+    // the segment emitter runs there (in the HandleMessage overrides). Emitted
+    // segments are handed to the connection task purely through _segQueue — the
+    // MFP thread never touches the WebSocket. Cross-thread fields are volatile;
+    // the cursor fields (_segCursor/_segEmittedSpan/seek-tracking) are mutated
+    // ONLY on the MFP event thread, which delivers messages serially, so they
+    // need no lock.
+    private volatile bool _segActive;                       // gates all HandleMessage work
+    private volatile Channel<SegmentSample> _segQueue;      // MFP thread → connection task
+    private volatile KeyframeCollection _segKeyframes;      // ref-swapped on script change (immutable contents)
+    private volatile bool _segPlaying;
+    private DeviceAxis _segAxis;
+    private int _segCursor;                                 // span index (keyframe before position)
+    private int _segEmittedSpan = -1;                       // last span we emitted / gap-skipped
+    private bool _segNeedsResync;                           // force a hard SearchForIndexBefore next tick
+    private double _segLastMediaPosSec;                     // seek detector: last reported media position
+    private long _segLastMediaTicks;                        // seek detector: Stopwatch ticks at that report
+    private bool _segHaveSeekRef;
+
     // Stable 8-byte identity for this plugin instance (§6.1). Kept for the whole
     // plugin lifetime so a reconnect replaces the old session (DUPLICATE_INSTANCE
     // eviction) rather than piling up ghost sessions on the hub.
@@ -137,7 +180,18 @@ public class SlopSync : PluginBase
     // on the dispatcher, so it is cheap.
     private void Ui(Action a) => Execute.OnUIThread(a);
 
-    protected override void OnInitialize() { }
+    protected override void OnInitialize()
+    {
+        // Make connect/disconnect bindable from MFP's shortcut system, mirroring
+        // a native output target's "<Identifier>::Connection::{Toggle,Connect,
+        // Disconnect}" convention. OnConnectClick() is itself a toggle; Connect/
+        // Disconnect are idempotent guards on the task handle. PluginBase tracks
+        // these and auto-unregisters them on dispose. Marshalled to the UI thread
+        // because they mutate the same _task/_cancellationSource the view does.
+        RegisterAction("SlopSync::Connection::Toggle", () => Ui(OnConnectClick));
+        RegisterAction("SlopSync::Connection::Connect", () => Ui(() => { if (_task == null) OnConnectClick(); }));
+        RegisterAction("SlopSync::Connection::Disconnect", () => Ui(() => { if (_task != null) OnConnectClick(); }));
+    }
 
     protected override void OnDispose()
     {
@@ -243,15 +297,46 @@ public class SlopSync : PluginBase
         var client = new HubClient(ws, _instanceId, Logger);
 
         // ---- HELLO / WELCOME -------------------------------------------------
+        // Snapshot the mode for the whole session — the view disables the mode
+        // ComboBox while connected, so it cannot change under us, but reading it
+        // once keeps the branch decision stable regardless.
+        var mode = Mode;
         double wishHz = Math.Clamp(UpdateRateHz, 10, 250);
         byte[] token16 = string.IsNullOrEmpty(PairingPin) ? null : Encoding.UTF8.GetBytes(PairingPin);
-        var welcome = await client.HelloAsync("mfp", "MultiFunPlayer SlopSync",
-            SlopWire.ChMotionInput, wishHz, token16, token);
+
+        // Samples mode wishes 0x0084 only (unchanged). Segments mode ALSO wishes
+        // 0x0084 (the dense-sample fallback path stays granted) PLUS 0x0085 at the
+        // segment channel's 10 Hz — one bundle per stroke leg is a handful/sec, so
+        // 10 Hz of headroom is plenty and well under the channel's 50 Hz cap.
+        WelcomeInfo welcome;
+        if (mode == StreamMode.Segments)
+        {
+            welcome = await client.HelloAsync("mfp", "MultiFunPlayer SlopSync",
+                new (ushort ch, double rate)[] { (SlopWire.ChMotionInput, wishHz), (SlopWire.ChMotionSegment, 10.0) },
+                token16, token);
+        }
+        else
+        {
+            welcome = await client.HelloAsync("mfp", "MultiFunPlayer SlopSync",
+                SlopWire.ChMotionInput, wishHz, token16, token);
+        }
 
         double granted = welcome.GrantedPublishRate(SlopWire.ChMotionInput);
         if (double.IsNaN(granted))
             throw new InvalidOperationException("no publish grant for motion-input(0x0084) in WELCOME");
 
+        // Segments mode *requires* the 0x0085 grant — mirror the no-grant error
+        // path rather than silently degrading to the sample loop (ground-truth
+        // doctrine: the UI says "Segments", so we send segments or we error).
+        double segGranted = double.NaN;
+        if (mode == StreamMode.Segments)
+        {
+            segGranted = welcome.GrantedPublishRate(SlopWire.ChMotionSegment);
+            if (double.IsNaN(segGranted))
+                throw new InvalidOperationException("no publish grant for motion-segment(0x0085) in WELCOME — device may predate the segment channel; use Samples mode");
+        }
+
+        double segGrantedSnapshot = segGranted;
         Ui(() =>
         {
             SessionId = welcome.SessionId;
@@ -260,11 +345,14 @@ public class SlopSync : PluginBase
                 ? $"{_selectedDevice.InstanceName} · fw {_selectedDevice.Fw}"
                 : $"boot 0x{welcome.BootId:X8}";
             Status = ConnectionStatus.Connected;
-            StatusText = $"Streaming {SourceAxis} @ {granted:F0} Hz";
+            StatusText = mode == StreamMode.Segments
+                ? $"Segments {SourceAxis} @ {segGrantedSnapshot:F0} Hz (fallback {granted:F0} Hz)"
+                : $"Streaming {SourceAxis} @ {granted:F0} Hz";
             NotifyOfPropertyChange(nameof(IsEditable));
         });
-        Logger.Info("WELCOME: session={0} boot=0x{1:X8} granted motion-input @ {2:F1} Hz (wished {3:F1})",
-            welcome.SessionId, welcome.BootId, granted, wishHz);
+        Logger.Info("WELCOME: session={0} boot=0x{1:X8} mode={2} granted motion-input @ {3:F1} Hz (wished {4:F1}){5}",
+            welcome.SessionId, welcome.BootId, mode, granted, wishHz,
+            mode == StreamMode.Segments ? $", motion-segment @ {segGranted:F1} Hz" : "");
 
         // ---- SUBSCRIBE: safety(0x0003) on-change + motion(0x0080)@20Hz -------
         // Mirrors the probe: safety is never-shed/critical, motion is the live
@@ -283,8 +371,11 @@ public class SlopSync : PluginBase
         {
             await ResyncClock(client, token);
 
-            // ---- Stream loop -----------------------------------------------------
-            await StreamLoopAsync(client, granted, token);
+            // ---- Stream loop (mode-specific) -------------------------------------
+            if (mode == StreamMode.Segments)
+                await SegmentLoopAsync(client, granted, segGranted, token);
+            else
+                await StreamLoopAsync(client, granted, token);
         }
         finally
         {
@@ -437,6 +528,363 @@ public class SlopSync : PluginBase
     }
 
     // =========================================================================
+    // SEGMENTS MODE
+    //
+    // The connection task owns this loop; it is the ONLY writer to the socket.
+    // The MFP event thread runs the emitter (HandleMessage overrides below) and
+    // hands finished segments over via _segQueue — no shared socket, no shared
+    // seq counter, no lock. The loop drains the queue, stamps each segment with
+    // the current hub time at send, and interleaves three timers: a silence-based
+    // PING keepalive (segments are sparse — without it the hub's 600 ms deadman
+    // would fire between strokes), the usual ~10 s CLOCK resync, and a ~1 s
+    // output-divergence probe.
+    // =========================================================================
+    private const double SegmentPingIntervalMs = 400.0;   // < 600 ms deadman, with margin
+
+    private async Task SegmentLoopAsync(HubClient client, double sampleRate, double segRate, CancellationToken token)
+    {
+        // Fresh queue + engine state for this session.
+        _segQueue = Channel.CreateUnbounded<SegmentSample>(
+            new UnboundedChannelOptions { SingleReader = true, SingleWriter = false });
+        _segAxis = DeviceAxis.Parse(SourceAxis);
+        _segKeyframes = ReadKeyframes(_segAxis);
+        _segCursor = -1;
+        _segEmittedSpan = -1;
+        _segHaveSeekRef = false;
+        _segNeedsResync = true;
+        try { _segPlaying = ReadProperty<bool>("Media::PlayPause"); } catch { _segPlaying = false; }
+
+        Ui(() => { SegmentsSent = 0; DivergenceWarning = null; });
+        _segActive = true;   // opens the gate for the HandleMessage emitter
+
+        var reader = _segQueue.Reader;
+        var sw = Stopwatch.StartNew();
+        var connectedAt = DateTime.UtcNow;
+        long localSegs = 0;
+        double lastSendMs = 0;      // last time ANY frame went out (segment/ping/clock)
+        double lastResyncMs = 0;
+        double lastStatsMs = 0;
+        double lastDivergeMs = 0;
+        int divergeStreak = 0;
+
+        try
+        {
+            while (!token.IsCancellationRequested)
+            {
+                // ---- drain any queued segments, newest included -------------
+                while (reader.TryRead(out var seg))
+                {
+                    await client.SendSegmentSampleAsync(client.HubNowUs(), seg, token);
+                    localSegs++;
+                    lastSendMs = sw.Elapsed.TotalMilliseconds;
+                }
+
+                double nowMs = sw.Elapsed.TotalMilliseconds;
+
+                // ---- PING keepalive (only when otherwise silent) ------------
+                if (nowMs - lastSendMs >= SegmentPingIntervalMs)
+                {
+                    await client.SendPingAsync(token);
+                    lastSendMs = nowMs;
+                }
+
+                // ---- periodic CLOCK resync (~10 s) --------------------------
+                if (nowMs - lastResyncMs >= SlopWire.ClockResyncIntervalMs)
+                {
+                    lastResyncMs = nowMs;
+                    await ResyncClock(client, token);
+                    lastSendMs = sw.Elapsed.TotalMilliseconds;   // CLOCK is traffic too
+                }
+
+                // ---- output-divergence probe (~1 s) -------------------------
+                if (nowMs - lastDivergeMs >= 1000)
+                {
+                    lastDivergeMs = nowMs;
+                    CheckDivergence(ref divergeStreak);
+                }
+
+                // ---- throttled stats push -----------------------------------
+                if (nowMs - lastStatsMs >= 200)
+                {
+                    lastStatsMs = nowMs;
+                    long segSnapshot = localSegs;
+                    var up = DateTime.UtcNow - connectedAt;
+                    Ui(() =>
+                    {
+                        SegmentsSent = segSnapshot;
+                        Uptime = $"{(int)up.TotalMinutes:D2}:{up.Seconds:D2}";
+                    });
+                }
+
+                // ---- wait for the next segment or the nearest timer deadline -
+                double toPing = SegmentPingIntervalMs - (nowMs - lastSendMs);
+                double toStats = 200 - (nowMs - lastStatsMs);
+                double toDiverge = 1000 - (nowMs - lastDivergeMs);
+                int wait = (int)Math.Clamp(Math.Min(toPing, Math.Min(toStats, toDiverge)), 15, 400);
+                try
+                {
+                    var ready = reader.WaitToReadAsync(token).AsTask();
+                    await Task.WhenAny(ready, Task.Delay(wait, token));
+                }
+                catch (OperationCanceledException) { break; }
+            }
+        }
+        finally
+        {
+            _segActive = false;
+            _segQueue = null;
+        }
+    }
+
+    // ---- Keyframe cache read (null-safe) ------------------------------------
+    private KeyframeCollection ReadKeyframes(DeviceAxis axis)
+    {
+        if (axis == null) return null;
+        // 1.34.5 exposes the concrete ScriptResource (there is no IScriptResource
+        // interface in that build); ScriptResource.Keyframes is the collection.
+        try { return ReadProperty<DeviceAxis, ScriptResource>("Axis::Script", axis)?.Keyframes; }
+        catch { return null; }
+    }
+
+    // ---- Transform replication (ScriptScale + InvertScript) -----------------
+    // Reproduces the two cheap deterministic stages ScriptViewModel applies to a
+    // raw keyframe value (verified against ScriptViewModel.cs UpdateScript):
+    //   value = Clamp01(default + (value - default) * ScriptScale); if invert 1-value.
+    // Deeper stages (motion-provider blend, SmartLimit, SpeedLimit, sync/autohome)
+    // cannot be replicated here — the divergence probe catches those at runtime.
+    private double TransformValue(DeviceAxis axis, double raw)
+    {
+        double def = axis?.DefaultValue ?? 0.5;
+        double scale = 1.0;
+        bool invert = false;
+        try { scale = ReadProperty<DeviceAxis, double>("Axis::ScriptScale", axis); } catch { }
+        try { invert = ReadProperty<DeviceAxis, bool>("Axis::InvertScript", axis); } catch { }
+        double v = Clamp01(def + (raw - def) * scale);
+        return invert ? 1.0 - v : v;
+    }
+
+    private static double Clamp01(double v) => v < 0 ? 0 : (v > 1 ? 1 : v);
+
+    private double ReadSpeed()
+    {
+        try { double s = ReadProperty<double>("Media::Speed"); return s > 1e-3 ? s : 1.0; }
+        catch { return 1.0; }
+    }
+
+    // Transformed slope of span k (kf[k]→kf[k+1]) in norm/s of WALL-clock time
+    // (script seconds divided by playback speed).
+    private double TransformedSlope(KeyframeCollection kf, int k, double speed)
+    {
+        double dtScript = kf[k + 1].Position - kf[k].Position;
+        if (dtScript <= 1e-9) return 0;
+        double dv = TransformValue(_segAxis, kf[k + 1].Value) - TransformValue(_segAxis, kf[k].Value);
+        return dv / (dtScript / speed);
+    }
+
+    // ---- The cursor / emit core (all on the MFP event thread) ----------------
+    private void SegResync(KeyframeCollection kf, double axisPos)
+    {
+        _segCursor = kf.SearchForIndexBefore(axisPos);
+        _segEmittedSpan = -1;
+    }
+
+    private void SegAdvanceEmit(KeyframeCollection kf, double axisPos)
+    {
+        _segCursor = kf.AdvanceIndex(_segCursor, axisPos);
+        MaybeEmitSpan(kf, _segCursor, axisPos);
+    }
+
+    private void MaybeEmitSpan(KeyframeCollection kf, int i, double axisPos)
+    {
+        if (i == _segEmittedSpan) return;                       // already handled this span
+        if (i < 0 || i + 1 >= kf.Count) return;                 // before / after script
+        _segEmittedSpan = i;
+        if (kf.IsGap(i)) return;                                // gap span → machine holds, emit nothing
+        EmitSegment(kf, i, axisPos);
+    }
+
+    private void EmitSegment(KeyframeCollection kf, int i, double axisPos)
+    {
+        var q = _segQueue;
+        if (q == null) return;
+
+        double speed = ReadSpeed();
+        double target = TransformValue(_segAxis, kf[i + 1].Value);
+
+        // Duration = remaining wall-clock time from where we ACTUALLY are to the
+        // next keyframe (plan from current state — the device replans anyway).
+        double durSec = (kf[i + 1].Position - axisPos) / speed;
+        int durMs = (int)Math.Clamp(Math.Round(durSec * 1000.0), 10, 65535);
+
+        var (endVel, sentinel) = ComputeEndVel(kf, i, speed);
+        q.Writer.TryWrite(new SegmentSample(target, durMs, endVel, sentinel));
+
+        Ui(() => LastTarget = target);
+    }
+
+    // Outgoing-slope continuity for the end-velocity handoff (§0x0085 semantics):
+    //   * no keyframe after the target, or the outgoing span is a gap → SENTINEL
+    //     (unconstrained — the engine settles / holds; these are the two cases
+    //     where "the span after the target" has no real slope to hand off).
+    //   * a reversal at the target (incoming vs outgoing slope opposite sign), or
+    //     either slope ~0 → 0 (arrive AT REST; 0 is a real slope, not "absent").
+    //   * otherwise → the outgoing slope, clamped ±32.767 norm/s.
+    // The structural (gap/absent) check must precede the kinematic one because the
+    // outgoing slope is undefined without a valid, non-gap outgoing span.
+    private (double endVel, bool sentinel) ComputeEndVel(KeyframeCollection kf, int i, double speed)
+    {
+        int j = i + 1;   // outgoing span index (span after the target keyframe kf[i+1])
+        if (j + 1 >= kf.Count) return (0, true);      // no kf[i+2] → end of script → SENTINEL
+        if (kf.IsGap(j)) return (0, true);             // outgoing gap → hold → SENTINEL
+
+        double sIn = TransformedSlope(kf, i, speed);
+        double sOut = TransformedSlope(kf, j, speed);
+        const double eps = 1e-6;
+        if (Math.Abs(sIn) < eps || Math.Abs(sOut) < eps || Math.Sign(sIn) != Math.Sign(sOut))
+            return (0, false);                          // reversal / flat → rest at target
+
+        return (Math.Clamp(sOut, -32.767, 32.767), false);
+    }
+
+    // Seek heuristic: expected media position advances at playback speed between
+    // reports; a jump > 1 s (or MFP's own ForceSeek flag) is a seek.
+    private bool DetectSeek(double mediaPosSec, double speed)
+    {
+        if (!_segHaveSeekRef) return false;
+        double dtReal = (Stopwatch.GetTimestamp() - _segLastMediaTicks) / (double)Stopwatch.Frequency;
+        double expected = _segLastMediaPosSec + (_segPlaying ? dtReal * speed : 0.0);
+        return Math.Abs(mediaPosSec - expected) > 1.0;
+    }
+
+    private void RecordSeekRef(double mediaPosSec)
+    {
+        _segLastMediaPosSec = mediaPosSec;
+        _segLastMediaTicks = Stopwatch.GetTimestamp();
+        _segHaveSeekRef = true;
+    }
+
+    // Runtime divergence probe (connection task): compare the axis' ACTUAL output
+    // against what we predict the authored+transformed script to be at the current
+    // position. Persistent divergence means a stage we can't replicate (motion
+    // provider, SmartLimit, sync, …) is active — warn, never switch modes.
+    private void CheckDivergence(ref int streak)
+    {
+        var kf = _segKeyframes;
+        if (_segAxis == null || kf == null || kf.Count < 2)
+        {
+            streak = 0;
+            if (DivergenceWarning != null) Ui(() => DivergenceWarning = null);
+            return;
+        }
+
+        try
+        {
+            double pos = ReadProperty<DeviceAxis, double>("Axis::Position", _segAxis);
+            int idx = kf.SearchForIndexBefore(pos);
+            if (idx < 0 || idx + 1 >= kf.Count) { streak = 0; return; }   // outside script — undefined, skip
+
+            var interp = ReadProperty<DeviceAxis, InterpolationType>("Axis::InterpolationType", _segAxis);
+            double predicted = TransformValue(_segAxis, Clamp01(kf.Interpolate(idx, pos, interp)));
+            double actual = ReadProperty<DeviceAxis, double>("Axis::Value", _segAxis);
+
+            if (Math.Abs(actual - predicted) > 0.05) streak++;
+            else streak = 0;
+
+            if (streak >= 3)
+                Ui(() => DivergenceWarning = "Axis output diverges from script (motion provider / smart-limit active?) — Segments mode is sending the authored script; consider Samples mode.");
+            else if (streak == 0 && DivergenceWarning != null)
+                Ui(() => DivergenceWarning = null);
+        }
+        catch (Exception ex) { Logger.Debug(ex, "divergence probe read failed"); }
+    }
+
+    // =========================================================================
+    // MFP message hooks — drive the Segments-mode emitter. All no-op unless a
+    // Segments session is live (_segActive). These run on MFP's event thread.
+    // =========================================================================
+    protected override void HandleMessage(MediaPositionChangedMessage message)
+    {
+        if (!_segActive) return;
+        var kf = _segKeyframes;
+        if (_segAxis == null || kf == null || kf.Count < 2) return;
+
+        double mediaPos = message.Position.TotalSeconds;
+        double speed = ReadSpeed();
+        bool seek = message.ForceSeek || DetectSeek(mediaPos, speed);
+        RecordSeekRef(mediaPos);
+
+        double axisPos;
+        try { axisPos = ReadProperty<DeviceAxis, double>("Axis::Position", _segAxis); }
+        catch { return; }
+
+        if (!_segPlaying)
+        {
+            // Paused: hold. Keep the cursor coherent so resume replans correctly,
+            // but emit nothing (the machine finishes its in-flight segment).
+            if (seek) { SegResync(kf, axisPos); _segNeedsResync = true; }
+            return;
+        }
+
+        if (seek || _segNeedsResync)
+        {
+            SegResync(kf, axisPos);
+            _segNeedsResync = false;
+        }
+
+        SegAdvanceEmit(kf, axisPos);
+    }
+
+    protected override void HandleMessage(MediaPlayingChangedMessage message)
+    {
+        _segPlaying = message.IsPlaying;
+        if (!_segActive) return;
+
+        if (_segPlaying)
+        {
+            // Play/resume: hard re-sync from actual position and emit a fresh
+            // segment immediately (device replans from its real state).
+            var kf = _segKeyframes;
+            if (_segAxis == null || kf == null || kf.Count < 2) { _segNeedsResync = true; return; }
+            double axisPos;
+            try { axisPos = ReadProperty<DeviceAxis, double>("Axis::Position", _segAxis); }
+            catch { _segNeedsResync = true; return; }
+            SegResync(kf, axisPos);
+            SegAdvanceEmit(kf, axisPos);
+        }
+    }
+
+    protected override void HandleMessage(MediaSpeedChangedMessage message)
+    {
+        // A speed change rescales every segment's wall-clock duration — force a
+        // fresh plan on the next position tick.
+        if (_segActive) _segNeedsResync = true;
+    }
+
+    protected override void HandleMessage(ScriptChangedMessage message)
+    {
+        if (!_segActive || _segAxis == null || message.Axis != _segAxis) return;
+        _segKeyframes = message.Script?.Keyframes;
+        _segNeedsResync = true;
+    }
+
+    protected override void HandleMessage(PostScriptSearchMessage message)
+    {
+        // Batched refresh signal. The message payload shape differs across MFP
+        // versions (1.34.5 carries a Result, master a Scripts map), so re-pull the
+        // keyframes straight from the axis property — version-proof and always current.
+        if (!_segActive || _segAxis == null) return;
+        _segKeyframes = ReadKeyframes(_segAxis);
+        _segNeedsResync = true;
+    }
+
+    protected override void HandleMessage(MediaSeekMessage message)
+    {
+        // Secondary (MFP-internal) seek signal — the position-message heuristic is
+        // primary; this just guarantees a resync even if the jump was < 1 s.
+        if (_segActive) _segNeedsResync = true;
+    }
+
+    // =========================================================================
     // Discovery — mDNS DNS-SD PTR query for _slopsync._tcp.local.
     // =========================================================================
     public void OnDiscoverClick()
@@ -465,6 +913,35 @@ public class SlopSync : PluginBase
                 Ui(() => IsDiscovering = false);
             }
         });
+    }
+}
+
+// =============================================================================
+// StreamMode — how the plugin feeds the machine.
+//   Samples  — the original 50 Hz dense-point path on 0x0084 (motion-input).
+//   Segments — one timed {target, duration, end_vel} per funscript action on
+//              0x0085 (motion-segment); ~2–4 packets/s, the device renders the
+//              native waveform. 0x0084 stays granted as a fallback either way.
+// =============================================================================
+public enum StreamMode
+{
+    Samples,
+    Segments,
+}
+
+// =============================================================================
+// SegmentSample — one 0x0085 segment handed from the MFP event thread to the
+// connection task. Sentinel=true means "no end velocity" (encoded INT16_MIN).
+// =============================================================================
+public readonly struct SegmentSample
+{
+    public readonly double Target;     // normalized 0..1 (pre-wire)
+    public readonly int DurationMs;    // commanded segment duration, ≥1
+    public readonly double EndVel;     // norm/s (ignored when Sentinel)
+    public readonly bool Sentinel;     // true → INT16_MIN "no end velocity"
+    public SegmentSample(double target, int durationMs, double endVel, bool sentinel)
+    {
+        Target = target; DurationMs = durationMs; EndVel = endVel; Sentinel = sentinel;
     }
 }
 
@@ -543,6 +1020,10 @@ public static class SlopWire
     public const ushort ChSafety = 0x0003;        // channels.safety (STATE, critical)
     public const ushort ChMotion = 0x0080;        // ch::motion (STATE)
     public const ushort ChMotionInput = 0x0084;   // ch::motion_input (STREAM c2h, ≤333 Hz)
+    public const ushort ChMotionSegment = 0x0085; // ch::motion_segment (STREAM c2h, ≤50 Hz, timed segments)
+
+    // §0x0085 sentinel: "no end velocity" (INT16_MIN). 0 is a real slope.
+    public const short SegmentEndVelSentinel = short.MinValue;   // -32768
 
     // ---- NACK codes (registry NackCode) — the subset we surface -------------
     public const ushort NackRateLimited = 0x0301;
@@ -603,6 +1084,15 @@ public static class SlopWire
     // publishes wish: [{12:rate_hz, 15:channel_id}] (§6.2 c2h STREAM wish).
     public static byte[] BuildHello(string clientKind, string clientName, byte[] instanceId,
                                     ushort publishChannel, double publishRateHz, byte[] token16 = null)
+        => BuildHello(clientKind, clientName, instanceId,
+                      new (ushort ch, double rate)[] { (publishChannel, publishRateHz) }, token16);
+
+    // Multi-wish variant: the publishes array carries one {12:rate,15:channel}
+    // map per channel we want to publish on (§6.2). Segments mode wishes both
+    // 0x0084 and 0x0085; Samples mode wishes just 0x0084 (the single-wish overload
+    // above delegates here, producing byte-identical output for one channel).
+    public static byte[] BuildHello(string clientKind, string clientName, byte[] instanceId,
+                                    IReadOnlyList<(ushort ch, double rate)> publishes, byte[] token16 = null)
     {
         var w = new CborWriter();
         int n = 4 + (token16 != null ? 1 : 0) + 1;   // proto,kind,name,instance (+token) +publishes
@@ -613,10 +1103,13 @@ public static class SlopWire
         w.WriteUInt(KInstanceId); w.WriteByteString(instanceId);
         if (token16 != null) { w.WriteUInt(KToken); w.WriteByteString(token16); }
         w.WriteUInt(KPublishes);
-        w.WriteArrayHeader(1);
-        w.WriteMapHeader(2);                          // {12:rate, 15:channel}
-        w.WriteUInt(KRateHz); w.WriteFloat32((float)publishRateHz);
-        w.WriteUInt(KChannelId); w.WriteUInt(publishChannel);
+        w.WriteArrayHeader(publishes.Count);
+        foreach (var (ch, rate) in publishes)
+        {
+            w.WriteMapHeader(2);                      // {12:rate, 15:channel} keys ascending
+            w.WriteUInt(KRateHz); w.WriteFloat32((float)rate);
+            w.WriteUInt(KChannelId); w.WriteUInt(ch);
+        }
         return w.ToArray();
     }
 
@@ -675,6 +1168,36 @@ public static class SlopWire
             rawV = Math.Clamp(rawV, -32768, 32767);
             BinaryPrimitives.WriteUInt16LittleEndian(buf.AsSpan(p), (ushort)rawT); p += 2;
             BinaryPrimitives.WriteInt16LittleEndian(buf.AsSpan(p), (short)rawV); p += 2;
+        }
+        return buf;
+    }
+
+    // ---- SEGMENT bundle (§5.4) for motion-segment (0x0085) ------------------
+    // Same STREAM framing as 0x0084: [t_base:u32 LE][n:u8][reserved:u8][off:u16 LE]*n
+    // then n × 6-byte samples {target:u16 LE, duration:u16 LE, end_vel:i16 LE}.
+    // Scales (SlopSyncCatalog 0x0085): target *10000, duration *1, end_vel *1000.
+    // duration is clamped ≥1 (the channel rejects 0); a Sentinel end_vel encodes
+    // INT16_MIN, and a real end_vel is clamped to ±32767 so it can never collide
+    // with the sentinel.
+    public static byte[] BuildSegmentBundle(uint tBase, IReadOnlyList<(ushort off, double target, int durationMs, double endVel, bool sentinel)> samples)
+    {
+        int n = samples.Count;
+        var buf = new byte[6 + n * 2 + n * 6];
+        int p = 0;
+        BinaryPrimitives.WriteUInt32LittleEndian(buf.AsSpan(p), tBase); p += 4;
+        buf[p++] = (byte)n;
+        buf[p++] = 0;                                  // reserved
+        for (int i = 0; i < n; i++) { BinaryPrimitives.WriteUInt16LittleEndian(buf.AsSpan(p), samples[i].off); p += 2; }
+        for (int i = 0; i < n; i++)
+        {
+            int rawT = Math.Clamp((int)Math.Round(samples[i].target * 10000.0), 0, 65535);
+            int rawD = Math.Clamp(samples[i].durationMs, 1, 65535);
+            short rawV = samples[i].sentinel
+                ? SegmentEndVelSentinel
+                : (short)Math.Clamp((int)Math.Round(samples[i].endVel * 1000.0), -32767, 32767);
+            BinaryPrimitives.WriteUInt16LittleEndian(buf.AsSpan(p), (ushort)rawT); p += 2;
+            BinaryPrimitives.WriteUInt16LittleEndian(buf.AsSpan(p), (ushort)rawD); p += 2;
+            BinaryPrimitives.WriteInt16LittleEndian(buf.AsSpan(p), rawV); p += 2;
         }
         return buf;
     }
@@ -886,6 +1409,7 @@ public sealed class HubClient
 
     private volatile int _clockOffset;   // hub_us - client_us (windowed), stored as int32
     private ushort _streamSeq;
+    private ushort _segmentSeq;          // per-channel seq for 0x0085 (§7.3)
 
     // CLOCK reply plumbing: the receive loop captures t3 at arrival and hands
     // the raw (t0e,t1,t2,t3) to whoever is awaiting an exchange.
@@ -917,10 +1441,15 @@ public sealed class HubClient
     }
 
     // ---- HELLO / await WELCOME (done inline before the receive loop starts) --
-    public async Task<WelcomeInfo> HelloAsync(string kind, string name, ushort publishChannel,
+    public Task<WelcomeInfo> HelloAsync(string kind, string name, ushort publishChannel,
         double publishRateHz, byte[] token16, CancellationToken token)
+        => HelloAsync(kind, name,
+                      new (ushort ch, double rate)[] { (publishChannel, publishRateHz) }, token16, token);
+
+    public async Task<WelcomeInfo> HelloAsync(string kind, string name,
+        IReadOnlyList<(ushort ch, double rate)> publishes, byte[] token16, CancellationToken token)
     {
-        var hello = SlopWire.BuildHello(kind, name, _instanceId, publishChannel, publishRateHz, token16);
+        var hello = SlopWire.BuildHello(kind, name, _instanceId, publishes, token16);
         await SendFrameAsync(SlopWire.FHello, 0, hello, 0, token);
 
         using var cts = CancellationTokenSource.CreateLinkedTokenSource(token);
@@ -987,6 +1516,19 @@ public sealed class HubClient
         ushort seq = _streamSeq++;
         return SendFrameAsync(SlopWire.FStream, SlopWire.ChMotionInput, payload, seq, token);
     }
+
+    // ---- SEGMENT sample (§0x0085) — single-sample bundle, own seq counter ---
+    public Task SendSegmentSampleAsync(uint tBase, SegmentSample s, CancellationToken token)
+    {
+        var payload = SlopWire.BuildSegmentBundle(tBase,
+            new (ushort, double, int, double, bool)[] { (0, s.Target, s.DurationMs, s.EndVel, s.Sentinel) });
+        ushort seq = _segmentSeq++;
+        return SendFrameAsync(SlopWire.FStream, SlopWire.ChMotionSegment, payload, seq, token);
+    }
+
+    // ---- PING keepalive (§6.5) — raw, empty payload; hub answers with PONG --
+    public Task SendPingAsync(CancellationToken token)
+        => SendFrameAsync(SlopWire.FPing, 0, Array.Empty<byte>(), 0, token);
 
     // ---- Receive loop -------------------------------------------------------
     // Single reader. Routes CLOCK replies to the pending exchange, PING→PONG,

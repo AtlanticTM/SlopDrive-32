@@ -72,11 +72,34 @@ entirely. Mode split falls out of what each input can know:
 Own fixed structures + std cover us; String-churn paths die with
 slopsync-js; no retrofit crusade. Revisit only on concrete need.
 
-## 4. Async web server — parked (final)
+## 4. Async web server — parked (final); candidate pre-selected
 
 Handlers-in-network-task is the failure class we just spent a day
 exorcising. Sync WebServer + isolated WS tasks until HTTP is static-files +
-OTA only, then re-evaluate whether it matters at all.
+OTA only, then re-evaluate whether it matters at all. (Interim mitigation
+landed fw 2.1.40: ETag revalidation — reloads 304 in ~40 ms; only the
+first-load ~600 ms stall remains.)
+
+**Re-evaluation shortlist (recorded 2026-07-23, so we never re-shop this):**
+- **PsychicHttp (esp_http_server) is the candidate** for the static+OTA end
+  state: handlers run in its OWN task (blocking stays contained — NOT the
+  async_tcp/LwIP context), IDF-native/Espressif-maintained underneath,
+  built-in LRU socket purge + per-socket timeouts (our zombie-client
+  defenses, first-class), single-port URI-routed WS possible. Its own
+  benchmark: no crashes under load, best-in-class file serving.
+- **ESPAsyncWebServer: DISQUALIFIED** — architecturally (all handlers move
+  into the LwIP context) AND empirically (PsychicHttp's published loadtests:
+  crashes under heavy load in every 60 s test; ~2 yrs abandoned upstream).
+- **WS caveat — bench gate before trusting PsychicHttp's websockets:** its
+  own numbers show 38 rps/connection round-trip (~26 ms/msg). Our pattern is
+  push-heavy small-binary (SlopSync STREAM ≤50 bundles/s in + STATE ≥20 Hz
+  out per client; TCode 100–333 Hz until absorbed) — if that overhead is
+  per-message, it's disqualifying for the sync socket; if it's their
+  echo-path plumbing, fine. MUST bench our exact pattern first. Escape
+  hatch either way: ITransport keeps the WS layer swappable — PsychicHttp
+  for HTTP/static/OTA + links2004 (proven at 333 Hz today) or raw
+  esp_http_server WS for the sync socket. The halves need not migrate
+  together (costs the single-port prize, nothing else).
 
 ## 5. slopsync-js — parked until motion + library refactor land
 

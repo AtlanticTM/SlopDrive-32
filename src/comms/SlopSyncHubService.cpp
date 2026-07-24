@@ -4,6 +4,7 @@
 #include <ArduinoJson.h>
 #include <Preferences.h>
 #include <WiFi.h>
+#include <esp_timer.h>
 
 #include <array>
 #include <cmath>
@@ -16,6 +17,7 @@
 #include "UiProtocol.h"
 #include "WebUI.h"
 #include "sloplog/sloplog.h"
+#include "slopmotion/slopmotion.hpp"
 #include "slopsync/util/byte_io.hpp"
 
 namespace slopdrive {
@@ -273,6 +275,7 @@ bool SlopDriveHubDelegate::canClearEstop() {
 std::optional<uint8_t> SlopDriveHubDelegate::sourceForChannel(uint16_t channel_id) {
     if (channel_id == ch::move) return uint8_t(MotionSource::MANUAL);    // 0
     if (channel_id == ch::pattern_cmd) return uint8_t(MotionSource::PATTERN);  // 2
+    if (channel_id == ch::motion_input) return uint8_t(MotionSource::TCODE_STREAM);  // 1
     return std::nullopt;
 }
 
@@ -301,6 +304,59 @@ void SlopDriveHubDelegate::onSessionLeft(uint32_t session_id) {
     SLOGI("slopsync", "session %08x left", session_id);
 }
 
+// ---- 0x0084 motion-input STREAM -> pacing ring -----------------------------
+// Runs on the SlopSyncHub task, synchronously inside _hub.update() (the hub
+// has already validated caps/rate/ownership/deadman per the hub.hpp contract
+// — see this method's declaration comment). Decodes each 4-byte sample by
+// FIXED OFFSET, not the generic layout_codec: the byte layout below MUST
+// mirror SlopSyncCatalog's 0x0084 entry field order exactly, the same
+// convention publishTelemetry() already uses on the encode side for every
+// other packed channel in this file.
+void SlopDriveHubDelegate::onStreamBundle(uint16_t channel_id, uint32_t session_id,
+                                          const slopsync::BundleView& bundle) {
+    (void)session_id;
+    if (channel_id != ch::motion_input) return;
+
+    // t_base/t_off are u32 HUB-µs — the SAME wrapping domain EspClock::nowUs()
+    // reads (esp_timer_get_time() truncated to 32 bits, §7.2). now64 stays the
+    // FULL 64-bit esp_timer reading so due_us in the ring never itself wraps;
+    // only the WIRE timestamp we're resolving against it does.
+    const int64_t now64 = esp_timer_get_time();
+    const uint32_t now32 = uint32_t(now64 & 0xFFFFFFFFull);
+
+    uint32_t ringDrops = 0;
+    uint32_t farClamped = 0;
+
+    const uint8_t n = bundle.sampleCount();
+    for (uint8_t i = 0; i < n; ++i) {
+        const uint32_t wireT = bundle.sampleTimeUs(i);
+        // Nearest-window resolve (§7.2): a plain wrap-aware signed subtract,
+        // since wireT is always near "now" by construction (bundle span is
+        // capped at limits::bundle_max_span_ms, far under the 32-bit wrap).
+        int32_t delta = int32_t(wireT - now32);
+        if (delta > 250000) { delta = 250000; ++farClamped; }
+        if (delta < 0) delta = 0;
+        const uint64_t due = uint64_t(now64 + int64_t(delta));
+
+        const auto sample = bundle.sample(i);
+        const uint16_t rawTarget = slopsync::getU16(sample.subspan(0, 2));
+        const int16_t  rawVel    = int16_t(slopsync::getU16(sample.subspan(2, 2)));
+        const float target = float(rawTarget) / 10000.0f;  // catalog scale 10000 (0x0084)
+        const float vel    = float(rawVel) / 1000.0f;      // catalog scale 1000
+
+        if (_pacingRing.push(PacingEntry{due, target, vel})) ++ringDrops;
+    }
+
+    _state.sm_sync_bundles = _state.sm_sync_bundles + 1;
+    _state.sm_sync_samples = _state.sm_sync_samples + n;
+    if (ringDrops) _state.sm_sync_dropped = _state.sm_sync_dropped + ringDrops;
+    if (farClamped) {
+        SLOGW_EVERY_MS(2000, "slopsync", "motion-input: %u sample(s) clamped from far-future "
+                       "t_off this window (missed CLOCK resync on the client?)",
+                       (unsigned)farClamped);
+    }
+}
+
 // ============================================================================
 // SlopSyncHubService
 // ============================================================================
@@ -310,7 +366,7 @@ SlopSyncHubService::SlopSyncHubService(SystemState& state, WebUI& webui, MotionA
       _webui(webui),
       _arbiter(arbiter),
       _catalog(buildSlopDriveCatalog()),
-      _delegate(state, webui, arbiter),
+      _delegate(state, webui, arbiter, _pacingRing),
       _hub(_catalog, _clock, _rng, _delegate),
       _port() {}
 
@@ -349,7 +405,8 @@ void SlopSyncHubService::taskLoop() {
         if (_state.ota_active.load(std::memory_order_relaxed)) continue;
 
         _port.loop();                 // service WS: accept/read/heartbeat/stall-sweep
-        _hub.update(_clock.nowUs());  // pump every session: frames, pacing, deadman
+        _hub.update(_clock.nowUs());  // pump every session: frames, pacing, deadman (fires onStreamBundle)
+        drainMotionStream();          // pop due 0x0084 pacing-ring entries -> Core-1 sampler queue
         syncSafety();
         publishTelemetry();
     }
@@ -371,6 +428,68 @@ void SlopSyncHubService::syncSafety() {
         // the hub still holds the latch: clear it. clearEstop() consults
         // canClearEstop() and is a no-op if motion isn't actually stopped yet.
         _hub.clearEstop();
+    }
+}
+
+void SlopSyncHubService::drainMotionStream() {
+    PacingEntry entry;
+    const uint64_t now64 = uint64_t(esp_timer_get_time());
+
+    while (_pacingRing.popDue(now64, entry)) {
+        // ---- Gates (mirror main.cpp's buttplugLinearCmd early-outs) --------
+        if (!_state.homed) {
+            _state.sm_sync_dropped = _state.sm_sync_dropped + 1;
+            continue;
+        }
+        if (_state.paused || _state.manual_override) {
+            _state.resume_start_ms = millis();
+            _state.sm_sync_dropped = _state.sm_sync_dropped + 1;
+            continue;
+        }
+
+        // ---- Sampler gating stamps (mirror buttplugLinearCmd, main.cpp
+        //      ~176-249) — without these the Core-1 sampler never drives. ----
+        const uint32_t now = millis();
+
+        // New-stream soft start — stamp resume so safeSpeedCap eases the
+        // first move, evaluated against the OLD last_intiface_ms.
+        if (_state.last_intiface_ms == 0 || (now - _state.last_intiface_ms) > 2000) {
+            _state.resume_start_ms = now;
+        }
+
+        // Cadence measurement (EMA), same 0.7/0.3 filter + <1000 ms gap
+        // window buttplugLinearCmd uses, feeding the same UI rate readout.
+        if (_state.last_cmd_ms != 0) {
+            const uint32_t gap = now - _state.last_cmd_ms;
+            if (gap > 0 && gap < 1000) {
+                if (_state.measured_interval_ms <= 0.0f)
+                    _state.measured_interval_ms = float(gap);
+                else
+                    _state.measured_interval_ms =
+                        0.7f * _state.measured_interval_ms + 0.3f * float(gap);
+            }
+        }
+        _state.last_cmd_ms      = now;
+        _state.last_intiface_ms = now;  // marks the stream active for the sampler
+
+        // Yield-on-MOTION stamp: only a sample that actually moves the
+        // commanded target counts as "the stream is driving".
+        if (_syncPrevTarget < 0.0f || fabsf(entry.target - _syncPrevTarget) > 0.003f) {
+            _state.last_intiface_move_ms = now;
+            _syncPrevTarget = entry.target;
+        }
+
+        slopmotion::Command cmd;
+        cmd.target       = entry.target;
+        cmd.end_vel      = entry.vel;
+        cmd.has_end_vel  = (entry.vel != 0.0f);
+        cmd.has_duration = false;
+
+        if (_motionStreamQueue && xQueueSend(_motionStreamQueue, &cmd, 0) == pdTRUE) {
+            _state.sm_sync_enqueued = _state.sm_sync_enqueued + 1;
+        } else {
+            _state.sm_sync_dropped = _state.sm_sync_dropped + 1;
+        }
     }
 }
 

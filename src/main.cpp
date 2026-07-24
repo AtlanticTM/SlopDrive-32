@@ -870,6 +870,7 @@ void setup() {
         if (mem != nullptr) {
             slopSyncHub = new (mem) slopdrive::SlopSyncHubService(g_state, webui, arbiter);
             slopSyncHub->setPatternEngine(&patternEngine);
+            slopSyncHub->setMotionStreamQueue(g_interp_queue);  // 0x0084 motion-input -> Core-1 sampler
             slopSyncHub->init();
             SLOGI("slopsync", "hub service in PSRAM (%u B)",
                   unsigned(sizeof(slopdrive::SlopSyncHubService)));

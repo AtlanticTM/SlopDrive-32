@@ -1702,6 +1702,11 @@ void WebUI::handleApiSlopMotion() {
     stats["plan_us_last"] = _state.sm_plan_us_last;
     stats["plan_us_max"]  = _state.sm_plan_us_max;
     stats["plan_us_avg"]  = _state.sm_plan_us_avg;
+    JsonObject sync = resp["sync"].to<JsonObject>();
+    sync["bundles"]  = _state.sm_sync_bundles;
+    sync["samples"]  = _state.sm_sync_samples;
+    sync["enqueued"] = _state.sm_sync_enqueued;
+    sync["dropped"]  = _state.sm_sync_dropped;
     resp["persist"] = false;   // reboot = defaults, by design (rough-in)
 
     String json;

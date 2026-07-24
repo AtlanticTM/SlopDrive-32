@@ -351,6 +351,16 @@ struct SystemState {
     volatile uint32_t      sm_plan_us_max  = 0;    // POST {"reset_stats":true} clears
     volatile float         sm_plan_us_avg  = 0.0f; // EMA(0.1)
 
+    // ---- SlopSync motion-input (0x0084) stream counters — the SlopSyncHub
+    // Core-0 task writes all four (onStreamBundle + taskLoop's drain), the
+    // HTTP handler (also Core 0) reads them for GET /api/slopmotion. Same
+    // aligned-scalar single-writer-per-field pattern as sm_tune_* above; not
+    // persisted, reboot zeroes them. ------------------------------------------
+    volatile uint32_t      sm_sync_bundles  = 0;  // accepted onStreamBundle() calls
+    volatile uint32_t      sm_sync_samples  = 0;  // total decoded samples across those bundles
+    volatile uint32_t      sm_sync_enqueued = 0;  // samples handed to the Core-1 sampler queue
+    volatile uint32_t      sm_sync_dropped  = 0;  // ring-overwrite + queue-full + gate drops (combined)
+
     // --------------------------------------------------------------------------
     // Convenience helpers — zero-cost inline
     // --------------------------------------------------------------------------

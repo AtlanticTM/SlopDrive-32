@@ -42,6 +42,7 @@ inline constexpr uint16_t motion         = 0x0080;
 inline constexpr uint16_t machine_config = 0x0081;
 inline constexpr uint16_t pattern_state  = 0x0082;
 inline constexpr uint16_t odometer       = 0x0083;
+inline constexpr uint16_t motion_input   = 0x0084;
 inline constexpr uint16_t move           = 0x0100;
 inline constexpr uint16_t config_set     = 0x0101;
 inline constexpr uint16_t pattern_cmd    = 0x0102;
@@ -57,7 +58,7 @@ inline slopsync::Catalog32 buildSlopDriveCatalog() {
     using slopsync::Priority;
 
     slopsync::Catalog32 c;
-    c.count = 13;
+    c.count = 14;
     auto& e = c.entries;
     int i = 0;
 
@@ -189,6 +190,28 @@ inline slopsync::Catalog32 buildSlopDriveCatalog() {
     e[i].layout[0] = {.name = "strokes",    .type = PackedFieldType::u32, .unit = "",     .scale = 1.0f};
     e[i].layout[1] = {.name = "distance_m", .type = PackedFieldType::f32, .unit = "m",    .scale = 1.0f};
     e[i].layout[2] = {.name = "peak_mm_s",  .type = PackedFieldType::f32, .unit = "mm/s", .scale = 1.0f};
+    ++i;
+
+    // ---- 0x0084 "motion-input" — STREAM, c2h, controller, ≤333 Hz ---------
+    // The SlopSync-native TCode successor: continuous stroke-window targets
+    // + optional signed handoff velocity, decoded straight off BundleView by
+    // the hub delegate's onStreamBundle() into the SlopMotion pacing ring
+    // (maps to arbiter source 1 / MotionSource::TCODE_STREAM — the same
+    // source id legacy TCode uses, since this IS that source, just arriving
+    // over SlopSync instead of a text transport). scale 10000 on target =
+    // 1e-4 resolution over the 0..1 stroke window; scale 1000 on vel = 1e-3
+    // resolution, i16 signed (0 = no handoff velocity). NOTE: SPEC Appendix D
+    // sketches 0x0081 as "motion-input" — this firmware already spent 0x0081
+    // on machine-config, so 0x0084 is this device's actual allocation; the
+    // catalog is self-describing and authoritative per Appendix D's own
+    // disclaimer.  [2+2 = 4 B]
+    e[i].id = ch::motion_input; e[i].name = "motion-input";
+    e[i].cls = ChannelClass::STREAM; e[i].dir = Direction::c2h;
+    e[i].access = AccessLevel::controller; e[i].maxRateHz = 333.0f;
+    e[i].defaultPriority = Priority::elevated;
+    e[i].fieldCount = 2;
+    e[i].layout[0] = {.name = "target_norm", .type = PackedFieldType::u16, .unit = "norm",   .scale = 10000.0f};
+    e[i].layout[1] = {.name = "vel_norm",    .type = PackedFieldType::i16, .unit = "norm/s", .scale = 1000.0f};
     ++i;
 
     // ---- 0x0100 "move" — INTENT, controller, 20 Hz, critical --------------

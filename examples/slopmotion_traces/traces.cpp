@@ -232,7 +232,7 @@ int main(int argc, char** argv) {
         Trace tr;
         tr.name  = "v4_sparse";
         tr.title = "TCode v4 sparse stream (700 ms points, I + G slope)";
-        tr.note  = "One-shot mode: each point plans a deadline-stretched jerk-limited profile with the G-slope handoff velocity. The cubic is C1 (velocity-continuous) - watch its acceleration jump at every boundary; SlopMotion is C2.";
+        tr.note  = "Waveform mode: each I+G point becomes a C2 quintic segment reproducing the sender's spline (the cubic's shape idea, upgraded from C1), ceiling-scanned at plan time with Ruckig as the feasibility guard. Watch the cubic's acceleration jump at every boundary; the quintic joins smoothly.";
         tr.vmax = cfg.limits.vmax; tr.amax = cfg.limits.amax; tr.jmax = cfg.limits.jmax;
         tr.cmds = cmds;
         tr.series.push_back(runSlopMotion(cmds, t_end, 0.5f, cfg));
@@ -261,7 +261,7 @@ int main(int argc, char** argv) {
         Trace tr;
         tr.name  = "v3_dense";
         tr.title = "TCode v3 dense stream (60 Hz bare points, +/-3 ms jitter)";
-        tr.note  = "Chase mode vs the cubic's live-extrapolation mode. Same jittery stream. Watch velocity smoothness and tracking lag.";
+        tr.note  = "Predictive chase (aim one interval ahead, arrive at the stream's velocity, dense-gated) vs the cubic's live-extrapolation mode. Same jittery stream. Watch velocity smoothness and tracking lag.";
         tr.vmax = cfg.limits.vmax; tr.amax = cfg.limits.amax; tr.jmax = cfg.limits.jmax;
         tr.cmds = cmds;
         tr.series.push_back(runSlopMotion(cmds, t_end, 0.5f, cfg));
@@ -338,11 +338,11 @@ int main(int argc, char** argv) {
     // ------------------------------------------------------------------
     {
         std::printf("scenario: jmax-sweep\n");
-        std::vector<Cmd> cmds = { { 100 * kMs, 0.9f, 600 * (uint32_t)kMs } };
+        std::vector<Cmd> cmds = { { 100 * kMs, 0.9f } };   // bare point: Ruckig plans it
         Trace tr;
         tr.name  = "jmax_sweep";
-        tr.title = "Same 0.1->0.9 / 600 ms move, four jerk ceilings";
-        tr.note  = "jmax is the feel knob: low = silky S-curve easing, high = approaches the trapezoid. Same target, same deadline, same vmax/amax.";
+        tr.title = "Same 0.1->0.9 point move, four jerk ceilings";
+        tr.note  = "jmax is the feel knob for point moves (manual taps, isolated retargets - the Ruckig-planned paths): low = silky S-curve easing, high = approaches the trapezoid. Identical vmax/amax. Timed v4 segments use the quintic instead, whose shape comes from the sender's spline.";
         tr.vmax = cfg.limits.vmax; tr.amax = cfg.limits.amax;
         tr.jmax = 0;   // varies per series
         tr.cmds = cmds;
@@ -351,7 +351,7 @@ int main(int argc, char** argv) {
             c.limits.jmax = j;
             char nm[32];
             std::snprintf(nm, sizeof nm, "jmax=%g", (double)j);
-            tr.series.push_back(runSlopMotion(cmds, 900 * kMs, 0.1f, c, nm));
+            tr.series.push_back(runSlopMotion(cmds, 1500 * kMs, 0.1f, c, nm));
         }
         stats(tr); writeTrace(tr, dir);
     }

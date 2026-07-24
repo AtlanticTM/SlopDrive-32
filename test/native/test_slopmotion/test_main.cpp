@@ -85,7 +85,7 @@ TEST_CASE("Idle: fresh engine holds its seed position, not busy") {
     CHECK(e.mode() == Mode::Idle);
 }
 
-TEST_CASE("One-shot rest-to-rest: lands on target, at rest, on the deadline") {
+TEST_CASE("Waveform rest-to-rest: lands on target, at rest, on the deadline") {
     Engine e(testConfig(), 0.2f);
 
     Command c;
@@ -94,12 +94,12 @@ TEST_CASE("One-shot rest-to-rest: lands on target, at rest, on the deadline") {
     c.has_duration = true;
     const uint64_t t0 = 1 * kS;
     REQUIRE(e.commit(c, t0));
-    CHECK(e.mode() == Mode::OneShot);
+    CHECK(e.mode() == Mode::Waveform);
+    CHECK(e.planKind() == slopmotion::PlanKind::Quintic);
     CHECK(e.isBusy(t0 + 10 * kMs));
 
     auto snap = e.snapshot(t0);
-    // The move is easy under these limits, so minimum_duration should land
-    // the deadline exactly.
+    // A quintic segment spans exactly the commanded duration.
     CHECK(snap.duration_s == doctest::Approx(0.6).epsilon(0.01));
 
     // Landed: position, rest, not busy.
@@ -113,7 +113,68 @@ TEST_CASE("One-shot rest-to-rest: lands on target, at rest, on the deadline") {
     CHECK_FALSE(e.popAnomaly(ev));
 }
 
-TEST_CASE("One-shot respects the v/a/j ceilings (sampled, 1 ms grid)") {
+TEST_CASE("Waveform quintic is the min-jerk curve (shape fidelity)") {
+    // The whole point of the quintic path: reproduce the sender's spline, not
+    // a cruise-and-burst chord. Rest-to-rest min-jerk has exact analytic
+    // midpoint values: p(T/2) = midpoint, v(T/2) = 1.875 * dist / T.
+    Engine e(testConfig(), 0.2f);
+    Command c;
+    c.target = 0.8f; c.duration_us = 600 * (uint32_t)kMs; c.has_duration = true;
+    REQUIRE(e.commit(c, 0));
+    REQUIRE(e.planKind() == slopmotion::PlanKind::Quintic);
+
+    CHECK(e.positionAt(300 * kMs) == doctest::Approx(0.5).epsilon(1e-4));
+    CHECK(e.velocityAt(300 * kMs) ==
+          doctest::Approx(1.875 * 0.6 / 0.6).epsilon(1e-3));
+    // Acceleration at both ends is zero (C2 into a rest hold).
+    CHECK(e.accelerationAt(0) == doctest::Approx(0.0).epsilon(1e-6));
+    CHECK(e.accelerationAt(600 * kMs) == doctest::Approx(0.0).epsilon(1e-6));
+}
+
+TEST_CASE("Consecutive G-slope segments join C2 (no accel jump at boundaries)") {
+    // The legacy cubic was C1: acceleration JUMPED at every v4 boundary
+    // (bench-measured ~8 u/s^2 discontinuities). The quintic chain replans
+    // from its own sampled (p,v,a), so accel is continuous at joints — the
+    // largest 1 ms accel step anywhere must be jerk-limited, not a jump.
+    Config cfg;
+    cfg.limits.vmax = 3.0f; cfg.limits.amax = 30.0f; cfg.limits.jmax = 500.0f;
+    const double amp = 0.35, f = 0.5, base = 0.5;
+    Engine e(cfg, (float)base);
+
+    auto srcP = [&](double t){ return base + amp * std::sin(2*M_PI*f*t); };
+    auto srcV = [&](double t){ return amp*2*M_PI*f * std::cos(2*M_PI*f*t); };
+
+    const uint64_t seg = 500 * kMs;
+    uint64_t next_cmd = 0;
+    double prev_a = 0.0; bool have_prev = false;
+    double max_da = 0.0;
+    for (uint64_t t = 0; t <= 4 * kS; t += kMs) {
+        if (t >= next_cmd) {
+            const double te = (double)(next_cmd + seg) * 1e-6;
+            Command c;
+            c.target       = (float)srcP(te);
+            c.duration_us  = (uint32_t)seg;
+            c.has_duration = true;
+            c.end_vel      = (float)srcV(te);
+            c.has_end_vel  = true;
+            REQUIRE(e.commit(c, next_cmd));
+            REQUIRE(e.planKind() == slopmotion::PlanKind::Quintic);
+            next_cmd += seg;
+        }
+        const double a = e.accelerationAt(t);
+        // skip the first (catch-up) segment: entry-state mismatch is real work
+        if (have_prev && t > seg) max_da = std::max(max_da, std::fabs(a - prev_a));
+        prev_a = a; have_prev = true;
+    }
+    // Jerk-limited step, never a discontinuity: da <= jmax * 1ms with margin.
+    // (The cubic's boundary jumps were ~8.0 here — an order of magnitude out.)
+    CHECK(max_da <= 500.0 * 1e-3 * 1.5 + 0.05);
+}
+
+TEST_CASE("Over-demanding waveform falls back to the Ruckig guard, ceilings hold") {
+    // 0->1 in 900 ms wants a min-jerk peak velocity of 1.875/0.9 = 2.08 —
+    // just over the 2.0 ceiling. The quintic must NOT be executed; the guard
+    // takes the segment and every sampled ceiling still holds.
     auto cfg = testConfig();
     Engine e(cfg, 0.0f);
 
@@ -122,6 +183,14 @@ TEST_CASE("One-shot respects the v/a/j ceilings (sampled, 1 ms grid)") {
     c.duration_us  = 900 * (uint32_t)kMs;
     c.has_duration = true;
     REQUIRE(e.commit(c, 0));
+    CHECK(e.planKind() == slopmotion::PlanKind::Ruckig);
+
+    slopmotion::Anomaly ev;
+    bool saw_fallback = false;
+    while (e.popAnomaly(ev)) {
+        if (ev.kind == (uint8_t)AnomalyType::WaveformFallback) saw_fallback = true;
+    }
+    CHECK(saw_fallback);
 
     auto s = sweep(e, 0, 1 * kS);
     CHECK(s.max_abs_v <= cfg.limits.vmax * 1.001);
@@ -146,9 +215,18 @@ TEST_CASE("Infeasible deadline stretches to physical minimum + anomaly") {
     CHECK(snap.duration_s > 0.5f);    // stretched to ≥ distance / vmax
 
     slopmotion::Anomaly ev;
-    REQUIRE(e.popAnomaly(ev));
-    CHECK(ev.kind == (uint8_t)AnomalyType::DeadlineStretched);
-    CHECK(ev.detail == doctest::Approx(snap.duration_s).epsilon(0.01));
+    bool saw_fallback = false, saw_stretch = false;
+    float stretch_detail = 0.0f;
+    while (e.popAnomaly(ev)) {
+        if (ev.kind == (uint8_t)AnomalyType::WaveformFallback) saw_fallback = true;
+        if (ev.kind == (uint8_t)AnomalyType::DeadlineStretched) {
+            saw_stretch = true;
+            stretch_detail = ev.detail;
+        }
+    }
+    CHECK(saw_fallback);              // the quintic could never do this move
+    REQUIRE(saw_stretch);
+    CHECK(stretch_detail == doctest::Approx(snap.duration_s).epsilon(0.01));
 }
 
 TEST_CASE("Retarget mid-move is C2-continuous at the commit instant") {
@@ -224,11 +302,12 @@ TEST_CASE("Chase: 60 Hz sine stream tracks smoothly within limits") {
         }
     }
     // Tracking lag exists (the engine chases points, it cannot see the
-    // future): measured 0.125 peak on this sine ≈ 65 ms effective lag at
-    // peak velocity — the ZOH + damped-feedforward price. This bound is a
+    // future): predictive aim + velocity/accel feedforward measured ~0.06
+    // peak on this clean-grid sine (~35 ms of estimator-smoothing lag at
+    // peak velocity — the price of jitter immunity). This bound is a
     // regression tripwire, not a quality target; lag tuning is done with
     // eyes on the scenario graphs (examples/slopmotion_traces).
-    CHECK(worst_err < 0.15);
+    CHECK(worst_err < 0.10);
 }
 
 TEST_CASE("Starve-settle: dead stream brakes to rest and holds") {

@@ -284,7 +284,7 @@ On transport restoration a client sends a fresh HELLO (same `instance_id`, same 
 
 ### 6.8 Teardown
 
-GOODBYE (either direction, CBOR: `code`, optional `detail`) is a courtesy, not a requirement — transports die rudely and every rule above already tolerates it. Codes of note: `NORMAL_CLOSURE` (clean voluntary teardown, either direction), and hub-initiated `SESSION_EVICTED` (slow consumer, §10.4; admin kick) and `DUPLICATE_INSTANCE` (§6.3). After GOODBYE the hub frees the session and releases any control ownership per §11.4's loss rules (identical to deadman).
+GOODBYE (either direction, CBOR: `code`, optional `detail`) is a courtesy, not a requirement — transports die rudely and every rule above already tolerates it. Codes of note: `NORMAL_CLOSURE` (clean voluntary teardown, either direction), and hub-initiated `SESSION_EVICTED` (slow consumer, §10.4; admin kick) and `DUPLICATE_INSTANCE` (§6.3). After GOODBYE the hub frees the session and releases any control ownership per §11.4's loss rules (identical to deadman). A session that ends *without* a GOODBYE — a rude transport death the hub detects out of band (socket close, physical detach) — is torn down identically: the hub MUST release that session's control ownership the same way, so a departed owner never leaves a source held by a session_id that no longer exists (which would silently Conflict-drop every later owner's intents and stream bundles). Ownership release on session end is unconditional and independent of *how* the end was detected.
 
 ---
 

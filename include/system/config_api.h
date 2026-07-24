@@ -32,7 +32,7 @@
 // Bumped by hand on each firmware change so an OTA can be verified as landed
 // (surfaced via /api/capabilities → "fw_version" and the boot log). This is the
 // single source of truth for "which build is actually running." :3
-#define FIRMWARE_VERSION        "2.1.42"
+#define FIRMWARE_VERSION        "2.1.44"
 
 // =============================================================================
 // WiFi Configuration (values come from secrets.h)
@@ -531,7 +531,7 @@ enum class TransportMode : uint8_t {
 // =============================================================================
 
 #define UI_WS_PORT              81           // binary WebSocket UI control plane
-#define SLOPSYNC_WS_PORT        82           // SlopSync hub transport (binary WS, slopsync/1)
+#define SLOPSYNC_WS_PORT        82           // SlopSync hub transport (binary WS, slopsync.v1)
 // NOTE: WiFi power-save (WIFI_PS_*) is never touched anywhere in this
 // firmware — the device is permanently wall-powered via a brick, so there's
 // no power budget to protect and toggling PS modes only adds WiFi radio

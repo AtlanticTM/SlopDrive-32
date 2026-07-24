@@ -301,7 +301,7 @@ private:
     void sendStreamOverageNack(Slot& slot, HubSession::PublishGrant& pg, uint16_t channel_id, uint32_t nowMs);
     void handlePing(Slot& slot, std::span<const std::byte> payload);
     void handleClock(Slot& slot, std::span<const std::byte> payload);  // §7.1 hub-time exchange
-    void handleGoodbye(Slot& slot);
+    void handleGoodbye(Slot& slot, uint32_t nowMs);
     void handleCatalogReq(Slot& slot, std::span<const std::byte> payload);
     void pumpStatePacing(Slot& slot, uint32_t nowMs);
     PushRecord* findOrCreatePushRecord(Slot& slot, uint16_t channel_id);
@@ -320,6 +320,27 @@ private:
 
     void pumpDeadman(Slot& slot, uint32_t nowMs);         // §11.3
 
+    // §6.8/§11.3/§11.4: release EVERY source a session owns, running each
+    // source's §11.3 loss policy (Stop -> onDeadmanStop + latch STOP +
+    // publish/broadcast; Continue -> release only), then republish
+    // control-owner STATE once if anything was released. `reason` is the §11.4
+    // delegate ownership-release reason (3 = deadman-release, 4 =
+    // session-loss-release). Shared by pumpDeadman() and teardownSession() so
+    // "owner departs" is ONE behavior regardless of how the departure happened.
+    void releaseSessionSources(uint32_t sessionId, uint8_t reason, uint32_t nowMs);
+    // Centralized teardown for one session slot: releases source ownership
+    // (above) with the given `reason` (default session-loss), notifies the
+    // roster (onSessionLeft), and frees the slot (session.reset() +
+    // pushRecords). EVERY path that ends or recycles an occupied slot — GOODBYE,
+    // transport detach, slow-consumer/duplicate-instance eviction, same-slot
+    // re-HELLO, deadman fire — funnels through here so source ownership is
+    // never orphaned to a departed session_id (§6.8; the field bug this closes
+    // was a dead streamer's session_id owning motion-input forever, Conflict-
+    // dropping every later client's bundles until reboot). Safe on a FREE slot
+    // (no-op release, no onSessionLeft). Any GOODBYE frame a path wants to send
+    // must be sent BEFORE calling this (the slot is reset afterward).
+    void teardownSession(Slot& slot, uint32_t nowMs, uint8_t reason = 4);
+
     // §12.2 pairing wire handling; §6.4 probe.
     void handlePairReq(Slot& slot, std::span<const std::byte> payload, uint32_t nowMs);
     void handleProbeRequest(Slot& slot, uint32_t nowMs);
@@ -327,7 +348,7 @@ private:
 
     // §10.4 step 4: never-shed slow-consumer tracking + eviction.
     void trackCriticalSend(Slot& slot, bool sendOk, uint32_t nowMs);
-    void evictSlot(Slot& slot, NackCode code);
+    void evictSlot(Slot& slot, NackCode code, uint32_t nowMs);
     bool sendFrameToTracked(Slot& slot, FrameType type, uint16_t channel, std::span<const std::byte> payload,
                             uint32_t nowMs, uint16_t seq = 0);
     void sendNackTracked(Slot& slot, const NackMsg& n, uint32_t nowMs);

@@ -555,3 +555,149 @@ TEST_CASE("SI-10: the hub answers a CLOCK frame with echoed t0 + hub-time t1/t2,
         CHECK(clockReplies == 0);
     }
 }
+
+// ============================================================================
+// SI-11 — source-ownership release on GOODBYE (§6.8/§11.4). REGRESSION for the
+// field bug: a streaming owner's ownership used to leak past teardown, so after
+// the owner left, EVERY later client's bundles were Conflict-dropped until
+// reboot. Proves: A owns -> B is Conflict-dropped while A lives -> A GOODBYEs
+// -> B's bundles are now ACCEPTED (ownership was released, not orphaned).
+// ============================================================================
+TEST_CASE("SI-11: after a streaming owner sends GOODBYE, a new session can acquire the source and stream") {
+    Catalog32 cat = makeStreamCatalog();
+    ManualClock clock;
+    XorShift32 rng(111);
+    StreamHubDelegate del;  // mapSource=true -> 0x0080 maps to source 0 (Stop policy by default)
+    Hub hub(cat, clock, rng, del);
+
+    InProcessLink linkA(clock, rng), linkB(clock, rng);
+    REQUIRE(hub.attachTransport(linkA.endpointA()));  // slot 0
+    REQUIRE(hub.attachTransport(linkB.endpointA()));  // slot 1
+    REQUIRE(linkA.endpointB().open());
+    REQUIRE(linkB.endpointB().open());
+
+    // A connects + streams -> acquires source 0.
+    WelcomeMsg wA = connectSession(hub, clock, linkA.endpointB(), 1, true, {PublishWish{kStreamCh, 200.0f}});
+    writeValidBundle(linkA.endpointB(), kStreamCh, 3);
+    tickAndDrain(hub, clock, linkA.endpointB());
+    REQUIRE(del.bundles.size() == 1);
+    REQUIRE(del.ownership.size() == 1);
+    CHECK(del.ownership[0].owner_session == wA.session_id);
+    CHECK(del.ownership[0].reason == 0);  // acquire
+
+    // B connects + streams WHILE A still owns -> Conflict, dropped (proves the
+    // ownership is genuinely exclusive, so the release below is what unblocks B).
+    WelcomeMsg wB = connectSession(hub, clock, linkB.endpointB(), 2, true, {PublishWish{kStreamCh, 200.0f}});
+    writeValidBundle(linkB.endpointB(), kStreamCh, 3);
+    tickAndDrain(hub, clock, linkB.endpointB());
+    CHECK(del.bundles.size() == 1);                         // B's bundle did NOT reach the delegate
+    CHECK(hub.streamIngressCounters(1).dropped == 1);       // dropped on slot 1 (B)
+    CHECK(del.ownership.size() == 1);                        // no new ownership event
+
+    // A sends GOODBYE -> teardown releases source 0.
+    writeFrame(linkA.endpointB(), FrameType::GOODBYE, 0, std::span<const std::byte>{});
+    tickAndDrain(hub, clock, linkA.endpointB());
+    REQUIRE(del.ownership.size() == 2);
+    CHECK(del.ownership[1].owner_session == 0);              // released
+    CHECK(del.ownership[1].reason == 4);                    // session-loss-release
+
+    // B streams again -> now ACCEPTED (acquires the freed source).
+    writeValidBundle(linkB.endpointB(), kStreamCh, 3);
+    tickAndDrain(hub, clock, linkB.endpointB());
+    REQUIRE(del.bundles.size() == 2);
+    CHECK(del.bundles[1].session_id == wB.session_id);
+    REQUIRE(del.ownership.size() == 3);
+    CHECK(del.ownership[2].owner_session == wB.session_id);
+    CHECK(del.ownership[2].reason == 0);                    // B acquires
+}
+
+// ============================================================================
+// SI-12 — source-ownership release on rude transport detach (§6.8: a socket
+// death is handled identically to GOODBYE). Same regression as SI-11 but the
+// owner never says goodbye — the hub's detachTransport() must still release.
+// ============================================================================
+TEST_CASE("SI-12: after a streaming owner's transport detaches (no GOODBYE), a new session can acquire the source") {
+    Catalog32 cat = makeStreamCatalog();
+    ManualClock clock;
+    XorShift32 rng(112);
+    StreamHubDelegate del;
+    Hub hub(cat, clock, rng, del);
+
+    InProcessLink linkA(clock, rng), linkB(clock, rng);
+    REQUIRE(hub.attachTransport(linkA.endpointA()));  // slot 0
+    REQUIRE(hub.attachTransport(linkB.endpointA()));  // slot 1
+    REQUIRE(linkA.endpointB().open());
+    REQUIRE(linkB.endpointB().open());
+
+    WelcomeMsg wA = connectSession(hub, clock, linkA.endpointB(), 1, true, {PublishWish{kStreamCh, 200.0f}});
+    writeValidBundle(linkA.endpointB(), kStreamCh, 3);
+    tickAndDrain(hub, clock, linkA.endpointB());
+    REQUIRE(del.bundles.size() == 1);
+    REQUIRE(del.ownership.size() == 1);
+    CHECK(del.ownership[0].owner_session == wA.session_id);
+
+    WelcomeMsg wB = connectSession(hub, clock, linkB.endpointB(), 2, true, {PublishWish{kStreamCh, 200.0f}});
+    writeValidBundle(linkB.endpointB(), kStreamCh, 3);
+    tickAndDrain(hub, clock, linkB.endpointB());
+    CHECK(del.bundles.size() == 1);                         // conflict while A owns
+    CHECK(del.ownership.size() == 1);
+
+    // Rude death: the transport layer detaches A's endpoint. No GOODBYE frame.
+    hub.detachTransport(linkA.endpointA());
+    REQUIRE(del.ownership.size() == 2);
+    CHECK(del.ownership[1].owner_session == 0);              // released by detach
+    CHECK(del.ownership[1].reason == 4);
+
+    // B streams again -> accepted.
+    writeValidBundle(linkB.endpointB(), kStreamCh, 3);
+    tickAndDrain(hub, clock, linkB.endpointB());
+    REQUIRE(del.bundles.size() == 2);
+    CHECK(del.bundles[1].session_id == wB.session_id);
+    REQUIRE(del.ownership.size() == 3);
+    CHECK(del.ownership[2].owner_session == wB.session_id);
+    CHECK(del.ownership[2].reason == 0);
+}
+
+// ============================================================================
+// SI-13 — slot reuse: a re-HELLO on the SAME transport without a GOODBYE (a
+// reconnect reusing the socket) recycles the slot. The outgoing session's
+// source ownership must be released as the new session is minted, else the new
+// session — on the very same transport — could never re-acquire its own source.
+// ============================================================================
+TEST_CASE("SI-13: a re-HELLO recycling a live slot releases the old session's source before the new one streams") {
+    Catalog32 cat = makeStreamCatalog();
+    ManualClock clock;
+    XorShift32 rng(113);
+    StreamHubDelegate del;
+    Hub hub(cat, clock, rng, del);
+
+    InProcessLink linkA(clock, rng);
+    REQUIRE(hub.attachTransport(linkA.endpointA()));
+    REQUIRE(linkA.endpointB().open());
+
+    // First session A owns source 0.
+    WelcomeMsg wA = connectSession(hub, clock, linkA.endpointB(), 1, true, {PublishWish{kStreamCh, 200.0f}});
+    writeValidBundle(linkA.endpointB(), kStreamCh, 3);
+    tickAndDrain(hub, clock, linkA.endpointB());
+    REQUIRE(del.bundles.size() == 1);
+    REQUIRE(del.ownership.size() == 1);
+    CHECK(del.ownership[0].owner_session == wA.session_id);
+
+    // Re-HELLO on the SAME transport, no GOODBYE -> slot recycled into a new
+    // session A'. The old session's ownership must be released in the process.
+    WelcomeMsg wA2 = connectSession(hub, clock, linkA.endpointB(), 1, true, {PublishWish{kStreamCh, 200.0f}});
+    CHECK(wA2.session_id != wA.session_id);                 // genuinely a fresh session
+    REQUIRE(del.ownership.size() == 2);
+    CHECK(del.ownership[1].owner_session == 0);              // old session's source released
+    CHECK(del.ownership[1].reason == 4);
+
+    // A' streams -> must ACQUIRE the freed source (would Conflict against the
+    // orphaned old session_id under the bug).
+    writeValidBundle(linkA.endpointB(), kStreamCh, 3);
+    tickAndDrain(hub, clock, linkA.endpointB());
+    REQUIRE(del.bundles.size() == 2);
+    CHECK(del.bundles[1].session_id == wA2.session_id);
+    REQUIRE(del.ownership.size() == 3);
+    CHECK(del.ownership[2].owner_session == wA2.session_id);
+    CHECK(del.ownership[2].reason == 0);                    // A' acquires cleanly
+}

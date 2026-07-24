@@ -80,16 +80,19 @@ inline bool Hub::attachTransport(ITransport& t) {
 inline void Hub::detachTransport(ITransport& t) {
     for (auto& slot : _slots) {
         if (slot.transport == &t) {
+            // Detaching physically removes the transport; whatever session (if
+            // any) was riding it is no longer reachable. §6.8: a rude socket
+            // death is handled identically to GOODBYE — tear the session down
+            // so its source ownership is RELEASED (the bug this fixes left it
+            // owned by a departed session_id forever). Teardown runs FIRST,
+            // while slot.transport is still valid, so any §11.3 loss-policy
+            // safety broadcast to the remaining sessions is unaffected and this
+            // slot's own last frame simply drains into the closing link. No
+            // nowMs is threaded to detach (the transport layer, not update(),
+            // drives it), so read the injected clock — same as latchEstop().
+            teardownSession(slot, _clock.nowMs());
             t.close();
             slot.transport = nullptr;
-            // Detaching physically removes the transport; whatever session
-            // (if any) was riding it is no longer reachable — free it too so
-            // its slot is immediately reusable and doesn't linger occupied.
-            if (slot.session.occupied()) {
-                _delegate.onSessionLeft(slot.session.session_id);
-            }
-            slot.session.reset();
-            slot.pushRecords.fill(PushRecord{});
             return;
         }
     }
@@ -182,7 +185,7 @@ inline void Hub::dispatchFrame(Slot& slot, const FrameHeader& h, std::span<const
             if (slot.session.occupied()) handleClock(slot, payload);
             break;
         case FrameType::GOODBYE:
-            if (slot.session.occupied()) handleGoodbye(slot);
+            if (slot.session.occupied()) handleGoodbye(slot, nowMs);
             break;
         case FrameType::CATALOG_REQ:
             if (slot.session.occupied()) handleCatalogReq(slot, payload);
@@ -278,9 +281,9 @@ inline void Hub::handleHello(Slot& slot, std::span<const std::byte> payload, uin
         if (glen > 0 && dup->transport != nullptr) {
             sendFrameTo(*dup->transport, FrameType::GOODBYE, 0, std::span<const std::byte>(gbuf.data(), glen));
         }
-        _delegate.onSessionLeft(dup->session.session_id);
-        dup->session.reset();
-        dup->pushRecords.fill(PushRecord{});
+        // §6.3 + §6.8: the evicted duplicate's session ends here — release its
+        // source ownership too (GOODBYE frame already sent above).
+        teardownSession(*dup, nowMs);
     }
 
     // §6.3 admission: BUSY once kHubMaxSessions SESSIONS (not physical slots)
@@ -296,9 +299,14 @@ inline void Hub::handleHello(Slot& slot, std::span<const std::byte> payload, uin
         return;
     }
 
-    // Fresh session in this slot.
-    slot.session.reset();
-    slot.pushRecords.fill(PushRecord{});
+    // Fresh session in this slot. A HELLO can land on a slot that is STILL
+    // occupied by a prior session (a client re-HELLOing on a live transport
+    // without a GOODBYE — a reconnect that reuses the socket). Tear that
+    // outgoing session down first so its source ownership is released (§6.8);
+    // otherwise it orphans exactly like the GOODBYE/detach bug and the fresh
+    // session can never acquire the source. On a FREE slot this is a cheap
+    // no-op (no onSessionLeft, plain reset).
+    teardownSession(slot, nowMs);
     slot.session.state = HubSessionState::VALIDATING;
     do {
         slot.session.session_id = _rng.nextU32();
@@ -833,10 +841,13 @@ inline void Hub::handleClock(Slot& slot, std::span<const std::byte> payload) {
     sendFrameTo(*slot.transport, FrameType::CLOCK, 0, std::span<const std::byte>(buf.data(), n));
 }
 
-inline void Hub::handleGoodbye(Slot& slot) {
-    _delegate.onSessionLeft(slot.session.session_id);
-    slot.session.reset();
-    slot.pushRecords.fill(PushRecord{});
+inline void Hub::handleGoodbye(Slot& slot, uint32_t nowMs) {
+    // §6.8: after GOODBYE the hub frees the session AND releases any control
+    // ownership per §11.4's loss rules (identical to deadman) — teardownSession
+    // does both. A voluntary GOODBYE is still the source's author departing, so
+    // a Stop-policy source stops motion here exactly as a rude drop or a
+    // deadman timeout would (there is no unmonitored path to motion, §11.3).
+    teardownSession(slot, nowMs);
 }
 
 inline void Hub::handleCatalogReq(Slot& slot, std::span<const std::byte> payload) {
@@ -1171,11 +1182,11 @@ inline void Hub::trackCriticalSend(Slot& slot, bool sendOk, uint32_t nowMs) {
         return;
     }
     if (timeReached(nowMs, slot.criticalStallSinceMs + limits::never_shed_stall_eviction_ms)) {
-        evictSlot(slot, NackCode::SESSION_EVICTED);
+        evictSlot(slot, NackCode::SESSION_EVICTED, nowMs);
     }
 }
 
-inline void Hub::evictSlot(Slot& slot, NackCode code) {
+inline void Hub::evictSlot(Slot& slot, NackCode code, uint32_t nowMs) {
     if (slot.session.occupied()) {
         GoodbyeMsg gb;
         gb.code = code;
@@ -1187,10 +1198,10 @@ inline void Hub::evictSlot(Slot& slot, NackCode code) {
             // carry a few dozen bytes either way is simply gone).
             sendFrameTo(*slot.transport, FrameType::GOODBYE, 0, std::span<const std::byte>(buf.data(), n));
         }
-        _delegate.onSessionLeft(slot.session.session_id);
     }
-    slot.session.reset();
-    slot.pushRecords.fill(PushRecord{});
+    // §6.8/§11.4: eviction is a session end — release its source ownership
+    // (GOODBYE frame already sent above) via the shared teardown path.
+    teardownSession(slot, nowMs);
     slot.congestionLevel = 0;
     slot.criticalStalling = false;
 }
@@ -1283,26 +1294,12 @@ inline void Hub::pumpDeadman(Slot& slot, uint32_t nowMs) {
 
     if (!timeReached(nowMs, slot.session.lastRxMs + limits::deadman_default_ms)) return;
 
-    uint32_t sessionId = slot.session.session_id;
-    _ownership.releaseAllOf(sessionId, [&](uint8_t source) {
-        SourceLossPolicy pol = _delegate.sourcePolicy(source);
-        if (pol == SourceLossPolicy::Stop) {
-            _delegate.onDeadmanStop(source);  // §11.3: stop motion BEFORE the latch publishes
-            _safetyWord |= safety_bits::STOP;
-            _safetyCause = 1;  // deadman
-            _safetyOwnerSession = sessionId;  // §11.1: "owning session_id where applicable"
-            publishSafetySnapshot();
-            broadcastSafetyNow(nowMs);  // bypass pacing, like the ESTOP latch does
-        }
-        // Continue-policy sources: release only, no STOP latch.
-        _delegate.onSourceOwnership(source, 0, /*reason=*/3);  // 3 = deadman-release
-    });
-    publishControlOwnerStateIfPresent();
-
     // §6.5/§11.3: the session itself dies with its lost source(s) in this M5
-    // pass (see the scoping note above) — GOODBYE best-effort, then free the
-    // slot exactly like handleGoodbye(). Registry code DEADMAN_TIMEOUT
-    // (0x0108, allocated when this gap was flagged).
+    // pass (see the scoping note above) — GOODBYE best-effort FIRST (the slot
+    // is reset below), then the shared teardown releases every owned source
+    // with reason=3 (deadman-release), running each source's §11.3 loss policy
+    // (Stop latches STOP + stops motion; Continue releases only). Registry code
+    // DEADMAN_TIMEOUT (0x0108, allocated when this gap was flagged).
     GoodbyeMsg gb;
     gb.code = NackCode::DEADMAN_TIMEOUT;
     std::array<std::byte, 64> buf{};
@@ -1310,7 +1307,39 @@ inline void Hub::pumpDeadman(Slot& slot, uint32_t nowMs) {
     if (n > 0 && slot.transport != nullptr) {
         sendFrameTo(*slot.transport, FrameType::GOODBYE, 0, std::span<const std::byte>(buf.data(), n));
     }
-    _delegate.onSessionLeft(sessionId);
+    teardownSession(slot, nowMs, /*reason=*/3 /*deadman-release*/);
+}
+
+// ============================================================================
+// Shared session teardown (§6.8, §11.3, §11.4) — the single choke point every
+// slot-ending path funnels through, so source ownership is released the SAME
+// way no matter how the session departed.
+// ============================================================================
+
+inline void Hub::releaseSessionSources(uint32_t sessionId, uint8_t reason, uint32_t nowMs) {
+    bool releasedAny = false;
+    _ownership.releaseAllOf(sessionId, [&](uint8_t source) {
+        releasedAny = true;
+        SourceLossPolicy pol = _delegate.sourcePolicy(source);
+        if (pol == SourceLossPolicy::Stop) {
+            _delegate.onDeadmanStop(source);  // §11.3: stop motion BEFORE the latch publishes
+            _safetyWord |= safety_bits::STOP;
+            _safetyCause = 1;  // deadman/owner-loss (§11.1 cause taxonomy has no distinct "session-loss")
+            _safetyOwnerSession = sessionId;  // §11.1: "owning session_id where applicable"
+            publishSafetySnapshot();
+            broadcastSafetyNow(nowMs);  // bypass pacing, like the ESTOP latch does
+        }
+        // Continue-policy sources: release only, no STOP latch.
+        _delegate.onSourceOwnership(source, 0, reason);
+    });
+    if (releasedAny) publishControlOwnerStateIfPresent();
+}
+
+inline void Hub::teardownSession(Slot& slot, uint32_t nowMs, uint8_t reason) {
+    if (slot.session.occupied()) {
+        releaseSessionSources(slot.session.session_id, reason, nowMs);
+        _delegate.onSessionLeft(slot.session.session_id);
+    }
     slot.session.reset();
     slot.pushRecords.fill(PushRecord{});
 }

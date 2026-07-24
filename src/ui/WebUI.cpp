@@ -32,6 +32,7 @@
 #include "MotionArbiter.h"
 #include "config_api.h"
 #include "range_mapper.h"
+#include "slopsync/generated/registry_constants.hpp"  // limits::ws_subprotocol (single source of the proto id)
 
 // ---- Fallback HTML page (shown when LittleFS /index.html is missing) -------
 static const char* htmlFallbackPage = R"RAWHTML(
@@ -426,7 +427,9 @@ void WebUI::handleApiCapabilities() {
     // binary WS on its own port, protocol id per docs/slopsync/SPEC.md.
     feat["slopsync"] = true;
     doc["slopsync_port"]  = (uint16_t)SLOPSYNC_WS_PORT;
-    doc["slopsync_proto"] = "slopsync/1";
+    // Single source of truth: the registry constant that also names the WS
+    // subprotocol + the mDNS TXT `proto` record (was a stale "slopsync/1").
+    doc["slopsync_proto"] = slopsync::limits::ws_subprotocol.data();
 
     // Phase 2 — runtime motion backend. _machine_backend mirrors whatever
     // main.cpp actually bound the MotorProxy to (Ground Truth: NOT re-read

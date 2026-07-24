@@ -29,6 +29,7 @@
 #include "slopsync/transport/transport.hpp"
 #include "slopsync/util/serial_arithmetic.hpp"
 #include "slopsync/wire/estop_frame.hpp"
+#include "slopsync/wire/stream_bundle.hpp"
 #include "slopsync/wire/messages/goodbye.hpp"
 #include "slopsync/wire/messages/grant.hpp"
 #include "slopsync/wire/messages/intent.hpp"
@@ -73,6 +74,14 @@ public:
     // Map an INTENT channel to a control source id (nullopt = no source
     // semantics). Intents on mapped channels acquire the source (§11.4:
     // exclusive ownership; SOURCE_CONFLICT / takeover) BEFORE applyIntent.
+    //
+    // Stream-ingress extension (additive, §11.4): the SAME mapping governs
+    // c2h STREAM (motion-input) channels — a mapped STREAM channel's first
+    // accepted bundle acquires the source and each subsequent bundle refreshes
+    // its deadman (§11.3). Return the same source id for the INTENT channel and
+    // the STREAM channel that drive one physical source so a stream and a jog
+    // intent can't own it simultaneously. Semantics for INTENT callers are
+    // unchanged.
     virtual std::optional<uint8_t> sourceForChannel(uint16_t channel_id) {
         (void)channel_id; return std::nullopt;
     }
@@ -93,6 +102,21 @@ public:
     // §11.2: application-side clear precondition (velocity zero, fault gone —
     // machine domain the library can't see). false -> NACK CLEAR_REFUSED.
     virtual bool canClearEstop() { return true; }
+
+    // §9.2/§10.5: a validated inbound STREAM bundle (client→hub motion input)
+    // arrived on `channel_id` from `session_id`. Called ONLY after the hub has
+    // confirmed the channel is a granted c2h STREAM publish for this session,
+    // re-validated the §5.4 caps against its own catalog (n in 1..32, span
+    // ≤ 20 ms, strictly-increasing t_off with t_off[0] == 0, exact size),
+    // passed the granted-rate token bucket (§10.5), and acquired/refreshed
+    // source ownership (§11.4) + deadman (§11.3). The delegate applies the
+    // samples via the MotionArbiter (sole-caller doctrine, §3.1) — it never
+    // re-checks ownership, role, or rate. `bundle` is a read-only view over
+    // the frame payload, valid only for the duration of this call. Default
+    // no-op keeps stream-free delegates valid.
+    virtual void onStreamBundle(uint16_t channel_id, uint32_t session_id, const BundleView& bundle) {
+        (void)channel_id; (void)session_id; (void)bundle;
+    }
 };
 
 // The hub. Construction wires the catalog (client-invariant, §8.6), clock,
@@ -161,6 +185,15 @@ public:
     // grants accordingly") is a policy left to a future milestone/delegate
     // hook — not implemented here.
     std::optional<ProbeResult> probeReportFor(size_t slotIdx) const;
+
+    // §16.2 STREAM-ingress telemetry (read-only): per-session count of bundles
+    // delivered to the delegate vs. dropped (ungranted / malformed / over-rate
+    // / source-conflict). {0,0} for an out-of-range or unoccupied slot.
+    struct StreamIngressCounters {
+        uint32_t accepted = 0;
+        uint32_t dropped = 0;
+    };
+    StreamIngressCounters streamIngressCounters(size_t slotIdx) const;
 
     // Test/observability access (read-only).
     const HubSession* sessionBySlot(size_t i) const;
@@ -262,7 +295,12 @@ private:
     void handleSubscribe(Slot& slot, std::span<const std::byte> payload, uint32_t nowMs);
     void handleUnsubscribe(Slot& slot, std::span<const std::byte> payload);
     void handleIntent(Slot& slot, std::span<const std::byte> payload, uint32_t nowMs);
+    // §9.2/§10.5 inbound STREAM ingress. Needs the frame HEADER (channel id
+    // rides the header, not the packed payload), unlike the CBOR handlers.
+    void handleStream(Slot& slot, const FrameHeader& h, std::span<const std::byte> payload, uint32_t nowMs);
+    void sendStreamOverageNack(Slot& slot, HubSession::PublishGrant& pg, uint16_t channel_id, uint32_t nowMs);
     void handlePing(Slot& slot, std::span<const std::byte> payload);
+    void handleClock(Slot& slot, std::span<const std::byte> payload);  // §7.1 hub-time exchange
     void handleGoodbye(Slot& slot);
     void handleCatalogReq(Slot& slot, std::span<const std::byte> payload);
     void pumpStatePacing(Slot& slot, uint32_t nowMs);

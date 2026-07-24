@@ -157,6 +157,23 @@ public:
         return false;
     }
 
+    // Consume `n` tokens at once — STREAM ingress meters SAMPLES, and one
+    // bundle batches up to 32 (§10.5). Refills first, then all-or-nothing:
+    // consumes n and returns true only if the bucket currently holds ≥ n
+    // tokens, else consumes nothing and returns false (the caller drops the
+    // whole bundle and NACKs RATE_LIMITED). All-or-nothing, not partial, so a
+    // bundle is never half-applied — the same drop-whole rule §9.2 states for
+    // a cap violation. n == 0 is a no-op returning true (an empty bundle costs
+    // nothing; the caller rejects n == 0 as malformed on its own, before here).
+    bool allowN(uint32_t nowMs, uint32_t n) {
+        refill(nowMs);
+        if (_tokens >= float(n)) {
+            _tokens -= float(n);
+            return true;
+        }
+        return false;
+    }
+
     float tokens() const { return _tokens; }
     uint32_t ratePerSec() const { return _ratePerSec; }
 

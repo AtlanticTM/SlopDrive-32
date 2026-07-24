@@ -138,6 +138,7 @@ cbor_keys:
   33: { name: event_kind,     type: uint,  note: "EVENT: kind discriminator per catalog entry" }
   34: { name: seq_of_state,   type: uint,  note: "EVENT: seq of the STATE twin frame it corresponds to (§9.4)" }
   35: { name: grants,         type: array, note: "WELCOME: batch grant results — array of {13:priority, 14:granted_rate_hz, 15:channel_id} (§6.3, §10.2)" }
+  36: { name: granted_publishes, type: array, note: "WELCOME: granted STREAM-ingress publishes — array of {14:granted_rate_hz, 15:channel_id} (§6.3, §10.5). Omitted when empty." }
 
 # ---------------------------------------------------------------------------
 # WELCOME `limits` (key 22) sub-map integer keys — a separate tiny key space
@@ -246,6 +247,7 @@ limits:
   frag_max_concurrent_per_session: 2
   idempotency_ring_depth: 32
   intent_ingress_default_per_s: 50
+  stream_ingress_overage_nack_per_s: 5   # §10.5: per-session cap on RATE_LIMITED NACKs emitted for STREAM-ingress overage (throttle — the NACK is back-pressure feedback, not a per-sample echo; unthrottled it would mirror the very flood it reports)
   event_queue_depth_per_subscriber: 16
   never_shed_stall_eviction_ms: 2000
   catalog_chunk_gap_timeout_ms: 500   # recommended (SHOULD)

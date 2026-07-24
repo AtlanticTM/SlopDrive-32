@@ -28,6 +28,7 @@
 #include "slopsync/wire/messages/pair.hpp"
 #include "slopsync/wire/messages/probe_report.hpp"
 #include "slopsync/wire/messages/subscribe.hpp"
+#include "slopsync/wire/raw/clock_frame.hpp"
 #include "slopsync/wire/raw/ping_pong.hpp"
 #include "slopsync/wire/raw/probe.hpp"
 #include "slopsync/wire/sha256.hpp"
@@ -165,8 +166,20 @@ inline void Hub::dispatchFrame(Slot& slot, const FrameHeader& h, std::span<const
         case FrameType::INTENT:
             if (slot.session.occupied()) handleIntent(slot, payload, nowMs);
             break;
+        case FrameType::STREAM:
+            // §9.2: inbound (c2h) motion-input bundles. Header carries the
+            // channel id. Never ACKed — validation failures drop silently.
+            if (slot.session.occupied()) handleStream(slot, h, payload, nowMs);
+            break;
         case FrameType::PING:
             if (slot.session.occupied()) handlePing(slot, payload);
+            break;
+        case FrameType::CLOCK:
+            // §7.1 hub-time exchange. Header-framed like PING (the legacy
+            // "0x05" byte IS this frame's header type — see clock_frame.hpp);
+            // the 8-byte header already passed decode in pumpSlot(), so this
+            // never needed pre-header special-casing the way ESTOP does.
+            if (slot.session.occupied()) handleClock(slot, payload);
             break;
         case FrameType::GOODBYE:
             if (slot.session.occupied()) handleGoodbye(slot);
@@ -333,6 +346,32 @@ inline void Hub::handleHello(Slot& slot, std::span<const std::byte> payload, uin
             g.granted_rate_hz = grantedRate;
             g.priority = uint8_t(entry->defaultPriority);
             w.grants[w.grants_count++] = g;
+        }
+    }
+
+    // §6.2/§10.5 publishes grants: inbound-STREAM (c2h motion-input) wishes.
+    // A wish is granted iff the channel exists, is class STREAM, is direction
+    // c2h, is within the session's role, and clamps to a positive rate. Any
+    // failure -> omit (no NACK, §6.2). Grants become truth on the session
+    // (publishGrants) and echo in WELCOME under granted_publishes (key 36).
+    for (uint32_t i = 0; i < h.publishes_count; ++i) {
+        const PublishWish& wish = h.publishes[i];
+        const CatalogEntry* entry = _catalog.find(wish.channel_id);
+        if (!entry) continue;                                  // unknown -> absent
+        if (entry->cls != ChannelClass::STREAM) continue;      // wrong class -> absent
+        if (entry->dir != Direction::c2h) continue;            // wrong direction -> absent
+        if (uint8_t(slot.session.role) < uint8_t(entry->access)) continue;  // access -> absent
+
+        float grantedRate = (entry->maxRateHz <= 0.0f) ? 0.0f : std::min(wish.rate_hz, entry->maxRateHz);
+        if (grantedRate <= 0.0f) continue;                     // not a rate-bearing publish -> absent
+
+        if (!slot.session.addPublishGrant(wish.channel_id, grantedRate, nowMs)) continue;  // table full
+
+        if (w.granted_publishes_count < kWelcomeMaxGrantedPublishes) {
+            GrantedPublish gp;
+            gp.channel_id = wish.channel_id;
+            gp.granted_rate_hz = grantedRate;
+            w.granted_publishes[w.granted_publishes_count++] = gp;
         }
     }
 
@@ -654,6 +693,119 @@ inline void Hub::handleIntent(Slot& slot, std::span<const std::byte> payload, ui
 }
 
 // ============================================================================
+// STREAM ingress (§9.2 c2h motion input, §10.5 rate, §11.3/§11.4 source)
+// ============================================================================
+
+inline void Hub::sendStreamOverageNack(Slot& slot, HubSession::PublishGrant& pg, uint16_t channel_id, uint32_t nowMs) {
+    // Throttle to limits::stream_ingress_overage_nack_per_s per channel: the
+    // NACK is back-pressure feedback, not a per-drop echo — unthrottled it
+    // would mirror the very flood it reports (§10.5). First overage always
+    // NACKs; then at most one per interval.
+    constexpr uint32_t kIntervalMs = 1000u / limits::stream_ingress_overage_nack_per_s;
+    if (pg.everNackedOverage && !timeReached(nowMs, pg.lastOverageNackMs + kIntervalMs)) return;
+    pg.everNackedOverage = true;
+    pg.lastOverageNackMs = nowMs;
+
+    NackMsg n;
+    n.code = NackCode::RATE_LIMITED;
+    n.has_channel_id = true;
+    n.channel_id = channel_id;
+    sendNackTracked(slot, n, nowMs);
+}
+
+inline void Hub::handleStream(Slot& slot, const FrameHeader& h, std::span<const std::byte> payload, uint32_t nowMs) {
+    const uint16_t channel_id = h.channel;
+
+    // 1) Grant gate (§6.2/§9.2): only a channel this session was granted as a
+    // publish is eligible. Unknown / ungranted / wrong-class / wrong-dir all
+    // resolve to "no grant record" here (the HELLO grant loop rejected them),
+    // so a single lookup covers every silent-drop case. STREAM is never
+    // NACKed for these (§9.2) — drop + count.
+    HubSession::PublishGrant* pg = slot.session.publishGrantFor(channel_id);
+    if (!pg) {
+        ++slot.session.streamBundlesDropped;
+        return;
+    }
+
+    // 2) Re-derive sample size from the hub's OWN catalog and re-confirm the
+    // class/direction (defensive: the grant proves it was valid at HELLO, and
+    // the catalog is client-invariant §8.6, but the RX side owns its truth).
+    const CatalogEntry* entry = _catalog.find(channel_id);
+    if (!entry || entry->cls != ChannelClass::STREAM || entry->dir != Direction::c2h) {
+        ++slot.session.streamBundlesDropped;
+        return;
+    }
+    const size_t sampleSize = entry->layoutWireSize();
+
+    // 3) Parse + re-validate §5.4 caps against the payload (n≤32, span≤20ms,
+    // exact total size / truncation). BundleView::parse enforces those; a
+    // violation drops the bundle WHOLE.
+    auto parsed = BundleView::parse(payload, sampleSize);
+    if (!parsed) {
+        ++slot.session.streamBundlesDropped;
+        return;
+    }
+    const BundleView& bundle = parsed.value();
+
+    // 3b) n==0 is malformed (an empty bundle carries no samples — BundleWriter
+    // never emits one). t_off monotonicity + t_off[0]==0 are NOT checked by
+    // BundleView::parse (it only bounds the span), so re-validate them here:
+    // recover t_off[i] = sampleTimeUs(i) − t_base (wrap-safe unsigned subtract,
+    // exact because t_off < 2^16), require strictly increasing with first == 0.
+    const uint8_t n = bundle.sampleCount();
+    if (n == 0) {
+        ++slot.session.streamBundlesDropped;
+        return;
+    }
+    uint32_t prevOff = 0;
+    for (uint8_t i = 0; i < n; ++i) {
+        const uint32_t off = bundle.sampleTimeUs(i) - bundle.tBase();  // = t_off[i]
+        if (i == 0) {
+            if (off != 0) { ++slot.session.streamBundlesDropped; return; }
+        } else if (off <= prevOff) {
+            ++slot.session.streamBundlesDropped;
+            return;  // not strictly increasing
+        }
+        prevOff = off;
+    }
+
+    // 4) Granted-rate token bucket on SAMPLES (§10.5). Overdraw -> drop whole +
+    // throttled RATE_LIMITED NACK, but keep servicing later legal bundles.
+    if (!pg->limiter.allowN(nowMs, uint32_t(n))) {
+        ++slot.session.streamBundlesDropped;
+        sendStreamOverageNack(slot, *pg, channel_id, nowMs);
+        return;
+    }
+
+    // 5) Source ownership (§11.4): a channel the delegate maps to an arbiter
+    // source acquires on the FIRST accepted bundle; later bundles are
+    // AlreadyOwner (refresh only — lastRxMs was already stamped in pumpSlot(),
+    // which is what pumpDeadman() reads, so the deadman window is refreshed by
+    // arrival alone, §11.3/§6.5). A bundle from a non-owner while the source is
+    // owned is dropped: data-plane bundles carry no takeover flag (§11.4), so
+    // takeover=false is the only option and Conflict is the only refusal.
+    std::optional<uint8_t> mappedSource = _delegate.sourceForChannel(channel_id);
+    if (mappedSource) {
+        uint8_t source = *mappedSource;
+        auto acq = _ownership.acquire(source, slot.session.session_id, slot.session.role, /*takeover=*/false);
+        if (acq == SourceOwnershipTable::AcquireResult::Conflict) {
+            ++slot.session.streamBundlesDropped;
+            return;  // another session owns it; silent (no per-bundle NACK, §9.2)
+        }
+        if (acq == SourceOwnershipTable::AcquireResult::Acquired) {
+            _delegate.onSourceOwnership(source, slot.session.session_id, /*reason=*/0);
+            publishControlOwnerStateIfPresent();
+        }
+        // AlreadyOwner: idempotent refresh, nothing to notify.
+    }
+
+    // 6) Deliver. Post-clamp / arbiter application is the delegate's job (sole-
+    // caller doctrine §3.1) — the hub has done all gating.
+    ++slot.session.streamBundlesAccepted;
+    _delegate.onStreamBundle(channel_id, slot.session.session_id, bundle);
+}
+
+// ============================================================================
 // PING/PONG, GOODBYE, CATALOG_REQ
 // ============================================================================
 
@@ -661,6 +813,24 @@ inline void Hub::handlePing(Slot& slot, std::span<const std::byte> payload) {
     std::array<std::byte, 32> buf{};
     size_t n = encodePong(payload, std::span<std::byte>(buf));
     sendFrameTo(*slot.transport, FrameType::PONG, 0, std::span<const std::byte>(buf.data(), n));
+}
+
+inline void Hub::handleClock(Slot& slot, std::span<const std::byte> payload) {
+    // §7.1: one CLOCK exchange. The request payload (after the frame header,
+    // which carried the legacy 0x05 type byte — see clock_frame.hpp) is just
+    // t0:u32 (client-µs); echo it back with t1 = hub-µs at receipt and t2 =
+    // hub-µs at send. All hub-time reads go through the injected IClock so the
+    // reply is deterministic under a ManualClock (§17.2). A truncated request
+    // (< 4 bytes) is silently dropped — CLOCK is raw plane, never NACKed, same
+    // drop-on-bad-frame rule as PING/ESTOP.
+    auto req = decodeClockRequest(payload);
+    if (!req) return;
+    const uint32_t t1 = _clock.nowUs();  // hub-µs at receipt
+    const uint32_t t2 = _clock.nowUs();  // hub-µs at send (≥ t1; equal under a ManualClock)
+    std::array<std::byte, kClockReplyBytes> buf{};
+    size_t n = encodeClockReply(req.value().t0, t1, t2, std::span<std::byte>(buf));
+    if (n == 0) return;
+    sendFrameTo(*slot.transport, FrameType::CLOCK, 0, std::span<const std::byte>(buf.data(), n));
 }
 
 inline void Hub::handleGoodbye(Slot& slot) {
@@ -1157,6 +1327,12 @@ inline size_t Hub::sessionCount() const { return occupiedCount(nullptr); }
 inline const HubSession* Hub::sessionBySlot(size_t i) const {
     if (i >= _slots.size()) return nullptr;
     return &_slots[i].session;
+}
+
+inline Hub::StreamIngressCounters Hub::streamIngressCounters(size_t slotIdx) const {
+    if (slotIdx >= _slots.size() || !_slots[slotIdx].session.occupied()) return StreamIngressCounters{};
+    return StreamIngressCounters{_slots[slotIdx].session.streamBundlesAccepted,
+                                 _slots[slotIdx].session.streamBundlesDropped};
 }
 
 // ============================================================================

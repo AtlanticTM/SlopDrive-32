@@ -26,10 +26,21 @@ namespace slopsync {
 
 inline constexpr uint32_t kWelcomeMaxGrants = 16;  // SPEC §6.3: "array up to 16"
 
+// SPEC §6.2: at most kHelloMaxPublishWishes (8) publish wishes ride one HELLO,
+// so at most that many can be granted — mirror the cap here.
+inline constexpr uint32_t kWelcomeMaxGrantedPublishes = 8;
+
 struct Grant {
     uint16_t channel_id = 0;
     float granted_rate_hz = 0.0f;
     uint8_t priority = 0;
+};
+
+// A granted inbound-STREAM publish result (§6.2/§6.3, key 36). No priority —
+// a c2h producer has no subscription priority; the pair is {rate, channel}.
+struct GrantedPublish {
+    uint16_t channel_id = 0;
+    float granted_rate_hz = 0.0f;
 };
 
 // §6.3's `limits` (22) is itself a CBOR map with its OWN small integer key
@@ -57,14 +68,24 @@ struct WelcomeMsg {
 
     uint32_t grants_count = 0;
     std::array<Grant, kWelcomeMaxGrants> grants{};
+
+    // Granted publishes (§6.2/§6.3, key 36). Emitted ONLY when non-empty — a
+    // WELCOME with no granted publish is byte-identical to a pre-key-36 hub's
+    // (the golden vectors and every non-streaming session stay unchanged).
+    uint32_t granted_publishes_count = 0;
+    std::array<GrantedPublish, kWelcomeMaxGrantedPublishes> granted_publishes{};
 };
 
 // Encodes into `out`; returns bytes written, or 0 on any failure.
 inline size_t encodeWelcome(const WelcomeMsg& m, std::span<std::byte> out) {
     if (m.grants_count > kWelcomeMaxGrants) return 0;
+    if (m.granted_publishes_count > kWelcomeMaxGrantedPublishes) return 0;
+
+    // granted_publishes (key 36) is the ONLY optional key — 11 fixed + it.
+    const bool hasGrantedPublishes = m.granted_publishes_count > 0;
 
     CborWriter w(out);
-    w.mapHeader(11);
+    w.mapHeader(hasGrantedPublishes ? 12 : 11);
     w.key(CborKey::proto_ver).uintVal(m.proto_ver);
     w.key(CborKey::session_id).uintVal(m.session_id);
     w.key(CborKey::boot_id).uintVal(m.boot_id);
@@ -89,6 +110,17 @@ inline size_t encodeWelcome(const WelcomeMsg& m, std::span<std::byte> out) {
         w.key(CborKey::priority).uintVal(g.priority);
         w.key(CborKey::granted_rate_hz).f32Val(g.granted_rate_hz);
         w.key(CborKey::channel_id).uintVal(g.channel_id);
+    }
+    if (hasGrantedPublishes) {
+        // granted_publishes(36) > grants(35): map order stays ascending.
+        w.key(CborKey::granted_publishes).arrayHeader(m.granted_publishes_count);
+        for (uint32_t i = 0; i < m.granted_publishes_count; ++i) {
+            const GrantedPublish& gp = m.granted_publishes[i];
+            // Entry keys ascending: granted_rate_hz(14) < channel_id(15).
+            w.mapHeader(2);
+            w.key(CborKey::granted_rate_hz).f32Val(gp.granted_rate_hz);
+            w.key(CborKey::channel_id).uintVal(gp.channel_id);
+        }
     }
     return w.size();
 }
@@ -252,6 +284,45 @@ inline Result<WelcomeMsg, DecodeError> decodeWelcome(std::span<const std::byte> 
                 }
                 m.grants_count = cR.value();
                 gotGrants = true;
+                break;
+            }
+            case uint64_t(CborKey::granted_publishes): {
+                auto cR = r.readArrayHeader();
+                if (!cR) return Ret::err(cR.error());
+                if (cR.value() > kWelcomeMaxGrantedPublishes) return Ret::err(DecodeError::CapacityExceeded);
+                for (uint32_t j = 0; j < cR.value(); ++j) {
+                    auto pR = r.readMapHeader();
+                    if (!pR) return Ret::err(pR.error());
+                    GrantedPublish gp{};
+                    for (uint32_t f = 0; f < pR.value(); ++f) {
+                        auto fk = r.readKey();
+                        if (!fk) return Ret::err(fk.error());
+                        switch (fk.value()) {
+                            case uint64_t(CborKey::granted_rate_hz): {
+                                auto vv = r.readF32();
+                                if (!vv) return Ret::err(vv.error());
+                                gp.granted_rate_hz = vv.value();
+                                break;
+                            }
+                            case uint64_t(CborKey::channel_id): {
+                                auto vv = r.readUint();
+                                if (!vv) return Ret::err(vv.error());
+                                gp.channel_id = uint16_t(vv.value());
+                                break;
+                            }
+                            default: {
+                                auto sv = r.skipValue();
+                                if (!sv) return Ret::err(sv.error());
+                                break;
+                            }
+                        }
+                    }
+                    m.granted_publishes[j] = gp;
+                }
+                m.granted_publishes_count = cR.value();
+                // NOT added to the required-keys set below: granted_publishes is
+                // optional (absent from a WELCOME with no granted publish, and
+                // from any pre-key-36 hub — §4.3 tolerance).
                 break;
             }
             default: {

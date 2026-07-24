@@ -241,11 +241,13 @@ Fragments carry the same `type/channel/seq` with flags: first = FRAG_START|FRAG_
 
 ### 6.2 HELLO (client → hub)
 
-CBOR map: `proto_ver` (1), `client_kind` (2), `client_name` (3), `instance_id` (4), optional `token` (5), optional `catalog_etag` (8) — the etag the client has cached — optional `subscriptions` (10) and `publishes` (11) wish-lists so that simple clients can complete setup in one round trip. Wish-list entries: `{channel_id, rate_hz, priority}`.
+CBOR map: `proto_ver` (1), `client_kind` (2), `client_name` (3), `instance_id` (4), optional `token` (5), optional `catalog_etag` (8) — the etag the client has cached — optional `subscriptions` (10) and `publishes` (11) wish-lists so that simple clients can complete setup in one round trip. `subscriptions` entries are `{channel_id, rate_hz, priority}`; `publishes` entries are `{channel_id, rate_hz}` (a c2h STREAM producer has no subscription priority).
+
+Each `publishes` wish is a request to *send* an inbound STREAM channel (client→hub motion input). The hub validates each wish against the catalog: the channel must exist, be class STREAM, be direction c2h, and its `access` level must not exceed the session's granted role. A wish that fails any check is **silently omitted** from the grants (no NACK — an unwanted publish wish is not an error). A passing wish is granted at `min(wished rate, catalog max_rate_hz)`; a channel whose granted rate resolves to ≤ 0 is not a rate-bearing publish and is omitted. Grants are echoed in WELCOME under `granted_publishes` (§6.3); a session may only send STREAM bundles on channels it was granted here (§9.2, §10.5).
 
 ### 6.3 WELCOME (hub → client)
 
-CBOR map: `proto_ver` (served version), `session_id`, `boot_id`, `catalog_etag`, `cfg_gen`, `roles` (granted access level: viewer unless a valid token raised it), `limits` (22: at minimum `max_frame`, `max_subscriptions`, `retained_pending` count), `deadman_ms` + `deadman_policy` (as applied to this session), `nonce` (29, for a subsequent PAIR_REQ), and per-wish **grant results** embedded as the same structure GRANT uses (§10.2). WELCOME is the moment grants become truth; anything not granted here needs SUBSCRIBE.
+CBOR map: `proto_ver` (served version), `session_id`, `boot_id`, `catalog_etag`, `cfg_gen`, `roles` (granted access level: viewer unless a valid token raised it), `limits` (22: at minimum `max_frame`, `max_subscriptions`, `retained_pending` count), `deadman_ms` + `deadman_policy` (as applied to this session), `nonce` (29, for a subsequent PAIR_REQ), per-wish **grant results** for subscriptions embedded as the same structure GRANT uses (§10.2), and — when the HELLO carried granted `publishes` wishes — `granted_publishes` (36): an array of `{granted_rate_hz, channel_id}` mirroring §6.2's grant rules. `granted_publishes` is omitted entirely when no publish wish was granted. WELCOME is the moment grants become truth; anything not granted here needs SUBSCRIBE.
 
 After WELCOME the hub MUST immediately push the **retained value** of every granted STATE channel (§9.1). The client reaches LIVE when all have arrived (§2.2).
 
@@ -384,6 +386,7 @@ STREAM channels carry timestamped sample bundles (§5.4) in either direction (po
 - **Ordering:** guaranteed only on ordered bindings. On datagram bindings the consumer rules of §7.3 (drop-not-newer, timestamp-driven consumption) are the whole contract. The per-binding guarantee matrix is §13.1; STREAM consumers MUST be written against the weakest line of that table.
 - **Shedding = decimation, newest-biased:** under congestion the hub drops whole bundles or thins samples within bundles, always preserving the most recent samples. It MUST NOT delay-and-burst (a stale motion sample is worse than a missing one — the timestamps make dropped samples recoverable by interpolation, stale delivery is a lie).
 - **No acknowledgements.** STREAM frames are never ACKed at the protocol level, in either direction (X-ref §9.3 for why motion *input* correctness doesn't need it).
+- **Inbound (c2h) ingress validation.** A hub accepts a STREAM bundle only on a channel the sending session was granted as a `publishes` channel (§6.2). A bundle on an unknown, ungranted, wrong-class, or wrong-direction channel is **silently dropped** and counted — never NACKed (STREAM carries no ACK/NACK per-frame; §9.3). Before acting on an accepted bundle the hub MUST re-validate the §5.4 caps against its own catalog: `n` in 1..32, span `t_off[n-1]` ≤ 20 ms, `t_off` strictly increasing with `t_off[0] == 0`, and total size matching `n × sample_size`. A bundle violating any cap (including `n == 0` or truncation) is dropped **whole** — never parsed half-way. Rate enforcement and source/deadman semantics are §10.5, §11.3, §11.4.
 - **Grants bound sample rate**, not frame rate: a 240 Hz grant delivered as ~48 fps × 5-sample bundles is conformant and expected. (The §5.4 span cap of 20 ms governs bundle size: at 240 Hz, five samples span 16.7 ms — the sixth would exceed the cap. An earlier draft's "30 fps × 8-sample" example violated the spec's own cap; caught by implementation, corrected here.)
 
 ### 9.3 INTENT / ECHO — the control plane
@@ -439,6 +442,8 @@ ESTOP is exempt from even step 4's queue: it is written ahead of every queue at 
 
 The hub bounds client→hub traffic: intents per §9.3 (default 50/s), STREAM input per its grant (`publishes` wish → granted rate; sustained overage ⇒ NACK `RATE_LIMITED`, persistent overage ⇒ eviction). A misbehaving client cannot starve Core-1 by flooding Core-0.
 
+STREAM-ingress enforcement is on **samples per second**, not bundles per second (a bundle batches up to 32 samples). The hub meters each granted publish channel with a per-session token bucket whose refill rate and capacity both equal the granted sample rate — one second of burst headroom, the same shape as the intent limiter (§9.3). Each accepted bundle consumes `n` tokens (its sample count); a bundle that would overdraw the bucket is dropped whole and the session is sent NACK `RATE_LIMITED` carrying the offending `channel_id`. That NACK is throttled to `stream_ingress_overage_nack_per_s` (Appendix G) per session — it is back-pressure feedback, not a per-drop echo — and later legal-rate bundles on the same channel continue to be delivered. Persistent overage escalates to slow-consumer eviction via the same never-shed stall path as any other session (§10.4).
+
 ### 10.6 Broadcast media
 
 On broadcast bindings (ESP-NOW), one transmission serves all peers; per-subscriber rate limiting is physically meaningless downstream of the radio. Rule: the effective channel rate on a broadcast segment is the **highest grant among its subscribers**; per-subscriber grants remain meaningful hub-side (they still drive what the hub *offers* the segment) and on unicast bindings. Relays MAY further decimate per §14.1.
@@ -483,6 +488,7 @@ The deadman binds to the **active MotionArbiter source**, not to sessions in gen
 The MotionArbiter's source priorities (MANUAL / TCODE / PATTERN / OSSM) arbitrate *between source types*. SlopSync adds the layer the arbiter cannot provide — arbitration *within* a type:
 
 - **Exclusive ownership:** each arbiter source has at most one owning session at a time, tracked in `control-owner` STATE (0x0004). The first authorized session to activate a source owns it; a second session's activating intent gets NACK `SOURCE_CONFLICT`.
+- **STREAM channels mapped to a source** (motion-input publishes, §6.2) participate on the same ownership and deadman machinery as activating intents: the *first accepted bundle* on such a channel acquires the source (§11.4 acquire), each subsequent accepted bundle refreshes its deadman window (§11.3, §6.5 — any received frame is proof of life), and a bundle from a non-owner while the source is owned is dropped (data-plane bundles carry no `takeover` flag — a would-be taker must acquire via an activating intent or safety-intent TAKEOVER first, §11.4). Ownership releases on the same events as any source (GOODBYE, eviction, deadman fire).
 - **TAKEOVER:** re-issuing the activating intent with `takeover: true` (32) transfers ownership if the requester's role ≥ owner's role. The hub emits a takeover EVENT + `control-owner` STATE update; the dispossessed session's UI MUST reflect loss of control immediately (it's subscribed to 0x0004 like everyone else). Takeover between *types* remains the arbiter's existing priority logic, unchanged.
 - **Release:** ownership releases on GOODBYE, eviction, deadman fire, or an explicit release intent. Post-deadman reacquisition requires a fresh activating intent (§6.7) — never silent resume.
 - **Grants gate the door:** activating any source requires `controller` role (§12). Viewer sessions cannot own sources, full stop.
@@ -688,7 +694,7 @@ Reserved: 0x02, 0x18–0x3F spec/core; 0x40–0x7F future spec; 0x80–0xDF expe
 
 ## Appendix B — CBOR integer-key registry *(normative, generated view)*
 
-Keys 1–34 as allocated in `registry.yaml` `cbor_keys` (proto_ver 1, client_kind 2, client_name 3, instance_id 4, token 5, session_id 6, boot_id 7, catalog_etag 8, cfg_gen 9, subscriptions 10, publishes 11, rate_hz 12, priority 13, granted_rate_hz 14, channel_id 15, code 16, detail 17, intent_id 18, applied 19, value 20, timestamp 21, limits 22, roles 23, deadman_ms 24, deadman_policy 25, probe_result 26, chunks 27, pin_proof 28, nonce 29, precondition 30, retry_after_ms 31, takeover 32, event_kind 33, seq_of_state 34). Ranges: 1–63 core, 64–127 reserved, 128+ experimental. A key means the same thing in every message.
+Keys 1–34 as allocated in `registry.yaml` `cbor_keys` (proto_ver 1, client_kind 2, client_name 3, instance_id 4, token 5, session_id 6, boot_id 7, catalog_etag 8, cfg_gen 9, subscriptions 10, publishes 11, rate_hz 12, priority 13, granted_rate_hz 14, channel_id 15, code 16, detail 17, intent_id 18, applied 19, value 20, timestamp 21, limits 22, roles 23, deadman_ms 24, deadman_policy 25, probe_result 26, chunks 27, pin_proof 28, nonce 29, precondition 30, retry_after_ms 31, takeover 32, event_kind 33, seq_of_state 34, grants 35, granted_publishes 36). Ranges: 1–63 core, 64–127 reserved, 128+ experimental. A key means the same thing in every message.
 
 ## Appendix C — Catalog schema *(normative)*
 
@@ -746,6 +752,7 @@ The vector manifest and generation plan live in [`vectors/manifest.yaml`](vector
 | PING interval (holding control / idle) | 200 ms / 1 s | §6.5 |
 | Deadman default / clamp | 600 ms / 250–5000 ms | §11.3 |
 | Intent ingress default | 50 /s | §9.3, §10.5 |
+| STREAM-ingress overage NACK throttle | 5 /s per session | §10.5 |
 | Pairing window / PIN digits / token | 120 s / 4 / 16 B | §12.2 |
 | instance_id / etag size | 8 B / 8 B | §6.1, §8.3 |
 | ESTOP repeat interval / max | 50 ms / 20 | §11.2 |

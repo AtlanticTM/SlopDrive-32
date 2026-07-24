@@ -122,6 +122,7 @@ enum class CborKey : uint8_t {
     event_kind = 33,  // uint: EVENT: kind discriminator per catalog entry
     seq_of_state = 34,  // uint: EVENT: seq of the STATE twin frame it corresponds to (§9.4)
     grants = 35,  // array: WELCOME: batch grant results — array of {13:priority, 14:granted_rate_hz, 15:channel_id} (§6.3, §10.2)
+    granted_publishes = 36,  // array: WELCOME: granted STREAM-ingress publishes — array of {14:granted_rate_hz, 15:channel_id} (§6.3, §10.5). Omitted when empty.
 };
 
 namespace welcome_limits {
@@ -196,6 +197,7 @@ inline constexpr uint32_t frag_reassembly_timeout_ms = 5000;
 inline constexpr uint32_t frag_max_concurrent_per_session = 2;
 inline constexpr uint32_t idempotency_ring_depth = 32;
 inline constexpr uint32_t intent_ingress_default_per_s = 50;
+inline constexpr uint32_t stream_ingress_overage_nack_per_s = 5;
 inline constexpr uint32_t event_queue_depth_per_subscriber = 16;
 inline constexpr uint32_t never_shed_stall_eviction_ms = 2000;
 inline constexpr uint32_t catalog_chunk_gap_timeout_ms = 500;

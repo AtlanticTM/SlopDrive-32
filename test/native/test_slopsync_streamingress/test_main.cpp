@@ -47,12 +47,15 @@ namespace {
 constexpr uint16_t kStreamCh = 0x0080;   // the c2h STREAM channel under test
 constexpr uint16_t kH2cStreamCh = 0x0081;
 constexpr uint16_t kIntentCh = 0x0084;
+constexpr uint16_t kSegCh = 0x0085;       // c2h STREAM, 6-B timed-segment layout
 constexpr uint16_t kUnknownCh = 0x00FF;
 constexpr size_t kSampleSize = 2;         // one i16
+constexpr size_t kSegSampleSize = 6;      // {target u16, dur u16, end_vel i16}
+constexpr int16_t kSegNoEndVel = -32768;  // INT16_MIN sentinel = "no end velocity"
 
 Catalog32 makeStreamCatalog() {
     Catalog32 c;
-    c.count = 3;
+    c.count = 4;
     auto& e = c.entries;
 
     e[0].id = kStreamCh; e[0].name = "motion-input";
@@ -76,6 +79,19 @@ Catalog32 makeStreamCatalog() {
     e[2].fieldCount = 1;
     e[2].schema[0] = {.key = 1, .name = "speed", .type = CborFieldType::f32_t, .unit = "mm/s"};
 
+    // 0x0085 "motion-segment": the 6-byte timed-segment layout the SlopDrive
+    // device advertises (target + duration + sentinel-bearing end velocity).
+    // Mirrors include/comms/SlopSyncCatalog.h's 0x0085 entry so the harness
+    // exercises the exact wire size + field order the firmware decodes.
+    e[3].id = kSegCh; e[3].name = "motion-segment";
+    e[3].cls = ChannelClass::STREAM; e[3].dir = Direction::c2h;
+    e[3].access = AccessLevel::controller; e[3].maxRateHz = 50.0f;
+    e[3].defaultPriority = Priority::elevated;
+    e[3].fieldCount = 3;
+    e[3].layout[0] = {.name = "target_norm",  .type = PackedFieldType::u16, .unit = "norm",   .scale = 10000.0f};
+    e[3].layout[1] = {.name = "duration_ms",  .type = PackedFieldType::u16, .unit = "ms",     .scale = 1.0f};
+    e[3].layout[2] = {.name = "end_vel_norm", .type = PackedFieldType::i16, .unit = "norm/s", .scale = 1000.0f};
+
     return c;
 }
 
@@ -98,6 +114,10 @@ public:
     std::vector<RecordedBundle> bundles;
     std::vector<RecordedOwnership> ownership;
     std::vector<uint8_t> deadmanStops;
+    // Raw bytes of the most-recent bundle's samples — lets a test confirm the
+    // 6-B segment layout (incl. the sentinel end_vel) round-trips through the
+    // hub's BundleView unchanged.
+    std::vector<std::vector<std::byte>> lastSamples;
 
     AccessLevel validateToken(std::span<const std::byte>, std::span<const std::byte>, bool hasToken) override {
         return hasToken ? AccessLevel::controller : AccessLevel::viewer;
@@ -108,7 +128,9 @@ public:
     void onEstop(uint8_t, uint8_t) override {}
 
     std::optional<uint8_t> sourceForChannel(uint16_t channel_id) override {
-        if (mapSource && channel_id == kStreamCh) return uint8_t{0};
+        // Both stream channels map to the same arbiter source (0), exactly as
+        // the firmware maps 0x0084 + 0x0085 to TCODE_STREAM.
+        if (mapSource && (channel_id == kStreamCh || channel_id == kSegCh)) return uint8_t{0};
         return std::nullopt;
     }
     void onSourceOwnership(uint8_t source_id, uint32_t owner_session, uint8_t reason) override {
@@ -118,6 +140,11 @@ public:
 
     void onStreamBundle(uint16_t channel_id, uint32_t session_id, const BundleView& bundle) override {
         bundles.push_back(RecordedBundle{channel_id, session_id, bundle.sampleCount(), bundle.tBase()});
+        lastSamples.clear();
+        for (uint8_t k = 0; k < bundle.sampleCount(); ++k) {
+            auto sp = bundle.sample(k);
+            lastSamples.emplace_back(sp.begin(), sp.end());
+        }
     }
 };
 
@@ -168,6 +195,34 @@ void writeValidBundle(ITransport& ep, uint16_t channel, uint8_t n, uint32_t tBas
     size_t len = w.finalize();
     REQUIRE(len > 0);
     writeFrame(ep, FrameType::STREAM, channel, std::span<const std::byte>(buf.data(), len));
+}
+
+// A valid 6-byte-sample segment bundle: each sample is
+// {target_norm u16, duration_ms u16, end_vel_norm i16} little-endian, samples
+// 1 us apart with first t_off 0. Written raw as a STREAM frame on kSegCh.
+struct SegSample { uint16_t target; uint16_t durMs; int16_t endVel; };
+void writeSegmentBundle(ITransport& ep, const std::vector<SegSample>& samples, uint32_t tBase = 2000) {
+    std::array<std::byte, 256> buf{};
+    BundleWriter w(std::span<std::byte>(buf), tBase, kSegSampleSize);
+    for (size_t i = 0; i < samples.size(); ++i) {
+        std::array<std::byte, kSegSampleSize> s{};
+        auto put16 = [&](size_t off, uint16_t v) {
+            s[off] = std::byte(v & 0xFF);
+            s[off + 1] = std::byte((v >> 8) & 0xFF);
+        };
+        put16(0, samples[i].target);
+        put16(2, samples[i].durMs);
+        put16(4, uint16_t(samples[i].endVel));
+        REQUIRE(w.addSample(uint16_t(i), std::span<const std::byte>(s)));
+    }
+    size_t len = w.finalize();
+    REQUIRE(len > 0);
+    writeFrame(ep, FrameType::STREAM, kSegCh, std::span<const std::byte>(buf.data(), len));
+}
+
+// Decode the end_vel_norm (i16 at byte offset 4) out of a captured sample.
+int16_t sampleEndVel(const std::vector<std::byte>& s) {
+    return int16_t(uint16_t(uint8_t(s[4])) | (uint16_t(uint8_t(s[5])) << 8));
 }
 
 // Hand-assembled bundle bytes so we can inject illegal layouts BundleWriter
@@ -700,4 +755,94 @@ TEST_CASE("SI-13: a re-HELLO recycling a live slot releases the old session's so
     REQUIRE(del.ownership.size() == 3);
     CHECK(del.ownership[2].owner_session == wA2.session_id);
     CHECK(del.ownership[2].reason == 0);                    // A' acquires cleanly
+}
+
+// ============================================================================
+// SI-14 — a 6-byte timed-SEGMENT bundle (0x0085) round-trips through the hub's
+// generic STREAM ingress: it is granted, delivered, and every byte — crucially
+// the INT16_MIN "no end velocity" sentinel that 0 cannot stand in for — reaches
+// the delegate's BundleView intact. Proves the segment layout rides the same
+// channel-generic path as motion-input with zero library changes.
+// ============================================================================
+TEST_CASE("SI-14: a 6-B motion-segment bundle is granted and its sentinel end_vel round-trips to the delegate") {
+    Catalog32 cat = makeStreamCatalog();
+    ManualClock clock;
+    XorShift32 rng(114);
+    StreamHubDelegate del;
+    Hub hub(cat, clock, rng, del);
+
+    InProcessLink link(clock, rng);
+    REQUIRE(hub.attachTransport(link.endpointA()));
+    REQUIRE(link.endpointB().open());
+
+    // Wish 200 Hz on a 50 Hz channel -> granted at the catalog ceiling (proves
+    // the grant loop is channel-generic, min(wish, max_rate), no 0x0084 special-
+    // casing).
+    WelcomeMsg w = connectSession(hub, clock, link.endpointB(), 14, true, {PublishWish{kSegCh, 200.0f}});
+    REQUIRE(w.granted_publishes_count == 1);
+    CHECK(w.granted_publishes[0].channel_id == kSegCh);
+    CHECK(w.granted_publishes[0].granted_rate_hz == doctest::Approx(50.0f));
+
+    // Two segments: one carrying a real handoff velocity (250 -> 0.25 units/s),
+    // one carrying the -32768 sentinel (engine should estimate vf itself).
+    writeSegmentBundle(link.endpointB(),
+                       {SegSample{3000, 900, 250}, SegSample{7000, 900, kSegNoEndVel}},
+                       /*tBase=*/2000);
+    tickAndDrain(hub, clock, link.endpointB());
+
+    REQUIRE(del.bundles.size() == 1);
+    CHECK(del.bundles[0].channel_id == kSegCh);
+    CHECK(del.bundles[0].sampleCount == 2);
+    REQUIRE(del.lastSamples.size() == 2);
+    REQUIRE(del.lastSamples[0].size() == kSegSampleSize);
+    // Sample 0: a genuine end velocity, NOT the sentinel.
+    CHECK(sampleEndVel(del.lastSamples[0]) == int16_t(250));
+    CHECK(sampleEndVel(del.lastSamples[0]) != kSegNoEndVel);
+    // Sample 1: the sentinel survives the wire byte-for-byte (it must, or the
+    // firmware would decode "arrive at rest" instead of "no constraint").
+    CHECK(sampleEndVel(del.lastSamples[1]) == kSegNoEndVel);
+}
+
+// ============================================================================
+// SI-15 — GROUND TRUTH: after a deadman STOP latch, the FIRST accepted stream
+// bundle from the (new) owning source clears the STOP bit, exactly as a
+// source-mapped INTENT does (§11.1 "cleared by any new motion intent"). Without
+// the fix the resumed stream drives the arbiter's soft-start while the safety
+// STATE still reports STOP — a lie. Verified here on the SEGMENT channel so the
+// clear covers 0x0085 too (both map to source 0).
+// ============================================================================
+TEST_CASE("SI-15: a resumed stream bundle clears the deadman STOP latch (safety STATE stops lying)") {
+    Catalog32 cat = makeStreamCatalog();
+    ManualClock clock;
+    XorShift32 rng(115);
+    StreamHubDelegate del;  // mapSource = true -> both stream channels -> source 0
+    Hub hub(cat, clock, rng, del);
+
+    InProcessLink link(clock, rng);
+    REQUIRE(hub.attachTransport(link.endpointA()));
+    REQUIRE(link.endpointB().open());
+
+    // 1) A owns source 0 via a segment stream.
+    connectSession(hub, clock, link.endpointB(), 15, true, {PublishWish{kSegCh, 50.0f}});
+    writeSegmentBundle(link.endpointB(), {SegSample{3000, 900, kSegNoEndVel}});
+    tickAndDrain(hub, clock, link.endpointB());
+    REQUIRE(del.bundles.size() == 1);
+    REQUIRE(del.ownership.size() == 1);
+    CHECK_FALSE(hub.stopLatched());   // no latch yet
+
+    // 2) Go silent past the 600 ms deadman -> STOP latches + the session is torn
+    // down (owner-loss release runs the Stop policy: onDeadmanStop + STOP bit).
+    for (int i = 0; i < 20; ++i) { clock.advanceUs(50'000); hub.update(clock.nowUs()); }
+    REQUIRE(del.deadmanStops.size() == 1);
+    REQUIRE(hub.stopLatched());       // safety STATE now says STOP
+
+    // 3) Reconnect on the same transport, re-wish, and resume streaming. The
+    // first ACCEPTED bundle acquires the freed source AND must clear STOP.
+    connectSession(hub, clock, link.endpointB(), 15, true, {PublishWish{kSegCh, 50.0f}});
+    REQUIRE(hub.stopLatched());       // still latched right up until the bundle lands
+    writeSegmentBundle(link.endpointB(), {SegSample{7000, 900, kSegNoEndVel}}, /*tBase=*/900000);
+    tickAndDrain(hub, clock, link.endpointB());
+    REQUIRE(del.bundles.size() == 2);           // resumed bundle delivered
+    CHECK_FALSE(hub.stopLatched());             // STOP cleared by the accepted bundle
+    CHECK_FALSE((hub.safetyWord() & slopsync::safety_bits::STOP));
 }

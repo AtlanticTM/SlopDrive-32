@@ -810,6 +810,21 @@ inline void Hub::handleStream(Slot& slot, const FrameHeader& h, std::span<const 
     // 6) Deliver. Post-clamp / arbiter application is the delegate's job (sole-
     // caller doctrine §3.1) — the hub has done all gating.
     ++slot.session.streamBundlesAccepted;
+
+    // §11.1: an ACCEPTED bundle on a source-mapped channel is "new motion" from
+    // the owning source and clears a latched STOP the SAME way a source-mapped
+    // INTENT does (see handleIntent) — otherwise, after a deadman STOP, a
+    // resumed stream drives the arbiter (soft-start) while the safety STATE
+    // still lies "STOP", a Ground-Truth violation. The bundle was ownership-
+    // gated above (a non-owner Conflict-drops before here), so this only fires
+    // for the source's live owner.
+    if (mappedSource && (_safetyWord & safety_bits::STOP)) {
+        _safetyWord &= ~safety_bits::STOP;
+        _safetyOwnerSession = 0;
+        publishSafetySnapshot();
+        broadcastSafetyNow(nowMs);
+    }
+
     _delegate.onStreamBundle(channel_id, slot.session.session_id, bundle);
 }
 

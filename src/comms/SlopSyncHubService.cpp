@@ -33,6 +33,11 @@ using slopsync::IntentValueField;
 using slopsync::IntentValueMap;
 using slopsync::NackCode;
 
+// 0x0085 end_vel_norm sentinel: INT16_MIN means "no end velocity" (0 is a
+// legitimate slope, so it can't double as "absent"). Named here to keep the
+// magic number off the decode hot path and greppable against the catalog doc.
+constexpr int16_t kSegNoEndVel = -32768;
+
 const IntentValueField* findField(const IntentValueMap& m, uint8_t key) {
     for (uint32_t i = 0; i < m.count; ++i) {
         if (m.fields[i].key == key) return &m.fields[i];
@@ -276,6 +281,10 @@ std::optional<uint8_t> SlopDriveHubDelegate::sourceForChannel(uint16_t channel_i
     if (channel_id == ch::move) return uint8_t(MotionSource::MANUAL);    // 0
     if (channel_id == ch::pattern_cmd) return uint8_t(MotionSource::PATTERN);  // 2
     if (channel_id == ch::motion_input) return uint8_t(MotionSource::TCODE_STREAM);  // 1
+    // 0x0085 motion-segment shares the stream source: a client uses one channel
+    // OR the other, both ARE "the stream input" (§11.4 ownership then guarantees
+    // only one drives at a time).
+    if (channel_id == ch::motion_segment) return uint8_t(MotionSource::TCODE_STREAM);  // 1
     return std::nullopt;
 }
 
@@ -304,18 +313,22 @@ void SlopDriveHubDelegate::onSessionLeft(uint32_t session_id) {
     SLOGI("slopsync", "session %08x left", session_id);
 }
 
-// ---- 0x0084 motion-input STREAM -> pacing ring -----------------------------
+// ---- 0x0084 motion-input + 0x0085 motion-segment STREAM -> pacing ring ------
 // Runs on the SlopSyncHub task, synchronously inside _hub.update() (the hub
 // has already validated caps/rate/ownership/deadman per the hub.hpp contract
-// — see this method's declaration comment). Decodes each 4-byte sample by
-// FIXED OFFSET, not the generic layout_codec: the byte layout below MUST
-// mirror SlopSyncCatalog's 0x0084 entry field order exactly, the same
-// convention publishTelemetry() already uses on the encode side for every
-// other packed channel in this file.
+// — see this method's declaration comment). Decodes each sample by FIXED
+// OFFSET, not the generic layout_codec: the byte layouts below MUST mirror
+// SlopSyncCatalog's 0x0084 (4 B chase point) / 0x0085 (6 B timed segment)
+// entry field order exactly, the same convention publishTelemetry() already
+// uses on the encode side for every other packed channel in this file. Both
+// channels feed the SAME pacing ring and drain to the SAME Core-1 sampler
+// queue — a client uses one OR the other, never both at once (§11.4 source
+// ownership on TCODE_STREAM enforces that).
 void SlopDriveHubDelegate::onStreamBundle(uint16_t channel_id, uint32_t session_id,
                                           const slopsync::BundleView& bundle) {
     (void)session_id;
-    if (channel_id != ch::motion_input) return;
+    const bool isSegment = (channel_id == ch::motion_segment);
+    if (channel_id != ch::motion_input && !isSegment) return;
 
     // t_base/t_off are u32 HUB-µs — the SAME wrapping domain EspClock::nowUs()
     // reads (esp_timer_get_time() truncated to 32 bits, §7.2). now64 stays the
@@ -326,6 +339,7 @@ void SlopDriveHubDelegate::onStreamBundle(uint16_t channel_id, uint32_t session_
 
     uint32_t ringDrops = 0;
     uint32_t farClamped = 0;
+    uint32_t badDuration = 0;
 
     const uint8_t n = bundle.sampleCount();
     for (uint8_t i = 0; i < n; ++i) {
@@ -333,6 +347,7 @@ void SlopDriveHubDelegate::onStreamBundle(uint16_t channel_id, uint32_t session_
         // Nearest-window resolve (§7.2): a plain wrap-aware signed subtract,
         // since wireT is always near "now" by construction (bundle span is
         // capped at limits::bundle_max_span_ms, far under the 32-bit wrap).
+        // For 0x0085 this is the intended segment START in hub time.
         int32_t delta = int32_t(wireT - now32);
         if (delta > 250000) { delta = 250000; ++farClamped; }
         if (delta < 0) delta = 0;
@@ -340,18 +355,48 @@ void SlopDriveHubDelegate::onStreamBundle(uint16_t channel_id, uint32_t session_
 
         const auto sample = bundle.sample(i);
         const uint16_t rawTarget = slopsync::getU16(sample.subspan(0, 2));
-        const int16_t  rawVel    = int16_t(slopsync::getU16(sample.subspan(2, 2)));
-        const float target = float(rawTarget) / 10000.0f;  // catalog scale 10000 (0x0084)
-        const float vel    = float(rawVel) / 1000.0f;      // catalog scale 1000
 
-        if (_pacingRing.push(PacingEntry{due, target, vel})) ++ringDrops;
+        PacingEntry e{};
+        e.due_us = due;
+        e.target = float(rawTarget) / 10000.0f;  // catalog scale 10000 (both channels)
+
+        if (isSegment) {
+            // 6-B layout: {target_norm u16, duration_ms u16, end_vel_norm i16}.
+            const uint16_t rawDurMs = slopsync::getU16(sample.subspan(2, 2));
+            const int16_t  rawEndV  = int16_t(slopsync::getU16(sample.subspan(4, 2)));
+            if (rawDurMs == 0) {
+                // durationless points belong on 0x0084 — skip + count dropped.
+                ++badDuration;
+                continue;
+            }
+            e.has_duration = true;
+            e.duration_us  = uint32_t(rawDurMs) * 1000u;
+            if (rawEndV == kSegNoEndVel) {
+                // -32768 sentinel = "no end velocity" (0 is a legit slope, so 0
+                // cannot mean absent) → the engine estimates vf/af itself.
+                e.has_end_vel = false;
+            } else {
+                e.vel         = float(rawEndV) / 1000.0f;  // catalog scale 1000
+                e.has_end_vel = true;
+            }
+        } else {
+            // 4-B layout: {target_norm u16, vel_norm i16}. 0 velocity = no
+            // handoff (the pre-segment-channel convention, preserved verbatim).
+            const int16_t rawVel = int16_t(slopsync::getU16(sample.subspan(2, 2)));
+            e.vel         = float(rawVel) / 1000.0f;  // catalog scale 1000
+            e.has_end_vel = (e.vel != 0.0f);
+        }
+
+        if (_pacingRing.push(e)) ++ringDrops;
     }
 
     _state.sm_sync_bundles = _state.sm_sync_bundles + 1;
     _state.sm_sync_samples = _state.sm_sync_samples + n;
-    if (ringDrops) _state.sm_sync_dropped = _state.sm_sync_dropped + ringDrops;
+    if (isSegment) _state.sm_sync_seg_bundles = _state.sm_sync_seg_bundles + 1;
+    if (ringDrops || badDuration)
+        _state.sm_sync_dropped = _state.sm_sync_dropped + ringDrops + badDuration;
     if (farClamped) {
-        SLOGW_EVERY_MS(2000, "slopsync", "motion-input: %u sample(s) clamped from far-future "
+        SLOGW_EVERY_MS(2000, "slopsync", "motion-stream: %u sample(s) clamped from far-future "
                        "t_off this window (missed CLOCK resync on the client?)",
                        (unsigned)farClamped);
     }
@@ -479,11 +524,16 @@ void SlopSyncHubService::drainMotionStream() {
             _syncPrevTarget = entry.target;
         }
 
+        // Both stream channels land here; the ingress decode already resolved
+        // has_end_vel (0x0084: vel≠0; 0x0085: sentinel) and has_duration/
+        // duration_us (0x0085 waveform segments only), so the Command is a
+        // straight copy — the drain is channel-agnostic by construction.
         slopmotion::Command cmd;
         cmd.target       = entry.target;
         cmd.end_vel      = entry.vel;
-        cmd.has_end_vel  = (entry.vel != 0.0f);
-        cmd.has_duration = false;
+        cmd.has_end_vel  = entry.has_end_vel;
+        cmd.duration_us  = entry.duration_us;
+        cmd.has_duration = entry.has_duration;
 
         if (_motionStreamQueue && xQueueSend(_motionStreamQueue, &cmd, 0) == pdTRUE) {
             _state.sm_sync_enqueued = _state.sm_sync_enqueued + 1;

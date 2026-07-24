@@ -43,6 +43,7 @@ inline constexpr uint16_t machine_config = 0x0081;
 inline constexpr uint16_t pattern_state  = 0x0082;
 inline constexpr uint16_t odometer       = 0x0083;
 inline constexpr uint16_t motion_input   = 0x0084;
+inline constexpr uint16_t motion_segment = 0x0085;
 inline constexpr uint16_t move           = 0x0100;
 inline constexpr uint16_t config_set     = 0x0101;
 inline constexpr uint16_t pattern_cmd    = 0x0102;
@@ -58,7 +59,7 @@ inline slopsync::Catalog32 buildSlopDriveCatalog() {
     using slopsync::Priority;
 
     slopsync::Catalog32 c;
-    c.count = 14;
+    c.count = 15;
     auto& e = c.entries;
     int i = 0;
 
@@ -212,6 +213,41 @@ inline slopsync::Catalog32 buildSlopDriveCatalog() {
     e[i].fieldCount = 2;
     e[i].layout[0] = {.name = "target_norm", .type = PackedFieldType::u16, .unit = "norm",   .scale = 10000.0f};
     e[i].layout[1] = {.name = "vel_norm",    .type = PackedFieldType::i16, .unit = "norm/s", .scale = 1000.0f};
+    ++i;
+
+    // ---- 0x0085 "motion-segment" — STREAM, c2h, controller, ≤50 Hz --------
+    // TIMED-SEGMENT motion streaming: the WAVEFORM-mode companion to 0x0084.
+    // Where motion-input carries dense point samples the sender interpolates
+    // (chase mode, ~50 Hz), THIS channel carries the sender's NATIVE segments —
+    // ONE {target, duration, end_vel} per stroke leg — which the SlopMotion
+    // engine renders as a C2 quintic over EXACTLY the commanded duration (the
+    // same waveform path TCode v4 drives via buttplugLinearCmd). Funscript
+    // players know their segments natively, so a segment stream is ~2–4
+    // packets/s instead of 50, with strictly better motion. Decoded by FIXED
+    // OFFSET in the delegate's onStreamBundle() (same convention as 0x0084),
+    // enqueued into the SAME SlopMotion pacing ring, and mapped to arbiter
+    // source 1 / TCODE_STREAM — a client uses 0x0084 OR 0x0085, both ARE "the
+    // stream input".
+    //   * duration_ms is the commanded segment duration and MUST be ≥1;
+    //     durationless points belong on 0x0084 (a 0 here is skipped + counted
+    //     dropped, never sent to the engine).
+    //   * end_vel_norm == -32768 (INT16_MIN) is the "NO end velocity" SENTINEL:
+    //     0 is a legitimate slope (a reversal ends AT rest), so 0 cannot mean
+    //     "absent". On the sentinel the engine estimates the boundary accel/vel
+    //     itself (backward-difference af + stream vf); otherwise it honors the
+    //     wire handoff velocity verbatim.
+    //   * bundle sample timestamps (§5.4 t_off) are the intended segment START
+    //     in hub time, resolved through the same nearest-window pacing as 0x0084.
+    // scale 10000 on target = 1e-4 over the 0..1 window; scale 1000 on end_vel =
+    // 1e-3 units/s, i16 signed.  [2+2+2 = 6 B]
+    e[i].id = ch::motion_segment; e[i].name = "motion-segment";
+    e[i].cls = ChannelClass::STREAM; e[i].dir = Direction::c2h;
+    e[i].access = AccessLevel::controller; e[i].maxRateHz = 50.0f;
+    e[i].defaultPriority = Priority::elevated;
+    e[i].fieldCount = 3;
+    e[i].layout[0] = {.name = "target_norm",  .type = PackedFieldType::u16, .unit = "norm",   .scale = 10000.0f};
+    e[i].layout[1] = {.name = "duration_ms",  .type = PackedFieldType::u16, .unit = "ms",     .scale = 1.0f};
+    e[i].layout[2] = {.name = "end_vel_norm", .type = PackedFieldType::i16, .unit = "norm/s", .scale = 1000.0f};
     ++i;
 
     // ---- 0x0100 "move" — INTENT, controller, 20 Hz, critical --------------

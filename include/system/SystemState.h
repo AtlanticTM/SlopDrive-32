@@ -356,10 +356,11 @@ struct SystemState {
     // HTTP handler (also Core 0) reads them for GET /api/slopmotion. Same
     // aligned-scalar single-writer-per-field pattern as sm_tune_* above; not
     // persisted, reboot zeroes them. ------------------------------------------
-    volatile uint32_t      sm_sync_bundles  = 0;  // accepted onStreamBundle() calls
+    volatile uint32_t      sm_sync_bundles  = 0;  // accepted onStreamBundle() calls (both stream channels)
     volatile uint32_t      sm_sync_samples  = 0;  // total decoded samples across those bundles
     volatile uint32_t      sm_sync_enqueued = 0;  // samples handed to the Core-1 sampler queue
-    volatile uint32_t      sm_sync_dropped  = 0;  // ring-overwrite + queue-full + gate drops (combined)
+    volatile uint32_t      sm_sync_dropped  = 0;  // ring-overwrite + queue-full + gate + bad-duration drops (combined)
+    volatile uint32_t      sm_sync_seg_bundles = 0;  // subset of _bundles that arrived on 0x0085 motion-segment (waveform)
 
     // --------------------------------------------------------------------------
     // Convenience helpers — zero-cost inline

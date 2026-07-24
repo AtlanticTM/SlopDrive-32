@@ -52,6 +52,14 @@ struct PacingEntry {
     uint64_t due_us = 0;   // device µs, esp_timer_get_time() domain (unwrapped 64-bit)
     float    target = 0.0f;
     float    vel    = 0.0f;
+    // WAVEFORM (0x0085 motion-segment) carries a commanded duration + an
+    // EXPLICIT end-velocity presence flag; CHASE (0x0084 motion-input) leaves
+    // has_duration false and derives has_end_vel from vel≠0 at push time. Both
+    // channels share this ring — the drain builds the slopmotion::Command
+    // straight from these fields, so the two paths differ ONLY here at ingress.
+    uint32_t duration_us  = 0;
+    bool     has_duration = false;
+    bool     has_end_vel  = false;
 };
 
 class PacingRing {
@@ -119,9 +127,10 @@ public:
     void onSessionJoined(uint32_t session_id) override;
     void onSessionLeft(uint32_t session_id) override;
 
-    // 0x0084 motion-input STREAM — decodes samples and pushes them onto the
-    // pacing ring. See the .cpp for the full contract (only handles
-    // ch::motion_input; anything else is a no-op, matching the base default).
+    // 0x0084 motion-input (chase points) + 0x0085 motion-segment (timed
+    // waveform segments) STREAM — decodes samples and pushes them onto the
+    // shared pacing ring. See the .cpp for the full contract (handles both
+    // stream channels; anything else is a no-op, matching the base default).
     void onStreamBundle(uint16_t channel_id, uint32_t session_id, const slopsync::BundleView& bundle) override;
 
 private:

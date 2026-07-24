@@ -233,5 +233,8 @@ private:
     void handleApiPatternPresets();
     void handleApiLog();
     void handleApiMode();
+    // SlopMotion live-tuning rough-in (GET state+bench / POST knobs). No
+    // persistence, no UI card yet — curl-driven until the WebUI refactor.
+    void handleApiSlopMotion();
     void handleApiClients();   // GET list of WS clients / POST kick — Health tab
 };

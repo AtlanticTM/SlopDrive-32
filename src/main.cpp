@@ -45,7 +45,8 @@
 #endif
 
 #include "MotionArbiter.h"
-#include "MotionInterpolator.h"
+#include "MotionInterpolator.h"     // InterpAnomaly type only (legacy 0x05 ring)
+#include <slopmotion/slopmotion.hpp>
 #include "PatternEngine.h"
 #include "OssmBleService.h"
 
@@ -115,13 +116,13 @@ static RangeMapper        mapper;
 static PatternEngine      patternEngine(g_state, mapper, motor);
 static MotionArbiter      arbiter(g_state, mapper, motor);
 
-// v0.4 on-device interpolator — Core-1-owned cubic motion generator.
-// buttplugLinearCmd (Core 0) builds InterpSegments and hands them across via
-// g_interp_queue; streamSamplerTask (Core 1) commits them onto the curve and
-// samples it at ~1kHz into arbiter.submitStreamSample(). This is the fix for
-// the v4 microstutter (C1-continuous cubic instead of per-point FAS re-plan)
-// and the v3 slow-speed dropout (live-mode extrapolation). :3
-static MotionInterpolator g_interp(0.5f);
+// SlopMotion — Core-1-owned jerk-limited motion core (the MotionInterpolator
+// successor, CLAUDE.md §7.6). buttplugLinearCmd (Core 0) builds
+// slopmotion::Commands and hands them across via g_interp_queue;
+// streamSamplerTask (Core 1) plans them (quintic waveform / Ruckig chase +
+// guard) and samples the plan at ~1kHz into arbiter.submitStreamSample().
+// ~3.4 KB object — plain BSS static is fine (measured on xtensa).
+static slopmotion::Engine g_slopmotion({}, 0.5f);
 static constexpr size_t   INTERP_QUEUE_DEPTH     = 16;
 static QueueHandle_t      g_interp_queue         = nullptr;
 // After this idle gap with no L0 command the sampler stops feeding FAS and
@@ -221,29 +222,27 @@ static void buttplugLinearCmd(float position, uint32_t duration_ms,
     // Raw target telemetry (pre-planner) — mapped into the stroke window.
     g_state.commanded_raw_mm = mapper.intensityToPosition(position);
 
-    // Build a POD InterpSegment and hand it to the Core-1 sampler. The
-    // interpolator owns ALL curve shaping (v3 live extrapolation, v4 Hermite
-    // gradient); main.cpp only translates parser output into a segment.
-    //   targetPos   : normalized 0..1 magnitude (interp window == TCode 0..1)
-    //   durationUs  : I<ms> * 1000 (0 when absent → interp derives from cadence)
-    //   endSlope    : RAW wire G — the interpolator applies /1000 → dp/dtau,
-    //                 byte-for-byte with TempestMAx's Axis::setCubic.
-    //   isLivePoint : bare high-rate v3 point (no I, no G)
-    InterpSegment seg;
-    seg.targetPos   = position;
-    seg.durationUs  = duration_ms * 1000UL;
-    seg.endSlope    = slope;
-    seg.hasSlope    = hasSlope;
-    seg.hasDuration = hasDuration;
-    seg.isLivePoint = (!hasSlope && !hasDuration);
+    // Build a POD slopmotion::Command and hand it to the Core-1 sampler. The
+    // engine owns ALL trajectory shaping (quintic waveform for timed points,
+    // Ruckig chase/guard otherwise); main.cpp only translates parser output.
+    //   target   : normalized 0..1 magnitude (engine window == TCode 0..1)
+    //   duration : I<ms> * 1000 (engine treats < 50 ms as a chase point)
+    //   end_vel  : wire G / 1000 → normalized units per SECOND (the engine
+    //              speaks physical velocity, not the raw MFP slope encoding)
+    slopmotion::Command cmd;
+    cmd.target       = position;
+    cmd.duration_us  = duration_ms * 1000UL;
+    cmd.end_vel      = slope / 1000.0f;
+    cmd.has_end_vel  = hasSlope;
+    cmd.has_duration = hasDuration;
     // Live motion-command path: a full queue means the Core-1 sampler is
-    // stalled or overloaded and this segment is LOST. Count it and log
-    // (rate-limited) — a silently-dropped TCode segment is a motion glitch
+    // stalled or overloaded and this command is LOST. Count it and log
+    // (rate-limited) — a silently-dropped TCode command is a motion glitch
     // with no trace otherwise. :3
-    if (g_interp_queue && xQueueSend(g_interp_queue, &seg, 0) != pdTRUE) {
+    if (g_interp_queue && xQueueSend(g_interp_queue, &cmd, 0) != pdTRUE) {
         static uint32_t interp_drops = 0;
         interp_drops++;
-        SLOGW_EVERY_MS(2000, "sys", "Interp queue FULL — %lu TCode segment(s) dropped; sampler stalled?",
+        SLOGW_EVERY_MS(2000, "sys", "SlopMotion queue FULL — %lu TCode command(s) dropped; sampler stalled?",
                        (unsigned long)interp_drops);
     }
 
@@ -362,11 +361,12 @@ static void motorTask(void* /*param*/) {
     }
 }
 
-// Core 1 — real-time: v0.4 interpolator sampler. Commits Core-0 segments onto
-// the MotionInterpolator, samples its cubic at ~1kHz, and feeds the arbiter's
-// stream fast-path (submitStreamSample). Publishes interp telemetry for the
-// WebUI overlay. Only drives motion while a TCode stream is recently active —
-// otherwise it yields the motor to PatternEngine / manual moves. :3
+// Core 1 — real-time: SlopMotion sampler. Plans Core-0 commands on the
+// slopmotion::Engine (quintic waveform / Ruckig chase + guard, CLAUDE.md
+// §7.6), samples the plan at ~1kHz, and feeds the arbiter's stream fast-path
+// (submitStreamSample). Publishes telemetry for the WebUI overlay. Only
+// drives motion while a TCode stream is recently active — otherwise it
+// yields the motor to PatternEngine / manual moves. :3
 static void streamSamplerTask(void* /*param*/) {
     TickType_t lastWake     = xTaskGetTickCount();
     bool       wasActive    = false;
@@ -390,7 +390,7 @@ static void streamSamplerTask(void* /*param*/) {
         // re-command doesn't drop-then-reacquire. :3
         bool recentPacket = g_state.last_intiface_ms != 0 &&
                             (now_ms - g_state.last_intiface_ms < STREAM_IDLE_TIMEOUT_MS);
-        bool interpBusy   = g_interp.isBusy(nowUs);
+        bool interpBusy   = g_slopmotion.isBusy(nowUs);
 
         // Trailing hold measured from MOVE-END, not packet arrival. While the
         // curve is gliding we keep stamping lastMotionMs; once it settles to a
@@ -414,59 +414,99 @@ static void streamSamplerTask(void* /*param*/) {
         bool streamActive = gatesOk && !patternClaims &&
                             (interpBusy || recentPacket || postMoveHold);
 
-        // Rising edge: seed the interpolator at the actual current position so a
-        // new stream starts from where the shaft really is (no stale segment).
+        // Rising edge: seed the engine at the actual current position so a
+        // new stream starts from where the shaft really is (no stale plan).
         if (streamActive && !wasActive) {
             float span      = mapper.getMaxMm() - mapper.getMinMm();
             float actual_mm = g_state.actual_position_mm.load(std::memory_order_relaxed);
             float norm      = (span > 0.01f) ? (actual_mm - mapper.getMinMm()) / span : 0.5f;
-            g_interp.reset(constrain(norm, 0.0f, 1.0f));
+            g_slopmotion.resetAt(constrain(norm, 0.0f, 1.0f), nowUs);
         }
 
-        // Push the live WebUI overshoot-clamp toggle into the interpolator so a
-        // change takes effect on the next committed segment. Cheap bool store on
-        // the same core that reads it in commit() — no lock needed.
-        g_interp.setClampOvershoot(g_state.interp_clamp_overshoot);
+        // Push the live tuning (POST /api/slopmotion, Core 0) into the engine.
+        // Ceilings derive from the mm-domain INPUT limit set over the stroke
+        // window (1 normalized unit == the window span), overridable for bench
+        // tuning; jmax is a direct tunable (no mm-domain source exists yet).
+        // Same-core with commit() — no lock. Runs every tick: 10 scalar copies.
+        {
+            slopmotion::Config smCfg;
+            const float span = mapper.getMaxMm() - mapper.getMinMm();
+            const float vovr = g_state.sm_tune_vmax_ovr;
+            const float aovr = g_state.sm_tune_amax_ovr;
+            smCfg.limits.vmax = vovr > 0.0f ? vovr
+                : (span > 1.0f ? g_state.config.input_max_speed_mm_s  / span : 3.0f);
+            smCfg.limits.amax = aovr > 0.0f ? aovr
+                : (span > 1.0f ? g_state.config.input_max_accel_mm_s2 / span : 30.0f);
+            smCfg.limits.jmax      = g_state.sm_tune_jmax;
+            smCfg.chase_feedforward = g_state.sm_tune_chase_ff;
+            smCfg.chase_accel_ff    = g_state.sm_tune_chase_aff;
+            smCfg.chase_ff_gain     = g_state.sm_tune_chase_gain;
+            smCfg.chase_lookahead   = g_state.sm_tune_chase_look;
+            smCfg.chase_dense_us    = g_state.sm_tune_dense_us;
+            g_slopmotion.setConfig(smCfg);
+            g_state.sm_eff_vmax = smCfg.limits.vmax;
+            g_state.sm_eff_amax = smCfg.limits.amax;
+        }
 
-        // Drain the Core-0 → Core-1 segment handoff, committing each onto the curve.
-        InterpSegment seg;
-        while (xQueueReceive(g_interp_queue, &seg, 0) == pdTRUE) {
-            g_interp.commit(seg, nowUs);
+        // Drain the Core-0 → Core-1 command handoff; each commit is ONE plan.
+        // Plan time is the software-double cost — benched right here, where it
+        // runs, and surfaced via GET /api/slopmotion (the §7.6 part-2 gate).
+        slopmotion::Command cmd;
+        while (xQueueReceive(g_interp_queue, &cmd, 0) == pdTRUE) {
+            const uint32_t t0 = (uint32_t)esp_timer_get_time();
+            g_slopmotion.commit(cmd, nowUs);
+            const uint32_t dt = (uint32_t)esp_timer_get_time() - t0;
+            g_state.sm_plan_us_last = dt;
+            if (dt > g_state.sm_plan_us_max) g_state.sm_plan_us_max = dt;
+            g_state.sm_plan_us_avg = g_state.sm_plan_us_avg <= 0.0f
+                ? (float)dt
+                : 0.9f * g_state.sm_plan_us_avg + 0.1f * (float)dt;
         }
 
         if (streamActive) {
-            float pos = g_interp.positionAt(nowUs);
-            float vel = g_interp.velocityAt(nowUs);
+            float pos = g_slopmotion.positionAt(nowUs);
+            float vel = g_slopmotion.velocityAt(nowUs);
             arbiter.submitStreamSample(pos, vel);
 
-            // Publish interp telemetry for the WebUI planned-path overlay.
-            InterpDebug d = g_interp.snapshot(nowUs);
-            g_state.interp_start_pos   = d.startPos;
-            g_state.interp_end_pos     = d.endPos;
-            g_state.interp_cur_pos     = d.curPos;
-            g_state.interp_cur_vel     = d.curVel;
-            g_state.interp_duration_us = d.durationUs;
-            g_state.interp_elapsed_us  = d.elapsedUs;
-            g_state.interp_live_mode   = d.liveMode;
-            g_state.interp_grad_mode   = d.gradMode;
-            g_state.interp_style       = d.style;
+            // Publish telemetry for the WebUI planned-path overlay. Field
+            // mapping onto the legacy interp_* slots (honest approximations;
+            // proper SlopMotion telemetry lands with the WebUI refactor):
+            // live_mode = chasing, grad_mode = quintic plan, style = Mode.
+            slopmotion::Snapshot d = g_slopmotion.snapshot(nowUs);
+            g_state.interp_start_pos   = d.start;
+            g_state.interp_end_pos     = d.target;
+            g_state.interp_cur_pos     = d.pos;
+            g_state.interp_cur_vel     = d.vel;
+            g_state.interp_duration_us = (uint32_t)(d.duration_s * 1e6f);
+            g_state.interp_elapsed_us  = (uint32_t)(d.elapsed_s * 1e6f);
+            g_state.interp_live_mode   = (d.mode == (uint8_t)slopmotion::Mode::Chase);
+            g_state.interp_grad_mode   = (d.plan_kind == (uint8_t)slopmotion::PlanKind::Quintic);
+            g_state.interp_style       = d.mode;
             g_state.interp_active      = true;
+            g_state.sm_mode      = d.mode;
+            g_state.sm_plan_kind = d.plan_kind;
+            g_state.sm_plans     = d.plans;
+            g_state.sm_failures  = d.failures;
         } else if (wasActive) {
             g_state.interp_active = false;
         }
 
-        // Drain the interpolator's Core-1-local anomaly ring into the cross-core
-        // ring for the WebUI's 0x05 ANOMALY feed. Done unconditionally (not gated
-        // on streamActive) so a decel-overrun fired as a stream ends still lands.
-        // popAnomaly() is a cheap FIFO pop; the portMUX section is only entered
-        // when there's actually something to publish. :3
+        // Drain the engine's anomaly ring. ROUGH-IN: counted + logged via
+        // SlopLog (kinds don't map onto the legacy InterpAnomaly wire codes,
+        // and a mislabeled anomaly feed is worse than a quiet one — the 0x05
+        // WS frame goes silent until the WebUI refactor plumbs the new kinds).
         {
-            InterpAnomaly ev;
-            while (g_interp.popAnomaly(ev)) {
-                portENTER_CRITICAL(&g_state.anom_mux);
-                g_state.anom_ring[g_state.anom_write % SystemState::ANOM_CAP] = ev;
-                g_state.anom_write++;
-                portEXIT_CRITICAL(&g_state.anom_mux);
+            static const char* kSmAnomNames[] = {
+                "none", "plan-failed", "settle", "endvel-clamped",
+                "deadline-stretched", "waveform-fallback" };
+            slopmotion::Anomaly ev;
+            while (g_slopmotion.popAnomaly(ev)) {
+                g_state.sm_anomalies = g_state.sm_anomalies + 1;
+                const char* nm = ev.kind < 6 ? kSmAnomNames[ev.kind] : "?";
+                SLOGD_EVERY_MS(1000, "motion",
+                               "slopmotion %s target=%.3f detail=%.3f (total %lu)",
+                               nm, (double)ev.target, (double)ev.detail,
+                               (unsigned long)g_state.sm_anomalies);
             }
         }
 
@@ -776,8 +816,8 @@ void setup() {
 
     transportMgr.applyTransport(g_state.getTransport());
 
-    // v0.4 interpolator segment queue — Core 0 (buttplugLinearCmd) → Core 1 sampler
-    g_interp_queue = xQueueCreate(INTERP_QUEUE_DEPTH, sizeof(InterpSegment));
+    // SlopMotion command queue — Core 0 (buttplugLinearCmd) → Core 1 sampler
+    g_interp_queue = xQueueCreate(INTERP_QUEUE_DEPTH, sizeof(slopmotion::Command));
     configASSERT(g_interp_queue != nullptr);
 
     // Create FreeRTOS tasks. Every creation is checked — a boot-critical task
@@ -793,8 +833,11 @@ void setup() {
     // motorTask: Core 1, priority 3 — homing + D4 deferred-intent consumer
     task_ok = xTaskCreatePinnedToCore(motorTask, "Motor", 4096, nullptr, 3, nullptr, 1);
     configASSERT(task_ok == pdPASS);
-    // streamSamplerTask: Core 1, priority 4 — v0.4 interpolator cubic sampler
-    task_ok = xTaskCreatePinnedToCore(streamSamplerTask, "Sampler", 4096, nullptr, 4, nullptr, 1);
+    // streamSamplerTask: Core 1, priority 4 — SlopMotion sampler. 16 KB stack:
+    // commit() nests Ruckig temporaries (InputParameter 328 B + Trajectory
+    // 2.2 KB per frame, measured on xtensa) — the 4 KB stack that fit the
+    // cubic is exactly the HubSession stack-bomb class waiting to recur. :3
+    task_ok = xTaskCreatePinnedToCore(streamSamplerTask, "Sampler", 16384, nullptr, 4, nullptr, 1);
     configASSERT(task_ok == pdPASS);
     task_ok = xTaskCreatePinnedToCore(commsTask, "Comms", 6144, nullptr, 2, nullptr, 0);
     configASSERT(task_ok == pdPASS);

@@ -166,6 +166,7 @@ struct Snapshot {
     float    pos        = 0.5f;
     float    vel        = 0.0f;   // units/s
     float    acc        = 0.0f;   // units/s^2
+    float    start      = 0.5f;   // active plan's start position
     float    target     = 0.5f;   // active plan's end position
     float    duration_s = 0.0f;   // active plan duration (0 = holding)
     float    elapsed_s  = 0.0f;
@@ -208,6 +209,9 @@ public:
         _cfg.chase_feedforward = on;
         _cfg.chase_ff_gain     = gain;
     }
+    // Wholesale live-tuning update (firmware pushes the WebUI/API-tuned
+    // config every sampler tick — same-core with commit(), no lock needed).
+    void setConfig(const Config& c) { _cfg = c; }
 
     // ---- Command entry (Core 1, after queue drain) -------------------------
     // Plan a new trajectory NOW from the current sampled state. Returns false
@@ -293,11 +297,16 @@ public:
             double pe, ve, ae;
             planEndState(pe, ve, ae);
             s.target     = (float)clamp01(pe);
+            double ps, vs, as;
+            if (_kind == PlanKind::Quintic) quinticAt(0.0, ps, vs, as);
+            else                            _traj.at_time(0.0, ps, vs, as);
+            s.start      = (float)clamp01(ps);
             s.duration_s = (float)planDuration();
             const double el = elapsedS(now_us);
             s.elapsed_s  = (float)(el < planDuration() ? el : planDuration());
         } else {
             s.target = (float)_hold_pos;
+            s.start  = (float)_hold_pos;
         }
         s.mode      = (uint8_t)_mode;
         s.plan_kind = (uint8_t)_kind;

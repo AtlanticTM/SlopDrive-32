@@ -111,6 +111,8 @@ void WebUI::init() {
     _httpServer->on("/api/mode",      HTTP_POST, [this]() { handleApiMode(); });
     _httpServer->on("/api/clients",   HTTP_GET,  [this]() { handleApiClients(); });
     _httpServer->on("/api/clients",   HTTP_POST, [this]() { slopglowActivity(); handleApiClients(); });
+    _httpServer->on("/api/slopmotion", HTTP_GET,  [this]() { handleApiSlopMotion(); });
+    _httpServer->on("/api/slopmotion", HTTP_POST, [this]() { slopglowActivity(); handleApiSlopMotion(); });
     _httpServer->on("/api/machine",        HTTP_GET,  [this]() { handleApiMachine(); });
     _httpServer->on("/api/machine/commit", HTTP_POST, [this]() { slopglowActivity(); handleApiMachineCommit(); });
     _httpServer->on("/api/machine/homeoverride", HTTP_POST, [this]() { slopglowActivity(); handleApiHomeOverride(); });
@@ -1604,6 +1606,88 @@ void WebUI::handleApiHomeOverride() {
     resp["home_override"] = on;
     resp["homed"] = _state.homed;
     _bumpGen();
+
+    String json;
+    serializeJson(resp, json);
+    _httpServer->send(200, "application/json", json);
+}
+
+// ============================================================================
+// handleApiSlopMotion (HTTP GET + POST) — SlopMotion live-tuning ROUGH-IN
+// ============================================================================
+// Curl-driven bench tuning until the WebUI refactor grows a proper card.
+// POST writes the sm_tune_* fields in SystemState (Core 0 single-writer);
+// the Core-1 sampler pushes them into the engine every tick, so a change is
+// live within ~1 ms. Values are clamped HERE and the response echoes the
+// APPLIED values (ground-truth doctrine — never echo the raw request).
+// Nothing persists: a reboot restores compile-time defaults, which is the
+// desired behavior for a tuning session (no way to brick the feel in NVS).
+void WebUI::handleApiSlopMotion() {
+    if (_httpServer->method() == HTTP_POST) {
+        JsonDocument doc;
+        if (deserializeJson(doc, _httpServer->arg("plain"))) {
+            _httpServer->send(400, "application/json", "{\"error\":\"Invalid JSON\"}");
+            return;
+        }
+        auto clampf = [](float v, float lo, float hi) {
+            return v < lo ? lo : (v > hi ? hi : v);
+        };
+        if (doc["jmax"].is<float>())
+            _state.sm_tune_jmax = clampf(doc["jmax"], 10.0f, 20000.0f);
+        if (doc["vmax_ovr"].is<float>())          // 0 = derive from mm limits
+            _state.sm_tune_vmax_ovr = clampf(doc["vmax_ovr"], 0.0f, 20.0f);
+        if (doc["amax_ovr"].is<float>())          // 0 = derive from mm limits
+            _state.sm_tune_amax_ovr = clampf(doc["amax_ovr"], 0.0f, 500.0f);
+        if (doc["chase_ff"].is<bool>())
+            _state.sm_tune_chase_ff = doc["chase_ff"].as<bool>();
+        if (doc["chase_accel_ff"].is<bool>())
+            _state.sm_tune_chase_aff = doc["chase_accel_ff"].as<bool>();
+        if (doc["chase_gain"].is<float>())
+            _state.sm_tune_chase_gain = clampf(doc["chase_gain"], 0.0f, 1.5f);
+        if (doc["chase_lookahead"].is<float>())
+            _state.sm_tune_chase_look = clampf(doc["chase_lookahead"], 0.0f, 8.0f);
+        if (doc["chase_dense_ms"].is<float>())
+            _state.sm_tune_dense_us =
+                (uint32_t)(clampf(doc["chase_dense_ms"], 10.0f, 500.0f) * 1000.0f);
+        if (doc["reset_stats"].as<bool>()) {
+            _state.sm_plan_us_max  = 0;
+            _state.sm_plan_us_avg  = 0.0f;
+            _state.sm_anomalies    = 0;
+        }
+        SLOGI("ui", "slopmotion tuning: jmax=%.0f gain=%.2f look=%.2f ff=%d aff=%d",
+              (double)_state.sm_tune_jmax, (double)_state.sm_tune_chase_gain,
+              (double)_state.sm_tune_chase_look,
+              (int)_state.sm_tune_chase_ff, (int)_state.sm_tune_chase_aff);
+    }
+
+    // GET and POST both answer with the full applied state.
+    static const char* kModeNames[] = { "idle", "waveform", "chase", "settle" };
+    static const char* kKindNames[] = { "none", "quintic", "ruckig" };
+    JsonDocument resp;
+    JsonObject tuning = resp["tuning"].to<JsonObject>();
+    tuning["jmax"]            = _state.sm_tune_jmax;
+    tuning["vmax_ovr"]        = _state.sm_tune_vmax_ovr;
+    tuning["amax_ovr"]        = _state.sm_tune_amax_ovr;
+    tuning["chase_ff"]        = (bool)_state.sm_tune_chase_ff;
+    tuning["chase_accel_ff"]  = (bool)_state.sm_tune_chase_aff;
+    tuning["chase_gain"]      = _state.sm_tune_chase_gain;
+    tuning["chase_lookahead"] = _state.sm_tune_chase_look;
+    tuning["chase_dense_ms"]  = _state.sm_tune_dense_us / 1000.0f;
+    JsonObject eff = resp["effective"].to<JsonObject>();
+    eff["vmax"] = _state.sm_eff_vmax;   // normalized units/s (window span = 1)
+    eff["amax"] = _state.sm_eff_amax;
+    eff["jmax"] = _state.sm_tune_jmax;
+    JsonObject stats = resp["stats"].to<JsonObject>();
+    stats["active"]       = (bool)_state.interp_active;
+    stats["mode"]         = kModeNames[_state.sm_mode < 4 ? _state.sm_mode : 0];
+    stats["plan_kind"]    = kKindNames[_state.sm_plan_kind < 3 ? _state.sm_plan_kind : 0];
+    stats["plans"]        = _state.sm_plans;
+    stats["failures"]     = _state.sm_failures;
+    stats["anomalies"]    = _state.sm_anomalies;
+    stats["plan_us_last"] = _state.sm_plan_us_last;
+    stats["plan_us_max"]  = _state.sm_plan_us_max;
+    stats["plan_us_avg"]  = _state.sm_plan_us_avg;
+    resp["persist"] = false;   // reboot = defaults, by design (rough-in)
 
     String json;
     serializeJson(resp, json);

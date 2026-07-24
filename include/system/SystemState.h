@@ -322,6 +322,35 @@ struct SystemState {
     volatile uint32_t      anom_read  = 0;   // total events drained    (Core 0)
     portMUX_TYPE           anom_mux   = portMUX_INITIALIZER_UNLOCKED;
 
+    // ---- SlopMotion live tuning (ROUGH-IN — WebUI card lands with the UI
+    // refactor; until then this is driven by GET/POST /api/slopmotion). -------
+    // Core 0 (HTTP handler) writes the sm_tune_* fields; Core 1's sampler
+    // pushes them into the slopmotion::Engine every tick, so a POST takes
+    // effect within ~1 ms. Aligned 32-bit scalars, single writer per field —
+    // same lock-free pattern as interp_clamp_overshoot above. NOT persisted:
+    // reboot restores compile-time defaults (deliberate for a tuning session).
+    volatile float         sm_tune_jmax        = 500.0f; // units/s^3 (no mm-domain source yet)
+    volatile float         sm_tune_vmax_ovr    = 0.0f;   // >0 overrides mm-derived vmax (units/s)
+    volatile float         sm_tune_amax_ovr    = 0.0f;   // >0 overrides mm-derived amax (units/s^2)
+    volatile bool          sm_tune_chase_ff    = true;   // chase velocity feedforward
+    volatile bool          sm_tune_chase_aff   = true;   // chase curvature (accel) feedforward
+    volatile float         sm_tune_chase_gain  = 0.9f;   // estimate damping 0..1.5
+    volatile float         sm_tune_chase_look  = 3.0f;   // predictive aim, intervals
+    volatile uint32_t      sm_tune_dense_us    = 60000;  // dense-stream gate (mean interval)
+
+    // ---- SlopMotion telemetry back-channel (Core 1 writes, Core 0 reads) ----
+    volatile float         sm_eff_vmax    = 0.0f;  // applied normalized ceilings
+    volatile float         sm_eff_amax    = 0.0f;  //   (post-derivation/override)
+    volatile uint32_t      sm_plans       = 0;     // successful plans since stream seed
+    volatile uint32_t      sm_failures    = 0;     // rejected plans since stream seed
+    volatile uint32_t      sm_anomalies   = 0;     // total anomaly events (all kinds)
+    volatile uint8_t       sm_mode        = 0;     // slopmotion::Mode
+    volatile uint8_t       sm_plan_kind   = 0;     // slopmotion::PlanKind
+    // Plan-time bench (the software-double cost, measured where it runs):
+    volatile uint32_t      sm_plan_us_last = 0;
+    volatile uint32_t      sm_plan_us_max  = 0;    // POST {"reset_stats":true} clears
+    volatile float         sm_plan_us_avg  = 0.0f; // EMA(0.1)
+
     // --------------------------------------------------------------------------
     // Convenience helpers — zero-cost inline
     // --------------------------------------------------------------------------

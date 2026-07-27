@@ -27,9 +27,40 @@ import {
   createSession, CHANNEL_CLASS, PRIORITY, NACK, acquireToken, getInstanceId, toHex,
 } from '../core/slopsync/index.js';
 import { buildSettingsModel } from './settings.js';
+import { ROLE } from './roles.js';
 
 /** Highest rate we can actually paint. Everything is capped to this. */
 const DRAW_HZ = 30;
+
+/**
+ * Live kinematic telemetry (the rail comet: position/target/velocity) gets
+ * its OWN subscribe rate instead of DRAW_HZ — measured, not guessed, against
+ * the real device with the carriage moving (webui/test/position-jitter-probe.mjs).
+ *
+ * The hub paces each STATE subscription on its own SlopSyncHubService task
+ * tick (firmware: 5 ms — SPEC's pacer truncates `periodMs = 1000/rate_hz` to
+ * whole ms and only checks it at tick boundaries). The closer a channel's
+ * wished period sits to that 5 ms grain, the more the delivery shows
+ * duplicate-timestamp/burst artifacts: measured on-device, 60 Hz (16.7 ms
+ * period) produced duplicate-timestamped pushes on ~9% of samples and a
+ * visibly heavier tail (p95/max inter-arrival, implied-acceleration p95) than
+ * 25 Hz (40 ms = exactly 8 hub ticks), which measured ZERO duplicates and the
+ * tightest p95/max-vs-median ratio of every rate from 20-60 Hz tried under a
+ * full realistic subscription load (all ~30 channels live, not isolated).
+ * "Draw at 60 fps so subscribe near 60 Hz" (this file's old DRAW_HZ reasoning)
+ * is backwards for this specific wire: going faster made the raw telemetry
+ * measurably choppier, not smoother — the render-side interpolator
+ * (ui/hero/telebuf.js) is what turns a clean 25 Hz feed into a 60 fps-looking
+ * readout, not a higher subscribe rate.
+ *
+ * Only the three ROLES that feed the rail's live comet/numerals get this
+ * treatment; every other channel (settings, diagnostics, tuning) keeps the
+ * DRAW_HZ policy — this is not "subscribe to everything faster", it is
+ * "the one signal a human's eye tracks in real time gets a rate chosen for
+ * pacing quality, not for how fast the browser could theoretically draw it".
+ */
+const TELEMETRY_HZ = 25;
+const TELEMETRY_ROLES = new Set([ROLE.telemetryPosition, ROLE.telemetryTarget, ROLE.telemetryVelocity]);
 
 /** Bounded rings — an EVENT channel is a firehose and memory is not free. */
 const LOG_MAX = 400;
@@ -125,17 +156,23 @@ export function isLive() {
  * ONE combined wish list — STATE and EVENT wishes mixed in the same frame.
  * RFC-033 settled this: mixing classes in one SUBSCRIBE is, and always was,
  * legal. See subscribeInBatches() for the field bug this used to be blamed on.
+ *
+ * `telemetryChanIds` (from the telemetryChannelIds() helper below) gets
+ * TELEMETRY_HZ instead of DRAW_HZ — see that constant's header for why.
  */
-function subscriptionWishes(entries, maxSubs) {
+function subscriptionWishes(entries, maxSubs, telemetryChanIds) {
   const wishes = [];
   for (const e of entries) {
     if (e.dir !== 0) continue;                       // h2c only; we do not publish
     if (e.cls !== CHANNEL_CLASS.STATE && e.cls !== CHANNEL_CLASS.EVENT) continue;
     // EVENTs are edge-driven; a rate on them is meaningless. On-change STATE
     // channels advertise 0 and mean it.
-    const rate = (e.cls === CHANNEL_CLASS.EVENT || !e.maxRateHz)
+    let rate = (e.cls === CHANNEL_CLASS.EVENT || !e.maxRateHz)
       ? 0
       : Math.min(e.maxRateHz, DRAW_HZ);
+    if (telemetryChanIds && telemetryChanIds.has(e.id) && e.maxRateHz) {
+      rate = Math.min(e.maxRateHz, TELEMETRY_HZ);
+    }
     wishes.push([e.id, rate, e.priority != null ? e.priority : PRIORITY.background]);
   }
 
@@ -198,6 +235,17 @@ function subscribeInBatches(wishes) {
   for (let i = 0; i < wishes.length; i += budget) {
     session.subscribe(wishes.slice(i, i + budget));
   }
+}
+
+/** Channel ids carrying any of TELEMETRY_ROLES on this machine, by role — never a hardcoded id. */
+function telemetryChannelIds(model) {
+  const ids = new Set();
+  if (!model || !model.byRole) return ids;
+  for (const role of TELEMETRY_ROLES) {
+    const list = model.byRole.get(role);
+    if (list) for (const f of list) ids.add(f.channelId);
+  }
+  return ids;
 }
 
 // ---------------------------------------------------------------------------
@@ -277,7 +325,7 @@ export function connect(opts = {}) {
     // per-frame wish count, which subscribeInBatches() sizes from the hub's
     // own advertised cap. See that function's header for the corrected story.
     const lim = machine.link.limits.max_subscriptions;
-    subscribeInBatches(subscriptionWishes(entries, lim));
+    subscribeInBatches(subscriptionWishes(entries, lim, telemetryChannelIds(machine.catalog.model)));
   });
 
   session.on('grant', (grants) => {

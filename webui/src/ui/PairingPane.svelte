@@ -1,31 +1,58 @@
 <script>
   /**
-   * PairingPane.svelte — the knock-and-approve ceremony, finally reachable.
+   * PairingPane.svelte — the knock-and-approve ceremony, AND the joiner's
+   * side of it, both reachable now.
    *
    * The protocol has had all of this working for a while: a joiner sends
    * PAIR_REQ, the hub parks it in a bounded pending list, publishes that list
    * as ordinary STATE, and any `configure` session approves or denies it over
-   * the session-admin INTENT. Every piece shipped. Nothing ever RENDERED it, so
-   * the MFP plugin's knock went into a void and the operator saw nothing.
+   * the session-admin INTENT. That half shipped first and is unchanged below
+   * (see `decide()`). What was missing is the OTHER half: this client itself
+   * never sent a PAIR_REQ, so a browser stuck at `watch`/`control` had no way
+   * to become the joiner and ask for `configure` — the exact gap this file
+   * now closes.
    *
-   * ── Why this pane can be honest about being unusable ───────────────────────
+   * ── Why /uitoken can never do this ──────────────────────────────────────
    *
-   * The pending-pairing channel requires `configure` to even subscribe to, and
-   * a browser that bootstrapped on /uitoken gets `control` — deliberately, so a
-   * credential anything on the LAN can mint cannot hand out permanent ones.
-   * That means this pane is often NOT usable, and the correct behaviour is to
-   * say so and explain the way out, rather than render an empty list that looks
-   * like "nobody is asking".
+   * `/uitoken` mints a single-use, short-lived `control` credential to
+   * anything on the LAN that can HTTP GET — that is deliberate (see
+   * `validateToken` in src/comms/SlopSyncHubService.cpp): a credential
+   * anything can mint must never be a PERMANENT one, and `configure` is
+   * permanent. The ONLY route to `configure` is a pairing ceremony (RFC-027),
+   * because a ceremony requires something /uitoken cannot forge: either an
+   * operator who already holds `configure` approving you, or physical
+   * possession of the machine's power cord.
+   *
+   * ── The three ceremonies (RFC-027 §12.2), and which this pane can start ──
+   *
+   *   (a) knock-and-approve — this client sends a bare PAIR_REQ (no proof),
+   *       the hub parks it, and it sits until ANY `configure` session
+   *       approves or denies it over 0x0009. `sendPairReq()` below is
+   *       ALWAYS this shape — this pane never types or shows a PIN.
+   *   (b) PIN proof — a keyboard ceremony this pane does not implement.
+   *   (c) push-to-pair — a PHYSICAL-PRESENCE proof (three quick power-cycles,
+   *       see `checkQuickBootPairingGesture()` in SlopSyncHubService.cpp)
+   *       opens a 120s window in which the FIRST bare knock — the exact same
+   *       PAIR_REQ this pane already sends for mode (a) — is granted with NO
+   *       approval needed. Whether a knock lands as (a) or (c) is decided
+   *       entirely by the hub's window state at the moment it arrives; this
+   *       pane cannot request one over the other.
    *
    * ── Channel discovery ──────────────────────────────────────────────────────
    *
-   * Located by SPEC-CORE NAME, never by a literal id. These channels are part
-   * of the protocol itself and exist on every conforming hub, so binding to
-   * their names is portable in exactly the way binding to a device's own
-   * channel numbers is not.
+   * The 0x000A/0x0009 admin surface is located by SPEC-CORE NAME, never by a
+   * literal id — these channels are part of the protocol itself and exist on
+   * every conforming hub, so binding to their names is portable in exactly
+   * the way binding to a device's own channel numbers is not. The pending
+   * list requires `configure` to even subscribe, so a `watch`/`control`
+   * session never sees it (correct — see the locked-state note below); the
+   * live tier/pairing-modes/window-open signals this pane's OWN ceremony
+   * relies on instead come off session-level events (welcome/pairGrant/event)
+   * that exist for any session, at any tier.
    */
   import { machine, getSession } from '../model/machine.svelte.js';
-  import { ACCESS } from '../core/slopsync/index.js';
+  import { ACCESS, ACCESS_NAME, NACK, bytesEqual, getInstanceId, setPairedToken } from '../core/slopsync/index.js';
+  import { PAIRING_MODE, PAIRING_MODE_NAME, PAIRING_EVENT_KIND } from '../core/slopsync/frames.js';
 
   const entryNamed = (n) => machine.catalog.entries.find((e) => e.name === n) || null;
 
@@ -33,9 +60,80 @@
   const adminEntry = $derived(entryNamed('session-admin'));
   const sample = $derived(pendingEntry ? machine.samples[pendingEntry.id] : null);
 
-  const canAdminister = $derived(
-    adminEntry ? (machine.link.roles | 0) >= (adminEntry.access | 0) : false
+  // ── live tier + pairing-surface state, mirrored from session-level events ──
+  //
+  // Why this pane keeps its OWN copy instead of reading `machine.link.roles`:
+  // hub_impl.hpp upgrades a session's role IN PLACE the instant PAIR_GRANT is
+  // sent — no reconnect required — and this pane has to reflect that the
+  // moment it happens (GROUND TRUTH: never show a stale tier once the hub has
+  // said otherwise). `session.state.roles` is updated immediately by
+  // session.js's PAIR_GRANT handler; `liveRoles` here just mirrors it into a
+  // Svelte rune so the template reacts to it. Other cards catch up to the new
+  // tier on their own next WELCOME (a reconnect), which is a narrower
+  // staleness window than this pane can fix on its own — it does not touch
+  // model/machine.svelte.js, which other cards read from.
+  let liveRoles = $state(machine.link.roles | 0);
+  let pairingModes = $state(0);
+  let liveWindowOpen = $state(false);
+  let boundSession = null;
+
+  $effect(() => {
+    // Reactive retrigger: if this pane mounts before connect() has created a
+    // session, `getSession()` is null and this effect must run again once the
+    // link progresses — reading `machine.link.phase` here is what makes that
+    // happen, exactly the way canAdminister already depends on machine.link.
+    void machine.link.phase;
+    const s = getSession();
+    if (!s || s === boundSession) return;
+    boundSession = s;
+
+    const syncRoles = () => { liveRoles = s.state.roles || 0; };
+    syncRoles();
+
+    const offWelcome = s.on('welcome', (w) => {
+      syncRoles();
+      pairingModes = w.pairingModes || 0;
+      // WELCOME's bitmask is a snapshot at connect time; window_opened/closed
+      // EVENTs (below) keep it live for the rest of the session.
+      liveWindowOpen = (pairingModes & PAIRING_MODE.push_to_pair) !== 0;
+    });
+    const offGrant = s.on('grant', syncRoles);
+    const offPairGrant = s.on('pairGrant', (g) => { syncRoles(); onPairGrant(g); });
+    const offEvent = s.on('event', (evt) => {
+      if (evt.channelName !== 'pairing-events') return;
+      if (evt.kind === PAIRING_EVENT_KIND.window_opened) liveWindowOpen = true;
+      else if (evt.kind === PAIRING_EVENT_KIND.window_closed) liveWindowOpen = false;
+      onPairingEvent(evt);
+    });
+    const offNack = s.on('nack', (n) => {
+      if (n.code === NACK.PAIRING_REQUIRED || n.code === NACK.PAIRING_DENIED || n.code === NACK.BUSY) {
+        onPairingNack(n);
+      }
+    });
+
+    return () => {
+      offWelcome(); offGrant(); offPairGrant(); offEvent(); offNack();
+      if (boundSession === s) boundSession = null;
+    };
+  });
+
+  const tierName = $derived(ACCESS_NAME[liveRoles] || String(liveRoles));
+  const modesOffered = $derived(
+    [PAIRING_MODE.knock_approve, PAIRING_MODE.pin_proof, PAIRING_MODE.push_to_pair]
+      .filter((bit) => (pairingModes & bit) !== 0)
+      .map((bit) => PAIRING_MODE_NAME[bit])
   );
+
+  const canAdminister = $derived(
+    adminEntry ? liveRoles >= (adminEntry.access | 0) : false
+  );
+
+  // Either signal proves the same underlying hub state; only one is usually
+  // reachable at a time (0x000A needs `configure`, so a not-yet-paired
+  // session only ever has the WELCOME/0x000B route — exactly the case this
+  // pane exists to serve).
+  const windowOpenFromRoster = $derived(!!(sample && sample.flags_bits && sample.flags_bits.window_open));
+  const windowOpen = $derived(windowOpenFromRoster || liveWindowOpen);
 
   /** The op-select field and its option labels, read off the catalog. */
   const opField = $derived(adminEntry && adminEntry.schema
@@ -72,8 +170,6 @@
     return out;
   });
 
-  const windowOpen = $derived(!!(sample && sample.flags_bits && sample.flags_bits.window_open));
-
   let busy = $state(null);
   let result = $state(null);
 
@@ -106,6 +202,67 @@
       busy = null;
     }
   }
+
+  // ── this client's OWN knock: send, then watch for the answer ────────────
+
+  let claiming = $state(false);
+  let claimResult = $state(null); // {ok: true|false|null, msg}
+  let claimTimer = null;
+
+  function ownKnockEvent(evt) {
+    const id = evt.body && evt.body.instance_id;
+    return id instanceof Uint8Array && bytesEqual(id, getInstanceId());
+  }
+
+  function finishClaim(res) {
+    claiming = false;
+    if (claimTimer) { clearTimeout(claimTimer); claimTimer = null; }
+    claimResult = res;
+  }
+
+  function onPairingEvent(evt) {
+    if (!claiming) return;
+    if (evt.kind === PAIRING_EVENT_KIND.knocked && ownKnockEvent(evt)) {
+      // Still pending — just now CONFIRMED delivered (0x000B is a broadcast,
+      // so this is the earliest proof the hub actually queued it).
+      claimResult = { ok: null, msg: 'knock delivered — waiting for an operator to approve it, or for the window to close.' };
+    } else if (evt.kind === PAIRING_EVENT_KIND.denied && ownKnockEvent(evt)) {
+      finishClaim({ ok: false, msg: 'denied by an operator.' });
+    } else if (evt.kind === PAIRING_EVENT_KIND.expired && ownKnockEvent(evt)) {
+      finishClaim({ ok: false, msg: 'the knock expired unanswered after 120s — nobody approved it.' });
+    }
+  }
+
+  function onPairingNack(n) {
+    if (!claiming) return;
+    const msg = n.code === NACK.PAIRING_REQUIRED
+      ? 'refused: knock-and-approve is disabled on this hub, and no pairing window is open right now.'
+      : n.code === NACK.BUSY
+        ? 'refused: the pending-knock list is full — try again shortly.'
+        : 'refused: ' + n.name + (n.detail ? ' — ' + n.detail : '');
+    finishClaim({ ok: false, msg });
+  }
+
+  function onPairGrant(g) {
+    if (g.token) setPairedToken(getSession().host, g.token);
+    const roleName = g.role != null ? (ACCESS_NAME[g.role] || String(g.role)) : 'a higher tier';
+    finishClaim({ ok: true, msg: 'paired at ' + roleName + ' — this browser will use it automatically from now on, including after a reload.' });
+  }
+
+  function startClaim() {
+    const s = getSession();
+    if (!s) return;
+    claimResult = null;
+    const sent = s.sendPairReq();
+    if (!sent) { claimResult = { ok: false, msg: 'not connected yet — try again once the link is live.' }; return; }
+    claiming = true;
+    if (claimTimer) clearTimeout(claimTimer);
+    // Just past the hub's own 120s pending-knock window (limits::pairing_window_default_s):
+    // a genuinely silent outcome (nothing lost, nobody home) resolves by then.
+    claimTimer = setTimeout(() => {
+      if (claiming) finishClaim({ ok: false, msg: 'no response within the pairing window. Nobody approved it, or no window was open — see the instructions below.' });
+    }, 125000);
+  }
 </script>
 
 <section class="pairing">
@@ -116,6 +273,65 @@
     {/if}
   </header>
 
+  <div class="tier">
+    <p>
+      This session is at <strong>{tierName}</strong>.
+      {#if liveRoles >= ACCESS.configure}
+        It already holds <strong>configure</strong> — nothing below is needed.
+      {:else}
+        Pairing is the <strong>only</strong> way to reach <strong>configure</strong> on this
+        machine — the <code>/uitoken</code> bootstrap a browser normally gets is deliberately
+        capped at <strong>control</strong>, because it is a credential anything on the LAN can
+        mint, and a credential like that must never be permanent.
+      {/if}
+    </p>
+    <p class="modes">
+      This hub currently offers:
+      {#if modesOffered.length}
+        {#each modesOffered as m, i}<code>{m}</code>{i < modesOffered.length - 1 ? ', ' : ''}{/each}
+      {:else}
+        <span class="note">nothing right now</span>
+      {/if}
+      {#if !modesOffered.includes('push_to_pair')}
+        <span class="note"> — no physical-presence window is currently open.</span>
+      {/if}
+    </p>
+  </div>
+
+  {#if liveRoles < ACCESS.configure}
+    <div class="claim">
+      <button class="pair-btn" disabled={claiming} onclick={startClaim}>
+        {claiming ? 'Waiting for a response…' : 'Pair this client'}
+      </button>
+      {#if claimResult}
+        <p class="result" class:bad={claimResult.ok === false} class:pending={claimResult.ok === null} role="status">
+          {claimResult.msg}
+        </p>
+      {/if}
+
+      <details class="howto">
+        <summary>How to open a pairing window (claims <strong>configure</strong> with no approval needed)</summary>
+        <ol>
+          <li>Power the machine off, then on again — <strong>three times in a row</strong>, each
+            power-cycle starting within about 10 seconds of the previous boot. (Let it run
+            normally for more than ~10s between cycles and the count resets — start over.)</li>
+          <li>On the third quick cycle, the machine opens a 120-second pairing window and lights
+            its pairing indicator.</li>
+          <li>With this page connected (it will reconnect on its own after each power-cycle),
+            click <strong>Pair this client</strong> above within those 120 seconds.</li>
+        </ol>
+        <p class="note">
+          If nobody has ever paired <strong>configure</strong> on this machine before, the very
+          first knock inside that window becomes <strong>configure</strong> automatically —
+          possession of the power cord is treated as ownership. If this machine has already been
+          claimed once, the same window instead grants <strong>control</strong>, and reaching
+          <strong>configure</strong> needs an existing configure session to approve your knock
+          below via <code>session-admin</code> instead.
+        </p>
+      </details>
+    </div>
+  {/if}
+
   {#if !pendingEntry || !adminEntry}
     <p class="note">This hub does not advertise a pairing surface.</p>
 
@@ -123,21 +339,11 @@
     <!-- The honest version. An empty list here would read as "nobody is
          knocking", when the truth is "you are not allowed to be told". -->
     <div class="locked">
-      <p class="lead">This session cannot approve pairings.</p>
+      <p class="lead">This session cannot approve OTHER clients' pairings.</p>
       <p>
-        Approving requires the <strong>configure</strong> tier. A browser that
-        bootstrapped over <code>/uitoken</code> is granted <strong>control</strong>
-        on purpose — a credential anything on the network can mint must not be
-        able to issue permanent ones.
+        Approving requires the <strong>configure</strong> tier, which this session does not
+        currently hold — see above for how to claim it.
       </p>
-      <p>
-        To claim configure on a machine that has never issued it, open a
-        physical-presence window at the machine and pair from this client while
-        it is open. Possession of the hardware is the root credential.
-      </p>
-      {#if knocks.length}
-        <p class="note">{knocks.length} client(s) are waiting, but their details are withheld at this tier.</p>
-      {/if}
     </div>
 
   {:else if !knocks.length}
@@ -177,6 +383,18 @@
   .lead { color: var(--ink); font-weight: 500; }
   .locked p + p { margin-top: .5rem; }
   code { font-family: var(--mono); font-size: .85em; }
+  .tier { font-size: .875rem; margin-bottom: var(--gap); }
+  .tier p { margin: 0; }
+  .tier p + p { margin-top: .35rem; }
+  .tier .modes { color: var(--ink-dim); }
+  .claim { margin-bottom: var(--gap); padding-bottom: var(--gap); border-bottom: 1px solid var(--line-soft); }
+  .pair-btn { min-height: var(--tap); border-radius: var(--r-s); border: 1px solid var(--line);
+              background: color-mix(in srgb, var(--good) 12%, transparent); padding: 0 16px; }
+  .pair-btn:disabled { opacity: .7; }
+  .howto { margin-top: .6rem; font-size: .8rem; color: var(--ink-dim); }
+  .howto summary { cursor: pointer; color: var(--ink); }
+  .howto ol { margin: .5rem 0 .5rem 1.1rem; padding: 0; }
+  .howto li + li { margin-top: .3rem; }
   .knocks { list-style: none; margin: 0; padding: 0; display: grid; gap: 8px; }
   .knocks li { display: flex; flex-wrap: wrap; gap: 8px; align-items: center; justify-content: space-between;
                background: var(--bg-raised); border: 1px solid var(--line-soft); border-radius: var(--r-s); padding: 10px; }
@@ -188,4 +406,5 @@
   .deny { background: transparent; color: var(--ink-dim); }
   .result { margin-top: var(--gap); font-size: .875rem; color: var(--good); }
   .result.bad { color: var(--bad); }
+  .result.pending { color: var(--ink-dim); }
 </style>

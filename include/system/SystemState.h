@@ -127,6 +127,15 @@ struct SystemState {
     // ---- Loading / flow (cross-core) -----------------------------------------
     volatile bool          homed               = false;
     volatile bool          homing_in_progress  = false;
+    // Item 3 (fw 2.1.76): raised by motorTask (Core 1) the instant a homing
+    // cycle completes successfully (homed transitions false -> true), so the
+    // freshly-measured stroke gets persisted to NVS on EVERY home, not only
+    // whenever the operator next hits Save. NVS writes are flash I/O and must
+    // never run on the real-time core (motion doctrine §2), so this is only a
+    // flag — SlopSyncHubService's Core-0 1 Hz tick does the actual
+    // ConfigStore::save() and clears it. Same volatile-bool cross-core
+    // contract as homed/homing_in_progress above.
+    volatile bool          stroke_measured_pending = false;
     // WebUI "home override" (bench test, no motor): when >0 the UI is told the
     // machine is homed and this value is reported as the measured stroke (mm) so
     // the rail populates without a real homing cycle. 0 = normal (use motor). :3

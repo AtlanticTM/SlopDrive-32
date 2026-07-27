@@ -240,6 +240,11 @@ public:
     // clears it on its 1 Hz tick and persists once. Public because the service
     // (not the delegate) owns NVS.
     bool _smTuneDirty = false;
+    // Set by 0x0101 key 8 (max_rail) when a client writes it (item 1, fw
+    // 2.1.76) — same coalesced-persist contract as _smTuneDirty above, so a
+    // savable geometry setting doesn't wait on a manual WebUI save to survive
+    // a reboot.
+    bool _maxRailDirty = false;
 };
 
 // ---- The service -----------------------------------------------------------

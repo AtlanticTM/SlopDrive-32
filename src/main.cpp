@@ -333,6 +333,13 @@ static void motorTask(void* /*param*/) {
                 homing_started = false;
                 if (g_state.homed) {
                     g_state.resume_start_ms = millis();
+                    // Item 3 (fw 2.1.76): flag the fresh measurement for a
+                    // Core-0 NVS persist (SlopSyncHubService's 1 Hz tick) and
+                    // wake the 0x0081 on-change publisher so `measured_stroke`
+                    // reaches clients promptly instead of waiting for some
+                    // unrelated config edit to bump cfg_gen next.
+                    g_state.stroke_measured_pending = true;
+                    g_state.cfg_gen.fetch_add(1, std::memory_order_relaxed);
                     SLOGI("sys", "System is now homed and ready to pound :3");
                 } else {
                     SLOGW("sys", "Homing failed — endstop not found. Check wiring.");

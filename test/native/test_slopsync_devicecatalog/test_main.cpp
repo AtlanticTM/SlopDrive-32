@@ -390,7 +390,7 @@ TEST_CASE("device catalog: published layout sizes match the firmware's encoders"
     DeviceCatalog dc;
     struct { uint16_t id; size_t bytes; } expect[] = {
         {slopdrive::ch::motion,         9},   // + raw_10um (M5a)
-        {slopdrive::ch::machine_config, 33},  // + enabled_mask (M5a)
+        {slopdrive::ch::machine_config, 37},  // + enabled_mask (M5a) + measured_stroke (fw 2.1.76)
         {slopdrive::ch::pattern_state,  19},  // + enabled_mask (M5a)
         {slopdrive::ch::odometer,       20},  // + energy_wh, session_ms (M5a)
         {slopdrive::ch::plan_strip,     18},
@@ -428,7 +428,7 @@ TEST_CASE("device catalog: M5a growth is append-only on 0x0080/0x0081/0x0082/0x0
     CHECK(names(slopdrive::ch::machine_config) ==
           std::vector<std::string_view>{"window_min", "window_max", "user_speed", "user_accel",
                                         "input_speed", "input_accel", "max_rail", "input_jerk",
-                                        "enabled_mask"});
+                                        "enabled_mask", "measured_stroke"});
     CHECK(names(slopdrive::ch::pattern_state) ==
           std::vector<std::string_view>{"running", "pattern", "speed", "depth", "stroke",
                                         "sensation", "enabled_mask"});
@@ -477,6 +477,12 @@ TEST_CASE("device catalog: every setting_key resolves in its declared settingCha
     // 36 -> 80 for the advanced-pattern channel set: 8 base controls (0x008E)
     // + 36 modifier-cycle fields (6 controls × 6 sub-fields, 0x008F..0x0094),
     // all writable ONLY through 0x0107 now that /api/pattern is also 410 Gone.
+    // 80 -> 80 at fw 2.1.76 (operator ruling 2026-07-27): NET ZERO, not
+    // unchanged. `max_rail` on 0x0081 gained a setting_key (item 1 — it is a
+    // real savable geometry setting now) and `blend_mode` on 0x008A lost its
+    // setting_key + INTENT key, retired to `blend_mode_reserved` (item 2 —
+    // dead motion behaviour, MotionArbiter has aliased every mode to "allow"
+    // for a while). One in, one out.
     CHECK(annotated == 80);
 }
 
@@ -537,12 +543,19 @@ TEST_CASE("device catalog: the limit + window roles are discoverable and unique"
 
 // ============================================================================
 // RFC-003 — the STORED-vs-EFFECTIVE distinction, which IS the presence of
-// setting_key and nothing else. `max_rail` is derived machine truth: it has no
-// config-set key, so a client must render it read-only and must NEVER write it
-// back into a setting's shadow. Adopting an EFFECTIVE value as stored config is
-// the slopsync-js bug that produced RFC-003, so this is pinned in a test.
+// setting_key and nothing else. `measured_stroke` is derived machine truth: it
+// has no config-set key, so a client must render it read-only and must NEVER
+// write it back into a setting's shadow. Adopting an EFFECTIVE value as stored
+// config is the slopsync-js bug that produced RFC-003, so this is pinned in a
+// test.
+//
+// fw 2.1.76 (operator ruling 2026-07-27): `max_rail` used to be this test's
+// read-only example. Item 1 turned it into a real setting (it bounds the
+// homing search sweep — an INPUT, not derived truth) and item 3 gave the
+// derived-truth role its own honest field, `measured_stroke`, which is what
+// this test pins now.
 // ============================================================================
-TEST_CASE("device catalog: max_rail is read-only, its siblings are settings") {
+TEST_CASE("device catalog: measured_stroke is read-only, max_rail is now a setting") {
     DeviceCatalog dc;
     const CatalogEntry* e = dc.c.find(slopdrive::ch::machine_config);
     REQUIRE(e != nullptr);
@@ -551,14 +564,31 @@ TEST_CASE("device catalog: max_rail is read-only, its siblings are settings") {
     CHECK(e->hasCategory);
     CHECK(e->category == setting_categories::limits);
 
+    const LayoutField* stroke = layoutFieldByName(dc.c, *e, "measured_stroke");
+    REQUIRE(stroke != nullptr);
+    CHECK_FALSE(stroke->hasSettingKey);   // *** the distinction ***
+    CHECK_FALSE(stroke->desc.empty());    // still explained to the user
+    CHECK(stroke->unit == "mm");
+    CHECK(stroke->role.empty());
+
+    // max_rail (item 1): promoted to a real setting. Checked on its own,
+    // rather than folded into the `settings[]` loop below, because it
+    // carries no registered `role` yet — RFC-009 roles are an optional
+    // upgrade hint, not a requirement, and no registered role fits "the
+    // homing search bound" today.
     const LayoutField* rail = layoutFieldByName(dc.c, *e, "max_rail");
     REQUIRE(rail != nullptr);
-    CHECK_FALSE(rail->hasSettingKey);   // *** the distinction ***
-    CHECK_FALSE(rail->desc.empty());    // still explained to the user
-    CHECK(rail->unit == "mm");
-    CHECK(rail->role.empty());
+    CHECK(rail->hasSettingKey);
+    CHECK(rail->settingKey == 8);
+    CHECK(rail->dflt.has());
+    CHECK(rail->hasMin);
+    CHECK(rail->hasMax);
+    CHECK(rail->hasStep);
+    CHECK_FALSE(rail->group.empty());
+    CHECK_FALSE(rail->desc.empty());
 
-    // Every other numeric field here IS a setting, with a default and bounds.
+    // Every other numeric field here IS a setting, with a default, bounds,
+    // and a registered role.
     const char* settings[] = {"window_min", "window_max", "user_speed",
                               "user_accel", "input_speed", "input_accel", "input_jerk"};
     for (const char* nm : settings) {
@@ -585,7 +615,7 @@ TEST_CASE("device catalog: both settings channels carry a role-tagged enabled_ma
     DeviceCatalog dc;
 
     struct { uint16_t id; size_t bits; } cases[] = {
-        {slopdrive::ch::machine_config, 7},
+        {slopdrive::ch::machine_config, 8},
         {slopdrive::ch::pattern_state,  6},
     };
     for (auto& c : cases) {
@@ -594,9 +624,17 @@ TEST_CASE("device catalog: both settings channels carry a role-tagged enabled_ma
         REQUIRE(e != nullptr);
         auto fields = dc.c.layoutFields(*e);
         REQUIRE(!fields.empty());
-        // APPENDED LAST — that is what keeps every released offset intact.
-        const LayoutField& mask = fields.back();
-        CHECK(mask.name == "enabled_mask");
+        // Looked up BY NAME, not fields.back(): 0x0081 appended
+        // `measured_stroke` (fw 2.1.76, item 3) AFTER enabled_mask — a
+        // legitimate append-only evolution (new field goes after the
+        // PREVIOUS last field, which was enabled_mask) that keeps every
+        // released offset intact but means enabled_mask is no longer the
+        // LAST field in THIS channel's layout. 0x0082 has grown no such tail
+        // yet, so its mask is still physically last; the by-name lookup
+        // covers both honestly instead of special-casing one channel.
+        const LayoutField* maskPtr = layoutFieldByName(dc.c, *e, "enabled_mask");
+        REQUIRE(maskPtr != nullptr);
+        const LayoutField& mask = *maskPtr;
         CHECK(mask.type == PackedFieldType::bitfield8);
         CHECK(mask.role == slopsync::field_roles::meta_enabled_mask);
         CHECK_FALSE(mask.hasSettingKey);   // the mask is state, never a setting
@@ -910,14 +948,24 @@ TEST_CASE("device catalog: annotations survive encode -> decode") {
     REQUIRE(jerk != nullptr);
     CHECK((jerk->flags & setting_flags::advanced) != 0);
 
+    // max_rail (item 1, fw 2.1.76): now a real setting; survives round-trip
+    // WITH its setting_key, unlike measured_stroke below.
     const LayoutField* rail = layoutFieldByName(back, *cfg, "max_rail");
     REQUIRE(rail != nullptr);
-    CHECK_FALSE(rail->hasSettingKey);   // read-only survives as an ABSENCE
+    CHECK(rail->hasSettingKey);
+    CHECK(rail->settingKey == 8);
+
+    // measured_stroke (item 3, fw 2.1.76): the NEW read-only derived-truth
+    // field — survives round-trip WITHOUT a setting_key, same ABSENCE-is-the-
+    // signal contract max_rail used to demonstrate.
+    const LayoutField* stroke = layoutFieldByName(back, *cfg, "measured_stroke");
+    REQUIRE(stroke != nullptr);
+    CHECK_FALSE(stroke->hasSettingKey);   // read-only survives as an ABSENCE
 
     const LayoutField* mask = layoutFieldByName(back, *cfg, "enabled_mask");
     REQUIRE(mask != nullptr);
     CHECK(mask->role == slopsync::field_roles::meta_enabled_mask);
-    CHECK(back.bitLabels(*mask).size() == 7);
+    CHECK(back.bitLabels(*mask).size() == 8);
 
     const CatalogEntry* pat = back.find(slopdrive::ch::pattern_state);
     REQUIRE(pat != nullptr);
@@ -945,7 +993,7 @@ TEST_CASE("device catalog: annotations survive encode -> decode") {
 // M5a — the conformance checker is CLEAN for every feature combination, incl.
 // limits::catalog_max_entry_bytes (4096). A heavily-annotated entry with long
 // descs is the one thing that can blow that cap, and 0x0088 (24 fields) plus
-// 0x0081 (9 annotated fields) are the two candidates.
+// 0x0081 (10 fields as of fw 2.1.76) are the two candidates.
 // ============================================================================
 TEST_CASE("device catalog: conformance is clean under every feature combination") {
     std::vector<std::byte> scratch(65536);

@@ -90,6 +90,7 @@
   }
 
   function reasonFor(action, value) {
+    if (value === 0) return 'wire value 0 is reserved, never an operation (RFC-034)';
     if (!linkUp) return 'no hub link';
     if (!canFire(action, value)) return 'this session is not authorised for this op';
     return '';
@@ -112,24 +113,6 @@
   }
 
   /**
-   * Option-select INTENT fields are index-aligned with their wire value, and
-   * the registry's op tables all start numbering at 1 — so index 0 exists only
-   * to keep the array aligned and carries a placeholder label ("reserved").
-   * Rendering it produces a button that means nothing and, if pressed, earns a
-   * NACK.
-   *
-   * Filtered by LABEL rather than by "always drop index 0", because a
-   * device-defined action channel is entitled to use 0 as a real operation.
-   * Worst case of the heuristic is that a button labelled "reserved" stays
-   * hidden, which is what anyone would want anyway.
-   *
-   * The cleaner fix is machine-side: gate the placeholder with an
-   * `option_access` level nobody holds, the way 0x0009 session-admin already
-   * does. Noted in docs/webui-architecture.md.
-   */
-  const PLACEHOLDER = /^(reserved|none|unused|n\/a|-|—)$/i;
-
-  /**
    * Order by the access each op REQUIRES, lowest first.
    *
    * This is not cosmetic. RFC-025b makes stop and estop role-exempt, and the
@@ -143,6 +126,25 @@
    * one control that must always be reachable was the one you had to go
    * looking for.
    */
+  /**
+   * Option-select INTENT fields are index-aligned with their wire value, and
+   * RFC-034 made it NORMATIVE (registry.yaml, `field_roles` doctrine): for a
+   * select field carrying an `action.*` role, wire value 0 is NEVER an
+   * operation — every op table numbers its real ops from 1, and 0 exists only
+   * to keep the array aligned. This used to be guessed from the option's own
+   * LABEL text (a regex for "reserved"/"none"/"unused"/...), which is exactly
+   * the kind of device-knowledge-shaped heuristic this layer is supposed to
+   * refuse: a machine that spelled its placeholder differently, or in another
+   * language, sailed straight through and rendered a button that meant
+   * nothing and earned a NACK if pressed.
+   *
+   * GREY, never hide — same doctrine as option_access gating below it (which
+   * stays as defense in depth for sub-configure sessions; a hub CAN gate
+   * index 0 itself the way 0x0009 session-admin does, and if it does, this
+   * still greys it). Hiding index 0 outright would have been the simpler fix
+   * but breaks a keyboard/screen-reader user's expectation that the option
+   * list is index-complete.
+   */
   function optionButtons(action) {
     const floor = action.access | 0;
     const accessOf = (i) => {
@@ -150,8 +152,7 @@
       return a == null ? floor : a;
     };
     return (action.options || [])
-      .map((label, i) => ({ label: label || String(i), value: i, access: accessOf(i) }))
-      .filter((o) => !PLACEHOLDER.test(o.label.trim()))
+      .map((label, i) => ({ label: label || String(i), value: i, access: accessOf(i), reserved: i === 0 }))
       .sort((a, b) => a.access - b.access);
   }
 </script>
@@ -186,7 +187,7 @@
               type="button"
               class="btn"
               class:estop={opt.value === SAFETY_OP.estop}
-              disabled={!canFire(action, opt.value)}
+              disabled={opt.reserved || !canFire(action, opt.value)}
               title={reasonFor(action, opt.value) || opt.label}
               onclick={() => fire(action, opt.value, opt.label, key)}
             >

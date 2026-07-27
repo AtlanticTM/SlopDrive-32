@@ -45,6 +45,29 @@
  *   'event'        (evt)                            — an EVENT frame, `body` decoded
  *   'sessionEvent' (evt)                            — join/leave/takeover/goodbye
  *   'clock'        ({offsetUs, rttUs})              — a CLOCK sync result
+ *   'pairGrant'    ({token, role, trust})            — RFC-027 §12.2: this
+ *                                                      SESSION was just granted
+ *                                                      a tier (knock-and-approve,
+ *                                                      PIN, or push-to-pair —
+ *                                                      PAIR_GRANT is unicast to
+ *                                                      the granted session only,
+ *                                                      so receiving it always
+ *                                                      means "us"). `role` is
+ *                                                      adopted into state.roles
+ *                                                      immediately, mirroring
+ *                                                      the hub's own in-place
+ *                                                      upgrade (hub_impl.hpp) —
+ *                                                      no reconnect required.
+ *                                                      Persisting `token` is the
+ *                                                      caller's job (identity.js
+ *                                                      setPairedToken).
+ *   'error'        ({kind, code, codeName, detail, ...})  — a loud, visible
+ *                                                      client-side failure that
+ *                                                      also tore the session
+ *                                                      down (RFC-039.2: today
+ *                                                      this is only the blob-
+ *                                                      refusal case — see
+ *                                                      refuseBlob() below)
  *   'close'        ({code, reason, willReconnect})  — socket closed
  */
 
@@ -52,7 +75,7 @@ import {
   cbUint, cbInt, cbBool, cbF32, cbTstr, cbBstr, cbMap, cbArray, cbDecodeFull,
 } from './cbor.js';
 import {
-  FRAME, FRAME_NAME, K, IDENTITY_K, WELCOME_LIMITS_K, PRIORITY, WS_SUBPROTOCOL,
+  FRAME, FRAME_NAME, K, IDENTITY_K, TRUST_K, WELCOME_LIMITS_K, PRIORITY, WS_SUBPROTOCOL,
   PROTO_VER, LIMITS, nackName, GOODBYE_CODE,
   CBOR_FIELD, CHANNEL_CLASS, SAFETY_OP, SAFETY_CAUSE,
   CH_SAFETY, CH_SAFETY_INTENTS,
@@ -159,6 +182,16 @@ function defaultCatalogStore() {
  * @param {string} [opts.clientName] HELLO client_name
  * @param {Uint8Array} [opts.instanceId] stable 8-byte identity (default random)
  * @param {Uint8Array} [opts.token] 16-byte pairing token (absent = watch)
+ * @param {number|null} [opts.deadmanWishMs] HELLO key 44 (RFC-038): this
+ *        client's requested deadman window, in ms. Default 2000 — a browser
+ *        tab's liveness cadence is coarse (background-tab timer throttling),
+ *        so asking for a window well above the hub's 600 ms default cuts down
+ *        on spurious alt-tab evictions without flooding PINGs. The hub clamps
+ *        into [deadman_min_ms, deadman_max_ms] and ALWAYS echoes the APPLIED
+ *        value on WELCOME key 24 (deadmanMs) — this wish is never adopted
+ *        directly, only the echo is (see handleWelcome). Pass null/false to
+ *        omit the key entirely (pre-RFC-038 hub compatibility needs nothing
+ *        special; absent just means "hub default").
  * @param {Array<[number, number, number]>} [opts.subscriptions] [ch, rateHz, priority] wishes to
  *        (re)issue automatically after each WELCOME
  * @param {boolean} [opts.autoCatalog] fetch the catalog when the etag misses (default true)
@@ -182,6 +215,11 @@ export function createSession(opts = {}) {
   // credential is fetched exactly when one is needed. May return a promise.
   const tokenProvider = typeof opts.token === 'function' ? opts.token : null;
   let liveToken = tokenProvider ? null : (opts.token || null);
+  // RFC-038: default 2000ms — see the JSDoc above for why a browser wants this.
+  // `opts.deadmanWishMs` explicitly null/false omits the key (pre-RFC-038 hubs
+  // need nothing special; §4.3 forward-compat ignores an unknown HELLO key
+  // just as readily as an absent one).
+  const deadmanWishMs = opts.deadmanWishMs === undefined ? 2000 : opts.deadmanWishMs;
   const autoCatalog = opts.autoCatalog !== false;
   const autoReconnect = opts.autoReconnect !== false;
   const catalogStore = opts.catalogStore || defaultCatalogStore();
@@ -223,6 +261,12 @@ export function createSession(opts = {}) {
     ready: false, // RFC-015: is our data plane open?
     identity: null, // {product, fw_version, hub_name, info}
     roles: null,
+    // RFC-027 §12.2: WELCOME `trust.pairing_modes` (TRUST_K.pairing_modes,
+    // key 8) — bitmask of PAIRING_MODE bits this hub offers RIGHT NOW,
+    // re-evaluated per session so a transient push-to-pair window is only
+    // advertised while it is actually open. 0 (no bits) when the hub sent no
+    // `trust` map at all (pre-RFC-027 hub, or nothing on offer).
+    pairingModes: 0,
     deadmanMs: LIMITS.deadman_default_ms,
     deadmanPolicy: null,
     limits: {},
@@ -295,8 +339,9 @@ export function createSession(opts = {}) {
 
   function buildHello() {
     // keys ascending: proto_ver(1) < client_kind(2) < client_name(3) <
-    // instance_id(4) < [token(5)] < [catalog_etag(8)]. No publish wishes (11):
-    // the browser SUBSCRIBEs h2c channels, it does not publish a stream.
+    // instance_id(4) < [token(5)] < [catalog_etag(8)] < [deadman_wish_ms(44)].
+    // No publish wishes (11): the browser SUBSCRIBEs h2c channels, it does not
+    // publish a stream.
     //
     // catalog_etag is RFC-015's fast path: presenting an etag the hub agrees
     // with IS proof of possession, so the hub marks us ready in WELCOME and
@@ -310,6 +355,14 @@ export function createSession(opts = {}) {
     ];
     if (liveToken) pairs.push([K.token, cbBstr(liveToken)]);
     if (cachedCatalog) pairs.push([K.catalog_etag, cbBstr(cachedCatalog.etag)]);
+    // RFC-038: ask for a browser-honest deadman window. The hub clamps into
+    // [deadman_min_ms, deadman_max_ms] and echoes the APPLIED value on the
+    // EXISTING WELCOME key 24 — handleWelcome() adopts ONLY that echo, never
+    // this wish, so a hub that clamps tighter (or predates RFC-038 entirely
+    // and ignores the key) is handled correctly with no special-casing here.
+    if (deadmanWishMs != null && deadmanWishMs !== false) {
+      pairs.push([K.deadman_wish_ms, cbUint(deadmanWishMs)]);
+    }
     return cbMap(pairs);
   }
 
@@ -383,6 +436,43 @@ export function createSession(opts = {}) {
     }
   }
 
+  /**
+   * RFC-039.2: this client's reassembler refuses a declared blob whose
+   * `total_bytes` exceeds its cap. The old behaviour — silently returning
+   * from handleBlobChunk() — is BlobReassembler's own documented failure: the
+   * session went LIVE WITH NO CATALOG, every STATE frame after it arrived
+   * undecodable, and nothing said why until READY_TIMEOUT killed the session
+   * 15 s later and blamed the client in every log. Refusal is legal; SILENT
+   * refusal is not. So instead: GOODBYE with BLOB_REFUSED (a real reason code,
+   * not idling in a half-session) and an 'error' event so the integrator can
+   * show it — never a bare console.warn that a headless integrator won't see.
+   */
+  function refuseBlob(declaredTotalBytes) {
+    const info = {
+      kind: 'blob_refused',
+      code: GOODBYE_CODE.BLOB_REFUSED,
+      codeName: 'BLOB_REFUSED',
+      declaredTotalBytes,
+      capBytes: blob.maxTotalBytes,
+      detail: 'declared blob total_bytes ' + declaredTotalBytes +
+        ' exceeds this client\'s ' + blob.maxTotalBytes + '-byte reassembly cap',
+    };
+    log('error', 'blob refused — GOODBYE BLOB_REFUSED', info);
+    emit('error', info);
+    try {
+      if (ws && ws.readyState === 1) {
+        sendFrame(FRAME.GOODBYE, 0, cbMap([[K.code, cbUint(GOODBYE_CODE.BLOB_REFUSED)]]));
+      }
+    } catch (e) { /* gone */ }
+    try { if (ws) ws.close(); } catch (e) { /* gone */ }
+    // Deliberately NOT `intentionalClose = true`: this is a real failure, not a
+    // voluntary teardown, so the normal autoReconnect/backoff policy still
+    // applies (§6.9 — every teardown path is otherwise ordinary). A device
+    // whose catalog genuinely outgrows this cap will hit this every reconnect,
+    // which is the point: loud and repeated beats a session that quietly
+    // never lights up.
+  }
+
   function handleBlobChunk(payload) {
     const h = parseBlobChunk(payload);
     if (!h) return;
@@ -394,7 +484,8 @@ export function createSession(opts = {}) {
 
     const now = Date.now();
     if (!blob.active || blob.chunkCount !== h.chunkCount || blob.totalBytes !== h.totalBytes) {
-      if (!blob.begin(h, now)) return; // declared size refused: RFC-028
+      if (h.totalBytes > blob.maxTotalBytes) { refuseBlob(h.totalBytes); return; }
+      if (!blob.begin(h, now)) return; // malformed header (chunkCount/totalBytes 0): not a cap refusal
     }
     if (!blob.insert(h, now)) return;
     if (!blob.complete()) return;
@@ -452,6 +543,70 @@ export function createSession(opts = {}) {
   /** current hub-time estimate in µs (u32). */
   function hubNowUs() {
     return (clientNowUs() + state.clockOffsetUs) >>> 0;
+  }
+
+  // ---- PAIRING (RFC-027 §12.2) --------------------------------------------
+
+  /**
+   * Send a bare PAIR_REQ knock: {instance_id(4): bstr}, nothing else. Mirrors
+   * tools/slopsync_probe.py's build_pair_knock() byte-for-byte.
+   *
+   * A bare knock (no `pin_proof`) is mode (a) knock-and-approve or mode (c)
+   * push-to-pair — hub_impl.hpp::handleKnock decides which by whether a
+   * presence window is open RIGHT NOW. This client never types or shows a
+   * PIN, so a bare knock is the only ceremony it can initiate; the PIN path
+   * (mode (b)) would add a `pin_proof` (28) key this function deliberately
+   * never sends.
+   *
+   * DELIBERATELY FIRE-AND-FORGET, NOT A PROMISE: hub_impl.hpp is explicit
+   * that a queued knock-and-approve is answered with NO FRAME AT ALL — the
+   * eventual answer is a PAIR_GRANT (this session's 'pairGrant' event), a
+   * NACK (PAIRING_REQUIRED / PAIRING_DENIED / BUSY, via the ordinary 'nack'
+   * event) if the hub refuses outright, or silence for as long as an
+   * operator takes to approve or the ~120s pending-knock window takes to
+   * expire (visible as a `pairing-events` `expired` EVENT, if the caller is
+   * subscribed to 0x000B). A caller that wants a bounded wait races this
+   * against its own timer against those events; this function only reports
+   * whether the frame actually went out.
+   *
+   * Gated on `state.welcomed`, not `isLive`: hub_impl.hpp gates PAIR_REQ on
+   * `slot.session.occupied()` (true as soon as WELCOME is sent), NOT on the
+   * RFC-015 readiness gate that INTENT is held behind — a knock needs no
+   * catalog.
+   *
+   * @returns {boolean} true iff the frame was actually written to the socket
+   */
+  function sendPairReq() {
+    if (!state.welcomed) return false;
+    return sendFrame(FRAME.PAIR_REQ, 0, cbMap([[K.instance_id, cbBstr(instanceId)]]));
+  }
+
+  /**
+   * PAIR_GRANT (h2c): {token(5): bstr16, roles(23): uint, [trust(39)]}.
+   * ALWAYS about THIS session — hub_impl.hpp::issuePairGrant/handleKnock send
+   * it unicast to the granted session's own transport, never broadcast, so
+   * there is no instance_id to check on the way in.
+   *
+   * Adopts `role` into state.roles IMMEDIATELY, mirroring
+   * "THE SESSION IS UPGRADED IN PLACE" in hub_impl.hpp — the hub does not
+   * require a reconnect for the tier bump to take effect, so neither does
+   * this client's own idea of its roles (canUse()/sendIntent gating reads
+   * state.roles fresh on every call). Persisting the token for the NEXT
+   * connect is deliberately left to the caller (identity.js setPairedToken)
+   * rather than done here, so this library layer stays free of localStorage
+   * policy.
+   */
+  function handlePairGrant(payload) {
+    const g = cbDecodeFull(payload);
+    const token = g.get(K.token) || null;
+    const role = g.has(K.roles) ? g.get(K.roles) : null;
+    if (role != null) state.roles = role;
+    let trust = null;
+    const tm = g.get(K.trust);
+    if (tm instanceof Map) {
+      trust = { hubPubkey: tm.get(TRUST_K.hub_pubkey) || null };
+    }
+    emit('pairGrant', { token, role, trust });
   }
 
   // ---- INTENT senders (c2h) — ONLY sent when the integrator calls them ----
@@ -624,11 +779,23 @@ export function createSession(opts = {}) {
     state.cfgGen = w.get(K.cfg_gen);
     state.catalogEtag = w.get(K.catalog_etag) || null;
     state.roles = w.get(K.roles);
+    // RFC-038: this is the ONLY place state.deadmanMs is ever assigned. We sent
+    // a `deadman_wish_ms` wish in HELLO, but the wish itself is never read back
+    // here or anywhere else — the hub may clamp tighter than asked, or ignore
+    // the key entirely on a pre-RFC-038 build, and either way key 24 (echoed
+    // exactly as it always was) is the only APPLIED truth. pingIntervalMs()
+    // downstream derives its cadence from this adopted value, not the wish.
     state.deadmanMs = w.get(K.deadman_ms) ?? LIMITS.deadman_default_ms;
     state.deadmanPolicy = w.get(K.deadman_policy);
     const lim = w.get(K.limits);
     state.limits = {};
     if (lim instanceof Map) for (const [name, key] of Object.entries(WELCOME_LIMITS_K)) state.limits[name] = lim.get(key);
+
+    // RFC-027 §12.2: `trust` (39) is OPTIONAL — absent means a pre-RFC-027 hub
+    // or simply nothing on offer this session, either way 0 bits is the
+    // honest default (see PAIRING_MODE in frames.js for what each bit means).
+    const trustMap = w.get(K.trust);
+    state.pairingModes = (trustMap instanceof Map) ? (trustMap.get(TRUST_K.pairing_modes) || 0) : 0;
 
     // RFC-016: hub identity in band. `fw_version` is why a client no longer has
     // to label a device "boot 0x…" from an mDNS TXT record.
@@ -663,6 +830,7 @@ export function createSession(opts = {}) {
       deadmanMs: state.deadmanMs,
       deadmanPolicy: state.deadmanPolicy,
       limits: state.limits,
+      pairingModes: state.pairingModes,
     };
     setPhase(SESSION_STATE.SYNCING);
     emit('welcome', info);
@@ -853,8 +1021,11 @@ export function createSession(opts = {}) {
       case FRAME.PING: sendFrame(FRAME.PONG, header.channel, payload); break; // §6.5 echo
       case FRAME.PONG: break;
       case FRAME.BEACON: break; // §13.7 discovery beacon: nothing to do on WS
-      case FRAME.PAIR_GRANT: // pairing UI is out of scope for this milestone —
-      case FRAME.HUB_SIG: // ditto hub-signature verification (bearer + unverified).
+      case FRAME.PAIR_GRANT: handlePairGrant(payload); break;
+      case FRAME.HUB_SIG: // hub-signature verification (bearer + unverified) is
+        // still out of scope — PAIR_GRANT's `trust.hub_pubkey` is stored on the
+        // 'pairGrant' event for a future caller, but nothing here VERIFIES a
+        // later WELCOME's `welcome_sig` against it yet.
         log('debug', 'trust-plane frame ignored', FRAME_NAME[header.type]);
         break;
       case FRAME.GOODBYE: {
@@ -1001,6 +1172,8 @@ export function createSession(opts = {}) {
     requestCatalog,
     syncClock,
     hubNowUs,
+    // pairing (RFC-027 §12.2) — fire-and-forget; outcome arrives via 'pairGrant'/'nack'/'event'
+    sendPairReq,
     // write-plane (explicit; never auto-fired)
     sendIntent,
     sendMove,
@@ -1035,5 +1208,9 @@ export function createSession(opts = {}) {
     get channelMap() { return channelMap; },
     get instanceId() { return instanceId; },
     get identity() { return state.identity; },
+    // The host this session dials — the SAME key identity.js's per-hub token
+    // store (getPairedToken/setPairedToken) uses, so a caller that just
+    // received a PAIR_GRANT can persist it without re-deriving the host.
+    get host() { return host; },
   };
 }

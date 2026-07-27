@@ -43,11 +43,22 @@ class FastAccelStepper;
 // enable/disable calls are no-ops that satisfy the MotorDriver interface.
 //
 // CONTINUOUS BLENDING: streamTo() never softens a committed brake ramp
-// (raise-only accel) and handles same-direction vs. reversal per the
-// selectable _blend_mode. No stop-and-go stutter between waypoints — we keep
-// pounding through the stream instead of edging to a dead stop on every
-// sample. The shaft just keeps thrusting, relentless and full, stuffed all
-// the way in until the belly bulges and it can't take anymore yippie! :3
+// (raise-only accel) — every sample just retargets FAS's in-flight move, which
+// handles same-direction moves AND reversals cleanly on its own. No stop-and-
+// go stutter between waypoints — we keep pounding through the stream instead
+// of edging to a dead stop on every sample. The shaft just keeps thrusting,
+// relentless and full, stuffed all the way in until the belly bulges and it
+// can't take anymore yippie! :3
+//
+// _blend_mode below (2026-07-27, operator ruling — item 2) is VESTIGIAL: this
+// comment used to say behaviour branched "per the selectable _blend_mode", but
+// neither streamTo() nor streamToSteps() has read that field for a while — FAS
+// retargeting handles every case uniformly now, which is exactly what let
+// MotionArbiter::setBlendMode() alias every mode to "allow" already (see
+// MotionArbiter.cpp). The getter/setter pair stays only because MotorDriver's
+// ABC contract, NVS persistence, and the WebUI HTTP settings JSON all still
+// reference it; SlopSync's 0x008A/0x0104 wire exposure was retired outright
+// (SlopSyncCatalog.h's `blend_mode_reserved`).
 
 class AIMServoDriver : public MotorDriver {
 public:
@@ -131,15 +142,16 @@ public:
     uint16_t getCurrentmA()  override { return 0; }
     uint8_t  getMicrosteps() override { return (uint8_t)(AIM_STEPS_PER_REV / 200); }
 
-    // ---- Continuous-blend tuning --------------------------------------------
-    // Blend mode picks how streamTo() handles a new waypoint that reverses
-    // direction while a stroke is still in flight:
-    //   1 = let-it-land (DEFAULT) — finish the current stroke, ignore the
-    //       reversing retarget. Smoothest; may drop a waypoint at extreme Hz.
-    //   2 = allow-reversal        — retarget immediately; FAS does a clean
-    //       decel→reverse. Tighter tracking, one decel per true turnaround.
-    //   3 = hybrid                — let-it-land only while the remaining
-    //       in-flight distance is large; otherwise allow the reversal.
+    // ---- Continuous-blend tuning (VESTIGIAL — item 2, 2026-07-27) -----------
+    // Used to pick how streamTo() handled a new waypoint that reverses
+    // direction mid-stroke (1=let-it-land, 2=allow-reversal, 3=hybrid). Dead
+    // since streamTo()/streamToSteps() stopped reading _blend_mode — see the
+    // class-level comment above. MotionArbiter::setBlendMode() already
+    // aliased every mode to "allow" before this field was retired from the
+    // SlopSync wire (SlopSyncCatalog.h's `blend_mode_reserved`); this
+    // accessor pair just keeps the ABC contract / NVS / legacy HTTP JSON
+    // compiling. Still clamped to [1,3] purely to keep old callers' NVS
+    // round-trip harmless.
     void    setBlendMode(uint8_t mode) { _blend_mode = constrain((int)mode, 1, 3); }
     uint8_t getBlendMode() const       { return _blend_mode; }
 

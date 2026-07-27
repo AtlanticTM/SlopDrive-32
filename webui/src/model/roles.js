@@ -53,9 +53,30 @@ export const ROLE = {
   telemetryPowerBus: 'telemetry.power.bus',
   telemetryTemp: 'telemetry.temp',
   telemetryUptime: 'telemetry.uptime',
+  // RFC-032: where the machine is currently COMMANDED to, as opposed to
+  // telemetryPosition (measured truth). Lag is deliberately not its own
+  // role — a hero widget computes target - position client-side.
+  telemetryTarget: 'telemetry.target',
 
   // identity
   identityName: 'identity.name',
+
+  // RFC-032: value-bearing INTENT fields (as opposed to action.* verbs).
+  // A schema field carrying this role is a SETPOINT — render a positional
+  // control (rail, tape, slider) and write it via sendIntent, never
+  // writeSetting (it is not a RFC-009 setting).
+  commandPosition: 'command.position',
+
+  // RFC-035: in-flight motion-plan telemetry. No registered role existed
+  // when PlanStrip.svelte was first written, so it discovered its channel
+  // and fields by name/prose regex; these are the durable fix.
+  planStart: 'plan.start',
+  planEnd: 'plan.end',
+  planCurrent: 'plan.current',
+  planVelocity: 'plan.velocity',
+  planElapsed: 'plan.elapsed',
+  planDuration: 'plan.duration',
+  planStyle: 'plan.style',
 
   // machinery
   enabledMask: 'meta.enabled_mask',

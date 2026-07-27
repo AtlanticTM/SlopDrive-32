@@ -1,52 +1,46 @@
 <script>
   /**
-   * PlanStrip.svelte — in-flight motion-plan visualiser, discovered by NAME.
+   * PlanStrip.svelte — in-flight motion-plan visualiser, bound by ROLE.
    *
    * Reproduces the character of the pre-refactor features/planstrip.js (a
    * glowing span between the plan's start/end, a sweep head at the live
    * setpoint, a fading trail of recently-completed segments) with a cleaner
    * execution: no bespoke render-clock module, no wire-specific state
    * machine — it just redraws from whatever the catalog's own decoded
-   * snapshot says, at whatever rate the hub is granting the channel.
+   * snapshot says, at whatever rate the hub is granting the channel(s).
    *
-   * ── Why this file is NOT like roles.js discovery ────────────────────────
+   * ── RFC-035 landed the durable fix ──────────────────────────────────────
    *
-   * Every other hero/widget in this app binds to a REGISTRY ROLE
-   * (`telemetry.position`, `window.min`, ...) — a vocabulary the protocol
-   * defines, so the same widget draws correctly on any conforming machine.
-   * Plan telemetry has NO registered role yet (checked against
-   * docs/slopsync/registry/registry.yaml's field_roles at the time this was
-   * written), so there is nothing to claim. What follows are TWO SEPARATE,
-   * WEAKER heuristics, both explicitly name/shape-based rather than
-   * role-based, and both are exactly the kind of thing a real role
-   * vocabulary would delete:
+   * The registry now names `plan.start/end/current/velocity/elapsed/
+   * duration/style` (docs/slopsync/registry/registry.yaml, field_roles), so
+   * this binds like every other hero/widget: claimRoles() against
+   * machine.catalog.model.byRole, same as RailWidget. That claim resolves
+   * per-FIELD, not per-channel — each resolved field carries its own
+   * channelId — so a hub is free to spread plan telemetry across more than
+   * one channel and this still draws correctly.
    *
-   *   1. Channel discovery: an h2c STATE channel whose catalog NAME matches
-   *      /plan/i. This is the "catalog entry NAME pattern" fallback the
-   *      generic-rendering contract explicitly allows when no role exists.
-   *      A machine with a differently-named plan channel, or none at all,
-   *      is invisible to this heuristic — the component then renders
-   *      nothing, which is the correct, honest degrade.
+   * Two things stay heuristic, on purpose:
    *
-   *   2. Sub-field classification: once a candidate channel is found, its
-   *      OWN layout fields are sorted into start/end/current-position,
-   *      current-velocity, duration/elapsed and style/flags by matching
-   *      regexes against each field's `name` + `desc` prose (never an exact
-   *      wire field name — see classifyPlanFields below). Two differently
-   *      authored plan channels that both describe themselves in plain
-   *      English ("where the current plan started" vs "segment origin")
-   *      may classify differently or not at all; that is the cost of not
-   *      having a role for this yet.
+   *   1. FALLBACK for a role-less hub. When the role claim yields nothing
+   *      (no plan.start/end/current), this falls back to the original
+   *      discovery: find an h2c STATE channel whose catalog NAME matches
+   *      /plan/i, then classify ITS layout fields by regex over name+desc
+   *      (classifyPlanFields below). A machine with neither the roles nor a
+   *      plan-shaped name is invisible to both paths — the component then
+   *      renders nothing, which is the correct, honest degrade.
    *
-   * THE DURABLE FIX is a registered `plan.*` role family (start/end/
-   * position/velocity/elapsed/duration/style/flags) in the SlopSync
-   * registry, at which point this file collapses to a claimRoles() call
-   * exactly like RailWidget's. Worth an RFC — see docs/slopsync/RFC-QUEUE.md.
+   *   2. "Is a plan actually running" flags/bits. No `plan.active`-shaped
+   *      role exists in the registry (inclusion test in registry.yaml:
+   *      "would a DIFFERENT machine's motion planner have this concept?" —
+   *      a device-specific status bitfield generally would not), so that
+   *      one signal is still read via the name-heuristic's `flags` field
+   *      when present, falling back to "has any position" otherwise.
    */
   import { machine } from '../../model/machine.svelte.js';
   import { CHANNEL_CLASS, PACKED } from '../../core/slopsync/index.js';
   import { humanize } from '../../model/settings.js';
   import { formatValue, unitOf, optionLabel } from '../../model/format.js';
+  import { ROLE, claimRoles } from '../../model/roles.js';
 
   const NUMERIC = new Set([
     PACKED.u8, PACKED.i8, PACKED.u16, PACKED.i16, PACKED.u32, PACKED.i32, PACKED.f32,
@@ -91,44 +85,82 @@
 
   function clamp(v, lo, hi) { return Math.min(hi, Math.max(lo, v)); }
 
+  /** Per-field sample lookup — every field here carries its own channelId
+      (role-claimed fields always do; the heuristic path attaches one too,
+      see fields below), so a claim spread across multiple channels still
+      reads the right sample for each piece. */
+  function fieldSample(f) { return f ? machine.samples[f.channelId] : undefined; }
+  function fieldValue(f) {
+    const s = fieldSample(f);
+    return (f && s) ? s[f.name] : undefined;
+  }
+
   /** Normalized 0..1 position: the field's own [min,max] if annotated, else assume the value is already normalized (matches every "_norm" style field seen on this and similarly-shaped channels). */
-  function pct(f, sample) {
-    if (!f || !sample) return null;
-    const v = sample[f.name];
+  function pct(f) {
+    if (!f) return null;
+    const v = fieldValue(f);
     if (v == null || !isFinite(v)) return null;
     if (f.min != null && f.max != null && f.max > f.min) return clamp((v - f.min) / (f.max - f.min), 0, 1);
     return clamp(v, 0, 1);
   }
 
-  // ---- discovery ------------------------------------------------------------
+  // ---- discovery: ROLE first, name/shape heuristic as fallback --------------
+  const roleClaim = $derived.by(() => {
+    const byRole = machine.catalog.model && machine.catalog.model.byRole;
+    if (!byRole) return null;
+    return claimRoles(byRole, {
+      optional: {
+        start: ROLE.planStart, end: ROLE.planEnd, position: ROLE.planCurrent,
+        velocity: ROLE.planVelocity, elapsed: ROLE.planElapsed, duration: ROLE.planDuration,
+        style: ROLE.planStyle,
+      },
+    });
+  });
+  // A claim with none of the span/position roles resolved means the hub
+  // simply has not annotated plan.* yet — fall through to the heuristic
+  // rather than rendering an empty strip off a "successful" but useless claim.
+  const haveRoleClaim = $derived(!!roleClaim && (roleClaim.start || roleClaim.end || roleClaim.position));
+
   const planEntry = $derived.by(() => {
+    if (haveRoleClaim) return null; // not needed: the claimed fields carry their own channelId
     const entries = machine.catalog.entries || [];
     return entries.find((e) => e.layout && e.dir === 0 && e.cls === CHANNEL_CLASS.STATE && /plan/i.test(e.name)) || null;
   });
 
-  const fields = $derived(planEntry ? classifyPlanFields(planEntry.layout) : null);
-  const sample = $derived(planEntry ? machine.samples[planEntry.id] : undefined);
+  const fields = $derived.by(() => {
+    if (haveRoleClaim) return roleClaim;
+    if (!planEntry) return null;
+    // classifyPlanFields returns raw catalog layout descriptors with no
+    // channelId of their own (they come straight off entry.layout) — stamp
+    // one on so fieldSample()/fieldValue() work identically for both paths.
+    const raw = classifyPlanFields(planEntry.layout);
+    const out = {};
+    for (const k of Object.keys(raw)) out[k] = raw[k] ? { ...raw[k], channelId: planEntry.id } : null;
+    return out;
+  });
 
-  const startPct = $derived(fields ? pct(fields.start, sample) : null);
-  const endPct = $derived(fields ? pct(fields.end, sample) : null);
-  const curPct = $derived(fields ? pct(fields.position, sample) : null);
+  const startPct = $derived(fields ? pct(fields.start) : null);
+  const endPct = $derived(fields ? pct(fields.end) : null);
+  const curPct = $derived(fields ? pct(fields.position) : null);
   const haveSpan = $derived(startPct != null && endPct != null);
   const haveAnyPosition = $derived(haveSpan || curPct != null);
 
-  const velVal = $derived(fields && fields.velocity && sample ? sample[fields.velocity.name] : undefined);
-  const durVal = $derived(fields && fields.duration && sample ? sample[fields.duration.name] : undefined);
-  const elapsedVal = $derived(fields && fields.elapsed && sample ? sample[fields.elapsed.name] : undefined);
+  const velVal = $derived(fields && fields.velocity ? fieldValue(fields.velocity) : undefined);
+  const durVal = $derived(fields && fields.duration ? fieldValue(fields.duration) : undefined);
+  const elapsedVal = $derived(fields && fields.elapsed ? fieldValue(fields.elapsed) : undefined);
   const progressFrac = $derived.by(() => {
     if (durVal == null || elapsedVal == null || !isFinite(durVal) || durVal <= 0) return null;
     return clamp(elapsedVal / durVal, 0, 1);
   });
 
-  const styleVal = $derived(fields && fields.style && sample ? sample[fields.style.name] : undefined);
+  const styleVal = $derived(fields && fields.style ? fieldValue(fields.style) : undefined);
 
   const activeBit = $derived(fields ? activeBitName(fields.flags) : null);
-  const flagBits = $derived(
-    fields && fields.flags && sample ? (sample[fields.flags.name + '_bits'] || {}) : {}
-  );
+  const flagBits = $derived.by(() => {
+    if (!fields || !fields.flags) return {};
+    const s = fieldSample(fields.flags);
+    return s ? (s[fields.flags.name + '_bits'] || {}) : {};
+  });
   // "is a plan actually running right now" if the flags field names a bit
   // that reads that way; otherwise show whenever the channel has data at
   // all, since we have no better signal.
@@ -268,7 +300,7 @@
   });
 </script>
 
-{#if planEntry && haveAnyPosition}
+{#if fields && haveAnyPosition}
   <div class="plan-strip" class:on={isActive}>
     <div class="plan-lane">
       <canvas bind:this={canvasEl} role="img" aria-label="In-flight motion plan"></canvas>

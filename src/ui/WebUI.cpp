@@ -426,9 +426,18 @@ void WebUI::handleApiStatus() {
     doc["measured_hz"] = hz;
     doc["measured_interval_ms"] = (hz > 0) ? (uint16_t)(1000 / hz) : 0;
     doc["auto_duration"] = _state.auto_duration;
-    doc["measured_stroke_mm"] = (_state.test_stroke_override_mm > 0.0f)
-                                ? _state.test_stroke_override_mm
-                                : _motor.getMeasuredStrokeMm();
+    {
+        // Item 4 (fw 2.1.76): a pre-home carryover (ConfigStore::load()
+        // restores a PRIOR boot's measurement into the motor regardless of
+        // _state.homed) must never overstate the configured ceiling. The
+        // override branch is exempt — WS_OP_HOME_OVERRIDE always sets
+        // _state.homed=true alongside it, so it is never "unhomed".
+        float ms = (_state.test_stroke_override_mm > 0.0f)
+                   ? _state.test_stroke_override_mm
+                   : _motor.getMeasuredStrokeMm();
+        if (!_state.homed && ms > _state.config.max_rail_mm) ms = _state.config.max_rail_mm;
+        doc["measured_stroke_mm"] = ms;
+    }
     doc["home_override"] = (_state.test_stroke_override_mm > 0.0f);
     doc["serial_mode"] = (bool)SERIAL_CONTROL_MODE;
     doc["serial_active"] = _serialTransport.isActive();
@@ -505,7 +514,14 @@ void WebUI::handleApiCapabilities() {
     // (the pre-homing scale + homing sweep bound), not a fixed geometry ceiling.
     doc["max_travel_mm"] = _state.config.max_rail_mm;
     doc["max_rail_mm"]   = _state.config.max_rail_mm;
-    doc["measured_stroke_mm"] = _motor.getMeasuredStrokeMm();
+    {
+        // Item 4 (fw 2.1.76): same pre-home clamp as handleApiStatus() above —
+        // see that comment for why. Kept in step deliberately; these are the
+        // HTTP twin of the SlopSync 0x0081 `measured_stroke` field.
+        float ms = _motor.getMeasuredStrokeMm();
+        if (!_state.homed && ms > _state.config.max_rail_mm) ms = _state.config.max_rail_mm;
+        doc["measured_stroke_mm"] = ms;
+    }
 
     JsonObject speed = doc["speed_ceiling_mm_s"].to<JsonObject>();
     speed["normal"] = (uint32_t)NORMAL_MAX_SPEED_MM_S;
@@ -737,6 +753,24 @@ bool WebUI::applySettings(JsonDocument& doc, JsonDocument& resp) {
     }
 
     _mapper.setRange(rmin, rmax);
+    // Mirror the mapper's post-clamp range back into state.config. The mapper
+    // is the ONE live source of truth for the window (every real motion
+    // consumer — MotionArbiter, PatternEngine, main.cpp's telemetry — reads
+    // _mapper directly, and it always did apply a live window edit correctly).
+    // state.config.min/max_position_mm is a SEPARATE copy that only
+    // ConfigStore::load() used to keep in sync (see its own "silent
+    // divergence from the mapper's real range" comment) — this call path
+    // never did, which starved two things that read state.config instead of
+    // the mapper: SlopSyncHubService's 0x0081 machine-config STATE broadcast
+    // (so the UI's ground-truth rail band always redisplayed the stale
+    // boot-time window after a live edit — CLAUDE.md 3's Ground Truth
+    // Doctrine was doing exactly its job, faithfully reporting a firmware
+    // value that was itself wrong) and pumpConfigGeneration()'s change
+    // detector (so the SlopSync protocol cfg_gen never advanced for a window
+    // edit either). The physical machine was never the bug; its own STATE
+    // channel lying about itself was. :3
+    _state.config.min_position_mm = _mapper.getMinMm();
+    _state.config.max_position_mm = _mapper.getMaxMm();
 
     _state.config.max_speed_mm_s = (float)speed;
     _state.config.acceleration_mm_s2 = (float)accel;

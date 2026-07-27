@@ -236,7 +236,7 @@ export class BlobReassembler {
  *                  ?13:replay_depth, ?14:setting_channel, ?15:stream_kind}
  * layout-field = {1:name, 2:packedType, 3:unit, 4:scale f32, ?5:min, ?6:max,
  *                 ?7:{bits}, ?8:setting_key, ?9:default, ?10:[options],
- *                 ?11:group, ?12:desc, ?13:role, ?14:step, ?15:flags}
+ *                 ?11:group, ?12:desc, ?13:role, ?14:step, ?15:flags, ?18:size}
  * schema-field = {1:name, 2:cborType, 3:unit, ?5:min, ?6:max, ?9:default,
  *                 ?10:[options], ?11:group, ?12:desc, ?13:role, ?14:step,
  *                 ?15:flags, ?16:access, ?17:[option_access]}
@@ -343,6 +343,13 @@ function decodeLayoutField(fm) {
   // original slopsync-js window bug.
   if (fm.has(8)) f.settingKey = fm.get(8);
   decodeSharedAnnotations(fm, f);
+  // RFC-037: the field's packed width, stated explicitly rather than derived
+  // from `type`. Absent on every catalog this reference device currently
+  // emits (the encoder side is a named follow-up) — this is forward-looking
+  // decode support, exercised so far only by this file's own tests. See
+  // decodePacked() for what it buys: an unknown FUTURE packed type becomes a
+  // skippable hole in the layout instead of truncating every field after it.
+  if (fm.has(18)) f.declaredSize = fm.get(18);
   return f;
 }
 
@@ -457,8 +464,26 @@ const _dec = new TextDecoder();
  * LONGER payload than the layout describes is ignored past the end — the same
  * append-only rule from the other side.
  *
+ * RFC-037 (`f.declaredSize`, catalog key 18): a field's byte width is
+ * otherwise derivable ONLY from `type` — so the day the registry adds packed
+ * type 11, every client that meets it on the wire has to stop decoding the
+ * layout THERE, not just at that field: every later field's offset becomes
+ * unknowable too, and the whole tail goes dark. A declared size fixes that:
+ *   - KNOWN type, declared size present and it disagrees with the type's own
+ *     width: that is a CATALOG AUTHORING error (conformance is supposed to
+ *     catch it before it ships). We trust the TYPE, not the declaration —
+ *     the type is what tells us how to actually decode the bytes — and warn
+ *     once per field so the mismatch doesn't decode-loop silently forever.
+ *   - UNKNOWN type, declared size present: a SKIPPABLE HOLE. We don't know
+ *     what the bytes mean, but we know how many there are, so we step over
+ *     them and keep decoding every field that follows — the whole point of
+ *     RFC-037.
+ *   - UNKNOWN type, no declared size: offsets are genuinely unknowable past
+ *     here — stop, exactly as before this RFC (a pre-RFC-037 hub, or a hub
+ *     that forgot to state it, gets today's behavior, not a crash).
+ *
  * @param {Uint8Array} payload
- * @param {Array<{name,type,scale,bits?}>} layout
+ * @param {Array<{name,type,scale,bits?,declaredSize?}>} layout
  * @returns {Object} field name -> value (+ optional _bits maps)
  */
 export function decodePacked(payload, layout) {
@@ -466,8 +491,22 @@ export function decodePacked(payload, layout) {
   const out = {};
   let off = 0;
   for (const f of layout) {
-    const size = PACKED_SIZE[f.type];
-    if (size == null) break; // unknown packed type: offsets are unknowable past here
+    const derivedSize = PACKED_SIZE[f.type];
+    if (derivedSize == null) {
+      // Unknown packed type (a future registry addition this build predates).
+      if (f.declaredSize == null) break; // offsets unknowable past here — stop (pre-RFC-037 behavior)
+      if (off + f.declaredSize > payload.byteLength) break; // short frame — stop gracefully
+      off += f.declaredSize; // skippable hole: no value to produce, but decoding continues
+      continue;
+    }
+    if (f.declaredSize != null && f.declaredSize !== derivedSize && !f._sizeMismatchWarned) {
+      f._sizeMismatchWarned = true; // warn once per field, not once per STATE push
+      // eslint-disable-next-line no-console
+      console.warn('slopsync: catalog field "' + f.name + '" (type ' + f.typeName +
+        ') declares size ' + f.declaredSize + ' B but the type is ' + derivedSize +
+        ' B wide — trusting the type (RFC-037: this is a catalog authoring error)');
+    }
+    const size = derivedSize; // known type: TRUST THE TYPE, never the declaration
     if (off + size > payload.byteLength) break; // short frame — stop gracefully
     let raw;
     switch (f.type) {

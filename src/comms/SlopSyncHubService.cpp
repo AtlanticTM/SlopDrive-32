@@ -47,6 +47,7 @@ static_assert(factory::user_accel  == DEFAULT_USER_ACCEL_MM_S2,    "catalog defa
 static_assert(factory::input_speed == DEFAULT_MAX_SPEED_MM_S,      "catalog default input_speed drifted");
 static_assert(factory::input_accel == DEFAULT_ACCEL_MM_S2,         "catalog default input_accel drifted");
 static_assert(factory::input_jerk  == DEFAULT_INPUT_MAX_JERK_MM_S3,"catalog default input_jerk drifted");
+static_assert(factory::max_rail    == DEFAULT_MAX_RAIL_MM,         "catalog default max_rail drifted from DEFAULT_MAX_RAIL_MM");
 static_assert(ceiling::speed_max   == MAX_SPEED_MM_S,              "catalog speed ceiling drifted from MAX_SPEED_MM_S");
 static_assert(ceiling::accel_max   == MAX_ACCEL_MM_S2,             "catalog accel ceiling drifted from MAX_ACCEL_MM_S2");
 static_assert(ceiling::jerk_max    == MAX_JERK_MM_S3,              "catalog jerk ceiling drifted from MAX_JERK_MM_S3");
@@ -235,6 +236,7 @@ slopsync::Result<IntentValueMap, NackCode> SlopDriveHubDelegate::applyIntent(
             const auto* f5 = findField(requested, 5);  // input_speed
             const auto* f6 = findField(requested, 6);  // input_accel
             const auto* f7 = findField(requested, 7);  // input_jerk (fw 2.1.47)
+            const auto* f8 = findField(requested, 8);  // max_rail (fw 2.1.76, item 1)
             if (f1) in["range_min"] = fieldF32(f1, 0.0f);
             if (f2) in["range_max"] = fieldF32(f2, 0.0f);
             // applySettings gates the user/input branches on is<uint32_t>(), so
@@ -244,9 +246,16 @@ slopsync::Result<IntentValueMap, NackCode> SlopDriveHubDelegate::applyIntent(
             if (f5) in["input_max_speed"] = uint32_t(lroundf(fieldF32(f5, 0.0f)));
             if (f6) in["input_max_accel"] = uint32_t(lroundf(fieldF32(f6, 0.0f)));
             if (f7) in["input_max_jerk"] = uint32_t(lroundf(fieldF32(f7, 0.0f)));
+            // max_rail is a float field in applySettings (doc["max_rail"].is<float>()
+            // is checked FIRST there), unlike the uint32-gated user/input pairs above.
+            if (f8) in["max_rail"] = fieldF32(f8, 0.0f);
             // Bump the protocol cfg_gen (that is what cfgChanged means) but do
             // NOT hammer NVS on a potentially-streamed intent — no_persist keeps
             // flash safe; a future explicit save channel handles durability.
+            // max_rail is the one exception: it is a rare, deliberate geometry
+            // edit (never a streamed value), so it earns an explicit COALESCED
+            // persist via _maxRailDirty below rather than waiting on a manual
+            // WebUI save — see item 1's "savable" requirement.
             in["no_persist"] = true;
 
             // RFC-002: cfg_gen advances IFF an applied value actually CHANGED.
@@ -261,6 +270,7 @@ slopsync::Result<IntentValueMap, NackCode> SlopDriveHubDelegate::applyIntent(
             const float p2 = cfg.user_max_speed_mm_s, p3 = cfg.user_max_accel_mm_s2;
             const float p4 = cfg.input_max_speed_mm_s, p5 = cfg.input_max_accel_mm_s2;
             const float p6 = cfg.input_max_jerk_mm_s3;
+            const float p7 = cfg.max_rail_mm;
 
             if (!_webui.handleCommand(WS_OP_SET_WINDOW, in, out)) {
                 return Ret::err(NackCode::INVALID_VALUE);  // e.g. min >= max
@@ -268,7 +278,7 @@ slopsync::Result<IntentValueMap, NackCode> SlopDriveHubDelegate::applyIntent(
             cfgChanged = (p0 != cfg.min_position_mm) || (p1 != cfg.max_position_mm) ||
                          (p2 != cfg.user_max_speed_mm_s) || (p3 != cfg.user_max_accel_mm_s2) ||
                          (p4 != cfg.input_max_speed_mm_s) || (p5 != cfg.input_max_accel_mm_s2) ||
-                         (p6 != cfg.input_max_jerk_mm_s3);
+                         (p6 != cfg.input_max_jerk_mm_s3) || (p7 != cfg.max_rail_mm);
             // RFC-011: tell the service's machine-side detector that THIS change
             // was client-driven, so it doesn't bump cfg_gen a second time for
             // the same edit (the hub already bumps on cfgChanged).
@@ -281,7 +291,12 @@ slopsync::Result<IntentValueMap, NackCode> SlopDriveHubDelegate::applyIntent(
             if (f5) applied.fields[n++] = {5, IntentValue::ofF32(float(out["input_max_speed"] | 0u))};
             if (f6) applied.fields[n++] = {6, IntentValue::ofF32(float(out["input_max_accel"] | 0u))};
             if (f7) applied.fields[n++] = {7, IntentValue::ofF32(float(out["input_max_jerk"] | 0u))};
+            if (f8) applied.fields[n++] = {8, IntentValue::ofF32(out["max_rail"] | 0.0f)};
             applied.count = n;
+            // Coalesced NVS persist, mirroring 0x0105's _smTuneDirty — a rare
+            // geometry edit deserves durability without hammering flash on a
+            // channel other keys on THIS SAME intent deliberately don't persist.
+            if (f8) _maxRailDirty = true;
             return Ret::ok(applied);
         }
 
@@ -379,39 +394,29 @@ slopsync::Result<IntentValueMap, NackCode> SlopDriveHubDelegate::applyIntent(
             }
         }
 
-        // ---- 0x0104 modes-set → WS_OP_BLEND / MODE / STREAM_MODE / OVERSHOOT
-        // M5b: the four MODE settings the legacy :81/HTTP plane owned. Every
-        // key optional; only the keys PRESENT are applied, and each one echoes
-        // the value the handler actually took.
+        // ---- 0x0104 modes-set → MODE / STREAM_MODE / OVERSHOOT ------------
+        // M5b: originally the four MODE settings the legacy :81/HTTP plane
+        // owned. Every key optional; only the keys PRESENT are applied, and
+        // each one echoes the value the handler actually took.
         //
-        // GROUND TRUTH, and it is not decoration here: three of these four
-        // clamp or reinterpret their input somewhere downstream (blend is
-        // constrained to [1,3] by the driver; transport is validated against
-        // the modes this build compiled in). So the echo is re-read from the
-        // machine AFTER the handler ran, never assumed from the request —
-        // otherwise a rejected transport switch would leave every client's
-        // dropdown showing a mode the machine is not in.
+        // KEY 1 (blend_mode) IS NOW A PERMANENT GAP, same treatment as key 2
+        // (transport) below — fw 2.1.76, operator ruling 2026-07-27, item 2.
+        // MotionArbiter has aliased every blend mode to "allow" since before
+        // this channel existed, so there was no live setting left to write;
+        // see the field comment on 0x008A's `blend_mode_reserved` in
+        // SlopSyncCatalog.h. A client that still sends key 1 falls through
+        // unhandled below, same as key 2 always has — if it is the ONLY key
+        // present the call NACKs INVALID_VALUE (anyApplied stays false).
+        //
+        // GROUND TRUTH, and it is not decoration here: these clamp or
+        // reinterpret their input somewhere downstream. So the echo is
+        // re-read from the machine AFTER the handler ran, never assumed from
+        // the request — otherwise a rejected switch would leave every
+        // client's dropdown showing a mode the machine is not in.
         case ch::modes_set: {
             applied.count = 0;
             bool anyApplied = false;
 
-            if (const auto* f = findField(requested, 1)) {   // blend_mode
-                // The key is "blend_mode" — applySettings reads
-                // `doc["blend_mode"] | current`, so a WRONG KEY IS SILENT: the
-                // fallback re-applies the existing value, the call succeeds,
-                // and the echo carries the old setting. Caught live by the
-                // round-trip test asserting echo == request rather than merely
-                // asserting the call did not error.
-                in.clear(); out.clear();
-                in["blend_mode"] = uint8_t(fieldU64(f, 1));
-                _webui.handleCommand(WS_OP_BLEND, in, out);
-                // Echo the handler's OWN response field, which is the
-                // post-clamp value it actually stored. (_arbiter's copy is a
-                // different object from the _motor one applySettings writes.)
-                applied.fields[applied.count++] =
-                    {1, IntentValue::ofU64(out["blend_mode"] | uint8_t(fieldU64(f, 1)))};
-                anyApplied = true;
-            }
             if (const auto* f = findField(requested, 3)) {   // stream_speed_mode
                 in.clear(); out.clear();
                 in["mode"] = uint8_t(fieldU64(f, 0));
@@ -1592,10 +1597,13 @@ void SlopSyncHubService::publishTelemetry() {
     if (!_cfgEverSent || gen != _lastCfgGen) {
         _cfgEverSent = true;
         _lastCfgGen = gen;
-        // 33 B — MUST stay byte-for-byte in step with the 0x0081 layout in
+        // 37 B — MUST stay byte-for-byte in step with the 0x0081 layout in
         // SlopSyncCatalog.h (field 7 "input_jerk" appended in fw 2.1.47,
-        // field 8 "enabled_mask" appended at M5a).
-        std::array<std::byte, 33> buf{};
+        // field 8 "enabled_mask" appended at M5a, field 9 "measured_stroke"
+        // appended in fw 2.1.76 / item 3). max_rail (field 6) became a real
+        // setting in the SAME release (item 1) — that is a metadata change
+        // only, it keeps its byte 24 offset.
+        std::array<std::byte, 37> buf{};
         std::span<std::byte> s(buf);
         slopsync::putF32(s.subspan(0, 4), _state.config.min_position_mm);
         slopsync::putF32(s.subspan(4, 4), _state.config.max_position_mm);
@@ -1607,9 +1615,9 @@ void SlopSyncHubService::publishTelemetry() {
         slopsync::putF32(s.subspan(28, 4), _state.config.input_max_jerk_mm_s3);
         // RFC-009 enabled_mask, bit i = the i-th setting-annotated field:
         //   0 window_min 1 window_max 2 user_speed 3 user_accel
-        //   4 input_speed 5 input_accel 6 input_jerk
+        //   4 input_speed 5 input_accel 6 max_rail 7 input_jerk
         //
-        // ALL SEVEN, ALWAYS — and that is the HONEST publish, not a stub.
+        // ALL EIGHT, ALWAYS — and that is the HONEST publish, not a stub.
         // I went looking for a gate to make this dynamic and there isn't one:
         // the delegate's 0x0101 handler has no e-stop, homed, or pause guard,
         // and applySettings clamps values rather than refusing them (its only
@@ -1620,7 +1628,19 @@ void SlopSyncHubService::publishTelemetry() {
         // every limit on this machine is editable at all times, including
         // while latched, which is exactly when an operator wants to lower one.
         // 0x0082's mask is where this field earns its keep dynamically.
-        slopsync::putU8(s.subspan(32, 1), 0x7F);
+        slopsync::putU8(s.subspan(32, 1), 0xFF);
+        // measured_stroke (item 3): the REAL homing measurement, distinct
+        // from max_rail above. Item 4: a value carried over from a PRIOR
+        // boot's NVS restore (ConfigStore::load() seeds this into the motor
+        // regardless of _state.homed) must never overstate the CONFIGURED
+        // ceiling while this session hasn't yet earned "measurement wins" by
+        // completing a fresh home — only a home that finished THIS session
+        // (_state.homed true) is trusted past max_rail.
+        float measured_stroke = _motor.getMeasuredStrokeMm();
+        if (!_state.homed && measured_stroke > _state.config.max_rail_mm) {
+            measured_stroke = _state.config.max_rail_mm;
+        }
+        slopsync::putF32(s.subspan(33, 4), measured_stroke);
         _hub.publishState(ch::machine_config, s);
     }
 
@@ -1635,19 +1655,24 @@ void SlopSyncHubService::publishTelemetry() {
         // _motor, NOT _arbiter: applySettings writes the MOTOR's blend mode and
         // echoes it, so publishing the arbiter's copy could report a value no
         // write ever produced. One source of truth per field.
+        //
+        // `blend` (byte 0, "blend_mode_reserved") is RETIRED (item 2, fw
+        // 2.1.76) — still read from _motor.getBlendMode() only because that is
+        // the smaller diff, not because the value means anything anymore. It
+        // is excluded from `mask` below and no client should render it.
         const uint8_t blend  = _motor.getBlendMode();
         const uint8_t smode  = _state.stream_speed_mode;
         const uint8_t oclamp = _state.interp_clamp_overshoot ? 1u : 0u;
-        // ALL THREE, ALWAYS — and, as on 0x0081, that is the honest publish
-        // rather than a stub. Each takes effect on the NEXT move; none reshapes
-        // one already in flight, and none is refused while latched, paused or
-        // driven. The one setting here that WOULD have needed gating was
-        // `transport`, and it was retired rather than gated (SlopSync is the
-        // only way in now; the hub listens on WS and BLE by default). If a
-        // future mode CAN be refused, drop its bit — a UI greying a control the
-        // machine would accept is the same lie as one offering a control it
-        // would refuse.
-        const uint8_t mask = 0x07u;           // bits 0..2 = the three settings
+        // ALL, ALWAYS — and, as on 0x0081, that is the honest publish rather
+        // than a stub. Each takes effect on the NEXT move; none reshapes one
+        // already in flight, and none is refused while latched, paused or
+        // driven. `transport` was retired rather than gated (SlopSync is the
+        // only way in now; the hub listens on WS and BLE by default), and
+        // `blend_mode` was retired outright (item 2 — see the field comment on
+        // SlopSyncCatalog.h's `blend_mode_reserved`). If a future mode CAN be
+        // refused, drop its bit — a UI greying a control the machine would
+        // accept is the same lie as one offering a control it would refuse.
+        const uint8_t mask = 0x03u;           // bits 0..1 = stream_speed_mode, overshoot_clamp
         std::array<std::byte, 4> buf{};
         std::span<std::byte> s(buf);
         slopsync::putU8(s.subspan(0, 1), blend);
@@ -1966,6 +1991,28 @@ void SlopSyncHubService::publishTelemetry() {
             JsonDocument in, out;
             _webui.handleCommand(WS_OP_SAVE, in, out);
             SLOGI("slopsync", "slopmotion tuning persisted to NVS");
+        }
+        // Item 1 (fw 2.1.76): max_rail is now a savable setting. Same
+        // coalesced-persist contract as _smTuneDirty above — 0x0101 key 8
+        // only flags the change, the write happens here at most once a
+        // second.
+        if (_delegate._maxRailDirty) {
+            _delegate._maxRailDirty = false;
+            JsonDocument in, out;
+            _webui.handleCommand(WS_OP_SAVE, in, out);
+            SLOGI("slopsync", "max_rail persisted to NVS");
+        }
+        // Item 3 (fw 2.1.76): persist the freshly-measured stroke on EVERY
+        // successful home, not just whenever the operator happens to hit
+        // Save next. motorTask (Core 1) raises this flag the instant a
+        // homing cycle completes with _state.homed true; NVS writes are
+        // flash I/O and must never run on the real-time core, so the actual
+        // ConfigStore::save() happens here, on the hub's Core-0 task.
+        if (_state.stroke_measured_pending) {
+            _state.stroke_measured_pending = false;
+            JsonDocument in, out;
+            _webui.handleCommand(WS_OP_SAVE, in, out);
+            SLOGI("slopsync", "measured stroke persisted to NVS after home");
         }
     }
 }

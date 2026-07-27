@@ -238,6 +238,16 @@
       {#if machine.link.closeReason}<span class="reason">({machine.link.closeReason})</span>{/if}
     </div>
   {/if}
+
+  {#if machine.link.error}
+    <!-- RFC-033: SUBSCRIBE_REJECTED (and any other link-level protocol error
+         this client causes) surfaces here, not just in the SlopSync pane's
+         NACK table — it means a client bug, and burying it in a list of
+         routine NACKs is how it goes unnoticed. -->
+    <div class="banner tone-bad" role="alert">
+      <strong>LINK ERROR</strong> — {machine.link.error}
+    </div>
+  {/if}
 </header>
 
 <style>

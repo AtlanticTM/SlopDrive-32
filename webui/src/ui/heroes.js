@@ -36,7 +36,14 @@ const HEROES = [
     component: RailWidget,
     spec: {
       require: { min: ROLE.windowMin, max: ROLE.windowMax },
-      optional: { pos: ROLE.telemetryPosition, vel: ROLE.telemetryVelocity },
+      // `move` (RFC-032 command.position) and `target` (telemetry.target) are
+      // both optional: a machine with only the window roles still gets a
+      // correct, read-only window editor. Only when BOTH are present does
+      // the input tape become a live command surface (see RailWidget).
+      optional: {
+        pos: ROLE.telemetryPosition, vel: ROLE.telemetryVelocity,
+        move: ROLE.commandPosition, target: ROLE.telemetryTarget,
+      },
     },
   },
   {

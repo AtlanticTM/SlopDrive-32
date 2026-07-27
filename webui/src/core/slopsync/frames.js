@@ -103,6 +103,7 @@ export const K = {
   intent_seq: 41, // NACK: header seq of the frame being refused (RFC-001)
   burst: 42, // publishes entry: token-bucket capacity (RFC-013)
   reboot_in_ms: 43, // ECHO applied: this intent commits by rebooting (RFC-020)
+  deadman_wish_ms: 44, // HELLO: requested per-session deadman window (RFC-038); hub clamps into [deadman_min_ms,deadman_max_ms] and echoes the APPLIED value via the EXISTING key 24 — never a new response key
 };
 
 // WELCOME's `identity` (key 37) sub-map (registry identity_keys) — RFC-016 put
@@ -134,6 +135,13 @@ export const WELCOME_LIMITS_K = {
   max_frame: 1, // welcome_limits::max_frame
   max_subscriptions: 2, // welcome_limits::max_subscriptions
   retained_pending: 3, // welcome_limits::retained_pending
+  // RFC-033.3: most wishes ONE SUBSCRIBE/HELLO frame may carry (16 on the
+  // reference hub). Before this was advertised the cap was discoverable only by
+  // binary-searching a live machine, and overflowing it dropped the frame in
+  // silence — a healthy-looking LIVE session with zero STATE. Missing this
+  // mapping is not harmless: the client falls back to a conservative guess and
+  // never uses the real value.
+  max_subscriptions_per_frame: 4, // welcome_limits::max_subscriptions_per_frame
 };
 
 // ---- Access levels (registry AccessLevel) ----------------------------------
@@ -246,6 +254,27 @@ export const SAFETY_EVENT_KIND = {
 export const LOG_EVENT_KIND = { entry: 1 };
 export const LOG_LEVEL_NAME = ['trace', 'debug', 'info', 'warn', 'error', 'fatal'];
 
+// ---- Pairing modes (registry `pairing_modes` bitmask, RFC-027) -------------
+// The SAME three bits everywhere they appear: WELCOME `trust.pairing_modes`
+// (TRUST_K.pairing_modes, key 8 — "which ceremonies this hub offers RIGHT
+// NOW, re-evaluated per session"), the pending-pairing (0x000A) slot's `kind`
+// field, and the paired-devices roster's `pairing_mode` — "the single bit a
+// device paired through". ROLE IS AN ATTRIBUTE OF THE GRANT, NEVER OF THE
+// CEREMONY: all three modes end in PAIR_GRANT {token, role}.
+export const PAIRING_MODE = { knock_approve: 1, pin_proof: 2, push_to_pair: 4 };
+/** bit value -> short registry name, for generic rendering. */
+export const PAIRING_MODE_NAME = {
+  [PAIRING_MODE.knock_approve]: 'knock_approve',
+  [PAIRING_MODE.pin_proof]: 'pin_proof',
+  [PAIRING_MODE.push_to_pair]: 'push_to_pair',
+};
+
+// ---- pairing-events (0x000B) kind discriminators (registry pairing_event_kinds) --
+export const PAIRING_EVENT_KIND = {
+  knocked: 1, granted: 2, denied: 3, expired: 4,
+  window_opened: 5, window_closed: 6, revoked: 7, recognized_pending: 8,
+};
+
 // ---- NACK codes (registry NackCode) ----------------------------------------
 export const NACK = {
   MALFORMED: 0x0000,
@@ -264,6 +293,7 @@ export const NACK = {
   REBOOTING: 0x0109, // hub closing every session to commit a change (RFC-020)
   READY_TIMEOUT: 0x010a, // never sent CATALOG_READY in catalog_ready_timeout_ms
   NOT_READY: 0x010b, // refused: this session has not sent CATALOG_READY (RFC-015)
+  IDLE_REAPED: 0x010c, // RFC-039.4: hub reaped a non-owning session that fell silent past the idle threshold — GOODBYE code, deliberately distinct from DEADMAN_TIMEOUT (housekeeping, not a motion-safety event)
   UNKNOWN_CHANNEL: 0x0200,
   ACCESS_DENIED: 0x0201,
   CLASS_MISMATCH: 0x0202,
@@ -281,6 +311,7 @@ export const NACK = {
   CHUNK_UNAVAILABLE: 0x0500,
   REASSEMBLY_TIMEOUT: 0x0501,
   ETAG_MISMATCH: 0x0502,
+  BLOB_REFUSED: 0x0503, // RFC-039.2: a RECEIVER (this client) refusing a declared blob whose total_bytes exceeds its reassembly cap — sent as a GOODBYE code instead of idling in a half-session (the "LIVE WITH NO CATALOG" outage BlobReassembler's own comment used to describe)
 };
 export const NACK_NAME = Object.fromEntries(Object.entries(NACK).map(([k, v]) => [v, k]));
 
@@ -296,6 +327,8 @@ export const GOODBYE_CODE = {
   DEADMAN_TIMEOUT: NACK.DEADMAN_TIMEOUT,
   REBOOTING: NACK.REBOOTING,
   READY_TIMEOUT: NACK.READY_TIMEOUT,
+  IDLE_REAPED: NACK.IDLE_REAPED, // RFC-039.4: housekeeping reap of a dark viewer, never a safety event
+  BLOB_REFUSED: NACK.BLOB_REFUSED, // RFC-039.2: this client refusing an over-cap blob transfer
 };
 
 /**

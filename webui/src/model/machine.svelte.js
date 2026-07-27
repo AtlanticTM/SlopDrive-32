@@ -24,7 +24,7 @@
  */
 
 import {
-  createSession, CHANNEL_CLASS, PRIORITY, acquireToken, getInstanceId, toHex,
+  createSession, CHANNEL_CLASS, PRIORITY, NACK, acquireToken, getInstanceId, toHex,
 } from '../core/slopsync/index.js';
 import { buildSettingsModel } from './settings.js';
 
@@ -121,13 +121,16 @@ export function isLive() {
  * subscribed to anyway, and its data shows up in the diagnostics surface even
  * though no bespoke widget knows what it means. That is the difference between
  * a client and OUR client.
+ *
+ * ONE combined wish list — STATE and EVENT wishes mixed in the same frame.
+ * RFC-033 settled this: mixing classes in one SUBSCRIBE is, and always was,
+ * legal. See subscribeInBatches() for the field bug this used to be blamed on.
  */
-function subscriptionWishes(entries, maxSubs, onlyClass) {
+function subscriptionWishes(entries, maxSubs) {
   const wishes = [];
   for (const e of entries) {
     if (e.dir !== 0) continue;                       // h2c only; we do not publish
     if (e.cls !== CHANNEL_CLASS.STATE && e.cls !== CHANNEL_CLASS.EVENT) continue;
-    if (onlyClass != null && e.cls !== onlyClass) continue;
     // EVENTs are edge-driven; a rate on them is meaningless. On-change STATE
     // channels advertise 0 and mean it.
     const rate = (e.cls === CHANNEL_CLASS.EVENT || !e.maxRateHz)
@@ -161,35 +164,37 @@ function subscriptionWishes(entries, maxSubs, onlyClass) {
 
 
 /**
- * Send SUBSCRIBE in batches that fit the hub's declared max_frame.
+ * Send SUBSCRIBE in batches that fit the hub's declared per-frame wish cap.
  *
- * THE FIELD BUG THIS FIXES: the real machine advertises `max_frame: 512`. This
- * client wanted 21 channels; that SUBSCRIBE exceeded 512 bytes and the hub
- * dropped it WHOLESALE — no NACK, no grants, no STATE. The session sat happily
- * LIVE while every readout on every tab rendered `--`, which reads exactly like
- * a rendering bug and is not one. Nine channels fit and worked, which is why
- * the reference probe never caught it and why the simulator (fewer channels,
- * and it declares a larger frame) hid it completely.
+ * ── Two field bugs, and the corrected diagnosis (RFC-033) ──────────────────
  *
- * Batching rather than truncating means a machine with many channels still gets
- * ALL of them subscribed. Each entry is a 3-key CBOR map (rate f32, priority,
- * channel id) — ~14 B — and the budget leaves room for the frame header and the
- * array/map wrappers. When the hub declares no limit we fall back to the
- * protocol floor rather than assuming generosity.
+ * FIELD BUG #1: the real machine advertises `max_frame: 512` bytes. This
+ * client wanted 21 channels in one SUBSCRIBE; the hub dropped it WHOLESALE —
+ * no NACK, no grants, no STATE. The session sat happily LIVE while every
+ * readout on every tab rendered `--`, which reads exactly like a rendering
+ * bug and is not one.
+ *
+ * FIELD BUG #2 (the one that actually mattered): the byte-size math above was
+ * the wrong model entirely. A conservative fixed batch of 8 was shipped as
+ * the fix, tuned down from an estimate that regressed the moment the catalog
+ * grew from 33 to 44 entries. Both "mixed STATE+EVENT frame" drops that were
+ * blamed on class-mixing at the time were actually this: the hub was silently
+ * dropping any SUBSCRIBE over its UNDECLARED wish-count cap (16, on this
+ * hub), which nobody could see without binary-searching a live machine.
+ *
+ * THE FIX, now that the cap is advertised (WELCOME `limits` key 4,
+ * `max_subscriptions_per_frame`): batch by COUNT, sized from that value
+ * directly. No byte estimate, no class split — mixing STATE and EVENT wishes
+ * in one frame is, and always was, legal (RFC-033's ruling). Fall back to 8
+ * only when the hub is old enough not to advertise key 4 at all; a hub that
+ * DOES advertise it is trusted completely, because overflow now answers
+ * `SUBSCRIBE_REJECTED` (0x0204) instead of silence — see the `nack` handler
+ * below, which treats that code as a loud client-bug error rather than
+ * routine congestion shedding.
  */
 function subscribeInBatches(wishes) {
-  // CONSERVATIVE ON PURPOSE. A byte estimate was tried first and regressed the
-  // moment the device's catalog grew from 33 to 44 entries: the batches got
-  // bigger, the SUBSCRIBE was silently dropped again, and every control on the
-  // page went disabled because isFieldEnabled() has no snapshot to gate on.
-  //
-  // The reference probe subscribes 9 channels and has always worked, so 8 per
-  // frame sits comfortably inside whatever the real constraint is. The cost is
-  // a few extra small frames at connect; the benefit is that a machine growing
-  // its catalog can never silently break its own clients again. Still bounded
-  // by the hub's declared max_frame in case some hub declares a tiny one.
-  const maxFrame = machine.link.limits.max_frame || 512;
-  const budget = Math.max(1, Math.min(8, Math.floor((maxFrame - 48) / 16)));
+  const perFrame = machine.link.limits.max_subscriptions_per_frame;
+  const budget = (typeof perFrame === 'number' && perFrame > 0) ? perFrame : 8;
   for (let i = 0; i < wishes.length; i += budget) {
     session.subscribe(wishes.slice(i, i + budget));
   }
@@ -267,19 +272,29 @@ export function connect(opts = {}) {
     };
     // Subscribe only once we know what exists. Wishing for channels before the
     // catalog is how a client ends up hardcoding ids.
-    // STATE and EVENT go in SEPARATE frames. They are subscribed the same way,
-    // but keeping them apart means a hub that dislikes one class cannot take the
-    // other down with it — and STATE is the class every readout on the page
-    // depends on, so it must never be collateral damage.
+    // ONE combined wish list, STATE and EVENT together — RFC-033 settled that
+    // mixing classes in a SUBSCRIBE is legal; the only real constraint is the
+    // per-frame wish count, which subscribeInBatches() sizes from the hub's
+    // own advertised cap. See that function's header for the corrected story.
     const lim = machine.link.limits.max_subscriptions;
-    subscribeInBatches(subscriptionWishes(entries, lim, CHANNEL_CLASS.STATE));
-    subscribeInBatches(subscriptionWishes(entries, lim, CHANNEL_CLASS.EVENT));
+    subscribeInBatches(subscriptionWishes(entries, lim));
   });
 
   session.on('grant', (grants) => {
     for (const g of grants || []) {
       machine.grants[g.channel] = { rate: g.rate, priority: g.priority };
     }
+  });
+
+  // A PAIR_GRANT upgrades this session's tier IN PLACE — the hub does not
+  // require a reconnect, so neither may we. Without mirroring it here, every
+  // widget outside the pairing pane keeps rendering the OLD tier and greys
+  // configure-only controls that the machine would now accept: the UI would be
+  // lying about what this session can do, in the direction that hides working
+  // controls. PairingPane tracks session.state.roles directly and so was
+  // already correct; this makes the rest of the page agree with it.
+  session.on('pairGrant', (g) => {
+    if (g && g.role != null) machine.link.roles = g.role | 0;
   });
 
   session.on('live', () => {
@@ -313,6 +328,15 @@ export function connect(opts = {}) {
 
   session.on('nack', (n) => {
     push(machine.events.nacks, { ...n, at: Date.now() }, NACK_MAX);
+    // SUBSCRIBE_REJECTED (0x0204) means a client bug — this client sent a
+    // SUBSCRIBE the hub could not process (RFC-033: usually more wishes than
+    // max_subscriptions_per_frame). Every other NACK the link surfaces via
+    // the events ring alone; this one is loud enough to earn a standing
+    // link-level error, because it means the batching logic above regressed,
+    // not that the operator did anything wrong.
+    if (n.code === NACK.SUBSCRIBE_REJECTED) {
+      machine.link.error = 'SUBSCRIBE_REJECTED' + (n.detail ? ': ' + n.detail : '') + ' — client bug, see machine.svelte.js';
+    }
   });
 
   session.on('clock', (c) => {

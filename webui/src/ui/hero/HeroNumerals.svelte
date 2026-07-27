@@ -3,36 +3,39 @@
    * HeroNumerals.svelte — the big glowing readout row above the rail.
    *
    * A faithful port of the pre-refactor rail's hero numerals (actual /
-   * commanded / lag / speed), MINUS commanded and lag. Those two do not
-   * survive the port on purpose: they read the live motion PLAN (the
-   * interpolator's current setpoint), and nothing in the registry's
-   * `field_roles` names that concept — `telemetry.position` is measured
-   * truth, there is no `telemetry.target`. Rendering "commanded" off the
-   * window bounds or off a locally-remembered request would be exactly the
-   * optimistic-UI lie CLAUDE.md forbids, so this widget only shows the two
-   * numbers that have a real ground-truth role: actual position and speed.
-   * See RailWidget.svelte's header comment and the task report for the full
-   * account of what could not be reproduced generically and why.
+   * commanded / lag / speed). Commanded and lag were dropped in the first
+   * pass of this refactor because nothing in `field_roles` named "the live
+   * setpoint" — rendering it off window bounds or a locally-remembered
+   * request would have been exactly the optimistic-UI lie CLAUDE.md forbids.
+   * RFC-032 registered `telemetry.target` for exactly this (the machine's own
+   * commanded position, as opposed to `telemetry.position`'s measured truth),
+   * so both numerals are back — still entirely ground-truth: `targetVal` is
+   * whatever the device actually reported, and `lag` is target - position,
+   * computed client-side here (still no THIRD role for that subtraction —
+   * see roles.js's note on `telemetry.target`).
    *
    * NOT a hero registered in heroes.js — HeroStrip only knows {id, component,
    * fields} entries from that registry, and this widget has no roles of its
    * own to claim. RailWidget composes it directly, feeding it the SAME
-   * interpolated numbers driving its canvas, so the numeral and the phosphor
+   * interpolated numbers driving its canvas, so the numerals and the phosphor
    * dot never disagree about where "now" is.
    *
-   * Every number is either `posVal`/`speedVal` (already smoothed from real
-   * telemetry samples in RailWidget's telebuf, never fabricated) — this
-   * component does no ground-truth reading of its own.
+   * Every number is either `posVal`/`speedVal`/`targetVal` (already smoothed
+   * from real telemetry samples in RailWidget's telebuf, never fabricated) —
+   * this component does no ground-truth reading of its own.
    */
   import { formatValue, unitOf, precisionFor } from '../../model/format.js';
 
   let {
     posField = null,
     velField = null,
+    targetField = null,
     posVal = null,
     speedVal = null,
+    targetVal = null,
     moving = false,
     fresh = false,
+    targetFresh = false,
   } = $props();
 
   const posText = $derived(posField ? formatValue(posField, fresh ? posVal : null) : '--');
@@ -46,6 +49,17 @@
     fresh && speedVal != null && isFinite(speedVal) ? speedVal.toFixed(speedPrecision) : '--'
   );
   const speedUnit = $derived(velField ? unitOf(velField) : (posField && unitOf(posField) ? unitOf(posField) + '/s' : ''));
+
+  const commandedText = $derived(targetField ? formatValue(targetField, targetFresh ? targetVal : null) : '--');
+  const commandedUnit = $derived(targetField ? unitOf(targetField) : '');
+
+  // lag = target - position (RFC-032: deliberately not its own role). Only
+  // meaningful when BOTH sides are fresh ground truth this instant.
+  const lagVal = $derived(
+    (fresh && targetFresh && posVal != null && targetVal != null) ? (targetVal - posVal) : null
+  );
+  const lagPrecision = $derived(targetField ? precisionFor(targetField) : (posField ? precisionFor(posField) : 0));
+  const lagText = $derived(lagVal != null && isFinite(lagVal) ? lagVal.toFixed(lagPrecision) : '--');
 </script>
 
 <div class="hero-numerals" class:stale={!fresh}>
@@ -63,6 +77,18 @@
     </span>
     <span class="hn-val mono" class:glow={moving && fresh}>{posText}<span class="hn-unit">{posUnit}</span></span>
   </div>
+
+  {#if targetField}
+    <div class="hn-item hn-secondary">
+      <span class="hn-label">commanded</span>
+      <span class="hn-val mono">{commandedText}<span class="hn-unit">{commandedUnit}</span></span>
+    </div>
+
+    <div class="hn-item hn-secondary">
+      <span class="hn-label">lag</span>
+      <span class="hn-val mono">{lagText}<span class="hn-unit">{commandedUnit}</span></span>
+    </div>
+  {/if}
 
   <div class="hn-item hn-secondary">
     <span class="hn-label">speed</span>

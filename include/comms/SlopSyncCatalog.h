@@ -179,9 +179,17 @@ inline constexpr float user_accel  = 200.0f;      // DEFAULT_USER_ACCEL_MM_S2
 inline constexpr float input_speed = 950.0f;      // DEFAULT_MAX_SPEED_MM_S
 inline constexpr float input_accel = 50000.0f;    // DEFAULT_ACCEL_MM_S2
 inline constexpr float input_jerk  = 2000000.0f;  // DEFAULT_INPUT_MAX_JERK_MM_S3
+// max_rail (fw 2.1.76 / operator ruling 2026-07-27): promoted from read-only
+// derived truth to a real savable setting (item 1) — see the field comment on
+// 0x0081 below. Same mirror rule as its siblings above.
+inline constexpr float max_rail    = 500.0f;      // DEFAULT_MAX_RAIL_MM
 // M5b mode defaults (0x008A). Same forced-duplication rule as above — each one
 // is static_assert'd against its real source in SlopSyncHubService.cpp.
-inline constexpr uint8_t blend_mode        = 1;   // AIMServoDriver::_blend_mode ctor value
+//
+// `blend_mode` REMOVED 2026-07-27 (operator ruling — item 2): the setting it
+// used to default was retired from 0x008A (see the field comment there), so
+// there is no longer a `.dflt` annotation to mirror. Do not re-add without
+// re-adding the field's setting_key first.
 inline constexpr uint8_t stream_speed_mode = 0;   // SystemState::SPEED_CEILING_PEGGED
 inline constexpr uint8_t overshoot_clamp   = 0;   // SystemState::interp_clamp_overshoot = false
 }  // namespace factory
@@ -193,6 +201,7 @@ inline constexpr uint8_t overshoot_clamp   = 0;   // SystemState::interp_clamp_o
 // static_assert treatment as `factory` above.
 namespace ceiling {
 inline constexpr float rail_mm    = 2000.0f;      // applySettings' max_rail sanity bound
+inline constexpr float rail_min   = 10.0f;        // applySettings' max_rail sanity floor
 inline constexpr float speed_min  = 1.0f;
 inline constexpr float speed_max  = 10000.0f;     // MAX_SPEED_MM_S
 inline constexpr float accel_min  = 10.0f;
@@ -447,14 +456,21 @@ inline bool buildSlopDriveCatalog(slopsync::Catalog32& c, DeviceFeatures feat = 
     // declares `settingChannel` = 0x0101 and `category` = limits, which is what
     // makes "render me a settings page" answerable from the catalog alone.
     //
-    // *** max_rail DELIBERATELY CARRIES NO setting_key. *** It is DERIVED
-    // MACHINE TRUTH — the rail ceiling the driver reports after homing measures
-    // it (or the configured sanity bound before that), and 0x0101 has no key
-    // that writes it. RFC-003's stored-vs-effective distinction IS this
-    // presence test and nothing else: absent = read-only, display it with its
-    // unit and never write it back into a setting's shadow. A client that
-    // stomped a stored value with this one is the exact slopsync-js bug
-    // (adopting the EFFECTIVE window as stored config) that produced RFC-003.
+    // fw 2.1.76 (operator ruling 2026-07-27, item 1): `max_rail` is now a REAL
+    // SAVABLE SETTING, not derived truth. It is the user-configured ceiling
+    // that bounds the sensorless-homing search sweep AND serves as the
+    // position ceiling before homing has measured the real stroke (see
+    // config_api.h's DEFAULT_MAX_RAIL_MM doc) — on a 2 m rail you set it above
+    // 2000mm so homing's search actually reaches both hard stops. That is a
+    // machine-geometry INPUT, which is why it belongs on 0x0101 like its
+    // siblings. THE OLD "derived machine truth" ROLE THIS FIELD USED TO PLAY —
+    // "what did homing actually measure" — is now `measured_stroke` (appended
+    // below, field 10): a SEPARATE, still read-only quantity. Conflating the
+    // two was the bug RFC-003's own note here used to warn against without
+    // fixing: this field's description claimed "measured for itself" while the
+    // publisher always wrote the CONFIGURED value, never the measurement.
+    // They are different quantities now published distinctly, and a client
+    // must not adopt one as a stand-in for the other.
     c.addEntry({.id = ch::machine_config, .name = "machine-config",
                 .cls = ChannelClass::STATE, .dir = Direction::h2c,
                 .access = AccessLevel::watch, .maxRateHz = 0.0f,
@@ -510,8 +526,13 @@ inline bool buildSlopDriveCatalog(slopsync::Catalog32& c, DeviceFeatures feat = 
                       .role = roles::limit_input_accel, .step = 100.0f,
                       .settingKey = 6, .hasSettingKey = true, .hasStep = true});
     c.addLayoutField({.name = "max_rail",    .type = PackedFieldType::f32, .unit = "mm",    .scale = 1.0f,
-                      .desc = "Total rail length this machine measured for itself. Read-only: it "
-                              "is what the hardware IS, not something you choose."});
+                      .hasMin = true, .hasMax = true, .min = ceiling::rail_min, .max = ceiling::rail_mm,
+                      .dflt = SettingDefault::ofFloat(factory::max_rail),
+                      .group = "Rail geometry",
+                      .desc = "How far sensorless homing searches for the hard stops. Set it above "
+                              "your rail's real length (e.g. 2000mm+ for a 2m rail).",
+                      .step = 1.0f,
+                      .settingKey = 8, .hasSettingKey = true, .hasStep = true});
     c.addLayoutField({.name = "input_jerk",  .type = PackedFieldType::f32, .unit = "mm/s3", .scale = 1.0f,
                       .hasMin = true, .hasMax = true, .min = ceiling::jerk_min, .max = ceiling::jerk_max,
                       .dflt = SettingDefault::ofFloat(factory::input_jerk),
@@ -524,18 +545,39 @@ inline bool buildSlopDriveCatalog(slopsync::Catalog32& c, DeviceFeatures feat = 
     // RFC-009 item 4 — DYNAMIC ENABLED STATE. Bit i gates the i-th
     // SETTING-ANNOTATED field of this layout, in layout order:
     //   0 window_min  1 window_max  2 user_speed  3 user_accel
-    //   4 input_speed 5 input_accel 6 input_jerk
-    // max_rail is skipped because it carries no setting_key, and so is this
-    // field itself — "setting-annotated" is the only membership rule, which is
-    // why it needs no second list to stay in step. Disabled means GREY, NEVER
-    // HIDE. Bit labels name the field each bit gates so the mapping survives
-    // encode/decode without a client re-deriving it.
+    //   4 input_speed 5 input_accel 6 max_rail     7 input_jerk
+    // fw 2.1.76: max_rail joined the setting-annotated set (item 1) and takes
+    // bit 6 in LAYOUT order (it is declared before input_jerk), which pushes
+    // input_jerk to bit 7 — a pure relabelling of what bit 6/7 mean, not a
+    // reshuffle of any BYTE offset (enabled_mask is metadata about the layout,
+    // not part of it). All 8 bits of the bitfield8 are now spoken for; a 9th
+    // setting on this entry would need to split into a new channel, same as
+    // 0x008B/C/D's category-split precedent. `enabled_mask` itself is never
+    // setting-annotated — "setting-annotated" is the only membership rule,
+    // which is why it needs no second list to stay in step. Disabled means
+    // GREY, NEVER HIDE. Bit labels name the field each bit gates so the
+    // mapping survives encode/decode without a client re-deriving it.
     c.addBitfieldField({.name = "enabled_mask", .type = PackedFieldType::bitfield8, .unit = "flag",
                         .scale = 1.0f,
                         .desc = "Which of these settings the machine will accept right now.",
                         .role = roles::meta_enabled_mask},
                        {"window_min", "window_max", "user_speed", "user_accel",
-                        "input_speed", "input_accel", "input_jerk"});
+                        "input_speed", "input_accel", "max_rail", "input_jerk"});
+    // measured_stroke (field 10, byte 33) — fw 2.1.76, item 3. THE REAL
+    // HOMING MEASUREMENT, distinct from max_rail (the configured ceiling
+    // above): 0 until the first successful home this boot has completed, then
+    // the usable stroke sensorless homing actually felt out between the two
+    // hard stops. No setting_key: this is derived machine truth exactly like
+    // max_rail used to claim to be, just honestly this time — the publisher
+    // (SlopSyncHubService.cpp) clamps the PRE-HOME value to max_rail (item 4:
+    // a stale NVS-restored measurement from a prior boot must never overstate
+    // the configured ceiling), but a measurement earned by a fresh home this
+    // session is trusted even past max_rail — the search sweep bounds
+    // hunting, not the result. Append-only: added after enabled_mask so bytes
+    // 0..32 keep their offsets.
+    c.addLayoutField({.name = "measured_stroke", .type = PackedFieldType::f32, .unit = "mm", .scale = 1.0f,
+                      .desc = "Usable stroke length sensorless homing actually measured between the "
+                              "two hard stops. Zero until the first successful home."});
 
     // ---- 0x0082 "pattern-state" — STATE, normal, on-change ----------------
     // PatternEngine live snapshot.  [1+1+4+4+4+4+1 = 19 B]
@@ -974,11 +1016,28 @@ inline bool buildSlopDriveCatalog(slopsync::Catalog32& c, DeviceFeatures feat = 
                       .desc = "Motion-core time when it happened."});
 
     // ---- 0x008A "machine-modes" — STATE, elevated, on-change -------------
-    // M5b. The four MODE settings the legacy :81/HTTP plane owned outright:
-    // WS_OP_BLEND (0x07), WS_OP_MODE (0x06), WS_OP_STREAM_MODE (0x12) and
-    // WS_OP_OVERSHOOT (0x13). Until now a SlopSync-only client could not read
-    // them at all, let alone set them — the WebUI got them from /api/settings
-    // over HTTP, which is exactly the control surface being retired.
+    // M5b. Originally the four MODE settings the legacy :81/HTTP plane owned
+    // outright: WS_OP_BLEND (0x07), WS_OP_MODE (0x06), WS_OP_STREAM_MODE
+    // (0x12) and WS_OP_OVERSHOOT (0x13). `transport`/WS_OP_MODE was RETIRED
+    // before it ever shipped a byte on this channel (SlopSync is the only way
+    // in now) — see ch::modes_set's key-2-is-a-permanent-gap note. Left with
+    // three: blend_mode, stream_speed_mode, overshoot_clamp.
+    //
+    // fw 2.1.76 (operator ruling 2026-07-27, item 2): `blend_mode` is ALSO
+    // retired. MotionArbiter::setBlendMode() has aliased every mode to
+    // "allow" since before this catalog existed (let-it-land/hybrid were
+    // already dead, just still settable), and the driver-level stream
+    // dispatch (AIMServoDriver::streamTo/streamToSteps) never reads its own
+    // _blend_mode field either — there has been no live motion behaviour
+    // behind this control for a while, only a setting UI that could still
+    // change a number nothing acted on. Picked option (b) from the CLAUDE.md
+    // ritual for retiring a packed STATE field: the BYTE STAYS (renamed
+    // `blend_mode_reserved`, still occupies byte 0 so bytes 1..3 keep their
+    // offsets — packed layouts are append-only, deleting the byte would be a
+    // wire break) but it carries NO setting_key, so no generic client renders
+    // a control for it. The paired INTENT key (0x0104 key 1) is retired too —
+    // see the modes_set case in SlopSyncHubService.cpp — making key 1 a
+    // SECOND permanent gap alongside key 2's `transport`.
     //
     // They are MODES, not limits: each one changes what the machine DOES with a
     // command rather than how far or how fast it may go. That is why they are
@@ -986,29 +1045,24 @@ inline bool buildSlopDriveCatalog(slopsync::Catalog32& c, DeviceFeatures feat = 
     // machine_modes for the enabled_mask arithmetic that makes the split
     // structural rather than tidy-minded).
     //
-    // Layout [1+1+1+1+1 = 5 B], all u8 — small enough that the on-change
-    // cadence costs nothing, and every value is an enum the catalog names, so a
-    // generic client renders four dropdowns without knowing this device exists.
+    // Layout [1+1+1+1 = 4 B], all u8 — small enough that the on-change
+    // cadence costs nothing, and every live value is an enum the catalog
+    // names, so a generic client renders two dropdowns without knowing this
+    // device exists.
     c.addEntry({.id = ch::machine_modes, .name = "machine-modes",
                 .cls = ChannelClass::STATE, .dir = Direction::h2c,
                 .access = AccessLevel::watch, .maxRateHz = 0.0f,
                 .defaultPriority = Priority::elevated,
                 .hasCategory = true, .category = slopsync::setting_categories::user,
                 .hasSettingChannel = true, .settingChannel = ch::modes_set});
-    // Blend is 1-BASED on this machine (the driver constrains to [1,3]), so the
-    // options array carries a dead index 0. Naming it "—" rather than omitting
-    // it keeps wire value == option index, which is the whole contract of a
-    // select field; a client must never have to subtract one.
-    c.addSelectField({.name = "blend_mode", .type = PackedFieldType::u8, .unit = "", .scale = 1.0f,
-                      .dflt = SettingDefault::ofInt(factory::blend_mode),
-                      .group = "Motion behaviour",
-                      // <=128 B: the registry caps desc and the probe enforces
-                      // it. The option LABELS carry the per-choice detail, so
-                      // this only has to say what the setting is about.
-                      .desc = "What the machine does when a new move arrives while one is "
-                              "still running.",
-                      .settingKey = 1, .hasSettingKey = true},
-                     {"—", "let-it-land", "allow-reversal", "hybrid"});
+    // RETIRED (item 2) — see the entry comment above. Plain reserved byte, no
+    // options/group/default/setting_key: nothing should render this. The
+    // publisher still writes the driver's (inert) getBlendMode() value here
+    // rather than a hardcoded 0, purely because that is the smaller diff —
+    // the byte's CONTENT is no longer meaningful either way.
+    c.addLayoutField({.name = "blend_mode_reserved", .type = PackedFieldType::u8, .unit = "", .scale = 1.0f,
+                      .desc = "Retired. Unused padding now — the motion policy it once set is gone; "
+                              "motion always behaves as 'allow'."});
     c.addSelectField({.name = "stream_speed_mode", .type = PackedFieldType::u8, .unit = "", .scale = 1.0f,
                       .dflt = SettingDefault::ofInt(factory::stream_speed_mode),
                       .group = "Motion behaviour",
@@ -1026,16 +1080,14 @@ inline bool buildSlopDriveCatalog(slopsync::Catalog32& c, DeviceFeatures feat = 
                       .hasSettingKey = true},
                      {"off", "on"});
     // Bit i gates the i-th setting-annotated field, same rule as 0x0081.
-    // TRANSPORT IS THE ONE THAT ACTUALLY MOVES: switching input source while
-    // the machine is being driven would yank control out from under a live
-    // session, so the machine reports that bit low while a pattern or stream is
-    // running. The other three are safe to change at any time — they take
-    // effect on the NEXT move rather than reshaping the one in flight.
+    // blend_mode_reserved carries no setting_key so it is NOT bit 0 anymore —
+    // stream_speed_mode and overshoot_clamp are the only two setting-
+    // annotated fields left on this layout.
     c.addBitfieldField({.name = "enabled_mask", .type = PackedFieldType::bitfield8, .unit = "flag",
                         .scale = 1.0f,
                         .desc = "Which of these the machine will accept right now.",
                         .role = roles::meta_enabled_mask},
-                       {"blend_mode", "stream_speed_mode", "overshoot_clamp"});
+                       {"stream_speed_mode", "overshoot_clamp"});
 
     // ---- 0x008B/0x008C/0x008D "slopmotion-*" — STATE, tuning ---------------
     // M5c: the SlopMotion live-tune surface, off HTTP and onto the protocol.
@@ -1486,6 +1538,11 @@ inline bool buildSlopDriveCatalog(slopsync::Catalog32& c, DeviceFeatures feat = 
                       .hasMin = true, .hasMax = true, .min = ceiling::accel_min, .max = ceiling::accel_max});
     c.addSchemaField({.key = 7, .name = "input_jerk",  .type = CborFieldType::f32_t, .unit = "mm/s3",
                       .hasMin = true, .hasMax = true, .min = ceiling::jerk_min, .max = ceiling::jerk_max});
+    // fw 2.1.76 APPENDED key 8 "max_rail" (item 1, operator ruling
+    // 2026-07-27): promoted from read-only derived truth to a real setting —
+    // see the field comment on 0x0081's `max_rail` for the full rationale.
+    c.addSchemaField({.key = 8, .name = "max_rail",    .type = CborFieldType::f32_t, .unit = "mm",
+                      .hasMin = true, .hasMax = true, .min = ceiling::rail_min, .max = ceiling::rail_mm});
 
     // ---- 0x0102 "pattern-cmd" — INTENT, control, 20 Hz -------------------
     // Session-volatile (cfg_gen does NOT bump). Maps to arbiter source 2
@@ -1556,18 +1613,24 @@ inline bool buildSlopDriveCatalog(slopsync::Catalog32& c, DeviceFeatures feat = 
                 .cls = ChannelClass::INTENT, .dir = Direction::c2h,
                 .access = AccessLevel::control, .maxRateHz = 5.0f,
                 .defaultPriority = Priority::normal});
-    c.addSchemaField({.key = 1, .name = "blend_mode", .type = CborFieldType::uint_t, .unit = "",
-                      .hasMin = true, .hasMax = true, .min = 1.0f, .max = 3.0f});
-    // KEY 2 IS DELIBERATELY UNUSED. It briefly held "transport" (the WS/SER/
-    // BT/DONGLE/OSSM input-source selector) before that setting was retired:
-    // SlopSync is now the only way in, the hub listens on WebSocket and BLE by
-    // default, and OSSM-BLE is gone. The C5 dongle may return one day, but as a
-    // transport the hub simply HAS, not a mode an operator picks.
+    // KEY 1 IS DELIBERATELY UNUSED (fw 2.1.76, operator ruling 2026-07-27,
+    // item 2). It held "blend_mode" until MotionArbiter's already-standing
+    // alias-everything-to-"allow" behaviour (see setBlendMode()) made clear
+    // there was no live setting left to write — see the field comment on
+    // 0x008A's `blend_mode_reserved`. SlopSyncHubService.cpp's modes_set case
+    // no longer recognizes this key; a client that still sends it gets
+    // NACK(INVALID_VALUE) same as any other unrecognized key would.
     //
-    // The number is skipped rather than recycled. This channel never left the
-    // branch so reuse would technically be safe, but "released keys are never
-    // reused" is only a reliable habit if it does not get relitigated per case,
-    // and a gap costs nothing.
+    // KEY 2 IS ALSO DELIBERATELY UNUSED. It briefly held "transport" (the WS/
+    // SER/BT/DONGLE/OSSM input-source selector) before that setting was
+    // retired: SlopSync is now the only way in, the hub listens on WebSocket
+    // and BLE by default, and OSSM-BLE is gone. The C5 dongle may return one
+    // day, but as a transport the hub simply HAS, not a mode an operator picks.
+    //
+    // Both numbers are skipped rather than recycled. This channel never left
+    // the branch so reuse would technically be safe, but "released keys are
+    // never reused" is only a reliable habit if it does not get relitigated
+    // per case, and a gap costs nothing.
     c.addSchemaField({.key = 3, .name = "stream_speed_mode", .type = CborFieldType::uint_t, .unit = "",
                       .hasMin = true, .hasMax = true, .min = 0.0f, .max = 1.0f});
     c.addSchemaField({.key = 4, .name = "overshoot_clamp", .type = CborFieldType::uint_t, .unit = "",

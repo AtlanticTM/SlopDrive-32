@@ -12,25 +12,25 @@
    *
    * ── What did NOT survive the port, and why ─────────────────────────────────
    *
-   * 1. THE INPUT TAPE CANNOT COMMAND A MOVE. The original tape wrote directly
-   *    to a hardcoded "move" intent (position mm + bypass bool). That channel
-   *    is real on this device (0x0100) but its schema fields deliberately carry
-   *    NO role — see the comment at SlopSyncCatalog.h's "0x0100 move" entry:
-   *    RFC-019 action roles mark VERBS, and `position` is a value, not a verb,
-   *    so tagging it would have told every generic client to draw a button
-   *    where a slider belongs. The intended fix is a generic "render every
-   *    INTENT channel's schema as fields" path, which does not exist yet in
-   *    settings.js (it only turns action-role schema fields into buttons).
-   *    Per this task's hard rule 3, the honest move is to decline rather than
-   *    hardcode 0x0100: the tape renders, spans the window, and is disabled
-   *    with a reason, exactly like a Field.svelte control the session cannot
-   *    write.
+   * 1. THE INPUT TAPE COMMANDS A MOVE ONLY WHEN THE CATALOG SAYS IT CAN.
+   *    RFC-032 gave the wire a role for exactly this — `command.position` on
+   *    an INTENT schema field is a SETPOINT, not a verb, so (unlike an
+   *    `action.*` field) it renders as a positional control rather than a
+   *    button. When the hero claim resolves `fields.move`, the tape is live:
+   *    tap or drag sends `sendIntent(move.channelId, { [move.key]: value })`
+   *    directly (NOT writeSetting — this is not an RFC-009 setting, there is
+   *    no settingKey/settingChannel for it). When a machine has not
+   *    annotated its move channel this way, the tape correctly declines —
+   *    spans the window, disabled, with a reason — exactly like a
+   *    Field.svelte control the session cannot write. That decline path is
+   *    the honest fallback per hard rule 3, not a placeholder waiting on a
+   *    role that does not exist.
    *
-   * 2. "COMMANDED" AND "LAG" hero numerals are gone. Both read the live motion
-   *    PLAN (the interpolator's current setpoint), and no `field_roles` entry
-   *    names that concept — `telemetry.position` is measured truth; there is
-   *    no `telemetry.target`. See HeroNumerals.svelte's header for the full
-   *    account.
+   * 2. "COMMANDED" AND "LAG" hero numerals are back. RFC-032 registered
+   *    `telemetry.target` (the machine's live setpoint, as opposed to
+   *    `telemetry.position`'s measured truth) precisely to unblock this.
+   *    Lag is still not its own role — it is target - position, computed
+   *    client-side in HeroNumerals — see that file's header.
    *
    * 3. Manual mode (tape spans full travel, Set-Min/Max-here buttons with
    *    yielding-bounds) depended on a client-side "bypass limits" toggle that
@@ -43,7 +43,7 @@
    * work off whatever `[lo, hi]` and unit the catalog reports instead of an
    * assumed 0-999mm rail.
    */
-  import { machine } from '../../model/machine.svelte.js';
+  import { machine, getSession } from '../../model/machine.svelte.js';
   import { isFieldEnabled } from '../../model/settings.js';
   import { writeSetting, displayValue, statusOf, STATUS } from '../../model/shadow.svelte.js';
   import { formatValue, unitOf } from '../../model/format.js';
@@ -59,6 +59,12 @@
   const max = $derived(fields.max);
   const pos = $derived(fields.pos);
   const vel = $derived(fields.vel);
+  // RFC-032 optional claims. `move` is an INTENT schema field (isIntentField:
+  // true from settings.js pass 2) — it has channelId/key/access but no
+  // settingKey/writeChannel, so it is written via sendIntent, never
+  // writeSetting. `target` is an ordinary STATE field like pos/vel.
+  const move = $derived(fields.move);
+  const target = $derived(fields.target);
 
   function sampleOf(f) { return f ? machine.samples[f.channelId] : undefined; }
 
@@ -78,6 +84,28 @@
   const minEnabled = $derived(enabledOf(min));
   const maxEnabled = $derived(enabledOf(max));
   const bandEnabled = $derived(minEnabled && maxEnabled);
+
+  /**
+   * May THIS session command a move? `move` has no enabled_mask (it is not a
+   * RFC-009 setting) and no writeChannel/settingKey — its own `access` is the
+   * whole gate, checked the same way SafetyBar checks an option's access:
+   * against the catalog's own data, so this can never disagree with what the
+   * hub will actually accept. Reads machine.link.roles/phase explicitly
+   * because the session object lives outside Svelte's reactivity.
+   */
+  const moveEnabled = $derived.by(() => {
+    void machine.link.roles; void machine.link.phase;
+    if (!move) return false;
+    if (machine.link.phase !== 'live') return false;
+    const session = getSession();
+    return !!session && session.isLive && session.canUse(move.channelId, move.key, 0);
+  });
+  const moveReason = $derived.by(() => {
+    if (!move) return '';
+    if (machine.link.phase !== 'live') return 'no hub link';
+    if (!moveEnabled) return 'this session is not authorised to command motion';
+    return '';
+  });
 
   function worstStatus(a, b) {
     const order = [STATUS.fault, STATUS.overdue, STATUS.pending, STATUS.confirmed];
@@ -175,6 +203,25 @@
     }
   });
 
+  // Same treatment for the commanded setpoint, so the "commanded" numeral and
+  // the tape's own live cursor never disagree about "now" with each other or
+  // with the actual-position comet — all three are sampled from the same rAF
+  // instant below.
+  const targetTele = createTelebuf();
+  let targetTeleChannel = null;
+
+  $effect(() => {
+    const f = target;
+    if (!f) return;
+    if (targetTeleChannel !== f.channelId) { targetTele.reset(); targetTeleChannel = f.channelId; }
+    const ts = machine.sampleTs[f.channelId];
+    const s = machine.samples[f.channelId];
+    if (ts && s) {
+      const v = displayValue(f, s);
+      if (typeof v === 'number' && isFinite(v)) targetTele.push(v, ts);
+    }
+  });
+
   // ---------------------------------------------------------------------------
   // rAF render loop — drives the canvas AND the hero numerals from the SAME
   // interpolated instant, so the phosphor dot and the big numeral never
@@ -185,6 +232,8 @@
   let speedDisplay = $state(null);
   let moving = $state(false);
   let fresh = $state(false);
+  let targetDisplay = $state(null);
+  let targetFresh = $state(false);
 
   let hostEl = $state(null);
   let canvasEl = $state(null);
@@ -305,6 +354,14 @@
         moving = (nowMs - lastMoveAt) < 300;
       } else {
         posDisplay = null; speedDisplay = null; moving = false; fresh = false;
+      }
+
+      if (target) {
+        const rt = targetTele.sampleAt(nowMs);
+        targetDisplay = rt.value;
+        targetFresh = rt.fresh;
+      } else {
+        targetDisplay = null; targetFresh = false;
       }
 
       ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
@@ -451,11 +508,89 @@
         + ' · ' + formatValue(min, (maxVal ?? hi) - (minVal ?? lo)) + unitOf(min)
       : ''
   );
+
+  // ---------------------------------------------------------------------------
+  // Input tape — commands a move (RFC-032 command.position), when the catalog
+  // gave us `move`. Not a Field.svelte control and not writeSetting: there is
+  // no settingKey/settingChannel/shadow record for an INTENT field, only a
+  // sendIntent call and its post-clamp ECHO. Ground truth is preserved by NOT
+  // inventing a local "confirmed" value: while dragging the cursor tracks the
+  // operator's hand (clearly a live drag, not a claim about the machine);
+  // once released it falls straight back to `telemetry.target`, the same
+  // ground-truth setpoint the "commanded" hero numeral shows, so the tape and
+  // the numeral can never disagree.
+  // ---------------------------------------------------------------------------
+  let moveDragging = $state(false);
+  let moveDragValue = $state(null);
+  let moveLastResult = $state(null); // {ok, error, at}
+  let lastMoveSentAt = 0;
+  const MOVE_MIN_INTERVAL_MS = 80; // client-side throttle while dragging; tap/release always send
+
+  function moveValueFromClientX(clientX) {
+    if (!hostEl) return null;
+    const rect = hostEl.getBoundingClientRect();
+    if (!rect.width) return null;
+    const frac = clamp((clientX - rect.left) / rect.width, 0, 1);
+    const vlo = move && move.min != null ? move.min : lo;
+    const vhi = move && move.max != null ? move.max : hi;
+    return vlo + frac * (vhi - vlo);
+  }
+
+  async function commandMove(value) {
+    const session = getSession();
+    if (!session || !move || !moveEnabled) return;
+    try {
+      await session.sendIntent(move.channelId, { [move.key]: value });
+      moveLastResult = { ok: true, at: Date.now() };
+    } catch (err) {
+      moveLastResult = { ok: false, error: (err && (err.name || err.message)) || 'rejected', at: Date.now() };
+    }
+  }
+
+  function requestMove(value, force) {
+    if (value == null) return;
+    const now = Date.now();
+    if (!force && (now - lastMoveSentAt) < MOVE_MIN_INTERVAL_MS) return;
+    lastMoveSentAt = now;
+    commandMove(value);
+  }
+
+  function onTapePointerDown(e) {
+    if (!moveEnabled) return;
+    moveDragging = true;
+    try { e.currentTarget.setPointerCapture(e.pointerId); } catch (err) { /* unsupported: still works via window fallback */ }
+    const v = moveValueFromClientX(e.clientX);
+    moveDragValue = v;
+    requestMove(v, true);
+    e.preventDefault();
+  }
+  function onTapePointerMove(e) {
+    if (!moveDragging) return;
+    const v = moveValueFromClientX(e.clientX);
+    moveDragValue = v;
+    requestMove(v, false);
+  }
+  function onTapePointerUp() {
+    if (!moveDragging) return;
+    moveDragging = false;
+    requestMove(moveDragValue, true); // guarantee the released position lands, even mid-throttle
+  }
+
+  // Cursor position: the live drag value while dragging, else the machine's
+  // own reported setpoint (never a locally-remembered request once released).
+  const tapeVal = $derived(
+    moveDragging ? moveDragValue : (target && targetFresh && targetDisplay != null ? targetDisplay : null)
+  );
+  const tapePct = $derived(tapeVal != null ? pct(tapeVal) : null);
 </script>
 
 <div class="hero rail-hero">
   {#if pos}
-    <HeroNumerals posField={pos} velField={vel} posVal={posDisplay} speedVal={speedDisplay} moving={moving} fresh={fresh} />
+    <HeroNumerals
+      posField={pos} velField={vel} targetField={target}
+      posVal={posDisplay} speedVal={speedDisplay} targetVal={targetDisplay}
+      moving={moving} fresh={fresh} targetFresh={targetFresh}
+    />
   {/if}
 
   <div class="rail-readouts">
@@ -469,23 +604,53 @@
     </span>
   </div>
 
-  <!-- Input tape — the command surface, faithfully reproduced, DISABLED: this
-       catalog has no discoverable move INTENT (see the header comment). It
-       still shows the window extent so the visual rhythm of the original
-       survives; it commands nothing. -->
-  <div class="rail-tape-assembly disabled" class:drag-live={dragMode !== null} aria-disabled="true">
-    <div class="rail-tape-labels">
-      <span class="rail-tape-mode">input &middot; window</span>
-      <span class="rail-tape-extent mono">{haveWindow ? formatValue(min, minVal) + '–' + formatValue(max, maxVal) : '--'}</span>
-    </div>
-    <div class="rail-tape-track">
-      <div class="rail-tape"
-           style="left:{haveWindow ? minPct * 100 : 0}%; width:{haveWindow ? Math.max(0, (maxPct - minPct) * 100) : 100}%">
-        <span class="rail-tape-micro">no move intent on this catalog</span>
+  {#if move}
+    <!-- Input tape — a live command surface. Tap or drag anywhere across the
+         full travel to send a move INTENT; the hub clamps (window, limits)
+         and the post-clamp ECHO plus telemetry.target are what the cursor
+         shows once the drag ends — never an optimistic local guess. -->
+    <div class="rail-tape-assembly" class:drag-live={moveDragging} class:disabled={!moveEnabled}>
+      <div class="rail-tape-labels">
+        <span class="rail-tape-mode">tap &middot; drag to move</span>
+        <span class="rail-tape-extent mono">{tapeVal != null ? formatValue(move, tapeVal) + unitOf(move) : '--'}</span>
       </div>
+      <div class="rail-tape-track"
+           role="slider" tabindex={moveEnabled ? 0 : -1}
+           aria-label={move.label} aria-orientation="horizontal"
+           aria-valuemin={lo} aria-valuemax={hi} aria-valuenow={tapeVal ?? lo}
+           aria-disabled={!moveEnabled}
+           onpointerdown={onTapePointerDown}
+           onpointermove={onTapePointerMove}
+           onpointerup={onTapePointerUp}
+           onpointercancel={onTapePointerUp}>
+        {#if tapePct != null}
+          <div class="rail-tape-cursor" style="left:{tapePct * 100}%"></div>
+        {/if}
+      </div>
+      {#if moveLastResult && !moveLastResult.ok && (Date.now() - moveLastResult.at) < 4000}
+        <p class="rail-reason err">move refused: {moveLastResult.error}</p>
+      {:else if !moveEnabled}
+        <p class="rail-reason">{moveReason}</p>
+      {/if}
     </div>
-    <p class="rail-reason">This catalog does not tag a move INTENT by role, so a generic client cannot find it safely &mdash; see RailWidget.svelte.</p>
-  </div>
+  {:else}
+    <!-- Fallback for a machine that has not tagged a move INTENT by role —
+         renders the window extent so the visual rhythm survives, commands
+         nothing, and says exactly why. -->
+    <div class="rail-tape-assembly disabled" aria-disabled="true">
+      <div class="rail-tape-labels">
+        <span class="rail-tape-mode">input &middot; window</span>
+        <span class="rail-tape-extent mono">{haveWindow ? formatValue(min, minVal) + '–' + formatValue(max, maxVal) : '--'}</span>
+      </div>
+      <div class="rail-tape-track">
+        <div class="rail-tape"
+             style="left:{haveWindow ? minPct * 100 : 0}%; width:{haveWindow ? Math.max(0, (maxPct - minPct) * 100) : 100}%">
+          <span class="rail-tape-micro">no move intent on this catalog</span>
+        </div>
+      </div>
+      <p class="rail-reason">This catalog does not tag a move INTENT by role, so a generic client cannot find it safely &mdash; see RailWidget.svelte.</p>
+    </div>
+  {/if}
 
   <div class="spine-rail-host" class:drag-live={dragMode !== null} bind:this={hostEl}>
     <svg class="rail-ruler-svg" viewBox="0 0 100 100" preserveAspectRatio="none" aria-hidden="true">
@@ -614,7 +779,23 @@
     height: max(calc(var(--tap) * 0.6), 22px);
     border-top: 1px dashed var(--line-1);
     border-bottom: 1px dashed var(--line-1);
+    touch-action: none;
   }
+  /* Live tape (a `move` role was claimed): the whole track is the command
+     surface, cursor: crosshair like the rail host itself. */
+  .rail-tape-assembly:not(.disabled) .rail-tape-track { cursor: crosshair; }
+  .rail-tape-assembly.disabled .rail-tape-track { cursor: not-allowed; }
+  .rail-tape-cursor {
+    position: absolute;
+    top: 0; bottom: 0;
+    width: 2px;
+    transform: translateX(-1px);
+    background: var(--intent);
+    box-shadow: 0 0 8px rgba(var(--intent-rgb), .65);
+    pointer-events: none;
+    transition: left .12s ease;
+  }
+  .rail-tape-assembly.drag-live .rail-tape-cursor { transition: none; }
   .rail-tape {
     position: absolute;
     top: 0; bottom: 0; left: 0;
@@ -638,6 +819,7 @@
     text-transform: uppercase;
   }
   .rail-reason { margin: 4px 0 0; color: var(--tx-ghost); font-size: 0.72rem; }
+  .rail-reason.err { color: var(--bad); }
 
   /* ---- rail host ----------------------------------------------------------- */
   .spine-rail-host {
@@ -706,11 +888,11 @@
   .rail-band.disabled { cursor: not-allowed; opacity: 0.55; }
   /* Programmatic window changes (echo/adoption) ease in; a LIVE drag must
      track the pointer 1:1 with zero lag, so drag-live kills the transition
-     on the band, its handles, and the tape for as long as a drag is in
-     flight (mirrors the original's "instant during drag" rule). */
+     on the band and its handles for as long as a drag is in flight (mirrors
+     the original's "instant during drag" rule). The move tape's own cursor
+     gets the identical treatment via .rail-tape-assembly.drag-live above. */
   .drag-live .rail-band,
-  .drag-live .rail-band-handle,
-  .rail-tape-assembly.drag-live .rail-tape { transition: none; }
+  .drag-live .rail-band-handle { transition: none; }
 
   .rail-band-label {
     position: absolute;

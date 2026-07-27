@@ -26,6 +26,7 @@
 #include <optional>
 #include <span>
 
+#include "PatternPresetStore.h"
 #include "SlopSyncCatalog.h"
 #include "SlopSyncCrypto.h"
 #include "SlopSyncPlatform.h"
@@ -163,6 +164,17 @@ public:
     // get. It never fails open.
     void bindPairing(slopsync::PairingManager& pm) { _pairing = &pm; }
 
+    // ---- RFC-021 pattern-preset store, bound AFTER construction (M5) --------
+    // Same reason/timing as bindPairing: PatternPresetStore is a SERVICE
+    // member, the delegate is bound by reference into the Hub's constructor,
+    // so the service must exist first. bindPatternEngine is separate (not
+    // every build wires a PatternEngine — see setPatternEngine's own doc) and
+    // is how the "save" op reads LIVE advanced-pattern state directly
+    // (PatternEngine::apSettings(), a pure read — no WebUI::handleCommand
+    // round trip needed for a read that never clamps anything).
+    void bindPresets(PatternPresetStore& store) { _presets = &store; }
+    void bindPatternEngine(PatternEngine* pe) { _presetPatternEngine = pe; }
+
     slopsync::AccessLevel validateToken(std::span<const std::byte> instance_id,
                                         std::span<const std::byte> token, bool hasToken) override;
 
@@ -186,6 +198,13 @@ public:
     // stream channels; anything else is a no-op, matching the base default).
     void onStreamBundle(uint16_t channel_id, uint32_t session_id, const slopsync::BundleView& bundle) override;
 
+    // RFC-021: BLOB_REQ export for the pattern-preset store (0x0095, store_id
+    // 2). Only namespaces/stores the HUB doesn't serve itself reach here (the
+    // trust ledger is hub-served — see hub.hpp's readBlob doc); this store
+    // isn't, so it lands exactly here. Returns the slot's raw 40-byte payload,
+    // or nullopt for an out-of-range/empty slot or store_id != 2.
+    std::optional<BlobView> readBlob(uint8_t ns, uint8_t store_id, uint8_t slot) override;
+
 private:
     SystemState& _state;
     WebUI& _webui;
@@ -193,6 +212,8 @@ private:
     PacingRing& _pacingRing;
     SlopSyncUiTokenMinter& _uiTokens;
     slopsync::PairingManager* _pairing = nullptr;  // see bindPairing()
+    PatternPresetStore* _presets = nullptr;        // see bindPresets()
+    PatternEngine* _presetPatternEngine = nullptr; // see bindPatternEngine()
     bool _cfgFromIntent = false;
 
 public:
@@ -231,7 +252,10 @@ public:
     // Optional (additive): wire the PatternEngine so 0x0082 pattern-state can be
     // published from the live engine (Ground Truth). Without it, 0x0082 is
     // silent — every other channel works regardless. Call once from setup().
-    void setPatternEngine(PatternEngine* pe) { _patternEngine = pe; }
+    // ALSO binds the delegate's own PatternEngine pointer (0x0108 "save" reads
+    // apSettings() directly) — one setter, one call site, matches every other
+    // build regardless of whether it wires a PatternEngine at all.
+    void setPatternEngine(PatternEngine* pe) { _patternEngine = pe; _delegate.bindPatternEngine(pe); }
 
     // Optional (additive): wire the Core-1 sampler's command queue so drained
     // 0x0084 motion-input pacing-ring entries can reach it (mirrors
@@ -283,6 +307,15 @@ private:
     void checkQuickBootPairingGesture();
     void pumpPresencePairingWindow(uint32_t nowMs);
 
+    // RFC-021 pattern-preset store (M5) — mirrors the pairing ledger's own
+    // load/save/persist-if-changed shape exactly, same NVS namespace
+    // convention. loadPresets() also runs the one-time legacy migration off
+    // the retired /api/pattern/presets handler's "advpreset"/"list" JSON.
+    void loadPresets();
+    void savePresets();
+    void persistPresetsIfChanged();
+    void publishPresetRoster();  // on-change, called from publishTelemetry
+
     // ---- Injected -----------------------------------------------------------
     SystemState& _state;
     WebUI& _webui;
@@ -303,6 +336,12 @@ private:
     SlopDriveHubDelegate _delegate;
     slopsync::Hub _hub;
     SlopSyncAsyncWsPort _port;
+
+    // RFC-021 pattern-preset store (M5). NOT bound by reference into the Hub's
+    // constructor (unlike the pool above) — the delegate learns about it via
+    // bindPresets() in init(), the same post-construction pattern _pairing
+    // already uses, so it can live anywhere after _delegate exists.
+    PatternPresetStore _presets;
 
     TaskHandle_t _task = nullptr;
 
@@ -381,6 +420,12 @@ private:
     bool _hasDieTemp = false;
     bool _planEverSent = false;
 
+    // 0x0096 pattern-presets-roster — on-change, keyed off the store's own
+    // generation counter (same idea as _lastCfgGen, a simpler one since the
+    // roster has no fields besides "what changed", unlike a settings snapshot).
+    uint16_t _lastPresetGen = 0;
+    bool _presetRosterEverSent = false;
+
     // Pattern-state change detection (last PUBLISHED snapshot). _patMask is in
     // here because the RFC-009 enabled_mask is part of the snapshot and moves
     // on homed/e-stop transitions the pattern PARAMETERS do not see — leaving
@@ -414,6 +459,12 @@ private:
     // No concurrency to guard: loadPairing() runs in init(), before the hub task
     // exists; savePairing() runs only on the hub task afterwards.
     uint8_t _ledgerBlob[slopsync::limits::trust_ledger_max_bytes] = {};
+
+    // ---- Pattern-preset NVS scratch (RFC-021, M5) ---------------------------
+    // Same reasoning as _ledgerBlob immediately above: a member costs nothing
+    // from internal heap (this service lives in PSRAM), and 1 KB is too much
+    // to put on the hub task's stack even transiently.
+    uint8_t _presetBlob[PatternPresetStore::kEncodedBytes] = {};
 
     // ---- RFC-017 log bridge -------------------------------------------------
     // The serial handoff RE-BINDS to the first log-channel GRANT (RFC-017), so

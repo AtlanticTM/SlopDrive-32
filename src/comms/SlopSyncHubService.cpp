@@ -61,6 +61,15 @@ static_assert(factory::stream_speed_mode == SystemState::SPEED_CEILING_PEGGED,
 // the mirror is pinned.
 static_assert(slopdrive::kApBaseCount == advpat::BASE_COUNT,
               "catalog kApBaseCount drifted from advpat::BASE_COUNT");
+// Same mirror rule for the RFC-021 preset store: SlopSyncCatalog.h duplicates
+// PatternPresetStore's constants rather than including its header (kept
+// dependency-free, same reasoning as kApBaseCount above); this TU sees both.
+static_assert(slopdrive::kPresetCapacity == PatternPresetStore::kCapacity,
+              "catalog kPresetCapacity drifted from PatternPresetStore::kCapacity");
+static_assert(slopdrive::kPresetNameMax == PatternPresetStore::kNameMax,
+              "catalog kPresetNameMax drifted from PatternPresetStore::kNameMax");
+static_assert(slopdrive::kPresetPayloadBytes == PatternPresetStore::kPayloadBytes,
+              "catalog kPresetPayloadBytes drifted from PatternPresetStore::kPayloadBytes");
 
 // ============================================================================
 // Small helpers
@@ -672,6 +681,126 @@ slopsync::Result<IntentValueMap, NackCode> SlopDriveHubDelegate::applyIntent(
             return Ret::ok(applied);
         }
 
+        // ---- 0x0108 pattern-presets-cmd → PatternPresetStore CRUD (RFC-021) --
+        // Retires POST /api/pattern/presets. `save`/`load` are the two ops that
+        // touch live advanced-pattern state; `delete`/`rename` are pure store
+        // bookkeeping. The roster (0x0096) republishes on the NEXT tick once it
+        // notices the store's generation moved (publishPresetRoster) — no
+        // special-case publish needed here.
+        case ch::pattern_presets_cmd: {
+            if (_presets == nullptr) return Ret::err(NackCode::UNSUPPORTED_OP);
+
+            const uint64_t op = fieldU64(findField(requested, 1), 0);
+            const uint64_t slotRaw = fieldU64(findField(requested, 2), uint64_t(PatternPresetStore::kCapacity));
+            if (slotRaw >= PatternPresetStore::kCapacity) return Ret::err(NackCode::INVALID_VALUE);
+            const uint8_t slotIdx = uint8_t(slotRaw);
+
+            const auto* nameField = findField(requested, 3);
+            std::string_view name;
+            if (nameField && nameField->value.kind == IntentValue::Kind::Tstr) name = nameField->value.tstr_val;
+
+            switch (op) {
+                case 1: {  // save — captures LIVE advpat state (Ground Truth: a
+                           // pure READ of the engine, never the request) into
+                           // `slotIdx`, named `name`. Overwrites whatever was there.
+                    if (name.empty()) return Ret::err(NackCode::INVALID_VALUE);
+                    if (_presetPatternEngine == nullptr) return Ret::err(NackCode::UNSUPPORTED_OP);
+                    const advpat::Settings& live = _presetPatternEngine->apSettings();
+                    uint8_t payload[PatternPresetStore::kPayloadBytes];
+                    // Same four scalars + six modifier blocks the retired HTTP
+                    // handler's `def` carried ("never depths or master speed") —
+                    // base = 4 + 6*id, id in advpat::BaseId order, matching
+                    // 0x008F..0x0094's wire layout exactly (see the load case
+                    // below, which runs this arithmetic in reverse).
+                    payload[0] = live.in_speed.value;
+                    payload[1] = live.out_speed.value;
+                    payload[2] = live.in_accel.value;
+                    payload[3] = live.out_accel.value;
+                    for (uint8_t id = 0; id < advpat::BASE_COUNT; ++id) {
+                        const advpat::BaseControl* bc = live.byId(id);
+                        const uint8_t base = uint8_t(4 + id * 6);
+                        payload[base + 0] = bc->modifier.amplitude;
+                        payload[base + 1] = bc->modifier.in_step;
+                        payload[base + 2] = bc->modifier.in_wait;
+                        payload[base + 3] = bc->modifier.out_step;
+                        payload[base + 4] = bc->modifier.out_wait;
+                        payload[base + 5] = bc->modifier.offset;
+                    }
+                    if (!_presets->save(slotIdx, name, payload)) return Ret::err(NackCode::INVALID_VALUE);
+                    SLOGI("slopsync", "preset saved: slot %u \"%.*s\"", unsigned(slotIdx),
+                          int(name.size()), name.data());
+                    applied.count = 3;
+                    applied.fields[0] = {1, IntentValue::ofU64(1)};
+                    applied.fields[1] = {2, IntentValue::ofU64(slotIdx)};
+                    applied.fields[2] = {3, IntentValue::ofTstr(name)};
+                    cfgChanged = false;
+                    return Ret::ok(applied);
+                }
+
+                case 2: {  // load — decode the stored payload and apply it via
+                           // the SAME validated path a client's own 0x0107 write
+                           // uses (clamping included); ground truth arrives via
+                           // the normal 0x008E/0x008F..0x0094 STATE broadcasts,
+                           // no special echo. Also engages Advanced mode — a
+                           // loaded preset is a pattern being asked for, not a
+                           // value being previewed.
+                    if (_state.estop_latched) return Ret::err(NackCode::ESTOP_ACTIVE);
+                    const uint8_t* p = _presets->payload(slotIdx);
+                    if (p == nullptr) return Ret::err(NackCode::INVALID_VALUE);
+                    in["ap_mode"] = true;
+                    in["ap_in_speed"]  = int(p[0]);
+                    in["ap_out_speed"] = int(p[1]);
+                    in["ap_in_accel"]  = int(p[2]);
+                    in["ap_out_accel"] = int(p[3]);
+                    JsonArray mods = in["ap_mods"].to<JsonArray>();
+                    for (uint8_t id = 0; id < advpat::BASE_COUNT; ++id) {
+                        const uint8_t base = uint8_t(4 + id * 6);
+                        JsonObject m = mods.add<JsonObject>();
+                        m["ctrl"]      = id;
+                        m["amplitude"] = int(p[base + 0]);
+                        m["in_step"]   = int(p[base + 1]);
+                        m["in_wait"]   = int(p[base + 2]);
+                        m["out_step"]  = int(p[base + 3]);
+                        m["out_wait"]  = int(p[base + 4]);
+                        m["offset"]    = int(p[base + 5]);
+                    }
+                    if (!_webui.handleCommand(WS_OP_GEN_CFG, in, out)) return Ret::err(NackCode::INVALID_VALUE);
+                    SLOGI("slopsync", "preset loaded: slot %u", unsigned(slotIdx));
+                    applied.count = 2;
+                    applied.fields[0] = {1, IntentValue::ofU64(2)};
+                    applied.fields[1] = {2, IntentValue::ofU64(slotIdx)};
+                    cfgChanged = false;  // session-volatile, same as 0x0107
+                    return Ret::ok(applied);
+                }
+
+                case 3: {  // delete
+                    if (!_presets->remove(slotIdx)) return Ret::err(NackCode::INVALID_VALUE);
+                    SLOGI("slopsync", "preset deleted: slot %u", unsigned(slotIdx));
+                    applied.count = 2;
+                    applied.fields[0] = {1, IntentValue::ofU64(3)};
+                    applied.fields[1] = {2, IntentValue::ofU64(slotIdx)};
+                    cfgChanged = false;
+                    return Ret::ok(applied);
+                }
+
+                case 4: {  // rename
+                    if (name.empty()) return Ret::err(NackCode::INVALID_VALUE);
+                    if (!_presets->rename(slotIdx, name)) return Ret::err(NackCode::INVALID_VALUE);
+                    SLOGI("slopsync", "preset renamed: slot %u -> \"%.*s\"", unsigned(slotIdx),
+                          int(name.size()), name.data());
+                    applied.count = 3;
+                    applied.fields[0] = {1, IntentValue::ofU64(4)};
+                    applied.fields[1] = {2, IntentValue::ofU64(slotIdx)};
+                    applied.fields[2] = {3, IntentValue::ofTstr(name)};
+                    cfgChanged = false;
+                    return Ret::ok(applied);
+                }
+
+                default:
+                    return Ret::err(NackCode::UNSUPPORTED_OP);
+            }
+        }
+
         default:
             // A cataloged INTENT channel the delegate doesn't implement.
             return Ret::err(NackCode::UNKNOWN_CHANNEL);
@@ -840,6 +969,21 @@ void SlopDriveHubDelegate::onStreamBundle(uint16_t channel_id, uint32_t session_
     }
 }
 
+// RFC-021 BLOB_REQ export for the pattern-preset store (0x0095, store_id 2).
+// The hub already validated the access gate (0x0095's `control` floor) and
+// resolved that this isn't the hub-served trust ledger before calling here —
+// see hub_impl.hpp's resolveBlobBytes. Just hand back the slot's raw bytes.
+std::optional<slopsync::HubDelegate::BlobView> SlopDriveHubDelegate::readBlob(uint8_t ns, uint8_t store_id,
+                                                                              uint8_t slot) {
+    if (ns != slopsync::blob_ns::store || store_id != 2 || _presets == nullptr) return std::nullopt;
+    const uint8_t* p = _presets->payload(slot);
+    if (p == nullptr) return std::nullopt;
+    BlobView v{};
+    v.bytes = std::span<const std::byte>(reinterpret_cast<const std::byte*>(p), PatternPresetStore::kPayloadBytes);
+    v.generation = _presets->generation();
+    return v;
+}
+
 // ============================================================================
 // SlopSyncHubService
 // ============================================================================
@@ -933,6 +1077,13 @@ void SlopSyncHubService::init() {
     _delegate.bindPairing(_hub.pairing());
     SLOGI("slopsync", "auth ENFORCED — /uitoken -> ledger (%u paired) -> watch",
           unsigned(_hub.pairing().entryCount()));
+
+    // RFC-021 pattern-preset store (M5): load/migrate before binding, same
+    // ordering reason as pairing above — the delegate must never see an
+    // instant where it's bound to a store the boot-time migration hasn't run
+    // against yet.
+    loadPresets();
+    _delegate.bindPresets(_presets);
 
     // ---- Wall clock (RFC-029's first_seen/last_seen) -----------------------
     // THIS DEVICE HAS NO WALL CLOCK. There is no SNTP client anywhere in the
@@ -1761,6 +1912,8 @@ void SlopSyncHubService::publishTelemetry() {
 
         persistPairingIfChanged();
         pumpPresencePairingWindow(now);  // RFC-027(c): streak reset + SlopGlow mirror
+        persistPresetsIfChanged();       // RFC-021 pattern-preset store, write-on-change
+        publishPresetRoster();           // 0x0096, on-change (generation-diffed internally)
         // M5c: coalesced tuning persist. 0x0105 only FLAGS a change; the write
         // happens here, at most once a second. NVS is flash — a slider dragged
         // at the channel's 5 Hz would otherwise be five erase/write cycles per
@@ -2037,6 +2190,147 @@ void SlopSyncHubService::persistPairingIfChanged() {
     // state transition, a refreshed last_seen. The old entryCount() heuristic
     // missed every one of those that did not move the COUNT.
     if (_hub.pairing().dirty()) savePairing();
+}
+
+// ============================================================================
+// RFC-021 pattern-preset store — NVS persistence (namespace "slopsync") + the
+// one-time legacy migration off the retired /api/pattern/presets handler.
+// ============================================================================
+namespace {
+constexpr const char* kPresetKey = "presets";  // NVS key, <=15 chars, namespace "slopsync"
+}  // namespace
+
+void SlopSyncHubService::loadPresets() {
+    // Same read-WRITE-to-avoid-a-scary-first-boot-E-line reasoning as
+    // loadPairing() — see that function's comment.
+    Preferences prefs;
+    if (!prefs.begin("slopsync", false)) return;
+
+    size_t n = prefs.getBytesLength(kPresetKey);
+    if (n == PatternPresetStore::kEncodedBytes) {
+        prefs.getBytes(kPresetKey, _presetBlob, n);
+        if (_presets.decode(std::span<const std::byte>(reinterpret_cast<const std::byte*>(_presetBlob), n))) {
+            _presets.clearDirty();  // loading is not a change
+            SLOGI("slopsync", "pattern presets loaded: %u/%u slots", unsigned(_presets.count()),
+                  unsigned(PatternPresetStore::kCapacity));
+        } else {
+            SLOGE("slopsync", "pattern preset blob REJECTED (%u B) — starting empty", unsigned(n));
+        }
+        prefs.end();
+        return;
+    }
+    if (n != 0) {
+        // Some OTHER size lives under this key — not a format this build
+        // recognizes (the key is new at M5, so this should never fire in
+        // practice). Leave it alone rather than guess at a decode.
+        SLOGW("slopsync", "pattern preset blob is %u B, expected %u — ignoring", unsigned(n),
+              unsigned(PatternPresetStore::kEncodedBytes));
+        prefs.end();
+        return;
+    }
+    prefs.end();
+
+    // ---- One-time migration from the pre-M5 HTTP handler's NVS format ------
+    // "advpreset"/"list": a JSON array of {name, def:{in_speed, out_speed,
+    // in_accel, out_accel, mods:[{ctrl, amplitude, in_step, in_wait, out_step,
+    // out_wait, offset}]}} — src/ui/WebUI.cpp's own retired format. Read-only
+    // (this store never writes the legacy key); best-effort, so a preset that
+    // doesn't fit (more than kCapacity, or a malformed `def`) is skipped, never
+    // silently eaten — the summary log line says how many made it across.
+    Preferences legacy;
+    if (!legacy.begin("advpreset", true)) return;  // read-only; namespace may not exist yet
+    String stored = legacy.getString("list", "[]");
+    legacy.end();
+
+    JsonDocument listDoc;
+    if (deserializeJson(listDoc, stored) || !listDoc.is<JsonArray>()) return;
+    JsonArray arr = listDoc.as<JsonArray>();
+    if (arr.size() == 0) return;
+
+    auto clampU8 = [](int v) -> uint8_t { return uint8_t(v < 0 ? 0 : (v > 100 ? 100 : v)); };
+    uint8_t migrated = 0;
+    for (JsonObject e : arr) {
+        if (migrated >= PatternPresetStore::kCapacity) break;
+        const char* nm = e["name"] | "";
+        if (!nm || !*nm || !e["def"].is<JsonObject>()) continue;
+        JsonObject def = e["def"];
+
+        uint8_t payload[PatternPresetStore::kPayloadBytes];
+        payload[0] = clampU8(def["in_speed"]  | 100);
+        payload[1] = clampU8(def["out_speed"] | 100);
+        payload[2] = clampU8(def["in_accel"]  | 40);
+        payload[3] = clampU8(def["out_accel"] | 40);
+        // advpat::Settings' own ctor defaults (AdvancedPattern.h) for any
+        // modifier a legacy entry never mentions (amplitude 100 = off).
+        for (uint8_t id = 0; id < advpat::BASE_COUNT; ++id) {
+            const uint8_t base = uint8_t(4 + id * 6);
+            payload[base + 0] = 100; payload[base + 1] = 1; payload[base + 2] = 0;
+            payload[base + 3] = 1;   payload[base + 4] = 0; payload[base + 5] = 0;
+        }
+        if (def["mods"].is<JsonArray>()) {
+            for (JsonObject m : def["mods"].as<JsonArray>()) {
+                int ctrl = m["ctrl"] | -1;
+                if (ctrl < 0 || ctrl >= int(advpat::BASE_COUNT)) continue;
+                const uint8_t base = uint8_t(4 + ctrl * 6);
+                payload[base + 0] = clampU8(m["amplitude"] | 100);
+                payload[base + 1] = clampU8(m["in_step"]   | 1);
+                payload[base + 2] = clampU8(m["in_wait"]   | 0);
+                payload[base + 3] = clampU8(m["out_step"]  | 1);
+                payload[base + 4] = clampU8(m["out_wait"]  | 0);
+                payload[base + 5] = clampU8(m["offset"]    | 0);
+            }
+        }
+        if (_presets.importRaw(migrated, nm, payload)) ++migrated;
+    }
+    if (migrated > 0) {
+        _presets.markDirty();  // the next savePresets() writes the new format
+        SLOGI("slopsync", "migrated %u/%u legacy pattern preset(s) to the RFC-021 store",
+              unsigned(migrated), unsigned(arr.size()));
+    }
+}
+
+void SlopSyncHubService::savePresets() {
+    // Same OTA NVS gate as savePairing() — a flash-cache access during an OTA
+    // write window can reset the chip.
+    if (_state.ota_active.load(std::memory_order_relaxed)) return;
+
+    const size_t n = _presets.encode(
+        std::span<std::byte>(reinterpret_cast<std::byte*>(_presetBlob), sizeof(_presetBlob)));
+    if (n == 0) {
+        SLOGE("slopsync", "pattern preset store did NOT encode — NOT persisted");
+        return;
+    }
+    Preferences prefs;
+    if (prefs.begin("slopsync", false)) {
+        prefs.putBytes(kPresetKey, _presetBlob, n);
+        prefs.end();
+        _presets.clearDirty();
+        SLOGI("slopsync", "pattern presets persisted: %u/%u slots, %u B", unsigned(_presets.count()),
+              unsigned(PatternPresetStore::kCapacity), unsigned(n));
+    }
+}
+
+void SlopSyncHubService::persistPresetsIfChanged() {
+    if (_presets.dirty()) savePresets();
+}
+
+// 0x0096 roster — on-change only, keyed off the store's own generation. BARE
+// {generation,count,capacity}, same shape as 0x000D paired-devices-roster —
+// see SlopSyncCatalog.h's comment on the 0x0096 entry for why an embedded
+// per-slot name preview was cut (Catalog32's layout-field pool had only 11
+// free slots; 17 were needed). Enumerate names via BLOB_REQ per slot.
+void SlopSyncHubService::publishPresetRoster() {
+    if (_catalog.find(ch::pattern_presets_roster) == nullptr) return;
+    if (_presetRosterEverSent && _presets.generation() == _lastPresetGen) return;
+    _lastPresetGen = _presets.generation();
+    _presetRosterEverSent = true;
+
+    std::array<std::byte, 4> buf{};
+    std::span<std::byte> s(buf);
+    slopsync::putU16(s.subspan(0, 2), _presets.generation());
+    slopsync::putU8(s.subspan(2, 1), _presets.count());
+    slopsync::putU8(s.subspan(3, 1), PatternPresetStore::kCapacity);
+    _hub.publishState(ch::pattern_presets_roster, s);
 }
 
 // ============================================================================

@@ -118,7 +118,10 @@ TEST_CASE("device catalog: builds, sorts ascending, and passes checkCatalog") {
     // Modifier cards, one channel apiece — see SlopSyncCatalog.h for why that
     // split is by subsystem and not by bit-packing), all sharing category
     // `user` with 0x0082, plus their shared writer 0x0107.
-    CHECK(dc.c.count == 41);
+    // 41 -> 44 (M5): the RFC-021 `pattern.frayd` preset store — 0x0095 STORE
+    // descriptor, 0x0096 its roster STATE, 0x0108 the save/load/delete/rename
+    // writer. Retires POST /api/pattern/presets, the last HTTP writer.
+    CHECK(dc.c.count == 44);
     // RFC-017: the log channel must carry a replay depth, or a client that
     // connects after a fault sees nothing of what happened.
     const slopsync::CatalogEntry* logE = dc.c.find(slopsync::channels::log);

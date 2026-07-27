@@ -173,7 +173,17 @@ void WebUI::init() {
                           "{\"ok\":false,\"error\":\"retired\",\"use\":\"0x0102 pattern-cmd\"}");
     });
     _httpServer->on("/api/pattern/presets", HTTP_GET,  [this]() { handleApiPatternPresets(); });
-    _httpServer->on("/api/pattern/presets", HTTP_POST, [this]() { slopglowActivity(); handleApiPatternPresets(); });
+    // POST /api/pattern/presets is RETIRED (M5) — THE LAST HTTP WRITER. "No
+    // controls outside SlopSync, HTTP is read only." save/load/delete/rename
+    // are now SlopSync 0x0108 pattern-presets-cmd (RFC-021 store 0x0095 +
+    // roster 0x0096, SlopSyncHubService.cpp). GET stays: the legacy NVS
+    // ("advpreset") list is still a useful read-only diagnostic, and that key
+    // is left in place — the new store migrates from it read-only, once, at
+    // boot (SlopSyncHubService::loadPresets), never deletes it.
+    _httpServer->on("/api/pattern/presets", HTTP_POST, [this]() {
+        _httpServer->send(410, "application/json",
+                          "{\"ok\":false,\"error\":\"retired\",\"use\":\"slopsync 0x0108 pattern-presets-cmd\"}");
+    });
     _httpServer->on("/api/log",       HTTP_GET,  [this]() { handleApiLog(); });
     _httpServer->on("/api/mode",      HTTP_GET,  [this]() { handleApiMode(); });
     _httpServer->on("/api/mode", HTTP_POST, [this]() {

@@ -105,7 +105,22 @@ inline constexpr uint16_t machine_admin  = 0x0106;
 // Shared writer behind ALL SEVEN 0x008E..0x0094 advanced-pattern STATE
 // channels — same "one settingChannel, many cards" pattern as 0x0105.
 inline constexpr uint16_t pattern_advanced_cmd = 0x0107;
+// RFC-021 `pattern.frayd` preset store — retires POST /api/pattern/presets.
+// See PatternPresetStore.h for the backend and the STORE/roster entries below.
+inline constexpr uint16_t pattern_presets        = 0x0095;  // STORE
+inline constexpr uint16_t pattern_presets_roster = 0x0096;  // its roster STATE
+inline constexpr uint16_t pattern_presets_cmd    = 0x0108;  // save/load/delete/rename INTENT
 }  // namespace ch
+
+// MIRROR of PatternPresetStore::{kCapacity,kNameMax,kPayloadBytes}
+// (include/comms/PatternPresetStore.h), same forced-duplication rule as
+// kApBaseCount above (this header stays library-only; PatternPresetStore.h is
+// itself hardware-free but still a cross-module include this header has never
+// taken). SlopSyncHubService.cpp carries a static_assert pinning these
+// together, so drift fails the FIRMWARE build, not a silent wire mismatch.
+inline constexpr uint8_t kPresetCapacity = 24;
+inline constexpr uint8_t kPresetNameMax = 32;
+inline constexpr uint8_t kPresetPayloadBytes = 40;
 
 // MIRROR of advpat::BASE_COUNT (include/motion/AdvancedPattern.h), same forced-
 // duplication rule as `factory`/`ceiling` below: this header must stay
@@ -1364,6 +1379,52 @@ inline bool buildSlopDriveCatalog(slopsync::Catalog32& c, DeviceFeatures feat = 
     addApModifierChannel(ch::pattern_adv_mod_accelin,  "pattern-adv-mod-accelin",  "Accel in modifier",  33);
     addApModifierChannel(ch::pattern_adv_mod_accelout, "pattern-adv-mod-accelout", "Accel out modifier", 39);
 
+    // ---- 0x0095 "pattern-presets" — STORE, control -------------------------
+    // RFC-021's `pattern.frayd` worked example, landed: retires the last HTTP
+    // writer, POST /api/pattern/presets (NVS "advpreset", 24 x {name, def}
+    // opaque JSON). `access = control` matches this store's CRUD writer
+    // (0x0108) — same tier as every other pattern control, not `configure`
+    // (unlike 0x000C paired-devices, this is not an admin/security surface).
+    // storeId 2 (1 is the trust ledger, RFC-027/029) — self-describing, agreed
+    // by being published here rather than legislated.
+    //
+    // perItemMax/nameMax are declared, not measured against the wire: the
+    // payload is opaque device-defined bytes (in/out speed, in/out accel, six
+    // modifier blocks — the SAME fields the retired handler's `def` carried,
+    // "never depths or master speed"). See PatternPresetStore.h for the
+    // 40-byte layout and SlopDriveHubDelegate::applyIntent's 0x0108 case for
+    // the encode/decode.
+    c.addEntry({.id = ch::pattern_presets, .name = "pattern-presets",
+                .cls = ChannelClass::STORE, .dir = Direction::h2c,
+                .access = AccessLevel::control, .maxRateHz = 0.0f,
+                .defaultPriority = Priority::background});
+    c.addStoreDescriptor({.storeId = 2, .kind = "pattern.frayd",
+                          .capacity = kPresetCapacity,
+                          .perItemMax = kPresetPayloadBytes,
+                          .nameMax = kPresetNameMax});
+
+    // ---- 0x0096 "pattern-presets-roster" — STATE, watch, on-change --------
+    // {generation u16, count u8, capacity u8} — BARE, deliberately, same shape
+    // as 0x000D paired-devices-roster. An embedded str16 name preview per slot
+    // was the original plan (see PatternPresetStore.h's earlier revision) and
+    // was cut for a real, measured reason, not a preference: Catalog32's
+    // layout-field pool (channel/catalog.hpp, capacity 200) had only 11 free
+    // slots left on this device before this channel existed (189/200 used),
+    // and 3 header fields + 14 name fields needs 17. A client enumerates names
+    // the same way it already does for the trust ledger: BLOB_REQ each slot
+    // (kPayloadBytes is tiny — 40 B — so kPresetCapacity fetches is cheap) or
+    // read the name back from a save/rename ECHO it sent itself. A generation
+    // bump means "re-enumerate", exactly like 0x000D.
+    c.addEntry({.id = ch::pattern_presets_roster, .name = "pattern-presets-roster",
+                .cls = ChannelClass::STATE, .dir = Direction::h2c,
+                .access = AccessLevel::watch, .maxRateHz = 0.0f,
+                .defaultPriority = Priority::background,
+                .hasCategory = true, .category = slopsync::setting_categories::user,
+                .hasSettingChannel = true, .settingChannel = ch::pattern_presets_cmd});
+    c.addLayoutField({.name = "generation", .type = PackedFieldType::u16, .unit = "count", .scale = 1.0f});
+    c.addLayoutField({.name = "count",      .type = PackedFieldType::u8,  .unit = "count", .scale = 1.0f});
+    c.addLayoutField({.name = "capacity",   .type = PackedFieldType::u8,  .unit = "count", .scale = 1.0f});
+
     // ---- 0x0100 "move" — INTENT, control, 20 Hz, critical ----------------
     // {1:"position" f32 mm, 2:"bypass" bool}. This channel maps to arbiter
     // source 0 (MANUAL) in the delegate.
@@ -1629,6 +1690,28 @@ inline bool buildSlopDriveCatalog(slopsync::Catalog32& c, DeviceFeatures feat = 
         c.addSchemaField({.key = uint8_t(base + 5), .name = "offset",    .type = CborFieldType::uint_t,
                           .unit = "", .hasMin = true, .hasMax = true, .min = 0.0f, .max = 100.0f});
     }
+
+    // ---- 0x0108 "pattern-presets-cmd" — INTENT, control -------------------
+    // The CRUD writer behind the 0x0095 store / 0x0096 roster pair (RFC-021).
+    // {1:"op", 2:"slot", 3:"name"}. `op` is RFC-019's OPEN `action.<name>`
+    // convention (no registry change needed, same as 0x0005's action.safety):
+    // index 0 is the mandatory non-empty placeholder, never a real op.
+    //
+    // `slot` addresses directly — the client picks it (normally the roster's
+    // first free entry), there is no name-keyed dedup the way the retired
+    // HTTP handler had. `name` is required for save/rename, ignored for
+    // load/delete. See SlopDriveHubDelegate::applyIntent's 0x0108 case for
+    // exactly what each op does and PatternPresetStore.h for the backend.
+    c.addEntry({.id = ch::pattern_presets_cmd, .name = "pattern-presets-cmd",
+                .cls = ChannelClass::INTENT, .dir = Direction::c2h,
+                .access = AccessLevel::control, .maxRateHz = 5.0f,
+                .defaultPriority = Priority::normal});
+    c.addSelectSchemaField({.key = 1, .name = "op", .type = CborFieldType::uint_t, .unit = "",
+                            .role = "action.preset"},
+                           {"reserved", "save", "load", "delete", "rename"});
+    c.addSchemaField({.key = 2, .name = "slot", .type = CborFieldType::uint_t, .unit = "",
+                      .hasMin = true, .hasMax = true, .min = 0.0f, .max = float(kPresetCapacity - 1)});
+    c.addSchemaField({.key = 3, .name = "name", .type = CborFieldType::tstr_t, .unit = ""});
 
     return c.ok();
 }

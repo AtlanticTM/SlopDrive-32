@@ -73,11 +73,17 @@ bool isRegisteredRole(std::string_view r) {
     using namespace slopsync::field_roles;
     static constexpr std::string_view kAll[] = {
         limit_user_speed, limit_user_accel, limit_input_speed, limit_input_accel,
-        limit_input_jerk, window_min, window_max, telemetry_position, telemetry_velocity,
+        limit_input_jerk, window_min, window_max, telemetry_position, telemetry_target,
+        telemetry_velocity,
         telemetry_current, telemetry_power_bus, telemetry_temp, telemetry_uptime,
         identity_name, meta_enabled_mask, meta_reset_gen,
         pattern_running, pattern_select, pattern_speed, pattern_depth, pattern_stroke,
         pattern_sensation,
+        // RFC-032/035 batch: the commanded-value family + the plan telemetry
+        // family the plan-strip widget binds by.
+        command_position,
+        plan_start, plan_end, plan_current, plan_velocity, plan_elapsed,
+        plan_duration, plan_style,
     };
     for (std::string_view k : kAll) {
         if (k == r) return true;

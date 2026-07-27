@@ -115,6 +115,11 @@ struct HubSession {
         IngressRateLimiter limiter{limits::intent_ingress_default_per_s};  // token bucket on SAMPLES/s (§10.5)
         bool everNackedOverage = false;       // throttle state for RATE_LIMITED (§10.5)
         uint32_t lastOverageNackMs = 0;
+        // RFC-030: the EFFECTIVE curve family granted to this publish (post
+        // delegate override), 0 = unspecified. Read back at drain time via
+        // Hub::publishCurveFamily() so the segment consumer honours the
+        // sender's declared smoothness class.
+        uint8_t curveFamily = 0;
     };
     std::array<PublishGrant, kMaxPublishGrants> publishGrants{};
     uint32_t streamBundlesAccepted = 0;                        // §16.2 ingress telemetry
@@ -136,7 +141,8 @@ struct HubSession {
     // (unmodified) only when the fixed table is full AND `channel_id` is new —
     // the caller then simply omits the grant.
     bool addPublishGrant(uint16_t channel_id, float granted_rate_hz, uint32_t nowMs,
-                         float granted_burst = 0.0f, bool burstRequested = false) {
+                         float granted_burst = 0.0f, bool burstRequested = false,
+                         uint8_t curveFamily = 0) {
         uint32_t ratePerSec = uint32_t(granted_rate_hz < 1.0f ? 1.0f : granted_rate_hz);
         float capacity = granted_burst > 0.0f ? granted_burst : float(ratePerSec);
         PublishGrant* pg = publishGrantFor(channel_id);
@@ -156,10 +162,15 @@ struct HubSession {
         pg->limiter = IngressRateLimiter(ratePerSec, nowMs, capacity);
         pg->everNackedOverage = false;
         pg->lastOverageNackMs = 0;
+        pg->curveFamily = curveFamily;
         return true;
     }
 
     uint32_t lastRxMs = 0;                                     // liveness (§6.5): ANY frame refreshes
+    // RFC-038: the APPLIED per-session deadman window — the HELLO wish clamped
+    // into [deadman_min_ms, deadman_max_ms], or the default when no wish.
+    // WELCOME key 24 echoes exactly this value; pumpDeadman() enforces it.
+    uint32_t deadmanMs = limits::deadman_default_ms;
     uint32_t lastTxMs = 0;                                     // idle-PING scheduling (§6.5)
     uint16_t retainedPending = 0;                              // remaining retained pushes after WELCOME
 

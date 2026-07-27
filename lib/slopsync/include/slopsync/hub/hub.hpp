@@ -136,6 +136,18 @@ public:
         (void)channel_id; (void)session_id; (void)bundle;
     }
 
+    // RFC-030: the EFFECTIVE curve family for a granted segment publish — the
+    // client's wish AFTER the machine's own curve policy. Called at grant time
+    // (HELLO and PUBLISH share it); the returned value is what the grant
+    // echoes, so a force-C1/force-C2 machine tells the sender honestly that
+    // its declaration is being rendered as something else. Default honours the
+    // wish verbatim (a hub with no override). `requested` is already clamped
+    // to the registered `curve_families` range.
+    virtual uint8_t effectiveCurveFamily(uint16_t channel_id, uint8_t requested) {
+        (void)channel_id;
+        return requested;
+    }
+
     // ---- RFC-021: the BLOB STORE BACKEND SEAM -------------------------------
     // The hub owns TRANSPORT (chunk framing, repair, identity, caps, access);
     // the delegate owns STORAGE. That split is the whole reason BLOB_* is one
@@ -247,6 +259,26 @@ public:
     // sim both do. Purely observational, no behaviour attached.
     size_t catalogEncodedBytes() const { return _catalogEncodedLen; }
     static constexpr size_t catalogScratchCapacity() { return kCatalogScratchBytes; }
+
+    // ---- RFC-016(a): hub identity for WELCOME key 37 -----------------------
+    // The views must point at storage that OUTLIVES the hub — static/rodata
+    // strings are the intended use (a firmware's FIRMWARE_VERSION literal, a
+    // product-name constant); the hub copies nothing, per the no-heap
+    // invariant. Empty views are omitted from the wire; all-empty means the
+    // identity map is never emitted and WELCOME stays byte-identical to a
+    // pre-identity hub's. Set once at composition time, before sessions.
+    void setIdentity(std::string_view product, std::string_view fw_version, std::string_view hub_name) {
+        _idProduct = product;
+        _idFwVersion = fw_version;
+        _idHubName = hub_name;
+    }
+
+    // ---- RFC-030: the curve family granted to a live publish ---------------
+    // 0 (unspecified) when the session/channel has no grant or declared no
+    // family. Read this at segment-drain time so the consumer honours the
+    // sender's declared smoothness class (subject to the machine's own
+    // curve policy, which already shaped this value at grant time).
+    uint8_t publishCurveFamily(uint32_t session_id, uint16_t channel_id) const;
 
     uint16_t cfgGen() const;
     uint32_t bootId() const;
@@ -661,6 +693,10 @@ private:
     std::array<std::byte, limits::etag_bytes> _etag{};
     std::array<std::byte, kCatalogScratchBytes> _catalogEncoded{};
     size_t _catalogEncodedLen = 0;
+    // RFC-016(a) identity views — caller-owned storage, see setIdentity().
+    std::string_view _idProduct{};
+    std::string_view _idFwVersion{};
+    std::string_view _idHubName{};
     uint32_t _bootId = 0;
     uint16_t _cfgGen = 1;
     MonotonicMs _monoMs;  // wrap-safe ms derivation for all deadline bookkeeping (§7.2)

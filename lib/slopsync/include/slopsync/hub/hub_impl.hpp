@@ -530,8 +530,30 @@ inline void Hub::handleHello(Slot& slot, std::span<const std::byte> payload, uin
     w.limits_info.max_subscriptions = uint32_t(limits::max_subscriptions_per_session);
     w.limits_info.retained_pending = retainedPending;
     w.roles = uint8_t(slot.session.role);
-    w.deadman_ms = limits::deadman_default_ms;
+    // RFC-038: a client that KNOWS its liveness cadence is coarse (throttled
+    // browser tab, slow BLE connection interval) may wish a deadman window;
+    // clamp into the registry bounds, apply per session, echo the APPLIED
+    // value on the key that was already the echo. No wish = default = today.
+    uint32_t appliedDeadman = limits::deadman_default_ms;
+    if (h.deadman_wish_ms > 0) {
+        appliedDeadman = h.deadman_wish_ms;
+        if (appliedDeadman < limits::deadman_min_ms) appliedDeadman = limits::deadman_min_ms;
+        if (appliedDeadman > limits::deadman_max_ms) appliedDeadman = limits::deadman_max_ms;
+    }
+    slot.session.deadmanMs = appliedDeadman;
+    w.deadman_ms = appliedDeadman;
     w.deadman_policy = 0;  // M4: informational only, policy dispatch is M5
+    // RFC-033.3: the per-frame wish bound is advertised, never binary-searched.
+    static_assert(kSubscribeMaxWishes == limits::max_subscriptions_per_frame,
+                  "registry max_subscriptions_per_frame documents the reference decoder cap");
+    w.limits_info.max_subscriptions_per_frame = uint32_t(kSubscribeMaxWishes);
+    // RFC-016(a): identity travels when the application declared one.
+    if (!_idProduct.empty() || !_idFwVersion.empty() || !_idHubName.empty()) {
+        w.has_identity = true;
+        w.identity.product = _idProduct;
+        w.identity.fw_version = _idFwVersion;
+        w.identity.hub_name = _idHubName;
+    }
     _rng.fill(std::span<std::byte>(w.nonce));
     slot.nonce = w.nonce;  // §12.2: remembered so a later PAIR_REQ on this session can be verified
 
@@ -818,7 +840,21 @@ inline void Hub::emitHubSig(Slot& slot, std::span<const std::byte> sig) {
 inline void Hub::handleSubscribe(Slot& slot, std::span<const std::byte> payload, uint32_t nowMs) {
     (void)nowMs;
     auto res = decodeSubscribe(payload);
-    if (!res) return;
+    if (!res) {
+        // RFC-033: a SUBSCRIBE the hub cannot process is ANSWERED, never
+        // dropped. The silent `return` that stood here produced a healthy-
+        // looking LIVE session with zero STATE — twice in one night (a frame
+        // over the 16-wish decode cap, both times) — and presented as a client
+        // rendering bug. The cap itself is now advertised in WELCOME limits.
+        NackMsg n;
+        n.code = NackCode::SUBSCRIBE_REJECTED;
+        n.has_detail = true;
+        n.detail = (res.error() == DecodeError::CapacityExceeded)
+                       ? "too many wishes per frame"
+                       : "undecodable subscribe";
+        sendNack(*slot.transport, n);
+        return;
+    }
     const SubscribeMsg& m = res.value();
 
     GrantMsg batch{};
@@ -927,7 +963,19 @@ inline std::optional<GrantedPublish> Hub::grantPublishWish(Slot& slot, const Pub
         if (grantedBurst > ceiling) grantedBurst = ceiling;
     }
 
-    if (!slot.session.addPublishGrant(wish.channel_id, grantedRate, nowMs, grantedBurst, wish.has_burst)) {
+    // RFC-030: the declared curve family, passed through the application's
+    // curve policy so the echo is the EFFECTIVE family. An unknown (future)
+    // family value is treated as unspecified rather than parroted — the hub
+    // must never claim to honour a smoothness class it cannot name.
+    uint8_t effectiveFamily = 0;
+    if (wish.has_curve_family) {
+        uint8_t fam = (wish.curve_family <= curve_families::step) ? wish.curve_family
+                                                                  : curve_families::unspecified;
+        effectiveFamily = _delegate.effectiveCurveFamily(wish.channel_id, fam);
+    }
+
+    if (!slot.session.addPublishGrant(wish.channel_id, grantedRate, nowMs, grantedBurst, wish.has_burst,
+                                      effectiveFamily)) {
         return std::nullopt;  // table full and this is a new channel
     }
 
@@ -936,7 +984,23 @@ inline std::optional<GrantedPublish> Hub::grantPublishWish(Slot& slot, const Pub
     gp.granted_rate_hz = grantedRate;
     gp.has_burst = wish.has_burst;  // echo a burst only to a client that asked for one
     gp.burst = grantedBurst;
+    gp.has_curve_family = wish.has_curve_family;  // echo a family only to a client that declared one
+    gp.curve_family = effectiveFamily;
     return gp;
+}
+
+// RFC-030: what family is a live publish operating under? 0 = unspecified —
+// no such session, no such grant, or no declaration. Segment consumers read
+// this at drain time.
+inline uint8_t Hub::publishCurveFamily(uint32_t session_id, uint16_t channel_id) const {
+    for (const Slot& slot : _slots) {
+        if (!slot.session.occupied() || slot.session.session_id != session_id) continue;
+        for (const auto& pg : slot.session.publishGrants) {
+            if (pg.used && pg.channel_id == channel_id) return pg.curveFamily;
+        }
+        return 0;
+    }
+    return 0;
 }
 
 inline void Hub::handlePublish(Slot& slot, std::span<const std::byte> payload, uint32_t nowMs) {
@@ -2992,7 +3056,9 @@ inline void Hub::pumpDeadman(Slot& slot, uint32_t nowMs) {
     }
     if (!ownsAny) return;
 
-    if (!timeReached(nowMs, slot.session.lastRxMs + limits::deadman_default_ms)) return;
+    // RFC-038: per-session window (HELLO wish clamped at grant; default when
+    // no wish). WELCOME key 24 echoed exactly this value.
+    if (!timeReached(nowMs, slot.session.lastRxMs + slot.session.deadmanMs)) return;
 
     // §6.5/§11.3: the session itself dies with its lost source(s) in this M5
     // pass (see the scoping note above) — GOODBYE best-effort FIRST (the slot
@@ -3051,13 +3117,13 @@ inline bool Hub::pumpIdleReap(Slot& slot, uint32_t nowMs) {
     if (!timeReached(nowMs, slot.session.lastRxMs + kIdleReapMs)) return false;
 
     // GOODBYE best-effort FIRST (teardownSession resets the slot right after).
-    // The code is DEADMAN_TIMEOUT: the registry's own "hub-initiated session
-    // teardown: silence exceeded the window" — which is exactly what happened,
-    // minus the motion consequence. A distinct IDLE_REAPED code would be a
-    // registry addition for a difference the client cannot act on differently
-    // (reconnect either way); flagged rather than invented.
+    // RFC-039.4: IDLE_REAPED, its own code. This function's original comment
+    // argued a distinct code was "a difference the client cannot act on
+    // differently" — true for the CLIENT's next move (reconnect either way),
+    // but wrong for every OBSERVER: logs and telemetry were blaming a reaped
+    // dashboard on the motion-safety timeout. Housekeeping is not a deadman.
     GoodbyeMsg gb;
-    gb.code = NackCode::DEADMAN_TIMEOUT;
+    gb.code = NackCode::IDLE_REAPED;
     std::array<std::byte, 64> buf{};
     size_t n = encodeGoodbye(gb, std::span<std::byte>(buf));
     if (n > 0 && slot.transport != nullptr) {

@@ -16,6 +16,7 @@
 #include <cstdint>
 #include <cstring>
 #include <span>
+#include <string_view>
 
 #include "slopsync/core/result.hpp"
 #include "slopsync/generated/registry_constants.hpp"
@@ -49,17 +50,48 @@ struct GrantedPublish {
     float granted_rate_hz = 0.0f;
     bool has_burst = false;
     float burst = 0.0f;
+    // RFC-030: the EFFECTIVE curve family (key 45) — the wish AFTER the hub's
+    // own curve_policy override, so a client can tell "honoured" from
+    // "downgraded". Emitted only when the wish declared a family, mirroring
+    // burst's byte-identical rule for everyone else.
+    bool has_curve_family = false;
+    uint8_t curve_family = 0;
 };
 
 // §6.3's `limits` (22) is itself a CBOR map with its OWN small integer key
 // space local to that sub-map — registry section `welcome_limits_keys`,
 // generated into namespace slopsync::welcome_limits.
 namespace welcome_limits_subkeys = ::slopsync::welcome_limits;
+namespace identity_subkeys = ::slopsync::identity;
 
 struct WelcomeLimits {
     uint32_t max_frame = 0;
     uint32_t max_subscriptions = 0;
     uint32_t retained_pending = 0;
+    // RFC-033.3: most wishes one SUBSCRIBE/HELLO frame may carry. 0 = not
+    // advertised (sub-map key 4 omitted — pre-RFC-033 hubs and the frozen
+    // golden vectors stay byte-identical); a hub that decodes a bounded wish
+    // array MUST advertise the bound so clients stop finding it by
+    // binary-searching a live machine.
+    uint32_t max_subscriptions_per_frame = 0;
+};
+
+// RFC-016(a): the WELCOME `identity` (37) sub-map — registered and specified
+// at v1.0, codec landed with the RFC-030..040 batch. Strings are views into
+// hub-owned storage (encode) or the frame buffer (decode). All three are
+// optional; the sub-map is emitted only when at least one is non-empty, so a
+// hub that sets nothing stays byte-identical to a pre-identity WELCOME.
+// (`identity_keys::info` — device-defined extras — is deliberately not
+// implemented yet; decoders skip it per §4.3.)
+inline constexpr size_t kIdentityProductMaxBytes = 32;
+inline constexpr size_t kIdentityFwVersionMaxBytes = 24;
+inline constexpr size_t kIdentityHubNameMaxBytes = 32;
+
+struct IdentityInfo {
+    std::string_view product;     // <= kIdentityProductMaxBytes
+    std::string_view fw_version;  // <= kIdentityFwVersionMaxBytes
+    std::string_view hub_name;    // <= kIdentityHubNameMaxBytes
+    bool any() const { return !product.empty() || !fw_version.empty() || !hub_name.empty(); }
 };
 
 struct WelcomeMsg {
@@ -83,6 +115,12 @@ struct WelcomeMsg {
     uint32_t granted_publishes_count = 0;
     std::array<GrantedPublish, kWelcomeMaxGrantedPublishes> granted_publishes{};
 
+    // RFC-016(a): hub identity (key 37). Emitted only when any field is
+    // non-empty. Key 37 sorts between granted_publishes(36) and trust(39),
+    // which is exactly the room the original encoder ordering left for it.
+    bool has_identity = false;
+    IdentityInfo identity{};
+
     // The scoped `trust` (39) sub-map. M4b puts `pairing_modes` here — the
     // BITMASK of association ceremonies this hub is offering RIGHT NOW, which
     // is why it is re-evaluated per session rather than fixed at boot: a
@@ -99,22 +137,36 @@ inline size_t encodeWelcome(const WelcomeMsg& m, std::span<std::byte> out) {
     if (m.grants_count > kWelcomeMaxGrants) return 0;
     if (m.granted_publishes_count > kWelcomeMaxGrantedPublishes) return 0;
 
-    // 11 fixed keys; granted_publishes (36) and trust (39) are the optionals.
+    // 11 fixed keys; granted_publishes (36), identity (37) and trust (39) are
+    // the optionals.
     const bool hasGrantedPublishes = m.granted_publishes_count > 0;
+    const bool hasIdentity = m.has_identity && m.identity.any();
     const bool hasTrust = m.has_trust && m.trust_map.any();
+    if (hasIdentity) {
+        if (m.identity.product.size() > kIdentityProductMaxBytes) return 0;
+        if (m.identity.fw_version.size() > kIdentityFwVersionMaxBytes) return 0;
+        if (m.identity.hub_name.size() > kIdentityHubNameMaxBytes) return 0;
+    }
 
     CborWriter w(out);
-    w.mapHeader(11 + uint32_t(hasGrantedPublishes) + uint32_t(hasTrust));
+    w.mapHeader(11 + uint32_t(hasGrantedPublishes) + uint32_t(hasIdentity) + uint32_t(hasTrust));
     w.key(CborKey::proto_ver).uintVal(m.proto_ver);
     w.key(CborKey::session_id).uintVal(m.session_id);
     w.key(CborKey::boot_id).uintVal(m.boot_id);
     w.key(CborKey::catalog_etag).bstrVal(std::span<const std::byte>(m.catalog_etag));
     w.key(CborKey::cfg_gen).uintVal(m.cfg_gen);
 
-    w.key(CborKey::limits).mapHeader(3);
+    // limits sub-map: key 4 (RFC-033) rides only when advertised, so a hub
+    // that leaves it 0 — and every frozen golden vector — stays byte-identical.
+    const bool hasPerFrame = m.limits_info.max_subscriptions_per_frame > 0;
+    w.key(CborKey::limits).mapHeader(3 + uint32_t(hasPerFrame));
     w.key(uint64_t(welcome_limits_subkeys::max_frame)).uintVal(m.limits_info.max_frame);
     w.key(uint64_t(welcome_limits_subkeys::max_subscriptions)).uintVal(m.limits_info.max_subscriptions);
     w.key(uint64_t(welcome_limits_subkeys::retained_pending)).uintVal(m.limits_info.retained_pending);
+    if (hasPerFrame) {
+        w.key(uint64_t(welcome_limits_subkeys::max_subscriptions_per_frame))
+            .uintVal(m.limits_info.max_subscriptions_per_frame);
+    }
 
     w.key(CborKey::roles).uintVal(m.roles);
     w.key(CborKey::deadman_ms).uintVal(m.deadman_ms);
@@ -135,12 +187,29 @@ inline size_t encodeWelcome(const WelcomeMsg& m, std::span<std::byte> out) {
         w.key(CborKey::granted_publishes).arrayHeader(m.granted_publishes_count);
         for (uint32_t i = 0; i < m.granted_publishes_count; ++i) {
             const GrantedPublish& gp = m.granted_publishes[i];
-            // Entry keys ascending: granted_rate_hz(14) < channel_id(15) < burst(42).
-            w.mapHeader(gp.has_burst ? 3 : 2);
+            // Entry keys ascending: granted_rate_hz(14) < channel_id(15) < burst(42) < curve_family(45).
+            w.mapHeader(2 + uint32_t(gp.has_burst) + uint32_t(gp.has_curve_family));
             w.key(CborKey::granted_rate_hz).f32Val(gp.granted_rate_hz);
             w.key(CborKey::channel_id).uintVal(gp.channel_id);
             if (gp.has_burst) w.key(CborKey::burst).f32Val(gp.burst);
+            if (gp.has_curve_family) w.key(CborKey::curve_family).uintVal(gp.curve_family);
         }
+    }
+    if (hasIdentity) {
+        // identity(37) between granted_publishes(36) and trust(39). Sub-map
+        // keys ascending: product(1) < fw_version(2) < hub_name(3); empty
+        // strings are omitted, never encoded as "".
+        uint32_t idKeys = 0;
+        if (!m.identity.product.empty()) ++idKeys;
+        if (!m.identity.fw_version.empty()) ++idKeys;
+        if (!m.identity.hub_name.empty()) ++idKeys;
+        w.key(CborKey::identity).mapHeader(idKeys);
+        if (!m.identity.product.empty())
+            w.key(uint64_t(identity_subkeys::product)).tstrVal(m.identity.product);
+        if (!m.identity.fw_version.empty())
+            w.key(uint64_t(identity_subkeys::fw_version)).tstrVal(m.identity.fw_version);
+        if (!m.identity.hub_name.empty())
+            w.key(uint64_t(identity_subkeys::hub_name)).tstrVal(m.identity.hub_name);
     }
     if (hasTrust) encodeTrustMap(w, m.trust_map);  // key 39 is last: §5.3 ascending
     return w.size();
@@ -223,6 +292,12 @@ inline Result<WelcomeMsg, DecodeError> decodeWelcome(std::span<const std::byte> 
                             auto vv = r.readUint();
                             if (!vv) return Ret::err(vv.error());
                             m.limits_info.retained_pending = uint32_t(vv.value());
+                            break;
+                        }
+                        case welcome_limits_subkeys::max_subscriptions_per_frame: {
+                            auto vv = r.readUint();
+                            if (!vv) return Ret::err(vv.error());
+                            m.limits_info.max_subscriptions_per_frame = uint32_t(vv.value());
                             break;
                         }
                         default: {
@@ -338,6 +413,14 @@ inline Result<WelcomeMsg, DecodeError> decodeWelcome(std::span<const std::byte> 
                                 gp.has_burst = true;
                                 break;
                             }
+                            case uint64_t(CborKey::curve_family): {
+                                auto vv = r.readUint();
+                                if (!vv) return Ret::err(vv.error());
+                                if (vv.value() > 0xFF) return Ret::err(DecodeError::Malformed);
+                                gp.curve_family = uint8_t(vv.value());
+                                gp.has_curve_family = true;
+                                break;
+                            }
                             default: {
                                 auto sv = r.skipValue();
                                 if (!sv) return Ret::err(sv.error());
@@ -351,6 +434,47 @@ inline Result<WelcomeMsg, DecodeError> decodeWelcome(std::span<const std::byte> 
                 // NOT added to the required-keys set below: granted_publishes is
                 // optional (absent from a WELCOME with no granted publish, and
                 // from any pre-key-36 hub — §4.3 tolerance).
+                break;
+            }
+            case uint64_t(CborKey::identity): {
+                // RFC-016(a). Views into `in` — same zero-copy lifetime rule
+                // as HELLO's strings. Unknown sub-keys (incl. the deliberately
+                // unimplemented `info` map) are skipped per §4.3.
+                auto iR = r.readMapHeader();
+                if (!iR) return Ret::err(iR.error());
+                for (uint32_t f = 0; f < iR.value(); ++f) {
+                    auto fk = r.readKey();
+                    if (!fk) return Ret::err(fk.error());
+                    switch (fk.value()) {
+                        case identity_subkeys::product: {
+                            auto vv = r.readTstr();
+                            if (!vv) return Ret::err(vv.error());
+                            if (vv.value().size() > kIdentityProductMaxBytes) return Ret::err(DecodeError::CapacityExceeded);
+                            m.identity.product = vv.value();
+                            break;
+                        }
+                        case identity_subkeys::fw_version: {
+                            auto vv = r.readTstr();
+                            if (!vv) return Ret::err(vv.error());
+                            if (vv.value().size() > kIdentityFwVersionMaxBytes) return Ret::err(DecodeError::CapacityExceeded);
+                            m.identity.fw_version = vv.value();
+                            break;
+                        }
+                        case identity_subkeys::hub_name: {
+                            auto vv = r.readTstr();
+                            if (!vv) return Ret::err(vv.error());
+                            if (vv.value().size() > kIdentityHubNameMaxBytes) return Ret::err(DecodeError::CapacityExceeded);
+                            m.identity.hub_name = vv.value();
+                            break;
+                        }
+                        default: {
+                            auto sv = r.skipValue();
+                            if (!sv) return Ret::err(sv.error());
+                            break;
+                        }
+                    }
+                }
+                m.has_identity = true;
                 break;
             }
             case uint64_t(CborKey::trust): {

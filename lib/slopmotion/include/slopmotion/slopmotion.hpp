@@ -595,6 +595,16 @@ struct Command {
     // handoff still meets the legality scan + Ruckig guard downstream.
     float    next_chord     = 0.0f;
     bool     has_next_chord = false;
+
+    // ---- RFC-030: the sender's DECLARED curve family -----------------------
+    // Values mirror the SlopSync registry's `curve_families` table verbatim
+    // (this header stays slopsync-free, so the numbering is documented, not
+    // included): 0 = unspecified, 1 = c1_cubic, 2 = c2_quintic, 3 = step.
+    // Consumed ONLY by the waveform path's FollowClient resolution — 1 selects
+    // the cubic reconstruction, everything else keeps the quintic (today's
+    // behaviour, including `step`, honestly: no step renderer exists yet).
+    // Callers with no wire knowledge leave it 0 and nothing changes.
+    uint8_t  client_curve_family = 0;
 };
 
 // ---- RFC-008 handoff sanity guard ------------------------------------------
@@ -1073,6 +1083,11 @@ private:
     // ---- WAVEFORM (v4 / timed segments): quintic + Ruckig guard ------------
     bool commitWaveform(const Command& cmd, double p, double v, double a,
                         double target, uint64_t now_us) {
+        // RFC-030: adopt the command's declared family BEFORE any curve is
+        // built — every later re-solve of this plan (Scale, the budgeted
+        // search, centring) reads it through waveformIsCubic() and therefore
+        // re-solves in the SAME family the sender declared.
+        _client_curve_family = cmd.client_curve_family;
         const double T = (double)cmd.duration_us * 1e-6;
 
         // End velocity: wire G when present, else the stream estimate (an
@@ -1292,11 +1307,19 @@ private:
         c[5] = 0.0;
     }
 
-    // Is the WAVEFORM path reconstructing with a cubic right now? FollowClient
-    // resolves to C2 until the curve_family wire signalling exists — when it
-    // does, this is the ONE function that learns about it.
+    // Is the WAVEFORM path reconstructing with a cubic right now? This is the
+    // ONE function that knows — and as of RFC-030 the curve_family wire
+    // signalling EXISTS, so FollowClient finally has something to follow:
+    // the family the active waveform command declared (1 = c1_cubic → cubic;
+    // 0/2/3 → quintic, i.e. the pre-RFC behaviour). The machine override
+    // still outranks the declaration, exactly as the policy enum promises.
     bool waveformIsCubic() const {
-        return _cfg.curve_policy == CurvePolicy::ForceC1;
+        switch (_cfg.curve_policy) {
+            case CurvePolicy::ForceC1: return true;
+            case CurvePolicy::ForceC2: return false;
+            case CurvePolicy::FollowClient: return _client_curve_family == 1;
+        }
+        return false;
     }
 
     // THE waveform-path curve builder. Every sizing rule (plain commit,
@@ -2515,6 +2538,10 @@ private:
     // Snapshot::sharpness). Telemetry only — nothing in the sample path reads
     // it; the plan is already an immutable polynomial.
     float                 _plan_jerk_frac = 1.0f;
+    // RFC-030: the curve family the ACTIVE waveform command declared (registry
+    // curve_families numbering; 0 = undeclared). Adopted at commitWaveform so
+    // every re-solve of the same plan resolves FollowClient identically.
+    uint8_t               _client_curve_family = 0;
 
     // Stream estimator
     bool     _est_valid = false;

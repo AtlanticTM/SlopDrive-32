@@ -103,6 +103,17 @@ layout-field = {
   ? 13 => tstr .size (1..24),        ; role: registry field_roles vocabulary; unknown roles render generically
   ? 14 => float32,         ; step: range granularity hint
   ? 15 => uint,            ; flags: bitmask of registry setting_flags (advanced / restart_required / secret)
+  ; ---- RFC-037 forward decodability ----
+  ? 18 => uint,            ; size: this field's packed width in BYTES, stated explicitly.
+                           ;   Decoders prefer this over the type-derived width; an unknown TYPE
+                           ;   with a declared SIZE is a SKIPPABLE HOLE instead of a decode wall.
+                           ;   Without it, the first registry-added packed type strands every
+                           ;   existing client at the first field that uses it — later offsets
+                           ;   become unknowable and the entire layout tail goes dark (both
+                           ;   shipped generic clients carry the identical defensive truncation).
+                           ;   For known types conformance checks declared == type-derived width;
+                           ;   a mismatch is an authoring error. (Key 18: 16/17 are taken by
+                           ;   schema-field access/option_access under the shared numbering.)
 }
 
 setting-default = int / float32 / bool / tstr

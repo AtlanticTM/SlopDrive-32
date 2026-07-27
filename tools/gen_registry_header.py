@@ -146,7 +146,8 @@ def gen(reg: dict) -> str:
                         ("safety_causes", "safety_causes"),
                         ("setting_categories", "setting_categories"),
                         ("stream_kinds", "stream_kinds"),
-                        ("procedure_phases", "procedure_phases")):
+                        ("procedure_phases", "procedure_phases"),
+                        ("curve_families", "curve_families")):
         p(f"namespace {ns} {{\n")
         for k in sorted(reg[section]):
             e = reg[section][k]

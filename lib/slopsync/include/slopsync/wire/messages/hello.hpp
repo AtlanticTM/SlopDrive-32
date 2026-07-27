@@ -2,7 +2,7 @@
 //
 // CBOR map, keys ascending: proto_ver(1), client_kind(2), client_name(3),
 // instance_id(4), [token(5)], [catalog_etag(8)], [subscriptions(10)],
-// [publishes(11)], [trust(39)]. The five bracketed fields are optional/possibly-empty
+// [publishes(11)], [trust(39)], [deadman_wish_ms(44)]. The bracketed fields are optional/possibly-empty
 // and, per this codec's brief, OMITTED from the map entirely when absent —
 // never encoded as null (§5.3 forbids meaningless simple values anyway; §4.3
 // is what makes omission safe on the decode side: an unknown-to-a-future-
@@ -51,6 +51,12 @@ struct PublishWish {
     float rate_hz = 0.0f;
     bool has_burst = false;
     float burst = 0.0f;
+    // RFC-030: which `curve_families` smoothness class this segment stream
+    // describes (key 45). OPTIONAL like burst, and omitted when absent so a
+    // family-less wish stays byte-identical to what every shipped client sends.
+    // The GRANT echoes the EFFECTIVE family (post curve_policy override).
+    bool has_curve_family = false;
+    uint8_t curve_family = 0;
 };
 
 struct HelloMsg {
@@ -77,6 +83,12 @@ struct HelloMsg {
     // change tripwire) and carries the rest for M4c.
     bool has_trust = false;
     TrustMap trust_map{};
+
+    // RFC-038: requested deadman window (key 44). 0 = absent (hub default).
+    // The hub clamps into [deadman_min_ms, deadman_max_ms] and echoes the
+    // APPLIED value via WELCOME's existing key 24. Negotiates WHEN the deadman
+    // fires, never WHAT it does — §11.3's loss policy is untouched.
+    uint32_t deadman_wish_ms = 0;
 };
 
 // Encodes into `out`; returns bytes written, or 0 on any failure (bad sizes,
@@ -94,6 +106,7 @@ inline size_t encodeHello(const HelloMsg& m, std::span<std::byte> out) {
     if (m.publishes_count > 0) ++nKeys;
     const bool hasTrust = m.has_trust && m.trust_map.any();
     if (hasTrust) ++nKeys;
+    if (m.deadman_wish_ms > 0) ++nKeys;
 
     CborWriter w(out);
     w.mapHeader(nKeys);
@@ -122,14 +135,16 @@ inline size_t encodeHello(const HelloMsg& m, std::span<std::byte> out) {
         w.key(CborKey::publishes).arrayHeader(m.publishes_count);
         for (uint32_t i = 0; i < m.publishes_count; ++i) {
             const PublishWish& p = m.publishes[i];
-            // Wish-entry keys ascending: rate_hz(12) < channel_id(15) < burst(42).
-            w.mapHeader(p.has_burst ? 3 : 2);
+            // Wish-entry keys ascending: rate_hz(12) < channel_id(15) < burst(42) < curve_family(45).
+            w.mapHeader(2 + uint32_t(p.has_burst) + uint32_t(p.has_curve_family));
             w.key(CborKey::rate_hz).f32Val(p.rate_hz);
             w.key(CborKey::channel_id).uintVal(p.channel_id);
             if (p.has_burst) w.key(CborKey::burst).f32Val(p.burst);
+            if (p.has_curve_family) w.key(CborKey::curve_family).uintVal(p.curve_family);
         }
     }
-    if (hasTrust) encodeTrustMap(w, m.trust_map);  // key 39 is last: §5.3 ascending
+    if (hasTrust) encodeTrustMap(w, m.trust_map);  // trust(39) then deadman_wish_ms(44): §5.3 ascending
+    if (m.deadman_wish_ms > 0) w.key(CborKey::deadman_wish_ms).uintVal(m.deadman_wish_ms);
     return w.size();
 }
 
@@ -270,6 +285,14 @@ inline Result<HelloMsg, DecodeError> decodeHello(std::span<const std::byte> in) 
                                 wish.has_burst = true;
                                 break;
                             }
+                            case uint64_t(CborKey::curve_family): {
+                                auto vv = r.readUint();
+                                if (!vv) return Ret::err(vv.error());
+                                if (vv.value() > 0xFF) return Ret::err(DecodeError::Malformed);
+                                wish.curve_family = uint8_t(vv.value());
+                                wish.has_curve_family = true;
+                                break;
+                            }
                             default: {
                                 auto sv = r.skipValue();
                                 if (!sv) return Ret::err(sv.error());
@@ -286,6 +309,13 @@ inline Result<HelloMsg, DecodeError> decodeHello(std::span<const std::byte> in) 
                 auto tR = decodeTrustMap(r, m.trust_map);
                 if (!tR) return Ret::err(tR.error());
                 m.has_trust = true;
+                break;
+            }
+            case uint64_t(CborKey::deadman_wish_ms): {
+                auto v = r.readUint();
+                if (!v) return Ret::err(v.error());
+                if (v.value() > 0xFFFFFFFFull) return Ret::err(DecodeError::Malformed);
+                m.deadman_wish_ms = uint32_t(v.value());
                 break;
             }
             default: {

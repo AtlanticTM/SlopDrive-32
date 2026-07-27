@@ -47,11 +47,12 @@ inline size_t encodePublish(const PublishMsg& m, std::span<std::byte> out) {
     w.key(CborKey::publishes).arrayHeader(m.publishes_count);
     for (uint32_t i = 0; i < m.publishes_count; ++i) {
         const PublishWish& p = m.publishes[i];
-        // Wish-entry keys ascending: rate_hz(12) < channel_id(15) < burst(42).
-        w.mapHeader(p.has_burst ? 3 : 2);
+        // Wish-entry keys ascending: rate_hz(12) < channel_id(15) < burst(42) < curve_family(45).
+        w.mapHeader(2 + uint32_t(p.has_burst) + uint32_t(p.has_curve_family));
         w.key(CborKey::rate_hz).f32Val(p.rate_hz);
         w.key(CborKey::channel_id).uintVal(p.channel_id);
         if (p.has_burst) w.key(CborKey::burst).f32Val(p.burst);
+        if (p.has_curve_family) w.key(CborKey::curve_family).uintVal(p.curve_family);
     }
     return w.size();
 }
@@ -100,6 +101,14 @@ inline Result<PublishMsg, DecodeError> decodePublish(std::span<const std::byte> 
                                 if (!vv) return Ret::err(vv.error());
                                 wish.burst = vv.value();
                                 wish.has_burst = true;
+                                break;
+                            }
+                            case uint64_t(CborKey::curve_family): {
+                                auto vv = r.readUint();
+                                if (!vv) return Ret::err(vv.error());
+                                if (vv.value() > 0xFF) return Ret::err(DecodeError::Malformed);
+                                wish.curve_family = uint8_t(vv.value());
+                                wish.has_curve_family = true;
                                 break;
                             }
                             default: {

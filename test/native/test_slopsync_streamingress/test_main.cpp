@@ -28,6 +28,7 @@
 #include "slopsync/wire/messages/nack.hpp"
 #include "slopsync/wire/messages/grant.hpp"
 #include "slopsync/wire/messages/publish.hpp"
+#include "slopsync/wire/messages/subscribe.hpp"
 #include "slopsync/wire/messages/welcome.hpp"
 #include "slopsync/wire/raw/catalog_ready.hpp"
 #include "slopsync/wire/stream_bundle.hpp"
@@ -143,6 +144,14 @@ public:
             auto sp = bundle.sample(k);
             lastSamples.emplace_back(sp.begin(), sp.end());
         }
+    }
+
+    // RFC-030: 0 = honour the wish (the library default); nonzero = act like a
+    // machine whose curve_policy forces a family, so tests can see the grant
+    // echo the EFFECTIVE value rather than parroting the request.
+    uint8_t forceCurveFamily = 0;
+    uint8_t effectiveCurveFamily(uint16_t, uint8_t requested) override {
+        return forceCurveFamily != 0 ? forceCurveFamily : requested;
     }
 };
 
@@ -1335,4 +1344,209 @@ TEST_CASE("SI-20: segment-class is the catalog's explicit stream_kind property")
     CHECK(shedDecision(Priority::background, ChannelClass::STREAM, 2, true) == ShedDecision::Drop);
     CHECK(shedDecision(Priority::elevated, ChannelClass::STREAM, 2, true) == ShedDecision::Send);
     CHECK(shedDecision(Priority::critical, ChannelClass::STREAM, 2, true) == ShedDecision::Send);
+}
+
+// ============================================================================
+// SI-21 (RFC-033) — an unacceptable SUBSCRIBE is ANSWERED, never dropped.
+// The exact silent failure that cost two debugging nights: a frame carrying
+// more wishes than the decoder's 16-entry cap produced nothing at all — no
+// GRANT, no NACK — and the session sat LIVE with zero STATE. Now it NACKs
+// SUBSCRIBE_REJECTED, and the cap itself is advertised in WELCOME limits so
+// no client ever has to binary-search it against a live machine again.
+// ============================================================================
+TEST_CASE("SI-21: oversized SUBSCRIBE answers NACK SUBSCRIBE_REJECTED; WELCOME advertises the per-frame cap") {
+    Catalog32 cat;
+    makeStreamCatalog(cat);
+    ManualClock clock;
+    XorShift32 rng(211);
+    StreamHubDelegate del;
+    Hub hub(cat, clock, rng, del);
+
+    InProcessLink link(clock, rng);
+    REQUIRE(hub.attachTransport(link.endpointA()));
+    REQUIRE(link.endpointB().open());  // no Client owns endpointB here — open it so raw write()s go through
+    ITransport& ep = link.endpointB();
+
+    writeHello(ep, 0x21, /*withToken=*/true, {});
+    auto helloReplies = tickAndDrain(hub, clock, ep);
+    auto w = findWelcome(helloReplies);
+    REQUIRE(w.has_value());
+    CHECK(w->limits_info.max_subscriptions_per_frame == kSubscribeMaxWishes);
+    writeCatalogReady(ep, std::span<const std::byte>(w->catalog_etag));
+    tickAndDrain(hub, clock, ep);
+
+    // Hand-encode a SUBSCRIBE with 17 wishes — encodeSubscribe() itself
+    // refuses to build one, which is exactly why the overflow could only ever
+    // arrive from a foreign client and why the hub must answer it.
+    std::array<std::byte, 512> buf{};
+    CborWriter cw{std::span<std::byte>(buf)};
+    cw.mapHeader(1);
+    cw.key(CborKey::subscriptions).arrayHeader(kSubscribeMaxWishes + 1);
+    for (uint32_t i = 0; i < kSubscribeMaxWishes + 1; ++i) {
+        cw.mapHeader(3);
+        cw.key(CborKey::rate_hz).f32Val(10.0f);
+        cw.key(CborKey::priority).uintVal(1);
+        cw.key(CborKey::channel_id).uintVal(kH2cStreamCh);
+    }
+    REQUIRE(cw.size() > 0);
+    writeFrame(ep, FrameType::SUBSCRIBE, 0, std::span<const std::byte>(buf.data(), cw.size()));
+
+    auto replies = tickAndDrain(hub, clock, ep);
+    CHECK(countNacks(replies, NackCode::SUBSCRIBE_REJECTED) == 1);
+    CHECK_FALSE(findGrant(replies).has_value());  // rejected wholesale, no partial grant
+
+    // Sanity: a legal SUBSCRIBE on the same session still grants normally.
+    std::array<std::byte, 128> ok{};
+    CborWriter cw2{std::span<std::byte>(ok)};
+    cw2.mapHeader(1);
+    cw2.key(CborKey::subscriptions).arrayHeader(1);
+    cw2.mapHeader(3);
+    cw2.key(CborKey::rate_hz).f32Val(10.0f);
+    cw2.key(CborKey::priority).uintVal(1);
+    cw2.key(CborKey::channel_id).uintVal(kH2cStreamCh);
+    writeFrame(ep, FrameType::SUBSCRIBE, 0, std::span<const std::byte>(ok.data(), cw2.size()));
+    auto replies2 = tickAndDrain(hub, clock, ep);
+    auto g = findGrant(replies2);
+    REQUIRE(g.has_value());
+    CHECK(g->grants_count == 1);
+}
+
+// ============================================================================
+// SI-22 (RFC-038) — the deadman window is a negotiation, not a decree.
+// A HELLO wish is clamped into [deadman_min_ms, deadman_max_ms] and the
+// APPLIED value comes back on WELCOME key 24 — which was already the echo, so
+// a pre-RFC-038 client sees nothing new. No wish = default = today.
+// ============================================================================
+TEST_CASE("SI-22: deadman_wish_ms clamps to registry bounds and echoes applied on key 24") {
+    Catalog32 cat;
+    makeStreamCatalog(cat);
+    ManualClock clock;
+    XorShift32 rng(222);
+    StreamHubDelegate del;
+    Hub hub(cat, clock, rng, del);
+
+    auto helloWithWish = [&](ITransport& ep, uint8_t idByte, uint32_t wishMs) {
+        HelloMsg m{};
+        m.proto_ver = kProtocolVersion;
+        m.client_kind = "sim";
+        m.client_name = "deadman-test";
+        m.instance_id.fill(std::byte{0});
+        m.instance_id[0] = std::byte{idByte};
+        m.has_token = true;
+        m.token.fill(std::byte{0xAA});
+        m.deadman_wish_ms = wishMs;
+        std::array<std::byte, 300> buf{};
+        size_t n = encodeHello(m, std::span<std::byte>(buf));
+        REQUIRE(n > 0);
+        writeFrame(ep, FrameType::HELLO, 0, std::span<const std::byte>(buf.data(), n));
+    };
+
+    InProcessLink linkA(clock, rng), linkB(clock, rng), linkC(clock, rng);
+    REQUIRE(hub.attachTransport(linkA.endpointA()));
+    REQUIRE(hub.attachTransport(linkB.endpointA()));
+    REQUIRE(hub.attachTransport(linkC.endpointA()));
+    REQUIRE(linkA.endpointB().open());
+    REQUIRE(linkB.endpointB().open());
+    REQUIRE(linkC.endpointB().open());
+
+    helloWithWish(linkA.endpointB(), 0x31, 999999);  // over max -> clamp down
+    auto wa = findWelcome(tickAndDrain(hub, clock, linkA.endpointB()));
+    REQUIRE(wa.has_value());
+    CHECK(wa->deadman_ms == limits::deadman_max_ms);
+
+    helloWithWish(linkB.endpointB(), 0x32, 60);      // under min -> clamp up
+    auto wb = findWelcome(tickAndDrain(hub, clock, linkB.endpointB()));
+    REQUIRE(wb.has_value());
+    CHECK(wb->deadman_ms == limits::deadman_min_ms);
+
+    helloWithWish(linkC.endpointB(), 0x33, 0);       // no wish -> default
+    auto wc = findWelcome(tickAndDrain(hub, clock, linkC.endpointB()));
+    REQUIRE(wc.has_value());
+    CHECK(wc->deadman_ms == limits::deadman_default_ms);
+}
+
+// ============================================================================
+// SI-23 (RFC-030) — curve family: wish in, EFFECTIVE value out.
+// A declaring client sees its family echoed by an honouring hub, sees the
+// FORCED family from an overriding hub (never a parroted lie), and the
+// application can read the granted family back at drain time.
+// ============================================================================
+TEST_CASE("SI-23: curve_family wish echoes effective value and is readable via publishCurveFamily") {
+    Catalog32 cat;
+    makeStreamCatalog(cat);
+    ManualClock clock;
+    XorShift32 rng(233);
+    StreamHubDelegate del;
+    Hub hub(cat, clock, rng, del);
+
+    InProcessLink link(clock, rng);
+    REQUIRE(hub.attachTransport(link.endpointA()));
+    REQUIRE(link.endpointB().open());  // no Client owns endpointB here — open it so raw write()s go through
+    ITransport& ep = link.endpointB();
+
+    PublishWish wish{};
+    wish.channel_id = kSegCh;
+    wish.rate_hz = 30.0f;
+    wish.has_curve_family = true;
+    wish.curve_family = curve_families::c1_cubic;
+    WelcomeMsg w = connectSession(hub, clock, ep, 0x41, /*token=*/true, {wish});
+
+    REQUIRE(w.granted_publishes_count == 1);
+    CHECK(w.granted_publishes[0].has_curve_family);
+    CHECK(w.granted_publishes[0].curve_family == curve_families::c1_cubic);  // honoured
+    CHECK(hub.publishCurveFamily(w.session_id, kSegCh) == curve_families::c1_cubic);
+    CHECK(hub.publishCurveFamily(w.session_id, kStreamCh) == 0);  // no grant -> unspecified
+
+    // Mid-session renegotiation via PUBLISH, against a machine now FORCING C2:
+    // the echo carries what the machine will DO, not what was asked.
+    del.forceCurveFamily = curve_families::c2_quintic;
+    writePublish(ep, {wish});
+    auto replies = tickAndDrain(hub, clock, ep);
+    auto g = findGrant(replies);
+    REQUIRE(g.has_value());
+    REQUIRE(g->granted_publishes_count == 1);
+    CHECK(g->granted_publishes[0].has_curve_family);
+    CHECK(g->granted_publishes[0].curve_family == curve_families::c2_quintic);  // downgrade is VISIBLE
+    CHECK(hub.publishCurveFamily(w.session_id, kSegCh) == curve_families::c2_quintic);
+
+    // A wish that declares nothing gets no family key back (byte-compat rule).
+    PublishWish plain{};
+    plain.channel_id = kSegCh;
+    plain.rate_hz = 30.0f;
+    writePublish(ep, {plain});
+    auto replies2 = tickAndDrain(hub, clock, ep);
+    auto g2 = findGrant(replies2);
+    REQUIRE(g2.has_value());
+    REQUIRE(g2->granted_publishes_count == 1);
+    CHECK_FALSE(g2->granted_publishes[0].has_curve_family);
+}
+
+// ============================================================================
+// SI-24 (RFC-016a) — WELCOME identity: fw_version finally has an in-band home.
+// A hub that declares identity serves it on key 37; one that doesn't stays
+// byte-identical to a pre-identity hub (implicitly proven by every other test
+// in this suite decoding WELCOMEs from an identity-less hub).
+// ============================================================================
+TEST_CASE("SI-24: setIdentity() serves product/fw_version/hub_name on WELCOME key 37") {
+    Catalog32 cat;
+    makeStreamCatalog(cat);
+    ManualClock clock;
+    XorShift32 rng(244);
+    StreamHubDelegate del;
+    Hub hub(cat, clock, rng, del);
+    hub.setIdentity("slopsim-bench", "9.9.9", "test rig");
+
+    InProcessLink link(clock, rng);
+    REQUIRE(hub.attachTransport(link.endpointA()));
+    REQUIRE(link.endpointB().open());  // no Client owns endpointB here — open it so raw write()s go through
+    ITransport& ep = link.endpointB();
+
+    writeHello(ep, 0x51, /*withToken=*/false, {});
+    auto replies = tickAndDrain(hub, clock, ep);  // kept alive: identity views point into the payload
+    auto w = findWelcome(replies);
+    REQUIRE(w.has_value());
+    REQUIRE(w->has_identity);
+    CHECK(w->identity.product == "slopsim-bench");
+    CHECK(w->identity.fw_version == "9.9.9");
+    CHECK(w->identity.hub_name == "test rig");
 }

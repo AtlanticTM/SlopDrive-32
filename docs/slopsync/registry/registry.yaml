@@ -227,7 +227,9 @@ cbor_keys:
   41: { name: intent_seq,     type: uint,  note: "NACK: seq of the frame being rejected (RFC-001). Hubs SHOULD populate it whenever a specific inbound frame provoked the NACK; clients MUST tolerate its absence. Without it a client with two intents in flight on ONE channel cannot tell which was refused." }
   42: { name: burst,          type: float, note: "publishes / granted_publishes ENTRY maps: token-bucket capacity in samples, decoupled from rate (RFC-013). Default = granted rate (today's behavior). Clamped to rate x max_burst_multiple and echoed like every wish. Exists because §10.5 made rate double as bucket depth, so a 2-4/s segment sender with a 25/s peak had to declare 30 Hz — lying to admission control to buy burst." }
   43: { name: reboot_in_ms,   type: uint,  note: "ECHO `applied` (19): this accepted intent commits by rebooting, in about this many ms (RFC-020). The hub then GOODBYEs every session with REBOOTING; `boot_id` change handles the rest." }
-# 44–63 free in the core space. 64–127 reserved. 128+ experimental.
+  44: { name: deadman_wish_ms, type: uint, note: "HELLO: requested deadman window (RFC-038). The hub clamps into [deadman_min_ms, deadman_max_ms] (a hub MAY clamp tighter) and echoes the APPLIED value via the existing key 24 — post-clamp echo, zero new response plumbing. Exists because a client that KNOWS its liveness cadence is coarse (a browser whose background-tab timers are throttled, a BLE client on a slow connection interval) could not ask for a window it can actually honour; §11.3's loss policy is untouched — this negotiates WHEN the deadman fires, never WHAT it does." }
+  45: { name: curve_family,   type: uint,  note: "publishes / granted_publishes ENTRY maps: which `curve_families` smoothness class the segment stream describes (RFC-030). Wish rides HELLO or PUBLISH (0x18) like `burst`, so a sender switching interpolators mid-session renegotiates without a reconnect; the GRANT echo carries the EFFECTIVE family — post `curve_policy` override — so a client can tell 'honoured' from 'downgraded' (M-2's open question). Absent = unspecified = today's behaviour." }
+# 46–63 free in the core space. 64–127 reserved. 128+ experimental.
 
 # ---------------------------------------------------------------------------
 # WELCOME `limits` (key 22) sub-map integer keys — a separate tiny key space
@@ -237,6 +239,7 @@ welcome_limits_keys:
   1: { name: max_frame,        note: "largest frame this hub accepts, bytes" }
   2: { name: max_subscriptions, note: "per-session subscription cap" }
   3: { name: retained_pending, note: "count of retained STATE pushes that will follow WELCOME" }
+  4: { name: max_subscriptions_per_frame, note: "RFC-033.3: most subscription wishes one SUBSCRIBE (or HELLO) frame may carry. Before this was advertised, a client could only find the reference hub's 16-wish decode cap by binary-searching against a live machine — which two clients did, one night each." }
 
 # ---------------------------------------------------------------------------
 # PROBE_REPORT `probe_result` (key 26) sub-map integer keys — scoped key
@@ -582,11 +585,13 @@ nack_codes:
   0x0109: { name: REBOOTING,            note: "hub is committing a change by rebooting and is closing every session first (RFC-020/022.2, GOODBYE code). Preceded by an ECHO carrying reboot_in_ms; on return the changed boot_id tells clients what happened." }
   0x010A: { name: READY_TIMEOUT,        note: "session never sent CATALOG_READY within catalog_ready_timeout_ms (RFC-015, GOODBYE code). Needed because liveness reaping NEVER fires on a client that PINGs happily but never finishes adopting the catalog — it would hold a slot forever with both planes gated shut." }
   0x010B: { name: NOT_READY,            note: "frame refused because the session has not sent CATALOG_READY yet (RFC-015). READY gates BOTH planes: pre-READY INTENTs are NACK'd, not queued, because a client acting before it has adopted the retained safety latch breaks §11.5(2)." }
+  0x010C: { name: IDLE_REAPED,          note: "RFC-039.4: hub-initiated teardown of a NON-OWNING session that fell silent past idle_reap_multiplier x ping_interval_idle_ms (RFC-024, GOODBYE code). Distinct from DEADMAN_TIMEOUT on purpose: reaping a dark viewer is housekeeping with zero motion consequence, and before this code existed it was reported with the motion-safety code — a reaped dashboard read as a deadman event in every log and client." }
   # 0x02xx — subscription / QoS
   0x0200: { name: UNKNOWN_CHANNEL,      note: "channel id not in catalog" }
   0x0201: { name: ACCESS_DENIED,        note: "channel access level above session role" }
   0x0202: { name: CLASS_MISMATCH,       note: "e.g. SUBSCRIBE to an INTENT channel" }
   0x0203: { name: SUB_LIMIT,            note: "per-session subscription cap reached" }
+  0x0204: { name: SUBSCRIBE_REJECTED,   note: "RFC-033.2: the SUBSCRIBE frame as a WHOLE could not be processed (undecodable, or more wishes than max_subscriptions_per_frame) — as opposed to the per-channel codes above, which reject one wish and grant the rest. `detail` carries the reason. Exists because the alternative was observed silence: a dropped SUBSCRIBE leaves a healthy-looking LIVE session with zero STATE, which presents as a client rendering bug and cost two debugging nights." }
   # 0x03xx — intent
   0x0300: { name: CONFLICT,             note: "precondition (cfg_gen CAS) failed" }
   0x0301: { name: RATE_LIMITED,         note: "ingress intent rate exceeded" }
@@ -603,6 +608,7 @@ nack_codes:
   0x0500: { name: CHUNK_UNAVAILABLE,    note: "blob chunk index out of range, or the requested namespace/store/slot does not exist (generalized from 'catalog chunk' by RFC-021 — the catalog is now namespace 0)" }
   0x0501: { name: REASSEMBLY_TIMEOUT,   note: "fragment reassembly abandoned (5 s)" }
   0x0502: { name: ETAG_MISMATCH,        note: "static-profile client etag != hub catalog etag" }
+  0x0503: { name: BLOB_REFUSED,         note: "RFC-039.2: a RECEIVER refusing a declared blob (total_bytes over its reassembly budget), sent as a GOODBYE code by the client rather than idling in a half-session. The observed failure: a client's DoS-guard cap silently refused a grown catalog's transfer header and the session went LIVE WITH NO CATALOG — no error anywhere, every STATE frame undecodable, READY_TIMEOUT eventually killing it 15 s later and blaming the client. Refusal is legal; SILENT refusal is not." }
 
 # ---------------------------------------------------------------------------
 # Packed payload field types (catalog schema `type` for STREAM/STATE layouts).
@@ -705,6 +711,7 @@ field_roles:
   "window.min":          { note: "stroke window lower bound. Limits normalized against the window are window-relative and therefore MOVE when it does — which is exactly why this is a STATE field and not a one-shot WELCOME value." }
   "window.max":          { note: "stroke window upper bound" }
   "telemetry.position":  { note: "live actuator position" }
+  "telemetry.target":    { note: "RFC-032: the position the machine is currently COMMANDED to, as opposed to telemetry.position which is where it measurably is. Lag is deliberately NOT a role: it is target - position, computed client-side — registering a third field for a subtraction would invite two sources of truth for one number." }
   "telemetry.velocity":  { note: "live actuator velocity" }
   "telemetry.current":   { note: "motor/drive current" }
   "telemetry.power.bus": { note: "DC bus voltage or power" }
@@ -719,6 +726,56 @@ field_roles:
   "pattern.depth":       { note: "pattern generator depth knob: how far into the stroke window it reaches" }
   "pattern.stroke":      { note: "pattern generator stroke-length knob, as a percentage of the available depth" }
   "pattern.sensation":   { note: "pattern generator character knob; what it changes depends on the selected pattern" }
+  # ---- command.* (RFC-032): value-bearing COMMANDS. action.<name> marks VERBS
+  # (render a button); command.<quantity> marks an INTENT field whose VALUE is
+  # the setpoint (render a positional/numeric control). Tagging 0x0100 move's
+  # `position` as action.move would have told every generic client to draw a
+  # button where a slider belongs — the device catalog refused, correctly, and
+  # the result was that the most-used control on the machine was reachable only
+  # by a client hardcoding the channel id. A command role generally has a
+  # telemetry.* counterpart to pair with (command.position <-> telemetry.target).
+  "command.position":    { note: "RFC-032: INTENT field carrying a commanded ABSOLUTE target position in the channel's own unit. A client that finds it MAY render a positional control (rail, tape, slider) and send the value on that field's channel." }
+  # ---- plan.* (RFC-035): motion-plan telemetry — the segment in flight.
+  # Inclusion test: "would a DIFFERENT machine's motion planner have this
+  # concept?" — the same test that kept Advanced-pattern internals out of
+  # pattern.*. Before these, the reference client located the plan channel by
+  # regex over the entry NAME (/plan/i), which silently fails on any machine
+  # that names the concept differently.
+  "plan.start":          { note: "normalized start position of the segment in flight" }
+  "plan.end":            { note: "normalized end position of the segment in flight" }
+  "plan.current":        { note: "normalized current position along the plan" }
+  "plan.velocity":       { note: "current planned velocity" }
+  "plan.elapsed":        { note: "elapsed time within the segment in flight" }
+  "plan.duration":       { note: "total duration of the segment in flight" }
+  "plan.style":          { note: "which planning style produced the segment; options are the device's style names, index-aligned with the wire value" }
+
+# ---------------------------------------------------------------------------
+# Curve families (u8) — the `curve_family` (cbor key 45) wish/echo value on a
+# segment-class publish (RFC-030).
+#
+# {target, duration_ms, end_vel} uniquely determines a cubic Hermite, so a
+# segment stream is a COMPLETE encoding of the sender's curve — but only if
+# both ends agree on the curve FAMILY. A C2 quintic CANNOT reproduce a C1
+# cubic across a knot: the script's acceleration genuinely STEPS there, and
+# the device's backward-difference `af` estimate is estimating a quantity
+# that is two-valued at the knot. Measured: forcing C1 gives 3-6x lower
+# in-span jerk than the quintic reconstruction of the same C1 script.
+#
+# Deliberately NOT a taxonomy of interpolator algorithms: the wire needs the
+# SMOOTHNESS CLASS the reconstruction must honour, not the vendor's name.
+# Pchip and Makima are both c1_cubic and that is the correct answer.
+#
+# The machine override outranks the declaration (`curve_policy`: follow
+# client / force C1 / force C2) — a feel and safety decision belonging to
+# whoever is strapped to the machine. NO CLAMPING SEMANTICS ARE IMPLIED
+# (operator ruling, RFC-030.5). The GRANT echo carries the EFFECTIVE family
+# post-override, so a client can tell "honoured" from "downgraded".
+# ---------------------------------------------------------------------------
+curve_families:
+  0: { name: unspecified, note: "the compatible default — the hub behaves exactly as it did before RFC-030. What every pre-RFC-030 client is." }
+  1: { name: c1_cubic,    note: "velocity-continuous cubic (Linear/Pchip/Makima/monotone-cubic senders). Acceleration lawfully STEPS at knots; a follow-client hub reconstructs C1 and does NOT smooth the corner the author put there." }
+  2: { name: c2_quintic,  note: "curvature-continuous; the sender means the smoothness. A follow-client hub may use its C2 reconstruction (backward-difference af estimation is valid here — the quantity exists)." }
+  3: { name: step,        note: "held value with instantaneous transitions (step/none interpolation). The hub renders transitions as fast as its OWN limits allow; the family says intent, the machine owns feasibility as always." }
 
 # ---------------------------------------------------------------------------
 # Pairing modes (bit values) — advertised as a BITMASK in WELCOME
@@ -796,6 +853,7 @@ limits:
   catalog_max_entries: 256
   catalog_max_entry_bytes: 4096     # feasibility pass: a 50-field FULLY annotated entry (defaults + options + groups + descs) encodes to ~8–10 KB, which violates RFC-028's no-unbounded-allocation rule for a per-entry decode buffer. Oversize is a catalog-AUTHORING error caught by conformance tooling, not a runtime surprise: the entry splits across channels or trims its descs.
   max_subscriptions_per_session: 64
+  max_subscriptions_per_frame: 16   # RFC-033.3: wishes one SUBSCRIBE/HELLO frame may carry (= the reference decoder's kSubscribeMaxWishes, which was previously discoverable only by binary-searching a live hub). Advertised in WELCOME limits key 4; a hub MAY advertise less, never more than it decodes. Overflow answers SUBSCRIBE_REJECTED, never silence.
 
   # ---- per-binding max_frame defaults (RFC-021/033 finding: the registry had
   # NO max_frame default at all, so every binding invented one) --------------

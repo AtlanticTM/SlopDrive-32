@@ -145,12 +145,15 @@ enum class CborKey : uint8_t {
     intent_seq = 41,  // uint: NACK: seq of the frame being rejected (RFC-001). Hubs SHOULD populate it whenever a specific inbound frame provoked the NACK; clients MUST tolerate its absence. Without it a client with two intents in flight on ONE channel cannot tell which was refused.
     burst = 42,  // float: publishes / granted_publishes ENTRY maps: token-bucket capacity in samples, decoupled from rate (RFC-013). Default = granted rate (today's behavior). Clamped to rate x max_burst_multiple and echoed like every wish. Exists because §10.5 made rate double as bucket depth, so a 2-4/s segment sender with a 25/s peak had to declare 30 Hz — lying to admission control to buy burst.
     reboot_in_ms = 43,  // uint: ECHO `applied` (19): this accepted intent commits by rebooting, in about this many ms (RFC-020). The hub then GOODBYEs every session with REBOOTING; `boot_id` change handles the rest.
+    deadman_wish_ms = 44,  // uint: HELLO: requested deadman window (RFC-038). The hub clamps into [deadman_min_ms, deadman_max_ms] (a hub MAY clamp tighter) and echoes the APPLIED value via the existing key 24 — post-clamp echo, zero new response plumbing. Exists because a client that KNOWS its liveness cadence is coarse (a browser whose background-tab timers are throttled, a BLE client on a slow connection interval) could not ask for a window it can actually honour; §11.3's loss policy is untouched — this negotiates WHEN the deadman fires, never WHAT it does.
+    curve_family = 45,  // uint: publishes / granted_publishes ENTRY maps: which `curve_families` smoothness class the segment stream describes (RFC-030). Wish rides HELLO or PUBLISH (0x18) like `burst`, so a sender switching interpolators mid-session renegotiates without a reconnect; the GRANT echo carries the EFFECTIVE family — post `curve_policy` override — so a client can tell 'honoured' from 'downgraded' (M-2's open question). Absent = unspecified = today's behaviour.
 };
 
 namespace welcome_limits {
 inline constexpr uint8_t max_frame = 1;  // largest frame this hub accepts, bytes
 inline constexpr uint8_t max_subscriptions = 2;  // per-session subscription cap
 inline constexpr uint8_t retained_pending = 3;  // count of retained STATE pushes that will follow WELCOME
+inline constexpr uint8_t max_subscriptions_per_frame = 4;  // RFC-033.3: most subscription wishes one SUBSCRIBE (or HELLO) frame may carry. Before this was advertised, a client could only find the reference hub's 16-wish decode cap by binary-searching against a live machine — which two clients did, one night each.
 }  // namespace welcome_limits
 
 namespace probe_result {
@@ -305,6 +308,13 @@ inline constexpr uint8_t failed = 3;  // terminal, error — `result` u16 carrie
 inline constexpr uint8_t aborted = 4;  // terminal, cancelled or superseded
 }  // namespace procedure_phases
 
+namespace curve_families {
+inline constexpr uint8_t unspecified = 0;  // the compatible default — the hub behaves exactly as it did before RFC-030. What every pre-RFC-030 client is.
+inline constexpr uint8_t c1_cubic = 1;  // velocity-continuous cubic (Linear/Pchip/Makima/monotone-cubic senders). Acceleration lawfully STEPS at knots; a follow-client hub reconstructs C1 and does NOT smooth the corner the author put there.
+inline constexpr uint8_t c2_quintic = 2;  // curvature-continuous; the sender means the smoothness. A follow-client hub may use its C2 reconstruction (backward-difference af estimation is valid here — the quantity exists).
+inline constexpr uint8_t step = 3;  // held value with instantaneous transitions (step/none interpolation). The hub renders transitions as fast as its OWN limits allow; the family says intent, the machine owns feasibility as always.
+}  // namespace curve_families
+
 namespace setting_flags {
 inline constexpr uint8_t advanced = 1u << 0;  // hide behind an 'advanced' affordance by default; NEVER remove from the surface
 inline constexpr uint8_t restart_required = 1u << 1;  // the applied value takes effect on the next boot (distinct from RFC-020's reboot_in_ms, which is the hub rebooting ITSELF to commit)
@@ -326,6 +336,7 @@ inline constexpr std::string_view limit_input_jerk = "limit.input.jerk";  // jer
 inline constexpr std::string_view window_min = "window.min";  // stroke window lower bound. Limits normalized against the window are window-relative and therefore MOVE when it does — which is exactly why this is a STATE field and not a one-shot WELCOME value.
 inline constexpr std::string_view window_max = "window.max";  // stroke window upper bound
 inline constexpr std::string_view telemetry_position = "telemetry.position";  // live actuator position
+inline constexpr std::string_view telemetry_target = "telemetry.target";  // RFC-032: the position the machine is currently COMMANDED to, as opposed to telemetry.position which is where it measurably is. Lag is deliberately NOT a role: it is target - position, computed client-side — registering a third field for a subtraction would invite two sources of truth for one number.
 inline constexpr std::string_view telemetry_velocity = "telemetry.velocity";  // live actuator velocity
 inline constexpr std::string_view telemetry_current = "telemetry.current";  // motor/drive current
 inline constexpr std::string_view telemetry_power_bus = "telemetry.power.bus";  // DC bus voltage or power
@@ -340,6 +351,14 @@ inline constexpr std::string_view pattern_speed = "pattern.speed";  // pattern g
 inline constexpr std::string_view pattern_depth = "pattern.depth";  // pattern generator depth knob: how far into the stroke window it reaches
 inline constexpr std::string_view pattern_stroke = "pattern.stroke";  // pattern generator stroke-length knob, as a percentage of the available depth
 inline constexpr std::string_view pattern_sensation = "pattern.sensation";  // pattern generator character knob; what it changes depends on the selected pattern
+inline constexpr std::string_view command_position = "command.position";  // RFC-032: INTENT field carrying a commanded ABSOLUTE target position in the channel's own unit. A client that finds it MAY render a positional control (rail, tape, slider) and send the value on that field's channel.
+inline constexpr std::string_view plan_start = "plan.start";  // normalized start position of the segment in flight
+inline constexpr std::string_view plan_end = "plan.end";  // normalized end position of the segment in flight
+inline constexpr std::string_view plan_current = "plan.current";  // normalized current position along the plan
+inline constexpr std::string_view plan_velocity = "plan.velocity";  // current planned velocity
+inline constexpr std::string_view plan_elapsed = "plan.elapsed";  // elapsed time within the segment in flight
+inline constexpr std::string_view plan_duration = "plan.duration";  // total duration of the segment in flight
+inline constexpr std::string_view plan_style = "plan.style";  // which planning style produced the segment; options are the device's style names, index-aligned with the wire value
 }  // namespace field_roles
 
 enum class NackCode : uint16_t {
@@ -359,10 +378,12 @@ enum class NackCode : uint16_t {
     REBOOTING = 0x0109,  // hub is committing a change by rebooting and is closing every session first (RFC-020/022.2, GOODBYE code). Preceded by an ECHO carrying reboot_in_ms; on return the changed boot_id tells clients what happened.
     READY_TIMEOUT = 0x010A,  // session never sent CATALOG_READY within catalog_ready_timeout_ms (RFC-015, GOODBYE code). Needed because liveness reaping NEVER fires on a client that PINGs happily but never finishes adopting the catalog — it would hold a slot forever with both planes gated shut.
     NOT_READY = 0x010B,  // frame refused because the session has not sent CATALOG_READY yet (RFC-015). READY gates BOTH planes: pre-READY INTENTs are NACK'd, not queued, because a client acting before it has adopted the retained safety latch breaks §11.5(2).
+    IDLE_REAPED = 0x010C,  // RFC-039.4: hub-initiated teardown of a NON-OWNING session that fell silent past idle_reap_multiplier x ping_interval_idle_ms (RFC-024, GOODBYE code). Distinct from DEADMAN_TIMEOUT on purpose: reaping a dark viewer is housekeeping with zero motion consequence, and before this code existed it was reported with the motion-safety code — a reaped dashboard read as a deadman event in every log and client.
     UNKNOWN_CHANNEL = 0x0200,  // channel id not in catalog
     ACCESS_DENIED = 0x0201,  // channel access level above session role
     CLASS_MISMATCH = 0x0202,  // e.g. SUBSCRIBE to an INTENT channel
     SUB_LIMIT = 0x0203,  // per-session subscription cap reached
+    SUBSCRIBE_REJECTED = 0x0204,  // RFC-033.2: the SUBSCRIBE frame as a WHOLE could not be processed (undecodable, or more wishes than max_subscriptions_per_frame) — as opposed to the per-channel codes above, which reject one wish and grant the rest. `detail` carries the reason. Exists because the alternative was observed silence: a dropped SUBSCRIBE leaves a healthy-looking LIVE session with zero STATE, which presents as a client rendering bug and cost two debugging nights.
     CONFLICT = 0x0300,  // precondition (cfg_gen CAS) failed
     RATE_LIMITED = 0x0301,  // ingress intent rate exceeded
     INVALID_VALUE = 0x0302,  // outside schema min/max or wrong type; also a store import whose kind or size the hub refuses (RFC-021.5)
@@ -376,6 +397,7 @@ enum class NackCode : uint16_t {
     CHUNK_UNAVAILABLE = 0x0500,  // blob chunk index out of range, or the requested namespace/store/slot does not exist (generalized from 'catalog chunk' by RFC-021 — the catalog is now namespace 0)
     REASSEMBLY_TIMEOUT = 0x0501,  // fragment reassembly abandoned (5 s)
     ETAG_MISMATCH = 0x0502,  // static-profile client etag != hub catalog etag
+    BLOB_REFUSED = 0x0503,  // RFC-039.2: a RECEIVER refusing a declared blob (total_bytes over its reassembly budget), sent as a GOODBYE code by the client rather than idling in a half-session. The observed failure: a client's DoS-guard cap silently refused a grown catalog's transfer header and the session went LIVE WITH NO CATALOG — no error anywhere, every STATE frame undecodable, READY_TIMEOUT eventually killing it 15 s later and blaming the client. Refusal is legal; SILENT refusal is not.
 };
 
 namespace limits {
@@ -418,6 +440,7 @@ inline constexpr uint32_t probe_max_duration_ms = 1500;
 inline constexpr uint32_t catalog_max_entries = 256;
 inline constexpr uint32_t catalog_max_entry_bytes = 4096;
 inline constexpr uint32_t max_subscriptions_per_session = 64;
+inline constexpr uint32_t max_subscriptions_per_frame = 16;
 inline constexpr uint32_t max_frame_ws = 512;
 inline constexpr uint32_t max_frame_espnow = 250;
 inline constexpr uint32_t max_frame_ble = 244;

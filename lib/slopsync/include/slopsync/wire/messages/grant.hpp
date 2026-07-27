@@ -86,11 +86,12 @@ inline size_t encodeGrant(const GrantMsg& m, std::span<std::byte> out) {
         w.key(CborKey::granted_publishes).arrayHeader(m.granted_publishes_count);
         for (uint32_t i = 0; i < m.granted_publishes_count; ++i) {
             const GrantedPublish& gp = m.granted_publishes[i];
-            // Entry keys ascending: granted_rate_hz(14) < channel_id(15) < burst(42).
-            w.mapHeader(gp.has_burst ? 3 : 2);
+            // Entry keys ascending: granted_rate_hz(14) < channel_id(15) < burst(42) < curve_family(45).
+            w.mapHeader(2 + uint32_t(gp.has_burst) + uint32_t(gp.has_curve_family));
             w.key(CborKey::granted_rate_hz).f32Val(gp.granted_rate_hz);
             w.key(CborKey::channel_id).uintVal(gp.channel_id);
             if (gp.has_burst) w.key(CborKey::burst).f32Val(gp.burst);
+            if (gp.has_curve_family) w.key(CborKey::curve_family).uintVal(gp.curve_family);
         }
     }
     return w.size();
@@ -191,6 +192,14 @@ inline Result<GrantMsg, DecodeError> decodeGrant(std::span<const std::byte> in) 
                                 if (!vv) return Ret::err(vv.error());
                                 gp.burst = vv.value();
                                 gp.has_burst = true;
+                                break;
+                            }
+                            case uint64_t(CborKey::curve_family): {
+                                auto vv = r.readUint();
+                                if (!vv) return Ret::err(vv.error());
+                                if (vv.value() > 0xFF) return Ret::err(DecodeError::Malformed);
+                                gp.curve_family = uint8_t(vv.value());
+                                gp.has_curve_family = true;
                                 break;
                             }
                             default: {

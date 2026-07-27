@@ -11,15 +11,22 @@
  * a given subscription rate.
  *
  * Mirrors machine.svelte.js's subscription policy (min(catalog maxRateHz,
- * DRAW_HZ) for every h2c STATE/EVENT channel) for realism, but lets the
- * caller OVERRIDE the rate wished for the telemetry.position/telemetry.target
- * channel specifically (both roles live on the same catalog channel on this
- * device, but this does not assume that) — that override is the whole point:
- * comparing 30 Hz (current client policy) against rates whose period is an
- * exact multiple of the hub's 5 ms tick (40 Hz=25ms=5 ticks, 50 Hz=20ms=4
- * ticks, 25 Hz=40ms=8 ticks) against 60 Hz (the catalog's advertised ceiling)
- * tells us whether H1 (pacing alias against the hub tick) is real and whether
- * H2 (we are under-subscribed at 30) helps or hurts.
+ * MAX_SUBSCRIBE_HZ) for every h2c STATE/EVENT channel — the rate the DEVICE
+ * paces STATE at, unrelated to how fast the browser draws) for realism, but
+ * lets the caller OVERRIDE the rate wished for the
+ * telemetry.position/telemetry.target channel specifically (both roles live
+ * on the same catalog channel on this device, but this does not assume that)
+ * — that override is the whole point: comparing 30 Hz (the original client
+ * policy) against rates whose period is an exact multiple of the hub's 5 ms
+ * tick (40 Hz=25ms=5 ticks, 50 Hz=20ms=4 ticks, 25 Hz=40ms=8 ticks) against
+ * 60 Hz (the catalog's advertised ceiling) tells us whether H1 (pacing alias
+ * against the hub tick) is real and whether H2 (we are under-subscribed at
+ * 30) helps or hurts.
+ *
+ * NOTE — this only measures the SUBSCRIBE-rate half of the picture. DRAW rate
+ * (how often the browser repaints) is free and uncapped (rAF), a completely
+ * separate axis; see render-vs-samplerate-probe.mjs for the harness that
+ * proves draw rate does NOT fix jitter on its own.
  *
  * Bound by ROLE (roles.js), never a hardcoded channel id, per CLAUDE.md's
  * SlopSync layering rule and this repo's existing probe convention
@@ -38,12 +45,16 @@
  *   mode      'full' (mirrors real page's whole subscription set) or 'solo' (position/target channel only) — default 'full'
  *   legs      comma-separated waypoints in mm, e.g. "40,170,60,150,45" — default "40,170,60,150,45"
  *   legWaitMs time to let each leg glide before commanding the next — default 3500
+ *   dumpPath  optional: write the raw {t,v} position trace as JSON here, for
+ *             feeding into render-vs-samplerate-probe.mjs (real captured
+ *             arrival timing, not synthetic)
  */
 
 import { createSession, CHANNEL_CLASS, PRIORITY } from '../src/core/slopsync/index.js';
 import { acquireToken } from '../src/core/slopsync/credentials.js';
 import { buildSettingsModel } from '../src/model/settings.js';
 import { claimRoles, ROLE } from '../src/model/roles.js';
+import { writeFileSync } from 'node:fs';
 
 const HOST = process.argv[2] || '192.168.1.229';
 const PORT = parseInt(process.argv[3] || '82', 10);
@@ -51,8 +62,9 @@ const POS_HZ_ARG = process.argv[4] != null && process.argv[4] !== '' ? parseFloa
 const MODE = process.argv[5] || 'full';
 const LEGS = (process.argv[6] || '40,170,60,150,45').split(',').map(Number);
 const LEG_WAIT_MS = parseInt(process.argv[7] || '3500', 10);
+const DUMP_PATH = process.argv[8] || null;
 
-const DRAW_HZ = 30; // machine.svelte.js's current baseline policy, for the OTHER channels in 'full' mode
+const MAX_SUBSCRIBE_HZ = 30; // machine.svelte.js's current baseline policy, for the OTHER channels in 'full' mode
 
 if (typeof WebSocket === 'undefined') {
   console.error('No global WebSocket (need node >= 22). Aborting.');
@@ -97,7 +109,7 @@ const posEntry = entries.find((e) => e.id === posField.channelId);
 const telemetryChannelIds = new Set([posField.channelId, targetField ? targetField.channelId : null].filter((x) => x != null));
 
 const catalogCeilHz = posEntry.maxRateHz || 0;
-const posHz = POS_HZ_ARG != null ? Math.min(POS_HZ_ARG, catalogCeilHz || POS_HZ_ARG) : Math.min(catalogCeilHz, DRAW_HZ);
+const posHz = POS_HZ_ARG != null ? Math.min(POS_HZ_ARG, catalogCeilHz || POS_HZ_ARG) : Math.min(catalogCeilHz, MAX_SUBSCRIBE_HZ);
 
 console.log('host                 : ' + HOST + ':' + PORT);
 console.log('mode                 : ' + MODE);
@@ -119,7 +131,7 @@ function subscriptionWishes() {
   for (const e of entries) {
     if (e.dir !== 0) continue;
     if (e.cls !== CHANNEL_CLASS.STATE && e.cls !== CHANNEL_CLASS.EVENT) continue;
-    let rate = (e.cls === CHANNEL_CLASS.EVENT || !e.maxRateHz) ? 0 : Math.min(e.maxRateHz, DRAW_HZ);
+    let rate = (e.cls === CHANNEL_CLASS.EVENT || !e.maxRateHz) ? 0 : Math.min(e.maxRateHz, MAX_SUBSCRIBE_HZ);
     if (telemetryChannelIds.has(e.id)) rate = Math.min(e.maxRateHz, posHz);
     wishes.push([e.id, rate, e.priority != null ? e.priority : PRIORITY.background]);
   }
@@ -248,5 +260,13 @@ for (const n of nacks) console.log('  ' + JSON.stringify(n));
 console.log('\nCSV_SUMMARY,' + MODE + ',' + posHz + ',' + grantedRate + ',' +
   (ia ? ia.mean.toFixed(2) : '') + ',' + (ia ? ia.p50.toFixed(2) : '') + ',' + (ia ? ia.p95.toFixed(2) : '') + ',' + (ia ? ia.max.toFixed(2) : '') + ',' +
   (acc ? acc.rms.toFixed(3) : '') + ',' + (acc ? acc.p95.toFixed(3) : '') + ',' + (acc ? acc.max.toFixed(3) : ''));
+
+if (DUMP_PATH) {
+  writeFileSync(DUMP_PATH, JSON.stringify({
+    host: HOST, mode: MODE, wishedHz: posHz, grantedHz: grantedRate,
+    unit: posField.unit || 'mm', posSamples, targetSamples,
+  }));
+  console.log('\ndumped raw trace -> ' + DUMP_PATH);
+}
 
 process.exit(0);

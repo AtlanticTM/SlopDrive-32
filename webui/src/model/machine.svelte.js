@@ -14,13 +14,35 @@
  * write landed asks shadow.svelte.js. Keeping those two questions in separate
  * files is what stops the second one from quietly answering the first.
  *
- * ── Subscribing at the rate we draw (SPEC 10.2) ────────────────────────────
+ * ── Two rates that must never be conflated ─────────────────────────────────
  *
- * We ask for min(catalog max, DRAW_HZ) rather than the channel's ceiling.
- * Asking 333 Hz to render 60 wastes the machine's airtime and its heap, and the
- * hub would shed us first under congestion. On-change channels are wished at 0,
- * which is the protocol's "push when it changes" and is strictly better than
- * any polling rate we could pick.
+ * DRAW rate — how often a widget repaints. Free (it's a couple of floats and
+ * a canvas stroke), so it runs at whatever `requestAnimationFrame` gives it —
+ * 60 Hz, 120 Hz, 240 Hz, whatever the display refreshes at. Nothing in the
+ * render path (RailWidget.svelte, PlanStrip.svelte) may add a fixed-interval
+ * timer or a self-imposed fps cap; `prefers-reduced-motion` is the one
+ * sanctioned exception (PlanStrip's reduced path drops to a 1 Hz `setInterval`
+ * on purpose — that is accessibility, not a performance cap).
+ *
+ * SUBSCRIBE rate — how often the DEVICE sends a STATE push for a channel.
+ * This one is emphatically not free: ESP32 airtime, heap, WS frame count, and
+ * the SlopSyncHubService task's own 5 ms tick budget, shared across every
+ * channel ~30 of them subscribed at once. This is the rate `MAX_SUBSCRIBE_HZ`
+ * and `TELEMETRY_HZ` below actually govern. A higher DRAW rate cannot make a
+ * ragged SUBSCRIBE rate look better — more frames just render the same uneven
+ * samples more finely (see telebuf.js's interpolation, which is where
+ * smoothness is actually won). Raising subscribe rate is a mistake in the
+ * OTHER direction too — see TELEMETRY_HZ below: the fastest available rate
+ * (the catalog's 60 Hz ceiling) measured WORSE than a slower one, because the
+ * hub can't pace it evenly.
+ *
+ * The old name here was `DRAW_HZ`, reasoning "subscribe at the rate we draw"
+ * (SPEC 10.2's intent, but SPEC 10.2 is about not over-asking a channel's
+ * ceiling for no reason — it never said the two rates should be numerically
+ * equal). That name is what led this policy to cap subscriptions at 30
+ * because the page draws at ~60: a readout drawn at 60+ fps does not need
+ * 60+ Hz of NEW data to look smooth, it needs EVENLY spaced data it can
+ * interpolate between. Renamed to say what it actually bounds.
  */
 
 import {
@@ -29,35 +51,46 @@ import {
 import { buildSettingsModel } from './settings.js';
 import { ROLE } from './roles.js';
 
-/** Highest rate we can actually paint. Everything is capped to this. */
-const DRAW_HZ = 30;
+/**
+ * Default ceiling for ordinary channels (settings, diagnostics, tuning) —
+ * nobody's eye tracks these in real time frame-to-frame, so a modest,
+ * unmeasured-but-safe rate is fine. NOT a draw rate; see this file's header.
+ * TELEMETRY_HZ below overrides this for the three roles that actually need
+ * to be paced well. This is a two-tier policy (telemetry vs everything else),
+ * not full per-priority stratification — nothing measured here showed
+ * background/diagnostic channels need their own tier, and the override
+ * mechanism (telemetryChannelIds()) generalizes to adding one if that changes.
+ */
+const MAX_SUBSCRIBE_HZ = 30;
 
 /**
  * Live kinematic telemetry (the rail comet: position/target/velocity) gets
- * its OWN subscribe rate instead of DRAW_HZ — measured, not guessed, against
- * the real device with the carriage moving (webui/test/position-jitter-probe.mjs).
+ * its OWN subscribe rate instead of MAX_SUBSCRIBE_HZ — measured, not guessed,
+ * against the real device with the carriage moving
+ * (webui/test/position-jitter-probe.mjs).
  *
  * The hub paces each STATE subscription on its own SlopSyncHubService task
  * tick (firmware: 5 ms — SPEC's pacer truncates `periodMs = 1000/rate_hz` to
  * whole ms and only checks it at tick boundaries). The closer a channel's
  * wished period sits to that 5 ms grain, the more the delivery shows
  * duplicate-timestamp/burst artifacts: measured on-device, 60 Hz (16.7 ms
- * period) produced duplicate-timestamped pushes on ~9% of samples and a
- * visibly heavier tail (p95/max inter-arrival, implied-acceleration p95) than
- * 25 Hz (40 ms = exactly 8 hub ticks), which measured ZERO duplicates and the
- * tightest p95/max-vs-median ratio of every rate from 20-60 Hz tried under a
- * full realistic subscription load (all ~30 channels live, not isolated).
- * "Draw at 60 fps so subscribe near 60 Hz" (this file's old DRAW_HZ reasoning)
- * is backwards for this specific wire: going faster made the raw telemetry
- * measurably choppier, not smoother — the render-side interpolator
- * (ui/hero/telebuf.js) is what turns a clean 25 Hz feed into a 60 fps-looking
- * readout, not a higher subscribe rate.
+ * period, the catalog's own advertised ceiling — NOT reachable at any higher
+ * rate regardless of draw rate) produced duplicate-timestamped pushes on ~9%
+ * of samples and a visibly heavier tail (p95/max inter-arrival,
+ * implied-acceleration p95) than 25 Hz (40 ms = exactly 8 hub ticks), which
+ * measured ZERO duplicates and the tightest p95/max-vs-median ratio of every
+ * rate from 20-60 Hz tried under a full realistic subscription load (all
+ * ~30 channels live, not isolated). An aligned 40/50 Hz sounded like it should
+ * win on paper (also exact tick multiples) but measured WORSE than 25 Hz in
+ * practice — the tick's fraction of the period (5ms/25ms=20% at 40Hz vs
+ * 5ms/40ms=12.5% at 25Hz) tracked the real jitter better than alignment alone.
  *
  * Only the three ROLES that feed the rail's live comet/numerals get this
  * treatment; every other channel (settings, diagnostics, tuning) keeps the
- * DRAW_HZ policy — this is not "subscribe to everything faster", it is
- * "the one signal a human's eye tracks in real time gets a rate chosen for
- * pacing quality, not for how fast the browser could theoretically draw it".
+ * MAX_SUBSCRIBE_HZ policy — this is not "subscribe to everything faster", it
+ * is "the one signal a human's eye tracks in real time gets a SUBSCRIBE rate
+ * chosen for even pacing, independent of and much lower than the DRAW rate
+ * that renders it".
  */
 const TELEMETRY_HZ = 25;
 const TELEMETRY_ROLES = new Set([ROLE.telemetryPosition, ROLE.telemetryTarget, ROLE.telemetryVelocity]);
@@ -146,7 +179,7 @@ export function isLive() {
 
 /**
  * Build SUBSCRIBE wishes from the catalog itself — every hub-to-client channel
- * it advertises, at a rate we can paint.
+ * it advertises, at a rate the DEVICE can pace, not a rate the browser draws.
  *
  * Generic on purpose: a machine with channels we have never heard of gets
  * subscribed to anyway, and its data shows up in the diagnostics surface even
@@ -158,7 +191,7 @@ export function isLive() {
  * legal. See subscribeInBatches() for the field bug this used to be blamed on.
  *
  * `telemetryChanIds` (from the telemetryChannelIds() helper below) gets
- * TELEMETRY_HZ instead of DRAW_HZ — see that constant's header for why.
+ * TELEMETRY_HZ instead of MAX_SUBSCRIBE_HZ — see that constant's header for why.
  */
 function subscriptionWishes(entries, maxSubs, telemetryChanIds) {
   const wishes = [];
@@ -169,7 +202,7 @@ function subscriptionWishes(entries, maxSubs, telemetryChanIds) {
     // channels advertise 0 and mean it.
     let rate = (e.cls === CHANNEL_CLASS.EVENT || !e.maxRateHz)
       ? 0
-      : Math.min(e.maxRateHz, DRAW_HZ);
+      : Math.min(e.maxRateHz, MAX_SUBSCRIBE_HZ);
     if (telemetryChanIds && telemetryChanIds.has(e.id) && e.maxRateHz) {
       rate = Math.min(e.maxRateHz, TELEMETRY_HZ);
     }

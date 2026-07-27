@@ -3,13 +3,20 @@
  * position telemetry channel against a live device, to diagnose the "rail
  * position readout is laggy" complaint.
  *
- * This mirrors machine.svelte.js's subscription policy byte-for-byte (wish
- * min(catalog maxRateHz, DRAW_HZ=30) for every h2c STATE/EVENT channel,
- * batched to the hub's max_subscriptions_per_frame, dropped to
+ * This mirrors machine.svelte.js's ORIGINAL subscription policy (wish
+ * min(catalog maxRateHz, MAX_SUBSCRIBE_HZ=30) for every h2c STATE/EVENT
+ * channel, batched to the hub's max_subscriptions_per_frame, dropped to
  * max_subscriptions by priority when oversubscribed) rather than subscribing
  * to just the one channel we care about — the whole point is to see whether
  * the motion channel gets shed or paced behind the other ~30 diagnostic
  * channels a real page opens, per SPEC 10.4 congestion shedding.
+ *
+ * SUPERSEDED for the position channel specifically: machine.svelte.js now
+ * subscribes telemetry.position/target/velocity at a dedicated, measured
+ * TELEMETRY_HZ (see that file's header) rather than this blanket rate — this
+ * script still measures the ORIGINAL blanket policy, useful as a baseline for
+ * "everything that ISN'T live telemetry". See position-jitter-probe.mjs for
+ * the rate-comparison harness that replaced this one for the position role.
  *
  * The channel under measurement is found by ROLE (telemetry.position), the
  * same mechanism RailWidget uses — no hardcoded channel id.
@@ -27,7 +34,7 @@ import { ROLE } from '../src/model/roles.js';
 const HOST = process.argv[2] || '192.168.1.229';
 const PORT = parseInt(process.argv[3] || '82', 10);
 const DURATION_S = parseFloat(process.argv[4] || '20');
-const DRAW_HZ = 30; // matches machine.svelte.js
+const MAX_SUBSCRIBE_HZ = 30; // matches machine.svelte.js
 
 if (typeof WebSocket === 'undefined') {
   console.error('No global WebSocket (need node >= 22). Aborting.');
@@ -40,7 +47,7 @@ function subscriptionWishes(entries, maxSubs) {
   for (const e of entries) {
     if (e.dir !== 0) continue;
     if (e.cls !== CHANNEL_CLASS.STATE && e.cls !== CHANNEL_CLASS.EVENT) continue;
-    const rate = (e.cls === CHANNEL_CLASS.EVENT || !e.maxRateHz) ? 0 : Math.min(e.maxRateHz, DRAW_HZ);
+    const rate = (e.cls === CHANNEL_CLASS.EVENT || !e.maxRateHz) ? 0 : Math.min(e.maxRateHz, MAX_SUBSCRIBE_HZ);
     wishes.push([e.id, rate, e.priority != null ? e.priority : PRIORITY.background]);
   }
   const cap = (typeof maxSubs === 'number' && maxSubs > 0) ? maxSubs : wishes.length;

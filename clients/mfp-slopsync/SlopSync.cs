@@ -1,5 +1,5 @@
 #:name SlopSync
-#:version 0.3.0
+#:version 0.4.0
 #:author SlopDrive
 #:description Streams a MultiFunPlayer axis to a SlopDrive-32 machine over the native SlopSync protocol (device-shadow + capability negotiation, WebSocket + CBOR).
 #:url https://github.com/AtlanticTM
@@ -62,6 +62,19 @@ using Stylet;
 //     through whatever settings channel + keys the ROLE says to use. INTENT
 //     frames set header.seq = intent_id so RFC-001's NACK `intent_seq` names
 //     the same number the ECHO does.
+//
+// v0.4.0 — honest admission control + curve declaration on the 0x0085 wish:
+//   * RFC-013. The segment wish declares its true sustained rate (5 Hz for a
+//     2–4/s mean stream) plus an explicit `burst` (42) sized to the measured
+//     ~25/s dense-section peak — it no longer over-declares 30 Hz to buy
+//     bucket depth. The client-side shaper sizes its bucket off the ECHOED
+//     burst in granted_publishes (absent = depth-equals-rate, the old rule).
+//   * RFC-030. The 0x0085 wish declares `curve_family` (45): Step scripts
+//     declare 3, everything else 1 (c1_cubic — every MFP interpolator is
+//     C1-class and the emitted {target,duration,end_vel} IS a cubic Hermite).
+//     The GRANT echoes the EFFECTIVE family post machine-override; a
+//     difference logs one WARN ("machine renders as ... (curve policy
+//     override)") — never silently ignored.
 // =============================================================================
 
 public class SlopSync : PluginBase
@@ -543,18 +556,19 @@ public class SlopSync : PluginBase
         // Samples mode wishes 0x0084 only (unchanged). Segments mode ALSO wishes
         // 0x0084 (the dense-sample fallback path stays granted) PLUS 0x0085.
         //
-        // The wish becomes the hub's §10.5 SUSTAINED token-bucket ceiling
-        // (granted = min(wish, 50 Hz cap); bucket depth == granted rate). Segments
-        // average only a handful/sec, but a dense/fast funscript section (rapid
-        // strokes / vibration) bursts far higher — and the OLD 10 Hz wish throttled
-        // exactly those sections to one segment per 100 ms (the ~99 ms lock the
-        // field saw): once the 10-token burst budget drained, the bucket refilled a
-        // single token every 100 ms. Segments are emitted the instant the emitter
-        // tick sees an action come due (SegTickAsync, 100 Hz), so the wish must
-        // clear the worst-case burst, not the average. 30 Hz = 30 Hz sustained +
-        // a full-second 30-token burst budget — headroom over the ~25 Hz worst
-        // case, still under the channel's 50 Hz cap. The plugin now shapes to
-        // this same grant client-side so the hub never has to NACK us.
+        // RFC-013 CATCH-UP — the honest wish. §10.5 originally made the wished
+        // rate double as the token-bucket DEPTH, so this plugin declared 30 Hz
+        // for a 2–4/s mean segment stream purely to buy burst budget for dense
+        // funscript sections (~25 segments/s worst case) — lying to admission
+        // control because burst had no key of its own. It does now: the 0x0085
+        // wish declares the honest sustained rate (SegmentWishHz) plus an
+        // explicit `burst` (42) sized to the measured peak (SegmentWishBurst).
+        // The hub clamps burst to granted_rate × max_burst_multiple and ECHOES
+        // the applied values in granted_publishes; the client-side shaper below
+        // sizes its own bucket off that echo — ground truth, never the wish.
+        //
+        // RFC-030 rides the same entry: `curve_family` (45) declares WHICH
+        // reconstruction this segment stream means (see segCurveFamily below).
 
         // Cached catalog for THIS host: presenting a matching etag in HELLO
         // makes the session ready at WELCOME with no transfer at all (RFC-015).
@@ -574,11 +588,34 @@ public class SlopSync : PluginBase
             (SlopWire.ChMotion, MotionStateRateHz, SlopWire.PriorityElevated),
         };
 
+        // RFC-030: which curve family the 0x0085 stream means. MFP's axis
+        // interpolation IS cleanly reachable (same property SegmentLoop reads
+        // for its own span math): Step means the author wants jumps (family 3);
+        // every other MFP interpolator (Linear/Pchip/Makima/…) is C1-class, and
+        // the wire payload {target, duration, end_vel} this plugin emits is a
+        // C1 cubic Hermite by construction — so 1 (c1_cubic) is the honest
+        // declaration, and the honest FALLBACK when the property read fails.
+        byte segCurveFamily = SlopWire.CurveC1Cubic;
+        if (mode == StreamMode.Segments)
+        {
+            try
+            {
+                var interpAxis = DeviceAxis.Parse(SourceAxis);
+                var interp = ReadProperty<DeviceAxis, InterpolationType>("Axis::InterpolationType", interpAxis);
+                segCurveFamily = interp == InterpolationType.Step ? SlopWire.CurveStep : SlopWire.CurveC1Cubic;
+            }
+            catch { /* not reachable → C1 stays the honest default */ }
+        }
+
         WelcomeInfo welcome;
         if (mode == StreamMode.Segments)
         {
             welcome = await client.HelloAsync("mfp", "MultiFunPlayer SlopSync",
-                new (ushort ch, double rate)[] { (SlopWire.ChMotionInput, wishHz), (SlopWire.ChMotionSegment, SegmentWishHz) },
+                new (ushort ch, double rate, double burst, byte curveFamily)[]
+                {
+                    (SlopWire.ChMotionInput, wishHz, 0.0, SlopWire.CurveUnspecified),
+                    (SlopWire.ChMotionSegment, SegmentWishHz, SegmentWishBurst, segCurveFamily),
+                },
                 token16, token, subWishes, cached?.Etag);
         }
         else
@@ -604,11 +641,27 @@ public class SlopSync : PluginBase
         // path rather than silently degrading to the sample loop (ground-truth
         // doctrine: the UI says "Segments", so we send segments or we error).
         double segGranted = double.NaN;
+        double segGrantedBurst = double.NaN;
         if (mode == StreamMode.Segments)
         {
             segGranted = welcome.GrantedPublishRate(SlopWire.ChMotionSegment);
             if (double.IsNaN(segGranted))
                 throw new InvalidOperationException("no publish grant for motion-segment(0x0085) in WELCOME — device may predate the segment channel; use Samples mode");
+
+            // RFC-013: the echoed burst is the APPLIED bucket depth (post-clamp);
+            // absent means a pre-RFC-013 hub, where depth defaults to the rate.
+            segGrantedBurst = welcome.GrantedPublishBurst(SlopWire.ChMotionSegment);
+            Logger.Info("motion-segment grant: rate {0:F1} Hz, burst {1} (wished {2:F1} Hz / {3:F0} samples)",
+                segGranted, double.IsNaN(segGrantedBurst) ? "(not echoed: depth = rate)" : $"{segGrantedBurst:F0} samples",
+                SegmentWishHz, SegmentWishBurst);
+
+            // RFC-030: the echo is the EFFECTIVE family post machine-override.
+            // A difference is a policy statement by the machine, and silence
+            // about it here would be a lie about what the user will feel.
+            long segGrantedFamily = welcome.GrantedCurveFamily(SlopWire.ChMotionSegment);
+            if (segGrantedFamily >= 0 && segGrantedFamily != segCurveFamily)
+                Logger.Warn("curve_family: declared {0} but the machine renders as {1} (curve policy override)",
+                    SlopWire.CurveFamilyName(segCurveFamily), SlopWire.CurveFamilyName(segGrantedFamily));
         }
 
         double segGrantedSnapshot = segGranted;
@@ -663,7 +716,7 @@ public class SlopSync : PluginBase
 
             // ---- Stream loop (mode-specific) -------------------------------------
             if (mode == StreamMode.Segments)
-                await SegmentLoopAsync(client, granted, segGranted, token);
+                await SegmentLoopAsync(client, granted, segGranted, segGrantedBurst, token);
             else
                 await StreamLoopAsync(client, granted, token);
         }
@@ -1218,10 +1271,17 @@ public class SlopSync : PluginBase
     // output-divergence probe.
     // =========================================================================
     private const double SegmentPingIntervalMs = 400.0;   // < 600 ms deadman, with margin
-    // 0x0085 publish wish (Hz). Becomes the hub's §10.5 sustained token-bucket
-    // ceiling AND its burst depth — 30 clears the ~25 Hz worst-case dense-section
-    // burst with headroom, under the channel's 50 Hz cap. See HELLO in SessionAsync.
-    private const double SegmentWishHz = 30.0;
+    // 0x0085 publish wish (Hz) — the HONEST sustained rate (RFC-013). The mean
+    // segment stream is 2–4/s; 5 gives slight headroom without over-declaring.
+    // Burst budget no longer rides the rate: it is the explicit `burst` (42)
+    // wish below. (Pre-RFC-013 this was 30.0 — a lie to admission control to
+    // buy bucket depth, because §10.5 made rate double as depth.)
+    private const double SegmentWishHz = 5.0;
+    // 0x0085 `burst` wish (samples): the measured worst-case dense-section peak
+    // (~25 segments/s — rapid strokes / vibration sections emitted the instant
+    // they come due). The hub clamps to granted_rate × max_burst_multiple and
+    // echoes the applied depth; the client shapes to the ECHO, not to this.
+    private const double SegmentWishBurst = 25.0;
 
     // Emitter tick. 10 ms is two orders of magnitude under the shortest span a
     // 50 Hz-capped channel can carry, so no span can slip past unseen; the
@@ -1306,7 +1366,8 @@ public class SlopSync : PluginBase
     // guard's coverage and is the obvious knob to sweep in the same session.
     private const bool SegHandoffLimiterEnabled = true;
 
-    private async Task SegmentLoopAsync(HubClient client, double sampleRate, double segRate, CancellationToken token)
+    private async Task SegmentLoopAsync(HubClient client, double sampleRate, double segRate,
+                                        double segBurst, CancellationToken token)
     {
         // Fresh engine state for this session.
         _segAxis = DeviceAxis.Parse(SourceAxis);
@@ -1328,9 +1389,11 @@ public class SlopSync : PluginBase
         try { _segPlaying = ReadProperty<bool>("Media::PlayPause"); } catch { _segPlaying = false; }
 
         // Token bucket sized off the ACTUAL grant (ground truth from WELCOME),
-        // not off our wish — the hub may have granted less than we asked for.
+        // not off our wish — the hub may have granted/clamped less than we
+        // asked for. RFC-013: depth = the echoed `burst` when the hub sent one,
+        // else the registry default (depth = granted rate — pre-RFC-013 hubs).
         _segTokenRate = segRate > 0.5 ? segRate : SegmentWishHz;
-        _segTokenDepth = _segTokenRate;
+        _segTokenDepth = !double.IsNaN(segBurst) && segBurst >= 1.0 ? segBurst : _segTokenRate;
         _segTokens = _segTokenDepth;
 
         Ui(() => { SegmentsSent = 0; DivergenceWarning = null; });
@@ -2128,6 +2191,28 @@ public static class SlopWire
     public const int KTrust = 39;             // HELLO/WELCOME/AUTH trust sub-map (RFC-029)
     public const int KBody = 40;              // EVENT: the kind-specific field sub-map
     public const int KIntentSeq = 41;         // NACK: header seq of the frame being refused (RFC-001)
+    public const int KBurst = 42;             // publishes/granted_publishes entry: token-bucket depth in samples (RFC-013)
+    public const int KCurveFamily = 45;       // publishes/granted_publishes entry: curve family of a segment stream (RFC-030)
+
+    // ---- Curve families (registry curve_families, RFC-030) ------------------
+    // {target, duration_ms, end_vel} uniquely determines a cubic Hermite, so a
+    // segment sender's wish names WHICH reconstruction it means. The GRANT
+    // echoes the EFFECTIVE family post machine-override — "honoured" and
+    // "downgraded" are distinguishable, and a downgrade is surfaced, never
+    // silently ignored.
+    public const byte CurveUnspecified = 0;   // the compatible pre-RFC-030 default
+    public const byte CurveC1Cubic = 1;       // velocity-continuous cubic (Linear/Pchip/Makima senders)
+    public const byte CurveC2Quintic = 2;     // curvature-continuous; sender means the smoothness
+    public const byte CurveStep = 3;          // step/none — no interpolation intended
+
+    public static string CurveFamilyName(long v) => v switch
+    {
+        CurveUnspecified => "unspecified",
+        CurveC1Cubic => "C1 cubic",
+        CurveC2Quintic => "C2 quintic",
+        CurveStep => "step",
+        _ => $"family {v}",
+    };
 
     // ---- `blob` (38) sub-map keys (registry blob_keys, RFC-021) -------------
     // ONE vocabulary shared by BLOB_REQ's CBOR map and BLOB_CHUNK's fixed
@@ -2333,12 +2418,27 @@ public static class SlopWire
         => BuildHello(clientKind, clientName, instanceId,
                       new (ushort ch, double rate)[] { (publishChannel, publishRateHz) }, token16);
 
-    // Multi-wish variant: the publishes array carries one {12:rate,15:channel}
-    // map per channel we want to publish on (§6.2). Segments mode wishes both
-    // 0x0084 and 0x0085; Samples mode wishes just 0x0084 (the single-wish overload
-    // above delegates here, producing byte-identical output for one channel).
+    // Rate-only publishes overload: burst/curve_family absent → each wish entry
+    // stays the classic 2-key {12:rate,15:channel} map, byte-identical to the
+    // pre-RFC-013 shape (the goldens in WireSelfTest.cs enforce that).
     public static byte[] BuildHello(string clientKind, string clientName, byte[] instanceId,
                                     IReadOnlyList<(ushort ch, double rate)> publishes, byte[] token16 = null,
+                                    IReadOnlyList<(ushort ch, double rate, byte prio)> subscribes = null,
+                                    byte[] catalogEtag = null)
+        => BuildHello(clientKind, clientName, instanceId,
+                      publishes.Select(p => (p.ch, p.rate, 0.0, (byte)0)).ToList(),
+                      token16, subscribes, catalogEtag);
+
+    // Multi-wish variant: the publishes array carries one wish map per channel
+    // we want to publish on (§6.2). Entry keys ASCENDING per §5.3:
+    //   rate_hz(12) < channel_id(15) < burst(42) < curve_family(45).
+    // burst (RFC-013): token-bucket depth in SAMPLES, decoupled from the
+    //   sustained rate. <= 0 omits the key (hub default: depth = granted rate).
+    // curveFamily (RFC-030): which reconstruction a segment stream means.
+    //   0 (unspecified) omits the key — the compatible pre-RFC-030 wire.
+    public static byte[] BuildHello(string clientKind, string clientName, byte[] instanceId,
+                                    IReadOnlyList<(ushort ch, double rate, double burst, byte curveFamily)> publishes,
+                                    byte[] token16 = null,
                                     IReadOnlyList<(ushort ch, double rate, byte prio)> subscribes = null,
                                     byte[] catalogEtag = null)
     {
@@ -2368,11 +2468,14 @@ public static class SlopWire
         }
         w.WriteUInt(KPublishes);
         w.WriteArrayHeader(publishes.Count);
-        foreach (var (ch, rate) in publishes)
+        foreach (var (ch, rate, burst, curveFamily) in publishes)
         {
-            w.WriteMapHeader(2);                      // {12:rate, 15:channel} keys ascending
+            int entries = 2 + (burst > 0 ? 1 : 0) + (curveFamily != CurveUnspecified ? 1 : 0);
+            w.WriteMapHeader(entries);                // keys ascending: 12 < 15 < 42 < 45
             w.WriteUInt(KRateHz); w.WriteFloat32((float)rate);
             w.WriteUInt(KChannelId); w.WriteUInt(ch);
+            if (burst > 0) { w.WriteUInt(KBurst); w.WriteFloat32((float)burst); }
+            if (curveFamily != CurveUnspecified) { w.WriteUInt(KCurveFamily); w.WriteUInt(curveFamily); }
         }
         return w.ToArray();
     }
@@ -2718,7 +2821,11 @@ public sealed class WelcomeInfo
     public long Roles;
     public long DeadmanMs;
     public long DeadmanPolicy;
-    private readonly List<(ushort ch, double rate)> _grantedPublishes = new();
+    // burst: NaN when the hub did not echo one (RFC-013 default: depth = rate).
+    // curveFamily: -1 when the hub did not echo one (pre-RFC-030 hub); otherwise
+    // the EFFECTIVE family post machine-override, which is how a client tells
+    // "honoured" from "downgraded".
+    private readonly List<(ushort ch, double rate, double burst, long curveFamily)> _grantedPublishes = new();
 
     public static WelcomeInfo Parse(byte[] payload)
     {
@@ -2739,7 +2846,9 @@ public sealed class WelcomeInfo
                 {
                     ushort ch = e.TryGetValue(SlopWire.KChannelId, out var c) ? (ushort)Convert.ToInt64(c) : (ushort)0;
                     double rate = e.TryGetValue(SlopWire.KGrantedRateHz, out var r) ? Convert.ToDouble(r) : 0.0;
-                    w._grantedPublishes.Add((ch, rate));
+                    double burst = e.TryGetValue(SlopWire.KBurst, out var b) ? Convert.ToDouble(b) : double.NaN;
+                    long fam = e.TryGetValue(SlopWire.KCurveFamily, out var f) ? Convert.ToInt64(f) : -1;
+                    w._grantedPublishes.Add((ch, rate, burst, fam));
                 }
             }
         }
@@ -2749,9 +2858,27 @@ public sealed class WelcomeInfo
     // Granted rate for a publish channel, or NaN if it wasn't granted.
     public double GrantedPublishRate(ushort channel)
     {
-        foreach (var (ch, rate) in _grantedPublishes)
+        foreach (var (ch, rate, _, _) in _grantedPublishes)
             if (ch == channel) return rate;
         return double.NaN;
+    }
+
+    // Granted burst (RFC-013) for a publish channel, or NaN when the hub echoed
+    // none — the caller then applies the registry default (depth = granted rate).
+    public double GrantedPublishBurst(ushort channel)
+    {
+        foreach (var (ch, _, burst, _) in _grantedPublishes)
+            if (ch == channel) return burst;
+        return double.NaN;
+    }
+
+    // EFFECTIVE curve family (RFC-030) the hub granted, or -1 when it echoed
+    // none (a pre-RFC-030 hub, which behaves as `unspecified`).
+    public long GrantedCurveFamily(ushort channel)
+    {
+        foreach (var (ch, _, _, fam) in _grantedPublishes)
+            if (ch == channel) return fam;
+        return -1;
     }
 }
 
@@ -3111,8 +3238,18 @@ public sealed class HubClient
         => HelloAsync(kind, name,
                       new (ushort ch, double rate)[] { (publishChannel, publishRateHz) }, token16, token);
 
-    public async Task<WelcomeInfo> HelloAsync(string kind, string name,
+    public Task<WelcomeInfo> HelloAsync(string kind, string name,
         IReadOnlyList<(ushort ch, double rate)> publishes, byte[] token16, CancellationToken token,
+        IReadOnlyList<(ushort ch, double rate, byte prio)> subscribes = null,
+        byte[] cachedEtag = null)
+        => HelloAsync(kind, name,
+                      publishes.Select(p => (p.ch, p.rate, 0.0, (byte)0)).ToList(),
+                      token16, token, subscribes, cachedEtag);
+
+    // Rich-wish variant (RFC-013 burst + RFC-030 curve_family per publish entry).
+    public async Task<WelcomeInfo> HelloAsync(string kind, string name,
+        IReadOnlyList<(ushort ch, double rate, double burst, byte curveFamily)> publishes,
+        byte[] token16, CancellationToken token,
         IReadOnlyList<(ushort ch, double rate, byte prio)> subscribes = null,
         byte[] cachedEtag = null)
     {

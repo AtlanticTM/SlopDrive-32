@@ -11,6 +11,13 @@
 //
 // Run:  dotnet run --project clients/mfp-slopsync/LiveWireTest.csproj [ip] [port]
 // Exit 0 only if every hard PASS criterion below is met.
+//
+// VERIFICATION DEBT (plugin v0.4.0 — RFC-013 honest rate/burst + RFC-030
+// curve_family on the 0x0085 wish): a bench re-run is REQUIRED before this
+// plugin version is considered verified — run this test TWICE BACK-TO-BACK
+// WITHOUT rebooting the device in between, per the ownership-release
+// regression pattern (the fw 2.1.44 teardown-leak bug was invisible to every
+// single-run pass because deploys rebooted the device between runs).
 // =============================================================================
 using System;
 using System.Collections.Generic;

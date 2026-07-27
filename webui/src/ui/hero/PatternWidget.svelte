@@ -10,7 +10,7 @@
   import { machine } from '../../model/machine.svelte.js';
   import { isFieldEnabled } from '../../model/settings.js';
   import { writeSetting, displayValue, statusOf } from '../../model/shadow.svelte.js';
-  import { formatValue, unitOf, optionLabel, precisionFor } from '../../model/format.js';
+  import { formatValue, unitOf, optionLabel, precisionFor, labelFor } from '../../model/format.js';
 
   let { fields } = $props();
   // Read through the prop rather than destructuring once — heroes.js hands us
@@ -76,7 +76,7 @@
   </div>
 
   {#if select.options && select.options.length}
-    <div class="pattern-grid" role="radiogroup" aria-label={select.label}
+    <div class="pattern-grid" role="radiogroup" aria-label={labelFor(select)}
          data-shadow={statusOf(select)}>
       {#each select.options as _opt, i}
         <button type="button" role="radio" aria-checked={Number(selectVal) === i}
@@ -96,13 +96,13 @@
         {@const en = enabledOf(f)}
         <div class="knob" class:disabled={!en} data-shadow={statusOf(f)}>
           <div class="knob-head">
-            <span class="knob-label">{f.label}</span>
+            <span class="knob-label">{labelFor(f)}</span>
             <output class="mono">{formatValue(f, val)}<span class="unit">{unitOf(f)}</span></output>
           </div>
           <input type="range" class="knob-slider"
                  min={f.min} max={f.max} step={knobStep(f)}
                  value={val ?? f.min} disabled={!en}
-                 aria-label={f.label}
+                 aria-label={labelFor(f)}
                  oninput={(e) => commitKnob(f, Number(e.currentTarget.value))} />
         </div>
       {/each}

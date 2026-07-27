@@ -24,7 +24,7 @@
    * from real telemetry samples in RailWidget's telebuf, never fabricated) —
    * this component does no ground-truth reading of its own.
    */
-  import { formatValue, unitOf, precisionFor } from '../../model/format.js';
+  import { formatValue, unitOf, precisionFor, labelFor } from '../../model/format.js';
 
   let {
     posField = null,
@@ -73,17 +73,21 @@
         <line x1="9.4" y1="6" x2="12" y2="6" stroke="currentColor" stroke-width="1"/>
         <circle cx="6" cy="6" r="0.9" fill="currentColor"/>
       </svg>
-      {posField ? posField.label.toLowerCase() : 'actual'}
+      {posField ? labelFor(posField).toLowerCase() : 'actual'}
     </span>
     <span class="hn-val mono" class:glow={moving && fresh}>{posText}<span class="hn-unit">{posUnit}</span></span>
   </div>
 
   {#if targetField}
     <div class="hn-item hn-secondary">
-      <span class="hn-label">commanded</span>
+      <span class="hn-label">{labelFor(targetField).toLowerCase()}</span>
       <span class="hn-val mono">{commandedText}<span class="hn-unit">{commandedUnit}</span></span>
     </div>
 
+    <!-- "lag" has no role of its own (roles.js: it is target - position,
+         computed client-side) — there is no field to resolve a label from,
+         so this stays a plain string rather than a fabricated ROLE_LABEL
+         entry. -->
     <div class="hn-item hn-secondary">
       <span class="hn-label">lag</span>
       <span class="hn-val mono">{lagText}<span class="hn-unit">{commandedUnit}</span></span>
@@ -91,7 +95,10 @@
   {/if}
 
   <div class="hn-item hn-secondary">
-    <span class="hn-label">speed</span>
+    <!-- Same treatment as the speed VALUE above: labelled from velField when
+         the machine annotated telemetry.velocity, else the plain fallback
+         (this number is client-derived from position, not its own field). -->
+    <span class="hn-label">{velField ? labelFor(velField).toLowerCase() : 'speed'}</span>
     <span class="hn-val mono">{speedText}<span class="hn-unit">{speedUnit}</span></span>
   </div>
 </div>

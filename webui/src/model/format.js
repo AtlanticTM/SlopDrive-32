@@ -6,6 +6,28 @@
  * sensibly on a machine we have never met.
  */
 
+import { ROLE_LABEL } from './roles.js';
+
+/**
+ * The display label for ANY field, anywhere in the UI. Resolution order:
+ *   1. ROLE_LABEL[field.role] when the field carries a known registry role
+ *      (roles.js) — a human-standardized label for machine vocabulary.
+ *   2. field.label, which buildSettingsModel already set to
+ *      humanize(field.name) at construction time — the honest fallback for a
+ *      field this project has no opinion about.
+ *
+ * This is the ONLY function in the UI layer that may special-case a role for
+ * display text; every component reads through it rather than field.label
+ * directly, so a role gets its human label wherever it appears (hero
+ * numerals, the rail, the generic Field control, the hero widgets) and an
+ * unroled field keeps today's behaviour everywhere too.
+ */
+export function labelFor(field) {
+  if (!field) return '';
+  if (field.role && ROLE_LABEL[field.role]) return ROLE_LABEL[field.role];
+  return field.label != null ? field.label : '';
+}
+
 /** Decimal places implied by a step. step 0.05 -> 2, step 1 -> 0, absent -> 2. */
 export function precisionFor(field) {
   const step = field && field.step;

@@ -84,6 +84,7 @@
 
 import { machine, getSession } from './machine.svelte.js';
 import { reportedValue, WIDGET } from './settings.js';
+import { labelFor } from './format.js';
 import { NACK, NACK_NAME, SAFETY_OP, HOME_OP } from '../core/slopsync/index.js';
 
 const OVERDUE_MS = 500;
@@ -333,7 +334,7 @@ function fail(sh, why, err) {
 export function writeSetting(field, value) {
   if (!field || field.readOnly || field.writeChannel == null) return;
   const shadowKey = keyOf('set', field.writeChannel, field.settingKey);
-  const sh = ensureShadow(shadowKey, field.writeChannel, field.label);
+  const sh = ensureShadow(shadowKey, field.writeChannel, labelFor(field));
   clearTimers(sh);
   sh.status = STATUS.pending;
   sh.requested = value;
@@ -377,7 +378,7 @@ export function writeSetting(field, value) {
  */
 export async function runAction(action, value = 1, extraFields = null) {
   const shadowKey = keyOf('act', action.channelId, action.key);
-  const sh = ensureShadow(shadowKey, action.channelId, action.label);
+  const sh = ensureShadow(shadowKey, action.channelId, labelFor(action));
   clearTimers(sh);
   sh.status = STATUS.pending;
   sh.requested = value;
@@ -427,7 +428,7 @@ export function sendCommand(field, value, opts = {}) {
   void opts; // reserved, unused today
   if (!field || field.channelId == null || field.key == null) return;
   const shadowKey = keyOf('cmd', field.channelId, field.key);
-  const sh = ensureShadow(shadowKey, field.channelId, field.label);
+  const sh = ensureShadow(shadowKey, field.channelId, labelFor(field));
   clearTimers(sh);
   sh.status = STATUS.pending;
   sh.requested = value;

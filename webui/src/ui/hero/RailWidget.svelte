@@ -53,10 +53,11 @@
   import { machine, getSession } from '../../model/machine.svelte.js';
   import { isFieldEnabled } from '../../model/settings.js';
   import { writeSetting, sendCommand, displayValue, statusOf, shadowOf, STATUS } from '../../model/shadow.svelte.js';
-  import { formatValue, unitOf } from '../../model/format.js';
+  import { formatValue, unitOf, labelFor } from '../../model/format.js';
   import { ACCENT, ac } from '../../model/theme.js';
-  import { createTelebuf, createTrail } from './telebuf.js';
+  import { createTelebuf, createTrail, createRenderClock } from './telebuf.js';
   import HeroNumerals from './HeroNumerals.svelte';
+  import PlanStrip from '../widgets/PlanStrip.svelte';
 
   let { fields } = $props();
   // Read through the prop rather than destructuring once — heroes.js hands us
@@ -221,15 +222,22 @@
   let posTeleChannel = null;
   let velTeleChannel = null;
 
+  // ONE render-delay clock shared by pos/vel/target (see telebuf.js's header
+  // for why raw "now" jitters against irregular arrival). Fed from `pos`'s
+  // arrivals — pos is the primary telemetry role every one of these three
+  // rides alongside (vel/target are optional companions on the same
+  // machine), so its arrival cadence is the right thing to buffer against.
+  const renderClock = createRenderClock();
+
   $effect(() => {
     const f = pos;
     if (!f) return;
-    if (posTeleChannel !== f.channelId) { posTele.reset(); posTeleChannel = f.channelId; }
+    if (posTeleChannel !== f.channelId) { posTele.reset(); posTeleChannel = f.channelId; renderClock.reset(); }
     const ts = machine.sampleTs[f.channelId];
     const s = machine.samples[f.channelId];
     if (ts && s) {
       const v = displayValue(f, s);
-      if (typeof v === 'number' && isFinite(v)) posTele.push(v, ts);
+      if (typeof v === 'number' && isFinite(v)) { posTele.push(v, ts); renderClock.noteArrival(ts); }
     }
   });
 
@@ -388,14 +396,23 @@
       // and always returns the OLDEST entry still in the ring).
       const nowEpochMs = performance.timeOrigin + nowMs;
 
+      // Render at nowEpochMs MINUS an adaptively-slewed delay (telebuf.js's
+      // createRenderClock), not raw "now" — see telebuf.js's header for why
+      // sampling at raw "now" against ~20-30 Hz, irregularly-spaced STATE
+      // pushes produces exactly the freeze-then-snap stutter this widget was
+      // reported buggy for. update() must run every frame (it slews toward
+      // the target delay), even on a frame with no fresh pos field.
+      renderClock.update(dtMs);
+      const tRender = renderClock.stableRenderTime(nowEpochMs);
+
       // Pull ground truth through the telebufs at THIS instant.
       if (pos) {
-        const r = posTele.sampleAt(nowEpochMs);
+        const r = posTele.sampleAt(tRender);
         posDisplay = r.value;
         fresh = r.fresh;
         let speedPerSec = null;
         if (vel) {
-          const rv = velTele.sampleAt(nowEpochMs);
+          const rv = velTele.sampleAt(tRender);
           if (rv.value != null) speedPerSec = Math.abs(rv.value);
         } else if (r.value != null) {
           speedPerSec = Math.abs(r.velPerMs) * 1000;
@@ -410,7 +427,7 @@
       }
 
       if (target) {
-        const rt = targetTele.sampleAt(nowEpochMs);
+        const rt = targetTele.sampleAt(tRender);
         targetDisplay = rt.value;
         targetFresh = rt.fresh;
       } else {
@@ -576,24 +593,67 @@
   // it falls straight back to `telemetry.target`, the same ground-truth
   // setpoint the "commanded" hero numeral shows, so the tape and the numeral
   // can never disagree.
+  //
+  // DOMAIN — this is bug #1 from the pre-refactor rail report: the tape's
+  // command surface is the reported STROKE WINDOW ([minVal, maxVal]), exactly
+  // like the original's "normal mode" (`core/range.js`'s `winMin`/`winMax`,
+  // ported here as this widget's own `minVal`/`maxVal`). It is NOT the move
+  // field's own static catalog [min,max] annotation (0100 `position` declares
+  // 0-2000mm — the full mechanical ceiling, not the operator's chosen
+  // sub-range) and NOT the rail's full [lo,hi] extent either. Binding to the
+  // window makes it geometrically impossible to command outside it, and the
+  // original's "manual mode" (tape spans full travel) is deliberately not
+  // reproduced — see this file's top-of-file note #3, unchanged by this fix.
   // ---------------------------------------------------------------------------
   let moveDragging = $state(false);
   let moveDragValue = $state(null);
+  let tapeBarEl = $state(null);
   const moveShadow = $derived(shadowOf(move));
 
+  // BUG FIX (tap/scrub not registering): the pointer handlers used to live on
+  // `.rail-tape.live` — the highlighted sub-strip, sized to exactly the
+  // reported window (see tapeStripLoPct/Hi below), which on this device's
+  // window (32-183mm of a 269mm rail) covers only the middle ~56% of the
+  // full-width track. `.rail-tape-track` (the dashed-guide wrapper) visually
+  // reads as "the tape" to a human or a script hit-testing "90% across the
+  // strip" — but it had NO listeners of its own, so a pointer landing in the
+  // dead zone outside the highlighted strip (elementFromPoint confirmed:
+  // `.rail-tape-track`, not `.rail-tape.live`) produced neither a command nor
+  // a refusal, because no handler ever ran. That is bug #3's actual root
+  // cause: a DOM hit-testing gap between the element that LOOKS interactive
+  // (the full track) and the smaller element that WAS. Fix: the track itself
+  // is now the event target (bound here as `tapeTrackEl`); the highlighted
+  // strip stays purely visual. `moveValueFromClientX` still maps/clamps
+  // against the STRIP's own rect (`tapeBarEl`), unchanged — so a tap inside
+  // the strip behaves exactly as before, and a tap ANYWHERE ELSE on the
+  // track (before its left edge or past its right edge) clamps to
+  // tapeLo/tapeHi instead of doing nothing, which is what "clamps rather
+  // than escaping the window" requires of a tap outside the window's span.
+  let tapeTrackEl = $state(null);
+
+  const tapeLo = $derived(haveWindow ? (minVal ?? lo) : lo);
+  const tapeHi = $derived(haveWindow ? (maxVal ?? hi) : hi);
+  const tapeSpan = $derived(Math.max(tapeHi - tapeLo, 1e-9));
+  // Where the tape's own highlighted/draggable strip sits ON THE RAIL — the
+  // SAME fraction-of-full-extent the window band below uses, so the strip you
+  // touch is drawn directly above the window it commands (the visual half of
+  // "geometrically impossible to command outside the window"; the original's
+  // `positionTape()` did the identical alignment).
+  const tapeStripLoPct = $derived(haveWindow ? minPct : 0);
+  const tapeStripHiPct = $derived(haveWindow ? maxPct : 1);
+
+  /** clientX -> commandable value, mapped against the STRIP's own width (not the whole assembly) so a short window strip still reads its full drag travel as [tapeLo,tapeHi]. */
   function moveValueFromClientX(clientX) {
-    if (!hostEl) return null;
-    const rect = hostEl.getBoundingClientRect();
+    if (!tapeBarEl) return null;
+    const rect = tapeBarEl.getBoundingClientRect();
     if (!rect.width) return null;
     const frac = clamp((clientX - rect.left) / rect.width, 0, 1);
-    const vlo = move && move.min != null ? move.min : lo;
-    const vhi = move && move.max != null ? move.max : hi;
-    return vlo + frac * (vhi - vlo);
+    return tapeLo + frac * tapeSpan;
   }
 
   function requestMove(value) {
     if (value == null || !move || !moveEnabled) return;
-    sendCommand(move, value);
+    sendCommand(move, clamp(value, tapeLo, tapeHi));
   }
 
   function onTapePointerDown(e) {
@@ -617,12 +677,37 @@
     requestMove(moveDragValue); // guarantee the released position is (re)queued, even mid-coalesce
   }
 
+  // Keyboard reach for the tape — the original had none (pointer/touch only);
+  // this control already announces itself to assistive tech as role="slider"
+  // (below), and a slider that ignores every key it claims to support is a
+  // worse a11y defect than not claiming the role at all, so this is a genuine
+  // fix (operator-blessed category: "a control that is keyboard-unreachable"),
+  // not a reproduction of anything the original did.
+  function onTapeKey(e) {
+    if (!moveEnabled) return;
+    const step = (move && move.step) || Math.max(tapeSpan / 100, 1e-6);
+    const cur = tapeVal ?? tapeLo;
+    let v;
+    if (e.key === 'ArrowRight' || e.key === 'ArrowUp') v = cur + step;
+    else if (e.key === 'ArrowLeft' || e.key === 'ArrowDown') v = cur - step;
+    else if (e.key === 'PageUp') v = cur + step * 10;
+    else if (e.key === 'PageDown') v = cur - step * 10;
+    else if (e.key === 'Home') v = tapeLo;
+    else if (e.key === 'End') v = tapeHi;
+    else return;
+    e.preventDefault();
+    requestMove(v);
+  }
+
   // Cursor position: the live drag value while dragging, else the machine's
   // own reported setpoint (never a locally-remembered request once released).
   const tapeVal = $derived(
     moveDragging ? moveDragValue : (target && targetFresh && targetDisplay != null ? targetDisplay : null)
   );
-  const tapePct = $derived(tapeVal != null ? pct(tapeVal) : null);
+  // Fraction WITHIN the strip's own local width (0..1) — the pip rides under
+  // the pointer/setpoint the same way the original's did, in the strip's own
+  // coordinate space, not the full rail's.
+  const tapeDotFrac = $derived(tapeVal != null ? clamp((tapeVal - tapeLo) / tapeSpan, 0, 1) : null);
 </script>
 
 <div class="hero rail-hero">
@@ -636,38 +721,56 @@
 
   <div class="rail-readouts">
     <span class="ro">
-      <span class="ro-label">{min.label}</span>
+      <span class="ro-label">{labelFor(min)}</span>
       <output class="mono" data-shadow={statusOf(min)}>{formatValue(min, minVal)}<span class="unit">{unitOf(min)}</span></output>
     </span>
     <span class="ro">
-      <span class="ro-label">{max.label}</span>
+      <span class="ro-label">{labelFor(max)}</span>
       <output class="mono" data-shadow={statusOf(max)}>{formatValue(max, maxVal)}<span class="unit">{unitOf(max)}</span></output>
     </span>
   </div>
 
   {#if move}
-    <!-- Input tape — a live command surface. Tap or drag anywhere across the
-         full travel to send a move INTENT; the hub clamps (window, limits)
-         and the post-clamp ECHO plus telemetry.target are what the cursor
-         shows once the drag ends — never an optimistic local guess. -->
+    <!-- Input tape — a live command surface. In the original this was
+         two layers: a full-width TRACK (dashed guides marking full travel)
+         with a highlighted, draggable STRIP inside it sized/positioned to
+         EXACTLY the reported window — so the strip you touch sits directly
+         above the window band on the rail below, and dragging anywhere on
+         it can only ever produce a value inside that window. Tap or drag it
+         to send a move INTENT; the hub clamps (window, limits) and the
+         post-clamp ECHO plus telemetry.target are what the cursor shows once
+         the drag ends — never an optimistic local guess. -->
     <div class="rail-tape-assembly" class:drag-live={moveDragging} class:disabled={!moveEnabled}
          data-shadow={statusOf(move)}>
       <div class="rail-tape-labels">
-        <span class="rail-tape-mode">tap &middot; drag to move</span>
-        <span class="rail-tape-extent mono">{tapeVal != null ? formatValue(move, tapeVal) + unitOf(move) : '--'}</span>
+        <span class="rail-tape-mode">input &middot; window</span>
+        <span class="rail-tape-extent mono">{formatValue(move, tapeLo)}&ndash;{formatValue(move, tapeHi)}</span>
       </div>
-      <div class="rail-tape-track"
+      <!-- The TRACK is the hit-test surface now (bug #3 fix, see the note by
+           tapeTrackEl above) — the whole dashed-guide width is tappable, not
+           just the highlighted strip nested inside it. The strip
+           (`.rail-tape.live`) stays purely visual: it still shows exactly
+           where the window sits, still carries the pip, but no longer owns
+           any listeners of its own (pointer events on it bubble to the
+           track same as anywhere else). -->
+      <div class="rail-tape-track" bind:this={tapeTrackEl}
            role="slider" tabindex={moveEnabled ? 0 : -1}
-           aria-label={move.label} aria-orientation="horizontal"
-           aria-valuemin={lo} aria-valuemax={hi} aria-valuenow={tapeVal ?? lo}
+           aria-label={labelFor(move)} aria-orientation="horizontal"
+           aria-valuemin={tapeLo} aria-valuemax={tapeHi} aria-valuenow={tapeVal ?? tapeLo}
            aria-disabled={!moveEnabled}
+           class:live={moveEnabled}
            onpointerdown={onTapePointerDown}
            onpointermove={onTapePointerMove}
            onpointerup={onTapePointerUp}
-           onpointercancel={onTapePointerUp}>
-        {#if tapePct != null}
-          <div class="rail-tape-cursor" style="left:{tapePct * 100}%"></div>
-        {/if}
+           onpointercancel={onTapePointerUp}
+           onkeydown={onTapeKey}>
+        <div class="rail-tape live" bind:this={tapeBarEl}
+             style="left:{tapeStripLoPct * 100}%; width:{Math.max(0, (tapeStripHiPct - tapeStripLoPct) * 100)}%">
+          <span class="rail-tape-micro">tap &middot; scrub</span>
+          {#if tapeDotFrac != null}
+            <div class="rail-tape-pip" class:on={moveDragging} style="left:{tapeDotFrac * 100}%"></div>
+          {/if}
+        </div>
       </div>
       <!-- The tape has no persistent widget of its own once a drag ends, so a
            refusal here is ALSO caught by ui/SafetyBar.svelte's global surface
@@ -737,7 +840,7 @@
       <div class="rail-band-handle lo"
            class:disabled={!minEnabled}
            role="slider" tabindex={minEnabled ? 0 : -1}
-           aria-label={min.label} aria-orientation="horizontal"
+           aria-label={labelFor(min)} aria-orientation="horizontal"
            aria-valuemin={lo} aria-valuemax={maxVal ?? hi} aria-valuenow={minVal ?? lo}
            aria-valuetext={formatValue(min, minVal) + (unitOf(min) ? ' ' + unitOf(min) : '')}
            aria-disabled={!minEnabled}
@@ -752,7 +855,7 @@
       <div class="rail-band-handle hi"
            class:disabled={!maxEnabled}
            role="slider" tabindex={maxEnabled ? 0 : -1}
-           aria-label={max.label} aria-orientation="horizontal"
+           aria-label={labelFor(max)} aria-orientation="horizontal"
            aria-valuemin={minVal ?? lo} aria-valuemax={hi} aria-valuenow={maxVal ?? hi}
            aria-valuetext={formatValue(max, maxVal) + (unitOf(max) ? ' ' + unitOf(max) : '')}
            aria-disabled={!maxEnabled}
@@ -767,6 +870,13 @@
       <p class="rail-waiting">waiting for device&hellip;</p>
     {/if}
   </div>
+
+  <!-- Plan strip — bug #4: belongs directly under the rail, inside this same
+       card, visible ONLY while a plan is actually streaming (see
+       widgets/PlanStrip.svelte). It used to live as its own separate
+       dashboard widget card; this is a straight relocation, not a rewrite of
+       its own logic beyond the role-purity fix documented there. -->
+  <PlanStrip />
 
   <div class="rail-hint">
     <span>drag band &middot; drag edges &middot; arrow keys to nudge</span>
@@ -819,6 +929,11 @@
     color: var(--tx-mut);
   }
   .rail-tape-extent { font-size: 0.62rem; color: var(--tx-ghost); }
+  /* Track spans the full assembly width with dashed top/bottom guides — the
+     original's "shows where full travel is even when the strip only covers
+     the window" landmark. The STRIP (.rail-tape) is what actually commands;
+     it is positioned/sized to the window fraction of that same width, in the
+     markup above. */
   .rail-tape-track {
     position: relative;
     width: 100%;
@@ -826,44 +941,69 @@
     border-top: 1px dashed var(--line-1);
     border-bottom: 1px dashed var(--line-1);
     touch-action: none;
+    cursor: not-allowed;
   }
-  /* Live tape (a `move` role was claimed): the whole track is the command
-     surface, cursor: crosshair like the rail host itself. */
-  .rail-tape-assembly:not(.disabled) .rail-tape-track { cursor: crosshair; }
-  .rail-tape-assembly.disabled .rail-tape-track { cursor: not-allowed; }
-  .rail-tape-cursor {
-    position: absolute;
-    top: 0; bottom: 0;
-    width: 2px;
-    transform: translateX(-1px);
-    background: var(--intent);
-    box-shadow: 0 0 8px rgba(var(--intent-rgb), .65);
-    pointer-events: none;
-    transition: left .12s ease;
+  /* The TRACK is the hit-test surface (bug #3 fix) — the whole dashed-guide
+     width is tappable, not just the highlighted strip nested inside it, so
+     crosshair/focus belong here now rather than on `.rail-tape.live`. */
+  .rail-tape-track.live { cursor: crosshair; }
+  .rail-tape-track:focus-visible {
+    outline: 2px solid var(--intent);
+    outline-offset: 2px;
   }
-  .rail-tape-assembly.drag-live .rail-tape-cursor { transition: none; }
   .rail-tape {
     position: absolute;
-    top: 0; bottom: 0; left: 0;
+    top: 0; bottom: 0;
     display: flex;
     align-items: center;
     justify-content: center;
+    border-radius: var(--r-s);
+    overflow: hidden;
+    transition: left .25s ease, width .25s ease;
+  }
+  /* Disabled (fallback: no move role, or this session may not command) —
+     inert grey strip, same shape as the live one so the rhythm survives. */
+  .rail-tape:not(.live) {
     background:
       repeating-linear-gradient(90deg, var(--line-2) 0 1px, transparent 1px 7px),
       var(--bg-sunken);
     border: 1px solid var(--line-2);
-    border-radius: var(--r-s);
-    cursor: not-allowed;
-    overflow: hidden;
-    transition: left .25s ease, width .25s ease;
   }
+  /* Live command strip — purely visual now (shows exactly where the window
+     sits + carries the pip); the track around it owns the actual pointer
+     handling, see tapeTrackEl's note above. Intent-tinted so it visually
+     pairs with the window band on the rail below it. */
+  .rail-tape.live {
+    background:
+      repeating-linear-gradient(90deg, rgba(var(--intent-rgb), .12) 0 1px, transparent 1px 7px),
+      var(--bg-sunken);
+    border: 1px solid rgba(var(--intent-rgb), .45);
+    box-shadow: inset 0 2px 6px rgba(0, 0, 0, .5);
+  }
+  .rail-tape-assembly.drag-live .rail-tape { transition: none; }
   .rail-tape-micro {
     font-size: 0.58rem;
     letter-spacing: 0.1em;
     color: var(--tx-ghost);
     white-space: nowrap;
     text-transform: uppercase;
+    pointer-events: none;
   }
+  /* Scrub pip — rides under the pointer/setpoint, inside the strip's own
+     local coordinate space (matches the original's tapeMm()). */
+  .rail-tape-pip {
+    position: absolute;
+    top: 0; bottom: 0;
+    width: 2px;
+    transform: translateX(-1px);
+    background: var(--intent);
+    box-shadow: 0 0 10px rgba(var(--intent-rgb), .7);
+    opacity: 0;
+    pointer-events: none;
+    transition: opacity .1s ease, left .12s ease;
+  }
+  .rail-tape-pip.on { opacity: 1; }
+  .rail-tape-assembly.drag-live .rail-tape-pip { transition: opacity .1s ease; }
   .rail-reason { margin: 4px 0 0; color: var(--tx-ghost); font-size: 0.72rem; }
   .rail-reason.err { color: var(--bad); }
 

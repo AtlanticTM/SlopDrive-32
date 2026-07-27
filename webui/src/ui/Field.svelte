@@ -17,7 +17,7 @@
   import { machine } from '../model/machine.svelte.js';
   import { WIDGET, isFieldEnabled } from '../model/settings.js';
   import { writeSetting, displayValue, statusOf, shadowOf } from '../model/shadow.svelte.js';
-  import { formatValue, unitOf, optionLabel, precisionFor } from '../model/format.js';
+  import { formatValue, unitOf, optionLabel, precisionFor, labelFor } from '../model/format.js';
 
   let { field } = $props();
 
@@ -68,7 +68,7 @@
 
   <div class="field-head">
     <label class="field-label" for={field.uid}>
-      {field.label}
+      {labelFor(field)}
       {#if field.flagBits.advanced}<span class="tag adv" title="Advanced setting">adv</span>{/if}
       {#if field.flagBits.restart_required}<span class="tag warn" title="Takes effect after restart">restart</span>{/if}
     </label>

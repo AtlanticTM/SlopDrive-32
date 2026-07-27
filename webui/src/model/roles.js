@@ -99,6 +99,71 @@ export const ROLE = {
   patternSensation: 'pattern.sensation',
 };
 
+/**
+ * ROLE -> HUMAN DISPLAY LABEL.
+ *
+ * A role is registry vocabulary (docs/slopsync/registry/registry.yaml,
+ * `field_roles`) — it means the same thing on every conforming hub, so a
+ * label keyed off it is not device knowledge any more than the role string
+ * itself is. This is the ONLY place a field's wire NAME may be overridden for
+ * display; see `labelFor()` in format.js for the resolution order (role label
+ * first, `humanize(field.name)` fallback otherwise — never a per-device name
+ * table).
+ *
+ * Wording prefers the pre-refactor UI's own choices where it had one
+ * (`git show webui-prerefactor:webui/index.html` / `style.css` —
+ * "actual"/"commanded" for the hero numerals, "User speed"/"Input jerk" etc
+ * for the limit sliders) so this reads as a relabel, not a redesign.
+ *
+ * Every entry in ROLE above SHOULD have a mapping here — a role with no label
+ * just falls through to humanize(), which is a safe, correct default, not a
+ * bug, so this is a courtesy for readability, not something claimRoles()
+ * enforces.
+ */
+export const ROLE_LABEL = {
+  [ROLE.limitUserSpeed]: 'User speed',
+  [ROLE.limitUserAccel]: 'User accel',
+  [ROLE.limitInputSpeed]: 'Input speed',
+  [ROLE.limitInputAccel]: 'Input accel',
+  [ROLE.limitInputJerk]: 'Input jerk',
+
+  [ROLE.windowMin]: 'Window min',
+  [ROLE.windowMax]: 'Window max',
+
+  [ROLE.geometryMaxTravel]: 'Max travel',
+  [ROLE.geometryMeasuredTravel]: 'Measured travel',
+
+  [ROLE.telemetryPosition]: 'Actual',
+  [ROLE.telemetryTarget]: 'Commanded',
+  [ROLE.telemetryVelocity]: 'Speed',
+  [ROLE.telemetryCurrent]: 'Current',
+  [ROLE.telemetryPowerBus]: 'Bus power',
+  [ROLE.telemetryTemp]: 'Temperature',
+  [ROLE.telemetryUptime]: 'Uptime',
+
+  [ROLE.identityName]: 'Machine name',
+
+  [ROLE.enabledMask]: 'Enabled mask',
+  [ROLE.resetGen]: 'Reset counter',
+
+  [ROLE.commandPosition]: 'Move to',
+
+  [ROLE.planStart]: 'Plan start',
+  [ROLE.planEnd]: 'Plan end',
+  [ROLE.planCurrent]: 'Plan position',
+  [ROLE.planVelocity]: 'Plan speed',
+  [ROLE.planElapsed]: 'Elapsed',
+  [ROLE.planDuration]: 'Duration',
+  [ROLE.planStyle]: 'Style',
+
+  [ROLE.patternRunning]: 'Running',
+  [ROLE.patternSelect]: 'Pattern',
+  [ROLE.patternSpeed]: 'Speed',
+  [ROLE.patternDepth]: 'Depth',
+  [ROLE.patternStroke]: 'Stroke',
+  [ROLE.patternSensation]: 'Sensation',
+};
+
 /** Open convention (RFC-019): `action.<name>` marks an INTENT field as a verb. */
 export const ACTION_PREFIX = 'action.';
 

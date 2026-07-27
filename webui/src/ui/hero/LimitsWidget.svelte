@@ -12,7 +12,7 @@
   import { machine } from '../../model/machine.svelte.js';
   import { isFieldEnabled } from '../../model/settings.js';
   import { writeSetting, displayValue, statusOf } from '../../model/shadow.svelte.js';
-  import { formatValue, unitOf, precisionFor } from '../../model/format.js';
+  import { formatValue, unitOf, precisionFor, labelFor } from '../../model/format.js';
 
   let { fields } = $props();
   // Read through the prop rather than destructuring once — heroes.js hands us
@@ -58,13 +58,13 @@
         {@const en = enabledOf(f)}
         <div class="limit-row" class:disabled={!en} data-shadow={statusOf(f)}>
           <div class="limit-head">
-            <span class="limit-label">{f.label}</span>
+            <span class="limit-label">{labelFor(f)}</span>
             <output class="mono">{formatValue(f, val)}<span class="unit">{unitOf(f)}</span></output>
           </div>
           <input type="range" class="limit-slider"
                  min={f.min} max={f.max} step={stepOf(f)}
                  value={val ?? f.min} disabled={!en}
-                 aria-label={f.label}
+                 aria-label={labelFor(f)}
                  oninput={(e) => commit(f, Number(e.currentTarget.value))} />
           {#if f.desc}<p class="limit-desc">{f.desc}</p>{/if}
         </div>
@@ -81,13 +81,13 @@
           {@const en = enabledOf(f)}
           <div class="limit-row" class:disabled={!en} data-shadow={statusOf(f)}>
             <div class="limit-head">
-              <span class="limit-label">{f.label}</span>
+              <span class="limit-label">{labelFor(f)}</span>
               <output class="mono">{formatValue(f, val)}<span class="unit">{unitOf(f)}</span></output>
             </div>
             <input type="range" class="limit-slider"
                    min={f.min} max={f.max} step={stepOf(f)}
                    value={val ?? f.min} disabled={!en}
-                   aria-label={f.label}
+                   aria-label={labelFor(f)}
                    oninput={(e) => commit(f, Number(e.currentTarget.value))} />
             {#if f.desc}<p class="limit-desc">{f.desc}</p>{/if}
           </div>

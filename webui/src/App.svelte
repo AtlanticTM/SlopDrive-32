@@ -20,7 +20,6 @@
   import ThemePicker from './ui/ThemePicker.svelte';
   import HeroStrip from './ui/HeroStrip.svelte';
   import TelemetryChart from './ui/widgets/TelemetryChart.svelte';
-  import PlanStrip from './ui/widgets/PlanStrip.svelte';
   import DashGrid from './ui/dash/DashGrid.svelte';
   import { machine } from './model/machine.svelte.js';
   import { withoutClaimed } from './model/roles.js';
@@ -106,7 +105,6 @@
 
   const machineItems = $derived([
     { id: 'widget:telemetry', title: 'Telemetry', snippet: telemetryCard },
-    { id: 'widget:plan', title: 'Active plan', snippet: planCard },
   ]);
 </script>
 
@@ -120,10 +118,6 @@
 
 {#snippet telemetryCard()}
   <TelemetryChart />
-{/snippet}
-
-{#snippet planCard()}
-  <PlanStrip />
 {/snippet}
 
 <div class="app">

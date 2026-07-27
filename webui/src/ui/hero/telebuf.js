@@ -36,6 +36,31 @@
  * a rAF loop up to 60 times a second, and routing that through reactive state
  * would fire the whole reactivity graph for no reason. Callers push the
  * handful of *derived* display numbers they actually render into `$state`.
+ *
+ * ── The render-delay bug (jitter regression #3) ─────────────────────────────
+ *
+ * The pre-refactor `core/telebuf.js` never sampled at raw "now". It sampled at
+ * `nowSynced - renderDelay`, where renderDelay was an adaptively-slewed buffer
+ * (20-120ms, `p95_jitter*1.5 + frame_dt`) whose whole job was to keep the
+ * render instant reliably BEHIND the newest real sample, so `sampleAt()`
+ * almost always finds two real bracketing samples to interpolate between.
+ * That delay was dropped in the port (its header now says so explicitly) —
+ * the reasoning given was "there is nothing left to synchronize" (true: the
+ * old delay's OTHER job, device/client clock-offset sync, really is gone now
+ * that machine.svelte.js stamps every sample in one epoch-ms domain). But the
+ * delay had a second, independent job the port's reasoning missed: it was
+ * also a JITTER BUFFER against irregular sample arrival, which is still very
+ * much a live problem — SlopSync STATE pushes arrive at ~20-30 Hz with real
+ * gaps (measured on-device: mean ~20-45ms, p95 45-55ms, occasional gaps past
+ * 100ms). Sampling at raw "now" with no buffer means any push arriving a
+ * little late leaves "now" sitting PAST the newest sample, past the tight
+ * 50ms extrapolate window, so the display FREEZES (the `pastMs > EXTRAPOLATE_MS`
+ * hold branch) until the next push arrives and it SNAPS forward to catch up —
+ * a visible stutter, worse the larger the gap. `createRenderClock` below is a
+ * single-clock re-derivation of the old technique: no device/client offset
+ * (nothing to sync), but the same "buffer by a bit more than the typical gap
+ * between samples" idea, driven by the MEASURED gap between real pushes
+ * instead of a removed network-clock jitter estimate.
  */
 
 /**
@@ -164,4 +189,85 @@ export function createTrail(opts = {}) {
   function reset() { head = 0; len = 0; }
 
   return { record, forEachRecent, reset, get length() { return len; } };
+}
+
+/**
+ * A single render-delay clock, SHARED across every telebuf that must agree
+ * about "now" (position/velocity/target — see RailWidget.svelte, which reads
+ * all three at the one instant this produces so the phosphor dot, the tape
+ * cursor and the hero numerals never disagree). See this file's header for
+ * why the delay exists at all.
+ *
+ * Usage: call `noteArrival(tsMs)` every time ANY real sample lands (the
+ * timestamp the sample itself carries, e.g. `machine.sampleTs[channelId]`),
+ * call `update(frameDtMs)` once per rendered frame, then read `renderTime(t)`
+ * (or `stableRenderTime(t)`, which additionally guarantees the return value
+ * never rewinds by more than one frame — a delay that grows because arrivals
+ * just got sparser must not make the display visibly jump backward).
+ *
+ * @param {{minDelayMs?: number, maxDelayMs?: number, slewMsPerFrame?: number, gapCapacity?: number}} [opts]
+ */
+export function createRenderClock(opts = {}) {
+  const MIN_DELAY_MS = opts.minDelayMs != null ? opts.minDelayMs : 20;
+  const MAX_DELAY_MS = opts.maxDelayMs != null ? opts.maxDelayMs : 120;
+  const SLEW_MS_PER_FRAME = opts.slewMsPerFrame != null ? opts.slewMsPerFrame : 2;
+  const GAP_CAP = opts.gapCapacity || 32; // ~1s of history at ~30Hz — plenty for a p95
+
+  const gaps = new Float64Array(GAP_CAP);
+  let gapHead = 0, gapLen = 0;
+  let lastArrivalTs = 0;
+
+  let delayMs = (MIN_DELAY_MS + MAX_DELAY_MS) / 2; // sane mid-point before any data
+  let frameDtMs = 16.667;
+  let lastRenderT = 0;
+
+  /** Record one real sample's arrival timestamp (same epoch-ms domain as sampleAt). */
+  function noteArrival(tsMs) {
+    if (lastArrivalTs > 0) {
+      const gap = tsMs - lastArrivalTs;
+      if (gap > 0 && gap < 5000) { // ignore resets/backward jumps/huge stalls
+        gaps[gapHead] = gap;
+        gapHead = (gapHead + 1) % GAP_CAP;
+        if (gapLen < GAP_CAP) gapLen++;
+      }
+    }
+    lastArrivalTs = tsMs;
+  }
+
+  function p95Gap() {
+    if (gapLen === 0) return MIN_DELAY_MS;
+    const sorted = Array.prototype.slice.call(gaps, 0, gapLen).sort((a, b) => a - b);
+    const idx = Math.min(sorted.length - 1, Math.floor(sorted.length * 0.95));
+    return sorted[idx];
+  }
+
+  /** Recompute the target delay from the measured arrival cadence and slew toward it. Call once per rendered frame. */
+  function update(dtMs) {
+    if (dtMs > 0 && dtMs < 200) frameDtMs = dtMs;
+    const target = Math.max(MIN_DELAY_MS, Math.min(MAX_DELAY_MS, p95Gap() * 1.5 + frameDtMs));
+    const delta = target - delayMs;
+    const clamped = Math.max(-SLEW_MS_PER_FRAME, Math.min(SLEW_MS_PER_FRAME, delta));
+    delayMs += clamped;
+  }
+
+  function getDelayMs() { return delayMs; }
+
+  /** t_render = t - delay. */
+  function renderTime(tMs) { return tMs - delayMs; }
+
+  /** Same, but never rewinds more than one frame versus the last call — avoids a visible backward jump when the delay grows. */
+  function stableRenderTime(tMs) {
+    let t = renderTime(tMs);
+    const maxRewind = frameDtMs;
+    if (lastRenderT > 0 && t < lastRenderT - maxRewind) t = lastRenderT - maxRewind;
+    lastRenderT = t;
+    return t;
+  }
+
+  function reset() {
+    gapHead = 0; gapLen = 0; lastArrivalTs = 0; lastRenderT = 0;
+    delayMs = (MIN_DELAY_MS + MAX_DELAY_MS) / 2;
+  }
+
+  return { noteArrival, update, getDelayMs, renderTime, stableRenderTime, reset };
 }

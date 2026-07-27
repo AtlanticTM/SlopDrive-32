@@ -178,9 +178,18 @@ function subscriptionWishes(entries, maxSubs, onlyClass) {
  * protocol floor rather than assuming generosity.
  */
 function subscribeInBatches(wishes) {
+  // CONSERVATIVE ON PURPOSE. A byte estimate was tried first and regressed the
+  // moment the device's catalog grew from 33 to 44 entries: the batches got
+  // bigger, the SUBSCRIBE was silently dropped again, and every control on the
+  // page went disabled because isFieldEnabled() has no snapshot to gate on.
+  //
+  // The reference probe subscribes 9 channels and has always worked, so 8 per
+  // frame sits comfortably inside whatever the real constraint is. The cost is
+  // a few extra small frames at connect; the benefit is that a machine growing
+  // its catalog can never silently break its own clients again. Still bounded
+  // by the hub's declared max_frame in case some hub declares a tiny one.
   const maxFrame = machine.link.limits.max_frame || 512;
-  const perEntry = 16;                       // generous: 3-key map with a u16 id
-  const budget = Math.max(1, Math.floor((maxFrame - 48) / perEntry));
+  const budget = Math.max(1, Math.min(8, Math.floor((maxFrame - 48) / 16)));
   for (let i = 0; i < wishes.length; i += budget) {
     session.subscribe(wishes.slice(i, i + budget));
   }

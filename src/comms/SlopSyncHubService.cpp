@@ -893,9 +893,15 @@ void SlopDriveHubDelegate::onSessionLeft(uint32_t session_id) {
 // ownership on TCODE_STREAM enforces that).
 void SlopDriveHubDelegate::onStreamBundle(uint16_t channel_id, uint32_t session_id,
                                           const slopsync::BundleView& bundle) {
-    (void)session_id;
     const bool isSegment = (channel_id == ch::motion_segment);
     if (channel_id != ch::motion_input && !isSegment) return;
+
+    // RFC-030: the session's GRANTED (effective, post-curve_policy) family,
+    // looked up once per bundle and stamped on every segment entry below.
+    // Chase points (0x0084) never carry one — the family is a waveform-
+    // reconstruction concept and the engine only reads it on that path.
+    const uint8_t curveFamily =
+        (isSegment && _hub != nullptr) ? _hub->publishCurveFamily(session_id, channel_id) : 0;
 
     // t_base/t_off are u32 HUB-µs — the SAME wrapping domain EspClock::nowUs()
     // reads (esp_timer_get_time() truncated to 32 bits, §7.2). now64 stays the
@@ -938,6 +944,7 @@ void SlopDriveHubDelegate::onStreamBundle(uint16_t channel_id, uint32_t session_
             }
             e.has_duration = true;
             e.duration_us  = uint32_t(rawDurMs) * 1000u;
+            e.curve_family = curveFamily;
             if (rawEndV == kSegNoEndVel) {
                 // -32768 sentinel = "no end velocity" (0 is a legit slope, so 0
                 // cannot mean absent) → the engine estimates vf/af itself.
@@ -966,6 +973,30 @@ void SlopDriveHubDelegate::onStreamBundle(uint16_t channel_id, uint32_t session_
         SLOGW_EVERY_MS(2000, "slopsync", "motion-stream: %u sample(s) clamped from far-future "
                        "t_off this window (missed CLOCK resync on the client?)",
                        (unsigned)farClamped);
+    }
+}
+
+// RFC-030: the grant-plane echo of the curve family. The wish arrives already
+// clamped to the registered curve_families range; this machine's curve_policy
+// then decides what will actually be rendered, and THAT is what the grant
+// reports — never the request (ground-truth doctrine). Note the deliberate
+// asymmetry with the engine: the engine re-reads curve_policy every tick, so
+// an operator flipping policy mid-session changes MOTION instantly, while the
+// grant echo only refreshes on the next HELLO/PUBLISH. The echo is a
+// declaration receipt, not live telemetry.
+uint8_t SlopDriveHubDelegate::effectiveCurveFamily(uint16_t channel_id, uint8_t requested) {
+    (void)channel_id;
+    switch (_state.sm_tune_curve_policy) {
+        case 1:  return slopsync::curve_families::c1_cubic;    // ForceC1
+        case 2:  return slopsync::curve_families::c2_quintic;  // ForceC2
+        default:
+            // FollowClient honours what it can RENDER. No step renderer
+            // exists (SPEC §18): the engine plans a step declaration as a
+            // quintic, so the echo says quintic — claiming "step honoured"
+            // would be the exact lie the effective-family echo exists to kill.
+            return (requested == slopsync::curve_families::step)
+                       ? slopsync::curve_families::c2_quintic
+                       : requested;
     }
 }
 
@@ -1075,8 +1106,15 @@ void SlopSyncHubService::init() {
     // accident. Both objects exist by now; see SlopDriveHubDelegate::bindPairing
     // for why this is a post-construction bind rather than a ctor reference.
     _delegate.bindPairing(_hub.pairing());
+    _delegate.bindHub(_hub);  // RFC-030: onStreamBundle reads granted curve families
     SLOGI("slopsync", "auth ENFORCED — /uitoken -> ledger (%u paired) -> watch",
           unsigned(_hub.pairing().entryCount()));
+
+    // RFC-016(a): in-band hub identity on WELCOME key 37. String literals are
+    // rodata, satisfying setIdentity's outlives-the-hub contract. fw_version's
+    // ONLY other home is mDNS TXT — "what firmware is this machine running"
+    // finally has an answer a client can get without HTTP.
+    _hub.setIdentity("slopdrive-32", FIRMWARE_VERSION, "");
 
     // RFC-021 pattern-preset store (M5): load/migrate before binding, same
     // ordering reason as pairing above — the delegate must never see an
@@ -1469,6 +1507,7 @@ void SlopSyncHubService::drainMotionStream() {
         cmd.has_end_vel  = entry.has_end_vel;
         cmd.duration_us  = entry.duration_us;
         cmd.has_duration = entry.has_duration;
+        cmd.client_curve_family = entry.curve_family;  // RFC-030: FollowClient's input
 
         // ---- RFC-008 one-segment LOOKAHEAD --------------------------------
         // The whole hub-side handoff sanity guard reduces, here, to answering

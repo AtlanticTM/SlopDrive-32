@@ -416,7 +416,8 @@ inline bool buildSlopDriveCatalog(slopsync::Catalog32& c, DeviceFeatures feat = 
                       .desc = "Where the carriage actually is.",
                       .role = roles::telemetry_position});
     c.addLayoutField({.name = "tgt_10um", .type = PackedFieldType::u16, .unit = "mm",   .scale = 100.0f,
-                      .desc = "Where the motion planner is currently driving to."});
+                      .desc = "Where the motion planner is currently driving to.",
+                      .role = roles::telemetry_target});
     c.addLayoutField({.name = "speed",    .type = PackedFieldType::i16, .unit = "mm/s", .scale = 10.0f,
                       .desc = "Live carriage speed; sign is the direction of travel.",
                       .role = roles::telemetry_velocity});
@@ -752,22 +753,33 @@ inline bool buildSlopDriveCatalog(slopsync::Catalog32& c, DeviceFeatures feat = 
                         .group = "Active plan",
                         .desc = "Whether a plan is running, and which planner produced it."},
                        {"active", "live_mode", "grad_mode"});
+    // RFC-035: the plan.* role family — a generic plan-strip widget finds this
+    // channel BY ROLE on any machine, replacing the reference client's
+    // documented /plan/i entry-name regex (which silently fails on a hub that
+    // names the concept differently).
     c.addSelectField({.name = "style", .type = PackedFieldType::u8, .unit = "", .scale = 1.0f,
                       .group = "Active plan",
-                      .desc = "Which planning mode the motion core is in."},
+                      .desc = "Which planning mode the motion core is in.",
+                      .role = roles::plan_style},
                      {"idle", "waveform", "chase", "settle"});
     c.addLayoutField({.name = "start_norm", .type = PackedFieldType::u16, .unit = "norm",   .scale = 10000.0f,
-                      .group = "Active plan", .desc = "Where the current plan started."});
+                      .group = "Active plan", .desc = "Where the current plan started.",
+                      .role = roles::plan_start});
     c.addLayoutField({.name = "end_norm",   .type = PackedFieldType::u16, .unit = "norm",   .scale = 10000.0f,
-                      .group = "Active plan", .desc = "Where the current plan ends."});
+                      .group = "Active plan", .desc = "Where the current plan ends.",
+                      .role = roles::plan_end});
     c.addLayoutField({.name = "cur_norm",   .type = PackedFieldType::u16, .unit = "norm",   .scale = 10000.0f,
-                      .group = "Active plan", .desc = "The setpoint the plan is producing right now."});
+                      .group = "Active plan", .desc = "The setpoint the plan is producing right now.",
+                      .role = roles::plan_current});
     c.addLayoutField({.name = "cur_vel",    .type = PackedFieldType::i16, .unit = "norm/s", .scale = 1000.0f,
-                      .group = "Active plan", .desc = "The plan's velocity right now, signed."});
+                      .group = "Active plan", .desc = "The plan's velocity right now, signed.",
+                      .role = roles::plan_velocity});
     c.addLayoutField({.name = "duration_us", .type = PackedFieldType::u32, .unit = "us",    .scale = 1.0f,
-                      .group = "Active plan", .desc = "How long the current plan runs in total."});
+                      .group = "Active plan", .desc = "How long the current plan runs in total.",
+                      .role = roles::plan_duration});
     c.addLayoutField({.name = "elapsed_us",  .type = PackedFieldType::u32, .unit = "us",    .scale = 1.0f,
-                      .group = "Active plan", .desc = "How far into the current plan we are."});
+                      .group = "Active plan", .desc = "How far into the current plan we are.",
+                      .role = roles::plan_elapsed});
 
     // ---- 0x0087 "power" — STATE, background, 10 Hz -----------------------
     // Bus voltage / current / die temperature: the legacy :81 0x02 STATUS
@@ -1429,17 +1441,20 @@ inline bool buildSlopDriveCatalog(slopsync::Catalog32& c, DeviceFeatures feat = 
     // {1:"position" f32 mm, 2:"bypass" bool}. This channel maps to arbiter
     // source 0 (MANUAL) in the delegate.
     //
-    // NO `action.*` ROLE HERE, DELIBERATELY. RFC-019's action roles mark a
-    // schema field as a VERB ("do this") rather than a value; `position` is a
-    // value (where to go), not a verb, and tagging it action.move would tell a
-    // generic client to render a button where a slider belongs. This channel
-    // is exactly what generic value-field rendering already handles.
+    // NO `action.*` ROLE HERE, DELIBERATELY — and that refusal became RFC-032:
+    // RFC-019's action roles mark a schema field as a VERB ("do this");
+    // `position` is a VALUE (where to go), and tagging it action.move would
+    // tell a generic client to render a button where a slider belongs. The
+    // honest annotation is the value-role `command.position`, which is what
+    // lets ANY client (the rail widget's tap-to-move tape first among them)
+    // find "put the carriage there" without hardcoding 0x0100.
     c.addEntry({.id = ch::move, .name = "move",
                 .cls = ChannelClass::INTENT, .dir = Direction::c2h,
                 .access = AccessLevel::control, .maxRateHz = 20.0f,
                 .defaultPriority = Priority::critical});
     c.addSchemaField({.key = 1, .name = "position", .type = CborFieldType::f32_t, .unit = "mm",
-                      .hasMin = true, .hasMax = true, .min = 0.0f, .max = 2000.0f});
+                      .hasMin = true, .hasMax = true, .min = 0.0f, .max = 2000.0f,
+                      .role = roles::command_position});
     c.addSchemaField({.key = 2, .name = "bypass", .type = CborFieldType::bool_t, .unit = ""});
 
     // ---- 0x0101 "config-set" — INTENT, control, 10 Hz --------------------

@@ -71,6 +71,11 @@ struct PacingEntry {
     uint32_t duration_us  = 0;
     bool     has_duration = false;
     bool     has_end_vel  = false;
+    // RFC-030: the EFFECTIVE curve family of the grant that produced this
+    // entry (registry curve_families; 0 = unspecified), stamped per-entry at
+    // ingress because entries from different sessions could interleave in the
+    // ring — a drain-time "current family" cache would mis-attribute them.
+    uint8_t  curve_family = 0;
 };
 
 class PacingRing {
@@ -164,6 +169,13 @@ public:
     // get. It never fails open.
     void bindPairing(slopsync::PairingManager& pm) { _pairing = &pm; }
 
+    // ---- RFC-030: the hub, bound AFTER construction -------------------------
+    // Same ctor-ordering reason as bindPairing. Needed so onStreamBundle can
+    // stamp each pacing entry with the session's GRANTED curve family
+    // (Hub::publishCurveFamily). Null = family stays 0 (unspecified), which is
+    // the safe pre-RFC-030 behaviour.
+    void bindHub(slopsync::Hub& h) { _hub = &h; }
+
     // ---- RFC-021 pattern-preset store, bound AFTER construction (M5) --------
     // Same reason/timing as bindPairing: PatternPresetStore is a SERVICE
     // member, the delegate is bound by reference into the Hub's constructor,
@@ -198,6 +210,12 @@ public:
     // stream channels; anything else is a no-op, matching the base default).
     void onStreamBundle(uint16_t channel_id, uint32_t session_id, const slopsync::BundleView& bundle) override;
 
+    // RFC-030: the grant echo carries the EFFECTIVE curve family — the wish
+    // filtered through this machine's curve_policy. ForceC1/ForceC2 report the
+    // forced family (a downgrade the sender can SEE); FollowClient honours the
+    // declaration. Ground-truth doctrine on the grant plane.
+    uint8_t effectiveCurveFamily(uint16_t channel_id, uint8_t requested) override;
+
     // RFC-021: BLOB_REQ export for the pattern-preset store (0x0095, store_id
     // 2). Only namespaces/stores the HUB doesn't serve itself reach here (the
     // trust ledger is hub-served — see hub.hpp's readBlob doc); this store
@@ -212,6 +230,7 @@ private:
     PacingRing& _pacingRing;
     SlopSyncUiTokenMinter& _uiTokens;
     slopsync::PairingManager* _pairing = nullptr;  // see bindPairing()
+    slopsync::Hub* _hub = nullptr;                 // see bindHub()
     PatternPresetStore* _presets = nullptr;        // see bindPresets()
     PatternEngine* _presetPatternEngine = nullptr; // see bindPatternEngine()
     bool _cfgFromIntent = false;

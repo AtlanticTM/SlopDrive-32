@@ -214,6 +214,14 @@ Reserved ranges: frame types `0x02` and `0x1E–0x3F` spec/core, `0x40–0x7F` f
 
 Breaking the wire grammar requires a `proto_ver` bump, which requires exceptional justification. The intended lifetime of `slopsync/1` is the lifetime of the hardware.
 
+### 4.5 Every refusal is answered
+
+**A conforming implementation never declines silently: every frame or transfer it cannot honour has a wire signal.** §6.7's SUBSCRIBE rule is the instance that was paid for in debugging time; the principle is general, and it binds clients as well as hubs. Three named applications beyond SUBSCRIBE:
+
+1. A **client** that cannot accept a declared blob (`total_bytes` over its reassembly budget) MUST GOODBYE with `BLOB_REFUSED` (0x0503) rather than idle in a half-session (§8.4). The observed failure: a refused catalog transfer produced a session that went LIVE with no catalog, no error anywhere, and a `READY_TIMEOUT` fifteen seconds later that blamed the client. Refusal is legal; silent refusal is not.
+2. A HELLO whose `token` field is **present but malformed** (wrong length or type) fails decode and MUST be answered NACK `MALFORMED` — never silently demoted to watch tier. A *tokenless* HELLO keeps its legitimate watch-tier path; only present-but-broken credentials become loud. Under enforcement, silent demotion presents as "connects, plays nothing".
+3. Idle reaping (§6.6) sends GOODBYE `IDLE_REAPED` (0x010C). It is distinct from `DEADMAN_TIMEOUT` on purpose: `DEADMAN_TIMEOUT` now means ONLY a §11.3 deadman firing on a source-owning session. Reaping a dark viewer is housekeeping with zero motion consequence, and before the code existed it was reported with the motion-safety code in every log and client.
+
 ---
 
 ## 5. Wire Format *(normative)*
@@ -234,6 +242,17 @@ offset  size  field     notes
 One SlopSync frame maps to exactly one transport datagram/message where the binding allows (§13); `len` makes frames self-delimiting on byte-pipe bindings.
 
 **`max_frame` is header-inclusive**: it bounds `8 + len`. Per-binding defaults are in the registry (`max_frame_ws`, `max_frame_espnow`, `max_frame_ble`, `max_frame_serial`; Appendix G). A hub advertises its own value in WELCOME `limits.max_frame` and MAY advertise less than its binding permits; it MUST NOT advertise more. A frame exceeding the negotiated maximum is answered with NACK `FRAME_TOO_LARGE` (if a session exists) and discarded.
+
+**What `header.channel` carries, per frame type** *(normative routing — previously discoverable only by reading the reference implementation)*:
+
+| Frame types | `header.channel` |
+|---|---|
+| HELLO, WELCOME, SUBSCRIBE, UNSUBSCRIBE, PUBLISH, GRANT, NACK, GOODBYE, PING, PONG, CLOCK, PROBE, PROBE_REPORT, PAIR_REQ, PAIR_GRANT, AUTH, HUB_SIG, CATALOG_READY, BLOB_REQ, ACKMASK, BEACON | `0x0000` (session-scoped). Any addressing rides the payload — NACK's `channel_id` (15), BLOB_REQ's `blob` (38) sub-map |
+| STATE, STREAM, INTENT, ECHO, EVENT | the **target channel id** |
+| BLOB_CHUNK | the id of the channel whose blob it carries (the `catalog` channel for namespace 0) |
+| ESTOP | not applicable — the §5.5 fixed 12-byte layout has no conventional header |
+
+INTENT and ECHO *also* carry `channel_id` (15) inside the CBOR payload; the header copy is redundant-but-authoritative routing — the two name the same channel, and the header is what routes.
 
 ### 5.2 Frame type registry
 
@@ -267,6 +286,8 @@ STATE and STREAM payloads are **packed little-endian structs**. There is no enco
 **STREAM sample layouts MUST NOT contain string fields.** The motion hot path never pays for text.
 
 **Append-only evolution rule:** a layout, once released, may only grow at the tail. Readers MUST parse the prefix they know and ignore trailing bytes; writers MUST NOT reorder, resize, or remove released fields. Consequence: a constrained client compiled against catalog etag *E* still reads every field it knows from a hub whose catalog moved to *E′* by appending — the etag check (§8.5) then decides *policy* (warn/degrade), not parseability. Removing or changing a field requires allocating a **new channel id** and retiring the old one, which keeps its id forever (§4.4).
+
+**Explicit field width (forward decodability).** A layout field MAY carry `size` (catalog key 18) — the field's packed width in **bytes**, stated explicitly. Decoders MUST prefer the declared size over the type-derived width; an unknown TYPE with a declared SIZE is then a **skippable hole** rather than a decode wall. Without it, the first registry-added packed type strands every existing client at the first field that uses it: later offsets become unknowable and the entire layout tail goes dark — both shipped generic clients independently carried the identical defensive truncation, which is why this key exists. For known types the declared width MUST equal the type-derived width; conformance checks the agreement, and a mismatch is a catalog-authoring error, never a runtime override.
 
 **STREAM bundle payload layout** (applies to every STREAM channel; the catalog defines only the per-sample struct):
 
@@ -351,10 +372,10 @@ Conformance evidence for this section is fuzzing, not vectors (§17.4).
 
 ### 6.2 HELLO (client → hub)
 
-CBOR map. Required: `proto_ver` (1), `client_kind` (2), `client_name` (3), `instance_id` (4). Optional: `token` (5), `catalog_etag` (8) — the etag the client has cached — `subscriptions` (10) and `publishes` (11) wish-lists so simple clients complete setup in one round trip, and `trust` (39).
+CBOR map. Required: `proto_ver` (1), `client_kind` (2), `client_name` (3), `instance_id` (4). Optional: `token` (5), `catalog_etag` (8) — the etag the client has cached — `subscriptions` (10) and `publishes` (11) wish-lists so simple clients complete setup in one round trip, `trust` (39), and `deadman_wish_ms` (44) — the requested deadman window (§11.3).
 
 - `subscriptions` entries are `{channel_id, rate_hz, priority}`.
-- `publishes` entries are `{channel_id, rate_hz, burst?}`. A c2h STREAM producer has no subscription priority; `burst` is the token-bucket capacity in samples (§10.5).
+- `publishes` entries are `{channel_id, rate_hz, burst?, curve_family?}`. A c2h STREAM producer has no subscription priority; `burst` is the token-bucket capacity in samples (§10.5); `curve_family` (45) declares a segment stream's smoothness class (§9.6).
 - `trust` (39) is the optional identity/authenticity sub-map. In HELLO it may carry `client_ver` (1), `client_nonce` (2, 8 bytes of client entropy), and `sig_request` (3). **A client that omits `trust` entirely is on the supported floor**: bearer token, zero crypto, the v1-draft handshake cost unchanged.
 
 **Publication wish validation.** The hub validates each `publishes` wish against the catalog: the channel MUST exist, be class STREAM, be direction c2h, and its effective `access` MUST NOT exceed the session's granted tier. A wish that fails any check is **silently omitted** from the grants — no NACK, because an unwanted publish wish is not an error. A passing wish is granted at `min(wished rate, catalog max_rate_hz)`; a channel whose granted rate resolves to ≤ 0 is not a rate-bearing publish and is omitted. Grants are echoed in WELCOME under `granted_publishes` (36). **A session may send STREAM bundles only on channels granted here or by a later PUBLISH (§6.7).**
@@ -365,7 +386,7 @@ CBOR map. Required: `proto_ver` (1), `client_kind` (2), `client_name` (3), `inst
 
 CBOR map: `proto_ver` (the served version), `session_id`, `boot_id`, `catalog_etag`, `cfg_gen`, `roles` (23 — the granted access tier: `watch` unless a valid token raises it), `limits` (22), `deadman_ms` (24) and `deadman_policy` (25) as applied to this session, `nonce` (29 — 8 bytes, used by a subsequent PAIR_REQ *and* by token-proof presentation), `grants` (35), optionally `granted_publishes` (36), `identity` (37), and optionally `trust` (39).
 
-- `limits` (22) carries at minimum `max_frame` (1), `max_subscriptions` (2), and `retained_pending` (3) — the count of retained STATE pushes that will follow.
+- `limits` (22) carries at minimum `max_frame` (1), `max_subscriptions` (2), and `retained_pending` (3) — the count of retained STATE pushes that will follow — plus `max_subscriptions_per_frame` (4), the most wishes one SUBSCRIBE or HELLO frame may carry (§6.7).
 - `identity` (37) carries `product` (1), `fw_version` (2), `hub_name` (3), and an optional device-defined `info` map (4) whose keys the protocol never interprets. **This is the only wire home for hub identity.** A hub SHOULD carry it; clients MUST tolerate its absence per §4.3, and MUST NOT make connection or operation conditional on it. Reference-implementation status: §18-16.
 - `trust` (39) in WELCOME may carry `pairing_modes` (8, a bitmask of the association modes this hub offers **right now**, re-evaluated per session so a transient window is advertised only while open) and `welcome_sig` (5) where the hub can sign without stalling (§12.5).
 - `granted_publishes` is omitted entirely when no publish wish was granted.
@@ -419,7 +440,7 @@ There are **two liveness regimes, deliberately different**:
 | Regime | Applies to | Trigger | Consequence |
 |---|---|---|---|
 | **Deadman** (§11.3) | a session that **owns an active motion source** | silence beyond `deadman_ms` (default 600, clamp 250–5000, negotiated at WELCOME) | the source's **loss policy** fires; safety latches with `cause=deadman`; ownership released |
-| **Idle reaping** | every other session | silence beyond `idle_reap_multiplier` × `ping_interval_idle_ms` | the session SHOULD be reaped (GOODBYE if the transport still functions). **No motion consequence** — it owned nothing |
+| **Idle reaping** | every other session | silence beyond `idle_reap_multiplier` × `ping_interval_idle_ms` | the session SHOULD be reaped (GOODBYE `IDLE_REAPED` if the transport still functions — §4.5, never `DEADMAN_TIMEOUT`). **No motion consequence** — it owned nothing |
 
 A hub SHOULD implement idle reaping. Without it a watch-tier session that goes dark holds a slot until reboot, and there is no other pressure to release it.
 
@@ -428,6 +449,8 @@ Note the sparse-sender case this design serves on purpose: a client that emits a
 ### 6.7 Mid-session subscription and publication management
 
 - **SUBSCRIBE** (`0x06`, c2h): CBOR `subscriptions` array as in HELLO; answered by GRANT per entry, or NACK carrying the offending `channel_id`. Rate or priority changes are a re-SUBSCRIBE of the same channel — the new grant replaces the old one. Subscriptions are capped per session (`max_subscriptions_per_session`, NACK `SUB_LIMIT`).
+
+  **An unacceptable SUBSCRIBE is answered, never dropped** (§4.5). A hub that cannot process a SUBSCRIBE frame **as a whole** — undecodable, or carrying more wishes than `max_subscriptions_per_frame` (16) — MUST answer NACK `SUBSCRIBE_REJECTED` (0x0204) with the reason in `detail`; silence is non-conformant. Per-channel refusals are unchanged: an individually unacceptable wish keeps its per-wish code (`UNKNOWN_CHANNEL`, `ACCESS_DENIED`, `SUB_LIMIT`, …) while the remaining wishes grant normally. The per-frame bound is advertised in WELCOME `limits` key 4, so a client sizes its batches from the wire rather than by binary-searching a live machine. **Ruling, recorded:** mixing STATE and EVENT subscriptions in one SUBSCRIBE is **legal** and always was — the wholesale drop that motivated this rule was the then-undeclared 16-wish cap, not the mix. *Conformance:* a negative vector (17 wishes → assert the NACK) exists as test SI-21. Silence here is uniquely expensive: the session completes HELLO/WELCOME, reaches LIVE, looks healthy, and zero STATE ever arrives — it presents as a client rendering bug.
 - **UNSUBSCRIBE** (`0x07`, c2h): array of `channel_id`.
 - **PUBLISH** (`0x18`, c2h): CBOR `publishes` array, the c2h counterpart of SUBSCRIBE. Adds, changes or (with rate 0) drops a publication wish mid-session, validated and clamped exactly as in §6.2 and answered with `granted_publishes` results. Without it, adding one publication required a full reconnect.
 
@@ -453,7 +476,7 @@ The `cause` recorded in the `safety` snapshot distinguishes them: `deadman` (1) 
 
 *Why this is a numbered rule (informative):* the reference implementation released ownership only from the deadman pump, which requires an occupied slot. GOODBYE, rude detach, both evictions and same-slot re-HELLO all reset the slot first — so a departed streamer's dead `session_id` owned the motion source **forever**, silently conflict-dropping every later client's intents and bundles until reboot. It was invisible to every test that rebooted between runs. Back-to-back sessions with no reboot in between is therefore a mandatory verification pattern for any session-lifecycle change.
 
-Codes of note: `NORMAL_CLOSURE` (clean voluntary teardown, either direction), `SESSION_EVICTED`, `DUPLICATE_INSTANCE`, `DEADMAN_TIMEOUT`, `READY_TIMEOUT`, `REBOOTING` (§9.3).
+Codes of note: `NORMAL_CLOSURE` (clean voluntary teardown, either direction), `SESSION_EVICTED`, `DUPLICATE_INSTANCE`, `DEADMAN_TIMEOUT`, `READY_TIMEOUT`, `IDLE_REAPED` (§4.5, §6.6), `BLOB_REFUSED` (§4.5, client-sent), `REBOOTING` (§9.3).
 
 ---
 
@@ -542,7 +565,7 @@ Chunked transfer is **one verb for the whole protocol** (§8.7). The catalog is 
 
 - **BLOB_REQ** (`0x1A`, c2h, CBOR): `blob` (38) selects what — for the catalog, `ns = 0` and no `store_id`/`slot`. An empty selection means "send everything"; `chunks` (27) at the top level makes it a **selective repair** request listing missing indices. **Carrying both a full request and `chunks` is MALFORMED** and MUST be rejected.
 - **BLOB_CHUNK** (`0x1B`, h2c, raw): a fixed header naming the same identity fields as `blob_keys` (namespace, store, slot, generation, `chunk_index`, `chunk_count`, `total_bytes`), followed by up to `catalog_chunk_payload` (192) bytes of the deterministic encoding. 192 fits every binding unfragmented; WS MAY carry multiple chunks back-to-back.
-- The receiver reassembles by index, requests missing indices after `catalog_chunk_gap_timeout_ms` (500 ms, SHOULD), and abandons after `frag_reassembly_timeout_ms` (5 s) total — then either retries from scratch or falls back to the static profile (§8.5). `total_bytes` lets a receiver size or refuse a transfer **before** assembling it (§5.8-1).
+- The receiver reassembles by index, requests missing indices after `catalog_chunk_gap_timeout_ms` (500 ms, SHOULD), and abandons after `frag_reassembly_timeout_ms` (5 s) total — then either retries from scratch or falls back to the static profile (§8.5). `total_bytes` lets a receiver size or refuse a transfer **before** assembling it (§5.8-1). A receiver that refuses — declared size over its reassembly budget — MUST say so: GOODBYE `BLOB_REFUSED` (§4.5), never a half-session idling toward `READY_TIMEOUT`; hubs SHOULD log the declared size alongside it.
 - **A hub MAY pace chunk emission, and MUST respect transport backpressure while doing so.** §13.1 defines a transport refusal as "not accepted right now; the caller decides retry vs drop" — for BLOB_CHUNK the hub **MUST retry**, resuming at the refused index, and MUST NOT treat the refusal as an error (no NACK, no teardown). A hub that instead emits every chunk in one synchronous burst and discards refusals silently truncates any blob longer than the binding's egress queue; that is non-conformant, and it fails invisibly because the sender sees a completed loop. Correspondingly, a **receiver MUST NOT assume a transfer arrives in one delivery**: it is bounded by `catalog_chunk_gap_timeout_ms` between chunks and `frag_reassembly_timeout_ms` overall, and by nothing else. Pacing granularity is a hub policy and is not on the wire.
 - A hub bounds concurrent transfers by its RAM; beyond that, BLOB_REQ gets NACK `BUSY`. A request naming a namespace, store or slot that does not exist gets NACK `CHUNK_UNAVAILABLE`. **One NACK answers one BLOB_REQ**, whether the request was refused up front or a resumed transfer became unservable partway (the addressed item was deleted, resized, or its `generation` moved) — never one per bad index and never one per chunk.
 - The hub MUST gate BLOB_REQ on the declaring entry's `access` exactly as it gates SUBSCRIBE.
@@ -604,6 +627,14 @@ Every layout and schema field MAY carry an annotation block. **All of it is opti
 
 `role` is a **string**, not a number, because `action.<name>` carries a device-chosen suffix no integer enum could express. Unregistered roles are legal. **Nothing is hardcoded as a requirement; roles are hardcoded as opportunities.** A client that recognizes a registered role MAY upgrade to a bespoke widget; a client that does not MUST fall back to generic rendering. Fallback is mandatory, upgrades are optional, an unknown role is never an error.
 
+Three role families were registered by the first generic clients, which found the holes by refusing to guess:
+
+- **`command.<quantity>`** names a value-bearing INTENT field whose value **is** the setpoint; `command.position` (a commanded absolute target position, in the channel's own unit) is the first member. It is deliberately distinct from `action.*`, which marks **verbs**: tagging a move's `position` field as an action would tell every generic client to draw a button where a positional control belongs. A command role generally pairs with a `telemetry.*` counterpart.
+- **`telemetry.target`** is the position the machine is currently *commanded* to, as opposed to `telemetry.position`, where it measurably is. Lag is deliberately **not** a role: it is `target − position`, computed client-side — registering a third field for a subtraction would invite two sources of truth for one number.
+- **`plan.*`** names motion-plan telemetry, the segment in flight: `plan.start`, `plan.end`, `plan.current`, `plan.velocity`, `plan.elapsed`, `plan.duration`, `plan.style`. The inclusion test is "would a *different* machine's motion planner have this concept?" — the same test that keeps device internals out of `pattern.*`.
+
+**Role cardinality.** A registered role SHOULD appear on at most one field per catalog. A client that meets duplicates binds the **first in catalog order** — a deterministic, conformant tiebreak rather than a client-local guess.
+
 **Categories** organize the surface. Entry-level `category` values 0–127 are spec-registered with a canonical order (`device`, `user`, `limits`, `tuning`, `diagnostics`) so placement, iconography and translation are consistent across every hub a client ever meets; 128–255 are device-defined and MUST carry `category_label`, rendered as additional tabs after the spec set. **A category spans channels** — two channels in the same category merge into one tab, which is the answer to a category outgrowing one 242-byte snapshot (about 58 f32 or 115 u16 fields, inclusive of mask bytes).
 
 **Dynamic enablement.** "Greyed out right now" depends on live machine state and therefore cannot live in static metadata at all. A settings STATE channel carries one or more `bitfield8` fields tagged `meta.enabled_mask`; bit *i* gates the *i*-th setting-annotated field of that layout. On-change, retained, conflated — every client greys from the same ground truth.
@@ -628,6 +659,8 @@ This is spec text, not wire. A client claiming generic-settings support MUST:
 8. render an unknown role, flag, category, or annotation key **generically** — fallback is mandatory.
 
 A phone renders a range as a slider, a remote as a click-wheel value, a plugin side panel as a numeric box. Same bytes, three honest UIs.
+
+**Index 0 of an op table is never an operation.** For a `schema` select field carrying an `action.*` role, wire value 0 is NOT an operation unless the governing op table registers an op at 0 — registry op tables number from 1, so index 0 exists only to keep `options` array-index-aligned and carries a filler label. Clients MUST NOT render index 0 as an actionable choice. Gating index 0 with `option_access` at a high tier remains RECOMMENDED defense-in-depth, but cannot be the whole answer: `AccessLevel` tops out at `configure`, which real admin sessions actually hold, so there is no "level nobody holds" to gate with — the rendering rule is what closes it.
 
 ---
 
@@ -665,7 +698,7 @@ STREAM channels carry timestamped sample bundles (§5.4) in either direction: te
 
 INTENT is the only way a client changes anything. CBOR: `channel_id` (15) naming an INTENT-class channel, `intent_id` (18), `value` (20) per the channel's `schema`, optional `precondition` (30), optional `takeover` (32).
 
-- **ECHO is mandatory and truthful.** The hub replies ECHO `{intent_id, applied (19), cfg_gen}` — or NACK. `applied` carries the **post-clamp values actually in effect**, which MAY differ from what was requested. The client's shadow updates from ECHO and the ensuing STATE broadcast, **never from its own request**. All *other* subscribers learn of the change via STATE; ECHO goes only to the sender.
+- **ECHO is mandatory and truthful.** The hub replies ECHO `{intent_id, applied (19), cfg_gen}` — or NACK. `applied` carries the **post-clamp values actually in effect**, which MAY differ from what was requested. The client's shadow updates from ECHO and the ensuing STATE broadcast, **never from its own request**. All *other* subscribers learn of the change via STATE; ECHO goes only to the sender. **ECHO is key-complete over what was applied:** `applied` carries every key from the intent's `value` map that the hub applied; a key **absent** from the ECHO means NOT applied, and the client MUST fall back to reported truth (the ensuing STATE) for it. This is what makes "silently accepted" and "silently ignored" distinguishable on every hub.
 - **Idempotency:** `intent_id` is session-scoped, client-assigned, monotonically increasing. The hub keeps a ring of the last `idempotency_ring_depth` (32) `id → ECHO` pairs per session; a duplicate id re-emits the stored ECHO and MUST NOT re-apply. The ring dies with the session (§6.8) — which is safe *because*:
 - **Absolute values only.** Intent schemas MUST express target state ("set speed 400"), never operations on current state ("add 20"). A client wanting an increment computes the absolute target from its shadow and MAY guard against races with `precondition` = expected `cfg_gen`; mismatch → NACK `CONFLICT`, client re-reads and retries. This one rule is what makes the reconnect story (§6.8) sound and two-operator racing merely annoying instead of corrupting.
 - **Rate limiting:** hub-enforced per session, `intent_ingress_default_per_s` (50) by default; excess → NACK `RATE_LIMITED`. Generous for UIs, hostile to accidental loops. **Role-exempt safety ops are rate-limited too** (§11.2).
@@ -708,6 +741,8 @@ This section states, as protocol obligation, where kinematic work lives. It exis
 **Limits discovery is for display and optional pre-adaptation.** A hub SHOULD tag its kinematic ceilings and window bounds with `field_roles` (`limit.*`, `window.*`) so a client can find them on *any* hub without hardcoding a channel number. But the normative word for a client acting on them is **MAY, never SHOULD**: a client MUST NOT be required to reason about feasibility in order to produce good motion. Limits are shown to the operator; the machine's job is to play back whatever it is fed as well as it possibly can.
 
 Note in particular that knowing `vmax/amax/jmax` is **not sufficient** to predict feasibility, because peak-versus-mean depends on the shape the hub plans. A minimum-jerk quintic over a chord `d` in time `T` peaks at `1.875·d/T` in velocity — a client applying the naive `d/T ≤ vmax` test concludes a stroke is fine when the profile actually needs 1.875× that. This is precisely why clause 4 exists and why clause 2 puts the work on the hub.
+
+**Curve family declaration (segment streams).** A segment-class publish MAY declare a `curve_family` (key 45; registry `curve_families`: 0 `unspecified`, 1 `c1_cubic`, 2 `c2_quintic`, 3 `step`) on its `publishes`/`granted_publishes` entry map. The declaration rides HELLO **and** PUBLISH, so a sender switching interpolators mid-session renegotiates without dropping the stream. It exists because `{target, duration, end_velocity}` uniquely determines a cubic — a segment stream is a *complete* encoding of the sender's curve — but only if both ends agree on the smoothness class: a C2 quintic cannot reproduce a C1 cubic across a knot, because the script's acceleration genuinely steps there, and smoothing that corner erases something the author put there on purpose. The grant echo carries the **EFFECTIVE** family — the declaration after the machine's own curve policy — so a client can distinguish honoured from downgraded. The machine override outranks the declaration; `unspecified` MUST behave exactly as pre-declaration behaviour, so the key is purely additive; an **unknown** family value is treated as `unspecified`, never parroted back. **No clamping semantics are implied by the family** — overshoot, feasibility and window legality stay the machine's existing machinery.
 
 **Machine-side handoff sanity.** A hub that accepts an end-velocity with a scheduled successor SHOULD bound it against **both** adjoining chords, not just the current one: a pathological handoff is typically sane relative to its own span and absurd relative to the next. The reference bound is `|end_vel| ≤ k · min(|chord_in|, |chord_out|)` with `k = 1.5` (the shape-preserving value), where `chord_in` is measured from the machine's **actual** position rather than the sender's geometry. Every bounded handoff SHOULD be surfaced — a counter, a log line, and an EVENT — so a client can *see* its content being reshaped. **HONESTY CLAUSE (H11):** this guard is lookahead-bounded. It can only act when the successor is already scheduled, i.e. when the current segment is shorter than the client's scheduling lookahead; a segment with no successor in hand is accepted unchanged, deliberately, because guessing a chord the hub does not have would trim well-behaved senders. The hub's own legality checks remain the backstop. See §18.
 
@@ -823,6 +858,7 @@ They are latched **modes**, not stop edges, and deliberately have no event kind:
 The deadman binds to the **active motion source**, not to sessions in general (§6.6 gives the other regime).
 
 - Every session that owns an active source has a deadman window: `deadman_ms`, default 600, clamped to `[deadman_min_ms, deadman_max_ms]` = 250–5000, negotiated at WELCOME. Silence beyond the window — no frame of any kind, §6.6 — fires the source's **loss policy**.
+- **The window is negotiable; the policy is not.** HELLO MAY carry `deadman_wish_ms` (44). The hub clamps the wish into `[deadman_min_ms, deadman_max_ms]` — a hub MAY clamp tighter — and the APPLIED value is echoed on WELCOME `deadman_ms` (24), which was already the echo: post-clamp ground truth, zero new response plumbing. This negotiates **when** the deadman fires, never **what** it does — the loss policy above is untouched. It exists because browsers throttle background-tab timers: a client that *knows* its liveness cadence is coarse could not previously ask for a window it can actually honour, and either hacked around eviction or flooded PINGs.
 - **Initiator-bound sources** (a motion stream, a manual jog, a live remote): loss policy default **STOP** (decel). The machine must not continue executing a stream whose author is gone.
 - **Hub-autonomous sources** (a pattern generator running on the hub): the generator runs *on the hub*; the vanished client was merely the finger that pressed start. Default policy **continue**, with ownership released so any authorized session may now stop, adjust, or take over. Configurable to STOP per hub setting. This is a deliberate product decision: a phone screen-lock must not interrupt a self-driving session, while a vanished *streamer* must stop motion in under a second.
 - Deadman firing latches **STOP** (not ESTOP) with `cause = deadman`, and releases source ownership (§11.4).
@@ -1023,7 +1059,7 @@ The ESP-NOW line is the **normative floor**: `min_transport_payload` = 242 comes
 
 ### 13.2 WebSocket
 
-Subprotocol **`slopsync.v1`** in the upgrade handshake — this is version negotiation for free, and it lets a legacy protocol coexist on a different path or subprotocol during migration. One SlopSync frame = one WS **binary** message; no batching at the WS layer, since bundles already amortize. Text messages on a `slopsync.v1` socket are a protocol error (close 1002). The server is the hub. RECOMMENDED endpoint: `/slopsync` on the primary HTTP port.
+Subprotocol **`slopsync.v1`** in the upgrade handshake — this is version negotiation for free, and it lets a legacy protocol coexist on a different path or subprotocol during migration. **The server MUST perform RFC 6455 subprotocol selection and echo `slopsync.v1` in the upgrade response.** Strict clients hard-fail without the echo — two independent WS server libraries had to be patched to comply, which is why this is a sentence rather than an assumption. One SlopSync frame = one WS **binary** message; no batching at the WS layer, since bundles already amortize. Text messages on a `slopsync.v1` socket are a protocol error (close 1002). The server is the hub. RECOMMENDED endpoint: `/slopsync` on the primary HTTP port.
 
 ### 13.3 ESP-NOW
 
@@ -1132,7 +1168,7 @@ NACK (CBOR): `code` (16) from the registry's ranged taxonomy, optional `channel_
 - **`detail` is diagnostic, never required for machine handling.** A sender truncates it to `nack_detail_max_bytes` (48); an over-length detail MUST NOT cause the NACK itself to vanish (§5.8-4).
 - **NACK never closes the session by itself; GOODBYE does.**
 
-**GOODBYE draws its `code` from the same `nack_codes` table.** A separate code space was considered and rejected: §4.3's unknown-code handling is a *range* fallback, and two overlapping spaces would make the range of an unknown code ambiguous, so a forward-compatible receiver could not classify it. Codes usable as a GOODBYE reason are marked as such in the registry: `NORMAL_CLOSURE`, `SESSION_EVICTED`, `DUPLICATE_INSTANCE`, `DEADMAN_TIMEOUT`, `READY_TIMEOUT`, `REBOOTING`, `UNAUTHORIZED`.
+**GOODBYE draws its `code` from the same `nack_codes` table.** A separate code space was considered and rejected: §4.3's unknown-code handling is a *range* fallback, and two overlapping spaces would make the range of an unknown code ambiguous, so a forward-compatible receiver could not classify it. Codes usable as a GOODBYE reason are marked as such in the registry: `NORMAL_CLOSURE`, `SESSION_EVICTED`, `DUPLICATE_INSTANCE`, `DEADMAN_TIMEOUT`, `READY_TIMEOUT`, `IDLE_REAPED`, `REBOOTING`, `UNAUTHORIZED`, and the client-sent `BLOB_REFUSED` (§4.5). `DEADMAN_TIMEOUT` means only a §11.3 deadman firing on a source-owning session; a reaped idle viewer says `IDLE_REAPED`.
 
 ### 16.2 Observability
 
@@ -1208,10 +1244,11 @@ These are real, found during implementation, and stated so nobody rediscovers th
 13. **Cleartext transport bounds everything** (H4). Every trust mechanism here is designed to be useful without confidentiality — which is why the hub signature works without secrecy and why proof presentation exists — but the ceiling is "honest LAN" until a secure transport lands in v2.
 14. **One relay hop only** (§14.3).
 15. **Preset/store device backends are optional and largely unimplemented.** The blob verb, the STORE class and the trust-ledger store are specified and implemented; general device preset stores are a specified mechanism with no reference device backend yet.
-16. **WELCOME `identity` (37) has no reference codec yet.** The key and its sub-key space are registered and §6.3 specifies them, but the reference WELCOME encoder does not emit them and no reference hub populates them. A client MUST therefore be able to run with no hub identity at all — which §4.3 already required, but which is worth stating plainly because §4.2-4 makes this the *only* home for `fw_version`. Until it ships, "what firmware is this machine running" has no in-band answer.
+16. **WELCOME `identity` (37) is live for `product`/`fw_version`/`hub_name`; the `info` sub-map is not.** RFC-016(a) landed: the reference codec encodes the identity sub-map and the reference hub populates `product` and `fw_version`, so "what firmware is this machine running" now HAS an in-band answer at its one wire home (§4.2-4, §6.3). The device-defined `info` sub-map (sub-key 4) remains unimplemented — decoders skip it per §4.3. A client MUST still tolerate a hub with no identity at all; §6.3's tolerance rule is unchanged.
 17. **The `session-roster` channel is allocated and described but not built.** No reference catalog builder declares it, so the roster snapshot of §12.7 — and with it the "a late joiner learns existing sessions' names" property that offsets §9.4's no-replay rule — is specification, not shipped behavior. The session-events channel and the administration ops around it are implemented; the roster STATE they complement is not.
 18. **Action-intent resets have vocabulary but no reference verb.** `action.<name>` and `meta.reset_gen` are registered and specified (§9.3); no reference hub exposes a reset as an INTENT yet, so the observable-reset rule is untested in the field.
 19. **Registry `ref:` fields lag this document's numbering.** Inserting §6.4 (readiness) and splitting §12.2 into §12.3–§12.5 shifted several pointers: entries citing §6.4/§6.5/§6.6/§6.8 mean §6.5/§6.6/§6.7/§6.9, and entries citing §12.2 for pairing, token presentation or signing mean §12.3, §12.4 and §12.5 respectively. Values are unaffected (§5.7). Correcting the `ref:` strings requires regenerating the constants header, so it is a follow-up commit rather than part of this document.
+20. **`curve_family` `step` (3) is declarable but has no reference renderer.** The value is registered and a sender may declare it (§9.6), but the reference engine has no step renderer yet — a `step` declaration currently renders as quintic, and the reference delegate's grant echo therefore reports `c2_quintic` for a `step` wish even under a follow-client policy: the echo is what the machine will *do* (§9.6's effective-family rule applied all the way down), never a claim about a renderer that does not exist. When a step renderer lands, only the delegate's mapping changes and declaring clients see the echo flip to `step`.
 
 ---
 
@@ -1285,13 +1322,15 @@ These are real, found during implementation, and stated so nobody rediscovers th
 | 19 | `applied` | map | 41 | `intent_seq` | uint |
 | 20 | `value` | any | 42 | `burst` | float |
 | 21 | `timestamp` | uint | 43 | `reboot_in_ms` | uint |
-| 22 | `limits` | map | | *44–63 free* | |
+| 22 | `limits` | map | 44 | `deadman_wish_ms` | uint |
+| | | | 45 | `curve_family` | uint |
+| | | | | *46–63 free* | |
 
 **Scoped sub-map key spaces (§5.3).** Each is local to its own map: key 1 of `blob` and key 1 of `trust` are unrelated, and neither is `proto_ver`.
 
 | Parent | Sub-keys |
 |---|---|
-| `limits` (22) | 1 `max_frame`, 2 `max_subscriptions`, 3 `retained_pending` |
+| `limits` (22) | 1 `max_frame`, 2 `max_subscriptions`, 3 `retained_pending`, 4 `max_subscriptions_per_frame` |
 | `probe_result` (26) | 1 `bytes_received`, 2 `span_ms`, 3 `loss_pct_x100`, 4 `rtt_ms` |
 | `identity` (37) | 1 `product`, 2 `fw_version`, 3 `hub_name`, 4 `info` (device-defined map) |
 | `blob` (38) | 1 `ns`, 2 `store_id`, 3 `slot`, 4 `generation`, 5 `name`, 6 `kind`, 7 `payload`, 8 `chunk_index`, 9 `chunk_count`, 10 `total_bytes` |
@@ -1396,6 +1435,7 @@ The fixture's coverage gaps at v1.0 are stated in §18-7 rather than implied by 
 | `catalog_max_entries` | 256 | §8.1 |
 | `catalog_max_entry_bytes` | 4096 | §8.1 |
 | `max_subscriptions_per_session` | 64 | §6.7 |
+| `max_subscriptions_per_frame` | 16 | §6.3, §6.7 |
 | `desc_max_bytes` | 128 | §8.8 |
 | `option_label_max_bytes` | 24 | §8.8 |
 | `nack_detail_max_bytes` | 48 | §16.1 |

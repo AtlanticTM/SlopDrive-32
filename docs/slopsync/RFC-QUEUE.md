@@ -747,20 +747,21 @@ the copy a third-party implementer reads.
 
 ## RFC-016 — In-band hub identity; capabilities = catalog introspection
 
-- **Status:** **PARTIALLY LANDED (v1.0) — one half is DEFERRED, stated
-  honestly.** (b) LANDED and normative: capability discovery IS catalog
-  introspection (SPEC §6.3) — a feature exists iff its channels exist, and there
-  is no parallel capability list to drift. (c) LANDED: `fw version` is struck
-  from 0x0006's registry note, so identity has exactly one home.
-  **(a) DEFERRED: the WELCOME `identity` keys are REGISTERED (cbor key 37 plus
-  the `identity_keys` sub-space) and SPECIFIED (SPEC §6.3) but NOT
-  IMPLEMENTED** — `wire/messages/welcome.hpp` encodes eleven fixed keys plus
-  `granted_publishes` and `trust`, there is no identity sub-map codec beside
-  `trust_submap.hpp`, and no hub populates one. Consequence, recorded because it
-  is load-bearing: since SPEC §4.2-4 makes WELCOME the ONLY home for
-  `fw_version`, "what firmware is this machine running" currently has NO in-band
-  answer at all. SPEC §18-16. Landing it is additive — key 37 sorts before 39,
-  so the existing encoder ordering already has room.
+- **Status:** **LANDED IN FULL (a+b+c; (a) closed 2026-07-27).** (b) LANDED and
+  normative: capability discovery IS catalog introspection (SPEC §6.3) — a
+  feature exists iff its channels exist, and there is no parallel capability
+  list to drift. (c) LANDED: `fw version` is struck from 0x0006's registry
+  note, so identity has exactly one home. **(a) LANDED with the RFC-030..040
+  batch, promoted off the deferred ledger by the operator's HTTP ruling** ("a
+  device does not need to support HTTP at all" — and fw_version had NO in-band
+  answer, the poster child for a feature stranded in HTTP-land):
+  `welcome.hpp` gained the `IdentityInfo` codec on key 37
+  (product/fw_version/hub_name, emit-only-when-set so an identity-less
+  WELCOME stays byte-identical), `Hub::setIdentity()` is the additive API
+  (caller-owned rodata strings, no heap), and the firmware populates
+  `("slopdrive-32", FIRMWARE_VERSION, "")`. Test SI-24. Honest remainder: the
+  `info` (key 4) device-defined extras sub-map is still codec-less — decoders
+  skip it per §4.3; register interest before building it.
 - **Origin:** slopsim spec-gap ledger (`README.md:465-467`);
   `SlopSync.cs:395-397` labels devices `"boot 0x…"` because fw version
   exists only in mDNS TXT; `/api/capabilities` audit — feature gates and
@@ -1644,7 +1645,21 @@ operator ruling — it is at the bottom, alone.*
 
 ## RFC-030 — Curve family on the stream: say WHICH spline the segments describe
 
-- **Status:** Draft — the wire half of a machine-side setting that already ships.
+- **Status:** **LANDED (2026-07-27)** — as a **publishes-wish key, not the
+  stream_meta INTENT** (operator-approved variant: RFC-013's PUBLISH frame
+  already provides mid-session renegotiation, deleting the RFC's only argument
+  against the wish-key home). Shipped: registry `curve_families` table + CBOR
+  key 45 on publishes/granted_publishes entries; the GRANT echoes the
+  **EFFECTIVE** family via `HubDelegate::effectiveCurveFamily` (answers M-2's
+  "honoured vs silently downgraded" open question — a ForceC1/C2 machine
+  reports the forced family, never parrots); `slopmotion::Command::
+  client_curve_family` resolves `CurvePolicy::FollowClient` at last (c1_cubic
+  → cubic reconstruction; everything else = pre-RFC quintic); firmware stamps
+  each pacing-ring segment with its session's granted family. Test SI-23.
+  Honest scope notes: `step` (3) is declarable but renders as quintic (no
+  step renderer exists); the MFP plugin's declaration + WireSelfTest lockstep
+  needs its mandatory twice-back-to-back bench run before the plugin side
+  counts as verified.
 - **Origin:** Operator, 2026-07-25/27. The `main`-branch firmware treated TCode
   v4 as the gold standard because it passed an interval `I` and a slope `G`
   alongside each segment, letting the device reconstruct the sender's
@@ -1701,9 +1716,12 @@ operator ruling — it is at the bottom, alone.*
 
 ## RFC-031 — Servo register configuration: the last HTTP writer
 
-- **Status:** Draft — DEFERRED BY THE OPERATOR, recorded so the shape is decided
-  before anyone needs it. *"I don't use the servo tuning at the moment, we'll
-  re-introduce later as it was always broken lol."*
+- **Status:** Draft — feature PARKED, mechanism REQUIRED. Original deferral
+  (operator, M5c): *"I don't use the servo tuning at the moment, we'll
+  re-introduce later as it was always broken lol."* **Amended by operator
+  ruling 2026-07-27:** register read/write-STYLE communication is a shape
+  SlopSync must support. The servo pane itself stays parked, but item 5 below
+  is accepted-in-principle and waits only for a consumer.
 - **Origin:** M5c (fw 2.1.72). The ruling is **"no controls outside SlopSync,
   HTTP is read only"**, and `POST /api/servo` was the last writer standing after
   the motion, mode, tuning and admin surfaces moved. It is retired (410 Gone)
@@ -1735,6 +1753,33 @@ operator ruling — it is at the bottom, alone.*
      not advertise these channels at all. Their ABSENCE is the honest answer to
      "can this device configure a servo?", exactly as 0x0087 power already
      works.
+  5. **(Operator ruling 2026-07-27) Raw register access is a bounded
+     DIAGNOSTIC plane, distinct from settings.** Item 1 covers KNOWN tunables;
+     this covers the engineering case item 1 cannot: reading or poking an
+     arbitrary register during bring-up or fault hunting. Shape:
+     - A device INTENT channel at `configure` access: op-select
+       `{read, write}` + `addr u16` + `value u16`. The catalog's `addr`
+       min/max is the RENDERING hint; the hub is the referee for the real
+       (possibly disjoint) whitelist ranges via NACK `INVALID_VALUE` —
+       exactly RFC-009.6, no new mechanism. A generic client already renders
+       this: op-select + two bounded numeric boxes.
+     - **Results ride a paired EVENT channel `{addr, value, status}`, never
+       the ECHO — structurally, not stylistically.** The hub emits ECHO the
+       moment `applyIntent` returns (§9.3 path, `hub_impl.hpp`), but the bus
+       transaction is QUEUED to servoBusTask (`ServoModbus::queueWrite`
+       already exists) and the wire has not been touched yet when that echo
+       leaves. So the ECHO honestly means "accepted and queued"; the EVENT
+       carries the bus truth when the transaction completes. Making the
+       delegate block on a Modbus round trip inside the hub task's 5 ms tick
+       is the alternative, and it is prohibited by construction.
+     - Writes report the post-READBACK value in the EVENT (write, then read
+       the register back, publish what the hardware answered) — the
+       ground-truth doctrine extended to a plane the settings shadow cannot
+       reach.
+     - No new registry vocabulary is needed; this is a spec AUTHORING PATTERN
+       (an appendix worked example), not a new channel class. It is
+       peripheral-agnostic by design: any register-file device a hub fronts
+       (Modbus today, an I2C peripheral tomorrow) reuses the same shape.
 - **Compatibility:** Additive when it lands. `POST /api/servo` is ALREADY gone
   as of fw 2.1.72 — this RFC does not remove anything, it describes what
   replaces it. Until then the servo surface is read-only (`GET /api/servo`
@@ -1744,7 +1789,12 @@ operator ruling — it is at the bottom, alone.*
 
 ## RFC-032 — `command.*` and `telemetry.target`: make commanded motion discoverable
 
-- **Status:** Draft. Found by building a generic client, not by reasoning.
+- **Status:** **LANDED (2026-07-27)** as written. Registry `field_roles` gained
+  `command.position` (opening the `command.<quantity>` family) and
+  `telemetry.target`; the device catalog tags `position` on 0x0100 and
+  `tgt_10um` on 0x0080. Client side needs zero code (`model/settings.js`
+  already indexes roles) — live verification of the rail tape + commanded/lag
+  numerals is on the WebUI agent (WEBUI-HANDOFF-RFC-BATCH.md item 2).
 - **Origin:** WebUI rebuild, 2026-07-27. The rebuilt page renders entirely from
   the catalog and is forbidden from naming a channel id. When the rail widget
   went to wire up tap-to-move it found nothing it could bind to and — correctly —
@@ -1802,8 +1852,17 @@ operator ruling — it is at the bottom, alone.*
 
 ## RFC-033 — An unacceptable SUBSCRIBE MUST be answered, never silently dropped
 
-- **Status:** Draft. **This cost real debugging time twice in one night and is
-  the most valuable entry here.**
+- **Status:** **LANDED (2026-07-27).** Root cause found in review: BOTH night
+  failures were one bug — `handleSubscribe`'s silent `return` on decode
+  failure, hit through the never-registered 16-wish decoder cap
+  (`kSubscribeMaxWishes`); the "mixed STATE+EVENT" theory was a red herring
+  (the concatenated list simply exceeded 16). Shipped: NACK
+  `SUBSCRIBE_REJECTED` (0x0204) with reason in `detail`;
+  `max_subscriptions_per_frame` (16) registered and advertised in WELCOME
+  `limits` key 4; item 4's ruling recorded — **mixing classes is LEGAL and
+  always was**; negative vector SI-21 (17 wishes → NACK, then a legal
+  subscribe still grants). The probe's subscribe-everything case rides the
+  tooling pass.
 - **Origin:** WebUI rebuild, 2026-07-27, live against fw 2.1.73 then 2.1.74.
 - **Problem:** A SUBSCRIBE the hub will not accept produces **nothing** — no
   GRANT, no NACK, no EVENT. The session completes HELLO/WELCOME, adopts the
@@ -1854,8 +1913,16 @@ operator ruling — it is at the bottom, alone.*
 
 ## RFC-034 — Placeholder entries in `options` lists
 
-- **Status:** Draft — small, but it produces a nonsense control on every generic
-  client.
+- **Status:** **LANDED (2026-07-27) via option 3, not option 1** — review found
+  option 1's "gate at a level nobody holds" cannot deliver: `AccessLevel` tops
+  out at `configure`, which real admin sessions hold, so a configure-tier
+  client still saw an enabled "reserved" button on 0x0009. The normative rule
+  is now: for a select field carrying an `action.*` role, wire value 0 is
+  NEVER an operation unless the governing op table defines op 0; clients MUST
+  NOT render index 0 as actionable. Strict `option_access` on index 0 stays as
+  defense-in-depth (already shipped on every device op-select). Reference
+  client swaps its English-guessing regex for the index-0 rule
+  (WEBUI-HANDOFF-RFC-BATCH.md item 5).
 - **Origin:** WebUI rebuild, 2026-07-27, seen live in the safety bar.
 - **Problem:** Op-select INTENT fields are index-aligned with their wire value,
   and every registry op table starts numbering at 1. Index 0 therefore exists
@@ -1883,7 +1950,10 @@ operator ruling — it is at the bottom, alone.*
 
 ## RFC-035 — A role vocabulary for motion-plan telemetry
 
-- **Status:** Draft — currently worked around with a documented heuristic.
+- **Status:** **LANDED (2026-07-27).** Registry `plan.*` family
+  (start/end/current/velocity/elapsed/duration/style) + all seven 0x0086
+  fields tagged. The reference client's `/plan/i` heuristic demotes to a
+  fallback-for-roleless-hubs (WEBUI-HANDOFF-RFC-BATCH.md item 3).
 - **Origin:** WebUI rebuild, 2026-07-27, building the plan-strip widget.
 - **Problem:** `0x0086 plan-strip` publishes genuinely useful data (the segment
   in flight: start/end/current normalized position, velocity, elapsed and total
@@ -1907,7 +1977,12 @@ operator ruling — it is at the bottom, alone.*
 
 ## RFC-036 — Renderability of string settings
 
-- **Status:** Draft — a conformance-tool gap, not a protocol defect.
+- **Status:** **LANDED items 1+3 (2026-07-27); item 2 (`max_len`) DEFERRED** —
+  registering an annotation nothing emits or needs yet is exactly how RFC-007
+  said registries accrete dead weight. The probe's `cat_renderable` now treats
+  str16/32/64 as renderable by type (width = the bound); the exercised fixture
+  is the SIMULATOR's divergent catalog, never the frozen mini-catalog (whose
+  etag pin a string setting would break).
 - **Origin:** Found by `tools/slopsync_probe.py` against the divergent simulator
   catalog, 2026-07-27 — the FIRST time a `str16` setting field was ever
   exercised. RFC-026 landed the packed string types and nothing had used one.
@@ -1925,6 +2000,155 @@ operator ruling — it is at the bottom, alone.*
   3. Add a string setting to the conformance fixtures so this path stays
      exercised rather than being rediscovered by the next implementer.
 - **Compatibility:** Tooling and optional-annotation only; no wire impact.
+
+---
+
+## RFC-037 — Forward-decodable packed layouts: explicit per-field width
+
+- **Status:** **PARTIALLY LANDED (2026-07-27)** — the vocabulary half: catalog
+  key 18 `size` registered (registry + catalog.cddl + SPEC), decode rule
+  specified (prefer declared width; unknown type + declared size = skippable
+  hole), client decode rule handed to the WebUI agent. **The named follow-up:
+  the reference catalog ENCODER does not emit key 18 yet** — emission is a
+  per-field byte cost the encoder should take in one deliberate pass (with the
+  conformance declared==derived check landing alongside), not a rider on this
+  batch. Until then the key is registered, decodable, and unexercised —
+  exactly the state RFC-036.3 warns about, so the follow-up carries a "add an
+  emitting fixture" obligation with it.
+- **Origin:** Grievance sweep 2026-07-27. `webui/src/core/slopsync/catalog.js:470`
+  (*"unknown packed type: offsets are unknowable past here"*) and
+  `clients/mfp-slopsync/SlopSync.cs:2859` (*"An UNKNOWN packed type makes every
+  later offset unknowable, so we stop there rather than silently mis-decoding
+  the tail"*) carry the identical defensive truncation. The probe's 0x0088
+  misread (80 B struct silently accepted an 84 B grown payload, every field
+  after the growth point read one slot early) is the hardcoded-client face of
+  the same disease.
+- **Problem:** A packed field's byte width is derivable ONLY from its `type`.
+  The moment the registry adds packed type 11, every existing client that meets
+  it must stop decoding the layout THERE — not just the unknown field, the
+  entire tail — because later offsets are unknowable. Append-only evolution is
+  the protocol's own growth mechanism, and it strands exactly the conforming,
+  catalog-decoding clients it was designed for.
+- **Proposed change:** catalog layout fields gain an explicit `size` key
+  (u8, bytes). Decoders prefer the declared size and fall back to type-derived
+  width when absent; an unknown TYPE with a declared SIZE is a skippable hole
+  instead of a decode wall. Conformance checks declared-vs-type width
+  agreement for known types (a mismatch is an authoring error). One uint per
+  field against a 4096 B entry cap is noise.
+- **Compatibility:** Additive catalog key (catalog.cddl + registry). Absent =
+  today's behaviour. This is the single highest-leverage "works everywhere"
+  change in the sweep: it makes every FUTURE registry addition non-breaking
+  for every PAST client.
+
+---
+
+## RFC-038 — Client-negotiated deadman window
+
+- **Status:** **LANDED (2026-07-27).** HELLO key 44 `deadman_wish_ms`; hub
+  clamps into the registry bounds and applies PER SESSION
+  (`HubSession::deadmanMs`, enforced by pumpDeadman); WELCOME key 24 echoes
+  the applied value exactly as it always did. Test SI-22 (over-max clamps
+  down, under-min clamps up, absent = default). The browser client's wish is
+  on the WebUI agent (handoff item 7).
+- **Origin:** Grievance sweep 2026-07-27. `webui/src/model/machine.svelte.js:341-360`
+  ("The alt-tab problem"): browsers throttle background-tab timers, PINGs stop,
+  the 600 ms deadman evicts the session — *"to the operator this reads as
+  'alt-tabbing kills the page'"* — and the only client-side remedy is a
+  `visibilitychange` reconnect hack.
+- **Problem:** The deadman window is hub-dictated. WELCOME key 24 already
+  echoes the APPLIED per-session deadman and the registry already bounds it
+  (`deadman_min_ms` 250 / `deadman_max_ms` 5000) — but HELLO carries no wish,
+  so a client that KNOWS its liveness cadence is coarse (a browser, a BLE
+  client on a slow connection interval) cannot ask for the window it can
+  actually honour. Every such client either hacks around eviction or floods
+  PINGs.
+- **Proposed change:** optional HELLO key `deadman_wish_ms`; hub clamps into
+  `[deadman_min_ms, deadman_max_ms]` (a hub MAY clamp tighter) and echoes the
+  applied value via the EXISTING key 24 — post-clamp echo, ground-truth
+  doctrine, zero new response plumbing. §11.3's loss policy is untouched: this
+  negotiates WHEN the deadman fires, never WHAT it does. A source-owning
+  session's wish is still bounded by the registry max the operator already
+  accepted.
+- **Compatibility:** One additive HELLO key. Absent = hub default = today.
+
+---
+
+## RFC-039 — Every refusal is answered (RFC-033's principle, generalized)
+
+- **Status:** **LANDED (2026-07-27), one honest asymmetry.** Codes
+  `BLOB_REFUSED` (0x0503) and `IDLE_REAPED` (0x010C) registered; idle reaping
+  now GOODBYEs with its own code (the hub_impl comment that argued against a
+  distinct code is rewritten with the counter-argument that won: observers,
+  not the client, needed the distinction). Item 3 turned out narrower than
+  drafted: a wrong-shape token already fails HELLO decode, and hub_impl was
+  ALREADY answering NACK MALFORMED there — the silent-demotion case is a
+  well-FORMED but unrecognized token, which is RFC-029's deliberate
+  admit-at-watch tripwire behaviour and stays. The asymmetry: BLOB_REFUSED is
+  a CLIENT obligation and only slopsync-js has a reassembler cap to refuse
+  with — that emission is on the WebUI agent (handoff item 8); the C++ client
+  core sizes its scratch from its own build and structurally cannot hit it.
+- **Origin:** Grievance sweep 2026-07-27, three receipts:
+  1. `webui/src/core/slopsync/catalog.js:131-137` — the client's blob
+     reassembler cap refused a grown catalog's transfer header and the session
+     *"then went LIVE WITH NO CATALOG… No error, no NACK, no dropped-frame
+     warning: a refused blob header just stops."* (RFC-015's READY_TIMEOUT
+     eventually kills the session 15 s later — and blames the client.)
+  2. `clients/mfp-slopsync/SlopSync.cs:536` — a HELLO token of the wrong
+     shape (a PIN typed where a 16 B token belongs) is silently ignored and
+     the session downgraded to viewer tier: *"Under enforcement that would
+     present as 'connects, plays nothing'."*
+  3. `lib/slopsync/hub/hub_impl.hpp:3056-3058` — idle reaping (RFC-024) has
+     no GOODBYE code of its own, so a reaped VIEWER is labelled
+     `DEADMAN_TIMEOUT` — the motion-safety code — in every log and client.
+     The comment says *"flagged rather than invented"*; this RFC invents it
+     properly.
+- **Proposed change:**
+  1. Normative umbrella sentence in SPEC §4: silence is never a conforming
+     response to a frame or transfer an implementation cannot honour — this
+     generalizes RFC-033.1 from SUBSCRIBE to the whole surface.
+  2. A client that cannot accept a declared blob (`total_bytes` over its cap)
+     MUST GOODBYE with new code `BLOB_REFUSED` rather than idle in a
+     half-session; hubs SHOULD log it with the declared size.
+  3. A HELLO carrying a token field that is PRESENT but malformed (wrong
+     length/type) is NACK'd `UNAUTHORIZED` — never silently demoted.
+     Tokenless HELLO keeps its legitimate watch-tier path; only present-but-
+     broken credentials become loud.
+  4. New GOODBYE code `IDLE_REAPED`, distinct from `DEADMAN_TIMEOUT`, so a
+     motion-safety timeout is never confused with housekeeping.
+- **Compatibility:** Two additive registry codes + normative text + small hub
+  behaviour changes. Clients ignoring the new codes see today's behaviour.
+
+---
+
+## RFC-040 — Spec says what the reference implementation knows (editorial batch)
+
+- **Status:** **LANDED (2026-07-27)** — spec text for all four rules (frame-
+  header channel table, WS subprotocol-echo MUST, ECHO key-completeness,
+  role cardinality). Zero wire numbers, as designed.
+- **Origin:** Grievance sweep 2026-07-27, receipts inline.
+- **Proposed change:**
+  1. **Frame-header channel table.** Which frame types carry
+     `header.channel == 0` vs a target channel id is normative routing that
+     exists only in the reference implementation
+     (`tools/slopsync_probe.py:33-41`: *"confirmed against the reference C++
+     impl, not spelled out explicitly in SPEC.md prose"*). SPEC §4 gains the
+     per-frame-type table.
+  2. **WS subprotocol selection is an obligation.** §13.2 names `slopsync.v1`
+     but never says the server MUST perform RFC 6455 selection and echo it —
+     two independent WS libraries (firmware's vendored ESP32Async patch, the
+     sim's IXWebSocket patch) had to be patched because strict clients
+     hard-fail without the echo. One MUST sentence.
+  3. **ECHO key-completeness.** ECHO carries every key from the intent's value
+     map that the hub applied; a key ABSENT from the ECHO means NOT applied,
+     and clients MUST fall back to reported truth for it
+     (`webui/src/model/shadow.svelte.js:114` already behaves this way —
+     codify it so "silently accepted" and "silently ignored" are
+     distinguishable on every hub).
+  4. **Role cardinality.** A registered role SHOULD appear on at most one
+     field per catalog; a client meeting duplicates binds the first in
+     catalog order, deterministically (`webui/src/model/roles.js:115` already
+     does; make the tiebreak conformant rather than client-local).
+- **Compatibility:** Editorial + conformance notes. No wire change anywhere.
 
 ---
 

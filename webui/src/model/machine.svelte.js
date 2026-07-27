@@ -53,6 +53,8 @@ export const machine = $state({
     deadmanMs: 0,
     cfgGen: 0,
     hubIdentity: null,      // RFC-016 in-band identity, when the hub sends it
+    limits: {},             // the hub's declared ceilings, from WELCOME
+    subsDropped: 0,         // channels we had to shed to fit max_subscriptions
   },
 
   /** Catalog + everything derived from it. Replaced wholesale on adoption. */
@@ -120,11 +122,12 @@ export function isLive() {
  * though no bespoke widget knows what it means. That is the difference between
  * a client and OUR client.
  */
-function subscriptionWishes(entries) {
+function subscriptionWishes(entries, maxSubs, onlyClass) {
   const wishes = [];
   for (const e of entries) {
     if (e.dir !== 0) continue;                       // h2c only; we do not publish
     if (e.cls !== CHANNEL_CLASS.STATE && e.cls !== CHANNEL_CLASS.EVENT) continue;
+    if (onlyClass != null && e.cls !== onlyClass) continue;
     // EVENTs are edge-driven; a rate on them is meaningless. On-change STATE
     // channels advertise 0 and mean it.
     const rate = (e.cls === CHANNEL_CLASS.EVENT || !e.maxRateHz)
@@ -132,7 +135,55 @@ function subscriptionWishes(entries) {
       : Math.min(e.maxRateHz, DRAW_HZ);
     wishes.push([e.id, rate, e.priority != null ? e.priority : PRIORITY.background]);
   }
-  return wishes;
+
+  // ---- RESPECT THE HUB'S SUBSCRIPTION CAP --------------------------------
+  //
+  // FIELD BUG, found by pointing this client at the real machine: it advertises
+  // 33 channels, this wanted 21 of them, and the hub's per-session cap is
+  // smaller than that. Over-subscribing did NOT earn a NACK — the SUBSCRIBE was
+  // dropped WHOLESALE, so the session went LIVE with zero grants and zero STATE,
+  // and every readout on every tab rendered `--`. It looked like a rendering
+  // bug and was a protocol-etiquette bug. The simulator hid it by advertising
+  // fewer channels.
+  //
+  // The cap is whatever the hub declared in WELCOME, so this adapts to any
+  // machine rather than hardcoding a number. When we have to drop some, drop
+  // the LEAST important: sorting by priority descending keeps safety and motion
+  // and sheds background diagnostics, which is the same ordering the hub itself
+  // uses when it sheds under congestion (SPEC 10.4).
+  const cap = (typeof maxSubs === 'number' && maxSubs > 0) ? maxSubs : wishes.length;
+  if (wishes.length <= cap) return wishes;
+  const ranked = wishes.slice().sort((a, b) => b[2] - a[2]);
+  const kept = ranked.slice(0, cap);
+  machine.link.subsDropped = wishes.length - cap;
+  return kept;
+}
+
+
+/**
+ * Send SUBSCRIBE in batches that fit the hub's declared max_frame.
+ *
+ * THE FIELD BUG THIS FIXES: the real machine advertises `max_frame: 512`. This
+ * client wanted 21 channels; that SUBSCRIBE exceeded 512 bytes and the hub
+ * dropped it WHOLESALE — no NACK, no grants, no STATE. The session sat happily
+ * LIVE while every readout on every tab rendered `--`, which reads exactly like
+ * a rendering bug and is not one. Nine channels fit and worked, which is why
+ * the reference probe never caught it and why the simulator (fewer channels,
+ * and it declares a larger frame) hid it completely.
+ *
+ * Batching rather than truncating means a machine with many channels still gets
+ * ALL of them subscribed. Each entry is a 3-key CBOR map (rate f32, priority,
+ * channel id) — ~14 B — and the budget leaves room for the frame header and the
+ * array/map wrappers. When the hub declares no limit we fall back to the
+ * protocol floor rather than assuming generosity.
+ */
+function subscribeInBatches(wishes) {
+  const maxFrame = machine.link.limits.max_frame || 512;
+  const perEntry = 16;                       // generous: 3-key map with a u16 id
+  const budget = Math.max(1, Math.floor((maxFrame - 48) / perEntry));
+  for (let i = 0; i < wishes.length; i += budget) {
+    session.subscribe(wishes.slice(i, i + budget));
+  }
 }
 
 // ---------------------------------------------------------------------------
@@ -184,6 +235,9 @@ export function connect(opts = {}) {
     machine.link.deadmanMs = w.deadmanMs || 0;
     machine.link.cfgGen = w.cfgGen || 0;
     machine.link.hubIdentity = w.identity || null;
+    // The hub's own declared ceilings. max_subscriptions is the one that bites:
+    // exceeding it drops the whole SUBSCRIBE silently. See subscriptionWishes().
+    machine.link.limits = w.limits || {};
   });
 
   session.on('catalog', (entries, _map, meta) => {
@@ -204,7 +258,13 @@ export function connect(opts = {}) {
     };
     // Subscribe only once we know what exists. Wishing for channels before the
     // catalog is how a client ends up hardcoding ids.
-    session.subscribe(subscriptionWishes(entries));
+    // STATE and EVENT go in SEPARATE frames. They are subscribed the same way,
+    // but keeping them apart means a hub that dislikes one class cannot take the
+    // other down with it — and STATE is the class every readout on the page
+    // depends on, so it must never be collateral damage.
+    const lim = machine.link.limits.max_subscriptions;
+    subscribeInBatches(subscriptionWishes(entries, lim, CHANNEL_CLASS.STATE));
+    subscribeInBatches(subscriptionWishes(entries, lim, CHANNEL_CLASS.EVENT));
   });
 
   session.on('grant', (grants) => {

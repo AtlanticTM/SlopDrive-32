@@ -56,6 +56,11 @@ export function formatWithUnit(field, value) {
  * not ours to paper over.
  */
 export function optionLabel(field, value) {
+  // No value yet is NOT the zeroth option. Rendering String(undefined) put the
+  // literal text "undefined" in front of the operator where a setting's state
+  // belonged; showing option 0 instead would have been worse, because it would
+  // have asserted a machine state nobody reported.
+  if (value == null || value === '' || Number.isNaN(Number(value))) return '--';
   if (!field || !field.options) return String(value);
   const i = Number(value);
   const l = field.options[i];

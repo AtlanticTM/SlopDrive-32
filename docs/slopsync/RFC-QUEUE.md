@@ -2217,6 +2217,326 @@ operator ruling — it is at the bottom, alone.*
 
 ---
 
+## RFC-042 — Session staleness: separate "the session ends" from "motion stops"
+
+- **Status:** Draft.
+- **Origin:** Operator requirement, 2026-07-27, verbatim: *"clients, even the
+  webui, seem to just die sometimes. A client should never randomly die. If a
+  client is not responding, they get marked stale. Any new clients kick out
+  the lowest access tier stale client, but their slot and privilege is
+  retained until then. You should never have to have a client reconnect just
+  because you alt tabbed or locked your screen."* Grounded in a structural
+  fact, not just a complaint: browsers throttle a backgrounded tab's timers
+  to roughly one callback per **minute**; the deadman window is negotiable
+  (RFC-038) but hard-clamped to `[deadman_min_ms, deadman_max_ms]` =
+  **250–5000 ms**, and idle reaping (RFC-024) fires at
+  `idle_reap_multiplier(3) x ping_interval_idle_ms(1000)` = **3000 ms**. No
+  legal value on either axis can survive a single throttle interval — **there
+  is no way to configure this problem away**, which is why the reference
+  WebUI carries a `visibilitychange` reconnect workaround (a symptom, patched
+  around the actual defect, not a fix). Compounding it: `kHubMaxSessions` is
+  **4** (`hub.hpp:51`, a conformance floor) — on a household machine with two
+  people each holding a phone and a browser tab, four "just dozing" sessions
+  is not a hypothetical, it is Tuesday.
+- **Problem:** Today, silence past either liveness regime (§6.6) — the
+  deadman for a source-owning session, idle reaping for everyone else — runs
+  `teardownSession()` (`hub_impl.hpp:3201`) unconditionally: the slot resets
+  to `FREE`, `session_id` is discarded, every subscription/publish grant is
+  dropped, the intent idempotency ring dies, and (§11.4) any owned motion
+  source is released through `releaseSessionSources()`. Two genuinely
+  different concerns are welded into that one function call:
+  1. **Motion needs to stop being unsupervised** — the actual safety half of
+     §11.3.
+  2. **The session needs to be destroyed** — slot freed, identity forgotten,
+     grants revoked — which is a *lifecycle* decision, not a safety one, and
+     is what forces a client back through full HELLO → WELCOME → catalog
+     SYNC → re-SUBSCRIBE just because it went quiet for the length of one
+     browser paint-throttle interval.
+
+  Nothing in §6.6, §11.3, or the RFC-024/RFC-038/RFC-039 disposition
+  distinguishes these. A browser tab losing its foreground status and a phone
+  genuinely leaving the building produce *identical* hub behavior today, even
+  though only one of them is actually gone.
+- **Corrected premise — the deadman is not a safety mechanism (read this
+  before the proposed change):** An earlier draft of this RFC argued that
+  motion "must still halt" when a source-owning session goes silent, and
+  treated that as non-negotiable. The operator's correction, verbatim: *"a
+  client going silent isn't outputting motion! they're mutually exclusive."*
+  That is simply true, and it dissolves the premise:
+  - **The machine only moves when commanded.** Every motion source on this
+    hub is one of two shapes, and a silent client cannot sustain either:
+    - **Initiator-bound / command-driven** — `move` (MANUAL, a single bounded
+      point-to-point plan that completes and holds on its own),
+      `motion-input`/`motion-segment` (TCODE_STREAM, whose planner already
+      brakes to rest with no external help — CLAUDE.md §7.6: *"plan ending
+      still-moving with no fresh command → one-time velocity-interface
+      brake-to-rest [SETTLE]"* — and whose segment commands are individually
+      time-bounded to begin with, §5.4/§9.2). Silence from the owning session
+      does not risk continued motion for either: there is no next command to
+      execute, so the machine runs out of things to do and stops, by
+      construction, with no hub intervention required.
+    - **Hub-autonomous** — the pattern generator (`MotionSource::PATTERN`),
+      which already has `SourceLossPolicy::Continue`
+      (`SlopSyncHubService.cpp:867`) precisely because it runs *on the hub*,
+      independent of the client that pressed start.
+  - **Operator ruling on the one real nuance (2026-07-27), stated plainly
+    rather than left open:** *"For now, motion started on the machine stays
+    on the machine. We will discuss how that changes in the future."*
+    Generator-driven motion is a **machine-level mode**, not tied to the
+    liveness of whoever started it. A session going stale, or being evicted,
+    does **not** stop it. The recourse is the safety channel: `stop`/`estop`
+    are role-exempt (RFC-025b) — **any** connected session, including a bare
+    `watch`-tier viewer, can halt it. This RFC deliberately does **not**
+    couple machine-level motion modes to session liveness. Recorded as a
+    decision made now and flagged for revisit, not an oversight.
+  - **Conclusion:** there is no motion case, on this hub, that requires the
+    deadman to force a stop. Command-driven sources are already
+    self-limiting; the one autonomous source is deliberately
+    session-independent. **The deadman's job is liveness and slot
+    management. It has no safety job left to do**, and this RFC stops
+    pretending it does.
+- **Proposed change:**
+  1. **A third session lifecycle state: `STALE`**, sitting between `LIVE` and
+     `CLOSED` in `HubSessionState` (`session.hpp:29`). A session enters
+     `STALE` instead of being torn down on exactly the triggers that today
+     call `teardownSession()` for silence or connectivity loss:
+
+     | Trigger | Window (unchanged from today) | Today | This RFC |
+     |---|---|---|---|
+     | Source-owning session, no frame received | `deadman_ms` (RFC-038, 250–5000, default 600) | `pumpDeadman()`: GOODBYE `DEADMAN_TIMEOUT`, teardown, source loss policy runs | Goes `STALE`. Owned sources released (see below). No GOODBYE — staleness is not termination. |
+     | Non-owning session, no frame received | `idle_reap_multiplier(3) x ping_interval_idle_ms(1000)` = 3000 ms | `pumpIdleReap()`: GOODBYE `IDLE_REAPED`, teardown | Goes `STALE`. Nothing owned to release. |
+     | Transport reports closed/errored out of band | immediate | teardown | Goes `STALE` immediately — the case that matters most for a genuine WiFi blip, and it is *detected*, not timed out |
+
+     **Unaffected on purpose:** a session that never reaches `LIVE` (stuck in
+     `SYNCING`/`GRANTED`) keeps today's `READY_TIMEOUT` (RFC-015) — there is
+     no partially-adopted state worth preserving, and that mechanism already
+     works. Voluntary `GOODBYE`, administrative eviction (§12.7), and a
+     duplicate-`instance_id` `HELLO` arriving while the existing session is
+     still `LIVE` (a genuine identity conflict, not a resumption) all remain
+     hard, immediate destruction, exactly as today (§6.9's teardown
+     equivalence rule is unchanged for these four doors).
+  2. **Ownership release, decoupled from forced stop.** On the `STALE`
+     transition, the hub releases every motion source the session owned —
+     unconditionally and immediately, exactly like today's §11.4 release, so
+     another session may claim them (`control-owner`, 0x0004, updates
+     exactly as it does today — free, no change needed there). What changes:
+     **this release no longer runs the `SourceLossPolicy::Stop` branch.** No
+     source is halted, and the `safety` snapshot is not latched, *by virtue
+     of its owner going silent* — per the corrected premise above, nothing on
+     this hub needs that, and forcing it converts a graceful, planner-owned
+     settle into an operator-visible `STOP` edge (`stop_latched`/
+     `stop_cleared`, auto-cleared once a resuming stream's first accepted
+     bundle lands per the existing SI-15 fix — but visible, and spurious, in
+     the meantime) for a machine that was never actually out of control.
+
+     Concretely: `releaseSessionSources()`'s `reason=3` path
+     (deadman/staleness) becomes a plain release — call
+     `_delegate.onSourceOwnership(source, 0, reason)` for each owned source
+     and stop there. `reason=4` (voluntary/administrative/duplicate/
+     slot-reuse teardown — genuine destruction) is **unchanged**, and still
+     runs the full `Stop`-vs-`Continue` dispatch. This is a deliberate scope
+     boundary, not an oversight: whether a *destroyed* session's sources
+     should also skip the forced-stop dispatch is the same argument extended
+     further, but it is a broader change (touches §6.9's "behaviorally
+     identical" invariant across all six teardown doors, and the firmware's
+     own `SlopDriveHubDelegate::sourcePolicy()` choice of `Stop` for
+     `MANUAL`/`TCODE_STREAM`) that deserves its own review rather than riding
+     in on a session-lifecycle RFC. **Named follow-up, not part of this
+     RFC:** revisit whether `MANUAL`/`TCODE_STREAM` need
+     `SourceLossPolicy::Stop` at all on *any* teardown path, now that SETTLE
+     exists. Until that lands, `Stop` still fires exactly as today on the
+     four unaffected doors.
+
+     **Honest side effect worth stating outright:** `safety_causes::deadman`
+     (registry value 1) is, today, produced by exactly the code path this
+     RFC removes. After this RFC, no reference code path emits it —
+     `MANUAL`/`TCODE_STREAM` never reach the `Stop` branch via staleness
+     anymore, and the four still-hard doors tag their releases
+     `session_loss` (4), same as today. The registry value stays defined (a
+     hub with a source whose `sourcePolicy()` legitimately needs
+     stop-on-silence would still produce it) but the reference firmware
+     orphans it. Flagged rather than silently letting a documented enum value
+     go dark.
+  3. **Retain / release, enumerated.** Everything not listed under Release
+     stays exactly as it was the instant before staleness — this list is
+     deliberately short:
+
+     | Kept (unconditionally, for as long as the session is stale) | Released (immediately, at the moment of staleness) |
+     |---|---|
+     | Slot + `session_id` | Ownership of every motion source held (see above) |
+     | `instance_id`, access tier (`role`), client identity (`clientKind`/`clientName`/`clientVer`/`presentationMode`) | "Active source" designation (implied by ownership release) |
+     | Subscription grants (`subs`) — STATE/EVENT/STREAM h2c, at their negotiated rate/priority | — nothing else. |
+     | Publish grants (`publishGrants`) — STREAM c2h rate/burst records | |
+     | Intent idempotency ring (`intentRing`, §9.3) — a client that sent an intent right before going stale and never saw the ECHO gets the idempotent replay on resume, not a duplicate apply | |
+     | Ingress rate-limiter state — token buckets keep refilling; a returning session is not penalized for having been away | |
+     | Catalog readiness (`ready`, `readyEtagMismatch`) — no re-SYNC, no catalog refetch | |
+     | Negotiated `deadmanMs` (RFC-038) | |
+     | Bounded event queue (`events`) — keeps accepting best-effort, drop-oldest, exactly like a slow consumer | |
+     | AUTH/pending-blob/pending-knock state, **if the transport itself is still attached** (resumption path A below); reset on true reattach (path B), since it was mid-flight against a socket that no longer exists | |
+
+     A stale session costs the hub **exactly as much as a live one** — full
+     `HubSession` + `Slot` footprint, unreduced (the struct is large enough
+     that an earlier field bug blew an 8 KB task stack copying one, per
+     CLAUDE.md's field-bug ledger). Staleness is not a compression scheme; it
+     is a promise not to reclaim something already paid for, made *only* on
+     the belief the owner might come back. That belief is exactly what the
+     eviction rule below exists to bound.
+  4. **Resumption — two paths, neither a full HELLO renegotiation:**
+     - **(A) Same-transport revival — the dominant, targeted case.** The
+       backgrounded-tab and locked-screen scenarios the operator named do
+       **not** close the underlying socket; the OS/browser only throttles JS
+       timers, so the transport a stale session was attached to is usually
+       still perfectly good. The instant the hub observes **any** frame on
+       that transport again (a `PING` is enough — nothing new is required of
+       the client), it flips the session back to `LIVE`. No `HELLO`, no
+       `SUBSCRIBE`, no catalog fetch: the grants never left.
+     - **(B) Transport re-establishment.** If the socket genuinely died
+       (sleep, a real network drop), the client has no choice but to open a
+       new transport and speak `HELLO` — that much is a framing-layer
+       necessity, not a protocol design choice. What changes here: today,
+       `handleHello()`'s duplicate-`instance_id` check (`hub_impl.hpp:362`)
+       *always* evicts-and-recreates. This RFC narrows that: if the existing
+       session for that `instance_id` is `STALE` (not `LIVE`), the hub
+       **reattaches** the new transport to the existing slot instead — same
+       `session_id`, same grants, role **re-derived from the token exactly
+       as any HELLO does** (so a revoked credential is correctly downgraded,
+       and an unrevoked one reproduces the identical role it already had,
+       cheaply). A `WELCOME` still goes out (a `HELLO` always gets one), but
+       it is answering a reattach, not a fresh negotiation — no `BUSY`
+       pressure is spent (this is not new capacity, it is the same slot),
+       and the catalog/readiness gate is already satisfied because `ready`
+       was retained. **A duplicate `HELLO` against a `LIVE` session is
+       unchanged** — that is a real identity conflict (two live claimants),
+       not a resumption, and still evicts the incumbent as today.
+
+     Either path: **grant reacquisition is not control reacquisition**,
+     unchanged from §6.8 — a resumed session does not silently reclaim any
+     source it used to own; it issues a fresh control-taking intent/stream
+     exactly as a live session would, to take over from whoever (if anyone)
+     picked the source up while it was stale.
+
+     **What a resuming client sees, since so much may have changed while it
+     was away:** resumption is treated as a fresh grant for **push purposes
+     only** (not renegotiated) — every one of the session's existing STATE
+     subscriptions gets the §9.1/§10.4-row-3 "first push after grant, never
+     shed" treatment again on the `LIVE` transition. This is reused
+     machinery, not new machinery, and it answers every version of "what did
+     I miss":
+     - **`cfg_gen`/config values:** the resumption push carries current
+       values; any precondition-bearing intent the client had in flight is
+       handled exactly as an ordinary reconnect already handles it (§6.8:
+       gone, reconciled against the fresh snapshot, never blind-
+       retransmitted).
+     - **Catalog etag:** unaffected by staleness specifically — a
+       mid-session catalog change is already signaled to every subscriber
+       via the `catalog` STATE channel (§8.6); a session that was stale the
+       whole time still held (and, per the table above, retained) that
+       channel's grant, so it learns of a changed etag the same way a
+       session that was live the whole time would. No special case needed.
+     - **A latched e-stop:** `safety` is `critical` priority and retained;
+       the resumption push includes its current value, so a resumed
+       client's very first frame back is the true, current safety state —
+       ground-truth doctrine holds through a staleness gap exactly as it
+       holds through any reconnect.
+  5. **Eviction — only under slot pressure, only among the stale.** A `HELLO`
+     that would otherwise get `BUSY` (`occupiedCount() >= kHubMaxSessions`,
+     today 4) instead first scans for a `STALE` session to reclaim:
+     - Eligible: `STALE` sessions only. **A `LIVE` session is never evicted
+       to make room for a new one**, full stop — the existing
+       duplicate-`instance_id` mechanism is the only thing that ever
+       displaces a `LIVE` session, and that requires matching identity, not
+       mere pressure.
+     - Choice: **lowest access tier first** (`watch` < `control` <
+       `configure`); tie-break **longest continuously stale** (earliest
+       staleness timestamp loses its slot first). This needs one new field,
+       `staleSinceMs`, set when a session enters `STALE` — the same field
+       also underwrites any future outer bound (open question below).
+     - If none is eligible: unchanged — `NACK BUSY` with `retry_after_ms`,
+       exactly as today.
+     - The evicted session gets a best-effort `GOODBYE` (it may well not
+       arrive — it was stale for a reason) with a **new** code,
+       `SLOT_RECLAIMED` (0x010D): distinguishable from `SESSION_EVICTED`
+       (admin/slow-consumer) and from the now-orphaned
+       `DEADMAN_TIMEOUT`/`IDLE_REAPED`, for exactly the reason RFC-039
+       registered `IDLE_REAPED` in the first place — an observer needs to
+       tell "your slot was needed" apart from every other reason a session
+       ends.
+     - **Why only 4 slots makes this load-bearing, not decorative:**
+       `kHubMaxSessions` is a conformance floor of 4. Under this RFC,
+       staleness is intentionally unbounded in time (see below) — so on a
+       real household machine, a phone-in-pocket plus a laptop with a
+       locked screen plus a second person's equivalent pair is *four
+       stale-but-not-dead sessions*, and the fifth connection attempt is the
+       normal case this eviction rule exists for, not an edge case.
+  6. **Observability — additive, does not depend on RFC-018.** Two new
+     kinds on the existing spec-core `session-events` channel (0x0007,
+     already implemented, kinds 1–3 already registered): `4 =
+     session_stale`, `5 = session_resumed`, body carrying the affected
+     `session_id` (same shape as the existing `takeover`/`session_joined`
+     kinds). This is enough to see staleness happen on any hub today,
+     without waiting on RFC-018's `session-roster` (0x0002, still deferred
+     per the disposition table). It composes cleanly with that roster if/when
+     it lands: a **persistent** stale bit belongs in the roster's per-slot
+     `flags` byte (a level, matching what a roster IS), while the event pair
+     above is the **edge** (an observer watching only for transitions
+     doesn't want to poll a roster for them). This RFC does not depend on
+     RFC-018; RFC-018 would be strictly better with this RFC already landed.
+- **Two questions answered but left as the operator's call, stated so no
+  future reader thinks they were overlooked:**
+  1. **How long may a session stay stale?** This RFC proposes **no
+     independent outer bound** — staleness lasts until either resumption or
+     slot-pressure eviction, by design: any fixed cap is just a slower
+     deadman with the identical browser-throttling failure mode this RFC
+     exists to remove (a laptop asleep for the weekend is indistinguishable,
+     from a timer's perspective, from a laptop that alt-tabbed ten seconds
+     ago). The eviction rule above is the only pressure release, and with
+     only 4 slots it fires often enough in practice to matter. If the
+     operator wants a hard ceiling anyway — most plausibly scoped to
+     `configure`-tier sessions specifically, for the security reason below —
+     that is a deliberate, separate policy knob this RFC leaves open rather
+     than guesses at.
+  2. **Security — does this widen the trust model?** Yes, honestly, and it
+     should be said plainly rather than glossed. Before this RFC, a
+     `configure` session that went dark was destroyed within 600 ms (if it
+     happened to be driving motion) or 3 s (otherwise) — so a stolen or lost
+     device's standing access lapsed quickly on its own. After this RFC, the
+     identical scenario the operator explicitly asked for — *"you should
+     never have to reconnect just because you locked your screen"* — means
+     an already-authenticated, still-open browser tab on a **locked** laptop
+     stays a live `configure` session indefinitely, and unlocking the laptop
+     resumes it with **zero additional authorization check**, because that
+     is precisely the case path (A) is built to make invisible. This is not
+     a new hole in *who can use the credential* — the bearer token is the
+     credential either way, and reattachment (path B) still re-derives role
+     from it, so a *different* claimant gains nothing new. It is a real
+     widening of *how long a credential already in someone's hand keeps
+     working after the legitimate holder stops actively proving it's still
+     them*. That trade-off is exactly what the operator asked for, so this
+     RFC makes it — but names it, rather than letting it be discovered later
+     as a surprise.
+- **Compatibility:** Internal hub-lifecycle behavior change — no wire-format
+  break for existing clients; a client that never goes silent for long
+  enough to matter behaves identically to today. Wire-visible additions, all
+  additive: `session_event_kinds` 4/5 on the existing 0x0007 channel; one new
+  `goodbye_codes`/`nack_codes` entry `SLOT_RECLAIMED` (0x010D).
+  `HubSessionState` gains `STALE` (library-internal enum, not itself
+  wire-visible). `DEADMAN_TIMEOUT` and `IDLE_REAPED` remain registered but
+  are no longer emitted by the reference hub for the triggers named above —
+  they stay reachable for a hub/policy combination that still needs to
+  terminate outright on silence. `handleHello()`'s duplicate-`instance_id`
+  branch (`hub_impl.hpp:362`) gains a reattach-if-stale case; a `HELLO`
+  against a `LIVE` duplicate is unchanged. Reference implementation touch
+  points: `HubSessionState` (`session.hpp:29`), `Hub::pumpDeadman` /
+  `Hub::pumpIdleReap` / `Hub::releaseSessionSources` / `Hub::teardownSession`
+  (`hub_impl.hpp:3041-3241`), `Hub::handleHello` (`hub_impl.hpp:349`).
+  **Named follow-up, not part of this RFC:** whether
+  `SourceLossPolicy::Stop` is still the right default for
+  `MANUAL`/`TCODE_STREAM` on the four teardown doors this RFC leaves
+  unchanged, now that SlopMotion's SETTLE makes the forced-halt redundant
+  there too.
+
+---
+
 *Add new entries below. Keep the shape: Status / Origin / Problem / Proposed
 change / Compatibility — and if it was found by a probe or a live failure,
 say exactly which, future-us will want the receipts.*

@@ -1742,6 +1742,192 @@ operator ruling — it is at the bottom, alone.*
   reflection of a feature the operator does not currently use.
 
 
+## RFC-032 — `command.*` and `telemetry.target`: make commanded motion discoverable
+
+- **Status:** Draft. Found by building a generic client, not by reasoning.
+- **Origin:** WebUI rebuild, 2026-07-27. The rebuilt page renders entirely from
+  the catalog and is forbidden from naming a channel id. When the rail widget
+  went to wire up tap-to-move it found nothing it could bind to and — correctly —
+  REFUSED, rendering its input tape disabled with the text "this catalog does not
+  tag a move INTENT by role, so a generic client cannot find it safely". The same
+  search killed the `commanded` and `lag` hero numerals.
+- **Problem:** Two related holes, both in the `field_roles` vocabulary.
+  1. **No role names a value-bearing COMMAND.** `action.<name>` (RFC-019) marks
+     VERBS — home, e-stop, clear-fault — and a client renders them as buttons.
+     `0x0100 move`'s field is `position`: a VALUE. Tagging it `action.move` would
+     be actively wrong, telling every generic client to draw a button where a
+     position control belongs (the device catalog's own comment says exactly
+     this, and declining to tag it was the right call). So there is no honest way
+     to annotate it, and therefore no way for any client but ours to command a
+     move.
+  2. **No role names the COMMANDED position.** `telemetry.position` is measured
+     truth; nothing names the setpoint. The device publishes `tgt_10um` directly
+     beside `pos_10um` on 0x0080 and it is unannotated, so a generic client can
+     show where the carriage IS but never where it was ASKED to be — and so
+     cannot show lag either. Deriving "commanded" from the stroke window would be
+     fabrication, which the Ground Truth Doctrine forbids.
+
+  Net effect: the most-used control on the machine — put the carriage there — is
+  reachable only by a client that hardcodes `0x0100`. That is precisely the
+  privilege this project exists to delete.
+- **Proposed change:** Two additive `field_roles` entries. No new frames, no new
+  keys, no channel changes.
+  1. **`command.position`** — an INTENT field carrying a commanded ABSOLUTE
+     target position in the channel's own unit. A client that finds it MAY render
+     a positional control (rail, tape, slider) and send the value on that field's
+     channel. Deliberately a VALUE role, not an `action.*`, so RFC-019's
+     verb/value distinction stays intact.
+  2. **`telemetry.target`** — the position the machine is currently commanded to,
+     as opposed to `telemetry.position` which is where it measurably is. LAG IS
+     NOT A SEPARATE ROLE: it is target − position, computed client-side.
+     Registering a third field for a subtraction would invite two sources of
+     truth for one number.
+  3. Tag the reference device: `position` on `0x0100 move` gets
+     `command.position`; `tgt_10um` on `0x0080 motion` gets `telemetry.target`.
+- **Why a `command.*` family rather than a one-off:** the shape recurs the moment
+  anyone adds a second commandable quantity (a commanded velocity; a commanded
+  force on a machine that has one). Opening the namespace now, with
+  `command.position` as its first member, costs nothing and avoids a rename
+  later. Convention: `command.<quantity>` names an INTENT field whose value IS
+  the setpoint, and it generally has a `telemetry.*` counterpart to pair with.
+- **Compatibility:** Purely additive vocabulary. Unknown roles must already be
+  ignored, so a client that does not know these is unaffected, and a machine that
+  does not tag them behaves exactly as today (the rail degrades to a window
+  editor with no tape — what ships now). No wire-number changes, no frozen
+  artifact touched. Client support already exists: `webui/src/model/settings.js`
+  indexes non-action schema-field roles into `byRole`, so both light up the
+  moment a device advertises them.
+
+---
+
+## RFC-033 — An unacceptable SUBSCRIBE MUST be answered, never silently dropped
+
+- **Status:** Draft. **This cost real debugging time twice in one night and is
+  the most valuable entry here.**
+- **Origin:** WebUI rebuild, 2026-07-27, live against fw 2.1.73 then 2.1.74.
+- **Problem:** A SUBSCRIBE the hub will not accept produces **nothing** — no
+  GRANT, no NACK, no EVENT. The session completes HELLO/WELCOME, adopts the
+  catalog, reaches LIVE and looks perfectly healthy, while zero STATE ever
+  arrives. Every readout renders `--` and every control correctly greys out (a
+  control cannot be enabled without a snapshot to gate it against). It presents
+  as a CLIENT RENDERING BUG and is a protocol-etiquette failure.
+
+  Two distinct triggers were hit, both invisible:
+  1. **A frame mixing STATE and EVENT subscriptions** was dropped wholesale.
+     Splitting them into separate frames fixed it.
+  2. **A frame with too many entries.** After the catalog grew from 33 to 44
+     entries, batches sized from the advertised `max_frame` grew with it and the
+     drop returned. A fixed conservative batch of 8 fixed it.
+
+  Note the second failure was introduced BY THE FIX FOR THE FIRST. That is how
+  easy this is to get wrong when the protocol gives no feedback.
+
+  The reference probe caught neither: it subscribes to 9 STATE channels and has
+  always sat inside both limits. The simulator hid them too. **A conformance
+  suite that only exercises the happy path cannot find this class of bug.**
+- **Proposed change:**
+  1. **Normative:** a hub that cannot honour a SUBSCRIBE MUST respond — either
+     GRANT what it accepted and NACK the remainder, or NACK the frame. Silence is
+     non-conformant. Partial acceptance is already the observed behaviour for
+     individually unauthorized channels (a `configure` channel requested at
+     `control` is denied per-channel, not fatally), so this mostly makes existing
+     good behaviour mandatory and closes the fatal cases.
+  2. **A registered NACK code** — `SUBSCRIBE_REJECTED` — with `detail` carrying
+     the reason (too many entries / frame too large / mixed classes).
+  3. **Register the actual constraints.** If a hub limits entries-per-frame or
+     forbids mixing channel classes, that MUST be discoverable — e.g.
+     `max_subscriptions_per_frame` in WELCOME `limits`, beside the existing
+     `max_frame` and `max_subscriptions`. Today a client can only find the limit
+     by binary-searching against a live machine.
+  4. **Decide the mixed-class question.** Either mixing STATE and EVENT in one
+     SUBSCRIBE is legal (and the reference hub has a bug) or it is illegal (and
+     the spec must say so). Right now it is neither.
+  5. **Conformance:** add a negative vector — subscribe to more channels than the
+     hub allows, assert a NACK. The probe should also grow a subscribe-everything
+     case, since "subscribe to every channel the catalog advertises" is the
+     natural thing a generic client does and is exactly what nothing tested.
+- **Compatibility:** Additive (one NACK code, one optional limits key) plus a
+  behavioural requirement on hubs. Clients ignoring the new NACK are no worse off
+  than today. The reference hub needs the fix; that is the point.
+
+---
+
+## RFC-034 — Placeholder entries in `options` lists
+
+- **Status:** Draft — small, but it produces a nonsense control on every generic
+  client.
+- **Origin:** WebUI rebuild, 2026-07-27, seen live in the safety bar.
+- **Problem:** Op-select INTENT fields are index-aligned with their wire value,
+  and every registry op table starts numbering at 1. Index 0 therefore exists
+  only to keep the array aligned and carries a filler label — `"reserved"`. A
+  generic client renders `options` faithfully and so draws a **pressable button
+  labelled "reserved"** that means nothing and, if pressed, earns a NACK. The
+  reference client currently filters it with a label heuristic
+  (`/^(reserved|none|unused)$/i`), which is a guess about English, not protocol.
+- **Proposed change:** One of, in preference order:
+  1. **Gate it with `option_access`** at a level nobody holds. `0x0009
+     session-admin` ALREADY does exactly this for its own index 0 — so this is an
+     existing pattern the reference device applies inconsistently, not a new
+     mechanism. Needs no wire change, just discipline plus a normative SHOULD so
+     other implementers do it too.
+  2. A registered sentinel label the spec blesses, so filtering is conformant
+     rather than a guess about English.
+  3. Explicitly bless index 0 as never-an-operation for op-select fields.
+
+  (1) is preferred: it reuses shipped machinery and renders the control GREYED
+  rather than vanished, matching the "grey, never hide" doctrine.
+- **Compatibility:** Fully additive. Option (1) is a catalog authoring change on
+  the device with no wire-format impact at all.
+
+---
+
+## RFC-035 — A role vocabulary for motion-plan telemetry
+
+- **Status:** Draft — currently worked around with a documented heuristic.
+- **Origin:** WebUI rebuild, 2026-07-27, building the plan-strip widget.
+- **Problem:** `0x0086 plan-strip` publishes genuinely useful data (the segment
+  in flight: start/end/current normalized position, velocity, elapsed and total
+  duration, style). None of it carries a role, and no vocabulary could describe
+  it. A generic widget therefore cannot find it. The reference implementation
+  resorts to matching the catalog ENTRY NAME against `/plan/i` and classifying
+  sub-fields by regex over their `name` and `desc` — which works, is documented
+  in the source as a heuristic, and is exactly the guessing this protocol exists
+  to eliminate. It will silently fail on a machine that names the concept
+  differently.
+- **Proposed change:** A small `plan.*` role family covering what is genuinely
+  portable across jerk-limited planners — e.g. `plan.start`, `plan.end`,
+  `plan.current`, `plan.velocity`, `plan.elapsed`, `plan.duration`, `plan.style`.
+  Deliberately NOT a description of any one planner's internals: the test for
+  inclusion is "would a different machine's motion planner have this concept?",
+  the same test that kept Advanced-pattern internals out of `pattern.*`.
+- **Compatibility:** Additive vocabulary; absent roles keep today's behaviour
+  (the widget renders nothing, which is correct for a machine with no planner).
+
+---
+
+## RFC-036 — Renderability of string settings
+
+- **Status:** Draft — a conformance-tool gap, not a protocol defect.
+- **Origin:** Found by `tools/slopsync_probe.py` against the divergent simulator
+  catalog, 2026-07-27 — the FIRST time a `str16` setting field was ever
+  exercised. RFC-026 landed the packed string types and nothing had used one.
+- **Problem:** The probe's `cat_renderable` check requires every setting to carry
+  either `options` or numeric `min`/`max`, and fails a string field that has
+  neither. A string's bound is its fixed packed width (16/32/64 B), implied by
+  its TYPE and not expressible as a numeric min/max. So a perfectly conformant
+  string setting fails conformance.
+- **Proposed change:**
+  1. Fix the check: a `str16`/`str32`/`str64` field is renderable by virtue of
+     its type; its length bound is the type's width.
+  2. Consider a `max_len` annotation for a device wanting a SHORTER logical limit
+     than the field's physical width — RFC-009 item 5 already mentions `max_len`
+     as a UI hint, but nothing registers or emits it.
+  3. Add a string setting to the conformance fixtures so this path stays
+     exercised rather than being rediscovered by the next implementer.
+- **Compatibility:** Tooling and optional-annotation only; no wire impact.
+
+---
+
 *Add new entries below. Keep the shape: Status / Origin / Problem / Proposed
 change / Compatibility — and if it was found by a probe or a live failure,
 say exactly which, future-us will want the receipts.*

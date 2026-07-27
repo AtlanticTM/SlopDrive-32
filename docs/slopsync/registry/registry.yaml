@@ -708,6 +708,8 @@ field_roles:
   "limit.input.speed":   { note: "speed ceiling of the INPUT (machine-driven: patterns, streams, TCode) limit set" }
   "limit.input.accel":   { note: "accel ceiling of the input limit set" }
   "limit.input.jerk":    { note: "jerk ceiling of the input limit set" }
+  "geometry.max_travel":      { note: "the configured travel ceiling — how far the machine's rail geometry allows it to search/move (0x0081 max_rail is the worked example: also the sensorless-homing search sweep bound). Distinct from window.min/max, which is the operator-chosen SUB-range within this travel." }
+  "geometry.measured_travel": { note: "the usable travel a real home actually measured between the two hard stops, as opposed to geometry.max_travel's configured ceiling. Zero/absent-of-meaning until the first successful home this session; a client MUST NOT treat zero as a real measurement." }
   "window.min":          { note: "stroke window lower bound. Limits normalized against the window are window-relative and therefore MOVE when it does — which is exactly why this is a STATE field and not a one-shot WELCOME value." }
   "window.max":          { note: "stroke window upper bound" }
   "telemetry.position":  { note: "live actuator position" }

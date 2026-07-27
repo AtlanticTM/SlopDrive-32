@@ -43,6 +43,13 @@ const HEROES = [
       optional: {
         pos: ROLE.telemetryPosition, vel: ROLE.telemetryVelocity,
         move: ROLE.commandPosition, target: ROLE.telemetryTarget,
+        // RFC-041: the machine's ACTUAL travel extent, as opposed to
+        // window.min/window.max's own static catalog bounds (see
+        // RailWidget's `hi` derivation for why those are the wrong source).
+        // Absent on any hub that has not tagged these roles yet — the rail
+        // falls back to the window fields' bounds exactly as it does today.
+        extentMeasured: ROLE.geometryMeasuredTravel,
+        extentMax: ROLE.geometryMaxTravel,
       },
     },
   },

@@ -17,9 +17,16 @@
    *    an INTENT schema field is a SETPOINT, not a verb, so (unlike an
    *    `action.*` field) it renders as a positional control rather than a
    *    button. When the hero claim resolves `fields.move`, the tape is live:
-   *    tap or drag sends `sendIntent(move.channelId, { [move.key]: value })`
-   *    directly (NOT writeSetting — this is not an RFC-009 setting, there is
-   *    no settingKey/settingChannel for it). When a machine has not
+   *    tap or drag calls `shadow.svelte.js`'s `sendCommand(move, value)` —
+   *    the THIRD of its three write entry points (settings / actions /
+   *    commands), NOT writeSetting (this is not an RFC-009 setting, there is
+   *    no settingKey/settingChannel for it) and never `session.sendIntent`
+   *    directly (nothing outside shadow.svelte.js may call that). Routing
+   *    through sendCommand also means the tape is throttled at the MOVE
+   *    channel's own catalog-advertised rate instead of a hand-rolled
+   *    client-side guess, and a refusal (this device: NACK NOT_HOMED while
+   *    unhomed) is no longer silent — see `moveShadow` below and
+   *    ui/SafetyBar.svelte's global refusal surface. When a machine has not
    *    annotated its move channel this way, the tape correctly declines —
    *    spans the window, disabled, with a reason — exactly like a
    *    Field.svelte control the session cannot write. That decline path is
@@ -45,7 +52,7 @@
    */
   import { machine, getSession } from '../../model/machine.svelte.js';
   import { isFieldEnabled } from '../../model/settings.js';
-  import { writeSetting, displayValue, statusOf, STATUS } from '../../model/shadow.svelte.js';
+  import { writeSetting, sendCommand, displayValue, statusOf, shadowOf, STATUS } from '../../model/shadow.svelte.js';
   import { formatValue, unitOf } from '../../model/format.js';
   import { ACCENT, ac } from '../../model/theme.js';
   import { createTelebuf, createTrail } from './telebuf.js';
@@ -65,6 +72,11 @@
   // writeSetting. `target` is an ordinary STATE field like pos/vel.
   const move = $derived(fields.move);
   const target = $derived(fields.target);
+  // RFC-041 optional claims: the machine's ACTUAL travel extent, as opposed
+  // to `min`/`max`'s own static catalog bounds (see the `hi` derivation
+  // below). Both null on any hub that has not tagged these roles yet.
+  const extentMeasured = $derived(fields.extentMeasured);
+  const extentMax = $derived(fields.extentMax);
 
   function sampleOf(f) { return f ? machine.samples[f.channelId] : undefined; }
 
@@ -113,10 +125,40 @@
     return STATUS.confirmed;
   }
 
-  // Rail extent per the contract: the descriptors' own bounds, not the current
-  // window — the rail must show the whole travel even when the window is small.
+  // Rail extent: the whole travel, not the current window — the rail must
+  // show the full extent even when the window is small.
+  //
+  // `lo` is the window fields' own catalog `min` annotation (the legal FLOOR
+  // a window edge may be set to — on this protocol that is always 0, the
+  // near hard stop). `hi` is where it gets interesting: `max.max` is that
+  // same kind of fact for the far edge, but it is the window SETTING's legal
+  // ceiling, not the rail's physical length — on a machine with a generous
+  // ceiling and a short rail (this device: window.max caps at 2000mm, the
+  // rail is ~500mm) using it draws a rail four times too long, and a
+  // successful home changes nothing because home doesn't touch that
+  // annotation at all. RFC-041 registers two roles for the fact this
+  // actually needs — `geometry.measured_travel` (what homing just measured,
+  // when it did) and `geometry.max_travel` (the configured ceiling homing
+  // searches within) — preferring the MEASUREMENT over the configured
+  // ceiling because it is ground truth from this session's own home, not a
+  // number the operator typed in. Both are OPTIONAL claims: no catalog has
+  // tagged them yet (RFC-041 is filed, not landed), so `hi` falls back to
+  // `max.max` exactly as before on every hub live today — that fallback is
+  // the documented, permanent behaviour for an unroled hub, not a stopgap.
   const lo = $derived(min.min ?? 0);
-  const hi = $derived(max.max ?? (lo + 1));
+  const measuredTravel = $derived(
+    extentMeasured ? displayValue(extentMeasured, sampleOf(extentMeasured)) : null);
+  const maxTravel = $derived(
+    extentMax ? displayValue(extentMax, sampleOf(extentMax)) : null);
+  const hi = $derived.by(() => {
+    if (typeof measuredTravel === 'number' && isFinite(measuredTravel) && measuredTravel > 0) {
+      return lo + measuredTravel;
+    }
+    if (typeof maxTravel === 'number' && isFinite(maxTravel) && maxTravel > 0) {
+      return lo + maxTravel;
+    }
+    return max.max ?? (lo + 1);
+  });
   const span = $derived(Math.max(hi - lo, 1e-9));
 
   function pct(v) {
@@ -335,14 +377,25 @@
       if (dtMs <= 0 || dtMs > 500) dtMs = 16.667;
       lastFrameTs = nowMs;
 
+      // rAF hands us a DOMHighResTimeStamp — ms since performance.timeOrigin,
+      // NOT since the Unix epoch. machine.sampleTs (and therefore every
+      // timestamp the telebufs were pushed with) is Date.now() epoch ms, off
+      // session.js's `emit('state', ..., Date.now())`. performance.timeOrigin
+      // IS the epoch time of navigation start, so adding it converts the rAF
+      // clock into the same domain the samples are stamped in — see
+      // telebuf.js's header for what silently comparing the two raw produces
+      // (spoiler: sampleAt() never sees "now" as newer than any real sample,
+      // and always returns the OLDEST entry still in the ring).
+      const nowEpochMs = performance.timeOrigin + nowMs;
+
       // Pull ground truth through the telebufs at THIS instant.
       if (pos) {
-        const r = posTele.sampleAt(nowMs);
+        const r = posTele.sampleAt(nowEpochMs);
         posDisplay = r.value;
         fresh = r.fresh;
         let speedPerSec = null;
         if (vel) {
-          const rv = velTele.sampleAt(nowMs);
+          const rv = velTele.sampleAt(nowEpochMs);
           if (rv.value != null) speedPerSec = Math.abs(rv.value);
         } else if (r.value != null) {
           speedPerSec = Math.abs(r.velPerMs) * 1000;
@@ -357,7 +410,7 @@
       }
 
       if (target) {
-        const rt = targetTele.sampleAt(nowMs);
+        const rt = targetTele.sampleAt(nowEpochMs);
         targetDisplay = rt.value;
         targetFresh = rt.fresh;
       } else {
@@ -512,19 +565,21 @@
   // ---------------------------------------------------------------------------
   // Input tape — commands a move (RFC-032 command.position), when the catalog
   // gave us `move`. Not a Field.svelte control and not writeSetting: there is
-  // no settingKey/settingChannel/shadow record for an INTENT field, only a
-  // sendIntent call and its post-clamp ECHO. Ground truth is preserved by NOT
-  // inventing a local "confirmed" value: while dragging the cursor tracks the
-  // operator's hand (clearly a live drag, not a claim about the machine);
-  // once released it falls straight back to `telemetry.target`, the same
-  // ground-truth setpoint the "commanded" hero numeral shows, so the tape and
-  // the numeral can never disagree.
+  // no settingKey/settingChannel for an INTENT command field. `sendCommand`
+  // (shadow.svelte.js) gives it the SAME pending/ECHO/NACK lifecycle a setting
+  // gets, coalesced at the move channel's own catalog-advertised rate — so
+  // dragging no longer needs a hand-rolled client-side throttle, and a refusal
+  // (this device, unhomed: NACK NOT_HOMED) is recorded in the shared shadow
+  // instead of vanishing. Ground truth is still preserved by NOT inventing a
+  // local "confirmed" value: while dragging the cursor tracks the operator's
+  // hand (clearly a live drag, not a claim about the machine); once released
+  // it falls straight back to `telemetry.target`, the same ground-truth
+  // setpoint the "commanded" hero numeral shows, so the tape and the numeral
+  // can never disagree.
   // ---------------------------------------------------------------------------
   let moveDragging = $state(false);
   let moveDragValue = $state(null);
-  let moveLastResult = $state(null); // {ok, error, at}
-  let lastMoveSentAt = 0;
-  const MOVE_MIN_INTERVAL_MS = 80; // client-side throttle while dragging; tap/release always send
+  const moveShadow = $derived(shadowOf(move));
 
   function moveValueFromClientX(clientX) {
     if (!hostEl) return null;
@@ -536,23 +591,9 @@
     return vlo + frac * (vhi - vlo);
   }
 
-  async function commandMove(value) {
-    const session = getSession();
-    if (!session || !move || !moveEnabled) return;
-    try {
-      await session.sendIntent(move.channelId, { [move.key]: value });
-      moveLastResult = { ok: true, at: Date.now() };
-    } catch (err) {
-      moveLastResult = { ok: false, error: (err && (err.name || err.message)) || 'rejected', at: Date.now() };
-    }
-  }
-
-  function requestMove(value, force) {
-    if (value == null) return;
-    const now = Date.now();
-    if (!force && (now - lastMoveSentAt) < MOVE_MIN_INTERVAL_MS) return;
-    lastMoveSentAt = now;
-    commandMove(value);
+  function requestMove(value) {
+    if (value == null || !move || !moveEnabled) return;
+    sendCommand(move, value);
   }
 
   function onTapePointerDown(e) {
@@ -561,19 +602,19 @@
     try { e.currentTarget.setPointerCapture(e.pointerId); } catch (err) { /* unsupported: still works via window fallback */ }
     const v = moveValueFromClientX(e.clientX);
     moveDragValue = v;
-    requestMove(v, true);
+    requestMove(v);
     e.preventDefault();
   }
   function onTapePointerMove(e) {
     if (!moveDragging) return;
     const v = moveValueFromClientX(e.clientX);
     moveDragValue = v;
-    requestMove(v, false);
+    requestMove(v);
   }
   function onTapePointerUp() {
     if (!moveDragging) return;
     moveDragging = false;
-    requestMove(moveDragValue, true); // guarantee the released position lands, even mid-throttle
+    requestMove(moveDragValue); // guarantee the released position is (re)queued, even mid-coalesce
   }
 
   // Cursor position: the live drag value while dragging, else the machine's
@@ -609,7 +650,8 @@
          full travel to send a move INTENT; the hub clamps (window, limits)
          and the post-clamp ECHO plus telemetry.target are what the cursor
          shows once the drag ends — never an optimistic local guess. -->
-    <div class="rail-tape-assembly" class:drag-live={moveDragging} class:disabled={!moveEnabled}>
+    <div class="rail-tape-assembly" class:drag-live={moveDragging} class:disabled={!moveEnabled}
+         data-shadow={statusOf(move)}>
       <div class="rail-tape-labels">
         <span class="rail-tape-mode">tap &middot; drag to move</span>
         <span class="rail-tape-extent mono">{tapeVal != null ? formatValue(move, tapeVal) + unitOf(move) : '--'}</span>
@@ -627,8 +669,12 @@
           <div class="rail-tape-cursor" style="left:{tapePct * 100}%"></div>
         {/if}
       </div>
-      {#if moveLastResult && !moveLastResult.ok && (Date.now() - moveLastResult.at) < 4000}
-        <p class="rail-reason err">move refused: {moveLastResult.error}</p>
+      <!-- The tape has no persistent widget of its own once a drag ends, so a
+           refusal here is ALSO caught by ui/SafetyBar.svelte's global surface
+           (shadow.svelte.js's `lastRefusal`) — this is the local, inline echo
+           of the exact same fault, not a second source of truth. -->
+      {#if moveShadow && moveShadow.status === STATUS.fault && moveShadow.error}
+        <p class="rail-reason err">move refused: {moveShadow.error}</p>
       {:else if !moveEnabled}
         <p class="rail-reason">{moveReason}</p>
       {/if}

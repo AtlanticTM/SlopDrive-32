@@ -51,6 +51,7 @@
    * that exist for any session, at any tier.
    */
   import { machine, getSession } from '../model/machine.svelte.js';
+  import { runAction } from '../model/shadow.svelte.js';
   import { ACCESS, ACCESS_NAME, NACK, bytesEqual, getInstanceId, setPairedToken } from '../core/slopsync/index.js';
   import { PAIRING_MODE, PAIRING_MODE_NAME, PAIRING_EVENT_KIND } from '../core/slopsync/frames.js';
 
@@ -188,19 +189,21 @@
     if (op < 0) { result = { ok: false, msg: 'this hub does not offer that operation' }; return; }
     busy = k.slot;
     result = null;
-    const fields = { [keyOf('op')]: op, [keyOf('instance_id')]: instanceBytes(k) };
-    // Grant the tier the operator chose. Approving at `control` is the safe
-    // default: it lets a client drive the machine without letting it hand out
-    // credentials of its own.
-    if (approve) fields[keyOf('role')] = ACCESS.control;
-    try {
-      await s.sendIntent(adminEntry.id, fields);
-      result = { ok: true, msg: (approve ? 'approved ' : 'denied ') + k.name };
-    } catch (e) {
-      result = { ok: false, msg: (e && (e.name || e.message)) || 'refused' };
-    } finally {
-      busy = null;
-    }
+    // session-admin is a spec-core admin surface, not a device-chosen
+    // `action.*` role — this ad-hoc action descriptor is the same shape
+    // runAction() expects from buildSettingsModel's actions[], per its own
+    // doc comment. Approving at `control` is the safe default: it lets a
+    // client drive the machine without letting it hand out credentials of
+    // its own. instance_id (+ role, when approving) ride the SAME intent as
+    // `op` — one atomic admin decision, not three.
+    const action = { channelId: adminEntry.id, key: keyOf('op'), label: approve ? 'approve pairing' : 'deny pairing' };
+    const extraFields = { [keyOf('instance_id')]: instanceBytes(k) };
+    if (approve) extraFields[keyOf('role')] = ACCESS.control;
+    const res = await runAction(action, op, extraFields);
+    result = res.ok
+      ? { ok: true, msg: (approve ? 'approved ' : 'denied ') + k.name }
+      : { ok: false, msg: res.error || 'refused' };
+    busy = null;
   }
 
   // ── this client's OWN knock: send, then watch for the answer ────────────

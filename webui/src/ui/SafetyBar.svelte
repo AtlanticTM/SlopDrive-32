@@ -16,15 +16,20 @@
    * exact same data the hub gates on, so this bar and the hub cannot disagree
    * about what a given session may press.
    *
-   * E-STOP RECOVERY: a refusal whose NACK is ESTOP_ACTIVE gets a standing
-   * recovery hint offering the safety channel's `estop_clear` op — found by
-   * the registry's own SAFETY_OP.estop_clear index into that same action's
-   * `.options`, so the button's label is always whatever THIS hub calls it,
-   * never a string we invented.
+   * GLOBAL REFUSAL SURFACE: this bar is pinned to the viewport, so it is the
+   * one place a refusal from ANY control (a settings slider, an action
+   * button, the rail's move tape — any of shadow.svelte.js's three entry
+   * points) is guaranteed to be visible even after the control that sent it
+   * has scrolled off or unmounted. `lastRefusal` + `remedyForLastRefusal()`
+   * come from shadow.svelte.js, which is also where the NACK-code -> action-
+   * role table lives (`NOT_HOMED` -> `action.home`, `ESTOP_ACTIVE` ->
+   * `action.safety`'s `estop_clear` op) — this component only renders it.
+   * This REPLACES the old estop-only local recovery banner: same mechanism,
+   * generalised to every refusal instead of hardcoded to one NACK.
    */
   import { machine, getSession } from '../model/machine.svelte.js';
-  import { runAction } from '../model/shadow.svelte.js';
-  import { NACK, NACK_NAME, SAFETY_OP } from '../core/slopsync/index.js';
+  import { runAction, lastRefusal, remedyForLastRefusal, clearLastRefusal } from '../model/shadow.svelte.js';
+  import { SAFETY_OP } from '../core/slopsync/index.js';
   import { optionLabel } from '../model/format.js';
 
   const roleActions = $derived(
@@ -70,15 +75,27 @@
       ? [specSafety, ...roleActions]
       : roleActions
   );
-  const safetyAction = $derived(actions.find((a) => a.role === 'action.safety') || null);
-
-  // The registry-defined safety op that clears a latch. SAFETY_OP is the
-  // registry's own enum (core/slopsync/frames.js), so naming a member of it is
-  // protocol vocabulary — portable to every conforming hub — not knowledge of
-  // this particular machine.
-  const RECOVERY_OP = SAFETY_OP.estop_clear ?? null;
-
   const linkUp = $derived(machine.link.phase === 'live');
+
+  /**
+   * The remedy for the CURRENT global refusal, if this hub advertises one.
+   * Reactive to `lastRefusal` (a new refusal anywhere in the app) and to the
+   * catalog (the action has to actually exist on THIS hub) — both reads
+   * happen inside remedyForLastRefusal() itself, which is enough for Svelte's
+   * fine-grained tracking to pick them up through this $derived.by.
+   */
+  const remedy = $derived.by(() => remedyForLastRefusal());
+  let remedyBusy = $state(false);
+
+  async function fireRemedy() {
+    if (!remedy) return;
+    remedyBusy = true;
+    const result = await runAction(remedy.action, remedy.op);
+    remedyBusy = false;
+    // Ground truth: only clear the banner once the ECHO confirms the remedy
+    // was actually applied — never optimistically on the mere act of tapping.
+    if (result.ok) clearLastRefusal();
+  }
 
   /** May THIS session fire this exact op, per the catalog's own access data? */
   function canFire(action, value) {
@@ -97,19 +114,16 @@
   }
 
   let busy = $state({});
-  let lastResult = $state(null); // { ok, label, error, at }
-  let estopActive = $state(false);
+  let lastResult = $state(null); // { ok, label, error, at } — this button's OWN last press
 
   async function fire(action, value, label, btnKey) {
     busy = { ...busy, [btnKey]: true };
     const result = await runAction(action, value);
     busy = { ...busy, [btnKey]: false };
     lastResult = { ok: result.ok, label, error: result.error || null, at: Date.now() };
-    if (!result.ok) {
-      if (result.error === NACK_NAME[NACK.ESTOP_ACTIVE]) estopActive = true;
-    } else {
-      estopActive = false;
-    }
+    // The global refusal banner below is driven by shadow.svelte.js's
+    // `lastRefusal` — runAction() already updated it on failure, so there is
+    // nothing left to do here for that surface.
   }
 
   /**
@@ -158,18 +172,30 @@
 </script>
 
 <div class="safetybar" role="group" aria-label="Safety controls">
-  {#if estopActive && safetyAction && RECOVERY_OP != null}
+  {#if lastRefusal.code != null}
+    <!-- THE GLOBAL REFUSAL SURFACE. Any of shadow.svelte.js's three write
+         paths — a settings slider, an action button, the rail's move tape —
+         lands here the instant the hub refuses it, whether or not the
+         control that sent it is still on screen (CLAUDE.md 3, Ground Truth
+         Doctrine: a swallowed refusal misrepresents machine state). The
+         remedy button only appears when THIS hub's catalog actually
+         advertises the action that clears it. -->
     <div class="recovery" role="alert">
-      <span>E-stop refused the last command — the machine is latched.</span>
-      <button
-        type="button"
-        class="btn recover"
-        disabled={!canFire(safetyAction, RECOVERY_OP)}
-        title={reasonFor(safetyAction, RECOVERY_OP)}
-        onclick={() => fire(safetyAction, RECOVERY_OP, 'clear ' + optionLabel(safetyAction, RECOVERY_OP), 'recover')}
-      >
-        {busy.recover ? '…' : 'Clear: ' + optionLabel(safetyAction, RECOVERY_OP)}
-      </button>
+      <span>
+        refused{lastRefusal.label ? ' (' + lastRefusal.label + ')' : ''}:
+        {lastRefusal.codeName}{lastRefusal.detail ? ' — ' + lastRefusal.detail : ''}
+      </span>
+      {#if remedy}
+        <button
+          type="button"
+          class="btn recover"
+          disabled={!canFire(remedy.action, remedy.op)}
+          title={reasonFor(remedy.action, remedy.op)}
+          onclick={fireRemedy}
+        >
+          {remedyBusy ? '…' : 'Fix: ' + optionLabel(remedy.action, remedy.op)}
+        </button>
+      {/if}
     </div>
   {/if}
 

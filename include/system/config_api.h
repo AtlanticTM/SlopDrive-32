@@ -32,7 +32,7 @@
 // Bumped by hand on each firmware change so an OTA can be verified as landed
 // (surfaced via /api/capabilities → "fw_version" and the boot log). This is the
 // single source of truth for "which build is actually running." :3
-#define FIRMWARE_VERSION        "2.1.76"
+#define FIRMWARE_VERSION        "2.1.77"
 
 // =============================================================================
 // WiFi Configuration (values come from secrets.h)
@@ -166,6 +166,15 @@ float    aimStepsPerMm();
 #define AIM_HOME_STALL_CONSEC       4      // consecutive over-threshold samples
 #define AIM_HOME_POLL_HZ            150    // INA228 poll rate during homing (Hz)
 #define AIM_HOME_BASELINE_SAMPLES   20     // samples averaged for the free-run baseline
+// A stall debounced this far into the search sweep is far more likely "ran out
+// of search distance" (a sustained current glitch — foldback, an alarming
+// drive on an open phase, an unplugged motor reading garbage off a separate
+// I2C device) than "found a wall". A REAL wall is always found well inside the
+// configured rail length; only a fault rides the sweep out to its bound. Below
+// this fraction of the full 1.2x-rail search sweep, a debounced stall is
+// trusted; at/above it, homing REJECTS the stall and fails safe exactly like
+// "no stall found at all" (see _sweepToStall()/`_homingTask()`'s FAILED path).
+#define AIM_HOME_STALL_PLAUSIBLE_FRAC 0.90f
 
 // ---- Modbus direct-drive backend tunables (Phase 3 — see plan.md) ----------
 // Streamed-setpoint executor cadence: how often StreamedSetpointExecutor

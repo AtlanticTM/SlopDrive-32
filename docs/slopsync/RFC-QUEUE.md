@@ -2152,6 +2152,71 @@ operator ruling — it is at the bottom, alone.*
 
 ---
 
+## RFC-041 — A role vocabulary for the machine's physical travel extent
+
+- **Status:** Draft.
+- **Origin:** WebUI grievance sweep, 2026-07-27 — building a generic rail
+  widget against fw 2.1.76's `machine-config` channel. `window.min`/
+  `window.max` (RFC-032-era roles) were the only candidates available and
+  neither is the right fact.
+- **Problem:** A rail widget needs to know how long the machine's travel
+  actually is, to draw a rail at the right scale and to make a successful
+  home visibly change the drawn extent. The obvious candidates both fail:
+  - `window.min`/`window.max` carry `hasMin`/`hasMax` catalog annotations —
+    but those bound the LEGAL VALUE of the window SETTING itself (the
+    operator may set the window edges anywhere in `[min.min, max.max]`), not
+    the rail's physical length. On the reference device, `window.max`'s own
+    `max` is a protocol-wide ceiling (2000mm) while the physical rail this
+    unit ships on is ~500mm — a generic client using the window fields' own
+    bounds draws a rail four times too long, and homing (which changes the
+    machine's IDEA of its travel, never the window setting's legal range)
+    changes nothing about that drawing. This is a real, reported symptom:
+    "the window doesn't scale to the measured value after homing."
+  - The device separately publishes exactly the two facts that WOULD answer
+    this (`max_rail`, the configured homing-search ceiling now a real
+    setting per the fw 2.1.76 operator ruling; `measured_stroke`, the
+    read-only distance sensorless homing actually measured this session,
+    zero until a successful home) — but neither carries a role, so a generic
+    client has no portable way to find them. Hardcoding either field name is
+    exactly the device-knowledge leak `test/check-device-knowledge.mjs`
+    exists to catch; this RFC is the alternative to hardcoding it anyway.
+- **Proposed change:** register a small `geometry.*` role family:
+  - `geometry.max_travel` — the configured ceiling on physical travel (what
+    this device calls `max_rail`): a length, in the tagged field's own unit,
+    measured from the low end of travel. Typically a writable setting, but
+    the role does not require that — a hub that hardcodes its rail length
+    into a read-only field may tag it too.
+  - `geometry.measured_travel` — the length the machine's own homing
+    procedure most recently measured this session, read-only, 0 (or absent)
+    before a valid home. Ground truth, not configuration.
+  - A client resolving "how long is this rail" prefers
+    `geometry.measured_travel` when it reports a positive value (a real
+    measurement outranks a configured guess), falls back to
+    `geometry.max_travel`, and only then to whatever static bound the
+    window/position fields themselves carry. Both roles are OPTIONAL on any
+    hero claim that uses them — a hub that tags neither keeps today's
+    (imperfect but pre-existing) behaviour exactly, per the "opportunities,
+    never requirements" doctrine (`model/roles.js`).
+- **Compatibility:** Additive vocabulary only, no wire change. Absent roles
+  keep today's behaviour (rail widget falls back to the window fields' own
+  `min`/`max` catalog bounds, which is what it already does). The reference
+  webui client implements the role BINDING now (`model/roles.js`,
+  `ui/heroes.js`, `RailWidget.svelte`'s `hi` derivation) so it lights up the
+  moment `SlopSyncCatalog.h` tags `max_rail`/`measured_stroke` with these
+  roles.
+  **UPDATE (fw 2.1.77, firmware-side agent, same day):** the firmware-side
+  tagging described above as "not yet done" is done — `registry.yaml`
+  gained both roles verbatim (names match this entry exactly, discovered
+  independently rather than coordinated), `max_rail` and `measured_stroke`
+  on 0x0081 carry `roles::geometry_max_travel` /
+  `roles::geometry_measured_travel`, and `test_slopsync_devicecatalog`
+  covers the tags (registered-role allowlist, discoverable-and-unique,
+  round-trip). Status line left at Draft — landing the RFC itself is a
+  batch-review call, not this agent's to make — but both halves of the
+  ecosystem now agree on the wire vocabulary.
+
+---
+
 *Add new entries below. Keep the shape: Status / Origin / Problem / Proposed
 change / Compatibility — and if it was found by a probe or a live failure,
 say exactly which, future-us will want the receipts.*

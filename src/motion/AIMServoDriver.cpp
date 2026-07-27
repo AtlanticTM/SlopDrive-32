@@ -265,6 +265,10 @@ bool AIMServoDriver::_sweepToStall(int8_t dir_sign) {
     // we DO run out, we never felt a wall within the configured rail and homing
     // fails. :3
     int32_t sweep = (int32_t)(_max_rail_mm * AIM_STEPS_PER_MM * 1.2f);
+    // Starting position for THIS sweep, so a debounced stall can be judged by
+    // WHERE it happened relative to the sweep we planned — not just THAT it
+    // happened. See AIM_HOME_STALL_PLAUSIBLE_FRAC. :3
+    int32_t start_steps = _stepper->getCurrentPosition();
     _stepper->move(dir_sign >= 0 ? sweep : -sweep);
 
     // Let the pulse train actually spin up and let any residual stall current
@@ -305,14 +309,35 @@ bool AIMServoDriver::_sweepToStall(int8_t dir_sign) {
                 if (++over_count >= AIM_HOME_STALL_CONSEC) {
                     // STOP NOW — no coasting on a 180W servo.
                     _stepper->forceStop();
+                    int32_t stall_pos = _stepper->getCurrentPosition();
                     SLOGI("aim", "AIMServo Homing: *** STALL *** %.2f A (base %.2f + margin %.1f) "
                           "for %u polls, pos=%d",
-                          amps, baseline_a, AIM_HOME_STALL_MARGIN_A, over_count,
-                          _stepper->getCurrentPosition());
+                          amps, baseline_a, AIM_HOME_STALL_MARGIN_A, over_count, stall_pos);
                     // Wait for the pulse train to fully drain before returning.
                     uint32_t to = millis() + 500;
                     while (_stepper->isRunning() && millis() < to) {
                         vTaskDelay(pdMS_TO_TICKS(2));
+                    }
+
+                    // PLAUSIBILITY CHECK (safety): a stall debounced this deep
+                    // into the planned search sweep is far more likely a
+                    // sustained current-reading glitch (motor unplugged, the
+                    // INA228 is a separate I2C device; a servo drive alarming
+                    // on an open phase can read erratic current) than a real
+                    // wall — a real wall is always found well inside the
+                    // configured rail length. Reject it and fail exactly like
+                    // "no stall found", rather than let a bogus ~1.2x-rail
+                    // position become ground-truth geometry. :3
+                    int32_t traveled = (stall_pos >= start_steps) ? (stall_pos - start_steps)
+                                                                   : (start_steps - stall_pos);
+                    float   frac     = (sweep > 0) ? (float)traveled / (float)sweep : 1.0f;
+                    if (frac >= AIM_HOME_STALL_PLAUSIBLE_FRAC) {
+                        SLOGW("aim", "AIMServo Homing: stall REJECTED as implausible — occurred at "
+                              "%d/%d steps (%.0f%% of the search sweep, bound %.0f%%). Reads like "
+                              "'ran out of search distance' (current glitch / unplugged motor / "
+                              "open-phase alarm), not a real wall. Treating as a FAILED sweep. uhoh :C",
+                              traveled, sweep, frac * 100.0f, AIM_HOME_STALL_PLAUSIBLE_FRAC * 100.0f);
+                        return false;
                     }
                     return true;
                 }
@@ -447,11 +472,28 @@ void AIMServoDriver::_homingTask() {
         // stops is ground truth for the usable stroke. We do NOT clamp it down
         // to the configured max rail length — that setting only bounds the
         // search sweep, not the result. A wall felt slightly past the expected
-        // rail length is a real wall, so we trust it. :3
-        _measured_stroke_mm = usable_mm;
-
-        SLOGI("aim", "AIMServo Homing: front-to-rear span %.1fmm -> usable stroke %.1fmm "
-              "(rail-length bound %.1fmm) :3", raw_span_mm, _measured_stroke_mm, _max_rail_mm);
+        // rail length is a real wall, so we trust it — UP TO A SANITY BOUND.
+        // Without one, a fresh measurement had NO upper-bound check at all
+        // (unlike ConfigStore's NVS-restore path, which clamps to <2000mm) —
+        // so a bad number that slipped past the plausibility guard above could
+        // still become new ground truth, get persisted to NVS, and haunt every
+        // boot after. Same bound as the restore path
+        // (MotorDriver::setMeasuredStrokeMm()), reused rather than
+        // re-invented. :3
+        if (usable_mm > 0.0f && usable_mm < 2000.0f) {
+            setMeasuredStrokeMm(usable_mm);
+            SLOGI("aim", "AIMServo Homing: front-to-rear span %.1fmm -> usable stroke %.1fmm "
+                  "(rail-length bound %.1fmm) :3", raw_span_mm, _measured_stroke_mm, _max_rail_mm);
+        } else if (usable_mm >= 2000.0f) {
+            SLOGE("aim", "AIMServo Homing: measured stroke %.1fmm is IMPLAUSIBLE (sanity bound "
+                  "0..2000mm, same as the NVS-restore path) — REJECTED, NOT stored as ground "
+                  "truth. Machine keeps its prior stroke (%.1fmm) / configured rail (%.1fmm). "
+                  "Check wiring, AIM_HOME_STALL_MARGIN_A, and the plausibility guard above. "
+                  "uhoh :C", usable_mm, _measured_stroke_mm, _max_rail_mm);
+        }
+        // usable_mm == 0.0f falls through with no log: a degenerate zero span
+        // is not a NEW implausible measurement, it's the same "not measured"
+        // sentinel _measured_stroke_mm already defaults to.
     } else {
         // Non-positive span — something's off, fall back to the configured rail
         // length. We still have a valid home from the rear sweep. :3

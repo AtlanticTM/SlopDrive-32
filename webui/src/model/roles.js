@@ -46,6 +46,14 @@ export const ROLE = {
   windowMin: 'window.min',
   windowMax: 'window.max',
 
+  // RFC-041: how far the machine can actually travel, as opposed to
+  // window.min/window.max's OWN catalog min/max annotations (which bound the
+  // legal WINDOW SETTING VALUE, not the physical rail). Neither field is a
+  // substitute for these — see RFC-041 for why. Both are lengths in the
+  // window fields' own unit, measured/configured from the low end of travel.
+  geometryMaxTravel: 'geometry.max_travel',
+  geometryMeasuredTravel: 'geometry.measured_travel',
+
   // live telemetry
   telemetryPosition: 'telemetry.position',
   telemetryVelocity: 'telemetry.velocity',

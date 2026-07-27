@@ -80,6 +80,21 @@ public:
 
 // Ordered by ascending priority: the highest ACTIVE state owns the LEDs.
 // (Estop outranks everything, always. Boot is the implicit floor state.)
+//
+// Pairing sits ABOVE Warning/Fault (moved here from below both, alongside
+// this comment — CLAUDE.md-tracked field bug class): a Fault/Warning is
+// PERSISTENT and rediscoverable (still true next time you look, still in
+// /api/log); a pairing window is a 120s, operator-is-standing-there
+// invitation that is GONE if missed. Concretely: `Fault` fires whenever the
+// machine is simply unhomed (SlopGlowBoard.cpp: `!state.homed &&
+// !state.homing_in_progress`) — the ordinary state of a fresh boot, not a
+// hardware failure — which used to hide the RFC-027 push-to-pair window
+// (opened by triple power-cycling a factory-fresh, therefore UNHOMED,
+// device) behind red Fault breathing on exactly the machine most likely to
+// be pairing. Pairing still sits BELOW Ota (an active flash is "do not
+// touch," and disrupting a device mid-OTA for a pairing ceremony is a
+// non-scenario anyway — power-cycling ends the flash) and BELOW Estop
+// (safety always wins, no exceptions).
 enum class GlowState : uint8_t {
     Boot = 0,      // power-up until the system says otherwise
     LinkDown,      // no network/transport
@@ -87,10 +102,10 @@ enum class GlowState : uint8_t {
     Active,        // motion in progress (pattern/stream/manual)
     Paused,
     Calibrating,   // homing / self-measurement — exclusive, hands off
-    Pairing,       // pairing window open — visible invitation
     Warning,       // degraded but running
-    Ota,           // flashing — do not power off
     Fault,         // needs attention, motion refused
+    Pairing,       // pairing window open — visible invitation
+    Ota,           // flashing — do not power off
     Estop,         // latched emergency stop
     kCount_,
 };

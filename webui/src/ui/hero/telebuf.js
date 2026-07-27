@@ -4,10 +4,24 @@
  * This is a deliberately shrunk port of the pre-refactor `core/telebuf.js`.
  * The original also did WS-frame parsing and dual-clock (device/client) sync
  * because it fed off a raw binary telemetry plane; that plane is gone. Here,
- * `machine.svelte.js` already timestamps every decoded STATE sample in the
- * client's own `performance.now()` domain (`machine.sampleTs[channelId]`), so
- * there is nothing left to synchronize — a caller just pushes {value, tsMs}
- * pairs as they arrive off `machine.samples`/`machine.sampleTs`.
+ * `machine.svelte.js` already timestamps every decoded STATE sample
+ * (`machine.sampleTs[channelId]`) with `Date.now()` — the epoch-ms domain set
+ * at `session.js`'s `emit('state', ..., Date.now())` — so there is nothing
+ * left to synchronize — a caller just pushes {value, tsMs} pairs as they
+ * arrive off `machine.samples`/`machine.sampleTs`.
+ *
+ * CLOCK-DOMAIN TRAP (bit us once, guard stays): `sampleAt(tMs)` must be
+ * called with a timestamp in that SAME Date.now() epoch-ms domain. A
+ * `requestAnimationFrame` callback's own argument is a DOMHighResTimeStamp —
+ * ms since `performance.timeOrigin`, a much smaller number — and passing it
+ * straight through makes `tMs` permanently "older" than every real sample in
+ * the ring, so `sampleAt()` always takes the `tMs <= bufT[head]` branch and
+ * returns the OLDEST entry still buffered: with the default 256-deep ring at
+ * ~30 Hz that reads as the display lagging live position by ~8-9 SECONDS,
+ * constantly, which is exactly the "incredibly laggy" field report this
+ * comment exists to prevent a repeat of. Callers driven by rAF must convert
+ * with `performance.timeOrigin + rafTimestamp` before calling `sampleAt()` —
+ * see RailWidget.svelte's `draw()`.
  *
  * What is kept, because it is still true at ~20-30 Hz STATE cadence rendered
  * at 60 fps rAF: samples arrive slower than frames are drawn, so a caller

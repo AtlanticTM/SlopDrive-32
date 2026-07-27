@@ -73,7 +73,8 @@ bool isRegisteredRole(std::string_view r) {
     using namespace slopsync::field_roles;
     static constexpr std::string_view kAll[] = {
         limit_user_speed, limit_user_accel, limit_input_speed, limit_input_accel,
-        limit_input_jerk, window_min, window_max, telemetry_position, telemetry_target,
+        limit_input_jerk, geometry_max_travel, geometry_measured_travel,
+        window_min, window_max, telemetry_position, telemetry_target,
         telemetry_velocity,
         telemetry_current, telemetry_power_bus, telemetry_temp, telemetry_uptime,
         identity_name, meta_enabled_mask, meta_reset_gen,
@@ -526,7 +527,8 @@ TEST_CASE("device catalog: the limit + window roles are discoverable and unique"
     DeviceCatalog dc;
     using namespace slopsync::field_roles;
     const std::string_view wanted[] = {limit_user_speed,  limit_user_accel, limit_input_speed,
-                                       limit_input_accel, limit_input_jerk, window_min, window_max};
+                                       limit_input_accel, limit_input_jerk, window_min, window_max,
+                                       geometry_max_travel, geometry_measured_travel};
     for (std::string_view want : wanted) {
         CAPTURE(want);
         int hits = 0;
@@ -569,13 +571,12 @@ TEST_CASE("device catalog: measured_stroke is read-only, max_rail is now a setti
     CHECK_FALSE(stroke->hasSettingKey);   // *** the distinction ***
     CHECK_FALSE(stroke->desc.empty());    // still explained to the user
     CHECK(stroke->unit == "mm");
-    CHECK(stroke->role.empty());
+    CHECK(stroke->role == slopsync::field_roles::geometry_measured_travel);
 
     // max_rail (item 1): promoted to a real setting. Checked on its own,
-    // rather than folded into the `settings[]` loop below, because it
-    // carries no registered `role` yet — RFC-009 roles are an optional
-    // upgrade hint, not a requirement, and no registered role fits "the
-    // homing search bound" today.
+    // rather than folded into the `settings[]` loop below, because its role
+    // (geometry.max_travel) is not one of the plain `limit.*` roles that
+    // loop's siblings all carry.
     const LayoutField* rail = layoutFieldByName(dc.c, *e, "max_rail");
     REQUIRE(rail != nullptr);
     CHECK(rail->hasSettingKey);
@@ -586,6 +587,7 @@ TEST_CASE("device catalog: measured_stroke is read-only, max_rail is now a setti
     CHECK(rail->hasStep);
     CHECK_FALSE(rail->group.empty());
     CHECK_FALSE(rail->desc.empty());
+    CHECK(rail->role == slopsync::field_roles::geometry_max_travel);
 
     // Every other numeric field here IS a setting, with a default, bounds,
     // and a registered role.
@@ -954,12 +956,14 @@ TEST_CASE("device catalog: annotations survive encode -> decode") {
     REQUIRE(rail != nullptr);
     CHECK(rail->hasSettingKey);
     CHECK(rail->settingKey == 8);
+    CHECK(rail->role == slopsync::field_roles::geometry_max_travel);
 
     // measured_stroke (item 3, fw 2.1.76): the NEW read-only derived-truth
     // field — survives round-trip WITHOUT a setting_key, same ABSENCE-is-the-
     // signal contract max_rail used to demonstrate.
     const LayoutField* stroke = layoutFieldByName(back, *cfg, "measured_stroke");
     REQUIRE(stroke != nullptr);
+    CHECK(stroke->role == slopsync::field_roles::geometry_measured_travel);
     CHECK_FALSE(stroke->hasSettingKey);   // read-only survives as an ABSENCE
 
     const LayoutField* mask = layoutFieldByName(back, *cfg, "enabled_mask");

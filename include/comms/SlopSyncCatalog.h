@@ -531,7 +531,7 @@ inline bool buildSlopDriveCatalog(slopsync::Catalog32& c, DeviceFeatures feat = 
                       .group = "Rail geometry",
                       .desc = "How far sensorless homing searches for the hard stops. Set it above "
                               "your rail's real length (e.g. 2000mm+ for a 2m rail).",
-                      .step = 1.0f,
+                      .role = roles::geometry_max_travel, .step = 1.0f,
                       .settingKey = 8, .hasSettingKey = true, .hasStep = true});
     c.addLayoutField({.name = "input_jerk",  .type = PackedFieldType::f32, .unit = "mm/s3", .scale = 1.0f,
                       .hasMin = true, .hasMax = true, .min = ceiling::jerk_min, .max = ceiling::jerk_max,
@@ -577,7 +577,8 @@ inline bool buildSlopDriveCatalog(slopsync::Catalog32& c, DeviceFeatures feat = 
     // 0..32 keep their offsets.
     c.addLayoutField({.name = "measured_stroke", .type = PackedFieldType::f32, .unit = "mm", .scale = 1.0f,
                       .desc = "Usable stroke length sensorless homing actually measured between the "
-                              "two hard stops. Zero until the first successful home."});
+                              "two hard stops. Zero until the first successful home.",
+                      .role = roles::geometry_measured_travel});
 
     // ---- 0x0082 "pattern-state" — STATE, normal, on-change ----------------
     // PatternEngine live snapshot.  [1+1+4+4+4+4+1 = 19 B]

@@ -171,6 +171,60 @@
     return out;
   });
 
+  // ── control ownership + eviction ("Connected clients", the reachable slice) ─
+  //
+  // There is no session ROSTER on this hub (0x0002 is allocated in the
+  // registry but no catalog builder — device or library — declares it, and a
+  // live probe against this machine confirms it never appears on the wire).
+  // What the protocol genuinely offers today is control-owner (0x0004,
+  // `watch`-visible, spec-core): which session, if any, owns each of the
+  // fixed arbiter sources. Its field names (src0/owner0..src3/owner3) are as
+  // safe to reference literally as pending-pairing's slot fields above — same
+  // spec-core guarantee, same idiom.
+  //
+  // Eviction is session-admin's `evict` op (RFC-018) — the SAME 0x0009
+  // channel and op-select already driving decide() above, because the
+  // library treats "who may do what" (approve/deny/evict/revoke) as one
+  // admin surface, not four. Reusing canAdminister/opIndex/keyOf here is
+  // therefore not a shortcut, it is the correct model: one tier gate for the
+  // whole surface.
+  //
+  // Absent channel -> nothing to draw (guarded by `{#if ownerEntry}` below),
+  // the same graceful-degrade every hero widget already does when its roles
+  // are absent.
+  const ownerEntry = $derived(entryNamed('control-owner'));
+  const ownerSample = $derived(ownerEntry ? machine.samples[ownerEntry.id] : null);
+
+  const owners = $derived.by(() => {
+    if (!ownerSample) return [];
+    const out = [];
+    for (let i = 0; i < 4; i++) {
+      const src = ownerSample['src' + i];
+      const owner = ownerSample['owner' + i];
+      if (src === undefined || owner === undefined) break;
+      out.push({ src, owner });
+    }
+    return out;
+  });
+
+  let evictBusy = $state(null);
+  let evictResult = $state(null);
+
+  async function evict(sessionId) {
+    const s = getSession();
+    if (!s || !adminEntry) return;
+    const op = opIndex('evict');
+    if (op < 0) { evictResult = { ok: false, msg: 'this hub does not offer eviction' }; return; }
+    evictBusy = sessionId;
+    evictResult = null;
+    const action = { channelId: adminEntry.id, key: keyOf('op'), label: 'evict session' };
+    const res = await runAction(action, op, { [keyOf('session_id')]: sessionId });
+    evictResult = res.ok
+      ? { ok: true, msg: 'evicted session ' + sessionId }
+      : { ok: false, msg: res.error || 'refused' };
+    evictBusy = null;
+  }
+
   let busy = $state(null);
   let result = $state(null);
 
@@ -377,8 +431,50 @@
   {/if}
 </section>
 
+{#if ownerEntry}
+  <section class="ownership">
+    <header>
+      <h2>Control ownership</h2>
+    </header>
+
+    {#if !owners.length}
+      <p class="note">No motion source is currently owned by any session.</p>
+    {:else}
+      <ul class="owners">
+        {#each owners as o (o.src)}
+          <li>
+            <div class="who">
+              <span class="src mono">source {o.src}</span>
+              {#if o.owner}
+                <span class="sess mono">session {o.owner}</span>
+                {#if o.owner === machine.link.sessionId}<span class="you">this session</span>{/if}
+              {:else}
+                <span class="unowned">unowned</span>
+              {/if}
+            </div>
+            {#if o.owner}
+              <div class="acts">
+                <button class="deny" disabled={!canAdminister || evictBusy !== null}
+                        title={!canAdminister ? 'Requires the configure tier to evict a session' : ''}
+                        onclick={() => evict(o.owner)}>
+                  {evictBusy === o.owner ? 'Evicting…' : 'Evict'}
+                </button>
+              </div>
+            {/if}
+          </li>
+        {/each}
+      </ul>
+    {/if}
+
+    {#if evictResult}
+      <p class="result" class:bad={!evictResult.ok} role="status">{evictResult.msg}</p>
+    {/if}
+  </section>
+{/if}
+
 <style>
-  .pairing { background: var(--bg-card); border: 1px solid var(--line); border-radius: var(--r); padding: var(--gap); }
+  .pairing, .ownership { background: var(--bg-card); border: 1px solid var(--line); border-radius: var(--r); padding: var(--gap); }
+  .ownership { margin-top: var(--gap); }
   header { display: flex; align-items: center; gap: var(--gap); margin-bottom: var(--gap); }
   h2 { font-size: 1rem; font-weight: 500; }
   .badge.open { font-size: .75rem; color: var(--good); border: 1px solid var(--good); border-radius: 999px; padding: 1px 8px; }
@@ -410,4 +506,13 @@
   .result { margin-top: var(--gap); font-size: .875rem; color: var(--good); }
   .result.bad { color: var(--bad); }
   .result.pending { color: var(--ink-dim); }
+
+  .owners { list-style: none; margin: 0; padding: 0; display: grid; gap: 8px; }
+  .owners li { display: flex; flex-wrap: wrap; gap: 8px; align-items: center; justify-content: space-between;
+               background: var(--bg-raised); border: 1px solid var(--line-soft); border-radius: var(--r-s); padding: 10px; }
+  .owners .who { display: flex; flex-wrap: wrap; gap: 8px; align-items: center; }
+  .owners .src { color: var(--ink-dim); }
+  .owners .sess { color: var(--ink); }
+  .owners .you { font-size: .75rem; color: var(--good); border: 1px solid var(--good); border-radius: 999px; padding: 1px 8px; }
+  .owners .unowned { color: var(--ink-faint); font-size: .875rem; }
 </style>

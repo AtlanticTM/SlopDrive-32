@@ -185,31 +185,63 @@
   }
 
   // ---------------------------------------------------------------------------
-  // Ruler ticks — "nice numbers", scale/unit agnostic. The original assumed an
-  // integer-mm rail and hand-rolled its tick spacing accordingly; this derives
-  // a pleasant step from span alone so it looks right whether the catalog's
-  // unit is mm, inches, or something nobody has invented yet.
+  // Ruler ticks — a faithful port of the pre-refactor rail's ruler
+  // (`drawStaticLayer` in `webui-prerefactor`'s rail.js), NOT the "nice
+  // numbers" scheme this port originally replaced it with. That replacement
+  // picked spacing from a target tick COUNT (span / 50, rounded to 1-2-5-10)
+  // — technically scale-agnostic, but on this rail it landed on a 10-unit
+  // minor step with majors every 50 units: ~6 major ticks total, and the
+  // last tick could overshoot the far end because `round(span/step)` doesn't
+  // generally divide evenly. That is the "goofy" the operator flagged.
+  //
+  // The original ticked every WHOLE UNIT of the reported span (1mm on every
+  // hub live today — nothing here hardcodes "mm", it is just whatever unit
+  // the catalog's `min`/`max` fields report), major every 10 units, mid
+  // every 5, and only coarsened the minor step when the host was physically
+  // too narrow to draw one line per unit without them smearing together.
+  // That density check is measured against the WIDGET's own pixel width
+  // (`railWidthPx` below), same as the original measured against its own
+  // host — the generalization is real (any span/unit gets sane ticks), the
+  // visual RESULT for an integer-unit rail is unchanged.
   // ---------------------------------------------------------------------------
-  function niceStep(spanV, targetCount) {
-    if (!(spanV > 0)) return 1;
-    const raw = spanV / targetCount;
-    const mag = Math.pow(10, Math.floor(Math.log10(raw)));
-    const norm = raw / mag;
-    const mult = norm <= 1 ? 1 : norm <= 2 ? 2 : norm <= 5 ? 5 : 10;
-    return mult * mag;
-  }
-  function buildTicks(loV, hiV, step) {
+  function buildTicks(loV, hiV, railWidthPx) {
     const out = [];
     const spanV = hiV - loV;
-    if (!(spanV > 0) || !(step > 0)) return out;
-    const count = Math.min(Math.round(spanV / step) + 1, 400);
-    for (let i = 0; i < count; i++) {
-      out.push({ frac: (i * step) / spanV, major: i % 5 === 0 });
+    if (!(spanV > 0)) return out;
+    const railUnits = Math.max(Math.round(spanV), 1);
+    // Before the ResizeObserver below has fired, railWidthPx is 0 — default
+    // to "dense enough for 1-unit ticks" rather than falling back to the
+    // coarsest step, so the very first paint already looks right.
+    const pxPerUnit = railWidthPx > 0 ? railWidthPx / railUnits : 2;
+    let minorStep = 1;
+    if (pxPerUnit < 2) minorStep = 2;
+    if (pxPerUnit < 1) minorStep = 5;
+    if (railUnits / minorStep > 600) minorStep = Math.ceil(railUnits / 600);
+    for (let u = 0; u <= railUnits; u += minorStep) {
+      const major = u % 10 === 0;
+      const mid = !major && u % 5 === 0;
+      out.push({ frac: u / railUnits, major, mid });
     }
     return out;
   }
-  const minorStep = $derived(niceStep(span, 50));
-  const ticks = $derived(buildTicks(lo, hi, minorStep));
+
+  // Actual pixel width of the rail host — the ruler's density check needs a
+  // real measurement (percentages alone can't tell "1mm tick" from "1px
+  // smear"), tracked the same way the canvas sizing effect below tracks it,
+  // but kept independent so the ruler doesn't depend on the canvas ever
+  // mounting.
+  let railWidthPx = $state(0);
+  $effect(() => {
+    if (!hostEl) return;
+    railWidthPx = hostEl.clientWidth;
+    const ro = (typeof ResizeObserver !== 'undefined')
+      ? new ResizeObserver(() => { railWidthPx = hostEl.clientWidth; })
+      : null;
+    if (ro) ro.observe(hostEl);
+    return () => { if (ro) ro.disconnect(); };
+  });
+
+  const ticks = $derived(buildTicks(lo, hi, railWidthPx));
 
   // ---------------------------------------------------------------------------
   // Telemetry smoothing — one telebuf per available role, fed on every real
@@ -802,12 +834,18 @@
   {/if}
 
   <div class="spine-rail-host" class:drag-live={dragMode !== null} bind:this={hostEl}>
+    <!-- Tick geometry mirrors the original's 72px-tall host ratios
+         (tickTop 26px, majorLen 14px, midLen 10px, minorLen 7px, baseline
+         33px) as percentages of this 0-100 viewBox — minor ticks land
+         exactly on the baseline from above; mid/major poke a bit past it,
+         which is what reads as "ruler" rather than "tally marks". -->
     <svg class="rail-ruler-svg" viewBox="0 0 100 100" preserveAspectRatio="none" aria-hidden="true">
       {#each ticks as t}
-        <line x1={t.frac * 100} x2={t.frac * 100} y1={t.major ? 34 : 44} y2="58"
-              stroke={t.major ? 'var(--line-3)' : 'var(--line-2)'} stroke-width="1" opacity={t.major ? 1 : 0.6} />
+        <line x1={t.frac * 100} x2={t.frac * 100} y1="36.11" y2={t.major ? 55.56 : (t.mid ? 50 : 45.83)}
+              stroke={t.major ? 'var(--line-3)' : 'var(--line-1)'} stroke-width="1"
+              opacity={t.major ? 1 : (t.mid ? 0.85 : 0.5)} />
       {/each}
-      <line x1="0" y1="58" x2="100" y2="58" stroke="var(--line-1)" stroke-width="1" />
+      <line x1="0" y1="45.83" x2="100" y2="45.83" stroke="var(--line-1)" stroke-width="1" />
     </svg>
     <span class="rail-endcap lo mono">{formatValue(min, lo)}</span>
     <span class="rail-endcap hi mono">{formatValue(max, hi)}</span>

@@ -24,7 +24,11 @@ import { OP_SET_WINDOW, OP_SET_SPEED, OP_SET_ACCEL, OP_GEN_CFG,
          OP_GEN_RUN, OP_MODE, OP_BLEND, OP_PAUSE, OP_HALT, OP_ESTOP,
          OP_HOME, OP_OVERRIDE, OP_BYPASS, OP_CLEAR_FAULT, OP_MOVE,
          OP_GET_CFG, OP_STREAM_MODE, OP_OVERSHOOT } from './wire.js';
-import { isFallback } from './link.js';
+// M5c: `isFallback` used to mean "the :81 socket is down, we are HTTP polling".
+// The condition is unchanged, only its source: we are on the fallback path
+// exactly when the SlopSync session is not LIVE.
+import { isSlopSyncLive } from './slopsync/bridge.js';
+const isFallback = () => !isSlopSyncLive();
 import { settingsAuthoritative } from '../core/range.js';
 
 // ============================================================================
@@ -351,6 +355,33 @@ export function getReported(key) {
 function _transition(sh, newState) {
   if (sh.state === 'fault') return; // fault is terminal until next send
   sh.state = newState;
+  _stampState(sh);
+}
+
+/**
+ * Publish the shadow's state onto its own DOM elements as `data-shadow`, so ONE
+ * stylesheet rule can express "this value is not confirmed yet" for every
+ * control instead of each card inventing its own treatment.
+ *
+ * GROUND TRUTH (CLAUDE.md §3) — this is the visible half of the doctrine. A
+ * control must never look applied because the CLIENT changed it; it looks
+ * applied when the DEVICE echoes it. That mattered less when a failed intent
+ * could silently fall back to an HTTP twin; as of fw 2.1.73 there is no
+ * fallback (HTTP is read-only), so an intent that goes nowhere goes NOWHERE,
+ * and a control that kept rendering the requested value would be lying.
+ *
+ * The escalation is deliberate: pending is quiet (you just moved it, of course
+ * it is in flight), overdue gets legible, fault is unmissable. Anything louder
+ * at the pending step would make normal use feel like an error state.
+ */
+function _stampState(sh) {
+  if (typeof document === 'undefined' || !sh.elIds) return;
+  for (var i = 0; i < sh.elIds.length; i++) {
+    var el = document.getElementById(sh.elIds[i]);
+    if (!el) continue;
+    if (sh.state && sh.state !== 'confirmed') el.setAttribute('data-shadow', sh.state);
+    else el.removeAttribute('data-shadow');
+  }
 }
 
 function _render(sh) {

@@ -16,7 +16,7 @@
  * (see features/diag.js) — one source of truth for connection trouble.
  */
 import { $ } from '../core/ui.js';
-import { getStats } from '../core/link.js';
+import { getLinkStats as getStats } from '../core/slopsync/bridge.js';
 
 var DROP_FLASH_MS = 1800;   // hold amber this long after a detected drop
 var HB_WARN_MS    = 1500;   // heartbeat late (missed a couple of ~500ms beats)

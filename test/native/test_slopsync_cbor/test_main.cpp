@@ -669,3 +669,88 @@ TEST_CASE("Writer sets failed on output-span overflow") {
     CHECK(w.failed());
     CHECK(w.size() == 0);
 }
+
+// ============================================================================
+// RFC-028 regression — parser TOTALITY (found by test/fuzz/fuzz_cbor).
+//
+// Minimised crashing input, verbatim from libFuzzer:
+//   7B FF FF FF FF FF FF FF FF        (major 3 | ai=27 -> 8-byte length,
+//                                      length = 2^64-1)
+//
+// The bug: readTstr/readBstr bounded the payload with
+//     if (start + len > _in.size()) -> Truncated
+// which OVERFLOWS. With start=9 and len=2^64-1, `start + len` wraps to 8,
+// 8 > 9 is false, the check passes, and the reader returns a 2^64-1-byte
+// string_view into a 9-byte buffer (while rewinding _pos backwards). Any
+// caller that copied or scanned that view walked off the heap — and every
+// message decoder in the library reaches readTstr.
+//
+// The fix is `arg > remaining` instead of `start + len > size` (cbor_reader
+// .hpp). These cases pin BOTH string types, at the 8-, 4- and 2-byte head
+// widths, and confirm the legal maximum still parses.
+// ============================================================================
+TEST_CASE("RFC-028: a tstr length of 2^64-1 is rejected, not trusted") {
+    const std::array<std::byte, 9> evil{
+        std::byte{0x7B}, std::byte{0xFF}, std::byte{0xFF}, std::byte{0xFF}, std::byte{0xFF},
+        std::byte{0xFF}, std::byte{0xFF}, std::byte{0xFF}, std::byte{0xFF}};
+    CborReader r{std::span<const std::byte>(evil)};
+    auto v = r.readTstr();
+    REQUIRE(r.bytesConsumed() == 0);
+    REQUIRE(!v.isOk());
+    CHECK(v.error() == DecodeError::Truncated);
+}
+
+TEST_CASE("RFC-028: a bstr length of 2^64-1 is rejected, not trusted") {
+    const std::array<std::byte, 9> evil{
+        std::byte{0x5B}, std::byte{0xFF}, std::byte{0xFF}, std::byte{0xFF}, std::byte{0xFF},
+        std::byte{0xFF}, std::byte{0xFF}, std::byte{0xFF}, std::byte{0xFF}};
+    CborReader r{std::span<const std::byte>(evil)};
+    auto v = r.readBstr();
+    REQUIRE(r.bytesConsumed() == 0);
+    REQUIRE(!v.isOk());
+    CHECK(v.error() == DecodeError::Truncated);
+}
+
+TEST_CASE("RFC-028: oversized string lengths reject at every head width") {
+    // 4-byte head claiming 2^32-1 bytes.
+    {
+        const std::array<std::byte, 5> evil{std::byte{0x7A}, std::byte{0xFF}, std::byte{0xFF},
+                                            std::byte{0xFF}, std::byte{0xFF}};
+        CborReader r{std::span<const std::byte>(evil)};
+        CHECK(!r.readTstr().isOk());
+    }
+    // 2-byte head claiming 65535 bytes.
+    {
+        const std::array<std::byte, 3> evil{std::byte{0x79}, std::byte{0xFF}, std::byte{0xFF}};
+        CborReader r{std::span<const std::byte>(evil)};
+        CHECK(!r.readTstr().isOk());
+    }
+    // skipValue() must inherit the same rejection — it is the §4.3
+    // unknown-key path, i.e. the one a decoder runs on data it does NOT
+    // understand, which is precisely the attacker's preferred entry point.
+    {
+        const std::array<std::byte, 9> evil{
+            std::byte{0x7B}, std::byte{0xFF}, std::byte{0xFF}, std::byte{0xFF}, std::byte{0xFF},
+            std::byte{0xFF}, std::byte{0xFF}, std::byte{0xFF}, std::byte{0xFF}};
+        CborReader r{std::span<const std::byte>(evil)};
+        CHECK(!r.skipValue().isOk());
+        CHECK(r.bytesConsumed() == 0);
+    }
+}
+
+TEST_CASE("RFC-028: the exactly-fitting string still parses (fix is not over-tight)") {
+    // 0x63 = major3 | length 3, then "abc" — the boundary the fix must not
+    // move: remaining == arg is legal, remaining < arg is not.
+    const std::array<std::byte, 4> ok{std::byte{0x63}, std::byte{'a'}, std::byte{'b'},
+                                      std::byte{'c'}};
+    CborReader r{std::span<const std::byte>(ok)};
+    auto v = r.readTstr();
+    REQUIRE(v.isOk());
+    CHECK(v.value() == "abc");
+    CHECK(r.bytesConsumed() == 4);
+
+    // One byte short of the declared length: rejected.
+    const std::array<std::byte, 3> shortOne{std::byte{0x63}, std::byte{'a'}, std::byte{'b'}};
+    CborReader r2{std::span<const std::byte>(shortOne)};
+    CHECK(!r2.readTstr().isOk());
+}

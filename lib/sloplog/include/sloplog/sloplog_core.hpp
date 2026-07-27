@@ -7,8 +7,25 @@
 // stack, then commit it into a fixed-slot ring under a short externally-
 // supplied lock (the ~µs copy is the entire critical section). A single
 // drain() caller (Core 0 on firmware) pops records and fans them out to
-// registered sinks. Overflow drops the OLDEST record and counts the loss —
-// a logger that can block a motion core is worse than no logger.
+// registered sinks. Overflow sheds records and counts the loss — a logger
+// that can block a motion core is worse than no logger.
+//
+// SEVERITY-AWARE RETENTION (the reason this ring is not a plain FIFO):
+// a flood of Debug/Trace must never evict the Error that explains what went
+// wrong. So the ring is split by policy, not by storage:
+//
+//   * LOW  (below kReserveFloor, i.e. Trace/Debug/Info) may occupy at most
+//     `Slots - HighReserve` slots and NEVER evicts anything. Past its cap —
+//     or with the ring simply full — a low record is dropped-and-counted at
+//     the door. Cheap, O(1), no scan.
+//   * HIGH (kReserveFloor and above, i.e. Warn/Error/Fatal) always has
+//     `HighReserve` slots it cannot be squeezed out of, and on a genuinely
+//     full ring falls back to drop-oldest.
+//
+// The invariant that buys: a HIGH record can only ever be displaced by
+// another HIGH record. Low-severity spam is structurally incapable of
+// destroying evidence. Every drop is counted per level (droppedAtLevel) so
+// the shedding is visible instead of silent.
 #pragma once
 
 #include <cstdarg>
@@ -33,6 +50,18 @@ inline const char* levelName(Level l) {
 }
 
 inline char levelChar(Level l) { return "TDIWEF?"[uint8_t(l) < 6 ? uint8_t(l) : 6]; }
+
+// The severity line that splits "keep at all costs" from "shed under load".
+// Warn and above is what an operator needs after the fact; Trace/Debug/Info
+// are the running commentary. Shared by every ring in the chain (core ring,
+// the SlopSync bridge ring, the /api/log web ring) — a severity-blind ring
+// anywhere would defeat the whole scheme.
+inline constexpr Level kReserveFloor = Level::Warn;
+inline constexpr bool isReserved(Level l) { return l >= kReserveFloor; }
+
+// Number of distinct real levels (Trace..Fatal) — the width of every
+// per-level drop counter array in the chain.
+inline constexpr size_t kLevelCount = 6;
 
 // One log record. Fixed-size by design: slots are copied whole under the
 // ring lock and never reference caller memory after commit.
@@ -70,14 +99,26 @@ public:
     virtual void unlock() = 0;
 };
 
-// The core: fixed ring of Records + sink registry + drop accounting.
+// The core: fixed ring of Records + sink registry + severity-aware drop
+// accounting.
 // Producers: push()/logf() from anywhere (lock held only for the slot copy).
 // Consumer: exactly one caller pumps drain() (not enforced — documented).
-template <size_t Slots = 64, size_t MaxSinks = 4>
+//
+// HighReserve is the number of slots Trace/Debug/Info may never touch. It
+// defaults to a quarter of the ring, which on the firmware's 64 slots leaves
+// 16 for Warn+ — comfortably more than any single fault cascade this machine
+// produces, while still leaving 48 slots of normal breathing room.
+template <size_t Slots = 64, size_t MaxSinks = 4, size_t HighReserve = Slots / 4>
 class LogCore {
     static_assert(Slots >= 8, "ring too small to absorb a burst");
+    static_assert(HighReserve >= 1, "reserve at least one slot for Warn+");
+    static_assert(HighReserve < Slots, "reserve must leave room for Debug/Info");
 
 public:
+    // Trace/Debug/Info may never hold more than this many slots.
+    static constexpr size_t kLowCapacity = Slots - HighReserve;
+    static constexpr size_t kHighReserve = HighReserve;
+
     explicit LogCore(IPort& port, Level floor = Level::Trace)
         : _port(port), _floor(floor) {}
 
@@ -133,19 +174,35 @@ public:
     }
 
     // Commit a pre-built record (producers that format their own).
+    //
+    // Two shedding policies, picked by severity — see the header comment:
+    //   LOW  : refuse the NEWEST record (never evicts, capped at kLowCapacity)
+    //   HIGH : evict the OLDEST record (which the low cap guarantees can only
+    //          ever be another HIGH once lows are at their ceiling)
+    // Both count the loss per level. Everything here is O(1) and touches no
+    // memory outside the fixed arrays: no scan, no allocation, no blocking.
     void push(const Record& r) {
         if (r.level < _floor || r.level >= Level::Off) return;
+        const bool high = isReserved(r.level);
         _port.lock();
-        Record& slot = _ring[_write % Slots];
-        bool overwriting = (_write - _read) >= Slots;
-        if (overwriting) {
-            _read++;          // drop-oldest
-            _lostSinceDrain++;
-            _totalLostShadow++;
+        const bool full = (_write - _read) >= Slots;
+        if (!high) {
+            if (full || _lowPending >= kLowCapacity) {
+                dropLocked(r.level);   // drop-newest: low severity never evicts
+                _port.unlock();
+                return;
+            }
+        } else if (full) {
+            const Record& victim = _ring[_read % Slots];
+            if (!isReserved(victim.level) && _lowPending > 0) --_lowPending;
+            dropLocked(victim.level);  // drop-oldest
+            _read++;
         }
+        Record& slot = _ring[_write % Slots];
         slot = r;
         slot.lost = _lostSinceDrain;  // rides on the next record a reader sees
         _write++;
+        if (!high) ++_lowPending;
         _port.unlock();
         if (_immediateDrain) drain();
     }
@@ -163,6 +220,7 @@ public:
             }
             r = _ring[_read % Slots];
             _read++;
+            if (!isReserved(r.level) && _lowPending > 0) --_lowPending;
             _lostSinceDrain = 0;
             _port.unlock();
             for (size_t i = 0; i < _sinkCount; ++i) {
@@ -173,14 +231,60 @@ public:
         return n;
     }
 
-    // Lifetime drop count (records lost to overflow, ever).
+    // Lifetime drop count (records lost to overflow, ever, all levels).
     uint32_t totalLost() const { return _totalLostShadow; }
     size_t pending() const {
         // Racy read is fine: diagnostic only.
         return size_t(_write - _read);
     }
+    // How many Trace/Debug/Info records are currently parked in the ring —
+    // the number the low cap governs. Diagnostic; racy read is fine.
+    size_t lowPending() const { return _lowPending; }
+
+    // ---- Honest visibility -------------------------------------------------
+    // Per-level lifetime drop counts. A silent drop is the one thing this
+    // logger refuses to do, so every shed record lands in exactly one of
+    // these six buckets and stays there.
+    uint32_t droppedAtLevel(Level l) const {
+        return uint8_t(l) < kLevelCount ? _dropped[uint8_t(l)] : 0;
+    }
+    uint32_t droppedLow() const {
+        uint32_t n = 0;
+        for (size_t i = 0; i < kLevelCount; ++i)
+            if (!isReserved(Level(i))) n += _dropped[i];
+        return n;
+    }
+    uint32_t droppedHigh() const {
+        uint32_t n = 0;
+        for (size_t i = 0; i < kLevelCount; ++i)
+            if (isReserved(Level(i))) n += _dropped[i];
+        return n;
+    }
+
+    // "T:0 D:1841 I:3 W:0 E:0 F:0" — the compact form every surface uses
+    // (/api/log footer, hub-status, the serial banner). Returns strlen(out),
+    // or 0 if the buffer could not hold the whole summary.
+    size_t formatDropSummary(char* out, size_t cap) const {
+        if (out == nullptr || cap == 0) return 0;
+        int n = snprintf(out, cap, "T:%lu D:%lu I:%lu W:%lu E:%lu F:%lu",
+                         (unsigned long)_dropped[0], (unsigned long)_dropped[1],
+                         (unsigned long)_dropped[2], (unsigned long)_dropped[3],
+                         (unsigned long)_dropped[4], (unsigned long)_dropped[5]);
+        if (n < 0 || size_t(n) >= cap) { out[0] = '\0'; return 0; }
+        return size_t(n);
+    }
 
 private:
+    // Called with the port lock HELD. Accounts one shed record: per-level
+    // bucket, lifetime total, and the "lost" marker that rides out on the
+    // next record a reader actually sees (saturating — a wrapped gap count
+    // would understate the hole, which is the one lie we cannot tell).
+    void dropLocked(Level l) {
+        if (uint8_t(l) < kLevelCount) ++_dropped[uint8_t(l)];
+        if (_lostSinceDrain != 0xFFFFu) ++_lostSinceDrain;
+        ++_totalLostShadow;
+    }
+
     static void copyBounded(char* dst, const char* src, size_t cap) {
         if (src == nullptr) { dst[0] = '\0'; return; }
         size_t i = 0;
@@ -196,6 +300,13 @@ private:
     uint32_t _read = 0;
     uint16_t _lostSinceDrain = 0;
     uint32_t _totalLostShadow = 0;
+    // Live count of Trace/Debug/Info records parked in the ring. This single
+    // counter is what makes the reserve O(1): the alternative — scanning the
+    // ring for the oldest low-severity slot — would run under the spinlock on
+    // whichever task happened to log, which is exactly the cost this logger
+    // exists to avoid.
+    size_t _lowPending = 0;
+    uint32_t _dropped[kLevelCount] = {};   // per-level lifetime shed counts
     ISink* _sinks[MaxSinks] = {};
     Level _sinkFloors[MaxSinks] = {};
     size_t _sinkCount = 0;

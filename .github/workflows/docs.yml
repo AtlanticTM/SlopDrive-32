@@ -1,0 +1,212 @@
+name: docs
+
+# Build, gate and publish the SlopSync documentation site (docs-site/).
+#
+# The site is Material for MkDocs, published to GitHub Pages, versioned with
+# `mike`. There is deliberately no PlatformIO here: PIO exists in this repo to
+# build FIRMWARE, and a documentation build needs neither a toolchain download
+# nor a framework it cannot use.
+#
+# THREE GATES, and the generated-content ones are the point of this workflow
+# existing:
+#
+#   1. `mkdocs build --strict` — a dead link, a missing anchor or a page left
+#      out of the nav fails the build. Implementers follow the links in a
+#      protocol specification; a dead one is a defect.
+#
+#   2. `gen_docs_tables.py --check` — every wire number in the docs is
+#      GENERATED from docs/slopsync/registry/registry.yaml. If a generated
+#      table has drifted from the registry, this fails BEFORE anything is
+#      published. This project has shipped the same hand-copied-constant drift
+#      bug three separate times, and a wrong NACK code in documentation is
+#      worse than a wrong NACK code in source: implementers trust
+#      documentation, and nothing compiles it.
+#
+#   3. `gen_spec_pages.py --check` — the whole Specification tier is GENERATED
+#      from docs/slopsync/SPEC.md, for the same reason one notch harder: a
+#      stale COPY OF THE SPEC is the worst instance of the drift bug, because
+#      implementers trust a specification absolutely and nothing compiles it
+#      either. The generator additionally refuses to run on a clause no page
+#      claims, or on a `§n.m` cross-reference that resolves to nothing.
+#
+# EXTRACTION NOTE (docs-site/README.md, "Extracting this directory"): this file
+# does NOT live under the docs-site/ prefix, so `git subtree split` leaves it
+# behind. Copy it into the extracted repository and drop the `docs-site/`
+# prefixes marked below.
+
+on:
+  push:
+    # Gate on feature branches too (matching the fuzz workflow), so drift is
+    # caught where the work happens. Publishing is still main-only — see the
+    # `deploy` job's `if:`.
+    branches: [main, 'feat/**']
+    paths:
+      - 'docs-site/**'                                # <- drop prefix on extraction
+      - 'docs/slopsync/registry/registry.yaml'        # <- becomes registry/registry.yaml
+      - 'docs/slopsync/SPEC.md'                       # <- becomes SPEC.md
+      - 'docs/slopsync/examples/session-traces.md'    # <- becomes examples/session-traces.md
+      - '.github/workflows/docs.yml'
+  pull_request:
+    paths:
+      - 'docs-site/**'
+      - 'docs/slopsync/registry/registry.yaml'
+      - 'docs/slopsync/SPEC.md'
+      - 'docs/slopsync/examples/session-traces.md'
+      - '.github/workflows/docs.yml'
+  workflow_dispatch:
+    inputs:
+      version:
+        description: 'mike version alias to publish (e.g. 1.0). Empty = latest only.'
+        required: false
+        default: ''
+
+# One in-flight docs deploy at a time. A second push must not race the first
+# onto the gh-pages branch.
+concurrency:
+  group: docs-${{ github.ref }}
+  cancel-in-progress: true
+
+permissions:
+  contents: write   # mike commits the built site to the gh-pages branch
+
+defaults:
+  run:
+    working-directory: docs-site   # <- delete this block on extraction
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          # mike reads and rewrites gh-pages history, so a shallow clone will
+          # not do. Cheap here; the repo is small.
+          fetch-depth: 0
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+          cache: pip
+          cache-dependency-path: docs-site/requirements.txt
+
+      - name: Install documentation dependencies
+        run: |
+          python -m pip install --upgrade pip
+          pip install -r requirements.txt
+          python -m mkdocs --version
+
+      # GATE 1. Nothing is published if a generated table has drifted from the
+      # registry. The generator ALSO refuses to run when registry.yaml grows a
+      # section no documentation page claims — an undocumented wire number is
+      # exactly what this gate exists to stop.
+      - name: Gate — generated tables match the registry
+        run: python tools/gen_docs_tables.py --check
+
+      # GATE 1b. The Specification tier is generated from SPEC.md. This step
+      # also enforces the structural rules: every clause claimed by a page,
+      # every cross-reference resolvable, every companion link given a home.
+      - name: Gate — generated spec pages match SPEC.md
+        run: python tools/gen_spec_pages.py --check
+
+      # Belt and braces: prove both generators are deterministic and that a
+      # regeneration in a clean tree changes nothing. If this step dirties the
+      # tree, --check passed by luck.
+      - name: Gate — regeneration is a no-op
+        run: |
+          python tools/gen_docs_tables.py
+          python tools/gen_spec_pages.py
+          git diff --exit-code -- . || {
+            echo "::error::Regenerating changed committed files; --check and the generator disagree."
+            exit 1
+          }
+
+      # The canonical origin. It feeds sitemap.xml and every canonical link, so
+      # it must be right the first time — changing it later rots links. A
+      # custom domain (repository variable SLOPSYNC_SITE_URL) wins; otherwise
+      # derive the GitHub Pages origin from context, assuming nothing about the
+      # repository's name.
+      - name: Resolve site_url
+        id: siteurl
+        run: |
+          if [ -n "${{ vars.SLOPSYNC_SITE_URL }}" ]; then
+            url="${{ vars.SLOPSYNC_SITE_URL }}"
+          else
+            url="https://${{ github.repository_owner }}.github.io/${{ github.event.repository.name }}/"
+          fi
+          echo "url=$url" >> "$GITHUB_OUTPUT"
+          echo "site_url = $url"
+
+      # GATE 2. --strict promotes every warning to an error: dead links,
+      # missing anchors, pages omitted from the nav.
+      - name: Gate — strict build
+        env:
+          SLOPSYNC_SITE_URL: ${{ steps.siteurl.outputs.url }}
+        run: python -m mkdocs build --strict
+
+      - name: Upload built site
+        uses: actions/upload-artifact@v4
+        with:
+          name: slopsync-docs-site
+          path: docs-site/site
+          retention-days: 7
+
+  # Publish only from the default branch. A pull request gets both gates and
+  # the artifact, and touches gh-pages not at all.
+  deploy:
+    needs: build
+    if: github.event_name != 'pull_request' && github.ref == 'refs/heads/main'
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+          cache: pip
+          cache-dependency-path: docs-site/requirements.txt
+
+      - name: Install documentation dependencies
+        run: |
+          python -m pip install --upgrade pip
+          pip install -r requirements.txt
+
+      - name: Configure git identity for mike
+        run: |
+          git config user.name  "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+
+      - name: Resolve site_url
+        id: siteurl
+        run: |
+          if [ -n "${{ vars.SLOPSYNC_SITE_URL }}" ]; then
+            url="${{ vars.SLOPSYNC_SITE_URL }}"
+          else
+            url="https://${{ github.repository_owner }}.github.io/${{ github.event.repository.name }}/"
+          fi
+          echo "url=$url" >> "$GITHUB_OUTPUT"
+
+      # `mike` keeps one tree per published version plus moving aliases.
+      # Readers of a protocol specification MUST be able to pin to the version
+      # they implemented against, so this is not optional polish.
+      #
+      #   * default push  -> `dev`, aliased `latest`  (the moving edge)
+      #   * workflow_dispatch with `version: 1.0`
+      #                   -> `1.0`, aliased `latest`  (a tagged spec version)
+      #
+      # `--update-aliases` moves `latest`; the version trees themselves are
+      # immutable once published, which is what keeps a citation valid.
+      - name: Publish with mike
+        env:
+          SLOPSYNC_SITE_URL: ${{ steps.siteurl.outputs.url }}
+        run: |
+          version="${{ github.event.inputs.version }}"
+          if [ -z "$version" ]; then version="dev"; fi
+          echo "publishing '$version' with alias 'latest'"
+          python -m mike deploy --push --update-aliases "$version" latest
+          python -m mike set-default --push latest

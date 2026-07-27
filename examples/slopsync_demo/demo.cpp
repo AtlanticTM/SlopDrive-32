@@ -111,7 +111,7 @@ struct Watcher final : ClientDelegate {
     void onPairGrant(std::span<const std::byte> t, AccessLevel) override {
         std::memcpy(token.data(), t.data(), token.size());
         hasToken = true;
-        say(name, "PAIRED! 16-byte controller token issued and stored");
+        say(name, "PAIRED! 16-byte control token issued and stored");
     }
 };
 
@@ -119,26 +119,26 @@ int main() {
     std::printf("SlopSync live demo — real Hub, real Clients, real bytes, injected chaos\n");
 
     // Catalog = the frozen conformance fixture + safety-intents; checked first.
-    auto cat = conformance::miniCatalog();
-    cat.entries[cat.count] = cat.entries[3];  // clone an INTENT entry shape
-    cat.entries[cat.count].id = channels::safety_intents;  // 0x0005... must stay ascending!
-    // 0x0005 sorts between 0x0003 and 0x0080: rebuild ascending
-    for (uint16_t i = cat.count; i > 1; --i) cat.entries[i] = cat.entries[i - 1];
-    cat.entries[1] = cat.entries[2];  // scratch — simpler: construct clean below
-    cat = conformance::miniCatalog();
-    {   // insert 0x0005 after 0x0003 (index 0), shifting the rest
-        for (uint16_t i = cat.count; i > 1; --i) cat.entries[i] = cat.entries[i - 1];
-        CatalogEntry& e = cat.entries[1];
-        e = CatalogEntry{};
-        e.id = channels::safety_intents; e.name = "safety-intents";
-        e.cls = ChannelClass::INTENT; e.dir = Direction::c2h;
-        e.access = AccessLevel::controller; e.maxRateHz = 10.0f;
-        e.defaultPriority = Priority::critical;
-        e.fieldCount = 1;
-        e.schema[0] = {.key = 1, .name = "op", .type = CborFieldType::uint_t, .unit = ""};
-        cat.count++;
-    }
-    auto conf = conformance::checkCatalog(cat);
+    // Entries are APPENDED in ascending id order (that is also the order the
+    // catalog's shared field pools fill in), so 0x0005 is authored between the
+    // fixture's 0x0003 and everything from 0x0080 up. Both catalogs are
+    // static: a Catalog32 is tens of KiB, never a stack temporary.
+    static Catalog32 mini;
+    static Catalog32 cat;
+    conformance::buildMiniCatalog(mini);
+    cat.addEntryFrom(mini, mini.entries[0]);  // 0x0003 "safety" + its fields
+    cat.addEntry({.id = channels::safety_intents, .name = "safety-intents",
+                  .cls = ChannelClass::INTENT, .dir = Direction::c2h,
+                  .access = AccessLevel::control, .maxRateHz = 10.0f,
+                  .defaultPriority = Priority::critical});
+    cat.addSchemaField({.key = 1, .name = "op", .type = CborFieldType::uint_t, .unit = ""});
+    for (uint16_t i = 1; i < mini.count; ++i) cat.addEntryFrom(mini, mini.entries[i]);
+
+    // Scratch overload: the full verdict, including the per-entry
+    // limits::catalog_max_entry_bytes cap (measuring an entry means encoding
+    // it, and this library never allocates — the buffer is ours to supply).
+    static std::array<std::byte, limits::catalog_max_entry_bytes + 64> confScratch{};
+    auto conf = conformance::checkCatalog(cat, confScratch);
     std::printf("catalog conformance: %s (%u violations)\n", conf.ok() ? "CLEAN" : "VIOLATIONS", unsigned(conf.count));
 
     XorShift32 rng(0xB007CAFE);
@@ -151,7 +151,9 @@ int main() {
     hub.attachTransport(linkRemote.endpointA());
 
     // Machine boots with state already published (retained store = the shadow).
-    std::array<std::byte, 8> safety0{};  // word=0,cause=0,owner=0,seq=0
+    // 9 bytes as of RFC-025c: word,cause,owner,estop_seq + the appended
+    // `modes` byte (manual override / limit bypass, both clear at boot).
+    std::array<std::byte, 9> safety0{};
     hub.publishState(0x0003, safety0);
     std::array<std::byte, 2> motion0{std::byte{0x01}, std::byte{0}};  // homed
     hub.publishState(0x0082, motion0);
@@ -184,7 +186,7 @@ int main() {
         }
     };
 
-    scene("SCENE 1 — the WebUI connects (viewer, no pairing needed)");
+    scene("SCENE 1 — the WebUI connects (watch, no pairing needed)");
     ui.connect();
     pump(50);
 
@@ -196,7 +198,7 @@ int main() {
     { auto proof = pairingPinProof(std::span<const char>(pin, 4), phone.nonce());
       phone.sendPairReq(proof); }
     pump(50);
-    say("phone", "reconnecting with the token to claim controller role...");
+    say("phone", "reconnecting with the token to claim control role...");
     phone.disconnect(); pump(10);
     { ClientIdentity id2 = ident("phone", 0x20);
       std::memcpy(id2.token.data(), phoneW.token.data(), id2.token.size());
@@ -226,7 +228,7 @@ int main() {
       auto proofR = pairingPinProof(std::span<const char>(pin, 4), remote.nonce());
       remote.sendPairReq(proofR);
       pump(60);
-      say("remote", "reconnecting with controller token...");
+      say("remote", "reconnecting with control token...");
       remote.disconnect(); pump(10);
       ClientIdentity idR = ident("remote", 0x30);
       std::memcpy(idR.token.data(), remoteW.token.data(), idR.token.size());

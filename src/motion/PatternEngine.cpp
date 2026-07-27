@@ -271,21 +271,51 @@ void PatternEngine::_recalcParameters() {
 // Diagnostics — mirrors Generator's heartbeat style
 // ============================================================================
 
+// Log on CHANGE, not per stroke. Every field printed here is an OPERATOR KNOB
+// — it is identical between fires unless somebody is actively dragging a
+// slider, so the old 1 Hz throttle transcribed the same settings for the whole
+// session. The knobs are folded into a cheap FNV-1a fingerprint; the line
+// fires only when the fingerprint moves, which is exactly "the operator
+// changed something" (plus mode switches, which change the fingerprint too).
 void PatternEngine::_diagnostics() {
-    if (!_running) return;
-
-    if (_advanced) {
-        SLOGD_EVERY_MS(1000, "pattern",
-                       "PatternEngine: ADVANCED master=%u depth=%u..%u v_in=%u v_out=%u a_in=%u a_out=%u stroke#%u",
-                       (unsigned)_ap.master.value, (unsigned)_ap.min_depth.value, (unsigned)_ap.max_depth.value,
-                       (unsigned)_ap.in_speed.value, (unsigned)_ap.out_speed.value,
-                       (unsigned)_ap.in_accel.value, (unsigned)_ap.out_accel.value, _stroke_index);
+    if (!_running) {
+        _diag_fingerprint = 0;   // a stop/start always re-announces
         return;
     }
-    const char* pname = patternName(_pattern_idx);
-    SLOGD_EVERY_MS(1000, "pattern",
-                   "PatternEngine: running pattern[%d]=\"%s\" speed=%.0f depth=%.0f stroke=%.0f sens=%.0f",
-                   _pattern_idx, pname, _speed, _depth, _stroke, _sensation);
+
+    auto mix = [](uint32_t h, uint32_t v) -> uint32_t {
+        h ^= v;
+        return h * 16777619u;
+    };
+
+    if (_advanced) {
+        uint32_t fp = 2166136261u;
+        fp = mix(fp, 0xADu);
+        fp = mix(fp, _ap.master.value);
+        fp = mix(fp, uint32_t(_ap.min_depth.value) << 8 | _ap.max_depth.value);
+        fp = mix(fp, uint32_t(_ap.in_speed.value) << 8 | _ap.out_speed.value);
+        fp = mix(fp, uint32_t(_ap.in_accel.value) << 8 | _ap.out_accel.value);
+        if (fp == _diag_fingerprint) return;
+        _diag_fingerprint = fp;
+        SLOGD("pattern",
+              "PatternEngine: ADVANCED master=%u depth=%u..%u v_in=%u v_out=%u a_in=%u a_out=%u stroke#%u",
+              (unsigned)_ap.master.value, (unsigned)_ap.min_depth.value, (unsigned)_ap.max_depth.value,
+              (unsigned)_ap.in_speed.value, (unsigned)_ap.out_speed.value,
+              (unsigned)_ap.in_accel.value, (unsigned)_ap.out_accel.value, _stroke_index);
+        return;
+    }
+
+    uint32_t fp = 2166136261u;
+    fp = mix(fp, uint32_t(_pattern_idx));
+    fp = mix(fp, uint32_t(int32_t(_speed)));
+    fp = mix(fp, uint32_t(int32_t(_depth)));
+    fp = mix(fp, uint32_t(int32_t(_stroke)));
+    fp = mix(fp, uint32_t(int32_t(_sensation)));
+    if (fp == _diag_fingerprint) return;
+    _diag_fingerprint = fp;
+    SLOGD("pattern",
+          "PatternEngine: running pattern[%d]=\"%s\" speed=%.0f depth=%.0f stroke=%.0f sens=%.0f",
+          _pattern_idx, patternName(_pattern_idx), _speed, _depth, _stroke, _sensation);
 }
 
 // ============================================================================
@@ -487,8 +517,9 @@ void PatternEngine::run() {
             }
 
             // ---- Publish telemetry ----------------------------------------
-            // D4: actual_position_mm is NEVER written — the telemetry sampler
-            // reads _motor.getPosition() directly. We only set commanded_target
+            // D4: actual_position_mm is NEVER written here — WebUI's 240Hz
+            // telemetry sampler owns that atomic and fills it from
+            // _motor.getPosition(). We only set commanded_target
             // (what the pattern told the machine to do) and raw (pre-planner demand).
             _state.commanded_target_mm = pos_mm;
             _state.commanded_raw_mm    = pos_mm;

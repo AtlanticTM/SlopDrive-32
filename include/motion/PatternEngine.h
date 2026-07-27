@@ -117,6 +117,9 @@ private:
 
     // Per-stroke index fed to pattern::nextTarget(); wraps naturally.
     unsigned int _stroke_index = 0;
+    // Fingerprint of the knob set last announced by _diagnostics(). The
+    // heartbeat logs on CHANGE, not on tick — see PatternEngine.cpp.
+    uint32_t _diag_fingerprint = 0;
 
     // ---- Parameters (Core 0 writes, Core 1 reads — 32-bit aligned = hardware
     //      atomic on ESP32-S3; no need for portMUX on single fields) ----------

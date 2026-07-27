@@ -14,9 +14,7 @@ class TransportManager;
 class MotionArbiter;
 
 class SerialTransport;
-class WebSocketTransport;
 class BleTransport;
-class UiSocket;
 
 #if defined(FEATURE_RS485_MODBUS)
 class ServoModbus;
@@ -26,10 +24,14 @@ class ServoModbus;
 class EncoderValidator;
 #endif
 
-// Forward-declared to avoid pulling <WebServer.h> into every translation unit
-// that includes this header (works around a PlatformIO include-path quirk when
-// framework headers are included from a subdirectory header).
-class WebServer;
+// Forward-declared to avoid pulling the HTTP backend's headers into every
+// translation unit that includes this one (works around a PlatformIO
+// include-path quirk when framework headers are included from a subdirectory
+// header). SlopHttpServer is the build-flag-selected backend — the sync
+// Arduino WebServer by default, PsychicHttp under -DUSE_PSYCHIC_HTTP. See
+// include/ui/SlopHttpServer.h; both sides present the same call surface, which
+// is why none of the ~30 handlers below care which one they are talking to.
+class SlopHttpServer;
 
 // ---- Batched telemetry sample ring ----------------------------------------
 // A dedicated 10ms-cadence sampler (esp_timer on Core 0) stuffs one of these
@@ -78,7 +80,6 @@ public:
           TransportManager&   transportMgr,
 
           SerialTransport&    serialTransport,
-          WebSocketTransport& wsTransport,
           BleTransport&       bleTransport);
 
     ~WebUI();
@@ -89,13 +90,11 @@ public:
     /// Service the HTTP server (was httpTask body).  Call frequently.
     void update();
 
-    /// Expose the owned WebServer so OtaService can register its POST /api/ota
-    /// routes on the SAME server instance (no second listener on port 80).
-    WebServer* server() { return _httpServer; }
+    /// Expose the owned HTTP server so OtaService can register its POST
+    /// /api/ota routes — and SlopSyncUiTokenMinter its GET /uitoken — on the
+    /// SAME server instance (no second listener on port 80).
+    SlopHttpServer* server() { return _httpServer; }
 
-    /// Set the UiSocket reference (after both are constructed) so the Health
-    /// tab's /api/clients endpoint can enumerate + kick live WS clients.
-    void setUiSocket(UiSocket* s) { _uiSocket = s; }
 
     /// Tell WebUI which motion backend is actually bound (0=FAS, 1=Modbus).
     /// Called once from setup() right after main.cpp's motor.bind() — this is
@@ -132,9 +131,9 @@ public:
     void setEncoderValidator(EncoderValidator& v) { _encValidator = &v; }
 #endif
 
-    // ---- 0x10 CMD dispatch (called from UiSocket via lambda) ----------------
+    // ---- 0x10 CMD dispatch ---------------------------------------------------
     /// Parse a 0x10 CMD WS frame op, apply the mutation, return {ok, response_json}.
-    /// The caller (UiSocket) wraps this in a 0x11 ECHO with idempotency.
+    /// Callers wrap the result in their own echo (SlopSync's post-clamp ECHO).
     /// Returns true on success, false on failure (but still sets payload_out["ok"]=false).
     bool handleCommand(uint8_t op, JsonDocument& payload_in,
                        JsonDocument& payload_out);
@@ -168,14 +167,11 @@ private:
     TransportManager&   _transportMgr;
 
     SerialTransport&    _serialTransport;
-    WebSocketTransport& _wsTransport;
     BleTransport&       _bleTransport;
 
     // ---- Owned instance (pointer — allocated in constructor, freed in dtor) --
-    WebServer*          _httpServer = nullptr;
+    SlopHttpServer*     _httpServer = nullptr;
 
-    // ---- UiSocket ref (set from setup(), used by /api/clients) ---------------
-    UiSocket*           _uiSocket = nullptr;
 
 #if defined(FEATURE_RS485_MODBUS)
     ServoModbus*        _servoModbus = nullptr;
@@ -236,5 +232,4 @@ private:
     // SlopMotion live-tuning rough-in (GET state+bench / POST knobs). No
     // persistence, no UI card yet — curl-driven until the WebUI refactor.
     void handleApiSlopMotion();
-    void handleApiClients();   // GET list of WS clients / POST kick — Health tab
 };

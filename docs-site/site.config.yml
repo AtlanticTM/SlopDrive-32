@@ -1,0 +1,29 @@
+# SlopSync docs-site — the ONLY configuration that reaches outside this
+# directory.
+#
+# Everything else the site needs lives under docs-site/. These values point at
+# the protocol's sources of truth, which the generators read and no page
+# copies:
+#
+#   registry_path   every wire number            -> tools/gen_docs_tables.py
+#   spec_path       the normative specification  -> tools/gen_spec_pages.py
+#   traces_path     SPEC.md Appendix E           -> tools/gen_spec_pages.py
+#   cddl_path       SPEC.md Appendix C           -> tools/gen_spec_pages.py
+#
+# Paths are resolved RELATIVE TO THIS FILE. Absolute paths also work but are
+# discouraged: they do not survive a clone into a different location.
+#
+# Override order (highest wins):
+#   1. --registry / --spec / --traces / --cddl   command-line flag
+#   2. SLOPSYNC_REGISTRY / _SPEC / _TRACES / _CDDL   environment variable
+#   3. the keys below                            this file
+#
+# AFTER EXTRACTION (see README.md "Extracting this directory"): when SlopSync
+# moves to its own repository, registry.yaml and SPEC.md travel with it. Change
+# these lines to the new locations — for example `registry/registry.yaml` —
+# and nothing else in this directory needs to move.
+
+registry_path: ../docs/slopsync/registry/registry.yaml
+spec_path: ../docs/slopsync/SPEC.md
+traces_path: ../docs/slopsync/examples/session-traces.md
+cddl_path: ../docs/slopsync/schema/catalog.cddl

@@ -33,6 +33,22 @@ inline constexpr uint8_t HOLD  = 1u << 2;
 inline constexpr uint8_t PAUSE = 1u << 3;
 }  // namespace safety_bits
 
+// RFC-025c: the safety channel's APPENDED `modes` bitfield8 — manual override
+// and limit bypass. These are SAFETY-DOMAIN state, not rail-UI state: they
+// render near the rail in a UI, but they change what the machine will do with
+// a motion command, so every surface (phone, remote, streaming plugin) needs
+// to see them, and only the safety snapshot is retained + pushed at critical
+// priority to every subscriber. Written via safety_ops override_on/off (7/8)
+// and bypass_on/off (9/10), `control` role.
+//
+// Do NOT confuse `BYPASS` here with the per-move `bypass` key on a motion
+// INTENT: that one is a one-shot property of a single commanded move and is
+// unchanged by this. This bit is the machine's STANDING bypass mode.
+namespace safety_mode_bits {
+inline constexpr uint8_t OVERRIDE = 1u << 0;  // manual override engaged
+inline constexpr uint8_t BYPASS   = 1u << 1;  // stroke-window limit bypass engaged
+}  // namespace safety_mode_bits
+
 // §11.4: exclusive per-source ownership with role-gated takeover. Pure state
 // machine — no I/O; the Hub drives it and publishes control-owner STATE +
 // takeover EVENTs on transitions.
@@ -57,7 +73,7 @@ public:
     AccessLevel ownerRoleOf(uint8_t source_id) const;
 
 private:
-    struct Entry { uint8_t source_id = 0; uint32_t owner = 0; AccessLevel role = AccessLevel::viewer; bool used = false; };
+    struct Entry { uint8_t source_id = 0; uint32_t owner = 0; AccessLevel role = AccessLevel::watch; bool used = false; };
     std::array<Entry, kMaxSources> _entries{};
     Entry* find(uint8_t source_id);
     const Entry* find(uint8_t source_id) const;
@@ -123,7 +139,7 @@ inline bool SourceOwnershipTable::release(uint8_t source_id, uint32_t session_id
     Entry* e = find(source_id);
     if (!e || e->owner != session_id) return false;
     e->owner = 0;
-    e->role = AccessLevel::viewer;
+    e->role = AccessLevel::watch;
     return true;
 }
 
@@ -132,7 +148,7 @@ inline void SourceOwnershipTable::releaseAllOf(uint32_t session_id, Cb&& cb) {
     for (auto& e : _entries) {
         if (e.used && e.owner == session_id) {
             e.owner = 0;
-            e.role = AccessLevel::viewer;
+            e.role = AccessLevel::watch;
             cb(e.source_id);
         }
     }
@@ -145,7 +161,7 @@ inline uint32_t SourceOwnershipTable::ownerOf(uint8_t source_id) const {
 
 inline AccessLevel SourceOwnershipTable::ownerRoleOf(uint8_t source_id) const {
     const Entry* e = find(source_id);
-    return e ? e->role : AccessLevel::viewer;
+    return e ? e->role : AccessLevel::watch;
 }
 
 }  // namespace slopsync

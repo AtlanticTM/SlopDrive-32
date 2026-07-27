@@ -44,8 +44,8 @@ TEST_CASE("H-01: header round-trip for every registered FrameType, seq 0 and 0xF
     constexpr FrameType kAllTypes[] = {
         FrameType::HELLO,        FrameType::WELCOME,      FrameType::PING,
         FrameType::PONG,         FrameType::CLOCK,        FrameType::SUBSCRIBE,
-        FrameType::UNSUBSCRIBE,  FrameType::GRANT,        FrameType::CATALOG_REQ,
-        FrameType::CATALOG_CHUNK, FrameType::STATE,       FrameType::STREAM,
+        FrameType::UNSUBSCRIBE,  FrameType::GRANT,        FrameType::BLOB_REQ,
+        FrameType::BLOB_CHUNK,   FrameType::STATE,        FrameType::STREAM,
         FrameType::INTENT,       FrameType::ECHO,         FrameType::EVENT,
         FrameType::NACK,         FrameType::GOODBYE,      FrameType::PROBE,
         FrameType::PROBE_REPORT, FrameType::PAIR_REQ,     FrameType::PAIR_GRANT,
@@ -288,7 +288,7 @@ TEST_CASE("E-01: ESTOP frame encoding — exact 12 bytes for cause=user origin=1
     // via the library's own incremental API so the test doesn't just trust
     // one code path.)
     EstopFrame f;
-    f.cause = uint8_t(EstopCause::user);  // 0
+    f.cause = safety_causes::user;  // 0
     f.origin = 1;
     f.seq = 1;
 
@@ -318,7 +318,7 @@ TEST_CASE("E-01: ESTOP frame encoding — exact 12 bytes for cause=user origin=1
 // ============================================================================
 TEST_CASE("E-02: scanForEstop finds the frame at offsets 0..3 in a noise buffer") {
     EstopFrame f;
-    f.cause = uint8_t(EstopCause::fault);
+    f.cause = safety_causes::fault;
     f.origin = 2;
     f.seq = 0xABCD;
 
@@ -442,7 +442,7 @@ TEST_CASE("E-03: COBS classic vectors — exact encoded bytes") {
 
 TEST_CASE("E-03: COBS round-trip of an encoded ESTOP frame") {
     EstopFrame f;
-    f.cause = uint8_t(EstopCause::relay);
+    f.cause = safety_causes::relay;
     f.origin = 2;
     f.seq = 0x0102;
 
@@ -476,7 +476,7 @@ TEST_CASE("E-03: raw magic scan survives COBS encoding when no 0x00 falls inside
     // pins that precondition so a future edit to these inputs fails loudly
     // here rather than silently testing the wrong thing.
     EstopFrame f;
-    f.cause = uint8_t(EstopCause::deadman);
+    f.cause = safety_causes::deadman;
     f.origin = 1;
     f.seq = 0x0101;
 

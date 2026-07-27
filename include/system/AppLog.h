@@ -20,16 +20,32 @@
 // Concatenate the web ring's buffered lines (oldest first) for /api/log.
 void applogDump(String& out);
 
-// Register the SlopLog sinks (web ring + serial, ALWAYS — serial gating is
-// runtime, see below). Call once in setup(). Records logged before this is
-// called are buffered in the SlopLog core and flow out on the first drain.
-void applogBegin();
+struct SystemState;
+
+// Register the SlopLog sinks (web ring + serial + the RFC-017 SlopSync bridge;
+// ALWAYS — serial gating is runtime, see below). Call once in setup(). Records
+// logged before this is called are buffered in the SlopLog core and flow out on
+// the first drain.
+//
+// `state` is where the bridge sink parks lines for the Core-0 SlopSync hub task
+// to pick up (the SPSC ring in SystemState — the hub is single-task by contract
+// and must never be touched from the drain task). Pass nullptr to leave the
+// bridge inert.
+void applogBegin(SystemState* state = nullptr);
 
 // Runtime serial gating: mute the serial sink completely while serial TCode
 // traffic is actively flowing (Intiface owns the port), restore when idle.
 // Poll from httpTask with serialTransport.isActive(). Composes with
 // applogSerialQuiet() (post-handshake Warn+ floor).
 void applogSerialDedicated(bool dedicated);
+
+// Arm the RFC-017 SlopSync bridge sink. Registered by applogBegin() but INERT
+// until this is called, because boot narrates far more lines than the cross-task
+// hand-off ring holds and nothing drains it until the hub task exists — an
+// armed-from-boot bridge would open every session with a meaningless three-digit
+// drop count. SlopSyncHubService::init() calls this immediately before spawning
+// its task.
+void applogSyncBridgeArm();
 
 // Pump: fan buffered records out to the sinks. Call from httpTask (Core 0).
 void applogDrain();

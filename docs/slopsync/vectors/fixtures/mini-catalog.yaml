@@ -3,11 +3,18 @@
 # Referenced by vectors/manifest.yaml (`fixtures.catalog`). DO NOT EDIT after
 # K-suite golden vectors are generated: K-01 pins its encoding, K-02 its etag.
 # Coverage: every packed type, every CBOR field type, both entry forms,
-# two bitfield8s, min/max present and absent.
+# three bitfield8s, min/max present and absent.
+#
+# v1.0 base pass (RFC-025c): 0x0003 gained an APPENDED `modes` bitfield8
+# (manual override + limit bypass as safety-domain state). This is the ONE
+# deliberate content change since the fixture was first frozen; it moves both
+# the K-01 length pin and the K-02 etag, sanctioned by the RFC queue's
+# break-allowed ruling. The fixture re-freezes at the v1.0 tag.
 entries:
   - { id: 0x0003, name: safety, class: STATE, dir: h2c, access: viewer, max_rate_hz: 0.0, priority: critical,
       layout: [ {name: word, type: bitfield8, unit: flag, bits: {0: estop, 1: stop, 2: hold, 3: pause}},
-                {name: cause, type: u8}, {name: owner_session, type: u32}, {name: estop_seq, type: u16, unit: count} ] }
+                {name: cause, type: u8}, {name: owner_session, type: u32}, {name: estop_seq, type: u16, unit: count},
+                {name: modes, type: bitfield8, unit: flag, bits: {0: override, 1: bypass}} ] }
   - { id: 0x0080, name: position, class: STREAM, dir: h2c, access: viewer, max_rate_hz: 240.0, priority: elevated,
       layout: [ {name: pos_10um, type: u16, unit: mm, scale: 100.0},
                 {name: tgt_10um, type: u16, unit: mm, scale: 100.0},

@@ -1,0 +1,17 @@
+# SlopSync documentation site — build dependencies.
+#
+#   cd docs-site
+#   python -m venv .venv
+#   .venv/Scripts/pip install -r requirements.txt      # Windows
+#   .venv/bin/pip install -r requirements.txt          # POSIX
+#
+# These are DOCUMENTATION dependencies only. Never install them into the
+# firmware toolchain's bundled environment; that environment builds the
+# firmware and nothing else.
+#
+# Versions are floored, not pinned, so security updates arrive. CI installs
+# from this file, so a build that passes locally passes there.
+
+mkdocs-material>=9.5,<10      # theme, search, glossary tooltips
+mike>=2.1,<3                  # versioned deploys: `latest` plus a tree per tag
+PyYAML>=6.0                   # read registry.yaml and dictionary.yaml

@@ -340,14 +340,14 @@ TEST_CASE("EventQueue: fill 16, push 17th -> oldest dropped, counter 1, FIFO ord
     REQUIRE(EventQueue<>::kDepth == 16);
 
     for (int i = 1; i <= 16; ++i) {
-        REQUIRE(q.push(bytesOf({i})));
+        REQUIRE(q.push(uint16_t(0x0007), bytesOf({i})));
     }
     CHECK(q.size() == 16);
     CHECK(q.full());
     CHECK(q.eventsDropped() == 0);
 
     // 17th push drops the oldest (event "1") to make room.
-    REQUIRE(q.push(bytesOf({17})));
+    REQUIRE(q.push(uint16_t(0x0008), bytesOf({17})));
     CHECK(q.size() == 16);  // saturates, never exceeds Depth
     CHECK(q.eventsDropped() == 1);
 
@@ -355,8 +355,10 @@ TEST_CASE("EventQueue: fill 16, push 17th -> oldest dropped, counter 1, FIFO ord
     for (int expected = 2; expected <= 17; ++expected) {
         auto popped = q.pop();
         REQUIRE(popped.has_value());
-        REQUIRE(popped->size() == 1);
-        CHECK(uint8_t((*popped)[0]) == uint8_t(expected));
+        REQUIRE(popped->bytes.size() == 1);
+        CHECK(uint8_t(popped->bytes[0]) == uint8_t(expected));
+        // The channel id travels WITH the bytes: event 17 went in on 0x0008.
+        CHECK(popped->channel_id == (expected == 17 ? 0x0008 : 0x0007));
     }
     CHECK(q.empty());
     CHECK_FALSE(q.pop().has_value());
@@ -364,15 +366,16 @@ TEST_CASE("EventQueue: fill 16, push 17th -> oldest dropped, counter 1, FIFO ord
 
 TEST_CASE("EventQueue: an event larger than kSlotCapacity is rejected, queue unmodified") {
     EventQueue<> q;
-    REQUIRE(EventQueue<>::kSlotCapacity == 128);
+    // M3b: 192, raised from 128 so a registry-legal RFC-017 log line fits.
+    REQUIRE(EventQueue<>::kSlotCapacity == 192);
 
-    auto oversize = fillBytes(129, 0xCC);
-    CHECK_FALSE(q.push(oversize));
+    auto oversize = fillBytes(193, 0xCC);
+    CHECK_FALSE(q.push(uint16_t(0x0008), oversize));
     CHECK(q.size() == 0);
     CHECK(q.eventsDropped() == 0);  // rejection is not the same thing as overflow-drop
 
-    auto exact = fillBytes(128, 0xDD);
-    CHECK(q.push(exact));
+    auto exact = fillBytes(192, 0xDD);
+    CHECK(q.push(uint16_t(0x0008), exact));
     CHECK(q.size() == 1);
 }
 

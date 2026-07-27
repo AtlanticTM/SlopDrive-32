@@ -1,0 +1,67 @@
+{% extends "base.html" %}
+
+{#
+  Renders each page's front-matter declarations as badges above the content.
+
+  `register:` is required on every page by CONTRIBUTING.md. It tells a
+  contributor which writing rules bind the page they are about to edit:
+
+      register: STE    guides and reference — ASD-STE100-influenced prose
+      register: IEEE   the specification — RFC 2119 normative register
+
+  `generated: true` marks a page written by tools/gen_docs_tables.py. Editing
+  one by hand is pointless: the next build overwrites it and CI fails first.
+
+  `status: stub` marks a page that honestly declares itself unwritten. A stub
+  says what will go there and where the source material is. It never fakes
+  content.
+#}
+
+{% block extrahead %}
+  {#
+    Tell the browser this site handles BOTH schemes itself.
+
+    Chromium-family browsers with "dark mode for web content" enabled apply
+    auto-dark to pages they believe support only light: they REWRITE computed
+    background colours and hand back a mangled sheet — warm-black panels
+    behind unchanged dark text, which is unreadable. Material declares
+    `color-scheme: light` on the light palette (correct for form controls),
+    which is exactly the signal auto-dark looks for.
+
+    This meta is the standard way to say "this site handles both", and it is
+    true here. HONEST LIMIT, measured: it does NOT stop headless Edge 150,
+    which force-darkened the light scheme anyway during render verification
+    (as did --disable-features and Emulation.setAutoDarkModeOverride). So
+    treat it as a correct declaration that helps where browsers honour it,
+    not as a guarantee. Material's per-scheme CSS still wins for widget
+    rendering, because CSS beats meta.
+  #}
+  <meta name="color-scheme" content="light dark">
+{% endblock %}
+
+{% macro register_badge(value) %}
+  {% if value == "IEEE" %}
+    <span class="ss-badge ss-badge--ieee" title="Normative register: numbered clauses, RFC 2119 MUST/SHALL/MAY, exact cross-references.">IEEE register</span>
+  {% elif value == "STE" %}
+    <span class="ss-badge ss-badge--ste" title="ASD-STE100-influenced register: one idea per sentence, active voice, present tense. Industry terminology is preserved, never simplified away.">STE register</span>
+  {% else %}
+    <span class="ss-badge">{{ value }} register</span>
+  {% endif %}
+{% endmacro %}
+
+{% block content %}
+  {% if page.meta %}
+    {% if page.meta.register or page.meta.generated or page.meta.status %}
+      <p class="ss-pagemeta">
+        {% if page.meta.register %}{{ register_badge(page.meta.register) }}{% endif %}
+        {% if page.meta.generated %}
+          <span class="ss-badge ss-badge--generated" title="Generated from registry.yaml by docs-site/tools/gen_docs_tables.py. Hand edits are overwritten, and a stale copy fails CI.">generated</span>
+        {% endif %}
+        {% if page.meta.status == "stub" %}
+          <span class="ss-badge ss-badge--stub" title="This page is deliberately unwritten. It names what belongs here and where the source material is.">stub</span>
+        {% endif %}
+      </p>
+    {% endif %}
+  {% endif %}
+  {{ super() }}
+{% endblock %}

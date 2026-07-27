@@ -169,14 +169,26 @@ public:
         return Result<float, DecodeError>::ok(v);
     }
     // Zero-copy: the returned view aliases `in` (the reader's input span).
+    //
+    // RFC-028 (found by test/fuzz/fuzz_cbor): the length check is written as
+    // `arg > remaining`, NEVER as `start + len > size()`. `arg` is a full
+    // uint64 straight off the wire, so a head of `7B FF FF FF FF FF FF FF FF`
+    // (a text string claiming 2^64-1 bytes) makes `start + len` WRAP to a
+    // small number, the additive check passes, and the reader hands back a
+    // 2^64-1-byte view into a 9-byte buffer — while also rewinding `_pos`
+    // backwards. `start` is guaranteed <= _in.size() by parseHeadRaw (which
+    // has already bounds-checked the whole head), so the subtraction below
+    // cannot underflow.
     Result<std::string_view, DecodeError> readTstr() {
         auto hr = parseHeadRaw();
         if (!hr) return Result<std::string_view, DecodeError>::err(hr.error());
         const Head h = hr.value();
         if (h.major != 3) return Result<std::string_view, DecodeError>::err(DecodeError::Malformed);
-        size_t start = _pos + h.totalBytes;
-        size_t len = size_t(h.arg);
-        if (start + len > _in.size()) return Result<std::string_view, DecodeError>::err(DecodeError::Truncated);
+        const size_t start = _pos + h.totalBytes;
+        if (h.arg > uint64_t(_in.size() - start)) {
+            return Result<std::string_view, DecodeError>::err(DecodeError::Truncated);
+        }
+        const size_t len = size_t(h.arg);
         _pos = start + len;
         consumeOne();
         return Result<std::string_view, DecodeError>::ok(
@@ -187,9 +199,11 @@ public:
         if (!hr) return Result<std::span<const std::byte>, DecodeError>::err(hr.error());
         const Head h = hr.value();
         if (h.major != 2) return Result<std::span<const std::byte>, DecodeError>::err(DecodeError::Malformed);
-        size_t start = _pos + h.totalBytes;
-        size_t len = size_t(h.arg);
-        if (start + len > _in.size()) return Result<std::span<const std::byte>, DecodeError>::err(DecodeError::Truncated);
+        const size_t start = _pos + h.totalBytes;
+        if (h.arg > uint64_t(_in.size() - start)) {
+            return Result<std::span<const std::byte>, DecodeError>::err(DecodeError::Truncated);
+        }
+        const size_t len = size_t(h.arg);
         _pos = start + len;
         consumeOne();
         return Result<std::span<const std::byte>, DecodeError>::ok(_in.subspan(start, len));

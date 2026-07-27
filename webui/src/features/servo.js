@@ -130,12 +130,17 @@ function schedulePoll(ms) {
 
 async function pollServo() {
   if (document.hidden) { schedulePoll(1500); return; }
+  const t0 = performance.now();
   const d = await get('/api/servo');
+  const took = performance.now() - t0;
   if (d) render(d);
   // 500ms base: the firmware's Modbus cycle refreshes every ~0.3s now, so a
   // 1s card poll would throw away half the samples it fought for.
   const fast = d && (d.queue > 0 || (d.cfg && d.cfg.scanning) || performance.now() < _fastUntil);
-  schedulePoll(fast ? 300 : 500);
+  // Slow-server backoff: when a response takes seconds (single-slot sync
+  // WebServer under contention), re-polling at full rate just feeds the pile
+  // that page loads then queue behind. Back off to 3× the observed latency.
+  schedulePoll(Math.max(fast ? 300 : 500, took * 3));
 }
 
 // ---- Render (both surfaces) -------------------------------------------------

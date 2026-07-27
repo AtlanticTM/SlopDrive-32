@@ -496,8 +496,11 @@ function railSetBoundHere(which) {
   setWinMin(nMin);
   setWinMax(nMax);
   // Debounced window-set path — shadow pending, echo confirms, overdue states
-  // apply unchanged. renderWindow re-clamps + repaints via setRailSync.
+  // apply unchanged. renderWindow re-clamps + repaints via setRailSync;
+  // pushWindow is explicit now (renderWindow no longer transmits — user
+  // actions push, adoptions never do).
   renderWindow();
+  pushWindow();
 
   if (shoved) {
     flashWarn(flashHandle);

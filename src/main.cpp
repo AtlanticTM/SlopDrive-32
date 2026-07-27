@@ -52,14 +52,12 @@
 
 #include "TCodeParser.h"
 #include "SerialTransport.h"
-#include "WebSocketTransport.h"
 #include "BleTransport.h"
 #include "DongleTransport.h"
 #include "TransportManager.h"
 #include "SlopSyncHubService.h"
 
 #include "WebUI.h"
-#include "UiSocket.h"
 #include "OtaService.h"
 
 #if defined(FEATURE_RS485_MODBUS)
@@ -135,17 +133,15 @@ static TCodeAxisState     axisL0("Stroke", {AxisType::Linear, 0}, 0.5f);
 
 static TCodeParser        tcodeParser;
 static SerialTransport    serialTransport(tcodeParser);
-static WebSocketTransport wsTransport(tcodeParser);
 static BleTransport       bleTransport(tcodeParser);
 static DongleTransport    dongleTransport(tcodeParser);
 static OssmBleService     ossmBleService(g_state, patternEngine, mapper);
 static TransportManager   transportMgr(g_state, tcodeParser,
-                                        serialTransport, wsTransport, bleTransport,
+                                        serialTransport, bleTransport,
                                         dongleTransport, ossmBleService);
 
-static UiSocket        uiSocket(g_state);
 static WebUI webui(g_state, motor, mapper, patternEngine,
-                    transportMgr, serialTransport, wsTransport, bleTransport);
+                    transportMgr, serialTransport, bleTransport);
 
 // SlopSync hub — the ecosystem sync plane (binary WS :SLOPSYNC_WS_PORT).
 // Lives in PSRAM: as a BSS static its ~100 KB reservation starved internal
@@ -157,7 +153,7 @@ static slopdrive::SlopSyncHubService* slopSyncHub = nullptr;
 // WiFi OTA path (firmware + LittleFS bundle). Owns the shared safety gate for
 // both ArduinoOTA (espota) and the HTTP /api/ota endpoints. Serviced from the
 // Core-0 httpTask only — never the motion-critical core. :3
-static OtaService      otaService(g_state, arbiter, patternEngine, uiSocket);
+static OtaService      otaService(g_state, arbiter, patternEngine);
 
 // NOTE: servoModbus itself now lives further up (right above the motor-driver
 // block) so ModbusServoDriver can bind to it — see the comment there. :3
@@ -426,26 +422,84 @@ static void streamSamplerTask(void* /*param*/) {
         // Push the live tuning (POST /api/slopmotion, Core 0) into the engine.
         // Ceilings derive from the mm-domain INPUT limit set over the stroke
         // window (1 normalized unit == the window span), overridable for bench
-        // tuning; jmax is a direct tunable (no mm-domain source exists yet).
-        // Same-core with commit() — no lock. Runs every tick: 10 scalar copies.
+        // tuning. ALL THREE derive the same way as of fw 2.1.47 — jerk used to
+        // be a bare normalized constant, which made the PHYSICAL jerk ceiling
+        // shrink as the operator narrowed the window and silently bound fast
+        // segments. It is a persisted mm-domain limit now, like its siblings.
+        // Same-core with commit() — no lock. Runs every tick: 12 scalar copies.
         {
             slopmotion::Config smCfg;
             const float span = mapper.getMaxMm() - mapper.getMinMm();
             const float vovr = g_state.sm_tune_vmax_ovr;
             const float aovr = g_state.sm_tune_amax_ovr;
+            const float jovr = g_state.sm_tune_jmax_ovr;
             smCfg.limits.vmax = vovr > 0.0f ? vovr
                 : (span > 1.0f ? g_state.config.input_max_speed_mm_s  / span : 3.0f);
             smCfg.limits.amax = aovr > 0.0f ? aovr
                 : (span > 1.0f ? g_state.config.input_max_accel_mm_s2 / span : 30.0f);
-            smCfg.limits.jmax      = g_state.sm_tune_jmax;
+            smCfg.limits.jmax = jovr > 0.0f ? jovr
+                : (span > 1.0f ? g_state.config.input_max_jerk_mm_s3  / span : 500.0f);
             smCfg.chase_feedforward = g_state.sm_tune_chase_ff;
             smCfg.chase_accel_ff    = g_state.sm_tune_chase_aff;
             smCfg.chase_ff_gain     = g_state.sm_tune_chase_gain;
             smCfg.chase_lookahead   = g_state.sm_tune_chase_look;
             smCfg.chase_dense_us    = g_state.sm_tune_dense_us;
+            // Infeasible-segment policy: a 3-WAY map, not a boolean. This runs
+            // every tick, so whatever it writes IS the engine's policy — a
+            // narrower map here silently overrides the engine's own default
+            // (that was the fw 2.1.49 bug: Reshape was unreachable because the
+            // boolean map could only produce Scale or Stretch). An out-of-range
+            // stored value falls through to the ENGINE default (smCfg is a
+            // fresh default-constructed Config), never to an arbitrary policy.
+            switch (g_state.sm_tune_infeas_policy) {
+                case 0: smCfg.infeasible_policy = slopmotion::InfeasiblePolicy::Stretch; break;
+                case 1: smCfg.infeasible_policy = slopmotion::InfeasiblePolicy::Scale;   break;
+                case 2: smCfg.infeasible_policy = slopmotion::InfeasiblePolicy::Reshape; break;
+                case 3: smCfg.infeasible_policy =
+                            slopmotion::InfeasiblePolicy::PrioritizeAmplitude; break;
+                case 4: smCfg.infeasible_policy =
+                            slopmotion::InfeasiblePolicy::PrioritizeSmooth;    break;
+                default: /* leave slopmotion::Config's own default in place */  break;
+            }
+            smCfg.infeasible_scale_margin = g_state.sm_tune_infeas_margin;
+            smCfg.infeasible_reshape_steps = g_state.sm_tune_reshape_steps;
+            smCfg.settle_grace_us          = g_state.sm_tune_settle_grace_us;
+            smCfg.chase_aim_accel_extrap  = g_state.sm_tune_aim_extrap;
+            // Budgeted-policy spend limits + alpha-search depth (slopmotion
+            // 0.8.0). Inert unless infeasible_policy is one of the two budgeted
+            // ones; the engine clamps both budgets to [0,1] and the step count
+            // to [1,10] itself, so pushing whatever the HTTP side stored is
+            // safe — the clamp on the POST side exists to keep the echo honest,
+            // not to protect the engine.
+            smCfg.infeasible_smooth_budget    = g_state.sm_tune_smooth_budget;
+            smCfg.infeasible_amplitude_budget = g_state.sm_tune_amp_budget;
+            smCfg.infeasible_blend_steps      = g_state.sm_tune_blend_steps;
+            // Curve family for waveform-segment reconstruction. Same shape as
+            // the policy map above and for the same reason: this runs EVERY
+            // TICK, so whatever it writes IS the engine's policy, and an
+            // out-of-range stored value must fall through to slopmotion's own
+            // default (smCfg is freshly default-constructed) rather than being
+            // cast blindly into a family nobody selected.
+            switch (g_state.sm_tune_curve_policy) {
+                case 0: smCfg.curve_policy = slopmotion::CurvePolicy::FollowClient; break;
+                case 1: smCfg.curve_policy = slopmotion::CurvePolicy::ForceC1;      break;
+                case 2: smCfg.curve_policy = slopmotion::CurvePolicy::ForceC2;      break;
+                default: /* leave slopmotion::Config's own default in place */      break;
+            }
+            // DC centring of a degraded band (slopmotion 0.5.0). The engine
+            // clamps the gain itself; clamping on the POST side too just keeps
+            // the /api/slopmotion echo honest about what Core 1 pushed.
+            smCfg.wave_centering      = g_state.sm_tune_centring;
+            smCfg.wave_centering_gain = g_state.sm_tune_centring_gain;
+            // RFC-008 handoff sanity guard (0 = off). The guard itself only
+            // engages when the INGRESS supplied a one-segment lookahead
+            // (SlopSyncHubService::drainMotionStream), so this knob is the
+            // aggressiveness dial + off switch, never the arming condition.
+            smCfg.handoff_chord_factor = g_state.sm_tune_handoff_k;
             g_slopmotion.setConfig(smCfg);
             g_state.sm_eff_vmax = smCfg.limits.vmax;
             g_state.sm_eff_amax = smCfg.limits.amax;
+            g_state.sm_eff_jmax = smCfg.limits.jmax;
         }
 
         // Drain the Core-0 → Core-1 command handoff; each commit is ONE plan.
@@ -480,7 +534,8 @@ static void streamSamplerTask(void* /*param*/) {
             g_state.interp_duration_us = (uint32_t)(d.duration_s * 1e6f);
             g_state.interp_elapsed_us  = (uint32_t)(d.elapsed_s * 1e6f);
             g_state.interp_live_mode   = (d.mode == (uint8_t)slopmotion::Mode::Chase);
-            g_state.interp_grad_mode   = (d.plan_kind == (uint8_t)slopmotion::PlanKind::Quintic);
+            g_state.interp_grad_mode   = (d.plan_kind == (uint8_t)slopmotion::PlanKind::Quintic ||
+                                          d.plan_kind == (uint8_t)slopmotion::PlanKind::Cubic);
             g_state.interp_style       = d.mode;
             g_state.interp_active      = true;
             g_state.sm_mode      = d.mode;
@@ -496,17 +551,69 @@ static void streamSamplerTask(void* /*param*/) {
         // and a mislabeled anomaly feed is worse than a quiet one — the 0x05
         // WS frame goes silent until the WebUI refactor plumbs the new kinds).
         {
-            static const char* kSmAnomNames[] = {
-                "none", "plan-failed", "settle", "endvel-clamped",
-                "deadline-stretched", "waveform-fallback" };
             slopmotion::Anomaly ev;
+            char nmbuf[8];
             while (g_slopmotion.popAnomaly(ev)) {
+                // COUNT FIRST, UNCONDITIONALLY. The human log line below is
+                // throttled (a 14-event replan burst would otherwise spam the
+                // ring), so the counters are the only lossless record — they
+                // must never sit behind a throttle or a log-level gate.
                 g_state.sm_anomalies = g_state.sm_anomalies + 1;
-                const char* nm = ev.kind < 6 ? kSmAnomNames[ev.kind] : "?";
-                SLOGD_EVERY_MS(1000, "motion",
-                               "slopmotion %s target=%.3f detail=%.3f (total %lu)",
-                               nm, (double)ev.target, (double)ev.detail,
-                               (unsigned long)g_state.sm_anomalies);
+                if (ev.kind < SystemState::SM_ANOM_KINDS)
+                    g_state.sm_anom_kind[ev.kind] = g_state.sm_anom_kind[ev.kind] + 1;
+                // Hand the EDGE to Core 0 for the 0x0089 motion-anomaly EVENT
+                // channel. We cannot publish from here: the slopsync Hub is
+                // single-task by invariant and that task is on Core 0, so the
+                // anomaly crosses as data (SPSC ring in SystemState) and the
+                // SlopSyncHub task turns it into a frame. Bounded, non-
+                // blocking, allocation-free — safe on the 1 kHz sampler.
+                // UNGATED by the ring's own name table on purpose: an unknown
+                // kind still deserves to reach a subscriber (the catalog's
+                // option labels stop at the last named kind, so a client shows
+                // the ordinal — the same self-identifying behaviour the log
+                // line's "?<n>" gives, rather than silence).
+                {
+                    SystemState::SmAnomalyRec rec;
+                    rec.t_us   = (uint32_t)(ev.t_us & 0xFFFFFFFFull);
+                    rec.seq    = ev.seq;
+                    rec.kind   = ev.kind;
+                    rec.target = ev.target;
+                    rec.detail = ev.detail;
+                    g_state.smAnomalyPush(rec);
+                }
+                // Bound from the shared table's own size, never a literal — an
+                // engine that grows a kind must not silently become "?" again.
+                const char* nm;
+                if (ev.kind < kSmAnomalyNameCount) {
+                    nm = kSmAnomalyNames[ev.kind];
+                } else {
+                    // Unknown kind prints its ORDINAL ("?6"), so a stale table
+                    // names the number to add rather than swallowing it.
+                    snprintf(nmbuf, sizeof(nmbuf), "?%u", (unsigned)ev.kind);
+                    nm = nmbuf;
+                }
+                // Info, not Debug: Debug sits below the default
+                // SLOPLOG_COMPILE_LEVEL floor, so this line compiled out of
+                // every stock build — the anomaly feed was invisible on the
+                // device by construction.
+                //
+                // Log the KIND CHANGING, not every anomaly. A stream that
+                // outruns the engine emits the same kind continuously, and the
+                // old flat 1 Hz throttle turned that into a permanent 1/s
+                // drip that said nothing new after the first line. The full
+                // per-event feed lives on channel 0x0089 and in the
+                // sm_anom_kind[] counters — this is the human mirror, so it
+                // fires on transitions plus a 10 s "still happening" pulse.
+                static uint8_t last_kind = 0xFF;
+                static uint32_t last_kind_ms = 0;
+                const uint32_t anom_now = millis();
+                if (ev.kind != last_kind || (anom_now - last_kind_ms) >= 10000u) {
+                    last_kind = ev.kind;
+                    last_kind_ms = anom_now;
+                    SLOGI("motion", "slopmotion %s target=%.3f detail=%.3f (total %lu)",
+                          nm, (double)ev.target, (double)ev.detail,
+                          (unsigned long)g_state.sm_anomalies);
+                }
             }
         }
 
@@ -539,7 +646,6 @@ static void commsTask(void* /*param*/) {
         } else if (activeMode == TransportMode::DONGLE) {
             TIME_STEP(dongleTransport.poll(), "comms:dongle.poll");
         } else {
-            TIME_STEP(wsTransport.run(), "comms:wsTransport.run");
         }
 
         uint32_t now = millis();
@@ -549,8 +655,24 @@ static void commsTask(void* /*param*/) {
             last_frame_count = frames;
             last_report_ms   = now;
             g_state.measured_hz = (uint16_t)per_sec;
-            if (wsTransport.isConnected() || serialTransport.isActive() || dongleTransport.isActive())
-                SLOGD("sys", "rx=%u frames/s", per_sec);
+            // Log on CHANGE, not on tick. This was an unconditional 1 Hz line
+            // printing the SAME "rx=50 frames/s" for the whole session — and
+            // measured_hz is already live telemetry the UI reads. What is
+            // actually worth a log line is the stream starting, stopping, or
+            // its rate shifting by more than jitter.
+            static uint32_t last_logged_hz = 0;
+            const bool linked = serialTransport.isActive() ||
+                                dongleTransport.isActive();
+            if (linked) {
+                const uint32_t delta = per_sec > last_logged_hz ? per_sec - last_logged_hz
+                                                                : last_logged_hz - per_sec;
+                if (delta >= 5 || (per_sec == 0) != (last_logged_hz == 0)) {
+                    last_logged_hz = per_sec;
+                    SLOGD("sys", "rx=%u frames/s", per_sec);
+                }
+            } else {
+                last_logged_hz = 0;
+            }
             transportMgr.pollWifiLink();
             transportMgr.superviseWifi();   // re-scan + re-pin if link dropped
         }
@@ -568,12 +690,16 @@ static void httpTask(void* param) {
     WebUI* ui = static_cast<WebUI*>(param);
     while (true) {
         TIME_STEP(ui->update(),           "http:ui.update");
-        // NOTE: uiSocket.update() (_ws.loop()) was MOVED to UiSocket::senderTask.
-        // Servicing the telemetry WebSocket here let a wedged/half-open client's
-        // blocking socket ops (up to WEBSOCKETS_TCP_TIMEOUT × connected sockets,
-        // ~2.6s observed) freeze this task — and with it the heartbeat + HTTP +
-        // OTA on Core 0. Isolating WS onto the sender task means a stuck client
-        // can only delay telemetry, never the heartbeat/HTTP/motion. :3
+        // M5c: the :81 telemetry WebSocket is GONE. It once had to be moved off
+        // this task because a wedged client's blocking socket ops (~2.6 s
+        // observed) froze the heartbeat + HTTP + OTA on Core 0; the replacement
+        // never blocks at all, because ESP32Async's write() queues or refuses
+        // rather than waiting. The whole class of failure left with it.
+        //
+        // Kept as history because the ISOLATION LESSON outlives the plane:
+        // never service a socket that can block from the task that also owns
+        // the heartbeat, HTTP and OTA. A stuck client may delay telemetry; it
+        // must never be able to delay any of those three. :3
         TIME_STEP(otaService.handle(),    "http:ota.handle");
 #if defined(FEATURE_RS485_MODBUS)
         // In Modbus motion-backend mode the bus is serviced from Core 1
@@ -638,7 +764,7 @@ static void servoBusTask(void* /*param*/) {
 
 void setup() {
     Serial.begin(SERIAL_CONTROL_BAUD);
-    applogBegin();
+    applogBegin(&g_state);
     SLOGI("boot", "=== SlopDrive-32 v2.0 — D4 event-driven ===");
 #if SERIAL_CONTROL_MODE
     SLOGI("boot", "Serial control mode ON: USB Serial is dedicated to Intiface TCode.");
@@ -702,11 +828,6 @@ void setup() {
 
     webui.init();
 
-    uiSocket.setTelemetryRing(webui._telemetry_ring, &webui._telemetry_seq, &webui._telemetry_mux);
-    uiSocket.setMotorDriver(&motor);
-    uiSocket.setWebUI(&webui);
-    webui.setUiSocket(&uiSocket);   // Health-tab /api/clients enumerate + kick
-    uiSocket.init();
 
     // OTA — only meaningful when WiFi actually came up. ArduinoOTA needs the
     // network stack; the HTTP endpoints ride the WebServer webui.init() just
@@ -812,7 +933,6 @@ void setup() {
         g_state.setTransport(TransportMode::SER);
     }
 
-    wsTransport.begin();
 
     transportMgr.applyTransport(g_state.getTransport());
 
@@ -868,10 +988,19 @@ void setup() {
         void* mem = heap_caps_malloc(sizeof(slopdrive::SlopSyncHubService),
                                      MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT);
         if (mem != nullptr) {
-            slopSyncHub = new (mem) slopdrive::SlopSyncHubService(g_state, webui, arbiter);
+            // `motor` by reference: the catalog's 0x0087 power channel is
+            // FEATURE-GATED on the driver's own hasCurrentSensor()/
+            // hasPowerMonitor(), and that is read inside the constructor
+            // before the hub computes the catalog etag. Safe here — this runs
+            // long after motor.bind() picked the backend.
+            slopSyncHub = new (mem) slopdrive::SlopSyncHubService(g_state, webui, arbiter, motor);
             slopSyncHub->setPatternEngine(&patternEngine);
             slopSyncHub->setMotionStreamQueue(g_interp_queue);  // 0x0084 motion-input -> Core-1 sampler
             slopSyncHub->init();
+            // RFC-029 §4: GET /uitoken on the SHARED WebServer — HTTP escapee #2,
+            // and it has to be HTTP because its whole security property is the
+            // browser's same-origin policy, which cannot exist in-band.
+            slopSyncHub->attachHttpRoutes(webui.server());
             SLOGI("slopsync", "hub service in PSRAM (%u B)",
                   unsigned(sizeof(slopdrive::SlopSyncHubService)));
         } else {

@@ -26,7 +26,10 @@
 #include "slopsync/wire/raw/clock_frame.hpp"
 #include "slopsync/wire/messages/hello.hpp"
 #include "slopsync/wire/messages/nack.hpp"
+#include "slopsync/wire/messages/grant.hpp"
+#include "slopsync/wire/messages/publish.hpp"
 #include "slopsync/wire/messages/welcome.hpp"
+#include "slopsync/wire/raw/catalog_ready.hpp"
 #include "slopsync/wire/stream_bundle.hpp"
 
 #include <array>
@@ -53,46 +56,41 @@ constexpr size_t kSampleSize = 2;         // one i16
 constexpr size_t kSegSampleSize = 6;      // {target u16, dur u16, end_vel i16}
 constexpr int16_t kSegNoEndVel = -32768;  // INT16_MIN sentinel = "no end velocity"
 
-Catalog32 makeStreamCatalog() {
-    Catalog32 c;
-    c.count = 4;
-    auto& e = c.entries;
+void makeStreamCatalog(Catalog32& c) {
+    c.clear();
 
-    e[0].id = kStreamCh; e[0].name = "motion-input";
-    e[0].cls = ChannelClass::STREAM; e[0].dir = Direction::c2h;
-    e[0].access = AccessLevel::controller; e[0].maxRateHz = 200.0f;
-    e[0].defaultPriority = Priority::elevated;
-    e[0].fieldCount = 1;
-    e[0].layout[0] = {.name = "vel_mm_s", .type = PackedFieldType::i16, .unit = "mm/s", .scale = 1.0f};
+    c.addEntry({.id = kStreamCh, .name = "motion-input",
+                .cls = ChannelClass::STREAM, .dir = Direction::c2h,
+                .access = AccessLevel::control, .maxRateHz = 200.0f,
+                .defaultPriority = Priority::elevated});
+    c.addLayoutField({.name = "vel_mm_s", .type = PackedFieldType::i16, .unit = "mm/s", .scale = 1.0f});
 
-    e[1].id = kH2cStreamCh; e[1].name = "pos-tele";
-    e[1].cls = ChannelClass::STREAM; e[1].dir = Direction::h2c;
-    e[1].access = AccessLevel::viewer; e[1].maxRateHz = 240.0f;
-    e[1].defaultPriority = Priority::elevated;
-    e[1].fieldCount = 1;
-    e[1].layout[0] = {.name = "pos_10um", .type = PackedFieldType::u16, .unit = "mm", .scale = 100.0f};
+    c.addEntry({.id = kH2cStreamCh, .name = "pos-tele",
+                .cls = ChannelClass::STREAM, .dir = Direction::h2c,
+                .access = AccessLevel::watch, .maxRateHz = 240.0f,
+                .defaultPriority = Priority::elevated});
+    c.addLayoutField({.name = "pos_10um", .type = PackedFieldType::u16, .unit = "mm", .scale = 100.0f});
 
-    e[2].id = kIntentCh; e[2].name = "cfg-set";
-    e[2].cls = ChannelClass::INTENT; e[2].dir = Direction::c2h;
-    e[2].access = AccessLevel::controller; e[2].maxRateHz = 10.0f;
-    e[2].defaultPriority = Priority::critical;
-    e[2].fieldCount = 1;
-    e[2].schema[0] = {.key = 1, .name = "speed", .type = CborFieldType::f32_t, .unit = "mm/s"};
+    c.addEntry({.id = kIntentCh, .name = "cfg-set",
+                .cls = ChannelClass::INTENT, .dir = Direction::c2h,
+                .access = AccessLevel::control, .maxRateHz = 10.0f,
+                .defaultPriority = Priority::critical});
+    c.addSchemaField({.key = 1, .name = "speed", .type = CborFieldType::f32_t, .unit = "mm/s"});
 
     // 0x0085 "motion-segment": the 6-byte timed-segment layout the SlopDrive
     // device advertises (target + duration + sentinel-bearing end velocity).
     // Mirrors include/comms/SlopSyncCatalog.h's 0x0085 entry so the harness
     // exercises the exact wire size + field order the firmware decodes.
-    e[3].id = kSegCh; e[3].name = "motion-segment";
-    e[3].cls = ChannelClass::STREAM; e[3].dir = Direction::c2h;
-    e[3].access = AccessLevel::controller; e[3].maxRateHz = 50.0f;
-    e[3].defaultPriority = Priority::elevated;
-    e[3].fieldCount = 3;
-    e[3].layout[0] = {.name = "target_norm",  .type = PackedFieldType::u16, .unit = "norm",   .scale = 10000.0f};
-    e[3].layout[1] = {.name = "duration_ms",  .type = PackedFieldType::u16, .unit = "ms",     .scale = 1.0f};
-    e[3].layout[2] = {.name = "end_vel_norm", .type = PackedFieldType::i16, .unit = "norm/s", .scale = 1000.0f};
-
-    return c;
+    // streamKind = segments (RFC-014/023): the explicit catalog property that
+    // replaced the M5 unit-string heuristic.
+    c.addEntry({.id = kSegCh, .name = "motion-segment",
+                .cls = ChannelClass::STREAM, .dir = Direction::c2h,
+                .access = AccessLevel::control, .maxRateHz = 50.0f,
+                .defaultPriority = Priority::elevated,
+                .streamKind = stream_kinds::segments});
+    c.addLayoutField({.name = "target_norm",  .type = PackedFieldType::u16, .unit = "norm",   .scale = 10000.0f});
+    c.addLayoutField({.name = "duration_ms",  .type = PackedFieldType::u16, .unit = "ms",     .scale = 1.0f});
+    c.addLayoutField({.name = "end_vel_norm", .type = PackedFieldType::i16, .unit = "norm/s", .scale = 1000.0f});
 }
 
 // ---- delegate: records ingress + ownership + deadman callbacks -------------
@@ -120,7 +118,7 @@ public:
     std::vector<std::vector<std::byte>> lastSamples;
 
     AccessLevel validateToken(std::span<const std::byte>, std::span<const std::byte>, bool hasToken) override {
-        return hasToken ? AccessLevel::controller : AccessLevel::viewer;
+        return hasToken ? AccessLevel::control : AccessLevel::watch;
     }
     Result<IntentValueMap, NackCode> applyIntent(uint16_t, const IntentValueMap&, AccessLevel, bool&) override {
         return Result<IntentValueMap, NackCode>::err(NackCode::UNKNOWN_CHANNEL);  // not exercised here
@@ -271,6 +269,27 @@ std::optional<WelcomeMsg> findWelcome(const std::vector<DecodedReply>& replies) 
     return std::nullopt;
 }
 
+// Mid-session publish renegotiation (§6.6/RFC-013): PUBLISH carries the same
+// `publishes` array HELLO does and is answered with a GRANT.
+void writePublish(ITransport& ep, const std::vector<PublishWish>& wishes) {
+    PublishMsg m{};
+    m.publishes_count = uint32_t(wishes.size());
+    for (size_t i = 0; i < wishes.size(); ++i) m.publishes[i] = wishes[i];
+    std::array<std::byte, 300> buf{};
+    size_t n = encodePublish(m, std::span<std::byte>(buf));
+    REQUIRE(n > 0);
+    writeFrame(ep, FrameType::PUBLISH, 0, std::span<const std::byte>(buf.data(), n));
+}
+
+std::optional<GrantMsg> findGrant(const std::vector<DecodedReply>& replies) {
+    for (const auto& r : replies) {
+        if (r.type != FrameType::GRANT) continue;
+        auto g = decodeGrant(std::span<const std::byte>(r.payload));
+        if (g) return g.value();
+    }
+    return std::nullopt;
+}
+
 int countNacks(const std::vector<DecodedReply>& replies, NackCode code) {
     int n = 0;
     for (const auto& r : replies) {
@@ -281,14 +300,30 @@ int countNacks(const std::vector<DecodedReply>& replies, NackCode code) {
     return n;
 }
 
+// Declares catalog readiness (§8.4/RFC-015) with the etag WELCOME advertised.
+// These sessions HELLO without a cached etag, so the hub gates both planes
+// until this lands — a raw-frame client has to say it can decode.
+void writeCatalogReady(ITransport& ep, std::span<const std::byte> etag) {
+    std::array<std::byte, kCatalogReadyBytes> buf{};
+    size_t n = encodeCatalogReady(etag, std::span<std::byte>(buf));
+    REQUIRE(n == kCatalogReadyBytes);
+    writeFrame(ep, FrameType::CATALOG_READY, 0, std::span<const std::byte>(buf.data(), n));
+}
+
 // Connects a session on `ep` (attached slot already present), returns its
-// WELCOME. Drains the WELCOME off the wire.
+// WELCOME. Drains the WELCOME off the wire. `ready` (default true) also
+// declares CATALOG_READY so the session's data plane is open — pass false to
+// exercise the pre-READY gate itself.
 WelcomeMsg connectSession(Hub& hub, ManualClock& clock, ITransport& ep, uint8_t idByte, bool token,
-                          std::vector<PublishWish> publishes) {
+                          std::vector<PublishWish> publishes, bool ready = true) {
     writeHello(ep, idByte, token, std::move(publishes));
     auto replies = tickAndDrain(hub, clock, ep);
     auto w = findWelcome(replies);
     REQUIRE(w.has_value());
+    if (ready) {
+        writeCatalogReady(ep, std::span<const std::byte>(w->catalog_etag));
+        tickAndDrain(hub, clock, ep);
+    }
     return w.value();
 }
 
@@ -298,7 +333,8 @@ WelcomeMsg connectSession(Hub& hub, ManualClock& clock, ITransport& ep, uint8_t 
 // SI-01 — publish wish on a c2h STREAM channel is granted, rate clamped
 // ============================================================================
 TEST_CASE("SI-01: a publish wish clamps to catalog max_rate_hz and echoes in granted_publishes") {
-    Catalog32 cat = makeStreamCatalog();
+    Catalog32 cat;
+    makeStreamCatalog(cat);
     ManualClock clock;
     XorShift32 rng(101);
     StreamHubDelegate del;
@@ -320,7 +356,8 @@ TEST_CASE("SI-01: a publish wish clamps to catalog max_rate_hz and echoes in gra
 // SI-02 — unknown / wrong-class / wrong-dir wishes are omitted, no NACK
 // ============================================================================
 TEST_CASE("SI-02: invalid publish wishes are silently omitted; the session still comes up") {
-    Catalog32 cat = makeStreamCatalog();
+    Catalog32 cat;
+    makeStreamCatalog(cat);
     ManualClock clock;
     XorShift32 rng(102);
     StreamHubDelegate del;
@@ -345,7 +382,8 @@ TEST_CASE("SI-02: invalid publish wishes are silently omitted; the session still
 // SI-03 — a viewer wishing a controller-access channel is not granted
 // ============================================================================
 TEST_CASE("SI-03: a viewer session cannot be granted a controller-access publish") {
-    Catalog32 cat = makeStreamCatalog();
+    Catalog32 cat;
+    makeStreamCatalog(cat);
     ManualClock clock;
     XorShift32 rng(103);
     StreamHubDelegate del;
@@ -357,7 +395,7 @@ TEST_CASE("SI-03: a viewer session cannot be granted a controller-access publish
 
     WelcomeMsg w = connectSession(hub, clock, link.endpointB(), 3, /*token=*/false,  // no token -> viewer
                                   {PublishWish{kStreamCh, 100.0f}});
-    CHECK(w.roles == uint8_t(AccessLevel::viewer));
+    CHECK(w.roles == uint8_t(AccessLevel::watch));
     CHECK(w.granted_publishes_count == 0);
 }
 
@@ -365,7 +403,8 @@ TEST_CASE("SI-03: a viewer session cannot be granted a controller-access publish
 // SI-04 — a granted session's valid bundle is delivered to the delegate
 // ============================================================================
 TEST_CASE("SI-04: a valid bundle on a granted channel reaches onStreamBundle with a parseable view") {
-    Catalog32 cat = makeStreamCatalog();
+    Catalog32 cat;
+    makeStreamCatalog(cat);
     ManualClock clock;
     XorShift32 rng(104);
     StreamHubDelegate del;
@@ -391,7 +430,8 @@ TEST_CASE("SI-04: a valid bundle on a granted channel reaches onStreamBundle wit
 // SI-05 — an ungranted session's bundle is silently dropped (no NACK)
 // ============================================================================
 TEST_CASE("SI-05: a bundle on a channel the session never published is dropped, uncounted-as-error") {
-    Catalog32 cat = makeStreamCatalog();
+    Catalog32 cat;
+    makeStreamCatalog(cat);
     ManualClock clock;
     XorShift32 rng(105);
     StreamHubDelegate del;
@@ -416,7 +456,8 @@ TEST_CASE("SI-05: a bundle on a channel the session never published is dropped, 
 // SI-06 — malformed bundles are dropped whole, delegate never called
 // ============================================================================
 TEST_CASE("SI-06: n=0 / over-span / non-monotonic / first!=0 / truncated bundles all drop") {
-    Catalog32 cat = makeStreamCatalog();
+    Catalog32 cat;
+    makeStreamCatalog(cat);
     ManualClock clock;
     XorShift32 rng(106);
     StreamHubDelegate del;
@@ -453,7 +494,8 @@ TEST_CASE("SI-06: n=0 / over-span / non-monotonic / first!=0 / truncated bundles
 // SI-07 — sustained overage NACKs RATE_LIMITED; legal traffic resumes after
 // ============================================================================
 TEST_CASE("SI-07: flooding samples past the grant NACKs RATE_LIMITED, then a legal bundle is delivered") {
-    Catalog32 cat = makeStreamCatalog();
+    Catalog32 cat;
+    makeStreamCatalog(cat);
     ManualClock clock;
     XorShift32 rng(107);
     StreamHubDelegate del;
@@ -490,7 +532,8 @@ TEST_CASE("SI-07: flooding samples past the grant NACKs RATE_LIMITED, then a leg
 // SI-08 — source ownership: first bundle acquires; silence fires the deadman
 // ============================================================================
 TEST_CASE("SI-08: first accepted bundle acquires the source; quiet past the deadman window fires onDeadmanStop") {
-    Catalog32 cat = makeStreamCatalog();
+    Catalog32 cat;
+    makeStreamCatalog(cat);
     ManualClock clock;
     XorShift32 rng(108);
     StreamHubDelegate del;  // mapSource = true -> 0x0080 maps to source 0
@@ -524,7 +567,8 @@ TEST_CASE("SI-08: first accepted bundle acquires the source; quiet past the dead
 // SI-09 — GOODBYE/reset clears the publish grant; reconnect must re-grant
 // ============================================================================
 TEST_CASE("SI-09: a session reset clears publish grants — a reconnect without re-wishing cannot stream") {
-    Catalog32 cat = makeStreamCatalog();
+    Catalog32 cat;
+    makeStreamCatalog(cat);
     ManualClock clock;
     XorShift32 rng(109);
     StreamHubDelegate del;
@@ -563,7 +607,8 @@ TEST_CASE("SI-09: a session reset clears publish grants — a reconnect without 
 // reply; a truncated CLOCK request is silently dropped
 // ============================================================================
 TEST_CASE("SI-10: the hub answers a CLOCK frame with echoed t0 + hub-time t1/t2, and drops a truncated one") {
-    Catalog32 cat = makeStreamCatalog();
+    Catalog32 cat;
+    makeStreamCatalog(cat);
     ManualClock clock;
     XorShift32 rng(110);
     StreamHubDelegate del;
@@ -619,7 +664,8 @@ TEST_CASE("SI-10: the hub answers a CLOCK frame with echoed t0 + hub-time t1/t2,
 // -> B's bundles are now ACCEPTED (ownership was released, not orphaned).
 // ============================================================================
 TEST_CASE("SI-11: after a streaming owner sends GOODBYE, a new session can acquire the source and stream") {
-    Catalog32 cat = makeStreamCatalog();
+    Catalog32 cat;
+    makeStreamCatalog(cat);
     ManualClock clock;
     XorShift32 rng(111);
     StreamHubDelegate del;  // mapSource=true -> 0x0080 maps to source 0 (Stop policy by default)
@@ -672,7 +718,8 @@ TEST_CASE("SI-11: after a streaming owner sends GOODBYE, a new session can acqui
 // owner never says goodbye — the hub's detachTransport() must still release.
 // ============================================================================
 TEST_CASE("SI-12: after a streaming owner's transport detaches (no GOODBYE), a new session can acquire the source") {
-    Catalog32 cat = makeStreamCatalog();
+    Catalog32 cat;
+    makeStreamCatalog(cat);
     ManualClock clock;
     XorShift32 rng(112);
     StreamHubDelegate del;
@@ -720,7 +767,8 @@ TEST_CASE("SI-12: after a streaming owner's transport detaches (no GOODBYE), a n
 // session — on the very same transport — could never re-acquire its own source.
 // ============================================================================
 TEST_CASE("SI-13: a re-HELLO recycling a live slot releases the old session's source before the new one streams") {
-    Catalog32 cat = makeStreamCatalog();
+    Catalog32 cat;
+    makeStreamCatalog(cat);
     ManualClock clock;
     XorShift32 rng(113);
     StreamHubDelegate del;
@@ -765,7 +813,8 @@ TEST_CASE("SI-13: a re-HELLO recycling a live slot releases the old session's so
 // channel-generic path as motion-input with zero library changes.
 // ============================================================================
 TEST_CASE("SI-14: a 6-B motion-segment bundle is granted and its sentinel end_vel round-trips to the delegate") {
-    Catalog32 cat = makeStreamCatalog();
+    Catalog32 cat;
+    makeStreamCatalog(cat);
     ManualClock clock;
     XorShift32 rng(114);
     StreamHubDelegate del;
@@ -812,7 +861,8 @@ TEST_CASE("SI-14: a 6-B motion-segment bundle is granted and its sentinel end_ve
 // clear covers 0x0085 too (both map to source 0).
 // ============================================================================
 TEST_CASE("SI-15: a resumed stream bundle clears the deadman STOP latch (safety STATE stops lying)") {
-    Catalog32 cat = makeStreamCatalog();
+    Catalog32 cat;
+    makeStreamCatalog(cat);
     ManualClock clock;
     XorShift32 rng(115);
     StreamHubDelegate del;  // mapSource = true -> both stream channels -> source 0
@@ -845,4 +895,444 @@ TEST_CASE("SI-15: a resumed stream bundle clears the deadman STOP latch (safety 
     REQUIRE(del.bundles.size() == 2);           // resumed bundle delivered
     CHECK_FALSE(hub.stopLatched());             // STOP cleared by the accepted bundle
     CHECK_FALSE((hub.safetyWord() & slopsync::safety_bits::STOP));
+}
+
+// ============================================================================
+// SI-16 — PUBLISH (0x18): a producer adds a publish grant MID-SESSION. Before
+// RFC-013 the only way to want a new c2h STREAM channel was to tear the whole
+// session down and reconnect with a different HELLO. Also proves the §6.2
+// validation rules are unchanged: an invalid wish is silently OMITTED from the
+// grants (absence, never a NACK), exactly as in HELLO.
+// ============================================================================
+TEST_CASE("SI-16: PUBLISH grants a new publish mid-session; invalid wishes are silently omitted") {
+    Catalog32 cat;
+    makeStreamCatalog(cat);
+    ManualClock clock;
+    XorShift32 rng(116);
+    StreamHubDelegate del;
+    del.mapSource = false;  // isolate the grant mechanics from ownership
+    Hub hub(cat, clock, rng, del);
+
+    InProcessLink link(clock, rng);
+    REQUIRE(hub.attachTransport(link.endpointA()));
+    REQUIRE(link.endpointB().open());
+
+    // Connect wishing NOTHING: the segment channel is ungranted, so its bundles
+    // are dropped (the pre-RFC-013 reconnect-or-nothing situation).
+    connectSession(hub, clock, link.endpointB(), 16, true, {});
+    writeSegmentBundle(link.endpointB(), {SegSample{3000, 900, kSegNoEndVel}});
+    tickAndDrain(hub, clock, link.endpointB());
+    REQUIRE(del.bundles.empty());
+
+    // Renegotiate: one good wish (clamped 200 -> 50 by the catalog ceiling) and
+    // three that must fail validation exactly as they would in HELLO.
+    writePublish(link.endpointB(), {PublishWish{kSegCh, 200.0f},
+                                    PublishWish{kUnknownCh, 10.0f},      // unknown channel
+                                    PublishWish{kIntentCh, 10.0f},       // wrong class
+                                    PublishWish{kH2cStreamCh, 10.0f}});  // wrong direction
+    auto replies = tickAndDrain(hub, clock, link.endpointB());
+
+    auto g = findGrant(replies);
+    REQUIRE(g.has_value());
+    REQUIRE(g->granted_publishes_count == 1);              // only the legal wish survives
+    CHECK(g->granted_publishes[0].channel_id == kSegCh);
+    CHECK(g->granted_publishes[0].granted_rate_hz == doctest::Approx(50.0f));
+    CHECK(countNacks(replies, NackCode::UNKNOWN_CHANNEL) == 0);  // §6.2: absence, not error
+    CHECK(countNacks(replies, NackCode::CLASS_MISMATCH) == 0);
+
+    // The grant is truth: bundles now reach the delegate, no reconnect involved.
+    writeSegmentBundle(link.endpointB(), {SegSample{7000, 900, kSegNoEndVel}}, /*tBase=*/9000);
+    tickAndDrain(hub, clock, link.endpointB());
+    REQUIRE(del.bundles.size() == 1);
+    CHECK(del.bundles[0].channel_id == kSegCh);
+}
+
+// ============================================================================
+// SI-17 — PUBLISH REPLACES an existing grant for the same channel (semantics
+// mirror SUBSCRIBE's re-subscribe), rather than stacking a second entry.
+// ============================================================================
+TEST_CASE("SI-17: a PUBLISH for an already-granted channel replaces that grant in place") {
+    Catalog32 cat;
+    makeStreamCatalog(cat);
+    ManualClock clock;
+    XorShift32 rng(117);
+    StreamHubDelegate del;
+    del.mapSource = false;
+    Hub hub(cat, clock, rng, del);
+
+    InProcessLink link(clock, rng);
+    REQUIRE(hub.attachTransport(link.endpointA()));
+    REQUIRE(link.endpointB().open());
+
+    WelcomeMsg w = connectSession(hub, clock, link.endpointB(), 17, true, {PublishWish{kStreamCh, 200.0f}});
+    REQUIRE(w.granted_publishes_count == 1);
+    CHECK(w.granted_publishes[0].granted_rate_hz == doctest::Approx(200.0f));
+
+    // Same channel, lower ask -> the grant is REPLACED at 20 Hz.
+    writePublish(link.endpointB(), {PublishWish{kStreamCh, 20.0f}});
+    auto replies = tickAndDrain(hub, clock, link.endpointB());
+    auto g = findGrant(replies);
+    REQUIRE(g.has_value());
+    REQUIRE(g->granted_publishes_count == 1);
+    CHECK(g->granted_publishes[0].channel_id == kStreamCh);
+    CHECK(g->granted_publishes[0].granted_rate_hz == doctest::Approx(20.0f));
+
+    // The replacement is enforced, not cosmetic: the bucket now holds 20
+    // samples, so a 32-sample bundle in one tick overdraws where it used to fit.
+    writeValidBundle(link.endpointB(), kStreamCh, 32, /*tBase=*/4000);
+    auto after = tickAndDrain(hub, clock, link.endpointB());
+    CHECK(del.bundles.empty());
+    CHECK(countNacks(after, NackCode::RATE_LIMITED) == 1);
+}
+
+// ============================================================================
+// SI-18 — RFC-013 burst: the token bucket's CAPACITY is the granted burst
+// while its REFILL RATE stays the granted sample rate. This is what lets the
+// real segment streamer (2-4/s mean, ~25/s peak) declare what it actually is
+// instead of inflating its rate 10x to buy burst headroom. The hub clamps to
+// max_burst_multiple x rate and ECHOES the applied value (ground truth).
+// ============================================================================
+TEST_CASE("SI-18: a requested burst is clamped to max_burst_multiple, echoed, and becomes the bucket depth") {
+    Catalog32 cat;
+    makeStreamCatalog(cat);
+    ManualClock clock;
+    XorShift32 rng(118);
+    StreamHubDelegate del;
+    del.mapSource = false;
+    Hub hub(cat, clock, rng, del);
+
+    InProcessLink link(clock, rng);
+    REQUIRE(hub.attachTransport(link.endpointA()));
+    REQUIRE(link.endpointB().open());
+
+    // Ask 5 Hz with a wildly optimistic burst of 100 -> clamped to 5 x 4 = 20.
+    PublishWish wish{kSegCh, 5.0f};
+    wish.has_burst = true;
+    wish.burst = 100.0f;
+    WelcomeMsg w = connectSession(hub, clock, link.endpointB(), 18, true, {wish});
+
+    REQUIRE(w.granted_publishes_count == 1);
+    CHECK(w.granted_publishes[0].granted_rate_hz == doctest::Approx(5.0f));  // rate untouched by the burst
+    REQUIRE(w.granted_publishes[0].has_burst);                               // echoed because it was asked for
+    CHECK(w.granted_publishes[0].burst == doctest::Approx(5.0f * float(limits::max_burst_multiple)));
+
+    // 20 samples in ONE tick (no refill between them) all fit the deeper bucket.
+    for (int i = 0; i < 4; ++i) {
+        writeSegmentBundle(link.endpointB(),
+                           {SegSample{1000, 100, kSegNoEndVel}, SegSample{2000, 100, kSegNoEndVel},
+                            SegSample{3000, 100, kSegNoEndVel}, SegSample{4000, 100, kSegNoEndVel},
+                            SegSample{5000, 100, kSegNoEndVel}},
+                           /*tBase=*/uint32_t(10000 + i));
+    }
+    auto burstReplies = tickAndDrain(hub, clock, link.endpointB());
+    CHECK(del.bundles.size() == 4);  // all 20 samples admitted
+    CHECK(countNacks(burstReplies, NackCode::RATE_LIMITED) == 0);
+
+    // The 21st sample in the same drained bucket overdraws -> the limiter is
+    // still a limiter, just a deeper one.
+    writeSegmentBundle(link.endpointB(), {SegSample{6000, 100, kSegNoEndVel}}, /*tBase=*/20000);
+    auto over = tickAndDrain(hub, clock, link.endpointB(), /*stepUs=*/0);
+    CHECK(del.bundles.size() == 4);
+    CHECK(countNacks(over, NackCode::RATE_LIMITED) == 1);
+}
+
+// ============================================================================
+// SI-19 — no burst asked = today's behavior EXACTLY: capacity equals the
+// granted rate and the grant echoes no `burst` key at all (so a non-bursty
+// client's WELCOME stays byte-identical to a pre-RFC-013 hub's).
+// ============================================================================
+TEST_CASE("SI-19: an unrequested burst defaults to the granted rate and is not echoed") {
+    Catalog32 cat;
+    makeStreamCatalog(cat);
+    ManualClock clock;
+    XorShift32 rng(119);
+    StreamHubDelegate del;
+    del.mapSource = false;
+    Hub hub(cat, clock, rng, del);
+
+    InProcessLink link(clock, rng);
+    REQUIRE(hub.attachTransport(link.endpointA()));
+    REQUIRE(link.endpointB().open());
+
+    WelcomeMsg w = connectSession(hub, clock, link.endpointB(), 19, true, {PublishWish{kSegCh, 5.0f}});
+    REQUIRE(w.granted_publishes_count == 1);
+    CHECK_FALSE(w.granted_publishes[0].has_burst);  // absent key: the wire is unchanged
+
+    // Capacity == rate == 5 samples: five fit, the sixth overdraws.
+    writeSegmentBundle(link.endpointB(),
+                       {SegSample{1000, 100, kSegNoEndVel}, SegSample{2000, 100, kSegNoEndVel},
+                        SegSample{3000, 100, kSegNoEndVel}, SegSample{4000, 100, kSegNoEndVel},
+                        SegSample{5000, 100, kSegNoEndVel}},
+                       /*tBase=*/30000);
+    auto first = tickAndDrain(hub, clock, link.endpointB());
+    CHECK(del.bundles.size() == 1);
+    CHECK(countNacks(first, NackCode::RATE_LIMITED) == 0);
+
+    writeSegmentBundle(link.endpointB(), {SegSample{6000, 100, kSegNoEndVel}}, /*tBase=*/40000);
+    auto second = tickAndDrain(hub, clock, link.endpointB(), /*stepUs=*/0);
+    CHECK(del.bundles.size() == 1);
+    CHECK(countNacks(second, NackCode::RATE_LIMITED) == 1);
+}
+
+// ============================================================================
+// SI-20 — RFC-015 gates the c2h data plane too: a granted producer that has
+// not declared CATALOG_READY has never received the retained safety latch, so
+// its bundles must not reach the arbiter. Dropped + counted, never NACKed
+// (§9.2's data-plane rule); accepted the moment readiness is declared.
+// ============================================================================
+TEST_CASE("SI-20: bundles from a pre-READY session are dropped, then accepted once it declares readiness") {
+    Catalog32 cat;
+    makeStreamCatalog(cat);
+    ManualClock clock;
+    XorShift32 rng(120);
+    StreamHubDelegate del;
+    Hub hub(cat, clock, rng, del);
+
+    InProcessLink link(clock, rng);
+    REQUIRE(hub.attachTransport(link.endpointA()));
+    REQUIRE(link.endpointB().open());
+
+    WelcomeMsg w =
+        connectSession(hub, clock, link.endpointB(), 20, true, {PublishWish{kStreamCh, 200.0f}}, /*ready=*/false);
+    REQUIRE(w.granted_publishes_count == 1);  // granted, but gated
+
+    writeValidBundle(link.endpointB(), kStreamCh, 4);
+    auto gated = tickAndDrain(hub, clock, link.endpointB());
+    CHECK(del.bundles.empty());
+    CHECK(del.ownership.empty());  // no source acquired by a blind producer
+    CHECK(hub.streamIngressCounters(0).accepted == 0);
+    CHECK(hub.streamIngressCounters(0).dropped == 1);
+    CHECK(countNacks(gated, NackCode::RATE_LIMITED) == 0);  // silent, per §9.2
+
+    writeCatalogReady(link.endpointB(), std::span<const std::byte>(w.catalog_etag));
+    tickAndDrain(hub, clock, link.endpointB());
+    writeValidBundle(link.endpointB(), kStreamCh, 4, /*tBase=*/60000);
+    tickAndDrain(hub, clock, link.endpointB());
+
+    REQUIRE(del.bundles.size() == 1);
+    CHECK(hub.streamIngressCounters(0).accepted == 1);
+    REQUIRE(del.ownership.size() == 1);
+    CHECK(del.ownership[0].owner_session == w.session_id);
+}
+
+// ============================================================================
+// SI-16 (RFC-012) — a producer whose arbiter source is owned by another LIVE
+// session gets NACK SOURCE_CONFLICT on its FIRST dropped bundle, then is
+// throttled exactly like §10.5's RATE_LIMITED NACK.
+//
+// This is the §9.2 carve-out. Before it, such a producer was silently, totally
+// dead: every bundle dropped for ownership, zero wire signal, no way to tell
+// "the machine ignores me" from "my socket is fine". The bundles are STILL
+// dropped — nothing is queued or retried — the client is just told why.
+// ============================================================================
+TEST_CASE("SI-16: second live producer gets SOURCE_CONFLICT, throttled per (session, source)") {
+    Catalog32 cat;
+    makeStreamCatalog(cat);
+    ManualClock clock;
+    XorShift32 rng(316);
+    StreamHubDelegate del;
+    Hub hub(cat, clock, rng, del);
+
+    InProcessLink linkA(clock, rng), linkB(clock, rng);
+    REQUIRE(hub.attachTransport(linkA.endpointA()));
+    REQUIRE(hub.attachTransport(linkB.endpointA()));
+    REQUIRE(linkA.endpointB().open());
+    REQUIRE(linkB.endpointB().open());
+
+    connectSession(hub, clock, linkA.endpointB(), 1, true, {{kStreamCh, 100.0f}});
+    connectSession(hub, clock, linkB.endpointB(), 2, true, {{kStreamCh, 100.0f}});
+
+    // A takes the source first.
+    writeValidBundle(linkA.endpointB(), kStreamCh, 2, /*tBase=*/1000);
+    tickAndDrain(hub, clock, linkA.endpointB());
+    REQUIRE(del.bundles.size() == 1);
+
+    // B's first bundle: dropped AND told.
+    writeValidBundle(linkB.endpointB(), kStreamCh, 2, /*tBase=*/2000);
+    auto first = tickAndDrain(hub, clock, linkB.endpointB());
+    CHECK(del.bundles.size() == 1);                 // still only A's
+    CHECK(hub.streamIngressCounters(1).dropped == 1);
+    CHECK(countNacks(first, NackCode::SOURCE_CONFLICT) == 1);
+
+    // The NACK names the channel, which is what makes it actionable.
+    bool sawChannel = false;
+    for (const auto& r : first) {
+        if (r.type != FrameType::NACK) continue;
+        auto nm = decodeNack(std::span<const std::byte>(r.payload));
+        if (nm && nm.value().code == NackCode::SOURCE_CONFLICT && nm.value().has_channel_id &&
+            nm.value().channel_id == kStreamCh) {
+            sawChannel = true;
+        }
+    }
+    CHECK(sawChannel);
+
+    // Immediately following conflicts inside the throttle interval are silent —
+    // a NACK per dropped bundle would mirror the very flood it reports.
+    int extraNacks = 0;
+    for (int i = 0; i < 5; ++i) {
+        writeValidBundle(linkB.endpointB(), kStreamCh, 2, /*tBase=*/uint32_t(3000 + i));
+        extraNacks += countNacks(tickAndDrain(hub, clock, linkB.endpointB(), /*stepUs=*/1000),
+                                 NackCode::SOURCE_CONFLICT);
+    }
+    CHECK(extraNacks == 0);
+    CHECK(hub.streamIngressCounters(1).dropped == 6);
+
+    // Past the interval, exactly one more.
+    writeValidBundle(linkB.endpointB(), kStreamCh, 2, /*tBase=*/9000);
+    auto later = tickAndDrain(hub, clock, linkB.endpointB(),
+                              /*stepUs=*/(1000u / limits::stream_ingress_overage_nack_per_s) * 1000u);
+    CHECK(countNacks(later, NackCode::SOURCE_CONFLICT) == 1);
+}
+
+// ============================================================================
+// SI-17 (RFC-012) — the throttle is keyed by SOURCE, not by channel. This
+// device maps BOTH 0x0084 and 0x0085 to one arbiter source, and a producer
+// failing over between them is ONE dead producer, not two.
+// ============================================================================
+TEST_CASE("SI-17: SOURCE_CONFLICT throttle is per-source across channels sharing it") {
+    Catalog32 cat;
+    makeStreamCatalog(cat);
+    ManualClock clock;
+    XorShift32 rng(317);
+    StreamHubDelegate del;
+    Hub hub(cat, clock, rng, del);
+
+    InProcessLink linkA(clock, rng), linkB(clock, rng);
+    REQUIRE(hub.attachTransport(linkA.endpointA()));
+    REQUIRE(hub.attachTransport(linkB.endpointA()));
+    REQUIRE(linkA.endpointB().open());
+    REQUIRE(linkB.endpointB().open());
+
+    connectSession(hub, clock, linkA.endpointB(), 1, true, {{kStreamCh, 100.0f}});
+    connectSession(hub, clock, linkB.endpointB(), 2, true, {{kStreamCh, 100.0f}, {kSegCh, 50.0f}});
+
+    writeValidBundle(linkA.endpointB(), kStreamCh, 2, /*tBase=*/1000);
+    tickAndDrain(hub, clock, linkA.endpointB());
+
+    writeValidBundle(linkB.endpointB(), kStreamCh, 2, /*tBase=*/2000);
+    CHECK(countNacks(tickAndDrain(hub, clock, linkB.endpointB()), NackCode::SOURCE_CONFLICT) == 1);
+
+    // Same source, DIFFERENT channel, inside the interval: still silent.
+    writeSegmentBundle(linkB.endpointB(), {{5000, 200, kSegNoEndVel}}, /*tBase=*/clock.nowUs());
+    CHECK(countNacks(tickAndDrain(hub, clock, linkB.endpointB()), NackCode::SOURCE_CONFLICT) == 0);
+}
+
+// ============================================================================
+// SI-18 (RFC-014) — the segment SCHEDULING CONTRACT. For a segment-class
+// channel, t_base + t_off[i] IS the intended execution start of sample i,
+// resolved via §7.2's nearest-window rule. A schedule further ahead than
+// limits::max_future_schedule_ms is rejected whole; a PAST one is fine (a late
+// bundle is ordinary jitter, and the engine plays it now).
+//
+// This replaces the unregistered 250 ms folklore constant the MFP plugin was
+// guessing against with a private SegLookaheadMs = 120.
+// ============================================================================
+TEST_CASE("SI-18: segment schedules beyond max_future_schedule_ms are rejected; past ones accepted") {
+    Catalog32 cat;
+    makeStreamCatalog(cat);
+    ManualClock clock;
+    XorShift32 rng(318);
+    StreamHubDelegate del;
+    Hub hub(cat, clock, rng, del);
+
+    InProcessLink link(clock, rng);
+    REQUIRE(hub.attachTransport(link.endpointA()));
+    REQUIRE(link.endpointB().open());
+    connectSession(hub, clock, link.endpointB(), 1, true, {{kSegCh, 50.0f}});
+
+    // NOTE: deliberately NO big clock jump here. t_base is a WRAPPING u32 of
+    // microseconds and the schedule test is a signed nearest-window difference,
+    // so "in the past" is representable at any hub time — while a multi-second
+    // jump with no traffic would trip RFC-024 idle reaping and tear the session
+    // down before the bundle ever landed.
+    const uint32_t now = clock.nowUs();
+    const uint32_t limitUs = limits::max_future_schedule_ms * 1000u;
+
+    // Just inside the window: accepted.
+    writeSegmentBundle(link.endpointB(), {{5000, 200, kSegNoEndVel}}, /*tBase=*/now + limitUs - 50000);
+    tickAndDrain(hub, clock, link.endpointB(), /*stepUs=*/0);
+    CHECK(del.bundles.size() == 1);
+
+    // Beyond it: dropped whole, counted, and NOT NACKed (§9.2 — the carve-out
+    // is ownership only; a malformed schedule is a producer bug, not a
+    // contended resource).
+    writeSegmentBundle(link.endpointB(), {{6000, 200, kSegNoEndVel}}, /*tBase=*/now + limitUs + 100000);
+    auto tooFar = tickAndDrain(hub, clock, link.endpointB(), /*stepUs=*/0);
+    CHECK(del.bundles.size() == 1);
+    CHECK(hub.streamIngressCounters(0).dropped == 1);
+    CHECK(countNacks(tooFar, NackCode::RATE_LIMITED) == 0);
+    CHECK(countNacks(tooFar, NackCode::SOURCE_CONFLICT) == 0);
+
+    // Late (in the past): accepted — jitter is normal, and the nearest-window
+    // rule reads a wrapped-back t_base as "behind", never as "+71 minutes".
+    writeSegmentBundle(link.endpointB(), {{7000, 200, kSegNoEndVel}}, /*tBase=*/now - 100000);
+    tickAndDrain(hub, clock, link.endpointB(), /*stepUs=*/0);
+    CHECK(del.bundles.size() == 2);
+}
+
+// ============================================================================
+// SI-19 (RFC-014) — the future-schedule clamp applies ONLY to segment-class
+// channels. A dense point-sample stream carries timestamps, not schedules, and
+// clamping it would break legitimate lookahead buffering.
+// ============================================================================
+TEST_CASE("SI-19: the schedule clamp does not apply to non-segment STREAM channels") {
+    Catalog32 cat;
+    makeStreamCatalog(cat);
+    ManualClock clock;
+    XorShift32 rng(319);
+    StreamHubDelegate del;
+    Hub hub(cat, clock, rng, del);
+
+    InProcessLink link(clock, rng);
+    REQUIRE(hub.attachTransport(link.endpointA()));
+    REQUIRE(link.endpointB().open());
+    connectSession(hub, clock, link.endpointB(), 1, true, {{kStreamCh, 100.0f}});
+
+    writeValidBundle(link.endpointB(), kStreamCh, 2,
+                     /*tBase=*/clock.nowUs() + limits::max_future_schedule_ms * 1000u + 500000);
+    tickAndDrain(hub, clock, link.endpointB(), /*stepUs=*/0);
+    CHECK(del.bundles.size() == 1);  // accepted: 0x0080 declares no time-unit field
+}
+
+// ============================================================================
+// SI-20 (RFC-014/023) — the CLASSIFICATION itself, evaluated straight from the
+// catalog's explicit `stream_kind` entry property (registry key 15): a STREAM
+// channel is segment-class iff it declares stream_kind = segments, because a
+// sample that carries its own DURATION commands a time extent rather than
+// reporting a value at an instant. This replaced the M5 unit-string heuristic
+// ("any layout field declares a time unit") — struck because `unit` is a
+// free-form tstr and two conforming hubs could disagree ("ms" vs "msec") and
+// therefore shed differently under identical congestion. Plus the shedding
+// table's segment exception.
+// ============================================================================
+TEST_CASE("SI-20: segment-class is the catalog's explicit stream_kind property") {
+    Catalog32 cat;
+    makeStreamCatalog(cat);
+
+    const CatalogEntry* seg = cat.find(kSegCh);
+    const CatalogEntry* pts = cat.find(kStreamCh);
+    const CatalogEntry* tele = cat.find(kH2cStreamCh);
+    const CatalogEntry* intent = cat.find(kIntentCh);
+    REQUIRE(seg);
+    REQUIRE(pts);
+    REQUIRE(tele);
+    REQUIRE(intent);
+
+    CHECK(cat.isSegmentClass(*seg));           // streamKind = stream_kinds::segments
+    CHECK_FALSE(cat.isSegmentClass(*pts));     // streamKind left at default (samples)
+    CHECK_FALSE(cat.isSegmentClass(*tele));    // streamKind left at default (samples)
+    CHECK_FALSE(cat.isSegmentClass(*intent));  // not STREAM at all
+
+    // RFC-014/023 in the shedding table: segment-class is NEVER decimated. Its
+    // decisions collapse to Send or Drop — shed whole-source or not at all,
+    // because a dropped segment is a permanently lost command and its
+    // neighbours describe different intervals, not adjacent points on a curve.
+    CHECK(shedDecision(Priority::normal, ChannelClass::STREAM, 1, false) == ShedDecision::Decimate2x);
+    CHECK(shedDecision(Priority::normal, ChannelClass::STREAM, 1, true) == ShedDecision::Send);
+    CHECK(shedDecision(Priority::background, ChannelClass::STREAM, 1, true) == ShedDecision::Send);
+    CHECK(shedDecision(Priority::normal, ChannelClass::STREAM, 2, false) == ShedDecision::Decimate4x);
+    CHECK(shedDecision(Priority::normal, ChannelClass::STREAM, 2, true) == ShedDecision::Drop);
+    CHECK(shedDecision(Priority::background, ChannelClass::STREAM, 2, true) == ShedDecision::Drop);
+    CHECK(shedDecision(Priority::elevated, ChannelClass::STREAM, 2, true) == ShedDecision::Send);
+    CHECK(shedDecision(Priority::critical, ChannelClass::STREAM, 2, true) == ShedDecision::Send);
 }

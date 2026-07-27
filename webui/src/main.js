@@ -8,7 +8,7 @@
  * fixed bottom bar. See SD32-PAGE-SYSTEM-SONNET-PROMPT.md §1.6b.
  *
  * Task 7: binary WS transport via link.js, clock-synced telebuf.js, control
- * plane via cmd.js. HTTP polling is the fallback (gated behind isFallback()).
+ * plane via cmd.js. HTTP polling is the fallback when SlopSync is not LIVE.
  * Header chips + Health stats are fed from 0x02 STATUS frames when WS is live.
  */
 console.log('[SD32] booting — imports loaded');
@@ -35,11 +35,6 @@ applyTheme(currentThemeId());
 applyHivis(hivisInitialState());
 
 // ---- Task 7: new core modules ---------------------------------------------
-import { initLink, onTelemetry as _onWsTelemetry, onStatus as _onWsStatus,
-         onStats as _onWsStats,
-         onInterp as _onWsInterp, onAnomaly as _onWsAnomaly,
-         onDegraded, onRestored, isFallback, getStats as getLinkStats,
-         isConnected as _wsConnected } from './core/link.js';
 import { initTeleBuf, feedHttpSamples, sampleAt, stableRenderTime,
          updateRenderDelay, onStale, onStaleSuspended, onFresh, isSuspended,
          setTeleFallback, noteLinkAlive, getBufferStats } from './core/telebuf.js';
@@ -55,6 +50,8 @@ import {
 } from './core/wire.js';
 import { initShadow, processEcho, processConfig, tick as shadowTick,
          wireStaleness, notifyRecovery } from './core/shadow.js';
+import { initSlopSyncBridge, isSlopSyncLive } from './core/slopsync/bridge.js';
+import { SAFETY_OP } from './core/slopsync/frames.js';
 
 // Expose action handlers on window so [data-action] buttons wired by
 // wireActions() can find them. These functions live in ES module scope,
@@ -222,24 +219,39 @@ function reflectGating() {
 // rejected command can never leave the UI lying about machine state. :3
 function togglePause() {
   var next = !state.paused;
-  cmd.send(OP_PAUSE, { paused: next });
+  // SlopSync safety-intents 0x0005 when live (pause/resume), legacy op fallback.
+  var ss = window.__slopsync;
+  if (!(ss && ss.isLive() && ss.sendSafety(next ? SAFETY_OP.pause : SAFETY_OP.resume)))
+    cmd.send(OP_PAUSE, { paused: next });
   if (next) stopPattern();
 }
 function halt() {
-  cmd.send(OP_HALT, {}); stopPattern();
+  var ss = window.__slopsync;
+  if (!(ss && ss.isLive() && ss.sendSafety(SAFETY_OP.stop))) cmd.send(OP_HALT, {});
+  stopPattern();
   toast('Halt sent', 'warn', 'i-stop');
 }
 function estop() {
-  cmd.send(OP_ESTOP, {});
+  // SlopSync safety_ops::estop (6) on 0x0005 — the hub treats it exactly as a
+  // valid 0xE5 frame (latch, cause=user, publish 0x0003). The session escalates
+  // to the raw 0xE5 plane by itself if it is connected but not yet LIVE, so a
+  // press is never silently swallowed. Legacy op only when there is no session.
+  var ss = window.__slopsync;
+  if (!(ss && ss.sendEstop && ss.sendEstop())) cmd.send(OP_ESTOP, {});
   stopPattern();
   toast('E-STOP sent — waiting for device confirmation', 'bad', 'i-alert', 6000);
 }
 function toggleOverride() {
   var ov = $('#overrideTog'); var on = ov ? ov.checked : false;
-  cmd.send(OP_OVERRIDE, { on: on });
+  // SlopSync 0x0005 ops override_on/off (RFC-025c: override is SAFETY-domain
+  // state, carried on the 0x0003 snapshot's appended `modes` byte).
+  var ss = window.__slopsync;
+  if (!(ss && ss.isLive() && ss.sendOverride && ss.sendOverride(on))) cmd.send(OP_OVERRIDE, { on: on });
 }
 function moveToHome() {
-  cmd.send(OP_HOME, {});
+  // SlopSync home 0x0103 {1:op=1} when live, legacy op fallback.
+  var ss = window.__slopsync;
+  if (!(ss && ss.isLive() && ss.sendHome(1))) cmd.send(OP_HOME, {});
   toast('Homing…', 'info', 'i-home');
 }
 function clearFault() {
@@ -256,10 +268,14 @@ function sendMove(pos, force) {
   var now = performance.now();
   if (!force && now - lastMoveSent < 50) return; lastMoveSent = now;
   var bp = $('#bypassLimits');
+  var bypass = bp ? bp.checked : false;
+  // SlopSync move 0x0100 {1:posMm,2:bypass} when live, legacy op fallback.
+  var ss = window.__slopsync;
+  if (ss && ss.isLive() && ss.sendMove(Math.round(pos * 10) / 10, bypass)) return;
   cmd.send(OP_MOVE, {
     position: Math.round(pos * 10) / 10,
     stream: !force,
-    bypass_limits: bp ? bp.checked : false
+    bypass_limits: bypass
   });
 }
 
@@ -472,9 +488,11 @@ function _applyWsFlags(flags) {
 // ---- PollStatus (HTTP fallback path — kept intact) -------------------------
 
 async function pollStatus() {
-  // WS peer connected? Let telemetry frames own the UI. Check live state
-  // (not a callback flag) to avoid the race where HELLO hasn't fired yet.
-  if (_wsConnected()) { _wsLive = true; return; }
+  // A live SlopSync session owns the shared surfaces — never let the HTTP
+  // fallback poll fight it for the flags/window/stats. Checked as LIVE state
+  // rather than a callback flag, so the WELCOME race cannot open a window where
+  // both planes write the same DOM.
+  if (isSlopSyncLive()) { _wsLive = true; return; }
   const nowMs = performance.now();
   const backoffElapsed = nowMs - (pollLastSuccessMs || nowMs);
   // Fast-probe: every 5th attempt fires regardless of backoff (A-008)
@@ -639,7 +657,15 @@ async function pollStatus() {
 
 // ===================== Log refresh ==========================================
 
+// In-flight guard: the 2 s interval fires regardless of completion, so a slow
+// server response would stack requests until the browser's per-host connection
+// pool saturates and EVERYTHING (including page loads) queues behind the pile
+// (observed live 2026-07-24: waves of 5 s-canceled log/clients/servo fetches).
+// One request in flight, ever; a slow tick just skips.
+let _logInflight = false;
 async function refreshLog() {
+  if (_logInflight) return;
+  _logInflight = true;
   try {
     var txt = await getText('/api/log');
     var box = $('#logBox');
@@ -655,7 +681,7 @@ async function refreshLog() {
     cur.textContent = '▌';
     box.appendChild(cur);
     if (atBottom) box.scrollTop = box.scrollHeight;
-  } catch (e) {}
+  } catch (e) {} finally { _logInflight = false; }
 }
 
 // ===================== Connected-clients panel (Health tab) =================
@@ -672,10 +698,14 @@ function _fmtIdle(ms) {
   return m + 'm' + (s % 60) + 's ago';
 }
 
+let _clientsInflight = false;   // same in-flight guard as refreshLog
 async function refreshClients() {
   var body = $('#clientsBody');
   if (!body) return;
-  var data = await get('/api/clients');
+  if (_clientsInflight) return;
+  _clientsInflight = true;
+  var data;
+  try { data = await get('/api/clients'); } finally { _clientsInflight = false; }
   if (!data || !Array.isArray(data.clients)) { body.textContent = 'Client list unavailable.'; return; }
   if (data.clients.length === 0) { body.textContent = 'No clients connected.'; return; }
 
@@ -967,6 +997,75 @@ function _startRailTelemetryLoop() {
 
 // ===================== Init =================================================
 
+// ---- Bridge hooks (M5c: formerly the :81 0x04/0x05 frame callbacks) --------
+
+/** 0x0086 plan-strip -> the debug overlay / rail planned-path renderer. */
+function _applyInterp(it) {
+  interpState.active     = it.active;
+  interpState.liveMode   = it.liveMode;
+  interpState.gradMode   = it.gradMode;
+  interpState.style      = it.style;
+  interpState.styleName  = it.styleName;
+  interpState.startPos   = it.startPos;
+  interpState.endPos     = it.endPos;
+  interpState.curPos     = it.curPos;
+  interpState.curVel     = it.curVel;
+  interpState.durationUs = it.durationUs;
+  interpState.elapsedUs  = it.elapsedUs;
+  interpState.lastRxMs   = performance.now();
+}
+
+/**
+ * 0x0089 motion-anomaly EVENT -> bounded log + kind counter + the Log tab.
+ * One frame per invented micromotion / dropped point / decel overrun /
+ * waveform fallback: the diagnostic that says WHICH stutter cause actually
+ * fired on the wire.
+ */
+function _applyAnomaly(a) {
+  if (Object.prototype.hasOwnProperty.call(anomalyCounts, a.kindName))
+    anomalyCounts[a.kindName]++;
+  a.rxMs = performance.now();
+  anomalyLog.unshift(a);
+  if (anomalyLog.length > ANOMALY_LOG_CAP) anomalyLog.pop();
+  renderAnomaly(a);
+}
+
+/** SlopSync session lost -> fall back to HTTP polling. */
+function _onLinkDegraded() {
+  console.warn('[SD32] slopsync down - starting HTTP fallback poll');
+  _wsLive = false;
+  window.__CMD_SUSPENDED = false;
+  setTeleFallback(true); // staleness thresholds x5 in HTTP polling mode
+  if (!_fallbackPollInterval) {
+    _fallbackPollInterval = setInterval(pollStatus, 100);
+    pollStatus();
+  }
+}
+
+/** SlopSync session LIVE -> disarm polling and adopt device truth. */
+function _onLinkRestored() {
+  console.log('[SD32] slopsync live - clearing HTTP poll');
+  // FIRST: disarm HTTP polling before touching any other state (A-004)
+  if (_fallbackPollInterval) {
+    clearInterval(_fallbackPollInterval);
+    _fallbackPollInterval = null;
+  }
+  setTeleFallback(false);
+  // Stamp liveness immediately so the suspend gate has a full grace window
+  // before the first periodic STATE lands, even on an idle rig.
+  noteLinkAlive();
+  _wsLive = true;
+  window.__CMD_SUSPENDED = false;
+  document.body.classList.remove('stale', 'suspended', 'degraded');
+  notifyRecovery();
+  // The UI must NEVER assume config on (re)connect. SlopSync's retained-on-grant
+  // STATE already delivers window/speeds/accel the moment the channels are
+  // granted, so the old OP_GET_CFG pull is redundant here -- but capabilities
+  // still needs a refetch so measured rail + ceilings resync after a re-home
+  // during a dropout.
+  fetchAndApplyCapabilities().then(function (caps) { if (caps) { rebuildPatternGrid(); renumberPanels(); } });
+}
+
 function init() {
   console.log('[SD32] init begin');
   try {
@@ -974,102 +1073,42 @@ function init() {
     measureMartianMonoCh();
     console.log('[SD32] icons + fonts OK');
 
-    // ---- Task 7: telemetry buffer + WS transport ----------------------------
+    // ---- Telemetry buffer + the ONE remaining link --------------------------
+    // M5c: initLink() is GONE. The legacy :81 UiSocket plane ran alongside this
+    // and is now deleted outright -- it was measurably the cause of the device
+    // reboots and heap exhaustion (docs/http-plane-retirement.md 2), it carried
+    // no authorization of any kind, and every surface it fed is now fed from
+    // SlopSync below.
     initTeleBuf();
-    initLink(); // connects ws://<hostname>:81/ws/ui
-    console.log('[SD32] telebuf + link OK');
-
-    // ---- Wire WS frame callbacks ---------------------------------------------
-    _onWsTelemetry(function(t) {
-      _applyWsFlags(t.flags);
-      if (typeof t.i_bus_mA === 'number') _liveBusmA = t.i_bus_mA;
-      _agNoteLinkMsg();
-      // telebuf is auto-fed from link.js's feedWireSamples
-      // Poll disarm is now owned by onRestored only (A-004).
+    // ---- SlopSync (ws://<hostname>:82) -- the only telemetry plane ----------
+    // motion->telebuf, flags->_applyWsFlags, machine-config->processConfig,
+    // odometer->renderSessionCard, plan-strip->interpState, anomaly->the log;
+    // installs the write-plane senders on window.__slopsync.
+    initSlopSyncBridge({
+      host: location.hostname,
+      applyFlags: _applyWsFlags,
+      applyConfig: processConfig,
+      renderSession: renderSessionCard,
+      applyInterp: _applyInterp,
+      applyAnomaly: _applyAnomaly,
+      noteAlive: function () { noteLinkAlive(); _agNoteLinkMsg(); },
+      onLive: _onLinkRestored,
+      onDown: _onLinkDegraded,
+      log: function (lvl) { if (window.__DEBUG_SLOPSYNC) console.log.apply(console, ['[slopsync]'].concat([].slice.call(arguments, 1))); },
     });
+    console.log('[SD32] telebuf + slopsync OK');
 
-    _onWsStatus(function(s) {
-      // 0x02 STATUS is a ~500ms link heartbeat that flows even when the rig is
-      // idle and emitting no 0x01 motion telemetry. Feed it to telebuf so the
-      // >1s control-suspension gate never trips on a healthy-but-idle link.
-      noteLinkAlive();
-      _agNoteLinkMsg();
-      _applyWsStatusToUI(s);
-    });
-
-    // ---- 0x06 STATS — session odometer (~2Hz) → SESSION card ---------------
-    _onWsStats(function(st) { renderSessionCard(st); });
-
-    // ---- 0x04 INTERP — interpolator debug snapshot (~45Hz) ------------------
-    // Mirror the frame into interpState for the debug overlay / rail planned-
-    // path renderer. Pure data capture; no DOM writes here to keep it cheap.
-    _onWsInterp(function(it) {
-      interpState.active     = it.active;
-      interpState.liveMode   = it.liveMode;
-      interpState.gradMode   = it.gradMode;
-      interpState.style      = it.style;
-      interpState.styleName  = it.styleName;
-      interpState.startPos   = it.startPos;
-      interpState.endPos     = it.endPos;
-      interpState.curPos     = it.curPos;
-      interpState.curVel     = it.curVel;
-      interpState.durationUs = it.durationUs;
-      interpState.elapsedUs  = it.elapsedUs;
-      interpState.lastRxMs   = performance.now();
-    });
-
-    // ---- 0x05 ANOMALY — interpolator path-anomaly events (event-driven) -----
-    // One frame per invented micromotion / dropped point / decel overrun /
-    // duration fallback. Push into the bounded log + bump the kind counter, then
-    // hand to renderAnomaly() for the Log-tab surface. This is the diagnostic
-    // that tells us WHICH of the stutter causes actually fired on the wire. :3
-    _onWsAnomaly(function(a) {
-      if (Object.prototype.hasOwnProperty.call(anomalyCounts, a.kindName))
-        anomalyCounts[a.kindName]++;
-      a.rxMs = performance.now();
-      anomalyLog.unshift(a);
-      if (anomalyLog.length > ANOMALY_LOG_CAP) anomalyLog.pop();
-      renderAnomaly(a);
-    });
-
-    // ---- Fallback / restore -------------------------------------------------
-    onDegraded(function() {
-      console.warn('[SD32] WS degraded — starting HTTP fallback poll');
-      _wsLive = false;
-      window.__CMD_SUSPENDED = false;
-      setTeleFallback(true); // staleness thresholds ×5 in HTTP polling mode
-      // Start HTTP polling if not already running
-      if (!_fallbackPollInterval) {
-        _fallbackPollInterval = setInterval(pollStatus, 100);
-        pollStatus();
-      }
-    });
-
-    onRestored(function() {
-      console.log('[SD32] WS restored — clearing HTTP poll');
-      // FIRST: disarm HTTP polling before touching any other state (A-004)
-      if (_fallbackPollInterval) {
-        clearInterval(_fallbackPollInterval);
-        _fallbackPollInterval = null;
-      }
-      setTeleFallback(false);
-      // Stamp link-liveness immediately on HELLO so the suspend gate has a full
-      // grace window before the first 0x02 STATUS heartbeat (~500ms out) lands,
-      // even when the rig is idle and no 0x01 motion frames will ever arrive.
-      noteLinkAlive();
-      _wsLive = true;
-      window.__CMD_SUSPENDED = false;
-      document.body.classList.remove('stale', 'suspended', 'degraded');
-      notifyRecovery();
-      // Thing #3 — the UI must NEVER assume config on (re)connect. Pull the
-      // machine's authoritative cfg snapshot the instant the link is live so
-      // window / speeds / accel / mode all populate from device truth instead
-      // of whatever stale defaults the DOM booted with. processConfig() (via
-      // cmd.onConfig) applies it. Also re-fetch capabilities so the measured
-      // rail length + ceilings resync after a re-home during a dropout. :3
-      cmd.send(OP_GET_CFG, {});
-      fetchAndApplyCapabilities().then(function (caps) { if (caps) { rebuildPatternGrid(); renumberPanels(); } });
-    });
+    // ---- Link lifecycle, now driven by the SlopSync session -----------------
+    // These were registered against link.js's :81 callbacks. They are the same
+    // logic, hoisted to named functions and called from the bridge hooks: the
+    // conditions did not change, only which plane reports them.
+    //
+    // HTTP FALLBACK STAYS. When SlopSync is down the page still polls
+    // /api/status and cmd.js still routes ops to their /api/* twins, so a
+    // machine whose hub plane is broken remains observable and controllable.
+    // Diagnostics that depend on the subsystem under test are not diagnostics
+    // (docs/http-plane-retirement.md 1) -- and that argument applies just as
+    // well to the last-resort control path.
 
     // ---- Staleness escalation -----------------------------------------------
     onStale(function() {
@@ -1093,7 +1132,9 @@ function init() {
       if (window.__DEBUG_ECHO) console.log('[echo]', ev);
     });
     cmd.onConfig(function(cfg) {
-      processConfig(cfg);
+      // Precedence: slopsync machine-config 0x0081 owns the window/limit adoption
+      // when live; the legacy config push (OP_GET_CFG echo) stands down.
+      if (!isSlopSyncLive()) processConfig(cfg);
       if (window.__DEBUG_CFG) console.log('[cfg]', cfg);
     });
     // Command exhausted its WS retries — the device never acked. Without this
@@ -1174,14 +1215,18 @@ function init() {
 
     // Start HTTP polling UNLESS WS is already live. The degraded/restored
     // callbacks handle the start/stop transitions.
-    console.log('[SD32] poll gate — wsConnected=', _wsConnected());
-    if (!_wsConnected()) {
-      console.log('[SD32] starting HTTP poll (WS not connected)');
+    // Poll from boot until SlopSync reaches LIVE. It never has at this point
+    // in init (the session has not even opened its socket), so this always
+    // starts — _onLinkRestored disarms it. That is deliberate: a page that
+    // renders nothing until a WebSocket handshake completes looks broken.
+    console.log('[SD32] poll gate — slopsyncLive=', isSlopSyncLive());
+    if (!isSlopSyncLive()) {
+      console.log('[SD32] starting HTTP poll (slopsync not live yet)');
       setTeleFallback(true); // relaxed staleness thresholds until WS is live
       _fallbackPollInterval = setInterval(pollStatus, 100);
       pollStatus();
     } else {
-      console.log('[SD32] WS already live, skipping poll');
+      console.log('[SD32] slopsync already live, skipping poll');
       _wsLive = true;
     }
 
@@ -1217,7 +1262,7 @@ function init() {
     }, 3000);
 
     // Expose Health metrics for the Health tab (link stats)
-    window.__LINK_STATS = getLinkStats;
+    window.__LINK_STATS = function () { return (window.__slopsync && window.__slopsync.session) ? window.__slopsync.session.state : null; };
     window.__BUF_STATS = getBufferStats;
 
     console.log('[SD32] init complete — booted');

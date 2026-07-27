@@ -2,7 +2,7 @@
 //
 // CBOR map, keys ascending: proto_ver(1), client_kind(2), client_name(3),
 // instance_id(4), [token(5)], [catalog_etag(8)], [subscriptions(10)],
-// [publishes(11)]. The four bracketed fields are optional/possibly-empty
+// [publishes(11)], [trust(39)]. The five bracketed fields are optional/possibly-empty
 // and, per this codec's brief, OMITTED from the map entirely when absent —
 // never encoded as null (§5.3 forbids meaningless simple values anyway; §4.3
 // is what makes omission safe on the decode side: an unknown-to-a-future-
@@ -20,6 +20,7 @@
 #include "slopsync/generated/registry_constants.hpp"
 #include "slopsync/wire/cbor/cbor_reader.hpp"
 #include "slopsync/wire/cbor/cbor_writer.hpp"
+#include "slopsync/wire/messages/trust_submap.hpp"
 
 namespace slopsync {
 
@@ -39,9 +40,17 @@ struct SubscriptionWish {
     uint8_t priority = 0;
 };
 
+// A publish wish (§6.2 key 11 entries, also carried by PUBLISH 0x18 —
+// wire/messages/publish.hpp). `burst` (key 42, RFC-013) is OPTIONAL token-
+// bucket CAPACITY in samples, decoupled from the refill rate: absent means
+// "capacity = granted rate", the pre-RFC-013 behavior, and an absent burst is
+// omitted from the encoding entirely so a non-bursty wish stays byte-identical
+// to what every shipped client already sends.
 struct PublishWish {
     uint16_t channel_id = 0;
     float rate_hz = 0.0f;
+    bool has_burst = false;
+    float burst = 0.0f;
 };
 
 struct HelloMsg {
@@ -61,6 +70,13 @@ struct HelloMsg {
 
     uint32_t publishes_count = 0;
     std::array<PublishWish, kHelloMaxPublishWishes> publishes{};
+
+    // The scoped `trust` (39) sub-map (RFC-029/027). ABSENT is the potato path
+    // and stays byte-identical to a pre-M4b HELLO: a client that omits it gets
+    // the v1-draft handshake exactly. M4b reads `client_ver` from here (the
+    // change tripwire) and carries the rest for M4c.
+    bool has_trust = false;
+    TrustMap trust_map{};
 };
 
 // Encodes into `out`; returns bytes written, or 0 on any failure (bad sizes,
@@ -76,6 +92,8 @@ inline size_t encodeHello(const HelloMsg& m, std::span<std::byte> out) {
     if (m.has_catalog_etag) ++nKeys;
     if (m.subscriptions_count > 0) ++nKeys;
     if (m.publishes_count > 0) ++nKeys;
+    const bool hasTrust = m.has_trust && m.trust_map.any();
+    if (hasTrust) ++nKeys;
 
     CborWriter w(out);
     w.mapHeader(nKeys);
@@ -104,12 +122,14 @@ inline size_t encodeHello(const HelloMsg& m, std::span<std::byte> out) {
         w.key(CborKey::publishes).arrayHeader(m.publishes_count);
         for (uint32_t i = 0; i < m.publishes_count; ++i) {
             const PublishWish& p = m.publishes[i];
-            // Wish-entry keys ascending: rate_hz(12) < channel_id(15).
-            w.mapHeader(2);
+            // Wish-entry keys ascending: rate_hz(12) < channel_id(15) < burst(42).
+            w.mapHeader(p.has_burst ? 3 : 2);
             w.key(CborKey::rate_hz).f32Val(p.rate_hz);
             w.key(CborKey::channel_id).uintVal(p.channel_id);
+            if (p.has_burst) w.key(CborKey::burst).f32Val(p.burst);
         }
     }
+    if (hasTrust) encodeTrustMap(w, m.trust_map);  // key 39 is last: §5.3 ascending
     return w.size();
 }
 
@@ -243,6 +263,13 @@ inline Result<HelloMsg, DecodeError> decodeHello(std::span<const std::byte> in) 
                                 wish.rate_hz = vv.value();
                                 break;
                             }
+                            case uint64_t(CborKey::burst): {
+                                auto vv = r.readF32();
+                                if (!vv) return Ret::err(vv.error());
+                                wish.burst = vv.value();
+                                wish.has_burst = true;
+                                break;
+                            }
                             default: {
                                 auto sv = r.skipValue();
                                 if (!sv) return Ret::err(sv.error());
@@ -253,6 +280,12 @@ inline Result<HelloMsg, DecodeError> decodeHello(std::span<const std::byte> in) 
                     m.publishes[j] = wish;
                 }
                 m.publishes_count = cR.value();
+                break;
+            }
+            case uint64_t(CborKey::trust): {
+                auto tR = decodeTrustMap(r, m.trust_map);
+                if (!tR) return Ret::err(tR.error());
+                m.has_trust = true;
                 break;
             }
             default: {

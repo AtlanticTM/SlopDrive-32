@@ -44,32 +44,53 @@ internal static class LiveWireTest
         using var http = new HttpClient { Timeout = TimeSpan.FromSeconds(5) };
 
         // ---- SAFETY GATE ----------------------------------------------------
-        JObject status;
+        // On real hardware: /api/status must say unhomed + not e-stopped, or we
+        // refuse to open a socket at all. On slopsim there is no /api/status
+        // (its HTTP facade is capabilities + slopmotion only) and nothing
+        // physical to move, so `sim: true` in /api/capabilities is an explicit
+        // waiver. An endpoint we cannot read on a machine that is NOT a
+        // declared sim is an ABORT — "unknown machine state" is never a pass.
+        bool isSim = false;
         try
         {
-            var body = await http.GetStringAsync($"{baseUrl}/api/status");
-            status = JObject.Parse(body);
+            var caps = JObject.Parse(await http.GetStringAsync($"{baseUrl}/api/capabilities"));
+            isSim = caps.Value<bool?>("sim") ?? false;
+            Console.WriteLine($"[gate] target: fw={caps.Value<string>("fw_version")} sim={isSim}");
         }
         catch (Exception ex)
         {
-            Console.WriteLine($"ABORT: device unreachable at {baseUrl}/api/status ({ex.Message})");
-            return 3;
+            Console.WriteLine($"[gate] /api/capabilities unreadable ({ex.Message})");
         }
 
-        bool homed = status.Value<bool?>("homed") ?? false;
-        bool estopped = status.Value<bool?>("estopped") ?? false;
-        Console.WriteLine($"[gate] homed={homed} estopped={estopped}");
-        if (homed)
+        JObject status = null;
+        try { status = JObject.Parse(await http.GetStringAsync($"{baseUrl}/api/status")); }
+        catch (Exception ex)
         {
-            Console.WriteLine("ABORT: machine is HOMED — streamed motion would actually move it. Refusing to open a WebSocket.");
-            return 3;
+            if (!isSim)
+            {
+                Console.WriteLine($"ABORT: no /api/status at {baseUrl} ({ex.Message}) and the target does not declare itself a simulator — refusing to stream at an unknown machine state.");
+                return 3;
+            }
+            Console.WriteLine("[gate] no /api/status (slopsim) — proceeding on the declared-simulator waiver.");
         }
-        if (estopped)
+
+        if (status != null)
         {
-            Console.WriteLine("ABORT: machine is E-STOPPED. Refusing to open a WebSocket.");
-            return 3;
+            bool homed = status.Value<bool?>("homed") ?? false;
+            bool estopped = status.Value<bool?>("estopped") ?? false;
+            Console.WriteLine($"[gate] homed={homed} estopped={estopped}");
+            if (homed)
+            {
+                Console.WriteLine("ABORT: machine is HOMED — streamed motion would actually move it. Refusing to open a WebSocket.");
+                return 3;
+            }
+            if (estopped)
+            {
+                Console.WriteLine("ABORT: machine is E-STOPPED. Refusing to open a WebSocket.");
+                return 3;
+            }
+            Console.WriteLine("[gate] PASS — unhomed, not estopped. Streamed motion will be dropped at the firmware HOMED gate (expected & correct).");
         }
-        Console.WriteLine("[gate] PASS — unhomed, not estopped. Streamed motion will be dropped at the firmware HOMED gate (expected & correct).");
         Console.WriteLine();
 
         // ---- Baseline /api/slopmotion sync counters --------------------------
@@ -120,50 +141,123 @@ internal static class LiveWireTest
 
         var client = new HubClient(ws, instanceId, Log);
 
+        // §6.2 subscription wishes ride in HELLO now (RFC-006). This is the
+        // byte shape WireSelfTest's HELLO goldens pin.
+        var subWishes = new (ushort ch, double rate, byte prio)[]
+        {
+            (SlopWire.ChSafety, 0.0, SlopWire.PriorityCritical),
+            (SlopWire.ChMotion, 20.0, SlopWire.PriorityElevated),
+        };
+
         WelcomeInfo welcome;
         double segGranted = double.NaN;
         if (segments)
         {
-            Console.WriteLine("[hello] wishing publish on motion-input (0x0084) @ 50 Hz AND motion-segment (0x0085) @ 10 Hz...");
+            Console.WriteLine("[hello] subs safety+motion; wishing publish on motion-input (0x0084) @ 50 Hz AND motion-segment (0x0085) @ 10 Hz...");
             welcome = await client.HelloAsync("mfp", "LiveWireTest",
-                new (ushort ch, double rate)[] { (SlopWire.ChMotionInput, 50.0), (SlopWire.ChMotionSegment, 10.0) }, null, token);
+                new (ushort ch, double rate)[] { (SlopWire.ChMotionInput, 50.0), (SlopWire.ChMotionSegment, 10.0) },
+                null, token, subWishes);
             segGranted = welcome.GrantedPublishRate(SlopWire.ChMotionSegment);
         }
         else
         {
-            Console.WriteLine("[hello] wishing publish on motion-input (0x0084) @ 50 Hz...");
-            welcome = await client.HelloAsync("mfp", "LiveWireTest", SlopWire.ChMotionInput, 50.0, null, token);
+            Console.WriteLine("[hello] subs safety+motion; wishing publish on motion-input (0x0084) @ 50 Hz...");
+            welcome = await client.HelloAsync("mfp", "LiveWireTest",
+                new (ushort ch, double rate)[] { (SlopWire.ChMotionInput, 50.0) },
+                null, token, subWishes);
         }
         double granted = welcome.GrantedPublishRate(SlopWire.ChMotionInput);
-        Console.WriteLine($"[welcome] session_id={welcome.SessionId} boot_id=0x{welcome.BootId:X8} granted motion-input={granted:F1} Hz (wished 50.0)"
+        Console.WriteLine($"[welcome] session_id={welcome.SessionId} boot_id=0x{welcome.BootId:X8} etag={SlopCatalog.Hex(welcome.CatalogEtag)} granted motion-input={granted:F1} Hz (wished 50.0)"
             + (segments ? $" motion-segment={segGranted:F1} Hz (wished 10.0)" : ""));
         Console.WriteLine();
 
-        Console.WriteLine("[subscribe] safety(0x0003) on-change critical + motion(0x0080) @20Hz elevated...");
-        await client.SubscribeAsync(new (ushort, double, byte)[]
+        // ---- §8.4 / RFC-015 READINESS GATE ----------------------------------
+        // No cached etag here (a fresh process every run), so this always takes
+        // the FETCH path: BLOB_REQ -> BLOB_CHUNK reassembly -> verify the
+        // SHA-256 locally -> CATALOG_READY. Until that lands the hub emits no
+        // data-plane frame and NACKs every intent NOT_READY, so "STATE frames
+        // received > 0" below is itself the proof the gate opened.
+        Console.WriteLine("[ready] BLOB_REQ namespace 0 (catalog)...");
+        var catalogBytes = await client.FetchCatalogAsync(token);
+        bool catalogOk = catalogBytes != null;
+        bool etagVerified = false;
+        SlopCatalog catalog = null;
+        if (!catalogOk)
         {
-            (SlopWire.ChSafety, 0.0, SlopWire.PriorityCritical),
-            (SlopWire.ChMotion, 20.0, SlopWire.PriorityElevated),
-        }, token);
+            Console.WriteLine("[ready] FAIL: catalog transfer produced nothing.");
+        }
+        else
+        {
+            var digest = SlopCatalog.Etag(catalogBytes);
+            etagVerified = SlopCatalog.BytesEqual(digest, welcome.CatalogEtag);
+            catalog = SlopCatalog.Decode(catalogBytes);
+            Console.WriteLine($"[ready] catalog {catalogBytes.Length} B, sha256[:8]={SlopCatalog.Hex(digest)} "
+                + (etagVerified ? "VERIFIES against WELCOME" : $"MISMATCH (WELCOME said {SlopCatalog.Hex(welcome.CatalogEtag)})")
+                + $", decoded {catalog?.Entries.Count ?? 0} channels / {catalog?.RoleCount ?? 0} roles");
+            await client.SendCatalogReadyAsync(digest, token);
+            Console.WriteLine($"[ready] CATALOG_READY sent — data plane + control plane open.");
+        }
+        Console.WriteLine();
+
+        // ---- RFC-006(b) ROLE LOOKUP -----------------------------------------
+        // The point of the whole exercise: find the kinematic limits WITHOUT
+        // knowing this device's channel numbering. Nothing below names 0x0081.
+        var roleNames = new[]
+        {
+            SlopWire.RoleWindowMin, SlopWire.RoleWindowMax,
+            SlopWire.RoleLimitInputSpeed, SlopWire.RoleLimitInputAccel, SlopWire.RoleLimitInputJerk,
+        };
+        var locators = new Dictionary<string, SlopCatalog.RoleLocator>();
+        Console.WriteLine("[roles] locating kinematic field_roles in the fetched catalog:");
+        foreach (var rn in roleNames)
+        {
+            var loc = catalog?.LocateRole(rn);
+            if (loc != null) locators[rn] = loc;
+            Console.WriteLine(loc == null
+                ? $"    {rn,-20} -> NOT ADVERTISED"
+                : $"    {rn,-20} -> channel 0x{loc.ChannelId:X4} field '{loc.Field.Name}' @byte {loc.Field.Offset} "
+                  + $"({loc.Field.Unit}) {(loc.Writable ? $"writable via 0x{loc.SettingChannel:X4} key {loc.SettingKey}" : "read-only")}");
+        }
+        int rolesFound = locators.Count;
+        Console.WriteLine();
+
+        // Mid-session SUBSCRIBE to whatever channel(s) those roles landed on.
+        var roleChannels = new List<ushort>();
+        foreach (var loc in locators.Values)
+            if (loc.ChannelId != SlopWire.ChSafety && loc.ChannelId != SlopWire.ChMotion && !roleChannels.Contains(loc.ChannelId))
+                roleChannels.Add(loc.ChannelId);
+        if (roleChannels.Count > 0)
+        {
+            Console.WriteLine($"[subscribe] role-located channel(s): {string.Join(", ", roleChannels.ConvertAll(c => $"0x{c:X4}"))} (on-change, normal)");
+            await client.SubscribeAsync(roleChannels.ConvertAll(c => (c, 0.0, SlopWire.PriorityNormal)), token);
+        }
 
         int nackCount = 0;
         int stateCount = 0;
         var stateByChannel = new Dictionary<ushort, int>();
         var nackLog = new List<(ushort code, ushort channel)>();
+        var roleValues = new Dictionary<string, double>();
 
-        void OnNack(ushort code, ushort channel)
+        void OnNack(HubClient.NackInfo n)
         {
             nackCount++;
-            nackLog.Add((code, channel));
-            SlopWire.NackNames.TryGetValue(code, out var name);
-            Console.WriteLine($"    [recv] NACK {name ?? "UNKNOWN"} (0x{code:X4}) channel=0x{channel:X4}");
+            nackLog.Add((n.Code, n.Channel));
+            Console.WriteLine($"    [recv] NACK {n.Name} channel=0x{n.Channel:X4} intent_seq={n.IntentSeq?.ToString() ?? "-"}");
         }
 
-        void OnState(ushort channel)
+        void OnState(ushort channel, byte[] payload)
         {
             stateCount++;
             stateByChannel.TryGetValue(channel, out var c);
             stateByChannel[channel] = c + 1;
+            // Decode role values off the packed snapshot, using the layout the
+            // hub itself published — no hardcoded offsets anywhere.
+            foreach (var kv in locators)
+            {
+                if (kv.Value.ChannelId != channel) continue;
+                double v = SlopCatalog.ReadField(payload, kv.Value.Field);
+                if (!double.IsNaN(v)) roleValues[kv.Key] = v;
+            }
         }
 
         var recvTask = client.ReceiveLoopAsync(OnNack, OnState, token);
@@ -192,6 +286,69 @@ internal static class LiveWireTest
             Console.WriteLine("[clock] FAIL: no CLOCK exchange completed.");
         }
         Console.WriteLine();
+
+        // ---- Stroke-window INTENT round trip (SIMULATOR ONLY) ---------------
+        // This is the only automated proof that the plugin's new window control
+        // DRIVES something rather than merely rendering. It is gated hard on
+        // `isSim`: writing config to somebody's real machine from a test
+        // harness is not this program's business, and the Home intent is not
+        // exercised anywhere for the same reason (it moves a physical axis).
+        //
+        // What it proves: (1) an INTENT built against the ROLE'S paired
+        // settingChannel + settingKey is accepted, (2) the ECHO's `applied` map
+        // carries the POST-CLAMP values the ground-truth doctrine requires,
+        // and (3) header.seq == intent_id, so a NACK's intent_seq would name
+        // the same number the ECHO does (RFC-001).
+        bool intentTested = false, intentEchoed = false, intentRestored = false;
+        var wMinLoc = locators.TryGetValue(SlopWire.RoleWindowMin, out var wl) ? wl : null;
+        var wMaxLoc = locators.TryGetValue(SlopWire.RoleWindowMax, out var wh) ? wh : null;
+        if (isSim && wMinLoc != null && wMaxLoc != null && wMinLoc.Writable && wMaxLoc.Writable &&
+            roleValues.ContainsKey(SlopWire.RoleWindowMin) && roleValues.ContainsKey(SlopWire.RoleWindowMax))
+        {
+            double origMin = roleValues[SlopWire.RoleWindowMin];
+            double origMax = roleValues[SlopWire.RoleWindowMax];
+            double tryMin = origMin + 10.0;
+            double tryMax = origMax - 10.0;
+
+            var echoes = new List<HubClient.EchoInfo>();
+            void OnEcho(HubClient.EchoInfo e)
+            {
+                echoes.Add(e);
+                string ap = "-";
+                if (e.TryGetApplied(wMinLoc.SettingKey.Value, out var am) &&
+                    e.TryGetApplied(wMaxLoc.SettingKey.Value, out var ax))
+                    ap = $"min={am:F1} max={ax:F1}";
+                Console.WriteLine($"    [recv] ECHO channel=0x{e.Channel:X4} intent_id={e.IntentId} cfg_gen={e.CfgGen} applied {ap}");
+            }
+            client.SetEchoHandler(OnEcho);
+
+            Console.WriteLine($"[intent] window {origMin:F1}/{origMax:F1} -> {tryMin:F1}/{tryMax:F1} "
+                + $"via channel 0x{wMinLoc.SettingChannel:X4} keys {wMinLoc.SettingKey}/{wMaxLoc.SettingKey} (role-resolved, intent_id=101)");
+            await client.SendIntentAsync(wMinLoc.SettingChannel.Value, 101, new (int, byte[])[]
+            {
+                (wMinLoc.SettingKey.Value, SlopWire.CborF32(tryMin)),
+                (wMaxLoc.SettingKey.Value, SlopWire.CborF32(tryMax)),
+            }, token);
+            intentTested = true;
+            await Task.Delay(600, token);
+            intentEchoed = echoes.Exists(e => e.IntentId == 101);
+
+            Console.WriteLine($"[intent] restoring window {origMin:F1}/{origMax:F1} (intent_id=102)");
+            await client.SendIntentAsync(wMinLoc.SettingChannel.Value, 102, new (int, byte[])[]
+            {
+                (wMinLoc.SettingKey.Value, SlopWire.CborF32(origMin)),
+                (wMaxLoc.SettingKey.Value, SlopWire.CborF32(origMax)),
+            }, token);
+            await Task.Delay(600, token);
+            intentRestored = echoes.Exists(e => e.IntentId == 102);
+            client.SetEchoHandler(null);
+            Console.WriteLine();
+        }
+        else if (!isSim)
+        {
+            Console.WriteLine("[intent] SKIPPED — target is not a declared simulator; this harness does not write config to real hardware.");
+            Console.WriteLine();
+        }
 
         // ---- Stream test -----------------------------------------------------
         long sends = 0;
@@ -282,6 +439,18 @@ internal static class LiveWireTest
             Console.WriteLine($"    STATE channel=0x{kv.Key:X4} count={kv.Value}");
         Console.WriteLine();
 
+        // ---- What the role lookup actually READ off the wire ------------------
+        Console.WriteLine("[roles] values decoded from STATE via the catalog layout:");
+        foreach (var rn in roleNames)
+        {
+            string unit = locators.TryGetValue(rn, out var l) ? l.Field.Unit : "";
+            Console.WriteLine(roleValues.TryGetValue(rn, out var v)
+                ? $"    {rn,-20} = {v:N2} {unit}"
+                : $"    {rn,-20} = (no value seen)");
+        }
+        int roleValuesRead = roleValues.Count;
+        Console.WriteLine();
+
         // ---- After counters + diff --------------------------------------------
         var (afterBundles, afterSamples, afterEnqueued, afterDropped) = await ReadSyncCounters(http, baseUrl);
         long dBundles = afterBundles - baseBundles;
@@ -298,6 +467,13 @@ internal static class LiveWireTest
         var checks = new List<(string name, bool pass, string detail)>
         {
             ("granted motion-input rate == 50 Hz", Math.Abs(granted - 50.0) < 0.01, $"granted={granted:F2}"),
+            ("catalog fetched over BLOB_REQ/BLOB_CHUNK", catalogOk, catalogOk ? $"{catalogBytes.Length} B" : "no bytes"),
+            ("catalog sha256[:8] == WELCOME catalog_etag", etagVerified, SlopCatalog.Hex(welcome.CatalogEtag)),
+            ("catalog decodes to >0 channels", (catalog?.Entries.Count ?? 0) > 0, $"channels={catalog?.Entries.Count ?? 0}"),
+            ("all 5 kinematic roles located by role, not channel", rolesFound == 5, $"found={rolesFound}/5"),
+            ("role values decoded from STATE", roleValuesRead == rolesFound, $"read={roleValuesRead}/{rolesFound}"),
+            ("window INTENT ECHOed (sim only)", !intentTested || intentEchoed, intentTested ? $"echoed={intentEchoed}" : "skipped (not a sim)"),
+            ("window restored by 2nd INTENT (sim only)", !intentTested || intentRestored, intentTested ? $"echoed={intentRestored}" : "skipped (not a sim)"),
             ("CLOCK rtt < 200000 us", haveClock && bestRtt < 200000, haveClock ? $"rtt={bestRtt} us" : "no exchange completed"),
             ("bundles delta == sends (zero wire loss)", dBundles == sends, $"delta={dBundles} sends={sends}"),
             ("samples delta == sends", dSamples == sends, $"delta={dSamples} sends={sends}"),

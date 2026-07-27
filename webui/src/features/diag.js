@@ -27,7 +27,7 @@ import { $, clamp, pad } from '../core/ui.js';
 import { TRAVEL, winMin, winMax } from '../core/range.js';
 import { sampleAt, stableRenderTime } from '../core/telebuf.js';
 import { ACCENT, ac } from '../core/theme.js';
-import { getStats as linkStats } from '../core/link.js';
+import { getLinkStats as linkStats } from '../core/slopsync/bridge.js';
 
 var N = 2048;               // ring capacity (~34s at 60fps — > the 10s window)
 var WINDOW_MS = 10000;      // visible time span

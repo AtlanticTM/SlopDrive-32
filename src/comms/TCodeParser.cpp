@@ -249,10 +249,23 @@ void TCodeParser::_decodeAndDispatch(const char* token, size_t tlen) {
     // All other registered axes store state but don't fire motion callbacks
     // (they're polled by the application layer for aux outputs).
     if (atype == AxisType::Linear && channel == 0) {
-        SLOGD_EVERY_MS(500, "tcode",
-                       "L0: pos=%.4f dur=%lums Graw=%.0f hasG=%d hasT=%d (digits=%d)",
-                       position, (unsigned long)duration_ms, slope_raw,
-                       (int)hasSlope, (int)hasDuration, mag_digits);
+        // Log the packet SHAPE changing, not every packet. Position and
+        // duration move constantly and mean nothing in isolation; what an
+        // operator actually needs from this line is "the sender switched
+        // dialect" — bare v3 points vs v4 segments, with or without a G
+        // slope, magnitude precision. That is stable for a whole session, so
+        // the old 500 ms throttle printed the same shape 2x/s forever on
+        // every live stream (higher sustained rate than any other site in the
+        // firmware). Now it fires on the transition and is silent after.
+        static uint8_t last_shape = 0xFF;
+        const uint8_t shape = uint8_t((hasSlope ? 0x80 : 0) | (hasDuration ? 0x40 : 0) |
+                                      (mag_digits & 0x3F));
+        if (shape != last_shape) {
+            last_shape = shape;
+            SLOGD("tcode", "L0 shape: hasG=%d hasT=%d digits=%d (pos=%.4f dur=%lums Graw=%.0f)",
+                  (int)hasSlope, (int)hasDuration, mag_digits, position,
+                  (unsigned long)duration_ms, slope_raw);
+        }
 
         if (_onLinearCmd) {
             _onLinearCmd(position, duration_ms, slope_raw, hasSlope, hasDuration);

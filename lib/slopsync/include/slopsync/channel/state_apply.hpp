@@ -85,16 +85,28 @@ inline bool applyStateFrame(uint16_t frameSeq, std::span<const std::byte> payloa
 // construction (§4.4: released fields never move, resize, or get removed).
 //
 // This is not a new algorithm: decodeByLayout() already reads only
-// knownLayout.fieldCount fields and never looks past them, so calling it
+// knownLayout.size() fields and never looks past them, so calling it
 // with a prefix `knownLayout` against a longer `payload` (e.g. straight out
 // of a ShadowSlot::value/size pair) IS the rule. This wrapper exists purely
 // so call sites reaching for "read what I know out of whatever the hub
 // actually sent" say so by name, rather than re-deriving the reasoning
 // inline at every call site.
-inline Result<size_t, DecodeError> appendOnlyRead(const CatalogEntry& knownLayout,
+//
+// `knownLayout` is a field span — get one from cat.layoutFields(entry), and
+// .first(n) it to model a client that only knows the first n fields.
+inline Result<size_t, DecodeError> appendOnlyRead(std::span<const LayoutField> knownLayout,
                                                    std::span<const std::byte> payload,
                                                    std::span<float> outPhysical) {
     return decodeByLayout(knownLayout, payload, outPhysical);
+}
+
+// (catalog, entry) convenience, mirroring decodeByLayout's.
+template <size_t E, size_t L, size_t S, size_t B, size_t T>
+inline Result<size_t, DecodeError> appendOnlyRead(const BasicCatalog<E, L, S, B, T>& cat,
+                                                   const CatalogEntry& knownLayout,
+                                                   std::span<const std::byte> payload,
+                                                   std::span<float> outPhysical) {
+    return decodeByLayout(cat, knownLayout, payload, outPhysical);
 }
 
 }  // namespace slopsync

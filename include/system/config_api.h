@@ -32,7 +32,7 @@
 // Bumped by hand on each firmware change so an OTA can be verified as landed
 // (surfaced via /api/capabilities → "fw_version" and the boot log). This is the
 // single source of truth for "which build is actually running." :3
-#define FIRMWARE_VERSION        "2.1.45"
+#define FIRMWARE_VERSION        "2.1.73"
 
 // =============================================================================
 // WiFi Configuration (values come from secrets.h)
@@ -308,7 +308,7 @@ float    aimStepsPerMm();
 // The 57AIM servo drive at 800 steps/rev × 10 steps/mm can push this — it's
 // a closed-loop servo, not a stepper, so it won't skip steps. Strap in. :3
 #define MAX_SPEED_MM_S              10000.0f
-#define DEFAULT_MAX_SPEED_MM_S      550.0f   // factory default on fresh boot
+#define DEFAULT_MAX_SPEED_MM_S      950.0f   // factory default on fresh boot (operator's hardware)
 
 // USER limit-set factory defaults — deliberately gentle. The USER set caps the
 // operator's own hand (manual moves) AND the "glide into the window" entry move
@@ -317,8 +317,9 @@ float    aimStepsPerMm();
 // lunging to the edge at the input ceiling. Raise them in Settings once you've
 // felt the machine out. Distinct from DEFAULT_MAX_SPEED/ACCEL which seed the
 // INPUT set (streams/patterns). :3
-#define DEFAULT_USER_MAX_SPEED_MM_S  50.0f    // gentle user/manual speed default
-#define DEFAULT_USER_ACCEL_MM_S2     200.0f   // gentle user/manual accel default
+#define DEFAULT_USER_MAX_SPEED_MM_S  50.0f    // gentle HAND-DRIVEN default — deliberately NOT the
+                                             // master/input pair below. Manual jogging stays slow.
+#define DEFAULT_USER_ACCEL_MM_S2     200.0f   // gentle hand-driven default (see above)
 
 // Split ceilings the WebUI's expert-mode toggle switches between. Advertised
 // via /api/capabilities so the UI derives its slider `max` attrs from the API
@@ -339,13 +340,59 @@ float    aimStepsPerMm();
 // Firmware ceiling is 100000 — the WebUI enforces the normal/expert split.
 // NOTE: accel is stored as uint32_t in NVS (not uint16_t) — values above
 // 65535 would silently overflow a uint16_t and corrupt the saved setting. :3
-#define DEFAULT_ACCEL_MM_S2     8000.0f
+#define DEFAULT_ACCEL_MM_S2     50000.0f
 #define MAX_ACCEL_MM_S2         100000.0f
 
 // Split accel ceilings — same expert-mode split as speed above.
 // Normal mode confirmed safe to 20000 mm/s²; expert unlocks the full ceiling.
 #define NORMAL_MAX_ACCEL_MM_S2      20000.0f
 #define EXPERT_MAX_ACCEL_MM_S2      MAX_ACCEL_MM_S2     // 100000
+
+// =============================================================================
+// INPUT-set JERK ceiling (mm/s^3) — third member of the limit family
+// =============================================================================
+// The planner (SlopMotion, §7.6) is jerk-limited, and until fw 2.1.47 its jmax
+// was a BARE NORMALIZED CONSTANT (500 units/s^3) with no mm-domain source. That
+// made the PHYSICAL jerk ceiling `500 * window_span` — i.e. it SHRANK as the
+// operator narrowed the stroke window, which is exactly backwards, and it
+// silently bound fast segments long before speed or accel did. Measured on the
+// bench: a 200 mm window fed 400 ms funscript segments reached only 49% of the
+// commanded stroke depth because JERK (not velocity) was the binding limit;
+// raising the effective jerk took the same script to 98%. So jerk gets promoted
+// to a first-class, mm-domain, persisted, wire-exposed limit that lives beside
+// speed and accel, and main.cpp divides it by the window span exactly like the
+// other two. Narrow the window now and the physical ceiling stays put. :3
+//
+// WHY THE DEFAULT IS THIS HIGH — jerk here is a MECHANICAL PROTECTION limit,
+// not a smoothing crutch. The classic reason to hold jerk low is to hide the
+// stair-stepping of a clocked position output; this codebase does not have that
+// problem, because the Motion Doctrine engineered it out — ONE COMMAND → ONE
+// PLAN, the trajectory is C2 by construction (quintic Hermite / Ruckig), and
+// FastAccelStepper's ISR is the sample rate. Nothing here needs jerk to smooth
+// it. What jerk still buys us is protecting the belt, the carriage, and the
+// mounting from the shock of a genuinely instantaneous accel change. Set it at
+// the mechanical pain threshold and let velocity be the limit that actually
+// binds, which is the honest physical one.
+//
+// Calibration, at the NORMAL 1000 mm/s speed ceiling: the quintic is
+// velocity-bound (rather than jerk-bound) for segments longer than ~120 ms at
+// 2e6 mm/s^3, and only for segments longer than ~240 ms at 5e5. Funscript
+// cadence lives well under 240 ms, which is why 5e5-class ceilings ate stroke
+// depth. 2e6 is the "fast script still reaches full depth" default; the normal
+// UI cap (1e7) covers aggressive setups, expert unlocks 5e7 for rigid rails.
+//
+// NOT the same thing as AIM_MODBUS_JERK_MM_S3 (100000, ~line 198): that one is
+// the Modbus servo executor's OWN target-tracker glide limit, downstream of the
+// planner and specific to that driver's incremental-delta wire protocol. Two
+// different limits on two different stages of the pipeline — do not conflate
+// them, and do not "fix" a mismatch by making them equal. :3
+#define DEFAULT_INPUT_MAX_JERK_MM_S3  2000000.0f   // factory default (2e6)
+#define MAX_JERK_MM_S3               50000000.0f   // hard firmware ceiling (5e7)
+
+// Split jerk ceilings — same expert-mode split as speed/accel above, advertised
+// via /api/capabilities so the UI derives its slider max from the API. :3
+#define NORMAL_MAX_JERK_MM_S3        10000000.0f   // 1e7
+#define EXPERT_MAX_JERK_MM_S3        MAX_JERK_MM_S3 // 5e7
 
 // =============================================================================
 // Safe-approach soft start — no more scary full-speed lunges. :3
@@ -400,32 +447,16 @@ float    aimStepsPerMm();
 #define SERIAL_CONTROL_BAUD     115200       // must match Intiface's serial port
 
 // =============================================================================
-// Buttplug WebSocket Port
+// Intiface / Buttplug — REMOVED (M5c, fw 2.1.65)
 // =============================================================================
-// Port the ESP32 runs its OWN WebSocket server on (for MultiFunPlayer, which
-// connects TO the device and streams raw TCode).
-#define BUTTPLUG_WEBSOCKET_PORT 55555
-
-// =============================================================================
-// Intiface WSDM (Websocket Device Manager) Client
-// =============================================================================
-// When Intiface's "Device WebSocket Server" toggle is ON, Intiface LISTENS for
-// devices to connect to IT. The ESP32 connects out to this host:port as a
-// WebSocket CLIENT, sends the identification handshake, then exchanges TCode.
+// BUTTPLUG_WEBSOCKET_PORT (55555), INTIFACE_HOST/PORT/ENABLED/IDENTIFIER/ADDRESS
+// all lived here. Their one consumer, WebSocketTransport, is deleted: SlopSync
+// is now the only input and output on this device, and Intiface is planned to
+// gain native SlopSync support rather than the device continuing to speak
+// Intiface's protocol.
 //
-// Set INTIFACE_HOST to the IP of the PC running Intiface, and INTIFACE_PORT to
-// the port shown in Intiface's log ("Listening on: 0.0.0.0:<port>"). The port
-// can change between Intiface launches - update it or set via the web UI.
-#define INTIFACE_HOST          SECRET_INTIFACE_HOST  // <-- from secrets.h
-#define INTIFACE_PORT          SECRET_INTIFACE_PORT  // <-- from secrets.h
-#define INTIFACE_ENABLED       true             // enable WSDM client connection
-
-// Identification handshake sent as the FIRST message after connecting.
-// identifier: must match the protocol selected in Intiface's websocket device
-//             dropdown. For TCode v0.3 stroker this is "tcode-v03".
-// address:    arbitrary unique string to identify this device across sessions.
-#define INTIFACE_IDENTIFIER    "tcode-v03"
-#define INTIFACE_ADDRESS       "slopdrive32-0001"
+// SECRET_INTIFACE_HOST/PORT survive in secrets.h and secrets.example.h only so
+// an existing (git-ignored) secrets.h keeps compiling. Nothing reads them.
 
 // TCode magnitude scaling — DEPRECATED, NO LONGER USED IN THE DECODE PATH. :3
 //
@@ -531,7 +562,12 @@ enum class TransportMode : uint8_t {
 // =============================================================================
 
 #define UI_WS_PORT              81           // binary WebSocket UI control plane
-#define SLOPSYNC_WS_PORT        82           // SlopSync hub transport (binary WS, slopsync.v1)
+#define SLOPSYNC_WS_PORT        82           // SlopSync hub transport (binary WS)
+// The negotiated WS subprotocol. ONE definition: it was a bare literal in the
+// links2004 transport and in its log line, and a second transport would have
+// made that two more places to drift. A client that does not offer exactly this
+// is refused at handshake (RFC 6455 4.2.2) -- see lib/espasyncwebserver/VENDORED.md.
+#define SLOPSYNC_WS_SUBPROTOCOL "slopsync.v1"
 // NOTE: WiFi power-save (WIFI_PS_*) is never touched anywhere in this
 // firmware — the device is permanently wall-powered via a brick, so there's
 // no power budget to protect and toggling PS modes only adds WiFi radio
@@ -578,6 +614,10 @@ struct DeviceConfig {
     // INPUT set: TCode streams, PatternEngine, OSSM
     float input_max_speed_mm_s;    // default: 550
     float input_max_accel_mm_s2;   // default: 1500
+    // Third member of the INPUT limit family (fw 2.1.47). Feeds SlopMotion's
+    // jmax after division by the stroke-window span, exactly like the two
+    // above — a MECHANICAL protection ceiling, never a smoothing knob. :3
+    float input_max_jerk_mm_s3;    // default: 2000000
 
     // Control mode
     uint8_t control_mode;      // 0=Manual, 1=Buttplug
@@ -611,7 +651,7 @@ inline DeviceConfig getDefaultConfig() {
     cfg.min_position_mm = 0.0f;
     cfg.max_rail_mm     = DEFAULT_MAX_RAIL_MM;     // agnostic default rail ceiling (500mm)
     cfg.max_position_mm = DEFAULT_MAX_RAIL_MM;     // seeds the startup range until homing measures
-    cfg.max_speed_mm_s = DEFAULT_MAX_SPEED_MM_S;  // 550 mm/s factory default
+    cfg.max_speed_mm_s = DEFAULT_MAX_SPEED_MM_S;  // 950 mm/s factory default
     cfg.acceleration_mm_s2 = DEFAULT_ACCEL_MM_S2;
     // Dual limit sets. USER set defaults gentle (glide-into-window + manual);
     // INPUT set seeds from the legacy full-speed default (streams/patterns). :3
@@ -619,6 +659,7 @@ inline DeviceConfig getDefaultConfig() {
     cfg.user_max_accel_mm_s2  = DEFAULT_USER_ACCEL_MM_S2;      // 200 mm/s²
     cfg.input_max_speed_mm_s  = DEFAULT_MAX_SPEED_MM_S;
     cfg.input_max_accel_mm_s2 = DEFAULT_ACCEL_MM_S2;
+    cfg.input_max_jerk_mm_s3  = DEFAULT_INPUT_MAX_JERK_MM_S3;
     cfg.control_mode = (uint8_t)ControlMode::BUTTPLUG;
     cfg.microsteps = 16;
     cfg.run_current_ma = DRIVER_DEFAULT_RUN_CURRENT_MA;

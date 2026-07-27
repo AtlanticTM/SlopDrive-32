@@ -36,6 +36,15 @@ static uint32_t nvsConfigChecksum(Preferences& prefs) {
     mixU32(prefs.getUInt("user_acc", 0));
     mixU32(prefs.getUShort("inp_spd", 0));
     mixU32(prefs.getUInt("inp_acc", 0));
+    // "inp_jrk" (fw 2.1.47) is mixed ONLY WHEN PRESENT. Unconditionally adding a
+    // key to this hash would change the computed value for every blob written by
+    // an older firmware, and load() would cry CORRUPTION at every upgraded device
+    // exactly once — a false alarm that teaches the operator to ignore a real
+    // one. Absent key → hash is bit-identical to the pre-2.1.47 hash; present key
+    // → fully covered. (A bit-flip that lands inp_jrk on exactly 0 escapes the
+    // hash, but 0 is out of range and the loader falls back to default anyway.)
+    // Any future key added here should follow the same present-only idiom. :3
+    { uint32_t jrk = prefs.getUInt("inp_jrk", 0); if (jrk) mixU32(jrk); }
     mixU32(prefs.getBool("auto_dur", false) ? 1u : 0u);
     mixU32(prefs.getBool("if_compat", false) ? 1u : 0u);
     mixF(prefs.getFloat("def_rmin", 0.0f));
@@ -110,6 +119,10 @@ void ConfigStore::save(SystemState& state, RangeMapper& mapper, MotorDriver& mot
     ck(prefs.putUInt("user_acc", (uint32_t)state.config.user_max_accel_mm_s2));
     ck(prefs.putUShort("inp_spd", (uint16_t)state.config.input_max_speed_mm_s));
     ck(prefs.putUInt("inp_acc", (uint32_t)state.config.input_max_accel_mm_s2));
+    // Jerk is UInt like accel — the ceiling is 5e7 mm/s³, which needs the full
+    // 32 bits (a UShort would truncate it into nonsense, the exact bug that bit
+    // accel back when it lived under the old 16-bit "accel" key). :3
+    ck(prefs.putUInt("inp_jrk", (uint32_t)state.config.input_max_jerk_mm_s3));
 
     ck(prefs.putBool("auto_dur", state.auto_duration));
     // Intiface compat — whether we decode magnitudes against the legacy /999
@@ -144,6 +157,39 @@ void ConfigStore::save(SystemState& state, RangeMapper& mapper, MotorDriver& mot
     ck(prefs.putUChar("tmc_tbl", state.driver.tbl));
     ck(prefs.putChar("tmc_hs", state.driver.hstart));
     ck(prefs.putChar("tmc_he", state.driver.hend));
+
+    // ---- SlopMotion live tuning (M5c) --------------------------------------
+    // These used to be session-only: /api/slopmotion wrote SystemState and a
+    // reboot took them back to defaults. They are real settings now (operator
+    // ruling 2026-07-27) and are written via SlopSync 0x0105.
+    //
+    // NVS keys are capped at 15 chars, hence the abbreviations. They are NOT
+    // mixed into cfg_crc: that checksum covers the motion-safety envelope, and
+    // widening it would silently invalidate every existing device's stored
+    // hash on the first boot after this change. A corrupt tuning value is
+    // clamped on load like every other field; a corrupt WINDOW is what the
+    // checksum is there to shout about.
+    ck(prefs.putFloat("sm_jmax",   state.sm_tune_jmax_ovr));
+    ck(prefs.putFloat("sm_vmax",   state.sm_tune_vmax_ovr));
+    ck(prefs.putFloat("sm_amax",   state.sm_tune_amax_ovr));
+    ck(prefs.putUChar("sm_cent",   state.sm_tune_centring ? 1 : 0));
+    ck(prefs.putFloat("sm_cgain",  state.sm_tune_centring_gain));
+    ck(prefs.putUChar("sm_cff",    state.sm_tune_chase_ff ? 1 : 0));
+    ck(prefs.putUChar("sm_caff",   state.sm_tune_chase_aff ? 1 : 0));
+    ck(prefs.putFloat("sm_cgn",    state.sm_tune_chase_gain));
+    ck(prefs.putFloat("sm_clk",    state.sm_tune_chase_look));
+    ck(prefs.putUInt ("sm_dens",   state.sm_tune_dense_us));
+    ck(prefs.putUChar("sm_aim",    state.sm_tune_aim_extrap ? 1 : 0));
+    ck(prefs.putFloat("sm_hk",     state.sm_tune_handoff_k));
+    ck(prefs.putUChar("sm_curve",  state.sm_tune_curve_policy));
+    ck(prefs.putUChar("sm_ipol",   state.sm_tune_infeas_policy));
+    ck(prefs.putFloat("sm_imarg",  state.sm_tune_infeas_margin));
+    ck(prefs.putFloat("sm_sbud",   state.sm_tune_smooth_budget));
+    ck(prefs.putFloat("sm_abud",   state.sm_tune_amp_budget));
+    ck(prefs.putUChar("sm_bstep",  state.sm_tune_blend_steps));
+    ck(prefs.putUChar("sm_rstep",  state.sm_tune_reshape_steps));
+    ck(prefs.putUInt ("sm_settle", state.sm_tune_settle_grace_us));
+
 
     // Corruption defense: hash what actually landed in NVS (read back raw) and
     // store it. load() recomputes + compares. See nvsConfigChecksum(). :3
@@ -232,21 +278,65 @@ void ConfigStore::load(SystemState& state, RangeMapper& mapper, MotorDriver& mot
         // The USER set falls back to its GENTLE factory default (50/200) — NOT
         // the legacy values — so a fresh device (or one that only ever saved the
         // legacy keys) boots gentle for manual moves + window-entry glides. :3
+        // INPUT jerk (fw 2.1.47) has NO legacy predecessor to migrate from — a
+        // blob written before this key existed reads 0 and keeps the factory
+        // default seeded by getDefaultConfig() above, never a zero ceiling
+        // (jmax == 0 would wedge the planner solid). Same >0 idiom as the rest,
+        // then hard-clamped to the firmware ceiling below. :3
         float usr_spd = state.config.user_max_speed_mm_s;   // 50 (gentle default)
         float usr_acc = state.config.user_max_accel_mm_s2;  // 200 (gentle default)
         float inp_spd = spd, inp_acc = (float)acc;
+        float inp_jrk = state.config.input_max_jerk_mm_s3;  // 2e6 factory default
         uint16_t usr_spd_saved = prefs.getUShort("user_spd", 0);
         uint32_t usr_acc_saved = prefs.getUInt("user_acc", 0);
         uint16_t inp_spd_saved = prefs.getUShort("inp_spd", 0);
         uint32_t inp_acc_saved = prefs.getUInt("inp_acc", 0);
+        uint32_t inp_jrk_saved = prefs.getUInt("inp_jrk", 0);
         if (usr_spd_saved > 0) usr_spd = (float)usr_spd_saved;
         if (usr_acc_saved > 0) usr_acc = (float)usr_acc_saved;
         if (inp_spd_saved > 0) inp_spd = (float)inp_spd_saved;
         if (inp_acc_saved > 0) inp_acc = (float)inp_acc_saved;
+        if (inp_jrk_saved > 0) inp_jrk = (float)inp_jrk_saved;
+        // Per-field validation: a corrupt in-range-looking jerk is still bounded.
+        if (inp_jrk < 1000.0f)        inp_jrk = DEFAULT_INPUT_MAX_JERK_MM_S3;
+        if (inp_jrk > MAX_JERK_MM_S3) inp_jrk = MAX_JERK_MM_S3;
         state.config.user_max_speed_mm_s   = usr_spd;
         state.config.user_max_accel_mm_s2  = usr_acc;
         state.config.input_max_speed_mm_s  = inp_spd;
         state.config.input_max_accel_mm_s2 = inp_acc;
+
+        // ---- SlopMotion live tuning (M5c) ----------------------------------
+        // Every getter passes the CURRENT value as its default, so a device
+        // whose NVS predates this block keeps the compiled-in defaults instead
+        // of being zeroed. Bounds mirror the 0x0105 clamps exactly — a value
+        // that got out of range by any route is corrected on the way in.
+        auto clf = [](float v, float lo, float hi) {
+            return !(v > lo) ? lo : (v > hi ? hi : v);
+        };
+        auto clu = [](uint32_t v, uint32_t lo, uint32_t hi) {
+            return v < lo ? lo : (v > hi ? hi : v);
+        };
+        state.sm_tune_jmax_ovr    = clf(prefs.getFloat("sm_jmax",  state.sm_tune_jmax_ovr), 0.0f, 2000000.0f);
+        state.sm_tune_vmax_ovr    = clf(prefs.getFloat("sm_vmax",  state.sm_tune_vmax_ovr), 0.0f, 20.0f);
+        state.sm_tune_amax_ovr    = clf(prefs.getFloat("sm_amax",  state.sm_tune_amax_ovr), 0.0f, 500.0f);
+        state.sm_tune_centring    = prefs.getUChar("sm_cent",  state.sm_tune_centring ? 1 : 0) != 0;
+        state.sm_tune_centring_gain = clf(prefs.getFloat("sm_cgain", state.sm_tune_centring_gain), 0.0f, 1.0f);
+        state.sm_tune_chase_ff    = prefs.getUChar("sm_cff",   state.sm_tune_chase_ff ? 1 : 0) != 0;
+        state.sm_tune_chase_aff   = prefs.getUChar("sm_caff",  state.sm_tune_chase_aff ? 1 : 0) != 0;
+        state.sm_tune_chase_gain  = clf(prefs.getFloat("sm_cgn", state.sm_tune_chase_gain), 0.0f, 1.5f);
+        state.sm_tune_chase_look  = clf(prefs.getFloat("sm_clk", state.sm_tune_chase_look), 0.0f, 8.0f);
+        state.sm_tune_dense_us    = clu(prefs.getUInt("sm_dens", state.sm_tune_dense_us), 10000u, 500000u);
+        state.sm_tune_aim_extrap  = prefs.getUChar("sm_aim",   state.sm_tune_aim_extrap ? 1 : 0) != 0;
+        state.sm_tune_handoff_k   = clf(prefs.getFloat("sm_hk", state.sm_tune_handoff_k), 0.0f, 8.0f);
+        state.sm_tune_curve_policy  = (uint8_t)clu(prefs.getUChar("sm_curve", state.sm_tune_curve_policy), 0, 2);
+        state.sm_tune_infeas_policy = (uint8_t)clu(prefs.getUChar("sm_ipol",  state.sm_tune_infeas_policy), 0, 4);
+        state.sm_tune_infeas_margin = clf(prefs.getFloat("sm_imarg", state.sm_tune_infeas_margin), 0.5f, 1.0f);
+        state.sm_tune_smooth_budget = clf(prefs.getFloat("sm_sbud",  state.sm_tune_smooth_budget), 0.0f, 1.0f);
+        state.sm_tune_amp_budget    = clf(prefs.getFloat("sm_abud",  state.sm_tune_amp_budget), 0.0f, 1.0f);
+        state.sm_tune_blend_steps   = (uint8_t)clu(prefs.getUChar("sm_bstep", state.sm_tune_blend_steps), 1, 10);
+        state.sm_tune_reshape_steps = (uint8_t)clu(prefs.getUChar("sm_rstep", state.sm_tune_reshape_steps), 0, 8);
+        state.sm_tune_settle_grace_us = clu(prefs.getUInt("sm_settle", state.sm_tune_settle_grace_us), 0u, 200000u);
+        state.config.input_max_jerk_mm_s3  = inp_jrk;
 
         state.auto_duration = prefs.getBool("auto_dur", true);
         // Intiface compat — default false (spec-correct/MFP decode) when the key

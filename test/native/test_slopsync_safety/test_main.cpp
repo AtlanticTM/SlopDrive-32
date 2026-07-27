@@ -52,50 +52,61 @@ namespace {
 // ids kept ascending (superset copy — mini_catalog.hpp itself is untouched).
 // ============================================================================
 
-Catalog32 safetyCatalog() {
-    Catalog32 c = conformance::miniCatalog();  // 0x0003,0x0080,0x0082,0x0084,0x008A,0x0090 (6, ascending)
-    REQUIRE(c.count == 6);
+// Out-param builder (a Catalog32 is tens of KiB — never a return value).
+// Entries are APPENDED in ascending id order, which is also the order the
+// shared field pools fill in, so the mini fixture's entries are copied across
+// in two halves with 0x0004/0x0005 authored in between.
+void safetyCatalog(Catalog32& c) {
+    Catalog32 mini;  // 0x0003,0x0080,0x0082,0x0084,0x008A,0x0090 (6, ascending)
+    conformance::buildMiniCatalog(mini);
+    REQUIRE(mini.count == 6);
 
-    // Make room for two new entries right after 0x0003 (index 0): shift
-    // [1..count) up by two slots.
-    for (int i = int(c.count) - 1; i >= 1; --i) c.entries[size_t(i) + 2] = c.entries[size_t(i)];
-    c.count = uint16_t(c.count + 2);
+    c.clear();
 
-    auto& e = c.entries;
+    // -- 0x0003 "safety", copied verbatim (entry AND its pooled fields).
+    c.addEntryFrom(mini, mini.entries[0]);
 
     // -- 0x0004 "control-owner" — STATE, viewer, critical (§10.1's minimum
     // never-shed set explicitly names this channel). Layout: 4x
     // {source_id:u8, owner_session:u32} = 20 bytes, matching
     // Hub::buildControlOwnerPayload().
-    e[1] = CatalogEntry{};
-    e[1].id = 0x0004;
-    e[1].name = "control-owner";
-    e[1].cls = ChannelClass::STATE;
-    e[1].dir = Direction::h2c;
-    e[1].access = AccessLevel::viewer;
-    e[1].maxRateHz = 0.0f;
-    e[1].defaultPriority = Priority::critical;
-    e[1].fieldCount = 8;
+    c.addEntry({.id = 0x0004, .name = "control-owner",
+                .cls = ChannelClass::STATE, .dir = Direction::h2c,
+                .access = AccessLevel::watch, .maxRateHz = 0.0f,
+                .defaultPriority = Priority::critical});
     for (size_t i = 0; i < 4; ++i) {
-        e[1].layout[i * 2] = {.name = "source_id", .type = PackedFieldType::u8, .unit = "", .scale = 1.0f};
-        e[1].layout[i * 2 + 1] = {.name = "owner_session", .type = PackedFieldType::u32, .unit = "", .scale = 1.0f};
+        c.addLayoutField({.name = "source_id", .type = PackedFieldType::u8, .unit = "", .scale = 1.0f});
+        c.addLayoutField({.name = "owner_session", .type = PackedFieldType::u32, .unit = "", .scale = 1.0f});
     }
 
-    // -- 0x0005 "safety-intents" — INTENT, controller. Minimal schema (this
-    // M5 pass hub-handles the ESTOP_CLEAR op directly by value key, not via
-    // catalog schema dispatch — see hub_impl.hpp's handleIntent step 5b).
-    e[2] = CatalogEntry{};
-    e[2].id = 0x0005;
-    e[2].name = "safety-intents";
-    e[2].cls = ChannelClass::INTENT;
-    e[2].dir = Direction::c2h;
-    e[2].access = AccessLevel::controller;
-    e[2].maxRateHz = 10.0f;
-    e[2].defaultPriority = Priority::critical;
-    e[2].fieldCount = 1;
-    e[2].schema[0] = {.key = 1, .name = "op", .type = CborFieldType::uint_t, .unit = ""};
+    // -- 0x0005 "safety-intents" — INTENT. RFC-025b: the channel ACCESS FLOOR
+    // is `watch`, and the per-op minimum role rides `option_access` (catalog
+    // key 17), index-aligned with the option labels so that element i
+    // describes WIRE VALUE i. `estop` (6) and `stop` (2) are role-EXEMPT;
+    // everything else needs `control`. Index 0 is a "reserved" placeholder
+    // (safety_ops starts at 1) gated at `control` — an option label may never
+    // be empty, and the strict side is the safe side for a non-op.
+    //
+    // This mirrors include/comms/SlopSyncCatalog.h's real device entry exactly;
+    // if the two drift, a device-catalog test in this repo would still pass
+    // while the shipped machine gated differently, which is the failure this
+    // duplication is deliberately shaped to make loud.
+    c.addEntry({.id = 0x0005, .name = "safety-intents",
+                .cls = ChannelClass::INTENT, .dir = Direction::c2h,
+                .access = AccessLevel::watch, .maxRateHz = 10.0f,
+                .defaultPriority = Priority::critical});
+    c.addSelectSchemaField({.key = 1, .name = "op", .type = CborFieldType::uint_t, .unit = ""},
+                           {"reserved", "estop_clear", "stop", "hold", "pause", "resume",
+                            "estop", "override_on", "override_off", "bypass_on", "bypass_off"},
+                           {AccessLevel::control, AccessLevel::control, AccessLevel::watch,
+                            AccessLevel::control, AccessLevel::control, AccessLevel::control,
+                            AccessLevel::watch, AccessLevel::control, AccessLevel::control,
+                            AccessLevel::control, AccessLevel::control});
 
-    return c;
+    // -- the rest of the mini fixture (0x0080 .. 0x0090); ids stay ascending.
+    for (uint16_t i = 1; i < mini.count; ++i) c.addEntryFrom(mini, mini.entries[i]);
+    REQUIRE(c.count == 8);
+    REQUIRE(c.ok());
 }
 
 // ============================================================================
@@ -128,6 +139,14 @@ size_t findSlotForSession(const Hub& hub, uint32_t sessionId) {
         if (s && s->occupied() && s->session_id == sessionId) return i;
     }
     return size_t(-1);
+}
+
+// One safety_ops verb as an INTENT value map: {1: op}.
+IntentValueMap makeSafetyOp(uint8_t op) {
+    IntentValueMap m{};
+    m.count = 1;
+    m.fields[0] = IntentValueField{1, IntentValue::ofU64(op)};
+    return m;
 }
 
 IntentValueMap makeSpeedIntent(float speed) {
@@ -195,6 +214,12 @@ public:
     std::map<uint8_t, SourceLossPolicy> sourcePolicies;
     bool allowClearEstop = true;
 
+    // RFC-025a: ops this delegate refuses with UNSUPPORTED_OP, so a test can
+    // model "this machine does not implement HOLD" and assert the hub latches
+    // NOTHING for it.
+    std::vector<uint8_t> refuseOps;
+    std::vector<uint8_t> acceptedOps;   // safety ops the delegate actually applied
+
     std::vector<uint8_t> deadmanStopped;
     struct OwnershipEvent {
         uint8_t source;
@@ -205,12 +230,22 @@ public:
     int estopCallCount = 0;
 
     AccessLevel validateToken(std::span<const std::byte>, std::span<const std::byte>, bool hasToken) override {
-        if (hasToken && grantController) return AccessLevel::controller;
-        return AccessLevel::viewer;
+        if (hasToken && grantController) return AccessLevel::control;
+        return AccessLevel::watch;
     }
 
-    Result<IntentValueMap, NackCode> applyIntent(uint16_t, const IntentValueMap& requested, AccessLevel,
+    Result<IntentValueMap, NackCode> applyIntent(uint16_t channel_id, const IntentValueMap& requested, AccessLevel,
                                                   bool& cfgChanged) override {
+        if (channel_id == 0x0005) {
+            uint8_t op = 0;
+            for (uint32_t i = 0; i < requested.count; ++i) {
+                if (requested.fields[i].key == 1) op = uint8_t(requested.fields[i].value.u64_val);
+            }
+            if (std::find(refuseOps.begin(), refuseOps.end(), op) != refuseOps.end()) {
+                return Result<IntentValueMap, NackCode>::err(NackCode::UNSUPPORTED_OP);
+            }
+            acceptedOps.push_back(op);
+        }
         cfgChanged = true;
         return Result<IntentValueMap, NackCode>::ok(requested);
     }
@@ -248,7 +283,7 @@ struct RecordedEcho {
 
 struct RecordedPairGrant {
     std::array<std::byte, 16> token{};
-    AccessLevel roles = AccessLevel::viewer;
+    AccessLevel roles = AccessLevel::watch;
 };
 
 class TestClientDelegate final : public ClientDelegate {
@@ -370,7 +405,8 @@ TEST_CASE("shed table (pure): shedDecision matches the M5 exhaustive table") {
 // STOP, and the session itself is freed.
 // ============================================================================
 TEST_CASE("S-05: deadman fires onDeadmanStop + latches STOP for a Stop-policy source, then frees the session") {
-    Catalog32 catalog = safetyCatalog();
+    Catalog32 catalog;
+    safetyCatalog(catalog);
     ManualClock clock;
     XorShift32 hubRng(2001);
     SafetyHubDelegate hubDelegate;
@@ -433,7 +469,8 @@ TEST_CASE("S-05: deadman fires onDeadmanStop + latches STOP for a Stop-policy so
 // ownership just releases; no STOP; the source is immediately reacquirable.
 // ============================================================================
 TEST_CASE("S-06: deadman on a Continue-policy source releases ownership only, no STOP, immediately reacquirable") {
-    Catalog32 catalog = safetyCatalog();
+    Catalog32 catalog;
+    safetyCatalog(catalog);
     ManualClock clock;
     XorShift32 hubRng(2201);
     SafetyHubDelegate hubDelegate;
@@ -489,7 +526,8 @@ TEST_CASE("S-06: deadman on a Continue-policy source releases ownership only, no
 // (equal role); control-owner STATE (0x0004) reflects the change to both.
 // ============================================================================
 TEST_CASE("S-07: same-source contention — TAKEOVER_REQUIRED, then takeover=true transfers ownership") {
-    Catalog32 catalog = safetyCatalog();
+    Catalog32 catalog;
+    safetyCatalog(catalog);
     ManualClock clock;
     XorShift32 hubRng(2401);
     SafetyHubDelegate hubDelegate;
@@ -566,7 +604,8 @@ TEST_CASE("S-07: same-source contention — TAKEOVER_REQUIRED, then takeover=tru
 // priority (0x0090 diag/background, 0x0082 motion-status/normal).
 // ============================================================================
 TEST_CASE("S-08: congestion shedding decimates background before normal/critical; stalled critical writes evict") {
-    Catalog32 catalog = safetyCatalog();
+    Catalog32 catalog;
+    safetyCatalog(catalog);
     ManualClock clock;
     XorShift32 hubRng(2601);
     SafetyHubDelegate hubDelegate;
@@ -669,7 +708,8 @@ TEST_CASE("S-08: congestion shedding decimates background before normal/critical
 // S-10 — pairing ceremony (§12.2)
 // ============================================================================
 TEST_CASE("S-10: pairing grants a controller token via correct PIN proof; a reconnect with it adopts controller") {
-    Catalog32 catalog = safetyCatalog();
+    Catalog32 catalog;
+    safetyCatalog(catalog);
     ManualClock clock;
     XorShift32 hubRng(2801);
     SafetyHubDelegate hubDelegate;
@@ -686,7 +726,7 @@ TEST_CASE("S-10: pairing grants a controller token via correct PIN proof; a reco
     REQUIRE(client.connect());
     pump(hub, clock, {&client}, 6);
     REQUIRE(client.state() == ClientSessionState::LIVE);
-    CHECK(client.roles() == AccessLevel::viewer);
+    CHECK(client.roles() == AccessLevel::watch);
 
     const char pin[] = "4821";
     hub.openPairingWindow(std::span<const char>(pin, 4));
@@ -696,7 +736,7 @@ TEST_CASE("S-10: pairing grants a controller token via correct PIN proof; a reco
     pump(hub, clock, {&client}, 4);
 
     REQUIRE(delegate.pairGrants.size() == 1);
-    CHECK(delegate.pairGrants[0].roles == AccessLevel::controller);
+    CHECK(delegate.pairGrants[0].roles == AccessLevel::control);
     std::array<std::byte, 16> token = delegate.pairGrants[0].token;
     CHECK_FALSE(std::all_of(token.begin(), token.end(), [](std::byte b) { return b == std::byte{0}; }));
 
@@ -710,11 +750,12 @@ TEST_CASE("S-10: pairing grants a controller token via correct PIN proof; a reco
     REQUIRE(client2.connect());
     pump(hub, clock, {&client2}, 6);
     REQUIRE(client2.state() == ClientSessionState::LIVE);
-    CHECK(client2.roles() == AccessLevel::controller);
+    CHECK(client2.roles() == AccessLevel::control);
 }
 
 TEST_CASE("S-10: wrong PIN denies pairing; three failures close the window; further attempts NACK PAIRING_REQUIRED") {
-    Catalog32 catalog = safetyCatalog();
+    Catalog32 catalog;
+    safetyCatalog(catalog);
     ManualClock clock;
     XorShift32 hubRng(3001);
     SafetyHubDelegate hubDelegate;
@@ -776,4 +817,371 @@ TEST_CASE("S-10 (HMAC KAT): RFC 4231 test case 2 — key \"Jefe\", full 32-byte 
         CAPTURE(i);
         CHECK(uint8_t(mac[i]) == expected[i]);
     }
+}
+
+// ############################################################################
+// M4a — SAFETY SEMANTICS FOR PUBLIC v1.0
+//
+// RFC-010 (client-assertable e-stop), RFC-025a (the hub latches all four
+// levels), RFC-025b (per-op role exemption, expressed in the CATALOG),
+// RFC-025c (override/bypass as safety-domain state on the appended snapshot
+// byte), RFC-022.3 (session_loss vs deadman cause).
+//
+// Shared harness note: `safetyCatalog()` above now authors 0x0005 with a
+// `watch` access FLOOR plus index-aligned `option_access`, which is the thing
+// under test in half of these cases — a viewer must be able to STOP and to
+// ESTOP, and must NOT be able to HOLD, PAUSE, RESUME, clear a latch, or flip
+// override/bypass.
+// ############################################################################
+
+namespace {
+
+// Brings up hub + one client and returns once the client is LIVE. `withToken`
+// selects the role the delegate hands out (control vs watch).
+struct SafetyRig {
+    Catalog32 catalog{};
+    ManualClock clock{};
+    XorShift32 hubRng{4242};
+    SafetyHubDelegate hubDelegate{};
+    std::optional<Hub> hub{};
+    std::optional<InProcessLink> link{};
+    XorShift32 clientRng{4243};
+    TestClientDelegate del{};
+    std::optional<Client> client{};
+
+    explicit SafetyRig(bool withToken, uint8_t idByte = 60) {
+        safetyCatalog(catalog);
+        hub.emplace(catalog, clock, hubRng, hubDelegate);
+        hubDelegate.hub = &*hub;
+        link.emplace(clock, hubRng);
+        REQUIRE(hub->attachTransport(link->endpointA()));
+        ClientIdentity id = makeIdentity(idByte, withToken);
+        client.emplace(id, link->endpointB(), clock, clientRng, del);
+        client->addSubscriptionWish(0x0003, 0.0f, Priority::critical);
+        REQUIRE(client->connect());
+        pump(*hub, clock, {&*client}, 12);
+        REQUIRE(client->state() == ClientSessionState::LIVE);
+    }
+
+    void step(int rounds = 8) { pump(*hub, clock, {&*client}, rounds); }
+
+    // The `modes` byte (index 8) of the last 0x0003 snapshot this client saw.
+    uint8_t lastModes() {
+        auto it = del.lastStateByChannel.find(0x0003);
+        REQUIRE(it != del.lastStateByChannel.end());
+        REQUIRE(it->second.size() == 9);
+        return uint8_t(it->second[8]);
+    }
+    uint8_t lastWord() {
+        auto it = del.lastStateByChannel.find(0x0003);
+        REQUIRE(it != del.lastStateByChannel.end());
+        REQUIRE(it->second.size() >= 1);
+        return uint8_t(it->second[0]);
+    }
+    uint8_t lastCause() {
+        auto it = del.lastStateByChannel.find(0x0003);
+        REQUIRE(it != del.lastStateByChannel.end());
+        REQUIRE(it->second.size() >= 2);
+        return uint8_t(it->second[1]);
+    }
+};
+
+}  // namespace
+
+// ============================================================================
+// RFC-025c — the snapshot itself: 9 bytes, appended `modes`, prefix-stable.
+// ============================================================================
+TEST_CASE("M4a: the 0x0003 snapshot is 9 bytes and its first 8 are unchanged") {
+    SafetyRig rig(/*withToken=*/true);
+
+    auto& snap = rig.del.lastStateByChannel[0x0003];
+    REQUIRE(snap.size() == 9);
+    // Fresh hub, nothing latched: every byte clear, INCLUDING the new one.
+    for (size_t i = 0; i < snap.size(); ++i) {
+        CAPTURE(i);
+        CHECK(uint8_t(snap[i]) == 0);
+    }
+    // And the catalog agrees with the encoder — the invariant that actually
+    // matters, since a hub publishing a payload its own catalog cannot decode
+    // is a client-side decode failure on the SAFETY channel.
+    const CatalogEntry* e = rig.catalog.find(channels::safety);
+    REQUIRE(e != nullptr);
+    CHECK(rig.catalog.layoutWireSize(*e) == 9);
+}
+
+// ============================================================================
+// RFC-010 — a client can ASSERT the e-stop, and a WATCH session can too.
+// ============================================================================
+TEST_CASE("M4a/RFC-010: safety_ops::estop latches exactly like a 0xE5 frame") {
+    SafetyRig rig(/*withToken=*/true);
+    REQUIRE_FALSE(rig.hub->estopLatched());
+
+    REQUIRE(rig.client->sendIntent(0x0005, makeSafetyOp(safety_ops::estop)).has_value());
+    rig.step();
+
+    // Motion stopped BEFORE bookkeeping (11.2): the delegate hook ran.
+    CHECK(rig.hubDelegate.estopCallCount == 1);
+    CHECK(rig.hub->estopLatched());
+    CHECK((rig.hub->safetyWord() & safety_bits::ESTOP) != 0);
+    // Published at critical priority to the subscriber, with cause=user.
+    CHECK((rig.lastWord() & safety_bits::ESTOP) != 0);
+    CHECK(rig.lastCause() == safety_causes::user);
+    // ECHOed, not NACKed.
+    CHECK(rig.del.nacks.empty());
+    REQUIRE(rig.del.echoes.size() == 1);
+    REQUIRE(rig.del.echoes[0].applied.count == 1);
+    CHECK(rig.del.echoes[0].applied.fields[0].value.u64_val == safety_ops::estop);
+    // It never reached the delegate's applyIntent — hub-handled, like
+    // estop_clear. That equivalence with the raw 0xE5 path is the point.
+    CHECK(rig.hubDelegate.acceptedOps.empty());
+}
+
+TEST_CASE("M4a/RFC-025b: a WATCH session may estop and stop, but nothing else") {
+    SafetyRig rig(/*withToken=*/false);   // no token -> AccessLevel::watch
+
+    SUBCASE("estop is role-EXEMPT — the person in the room can stop the machine") {
+        REQUIRE(rig.client->sendIntent(0x0005, makeSafetyOp(safety_ops::estop)).has_value());
+        rig.step();
+        CHECK(rig.hub->estopLatched());
+        CHECK(rig.del.nacks.empty());
+    }
+
+    SUBCASE("stop is role-EXEMPT too") {
+        REQUIRE(rig.client->sendIntent(0x0005, makeSafetyOp(safety_ops::stop)).has_value());
+        rig.step();
+        CHECK(rig.del.nacks.empty());
+        CHECK((rig.hub->safetyWord() & safety_bits::STOP) != 0);
+    }
+
+    SUBCASE("hold / pause / resume / estop_clear / override / bypass need control") {
+        const uint8_t gated[] = {safety_ops::estop_clear, safety_ops::hold,        safety_ops::pause,
+                                 safety_ops::resume,      safety_ops::override_on, safety_ops::override_off,
+                                 safety_ops::bypass_on,   safety_ops::bypass_off};
+        for (uint8_t op : gated) {
+            CAPTURE(int(op));
+            rig.del.nacks.clear();
+            REQUIRE(rig.client->sendIntent(0x0005, makeSafetyOp(op)).has_value());
+            rig.step();
+            REQUIRE(rig.del.nacks.size() == 1);
+            CHECK(rig.del.nacks[0].code == NackCode::NOT_CONTROLLER);
+        }
+        // Nothing latched, nothing applied, machine untouched.
+        CHECK(rig.hub->safetyWord() == 0);
+        CHECK(rig.hub->safetyModes() == 0);
+        CHECK(rig.hubDelegate.acceptedOps.empty());
+    }
+
+    SUBCASE("an UNKNOWN op is at least as gated as the strictest known one") {
+        // Option index past the end of the option_access vector: it must NOT
+        // fall back to the channel floor, or an unregistered verb would be the
+        // cheapest thing on a safety channel to reach.
+        REQUIRE(rig.client->sendIntent(0x0005, makeSafetyOp(200)).has_value());
+        rig.step();
+        REQUIRE(rig.del.nacks.size() == 1);
+        CHECK(rig.del.nacks[0].code == NackCode::NOT_CONTROLLER);
+    }
+}
+
+TEST_CASE("M4a/RFC-025b: role-exempt ops are STILL rate-limited") {
+    SafetyRig rig(/*withToken=*/false);   // watch
+    // The 9.3 limiter is per SESSION, and it is what bounds a viewer
+    // loop-stopping the machine. Fire a burst far past any plausible bucket
+    // depth WITHOUT advancing the clock.
+    int accepted = 0;
+    for (int i = 0; i < 80; ++i) {
+        if (rig.client->sendIntent(0x0005, makeSafetyOp(safety_ops::stop)).has_value()) ++accepted;
+        rig.hub->update(rig.clock.nowUs());
+        rig.client->update(rig.clock.nowUs());
+    }
+    REQUIRE(accepted > 0);
+    rig.step(4);
+    const size_t rateLimited =
+        size_t(std::count_if(rig.del.nacks.begin(), rig.del.nacks.end(),
+                             [](const RecordedNack& n) { return n.code == NackCode::RATE_LIMITED; }));
+    CHECK(rateLimited > 0);   // exemption is from ROLE, never from the limiter
+}
+
+// ============================================================================
+// RFC-025a — the hub latches all four levels, on delegate ACCEPTANCE.
+// ============================================================================
+TEST_CASE("M4a/RFC-025a: the HUB latches STOP/HOLD/PAUSE and RESUME lifts the right two") {
+    SafetyRig rig(/*withToken=*/true);
+
+    REQUIRE(rig.client->sendIntent(0x0005, makeSafetyOp(safety_ops::hold)).has_value());
+    rig.step();
+    CHECK((rig.hub->safetyWord() & safety_bits::HOLD) != 0);
+    CHECK((rig.lastWord() & safety_bits::HOLD) != 0);   // subscribers see it, not just the sender
+
+    REQUIRE(rig.client->sendIntent(0x0005, makeSafetyOp(safety_ops::pause)).has_value());
+    rig.step();
+    CHECK((rig.hub->safetyWord() & safety_bits::PAUSE) != 0);
+
+    REQUIRE(rig.client->sendIntent(0x0005, makeSafetyOp(safety_ops::stop)).has_value());
+    rig.step();
+    CHECK((rig.hub->safetyWord() & safety_bits::STOP) != 0);
+    CHECK(rig.hub->safetyWord() == (safety_bits::STOP | safety_bits::HOLD | safety_bits::PAUSE));
+
+    REQUIRE(rig.client->sendIntent(0x0005, makeSafetyOp(safety_ops::resume)).has_value());
+    rig.step();
+    // RESUME lifts HOLD and PAUSE only. STOP is cleared by NEW MOTION (11.1),
+    // never by resume, and ESTOP needs estop_clear + its preconditions.
+    CHECK((rig.hub->safetyWord() & safety_bits::HOLD) == 0);
+    CHECK((rig.hub->safetyWord() & safety_bits::PAUSE) == 0);
+    CHECK((rig.hub->safetyWord() & safety_bits::STOP) != 0);
+    CHECK(rig.del.nacks.empty());
+}
+
+TEST_CASE("M4a/RFC-025a: a delegate that does not implement a level NACKs and latches NOTHING") {
+    SafetyRig rig(/*withToken=*/true);
+    rig.hubDelegate.refuseOps.push_back(safety_ops::hold);
+
+    REQUIRE(rig.client->sendIntent(0x0005, makeSafetyOp(safety_ops::hold)).has_value());
+    rig.step();
+
+    REQUIRE(rig.del.nacks.size() == 1);
+    CHECK(rig.del.nacks[0].code == NackCode::UNSUPPORTED_OP);   // discoverable and honest
+    CHECK(rig.hub->safetyWord() == 0);                          // and NOT silently latched
+}
+
+// ============================================================================
+// RFC-025c — override/bypass write through 0x0005 and read back on 0x0003.
+// ============================================================================
+TEST_CASE("M4a/RFC-025c: override/bypass ops drive the appended modes byte") {
+    SafetyRig rig(/*withToken=*/true);
+    CHECK(rig.hub->safetyModes() == 0);
+
+    REQUIRE(rig.client->sendIntent(0x0005, makeSafetyOp(safety_ops::override_on)).has_value());
+    rig.step();
+    CHECK(rig.hub->safetyModes() == safety_mode_bits::OVERRIDE);
+    CHECK(rig.lastModes() == safety_mode_bits::OVERRIDE);
+
+    REQUIRE(rig.client->sendIntent(0x0005, makeSafetyOp(safety_ops::bypass_on)).has_value());
+    rig.step();
+    CHECK(rig.hub->safetyModes() == (safety_mode_bits::OVERRIDE | safety_mode_bits::BYPASS));
+    CHECK(rig.lastModes() == (safety_mode_bits::OVERRIDE | safety_mode_bits::BYPASS));
+
+    REQUIRE(rig.client->sendIntent(0x0005, makeSafetyOp(safety_ops::override_off)).has_value());
+    rig.step();
+    CHECK(rig.hub->safetyModes() == safety_mode_bits::BYPASS);
+
+    REQUIRE(rig.client->sendIntent(0x0005, makeSafetyOp(safety_ops::bypass_off)).has_value());
+    rig.step();
+    CHECK(rig.hub->safetyModes() == 0);
+    CHECK(rig.lastModes() == 0);
+    CHECK(rig.del.nacks.empty());
+
+    // The four ops DID reach the delegate (unlike estop/estop_clear): the
+    // machine is what actually engages an override, the hub only latches the
+    // fact afterwards.
+    CHECK(rig.hubDelegate.acceptedOps.size() == 4);
+}
+
+TEST_CASE("M4a/RFC-025c: setSafetyModes is the machine-side direction, publishing on change only") {
+    SafetyRig rig(/*withToken=*/true);
+    const int before = rig.del.stateCountByChannel[0x0003];
+
+    rig.hub->setSafetyModes(true, false);   // e.g. the legacy UI plane flipped it
+    rig.step();
+    CHECK(rig.lastModes() == safety_mode_bits::OVERRIDE);
+    const int afterChange = rig.del.stateCountByChannel[0x0003];
+    CHECK(afterChange > before);
+
+    // Value-identical re-assert: ground truth did not move, so neither does
+    // the wire (the same discipline RFC-002 imposed on cfg_gen).
+    rig.hub->setSafetyModes(true, false);
+    rig.step();
+    CHECK(rig.del.stateCountByChannel[0x0003] == afterChange);
+}
+
+// ============================================================================
+// RFC-022.3 — the latched cause tells the truth about HOW the owner left.
+// ============================================================================
+TEST_CASE("M4a/RFC-022.3: a GOODBYE latches session_loss, not deadman") {
+    Catalog32 catalog;
+    safetyCatalog(catalog);
+    ManualClock clock;
+    XorShift32 hubRng(7311);
+    SafetyHubDelegate hubDelegate;
+    hubDelegate.channelToSource[0x0084] = 1;
+    hubDelegate.sourcePolicies[1] = SourceLossPolicy::Stop;
+    Hub hub(catalog, clock, hubRng, hubDelegate);
+    hubDelegate.hub = &hub;
+
+    InProcessLink owner(clock, hubRng), watcher(clock, hubRng);
+    REQUIRE(hub.attachTransport(owner.endpointA()));
+    REQUIRE(hub.attachTransport(watcher.endpointA()));
+
+    XorShift32 rngA(7312), rngB(7313);
+    TestClientDelegate delA, delB;
+    Client a(makeIdentity(71, true), owner.endpointB(), clock, rngA, delA);
+    Client b(makeIdentity(72, true), watcher.endpointB(), clock, rngB, delB);
+    b.addSubscriptionWish(0x0003, 0.0f, Priority::critical);
+    REQUIRE(a.connect());
+    REQUIRE(b.connect());
+    pump(hub, clock, {&a, &b}, 14);
+    REQUIRE(a.state() == ClientSessionState::LIVE);
+    REQUIRE(b.state() == ClientSessionState::LIVE);
+
+    // A takes the source, then says GOODBYE — a graceful departure, which is
+    // precisely the case that used to be blamed on a deadman TIMEOUT in every
+    // subscriber's UI and log line.
+    REQUIRE(a.sendIntent(0x0084, makeSpeedIntent(100.0f)).has_value());
+    pump(hub, clock, {&a, &b}, 6);
+    a.disconnect();
+    pump(hub, clock, {&a, &b}, 10);
+
+    CHECK((hub.safetyWord() & safety_bits::STOP) != 0);   // the loss policy still ran
+    auto& snap = delB.lastStateByChannel[0x0003];
+    REQUIRE(snap.size() == 9);
+    CHECK(uint8_t(snap[1]) == safety_causes::session_loss);
+    CHECK(uint8_t(snap[1]) != safety_causes::deadman);
+}
+
+TEST_CASE("M4a/RFC-022.3: an actual silence timeout still reports deadman") {
+    Catalog32 catalog;
+    safetyCatalog(catalog);
+    ManualClock clock;
+    XorShift32 hubRng(7321);
+    SafetyHubDelegate hubDelegate;
+    hubDelegate.channelToSource[0x0084] = 1;
+    hubDelegate.sourcePolicies[1] = SourceLossPolicy::Stop;
+    Hub hub(catalog, clock, hubRng, hubDelegate);
+    hubDelegate.hub = &hub;
+
+    InProcessLink owner(clock, hubRng);
+    REQUIRE(hub.attachTransport(owner.endpointA()));
+    XorShift32 rngA(7322);
+    TestClientDelegate delA;
+    Client a(makeIdentity(73, true), owner.endpointB(), clock, rngA, delA);
+    a.addSubscriptionWish(0x0003, 0.0f, Priority::critical);
+    REQUIRE(a.connect());
+    pump(hub, clock, {&a}, 14);
+    REQUIRE(a.state() == ClientSessionState::LIVE);
+    REQUIRE(a.sendIntent(0x0084, makeSpeedIntent(100.0f)).has_value());
+    pump(hub, clock, {&a}, 6);
+    REQUIRE(hubDelegate.deadmanStopped.empty());
+
+    // Go silent: pump the HUB ONLY, past the deadman window.
+    for (int i = 0; i < 400; ++i) {
+        clock.advanceUs(5000);
+        hub.update(clock.nowUs());
+    }
+    REQUIRE_FALSE(hubDelegate.deadmanStopped.empty());
+    CHECK((hub.safetyWord() & safety_bits::STOP) != 0);
+
+    // Now let the (formerly silent) client drain what the hub already put on
+    // the wire — going silent is what FIRES the deadman; it does not stop the
+    // client from reading the broadcast afterwards.
+    for (int i = 0; i < 6; ++i) {
+        clock.advanceUs(1000);
+        hub.update(clock.nowUs());
+        a.update(clock.nowUs());
+    }
+
+    // The subscriber's own retained snapshot is where the cause is observable
+    // (there is no hub getter for it, and nor should there be — the wire IS
+    // the observation).
+    auto& snap = delA.lastStateByChannel[0x0003];
+    REQUIRE(snap.size() == 9);
+    CHECK(uint8_t(snap[1]) == safety_causes::deadman);
 }

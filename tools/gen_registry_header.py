@@ -23,9 +23,55 @@ REGISTRY = ROOT / "docs" / "slopsync" / "registry" / "registry.yaml"
 OUT = ROOT / "lib" / "slopsync" / "include" / "slopsync" / "generated" / "registry_constants.hpp"
 
 
+# Registry names become C++ identifiers, so they may not collide with a
+# keyword. Caught here with a pointed message rather than 200 lines later as
+# "expected unqualified-id before 'namespace'".
+CPP_KEYWORDS = {
+    "alignas", "alignof", "and", "asm", "auto", "bool", "break", "case", "catch",
+    "char", "class", "concept", "const", "consteval", "constexpr", "constinit",
+    "const_cast", "continue", "co_await", "co_return", "co_yield", "decltype",
+    "default", "delete", "do", "double", "dynamic_cast", "else", "enum",
+    "explicit", "export", "extern", "false", "float", "for", "friend", "goto",
+    "if", "inline", "int", "long", "mutable", "namespace", "new", "noexcept",
+    "not", "nullptr", "operator", "or", "private", "protected", "public",
+    "register", "reinterpret_cast", "requires", "return", "short", "signed",
+    "sizeof", "static", "static_assert", "static_cast", "struct", "switch",
+    "template", "this", "thread_local", "throw", "true", "try", "typedef",
+    "typeid", "typename", "union", "unsigned", "using", "virtual", "void",
+    "volatile", "wchar_t", "while", "xor",
+}
+
+
 def ident(name: str) -> str:
-    """Sanitize a registry name into a C++ identifier (dashes -> underscores)."""
-    return name.replace("-", "_")
+    """Sanitize a registry name into a C++ identifier.
+
+    Dashes and dots both become underscores: `session-roster` -> session_roster,
+    `limit.user.speed` -> limit_user_speed (field_roles are dotted tstr values).
+    """
+    out = name.replace("-", "_").replace(".", "_")
+    if out in CPP_KEYWORDS:
+        raise SystemExit(
+            f"registry name '{name}' generates the C++ keyword '{out}' — "
+            f"pick a different name in registry.yaml (the wire number is "
+            f"unaffected; only the generated identifier changes)."
+        )
+    return out
+
+
+def esc(text: str) -> str:
+    """Escape a registry string for a C++ string literal."""
+    return text.replace("\\", "\\\\").replace('"', '\\"')
+
+
+def emit_bits(p, section: dict, ns: str) -> None:
+    """Emit a bit-flag section (`bitN: {name, note|ref}`) as a namespace."""
+    p(f"namespace {ns} {{\n")
+    for bit in sorted(section, key=lambda b: int(b.removeprefix("bit"))):
+        e = section[bit]
+        shift = int(bit.removeprefix("bit"))
+        why = e.get("ref") or e.get("note", "")
+        p(f"inline constexpr uint8_t {ident(e['name'])} = 1u << {shift};  // {why}\n")
+    p(f"}}  // namespace {ns}\n\n")
 
 
 def gen(reg: dict) -> str:
@@ -53,12 +99,7 @@ def gen(reg: dict) -> str:
     p("};\n\n")
 
     # ---- Header flags -------------------------------------------------------
-    p("namespace flags {\n")
-    for bit in sorted(reg["header_flags"]):
-        e = reg["header_flags"][bit]
-        shift = int(bit.removeprefix("bit"))
-        p(f"inline constexpr uint8_t {e['name']} = 1u << {shift};  // {e['ref']}\n")
-    p("}  // namespace flags\n\n")
+    emit_bits(p, reg["header_flags"], "flags")
 
     # ---- Simple u8 enums ----------------------------------------------------
     for section, cpp in (("channel_classes", "ChannelClass"),
@@ -85,15 +126,46 @@ def gen(reg: dict) -> str:
     p("};\n\n")
 
     # ---- Scoped sub-map key spaces (not the global cbor_keys space) --------
+    #      ...plus the small u8 enums that are values inside those spaces.
     for section, ns in (("welcome_limits_keys", "welcome_limits"),
                         ("probe_result_keys", "probe_result"),
+                        ("identity_keys", "identity"),
+                        ("blob_keys", "blob"),
+                        ("trust_keys", "trust"),
+                        ("trust_ledger_keys", "trust_ledger"),
+                        ("trust_states", "trust_states"),
+                        ("presentation_modes", "presentation_modes"),
+                        ("blob_namespaces", "blob_ns"),
                         ("session_event_kinds", "session_events"),
-                        ("safety_intent_ops", "safety_ops")):
+                        ("log_event_kinds", "log_events"),
+                        ("pairing_event_kinds", "pairing_events"),
+                        ("safety_event_kinds", "safety_events"),
+                        ("log_levels", "log_levels"),
+                        ("safety_intent_ops", "safety_ops"),
+                        ("session_admin_ops", "session_admin_ops"),
+                        ("safety_causes", "safety_causes"),
+                        ("setting_categories", "setting_categories"),
+                        ("stream_kinds", "stream_kinds"),
+                        ("procedure_phases", "procedure_phases")):
         p(f"namespace {ns} {{\n")
         for k in sorted(reg[section]):
             e = reg[section][k]
             p(f"inline constexpr uint8_t {ident(e['name'])} = {k};  // {e['note']}\n")
         p(f"}}  // namespace {ns}\n\n")
+
+    # ---- Bit-flag spaces ----------------------------------------------------
+    emit_bits(p, reg["setting_flags"], "setting_flags")
+    emit_bits(p, reg["pairing_modes"], "pairing_modes")
+
+    # ---- Field roles --------------------------------------------------------
+    # These are TSTR values on the wire (dotted namespace, device-extensible),
+    # not an integer enum — RFC-019's `action.<name>` roles carry a
+    # device-chosen suffix that no enum can express.
+    p("namespace field_roles {\n")
+    for role in reg["field_roles"]:  # registry order
+        e = reg["field_roles"][role] or {}
+        p(f'inline constexpr std::string_view {ident(role)} = "{esc(role)}";  // {e.get("note", "")}\n')
+    p("}  // namespace field_roles\n\n")
 
     # ---- NACK codes ---------------------------------------------------------
     p("enum class NackCode : uint16_t {\n")

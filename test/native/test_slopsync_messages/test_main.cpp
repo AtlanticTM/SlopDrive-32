@@ -368,16 +368,16 @@ TEST_CASE("ECHO: minimal (empty applied map) — ECHO has no top-level optionals
 // ============================================================================
 // EVENT (§9.4)
 // ============================================================================
-TEST_CASE("EVENT: full round-trip (payload + seq_of_state present) + determinism") {
+TEST_CASE("EVENT: full round-trip (body + seq_of_state present) + determinism") {
     EventMsg m{};
     m.channel_id = 7;
     m.timestamp = 123456;
     m.event_kind = 2;
     m.has_seq_of_state = true;
     m.seq_of_state = 55;
-    m.has_payload = true;
-    m.payload_count = 1;
-    m.payload[0] = IntentValueField{1, IntentValue::ofU64(3)};
+    m.has_body = true;
+    m.body_count = 1;
+    m.body[0] = IntentValueField{1, IntentValue::ofU64(3)};
 
     checkDeterministic(encodeEvent, m);
 
@@ -391,17 +391,17 @@ TEST_CASE("EVENT: full round-trip (payload + seq_of_state present) + determinism
     CHECK(d.event_kind == 2);
     REQUIRE(d.has_seq_of_state);
     CHECK(d.seq_of_state == 55);
-    REQUIRE(d.has_payload);
-    REQUIRE(d.payload_count == 1);
-    CHECK(d.payload[0].value.u64_val == 3);
+    REQUIRE(d.has_body);
+    REQUIRE(d.body_count == 1);
+    CHECK(d.body[0].value.u64_val == 3);
 }
 
-TEST_CASE("EVENT: minimal (no payload, no seq_of_state) — map shrinks from 5 to 3 pairs") {
+TEST_CASE("EVENT: minimal (no body, no seq_of_state) — map shrinks from 5 to 3 pairs") {
     EventMsg m{};
     m.channel_id = 7;
     m.timestamp = 999;
     m.event_kind = 1;
-    // has_seq_of_state / has_payload left false.
+    // has_seq_of_state / has_body left false.
 
     std::array<std::byte, 32> buf{};
     size_t n = encodeEvent(m, buf);
@@ -411,7 +411,7 @@ TEST_CASE("EVENT: minimal (no payload, no seq_of_state) — map shrinks from 5 t
     auto dec = decodeEvent(std::span<const std::byte>(buf.data(), n));
     REQUIRE(dec.isOk());
     CHECK_FALSE(dec.value().has_seq_of_state);
-    CHECK_FALSE(dec.value().has_payload);
+    CHECK_FALSE(dec.value().has_body);
 }
 
 // ============================================================================
@@ -518,13 +518,17 @@ TEST_CASE("GOODBYE: minimal (detail absent) — map shrinks from 2 to 1 pair") {
 }
 
 // ============================================================================
-// PAIR_REQ / PAIR_GRANT (§12.2) — both fields are mandatory in both
-// messages (no optional keys the SPEC allows omitting), so only the "full"
-// round-trip case applies; noted rather than silently skipped.
+// PAIR_REQ / PAIR_GRANT (§12.2, RFC-027).
+//
+// `pin_proof` BECAME OPTIONAL at M4b and that absence is a MEANING, not a
+// degenerate case: a PAIR_REQ with only an instance id is a KNOCK (mode (a)/(c)
+// — a device with one button and no display asking to be let in). Both shapes
+// are pinned here.
 // ============================================================================
-TEST_CASE("PAIR_REQ: round-trip + determinism (no optional fields exist to omit)") {
+TEST_CASE("PAIR_REQ: round-trip + determinism, PIN-proof form") {
     PairReqMsg m{};
     m.instance_id = {B(0x01), B(0x02), B(0x03), B(0x04), B(0x05), B(0x06), B(0x07), B(0x08)};
+    m.has_pin_proof = true;
     m.pin_proof = {B(0xA0), B(0xA1), B(0xA2), B(0xA3), B(0xA4), B(0xA5), B(0xA6), B(0xA7),
                    B(0xA8), B(0xA9), B(0xAA), B(0xAB), B(0xAC), B(0xAD), B(0xAE), B(0xAF)};
 
@@ -534,8 +538,26 @@ TEST_CASE("PAIR_REQ: round-trip + determinism (no optional fields exist to omit)
     size_t n = encodePairReq(m, buf);
     auto dec = decodePairReq(std::span<const std::byte>(buf.data(), n));
     REQUIRE(dec.isOk());
+    CHECK(dec.value().has_pin_proof);
     CHECK(std::memcmp(dec.value().instance_id.data(), m.instance_id.data(), 8) == 0);
     CHECK(std::memcmp(dec.value().pin_proof.data(), m.pin_proof.data(), 16) == 0);
+}
+
+TEST_CASE("PAIR_REQ: bare KNOCK form (RFC-027 mode (a)) is legal, not malformed") {
+    PairReqMsg m{};
+    m.instance_id = {B(0x11), B(0x12), B(0x13), B(0x14), B(0x15), B(0x16), B(0x17), B(0x18)};
+    // has_pin_proof stays false: that IS the knock.
+
+    checkDeterministic(encodePairReq, m);
+
+    std::array<std::byte, 64> buf{};
+    size_t n = encodePairReq(m, buf);
+    auto dec = decodePairReq(std::span<const std::byte>(buf.data(), n));
+    REQUIRE(dec.isOk());
+    CHECK_FALSE(dec.value().has_pin_proof);
+    CHECK(std::memcmp(dec.value().instance_id.data(), m.instance_id.data(), 8) == 0);
+    // A one-key map: the whole ceremony a coin-cell remote can afford.
+    CHECK(n < 16);
 }
 
 TEST_CASE("PAIR_GRANT: round-trip + determinism (no optional fields exist to omit)") {
@@ -716,4 +738,53 @@ TEST_CASE("Unknown-key tolerance (§4.3): an out-of-range top-level key is skipp
         REQUIRE(dec.isOk());
         CHECK(dec.value().probe_result.rtt_ms == 5);
     }
+}
+
+// ============================================================================
+// EVENT `body` (40) — the v1.0 GRAMMAR FIX, asserted at the byte level.
+//
+// Kind-specific fields used to sit at the TOP level of the EVENT map and
+// therefore drew their keys from the GLOBAL cbor_keys space. That made
+// device-authored EVENT channels impossible without a registry PR per field —
+// the exact coupling the self-describing catalog exists to prevent, and it
+// would have blocked this device's own motion-anomaly channel. They now ride
+// the scoped `body` sub-map, whose integer keys come from the channel's
+// catalog `schema`, mirroring how INTENT nests under `value` (20).
+//
+// `event_kind` (33) and `seq_of_state` (34) deliberately STAY at the top
+// level: those are protocol framing, not payload.
+// ============================================================================
+TEST_CASE("EVENT: kind-specific fields ride the scoped `body` sub-map, key 40, last in order") {
+    EventMsg m{};
+    m.channel_id = 8;
+    m.timestamp = 5;
+    m.event_kind = 1;
+    m.has_body = true;
+    m.body_count = 1;
+    m.body[0] = IntentValueField{4, IntentValue::ofU64(9)};
+
+    std::array<std::byte, 64> buf{};
+    size_t n = encodeEvent(m, buf);
+    REQUIRE(n > 0);
+
+    // map(4): channel_id(15), timestamp(21), event_kind(33), body(40).
+    CHECK(uint8_t(buf[0]) == (0xA0 | 4));
+
+    // §5.3 ascending keys put `body` LAST, encoded as a uint8 key (40 > 23).
+    // Finding 0x18 0x28 (= 40) proves the payload map moved out of the global
+    // key space and into the channel's own schema space.
+    bool sawBodyKey = false;
+    for (size_t i = 0; i + 1 < n; ++i) {
+        if (uint8_t(buf[i]) == 0x18 && uint8_t(buf[i + 1]) == 40) sawBodyKey = true;
+    }
+    CHECK(sawBodyKey);
+    // ...and `value` (20, encoded as the single byte 0x14) is gone from it.
+    CHECK(uint8_t(buf[n - 3]) != 0x14);
+
+    auto d = decodeEvent(std::span<const std::byte>(buf.data(), n));
+    REQUIRE(d.isOk());
+    REQUIRE(d.value().has_body);
+    REQUIRE(d.value().body_count == 1);
+    CHECK(d.value().body[0].key == 4);
+    CHECK(d.value().body[0].value.u64_val == 9);
 }

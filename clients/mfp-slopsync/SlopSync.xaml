@@ -5,10 +5,17 @@
                        xmlns:mc="http://schemas.openxmlformats.org/markup-compatibility/2006"
                        xmlns:plugin="clr-namespace:MultiFunPlayer.Plugin;assembly=MultiFunPlayer"
                        xmlns:s="https://github.com/canton7/Stylet"
-                       d:DesignHeight="560"
+                       d:DesignHeight="520"
                        d:DesignWidth="440"
                        StatusContent="{Binding Status}"
                        mc:Ignorable="d">
+    <!--
+      LAYOUT RULE (M5d): what an operator TOUCHES mid-session is at the top and
+      always visible; what they set once is folded into a collapsed Setup
+      expander. Nothing was removed — every control the previous view had is
+      still here and still reachable, just not all competing for the same
+      screenful. The 11-row live-stat ladder became a 4-row 2-up grid.
+    -->
     <plugin:PluginViewBase.Style>
         <Style TargetType="{x:Type plugin:PluginViewBase}">
             <Setter Property="StatusForeground" Value="{DynamicResource MaterialDesignErrorBrush}"/>
@@ -29,7 +36,8 @@
         </Style>
     </plugin:PluginViewBase.Style>
 
-    <!-- Toolbar: connect/disconnect toggle. Icon swaps Play <-> Stop on Status. -->
+    <!-- Toolbar: connect toggle + Home. Home is a mid-session operator action,
+         so it lives where the operator's hand already is. INTENT 0x0103 op 1. -->
     <plugin:PluginViewBase.ToolBarContent>
         <StackPanel Orientation="Horizontal">
             <Button Style="{StaticResource MaterialDesignToolBarButton}"
@@ -52,105 +60,41 @@
                     </material:PackIcon.Style>
                 </material:PackIcon>
             </Button>
+            <Button Style="{StaticResource MaterialDesignToolBarButton}"
+                    Padding="8"
+                    Click="{s:Action OnHomeClick}"
+                    IsEnabled="{Binding IsConnected}"
+                    ToolTip="Home the machine (SlopSync INTENT 0x0103, op 1)">
+                <material:PackIcon Kind="HomeImportOutline" Width="19" Height="19"/>
+            </Button>
         </StackPanel>
     </plugin:PluginViewBase.ToolBarContent>
 
     <ScrollViewer VerticalScrollBarVisibility="Auto">
         <StackPanel Margin="12">
 
-            <!-- ==== Connection settings ==== -->
-            <TextBlock Text="CONNECTION" FontWeight="Bold" Opacity="0.6" Margin="0,0,0,6"/>
-            <Grid>
-                <Grid.ColumnDefinitions>
-                    <ColumnDefinition Width="*"/>
-                    <ColumnDefinition Width="8"/>
-                    <ColumnDefinition Width="90"/>
-                </Grid.ColumnDefinitions>
-                <TextBox Grid.Column="0"
-                         material:HintAssist.Hint="Address"
-                         Style="{StaticResource MaterialDesignFloatingHintTextBox}"
-                         IsEnabled="{Binding IsEditable}"
-                         Text="{Binding Address, UpdateSourceTrigger=PropertyChanged}"/>
-                <TextBox Grid.Column="2"
-                         material:HintAssist.Hint="Port"
-                         Style="{StaticResource MaterialDesignFloatingHintTextBox}"
-                         IsEnabled="{Binding IsEditable}"
-                         Text="{Binding Port, UpdateSourceTrigger=PropertyChanged}"/>
-            </Grid>
-
-            <Grid Margin="0,10,0,0">
-                <Grid.ColumnDefinitions>
-                    <ColumnDefinition Width="*"/>
-                    <ColumnDefinition Width="8"/>
-                    <ColumnDefinition Width="*"/>
-                    <ColumnDefinition Width="8"/>
-                    <ColumnDefinition Width="*"/>
-                </Grid.ColumnDefinitions>
-                <TextBox Grid.Column="0"
-                         material:HintAssist.Hint="Axis"
-                         Style="{StaticResource MaterialDesignFloatingHintTextBox}"
-                         IsEnabled="{Binding IsEditable}"
-                         Text="{Binding SourceAxis, UpdateSourceTrigger=PropertyChanged}"/>
-                <TextBox Grid.Column="2"
-                         material:HintAssist.Hint="Rate (Hz)"
-                         Style="{StaticResource MaterialDesignFloatingHintTextBox}"
-                         IsEnabled="{Binding IsEditable}"
-                         Text="{Binding UpdateRateHz, UpdateSourceTrigger=PropertyChanged}"/>
-                <TextBox Grid.Column="4"
-                         material:HintAssist.Hint="PIN"
-                         Style="{StaticResource MaterialDesignFloatingHintTextBox}"
-                         IsEnabled="{Binding IsEditable}"
-                         Text="{Binding PairingPin, UpdateSourceTrigger=PropertyChanged}"/>
-            </Grid>
-
-            <!-- Streaming mode: Samples (50 Hz points) vs Segments (one timed
-                 command per funscript action). Locked while connected. -->
-            <ComboBox Margin="0,10,0,0"
-                      material:HintAssist.Hint="Mode"
-                      Style="{StaticResource MaterialDesignFloatingHintComboBox}"
-                      IsEnabled="{Binding IsEditable}"
-                      ItemsSource="{Binding Modes}"
-                      SelectedItem="{Binding Mode}"/>
-
-            <!-- ==== Discovery ==== -->
-            <TextBlock Text="DISCOVERY (mDNS)" FontWeight="Bold" Opacity="0.6" Margin="0,18,0,6"/>
-            <Grid>
-                <Grid.ColumnDefinitions>
-                    <ColumnDefinition Width="*"/>
-                    <ColumnDefinition Width="8"/>
-                    <ColumnDefinition Width="Auto"/>
-                </Grid.ColumnDefinitions>
-                <ComboBox Grid.Column="0"
-                          material:HintAssist.Hint="Discovered devices"
-                          Style="{StaticResource MaterialDesignFloatingHintComboBox}"
-                          IsEnabled="{Binding IsEditable}"
-                          ItemsSource="{Binding DiscoveredDevices}"
-                          DisplayMemberPath="Display"
-                          SelectedItem="{Binding SelectedDevice}"/>
-                <Button Grid.Column="2"
-                        VerticalAlignment="Bottom"
-                        Style="{StaticResource MaterialDesignOutlinedButton}"
-                        Click="{s:Action OnDiscoverClick}"
-                        IsEnabled="{Binding IsEditable}"
-                        Content="Discover"/>
-            </Grid>
-            <ProgressBar Style="{StaticResource MaterialDesignLinearProgressBar}"
-                         IsIndeterminate="True"
-                         Height="3"
-                         Margin="0,4,0,0"
-                         Visibility="{Binding IsDiscovering, Converter={StaticResource BooleanToVisibilityConverter}}"/>
-
-            <!-- ==== Live status ==== -->
-            <TextBlock Text="LIVE" FontWeight="Bold" Opacity="0.6" Margin="0,18,0,6"/>
+            <!-- ============================================================
+                 LIVE — the always-visible session line + compact stat grid.
+                 ============================================================ -->
             <Border Background="{DynamicResource MaterialDesignChipBackground}"
-                    CornerRadius="4" Padding="12">
+                    CornerRadius="4" Padding="10">
                 <StackPanel>
-                    <TextBlock Text="{Binding StatusText}" FontWeight="Bold" Margin="0,0,0,6"
+                    <TextBlock Text="{Binding StatusText}" FontWeight="Bold" Margin="0,0,0,2"
+                               TextWrapping="Wrap"
                                Visibility="{Binding StatusText, Converter={StaticResource NullableToVisibilityConverter}}"/>
+                    <TextBlock Text="{Binding DeviceInfo}" Opacity="0.6" FontSize="11" Margin="0,0,0,6"
+                               Visibility="{Binding DeviceInfo, Converter={StaticResource NullableToVisibilityConverter}}"/>
+
+                    <!-- 2 label/value pairs per row: half the vertical space of
+                         the old one-per-row ladder, same information. -->
                     <Grid>
                         <Grid.ColumnDefinitions>
                             <ColumnDefinition Width="Auto"/>
-                            <ColumnDefinition Width="12"/>
+                            <ColumnDefinition Width="8"/>
+                            <ColumnDefinition Width="*"/>
+                            <ColumnDefinition Width="14"/>
+                            <ColumnDefinition Width="Auto"/>
+                            <ColumnDefinition Width="8"/>
                             <ColumnDefinition Width="*"/>
                         </Grid.ColumnDefinitions>
                         <Grid.RowDefinitions>
@@ -159,42 +103,39 @@
                             <RowDefinition Height="Auto"/>
                             <RowDefinition Height="Auto"/>
                             <RowDefinition Height="Auto"/>
-                            <RowDefinition Height="Auto"/>
-                            <RowDefinition Height="Auto"/>
-                            <RowDefinition Height="Auto"/>
-                            <RowDefinition Height="Auto"/>
-                            <RowDefinition Height="Auto"/>
-                            <RowDefinition Height="Auto"/>
                         </Grid.RowDefinitions>
 
-                        <TextBlock Grid.Row="0" Grid.Column="0" Text="Mode"     Opacity="0.6"/>
+                        <TextBlock Grid.Row="0" Grid.Column="0" Text="Mode"    Opacity="0.6"/>
                         <TextBlock Grid.Row="0" Grid.Column="2" Text="{Binding Mode}"/>
-                        <TextBlock Grid.Row="1" Grid.Column="0" Text="Device"   Opacity="0.6"/>
-                        <TextBlock Grid.Row="1" Grid.Column="2" Text="{Binding DeviceInfo}"/>
-                        <TextBlock Grid.Row="2" Grid.Column="0" Text="Session"  Opacity="0.6"/>
-                        <TextBlock Grid.Row="2" Grid.Column="2" Text="{Binding SessionId}"/>
-                        <TextBlock Grid.Row="3" Grid.Column="0" Text="Granted"  Opacity="0.6"/>
-                        <TextBlock Grid.Row="3" Grid.Column="2" Text="{Binding GrantedRate, StringFormat={}{0:F0} Hz}"/>
-                        <TextBlock Grid.Row="4" Grid.Column="0" Text="Clock off" Opacity="0.6"/>
-                        <TextBlock Grid.Row="4" Grid.Column="2" Text="{Binding ClockOffsetUs, StringFormat={}{0} us}"/>
-                        <TextBlock Grid.Row="5" Grid.Column="0" Text="RTT"      Opacity="0.6"/>
-                        <TextBlock Grid.Row="5" Grid.Column="2" Text="{Binding RttUs, StringFormat={}{0} us}"/>
-                        <TextBlock Grid.Row="6" Grid.Column="0" Text="Bundles"  Opacity="0.6"/>
-                        <TextBlock Grid.Row="6" Grid.Column="2" Text="{Binding BundlesSent}"/>
-                        <TextBlock Grid.Row="7" Grid.Column="0" Text="NACKs"    Opacity="0.6"/>
-                        <TextBlock Grid.Row="7" Grid.Column="2" Text="{Binding NackCount}"/>
-                        <TextBlock Grid.Row="8" Grid.Column="0" Text="Rate-limited" Opacity="0.6"/>
-                        <TextBlock Grid.Row="8" Grid.Column="2" Text="{Binding RateLimitedCount}"/>
-                        <!-- Segments sent — only meaningful in Segments mode. -->
-                        <TextBlock Grid.Row="9" Grid.Column="0" Text="Segments sent" Opacity="0.6"
+                        <TextBlock Grid.Row="0" Grid.Column="4" Text="Granted" Opacity="0.6"/>
+                        <TextBlock Grid.Row="0" Grid.Column="6" Text="{Binding GrantedRate, StringFormat={}{0:F0} Hz}"/>
+
+                        <TextBlock Grid.Row="1" Grid.Column="0" Text="Session" Opacity="0.6"/>
+                        <TextBlock Grid.Row="1" Grid.Column="2" Text="{Binding SessionId}"/>
+                        <TextBlock Grid.Row="1" Grid.Column="4" Text="Uptime"  Opacity="0.6"/>
+                        <TextBlock Grid.Row="1" Grid.Column="6" Text="{Binding Uptime}"/>
+
+                        <TextBlock Grid.Row="2" Grid.Column="0" Text="Bundles" Opacity="0.6"/>
+                        <TextBlock Grid.Row="2" Grid.Column="2" Text="{Binding BundlesSent}"/>
+                        <TextBlock Grid.Row="2" Grid.Column="4" Text="States"  Opacity="0.6"/>
+                        <TextBlock Grid.Row="2" Grid.Column="6" Text="{Binding StatesReceived}"/>
+
+                        <TextBlock Grid.Row="3" Grid.Column="0" Text="NACKs"   Opacity="0.6"/>
+                        <TextBlock Grid.Row="3" Grid.Column="2" Text="{Binding NackCount}"/>
+                        <TextBlock Grid.Row="3" Grid.Column="4" Text="Rate-ltd" Opacity="0.6"/>
+                        <TextBlock Grid.Row="3" Grid.Column="6" Text="{Binding RateLimitedCount}"/>
+
+                        <!-- Segments counter replaces the clock pair in Segments
+                             mode; RTT/offset stay reachable on the row below. -->
+                        <TextBlock Grid.Row="4" Grid.Column="0" Text="Segments" Opacity="0.6"
                                    Visibility="{Binding IsSegmentsMode, Converter={StaticResource BooleanToVisibilityConverter}}"/>
-                        <TextBlock Grid.Row="9" Grid.Column="2" Text="{Binding SegmentsSent}"
+                        <TextBlock Grid.Row="4" Grid.Column="2" Text="{Binding SegmentsSent}"
                                    Visibility="{Binding IsSegmentsMode, Converter={StaticResource BooleanToVisibilityConverter}}"/>
-                        <TextBlock Grid.Row="10" Grid.Column="0" Text="Last target / uptime" Opacity="0.6"/>
-                        <StackPanel Grid.Row="10" Grid.Column="2" Orientation="Horizontal">
-                            <TextBlock Text="{Binding LastTarget, StringFormat={}{0:F4}}"/>
-                            <TextBlock Text="  ·  "/>
-                            <TextBlock Text="{Binding Uptime}"/>
+                        <TextBlock Grid.Row="4" Grid.Column="4" Text="Clock"    Opacity="0.6"/>
+                        <StackPanel Grid.Row="4" Grid.Column="6" Orientation="Horizontal">
+                            <TextBlock Text="{Binding ClockOffsetUs, StringFormat={}{0} us}"/>
+                            <TextBlock Text=" · rtt " Opacity="0.6"/>
+                            <TextBlock Text="{Binding RttUs}"/>
                         </StackPanel>
                     </Grid>
 
@@ -206,8 +147,209 @@
                 </StackPanel>
             </Border>
 
-            <TextBlock TextWrapping="Wrap" Opacity="0.5" FontSize="11" Margin="0,10,0,0"
-                       Text="Streams the selected axis to the machine over SlopSync — Samples mode on channel 0x0084 (motion-input, 50 Hz points) or Segments mode on 0x0085 (motion-segment, one timed command per funscript action). The machine must be homed before motion runs; the ground-truth doctrine means the device clamps everything — echoed values are what actually applied."/>
+            <!-- ============================================================
+                 MACHINE — device state and the two things an operator touches
+                 mid-session: homing and the stroke window.
+
+                 GROUND-TRUTH DOCTRINE: the "Device" line is the machine's own
+                 value (decoded STATE / post-clamp ECHO). The two boxes are a
+                 DRAFT and are labelled as such — they are re-seeded from the
+                 device after every echo, so a refused value can never sit in
+                 the box pretending to be real.
+                 ============================================================ -->
+            <TextBlock Text="MACHINE" FontWeight="Bold" Opacity="0.6" Margin="0,16,0,6"/>
+
+            <!-- Home status line (mirrors the toolbar button's result). -->
+            <Grid Margin="0,0,0,6">
+                <Grid.ColumnDefinitions>
+                    <ColumnDefinition Width="Auto"/>
+                    <ColumnDefinition Width="8"/>
+                    <ColumnDefinition Width="*"/>
+                </Grid.ColumnDefinitions>
+                <Button Grid.Column="0"
+                        Style="{StaticResource MaterialDesignOutlinedButton}"
+                        Padding="10,2" Height="26"
+                        Click="{s:Action OnHomeClick}"
+                        IsEnabled="{Binding IsConnected}"
+                        ToolTip="INTENT 0x0103 op 1 — ask the machine to run its homing cycle"
+                        Content="Home"/>
+                <TextBlock Grid.Column="2" VerticalAlignment="Center" FontSize="11" Opacity="0.75"
+                           TextWrapping="Wrap" Text="{Binding HomeStatus}"/>
+            </Grid>
+
+            <!-- Stroke window mini-editor. Channel + keys come from the
+                 catalog's window.min / window.max field ROLES, not from a
+                 hardcoded channel number. The card greys out entirely on a hub
+                 that does not advertise a writable window. -->
+            <Border BorderBrush="{DynamicResource MaterialDesignDivider}" BorderThickness="1"
+                    CornerRadius="4" Padding="10">
+                <StackPanel>
+                    <Grid>
+                        <Grid.ColumnDefinitions>
+                            <ColumnDefinition Width="Auto"/>
+                            <ColumnDefinition Width="*"/>
+                        </Grid.ColumnDefinitions>
+                        <TextBlock Grid.Column="0" Text="Stroke window" FontWeight="SemiBold" FontSize="12"/>
+                        <TextBlock Grid.Column="1" HorizontalAlignment="Right" FontSize="12"
+                                   Text="{Binding WindowText}"
+                                   ToolTip="The machine's current window — device truth, never the boxes below"/>
+                    </Grid>
+
+                    <Grid Margin="0,4,0,0" IsEnabled="{Binding IsWindowEditable}">
+                        <Grid.ColumnDefinitions>
+                            <ColumnDefinition Width="*"/>
+                            <ColumnDefinition Width="6"/>
+                            <ColumnDefinition Width="*"/>
+                            <ColumnDefinition Width="6"/>
+                            <ColumnDefinition Width="Auto"/>
+                            <ColumnDefinition Width="4"/>
+                            <ColumnDefinition Width="Auto"/>
+                        </Grid.ColumnDefinitions>
+                        <TextBox Grid.Column="0"
+                                 material:HintAssist.Hint="Min (mm)"
+                                 Style="{StaticResource MaterialDesignFloatingHintTextBox}"
+                                 Text="{Binding WindowMinEdit, UpdateSourceTrigger=PropertyChanged}"/>
+                        <TextBox Grid.Column="2"
+                                 material:HintAssist.Hint="Max (mm)"
+                                 Style="{StaticResource MaterialDesignFloatingHintTextBox}"
+                                 Text="{Binding WindowMaxEdit, UpdateSourceTrigger=PropertyChanged}"/>
+                        <Button Grid.Column="4" VerticalAlignment="Bottom" Height="26" Padding="10,2"
+                                Style="{StaticResource MaterialDesignOutlinedButton}"
+                                Click="{s:Action OnApplyWindowClick}"
+                                ToolTip="Write min/max via the paired config INTENT; the reply is the APPLIED (post-clamp) value"
+                                Content="Apply"/>
+                        <Button Grid.Column="6" VerticalAlignment="Bottom" Height="26" Padding="8,2"
+                                Style="{StaticResource MaterialDesignFlatButton}"
+                                Click="{s:Action OnRevertWindowClick}"
+                                ToolTip="Discard the draft and re-read the machine's values"
+                                Content="Revert"/>
+                    </Grid>
+
+                    <TextBlock FontSize="11" Opacity="0.75" Margin="0,4,0,0" TextWrapping="Wrap"
+                               Text="{Binding WindowStatus}"
+                               Visibility="{Binding WindowStatus, Converter={StaticResource NullableToVisibilityConverter}}"/>
+                </StackPanel>
+            </Border>
+
+            <!-- Machine-driven limits. READ-ONLY, and that is the entire
+                 contract: this plugin ships the funscript AS AUTHORED and does
+                 not map, clamp or scale anything to these numbers (RFC-008 —
+                 the machine owns motion processing). They are here so the
+                 operator can see the machine's ceilings, full stop. -->
+            <Border BorderBrush="{DynamicResource MaterialDesignDivider}" BorderThickness="1"
+                    CornerRadius="4" Padding="10" Margin="0,8,0,0">
+                <StackPanel>
+                    <TextBlock Text="Machine-driven limits (read-only)" FontWeight="SemiBold" FontSize="12"/>
+                    <Grid Margin="0,4,0,0">
+                        <Grid.ColumnDefinitions>
+                            <ColumnDefinition Width="Auto"/>
+                            <ColumnDefinition Width="10"/>
+                            <ColumnDefinition Width="*"/>
+                        </Grid.ColumnDefinitions>
+                        <Grid.RowDefinitions>
+                            <RowDefinition Height="Auto"/>
+                            <RowDefinition Height="Auto"/>
+                            <RowDefinition Height="Auto"/>
+                        </Grid.RowDefinitions>
+                        <TextBlock Grid.Row="0" Grid.Column="0" Text="Speed" Opacity="0.6"/>
+                        <TextBlock Grid.Row="0" Grid.Column="2" Text="{Binding InputSpeedText}"/>
+                        <TextBlock Grid.Row="1" Grid.Column="0" Text="Accel" Opacity="0.6"/>
+                        <TextBlock Grid.Row="1" Grid.Column="2" Text="{Binding InputAccelText}"/>
+                        <TextBlock Grid.Row="2" Grid.Column="0" Text="Jerk"  Opacity="0.6"/>
+                        <TextBlock Grid.Row="2" Grid.Column="2" Text="{Binding InputJerkText}"/>
+                    </Grid>
+                    <TextBlock FontSize="10" Opacity="0.5" Margin="0,4,0,0" TextWrapping="Wrap"
+                               Text="Found by catalog field role, not by channel number — so this reads correctly on any hub that annotates its catalog, and says &quot;not advertised&quot; on one that does not. The script is always sent as authored; the machine does the clamping."/>
+                </StackPanel>
+            </Border>
+
+            <!-- ============================================================
+                 SETUP — set once, folded away. Everything here is disabled
+                 while connected anyway, so it does not belong on the main face.
+                 ============================================================ -->
+            <Expander Margin="0,14,0,0" Header="Setup &amp; discovery" IsExpanded="False">
+                <StackPanel Margin="0,8,0,0">
+                    <Grid>
+                        <Grid.ColumnDefinitions>
+                            <ColumnDefinition Width="*"/>
+                            <ColumnDefinition Width="8"/>
+                            <ColumnDefinition Width="70"/>
+                            <ColumnDefinition Width="8"/>
+                            <ColumnDefinition Width="Auto"/>
+                        </Grid.ColumnDefinitions>
+                        <TextBox Grid.Column="0"
+                                 material:HintAssist.Hint="Address"
+                                 Style="{StaticResource MaterialDesignFloatingHintTextBox}"
+                                 IsEnabled="{Binding IsEditable}"
+                                 Text="{Binding Address, UpdateSourceTrigger=PropertyChanged}"/>
+                        <TextBox Grid.Column="2"
+                                 material:HintAssist.Hint="Port"
+                                 Style="{StaticResource MaterialDesignFloatingHintTextBox}"
+                                 IsEnabled="{Binding IsEditable}"
+                                 Text="{Binding Port, UpdateSourceTrigger=PropertyChanged}"/>
+                        <Button Grid.Column="4"
+                                VerticalAlignment="Bottom" Height="26" Padding="10,2"
+                                Style="{StaticResource MaterialDesignOutlinedButton}"
+                                Click="{s:Action OnDiscoverClick}"
+                                IsEnabled="{Binding IsEditable}"
+                                Content="Discover"/>
+                    </Grid>
+
+                    <ComboBox Margin="0,6,0,0"
+                              material:HintAssist.Hint="Discovered devices (mDNS)"
+                              Style="{StaticResource MaterialDesignFloatingHintComboBox}"
+                              IsEnabled="{Binding IsEditable}"
+                              ItemsSource="{Binding DiscoveredDevices}"
+                              DisplayMemberPath="Display"
+                              SelectedItem="{Binding SelectedDevice}"/>
+                    <ProgressBar Style="{StaticResource MaterialDesignLinearProgressBar}"
+                                 IsIndeterminate="True"
+                                 Height="3"
+                                 Margin="0,3,0,0"
+                                 Visibility="{Binding IsDiscovering, Converter={StaticResource BooleanToVisibilityConverter}}"/>
+
+                    <Grid Margin="0,8,0,0">
+                        <Grid.ColumnDefinitions>
+                            <ColumnDefinition Width="*"/>
+                            <ColumnDefinition Width="8"/>
+                            <ColumnDefinition Width="*"/>
+                            <ColumnDefinition Width="8"/>
+                            <ColumnDefinition Width="*"/>
+                            <ColumnDefinition Width="8"/>
+                            <ColumnDefinition Width="*"/>
+                        </Grid.ColumnDefinitions>
+                        <TextBox Grid.Column="0"
+                                 material:HintAssist.Hint="Axis"
+                                 Style="{StaticResource MaterialDesignFloatingHintTextBox}"
+                                 IsEnabled="{Binding IsEditable}"
+                                 Text="{Binding SourceAxis, UpdateSourceTrigger=PropertyChanged}"/>
+                        <TextBox Grid.Column="2"
+                                 material:HintAssist.Hint="Rate (Hz)"
+                                 Style="{StaticResource MaterialDesignFloatingHintTextBox}"
+                                 IsEnabled="{Binding IsEditable}"
+                                 Text="{Binding UpdateRateHz, UpdateSourceTrigger=PropertyChanged}"/>
+                        <ComboBox Grid.Column="4"
+                                  material:HintAssist.Hint="Mode"
+                                  Style="{StaticResource MaterialDesignFloatingHintComboBox}"
+                                  IsEnabled="{Binding IsEditable}"
+                                  ItemsSource="{Binding Modes}"
+                                  SelectedItem="{Binding Mode}"/>
+                        <TextBox Grid.Column="6"
+                                 material:HintAssist.Hint="PIN"
+                                 Style="{StaticResource MaterialDesignFloatingHintTextBox}"
+                                 IsEnabled="{Binding IsEditable}"
+                                 Text="{Binding PairingPin, UpdateSourceTrigger=PropertyChanged}"/>
+                    </Grid>
+
+                    <TextBlock FontSize="10" Opacity="0.5" Margin="0,8,0,0" TextWrapping="Wrap"
+                               Text="{Binding CatalogInfo, StringFormat=catalog: {0}}"
+                               Visibility="{Binding CatalogInfo, Converter={StaticResource NullableToVisibilityConverter}}"/>
+
+                    <TextBlock TextWrapping="Wrap" Opacity="0.5" FontSize="10" Margin="0,6,0,0"
+                               Text="Samples mode streams the axis on channel 0x0084 (motion-input); Segments mode sends one timed command per funscript action on 0x0085 (motion-segment). The machine must be homed before motion runs, and it clamps everything — every value shown above is the device's own, post-clamp."/>
+                </StackPanel>
+            </Expander>
+
         </StackPanel>
     </ScrollViewer>
 </plugin:PluginViewBase>

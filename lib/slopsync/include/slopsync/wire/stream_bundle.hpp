@@ -20,11 +20,21 @@
 //   - span, i.e. t_off[n-1], <= limits::bundle_max_span_ms * 1000 µs
 //     (note the unit crossing: the registry limit is in MILLISECONDS,
 //     t_off is in MICROSECONDS — every comparison below multiplies by 1000)
-//   - t_off is STRICTLY increasing and t_off[0] == 0. The spec's prose only
-//     says "monotonic"; we take the stronger strict reading because t_off
-//     is this sample's unique position in a time series — two samples
-//     claiming the identical timestamp is a producer bug, not a valid
-//     bundle, and catching it here is free.
+//   - t_off is STRICTLY increasing and t_off[0] == 0 (RFC-022.4: the spec's
+//     prose said only "monotonic"; the registry now says strictly increasing
+//     with a zero first element). We take the strict reading because t_off is
+//     this sample's unique position in a time series — two samples claiming
+//     the identical timestamp is a producer bug, not a valid bundle.
+//     ENFORCED BY BOTH SIDES, and deliberately so (RFC-028's symmetric
+//     obligation): BundleWriter refuses to emit a violating bundle, and
+//     BundleView::parse REFUSES TO CONSTRUCT ON ONE. The parse-side walk was
+//     missing until the M4a safety pass — the hub re-derived both at ingress,
+//     so the DEVICE was covered, but a CLIENT parsing an h2c bundle from a
+//     hostile hub had no protection at all, and "every caller remembers to
+//     re-walk t_off" is exactly the obligation a total parser exists to
+//     remove. It is a walk over at most 32 u16s; making it the parser's job
+//     costs nothing measurable and makes BundleView self-sufficient in both
+//     directions.
 //   - the bundle never fragments (§5.6): whatever doesn't fit `out`/`in` is
 //     rejected outright, never partially written or partially parsed.
 //
@@ -146,10 +156,16 @@ public:
 
     // Validates and parses `in` as a bundle whose samples are `sampleSize`
     // bytes each. Rejects (never crashes) on: a header that doesn't fit, an
-    // n over the cap, a span over the cap, or a total size that doesn't fit
-    // `in` — the last case covers a bundle deliberately or accidentally
+    // n over the cap, a t_off array that isn't strictly increasing or whose
+    // first element isn't 0, a span over the cap, or a total size that doesn't
+    // fit `in` — the last case covers a bundle deliberately or accidentally
     // truncated in flight (§9.2: STREAM data is loss-tolerant BECAUSE bad
     // bundles are detected and dropped, not acted on half-parsed).
+    //
+    // The t_off walk is a PARSER obligation, not a caller one (RFC-028
+    // symmetric totality — see this file's header): a client decoding an h2c
+    // bundle from a hostile hub gets the same structural guarantees the hub
+    // gets from a client, without having to know it should re-derive anything.
     static Result<BundleView, DecodeError> parse(std::span<const std::byte> in, size_t sampleSize) {
         using Ret = Result<BundleView, DecodeError>;
         if (in.size() < kStreamBundleHeaderBytes) return Ret::err(DecodeError::Truncated);
@@ -164,9 +180,20 @@ public:
         const size_t tOffEnd = kStreamBundleHeaderBytes + kStreamBundleTOffBytes * size_t(n);
         if (in.size() < tOffEnd) return Ret::err(DecodeError::Truncated);
 
+        // ONE walk over the t_off array does all three jobs: t_off[0] == 0,
+        // strictly increasing, and the span cap on the LAST element (which is
+        // the largest precisely BECAUSE the array is strictly increasing —
+        // before this walk existed, "last" was merely "final", which is why
+        // bounding it alone was never the same guarantee).
         uint16_t lastTOff = 0;
         for (uint8_t i = 0; i < n; ++i) {
-            lastTOff = getU16(in.subspan(kStreamBundleHeaderBytes + kStreamBundleTOffBytes * size_t(i), 2));
+            const uint16_t tOff = getU16(in.subspan(kStreamBundleHeaderBytes + kStreamBundleTOffBytes * size_t(i), 2));
+            if (i == 0) {
+                if (tOff != 0) return Ret::err(DecodeError::Malformed);
+            } else if (tOff <= lastTOff) {
+                return Ret::err(DecodeError::Malformed);  // not strictly increasing
+            }
+            lastTOff = tOff;
         }
         if (n > 0 && uint32_t(lastTOff) > limits::bundle_max_span_ms * 1000u) {
             return Ret::err(DecodeError::Malformed);

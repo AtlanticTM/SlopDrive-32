@@ -4,7 +4,11 @@
 #include <ESPmDNS.h>
 #include <LittleFS.h>
 #include <Preferences.h>
-#include <WebServer.h>
+// The HTTP backend A/B seam. Pulls in either the sync Arduino WebServer (+
+// IdleGuardWebServer) or the PsychicHttp adapter, depending on
+// -DUSE_PSYCHIC_HTTP. Every handler below is written against the surface both
+// sides present, so nothing past init()/update() knows which one is live.
+#include "ui/SlopHttpServer.h"
 #include <WiFi.h>
 #include <esp_timer.h>
 
@@ -22,12 +26,10 @@
 #include "SlopGlowBoard.h"
 #include "PatternEngine.h"
 #include "MotorDriver.h"
-#include "UiSocket.h"
 
 #include "TransportManager.h"
 #include "TCodeParser.h"
 #include "SerialTransport.h"
-#include "WebSocketTransport.h"
 #include "BleTransport.h"
 #include "MotionArbiter.h"
 #include "config_api.h"
@@ -65,7 +67,6 @@ WebUI::WebUI(SystemState&        state,
              PatternEngine&      patternEngine,
              TransportManager&   transportMgr,
              SerialTransport&    serialTransport,
-             WebSocketTransport& wsTransport,
              BleTransport&       bleTransport)
     : _state(state)
     , _motor(motor)
@@ -74,10 +75,14 @@ WebUI::WebUI(SystemState&        state,
     , _transportMgr(transportMgr)
 
     , _serialTransport(serialTransport)
-    , _wsTransport(wsTransport)
     , _bleTransport(bleTransport)
 {
-    _httpServer = new WebServer(HTTP_PORT);
+    // The build-flag-selected HTTP backend (include/ui/SlopHttpServer.h):
+    //   default            -> IdleGuardWebServer (sync WebServer + the
+    //                         speculative-socket idle guard that kills the
+    //                         measured 5 s HTTP_MAX_DATA_WAIT captures)
+    //   -DUSE_PSYCHIC_HTTP -> PsychicHttp / esp_http_server adapter
+    _httpServer = new SlopHttpServer(HTTP_PORT);
 }
 
 WebUI::~WebUI() {
@@ -91,7 +96,8 @@ WebUI::~WebUI() {
 void WebUI::init() {
     // WebServer only exposes request headers that were explicitly collected —
     // without this, header("If-None-Match") is always empty and the ETag
-    // revalidation in handleRoot() silently never fires.
+    // revalidation in handleRoot() silently never fires. (Under PsychicHttp
+    // this is a no-op: esp_http_server can read any header on demand.)
     static const char* kCollectHeaders[] = { "If-None-Match" };
     _httpServer->collectHeaders(kCollectHeaders, 1);
 
@@ -99,30 +105,99 @@ void WebUI::init() {
     _httpServer->on("/api/status",    HTTP_GET,  [this]() { handleApiStatus(); });
     _httpServer->on("/api/capabilities", HTTP_GET, [this]() { handleApiCapabilities(); });
     _httpServer->on("/api/settings",  HTTP_GET,  [this]() { handleApiSettings(); });
-    _httpServer->on("/api/settings",  HTTP_POST, [this]() { slopglowActivity(); handleApiSettings(); });
-    _httpServer->on("/api/move",      HTTP_POST, [this]() { slopglowActivity(); handleApiMove(); });
-    _httpServer->on("/api/home",      HTTP_POST, [this]() { slopglowActivity(); handleApiHome(); });
-    _httpServer->on("/api/stop",      HTTP_POST, [this]() { slopglowActivity(); handleApiStop(); });
-    _httpServer->on("/api/pause",     HTTP_POST, [this]() { slopglowActivity(); handleApiPause(); });
-    _httpServer->on("/api/halt",      HTTP_POST, [this]() { slopglowActivity(); handleApiHalt(); });
-    _httpServer->on("/api/override",  HTTP_POST, [this]() { slopglowActivity(); handleApiOverride(); });
+    _httpServer->on("/api/settings", HTTP_POST, [this]() {
+        _httpServer->send(410, "application/json",
+                          "{\"ok\":false,\"error\":\"retired\",\"use\":\"0x0101 config-set\"}");
+    });
+    // ---- HTTP CONTROL IS RETIRED (M5c) ---------------------------------
+    // "No controls outside SlopSync, HTTP is read only." Every route below
+    // has an exact SlopSync twin and now answers 410 with a pointer to it.
+    // GET siblings survive as read-only diagnostics; OTA and /uitoken are
+    // permanent sidebands (they flash and they authorize, they do not move
+    // the machine).
+    _httpServer->on("/api/move", HTTP_POST, [this]() {
+        _httpServer->send(410, "application/json",
+                          "{\"ok\":false,\"error\":\"retired\",\"use\":\"0x0100 move\"}");
+    });
+    _httpServer->on("/api/home", HTTP_POST, [this]() {
+        _httpServer->send(410, "application/json",
+                          "{\"ok\":false,\"error\":\"retired\",\"use\":\"0x0103 home\"}");
+    });
+    _httpServer->on("/api/stop", HTTP_POST, [this]() {
+        _httpServer->send(410, "application/json",
+                          "{\"ok\":false,\"error\":\"retired\",\"use\":\"0x0005 safety op=stop\"}");
+    });
+    _httpServer->on("/api/pause", HTTP_POST, [this]() {
+        _httpServer->send(410, "application/json",
+                          "{\"ok\":false,\"error\":\"retired\",\"use\":\"0x0005 safety op=pause/resume\"}");
+    });
+    _httpServer->on("/api/halt", HTTP_POST, [this]() {
+        _httpServer->send(410, "application/json",
+                          "{\"ok\":false,\"error\":\"retired\",\"use\":\"0x0005 safety op=hold\"}");
+    });
+    _httpServer->on("/api/override", HTTP_POST, [this]() {
+        _httpServer->send(410, "application/json",
+                          "{\"ok\":false,\"error\":\"retired\",\"use\":\"0x0005 safety op=override_on/off\"}");
+    });
     _httpServer->on("/api/servo",     HTTP_GET,  [this]() { handleApiServo(); });
-    _httpServer->on("/api/servo",     HTTP_POST, [this]() { slopglowActivity(); handleApiServo(); });
-    _httpServer->on("/api/clearfault",HTTP_POST, [this]() { slopglowActivity(); handleApiClearFault(); });
+    // POST /api/servo is RETIRED (M5c) — THE LAST HTTP WRITER. "No controls
+    // outside SlopSync, HTTP is read only."
+    //
+    // Retired rather than ported, deliberately: unlike the other writers this
+    // one took an arbitrary register->value map, which is not a fixed INTENT
+    // schema, and the operator does not currently use servo tuning ("it was
+    // always broken"). Designing its protocol shape under time pressure for a
+    // feature with no user is how you get a bad shape you then live with.
+    // RFC-031 records the intended split for when it returns: the `live`
+    // whitelist becomes annotated settings, `program` becomes an RFC-021 blob,
+    // and `scan` is already 0x0106 machine-admin op 3.
+    //
+    // GET /api/servo survives as a read-only diagnostic, per the same rule that
+    // keeps /api/log and /api/capabilities.
+    _httpServer->on("/api/servo", HTTP_POST, [this]() {
+        _httpServer->send(410, "application/json",
+                          "{\"ok\":false,\"error\":\"retired\","
+                          "\"see\":\"RFC-031\","
+                          "\"use\":\"slopsync 0x0106 machine-admin op=servo_scan (scan only)\"}");
+    });
+    // POST /api/clearfault is RETIRED (M5c) — it is now machine-admin op 1 on
+    // SlopSync 0x0106. No controls outside SlopSync.
+    _httpServer->on("/api/clearfault", HTTP_POST, [this]() {
+        _httpServer->send(410, "application/json",
+                          "{\"ok\":false,\"error\":\"retired\","
+                          "\"use\":\"slopsync 0x0106 machine-admin op=clear_fault\"}");
+    });
     _httpServer->on("/api/pattern",   HTTP_GET,  [this]() { handleApiPattern(); });
-    _httpServer->on("/api/pattern",   HTTP_POST, [this]() { slopglowActivity(); handleApiPattern(); });
+    _httpServer->on("/api/pattern", HTTP_POST, [this]() {
+        _httpServer->send(410, "application/json",
+                          "{\"ok\":false,\"error\":\"retired\",\"use\":\"0x0102 pattern-cmd\"}");
+    });
     _httpServer->on("/api/pattern/presets", HTTP_GET,  [this]() { handleApiPatternPresets(); });
     _httpServer->on("/api/pattern/presets", HTTP_POST, [this]() { slopglowActivity(); handleApiPatternPresets(); });
     _httpServer->on("/api/log",       HTTP_GET,  [this]() { handleApiLog(); });
     _httpServer->on("/api/mode",      HTTP_GET,  [this]() { handleApiMode(); });
-    _httpServer->on("/api/mode",      HTTP_POST, [this]() { handleApiMode(); });
-    _httpServer->on("/api/clients",   HTTP_GET,  [this]() { handleApiClients(); });
-    _httpServer->on("/api/clients",   HTTP_POST, [this]() { slopglowActivity(); handleApiClients(); });
+    _httpServer->on("/api/mode", HTTP_POST, [this]() {
+        _httpServer->send(410, "application/json",
+                          "{\"ok\":false,\"error\":\"retired\",\"use\":\"retired with the transport selector (M5c)\"}");
+    });
     _httpServer->on("/api/slopmotion", HTTP_GET,  [this]() { handleApiSlopMotion(); });
-    _httpServer->on("/api/slopmotion", HTTP_POST, [this]() { slopglowActivity(); handleApiSlopMotion(); });
+    // POST /api/slopmotion is RETIRED (M5c). "No controls outside SlopSync,
+    // HTTP is read only" — the 20 live-tune knobs are channels 0x008B/0x008C/
+    // 0x008D written through 0x0105 slopmotion-set, which ALSO persists them to
+    // NVS (this endpoint never did). GET stays: a read-only view of the tuning
+    // state is a diagnostic, and one that keeps working when the SlopSync plane
+    // is the thing being debugged.
+    _httpServer->on("/api/slopmotion", HTTP_POST, [this]() {
+        _httpServer->send(410, "application/json",
+                          "{\"ok\":false,\"error\":\"retired\","
+                          "\"use\":\"slopsync 0x0105 slopmotion-set\"}");
+    });
     _httpServer->on("/api/machine",        HTTP_GET,  [this]() { handleApiMachine(); });
     _httpServer->on("/api/machine/commit", HTTP_POST, [this]() { slopglowActivity(); handleApiMachineCommit(); });
-    _httpServer->on("/api/machine/homeoverride", HTTP_POST, [this]() { slopglowActivity(); handleApiHomeOverride(); });
+    _httpServer->on("/api/machine/homeoverride", HTTP_POST, [this]() {
+        _httpServer->send(410, "application/json",
+                          "{\"ok\":false,\"error\":\"retired\",\"use\":\"0x0103 home op=2 force_home / op=3 clear_override\"}");
+    });
 
     _httpServer->begin();
     SLOGI("ui", "HTTP server on port %d", HTTP_PORT);
@@ -135,7 +210,18 @@ void WebUI::init() {
 // ============================================================================
 
 void WebUI::update() {
+    // Sync backend: this IS the request pump.
+    // Psychic backend: esp_http_server serves on its own task, so this is only
+    // the deferred-start retry (Psychic refuses to start with no IP, which the
+    // sync WebServer never did). Either way it must keep being called.
     _httpServer->handleClient();
+#if !defined(USE_PSYCHIC_HTTP)
+    // Drop speculative browser sockets that hold the single serve slot while
+    // sending nothing — otherwise each one deafens HTTP for 5 s (measured).
+    // Structurally unnecessary under Psychic: a silent socket simply never
+    // becomes readable in select(), so it costs the server nothing.
+    _httpServer->dropIdleCapture();
+#endif
 
     // Deferred reboot for the machine-backend commit: the HTTP handler arms
     // this and returns immediately so its 200 response actually flushes to
@@ -153,7 +239,17 @@ void WebUI::telemetryTimerCb(void* arg) {
     //   asked (raw)    = TCode parser + mapper demand  → dotted asked
     // When the planner derives a slower profile (gentle command), the gap
     // between "told" and "took" shows exactly how much the planner backed off.
-    self->captureTelemetry(self->_motor.getPosition(),
+    //
+    // ONE read of FAS, TWO consumers: the graph AND the shared atomic. Before
+    // fw 2.1.48 this callback only fed the graph, so actual_position_mm had a
+    // single writer (applyMove) and sat frozen at the last manual endpoint —
+    // which meant SlopSync's 0x0080 `pos` field lied through every stream,
+    // pattern and homing cycle, and main.cpp's stream rising-edge re-seeded
+    // SlopMotion from a stale position. This sampler is the writer now.
+    // Do NOT call getPosition() twice — one sample, both uses. :3
+    const float actual_mm = self->_motor.getPosition();
+    self->_state.actual_position_mm.store(actual_mm, std::memory_order_relaxed);
+    self->captureTelemetry(actual_mm,
                            self->_state.commanded_target_mm,
                            self->_state.commanded_raw_mm);
 }
@@ -286,7 +382,13 @@ void WebUI::handleApiStatus() {
 
     doc["homed"] = _state.homed;
     doc["homing"] = _state.homing_in_progress;
-    doc["buttplug_connected"] = _wsTransport.isServerConnected();
+    // M5c: the Intiface/TCode :55555 WebSocket is DELETED — SlopSync is the
+    // only input and output now, and Intiface is planned to speak SlopSync
+    // natively rather than us speaking its protocol. Reported as a constant
+    // false rather than dropped from the payload, so an older cached page reads
+    // "not connected" instead of "undefined". The key goes when the HTTP
+    // control surface does.
+    doc["buttplug_connected"] = false;
     doc["position"] = _motor.getPosition();
 
     doc["has_current_sensor"] = _motor.hasCurrentSensor();
@@ -403,6 +505,12 @@ void WebUI::handleApiCapabilities() {
     accel["normal"] = (uint32_t)NORMAL_MAX_ACCEL_MM_S2;
     accel["expert"] = (uint32_t)EXPERT_MAX_ACCEL_MM_S2;
 
+    // Jerk joined the limit family in fw 2.1.47 — advertised the same way so the
+    // UI derives its slider max from the API instead of hardcoding a literal. :3
+    JsonObject jerk = doc["jerk_ceiling_mm_s3"].to<JsonObject>();
+    jerk["normal"] = (uint32_t)NORMAL_MAX_JERK_MM_S3;
+    jerk["expert"] = (uint32_t)EXPERT_MAX_JERK_MM_S3;
+
     JsonObject feat = doc["features"].to<JsonObject>();
     feat["has_current_sensor"] = _motor.hasCurrentSensor();
     feat["has_power_monitor"]  = _motor.hasPowerMonitor();
@@ -479,6 +587,7 @@ void WebUI::handleApiSettings() {
         doc["user_max_accel"] = (uint32_t)_state.config.user_max_accel_mm_s2;
         doc["input_max_speed"] = (uint32_t)_state.config.input_max_speed_mm_s;
         doc["input_max_accel"] = (uint32_t)_state.config.input_max_accel_mm_s2;
+        doc["input_max_jerk"]  = (uint32_t)_state.config.input_max_jerk_mm_s3;
         doc["blend_mode"] = _motor.getBlendMode();
         doc["auto_duration"] = _state.auto_duration;
         doc["intiface_compat"] = _state.intiface_compat;
@@ -543,13 +652,23 @@ bool WebUI::applySettings(JsonDocument& doc, JsonDocument& resp) {
         _state.config.user_max_accel_mm_s2 = ua;
         if (_arbiter) { _arbiter->setUserSpeedLimit(us); _arbiter->setUserAccelLimit(ua); }
     }
-    if (doc["input_max_speed"].is<uint32_t>() || doc["input_max_accel"].is<uint32_t>()) {
+    // INPUT set — speed/accel go to the arbiter AND (via config) to SlopMotion's
+    // derived ceilings; jerk is planner-only (the arbiter has no jerk concept),
+    // so it just lands in config and main.cpp's per-tick push picks it up within
+    // ~1 ms. Clamped to the same HARD firmware ceiling its siblings use — the
+    // NORMAL/EXPERT split is a UI guardrail advertised via /api/capabilities,
+    // not something the firmware enforces here. :3
+    if (doc["input_max_speed"].is<uint32_t>() || doc["input_max_accel"].is<uint32_t>() ||
+        doc["input_max_jerk"].is<uint32_t>()) {
         float is = doc["input_max_speed"] | _state.config.input_max_speed_mm_s;
         float ia = doc["input_max_accel"] | _state.config.input_max_accel_mm_s2;
+        float ij = doc["input_max_jerk"]  | _state.config.input_max_jerk_mm_s3;
         if (is < 1.0f) is = 1.0f; if (is > MAX_SPEED_MM_S) is = MAX_SPEED_MM_S;
         if (ia < 10.0f) ia = 10.0f; if (ia > MAX_ACCEL_MM_S2) ia = MAX_ACCEL_MM_S2;
+        if (ij < 1000.0f) ij = 1000.0f; if (ij > MAX_JERK_MM_S3) ij = MAX_JERK_MM_S3;
         _state.config.input_max_speed_mm_s = is;
         _state.config.input_max_accel_mm_s2 = ia;
+        _state.config.input_max_jerk_mm_s3 = ij;
         if (_arbiter) { _arbiter->setInputSpeedLimit(is); _arbiter->setInputAccelLimit(ia); }
     }
 
@@ -632,6 +751,7 @@ bool WebUI::applySettings(JsonDocument& doc, JsonDocument& resp) {
     resp["user_max_accel"] = (uint32_t)_state.config.user_max_accel_mm_s2;
     resp["input_max_speed"] = (uint32_t)_state.config.input_max_speed_mm_s;
     resp["input_max_accel"] = (uint32_t)_state.config.input_max_accel_mm_s2;
+    resp["input_max_jerk"]  = (uint32_t)_state.config.input_max_jerk_mm_s3;
     resp["blend_mode"] = _motor.getBlendMode();
     resp["auto_duration"] = _state.auto_duration;
     resp["intiface_compat"] = _state.intiface_compat;
@@ -723,10 +843,15 @@ bool WebUI::applyMove(JsonDocument& doc, JsonDocument& resp) {
         return false;
     }
 
-    // Seed the "where the shaft is" atomic the stream rising-edge reads
-    // (main.cpp) so a stream started right after a manual move begins from the
-    // manual endpoint, not a stale sample. The live posdot/readout reads
-    // _motor.getPosition() directly, so this is only the stream-seed hint. :3
+    // Immediate seed of the "where the shaft is" atomic that the stream
+    // rising-edge reads (main.cpp). The 240 Hz telemetry sampler maintains this
+    // atomic continuously from _motor.getPosition(), so this store is only a
+    // head start: it publishes the manual ENDPOINT the instant the intent is
+    // submitted, before the shaft has actually travelled there. A stream started
+    // in the same breath as a manual move therefore plans toward the endpoint
+    // rather than the mid-flight sample. The sampler overwrites it within one
+    // 4.2 ms tick either way. The live posdot/readout reads _motor.getPosition()
+    // directly. :3
     _state.actual_position_mm.store(pos, std::memory_order_relaxed);
     _state.commanded_target_mm = pos;
 
@@ -804,64 +929,8 @@ void WebUI::handleApiOverride() {
 }
 
 // ============================================================================
-// handleApiClients (HTTP GET list / POST kick) — Health-tab client admin
 // ============================================================================
 //
-// GET  /api/clients            → {clients:[{num, ip, idle_ms, streaming,
-//                                            most_recent}], max, active_window_ms}
-// POST /api/clients  {kick:N}   → force-disconnect client slot N (reclaim slot).
-//
-// "streaming" = passes the activity gate right now; "most_recent" = the single
-// always-live last-active client. A muted (streaming:false) tab is the
-// forgotten one costing you nothing — kick it only if you want its slot back.
-
-void WebUI::handleApiClients() {
-    if (!_uiSocket) {
-        _httpServer->send(503, "application/json", "{\"error\":\"no UiSocket\"}");
-        return;
-    }
-
-    // POST → kick
-    if (_httpServer->method() == HTTP_POST) {
-        JsonDocument doc;
-        deserializeJson(doc, _httpServer->arg("plain"));
-        if (!doc["kick"].is<int>()) {
-            _httpServer->send(400, "application/json", "{\"error\":\"kick (client num) required\"}");
-            return;
-        }
-        int num = doc["kick"].as<int>();
-        bool ok = (num >= 0 && num < UiSocket::MAX_CLIENTS)
-                    ? _uiSocket->kickClient((uint8_t)num) : false;
-        String json; JsonDocument r; r["ok"] = ok; r["kicked"] = num;
-        serializeJson(r, json);
-        _httpServer->send(ok ? 200 : 404, "application/json", json);
-        return;
-    }
-
-    // GET → list
-    UiSocket::ClientInfo info[UiSocket::MAX_CLIENTS];
-    uint8_t n = _uiSocket->enumerateClients(info, UiSocket::MAX_CLIENTS);
-
-    JsonDocument r;
-    r["max"] = UiSocket::MAX_CLIENTS;
-    r["active_window_ms"] = UiSocket::CLIENT_ACTIVE_WINDOW_MS;
-    JsonArray arr = r["clients"].to<JsonArray>();
-    for (uint8_t i = 0; i < n; i++) {
-        JsonObject c = arr.add<JsonObject>();
-        c["num"]         = info[i].num;
-        char ips[16];
-        snprintf(ips, sizeof(ips), "%u.%u.%u.%u",
-                 info[i].ip[0], info[i].ip[1], info[i].ip[2], info[i].ip[3]);
-        c["ip"]          = ips;
-        c["idle_ms"]     = info[i].idle_ms;
-        c["streaming"]   = info[i].streaming;
-        c["most_recent"] = info[i].most_recent;
-    }
-
-    String json;
-    serializeJson(r, json);
-    _httpServer->send(200, "application/json", json);
-}
 
 // ============================================================================
 // applyDriverConfig — shared driver-config mutation (used by the WS op)
@@ -1641,6 +1710,29 @@ void WebUI::handleApiHomeOverride() {
 // Nothing persists: a reboot restores compile-time defaults, which is the
 // desired behavior for a tuning session (no way to brick the feel in NVS).
 void WebUI::handleApiSlopMotion() {
+    // Canonical wire names for slopmotion::InfeasiblePolicy, indexed by the
+    // stored ordinal. ONE table for the POST log line and the GET echo so the
+    // two can never disagree about what is in force. Names match the sim's
+    // /api/slopmotion echo exactly, so an operator can diff the two responses.
+    //
+    // EVERY index into this table is guarded with a real `<` bounds check, and
+    // NEVER with `%` or `&`. A modulo does not bound an out-of-range ordinal,
+    // it ALIASES it onto a valid name — which is how `plan % 3` once reported
+    // PlanKind::Cubic (=3) as "no active plan" mid-stroke. An out-of-range
+    // value must LOOK wrong, so it falls back to index 0 and the operator sees
+    // a policy that plainly is not the one they set.
+    static const char* kInfeasPolicyNames[] = {
+        "stretch", "scale", "reshape", "prio-amplitude", "prio-smooth"
+    };
+    static constexpr uint8_t kInfeasPolicyCount =
+        uint8_t(sizeof(kInfeasPolicyNames) / sizeof(kInfeasPolicyNames[0]));
+    // Canonical wire names for slopmotion::CurvePolicy — same table-and-bound
+    // discipline, same sim parity. "follow" is FollowClient: honour the
+    // sender's declared family, which with no wire signalling yet resolves to
+    // C2, i.e. pre-0.8.0 behaviour byte for byte.
+    static const char* kCurvePolicyNames[] = { "follow", "c1", "c2" };
+    static constexpr uint8_t kCurvePolicyCount =
+        uint8_t(sizeof(kCurvePolicyNames) / sizeof(kCurvePolicyNames[0]));
     if (_httpServer->method() == HTTP_POST) {
         JsonDocument doc;
         if (deserializeJson(doc, _httpServer->arg("plain"))) {
@@ -1650,8 +1742,15 @@ void WebUI::handleApiSlopMotion() {
         auto clampf = [](float v, float lo, float hi) {
             return v < lo ? lo : (v > hi ? hi : v);
         };
-        if (doc["jmax"].is<float>())
-            _state.sm_tune_jmax = clampf(doc["jmax"], 10.0f, 20000.0f);
+        // jmax is a mm-domain PERSISTED limit as of fw 2.1.47 (settings key
+        // input_max_jerk) — what lives here is only the normalized bench
+        // OVERRIDE, exactly like vmax_ovr/amax_ovr. Legacy key "jmax" is still
+        // accepted as an alias so bench scripts written against the rough-in
+        // keep working; both mean "0 = derive from the mm limit / window span".
+        if (doc["jmax_ovr"].is<float>())          // 0 = derive from mm limits
+            _state.sm_tune_jmax_ovr = clampf(doc["jmax_ovr"], 0.0f, 2000000.0f);
+        else if (doc["jmax"].is<float>())         // deprecated alias
+            _state.sm_tune_jmax_ovr = clampf(doc["jmax"], 0.0f, 2000000.0f);
         if (doc["vmax_ovr"].is<float>())          // 0 = derive from mm limits
             _state.sm_tune_vmax_ovr = clampf(doc["vmax_ovr"], 0.0f, 20.0f);
         if (doc["amax_ovr"].is<float>())          // 0 = derive from mm limits
@@ -1667,23 +1766,147 @@ void WebUI::handleApiSlopMotion() {
         if (doc["chase_dense_ms"].is<float>())
             _state.sm_tune_dense_us =
                 (uint32_t)(clampf(doc["chase_dense_ms"], 10.0f, 500.0f) * 1000.0f);
+        // Infeasible-segment policy — what gives when a commanded stroke cannot
+        // physically happen in its commanded duration:
+        //   "stretch" (0) range-first:   keep the stroke, overrun the deadline
+        //   "scale"   (1) timing-first + shape-first: keep the deadline, shrink
+        //                 the stroke until the quintic is legal
+        //   "reshape" (2) timing-first + machine-first (ENGINE DEFAULT): keep
+        //                 the deadline and as much range as physics allows,
+        //                 giving up the SPLINE SHAPE instead of the range
+        //   "prio-amplitude" (3) budgeted: spend SMOOTHNESS first (flatten the
+        //                 span's end handle toward its chord, up to
+        //                 smooth_budget), then start spending amplitude
+        //   "prio-smooth"    (4) budgeted: spend AMPLITUDE first (up to
+        //                 amplitude_budget), then start spending smoothness
+        // The two budgeted policies stay inside the QUINTIC family the whole
+        // way down, so the sender's curve degrades CONTINUOUSLY instead of
+        // snapping to a Ruckig chord the moment the legality scan fails — which
+        // is the "static interpolation" artifact reshape produces on hardware.
+        // Both are identical to no policy at all until a segment is infeasible.
+        // Accepts either canonical string (case-insensitive) or the ordinal;
+        // anything else leaves the applied value alone, and the echo below
+        // tells the truth about what is in force (ground-truth doctrine).
+        if (doc["infeasible_policy"].is<const char*>()) {
+            const char* p = doc["infeasible_policy"];
+            if      (strcasecmp(p, "stretch") == 0) _state.sm_tune_infeas_policy = 0;
+            else if (strcasecmp(p, "scale")   == 0) _state.sm_tune_infeas_policy = 1;
+            else if (strcasecmp(p, "reshape") == 0) _state.sm_tune_infeas_policy = 2;
+            else if (strcasecmp(p, "prio-amplitude") == 0) _state.sm_tune_infeas_policy = 3;
+            else if (strcasecmp(p, "prio-smooth")    == 0) _state.sm_tune_infeas_policy = 4;
+        } else if (doc["infeasible_policy"].is<int>()) {
+            const int p = doc["infeasible_policy"].as<int>();
+            if (p >= 0 && p < (int)kInfeasPolicyCount)
+                _state.sm_tune_infeas_policy = (uint8_t)p;
+        }
+        // Curve family for waveform-segment reconstruction. A funscript
+        // rendered through Pchip/Makima IS a C1 cubic Hermite spline, and
+        // {target, duration, end_vel} on 0x0085 is a COMPLETE encoding of one —
+        // so "c1" reproduces the sender's own span exactly, where the quintic
+        // necessarily rounds off the acceleration step the script has at each
+        // knot. "follow" (engine default) honours a declared family; no wire
+        // signalling exists yet, so today it resolves to C2 — pre-0.8.0
+        // behaviour byte for byte. Strings only, mirroring the sim's
+        // /api/slopmotion vocabulary so the two responses diff directly.
+        if (doc["curve_policy"].is<const char*>()) {
+            const char* p = doc["curve_policy"];
+            if      (strcasecmp(p, "follow") == 0) _state.sm_tune_curve_policy = 0;
+            else if (strcasecmp(p, "c1")     == 0) _state.sm_tune_curve_policy = 1;
+            else if (strcasecmp(p, "c2")     == 0) _state.sm_tune_curve_policy = 2;
+        }
+        // Budgeted-policy spend limits. Fractions in [0, 1], clamped here so
+        // the GET echo is what Core 1 will actually push (the engine clamps
+        // them again — a config push is not a trusted input on either side).
+        if (doc["smooth_budget"].is<float>())
+            _state.sm_tune_smooth_budget = clampf(doc["smooth_budget"], 0.0f, 1.0f);
+        if (doc["amplitude_budget"].is<float>())
+            _state.sm_tune_amp_budget = clampf(doc["amplitude_budget"], 0.0f, 1.0f);
+        // Alpha-search bisection depth. One quintic build + one legality scan
+        // per step (no Ruckig call), clamped to the engine's own [1, 10].
+        if (doc["blend_steps"].is<int>())
+            _state.sm_tune_blend_steps =
+                (uint8_t)(int)clampf((float)doc["blend_steps"].as<int>(), 1.0f, 10.0f);
+        if (doc["infeasible_scale_margin"].is<float>())
+            _state.sm_tune_infeas_margin =
+                clampf(doc["infeasible_scale_margin"], 0.50f, 1.00f);
+        // RESHAPE bisection depth — a plan-time BUDGET dial (one Ruckig
+        // calculate() per step), clamped to the engine's own [0, 8].
+        if (doc["reshape_steps"].is<int>())
+            _state.sm_tune_reshape_steps =
+                (uint8_t)(int)clampf((float)doc["reshape_steps"].as<int>(), 0.0f, 8.0f);
+        // Settle grace. The ENGINE field is MICROSECONDS; this API talks
+        // MILLISECONDS because that is the unit an operator thinks in (same
+        // convention as chase_dense_ms above) — convert at the boundary, here,
+        // and nowhere else. Clamped [0, 200] ms: 0 = pre-0.4 brake-on-expiry,
+        // 200 ms is already far past any sane stream interval.
+        if (doc["settle_grace_ms"].is<float>())
+            _state.sm_tune_settle_grace_us =
+                (uint32_t)(clampf(doc["settle_grace_ms"], 0.0f, 200.0f) * 1000.0f);
+        if (doc["chase_aim_accel_extrap"].is<bool>())
+            _state.sm_tune_aim_extrap = doc["chase_aim_accel_extrap"].as<bool>();
+        // DC centring of a degraded band: keep the achieved stroke symmetric
+        // about the COMMANDED midpoint when the machine cannot deliver the full
+        // amplitude on the clock. ON is the engine default; OFF restores the
+        // slopmotion 0.4.0 contract. The gain is a feel dial (0..1, and NOT
+        // monotone — see SystemState) clamped to the engine's own range here so
+        // the GET echo below is the value Core 1 will actually push.
+        if (doc["wave_centering"].is<bool>())
+            _state.sm_tune_centring = doc["wave_centering"].as<bool>();
+        if (doc["wave_centering_gain"].is<float>())
+            _state.sm_tune_centring_gain =
+                clampf(doc["wave_centering_gain"], 0.0f, 1.0f);
+        // RFC-008 handoff sanity guard — the Fritsch-Carlson chord factor k
+        // used to bound an inbound segment's end velocity against the FOLLOWING
+        // segment's chord. 1.5 is the shape-preserving bound (engine default);
+        // 0 turns the guard OFF, which is the machine half of the M5d A/B
+        // against the MFP plugin's own limiter. Clamped to the engine's [0, 8]
+        // here too, so the GET echo is what Core 1 will actually push.
+        if (doc["handoff_k"].is<float>())
+            _state.sm_tune_handoff_k = clampf(doc["handoff_k"], 0.0f, 8.0f);
         if (doc["reset_stats"].as<bool>()) {
             _state.sm_plan_us_max  = 0;
             _state.sm_plan_us_avg  = 0.0f;
             _state.sm_anomalies    = 0;
+            // The per-kind breakdown resets WITH the total — a bench session
+            // that zeroes one and not the other would publish a histogram that
+            // sums to more than its own total.
+            for (uint8_t k = 0; k < SystemState::SM_ANOM_KINDS; ++k)
+                _state.sm_anom_kind[k] = 0;
+            // RFC-019: the reset must be OBSERVABLE to every subscriber of
+            // 0x0088 slopmotion-diag, not just to whoever POSTed. Bump last,
+            // after the counters are actually zero, so a snapshot that carries
+            // the new generation can never still carry the old totals.
+            _state.sm_reset_gen = (uint16_t)(_state.sm_reset_gen + 1);
         }
-        SLOGI("ui", "slopmotion tuning: jmax=%.0f gain=%.2f look=%.2f ff=%d aff=%d",
-              (double)_state.sm_tune_jmax, (double)_state.sm_tune_chase_gain,
+        SLOGI("ui", "slopmotion tuning: jmax_ovr=%.0f gain=%.2f look=%.2f ff=%d aff=%d "
+                    "policy=%s margin=%.2f steps=%u grace=%.0fms aimx=%d "
+                    "centring=%d@%.2f handoff_k=%.2f curve=%s "
+                    "smooth_bud=%.2f amp_bud=%.2f blend=%u",
+              (double)_state.sm_tune_jmax_ovr, (double)_state.sm_tune_chase_gain,
               (double)_state.sm_tune_chase_look,
-              (int)_state.sm_tune_chase_ff, (int)_state.sm_tune_chase_aff);
+              (int)_state.sm_tune_chase_ff, (int)_state.sm_tune_chase_aff,
+              kInfeasPolicyNames[_state.sm_tune_infeas_policy < kInfeasPolicyCount
+                                     ? _state.sm_tune_infeas_policy : 0],
+              (double)_state.sm_tune_infeas_margin,
+              (unsigned)_state.sm_tune_reshape_steps,
+              (double)_state.sm_tune_settle_grace_us / 1000.0,
+              (int)_state.sm_tune_aim_extrap,
+              (int)_state.sm_tune_centring,
+              (double)_state.sm_tune_centring_gain,
+              (double)_state.sm_tune_handoff_k,
+              kCurvePolicyNames[_state.sm_tune_curve_policy < kCurvePolicyCount
+                                    ? _state.sm_tune_curve_policy : 0],
+              (double)_state.sm_tune_smooth_budget,
+              (double)_state.sm_tune_amp_budget,
+              (unsigned)_state.sm_tune_blend_steps);
     }
 
     // GET and POST both answer with the full applied state.
     static const char* kModeNames[] = { "idle", "waveform", "chase", "settle" };
-    static const char* kKindNames[] = { "none", "quintic", "ruckig" };
+    static const char* kKindNames[] = { "none", "quintic", "ruckig", "cubic" };
     JsonDocument resp;
     JsonObject tuning = resp["tuning"].to<JsonObject>();
-    tuning["jmax"]            = _state.sm_tune_jmax;
+    tuning["jmax_ovr"]        = _state.sm_tune_jmax_ovr;
     tuning["vmax_ovr"]        = _state.sm_tune_vmax_ovr;
     tuning["amax_ovr"]        = _state.sm_tune_amax_ovr;
     tuning["chase_ff"]        = (bool)_state.sm_tune_chase_ff;
@@ -1691,20 +1914,69 @@ void WebUI::handleApiSlopMotion() {
     tuning["chase_gain"]      = _state.sm_tune_chase_gain;
     tuning["chase_lookahead"] = _state.sm_tune_chase_look;
     tuning["chase_dense_ms"]  = _state.sm_tune_dense_us / 1000.0f;
+    // Canonical string echo — the wire name, never the raw enum ordinal.
+    // Bounded with `<`, never `%`: aliasing an out-of-range ordinal onto a
+    // valid name would report a policy the machine is not running.
+    tuning["infeasible_policy"]       = kInfeasPolicyNames[
+        _state.sm_tune_infeas_policy < kInfeasPolicyCount
+            ? _state.sm_tune_infeas_policy : 0];
+    tuning["infeasible_scale_margin"] = _state.sm_tune_infeas_margin;
+    tuning["reshape_steps"]           = _state.sm_tune_reshape_steps;
+    // Curve family, same string vocabulary as the sim's echo ("follow"/"c1"/"c2").
+    tuning["curve_policy"]            = kCurvePolicyNames[
+        _state.sm_tune_curve_policy < kCurvePolicyCount
+            ? _state.sm_tune_curve_policy : 0];
+    // Budgeted-policy spend limits + the alpha-search depth. APPLIED values,
+    // post-clamp — inert unless infeasible_policy is one of the two budgeted
+    // ones, but always echoed so the operator can set them up before switching.
+    tuning["smooth_budget"]           = _state.sm_tune_smooth_budget;
+    tuning["amplitude_budget"]        = _state.sm_tune_amp_budget;
+    tuning["blend_steps"]             = _state.sm_tune_blend_steps;
+    // MILLISECONDS on the wire, microseconds in the engine (see the POST side).
+    tuning["settle_grace_ms"]         = _state.sm_tune_settle_grace_us / 1000.0f;
+    tuning["chase_aim_accel_extrap"]  = (bool)_state.sm_tune_aim_extrap;
+    // Centring: the APPLIED pair (post-clamp), i.e. exactly what the per-tick
+    // Core-1 push writes into slopmotion::Config.
+    tuning["wave_centering"]          = (bool)_state.sm_tune_centring;
+    tuning["wave_centering_gain"]     = _state.sm_tune_centring_gain;
+    // RFC-008 handoff guard strength (0 = off). APPLIED value, post-clamp.
+    tuning["handoff_k"]               = _state.sm_tune_handoff_k;
+    // "effective" is what Core 1 ACTUALLY pushed into the engine last tick —
+    // post-derivation, post-override, post-clamp. All three are read back from
+    // the sm_eff_* back-channel, never recomputed here, so this block cannot
+    // lie about the machine's real ceilings (ground-truth doctrine). :3
     JsonObject eff = resp["effective"].to<JsonObject>();
     eff["vmax"] = _state.sm_eff_vmax;   // normalized units/s (window span = 1)
     eff["amax"] = _state.sm_eff_amax;
-    eff["jmax"] = _state.sm_tune_jmax;
+    eff["jmax"] = _state.sm_eff_jmax;
+    // The mm-domain source of the derived jerk ceiling, so a bench session can
+    // see WHY eff.jmax is what it is without a second /api/settings round-trip.
+    eff["jmax_mm_s3"] = _state.config.input_max_jerk_mm_s3;
     JsonObject stats = resp["stats"].to<JsonObject>();
     stats["active"]       = (bool)_state.interp_active;
     stats["mode"]         = kModeNames[_state.sm_mode < 4 ? _state.sm_mode : 0];
-    stats["plan_kind"]    = kKindNames[_state.sm_plan_kind < 3 ? _state.sm_plan_kind : 0];
+    stats["plan_kind"]    = kKindNames[_state.sm_plan_kind < 4 ? _state.sm_plan_kind : 0];
     stats["plans"]        = _state.sm_plans;
     stats["failures"]     = _state.sm_failures;
     stats["anomalies"]    = _state.sm_anomalies;
+    // Per-kind breakdown. The scalar total above is unchanged (back-compat);
+    // this is what makes the anomaly feed actually diagnosable from outside —
+    // "anomalies: 42" could be 42 benign settles or 42 scaled strokes, and
+    // an investigation could not tell the two apart from the API alone.
+    // Keys come from kSmAnomalyNames (SystemState.h), the SAME table the
+    // Core-1 drain log formats with, so a key here always matches the log text
+    // an operator saw. "none" (index 0) is emitted too: a nonzero count there
+    // means the engine recorded a kind-0 event, which is itself a defect worth
+    // seeing rather than hiding.
+    JsonObject byKind = stats["anomalies_by_kind"].to<JsonObject>();
+    for (uint8_t k = 0; k < kSmAnomalyNameCount; ++k)
+        byKind[kSmAnomalyNames[k]] = _state.sm_anom_kind[k];
     stats["plan_us_last"] = _state.sm_plan_us_last;
     stats["plan_us_max"]  = _state.sm_plan_us_max;
     stats["plan_us_avg"]  = _state.sm_plan_us_avg;
+    // RFC-019 reset generation — the same value 0x0088 publishes, so the HTTP
+    // and SlopSync views of "have these counters been reset?" cannot disagree.
+    stats["reset_gen"]    = _state.sm_reset_gen;
     JsonObject sync = resp["sync"].to<JsonObject>();
     sync["bundles"]     = _state.sm_sync_bundles;
     sync["seg_bundles"] = _state.sm_sync_seg_bundles;  // subset on 0x0085 motion-segment (waveform)
@@ -1784,7 +2056,7 @@ bool WebUI::applyMode(JsonDocument& doc, JsonDocument& resp) {
 // ============================================================================
 // handleCommand — dispatch 0x10 CMD ops from WS control plane
 // ============================================================================
-// This is called by UiSocket's _handleEvent for each 0x10 frame. The caller
+// Called for each command frame by whichever plane received it. The caller
 // handles JSON parsing of the payload, then passes the parsed doc here.
 // Returns true on success; payload_out always gets "ok" set.
 

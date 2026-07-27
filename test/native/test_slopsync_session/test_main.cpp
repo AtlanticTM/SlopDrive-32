@@ -54,13 +54,18 @@ ClientIdentity makeIdentity(uint8_t idByte, bool withToken) {
     return id;
 }
 
-std::array<std::byte, 8> makeSafetyPayload(bool estop, uint8_t cause, uint32_t owner, uint16_t estopSeq) {
-    std::array<std::byte, 8> buf{};
+// 9 bytes as of RFC-025c: the appended `modes` byte (safety_mode_bits) closes
+// the snapshot. Mirrors Hub::buildSafetyPayload() exactly — if these two ever
+// disagree the hub is publishing a payload its own catalog cannot decode.
+std::array<std::byte, 9> makeSafetyPayload(bool estop, uint8_t cause, uint32_t owner, uint16_t estopSeq,
+                                           uint8_t modes = 0) {
+    std::array<std::byte, 9> buf{};
     std::span<std::byte> s(buf);
     putU8(s.subspan(0, 1), uint8_t(estop ? 1 : 0));
     putU8(s.subspan(1, 1), cause);
     putU32(s.subspan(2, 4), owner);
     putU16(s.subspan(6, 2), estopSeq);
+    putU8(s.subspan(8, 1), modes);
     return buf;
 }
 
@@ -84,7 +89,9 @@ bool bytesEqual(std::span<const std::byte> a, std::span<const std::byte> b) {
 // tests preset a client's cached etag to a KNOWN-matching or KNOWN-wrong
 // value without depending on Hub internals.
 std::array<std::byte, 8> miniCatalogEtag() {
-    static Catalog32 cat = conformance::miniCatalog();
+    static Catalog32 cat;  // built once; never copied (a Catalog32 is ~22 KB)
+    static const bool built = conformance::buildMiniCatalog(cat);
+    (void)built;
     std::array<std::byte, 8192> scratch{};
     return catalogEtag(cat, std::span<std::byte>(scratch));
 }
@@ -107,8 +114,8 @@ public:
     bool grantController = true;  // whether a token-bearing HELLO gets controller
 
     AccessLevel validateToken(std::span<const std::byte>, std::span<const std::byte>, bool hasToken) override {
-        if (hasToken && grantController) return AccessLevel::controller;
-        return AccessLevel::viewer;
+        if (hasToken && grantController) return AccessLevel::control;
+        return AccessLevel::watch;
     }
 
     Result<IntentValueMap, NackCode> applyIntent(uint16_t channel_id, const IntentValueMap& requested, AccessLevel,
@@ -235,7 +242,8 @@ void pump(Hub& hub, ManualClock& clock, std::initializer_list<Client*> clients, 
 // S-01 — cold connect: retained push, SYNCING->LIVE gate, shadow fidelity
 // ============================================================================
 TEST_CASE("S-01: cold connect adopts retained STATE and gates SYNCING->LIVE exactly at retained_pending") {
-    Catalog32 catalog = conformance::miniCatalog();
+    Catalog32 catalog;
+    conformance::buildMiniCatalog(catalog);
     ManualClock clock;
     XorShift32 hubRng(1001);
     TestHubDelegate hubDelegate;
@@ -291,8 +299,9 @@ TEST_CASE("S-01: cold connect adopts retained STATE and gates SYNCING->LIVE exac
 // ============================================================================
 // S-02 — reconnect: cached-etag skip vs. wrong-etag full transfer
 // ============================================================================
-TEST_CASE("S-02: matching cached etag skips CATALOG_REQ on reconnect; wrong etag triggers chunk transfer") {
-    Catalog32 catalog = conformance::miniCatalog();
+TEST_CASE("S-02: matching cached etag skips BLOB_REQ on reconnect; wrong etag triggers chunk transfer") {
+    Catalog32 catalog;
+    conformance::buildMiniCatalog(catalog);
     ManualClock clock;
     XorShift32 hubRng(1101);
     TestHubDelegate hubDelegate;
@@ -314,7 +323,7 @@ TEST_CASE("S-02: matching cached etag skips CATALOG_REQ on reconnect; wrong etag
     CHECK(client.catalogReqCount() == 1);
     size_t reqsAfterFirstConnect = client.catalogReqCount();
 
-    // Reconnect with the now-cached (matching) etag: no NEW CATALOG_REQ.
+    // Reconnect with the now-cached (matching) etag: no NEW BLOB_REQ.
     client.disconnect();
     REQUIRE(client.connect());
     pump(hub, clock, {&client}, 6);
@@ -322,7 +331,7 @@ TEST_CASE("S-02: matching cached etag skips CATALOG_REQ on reconnect; wrong etag
     CHECK(client.catalogReqCount() == reqsAfterFirstConnect);  // unchanged
 
     // A fresh client, different instance_id, WRONG cached etag -> full
-    // CATALOG_REQ + chunk flow + verified adoption.
+    // BLOB_REQ + chunk flow + verified adoption.
     InProcessLink link2(clock, hubRng);
     REQUIRE(hub.attachTransport(link2.endpointA()));
     XorShift32 clientRng2(2103);
@@ -349,7 +358,8 @@ TEST_CASE("S-02: matching cached etag skips CATALOG_REQ on reconnect; wrong etag
 // S-03 — reconcile: dropped-before-processed intent is flushed, never resent
 // ============================================================================
 TEST_CASE("S-03: an intent lost before the hub processes it is flushed via onPendingDropped, never auto-resent") {
-    Catalog32 catalog = conformance::miniCatalog();
+    Catalog32 catalog;
+    conformance::buildMiniCatalog(catalog);
     ManualClock clock;
     XorShift32 hubRng(1201);
     TestHubDelegate hubDelegate;
@@ -403,7 +413,8 @@ TEST_CASE("S-03: an intent lost before the hub processes it is flushed via onPen
 // S-04 — duplicate instance eviction, and BUSY admission
 // ============================================================================
 TEST_CASE("S-04: duplicate instance_id evicts the old session; a hub at capacity NACKs BUSY") {
-    Catalog32 catalog = conformance::miniCatalog();
+    Catalog32 catalog;
+    conformance::buildMiniCatalog(catalog);
     ManualClock clock;
     XorShift32 hubRng(1301);
     TestHubDelegate hubDelegate;
@@ -482,7 +493,8 @@ TEST_CASE("S-04: duplicate instance_id evicts the old session; a hub at capacity
 // S-09 — unsolicited GRANT
 // ============================================================================
 TEST_CASE("S-09: an unsolicited GRANT updates one client's recorded grant without touching the other") {
-    Catalog32 catalog = conformance::miniCatalog();
+    Catalog32 catalog;
+    conformance::buildMiniCatalog(catalog);
     ManualClock clock;
     XorShift32 hubRng(1401);
     TestHubDelegate hubDelegate;
@@ -534,7 +546,8 @@ TEST_CASE("S-09: an unsolicited GRANT updates one client's recorded grant withou
 // I-01 — clamp + cfg_gen bump + broadcast to other subscribers
 // ============================================================================
 TEST_CASE("I-01: an out-of-range intent is clamped, cfg_gen bumps, and other subscribers see the STATE broadcast") {
-    Catalog32 catalog = conformance::miniCatalog();
+    Catalog32 catalog;
+    conformance::buildMiniCatalog(catalog);
     ManualClock clock;
     XorShift32 hubRng(1501);
     TestHubDelegate hubDelegate;
@@ -585,7 +598,8 @@ TEST_CASE("I-01: an out-of-range intent is clamped, cfg_gen bumps, and other sub
 // I-02 — duplicate intent_id at the transport level: identical ECHO, one apply
 // ============================================================================
 TEST_CASE("I-02: resending the identical encoded INTENT frame re-emits identical ECHO bytes, applies once") {
-    Catalog32 catalog = conformance::miniCatalog();
+    Catalog32 catalog;
+    conformance::buildMiniCatalog(catalog);
     ManualClock clock;
     XorShift32 hubRng(1601);
     TestHubDelegate hubDelegate;
@@ -652,7 +666,8 @@ TEST_CASE("I-02: resending the identical encoded INTENT frame re-emits identical
 // I-03 — precondition CAS mismatch -> NACK CONFLICT, no apply
 // ============================================================================
 TEST_CASE("I-03: a wrong precondition cfg_gen is refused with NACK CONFLICT and never applied") {
-    Catalog32 catalog = conformance::miniCatalog();
+    Catalog32 catalog;
+    conformance::buildMiniCatalog(catalog);
     ManualClock clock;
     XorShift32 hubRng(1701);
     TestHubDelegate hubDelegate;
@@ -686,7 +701,8 @@ TEST_CASE("I-03: a wrong precondition cfg_gen is refused with NACK CONFLICT and 
 // I-04 — refusal mode -> NACK NOT_HOMED
 // ============================================================================
 TEST_CASE("I-04: the delegate's NOT_HOMED refusal surfaces via onNack") {
-    Catalog32 catalog = conformance::miniCatalog();
+    Catalog32 catalog;
+    conformance::buildMiniCatalog(catalog);
     ManualClock clock;
     XorShift32 hubRng(1801);
     TestHubDelegate hubDelegate;
@@ -717,7 +733,8 @@ TEST_CASE("I-04: the delegate's NOT_HOMED refusal surfaces via onNack") {
 // E-04 — ESTOP repeat-until-latched under 30% loss both directions
 // ============================================================================
 TEST_CASE("E-04: initiateEstop survives 30% loss both directions within estop_repeat_max attempts") {
-    Catalog32 catalog = conformance::miniCatalog();
+    Catalog32 catalog;
+    conformance::buildMiniCatalog(catalog);
     ManualClock clock;
     XorShift32 hubRng(1901);
     TestHubDelegate hubDelegate;
@@ -740,7 +757,7 @@ TEST_CASE("E-04: initiateEstop survives 30% loss both directions within estop_re
     link.profileA().loss_pct = 30;
     link.profileB().loss_pct = 30;
 
-    client.initiateEstop(uint8_t(EstopCause::user));
+    client.initiateEstop(safety_causes::user);
 
     for (int i = 0; i < 25; ++i) {
         clock.advanceUs(50000);  // limits::estop_repeat_interval_ms == 50
@@ -763,7 +780,8 @@ TEST_CASE("E-04: initiateEstop survives 30% loss both directions within estop_re
 // before the wrap and must sail straight through it.
 // ============================================================================
 TEST_CASE("wrap regression: session pushes flow at full rate straight across the u32 microsecond wrap") {
-    Catalog32 catalog = conformance::miniCatalog();
+    Catalog32 catalog;
+    conformance::buildMiniCatalog(catalog);
     ManualClock clock(0xFFFFFFFFu - 8'000'000u);   // 8 s before the µs wrap
     XorShift32 hubRng(7001);
     TestHubDelegate hubDelegate;
@@ -816,7 +834,8 @@ TEST_CASE("wrap regression: session pushes flow at full rate straight across the
 // seeds the all-clear snapshot whenever the catalog declares the channel.
 // ============================================================================
 TEST_CASE("fresh hub with no publishes still serves the retained safety snapshot") {
-    Catalog32 catalog = conformance::miniCatalog();
+    Catalog32 catalog;
+    conformance::buildMiniCatalog(catalog);
     ManualClock clock;
     XorShift32 hubRng(8001);
     TestHubDelegate hubDelegate;
@@ -835,7 +854,7 @@ TEST_CASE("fresh hub with no publishes still serves the retained safety snapshot
 
     REQUIRE(client.state() == ClientSessionState::LIVE);
     REQUIRE(del.lastStateByChannel.count(0x0003) == 1);
-    // All-clear snapshot: word=0 cause=0 owner=0 estop_seq=0 (8 bytes).
+    // All-clear snapshot: word=0 cause=0 owner=0 estop_seq=0 modes=0 (9 bytes).
     auto expect = makeSafetyPayload(false, 0, 0, 0);
     CHECK(bytesEqual(del.lastStateByChannel[0x0003],
                      std::span<const std::byte>(expect)));

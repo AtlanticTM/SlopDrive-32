@@ -198,6 +198,20 @@ public:
             slot->lastFragLen = uint16_t(slice.size());
             if (slot->unitLen != 0) {
                 if (!placeFragment(*slot, index, slice)) overflowed = true;
+            } else if (slice.size() > slot->pendingLastBytes.size()) {
+                // RFC-028 (found by test/fuzz/fuzz_frame): the copy below used
+                // to be unbounded. `slice` is caller-supplied wire bytes, and
+                // this is the ONE branch that writes them somewhere other
+                // than placeFragment() (which does bounds-check) — so a
+                // last-fragment payload larger than kMaxSlotPayload wrote
+                // straight off the end of pendingLastBytes. It stayed
+                // invisible for a long time because the spill lands in the
+                // very next member (`data`), which is an INTRA-OBJECT
+                // overflow ASan cannot see; only a payload long enough to
+                // leave the whole Reassembler shows up as a report. Treat it
+                // as what it is: the same capacity overflow placeFragment()
+                // reports.
+                overflowed = true;
             } else {
                 // Unit size not known yet (no full fragment seen so far) —
                 // buffer this one piece until it is.

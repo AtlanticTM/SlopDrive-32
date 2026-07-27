@@ -1,0 +1,261 @@
+---
+title: Catalog schema (CDDL)
+description: >-
+  The normative CDDL definition of the SlopSync channel catalog: channel
+  entries, packed layouts, CBOR schemas, the settings metamodel and store
+  descriptors. Appendix C, in full.
+register: IEEE
+generated: true
+---
+
+<!-- ==========================================================
+     GENERATED FILE — DO NOT EDIT.
+     Source of truth: docs/slopsync/schema/catalog.cddl
+     Generator:       docs-site/tools/gen_spec_pages.py
+     Regenerate:      python docs-site/tools/gen_spec_pages.py
+     CI gate:         python docs-site/tools/gen_spec_pages.py --check
+     Normative text is copied verbatim. Hand edits are overwritten
+     and fail the docs build. Edit the specification instead.
+     ========================================================== -->
+
+# Catalog schema (CDDL)
+
+!!! danger "Normative. This schema wins over the prose."
+
+    This is [Appendix C](appendices.md#appendix-c) in full: the normative
+    encoding of the channel catalog. [§8.1](catalog.md#s8-1) is its prose
+    companion, and **the CDDL wins on any disagreement** with it.
+
+    The page is generated from `docs/slopsync/schema/catalog.cddl`. It cannot drift from that
+    file, because `--check` fails the build the moment it does.
+
+## Reading it {#reading}
+
+The schema is written in CDDL (RFC 8610), the concise data definition
+language for CBOR. Three conventions carry most of the meaning:
+
+| Notation | Meaning |
+|---|---|
+| `1 => uint` | map key 1, holding an unsigned integer. Keys are the wire numbers from the [registry](../reference/registry/cbor-keys.md). |
+| `? 8 => ...` | the key is optional. Absent is not the same as null: the deterministic profile never encodes null ([§5.3](wire-format.md#s5-3)). |
+| `* entry` / `+ field` | zero-or-more, and one-or-more. |
+
+Comments carry normative constraints that the grammar cannot express —
+the depth budget, which keys are mutually exclusive, and why. Read them.
+
+## The schema {#cddl}
+
+```cddl
+; SlopSync catalog schema (slopsync/1) — NORMATIVE (SPEC.md §8.1, Appendix C)
+; The catalog_etag (SPEC.md §8.3) is the first 8 bytes of SHA-256 over the
+; catalog encoded per the deterministic CBOR profile (SPEC.md §5.3), entries
+; sorted ascending by id.
+;
+; DEPTH BUDGET (§5.3 caps nesting at 4). Counting from a channel-entry map:
+;   entry map -> layout array -> field map -> options array   = 4  (AT THE CAP)
+;   entry map -> layout array -> field map -> bits map        = 4  (AT THE CAP)
+;   entry map -> schema map    -> field map -> options array  = 4  (AT THE CAP)
+;   entry map -> store map                                    = 2
+; The leaves of those depth-4 containers are SCALARS (tstr / uint / access) by
+; construction — nothing nests further. Any future annotation that wants a map
+; or array INSIDE a field map is therefore blocked; it must ride the entry
+; level instead. This is a real design constraint, not a formality.
+;
+; RAM NOTE for implementers (feasibility pass 2026-07-25): an entry carries a
+; layout OR a schema OR a store descriptor, never more than one. Building a
+; catalog struct with all three arrays present in every entry is what turned
+; a uniform Catalog<48,50> into 320 KiB. Field capacity is PER-ENTRY.
+
+catalog = [ * channel-entry ]
+
+channel-entry = {
+  1  => uint,              ; id: u16 channel id
+  2  => tstr .size (1..32),; name
+  3  => class,             ; channel class
+  4  => direction,         ; h2c / c2h
+  5  => access,            ; minimum role to subscribe (or send, for INTENT) — the FLOOR; per-op `access` on a schema-field may raise it
+  6  => float32,           ; max_rate_hz (0.0 = on-change only)
+  7  => priority,          ; default priority class
+  ? 8  => [ + layout-field ],  ; packed classes (STATE, STREAM): wire-order fields
+  ? 9  => { + int => schema-field }, ; CBOR classes (INTENT, EVENT): key -> field
+  ? 12 => store-descriptor,    ; STORE class only (RFC-021)
+  ; ---- RFC-009 settings metamodel (entry level) ----
+  ? 10 => uint,            ; category: setting_categories (0..127 registered, 128..255 device-defined)
+  ? 11 => tstr .size (1..24),  ; category_label: REQUIRED iff category >= 128
+  ? 13 => uint,            ; replay_depth: entries the hub MAY replay on grant (RFC-017). Presence is THE exception to §9.4's no-replay rule.
+  ? 14 => uint,            ; setting_channel: the u16 INTENT channel that writes this entry's setting-annotated fields. REQUIRED iff any field carries setting_key.
+  ? 15 => uint,            ; stream_kind: registry stream_kinds (STREAM class only, RFC-014/023). Absent = 0 (samples) — replaces the M5 unit-string heuristic for segment-class classification (§9.2, §10.4).
+}
+; Exactly one of key 8 / key 9 / key 12 MUST be present, matching the class:
+;   STATE | STREAM -> 8  (layout)
+;   INTENT | EVENT -> 9  (schema)
+;   STORE          -> 12 (store descriptor)
+
+class     = 0 ; STATE
+          / 1 ; STREAM
+          / 2 ; INTENT
+          / 3 ; EVENT
+          / 4 ; STORE  (RFC-021: a blob store — presets, saved positions, trust
+              ;         ledger. An ordinary catalog entry on purpose: a parallel
+              ;         top-level array would break the catalog root shape, the
+              ;         id sort, the etag computation and the depth rules, all four.)
+
+direction = 0 ; h2c
+          / 1 ; c2h
+
+; Access tiers renamed by RFC-027; WIRE VALUES UNCHANGED.
+access    = 0 ; watch      (was: viewer)
+          / 1 ; control    (was: controller) — includes STREAM publishing
+          / 2 ; configure  (was: admin)
+
+priority  = 0 ; background
+          / 1 ; normal
+          / 2 ; elevated
+          / 3 ; critical
+
+; ---------------------------------------------------------------------------
+; A packed field, in wire order. Wire value = physical value * scale.
+;
+; Keys 1..7 are the wire description. Keys 8..15 are the RFC-009 ANNOTATION
+; BLOCK — all optional, all ignorable. A client that reads none of them
+; behaves exactly as a v1-draft client did. A client that reads them can build
+; its entire settings surface from the hub, so a control added in firmware
+; populates on every client's next connect, with the label, grouping and
+; explanation coming from the hub.
+;
+; SlopSync describes what things ARE, never how they LOOK: no widget hints, no
+; layout, no ordering, no styling, ever. Widget choice is a client-side
+; function of type + constraints (bool-u8 -> toggle, u8+options -> select,
+; bitfield8 -> checkbox group, numeric+min/max -> slider, str<N> -> text,
+; no setting_key -> read-only display with unit).
+; ---------------------------------------------------------------------------
+layout-field = {
+  1 => tstr .size (1..24), ; name
+  2 => packed-type,        ; registry packed_field_types
+  3 => tstr .size (0..8),  ; unit ("mm", "mm/s", "mA", "degC", "%", "count", "flag", "")
+  4 => float32,            ; scale (wire = physical * scale); 1.0 for unscaled
+  ? 5 => float32,          ; min (physical units)
+  ? 6 => float32,          ; max (physical units)
+  ? 7 => { + uint => tstr },  ; bits: bit-index -> meaning (bitfield8 only)
+  ; ---- RFC-009 annotation block ----
+  ? 8  => uint,            ; setting_key: the CBOR key in the entry's setting_channel that WRITES this field.
+                           ;   PRESENT  = this field is a SETTING (stored config; adopt it into a control).
+                           ;   ABSENT   = read-only (effective state or telemetry; display it, NEVER write it back
+                           ;              into a setting's shadow).
+                           ; RFC-003's stored/effective distinction falls out of this presence test with no
+                           ; separate flag — it is why RFC-003 is superseded rather than landed.
+  ? 9  => setting-default, ; default: the FACTORY value, same type as the field
+  ? 10 => [ + tstr .size (1..24) ],  ; options: labels for a single-select; WIRE VALUE = ARRAY INDEX
+  ? 11 => tstr .size (1..24),        ; group: free-form card heading within the category tab
+  ? 12 => tstr .size (1..128),       ; desc: user-facing description/tooltip (limits.desc_max_bytes)
+  ? 13 => tstr .size (1..24),        ; role: registry field_roles vocabulary; unknown roles render generically
+  ? 14 => float32,         ; step: range granularity hint
+  ? 15 => uint,            ; flags: bitmask of registry setting_flags (advanced / restart_required / secret)
+}
+
+setting-default = int / float32 / bool / tstr
+
+packed-type = 0  ; u8
+            / 1  ; i8
+            / 2  ; u16
+            / 3  ; i16
+            / 4  ; u32
+            / 5  ; i32
+            / 6  ; f32
+            / 7  ; bitfield8
+            / 8  ; str16   \
+            / 9  ; str32    > RFC-026: fixed-width, zero-padded UTF-8. Fixed width
+            / 10 ; str64   /  keeps every offset static and evolution append-only.
+; STREAM sample layouts remain STRING-FREE — the motion hot path never pays for text.
+
+; ---------------------------------------------------------------------------
+; A CBOR-payload field.
+;
+;   INTENT — the fields of the intent's `value` map (CBOR key 20).
+;   EVENT  — the fields of the event's `body` map (CBOR key 40). Kind-specific
+;            EVENT fields ride `body` and draw their integer keys from THIS
+;            schema, NOT from the global cbor_keys space. That is the v1.0
+;            grammar fix: with kind-specific fields at the top level, every
+;            device-authored EVENT channel would have needed a registry PR to
+;            name its own fields — the exact coupling the self-describing
+;            catalog exists to prevent. (`event_kind` 33 and `seq_of_state` 34
+;            stay at the top level: they are protocol framing, not payload.)
+;
+; Annotation keys are NUMBERED IDENTICALLY to layout-field wherever the meaning
+; matches, so one reader handles both. Key 8 (setting_key) is absent by
+; construction: for a schema-field the MAP KEY *is* the write key.
+; ---------------------------------------------------------------------------
+schema-field = {
+  1 => tstr .size (1..24), ; name
+  2 => cbor-type,
+  3 => tstr .size (0..8),  ; unit
+  ? 5 => float32,          ; min
+  ? 6 => float32,          ; max
+  ? 9  => setting-default, ; default
+  ? 10 => [ + tstr .size (1..24) ],  ; options (wire value = array index)
+  ? 11 => tstr .size (1..24),        ; group
+  ? 12 => tstr .size (1..128),       ; desc
+  ? 13 => tstr .size (1..24),        ; role — incl. RFC-019 `action.<name>`, which marks this
+                                     ;   field as a VERB rather than a value
+  ? 14 => float32,         ; step
+  ? 15 => uint,            ; flags (setting_flags)
+  ? 16 => access,          ; PER-OP minimum role; overrides the entry's `access` floor upward
+                           ;   or downward. Without this, the role-EXEMPT safety ops (estop,
+                           ;   stop) would force channel 0x0005 down to `watch` access, and a
+                           ;   generic renderer would then offer hold/pause/takeover to every
+                           ;   viewer — discovering otherwise only by NACK, which violates
+                           ;   grey-never-hide.
+  ? 17 => [ + access ],    ; option_access: per-OPTION minimum role, index-aligned with key 10.
+                           ;   Needed because an op-style INTENT can carry its verb as one
+                           ;   ENUM-VALUED field (safety-intents does: `value` key 1 holds the
+                           ;   op code), and per-FIELD access cannot vary across the values of
+                           ;   one field. Omit it for the RFC-019 one-field-per-action shape,
+                           ;   where key 16 alone is sufficient.
+}
+
+cbor-type = 0 ; uint
+          / 1 ; int
+          / 2 ; float32
+          / 3 ; bool
+          / 4 ; tstr
+          / 5 ; bstr
+
+; ---------------------------------------------------------------------------
+; STORE class (RFC-021). The entry declares the store; ITEMS never appear in
+; the catalog — they move over BLOB_REQ/BLOB_CHUNK in blob_namespaces.store,
+; addressed by {store_id, slot}. A store's dynamic side (generation, count) is
+; a separate tiny STATE channel, so the catalog stays invariant per firmware
+; (§8.6) while the roster changes freely.
+;
+; `payload` is OPAQUE: the protocol layer NEVER decodes it, and RFC-028's
+; depth and allocation budget explicitly does not extend inside it. A client
+; that decodes a preset does so above the protocol boundary.
+;
+; THE ONE CARVE-OUT (M4b, RFC-027.4/029.2): the trust ledger — the store whose
+; `kind` is "trust.ledger", declared by spec-core channel 0x000C — has a
+; REGISTERED item grammar (`trust_ledger_keys`). Presets are DEVICE content and
+; are genuinely opaque; the trust ledger is PROTOCOL content whose fields the
+; spec names, which every `configure` client must render and act on, and where
+; "revoke device 3" has to mean the same thing on every hub. Opacity is the
+; default and stays the default: the store MACHINERY is reused verbatim
+; (chunking, repair, generation, caps) and only this one store's payload
+; grammar is agreed centrally. Its `access` is `configure` like the rest of the
+; admin surface — the paired-device list is not open reading, and a hub MUST
+; gate BLOB_REQ on the declaring entry's access exactly as it gates SUBSCRIBE.
+; ---------------------------------------------------------------------------
+store-descriptor = {
+  1 => uint,               ; store_id: u8, unique per hub; selects this store in `blob`.store_id
+  2 => tstr .size (1..32), ; kind: namespaced payload kind, e.g. "pattern.frayd", "trust.ledger"
+  3 => uint,               ; capacity: item slots (conformance floor limits.preset_capacity_min)
+  4 => uint,               ; per_item_max: max encoded payload bytes (default limits.preset_item_max_bytes)
+  5 => uint,               ; name_max: max item-name bytes
+}
+```
+
+## Related {#related}
+
+- [§8 Catalog](catalog.md#s8) — the prose companion, and the etag rules.
+- [Channel catalog reference](../reference/channel-catalog.md) — the
+  SlopDrive-32 catalog that this schema describes, entry by entry.
+- [Catalog vocabulary](../reference/registry/catalog-vocabulary.md) — the
+  generated view of every enumeration named above.

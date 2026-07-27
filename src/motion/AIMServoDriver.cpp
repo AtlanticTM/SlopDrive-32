@@ -321,9 +321,22 @@ bool AIMServoDriver::_sweepToStall(int8_t dir_sign) {
             }
         }
 
-        SLOGD_EVERY_MS(500, "aim",
-                       "AIMServo Homing: sweeping dir=%d I=%.2fA base=%.2f over=%u pos=%d",
-                       dir_sign, amps, baseline_a, over_count, _stepper->getCurrentPosition());
+        // Log on CHANGE: the current has to move by 50 mA, or the consecutive
+        // over-threshold run has to change, before the sweep says anything.
+        // A clean sweep is now two or three lines instead of a 2 Hz transcript
+        // of a number that barely moves — and the lines that DO appear are the
+        // ones where the load actually shifted, which is the whole diagnostic.
+        {
+            static int16_t last_ca = INT16_MIN;   // centi-amps, quantized
+            static uint8_t last_over = 0xFF;
+            const int16_t ca = int16_t(amps * 100.0f);
+            if (abs(int(ca) - int(last_ca)) >= 5 || over_count != last_over) {
+                last_ca = ca;
+                last_over = uint8_t(over_count);
+                SLOGD("aim", "AIMServo Homing: sweeping dir=%d I=%.2fA base=%.2f over=%u pos=%d",
+                      dir_sign, amps, baseline_a, over_count, _stepper->getCurrentPosition());
+            }
+        }
         vTaskDelay(pdMS_TO_TICKS(poll_ms));
     }
     return false;  // ran the whole sweep without a stall — no wall found. uhoh :C

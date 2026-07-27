@@ -18,6 +18,7 @@
 #include <span>
 
 #include "slopsync/core/result.hpp"
+#include "slopsync/generated/registry_constants.hpp"
 #include "slopsync/util/byte_io.hpp"
 #include "slopsync/wire/crc32.hpp"
 
@@ -27,16 +28,18 @@ inline constexpr size_t kEstopFrameBytes = 12;
 inline constexpr size_t kEstopCrcOffset = 8;   // crc32 covers bytes [0, 8)
 inline constexpr std::byte kEstopMagicByte{0xE5};
 
-// SPEC §5.5: cause of an ESTOP initiation event.
-enum class EstopCause : uint8_t {
-    user = 0,      // operator-initiated (physical button, UI)
-    deadman = 1,   // deadman timeout expired (§11.3)
-    fault = 2,     // hub/driver-detected fault
-    relay = 3,     // relay-originated (segment-local safety event)
-};
+// The `cause` byte's values are `safety_causes` (registry, generated). This
+// file used to hand-roll an `EstopCause` enum that duplicated four of them —
+// which meant TWO declarations of one wire enum, and only one of them could be
+// regenerated from registry.yaml. It also could not grow: RFC-022.3's
+// `session_loss` (4) exists in the registry and simply had no member here.
+// Deleted, not deprecated (the v1.0 break-allowed ruling): a second spelling of
+// a wire number is exactly the drift the registry-discipline rule forbids. Use
+// `slopsync::safety_causes::user` / `::deadman` / `::fault` / `::relay` /
+// `::session_loss`.
 
 struct EstopFrame {
-    uint8_t  cause = 0;   // EstopCause
+    uint8_t  cause = 0;   // a `safety_causes` value (§5.5, §11.1 — one taxonomy, two wire homes)
     uint8_t  origin = 0;  // AccessLevel of the initiator
     uint16_t seq = 0;     // increments per initiation event (§5.5)
 };

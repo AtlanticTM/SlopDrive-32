@@ -587,7 +587,7 @@ TEST_CASE("T-11: ESTOP jumps the queue ahead of everything already waiting") {
         auto frame = makeFrame(FrameType::EVENT, 0, i, 8, uint8_t(i));
         REQUIRE(a.write(frame));
     }
-    auto estop = makeEstop(uint8_t(EstopCause::user), uint8_t(AccessLevel::controller), 1);
+    auto estop = makeEstop(safety_causes::user, uint8_t(AccessLevel::control), 1);
     REQUIRE(a.write(estop));
 
     auto got = b.read();
@@ -644,4 +644,75 @@ TEST_CASE("T-12: a large control frame reassembles byte-identical over a 20%-los
     REQUIRE(complete.has_value());
     CHECK(complete->size() == whole.size());
     CHECK(bytesEqual(complete->bytes(), whole));
+}
+
+// ============================================================================
+// RFC-028 regression — Reassembler TOTALITY (found by test/fuzz/fuzz_frame).
+//
+// Minimised crashing input, as the harness's replay format:
+//   type=0x11 flags=0x00 seq=0 channel=0 dt=0 len=0x0FA0(4000)
+//   payload = [00 00] + 3998 x 'A'
+//
+// The bug: accept()'s "last fragment, unit size not yet known" branch did
+//     std::memcpy(slot->pendingLastBytes.data(), slice.data(), slice.size());
+// with NO bound. `slice` is caller-supplied wire bytes; pendingLastBytes is
+// kMaxSlotPayload (504). Every OTHER write in the class goes through
+// placeFragment(), which bounds-checks — this one branch did not. ASan report:
+// "WRITE of size 3998" into a 504-byte array.
+//
+// Why it survived a 7.8M-execution fuzz run before being found by hand: the
+// spill lands in the very next member of the same Slot (`data`), an
+// INTRA-OBJECT overflow ASan cannot see. Only a payload long enough to leave
+// the whole Reassembler produces a report — which is exactly why the harness
+// now allows 8 KiB inputs. Remember that shape: a bounded-looking overflow
+// between two arrays of one struct is invisible to the sanitizer.
+//
+// The fix reports it as the capacity overflow it is (CapacityExceeded, slot
+// discarded), identical to placeFragment()'s own overflow path.
+// ============================================================================
+TEST_CASE("RFC-028: an oversized last-fragment is refused, never memcpy'd past the slot") {
+    Reassembler ra;
+
+    FrameHeader h{};
+    h.type = 0x11;
+    h.flags = 0;  // last fragment of a multi-fragment message
+    h.seq = 0;
+    h.channel = 0;
+
+    // frag_index(2) + a slice far larger than kMaxSlotPayload (504).
+    std::vector<std::byte> payload(2 + 3998, std::byte{'A'});
+    payload[0] = std::byte{0};
+    payload[1] = std::byte{0};
+
+    auto r = ra.accept(h, std::span<const std::byte>(payload), 0);
+    REQUIRE(!r.isOk());
+    CHECK(r.error() == DecodeError::CapacityExceeded);
+}
+
+TEST_CASE("RFC-028: the last-fragment size boundary is exact") {
+    constexpr size_t kMaxSlotPayload = kFrameBufferCapacity - kHeaderBytes;  // 504
+
+    FrameHeader h{};
+    h.type = 0x12;
+    h.flags = 0;
+    h.seq = 1;
+
+    {  // exactly kMaxSlotPayload: buffered, no error (index 3 => still awaiting parts)
+        Reassembler ra;
+        std::vector<std::byte> payload(2 + kMaxSlotPayload, std::byte{'B'});
+        payload[0] = std::byte{3};
+        payload[1] = std::byte{0};
+        auto r = ra.accept(h, std::span<const std::byte>(payload), 0);
+        REQUIRE(r.isOk());
+        CHECK(!r.value().has_value());  // pending, unit size still unknown
+    }
+    {  // one byte over: refused
+        Reassembler ra;
+        std::vector<std::byte> payload(2 + kMaxSlotPayload + 1, std::byte{'B'});
+        payload[0] = std::byte{3};
+        payload[1] = std::byte{0};
+        auto r = ra.accept(h, std::span<const std::byte>(payload), 0);
+        REQUIRE(!r.isOk());
+        CHECK(r.error() == DecodeError::CapacityExceeded);
+    }
 }

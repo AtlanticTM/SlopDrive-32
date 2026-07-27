@@ -4,7 +4,12 @@
 # renumbered once released in a tagged spec version. See SPEC.md §5.7.
 #
 # spec: slopsync/1
-# status: v1-draft
+# status: v1.0-candidate
+#
+# NEVER-RENUMBER SCOPE: the no-reuse/no-renumber rule binds from the v1.0 tag
+# FORWARD. v1-draft was the feasibility test, never a public release, so the
+# public-v1.0 base pass (RFC queue 001–029 + the 2026-07-25 feasibility
+# amendments) is permitted to restructure. After the v1.0 tag, additions only.
 
 meta:
   protocol_name: slopsync
@@ -27,8 +32,12 @@ frame_types:
   0x06: { name: SUBSCRIBE,      dir: c2h, plane: control, ref: "§6.6" }
   0x07: { name: UNSUBSCRIBE,    dir: c2h, plane: control, ref: "§6.6" }
   0x08: { name: GRANT,          dir: h2c, plane: control, ref: "§10.2" }  # solicited AND unsolicited (GRANT_UPDATE)
-  0x09: { name: CATALOG_REQ,    dir: c2h, plane: control, ref: "§8.4" }
-  0x0A: { name: CATALOG_CHUNK,  dir: h2c, plane: raw,     ref: "§8.4" }
+  # ---- RETIRED PRE-v1.0 — DO NOT REALLOCATE 0x09 / 0x0A ----
+  # 0x09 CATALOG_REQ and 0x0A CATALOG_CHUNK are superseded by BLOB_REQ (0x1A)
+  # and BLOB_CHUNK (0x1B): RFC-021 generalized chunked transfer into a
+  # namespaced blob verb, and catalog transfer is now simply blob namespace 0
+  # (see `blob_namespaces`). The numbers stay burned so a stale v1-draft peer
+  # meets an UNKNOWN type and fails loudly, never a silent misread.
   0x0B: { name: STATE,          dir: h2c, plane: data,    ref: "§9.1" }
   0x0C: { name: STREAM,         dir: any, plane: data,    ref: "§9.2" }
   0x0D: { name: INTENT,         dir: c2h, plane: control, ref: "§9.3" }
@@ -42,8 +51,15 @@ frame_types:
   0x15: { name: PAIR_GRANT,     dir: h2c, plane: control, ref: "§12.2" }
   0x16: { name: ACKMASK,        dir: any, plane: raw,     ref: "§13.3" }  # ESP-NOW binding: base_seq:u16 + mask:u32
   0x17: { name: BEACON,         dir: h2c, plane: raw,     ref: "§13.7" }  # ESP-NOW discovery: hub id + etag + pairing flag
+  0x18: { name: PUBLISH,        dir: c2h, plane: control, ref: "§6.6" }   # RFC-013: mid-session publish renegotiation — carries `publishes` (11); answered like SUBSCRIBE (GRANT / granted_publishes)
+  0x19: { name: CATALOG_READY,  dir: c2h, plane: raw,     ref: "§8.4" }   # RFC-015: payload = the 8-byte etag the client now operates against. Idempotent; re-sent at catalog_chunk_gap_timeout_ms until retained STATE arrives.
+  0x1A: { name: BLOB_REQ,       dir: c2h, plane: control, ref: "§8.4" }   # RFC-021: generalizes CATALOG_REQ — carries `blob` (38) to select namespace/store/slot, plus `chunks` (27) for repair
+  0x1B: { name: BLOB_CHUNK,     dir: h2c, plane: raw,     ref: "§8.4" }   # RFC-021: generalizes CATALOG_CHUNK — raw header names the same identity fields as `blob_keys`, then chunk bytes
+  0x1C: { name: AUTH,           dir: c2h, plane: control, ref: "§12.2" }  # RFC-029: post-WELCOME token proof (`trust`.token_proof); hub re-issues `roles` (23) on success, NACK UNAUTHORIZED on failure. Exists because a 2nd HELLO would self-evict via §6.3's duplicate-instance rule.
+  0x1D: { name: HUB_SIG,        dir: h2c, plane: control, ref: "§12.2" }  # RFC-029 item 1, DEFERRED DELIVERY of the WELCOME signature. Payload is the `trust` (39) sub-map carrying `welcome_sig` (5) — nothing else, so the decode surface is one already-fuzzed sub-map. EXISTS BECAUSE SIGNING IS SLOW WHERE IT MATTERS: the S3 has no ECC accelerator, so mbedtls software ECDSA is ~30-80 ms in ONE uninterruptible call, and a hub that signed inline in WELCOME would stall its own tick (5 ms period) for 6-16 ticks — stalling STATE pacing, deadman detection and any motion-input drain sharing that task, for EVERY connecting client. A hub that CAN sign cheaply (host, sim, a C3/C6/H2 with the ECC peripheral) MAY instead put `welcome_sig` directly in WELCOME; the two are wire-alternatives with identical signature material and identical client handling, and a hub that never signs at all sends neither and stays conformant.
   0xE5: { name: ESTOP,          dir: any, plane: raw,     ref: "§5.5, §11.2" }
-# 0x02, 0x18–0x3F reserved for spec/core. 0x40–0x7F reserved for future spec use.
+# 0x02 and 0x1E–0x3F reserved for spec/core (35 slots free; 0x09/0x0A burned, see above).
+# 0x40–0x7F reserved for future spec use.
 # 0x80–0xDF experimental (never in tagged releases). 0xE0–0xFF reserved except 0xE5.
 
 # ---------------------------------------------------------------------------
@@ -61,14 +77,47 @@ channel_classes:
   1: { name: STREAM, ref: "§9.2" }
   2: { name: INTENT, ref: "§9.3" }
   3: { name: EVENT,  ref: "§9.4" }
+  4: { name: STORE,  ref: "§8.7" }   # RFC-021: a blob store (presets, saved positions, trust ledger). Declared as an ORDINARY catalog entry so the catalog root shape, id sort, etag computation and per-entry depth rules are all untouched; the entry carries a store descriptor instead of a layout/schema. Items move over BLOB_REQ/BLOB_CHUNK.
+
+# ---------------------------------------------------------------------------
+# Stream kinds (u8) — catalog entry `stream_kind` (channel-entry key 15),
+# STREAM class only (§9.2, §10.4).
+#
+# RFC-014/023 (feasibility-pass correction, 2026-07-25): this REPLACES the M5
+# unit-string HEURISTIC ("a STREAM channel is segment-class iff any layout
+# field declares a time unit") with an explicit, registered property. The
+# heuristic was struck because `unit` is a free-form tstr — two conforming
+# hubs could disagree ("ms" vs "msec" vs "millis") and therefore SHED
+# DIFFERENTLY under identical congestion, exactly the divergence RFC-023
+# exists to eliminate on a protocol heading for a third-party-implemented
+# v1.0. SlopSync describes what things ARE, never how they should behave:
+# this property says what a STREAM sample IS; §10.4's shedding table derives
+# the never-decimate policy from it and is otherwise UNCHANGED.
+#
+# Absent on the wire MEANS `samples` (0) — §5.3 never emits an absent
+# optional key, so every catalog entry predating this key (including the
+# frozen mini-catalog fixture) is unaffected.
+# ---------------------------------------------------------------------------
+stream_kinds:
+  0: { name: samples,  note: "dense points reporting a value AT AN INSTANT (§9.2); a dropped sample is recoverable by interpolation from its neighbours. Decimable under congestion. The default — absent on the wire means this." }
+  1: { name: segments, note: "each sample COMMANDS A TIME EXTENT — it carries its own duration, so it is not a point on a continuous curve. A dropped segment is a permanently lost COMMAND, not a recoverable interpolation gap (RFC-014/023). NOT decimable: §10.4's shedding table sheds whole-source or not at all for these." }
 
 # ---------------------------------------------------------------------------
 # Access levels (u8) — catalog `access`, session roles.
+# RFC-027 renamed the three tiers; WIRE VALUES ARE UNCHANGED.
+#   old name (v1-draft docs)  ->  v1.0 name
+#   viewer     (0)            ->  watch
+#   controller (1)            ->  control        (includes STREAM publishing —
+#                                                 a motion producer is a controller)
+#   admin      (2)            ->  configure
+# Standing composition rules: safety `estop`/`stop` are role-EXEMPT
+# (RFC-025/010); OTA rights are NEVER derivable from any tier; serial /
+# in-process transports are implicitly `configure` (physical possession, §12.3).
 # ---------------------------------------------------------------------------
 access_levels:
-  0: { name: viewer }
-  1: { name: controller }
-  2: { name: admin }
+  0: { name: watch }       # was: viewer
+  1: { name: control }     # was: controller
+  2: { name: configure }   # was: admin
 
 # ---------------------------------------------------------------------------
 # Priority classes (u8) — subscription priority. Lower number sheds FIRST.
@@ -90,17 +139,48 @@ channel_id_ranges:
 
 core_channels:
   0x0001: { name: catalog,        class: STATE, note: "catalog meta: etag, chunk count, entry count" }
-  0x0002: { name: session-roster, class: STATE, note: "connected sessions: id, kind, name, roles" }
-  0x0003: { name: safety,         class: STATE, note: "latched safety word: estop/stop/hold/pause + cause + owner (§11.1)" }
+  0x0002: { name: session-roster, class: STATE, note: "IMPLEMENTED at v1.0 (RFC-018): generation u16 + count u8 + flags u8, then 8 packed slots {session_id u32, role u8, flags u8, name str16} = 8x22 + 4 = 180 B, inside the 242 B floor at default_max_clients_ws 8. The str16 name (feasibility pass) also FIXES the never-replayed-join-events blocker: a late joiner learns existing sessions' names from the roster snapshot, not from missed 0x0007 events. Names over 16 B truncate here; the full name rides 0x0007 while the session lives." }
+  0x0003: { name: safety,         class: STATE, note: "latched safety word: estop/stop/hold/pause + cause + owner (§11.1); RFC-025 appends manual_override + bypass_limits to the same snapshot (append-only is legal)" }
   0x0004: { name: control-owner,  class: STATE, note: "active arbiter source + owning session per source (§11.4)" }
-  0x0005: { name: safety-intents, class: INTENT, note: "STOP/HOLD/PAUSE/RESUME/ESTOP_CLEAR/TAKEOVER (§11)" }
-  0x0006: { name: hub-status,     class: STATE, note: "boot_id, fw version, heap, uptime, transport stats" }
+  0x0005: { name: safety-intents, class: INTENT, note: "STOP/HOLD/PAUSE/RESUME/ESTOP_CLEAR/ESTOP/TAKEOVER + override/bypass (§11, safety_intent_ops)" }
+  0x0006: { name: hub-status,     class: STATE, note: "boot_id, heap, uptime, transport stats. NO fw version: RFC-016 puts identity in WELCOME `identity` — one home, no drift." }
   0x0007: { name: session-events, class: EVENT, note: "join/leave/takeover/eviction notifications" }
+  0x0008: { name: log,            class: EVENT, note: "RFC-017: device log in-band — {level u8, tag, hub-ms, message <=128 B} via the `body` sub-map. Bounded drop-oldest with the §9.4 visible drop counter, `background` priority, `watch` access. Declares a replay depth (log_replay_depth_default) so the hub MAY replay its ring tail on grant — the named exception to §9.4's no-replay rule. Retires /api/log; the serial-quiet handoff re-binds from 'first HTTP GET' to 'first log grant'." }
+  0x0009: { name: session-admin,  class: INTENT, note: "RFC-018: {op: evict, session_id} -> hub GOODBYEs the target with SESSION_EVICTED. `configure` access — and note RFC-027 makes configure reachable BY CEREMONY now (§12.2's 'admin only via the hub's own UI' sentence is struck), so this power is deliberately pairing-reachable." }
+  0x000A: { name: pending-pairing, class: STATE, note: "RFC-027(a) knock-and-approve: the bounded pending list (pairing_pending_max) as protocol state — {generation u16, count u8, flags u8} + slots {instance_id u64, kind u8, expires_s u16, name str16}. Any `configure` session approves/denies via 0x0009 (session_admin_ops pair_approve/pair_deny); the joiner needs one button and no display. TWO FIELD CLARIFICATIONS made when M4b implemented this: `kind` is the `pairing_modes` BIT that produced the knock (1 knock_approve / 2 pin_proof / 4 push_to_pair), so an approving UI can say HOW the device asked; and the countdown is `expires_s`, NOT ms — pairing_window_default_s is 120, i.e. 120000 ms, which does not fit the u16 the slot layout allocates. Seconds is also the only resolution an approval UI can use. `flags` bit0 = a pairing association window is currently OPEN (RFC-027(c) push-to-pair), which is how window state stays observable in-band for a session that connected before the window opened." }
+  0x000B: { name: pairing-events, class: EVENT, note: "RFC-027: knock arrived / approved / denied / expired, plus pairing-window open/close. EVENT twin of 0x000A." }
+  # RFC-027(4)/029(2) trust ledger. The feasibility pass ruled this a BLOB
+  # STORE, never a packed roster — a ledger entry is {instance_id, kind, name,
+  # version, first_seen, last_seen, role, state} and only 2-7 of those fit a
+  # 242 B snapshot depending on field set. So it follows RFC-021's store shape
+  # exactly, which is TWO catalog entries: a static STORE descriptor and a tiny
+  # dynamic roster STATE. Every store in the protocol looks like this pair.
+  0x000C: { name: paired-devices,        class: STORE, note: "trust-ledger store descriptor: {store_id, kind 'trust.ledger', capacity paired_devices_max, per_item_max, name_max}. Items are read/revoked by any `configure` session via BLOB_REQ on blob_namespaces.store + the 0x0009 admin surface. Whole encoded ledger stays under trust_ledger_max_bytes (one NVS page)." }
+  0x000D: { name: paired-devices-roster, class: STATE, note: "the 0x000C store's roster: {generation u16, count u8, capacity u8}. On-change, tiny; a generation bump means 're-enumerate' (fetch again over BLOB_REQ). `configure` access — the paired-device list is not open reading." }
+  # §9.4's event/state duality rule names e-stop as THE canonical pair — "EVENT
+  # for the edge, `safety` 0x0003 for the latch" — and §5.5/§11.2 both require
+  # the hub to "emit the EVENT twin". Until M4b there was no channel to emit it
+  # ON: 0x0007 session-events is a SESSION-lifecycle vocabulary at `normal`
+  # priority, and folding safety edges into it would have merged two unrelated
+  # kind spaces, forced the whole channel to `critical`, and made "subscribe to
+  # safety edges" impossible without also taking every join/leave. So the twin
+  # gets its own channel, which is also what makes the duality rule literally
+  # true: 0x0003 is the latch, 0x000E is its edge, same domain, same priority.
+  0x000E: { name: safety-events, class: EVENT, note: "RFC/§9.4 duality: the EVENT TWIN of the `safety` STATE channel (0x0003). Kinds in `safety_event_kinds`; fields ride the scoped `body` (40) sub-map keyed by this channel's own catalog schema (word, cause, owner_session, estop_seq, level). `critical` priority and `watch` access, matching its STATE twin exactly — an edge nobody is allowed to be denied and nobody is allowed to shed. Carries `seq_of_state` (34) naming the 0x0003 frame it corresponds to, which is what lets a client that missed the edge reconcile against the latch it DID receive. Emitted on TRANSITIONS ONLY: a repeated ESTOP frame re-broadcasts the STATE (that is §11.2's loss recovery) but does NOT re-emit the edge, because an edge that did not happen is a lie." }
 
 # ---------------------------------------------------------------------------
 # CBOR map integer keys (control plane). Global key space — a key means the
 # same thing in every message that uses it. 1–63 core, 64–127 reserved,
 # 128+ experimental. Encoded per deterministic profile §5.3.
+#
+# CONSERVATION RULE (feasibility pass 2026-07-25, binding): per-feature keys
+# do NOT get global keys each. They nest in a SCOPED SUB-MAP the way `limits`
+# (22) and `probe_result` (26) already do — one global key per feature, its
+# interior numbered in its own tiny space defined further down this file
+# (`identity_keys`, `blob_keys`, `trust_keys`). This is what kept the v1.0
+# base pass at ~7 new global keys instead of ~18, and it is why the 1–63 space
+# is expected to outlive the protocol. A new feature that wants five keys gets
+# ONE, plus a sub-key section.
 # ---------------------------------------------------------------------------
 cbor_keys:
   1:  { name: proto_ver,      type: uint,  note: "HELLO/WELCOME: protocol major version" }
@@ -113,7 +193,7 @@ cbor_keys:
   8:  { name: catalog_etag,   type: bstr,  note: "8-byte truncated SHA-256 (§8.3)" }
   9:  { name: cfg_gen,        type: uint,  note: "u16 config generation (§4.2)" }
   10: { name: subscriptions,  type: array, note: "of {15:channel,12:rate,13:priority}" }
-  11: { name: publishes,      type: array, note: "of {15:channel,12:rate}" }
+  11: { name: publishes,      type: array, note: "of {15:channel,12:rate,42:burst} — HELLO wishes and PUBLISH (0x18) renegotiation (RFC-013)" }
   12: { name: rate_hz,        type: float, note: "requested rate; 0 = on-change only" }
   13: { name: priority,       type: uint,  note: "priority class 0–3" }
   14: { name: granted_rate_hz, type: float, note: "GRANT: applied rate after clamp (§10.2)" }
@@ -128,8 +208,8 @@ cbor_keys:
   23: { name: roles,          type: uint,  note: "granted access level (max of session)" }
   24: { name: deadman_ms,     type: uint,  note: "WELCOME: applied deadman timeout for this session" }
   25: { name: deadman_policy, type: uint,  note: "0=stop(decel) 1=hold 2=none — per active-source rules §11.3" }
-  26: { name: probe_result,   type: map,   note: "PROBE_REPORT: {bytes, span_ms, loss_pct, rtt_ms}" }
-  27: { name: chunks,         type: array, note: "CATALOG_REQ repair: missing chunk indices" }
+  26: { name: probe_result,   type: map,   note: "PROBE_REPORT: {bytes, span_ms, loss_pct, rtt_ms} — sub-keys in `probe_result_keys`" }
+  27: { name: chunks,         type: array, note: "BLOB_REQ repair: missing chunk indices. (Was 'CATALOG_REQ repair' pre-v1.0; the key is REUSED rather than replaced because catalog transfer is now blob namespace 0 — same meaning, generalized carrier.) Present WITH a full request = MALFORMED (RFC-022.6)." }
   28: { name: pin_proof,      type: bstr,  note: "PAIR_REQ: HMAC-SHA256(PIN, hello-nonce) truncated 16B (§12.2)" }
   29: { name: nonce,          type: bstr,  note: "WELCOME: 8-byte pairing nonce" }
   30: { name: precondition,   type: uint,  note: "INTENT: expected cfg_gen (CAS guard, §9.3)" }
@@ -138,7 +218,16 @@ cbor_keys:
   33: { name: event_kind,     type: uint,  note: "EVENT: kind discriminator per catalog entry" }
   34: { name: seq_of_state,   type: uint,  note: "EVENT: seq of the STATE twin frame it corresponds to (§9.4)" }
   35: { name: grants,         type: array, note: "WELCOME: batch grant results — array of {13:priority, 14:granted_rate_hz, 15:channel_id} (§6.3, §10.2)" }
-  36: { name: granted_publishes, type: array, note: "WELCOME: granted STREAM-ingress publishes — array of {14:granted_rate_hz, 15:channel_id} (§6.3, §10.5). Omitted when empty." }
+  36: { name: granted_publishes, type: array, note: "WELCOME / PUBLISH result: granted STREAM-ingress publishes — array of {14:granted_rate_hz, 15:channel_id, 42:burst} (§6.3, §10.5). Omitted when empty." }
+  # ---- public v1.0 additions (feasibility pass: 7 keys, all sub-mapped) ----
+  37: { name: identity,       type: map,   note: "WELCOME: hub identity (RFC-016) — sub-keys in `identity_keys`. Capability discovery is CATALOG introspection, not a list here: a feature exists iff its channels exist." }
+  38: { name: blob,           type: map,   note: "BLOB_REQ / BLOB_CHUNK / store CRUD intents: which blob, and its item fields (RFC-021) — sub-keys in `blob_keys`." }
+  39: { name: trust,          type: map,   note: "HELLO + WELCOME + AUTH: identity proof, signature material, token presentation, pairing modes (RFC-029/027) — sub-keys in `trust_keys`. Absent = the potato path: bearer token, no crypto, unchanged v1-draft handshake cost." }
+  40: { name: body,           type: map,   note: "EVENT: the kind-specific fields. Integer keys come from the CHANNEL'S CATALOG `schema`, exactly as INTENT's `value` (20) does — NOT from this global space. Grammar fix from the feasibility pass: with kind-specific fields at the top level, every device-authored EVENT channel (the motion-anomaly channel!) would have needed a registry PR to name its own fields — the precise coupling the self-describing catalog exists to prevent." }
+  41: { name: intent_seq,     type: uint,  note: "NACK: seq of the frame being rejected (RFC-001). Hubs SHOULD populate it whenever a specific inbound frame provoked the NACK; clients MUST tolerate its absence. Without it a client with two intents in flight on ONE channel cannot tell which was refused." }
+  42: { name: burst,          type: float, note: "publishes / granted_publishes ENTRY maps: token-bucket capacity in samples, decoupled from rate (RFC-013). Default = granted rate (today's behavior). Clamped to rate x max_burst_multiple and echoed like every wish. Exists because §10.5 made rate double as bucket depth, so a 2-4/s segment sender with a 25/s peak had to declare 30 Hz — lying to admission control to buy burst." }
+  43: { name: reboot_in_ms,   type: uint,  note: "ECHO `applied` (19): this accepted intent commits by rebooting, in about this many ms (RFC-020). The hub then GOODBYEs every session with REBOOTING; `boot_id` change handles the rest." }
+# 44–63 free in the core space. 64–127 reserved. 128+ experimental.
 
 # ---------------------------------------------------------------------------
 # WELCOME `limits` (key 22) sub-map integer keys — a separate tiny key space
@@ -160,7 +249,125 @@ probe_result_keys:
   4: { name: rtt_ms,         note: "measured round-trip time, ms" }
 
 # ---------------------------------------------------------------------------
+# WELCOME `identity` (key 37) sub-map integer keys — RFC-016. Strings are
+# legal here (control plane); this is tier 1 of RFC-026's three string tiers.
+# There is exactly ONE home for hub identity, deliberately: 0x0006 hub-status
+# had `fw version` in its note and the feasibility pass struck it, because two
+# homes drift and clients then disagree about which machine they are talking
+# to. Session-layer capabilities (pairing modes) live in `trust`; CHANNEL
+# capabilities are catalog introspection.
+# ---------------------------------------------------------------------------
+identity_keys:
+  1: { name: product,    note: "tstr: product/model identifier, e.g. 'slopdrive-32' (<=32 B)" }
+  2: { name: fw_version, note: "tstr: hub firmware version, e.g. '2.1.47' (<=24 B). Retires the mDNS-TXT-only exposure that made the MFP plugin label devices 'boot 0x...'. A change here SHOULD be surfaced to the user (RFC-029.3)." }
+  3: { name: hub_name,   note: "tstr: operator-assigned machine name (<=32 B). Writable as a str16/str32 setting (RFC-026) where the hub offers one." }
+  4: { name: info,       note: "map: OPTIONAL device-defined extras (hardware rev, build date...). Keys are device-defined tstr; the protocol never interprets them. Depth: WELCOME map -> identity map -> info map = 3, one under the §5.3 cap." }
+
+# ---------------------------------------------------------------------------
+# `blob` (key 38) sub-map integer keys — RFC-021. One vocabulary shared by:
+#   * BLOB_REQ (0x1A)      — namespace/store_id/slot/generation select WHAT;
+#                            top-level `chunks` (27) makes it a repair request
+#   * BLOB_CHUNK (0x1B)    — raw plane, but its fixed header carries the SAME
+#                            identity fields, named here so the two stay aligned
+#   * store CRUD INTENTs   — save/load/delete/rename carry slot/name/kind/payload
+# `payload` is OPAQUE to the protocol layer: a bstr the spec NEVER decodes.
+# RFC-028's depth and allocation budget explicitly does NOT extend inside it;
+# a client that decodes one has stepped above the protocol boundary. Imports
+# larger than max_frame ride BLOB chunks, never fragmented INTENTs.
+# ---------------------------------------------------------------------------
+blob_keys:
+  1:  { name: ns,          note: "uint: which blob space — see `blob_namespaces`. (Named `ns`, not `namespace`: the generated C++ constant would otherwise be a keyword. Prose and CDDL may say 'namespace'.)" }
+  2:  { name: store_id,    note: "uint u8: which store within blob_namespaces.store; absent/0 for the catalog namespace. Declared by the store's STORE-class catalog entry." }
+  3:  { name: slot,        note: "uint u8: item index within the store, 0..capacity-1" }
+  4:  { name: generation,  note: "uint u16: the roster generation this request/response is consistent with. Lets a client notice its enumeration went stale mid-transfer." }
+  5:  { name: name,        note: "tstr: item name, <= the store's declared name_max" }
+  6:  { name: kind,        note: "tstr: namespaced payload kind, e.g. 'pattern.frayd'. The hub validates kind + size on import and NACKs INVALID_VALUE; it never inspects the payload itself." }
+  7:  { name: payload,     note: "bstr: the opaque item document (<= preset_item_max_bytes / the store's per_item_max). Present on save-with-payload (= import); absent on save means 'capture CURRENT live state'." }
+  8:  { name: chunk_index, note: "uint: 0-based index of this chunk" }
+  9:  { name: chunk_count, note: "uint: total chunks in this transfer" }
+  10: { name: total_bytes, note: "uint: total encoded byte length being transferred (lets a receiver size/reject before assembling — RFC-028 no-unbounded-allocation)" }
+
+# ---------------------------------------------------------------------------
+# `trust` (key 39) sub-map integer keys — RFC-029 (+ RFC-027 mode advert).
+# Present in HELLO (client_ver, client_nonce, sig_request), WELCOME
+# (welcome_sig, pairing_modes), AUTH (token_proof, presentation_mode) and
+# PAIR_GRANT (hub_pubkey).
+#
+# WEIGHT COVENANT: every key here is OPTIONAL and the mandatory client floor
+# is unchanged from v1-draft — same parser, zero required crypto, 24 bytes of
+# stored identity. A coin-cell remote omits the whole map and pairs by
+# physical ceremony.
+# ---------------------------------------------------------------------------
+trust_keys:
+  1: { name: client_ver,        note: "tstr: HELLO — client software version (<=24 B). The CHANGE TRIPWIRE: an observed version change drops a paired device to RECOGNIZED-PENDING (admitted at `watch`, granted role suspended, re-approval surfaced to configure sessions). HONESTY CLAUSE, normative: self-reported, therefore a tripwire and NOT attestation — a deliberately malicious update lies and keeps its token. The real bounds are role scoping, instant revocation, roster visibility and the role-exempt safety ops." }
+  2: { name: client_nonce,      note: "bstr: HELLO — 8 bytes of CLIENT entropy. The hub signs client_nonce || session_id || boot_id. This was a feasibility-pass BLOCKER: without client entropy the WELCOME signature is replayable from one captured handshake and an evil twin passes verification." }
+  3: { name: sig_request,       note: "bool: HELLO — 'please sign my nonce'. Signing is ON REQUEST because the S3 has no ECC accelerator (mbedtls software ECDSA: sign ~30-80 ms, one uninterruptible call, never inline in a WS handler), so potato handshakes must stay instant. Absent/false = no signature, no cost. A request is NOT a promise: a hub with no keypair answers with silence, and silence is a conformant answer — only a client that PINNED a key (which it can only have received from that machine's own PAIR_GRANT) is entitled to read silence as failure, after hub_sig_timeout_ms." }
+  4: { name: hub_pubkey,        note: "bstr: PAIR_GRANT — SEC1-compressed P-256 public key (33 B). Delivered AT THE PAIRING CEREMONY, i.e. TOFU anchored at the moment physical presence was proven. P-256 because WebCrypto can verify it — the browser participates." }
+  5: { name: welcome_sig,       note: "bstr: WELCOME or HUB_SIG (0x1D) — deterministic ECDSA-P256 (RFC 6979) signature over the 16-byte string client_nonce(8) || session_id(u32 LE) || boot_id(u32 LE). A clone machine copies every identity string and fails this; the client MUST surface 'not your machine' and withhold intents. Potato clients paired by physical ceremony MAY skip verification. TWO DELIVERY POINTS, ONE MEANING: inline in WELCOME where a hub can sign without stalling its own tick, otherwise deferred in HUB_SIG once the hub's own low-priority worker has produced it. Signature material and client handling are identical either way; a client accepts whichever arrives first and ignores a second." }
+  6: { name: token_proof,       note: "bstr: AUTH — HMAC-SHA256(token, WELCOME nonce) truncated to 16 B. Costs ONE extra round trip per connect; that is the honest price. The 'previous-session nonce' shortcut was DROPPED by the feasibility pass as replay-unsafe (undefined rotation point, and §6.3 makes a successful replay EVICT the real client)." }
+  7: { name: presentation_mode, note: "uint: how the client presents its token — 0 = bearer (raw 16 B in HELLO; legal, the potato floor stays a memcpy), 1 = proof (AUTH, RECOMMENDED for anything with SHA-256, i.e. everyone but coin cells). v1 transports are cleartext, so bearer is sniffable by a passive LAN observer; the roster records which mode a device uses, making security posture visible." }
+  8: { name: pairing_modes,     note: "uint: WELCOME — BITMASK of `pairing_modes` this hub currently offers, RE-EVALUATED PER SESSION so a mode that is only transiently available (RFC-027(c)'s push-to-pair window) is advertised only while it is actually open. RFC-027.3 said 'WELCOME limits/identity map'; it lands here instead because it is session-security capability, and `limits` is sized caps while `identity` is who-you-are. Window state is thus observable in-band by any watch session." }
+
+# ---------------------------------------------------------------------------
+# Token PRESENTATION modes (u8) — `trust`.presentation_mode (RFC-029 item 6),
+# recorded per device in the trust ledger so security posture is VISIBLE.
+#
+# THE WEIGHT COVENANT LIVES HERE. `bearer` is the mandatory floor and the
+# default: raw token in HELLO, one memcpy, zero crypto, one round trip. `proof`
+# is RECOMMENDED for anything that already has SHA-256 (browser/WebCrypto, C#,
+# every ESP32) and is never required of anyone.
+# ---------------------------------------------------------------------------
+presentation_modes:
+  0: { name: bearer, note: "raw 16-byte token in HELLO. LEGAL, DEFAULT, and the potato floor — a coin-cell client does exactly this and nothing more. v1 transports are cleartext, so a passive LAN observer who captures one HELLO owns the credential until it is revoked; §12.1 excludes that attacker, and this mode accepts that ceiling knowingly." }
+  1: { name: proof,  note: "HMAC-SHA256(key = token, message = the WELCOME nonce) truncated to 16 B, presented in an AUTH (0x1C) frame after WELCOME. The token itself NEVER crosses the wire, so a sniffer captures a one-time proof and not the credential. Costs exactly one extra round trip per connect (HELLO -> WELCOME -> AUTH -> GRANT); the client is at `watch` in between, which is the correct posture for a client that has not yet proved anything. The 'reuse the previous session's nonce to skip the round trip' shortcut was DROPPED as replay-unsafe — see trust_keys.token_proof." }
+
+# ---------------------------------------------------------------------------
+# Trust-ledger ITEM key space (RFC-029 item 2, RFC-027.4) — the CBOR map that
+# encodes ONE paired device, carried as a BLOB item of the `paired-devices`
+# STORE (0x000C) in blob_namespaces.store.
+#
+# WHY THIS IS REGISTERED AT ALL, when RFC-021 says store payloads are opaque
+# bstr the protocol layer never decodes: preset payloads are DEVICE content and
+# genuinely opaque. The trust ledger is PROTOCOL content — RFC-029 names its
+# fields, any configure client must render and act on them, and "revoke device
+# 3" has to mean the same thing on every hub. So the store MACHINERY is reused
+# verbatim (chunking, repair, generation, caps — all free) while this one
+# store's item grammar is agreed here. A hub with no trust ledger simply never
+# declares the 0x000C entry.
+#
+# BUDGET: 8 + 16 + 16 + 24 + 4 + 4 + 4x1 byte fields ~= 96 B encoded, x
+# paired_devices_max (8) ~= 770 B, inside trust_ledger_max_bytes (1900, one NVS
+# page). That is the whole reason this is a blob store and not a packed STATE
+# roster — the feasibility pass measured 2-7 entries per 242 B snapshot.
+# ---------------------------------------------------------------------------
+trust_ledger_keys:
+  1:  { name: instance_id,       note: "bstr: the device's 8-byte stable identity (§6.1) — the ledger's primary key, and the value a `session_admin_ops` revoke/pair_approve names." }
+  2:  { name: kind,              note: "tstr: the `client_kind` this device presented (<=16 B, HELLO key 2). Recorded so a roster can say 'mfp-plugin' rather than a hex blob." }
+  3:  { name: name,              note: "tstr: the `client_name` this device presented (<=16 B here; HELLO allows 32 and the ledger truncates, same rule as the 0x0002 roster's str16)." }
+  4:  { name: version,           note: "tstr: the `trust`.client_ver observed when the role was last approved (<=24 B). The value the RFC-029 item-2 tripwire compares each HELLO against. Absent/empty means the device never reported one, and a device that reports NO version can never trip the wire — stated plainly because it is a real gap, not an oversight." }
+  5:  { name: first_seen,        note: "uint: UNIX epoch seconds when this device was first paired, or 0 for unknown. ZERO IS THE HONEST DEFAULT AND WILL BE COMMON: the protocol's only clock is hub-boot-relative and wraps in ~71 minutes (§7.2), so a hub can fill this in only if the APPLICATION has a wall clock (SNTP) and pushes it in. The library never invents one." }
+  6:  { name: last_seen,         note: "uint: UNIX epoch seconds of the most recent HELLO from this device, or 0 for unknown. Same wall-clock caveat as first_seen." }
+  7:  { name: role,              note: "uint: the granted `access_levels` value. While `state` is recognized_pending this is the SUSPENDED role — what the device gets back if a configure session re-approves it, not what it currently has." }
+  8:  { name: state,             note: "uint: a `trust_states` value." }
+  9:  { name: presentation_mode, note: "uint: the `trust`.presentation_mode this device last used (0 bearer / 1 proof). RFC-029.6 requires the roster to record it: a device pairing over cleartext with a raw bearer token has a different security posture than one presenting an HMAC proof, and posture the operator cannot SEE is posture the operator cannot fix." }
+  10: { name: pairing_mode,      note: "uint: the single `pairing_modes` BIT this device paired through (1 knock_approve / 2 pin_proof / 4 push_to_pair). The audit trail RFC-027 leans on instead of a hard tier ceiling: a configure grant issued through a push-to-pair window is visible as exactly that." }
+
+# ---------------------------------------------------------------------------
+# Blob namespaces (u8) — `blob`.namespace (RFC-021). ONE transfer verb for the
+# whole protocol instead of a per-feature clone of the chunking machinery.
+# 0–127 spec-governed, 128–255 device-defined.
+# ---------------------------------------------------------------------------
+blob_namespaces:
+  0: { name: catalog, note: "the hub's channel catalog (§8.4). store_id/slot absent. This is the ONLY namespace with a READY concept (CATALOG_READY 0x19) — you cannot decode STATE without the catalog, but nothing gates on a preset." }
+  1: { name: store,   note: "items in a catalog-declared STORE-class channel: store_id picks the store, slot picks the item. Presets, saved positions, limit profiles, recordings, the trust ledger — all the same machinery, for free. Unused is unproblem." }
+
+# ---------------------------------------------------------------------------
 # session-events channel (0x0007) event_kind values (§9.4, §11.4).
+#
+# Device-authored EVENT channels enumerate their own kinds in their catalog
+# entry; a SPEC-CORE channel's kinds must be agreed here or hub and client
+# will disagree. The two other spec-core EVENT channels (0x0008 log,
+# 0x000B pairing-events) get their own kind tables directly below.
 # ---------------------------------------------------------------------------
 session_event_kinds:
   1: { name: takeover,       note: "control source ownership transferred (§11.4)" }
@@ -168,17 +375,193 @@ session_event_kinds:
   3: { name: session_left,   note: "a session ended (any reason)" }
 
 # ---------------------------------------------------------------------------
+# log channel (0x0008) event_kind values (RFC-017).
+#
+# ONE KIND: a log EVENT only ever announces "a line arrived" — the per-field
+# content (level/tag/hub-ms/message) rides `body` (key 40), schema'd by the
+# channel's own catalog entry exactly like every other EVENT (device-authored
+# or spec-core; see cbor_keys[40]'s note). A "dropped-entries" NOTIFICATION
+# kind was considered and rejected: §9.4 already gives EVERY EVENT channel a
+# generic visible drop counter (`events_dropped` on hub-status 0x0006, per
+# §9.4/§16.2) — a per-channel "dropped" kind here would duplicate that home,
+# the same one-home reasoning RFC-016 already applied to fw_version. SlopLog's
+# OWN ring-level loss count (a record dropped before it ever became a wire
+# EVENT — `sloplog::Record::lost`) is carried honestly as a `body` field on
+# the next entry that DOES get published (mirroring what SerialSink already
+# prints, "(+N lost)") — that is catalog-schema territory, not a registry
+# event_kind.
+# ---------------------------------------------------------------------------
+log_event_kinds:
+  1: { name: entry, note: "a log line was published (fields ride `body`: level, tag, hub-ms, message)" }
+
+# ---------------------------------------------------------------------------
+# pairing-events channel (0x000B) event_kind values (RFC-027/029). EVENT twin
+# of pending-pairing STATE (0x000A) and the paired-devices store (0x000C/D).
+# A generic client renders these as notifications; none of them is a safety
+# latch, so none needs a STATE twin under §9.4's duality rule.
+# ---------------------------------------------------------------------------
+pairing_event_kinds:
+  1: { name: knocked,            note: "a PAIR_REQ joined the pending list (0x000A) — knock-and-approve or PIN mode (RFC-027.2)" }
+  2: { name: granted,            note: "a pending knock (or an existing device's re-approval) was granted a role, via PAIR_GRANT or the 0x0009 admin surface" }
+  3: { name: denied,             note: "a pending knock was denied by a `configure` session" }
+  4: { name: expired,            note: "a pending knock's window elapsed unanswered (pairing_window_default_s)" }
+  5: { name: window_opened,      note: "a pairing association window opened (push-to-pair boot gesture, or a mode newly advertised in `trust`.pairing_modes)" }
+  6: { name: window_closed,      note: "the pairing association window closed" }
+  7: { name: revoked,            note: "a paired device's token was revoked from the trust ledger (RFC-018 admin surface, store 0x000C)" }
+  8: { name: recognized_pending, note: "RFC-029 item 2: a paired device's observed `client_ver` changed; state dropped trusted -> RECOGNIZED-PENDING (admitted at watch, granted role suspended pending re-approval)" }
+
+# ---------------------------------------------------------------------------
+# safety-events channel (0x000E) event_kind values (§9.4 duality, §5.5, §11.2).
+#
+# THE EDGE HALF of the safety pair. 0x0003 answers "what is latched right now";
+# these answer "something just changed, and here is what". A client that has
+# both never has to poll and never has to infer a transition by diffing
+# snapshots it may have been shed out of.
+#
+# Emitted on TRANSITIONS ONLY. Repeats of an already-latched ESTOP re-broadcast
+# the STATE — that is §11.2's only loss-recovery mechanism and it must keep
+# working — but they do NOT re-emit the edge.
+#
+# Deliberately NOT here: a kind for the RFC-025c `modes` byte (manual override /
+# limit bypass). Those are latched MODES, not stop edges; they live in the same
+# snapshot for rendering reasons, and giving them an edge kind would imply an
+# operator action a hub-side reconciliation (an e-stop dropping override as a
+# side effect) did not have. If a mode edge is ever genuinely wanted it is an
+# additive kind here, which is normal evolution.
+# ---------------------------------------------------------------------------
+safety_event_kinds:
+  1: { name: estop_latched, note: "the ESTOP bit went 0 -> 1 (§5.5). `body` carries word/cause/owner_session/estop_seq. Cause is a `safety_causes` value; `estop_seq` is the §5.5 per-INITIATION sequence, so repeats of one initiation share it." }
+  2: { name: estop_cleared, note: "the ESTOP bit went 1 -> 0 via §11.2's guarded clear (`safety_ops::estop_clear` + the hub's and delegate's preconditions). Clearing never restarts motion; this edge says the latch is gone, never that the machine moved." }
+  3: { name: stop_latched,  note: "one or more of STOP / HOLD / PAUSE went 0 -> 1. `body.level` is the bitmask of the bits that NEWLY set (safety word bits 1/2/3), so one edge reports one operator action even when it sets several. Cause distinguishes an operator `stop` (user) from a §11.3 deadman (deadman) from a teardown loss policy (session_loss) — which is the whole reason this edge is worth having: all three look identical in the snapshot." }
+  4: { name: stop_cleared,  note: "one or more of STOP / HOLD / PAUSE went 1 -> 0 (`resume`, or a STOP cleared by an accepted new motion intent per §11.1). `body.level` is the bitmask of the bits that NEWLY cleared." }
+
+# ---------------------------------------------------------------------------
+# Trust-ledger entry states (u8) — the `state` field of a paired-devices item
+# (RFC-029 item 2). A revoked device has NO entry, so revocation is an absence,
+# never a third state: the ledger is the authorization list, and something on
+# the authorization list that is not authorized is a footgun.
+# ---------------------------------------------------------------------------
+trust_states:
+  0: { name: trusted,            note: "paired, and the version observed at the last HELLO matches the version recorded when the role was approved. The granted role applies in full." }
+  1: { name: recognized_pending, note: "RFC-029 item 2's tripwire fired: this device presented a DIFFERENT `client_ver` than the ledger recorded. The session is admitted at `watch`, the granted role is SUSPENDED (not revoked), and a re-approval is surfaced to configure sessions via 0x000A/0x000B. HONESTY CLAUSE, normative: the version is SELF-REPORTED, so this catches an honest update and nothing else — a deliberately malicious update lies about its version and keeps its token. The real bounds on a hostile client are role scoping, instant revocation, roster visibility and the role-exempt safety ops. Do not let a UI imply this is attestation." }
+
+# ---------------------------------------------------------------------------
+# Log severity levels (u8) — log channel (0x0008) `body.level` (RFC-017).
+#
+# MIRRORS lib/sloplog's `sloplog::Level` enum NUMBER-FOR-NUMBER so the
+# firmware bridge (AppLog -> log EVENT) is a straight `uint8_t(level)` cast,
+# never a translation table. `sloplog::Level` also declares `Off = 6`, but
+# Off is a FLOOR sentinel (setFloor() / a sink's floor argument) — push()/
+# logf() reject any record at or above it, so no wire record's level field
+# can ever read 6. It is deliberately NOT registered here: registering it
+# would imply a log line can arrive "at Off", which is a contradiction.
+# ---------------------------------------------------------------------------
+log_levels:
+  0: { name: trace, note: "sloplog::Level::Trace — SLOGT" }
+  1: { name: debug, note: "sloplog::Level::Debug — SLOGD" }
+  2: { name: info,  note: "sloplog::Level::Info — SLOGI" }
+  3: { name: warn,  note: "sloplog::Level::Warn — SLOGW" }
+  4: { name: error, note: "sloplog::Level::Error — SLOGE" }
+  5: { name: fatal, note: "sloplog::Level::Fatal — SLOGF" }
+
+# ---------------------------------------------------------------------------
 # safety-intents channel (0x0005) op codes — `value` map key 1 (§11).
+#
+# ROLE EXEMPTION (RFC-025b, normative): `estop` (6) and `stop` (2) are
+# role-EXEMPT — ANY session may send them, including `watch`. This is §11.2's
+# "safety outranks authorization" generalized: the wrong guess here means the
+# person standing in the room cannot stop the machine. Every other op requires
+# `control`. Exempt ops are still §9.3 rate-limited; watch-tier stop spam is a
+# named, bounded, ACCEPTED risk in §12.1.
+#
+# Per-op access is expressible in the catalog as of v1.0 (schema-field gains
+# optional `access`) — without it, role-exempt ops would force the whole
+# channel to `watch` access and a generic RFC-009 renderer would offer
+# hold/pause/takeover to every viewer, discovering otherwise only by NACK.
+# That violates grey-never-hide.
 # ---------------------------------------------------------------------------
 safety_intent_ops:
-  1: { name: estop_clear, note: "clear the ESTOP latch (§11.2 conditions apply; NACK CLEAR_REFUSED otherwise)" }
-  2: { name: stop,        note: "controlled decel stop (§11.1)" }
-  3: { name: hold,        note: "position hold (§11.1)" }
-  4: { name: pause,       note: "pattern pause (§11.1)" }
-  5: { name: resume,      note: "resume from HOLD/PAUSE (§11.1)" }
+  1:  { name: estop_clear,  note: "clear the ESTOP latch (§11.2 conditions apply; NACK CLEAR_REFUSED otherwise). Requires `control`." }
+  2:  { name: stop,         note: "controlled decel stop (§11.1). ROLE-EXEMPT." }
+  3:  { name: hold,         note: "position hold (§11.1). Requires `control`. The HUB latches all four levels in 0x0003 — delegate acceptance is what triggers the latch; a hub whose delegate does not implement this NACKs UNSUPPORTED_OP, which is discoverable and honest (RFC-025a)." }
+  4:  { name: pause,        note: "pattern pause (§11.1). Requires `control`." }
+  5:  { name: resume,       note: "resume from HOLD/PAUSE (§11.1). Requires `control`." }
+  6:  { name: estop,        note: "ASSERT e-stop (RFC-010). ROLE-EXEMPT. The hub treats it exactly as a valid 0xE5 frame: latch, cause=user, publish 0x0003, EVENT twin. The raw 0xE5 frame stays as the deframed-path/relay guarantee; this op is the trivially-implementable client path — without it the red button silently degrades to a decel-stop, which is why this gated port-81 deletion." }
+  7:  { name: override_on,  note: "engage manual override (RFC-025c). Requires `control`. Override/bypass are SAFETY-domain state, not rail-UI state: they render near the rail but other surfaces need them, so they live in the 0x0003 snapshot (appended byte) and are written here." }
+  8:  { name: override_off, note: "release manual override. Requires `control`." }
+  9:  { name: bypass_on,    note: "engage limit bypass (RFC-025c). Requires `control`. The per-move `bypass` key on a motion INTENT is unaffected and stays as-is." }
+  10: { name: bypass_off,   note: "release limit bypass. Requires `control`." }
+
+# ---------------------------------------------------------------------------
+# session-admin channel (0x0009) `value` map key 1 — the ADMIN VERB SPACE
+# (RFC-018 eviction + RFC-027/029 trust administration).
+#
+# ONE CHANNEL, NOT THREE. Eviction, pairing approval and revocation are all
+# "an authorized operator changing who may do what", so they share one access
+# floor (`configure`), one §9.3 rate limiter, one idempotency ring, and one
+# place a generic RFC-009 renderer looks to build an admin surface. Splitting
+# them would have burned two more spec-core channel ids to re-implement the
+# same dispatch three times, and would have let a hub end up authorizing
+# "approve a pairing" differently from "evict a session" — which is one
+# authorization decision wearing two hats.
+#
+# THE TRUSTED SURFACE IS A TIER, NOT AN APP (operator ruling, RFC-027): nothing
+# anywhere may special-case "the WebUI approves". Any `configure` session —
+# phone, CLI, another machine, the WebUI — reaches every op here, and §12.2's
+# old "admin granted only via the hub's own UI" sentence is struck by RFC-027
+# precisely so that is true.
+#
+# CEILING RULING (operator, 2026-07-25): a configure session may grant UP TO
+# ITS OWN TIER, configure included. That is conventional admin behaviour; the
+# audit trail is the paired-device roster (0x000C/D records which mode and
+# which role), not a hard ceiling that would make the first admin unable to
+# make a second.
+#
+# `value` map: key 1 = op (this table), plus the op's own arguments —
+# key 2 = session_id (u32), key 3 = instance_id (bstr 8), key 4 = role
+# (access_levels). Those are the CHANNEL'S OWN catalog schema keys, exactly
+# like every other INTENT channel; they are not global cbor_keys.
+# ---------------------------------------------------------------------------
+session_admin_ops:
+  1: { name: evict,        note: "RFC-018: GOODBYE the session named by `session_id` with SESSION_EVICTED. Runs the full §6.8/RFC-005 teardown — the evicted session's source ownership is released under its §11.3 loss policy exactly as if it had crashed, because 'no unmonitored path to motion' does not get an exception for admin actions. Evicting your OWN session is legal and is just a rude GOODBYE to yourself." }
+  2: { name: pair_approve, note: "RFC-027(a): approve the pending knock named by `instance_id` at `role`, issuing PAIR_GRANT {token, role} to the knocker. ALSO the RFC-029 item-2 RE-APPROVAL verb: applied to a device in `recognized_pending` it re-records the observed version and restores the suspended role — approving a knock and re-trusting a changed device are the same decision ('this identity may do this'), so they are the same op rather than two that could drift." }
+  3: { name: pair_deny,    note: "RFC-027(a): drop the pending knock named by `instance_id` without issuing a token; emits pairing_events `denied`. On a `recognized_pending` device this is a REVOKE (op 4) in effect — deny means 'no', and leaving a suspended entry in the ledger after an operator said no would be a lie the roster tells forever." }
+  4: { name: revoke,       note: "RFC-027(4)/029: delete `instance_id` from the trust ledger. Revocation is PROTOCOL, not a WebUI feature — that is the entire point of putting it here. Takes effect at the next HELLO (an already-live session keeps the role it was admitted with until it reconnects or is evicted; use evict to end it now). Emits pairing_events `revoked`." }
+
+# ---------------------------------------------------------------------------
+# Safety cause codes (u8) — ONE taxonomy, two wire homes: the ESTOP frame's
+# `cause` byte (§5.5, frame type 0xE5) and the 0x0003 safety STATE snapshot's
+# latched `cause` field (§11.1: "cause (user / deadman / fault / relay)").
+# An ESTOP's initiating cause and the cause a STOP/ESTOP is CURRENTLY latched
+# for are the same four-then-five-value enum.
+#
+# RFC-022.3: value 4 `session_loss` is NEW. Before it, `hub_impl.hpp` had no
+# distinct code for "the owning session went away" — GOODBYE, rude detach,
+# either eviction, and slot reuse (RFC-005's teardownSession(), §6.8) all
+# hard-coded cause=1 (deadman). That is a real bug, not just a naming gap: an
+# operator closing their browser tab got blamed on a deadman-TIMEOUT in every
+# subscriber's UI and log line. `deadman` (1) now means ONLY "the §11.3
+# silence window actually elapsed"; every other teardown path latches
+# `session_loss` (4) instead.
+# ---------------------------------------------------------------------------
+safety_causes:
+  0: { name: user,         note: "operator-initiated (physical button, UI, safety-intents `estop`/`stop`) — §5.5" }
+  1: { name: deadman,      note: "§11.3 deadman window actually elapsed (silence timeout, not some other way the session ended — see session_loss)" }
+  2: { name: fault,        note: "hub/driver-detected fault" }
+  3: { name: relay,        note: "relay-originated (segment-local safety event) — §5.5" }
+  4: { name: session_loss, note: "RFC-022.3: the owning session ended by ANY non-deadman teardown path (GOODBYE, rude detach, either eviction, slot reuse) — §6.8 / RFC-005's teardownSession() loss policy. Was misreported as cause=deadman before this value existed." }
 
 # ---------------------------------------------------------------------------
 # NACK / GOODBYE reason codes (u16, ranged).
+#
+# ONE SPACE, NOT TWO (RFC-022.2, ruled by the feasibility pass): GOODBYE
+# `code` values are drawn from THIS table. A separate `goodbye_codes` space
+# was considered and rejected because §4.3's unknown-code handling is a RANGE
+# fallback ("0x04xx means a safety refusal I don't recognize") — two
+# overlapping spaces make the range of an unknown code ambiguous, so a
+# forward-compatible receiver could not classify it. Codes usable as a GOODBYE
+# reason say so in their note. (Two shipped clients had already hand-reused
+# 0x0107 for this; the registry was simply behind them.)
 # ---------------------------------------------------------------------------
 nack_codes:
   # 0x00xx — protocol
@@ -196,6 +579,9 @@ nack_codes:
   0x0106: { name: DUPLICATE_INSTANCE,   note: "instance_id already in live session; old session evicted instead — see §6.8" }
   0x0107: { name: NORMAL_CLOSURE,       note: "clean voluntary teardown (GOODBYE code, either direction) — not an error" }
   0x0108: { name: DEADMAN_TIMEOUT,      note: "hub-initiated session teardown: silence exceeded the deadman window (§11.3, GOODBYE code)" }
+  0x0109: { name: REBOOTING,            note: "hub is committing a change by rebooting and is closing every session first (RFC-020/022.2, GOODBYE code). Preceded by an ECHO carrying reboot_in_ms; on return the changed boot_id tells clients what happened." }
+  0x010A: { name: READY_TIMEOUT,        note: "session never sent CATALOG_READY within catalog_ready_timeout_ms (RFC-015, GOODBYE code). Needed because liveness reaping NEVER fires on a client that PINGs happily but never finishes adopting the catalog — it would hold a slot forever with both planes gated shut." }
+  0x010B: { name: NOT_READY,            note: "frame refused because the session has not sent CATALOG_READY yet (RFC-015). READY gates BOTH planes: pre-READY INTENTs are NACK'd, not queued, because a client acting before it has adopted the retained safety latch breaks §11.5(2)." }
   # 0x02xx — subscription / QoS
   0x0200: { name: UNKNOWN_CHANNEL,      note: "channel id not in catalog" }
   0x0201: { name: ACCESS_DENIED,        note: "channel access level above session role" }
@@ -204,7 +590,7 @@ nack_codes:
   # 0x03xx — intent
   0x0300: { name: CONFLICT,             note: "precondition (cfg_gen CAS) failed" }
   0x0301: { name: RATE_LIMITED,         note: "ingress intent rate exceeded" }
-  0x0302: { name: INVALID_VALUE,        note: "outside schema min/max or wrong type" }
+  0x0302: { name: INVALID_VALUE,        note: "outside schema min/max or wrong type; also a store import whose kind or size the hub refuses (RFC-021.5)" }
   0x0303: { name: UNSUPPORTED_OP,       note: "intent op not implemented on this hub" }
   # 0x04xx — safety refusals (UIs SHOULD render these distinctly)
   0x0400: { name: ESTOP_ACTIVE,         note: "refused while e-stop latched" }
@@ -214,22 +600,151 @@ nack_codes:
   0x0404: { name: TAKEOVER_REQUIRED,    note: "control exists; retry with takeover flag" }
   0x0405: { name: CLEAR_REFUSED,        note: "e-stop clear conditions not met (§11.2)" }
   # 0x05xx — transfer
-  0x0500: { name: CHUNK_UNAVAILABLE,    note: "catalog chunk index out of range" }
+  0x0500: { name: CHUNK_UNAVAILABLE,    note: "blob chunk index out of range, or the requested namespace/store/slot does not exist (generalized from 'catalog chunk' by RFC-021 — the catalog is now namespace 0)" }
   0x0501: { name: REASSEMBLY_TIMEOUT,   note: "fragment reassembly abandoned (5 s)" }
   0x0502: { name: ETAG_MISMATCH,        note: "static-profile client etag != hub catalog etag" }
 
 # ---------------------------------------------------------------------------
 # Packed payload field types (catalog schema `type` for STREAM/STATE layouts).
+#
+# Types 8–10 are RFC-026's string tier 2: FIXED-WIDTH, ZERO-PADDED UTF-8,
+# register-map style. Fixed width is the whole point — packed layouts ban
+# variable-length fields because every field's offset must be static and
+# evolution must stay append-only. A shorter string is NUL-padded to width; a
+# reader stops at the first NUL or the width, whichever comes first.
+#
+#   * STREAM sample layouts stay STRING-FREE. The motion hot path never pays
+#     for text (RFC-026 tier 3).
+#   * A `secret`-flagged string SHOULD be str16, or write-only with a presence
+#     bit: a `secret str32` burns 13% of a 242 B snapshot to communicate one
+#     bit of "is it set" (the value itself never appears in STATE — RFC-009.5).
 # ---------------------------------------------------------------------------
 packed_field_types:
-  0: { name: u8 }
-  1: { name: i8 }
-  2: { name: u16 }
-  3: { name: i16 }
-  4: { name: u32 }
-  5: { name: i32 }
-  6: { name: f32 }
-  7: { name: bitfield8, note: "bit meanings enumerated in catalog entry" }
+  0:  { name: u8 }
+  1:  { name: i8 }
+  2:  { name: u16 }
+  3:  { name: i16 }
+  4:  { name: u32 }
+  5:  { name: i32 }
+  6:  { name: f32 }
+  7:  { name: bitfield8, note: "bit meanings enumerated in catalog entry" }
+  8:  { name: str16, note: "16 bytes, zero-padded UTF-8 (RFC-026). The default string width — session-roster names, device names, secret settings." }
+  9:  { name: str32, note: "32 bytes, zero-padded UTF-8 (RFC-026)" }
+  10: { name: str64, note: "64 bytes, zero-padded UTF-8 (RFC-026). 26% of a 242 B snapshot — use deliberately." }
+
+# ---------------------------------------------------------------------------
+# Setting categories (u8) — catalog channel-entry `category` (RFC-009.2).
+# Two tiers, mirroring the channel-id range split:
+#   0–127   SPEC-REGISTERED here, with a canonical order. A client gets
+#           consistent placement, iconography and translation across every
+#           hub it ever meets.
+#   128–255 DEVICE-DEFINED. The hub MUST supply `category_label`; clients
+#           render these as additional tabs AFTER the spec set, ordered by id.
+#
+# A category SPANS CHANNELS: `user` and `user-2` merge into one tab. That is
+# the answer to a category outgrowing one 242 B snapshot (about 58 f32 or 115
+# u16 settings, INCLUSIVE of enabled_mask bytes).
+#
+# Presentation order is authoring order and carries NO wire metadata: tabs in
+# registry order then device ids; within a tab, channels ascending by id and
+# fields in layout order. SlopSync describes what things ARE, never how they
+# LOOK — there is no widget field, deliberately.
+# ---------------------------------------------------------------------------
+setting_categories:
+  0: { name: device,      note: "identity, network, storage, firmware — what the machine IS" }
+  1: { name: user,        note: "everyday operating preferences" }
+  2: { name: limits,      note: "safety envelope: windows, ceilings, e-stop behaviour" }
+  3: { name: tuning,      note: "motion/planner internals; typically `advanced`-flagged" }
+  4: { name: diagnostics, note: "counters, telemetry, resets — mostly read-only fields" }
+
+# ---------------------------------------------------------------------------
+# Setting flags (bit values) — catalog field annotation `flags` (RFC-009.1).
+# ---------------------------------------------------------------------------
+setting_flags:
+  bit0: { name: advanced,         note: "hide behind an 'advanced' affordance by default; NEVER remove from the surface" }
+  bit1: { name: restart_required, note: "the applied value takes effect on the next boot (distinct from RFC-020's reboot_in_ms, which is the hub rebooting ITSELF to commit)" }
+  bit2: { name: secret,           note: "NORMATIVE (RFC-009.5): the value NEVER appears in STATE. The snapshot carries only a set/unset presence bit. Writes ride the paired INTENT normally and ECHO confirms application WITHOUT echoing the value. A WiFi password must never ride a retained snapshot that open-access `watch` sessions receive." }
+
+# ---------------------------------------------------------------------------
+# Field roles — the semantic vocabulary for catalog field annotation `role`
+# (RFC-006(b) mechanism, adopted by RFC-009.1 and RFC-019).
+#
+# WIRE ENCODING: `role` is a TSTR (<= 24 B), not a number. It has to be:
+# RFC-019's action roles carry a device-chosen suffix (`action.reset_stats`),
+# which no integer enum can express. The names below are the SPEC-REGISTERED
+# vocabulary; the dotted namespace is open, and unregistered roles are legal.
+#
+# DOCTRINE (binding, RFC-009): nothing is hardcoded as a REQUIREMENT; roles
+# are hardcoded as OPPORTUNITIES. A client that recognizes a registered role
+# MAY upgrade to a bespoke widget (a position scope, a dual-limit editor); a
+# client that does not MUST fall back to generic rendering by type +
+# constraints. Fallback is mandatory, upgrades are optional. An unknown role
+# is never an error.
+#
+# FRAMING (RFC-006 as corrected by RFC-008): limits discovery exists for
+# DISPLAY and OPTIONAL pre-adaptation. A client MUST NOT be required to reason
+# about feasibility to produce good motion — the hub owns that. Normative
+# language around these is MAY, never SHOULD.
+#
+# CONVENTIONS, not entries:
+#   * `<role>.peak` — the peak/hold companion of any telemetry role
+#     (`telemetry.current` + `telemetry.current.peak`). A client MAY render
+#     the pair as one tile; a client that doesn't shows two honest fields.
+#   * `action.<name>` — RFC-019. Marks an INTENT schema field as an ACTION
+#     (a verb) rather than a value: `action.reset_stats`, `action.home`,
+#     `action.ap_reset`. ECHO echoes the op. Reset classification (RFC-019/011):
+#     an action that restores CONFIGURATION bumps cfg_gen AND reset_gen; an
+#     action that only clears COUNTERS bumps reset_gen alone.
+# ---------------------------------------------------------------------------
+field_roles:
+  "limit.user.speed":    { note: "speed ceiling of the USER (manual) limit set. CEILING, never a target." }
+  "limit.user.accel":    { note: "accel ceiling of the user limit set" }
+  "limit.input.speed":   { note: "speed ceiling of the INPUT (machine-driven: patterns, streams, TCode) limit set" }
+  "limit.input.accel":   { note: "accel ceiling of the input limit set" }
+  "limit.input.jerk":    { note: "jerk ceiling of the input limit set" }
+  "window.min":          { note: "stroke window lower bound. Limits normalized against the window are window-relative and therefore MOVE when it does — which is exactly why this is a STATE field and not a one-shot WELCOME value." }
+  "window.max":          { note: "stroke window upper bound" }
+  "telemetry.position":  { note: "live actuator position" }
+  "telemetry.velocity":  { note: "live actuator velocity" }
+  "telemetry.current":   { note: "motor/drive current" }
+  "telemetry.power.bus": { note: "DC bus voltage or power" }
+  "telemetry.temp":      { note: "a temperature reading; the field's own name/unit says which" }
+  "telemetry.uptime":    { note: "hub uptime" }
+  "identity.name":       { note: "the writable machine-name setting (RFC-026 tier 2, str16/str32). Its READ-ONLY twin is WELCOME identity.hub_name." }
+  "meta.enabled_mask":   { note: "RFC-009.4: a bitfield8 field whose bit i gates the i-th setting-annotated field of the SAME layout. On-change, retained, conflated — every client greys from one ground truth. Disabled means GREY, never hide." }
+  "meta.reset_gen":      { note: "RFC-019: increments on every applied reset in this counter group, so ALL subscribers observe the reset, not just the sender who asked for it." }
+
+# ---------------------------------------------------------------------------
+# Pairing modes (bit values) — advertised as a BITMASK in WELCOME
+# `trust`.pairing_modes; the roster records a device's mode as the single set
+# bit it used (RFC-027.2). All three end in PAIR_GRANT {token, role}: ROLE IS
+# AN ATTRIBUTE OF THE GRANT, NEVER OF THE CEREMONY. There is zero-or-one PIN
+# on a hub, never per-tier secrets.
+# ---------------------------------------------------------------------------
+pairing_modes:
+  bit0: { name: knock_approve, note: "PRIMARY and capability-agnostic: bare PAIR_REQ with no proof -> bounded pending list (pairing_pending_max) exposed as protocol state (0x000A/0x000B) -> ANY `configure` session approves {instance_id, role}. The joiner needs one button and no display; the trusted surface is any configure client, which kills the circular 'the WebUI is trusted because it's the WebUI' dependency. RECOMMENDED partly because its approval surface shows the knocker's identity on hardware the attacker does not control." }
+  bit1: { name: pin_proof,     note: "the HMAC-PIN flow, for keyboard-bearing joiners when no configure session exists. HONESTY CLAUSE (normative): 4 digits = 10^4 offline HMACs, so a passive observer of the exchange can brute-force it. Acceptable for the v1 threat model (casual/drive-by prevention) and MUST be stated plainly. SPAKE2 is the reserved v2 upgrade — not v1, because WebCrypto has no PAKE and mandating it would exile the browser client." }
+  bit2: { name: push_to_pair,  note: "PHYSICAL-PRESENCE proof opens a short SINGLE-GRANT window. The spec requires the PROOF, not a GPIO — minimum hardware is NONE, because the power cord is the button: factory-fresh (zero configure tokens) boots claimable and the first knock gets `configure` (possession is root); later, N=3 consecutive boots with uptime <10 s opens the window (NVS counter only; cannot collide with a session, since any power loss already stops motion and forces re-home). A hub with a real button MAY bind it — UX upgrade, never required. FACTORY RESET MUST BE A HARDER GESTURE than opening pairing." }
+
+# ---------------------------------------------------------------------------
+# Procedure phases (u8) — the `phase` field of an RFC-020 procedure STATE
+# channel. One such channel per CONCURRENTLY-RUNNABLE procedure (full-snapshot
+# semantics can represent exactly one).
+#
+# RFC-020 does NOT fix a phase vocabulary and procedure channels are
+# device-authored, so only the LIFECYCLE phases — the ones any generic client
+# must be able to render without knowing the procedure — are registered here.
+# Intermediate steps ("writing register 3 of 3") are device-defined at 128+
+# and carry their own labels. Same two-tier shape as setting_categories.
+# ---------------------------------------------------------------------------
+procedure_phases:
+  0: { name: idle,      note: "not running; the reconnect-safe resting value" }
+  1: { name: running,   note: "started and in progress; `progress` 0–100 is advisory" }
+  2: { name: succeeded, note: "terminal, ok. Also EVENTed (RFC-020)." }
+  3: { name: failed,    note: "terminal, error — `result` u16 carries a nack_codes value or a device code" }
+  4: { name: aborted,   note: "terminal, cancelled or superseded" }
+# 5–127 reserved for spec. 128–255 device-defined intermediate steps (labelled
+# by the device; a client that does not recognize one renders it as 'running').
 
 # ---------------------------------------------------------------------------
 # Well-known limits & defaults. SPEC.md Appendix G mirrors this table; the
@@ -273,6 +788,51 @@ limits:
   probe_default_bytes: 8192
   probe_max_duration_ms: 1500
   catalog_max_entries: 256
+  catalog_max_entry_bytes: 4096     # feasibility pass: a 50-field FULLY annotated entry (defaults + options + groups + descs) encodes to ~8–10 KB, which violates RFC-028's no-unbounded-allocation rule for a per-entry decode buffer. Oversize is a catalog-AUTHORING error caught by conformance tooling, not a runtime surprise: the entry splits across channels or trims its descs.
   max_subscriptions_per_session: 64
+
+  # ---- per-binding max_frame defaults (RFC-021/033 finding: the registry had
+  # NO max_frame default at all, so every binding invented one) --------------
+  # max_frame is HEADER-INCLUSIVE: header_bytes + payload. That is what the
+  # reference hub already advertises (kFrameBufferCapacity), and what
+  # FRAME_TOO_LARGE is measured against. Payload budget = max_frame − 8.
+  # A hub MAY advertise less; it MUST NOT advertise more than its binding.
+  max_frame_ws: 512                 # = the reference hub's FrameBuffer capacity. Nothing NEEDS to be bigger: data-plane frames fit the 242 B floor by rule, blob chunks are catalog_chunk_payload + header, and oversized control frames fragment (§5.6). A fixed capacity keeps every queue slot heap-free on an ESP32.
+  max_frame_espnow: 250             # the hard ESP-NOW MTU. Payload 250−8 = 242 = min_transport_payload; that subtraction is where the 242 B STATE floor came from in the first place.
+  max_frame_ble: 244                # ATT_MTU 247 − 3 B notification header. Payload 236. A client stuck at the legacy 23 B MTU cannot carry a full STATE frame at all, which is why §13 SHOULD-mandates MTU exchange + data length extension before catalog transfer.
+  max_frame_serial: 512             # byte-stream binding: no MTU of its own, so it matches the WS/buffer figure rather than inventing a third number.
+
+  # ---- session lifecycle (RFC-015, RFC-024) --------------------------------
+  catalog_ready_timeout_ms: 15000   # RFC-015: a session that PINGs happily but never sends CATALOG_READY is GOODBYE'd READY_TIMEOUT. Liveness reaping alone NEVER fires on a pinging client, so without this a half-adopted session holds a slot forever with both planes gated shut. (READY itself is re-sent by the client at catalog_chunk_gap_timeout_ms until retained STATE arrives — idempotent, no handshake state machine.)
+  idle_reap_multiplier: 3           # RFC-024: reap a non-owning session after this multiple of ping_interval_idle_ms of silence. §6.5 said "MAY"; it was never implemented, so a viewer that went dark held a slot forever. Two liveness regimes, deliberately different: source OWNERS get the deadman window + §11.3 loss policy; everyone else gets idle reaping with no motion consequence.
+
+  # ---- streaming (RFC-013, RFC-014) ----------------------------------------
+  max_future_schedule_ms: 250       # RFC-014: for segment-class STREAM channels, t_base + t_off[i] IS the intended execution start of sample i; the hub clamps scheduling this far ahead. It was already the shipped fw 2.1.45 behaviour but registered NOWHERE — the MFP plugin carried a private SegLookaheadMs=120 against it. Interop by folklore, now by number. Recommended client lookahead <= half of this.
+  max_burst_multiple: 4             # RFC-013: cap on `burst` relative to granted rate. An unbounded client-declared burst would reintroduce the exact flood the token bucket exists to stop.
+
+  # ---- string caps (RFC-009, RFC-022.5, RFC-028.2) -------------------------
+  # Reconciliation, normative: SENDERS truncate diagnostic strings to the cap;
+  # RECEIVERS reject over-cap strings in STRUCTURAL payloads. `detail` is
+  # diagnostic — an over-length NACK detail is TRUNCATED, never suppressed
+  # (today's encoder returns 0 and the whole NACK silently vanishes).
+  desc_max_bytes: 128               # RFC-009: per-field user-facing description. Flash-resident on the hub, travels once, etag-cached forever.
+  nack_detail_max_bytes: 48         # RFC-022.5
+  option_label_max_bytes: 24        # RFC-009.1: one label in a single-select `options` array. Matches the 24 B field-name cap so a label is never the thing that overflows an entry.
+
+  # ---- stores & trust (RFC-021, RFC-027, RFC-029) --------------------------
+  preset_capacity_min: 32           # RFC-021.6: conformance FLOOR for a store's declared capacity, not a cap. 32 fray-d presets ~ 1.5 KB NVS; the mechanism does not blink at 256. Small hubs declare less, the catalog says so, clients render accordingly.
+  preset_item_max_bytes: 4096       # RFC-021.6 default per_item_max. The payload is opaque: the protocol never decodes it, so this is purely a transfer/storage budget.
+  paired_devices_max: 8             # trust-ledger capacity. 8, matching the library's kMaxPaired TODAY (the RFC text said 16; the feasibility pass corrected it against the source). Also equals default_max_clients_ws, which is a coincidence worth not reading meaning into.
+  trust_ledger_max_bytes: 1900      # feasibility pass: the whole encoded ledger is ONE blob in the existing `slopsync` NVS namespace and must stay inside a single ~2 KB NVS page. Written only on change, and gated on ota_active exactly like savePairing() — flash-cache writes during an OTA reset the chip.
+  pairing_pending_max: 4            # RFC-027.2a: bounded knock list. Bounded because it is an unauthenticated queue — the one surface a stranger can fill.
+  client_ver_max_bytes: 24          # HELLO `trust`.client_ver. Registered as a NUMBER (the trust_keys note only stated it in prose) because RFC-028.2 makes registry string caps a PARSE-TIME obligation: a receiver rejects an over-cap string in a structural payload rather than truncating and continuing, and it cannot enforce a cap that exists only in English. Same value bounds the trust-ledger `version` field, so the tripwire never compares a truncated value against a full one.
+  trust_ledger_name_max_bytes: 16   # trust-ledger `name`. 16 to match the 0x0002 roster's str16 rather than HELLO's 32: a roster label is a label, and the authoritative full name rides HELLO/0x0007 while the session lives.
+  trust_ledger_kind_max_bytes: 16   # trust-ledger `kind`. Equals the HELLO client_kind cap, so a kind is recorded whole and never appears to change between sessions.
+  hub_sig_timeout_ms: 3000          # RFC-029 item 1: how long a client that REQUESTED a hub signature AND holds a pinned key waits before calling the absence a failure. Generous on purpose — one software ECDSA is ~30-80 ms, but it is queued behind whatever the hub's low-priority worker is already doing, and a hub is allowed to be busy. A client with NO pinned key never applies this timeout: it has nothing to verify against, and silence from a hub that simply has no keypair is conformant, not suspicious.
+  auth_attempts_max: 3              # RFC-029 item 6: failed AUTH (0x1C) proofs a session may present before the hub stops answering and GOODBYEs it. Mirrors §12.2's "three failures close the PIN window" verbatim rather than inventing a second number. The proof is 16 bytes, so this is not what makes guessing infeasible — it is what stops an unauthenticated peer spending the hub's HMAC budget in a loop.
+
+  # ---- logging (RFC-017) ---------------------------------------------------
+  log_replay_depth_default: 32      # entries the hub MAY replay from its ring tail when a session is granted the log channel. THE named exception to §9.4's no-replay rule ("except where a channel's catalog entry declares a replay depth"); the actual depth is declared per-entry, this is the default. 32 lines is roughly "what went wrong just before I connected" without making every grant a burst.
+
   ws_subprotocol: "slopsync.v1"
   mdns_service: "_slopsync._tcp"

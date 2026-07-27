@@ -12,42 +12,68 @@ using namespace slopsync;
 using namespace slopsync::conformance;
 
 TEST_CASE("frozen mini-catalog passes conformance clean") {
-    auto r = checkCatalog(miniCatalog());
+    Catalog32 c;
+    REQUIRE(buildMiniCatalog(c));
+    auto r = checkCatalog(c);
     CHECK(r.ok());
     CHECK(r.count == 0);
 }
 
 TEST_CASE("D-03: oversized STATE layout is caught mechanically") {
-    auto c = miniCatalog();
-    // diag (0x0090) is STATE with 15 wire bytes; inflate a copy far past 242
-    // by claiming max fields of f32... 8*4=32B still fits, so widen the check
-    // by cloning diag into many entries is pointless — instead directly seed
-    // an impossible entry: kMaxFields f32s is 32B, so the ONLY way a real
-    // catalog trips 242 is via a larger kMaxFields build. Simulate by
-    // checking the comparison itself with a synthetic entry whose fieldCount
-    // is legal but whose declared type sizes sum over the limit is not
-    // constructible — so this test instead proves detection on a REDUCED
-    // limit boundary: temporarily assert the checker flags when wire size
-    // exceeds the constant by using a catalog whose entry we KNOW is 15B and
-    // comparing against the real rule (15 <= 242 passes), then verifying the
-    // violation path with the largest constructible layout (32B) against the
-    // rule's arithmetic via the report API on a hand-built violation.
-    // Practical path: build an entry with 8 f32 fields (32B) — passes 242 —
-    // then verify the checker's arithmetic by direct comparison:
-    auto& e = c.entries[5];
-    e.fieldCount = CatalogEntry::kMaxFields;
-    for (size_t i = 0; i < CatalogEntry::kMaxFields; ++i)
-        e.layout[i] = {.name = "f", .type = PackedFieldType::f32, .unit = "", .scale = 1.0f};
-    CHECK(e.layoutWireSize() == 32);
-    CHECK(checkCatalog(c).ok());  // 32 <= 242: no violation — rule arithmetic exercised
-    // The >242 case is unconstructible at kMaxFields=8 BY DESIGN (the library
-    // makes the violation impossible to author); the checker still guards
-    // catalogs built with larger kMaxFields forks. Document > enforce.
+    // Pre-M2b this case could only prove the checker's ARITHMETIC: kMaxFields
+    // was 8 and the widest numeric packed type is 4 B, so 8*4 = 32 B could not
+    // reach the 242 B floor and the violation was unconstructible. M2b raised
+    // kMaxFields to 64, so it is constructible now — and this case asserts the
+    // VIOLATION, exactly as its old note asked whoever raised it to do.
+    auto buildWide = [](Catalog32& c, size_t nF32) {
+        c.clear();
+        c.addEntry({.id = 0x0090, .name = "wide-diag",
+                    .cls = ChannelClass::STATE, .dir = Direction::h2c,
+                    .access = AccessLevel::watch, .maxRateHz = 2.0f,
+                    .defaultPriority = Priority::background});
+        for (size_t i = 0; i < nF32; ++i)
+            c.addLayoutField({.name = "f", .type = PackedFieldType::f32, .unit = "", .scale = 1.0f});
+    };
+
+    SUBCASE("the largest layout that still fits passes clean") {
+        Catalog32 c;
+        buildWide(c, 60);  // 60 * 4 = 240 <= 242
+        REQUIRE(c.ok());
+        CHECK(c.layoutWireSize(c.entries[0]) == 240);
+        CHECK(checkCatalog(c).ok());
+    }
+    SUBCASE("one field past the floor is reported StateTooLarge") {
+        Catalog32 c;
+        buildWide(c, 61);  // 61 * 4 = 244 > 242
+        REQUIRE(c.ok());
+        CHECK(c.layoutWireSize(c.entries[0]) == 244);
+        auto r = checkCatalog(c);
+        CHECK_FALSE(r.ok());
+        CHECK(r.has(ViolationKind::StateTooLarge));
+    }
+    SUBCASE("RFC-026 str64 blows the floor in four fields") {
+        Catalog32 c;
+        c.clear();
+        c.addEntry({.id = 0x0090, .name = "stringy",
+                    .cls = ChannelClass::STATE, .dir = Direction::h2c,
+                    .access = AccessLevel::watch, .maxRateHz = 0.0f,
+                    .defaultPriority = Priority::background});
+        for (size_t i = 0; i < 4; ++i)
+            c.addLayoutField({.name = "s", .type = PackedFieldType::str64, .unit = "", .scale = 1.0f});
+        REQUIRE(c.ok());
+        CHECK(c.layoutWireSize(c.entries[0]) == 256);
+        CHECK(checkCatalog(c).has(ViolationKind::StateTooLarge));
+    }
+
+    // The checker's own comparison, exercised directly against the boundary.
+    CHECK(size_t(242) <= limits::min_transport_payload);
+    CHECK_FALSE(size_t(243) <= limits::min_transport_payload);
 }
 
 TEST_CASE("seeded violations are each caught") {
     SUBCASE("ids not ascending") {
-        auto c = miniCatalog();
+        Catalog32 c;
+    buildMiniCatalog(c);
         std::swap(c.entries[0], c.entries[1]);
         auto r = checkCatalog(c);
         CHECK_FALSE(r.ok());
@@ -57,7 +83,8 @@ TEST_CASE("seeded violations are each caught") {
         CHECK(found);
     }
     SUBCASE("empty name") {
-        auto c = miniCatalog();
+        Catalog32 c;
+    buildMiniCatalog(c);
         c.entries[2].name = "";
         auto r = checkCatalog(c);
         CHECK_FALSE(r.ok());
@@ -65,14 +92,16 @@ TEST_CASE("seeded violations are each caught") {
         CHECK(r.violations[0].channel_id == 0x0082);
     }
     SUBCASE("zero fields") {
-        auto c = miniCatalog();
+        Catalog32 c;
+    buildMiniCatalog(c);
         c.entries[1].fieldCount = 0;
         auto r = checkCatalog(c);
         CHECK_FALSE(r.ok());
         CHECK(r.violations[0].kind == ViolationKind::NoFields);
     }
     SUBCASE("core channel misclassified") {
-        auto c = miniCatalog();
+        Catalog32 c;
+    buildMiniCatalog(c);
         c.entries[0].cls = ChannelClass::STREAM;  // 0x0003 safety must be STATE
         auto r = checkCatalog(c);
         CHECK_FALSE(r.ok());
@@ -81,4 +110,129 @@ TEST_CASE("seeded violations are each caught") {
             if (r.violations[i].kind == ViolationKind::CoreChannelMisclass) found = true;
         CHECK(found);
     }
+}
+
+// ============================================================================
+// M2b — the checks that came in with RFC-009 annotations, STORE entries, and
+// the per-entry byte cap.
+// ============================================================================
+
+TEST_CASE("M2b: a well-formed STORE entry is clean; a malformed one is caught") {
+    SUBCASE("clean") {
+        Catalog32 c;
+        c.addEntry({.id = channels::paired_devices, .name = "paired-devices",
+                    .cls = ChannelClass::STORE, .dir = Direction::h2c,
+                    .access = AccessLevel::configure, .maxRateHz = 0.0f,
+                    .defaultPriority = Priority::normal});
+        c.addStoreDescriptor({.storeId = 1, .kind = "trust.ledger",
+                              .capacity = uint16_t(limits::paired_devices_max),
+                              .perItemMax = 192, .nameMax = 24});
+        REQUIRE(c.ok());
+        CHECK(checkCatalog(c).ok());
+    }
+    SUBCASE("a STORE entry with no descriptor describes nothing") {
+        Catalog32 c;
+        c.addEntry({.id = channels::paired_devices, .name = "paired-devices",
+                    .cls = ChannelClass::STORE, .dir = Direction::h2c,
+                    .access = AccessLevel::configure, .maxRateHz = 0.0f,
+                    .defaultPriority = Priority::normal});
+        auto r = checkCatalog(c);
+        CHECK_FALSE(r.ok());
+        CHECK(r.has(ViolationKind::NoFields));
+    }
+    SUBCASE("a STORE entry whose descriptor does not resolve is WrongFieldForm") {
+        Catalog32 c;
+        c.addEntry({.id = channels::paired_devices, .name = "paired-devices",
+                    .cls = ChannelClass::STORE, .dir = Direction::h2c,
+                    .access = AccessLevel::configure, .maxRateHz = 0.0f,
+                    .defaultPriority = Priority::normal});
+        c.addStoreDescriptor({.storeId = 1, .kind = "trust.ledger",
+                              .capacity = 8, .perItemMax = 192, .nameMax = 24});
+        c.entries[0].fieldOffset = 99;  // hand-mutated: points outside the store pool
+        auto r = checkCatalog(c);
+        CHECK_FALSE(r.ok());
+        CHECK(r.has(ViolationKind::WrongFieldForm));
+    }
+}
+
+TEST_CASE("M2b: RFC-009 annotation coherence") {
+    SUBCASE("a device-defined category (>=128) without a label is caught") {
+        Catalog32 c;
+        c.addEntry({.id = 0x0080, .name = "motion",
+                    .cls = ChannelClass::STATE, .dir = Direction::h2c,
+                    .access = AccessLevel::watch, .maxRateHz = 0.0f,
+                    .defaultPriority = Priority::normal,
+                    .hasCategory = true, .category = 200});
+        c.addLayoutField({.name = "pos", .type = PackedFieldType::u16, .unit = "mm", .scale = 100.0f});
+        REQUIRE(c.ok());
+        auto r = checkCatalog(c);
+        CHECK(r.has(ViolationKind::CategoryLabelMissing));
+
+        c.entries[0].categoryLabel = "SlopDrive";
+        CHECK(checkCatalog(c).ok());
+    }
+    SUBCASE("a registered category (<128) needs no label") {
+        Catalog32 c;
+        c.addEntry({.id = 0x0080, .name = "motion",
+                    .cls = ChannelClass::STATE, .dir = Direction::h2c,
+                    .access = AccessLevel::watch, .maxRateHz = 0.0f,
+                    .defaultPriority = Priority::normal,
+                    .hasCategory = true, .category = setting_categories::limits});
+        c.addLayoutField({.name = "pos", .type = PackedFieldType::u16, .unit = "mm", .scale = 100.0f});
+        REQUIRE(c.ok());
+        CHECK(checkCatalog(c).ok());
+    }
+    SUBCASE("setting_key without the entry's setting_channel is unwritable") {
+        Catalog32 c;
+        c.addEntry({.id = 0x0081, .name = "machine-config",
+                    .cls = ChannelClass::STATE, .dir = Direction::h2c,
+                    .access = AccessLevel::watch, .maxRateHz = 0.0f,
+                    .defaultPriority = Priority::normal});
+        c.addLayoutField({.name = "user_speed", .type = PackedFieldType::f32, .unit = "mm/s",
+                          .scale = 1.0f, .settingKey = 3, .hasSettingKey = true});
+        REQUIRE(c.ok());
+        auto r = checkCatalog(c);
+        CHECK(r.has(ViolationKind::SettingChannelMissing));
+
+        c.entries[0].hasSettingChannel = true;
+        c.entries[0].settingChannel = 0x0101;
+        CHECK(checkCatalog(c).ok());
+    }
+}
+
+TEST_CASE("M2b: EntryTooLarge needs the scratch overload and fires at the cap") {
+    static const char kLongDesc[] =
+        "A deliberately long description, so that a wide entry blows the "
+        "per-entry byte cap the feasibility pass introduced. Padding.";
+
+    static Catalog32 c;
+    c.clear();
+    c.addEntry({.id = 0x0130, .name = "ap-params-fat",
+                .cls = ChannelClass::STREAM, .dir = Direction::h2c,
+                .access = AccessLevel::watch, .maxRateHz = 1.0f,
+                .defaultPriority = Priority::background});
+    for (size_t i = 0; i < CatalogEntry::kMaxFields; ++i) {
+        c.addLayoutField({.name = "parameter_with_a_name", .type = PackedFieldType::u16,
+                          .unit = "mm", .scale = 1.0f,
+                          .group = "A reasonably long group",
+                          .desc = kLongDesc,
+                          .role = "telemetry.position"});
+    }
+    REQUIRE(c.ok());
+
+    // Structural-only overload cannot see it — measuring means encoding, and
+    // this library never allocates.
+    CHECK_FALSE(checkCatalog(c).has(ViolationKind::EntryTooLarge));
+
+    static std::array<std::byte, limits::catalog_max_entry_bytes + 64> scratch{};
+    auto r = checkCatalog(c, scratch);
+    CHECK_FALSE(r.ok());
+    CHECK(r.has(ViolationKind::EntryTooLarge));
+    CHECK(r.violations[0].channel_id == 0x0130);
+
+    // The frozen fixture is nowhere near the cap, and the scratch overload
+    // agrees with the structural one on a clean catalog.
+    static Catalog32 mini;
+    buildMiniCatalog(mini);
+    CHECK(checkCatalog(mini, scratch).ok());
 }

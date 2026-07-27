@@ -86,9 +86,17 @@ export function pushWindow() {
   if (!windowReady || suppressPush) return;
   clearTimeout(windowPushTimer);
   windowPushTimer = setTimeout(() => {
+    var mn = Math.round(winMin), mx = Math.round(winMax);
+    // Prefer the SlopSync write plane (config-set 0x0101) when a granted session
+    // is live — it carries its own liveness (never gated by legacy telemetry
+    // staleness / __CMD_SUSPENDED, the reported window-drag defect) and echoes
+    // post-clamp APPLIED values the bridge adopts as ground truth. The legacy
+    // cmd path stays as the fallback when no session is live. :3
+    var ss = (typeof window !== 'undefined') ? window.__slopsync : null;
+    if (ss && ss.isLive() && ss.sendWindow(mn, mx)) return;
     cmd.send(OP_SET_WINDOW, {
-      range_min: Math.round(winMin),
-      range_max: Math.round(winMax),
+      range_min: mn,
+      range_max: mx,
       no_persist: true,
     });
   }, 60);
@@ -135,7 +143,12 @@ export function renderWindow() {
   // invisible until touched. :3
   if (onRailSync) onRailSync();
 
-  pushWindow();
+  // NO pushWindow() here — renderWindow is called from ADOPTION paths too
+  // (config push, machine-config STATE, setTravel), and an adoption that
+  // transmits is a feedback loop: device cfg echo → render → push → device
+  // bumps cfg_gen → republish → render → push → ... (the fw-2.1.45 config
+  // storm). Pushes are explicit at USER-action sites only: nudge/trim/
+  // setBound, the min/max inputs, and the rail drag handlers.
 }
 
 export function nudgeWindow(d) {
@@ -146,6 +159,7 @@ export function nudgeWindow(d) {
   if (nMax > TRAVEL) { nMax = TRAVEL; nMin = TRAVEL - span; }
   winMin = nMin; winMax = nMax;
   renderWindow();
+  pushWindow();
 }
 
 export function trim(which, d) {
@@ -153,6 +167,7 @@ export function trim(which, d) {
   if (which === 'min') winMin = clamp(winMin + dd, 0, winMax - 5);
   else winMax = clamp(winMax + dd, winMin + 5, TRAVEL);
   renderWindow();
+  pushWindow();
 }
 
 export function manualBounds() {
@@ -175,8 +190,8 @@ export function syncManualWindow() {
 // band handles these same values via rail.js's drag/resize → setWinMin/setWinMax.
 export function initWindowInputs() {
   const minNum = $('minNum'), maxNum = $('maxNum');
-  if (minNum) minNum.addEventListener('change', () => { winMin = clamp(parseInt(minNum.value) || 0, 0, winMax - 5); renderWindow(); });
-  if (maxNum) maxNum.addEventListener('change', () => { winMax = clamp(parseInt(maxNum.value) || 0, winMin + 5, TRAVEL); renderWindow(); });
+  if (minNum) minNum.addEventListener('change', () => { winMin = clamp(parseInt(minNum.value) || 0, 0, winMax - 5); renderWindow(); pushWindow(); });
+  if (maxNum) maxNum.addEventListener('change', () => { winMax = clamp(parseInt(maxNum.value) || 0, winMin + 5, TRAVEL); renderWindow(); pushWindow(); });
 
   // Bypass limits toggle
   const bypass = $('bypassLimits');
@@ -218,6 +233,7 @@ export async function setBound(which, position) {
   if (which === 'min') winMin = clamp(p, 0, winMax - 5);
   else winMax = clamp(p, winMin + 5, TRAVEL);
   renderWindow();
+  pushWindow();
   toast('Window ' + which + ' set to ' + p + ' mm', 'good', 'i-check');
 }
 

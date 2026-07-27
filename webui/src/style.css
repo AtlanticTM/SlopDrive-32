@@ -3148,3 +3148,49 @@ input.num.sv-reject {
 /* DIR seg selection not yet confirmed by the drive's readback */
 #svDirSeg button.sv-pending { border-color: var(--intent); color: var(--intent); }
 
+
+/* ==========================================================================
+   UNCONFIRMED VALUES — the visible half of the Ground Truth Doctrine
+   ==========================================================================
+   A control shows the DEVICE's value. When you change one, what you see is a
+   REQUEST until the hub echoes it, and it has to look like a request without
+   looking like a fault. `data-shadow` is stamped by core/shadow.js from the
+   same state machine that owns the retry/revert lifecycle, so the styling can
+   never disagree with the shadow layer about what is confirmed.
+
+   This matters more since fw 2.1.73: HTTP control is retired, so there is no
+   silent fallback path. An intent that fails now fails visibly, or it lies.
+
+   Escalation, quiet -> unmissable:
+     pending   (just sent)      amber underline, no motion, no colour shift
+     overdue1  (>500 ms)        amber value + a soft pulse
+     overdue2  (>2 s)           stronger amber, faster pulse
+     fault     (gave up)        red, static -- a pulsing failure reads as
+                                "still trying", which would be a second lie
+   ========================================================================== */
+[data-shadow] {
+  /* box-shadow, not border: borders reflow the layout and make every pending
+     value nudge its neighbours a pixel. This cannot move anything. */
+  box-shadow: inset 0 -2px 0 0 var(--pending, #d9a441);
+  transition: box-shadow 120ms ease-out, color 120ms ease-out;
+}
+[data-shadow="overdue1"],
+[data-shadow="overdue2"] { color: var(--pending, #d9a441); }
+[data-shadow="overdue1"] { animation: shadow-pulse 1.4s ease-in-out infinite; }
+[data-shadow="overdue2"] {
+  box-shadow: inset 0 -2px 0 0 var(--pending, #d9a441),
+              0 0 0 1px color-mix(in srgb, var(--pending, #d9a441) 45%, transparent);
+  animation: shadow-pulse 0.7s ease-in-out infinite;
+}
+[data-shadow="fault"] {
+  color: var(--bad, #e05252);
+  box-shadow: inset 0 -2px 0 0 var(--bad, #e05252);
+  animation: none;   /* terminal: it is not still trying */
+}
+@keyframes shadow-pulse { 0%,100% { opacity: 1; } 50% { opacity: 0.62; } }
+
+/* Respect the OS setting. The colour still carries the whole message; the
+   pulse is an amplifier, not the signal. */
+@media (prefers-reduced-motion: reduce) {
+  [data-shadow] { animation: none !important; }
+}

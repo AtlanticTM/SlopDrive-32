@@ -2,10 +2,11 @@
 // WireSelfTest — standalone golden-byte check for the SlopSync wire codec.
 //
 // It re-implements the exact encoder logic used by SlopSync.cs (CBOR writer,
-// frame header, HELLO / SUBSCRIBE / GOODBYE / CLOCK / STREAM builders) with NO
-// MultiFunPlayer / WPF dependencies, and byte-compares its output against golden
-// hex derived by RUNNING tools/slopsync_probe.py's own builder functions
-// (see scratchpad/gen_golden.py). This is the referee that proves the C# bytes
+// frame header, HELLO / SUBSCRIBE / GOODBYE / CLOCK / STREAM / BLOB_REQ /
+// INTENT builders and the BLOB_CHUNK header decoder) with NO MultiFunPlayer /
+// WPF dependencies, and byte-compares its output against golden hex derived by
+// RUNNING tools/slopsync_probe.py's own CBOR primitives (see
+// scratchpad/gen_golden_m5d.py). This is the referee that proves the C# bytes
 // match the live-verified Python probe.
 //
 // Build & run:  dotnet run --project clients/mfp-slopsync/WireSelfTest.csproj
@@ -14,6 +15,12 @@
 // NOTE: the encoder methods below are a deliberate verbatim copy of SlopSync.cs's
 // SlopWire/CborWriter. If you change the codec in SlopSync.cs, mirror it here and
 // re-run — both must keep matching the probe.
+//
+// M5d MOVED THE HELLO GOLDENS ON PURPOSE. Adding RFC-006's `subscriptions` (10)
+// wish to HELLO changes its bytes; that coupling is documented in RFC-006 and
+// this file is where it is enforced. The publish-only golden is KEPT as a
+// regression guard, so a hub or client that still speaks the old shape can be
+// checked against it.
 // =============================================================================
 using System;
 using System.Buffers.Binary;
@@ -40,19 +47,68 @@ internal static class Program
         }
     }
 
+    private static void CheckEq(string name, object actual, object expected)
+    {
+        bool ok = Equals(actual, expected);
+        Console.WriteLine($"  [{(ok ? "PASS" : "FAIL")}] {name}");
+        if (!ok)
+        {
+            Console.WriteLine($"        expected: {expected}");
+            Console.WriteLine($"        actual:   {actual}");
+            _fail++;
+        }
+    }
+
     private static int Main()
     {
         Console.WriteLine("SlopSync wire self-test (golden bytes from slopsync_probe.py):");
 
         var inst = new byte[] { 0, 1, 2, 3, 4, 5, 6, 7 };
+        // The frozen mini-catalog etag — a stable 8-byte value to exercise the
+        // etag paths with, not a live device's.
+        var etag = new byte[] { 0x21, 0xCB, 0x26, 0xC9, 0x4F, 0xB3, 0x88, 0xB5 };
 
+        // ---- HELLO: publish-only shape (pre-M5d) — regression guard ---------
         var hello = Wire.BuildHello("probe", "slopsync_probe.py", inst, 0x0084, 100.0);
-        Check("HELLO payload", hello,
+        Check("HELLO payload (publish-only, unchanged)", hello,
             "A50101026570726F62650371736C6F7073796E635F70726F62652E7079044800010203040506070B81A20CFA42C800000F1884");
 
         var helloFrame = Wire.EncodeFrame(0x00, 0, hello, 0);
-        Check("HELLO frame", helloFrame,
+        Check("HELLO frame (publish-only)", helloFrame,
             "0000000000003300A50101026570726F62650371736C6F7073796E635F70726F62652E7079044800010203040506070B81A20CFA42C800000F1884");
+
+        // ---- HELLO: the plugin's ACTUAL M5d shape ---------------------------
+        // subscriptions(10) rides in HELLO now: safety(0x0003) on-change
+        // critical + motion(0x0080) @20 Hz elevated, then the publish wish.
+        // Key order 1<2<3<4<10<11; wish-entry order 12<13<15 and 12<15.
+        var subs = new (ushort, double, byte)[] { (0x0003, 0.0, 3), (0x0080, 20.0, 2) };
+        var helloMfp = Wire.BuildHello("mfp", "MultiFunPlayer SlopSync", inst,
+            new (ushort, double)[] { (0x0084, 50.0) }, null, subs);
+        Check("HELLO payload (mfp Samples: subs + 1 publish)", helloMfp,
+            "A6010102636D667003774D756C746946756E506C6179657220536C6F7053796E63044800010203040506070A82A30CFA000000000D030F03A30CFA41A000000D020F18800B81A20CFA424800000F1884");
+
+        Check("HELLO frame (mfp Samples)", Wire.EncodeFrame(0x00, 0, helloMfp, 0),
+            "0000000000005000A6010102636D667003774D756C746946756E506C6179657220536C6F7053796E63044800010203040506070A82A30CFA000000000D030F03A30CFA41A000000D020F18800B81A20CFA424800000F1884");
+
+        // Segments mode wishes BOTH stream channels; the publishes array grows,
+        // nothing else moves.
+        var helloSeg = Wire.BuildHello("mfp", "MultiFunPlayer SlopSync", inst,
+            new (ushort, double)[] { (0x0084, 50.0), (0x0085, 30.0) }, null, subs);
+        Check("HELLO payload (mfp Segments: subs + 2 publishes)", helloSeg,
+            "A6010102636D667003774D756C746946756E506C6179657220536C6F7053796E63044800010203040506070A82A30CFA000000000D030F03A30CFA41A000000D020F18800B82A20CFA424800000F1884A20CFA41F000000F1885");
+
+        // ---- HELLO: RFC-015 cached-etag fast path ---------------------------
+        // catalog_etag(8) sits between instance_id(4) and subscriptions(10).
+        var helloEtag = Wire.BuildHello("mfp", "MultiFunPlayer SlopSync", inst,
+            new (ushort, double)[] { (0x0084, 50.0) }, null, subs, etag);
+        Check("HELLO payload (cached etag + subs + publish)", helloEtag,
+            "A7010102636D667003774D756C746946756E506C6179657220536C6F7053796E6304480001020304050607084821CB26C94FB388B50A82A30CFA000000000D030F03A30CFA41A000000D020F18800B81A20CFA424800000F1884");
+
+        // Every optional at once: token(5) then etag(8) then subs(10).
+        var helloAll = Wire.BuildHello("mfp", "MultiFunPlayer SlopSync", inst,
+            new (ushort, double)[] { (0x0084, 50.0) }, Encoding.UTF8.GetBytes("1234"), subs, etag);
+        Check("HELLO payload (token + etag + subs + publish)", helloAll,
+            "A8010102636D667003774D756C746946756E506C6179657220536C6F7053796E6304480001020304050607054431323334084821CB26C94FB388B50A82A30CFA000000000D030F03A30CFA41A000000D020F18800B81A20CFA424800000F1884");
 
         var clockReq = Wire.BuildClockRequest(0x11223344);
         Check("CLOCK request", clockReq, "44332211");
@@ -66,8 +122,17 @@ internal static class Program
         var sub = Wire.BuildSubscribe(new (ushort, double, byte)[] { (0x0003, 0.0, 3), (0x0080, 20.0, 2) });
         Check("SUBSCRIBE payload", sub, "A10A82A30CFA000000000D030F03A30CFA41A000000D020F1880");
 
-        var goodbye = Wire.BuildGoodbye(0x0107);
-        Check("GOODBYE payload", goodbye, "A110190107");
+        // Mid-session SUBSCRIBE for the ROLE-LOCATED limits channel. 0x0081 is
+        // the value on THIS device only — the plugin gets it from the catalog,
+        // the test just needs a concrete number to encode.
+        Check("SUBSCRIBE payload (role-located channel, on-change normal)",
+            Wire.BuildSubscribe(new (ushort, double, byte)[] { (0x0081, 0.0, 1) }),
+            "A10A81A30CFA000000000D010F1881");
+
+        // GOODBYE's code is NORMAL_CLOSURE from the NackCode vocabulary (§6.8),
+        // not a private literal.
+        var goodbye = Wire.BuildGoodbye(Wire.NackNormalClosure);
+        Check("GOODBYE payload (NackCode NORMAL_CLOSURE)", goodbye, "A110190107");
 
         // ---- Segments mode (0x0085) golden bytes ----------------------------
         // Hand-derived from the locked wire contract, same STREAM framing as
@@ -103,6 +168,69 @@ internal static class Program
             new (ushort, double)[] { (0x0084, 100.0) });
         Check("HELLO single-wish == list-of-one", helloListOfOne, Convert.ToHexString(hello));
 
+        // ====================================================================
+        // v1.0 BLOB TRANSFER (RFC-021) — CATALOG_REQ/CHUNK (0x09/0x0A) are
+        // RETIRED and their numbers burned; catalog is blob namespace 0.
+        // ====================================================================
+        // A bare catalog request is the EMPTY CBOR map: ns 0 is the default and
+        // store_id/slot are absent by rule, so generalizing transfer cost the
+        // common case exactly zero bytes.
+        Check("BLOB_REQ payload (bare catalog = empty map)", Wire.BuildCatalogRequest(), "A0");
+        Check("BLOB_REQ frame (bare catalog)", Wire.EncodeFrame(0x1A, 0, Wire.BuildCatalogRequest(), 0),
+            "1A00000000000100A0");
+        Check("BLOB_REQ payload (repair chunks 2,5,9)", Wire.BuildCatalogRepair(new[] { 2, 5, 9 }),
+            "A1181B83020509");
+        Check("BLOB_REQ payload (ns=1 store 1 slot 0)", Wire.BuildBlobReq(1, 1, 0),
+            "A11826A3010102010300");
+
+        // ---- CATALOG_READY (0x19) — RAW frame, payload = the 8 etag bytes ---
+        Check("CATALOG_READY frame (raw, 8 etag bytes)", Wire.EncodeFrame(0x19, 0, etag, 0),
+            "190000000000080021CB26C94FB388B5");
+
+        // ---- BLOB_CHUNK (0x1B) 14-byte identity header ----------------------
+        // h2c, so we only DECODE it — the golden proves this client reads the
+        // v1.0 header layout (was 8 bytes on the retired CATALOG_CHUNK).
+        var bcHex = "000000000700030036002B280000AABB";
+        var bc = Convert.FromHexString(bcHex);
+        if (!Wire.TryDecodeBlobChunk(bc, out var chunk))
+        {
+            Console.WriteLine("  [FAIL] BLOB_CHUNK header decode (returned false)");
+            _fail++;
+        }
+        else
+        {
+            CheckEq("BLOB_CHUNK header: ns", (int)chunk.Ns, 0);
+            CheckEq("BLOB_CHUNK header: generation", (int)chunk.Generation, 7);
+            CheckEq("BLOB_CHUNK header: chunk_index", (int)chunk.ChunkIndex, 3);
+            CheckEq("BLOB_CHUNK header: chunk_count", (int)chunk.ChunkCount, 54);
+            CheckEq("BLOB_CHUNK header: total_bytes", (long)chunk.TotalBytes, 10283L);
+            CheckEq("BLOB_CHUNK header: body length", chunk.Bytes.Length, 2);
+            Check("BLOB_CHUNK header: body bytes", chunk.Bytes, "AABB");
+        }
+        // A payload shorter than the header must be REFUSED, not mis-parsed.
+        CheckEq("BLOB_CHUNK header: 13-byte payload refused",
+            Wire.TryDecodeBlobChunk(new byte[13], out _), false);
+
+        // ====================================================================
+        // INTENT (§9.3) — and RFC-001's correlation rule.
+        // ====================================================================
+        // The hub stamps NACK.intent_seq from the REFUSED FRAME'S HEADER seq,
+        // so the plugin sets header.seq = intent_id. These two frames are the
+        // proof that both correlation keys name the same number.
+        var iWin = Wire.BuildIntent(0x0101, 7,
+            new (int, byte[])[] { (1, Wire.CborF32(20.0)), (2, Wire.CborF32(150.0)) });
+        Check("INTENT payload (config-set window 20/150)", iWin,
+            "A30F190101120714A201FA41A0000002FA43160000");
+        Check("INTENT frame (config-set, header seq == intent_id 7)",
+            Wire.EncodeFrame(0x0D, 0x0101, iWin, 7),
+            "0D00010107001500A30F190101120714A201FA41A0000002FA43160000");
+
+        var iHome = Wire.BuildIntent(0x0103, 3, new (int, byte[])[] { (1, Wire.CborUInt(1)) });
+        Check("INTENT payload (home op 1)", iHome, "A30F190103120314A10101");
+        Check("INTENT frame (home, header seq == intent_id 3)",
+            Wire.EncodeFrame(0x0D, 0x0103, iHome, 3),
+            "0D00030103000B00A30F190103120314A10101");
+
         Console.WriteLine();
         if (_fail == 0) { Console.WriteLine("ALL PASS"); return 0; }
         Console.WriteLine($"{_fail} FAILED"); return 1;
@@ -113,8 +241,13 @@ internal static class Program
 internal static class Wire
 {
     public const int KProtoVer = 1, KClientKind = 2, KClientName = 3, KInstanceId = 4, KToken = 5;
-    public const int KSubscriptions = 10, KPublishes = 11, KRateHz = 12, KPriority = 13;
-    public const int KChannelId = 15, KCode = 16;
+    public const int KCatalogEtag = 8, KSubscriptions = 10, KPublishes = 11, KRateHz = 12, KPriority = 13;
+    public const int KChannelId = 15, KCode = 16, KIntentId = 18, KValue = 20;
+    public const int KChunks = 27, KBlob = 38;
+    public const int BlobKNs = 1, BlobKStoreId = 2, BlobKSlot = 3, BlobKGeneration = 4;
+    public const int BlobNsCatalog = 0;
+    public const int BlobChunkHeaderBytes = 14;
+    public const ushort NackNormalClosure = 0x0107;
 
     public static byte[] EncodeFrame(byte type, ushort channel, ReadOnlySpan<byte> payload, ushort seq = 0, byte flags = 0)
     {
@@ -133,16 +266,34 @@ internal static class Wire
                       new (ushort ch, double rate)[] { (publishChannel, publishRateHz) }, token16);
 
     public static byte[] BuildHello(string clientKind, string clientName, byte[] instanceId,
-                                    IReadOnlyList<(ushort ch, double rate)> publishes, byte[] token16 = null)
+                                    IReadOnlyList<(ushort ch, double rate)> publishes, byte[] token16 = null,
+                                    IReadOnlyList<(ushort ch, double rate, byte prio)> subscribes = null,
+                                    byte[] catalogEtag = null)
     {
+        bool hasSubs = subscribes != null && subscribes.Count > 0;
+        bool hasEtag = catalogEtag != null && catalogEtag.Length > 0;
+
         var w = new Cbor();
-        int n = 4 + (token16 != null ? 1 : 0) + 1;
+        int n = 4 + (token16 != null ? 1 : 0) + (hasEtag ? 1 : 0) + (hasSubs ? 1 : 0) + 1;
         w.Map(n);
         w.U(KProtoVer); w.U(1);
         w.U(KClientKind); w.T(clientKind);
         w.U(KClientName); w.T(clientName);
         w.U(KInstanceId); w.B(instanceId);
         if (token16 != null) { w.U(KToken); w.B(token16); }
+        if (hasEtag) { w.U(KCatalogEtag); w.B(catalogEtag); }
+        if (hasSubs)
+        {
+            w.U(KSubscriptions);
+            w.Arr(subscribes.Count);
+            foreach (var (ch, rate, prio) in subscribes)
+            {
+                w.Map(3);
+                w.U(KRateHz); w.F((float)rate);
+                w.U(KPriority); w.U(prio);
+                w.U(KChannelId); w.U(ch);
+            }
+        }
         w.U(KPublishes);
         w.Arr(publishes.Count);
         foreach (var (ch, rate) in publishes)
@@ -185,6 +336,82 @@ internal static class Wire
         BinaryPrimitives.WriteUInt32LittleEndian(b, t0);
         return b;
     }
+
+    // ---- BLOB_REQ (0x1A, §8.4 / RFC-021) — key order chunks(27) < blob(38) --
+    public static byte[] BuildBlobReq(int ns = BlobNsCatalog, int? storeId = null, int? slot = null,
+                                      int? generation = null, IReadOnlyList<int> chunks = null)
+    {
+        bool hasChunks = chunks != null && chunks.Count > 0;
+        var sub = new List<(int key, long val)>();
+        if (ns != BlobNsCatalog) sub.Add((BlobKNs, ns));
+        if (storeId.HasValue) sub.Add((BlobKStoreId, storeId.Value));
+        if (slot.HasValue) sub.Add((BlobKSlot, slot.Value));
+        if (generation.HasValue) sub.Add((BlobKGeneration, generation.Value));
+
+        var w = new Cbor();
+        w.Map((hasChunks ? 1 : 0) + (sub.Count > 0 ? 1 : 0));
+        if (hasChunks)
+        {
+            w.U(KChunks);
+            w.Arr(chunks.Count);
+            foreach (var i in chunks) w.U(i);
+        }
+        if (sub.Count > 0)
+        {
+            w.U(KBlob);
+            w.Map(sub.Count);
+            foreach (var (k, v) in sub) { w.U(k); w.U(v); }
+        }
+        return w.ToArray();
+    }
+
+    public static byte[] BuildCatalogRequest() => BuildBlobReq();
+    public static byte[] BuildCatalogRepair(IReadOnlyList<int> indices) => BuildBlobReq(chunks: indices);
+
+    public readonly struct BlobChunk
+    {
+        public readonly byte Ns, StoreId, Slot;
+        public readonly ushort Generation, ChunkIndex, ChunkCount;
+        public readonly uint TotalBytes;
+        public readonly byte[] Bytes;
+        public BlobChunk(byte ns, byte store, byte slot, ushort gen, ushort idx, ushort count,
+                         uint total, byte[] bytes)
+        { Ns = ns; StoreId = store; Slot = slot; Generation = gen; ChunkIndex = idx; ChunkCount = count; TotalBytes = total; Bytes = bytes; }
+    }
+
+    public static bool TryDecodeBlobChunk(byte[] payload, out BlobChunk chunk)
+    {
+        chunk = default;
+        if (payload == null || payload.Length < BlobChunkHeaderBytes) return false;
+        var s = payload.AsSpan();
+        var body = new byte[payload.Length - BlobChunkHeaderBytes];
+        Array.Copy(payload, BlobChunkHeaderBytes, body, 0, body.Length);
+        chunk = new BlobChunk(
+            s[0], s[1], s[2],
+            BinaryPrimitives.ReadUInt16LittleEndian(s.Slice(4)),
+            BinaryPrimitives.ReadUInt16LittleEndian(s.Slice(6)),
+            BinaryPrimitives.ReadUInt16LittleEndian(s.Slice(8)),
+            BinaryPrimitives.ReadUInt32LittleEndian(s.Slice(10)),
+            body);
+        return true;
+    }
+
+    // ---- INTENT (§9.3) — {15:channel, 18:intent_id, 20:{value}} -------------
+    public static byte[] BuildIntent(ushort channelId, long intentId,
+                                     IReadOnlyList<(int key, byte[] encoded)> valueFields)
+    {
+        var w = new Cbor();
+        w.Map(3);
+        w.U(KChannelId); w.U(channelId);
+        w.U(KIntentId); w.U(intentId);
+        w.U(KValue);
+        w.Map(valueFields.Count);
+        foreach (var (key, enc) in valueFields) { w.U(key); w.Raw(enc); }
+        return w.ToArray();
+    }
+
+    public static byte[] CborF32(double v) { var w = new Cbor(); w.F((float)v); return w.ToArray(); }
+    public static byte[] CborUInt(long v) { var w = new Cbor(); w.U(v); return w.ToArray(); }
 
     public static byte[] BuildStreamBundle(uint tBase, IReadOnlyList<(ushort off, double target, double vel)> samples)
     {
@@ -249,5 +476,6 @@ internal sealed class Cbor
     public void B(ReadOnlySpan<byte> b) { Head(2, (ulong)b.Length); _ms.Write(b); }
     public void Arr(int c) => Head(4, (ulong)c);
     public void Map(int c) => Head(5, (ulong)c);
+    public void Raw(ReadOnlySpan<byte> encoded) => _ms.Write(encoded);
     public byte[] ToArray() => _ms.ToArray();
 }

@@ -1,0 +1,885 @@
+/* =========================================================================
+   SlopSync — "technical datasheet" theme for Material for MkDocs.
+
+   The reference point is a good component datasheet: warm paper, ink-black
+   text, one restrained spot colour, dense tables you can actually read a
+   column of numbers out of, and monospace wherever a number or an identifier
+   lives. Restrained and authoritative. Not flashy.
+
+   Both schemes are first-class. Material's built-in `default` and `slate`
+   schemes are retinted here rather than replaced, so every widget this site
+   does not style still inherits a sane value.
+
+   No web fonts (`font: false` in mkdocs.yml). System stacks only: the build
+   stays offline-capable and the site loads no third-party resource.
+   ========================================================================= */
+
+:root {
+  /* One heading/identifier face for the whole site. */
+  --ss-mono: ui-monospace, "SFMono-Regular", "SF Mono", "JetBrains Mono",
+             "Cascadia Mono", "Roboto Mono", Menlo, Consolas,
+             "DejaVu Sans Mono", monospace;
+  --ss-sans: system-ui, -apple-system, "Segoe UI", Roboto, "Helvetica Neue",
+             "Noto Sans", Arial, sans-serif;
+
+  --ss-radius: 2px;          /* squared off; datasheets are not rounded */
+  --ss-hairline: 1px;
+}
+
+/* ---------------------------------------------------------------- light -- */
+[data-md-color-scheme="default"] {
+  --ss-paper:        #faf9f5;   /* warm paper, not white, not grey */
+  --ss-surface:      #ffffff;
+  --ss-ink:          #15181c;
+  --ss-ink-muted:    #5b6168;
+  --ss-ink-faint:    #878d94;
+  --ss-rule:         #e0ddd4;
+  --ss-rule-strong:  #c8c4b8;
+  --ss-accent:       #8f5a12;   /* bronze — reads as "instrument", not "brand" */
+  --ss-accent-hot:   #b0700f;
+  --ss-accent-wash:  #f4ece0;
+  --ss-code-bg:      #f3f1ea;
+  --ss-zebra:        #f7f5ef;
+
+  --md-default-bg-color:            var(--ss-paper);
+  --md-default-fg-color:            var(--ss-ink);
+  --md-default-fg-color--light:     var(--ss-ink-muted);
+  --md-default-fg-color--lighter:   var(--ss-ink-faint);
+  --md-default-fg-color--lightest:  var(--ss-rule);
+  --md-typeset-color:               var(--ss-ink);
+  --md-typeset-a-color:             var(--ss-accent);
+  --md-accent-fg-color:             var(--ss-accent-hot);
+  --md-primary-fg-color:            #23262b;
+  --md-primary-bg-color:            #f6f4ee;
+  --md-code-bg-color:               var(--ss-code-bg);
+  --md-code-fg-color:               #24282d;
+  --md-footer-bg-color:             #23262b;
+  --md-footer-bg-color--dark:       #1a1d21;
+}
+
+/* ----------------------------------------------------------------- dark -- */
+[data-md-color-scheme="slate"] {
+  --ss-paper:        #14161a;
+  --ss-surface:      #1a1d22;
+  --ss-ink:          #e3e1dc;
+  --ss-ink-muted:    #9ba1a8;
+  --ss-ink-faint:    #767c83;
+  --ss-rule:         #2b2f36;
+  --ss-rule-strong:  #3d434b;
+  --ss-accent:       #d9a45a;
+  --ss-accent-hot:   #edb96f;
+  --ss-accent-wash:  #241d12;
+  --ss-code-bg:      #1e2127;
+  --ss-zebra:        #191c21;
+
+  --md-hue: 220;
+  --md-default-bg-color:            var(--ss-paper);
+  --md-default-fg-color:            var(--ss-ink);
+  --md-default-fg-color--light:     var(--ss-ink-muted);
+  --md-default-fg-color--lighter:   var(--ss-ink-faint);
+  --md-default-fg-color--lightest:  var(--ss-rule);
+  --md-typeset-color:               var(--ss-ink);
+  --md-typeset-a-color:             var(--ss-accent);
+  --md-accent-fg-color:             var(--ss-accent-hot);
+  --md-primary-fg-color:            #1a1d22;
+  --md-primary-bg-color:            var(--ss-ink);
+  --md-code-bg-color:               var(--ss-code-bg);
+  --md-code-fg-color:               #d7d4cd;
+  --md-footer-bg-color:             #101216;
+  --md-footer-bg-color--dark:       #0c0e11;
+}
+
+/* ============================================================ typography == */
+
+body,
+.md-typeset {
+  font-family: var(--ss-sans);
+  font-feature-settings: "kern" 1, "liga" 1, "tnum" 1;
+}
+
+.md-typeset {
+  font-size: 0.775rem;
+  line-height: 1.66;
+}
+
+/* Headings are the datasheet signature: monospace, tight, understated size
+   steps. A specification is navigated, not read like a novel. */
+.md-typeset h1,
+.md-typeset h2,
+.md-typeset h3,
+.md-typeset h4,
+.md-typeset h5,
+.md-typeset h6 {
+  font-family: var(--ss-mono);
+  font-weight: 600;
+  letter-spacing: -0.012em;
+  color: var(--ss-ink);
+}
+
+.md-typeset h1 {
+  font-size: 1.45rem;
+  line-height: 1.25;
+  margin: 0 0 0.5rem;
+  padding-bottom: 0.5rem;
+  border-bottom: 2px solid var(--ss-rule-strong);
+  color: var(--ss-ink);
+}
+
+.md-typeset h2 {
+  font-size: 1.06rem;
+  margin-top: 2.1rem;
+  padding-top: 0.55rem;
+  border-top: var(--ss-hairline) solid var(--ss-rule);
+}
+
+.md-typeset h3 {
+  font-size: 0.87rem;
+  margin-top: 1.5rem;
+  color: var(--ss-ink);
+}
+
+.md-typeset h4 {
+  font-size: 0.79rem;
+  text-transform: uppercase;
+  letter-spacing: 0.06em;
+  color: var(--ss-ink-muted);
+}
+
+/* Anchor permalinks: quiet until hovered. */
+.md-typeset .headerlink {
+  font-family: var(--ss-mono);
+  color: var(--ss-rule-strong);
+  opacity: 0;
+  transition: opacity 120ms ease;
+}
+.md-typeset :hover > .headerlink,
+.md-typeset .headerlink:focus {
+  opacity: 1;
+}
+
+/* Links: underlined on hover only, accent always. Datasheets do not shout. */
+.md-typeset a {
+  text-decoration: none;
+  border-bottom: var(--ss-hairline) solid transparent;
+  transition: border-color 120ms ease, color 120ms ease;
+}
+.md-typeset a:hover,
+.md-typeset a:focus {
+  color: var(--ss-accent-hot);
+  border-bottom-color: currentColor;
+}
+
+/* ================================================================ tables == */
+/* Dense, ruled, tabular figures. These carry the wire numbers, so they are the
+   most important element on the site. Rules instead of a card: a datasheet
+   table has hairlines, not a drop shadow. */
+
+.md-typeset table:not([class]) {
+  display: table;
+  width: 100%;
+  font-size: 0.7rem;
+  line-height: 1.5;
+  border: var(--ss-hairline) solid var(--ss-rule);
+  border-radius: var(--ss-radius);
+  box-shadow: none;
+  font-variant-numeric: tabular-nums;
+}
+
+.md-typeset table:not([class]) th {
+  position: sticky;
+  top: 0;
+  z-index: 1;
+  font-family: var(--ss-mono);
+  font-size: 0.63rem;
+  font-weight: 600;
+  text-transform: uppercase;
+  letter-spacing: 0.07em;
+  white-space: nowrap;
+  color: var(--ss-ink-muted);
+  background-color: var(--ss-surface);
+  border-bottom: 2px solid var(--ss-rule-strong);
+  padding: 0.5em 0.75em;
+}
+
+.md-typeset table:not([class]) td {
+  padding: 0.42em 0.75em;
+  border-top: var(--ss-hairline) solid var(--ss-rule);
+  vertical-align: top;
+}
+
+.md-typeset table:not([class]) tbody tr:nth-child(even) {
+  background-color: var(--ss-zebra);
+}
+.md-typeset table:not([class]) tbody tr:hover {
+  background-color: var(--ss-accent-wash);
+}
+
+/* First column of a registry table is a code, and codes never wrap. */
+.md-typeset table:not([class]) td:first-child > code {
+  white-space: nowrap;
+}
+
+/* Wide tables scroll inside themselves, never the page. */
+.md-typeset .md-typeset__table {
+  display: block;
+  overflow-x: auto;
+}
+
+/* ================================================================== code == */
+
+.md-typeset code,
+.md-typeset kbd,
+.md-typeset pre {
+  font-family: var(--ss-mono);
+}
+
+.md-typeset code {
+  font-size: 0.86em;
+  padding: 0.1em 0.34em;
+  border: var(--ss-hairline) solid var(--ss-rule);
+  border-radius: var(--ss-radius);
+  background-color: var(--ss-code-bg);
+}
+
+.md-typeset pre > code {
+  border: 0;
+  border-radius: 0;
+  padding: 0.7rem 0.9rem;
+}
+
+.md-typeset .highlight,
+.md-typeset pre {
+  border-radius: var(--ss-radius);
+}
+
+.md-typeset .highlight > pre {
+  border: var(--ss-hairline) solid var(--ss-rule);
+  border-radius: var(--ss-radius);
+}
+
+/* Tables carry code in every cell; the extra chrome would be noise there. */
+.md-typeset table:not([class]) code {
+  padding: 0 0.15em;
+  border: 0;
+  background-color: transparent;
+  color: var(--ss-ink);
+  font-weight: 500;
+}
+
+/* ============================================================ chrome/nav == */
+
+.md-header {
+  box-shadow: none;
+  border-bottom: var(--ss-hairline) solid var(--ss-rule);
+}
+[data-md-color-scheme="default"] .md-header {
+  border-bottom-color: rgba(0, 0, 0, 0.16);
+}
+
+.md-header__title,
+.md-tabs__link,
+.md-nav__title {
+  font-family: var(--ss-mono);
+  letter-spacing: -0.01em;
+}
+
+.md-tabs {
+  border-bottom: var(--ss-hairline) solid var(--ss-rule);
+}
+
+.md-nav {
+  font-size: 0.68rem;
+}
+
+.md-nav__item .md-nav__link--active {
+  font-weight: 600;
+  color: var(--ss-accent);
+}
+
+/* Section labels in the sidebar read as register headings. */
+.md-nav__item--section > .md-nav__link {
+  font-family: var(--ss-mono);
+  font-size: 0.66rem;
+  text-transform: uppercase;
+  letter-spacing: 0.08em;
+  color: var(--ss-ink-faint);
+}
+
+.md-search__form {
+  border-radius: var(--ss-radius);
+}
+
+.md-footer-meta {
+  font-size: 0.66rem;
+}
+
+/* ========================================================== admonitions === */
+/* Square, left-ruled, low chroma. */
+
+.md-typeset .admonition,
+.md-typeset details {
+  border: var(--ss-hairline) solid var(--ss-rule);
+  border-left: 3px solid var(--ss-rule-strong);
+  border-radius: var(--ss-radius);
+  box-shadow: none;
+  font-size: 0.74rem;
+}
+
+.md-typeset .admonition-title,
+.md-typeset summary {
+  font-family: var(--ss-mono);
+  font-size: 0.7rem;
+  font-weight: 600;
+  letter-spacing: 0.01em;
+}
+
+.md-typeset blockquote {
+  border-left: 3px solid var(--ss-rule-strong);
+  color: var(--ss-ink-muted);
+}
+
+/* Glossary tooltips: a dotted rule, so a defined term is discoverable but
+   never mistaken for a link. */
+.md-typeset abbr {
+  border-bottom: 1px dotted var(--ss-ink-faint);
+  cursor: help;
+  text-decoration: none;
+}
+
+/* ====================================================== register badges === */
+/* Rendered by overrides/main.html from each page's front matter. The register
+   tells a contributor which writing rules bind the page they are editing. */
+
+.ss-pagemeta {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 0.4rem;
+  align-items: center;
+  margin: 0 0 1.1rem;
+  padding: 0;
+}
+
+.ss-badge {
+  display: inline-flex;
+  align-items: baseline;
+  gap: 0.35em;
+  font-family: var(--ss-mono);
+  font-size: 0.58rem;
+  font-weight: 600;
+  text-transform: uppercase;
+  letter-spacing: 0.09em;
+  padding: 0.2em 0.55em;
+  border: var(--ss-hairline) solid var(--ss-rule-strong);
+  border-radius: var(--ss-radius);
+  color: var(--ss-ink-muted);
+  background-color: var(--ss-surface);
+  white-space: nowrap;
+}
+
+.ss-badge--ieee {
+  color: var(--ss-accent);
+  border-color: var(--ss-accent);
+  background-color: var(--ss-accent-wash);
+}
+
+.ss-badge--ste {
+  color: var(--ss-ink-muted);
+}
+
+.ss-badge--generated {
+  border-style: dashed;
+}
+
+.ss-badge--stub {
+  color: var(--ss-ink);
+  border-color: var(--ss-rule-strong);
+  background: repeating-linear-gradient(
+    135deg,
+    transparent 0 5px,
+    var(--ss-accent-wash) 5px 10px
+  );
+}
+
+/* Dictionary term metadata line: see-also plus provenance. */
+.md-typeset .ss-termmeta {
+  font-family: var(--ss-mono);
+  font-size: 0.63rem;
+  color: var(--ss-ink-faint);
+  margin-top: -0.4rem;
+  padding-bottom: 0.4rem;
+  border-bottom: var(--ss-hairline) dashed var(--ss-rule);
+}
+
+/* The Dictionary is long. Give each term room to breathe without a rule. */
+.md-typeset h3 + p > strong:first-child {
+  color: var(--ss-ink);
+}
+
+/* ======================================================= home page grid === */
+
+.ss-doors {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(15rem, 1fr));
+  gap: 0.9rem;
+  margin: 1.4rem 0 2rem;
+}
+
+.ss-door {
+  border: var(--ss-hairline) solid var(--ss-rule);
+  border-top: 3px solid var(--ss-accent);
+  border-radius: var(--ss-radius);
+  padding: 0.95rem 1rem 1rem;
+  background-color: var(--ss-surface);
+}
+
+.md-typeset .ss-door h3 {
+  margin: 0 0 0.35rem;
+  font-size: 0.82rem;
+  border: 0;
+  padding: 0;
+}
+
+.md-typeset .ss-door p {
+  margin: 0 0 0.5rem;
+  font-size: 0.72rem;
+  color: var(--ss-ink-muted);
+}
+
+.md-typeset .ss-door p:last-child {
+  margin-bottom: 0;
+}
+
+/* A short key/value block, styled like the parameter box at the top of a
+   datasheet page. Wrap the table in `<div class="ss-facts" markdown>`:
+   attr_list cannot attach a class to a table, and a trailing `{ .ss-facts }`
+   silently becomes an extra table ROW instead. */
+.md-typeset .ss-facts table:not([class]) {
+  border-left: 0;
+  border-right: 0;
+  border-radius: 0;
+}
+.md-typeset .ss-facts thead {
+  display: none;
+}
+.md-typeset .ss-facts td:first-child {
+  width: 12rem;
+  color: var(--ss-ink);
+  white-space: nowrap;
+  background-color: var(--ss-zebra);
+}
+
+/* =========================================================================
+   INSTRUMENT LAYER — the machine's own visual language, brought to the docs.
+   =========================================================================
+
+   The SlopDrive-32 web interface (webui/src/style.css, webui/src/core/theme.js)
+   encodes MEANING in two colours, and this site reuses that meaning exactly:
+
+       reality (blue)   measured truth. What the machine actually did, applied,
+                        or is reporting right now.
+       intent (purple)  a wish. What somebody asked for, before the machine has
+                        confirmed anything.
+
+   Amber and red are SAFETY. In the machine's interface they are the only
+   colours a theme may never restyle, because hazard must read the same on
+   every skin. The same rule holds here: they never carry a second meaning.
+
+   Someone who operates the machine should recognise these diagrams. Someone
+   who reads these diagrams first should recognise the machine.
+
+   WHAT IS *NOT* BORROWED, DELIBERATELY. The machine's interface is a dark
+   instrument panel, read at arm's length, in glances. Documentation is
+   long-form reading. So the instrument treatment is applied to the things
+   that ARE readouts — diagrams, byte strips, tables, code, numerals — and
+   running prose stays calm and highly legible in both schemes. Light mode is
+   a real light mode, not an inverted panel: the accent pair keeps its hue
+   relationship and drops in value until it has honest contrast on paper.
+   Where flair and readability disagreed, readability won.
+   ------------------------------------------------------------------------ */
+
+[data-md-color-scheme="default"] {
+  /* Re-tuned for a paper ground. The WebUI's #4DA6FF / #A78BFA are tuned for
+     a near-black panel and fail on paper (roughly 2.4:1 and 3.1:1 against
+     --ss-paper). These keep the blue/purple hue relationship and drop in
+     value to clear 4.5:1 for text and UI borders. */
+  --ss-reality:       #14539e;
+  --ss-reality-rule:  #6f9fd0;
+  --ss-reality-wash:  #e8f0f9;
+  --ss-intent:        #6234c4;
+  --ss-intent-rule:   #a48ce0;
+  --ss-intent-wash:   #efe9fb;
+  --ss-warn:          #8a5200;
+  --ss-warn-rule:     #d3a45e;
+  --ss-warn-wash:     #faf0dc;
+  --ss-bad:           #ab1f2c;
+  --ss-bad-rule:      #dc9aa0;
+  --ss-bad-wash:      #fbe9eb;
+
+  /* Recessed surface — a readout sits *in* the sheet, not on it. */
+  --ss-screen:        #f1efe7;
+  --ss-screen-inset:  inset 0 1px 3px rgba(21, 24, 28, 0.07);
+  --ss-bracket:       #b9b4a6;
+  --ss-bracket-hi:    var(--ss-accent);
+  --ss-glow-accent:   none;
+}
+
+[data-md-color-scheme="slate"] {
+  /* The machine's own values, unchanged: this is the instrument panel. */
+  --ss-reality:       #4da6ff;
+  --ss-reality-rule:  #3d80c2;
+  --ss-reality-wash:  #0f1d2c;
+  --ss-intent:        #a78bfa;
+  --ss-intent-rule:   #7059ba;
+  --ss-intent-wash:   #191533;
+  --ss-warn:          #f5b94d;
+  --ss-warn-rule:     #a3803c;
+  --ss-warn-wash:     #241c0f;
+  --ss-bad:           #ff4757;
+  --ss-bad-rule:      #b2404a;
+  --ss-bad-wash:      #2a1216;
+
+  --ss-screen:        #0d0f13;   /* the WebUI's --screen, one step off black */
+  --ss-screen-inset:  inset 0 2px 8px rgba(0, 0, 0, 0.7);
+  --ss-bracket:       #33373e;   /* the WebUI's --line-3 */
+  --ss-bracket-hi:    #454a54;   /* the WebUI's --line-4 */
+  --ss-glow-accent:   0 0 10px rgba(77, 166, 255, 0.35);
+}
+
+/* --------------------------------------------------------- link colour -- */
+/* Links take the theme accent in BOTH schemes. Material's default primary
+   (indigo) otherwise wins the link colour in slate, which puts a BLUE word in
+   running text — and blue means "measured truth" everywhere else on this
+   site. A link is navigation, not a semantic colour, so it must not borrow
+   one. Caught while checking diagram colour consistency in dark. */
+.md-typeset a {
+  color: var(--ss-accent);
+}
+
+/* ------------------------------------------------- recessed readouts ----- */
+/* Block code is a readout, so it sits in the recess. Inline code stays on the
+   surface: inside a sentence, a recess reads as a hole. */
+.md-typeset pre > code {
+  background-color: var(--ss-screen);
+  box-shadow: var(--ss-screen-inset);
+}
+
+/* Every number on this site is monospace with tabular figures already; make
+   the table body agree so columns of values line up like a datasheet. */
+.md-typeset table:not([class]) td {
+  font-variant-numeric: tabular-nums;
+}
+
+/* ------------------------------------------------- corner brackets ------- */
+/* Four two-sided 8 px corner marks, drawn with gradients so they follow the
+   palette (the machine draws the same marks with inline SVG, which cannot).
+   Applied to diagram surfaces and byte strips only — the panel signature,
+   used sparingly enough that it stays a signature. The `.mermaid` div is
+   generated by Material, so it cannot carry a utility class; it is named
+   here instead. */
+.ss-brackets,
+.md-typeset .mermaid,
+.md-typeset .ss-bytemap {
+  background-image:
+    linear-gradient(var(--ss-bracket-hi), var(--ss-bracket-hi)),
+    linear-gradient(var(--ss-bracket-hi), var(--ss-bracket-hi)),
+    linear-gradient(var(--ss-bracket), var(--ss-bracket)),
+    linear-gradient(var(--ss-bracket), var(--ss-bracket)),
+    linear-gradient(var(--ss-bracket), var(--ss-bracket)),
+    linear-gradient(var(--ss-bracket), var(--ss-bracket)),
+    linear-gradient(var(--ss-bracket), var(--ss-bracket)),
+    linear-gradient(var(--ss-bracket), var(--ss-bracket));
+  background-size:
+    9px 1px, 1px 9px,   /* top left  */
+    9px 1px, 1px 9px,   /* top right */
+    9px 1px, 1px 9px,   /* bottom left  */
+    9px 1px, 1px 9px;   /* bottom right */
+  background-position:
+    top left, top left,
+    top right, top right,
+    bottom left, bottom left,
+    bottom right, bottom right;
+  background-repeat: no-repeat;
+}
+
+/* ========================================================== figures ====== */
+/* A diagram is a numbered figure with a caption above and a conclusion below.
+   The counter is per page, and it is CSS-driven: nobody hand-numbers a
+   figure, so nobody can leave a stale number behind. */
+
+.md-typeset {
+  counter-reset: ss-fig;
+}
+
+.md-typeset .ss-cap {
+  counter-increment: ss-fig;
+  margin: 1.6rem 0 0.5rem;
+  padding-left: 0.65rem;
+  border-left: 2px solid var(--ss-accent);
+  font-size: 0.72rem;
+  line-height: 1.5;
+  color: var(--ss-ink-muted);
+}
+
+.md-typeset .ss-cap::before {
+  content: "FIG " counter(ss-fig, decimal-leading-zero) "\2002\00B7\2002";
+  font-family: var(--ss-mono);
+  font-size: 0.62rem;
+  font-weight: 600;
+  letter-spacing: 0.08em;
+  color: var(--ss-accent);
+}
+
+.md-typeset .ss-point {
+  margin: 0.55rem 0 1.7rem;
+  padding: 0.55rem 0.8rem;
+  border: var(--ss-hairline) solid var(--ss-rule);
+  border-left: 3px solid var(--ss-rule-strong);
+  border-radius: var(--ss-radius);
+  background-color: var(--ss-zebra);
+  font-size: 0.74rem;
+}
+
+.md-typeset .ss-point > strong:first-child {
+  font-family: var(--ss-mono);
+  font-size: 0.68rem;
+  text-transform: uppercase;
+  letter-spacing: 0.08em;
+  color: var(--ss-ink-muted);
+}
+
+/* ========================================================== mermaid ====== */
+/* Material renders every ```mermaid fence into a CLOSED shadow root, so page
+   CSS cannot reach inside it. What DOES cross that boundary is a custom
+   property, which is why everything below is set here and inherited in.
+
+   THE DIAGRAM PALETTE, AND WHY IT IS HEX (verified, not assumed). Mermaid's
+   flowchart grammar cannot lex a parenthesis in a `classDef` value:
+   `fill:var(--ss-reality-wash)` is a PARSE ERROR, and a fence that fails to
+   parse renders as nothing at all. So diagram sources carry one DUAL-GROUND
+   palette, chosen to sit on both the paper and the panel:
+
+       reality   stroke #3183cc   fill #3183cc2e
+       intent    stroke #8158d8   fill #8158d82e
+       safety    stroke #d8434f   fill #d8434f2e
+       neutral   stroke #8a8f98   fill none
+
+   The strokes are mid-value on purpose — each clears 3:1 against BOTH
+   --ss-paper and --ss-screen, and the 18 % fills tint over whichever surface
+   is underneath instead of replacing it. The scheme-tuned `--ss-reality` /
+   `--ss-intent` above are the same two hues pushed for text contrast, and
+   they are what the legend chips, byte strips and prose use, where CSS can
+   adapt per scheme and mermaid cannot.
+
+   Node LABEL colour is left to Material in every diagram: semantic colour
+   lives in the frame and the fill, never in the text, so text contrast is
+   never traded for meaning. */
+
+:root {
+  --md-mermaid-font-family: var(--ss-sans);
+  --md-mermaid-edge-color: var(--ss-ink-muted);
+  --md-mermaid-node-bg-color: var(--ss-surface);
+  --md-mermaid-node-fg-color: var(--ss-rule-strong);
+  --md-mermaid-label-bg-color: var(--ss-surface);
+  --md-mermaid-label-fg-color: var(--ss-ink);
+
+  --md-mermaid-sequence-actor-bg-color: var(--ss-surface);
+  --md-mermaid-sequence-actor-border-color: var(--ss-rule-strong);
+  --md-mermaid-sequence-actor-fg-color: var(--ss-ink);
+  --md-mermaid-sequence-actor-line-color: var(--ss-rule-strong);
+  --md-mermaid-sequence-actorman-bg-color: var(--ss-surface);
+  --md-mermaid-sequence-actorman-line-color: var(--ss-rule-strong);
+  --md-mermaid-sequence-box-bg-color: var(--ss-zebra);
+  --md-mermaid-sequence-box-fg-color: var(--ss-ink);
+  --md-mermaid-sequence-label-bg-color: var(--ss-code-bg);
+  --md-mermaid-sequence-label-fg-color: var(--ss-ink);
+  --md-mermaid-sequence-loop-bg-color: var(--ss-zebra);
+  --md-mermaid-sequence-loop-border-color: var(--ss-rule-strong);
+  --md-mermaid-sequence-loop-fg-color: var(--ss-ink-muted);
+  --md-mermaid-sequence-message-fg-color: var(--ss-ink);
+  --md-mermaid-sequence-message-line-color: var(--ss-ink-muted);
+  --md-mermaid-sequence-note-bg-color: var(--ss-accent-wash);
+  --md-mermaid-sequence-note-border-color: var(--ss-accent);
+  --md-mermaid-sequence-note-fg-color: var(--ss-ink);
+  --md-mermaid-sequence-number-bg-color: var(--ss-accent);
+  --md-mermaid-sequence-number-fg-color: var(--ss-paper);
+}
+
+.md-typeset .mermaid {
+  margin: 0;
+  padding: 1rem 0.75rem 0.9rem;
+  border: var(--ss-hairline) solid var(--ss-rule);
+  border-radius: var(--ss-radius);
+  background-color: var(--ss-screen);
+  box-shadow: var(--ss-screen-inset);
+  overflow-x: auto;   /* a wide diagram scrolls itself, never the page */
+}
+
+/* ======================================================== byte strips ==== */
+/* The one thing Mermaid cannot draw. A CSS grid strip is responsive, follows
+   the palette, prints, and reads in source order to a screen reader — all
+   four of which an exported image loses. Field widths are `--span` byte
+   columns, so the picture cannot drift from the field sizes beside it. */
+
+.md-typeset .ss-bytemap {
+  margin: 0 0 0.2rem;
+  padding: 0.85rem 0.8rem 0.7rem;
+  border: var(--ss-hairline) solid var(--ss-rule);
+  border-radius: var(--ss-radius);
+  background-color: var(--ss-screen);
+  box-shadow: var(--ss-screen-inset);
+  overflow-x: auto;
+}
+
+.md-typeset .ss-bytemap__scale,
+.md-typeset .ss-bytemap__row {
+  display: grid;
+  grid-template-columns: repeat(var(--cols, 8), minmax(3.1rem, 1fr));
+  gap: 3px;
+  min-width: 26rem;
+}
+
+/* The offset ruler: mono, faint, tabular — the machine's ruler numerals. */
+.md-typeset .ss-bytemap__scale {
+  margin-bottom: 0.25rem;
+  font-family: var(--ss-mono);
+  font-size: 0.55rem;
+  letter-spacing: 0.04em;
+  color: var(--ss-ink-faint);
+  font-variant-numeric: tabular-nums;
+}
+
+.md-typeset .ss-bytemap__scale > span {
+  padding-left: 0.15rem;
+  border-left: var(--ss-hairline) solid var(--ss-rule-strong);
+}
+
+.md-typeset .ss-f {
+  grid-column: span var(--span, 1);
+  padding: 0.4rem 0.45rem 0.35rem;
+  border: var(--ss-hairline) solid var(--ss-rule-strong);
+  border-radius: var(--ss-radius);
+  background-color: var(--ss-surface);
+}
+
+.md-typeset .ss-f > b {
+  display: block;
+  font-family: var(--ss-mono);
+  font-size: 0.68rem;
+  font-weight: 600;
+  color: var(--ss-ink);
+  overflow-wrap: anywhere;
+}
+
+.md-typeset .ss-f > span {
+  display: block;
+  font-family: var(--ss-mono);
+  font-size: 0.56rem;
+  letter-spacing: 0.03em;
+  color: var(--ss-ink-muted);
+}
+
+/* Field roles reuse the site-wide colour meanings. */
+.md-typeset .ss-f--hdr    { border-color: var(--ss-rule-strong); background-color: var(--ss-zebra); }
+.md-typeset .ss-f--reality{ border-color: var(--ss-reality-rule); background-color: var(--ss-reality-wash); }
+.md-typeset .ss-f--intent { border-color: var(--ss-intent-rule);  background-color: var(--ss-intent-wash); }
+.md-typeset .ss-f--safety { border-color: var(--ss-bad-rule);     background-color: var(--ss-bad-wash); }
+.md-typeset .ss-f--open   { border-style: dashed; background-color: transparent; }
+
+/* ============================================================== keys ===== */
+/* The convention legend. Learn it once, it holds on every diagram. */
+
+.md-typeset .ss-keys {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(13rem, 1fr));
+  gap: 0.4rem 0.9rem;
+  margin: 0.9rem 0 1.4rem;
+  padding: 0.85rem 0.9rem;
+  border: var(--ss-hairline) solid var(--ss-rule);
+  border-radius: var(--ss-radius);
+  background-color: var(--ss-surface);
+}
+
+.md-typeset .ss-key {
+  display: flex;
+  align-items: baseline;
+  gap: 0.5rem;
+  font-size: 0.72rem;
+  line-height: 1.45;
+  color: var(--ss-ink-muted);
+}
+
+.md-typeset .ss-key > b {
+  flex: 0 0 auto;
+  min-width: 4.6rem;
+  font-family: var(--ss-mono);
+  font-size: 0.62rem;
+  font-weight: 600;
+  text-transform: uppercase;
+  letter-spacing: 0.07em;
+  padding: 0.12em 0.45em;
+  border: var(--ss-hairline) solid var(--ss-rule-strong);
+  border-radius: var(--ss-radius);
+  text-align: center;
+  color: var(--ss-ink-muted);
+  background-color: var(--ss-zebra);
+}
+
+.md-typeset .ss-key--reality > b {
+  color: var(--ss-reality);
+  border-color: var(--ss-reality-rule);
+  background-color: var(--ss-reality-wash);
+  box-shadow: var(--ss-glow-accent);
+}
+
+.md-typeset .ss-key--intent > b {
+  color: var(--ss-intent);
+  border-color: var(--ss-intent-rule);
+  background-color: var(--ss-intent-wash);
+}
+
+.md-typeset .ss-key--safety > b {
+  color: var(--ss-bad);
+  border-color: var(--ss-bad-rule);
+  background-color: var(--ss-bad-wash);
+}
+
+/* Inline semantic emphasis for prose and table cells: `.ss-reality` on a word
+   that names measured truth, `.ss-intent` on a word that names a request. */
+.md-typeset .ss-reality { color: var(--ss-reality); font-weight: 600; }
+.md-typeset .ss-intent  { color: var(--ss-intent);  font-weight: 600; }
+.md-typeset .ss-num {
+  font-family: var(--ss-mono);
+  font-variant-numeric: tabular-nums;
+}
+
+/* ============================================================ flair ====== */
+/* Glow is seasoning. Anyone who asked for less motion, and every printer,
+   gets the plain sheet. */
+
+@media (prefers-reduced-motion: reduce) {
+  [data-md-color-scheme="slate"] { --ss-glow-accent: none; }
+}
+
+/* ============================================================== print ==== */
+
+@media print {
+  .ss-badge {
+    border-color: #999;
+    color: #333;
+  }
+  .md-typeset table:not([class]) th {
+    position: static;
+  }
+  /* Recesses, brackets and glow are screen affordances. Paper gets the
+     content, framed by a hairline and nothing else. */
+  .ss-brackets,
+  .md-typeset .mermaid,
+  .md-typeset .ss-bytemap { background-image: none; }
+  .md-typeset .mermaid,
+  .md-typeset .ss-bytemap,
+  .md-typeset pre > code {
+    background-color: transparent;
+    box-shadow: none;
+  }
+  .md-typeset .ss-key > b { box-shadow: none; }
+}

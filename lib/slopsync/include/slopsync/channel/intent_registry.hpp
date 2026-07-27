@@ -135,15 +135,27 @@ private:
 //
 // The bucket starts FULL (burst-ready from the first intent a session ever
 // sends — a fresh session should not have to "wait a second" before its
-// first burst is allowed) and refills continuously, capped at `ratePerSec`
+// first burst is allowed) and refills continuously, capped at `capacity`
 // tokens, based on elapsed wall time between allow() calls. All elapsed-time
 // math goes through util/serial_arithmetic.hpp's timeDelta (wrap-safe hub-ms
 // per SPEC §7.2) — no inline `now - last` anywhere in this file.
+//
+// ---- Capacity is DECOUPLED from rate (RFC-013) -----------------------------
+// §10.5 originally made the granted rate double as the bucket depth, which
+// forced a sparse-but-bursty producer (the MFP segment streamer: 2–4/s mean,
+// ~25/s peak) to declare a ~10x inflated rate purely to buy burst headroom —
+// misrepresenting itself to admission control. `capacityTokens` therefore sets
+// the DEPTH independently of the REFILL rate. Zero (the default) means "one
+// second's worth", i.e. capacity == ratePerSec, which is exactly the pre-RFC-013
+// behavior — every existing call site is unchanged by construction.
 class IngressRateLimiter {
 public:
     explicit IngressRateLimiter(uint32_t ratePerSec = limits::intent_ingress_default_per_s,
-                                 uint32_t nowMs = 0)
-        : _ratePerSec(ratePerSec), _tokens(float(ratePerSec)), _lastMs(nowMs) {}
+                                 uint32_t nowMs = 0, float capacityTokens = 0.0f)
+        : _ratePerSec(ratePerSec),
+          _capacity(capacityTokens > 0.0f ? capacityTokens : float(ratePerSec)),
+          _tokens(capacityTokens > 0.0f ? capacityTokens : float(ratePerSec)),
+          _lastMs(nowMs) {}
 
     // Call once per ingress intent, at its arrival time. Returns true (and
     // consumes one token) if under the rate; false (session should be
@@ -176,19 +188,22 @@ public:
 
     float tokens() const { return _tokens; }
     uint32_t ratePerSec() const { return _ratePerSec; }
+    float capacity() const { return _capacity; }
 
 private:
     void refill(uint32_t nowMs) {
         int32_t deltaMs = timeDelta(nowMs, _lastMs);  // §7.2 wrap-safe
         if (deltaMs <= 0) return;  // no time elapsed (or clock went backward within the wrap window): no refill, no update
         _lastMs = nowMs;
-        float capacity = float(_ratePerSec);
-        float added = (float(deltaMs) / 1000.0f) * capacity;
+        // Refill RATE is the granted rate; the ceiling is the (possibly larger)
+        // burst CAPACITY — the two knobs RFC-013 separated.
+        float added = (float(deltaMs) / 1000.0f) * float(_ratePerSec);
         _tokens += added;
-        if (_tokens > capacity) _tokens = capacity;  // burst cap: one second's worth (§9.3/§10.5)
+        if (_tokens > _capacity) _tokens = _capacity;
     }
 
     uint32_t _ratePerSec;
+    float _capacity;
     float _tokens;
     uint32_t _lastMs;
 };

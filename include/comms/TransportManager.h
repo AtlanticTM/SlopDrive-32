@@ -21,7 +21,6 @@
 // Forward declarations
 class TCodeParser;
 class SerialTransport;
-class WebSocketTransport;
 class BleTransport;
 class DongleTransport;
 class OssmBleService;
@@ -31,7 +30,6 @@ public:
     TransportManager(SystemState&        state,
                      TCodeParser&        parser,
                      SerialTransport&    serial,
-                     WebSocketTransport& ws,
                      BleTransport&       ble,
                      DongleTransport&    dongle,
                      OssmBleService&     ossm);
@@ -102,7 +100,6 @@ private:
     SystemState&        _state;
     TCodeParser&        _parser;
     SerialTransport&    _serial;
-    WebSocketTransport& _ws;
     BleTransport&       _ble;
     DongleTransport&    _dongle;
     OssmBleService&     _ossm;

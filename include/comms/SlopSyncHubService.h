@@ -27,8 +27,16 @@
 #include <span>
 
 #include "SlopSyncCatalog.h"
+#include "SlopSyncCrypto.h"
 #include "SlopSyncPlatform.h"
-#include "SlopSyncWsTransport.h"
+#include "SlopSyncUiToken.h"
+// THE transport. There used to be two behind -DSLOPSYNC_WS_ASYNC so the
+// links2004-vs-ESP32Async swap could be A/B'd with one variable moving; the
+// A/B is settled (docs/http-plane-retirement.md 2 -- three device reboots and
+// a 112-byte heap watermark with the old plane attached, 7/7 clean without)
+// and links2004 has been removed from the build entirely. The #else branch
+// pointed at a file that no longer exists, so it is gone with it.
+#include "SlopSyncAsyncWsTransport.h"
 #include "slopsync/hub/hub.hpp"
 
 // Firmware types the service/delegate reference — forward-declared to keep this
@@ -37,6 +45,8 @@ struct SystemState;
 class WebUI;
 class MotionArbiter;
 class PatternEngine;
+class MotorDriver;
+class SlopHttpServer;
 
 namespace slopdrive {
 
@@ -96,6 +106,21 @@ public:
         return true;
     }
 
+    // The oldest entry still in the ring, WITHOUT regard to its due time —
+    // nullptr when empty. This is the RFC-008 one-segment LOOKAHEAD: call it
+    // straight after a popDue() and it hands back the segment that FOLLOWS the
+    // one just popped, which is exactly what the handoff sanity guard needs to
+    // bound the popped segment's end velocity. It exists at all because the
+    // ring is a SCHEDULER, not a queue: a 0x0085 client sends each segment
+    // ~120 ms before its start, so the successor is usually already sitting
+    // here when its predecessor comes due.
+    //
+    // Read-only and non-consuming by design. Nothing about the guard may
+    // change what the ring delivers or when.
+    const PacingEntry* peekOldest() const {
+        return _count == 0 ? nullptr : &_buf[_tail];
+    }
+
 private:
     std::array<PacingEntry, kCapacity> _buf{};
     size_t _head = 0, _tail = 0, _count = 0;
@@ -107,8 +132,36 @@ private:
 // post-clamp values the handler reports, never the request).
 class SlopDriveHubDelegate final : public slopsync::HubDelegate {
 public:
-    SlopDriveHubDelegate(SystemState& state, WebUI& webui, MotionArbiter& arbiter, PacingRing& pacingRing)
-        : _state(state), _webui(webui), _arbiter(arbiter), _pacingRing(pacingRing) {}
+    SlopDriveHubDelegate(SystemState& state, WebUI& webui, MotionArbiter& arbiter, PacingRing& pacingRing,
+                         SlopSyncUiTokenMinter& uiTokens)
+        : _state(state), _webui(webui), _arbiter(arbiter), _pacingRing(pacingRing), _uiTokens(uiTokens) {}
+
+    // ---- RFC-011 cfg_gen origin flag ---------------------------------------
+    // Set by applyIntent whenever a CONFIG intent actually changed a value —
+    // i.e. whenever the HUB already bumped its own cfg_gen for this change. The
+    // service reads-and-clears it on the same tick (delegate and service both
+    // run on the SlopSyncHub task) so its machine-side detector can tell "the
+    // config moved because a client moved it" from "the config moved by itself",
+    // and only bumps for the second case. Without this the hub would
+    // double-bump every client config-set: harmless but wasteful (every
+    // subscriber resyncs), and the whole point of RFC-002 was to stop paying
+    // that for nothing.
+    bool takeCfgIntentFlag() {
+        const bool f = _cfgFromIntent;
+        _cfgFromIntent = false;
+        return f;
+    }
+
+    // ---- The trust ledger, bound AFTER construction -------------------------
+    // Deliberately a pointer set by the service rather than a ctor reference:
+    // the delegate is bound BY reference into the Hub's constructor, so the
+    // delegate must be constructed FIRST and cannot name _hub.pairing() in its
+    // own initializer list. init() closes the loop once both exist.
+    //
+    // A null pointer is a SAFE state, not a broken one: validateToken falls
+    // through to `watch`, which is exactly the answer an unpaired client should
+    // get. It never fails open.
+    void bindPairing(slopsync::PairingManager& pm) { _pairing = &pm; }
 
     slopsync::AccessLevel validateToken(std::span<const std::byte> instance_id,
                                         std::span<const std::byte> token, bool hasToken) override;
@@ -138,15 +191,42 @@ private:
     WebUI& _webui;
     MotionArbiter& _arbiter;
     PacingRing& _pacingRing;
+    SlopSyncUiTokenMinter& _uiTokens;
+    slopsync::PairingManager* _pairing = nullptr;  // see bindPairing()
+    bool _cfgFromIntent = false;
+
+public:
+    // Set by 0x0105 when a tuning knob actually moved; the service reads and
+    // clears it on its 1 Hz tick and persists once. Public because the service
+    // (not the delegate) owns NVS.
+    bool _smTuneDirty = false;
 };
 
 // ---- The service -----------------------------------------------------------
 class SlopSyncHubService {
 public:
-    SlopSyncHubService(SystemState& state, WebUI& webui, MotionArbiter& arbiter);
+    // `motor` is taken by reference (not wired later like the PatternEngine)
+    // because the catalog is built INSIDE the member-initializer list and its
+    // FEATURE GATING — whether 0x0087 power is advertised at all — is read from
+    // the driver right there. A setter would be too late: the etag is computed
+    // when _hub is constructed, and a catalog that grew a channel afterwards
+    // would be a different catalog under the same etag. Construct this service
+    // AFTER motor.bind() picks the backend (main.cpp already does).
+    SlopSyncHubService(SystemState& state, WebUI& webui, MotionArbiter& arbiter, MotorDriver& motor);
 
-    // Build the port, load persisted pairing tokens, spawn the Core-0 task.
+    // Build the port, load the persisted trust ledger, spawn the Core-0 hub
+    // task and the low-priority signing task.
     void init();
+
+    // RFC-029 §4: register GET /uitoken on the shared WebServer. Separate from
+    // init() because the HTTP server belongs to WebUI and is only guaranteed to
+    // exist after WebUI::begin(). Call once from setup(). Skipping it simply
+    // means no browser-borne credential path exists — everything else works.
+    void attachHttpRoutes(SlopHttpServer* server);
+
+    // Shared-space kill switch for the browser credential path (persisted).
+    void setUiTokenEnabled(bool on) { _uiTokens.setEnabled(on); }
+    bool uiTokenEnabled() const { return _uiTokens.enabled(); }
 
     // Optional (additive): wire the PatternEngine so 0x0082 pattern-state can be
     // published from the live engine (Ground Truth). Without it, 0x0082 is
@@ -178,12 +258,18 @@ public:
 private:
     static void taskTrampoline(void* arg);
     void taskLoop();
+    static void signTaskTrampoline(void* arg);
+    void signTaskLoop();
 
     void syncSafety();          // firmware estop latch <-> hub safety word
     void publishTelemetry();    // cadenced STATE pushes
     void drainMotionStream();   // pop due PacingRing entries -> Core-1 sampler queue
+    void publishAnomalies();    // Core-1 anomaly ring -> 0x0089 motion-anomaly EVENTs
+    void drainLogBridge();      // RFC-017: SlopLog SPSC ring -> 0x0008 log EVENTs
+    void pumpSigning();         // M4c: hub <-> signing task, both directions
+    void pumpConfigGeneration();// RFC-011: machine-side config change -> cfg_gen
 
-    void loadPairing();         // NVS -> PairingManager at boot
+    void loadPairing();         // NVS -> PairingManager at boot (ledger + legacy migration)
     void savePairing();         // PairingManager -> NVS (skips while OTA active)
     void persistPairingIfChanged();
 
@@ -191,6 +277,7 @@ private:
     SystemState& _state;
     WebUI& _webui;
     MotionArbiter& _arbiter;
+    MotorDriver& _motor;   // power/thermal/energy telemetry + the 0x0087 feature gate
     PatternEngine* _patternEngine = nullptr;
     QueueHandle_t _motionStreamQueue = nullptr;  // Core-1 SlopMotion sampler queue (g_interp_queue)
 
@@ -199,13 +286,58 @@ private:
     //      reference) ---------------------------------------------------------
     EspClock _clock;
     EspRandom _rng;
+    EspCrypto _crypto;               // MUST precede _hub — bound by reference
+    SlopSyncUiTokenMinter _uiTokens; // MUST precede _delegate — bound by reference
     slopsync::Catalog32 _catalog;
     PacingRing _pacingRing;
     SlopDriveHubDelegate _delegate;
     slopsync::Hub _hub;
-    SlopSyncWsPort _port;
+    SlopSyncAsyncWsPort _port;
 
     TaskHandle_t _task = nullptr;
+
+    // ---- M4c deferred signing (RFC-029 item 1) ------------------------------
+    // THE ONE-TASK INVARIANT IS WHY THESE QUEUES EXIST. takePendingSignJob() and
+    // submitSignature() are Hub methods, so they may ONLY be called from the hub
+    // task — but the sign itself is 30-80 ms of uninterruptible ECP that would
+    // put a 6-16 tick hole in every other client's motion stream. So the hub
+    // task does both Hub calls and the queues carry the WORK across:
+    //
+    //   hub task:  takePendingSignJob() -> _signReqQ -> (sign task) -> _signResQ
+    //              -> submitSignature()
+    //
+    // Depth 2: one session can have at most one outstanding signature and the
+    // hub caps sessions at 4, but a queue this shallow simply back-pressures
+    // (the job stays flagged in the hub slot and is taken on a later tick),
+    // which is strictly better than a deep queue full of signatures for sessions
+    // that died while waiting.
+    struct SignRequest {
+        uint32_t session_id = 0;
+        uint8_t message[slopsync::kHubSigMaterialBytes] = {};
+    };
+    struct SignResult {
+        uint32_t session_id = 0;
+        uint8_t len = 0;
+        uint8_t sig[slopsync::kTrustSigMaxBytes] = {};
+    };
+    QueueHandle_t _signReqQ = nullptr;
+    QueueHandle_t _signResQ = nullptr;
+    TaskHandle_t _signTask = nullptr;
+    uint32_t _signsDone = 0;
+
+    // ---- RFC-011 machine-side cfg_gen detector ------------------------------
+    // The last PUBLISHED value of every field 0x0081 carries. A machine-side
+    // change (physical control, boot adoption, an internal recalculation) has no
+    // other way to reach the protocol's generation counter, and a client's
+    // `precondition` CAS silently passing against config that already moved is
+    // the failure this closes.
+    struct CfgSnapshot {
+        float window_min = 0, window_max = 0;
+        float user_speed = 0, user_accel = 0;
+        float input_speed = 0, input_accel = 0;
+        float max_rail = 0, input_jerk = 0;
+        bool valid = false;
+    } _cfgSnap;
 
     // ---- Motion-input stream drain bookkeeping ------------------------------
     float _syncPrevTarget = -1.0f;  // previous ENQUEUED target, for the >0.003 move-gate
@@ -214,13 +346,58 @@ private:
     uint32_t _lastMotionMs = 0;
     uint32_t _lastSlowMs = 0;
     uint32_t _lastPatternMs = 0;
+    uint32_t _lastPlanMs = 0;    // 0x0086 plan-strip, 45 Hz
+    uint32_t _lastPowerMs = 0;   // 0x0087 power, 2 Hz (grant-capped at 10)
     uint16_t _lastCfgGen = 0;
     bool _cfgEverSent = false;
+    // 0x008A machine-modes (M5b): the LAST PUBLISHED bytes, not the last known
+    // values. Diffing what subscribers actually hold is what makes the
+    // on-change trigger unable to disagree with them — see publishTelemetry.
+    std::array<std::byte, 4> _lastModes{};
+    bool _modesEverSent = false;
+    // 0x008B/0x008C/0x008D slopmotion tuning — last PUBLISHED bytes, same
+    // reason as _lastModes: diffing what subscribers hold cannot disagree with
+    // what they hold.
+    std::array<std::byte, 18> _lastSmLim{};
+    std::array<std::byte, 20> _lastSmChase{};
+    std::array<std::byte, 21> _lastSmWav{};
+    bool _smLimEverSent = false;
+    bool _smChaseEverSent = false;
+    bool _smWavEverSent = false;
+    // 0x0087 is only PUBLISHED when it is also DECLARED — a publishState() to a
+    // channel absent from the catalog is refused anyway, but skipping the work
+    // keeps the driver reads off the tick on a machine with no sensor.
+    bool _hasPowerChannel = false;
+    bool _hasDieTemp = false;
+    bool _planEverSent = false;
 
-    // Pattern-state change detection (last PUBLISHED snapshot).
+    // Pattern-state change detection (last PUBLISHED snapshot). _patMask is in
+    // here because the RFC-009 enabled_mask is part of the snapshot and moves
+    // on homed/e-stop transitions the pattern PARAMETERS do not see — leaving
+    // it out would let a client keep the whole card enabled through an e-stop.
     bool _patRunning = false;
     uint8_t _patIdx = 0xFF;
+    uint8_t _patMask = 0xFF;
     float _patSpeed = -1.0f, _patDepth = -1.0f, _patStroke = -1.0f, _patSensation = -1.0f;
+
+    // ---- Trust-ledger NVS scratch (RFC-029 item 3) --------------------------
+    // ONE buffer for both directions. It lives HERE, as a member, rather than as
+    // a function-local static, for one specific reason: this whole service is
+    // placement-new'd into PSRAM, so a member costs nothing from the internal
+    // heap the WebUI and the network stack compete for — and this codebase has
+    // already killed the WebUI once by starving that heap. 1.9 KB is also far
+    // too much to put on any task stack.
+    //
+    // No concurrency to guard: loadPairing() runs in init(), before the hub task
+    // exists; savePairing() runs only on the hub task afterwards.
+    uint8_t _ledgerBlob[slopsync::limits::trust_ledger_max_bytes] = {};
+
+    // ---- RFC-017 log bridge -------------------------------------------------
+    // The serial handoff RE-BINDS to the first log-channel GRANT (RFC-017), so
+    // once an in-band subscriber is receiving the log, USB serial demotes to
+    // Warn+ exactly as it does today for the first /api/log serve. One-shot.
+    bool _logGrantSeen = false;
+    uint32_t _logPublished = 0;
 
     // ---- Safety sync + pairing ----------------------------------------------
     uint16_t _estopSeq = 0;

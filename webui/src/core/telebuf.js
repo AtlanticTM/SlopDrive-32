@@ -54,6 +54,7 @@ var _lastLinkTs = 0;        // client-time (ms) of last proof the WS link is ali
 var _staleFired = false;
 var _staleSuspended = false;
 var _teleFallback = false;  // HTTP fallback mode: staleness thresholds ×5
+var _externalMotionAuthority = false; // SlopSync bridge owns the motion feed
 var STALE_MS = 150;
 var SUSPEND_MS = 1000;
 var STALE_FB_MS = 750;
@@ -186,6 +187,10 @@ export function setHeroCallbacks(actualCb, cmdCb, lagCb) {
  * @param {number} nowMs — performance.now() at receive time
  */
 export function feedWireSamples(parsed, nowMs) {
+  // Motion-authority gate: while the SlopSync bridge owns the carriage feed
+  // (feedExternalSample), the legacy 0x01 plane must NOT also push into this
+  // ring — two sources at different timestamps = out-of-order samples = jitter.
+  if (_externalMotionAuthority) return;
   if (!parsed || !parsed.samples || parsed.samples.length === 0) return;
   if (typeof parsed.dt_100us === 'number' && parsed.dt_100us > 0) DT_US = parsed.dt_100us * 100;
 
@@ -263,6 +268,56 @@ export function feedHttpSamples(rawSamples, dtMs, nowMs) {
   _lastSampleTs = nowMs;
   _lastLinkTs = nowMs;
 
+  if (_staleFired || _staleSuspended) {
+    _staleFired = false;
+    _staleSuspended = false;
+    if (_onFresh) _onFresh();
+  }
+}
+
+// ============================================================================
+// External motion source (SlopSync bridge) — one clock-stamped sample at a time
+// ============================================================================
+
+/**
+ * Hand the motion feed to (or back from) an external source (the SlopSync
+ * bridge). While engaged, feedWireSamples (legacy 0x01) no-ops so there is a
+ * single source of truth for the display ring. Resets the staleness clock so a
+ * mid-migration handoff starts with a fresh grace window.
+ * @param {boolean} external
+ */
+export function setMotionAuthority(external) {
+  _externalMotionAuthority = !!external;
+  var now = (typeof performance !== 'undefined') ? performance.now() : Date.now();
+  _lastSampleTs = now;
+  _lastLinkTs = now;
+  if (_staleFired || _staleSuspended) {
+    _staleFired = false;
+    _staleSuspended = false;
+    if (_onFresh) _onFresh();
+  }
+}
+
+export function isMotionExternal() { return _externalMotionAuthority; }
+
+/**
+ * Feed ONE motion sample (already in mm) from the SlopSync motion channel,
+ * stamped at receive time in the performance.now() domain — no device-clock
+ * conversion needed since the sample arrives ~now. Resets staleness like the
+ * wire/HTTP feeds do, so a granted 20 Hz feed keeps controls alive even on an
+ * idle machine (the fix for the legacy idle-blackout suspension).
+ * @param {number} posMm actual carriage position (mm)
+ * @param {number} [tgtMm] commanded target (mm) — defaults to posMm
+ * @param {number} [nowMs] performance.now() at receive (defaults to now)
+ */
+export function feedExternalSample(posMm, tgtMm, nowMs) {
+  var t = (typeof nowMs === 'number')
+    ? nowMs
+    : ((typeof performance !== 'undefined') ? performance.now() : Date.now());
+  var tgt = (typeof tgtMm === 'number') ? tgtMm : posMm;
+  pushSample(t, posMm, tgt, tgt);
+  _lastSampleTs = t;
+  _lastLinkTs = t;
   if (_staleFired || _staleSuspended) {
     _staleFired = false;
     _staleSuspended = false;

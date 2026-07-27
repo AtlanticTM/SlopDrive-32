@@ -19,6 +19,8 @@ import {
   buildCmd, parseEcho
 } from './wire.js';
 import { post } from './api.js';
+// The SHADOW's processEcho (object form), not this module's wire-frame one.
+import { processEcho as shadowEcho } from './shadow.js';
 
 // ---- State -----------------------------------------------------------------
 var _nextId = 1;          // monotonic command id (wraps at 65535)
@@ -72,6 +74,90 @@ var MAX_ATTEMPTS = 3;
  * Set the binary send function (called by link.js when WS is connected).
  * @param {function(Uint8Array):boolean} fn — returns true if send succeeded
  */
+// M5c: NOTHING CALLS THIS ANY MORE, and that is the intended state rather than
+// a broken wire. link.js used to install the :81 socket here; that plane is
+// deleted, so `_sendBinary` stays null and every op takes the HTTP fallback
+// route below -- which is correct, because the ops that have migrated are
+// intercepted upstream by window.__slopsync before they ever reach cmd.send().
+// Kept (not deleted) so the seam is obvious when the remaining HTTP control
+// routes are retired onto SlopSync intents.
+
+// safety_ops (registry): 2 stop, 3 hold, 4 pause, 5 resume.
+var SAFETY_HOLD = 3, SAFETY_PAUSE = 4, SAFETY_RESUME = 5;
+
+// ---------------------------------------------------------------------------
+// SLOPSYNC ROUTING — the ONE place every control reaches the machine.
+//
+// This exists because retiring the HTTP writers (fw 2.1.73) without it broke
+// the entire control surface: bridge.js installs senders on window.__slopsync,
+// but NOTHING called them — every control still went cmd.send() -> null WS
+// transport -> HTTP fallback -> 410 Gone. The channels were verified by test
+// harness; the CONTROLS were never routed through them. Protocol tested,
+// product not.
+//
+// cmd.send() is the single choke point for every op in the UI, so mapping
+// op -> intent HERE migrates every control at once and keeps the call sites
+// untouched. A `null` return means "no slopsync route for this op", and the
+// caller falls through to its normal failure path rather than silently
+// succeeding.
+//
+// Ground truth is preserved end to end: each sender resolves on the device's
+// post-clamp ECHO, which drives the shadow's pending -> confirmed lifecycle and
+// therefore the amber/red styling. A control cannot look applied here without
+// the machine having said so.
+function _slopsyncRoute(op, d) {
+  var S = (typeof window !== 'undefined') ? window.__slopsync : null;
+  if (!S || !S.isLive || !S.isLive()) return null;
+  var v = function (x, y) { return x != null ? x : y; };
+
+  switch (op) {
+    case OP_SET_WINDOW:
+      return S.sendWindow(v(d.min, d.range_min), v(d.max, d.range_max));
+    case OP_SET_SPEED:
+    case OP_SET_ACCEL: {
+      // 0x0101 keys: 3 user_speed, 4 user_accel.
+      var f = {};
+      if (d.mm_s != null || d.max_speed != null) f[3] = v(d.mm_s, d.max_speed);
+      if (d.mm_s2 != null || d.accel != null) f[4] = v(d.mm_s2, d.accel);
+      return S.sendConfigSet ? S.sendConfigSet(f) : null;
+    }
+    case OP_MOVE:     return S.sendMove(v(d.position, d.pos), !!d.bypass_limits);
+    case OP_HOME:     return S.sendHome(1);
+    case OP_ESTOP:    return S.sendEstop();
+    case OP_HALT:     return S.sendSafety(SAFETY_HOLD);
+    case OP_PAUSE:    return S.sendSafety(d.paused ? SAFETY_PAUSE : SAFETY_RESUME);
+    case OP_OVERRIDE: return S.sendOverride(!!d.on);
+    case OP_BYPASS:   return S.sendBypass(!!d.on);
+    // 0x0104 modes-set: 1 blend, 3 stream_speed_mode, 4 overshoot_clamp.
+    case OP_BLEND:        return S.sendModes({ 1: v(d.bm, d.blend_mode) });
+    case OP_STREAM_MODE:  return S.sendModes({ 3: v(d.mode, 0) });
+    case OP_OVERSHOOT:    return S.sendModes({ 4: d.on ? 1 : 0 });
+    // 0x0102 pattern-cmd: 1 running, 2 pattern, 3 speed, 4 depth, 5 stroke,
+    // 6 sensation. Only present keys are sent, so a partial update stays partial.
+    case OP_GEN_RUN:      return S.sendPatternCmd({ 1: !!(d.run || d.running) });
+    case OP_GEN_CFG: {
+      var p = {};
+      if (d.pattern != null)   p[2] = d.pattern;
+      if (d.speed != null)     p[3] = d.speed;
+      if (d.depth != null)     p[4] = d.depth;
+      if (d.stroke != null)    p[5] = d.stroke;
+      if (d.sensation != null) p[6] = d.sensation;
+      return S.sendPatternCmd(p);
+    }
+    // 0x0106 machine-admin ops.
+    case OP_CLEAR_FAULT:  return S.sendAdmin ? S.sendAdmin(1) : null;
+    case OP_SAVE:         return S.sendAdmin ? S.sendAdmin(2) : null;
+    default:              return null;
+  }
+}
+
+/** Terminal failure for an op that was never sent. Drives the shadow to
+ *  `fault` so the control renders red rather than pending-forever. */
+function _fail(id, why) {
+  if (window.__DEBUG_ECHO) console.warn('[cmd] ' + why + ' (id ' + id + ')');
+  try { shadowEcho({ id: id, ok: 0, reported: null }); } catch (e) { /* shadow not wired */ }
+}
+
 export function setSendBinary(fn) { _sendBinary = fn; }
 
 /**
@@ -184,9 +270,22 @@ export function send(op, payload) {
     return id;
   }
 
+  // SlopSync first: it is the only control plane since fw 2.1.73.
+  if (_slopsyncRoute(op, desired)) return id;
+
   if (!_sendBinary) {
-    // No WS transport available — queue for retry via HTTP fallback
-    _fallbackSend(op, desired, id);
+    // NO CONTROL PLANE. Since fw 2.1.73 the /api/* twins this used to fall back
+    // to all answer 410 Gone — "no controls outside SlopSync, HTTP is read
+    // only" — so firing at them would mean the UI showing a pending value that
+    // can NEVER be confirmed, which is the failure mode the shadow layer and
+    // its data-shadow styling exist to prevent.
+    //
+    // Fail loudly and immediately instead: the shadow goes to `fault`, the
+    // control turns red and stops pretending, and the operator learns the hub
+    // is down from the control they just touched rather than from its silence.
+    // A machine you cannot observe should not be commandable through a side
+    // door anyway.
+    _fail(id, 'no control plane — SlopSync is not connected');
     return id;
   }
 

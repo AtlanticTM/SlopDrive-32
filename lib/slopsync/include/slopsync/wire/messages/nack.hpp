@@ -40,6 +40,16 @@ struct NackMsg {
 
     bool has_retry_after_ms = false;
     uint32_t retry_after_ms = 0;
+
+    // RFC-001: the frame-header `seq` of the inbound frame this NACK refuses.
+    // Hubs SHOULD populate it whenever a specific arriving frame provoked the
+    // refusal; clients MUST tolerate its absence (a v1.0 hub that never sets
+    // it is conformant). `intent_id` (18) disambiguates INTENTs that carry
+    // one; this disambiguates everything else — SUBSCRIBE/PUBLISH/STREAM/HELLO
+    // frames have no intent id at all, and a pipelining client otherwise
+    // cannot tell WHICH of its in-flight frames on one channel was refused.
+    bool has_intent_seq = false;
+    uint16_t intent_seq = 0;
 };
 
 // Encodes into `out`; returns bytes written, or 0 on any failure.
@@ -51,10 +61,12 @@ inline size_t encodeNack(const NackMsg& m, std::span<std::byte> out) {
     if (m.has_detail) ++nKeys;
     if (m.has_intent_id) ++nKeys;
     if (m.has_retry_after_ms) ++nKeys;
+    if (m.has_intent_seq) ++nKeys;
 
     CborWriter w(out);
     w.mapHeader(nKeys);
-    // Ascending: channel_id(15) < code(16) < detail(17) < intent_id(18) < retry_after_ms(31).
+    // Ascending: channel_id(15) < code(16) < detail(17) < intent_id(18) <
+    // retry_after_ms(31) < intent_seq(41).
     if (m.has_channel_id) {
         w.key(CborKey::channel_id).uintVal(m.channel_id);
     }
@@ -67,6 +79,9 @@ inline size_t encodeNack(const NackMsg& m, std::span<std::byte> out) {
     }
     if (m.has_retry_after_ms) {
         w.key(CborKey::retry_after_ms).uintVal(m.retry_after_ms);
+    }
+    if (m.has_intent_seq) {
+        w.key(CborKey::intent_seq).uintVal(m.intent_seq);
     }
     return w.size();
 }
@@ -121,6 +136,14 @@ inline Result<NackMsg, DecodeError> decodeNack(std::span<const std::byte> in) {
                 if (!v) return Ret::err(v.error());
                 m.retry_after_ms = uint32_t(v.value());
                 m.has_retry_after_ms = true;
+                break;
+            }
+            case uint64_t(CborKey::intent_seq): {
+                auto v = r.readUint();
+                if (!v) return Ret::err(v.error());
+                if (v.value() > 0xFFFF) return Ret::err(DecodeError::Malformed);
+                m.intent_seq = uint16_t(v.value());
+                m.has_intent_seq = true;
                 break;
             }
             default: {

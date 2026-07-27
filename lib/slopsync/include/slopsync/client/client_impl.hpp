@@ -18,12 +18,14 @@
 #include "slopsync/util/serial_arithmetic.hpp"
 #include "slopsync/wire/estop_frame.hpp"
 #include "slopsync/wire/frame_header.hpp"
-#include "slopsync/wire/messages/catalog_req.hpp"
+#include "slopsync/wire/messages/blob_req.hpp"
 #include "slopsync/wire/messages/echo.hpp"
 #include "slopsync/wire/messages/goodbye.hpp"
 #include "slopsync/wire/messages/grant.hpp"
 #include "slopsync/wire/messages/pair.hpp"
 #include "slopsync/wire/messages/probe_report.hpp"
+#include "slopsync/wire/messages/subscribe.hpp"
+#include "slopsync/wire/raw/catalog_ready.hpp"
 #include "slopsync/wire/raw/ping_pong.hpp"
 #include "slopsync/wire/raw/probe.hpp"
 #include "slopsync/wire/sha256.hpp"
@@ -44,8 +46,8 @@ inline bool isAllZero(std::span<const std::byte> b) {
 // ============================================================================
 
 inline Client::Client(const ClientIdentity& id, ITransport& transport, IClock& clock, IRandom& rng,
-                       ClientDelegate& delegate)
-    : _id(id), _t(transport), _clock(clock), _rng(rng), _delegate(delegate) {}
+                       ClientDelegate& delegate, ICrypto& crypto)
+    : _id(id), _t(transport), _clock(clock), _rng(rng), _delegate(delegate), _crypto(crypto) {}
 
 inline bool Client::addSubscriptionWish(uint16_t channel_id, float rate_hz, Priority prio) {
     if (_wishCount >= kMaxWishes) return false;
@@ -82,16 +84,27 @@ inline bool Client::connect() {
     _catalogReady = true;
     _chunkReassembler = ChunkReassembler<64>{};
     _catalogChunkCount = 0;
-    _lastChunkLen = 0;
+    _readyPending = false;
+    _readyAttempts = 0;
     _estopActive = false;
     _estopSendFailed = false;
+
+    // ---- M4c: the RFC-029 trust state, reset per session --------------------
+    _hubAuth = HubAuthState::NotRequested;
+    _sigDeadlineMs = 0;
 
     HelloMsg h{};
     h.proto_ver = kProtocolVersion;
     h.client_kind = _id.client_kind;
     h.client_name = _id.client_name;
     h.instance_id = _id.instance_id;
-    h.has_token = _id.hasToken;
+    // RFC-029 item 6. In PROOF mode the token DOES NOT GO ON THE WIRE at all —
+    // that is the entire point, since v1 bindings are cleartext. The session
+    // therefore starts at `watch` and is upgraded by AUTH after WELCOME, which
+    // is the honest one-round-trip price. `bearer` (the default) is unchanged
+    // and stays a memcpy: the potato floor does not move.
+    const bool proofMode = (_presentationMode == presentation_modes::proof) && _id.hasToken;
+    h.has_token = _id.hasToken && !proofMode;
     h.token = _id.token;
     h.has_catalog_etag = !detail::isAllZero(std::span<const std::byte>(_cachedEtag));
     h.catalog_etag = _cachedEtag;
@@ -102,10 +115,50 @@ inline bool Client::connect() {
         h.subscriptions[i].priority = uint8_t(_wishes[i].priority);
     }
 
+    // ---- M4c: the OPTIONAL `trust` sub-map ----------------------------------
+    // Emitted only when this client actually opted into something. A client
+    // that called none of the M4c setters produces a HELLO byte-identical to
+    // its M4b one — no sub-map, no key 39, no extra bytes on the wire.
+    if (_clientVer != nullptr) {
+        h.has_trust = true;
+        h.trust_map.has_client_ver = true;
+        h.trust_map.client_ver = std::string_view(_clientVer);
+    }
+    if (_presentationMode != 0) {
+        h.has_trust = true;
+        h.trust_map.has_presentation_mode = true;
+        h.trust_map.presentation_mode = _presentationMode;
+    }
+    if (_sigRequested) {
+        // FRESH ENTROPY, EVERY CONNECT. This is the replay fix in one line: the
+        // hub signs client_nonce || session_id || boot_id, so a signature
+        // captured off a cleartext wire is bound to a nonce this client will
+        // never present again. Drawing it here rather than once at construction
+        // matters — a nonce reused across reconnects would make a captured
+        // signature replayable at exactly the moment (a reconnect) an attacker
+        // is most likely to be in position.
+        _rng.fill(std::span<std::byte>(_clientNonce));
+        h.has_trust = true;
+        h.trust_map.has_client_nonce = true;
+        h.trust_map.client_nonce = _clientNonce;
+        h.trust_map.has_sig_request = true;
+        h.trust_map.sig_request = true;
+        // Pinned key or not decides whether silence is evidence. Without a key
+        // there is nothing to verify against and no timeout is applied — a hub
+        // that simply has no keypair is conformant, and treating its silence as
+        // an attack would make honest hubs unusable.
+        setHubAuth(_hubPubkeyLen > 0 ? HubAuthState::Pending : HubAuthState::Unverifiable);
+    }
+
     std::array<std::byte, 700> buf{};
     size_t n = encodeHello(h, std::span<std::byte>(buf));
     if (n == 0) return false;
     if (!sendFrame(FrameType::HELLO, 0, std::span<const std::byte>(buf.data(), n))) return false;
+
+    // The clock on "is this machine going to prove itself?" starts when the ask
+    // leaves, not when WELCOME lands — a hub that never answers at all is the
+    // case this is here to catch.
+    if (_hubAuth == HubAuthState::Pending) _sigDeadlineMs = _clock.nowMs() + limits::hub_sig_timeout_ms;
 
     setState(ClientSessionState::HELLO_SENT);
     return true;
@@ -144,7 +197,9 @@ inline void Client::update(uint32_t nowUs) {
     }
 
     pumpEstopRepeat(nowMs);
+    pumpCatalogReady(nowMs);
     pumpProbe(nowMs);
+    pumpHubSigTimeout(nowMs);
 }
 
 // ============================================================================
@@ -210,14 +265,17 @@ inline void Client::handleFrame(const FrameBuffer& fb, uint32_t nowMs) {
         case FrameType::EVENT:
             handleEvent(header->channel, payload);
             break;
-        case FrameType::CATALOG_CHUNK:
-            handleCatalogChunk(payload, nowMs);
+        case FrameType::BLOB_CHUNK:
+            handleBlobChunk(payload, nowMs);
             break;
         case FrameType::PING:
             handlePing(payload);
             break;
         case FrameType::PAIR_GRANT:
             handlePairGrant(payload);
+            break;
+        case FrameType::HUB_SIG:
+            handleHubSig(payload);
             break;
         case FrameType::PROBE:
             handleProbeFrame(payload);
@@ -267,9 +325,22 @@ inline void Client::handleWelcome(std::span<const std::byte> payload, uint32_t n
         _catalogReady = false;
         _chunkReassembler = ChunkReassembler<64>{};
         _catalogChunkCount = 0;
-        _lastChunkLen = 0;
-        sendCatalogReq();
+        sendBlobReq();
     }
+
+    // ---- M4c (RFC-029 item 1): the INLINE delivery point --------------------
+    // A hub that can sign cheaply puts `welcome_sig` right here. Identical
+    // material, identical verification, identical verdict as the deferred
+    // HUB_SIG path — the client does not care which strategy the hub picked,
+    // which is what keeps this state machine one enum wide.
+    if (w.has_trust && w.trust_map.has_welcome_sig) {
+        adoptHubSignature(std::span<const std::byte>(w.trust_map.welcome_sig.data(), w.trust_map.welcome_sig_len));
+    }
+
+    // ---- M4c (RFC-029 item 6): the PROOF presentation -----------------------
+    // WELCOME's nonce is the message; the token (which never crossed the wire)
+    // is the key. This is the extra round trip proof mode honestly costs.
+    if (_presentationMode == presentation_modes::proof && _id.hasToken) sendAuthProof();
 
     setState(ClientSessionState::SYNCING);
     checkLiveTransition();
@@ -305,6 +376,11 @@ inline void Client::handleState(uint16_t channel, uint16_t seq, std::span<const 
     (void)nowMs;
     ShadowEntry* e = findOrCreateShadow(channel);
     if (!e) return;
+
+    // §8.4/RFC-015: STATE arriving is proof the hub opened our data plane, so
+    // the CATALOG_READY re-declaration loop stops here (even for a frame this
+    // client then discards as stale — the gate is what we were waiting on).
+    _readyPending = false;
 
     bool wasValid = e->slot.valid;
     bool accepted = applyStateFrame(seq, payload, e->slot);
@@ -405,6 +481,21 @@ inline void Client::handleGrant(std::span<const std::byte> payload) {
             }
         }
     }
+
+    // ---- M4c (RFC-029 item 6): the AUTH answer ------------------------------
+    // The hub re-issued `roles`. On an UPGRADE the standing wish list is re-sent
+    // as SUBSCRIBE, because the wishes in HELLO were judged against the role
+    // this client had before it authenticated — the hub does not hoard rejected
+    // wishes waiting for permission to show up, and SUBSCRIBE is exactly the
+    // verb for asking again.
+    if (m.has_roles) {
+        const AccessLevel before = _roles;
+        _roles = AccessLevel(m.roles);
+        if (_roles != before) {
+            if (uint8_t(_roles) > uint8_t(before)) resendSubscriptionWishes();
+            _delegate.onRolesChanged(_roles);
+        }
+    }
 }
 
 inline void Client::handleEvent(uint16_t channel, std::span<const std::byte> payload) {
@@ -415,33 +506,37 @@ inline void Client::handleEvent(uint16_t channel, std::span<const std::byte> pay
 // Catalog transfer (§8.4)
 // ============================================================================
 
-inline void Client::sendCatalogReq() {
-    CatalogReqMsg m{};
+inline void Client::sendBlobReq() {
+    BlobReqMsg m{};
     m.full = true;
     std::array<std::byte, 16> buf{};
-    size_t n = encodeCatalogReq(m, std::span<std::byte>(buf));
-    if (n > 0 && sendFrame(FrameType::CATALOG_REQ, 0, std::span<const std::byte>(buf.data(), n))) {
+    size_t n = encodeBlobReq(m, std::span<std::byte>(buf));
+    if (n > 0 && sendFrame(FrameType::BLOB_REQ, 0, std::span<const std::byte>(buf.data(), n))) {
         ++_catalogReqSentCount;
     }
 }
 
-inline void Client::handleCatalogChunk(std::span<const std::byte> payload, uint32_t nowMs) {
-    if (payload.size() < 4) return;
-    uint16_t idx = getU16(payload.subspan(0, 2));
-    uint16_t cc = getU16(payload.subspan(2, 2));
-    if (cc == 0 || idx >= cc) return;
+inline void Client::handleBlobChunk(std::span<const std::byte> payload, uint32_t nowMs) {
+    BlobChunkHeader h{};
+    if (!getBlobChunkHeader(payload, h)) return;
+    // This client transfers exactly one namespace: the catalog. A chunk from a
+    // store (a preset the application asked for) belongs to that fetch's own
+    // reassembler, not to this one — dropping it here is what keeps the two
+    // from corrupting each other.
+    if (!h.id.isCatalog()) return;
+    if (h.chunk_count == 0 || h.chunk_index >= h.chunk_count) return;
 
-    if (!_chunkReassembler.active() || _catalogChunkCount != cc) {
-        _chunkReassembler.begin(cc, size_t(cc) * limits::catalog_chunk_payload, nowMs);
-        _catalogChunkCount = cc;
+    if (!_chunkReassembler.active() || _catalogChunkCount != h.chunk_count) {
+        // total_bytes rides the header now (RFC-021/028: know the size before
+        // you allocate), which also retires the old "remember the last chunk's
+        // length and reconstruct the real total" hack — the sender simply says.
+        _chunkReassembler.begin(h, nowMs);
+        _catalogChunkCount = h.chunk_count;
     }
     _chunkReassembler.insert(payload, nowMs);
-    if (idx == uint16_t(cc - 1)) _lastChunkLen = uint16_t(payload.size() - 4);
 
     if (_chunkReassembler.complete()) {
-        size_t realTotal = size_t(cc - 1) * limits::catalog_chunk_payload + _lastChunkLen;
-        auto assembled = _chunkReassembler.assembled();
-        auto bytes = assembled.first(std::min(realTotal, assembled.size()));
+        auto bytes = _chunkReassembler.assembled();
 
         auto digest = Sha256::hash(bytes);
         bool match = true;
@@ -457,8 +552,61 @@ inline void Client::handleCatalogChunk(std::span<const std::byte> payload, uint3
         // reassembled bytes actually verified.
         if (match) _cachedEtag = _hubEtag;
         _catalogReady = true;
+
+        // §8.4/RFC-015: the hash IS the acknowledgement — declare which
+        // catalog we now operate against so the hub opens our data plane. On a
+        // verified transfer that is the hub's etag; on a transfer that did NOT
+        // verify we declare what we actually hold (the digest of the bytes we
+        // assembled), which is the honest §8.5 "degraded operation" statement
+        // and is what lets the hub flag the session rather than be misled.
+        std::array<std::byte, limits::etag_bytes> declared{};
+        for (size_t i = 0; i < declared.size(); ++i) declared[i] = match ? _hubEtag[i] : digest[i];
+        sendCatalogReady(std::span<const std::byte>(declared));
+
         checkLiveTransition();
     }
+}
+
+// ============================================================================
+// CATALOG_READY (§8.4 / RFC-015) — declaring which catalog we operate against
+// ============================================================================
+
+inline void Client::sendCatalogReady(std::span<const std::byte> etag) {
+    std::array<std::byte, kCatalogReadyBytes> buf{};
+    size_t n = encodeCatalogReady(etag, std::span<std::byte>(buf));
+    if (n == 0) return;
+    std::copy(etag.begin(), etag.end(), _readyEtag.begin());
+    if (sendFrame(FrameType::CATALOG_READY, 0, std::span<const std::byte>(buf.data(), n))) {
+        // Pending until the hub demonstrably opened the data plane, i.e. until
+        // the first STATE frame lands (handleState clears this).
+        _readyPending = true;
+        _lastReadySendMs = _clock.nowMs();
+        ++_readyAttempts;
+    }
+}
+
+inline void Client::pumpCatalogReady(uint32_t nowMs) {
+    if (!_readyPending) return;
+    // Bounded by the hub's own catalog_ready_timeout_ms: past that the hub has
+    // already GOODBYE'd us (READY_TIMEOUT), so re-declaring is pure noise.
+    constexpr uint32_t kMaxAttempts = limits::catalog_ready_timeout_ms / limits::catalog_chunk_gap_timeout_ms;
+    if (_readyAttempts >= kMaxAttempts) {
+        _readyPending = false;
+        return;
+    }
+    if (!timeReached(nowMs, _lastReadySendMs + limits::catalog_chunk_gap_timeout_ms)) return;
+
+    // Idempotent on the hub side by design — re-declaring is a flag-set, so a
+    // lossy binding costs nothing but 16 bytes per repair interval.
+    std::array<std::byte, kCatalogReadyBytes> buf{};
+    size_t n = encodeCatalogReady(std::span<const std::byte>(_readyEtag), std::span<std::byte>(buf));
+    if (n == 0) {
+        _readyPending = false;
+        return;
+    }
+    sendFrame(FrameType::CATALOG_READY, 0, std::span<const std::byte>(buf.data(), n));
+    _lastReadySendMs = nowMs;
+    ++_readyAttempts;
 }
 
 // ============================================================================
@@ -478,6 +626,15 @@ inline void Client::handlePing(std::span<const std::byte> payload) {
 inline std::optional<uint16_t> Client::sendIntent(uint16_t channel_id, const IntentValueMap& values,
                                                    std::optional<uint16_t> preconditionCfgGen, bool takeover) {
     if (_state != ClientSessionState::LIVE) return std::nullopt;
+    // RFC-029 item 1, NORMATIVE: "a clone fails the signature; the client MUST
+    // surface 'this is not your machine' and withhold intents". WITHHELD HERE,
+    // in the library, and not left to the application — a UI that forgets the
+    // check would otherwise be driving a stranger's machine, and on THIS product
+    // that is a physical-safety failure, not a data one. `Pending` is
+    // deliberately NOT withheld: a hub is allowed to take tens of milliseconds
+    // to sign, and a client that froze during that window would make every
+    // signing hub feel broken.
+    if (_hubAuth == HubAuthState::Mismatch || _hubAuth == HubAuthState::Timeout) return std::nullopt;
     if (_pendingCount >= kMaxPendingIntents) return std::nullopt;
 
     IntentMsg m{};
@@ -586,8 +743,18 @@ inline bool Client::sendPairReq(std::span<const std::byte> pinProof) {
 
     PairReqMsg m{};
     m.instance_id = _id.instance_id;
+    m.has_pin_proof = true;
     std::memcpy(m.pin_proof.data(), pinProof.data(), pinProof.size());
 
+    std::array<std::byte, 64> buf{};
+    size_t n = encodePairReq(m, std::span<std::byte>(buf));
+    if (n == 0) return false;
+    return sendFrame(FrameType::PAIR_REQ, 0, std::span<const std::byte>(buf.data(), n));
+}
+
+inline bool Client::sendPairKnock() {
+    PairReqMsg m{};
+    m.instance_id = _id.instance_id;  // has_pin_proof stays false: that IS the knock
     std::array<std::byte, 64> buf{};
     size_t n = encodePairReq(m, std::span<std::byte>(buf));
     if (n == 0) return false;
@@ -598,7 +765,130 @@ inline void Client::handlePairGrant(std::span<const std::byte> payload) {
     auto res = decodePairGrant(payload);
     if (!res) return;
     const PairGrantMsg& m = res.value();
+    // ---- M4c (RFC-029 item 1): TOFU AT A VERIFIED MOMENT --------------------
+    // The hub's durable identity arrives HERE and nowhere else: the pairing
+    // ceremony is the one moment physical presence was already proven, so it is
+    // the only moment at which "whatever key I am handed is the right key" is a
+    // defensible assumption. Pinning it at an arbitrary later connection would
+    // be trust-on-first-CONNECT, which an evil twin satisfies trivially.
+    if (m.has_trust && m.trust_map.has_hub_pubkey) {
+        std::span<const std::byte> pk(m.trust_map.hub_pubkey.data(), m.trust_map.hub_pubkey_len);
+        setHubPublicKey(pk);
+        _delegate.onHubPublicKey(pk);
+    }
     _delegate.onPairGrant(std::span<const std::byte>(m.token), AccessLevel(m.roles));
+}
+
+// ============================================================================
+// M4c: RFC-029 item 1 (hub authenticity) + item 6 (token proof presentation)
+// ============================================================================
+
+inline void Client::setClientVersion(const char* ver) { _clientVer = ver; }
+
+inline void Client::setHubPublicKey(std::span<const std::byte> sec1Pubkey) {
+    if (sec1Pubkey.empty() || sec1Pubkey.size() > _hubPubkey.size()) {
+        _hubPubkeyLen = 0;  // un-pin: an over-size key is not a key
+        return;
+    }
+    for (size_t i = 0; i < sec1Pubkey.size(); ++i) _hubPubkey[i] = sec1Pubkey[i];
+    _hubPubkeyLen = uint8_t(sec1Pubkey.size());
+}
+
+inline std::span<const std::byte> Client::hubPublicKey() const {
+    return std::span<const std::byte>(_hubPubkey.data(), _hubPubkeyLen);
+}
+
+inline void Client::requestHubSignature(bool on) { _sigRequested = on; }
+inline HubAuthState Client::hubAuthState() const { return _hubAuth; }
+
+inline void Client::setTokenPresentationMode(uint8_t mode) { _presentationMode = mode; }
+inline uint8_t Client::tokenPresentationMode() const { return _presentationMode; }
+
+inline void Client::setHubAuth(HubAuthState s) {
+    if (_hubAuth == s) return;
+    _hubAuth = s;
+    _delegate.onHubAuth(s);
+}
+
+// THE VERIFIER. One function, reached from WELCOME (inline delivery) and from
+// HUB_SIG (deferred delivery), so the two hub strategies are literally
+// indistinguishable to everything above this line.
+inline void Client::adoptHubSignature(std::span<const std::byte> sig) {
+    // First valid answer wins; a second is ignored rather than allowed to
+    // downgrade a Verified session. Otherwise a hub (or an attacker who can
+    // inject one frame) could flip an already-verified client to Mismatch by
+    // sending a second, bogus HUB_SIG.
+    if (_hubAuth == HubAuthState::Verified || _hubAuth == HubAuthState::Mismatch) return;
+    if (!_sigRequested) return;  // unsolicited signature: nothing was asked, nothing is claimed
+    if (_hubPubkeyLen == 0) {
+        setHubAuth(HubAuthState::Unverifiable);
+        return;
+    }
+    if (sig.empty()) return;
+
+    const auto material =
+        hubSigMaterial(std::span<const std::byte, kTrustClientNonceBytes>(_clientNonce), _sessionId, _bootId);
+    // THE REPLAY FENCE IS THE MATERIAL, NOT THE CHECK. `material` contains this
+    // client's fresh nonce AND this session's id AND this boot's id, so a
+    // signature captured from any earlier session verifies against bytes that
+    // no longer exist. The verify below is ordinary; what makes it unforgeable
+    // by an evil twin is what it is asked about.
+    const bool ok = _crypto.verifyP256(hubPublicKey(), std::span<const std::byte>(material), sig);
+    setHubAuth(ok ? HubAuthState::Verified : HubAuthState::Mismatch);
+}
+
+inline void Client::handleHubSig(std::span<const std::byte> payload) {
+    auto res = decodeHubSig(payload);
+    if (!res || !res.value().trust_map.has_welcome_sig) return;
+    const TrustMap& t = res.value().trust_map;
+    adoptHubSignature(std::span<const std::byte>(t.welcome_sig.data(), t.welcome_sig_len));
+}
+
+inline void Client::pumpHubSigTimeout(uint32_t nowMs) {
+    if (_hubAuth != HubAuthState::Pending) return;
+    if (!timeReached(nowMs, _sigDeadlineMs)) return;
+    // SILENCE FROM A HUB WHOSE KEY WE HOLD IS AN ANSWER. We only ever pinned a
+    // key because that machine handed us one in PAIR_GRANT, which means it HAD
+    // a keypair — so "asked, never answered" is either a clone that cannot
+    // sign, or a machine that has lost its identity. Both mean: do not drive it.
+    setHubAuth(HubAuthState::Timeout);
+}
+
+inline void Client::sendAuthProof() {
+    if (!_id.hasToken) return;
+    std::array<std::byte, 32> mac{};
+    if (!_crypto.hmacSha256(std::span<const std::byte>(_id.token), std::span<const std::byte>(_nonce),
+                            std::span<std::byte>(mac))) {
+        return;
+    }
+    AuthMsg m{};
+    m.trust_map.has_token_proof = true;
+    for (size_t i = 0; i < kTrustTokenProofBytes; ++i) m.trust_map.token_proof[i] = mac[i];
+    m.trust_map.has_presentation_mode = true;
+    m.trust_map.presentation_mode = uint8_t(presentation_modes::proof);
+
+    std::array<std::byte, 64> buf{};
+    const size_t n = encodeAuth(m, std::span<std::byte>(buf));
+    if (n == 0) return;
+    sendFrame(FrameType::AUTH, 0, std::span<const std::byte>(buf.data(), n));
+}
+
+inline void Client::resendSubscriptionWishes() {
+    if (_wishCount == 0) return;
+    SubscribeMsg m{};
+    m.subscriptions_count = uint32_t(_wishCount < kSubscribeMaxWishes ? _wishCount : kSubscribeMaxWishes);
+    for (uint32_t i = 0; i < m.subscriptions_count; ++i) {
+        m.subscriptions[i].channel_id = _wishes[i].channel_id;
+        m.subscriptions[i].rate_hz = _wishes[i].rate_hz;
+        m.subscriptions[i].priority = uint8_t(_wishes[i].priority);
+    }
+    std::array<std::byte, 400> buf{};
+    const size_t n = encodeSubscribe(m, std::span<std::byte>(buf));
+    if (n == 0) return;
+    // Wishes already granted are re-granted identically (upsert), so re-sending
+    // the WHOLE list is idempotent and needs no diff — the hub re-authorizes
+    // every entry from scratch against the role it now sees.
+    sendFrame(FrameType::SUBSCRIBE, 0, std::span<const std::byte>(buf.data(), n));
 }
 
 // ============================================================================

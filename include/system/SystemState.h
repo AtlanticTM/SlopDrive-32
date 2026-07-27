@@ -63,6 +63,40 @@ struct BufSample {
 };
 
 // ============================================================================
+// SlopMotion anomaly kind names — THE ONE TABLE
+// ============================================================================
+// Index == slopmotion::AnomalyType ordinal. Both consumers read this and only
+// this: the Core-1 drain log line (src/main.cpp) and the
+// GET /api/slopmotion `stats.anomalies_by_kind` JSON keys (src/ui/WebUI.cpp).
+// Two tables would silently drift the moment the engine grows a kind, and a
+// log that says one thing while the API says another is worse than neither.
+//
+// Deliberately snake_case: JSON keys want it, and matching log text means an
+// operator can grep the device log for the exact key they saw in the API.
+//
+// Bounds are ALWAYS derived from this table's own size — never a literal. That
+// is what makes adding a kind here (and only here) the whole change; a kind the
+// engine reports past the end of the table prints as "?<n>" rather than "?", so
+// an out-of-date table is self-identifying instead of anonymous.
+//
+// NOT engine-header-derived on purpose: SystemState.h stays slopmotion-free
+// (same rule as sm_tune_infeas_policy's plain uint8_t just below).
+inline constexpr const char* kSmAnomalyNames[] = {
+    "none",                // AnomalyType::None              = 0
+    "plan_failed",         //              ::PlanFailed      = 1
+    "settle",              //              ::SettleEngaged   = 2
+    "endvel_clamped",      //              ::EndVelClamped   = 3
+    "deadline_stretched",  //              ::DeadlineStretched = 4
+    "waveform_fallback",   //              ::WaveformFallback  = 5
+    "waveform_scaled",     //              ::WaveformScaled    = 6
+    "waveform_centred",    //              ::WaveformCentred   = 7
+    "handoff_bounded",     //              ::HandoffBounded    = 8
+    "waveform_smoothed",   //              ::WaveformSmoothed  = 9
+};
+inline constexpr uint8_t kSmAnomalyNameCount =
+    uint8_t(sizeof(kSmAnomalyNames) / sizeof(kSmAnomalyNames[0]));
+
+// ============================================================================
 // SystemState — centralised, thread-safe runtime state container
 // ============================================================================
 //
@@ -329,7 +363,11 @@ struct SystemState {
     // effect within ~1 ms. Aligned 32-bit scalars, single writer per field —
     // same lock-free pattern as interp_clamp_overshoot above. NOT persisted:
     // reboot restores compile-time defaults (deliberate for a tuning session).
-    volatile float         sm_tune_jmax        = 500.0f; // units/s^3 (no mm-domain source yet)
+    // jmax joined vmax/amax as an OVERRIDE in fw 2.1.47 — the real ceiling now
+    // derives from config.input_max_jerk_mm_s3 / window span, so this field is
+    // a bench knob of the same shape as the two below, not the source of truth.
+    volatile float         sm_tune_jmax_ovr    = 0.0f;   // 0 = derive from config.input_max_jerk_mm_s3 / span;
+                                                         // >0 = normalized override (units/s^3) for tuning sessions
     volatile float         sm_tune_vmax_ovr    = 0.0f;   // >0 overrides mm-derived vmax (units/s)
     volatile float         sm_tune_amax_ovr    = 0.0f;   // >0 overrides mm-derived amax (units/s^2)
     volatile bool          sm_tune_chase_ff    = true;   // chase velocity feedforward
@@ -337,13 +375,112 @@ struct SystemState {
     volatile float         sm_tune_chase_gain  = 0.9f;   // estimate damping 0..1.5
     volatile float         sm_tune_chase_look  = 3.0f;   // predictive aim, intervals
     volatile uint32_t      sm_tune_dense_us    = 60000;  // dense-stream gate (mean interval)
+    // Infeasible-segment policy: what gives when a commanded stroke cannot
+    // physically happen in its commanded duration. 0 = Stretch (range-first:
+    // keep the full stroke, overrun the deadline), 1 = Scale (timing-first +
+    // shape-first: keep the deadline, shrink the stroke to a legal quintic),
+    // 2 = Reshape (timing-first + machine-first: keep the deadline AND as much
+    // range as the machine can physically deliver, giving up the SHAPE — a
+    // Ruckig time-optimal move, bisected toward the midpoint only if even that
+    // does not fit). Mirrors slopmotion::InfeasiblePolicy — kept as a plain
+    // uint8_t so SystemState.h stays engine-header-free; the mapping to the
+    // enum lives in main.cpp's per-tick config push, and anything out of range
+    // there falls back to the ENGINE's own default rather than silently
+    // picking a policy the operator never asked for.
+    volatile uint8_t       sm_tune_infeas_policy   = 2;      // default: Reshape (engine 0.4.0)
+    volatile float         sm_tune_infeas_margin   = 0.92f;  // stroke-scale margin 0.50..1.00
+    // RESHAPE bisection depth: each step halves the remaining stroke interval,
+    // so N steps resolve the delivered stroke to stroke/2^N. Each step costs
+    // ONE Ruckig calculate() — this is a direct plan-time budget dial, clamped
+    // [0, 8] (0 = no bisection: full amplitude when it fits, guard when not).
+    volatile uint8_t       sm_tune_reshape_steps   = 6;      // slopmotion default
+    // Settle grace: how long an expired plan may HOLD its end state before the
+    // engine concludes the stream is starved and brakes to rest. Microseconds
+    // here (engine units); the /api/slopmotion surface talks MILLISECONDS.
+    // 0 = pre-0.4 behaviour (brake the instant the plan expires).
+    volatile uint32_t      sm_tune_settle_grace_us = 30000;  // 30 ms, slopmotion default
+    volatile bool          sm_tune_aim_extrap      = true;   // 2nd-order chase aim (crest overshoot)
+    // DC centring of a degraded band (WAVEFORM path, Scale + Reshape policies).
+    // When the machine cannot deliver the commanded amplitude on the commanded
+    // clock, ON (engine default) shrinks the achieved band SYMMETRICALLY about
+    // the commanded midpoint instead of letting it walk off one end — every such
+    // stroke is reported as a WaveformCentred anomaly, so the deviation is
+    // visible, never silent. OFF restores the slopmotion 0.4.0 contract.
+    volatile bool          sm_tune_centring        = true;   // slopmotion wave_centering
+    // Correction strength 0..1 (clamped both here and in the engine). 1 = full
+    // centring, 0 = same as the bool off. A FEEL dial, not a calibration, and
+    // deliberately not monotone — the debt loop closes around the pull it
+    // actually applied, so the mid settings are for experimenting only.
+    volatile float         sm_tune_centring_gain   = 1.0f;   // slopmotion wave_centering_gain
+    // RFC-008 handoff sanity guard: the Fritsch-Carlson chord factor k applied
+    // to an inbound segment's end velocity against the FOLLOWING segment's
+    // chord. 1.5 = the shape-preserving bound (engine default); 0 DISABLES the
+    // guard, which is the A/B switch for comparing machine-side bounding
+    // against a client that still carries its own limiter (the MFP plugin's
+    // SegHandoffLimiterEnabled is the other half of that experiment). Clamped
+    // [0, 8] here AND in the engine — a config push is not a trusted input.
+    volatile float         sm_tune_handoff_k       = 1.5f;   // slopmotion handoff_chord_factor
+    // Which CURVE FAMILY the waveform path rebuilds a segment with. A funscript
+    // rendered through Pchip/Makima is a C1 CUBIC Hermite spline, and a C2
+    // quintic cannot reproduce one across a knot by construction — the script's
+    // acceleration genuinely STEPS there. 0 = FollowClient (honour the sender's
+    // declared family; no wire signalling exists yet, so today it resolves to
+    // C2 — pre-0.8.0 behaviour byte for byte), 1 = ForceC1 (cubic), 2 = ForceC2
+    // (quintic, always). Plain uint8_t for the same reason as
+    // sm_tune_infeas_policy: SystemState.h stays engine-header-free, and the
+    // mapping to slopmotion::CurvePolicy lives in main.cpp's per-tick push,
+    // where an out-of-range value falls back to the ENGINE's own default rather
+    // than silently picking a family the operator never asked for.
+    volatile uint8_t       sm_tune_curve_policy    = 0;      // default: FollowClient (engine 0.8.0)
+    // Budgeted-policy spend limits (PrioritizeAmplitude / PrioritizeSmooth
+    // only — inert under the other three). Both are FRACTIONS in [0, 1] of how
+    // much of one axis the policy may spend before it starts spending the
+    // other:
+    //   smooth budget    — max alpha, i.e. how far the span's END HANDLE may be
+    //                      lerped toward its own chord slope. 0 = never touch
+    //                      the sender's curve; 1 = the flattest quintic
+    //                      reachable from the machine's ACTUAL state, which is
+    //                      NOT the same thing as a straight line.
+    //   amplitude budget — max fraction of the COMMANDED stroke that may be
+    //                      surrendered. 0.5 = may shrink to the segment
+    //                      midpoint; 1.0 = may decline to move at all.
+    // 0.5/0.5 are the engine's defaults, so a fresh boot changes nothing.
+    volatile float         sm_tune_smooth_budget   = 0.5f;   // slopmotion infeasible_smooth_budget
+    volatile float         sm_tune_amp_budget      = 0.5f;   // slopmotion infeasible_amplitude_budget
+    // Bisection depth on the alpha search. Each step costs ONE quintic build +
+    // one legality scan (no Ruckig call), so it is far cheaper per step than
+    // sm_tune_reshape_steps. Clamped [1, 10] here AND in the engine; 6 resolves
+    // alpha to 1/64 of the budget, well under anything perceptible.
+    volatile uint8_t       sm_tune_blend_steps     = 6;      // slopmotion infeasible_blend_steps
 
     // ---- SlopMotion telemetry back-channel (Core 1 writes, Core 0 reads) ----
     volatile float         sm_eff_vmax    = 0.0f;  // applied normalized ceilings
     volatile float         sm_eff_amax    = 0.0f;  //   (post-derivation/override)
+    volatile float         sm_eff_jmax    = 0.0f;  //   — jerk joined the family in 2.1.47
     volatile uint32_t      sm_plans       = 0;     // successful plans since stream seed
     volatile uint32_t      sm_failures    = 0;     // rejected plans since stream seed
     volatile uint32_t      sm_anomalies   = 0;     // total anomaly events (all kinds)
+    // Per-kind breakdown, indexed by slopmotion::AnomalyType. The scalar total
+    // above stays for back-compat; this is the diagnostic surface — "42
+    // anomalies" told an investigation nothing, "40 waveform_scaled + 2
+    // endvel_clamped" tells it everything.
+    // WHY 10: the enum ends at WaveformSmoothed = 9 (10 values, 0..9) as of
+    // slopmotion 0.8.0, so this array is EXACTLY FULL again — there is no spare
+    // slot. A kind 10 REQUIRES bumping this constant, appending to
+    // kSmAnomalyNames, appending a per-kind field to the 0x0088 slopmotion-diag
+    // layout (SlopSyncCatalog.h) and mirroring both in sim/slopsim, all in the
+    // same change; until they move, the Core-1 drain loop bounds-checks against
+    // kSmAnomalyNames and DROPS the kind rather than making a stray write, and
+    // the log prints it as "?10".
+    //
+    // The 0x0088 half of that list is an ETAG CHANGE, not an append: the
+    // per-kind block sits in the MIDDLE of that layout, so a tenth counter
+    // shifts every field after it (the ninth already moved plan_us_*/sync_*/
+    // reset_gen by 4 B at M4d, and the tenth moved them another 4 — 84 -> 88).
+    static constexpr uint8_t SM_ANOM_KINDS = 10;
+    static_assert(kSmAnomalyNameCount <= SM_ANOM_KINDS,
+                  "kSmAnomalyNames outgrew sm_anom_kind — bump SM_ANOM_KINDS");
+    volatile uint32_t      sm_anom_kind[SM_ANOM_KINDS] = {};
     volatile uint8_t       sm_mode        = 0;     // slopmotion::Mode
     volatile uint8_t       sm_plan_kind   = 0;     // slopmotion::PlanKind
     // Plan-time bench (the software-double cost, measured where it runs):
@@ -361,6 +498,157 @@ struct SystemState {
     volatile uint32_t      sm_sync_enqueued = 0;  // samples handed to the Core-1 sampler queue
     volatile uint32_t      sm_sync_dropped  = 0;  // ring-overwrite + queue-full + gate + bad-duration drops (combined)
     volatile uint32_t      sm_sync_seg_bundles = 0;  // subset of _bundles that arrived on 0x0085 motion-segment (waveform)
+
+    // ---- RFC-019 observable reset generation --------------------------------
+    // Bumped by the ONE writer that clears the counters above
+    // (POST /api/slopmotion {reset_stats}, Core 0). Published as 0x0088's
+    // `reset_gen` field so EVERY subscriber sees that a reset happened, not
+    // just the session that asked for one — without it a watcher observes the
+    // counters jump backwards and cannot tell a reset from a reboot or a wrap.
+    volatile uint16_t      sm_reset_gen = 0;
+
+    // ---- SlopMotion anomaly EVENT hand-off: Core 1 -> Core 0 ----------------
+    // The 0x0089 motion-anomaly EVENT channel's feed. Core 1's streamSamplerTask
+    // drains slopmotion's own ring (it must — the engine lives there), but it
+    // may NEVER publish: the slopsync Hub is touched by exactly one task, the
+    // Core-0 "SlopSyncHub" task (the one-task invariant SlopSyncWsTransport.h
+    // documents), so an anomaly has to cross cores as DATA before it can become
+    // a frame.
+    //
+    // Single-producer/single-consumer by construction — one writer task, one
+    // reader task, monotonically increasing indices, modulo only at access.
+    // NEWEST LOSES on overflow rather than overwriting the oldest: overwriting
+    // a slot the consumer may be mid-copy is the only way this could tear, and
+    // an anomaly FLOOD is exactly when the earliest events are the diagnostic
+    // ones. Drops are counted, never silent.
+    struct SmAnomalyRec {
+        uint32_t t_us   = 0;    // engine time, low 32 bits
+        uint16_t seq    = 0;    // engine's rolling event id
+        uint8_t  kind   = 0;    // slopmotion::AnomalyType
+        float    target = 0.0f;
+        float    detail = 0.0f;
+    };
+    static constexpr uint32_t SM_ANOM_RING = 16;
+    SmAnomalyRec           sm_anom_ring[SM_ANOM_RING] = {};
+    std::atomic<uint32_t>  sm_anom_head{0};      // producer cursor (Core 1)
+    std::atomic<uint32_t>  sm_anom_tail{0};      // consumer cursor (Core 0)
+    std::atomic<uint32_t>  sm_anom_evt_dropped{0};
+
+    // Producer side (Core 1 ONLY). Returns false when the ring is full.
+    bool smAnomalyPush(const SmAnomalyRec& r) {
+        const uint32_t head = sm_anom_head.load(std::memory_order_relaxed);
+        const uint32_t tail = sm_anom_tail.load(std::memory_order_acquire);
+        if (head - tail >= SM_ANOM_RING) {
+            sm_anom_evt_dropped.fetch_add(1, std::memory_order_relaxed);
+            return false;
+        }
+        sm_anom_ring[head % SM_ANOM_RING] = r;
+        // Release: the slot's stores must be visible before the consumer can
+        // see the cursor that publishes them.
+        sm_anom_head.store(head + 1, std::memory_order_release);
+        return true;
+    }
+
+    // Consumer side (Core 0 ONLY).
+    bool smAnomalyPop(SmAnomalyRec& out) {
+        const uint32_t tail = sm_anom_tail.load(std::memory_order_relaxed);
+        if (tail == sm_anom_head.load(std::memory_order_acquire)) return false;
+        out = sm_anom_ring[tail % SM_ANOM_RING];
+        sm_anom_tail.store(tail + 1, std::memory_order_release);
+        return true;
+    }
+
+    // ---- SlopLog -> SlopSync log channel (0x0008) hand-off: httpTask -> hub --
+    // RFC-017, M5b item 1. The SlopLog drain (applogDrain()) runs on httpTask;
+    // slopsync::Hub is single-task by contract and is touched ONLY by the Core-0
+    // "SlopSyncHub" task. So a log line must cross tasks as DATA before it can
+    // become an EVENT frame — exactly the shape the 0x0089 anomaly ring above
+    // uses, and deliberately the SAME shape rather than a second invention.
+    //
+    // Producer: the SlopSyncSink in AppLog.cpp (httpTask, and during boot the
+    // setup() task while immediate-drain is on — still a single producer at any
+    // instant, because immediate-drain is switched off before task creation).
+    // Consumer: SlopSyncHubService::drainLogBridge() on the hub task.
+    //
+    // NEWEST LOSES on overflow — and here it is not a preference but a
+    // constraint: in an SPSC ring the producer does not own the tail, so it
+    // physically cannot evict. Which is precisely why this ring needs the
+    // SEVERITY RESERVE rather than an eviction policy: Trace/Debug/Info may
+    // occupy at most SLOPLOG_RING - SLOPLOG_HIGH_RESERVE slots, so a Debug
+    // flood can never fill the ring out from under a Warn/Error/Fatal line
+    // that arrives a millisecond later. Same guarantee the sloplog core ring
+    // makes, expressed with the tools SPSC allows. Drops are counted and
+    // surfaced (§9.4: visible, never silent).
+    //
+    // The record is a local POD rather than sloplog::Record so SystemState.h
+    // keeps its dependency surface; AppLog.cpp static_asserts the two agree.
+    struct SlopLogRec {
+        uint32_t ms    = 0;
+        uint8_t  level = 0;    // sloplog::Level, which mirrors registry log_levels 0..5
+        uint16_t lost  = 0;    // records SlopLog itself dropped just before this one
+        char     tag[12]  = {};
+        char     msg[104] = {};
+    };
+    static constexpr uint32_t SLOPLOG_RING = 16;
+    // Slots only Warn+ may occupy. Mirrors sloplog::kReserveFloor == Warn ==
+    // level 3; AppLog.cpp static_asserts that the numbering has not drifted.
+    static constexpr uint32_t SLOPLOG_HIGH_RESERVE = 6;
+    static constexpr uint8_t  SLOPLOG_RESERVE_LEVEL = 3;   // sloplog::Level::Warn
+    SlopLogRec             sloplog_ring[SLOPLOG_RING] = {};
+    std::atomic<uint32_t>  sloplog_head{0};      // producer cursor (httpTask)
+    std::atomic<uint32_t>  sloplog_tail{0};      // consumer cursor (hub task)
+    std::atomic<uint32_t>  sloplog_bridge_dropped{0};       // all levels
+    std::atomic<uint32_t>  sloplog_bridge_dropped_high{0};  // Warn+ subset
+    // Low-severity occupancy, tracked as two monotonic counters so each is
+    // written by exactly ONE side (pushed: producer, popped: consumer) and the
+    // SPSC discipline survives. lowPending = pushed - popped; a stale read of
+    // `popped` only ever makes the producer more conservative, never less.
+    std::atomic<uint32_t>  sloplog_low_pushed{0};
+    std::atomic<uint32_t>  sloplog_low_popped{0};
+
+    // Producer side (log-drain task ONLY). Never blocks, never allocates.
+    bool slopLogPush(const SlopLogRec& r) {
+        const uint32_t head = sloplog_head.load(std::memory_order_relaxed);
+        const uint32_t tail = sloplog_tail.load(std::memory_order_acquire);
+        const bool full = (head - tail) >= SLOPLOG_RING;
+        const bool high = r.level >= SLOPLOG_RESERVE_LEVEL;
+        if (full) {
+            sloplog_bridge_dropped.fetch_add(1, std::memory_order_relaxed);
+            if (high) sloplog_bridge_dropped_high.fetch_add(1, std::memory_order_relaxed);
+            return false;
+        }
+        if (!high) {
+            const uint32_t lowPending =
+                sloplog_low_pushed.load(std::memory_order_relaxed) -
+                sloplog_low_popped.load(std::memory_order_acquire);
+            if (lowPending >= (SLOPLOG_RING - SLOPLOG_HIGH_RESERVE)) {
+                sloplog_bridge_dropped.fetch_add(1, std::memory_order_relaxed);
+                return false;
+            }
+            sloplog_low_pushed.store(
+                sloplog_low_pushed.load(std::memory_order_relaxed) + 1,
+                std::memory_order_relaxed);
+        }
+        sloplog_ring[head % SLOPLOG_RING] = r;
+        sloplog_head.store(head + 1, std::memory_order_release);
+        return true;
+    }
+
+    // Consumer side (SlopSyncHub task ONLY).
+    bool slopLogPop(SlopLogRec& out) {
+        const uint32_t tail = sloplog_tail.load(std::memory_order_relaxed);
+        if (tail == sloplog_head.load(std::memory_order_acquire)) return false;
+        out = sloplog_ring[tail % SLOPLOG_RING];
+        if (out.level < SLOPLOG_RESERVE_LEVEL) {
+            // Release: the producer's cap check acquire-loads this, and must
+            // not observe the credit before the slot is genuinely free.
+            sloplog_low_popped.store(
+                sloplog_low_popped.load(std::memory_order_relaxed) + 1,
+                std::memory_order_release);
+        }
+        sloplog_tail.store(tail + 1, std::memory_order_release);
+        return true;
+    }
 
     // --------------------------------------------------------------------------
     // Convenience helpers — zero-cost inline

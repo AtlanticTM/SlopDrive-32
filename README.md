@@ -268,23 +268,19 @@ at configured ceilings.
   |------|-------------|
   | **Serial** | USB Serial dedicated to Intiface's serial comm manager — lowest latency/jitter path. |
   | **BLE** | NimBLE-based GATT server advertising a Nordic-UART-style service (separate write/notify characteristics) for a TCode RX/TX pair. |
-  | **WebSocket Server** | Direct TCode WebSocket server on port `55555` — compatible with MultiFunPlayer and other WebSocket-based controllers. Always running alongside... |
-  | **WiFi / WSDM Client** | ...an outbound connection to Intiface's Device WebSocket Server as a client. These two are two roles of the same always-resident WebSocket transport object, not independently selectable — picking "WS" mode turns both on together. |
+  | ~~**WebSocket Server** / **WSDM Client**~~ | **REMOVED (fw 2.1.65).** The `:55555` TCode WebSocket server and the outbound Intiface Device-WebSocket client are both gone. **SlopSync is now the only input and output.** MultiFunPlayer talks to the device through the native SlopSync plugin (`clients/mfp-slopsync/`); Intiface is planned to gain native SlopSync support rather than the device continuing to speak Intiface's protocol. |
   | **Dongle Transport** | UART relay from the onboard C5-Zero coprocessor (itself fed wirelessly by the external T-Dongle C5 over ESP-NOW). `DongleTransport` reads that UART (GPIO 43/44, 460800 baud) and feeds the parser exactly like `SerialTransport` does for USB. |
   | **OSSM BLE** | SlopDrive-32 advertises itself as a **stock KinkyMakers OSSM device** (BLE peripheral/server, not a client) so third-party OSSM-ecosystem apps (OSSM Possum, XToys) can control it directly — full command/state/pattern-list characteristic set, with a 1s-grace + 2s ease-out safety ramp on disconnect. See the Known Gap note above re: continuous position streaming. |
 
-- **Binary WebSocket UI control plane** — a completely separate WebSocket
-  server on port `81` (distinct from the TCode server on 55555) speaks a compact
-  binary frame protocol for device configuration and telemetry: `HELLO`,
-  batched `TELE` position/target/raw samples, `STATUS` (bus/thermal/WiFi/heap),
-  `CLOCK` (RTT sync), `INTERP` (interpolator debug), `ANOMALY` (event-driven),
-  `CMD` (client→device, ~20 operations covering window/speed/accel, transport
-  switching, blend mode, pause/halt/e-stop/home, manual moves, and more), and
-  `ECHO` (device→client ack). A monotonic `cfg_gen` counter rides on every
-  frame; when a client sees it advance past what it has cached, it discards any
-  pending optimistic UI state and re-fetches the full config — keeping multiple
-  simultaneously-connected browser tabs (or a phone + a desktop) consistent
-  without polling.
+- **~~Binary WebSocket UI control plane (`:81`)~~ — REMOVED (fw 2.1.65).** The
+  compact binary frame protocol on port `81` (`HELLO`/`TELE`/`STATUS`/`CLOCK`/
+  `INTERP`/`ANOMALY`/`CMD`) is deleted. Everything it did now rides **SlopSync**
+  on `:82`, which additionally has capability negotiation, per-client rate
+  grants, and — unlike `:81`, which had none at all — authorization. Removing it
+  was a fix, not a tidy-up: with `:81` attached a full soak run rebooted the
+  device three times and bottomed out at a 112-byte heap watermark; without
+  links2004 entirely that watermark is 25,536 B. See
+  `docs/http-plane-retirement.md`.
 
 - **`WIFI <ssid> <password>` / `WIFI CLEAR` sideband command** — a rescue tool
   parsed out of the normal TCode stream (works over any transport that reaches

@@ -21,6 +21,7 @@
 #include "slopsync/conformance/mini_catalog.hpp"
 #include "slopsync/core/result.hpp"
 #include "slopsync/generated/registry_constants.hpp"
+#include "slopsync/util/byte_io.hpp"
 #include "slopsync/util/serial_arithmetic.hpp"
 #include "slopsync/wire/packed/layout_codec.hpp"
 #include "slopsync/wire/raw/ackmask.hpp"
@@ -56,39 +57,57 @@ bool approxEq(float a, float b, float quantum) {
 // D-01 — STATE/STREAM layout round-trip for every layout-class mini-catalog
 // entry, via the runtime layout_codec (wire/packed/layout_codec.hpp).
 // ============================================================================
-TEST_CASE("D-01: safety (0x0003) round-trip — bitfield8 + u8/u32/u16") {
-    Catalog32 cat = miniCatalog();
+TEST_CASE("D-01: safety (0x0003) round-trip — bitfield8 + u8/u32/u16 + appended modes") {
+    Catalog32 cat;
+    buildMiniCatalog(cat);
     const CatalogEntry* e = cat.find(channels::safety);
     REQUIRE(e != nullptr);
     REQUIRE(e->usesLayout());
-    CHECK(e->fieldCount == 4);
+    CHECK(e->fieldCount == 5);  // RFC-025c appended `modes` (was 4)
 
     // word=0x0A (bitfield8, raw passthrough, no scale), cause=2, owner_session=123456
-    // (an exact float integer, well under 2^24), estop_seq=7.
-    const float physical[4] = {10.0f, 2.0f, 123456.0f, 7.0f};
+    // (an exact float integer, well under 2^24), estop_seq=7, modes=0x03
+    // (override|bypass — the second bitfield8, also raw passthrough).
+    const float physical[5] = {10.0f, 2.0f, 123456.0f, 7.0f, 3.0f};
 
     std::array<std::byte, 32> buf{};
-    size_t n = encodeByLayout(*e, physical, buf);
-    REQUIRE(n == e->layoutWireSize());
-    CHECK(n == 8);  // 1(bitfield8) + 1(u8) + 4(u32) + 2(u16)
+    size_t n = encodeByLayout(cat, *e, physical, buf);
+    REQUIRE(n == cat.layoutWireSize(*e));
+    CHECK(n == 9);  // 1(bitfield8) + 1(u8) + 4(u32) + 2(u16) + 1(bitfield8)
 
-    // Hand-derived: 0A | 02 | 40 E2 01 00 (123456 = 0x0001E240, LE) | 07 00
-    const std::array<std::byte, 8> expected = {
+    // Hand-derived: 0A | 02 | 40 E2 01 00 (123456 = 0x0001E240, LE) | 07 00 | 03
+    // APPEND-ONLY PROOF: bytes 0..7 are byte-for-byte what this test pinned
+    // before `modes` existed. That is the whole claim of append-only layout
+    // evolution, asserted rather than asserted-about.
+    const std::array<std::byte, 9> expected = {
         std::byte{0x0A}, std::byte{0x02},
         std::byte{0x40}, std::byte{0xE2}, std::byte{0x01}, std::byte{0x00},
         std::byte{0x07}, std::byte{0x00},
+        std::byte{0x03},
     };
-    CHECK(std::equal(buf.begin(), buf.begin() + 8, expected.begin()));
+    CHECK(std::equal(buf.begin(), buf.begin() + 9, expected.begin()));
 
-    float decoded[4] = {};
-    auto dr = decodeByLayout(*e, std::span(buf).first(n), decoded);
+    float decoded[5] = {};
+    auto dr = decodeByLayout(cat, *e, std::span(buf).first(n), decoded);
     REQUIRE(dr.isOk());
     CHECK(dr.value() == n);
-    for (int i = 0; i < 4; ++i) CHECK(approxEq(decoded[i], physical[i], 1.0f));
+    for (int i = 0; i < 5; ++i) CHECK(approxEq(decoded[i], physical[i], 1.0f));
+
+    // An OLD client — one whose cached catalog knows only the first 4 fields —
+    // decodes them correctly from the FULL 9-byte snapshot and simply never
+    // looks at byte 8. That is the prefix-parse guarantee that makes appending
+    // legal at all (§8.6 append-only evolution), exercised the way a real
+    // stale client would: with a SHORTER FIELD LIST, not a truncated payload.
+    float oldDecoded[4] = {};
+    auto pr = decodeByLayout(cat.layoutFields(*e).first(4), std::span<const std::byte>(buf).first(n), oldDecoded);
+    REQUIRE(pr.isOk());
+    CHECK(pr.value() == 8);  // consumed exactly the pre-RFC-025c prefix
+    for (int i = 0; i < 4; ++i) CHECK(approxEq(oldDecoded[i], physical[i], 1.0f));
 }
 
 TEST_CASE("D-01: position (0x0080) round-trip — hand-checked exact bytes {123.45,124.0,122.9} mm") {
-    Catalog32 cat = miniCatalog();
+    Catalog32 cat;
+    buildMiniCatalog(cat);
     const CatalogEntry* e = cat.find(0x0080);
     REQUIRE(e != nullptr);
     CHECK(e->fieldCount == 3);
@@ -96,8 +115,8 @@ TEST_CASE("D-01: position (0x0080) round-trip — hand-checked exact bytes {123.
     const float physical[3] = {123.45f, 124.0f, 122.9f};  // mm
 
     std::array<std::byte, 16> buf{};
-    size_t n = encodeByLayout(*e, physical, buf);
-    REQUIRE(n == e->layoutWireSize());
+    size_t n = encodeByLayout(cat, *e, physical, buf);
+    REQUIRE(n == cat.layoutWireSize(*e));
     CHECK(n == 6);
 
     // Derivation (scale=100, wire = round(physical*100)):
@@ -111,13 +130,14 @@ TEST_CASE("D-01: position (0x0080) round-trip — hand-checked exact bytes {123.
     CHECK(std::equal(buf.begin(), buf.begin() + 6, expected.begin()));
 
     float decoded[3] = {};
-    auto dr = decodeByLayout(*e, std::span(buf).first(n), decoded);
+    auto dr = decodeByLayout(cat, *e, std::span(buf).first(n), decoded);
     REQUIRE(dr.isOk());
     for (int i = 0; i < 3; ++i) CHECK(approxEq(decoded[i], physical[i], 1.0f / 100.0f));
 }
 
 TEST_CASE("D-01: motion-status (0x0082) round-trip — bitfield8 + u8") {
-    Catalog32 cat = miniCatalog();
+    Catalog32 cat;
+    buildMiniCatalog(cat);
     const CatalogEntry* e = cat.find(0x0082);
     REQUIRE(e != nullptr);
     CHECK(e->fieldCount == 2);
@@ -125,20 +145,21 @@ TEST_CASE("D-01: motion-status (0x0082) round-trip — bitfield8 + u8") {
     const float physical[2] = {21.0f, 0.0f};  // flags=0b10101, reserved=0
 
     std::array<std::byte, 8> buf{};
-    size_t n = encodeByLayout(*e, physical, buf);
-    REQUIRE(n == e->layoutWireSize());
+    size_t n = encodeByLayout(cat, *e, physical, buf);
+    REQUIRE(n == cat.layoutWireSize(*e));
     CHECK(n == 2);
     CHECK(buf[0] == std::byte{0x15});
     CHECK(buf[1] == std::byte{0x00});
 
     float decoded[2] = {};
-    auto dr = decodeByLayout(*e, std::span(buf).first(n), decoded);
+    auto dr = decodeByLayout(cat, *e, std::span(buf).first(n), decoded);
     REQUIRE(dr.isOk());
     for (int i = 0; i < 2; ++i) CHECK(approxEq(decoded[i], physical[i], 1.0f));
 }
 
 TEST_CASE("D-01: diag (0x0090) round-trip — signed i8/i16/i32 negative values, exact 15-byte payload") {
-    Catalog32 cat = miniCatalog();
+    Catalog32 cat;
+    buildMiniCatalog(cat);
     const CatalogEntry* e = cat.find(0x0090);
     REQUIRE(e != nullptr);
     CHECK(e->fieldCount == 5);
@@ -148,8 +169,8 @@ TEST_CASE("D-01: diag (0x0090) round-trip — signed i8/i16/i32 negative values,
     const float physical[5] = {-5.0f, -450.0f, -123456.0f, 999999.0f, 3.5f};
 
     std::array<std::byte, 20> buf{};
-    size_t n = encodeByLayout(*e, physical, buf);
-    REQUIRE(n == e->layoutWireSize());
+    size_t n = encodeByLayout(cat, *e, physical, buf);
+    REQUIRE(n == cat.layoutWireSize(*e));
     CHECK(n == 15);  // 1 + 2 + 4 + 4 + 4
 
     // Derivations:
@@ -168,7 +189,7 @@ TEST_CASE("D-01: diag (0x0090) round-trip — signed i8/i16/i32 negative values,
     CHECK(std::equal(buf.begin(), buf.begin() + 15, expected.begin()));
 
     float decoded[5] = {};
-    auto dr = decodeByLayout(*e, std::span(buf).first(n), decoded);
+    auto dr = decodeByLayout(cat, *e, std::span(buf).first(n), decoded);
     REQUIRE(dr.isOk());
     CHECK(approxEq(decoded[0], physical[0], 1.0f));
     CHECK(approxEq(decoded[1], physical[1], 1.0f / 10.0f));
@@ -243,30 +264,68 @@ TEST_CASE("D-02: oversized payload is rejected with the capacity flag, shadow un
 
 // ============================================================================
 // D-03 — STATE-fit conformance check: every layout-class mini-catalog entry
-// fits limits::min_transport_payload (242 B). A genuinely oversized
-// CatalogEntry can't be constructed in this data model (kMaxFields=8, widest
-// field is 4 bytes -> worst case 32 B, far under 242) — that mechanical
-// impossibility is exactly why the FULL D-03 vector (a real 243-byte-layout
-// catalog rejected by conformance tooling) is deferred to the M6 CLI, which
-// builds catalogs from parsed YAML/CBOR rather than this fixed-capacity
-// struct. What we CAN and do test natively is that the comparison the CLI
-// will run is the right one.
+// fits limits::min_transport_payload (242 B).
+//
+// M2b note: an oversized CatalogEntry USED to be mechanically unconstructible
+// here (kMaxFields was 8 and the widest numeric field is 4 B -> 32 B worst
+// case). kMaxFields is 64 now, so the overflow is real and the seeded-violation
+// half of D-03 lives in test_slopsync_conformance, which asserts both sides of
+// the 242 B boundary. This case keeps the fixture-side half: the shipped
+// fixture fits, and the comparison the CLI will run is the right one.
 // ============================================================================
 TEST_CASE("D-03: every mini-catalog layout entry fits the 242-byte STATE floor") {
-    Catalog32 cat = miniCatalog();
+    Catalog32 cat;
+    buildMiniCatalog(cat);
     bool sawAny = false;
     for (uint16_t i = 0; i < cat.count; ++i) {
         const CatalogEntry& e = cat.entries[i];
         if (!e.usesLayout()) continue;
         sawAny = true;
-        CHECK(e.layoutWireSize() <= limits::min_transport_payload);
+        CHECK(cat.layoutWireSize(e) <= limits::min_transport_payload);
     }
     CHECK(sawAny);
 
-    // The mechanical maximum this data model can even represent: 8 fields,
-    // 4 bytes each (u32/i32/f32, the widest PackedFieldType).
+    // The mechanical maximum the NUMERIC field types can represent: kMaxFields
+    // fields, 4 bytes each (u32/i32/f32, the widest numeric PackedFieldType).
+    // At kMaxFields 64 that is 256 B — PAST the floor, which is why the
+    // conformance suite now asserts the StateTooLarge violation for real.
     constexpr size_t kMaxPossibleLayoutBytes = CatalogEntry::kMaxFields * 4;
-    CHECK(kMaxPossibleLayoutBytes < limits::min_transport_payload);
+    CHECK(kMaxPossibleLayoutBytes > limits::min_transport_payload);
+
+    // ---- RFC-026 fixed-width string types ---------------------------------
+    // wireSize() used to end in `default: return 4`, so str16/str32/str64 all
+    // reported 4 bytes — which silently shifted the offset of EVERY field
+    // packed after one of them. Pin the real widths, and pin that a layout
+    // mixing them still adds up: the offsets are the whole point.
+    auto sz = [](PackedFieldType t) {
+        return LayoutField{.name = "x", .type = t, .unit = ""}.wireSize();
+    };
+    CHECK(sz(PackedFieldType::str16) == 16);
+    CHECK(sz(PackedFieldType::str32) == 32);
+    CHECK(sz(PackedFieldType::str64) == 64);
+
+    Catalog32 strCat;
+    strCat.addEntry({.id = 0x0002, .name = "session-roster",
+                     .cls = ChannelClass::STATE, .dir = Direction::h2c,
+                     .access = AccessLevel::watch, .maxRateHz = 0.0f,
+                     .defaultPriority = Priority::normal});
+    strCat.addLayoutField({.name = "session_id", .type = PackedFieldType::u32, .unit = "", .scale = 1.0f});
+    strCat.addLayoutField({.name = "name", .type = PackedFieldType::str16, .unit = "", .scale = 1.0f});
+    strCat.addLayoutField({.name = "role", .type = PackedFieldType::u8, .unit = "", .scale = 1.0f});
+    REQUIRE(strCat.ok());
+    CHECK(strCat.layoutWireSize(strCat.entries[0]) == 4 + 16 + 1);  // was 4+4+1 with the old bug
+
+    // Round-trip the string field itself: fixed width, NUL-padded, read back
+    // as the bytes before the first NUL, and the NEXT field still lands at the
+    // right offset.
+    const auto fields = strCat.layoutFields(strCat.entries[0]);
+    std::array<std::byte, 21> packed{};
+    CHECK(packField(fields[0], 7.0f, std::span(packed).subspan(0, 4)) == 4);
+    CHECK(packStringField(fields[1], "webui", std::span(packed).subspan(4, 16)) == 16);
+    CHECK(packField(fields[2], 2.0f, std::span(packed).subspan(20, 1)) == 1);
+    CHECK(readStringField(fields[1], std::span<const std::byte>(packed).subspan(4, 16)) == "webui");
+    CHECK(packed[4 + 5] == std::byte{0});   // zero-padded, not left as garbage
+    CHECK(packed[20] == std::byte{2});      // the field AFTER the string is where it should be
 }
 
 TEST_CASE("D-03: the fit comparison itself, against synthetic sizes (243 over / 242 at-the-line)") {
@@ -436,26 +495,29 @@ TEST_CASE("D-05: BundleView on a truncated buffer errors, does not crash") {
 // bytes (SPEC §5.4).
 // ============================================================================
 TEST_CASE("D-06: append-only prefix parse — 3-field view over diag's full 15-byte payload") {
-    Catalog32 cat = miniCatalog();
+    Catalog32 cat;
+    buildMiniCatalog(cat);
     const CatalogEntry* diag = cat.find(0x0090);
     REQUIRE(diag != nullptr);
 
     const float physical[5] = {-5.0f, -450.0f, -123456.0f, 999999.0f, 3.5f};
     std::array<std::byte, 15> full{};
-    size_t n = encodeByLayout(*diag, physical, full);
+    size_t n = encodeByLayout(cat, *diag, physical, full);
     REQUIRE(n == 15);
 
     // A synthetic "old client" catalog entry that only knows diag's first
     // three fields (d_i8, d_i16, d_i32) — as if compiled against an earlier
-    // catalog etag, before d_u32/d_f32 were appended.
+    // catalog etag, before d_u32/d_f32 were appended. Narrowing fieldCount
+    // narrows the entry's window into the catalog's shared layout pool, so
+    // the truncated view resolves exactly as it did in the array-era model.
     CatalogEntry prefix = *diag;
     prefix.fieldCount = 3;
 
     constexpr size_t kPrefixBytes = 1 + 2 + 4;  // i8 + i16 + i32
-    CHECK(prefix.layoutWireSize() == kPrefixBytes);
+    CHECK(cat.layoutWireSize(prefix) == kPrefixBytes);
 
     float decoded[3] = {};
-    auto r = appendOnlyRead(prefix, full, decoded);  // `full` is longer than the prefix needs
+    auto r = appendOnlyRead(cat, prefix, full, decoded);  // `full` is longer than the prefix needs
     REQUIRE(r.isOk());
     CHECK(r.value() == kPrefixBytes);  // only 7 of the 15 bytes were consumed
     CHECK(approxEq(decoded[0], physical[0], 1.0f));
@@ -665,4 +727,118 @@ TEST_CASE("BEACON: byte-exact round-trip — boot_id=0xB007CAFE, etag=0102..08, 
     CHECK(decoded.value().boot_id == 0xB007CAFE);
     CHECK(decoded.value().etag == b.etag);
     CHECK(decoded.value().pairing_open == true);
+}
+
+// ============================================================================
+// M4a / RFC-028 — BundleView::parse enforces the t_off ORDERING rules, not
+// just the span.
+//
+// Why this suite exists: BundleWriter has always refused to EMIT a bundle
+// whose t_off is not strictly increasing from 0, but BundleView::parse only
+// bounded the span, and the hub re-derived the ordering itself at ingress.
+// That left the DEVICE safe and every CLIENT exposed — a client decoding an
+// h2c bundle from a hostile hub had no protection at all, which violates
+// RFC-028's symmetric obligation that a malicious hub must not be able to
+// harm a conforming client. The checks now live in the parser, so being safe
+// no longer depends on the caller knowing to re-walk 32 u16s.
+//
+// These bundles are HAND-FORGED byte by byte: BundleWriter cannot produce
+// them, which is exactly why the parser is the thing under test.
+// ============================================================================
+
+namespace {
+
+// Forges a bundle header + t_off array + zero-filled samples. `tOffs` is
+// written verbatim, legal or not.
+template <size_t N>
+std::vector<std::byte> forgeBundle(uint32_t tBase, const std::array<uint16_t, N>& tOffs, size_t sampleSize) {
+    std::vector<std::byte> out(kStreamBundleHeaderBytes + kStreamBundleTOffBytes * N + N * sampleSize,
+                               std::byte{0});
+    std::span<std::byte> s(out);
+    putU32(s.subspan(0, 4), tBase);
+    putU8(s.subspan(4, 1), uint8_t(N));
+    putU8(s.subspan(5, 1), 0);
+    for (size_t i = 0; i < N; ++i) {
+        putU16(s.subspan(kStreamBundleHeaderBytes + kStreamBundleTOffBytes * i, 2), tOffs[i]);
+    }
+    return out;
+}
+
+}  // namespace
+
+TEST_CASE("M4a/RFC-028: BundleView::parse rejects a non-zero t_off[0]") {
+    constexpr size_t kSampleSize = 4;
+    // Structurally perfect, strictly increasing — and still illegal, because
+    // t_off is an offset FROM t_base and sample 0 is by definition at t_base.
+    auto forged = forgeBundle<3>(1000, {50, 100, 150}, kSampleSize);
+    auto view = BundleView::parse(forged, kSampleSize);
+    CHECK_FALSE(view.isOk());
+    CHECK(view.error() == DecodeError::Malformed);
+
+    // The same array with a zero first element parses fine — proof the
+    // rejection is about t_off[0], not about anything else in the forgery.
+    auto legal = forgeBundle<3>(1000, {0, 100, 150}, kSampleSize);
+    CHECK(BundleView::parse(legal, kSampleSize).isOk());
+}
+
+TEST_CASE("M4a/RFC-028: BundleView::parse rejects non-strictly-increasing t_off") {
+    constexpr size_t kSampleSize = 4;
+
+    SUBCASE("a duplicate timestamp is a producer bug, not a valid bundle") {
+        auto forged = forgeBundle<4>(7000, {0, 100, 100, 200}, kSampleSize);
+        auto view = BundleView::parse(forged, kSampleSize);
+        CHECK_FALSE(view.isOk());
+        CHECK(view.error() == DecodeError::Malformed);
+    }
+
+    SUBCASE("a backwards step is rejected") {
+        auto forged = forgeBundle<4>(7000, {0, 300, 200, 400}, kSampleSize);
+        auto view = BundleView::parse(forged, kSampleSize);
+        CHECK_FALSE(view.isOk());
+        CHECK(view.error() == DecodeError::Malformed);
+    }
+
+    SUBCASE("a bundle whose LAST t_off is in range but whose interior is not") {
+        // This is the case the old span-only check could never catch: byte for
+        // byte it passes "last <= span cap", and every sample offset is inside
+        // the cap. Only the ordering walk sees it.
+        auto forged = forgeBundle<3>(7000, {0, 15000, 9000}, kSampleSize);
+        auto view = BundleView::parse(forged, kSampleSize);
+        CHECK_FALSE(view.isOk());
+        CHECK(view.error() == DecodeError::Malformed);
+    }
+
+    SUBCASE("an out-of-order array whose LAST element hides an over-cap interior one") {
+        // t_off[1] busts the 20 ms span cap, but t_off[2] (the one the old
+        // code bounded) does not. Rejected now on the ordering rule, and the
+        // reason it matters: after this walk, "last" really is "largest", which
+        // is what makes bounding the last element a span check at all.
+        const uint16_t overCap = uint16_t(limits::bundle_max_span_ms * 1000u + 500u);
+        auto forged = forgeBundle<3>(7000, {0, overCap, 10}, kSampleSize);
+        auto view = BundleView::parse(forged, kSampleSize);
+        CHECK_FALSE(view.isOk());
+        CHECK(view.error() == DecodeError::Malformed);
+    }
+}
+
+TEST_CASE("M4a/RFC-028: a legal hand-forged bundle still parses (no over-rejection)") {
+    constexpr size_t kSampleSize = 2;
+    auto forged = forgeBundle<5>(0xFFFFFF00u, {0, 1, 2, 19999, 20000}, kSampleSize);
+    auto view = BundleView::parse(forged, kSampleSize);
+    REQUIRE(view.isOk());
+    CHECK(view.value().sampleCount() == 5);
+    // t_base is near the u32 wrap on purpose: sampleTimeUs() wraps, and the
+    // ordering walk must not have introduced any signed/wrap confusion.
+    CHECK(view.value().sampleTimeUs(0) == 0xFFFFFF00u);
+    CHECK(view.value().sampleTimeUs(4) == uint32_t(0xFFFFFF00u + 20000u));
+
+    // n == 0 stays STRUCTURALLY VALID at the parser: an empty bundle reads no
+    // bytes and can harm nobody. Rejecting it is an INGRESS policy (it would
+    // burn a rate-limit token and a source acquisition for zero motion), and
+    // it lives in the hub, not here.
+    std::array<uint16_t, 0> none{};
+    auto empty = forgeBundle<0>(1234, none, kSampleSize);
+    auto emptyView = BundleView::parse(empty, kSampleSize);
+    CHECK(emptyView.isOk());
+    CHECK(emptyView.value().sampleCount() == 0);
 }

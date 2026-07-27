@@ -66,7 +66,7 @@ Demo: [`examples/slopsync_demo/`](../../examples/slopsync_demo/).
 
 `conformance/catalog_check.hpp` mechanically validates any catalog (STATE-fit,
 id order, form rules). The frozen fixture `conformance/mini_catalog.hpp` pins
-the protocol's reference etag (`21 CB 26 C9 4F B3 88 B5`) — if your
+the protocol's reference etag (`F4 A2 8F BB 58 CE D1 6A`) — if your
 implementation reproduces it byte-for-byte, your catalog codec is correct.
 
 License: MIT. Part of the SlopDrive-32 / OSSM-adjacent ecosystem.

@@ -14,7 +14,6 @@
 #include "ConfigStore.h"
 #include "TCodeParser.h"
 #include "SerialTransport.h"
-#include "WebSocketTransport.h"
 #include "BleTransport.h"
 #include "DongleTransport.h"
 #include "OssmBleService.h"
@@ -23,11 +22,10 @@
 TransportManager::TransportManager(SystemState&        state,
                                    TCodeParser&        parser,
                                    SerialTransport&    serial,
-                                   WebSocketTransport& ws,
                                    BleTransport&       ble,
                                    DongleTransport&    dongle,
                                    OssmBleService&     ossm)
-    : _state(state), _parser(parser), _serial(serial), _ws(ws), _ble(ble), _dongle(dongle), _ossm(ossm) {}
+    : _state(state), _parser(parser), _serial(serial), _ble(ble), _dongle(dongle), _ossm(ossm) {}
 
 // ---- WiFi + mDNS -----------------------------------------------------------
 
@@ -163,7 +161,11 @@ bool TransportManager::setupWiFi() {
 
         if (MDNS.begin(MDNSServiceName)) {
             MDNS.addService("http", "tcp", HTTP_PORT);
-            MDNS.addService("ws", "tcp", BUTTPLUG_WEBSOCKET_PORT);
+            // M5c: the generic "_ws" record advertised the :55555 Intiface/TCode
+            // server, which is deleted. Advertising a port that refuses
+            // connections is worse than advertising nothing — a discovering
+            // client would find it, dial it, and fail, with the device itself as
+            // the source of the bad address.
             MDNS.addService("slopsync", "tcp", SLOPSYNC_WS_PORT);
             MDNS.addServiceTxt("slopsync", "tcp", "proto", slopsync::limits::ws_subprotocol.data());
             MDNS.addServiceTxt("slopsync", "tcp", "fw", FIRMWARE_VERSION);
@@ -244,7 +246,6 @@ void TransportManager::superviseWifi() {
 void TransportManager::applyTransport(TransportMode mode) {
     // Remove all response hooks — clean palate before new hose
     _serial.removeResponseHooks();
-    _ws.removeResponseHooks();
     _ble.removeResponseHooks();
     _dongle.removeResponseHooks();
 
@@ -258,7 +259,6 @@ void TransportManager::applyTransport(TransportMode mode) {
     if (mode == TransportMode::OSSM_BLE) {
         // OSSM masquerade: stop native NUS BLE, start OSSM GATT service
         if (_ble.isRunning()) _ble.stop();
-        _ws.disconnectIntiface();
         _ossm.start();
     } else {
         // Stop OSSM service if switching away
@@ -266,24 +266,19 @@ void TransportManager::applyTransport(TransportMode mode) {
 
         if (mode == TransportMode::BT) {
             _ble.begin();
-            _ws.disconnectIntiface();
             _ble.installResponseHooks();
         } else if (mode == TransportMode::DONGLE) {
             if (_ble.isRunning()) _ble.stop();
-            _ws.disconnectIntiface();
             _dongle.begin();
             _dongle.installResponseHooks();
         } else {
+            // M5c: TransportMode::WS used to mean "the :55555 Intiface/TCode
+            // WebSocket". That transport is DELETED — SlopSync is the only way
+            // in or out now, and it does not live behind this selector. WS
+            // therefore falls through to serial hooks, which is the honest
+            // behaviour for "no legacy text transport is attached".
             if (_ble.isRunning()) _ble.stop();
-            if (mode == TransportMode::WS) {
-#if INTIFACE_ENABLED
-                if (_state.wifi_ready) _ws.connectIntiface(INTIFACE_HOST, INTIFACE_PORT);
-#endif
-                _ws.installResponseHooks();
-            } else {  // SER
-                _ws.disconnectIntiface();
-                _serial.installResponseHooks();
-            }
+            _serial.installResponseHooks();
         }
     }
 

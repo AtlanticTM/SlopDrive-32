@@ -31,8 +31,8 @@ namespace slopsync {
 // bytes etag rather than asserting or throwing: an etag is cache-invalidation
 // metadata, never a safety-critical path, and a caller that needs to detect
 // the failure explicitly already has encodeCatalog's own 0-return for that.
-template <size_t N>
-std::array<std::byte, 8> catalogEtag(const BasicCatalog<N>& cat, std::span<std::byte> scratch) {
+template <size_t E, size_t L, size_t S, size_t B, size_t T>
+std::array<std::byte, 8> catalogEtag(const BasicCatalog<E, L, S, B, T>& cat, std::span<std::byte> scratch) {
     size_t n = encodeCatalog(cat, scratch);
     auto digest = Sha256::hash(scratch.first(n));  // n==0 -> hash of empty span
 

@@ -79,12 +79,19 @@ void MotionArbiter::processDeferred() {
         if (rpt.plan_us > max_plan_us) max_plan_us = rpt.plan_us;
         drained++;
     }
-    // Diagnostic: log queue metrics every 2s. peak_drain is the highest drain
-    // seen since boot — the per-call-site throttle owns the 2s cadence now.
+    // Diagnostic: ONLY a new depth watermark. This used to be a 2 s periodic
+    // "STATS: drained=0 peak=0 total=0 homed=0" — which, sitting in a 1 kHz
+    // Core-1 loop, reported the same four numbers forever and burned ~1900
+    // throttle hits per window to say nothing. A rising peak is the only part
+    // of it that was ever information: it means the queue got deeper than it
+    // has ever been, i.e. Core 1 started falling behind. total/homed are
+    // already live in telemetry.
     static uint8_t peak_drain = 0;  // highest drain seen in any tick
-    if (drained > peak_drain) peak_drain = drained;
-    SLOGD_EVERY_MS(2000, "arbiter", "MotionArbiter STATS: drained=%u peak=%u total=%lu homed=%u",
-                   drained, peak_drain, _intent_count, (unsigned)_state.homed);
+    if (drained > peak_drain) {
+        peak_drain = drained;
+        SLOGD("arbiter", "MotionArbiter: new defer-drain peak %u/tick (total=%lu)",
+              (unsigned)peak_drain, _intent_count);
+    }
 }
 
 // ============================================================================
@@ -253,7 +260,11 @@ PlanReport MotionArbiter::submit(const MotionIntent& intent) {
 
     // Publish to SystemState for the WebUI position graph
     _state.commanded_target_mm = intent.target_mm;
-    // actual_position_mm is updated by _planAndDispatch after FAS dispatch
+    // actual_position_mm is NOT ours to write — not here, not in
+    // _planAndDispatch. WebUI's 240Hz telemetry sampler owns that atomic and
+    // fills it from _motor.getPosition() (FAS step-counter truth). The arbiter
+    // publishes INTENT only. (The old comment here claimed _planAndDispatch
+    // wrote it; it never did — see fw 2.1.48.)
 
     return report;
 }
@@ -520,12 +531,19 @@ PlanReport MotionArbiter::_planAndDispatch(const MotionIntent& intent, bool /*lo
         ramp_mult = fminf(intent.rampIn.entryMultiplier, intent.rampOut.exitMultiplier);
         if (ramp_mult < 0.01f) ramp_mult = 0.01f;
         derived_accel_mm_s2 *= ramp_mult;
-        // Diagnostic: log when ramp interpolation is active
-        SLOGD_EVERY_MS(1000, "arbiter",
-                       "MotionArbiter RAMP ACTIVE: mult=%.2f entry=%.2f exit=%.2f accel %.0f→%.0f mm/s²",
-                       ramp_mult, intent.rampIn.entryMultiplier, intent.rampOut.exitMultiplier,
-                       report.derived_accel_mm_s2 / ((ramp_mult > 0.01f) ? ramp_mult : 1.0f),
-                       derived_accel_mm_s2);
+        // Log on CHANGE, not on tick: a ramping stream held the old 1 s
+        // throttle open forever repeating one multiplier. Quantized to 1% so
+        // float jitter cannot chatter the line.
+        static uint8_t last_mult_pct = 0xFF;
+        const uint8_t mult_pct = uint8_t(ramp_mult * 100.0f + 0.5f);
+        if (mult_pct != last_mult_pct) {
+            last_mult_pct = mult_pct;
+            SLOGD("arbiter",
+                  "MotionArbiter RAMP: mult=%.2f entry=%.2f exit=%.2f accel %.0f→%.0f mm/s²",
+                  ramp_mult, intent.rampIn.entryMultiplier, intent.rampOut.exitMultiplier,
+                  report.derived_accel_mm_s2 / ((ramp_mult > 0.01f) ? ramp_mult : 1.0f),
+                  derived_accel_mm_s2);
+        }
     }
 
     // ---- Record derived values before clamp -----------------------------------
@@ -620,8 +638,11 @@ PlanReport MotionArbiter::_planAndDispatch(const MotionIntent& intent, bool /*lo
 
     report.dispatched_steps = target_steps;
 
-    // D4: NEVER write actual_position_mm from the planner. The telemetry sampler
-    // reads _motor.getPosition() directly — that is the only source of truth.
+    // D4: NEVER write actual_position_mm from the planner. WebUI's 240Hz
+    // telemetry sampler (WebUI::telemetryTimerCb) is its writer, sourcing
+    // _motor.getPosition() — FAS step-counter truth. A planner write would
+    // publish INTENT as if it were reality, straight into the graph, the
+    // SlopSync 0x0080 pos field, and the stream rising-edge re-seed.
     report.plan_us = micros() - start_us;
     return report;
 }

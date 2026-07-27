@@ -21,6 +21,7 @@
 #include "slopsync/generated/registry_constants.hpp"
 #include "slopsync/wire/cbor/cbor_reader.hpp"
 #include "slopsync/wire/cbor/cbor_writer.hpp"
+#include "slopsync/wire/messages/trust_submap.hpp"
 
 namespace slopsync {
 
@@ -38,9 +39,16 @@ struct Grant {
 
 // A granted inbound-STREAM publish result (§6.2/§6.3, key 36). No priority —
 // a c2h producer has no subscription priority; the pair is {rate, channel}.
+// `burst` (key 42, RFC-013) is the APPLIED token-bucket capacity, echoed back
+// post-clamp exactly like every other granted value (ground-truth doctrine).
+// It is emitted only when the wish ASKED for a burst: a wish that didn't ask
+// gets capacity == granted rate (the documented default), and its grant stays
+// byte-identical to a pre-RFC-013 hub's.
 struct GrantedPublish {
     uint16_t channel_id = 0;
     float granted_rate_hz = 0.0f;
+    bool has_burst = false;
+    float burst = 0.0f;
 };
 
 // §6.3's `limits` (22) is itself a CBOR map with its OWN small integer key
@@ -74,6 +82,16 @@ struct WelcomeMsg {
     // (the golden vectors and every non-streaming session stay unchanged).
     uint32_t granted_publishes_count = 0;
     std::array<GrantedPublish, kWelcomeMaxGrantedPublishes> granted_publishes{};
+
+    // The scoped `trust` (39) sub-map. M4b puts `pairing_modes` here — the
+    // BITMASK of association ceremonies this hub is offering RIGHT NOW, which
+    // is why it is re-evaluated per session rather than fixed at boot: a
+    // push-to-pair window is advertised exactly while it is open, and that is
+    // half of how RFC-027(c) keeps window state observable in-band. Emitted
+    // only when non-empty, so a hub offering nothing (and every pre-M4b
+    // WELCOME) stays byte-identical.
+    bool has_trust = false;
+    TrustMap trust_map{};
 };
 
 // Encodes into `out`; returns bytes written, or 0 on any failure.
@@ -81,11 +99,12 @@ inline size_t encodeWelcome(const WelcomeMsg& m, std::span<std::byte> out) {
     if (m.grants_count > kWelcomeMaxGrants) return 0;
     if (m.granted_publishes_count > kWelcomeMaxGrantedPublishes) return 0;
 
-    // granted_publishes (key 36) is the ONLY optional key — 11 fixed + it.
+    // 11 fixed keys; granted_publishes (36) and trust (39) are the optionals.
     const bool hasGrantedPublishes = m.granted_publishes_count > 0;
+    const bool hasTrust = m.has_trust && m.trust_map.any();
 
     CborWriter w(out);
-    w.mapHeader(hasGrantedPublishes ? 12 : 11);
+    w.mapHeader(11 + uint32_t(hasGrantedPublishes) + uint32_t(hasTrust));
     w.key(CborKey::proto_ver).uintVal(m.proto_ver);
     w.key(CborKey::session_id).uintVal(m.session_id);
     w.key(CborKey::boot_id).uintVal(m.boot_id);
@@ -116,12 +135,14 @@ inline size_t encodeWelcome(const WelcomeMsg& m, std::span<std::byte> out) {
         w.key(CborKey::granted_publishes).arrayHeader(m.granted_publishes_count);
         for (uint32_t i = 0; i < m.granted_publishes_count; ++i) {
             const GrantedPublish& gp = m.granted_publishes[i];
-            // Entry keys ascending: granted_rate_hz(14) < channel_id(15).
-            w.mapHeader(2);
+            // Entry keys ascending: granted_rate_hz(14) < channel_id(15) < burst(42).
+            w.mapHeader(gp.has_burst ? 3 : 2);
             w.key(CborKey::granted_rate_hz).f32Val(gp.granted_rate_hz);
             w.key(CborKey::channel_id).uintVal(gp.channel_id);
+            if (gp.has_burst) w.key(CborKey::burst).f32Val(gp.burst);
         }
     }
+    if (hasTrust) encodeTrustMap(w, m.trust_map);  // key 39 is last: §5.3 ascending
     return w.size();
 }
 
@@ -310,6 +331,13 @@ inline Result<WelcomeMsg, DecodeError> decodeWelcome(std::span<const std::byte> 
                                 gp.channel_id = uint16_t(vv.value());
                                 break;
                             }
+                            case uint64_t(CborKey::burst): {
+                                auto vv = r.readF32();
+                                if (!vv) return Ret::err(vv.error());
+                                gp.burst = vv.value();
+                                gp.has_burst = true;
+                                break;
+                            }
                             default: {
                                 auto sv = r.skipValue();
                                 if (!sv) return Ret::err(sv.error());
@@ -323,6 +351,12 @@ inline Result<WelcomeMsg, DecodeError> decodeWelcome(std::span<const std::byte> 
                 // NOT added to the required-keys set below: granted_publishes is
                 // optional (absent from a WELCOME with no granted publish, and
                 // from any pre-key-36 hub — §4.3 tolerance).
+                break;
+            }
+            case uint64_t(CborKey::trust): {
+                auto tR = decodeTrustMap(r, m.trust_map);
+                if (!tR) return Ret::err(tR.error());
+                m.has_trust = true;
                 break;
             }
             default: {

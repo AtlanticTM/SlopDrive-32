@@ -400,15 +400,24 @@ void OssmBleService::_onCommandWrite(NimBLECharacteristic* chr) {
     memcpy(buf, raw.data(), len);
     buf[len] = '\0';
 
-    SLOGD("ossm", "OssmBleService: cmd rx: \"%s\"", buf);
-
     if (strncmp(buf, "set:", 4) == 0) {
+        // Control commands are genuine events — one per operator action.
+        SLOGD("ossm", "cmd rx: \"%s\"", buf);
         _handleSet(buf + 4);
     } else if (strncmp(buf, "go:", 3) == 0) {
+        SLOGD("ossm", "cmd rx: \"%s\"", buf);
         _handleGo(buf + 3);
     } else if (strncmp(buf, "stream:", 7) == 0) {
+        // NOT logged. "stream:<pos>:<time>" is the per-sample motion wire and
+        // arrives 10-50x/s for as long as a remote is connected — this was the
+        // single loudest call site in the firmware, an unthrottled Debug line
+        // per motion packet. The stream's health is already visible as
+        // measured_hz telemetry and in the arbiter's rejection warnings; a
+        // per-packet transcript belongs on a protocol analyser, not in a
+        // 64-slot ring shared with the fault path.
         _handleStream(buf + 7);
     } else {
+        SLOGW("ossm", "cmd rx unrecognised: \"%s\"", buf);
         char resp[140];
         snprintf(resp, sizeof(resp), "fail:%s", buf);
         if (_charCmd) _charCmd->setValue(resp);

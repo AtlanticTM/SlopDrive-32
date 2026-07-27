@@ -106,10 +106,28 @@ export function setHttpGet(fn) { _httpGet = typeof fn === 'function' ? fn : brow
  * @param {string} host
  * @returns {Promise<Uint8Array|null>}
  */
+/**
+ * Where to ask for a mint.
+ *
+ * When the page is served BY the machine — the normal case — use a
+ * same-origin relative URL. Building `http://<host>/uitoken` by hand assumes
+ * the HTTP server is on port 80 and silently fails with a connection refusal
+ * anywhere it is not, which is exactly what happened against a simulator
+ * serving on :8080: the socket connected, the catalog rendered, and the client
+ * quietly dropped to `watch` with three console errors as the only clue.
+ *
+ * Same-origin is also the safer request: it is the shape the endpoint's
+ * no-CORS defence is designed around.
+ */
+function mintUrl(host) {
+  if (typeof location !== 'undefined' && location.hostname === host) return '/uitoken';
+  return 'http://' + host + '/uitoken';
+}
+
 export async function mintUiToken(host, attempts = 4) {
   for (let i = 0; i < attempts; i++) {
     try {
-      const body = await _httpGet('http://' + host + '/uitoken');
+      const body = await _httpGet(mintUrl(host));
       if (body === RATE_LIMITED) {
         // RETRYING THIS IS NOT OPTIONAL. The mint is capped at one per 250 ms
         // DEVICE-WIDE, not per client, so a second browser tab, a running

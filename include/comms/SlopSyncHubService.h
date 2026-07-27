@@ -273,6 +273,16 @@ private:
     void savePairing();         // PairingManager -> NVS (skips while OTA active)
     void persistPairingIfChanged();
 
+    // RFC-027(c) push-to-pair (M5, firmware boot-counter gesture — see
+    // hub.hpp's Hub::openPresenceWindow doc). checkQuickBootPairingGesture()
+    // runs once from init(): bumps the NVS quick-boot streak and, at 3, opens
+    // the presence window. pumpPresencePairingWindow() runs every 1 Hz tick:
+    // it resets the streak once this boot has clearly survived past the
+    // gesture window, and mirrors the window's open/closed state onto
+    // SlopGlow (the library is hardware-free and never touches an LED itself).
+    void checkQuickBootPairingGesture();
+    void pumpPresencePairingWindow(uint32_t nowMs);
+
     // ---- Injected -----------------------------------------------------------
     SystemState& _state;
     WebUI& _webui;
@@ -380,6 +390,19 @@ private:
     uint8_t _patMask = 0xFF;
     float _patSpeed = -1.0f, _patDepth = -1.0f, _patStroke = -1.0f, _patSensation = -1.0f;
 
+    // 0x008E pattern-advanced + 0x008F..0x0094 pattern-adv-mod-* — last
+    // PUBLISHED bytes, same diff-what-subscribers-hold rule as _lastModes/
+    // _lastSmLim above (these are also written from the hub task via 0x0107,
+    // never bump cfg_gen, so gating on cfg_gen would strand a client on a
+    // stale card). 9 B: ap_mode, master, max_depth, min_depth, in_speed,
+    // out_speed, in_accel, out_accel, mask. 7 B ×6: amplitude, in_step,
+    // in_wait, out_step, out_wait, offset, mask — one per advpat::BaseId,
+    // ascending id order matching 0x008F..0x0094.
+    std::array<std::byte, 9> _lastApBase{};
+    bool _apBaseEverSent = false;
+    std::array<std::array<std::byte, 7>, 6> _lastApMod{};
+    std::array<bool, 6> _apModEverSent{};
+
     // ---- Trust-ledger NVS scratch (RFC-029 item 3) --------------------------
     // ONE buffer for both directions. It lives HERE, as a member, rather than as
     // a function-local static, for one specific reason: this whole service is
@@ -403,6 +426,10 @@ private:
     uint16_t _estopSeq = 0;
     size_t _pairCountCached = 0;
     char _pairPin[8] = {};   // outlives the pairing window (hub holds a view)
+
+    // ---- RFC-027(c) push-to-pair boot gesture (M5) --------------------------
+    bool _qbootResetDone = false;   // one-shot: the 10 s "boot survived" streak reset already ran
+    bool _presenceGlowOn = false;   // last SlopGlow Pairing state WE set for the presence window
 };
 
 }  // namespace slopdrive

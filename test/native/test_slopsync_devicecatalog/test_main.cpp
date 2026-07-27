@@ -61,11 +61,14 @@ const LayoutField* layoutFieldByName(const Catalog32& cat, const CatalogEntry& e
     return nullptr;
 }
 
-// Every role string a field may carry must be one the REGISTRY defines.
-// `role` is a free string on the wire (the vocabulary is extensible by design),
-// which is exactly why an unregistered value has to fail HERE: a client can
-// only upgrade to a bespoke widget for a role it recognizes, so a typo'd role
-// is silently identical to no role at all.
+// Every role string a field may carry must be one the REGISTRY defines, OR
+// match the one OPEN convention the registry itself documents: RFC-019's
+// `action.<name>` (registry.yaml field_roles preamble — "the dotted namespace
+// is open, and unregistered roles are legal" for that specific prefix; the
+// fixed vocabulary below is everything else). `role` is a free string on the
+// wire, which is exactly why an unregistered value has to fail HERE: a client
+// can only upgrade to a bespoke widget for a role it recognizes, so a typo'd
+// role is silently identical to no role at all.
 bool isRegisteredRole(std::string_view r) {
     using namespace slopsync::field_roles;
     static constexpr std::string_view kAll[] = {
@@ -73,11 +76,13 @@ bool isRegisteredRole(std::string_view r) {
         limit_input_jerk, window_min, window_max, telemetry_position, telemetry_velocity,
         telemetry_current, telemetry_power_bus, telemetry_temp, telemetry_uptime,
         identity_name, meta_enabled_mask, meta_reset_gen,
+        pattern_running, pattern_select, pattern_speed, pattern_depth, pattern_stroke,
+        pattern_sensation,
     };
     for (std::string_view k : kAll) {
         if (k == r) return true;
     }
-    return false;
+    return r.substr(0, 7) == "action.";
 }
 
 }  // namespace
@@ -108,7 +113,12 @@ TEST_CASE("device catalog: builds, sorts ascending, and passes checkCatalog") {
     // 0x008B/0x008C/0x008D (three cards, one `tuning` category, so they render
     // as ONE tab per SPEC §8.8) plus their shared writer 0x0105, plus 0x0106
     // machine-admin for the non-motion device actions.
-    CHECK(dc.c.count == 33);
+    // 33 -> 41: the advanced-pattern channel set. 0x008E pattern-advanced (the
+    // 8 base controls) plus 0x008F..0x0094 (six per-base-control cyclic
+    // Modifier cards, one channel apiece — see SlopSyncCatalog.h for why that
+    // split is by subsystem and not by bit-packing), all sharing category
+    // `user` with 0x0082, plus their shared writer 0x0107.
+    CHECK(dc.c.count == 41);
     // RFC-017: the log channel must carry a replay depth, or a client that
     // connects after a fault sees nothing of what happened.
     const slopsync::CatalogEntry* logE = dc.c.find(slopsync::channels::log);
@@ -455,7 +465,10 @@ TEST_CASE("device catalog: every setting_key resolves in its declared settingCha
     // 16 -> 36 at M5c: 20 SlopMotion live-tune knobs, every one of which used
     // to be reachable ONLY via POST /api/slopmotion. That endpoint is now 410
     // Gone — this count IS the "no privileged client" invariant in numeric form.
-    CHECK(annotated == 36);
+    // 36 -> 80 for the advanced-pattern channel set: 8 base controls (0x008E)
+    // + 36 modifier-cycle fields (6 controls × 6 sub-fields, 0x008F..0x0094),
+    // all writable ONLY through 0x0107 now that /api/pattern is also 410 Gone.
+    CHECK(annotated == 80);
 }
 
 // ============================================================================

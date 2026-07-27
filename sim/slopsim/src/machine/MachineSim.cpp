@@ -3,6 +3,8 @@
 #include <algorithm>
 #include <cmath>
 #include <cstdio>
+#include <cstring>
+#include <string_view>
 
 #include "slopsync/util/byte_io.hpp"
 
@@ -84,16 +86,13 @@ uint64_t fieldU64(const IntentValueField* f, uint64_t dflt) {
     return dflt;
 }
 
-uint16_t clampU16(float v) {
-    if (v <= 0.0f) return 0;
-    if (v >= 65535.0f) return 65535;
-    return uint16_t(v + 0.5f);
-}
-
-int16_t clampI16(float v) {
-    if (v >= 32767.0f) return 32767;
-    if (v <= -32768.0f) return -32768;
-    return int16_t(v >= 0.0f ? v + 0.5f : v - 0.5f);
+// benchrig-only: 0x0111's `device_label` (CborFieldType::tstr_t). No other
+// channel on this catalog writes a string, so this stays local to MachineSim
+// rather than joining the generic fieldF32/fieldBool/fieldU64 family above.
+std::string_view fieldTstr(const IntentValueField* f, std::string_view dflt) {
+    if (!f) return dflt;
+    if (f->value.kind == IntentValue::Kind::Tstr) return f->value.tstr_val;
+    return dflt;
 }
 
 float clampf(float v, float lo, float hi) { return v < lo ? lo : (v > hi ? hi : v); }
@@ -109,16 +108,12 @@ float clampf(float v, float lo, float hi) { return v < lo ? lo : (v > hi ? hi : 
 // the catalog by reference and encodes it in ITS constructor — so the fill has
 // to happen inside the member-initializer list, not the constructor body.
 //
-// M5a: the sim declares itself FULLY EQUIPPED ({current sensor, power
-// monitor}) so the feature-gated 0x0087 power channel exists here and can be
-// exercised end to end. That is a fiction of exactly the same kind as the
-// "heap": 4 MiB and "rssi": -42 the 0x0006 publisher already ships — the sim's
-// job is to prove the PROTOCOL, and the wire is real even when the amps are
-// modeled. The GATE itself is proven where it can be proven honestly: the
-// native device-catalog suite builds all four feature combinations and asserts
-// the channel appears and disappears with the hardware.
+// slopsim advertises its OWN catalog (SlopSimCatalog.h's benchrig::), not the
+// firmware's — see that file's header for why: a client pointed at slopsim
+// must prove it can render a machine it has never met, not SlopDrive-32 again
+// over a fresh socket.
 static slopsync::Catalog32& initCatalog(slopsync::Catalog32& c) {
-    slopdrive::buildSlopDriveCatalog(c, {/*current sensor*/ true, /*power monitor*/ true});
+    benchrig::buildDivergentCatalog(c);
     return c;
 }
 
@@ -600,36 +595,11 @@ void MachineSim::drainAnomalies(uint64_t now64) {
         ++_anom_total;
         if (ev.kind < kSmAnomalyKinds) ++_anom_kind[ev.kind];
 
-        // M5a: the 0x0089 motion-anomaly EVENT. The firmware has to hand these
-        // across cores first (the hub is Core-0-task-only); on the host the
-        // engine and the hub are on the same thread, so this publishes inline —
-        // the WIRE is identical either way, which is the point of the sim.
-        {
-            slopsync::EventMsg em{};
-            em.channel_id = slopdrive::ch::motion_anomaly;
-            em.timestamp = _clock.nowMs();
-            em.event_kind = ev.kind;   // the §9.4 discriminator
-            em.has_body = true;
-            em.body_count = 0;
-            // ...and again in the body, where the catalog's option labels can
-            // NAME it (the catalog has no vocabulary for labelling event kinds).
-            em.body[em.body_count++] = {slopdrive::anom_body::kind,
-                                        slopsync::IntentValue::ofU64(ev.kind)};
-            em.body[em.body_count++] = {slopdrive::anom_body::seq,
-                                        slopsync::IntentValue::ofU64(ev.seq)};
-            em.body[em.body_count++] = {slopdrive::anom_body::target,
-                                        slopsync::IntentValue::ofF32(ev.target)};
-            em.body[em.body_count++] = {slopdrive::anom_body::detail,
-                                        slopsync::IntentValue::ofF32(ev.detail)};
-            em.body[em.body_count++] = {slopdrive::anom_body::t_us,
-                                        slopsync::IntentValue::ofU64(uint32_t(ev.t_us & 0xFFFFFFFFull))};
-            std::array<std::byte, 96> buf{};
-            const size_t n = slopsync::encodeEvent(em, std::span<std::byte>(buf));
-            if (n > 0)
-                _hub.publishEvent(slopdrive::ch::motion_anomaly,
-                                  std::span<const std::byte>(buf.data(), n));
-        }
-
+        // benchrig advertises NO motion-anomaly EVENT channel (no SlopMotion
+        // tuning/diagnostics surface at all — see SlopSimCatalog.h) — this
+        // machine doesn't expose planner internals over the wire, only the
+        // resulting telemetry. The counters still accumulate for local
+        // logging/bench diagnosis; only the wire publish is gone.
         const uint32_t nowMs = uint32_t(now64 / 1000);
         if (nowMs - _lastAnomLogMs >= 1000 || _lastAnomLogMs == 0) {
             _lastAnomLogMs = nowMs;
@@ -679,200 +649,79 @@ void MachineSim::syncSafety() {
 }
 
 void MachineSim::publishTelemetry(uint32_t nowMs) {
-    // ---- 0x0080 motion — ≥16 ms (≤~60 Hz), byte-mirrors the firmware -------
-    if (nowMs - _lastMotionMs >= 16) {
+    // ---- 0x0090 telemetry — >=33 ms (<=30 Hz), plain f32, not the real -----
+    // device's scaled u16/i16 — proves a client isn't assuming a specific
+    // numeric wire encoding. No raw/target split and only two status bits:
+    // benchrig doesn't expose planner internals (see SlopSimCatalog.h).
+    if (nowMs - _lastMotionMs >= 33) {
         _lastMotionMs = nowMs;
-        std::array<std::byte, 9> buf{};   // M5a: + raw_10um
+        std::array<std::byte, 9> buf{};
         std::span<std::byte> s(buf);
-        const uint16_t pos10 = clampU16(_stepper.positionMm() * 100.0f);
-        const uint16_t tgt10 = clampU16(_commanded_target_mm * 100.0f);
-        const uint16_t raw10 = clampU16(_commanded_raw_mm * 100.0f);
-        const int16_t spd10 = clampI16(_stepper.velocityMmS() * 10.0f);
         uint8_t flags = 0;
         if (_homed) flags |= 1u << 0;
-        if (_homing) flags |= 1u << 1;
-        if (_pattern.running) flags |= 1u << 2;
-        if (_paused) flags |= 1u << 3;
-        if (_override) flags |= 1u << 4;
-        if (_estop_latched) flags |= 1u << 5;
-        if (_last_intiface_ms != 0 && (nowMs - _last_intiface_ms) < 250) flags |= 1u << 6;
-        slopsync::putU16(s.subspan(0, 2), pos10);
-        slopsync::putU16(s.subspan(2, 2), tgt10);
-        slopsync::putU16(s.subspan(4, 2), uint16_t(spd10));
-        slopsync::putU8(s.subspan(6, 1), flags);
-        slopsync::putU16(s.subspan(7, 2), raw10);
-        _hub.publishState(slopdrive::ch::motion, s);
+        if (std::fabs(_stepper.velocityMmS()) > 0.5f) flags |= 1u << 1;  // moving
+        slopsync::putF32(s.subspan(0, 4), _stepper.positionMm());
+        slopsync::putF32(s.subspan(4, 4), _stepper.velocityMmS());
+        slopsync::putU8(s.subspan(8, 1), flags);
+        _hub.publishState(benchrig::ch::telemetry, s);
     }
 
-    // ---- 0x0081 machine-config — on cfg_gen change OR machine-side edit -----
+    // ---- 0x0091 limits — on cfg_gen change OR machine-side edit ------------
+    // Window + the user limit set only — no input limit set, no jerk (see
+    // SlopSimCatalog.h). Same RFC-011 cfg_gen-bump-on-machine-edit rule as the
+    // real device's twin.
     const uint16_t gen = _hub.cfgGen();
     if (!_cfgEverSent || gen != _lastCfgGen || _cfgDirty) {
-        // RFC-011: a MACHINE-SIDE config edit (the TUI palette here; a physical
-        // control, boot adoption or an internal recalculation on real hardware)
-        // used to republish 0x0081 while leaving cfg_gen exactly where it was —
-        // so a client's `precondition` CAS kept passing against config that had
-        // already moved. `_cfgDirty` is set only by the ui* setters, i.e. only
-        // by changes that did NOT arrive as an intent (an intent's change bumps
-        // via applyIntent's cfgChanged), so this is the missing half and cannot
-        // double-count.
         if (_cfgDirty) _hub.bumpConfigGeneration();
         _cfgEverSent = true;
         _lastCfgGen = _hub.cfgGen();
         _cfgDirty = false;
-        std::array<std::byte, 33> buf{};   // M5a: + enabled_mask
+        std::array<std::byte, 21> buf{};   // 4*f32 + max_rail f32 + enabled_mask
         std::span<std::byte> s(buf);
         slopsync::putF32(s.subspan(0, 4), _win_min_mm);
         slopsync::putF32(s.subspan(4, 4), _win_max_mm);
         slopsync::putF32(s.subspan(8, 4), _user_speed);
         slopsync::putF32(s.subspan(12, 4), _user_accel);
-        slopsync::putF32(s.subspan(16, 4), _input_speed);
-        slopsync::putF32(s.subspan(20, 4), _input_accel);
-        slopsync::putF32(s.subspan(24, 4), _max_rail_mm);
-        slopsync::putF32(s.subspan(28, 4), _input_jerk);   // 8th field (append-only)
-        // RFC-009 enabled_mask — all seven limits, always, matching the device
-        // exactly: nothing on this channel is ever refused for a REASON (only
-        // clamped by value), so a low bit here would be a lie. See the
-        // firmware's twin for the full argument.
-        slopsync::putU8(s.subspan(32, 1), 0x7F);
-        _hub.publishState(slopdrive::ch::machine_config, s);
+        slopsync::putF32(s.subspan(16, 4), _max_rail_mm);
+        // Nothing on this channel is ever refused for a REASON, only clamped
+        // by value — all four bits stay set, honestly.
+        slopsync::putU8(s.subspan(20, 1), 0x0F);
+        _hub.publishState(benchrig::ch::limits, s);
     }
 
-    // ---- 0x0082 pattern-state — on change, ≥100 ms --------------------------
-    if (nowMs - _lastPatternMs >= 100) {
-        // RFC-009 enabled_mask — the delegate refuses 0x0102 with ESTOP_ACTIVE
-        // or NOT_HOMED, so all six bits drop together in either state. Same
-        // derivation as the firmware's, from the same refusals.
-        const uint8_t mask = (_estop_latched || !_homed) ? 0x00 : 0x3F;
-        const bool changed = _pattern.running != _patRunning || _pattern.idx != _patIdx ||
-                             _pattern.speed != _patSpeed || _pattern.depth != _patDepth ||
-                             _pattern.stroke != _patStroke || _pattern.sensation != _patSensation ||
-                             mask != _patMask;
-        if (changed) {
-            _lastPatternMs = nowMs;
-            _patRunning = _pattern.running;
-            _patIdx = _pattern.idx;
-            _patSpeed = _pattern.speed;
-            _patDepth = _pattern.depth;
-            _patStroke = _pattern.stroke;
-            _patSensation = _pattern.sensation;
-            _patMask = mask;
-            std::array<std::byte, 19> buf{};   // M5a: + enabled_mask
-            std::span<std::byte> s(buf);
-            slopsync::putU8(s.subspan(0, 1), _pattern.running ? 1 : 0);
-            slopsync::putU8(s.subspan(1, 1), _pattern.idx);
-            slopsync::putF32(s.subspan(2, 4), _pattern.speed);
-            slopsync::putF32(s.subspan(6, 4), _pattern.depth);
-            slopsync::putF32(s.subspan(10, 4), _pattern.stroke);
-            slopsync::putF32(s.subspan(14, 4), _pattern.sensation);
-            slopsync::putU8(s.subspan(18, 1), mask);
-            _hub.publishState(slopdrive::ch::pattern_state, s);
-        }
-    }
-
-    // ---- 0x0086 plan-strip — ≥22 ms (≤~45 Hz), byte-mirrors the firmware ----
-    // Straight off slopmotion::Snapshot, exactly like the device's Core-1
-    // sampler fills the interp_* SystemState slots the firmware publisher
-    // reads. Idle strips are sent once and then go quiet.
-    if (nowMs - _lastPlanMs >= 22) {
-        _lastPlanMs = nowMs;
-        const slopmotion::Snapshot d = _engine.snapshot(_clock.nowUs64());
-        const bool active = d.duration_s > 0.0f;
-        if (active || !_planEverSent) {
-            _planEverSent = true;
-            uint8_t flags = 0;
-            if (active) flags |= 1u << 0;
-            if (d.mode == uint8_t(slopmotion::Mode::Chase)) flags |= 1u << 1;      // live_mode
-            if (d.plan_kind == uint8_t(slopmotion::PlanKind::Quintic) ||
-                d.plan_kind == uint8_t(slopmotion::PlanKind::Cubic)) flags |= 1u << 2;  // grad_mode
-            std::array<std::byte, 18> buf{};
-            std::span<std::byte> s(buf);
-            slopsync::putU8(s.subspan(0, 1), flags);
-            slopsync::putU8(s.subspan(1, 1), d.mode);
-            slopsync::putU16(s.subspan(2, 2), clampU16(d.start * 10000.0f));
-            slopsync::putU16(s.subspan(4, 2), clampU16(d.target * 10000.0f));
-            slopsync::putU16(s.subspan(6, 2), clampU16(d.pos * 10000.0f));
-            slopsync::putU16(s.subspan(8, 2), uint16_t(clampI16(d.vel * 1000.0f)));
-            slopsync::putU32(s.subspan(10, 4), uint32_t(d.duration_s * 1e6f));
-            slopsync::putU32(s.subspan(14, 4), uint32_t(d.elapsed_s * 1e6f));
-            _hub.publishState(slopdrive::ch::plan_strip, s);
-        }
-    }
-
-    // ---- 0x0087 power — 2 Hz. MODELED, and labelled as such ----------------
-    // Bus current tracks |velocity| with a small quiescent draw; die temp
-    // drifts toward an activity-dependent equilibrium; energy integrates the
-    // product. None of this is a measurement — see initCatalog's note.
-    if (nowMs - _lastPowerMs >= 500) {
-        const float dt = _lastPowerMs == 0 ? 0.5f : float(nowMs - _lastPowerMs) / 1000.0f;
-        _lastPowerMs = nowMs;
-        const float speed = std::fabs(_stepper.velocityMmS());
-        _bus_a = 0.15f + speed * 0.004f;
-        if (_bus_a > _bus_peak_a) _bus_peak_a = _bus_a;
-        _bus_v = 24.0f - _bus_a * 0.08f;                    // a little droop under load
-        const float target_c = 30.0f + _bus_a * 6.0f;
-        _die_c += (target_c - _die_c) * 0.05f;
-        _energy_wh += _bus_v * _bus_a * dt / 3600.0f;
-
-        std::array<std::byte, 8> buf{};
+    // ---- 0x0092 device-settings — on change ---------------------------------
+    // The setting the real device does not have. Change-detected the same way
+    // the real catalog's pattern-state card is (no natural cfg_gen coupling
+    // for a device-local settings card that isn't part of the safety envelope).
+    if (_warmup_mode != _lastWarmupMode || _device_label != _lastDeviceLabel || !_devSettingsSent) {
+        _devSettingsSent = true;
+        _lastWarmupMode = _warmup_mode;
+        _lastDeviceLabel = _device_label;
+        std::array<std::byte, 18> buf{};   // u8 + str16(16) + enabled_mask
         std::span<std::byte> s(buf);
-        slopsync::putU16(s.subspan(0, 2), clampU16(_bus_v * 1000.0f));
-        slopsync::putU16(s.subspan(2, 2), clampU16(_bus_peak_a * 1000.0f));
-        slopsync::putU16(s.subspan(4, 2), uint16_t(clampI16(_bus_a * 1000.0f)));
-        slopsync::putU16(s.subspan(6, 2), uint16_t(clampI16(_die_c * 10.0f)));
-        _hub.publishState(slopdrive::ch::power, s);
+        slopsync::putU8(s.subspan(0, 1), _warmup_mode);
+        {
+            const std::string_view label = _device_label;
+            const size_t n = std::min<size_t>(label.size(), 16);
+            if (n > 0) std::memcpy(s.data() + 1, label.data(), n);
+            if (n < 16) std::memset(s.data() + 1 + n, 0, 16 - n);
+        }
+        // Always accepted — both bits stay set, honestly (same rule as 0x0091).
+        slopsync::putU8(s.subspan(17, 1), 0x03);
+        _hub.publishState(benchrig::ch::device_settings, s);
     }
 
-    // ---- 1 Hz block: 0x0083 odometer + 0x0088 diag + 0x0006 hub-status -----
+    // ---- 1 Hz block: 0x0006 hub-status (SPEC-CORE; unchanged) --------------
     if (nowMs - _lastSlowMs >= 1000) {
         _lastSlowMs = nowMs;
-        {
-            std::array<std::byte, 20> buf{};   // M5a: + energy_wh, session_ms
-            std::span<std::byte> s(buf);
-            slopsync::putU32(s.subspan(0, 4), _strokes);
-            slopsync::putF32(s.subspan(4, 4), _distance_mm / 1000.0f);
-            slopsync::putF32(s.subspan(8, 4), _peak_mm_s);
-            slopsync::putF32(s.subspan(12, 4), _energy_wh);
-            slopsync::putU32(s.subspan(16, 4), nowMs - _sessionStartMs);
-            _hub.publishState(slopdrive::ch::odometer, s);
-        }
-        {  // 0x0088 slopmotion-diag — the /api/slopmotion stats+sync blocks
-            const slopmotion::Snapshot d = _engine.snapshot(_clock.nowUs64());
-            std::array<std::byte, 84> buf{};   // M4d: + anom_handoff_bounded
-            std::span<std::byte> s(buf);
-            slopsync::putU32(s.subspan(0, 4), d.plans);
-            slopsync::putU32(s.subspan(4, 4), d.failures);
-            slopsync::putU32(s.subspan(8, 4), _anom_total);
-            slopsync::putU8(s.subspan(12, 1), d.mode);
-            slopsync::putU8(s.subspan(13, 1), d.plan_kind);
-            for (size_t k = 0; k < kSmAnomalyKinds; ++k)
-                slopsync::putU32(s.subspan(14 + k * 4, 4), _anom_kind[k]);
-            // The device's plan-time bench measures a real xtensa cost; there
-            // is nothing honest to report from a host, so these stay zero
-            // rather than inventing a number an operator might compare.
-            slopsync::putU32(s.subspan(50, 4), 0);
-            slopsync::putU32(s.subspan(54, 4), 0);
-            slopsync::putF32(s.subspan(58, 4), 0.0f);
-            slopsync::putU32(s.subspan(62, 4), _sync_bundles);
-            slopsync::putU32(s.subspan(66, 4), _sync_samples);
-            slopsync::putU32(s.subspan(70, 4), _sync_enqueued);
-            slopsync::putU32(s.subspan(74, 4), _sync_dropped);
-            slopsync::putU32(s.subspan(78, 4), _sync_seg_bundles);
-            slopsync::putU16(s.subspan(82, 2), _reset_gen);
-            _hub.publishState(slopdrive::ch::motion_diag, s);
-        }
-        {
-            std::array<std::byte, 14> buf{};  // 14 B since M5b: log_dropped appended
-            std::span<std::byte> s(buf);
-            slopsync::putU32(s.subspan(0, 4), 4u * 1024u * 1024u);  // "heap": a host fiction
-            slopsync::putU32(s.subspan(4, 4), nowMs / 1000u);
-            slopsync::putU8(s.subspan(8, 1), uint8_t(int8_t(-42)));  // "rssi": wired-grade
-            slopsync::putU8(s.subspan(9, 1), uint8_t(_hub.sessionCount()));
-            // RFC-017 §9.4's visible drop counter. The sim has no cross-task
-            // bridge ring (one thread), so the hub's own replay ring is the
-            // whole number here — the device sums both.
-            slopsync::putU32(s.subspan(10, 4), _hub.logDropped());
-            _hub.publishState(slopsync::channels::hub_status, s);
-        }
+        std::array<std::byte, 14> buf{};  // 14 B since M5b: log_dropped appended
+        std::span<std::byte> s(buf);
+        slopsync::putU32(s.subspan(0, 4), 4u * 1024u * 1024u);  // "heap": a host fiction
+        slopsync::putU32(s.subspan(4, 4), nowMs / 1000u);
+        slopsync::putU8(s.subspan(8, 1), uint8_t(int8_t(-42)));  // "rssi": wired-grade
+        slopsync::putU8(s.subspan(9, 1), uint8_t(_hub.sessionCount()));
+        slopsync::putU32(s.subspan(10, 4), _hub.logDropped());
+        _hub.publishState(slopsync::channels::hub_status, s);
     }
 }
 
@@ -896,7 +745,7 @@ slopsync::Result<IntentValueMap, NackCode> MachineSim::applyIntent(uint16_t chan
     IntentValueMap applied{};
 
     switch (channel_id) {
-        case slopdrive::ch::move: {
+        case benchrig::ch::move: {
             if (_estop_latched) return Ret::err(NackCode::ESTOP_ACTIVE);
             if (!_homed) return Ret::err(NackCode::NOT_HOMED);
             // Per-request bypass wins; otherwise honour the STANDING bypass
@@ -921,96 +770,74 @@ slopsync::Result<IntentValueMap, NackCode> MachineSim::applyIntent(uint16_t chan
             return Ret::ok(applied);
         }
 
-        case slopdrive::ch::config_set: {
+        // benchrig has NO input (machine-driven) limit set and NO jerk setting
+        // (see SlopSimCatalog.h) — this replaces the real device's config_set
+        // (0x0101) with a smaller writer that only ever touches the window and
+        // the user limit set. _input_speed/_input_accel/_input_jerk stay fixed
+        // firmware constants (bench-only via the TUI's `speed.input` etc.),
+        // never reachable from this switch.
+        case benchrig::ch::limits_set: {
             const auto* f1 = findField(requested, 1);
             const auto* f2 = findField(requested, 2);
             const auto* f3 = findField(requested, 3);
             const auto* f4 = findField(requested, 4);
-            const auto* f5 = findField(requested, 5);
-            const auto* f6 = findField(requested, 6);
-            const auto* f7 = findField(requested, 7);
 
-            // Window legality mirrors the device path exactly: WebUI::
-            // applySettings REFUSES min >= max on the RAW request ("Min must be
-            // less than Max" -> INVALID_VALUE), and only then does
-            // RangeMapper::setRange clamp to the rail and enforce the 5 mm
-            // minimum span. Echo is post-clamp (ground truth).
+            // Window legality mirrors the device path exactly: refuse min>=max
+            // on the RAW request (INVALID_VALUE), then RangeMapper::setRange
+            // clamps to the rail and enforces the 5 mm minimum span. Echo is
+            // post-clamp (ground truth).
             const float wmin = f1 ? fieldF32(f1, _win_min_mm) : _win_min_mm;
             const float wmax = f2 ? fieldF32(f2, _win_max_mm) : _win_max_mm;
             if (wmin >= wmax) return Ret::err(NackCode::INVALID_VALUE);
 
             // RFC-002: cfg_gen advances IFF an applied value actually CHANGED.
-            // Snapshot the post-clamp state before applying and compare after —
-            // an accepted-but-value-identical config-set still gets its ECHO
-            // (ground truth is unaffected) but must NOT bump the generation,
-            // because a bump re-arms every observer's on-change republish and
-            // resync. That amplification is exactly what the 2026-07-24
-            // dual-plane config storm rode.
             const float p0 = _win_min_mm, p1 = _win_max_mm, p2 = _user_speed, p3 = _user_accel;
-            const float p4 = _input_speed, p5 = _input_accel, p6 = _input_jerk;
 
+            // Clamp to the CATALOG's own declared bounds (benchrig::ceiling),
+            // not the wider firmware-parity kSpeedCeiling/kAccelCeiling those
+            // constants exist for (the TUI's bench-only _input_* overrides) —
+            // 0x0091 advertises max=3000/20000, so the wire delegate must
+            // actually enforce that or the catalog would be lying.
             applyWindowLegality(wmin, wmax);
-            if (f3) _user_speed = float(lroundf(clampf(fieldF32(f3, _user_speed), 1.0f, kSpeedCeiling)));
-            if (f4) _user_accel = float(lroundf(clampf(fieldF32(f4, _user_accel), 1.0f, kAccelCeiling)));
-            if (f5) _input_speed = float(lroundf(clampf(fieldF32(f5, _input_speed), 1.0f, kSpeedCeiling)));
-            if (f6) _input_accel = float(lroundf(clampf(fieldF32(f6, _input_accel), 1.0f, kAccelCeiling)));
-            if (f7) _input_jerk = float(lroundf(clampf(fieldF32(f7, _input_jerk), 1.0f, kJerkCeiling)));
+            if (f3) _user_speed = float(lroundf(clampf(fieldF32(f3, _user_speed), 1.0f, benchrig::ceiling::speed_max)));
+            if (f4) _user_accel = float(lroundf(clampf(fieldF32(f4, _user_accel), 1.0f, benchrig::ceiling::accel_max)));
             deriveEngineLimits();
             cfgChanged = (p0 != _win_min_mm) || (p1 != _win_max_mm) || (p2 != _user_speed) ||
-                         (p3 != _user_accel) || (p4 != _input_speed) || (p5 != _input_accel) ||
-                         (p6 != _input_jerk);
+                         (p3 != _user_accel);
 
             uint32_t n = 0;
             if (f1) applied.fields[n++] = {1, IntentValue::ofF32(_win_min_mm)};
             if (f2) applied.fields[n++] = {2, IntentValue::ofF32(_win_max_mm)};
             if (f3) applied.fields[n++] = {3, IntentValue::ofF32(_user_speed)};
             if (f4) applied.fields[n++] = {4, IntentValue::ofF32(_user_accel)};
-            if (f5) applied.fields[n++] = {5, IntentValue::ofF32(_input_speed)};
-            if (f6) applied.fields[n++] = {6, IntentValue::ofF32(_input_accel)};
-            if (f7) applied.fields[n++] = {7, IntentValue::ofF32(_input_jerk)};
             applied.count = n;
             return Ret::ok(applied);
         }
 
-        case slopdrive::ch::pattern_cmd: {
-            if (_estop_latched) return Ret::err(NackCode::ESTOP_ACTIVE);
+        // The setting the real device does not have (0x0092's writer). Proves
+        // a brand-new select+str16 pair round-trips with zero client changes.
+        // Session-volatile, like the real device's mode settings (0x0104) —
+        // not part of the safety envelope, so it does not bump cfg_gen.
+        case benchrig::ch::device_set: {
             const auto* f1 = findField(requested, 1);
             const auto* f2 = findField(requested, 2);
-            const auto* f3 = findField(requested, 3);
-            const auto* f4 = findField(requested, 4);
-            const auto* f5 = findField(requested, 5);
-            const auto* f6 = findField(requested, 6);
 
-            const bool wantRunning = fieldBool(f1, _pattern.running);
-            if (wantRunning && !_homed) return Ret::err(NackCode::NOT_HOMED);
-
-            if (f2) _pattern.idx = uint8_t(std::min<uint64_t>(fieldU64(f2, 0), 2));
-            if (f3) _pattern.speed = clampf(fieldF32(f3, _pattern.speed), 0.0f, 100.0f);
-            if (f4) _pattern.depth = clampf(fieldF32(f4, _pattern.depth), 0.0f, 100.0f);
-            if (f5) _pattern.stroke = clampf(fieldF32(f5, _pattern.stroke), 0.0f, 100.0f);
-            if (f6) _pattern.sensation = clampf(fieldF32(f6, _pattern.sensation), -100.0f, 100.0f);
-            if (f1) {
-                _pattern.running = wantRunning;
-                _pattern.next_due_us = 0;  // next tickPattern emits immediately
-                // Stopping a pattern does NOT stop the motor on the device:
-                // PatternEngine::stop() only clears its own flags, so the leg
-                // already submitted to the arbiter runs to completion and the
-                // machine settles there. The sim used to hard-stop mid-leg.
+            if (f1) _warmup_mode = uint8_t(std::min<uint64_t>(fieldU64(f1, _warmup_mode), 2));
+            if (f2) {
+                std::string_view sv = fieldTstr(f2, _device_label);
+                if (sv.size() > 16) sv = sv.substr(0, 16);  // str16 wire width (RFC-026)
+                _device_label.assign(sv);
             }
-            cfgChanged = false;  // session-volatile (firmware parity)
+            cfgChanged = false;
 
             uint32_t n = 0;
-            if (f1) applied.fields[n++] = {1, IntentValue::ofBool(_pattern.running)};
-            if (f2) applied.fields[n++] = {2, IntentValue::ofU64(_pattern.idx)};
-            if (f3) applied.fields[n++] = {3, IntentValue::ofF32(_pattern.speed)};
-            if (f4) applied.fields[n++] = {4, IntentValue::ofF32(_pattern.depth)};
-            if (f5) applied.fields[n++] = {5, IntentValue::ofF32(_pattern.stroke)};
-            if (f6) applied.fields[n++] = {6, IntentValue::ofF32(_pattern.sensation)};
+            if (f1) applied.fields[n++] = {1, IntentValue::ofU64(_warmup_mode)};
+            if (f2) applied.fields[n++] = {2, IntentValue::ofTstr(_device_label)};
             applied.count = n;
             return Ret::ok(applied);
         }
 
-        case slopdrive::ch::home: {
+        case benchrig::ch::home: {
             const uint64_t op = fieldU64(findField(requested, 1), 0);
             switch (op) {
                 case 1:
@@ -1129,10 +956,12 @@ bool MachineSim::canClearEstop() {
 }
 
 std::optional<uint8_t> MachineSim::sourceForChannel(uint16_t channel_id) {
-    if (channel_id == slopdrive::ch::move) return kSrcManual;
-    if (channel_id == slopdrive::ch::pattern_cmd) return kSrcPattern;
-    if (channel_id == slopdrive::ch::motion_input) return kSrcTcodeStream;
-    if (channel_id == slopdrive::ch::motion_segment) return kSrcTcodeStream;
+    // benchrig has no pattern channel (see SlopSimCatalog.h) — kSrcPattern is
+    // never reachable over the wire here, but sourcePolicy() below still
+    // handles it for the local, TUI-only pattern generator.
+    if (channel_id == benchrig::ch::move) return kSrcManual;
+    if (channel_id == benchrig::ch::motion_input) return kSrcTcodeStream;
+    if (channel_id == benchrig::ch::motion_segment) return kSrcTcodeStream;
     return std::nullopt;
 }
 
@@ -1163,8 +992,8 @@ void MachineSim::onSessionLeft(uint32_t session_id) {
 // nearest-window timestamp resolve, far-future clamp, 0x0085 sentinel).
 void MachineSim::onStreamBundle(uint16_t channel_id, uint32_t /*session_id*/,
                                 const slopsync::BundleView& bundle) {
-    const bool isSegment = (channel_id == slopdrive::ch::motion_segment);
-    if (channel_id != slopdrive::ch::motion_input && !isSegment) return;
+    const bool isSegment = (channel_id == benchrig::ch::motion_segment);
+    if (channel_id != benchrig::ch::motion_input && !isSegment) return;
 
     const int64_t now64 = int64_t(_clock.nowUs64());
     const uint32_t now32 = uint32_t(now64 & 0xFFFFFFFFll);
@@ -1495,7 +1324,7 @@ void MachineSim::recordIngress(IngressRecord* rows, uint8_t n) {
     std::lock_guard<std::mutex> lk(_ingressM);
     for (uint8_t i = 0; i < n; ++i) {
         IngressRecord& r = rows[i];
-        const bool isSeg = (r.channel_id == slopdrive::ch::motion_segment);
+        const bool isSeg = (r.channel_id == benchrig::ch::motion_segment);
         const size_t chIdx = isSeg ? 1 : 0;
 
         // Inter-arrival gap is PER CHANNEL — a client running both a chase feed
@@ -1573,7 +1402,7 @@ const char* MachineSim::ingressCsvHeader() {
 }
 
 void MachineSim::formatIngressCsvRow(char* buf, size_t cap, const IngressRecord& r) {
-    const bool seg = (r.channel_id == slopdrive::ch::motion_segment);
+    const bool seg = (r.channel_id == benchrig::ch::motion_segment);
     std::snprintf(buf, cap,
                   "%.6f,0x%04X,%s,%u,%u,%d,%.4f,%.3f,%.4f,%d,%d,%d,%u,%u,%llu,%.3f,%.3f\n",
                   double(r.t_s), unsigned(r.channel_id), seg ? "segment" : "sample",

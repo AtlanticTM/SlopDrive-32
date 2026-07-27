@@ -811,6 +811,21 @@ struct BasicCatalog {
 // that fits without widening a wire type; see docs/http-plane-retirement.md 5.9.
 // 28 entries were in use with 4 more landing, and stopping exactly on the old
 // cap is not a margin.
-using Catalog32 = BasicCatalog<40, 200, 96, 192, 4>;
+//
+// 40 -> 48 for the advanced-pattern channel set (SlopSyncCatalog.h 0x008E..
+// 0x0094 + 0x0107): the SAME "settings-dense category, bitfield8 enabled_mask
+// caps a channel at 8 settings" arithmetic as the M5c bump above, applied to
+// AdvancedPattern.h's 8 base controls + 6-per-control cyclic Modifier (36
+// fields) — 7 STATE cards + 1 shared INTENT writer, 8 more entries. Landed at
+// 33 in use; 48 leaves real headroom rather than stopping on the new line.
+//
+// SchemaFields 96 -> 160 in the SAME change. 0x0107 alone is 44 schema
+// fields (kIntentMaxValueFields caps what ONE wire frame carries, not what a
+// catalog may DECLARE — see SlopSyncCatalog.h's 0x0107), which took the pool
+// from measured 52/96 in use to 96/96 — overflow, latched silently (`ok()`
+// false, no diagnostic beyond that) until measured with a scratch instrumented
+// build. 160 leaves the same kind of real headroom as the entries bump rather
+// than landing on the new line a second time.
+using Catalog32 = BasicCatalog<48, 200, 160, 192, 4>;
 
 }  // namespace slopsync

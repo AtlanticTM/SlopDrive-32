@@ -1,4 +1,5 @@
 import { defineConfig } from 'vite';
+import { svelte } from '@sveltejs/vite-plugin-svelte';
 import { viteSingleFile } from 'vite-plugin-singlefile';
 import { execSync } from 'node:child_process';
 
@@ -13,6 +14,11 @@ import { execSync } from 'node:child_process';
  * separate files. 100KB gives comfortable headroom.
  *
  * Gzipping is handled by build_webui.py (PlatformIO pre-build script).
+ *
+ * SVELTE 5: the plugin is pinned to the v4 line because it is the last one that
+ * peers against Vite 5, and both vite-plugin-singlefile and build_webui.py are
+ * tuned to Vite 5's asset emission. Svelte compiles to direct DOM operations,
+ * so the framework's runtime cost on a page served off LittleFS stays small.
  */
 
 // UI bundle build identifier — the footer "ui" chip (§1.6h). Short git hash
@@ -28,7 +34,7 @@ function uiBuildId() {
 }
 
 export default defineConfig({
-  plugins: [viteSingleFile()],
+  plugins: [svelte(), viteSingleFile()],
   define: {
     __UI_BUILD__: JSON.stringify(uiBuildId()),
   },

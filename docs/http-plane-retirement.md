@@ -639,6 +639,40 @@ trust channels) -> operator approves -> `grant()` issues a durable token. The
 plugin already has the PIN box and already presents a token in HELLO; the
 missing piece is entirely on the machine's side of the glass.
 
+#### Push-to-pair IS reachable now (M5, firmware boot gesture)
+
+The knock-and-approve gap above (mode (a), `pairing_modes` bit0) is still open
+— it needs the WebUI ceremony described above. But mode (c), push-to-pair
+(`pairing_modes` bit2), landed on the firmware side without any UI at all,
+because RFC-027(c) deliberately requires no display and no button: *"the power
+cord is the button."*
+
+`SlopSyncHubService::checkQuickBootPairingGesture()` (called once from
+`init()`, after `loadPairing()` so the factory-fresh check sees the restored
+ledger) keeps an NVS counter (`"qboots"`, namespace `slopsync`) of consecutive
+boots that reach init() before the previous boot's 10 s survival mark. At 3 it
+calls `Hub::openPresenceWindow()` and raises `SlopGlow::GlowState::Pairing`.
+`SlopSyncHubService::pumpPresencePairingWindow()` runs every 1 Hz tick
+thereafter: it resets the streak once a boot has genuinely survived past 10 s
+(so an unrelated later reboot doesn't inherit a stale count), and mirrors the
+window's open/auto-expired state onto SlopGlow (the library never touches an
+LED itself).
+
+**Operator gesture:** power-cycle the machine three times in quick succession
+(each boot within ~10 s of the previous one starting). On the third, the
+Pairing SlopGlow state lights and the boot log shows `pairing: PRESENCE WINDOW
+OPEN (3 quick power-cycles) — pair within 120 s`. Any client's PAIR_REQ within
+that window is granted with no approval step — `configure` if the ledger holds
+no configure token yet (factory-fresh: possession is root), otherwise the
+hub's configured default role (`control`). The window is single-grant and
+closes on the first knock or after 120 s, whichever comes first.
+
+This does not replace the knock-and-approve UI work above — it covers the
+"machine has nobody it trusts yet" case (initial claim, or recovery after a
+factory reset) and the "I'm standing at the machine" case. A machine that
+already has a configure-holder still needs the approve ceremony for every
+LATER client, which is exactly the gap still open.
+
 ### The bar: GOLD STANDARD, 100% SlopSync-compliant, best practice
 
 Operator, 2026-07-27: *"this webui needs to both be gold standard and 100%

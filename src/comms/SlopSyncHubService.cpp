@@ -55,6 +55,12 @@ static_assert(ceiling::jerk_max    == MAX_JERK_MM_S3,              "catalog jerk
 // shipping a catalog that advertises a factory default the machine never had.
 static_assert(factory::stream_speed_mode == SystemState::SPEED_CEILING_PEGGED,
               "catalog default stream_speed_mode drifted from SystemState");
+// kApBaseCount mirrors advpat::BASE_COUNT (see SlopSyncCatalog.h's comment on
+// why the catalog header can't include AdvancedPattern.h directly) — this TU
+// includes PatternEngine.h (and therefore AdvancedPattern.h), so it is where
+// the mirror is pinned.
+static_assert(slopdrive::kApBaseCount == advpat::BASE_COUNT,
+              "catalog kApBaseCount drifted from advpat::BASE_COUNT");
 
 // ============================================================================
 // Small helpers
@@ -575,6 +581,97 @@ slopsync::Result<IntentValueMap, NackCode> SlopDriveHubDelegate::applyIntent(
             return Ret::ok(applied);
         }
 
+        // ---- 0x0107 pattern-advanced-cmd -> WS_OP_GEN_CFG (ap_* fields) -----
+        // Shared writer behind 0x008E..0x0094, the flattened-and-split
+        // advanced-pattern settings surface (SlopSyncCatalog.h has the full
+        // budget story). SlopDriveHubDelegate has no PatternEngine reference
+        // of its own — this is the SAME seam 0x0102 pattern_cmd uses just
+        // above (_webui.handleCommand -> WebUI::applyPattern's existing ap_*
+        // handling), not a new one. WebUI::applyPattern's `touched[]`/
+        // `ap_mods` echo (added alongside this channel) is what makes a
+        // ground-truth reply possible when one wire frame lands sub-fields on
+        // more than one base control at once.
+        case ch::pattern_advanced_cmd: {
+            if (_state.estop_latched) return Ret::err(NackCode::ESTOP_ACTIVE);
+
+            static constexpr const char* kBaseJsonKeys[kApBaseCount] = {
+                "ap_max_depth", "ap_min_depth", "ap_in_speed", "ap_out_speed",
+                "ap_in_accel", "ap_out_accel",
+            };
+            static constexpr const char* kModJsonKeys[6] = {
+                "amplitude", "in_step", "in_wait", "out_step", "out_wait", "offset",
+            };
+
+            if (const auto* f = findField(requested, 1)) in["ap_mode"] = fieldBool(f, false);
+            if (const auto* f = findField(requested, 2)) in["ap_speed"] = int(fieldU64(f, 0));
+            // Key = 3 + advpat::BaseId: 3 max_depth, 4 min_depth, 5 in_speed,
+            // 6 out_speed, 7 in_accel, 8 out_accel — exactly 0x008E's layout.
+            for (uint8_t id = 0; id < kApBaseCount; ++id) {
+                if (const auto* f = findField(requested, uint8_t(3 + id)))
+                    in[kBaseJsonKeys[id]] = int(fieldU64(f, 0));
+            }
+            // Modifier cycles: keys 9..44, base = 9 + 6*id, sub-offsets
+            // amplitude+0 in_step+1 in_wait+2 out_step+3 out_wait+4 offset+5 —
+            // exactly 0x008F..0x0094's wire layout. Build ap_mods with only
+            // the sub-keys THIS request touches per control; applyModObject
+            // (WebUI.cpp) reads the rest back from the engine.
+            JsonArray modsArr;
+            for (uint8_t id = 0; id < kApBaseCount; ++id) {
+                const uint8_t base = uint8_t(9 + 6 * id);
+                bool any = false;
+                JsonObject m;
+                for (uint8_t sub = 0; sub < 6; ++sub) {
+                    const auto* f = findField(requested, uint8_t(base + sub));
+                    if (!f) continue;
+                    if (!any) {
+                        if (modsArr.isNull()) modsArr = in["ap_mods"].to<JsonArray>();
+                        m = modsArr.add<JsonObject>();
+                        m["ctrl"] = id;
+                        any = true;
+                    }
+                    m[kModJsonKeys[sub]] = int(fieldU64(f, 0));
+                }
+            }
+
+            if (!_webui.handleCommand(WS_OP_GEN_CFG, in, out)) {
+                return Ret::err(NackCode::INVALID_VALUE);
+            }
+
+            applied.count = 0;
+            if (findField(requested, 1))
+                applied.fields[applied.count++] = {1, IntentValue::ofBool(out["ap_mode"] | false)};
+            if (findField(requested, 2))
+                applied.fields[applied.count++] =
+                    {2, IntentValue::ofU64(uint64_t(int(out["ap_speed"] | 0)))};
+            for (uint8_t id = 0; id < kApBaseCount; ++id) {
+                const uint8_t key = uint8_t(3 + id);
+                if (findField(requested, key))
+                    applied.fields[applied.count++] =
+                        {key, IntentValue::ofU64(uint64_t(int(out[kBaseJsonKeys[id]] | 0)))};
+            }
+            // Modifier echo: out["ap_mods"] carries the POST-CLAMP block for
+            // EVERY touched control — pull out just the sub-keys this request
+            // actually asked for (Ground Truth without inventing values for
+            // fields it never touched).
+            if (out["ap_mods"].is<JsonArray>()) {
+                for (JsonObject m : out["ap_mods"].as<JsonArray>()) {
+                    int ctrl = m["ctrl"] | -1;
+                    if (ctrl < 0 || ctrl >= int(kApBaseCount)) continue;
+                    const uint8_t base = uint8_t(9 + 6 * ctrl);
+                    for (uint8_t sub = 0; sub < 6; ++sub) {
+                        const uint8_t key = uint8_t(base + sub);
+                        if (!findField(requested, key)) continue;
+                        applied.fields[applied.count++] =
+                            {key, IntentValue::ofU64(uint64_t(int(m[kModJsonKeys[sub]] | 0)))};
+                    }
+                }
+            }
+
+            if (applied.count == 0) return Ret::err(NackCode::INVALID_VALUE);
+            cfgChanged = false;  // session-volatile, same as classic pattern-cmd
+            return Ret::ok(applied);
+        }
+
         default:
             // A cataloged INTENT channel the delegate doesn't implement.
             return Ret::err(NackCode::UNKNOWN_CHANNEL);
@@ -820,6 +917,12 @@ void SlopSyncHubService::init() {
 
     loadPairing();
     _uiTokens.begin();
+
+    // RFC-027(c) push-to-pair: AFTER loadPairing() so the factory-fresh check
+    // (hasConfigureToken()) sees the restored ledger, not an empty one — a
+    // machine that was already claimed must never re-open a configure-granting
+    // window just because it also happened to reboot three times fast.
+    checkQuickBootPairingGesture();
 
     // Close the delegate -> ledger loop. MUST come after loadPairing() so the
     // very first HELLO of the boot is validated against the RESTORED ledger and
@@ -1461,6 +1564,63 @@ void SlopSyncHubService::publishTelemetry() {
         }
     }
 
+    // ---- 0x008E pattern-advanced + 0x008F..0x0094 pattern-adv-mod-* -------
+    // Same diff-what-we-SENT trigger as 0x008B/C/D: written from the hub task
+    // via 0x0107 and never bumps cfg_gen, so gating on cfg_gen would strand a
+    // client on a stale card. Reads PatternEngine directly — the SAME source
+    // 0x0082 above reads — never a shadow copy: two sources of truth for the
+    // same value is a bug class this project has already been bitten by
+    // (blend mode, motor vs arbiter).
+    if (_patternEngine) {
+        const advpat::Settings& ap = _patternEngine->apSettings();
+        // GENUINELY dynamic, narrower than 0x0082's mask: none of these
+        // setters is gated on `homed` (see SlopSyncCatalog.h's 0x008E
+        // comment), so this tracks e-stop alone.
+        const uint8_t mask = _state.estop_latched ? 0x00 : 0xFF;
+
+        std::array<std::byte, 9> base{};
+        std::span<std::byte> b(base);
+        slopsync::putU8(b.subspan(0, 1), _patternEngine->isAdvancedMode() ? 1u : 0u);
+        slopsync::putU8(b.subspan(1, 1), uint8_t(ap.master.value));
+        slopsync::putU8(b.subspan(2, 1), uint8_t(ap.max_depth.value));
+        slopsync::putU8(b.subspan(3, 1), uint8_t(ap.min_depth.value));
+        slopsync::putU8(b.subspan(4, 1), uint8_t(ap.in_speed.value));
+        slopsync::putU8(b.subspan(5, 1), uint8_t(ap.out_speed.value));
+        slopsync::putU8(b.subspan(6, 1), uint8_t(ap.in_accel.value));
+        slopsync::putU8(b.subspan(7, 1), uint8_t(ap.out_accel.value));
+        slopsync::putU8(b.subspan(8, 1), mask);
+        if (!_apBaseEverSent || base != _lastApBase) {
+            _apBaseEverSent = true;
+            _lastApBase = base;
+            _hub.publishState(ch::pattern_advanced, b);
+        }
+
+        // Ascending BaseId order == ascending channel id order (0x008F..0x0094).
+        static constexpr uint16_t kModChannels[kApBaseCount] = {
+            ch::pattern_adv_mod_depth1, ch::pattern_adv_mod_depth2, ch::pattern_adv_mod_speedin,
+            ch::pattern_adv_mod_speedout, ch::pattern_adv_mod_accelin, ch::pattern_adv_mod_accelout,
+        };
+        for (uint8_t id = 0; id < kApBaseCount; ++id) {
+            const advpat::BaseControl* bc = ap.byId(id);
+            if (!bc) continue;
+            const advpat::Modifier& m = bc->modifier;
+            std::array<std::byte, 7> mb{};
+            std::span<std::byte> ms(mb);
+            slopsync::putU8(ms.subspan(0, 1), m.amplitude);
+            slopsync::putU8(ms.subspan(1, 1), m.in_step);
+            slopsync::putU8(ms.subspan(2, 1), m.in_wait);
+            slopsync::putU8(ms.subspan(3, 1), m.out_step);
+            slopsync::putU8(ms.subspan(4, 1), m.out_wait);
+            slopsync::putU8(ms.subspan(5, 1), m.offset);
+            slopsync::putU8(ms.subspan(6, 1), mask);
+            if (!_apModEverSent[id] || mb != _lastApMod[id]) {
+                _apModEverSent[id] = true;
+                _lastApMod[id] = mb;
+                _hub.publishState(kModChannels[id], ms);
+            }
+        }
+    }
+
     // ---- 0x0086 plan-strip — ≥22 ms (≤~45 Hz) ----------------------------
     // The planner's CURRENT SEGMENT. Fed from the interp_* SystemState slots
     // that Core 1's streamSamplerTask fills from slopmotion::Snapshot each
@@ -1600,6 +1760,7 @@ void SlopSyncHubService::publishTelemetry() {
         }
 
         persistPairingIfChanged();
+        pumpPresencePairingWindow(now);  // RFC-027(c): streak reset + SlopGlow mirror
         // M5c: coalesced tuning persist. 0x0105 only FLAGS a change; the write
         // happens here, at most once a second. NVS is flash — a slider dragged
         // at the channel's 5 Hz would otherwise be five erase/write cycles per
@@ -1661,6 +1822,83 @@ void SlopSyncHubService::publishAnomalies() {
         std::array<std::byte, 96> buf{};
         size_t n = slopsync::encodeEvent(ev, std::span<std::byte>(buf));
         if (n > 0) _hub.publishEvent(ch::motion_anomaly, std::span<const std::byte>(buf.data(), n));
+    }
+}
+
+// ============================================================================
+// RFC-027(c) push-to-pair — the boot-counter gesture (namespace "slopsync")
+// ============================================================================
+//
+// hub.hpp is explicit that the library provides the window, never the
+// gesture: "the application's job and only the application's". This is that
+// job. Registry `pairing_modes` bit2 (docs/slopsync/registry/registry.yaml)
+// is the normative text: N=3 consecutive boots with uptime <10 s opens the
+// window, NVS counter only — it cannot collide with a live session because
+// any power loss already stops motion and forces re-home, and FACTORY RESET
+// MUST STAY A HARDER GESTURE than this one (it is: factory reset is not
+// implemented via NVS counter at all, so there is no shared mechanism to
+// under-shoot).
+namespace {
+constexpr const char* kQuickBootKey = "qboots";  // NVS key, <=15 chars
+constexpr uint8_t kQuickBootThreshold = 3;
+constexpr uint32_t kQuickBootSurviveMs = 10000;  // "uptime < ~10 s" per the registry
+}  // namespace
+
+// Runs ONCE from init(), before the hub task exists — this is boot-sequence
+// work, exactly the CLAUDE.md §2 exception that permits a blocking NVS open
+// here (never in a runtime loop).
+void SlopSyncHubService::checkQuickBootPairingGesture() {
+    Preferences prefs;
+    if (!prefs.begin("slopsync", false)) return;
+
+    uint8_t count = prefs.getUChar(kQuickBootKey, 0);
+    // A streak that was already AT threshold on read means a previous boot's
+    // window-open write raced a reboot before pumpPresencePairingWindow() could
+    // clear it back to 0 (belt-and-braces below already clears it inline, but
+    // this keeps the counter self-healing even if that write was lost).
+    count = (count >= kQuickBootThreshold) ? uint8_t(1) : uint8_t(count + 1);
+    prefs.putUChar(kQuickBootKey, count);
+    SLOGI("slopsync", "pairing: quick-boot count %u/%u", unsigned(count), unsigned(kQuickBootThreshold));
+
+    if (count >= kQuickBootThreshold) {
+        prefs.putUChar(kQuickBootKey, 0);  // consume the gesture immediately, not on next boot
+        _hub.openPresenceWindow();
+        _presenceGlowOn = true;
+        slopglowEngine().set(slopglow::GlowState::Pairing, true);
+        SLOGI("slopsync", "pairing: PRESENCE WINDOW OPEN (3 quick power-cycles) — pair within %u s",
+              unsigned(slopsync::limits::pairing_window_default_s));
+    }
+    prefs.end();
+}
+
+// Runs every 1 Hz tick on the hub task (see publishTelemetry's slow block).
+void SlopSyncHubService::pumpPresencePairingWindow(uint32_t nowMs) {
+    // The streak only means anything for boots that die fast. Once THIS boot
+    // has visibly survived past the gesture's own window, the next reboot —
+    // fast or not — starts counting fresh rather than silently continuing a
+    // stale streak from an unrelated earlier power-cycle. One-shot: nothing
+    // past the first successful reset needs to touch flash again.
+    if (!_qbootResetDone && nowMs >= kQuickBootSurviveMs) {
+        _qbootResetDone = true;
+        Preferences prefs;
+        if (prefs.begin("slopsync", false)) {
+            if (prefs.getUChar(kQuickBootKey, 0) != 0) {
+                prefs.putUChar(kQuickBootKey, 0);
+                SLOGI("slopsync", "pairing: quick-boot streak reset (uptime > 10 s)");
+            }
+            prefs.end();
+        }
+    }
+
+    // The presence window auto-expires INSIDE the library (120 s, same
+    // duration as the PIN window) — nothing calls closePresenceWindow() for
+    // that edge, so SlopGlow only learns about it if something polls. 1 Hz is
+    // plenty; the window is open for whole seconds at minimum.
+    const bool open = _hub.presenceWindowOpen();
+    if (open != _presenceGlowOn) {
+        _presenceGlowOn = open;
+        slopglowEngine().set(slopglow::GlowState::Pairing, open);
+        if (!open) SLOGI("slopsync", "pairing: presence window closed");
     }
 }
 

@@ -57,8 +57,12 @@ target_include_directories(slopsim PRIVATE
     src
     "${REPO_ROOT}/lib/slopsync/include"
     "${REPO_ROOT}/lib/slopmotion/include"
-    "${REPO_ROOT}/lib/ruckig/include"
-    "${REPO_ROOT}/include/comms")   # SlopSyncCatalog.h ONLY — host-clean
+    "${REPO_ROOT}/lib/ruckig/include")
+    # NOTE: include/comms (the firmware's own SlopSyncCatalog.h) is
+    # DELIBERATELY NOT on this path. slopsim declares its own, different
+    # device catalog — src/machine/SlopSimCatalog.h — so that pointing a
+    # client at the sim proves it can render a machine it has never met, not
+    # just SlopDrive-32 again over a fresh socket. See that file's header.
 
 target_compile_options(slopsim PRIVATE -Wall -Wextra)
 

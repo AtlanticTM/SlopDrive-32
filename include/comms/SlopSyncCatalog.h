@@ -74,6 +74,27 @@ inline constexpr uint16_t machine_modes  = 0x008A;
 inline constexpr uint16_t sm_limits      = 0x008B;
 inline constexpr uint16_t sm_chase       = 0x008C;
 inline constexpr uint16_t sm_waveform    = 0x008D;
+// ---- Advanced pattern — off the dead /api/pattern HTTP surface, onto SlopSync
+// THE SAME FLATTENED-ENTRY BUDGET SPLIT AS 0x008B/C/D. AdvancedPattern.h's real
+// (firmware, not legacy-JS) parameter set is 8 base controls (advpat::Settings)
+// plus a 6-field cyclic Modifier PER base control (advpat::BASE_COUNT = 6) — 44
+// settings total, which is exactly the ~50-field case channel/catalog.hpp's own
+// comment says CatalogEntry::kMaxFields was raised to 64 (8 -> 64) FOR. But
+// registry.yaml's catalog_max_entry_bytes note is the other half of that
+// story: a 50-field FULLY annotated entry encodes to ~8-10 KB, so "fits in one
+// entry" and "affordable in one entry" are different questions — this device
+// answers the second one by splitting, same as 0x008B/C/D. One channel per
+// BASE CONTROL's modifier (6 fields, well under the 8-bit enabled_mask) keeps
+// every group boundary a real conceptual one instead of an artifact of
+// bit-packing, exactly like sm_limits/sm_chase/sm_waveform split by subsystem
+// rather than by filling every last mask bit.
+inline constexpr uint16_t pattern_advanced          = 0x008E;  // ap_mode + 7 base controls
+inline constexpr uint16_t pattern_adv_mod_depth1    = 0x008F;  // advpat::DEPTH_MAX modifier
+inline constexpr uint16_t pattern_adv_mod_depth2    = 0x0090;  // advpat::DEPTH_MIN modifier
+inline constexpr uint16_t pattern_adv_mod_speedin   = 0x0091;  // advpat::SPEED_IN modifier
+inline constexpr uint16_t pattern_adv_mod_speedout  = 0x0092;  // advpat::SPEED_OUT modifier
+inline constexpr uint16_t pattern_adv_mod_accelin   = 0x0093;  // advpat::ACCEL_IN modifier
+inline constexpr uint16_t pattern_adv_mod_accelout  = 0x0094;  // advpat::ACCEL_OUT modifier
 inline constexpr uint16_t move           = 0x0100;
 inline constexpr uint16_t config_set     = 0x0101;
 inline constexpr uint16_t pattern_cmd    = 0x0102;
@@ -81,7 +102,20 @@ inline constexpr uint16_t home           = 0x0103;
 inline constexpr uint16_t modes_set      = 0x0104;
 inline constexpr uint16_t sm_set         = 0x0105;
 inline constexpr uint16_t machine_admin  = 0x0106;
+// Shared writer behind ALL SEVEN 0x008E..0x0094 advanced-pattern STATE
+// channels — same "one settingChannel, many cards" pattern as 0x0105.
+inline constexpr uint16_t pattern_advanced_cmd = 0x0107;
 }  // namespace ch
+
+// MIRROR of advpat::BASE_COUNT (include/motion/AdvancedPattern.h), same forced-
+// duplication rule as `factory`/`ceiling` below: this header must stay
+// buildable with nothing but the library (native tests, the sim), and
+// AdvancedPattern.h — though itself hardware-free — is still a cross-module
+// dependency this header has never taken. SlopSyncHubService.cpp DOES include
+// PatternEngine.h (and therefore AdvancedPattern.h) and carries a static_assert
+// pinning this to advpat::BASE_COUNT, so drift fails the FIRMWARE build, not a
+// silent wire mismatch.
+inline constexpr uint8_t kApBaseCount = 6;
 
 // ---- 0x0089 motion-anomaly EVENT: the `body` (40) sub-map keys -------------
 // These are the CHANNEL'S OWN schema keys, exactly as slopsync::safety_body is
@@ -252,7 +286,8 @@ inline bool buildSlopDriveCatalog(slopsync::Catalog32& c, DeviceFeatures feat = 
                 .cls = ChannelClass::INTENT, .dir = Direction::c2h,
                 .access = AccessLevel::watch, .maxRateHz = 20.0f,
                 .defaultPriority = Priority::critical});
-    c.addSelectSchemaField({.key = 1, .name = "op", .type = CborFieldType::uint_t, .unit = ""},
+    c.addSelectSchemaField({.key = 1, .name = "op", .type = CborFieldType::uint_t, .unit = "",
+                            .role = "action.safety"},
                            {"reserved", "estop_clear", "stop", "hold", "pause", "resume",
                             "estop", "override_on", "override_off", "bypass_on", "bypass_off"},
                            {AccessLevel::control,  // 0  (placeholder, never an op)
@@ -274,7 +309,8 @@ inline bool buildSlopDriveCatalog(slopsync::Catalog32& c, DeviceFeatures feat = 
                 .access = AccessLevel::watch, .maxRateHz = 1.0f,
                 .defaultPriority = Priority::background});
     c.addLayoutField({.name = "heap_free", .type = PackedFieldType::u32, .unit = "B",     .scale = 1.0f});
-    c.addLayoutField({.name = "uptime_s",  .type = PackedFieldType::u32, .unit = "s",     .scale = 1.0f});
+    c.addLayoutField({.name = "uptime_s",  .type = PackedFieldType::u32, .unit = "s",     .scale = 1.0f,
+                      .role = roles::telemetry_uptime});
     c.addLayoutField({.name = "rssi",      .type = PackedFieldType::i8,  .unit = "dBm",   .scale = 1.0f});
     c.addLayoutField({.name = "sessions",  .type = PackedFieldType::u8,  .unit = "count", .scale = 1.0f});
     // M5b APPENDED (10 -> 14 B): RFC-017 / §9.4's VISIBLE drop counter for the
@@ -499,6 +535,12 @@ inline bool buildSlopDriveCatalog(slopsync::Catalog32& c, DeviceFeatures feat = 
     // setPattern(idx) consumes it — so a client shows "Teasing Pounding", not
     // "1", without knowing anything about this machine.
     //
+    // Fields carry `pattern.*` roles (registry field_roles, additive) so a
+    // generic client can draw a proper generator card — running toggle,
+    // pattern picker, speed/depth/stroke/sensation knobs — instead of six
+    // unrelated sliders. Same doctrine as every other role: a hint a client
+    // MAY upgrade to a bespoke widget on, never a requirement.
+    //
     // THE COMPILE-GATED TAIL: PatternEngine's registry is
     // CORE_PATTERN_COUNT (7) plus up to two build-flagged extended patterns
     // (PATTERN_EXT_TESTPATTERN1/2). Only the seven CORE names are advertised,
@@ -520,12 +562,14 @@ inline bool buildSlopDriveCatalog(slopsync::Catalog32& c, DeviceFeatures feat = 
                       .group = "Pattern",
                       .desc = "Whether the built-in pattern generator is currently driving the "
                               "machine.",
+                      .role = roles::pattern_running,
                       .step = 1.0f, .settingKey = 1, .hasSettingKey = true, .hasStep = true});
     c.addSelectField({.name = "pattern",   .type = PackedFieldType::u8,  .unit = "",  .scale = 1.0f,
                       .hasMin = true, .hasMax = true, .min = 0.0f, .max = 6.0f,
                       .dflt = SettingDefault::ofInt(0),
                       .group = "Pattern",
                       .desc = "Which stroke pattern the generator plays.",
+                      .role = roles::pattern_select,
                       .step = 1.0f, .settingKey = 2, .hasSettingKey = true, .hasStep = true},
                      {"Simple Stroke", "Teasing Pounding", "Robo Stroke", "Half'n'Half",
                       "Deeper", "Stop'n'Go", "Insist"});
@@ -535,18 +579,21 @@ inline bool buildSlopDriveCatalog(slopsync::Catalog32& c, DeviceFeatures feat = 
                       .group = "Pattern",
                       .desc = "How fast the pattern strokes, as a percentage of its own range. "
                               "Bounded by the machine-driven speed limit.",
+                      .role = roles::pattern_speed,
                       .step = 1.0f, .settingKey = 3, .hasSettingKey = true, .hasStep = true});
     c.addLayoutField({.name = "depth",     .type = PackedFieldType::f32, .unit = "%", .scale = 1.0f,
                       .hasMin = true, .hasMax = true, .min = 0.0f, .max = 100.0f,
                       .dflt = SettingDefault::ofFloat(0.0f),
                       .group = "Pattern",
                       .desc = "How far into the stroke window the pattern reaches.",
+                      .role = roles::pattern_depth,
                       .step = 1.0f, .settingKey = 4, .hasSettingKey = true, .hasStep = true});
     c.addLayoutField({.name = "stroke",    .type = PackedFieldType::f32, .unit = "%", .scale = 1.0f,
                       .hasMin = true, .hasMax = true, .min = 0.0f, .max = 100.0f,
                       .dflt = SettingDefault::ofFloat(0.0f),
                       .group = "Pattern",
                       .desc = "Length of each stroke, as a percentage of the available depth.",
+                      .role = roles::pattern_stroke,
                       .step = 1.0f, .settingKey = 5, .hasSettingKey = true, .hasStep = true});
     c.addLayoutField({.name = "sensation", .type = PackedFieldType::f32, .unit = "",  .scale = 1.0f,
                       .hasMin = true, .hasMax = true, .min = 0.0f, .max = 100.0f,
@@ -554,6 +601,7 @@ inline bool buildSlopDriveCatalog(slopsync::Catalog32& c, DeviceFeatures feat = 
                       .group = "Pattern",
                       .desc = "Pattern character knob. 50 is neutral; what it changes depends on "
                               "the pattern you picked.",
+                      .role = roles::pattern_sensation,
                       .step = 1.0f, .settingKey = 6, .hasSettingKey = true, .hasStep = true});
     // RFC-009 item 4 — bit i gates the i-th setting-annotated field above:
     //   0 running  1 pattern  2 speed  3 depth  4 stroke  5 sensation
@@ -1141,9 +1189,190 @@ inline bool buildSlopDriveCatalog(slopsync::Catalog32& c, DeviceFeatures feat = 
                        {"curve_policy", "infeasible_policy", "infeasible_margin", "smooth_budget",
                         "amplitude_budget", "blend_steps", "reshape_steps", "settle_grace_ms"});
 
+    // ---- 0x008E "pattern-advanced" — STATE, normal, on-change -------------
+    // Advanced mode's 8 BASE controls (advpat::Settings, everything except the
+    // per-control cyclic Modifier — see 0x008F..0x0094 for those). This is the
+    // real fix the roadmap asked for: POST /api/pattern used to carry ap_mode/
+    // ap_speed/ap_max_depth/ap_min_depth/ap_in_speed/ap_out_speed/ap_in_accel/
+    // ap_out_accel as ad-hoc JSON keys a generic client could not discover; now
+    // they are 8 RFC-009 settings a generic client renders without knowing this
+    // firmware exists. That endpoint answers 410 today (M5c); this channel is
+    // what makes Advanced mode reachable again at all.
+    //
+    // SAME CATEGORY AS 0x0082 (`user`), DIFFERENT settingChannel (0x0107, not
+    // 0x0102): Advanced is a separate sub-mode of the SAME pattern generator,
+    // not a seventh classic-pattern field, so it earns its own writer while
+    // sharing the category so both render as ONE tab (SPEC §8.8 — "a category
+    // spans channels").
+    //   [1*8 fields + 1 mask = 9 B]
+    c.addEntry({.id = ch::pattern_advanced, .name = "pattern-advanced",
+                .cls = ChannelClass::STATE, .dir = Direction::h2c,
+                .access = AccessLevel::watch, .maxRateHz = 0.0f,
+                .defaultPriority = Priority::normal,
+                .hasCategory = true, .category = slopsync::setting_categories::user,
+                .hasSettingChannel = true, .settingChannel = ch::pattern_advanced_cmd});
+    c.addLayoutField({.name = "ap_mode", .type = PackedFieldType::u8, .unit = "", .scale = 1.0f,
+                      .hasMin = true, .hasMax = true, .min = 0.0f, .max = 1.0f,
+                      .dflt = SettingDefault::ofBool(false),
+                      .group = "Advanced pattern",
+                      .desc = "Drive the generator with Advanced mode instead of the classic patterns.",
+                      .step = 1.0f, .settingKey = 1, .hasSettingKey = true, .hasStep = true});
+    c.addLayoutField({.name = "master", .type = PackedFieldType::u8, .unit = "%", .scale = 1.0f,
+                      .hasMin = true, .hasMax = true, .min = 0.0f, .max = 100.0f,
+                      .dflt = SettingDefault::ofInt(0),
+                      .group = "Advanced pattern",
+                      .desc = "Overall stroke speed. 0 holds position.",
+                      .step = 1.0f, .settingKey = 2, .hasSettingKey = true, .hasStep = true});
+    c.addLayoutField({.name = "max_depth", .type = PackedFieldType::u8, .unit = "%", .scale = 1.0f,
+                      .hasMin = true, .hasMax = true, .min = 0.0f, .max = 100.0f,
+                      .dflt = SettingDefault::ofInt(10),
+                      .group = "Depth window",
+                      .desc = "Deepest point of the stroke (the in-stroke target).",
+                      .step = 1.0f, .settingKey = 3, .hasSettingKey = true, .hasStep = true});
+    c.addLayoutField({.name = "min_depth", .type = PackedFieldType::u8, .unit = "%", .scale = 1.0f,
+                      .hasMin = true, .hasMax = true, .min = 0.0f, .max = 100.0f,
+                      .dflt = SettingDefault::ofInt(0),
+                      .group = "Depth window",
+                      .desc = "Shallowest point of the stroke (the out-stroke target).",
+                      .step = 1.0f, .settingKey = 4, .hasSettingKey = true, .hasStep = true});
+    c.addLayoutField({.name = "in_speed", .type = PackedFieldType::u8, .unit = "%", .scale = 1.0f,
+                      .hasMin = true, .hasMax = true, .min = 1.0f, .max = 100.0f,
+                      .dflt = SettingDefault::ofInt(100),
+                      .group = "Speed",
+                      .desc = "In-stroke speed, as a percentage of master speed.",
+                      .step = 1.0f, .settingKey = 5, .hasSettingKey = true, .hasStep = true});
+    c.addLayoutField({.name = "out_speed", .type = PackedFieldType::u8, .unit = "%", .scale = 1.0f,
+                      .hasMin = true, .hasMax = true, .min = 1.0f, .max = 100.0f,
+                      .dflt = SettingDefault::ofInt(100),
+                      .group = "Speed",
+                      .desc = "Out-stroke speed, as a percentage of master speed.",
+                      .step = 1.0f, .settingKey = 6, .hasSettingKey = true, .hasStep = true});
+    c.addLayoutField({.name = "in_accel", .type = PackedFieldType::u8, .unit = "%", .scale = 1.0f,
+                      .hasMin = true, .hasMax = true, .min = 0.0f, .max = 100.0f,
+                      .dflt = SettingDefault::ofInt(40),
+                      .group = "Acceleration",
+                      .desc = "How hard the in-stroke accelerates.",
+                      .step = 1.0f, .settingKey = 7, .hasSettingKey = true, .hasStep = true});
+    c.addLayoutField({.name = "out_accel", .type = PackedFieldType::u8, .unit = "%", .scale = 1.0f,
+                      .hasMin = true, .hasMax = true, .min = 0.0f, .max = 100.0f,
+                      .dflt = SettingDefault::ofInt(40),
+                      .group = "Acceleration",
+                      .desc = "How hard the out-stroke accelerates.",
+                      .step = 1.0f, .settingKey = 8, .hasSettingKey = true, .hasStep = true});
+    // Bit i gates the i-th setting-annotated field above, same rule as 0x0082.
+    // GENUINELY dynamic, and genuinely NARROWER than 0x0082's: unlike `running`
+    // on 0x0102, none of these 8 setters is gated on `homed` (PatternEngine::
+    // setAdvancedMode/setApMaster/setApBase have no homed check — only start()
+    // does), so mirroring 0x0082's mask formula here would be a DISHONEST
+    // refusal the delegate never actually makes. The mask therefore tracks
+    // e-stop alone; the fields simply have no effect on the machine until it is
+    // homed and running, same as dialling in a pattern before pressing start.
+    c.addBitfieldField({.name = "enabled_mask", .type = PackedFieldType::bitfield8, .unit = "flag",
+                        .scale = 1.0f,
+                        .desc = "Which of these the machine will accept right now.",
+                        .role = roles::meta_enabled_mask},
+                       {"ap_mode", "master", "max_depth", "min_depth", "in_speed", "out_speed",
+                        "in_accel", "out_accel"});
+
+    // ---- 0x008F..0x0094 "pattern-adv-mod-*" — STATE, background -----------
+    // The 6-field cyclic Modifier (advpat::Modifier) that rides EACH of the 6
+    // base controls (advpat::BASE_COUNT) — the "modifier cycle" the roadmap
+    // asked for: amplitude ramps a control's swing in over `in_step` strokes,
+    // holds `in_wait`, ramps back over `out_step`, rests `out_wait`, and
+    // `offset` phase-shifts the whole cycle. ONE CHANNEL PER BASE CONTROL
+    // rather than binpacking 36 fields into the fewest possible 8-field
+    // channels: each is a real, separate concept (fray-d lets you set a
+    // completely different breathing pattern on depth vs. speed vs. accel),
+    // and a channel boundary that means something is worth six channel ids
+    // more than a denser one that doesn't — same judgement 0x008B/C/D already
+    // made splitting by subsystem, not by bit-count.
+    //
+    // ALL SIX SHARE 0x0107 as settingChannel (see 0x008E) and `user` as
+    // category, so all seven advanced-pattern cards merge into ONE tab.
+    // setting_keys are allocated 9..44 across the six, 6 keys apiece, and
+    // match the wire layout below exactly: keyBase+0 amplitude, +1 in_step,
+    // +2 in_wait, +3 out_step, +4 out_wait, +5 offset — which is also
+    // SlopSyncHubService's applyIntent(0x0107) grouping formula
+    // (base = 9 + 6*advpat::BaseId), so the two can be eyeballed against each
+    // other without cross-referencing a third table. `advanced`-flagged: this
+    // is the deep-customization layer under the 8 base controls, not the
+    // everyday knobs.
+    //   [1*6 fields + 1 mask = 7 B, ×6 channels]
+    auto addApModifierChannel = [&](uint16_t id, const char* wireName, const char* group,
+                                    uint8_t keyBase) {
+        c.addEntry({.id = id, .name = wireName,
+                    .cls = ChannelClass::STATE, .dir = Direction::h2c,
+                    .access = AccessLevel::watch, .maxRateHz = 0.0f,
+                    .defaultPriority = Priority::background,
+                    .hasCategory = true, .category = slopsync::setting_categories::user,
+                    .hasSettingChannel = true, .settingChannel = ch::pattern_advanced_cmd});
+        c.addLayoutField({.name = "amplitude", .type = PackedFieldType::u8, .unit = "%", .scale = 1.0f,
+                          .hasMin = true, .hasMax = true, .min = 0.0f, .max = 100.0f,
+                          .dflt = SettingDefault::ofInt(100), .group = group,
+                          .desc = "Modulation strength; 100 = off.",
+                          .step = 1.0f, .settingKey = uint8_t(keyBase + 0),
+                          .flags = slopsync::setting_flags::advanced,
+                          .hasSettingKey = true, .hasStep = true});
+        c.addLayoutField({.name = "in_step", .type = PackedFieldType::u8, .unit = "", .scale = 1.0f,
+                          .hasMin = true, .hasMax = true, .min = 1.0f, .max = 25.0f,
+                          .dflt = SettingDefault::ofInt(1), .group = group,
+                          .desc = "Strokes ramping into the modulation.",
+                          .step = 1.0f, .settingKey = uint8_t(keyBase + 1),
+                          .flags = slopsync::setting_flags::advanced,
+                          .hasSettingKey = true, .hasStep = true});
+        c.addLayoutField({.name = "in_wait", .type = PackedFieldType::u8, .unit = "", .scale = 1.0f,
+                          .hasMin = true, .hasMax = true, .min = 0.0f, .max = 25.0f,
+                          .dflt = SettingDefault::ofInt(0), .group = group,
+                          .desc = "Strokes held at full modulation.",
+                          .step = 1.0f, .settingKey = uint8_t(keyBase + 2),
+                          .flags = slopsync::setting_flags::advanced,
+                          .hasSettingKey = true, .hasStep = true});
+        c.addLayoutField({.name = "out_step", .type = PackedFieldType::u8, .unit = "", .scale = 1.0f,
+                          .hasMin = true, .hasMax = true, .min = 1.0f, .max = 25.0f,
+                          .dflt = SettingDefault::ofInt(1), .group = group,
+                          .desc = "Strokes ramping back out.",
+                          .step = 1.0f, .settingKey = uint8_t(keyBase + 3),
+                          .flags = slopsync::setting_flags::advanced,
+                          .hasSettingKey = true, .hasStep = true});
+        c.addLayoutField({.name = "out_wait", .type = PackedFieldType::u8, .unit = "", .scale = 1.0f,
+                          .hasMin = true, .hasMax = true, .min = 0.0f, .max = 25.0f,
+                          .dflt = SettingDefault::ofInt(0), .group = group,
+                          .desc = "Strokes resting before the cycle repeats.",
+                          .step = 1.0f, .settingKey = uint8_t(keyBase + 4),
+                          .flags = slopsync::setting_flags::advanced,
+                          .hasSettingKey = true, .hasStep = true});
+        c.addLayoutField({.name = "offset", .type = PackedFieldType::u8, .unit = "", .scale = 1.0f,
+                          .hasMin = true, .hasMax = true, .min = 0.0f, .max = 100.0f,
+                          .dflt = SettingDefault::ofInt(0), .group = group,
+                          .desc = "Phase shift of the cycle.",
+                          .step = 1.0f, .settingKey = uint8_t(keyBase + 5),
+                          .flags = slopsync::setting_flags::advanced,
+                          .hasSettingKey = true, .hasStep = true});
+        // Same honesty note as 0x008E: no setter here checks `homed` either
+        // (setApModifier has no gate beyond the delegate's e-stop check), so
+        // the mask tracks e-stop alone.
+        c.addBitfieldField({.name = "enabled_mask", .type = PackedFieldType::bitfield8, .unit = "flag",
+                            .scale = 1.0f,
+                            .desc = "Which of these the machine will accept right now.",
+                            .role = roles::meta_enabled_mask},
+                           {"amplitude", "in_step", "in_wait", "out_step", "out_wait", "offset"});
+    };
+    addApModifierChannel(ch::pattern_adv_mod_depth1,   "pattern-adv-mod-depth1",   "Depth 1 modifier",   9);
+    addApModifierChannel(ch::pattern_adv_mod_depth2,   "pattern-adv-mod-depth2",   "Depth 2 modifier",   15);
+    addApModifierChannel(ch::pattern_adv_mod_speedin,  "pattern-adv-mod-speedin",  "Speed in modifier",  21);
+    addApModifierChannel(ch::pattern_adv_mod_speedout, "pattern-adv-mod-speedout", "Speed out modifier", 27);
+    addApModifierChannel(ch::pattern_adv_mod_accelin,  "pattern-adv-mod-accelin",  "Accel in modifier",  33);
+    addApModifierChannel(ch::pattern_adv_mod_accelout, "pattern-adv-mod-accelout", "Accel out modifier", 39);
+
     // ---- 0x0100 "move" — INTENT, control, 20 Hz, critical ----------------
     // {1:"position" f32 mm, 2:"bypass" bool}. This channel maps to arbiter
     // source 0 (MANUAL) in the delegate.
+    //
+    // NO `action.*` ROLE HERE, DELIBERATELY. RFC-019's action roles mark a
+    // schema field as a VERB ("do this") rather than a value; `position` is a
+    // value (where to go), not a verb, and tagging it action.move would tell a
+    // generic client to render a button where a slider belongs. This channel
+    // is exactly what generic value-field rendering already handles.
     c.addEntry({.id = ch::move, .name = "move",
                 .cls = ChannelClass::INTENT, .dir = Direction::c2h,
                 .access = AccessLevel::control, .maxRateHz = 20.0f,
@@ -1225,7 +1454,8 @@ inline bool buildSlopDriveCatalog(slopsync::Catalog32& c, DeviceFeatures feat = 
                 .cls = ChannelClass::INTENT, .dir = Direction::c2h,
                 .access = AccessLevel::control, .maxRateHz = 5.0f,
                 .defaultPriority = Priority::normal});
-    c.addSelectSchemaField({.key = 1, .name = "op", .type = CborFieldType::uint_t, .unit = ""},
+    c.addSelectSchemaField({.key = 1, .name = "op", .type = CborFieldType::uint_t, .unit = "",
+                            .role = "action.home"},
                            {"reserved", "home", "force_home", "clear_override"},
                            {AccessLevel::control,   // 0 (placeholder, never an op)
                             AccessLevel::control,   // 1 home
@@ -1337,12 +1567,68 @@ inline bool buildSlopDriveCatalog(slopsync::Catalog32& c, DeviceFeatures feat = 
                 .cls = ChannelClass::INTENT, .dir = Direction::c2h,
                 .access = AccessLevel::control, .maxRateHz = 2.0f,
                 .defaultPriority = Priority::normal});
-    c.addSelectSchemaField({.key = 1, .name = "op", .type = CborFieldType::uint_t, .unit = ""},
+    c.addSelectSchemaField({.key = 1, .name = "op", .type = CborFieldType::uint_t, .unit = "",
+                            .role = "action.admin"},
                            {"reserved", "clear_fault", "save_config", "servo_scan"},
                            {AccessLevel::control,   // 0 placeholder, never an op
                             AccessLevel::control,   // 1 clear_fault
                             AccessLevel::control,   // 2 save_config
                             AccessLevel::control}); // 3 servo_scan
+
+    // ---- 0x0107 "pattern-advanced-cmd" — INTENT, control, 20 Hz -----------
+    // The single writer behind ALL SEVEN 0x008E..0x0094 advanced-pattern
+    // cards. Same lean-schema convention as every other settings writer in
+    // this catalog (config_set, pattern_cmd, modes_set, sm_set): the
+    // user-facing text (desc/group/default/role) lives ONCE, on the STATE
+    // side, so this channel carries only what a client needs to validate
+    // before sending — name, type, unit, bounds.
+    //
+    // Keys 1..8 mirror 0x008E's layout exactly. Keys 9..44 are 6-per-control
+    // blocks, base = 9 + 6*id with id in advpat::BaseId order (DEPTH_MAX=0
+    // .. ACCEL_OUT=5), matching 0x008F..0x0094 exactly — see
+    // SlopSyncHubService's applyIntent(0x0107) for the same arithmetic run
+    // in reverse to decode a wire frame back into a control + sub-field.
+    //
+    // Session-volatile, same as 0x0102 pattern-cmd: cfg_gen does not bump.
+    c.addEntry({.id = ch::pattern_advanced_cmd, .name = "pattern-advanced-cmd",
+                .cls = ChannelClass::INTENT, .dir = Direction::c2h,
+                .access = AccessLevel::control, .maxRateHz = 20.0f,
+                .defaultPriority = Priority::normal});
+    c.addSchemaField({.key = 1, .name = "ap_mode",   .type = CborFieldType::bool_t, .unit = ""});
+    c.addSchemaField({.key = 2, .name = "master",    .type = CborFieldType::uint_t, .unit = "%",
+                      .hasMin = true, .hasMax = true, .min = 0.0f, .max = 100.0f});
+    c.addSchemaField({.key = 3, .name = "max_depth", .type = CborFieldType::uint_t, .unit = "%",
+                      .hasMin = true, .hasMax = true, .min = 0.0f, .max = 100.0f});
+    c.addSchemaField({.key = 4, .name = "min_depth", .type = CborFieldType::uint_t, .unit = "%",
+                      .hasMin = true, .hasMax = true, .min = 0.0f, .max = 100.0f});
+    c.addSchemaField({.key = 5, .name = "in_speed",  .type = CborFieldType::uint_t, .unit = "%",
+                      .hasMin = true, .hasMax = true, .min = 1.0f, .max = 100.0f});
+    c.addSchemaField({.key = 6, .name = "out_speed", .type = CborFieldType::uint_t, .unit = "%",
+                      .hasMin = true, .hasMax = true, .min = 1.0f, .max = 100.0f});
+    c.addSchemaField({.key = 7, .name = "in_accel",  .type = CborFieldType::uint_t, .unit = "%",
+                      .hasMin = true, .hasMax = true, .min = 0.0f, .max = 100.0f});
+    c.addSchemaField({.key = 8, .name = "out_accel", .type = CborFieldType::uint_t, .unit = "%",
+                      .hasMin = true, .hasMax = true, .min = 0.0f, .max = 100.0f});
+    // 6 keys per base control (advpat::BaseId order): amplitude, in_step,
+    // in_wait, out_step, out_wait, offset — base = 9 + 6*id. Authoring order
+    // doesn't need to be ascending here (the encoder sorts schema fields by
+    // key before emitting), so a loop is safe where it would not be for the
+    // addEntry() ordering above.
+    for (uint8_t id = 0; id < kApBaseCount; ++id) {
+        const uint8_t base = uint8_t(9 + 6 * id);
+        c.addSchemaField({.key = uint8_t(base + 0), .name = "amplitude", .type = CborFieldType::uint_t,
+                          .unit = "%", .hasMin = true, .hasMax = true, .min = 0.0f, .max = 100.0f});
+        c.addSchemaField({.key = uint8_t(base + 1), .name = "in_step",   .type = CborFieldType::uint_t,
+                          .unit = "", .hasMin = true, .hasMax = true, .min = 1.0f, .max = 25.0f});
+        c.addSchemaField({.key = uint8_t(base + 2), .name = "in_wait",   .type = CborFieldType::uint_t,
+                          .unit = "", .hasMin = true, .hasMax = true, .min = 0.0f, .max = 25.0f});
+        c.addSchemaField({.key = uint8_t(base + 3), .name = "out_step",  .type = CborFieldType::uint_t,
+                          .unit = "", .hasMin = true, .hasMax = true, .min = 1.0f, .max = 25.0f});
+        c.addSchemaField({.key = uint8_t(base + 4), .name = "out_wait",  .type = CborFieldType::uint_t,
+                          .unit = "", .hasMin = true, .hasMax = true, .min = 0.0f, .max = 25.0f});
+        c.addSchemaField({.key = uint8_t(base + 5), .name = "offset",    .type = CborFieldType::uint_t,
+                          .unit = "", .hasMin = true, .hasMax = true, .min = 0.0f, .max = 100.0f});
+    }
 
     return c.ok();
 }

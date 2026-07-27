@@ -1,0 +1,134 @@
+(node:74768) ExperimentalWarning: localStorage is not available because --localstorage-file was not provided.
+(Use `node --trace-warnings ...` to show where the warning was created)
+host      : 192.168.1.229:82
+entries   : 33
+catalog   : 15915 B (fetched)
+tier      : 1
+
+=== THE PAGE THIS MACHINE PRODUCES ===
+
+  TAB  Limits   (category 2, 8 fields, writable)
+    CARD  Stroke window
+      slider    window_min           mm      [0..2000]          -> ch 0x101 key 1
+      slider    window_max           mm      [0..2000]          -> ch 0x101 key 2
+    CARD  Manual limits
+      slider    user_speed           mm/s    [1..10000]         -> ch 0x101 key 3
+      slider    user_accel           mm/s2   [10..100000]       -> ch 0x101 key 4
+    CARD  Machine-driven limits
+      slider    input_speed          mm/s    [1..10000]         -> ch 0x101 key 5
+      slider    input_accel          mm/s2   [10..100000]       -> ch 0x101 key 6
+      slider    input_jerk           mm/s3   [1000..50000000]   -> ch 0x101 key 7
+    CARD  (ungrouped)
+      readout   max_rail             mm                         read-only
+
+  TAB  User   (category 1, 9 fields, writable)
+    CARD  Pattern
+      toggle    running                      [0..1]             -> ch 0x102 key 1
+      select    pattern                      [0..6]             -> ch 0x102 key 2
+      slider    speed                %       [0..100]           -> ch 0x102 key 3
+      slider    depth                %       [0..100]           -> ch 0x102 key 4
+      slider    stroke               %       [0..100]           -> ch 0x102 key 5
+      slider    sensation                    [0..100]           -> ch 0x102 key 6
+    CARD  Motion behaviour
+      segmented blend_mode                                      -> ch 0x104 key 1
+      segmented stream_speed_mode                               -> ch 0x104 key 3
+      toggle    overshoot_clamp                                 -> ch 0x104 key 4
+
+  TAB  Diagnostics   (category 4, 41 fields, read-only)
+    CARD  Session
+      readout   strokes                                         read-only
+      readout   distance_m           m                          read-only
+      readout   peak_mm_s            mm/s                       read-only
+      readout   energy_wh            Wh                         read-only
+      readout   session_ms           ms                         read-only
+    CARD  Active plan
+      readout   flags                flag                       read-only
+      readout   style                                           read-only
+      readout   start_norm           norm                       read-only
+      readout   end_norm             norm                       read-only
+      readout   cur_norm             norm                       read-only
+      readout   cur_vel              norm/s                     read-only
+      readout   duration_us          us                         read-only
+      readout   elapsed_us           us                         read-only
+    CARD  Power
+      readout   bus_mV               V                          read-only
+      readout   peak_mA              A                          read-only
+      readout   i_bus_mA             A                          read-only
+      readout   die_c10              C                          read-only
+    CARD  Planner
+      readout   plans                                           read-only
+      readout   failures                                        read-only
+      readout   anomalies                                       read-only
+      readout   mode                                            read-only
+      readout   plan_kind                                       read-only
+      readout   reset_gen                                       read-only
+    CARD  Anomalies
+      readout   anom_none                                       read-only
+      readout   anom_plan_failed                                read-only
+      readout   anom_settle                                     read-only
+      readout   anom_endvel_clamped                             read-only
+      readout   anom_deadline_stretched                            read-only
+      readout   anom_waveform_fallback                            read-only
+      readout   anom_waveform_scaled                            read-only
+      readout   anom_waveform_centred                            read-only
+      readout   anom_handoff_bounded                            read-only
+      readout   anom_waveform_smoothed                            read-only
+    CARD  Plan time
+      readout   plan_us_last         us                         read-only
+      readout   plan_us_max          us                         read-only
+      readout   plan_us_avg          us                         read-only
+    CARD  Stream ingress
+      readout   sync_bundles                                    read-only
+      readout   sync_samples                                    read-only
+      readout   sync_enqueued                                   read-only
+      readout   sync_dropped                                    read-only
+      readout   sync_seg_bundles                                read-only
+
+  TAB  Tuning   (category 3, 20 fields, writable)
+    CARD  Ceiling overrides
+      slider    jmax_ovr             1/s3    [0..2000000]       -> ch 0x105 key 1
+      slider    vmax_ovr             1/s     [0..20]            -> ch 0x105 key 2
+      slider    amax_ovr             1/s2    [0..500]           -> ch 0x105 key 3
+    CARD  Centring
+      toggle    centring                                        -> ch 0x105 key 4
+      slider    centring_gain                [0..1]             -> ch 0x105 key 5
+    CARD  Sample streams
+      toggle    chase_ff                                        -> ch 0x105 key 6
+      toggle    chase_accel_ff                                  -> ch 0x105 key 7
+      slider    chase_gain                   [0..1.5]           -> ch 0x105 key 8
+      slider    chase_lookahead              [0..8]             -> ch 0x105 key 9
+      slider    chase_dense_ms       ms      [10..500]          -> ch 0x105 key 10
+      toggle    chase_aim_extrap                                -> ch 0x105 key 11
+      slider    handoff_k                    [0..8]             -> ch 0x105 key 12
+    CARD  Curve
+      segmented curve_policy                                    -> ch 0x105 key 13
+    CARD  Infeasible moves
+      select    infeasible_policy                               -> ch 0x105 key 14
+      slider    infeasible_margin            [0.5..1]           -> ch 0x105 key 15
+      slider    smooth_budget                [0..1]             -> ch 0x105 key 16
+      slider    amplitude_budget             [0..1]             -> ch 0x105 key 17
+      slider    blend_steps                  [1..10]            -> ch 0x105 key 18
+      slider    reshape_steps                [0..8]             -> ch 0x105 key 19
+    CARD  Settling
+      slider    settle_grace_ms      ms      [0..200]           -> ch 0x105 key 20
+
+=== ACTIONS (RFC-019 action.* roles) ===
+  none — this machine exposes no discoverable verbs
+
+=== HERO CLAIMS (bespoke widgets, bound by role) ===
+  rail      claims 4 fields: min=window_min max=window_max pos=pos_10um vel=speed
+  pattern   DECLINED — required roles absent on this machine
+  limits    claims 5 fields: userSpeed=user_speed userAccel=user_accel inputSpeed=input_speed inputAccel=input_accel inputJerk=input_jerk
+
+=== WARNINGS ===
+  ! channel motion-anomaly carries a category but produced no fields
+
+=== UNCATEGORIZED STATE CHANNELS (no settings tab; telemetry only) ===
+  0x0003 safety
+  0x0004 control-owner
+  0x0006 hub-status
+  0x000a pending-pairing
+  0x000d paired-devices-roster
+  0x0080 motion
+  0x0084 motion-input
+  0x0085 motion-segment

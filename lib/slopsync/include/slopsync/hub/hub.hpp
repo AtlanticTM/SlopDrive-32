@@ -599,7 +599,20 @@ private:
     // you straight to this constant, and growing it does nothing. If encode
     // returns 0, check the ORDER first; it is the cheaper hypothesis and it is
     // the one that does not cost a flash cycle to disprove.
-    static constexpr size_t kCatalogScratchBytes = 24576;
+    //
+    // 24576 -> 32768 for the advanced-pattern channel set (SlopSyncCatalog.h
+    // 0x008E..0x0094 + 0x0107, 8 base controls + 6-per-control cyclic
+    // Modifier). MEASURED (a scratch instrumented build, same method as the
+    // M5a/M5b entries): 16073 B before, 23282 B after (94.7% of the OLD
+    // 24576 B cap — past the device-catalog test's 80%-headroom floor, and
+    // exactly the "cliff one channel away" the M5c comment above already
+    // named). This is a RAM knob, not a wire constant — it lives in PSRAM
+    // (the whole SlopSyncHubService is placement-new'd there; see
+    // docs/http-plane-retirement.md and the firmware's own comments on why
+    // that placement is load-bearing), and 8 KB more of an 8 MB budget is
+    // noise. 32768 leaves 26214 B of 80%-headroom against a measured 23282 B
+    // — real margin, not landing exactly on the new line a third time.
+    static constexpr size_t kCatalogScratchBytes = 32768;
 
     // ---- §8.4: per-update() chunk budget for a resumable blob transfer -------
     // NOT a wire number, so no registry entry: a receiver cannot observe this

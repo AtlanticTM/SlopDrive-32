@@ -1495,11 +1495,26 @@ bool WebUI::applyPattern(JsonDocument& doc, JsonDocument& resp) {
         _patternEngine.setApModifier((uint8_t)ctrl, amp, is_, iw, os_, ow, off);
         return ctrl;
     };
+    // Touched-control tracking (SlopSync 0x0107 needs this): the singular
+    // ap_mod echo below only ever reported the LAST touched control, which is
+    // silently wrong for a request that lands modifier edits on more than one
+    // base control at once (a preset apply, or a client batching several
+    // sub-fields from several controls into one wire frame — legal under
+    // kIntentMaxValueFields=8, 6 sub-keys per control). `touched` records
+    // EVERY control this call actually wrote, in ctrl-id order, so the caller
+    // can build a ground-truth echo for all of them, not just the last.
+    bool touched[advpat::BASE_COUNT] = {};
     int ap_mod_ctrl = -1;
-    if (doc["ap_mod"].is<JsonObject>())
+    if (doc["ap_mod"].is<JsonObject>()) {
         ap_mod_ctrl = applyModObject(doc["ap_mod"].as<JsonObject>());
-    if (doc["ap_mods"].is<JsonArray>())
-        for (JsonObject m : doc["ap_mods"].as<JsonArray>()) applyModObject(m);
+        if (ap_mod_ctrl >= 0 && ap_mod_ctrl < advpat::BASE_COUNT) touched[ap_mod_ctrl] = true;
+    }
+    if (doc["ap_mods"].is<JsonArray>()) {
+        for (JsonObject m : doc["ap_mods"].as<JsonArray>()) {
+            int ctrl = applyModObject(m);
+            if (ctrl >= 0 && ctrl < advpat::BASE_COUNT) touched[ctrl] = true;
+        }
+    }
 
     if (doc["running"].is<bool>()) {
         bool want = doc["running"];
@@ -1533,10 +1548,32 @@ bool WebUI::applyPattern(JsonDocument& doc, JsonDocument& resp) {
     apStateToJson(_patternEngine, resp, false);
     if (ap_mod_ctrl >= 0) {
         // Echo the APPLIED (post-clamp) modifier block for the touched control.
+        // Kept for whatever still reads the singular shape; superseded (not
+        // replaced) by the ap_mods array below for the general case.
         const advpat::BaseControl* c = _patternEngine.apSettings().byId((uint8_t)ap_mod_ctrl);
         if (c) {
             JsonObject m = resp["ap_mod"].to<JsonObject>();
             m["ctrl"]      = ap_mod_ctrl;
+            m["amplitude"] = (int)c->modifier.amplitude;
+            m["in_step"]   = (int)c->modifier.in_step;
+            m["in_wait"]   = (int)c->modifier.in_wait;
+            m["out_step"]  = (int)c->modifier.out_step;
+            m["out_wait"]  = (int)c->modifier.out_wait;
+            m["offset"]    = (int)c->modifier.offset;
+        }
+    }
+    // Ground Truth for EVERY control this call actually touched, not just the
+    // last one — see the `touched` comment above. SlopSync's 0x0107 delegate
+    // case reads this array to build its per-key ECHO; nothing else currently
+    // reads it, so adding it costs existing callers nothing.
+    {
+        JsonArray mods = resp["ap_mods"].to<JsonArray>();
+        for (uint8_t id = 0; id < advpat::BASE_COUNT; id++) {
+            if (!touched[id]) continue;
+            const advpat::BaseControl* c = _patternEngine.apSettings().byId(id);
+            if (!c) continue;
+            JsonObject m = mods.add<JsonObject>();
+            m["ctrl"]      = id;
             m["amplitude"] = (int)c->modifier.amplitude;
             m["in_step"]   = (int)c->modifier.in_step;
             m["in_wait"]   = (int)c->modifier.in_wait;

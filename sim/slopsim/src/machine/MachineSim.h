@@ -32,7 +32,7 @@
 #include <string>
 #include <vector>
 
-#include "SlopSyncCatalog.h"
+#include "SlopSimCatalog.h"
 #include "slopmotion/slopmotion.hpp"
 #include "slopsync/hub/hub.hpp"
 
@@ -584,10 +584,18 @@ private:
     // a one-shot property of one commanded move; this is the machine mode that
     // 0x0003's appended `modes` byte publishes and 0x0005's bypass_on/off write.
     bool _bypass_limits = false;
+    // ---- benchrig-only device settings (0x0092 / written via 0x0111) -------
+    // The setting the real device does not have: proves a brand-new
+    // select+str16 pair renders and round-trips with zero client changes.
+    uint8_t _warmup_mode = benchrig::factory::warmup_mode;
+    std::string _device_label = benchrig::factory::device_label;
     uint64_t _homing_done_us = 0;
-    float _win_min_mm = 0.0f, _win_max_mm = 500.0f;      // config_api defaults
-    float _max_rail_mm = 500.0f;
-    float _user_speed = 50.0f, _user_accel = 200.0f;      // gentle set
+    // benchrig's runtime defaults match its OWN catalog factory:: numbers
+    // (SlopSimCatalog.h) — a smaller/cheaper machine than SlopDrive-32, not
+    // the real device's config_api defaults.
+    float _win_min_mm = benchrig::factory::window_min, _win_max_mm = benchrig::factory::window_max;
+    float _max_rail_mm = benchrig::factory::window_max;
+    float _user_speed = benchrig::factory::user_speed, _user_accel = benchrig::factory::user_accel;
     // Stream/pattern (INPUT) set. NOT the device factory defaults (550/8000) —
     // these are the operator's OWN HARDWARE defaults (1000 mm/s, 50000 mm/s²),
     // so a sim trace is comparable with a hardware trace out of the box.
@@ -751,7 +759,12 @@ private:
     float _seg_first_t_s = -1.0f, _seg_last_t_s = -1.0f;
     float _last_arrival_t_s[2] = {-1.0f, -1.0f};  // [0]=0x0084, [1]=0x0085
 
-    bool _cfgDirty = false;  // UI-side config change -> republish 0x0081
+    bool _cfgDirty = false;  // UI-side config change -> republish 0x0091 (limits)
+
+    // 0x0092 device-settings change-detect (mirrors the pattern-state idiom).
+    bool _devSettingsSent = false;
+    uint8_t _lastWarmupMode = 0xFF;
+    std::string _lastDeviceLabel;
 
     // Telemetry cadence bookkeeping (firmware parity).
     uint32_t _lastMotionMs = 0, _lastSlowMs = 0, _lastPatternMs = 0;

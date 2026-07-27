@@ -334,6 +334,12 @@ inline constexpr std::string_view telemetry_uptime = "telemetry.uptime";  // hub
 inline constexpr std::string_view identity_name = "identity.name";  // the writable machine-name setting (RFC-026 tier 2, str16/str32). Its READ-ONLY twin is WELCOME identity.hub_name.
 inline constexpr std::string_view meta_enabled_mask = "meta.enabled_mask";  // RFC-009.4: a bitfield8 field whose bit i gates the i-th setting-annotated field of the SAME layout. On-change, retained, conflated — every client greys from one ground truth. Disabled means GREY, never hide.
 inline constexpr std::string_view meta_reset_gen = "meta.reset_gen";  // RFC-019: increments on every applied reset in this counter group, so ALL subscribers observe the reset, not just the sender who asked for it.
+inline constexpr std::string_view pattern_running = "pattern.running";  // whether the built-in pattern generator is currently driving the machine
+inline constexpr std::string_view pattern_select = "pattern.select";  // which built-in pattern the generator plays; options are the device's pattern names, index-aligned with the wire value
+inline constexpr std::string_view pattern_speed = "pattern.speed";  // pattern generator speed knob, as a percentage of its own range
+inline constexpr std::string_view pattern_depth = "pattern.depth";  // pattern generator depth knob: how far into the stroke window it reaches
+inline constexpr std::string_view pattern_stroke = "pattern.stroke";  // pattern generator stroke-length knob, as a percentage of the available depth
+inline constexpr std::string_view pattern_sensation = "pattern.sensation";  // pattern generator character knob; what it changes depends on the selected pattern
 }  // namespace field_roles
 
 enum class NackCode : uint16_t {

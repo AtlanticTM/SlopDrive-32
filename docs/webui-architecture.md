@@ -181,6 +181,37 @@ BEFORE (catalog 15,915 B — no role annotations)
 The client is not changed between these two runs. Only the firmware's catalog
 annotations are. Evidence in `webui/test/evidence/`.
 
+## 6a. TWO PROTOCOL GAPS THE REBUILD EXPOSED — read this first
+
+Both were found because a component *refused to fabricate data*, which is
+exactly what should happen. Both are small, additive, and worth doing next.
+
+**1. No generic client can command a manual move.**
+`0x0100 move` exists and works, but its `position` field carries no role. The
+`action.*` convention deliberately marks VERBS, and position is a value — so
+tagging it `action.move` would make a generic client draw a button where a
+slider belongs (the roles agent was right to decline). The consequence is that
+the rail's tap-to-move tape is **disabled on every machine**, including ours,
+and the widget says so in plain text instead of hardcoding `0x0100`.
+
+*Fix:* register a value-role for a commanded absolute target — e.g.
+`command.position` — and tag that field. `model/settings.js` already indexes
+non-action schema roles (added tonight) so `byRole` will surface it the moment
+the firmware ships it.
+
+**2. There is no `telemetry.target`, so "commanded" and "lag" are gone.**
+The device publishes `tgt_10um` next to `pos_10um` on the motion channel, but
+only position and velocity have registered roles. The hero numerals therefore
+ship **actual** and **speed** only. Deriving a commanded position from the
+window bounds would have been the exact optimistic-UI lie the doctrine forbids,
+so the rail port dropped both numerals rather than invent them.
+
+*Fix:* register `telemetry.target` and tag that field. Lag is then just
+actual − commanded and both numerals come back for every client, not just ours.
+
+Neither gap is a regression in behaviour — the old page could only do these
+things because it hardcoded this device. Making them portable is the work.
+
 ## 7. Known gaps and honest limits
 
 - **`/uitoken` grants `control`, never `configure`.** So the hosted UI cannot

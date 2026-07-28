@@ -2229,6 +2229,39 @@ longer dirty.
 PascalCase/combined-snake_case British spelling fails lint at commit time —
 this sweep does not need to recur.
 
+## FIRST LIVE BLE GATT SESSION (2026-07-28) — probe gains a BLE transport, fw 2.1.85 unchanged
+
+**The BLE binding's "no client has ever held a session" gap is closed.**
+SlopSync `1993f95` (pushed) adds `--ble [ADDR]` to `tools/slopsync_probe.py`:
+a `BleTransport` duck-typed to the `websocket.WebSocket` subset the probe
+already funnels everything through, bleak 3.0.2 bridged via one background
+asyncio-loop thread. Oversized frames raise `BleFrameTooLarge` (SPEC §13.4:
+no fragmentation, a hard error by design). `--pair` errors cleanly under
+`--ble` (needs several concurrent client identities; one central↔peripheral
+ACL link cannot represent that).
+
+**Live results against fw 2.1.85 @ `20:6E:F1:31:74:6D`** (motor unplugged):
+BLE `--listen-only` and `--no-motion` both 44 passed / 0 failed / 6
+skipped — identical to the WS baseline run first. ATT_MTU negotiated 250
+(payload 247). Full 129-chunk / 24,585 B catalog BLOB pulled over GATT and
+etag-verified against WELCOME. STATE cadence 20.8–22.5 Hz observed on
+motion(0x1100) against the 20 Hz grant. Scan-connect (service-UUID filter)
+and direct-address connect both verified. Clean GOODBYE both transports.
+One client-side bug found and fixed in the same commit: GATT writes reused
+the recv-poll's decayed 0.5 s timeout and spuriously timed out on GOODBYE;
+writes now carry their own fixed 5 s timeout.
+
+**No firmware change:** the transport, framing, and MTU behavior shipped in
+Phase E worked as deployed, first try. `slopsync.pin` bumped `6317b74e...`
+→ `1993f951...` via `git -C ../SlopSync rev-parse HEAD`.
+
+**Still open on the BLE ladder (this session):** operator phone nRF Connect
+raw-AD capture (adv = Flags + 128-bit UUID; scan rsp = name + MSD
+`0xFFFF: 02`); pairing-window bit0 observed ON AIR; both `kSlots` occupied
+concurrently (needs a second central — phone GATT connect + host probe);
+RFC-042 STALE park + reattach over a hard-dropped BLE link with a WS client
+attached (the T13 regression scenario, live).
+
 ## Deferred / planned (homes: docs/REFACTOR-ROADMAP.md, docs/MOTION-TODO.md)
 
 - TCode pass-through channel (post-MFP; parser cross-task race was the

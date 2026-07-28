@@ -1379,6 +1379,25 @@ directly, full gauntlet commands run and exit codes/output observed above]
   v1.0 tag day already carries the Old-column retirement and the
   `(was 0x...)` comment sweep, so the split joins one clean go-public event.
   [ruling recorded 2026-07-28 by main loop; not scheduled work yet]
+  RELEASE HOLD (operator, 2026-07-28): commits stay LOCAL and staged; no
+  repo creation, no push, no sync of any kind until the operator and main
+  loop have the release discussion. Standing agenda for that discussion:
+  (a) NAMING — "slopsync" is NOT collision-free on GitHub: three existing
+  repos (bullno1/slopsync, prestonguillot/slopsync, bullno1/cute-slopsync)
+  [verified 2026-07-28 — GitHub search API]; decide accept-collision
+  (AtlanticTM/slopsync unique as a full name) vs rename-before-public
+  (renaming after is the nightmare version); inspect what those projects
+  are first. (b) LICENSING (operator-ruled shape, files not yet written):
+  slopsync repo = MIT for all code (audit: everything destined there is
+  ours; only third-party touch is IXWebSocket, BSD-3-Clause, fetched at
+  build time, not vendored — MIT-compatible) + CC-BY 4.0 for the spec
+  documents + a NOTICE reserving the SlopSync name/mark for conformant
+  implementations (the protect-the-standard lever lives in the NAME, not
+  in copyleft — zero friction for legitimate implementers). SlopDrive-32's
+  license stays UNCHANGED (fray-d-derived code). (c) repo mechanics:
+  operator creates the empty repo (gh CLI not installed here; its auth is
+  interactive) or installs+auths gh and the main loop does the rest.
+  (d) publish timing vs the v1.0 tag-day bundle.
 
 - **Phase G (operator, 2026-07-28, runs after the live-verify + commits):**
   sonnet fleet updates ALL docs to final post-batch state, and the channel

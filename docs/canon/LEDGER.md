@@ -1277,12 +1277,78 @@ directly, full gauntlet commands run and exit codes/output observed above]
    root tracking is LICENSE/NOTICE/README/THIRD_PARTY_LICENSES + 4 build
    files only; zero PDFs/.diy tracked. The visible root clutter is
    untracked-by-existing-rules local files. Nothing deleted.
-5. **Comment standardization — approved, becomes law:** a comment style
-   standard gets written into DOCTRINE (file-top header block, `// ----`
-   section banners, `//` line style, `/* */` license-only — proposal,
-   veto-able), then a codebase-wide rewrite pass: rambly comments become
-   constraints-or-pointers or die (C-12 retroactive), file sections get
-   headers, one style everywhere. Full gauntlet after.
+5. **Comment standardization — DONE (2026-07-28, close-out session).** DOCTRINE
+   §4's comment style law landed (own commit), then the codebase-wide pass:
+   a comment-law fleet (~130 files, src/include/lib/sim/test, each verified
+   comments-only via stripped-source hash matching) plus this session's
+   mechanical follow-up on top of it. Two law amendments stamped in the same
+   DOCTRINE commit, ratified here as main-loop rulings: banner width settled
+   at column 80 (amended from 76, normalizing to the tree's actual dominant
+   width instead of repadding against it); RFC-nnn/T-nn references inside a
+   banner NAME are POINTERS (allowed), not the numbering C-12 forbids.
+   **This session's additions:** section banners repadded to column 80
+   (855 banners, 105 files — a hand-rolled Python tokenizer threading through
+   `//`, `/* */`, string/char/raw-string literals, and C++14 digit
+   separators, gating every edit on a stripped-code-hash proof; the one
+   file where a banner-shaped line lives inside a raw-string literal,
+   `GraphPage.h`'s embedded HTML/JS page, was correctly left alone — that
+   text is page content, not a C++ comment); ~23 stale `CLAUDE.md §N`
+   pointers (predating the CANON/DOCTRINE/TRAPS split) repointed to
+   DOCTRINE.md §1/2/3/8/9, TRAPS.md T5, or this ledger's Phase E entry, each
+   target verified to exist first — one (a released-but-inert-field remark
+   in `MachineSim.h`) had no separate current home and was reworded inline
+   rather than given a guessed pointer; ~19 `plan.md` references (a
+   gitignored operator-local scratch file, dead for any repo reader)
+   reworded to carry their constraint self-contained, plus one boot-log
+   STRING LITERAL citing the same dead file, fixed as a direct content edit
+   (not claimed as comments-only, since a string literal is compiled data).
+   **TRAPS gained T15** (SlopGlow's `GlowState` priority ordering: a
+   fixed-priority display can mask a lower-priority but time-critical state
+   — recovered from commit `5106d521`, the RFC-027 pairing-window-hidden-
+   behind-Fault incident), **T16** (a stall watchdog sized for "stuck"
+   cannot tell a wedged client from a healthy bulk transfer — the
+   BLOB_CHUNK/`kCtrlStallMs` incident already narrated in
+   `SlopSyncAsyncWsTransport.h`), and **T17** (a flag reused across
+   unrelated concerns silencing a sink at compile time — the
+   `SERIAL_CONTROL_MODE`-gated serial sink incident in `AppLog.cpp`), each
+   with a code-site pointer added (comments-only, hash-proven). Evaluated
+   and left OUT of TRAPS (lean NO, recorded here not as entries): AIM
+   PWM*10/wire-sign stories (their durable home is already
+   `config_api.h`'s own constants + constraint comments, not a narrative);
+   sim-local "used to" bug notes in `MachineSim`/`MachineScreen` (sim-local
+   debugging narration, not a recurring field-trap mechanism).
+   **`lib/SharedProtocol/SharedProtocol.h` — DELETED** (own commit): zero
+   `#include`s anywhere in src/, include/, lib/, sim/, test/, or either C5
+   main (`src/c5_waveshare/main.cpp`, `src/c5_tdongle/main.cpp`); its one
+   historical includer, the `src/s3_main/main.cpp` placeholder stub, was
+   already deleted in the 2026-07-27 dead-code pass; `platformio.ini` never
+   wired it via `lib_deps`/`lib_extra_dirs` (PlatformIO's LDF auto-discovers
+   from `#include`s alone, so it was never actually compiled into any
+   environment despite stale comments claiming otherwise). `README.md` and
+   `platformio.ini`'s stale "all three environments share it" prose fixed
+   in the same commit (C-9). Both C5 envs (`c5_waveshare`, `c5_tdongle`)
+   rebuilt SUCCESS after the deletion as the before/after proof.
+   **Gauntlet (all green, every command run directly this session):**
+   native suite 31/31 exit 0 (TRAPS T10); `pio run -e sd32-ota` SUCCESS —
+   RAM 78,948 B (byte-identical to the pre-session baseline), flash
+   1,870,292 B vs a freshly-rebuilt pre-session HEAD baseline of
+   1,870,276 B (+16 B, fully attributable to the one deliberate log-string
+   edit above; comments cost nothing, confirmed by rebuilding at HEAD via a
+   stash round-trip); `c5_waveshare`/`c5_tdongle` SUCCESS; `sim/slopsim` +
+   `sim/slopbench` (CMake+Ninja) clean builds (only pre-existing, unrelated
+   `slopmotion.hpp`/vendored-SHA256 warnings); `node webui/test/
+   slopsync-sim.mjs` + `slopsync-wire.test.mjs` ALL PASS against a fresh
+   `slopsim` instance; `python sim/slopbench/tools/smoke_test.py` 12/12;
+   `npm run check` (webui/) ALL PASS; `python tools/canon_lint.py` 0
+   findings; `python tools/catalog_lint.py` OK (32 entries); all six
+   generators `--check` green (`gen_registry_header.py`,
+   `gen_channel_map.py`, `gen_channel_grid.py`, `gen_docs_tables.py`,
+   `gen_spec_pages.py`, `gen_channel_grid_page.py`); `dotnet build` clean
+   (0/0) for all three `clients/mfp-slopsync` projects (SlopSync,
+   LiveWireTest, WireSelfTest) — `WireSelfTest` NOT run against the live
+   device (build-only, per scope). [verified 2026-07-28 — every command
+   above run directly this session, exit codes / PASS-ALL / 0-findings
+   observed firsthand]
 6. **`minimal` sim profile floor — PENDING, operator draft recorded:**
    "home, motion, move, window controls and pattern Gen are the bare
    minimum." Decide + implement later; current spec-core+motion/move/home
@@ -1292,6 +1358,27 @@ directly, full gauntlet commands run and exit codes/output observed above]
    SlopBench → (1) coalescing → (5) comment pass. Deploys serialize.
 
 ## Named work items (operator-approved 2026-07-27)
+
+- **SlopSync repo split (operator direction ruling, 2026-07-28; execute
+  at/around the v1.0 tag):** SlopSync moves to its OWN repo as the
+  first-class source of truth — the spec suite (SPEC.md, RENDERING.md,
+  registry/registry.yaml + codegen, RFC-QUEUE.md, CHANNEL-MAP.md +
+  generators), lib/slopsync (C++ core), the JS reference client, SlopBench
+  (the machine-agnostic reference hub), and the verification tools
+  (slopsync_probe, slopscope, slopsoak). SlopDrive-32 stays the machine repo
+  and CONSUMES SlopSync via a pinned version; sim/slopsim stays with the
+  machine (1:1 device twin). Operator constraints: everything visible in one
+  VS Code view, and commits stay SIMPLE — main-loop recommended shape
+  (veto-able): two plain side-by-side repos + a multi-root .code-workspace;
+  explicitly NO git submodules (pointer-bump commit hell) and NO subtree
+  merges (arcane push/pull); a cross-repo change is two ordinary commits,
+  spec repo first, exactly the order the existing spec-gap ritual already
+  enforces. Known tension to solve deliberately at migration time: the
+  registry<->catalog lockstep `--check` generators assume one tree today;
+  post-split they verify against the PINNED slopsync copy. Timing rationale:
+  v1.0 tag day already carries the Old-column retirement and the
+  `(was 0x...)` comment sweep, so the split joins one clean go-public event.
+  [ruling recorded 2026-07-28 by main loop; not scheduled work yet]
 
 - **Phase G (operator, 2026-07-28, runs after the live-verify + commits):**
   sonnet fleet updates ALL docs to final post-batch state, and the channel

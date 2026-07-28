@@ -151,3 +151,75 @@ Found by an operator phone scan with nRF Connect (which shows raw AD
 structures, not an OS-filtered summary) — the earlier host-side `bleak` scan
 had already shown empty `manufacturer_data` but that was wrongly attributed
 to Windows/WinRT company-id filtering until the phone scan ruled it out.
+
+## T15 — Fixed-priority status displays can mask a lower-priority, time-critical state
+**Rule:** when a single "highest active state wins" display picks ONE thing
+to show, rank by TIME-SENSITIVITY (what is gone if missed right now), not by
+severity. A persistent, rediscoverable condition may correctly rank BELOW a
+narrow window a human must catch immediately.
+**Mechanism:** SlopGlow's `GlowState` shows exactly one state, the
+highest-priority ACTIVE one. `Fault` originally outranked `Pairing`, and
+`Fault` fires whenever the machine is simply unhomed
+(`SlopGlowBoard.cpp`: `!state.homed && !state.homing_in_progress`) — the
+ordinary state of a fresh boot, not a hardware failure. RFC-027's
+push-to-pair window (opened by triple power-cycling a factory-fresh,
+therefore UNHOMED, device) landed on exactly the device that was ALSO
+showing Fault, and Fault won: red breathing instead of the pairing
+invitation, hiding a 120 s, gone-if-missed ceremony behind a condition that
+is still true — and still in `/api/log` — the next time anyone looks.
+**Fix:** `GlowState` reordered so Pairing outranks Warning/Fault (still
+below Ota, an active flash, and Estop, which are never allowed to be
+masked). See `lib/slopglow/include/slopglow/slopglow_core.hpp`'s
+`GlowState` ordering comment.
+Bit us: the RFC-027 pairing ceremony reading as a plain Fault LED on the one
+class of device (factory-fresh, unhomed) most likely to be running it.
+
+## T16 — A stall watchdog sized for "stuck" cannot tell it apart from "big"
+**Rule:** before arming a one-size stall/timeout watchdog on a shared queue,
+classify the traffic crossing it. A healthy bulk transfer that legitimately
+takes many ticks to drain looks IDENTICAL, from the queue's own point of
+view, to a client that stopped reading and will never come back.
+**Mechanism:** `SlopSyncAsyncWsTransport`'s control-stall timer
+(`kCtrlStallMs` = 2000 ms) exists to catch a client stranded waiting on a
+reply that will never come — correct for a genuinely wedged peer. Before
+BLOB_CHUNK (0x1B) got its own backpressure class, it was classified as
+ordinary control traffic: a 129-chunk catalog transfer pumping into a
+32-deep send queue filled it well inside 2 seconds, and the SAME timer built
+for a wedged client tore the session down mid-transfer — on a perfectly
+healthy connection whose only sin was draining a big, honest payload no
+faster than the network allowed. See `include/comms/
+SlopSyncAsyncWsTransport.h`'s backpressure-classification comment.
+**Fix:** BLOB_CHUNK got its own class, paced against the registry's OWN
+advertised sender budget (`limits::blob_chunks_in_flight`) via the same
+queue-depth check the data class already used, and made to hold-and-retry —
+never arms the control stall timer, never NACKs or tears down on its own
+(`hub_impl.hpp`'s `pumpBlobTransfer()` already retries the same un-sent
+chunk next tick).
+Bit us: a growing catalog BLOB transfer (57 chunks, later 129 as the catalog
+grew) closing every session that tried to fetch it — misdiagnosed at first
+as heap exhaustion (it happened alongside a real heap-pressure bug, T2)
+before the actual mechanism — traffic classification, not memory — was
+found.
+
+## T17 — A flag reused across unrelated concerns can silence a sink for good
+**Rule:** gate a sink's existence at runtime, not compile-time, and never let
+a flag whose stated job is something else (transport selection, a feature
+toggle, ...) also decide whether a diagnostic sink is registered at all.
+**Mechanism:** the serial log sink was once wrapped in `#if
+!SERIAL_CONTROL_MODE` inside `applogBegin()` — but `SERIAL_CONTROL_MODE`'s
+actual job is picking the factory-default transport (serial vs WiFi), not
+gating diagnostics. At the macro's normal value (1), that `#if` never
+registered the serial sink at all: not throttled, not floored, ABSENT, for
+the entire life of the build, regardless of anything happening at runtime.
+Every `SLOG*` call still went out fine over the web ring, so nothing looked
+broken from the firmware's own side; only a human watching USB serial and
+expecting log lines would notice, by which point the boot banner and any
+early crash trace were already gone.
+**Fix:** the `#if` is gone. Serial-sink visibility is now two independent
+RUNTIME floors composed in `applySerialFloor()` (`src/system/AppLog.cpp`):
+muted while serial is the live dedicated TCode transport, demoted to Warn+
+once `/api/log` has been served at least once (a human is watching the web
+log by then). A sink's existence is never compile-time-conditional on a
+flag that means something else.
+Bit us: USB serial going permanently quiet with no runtime symptom to chase,
+traced back to a transport-selection macro moonlighting as a logging gate.

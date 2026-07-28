@@ -1185,8 +1185,11 @@ pages (`reference/channel-catalog.md`, `channel-grid.md`, `dictionary.md`,
 normative IEEE voice, not the STE "register/channel reference" pages Rider 4
 names; (5) rider text intact verbatim, gold-standard bar applied (house-voice
 de-AI pass, mermaid diagram upgrades, ~90% link-the-reference rule, webui-
-matched aesthetic). DEMO-CANDIDATE markers: **35** total
-(`grep -rc '> DEMO-CANDIDATE:' docs/ docs-site/docs/`, summed).
+matched aesthetic). DEMO-CANDIDATE markers: **35** total, found by grepping
+docs/ + docs-site/docs/ for the greppable callout string Rider 5(f) defines
+(one hit above is that definition itself, in this ledger's own Named-work-
+items section — excluded from the 35; it names the format, it is not an
+instance of it).
 
 **Notable truth fixes landed in this pass** (spot-verified directly against
 the uncommitted `git diff`, not taken on faith):

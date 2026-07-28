@@ -11,10 +11,11 @@ Instead of TCode-over-serial/UDP, the plugin feeds the machine one of two ways,
 selected by the **Mode** setting:
 
 - **Samples** (default) — reads the axis position at a fixed rate and pushes it onto
-  the `motion-input` stream channel (`0x0084`): target position *and* a handoff
-  velocity, so the machine plans smooth motion between the dense samples.
+  the `motion-input` stream channel (`0x2100`, RFC-047 grid; was `0x0084`): target
+  position *and* a handoff velocity, so the machine plans smooth motion between the
+  dense samples.
 - **Segments** — reads the funscript's own keyframes and sends **one timed command
-  per action** on the `motion-segment` channel (`0x0085`): `{target, duration,
+  per action** on the `motion-segment` channel (`0x2101`; was `0x0085`): `{target, duration,
   end_velocity}`. That is ~2–4 packets/second instead of 50, and the machine renders
   the sender's *native* stroke waveform (a C² quintic over the commanded duration)
   rather than reconstructing it from point samples.
@@ -65,7 +66,7 @@ Laid out by what you actually touch mid-session:
     machine refused can never sit in the box pretending to be real. Apply sends the
     config INTENT and the status line reports the **applied, post-clamp** value the
     device echoed back — or the NACK that refused it, correlated by `intent_seq`.
-  * Both cards grey out entirely on a hub that does not advertise the corresponding
+  * Both cards gray out entirely on a hub that does not advertise the corresponding
     field roles, and the limits read "not advertised" rather than guessing.
 * **Setup & discovery** (collapsed) — Address/Port/Discover, the discovered-device list,
   Axis/Rate/Mode/PIN, and the adopted catalog's channel count, role count and etag.
@@ -83,7 +84,7 @@ you will see bundles climbing but no motion. Home it from the machine's own WebU
 | **Port** | `82` | SlopSync WebSocket port. |
 | **Rate (Hz)** | `50` | How often the axis is sampled and streamed. Clamped 10–250; the machine may grant a *lower* rate (its channel cap is 333 Hz) and the plugin streams at the **granted** rate, not the wish. |
 | **Axis** | `L0` | Which MFP `DeviceAxis` to stream (`L0`, `L1`, `R0`, …). |
-| **Mode** | `Samples` | `Samples` = 50 Hz dense points on `0x0084`. `Segments` = one timed command per funscript action on `0x0085`. Locked while connected. See *Samples vs Segments* below. |
+| **Mode** | `Samples` | `Samples` = 50 Hz dense points on `0x2100` (was `0x0084`). `Segments` = one timed command per funscript action on `0x2101` (was `0x0085`). Locked while connected. See *Samples vs Segments* below. |
 | **PIN** | *(empty)* | Pairing PIN. Sent in HELLO's token field. The firmware currently accepts any client (LAN-trust), so this is forward-compatibility plumbing — leave it empty unless the device asks for it. |
 
 ### Samples vs Segments — which to use
@@ -101,7 +102,7 @@ reconstruction). Each segment carries an **end velocity** for slope continuity b
 strokes — a reversal (peak/trough) ends at rest, a straight-through keyframe hands off
 its outgoing velocity, and a gap or script-end leaves the end velocity unconstrained.
 
-Requires a device that advertises the `motion-segment` channel (`0x0085`); if the hub
+Requires a device that advertises the `motion-segment` channel (`0x2101`; was `0x0085`); if the hub
 does not grant it, connecting in Segments mode errors instead of silently degrading.
 
 **Caveat — Segments sends the *authored* script, not the transformed axis output.**
@@ -123,7 +124,7 @@ All of this mirrors `tools/slopsync_probe.py` and `docs/slopsync/SPEC.md`.
 
 1. **Connect** — WebSocket to `ws://addr:port/`, subprotocol `slopsync.v1`, binary frames.
 2. **HELLO → WELCOME** — identifies (stable 8-byte instance id), wishes to *publish*
-   on channel `0x0084` at the configured rate, **and (v1.0) carries its `subscriptions`
+   on channel `0x2100` (was `0x0084`) at the configured rate, **and (v1.0) carries its `subscriptions`
    wish list and any cached `catalog_etag`** — §6.2 exists so a simple client can finish
    setup in one round trip. The hub replies WELCOME with a session id and a
    `granted_publishes` entry (CBOR key 36) confirming the applied publish rate. No
@@ -150,15 +151,17 @@ All of this mirrors `tools/slopsync_probe.py` and `docs/slopsync/SPEC.md`.
    timestamps are **hub time**, so the plugin converts local µs → hub µs using this offset,
    and re-syncs every ~10 s (drift between syncs is taken from a monotonic `Stopwatch`).
 5a. **Samples STREAM loop** — at the granted rate: reads the axis (0..1), derives velocity
-   `(x − x_prev)/dt` with a light EMA, and sends a single-sample bundle on `0x0084`. The
+   `(x − x_prev)/dt` with a light EMA, and sends a single-sample bundle on `0x2100` (was
+   `0x0084`). The
    4-byte sample is `{target_norm: u16 = clamp01(pos)×10000, vel_norm: i16 = clamp(vel,±32.767)×1000}`,
    little-endian, stamped with the current hub time. It keeps streaming even when the value
    is static — a constant target is a valid *hold*, and the device deadman (§11.3) handles a
    truly vanished source. (50 Hz traffic is its own deadman keepalive.)
 
-5b. **Segments engine** — HELLO wishes *both* `0x0084` (fallback) and `0x0085` @ 10 Hz. An
+5b. **Segments engine** — HELLO wishes *both* `0x2100` (fallback; was `0x0084`) and `0x2101`
+   (was `0x0085`) @ 10 Hz. An
    event-driven cursor walks the funscript keyframes as MFP reports media position; crossing
-   into a new inter-keyframe span emits **one** 6-byte segment on `0x0085`:
+   into a new inter-keyframe span emits **one** 6-byte segment on `0x2101`:
    `{target_norm: u16 ×10000, duration_ms: u16, end_vel_norm: i16 ×1000}`. `duration_ms` is
    the remaining wall-clock time from the machine's actual position to the next keyframe
    (÷ media speed); `end_vel_norm` is the outgoing-slope handoff (INT16_MIN sentinel = "no end
@@ -230,8 +233,9 @@ processing). The limits are shown to the operator. Full stop.
   generation u16 | chunk_index u16 | chunk_count u16 | total_bytes u32`. The reserved
   byte is ignored, never validated.
 - **Channels:** safety `0x0003` (9 B since the `modes` byte was appended), motion `0x0080`,
-  motion-input `0x0084` (STREAM c2h, ≤333 Hz), motion-segment `0x0085` (STREAM c2h,
-  ≤50 Hz, 6-byte `{target u16, duration_ms u16, end_vel i16}`), home `0x0103` (INTENT,
+  motion-input `0x2100` (STREAM·motion·00, STREAM c2h, ≤333 Hz; was `0x0084` pre-RFC-047),
+  motion-segment `0x2101` (STREAM·motion·01, STREAM c2h,
+  ≤50 Hz, 6-byte `{target u16, duration_ms u16, end_vel i16}`; was `0x0085`), home `0x0103` (INTENT,
   op 1 = home). The **config** channel and the **limits/window** STATE channel are NOT
   listed here on purpose — they are resolved from catalog field roles at runtime.
 - **CBOR profile:** deterministic (§5.3) — definite lengths, shortest-form ints,
@@ -290,7 +294,7 @@ on `sim`; the Home intent is never sent by this harness at all.
 source-ownership-release regression check, and it exists because a real field bug hid for
 months behind deploys that rebooted between runs (fw ≥ 2.1.44).
 
-Pass `--segments` to exercise the `0x0085` path instead: it wishes both channels,
+Pass `--segments` to exercise the `0x2101` path instead (was `0x0085`): it wishes both channels,
 requires the segment grant, and sends 5 timed segments over ~5 s (alternating target
 0.3/0.7, duration 900 ms) with the 400 ms PING keepalive, then diffs the same ingress
 counters. Same safety gate applies.
@@ -299,7 +303,7 @@ counters. Same safety gate applies.
 
 ## Troubleshooting
 
-- **"no publish grant"** — the hub did not grant channel `0x0084`. Confirm the firmware
+- **"no publish grant"** — the hub did not grant channel `0x2100`. Confirm the firmware
   advertises `features.slopsync` and the motion-input channel (`curl http://<ip>/api/capabilities`).
 - **Bundles climb but nothing moves** — the machine is not homed, or another source owns
   motion. Home it; check the machine's own UI for the active control source.

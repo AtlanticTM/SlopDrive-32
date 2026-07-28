@@ -153,7 +153,7 @@
 
                  GROUND-TRUTH DOCTRINE: the "Device" line is the machine's own
                  value (decoded STATE / post-clamp ECHO). The two boxes are a
-                 DRAFT and are labelled as such — they are re-seeded from the
+                 DRAFT and are labeled as such — they are re-seeded from the
                  device after every echo, so a refused value can never sit in
                  the box pretending to be real.
                  ============================================================ -->
@@ -179,7 +179,7 @@
 
             <!-- Stroke window mini-editor. Channel + keys come from the
                  catalog's window.min / window.max field ROLES, not from a
-                 hardcoded channel number. The card greys out entirely on a hub
+                 hardcoded channel number. The card grays out entirely on a hub
                  that does not advertise a writable window. -->
             <Border BorderBrush="{DynamicResource MaterialDesignDivider}" BorderThickness="1"
                     CornerRadius="4" Padding="10">
@@ -346,7 +346,7 @@
                                Visibility="{Binding CatalogInfo, Converter={StaticResource NullableToVisibilityConverter}}"/>
 
                     <TextBlock TextWrapping="Wrap" Opacity="0.5" FontSize="10" Margin="0,6,0,0"
-                               Text="Samples mode streams the axis on channel 0x0084 (motion-input); Segments mode sends one timed command per funscript action on 0x0085 (motion-segment). The machine must be homed before motion runs, and it clamps everything — every value shown above is the device's own, post-clamp."/>
+                               Text="Samples mode streams the axis on channel 0x2100 (motion-input); Segments mode sends one timed command per funscript action on 0x2101 (motion-segment). The machine must be homed before motion runs, and it clamps everything — every value shown above is the device's own, post-clamp."/>
                 </StackPanel>
             </Expander>
 

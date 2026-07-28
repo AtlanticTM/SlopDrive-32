@@ -22,7 +22,8 @@
 // regression guard, so a hub or client that still speaks the old shape can be
 // checked against it.
 //
-// v0.4.0 MOVED THE SEGMENTS GOLDEN AGAIN (RFC-013 + RFC-030). The 0x0085 wish
+// v0.4.0 MOVED THE SEGMENTS GOLDEN AGAIN (RFC-013 + RFC-030). The 0x0085 (now
+// 0x2101, RFC-047) wish
 // now declares its honest rate (5 Hz, was an over-declared 30) plus `burst`
 // (42) and `curve_family` (45) in the wish-entry map — keys ascending
 // 12<15<42<45. The pre-RFC-013 2-key entry shape is KEPT as a regression
@@ -77,13 +78,13 @@ internal static class Program
         var etag = new byte[] { 0x21, 0xCB, 0x26, 0xC9, 0x4F, 0xB3, 0x88, 0xB5 };
 
         // ---- HELLO: publish-only shape (pre-M5d) — regression guard ---------
-        var hello = Wire.BuildHello("probe", "slopsync_probe.py", inst, 0x0084, 100.0);
+        var hello = Wire.BuildHello("probe", "slopsync_probe.py", inst, 0x2100, 100.0);
         Check("HELLO payload (publish-only, unchanged)", hello,
-            "A50101026570726F62650371736C6F7073796E635F70726F62652E7079044800010203040506070B81A20CFA42C800000F1884");
+            "A50101026570726F62650371736C6F7073796E635F70726F62652E7079044800010203040506070B81A20CFA42C800000F192100");
 
         var helloFrame = Wire.EncodeFrame(0x00, 0, hello, 0);
         Check("HELLO frame (publish-only)", helloFrame,
-            "0000000000003300A50101026570726F62650371736C6F7073796E635F70726F62652E7079044800010203040506070B81A20CFA42C800000F1884");
+            "0000000000003400A50101026570726F62650371736C6F7073796E635F70726F62652E7079044800010203040506070B81A20CFA42C800000F192100");
 
         // ---- HELLO: the plugin's ACTUAL M5d shape ---------------------------
         // subscriptions(10) rides in HELLO now: safety(0x0003) on-change
@@ -91,44 +92,45 @@ internal static class Program
         // Key order 1<2<3<4<10<11; wish-entry order 12<13<15 and 12<15.
         var subs = new (ushort, double, byte)[] { (0x0003, 0.0, 3), (0x0080, 20.0, 2) };
         var helloMfp = Wire.BuildHello("mfp", "MultiFunPlayer SlopSync", inst,
-            new (ushort, double)[] { (0x0084, 50.0) }, null, subs);
+            new (ushort, double)[] { (0x2100, 50.0) }, null, subs);
         Check("HELLO payload (mfp Samples: subs + 1 publish)", helloMfp,
-            "A6010102636D667003774D756C746946756E506C6179657220536C6F7053796E63044800010203040506070A82A30CFA000000000D030F03A30CFA41A000000D020F18800B81A20CFA424800000F1884");
+            "A6010102636D667003774D756C746946756E506C6179657220536C6F7053796E63044800010203040506070A82A30CFA000000000D030F03A30CFA41A000000D020F18800B81A20CFA424800000F192100");
 
         Check("HELLO frame (mfp Samples)", Wire.EncodeFrame(0x00, 0, helloMfp, 0),
-            "0000000000005000A6010102636D667003774D756C746946756E506C6179657220536C6F7053796E63044800010203040506070A82A30CFA000000000D030F03A30CFA41A000000D020F18800B81A20CFA424800000F1884");
+            "0000000000005100A6010102636D667003774D756C746946756E506C6179657220536C6F7053796E63044800010203040506070A82A30CFA000000000D030F03A30CFA41A000000D020F18800B81A20CFA424800000F192100");
 
         // Rate-only wish entries (pre-RFC-013 2-key {12,15} shape) — kept as a
         // regression guard: the rate-only BuildHello overload must keep
         // producing exactly these bytes.
         var helloSeg = Wire.BuildHello("mfp", "MultiFunPlayer SlopSync", inst,
-            new (ushort, double)[] { (0x0084, 50.0), (0x0085, 30.0) }, null, subs);
+            new (ushort, double)[] { (0x2100, 50.0), (0x2101, 30.0) }, null, subs);
         Check("HELLO payload (rate-only wish entries, pre-RFC-013 regression guard)", helloSeg,
-            "A6010102636D667003774D756C746946756E506C6179657220536C6F7053796E63044800010203040506070A82A30CFA000000000D030F03A30CFA41A000000D020F18800B82A20CFA424800000F1884A20CFA41F000000F1885");
+            "A6010102636D667003774D756C746946756E506C6179657220536C6F7053796E63044800010203040506070A82A30CFA000000000D030F03A30CFA41A000000D020F18800B82A20CFA424800000F192100A20CFA41F000000F192101");
 
         // ---- HELLO: the plugin's ACTUAL v0.4.0 Segments shape ----------------
-        // RFC-013 honest wish + RFC-030 curve declaration on the 0x0085 entry:
-        // {12:rate 5.0, 15:0x0085, 42:burst 25.0, 45:curve_family 1} — keys
-        // ascending 12<15<42<45; the 0x0084 fallback entry stays the 2-key map
-        // (burst<=0 and family 0 are OMITTED, never encoded).
+        // RFC-013 honest wish + RFC-030 curve declaration on the 0x2101 entry
+        // (RFC-047 grid; was 0x0085):
+        // {12:rate 5.0, 15:0x2101, 42:burst 25.0, 45:curve_family 1} — keys
+        // ascending 12<15<42<45; the 0x2100 fallback entry (was 0x0084) stays
+        // the 2-key map (burst<=0 and family 0 are OMITTED, never encoded).
         var helloSegV4 = Wire.BuildHello("mfp", "MultiFunPlayer SlopSync", inst,
-            new (ushort, double, double, byte)[] { (0x0084, 50.0, 0.0, 0), (0x0085, 5.0, 25.0, 1) },
+            new (ushort, double, double, byte)[] { (0x2100, 50.0, 0.0, 0), (0x2101, 5.0, 25.0, 1) },
             null, subs);
         Check("HELLO payload (mfp Segments v0.4.0: honest rate + burst + curve_family)", helloSegV4,
-            "A6010102636D667003774D756C746946756E506C6179657220536C6F7053796E63044800010203040506070A82A30CFA000000000D030F03A30CFA41A000000D020F18800B82A20CFA424800000F1884A40CFA40A000000F1885182AFA41C80000182D01");
+            "A6010102636D667003774D756C746946756E506C6179657220536C6F7053796E63044800010203040506070A82A30CFA000000000D030F03A30CFA41A000000D020F18800B82A20CFA424800000F192100A40CFA40A000000F192101182AFA41C80000182D01");
 
         // ---- HELLO: RFC-015 cached-etag fast path ---------------------------
         // catalog_etag(8) sits between instance_id(4) and subscriptions(10).
         var helloEtag = Wire.BuildHello("mfp", "MultiFunPlayer SlopSync", inst,
-            new (ushort, double)[] { (0x0084, 50.0) }, null, subs, etag);
+            new (ushort, double)[] { (0x2100, 50.0) }, null, subs, etag);
         Check("HELLO payload (cached etag + subs + publish)", helloEtag,
-            "A7010102636D667003774D756C746946756E506C6179657220536C6F7053796E6304480001020304050607084821CB26C94FB388B50A82A30CFA000000000D030F03A30CFA41A000000D020F18800B81A20CFA424800000F1884");
+            "A7010102636D667003774D756C746946756E506C6179657220536C6F7053796E6304480001020304050607084821CB26C94FB388B50A82A30CFA000000000D030F03A30CFA41A000000D020F18800B81A20CFA424800000F192100");
 
         // Every optional at once: token(5) then etag(8) then subs(10).
         var helloAll = Wire.BuildHello("mfp", "MultiFunPlayer SlopSync", inst,
-            new (ushort, double)[] { (0x0084, 50.0) }, Encoding.UTF8.GetBytes("1234"), subs, etag);
+            new (ushort, double)[] { (0x2100, 50.0) }, Encoding.UTF8.GetBytes("1234"), subs, etag);
         Check("HELLO payload (token + etag + subs + publish)", helloAll,
-            "A8010102636D667003774D756C746946756E506C6179657220536C6F7053796E6304480001020304050607054431323334084821CB26C94FB388B50A82A30CFA000000000D030F03A30CFA41A000000D020F18800B81A20CFA424800000F1884");
+            "A8010102636D667003774D756C746946756E506C6179657220536C6F7053796E6304480001020304050607054431323334084821CB26C94FB388B50A82A30CFA000000000D030F03A30CFA41A000000D020F18800B81A20CFA424800000F192100");
 
         var clockReq = Wire.BuildClockRequest(0x11223344);
         Check("CLOCK request", clockReq, "44332211");
@@ -136,8 +138,8 @@ internal static class Program
         var stream = Wire.BuildStreamBundle(0x00010203, new (ushort, double, double)[] { (0, 0.5, 1.7592918) });
         Check("STREAM bundle payload", stream, "03020100010000008813DF06");
 
-        var streamFrame = Wire.EncodeFrame(0x0C, 0x0084, stream, 0);
-        Check("STREAM frame", streamFrame, "0C00840000000C0003020100010000008813DF06");
+        var streamFrame = Wire.EncodeFrame(0x0C, 0x2100, stream, 0);
+        Check("STREAM frame", streamFrame, "0C00002100000C0003020100010000008813DF06");
 
         var sub = Wire.BuildSubscribe(new (ushort, double, byte)[] { (0x0003, 0.0, 3), (0x0080, 20.0, 2) });
         Check("SUBSCRIBE payload", sub, "A10A82A30CFA000000000D030F03A30CFA41A000000D020F1880");
@@ -154,9 +156,9 @@ internal static class Program
         var goodbye = Wire.BuildGoodbye(Wire.NackNormalClosure);
         Check("GOODBYE payload (NackCode NORMAL_CLOSURE)", goodbye, "A110190107");
 
-        // ---- Segments mode (0x0085) golden bytes ----------------------------
+        // ---- Segments mode (0x2101, was 0x0085) golden bytes ----------------
         // Hand-derived from the locked wire contract, same STREAM framing as
-        // 0x0084. t_base 0x00010203, single sample at off 0:
+        // 0x2100 (was 0x0084). t_base 0x00010203, single sample at off 0:
         //   [t_base:03 02 01 00][n:01][rsv:00][off:00 00]
         //   [target 0.5 → 5000=0x1388 → 88 13]
         //   [duration 900 → 0x0384 → 84 03]
@@ -165,9 +167,9 @@ internal static class Program
             new (ushort, double, int, double, bool)[] { (0, 0.5, 900, 0.0, true) });
         Check("SEGMENT bundle payload (sentinel end_vel)", seg, "0302010001000000881384030080");
 
-        var segFrame = Wire.EncodeFrame(0x0C, 0x0085, seg, 0);
-        Check("SEGMENT frame (channel 0x0085, len 14)", segFrame,
-            "0C00850000000E000302010001000000881384030080");
+        var segFrame = Wire.EncodeFrame(0x0C, 0x2101, seg, 0);
+        Check("SEGMENT frame (channel 0x2101, len 14)", segFrame,
+            "0C00012100000E000302010001000000881384030080");
 
         // Real end_vel path: target 0.25 → 2500=0x09C4, duration 500=0x01F4,
         // end_vel 1.5 norm/s → 1500=0x05DC (LE DC 05) — proves it never collides
@@ -185,7 +187,7 @@ internal static class Program
         // The single-wish overload must be byte-identical to a list-of-one, so
         // Samples mode's HELLO bytes are unchanged by the multi-wish refactor.
         var helloListOfOne = Wire.BuildHello("probe", "slopsync_probe.py", inst,
-            new (ushort, double)[] { (0x0084, 100.0) });
+            new (ushort, double)[] { (0x2100, 100.0) });
         Check("HELLO single-wish == list-of-one", helloListOfOne, Convert.ToHexString(hello));
 
         // ====================================================================
@@ -465,7 +467,7 @@ internal static class Wire
         return buf;
     }
 
-    // Mirror of SlopWire.BuildSegmentBundle (0x0085): 6-byte samples
+    // Mirror of SlopWire.BuildSegmentBundle (0x2101, was 0x0085): 6-byte samples
     // {target:u16 LE ×10000, duration:u16 LE, end_vel:i16 LE ×1000}. Sentinel
     // encodes INT16_MIN; a real end_vel clamps ±32767 so it can't hit the sentinel.
     public static byte[] BuildSegmentBundle(uint tBase, IReadOnlyList<(ushort off, double target, int durationMs, double endVel, bool sentinel)> samples)

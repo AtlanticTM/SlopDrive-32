@@ -37,12 +37,12 @@ using Stylet;
 // SlopSync — MultiFunPlayer plugin: the first external client of the SlopSync
 // protocol (docs/slopsync/SPEC.md). It reads an MFP device axis at a fixed rate
 // and streams it to a SlopDrive-32 machine as native SlopSync STREAM bundles on
-// device channel 0x0084 "motion-input".
+// device channel 0x2100 "motion-input" (RFC-047 grid; was 0x0084).
 //
 // This ONE file is the entire plugin (MFP compiles each .cs as a single plugin
 // via Roslyn). Every wire number is copied from the registry — the single
 // source of truth (docs/slopsync/registry/registry.yaml, mirrored in
-// lib/slopsync/.../generated/registry_constants.hpp). The byte-level behaviour
+// lib/slopsync/.../generated/registry_constants.hpp). The byte-level behavior
 // mirrors tools/slopsync_probe.py, the live-verified Python reference client —
 // where the spec and the probe disagree, the probe wins.
 //
@@ -63,13 +63,14 @@ using Stylet;
 //     frames set header.seq = intent_id so RFC-001's NACK `intent_seq` names
 //     the same number the ECHO does.
 //
-// v0.4.0 — honest admission control + curve declaration on the 0x0085 wish:
+// v0.4.0 — honest admission control + curve declaration on the 0x0085 wish
+// (renumbered to 0x2101 by RFC-047; the wish semantics below are unchanged):
 //   * RFC-013. The segment wish declares its true sustained rate (5 Hz for a
 //     2–4/s mean stream) plus an explicit `burst` (42) sized to the measured
 //     ~25/s dense-section peak — it no longer over-declares 30 Hz to buy
 //     bucket depth. The client-side shaper sizes its bucket off the ECHOED
 //     burst in granted_publishes (absent = depth-equals-rate, the old rule).
-//   * RFC-030. The 0x0085 wish declares `curve_family` (45): Step scripts
+//   * RFC-030. The 0x0085 (now 0x2101) wish declares `curve_family` (45): Step scripts
 //     declare 3, everything else 1 (c1_cubic — every MFP interpolator is
 //     C1-class and the emitted {target,duration,end_vel} IS a cubic Hermite).
 //     The GRANT echoes the EFFECTIVE family post machine-override; a
@@ -95,7 +96,8 @@ public class SlopSync : PluginBase
     [JsonProperty] public string SourceAxis { get => _sourceAxis; set => SetAndNotify(ref _sourceAxis, value); }
     [JsonProperty] public string PairingPin { get => _pairingPin; set => SetAndNotify(ref _pairingPin, value); }
 
-    // Streaming mode (§0x0084 samples vs §0x0085 timed segments). Persisted by
+    // Streaming mode (§0x2100 samples vs §0x2101 timed segments, RFC-047 ids;
+    // was 0x0084/0x0085). Persisted by
     // name so reordering the enum can never silently remap a saved value.
     [JsonProperty][JsonConverter(typeof(StringEnumConverter))]
     public StreamMode Mode
@@ -226,7 +228,7 @@ public class SlopSync : PluginBase
 
     /// <summary>True once this hub advertised a WRITABLE window through the
     /// window.min / window.max roles. False on a hub that does not — the card
-    /// greys rather than pretending it can write something it cannot find.</summary>
+    /// grays rather than pretending it can write something it cannot find.</summary>
     public bool HasWindowControl =>
         (_roleWindowMin != null && _roleWindowMin.Writable) ||
         (_roleWindowMax != null && _roleWindowMax.Writable);
@@ -310,7 +312,7 @@ public class SlopSync : PluginBase
     private bool _segInvert;
     private InterpolationType _segInterp = InterpolationType.Linear;
 
-    // Client-side mirror of the hub's §10.5 token bucket for 0x0085 (sustained
+    // Client-side mirror of the hub's §10.5 token bucket for 0x2101 (sustained
     // rate = granted rate, depth = granted rate). Shaping here means a
     // pathologically dense script section is thinned by US, deliberately and
     // counted, instead of arriving as a burst the hub answers with RATE_LIMITED
@@ -553,14 +555,15 @@ public class SlopSync : PluginBase
         if (token16 == null)
             Logger.Warn("SlopSync connecting WITHOUT a credential — viewer tier: telemetry and e-stop work, playback will not");
 
-        // Samples mode wishes 0x0084 only (unchanged). Segments mode ALSO wishes
-        // 0x0084 (the dense-sample fallback path stays granted) PLUS 0x0085.
+        // Samples mode wishes 0x2100 only (unchanged). Segments mode ALSO wishes
+        // 0x2100 (the dense-sample fallback path stays granted) PLUS 0x2101.
+        // (RFC-047 ids; was 0x0084/0x0085.)
         //
         // RFC-013 CATCH-UP — the honest wish. §10.5 originally made the wished
         // rate double as the token-bucket DEPTH, so this plugin declared 30 Hz
         // for a 2–4/s mean segment stream purely to buy burst budget for dense
         // funscript sections (~25 segments/s worst case) — lying to admission
-        // control because burst had no key of its own. It does now: the 0x0085
+        // control because burst had no key of its own. It does now: the 0x2101
         // wish declares the honest sustained rate (SegmentWishHz) plus an
         // explicit `burst` (42) sized to the measured peak (SegmentWishBurst).
         // The hub clamps burst to granted_rate × max_burst_multiple and ECHOES
@@ -588,7 +591,7 @@ public class SlopSync : PluginBase
             (SlopWire.ChMotion, MotionStateRateHz, SlopWire.PriorityElevated),
         };
 
-        // RFC-030: which curve family the 0x0085 stream means. MFP's axis
+        // RFC-030: which curve family the 0x2101 stream means. MFP's axis
         // interpolation IS cleanly reachable (same property SegmentLoop reads
         // for its own span math): Step means the author wants jumps (family 3);
         // every other MFP interpolator (Linear/Pchip/Makima/…) is C1-class, and
@@ -635,9 +638,9 @@ public class SlopSync : PluginBase
 
         double granted = welcome.GrantedPublishRate(SlopWire.ChMotionInput);
         if (double.IsNaN(granted))
-            throw new InvalidOperationException("no publish grant for motion-input(0x0084) in WELCOME");
+            throw new InvalidOperationException("no publish grant for motion-input(0x2100) in WELCOME");
 
-        // Segments mode *requires* the 0x0085 grant — mirror the no-grant error
+        // Segments mode *requires* the 0x2101 grant — mirror the no-grant error
         // path rather than silently degrading to the sample loop (ground-truth
         // doctrine: the UI says "Segments", so we send segments or we error).
         double segGranted = double.NaN;
@@ -646,7 +649,7 @@ public class SlopSync : PluginBase
         {
             segGranted = welcome.GrantedPublishRate(SlopWire.ChMotionSegment);
             if (double.IsNaN(segGranted))
-                throw new InvalidOperationException("no publish grant for motion-segment(0x0085) in WELCOME — device may predate the segment channel; use Samples mode");
+                throw new InvalidOperationException("no publish grant for motion-segment(0x2101) in WELCOME — device may predate the segment channel; use Samples mode");
 
             // RFC-013: the echoed burst is the APPLIED bucket depth (post-clamp);
             // absent means a pre-RFC-013 hub, where depth defaults to the rate.
@@ -731,7 +734,7 @@ public class SlopSync : PluginBase
             // still-live receive loop below — deliberately NOT pairing this
             // with ws.CloseAsync, which internally consumes reads too and
             // would race that same loop. Its own short-lived token: the
-            // caller's token is usually already cancelled by the time we get
+            // caller's token is usually already canceled by the time we get
             // here — that's the normal reason we're here.
             try
             {
@@ -1271,13 +1274,13 @@ public class SlopSync : PluginBase
     // output-divergence probe.
     // =========================================================================
     private const double SegmentPingIntervalMs = 400.0;   // < 600 ms deadman, with margin
-    // 0x0085 publish wish (Hz) — the HONEST sustained rate (RFC-013). The mean
+    // 0x2101 publish wish (Hz) — the HONEST sustained rate (RFC-013). The mean
     // segment stream is 2–4/s; 5 gives slight headroom without over-declaring.
     // Burst budget no longer rides the rate: it is the explicit `burst` (42)
     // wish below. (Pre-RFC-013 this was 30.0 — a lie to admission control to
     // buy bucket depth, because §10.5 made rate double as depth.)
     private const double SegmentWishHz = 5.0;
-    // 0x0085 `burst` wish (samples): the measured worst-case dense-section peak
+    // 0x2101 `burst` wish (samples): the measured worst-case dense-section peak
     // (~25 segments/s — rapid strokes / vibration sections emitted the instant
     // they come due). The hub clamps to granted_rate × max_burst_multiple and
     // echoes the applied depth; the client shapes to the ECHO, not to this.
@@ -1754,12 +1757,12 @@ public class SlopSync : PluginBase
         Ui(() => StatusText = status);
     }
 
-    // One span → one 0x0085 sample. Two cases, one rule:
+    // One span → one 0x2101 sample. Two cases, one rule:
     //   * a span we have NOT entered yet (the normal case — the lookahead sees it
     //     coming) is SCHEDULED at its true start with its FULL duration. The
     //     start time rides on the bundle's t_base, because §5.4 pins t_off[0] to
     //     0 and caps the bundle span at 20 ms; the hub resolves t_base+t_off
-    //     against its own clock and honours it as the segment START. This is what
+    //     against its own clock and honors it as the segment START. This is what
     //     makes segment timing independent of our tick jitter.
     //   * a span we are already INSIDE (right after a re-anchor, or if a tick ran
     //     late) is planned from NOW to its unchanged end. Shortening the duration
@@ -1786,7 +1789,7 @@ public class SlopSync : PluginBase
                                              new SegmentSample(target, durMs, endVel, sentinel), token);
     }
 
-    // Outgoing-slope continuity for the end-velocity handoff (§0x0085 semantics):
+    // Outgoing-slope continuity for the end-velocity handoff (§0x2101 semantics):
     //   * no keyframe after the target, or the outgoing span is a gap → SENTINEL
     //     (unconstrained — the engine settles / holds; these are the two cases
     //     where "the span after the target" has no real slope to hand off).
@@ -1816,7 +1819,7 @@ public class SlopSync : PluginBase
 
     // The derivative of MFP's OWN interpolant at the end of span i, in value per
     // script-second, LIMITED to a handoff the device's quintic can actually
-    // honour. KeyframeCollection.CalculateSlopes(i, type) returns the pair of
+    // honor. KeyframeCollection.CalculateSlopes(i, type) returns the pair of
     // endpoint tangents for span i; Item2 is the one at kf[i+1], and for the C1
     // spline types it equals the incoming tangent of the next span, which is
     // exactly the handoff the device needs.
@@ -1868,7 +1871,7 @@ public class SlopSync : PluginBase
     // the shallow span's mean velocity down to 1.5x); a normal stroke script is
     // essentially untouched, because on Pchip every reversal knot is already 0
     // and on a run with similar adjoining chords the tangent is already ~1x the
-    // chord. Sharp reversals whose neighbouring spans differ a lot in LENGTH do
+    // chord. Sharp reversals whose neighboring spans differ a lot in LENGTH do
     // see a modest trim (measured 2.008 -> 1.441 on a 0.167 s / 0.833 s zig-zag);
     // that is the limiter working as intended, not a regression — the long span
     // genuinely cannot absorb the short one's speed.
@@ -2071,10 +2074,12 @@ public class SlopSync : PluginBase
 
 // =============================================================================
 // StreamMode — how the plugin feeds the machine.
-//   Samples  — the original 50 Hz dense-point path on 0x0084 (motion-input).
+//   Samples  — the original 50 Hz dense-point path on 0x2100 (motion-input;
+//              was 0x0084 pre-RFC-047).
 //   Segments — one timed {target, duration, end_vel} per funscript action on
-//              0x0085 (motion-segment); ~2–4 packets/s, the device renders the
-//              native waveform. 0x0084 stays granted as a fallback either way.
+//              0x2101 (motion-segment; was 0x0085); ~2–4 packets/s, the device
+//              renders the native waveform. 0x2100 stays granted as a
+//              fallback either way.
 // =============================================================================
 public enum StreamMode
 {
@@ -2083,7 +2088,7 @@ public enum StreamMode
 }
 
 // =============================================================================
-// SegmentSample — one 0x0085 segment handed from the MFP event thread to the
+// SegmentSample — one 0x2101 segment handed from the MFP event thread to the
 // connection task. Sentinel=true means "no end velocity" (encoded INT16_MIN).
 // =============================================================================
 public readonly struct SegmentSample
@@ -2197,7 +2202,7 @@ public static class SlopWire
     // ---- Curve families (registry curve_families, RFC-030) ------------------
     // {target, duration_ms, end_vel} uniquely determines a cubic Hermite, so a
     // segment sender's wish names WHICH reconstruction it means. The GRANT
-    // echoes the EFFECTIVE family post machine-override — "honoured" and
+    // echoes the EFFECTIVE family post machine-override — "honored" and
     // "downgraded" are distinguishable, and a downgrade is surfaced, never
     // silently ignored.
     public const byte CurveUnspecified = 0;   // the compatible pre-RFC-030 default
@@ -2287,8 +2292,8 @@ public static class SlopWire
     // catalog (see SlopCatalog.LocateRole). 0x0081 appears nowhere in this file.
     public const ushort ChSafety = 0x0003;        // channels.safety (STATE, critical)
     public const ushort ChMotion = 0x0080;        // ch::motion (STATE)
-    public const ushort ChMotionInput = 0x0084;   // ch::motion_input (STREAM c2h, ≤333 Hz)
-    public const ushort ChMotionSegment = 0x0085; // ch::motion_segment (STREAM c2h, ≤50 Hz, timed segments)
+    public const ushort ChMotionInput = 0x2100;   // ch::motion_input (STREAM·motion·00, ≤333 Hz; was 0x0084, RFC-047)
+    public const ushort ChMotionSegment = 0x2101; // ch::motion_segment (STREAM·motion·01, ≤50 Hz, timed segments; was 0x0085, RFC-047)
     public const ushort ChHome = 0x0103;          // ch::home (INTENT, control)
 
     // 0x0103 `op` (registry home ops). 1 = home; 2 force_home CLEARS the e-stop
@@ -2296,7 +2301,7 @@ public static class SlopWire
     // should be able to do, so only `home` is exposed.
     public const int HomeOpHome = 1;
 
-    // §0x0085 sentinel: "no end velocity" (INT16_MIN). 0 is a real slope.
+    // §0x2101 sentinel: "no end velocity" (INT16_MIN). 0 is a real slope.
     public const short SegmentEndVelSentinel = short.MinValue;   // -32768
 
     // ---- NACK codes (registry NackCode) -------------------------------------
@@ -2606,10 +2611,10 @@ public static class SlopWire
         return b;
     }
 
-    // ---- STREAM bundle (§5.4) for motion-input (0x0084) ---------------------
+    // ---- STREAM bundle (§5.4) for motion-input (0x2100; was 0x0084) ---------
     // Layout: [t_base:u32 LE][n:u8][reserved:u8][off:u16 LE]*n
     //         [{target:u16 LE, vel:i16 LE}]*n
-    // sample scales (SlopSyncCatalog 0x0084): target *10000, vel *1000.
+    // sample scales (SlopSyncCatalog 0x2100): target *10000, vel *1000.
     public static byte[] BuildStreamBundle(uint tBase, IReadOnlyList<(ushort off, double target, double vel)> samples)
     {
         int n = samples.Count;
@@ -2631,10 +2636,10 @@ public static class SlopWire
         return buf;
     }
 
-    // ---- SEGMENT bundle (§5.4) for motion-segment (0x0085) ------------------
-    // Same STREAM framing as 0x0084: [t_base:u32 LE][n:u8][reserved:u8][off:u16 LE]*n
+    // ---- SEGMENT bundle (§5.4) for motion-segment (0x2101; was 0x0085) ------
+    // Same STREAM framing as 0x2100: [t_base:u32 LE][n:u8][reserved:u8][off:u16 LE]*n
     // then n × 6-byte samples {target:u16 LE, duration:u16 LE, end_vel:i16 LE}.
-    // Scales (SlopSyncCatalog 0x0085): target *10000, duration *1, end_vel *1000.
+    // Scales (SlopSyncCatalog 0x2101): target *10000, duration *1, end_vel *1000.
     // duration is clamped ≥1 (the channel rejects 0); a Sentinel end_vel encodes
     // INT16_MIN, and a real end_vel is clamped to ±32767 so it can never collide
     // with the sentinel.
@@ -2824,7 +2829,7 @@ public sealed class WelcomeInfo
     // burst: NaN when the hub did not echo one (RFC-013 default: depth = rate).
     // curveFamily: -1 when the hub did not echo one (pre-RFC-030 hub); otherwise
     // the EFFECTIVE family post machine-override, which is how a client tells
-    // "honoured" from "downgraded".
+    // "honored" from "downgraded".
     private readonly List<(ushort ch, double rate, double burst, long curveFamily)> _grantedPublishes = new();
 
     public static WelcomeInfo Parse(byte[] payload)
@@ -2888,7 +2893,7 @@ public sealed class WelcomeInfo
 // point of fetching it here.
 //
 // WHY THIS CLIENT FETCHES A CATALOG AT ALL (it never did before):
-// This plugin's PUBLISH layouts (0x0084 / 0x0085) are and stay compiled in —
+// This plugin's PUBLISH layouts (0x2100 / 0x2101; was 0x0084 / 0x0085) are and stay compiled in —
 // they are the wire contract it WRITES, a §8.5 static profile, and no amount
 // of catalog would change what a funscript sample looks like. But the thing it
 // now READS — "what are this machine's input speed / accel / jerk ceilings and
@@ -3167,7 +3172,7 @@ public sealed class HubClient
 
     private volatile int _clockOffset;   // hub_us - client_us (windowed), stored as int32
     private ushort _streamSeq;
-    private ushort _segmentSeq;          // per-channel seq for 0x0085 (§7.3)
+    private ushort _segmentSeq;          // per-channel seq for 0x2101 (§7.3)
 
     // CLOCK reply plumbing: the receive loop captures t3 at arrival and hands
     // the raw (t0e,t1,t2,t3) to whoever is awaiting an exchange.
@@ -3400,7 +3405,7 @@ public sealed class HubClient
 
     // ---- GOODBYE (§6.8) — courtesy teardown, always attempted with its own
     // short-lived token so it still gets a chance to go out even when the
-    // caller's own token is already cancelled (the common shutdown case).
+    // caller's own token is already canceled (the common shutdown case).
     public Task GoodbyeAsync(ushort code, CancellationToken token) =>
         SendFrameAsync(SlopWire.FGoodbye, 0, SlopWire.BuildGoodbye(code), 0, token);
 
@@ -3439,7 +3444,7 @@ public sealed class HubClient
         return SendFrameAsync(SlopWire.FStream, SlopWire.ChMotionInput, payload, seq, token);
     }
 
-    // ---- SEGMENT sample (§0x0085) — single-sample bundle, own seq counter ---
+    // ---- SEGMENT sample (§0x2101) — single-sample bundle, own seq counter ---
     public Task SendSegmentSampleAsync(uint tBase, SegmentSample s, CancellationToken token)
     {
         var payload = SlopWire.BuildSegmentBundle(tBase,

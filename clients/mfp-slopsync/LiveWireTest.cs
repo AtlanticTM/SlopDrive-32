@@ -13,7 +13,7 @@
 // Exit 0 only if every hard PASS criterion below is met.
 //
 // VERIFICATION DEBT (plugin v0.4.0 — RFC-013 honest rate/burst + RFC-030
-// curve_family on the 0x0085 wish): a bench re-run is REQUIRED before this
+// curve_family on the 0x2101 wish, was 0x0085 pre-RFC-047): a bench re-run is REQUIRED before this
 // plugin version is considered verified — run this test TWICE BACK-TO-BACK
 // WITHOUT rebooting the device in between, per the ownership-release
 // regression pattern (the fw 2.1.44 teardown-leak bug was invisible to every
@@ -22,6 +22,7 @@
 using System;
 using System.Collections.Generic;
 using System.Diagnostics;
+using System.Net;
 using System.Net.Http;
 using System.Net.WebSockets;
 using System.Security.Cryptography;
@@ -36,7 +37,7 @@ internal static class LiveWireTest
 
     private static async Task<int> Main(string[] args)
     {
-        // --segments selects the 0x0085 timed-segment path; positional args
+        // --segments selects the 0x2101 timed-segment path (was 0x0085); positional args
         // (ip, port) are read ignoring any --flags.
         bool segments = Array.Exists(args, a => a == "--segments");
         var pos = Array.FindAll(args, a => !a.StartsWith("--"));
@@ -45,7 +46,7 @@ internal static class LiveWireTest
         string baseUrl = $"http://{ip}";
 
         Console.WriteLine("=============================================================");
-        Console.WriteLine($" SlopSync LiveWireTest — target {ip}:{port}  mode={(segments ? "SEGMENTS (0x0085)" : "SAMPLES (0x0084)")}");
+        Console.WriteLine($" SlopSync LiveWireTest — target {ip}:{port}  mode={(segments ? "SEGMENTS (0x2101)" : "SAMPLES (0x2100)")}");
         Console.WriteLine("=============================================================");
 
         using var http = new HttpClient { Timeout = TimeSpan.FromSeconds(5) };
@@ -132,6 +133,19 @@ internal static class LiveWireTest
         Console.WriteLine($"[discovery] result: {(discoveryFound ? "FOUND (matches target)" : "NOT CONFIRMED (soft — see warnings above)")}");
         Console.WriteLine();
 
+        // ---- Credential (fw 2.1.59+ enforces authorization) ------------------
+        // A tokenless HELLO is granted `watch` tier: safety/telemetry still flow
+        // but the motion-input/motion-segment publish wish is refused, which is
+        // exactly why every grant assertion below used to read NaN. Mirrors the
+        // self-serve rung of the plugin's own AcquireTokenAsync ladder
+        // (SlopSync.cs) — this harness has no PIN box, so it mints fresh every
+        // run instead of trying the paired-token rung first.
+        byte[] token16 = await MintUiTokenAsync(http, baseUrl);
+        Console.WriteLine(token16 != null
+            ? "[auth] /uitoken minted — presenting in HELLO for control tier"
+            : "[auth] /uitoken NOT minted — HELLO will be tokenless (watch tier; grant checks below WILL fail)");
+        Console.WriteLine();
+
         // ---- Session test --------------------------------------------------
         var instanceId = new byte[SlopWire.InstanceIdBytes];
         RandomNumberGenerator.Fill(instanceId);
@@ -160,18 +174,18 @@ internal static class LiveWireTest
         double segGranted = double.NaN;
         if (segments)
         {
-            Console.WriteLine("[hello] subs safety+motion; wishing publish on motion-input (0x0084) @ 50 Hz AND motion-segment (0x0085) @ 10 Hz...");
+            Console.WriteLine("[hello] subs safety+motion; wishing publish on motion-input (0x2100) @ 50 Hz AND motion-segment (0x2101) @ 10 Hz...");
             welcome = await client.HelloAsync("mfp", "LiveWireTest",
                 new (ushort ch, double rate)[] { (SlopWire.ChMotionInput, 50.0), (SlopWire.ChMotionSegment, 10.0) },
-                null, token, subWishes);
+                token16, token, subWishes);
             segGranted = welcome.GrantedPublishRate(SlopWire.ChMotionSegment);
         }
         else
         {
-            Console.WriteLine("[hello] subs safety+motion; wishing publish on motion-input (0x0084) @ 50 Hz...");
+            Console.WriteLine("[hello] subs safety+motion; wishing publish on motion-input (0x2100) @ 50 Hz...");
             welcome = await client.HelloAsync("mfp", "LiveWireTest",
                 new (ushort ch, double rate)[] { (SlopWire.ChMotionInput, 50.0) },
-                null, token, subWishes);
+                token16, token, subWishes);
         }
         double granted = welcome.GrantedPublishRate(SlopWire.ChMotionInput);
         Console.WriteLine($"[welcome] session_id={welcome.SessionId} boot_id=0x{welcome.BootId:X8} etag={SlopCatalog.Hex(welcome.CatalogEtag)} granted motion-input={granted:F1} Hz (wished 50.0)"
@@ -402,7 +416,7 @@ internal static class LiveWireTest
             const double durationS = 5.0;
             const double freqHz = 0.5;
             const double amp = 0.2;
-            const double centre = 0.5;
+            const double center = 0.5;
 
             Console.WriteLine($"[stream] sending {durationS:F0}s @ {rateHz:F1} Hz (target=0.5+0.2*sin(2*pi*0.5*t))...");
             var sw = Stopwatch.StartNew();
@@ -421,7 +435,7 @@ internal static class LiveWireTest
 
                 double t = sw.Elapsed.TotalSeconds;
                 double w = 2 * Math.PI * freqHz;
-                double target = centre + amp * Math.Sin(w * t);
+                double target = center + amp * Math.Sin(w * t);
                 double vel = amp * w * Math.Cos(w * t);
 
                 await client.SendStreamSampleAsync(client.HubNowUs(), target, vel, token);
@@ -473,6 +487,7 @@ internal static class LiveWireTest
         // ---- PASS/FAIL table ----------------------------------------------------
         var checks = new List<(string name, bool pass, string detail)>
         {
+            ("control-tier credential presented (/uitoken)", token16 != null, token16 != null ? "minted" : "NOT minted — HELLO went tokenless"),
             ("granted motion-input rate == 50 Hz", Math.Abs(granted - 50.0) < 0.01, $"granted={granted:F2}"),
             ("catalog fetched over BLOB_REQ/BLOB_CHUNK", catalogOk, catalogOk ? $"{catalogBytes.Length} B" : "no bytes"),
             ("catalog sha256[:8] == WELCOME catalog_etag", etagVerified, SlopCatalog.Hex(welcome.CatalogEtag)),
@@ -504,6 +519,43 @@ internal static class LiveWireTest
         Console.WriteLine();
         Console.WriteLine(allPass ? "RESULT: ALL HARD CRITERIA PASS" : "RESULT: FAILURES ABOVE");
         return allPass ? 0 : 1;
+    }
+
+    // Minimal mirror of SlopSync.cs's AcquireTokenAsync, mint-only rung (this
+    // harness has no PIN box to try first). GET /uitoken has no CORS headers by
+    // design (RFC-029 §4) — that property only matters to a browser, so a
+    // console client just reads the body directly. Rate-limited server-side to
+    // one mint per 250 ms device-wide; a couple of retries covers a stray 429.
+    private static async Task<byte[]> MintUiTokenAsync(HttpClient http, string baseUrl)
+    {
+        for (int attempt = 0; attempt < 3; attempt++)
+        {
+            try
+            {
+                using var res = await http.GetAsync($"{baseUrl}/uitoken");
+                if (res.StatusCode == HttpStatusCode.TooManyRequests)
+                {
+                    await Task.Delay(350);
+                    continue;
+                }
+                if (!res.IsSuccessStatusCode)
+                {
+                    Console.WriteLine($"[auth] /uitoken refused ({(int)res.StatusCode} {res.StatusCode})");
+                    return null;
+                }
+                var j = JObject.Parse(await res.Content.ReadAsStringAsync());
+                var tok = j.Value<string>("token");
+                if (j.Value<bool?>("ok") == true && tok != null && tok.Length == SlopWire.TokenBytes * 2)
+                    return Convert.FromHexString(tok);
+                return null;
+            }
+            catch (Exception ex)
+            {
+                Console.WriteLine($"[auth] /uitoken attempt {attempt} failed: {ex.Message}");
+                await Task.Delay(200);
+            }
+        }
+        return null;
     }
 
     private static async Task<(long bundles, long samples, long enqueued, long dropped)> ReadSyncCounters(HttpClient http, string baseUrl)

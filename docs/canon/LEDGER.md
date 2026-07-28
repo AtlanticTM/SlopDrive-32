@@ -2274,6 +2274,16 @@ stays machine-checked at zero local cost). Rationale: nobody is using this
 yet; more minor changes are expected; hours of ceremony per minor change is
 waste. Lift the ruling at UI completion / first release.
 
+## BLE MSD ON-AIR CONFIRMED (operator phone, nRF Connect, 2026-07-28)
+
+The BLE ADVERTISING MSD FIX entry's one remaining open check — "an operator
+phone + nRF Connect re-check (raw per-packet AD dump) remains" — is CLOSED:
+operator observed Manufacturer Specific Data company `0xFFFF`, payload
+`0x02` (bit1 ws_available set, bit0 pairing_window_open clear) in nRF
+Connect's parsed AD view against live fw 2.1.85. Same instrument that found
+the record missing pre-fix (T14). The `ble_adv_flags` byte is verifiably on
+the air.
+
 ## FIRST LIVE BLE GATT SESSION (2026-07-28) — probe gains a BLE transport, fw 2.1.85 unchanged
 
 - TCode pass-through channel (post-MFP; parser cross-task race was the

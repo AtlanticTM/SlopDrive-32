@@ -2092,6 +2092,143 @@ comment only — no value changed), `docs-site/docs/spec/transports.md`
 checked; live `bleak` scan + `/api/log` + `/api/capabilities` + `/api/status`
 all reproduced above]
 
+## BRITISH-SPELLING TOTAL SWEEP (2026-07-28, operator ruling: "every single instance, now and for good")
+
+Both linters (`tools/canon_lint.py` here, `tools/slopsync_lint.py` in
+SlopSync) were already codespell-backed and full-tree clean (0 findings)
+going into this pass — that covers prose, comments, and snake_case
+identifiers, because underscore separates words for `\b` matching. The
+KNOWN GAP this sweep closed: codespell's word regex is `[\w\-'']+`, and
+`\w` includes underscore, so it treats a whole camelCase/PascalCase token
+**or a combined snake_case token spanning two dictionary words** (e.g.
+`colourMode`, `waveform_centred`) as ONE word and never matches it against
+a dictionary key. Whole-word codespell genuinely could not see this.
+
+**Method:** built a case-aware scanner (scratchpad, not committed — its
+job ended when the linters absorbed its logic) that loads codespell's own
+`dictionary_en-GB_to_en-US.txt` straight from the installed package (never
+retyped) plus each repo's 4-word `BRITISH_SPELLING_EXTRAS` gap-list
+(travelled/travelling/traveller/travellers), then splits every identifier
+on case boundaries, underscores, and digit boundaries and checks every
+subword ≥4 chars against the dictionary. Ran it over every git-tracked
+file in both repos (filenames included), plus a plain
+`codespell --builtin en-GB_to_en-US` run per repo as a baseline cross-check
+(both: 0, confirming the existing purge held).
+
+**Totals — SlopDrive-32:** 0 hits / 0 fixed / 0 flagged / 0 false positives
+in the actively-scanned tree (this repo's own camelCase identifiers are
+already all-American). Gauntlet: green (see below).
+
+**Totals — SlopSync:** 1 hit / 1 fixed / 0 flagged / 0 false positives in
+the actively-scanned tree. Gauntlet: green (see below).
+
+**The one fix (bucket A — safe, internal-only):**
+`tools/slopsync_probe.py:235`, `ANOMALY_KINDS[7]`: `"waveform_centred"` →
+`"waveform_centered"`. Proof of internality: grepped both repos for the
+string; it exists nowhere else in either tree. It is a local
+numeric-wire-kind → human-display-string table for this Python tool's own
+console output (`decode_motion_diag`'s `by_kind`, and the probe's own
+anomaly-EVENT summary) — never serialized to the wire (the wire carries the
+numeric kind only), never a persisted key, never read back by any test or
+downstream tool. Bonus finding: this string had drifted from
+`include/system/SystemState.h`'s `kSmAnomalyNames[7]` in THIS repo, the
+firmware's own authoritative name table for the identical ordinal
+(`AnomalyType::WaveformCentered = 7`, feeding `GET /api/slopmotion`'s
+`stats.anomalies_by_kind` JSON key) — which already spelled it
+`"waveform_centered"` correctly. The probe's copy was simply wrong,
+independent of American-vs-British spelling; fixing the spelling also fixes
+the cross-repo name drift. Fixed in SlopSync commit `6317b74`.
+
+**Bucket B — FLAG, DO NOT CHANGE: NONE.** Nothing this sweep found had
+escaped either repo's boundary. No hits existed in NVS/Preferences key
+strings, CBOR/wire key strings, catalog/registry names, localStorage/
+sessionStorage keys, HTTP route strings, MFP plugin API surface, JS/C#
+public exports, or CSS class names — the one real hit (above) was pure
+internal Python tooling display text.
+
+**Bucket C — false positives / consciously out-of-scope (documented, not
+touched):**
+- `LICENSE`, `NOTICE` (both repos) — "Licence"/"licence"/"licences"/
+  "acknowledgement" throughout the Apache-2.0 text. Legal text is verbatim
+  by law, not by style (existing `BRITISH_SPELLING_SCAN_EXEMPT` policy);
+  not our call to edit either way.
+- `lib/espasyncwebserver/VENDORED.md` (SlopDrive-32) — "behaviour" in a
+  vendored third-party library's own doc (`VENDORED_PREFIXES`); out of
+  scope by the same policy that keeps the library byte-identical to
+  upstream.
+- `tools/canon_lint.py` / `tools/slopsync_lint.py` themselves — the
+  `BRITISH_SPELLING_EXTRAS` gap-list comment names its own test words
+  (favour/acknowledgement/catalogue/analyse/initialise/grey/judgement/
+  behaviour/centre/travelled) by construction; already self-exempted in
+  each file's own `BRITISH_SPELLING_SCAN_EXEMPT`, and rewriting them would
+  break the documentation of what codespell catches.
+- `docs-site/docs/assets/javascripts/mermaid.min.js` (SlopSync) — a
+  vendored, minified third-party JS bundle (colour/grey/centre/Cancelled/
+  Normalised/etc. throughout); `VENDORED_PREFIXES`, never touched.
+- Consciously swept but clean: SlopDrive-32's `lib/ruckig/`,
+  `lib/asynctcp/`, `webui/src/fonts/`, `.cache/` (vendored, zero hits); both
+  repos' `FROZEN_SHA256`(`_SIBLING`) conformance artifacts
+  (`mini_catalog.hpp`, `mini-catalog.yaml`) — zero hits, so the frozen-byte
+  rule was never actually tested by this sweep.
+- Not a scanner gap, a codespell dictionary gap (out of scope — the
+  operator's chosen mechanism is codespell's own dictionary, not a
+  supplemented one): "fibre", "vapour", "colonise" are NOT in codespell's
+  `en-GB_to_en-US` builtin dictionary at all (confirmed by direct lookup),
+  so a hit under those words wouldn't be flagged even if present — none
+  were found in either tree regardless.
+
+**"For good" — linter upgrade (both repos):** added `run_camelcase_check()`
+to `tools/canon_lint.py` and `tools/slopsync_lint.py`, using the identical
+mechanism as the scratch scanner (codespell's own dictionary file read from
+package data, no hand-rolled wordlist; same 4-word extras dict each file
+already carried) and wired into each `main()`. Filenames are checked too.
+Planted-and-reverted test in both repos: staged a scratch file containing
+`int colourMode = 0;` (force-added past `tools/*`'s gitignore), ran the
+lint, confirmed `[british-spelling-subword] ... colourMode (subword
+'colour' -> color)` fired, then unstaged and deleted it — both linters
+confirmed clean again afterward. Both linters: 0 findings, full tree, after
+the real fix landed.
+
+**Gauntlet — SlopSync (commit `6317b74`, pushed):** `pio test -e native`
+16/16 native suites PASSED (trusting exit code, not PIO's doctest summary
+line, per TRAPS T10); `hub/slopbench` CMake build (43/43 objects) +
+`tools/smoke_test.py` 12 passed/0 failed; `clients/js/test/
+slopsync-wire.test.mjs` ALL PASS; `clients/mfp/WireSelfTest.csproj`
+`dotnet build` (0 warnings/0 errors) + `dotnet run` ALL PASS;
+`tools/slopsync_lint.py` 0 findings; `tools/gen_registry_header.py --check`
+clean (folded into the lint run). mkdocs not run — no docs-site file
+touched.
+
+**Gauntlet — SlopDrive-32 (this commit, not pushed):** `pio test -e
+native` — `test_slopglow`, `test_sloplog`, `test_slopmotion` (31 cases),
+`test_slopsync_devicecatalog`, `test_slopsync_discovery` all PASSED;
+`pio run -e sd32-ota` SUCCESS in 16.9s — RAM 24.1% (78,948 / 327,680 B),
+Flash 28.5% (1,870,292 / 6,553,600 B) (delta not applicable — no
+non-comment code path changed, only two Python tools outside the firmware
+build); `tools/canon_lint.py` 0 findings including the pin check (bumped
+below); `tools/catalog_lint.py` OK (32 entries, 113 desc + 44 role
+annotations checked); channel-map/channel-grid `--check` clean (folded into
+the canon_lint run). `sim/slopsim` CMake rebuild clean (pre-existing
+`-Wmaybe-uninitialized`/`-Warray-bounds` warnings only, unrelated to this
+change); killed any stale sim, started `slopsim.exe machine --homed
+--headless --duration 240 --port 82 --http 80 --no-mdns`, ran
+`webui/test/slopsync-sim.mjs` — ALL PASS (cold session, write plane, NACK
+correlation, warm back-to-back session); `npm run check`
+(`check-device-knowledge.mjs` + `settings-model.test.mjs`) ALL PASS; the
+webui production build (`npm run build` → check + `vite build`) already
+ran as part of the `sd32-ota` build's `build_webui` hook and succeeded
+(`dist/index.html`, 261,438 B / 104,395 B gzipped).
+
+**`slopsync.pin` bumped:** `aa670db3...` → `6317b74e...` (SlopSync's new
+HEAD after the commit above), read via `git -C ../SlopSync rev-parse HEAD`,
+never typed by hand. Pin check re-verified green post-bump, sibling no
+longer dirty.
+
+**Bucket A is now empty going forward by construction, not luck:** with
+`run_camelcase_check()` landed in both linters, any new camelCase/
+PascalCase/combined-snake_case British spelling fails lint at commit time —
+this sweep does not need to recur.
+
 ## Deferred / planned (homes: docs/REFACTOR-ROADMAP.md, docs/MOTION-TODO.md)
 
 - TCode pass-through channel (post-MFP; parser cross-task race was the

@@ -84,6 +84,105 @@ _BRITISH_EXTRAS_RX = re.compile(
     re.IGNORECASE,
 )
 
+# ---------------------------------------------------------------- C-11 (camelCase gap)
+# codespell's word regex is r"[\w\-'']+" -- \w includes underscore, so it
+# treats "colourMode", "waveform_centred", and "kColourTable" as ONE token
+# each and never matches them against the dictionary key "colour"/"centred".
+# This closes that gap by splitting every identifier on case boundaries,
+# underscores, and digit boundaries before the dictionary check -- same
+# codespell dictionary, no hand-rolled wordlist (operator ruling 2026-07-28,
+# full-tree camelCase sweep). Any subword >=4 chars that matches is a hit.
+_IDENT_WORD_RX = re.compile(r"[A-Za-z][A-Za-z0-9_]*")
+_DIGIT_BOUNDARY_RX = re.compile(r"(?<=[A-Za-z])(?=[0-9])|(?<=[0-9])(?=[A-Za-z])")
+_CAMEL_BOUNDARY_RX = re.compile(r"(?<=[a-z0-9])(?=[A-Z])|(?<=[A-Z])(?=[A-Z][a-z])")
+
+
+def _split_subwords(token):
+    out = []
+    for piece in token.split("_"):
+        if not piece:
+            continue
+        piece = _DIGIT_BOUNDARY_RX.sub(" ", piece)
+        for chunk in piece.split(" "):
+            if not chunk:
+                continue
+            chunk = _CAMEL_BOUNDARY_RX.sub(" ", chunk)
+            out.extend(c for c in chunk.split(" ") if c)
+    return out
+
+
+def _load_gb_dictionary():
+    """The exact dictionary codespell ships -- read from its own package data,
+    never retyped. Same file run_codespell_check's codespell_lib.main() reads
+    internally; this just gives us subword-level access to it."""
+    if codespell_lib is None:
+        return {}
+    data_dir = Path(codespell_lib.__file__).resolve().parent / "data"
+    path = data_dir / "dictionary_en-GB_to_en-US.txt"
+    out = {}
+    for line in path.read_text(encoding="utf-8").splitlines():
+        line = line.strip()
+        if not line or "->" not in line:
+            continue
+        brit, us = line.split("->", 1)
+        out[brit.strip().lower()] = us.strip()
+    return out
+
+
+def _subword_hits(token, dictionary):
+    hits = []
+    for sub in _split_subwords(token):
+        if len(sub) < 4 or sub.lower() == token.lower():
+            continue  # whole-word hits are codespell's own job, not this gap
+        low = sub.lower()
+        if low in dictionary:
+            hits.append((sub, dictionary[low]))
+        elif low in BRITISH_SPELLING_EXTRAS:
+            hits.append((sub, BRITISH_SPELLING_EXTRAS[low]))
+    return hits
+
+
+def run_camelcase_check():
+    """C-11 gap-closer: British spelling hiding inside a camelCase/PascalCase/
+    combined-snake_case identifier, where codespell's whole-word match can't
+    see it. Filenames are in scope too -- a British-spelled path is the same
+    defect as a British-spelled variable."""
+    if codespell_lib is None:
+        return []  # run_codespell_check already reports the missing dependency loudly
+    dictionary = _load_gb_dictionary()
+    findings = []
+
+    all_files = list(tracked_files())
+    for rel in all_files:
+        for component in rel.split("/"):
+            stem = component.rsplit(".", 1)[0] if "." in component else component
+            for tok in _IDENT_WORD_RX.findall(stem):
+                for sub, sugg in _subword_hits(tok, dictionary):
+                    findings.append(("british-spelling-subword", rel, 0,
+                                     f"{tok} (filename subword {sub!r} -> {sugg})",
+                                     "British spelling inside a filename component "
+                                     "(CANON C-11 -- camelCase/subword gap)"))
+
+    content_files = [f for f in all_files if f not in BRITISH_SPELLING_SCAN_EXEMPT]
+    for rel in content_files:
+        try:
+            text = (ROOT / rel).read_text(encoding="utf-8", errors="strict")
+        except (UnicodeDecodeError, OSError):
+            continue
+        for lineno, line in enumerate(text.splitlines(), 1):
+            if (rel, lineno) in BRITISH_SPELLING_KNOWN_CODE_HITS:
+                continue
+            for tok in _IDENT_WORD_RX.findall(line):
+                if len(tok) < 4:
+                    continue
+                for sub, sugg in _subword_hits(tok, dictionary):
+                    findings.append(("british-spelling-subword", rel, lineno,
+                                     f"{tok} (subword {sub!r} -> {sugg})",
+                                     "British spelling inside a compound identifier "
+                                     "(CANON C-11 -- camelCase/subword gap, codespell "
+                                     "can't see across case/underscore boundaries)"))
+    return findings
+
 # Files the spelling scan must never touch: this file names the banned words
 # by construction (the extras dict above, this comment), and legal texts are
 # verbatim by law, not by style.
@@ -93,7 +192,21 @@ BRITISH_SPELLING_SCAN_EXEMPT = ("THIRD_PARTY_LICENSES.md", "LICENSE", "NOTICE",
 # Every catalogued code-comment hit was fixed in the 2026-07-28 pass. Kept as
 # a MECHANISM, not a list: adding an entry here requires an operator-visible
 # justification in the commit that adds it, never a silent exemption.
-BRITISH_SPELLING_KNOWN_CODE_HITS = set()
+#
+# Justification for the docs/canon/LEDGER.md lines below (2026-07-28 BRITISH-
+# SPELLING TOTAL SWEEP entry): that entry is an audit record, and quotes the
+# actual banned strings it found/fixed/flagged/false-positived (the same
+# reason this file's own BRITISH_SPELLING_EXTRAS comment above is exempt) --
+# not a live comment or prose defect. Never add a line here for an ordinary
+# hit; fix it instead.
+BRITISH_SPELLING_KNOWN_CODE_HITS = {
+    ("docs/canon/LEDGER.md", 2104), ("docs/canon/LEDGER.md", 2111),
+    ("docs/canon/LEDGER.md", 2126), ("docs/canon/LEDGER.md", 2151),
+    ("docs/canon/LEDGER.md", 2152), ("docs/canon/LEDGER.md", 2155),
+    ("docs/canon/LEDGER.md", 2161), ("docs/canon/LEDGER.md", 2162),
+    ("docs/canon/LEDGER.md", 2166), ("docs/canon/LEDGER.md", 2167),
+    ("docs/canon/LEDGER.md", 2186), ("docs/canon/LEDGER.md", 2187),
+}
 
 GREP_CHECKS = [
     dict(
@@ -279,7 +392,7 @@ def run_channel_map_check():
 
 
 def main(argv):
-    findings = run_grep_checks() + run_pin_check() + run_codespell_check()
+    findings = run_grep_checks() + run_pin_check() + run_codespell_check() + run_camelcase_check()
     if "--no-gen" not in argv:
         findings += run_channel_map_check()
 

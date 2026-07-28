@@ -1273,6 +1273,21 @@ this session, exit codes checked; link-verifier script + both its runs,
 `catalog_lint.py` output, native suite + `sd32-ota` build output all
 reproduced in this session]
 
+**Addendum — a lint gap this same session created and then caught.** The
+`canon_lint.py` "0 findings" run cited above ran before the `.gitignore`
+fix's rescued `docs-site/docs/build/` pages were staged; committing them
+(the first of this Phase G close-out's three commits) made canon_lint see
+those 10 pages for real for the first time ever, and the mandatory
+post-commit re-run (CANON §5: run before declaring substantive work done)
+turned up 13 genuine British-spelling findings (the British variants of
+"color", "behavior", and "honor", across `cli.md`, the four client-language
+stub pages, and `local-testing.md`) that had simply never been checked
+before. Fixed in a
+third commit, re-verified clean, no firmware/native/webui touched by that
+fix. Recorded here rather than silently folded into the number above,
+because the number above was accurate when written and would otherwise read
+as having covered ground it hadn't yet.
+
 - **Phase C4 LANDED (2026-07-28, execution spec = tools/gen_channel_grid.py's
   ALLOC dict, stamped 2026-07-27 via the channel-grid visual):** 22 device
   channels renumbered onto the family-nibble sub-slot convention — slot =

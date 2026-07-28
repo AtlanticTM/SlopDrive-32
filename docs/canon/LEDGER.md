@@ -1349,10 +1349,16 @@ directly, full gauntlet commands run and exit codes/output observed above]
    device (build-only, per scope). [verified 2026-07-28 — every command
    above run directly this session, exit codes / PASS-ALL / 0-findings
    observed firsthand]
-6. **`minimal` sim profile floor — PENDING, operator draft recorded:**
-   "home, motion, move, window controls and pattern Gen are the bare
-   minimum." Decide + implement later; current spec-core+motion/move/home
-   stands until then.
+6. **`minimal` sim profile floor — STAMPED (operator, 2026-07-28, webui
+   kickoff):** draft ratified as written — `minimal` is the smallest
+   REALISTIC machine (home, motion, move, window controls, pattern gen),
+   not an adversarially tiny catalog; the "Tier-1 widget absents itself"
+   test surface is explicitly `alien`'s job, which is already true in code
+   (`sim/slopsim/src/machine/SlopSimCatalog.h` advertises no pattern
+   channel by design — its own header states it). Implementation (window
+   controls + pattern gen added to `SlopMinimalCatalog.h`) is webui-phase
+   work, step 2 of the WEBUI PHASE KICKOFF plan below. [ruling stamped
+   2026-07-28; alien-omits-pattern verified same date — code read]
 7. **dictionary.yaml lane call — ratified.**
    Sequencing: Phase G close-out → (2) wire strings → (3) sim parity +
    SlopBench → (1) coalescing → (5) comment pass. Deploys serialize.
@@ -2368,10 +2374,98 @@ Connect's parsed AD view against live fw 2.1.85. Same instrument that found
 the record missing pre-fix (T14). The `ble_adv_flags` byte is verifiably on
 the air.
 
-## FIRST LIVE BLE GATT SESSION (2026-07-28) — probe gains a BLE transport, fw 2.1.85 unchanged
+## WEBUI PHASE KICKOFF (operator + main loop, 2026-07-28) — scope rulings + plan
+
+Alignment discussion held from the deliberate clean state (SlopDrive-32
+`84929cf`, SlopSync `c724b25`, device live on fw 2.1.86). The phase is
+COMPLETION + ALIGNMENT of the existing catalog-driven Svelte 5 client
+(`docs/webui-architecture.md`), NOT a rebuild — the rebuilt client is the
+SlopDeck kernel seed (DESIGN.md §6) and the rail/hero identity stays locked
+per the prior ruling.
+
+**Rulings stamped this session (operator):**
+
+- **Ruling-6 stamped** — see the amended morning-batch item 6 above.
+- **"UI complete" (the VERIFICATION POSTURE lift milestone) = embedded UI
+  + hosted build config + Tauri 2 shell.** Operator chose the
+  shell-inclusive scope over the main-loop recommendation (embedded +
+  hosted only), informed that it pulls client-side BLE GATT and the Tier-2
+  plugin loader into the phase. The bare-minimum verification floor stays
+  in force for the whole ride.
+- **Pairing knock-and-approve pulled IN:** `Hub::openPairing()` has no
+  firmware caller, so a machine with an existing configure-holder cannot
+  approve later clients from the UI (`PairingPane`'s honest-limits gap).
+  The firmware caller + UI approve flow are phase work — the Prime Rule's
+  own ritual (a client hitting a gap means the thing gets implemented).
+- **Telemetry redesign stays PARKED** (no stated scope; posture ruling
+  exists precisely to defer open-ended polish). Recorded in Deferred /
+  planned below.
+- The 35 `DEMO-CANDIDATE:` markers remain a separate parked pass, per the
+  kickoff brief.
+
+**Findings recorded (kickoff truth pass):**
+
+- **RFC-048 vocabulary consumption gap — the phase centerpiece.** The
+  device catalog EMITS the rendering vocabulary (`SlopSyncCatalog.h` is
+  full of `ui_ranks::hero`/`control` etc., wired by Phase C2) but the JS
+  client decoder (`../SlopSync/clients/js/catalog.js`) and the webui model
+  layer consume NONE of it — zero hits for archetype/rank/region/
+  widget_pattern in either tree. `roles.js`/`heroes.js` predate RFC-048
+  and hand-guess the derivation chain RENDERING.md then made normative.
+  Same disease the rebuild cured, one layer up. [verified 2026-07-28 —
+  grep both trees + SlopSyncCatalog.h read]
+- **WEBUI-HANDOFF-RFC-BATCH.md is substantially absorbed** (declared-size
+  decode, deadman wish, limits-key-4 batching, relative `/uitoken`,
+  PlanStrip role-first, reserved-regex gone — all confirmed by grep). The
+  ONE unverified item is the headline: rail tap-to-move end-to-end live
+  (tap → 0x3100 INTENT → post-clamp ECHO → carriage moves →
+  `telemetry.target` follows) + the commanded/lag numerals. No ledger
+  record of that check exists. Handoff file gets deleted once it passes.
+  [verified 2026-07-28 — grep `clients/js` + `webui/src`]
+
+**Plan (order agreed; each step live-smoked per DOCTRINE §3, which IS the
+posture floor's smoke):**
+
+1. Truth pass: tap-to-move + commanded/lag live verification; delete the
+   handoff doc.
+2. Ruling-6 implementation: `SlopMinimalCatalog.h` gains window controls +
+   pattern gen.
+3. Tier-0 alignment to RFC-048: `clients/js` decodes the vocabulary
+   fields; model consumes category → rank → archetype → widget pattern →
+   region; current heuristics demoted to fallback-for-roleless-hubs
+   (cross-repo: SlopSync commit first, pin bump here).
+4. Founding Tier-1 completion: SlopMotion tuning widget + fray-d Advanced
+   generator panel (the two of four founding widgets still rendering as
+   generic cards), sim-first against the 19-channel parity sim, live smoke
+   per control.
+5. Protocol-surface catch-up: RFC-042 staleness/resume UX (verify JS
+   client reattach presents the same `instance_id`, handles
+   `session_stale`/`session_resumed`), curve-family downgrade visibility
+   (key 45 ≠ key 48 shown, not buried), channel `status` field,
+   trust-ledger display rule, BLE/discovery presence in link surfaces,
+   knock-and-approve (firmware caller + PairingPane flow).
+6. Widget interface extraction (SlopDeck step 2) — deliberately LAST, so
+   the contract is extracted from four REAL widgets; `shadow.svelte.js`
+   pure-lifecycle refactor rides along.
+7. Shell tail: hosted build config, then Tauri 2 shell (mDNS discovery,
+   Tier-2 loader + dogfood plugin, client-side BLE GATT transport).
+
+Execution ladder per standing preference: main loop architects + reviews,
+sonnet executes Svelte/JS chunks, opus on hard debugging.
+
+## Deferred / planned (homes: docs/REFACTOR-ROADMAP.md, docs/MOTION-TODO.md)
 
 - TCode pass-through channel (post-MFP; parser cross-task race was the
   blocker).
 - Native Intiface SlopSync support (replaces the deleted :55555 bridge).
-- Telemetry redesign; Tauri 2 shell; C5-node SlopSync transports; merge to
-  `main`.
+- Telemetry redesign (parked by the WEBUI PHASE KICKOFF ruling below);
+  C5-node SlopSync transports; merge to `main`. Tauri 2 shell moved INTO
+  the webui phase by the same ruling — no longer deferred.
+
+**LEDGER REPAIR (2026-07-28, webui kickoff session):** this section's header
+was found clobbered by a duplicate copy of the FIRST LIVE BLE GATT SESSION
+header (bad edit anchor in one of the 2.1.86-era commits), leaving these
+bullets orphaned under the wrong title. Restored from `a24c42c`'s version of
+the file; no content was lost (the BLE session entry's real body was intact
+above). [verified 2026-07-28 — `git show a24c42c:docs/canon/LEDGER.md` diffed
+against working tree]

@@ -1379,7 +1379,23 @@ directly, full gauntlet commands run and exit codes/output observed above]
   v1.0 tag day already carries the Old-column retirement and the
   `(was 0x...)` comment sweep, so the split joins one clean go-public event.
   [ruling recorded 2026-07-28 by main loop; not scheduled work yet]
-  RELEASE HOLD (operator, 2026-07-28): commits stay LOCAL and staged; no
+  GO RULING (operator, 2026-07-28, release discussion held): the split
+  EXECUTES NOW (supersedes the at-v1.0 timing above; the Old-column and
+  `(was 0x...)` retirements still wait for the v1.0 tag, they just no
+  longer bundle with the split). Decisions stamped as recommended:
+  (a) name KEPT, repo is **SlopSync** (capitalized, operator-specified) —
+  the three GitHub collisions are toys (2 stars max, none a protocol);
+  (b) the MFP plugin MOVES to clients/mfp as a reference client;
+  (c) FRESH history — initial commit records "extracted from
+  SlopDrive-32 @ <sha>", no filter-repo surgery;
+  (d) PRIVATE first, public (and docs-site Pages deploy, which requires a
+  public repo on the free plan) when the operator flips it.
+  New repo builds locally at ../SlopSync as a sibling checkout; operator
+  creates the empty GitHub repo whenever; FIRST PUSH ONLY AFTER OPERATOR
+  REVIEW of both trees.
+  RELEASE HOLD (operator, 2026-07-28, superseded by the GO RULING above
+  for the split itself; the no-push-until-review clause still binds):
+  commits stay LOCAL and staged; no
   repo creation, no push, no sync of any kind until the operator and main
   loop have the release discussion. Standing agenda for that discussion:
   (a) NAMING — "slopsync" is NOT collision-free on GitHub: three existing

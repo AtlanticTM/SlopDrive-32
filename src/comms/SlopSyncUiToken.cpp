@@ -44,11 +44,11 @@ portMUX_TYPE s_mux = portMUX_INITIALIZER_UNLOCKED;
 //   consume():171 -> __cxa_atexit -> __register_exitproc
 //                 -> __retarget_lock_acquire_recursive -> abort()
 // At namespace scope the object is built during static init, before main, on a
-// task with interrupts enabled — so there is nothing left to initialise lazily
+// task with interrupts enabled — so there is nothing left to initialize lazily
 // and the critical section below does pure arithmetic.
 //
 // THE GENERAL RULE, since this will not be the last spinlock in this codebase:
-// NOTHING lazily-initialised may be touched inside portENTER_CRITICAL. That
+// NOTHING lazily-initialized may be touched inside portENTER_CRITICAL. That
 // includes function-local statics, first-use singletons, and anything that
 // might allocate, log, or take a lock. If you need one, construct it in
 // begin().

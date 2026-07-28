@@ -7,8 +7,6 @@
 // output to the two device-specific sinks:
 //   - the /api/log web ring (the WebUI's primary log surface), and
 //   - the USB Serial handoff (full at boot, Warn+ once the WebUI is receiving).
-// SERIAL_CONTROL_MODE decides whether the Serial sink is registered at all
-// (the USB port stays clean for Intiface TCode either way).
 #ifndef APPLOG_H
 #define APPLOG_H
 
@@ -32,12 +30,6 @@ struct SystemState;
 // and must never be touched from the drain task). Pass nullptr to leave the
 // bridge inert.
 void applogBegin(SystemState* state = nullptr);
-
-// Runtime serial gating: mute the serial sink completely while serial TCode
-// traffic is actively flowing (Intiface owns the port), restore when idle.
-// Poll from httpTask with serialTransport.isActive(). Composes with
-// applogSerialQuiet() (post-handshake Warn+ floor).
-void applogSerialDedicated(bool dedicated);
 
 // Arm the RFC-017 SlopSync bridge sink. Registered by applogBegin() but INERT
 // until this is called, because boot narrates far more lines than the cross-task

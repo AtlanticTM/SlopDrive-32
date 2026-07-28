@@ -32,7 +32,7 @@
 // Bumped by hand on each firmware change so an OTA can be verified as landed
 // (surfaced via /api/capabilities → "fw_version" and the boot log). This is the
 // single source of truth for "which build is actually running." :3
-#define FIRMWARE_VERSION        "2.1.77"
+#define FIRMWARE_VERSION        "2.1.82"
 
 // =============================================================================
 // WiFi Configuration (values come from secrets.h)
@@ -42,9 +42,10 @@
 
 // Per-credential-set connect timeout at boot. setupWiFi() tries the primary
 // (secrets.h) creds for this long, then the NVS-stored secondary creds for the
-// same window, before dropping to serial TCode control. 10s is enough for a
-// normal WPA2 associate + DHCP without stalling boot for a network that isn't
-// there. Boot-only blocking — never hit on the real-time path. :3
+// same window, before falling back to the serial rescue path (SlopSync needs
+// WiFi; there is no other control plane). 10s is enough for a normal WPA2
+// associate + DHCP without stalling boot for a network that isn't there.
+// Boot-only blocking — never hit on the real-time path. :3
 #define WIFI_CONNECT_TIMEOUT_MS   10000
 
 // ---- Boot-time / reconnect strongest-AP selection --------------------------
@@ -52,7 +53,7 @@
 // fast-scan latches onto the first-heard AP (often the weakest) and never
 // roams. The rig is stationary during use, so a full scan + strongest-BSSID
 // pin at every WiFi bring-up (cold boot AND every reconnect-from-disconnected
-// cycle) is the complete fix. See TransportManager::_connectBest(). :3
+// cycle) is the complete fix. See WifiLink::_connectBest(). :3
 #define WIFI_SCAN_PIN_ENABLED       1
 // Consecutive pinned-connect failures tolerated before a bring-up cycle falls
 // back to an unpinned WiFi.begin() (lets the core associate with ANY live AP so
@@ -177,9 +178,8 @@ float    aimStepsPerMm();
 #define AIM_HOME_STALL_PLAUSIBLE_FRAC 0.90f
 
 // ---- Modbus direct-drive backend tunables (Phase 3 — see plan.md) ----------
-// Streamed-setpoint executor cadence: how often StreamedSetpointExecutor
-// samples the active TrapezoidProfile and streams one 0x7B setpoint while
-// genuinely moving. 10ms matches the OSSM-RS reference cadence and fits
+// Streamed-setpoint executor cadence: how often StreamedSetpointExecutor's
+// tracker streams one FC 0x10 position delta while genuinely moving. 10ms matches the OSSM-RS reference cadence and fits
 // comfortably inside the bus budget at 115200 (plan.md "Bus budget"). :3
 #define AIM_SP_PERIOD_MS            10
 // Idle/frozen keep-alive cadence — slower than the motion cadence since
@@ -441,19 +441,11 @@ float    aimStepsPerMm();
 // =============================================================================
 // Serial Control Mode
 // =============================================================================
-// This flag no longer gates runtime input — the active transport (WS/SER/BT
-// selected in the web UI and persisted to NVS) is the single source of truth.
-// SERIAL_CONTROL_MODE is now used ONLY to:
-//   1. Set the factory-default transport mode (1 → SER, 0 → WS).
-//   2. Announce serial-control status via /api/status → serial_mode.
-// It NO LONGER gates debug output — that is runtime now: the SlopLog serial
-// sink mutes itself only while serial TCode traffic is actively flowing
-// (applogSerialDedicated ← serialTransport.isActive()), so the Intiface
-// stream stays clean exactly when it exists and logs flow every other
-// moment. (The old compile-time exclusion silenced ALL serial logging — a
-// diagnosed field incident. Don't bring it back.)
-#define SERIAL_CONTROL_MODE     1            // 1 = USB Serial is default transport, 0 = WiFi
-#define SERIAL_CONTROL_BAUD     115200       // must match Intiface's serial port
+// SlopSync (WiFi) is the only control plane (CLAUDE.md §8, M5c). USB Serial
+// is boot-log + the rescue/OTA-recovery path only. SERIAL_CONTROL_MODE just
+// gates the boot banner and the /api/status → serial_mode diagnostic field.
+#define SERIAL_CONTROL_MODE     1            // 1 = boot banner says serial-rescue, 0 = WiFi-only banner
+#define SERIAL_CONTROL_BAUD     115200       // USB serial baud (boot log + rescue path)
 
 // =============================================================================
 // Intiface / Buttplug — REMOVED (M5c, fw 2.1.65)
@@ -475,7 +467,8 @@ float    aimStepsPerMm();
 // got divided by 999 = 50.0, clamped to 1.0, and every fast high-precision
 // stroke slammed into the wall.
 //
-// Correct TCode v0.3 (what we do now, in TCodeParser): the magnitude is an
+// Correct TCode v0.3 decode (historical — the TCode parser is retired, SlopSync
+// is the only wire protocol now): the magnitude is an
 // IMPLICIT DECIMAL FRACTION of arbitrary length — strip the axis+channel, then
 // treat the entire remaining digit string as if prefixed with "0." So:
 //   L0500    → 0.500       (leading zeros are decimal placeholders!)
@@ -501,86 +494,19 @@ float    aimStepsPerMm();
 
 
 // =============================================================================
-// Transport Mode — three ways to get dirty talk into this machine. :3
-// =============================================================================
-// The machine can receive TCode over three transports. Exactly ONE is active
-// at a time; the user picks it in the web UI (Settings) and we remember it
-// in NVS (we're loyal like that). The status chip shows WS / SER / BT.
-//   WS  = WebSocket. The ESP32 runs a TCode WebSocket server (MultiFunPlayer
-//         connects in) AND can connect out to Intiface's WSDM server. Needs WiFi.
-//         The social butterfly of transports — always making new connections.
-//   SER = USB Serial. Intiface's "serialport" comm manager streams TCode over
-//         USB. Lowest latency, no WiFi needed. The direct, no-nonsense top.
-//   BT  = Bluetooth LE. The ESP32 advertises a Nordic-UART-style BLE service;
-//         a BLE host (phone app / Intiface BLE) writes TCode to the RX
-//         characteristic. Wireless, personal, intimate. No WiFi needed.
-enum class TransportMode : uint8_t {
-    WS      = 0,
-    SER     = 1,
-    BT      = 2,
-    OSSM_BLE = 4,
-    // DONGLE: T-Dongle C5 connected via hardware UART (Serial2).
-    // The dongle receives TCode over USB from MFP and relays it to the S3
-    // over a physical UART wire — TX/RX on pins defined below. This lets
-    // MFP talk to the dongle's USB port while the S3 stays on WiFi for the
-    // web UI. The dongle is basically a wireless-capable USB-to-UART bridge
-    // that also shows a pretty display. yippie! :3
-    DONGLE = 3,
-};
-
-// Default transport on a fresh device (before any saved selection). SER keeps
-// backwards-compatible behavior with the old SERIAL_CONTROL_MODE build flag.
-#ifndef DEFAULT_TRANSPORT_MODE
-  #if SERIAL_CONTROL_MODE
-    #define DEFAULT_TRANSPORT_MODE  TransportMode::SER
-  #else
-    #define DEFAULT_TRANSPORT_MODE  TransportMode::WS
-  #endif
-#endif
-
-// =============================================================================
-// Dongle UART Transport — Serial2 on the ESP32-S3
-// =============================================================================
-// The T-Dongle C5 relays TCode from MFP over a physical UART wire to the S3.
-// On the custom v0.0 board the relay goes to the onboard C5-Zero over GPIO43/44
-// (D1/D0), NOT the old 8/9 — those now belong to the I2C bus (INA228/AS5600).
-// Leaving these on 8/9 would fight the current sensor for the same pins. :3
-// If TX and RX are swapped, just swap the wires — no firmware change needed. :3
-#define DONGLE_UART_TX_PIN      43   // S3 TX → C5 RX (D1/TX)  [was GPIO8 on old PCB]
-#define DONGLE_UART_RX_PIN      44   // S3 RX ← C5 TX (D0/RX)  [was GPIO9 on old PCB]
-
-// 460800 baud: each byte takes ~22µs vs 87µs at 115200. A 12-byte TCode frame
-// arrives in ~260µs instead of ~1ms — cuts per-frame UART jitter by ~4×.
-// The dongle firmware must match this baud or every byte will be garbage. :3
-#define DONGLE_UART_BAUD        460800
-
-// =============================================================================
-// Bluetooth LE (BLE) Transport
-// =============================================================================
-// Advertised device name (what shows up in a BLE scanner / Intiface).
-#define BLE_DEVICE_NAME        "SlopDrive-32"
-// Nordic UART Service (NUS) UUIDs - the de-facto "BLE serial" profile. A host
-// writes TCode bytes to the RX characteristic; we notify TCode replies on TX.
-#define BLE_NUS_SERVICE_UUID   "8a846175-ea22-4411-88f5-9a8afcc20671"
-#define BLE_NUS_RX_CHAR_UUID   "8a846175-ea22-4411-88f5-9a8afcc20672"  // host -> device (write)
-#define BLE_NUS_TX_CHAR_UUID   "8a846175-ea22-4411-88f5-9a8afcc20673"  // device -> host (notify)
-
-
-// =============================================================================
 // HTTP Server Port
 // =============================================================================
 
-#define UI_WS_PORT              81           // binary WebSocket UI control plane
 #define SLOPSYNC_WS_PORT        82           // SlopSync hub transport (binary WS)
-// The negotiated WS subprotocol. ONE definition: it was a bare literal in the
-// links2004 transport and in its log line, and a second transport would have
-// made that two more places to drift. A client that does not offer exactly this
-// is refused at handshake (RFC 6455 4.2.2) -- see lib/espasyncwebserver/VENDORED.md.
+// The negotiated WS subprotocol. ONE definition, used by both the transport's
+// bind and its log line, so the two cannot drift apart. A client that does not
+// offer exactly this is refused at handshake (RFC 6455 4.2.2) -- see
+// lib/espasyncwebserver/VENDORED.md.
 #define SLOPSYNC_WS_SUBPROTOCOL "slopsync.v1"
 // NOTE: WiFi power-save (WIFI_PS_*) is never touched anywhere in this
 // firmware — the device is permanently wall-powered via a brick, so there's
 // no power budget to protect and toggling PS modes only adds WiFi radio
-// latency/jitter. TransportManager::setupWiFi() calls WiFi.setSleep(false)
+// latency/jitter. WifiLink::setupWiFi() calls WiFi.setSleep(false)
 // once at boot and that's the end of it. :3
 
 #define HTTP_SERVER_PORT        80
@@ -588,14 +514,6 @@ enum class TransportMode : uint8_t {
 
 // MDNS service name
 #define MDNSServiceName         "slopdrive32"
-
-// =============================================================================
-// Control Mode
-// =============================================================================
-enum class ControlMode : uint8_t {
-    MANUAL = 0,     // Web UI manual control
-    BUTTPLUG = 1    // Buttplug/Intiface WebSocket control
-};
 
 // =============================================================================
 // Device State for Configuration (persisted to EEPROM/NVS)
@@ -627,9 +545,6 @@ struct DeviceConfig {
     // jmax after division by the stroke-window span, exactly like the two
     // above — a MECHANICAL protection ceiling, never a smoothing knob. :3
     float input_max_jerk_mm_s3;    // default: 2000000
-
-    // Control mode
-    uint8_t control_mode;      // 0=Manual, 1=Buttplug
 
     // Driver settings (live-tunable from the Motor tab)
     uint16_t microsteps;       // 1/2/4/8/16/32/64/128/256 - smoothness vs torque
@@ -669,7 +584,6 @@ inline DeviceConfig getDefaultConfig() {
     cfg.input_max_speed_mm_s  = DEFAULT_MAX_SPEED_MM_S;
     cfg.input_max_accel_mm_s2 = DEFAULT_ACCEL_MM_S2;
     cfg.input_max_jerk_mm_s3  = DEFAULT_INPUT_MAX_JERK_MM_S3;
-    cfg.control_mode = (uint8_t)ControlMode::BUTTPLUG;
     cfg.microsteps = 16;
     cfg.run_current_ma = DRIVER_DEFAULT_RUN_CURRENT_MA;
     cfg.hold_current_pct = DRIVER_DEFAULT_HOLD_CURRENT_PCT;

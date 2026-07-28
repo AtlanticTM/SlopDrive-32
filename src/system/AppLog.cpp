@@ -5,6 +5,9 @@
 
 #include "AppLog.h"
 
+#include <new>
+
+#include "esp_heap_caps.h"
 #include "freertos/FreeRTOS.h"
 
 #include "SystemState.h"
@@ -55,8 +58,14 @@ public:
     void dump(String& out) {
         // Copy under the lock, then build the String outside it (String
         // append can reallocate — never allocate in a critical section).
-        static LowSub loSnap;    // static: far too big for an HTTP stack
-        static HighSub hiSnap;
+        // _loSnap/_hiSnap used to be function-local `static` here (comment:
+        // "far too big for an HTTP stack") — moved to instance members
+        // (TRAPS T2 pass, 2026-07-28) so they ride into PSRAM with the rest
+        // of this object instead of adding a SECOND ~8.9 KB internal-BSS
+        // reservation on top of _low/_high. Same single-shared-buffer
+        // semantics either way; dump() is never reentrant (httpTask only).
+        LowSub& loSnap = _loSnap;
+        HighSub& hiSnap = _hiSnap;
         portENTER_CRITICAL(&_mux);
         memcpy(&loSnap, &_low, sizeof(LowSub));
         memcpy(&hiSnap, &_high, sizeof(HighSub));
@@ -151,6 +160,11 @@ private:
 
     LowSub _low;
     HighSub _high;
+    // dump()'s copy-under-lock snapshot targets — see dump()'s comment. Same
+    // PSRAM placement as _low/_high (this whole object is placement-new'd
+    // there, see webRingOrNull() below).
+    LowSub _loSnap;
+    HighSub _hiSnap;
     uint32_t _seq = 0;
     uint32_t _evicted[sloplog::kLevelCount] = {};
     uint32_t _bridgeDropped = 0;
@@ -158,10 +172,27 @@ private:
     portMUX_TYPE _mux = portMUX_INITIALIZER_UNLOCKED;
 };
 
-WebRingSink& webRing() {
-    static WebRingSink s;
-    return s;
-}
+// ~17.8 KB total (_low + _high + _loSnap + _hiSnap) — TRAPS T2: this used to
+// be a magic-static object (`static WebRingSink s;`), i.e. ~17.8 KB of
+// internal BSS for a ring that ONLY httpTask ever touches (write() from the
+// drain caller, dump() from HTTP handlers) — no ISR, no DMA, nothing that
+// requires internal RAM. Found during the 2026-07-28 heap-relief pass as the
+// single largest non-mandatory internal-RAM reservation in the build
+// (xtensa-esp32s3-elf-nm --size-sort), on a device already down to ~15 KB
+// free heap post-NimBLE-return. Placement-new'd into PSRAM from
+// applogBegin() instead, same idiom as SlopSyncHubService in main.cpp
+// (heap_caps_malloc + placement new, refuse rather than eat internal RAM if
+// PSRAM is somehow absent). applogBegin() runs single-task, before any
+// FreeRTOS task exists, so there is no construction-order race to worry
+// about (unlike the magic-static version, whose first call could in
+// principle race — it never did in practice, since applogBegin() always ran
+// first, but this is now explicit rather than incidental).
+static WebRingSink* s_webRing = nullptr;
+
+// nullptr iff the one-time PSRAM allocation above failed. Every call site
+// checks: this ring is a diagnostics convenience, not a safety plane, so the
+// honest degradation is "no web log ring this boot", never a crash.
+WebRingSink* webRingOrNull() { return s_webRing; }
 
 // ---- RFC-017: the SlopLog -> SlopSync bridge sink --------------------------
 // Every drained record is copied into the SPSC ring in SystemState; the Core-0
@@ -235,18 +266,12 @@ SlopSyncSink& syncSink() {
 
 // Serial-sink gating is RUNTIME, not compile-time (the SERIAL_CONTROL_MODE
 // #if that used to exclude the sink silenced ALL serial logging forever —
-// a field incident). Two independent inputs pick the sink's floor:
-//   - dedicated: serial TCode traffic is actively flowing (Intiface owns the
-//     port) -> mute completely. Self-healing both directions, polled from
-//     httpTask via applogSerialDedicated(serialTransport.isActive()).
-//   - handshook: the WebUI served /api/log at least once -> Warn+ only.
-static bool s_serialDedicated = false;
+// a field incident). One input picks the sink's floor: handshook — the
+// WebUI served /api/log at least once -> Warn+ only; until then, full.
 static bool s_serialHandshook = false;
 
 static void applySerialFloor() {
-    sloplog::Level floor = sloplog::Level::Trace;
-    if (s_serialDedicated) floor = sloplog::Level::Off;
-    else if (s_serialHandshook) floor = sloplog::Level::Warn;
+    sloplog::Level floor = s_serialHandshook ? sloplog::Level::Warn : sloplog::Level::Trace;
     sloplog::logger().setSinkFloor(&sloplog::serialSink(), floor);
 }
 
@@ -256,7 +281,17 @@ static SystemState* s_state = nullptr;
 
 void applogBegin(SystemState* state) {
     s_state = state;
-    sloplog::logger().addSink(&webRing());
+    // TRAPS T2: placement-new the web ring into PSRAM (see webRingOrNull()'s
+    // comment) instead of the ~17.8 KB magic-static this used to be. Runs
+    // single-task, before any other setup() work — no construction-order
+    // race, unlike a lazily-first-called magic static would have.
+    void* mem = heap_caps_malloc(sizeof(WebRingSink), MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT);
+    if (mem != nullptr) {
+        s_webRing = new (mem) WebRingSink();
+        sloplog::logger().addSink(s_webRing);
+    } else {
+        SLOGE("sys", "no PSRAM block for the /api/log web ring — ring DISABLED this boot");
+    }
     // RFC-017: the in-band log plane. Registered here (and only here) per §7.5 —
     // AppLog.cpp is the sink/bridge file. Binding a null state leaves the sink
     // registered but inert, which is what a build without SlopSync wants.
@@ -279,28 +314,25 @@ void applogSyncBridgeArm() { syncSink().arm(); }
 void applogDrain() { sloplog::drainToSinks(); }
 
 // Called from TWO tasks now: httpTask (first /api/log serve) and the SlopSync
-// hub task (first in-band log GRANT, RFC-017). Both only ever set the flag TRUE
-// and then rewrite a small array of per-sink level bytes, so the worst possible
-// interleaving is one transient floor computed from a half-updated pair — which
-// the very next applogSerialDedicated() poll from httpTask corrects. Not worth a
-// lock on a one-shot handoff.
+// hub task (first in-band log GRANT, RFC-017). Both only ever set the flag
+// TRUE, so the worst possible interleaving is a harmless redundant write —
+// not worth a lock on a one-shot handoff.
 void applogSerialQuiet() {
     s_serialHandshook = true;
     applySerialFloor();
 }
 
-void applogSerialDedicated(bool dedicated) {
-    if (dedicated == s_serialDedicated) return;
-    s_serialDedicated = dedicated;
-    applySerialFloor();
-}
-
 void applogDump(String& out) {
+    WebRingSink* ring = webRingOrNull();
+    if (ring == nullptr) {
+        out += "[sloplog] web log ring unavailable this boot (PSRAM alloc failed at applogBegin)\n";
+        return;
+    }
     if (s_state != nullptr) {
-        webRing().setBridgeDrops(
+        ring->setBridgeDrops(
             s_state->sloplog_bridge_dropped.load(std::memory_order_relaxed),
             s_state->sloplog_bridge_dropped_high.load(std::memory_order_relaxed));
     }
-    webRing().dump(out);
+    ring->dump(out);
 }
 

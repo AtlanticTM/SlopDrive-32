@@ -2,16 +2,17 @@
 // same pattern src/ui/SlopHttpServer.cpp uses for the PsychicHttp backend.
 //
 // This guard is NOT optional tidiness. Everything under src/ is compiled by
-// every environment whether or not that environment wants it, so without it the
-// links2004 builds fail on `ESPAsyncWebServer.h: No such file or directory` --
-// in an env that never references the async transport at all. Trying to fix
-// that from platformio.ini (lib_ignore juggling) treats the symptom; the file
-// excluding itself is the actual fix.
+// every environment whether or not that environment wants it, so without it an
+// env that doesn't set the flag (e.g. s3_main) fails on
+// `ESPAsyncWebServer.h: No such file or directory`. Trying to fix that from
+// platformio.ini (lib_ignore juggling) treats the symptom; the file excluding
+// itself is the actual fix.
 #if defined(SLOPSYNC_WS_ASYNC) && SLOPSYNC_WS_ASYNC
 
 #include "SlopSyncAsyncWsTransport.h"
 
 #include "sloplog/sloplog.h"
+#include "slopsync/generated/registry_constants.hpp"  // limits::blob_chunks_in_flight
 
 namespace slopdrive {
 
@@ -28,6 +29,11 @@ bool SlopSyncAsyncWsTransport::isDroppable(std::span<const std::byte> frame) {
     if (frame.size() < 1) return false;
     const auto t = static_cast<slopsync::FrameType>(frame[0]);
     return t == slopsync::FrameType::STATE || t == slopsync::FrameType::STREAM;
+}
+
+bool SlopSyncAsyncWsTransport::isBlobChunk(std::span<const std::byte> frame) {
+    if (frame.size() < 1) return false;
+    return static_cast<slopsync::FrameType>(frame[0]) == slopsync::FrameType::BLOB_CHUNK;
 }
 
 bool SlopSyncAsyncWsTransport::open() {
@@ -68,6 +74,7 @@ bool SlopSyncAsyncWsTransport::write(std::span<const std::byte> frame) {
     // the AsyncTCP task may destroy the client between a lookup and its use,
     // and the id-taking API re-resolves under _ws_clients_lock every call.
     const bool droppable = isDroppable(frame);
+    const bool blobBulk = isBlobChunk(frame);
 
     if (_policy != SlopSyncTxPolicy::CloseAlways && droppable) {
         // Shed telemetry EARLY, before the queue is full, so control frames
@@ -84,28 +91,51 @@ bool SlopSyncAsyncWsTransport::write(std::span<const std::byte> frame) {
         }
     }
 
+    if (_policy != SlopSyncTxPolicy::CloseAlways && blobBulk) {
+        // §8.4/RFC-050 (see the header's classification comment): gate on the
+        // registry's OWN advertised in-flight budget BEFORE ever touching
+        // AsyncWebSocket, so a blob transfer never grows past a handful of
+        // live queued buffers regardless of how slowly the link drains. This
+        // is what keeps a 129-chunk catalog from ever reaching
+        // WS_MAX_QUEUED_MESSAGES in the first place.
+        AsyncWebSocketClient* c = _ws->client(id);
+        if (c != nullptr && c->queueLen() >= slopsync::limits::blob_chunks_in_flight) {
+            _txBlobHolds.fetch_add(1, std::memory_order_relaxed);
+            return false;   // pumpBlobTransfer() retries this same index next tick
+        }
+    }
+
     const bool ok = _ws->binary(id,
                                 reinterpret_cast<const uint8_t*>(frame.data()),
                                 frame.size());
     if (ok) {
-        if (!droppable) _ctrlStallSinceMs = 0;   // control is flowing again
+        // Only a TRUE control frame clears the stall timer — blob traffic
+        // flowing says nothing about whether some OTHER control reply is
+        // wedged, and must not paper over that.
+        if (!droppable && !blobBulk) _ctrlStallSinceMs = 0;
         return true;
     }
 
     // ---- The queue refused it. THIS IS USUALLY NOT AN ERROR. ---------------
     // ITransport::write returning false already MEANS "not accepted right now;
     // the caller's class semantics decide retry vs drop" (§13.1). A burst that
-    // outruns the queue is ordinary flow control: the catalog BLOB transfer
-    // pushes 57 chunks into a 32-deep queue and fills it EVERY time, and the
-    // hub simply retries on the next tick.
+    // outruns the queue is ordinary flow control.
     //
     // An earlier version of this function tore the session down on the first
-    // refused control frame. That killed every session at BLOB chunk ~16 --
-    // caught on hardware, by this file's own log line. Do not reintroduce it:
-    // "queue full once" and "client is not draining" are different facts.
+    // refused control frame. That killed every session partway through the
+    // catalog BLOB transfer -- caught on hardware, by this file's own log
+    // line. Do not reintroduce it: "queue full once" and "client is not
+    // draining" are different facts. (BLOB_CHUNK no longer reaches this far
+    // under ordinary backpressure at all -- see the budget gate above -- but
+    // AsyncWebSocket can still refuse it for OTHER reasons, e.g. queue room
+    // taken by unrelated traffic, so the fallback stays.)
     if (droppable) {
         _txDataDrops.fetch_add(1, std::memory_order_relaxed);
         return false;
+    }
+    if (blobBulk) {
+        _txBlobHolds.fetch_add(1, std::memory_order_relaxed);
+        return false;   // hold, never arm the control stall timer
     }
 
     _txCtrlFails.fetch_add(1, std::memory_order_relaxed);
@@ -113,9 +143,9 @@ bool SlopSyncAsyncWsTransport::write(std::span<const std::byte> frame) {
     // Control frames get a STALL TIMER rather than an immediate verdict. The
     // hub will retry; what we are watching for is a queue that never drains,
     // which is the one case where the client really is stranded waiting on a
-    // reply. Unlike the links2004 mute this cannot be reset by the client
-    // sending us traffic -- only by a control frame actually going out -- so a
-    // chatty-but-wedged client cannot hold the session open forever.
+    // reply. Cleared ONLY by a control frame actually going out -- never by
+    // inbound traffic -- so a chatty-but-wedged client cannot hold the session
+    // open forever.
     const uint32_t now = millis();
     if (_ctrlStallSinceMs == 0) {
         _ctrlStallSinceMs = now;
@@ -167,6 +197,7 @@ void SlopSyncAsyncWsTransport::attachClient(uint32_t id) {
     _rxDrops.store(0, std::memory_order_relaxed);
     _txDataDrops.store(0, std::memory_order_relaxed);
     _txCtrlFails.store(0, std::memory_order_relaxed);
+    _txBlobHolds.store(0, std::memory_order_relaxed);
     _clientId.store(id, std::memory_order_release);
 }
 
@@ -189,7 +220,7 @@ void SlopSyncAsyncWsTransport::pushRx(const uint8_t* data, size_t len) {
     if (next == _rxHead.load(std::memory_order_acquire)) {
         // Full. Drop the NEW frame: an older buffered one is closer to being
         // consumed by the hub this same tick, so discarding it would be
-        // strictly worse. Same choice the links2004 port made.
+        // strictly worse.
         _rxDrops.fetch_add(1, std::memory_order_relaxed);
         SLOGW_EVERY_MS(2000, "slopsync", "RX ring full — frame dropped");
         return;
@@ -322,11 +353,10 @@ void SlopSyncAsyncWsPort::onEvent(AsyncWebSocket* /*server*/, AsyncWebSocketClie
 }
 
 void SlopSyncAsyncWsPort::loop() {
-    // AsyncTCP needs no pumping, so unlike the links2004 port there is no
-    // service call here and no stall sweep: a wedged client can no longer stall
-    // anything, because the send path never blocks. What IS still worth doing
-    // is reaping clients AsyncWebSocket has already given up on, so hub slots
-    // do not leak if a disconnect event was ever missed.
+    // AsyncTCP needs no pumping: no service call here and no stall sweep, since
+    // the send path never blocks and a wedged client cannot stall anything.
+    // What IS still worth doing is reaping clients AsyncWebSocket has already
+    // given up on, so hub slots do not leak if a disconnect event was missed.
     _ws.cleanupClients(kSlots);
 
     // ---- Deferred attach/detach, ON THE HUB TASK (field bug #5) ------------

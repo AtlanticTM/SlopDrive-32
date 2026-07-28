@@ -3,25 +3,21 @@
 // ============================================================================
 // SlopSyncAsyncWsTransport / SlopSyncAsyncWsPort — the ESP32Async binding for
 // the SlopSync hub (SPEC §13.1: real transport adapters live in firmware, NEVER
-// in lib/slopsync). Drop-in replacement for the links2004 SlopSyncWsTransport;
-// selected at build time by -DSLOPSYNC_WS_ASYNC=1 so the two can be A/B'd on
-// otherwise-identical firmware.
+// in lib/slopsync). THE only WS transport (CLAUDE.md §8 M5c); every S3
+// main-controller env sets -DSLOPSYNC_WS_ASYNC=1 unconditionally now.
 //
 // ─── WHY THIS EXISTS ────────────────────────────────────────────────────────
-// links2004's send path is a SYNCHRONOUS BUSY-WAIT on the caller's task: a
-// backed-up client socket blocks the sender until the peer drains or
-// WEBSOCKETS_TCP_TIMEOUT expires (already capped 5000 -> 1200 ms here, which
-// BOUNDS the stall rather than removing it). Everything the old transport did
-// about that — the send-stall mute, kStallEvictMs, the reaper — was scaffolding
-// built to survive a transport that can stall a task. AsyncWebSocket gives
-// bounded per-client queues that drop or close and NEVER block, which is §9 /
-// §10.4 backpressure implemented by the transport instead of compensated for by
-// the application. See lib/espasyncwebserver/VENDORED.md.
+// Replaced a synchronous, busy-wait WS server: a backed-up client socket
+// blocked the sender until the peer drained or a timeout expired. AsyncWebSocket
+// gives bounded per-client queues that drop or close and NEVER block, which is
+// §9 / §10.4 backpressure implemented by the transport instead of compensated
+// for by the application. Full rationale + the measurements that settled it:
+// docs/http-plane-retirement.md. See also lib/espasyncwebserver/VENDORED.md.
 //
 // ─── THE THREADING MODEL (READ THIS BEFORE TOUCHING ANYTHING) ───────────────
-// The old transport had a ONE-TASK invariant and was deliberately mutex-free.
-// That invariant IS GONE and cannot be recovered: AsyncTCP owns its own task,
-// so callbacks arrive there while the hub runs on the SlopSyncHub task.
+// There is NO one-task invariant here, and there cannot be: AsyncTCP owns its
+// own task, so callbacks arrive there while the hub runs on the SlopSyncHub
+// task.
 //
 //   AsyncTCP task : onEvent -> attachClient / detachClient / pushRx
 //   Hub task      : open / close / write / read, from hub.update()
@@ -69,6 +65,24 @@
 //   STATE (0x0B), STREAM (0x0C) = data. Shed EARLY, above kDataQueueHighWater,
 //       so a telemetry burst cannot fill the room control frames need. Stale
 //       telemetry is worthless — conflation is already the doctrine.
+//   BLOB_CHUNK (0x1B) = bulk/resumable, its OWN third class (T2/heap-pressure
+//       field bug, 2026-07-28). Gated on the registry's OWN advertised sender
+//       pacing budget (limits::blob_chunks_in_flight, RFC-050) via the same
+//       queueLen() check the data class uses — NEVER runs all the way to
+//       WS_MAX_QUEUED_MESSAGES before backing off, and NEVER arms the control
+//       stall timer below. A resumable chunked transfer legitimately spends
+//       several ticks paced behind a slow link; that is not "a client
+//       stranded waiting on a reply that will never come" (the ctrlStall
+//       timer's actual job), and hub_impl.hpp's pumpBlobTransfer() already
+//       retries the same un-sent index next tick with no NACK/teardown of its
+//       own. Before this class existed, BLOB_CHUNK fell into "everything
+//       else" below: a 129-chunk catalog transfer pumped 2/tick into a
+//       32-deep queue, filled it, and after kCtrlStallMs of that the SAME
+//       timer meant for a wedged control reply killed the whole session —
+//       observed live as a client-side ConnectionResetError, and once as a
+//       genuine internal-heap-exhaustion PANIC reboot (up to 32 live queued
+//       ~260 B buffers on a ~15 KB free budget). Capping in-flight blob
+//       buffers at 4 keeps that under ~1 KB instead.
 //   everything else = control/raw. Never shed on our own initiative. Refused
 //       ones start a STALL TIMER (kCtrlStallMs); the session is torn down only
 //       if control stays unsendable that long, which is the one case where a
@@ -78,11 +92,9 @@
 //       nobody is allowed to shed (see the 0x000E channel note).
 //
 // The stall timer is cleared ONLY by a control frame actually going out — never
-// by inbound traffic. That is the precise bug that made links2004 fatal: its
-// send-stall mute was cleared by ANY inbound byte, so a client that stopped
-// reading but kept PINGing re-armed the blocking write forever and took every
-// other session down with it (measured: two healthy clients to 0 Hz,
-// permanently — see docs/ws-transport-baseline.md).
+// by inbound traffic. A mute that inbound traffic can reset lets a client that
+// stopped reading but kept PINGing hold its session (and every other client's
+// queue room) forever; see docs/ws-transport-baseline.md.
 //
 // The policy is selectable — see SlopSyncTxPolicy — because it is a protocol
 // semantics decision, not a library one. RATIFIED 2026-07-26: Classify, on the
@@ -121,9 +133,8 @@ enum class SlopSyncTxPolicy : uint8_t { CloseAlways = 0, Classify = 1, DropAlway
 
 class SlopSyncAsyncWsTransport final : public slopsync::ITransport {
 public:
-    // 32, up from links2004's 4 and from this transport's own first cut of 8.
-    //
-    // SIZED FROM A MEASUREMENT, not a guess: an 18-minute 3-client soak logged
+    // 32, up from this transport's own first cut of 8 — SIZED FROM A
+    // MEASUREMENT, not a guess: an 18-minute 3-client soak logged
     // `rx_ring_full: 2` at depth 8 -- rare, but it means two inbound frames were
     // dropped for want of a slot, and the operator's whole ask for this
     // transport is that clients do not lose things.
@@ -159,9 +170,10 @@ public:
     // control, and a burst (57 catalog BLOB_CHUNKs into a 32-deep queue) fills
     // it every single time. What is NOT ordinary is a queue that never drains,
     // because then a client is waiting on a reply that will never come. This
-    // separates the two by TIME rather than by a single failed attempt.
-    // 2 s matches the links2004 port's kStallEvictMs, deliberately: same
-    // promise, mechanism that cannot be defeated by the client PINGing.
+    // separates the two by TIME rather than by a single failed attempt. Long
+    // enough to absorb the catalog BLOB burst; cannot be reset by client PING
+    // traffic (see write()'s stall-timer logic), so a wedged client cannot
+    // hold a session open indefinitely.
     static constexpr uint32_t kCtrlStallMs = 2000;
 
     SlopSyncAsyncWsTransport() = default;
@@ -186,11 +198,20 @@ public:
     uint32_t rxDrops()  const { return _rxDrops.load(std::memory_order_relaxed); }
     uint32_t txDataDrops() const { return _txDataDrops.load(std::memory_order_relaxed); }
     uint32_t txCtrlFails() const { return _txCtrlFails.load(std::memory_order_relaxed); }
+    // Held-not-dropped: a BLOB_CHUNK refused because the in-flight budget
+    // (limits::blob_chunks_in_flight) or the queue itself is full. Never
+    // lost — pumpBlobTransfer() retries the same index — so this is a pacing
+    // counter, not a loss counter, and deliberately not folded into txDataDrops.
+    uint32_t txBlobHolds() const { return _txBlobHolds.load(std::memory_order_relaxed); }
 
 private:
     // Is this frame type shed-able under backpressure? Byte 0 of the header is
     // the frame type (wire/frame_header.hpp), so this needs no parsing.
     static bool isDroppable(std::span<const std::byte> frame);
+    // Is this a BLOB_CHUNK — bulk/resumable, its own third backpressure class
+    // (see the header comment block above). Never true at the same time as
+    // isDroppable().
+    static bool isBlobChunk(std::span<const std::byte> frame);
 
     AsyncWebSocket* _ws = nullptr;
     SlopSyncTxPolicy _policy = SlopSyncTxPolicy::Classify;
@@ -211,6 +232,7 @@ private:
     std::atomic<uint32_t> _rxDrops{0};
     std::atomic<uint32_t> _txDataDrops{0};
     std::atomic<uint32_t> _txCtrlFails{0};
+    std::atomic<uint32_t> _txBlobHolds{0};
 };
 
 // The server + its N transport slots. Owns the AsyncWebSocket handler and
@@ -218,9 +240,8 @@ private:
 //
 // NOTE ON THE HTTP SERVER: AsyncWebSocket is an AsyncWebHandler, so it needs an
 // AsyncWebServer to live in. This port owns its OWN AsyncWebServer on
-// SLOPSYNC_WS_PORT (82) rather than sharing the WebUI's, which keeps the swap
-// like-for-like with the links2004 topology (WebUI on :80, SlopSync on :82) and
-// keeps a WebUI stall from ever being able to touch the protocol plane.
+// SLOPSYNC_WS_PORT (82) rather than sharing the WebUI's (:80) — isolation
+// means a WebUI stall can never touch the protocol plane.
 class SlopSyncAsyncWsPort {
 public:
     static constexpr uint8_t kSlots = slopsync::kHubMaxSessions + 1;
@@ -228,9 +249,8 @@ public:
     SlopSyncAsyncWsPort();
 
     void begin(slopsync::Hub* hub);
-    // Kept for signature parity with the links2004 port so the service task is
-    // identical either way. AsyncTCP needs no pumping — this only sweeps
-    // bookkeeping, and it is a no-op most ticks.
+    // AsyncTCP needs no pumping; this only drains deferred attach/detach and
+    // sweeps bookkeeping (see the .cpp), and is a no-op most ticks.
     void loop();
 
     void setPolicy(SlopSyncTxPolicy p);
@@ -249,25 +269,13 @@ private:
     std::atomic<bool> _attached[kSlots]{};
 
     // ---- THE HUB IS TOUCHED ONLY FROM THE HUB TASK (field bug #5) ----------
-    // onEvent() runs on the AsyncTCP task. It used to call
-    // hub.attachTransport()/detachTransport() directly from there, which put a
-    // SECOND task inside the hub's slot table while the hub task was walking
-    // it. Hub::update() null-checks slot.transport once at the top of its walk
-    // and dereferences it several calls deeper in pumpStatePacing(); the
-    // AsyncTCP task nulling it in that window is a LoadProhibited panic on
-    // Core 0, and rapid connect/disconnect (slopsoak's `churn`) is exactly the
-    // workload that lands in it.
-    //
-    // So onEvent now only RECORDS intent in these flags and loop() -- which
-    // runs on the hub task -- performs the actual attach/detach. The header's
-    // own rule ("everything touched here is either atomic or owned by
-    // AsyncWebSocket's own locks") was always right; calling into the hub
-    // simply was not compatible with it.
-    //
-    // NOTE the links2004 port did not have this bug and could not have: its
-    // loop() was pumped BY the hub task, so its callbacks already ran there.
-    // Going async moved the callbacks to another task and the invariant went
-    // with them, silently.
+    // onEvent() runs on the AsyncTCP task. Calling hub.attachTransport()/
+    // detachTransport() from there races Hub::update()'s slot walk on the hub
+    // task: it null-checks slot.transport once, then dereferences it deeper in
+    // pumpStatePacing(), so AsyncTCP nulling it mid-walk is a LoadProhibited
+    // panic on Core 0 — rapid connect/disconnect (slopsoak's `churn`) hits it
+    // reliably. So onEvent only RECORDS intent in these flags; loop() (hub
+    // task) performs the actual attach/detach. See CLAUDE.md §8, field bug #5.
     std::atomic<bool> _wantAttach[kSlots]{};
     std::atomic<bool> _wantDetach[kSlots]{};
 };

@@ -27,21 +27,23 @@ commit as any change that alters it (C-3).
   2026-07-27 — git branch state]
 - Source-tree firmware version: see `FIRMWARE_VERSION` in
   `include/config_api.h` (its one home). [C-1 pointer]
-- Deployed firmware on the device: **2.1.83**, the RFC-042..050 + Phase C4 +
+- Deployed firmware on the device: **2.1.84**, the RFC-042..050 + Phase C4 +
   Phase E batch PLUS the `attachTransport()` STALE-slot-clobber fix + the
   boot reset-reason log line PLUS the HEAP RELIEF pass (BLOB_CHUNK backpressure
   reclass + WebRingSink PSRAM move — see the amended item (i) below) PLUS the
   parked-slot safety-broadcast panic fix (TRAPS T13 — see the PARKED-SLOT
   SAFETY BROADCAST entry below) PLUS the wire-string punctuation evolution
   (morning ruling item 2 — see the WIRE-STRING PUNCTUATION EVOLUTION entry
-  below), LIVE. [verified 2026-07-28 — `/api/capabilities` `fw_version` =
-  2.1.83 post-OTA; DEPLOY + LIVE-VERIFY session, `/api/capabilities`
-  `fw_version` before/after the OTA + a natural reboot + a deliberate
-  re-flash reboot, all three confirmed `2.1.78`; see the DEPLOY + LIVE-VERIFY
-  entry below for the full checklist, the "RFC-042 attachTransport() clobber
-  — FIXED" entry further down for the 2.1.78 → 2.1.80 follow-up fix session,
-  and the WIRE-STRING PUNCTUATION EVOLUTION entry for the 2.1.82 → 2.1.83
-  deploy]
+  below) PLUS the BLE advertising MSD fix (item (j) closed — see the BLE
+  ADVERTISING MSD FIX entry below), LIVE. [verified 2026-07-28 —
+  `/api/capabilities` `fw_version` = 2.1.84 post-OTA; DEPLOY + LIVE-VERIFY
+  session, `/api/capabilities` `fw_version` before/after the OTA + a natural
+  reboot + a deliberate re-flash reboot, all three confirmed `2.1.78`; see the
+  DEPLOY + LIVE-VERIFY entry below for the full checklist, the "RFC-042
+  attachTransport() clobber — FIXED" entry further down for the 2.1.78 →
+  2.1.80 follow-up fix session, the WIRE-STRING PUNCTUATION EVOLUTION entry
+  for the 2.1.82 → 2.1.83 deploy, and the BLE ADVERTISING MSD FIX entry for
+  the 2.1.83 → 2.1.84 deploy]
 
 ## Milestones & landed state
 
@@ -863,6 +865,13 @@ true, and a new `udp_discovery_port` field. [verified 2026-07-28 —
   + nRF Connect (which shows raw AD structures, not an OS-filtered summary)
   is needed to confirm the manufacturer-data flags byte itself. [verified
   2026-07-28 — live `bleak` scan capture]
+  **CLOSED, 2026-07-28 (later session):** the phone + nRF Connect check
+  happened, and it was a real firmware gap, not OS filtering — the
+  advertisement's own 31-byte budget had no room for the MSD record once
+  the service UUID, Flags, and name were in it; `addData()` failed silently
+  and nobody checked its return. Fixed (MSD moved to the scan response,
+  alongside the full name); see the BLE ADVERTISING MSD FIX entry further
+  down for the mechanism, the fix, and live re-verification (fw 2.1.84).
 
 **Unplanned event during this session:** the device rebooted once on its own
 (not an OTA reboot) mid-test, immediately after a `ConnectionResetError` on
@@ -1548,6 +1557,158 @@ pages, `include/system/config_api.h` (version bump),
 `webui/test/fixtures/slopsim-catalog.{bin,etag}`. [verified 2026-07-28 —
 every command above run directly this session, exit codes checked; commit
 `274abc3`]
+
+## BLE ADVERTISING MSD FIX (2026-07-28) — item (j) CLOSED, fw 2.1.83 → 2.1.84
+
+**Item (j) reopened by an operator phone scan (nRF Connect, hard evidence,
+2026-07-28).** The live advertisement carried Flags, Complete 128-bit
+Service UUID list, and Complete Local Name "SD32" in the primary
+advertisement, plus Complete Local Name "SlopDrive-32" in the scan
+response — but **no Manufacturer Specific Data record existed in either
+packet.** The `ble_adv_flags` byte (bit0 `pairing_window_open`, bit1
+`ws_available`) had never been on the air. This retroactively explains the
+DEPLOY + LIVE-VERIFY session's item (j) `bleak` result (`manufacturer_data`
+came back `{}`) — not Windows/WinRT company-id filtering as guessed at the
+time, but a firmware gap.
+
+**Mechanism confirmed by reading the code path and the vendored NimBLE
+source (`.pio/libdeps/sd32-ota/NimBLE-Arduino/src/NimBLEAdvertisementData.cpp`)
+— TRAPS T14, new entry.** `SlopSyncBlePort::refreshAdvertisingData()` built
+ONE `NimBLEAdvertisementData` carrying Flags(3B) + 128-bit Complete Service
+UUID(18B) + `setName(_shortName)`(6B, "SD32") + Manufacturer Specific
+Data(5B, company `0xFFFF` + the flags byte) = **32 bytes, one over
+`BLE_HS_ADV_MAX_SZ` (31)**. `NimBLEAdvertisementData::addData()` silently
+returns `false` and adds nothing once the running total would exceed the
+budget — earlier records already added still reach the radio; only the
+overflowing one (here, the MSD, added last) is dropped. `refreshAdvertisingData()`
+discarded every setter's return value, so the failure was invisible.
+**Compounding, separately-caught bug:** `setName(_shortName)` was called
+with no second argument, and `NimBLEAdvertisementData::setName()` defaults
+`isComplete=true` — so "SD32" went out as AD type 0x09 (Complete Local
+Name), matching what nRF Connect saw, not the shortened-name (0x08) design
+intent.
+
+**Fix (`src/comms/SlopSyncBleTransport.cpp`, `SlopSyncBlePort::refreshAdvertisingData`):**
+- Advertisement: Flags(3) + 128-bit Complete Service UUID(18) +
+  **shortened** name via `setShortName()` (AD 0x08, "SD32", 6B) = **27B**.
+  No MSD here — no room for it alongside the other two records.
+- Scan response: complete name "SlopDrive-32" (AD 0x09, 14B) +
+  Manufacturer Specific Data (company `0xFFFF` + flags byte, 5B) = **19B**.
+  The flags byte now rides the scan response, which requires an ACTIVE
+  scan to read (both `bleak` on Windows and nRF Connect do this by
+  default).
+- Every advertising-config return code (`setFlags`/`setCompleteServices`/
+  `setShortName`/`setName`/`setManufacturerData` on both
+  `NimBLEAdvertisementData` objects, and `NimBLEAdvertising::
+  setAdvertisementData`/`setScanResponseData` themselves) is now checked
+  and a failure logs `SLOGW` — never silently discarded again.
+- `updateAdvertising()`'s diff-gated refresh already called
+  `refreshAdvertisingData()` unconditionally on any flags change, so the
+  scan-response rewrite was already wired through that path; verified live
+  (below) that `bleak` sees the byte change on a boot-time flags publish.
+
+**SPEC/registry wording amended (spec-gap ritual, comment/prose only, no
+registry VALUE changed, no wire/etag effect):** SPEC.md §13.4's advertising-
+payload paragraph and `registry.yaml`'s `ble_adv_flags` header comment both
+previously read as if the flags byte rode the same 31-byte budget as the
+service UUID and shortened name (the design mismatch that let this bug
+ship unnoticed). Reworded both to state plainly that the flags byte rides
+the scan response, active scan required. Regenerated all six doc/spec
+generators (`gen_registry_header.py`, `gen_docs_tables.py`,
+`gen_spec_pages.py` — 1 file changed, `docs-site/docs/spec/transports.md`,
+matching the SPEC.md §13.4 wording edit — `gen_channel_map.py`,
+`gen_channel_grid.py`, `gen_channel_grid_page.py`), all `--check` green.
+
+**No native test added for the payload byte-budget arithmetic — judgment
+call, reasoning recorded rather than silently skipped.** The actual
+AD-record-length computation lives entirely inside vendored NimBLE
+(`NimBLEAdvertisementData::addData`/`setName`/`setManufacturerData`),
+compiled only under `-DBLE_ENABLED`; `[env:native]` is header-only (no
+`src/` compilation, no Arduino/NimBLE on the include path by design — see
+`SlopSyncBleTransport.h`'s own file-scope comment). Testing the REAL path
+would mean linking NimBLE on the host, which is not portable off the
+ESP32/Arduino BLE stack; writing a parallel calculation instead would test
+the test, not the code, and could drift from the real `addData()` logic
+silently. Skipped per the task brief's own escape hatch.
+
+**Host gauntlet (all green, every command run directly):** native suite
+31/31 exit 0 (mingw64 PATH prepend, TRAPS T10); `pio run -e sd32-ota`
+SUCCESS, RAM 24.1% / 78,948 B, flash 28.5% / 1,869,924 B (+468 B over the
+pre-fix build — the added return-code checks/log lines, as expected, no
+wire/catalog change); `canon_lint.py` 0 findings; `catalog_lint.py` OK (32
+entries, 113 desc / 44 role annotations — untouched, no catalog edit this
+pass); all six generators `--check` green (above).
+
+**Live deploy + verify.** `FIRMWARE_VERSION` 2.1.83 → 2.1.84
+(`include/system/config_api.h`), OTA'd via `deploy.ps1`. `/api/capabilities`
+confirms `fw_version 2.1.84`. Active `bleak` scan (repo `.venv`, package
+`bleak==3.0.2`) against the live device:
+
+```
+address: 20:6E:F1:31:74:6D
+local_name: SlopDrive-32
+service_uuids: ['534c4f50-5359-4e43-8000-000000000001']
+manufacturer_data (raw): {65535: b'\x02'}
+  company_id: 0xFFFF
+  payload bytes: 02
+```
+
+Company id `0xFFFF` matches `kBleMfgCompanyId`; payload byte `0x02` = bit1
+`ws_available` set, bit0 `pairing_window_open` clear — exactly the expected
+current bench state (WiFi up, no pairing window open). The on-device
+`/api/log` boot trace independently confirms both payload builds
+succeeded with no WARN (`BLE advertising flags -> 0x02 (pairing=0 ws=1)`
+logged, no `SLOGW` line) and shows the GATT server naming ("BLE GATT port
+up ... name 'SlopDrive-32'"). Windows/WinRT's `bleak` backend merges
+advertisement + scan-response fields into one `AdvertisementData` object
+per device and does not expose which physical packet carried which AD
+record, so the shortened-name-in-ADV-specifically claim rests on the code
+read + the successful `setAdvertisementData()` return (no WARN logged) —
+an operator phone + nRF Connect re-check (raw per-packet AD dump) remains
+the strongest confirmation and is optional follow-up, not required to close
+this item.
+
+**Pairing-window toggle (bit0) — SKIPPED, judgment call.** No plain HTTP
+route opens/closes the pairing window; the only paths are the 3-quick-
+power-cycle boot gesture (disruptive: requires actual reboots) or a signed
+SlopSync INTENT frame over an authenticated WS/BLE session (meaningfully
+more machinery than this fix's scope, and it would leave real pairing
+state written to NVS). Skipped rather than manufacture a side quest; the
+diff-gate code path (`updateAdvertising` → `refreshAdvertisingData` on any
+flags change) is unchanged by this fix and was already exercised at boot
+(the flags publish captured in `/api/log` above).
+
+**`tools/slopsync_probe.py`, two runs, motor unplugged throughout:**
+`--stream 1 --segments 1` (exercises intent/stream/segment/safety-mode
+round-trips; no `--estop`, no `--bench-home` — the OTA's own reboot had
+already cleared the volatile fake-home, see below): **55 passed / 0 failed
+/ 2 skipped** (`estop_assert`, `bench_home` — both correctly skipped,
+opt-in-only ops). A second run, `--no-motion --bench-home
+--bench-home-no-revert`, to restore the bench state: **45 passed / 0
+failed / 6 skipped**, `bench_home` PASS. (Total assertion count is higher
+than the DEPLOY + LIVE-VERIFY session's "50/0/3" because that run used
+`--estop --bench-home` together in one pass and against a smaller catalog
+of subscribe checks; both runs here are 0-failed, and the higher pass
+count reflects exercising MORE of the protocol, not a different bar.)
+
+**Pre-existing, expected, not a regression:** the OTA deploy's own reboot
+cleared the volatile `home_override` (`false` immediately post-OTA) exactly
+as documented in the WIRE-STRING PUNCTUATION EVOLUTION entry above — every
+firmware OTA does this. Restored via the second probe run above.
+
+**Device end-state:** fw **2.1.84**, reachable at 192.168.1.229,
+`homed=true` `home_override=true` (fake-homed, left ON), `estopped=false`,
+not moving, `measured_stroke_mm=250`.
+
+**Files touched:** `src/comms/SlopSyncBleTransport.cpp`,
+`include/comms/SlopSyncBleTransport.h` (comment only), `docs/slopsync/SPEC.md`
+(§13.4 prose), `docs/slopsync/registry/registry.yaml` (`ble_adv_flags`
+comment only — no value changed), `docs-site/docs/spec/transports.md`
+(regenerated), `include/system/config_api.h` (version bump),
+`docs/canon/TRAPS.md` (T14), `SD32-OVERNIGHT-REPORT.md`. [verified
+2026-07-28 — every command above run directly this session, exit codes
+checked; live `bleak` scan + `/api/log` + `/api/capabilities` + `/api/status`
+all reproduced above]
 
 ## Deferred / planned (homes: docs/REFACTOR-ROADMAP.md, docs/MOTION-TODO.md)
 

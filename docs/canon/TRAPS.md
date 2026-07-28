@@ -120,3 +120,34 @@ Bit us: `broadcastSafetyNow()` — the ONE fan-out sender missing the check its
 siblings (`pumpEventDrain`, `submitSignature`) already had — panicking the
 device on `override_on`/e-stop whenever a previous probe session was still
 parked (fw 2.1.81, three field reboots).
+
+## T14 — An unchecked radio-config return code ships a payload that was never on the air
+**Rule:** every NimBLE advertising-data setter (`setFlags`/`setName`/
+`setShortName`/`setCompleteServices`/`setManufacturerData`, and
+`NimBLEAdvertising::setAdvertisementData`/`setScanResponseData` themselves)
+returns `bool`. Check it and log a WARN on failure — never chain calls and
+discard the result.
+**Mechanism:** `NimBLEAdvertisementData` builds one legacy payload of
+`BLE_HS_ADV_MAX_SZ` (31) bytes; each `set*()` call appends an AD record
+(length + type + data) via `addData()`, which silently returns `false` and
+adds nothing once the running total would exceed 31 — it does not truncate,
+does not replace an earlier record, and raises no exception. Every record
+added BEFORE the one that overflows still lands on the radio; only the
+overflowing one (and everything after it in the same payload) goes missing.
+A scan that shows Flags + Service UUID + Name but no Manufacturer-Specific
+Data is not a filtering artifact of the scanning OS — it is proof the MSD
+`set*()` call returned `false` and nobody checked. The fix is never "shrink
+something until it fits by luck"; it is to budget the payload on purpose
+(§13.4) and split records that don't all fit one payload across the
+advertisement and the scan response, which have independent 31-byte budgets.
+Bit us: the `ble_adv_flags` byte (RFC-046) was never on the air in any build
+from Phase E's landing through fw 2.1.83 — service UUID(18) + Flags(3) +
+`setName()`'s default **complete** name(6, not the intended shortened
+name — a second, compounding bug: `setName(x)` defaults `isComplete=true`,
+so it advertised AD type 0x09 "SD32" rather than the intended 0x08) already
+totaled 27 of the 31 bytes, leaving no room for the 5-byte MSD record;
+`advData.setManufacturerData(...)`'s `false` return was silently discarded.
+Found by an operator phone scan with nRF Connect (which shows raw AD
+structures, not an OS-filtered summary) — the earlier host-side `bleak` scan
+had already shown empty `manufacturer_data` but that was wrongly attributed
+to Windows/WinRT company-id filtering until the phone scan ruled it out.

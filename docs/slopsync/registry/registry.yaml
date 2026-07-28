@@ -842,10 +842,12 @@ ble_identity:
   notify_char_uuid: "534C4F50-5359-4E43-8000-000000000003"   # h2c (notify) — hub delivers frames here
 
 # ---------------------------------------------------------------------------
-# BLE advertising flags (u8) — RFC-046 §2. The one flags byte a legacy
-# (≤31 B) advertising payload can spare after the service UUID and a
-# shortened hub name; the fuller name rides the scan response. Bits not
-# listed MUST be zero.
+# BLE advertising flags (u8) — RFC-046 §2. Rides the SCAN RESPONSE (active
+# scan required), not the primary advertisement: the legacy (≤31 B) adv
+# payload has no room left for this byte's Manufacturer-Specific-Data record
+# once the service UUID and shortened hub name are in it (TRAPS T14); the
+# fuller name rides alongside it in the same scan response. Bits not listed
+# MUST be zero.
 # ---------------------------------------------------------------------------
 ble_adv_flags:
   bit0: { name: pairing_window_open, note: "a §12.3 association window is open right now (same meaning as the 0x17 BEACON pairing-open flag, ESP-NOW's equivalent)" }

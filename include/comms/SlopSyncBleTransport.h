@@ -80,9 +80,11 @@ inline constexpr const char* kBleNotifyCharUuid = "534C4F50-5359-4E43-8000-00000
 
 // 0xFFFF: the Bluetooth SIG's own "for testing" company identifier —
 // SlopSync has no assigned company id, and this is the smallest legitimate
-// AD structure that can carry one custom byte (2-byte company id + payload)
-// inside the legacy 31-byte advertising budget alongside the 128-bit service
-// UUID and a shortened name (§13.4's own byte-budget note).
+// AD structure that can carry one custom byte (2-byte company id + payload).
+// It rides the SCAN RESPONSE, not the primary advertisement: the legacy
+// 31-byte advertising budget is already spent by the service UUID + shortened
+// name (27B), with no room for a 5B Manufacturer-Specific-Data record
+// alongside them (TRAPS T14; §13.4's own byte-budget note).
 inline constexpr uint16_t kBleMfgCompanyId = 0xFFFF;
 
 // Sentinel: no connection bound to this slot. Matches NimBLE's own

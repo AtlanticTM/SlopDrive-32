@@ -193,22 +193,45 @@ void SlopSyncBlePort::begin(slopsync::Hub* hub, const char* fullName, const char
 void SlopSyncBlePort::refreshAdvertisingData(uint8_t flags) {
     _lastAdvFlags = flags;
 
+    // Legacy 31-byte advertising budget (BLE_HS_ADV_MAX_SZ, §13.4): Flags(3)
+    // + 128-bit Complete Service UUID(18) + shortened name "SD32"(6) = 27B —
+    // no room left in THIS payload for the flags byte's 5-byte
+    // Manufacturer-Specific-Data record (TRAPS T14: a prior version put the
+    // MSD here too, 32B total, and NimBLEAdvertisementData::addData() silently
+    // rejected it while every earlier record still fit and made it to air).
+    // The flags byte therefore rides the SCAN RESPONSE instead, alongside the
+    // full name: complete name "SlopDrive-32"(14) + MSD(5) = 19B, comfortably
+    // under budget. Every setter below returns bool; failures are logged at
+    // WARN (never silently dropped, per TRAPS T14).
     NimBLEAdvertisementData advData;
-    advData.setFlags(0x06);  // LE General Discoverable + BR/EDR Not Supported (standard combo)
-    advData.setCompleteServices(NimBLEUUID(kBleServiceUuid));
-    advData.setName(_shortName);
-    // Manufacturer-specific data: company id (2B, LE) + our one flags byte —
-    // see the header's kBleMfgCompanyId doc for why this AD structure and
-    // not a 128-bit Service Data one.
-    const char mfg[3] = {char(uint8_t(kBleMfgCompanyId)), char(uint8_t(kBleMfgCompanyId >> 8)), char(flags)};
-    advData.setManufacturerData(std::string(mfg, sizeof(mfg)));
+    bool advOk = true;
+    advOk &= advData.setFlags(0x06);  // LE General Discoverable + BR/EDR Not Supported (standard combo)
+    advOk &= advData.setCompleteServices(NimBLEUUID(kBleServiceUuid));
+    advOk &= advData.setShortName(_shortName);  // AD type 0x08 — NOT setName() (which defaults to complete/0x09)
+    if (!advOk) {
+        SLOGW("slopsync", "BLE advertisement payload build failed — an AD record did not fit the 31-byte legacy budget");
+    }
 
     NimBLEAdvertisementData scanData;
-    scanData.setName(_fullName);  // the fuller name rides the scan response (§13.4)
+    bool scanOk = true;
+    scanOk &= scanData.setName(_fullName);  // complete name (0x09) rides the scan response (§13.4)
+    // Manufacturer-specific data: company id (2B, LE) + our one flags byte —
+    // see the header's kBleMfgCompanyId doc for why this AD structure and
+    // not a 128-bit Service Data one. Rides the SCAN RESPONSE (TRAPS T14),
+    // not the advertisement — see the budget note above.
+    const char mfg[3] = {char(uint8_t(kBleMfgCompanyId)), char(uint8_t(kBleMfgCompanyId >> 8)), char(flags)};
+    scanOk &= scanData.setManufacturerData(std::string(mfg, sizeof(mfg)));
+    if (!scanOk) {
+        SLOGW("slopsync", "BLE scan-response payload build failed — ble_adv_flags byte is NOT on the air this cycle");
+    }
 
     NimBLEAdvertising* adv = NimBLEDevice::getAdvertising();
-    adv->setAdvertisementData(advData);
-    adv->setScanResponseData(scanData);
+    if (!adv->setAdvertisementData(advData)) {
+        SLOGW("slopsync", "ble_gap_adv_set_data rejected the advertisement payload");
+    }
+    if (!adv->setScanResponseData(scanData)) {
+        SLOGW("slopsync", "ble_gap_adv_rsp_set_data rejected the scan-response payload");
+    }
 }
 
 void SlopSyncBlePort::updateAdvertising(bool pairingWindowOpen, bool wsAvailable) {

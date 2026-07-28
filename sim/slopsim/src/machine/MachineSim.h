@@ -781,7 +781,7 @@ private:
     // IDENTICAL to the device by construction, not by transcription.
     // PHYSICS LIMITATION (flagged, not silently absorbed): SimPattern above is
     // a stand-in generator (v1: stroke/tease/shallow-fast) — it does not
-    // consume `_ap` at all. Toggling `ap_mode` and dialling these controls
+    // consume `_ap` at all. Toggling `ap_mode` and dialing these controls
     // clamps/echoes/publishes byte-identically to the device, but does NOT
     // yet drive the stepper via fray-d's per-half-stroke math
     // (advpat::Settings::planStroke) the way the firmware's PatternEngine

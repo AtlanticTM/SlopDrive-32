@@ -155,7 +155,7 @@ function ensureCap(need){
 //
 // MAXN bounds it: past the cap the OLDEST HALF is dropped and the pyramid is
 // rebuilt once. That rebuild is O(N), but it happens once per MAXN/2 samples
-// rather than every poll, so the amortised cost is constant and the session
+// rather than every poll, so the amortized cost is constant and the session
 // stops degrading. ~33 min of 1 kHz scrollback is kept, well past the sim's own
 // 240 s ring, so nothing the sim can still serve is ever discarded early.
 const MAXN = 2000000;
@@ -547,7 +547,7 @@ function draw(){
     // any divergence separates into two visibly distinct bands. That is also
     // why it is not dashed — a dashed stroke over ~1500 min/max columns is
     // MEASURABLY the most expensive thing on the canvas under software
-    // rasterisation (176 ms/frame vs 17 ms with it solid, headless, 3.6 M
+    // rasterization (176 ms/frame vs 17 ms with it solid, headless, 3.6 M
     // samples). A halo says the same thing for free.
     if (showCmd)
       drawSeries(ctx,w,h,SER_C,0,meta.rail,CLR.cmd,3.2*d,null,

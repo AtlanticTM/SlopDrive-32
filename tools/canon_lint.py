@@ -19,6 +19,7 @@ Exit codes: 0 clean, 1 findings, 2 could not run.
 """
 
 import hashlib
+import io
 import re
 import subprocess
 import sys
@@ -50,186 +51,49 @@ BINARY_SUFFIXES = (".bin", ".png", ".jpg", ".webp", ".ico", ".pdf",
                    ".woff", ".woff2", ".idx", ".gz", ".lock")
 
 # ------------------------------------------------------------------ C-11
-# American English only. Stem-based: each family below generates its
-# matchable British forms from a stem list plus a CLOSED set of real
-# inflectional suffixes -- never a bare wildcard -- so a word that merely
-# shares a prefix with a stem (organism, capitalism, modernism, optimism,
-# realism, initialism, specialism, apologist, catalyst, analysis,
-# paralysis, catalysis, emphasis, sombrero, cancellation) can never match.
-# "analyses"/"paralyses"/"catalyses" are the one genuine ambiguity (Greek-
-# plural noun, identical in both dialects, vs. the British 3rd-person-
-# singular verb spelling) -- matched only when followed by a determiner
-# that marks it as a verb-with-object, same heuristic as before.
-def _build_british_regex():
-    forms = set()
+# American English only. Operator ruling 2026-07-28: the hand-rolled
+# stem/suffix regex is retired -- no reinventing a British-word list by hand
+# where a proven tool exists. codespell's en-GB_to_en-US builtin dictionary
+# is now the mechanism. This is a hard dependency of this check: if
+# codespell is not importable, the check FAILS LOUDLY (see
+# run_codespell_check below), never silently skips. Minimum version 2.4
+# (built and verified against codespell 2.4.3).
+try:
+    import codespell_lib
+    _CODESPELL_IMPORT_ERROR = None
+except ImportError as e:
+    codespell_lib = None
+    _CODESPELL_IMPORT_ERROR = str(e)
 
-    # -our -> -or (hour/four/your/pour/sour/tour/contour/velour/glamour/
-    # devour/flour/paramour/troubadour are real English, never in this set)
-    our_stems = (
-        "favour", "behaviour", "colour", "honour", "labour", "neighbour",
-        "flavour", "armour", "harbour", "humour", "rumour", "saviour",
-        "vapour", "endeavour", "rigour", "vigour", "valour", "clamour",
-        "odour", "parlour", "splendour", "tumour", "candour", "ardour",
-        "fervour", "demeanour",
-    )
-    our_suffixes = ("", "s", "ed", "ing", "er", "ers", "ite", "ites",
-                    "able", "ably", "ful", "fully", "less", "y")
-    for stem in our_stems:
-        for sfx in our_suffixes:
-            forms.add(stem + sfx)
-    forms.update(("savour", "savours", "savoured", "savouring",
-                  "savoury", "savouries"))
-
-    # -ise/-isation -> -ize/-ization, -yse -> -yze. Built from the verb
-    # ROOT (stem minus trailing "e") plus a closed suffix template, so
-    # "organism"/"capitalism"/"analysis"/"emphasis"/"catalyst" etc. --
-    # which merely share a prefix -- are structurally excluded, not
-    # exception-listed.
-    ise_stems = (
-        "organise", "realise", "recognise", "initialise", "serialise",
-        "synchronise", "customise", "minimise", "maximise", "optimise",
-        "normalise", "utilise", "categorise", "prioritise", "summarise",
-        "authorise", "standardise", "stabilise", "finalise", "generalise",
-        "specialise", "visualise", "randomise", "sanitise", "capitalise",
-        "centralise", "equalise", "italicise", "memorialise", "modernise",
-        "neutralise", "penalise", "personalise", "publicise", "quantise",
-        "localise", "tokenise", "emphasise", "apologise", "harmonise",
-    )
-    for stem in ise_stems:
-        root = stem[:-1]  # "organise" -> "organis"
-        # NOTE: no bare "root" (empty suffix) form -- for stems like
-        # "emphasise" the bare root ("emphasis") IS the real English noun
-        # and must never match. The bare verb comes from `stem` itself
-        # (below), which still ends in "e".
-        for sfx in ("es", "ed", "ing", "er", "ers", "ation", "ations", "able"):
-            forms.add(root + sfx)
-        forms.add(stem)  # bare verb, e.g. "organise"
-
-    yse_stems = ("analyse", "paralyse", "catalyse")
-    for stem in yse_stems:
-        root = stem[:-1]  # "analys"
-        for sfx in ("", "ed", "ing", "er", "ers"):
-            forms.add(root + sfx)
-        forms.add(stem)
-        # deliberately no "-es" form: "analyses"/"paralyses"/"catalyses"
-        # are the ambiguous Greek-plural noun, handled below instead.
-
-    # -re -> -er (mere/acre/genre/mediocre/massacre/ogre/timbre/cadre/
-    # sombrero are real English and structurally excluded: bare/plural/
-    # past suffixes only, never \w*)
-    re_stems = (
-        "centre", "metre", "litre", "fibre", "calibre", "theatre",
-        "sombre", "spectre", "lustre", "manoeuvre", "sceptre",
-        "centimetre", "millimetre", "kilometre",
-    )
-    for stem in re_stems:
-        for sfx in ("", "s", "d"):
-            forms.add(stem + sfx)
-
-    # -ogue -> house style -og (this project says "catalog" hundreds of times)
-    forms.update((
-        "catalogue", "catalogues", "catalogued", "cataloguing", "cataloguer",
-        "analogue", "analogues",
-        "dialogue", "dialogues", "dialogued", "dialoguing",
-        "epilogue", "epilogues",
-        "prologue", "prologues",
-    ))
-
-    # doubled-L inflections -> single-L (cancellation is correct US, both
-    # sides double the L -- excluded by simply never being in this list)
-    forms.update((
-        "travelled", "travelling", "traveller", "travellers",
-        "labelled", "labelling",
-        "modelled", "modelling",
-        "cancelled", "cancelling",
-        "levelled", "levelling",
-        "signalled", "signalling",
-        "channelled", "channelling",
-        "marshalled", "marshalling",
-        "totalled", "totalling",
-        "equalled", "equalling",
-        "fuelled", "fuelling",
-        "dialled", "dialling",
-        "rivalled", "rivalling",
-        "funnelled", "funnelling",
-        "tunnelled", "tunnelling",
-        "panelled", "panelling",
-        "quarrelled", "quarrelling",
-        "counselled", "counselling", "counsellor", "counsellors",
-        "spiralled", "spiralling",
-    ))
-
-    # misc singles (doughnut/glamour: accept both spellings, never listed)
-    forms.update((
-        "grey", "greys", "greyed", "greying", "greyscale",
-        "judgement", "judgements",
-        "acknowledgement", "acknowledgements",
-        "aluminium",
-        "artefact", "artefacts",
-        "licence", "licences",
-        "defence", "defences",
-        "offence", "offences",
-        "pretence", "pretences",
-        "practise", "practises", "practised", "practising",
-        "programme", "programmes",
-        "tyre", "tyres",
-        "kerb", "kerbs",
-        "mould", "moulds", "moulded", "moulding", "mouldy",
-        "smoulder", "smoulders", "smouldered", "smouldering",
-        "whilst", "amongst", "amidst",
-        "learnt", "spelt", "dreamt",
-        "storey", "storeys",
-        "sceptical", "scepticism",
-        "enquire", "enquires", "enquired", "enquiring", "enquiry", "enquiries",
-        "fulfil", "fulfils", "fulfilment",
-        "skilful", "skilfully",
-        "wilful", "wilfully",
-        "enrol", "enrols", "enrolment", "enrolments",
-        "distil", "distils", "distilment",
-        "jewellery",
-        "plough", "ploughs", "ploughed", "ploughing",
-        "draught", "draughts",
-        "behaviourally",
-        "speciality", "specialities",
-        "cosy", "cosier", "cosiest",
-        "snigger", "sniggers", "sniggered", "sniggering",
-        "aeroplane", "aeroplanes",
-        "cheque", "cheques",
-        "gaol", "gaols",
-        "moustache", "moustaches",
-        "pyjamas",
-        "furore",
-    ))
-
-    literal_rx = r"\b(?:%s)\b" % "|".join(sorted(forms, key=len, reverse=True))
-    # Ambiguous Greek-plural/British-verb collision: only flag when a
-    # determiner+object follows, marking it as a verb use ("it analyses
-    # the data"), never the bare plural noun ("risk analyses").
-    ambiguous_rx = (
-        r"\b(?:analyses|paralyses|catalyses)"
-        r"(?=\s+(?:the|a|an|this|that|each|every|it|them)\b)"
-    )
-    return re.compile(literal_rx + "|" + ambiguous_rx, re.IGNORECASE)
-
-
-BRITISH_RX = _build_british_regex()
-
-# Pre-existing British spellings living in code comments/strings, surfaced
-# for the first time by the 2026-07-28 dictionary upgrade (a docs-only
-# pass -- rewording code comments was explicitly out of scope for it, see
-# the pass's own commit). Tracked by exact line, not silently dropped
-# (CANON C-3: a conflict gets flagged, never silently ignored) -- a NEW
-# British spelling anywhere else, including new lines in these same files,
-# still fails the gate. Remove an entry only by fixing the spelling there.
-BRITISH_SPELLING_KNOWN_CODE_HITS = {
-    ("include/comms/SlopSyncAsyncWsTransport.h", 48),
-    ("include/comms/SlopSyncCatalog.h", 1434),
-    ("include/comms/SlopSyncCatalog.h", 1452),
-    ("sim/slopsim/src/machine/MachineSim.h", 784),
-    ("src/comms/SlopSyncHubService.cpp", 1952),
-    ("webui/src/model/format.js", 36),
-    ("webui/src/ui/SafetyBar.svelte", 28),
+# Small supplemental list for real words this project's prose actually uses
+# that codespell's en-GB_to_en-US dictionary is verified NOT to carry (checked
+# 2026-07-28 against codespell 2.4.3, test words favour/acknowledgement/
+# catalogue/analyse/initialise/grey/judgement/behaviour/centre/travelled --
+# every one of those matched natively EXCEPT "travelled", which codespell has
+# no "travel-" doubled-L entry for at all). Anything codespell already
+# catches must NOT be duplicated here -- verify against codespell's actual
+# dictionary before adding, and name the gap in the comment like this one.
+BRITISH_SPELLING_EXTRAS = {
+    "travelled": "traveled",
+    "travelling": "traveling",
+    "traveller": "traveler",
+    "travellers": "travelers",
 }
+_BRITISH_EXTRAS_RX = re.compile(
+    r"\b(?:%s)\b" % "|".join(sorted(BRITISH_SPELLING_EXTRAS, key=len, reverse=True)),
+    re.IGNORECASE,
+)
+
+# Files the spelling scan must never touch: this file names the banned words
+# by construction (the extras dict above, this comment), and legal texts are
+# verbatim by law, not by style.
+BRITISH_SPELLING_SCAN_EXEMPT = ("THIRD_PARTY_LICENSES.md", "LICENSE", "NOTICE",
+                                "tools/canon_lint.py")
+
+# Every catalogued code-comment hit was fixed in the 2026-07-28 pass. Kept as
+# a MECHANISM, not a list: adding an entry here requires an operator-visible
+# justification in the commit that adds it, never a silent exemption.
+BRITISH_SPELLING_KNOWN_CODE_HITS = set()
 
 GREP_CHECKS = [
     dict(
@@ -264,15 +128,9 @@ GREP_CHECKS = [
         include=("src/", "include/", "webui/src/", "platformio.ini"),
         exempt=(),
     ),
-    dict(
-        name="british-spelling",
-        msg="British spelling (CANON C-11: American English only)",
-        rx=BRITISH_RX,
-        include=("",),  # every tracked text file
-        exempt=("THIRD_PARTY_LICENSES.md",  # legal texts verbatim
-                "LICENSE", "NOTICE",
-                "tools/canon_lint.py"),     # this file quotes the banned words
-    ),
+    # british-spelling moved to run_codespell_check() (operator ruling
+    # 2026-07-28: codespell, not a hand-rolled regex, does this job now) --
+    # it does not fit the single-regex-per-check shape of this list.
 ]
 
 
@@ -299,12 +157,65 @@ def run_grep_checks():
             continue
         for lineno, line in enumerate(text.splitlines(), 1):
             for c in applicable:
-                if (c["name"] == "british-spelling"
-                        and (rel, lineno) in BRITISH_SPELLING_KNOWN_CODE_HITS):
-                    continue
                 m = c["rx"].search(line)
                 if m:
                     findings.append((c["name"], rel, lineno, m.group(0), c["msg"]))
+    return findings
+
+
+def run_codespell_check():
+    """C-11 American-English check: codespell's en-GB_to_en-US builtin
+    dictionary plus the small BRITISH_SPELLING_EXTRAS gap-list. Hard
+    dependency -- codespell missing is a loud finding, never a silent skip."""
+    if codespell_lib is None:
+        return [("codespell-missing", "tools/canon_lint.py", 0, "",
+                 f"codespell is not installed ({_CODESPELL_IMPORT_ERROR}) -- "
+                 "pip install codespell (>=2.4) -- the British-spelling rule "
+                 "has no fallback and refuses to silently skip")]
+
+    files = [f for f in tracked_files() if f not in BRITISH_SPELLING_SCAN_EXEMPT]
+    if not files:
+        return []
+    abs_paths = [str(ROOT / f) for f in files]
+
+    buf = io.StringIO()
+    old_stdout = sys.stdout
+    sys.stdout = buf
+    try:
+        codespell_lib.main(*abs_paths, "--builtin", "en-GB_to_en-US")
+    finally:
+        sys.stdout = old_stdout
+
+    findings = []
+    hit_rx = re.compile(r"^(.*):(\d+): (\S+) ==>")
+    for line in buf.getvalue().splitlines():
+        m = hit_rx.match(line)
+        if not m:
+            continue
+        try:
+            rel = Path(m.group(1)).resolve().relative_to(ROOT).as_posix()
+        except ValueError:
+            rel = m.group(1)
+        lineno = int(m.group(2))
+        if (rel, lineno) in BRITISH_SPELLING_KNOWN_CODE_HITS:
+            continue
+        findings.append(("british-spelling", rel, lineno, m.group(3),
+                         "British spelling (CANON C-11: American English only "
+                         "-- codespell en-GB_to_en-US)"))
+
+    for rel in files:
+        try:
+            text = (ROOT / rel).read_text(encoding="utf-8", errors="replace")
+        except OSError:
+            continue
+        for lineno, line in enumerate(text.splitlines(), 1):
+            if (rel, lineno) in BRITISH_SPELLING_KNOWN_CODE_HITS:
+                continue
+            m = _BRITISH_EXTRAS_RX.search(line)
+            if m:
+                findings.append(("british-spelling", rel, lineno, m.group(0),
+                                 "British spelling (CANON C-11: American English "
+                                 "only -- house extras list)"))
     return findings
 
 
@@ -368,7 +279,7 @@ def run_channel_map_check():
 
 
 def main(argv):
-    findings = run_grep_checks() + run_pin_check()
+    findings = run_grep_checks() + run_pin_check() + run_codespell_check()
     if "--no-gen" not in argv:
         findings += run_channel_map_check()
 

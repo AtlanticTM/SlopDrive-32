@@ -1431,7 +1431,7 @@ inline bool buildSlopDriveCatalog(slopsync::Catalog32& c, DeviceFeatures feat = 
     // does), so mirroring 0x0082's mask formula here would be a DISHONEST
     // refusal the delegate never actually makes. The mask therefore tracks
     // e-stop alone; the fields simply have no effect on the machine until it is
-    // homed and running, same as dialling in a pattern before pressing start.
+    // homed and running, same as dialing in a pattern before pressing start.
     c.addBitfieldField({.name = "enabled_mask", .type = PackedFieldType::bitfield8, .unit = "flag",
                         .scale = 1.0f,
                         .desc = "Which of these the machine will accept right now.",
@@ -1449,7 +1449,7 @@ inline bool buildSlopDriveCatalog(slopsync::Catalog32& c, DeviceFeatures feat = 
     // cycle. ONE CHANNEL PER BASE CONTROL rather than binpacking 36 fields
     // into the fewest possible 8-field channels: each is a real, separate
     // concept (a different breathing pattern on depth vs. speed vs. accel),
-    // same judgement 0x008B/C/D made splitting by subsystem, not by
+    // same judgment 0x008B/C/D made splitting by subsystem, not by
     // bit-count.
     //
     // ALL SIX SHARE ch::pattern_advanced_cmd as settingChannel (same writer

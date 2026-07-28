@@ -45,7 +45,7 @@
 // semantics decide retry vs drop" (§13.1) — a full queue during a burst is
 // ORDINARY FLOW CONTROL, not an error to have an opinion about. The
 // transport DOES distinguish, using the registry's own control/data/raw
-// classification (generated/registry_constants.hpp) rather than a judgement
+// classification (generated/registry_constants.hpp) rather than a judgment
 // call:
 //   STATE (0x0B), STREAM (0x0C) = data. Shed EARLY, above
 //       kDataQueueHighWater, so a telemetry burst cannot fill the room

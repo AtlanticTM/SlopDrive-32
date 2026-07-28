@@ -25,7 +25,7 @@
    * role table lives (`NOT_HOMED` -> `action.home`, `ESTOP_ACTIVE` ->
    * `action.safety`'s `estop_clear` op) — this component only renders it.
    * This REPLACES the old estop-only local recovery banner: same mechanism,
-   * generalised to every refusal instead of hardcoded to one NACK.
+   * generalized to every refusal instead of hardcoded to one NACK.
    */
   import { machine, getSession } from '../model/machine.svelte.js';
   import { runAction, lastRefusal, remedyForLastRefusal, clearLastRefusal } from '../model/shadow.svelte.js';

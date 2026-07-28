@@ -33,7 +33,7 @@ export function precisionFor(field) {
   const step = field && field.step;
   if (step == null || !isFinite(step) || step <= 0) {
     // No step published. Integers read better without a false ".00"; floats
-    // need some precision or every value looks quantised.
+    // need some precision or every value looks quantized.
     return field && field.typeName && /^(u|i)\d/.test(field.typeName) ? 0 : 2;
   }
   if (step >= 1) return 0;

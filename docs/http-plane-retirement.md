@@ -407,7 +407,7 @@ recorded here was measured on a SINGLE-SCENARIO run (`--scenario b2b`, 45
 seconds) and does not survive the full suite, which reports **1,164 B**. Quoting
 a short run's watermark as if it were the suite's was the same class of error as
 the "62× more margin" claim in §2: a number measured under light load, reported
-as though it characterised load.
+as though it characterized load.
 
 **AND THE REBOOTS ARE NOT FIXED.** fw 2.1.65, with links2004 deleted outright,
 rebooted three times in the full suite (twice in `churn`, once in

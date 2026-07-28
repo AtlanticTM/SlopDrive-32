@@ -1949,7 +1949,7 @@ void SlopSyncHubService::publishTelemetry() {
     // is a re-home of an existing feed and not a new measurement.
     //
     // A torn read across those scalars is visually harmless at 45 Hz (they are
-    // aligned 32-bit stores from a single writer) — the same judgement the
+    // aligned 32-bit stores from a single writer) — the same judgment the
     // legacy frame documented, restated because it is the reason this needs no
     // lock on the motion path.
     //

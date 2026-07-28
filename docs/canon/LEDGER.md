@@ -1393,6 +1393,12 @@ directly, full gauntlet commands run and exit codes/output observed above]
   New repo builds locally at ../SlopSync as a sibling checkout; operator
   creates the empty GitHub repo whenever; FIRST PUSH ONLY AFTER OPERATOR
   REVIEW of both trees.
+  PUSHED (operator instruction "push it to github and I'll read it
+  there", 2026-07-28): SlopSync main → github.com/AtlanticTM/SlopSync
+  (PRIVATE), HEAD 490d4b2 == slopsync.pin. [verified 2026-07-28 — git
+  push output + main...origin/main tracking clean] SlopDrive-32's own
+  ~45 local commits remain UNPUSHED — that push is a separate operator
+  call.
   RELEASE HOLD (operator, 2026-07-28, superseded by the GO RULING above
   for the split itself; the no-push-until-review clause still binds):
   commits stay LOCAL and staged; no

@@ -271,7 +271,33 @@ SOURCE_LINKS: dict[str, tuple[str, str]] = {
     "vectors/fixtures/mini-catalog.yaml": ("strip", ""),
     "vectors/": ("strip", ""),
     "RFC-QUEUE.md": ("strip", ""),
+    # Anchor-specific citations into RFC-QUEUE.md are listed individually: the
+    # bare-file entry above does not cover a link with a fragment, by design
+    # (a new anchor is a new citation, acknowledged deliberately, same as a
+    # new file would be).
+    "RFC-QUEUE.md#rfc-016--in-band-hub-identity-capabilities--catalog-introspection": ("strip", ""),
+    "RFC-QUEUE.md#rfc-026--strings-on-the-wire-operator-ordered": ("strip", ""),
+    "RFC-QUEUE.md#rfc-042--session-staleness-separate-the-session-ends-from-motion-stops": ("strip", ""),
+    "RFC-QUEUE.md#rfc-043--transport-conformance-profiles-which-bindings-a-hub-must-offer": ("strip", ""),
+    "RFC-QUEUE.md#rfc-044--client-onramp-doctrine-tcode-passthrough-as-a-client-side-adapter": ("strip", ""),
+    "RFC-QUEUE.md#rfc-045--retire-deadman-as-safety-session-liveness-is-bookkeeping-not-motion-control": ("strip", ""),
+    "RFC-QUEUE.md#rfc-046--ble-primary-discovery-udp-probe-and-reply-and-cross-transport-migration": ("strip", ""),
+    "RFC-QUEUE.md#rfc-048--the-rendering-constitution-catalog-vocabulary-capability-interfaces-renderer-law": ("strip", ""),
+    "RFC-QUEUE.md#rfc-049--spec-fresh-eyes-panel-omnibus-small-normative-fixes": ("strip", ""),
+    "RFC-QUEUE.md#rfc-050--blob-transfer-backpressure--completion-acknowledgement": ("strip", ""),
+    "RFC-QUEUE.md#rfc-004--appendix-d-sketch-collides-with-real-device-allocations": ("strip", ""),
     "V1-READINESS.md": ("strip", ""),
+    # session-traces.md cites SPEC.md clauses directly by GitHub anchor slug,
+    # rather than by the "§n.m" convention this generator auto-links. Each one
+    # is resolved to the exact page and anchor the matching clause landed on,
+    # same as SECTION_REF would produce for the equivalent "§n.m".
+    "SPEC.md": ("strip", ""),
+    "SPEC.md#62-hello-client--hub": ("page", "session.md#s6-2"),
+    "SPEC.md#66-liveness-deadman-and-idle-reaping": ("page", "session.md#s6-6"),
+    "SPEC.md#84-transfer-the-catalog-is-blob-namespace-0": ("page", "catalog.md#s8-4"),
+    "SPEC.md#173-behavioral-checklists": ("page", "conformance.md#s17-3"),
+    # CHANNEL-MAP.md is not published by docs-site (docs/slopsync/ territory).
+    "CHANNEL-MAP.md": ("strip", ""),
     # RENDERING.md is a normative companion (§19), same tier as SPEC.md itself,
     # but has no splitter of its own yet — publishing it as a full generated
     # site tier is out of scope for this landing (RFC-048 is spec/registry
@@ -387,8 +413,9 @@ _MASK = "\x00%d\x00"
 _MASK_RE = re.compile(r"\x00(\d+)\x00")
 
 
-def mask(text: str) -> tuple[str, list[str]]:
-    store: list[str] = []
+def mask(text: str, store: list[str] | None = None) -> tuple[str, list[str]]:
+    if store is None:
+        store = []
 
     def keep(m: re.Match) -> str:
         store.append(m.group(0))
@@ -400,7 +427,22 @@ def mask(text: str) -> tuple[str, list[str]]:
 
 
 def unmask(text: str, store: list[str]) -> str:
-    return _MASK_RE.sub(lambda m: store[int(m.group(1))], text)
+    """Resolve every mask token back to its stored text.
+
+    `Linker.rewrite()` masks a link's own rewritten form (`keep_link`) on top
+    of text that `mask()` already masked (an inline-code link label becomes a
+    mask token BEFORE the link around it becomes a second, outer mask token).
+    A single `re.sub` pass only resolves the outer token: `re.sub` does not
+    re-scan a replacement string for further matches, so the inner token was
+    surviving into the published page as a literal NUL byte pair. Looping to
+    a fixpoint resolves both levels; store entries never form a cycle (each
+    one is only ever built from text at strictly lower nesting depth), so
+    this always terminates.
+    """
+    while True:
+        text, n = _MASK_RE.subn(lambda m: store[int(m.group(1))], text)
+        if not n:
+            return text
 
 
 # --------------------------------------------------------------------------
@@ -421,6 +463,21 @@ APPENDIX_REF = re.compile(r"\bAppendix ([A-J])\b")
 APPENDICES_REF = re.compile(r"\bAppendices ([A-J]), ([A-J]) and ([A-J])\b")
 MD_LINK = re.compile(r"\[([^\]]*)\]\(([^)]+)\)")
 
+# RENDERING.md is a normative companion with its OWN clause numbering (its own
+# §2, §10.1, ...) that has no page of its own on this site (SOURCE_LINKS
+# strips it). A "§10.1" written right after "RENDERING.md" cites THAT
+# document's clause 10.1, never this one's — but by the time SECTION_REF runs,
+# "RENDERING.md" itself has already been reduced to an opaque mask token (it
+# is either inline code or a stripped link), so SECTION_REF cannot see what
+# preceded the reference and would otherwise resolve it against this
+# document's own clause table. This pre-pass protects the clause reference
+# before any masking happens, leaving "RENDERING.md" itself for the ordinary
+# code/link masking that follows.
+EXTERNAL_DOC_REF = re.compile(
+    r"(\[`?RENDERING\.md`?\]\(RENDERING\.md\)|RENDERING\.md)"
+    r"(\s+§[0-9][0-9A-Za-z.\-]*)"
+)
+
 
 class Linker:
     """Resolves clause references to `page.md#anchor`, and reports what it
@@ -437,11 +494,31 @@ class Linker:
         return f"#{a}" if slug == here else f"{slug}.md#{a}"
 
     def rewrite(self, text: str, here: str, source: str) -> str:
-        text, store = mask(text)
+        store: list[str] = []
+
+        def keep_external(m: re.Match) -> str:
+            store.append(m.group(2))
+            return m.group(1) + (_MASK % (len(store) - 1))
+
+        text = EXTERNAL_DOC_REF.sub(keep_external, text)
+        text, store = mask(text, store)
+
+        # Resolve every existing markdown link FIRST, and mask each one out
+        # by its resolved result, before any §-reference rewriting runs. This
+        # is what stops SECTION_REF from reaching INSIDE a link's own label
+        # (a label like "SPEC §6.6" is a deliberately authored composite, not
+        # a bare clause reference) and wrapping it in a second, nested link.
+        # It also means a link now resolves inside a heading line, which a
+        # per-line "headings keep plain text" guard used to skip entirely.
+        def keep_link(m: re.Match) -> str:
+            store.append(self._link(m, here, source))
+            return _MASK % (len(store) - 1)
+
+        text = MD_LINK.sub(keep_link, text)
+
         out_lines = []
         for line in text.split("\n"):
-            if not line.startswith("#"):        # headings keep plain text
-                line = MD_LINK.sub(lambda m: self._link(m, source), line)
+            if not line.startswith("#"):        # headings keep clause-ref text as-is
                 line = SECTION_REF.sub(lambda m: self._section(m, here), line)
                 line = APPENDICES_REF.sub(lambda m: self._appendices(m, here), line)
                 line = APPENDIX_REF.sub(lambda m: self._appendix(m, here), line)
@@ -449,10 +526,21 @@ class Linker:
         return unmask("\n".join(out_lines), store)
 
     # -- markdown links to repo-relative companions -------------------------
-    def _link(self, m: re.Match, source: str) -> str:
+    def _link(self, m: re.Match, here: str, source: str) -> str:
         label, href = m.group(1), m.group(2)
-        if href.startswith(("http://", "https://", "#", "../")):
-            return m.group(0)                       # absolute, or site-authored
+        if href.startswith(("http://", "https://", "#")):
+            return m.group(0)                       # absolute, or in-page anchor
+        # SPEC.md's own "../X" links are already correct at the depth its
+        # split lands on (docs-site/docs/spec/), one level under docs-site/docs/.
+        # session-traces.md is the one exception: its OWN source file sits a
+        # directory deeper (examples/) in its repository than SPEC.md does,
+        # so a "../SPEC.md#..." link that is correct there is one level too
+        # shallow once spliced in as a spec/ sibling page here. Only that one
+        # source gets the leading "../" normalized away before resolution.
+        if href.startswith("../"):
+            if here != "traces":
+                return m.group(0)                   # already correct at this depth
+            href = href.removeprefix("../")
         if href.partition("#")[0].removesuffix(".md") in PAGE_BY_SLUG:
             return m.group(0)                       # site-authored page link
         if href not in SOURCE_LINKS:

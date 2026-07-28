@@ -185,7 +185,7 @@ def front_matter(p, *, title: str, description: str, register: str) -> None:
 
 def banner(p, reg_display: str) -> None:
     p("<!-- ==========================================================\n")
-    p("     GENERATED FILE — DO NOT EDIT.\n")
+    p("     GENERATED FILE. DO NOT EDIT.\n")
     p(f"     Source of truth: {reg_display}\n")
     p(f"     Generator:       {GENERATOR_NAME}\n")
     p("     Regenerate:      python docs-site/tools/gen_docs_tables.py\n")
@@ -309,7 +309,7 @@ PAGE_INDEX: list[tuple[str, str, str]] = [
     ("errors.md", "NACK codes", "Every NACK and GOODBYE reason code, by range."),
     ("limits.md", "Limits and defaults", "Well-known sizes, timeouts, caps and defaults."),
     ("discovery.md", "Discovery", "BLE GATT identity and advertising flags, and the UDP discovery probe/reply."),
-    ("rendering.md", "Rendering vocabulary", "Categories, ranks, value axes, units, action tags, archetypes, regions, renderer classes and widget patterns — the numbers behind RENDERING.md (RFC-048)."),
+    ("rendering.md", "Rendering vocabulary", "Categories, ranks, value axes, units, action tags, archetypes, regions, renderer classes and widget patterns: the numbers behind RENDERING.md (RFC-048)."),
 ]
 
 
@@ -340,15 +340,17 @@ def page_frames(reg: dict, reg_display: str) -> str:
     p("`CATALOG_REQ` and `CATALOG_CHUNK` verbs. They are never reallocated, so a\n")
     p("stale peer meets an unknown type and fails loudly instead of misreading a\n")
     p("blob transfer.\n\n")
-    p("Types `0x80`–`0xDF` are experimental. They never appear in a tagged\n")
-    p("release. Types `0xE0`–`0xFF` are reserved, except `0xE5` (ESTOP).\n\n")
+    p("Types `0x80` to `0xDF` are experimental. They never appear in a tagged\n")
+    p("release. Types `0xE0` to `0xFF` are reserved, except `0xE5` (ESTOP).\n\n")
 
     p("## Header flags\n\n")
     p("Bits not listed are zero on send and ignored on receive.\n\n")
     table(p, ["Mask", "Bit", "Name", "Clause"], bit_rows(reg["header_flags"]))
     p("`FRAG_START` plus `FRAG_MORE` marks the first fragment. `FRAG_MORE` alone\n")
     p("marks a middle fragment. `FRAG_START` alone marks an unfragmented frame.\n")
-    p("Neither flag, after prior fragments, marks the last fragment.\n")
+    p("Neither flag, after prior fragments, marks the last fragment.\n\n")
+    p("> DEMO-CANDIDATE: capture one real frame's 8-byte header live and "
+      "annotate each byte against this table.\n")
     return w.getvalue()
 
 
@@ -373,7 +375,7 @@ def page_channels(reg: dict, reg_display: str) -> str:
 
     p("## Stream kinds\n\n")
     p("A STREAM channel declares what one sample **is**. The congestion rules\n")
-    p("read this property; they never guess it from a unit string.\n\n")
+    p("read this property. They never guess it from a unit string.\n\n")
     rows = [[code(c), code(reg["stream_kinds"][c]["name"]), cell(reg["stream_kinds"][c].get("note", ""))]
             for c in sorted(reg["stream_kinds"])]
     table(p, ["Value", "Kind", "Meaning"], rows)
@@ -402,8 +404,8 @@ def page_channels(reg: dict, reg_display: str) -> str:
 
     p("## Spec-core channels\n\n")
     p("These channel ids mean the same thing on every hub. A hub still declares\n")
-    p("each one it implements in its catalog; a channel that is absent from the\n")
-    p("catalog does not exist on that hub.\n\n")
+    p("each one it implements in its catalog. A channel absent from the catalog\n")
+    p("does not exist on that hub.\n\n")
     rows = []
     for cid in sorted(reg["core_channels"]):
         e = reg["core_channels"][cid]
@@ -422,7 +424,7 @@ def page_cbor_keys(reg: dict, reg_display: str) -> str:
     p("# CBOR keys\n\n")
     p("Control-plane payloads are CBOR maps with integer keys. The key space is\n")
     p("**global**: a key means the same thing in every message that uses it.\n\n")
-    p("Keys 1–63 are core. Keys 64–127 are reserved. Keys 128 and above are\n")
+    p("Keys 1 to 63 are core. Keys 64 to 127 are reserved. Keys 128 and above are\n")
     p("experimental and never appear in a tagged release.\n\n")
     p("A receiver ignores an unknown key. It never NACKs one.\n\n")
 
@@ -456,12 +458,14 @@ def page_cbor_keys(reg: dict, reg_display: str) -> str:
         table(p, ["Sub-key", "Name", "Notes"], rows)
 
     p("## Blob namespaces\n\n")
-    p("One transfer verb serves the whole protocol. The namespace says what is\n")
-    p("being transferred. Values 0–127 are spec-governed; 128–255 are\n")
-    p("device-defined.\n\n")
+    p("One transfer verb serves the whole protocol. The namespace names what a\n")
+    p("transfer carries. Values 0 to 127 are spec-governed. Values 128 to 255\n")
+    p("are device-defined.\n\n")
     rows = [[code(k), code(reg["blob_namespaces"][k]["name"]), cell(reg["blob_namespaces"][k]["note"])]
             for k in sorted(reg["blob_namespaces"])]
     table(p, ["Value", "Namespace", "Notes"], rows)
+    p("\n> DEMO-CANDIDATE: decode one captured HELLO or WELCOME frame live, "
+      "key by key, against this table.\n")
     return w.getvalue()
 
 
@@ -491,7 +495,7 @@ def page_catalog_vocabulary(reg: dict, reg_display: str) -> str:
     p("a number, because action roles carry a device-chosen suffix.\n\n")
     p("Roles are **opportunities, never requirements**. A client that\n")
     p("recognizes a role may render a bespoke widget. A client that does not\n")
-    p("must fall back to generic rendering by type and constraints. An unknown\n")
+    p("must render it generically instead, by type and constraints. An unknown\n")
     p("role is never an error.\n\n")
     rows = [[code(role), cell((reg["field_roles"][role] or {}).get("note", ""))]
             for role in reg["field_roles"]]
@@ -508,8 +512,8 @@ def page_catalog_vocabulary(reg: dict, reg_display: str) -> str:
 
     p("## Procedure phases\n\n")
     p("Only the lifecycle phases are registered. Any generic client can render\n")
-    p("these without knowing the procedure. Values 128–255 are device-defined\n")
-    p("intermediate steps; a client that does not recognize one renders it as\n")
+    p("these without knowing the procedure. Values 128 to 255 are device-defined\n")
+    p("intermediate steps. A client that does not recognize one renders it as\n")
     p("`running`.\n\n")
     rows = [[code(k), code(reg["procedure_phases"][k]["name"]),
              cell(reg["procedure_phases"][k].get("note", ""))]
@@ -517,10 +521,11 @@ def page_catalog_vocabulary(reg: dict, reg_display: str) -> str:
     table(p, ["Value", "Phase", "Notes"], rows)
 
     p("## Curve families\n\n")
-    p("The `curve_family` sub-key (CBOR key 45) of a `publishes` / "
-      "`granted_publishes` entry: which smoothness class a segment stream's "
-      "sender means. The wish rides HELLO or PUBLISH; the grant echoes the "
-      "effective family, so a client can tell honored from downgraded.\n\n")
+    p("The `curve_family` sub-key is CBOR key 45, inside a `publishes` or "
+      "`granted_publishes` entry. It names which smoothness class a segment "
+      "stream's sender means. The wish rides on HELLO or PUBLISH. The grant "
+      "echoes the effective family, so a client can tell honored from "
+      "downgraded.\n\n")
     rows = [[code(k), code(reg["curve_families"][k]["name"]),
              cell(reg["curve_families"][k].get("note", ""))]
             for k in sorted(reg["curve_families"])]
@@ -549,9 +554,9 @@ def page_events(reg: dict, reg_display: str) -> str:
         ("log_event_kinds", "log (`0x0008`)",
          "One kind. The per-line content rides the `body` sub-map, schema'd by the channel's own catalog entry."),
         ("pairing_event_kinds", "pairing-events (`0x000B`)",
-         "The EVENT twin of the pending-pairing STATE channel. None of these is a safety latch."),
+         "The EVENT twin of the [pending-pairing STATE channel](channels.md#spec-core-channels). None of these is a safety latch."),
         ("safety_event_kinds", "safety-events (`0x000E`)",
-         "The EVENT twin of the safety STATE channel. Emitted on transitions only: a repeated e-stop re-broadcasts the latch, which is how loss recovery works, but it does not re-announce an edge that did not happen."),
+         "The EVENT twin of the [safety STATE channel](channels.md#spec-core-channels). It fires only on a transition. A repeated e-stop re-broadcasts the latch. This is how loss recovery works. It does not re-announce an edge that did not happen."),
     ]:
         p(f"## {heading}\n\n{intro}\n\n")
         rows = [[code(k), code(reg[section][k]["name"]), cell(reg[section][k].get("note", ""))]
@@ -559,9 +564,9 @@ def page_events(reg: dict, reg_display: str) -> str:
         table(p, ["Kind", "Name", "Meaning"], rows)
 
     p("## Log severity levels\n\n")
-    p("The log channel's `body.level` field. These values mirror the firmware\n")
-    p("logging library number for number, so the bridge is a cast and never a\n")
-    p("translation table.\n\n")
+    p("The [log channel](channels.md#spec-core-channels)'s `body.level` field.\n")
+    p("These values mirror the firmware logging library number for number, so\n")
+    p("the bridge is a cast and never a translation table.\n\n")
     rows = [[code(k), code(reg["log_levels"][k]["name"]), cell(reg["log_levels"][k].get("note", ""))]
             for k in sorted(reg["log_levels"])]
     table(p, ["Value", "Level", "Notes"], rows)
@@ -580,11 +585,11 @@ def page_safety(reg: dict, reg_display: str) -> str:
     p("# Safety codes\n\n")
 
     p("## Safety intent operations\n\n")
-    p("These are the `value` map key 1 of the `safety-intents` channel\n")
-    p("(`0x0005`).\n\n")
+    p("These are the `value` map key 1 of the [`safety-intents` channel]"
+      "(channels.md#spec-core-channels) (`0x0005`).\n\n")
     p("**`stop` and `estop` are role-exempt. Any session may send them,\n")
     p("including a `watch` session.** Safety outranks authorization. The wrong\n")
-    p("choice here means the person standing in the room cannot stop the\n")
+    p("choice here means the person who is in the room cannot stop the\n")
     p("machine. Every other operation requires `control`.\n\n")
     rows = [[code(k), code(reg["safety_intent_ops"][k]["name"]),
              cell(reg["safety_intent_ops"][k].get("note", ""))]
@@ -592,14 +597,16 @@ def page_safety(reg: dict, reg_display: str) -> str:
     table(p, ["Op", "Name", "Meaning"], rows)
 
     p("## Safety causes\n\n")
-    p("One taxonomy, two wire homes: the ESTOP frame's `cause` byte, and the\n")
-    p("`cause` field of the latched `safety` STATE snapshot (`0x0003`).\n\n")
+    p("One taxonomy has two wire homes. They are the ESTOP frame's `cause`\n")
+    p("byte, and the `cause` field of the latched [`safety` STATE snapshot]"
+      "(channels.md#spec-core-channels) (`0x0003`).\n\n")
     rows = [[code(k), code(reg["safety_causes"][k]["name"]), cell(reg["safety_causes"][k].get("note", ""))]
             for k in sorted(reg["safety_causes"])]
     table(p, ["Value", "Cause", "Meaning"], rows)
     p("`deadman` means the silence window actually elapsed. Every other way a\n")
-    p("session ends latches `session_loss`. Reporting a closed browser tab as a\n")
-    p("deadman timeout was a real bug; these are two different events.\n")
+    p("session ends latches `session_loss`. A closed browser tab is not the\n")
+    p("same event as a deadman timeout. An earlier bug reported them as the\n")
+    p("same thing. These are two different events.\n")
     return w.getvalue()
 
 
@@ -620,8 +627,9 @@ def page_pairing(reg: dict, reg_display: str) -> str:
     table(p, ["Mask", "Bit", "Name", "Notes"], bit_rows(reg["pairing_modes"]))
 
     p("\n## Administration operations\n\n")
-    p("These are the `value` map key 1 of the `session-admin` channel\n")
-    p("(`0x0009`). The channel requires `configure`.\n\n")
+    p("These are the `value` map key 1 of the [`session-admin` channel]"
+      "(channels.md#spec-core-channels) (`0x0009`). The channel requires "
+      "`configure`.\n\n")
     p("**The trusted surface is a tier, not an app.** Any `configure` session\n")
     p("reaches every operation here. Nothing in the protocol knows or cares\n")
     p("whether that session is the machine's own web page, a phone, or a\n")
@@ -636,14 +644,15 @@ def page_pairing(reg: dict, reg_display: str) -> str:
     table(p, ["Op", "Name", "Meaning"], rows)
 
     p("## Trust ledger states\n\n")
-    p("The `state` field of a paired-devices item. A revoked device has no\n")
-    p("entry at all, so revocation is an absence and never a third state.\n\n")
+    p("This is the `state` field of a paired-devices item. A revoked device\n")
+    p("has no entry at all, so revocation is an absence and never a third\n")
+    p("state.\n\n")
     rows = [[code(k), code(reg["trust_states"][k]["name"]), cell(reg["trust_states"][k].get("note", ""))]
             for k in sorted(reg["trust_states"])]
     table(p, ["Value", "State", "Meaning"], rows)
     p("\n## Token presentation modes\n\n")
-    p("The `trust` sub-map's `presentation_mode`, recorded per device in the\n")
-    p("ledger so that security posture is something an operator can see.\n\n")
+    p("This is the `trust` sub-map's `presentation_mode`. The ledger records\n")
+    p("it per device, so an operator can see the security posture.\n\n")
     p("`bearer` is the floor and the default. `proof` is recommended for any\n")
     p("client that already has SHA-256, and is never required of anyone.\n\n")
     rows = [[code(k), code(reg["presentation_modes"][k]["name"]),
@@ -653,9 +662,9 @@ def page_pairing(reg: dict, reg_display: str) -> str:
 
     p("A reported client version is a tripwire, not an attestation. It catches\n")
     p("an honest update. A deliberately malicious one reports whatever version\n")
-    p("it likes and keeps its token. What actually bounds a hostile client is\n")
-    p("role scoping, immediate revocation, its visibility in the roster, and\n")
-    p("the fact that safety operations are role-exempt for everyone.\n")
+    p("it likes and keeps its token. What bounds a hostile client is role\n")
+    p("scoping, immediate revocation, its visibility in the roster, and the\n")
+    p("fact that safety operations are role-exempt for everyone.\n")
     return w.getvalue()
 
 
@@ -667,9 +676,10 @@ def page_discovery(reg: dict, reg_display: str) -> str:
                  register="IEEE")
     banner(p, reg_display)
     p("# Discovery\n\n")
-    p("Two ways a client finds a hub before it has a session: a pinned BLE GATT\n")
-    p("identity, and a UDP broadcast probe for WS-side clients without BLE. Both\n")
-    p("are read-only identity surfaces — neither carries a control plane.\n\n")
+    p("A client finds a hub two ways before it has a session. One is a pinned\n")
+    p("BLE GATT identity. The other is a UDP broadcast probe for WS-side\n")
+    p("clients without BLE. Both are read-only identity surfaces. Neither\n")
+    p("carries a control plane.\n\n")
 
     p("## BLE GATT identity\n\n")
     p("Every conformant BLE hub advertises the **same** service UUID, so a client\n")
@@ -684,14 +694,16 @@ def page_discovery(reg: dict, reg_display: str) -> str:
     table(p, ["Role", "UUID"], rows)
 
     p("## BLE advertising flags\n\n")
-    p("The one flags byte a legacy (≤31 B) advertising payload can spare\n")
-    p("after the service UUID and a shortened hub name. Bits not listed are zero.\n\n")
+    p("A legacy (≤31 B) advertising payload can spare one byte for flags,\n")
+    p("after the service UUID and a shortened hub name. Bits not listed are\n")
+    p("zero.\n\n")
     table(p, ["Mask", "Bit", "Name", "Notes"], bit_rows(reg["ble_adv_flags"]))
 
     p("## UDP discovery\n\n")
-    p("The canonical WS-side discovery path for a LAN client without BLE: plain\n")
-    p("UDP sockets both ends, immune to the multicast/mesh-AP/Android failure\n")
-    p("modes that make mDNS unreliable in real homes.\n\n")
+    p("This is the canonical WS-side discovery path for a LAN client without\n")
+    p("BLE. It uses plain UDP sockets on both ends. It is immune to the\n")
+    p("multicast, mesh-AP and Android failure modes that make mDNS unreliable\n")
+    p("in real homes.\n\n")
     ud = reg["udp_discovery"]
     rows = [
         [cell("Port"), code(ud["port"])],
@@ -699,11 +711,13 @@ def page_discovery(reg: dict, reg_display: str) -> str:
         [cell("Reply rate limit"), cell(f"{ud['reply_rate_limit_per_source_s']} / source / second")],
     ]
     table(p, ["Property", "Value"], rows)
-    p("The probe and reply frames themselves — `DISCOVER_PROBE` (`0x1E`) and\n")
-    p("`DISCOVER_REPLY` (`0x1F`) — are frame types; see [Frame types](frames.md).\n")
+    p("The probe and reply frames themselves, `DISCOVER_PROBE` (`0x1E`) and\n")
+    p("`DISCOVER_REPLY` (`0x1F`), are frame types. See [Frame types](frames.md).\n")
     p("A reply carries `magic + nonce + hub_name + hub_id + proto_ver + ws_port +\n")
-    p("fw_version + catalog_etag + flags` — nothing a passive observer of a normal\n")
-    p("WELCOME could not already learn.\n")
+    p("fw_version + catalog_etag + flags`. A passive observer of a normal\n")
+    p("WELCOME could already learn all of it.\n\n")
+    p("> DEMO-CANDIDATE: send a live UDP probe to a real hub and decode its "
+      "reply on the page.\n")
     return w.getvalue()
 
 
@@ -718,19 +732,20 @@ def page_rendering(reg: dict, reg_display: str) -> str:
     p("These are the numbers behind [RENDERING.md](../../spec/rendering.md), the "
       "normative UI-rendering companion to the specification. Every vocabulary "
       "below is frozen at the v1.0 tag. None is wired onto a real catalog entry "
-      "yet — see the specification's known limitations.\n\n")
+      "yet. See the specification's [known limitations]"
+      "(../../spec/limitations.md).\n\n")
 
     p("## Categories\n\n")
-    p("`category` answers WHERE a catalog entry lives. Ids 1-14 are the frozen, "
-      "complete spec set, in canonical menu order. An unrecognized id — "
-      "including an untaught vendor id — MUST render under `other`, using the "
-      "catalog-provided label, never dropped.\n\n")
+    p("`category` answers WHERE a catalog entry lives. Ids 1 to 14 are the "
+      "frozen, complete spec set, in canonical menu order. An unrecognized "
+      "id, including an untaught vendor id, MUST render under `other`. It "
+      "keeps the catalog-provided label. It is never dropped.\n\n")
     rows = [[code(k), code(reg["ui_categories"][k]["name"]), cell(reg["ui_categories"][k].get("note", ""))]
             for k in sorted(reg["ui_categories"])]
     table(p, ["Id", "Category", "Notes"], rows)
-    p("`0x40`-`0x7E` is the vendor/device range (a hub declaring one MUST supply "
-      "a label). `15`-`0x3F` is reserved for future spec-registered categories; "
-      "`0x7F`+ is reserved.\n\n")
+    p("`0x40` to `0x7E` is the vendor/device range. A hub that declares one "
+      "MUST supply a label. `15` to `0x3F` is reserved for future "
+      "spec-registered categories. `0x7F` and above is reserved.\n\n")
 
     p("## Ranks\n\n")
     p("`rank` answers HOW MUCH a catalog entry or field matters by default. "
@@ -740,8 +755,8 @@ def page_rendering(reg: dict, reg_display: str) -> str:
     table(p, ["Id", "Rank", "Notes"], rows)
 
     p("## Value axes\n\n")
-    p("Three small, orthogonal vocabularies tagging what statistic a field is. "
-      "Default when absent: `live` / `session` / `actual`.\n\n")
+    p("Three small, orthogonal vocabularies tag what statistic a field is. "
+      "The default, when none is given, is `live` / `session` / `actual`.\n\n")
     for section, heading in (("value_aspects", "Aspect"), ("value_scopes", "Scope"), ("value_provenance", "Provenance")):
         p(f"### {heading}\n\n")
         rows = [[code(k), code(reg[section][k]["name"]), cell(reg[section][k].get("note", ""))]
@@ -749,30 +764,32 @@ def page_rendering(reg: dict, reg_display: str) -> str:
         table(p, ["Id", heading, "Notes"], rows)
 
     p("## Units\n\n")
-    p("A frozen numeric companion to the existing free-string `unit` field. "
-      "Both exist; wiring this table onto real catalog fields is next-phase "
-      "work. Deliberately over-provisioned for foreseeable actuators. An "
-      "unrecognized unit id renders the catalog's own label string "
+    p("Units are a frozen numeric companion to the existing free-string "
+      "`unit` field. Both exist side by side. This table is not yet wired "
+      "onto real catalog fields; that is next-phase work. The list is "
+      "deliberately larger than current needs, to cover future actuators. "
+      "An unrecognized unit id renders the catalog's own label string "
       "verbatim.\n\n")
     rows = [[code(k), code(reg["unit_ids"][k]["name"]), cell(reg["unit_ids"][k].get("note", ""))]
             for k in sorted(reg["unit_ids"])]
     table(p, ["Id", "Unit", "Quantity"], rows)
 
     p("## Action tags\n\n")
-    p("The specific `action.<name>` suffixes a conformant client MAY "
-      "special-case to upgrade a generic `trigger` archetype into a "
-      "purpose-specific rendering. An unregistered suffix remains legal; an "
-      "unrecognized one renders as a generic trigger.\n\n")
+    p("A conformant client MAY special-case the specific `action.<name>` "
+      "suffixes below. This lets it upgrade a generic `trigger` archetype "
+      "into a purpose-specific rendering. An unregistered suffix remains "
+      "legal. An unrecognized one renders as a generic trigger.\n\n")
     rows = [[code(tag), cell((reg["action_tags"][tag] or {}).get("note", ""))]
             for tag in reg["action_tags"]]
     table(p, ["Tag", "Meaning"], rows)
 
     p("## Archetypes\n\n")
-    p("The control style and interaction contract a catalog field or channel "
-      "renders with. Derived by a normative decision table in the common "
-      "case (RENDERING.md §8.2); an explicit `archetype` hint overrides. "
-      "`Fallback` is the mandatory composition of frozen primitives every "
-      "archetype declares — a primitive lists itself.\n\n")
+    p("An archetype is the control style and interaction contract a catalog "
+      "field or channel renders with. A normative decision table derives it "
+      "in the common case (RENDERING.md §8.2). An explicit `archetype` hint "
+      "overrides that table. `Fallback` is the mandatory composition of "
+      "frozen primitives every archetype declares. A primitive lists "
+      "itself.\n\n")
     rows = []
     for k in sorted(reg["ui_archetypes"]):
         e = reg["ui_archetypes"][k]
@@ -781,15 +798,15 @@ def page_rendering(reg: dict, reg_display: str) -> str:
     table(p, ["Id", "Archetype", "Semantic", "Fallback"], rows)
 
     p("## Regions\n\n")
-    p("Four abstract placement zones plus one modal layer. Geometry, "
-      "position, size and style within a region are the renderer author's "
-      "craft; what lives in each region is normative.\n\n")
+    p("There are four abstract placement zones, plus one modal layer. "
+      "Geometry, position, size and style within a region are the "
+      "renderer author's craft. What lives in each region is normative.\n\n")
     rows = [[code(k), code(reg["ui_regions"][k]["name"]), cell(reg["ui_regions"][k].get("note", ""))]
             for k in sorted(reg["ui_regions"])]
     table(p, ["Id", "Region", "Contents"], rows)
 
     p("## Renderer classes\n\n")
-    p("All classes render one category tree; they differ in projection and "
+    p("All classes render one category tree. They differ in projection and "
       "default surfacing, never in reachable content. A device between "
       "budgets adopts the nearer class.\n\n")
     rows = [[code(k), code(reg["renderer_classes"][k]["name"]), cell(reg["renderer_classes"][k].get("note", ""))]
@@ -797,10 +814,10 @@ def page_rendering(reg: dict, reg_display: str) -> str:
     table(p, ["Id", "Class", "Notes"], rows)
 
     p("## Widget patterns\n\n")
-    p("Proven compositions extracted from the reference client. `Required` "
-      "marks a pattern a handheld/full client MUST provide when its "
-      "capability is present (glance-class: reachable via the category tree "
-      "instead).\n\n")
+    p("These are proven compositions extracted from the reference client. "
+      "`Required` marks a pattern that a handheld or full client MUST "
+      "provide when its capability is present. A glance-class device may "
+      "reach it through the category tree instead.\n\n")
     rows = []
     for k in sorted(reg["widget_patterns"]):
         e = reg["widget_patterns"][k]
@@ -822,16 +839,16 @@ def page_errors(reg: dict, reg_display: str) -> str:
     p("same table.\n\n")
     p("A receiver that meets an unknown code treats it as the generic code of\n")
     p("its range, taken from the high byte. That fallback is why a second,\n")
-    p("overlapping space was rejected: with two spaces, the range of an unknown\n")
-    p("code is ambiguous.\n\n")
+    p("overlapping space was rejected. With two spaces, the range of an\n")
+    p("unknown code is ambiguous.\n\n")
 
     ranges = {
-        0x00: ("`0x00xx` — protocol", "The frame itself is unusable."),
-        0x01: ("`0x01xx` — session and authorization", "The session cannot proceed as asked."),
-        0x02: ("`0x02xx` — subscription and QoS", "The subscription request is refused."),
-        0x03: ("`0x03xx` — intent", "The intent is refused on its own merits."),
-        0x04: ("`0x04xx` — safety refusal", "The machine refuses on safety grounds. A client SHOULD render these distinctly."),
-        0x05: ("`0x05xx` — transfer", "A chunked transfer failed."),
+        0x00: ("`0x00xx`: protocol", "The frame itself is unusable."),
+        0x01: ("`0x01xx`: session and authorization", "The session cannot proceed as asked."),
+        0x02: ("`0x02xx`: subscription and QoS", "The subscription request is refused."),
+        0x03: ("`0x03xx`: intent", "The intent is refused on its own merits."),
+        0x04: ("`0x04xx`: safety refusal", "The machine refuses on safety grounds. A client SHOULD render these distinctly."),
+        0x05: ("`0x05xx`: transfer", "A chunked transfer failed."),
     }
     by_range: dict[int, list] = {}
     for c in sorted(reg["nack_codes"]):
@@ -916,7 +933,7 @@ def build_dictionary(d: dict) -> tuple[str, str, int]:
         register="STE",
     )
     p("<!-- ==========================================================\n")
-    p("     GENERATED FILE — DO NOT EDIT.\n")
+    p("     GENERATED FILE. DO NOT EDIT.\n")
     p("     Source of truth: docs-site/dictionary.yaml\n")
     p(f"     Generator:       {GENERATOR_NAME}\n")
     p("     Edit the YAML, then regenerate. The tooltip definitions in\n")
@@ -949,7 +966,7 @@ def build_dictionary(d: dict) -> tuple[str, str, int]:
 
     count = 0
     abbr = io.StringIO()
-    abbr.write("<!-- GENERATED FILE — DO NOT EDIT. "
+    abbr.write("<!-- GENERATED FILE. DO NOT EDIT. "
                f"Source: docs-site/dictionary.yaml via {GENERATOR_NAME} -->\n")
     abbr.write("<!-- Appended to every page by pymdownx.snippets.auto_append, so a\n")
     abbr.write("     defined term shows its Dictionary definition on hover. -->\n\n")

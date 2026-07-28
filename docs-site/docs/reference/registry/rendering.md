@@ -6,7 +6,7 @@ generated: true
 ---
 
 <!-- ==========================================================
-     GENERATED FILE — DO NOT EDIT.
+     GENERATED FILE. DO NOT EDIT.
      Source of truth: docs/slopsync/registry/registry.yaml
      Generator:       docs-site/tools/gen_docs_tables.py
      Regenerate:      python docs-site/tools/gen_docs_tables.py
@@ -16,11 +16,11 @@ generated: true
 
 # Rendering vocabulary
 
-These are the numbers behind [RENDERING.md](../../spec/rendering.md), the normative UI-rendering companion to the specification. Every vocabulary below is frozen at the v1.0 tag. None is wired onto a real catalog entry yet — see the specification's known limitations.
+These are the numbers behind [RENDERING.md](../../spec/rendering.md), the normative UI-rendering companion to the specification. Every vocabulary below is frozen at the v1.0 tag. None is wired onto a real catalog entry yet. See the specification's [known limitations](../../spec/limitations.md).
 
 ## Categories
 
-`category` answers WHERE a catalog entry lives. Ids 1-14 are the frozen, complete spec set, in canonical menu order. An unrecognized id — including an untaught vendor id — MUST render under `other`, using the catalog-provided label, never dropped.
+`category` answers WHERE a catalog entry lives. Ids 1 to 14 are the frozen, complete spec set, in canonical menu order. An unrecognized id, including an untaught vendor id, MUST render under `other`. It keeps the catalog-provided label. It is never dropped.
 
 | Id | Category | Notes |
 |---|---|---|
@@ -39,7 +39,7 @@ These are the numbers behind [RENDERING.md](../../spec/rendering.md), the normat
 | `13` | `system` | power, thermals, memory, firmware, logs |
 | `14` | `other` | the defined overflow — every unrecognized category id (including an untaught vendor id) renders here, per the graceful-extension rule |
 
-`0x40`-`0x7E` is the vendor/device range (a hub declaring one MUST supply a label). `15`-`0x3F` is reserved for future spec-registered categories; `0x7F`+ is reserved.
+`0x40` to `0x7E` is the vendor/device range. A hub that declares one MUST supply a label. `15` to `0x3F` is reserved for future spec-registered categories. `0x7F` and above is reserved.
 
 ## Ranks
 
@@ -56,7 +56,7 @@ These are the numbers behind [RENDERING.md](../../spec/rendering.md), the normat
 
 ## Value axes
 
-Three small, orthogonal vocabularies tagging what statistic a field is. Default when absent: `live` / `session` / `actual`.
+Three small, orthogonal vocabularies tag what statistic a field is. The default, when none is given, is `live` / `session` / `actual`.
 
 ### Aspect
 
@@ -87,7 +87,7 @@ Three small, orthogonal vocabularies tagging what statistic a field is. Default 
 
 ## Units
 
-A frozen numeric companion to the existing free-string `unit` field. Both exist; wiring this table onto real catalog fields is next-phase work. Deliberately over-provisioned for foreseeable actuators. An unrecognized unit id renders the catalog's own label string verbatim.
+Units are a frozen numeric companion to the existing free-string `unit` field. Both exist side by side. This table is not yet wired onto real catalog fields; that is next-phase work. The list is deliberately larger than current needs, to cover future actuators. An unrecognized unit id renders the catalog's own label string verbatim.
 
 | Id | Unit | Quantity |
 |---|---|---|
@@ -117,7 +117,7 @@ A frozen numeric companion to the existing free-string `unit` field. Both exist;
 
 ## Action tags
 
-The specific `action.<name>` suffixes a conformant client MAY special-case to upgrade a generic `trigger` archetype into a purpose-specific rendering. An unregistered suffix remains legal; an unrecognized one renders as a generic trigger.
+A conformant client MAY special-case the specific `action.<name>` suffixes below. This lets it upgrade a generic `trigger` archetype into a purpose-specific rendering. An unregistered suffix remains legal. An unrecognized one renders as a generic trigger.
 
 | Tag | Meaning |
 |---|---|
@@ -137,7 +137,7 @@ The specific `action.<name>` suffixes a conformant client MAY special-case to up
 
 ## Archetypes
 
-The control style and interaction contract a catalog field or channel renders with. Derived by a normative decision table in the common case (RENDERING.md §8.2); an explicit `archetype` hint overrides. `Fallback` is the mandatory composition of frozen primitives every archetype declares — a primitive lists itself.
+An archetype is the control style and interaction contract a catalog field or channel renders with. A normative decision table derives it in the common case (RENDERING.md §8.2). An explicit `archetype` hint overrides that table. `Fallback` is the mandatory composition of frozen primitives every archetype declares. A primitive lists itself.
 
 | Id | Archetype | Semantic | Fallback |
 |---|---|---|---|
@@ -159,7 +159,7 @@ The control style and interaction contract a catalog field or channel renders wi
 
 ## Regions
 
-Four abstract placement zones plus one modal layer. Geometry, position, size and style within a region are the renderer author's craft; what lives in each region is normative.
+There are four abstract placement zones, plus one modal layer. Geometry, position, size and style within a region are the renderer author's craft. What lives in each region is normative.
 
 | Id | Region | Contents |
 |---|---|---|
@@ -171,7 +171,7 @@ Four abstract placement zones plus one modal layer. Geometry, position, size and
 
 ## Renderer classes
 
-All classes render one category tree; they differ in projection and default surfacing, never in reachable content. A device between budgets adopts the nearer class.
+All classes render one category tree. They differ in projection and default surfacing, never in reachable content. A device between budgets adopts the nearer class.
 
 | Id | Class | Notes |
 |---|---|---|
@@ -181,7 +181,7 @@ All classes render one category tree; they differ in projection and default surf
 
 ## Widget patterns
 
-Proven compositions extracted from the reference client. `Required` marks a pattern a handheld/full client MUST provide when its capability is present (glance-class: reachable via the category tree instead).
+These are proven compositions extracted from the reference client. `Required` marks a pattern that a handheld or full client MUST provide when its capability is present. A glance-class device may reach it through the category tree instead.
 
 | Id | Pattern | Composition | Required |
 |---|---|---|---|

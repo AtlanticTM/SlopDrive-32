@@ -1064,6 +1064,45 @@ toward eviction for a send never attempted). Operator veto window open.
   faithful build over the brief's imprecise "32"; `minimal` = spec-core +
   motion/move/home). Operator veto window open.
 
+## Morning ruling batch (operator, 2026-07-28, on the overnight stamp list)
+
+1. **STATE burst congestion: COALESCE, not backpressure — approved.** STATE
+   is last-value-wins, so under congestion a newer value for a channel
+   REPLACES its queued older frame instead of stacking behind it (BLOB
+   keeps its hold-based gating; every chunk must arrive). Design note →
+   implementation → bench measurement of the subscribe-all worst case.
+2. **Wire-visible catalog/registry strings get the punctuation pass —
+   approved** ("do it, it's a single etag bump"). ONE atomic catalog
+   evolution: em/en dashes + banned words fixed in SlopSyncCatalog.h descs
+   + registry.yaml desc strings; fixtures/goldens regenerated once; etag
+   changes on deploy; frozen mini-catalog untouched (C-11 precedent).
+3. **Sim division-of-labor ruling:** `sim/slopsim` is the 1:1 DEVICE TWIN —
+   the 19 advertised-but-inert entries get REAL behavior in parity with the
+   machine ("it's a 1:1 sim and it should reflect that for quality
+   testing"). PARITY IS ONE-WAY (operator, same date): the machine is the
+   truth and the sim conforms to it — the firmware is NEVER edited to close
+   a sim gap; a mismatch is always a sim work item. The "be anything" role
+   moves to a NEW dumb test hub named **SlopBench** (operator-named):
+   config-file catalog, simple TUI showing live axis/channel values,
+   configurable fake delay on STATE echo.
+4. **Internal reference docs stay out of the repo — verified already true:**
+   root tracking is LICENSE/NOTICE/README/THIRD_PARTY_LICENSES + 4 build
+   files only; zero PDFs/.diy tracked. The visible root clutter is
+   untracked-by-existing-rules local files. Nothing deleted.
+5. **Comment standardization — approved, becomes law:** a comment style
+   standard gets written into DOCTRINE (file-top header block, `// ----`
+   section banners, `//` line style, `/* */` license-only — proposal,
+   veto-able), then a codebase-wide rewrite pass: rambly comments become
+   constraints-or-pointers or die (C-12 retroactive), file sections get
+   headers, one style everywhere. Full gauntlet after.
+6. **`minimal` sim profile floor — PENDING, operator draft recorded:**
+   "home, motion, move, window controls and pattern Gen are the bare
+   minimum." Decide + implement later; current spec-core+motion/move/home
+   stands until then.
+7. **dictionary.yaml lane call — ratified.**
+   Sequencing: Phase G close-out → (2) wire strings → (3) sim parity +
+   SlopBench → (1) coalescing → (5) comment pass. Deploys serialize.
+
 ## Named work items (operator-approved 2026-07-27)
 
 - **Phase G (operator, 2026-07-28, runs after the live-verify + commits):**
@@ -1125,6 +1164,114 @@ toward eviction for a send never attempted). Operator veto window open.
   snippet would genuinely help, agents MARK the spot with the greppable
   callout `> DEMO-CANDIDATE: <one line: what it would show>` and move on —
   the operator implements demos personally; agents never build them.
+
+## Phase G LANDED (2026-07-28): docs gold-standard pass + channel-grid page + close-out gauntlet
+
+Round tally (main-loop orchestration of this effort): 1 initial build pass +
+9 correction sub-sweeps; round-2 sub-sweep totals: 81 findings, 77 fixed, 4
+deliberately left open, per Rider 5's own "multi-round, until the bar is
+met" design. This close-out session ran its own verification + fix round on
+top of that (Steps 1-2 below), independently re-proven, not merely relayed.
+
+All five STAMPED RIDERS confirmed executed: (1) `SlopSyncCatalog.h` interior
+section banners lose their hex ids entirely (`grep '// ---- 0x'
+include/comms/SlopSyncCatalog.h` — 0 hits); (2) `V1-READINESS.md`,
+`WEBUI-HANDOFF-RFC-BATCH.md`, and `RFC-QUEUE.md` each carry the one-line
+"ids herein are historical (pre-C4)" header; (3) `CHANNEL-MAP.md`'s Old
+column documents its own v1.0-tag retirement in prose; (4) STE register
+pages (`reference/channel-catalog.md`, `channel-grid.md`, `dictionary.md`,
+`reference/index.md`) carry `register: STE`, spec/registry pages keep
+`register: IEEE` — correctly scoped, the registry.yaml-generated pages are
+normative IEEE voice, not the STE "register/channel reference" pages Rider 4
+names; (5) rider text intact verbatim, gold-standard bar applied (house-voice
+de-AI pass, mermaid diagram upgrades, ~90% link-the-reference rule, webui-
+matched aesthetic). DEMO-CANDIDATE markers: **35** total
+(`grep -rc '> DEMO-CANDIDATE:' docs/ docs-site/docs/`, summed).
+
+**Notable truth fixes landed in this pass** (spot-verified directly against
+the uncommitted `git diff`, not taken on faith):
+- **RFC-045 disconnect behavior, plain-language pages.** `docs-site/docs/
+  understand/for-everyone.md` ("If your phone dies, the machine stops" →
+  "...the machine settles" / "nothing on the machine broadcasts an emergency
+  stop on your behalf") and `understand/how-it-works.md` ("a vanished
+  streaming client stops the machine" → the hub releases ownership as
+  bookkeeping, "motion settles by physics rather than by a safety action").
+  Both now describe RFC-045's actually-landed behavior instead of the
+  pre-RFC-045 deadman-forces-a-stop model the plain-language tier had never
+  been updated to drop.
+- **Session-roster overclaim fixed.** `understand/what-it-replaces.md` and
+  `understand/security.md` no longer describe "the roster" as a feature a
+  reader can rely on today; both now say the roster snapshot is specified,
+  not built, and route the same practical claims (who's connected, kick a
+  client) through session-events + the trust ledger, which ARE implemented —
+  matching this ledger's own "0x0002 session-roster: reserved, NOT
+  implemented" entry above.
+- **"BLE overclaim downgraded" — NOT found, not recorded as done.** This was
+  named as expected work for this pass; a full search of every BLE/GATT/
+  discovery hunk in the uncommitted diff found no line that downgrades an
+  overclaim (every BLE-related change in this pass is punctuation/link
+  cleanup, or new text adding a caveat to a page that previously said
+  nothing about BLE). Flagging instead of fabricating the claim (C-8).
+  **Separately found, and worth its own look:** `SPEC.md` §18 item 22 ("BLE
+  GATT... specified with no reference implementation... until a BLE
+  `ITransport` and a UDP responder land") is itself stale in the OTHER
+  direction — `src/comms/SlopSyncBleTransport.{h,cpp}` and the UDP responder
+  have been committed in-tree since Phase E (commit `07a3b90`), build/host-
+  verified. Not touched this pass: a normative §18 status rewrite is bigger
+  than a docs/link close-out and deserves its own review, not a drive-by
+  edit riding on this session's scope.
+
+**Anchor-fallout fix (this session's Step 1).** An earlier sweep retitled
+`RFC-QUEUE.md` headings RFC-043..048 from bare `## RFC-043` to descriptive
+titles, breaking every bare `#rfc-04X` cross-reference into it. Wrote a
+tree-wide markdown link verifier (walks every `.md` under `docs/` +
+`docs-site/docs/`, extracts relative links, verifies the target file exists
+and, if there's an anchor, that some heading in the target slugifies to it —
+underscore-preserving, em-dash → double-hyphen, matching this repo's own
+already-working full-slug RFC links; also honors mkdocs `attr_list` explicit
+`{#id}` anchors like `spec/session.md`'s `{#s6-4}` style). First run: 38
+broken — 36 were the anchor fallout (`docs/slopdeck/DESIGN.md` ×3,
+`docs/slopsync/RENDERING.md` ×4, `docs/slopsync/SPEC.md` ×29), all fixed to
+the full slug (e.g. `#rfc-043--transport-conformance-profiles-which-
+bindings-a-hub-must-offer`); the other 2 were the `plugins.md` links below.
+`docs-site/tools/gen_spec_pages.py`'s own `SOURCE_LINKS` allowlist carried
+the same 5 stale bare anchors (would have failed its own `--check` the
+moment it ran against the corrected SPEC.md) — updated to match. Second run:
+**0 broken.**
+
+**mkdocs strict fix (this session's Step 2).** The 2 warnings were
+`docs-site/docs/build/plugins.md` linking `../cli.md#the-probe` and
+`../local-testing.md#the-pattern-that-is-mandatory` with a spurious `../` —
+`cli.md` and `local-testing.md` are `plugins.md`'s own siblings in
+`docs-site/docs/build/`, not one level up (the same page's own "Where to go
+next" section links `cli.md` bare, confirming the sibling relationship).
+Fixed both to same-directory links. `mkdocs build --strict`: exit 0, zero
+warnings.
+
+**Also found and fixed, not in the original brief:** this ledger's own
+"Morning ruling batch" item 7 still named the new test-hub tool "SlopRig"
+after item 3, two lines above it, had already ratified the name "SlopBench"
+— a rename that hadn't propagated within the same file. Corrected.
+
+**Gauntlet (all green, this session, every command run directly):**
+tree-wide link checker 0 broken; `mkdocs build --strict` exit 0, zero
+warnings; all six generators `--check` green (`gen_registry_header.py`,
+`gen_channel_map.py`, `gen_channel_grid.py`, `gen_docs_tables.py` — 14
+files/108 terms, `gen_spec_pages.py` — 20 files, `gen_channel_grid_page.py`);
+`canon_lint.py` 0 findings; `catalog_lint.py` OK (32 entries, 113 desc / 44
+role annotations); native suite 31/31 exit 0 (mingw64 PATH prepend, TRAPS
+T10); `pio run -e sd32-ota` SUCCESS, **RAM 24.1% / 78,948 B, flash 28.5% /
+1,869,456 B** — byte-identical to the last-verified PARKED-SLOT SAFETY
+BROADCAST build, confirming this phase's `SlopSyncCatalog.h` banner-comment
+strip moved zero bytes (comments-only, as expected); webui untouched this
+phase (`git status` shows 0 changes under `webui/`, confirmed before
+declaring this) and `npm run check` still ALL PASS (device-knowledge 27
+files/87 wire fields; settings-model all cases; "the renderer is
+machine-agnostic"). [verified 2026-07-28 — every command above run directly
+this session, exit codes checked; link-verifier script + both its runs,
+`mkdocs build --strict` output, all six generator outputs, `canon_lint.py`/
+`catalog_lint.py` output, native suite + `sd32-ota` build output all
+reproduced in this session]
 
 - **Phase C4 LANDED (2026-07-28, execution spec = tools/gen_channel_grid.py's
   ALLOC dict, stamped 2026-07-27 via the channel-grid visual):** 22 device

@@ -77,6 +77,23 @@ Chunked transfer is **one verb for the whole protocol** ([§8.7](#s8-7)). The ca
   | 4 | congested, **sustained > 5 s** ([§10.3](qos.md#s10-3)'s own sustained-congestion window) | **Abort** the transfer: one NACK `BUSY` carrying `retry_after_ms`, per the existing "one NACK answers one BLOB_REQ" rule below — never a NACK per chunk |
 
   `blob_chunks_in_flight` (registry `limits`, default 4) is the concrete, binding-independent number the panel's "what IS the signal" finding asked for: a hub MAY advertise less, MUST NOT advertise more, and a chunk the receiver has not yet acknowledged by reassembly progress counts against it. This closes the gap between an advisory "MAY pace" and an implementer actually knowing what to code against.
+
+  ```mermaid
+  flowchart TD
+      Start([next chunk to emit]):::start
+      Start --> Check{binding congestion\nsignal, [§10.3](qos.md#s10-3)}
+      Check -->|"clear, or in-flight <\nblob_chunks_in_flight"| Send[Send the chunk]
+      Check -->|"congested,\nin-flight = limit"| Hold[Hold at current index]
+      Send -->|"more chunks remain"| Check
+      Hold -->|"congestion clears\nbefore 5 s"| Resume[Resume from held index]
+      Resume --> Check
+      Hold -->|"sustained > 5 s\n([§10.3](qos.md#s10-3) window)"| Abort["Abort: one NACK BUSY\n+ retry_after_ms"]
+
+      classDef start fill:#2b6cb0,stroke:#1a365d,color:#fff,stroke-width:2px
+  ```
+
+  *The `Send ⟲ Check` loop is the ordinary case — most transfers never touch
+  `Hold`. `Abort` fires once per stalled transfer, never once per chunk.*
 - **BLOB_DONE (`0x20`) is the transfer's positive completion signal**, generalizing CATALOG_READY's pattern ([§6.4](session.md#s6-4)) rather than adding a second concept: the **receiver** of a transfer — the client for the common hub→client case, the hub for a client→hub STORE import ([§8.7](#s8-7)) — MUST send BLOB_DONE once reassembly concludes, carrying the same identity fields as `blob_keys` (namespace, store_id, slot, generation) plus `status` (0 verified-complete after a local hash check succeeds, 1 hash-mismatch, 2 aborted — e.g. by row 4 above, or by the receiver's own `frag_reassembly_timeout_ms` giving up). It is idempotent, exactly like CATALOG_READY: safe to re-send on a duplicate delivery or a retried reassembly. **The sender treats a nonzero `status` per its own retry policy** — BLOB_DONE reports an outcome, it does not itself request a retry; a sender wanting one re-issues the transfer as a fresh BLOB_REQ. A receiver that never verifies (a static client, or one that trusts transport-level integrity) MAY omit BLOB_DONE; nothing upstream of the catalog namespace blocks on it, so its absence degrades observability, not correctness.
 - A hub bounds concurrent transfers by its RAM; beyond that, BLOB_REQ gets NACK `BUSY`. **A `blob.ns` value outside the registered `blob_namespaces` table (and outside the device-defined 128–255 range) MUST be rejected with NACK `INVALID_NAMESPACE`** (RFC-049e) — a namespace that does not exist at all is a different failure from a store or slot that does not exist *within* a namespace that does, and a client needs to tell them apart to know whether retrying with a different `store_id`/`slot` could ever succeed. A request naming a store or slot that does not exist within a valid namespace gets NACK `CHUNK_UNAVAILABLE`, unchanged. **One NACK answers one BLOB_REQ**, whether the request was refused up front, a resumed transfer became unservable partway (the addressed item was deleted, resized, or its `generation` moved), or the sender aborted it per row 4 above — never one per bad index and never one per chunk.
 - The hub MUST gate BLOB_REQ on the declaring entry's `access` exactly as it gates SUBSCRIBE.
@@ -130,7 +147,7 @@ Every layout and schema field MAY carry an annotation block. **All of it is opti
 
 **`setting_key` presence is the stored-vs-effective distinction**, and it needs no separate flag. A machine's stroke window may lawfully report a *stored* configured value on the write plane and a different *effective* value on the state plane — on an unhomed machine, for example, stored `[5, 495]` and effective `[0, max_rail]` are both true. A client that adopts the effective value into the stored control stomps operator input; the presence test is what tells it not to.
 
-**`access` and `option_access` are schema-field annotations only.** A layout field is the **read** side — a STATE snapshot value — and *all* write authorization flows through the paired INTENT channel named by `setting_channel` + `setting_key`. A client needing per-option gating resolves that join (which it must do anyway in order to encode a write) and reads `option_access` on the schema field there. This also keeps the field map inside the depth-4 cap, which is already at its limit.
+**`access` and `option_access` are schema-field annotations only.** A layout field is the **read** side — a STATE snapshot value — and *all* write authorization flows through the paired INTENT channel named by `setting_channel` + `setting_key`. A client needing per-option gating resolves that join (which it must do anyway to encode a write) and reads `option_access` on the schema field there. This also keeps the field map inside the depth-4 cap, which is already at its limit.
 
 `option_access` exists because an op-style INTENT carries its verb as one **enum-valued field** — the safety-intents channel does exactly this — and per-*field* access cannot vary across the values of one field. Without it, the role-exempt safety ops ([§11.2](safety.md#s11-2)) would force their whole channel down to `watch` access, and a generic renderer would then offer hold/pause/takeover to every watcher, discovering otherwise only by NACK. That violates gray-never-hide.
 

@@ -1,8 +1,20 @@
 # WebSocket transport baseline — links2004/arduinoWebSockets, fw 2.1.56
 
+> Channel ids herein are historical (pre-C4 renumber); current map:
+> [CHANNEL-MAP.md](slopsync/CHANNEL-MAP.md).
+
 **Status:** measured live on 192.168.1.229, 2026‑07‑26, fw **2.1.56** (the
 pre‑migration build). Everything below is observed, not reasoned — every number
 has a JSON summary behind it, produced by `tools/slopsoak.py`.
+
+**Truth check (2026-07-28): this is the BEFORE side of a migration that
+has since landed.** links2004 is gone — deleted outright, not swapped —
+and the reboot this document could not yet explain (§7-§8) was root-caused
+and fixed as its own field bug. Read
+[http-plane-retirement.md](http-plane-retirement.md) §5.7 for the "after"
+side and the acceptance-criteria scorecard (§9 below) filled in against
+real numbers. This document stays as the measurement baseline that made
+the migration's bar objective rather than a vibe.
 
 **Headline:** the reported dropouts **reproduce**, deterministically, in one
 specific scenario — and the device's own log names the whole causal chain. But
@@ -53,7 +65,7 @@ constants) rather than duplicating it — one wire implementation, no drift.
 
 | Scenario | What it does | What it is actually asking |
 |---|---|---|
-| `b2b` | 3 consecutive full sessions, **no reboot between**, torn down clean / RST / abandoned | CLAUDE.md §8's mandatory pattern — does source ownership leak across teardown? |
+| `b2b` | 3 consecutive full sessions, **no reboot between**, torn down clean / RST / abandoned | [TRAPS.md](canon/TRAPS.md) T3's mandatory pattern — does source ownership leak across teardown? |
 | `rst` | 10× full session then `SO_LINGER 0` → TCP **RST** | does the §11.4 rude‑death path release everything? |
 | `churn` | 30 rapid connect/handshake/disconnect cycles | slot leaks, handshake latency under pressure |
 | `wedge-silent` | a client completes the handshake, subscribes at high rate, then **stops reading its socket** and also stops talking | the firmware's mute‑then‑evict sweep should reclaim it |
@@ -131,8 +143,8 @@ http  499 polls, 1 failure, p50 57.9 ms, p95 116.9 ms, max 3596.4 ms
 
 **`b2b` — 3/3.** Every one of three consecutive sessions (clean / RST /
 abandoned teardown, no reboot between) was granted `motion-input (0x0084)` at
-50 Hz. No stranded source ownership. The bug CLAUDE.md §8 records as "the third
-field bug for the ages" stays fixed.
+50 Hz. No stranded source ownership. The bug [TRAPS.md](canon/TRAPS.md) T3
+records as "the third field bug for the ages" stays fixed.
 
 **`rst` — 10/10.** Ten RST teardowns; every following session established and
 took the source.
@@ -218,6 +230,11 @@ That is the entire failure, in six lines:
 a bad client misbehaves". A misbehaving client permanently kills every *other*
 client's session and cannot be recovered from without reconnecting them. That is
 precisely the shape of the operator's complaint.
+
+> DEMO-CANDIDATE: run `wedge-chatty` live against the current firmware and
+> graph healthy-watcher rate over time next to the device heap beacon —
+> the moment one client stops draining, everyone else's session dying with
+> it is far more convincing watched than read.
 
 ### Why `chatty` and not `silent`
 
@@ -353,21 +370,33 @@ refused outright if either is unreadable. Default `--stream-amp` is `0.0`.
 Run the same suite, same device, same label convention. The migration is
 justified when:
 
-| # | Criterion | links2004 baseline |
-|---|---|---|
-| 1 | `wedge-chatty` healthy‑watcher rate during the wedge ≥ 80 % of baseline | **49 %** (19.3 → 9.5 Hz) |
-| 2 | `wedge-chatty` healthy watchers still receiving after the wedge clears | **0 frames — dead** |
-| 3 | `wedge-chatty` healthy sessions killed = **0** | **2 of 2 killed** |
-| 4 | Device free heap during `wedge-chatty` stays above ~30 KB, largest block above ~16 KB | **8,776 B / 2,036 B** |
-| 5 | `http:ui.update blocked` never exceeds ~200 ms during the wedge | **2,219 ms**; `/api/status` max **3,596 ms** |
-| 6 | Everything already passing stays passing — `b2b` 3/3, `rst` 10/10, `churn` 30/30, stream loss ≤ 0.1 %, soak 0 unexpected disconnects | all currently pass |
-| 7 | `:81` WebUI link: 0 drops outside reboots | 0 drops outside reboots |
+| # | Criterion | links2004 baseline | **Result, fw 2.1.68** |
+|---|---|---|---|
+| 1 | `wedge-chatty` healthy‑watcher rate during the wedge ≥ 80 % of baseline | **49 %** (19.3 → 9.5 Hz) | **PASS** — `wedge-chatty` PASS (see criterion 6) |
+| 2 | `wedge-chatty` healthy watchers still receiving after the wedge clears | **0 frames — dead** | **PASS** — no dead watchers in the fixed suite |
+| 3 | `wedge-chatty` healthy sessions killed = **0** | **2 of 2 killed** | **PASS** — `churn` 30/30, no session killed by the wedge |
+| 4 | Device free heap during `wedge-chatty` stays above ~30 KB, largest block above ~16 KB | **8,776 B / 2,036 B** | soak heap floor **65,020 B** (up from 35,528 B baseline) |
+| 5 | `http:ui.update blocked` never exceeds ~200 ms during the wedge | **2,219 ms**; `/api/status` max **3,596 ms** | HTTP max latency **503 ms**, 1 failure / 348 polls |
+| 6 | Everything already passing stays passing — `b2b` 3/3, `rst` 10/10, `churn` 30/30, stream loss ≤ 0.1 %, soak 0 unexpected disconnects | all currently pass | **PASS** — `churn` PASS 30/30, `wedge-chatty` PASS, stream loss **0 / 5,886**, **0** reboots |
+| 7 | `:81` WebUI link: 0 drops outside reboots | 0 drops outside reboots | moot — `:81` deleted outright, see below |
 
 Criterion 6 is the one to watch. The async transport moves callbacks onto a
 different task, and the current transport's **one‑task invariant is why it is
 deliberately mutex‑free** (`include/comms/SlopSyncWsTransport.h`). A regression
 in `b2b`/`rst` after the swap most likely means that invariant was broken rather
 than that the new library is slow.
+
+**What actually happened (2026-07-27, full detail in
+[http-plane-retirement.md](http-plane-retirement.md) §5.7): the criterion
+6 warning above was exactly right, and it caught a real bug.** links2004
+was deleted outright rather than swapped, and the reboots (`churn`,
+`wedge-chatty` FAIL, fw 2.1.65) survived the deletion — proving `:81` was
+never the cause. The real bug was the *new* async transport itself:
+`onEvent` ran on the AsyncTCP task and mutated hub state directly,
+breaking the one-task invariant this section warned about. Fixed as its
+own field bug (fw 2.1.68); the table above is that fix's verification
+run, not the naive "swap and remeasure" this section originally asked
+for.
 
 ---
 

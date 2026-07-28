@@ -1,10 +1,13 @@
 # The WebUI, rebuilt: a catalog-driven client
 
 **Status:** rebuilt 2026-07-27 on `feat/cpp20-slopsync`. Replaces the hand-wired
-page recorded in `docs/http-plane-retirement.md` §7.
+page recorded in [`docs/http-plane-retirement.md`](http-plane-retirement.md) §7,
+answering the refactor call in
+[`docs/REFACTOR-ROADMAP.md`](REFACTOR-ROADMAP.md) §5.
 **Restore point:** tag `webui-prerefactor` (commit `e77bd1f`) is the last
 hand-wired bundle that shipped and worked. `git checkout webui-prerefactor -- webui/`
-brings it back whole.
+brings it back whole. Client/widget architecture beyond this device:
+[`docs/slopdeck/DESIGN.md`](slopdeck/DESIGN.md).
 
 ---
 
@@ -54,18 +57,25 @@ The rule at the `src/model/` boundary: **a role is portable, a channel id is
 not.** `window.min` is registry vocabulary and means the same thing on every
 conforming hub forever; `0x1000` means something only here. Binding to the first
 is why our nice widgets work on someone else's machine; binding to the second is
-the disease this refactor removes.
+the disease this refactor removes. The normative rule this client implements —
+category → rank → archetype → widget pattern → region — is
+[RENDERING.md](slopsync/RENDERING.md); `roles.js` and `heroes.js` are this
+client's read of that derivation chain.
 
 ## 3. Ground truth, mechanically
 
 `shadow.svelte.js` is the only place a write may be in flight and the only thing
 that decides what a control displays while it is.
 
-```
-confirmed --write--> pending --ECHO--> confirmed   (value = APPLIED)
-                        |  |
-                        |  +--500ms--> overdue --2s--> fault
-                        +--NACK-----------------------> fault  (value snaps back)
+```mermaid
+stateDiagram-v2
+    [*] --> confirmed: page load ADOPTS device state
+    confirmed --> pending: user write
+    pending --> confirmed: ECHO arrives\n(value = APPLIED)
+    pending --> overdue: 500ms, no ECHO yet
+    overdue --> fault: 2s more, still nothing
+    pending --> fault: NACK\n(value snaps back)
+    fault --> confirmed: next ECHO or STATE resync
 ```
 
 While pending the control shows the **requested** value, because a slider that
@@ -145,6 +155,12 @@ that storage does not know about takes a default and appends. So pointing the
 same browser at a different machine cannot scramble a saved arrangement, and a
 firmware update that adds a settings card cannot either.
 
+> DEMO-CANDIDATE: rearrange the dashboard, reload against a firmware build
+> with one extra settings channel, then reload against the ORIGINAL
+> machine again — the saved layout surviving the round trip is the point,
+> and it is a 30-second demo of a rule that is hard to appreciate as
+> prose.
+
 Two details that are correctness, not polish: the drag handle is an explicit
 grab target rather than the whole card (the cards are full of sliders, and a
 draggable card body would eat every control inside it), and `touch-action:
@@ -155,7 +171,7 @@ on a phone.
 
 All additive; no released number reused; frozen artifacts untouched.
 
-- **`action.*` roles** (RFC-019 open convention, no registry change) on the home,
+- **`action.*` roles** ([RFC-019](slopsync/RFC-QUEUE.md) open convention, no registry change) on the home,
   admin and safety op fields — so action buttons are *discoverable* instead of
   hardcoded. `move` was deliberately **not** tagged: its fields are values, not
   verbs, and tagging them would make a generic client draw a button where a
@@ -181,10 +197,26 @@ BEFORE (catalog 15,915 B — no role annotations)
 The client is not changed between these two runs. Only the firmware's catalog
 annotations are. Evidence in `webui/test/evidence/`.
 
+> DEMO-CANDIDATE: point the same running client at `sim/slopsim --profile
+> alien` and `--profile device` back to back — a machine with unknown
+> vendor channels and odd units rendering correctly, live, next to the
+> real one, is claim #2 (`npm run check:model`) made visible instead of
+> "25/25" in a table.
+
 ## 6a. TWO PROTOCOL GAPS THE REBUILD EXPOSED — read this first
 
-Both were found because a component *refused to fabricate data*, which is
-exactly what should happen. Both are small, additive, and worth doing next.
+**Truth check (2026-07-28): both gaps below are landed on the registry/catalog
+side.** [RFC-032](slopsync/RFC-QUEUE.md) shipped the same day this section was
+written: `position` on `0x3100 move` now carries role `command.position`,
+`tgt_10um` on `0x1100 motion` carries `telemetry.target` — see
+[WEBUI-HANDOFF-RFC-BATCH.md](slopsync/WEBUI-HANDOFF-RFC-BATCH.md) item 2. Per
+this doc's own §3/§5 model, the client needed no code change (`model/
+settings.js` already indexes non-action roles into `byRole`). **Not confirmed:**
+`LEDGER.md` has no record of the tap-to-move end-to-end live check the handoff
+doc calls for (tap → INTENT → ECHO → carriage moves → `telemetry.target`
+follows) — treat as landed-but-unverified-live, not as an open protocol gap.
+Original diagnosis kept below for the reasoning; both were found because a
+component *refused to fabricate data*, which is exactly what should happen.
 
 **1. No generic client can command a manual move.**
 `0x3100 move` exists and works, but its `position` field carries no role. The
@@ -216,10 +248,18 @@ things because it hardcoded this device. Making them portable is the work.
 
 - **`/uitoken` grants `control`, never `configure`.** So the hosted UI cannot
   approve pairings, and `PairingPane` says exactly that rather than showing an
-  empty list that would read as "nobody is knocking". The bootstrap that *would*
-  grant configure — RFC-027(c) physical-presence — is fully implemented in
-  `lib/slopsync` (`Hub::openPresenceWindow()`) and **has no caller in firmware**.
-  That is the real pairing blocker, and it is machine-side, not UI-side.
+  empty list that would read as "nobody is knocking".
+  **Truth check (2026-07-28): partially closed since this was written.**
+  [RFC-027](slopsync/RFC-QUEUE.md)(c)'s push-to-pair mode landed with no UI
+  at all — three quick power-cycles calls `Hub::openPresenceWindow()` from
+  the firmware's own boot-gesture detector, granting `configure` to the
+  first knock if the trust ledger is factory-fresh. See
+  [http-plane-retirement.md](http-plane-retirement.md) §7,
+  "Push-to-pair IS reachable now." **Still the real gap:** the
+  knock-and-approve ceremony (`Hub::openPairing()`) still has no caller in
+  firmware, so a machine that already has a configure-holder still cannot
+  approve any *later* client from this UI — that part is machine-side,
+  not UI-side, and is what `PairingPane`'s honest-limits message is about.
 - **`shadow.svelte.js` is not unit-tested in node** — `$state` needs the Svelte
   compiler, so its logic is only exercised in-browser. Putting the pure lifecycle
   in a plain `.js` with a thin reactive wrapper would fix this and is the right

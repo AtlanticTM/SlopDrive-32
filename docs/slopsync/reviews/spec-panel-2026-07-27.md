@@ -1,6 +1,15 @@
 # Spec Fresh-Eyes Panel — 2026-07-27
 
-Method: 15 independent vacuum reads of SPEC.md (readers forbidden any other repo context), haiku-class reviewers, sonnet convergence with a >=4-reader bar for 'consistent.' Raw reader reports retained off-repo. Evidence document — feeds RFC drafting, is not itself normative.
+Method: 15 independent vacuum reads of [SPEC.md](../SPEC.md) (readers forbidden any other repo context), haiku-class reviewers, sonnet convergence with a >=4-reader bar for 'consistent.' Raw reader reports retained off-repo. Evidence document — feeds RFC drafting, is not itself normative.
+
+**Resolution status (added after the fact — the panel text below is untouched):**
+every item in "Consistently hated" was closed by
+[RFC-049](../RFC-QUEUE.md#rfc-049--spec-fresh-eyes-panel-omnibus-small-normative-fixes)
+(the omnibus this panel fed) or [RFC-050](../RFC-QUEUE.md#rfc-050--blob-transfer-backpressure--completion-acknowledgement),
+except the H11 scheduling-depth backstop (evaluated, reverted — see
+[SPEC.md](../SPEC.md)'s `commitWaveform()` note) and `source.background_run`,
+which shipped separately as Phase D. See each finding's heading below for its
+specific fix.
 
 ## Convergence summary
 
@@ -11,6 +20,8 @@ Note on the input: the task framing says 16 readers, but the REPORTS array actua
 ### curve_family=step is registered/declarable on segment streams, but the reference hub has no step renderer and silently echoes quintic instead  
 **6/15 readers** — sections: §9.6, §18-20/§18-21
 
+> **RESOLVED** by [RFC-049](../RFC-QUEUE.md#rfc-049--spec-fresh-eyes-panel-omnibus-small-normative-fixes)(b): `requested_curve_family` (CBOR key 48) now echoes the client's ask verbatim alongside the effective, possibly-downgraded `curve_family` (45) — exactly the fix this section's improvement lead names.
+
 > curve_family=step is allocated and declarable but reference hub has no step renderer... Why allocate a value that cannot be acted on or tested? This feels like premature reservation that should either be implemented or deferred.
 
 > A client that declares curve_family: step and receives echo granted_publishes with effective c2_quintic knows its declaration was downgraded, but the spec does not clearly say whether this is a machine-policy override... or a transient state.
@@ -20,7 +31,9 @@ Note on the input: the task framing says 16 readers, but the REPORTS array actua
 **Improvement leads (mined from the liked list):** Readers praise the Honesty Clauses (H1-H12, liked by 12/13) and the §18 Known-Limitations listing precisely for naming gaps instead of hiding them — apply that same discipline consistently here: either implement the step renderer before tagging v1.0 normative, or explicitly demote curve_family=step to experimental/informative status. Also borrow the widely-loved ground-truth ECHO pattern (10/13, 'ECHO reports applied/post-clamp values, never requests') by adding an explicit requested_curve_family alongside effective_curve_family so a downgrade is visible rather than inferred.
 
 ### source.background_run (RFC-045/048 deadman setting for hub-autonomous sources) is specified but not shipped by the reference firmware, and the command-driven/autonomous split feels unintuitive or unverified  
-**6/15 readers** — sections: §11.3, RFC-045, RFC-048, §18-21
+**6/15 readers** — sections: §11.3, [RFC-045](../RFC-QUEUE.md#rfc-045--retire-deadman-as-safety-session-liveness-is-bookkeeping-not-motion-control), [RFC-048](../RFC-QUEUE.md#rfc-048--the-rendering-constitution-catalog-vocabulary-capability-interfaces-renderer-law), §18-21
+
+> **RESOLVED**: `source.background_run` shipped on the reference firmware's `pattern-state` channel (Phase D), discoverable from the catalog exactly as the improvement lead below asks.
 
 > The source.background_run setting (RFC-048) should handle this but is unimplemented (§18-21).
 
@@ -33,6 +46,8 @@ Note on the input: the task framing says 16 readers, but the REPORTS array actua
 ### Segment handoff sanity bound (H11) only catches pathological end-velocity when the successor segment is already scheduled — long, sparse segments have no backstop  
 **6/15 readers** — sections: §9.6, H11, §18-1
 
+> **PARTIALLY RESOLVED** by [RFC-049](../RFC-QUEUE.md#rfc-049--spec-fresh-eyes-panel-omnibus-small-normative-fixes)(c): the `k = 1.5` constant is now the registry-pinned `segment_handoff_k` (first half, landed). The scheduling-depth backstop itself (second half) was implemented, then reverted — it measurably worsened a characterized motion defect via an unverified control-loop interaction. Left open; see `slopmotion.hpp`'s `commitWaveform()` comment.
+
 > This is a real correctness gap (long segments from sparse senders can violate the guard) accepted because the alternative is worse... Stating it is good; accepting it still feels like a limitation left in place.
 
 > The `k = 1.5` constant for end-velocity bounding is in the reference implementation, not the registry... A competing implementation trying to match behavior has no authoritative source for the clamping constant.
@@ -43,6 +58,8 @@ Note on the input: the task framing says 16 readers, but the REPORTS array actua
 
 ### Trust ledger first_seen/last_seen are frequently zero because the protocol has no wall clock — an operator gets no useful pairing history  
 **4/15 readers** — sections: §7.2, §12.6, §18-12
+
+> **RESOLVED** by [RFC-049](../RFC-QUEUE.md#rfc-049--spec-fresh-eyes-panel-omnibus-small-normative-fixes): §7.2/§12.6 now carry the SHOULD-populate-when-available rule plus an explicit non-audit-grade honesty note — the exact improvement lead below.
 
 > An operator looking at 'when did this device pair' gets boot-relative milliseconds or nothing, not human time... Zero is a valid answer but it's not useful.
 
@@ -55,6 +72,8 @@ Note on the input: the task framing says 16 readers, but the REPORTS array actua
 ### Blob namespace/grammar is too permissive — unregistered namespaces and illegal full+chunks combinations aren't rejected at the grammar level, just fall through silently  
 **4/15 readers** — sections: §18-8/9, §8.7
 
+> **RESOLVED** by [RFC-049](../RFC-QUEUE.md#rfc-049--spec-fresh-eyes-panel-omnibus-small-normative-fixes)(e): grammar-level rejection is now stated precisely (an empty `chunks` array, or `ns=0` carrying `store_id`/`slot`, are MALFORMED) and a namespace outside the registered table gets its own NACK `INVALID_NAMESPACE`, split from `CHUNK_UNAVAILABLE` — exactly the distinction this finding asked for.
+
 > An unregistered ns falls through to CHUNK_UNAVAILABLE (correct behavior) but the grammar doesn't reject it... these are edge cases but they're sloppiness—grammar too permissive.
 
 > The grammar doesn't explicitly forbid the illegal combination; a decoder can't reject what cannot be encoded... A union type or explicit boolean flag would be clearer.
@@ -65,6 +84,8 @@ Note on the input: the task framing says 16 readers, but the REPORTS array actua
 
 ### Blob transfer pacing and backpressure are advisory/vague, and there's no positive application-level acknowledgement that a transfer completed  
 **4/15 readers** — sections: §8.4, §5.6
+
+> **RESOLVED** by [RFC-050](../RFC-QUEUE.md#rfc-050--blob-transfer-backpressure--completion-acknowledgement): §8.4 now carries a normative send/hold/resume/abort decision table keyed to the binding's own congestion signal, plus `BLOB_DONE` as the positive completion signal this finding says was missing — reapplying the shedding-table template the improvement lead names.
 
 > The spec says relays 'MUST respect transport backpressure while pacing BLOB_CHUNK emission,' but there's no normative definition of what that signal is—is it a return code, an exception, a callback?
 
@@ -77,6 +98,8 @@ Note on the input: the task framing says 16 readers, but the REPORTS array actua
 ### Relays 'MUST NOT chain' (one hop max) with no stated architectural reason, and per-hop relay buffering can silently stack up to degrade the end-to-end ESTOP guarantee  
 **4/15 readers** — sections: §14.3, §13.1, H2
 
+> **RESOLVED** by [RFC-049](../RFC-QUEUE.md#rfc-049--spec-fresh-eyes-panel-omnibus-small-normative-fixes)(f): §14.3 now states the architectural reason (a chain compounds worst-case latency with no stated ceiling and no routing/loop-protection machinery to bound it) and adds a normative one-relay-hop ESTOP latency budget.
+
 > A 250 ms buffered relay could turn a 50 ms ESTOP guarantee into 300 ms end-to-end without violating the spec. Practical consequence: a relay can silently degrade ESTOP's safety property.
 
 > If a relay's job is frame forwarding + buffer management + optional timestamp correction, why can't two relays chain with each maintaining its own queues? The limitation feels operational... rather than architectural.
@@ -87,6 +110,8 @@ Note on the input: the task framing says 16 readers, but the REPORTS array actua
 
 ### Pairing-ceremony edge cases are underspecified — vague thresholds ('~10s' power-cycle gesture), an unjustified 3-strike AUTH limit, and no timeout/fallback when a knock is never approved  
 **5/15 readers** — sections: §12.3, §12.3c, §12.4
+
+> **RESOLVED** by [RFC-049](../RFC-QUEUE.md#rfc-049--spec-fresh-eyes-panel-omnibus-small-normative-fixes)(g): `pairing_gesture_boot_count` (3) and `pairing_gesture_max_uptime_ms` (10000) are now registered constants pinning the former "~10 s" hedge; `auth_attempts_max` (3) is likewise a named registry constant shared by both the PIN window and AUTH's strike limit, not two independent magic numbers.
 
 > The specification says N consecutive boots with uptime below '~10 s' arm the pairing window. The tilde is not a normative value—it's hedge language in a normative section.
 

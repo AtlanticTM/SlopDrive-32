@@ -94,6 +94,27 @@ A minimal broadcast probe/reply pair, and the **canonical WS-side discovery path
 - **Read-only identity, no control surface.** A probe cannot command anything, and a reply discloses nothing a passive observer of a normal WELCOME could not already learn. Replies are rate-limited to `udp_discovery.reply_rate_limit_per_source_s` (1) **per source address**, so a probe storm cannot load the hub — the same posture as the BEACON frame's own broadcast cadence.
 - A manually-entered address MUST still always work; this, like every discovery mechanism, is a convenience.
 
+```mermaid
+sequenceDiagram
+    autonumber
+    participant C as Client
+    participant N as LAN (broadcast)
+    participant H as Hub
+
+    Note over C: ENTRY POINT — client wants a hub, has no address
+    C->>N: DISCOVER_PROBE (broadcast) magic + proto_ver + nonce
+    N->>H: delivered to every hub on the segment
+    H-->>C: DISCOVER_REPLY (unicast) hub_name, hub_instance_id,\nws_port, fw_version, catalog_etag, flags
+    Note over H: rate-limited to 1 reply / source / s
+    C->>C: matches reply's nonce to its own probe
+    C->>H: ordinary HELLO over WS to ws_port
+```
+
+*A probe storm from one source only ever gets one reply per second — the
+loop that would otherwise exist (retry until an answer arrives) is a client
+policy, not a protocol requirement, because a manually-entered address is
+always an equally valid entry point.*
+
 **Discovery doctrine, restated for this binding:** BLE advertisement remains primary where BLE is available at all ([§13.7](#s13-7)); the UDP probe is the WS-side discovery a LAN client without BLE should use in preference to mDNS.
 
 ## 14. Relay Role *(normative)* {#s14}

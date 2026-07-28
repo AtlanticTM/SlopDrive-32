@@ -250,6 +250,7 @@ nav:
           - Discovery: reference/registry/discovery.md
           - Rendering vocabulary: reference/registry/rendering.md
       - Channel catalog: reference/channel-catalog.md
+      - Channel grid: reference/channel-grid.md
 
   - Community:
       - community/index.md

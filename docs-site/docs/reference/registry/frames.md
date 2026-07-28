@@ -6,7 +6,7 @@ generated: true
 ---
 
 <!-- ==========================================================
-     GENERATED FILE — DO NOT EDIT.
+     GENERATED FILE. DO NOT EDIT.
      Source of truth: docs/slopsync/registry/registry.yaml
      Generator:       docs-site/tools/gen_docs_tables.py
      Regenerate:      python docs-site/tools/gen_docs_tables.py
@@ -66,8 +66,8 @@ Frame types `0x09` and `0x0A` are **burned**. They carried the retired
 stale peer meets an unknown type and fails loudly instead of misreading a
 blob transfer.
 
-Types `0x80`–`0xDF` are experimental. They never appear in a tagged
-release. Types `0xE0`–`0xFF` are reserved, except `0xE5` (ESTOP).
+Types `0x80` to `0xDF` are experimental. They never appear in a tagged
+release. Types `0xE0` to `0xFF` are reserved, except `0xE5` (ESTOP).
 
 ## Header flags
 
@@ -81,3 +81,5 @@ Bits not listed are zero on send and ignored on receive.
 `FRAG_START` plus `FRAG_MORE` marks the first fragment. `FRAG_MORE` alone
 marks a middle fragment. `FRAG_START` alone marks an unfragmented frame.
 Neither flag, after prior fragments, marks the last fragment.
+
+> DEMO-CANDIDATE: capture one real frame's 8-byte header live and annotate each byte against this table.

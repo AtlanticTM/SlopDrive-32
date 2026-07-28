@@ -6,7 +6,7 @@ generated: true
 ---
 
 <!-- ==========================================================
-     GENERATED FILE — DO NOT EDIT.
+     GENERATED FILE. DO NOT EDIT.
      Source of truth: docs/slopsync/registry/registry.yaml
      Generator:       docs-site/tools/gen_docs_tables.py
      Regenerate:      python docs-site/tools/gen_docs_tables.py
@@ -33,8 +33,7 @@ PIN, never one secret per tier.
 
 ## Administration operations
 
-These are the `value` map key 1 of the `session-admin` channel
-(`0x0009`). The channel requires `configure`.
+These are the `value` map key 1 of the [`session-admin` channel](channels.md#spec-core-channels) (`0x0009`). The channel requires `configure`.
 
 **The trusted surface is a tier, not an app.** Any `configure` session
 reaches every operation here. Nothing in the protocol knows or cares
@@ -55,8 +54,9 @@ second.
 
 ## Trust ledger states
 
-The `state` field of a paired-devices item. A revoked device has no
-entry at all, so revocation is an absence and never a third state.
+This is the `state` field of a paired-devices item. A revoked device
+has no entry at all, so revocation is an absence and never a third
+state.
 
 | Value | State | Meaning |
 |---|---|---|
@@ -66,8 +66,8 @@ entry at all, so revocation is an absence and never a third state.
 
 ## Token presentation modes
 
-The `trust` sub-map's `presentation_mode`, recorded per device in the
-ledger so that security posture is something an operator can see.
+This is the `trust` sub-map's `presentation_mode`. The ledger records
+it per device, so an operator can see the security posture.
 
 `bearer` is the floor and the default. `proof` is recommended for any
 client that already has SHA-256, and is never required of anyone.
@@ -79,6 +79,6 @@ client that already has SHA-256, and is never required of anyone.
 
 A reported client version is a tripwire, not an attestation. It catches
 an honest update. A deliberately malicious one reports whatever version
-it likes and keeps its token. What actually bounds a hostile client is
-role scoping, immediate revocation, its visibility in the roster, and
-the fact that safety operations are role-exempt for everyone.
+it likes and keeps its token. What bounds a hostile client is role
+scoping, immediate revocation, its visibility in the roster, and the
+fact that safety operations are role-exempt for everyone.

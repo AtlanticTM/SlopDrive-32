@@ -1,11 +1,16 @@
 # SlopSync RFC Queue — proposals targeting PUBLIC v1.0
 
+> Channel ids herein are historical (pre-C4); current map:
+> [CHANNEL-MAP.md](CHANNEL-MAP.md). Each entry keeps the ids it had when
+> written — that is the record, not a bug.
+
 *Companion to [SPEC.md](SPEC.md). This file is the accumulation buffer: when
 implementation or field use surfaces something the spec got wrong, left
 ambiguous, or never said, it gets an RFC entry here instead of an ad-hoc
 patch. When enough have piled up, we review the queue in one sitting and
 batch the accepted ones into the spec + registry.yaml (codegen + golden
-vectors updated in the same commit, per CLAUDE.md §8 registry discipline).*
+vectors updated in the same commit, per [DOCTRINE.md](../canon/DOCTRINE.md) §9's
+registry discipline).*
 
 **RETARGET RULING (operator, 2026-07-25):** the current spec (v1-draft) was
 the feasibility test — and it is feasible. The batch release this queue
@@ -27,7 +32,7 @@ table below.
   Goal state: "HTTP = static assets + OTA + uitoken, nothing else, ever."
   - **OTA** keeps its own token plane; OTA rights are NEVER derivable
     from SlopSync roles.
-  - **`/uitoken`** (RFC-029 §4) escapes because its entire security
+  - **`/uitoken`** ([RFC-029](#rfc-029--trust-lifecycle-hub-authenticity-change-tripwires-own-ui-trust) §4) escapes because its entire security
     property IS browser same-origin policy, which exists only over HTTP —
     it cannot be moved in-band without ceasing to work. Operator
     rationale: *it is a SIDEBAND, not a secondary cost* — a convenience
@@ -40,8 +45,8 @@ table below.
     duties SlopSync structurally cannot own.
 - **Strings are required** (machine name and other info must be visible to
   clients). Identity/product strings ride the CBOR control plane where
-  strings are already legal (RFC-016); string VALUES in packed STATE get
-  fixed-width `str<N>` field types (RFC-026, resolving RFC-009's sub-
+  strings are already legal ([RFC-016](#rfc-016--in-band-hub-identity-capabilities--catalog-introspection)); string VALUES in packed STATE get
+  fixed-width `str<N>` field types ([RFC-026](#rfc-026--strings-on-the-wire-operator-ordered), resolving [RFC-009](#rfc-009--settings-metamodel-per-field-catalog-annotations-for-generic-self-building-uis)'s sub-
   decision 7 to option (a)). STREAM sample layouts stay string-free.
 - The WebUI is the readiness yardstick — see
   [V1-READINESS.md](V1-READINESS.md) for the coverage ledger. Readiness is
@@ -73,7 +78,7 @@ each entry's own Status line carries the receipts.*
 | **Landed (v1.0)** — fully | 001, 002, 004, 005, 008\*, 009, 010, 011, 012, 013, 014, 015, 016\*, 017, 021\*, 022\*, 023\*, 024, 025, 026, 027, 028\*, 029\* |
 | **Partially landed** — named halves deferred | **018** (`0x0002` session-roster channel), **019** (reset action intent), **020** (spec + registry only; nothing emits it) |
 | **Deferred** — accepted need, deliberately not built | **007** (planner-shape advert) |
-| **Rejected** — superseded by RFC-009's mechanism, numbers retained | **003**, **006** |
+| **Rejected** — superseded by [RFC-009](#rfc-009--settings-metamodel-per-field-catalog-annotations-for-generic-self-building-uis)'s mechanism, numbers retained | **003**, **006** |
 
 \* carries a named deferred sub-item or an honest scope caveat inside its own
 Status line — 008 (TCode passthrough mode), 016 (`info` key 4 device-defined
@@ -83,22 +88,22 @@ only), 028/029 (default crypto stubs sign/verify).
 
 **The deferred ledger, one line each — nothing here is marked landed:**
 
-1. **RFC-007** — no planner-shape/ratio advert exists. RFC-008 resolved the
+1. **[RFC-007](#rfc-007--feasibility-cannot-be-predicted-without-the-hubs-planner-shape)** — no planner-shape/ratio advert exists. [RFC-008](#rfc-008--doctrine-the-machine-owns-motion-processing-not-the-client) resolved the
    same problem the other way (work moved to the hub), leaving an advisory
    field with no required consumer.
-2. **RFC-018 roster** — `0x0002 session-roster` is allocated and specified but
+2. **[RFC-018](#rfc-018--session-roster--admin-eviction) roster** — `0x0002 session-roster` is allocated and specified but
    **no catalog builder declares it**. The registry note claiming
    "IMPLEMENTED at v1.0" is drift.
-3. **RFC-019 reset verb** — `action.*` and `meta.reset_gen` shipped; no hub
+3. **[RFC-019](#rfc-019--action-intents--observable-resets) reset verb** — `action.*` and `meta.reset_gen` shipped; no hub
    exposes a reset as an INTENT.
-4. **RFC-020 procedures** — pattern, `procedure_phases`, `reboot_in_ms` (43)
+4. **[RFC-020](#rfc-020--procedures-long-running-guarded-operations--reboot-commit) procedures** — pattern, `procedure_phases`, `reboot_in_ms` (43)
    and `REBOOTING` all specified; **zero** implementations, and key 43 appears
    nowhere outside registry comments.
-5. **RFC-021 device stores** — the blob/STORE mechanism ships (the trust ledger
+5. **[RFC-021](#rfc-021--slopsync-presets-operator-ordered) device stores** — the blob/STORE mechanism ships (the trust ledger
    uses it); no `pattern.*` preset backend exists.
-6. **RFC-008 TCode passthrough** — one of the three sanctioned motion modes, not
+6. **[RFC-008](#rfc-008--doctrine-the-machine-owns-motion-processing-not-the-client) TCode passthrough** — one of the three sanctioned motion modes, not
    implemented on the reference firmware.
-7. **Real ECDSA** (RFC-028/029) — `ICrypto` is a working seam with a null-object
+7. **Real ECDSA** ([RFC-028](#rfc-028--parser-robustness--fuzz-conformance-gate-anti-cve)/029) — `ICrypto` is a working seam with a null-object
    default whose `signP256`/`verifyP256` are stubs. Hub authenticity exists only
    where an application injects a real primitive.
 
@@ -135,7 +140,7 @@ the copy a third-party implementer reads.
 - **Status:** **Landed (v1.0).** SPEC §4.2-2. Reference hub bumps only when an
   applied value actually changed; an accepted but value-identical write still
   gets its post-clamp ECHO and does not bump, and does not re-arm on-change
-  republish. Landed jointly with RFC-011 as ONE two-directional rule, because
+  republish. Landed jointly with [RFC-011](#rfc-011--hub-side-cfg_gen-advancement-rfc-002s-mirror-twin) as ONE two-directional rule, because
   either half alone leaves `precondition` CAS lying.
 - **Origin:** The 2026-07-24 dual-plane config storm (fw 2.1.45,
   docs/webui-legacy-diagnosis.md layers 1–3). The wire-side accomplice: an
@@ -157,7 +162,7 @@ the copy a third-party implementer reads.
 
 ## RFC-003 — STATE channels must declare stored-config vs effective-state semantics
 
-- **Status:** **REJECTED — superseded by RFC-009** (number retained per the
+- **Status:** **REJECTED — superseded by [RFC-009](#rfc-009--settings-metamodel-per-field-catalog-annotations-for-generic-self-building-uis)** (number retained per the
   queue's own rule, so "why didn't we add a stored/effective flag?" has a
   findable answer). The DISTINCTION is real and is now normative (SPEC §8.8);
   the MECHANISM is `setting_key` PRESENCE, not a separate flag. A layout field
@@ -229,14 +234,14 @@ the copy a third-party implementer reads.
 
 ## RFC-006 — Motion-producing clients have no portable way to learn the machine's kinematic limits
 
-- **Status:** **REJECTED — superseded by RFC-009** (number retained per the
+- **Status:** **REJECTED — superseded by [RFC-009](#rfc-009--settings-metamodel-per-field-catalog-annotations-for-generic-self-building-uis)** (number retained per the
   queue's own rule). The NEED is met; this entry as a separate change is not
   taken. Option (a) — a reserved `machine-limits` channel id — was never
   adopted, because a fixed channel number is exactly the coupling the
   self-describing catalog exists to prevent. Option (b)'s MECHANISM landed
-  INSIDE RFC-009 as the registry's `field_roles` vocabulary (`limit.user.*`,
+  INSIDE [RFC-009](#rfc-009--settings-metamodel-per-field-catalog-annotations-for-generic-self-building-uis) as the registry's `field_roles` vocabulary (`limit.user.*`,
   `limit.input.*`, `window.min|max`, `telemetry.*`), so a client locates limits
-  on ANY hub by role rather than by id. The framing correction from RFC-008 is
+  on ANY hub by role rather than by id. The framing correction from [RFC-008](#rfc-008--doctrine-the-machine-owns-motion-processing-not-the-client) is
   normative in SPEC §9.6: limits discovery exists for DISPLAY and OPTIONAL
   pre-adaptation, and the word is MAY, never SHOULD.
 - **Origin:** MFP plugin v0.2.1–v0.2.3 (2026-07-25), measured against slopsim
@@ -270,9 +275,9 @@ the copy a third-party implementer reads.
   roles** — an optional per-field semantic tag in the layout entry (e.g.
   `role: limit.speed | limit.accel | limit.jerk | window.min | window.max`)
   so a client can locate the limits on *any* device's catalog without knowing
-  its channel numbering. (b) composes with RFC-003's stored/effective flag —
+  its channel numbering. (b) composes with [RFC-003](#rfc-003--state-channels-must-declare-stored-config-vs-effective-state-semantics)'s stored/effective flag —
   both are per-field semantics the catalog currently cannot express.
-  **Framing corrected by RFC-008:** limits discovery exists for DISPLAY and
+  **Framing corrected by [RFC-008](#rfc-008--doctrine-the-machine-owns-motion-processing-not-the-client):** limits discovery exists for DISPLAY and
   OPTIONAL pre-adaptation. A client MUST NOT be required to reason about
   feasibility in order to produce good motion — the hub owns that. Normative
   language here is MAY, never SHOULD.
@@ -291,7 +296,7 @@ the copy a third-party implementer reads.
 - **Status:** **DEFERRED — not implemented, not registered.** No planner-shape
   advert (a `min_jerk_quintic` enum, or the `(kv, ka, kj)` peak/mean ratios)
   exists in registry.yaml or in any implementation. Reason, recorded honestly:
-  RFC-008 landed the opposite resolution of the same problem. Once feasibility
+  [RFC-008](#rfc-008--doctrine-the-machine-owns-motion-processing-not-the-client) landed the opposite resolution of the same problem. Once feasibility
   reasoning is explicitly OPTIONAL for clients (SPEC §9.6-4) and the concrete
   pathology is bounded machine-side by the handoff guard, an advisory advert has
   no required consumer — and a wire field nobody must read is how a registry
@@ -301,7 +306,7 @@ the copy a third-party implementer reads.
   field for it. Revisit if a real client wants to pre-adapt and demonstrably
   cannot.
 - **Origin:** Same investigation. Even a fully limits-aware client could not
-  have predicted the failure in RFC-006.
+  have predicted the failure in [RFC-006](#rfc-006--motion-producing-clients-have-no-portable-way-to-learn-the-machines-kinematic-limits).
 - **Problem:** Knowing `vmax/amax/jmax` is not sufficient to decide whether a
   `{target, duration}` segment is executable, because that depends on the
   *shape* the hub plans. SlopMotion renders timed segments as a C2 min-jerk
@@ -318,7 +323,7 @@ the copy a third-party implementer reads.
   so a client can evaluate `d ≤ min(vmax·T/kv, amax·T²/ka, jmax·T³/kj)`
   without hardcoding any planner's internals. Ratios are preferable: they stay
   meaningful if a hub changes planners, and they are what a client actually
-  needs to compute. Place alongside the RFC-006 limits.
+  needs to compute. Place alongside the [RFC-006](#rfc-006--motion-producing-clients-have-no-portable-way-to-learn-the-machines-kinematic-limits) limits.
 - **Compatibility:** Additive and purely advisory — the hub remains the sole
   authority on what it will execute, and a client that ignores the hint gets
   today's behavior (hub clamps/reshapes and reports the anomaly). Encourages
@@ -440,8 +445,8 @@ the copy a third-party implementer reads.
   both `layout-field` and `schema-field`; the registry gained
   `setting_categories`, `setting_flags`, `field_roles`, `desc_max_bytes`,
   `option_label_max_bytes` and `catalog_max_entry_bytes`. Sub-decision 7
-  resolved to option (a) by RFC-026. Its own out-of-scope note became
-  RFC-021.
+  resolved to option (a) by [RFC-026](#rfc-026--strings-on-the-wire-operator-ordered). Its own out-of-scope note became
+  [RFC-021](#rfc-021--slopsync-presets-operator-ordered).
 - **Origin:** Design sessions 2026-07-25 (fw 2.1.47 era), operator goal
   statement: SlopSync is the machine's SOLE communication surface (HTTP serves
   static web assets, nothing else), and any client — WebUI, phone app, desktop
@@ -451,8 +456,8 @@ the copy a third-party implementer reads.
   the label, grouping, and explanation coming from the hub. The user learns
   what a setting does from the hub's own description, not from the client
   developer. Receipts for the gap: slopsync-js adopting the effective window
-  as stored config and stomping operator input (RFC-003's origin), and the MFP
-  plugin flying blind on limits (RFC-006's origin) — both are instances of
+  as stored config and stomping operator input ([RFC-003](#rfc-003--state-channels-must-declare-stored-config-vs-effective-state-semantics)'s origin), and the MFP
+  plugin flying blind on limits ([RFC-006](#rfc-006--motion-producing-clients-have-no-portable-way-to-learn-the-machines-kinematic-limits)'s origin) — both are instances of
   "the catalog describes values, not meaning."
 - **Problem:** Five gaps block a generic settings renderer:
   1. **No STATE↔INTENT linkage.** Nothing machine-readable says "STATE field
@@ -483,7 +488,7 @@ the copy a third-party implementer reads.
      ritual) on catalog layout fields:
      - `setting_key: u8` — the CBOR key in the paired INTENT channel that
        writes this field. **Present = setting (stored); absent = read-only
-       (effective/telemetry).** RFC-003's stored/effective distinction falls
+       (effective/telemetry).** [RFC-003](#rfc-003--state-channels-must-declare-stored-config-vs-effective-state-semantics)'s stored/effective distinction falls
        out with no separate flag — 0x1000 `max_rail` (no config-set key) is
        the live worked example.
      - `default` — factory value, same type as the field.
@@ -491,7 +496,7 @@ the copy a third-party implementer reads.
      - `group: tstr` — free-form card heading within the category tab.
      - `desc: tstr` — user-facing description/tooltip, cap 128 B/field
        (registry limit). Flash-resident on the hub; travels once, etag-cached.
-     - `role` — RFC-006's semantic vocabulary, registry-governed, grown to
+     - `role` — [RFC-006](#rfc-006--motion-producing-clients-have-no-portable-way-to-learn-the-machines-kinematic-limits)'s semantic vocabulary, registry-governed, grown to
        include `telemetry.*`; the `<role>` + `<role>.peak` suffix convention
        pairs current/peak stats (client MAY render as one tile).
      - `step` — range granularity hint.
@@ -569,7 +574,7 @@ the copy a third-party implementer reads.
     catalog at all.
 - **Compatibility:** Additive catalog schema change (catalog.cddl + etag bump
   on adopting devices; the FROZEN conformance mini-catalog untouched until
-  versioned in at 1.1 — same posture as RFC-003/006). Registry additions:
+  versioned in at 1.1 — same posture as [RFC-003](#rfc-003--state-channels-must-declare-stored-config-vs-effective-state-semantics)/006). Registry additions:
   `setting_categories` table (+ device range rule), annotation keys, flag
   bits, `field_roles` growth, `desc` cap, optional `str<N>` packed types.
   Clients ignoring every annotation behave exactly as today. Depth check:
@@ -605,7 +610,7 @@ the copy a third-party implementer reads.
   to a decel-stop.
 - **Proposed change:** registry `safety_ops: 6 = estop` on 0x0005 — hub
   treats it exactly as a valid 0xE5 (latch, cause=user, publish, EVENT
-  twin). Role-exempt together with `stop` (see RFC-025). The raw 0xE5 frame
+  twin). Role-exempt together with `stop` (see [RFC-025](#rfc-025--safety-semantics-completion-incl-overridebypass-ruling)). The raw 0xE5 frame
   remains the deframed-path/relay guarantee; the op is the trivially-
   implementable client path.
 - **Compatibility:** additive registry op + one normative paragraph.
@@ -624,7 +629,7 @@ the copy a third-party implementer reads.
   stale, so a client's `precondition` CAS passes against config that already
   changed.
 - **Proposed change:** Hub gains `bumpConfigGeneration()`; unified normative
-  rule combining with RFC-002: **`cfg_gen` advances iff at least one applied
+  rule combining with [RFC-002](#rfc-002--cfg_gen-bumps-on-value-identical-config-sets): **`cfg_gen` advances iff at least one applied
   configuration value actually changed, regardless of who changed it.**
 - **Compatibility:** behavioral + library API; no wire change.
 
@@ -638,7 +643,7 @@ the copy a third-party implementer reads.
 - **Origin:** `hub_impl.hpp:793-801`: data-plane bundles carry no takeover
   flag (§11.4) and are never NACKed (§9.2), so a producer whose source is
   owned by another LIVE session is silently dead — every bundle dropped,
-  zero wire signal. (The stale-owner case is fixed by RFC-005/teardown; the
+  zero wire signal. (The stale-owner case is fixed by [RFC-005](#rfc-005--specify-hub-teardown-equivalence-for-all-session-end-paths)/teardown; the
   two-live-clients collision is not.)
 - **Proposed change:** hub sends NACK `SOURCE_CONFLICT` (carrying
   `channel_id`) on the FIRST dropped-for-ownership bundle per (session,
@@ -661,7 +666,7 @@ the copy a third-party implementer reads.
   §10.5 makes granted rate double as bucket depth, so a sparse-but-bursty
   segment sender (2–4/s mean, ~25/s peak) declares 30 Hz to buy burst budget
   — misrepresenting itself to admission control — and mirrors the hub's
-  entire token bucket client-side (fails RFC-008's write-once test). Also
+  entire token bucket client-side (fails [RFC-008](#rfc-008--doctrine-the-machine-owns-motion-processing-not-the-client)'s write-once test). Also
   `session.hpp:59-61`: no c2h counterpart to SUBSCRIBE — adding a publish
   wish mid-session requires a full reconnect.
 - **Proposed change:** (a) `publishes` wish and `granted_publishes` echo
@@ -679,7 +684,7 @@ the copy a third-party implementer reads.
   through §7.2's nearest-window rule; registry limit `max_future_schedule_ms`
   (250), enforced by the reference hub as a CLAMP rather than a rejection;
   recommended client lookahead <= half of it. Interop by folklore is over.
-  Landed together with the `stream_kinds` property RFC-023 needed anyway.
+  Landed together with the `stream_kinds` property [RFC-023](#rfc-023--congestion-shedding-table-becomes-normative) needed anyway.
 - **Origin:** `SlopSync.cs:624-630, 1056-1078` — the plugin schedules
   segment starts on `t_base` (§5.4 pins `t_off[0]`=0 and caps span at
   20 ms, so scheduling cannot ride `t_off`) against a hub future-clamp of
@@ -701,7 +706,7 @@ the copy a third-party implementer reads.
   `catalog_ready_timeout_ms` (15000) close the "PINGs happily, never adopts"
   hole that liveness reaping structurally cannot see. Both sides implemented,
   including the client's idempotent re-send at `catalog_chunk_gap_timeout_ms`
-  terminating on the first STATE frame. Landed together with RFC-021: the
+  terminating on the first STATE frame. Landed together with [RFC-021](#rfc-021--slopsync-presets-operator-ordered): the
   transfer verbs are BLOB_*, and only the catalog namespace has a READY concept.
   `FALLBACK_LAYOUTS` can go.
 - **Origin:** `webui/src/core/slopsync/catalog.js:11-13, 269-335` — nothing
@@ -730,7 +735,7 @@ the copy a third-party implementer reads.
   4. Loss-proofing: READY is idempotent — the client re-sends every ~500 ms
      (chunk-repair cadence) until the first retained STATE arrives. No
      handshake state machine, no hub timer; a session that never sends
-     READY just idles out under normal reaping (RFC-024).
+     READY just idles out under normal reaping ([RFC-024](#rfc-024--idle-session-reaping-for-non-owning-sessions)).
   5. Degraded static clients (§8.5) send READY with their stale etag —
      append-only layouts make their prefix-parse safe; the hub serves them
      and MAY log the session as degraded.
@@ -750,7 +755,7 @@ the copy a third-party implementer reads.
   normative: capability discovery IS catalog introspection (SPEC §6.3) — a
   feature exists iff its channels exist, and there is no parallel capability
   list to drift. (c) LANDED: `fw version` is struck from 0x0006's registry
-  note, so identity has exactly one home. **(a) LANDED with the RFC-030..040
+  note, so identity has exactly one home. **(a) LANDED with the [RFC-030](#rfc-030--curve-family-on-the-stream-say-which-spline-the-segments-describe)..040
   batch, promoted off the deferred ledger by the operator's HTTP ruling** ("a
   device does not need to support HTTP at all" — and fw_version had NO in-band
   answer, the poster child for a feature stranded in HTTP-land):
@@ -769,7 +774,7 @@ the copy a third-party implementer reads.
   already legal): `product`, `fw_version`, `hub_name`, optional
   device-defined info map. (b) Normative sentence: **capability discovery
   is catalog introspection** — a feature exists iff its channels exist
-  (`has_rs485` ⇔ servo channels present; ceilings ⇔ RFC-009 role-tagged
+  (`has_rs485` ⇔ servo channels present; ceilings ⇔ [RFC-009](#rfc-009--settings-metamodel-per-field-catalog-annotations-for-generic-self-building-uis) role-tagged
   limit fields). No parallel capability list to drift. (c)
   `/api/capabilities` demoted to legacy shim, deleted with the API plane;
   "where is SlopSync" bootstrap = mDNS / default port / same-host.
@@ -835,14 +840,14 @@ the copy a third-party implementer reads.
   `action.<name>` is a registered `field_roles` CONVENTION carrying a
   device-chosen suffix (which is exactly why `role` is a tstr and not an enum),
   `meta.reset_gen` is a registered role, and the observable-reset rule plus the
-  RFC-011 classification (an action that restores CONFIGURATION bumps cfg_gen
+  [RFC-011](#rfc-011--hub-side-cfg_gen-advancement-rfc-002s-mirror-twin) classification (an action that restores CONFIGURATION bumps cfg_gen
   AND reset_gen; one that only clears COUNTERS bumps reset_gen alone) are
   normative in SPEC §9.3. **DEFERRED: no reference hub exposes a reset as an
   INTENT** — the reference device's counter resets still ride their legacy HTTP
   keys and feed `reset_gen` from there. The vocabulary shipped; the verb did
   not. SPEC §18-18.
 - **Origin:** coverage audit: `reset_stats`, `reset_peaks`, slopmotion
-  `reset_stats`, `ap_reset` are ACTIONS, not values — RFC-009 is explicitly
+  `reset_stats`, `ap_reset` are ACTIONS, not values — [RFC-009](#rfc-009--settings-metamodel-per-field-catalog-annotations-for-generic-self-building-uis) is explicitly
   a value metamodel, and today three different reset verbs ride bespoke
   HTTP keys.
 - **Proposed change:** formalize the op-style intent as a first-class
@@ -851,7 +856,7 @@ the copy a third-party implementer reads.
   op. Normative reset rule (ground truth for resets): a resettable counter
   group's twin STATE carries a `reset_gen` field that increments on every
   applied reset, so ALL subscribers observe the reset, not just the sender.
-- **Compatibility:** additive; role vocabulary rides RFC-009's table.
+- **Compatibility:** additive; role vocabulary rides [RFC-009](#rfc-009--settings-metamodel-per-field-catalog-annotations-for-generic-self-building-uis)'s table.
 
 ## RFC-020 — Procedures: long-running guarded operations + reboot-commit
 
@@ -895,13 +900,13 @@ the copy a third-party implementer reads.
   the store PAIR — static descriptor plus a tiny dynamic roster STATE — is the
   shape every store uses; payloads are opaque `bstr` the protocol never decodes;
   caps are hub-declared with generous floors. SPEC §8.7. **The first real user
-  is the trust ledger** (RFC-027/029), which the feasibility pass ruled a blob
+  is the trust ledger** ([RFC-027](#rfc-027--capability-agnostic-pairing--tiered-access-operator-ordered)/029), which the feasibility pass ruled a blob
   store rather than a packed roster, and which carries the ONE
   registered-grammar carve-out. **DEFERRED: no device preset store backend
   exists yet** — the mechanism ships with no `pattern.*` store behind it.
   SPEC §18-15.
 - **Origin:** `/api/pattern/presets` (NVS `advpreset`, 24 × `{name, def}`
-  opaque blobs, 3600 B total); RFC-009's out-of-scope note; the ap-editor's
+  opaque blobs, 3600 B total); [RFC-009](#rfc-009--settings-metamodel-per-field-catalog-annotations-for-generic-self-building-uis)'s out-of-scope note; the ap-editor's
   import/export flow.
 - **Proposed change — the preset STORE model:**
   1. A device declares one or more **stores** in its catalog: `{store_id,
@@ -961,7 +966,7 @@ the copy a third-party implementer reads.
      landmine).
   2. `goodbye_codes` gets its own space (or one normative "GOODBYE uses
      nack_codes" sentence) — today two clients hand-reuse 0x0107
-     (`SlopSync.cs:1479`, `session.js:527`). Add `REBOOTING` (RFC-020).
+     (`SlopSync.cs:1479`, `session.js:527`). Add `REBOOTING` ([RFC-020](#rfc-020--procedures-long-running-guarded-operations--reboot-commit)).
   3. Safety `cause` enum gains `session_loss` — deadman is currently blamed
      for GOODBYEs/evictions (`hub_impl.hpp:1342`). **LANDED (M4a):**
      `releaseSessionSources()` derives the cause from the §11.4 release
@@ -994,7 +999,7 @@ the copy a third-party implementer reads.
   10. Echo-vs-advertised-range rule: applied values MUST lie within the
       catalog field's declared min/max — a hub whose internal clamp can
       exceed them (the window +5 mm rail quirk, `MachineSim.cpp:397-402`)
-      must widen its advertised max, not lie past it. Generic RFC-009
+      must widen its advertised max, not lie past it. Generic [RFC-009](#rfc-009--settings-metamodel-per-field-catalog-annotations-for-generic-self-building-uis)
       renderers depend on this.
 - **Compatibility:** registry additions + wording; item 5/8 change failure
   behavior (strictly better); item 10 may bump this device's advertised
@@ -1004,7 +1009,7 @@ the copy a third-party implementer reads.
 
 - **Status:** **Landed (v1.0).** The implemented decision matrix is now
   normative SPEC §10.4, written as ORDERED rows with first-match-wins so two
-  conforming hubs shed identically under identical load. It carries the RFC-014
+  conforming hubs shed identically under identical load. It carries the [RFC-014](#rfc-014--timed-segment-scheduling-contract)
   segment exception (rows 4-6: whole-source or nothing, never decimate), the
   never-shed exemption, and the first-push-after-grant exemption that keeps a
   session from being stranded mid-adoption. Honest scope note: the reference hub
@@ -1025,7 +1030,7 @@ the copy a third-party implementer reads.
   default `idle_reap_multiplier` (3) and implemented. SPEC §6.6 states the two
   liveness regimes in one table: source OWNERS get the deadman window and its
   loss policy; everyone else gets idle reaping with NO motion consequence.
-  Complemented by RFC-015's `READY_TIMEOUT`, which covers the one case reaping
+  Complemented by [RFC-015](#rfc-015--syncing-order-catalog-completes-before-retained-state)'s `READY_TIMEOUT`, which covers the one case reaping
   structurally cannot see — a client that PINGs forever and never adopts.
 - **Origin:** `hub_impl.hpp:1293-1300` — §11.3's deadman binds to active
   sources; §6.5's "MAY reap at 3× idle interval" was left unimplemented, so
@@ -1055,7 +1060,7 @@ the copy a third-party implementer reads.
 - **Proposed change:** (a) the HUB latches all four levels in 0x0003 —
   delegate acceptance is what triggers the latch; a hub whose delegate
   doesn't implement HOLD/PAUSE NACKs `UNSUPPORTED_OP` (discoverable,
-  honest). (b) Role exemption rule: `estop` (RFC-010) and `stop` are
+  honest). (b) Role exemption rule: `estop` ([RFC-010](#rfc-010--client-assertable-e-stop-over-slopsync)) and `stop` are
   role-EXEMPT on 0x0005 — anyone may stop the machine, §11.2's "safety
   outranks authorization" generalized; `hold/pause/resume/estop_clear`
   require controller. (c) `manual_override` and `bypass_limits` become
@@ -1072,22 +1077,22 @@ the copy a third-party implementer reads.
 
 - **Status:** **Landed (v1.0).** All three tiers. (1) identity/product strings
   ride the CBOR control plane and are REGISTERED as WELCOME `identity` — though
-  see RFC-016 for the deferred codec, which is the one place this RFC's promise
+  see [RFC-016](#rfc-016--in-band-hub-identity-capabilities--catalog-introspection) for the deferred codec, which is the one place this RFC's promise
   is not yet cashed. (2) `str16`/`str32`/`str64` are `packed_field_types`
   8/9/10, fixed-width zero-padded UTF-8, implemented in the layout codec and
   validated by the catalog codec; a reader stops at the first NUL or the width.
   (3) STREAM sample layouts remain string-free, normatively (SPEC §5.4). The
   `secret str32` warning survived into the registry note.
-- **Origin:** RFC-009 sub-decision 7 (now resolved to option (a) by
+- **Origin:** [RFC-009](#rfc-009--settings-metamodel-per-field-catalog-annotations-for-generic-self-building-uis) sub-decision 7 (now resolved to option (a) by
   ruling); the §3.1 link-status gap (BSSID/IP are strings, hence the
   WebUI's 30 s HTTP poll that exists ONLY to fetch a string); device-name
   setting.
 - **Proposed change:** three tiers, each in its natural home:
-  1. **Identity/product strings** → CBOR control plane (WELCOME, RFC-016).
+  1. **Identity/product strings** → CBOR control plane (WELCOME, [RFC-016](#rfc-016--in-band-hub-identity-capabilities--catalog-introspection)).
      Already legal; zero new machinery.
   2. **String VALUES in packed STATE/settings** → new `packed_field_types`:
      `str16 / str32 / str64` — fixed-width, zero-padded UTF-8, register-map
-     style. Offsets stay static; append-only evolution preserved; RFC-009
+     style. Offsets stay static; append-only evolution preserved; [RFC-009](#rfc-009--settings-metamodel-per-field-catalog-annotations-for-generic-self-building-uis)
      renders them as text inputs (`max_len` = width), `secret` flag
      composes (presence-bit rule unchanged).
   3. **STREAM sample layouts remain string-free** — the motion hot path
@@ -1122,7 +1127,7 @@ the copy a third-party implementer reads.
   1. **Tiers renamed, wire values unchanged:** `watch(0)` / `control(1)`
      / `configure(2)`. Control includes STREAM publishing (a motion
      producer is a controller). Composes with standing rules: safety
-     estop/stop role-EXEMPT (RFC-025); OTA never derivable from any tier
+     estop/stop role-EXEMPT ([RFC-025](#rfc-025--safety-semantics-completion-incl-overridebypass-ruling)); OTA never derivable from any tier
      (standing ruling); serial/in-process remain implicitly configure
      (physical possession, §12.3).
   2. **One ceremony, three association modes, all ending in PAIR_GRANT
@@ -1166,7 +1171,7 @@ the copy a third-party implementer reads.
      registry gains a pairing-modes enum + defaults.
   4. **Revocation is protocol, not WebUI:** the paired-device roster
      (instance_id, name, role, last-seen) is readable and revocable from
-     any configure session — rides RFC-018's admin surface.
+     any configure session — rides [RFC-018](#rfc-018--session-roster--admin-eviction)'s admin surface.
   5. **Honesty clause (normative text):** the HMAC-PIN proof is
      offline-brute-forceable by a passive observer of the pairing
      exchange (4 digits = 10⁴ HMACs); acceptable for the v1 threat model
@@ -1193,13 +1198,13 @@ the copy a third-party implementer reads.
   requirement (SPEC §5.8-7). **Honest caveat that belongs with it:** the DEFAULT
   `SoftwareCrypto` inherits `ICrypto`'s stub `signP256`/`verifyP256`/`publicKey`,
   which return 0/false/0. Signing is a working SEAM, not a shipped capability —
-  see RFC-029 and SPEC §18-11.
+  see [RFC-029](#rfc-029--trust-lifecycle-hub-authenticity-change-tripwires-own-ui-trust) and SPEC §18-11.
 - **Origin:** the wire parser is the attack surface in BOTH directions:
   the hub parses HELLO/INTENT/bundles from untrusted clients, and CLIENTS
   parse WELCOME/catalog/STATE from possibly-untrusted hubs — a client
   auto-connecting to any discovered `_slopsync._tcp` beacon is one
   malicious hub away from parsing hostile bytes, and the catalog (rich in
-  variable-length strings, growing via RFC-009/026) is the fattest
+  variable-length strings, growing via [RFC-009](#rfc-009--settings-metamodel-per-field-catalog-annotations-for-generic-self-building-uis)/026) is the fattest
   client-side surface. Today's conformance = golden vectors only; no fuzz
   requirement exists anywhere.
 - **Proposed change:**
@@ -1305,7 +1310,7 @@ the copy a third-party implementer reads.
      fails the signature → client MUST surface "not your machine" and
      withhold intents. Potato clients paired by physical ceremony MAY
      skip verification. Sign cost: once per session, off the hot path.
-     Crypto rides RFC-028's injected ICrypto delegate.
+     Crypto rides [RFC-028](#rfc-028--parser-robustness--fuzz-conformance-gate-anti-cve)'s injected ICrypto delegate.
   2. **Client-change tripwire ("untrusted but I recognize you"):** HELLO
      gains `client_ver` (tstr). Trust-ledger entry per paired device:
      {instance_id, kind, name, version, first_seen, last_seen, role,
@@ -1317,16 +1322,16 @@ the copy a third-party implementer reads.
      configurable. **Honesty clause (normative): self-reported version is
      a TRIPWIRE, not attestation** — a deliberately malicious update lies
      and keeps its token; the real bounds on a hostile client are role
-     scoping, instant revocation, roster visibility (RFC-018 + version
-     history), and the role-exempt safety ops (RFC-025).
+     scoping, instant revocation, roster visibility ([RFC-018](#rfc-018--session-roster--admin-eviction) + version
+     history), and the role-exempt safety ops ([RFC-025](#rfc-025--safety-semantics-completion-incl-overridebypass-ruling)).
   3. **Hub-change signal (symmetric):** hub fw_version change (visible
-     via RFC-016 WELCOME identity + etag/boot_id) SHOULD be surfaced by
+     via [RFC-016](#rfc-016--in-band-hub-identity-capabilities--catalog-introspection) WELCOME identity + etag/boot_id) SHOULD be surfaced by
      clients ("machine updated to X.Y.Z"); clients MAY gate configure-
      tier actions on user acknowledgement after a change. Hub code
      changes only via the OTA plane, which is outside SlopSync trust by
      standing ruling — a configure-tier compromise cannot flash firmware.
      A hostile hub's ceiling against conforming clients is well-formed
-     lies, per RFC-028 symmetric parser totality.
+     lies, per [RFC-028](#rfc-028--parser-robustness--fuzz-conformance-gate-anti-cve) symmetric parser totality.
   4. **Own-UI default trust via SERVED-PAGE TOKENS (operator design,
      2026-07-25 — supersedes the earlier Origin-only draft), capped:**
      the hub's own served WebUI is trusted by default through a
@@ -1358,7 +1363,7 @@ the copy a third-party implementer reads.
      * **NOT a connection prerequisite (normative).** A WebUI never
        NEEDS `/uitoken` to connect: with the endpoint absent, disabled,
        or failed it is an ordinary client — viewer by default (§12.2
-       open viewing), and control/configure via any RFC-027 association
+       open viewing), and control/configure via any [RFC-027](#rfc-027--capability-agnostic-pairing--tiered-access-operator-ordered) association
        mode (knock-and-approve, PIN, push-to-pair), with its token
        persisted against its `instance_id` like any other client's.
        Since configure ALWAYS pairs, a WebUI already exercises the
@@ -1401,7 +1406,7 @@ the copy a third-party implementer reads.
   (which is why the hub signature is designed to work WITHOUT secrecy).
 - **Compatibility:** new HELLO key (client_ver), PAIR_GRANT pubkey field,
   WELCOME signature field, token-proof presentation key, trust-ledger
-  states + re-approval intent on the RFC-018/027 admin surface.
+  states + re-approval intent on the [RFC-018](#rfc-018--session-roster--admin-eviction)/027 admin surface.
   Break-allowed: fields land clean. ICrypto delegate gains sign/verify
   (hub sign: mbedtls; client verify: WebCrypto / System.Security /
   mbedtls).
@@ -1525,7 +1530,7 @@ operator ruling — it is at the bottom, alone.*
 - **022.10 scoped:** applied-within-advertised-range applies to ECHO
   `applied` maps and `setting_key`-bearing fields; effective/read-only
   fields lawfully exceed a paired setting's range and declare their own
-  display bounds (this was colliding head-on with RFC-003's origin
+  display bounds (this was colliding head-on with [RFC-003](#rfc-003--state-channels-must-declare-stored-config-vs-effective-state-semantics)'s origin
   case).
 - **022.5 vs 028.2 reconciled:** SENDERS truncate diagnostic strings to
   the registered cap; RECEIVERS reject over-cap strings in structural
@@ -1587,7 +1592,7 @@ operator ruling — it is at the bottom, alone.*
   hub's hardcoded floor on `estop_clear` is CORRECT and stays.** The hub
   resolves per-op access generically from `option_access`, and then ALSO
   applies a hardcoded minimum role to `estop_clear` specifically. That looks
-  like the channel-id special-casing RFC-025 forbids. It is not, and the
+  like the channel-id special-casing [RFC-025](#rfc-025--safety-semantics-completion-incl-overridebypass-ruling) forbids. It is not, and the
   distinction matters:
   * `option_access` is CATALOG DATA, authored by a human. If someone
     mis-authors channel 0x0005 — omits the vector, or marks `estop_clear`
@@ -1595,8 +1600,8 @@ operator ruling — it is at the bottom, alone.*
     anonymous LAN client. A safety-critical authorization would be derived
     from a data file with no floor under it.
   * The prohibitions this appears to violate are both about something else:
-    RFC-008.3 forbids branching on WHO is talking when PLANNING MOTION;
-    RFC-025 forbids per-channel logic that duplicates what the catalog
+    [RFC-008](#rfc-008--doctrine-the-machine-owns-motion-processing-not-the-client).3 forbids branching on WHO is talking when PLANNING MOTION;
+    [RFC-025](#rfc-025--safety-semantics-completion-incl-overridebypass-ruling) forbids per-channel logic that duplicates what the catalog
     already expresses. A hardcoded FLOOR under a safety op branches on
     neither identity nor client behavior — it bounds the damage a bad
     catalog can do.
@@ -1616,13 +1621,13 @@ operator ruling — it is at the bottom, alone.*
   post-v1.0, it is an additive catalog key at the ENTRY level (not the
   field level, which has no depth budget left) — normal additive
   evolution, not a break.
-- **`replay_depth` (catalog entry key 13, RFC-017)** exists in
+- **`replay_depth` (catalog entry key 13, [RFC-017](#rfc-017--device-log-channel))** exists in
   `catalog.cddl` but is NOT yet in the data model — the one remaining
   CDDL↔struct gap after M2b. It lands with the log channel work, since
   that is its only consumer.
 - **Deferred cleanups, recorded so they are not lost:** (a) `CborWriter`
   wants a MEASURING mode (count bytes, no buffer) — it would remove
-  `checkCatalog`'s scratch-overload wart and serve RFC-028's
+  `checkCatalog`'s scratch-overload wart and serve [RFC-028](#rfc-028--parser-robustness--fuzz-conformance-gate-anti-cve)'s
   know-the-size-before-you-allocate rule generally; (b) `BasicCatalog`'s
   five positional capacity parameters should become a single
   `CatalogCaps` class-type NTTP if a sixth pool ever appears; (c)
@@ -1642,10 +1647,47 @@ operator ruling — it is at the bottom, alone.*
 
 ---
 
+## RFC-030–050 index (post-v1.0, landed piecemeal)
+
+*The base pass ends at [RFC-029](#rfc-029--trust-lifecycle-hub-authenticity-change-tripwires-own-ui-trust). Everything below is a later, smaller RFC —
+mostly single operator rulings from 2026-07-27/28, batched through Phase
+B/C/D. Status column matches each entry's own line; cross-check against
+`docs/canon/LEDGER.md` before citing a status from here.*
+
+| RFC | Scope | Status |
+|---|---|---|
+| [030](#rfc-030--curve-family-on-the-stream-say-which-spline-the-segments-describe) | Curve family on the stream | Landed |
+| [031](#rfc-031--servo-register-configuration-the-last-http-writer) | Servo register configuration | Draft — parked, mechanism required |
+| [032](#rfc-032--command-and-telemetrytarget-make-commanded-motion-discoverable) | `command.*` / `telemetry.target` roles | Landed |
+| [033](#rfc-033--an-unacceptable-subscribe-must-be-answered-never-silently-dropped) | SUBSCRIBE refusals must be answered | Landed |
+| [034](#rfc-034--placeholder-entries-in-options-lists) | Placeholder `options` entries | Landed |
+| [035](#rfc-035--a-role-vocabulary-for-motion-plan-telemetry) | Motion-plan telemetry roles | Landed |
+| [036](#rfc-036--renderability-of-string-settings) | Renderability of string settings | Landed items 1+3; item 2 (`max_len`) deferred |
+| [037](#rfc-037--forward-decodable-packed-layouts-explicit-per-field-width) | Forward-decodable packed layouts | Partially landed — vocabulary landed, encoder pass deferred |
+| [038](#rfc-038--client-negotiated-deadman-window) | Client-negotiated deadman window | Landed |
+| [039](#rfc-039--every-refusal-is-answered-rfc-033s-principle-generalized) | Every refusal is answered | Landed |
+| [040](#rfc-040--spec-says-what-the-reference-implementation-knows-editorial-batch) | Spec-says-what-the-reference-knows (editorial) | Landed |
+| [041](#rfc-041--a-role-vocabulary-for-the-machines-physical-travel-extent) | Physical travel extent roles | Draft — mechanism shipped, RFC not yet batch-reviewed |
+| [042](#rfc-042--session-staleness-separate-the-session-ends-from-motion-stops) | Session staleness / reattach | Landed |
+| [043](#rfc-043--transport-conformance-profiles-which-bindings-a-hub-must-offer) | Transport conformance profiles | Landed |
+| [044](#rfc-044--client-onramp-doctrine-tcode-passthrough-as-a-client-side-adapter) | Client onramp doctrine (TCode passthrough) | Draft — deprioritized, not near-term |
+| [045](#rfc-045--retire-deadman-as-safety-session-liveness-is-bookkeeping-not-motion-control) | Retire deadman-as-safety | Landed |
+| [046](#rfc-046--ble-primary-discovery-udp-probe-and-reply-and-cross-transport-migration) | BLE-primary discovery + UDP probe | Landed |
+| [047](#rfc-047--the-0xcdss-channel-allocation-grid-structure-over-arrival-order-history) | The 0xCDSS channel allocation grid | Landed |
+| [048](#rfc-048--the-rendering-constitution-catalog-vocabulary-capability-interfaces-renderer-law) | The rendering constitution | Landed |
+| [049](#rfc-049--spec-fresh-eyes-panel-omnibus-small-normative-fixes) | Fresh-eyes panel omnibus (7 fixes) | Landed spec/registry; hub behavior Phase D; (c)'s scheduling backstop evaluated and NOT landed |
+| [050](#rfc-050--blob-transfer-backpressure--completion-acknowledgement) | Blob transfer backpressure + BLOB_DONE | Landed spec/registry; implementation deferred |
+
+> DEMO-CANDIDATE: a live status board cross-checking every RFC's stated
+> disposition above against registry.yaml/SPEC.md's actual current state,
+> flagging drift the moment an entry goes stale.
+
+---
+
 ## RFC-030 — Curve family on the stream: say WHICH spline the segments describe
 
 - **Status:** **LANDED (2026-07-27)** — as a **publishes-wish key, not the
-  stream_meta INTENT** (operator-approved variant: RFC-013's PUBLISH frame
+  stream_meta INTENT** (operator-approved variant: [RFC-013](#rfc-013--publish-grants-burst-capacity--mid-session-renegotiation)'s PUBLISH frame
   already provides mid-session renegotiation, deleting the RFC's only argument
   against the wish-key home). Shipped: registry `curve_families` table + CBOR
   key 45 on publishes/granted_publishes entries; the GRANT echoes the
@@ -1738,17 +1780,17 @@ operator ruling — it is at the bottom, alone.*
   which endpoint it used to share.
   1. **The `live` whitelist becomes real settings.** It is a bounded, known set
      of tunable registers, so it becomes a STATE+INTENT settings pair with
-     RFC-009 annotations (`min`/`max`/`step`/`desc`/`group`). That makes it
+     [RFC-009](#rfc-009--settings-metamodel-per-field-catalog-annotations-for-generic-self-building-uis) annotations (`min`/`max`/`step`/`desc`/`group`). That makes it
      render generically, validate client-side, and echo post-clamp like every
      other setting — and it makes the Configure pane buildable by a third-party
      client, which the HTTP version never allowed.
   2. **`program` (the full gold-motor sequence) is a DOCUMENT, not a form**, and
-     belongs on the RFC-021 blob store: one `writeBlob` on the delegate seam
+     belongs on the [RFC-021](#rfc-021--slopsync-presets-operator-ordered) blob store: one `writeBlob` on the delegate seam
      inherits chunking, selective repair, `total_bytes` pre-sizing and
      `CHUNK_UNAVAILABLE` for free. A register dump is exactly the shape that
      seam was generalized for.
   3. **`scan` is already done** — `0x3002 machine-admin` op 3, shipping.
-  4. **Gate on `has_rs485`**, per RFC-016: a machine with no Modbus servo must
+  4. **Gate on `has_rs485`**, per [RFC-016](#rfc-016--in-band-hub-identity-capabilities--catalog-introspection): a machine with no Modbus servo must
      not advertise these channels at all. Their ABSENCE is the honest answer to
      "can this device configure a servo?", exactly as 0x1001 power already
      works.
@@ -1760,7 +1802,7 @@ operator ruling — it is at the bottom, alone.*
        `{read, write}` + `addr u16` + `value u16`. The catalog's `addr`
        min/max is the RENDERING hint; the hub is the referee for the real
        (possibly disjoint) whitelist ranges via NACK `INVALID_VALUE` —
-       exactly RFC-009.6, no new mechanism. A generic client already renders
+       exactly [RFC-009](#rfc-009--settings-metamodel-per-field-catalog-annotations-for-generic-self-building-uis).6, no new mechanism. A generic client already renders
        this: op-select + two bounded numeric boxes.
      - **Results ride a paired EVENT channel `{addr, value, status}`, never
        the ECHO — structurally, not stylistically.** The hub emits ECHO the
@@ -1801,7 +1843,7 @@ operator ruling — it is at the bottom, alone.*
   tag a move INTENT by role, so a generic client cannot find it safely". The same
   search killed the `commanded` and `lag` hero numerals.
 - **Problem:** Two related holes, both in the `field_roles` vocabulary.
-  1. **No role names a value-bearing COMMAND.** `action.<name>` (RFC-019) marks
+  1. **No role names a value-bearing COMMAND.** `action.<name>` ([RFC-019](#rfc-019--action-intents--observable-resets)) marks
      VERBS — home, e-stop, clear-fault — and a client renders them as buttons.
      `0x3100 move`'s field is `position`: a VALUE. Tagging it `action.move` would
      be actively wrong, telling every generic client to draw a button where a
@@ -1824,7 +1866,7 @@ operator ruling — it is at the bottom, alone.*
   1. **`command.position`** — an INTENT field carrying a commanded ABSOLUTE
      target position in the channel's own unit. A client that finds it MAY render
      a positional control (rail, tape, slider) and send the value on that field's
-     channel. Deliberately a VALUE role, not an `action.*`, so RFC-019's
+     channel. Deliberately a VALUE role, not an `action.*`, so [RFC-019](#rfc-019--action-intents--observable-resets)'s
      verb/value distinction stays intact.
   2. **`telemetry.target`** — the position the machine is currently commanded to,
      as opposed to `telemetry.position` which is where it measurably is. LAG IS
@@ -1977,14 +2019,14 @@ operator ruling — it is at the bottom, alone.*
 ## RFC-036 — Renderability of string settings
 
 - **Status:** **LANDED items 1+3 (2026-07-27); item 2 (`max_len`) DEFERRED** —
-  registering an annotation nothing emits or needs yet is exactly how RFC-007
+  registering an annotation nothing emits or needs yet is exactly how [RFC-007](#rfc-007--feasibility-cannot-be-predicted-without-the-hubs-planner-shape)
   said registries accrete dead weight. The probe's `cat_renderable` now treats
   str16/32/64 as renderable by type (width = the bound); the exercised fixture
   is the SIMULATOR's divergent catalog, never the frozen mini-catalog (whose
   etag pin a string setting would break).
 - **Origin:** Found by `tools/slopsync_probe.py` against the divergent simulator
   catalog, 2026-07-27 — the FIRST time a `str16` setting field was ever
-  exercised. RFC-026 landed the packed string types and nothing had used one.
+  exercised. [RFC-026](#rfc-026--strings-on-the-wire-operator-ordered) landed the packed string types and nothing had used one.
 - **Problem:** The probe's `cat_renderable` check requires every setting to carry
   either `options` or numeric `min`/`max`, and fails a string field that has
   neither. A string's bound is its fixed packed width (16/32/64 B), implied by
@@ -1994,7 +2036,7 @@ operator ruling — it is at the bottom, alone.*
   1. Fix the check: a `str16`/`str32`/`str64` field is renderable by virtue of
      its type; its length bound is the type's width.
   2. Consider a `max_len` annotation for a device wanting a SHORTER logical limit
-     than the field's physical width — RFC-009 item 5 already mentions `max_len`
+     than the field's physical width — [RFC-009](#rfc-009--settings-metamodel-per-field-catalog-annotations-for-generic-self-building-uis) item 5 already mentions `max_len`
      as a UI hint, but nothing registers or emits it.
   3. Add a string setting to the conformance fixtures so this path stays
      exercised rather than being rediscovered by the next implementer.
@@ -2012,7 +2054,7 @@ operator ruling — it is at the bottom, alone.*
   per-field byte cost the encoder should take in one deliberate pass (with the
   conformance declared==derived check landing alongside), not a rider on this
   batch. Until then the key is registered, decodable, and unexercised —
-  exactly the state RFC-036.3 warns about, so the follow-up carries a "add an
+  exactly the state [RFC-036](#rfc-036--renderability-of-string-settings).3 warns about, so the follow-up carries a "add an
   emitting fixture" obligation with it.
 - **Origin:** Grievance sweep 2026-07-27. `webui/src/core/slopsync/catalog.js:470`
   (*"unknown packed type: offsets are unknowable past here"*) and
@@ -2081,7 +2123,7 @@ operator ruling — it is at the bottom, alone.*
   not the client, needed the distinction). Item 3 turned out narrower than
   drafted: a wrong-shape token already fails HELLO decode, and hub_impl was
   ALREADY answering NACK MALFORMED there — the silent-demotion case is a
-  well-FORMED but unrecognized token, which is RFC-029's deliberate
+  well-FORMED but unrecognized token, which is [RFC-029](#rfc-029--trust-lifecycle-hub-authenticity-change-tripwires-own-ui-trust)'s deliberate
   admit-at-watch tripwire behavior and stays. The asymmetry: BLOB_REFUSED is
   a CLIENT obligation and only slopsync-js has a reassembler cap to refuse
   with — that emission is on the WebUI agent (handoff item 8); the C++ client
@@ -2090,13 +2132,13 @@ operator ruling — it is at the bottom, alone.*
   1. `webui/src/core/slopsync/catalog.js:131-137` — the client's blob
      reassembler cap refused a grown catalog's transfer header and the session
      *"then went LIVE WITH NO CATALOG… No error, no NACK, no dropped-frame
-     warning: a refused blob header just stops."* (RFC-015's READY_TIMEOUT
+     warning: a refused blob header just stops."* ([RFC-015](#rfc-015--syncing-order-catalog-completes-before-retained-state)'s READY_TIMEOUT
      eventually kills the session 15 s later — and blames the client.)
   2. `clients/mfp-slopsync/SlopSync.cs:536` — a HELLO token of the wrong
      shape (a PIN typed where a 16 B token belongs) is silently ignored and
      the session downgraded to viewer tier: *"Under enforcement that would
      present as 'connects, plays nothing'."*
-  3. `lib/slopsync/hub/hub_impl.hpp:3056-3058` — idle reaping (RFC-024) has
+  3. `lib/slopsync/hub/hub_impl.hpp:3056-3058` — idle reaping ([RFC-024](#rfc-024--idle-session-reaping-for-non-owning-sessions)) has
      no GOODBYE code of its own, so a reaped VIEWER is labeled
      `DEADMAN_TIMEOUT` — the motion-safety code — in every log and client.
      The comment says *"flagged rather than invented"*; this RFC invents it
@@ -2104,7 +2146,7 @@ operator ruling — it is at the bottom, alone.*
 - **Proposed change:**
   1. Normative umbrella sentence in SPEC §4: silence is never a conforming
      response to a frame or transfer an implementation cannot honor — this
-     generalizes RFC-033.1 from SUBSCRIBE to the whole surface.
+     generalizes [RFC-033](#rfc-033--an-unacceptable-subscribe-must-be-answered-never-silently-dropped).1 from SUBSCRIBE to the whole surface.
   2. A client that cannot accept a declared blob (`total_bytes` over its cap)
      MUST GOODBYE with new code `BLOB_REFUSED` rather than idle in a
      half-session; hubs SHOULD log it with the declared size.
@@ -2156,7 +2198,7 @@ operator ruling — it is at the bottom, alone.*
 - **Status:** Draft.
 - **Origin:** WebUI grievance sweep, 2026-07-27 — building a generic rail
   widget against fw 2.1.76's `machine-config` channel. `window.min`/
-  `window.max` (RFC-032-era roles) were the only candidates available and
+  `window.max` ([RFC-032](#rfc-032--command-and-telemetrytarget-make-commanded-motion-discoverable)-era roles) were the only candidates available and
   neither is the right fact.
 - **Problem:** A rail widget needs to know how long the machine's travel
   actually is, to draw a rail at the right scale and to make a successful
@@ -2223,12 +2265,12 @@ operator ruling — it is at the bottom, alone.*
   regime (§6.6) — the deadman for a source-owning session, idle reaping
   otherwise — now marks the session STALE via a shared `Hub::markStale()`
   (releases every owned source unconditionally, latching nothing per
-  RFC-045) instead of calling `teardownSession()`; the slot, `session_id`,
+  [RFC-045](#rfc-045--retire-deadman-as-safety-session-liveness-is-bookkeeping-not-motion-control)) instead of calling `teardownSession()`; the slot, `session_id`,
   subs, publish grants, intent ring, and readiness are all RETAINED. A THIRD
   trigger from this RFC's own design table is also implemented: `detachTransport()`
   (an out-of-band transport loss) now marks STALE too, additionally resetting
   the per-slot mid-flight state (pending knock, AUTH nonce, sign job, blob
-  cursor) that RFC-042's own "kept while stale" table scopes to "if the
+  cursor) that [RFC-042](#rfc-042--session-staleness-separate-the-session-ends-from-motion-stops)'s own "kept while stale" table scopes to "if the
   transport itself is still attached" — which it plainly is not on a confirmed
   transport loss. `DEADMAN_TIMEOUT`/`IDLE_REAPED` stay registered but the
   reference hub no longer emits either for silence. Two new `session_event_kinds`
@@ -2255,17 +2297,17 @@ operator ruling — it is at the bottom, alone.*
   BUSY check before NACKing; a reclaimed session gets a best-effort GOODBYE
   `SLOT_RECLAIMED` then a genuine `teardownSession()` (this really is an
   ending). A LIVE session is never evicted for pressure.
-  **Ambiguity resolved per the phase brief:** the general §6.3/RFC-046
+  **Ambiguity resolved per the phase brief:** the general §6.3/[RFC-046](#rfc-046--ble-primary-discovery-udp-probe-and-reply-and-cross-transport-migration)
   cross-BINDING-TYPE migration (e.g. a BLE-to-WS hop) is NOT implemented —
   this reference hub has only one transport binding (WS), so it cannot
   distinguish "the same device on a new socket" from "a genuine second
   claimant" the way §6.3's own text requires for that broader case; per its
   own MAY-fallback clause the hub continues to apply the duplicate-identity
-  eviction rule there. Only the RFC-042 STALE-instance_id case (unambiguous:
+  eviction rule there. Only the [RFC-042](#rfc-042--session-staleness-separate-the-session-ends-from-motion-stops) STALE-instance_id case (unambiguous:
   a STALE session is never a live competing claimant) is implemented.
   Tests: `test/native/test_slopsync_staleness/test_main.cpp` (STALE-01..04)
   plus rewritten expectations in `test_slopsync_safety` (S-05/S-06, the two
-  "M4a" RFC-022.3 cases), `test_slopsync_m3b` (MB-10/11), `test_slopsync_m4b`
+  "M4a" [RFC-022](#rfc-022--registry-hygiene-omnibus).3 cases), `test_slopsync_m3b` (MB-10/11), `test_slopsync_m4b`
   (M4B-05), `test_slopsync_m4c` (M4C-11), and `test_slopsync_streamingress`
   (SI-08/SI-15). Verified: `pio test -e native`, all suites, exit 0.
 - **Origin:** Operator requirement, 2026-07-27, verbatim: *"clients, even the
@@ -2276,8 +2318,8 @@ operator ruling — it is at the bottom, alone.*
   because you alt tabbed or locked your screen."* Grounded in a structural
   fact, not just a complaint: browsers throttle a backgrounded tab's timers
   to roughly one callback per **minute**; the deadman window is negotiable
-  (RFC-038) but hard-clamped to `[deadman_min_ms, deadman_max_ms]` =
-  **250–5000 ms**, and idle reaping (RFC-024) fires at
+  ([RFC-038](#rfc-038--client-negotiated-deadman-window)) but hard-clamped to `[deadman_min_ms, deadman_max_ms]` =
+  **250–5000 ms**, and idle reaping ([RFC-024](#rfc-024--idle-session-reaping-for-non-owning-sessions)) fires at
   `idle_reap_multiplier(3) x ping_interval_idle_ms(1000)` = **3000 ms**. No
   legal value on either axis can survive a single throttle interval — **there
   is no way to configure this problem away**, which is why the reference
@@ -2301,7 +2343,7 @@ operator ruling — it is at the bottom, alone.*
      SYNC → re-SUBSCRIBE just because it went quiet for the length of one
      browser paint-throttle interval.
 
-  Nothing in §6.6, §11.3, or the RFC-024/RFC-038/RFC-039 disposition
+  Nothing in §6.6, §11.3, or the [RFC-024](#rfc-024--idle-session-reaping-for-non-owning-sessions)/[RFC-038](#rfc-038--client-negotiated-deadman-window)/[RFC-039](#rfc-039--every-refusal-is-answered-rfc-033s-principle-generalized) disposition
   distinguishes these. A browser tab losing its foreground status and a phone
   genuinely leaving the building produce *identical* hub behavior today, even
   though only one of them is actually gone.
@@ -2316,9 +2358,9 @@ operator ruling — it is at the bottom, alone.*
     - **Initiator-bound / command-driven** — `move` (MANUAL, a single bounded
       point-to-point plan that completes and holds on its own),
       `motion-input`/`motion-segment` (TCODE_STREAM, whose planner already
-      brakes to rest with no external help — CLAUDE.md §7.6: *"plan ending
-      still-moving with no fresh command → one-time velocity-interface
-      brake-to-rest [SETTLE]"* — and whose segment commands are individually
+      brakes to rest with no external help — [DOCTRINE.md](../canon/DOCTRINE.md) §8:
+      *"plan ending still-moving with no fresh command → one-time
+      velocity-interface brake-to-rest [SETTLE]"* — and whose segment commands are individually
       time-bounded to begin with, §5.4/§9.2). Silence from the owning session
       does not risk continued motion for either: there is no next command to
       execute, so the machine runs out of things to do and stops, by
@@ -2333,7 +2375,7 @@ operator ruling — it is at the bottom, alone.*
     Generator-driven motion is a **machine-level mode**, not tied to the
     liveness of whoever started it. A session going stale, or being evicted,
     does **not** stop it. The recourse is the safety channel: `stop`/`estop`
-    are role-exempt (RFC-025b) — **any** connected session, including a bare
+    are role-exempt ([RFC-025](#rfc-025--safety-semantics-completion-incl-overridebypass-ruling)b) — **any** connected session, including a bare
     `watch`-tier viewer, can halt it. This RFC deliberately does **not**
     couple machine-level motion modes to session liveness. Recorded as a
     decision made now and flagged for revisit, not an oversight.
@@ -2351,12 +2393,12 @@ operator ruling — it is at the bottom, alone.*
 
      | Trigger | Window (unchanged from today) | Today | This RFC |
      |---|---|---|---|
-     | Source-owning session, no frame received | `deadman_ms` (RFC-038, 250–5000, default 600) | `pumpDeadman()`: GOODBYE `DEADMAN_TIMEOUT`, teardown, source loss policy runs | Goes `STALE`. Owned sources released (see below). No GOODBYE — staleness is not termination. |
+     | Source-owning session, no frame received | `deadman_ms` ([RFC-038](#rfc-038--client-negotiated-deadman-window), 250–5000, default 600) | `pumpDeadman()`: GOODBYE `DEADMAN_TIMEOUT`, teardown, source loss policy runs | Goes `STALE`. Owned sources released (see below). No GOODBYE — staleness is not termination. |
      | Non-owning session, no frame received | `idle_reap_multiplier(3) x ping_interval_idle_ms(1000)` = 3000 ms | `pumpIdleReap()`: GOODBYE `IDLE_REAPED`, teardown | Goes `STALE`. Nothing owned to release. |
      | Transport reports closed/errored out of band | immediate | teardown | Goes `STALE` immediately — the case that matters most for a genuine WiFi blip, and it is *detected*, not timed out |
 
      **Unaffected on purpose:** a session that never reaches `LIVE` (stuck in
-     `SYNCING`/`GRANTED`) keeps today's `READY_TIMEOUT` (RFC-015) — there is
+     `SYNCING`/`GRANTED`) keeps today's `READY_TIMEOUT` ([RFC-015](#rfc-015--syncing-order-catalog-completes-before-retained-state)) — there is
      no partially-adopted state worth preserving, and that mechanism already
      works. Voluntary `GOODBYE`, administrative eviction (§12.7), and a
      duplicate-`instance_id` `HELLO` arriving while the existing session is
@@ -2418,14 +2460,14 @@ operator ruling — it is at the bottom, alone.*
      | Intent idempotency ring (`intentRing`, §9.3) — a client that sent an intent right before going stale and never saw the ECHO gets the idempotent replay on resume, not a duplicate apply | |
      | Ingress rate-limiter state — token buckets keep refilling; a returning session is not penalized for having been away | |
      | Catalog readiness (`ready`, `readyEtagMismatch`) — no re-SYNC, no catalog refetch | |
-     | Negotiated `deadmanMs` (RFC-038) | |
+     | Negotiated `deadmanMs` ([RFC-038](#rfc-038--client-negotiated-deadman-window)) | |
      | Bounded event queue (`events`) — keeps accepting best-effort, drop-oldest, exactly like a slow consumer | |
      | AUTH/pending-blob/pending-knock state, **if the transport itself is still attached** (resumption path A below); reset on true reattach (path B), since it was mid-flight against a socket that no longer exists | |
 
      A stale session costs the hub **exactly as much as a live one** — full
      `HubSession` + `Slot` footprint, unreduced (the struct is large enough
      that an earlier field bug blew an 8 KB task stack copying one, per
-     CLAUDE.md's field-bug ledger). Staleness is not a compression scheme; it
+     [TRAPS.md](../canon/TRAPS.md)'s field-bug ledger). Staleness is not a compression scheme; it
      is a promise not to reclaim something already paid for, made *only* on
      the belief the owner might come back. That belief is exactly what the
      eviction rule below exists to bound.
@@ -2505,7 +2547,7 @@ operator ruling — it is at the bottom, alone.*
        arrive — it was stale for a reason) with a **new** code,
        `SLOT_RECLAIMED` (0x010D): distinguishable from `SESSION_EVICTED`
        (admin/slow-consumer) and from the now-orphaned
-       `DEADMAN_TIMEOUT`/`IDLE_REAPED`, for exactly the reason RFC-039
+       `DEADMAN_TIMEOUT`/`IDLE_REAPED`, for exactly the reason [RFC-039](#rfc-039--every-refusal-is-answered-rfc-033s-principle-generalized)
        registered `IDLE_REAPED` in the first place — an observer needs to
        tell "your slot was needed" apart from every other reason a session
        ends.
@@ -2516,19 +2558,19 @@ operator ruling — it is at the bottom, alone.*
        locked screen plus a second person's equivalent pair is *four
        stale-but-not-dead sessions*, and the fifth connection attempt is the
        normal case this eviction rule exists for, not an edge case.
-  6. **Observability — additive, does not depend on RFC-018.** Two new
+  6. **Observability — additive, does not depend on [RFC-018](#rfc-018--session-roster--admin-eviction).** Two new
      kinds on the existing spec-core `session-events` channel (0x0007,
      already implemented, kinds 1–3 already registered): `4 =
      session_stale`, `5 = session_resumed`, body carrying the affected
      `session_id` (same shape as the existing `takeover`/`session_joined`
      kinds). This is enough to see staleness happen on any hub today,
-     without waiting on RFC-018's `session-roster` (0x0002, still deferred
+     without waiting on [RFC-018](#rfc-018--session-roster--admin-eviction)'s `session-roster` (0x0002, still deferred
      per the disposition table). It composes cleanly with that roster if/when
      it lands: a **persistent** stale bit belongs in the roster's per-slot
      `flags` byte (a level, matching what a roster IS), while the event pair
      above is the **edge** (an observer watching only for transitions
      doesn't want to poll a roster for them). This RFC does not depend on
-     RFC-018; RFC-018 would be strictly better with this RFC already landed.
+     [RFC-018](#rfc-018--session-roster--admin-eviction); [RFC-018](#rfc-018--session-roster--admin-eviction) would be strictly better with this RFC already landed.
 - **Two questions answered but left as the operator's call, stated so no
   future reader thinks they were overlooked:**
   1. **How long may a session stay stale?** This RFC proposes **no
@@ -2585,7 +2627,7 @@ operator ruling — it is at the bottom, alone.*
 
 ---
 
-## RFC-043
+## RFC-043 — Transport conformance profiles: which bindings a hub must offer
 
 **Status:** Landed (v1.0). SPEC §13.1 states both profiles verbatim (base profile: any single binding conforms; hardware hub profile: BLE GATT MUST, WS SHOULD, ESP-NOW supported-not-conformance-relevant), UI-serving-as-capability, and the BLE→WS auto-upgrade guidance; §17.1's hub conformance row cross-references it. Documentation-only, as proposed — no reference-hub gap beyond the one already named (BLE GATT `ITransport` unbuilt; SPEC §18-22).
 **Origin:** Operator rulings 2026-07-27 (SlopDeck design sessions; the ESP32
@@ -2628,9 +2670,9 @@ WROOM-D / OSSM-reference-PCB target).
 
 ---
 
-## RFC-044
+## RFC-044 — Client onramp doctrine: TCode passthrough as a client-side adapter
 
-**Status:** Accepted (posture landed; the reference deliverable is a CLIENT-SIDE library, not a hub feature or a wire channel — see the 2026-07-27 correction below). SPEC §9.6 states the three-rung client onramp doctrine (TCode passthrough / native segments / native samples) and the never-force-their-hand strategy, worded to match the correction.
+**Status:** Draft — DEPRIORITIZED by operator (2026-07-27): "a later feature, parsed machine-side," a channel alongside segments and samples, not near-term work (`docs/canon/LEDGER.md`). This supersedes the posture-landed/channel-deferred disposition below: SPEC §9.6 still states the three-rung client onramp doctrine (TCode passthrough / native segments / native samples) as it was worded to match the 2026-07-27 correction, but this RFC does not carry Accepted or Landed status at v1.0.
 **Origin:** Operator ruling 2026-07-27 (client-onramp calibration; supersedes
 the "TCode pass-through DEFERRED post-MFP" disposition).
 
@@ -2664,7 +2706,7 @@ SlopSync-carried feed would arrive on the hub task). **That plan is
 retracted, not merely deferred.** The hub NEVER parses TCode and there is
 NO wire channel for it: the `0x2102 tcode-passthrough` reservation some
 earlier CHANNEL-MAP.md/registry commentary carried is dropped, and
-CHANNEL-MAP.md (regenerated, RFC-047) carries no such entry. Consequences:
+CHANNEL-MAP.md (regenerated, [RFC-047](#rfc-047--the-0xcdss-channel-allocation-grid-structure-over-arrival-order-history)) carries no such entry. Consequences:
 the TCodeParser cross-task-race blocker is moot — not resolved, moot,
 because a hub-side TCode parser no longer exists in any future plan; a
 WROOM-class hub never needs to carry a TCode parser at all; and the
@@ -2674,11 +2716,11 @@ surface. SPEC §9.6's onramp paragraph is reworded to match (see SPEC.md).
 
 ---
 
-## RFC-045
+## RFC-045 — Retire deadman-as-safety: session liveness is bookkeeping, not motion control
 
-**Status:** Landed (v1.0). SPEC §11.3 rewritten: the deadman forces no stop for any command-driven source (settles on its own, per §9.6's closed motion surface), and a hub-autonomous source's behavior is an explicit device-catalog `on_disconnect: stop|continue` setting (default `stop`) rather than an implicit protocol behavior — no new frame, per the RFC's own instruction. §6.6's liveness table, §6.9's teardown equivalence rule, §6.8's reconnect text, §11.5's invariant 1, §12.7's `evict` bullet, the §3.2 worked narrative, and Appendix H's rationale entry are all reconciled to match — every "loss policy" mention in the document now reads consistently. `on_disconnect` is deliberately NOT a new registry field_role in this batch (no wire number was in the operator's allocation list for this RFC); it rides the ordinary settings metamodel as device-catalog data. SPEC §18-21 records the reference-firmware gap: the shipped pattern generator still behaves as unconditional `continue`, predating this RFC's default flip to `stop`. **Superseded in part by RFC-048 (2026-07-27):** `on_disconnect` is promoted to the registered `field_roles` entry `source.background_run` (bool, generalized to any autonomous source, not only PatternEngine) — see that entry's Compatibility note.
-**Implementation landed, 2026-07-27 (Phase D).** `Hub::releaseSessionSources()` no longer runs any Stop-vs-Continue policy dispatch — the `if (pol == SourceLossPolicy::Stop) { ... }` branch (latch STOP + `onDeadmanStop()` + broadcast) is deleted outright; every release, from any of the (now seven, post-RFC-042) teardown/staleness doors, is `_delegate.onSourceOwnership(source, 0, reason)` and nothing else. `HubDelegate::sourcePolicy()`/`onDeadmanStop()` remain declared (frozen delegate interface, extended additively with a doc-comment note) but are never called by the reference hub. The STREAM-ingress "accepted bundle clears a latched STOP" workaround this RFC's own Problem section named (SI-15) is deleted from `Hub::handleStream()` — moot, not merely obsolete, since no source-loss path latches STOP any more for it to un-wedge; the separate, still-valid §11.1 rule ("an accepted source-mapped INTENT clears STOP") is unrelated and untouched in `handleIntent()`. `source.background_run` itself (the firmware delegate decision this RFC hands off to) is item 3 of this same Phase D pass — see the ledger/report for the channel choice. Verified: `pio test -e native`, all suites, exit 0 (SI-08/SI-15, S-05/S-06, and the M4a/M3b/M4b/M4c staleness rewrites all assert "nothing latches" directly).
-**Origin:** Operator ruling 2026-07-27 — resolving RFC-042's own named
+**Status:** Landed (v1.0). SPEC §11.3 rewritten: the deadman forces no stop for any command-driven source (settles on its own, per §9.6's closed motion surface), and a hub-autonomous source's behavior is an explicit device-catalog `on_disconnect: stop|continue` setting (default `stop`) rather than an implicit protocol behavior — no new frame, per the RFC's own instruction. §6.6's liveness table, §6.9's teardown equivalence rule, §6.8's reconnect text, §11.5's invariant 1, §12.7's `evict` bullet, the §3.2 worked narrative, and Appendix H's rationale entry are all reconciled to match — every "loss policy" mention in the document now reads consistently. `on_disconnect` is deliberately NOT a new registry field_role in this batch (no wire number was in the operator's allocation list for this RFC); it rides the ordinary settings metamodel as device-catalog data. SPEC §18-21 records the reference-firmware gap: the shipped pattern generator still behaves as unconditional `continue`, predating this RFC's default flip to `stop`. **Superseded in part by [RFC-048](#rfc-048--the-rendering-constitution-catalog-vocabulary-capability-interfaces-renderer-law) (2026-07-27):** `on_disconnect` is promoted to the registered `field_roles` entry `source.background_run` (bool, generalized to any autonomous source, not only PatternEngine) — see that entry's Compatibility note.
+**Implementation landed, 2026-07-27 (Phase D).** `Hub::releaseSessionSources()` no longer runs any Stop-vs-Continue policy dispatch — the `if (pol == SourceLossPolicy::Stop) { ... }` branch (latch STOP + `onDeadmanStop()` + broadcast) is deleted outright; every release, from any of the (now seven, post-[RFC-042](#rfc-042--session-staleness-separate-the-session-ends-from-motion-stops)) teardown/staleness doors, is `_delegate.onSourceOwnership(source, 0, reason)` and nothing else. `HubDelegate::sourcePolicy()`/`onDeadmanStop()` remain declared (frozen delegate interface, extended additively with a doc-comment note) but are never called by the reference hub. The STREAM-ingress "accepted bundle clears a latched STOP" workaround this RFC's own Problem section named (SI-15) is deleted from `Hub::handleStream()` — moot, not merely obsolete, since no source-loss path latches STOP any more for it to un-wedge; the separate, still-valid §11.1 rule ("an accepted source-mapped INTENT clears STOP") is unrelated and untouched in `handleIntent()`. `source.background_run` itself (the firmware delegate decision this RFC hands off to) is item 3 of this same Phase D pass — see the ledger/report for the channel choice. Verified: `pio test -e native`, all suites, exit 0 (SI-08/SI-15, S-05/S-06, and the M4a/M3b/M4b/M4c staleness rewrites all assert "nothing latches" directly).
+**Origin:** Operator ruling 2026-07-27 — resolving [RFC-042](#rfc-042--session-staleness-separate-the-session-ends-from-motion-stops)'s own named
 follow-up ("whether SourceLossPolicy::Stop is still the right default …
 now that SlopMotion's SETTLE makes the forced-halt redundant").
 
@@ -2698,7 +2740,7 @@ now that SlopMotion's SETTLE makes the forced-halt redundant").
   which would just ruin any sense of stability"):** retire
   DEADMAN-AS-SAFETY wholesale. The honest decomposition:
   1. **Session liveness stays — as bookkeeping.** Silence detection, PING
-     cadence, STALE marking, reattach, slot reclaim (RFC-042) are resource
+     cadence, STALE marking, reattach, slot reclaim ([RFC-042](#rfc-042--session-staleness-separate-the-session-ends-from-motion-stops)) are resource
      management and roster truth, not safety. Unchanged.
   2. **Source-loss forced-stop is REMOVED for all source classes.** No
      latch, no §11.3 Stop policy. A vanished streaming source leaves the
@@ -2726,13 +2768,13 @@ now that SlopMotion's SETTLE makes the forced-halt redundant").
 
 ---
 
-## RFC-046
+## RFC-046 — BLE-primary discovery, UDP probe and reply, and cross-transport migration
 
-**Status:** Landed (v1.0). Registry gains `ble_identity` (service/write/notify UUIDs), `ble_adv_flags` (pairing_window_open/ws_available), `udp_discovery` (port 21328/magic `SLOP`/reply rate limit), frame types `DISCOVER_PROBE` (0x1E) / `DISCOVER_REPLY` (0x1F), and WELCOME keys `ws_port` (46) / `ipv4` (47). SPEC §13.1 (profiles), §13.4 (BLE identity + advertising payload pinned), §13.7 (discovery doctrine restated), new §13.8 (UDP probe/reply), and §6.3 (transport migration + `ws_port`/`ipv4` documented) carry the normative text. Two decisions made without an explicit operator number and flagged for veto: (1) the UDP reply's `hub_id` field reuses the existing `boot_id` (u32) rather than a new identity primitive; (2) transport migration is specified against TODAY's session model (a `LIVE` duplicate-`instance_id` HELLO), with RFC-042's `STALE` case named as composing identically once that RFC lands — RFC-042 itself is NOT landed by this batch and remains Draft. No reference implementation exists yet (BLE `ITransport`, UDP responder); SPEC §18-22 records it. **RFC-042 landed 2026-07-27 (Phase D)** — its `STALE` reattach case DOES compose exactly as this entry predicted (`Hub::handleReattach()` implements it for the same-binding-type case; the general cross-BINDING-TYPE migration this RFC describes remains unimplemented, since the reference hub still has only one binding).
+**Status:** Landed (v1.0). Registry gains `ble_identity` (service/write/notify UUIDs), `ble_adv_flags` (pairing_window_open/ws_available), `udp_discovery` (port 21328/magic `SLOP`/reply rate limit), frame types `DISCOVER_PROBE` (0x1E) / `DISCOVER_REPLY` (0x1F), and WELCOME keys `ws_port` (46) / `ipv4` (47). SPEC §13.1 (profiles), §13.4 (BLE identity + advertising payload pinned), §13.7 (discovery doctrine restated), new §13.8 (UDP probe/reply), and §6.3 (transport migration + `ws_port`/`ipv4` documented) carry the normative text. Two decisions made without an explicit operator number and flagged for veto: (1) the UDP reply's `hub_id` field reuses the existing `boot_id` (u32) rather than a new identity primitive; (2) transport migration is specified against TODAY's session model (a `LIVE` duplicate-`instance_id` HELLO), with [RFC-042](#rfc-042--session-staleness-separate-the-session-ends-from-motion-stops)'s `STALE` case named as composing identically once that RFC lands — [RFC-042](#rfc-042--session-staleness-separate-the-session-ends-from-motion-stops) itself is NOT landed by this batch and remains Draft. No reference implementation exists yet (BLE `ITransport`, UDP responder); SPEC §18-22 records it. **[RFC-042](#rfc-042--session-staleness-separate-the-session-ends-from-motion-stops) landed 2026-07-27 (Phase D)** — its `STALE` reattach case DOES compose exactly as this entry predicted (`Hub::handleReattach()` implements it for the same-binding-type case; the general cross-BINDING-TYPE migration this RFC describes remains unimplemented, since the reference hub still has only one binding).
 **Origin:** Operator direction 2026-07-27 ("more robust discovery for
 clients — mDNS works but isn't my pick; BLE discovery and upgrade path").
-Companions: RFC-043 (BLE GATT is the hardware-hub conformance floor),
-RFC-042 (reattach-by-instance_id), the sim's logged hub-identity spec gap,
+Companions: [RFC-043](#rfc-043--transport-conformance-profiles-which-bindings-a-hub-must-offer) (BLE GATT is the hardware-hub conformance floor),
+[RFC-042](#rfc-042--session-staleness-separate-the-session-ends-from-motion-stops) (reattach-by-instance_id), the sim's logged hub-identity spec gap,
 and the 0x17 ESP-NOW BEACON precedent (per-binding discovery already exists
 for the peer radio; this is the phone-facing twin).
 
@@ -2741,7 +2783,7 @@ for the peer radio; this is the phone-facing twin).
   UUIDs are pinned anywhere — every implementation would invent its own and
   clients couldn't scan for one known service; (2) a BLE-connected client
   has no in-band way to learn the hub's WebSocket endpoint, so the
-  BLE→WS upgrade RFC-043 assumes has no mechanism; (3) nothing defines what
+  BLE→WS upgrade [RFC-043](#rfc-043--transport-conformance-profiles-which-bindings-a-hub-must-offer) assumes has no mechanism; (3) nothing defines what
   happens to the session when a client hops transports. mDNS remains the
   only WS-side discovery and it is the weakest link in real homes
   (multicast across mesh/consumer APs and Android is unreliable).
@@ -2761,12 +2803,12 @@ for the peer radio; this is the phone-facing twin).
      WS-side clients (the same keys tell a WS client what the hub believes
      its own endpoint is).
   4. **Transport migration:** a HELLO arriving on a NEW transport with an
-     instance_id matching a LIVE/STALE session is a MIGRATION — RFC-042
+     instance_id matching a LIVE/STALE session is a MIGRATION — [RFC-042](#rfc-042--session-staleness-separate-the-session-ends-from-motion-stops)
      reattach semantics applied cross-transport: same session identity,
      grants/etag-skip renegotiated by the normal HELLO flow, the old
      binding torn down as a reattach (not a rude death — no loss-policy
      side effects). Clients SHOULD keep BLE bonded/known and auto-upgrade
-     to WS whenever ws_available says so (RFC-043 client behavior).
+     to WS whenever ws_available says so ([RFC-043](#rfc-043--transport-conformance-profiles-which-bindings-a-hub-must-offer) client behavior).
   5. **UDP probe — WS discovery for clients without BLE** (operator
      ruling, same day: non-BLE clients get the better option, not
      mDNS-as-consolation): a minimal broadcast probe/reply pair on a
@@ -2789,7 +2831,7 @@ for the peer radio; this is the phone-facing twin).
      slopdrive.local). Manual IP always works.
 - **Compatibility:** additive — new registry section (BLE identity UUIDs +
   UDP discovery port/magic/frames), two WELCOME keys, one advertising flags
-  definition, migration semantics layered on RFC-042's existing reattach. No existing frame changes.
+  definition, migration semantics layered on [RFC-042](#rfc-042--session-staleness-separate-the-session-ends-from-motion-stops)'s existing reattach. No existing frame changes.
   Firmware follow-up it unblocks: the BLE GATT `ITransport` (NimBLE
   returns; single-task hub invariant preserved via the same
   callbacks-enqueue-on-foreign-task pattern the WS transport uses —
@@ -2797,7 +2839,7 @@ for the peer radio; this is the phone-facing twin).
 
 ---
 
-## RFC-047
+## RFC-047 — The 0xCDSS channel allocation grid: structure over arrival-order history
 
 **Status:** Landed (v1.0) (operator-approved direction 2026-07-27 — "re-organize the
 channel mapping; hex addresses don't stick in my mind"; batch-lands with
@@ -2858,7 +2900,7 @@ exactly — `0x1120` slopmotion-limits (STATE) and `0x3120` slopmotion-set
 admin/meta in every band** — `0x30F0` machine-admin (clear-fault, scan,
 save, reboot) is the machine domain's admin family. **Named reserves** hold
 a slot with no catalog entry behind it yet: `0x1011` battery, `0x1012`
-thermal (RFC-048 capability interfaces). **Reserved domains** `3`
+thermal ([RFC-048](#rfc-048--the-rendering-constitution-catalog-vocabulary-capability-interfaces-renderer-law) capability interfaces). **Reserved domains** `3`
 (auxiliary), `4` (playback), `5` (automation) are held for future
 subsystems; domains `8`-`F` are parked for a future multi-axis convention.
 SlopDrive-32's device catalog renumbered onto this convention (Phase C4;
@@ -2871,9 +2913,7 @@ concept gets a numeric home without disturbing its neighbors.
 
 ---
 
----
-
-## RFC-048
+## RFC-048 — The rendering constitution: catalog vocabulary, capability interfaces, renderer law
 
 **Status:** Landed (v1.0). New normative companion [`RENDERING.md`](RENDERING.md)
 carries the full UI/rendering constitution: the derivation chain (catalog →
@@ -2892,15 +2932,15 @@ with machine-checkable `fallback:` compositions, `ui_regions` 5,
 `axis-hero`/`pattern-panel`/`generator-advanced`) plus `identity_keys.5
 hub_instance_id`. None of the eleven are wired onto a real catalog entry in
 this landing — SPEC §18-23 records that plainly; wiring them is the next
-catalog-evolution phase. **The hub-identity fix (operator veto of an RFC-046
+catalog-evolution phase. **The hub-identity fix (operator veto of an [RFC-046](#rfc-046--ble-primary-discovery-udp-probe-and-reply-and-cross-transport-migration)
 decision, landed same batch):** `identity_keys` gains `5: hub_instance_id`
 (u64, durable, NVS-persisted, generated once) and DISCOVER_REPLY (`0x1F`,
 §13.8) is corrected to carry `hub_instance_id:u64` in place of its original
-`hub_id`/`boot_id` (u32) field — RFC-046's own entry flagged this exact
+`hub_id`/`boot_id` (u32) field — [RFC-046](#rfc-046--ble-primary-discovery-udp-probe-and-reply-and-cross-transport-migration)'s own entry flagged this exact
 decision for veto at landing, and this is that veto. Reply payload grows
 72 → 76 bytes (+4, the `u32`→`u64` widening); `boot_id` is unchanged and
 stays exactly where it already lived (`hub-status` STATE, WELCOME). **Riding
-along, promoted from RFC-045:** `on_disconnect` becomes the registered
+along, promoted from [RFC-045](#rfc-045--retire-deadman-as-safety-session-liveness-is-bookkeeping-not-motion-control):** `on_disconnect` becomes the registered
 `field_roles` entry `source.background_run` (bool; false default = stop when
 owning session ends, true = continue unattended), generalized to any
 autonomous source rather than PatternEngine specifically, with its rendering
@@ -2912,7 +2952,7 @@ unattended-and-moving indicator) normative in RENDERING.md §10.1. `gen_registry
 machine-unspecific; specify machine-specific and machine-agnostic channels
 in the spec; a standardized set of UI-building rules — for a remote with an
 OLED, a phone, a desktop, anything with a screen"), staged in full at
-`docs/slopsync/RFC-048-STAGING.md` and ratified clause-by-clause before this
+`docs/slopsync/[RFC-048](#rfc-048--the-rendering-constitution-catalog-vocabulary-capability-interfaces-renderer-law)-STAGING.md` and ratified clause-by-clause before this
 landing; the `hub_instance_id` fix and the `source.background_run` promotion
 are two additional same-day operator rulings folded into this batch.
 **Problem:** (1) the spec had two channel tiers (protocol core,
@@ -2985,13 +3025,13 @@ on an unmet hub without hardcoding a channel, the exact gap `command.*` and
      becomes a registered field role, generalized beyond PatternEngine.
 **Compatibility:** additive. New catalog vocabulary fields (`category`,
 `rank`, aspects/scope/provenance, unit ids, archetype hints) ride the same
-catalog evolution as the RFC-047 renumber (one etag bump), whenever that
+catalog evolution as the [RFC-047](#rfc-047--the-0xcdss-channel-allocation-grid-structure-over-arrival-order-history) renumber (one etag bump), whenever that
 lands; `advanced`-bit migration mapped, not broken. Standard-channel minima
 are SHOULD-level for existing hubs, MUST for hardware-hub-profile
 conformance from v1.0-tag forward. No frame changes, no core-channel
 changes except DISCOVER_REPLY's payload widening (item 7, a frame that
 landed with zero implementations, so free). `source.background_run` is a
-registry addition with no behavior change — RFC-045's semantics are
+registry addition with no behavior change — [RFC-045](#rfc-045--retire-deadman-as-safety-session-liveness-is-bookkeeping-not-motion-control)'s semantics are
 unchanged, only its discoverability is upgraded. The Completeness Doctrine's
 fallback rule guarantees post-tag vocabulary additions never obligate any
 shipped firmware or client.
@@ -3022,7 +3062,7 @@ exactly Phase D and needed no new spec work — LEDGER.md's own note).
     machine-checkably not actionable until a step renderer exists in the
     reference engine. SPEC §9.6 and §18-20 reworded to cite the status field
     instead of only prose. No wire change; a registry metadata addition the
-    codegen already tolerates (RFC-047 precedent).
+    codegen already tolerates ([RFC-047](#rfc-047--the-0xcdss-channel-allocation-grid-structure-over-arrival-order-history) precedent).
   - **(b) Downgrade visibility.** New CBOR key 48 `requested_curve_family`,
     riding the same `publishes`/`granted_publishes` ENTRY map as the existing
     effective `curve_family` (45) — the client's original wish, echoed
@@ -3104,10 +3144,10 @@ exactly Phase D and needed no new spec work — LEDGER.md's own note).
     for its own standalone default — only the firmware GLUE that wires the
     registry value in was carrying the duplication this RFC flagged.
   - **(c), the scheduling-depth backstop, EVALUATED AND NOT LANDED.** A
-    variant of `slopmotion::Engine::commitWaveform()`'s RFC-008 handoff guard
+    variant of `slopmotion::Engine::commitWaveform()`'s [RFC-008](#rfc-008--doctrine-the-machine-owns-motion-processing-not-the-client) handoff guard
     — falling `chord_out` back to the segment's own `chord_in` when no
     lookahead (`Command::has_next_chord`) is available, instead of skipping
-    the guard per RFC-008's original tail-case exemption — was implemented
+    the guard per [RFC-008](#rfc-008--doctrine-the-machine-owns-motion-processing-not-the-client)'s original tail-case exemption — was implemented
     and then REVERTED after it measurably regressed this library's own
     `test_slopmotion` regression bench
     ("Mixed feasible/infeasible chain settles centered and STAYS there," the

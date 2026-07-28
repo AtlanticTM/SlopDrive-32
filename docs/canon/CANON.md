@@ -26,12 +26,12 @@ places with different values, that is not information — that is a **flag** (§
 
 | Domain | Sole home |
 |---|---|
-| Wire numbers (frames, CBOR keys, NACK codes, channels, limits) | `docs/slopsync/registry/registry.yaml` |
-| SlopSync protocol behavior | `docs/slopsync/SPEC.md` |
+| Wire numbers (frames, CBOR keys, NACK codes, channels, limits) | [`docs/slopsync/registry/registry.yaml`](../slopsync/registry/registry.yaml) |
+| SlopSync protocol behavior | [`docs/slopsync/SPEC.md`](../slopsync/SPEC.md) |
 | Governance law — this rule system | this file |
-| Engineering doctrine (architecture, motion, subsystem rules, build/deploy procedure) | `docs/canon/DOCTRINE.md` |
-| Volatile project/device state (fw versions, what's deployed, what's live-verified, milestone status) | `docs/canon/LEDGER.md` |
-| Operator preferences & working relationship | `CLAUDE.md` (repo root) |
+| Engineering doctrine (architecture, motion, subsystem rules, build/deploy procedure) | [`docs/canon/DOCTRINE.md`](DOCTRINE.md) |
+| Volatile project/device state (fw versions, what's deployed, what's live-verified, milestone status) | [`docs/canon/LEDGER.md`](LEDGER.md) |
+| Operator preferences & working relationship | `CLAUDE.md` (repo root, gitignored) |
 | Firmware version constant | `FIRMWARE_VERSION` in `include/config_api.h` |
 | Subsystem deep detail | that subsystem's own README / spec |
 | Public docs site content | generated/derived from the homes above — never hand-forked |
@@ -66,7 +66,8 @@ Canon Flag (§3) and stop that thread until the operator rules. This is the core
 rule; everything else exists to make flags rare.
 
 **C-6 — FROZEN MEANS FROZEN.** The frozen list (conformance artifacts, golden
-vectors, frozen public APIs — enumerated in `CLAUDE.md` §8) is touched only after
+vectors, frozen public APIs — enumerated in [`DOCTRINE.md`](DOCTRINE.md) §9,
+hash-pinned mechanically in `tools/canon_lint.py`) is touched only after
 a flag and an explicit operator "yes, break compatibility". No exceptions for
 "it's just a comment".
 
@@ -80,7 +81,8 @@ then code against it.)
 **C-8 — "WORKING" REQUIRES EVIDENCE.** No claim of live/working/deployed/fixed —
 in a doc, ledger, commit message, or chat — without naming the evidence: the
 command run and the observed result. "Deployed" specifically means
-version-verified on-device per CLAUDE.md §6, not "upload completed".
+version-verified on-device per [`DOCTRINE.md`](DOCTRINE.md) §6, not "upload
+completed".
 
 **C-9 — DELETE LOUDLY, DEPRECATE VISIBLY.** Removing code requires proof of no
 remaining references (state the searches run — src/, include/, lib/, test/,
@@ -120,8 +122,9 @@ An agent MUST flag — and stop that thread of work — when any of these hits:
    ledger↔device).
 2. Work would touch anything on the frozen list, or modify/delete code on a
    motion or safety path whose liveness the agent cannot prove statically.
-3. The operator's request conflicts with a Law, with CLAUDE.md NON-NEGOTIABLEs,
-   or with how the rest of the codebase works.
+3. The operator's request conflicts with a Law, with a
+   [`DOCTRINE.md`](DOCTRINE.md) NON-NEGOTIABLE, or with how the rest of the
+   codebase works.
 4. A fact the work depends on is unstamped or stale (C-4) and cannot be
    re-verified without hardware the agent shouldn't drive unasked.
 
@@ -147,6 +150,49 @@ ruling stands against current doctrine, that is not an exception to be quietly
 carved out — it is a C-7 amendment: the rule is updated to say what the operator
 actually wants, dated in the Amendments log. Doctrine follows the operator;
 it is never silently violated AND never silently diverges from operator intent.
+
+**The flag-to-amendment flow, illustrated** (non-normative diagram; the
+rule text above governs):
+
+```mermaid
+flowchart TD
+    trigger(["Start: one of the four\ntriggers hits (1-4 above)"]):::startNode
+
+    subgraph flagging["Flag"]
+        direction TB
+        raise["Raise a 🚩 CANON FLAG\n(verbatim format above)"]
+        stop["Stop THIS thread\n(unrelated work continues)"]
+        raise --> stop
+    end
+
+    subgraph ruling["Ruling"]
+        direction TB
+        discuss["Operator + agent discussion\nruns to a conclusion"]
+        decide{"Does the ruling agree\nwith existing doctrine?"}
+        discuss --> decide
+    end
+
+    subgraph resolution["Resolution (same commit)"]
+        direction TB
+        write["Write the resolution into\nthe fact's ONE home, stamped"]
+        fixlosers["Correct or delete\nthe losing statements"]
+        amend["C-7 amendment: update the rule text\n+ dated Amendments log entry"]
+        write --> fixlosers
+    end
+
+    trigger --> flagging
+    flagging -->|"operator rules"| ruling
+    decide -->|"yes: doctrine already said this"| write
+    decide -->|"no: operator overrides doctrine"| amend
+    amend -->|"doctrine now matches the ruling"| write
+
+    classDef startNode fill:#2b6cb0,color:#fff,stroke:#2b6cb0,stroke-width:2px
+```
+
+Reading the diagram: the right-hand branch out of the decision diamond is
+the operator-override path from the paragraph above — it always lands back
+on `write`, because an override is never a silent exception; the rule text
+itself changes to match.
 
 ## 4. The Ledger
 

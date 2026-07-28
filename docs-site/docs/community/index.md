@@ -15,9 +15,9 @@ register: STE
 
 ## The short version
 
-SlopSync is provided to the community as a tool. The specification is the
-product; the library is its reference implementation. The registry is the
-single source of truth for every number, and it is enforced by generation
+SlopSync is provided to the community as a tool. [The specification](../spec/index.md)
+is the product; the library is its reference implementation. The registry is
+the single source of truth for every number, and it is enforced by generation
 rather than by discipline.
 
 Numbers released in a tagged version are permanent. They are never reused and

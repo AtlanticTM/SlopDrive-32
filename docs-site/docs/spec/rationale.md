@@ -142,7 +142,7 @@ For implementers of the draft. This is a summary; the reasoning lives in `RFC-QU
 
 - The **dual-plane readiness gate** ([§6.4](session.md#s6-4)) — a session receives no data and may send no intents until it demonstrably holds the catalog.
 - `cfg_gen` advances **iff an applied value actually changed**, in both directions ([§4.2-2](foundations.md#s4-2)).
-- **Teardown equivalence** across all six session-end paths ([§6.9](session.md#s6-9)), with `session_loss` distinguished from `deadman`.
+- **Teardown equivalence** across all six session-end paths ([§6.9](session.md#s6-9)). At this base rewrite, `session_loss` was still distinguished from `deadman` as a latch cause; RFC-045 later retired that distinction entirely for source-loss ([§6.9](session.md#s6-9), [§11.3](safety.md#s11-3)) — neither cause latches anything on the reference hub today.
 - **Blob transfer is paced and backpressure-respecting** ([§8.4](catalog.md#s8-4)): a refused write is retried at the same index rather than dropped, and a hub bounds how many chunks one transfer emits per service tick. Found in the field — the device catalog delivered 47 of 57 chunks against a 32-deep TX queue because the transfer discarded transport refusals.
 - Idle reaping promoted from MAY to SHOULD with a registered multiplier ([§6.6](session.md#s6-6)).
 - The [§10.4](qos.md#s10-4) shedding table is normative, with the **segment exception**.

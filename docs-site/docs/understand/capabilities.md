@@ -32,13 +32,17 @@ does not hardcode a number for your board. It finds the field carrying the
 [field role](../reference/dictionary.md#field-role) it wants, and reads the
 limit your catalog declares.
 
+> DEMO-CANDIDATE: a live catalog browse — point it at a real hub (or the
+> simulator) and watch channels, units and limits populate from nothing but
+> the connection, no driver installed.
+
 ## 2. The hub floor
 
 <p class="ss-cap" markdown>What every conforming hub owes, and what it may skip. The spine is mandatory; the dashed branches are not.</p>
 
 ```mermaid
 flowchart TD
-    H["Your firmware<br/>answers HELLO"]:::party
+    H["▶ START<br/>Your firmware<br/>answers HELLO"]:::party
     H --> C[("Catalog<br/>every channel you have,<br/>hashed into an etag")]:::truth
     C --> S["Retained STATE,<br/>pushed the moment<br/>a channel is granted"]:::truth
     S --> I["INTENT applied,<br/>then ECHOed with the<br/>value you actually used"]:::truth

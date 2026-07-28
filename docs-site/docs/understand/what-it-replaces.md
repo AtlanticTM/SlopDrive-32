@@ -28,9 +28,10 @@ would be a hole in it.
 
 SlopSync-native motion streaming is the **upgrade path**, not a deadline. A
 native stream carries timestamps, a rate
-[grant](../reference/dictionary.md#grant), source ownership and the deadman as
-protocol, rather than as conventions each firmware reimplements. Move when
-that is worth something to you.
+[grant](../reference/dictionary.md#grant),
+[source ownership](../reference/dictionary.md#source-ownership) and the
+deadman as protocol, rather than as conventions each firmware reimplements.
+Move when that is worth something to you.
 
 ## What it replaces
 
@@ -45,7 +46,7 @@ Every row here is something projects in this space build again from scratch.
 | Polling an endpoint for status | STATE channels with [retained values](../reference/dictionary.md#retained-value) | Connect and adopt, instead of poll and hope |
 | Per-feature chunked transfer machinery | One blob verb, with namespaces | Catalogs, presets and ledgers all move the same way |
 | A device log endpoint | A log channel | Clients that are not browsers can see the logs |
-| A client list and a kick endpoint | The roster channel and an admin intent | Session administration is protocol, not a side door |
+| A client list and a kick endpoint | Session-events for joins and leaves, plus an admin evict intent — the roster snapshot itself is specified, not yet built | Session administration is protocol, not a side door |
 | A capabilities endpoint | [Capability discovery](../reference/dictionary.md#capability-discovery) | The feature list cannot disagree with reality |
 
 The pattern in that table is one idea applied repeatedly. **Every surface that

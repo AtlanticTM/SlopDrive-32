@@ -6,7 +6,7 @@ generated: true
 ---
 
 <!-- ==========================================================
-     GENERATED FILE — DO NOT EDIT.
+     GENERATED FILE. DO NOT EDIT.
      Source of truth: docs/slopsync/registry/registry.yaml
      Generator:       docs-site/tools/gen_docs_tables.py
      Regenerate:      python docs-site/tools/gen_docs_tables.py
@@ -16,9 +16,10 @@ generated: true
 
 # Discovery
 
-Two ways a client finds a hub before it has a session: a pinned BLE GATT
-identity, and a UDP broadcast probe for WS-side clients without BLE. Both
-are read-only identity surfaces — neither carries a control plane.
+A client finds a hub two ways before it has a session. One is a pinned
+BLE GATT identity. The other is a UDP broadcast probe for WS-side
+clients without BLE. Both are read-only identity surfaces. Neither
+carries a control plane.
 
 ## BLE GATT identity
 
@@ -34,8 +35,9 @@ in ASCII, deliberately, so the UUID is greppable rather than an opaque v4.
 
 ## BLE advertising flags
 
-The one flags byte a legacy (≤31 B) advertising payload can spare
-after the service UUID and a shortened hub name. Bits not listed are zero.
+A legacy (≤31 B) advertising payload can spare one byte for flags,
+after the service UUID and a shortened hub name. Bits not listed are
+zero.
 
 | Mask | Bit | Name | Notes |
 |---|---|---|---|
@@ -44,9 +46,10 @@ after the service UUID and a shortened hub name. Bits not listed are zero.
 
 ## UDP discovery
 
-The canonical WS-side discovery path for a LAN client without BLE: plain
-UDP sockets both ends, immune to the multicast/mesh-AP/Android failure
-modes that make mDNS unreliable in real homes.
+This is the canonical WS-side discovery path for a LAN client without
+BLE. It uses plain UDP sockets on both ends. It is immune to the
+multicast, mesh-AP and Android failure modes that make mDNS unreliable
+in real homes.
 
 | Property | Value |
 |---|---|
@@ -54,8 +57,10 @@ modes that make mDNS unreliable in real homes.
 | Magic | `SLOP` |
 | Reply rate limit | 1 / source / second |
 
-The probe and reply frames themselves — `DISCOVER_PROBE` (`0x1E`) and
-`DISCOVER_REPLY` (`0x1F`) — are frame types; see [Frame types](frames.md).
+The probe and reply frames themselves, `DISCOVER_PROBE` (`0x1E`) and
+`DISCOVER_REPLY` (`0x1F`), are frame types. See [Frame types](frames.md).
 A reply carries `magic + nonce + hub_name + hub_id + proto_ver + ws_port +
-fw_version + catalog_etag + flags` — nothing a passive observer of a normal
-WELCOME could not already learn.
+fw_version + catalog_etag + flags`. A passive observer of a normal
+WELCOME could already learn all of it.
+
+> DEMO-CANDIDATE: send a live UDP probe to a real hub and decode its reply on the page.

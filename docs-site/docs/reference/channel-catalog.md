@@ -38,12 +38,15 @@ It should also cover the authoring rules that are easy to get wrong:
 
 ## Source material
 
-- `docs/slopsync/SPEC.md` Appendix D — the initial device catalog sketch.
-- `include/comms/SlopSyncCatalog.h` — the catalog a real device actually
-  publishes. Prefer this over the appendix where they differ: it is what
+- [Appendix D](../spec/appendices.md#appendix-d) of `docs/slopsync/SPEC.md`: the initial device catalog sketch.
+- `include/comms/SlopSyncCatalog.h`: the catalog a real device actually
+  publishes. Prefer this over the appendix where they differ. It is what
   ships.
-- [Catalog schema (CDDL)](../spec/schema.md) — the normative catalog encoding,
+- [Catalog schema (CDDL)](../spec/schema.md): the normative catalog encoding,
   published from `docs/slopsync/schema/catalog.cddl`.
-- `lib/slopsync/include/slopsync/conformance/catalog_check.hpp` — the rules a
+- `lib/slopsync/include/slopsync/conformance/catalog_check.hpp`: the rules a
   catalog is mechanically checked against. Every check there is a rule this
   page should explain.
+
+> DEMO-CANDIDATE: fetch a live device's catalog over the wire and render it
+> entry by entry next to this page's worked example, field for field.

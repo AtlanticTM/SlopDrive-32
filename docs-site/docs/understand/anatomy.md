@@ -21,7 +21,7 @@ purple is a request, amber and red are safety.
 
 ```mermaid
 flowchart TD
-    S["Session layer<br/>identity · roles · grants · liveness · reconnect"]:::layer
+    S["▶ START<br/>Session layer<br/>identity · roles · grants · liveness · reconnect"]:::layer
     C["Channel layer<br/>what a class means: snapshot, sample, command, edge, document"]:::layer
     F["Framing<br/>header · length · sequence · fragmentation"]:::layer
     T["Transport binding<br/>open · close · write · read, plus its declared properties"]:::layer
@@ -78,6 +78,10 @@ everywhere, and a reliable transport simply gets stronger behavior for free.
 | `channel` | 2 bytes | Which catalog channel this belongs to. Session-scoped frames use zero. |
 | `seq` | 2 bytes | The [sequence number](../reference/dictionary.md#sequence-number), per channel and per direction. Classes that do not need it send zero. |
 | `len` | 2 bytes | Payload length. This is what makes a frame self-delimiting on a transport that is a byte pipe rather than a message queue. |
+
+> DEMO-CANDIDATE: a live frame trace — capture real bytes off a running hub
+> and highlight this eight-byte header, field by field, against the table
+> above.
 
 Three rules hang off this header, and together they are why an old client keeps
 working against a new machine.

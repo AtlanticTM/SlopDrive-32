@@ -6,7 +6,7 @@ generated: true
 ---
 
 <!-- ==========================================================
-     GENERATED FILE — DO NOT EDIT.
+     GENERATED FILE. DO NOT EDIT.
      Source of truth: docs/slopsync/registry/registry.yaml
      Generator:       docs-site/tools/gen_docs_tables.py
      Regenerate:      python docs-site/tools/gen_docs_tables.py
@@ -19,7 +19,7 @@ generated: true
 Control-plane payloads are CBOR maps with integer keys. The key space is
 **global**: a key means the same thing in every message that uses it.
 
-Keys 1–63 are core. Keys 64–127 are reserved. Keys 128 and above are
+Keys 1 to 63 are core. Keys 64 to 127 are reserved. Keys 128 and above are
 experimental and never appear in a tagged release.
 
 A receiver ignores an unknown key. It never NACKs one.
@@ -151,12 +151,14 @@ Identity proof, signature material, token presentation, pairing modes. Every key
 
 ## Blob namespaces
 
-One transfer verb serves the whole protocol. The namespace says what is
-being transferred. Values 0–127 are spec-governed; 128–255 are
-device-defined.
+One transfer verb serves the whole protocol. The namespace names what a
+transfer carries. Values 0 to 127 are spec-governed. Values 128 to 255
+are device-defined.
 
 | Value | Namespace | Notes |
 |---|---|---|
 | `0` | `catalog` | the hub's channel catalog (§8.4). store_id/slot absent. This is the ONLY namespace with a READY concept (CATALOG_READY 0x19) — you cannot decode STATE without the catalog, but nothing gates on a preset. |
 | `1` | `store` | items in a catalog-declared STORE-class channel: store_id picks the store, slot picks the item. Presets, saved positions, limit profiles, recordings, the trust ledger — all the same machinery, for free. Unused is unproblem. |
 
+
+> DEMO-CANDIDATE: decode one captured HELLO or WELCOME frame live, key by key, against this table.

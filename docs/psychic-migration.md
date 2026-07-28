@@ -4,6 +4,17 @@
 runtime behavior is reasoned from the library source, not observed on the
 device. The first Psychic boot is the operator's experiment.
 
+This is the re-evaluation [REFACTOR-ROADMAP.md](REFACTOR-ROADMAP.md) §4
+calls for, now that HTTP is static-files + OTA only
+([http-plane-retirement.md](http-plane-retirement.md)). No live numbers
+exist yet for this backend specifically — everything here is design and
+build evidence, not a flashed result.
+
+> DEMO-CANDIDATE: capture the browser Network tab's TTFB on `/` and
+> `/api/status` side by side, sync `WebServer` vs. PsychicHttp, with a
+> Chromium speculative-socket parked — the 5 s quantized stall this
+> migration exists to kill, shown rather than described.
+
 ---
 
 ## 1. Why
@@ -108,6 +119,22 @@ If the Psychic build's OTA endpoint is what broke, the fallback is
 
 One type name, two implementations, chosen by `-DUSE_PSYCHIC_HTTP`:
 
+```mermaid
+flowchart LR
+    src(["WebUI.cpp handler bodies\n(~30 routes, unchanged either way)"]):::startNode
+    seam["SlopHttpServer\none type name"]
+    a["default build\nIdleGuardWebServer subclass\nsame RAM, same behavior"]:::current
+    b["-DUSE_PSYCHIC_HTTP build\nadapter over PsychicHttpServer\nsame WebServer-shaped surface"]:::candidate
+
+    src --> seam
+    seam -->|"sd32-ota (shipping)"| a
+    seam -->|"sd32-psychic-ota (never flashed)"| b
+
+    classDef startNode fill:#2b6cb0,color:#fff,stroke:#2b6cb0,stroke-width:2px
+    classDef current fill:#276749,color:#fff,stroke:#276749
+    classDef candidate fill:#744210,color:#fff,stroke:#744210,stroke-dasharray: 4 3
+```
+
 * **default** — `class SlopHttpServer : public IdleGuardWebServer` — a
   zero‑member subclass with inherited constructors. Same code generation, same
   static RAM, same behavior as before.
@@ -202,7 +229,7 @@ Set in `SlopHttpServer`'s constructor (`src/ui/SlopHttpServer.cpp`):
 
 | Field | Value | Why |
 |---|---|---|
-| `core_id` | **0** | IDF default is `tskNO_AFFINITY`, which would let the httpd task land on **Core 1 — the motion core**. Non‑negotiable (CLAUDE.md §2). |
+| `core_id` | **0** | IDF default is `tskNO_AFFINITY`, which would let the httpd task land on **Core 1 — the motion core**. Non‑negotiable ([DOCTRINE.md](canon/DOCTRINE.md) §2). |
 | `task_priority` | **1** | Same priority HTTP is served at today (httpTask). Deliberately **below** commsTask (2) and the SlopSyncHub task (2): the hub drains the 0x2100 inbound motion stream every 5 ms and a 115 KB page stream must never preempt it. httpd spends its life blocked in `select()`, so responsiveness does not suffer. |
 | `stack_size` | **12288** | Psychic's default is 8192; httpTask (which runs the same work today) is also 8192. Headroom taken on purpose: worst case is LittleFS/VFS file I/O + ArduinoJson + `Update.write()`. Two prior stack‑overflow incidents in this project, and host tests never see them (megabyte stacks). **Comes from the internal heap, not BSS.** |
 | `max_open_sockets` | **4** | See the budget below. |
@@ -384,7 +411,7 @@ ownership leak, and it is exactly what exercises the salvage path here.
 * **Chunked instead of `Content-Length`** on the root bundle (§7).
 * **404 body text** differs (`"That URI does not exist."` vs WebServer's). No
   caller depends on it.
-* **`max_open_sockets = 4`** is a judgement call, not a measurement. If the UI
+* **`max_open_sockets = 4`** is a judgment call, not a measurement. If the UI
   feels like it is serializing with several tabs open, raise it — but read the
   lwip budget in §5 first, because the failure mode of overshooting shows up in
   SlopSync, not in HTTP.

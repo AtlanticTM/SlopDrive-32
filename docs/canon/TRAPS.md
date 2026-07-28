@@ -1,6 +1,6 @@
 # TRAPS — hard-won mechanism lessons
 
-The single home (CANON C-1/C-12) for field bugs and platform traps that must
+The single home ([CANON](CANON.md) C-1/C-12) for field bugs and platform traps that must
 never be re-learned. Code comments point here; they do not retell these
 stories. Each entry: the rule, then the mechanism — because knowing *why*
 is what stops the same bug wearing a new coat.
@@ -92,7 +92,7 @@ CTRL_BREAK on failures are cosmetic lies).
 **Rule:** catalog descriptions, channel labels, and any string that ships in
 an encoded artifact are wire content: editing one changes encodings/etags
 and invalidates binary fixtures. Respelling/rewording them is a protocol
-change (CANON C-11 flags, frozen artifacts never change).
+change ([CANON](CANON.md) C-11 flags, frozen artifacts never change).
 
 ## T12 — Registry/spec drift is caught by tools, not eyes
 **Rule:** after any `registry.yaml` change: regenerate, run `--check`, run

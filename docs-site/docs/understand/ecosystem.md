@@ -84,10 +84,10 @@ Honest numbers, so a maintainer can estimate the work rather than guess at it.
 - **No transport is imposed.** A binding is four operations plus an honest
   declaration of what it can do. Implement the ones your hardware has.
 
-If some rule in the specification assumes something your firmware cannot do,
-that is a finding, not a verdict on your design. It belongs in the
-[RFC process](../community/rfc-process.md), where it will be answered on
-technical merit.
+If some rule in [the specification](../spec/index.md) assumes something your
+firmware cannot do, that is a finding, not a verdict on your design. It
+belongs in the [RFC process](../community/rfc-process.md), where it will be
+answered on technical merit.
 
 ## Working with specific projects
 

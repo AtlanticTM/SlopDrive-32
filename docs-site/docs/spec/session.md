@@ -52,6 +52,9 @@ CBOR map: `proto_ver` (the served version), `session_id`, `boot_id`, `catalog_et
 
 WELCOME is the moment grants become truth; anything not granted here needs SUBSCRIBE or PUBLISH.
 
+*A worked, frame-by-frame HELLO → WELCOME → readiness-gate trace, with a
+diagram, lives in [examples/session-traces.md](traces.md) E1.*
+
 **Capability discovery is catalog introspection.** There is no capability list in WELCOME and there will not be one. A feature exists **iff its channels exist**: a hub with a current sensor advertises the power channel and a hub without one does not, and that absence *is* the answer. Ceilings and geometry are discovered by `field_roles` ([§8.8](catalog.md#s8-8)), not by a parallel enumeration that can drift.
 
 **Duplicate identity:** if a HELLO arrives bearing the `instance_id` of a live session, the hub MUST evict the old session (GOODBYE `DUPLICATE_INSTANCE` if its transport still functions) and honor the new HELLO. Half-open zombies die here. Because a successful duplicate HELLO **evicts** the incumbent, a second HELLO is never a legal way to change one's own role mid-session — that is what AUTH ([§12.4](security.md#s12-4)) exists for.
@@ -115,6 +118,27 @@ An out-of-band transport-loss report (the transport layer telling the hub a conn
 A hub SHOULD implement idle reaping (into `STALE`, per the above). Without it a watch-tier session that goes dark holds a slot until reboot, and there is no other pressure to release it.
 
 Note the sparse-sender case this design serves on purpose: a client that emits a few timed segments per second ([§9.6](channels.md#s9-6)) holds its session open with [§6.6](#s6-6) PINGs and never needs a protocol change to do it. Pausing playback means the segments stop while the PINGs continue: the session survives, the machine settles, and nothing about the deadman needed special-casing.
+
+```mermaid
+stateDiagram-v2
+    [*] --> LIVE: HELLO / WELCOME
+    LIVE --> STALE: silence past deadman_ms (source-owning)\nor idle_reap window (§6.6),\nor an out-of-band transport-loss report
+    note right of STALE
+      slot, session_id, every grant RETAINED.
+      source ownership released unconditionally,
+      latching NOTHING (RFC-045). No GOODBYE sent.
+    end note
+    STALE --> LIVE: path A -- any frame on the SAME transport
+    STALE --> LIVE: path B -- fresh HELLO, same instance_id,\non a NEW transport (REATTACH, §6.3)
+    STALE --> [*]: slot-pressure reclaim ONLY\n(best-effort GOODBYE SLOT_RECLAIMED)
+    LIVE --> [*]: the other five teardown doors (§6.9)
+
+    classDef start fill:#2b6cb0,stroke:#1a365d,color:#fff,stroke-width:2px
+    class LIVE start
+```
+
+*A worked example of both reattach paths, with wire-level detail, lives in
+[examples/session-traces.md](traces.md) E2.*
 
 ## 6.7 Mid-session subscription and publication management {#s6-7}
 

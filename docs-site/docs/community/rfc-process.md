@@ -21,19 +21,20 @@ status: stub
 The process is already being run; this page has to write it down.
 
 - **What needs an RFC.** Any new wire number. Any change to normative
-  behavior. Any change to the governance stance.
+  behavior. Any change to the [governance stance](governance.md).
 - **What does not.** Authoring a new device channel needs no specification
-  change at all. That is the point of a self-describing catalog, and this page
+  change at all. That is the point of a
+  [self-describing catalog](../reference/dictionary.md#catalog), and this page
   should say so loudly, because it is the single biggest misconception a new
   implementer arrives with.
 - **The lifecycle.** Proposed, argued, amended, bound into a base pass, or
   refused with recorded reasoning.
-- **The spec-gap ritual.** When an implementation needs a number the
-  specification lacks: fix the registry and the specification **first**,
-  regenerate, then write code against the generated constant. Never invent a
-  code-local magic number for anything wire-visible. This happened eleven
-  times while the protocol was being built, and it will happen to the next
-  implementer too.
+- **The spec-gap ritual.** When an implementation needs a number
+  [the specification](../spec/index.md) lacks: fix the registry and the
+  specification **first**, regenerate, then write code against the generated
+  constant. Never invent a code-local magic number for anything wire-visible.
+  This happened eleven times while the protocol was being built, and it will
+  happen to the next implementer too.
 - **The allocation policy.** Additions by pull request. Released numbers are
   never reused and never renumbered.
 - **The alarm.** After the base pass, RFCs should be rare, small and
@@ -54,3 +55,5 @@ The process is already being run; this page has to write it down.
 
 - [Errata](../spec/errata.md) — for corrections that are not protocol changes.
 - [Governance](governance.md).
+- [Contributing](contributing.md) — building this site, if the RFC needs new
+  pages.

@@ -31,7 +31,7 @@ against what the documentation claims.
 | **A wrong or stale client** | Roles are scoped per channel. A `watch` session cannot own a motion source, whatever it sends |
 | **Privilege creep during approval** | An approver may grant up to its own tier and no further. Asking for more is refused, never silently reduced |
 | **A device you no longer trust** | Revocation is protocol, from any `configure` session, and bites at that device's next handshake |
-| **Invisible presence** | The roster shows who is connected, at what tier, and which token presentation mode each one uses |
+| **Invisible presence** | The [trust ledger](../reference/dictionary.md#trust-ledger) names every paired device, its tier and its token presentation mode; session-events broadcast joins and leaves as they happen |
 | **A changed client** | An observed version change drops a paired device to recognized-pending. See the [change tripwire](../reference/dictionary.md#change-tripwire), and its honesty clause below |
 | **Browser-borne attacks** | The [served-page token](../reference/dictionary.md#served-page-token) endpoint sets no cross-origin headers. A page from anywhere else can send the request and cannot read the answer |
 | **Unauthenticated queue flooding** | Every queue a stranger can fill is bounded: the pending-pairing list, admission control, ingress [token buckets](../reference/dictionary.md#token-bucket), and slow-consumer eviction |
@@ -80,8 +80,9 @@ Stated without hedging.
 thousand HMACs. A passive observer of a pairing exchange can compute all of
 them.
 
-This is acceptable for the stated threat model, and the specification states
-it plainly rather than implying it away. It is also one reason
+This is acceptable for the stated threat model, and
+[the specification](../spec/index.md) states it plainly rather than implying
+it away. It is also one reason
 [knock-and-approve](../reference/dictionary.md#knock-and-approve) is the
 recommended ceremony: its approval surface shows the knocker's identity on
 hardware the attacker does not control. A password-authenticated key exchange
@@ -92,7 +93,7 @@ primitive, and mandating one would exile the browser client.
 self-reported. It catches an honest update and asks you to re-approve it. A
 deliberately malicious update reports whatever version it likes and keeps its
 token. What actually bounds a hostile client is role scoping, immediate
-revocation, roster visibility, and the fact that safety operations are
+revocation, trust-ledger visibility, and the fact that safety operations are
 role-exempt for everyone.
 
 **The protocol's ESTOP is not the hardware path.** It is fast, role-exempt,
@@ -112,8 +113,8 @@ machine.
 3. **Use proof presentation if your client can compute an HMAC.** Browsers,
    desktop apps and every ESP32 can. It costs one round trip.
 4. **Keep `configure` rare.** It is the tier that approves other devices.
-5. **Revoke devices you no longer use.** The roster exists so that this is a
-   thing you can actually do.
+5. **Revoke devices you no longer use.** The trust ledger exists so that this
+   is a thing you can actually do.
 
 ## The audit
 

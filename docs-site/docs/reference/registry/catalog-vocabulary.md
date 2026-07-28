@@ -6,7 +6,7 @@ generated: true
 ---
 
 <!-- ==========================================================
-     GENERATED FILE — DO NOT EDIT.
+     GENERATED FILE. DO NOT EDIT.
      Source of truth: docs/slopsync/registry/registry.yaml
      Generator:       docs-site/tools/gen_docs_tables.py
      Regenerate:      python docs-site/tools/gen_docs_tables.py
@@ -48,7 +48,7 @@ a number, because action roles carry a device-chosen suffix.
 
 Roles are **opportunities, never requirements**. A client that
 recognizes a role may render a bespoke widget. A client that does not
-must fall back to generic rendering by type and constraints. An unknown
+must render it generically instead, by type and constraints. An unknown
 role is never an error.
 
 | Role | Meaning |
@@ -104,8 +104,8 @@ Two conventions extend the list without registering entries:
 ## Procedure phases
 
 Only the lifecycle phases are registered. Any generic client can render
-these without knowing the procedure. Values 128–255 are device-defined
-intermediate steps; a client that does not recognize one renders it as
+these without knowing the procedure. Values 128 to 255 are device-defined
+intermediate steps. A client that does not recognize one renders it as
 `running`.
 
 | Value | Phase | Notes |
@@ -118,7 +118,7 @@ intermediate steps; a client that does not recognize one renders it as
 
 ## Curve families
 
-The `curve_family` sub-key (CBOR key 45) of a `publishes` / `granted_publishes` entry: which smoothness class a segment stream's sender means. The wish rides HELLO or PUBLISH; the grant echoes the effective family, so a client can tell honored from downgraded.
+The `curve_family` sub-key is CBOR key 45, inside a `publishes` or `granted_publishes` entry. It names which smoothness class a segment stream's sender means. The wish rides on HELLO or PUBLISH. The grant echoes the effective family, so a client can tell honored from downgraded.
 
 | Value | Family | Notes |
 |---|---|---|

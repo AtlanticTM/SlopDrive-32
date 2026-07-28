@@ -1,5 +1,16 @@
 # WebUI Legacy-Plane Diagnosis (pre-slopsync-js refactor)
 
+> Channel ids herein are historical (pre-C4 renumber); current map:
+> [CHANNEL-MAP.md](slopsync/CHANNEL-MAP.md).
+
+> **DEPRECATED SYSTEM, dated record (2026-07-28).** Every file this
+> diagnosis traces — `link.js`, the old `cmd.js`/`shadow.js`/`range.js`,
+> `UiSocket.{h,cpp}` — is deleted. The WebUI was rebuilt catalog-driven;
+> current architecture is [webui-architecture.md](webui-architecture.md).
+> This document stays as the diagnosis that justified the rebuild and a
+> record of exactly what was broken and why — read it for history, not
+> for how the WebUI works today.
+
 **Date:** 2026-07-24. **fw at time of test:** 2.1.45 (live device 192.168.1.229,
 confirmed via `/api/capabilities`). **Scope:** read-only static trace of
 `webui/src/core/{link,cmd,shadow,range,telebuf,wire}.js`, `webui/src/features/rail.js`,
@@ -246,7 +257,7 @@ staleness mechanism named in suspect #1.
    cause found. Fix direction for the refactor: either gate the visual drag
    on link health too (so a suspended UI visibly refuses to drag, matching
    ground-truth doctrine — "a control that renders but drives nothing is a
-   defect" per CLAUDE.md §3), or make `cmd.send()`'s suspended-drop
+   defect" per [DOCTRINE.md](canon/DOCTRINE.md) §3), or make `cmd.send()`'s suspended-drop
    observable at the call site instead of returning a bare `-1`.
 
 2. **"Slow to reflect device state" → the ~2s guaranteed telemetry blackout

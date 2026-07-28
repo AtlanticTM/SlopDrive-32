@@ -6,7 +6,7 @@ generated: true
 ---
 
 <!-- ==========================================================
-     GENERATED FILE — DO NOT EDIT.
+     GENERATED FILE. DO NOT EDIT.
      Source of truth: docs-site/dictionary.yaml
      Generator:       docs-site/tools/gen_docs_tables.py
      Edit the YAML, then regenerate. The tooltip definitions in
@@ -204,7 +204,7 @@ Everything SlopSync sends is a frame. A frame belongs to one of two planes, and 
 
 ### Frame
 
-**One SlopSync message — an eight-byte header followed by a payload.**
+**One SlopSync message, an eight-byte header followed by a payload.**
 
 The header names the frame type, the channel, the sequence number
 and the payload length. Every frame starts this way, so a receiver
@@ -237,8 +237,8 @@ See also: [Data plane](#data-plane), [CBOR](#cbor), [Frame](#frame) · Source: S
 **The frames that carry machine values at rate, carrying packed struct payloads.**
 
 STATE snapshots and STREAM bundles are data plane. These frames are
-frequent, so they carry no keys and no type tags at all — only
-values, in the exact order the catalog's layout declares.
+frequent, so they carry no keys and no type tags at all. They carry
+only values, in the exact order the catalog's layout declares.
 
 The saving is real. The same content costs roughly a third as many
 bytes packed as it does in CBOR, and it decodes with a pointer cast
@@ -252,7 +252,7 @@ See also: [Control plane](#control-plane), [Layout](#layout), [Packed field type
 **A compact binary encoding of maps, arrays and numbers, used here in a deterministic profile.**
 
 CBOR is to binary what JSON is to text: the same shapes, far fewer
-bytes, and no parsing ambiguity. SlopSync restricts it further —
+bytes, and no parsing ambiguity. SlopSync restricts it further:
 definite lengths, shortest-form integers, sorted keys, binary32
 floats, no tags.
 
@@ -275,7 +275,7 @@ The counter is 16 bits and wraps. Comparisons use serial
 arithmetic, so a wrap is not mistaken for a jump backwards.
 
 STATE is newest-wins: a snapshot older than the shadow's is
-dropped. This — not arrival order — is what makes state correct on
+dropped. This, not arrival order, is what makes state correct on
 a transport that reorders. Gaps are normal and mean nothing,
 because conflation is allowed by design.
 
@@ -403,7 +403,7 @@ See also: [Setting category](#setting-category), [Schema](#schema), [Layout](#la
 
 **The tab a settings field belongs in, chosen from a registered list so placement is consistent across hubs.**
 
-Values 0–127 are registered and ordered. Values 128–255 are
+Values 0-127 are registered and ordered. Values 128-255 are
 device-defined and the hub supplies the label.
 
 A category **spans channels**: `user` and `user-2` merge into one
@@ -502,7 +502,7 @@ Every flow of data is a channel, and every channel has exactly one class. The cl
 
 **A named, numbered, typed data flow declared in the catalog.**
 
-Ids `0x0001`–`0x007F` are spec-governed. Ids `0x0080`–`0x7FFF` are
+Ids `0x0001`-`0x007F` are spec-governed. Ids `0x0080`-`0x7FFF` are
 allocated by hub firmware and described entirely by the catalog. A
 device can therefore add a channel without a specification change.
 
@@ -585,7 +585,7 @@ See also: [Intent](#intent), [Ground truth](#ground-truth), [Shadow](#shadow) ·
 
 ### Event
 
-**A channel class carrying discrete occurrences — edges, not levels.**
+**A channel class carrying discrete occurrences, edges, not levels.**
 
 Events are best-effort. They are bounded, conflated and **not
 replayed** on reconnect.
@@ -683,7 +683,7 @@ See also: [Session](#session), [Grant](#grant), [Publish grant](#publish-grant) 
 
 ### Grant
 
-**The hub's applied answer to a subscription request — which channel, at what rate, at what priority.**
+**The hub's applied answer to a subscription request, which channel, at what rate, at what priority.**
 
 **Grants are truth. Requests are wishes.** A wish is clamped by the
 catalog maximum rate, by the session's role, by hub capacity and by
@@ -846,7 +846,7 @@ See also: [Teardown](#teardown), [Shedding](#shedding), [Configure](#configure) 
 A TCode edge is not a SlopSync client and receives no SlopSync
 frames. The hub still wraps it in a session: it appears in the
 roster, it owns its arbiter source, and it carries the deadman its
-existing quiet timeout implies.
+existing silence timeout implies.
 
 The point is a rule, not tidiness: there is no unmonitored path to
 motion. A legacy transport that could move the machine outside the
@@ -899,7 +899,7 @@ See also: [Sample](#sample), [Stream kind](#stream-kind), [Quintic](#quintic) ·
 
 ### Token bucket
 
-**The ingress rate limiter — a bucket that refills at the granted sample rate and holds one burst's worth of tokens.**
+**The ingress rate limiter, a bucket that refills at the granted sample rate and holds one burst's worth of tokens.**
 
 Enforcement is on samples per second, not bundles per second,
 because one bundle batches up to 32 samples.
@@ -919,7 +919,7 @@ See also: [Burst](#burst), [Publish grant](#publish-grant), [Bundle](#bundle) ·
 
 Burst exists because rate used to double as bucket depth. A sender
 emitting two to four segments per second with a 25 per second peak
-had to declare 30 Hz — lying to admission control to buy headroom.
+had to declare 30 Hz, lying to admission control to buy headroom.
 
 Burst is clamped to a multiple of the granted rate and echoed like
 every other wish. An unbounded client-declared burst would
@@ -958,7 +958,7 @@ See also: [Never-shed set](#never-shed-set), [Shedding](#shedding), [Grant](#gra
 
 ### Never-shed set
 
-**The traffic that is never dropped under congestion — intents, echoes, NACKs, grants, ESTOP, and safety state.**
+**The traffic that is never dropped under congestion, intents, echoes, NACKs, grants, ESTOP, and safety state.**
 
 Never-shed traffic is tiny by design. If even that cannot drain for
 two seconds, the subscriber is broken and is evicted.
@@ -1058,7 +1058,7 @@ Safety outranks authorization. You may always stop the machine. You may not alwa
 
 ### ESTOP
 
-**Emergency stop — an immediate driver-level stop that latches and prohibits motion until explicitly cleared.**
+**Emergency stop, an immediate driver-level stop that latches and prohibits motion until explicitly cleared.**
 
 Any endpoint may initiate an ESTOP, at any role, in any session
 state, including with no session at all.
@@ -1078,7 +1078,7 @@ See also: [Latch](#latch), [Stop](#stop), [Safety cause](#safety-cause) · Sourc
 
 ### Stop
 
-**A controlled stop — decelerate to zero at the configured rate and deactivate the source.**
+**A controlled stop, decelerate to zero at the configured rate and deactivate the source.**
 
 A stop clears on the next motion intent from an authorized source.
 It is the deadman's default consequence, and it is role-exempt: any
@@ -1142,7 +1142,7 @@ See also: [Safety cause](#safety-cause), [Source ownership](#source-ownership), 
 
 ### Safety cause
 
-**Why a stop or an e-stop is latched — user, deadman, fault, relay, or session loss.**
+**Why a stop or an e-stop is latched, user, deadman, fault, relay, or session loss.**
 
 `deadman` means the silence window actually elapsed. Every other
 way a session ends latches `session_loss`.
@@ -1178,7 +1178,7 @@ the hub applies what is safe and reports what it applied.
 
 Clamping is why the echo exists. A request of 420 against a ceiling
 of 400 is not an error and gets no error: it is applied as 400, and
-400 is the number every screen then shows — including the screen
+400 is the number every screen then shows, including the screen
 that asked for 420.
 
 See also: [Echo](#echo), [Ground truth](#ground-truth), [Intent](#intent) · Source: SPEC
@@ -1201,7 +1201,7 @@ See also: [Knock-and-approve](#knock-and-approve), [Token](#token), [Role](#role
 
 ### Knock-and-approve
 
-**The primary pairing mode — a client knocks with no proof, and any configure session approves it.**
+**The primary pairing mode, a client knocks with no proof, and any configure session approves it.**
 
 The knock lands in a bounded pending list that is exposed as
 ordinary protocol state, so any configure client can render it and
@@ -1215,7 +1215,7 @@ It also kills the circular dependency where a built-in web interface
 is trusted because it is the built-in web interface. The trusted
 surface is *any* configure client.
 
-The pending list is bounded because it is an unauthenticated queue —
+The pending list is bounded because it is an unauthenticated queue,
 the one surface a stranger can fill.
 
 See also: [Pairing](#pairing), [Configure](#configure), [Pending pairing](#pending-pairing) · Source: RFC-027
@@ -1254,7 +1254,7 @@ See also: [Trust ledger](#trust-ledger), [Pairing](#pairing), [Role](#role) · S
 **The hub's stored list of paired devices, their roles, and how each one presents its token.**
 
 The ledger is a store, not a packed roster: an entry does not fit a
-242-byte snapshot. It follows the standard store shape — a static
+242-byte snapshot. It follows the standard store shape: a static
 descriptor plus a tiny roster state whose generation bump means
 "re-enumerate".
 
@@ -1331,7 +1331,7 @@ class of attack, which is the automatable one.
 
 The caps are deliberate. It grants `control`, never `configure`.
 Configure always pairs. A native process on the same network can
-request the token — that attacker already defeats the cleartext
+request the token. That attacker already defeats the cleartext
 ceiling, so nothing is newly lost.
 
 **It is never a prerequisite.** A web interface with no token
@@ -1375,8 +1375,8 @@ See also: [Quintic](#quintic), [Limit set](#limit-set)
 
 **A named group of speed, acceleration and jerk ceilings the arbiter selects per source.**
 
-Manual input uses the user limit set. Everything machine-driven —
-patterns, streams, transports — uses the input limit set.
+Manual input uses the user limit set. Everything machine-driven
+(patterns, streams, transports) uses the input limit set.
 
 **Limits are ceilings, never targets.** A plan derives its speed
 from what the intent requires, then clamps at the ceiling.
@@ -1403,8 +1403,8 @@ A sender that knows where the motion goes and how long it may take
 sends a segment. The planner reproduces that shape rather than
 approximating it, and the deadline is met by construction.
 
-A segment the machine cannot serve — too fast, or outside the
-window — falls back to a point-to-point plan and raises a
+A segment the machine cannot serve, too fast or outside the
+window, falls back to a point-to-point plan and raises a
 [motion anomaly](#motion-anomaly) saying so.
 
 See also: [Segment](#segment), [Quintic](#quintic), [Chase](#chase), [Motion anomaly](#motion-anomaly) · Source: Roadmap
@@ -1486,9 +1486,9 @@ SlopScope subscribes at the [watch](#watch) tier and nothing else. It
 sends no [intent](#intent), publishes no [stream](#stream), and
 carries no publish wish. It is structurally unable to command motion.
 
-It resolves every series from the catalog it is served — by
+It resolves every series from the catalog it is served: by
 [field role](#field-role) where one exists, by declared field names
-otherwise — so it graphs a hub whose channel numbers are not this
+otherwise. It graphs a hub whose channel numbers are not this
 firmware's.
 
 See also: [Scope trace](#scope-trace), [Asked](#asked), [Planned](#planned), [Achieved](#achieved), [Watch](#watch) · Source: Roadmap
@@ -1500,7 +1500,7 @@ See also: [Scope trace](#scope-trace), [Asked](#asked), [Planned](#planned), [Ac
 
 The header carries the catalog [etag](#etag), the firmware version,
 the [stroke window](#stroke-window), the [limit set](#limit-set), and
-the full layout of every recorded channel — names, units, scales,
+the full layout of every recorded channel: names, units, scales,
 roles and option labels.
 
 So a trace stays interpretable months later, against a firmware that

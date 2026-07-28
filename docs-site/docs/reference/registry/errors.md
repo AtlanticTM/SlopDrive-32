@@ -6,7 +6,7 @@ generated: true
 ---
 
 <!-- ==========================================================
-     GENERATED FILE — DO NOT EDIT.
+     GENERATED FILE. DO NOT EDIT.
      Source of truth: docs/slopsync/registry/registry.yaml
      Generator:       docs-site/tools/gen_docs_tables.py
      Regenerate:      python docs-site/tools/gen_docs_tables.py
@@ -21,10 +21,10 @@ same table.
 
 A receiver that meets an unknown code treats it as the generic code of
 its range, taken from the high byte. That fallback is why a second,
-overlapping space was rejected: with two spaces, the range of an unknown
-code is ambiguous.
+overlapping space was rejected. With two spaces, the range of an
+unknown code is ambiguous.
 
-## `0x00xx` — protocol
+## `0x00xx`: protocol
 
 The frame itself is unusable.
 
@@ -35,7 +35,7 @@ The frame itself is unusable.
 | `0x0002` | `FRAME_TOO_LARGE` | exceeds negotiated max_frame |
 | `0x0003` | `PROFILE_VIOLATION` | CBOR not in deterministic profile |
 
-## `0x01xx` — session and authorization
+## `0x01xx`: session and authorization
 
 The session cannot proceed as asked.
 
@@ -56,7 +56,7 @@ The session cannot proceed as asked.
 | `0x010C` | `IDLE_REAPED` | RFC-039.4: hub-initiated teardown of a NON-OWNING session that fell silent past idle_reap_multiplier x ping_interval_idle_ms (RFC-024, GOODBYE code). Distinct from DEADMAN_TIMEOUT on purpose: reaping a dark viewer is housekeeping with zero motion consequence, and before this code existed it was reported with the motion-safety code — a reaped dashboard read as a deadman event in every log and client. RFC-042: silence no longer reaches this code directly — it marks a session STALE instead (session_event_kinds.4) — so the reference hub no longer emits DEADMAN_TIMEOUT or IDLE_REAPED for silence; both stay registered for a hub/policy combination that still wants to terminate outright. |
 | `0x010D` | `SLOT_RECLAIMED` | RFC-042: a HELLO that would otherwise NACK BUSY instead evicted a STALE session to make room (lowest access tier first, tie-break longest continuously stale) — best-effort GOODBYE code, since the reclaimed session was stale for a reason and may never receive it. Distinguishable from SESSION_EVICTED (admin/slow-consumer) and from DEADMAN_TIMEOUT/IDLE_REAPED (which no longer fire for silence at all). |
 
-## `0x02xx` — subscription and QoS
+## `0x02xx`: subscription and QoS
 
 The subscription request is refused.
 
@@ -68,7 +68,7 @@ The subscription request is refused.
 | `0x0203` | `SUB_LIMIT` | per-session subscription cap reached |
 | `0x0204` | `SUBSCRIBE_REJECTED` | RFC-033.2: the SUBSCRIBE frame as a WHOLE could not be processed (undecodable, or more wishes than max_subscriptions_per_frame) — as opposed to the per-channel codes above, which reject one wish and grant the rest. `detail` carries the reason. Exists because the alternative was observed silence: a dropped SUBSCRIBE leaves a healthy-looking LIVE session with zero STATE, which presents as a client rendering bug and cost two debugging nights. |
 
-## `0x03xx` — intent
+## `0x03xx`: intent
 
 The intent is refused on its own merits.
 
@@ -79,7 +79,7 @@ The intent is refused on its own merits.
 | `0x0302` | `INVALID_VALUE` | outside schema min/max or wrong type; also a store import whose kind or size the hub refuses (RFC-021.5) |
 | `0x0303` | `UNSUPPORTED_OP` | intent op not implemented on this hub |
 
-## `0x04xx` — safety refusal
+## `0x04xx`: safety refusal
 
 The machine refuses on safety grounds. A client SHOULD render these distinctly.
 
@@ -92,7 +92,7 @@ The machine refuses on safety grounds. A client SHOULD render these distinctly.
 | `0x0404` | `TAKEOVER_REQUIRED` | control exists; retry with takeover flag |
 | `0x0405` | `CLEAR_REFUSED` | e-stop clear conditions not met (§11.2) |
 
-## `0x05xx` — transfer
+## `0x05xx`: transfer
 
 A chunked transfer failed.
 

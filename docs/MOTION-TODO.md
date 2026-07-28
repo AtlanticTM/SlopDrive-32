@@ -2,15 +2,25 @@
 
 Deferred items from the 2026-07-26 segment-fidelity session. Nothing here is
 normative. Items graduate into an RFC (protocol-visible) or a commit
-(machine-local) — see each item's **Disposition**.
+(machine-local) — see each item's **Disposition**. The stamped motion-core
+architecture this builds on is [REFACTOR-ROADMAP.md](REFACTOR-ROADMAP.md) §1.
+
+> Channel ids herein are historical (pre-C4 renumber); current map:
+> [CHANNEL-MAP.md](slopsync/CHANNEL-MAP.md).
 
 ---
 
 ## M-1 — Hermite overshoot vs the stroke window: clip, or pad?
 
-**Status:** open question, deliberately deferred.
+**Status:** open question, deliberately deferred (unresolved as of
+2026-07-28 — no landed decision in [LEDGER.md](canon/LEDGER.md)).
 **Disposition:** machine-local first (a window/planning decision); becomes
 protocol-visible only if a client needs to be *told* about the padding.
+
+> DEMO-CANDIDATE: overlay the sender's raw curve against the clamped
+> recorder trace on a stroke-window chart, sweeping Makima vs. Pchip, to
+> make the 12.1x vs. 0.89x overshoot difference visible instead of a
+> number in a table.
 
 ### What was observed
 
@@ -79,10 +89,17 @@ but it needs the numbers from (1)-(3) first.
 ## M-2 — RFC: interpolation / curve-family signaling in SlopSync
 
 **Status: DONE [2026-07-27].** Shipped as RFC-030 — `curve_family` (registry
-key 45), normatively specified in `docs/slopsync/SPEC.md` §9.6. Firmware
-deployment status: see `docs/canon/LEDGER.md`. The proposal below is kept as
+key 45), normatively specified in [`docs/slopsync/SPEC.md`](slopsync/SPEC.md)
+§9.6. Firmware deployment status: see
+[`docs/canon/LEDGER.md`](canon/LEDGER.md). The proposal below is kept as
 the design record; the shipped wire values (`unspecified`/`c1_cubic`/
 `c2_quintic`/`step`) are the registry's, not this section's draft names.
+**[RFC-049](slopsync/RFC-QUEUE.md)(b) landed on top of this** (also 2026-07-27/28):
+`requested_curve_family` (CBOR key 48) echoes the wish verbatim alongside
+the effective, possibly-downgraded `curve_family` (45) — see LEDGER.md
+Phase D, so a client can tell "honored" from "silently downgraded" without
+guessing, which is exactly the open sub-question this section used to
+flag below.
 
 ### Why it is needed
 
@@ -133,12 +150,19 @@ curve_family:  0 = unspecified   (points only, no tangent meaning — hub's choi
 
 - Registry: new enum, new INTENT key, WELCOME echo of the accepted value
   (ground-truth doctrine: the hub reports what it will actually DO, which may
-  differ from the wish if `curve_policy` is forcing).
-- Does the hub advertise which families it can reconstruct, so a client can tell
-  the difference between "honored" and "silently downgraded"? Probably yes —
-  otherwise a client cannot know its C1 script is being rendered as C2.
+  differ from the wish if `curve_policy` is forcing). **RESOLVED** by
+  RFC-049(b) (see the DONE banner above).
+- ~~Does the hub advertise which families it can reconstruct, so a client can
+  tell the difference between "honored" and "silently downgraded"?~~
+  **RESOLVED, same RFC:** `requested_curve_family` (48) rides alongside the
+  effective `curve_family` (45) in `granted_publishes`/WELCOME/GRANT — the
+  two being simultaneously present and different IS the downgrade signal,
+  live-verified (`{45: 1, 48: 3}` on a `step`-requested wish downgraded to
+  `c1_cubic`). See [`docs/canon/LEDGER.md`](canon/LEDGER.md), DEPLOY +
+  LIVE-VERIFY checklist item (h).
 - Interaction with M-1: a C1 sender is exactly the case that overshoots the
-  window hardest, so the padding decision and this RFC touch the same behavior.
+  window hardest, so the padding decision and this RFC touch the same
+  behavior. **Still open** — M-1 above is unresolved.
 
 ---
 

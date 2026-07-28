@@ -70,11 +70,14 @@ Every machine that has a physical emergency stop still relies on it first.
 This is an extra path, not a replacement for the switch you can hit with your
 hand.
 
-## If your phone dies, the machine stops
+## If your phone dies, the machine settles
 
-When an app is driving the machine directly, the machine watches for it. If
-that app goes quiet — the phone dies, the app crashes, the WiFi drops — the
-machine stops within a fraction of a second.
+When an app is driving the machine directly and it goes quiet — the phone
+dies, the app crashes, the WiFi drops — the machine does not keep executing
+a stream whose sender is gone. It simply stops receiving new instructions, so
+it runs out of fresh commands and settles on its own. Nothing on the machine
+broadcasts an emergency stop on your behalf; the hardware and software stop
+controls covered above are still there if you need them right now.
 
 There is one deliberate exception, and it is the behavior you want. If you
 started a pattern that the *machine itself* is running, your screen locking

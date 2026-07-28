@@ -83,6 +83,29 @@ A **physical-presence proof** opens a short **single-grant** window: the first k
 
 **Grant rule: if zero `configure` tokens exist, the window grants `configure` — physical possession is root.** Thereafter it grants the hub's configured default (`control`), and knock-and-approve does the rest.
 
+```mermaid
+flowchart TD
+    Req([PAIR_REQ arrives]):::start
+    Req --> Mode{which mode\ndoes it carry?}
+    Mode -->|"bare, no proof"| Knock["(a) knock-and-approve:\njoins the pending list"]
+    Mode -->|"pin_proof present"| Pin["(b) numeric proof:\nHMAC(PIN, nonce)"]
+    Mode -->|"physical-presence window open"| Push["(c) push-to-pair:\nfirst knock in the window"]
+
+    Knock -->|"a configure session\napproves"| Grant["PAIR_GRANT {token, role}"]
+    Knock -->|"expires after\npairing_window_default_s"| Expire[No grant]
+    Pin -->|"correct proof,\nwithin the window"| Grant
+    Pin -->|"wrong, or window closed"| Deny["NACK PAIRING_DENIED"]
+    Push -->|"factory-fresh\n(zero configure tokens)"| Grant
+    Push -->|"re-opened by the\npower-cycle gesture"| Grant
+
+    classDef start fill:#2b6cb0,stroke:#1a365d,color:#fff,stroke-width:2px
+```
+
+*Only one ceremony exists; the three boxes at the top are association
+**modes** into it, not three protocols. Every path converges on the same
+PAIR_GRANT shape — role is an attribute of the grant, never of the mode that
+produced it.*
+
 **Token use.** The token is presented in every HELLO (key 5, or as a proof — [§12.4](#s12-4)); the hub validates it against its store (`instance_id ↔ token ↔ role`) and sets `roles` in WELCOME. Tokens survive hub reboots and firmware updates.
 
 **`configure` is obtainable by ceremony.** The v1-draft sentence "admin is granted only via the hub's own UI" is **struck**. It was circular (it made the web UI the root of trust because it was the web UI) and it left no bootstrap story for a headless machine. The consequence is deliberate and must be understood: the administration surface, including session eviction and pairing approval, is **reachable through pairing**. A `configure` session may grant up to its own tier, `configure` included — conventional administrator behavior; the audit trail is the paired-device roster ([§12.6](#s12-6)), not a hard ceiling that would make the first administrator unable to make a second.

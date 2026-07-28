@@ -1,9 +1,9 @@
 # DOCTRINE — SlopDrive-32 engineering rules
 
-The single home (CANON C-1) for the project's technical doctrine: architecture
+The single home ([CANON C-1](CANON.md)) for the project's technical doctrine: architecture
 constraints, build/deploy procedure, and the per-subsystem NON-NEGOTIABLE
-rules. Governance meta-law lives in `CANON.md`; volatile status in
-`LEDGER.md`; field-bug mechanisms in `TRAPS.md`. Operator preferences live in
+rules. Governance meta-law lives in [`CANON.md`](CANON.md); volatile status in
+[`LEDGER.md`](LEDGER.md); field-bug mechanisms in [`TRAPS.md`](TRAPS.md). Operator preferences live in
 `CLAUDE.md` (repo root, gitignored).
 
 The product: an extensible, high-performance modular linear motion control
@@ -52,7 +52,7 @@ ESP32-S3 ecosystem. Hardware-agnostic, community-extensible.
   (arbiter dispatch, plan submission, step timing).
 * **Cross-core data:** anything shared between cores uses FreeRTOS primitives
   (atomics, mutexes, `xQueue`). Async-library callbacks run on the library's
-  own task — enqueue, never mutate owner state (TRAPS T5).
+  own task — enqueue, never mutate owner state ([TRAPS.md](TRAPS.md) T5).
 
 ## 3. WebUI Integration & Build Chain
 * **Compile-time asset bundling:** web assets are an independent front-end
@@ -73,7 +73,7 @@ ESP32-S3 ecosystem. Hardware-agnostic, community-extensible.
   `emergencyStop()`) on functional modules.
 * `float` over `double` (S3 hardware FPU) — double math only at plan-time
   events, never per-sample.
-* Comments are constraints, not stories (CANON C-12).
+* Comments are constraints, not stories ([CANON C-12](CANON.md)).
 * **Naming doctrine:** invented ecosystem-level things (protocols, subsystems,
   tools) get zero-collision, SEO-unique names ("SlopSync", never
   "SyncManager"). Ordinary classes/variables keep plain descriptive names.
@@ -82,10 +82,10 @@ ESP32-S3 ecosystem. Hardware-agnostic, community-extensible.
 * pio: `%USERPROFILE%\.platformio\penv\Scripts\platformio.exe`; host Windows 11.
 * Native tests: `pio test -e native` with WinLibs MinGW-w64 on PATH
   (`/c/Users/Atlan/AppData/Local/Microsoft/WinGet/Packages/BrechtSanders.WinLibs.POSIX.UCRT_Microsoft.Winget.Source_8wekyb3d8bbwe/mingw64/bin`).
-  Trust exit codes, not PIO's doctest summary (TRAPS T10).
+  Trust exit codes, not PIO's doctest summary ([TRAPS.md](TRAPS.md) T10).
 * Cross-compile proof each milestone: xtensa `-fsyntax-only` on library TUs
   AND `pio run -e sd32-ota` green.
-* `python tools/canon_lint.py` gates every substantive change (CANON §5).
+* `python tools/canon_lint.py` gates every substantive change ([CANON](CANON.md) §5).
 
 ## 6. Deployment (OTA)
 * **Scope:** OTA is the S3 main controller ONLY (`sd32`/`sd32-ota` extend
@@ -123,7 +123,7 @@ vendorable to C5 nodes; header-only via explicit `-I lib/<name>/include`.
   floor `SLOPLOG_COMPILE_LEVEL`. One drain point: `applogDrain()` in httpTask;
   sinks implement `sloplog::ISink`, registered in `applogBegin()`
   (`src/system/AppLog.cpp` is ONLY the sink/bridge). No `Serial.print` debug
-  output, no new log macros (WebUI JS exempt). Sinks never block (TRAPS T6).
+  output, no new log macros (WebUI JS exempt). Sinks never block ([TRAPS.md](TRAPS.md) T6).
 * **Boot lifecycle:** `applogBegin()` immediate-drains during single-task
   setup(); main.cpp disables that before task creation; first `/api/log` serve
   demotes serial to Warn+.
@@ -133,7 +133,7 @@ vendorable to C5 nodes; header-only via explicit `-I lib/<name>/include`.
   elsewhere.
 * **The LED liveness gate is a safety feature:** animation advances only while
   every registered heartbeat pulses (motorTask Core 1, commsTask Core 0; pump
-  on httpTask). Never defeat it; frozen LEDs are a diagnostic (TRAPS T7).
+  on httpTask). Never defeat it; frozen LEDs are a diagnostic ([TRAPS.md](TRAPS.md) T7).
 
 ## 8. SlopMotion (`lib/slopmotion/`)
 Every command becomes ONE trajectory planned from the engine's actual
@@ -154,13 +154,13 @@ Every command becomes ONE trajectory planned from the engine's actual
   quintics legality-scanned, sampled output clamped. Exceptions never
   instantiated; non-finite inputs rejected at `commit()`.
 * **Sampler task stack is 16 KB** — `commit()` nests KB-scale Ruckig
-  temporaries. Never shrink it (TRAPS T1 class).
+  temporaries. Never shrink it ([TRAPS.md](TRAPS.md) T1 class).
 
 ## 9. SlopSync (protocol + library — NON-NEGOTIABLE)
 The ecosystem sync protocol (device-shadow + capability negotiation). **The
 spec is the product; the library is its reference implementation.**
-* **Map:** `docs/slopsync/SPEC.md` (normative);
-  `docs/slopsync/registry/registry.yaml` (**single source of truth for every
+* **Map:** [`docs/slopsync/SPEC.md`](../slopsync/SPEC.md) (normative);
+  [`docs/slopsync/registry/registry.yaml`](../slopsync/registry/registry.yaml) (**single source of truth for every
   wire number**); `schema/catalog.cddl`, `vectors/manifest.yaml`,
   `examples/session-traces.md`. Library `lib/slopsync/`: zero-dependency,
   header-only C++20, hardware-free; layering acyclic bottom-up
@@ -170,11 +170,11 @@ spec is the product; the library is its reference implementation.**
 * **Registry discipline:** never hand-edit `generated/registry_constants.hpp`.
   `registry.yaml` → regenerate → commit both; `--check` green before commit.
   Released numbers are never reused or renumbered. `tools/catalog_lint.py`
-  after catalog changes (TRAPS T12).
+  after catalog changes ([TRAPS.md](TRAPS.md) T12).
 * **Spec-gap ritual:** need a number/rule the spec lacks → fix
   `registry.yaml`/`SPEC.md` FIRST, regenerate, then code against the constant.
   Never a code-local magic number for anything wire-visible.
-* **Frozen (CANON C-6):** `conformance/mini_catalog.hpp` +
+* **Frozen ([CANON C-6](CANON.md)):** `conformance/mini_catalog.hpp` +
   `vectors/fixtures/mini-catalog.yaml` (hash-pinned in canon_lint), golden
   byte arrays in tests, and the public APIs + delegate interfaces + doc
   comments of `hub.hpp`/`client.hpp` (extend additively; never change
@@ -188,11 +188,11 @@ spec is the product; the library is its reference implementation.**
   The firmware `HubDelegate` submits to the MotionArbiter — SlopSync never
   bypasses the sole-caller rule.
 * **Firmware shape:** `SlopSyncHubService` (composition root, own Core-0
-  task, single-task hub — TRAPS T5) + `SlopSyncAsyncWsTransport`
+  task, single-task hub — [TRAPS.md](TRAPS.md) T5) + `SlopSyncAsyncWsTransport`
   (AsyncWebSocket on `SLOPSYNC_WS_PORT`, subprotocol `slopsync.v1`) +
   `SlopSyncCatalog.h`. The service lives in PSRAM via placement-new from
-  main.cpp (TRAPS T2) — never move it back to BSS. Session teardown funnels
-  through one path (TRAPS T3); **back-to-back sessions without a reboot is
+  main.cpp ([TRAPS.md](TRAPS.md) T2) — never move it back to BSS. Session teardown funnels
+  through one path ([TRAPS.md](TRAPS.md) T3); **back-to-back sessions without a reboot is
   mandatory verification for any session-lifecycle change.**
 * **Auth:** `validateToken` = `/uitoken` → trust ledger → `watch`. Tokenless
   clients can watch and e-stop (stop/estop role-EXEMPT) but not command
@@ -201,7 +201,7 @@ spec is the product; the library is its reference implementation.**
 * **SlopSync is the ONLY input/output plane** (operator ruling 2026-07-26):
   motion input, telemetry, anomaly events, and settings ride SlopSync
   channels; HTTP remains for fallback polling and bootstrap only
-  (`docs/http-plane-retirement.md`).
+  ([`docs/http-plane-retirement.md`](../http-plane-retirement.md)).
 * **Transport doctrine (operator rulings 2026-07-27, calibrated):** SlopSync
   is the only protocol; transport-agnostic (SPEC §13, RFC-043 profiles).
   Hardware hubs: **BLE GATT is the conformance floor** (infrastructure-free
@@ -217,13 +217,15 @@ spec is the product; the library is its reference implementation.**
   easy — clients feed the TCode they already generate through a SlopSync
   session) → native segments (0x2101, better) → native samples (0x2100,
   dense). First-party client support in MFP/Intiface/etc. is maintained and
-  encouraged. Legacy raw-TCode transports (SER/BT/DONGLE) are TRANSITIONAL:
-  they live until TCode-passthrough + Intiface-native SlopSync both exist,
-  then retire. This firmware's BLE GATT `ITransport` is planned work; the
+  encouraged. Legacy raw-TCode transports (SER/BT/DONGLE) were REMOVED
+  2026-07-27 (operator ruling executed: SlopSync is the only plane; TCode
+  integration is a CLIENT-SIDE adapter per RFC-044, never a hub-side
+  stream). This firmware's BLE GATT `ITransport` LANDED and is deployed
+  (Phase E + overnight bench, fw 2.1.82; ledger has the receipts); the
   `OssmBleService` masquerade was REMOVED 2026-07-27 (SlopSync-over-BLE
   replaces it, ledger has the receipt).
 * **Clients:** `clients/mfp-slopsync/` — SlopSync.cs + SlopSync.xaml are the
   whole shipped plugin (dev-only harnesses never ship). `LiveWireTest`
-  refuses to run homed; run it TWICE back-to-back (T3 check). Verifier:
+  refuses to run homed; run it TWICE back-to-back ([TRAPS.md](TRAPS.md) T3 check). Verifier:
   `tools/slopsync_probe.py --ip <ip> --port 82`.
-* **Branch/milestone status:** `docs/canon/LEDGER.md` — never here.
+* **Branch/milestone status:** [`docs/canon/LEDGER.md`](LEDGER.md) — never here.

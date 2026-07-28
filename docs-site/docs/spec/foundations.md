@@ -86,6 +86,10 @@ Each of the following is a normative limitation of `slopsync/1`. An implementati
 | H11 | The hub's handoff sanity bound ([§9.6](channels.md#s9-6)) is **lookahead-bounded**: it can only act when a segment's successor is already scheduled, which is not guaranteed for long segments. | [§9.6](channels.md#s9-6), [§18](limitations.md#s18) |
 | H12 | Denial of service is out of scope. A LAN attacker can jam the radio regardless of anything this document says. | [§12.1](security.md#s12-1) |
 
+> DEMO-CANDIDATE: a single searchable page, one card per honesty clause,
+> linking each straight to its section — the thing a security reviewer
+> actually wants before reading 1600 lines end to end.
+
 ## 2. Terminology, Roles, and State Machines *(normative)* {#s2}
 
 ### 2.1 Glossary {#s2-1}

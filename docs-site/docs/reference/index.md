@@ -28,7 +28,7 @@ meaning.
 
 ## Quick lookups
 
-- [Frame types](registry/frames.md) — what is this `type` byte?
-- [NACK codes](registry/errors.md) — why was my frame refused?
-- [Limits and defaults](registry/limits.md) — how big, how fast, how long?
-- [CBOR keys](registry/cbor-keys.md) — what is key 24?
+- [Frame types](registry/frames.md): what is this `type` byte?
+- [NACK codes](registry/errors.md): why was my frame refused?
+- [Limits and defaults](registry/limits.md): how big, how fast, how long?
+- [CBOR keys](registry/cbor-keys.md): what is key 24?

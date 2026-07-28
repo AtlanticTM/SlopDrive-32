@@ -1,4 +1,4 @@
-<!-- GENERATED FILE — DO NOT EDIT. Source: docs-site/dictionary.yaml via docs-site/tools/gen_docs_tables.py -->
+<!-- GENERATED FILE. DO NOT EDIT. Source: docs-site/dictionary.yaml via docs-site/tools/gen_docs_tables.py -->
 <!-- Appended to every page by pymdownx.snippets.auto_append, so a
      defined term shows its Dictionary definition on hover. -->
 
@@ -9,8 +9,8 @@
 *[recognized-pending]: The rule that an observed client-version change drops a paired device to recognized-pending until re-approved.
 *[setting categories]: The tab a settings field belongs in, chosen from a registered list so placement is consistent across hubs.
 *[synthetic sessions]: A hub-side session object that wraps a legacy text-protocol edge so it obeys the same rules as a native client.
-*[knock and approve]: The primary pairing mode — a client knocks with no proof, and any configure session approves it.
-*[knock-and-approve]: The primary pairing mode — a client knocks with no proof, and any configure session approves it.
+*[knock and approve]: The primary pairing mode, a client knocks with no proof, and any configure session approves it.
+*[knock-and-approve]: The primary pairing mode, a client knocks with no proof, and any configure session approves it.
 *[served-page token]: A single-use token the hub mints for its own served web page, so that page reaches control without a pairing ceremony.
 *[slopsync_probe.py]: The reference verifier, which runs a scripted session against a hub and prints a pass-or-fail transcript per stage.
 *[synthetic session]: A hub-side session object that wraps a legacy text-protocol edge so it obeys the same rules as a native client.
@@ -27,7 +27,7 @@
 *[configure tier]: The highest access tier; a configure session changes device configuration and administers pairing.
 *[golden vectors]: A byte-exact recorded frame that every implementation must encode and decode identically.
 *[motion anomaly]: A device-authored event naming what the motion core had to do differently, and why.
-*[never-shed set]: The traffic that is never dropped under congestion — intents, echoes, NACKs, grants, ESTOP, and safety state.
+*[never-shed set]: The traffic that is never dropped under congestion, intents, echoes, NACKs, grants, ESTOP, and safety state.
 *[priority class]: The shedding rank of a subscription, from background up to critical.
 *[publish grants]: The hub's applied answer to a client's wish to send on an inbound STREAM channel.
 *[retained value]: The latest value of a STATE channel, which the hub keeps and pushes immediately on grant.
@@ -52,9 +52,9 @@
 *[idle reaping]: Closing a non-owning session that has gone silent, to reclaim its slot.
 *[precondition]: The expected cfg_gen a client attaches to an intent, turning it into a compare-and-swap.
 *[push-to-pair]: The pairing mode where physical presence, rather than a proof or an approval, opens a short single-grant window.
-*[safety cause]: Why a stop or an e-stop is latched — user, deadman, fault, relay, or session loss.
+*[safety cause]: Why a stop or an e-stop is latched, user, deadman, fault, relay, or session loss.
 *[setting flag]: A per-field annotation marking a setting advanced, restart-required, or secret.
-*[token bucket]: The ingress rate limiter — a bucket that refills at the granted sample rate and holds one burst's worth of tokens.
+*[token bucket]: The ingress rate limiter, a bucket that refills at the granted sample rate and holds one burst's worth of tokens.
 *[trust ledger]: The hub's stored list of paired devices, their roles, and how each one presents its token.
 *[wire numbers]: Any value that appears on the wire and must therefore mean the same thing to every implementation.
 *[RFC process]: The way a change to SlopSync is proposed, argued and either bound into the specification or refused.
@@ -125,20 +125,20 @@
 *[segment]: One STREAM data point that commands a time extent, carrying its own duration.
 *[session]: The stateful association between one client and the hub.
 *[Client]: Any endpoint that establishes a session with the hub.
-*[E-stop]: Emergency stop — an immediate driver-level stop that latches and prohibits motion until explicitly cleared.
+*[E-stop]: Emergency stop, an immediate driver-level stop that latches and prohibits motion until explicitly cleared.
 *[INTENT]: A channel class, and the only way a client changes anything.
 *[STREAM]: A channel class carrying timestamped sample bundles, in either direction.
 *[Shadow]: The client-side replica of subscribed state, maintained exclusively from hub frames.
 *[bundle]: One STREAM frame carrying a base timestamp and up to 32 samples.
 *[client]: Any endpoint that establishes a session with the hub.
-*[e-stop]: Emergency stop — an immediate driver-level stop that latches and prohibits motion until explicitly cleared.
-*[grants]: The hub's applied answer to a subscription request — which channel, at what rate, at what priority.
+*[e-stop]: Emergency stop, an immediate driver-level stop that latches and prohibits motion until explicitly cleared.
+*[grants]: The hub's applied answer to a subscription request, which channel, at what rate, at what priority.
 *[intent]: A channel class, and the only way a client changes anything.
 *[relays]: A forwarding node between the hub and clients on a transport the hub cannot reach directly.
 *[shadow]: The client-side replica of subscribed state, maintained exclusively from hub frames.
-*[ESTOP]: Emergency stop — an immediate driver-level stop that latches and prohibits motion until explicitly cleared.
-*[EVENT]: A channel class carrying discrete occurrences — edges, not levels.
-*[Grant]: The hub's applied answer to a subscription request — which channel, at what rate, at what priority.
+*[ESTOP]: Emergency stop, an immediate driver-level stop that latches and prohibits motion until explicitly cleared.
+*[EVENT]: A channel class carrying discrete occurrences, edges, not levels.
+*[Grant]: The hub's applied answer to a subscription request, which channel, at what rate, at what priority.
 *[PAUSE]: Suspend the pattern generator at a safe phase and park position.
 *[Relay]: A forwarding node between the hub and clients on a transport the hub cannot reach directly.
 *[STATE]: A channel class carrying idempotent full snapshots of a coherent group of fields.
@@ -146,7 +146,7 @@
 *[blobs]: An opaque byte document the protocol transfers in chunks and never decodes.
 *[chase]: The planner mode that replans to each newly arrived point from the machine's own sampled state.
 *[clamp]: Replacing a requested value with the nearest value the machine's limits allow.
-*[grant]: The hub's applied answer to a subscription request — which channel, at what rate, at what priority.
+*[grant]: The hub's applied answer to a subscription request, which channel, at what rate, at what priority.
 *[latch]: A safety condition that stays true in state until something explicitly clears it.
 *[relay]: A forwarding node between the hub and clients on a transport the hub cannot reach directly.
 *[Blob]: An opaque byte document the protocol transfers in chunks and never decodes.
@@ -155,7 +155,7 @@
 *[Etag]: The first eight bytes of a SHA-256 over the deterministically encoded catalog, naming exactly which catalog a hub exposes.
 *[HOLD]: Decelerate, then actively hold position, with the source suspended.
 *[Jerk]: The rate of change of acceleration.
-*[STOP]: A controlled stop — decelerate to zero at the configured rate and deactivate the source.
+*[STOP]: A controlled stop, decelerate to zero at the configured rate and deactivate the source.
 *[blob]: An opaque byte document the protocol transfers in chunks and never decodes.
 *[etag]: The first eight bytes of a SHA-256 over the deterministically encoded catalog, naming exactly which catalog a hub exposes.
 *[hubs]: The single authoritative endpoint of one machine.

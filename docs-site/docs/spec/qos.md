@@ -63,6 +63,10 @@ Two conforming hubs under identical load must shed identically, or a client can 
 
 Decision meanings: **Decimate** thins a sample stream, always **newest-biased** — preserve the most recent samples, drop the older ones. **Conflate hard** stretches a periodic STATE channel toward on-change-only; depth-1 queues already conflate, this makes it aggressive. **Drop** discards. **Bounded EVENT queues** drop *oldest* with the visible counter ([§9.4](channels.md#s9-4)) independently of this table.
 
+> DEMO-CANDIDATE: a live congestion-level slider driving this exact table
+> against a real subscription mix, showing which row fires and why a
+> `segments`-kind stream never decimates while a `samples`-kind one does.
+
 A hub MUST NOT **delay-and-burst**. A stale motion sample is worse than a missing one: timestamps make dropped samples recoverable by interpolation, whereas stale delivery is a lie.
 
 **The segment exception (rows 4–6) is the one place that rationale does not hold.** "Dropped samples are recoverable by interpolation" is true for dense position samples and **false** for timed segments — a shed segment is a permanently lost command. Segment-class channels therefore shed **whole-source or not at all**; they are never decimated. A hub determines segment class from the catalog's `stream_kind` ([§9.2](channels.md#s9-2)), never from a heuristic.

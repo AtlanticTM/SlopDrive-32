@@ -6,7 +6,7 @@ generated: true
 ---
 
 <!-- ==========================================================
-     GENERATED FILE — DO NOT EDIT.
+     GENERATED FILE. DO NOT EDIT.
      Source of truth: docs/slopsync/registry/registry.yaml
      Generator:       docs-site/tools/gen_docs_tables.py
      Regenerate:      python docs-site/tools/gen_docs_tables.py
@@ -18,12 +18,11 @@ generated: true
 
 ## Safety intent operations
 
-These are the `value` map key 1 of the `safety-intents` channel
-(`0x0005`).
+These are the `value` map key 1 of the [`safety-intents` channel](channels.md#spec-core-channels) (`0x0005`).
 
 **`stop` and `estop` are role-exempt. Any session may send them,
 including a `watch` session.** Safety outranks authorization. The wrong
-choice here means the person standing in the room cannot stop the
+choice here means the person who is in the room cannot stop the
 machine. Every other operation requires `control`.
 
 | Op | Name | Meaning |
@@ -41,8 +40,8 @@ machine. Every other operation requires `control`.
 
 ## Safety causes
 
-One taxonomy, two wire homes: the ESTOP frame's `cause` byte, and the
-`cause` field of the latched `safety` STATE snapshot (`0x0003`).
+One taxonomy has two wire homes. They are the ESTOP frame's `cause`
+byte, and the `cause` field of the latched [`safety` STATE snapshot](channels.md#spec-core-channels) (`0x0003`).
 
 | Value | Cause | Meaning |
 |---|---|---|
@@ -53,5 +52,6 @@ One taxonomy, two wire homes: the ESTOP frame's `cause` byte, and the
 | `4` | `session_loss` | RFC-022.3: the owning session ended by ANY non-deadman teardown path (GOODBYE, rude detach, either eviction, slot reuse) — §6.8 / RFC-005's teardownSession() loss policy. Was misreported as cause=deadman before this value existed. |
 
 `deadman` means the silence window actually elapsed. Every other way a
-session ends latches `session_loss`. Reporting a closed browser tab as a
-deadman timeout was a real bug; these are two different events.
+session ends latches `session_loss`. A closed browser tab is not the
+same event as a deadman timeout. An earlier bug reported them as the
+same thing. These are two different events.

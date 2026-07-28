@@ -5,7 +5,7 @@
 **Status:** Normative. Every enumerable vocabulary in this document is frozen at the v1.0 tag (§14).
 **Registry of record:** [`registry/registry.yaml`](registry/registry.yaml) — every numeric id in this document is a *view* of a registry section named in its heading. **On any conflict between this document and the registry, the registry wins**, exactly as [`SPEC.md`](SPEC.md) §5.7 rules for the wire protocol.
 **Normative parent:** [`SPEC.md`](SPEC.md) §19 establishes this document as the client-rendering conformance companion. Read that section first if you have not.
-**Origin:** RFC-048 (operator direction 2026-07-27), landed in full at the v1.0 tag. See [`RFC-QUEUE.md`](RFC-QUEUE.md) for problem statement, rationale, and compatibility notes.
+**Origin:** [RFC-048](RFC-QUEUE.md#rfc-048--the-rendering-constitution-catalog-vocabulary-capability-interfaces-renderer-law) (operator direction 2026-07-27), landed in full at the v1.0 tag. See [`RFC-QUEUE.md`](RFC-QUEUE.md) for problem statement, rationale, and compatibility notes.
 
 ---
 
@@ -24,6 +24,27 @@ A conformant renderer builds its whole surface from one catalog by walking a sin
 **catalog entry → category (§3) → rank (§4) → archetype (§8) → widget pattern (§10) → region (§9) → page (§11)**
 
 Every arrow is a *rule* stated in this document, not a per-app choice. Two conformant clients fed the same catalog and told the same renderer class (§12) produce the same page tree, differing only in the class's own projection behavior (glance vs. handheld vs. full). This is the single invariant the rest of the document exists to guarantee, and it is why "SlopSync describes what things **are**, never how they **look**" (SPEC §1-7) survives having a rendering constitution at all: nothing here is a pixel, a color, a margin, or a font. Everything here is a *binding* — which archetype, which region, which state — expressed **behaviorally**.
+
+```mermaid
+flowchart LR
+    Entry([catalog entry]):::start
+    Entry -->|"§3 WHERE"| Cat[category]
+    Cat -->|"§4 HOW MUCH"| Rank[rank]
+    Rank -->|"§8 derivation table"| Arch[archetype]
+    Arch -->|"§10 recipe lookup"| Widget[widget pattern]
+    Widget -->|"§9 placement"| Region[region]
+    Region -->|"§11 composition rules"| Page[page tree]
+
+    classDef start fill:#2b6cb0,stroke:#1a365d,color:#fff,stroke-width:2px
+```
+
+*No step is skippable and none is app-specific — the same catalog fed through this
+chain on any conformant renderer produces the same page tree (§11's consistency
+invariant). The chain runs once per catalog/etag; it does not loop.*
+
+> DEMO-CANDIDATE: paste a real catalog entry and watch it walk the chain live
+> — category, rank, archetype, widget pattern, region — ending in the
+> actual rendered control.
 
 ---
 
@@ -274,6 +295,10 @@ Rows 16-17 (and, commonly, row 4) rely on the explicit hint because automatic de
 | 13 | `color` | Chromatic actuator setpoint | `slider` + `slider` + `slider` | Lighting/glow accessories; a client with no color-picker affordance renders the three-slider fallback and is fully conformant. |
 | 14 | `datetime` | Moment/interval input | `text` | Automation schedules; a client with no date-picker renders the ISO-8601 text fallback and is fully conformant. |
 
+> DEMO-CANDIDATE: a living gallery, one tile per archetype, each showing its
+> real interaction (drag, tap, confirm-gate) across all three renderer
+> classes side by side.
+
 ---
 
 ## 9. Regions *(normative)*
@@ -321,11 +346,27 @@ How a developer *builds* each one — visuals, arrangement within its region, st
 
 ### 10.1 Shared safety-relevant control: `source.background_run`
 
-`source.background_run` (registry `field_roles`, §RFC-045/§RFC-048 — see SPEC §11.3 and §18-21) is a bool field role marking whether an autonomous source (a pattern generator today; on-hub script/scene playback tomorrow) continues running when its owning session ends. Because it changes what "nobody is attached" means for a moving machine, it is rendered under three specific, MUST-level rules wherever it appears — which today means both REQUIRED generator patterns above:
+`source.background_run` (registry `field_roles`, [RFC-045](RFC-QUEUE.md#rfc-045--retire-deadman-as-safety-session-liveness-is-bookkeeping-not-motion-control)/[RFC-048](RFC-QUEUE.md#rfc-048--the-rendering-constitution-catalog-vocabulary-capability-interfaces-renderer-law) — see SPEC §11.3 and §18-21) is a bool field role marking whether an autonomous source (a pattern generator today; on-hub script/scene playback tomorrow) continues running when its owning session ends. Because it changes what "nobody is attached" means for a moving machine, it is rendered under three specific, MUST-level rules wherever it appears — which today means both REQUIRED generator patterns above:
 
 1. **Placement (MUST).** The toggle MUST be co-located with its source's run/start control — in `pattern-panel`, next to `running`; in `generator-advanced`, next to the master run/stop. It is never a buried setting-card checkbox; the operator flips it in the same glance as starting the thing it governs.
 2. **Confirm-gated enable (MUST).** Transitioning the toggle false→true is consequential and MUST be confirm-gated exactly as a `destructive`-flagged `trigger` (§8.4) — the client is asking the operator to confirm "this may keep moving after you leave."
 3. **Distinct unattended indicator (SHOULD).** While a source's `background_run` reads true **and** its owning session is gone, a client SHOULD surface a distinct, unmissable indicator (an "unattended — moving" chip, not a color alone) rather than relying on the operator to infer it from generic ownership/session chrome. This state — the machine is moving with nobody attached — MUST be visible, never merely inferable.
+
+```mermaid
+flowchart TD
+    Start([session owns the source, running]):::start
+    Start -->|"owning session ends<br/>(RFC-042 STALE or teardown)"| Check{background_run?}
+    Check -->|"false (default)"| Stops["source stops<br/>(ordinary state — no chip needed)"]
+    Check -->|"true"| Unattended["still running, nobody attached"]
+    Unattended -->|"MUST render"| Chip["distinct 'unattended — moving' indicator"]
+    Chip -->|"a session takes ownership again"| Start
+
+    classDef start fill:#2b6cb0,stroke:#1a365d,color:#fff,stroke-width:2px
+```
+
+*The loop closes only when a session actively takes ownership again (§11.4)
+— the indicator does not clear on a timer, because nothing about the
+machine's physical state changed on its own.*
 
 **Rationale (informative):** a dead *stream* leaves the machine still (SPEC §11.3's SETTLE) — no switch exists for streams and none is wanted. A dead *controller* with a running generator does not leave the machine still, so continuation must be an explicit, visible choice rather than an implicit one, on both the setting itself and the state it produces.
 
@@ -402,3 +443,15 @@ Every enumerable vocabulary in this document is:
 **(d) The firmware-immortality rule.** Any *post-tag* vocabulary addition MUST declare its rendering as a **composition of frozen primitives** — its fallback (§8.4 already carries this for every archetype, as data, machine-checkable) — so that a client shipped at v1.0 renders every future catalog forever, merely less richly. **UI vocabulary never obligates a firmware or client update.**
 
 This doctrine is why a fifteenth archetype, a sixth rank, and three new capability interfaces could all land in the *same* batch as the original twelve/five/five without breaking anything already shipped: every addition arrived already wearing its fallback.
+
+---
+
+## See also
+
+- [SPEC.md](SPEC.md) §19 — the normative parent that makes this document a
+  conformance companion, and §8.8/§8.9 for the settings metamodel this
+  document's derivation chain (§1) consumes.
+- [CHANNEL-MAP.md](CHANNEL-MAP.md) — the concrete device channels a real
+  renderer walks through this chain.
+- [RFC-QUEUE.md](RFC-QUEUE.md#rfc-048--the-rendering-constitution-catalog-vocabulary-capability-interfaces-renderer-law) — RFC-048, this document's origin, and
+  RFC-049's follow-on fixes.

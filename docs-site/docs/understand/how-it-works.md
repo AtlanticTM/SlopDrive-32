@@ -25,6 +25,7 @@ Every diagram on this site uses one visual language. Learn it once here.
 <span class="ss-key"><b>rectangle</b>A party or a step: a hub, a client, a decision.</span>
 <span class="ss-key"><b>cylinder</b>Something that persists somewhere.</span>
 <span class="ss-key"><b>rounded</b>One frame, in flight on the wire.</span>
+<span class="ss-key"><b>▶ START</b>Where a flowchart begins. Every flowchart on this site marks it.</span>
 </div>
 
 The two colors are not decoration. They are the two colors the SlopDrive-32
@@ -42,7 +43,7 @@ the rest of this page is straightforward.
 
 ```mermaid
 flowchart LR
-    C["A new client<br/>knows nothing<br/>about this machine"]:::party
+    C["▶ START<br/>A new client<br/>knows nothing<br/>about this machine"]:::party
     H["The hub<br/>one machine,<br/>one authority"]:::hub
     CAT[("Catalog<br/>the machine's own datasheet")]:::store
     R["Values it may read<br/>name · type · unit · limits"]:::truth
@@ -83,7 +84,7 @@ Ask what breaks if a single frame never arrives. The answer picks the class.
 
 ```mermaid
 flowchart TD
-    Q{"One frame is lost.<br/>What breaks?"}:::party
+    Q{"▶ START<br/>One frame is lost.<br/>What breaks?"}:::party
 
     Q -->|"Nothing. The next one<br/>replaces it whole"| S["STATE<br/>full snapshots of a group of values"]:::truth
     Q -->|"Almost nothing. It was one<br/>timestamped sample of many"| ST["STREAM<br/>bundles of samples, at rate"]:::truth
@@ -188,6 +189,10 @@ as **pending** and adopts the applied value when the echo arrives. Limits are
 ceilings, never targets, and a [clamp](../reference/dictionary.md#clamp) is not
 an error: 400 is simply the answer.
 
+> DEMO-CANDIDATE: a live slider that lets a reader ask a real simulated hub
+> for a value past its ceiling, and watch pending, echo and clamp happen in
+> real time.
+
 Two more rules let this survive a bad network.
 
 **Intents are absolute, never relative.** "Set speed to 405" survives a
@@ -204,7 +209,7 @@ applying it twice.
 
 ```mermaid
 flowchart TD
-    H[("Hub<br/>the retained value of<br/>every STATE channel")]:::truth
+    H[("▶ START<br/>Hub<br/>the retained value of<br/>every STATE channel")]:::truth
 
     H -->|"on subscribe: the retained<br/>value, immediately"| S1[("Shadow<br/>in the browser")]:::truth
     H -->|"and to every other subscriber"| S2[("Shadow<br/>in the remote")]:::truth
@@ -239,7 +244,7 @@ again with a fresh intent. Motion never restarts because a socket reopened.
 
 ```mermaid
 flowchart TD
-    A["Any endpoint.<br/>Any role. Even with no session."]:::safety
+    A["▶ START<br/>Any endpoint.<br/>Any role. Even with no session."]:::safety
     A -->|"ESTOP frame"| Q["Every queue on the path<br/>admits it at the front"]:::plumb
     Q --> H["The hub stops motion FIRST,<br/>then does protocol bookkeeping"]:::safety
     H --> L[("safety STATE — the latch.<br/>Stays true until it is cleared.")]:::safety
@@ -259,11 +264,16 @@ Safety outranks authorization by design. Anyone may stop the machine; not
 everyone may start it. Clearing the latch needs the `control` tier, needs the
 cause to be resolved, and re-arms motion rather than resuming it.
 
-A machine also stops when nobody is watching it.
+A machine also notices when nobody is watching it.
 [Deadman](../reference/dictionary.md#deadman) binds to the source currently
-driving motion. If that source goes silent for its window, its loss policy
-fires. A vanished streaming client stops the machine. A pattern running on the
-hub keeps running, because a locked phone screen was never what drove it.
+driving motion. If that source goes silent for its window, the hub releases
+its ownership — bookkeeping, not a command. Nothing broadcasts a forced stop:
+a vanished streaming client was already the reason no fresh commands were
+arriving, so motion settles by physics rather than by a safety action. A
+pattern running on the hub keeps running by default, because a locked phone
+screen was never what drove it; whether a given source keeps going or stops
+when its owner disappears is that source's own declared policy, not a
+universal deadman reflex.
 
 ## 7. A settings screen that builds itself
 
@@ -275,7 +285,7 @@ never written for.
 
 ```mermaid
 flowchart TD
-    CAT[("Catalog field<br/>unit · min · max · default · options<br/>role · category · setting_key")]:::store
+    CAT[("▶ START<br/>Catalog field<br/>unit · min · max · default · options<br/>role · category · setting_key")]:::store
     CAT --> Q{"Does it carry<br/>a setting_key?"}:::party
     Q -->|"no — it is a reading"| RO["Read-only display,<br/>with its unit"]:::truth
     Q -->|"yes — it is a setting"| WID["A control, chosen from<br/>the type and the constraints"]:::truth

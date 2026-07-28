@@ -31,11 +31,11 @@ This section states only what belongs in SPEC proper — channel-level semantics
 Every channel a hub declares is exactly one of:
 
 - **CORE** (`0x0001`–`0x007F`) — machine-unspecific protocol machinery. A channel that assumes a motor, an actuator, or any physical capability MUST NOT be CORE.
-- **STANDARD** — machine-agnostic **capability** channels, declared per capability the hub actually has rather than per machine kind. A hub SHOULD expose the well-known channel for any capability it has (an axis's `motion`, a metered `power`, usage `odometer`, and the two standardized generator **capability interfaces** — a built-in pattern generator's role set, and the fray-d-shaped advanced-generator surface) carrying at minimum the field set RENDERING.md [§2.2](foundations.md#s2-2) names for that capability. This is SHOULD-level for existing hubs, MUST-level for hardware-hub-profile conformance from the v1.0 tag forward.
+- **STANDARD** — machine-agnostic **capability** channels, declared per capability the hub actually has rather than per machine kind. A hub SHOULD expose the well-known channel for any capability it has (an axis's `motion`, a metered `power`, usage `odometer`, and the two standardized generator **capability interfaces** — a built-in pattern generator's role set, and the fray-d-shaped advanced-generator surface) carrying at minimum the field set RENDERING.md §2.2 names for that capability. This is SHOULD-level for existing hubs, MUST-level for hardware-hub-profile conformance from the v1.0 tag forward.
 - **DEVICE** — everything else, wholly catalog-described, exactly as today.
 
 The taxonomy is a classification of intent, not a new wire mechanism: **no frame changes, no core-channel changes.** It answers "does a client that has never met this hub still render a *good* instrument for a capability it has," which pure catalog description ([§8](catalog.md#s8)) cannot guarantee on its own — two axis-bearing hubs may otherwise expose their position, target and speed under names, groupings and units a generic client cannot correlate.
 
 **Capability discovery is unaffected.** A STANDARD channel is discovered exactly like any other: its presence in the catalog *is* the capability advertisement ([§6.3](session.md#s6-3)'s "capability discovery is catalog introspection" is unchanged). STANDARD is a naming and minimum-field-set convention layered on top, never a new discovery mechanism.
 
-Full capability-interface field tables, the derivation chain, and every rendering rule built on top of this taxonomy are RENDERING.md [§2-14](foundations.md#s2).
+Full capability-interface field tables, the derivation chain, and every rendering rule built on top of this taxonomy are RENDERING.md §2-14.

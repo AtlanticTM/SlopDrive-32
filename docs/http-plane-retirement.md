@@ -4,6 +4,22 @@
 the next block of work, and the measurements that made it a priority rather than
 a tidy-up.*
 
+> Channel ids herein are historical (pre-C4 renumber); current map:
+> [CHANNEL-MAP.md](slopsync/CHANNEL-MAP.md).
+
+**Truth check (2026-07-28): the ruling in §1 is still today's live doctrine —
+HTTP is read-only, SlopSync is the only control plane, and that has not
+changed.** Everything this document planned has since LANDED: `:81`,
+links2004, and all 27 legacy HTTP control routes are deleted (§5.7), the
+mode settings moved to SlopSync (§5.6), and authorization is enforced
+(§5.5). The refactor call this document ends on (§7, "THE WEBUI NEEDS A
+FULL REFACTOR") was answered — the rebuilt, catalog-driven client is
+[webui-architecture.md](webui-architecture.md); read that for current
+architecture. This document stays as the ruling's record and the
+evidence that made it non-negotiable, not as a live status page (status
+lives in [`docs/canon/LEDGER.md`](canon/LEDGER.md), per
+[CANON C-2](canon/CANON.md)).
+
 ---
 
 ## 1. The ruling
@@ -126,23 +142,40 @@ A partial SlopSync client already exists at `webui/src/core/slopsync/`
 ## 4. Order of work (this order is forced)
 
 `:81` cannot be removed first. The live UI depends on it, so removing it before
-the SlopSync path works leaves no UI at all.
+the SlopSync path works leaves no UI at all. **All five steps LANDED
+2026-07-27, fw 2.1.65 — see §5.7 below.**
 
-1. **Bring the SlopSync path to parity** for everything the UI does today —
-   extend `webui/src/core/slopsync/`, drive controls through INTENT + ECHO,
-   render settings from the RFC-009 catalog annotations rather than hardcoding.
-2. **Verify parity against the live device**, per the Ground Truth Doctrine:
-   payload sent AND device state change observed, for every control. A control
-   that renders but drives nothing is a defect.
-3. **Cut the `:81` link** from the WebUI. Keep `UiSocket` compiled for one
-   release as a rollback, then delete it.
-4. **Retire the HTTP control endpoints.** Keep OTA, `/uitoken`, and the
-   read-only views per §1.
-5. **links2004 falls out of the build on its own** once `UiSocket` and
-   `WebSocketTransport` no longer reference it. It is not a separate step.
+```mermaid
+flowchart LR
+    start(["Start: :81 still live,\nSlopSync path incomplete"]):::startNode
+    n1["1. SlopSync path reaches parity\nINTENT + ECHO, catalog-rendered settings"]
+    n2["2. Verify parity live\npayload sent AND device state change observed"]
+    n3["3. Cut the :81 link\nkeep UiSocket compiled one release, rollback-only"]
+    n4["4. Retire HTTP control endpoints\nkeep OTA, /uitoken, read-only views (§1)"]
+    n5["5. links2004 falls out of the build\nno longer referenced, not a separate step"]
+    done([":81 + links2004 gone,\nSlopSync-only"]):::doneNode
 
-Re-run `tools/slopsoak.py` after step 3 and again after step 5. The number to
-watch is the heap min-watermark; the target is that it stops being interesting.
+    start --> n1 -->|"parity claimed"| n2
+    n2 -->|"parity PROVEN, not assumed"| n3
+    n3 -->|"UI now SlopSync-only"| n4
+    n4 -->|"nothing left references it"| n5
+    n5 --> done
+
+    n2 -.->|"soak re-run"| watch["watch: heap min-watermark\n(tools/slopsoak.py)"]
+    n5 -.->|"soak re-run"| watch
+
+    classDef startNode fill:#2b6cb0,color:#fff,stroke:#2b6cb0,stroke-width:2px
+    classDef doneNode fill:#276749,color:#fff,stroke:#276749,stroke-width:2px
+```
+
+Re-run `tools/slopsoak.py` after step 3 and again after step 5 (dashed
+lines above). The number to watch is the heap min-watermark; the target is
+that it stops being interesting.
+
+> DEMO-CANDIDATE: replay the `wedge-chatty` scenario from
+> [ws-transport-baseline.md](ws-transport-baseline.md) side by side,
+> links2004 vs. the current async transport, so the "kills every other
+> session, permanently" failure and its fix are seen, not just tabulated.
 
 ## 5. Telemetry design agreed alongside this
 
@@ -186,7 +219,7 @@ wire, not just asserted in a comment).
 
 A demoted client is not a locked-out client. It may connect, fetch the catalog,
 subscribe to telemetry, and **still e-stop** — `stop`/`estop` are role-exempt in
-0x0005's `option_access` (RFC-025b), because safety outranks authorization. What
+0x0005's `option_access` ([RFC-025b](slopsync/RFC-QUEUE.md)), because safety outranks authorization. What
 it loses is the ability to command motion. That is the correct degraded state for
 a machine someone may be standing next to.
 
@@ -215,13 +248,19 @@ answering and rung 2 carries everyone who paired.
 
 ### What is NOT yet reachable
 
-**No pairing ceremony is wired to anything an operator can press.**
-`openPairing()` / `openPresenceWindow()` exist on the service and have zero
-callers, so the trust ledger can never be populated on the real device. Every
-client is therefore on `/uitoken`, which is single-use, 60 s, and rate-limited to
-one mint per 250 ms **device-wide**. That is correct for a browser (one mint per
-page load) and wrong for a high-churn tool, which is why `slopsoak` now mints
-only for clients that actually publish a stream.
+**No knock-and-approve ceremony is wired to anything an operator can press.**
+`openPairing()` has zero callers, so the trust ledger can never be populated
+that way on the real device. Every client is therefore on `/uitoken`, which is
+single-use, 60 s, and rate-limited to one mint per 250 ms **device-wide**. That
+is correct for a browser (one mint per page load) and wrong for a high-churn
+tool, which is why `slopsoak` now mints only for clients that actually publish
+a stream.
+
+**Truth check (2026-07-28): `openPresenceWindow()` is no longer one of the
+zero-caller functions above.** The firmware's own boot gesture
+(three quick power-cycles) now calls it directly — see §7 "Push-to-pair IS
+reachable now" below. `openPairing()` (the knock-and-approve ceremony) is
+still uncalled; that gap is real and unchanged.
 
 Closing this is the next auth milestone: PAIR_REQ/PAIR_GRANT in `slopsync-js`
 plus an operator-reachable PIN window. Until then the lockdown posture is
@@ -240,7 +279,7 @@ plus an operator-reachable PIN window. Until then the lockdown posture is
 
 New settings category: **`0x008A machine-modes` (STATE) + `0x0104 modes-set`
 (INTENT)** carrying `blend_mode`, `stream_speed_mode`, `overshoot_clamp`. Fully
-RFC-009 annotated, so a generic client renders them without knowing this device
+[RFC-009](slopsync/RFC-QUEUE.md) annotated, so a generic client renders them without knowing this device
 exists. Live round-trip verified (`webui/test/slopsync-modes.mjs`): read device
 truth → write → ECHO carries the applied value → on-change STATE reflects it →
 restore.
@@ -279,7 +318,12 @@ nothing. Fixed three ways: the boot check now names the out-of-order pair,
 measured headroom (11659 B of 16384) is recorded in `hub.hpp` so nobody has to
 guess again.
 
-### What still makes the HTTP plane load-bearing
+### What still makes the HTTP plane load-bearing (as of M5b, fw 2.1.64)
+
+**Truth check (2026-07-28): all four ❌ rows below closed** —
+`machine-admin` (0x30F0) is the admin INTENT channel this section asks
+for in its last line, and it shipped. Nothing is HTTP-only anymore; see
+§1's ruling and the LEDGER's `RESOLVED` entry.
 
 | surface | status |
 |---|---|
@@ -288,14 +332,15 @@ guess again.
 | move / home / pattern / safety / override / bypass | ✅ existing intents |
 | motion + safety + odometer + power + diag telemetry | ✅ existing STATE |
 | transport selector | ✅ retired, not needed |
-| **servo configure pane** (`/api/servo`) | ❌ HTTP only |
-| **SlopMotion tuning** (`/api/slopmotion`) | ❌ HTTP only |
-| **clear fault** (`WS_OP_CLEAR_FAULT`) | ❌ HTTP only (no fault readback on this build) |
-| **save to NVS** (`WS_OP_SAVE`) | ❌ HTTP only |
+| **servo configure pane** (`/api/servo`) | ❌ HTTP only → ✅ `machine-admin` 0x30F0 |
+| **SlopMotion tuning** (`/api/slopmotion`) | ❌ HTTP only → ✅ §5.9 |
+| **clear fault** (`WS_OP_CLEAR_FAULT`) | ❌ HTTP only → ✅ `machine-admin` 0x30F0 |
+| **save to NVS** (`WS_OP_SAVE`) | ❌ HTTP only → ✅ `machine-admin` 0x30F0 |
 | `/api/log`, `/api/capabilities`, `/api/status`, presets | ✅ read-only, staying per §1 |
 
-Four control surfaces left. The last two are actions rather than settings, so
-they want an admin INTENT channel, not another settings pair.
+Four control surfaces left, at the time this was written. The last two are
+actions rather than settings, so they want an admin INTENT channel, not
+another settings pair — which is exactly what `machine-admin` became.
 
 ## 5.7. M5c — links2004 is GONE (fw 2.1.65)
 
@@ -475,14 +520,21 @@ only intended differences are widget choice and layout.
 
 ### The asymmetry ledger — what our UI can do that a SlopSync client cannot
 
-| surface | endpoint | status |
+**Truth check (2026-07-28): every row below marked ❌ has since closed.**
+`machine-admin` (0x30F0, device-defined INTENT: `clear_fault`/
+`save_config`/`servo_scan`) replaced the retired HTTP control routes; see
+[`docs/canon/LEDGER.md`](canon/LEDGER.md). The table is kept as the
+original asymmetry snapshot that justified the work, not as current
+status.
+
+| surface | endpoint | status (as of 2026-07-26) |
 |---|---|---|
-| SlopMotion live tuning (17 knobs) | `/api/slopmotion` | ❌ HTTP-only → §5.9 |
-| Servo status + register config | `/api/servo` | ❌ HTTP-only |
-| clear fault | `/api/clearfault` | ❌ HTTP-only |
-| save to NVS | (`WS_OP_SAVE`) | ❌ HTTP-only |
-| capabilities (rail, ceilings, features) | `/api/capabilities` | ⚠️ duplicated — RFC-016 says capability discovery IS catalog introspection |
-| pattern presets | `/api/pattern/presets` | ⚠️ RFC-021 store channel exists; not wired |
+| SlopMotion live tuning (17 knobs) | `/api/slopmotion` | ❌ HTTP-only → §5.9 (LANDED since) |
+| Servo status + register config | `/api/servo` | ❌ HTTP-only (LANDED since — `machine-admin` 0x30F0) |
+| clear fault | `/api/clearfault` | ❌ HTTP-only (LANDED since — `machine-admin` 0x30F0) |
+| save to NVS | (`WS_OP_SAVE`) | ❌ HTTP-only (LANDED since — `machine-admin` 0x30F0) |
+| capabilities (rail, ceilings, features) | `/api/capabilities` | ⚠️ duplicated — [RFC-016](slopsync/RFC-QUEUE.md) says capability discovery IS catalog introspection |
+| pattern presets | `/api/pattern/presets` | ⚠️ [RFC-021](slopsync/RFC-QUEUE.md) store channel exists; not wired |
 | limits, modes, move/home/pattern/safety | — | ✅ SlopSync |
 | all telemetry incl. plan-strip + anomalies | — | ✅ SlopSync |
 
@@ -490,6 +542,10 @@ only intended differences are widget choice and layout.
 privilege, they are what keeps a machine with a broken hub plane diagnosable.
 
 ### 5.9. The constraint the tuning surface hits, and the chosen shape
+
+**LANDED.** The tuning card described below exists and is rendered from
+the catalog, not hardcoded — see [webui-architecture.md](webui-architecture.md)
+§5, catalog cost accounting.
 
 SlopMotion exposes **17** live-tune knobs. RFC-009's `enabled_mask` is a
 `bitfield8` whose bit *i* gates the *i*-th setting-annotated field of its
@@ -532,7 +588,7 @@ fits in TWO channels, not three**:
 
 Deliberately NOT exposed — present in `SystemState`, absent from slopsim, and
 believed obsolete: `vmax_ovr`, `amax_ovr`, `chase_ff`, `chase_gain`,
-`chase_look`, `dense_us`, `handoff_k`. The catalog is not the place to memorialise knobs
+`chase_look`, `dense_us`, `handoff_k`. The catalog is not the place to memorialize knobs
 nobody turns — but note that "leave them on `/api/slopmotion`" is NOT an option
 for the WRITE path under §1: `POST /api/slopmotion` is control and is going.
 Either a knob earns a catalog key or it stops being settable at all. **Confirm
@@ -556,7 +612,7 @@ NOT persisted, by design — the tuning knobs are a session surface
 
 **TX drop policy = B (`Classify`)** — `SlopSyncTxPolicy::Classify`, already the
 default in `SlopSyncAsyncWsTransport`. Shed `STATE`/`STREAM` only (the registry's
-own control/data/raw classification decides, not a judgement call); control frames
+own control/data/raw classification decides, not a judgment call); control frames
 refuse honestly and tear the session down only after `kCtrlStallMs` of continuous
 failure. Survived the full soak suite twice.
 
@@ -644,7 +700,7 @@ missing piece is entirely on the machine's side of the glass.
 The knock-and-approve gap above (mode (a), `pairing_modes` bit0) is still open
 — it needs the WebUI ceremony described above. But mode (c), push-to-pair
 (`pairing_modes` bit2), landed on the firmware side without any UI at all,
-because RFC-027(c) deliberately requires no display and no button: *"the power
+because [RFC-027](slopsync/RFC-QUEUE.md)(c) deliberately requires no display and no button: *"the power
 cord is the button."*
 
 `SlopSyncHubService::checkQuickBootPairingGesture()` (called once from
@@ -693,7 +749,8 @@ rather than an adjective:
    the page shows nothing.
 4. **Ground truth, everywhere, provably.** Every control renders reported state,
    shows pending until ECHO, reverts on NACK/timeout, and grays from
-   `enabled_mask`. No optimistic state anywhere — CLAUDE.md §3 calls a UI that
+   `enabled_mask`. No optimistic state anywhere —
+   [DOCTRINE.md](canon/DOCTRINE.md) §3 calls a UI that
    lies about machine state a safety defect on this product, and it means it.
 5. **Degrades honestly.** Watch tier grays the write plane but keeps e-stop live
    (role-exempt by catalog, RFC-025b). Hub down = controls fail visibly, never

@@ -32,9 +32,10 @@ exist and are open to every device equally.
 not because one machine wants it. When a proposal is really "make my product
 easier", it is refused, and the refusal is recorded with its reasoning.
 
-**The specification is the product.** The C++ library is its reference
-implementation, not its definition. If the library and the specification
-disagree, the specification wins and the library has a bug.
+**[The specification](../spec/index.md) is the product.** The
+C++ library is its reference implementation, not its definition. If the
+library and the specification disagree, the specification wins and the
+library has a bug.
 
 **The registry is the single source of truth.** Where any document, any
 library and any table disagree about a number, the registry wins. That rule is

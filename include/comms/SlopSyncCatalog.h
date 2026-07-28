@@ -150,7 +150,7 @@ inline constexpr uint8_t kPresetPayloadBytes = 40;
 // silent wire mismatch.
 inline constexpr uint8_t kApBaseCount = 6;
 
-// ---- 0x0089 motion-anomaly EVENT: the `body` (40) sub-map keys -------------
+// ---- motion-anomaly EVENT: the `body` (40) sub-map keys -------------
 // These are the CHANNEL'S OWN schema keys, exactly as slopsync::safety_body is
 // for 0x000E — that is the v1.0 EVENT grammar (registry key 40's own note: with
 // kind-specific fields at the TOP level, every device-authored EVENT channel
@@ -249,7 +249,7 @@ inline bool buildSlopDriveCatalog(slopsync::Catalog32& c, DeviceFeatures feat = 
 
     c.clear();
 
-    // ---- 0x0003 "safety" — STATE, critical, on-change --------------------
+    // ---- "safety" — STATE, critical, on-change --------------------
     // VERBATIM copy of conformance/mini_catalog.hpp's safety entry: the hub's
     // buildSafetyPayload() hardcodes exactly this 9-byte layout (word
     // bitfield8, cause u8, owner_session u32, estop_seq u16, modes bitfield8).
@@ -276,7 +276,7 @@ inline bool buildSlopDriveCatalog(slopsync::Catalog32& c, DeviceFeatures feat = 
                         .scale = 1.0f},
                        {"override", "bypass"});
 
-    // ---- 0x0004 "control-owner" — STATE, critical, on-change -------------
+    // ---- "control-owner" — STATE, critical, on-change -------------
     // Matches Hub::buildControlOwnerPayload(): 4 × {source u8, owner u32}, in
     // ascending source order, 20 bytes total. Each pair is one arbiter source
     // (0 manual, 1 tcode, 2 pattern, 3 ossm) and the session id that owns it
@@ -294,7 +294,7 @@ inline bool buildSlopDriveCatalog(slopsync::Catalog32& c, DeviceFeatures feat = 
     c.addLayoutField({.name = "src3",   .type = PackedFieldType::u8,  .unit = "", .scale = 1.0f});
     c.addLayoutField({.name = "owner3", .type = PackedFieldType::u32, .unit = "", .scale = 1.0f});
 
-    // ---- 0x0005 "safety-intents" — INTENT, critical, modest rate ----------
+    // ---- "safety-intents" — INTENT, critical, modest rate ----------
     // The client sends {1:"op"} where op is a safety_ops:: value (estop=6 and
     // estop_clear=1 are hub-handled; the rest reach the delegate and the hub
     // latches the result — RFC-025a).
@@ -344,7 +344,7 @@ inline bool buildSlopDriveCatalog(slopsync::Catalog32& c, DeviceFeatures feat = 
                             AccessLevel::control,  // 9  bypass_on
                             AccessLevel::control});// 10 bypass_off
 
-    // ---- 0x0006 "hub-status" — STATE, background, 1 Hz --------------------
+    // ---- "hub-status" — STATE, background, 1 Hz --------------------
     // Slow health telemetry.  [4+4+1+1 = 10 B]
     c.addEntry({.id = slopsync::channels::hub_status, .name = "hub-status",
                 .cls = ChannelClass::STATE, .dir = Direction::h2c,
@@ -364,7 +364,7 @@ inline bool buildSlopDriveCatalog(slopsync::Catalog32& c, DeviceFeatures feat = 
     c.addLayoutField({.name = "log_dropped", .type = PackedFieldType::u32, .unit = "count", .scale = 1.0f,
                       .desc = "Log lines dropped since boot (replay ring + cross-task bridge)."});
 
-    // ---- 0x0007 "session-events" — EVENT, watch ----------------------------
+    // ---- "session-events" — EVENT, watch ----------------------------
     // Payload keys match Hub::emitTakeoverEvent(): {1:"source", 2:"session"}.
     c.addEntry({.id = slopsync::channels::session_events, .name = "session-events",
                 .cls = ChannelClass::EVENT, .dir = Direction::h2c,
@@ -373,7 +373,7 @@ inline bool buildSlopDriveCatalog(slopsync::Catalog32& c, DeviceFeatures feat = 
     c.addSchemaField({.key = 1, .name = "source",  .type = CborFieldType::uint_t, .unit = ""});
     c.addSchemaField({.key = 2, .name = "session", .type = CborFieldType::uint_t, .unit = ""});
 
-    // ---- 0x0008 "log" — EVENT, watch, background, replay_depth 32 ----------
+    // ---- "log" — EVENT, watch, background, replay_depth 32 ----------
     // RFC-017 / M5b: the device log, in band. Declared by the library's own
     // builder for the same reason the trust channels are — it is a SPEC-CORE
     // channel whose shape hub and client cannot negotiate, so a hand-authored
@@ -387,7 +387,7 @@ inline bool buildSlopDriveCatalog(slopsync::Catalog32& c, DeviceFeatures feat = 
     // §9.4's no-replay rule.
     if (!slopsync::addLogChannel(c)) return false;
 
-    // ---- 0x0009..0x000D — the TRUST ADMINISTRATION surface (M4b) -----------
+    // ---- the TRUST ADMINISTRATION surface (M4b) -----------
     // session-admin, pending-pairing, pairing-events, and the paired-devices
     // store + its roster, all in the canonical shapes the library declares
     // (lib/slopsync/include/slopsync/channel/trust_channels.hpp). Declared as a
@@ -404,14 +404,14 @@ inline bool buildSlopDriveCatalog(slopsync::Catalog32& c, DeviceFeatures feat = 
     // store number is agreed by being published rather than legislated.
     if (!slopsync::addTrustChannels(c)) return false;
 
-    // ---- 0x000E "safety-events" — EVENT, critical, watch -------------------
+    // ---- "safety-events" — EVENT, critical, watch -------------------
     // The §9.4 EVENT TWIN of the safety latch (0x0003). §5.5/§11.2 have always
     // required the hub to emit it and until M4b there was no channel to emit it
     // ON. Same access and priority as its STATE twin: an edge nobody may be
     // denied and nobody's may be shed.
     if (!slopsync::addSafetyEventsChannel(c)) return false;
 
-    // ---- 0x0080 "motion" — STATE, elevated, 60 Hz ------------------------
+    // ---- "motion" — STATE, elevated, 60 Hz ------------------------
     // The live carriage snapshot. scale 100 on positions = 10µm wire units;
     // scale 10 on speed = 0.1 mm/s wire units.  [2+2+2+1+2 = 9 B]
     //
@@ -479,7 +479,7 @@ inline bool buildSlopDriveCatalog(slopsync::Catalog32& c, DeviceFeatures feat = 
                       .hasUnitId = true, .unitId = slopsync::unit_ids::mm});
     };
 
-    // ---- 0x0081 "machine-config" — STATE, normal, on-change ---------------
+    // ---- "machine-config" — STATE, normal, on-change ---------------
     // The full geometry + dual-limit-set snapshot in physical units (f32).
     // [8 × 4 = 32 B]
     // fw 2.1.47 APPENDED "input_jerk" as field 7 (28 → 32 B). Append-only layout
@@ -644,7 +644,7 @@ inline bool buildSlopDriveCatalog(slopsync::Catalog32& c, DeviceFeatures feat = 
                       .hasUnitId = true, .unitId = slopsync::unit_ids::mm});
     };
 
-    // ---- 0x0082 "pattern-state" — STATE, normal, on-change ----------------
+    // ---- "pattern-state" — STATE, normal, on-change ----------------
     // PatternEngine live snapshot.  [1+1+4+4+4+4+1+1 = 20 B]
     //
     // M5a: annotated + "enabled_mask" APPENDED as field 7 (18 -> 19 B).
@@ -773,7 +773,7 @@ inline bool buildSlopDriveCatalog(slopsync::Catalog32& c, DeviceFeatures feat = 
                       .hasRank = true, .rank = slopsync::ui_ranks::control});
     };
 
-    // ---- 0x0083 "odometer" — STATE, background, 1 Hz ---------------------
+    // ---- "odometer" — STATE, background, 1 Hz ---------------------
     // Session totals.  [4+4+4+4+4 = 20 B]
     // M5a APPENDED "energy_wh" + "session_ms" (fields 4/5, 12 -> 20 B) — the
     // legacy :81 0x06 STATS frame's two remaining fields, which had no
@@ -826,7 +826,7 @@ inline bool buildSlopDriveCatalog(slopsync::Catalog32& c, DeviceFeatures feat = 
                       .hasUnitId = true, .unitId = slopsync::unit_ids::ms});
     };
 
-    // ---- 0x0084 "motion-input" — STREAM, c2h, control, ≤333 Hz -----------
+    // ---- "motion-input" — STREAM, c2h, control, ≤333 Hz -----------
     // The SlopSync-native TCode successor: continuous stroke-window targets
     // + optional signed handoff velocity, decoded straight off BundleView by
     // the hub delegate's onStreamBundle() into the SlopMotion pacing ring
@@ -854,7 +854,7 @@ inline bool buildSlopDriveCatalog(slopsync::Catalog32& c, DeviceFeatures feat = 
                       // (a documented gap, same class as the sm_limits override fields below).
     };
 
-    // ---- 0x0085 "motion-segment" — STREAM, c2h, control, ≤50 Hz ----------
+    // ---- "motion-segment" — STREAM, c2h, control, ≤50 Hz ----------
     // TIMED-SEGMENT motion streaming: the WAVEFORM-mode companion to 0x0084.
     // Where motion-input carries dense point samples the sender interpolates
     // (chase mode, ~50 Hz), THIS channel carries the sender's NATIVE segments —
@@ -901,7 +901,7 @@ inline bool buildSlopDriveCatalog(slopsync::Catalog32& c, DeviceFeatures feat = 
     c.addLayoutField({.name = "end_vel_norm", .type = PackedFieldType::i16, .unit = "norm/s", .scale = 1000.0f});
     };
 
-    // ---- 0x0086 "plan-strip" — STATE, elevated, 45 Hz --------------------
+    // ---- "plan-strip" — STATE, elevated, 45 Hz --------------------
     // THE PLANNER'S CURRENT SEGMENT: what SlopMotion is executing right now,
     // as a strip you can draw. The SlopSync home of the legacy :81 0x04 INTERP
     // frame (~45 Hz), which V1-READINESS §1 notes "was tracked NOWHERE before
@@ -964,7 +964,7 @@ inline bool buildSlopDriveCatalog(slopsync::Catalog32& c, DeviceFeatures feat = 
                       .role = roles::plan_elapsed});
     };
 
-    // ---- 0x0087 "power" — STATE, background, 10 Hz -----------------------
+    // ---- "power" — STATE, background, 10 Hz -----------------------
     // Bus voltage / current / die temperature: the legacy :81 0x02 STATUS
     // frame's power fields, which feed the BUS A/V and DIE °C meter tiles.
     //
@@ -1014,7 +1014,7 @@ inline bool buildSlopDriveCatalog(slopsync::Catalog32& c, DeviceFeatures feat = 
     }
     };
 
-    // ---- 0x0088 "slopmotion-diag" — STATE, background, 1 Hz --------------
+    // ---- "slopmotion-diag" — STATE, background, 1 Hz --------------
     // The `stats` + `sync` blocks of GET /api/slopmotion, in band. Plan
     // counts, the per-kind anomaly breakdown, the on-device plan-time bench,
     // and the SlopSync stream-ingress counters.
@@ -1113,7 +1113,7 @@ inline bool buildSlopDriveCatalog(slopsync::Catalog32& c, DeviceFeatures feat = 
                       .role = roles::meta_reset_gen});
     };
 
-    // ---- 0x0089 "motion-anomaly" — EVENT, watch, normal ------------------
+    // ---- "motion-anomaly" — EVENT, watch, normal ------------------
     // SlopMotion's anomaly feed, as EDGES. The roadmap already prescribed this
     // channel, and it is a live ground-truth REPAIR, not a new feature: the
     // legacy :81 0x05 ANOMALY ring is written only by the superseded
@@ -1165,7 +1165,7 @@ inline bool buildSlopDriveCatalog(slopsync::Catalog32& c, DeviceFeatures feat = 
                       .desc = "Motion-core time when it happened."});
     };
 
-    // ---- 0x008A "machine-modes" — STATE, elevated, on-change -------------
+    // ---- "machine-modes" — STATE, elevated, on-change -------------
     // M5b. Originally the four MODE settings the legacy :81/HTTP plane owned
     // outright: WS_OP_BLEND (0x07), WS_OP_MODE (0x06), WS_OP_STREAM_MODE
     // (0x12) and WS_OP_OVERSHOOT (0x13). `transport`/WS_OP_MODE was RETIRED
@@ -1250,7 +1250,7 @@ inline bool buildSlopDriveCatalog(slopsync::Catalog32& c, DeviceFeatures feat = 
                        {"stream_speed_mode", "overshoot_clamp"});
     };
 
-    // ---- 0x008B/0x008C/0x008D "slopmotion-*" — STATE, tuning ---------------
+    // ---- "slopmotion-*" — STATE, tuning ---------------
     // M5c: the SlopMotion live-tune surface, off HTTP and onto the protocol.
     // POST /api/slopmotion retires with it — no controls outside SlopSync.
     //
@@ -1444,7 +1444,7 @@ inline bool buildSlopDriveCatalog(slopsync::Catalog32& c, DeviceFeatures feat = 
                         "amplitude_budget", "blend_steps", "reshape_steps", "settle_grace_ms"});
     };
 
-    // ---- 0x008E "pattern-advanced" — STATE, normal, on-change -------------
+    // ---- "pattern-advanced" — STATE, normal, on-change -------------
     // Advanced mode's 8 BASE controls (advpat::Settings, everything except the
     // per-control cyclic Modifier — see 0x008F..0x0094 for those). This is the
     // real fix the roadmap asked for: POST /api/pattern used to carry ap_mode/
@@ -1548,7 +1548,7 @@ inline bool buildSlopDriveCatalog(slopsync::Catalog32& c, DeviceFeatures feat = 
                         "in_accel", "out_accel"});
     };
 
-    // ---- 0x008F..0x0094 "pattern-adv-mod-*" — STATE, background -----------
+    // ---- "pattern-adv-mod-*" — STATE, background -----------
     // The 6-field cyclic Modifier (advpat::Modifier) that rides EACH of the 6
     // base controls (advpat::BASE_COUNT) — the "modifier cycle" the roadmap
     // asked for: amplitude ramps a control's swing in over `in_step` strokes,
@@ -1649,7 +1649,7 @@ inline bool buildSlopDriveCatalog(slopsync::Catalog32& c, DeviceFeatures feat = 
     // The six invocations move to the final ascending-id call sequence below
     // (RFC-047 Phase C2 reorder) — see the end of this function.
 
-    // ---- 0x0095 "pattern-presets" — STORE, control -------------------------
+    // ---- "pattern-presets" — STORE, control -------------------------
     // RFC-021's `pattern.frayd` worked example, landed: retires the last HTTP
     // writer, POST /api/pattern/presets (NVS "advpreset", 24 x {name, def}
     // opaque JSON). `access = control` matches this store's CRUD writer
@@ -1677,7 +1677,7 @@ inline bool buildSlopDriveCatalog(slopsync::Catalog32& c, DeviceFeatures feat = 
                           .nameMax = kPresetNameMax});
     };
 
-    // ---- 0x0096 "pattern-presets-roster" — STATE, watch, on-change --------
+    // ---- "pattern-presets-roster" — STATE, watch, on-change --------
     // {generation u16, count u8, capacity u8} — BARE, deliberately, same shape
     // as 0x000D paired-devices-roster. An embedded str16 name preview per slot
     // was the original plan (see PatternPresetStore.h's earlier revision) and
@@ -1702,7 +1702,7 @@ inline bool buildSlopDriveCatalog(slopsync::Catalog32& c, DeviceFeatures feat = 
     c.addLayoutField({.name = "capacity",   .type = PackedFieldType::u8,  .unit = "count", .scale = 1.0f});
     };
 
-    // ---- 0x0100 "move" — INTENT, control, 20 Hz, critical ----------------
+    // ---- "move" — INTENT, control, 20 Hz, critical ----------------
     // {1:"position" f32 mm, 2:"bypass" bool}. This channel maps to arbiter
     // source 0 (MANUAL) in the delegate.
     //
@@ -1730,7 +1730,7 @@ inline bool buildSlopDriveCatalog(slopsync::Catalog32& c, DeviceFeatures feat = 
     c.addSchemaField({.key = 2, .name = "bypass", .type = CborFieldType::bool_t, .unit = ""});
     };
 
-    // ---- 0x0101 "config-set" — INTENT, control, 10 Hz --------------------
+    // ---- "config-set" — INTENT, control, 10 Hz --------------------
     // Every field optional; present keys are applied. cfg_gen bumps on success.
     // fw 2.1.47 APPENDED key 7 "input_jerk" — append-only (keys 1-6 keep their
     // meaning exactly), and released key numbers are never reused. :3
@@ -1767,7 +1767,7 @@ inline bool buildSlopDriveCatalog(slopsync::Catalog32& c, DeviceFeatures feat = 
                       .hasMin = true, .hasMax = true, .min = ceiling::rail_min, .max = ceiling::rail_mm});
     };
 
-    // ---- 0x0102 "pattern-cmd" — INTENT, control, 20 Hz -------------------
+    // ---- "pattern-cmd" — INTENT, control, 20 Hz -------------------
     // Session-volatile (cfg_gen does NOT bump). Maps to arbiter source 2
     // (PATTERN) via the delegate; running drives start/stop.
     auto addPatternCmd = [&]() {
@@ -1797,7 +1797,7 @@ inline bool buildSlopDriveCatalog(slopsync::Catalog32& c, DeviceFeatures feat = 
     c.addSchemaField({.key = 7, .name = "background_run", .type = CborFieldType::bool_t, .unit = ""});
     };
 
-    // ---- 0x0103 "home" — INTENT, control --------------------------------
+    // ---- "home" — INTENT, control --------------------------------
     // {1:"op", 2:"stroke"} — op 1 starts sensorless homing; ops 2/3 are the
     // BENCH ops (RFC-025, safety-reviewed) that make motorless dev work
     // possible at all: they are the in-band twin of the legacy
@@ -1834,7 +1834,7 @@ inline bool buildSlopDriveCatalog(slopsync::Catalog32& c, DeviceFeatures feat = 
                       .hasMin = true, .hasMax = true, .min = 1.0f, .max = 2000.0f});
     };
 
-    // ---- 0x0104 "modes-set" — INTENT, control, 5 Hz ----------------------
+    // ---- "modes-set" — INTENT, control, 5 Hz ----------------------
     // M5b: the write half of 0x008A. Every key optional; present keys applied,
     // and the ECHO carries the POST-CLAMP value the handler actually took.
     //
@@ -1875,7 +1875,7 @@ inline bool buildSlopDriveCatalog(slopsync::Catalog32& c, DeviceFeatures feat = 
                       .hasMin = true, .hasMax = true, .min = 0.0f, .max = 1.0f});
     };
 
-    // ---- 0x0105 "slopmotion-set" — INTENT, control, 5 Hz -------------------
+    // ---- "slopmotion-set" — INTENT, control, 5 Hz -------------------
     // The single writer behind all three slopmotion-* cards. Keys 1..20 are
     // allocated across those cards and never collide; every key optional, only
     // the keys PRESENT are applied, and each echoes the value the machine
@@ -1933,7 +1933,7 @@ inline bool buildSlopDriveCatalog(slopsync::Catalog32& c, DeviceFeatures feat = 
                       .hasMin = true, .hasMax = true, .min = 0.0f, .max = 200.0f});
     };
 
-    // ---- 0x0106 "machine-admin" — INTENT, control -------------------------
+    // ---- "machine-admin" — INTENT, control -------------------------
     // The device ACTIONS that are not settings and not motion: clear a driver
     // fault, persist config, kick off a servo register scan. They were HTTP
     // writers (/api/clearfault, WS_OP_SAVE, POST /api/servo {"scan":true});
@@ -1961,7 +1961,7 @@ inline bool buildSlopDriveCatalog(slopsync::Catalog32& c, DeviceFeatures feat = 
                             AccessLevel::control}); // 3 servo_scan
     };
 
-    // ---- 0x0107 "pattern-advanced-cmd" — INTENT, control, 20 Hz -----------
+    // ---- "pattern-advanced-cmd" — INTENT, control, 20 Hz -----------
     // The single writer behind ALL SEVEN 0x008E..0x0094 advanced-pattern
     // cards. Same lean-schema convention as every other settings writer in
     // this catalog (config_set, pattern_cmd, modes_set, sm_set): the
@@ -2018,7 +2018,7 @@ inline bool buildSlopDriveCatalog(slopsync::Catalog32& c, DeviceFeatures feat = 
     }
     };
 
-    // ---- 0x0108 "pattern-presets-cmd" — INTENT, control -------------------
+    // ---- "pattern-presets-cmd" — INTENT, control -------------------
     // The CRUD writer behind the 0x0095 store / 0x0096 roster pair (RFC-021).
     // {1:"op", 2:"slot", 3:"name"}. `op` is RFC-019's OPEN `action.<name>`
     // convention (no registry change needed, same as 0x0005's action.safety):

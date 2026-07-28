@@ -6,7 +6,7 @@ generated: true
 ---
 
 <!-- ==========================================================
-     GENERATED FILE — DO NOT EDIT.
+     GENERATED FILE. DO NOT EDIT.
      Source of truth: docs/slopsync/registry/registry.yaml
      Generator:       docs-site/tools/gen_docs_tables.py
      Regenerate:      python docs-site/tools/gen_docs_tables.py
@@ -35,7 +35,7 @@ The word "STREAM" is a channel class. Transports are described as
 ## Stream kinds
 
 A STREAM channel declares what one sample **is**. The congestion rules
-read this property; they never guess it from a unit string.
+read this property. They never guess it from a unit string.
 
 | Value | Kind | Meaning |
 |---|---|---|
@@ -79,8 +79,8 @@ A subscription carries a priority class. The lower number sheds first.
 ## Spec-core channels
 
 These channel ids mean the same thing on every hub. A hub still declares
-each one it implements in its catalog; a channel that is absent from the
-catalog does not exist on that hub.
+each one it implements in its catalog. A channel absent from the catalog
+does not exist on that hub.
 
 | Id | Name | Class | Notes |
 |---|---|---|---|

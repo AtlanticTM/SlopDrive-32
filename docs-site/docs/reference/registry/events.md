@@ -6,7 +6,7 @@ generated: true
 ---
 
 <!-- ==========================================================
-     GENERATED FILE — DO NOT EDIT.
+     GENERATED FILE. DO NOT EDIT.
      Source of truth: docs/slopsync/registry/registry.yaml
      Generator:       docs-site/tools/gen_docs_tables.py
      Regenerate:      python docs-site/tools/gen_docs_tables.py
@@ -46,7 +46,7 @@ One kind. The per-line content rides the `body` sub-map, schema'd by the channel
 
 ## pairing-events (`0x000B`)
 
-The EVENT twin of the pending-pairing STATE channel. None of these is a safety latch.
+The EVENT twin of the [pending-pairing STATE channel](channels.md#spec-core-channels). None of these is a safety latch.
 
 | Kind | Name | Meaning |
 |---|---|---|
@@ -61,7 +61,7 @@ The EVENT twin of the pending-pairing STATE channel. None of these is a safety l
 
 ## safety-events (`0x000E`)
 
-The EVENT twin of the safety STATE channel. Emitted on transitions only: a repeated e-stop re-broadcasts the latch, which is how loss recovery works, but it does not re-announce an edge that did not happen.
+The EVENT twin of the [safety STATE channel](channels.md#spec-core-channels). It fires only on a transition. A repeated e-stop re-broadcasts the latch. This is how loss recovery works. It does not re-announce an edge that did not happen.
 
 | Kind | Name | Meaning |
 |---|---|---|
@@ -72,9 +72,9 @@ The EVENT twin of the safety STATE channel. Emitted on transitions only: a repea
 
 ## Log severity levels
 
-The log channel's `body.level` field. These values mirror the firmware
-logging library number for number, so the bridge is a cast and never a
-translation table.
+The [log channel](channels.md#spec-core-channels)'s `body.level` field.
+These values mirror the firmware logging library number for number, so
+the bridge is a cast and never a translation table.
 
 | Value | Level | Notes |
 |---|---|---|

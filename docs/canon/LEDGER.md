@@ -2262,7 +2262,19 @@ concurrently (needs a second central — phone GATT connect + host probe);
 RFC-042 STALE park + reattach over a hard-dropped BLE link with a WS client
 attached (the T13 regression scenario, live).
 
-## Deferred / planned (homes: docs/REFACTOR-ROADMAP.md, docs/MOTION-TODO.md)
+## VERIFICATION POSTURE RULING (operator, 2026-07-28) — bare minimum until current task + UI complete
+
+Pre-release iteration regime, operator-stamped: **verification floor is
+compile + lint (canon_lint / slopsync_lint) + the native suite covering the
+changed area + one live smoke of the actual change after deploy.** Dropped
+until this ruling is lifted: fuzz runs, full-gauntlet sweeps on every touch,
+sim-parity re-runs when the sim was not touched, multi-round doc
+verification passes. SlopSync CI still gates every push (docs/regen drift
+stays machine-checked at zero local cost). Rationale: nobody is using this
+yet; more minor changes are expected; hours of ceremony per minor change is
+waste. Lift the ruling at UI completion / first release.
+
+## FIRST LIVE BLE GATT SESSION (2026-07-28) — probe gains a BLE transport, fw 2.1.85 unchanged
 
 - TCode pass-through channel (post-MFP; parser cross-task race was the
   blocker).

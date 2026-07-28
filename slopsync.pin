@@ -1,4 +1,4 @@
-1993f951d076eae6a1f7afb3deb7353611662c4e
+c724b252e745bf082bdae317b5715e752e06dc42
 # The SlopSync repo (sibling checkout ../SlopSync) commit this machine repo
 # builds against. tools/canon_lint.py's pin rule FAILs if ../SlopSync is
 # missing or its HEAD doesn't match this line, and cross-checks the frozen

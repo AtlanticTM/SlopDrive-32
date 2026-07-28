@@ -2262,6 +2262,78 @@ concurrently (needs a second central — phone GATT connect + host probe);
 RFC-042 STALE park + reattach over a hard-dropped BLE link with a WS client
 attached (the T13 regression scenario, live).
 
+## RFC-051 LANDED (2026-07-28): critical-stall parks the session instead of evicting it — fw 2.1.85 → 2.1.86
+
+**The eviction/staleness race is closed.** A vanished client's link looks
+CONGESTED before it looks GONE, so §10.4 step 4's never-shed stall clock
+(`never_shed_stall_eviction_ms`, 2 s) always outraced RFC-042's own
+transport-loss park and destroyed a session (GOODBYE `SESSION_EVICTED`, full
+§6.9 teardown) that a reconnect would otherwise have resumed. SlopSync
+`c724b25` (pushed to `main`) factors `Hub::detachTransport`'s existing park
+body into a new private `Hub::parkAndDetach(Slot&, uint32_t nowMs)` and
+switches `trackCriticalSend`'s stall-timeout branch to call it instead of
+`evictSlot`. `SESSION_EVICTED` narrows to admin evict only (duplicate-LIVE-
+instance eviction already had its own `DUPLICATE_INSTANCE` code).
+`evictSlot()` itself is unchanged and stays for admin evict. SPEC §10.4/§6.6/
+§6.9 and the registry's `SESSION_EVICTED` / `never_shed_stall_eviction_ms`
+comments updated to match (comments only — `gen_registry_header.py --check`
+confirmed no wire-emitted string moved, catalog etag unaffected).
+
+**A real bug surfaced and got fixed in the same commit, not deferred:**
+`Hub::pumpSlot`'s own frame-read loop (`while (auto fb =
+slot.transport->read())`) assumed nothing inside `dispatchFrame()` could null
+`slot.transport` mid-loop — true before this RFC, since `evictSlot()`'s
+`teardownSession()` never touches the transport pointer. `parkAndDetach()`
+breaks that assumption (a critical-stall noticed while handling the very
+frame being dispatched now nulls the transport from inside the dispatch
+call stack), so the loop now re-checks `slot.transport != nullptr` on every
+iteration rather than only on entry — caught by the new native test below
+crashing (`SIGSEGV` in `pumpSlot`), not by inspection.
+
+**Verification (bare-minimum posture, below):** `test_slopsync_safety` (the
+existing S-08 stall SUBCASE rewritten for park-not-evict, plus one new
+`TEST_CASE` proving a critical-stall park reattaches on a fresh HELLO with
+grants intact — `sessionCount()==1`, `state==STALE`, then same
+`session_id`/`roles` and a retained-grant STATE push after a same-
+`instance_id` HELLO on a brand-new transport), `test_slopsync_staleness`,
+`test_slopsync_m4b`, `test_slopsync_messages` — all four the suites
+referencing `SESSION_EVICTED`/`never_shed_stall`/`trackCriticalSend`/
+`STALE-`. All PASS. `tools/slopsync_lint.py`: clean. `tools/canon_lint.py`:
+clean. **Toolchain note for future native-test runs on this host:** git-
+bash's own `/mingw64/bin` ships a `libstdc++-6.dll` that shadows the winlibs
+GCC 16.1.0 toolchain PlatformIO actually built with — every `pio test -e
+native` run silently crashed (`STATUS_ENTRYPOINT_NOT_FOUND`) until the
+winlibs `mingw64/bin` was put ahead of it on `PATH`. Not a code issue; purely
+this machine's shell setup.
+
+`slopsync.pin` bumped `1993f951...` → `c724b252...` via `git -C ../SlopSync
+rev-parse HEAD`. `FIRMWARE_VERSION` 2.1.85 → 2.1.86. Built clean (`pio run -e
+sd32-ota`, RAM 24.1%, Flash 28.5%). Deployed via `deploy.ps1`: device
+confirmed `fw 2.1.85 -> 2.1.86`.
+
+**Live smoke, both required checks:** kill-test
+(`t13_kill.py`, WS) — probe killed mid-session at t=4.4s; `/api/log` shows
+`WS client#1 gone (slot 0) — detach deferred` with **no** `session ... left`
+line for that session, exactly the new park behavior (the OLD behavior would
+have logged a `left` line from `evictSlot`'s `teardownSession`, since
+critical-stall-via-flood is the same never-shed-queue mechanism the kill
+test's rapid disconnect stresses). Clean full probe
+(`slopsync_probe.py --listen-only`, WS): 44 passed / 0 failed / 6 skipped —
+unchanged from pre-change baseline.
+
+**One anomaly noted, NOT attributable to this change:** the post-OTA boot
+log's first line read `Reset reason: PANIC (unexpected)` rather than the
+`SW` this repo's own established pattern documents for an `ESP.restart()`-
+driven OTA reboot (see the 2.1.79→2.1.80 entry above). This reflects the
+reset that preceded THIS boot — i.e. something on the prior (2.1.85) boot
+crashed rather than cleanly restarting via `DeferredReboot`/`ESP.restart()`.
+`OtaService.cpp`'s reboot path is unchanged by this work and unrelated to
+`SlopSync`'s session-parking logic; no serial/backtrace access was available
+to investigate further (bench-only per doctrine). Device came back healthy
+and fully responsive on 2.1.86 with no further anomalies across both smoke
+runs. **Flagged for the operator to watch on the next bench session; not
+investigated further here.**
+
 ## VERIFICATION POSTURE RULING (operator, 2026-07-28) — bare minimum until current task + UI complete
 
 Pre-release iteration regime, operator-stamped: **verification floor is

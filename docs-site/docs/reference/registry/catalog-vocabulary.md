@@ -34,9 +34,9 @@ fixed-width, which is what makes append-only evolution safe.
 | `5` | `i32` |  |
 | `6` | `f32` |  |
 | `7` | `bitfield8` | bit meanings enumerated in catalog entry |
-| `8` | `str16` | 16 bytes, zero-padded UTF-8 (RFC-026). The default string width — session-roster names, device names, secret settings. |
+| `8` | `str16` | 16 bytes, zero-padded UTF-8 (RFC-026). The default string width: session-roster names, device names, secret settings. |
 | `9` | `str32` | 32 bytes, zero-padded UTF-8 (RFC-026) |
-| `10` | `str64` | 64 bytes, zero-padded UTF-8 (RFC-026). 26% of a 242 B snapshot — use deliberately. |
+| `10` | `str64` | 64 bytes, zero-padded UTF-8 (RFC-026). 26% of a 242 B snapshot: use deliberately. |
 
 STREAM sample layouts stay string-free. The motion path never pays for
 text.
@@ -58,19 +58,19 @@ role is never an error.
 | `limit.input.speed` | speed ceiling of the INPUT (machine-driven: patterns, streams, TCode) limit set |
 | `limit.input.accel` | accel ceiling of the input limit set |
 | `limit.input.jerk` | jerk ceiling of the input limit set |
-| `geometry.max_travel` | the configured travel ceiling — how far the machine's rail geometry allows it to search/move (0x0081 max_rail is the worked example: also the sensorless-homing search sweep bound). Distinct from window.min/max, which is the operator-chosen SUB-range within this travel. |
+| `geometry.max_travel` | the configured travel ceiling: how far the machine's rail geometry allows it to search/move (0x0081 max_rail is the worked example: also the sensorless-homing search sweep bound). Distinct from window.min/max, which is the operator-chosen SUB-range within this travel. |
 | `geometry.measured_travel` | the usable travel a real home actually measured between the two hard stops, as opposed to geometry.max_travel's configured ceiling. Zero/absent-of-meaning until the first successful home this session; a client MUST NOT treat zero as a real measurement. |
-| `window.min` | stroke window lower bound. Limits normalized against the window are window-relative and therefore MOVE when it does — which is exactly why this is a STATE field and not a one-shot WELCOME value. |
+| `window.min` | stroke window lower bound. Limits normalized against the window are window-relative and therefore MOVE when it does: which is exactly why this is a STATE field and not a one-shot WELCOME value. |
 | `window.max` | stroke window upper bound |
 | `telemetry.position` | live actuator position |
-| `telemetry.target` | RFC-032: the position the machine is currently COMMANDED to, as opposed to telemetry.position which is where it measurably is. Lag is deliberately NOT a role: it is target - position, computed client-side — registering a third field for a subtraction would invite two sources of truth for one number. |
+| `telemetry.target` | RFC-032: the position the machine is currently COMMANDED to, as opposed to telemetry.position which is where it measurably is. Lag is deliberately NOT a role: it is target - position, computed client-side: registering a third field for a subtraction would invite two sources of truth for one number. |
 | `telemetry.velocity` | live actuator velocity |
 | `telemetry.current` | motor/drive current |
 | `telemetry.power.bus` | DC bus voltage or power |
 | `telemetry.temp` | a temperature reading; the field's own name/unit says which |
 | `telemetry.uptime` | hub uptime |
 | `identity.name` | the writable machine-name setting (RFC-026 tier 2, str16/str32). Its READ-ONLY twin is WELCOME identity.hub_name. |
-| `meta.enabled_mask` | RFC-009.4: a bitfield8 field whose bit i gates the i-th setting-annotated field of the SAME layout. On-change, retained, conflated — every client grays from one ground truth. Disabled means GRAY, never hide. |
+| `meta.enabled_mask` | RFC-009.4: a bitfield8 field whose bit i gates the i-th setting-annotated field of the SAME layout. On-change, retained, conflated: every client grays from one ground truth. Disabled means GRAY, never hide. |
 | `meta.reset_gen` | RFC-019: increments on every applied reset in this counter group, so ALL subscribers observe the reset, not just the sender who asked for it. |
 | `pattern.running` | whether the built-in pattern generator is currently driving the machine |
 | `pattern.select` | which built-in pattern the generator plays; options are the device's pattern names, index-aligned with the wire value |
@@ -111,9 +111,9 @@ intermediate steps. A client that does not recognize one renders it as
 | Value | Phase | Notes |
 |---|---|---|
 | `0` | `idle` | not running; the reconnect-safe resting value |
-| `1` | `running` | started and in progress; `progress` 0–100 is advisory |
+| `1` | `running` | started and in progress; `progress` 0-100 is advisory |
 | `2` | `succeeded` | terminal, ok. Also EVENTed (RFC-020). |
-| `3` | `failed` | terminal, error — `result` u16 carries a nack_codes value or a device code |
+| `3` | `failed` | terminal, error: `result` u16 carries a nack_codes value or a device code |
 | `4` | `aborted` | terminal, canceled or superseded |
 
 ## Curve families
@@ -122,8 +122,8 @@ The `curve_family` sub-key is CBOR key 45, inside a `publishes` or `granted_publ
 
 | Value | Family | Notes |
 |---|---|---|
-| `0` | `unspecified` | the compatible default — the hub behaves exactly as it did before RFC-030. What every pre-RFC-030 client is. |
+| `0` | `unspecified` | the compatible default: the hub behaves exactly as it did before RFC-030. What every pre-RFC-030 client is. |
 | `1` | `c1_cubic` | velocity-continuous cubic (Linear/Pchip/Makima/monotone-cubic senders). Acceleration lawfully STEPS at knots; a follow-client hub reconstructs C1 and does NOT smooth the corner the author put there. |
-| `2` | `c2_quintic` | curvature-continuous; the sender means the smoothness. A follow-client hub may use its C2 reconstruction (backward-difference af estimation is valid here — the quantity exists). |
-| `3` | `step` | held value with instantaneous transitions (step/none interpolation). The family says intent, the machine owns feasibility as always. RFC-049a: NUMBER KEPT, never renumbered, but status is `reserved` — the reference engine has no step renderer, so a `step` declaration renders as `c2_quintic` and the GRANT echo reports exactly that effective family (§9.6, §18-20). Declarable again when a step renderer exists in the reference engine; only the delegate's mapping changes when it does. |
+| `2` | `c2_quintic` | curvature-continuous; the sender means the smoothness. A follow-client hub may use its C2 reconstruction (backward-difference af estimation is valid here: the quantity exists). |
+| `3` | `step` | held value with instantaneous transitions (step/none interpolation). The family says intent, the machine owns feasibility as always. RFC-049a: NUMBER KEPT, never renumbered, but status is `reserved`: the reference engine has no step renderer, so a `step` declaration renders as `c2_quintic` and the GRANT echo reports exactly that effective family (§9.6, §18-20). Declarable again when a step renderer exists in the reference engine; only the delegate's mapping changes when it does. |
 

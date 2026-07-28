@@ -33,7 +33,7 @@ Session lifecycle and control-ownership transfer.
 | `1` | `takeover` | control source ownership transferred (§11.4) |
 | `2` | `session_joined` | a session reached GRANTED |
 | `3` | `session_left` | a session ended (any reason) |
-| `4` | `session_stale` | RFC-042: a session's silence exceeded its liveness window (deadman for a source-owner, idle reaping otherwise) and it was marked STALE rather than torn down — slot, session_id, and grants are RETAINED; any owned source was released (unconditionally, latching nothing per RFC-045). Body carries the affected session_id, same shape as `takeover`. |
+| `4` | `session_stale` | RFC-042: a session's silence exceeded its liveness window (deadman for a source-owner, idle reaping otherwise) and it was marked STALE rather than torn down: slot, session_id, and grants are RETAINED; any owned source was released (unconditionally, latching nothing per RFC-045). Body carries the affected session_id, same shape as `takeover`. |
 | `5` | `session_resumed` | RFC-042: a STALE session returned to LIVE, either by any frame arriving on its still-attached transport (§6.6: any received frame is proof of life) or by a fresh HELLO reattaching a new transport to the same session identity (§6.3 migration path). Body carries the affected session_id. |
 
 ## log (`0x0008`)
@@ -50,7 +50,7 @@ The EVENT twin of the [pending-pairing STATE channel](channels.md#spec-core-chan
 
 | Kind | Name | Meaning |
 |---|---|---|
-| `1` | `knocked` | a PAIR_REQ joined the pending list (0x000A) — knock-and-approve or PIN mode (RFC-027.2) |
+| `1` | `knocked` | a PAIR_REQ joined the pending list (0x000A): knock-and-approve or PIN mode (RFC-027.2) |
 | `2` | `granted` | a pending knock (or an existing device's re-approval) was granted a role, via PAIR_GRANT or the 0x0009 admin surface |
 | `3` | `denied` | a pending knock was denied by a `configure` session |
 | `4` | `expired` | a pending knock's window elapsed unanswered (pairing_window_default_s) |
@@ -67,7 +67,7 @@ The EVENT twin of the [safety STATE channel](channels.md#spec-core-channels). It
 |---|---|---|
 | `1` | `estop_latched` | the ESTOP bit went 0 -> 1 (§5.5). `body` carries word/cause/owner_session/estop_seq. Cause is a `safety_causes` value; `estop_seq` is the §5.5 per-INITIATION sequence, so repeats of one initiation share it. |
 | `2` | `estop_cleared` | the ESTOP bit went 1 -> 0 via §11.2's guarded clear (`safety_ops::estop_clear` + the hub's and delegate's preconditions). Clearing never restarts motion; this edge says the latch is gone, never that the machine moved. |
-| `3` | `stop_latched` | one or more of STOP / HOLD / PAUSE went 0 -> 1. `body.level` is the bitmask of the bits that NEWLY set (safety word bits 1/2/3), so one edge reports one operator action even when it sets several. Cause distinguishes an operator `stop` (user) from a §11.3 deadman (deadman) from a teardown loss policy (session_loss) — which is the whole reason this edge is worth having: all three look identical in the snapshot. |
+| `3` | `stop_latched` | one or more of STOP / HOLD / PAUSE went 0 -> 1. `body.level` is the bitmask of the bits that NEWLY set (safety word bits 1/2/3), so one edge reports one operator action even when it sets several. Cause distinguishes an operator `stop` (user) from a §11.3 deadman (deadman) from a teardown loss policy (session_loss). That is the whole reason this edge is worth having: all three look identical in the snapshot. |
 | `4` | `stop_cleared` | one or more of STOP / HOLD / PAUSE went 1 -> 0 (`resume`, or a STOP cleared by an accepted new motion intent per §11.1). `body.level` is the bitmask of the bits that NEWLY cleared. |
 
 ## Log severity levels
@@ -78,12 +78,12 @@ the bridge is a cast and never a translation table.
 
 | Value | Level | Notes |
 |---|---|---|
-| `0` | `trace` | sloplog::Level::Trace — SLOGT |
-| `1` | `debug` | sloplog::Level::Debug — SLOGD |
-| `2` | `info` | sloplog::Level::Info — SLOGI |
-| `3` | `warn` | sloplog::Level::Warn — SLOGW |
-| `4` | `error` | sloplog::Level::Error — SLOGE |
-| `5` | `fatal` | sloplog::Level::Fatal — SLOGF |
+| `0` | `trace` | sloplog::Level::Trace (SLOGT) |
+| `1` | `debug` | sloplog::Level::Debug (SLOGD) |
+| `2` | `info` | sloplog::Level::Info (SLOGI) |
+| `3` | `warn` | sloplog::Level::Warn (SLOGW) |
+| `4` | `error` | sloplog::Level::Error (SLOGE) |
+| `5` | `fatal` | sloplog::Level::Fatal (SLOGF) |
 
 There is no wire value for `off`. `off` is a floor sentinel, so no record
 can arrive at that level.

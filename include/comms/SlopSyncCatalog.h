@@ -1069,7 +1069,7 @@ inline bool buildSlopDriveCatalog(slopsync::Catalog32& c, DeviceFeatures feat = 
     c.addLayoutField({.name = "anom_plan_failed", .type = PackedFieldType::u32, .unit = "", .scale = 1.0f,
                       .group = "Anomalies", .desc = "A command could not be planned at all."});
     c.addLayoutField({.name = "anom_settle",      .type = PackedFieldType::u32, .unit = "", .scale = 1.0f,
-                      .group = "Anomalies", .desc = "The stream went quiet mid-move; the machine braked to rest."});
+                      .group = "Anomalies", .desc = "The stream stopped sending mid-move; the machine braked to rest."});
     c.addLayoutField({.name = "anom_endvel_clamped", .type = PackedFieldType::u32, .unit = "", .scale = 1.0f,
                       .group = "Anomalies", .desc = "A handoff speed was cut back to stay inside the window."});
     c.addLayoutField({.name = "anom_deadline_stretched", .type = PackedFieldType::u32, .unit = "", .scale = 1.0f,
@@ -1213,8 +1213,8 @@ inline bool buildSlopDriveCatalog(slopsync::Catalog32& c, DeviceFeatures feat = 
     // rather than a hardcoded 0, purely because that is the smaller diff —
     // the byte's CONTENT is no longer meaningful either way.
     c.addLayoutField({.name = "blend_mode_reserved", .type = PackedFieldType::u8, .unit = "", .scale = 1.0f,
-                      .desc = "Retired. Unused padding now — the motion policy it once set is gone; "
-                              "motion always behaves as 'allow'."});
+                      .desc = "Retired. Unused padding now, the motion policy it once set is gone. "
+                              "Motion always behaves as 'allow'."});
     c.addSelectField({.name = "stream_speed_mode", .type = PackedFieldType::u8, .unit = "", .scale = 1.0f,
                       .dflt = SettingDefault::ofInt(factory::stream_speed_mode),
                       .group = "Motion behavior",
@@ -1434,7 +1434,7 @@ inline bool buildSlopDriveCatalog(slopsync::Catalog32& c, DeviceFeatures feat = 
     c.addLayoutField({.name = "settle_grace_ms", .type = PackedFieldType::u32, .unit = "ms", .scale = 1000.0f,
                       .hasMin = true, .hasMax = true, .min = 0.0f, .max = 200.0f,
                       .dflt = SettingDefault::ofFloat(30.0f), .group = "Settling",
-                      .desc = "Quiet time after a stream stops before the machine brakes to rest.",
+                      .desc = "Grace period after a stream stops before the machine brakes to rest.",
                       .settingKey = 20, .hasSettingKey = true});
     c.addBitfieldField({.name = "enabled_mask", .type = PackedFieldType::bitfield8, .unit = "flag",
                         .scale = 1.0f, .desc = "Which of these the machine will accept right now.",

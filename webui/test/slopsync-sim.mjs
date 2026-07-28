@@ -209,6 +209,210 @@ async function main() {
     (rejected.intentId === lastNack.intentId || rejected.intentSeq === lastNack.intentSeq));
 
   // ========================================================================
+  // 19-CHANNEL SIM-FIDELITY FOLLOW-ON (2026-07-28) — the SlopDeck milestone-1
+  // gap: machine-modes/modes-set, the 3 SlopMotion tuning cards + sm-set,
+  // fray-d Advanced pattern + its 6 modifier lanes + writer, the preset
+  // roster/store/cmd trio, machine-admin. Each family below: subscribe once,
+  // write -> post-clamp ECHO -> STATE reflect, plus one invalid-write ->
+  // correct-NACK case. Channel ids are the catalog's own (unchanged by this
+  // pass) — no CH.* constants exist for most of these in webui/src yet, so
+  // they're referenced directly; `sendIntent` is schema-driven from the
+  // catalog either way (see session.js's own doc comment on it).
+  // ========================================================================
+  console.log('\n19-channel sim-fidelity write plane (2026-07-28 follow-on):');
+  const CH19 = {
+    MACHINE_MODES: 0x1030, MODES_SET: 0x3030,
+    SM_LIMITS: 0x1120, SM_CHASE: 0x1121, SM_WAVEFORM: 0x1122, SM_SET: 0x3120,
+    PATTERN_ADVANCED: 0x1210,
+    AP_MOD_SPEEDIN: 0x1211, AP_MOD_SPEEDOUT: 0x1212, AP_MOD_ACCELIN: 0x1213,
+    AP_MOD_ACCELOUT: 0x1214, AP_MOD_DEPTH1: 0x1215, AP_MOD_DEPTH2: 0x1216,
+    PATTERN_ADVANCED_CMD: 0x3210,
+    PATTERN_PRESETS_ROSTER: 0x1220, PATTERN_PRESETS: 0x5220, PATTERN_PRESETS_CMD: 0x3220,
+    MACHINE_ADMIN: 0x30f0,
+  };
+  s1.subscribe([
+    [CH19.MACHINE_MODES, 0, PRIORITY.background],
+    [CH19.SM_LIMITS, 0, PRIORITY.background],
+    [CH19.SM_CHASE, 0, PRIORITY.background],
+    [CH19.SM_WAVEFORM, 0, PRIORITY.background],
+    [CH19.PATTERN_ADVANCED, 0, PRIORITY.background],
+    [CH19.AP_MOD_SPEEDIN, 0, PRIORITY.background],
+    [CH19.AP_MOD_SPEEDOUT, 0, PRIORITY.background],
+    [CH19.AP_MOD_ACCELIN, 0, PRIORITY.background],
+    [CH19.AP_MOD_ACCELOUT, 0, PRIORITY.background],
+    [CH19.AP_MOD_DEPTH1, 0, PRIORITY.background],
+    [CH19.AP_MOD_DEPTH2, 0, PRIORITY.background],
+    [CH19.PATTERN_PRESETS_ROSTER, 0, PRIORITY.background],
+  ]);
+  const want19 = [CH19.MACHINE_MODES, CH19.SM_LIMITS, CH19.SM_CHASE, CH19.SM_WAVEFORM,
+    CH19.PATTERN_ADVANCED, CH19.PATTERN_PRESETS_ROSTER];
+  for (let i = 0; i < 60 && !want19.every((c) => seen1.states.has(c)); i++) await delay(50);
+  ok('every newly-subscribed 19-channel STATE delivered its initial push (was UNKNOWN_CHANNEL-only before this pass)',
+    want19.every((c) => seen1.states.has(c)),
+    want19.filter((c) => !seen1.states.has(c)).map((c) => '0x' + c.toString(16)).join(',') || 'all present');
+
+  // ---- machine-modes (0x1030) / modes-set (0x3030) ------------------------
+  {
+    const echo = await s1.sendModesSet({ 3: 1, 4: 1 });
+    ok('modes-set ECHO carries post-clamp APPLIED values (stream_speed_mode, overshoot_clamp)',
+      echo.applied[3] === 1 && echo.applied[4] === 1, JSON.stringify(echo.applied));
+    const reflected = await waitFor(s1, 'state',
+      (ch, sm) => ch === CH19.MACHINE_MODES && sm.stream_speed_mode === 1 && sm.overshoot_clamp === 1,
+      2000, 'machine-modes reflect').then(() => true).catch(() => false);
+    ok('0x1030 machine-modes STATE reflects the applied modes', reflected);
+    const restore = await s1.sendModesSet({ 3: 0, 4: 0 });
+    ok('modes-set RESTORED', restore.applied[3] === 0 && restore.applied[4] === 0);
+
+    // Keys 1/2 (blend_mode/transport) are PERMANENT GAPS — the catalog
+    // declares no schema field for them at all anymore (see addModesSet's own
+    // comment), so a client-side encode of {1:...} throws locally before a
+    // frame is even sent; that is the client-side half of the same "no live
+    // setting left to write" fact. The wire-level half — a request that
+    // touches NO recognized key at all — is what actually reaches the hub's
+    // `anyApplied` check, so that is what this NACK case exercises.
+    let nacked = null;
+    try { await s1.sendIntent(CH19.MODES_SET, {}); } catch (e) { nacked = e; }
+    ok('modes-set: a write touching no recognized key NACKs INVALID_VALUE',
+      !!nacked && nacked.name === 'INVALID_VALUE', nacked ? nacked.name : 'no NACK!');
+  }
+
+  // ---- SlopMotion tuning: sm-limits/chase/waveform (0x1120-2) / sm-set (0x3120)
+  {
+    // One sm-set write touches all THREE STATE cards in the same hub tick, so
+    // every waitFor listener is armed BEFORE the write goes out (not chained
+    // after each other) — the sim's WS client can deliver a tick's several
+    // STATE frames as one synchronous burst, and a listener registered only
+    // after an earlier await already resolved can miss a sibling frame from
+    // the SAME burst (a real race, not a hypothetical one — this is exactly
+    // what an earlier draft of this test hit).
+    const limP = waitFor(s1, 'state',
+      (ch, sm) => ch === CH19.SM_LIMITS && sm.centering === 0 && Math.abs(sm.vmax_ovr - 20) < 0.01,
+      2000, 'sm-limits reflect').then(() => true).catch(() => false);
+    const chaseP = waitFor(s1, 'state',
+      (ch, sm) => ch === CH19.SM_CHASE && Math.abs(sm.handoff_k - 2.5) < 0.01,
+      2000, 'sm-chase reflect').then(() => true).catch(() => false);
+    const wavP = waitFor(s1, 'state',
+      (ch, sm) => ch === CH19.SM_WAVEFORM && sm.blend_steps === 3,
+      2000, 'sm-waveform reflect').then(() => true).catch(() => false);
+
+    const echo = await s1.sendIntent(CH19.SM_SET, { 2: 999, 4: 0, 5: 0.5, 12: 2.5, 18: 3 });
+    ok('sm-set ECHO carries post-clamp APPLIED values',
+      echo.applied[4] === 0 && Math.abs(echo.applied[5] - 0.5) < 0.01 &&
+      Math.abs(echo.applied[12] - 2.5) < 0.01 && echo.applied[18] === 3,
+      JSON.stringify(echo.applied));
+    ok('sm-set CLAMPS an out-of-range override (vmax_ovr=999 -> 20, the catalog\'s own max)',
+      Math.abs(echo.applied[2] - 20) < 0.01, 'applied[2]=' + echo.applied[2]);
+
+    const [reflectedLim, reflectedChase, reflectedWav] = await Promise.all([limP, chaseP, wavP]);
+    ok('0x1120 slopmotion-limits STATE reflects centering + the clamped vmax_ovr', reflectedLim);
+    ok('0x1121 slopmotion-chase STATE reflects handoff_k', reflectedChase);
+    ok('0x1122 slopmotion-waveform STATE reflects blend_steps', reflectedWav);
+
+    await s1.sendIntent(CH19.SM_SET, { 2: 0, 4: 1, 5: 1.0, 12: 1.5, 18: 6 }); // restore factory defaults
+
+    let nacked = null;
+    try { await s1.sendIntent(CH19.SM_SET, {}); } catch (e) { nacked = e; }
+    ok('sm-set: an empty write (no keys touched) NACKs INVALID_VALUE',
+      !!nacked && nacked.name === 'INVALID_VALUE', nacked ? nacked.name : 'no NACK!');
+  }
+
+  // ---- fray-d Advanced pattern: pattern-advanced + 6 modifiers (0x1210 family)
+  // writer pattern-advanced-cmd (0x3210) ------------------------------------
+  {
+    // Same "arm every listener before the write" rule as the sm-set block
+    // above — this one write touches BOTH pattern-advanced and its
+    // pattern-adv-mod-speedin lane in the same tick.
+    const baseP = waitFor(s1, 'state',
+      (ch, sm) => ch === CH19.PATTERN_ADVANCED && sm.ap_mode === 1 && sm.master === 50 &&
+        sm.max_depth === 80 && sm.min_depth === 10,
+      2000, 'pattern-advanced reflect').then(() => true).catch(() => false);
+    const modP = waitFor(s1, 'state',
+      (ch, sm) => ch === CH19.AP_MOD_SPEEDIN && sm.amplitude === 40 && sm.in_step === 25,
+      2000, 'pattern-adv-mod-speedin reflect').then(() => true).catch(() => false);
+
+    const echo = await s1.sendIntent(CH19.PATTERN_ADVANCED_CMD,
+      { 1: true, 2: 50, 3: 80, 4: 10, 21: 40, 22: 999 });
+    ok('pattern-advanced-cmd ECHO carries post-clamp APPLIED base + modifier values',
+      echo.applied[1] === true && echo.applied[2] === 50 && echo.applied[3] === 80 &&
+      echo.applied[4] === 10 && echo.applied[21] === 40,
+      JSON.stringify(echo.applied));
+    ok('pattern-advanced-cmd CLAMPS an out-of-range modifier sub-field (speedin in_step=999 -> 25)',
+      echo.applied[22] === 25, 'applied[22]=' + echo.applied[22]);
+
+    const [reflectedBase, reflectedMod] = await Promise.all([baseP, modP]);
+    ok('0x1210 pattern-advanced STATE reflects the applied base controls (depth pair re-coupled)', reflectedBase);
+    ok('0x1211 pattern-adv-mod-speedin STATE reflects the applied + clamped modifier', reflectedMod);
+
+    let nacked = null;
+    try { await s1.sendIntent(CH19.PATTERN_ADVANCED_CMD, {}); } catch (e) { nacked = e; }
+    ok('pattern-advanced-cmd: an empty write NACKs INVALID_VALUE',
+      !!nacked && nacked.name === 'INVALID_VALUE', nacked ? nacked.name : 'no NACK!');
+  }
+
+  // ---- preset roster/store/cmd trio (0x1220 / 0x5220 / 0x3220) ------------
+  {
+    const rosterBefore = seen1.states.get(CH19.PATTERN_PRESETS_ROSTER);
+    const countBefore = rosterBefore ? rosterBefore.count : 0;
+    info('preset roster before: count=' + countBefore + ' capacity=' + (rosterBefore && rosterBefore.capacity));
+
+    const saveEcho = await s1.sendIntent(CH19.PATTERN_PRESETS_CMD, { 1: 1, 2: 0, 3: 'sim-test-preset' });
+    ok('pattern-presets-cmd save ECHO carries op/slot/name',
+      saveEcho.applied[1] === 1 && saveEcho.applied[2] === 0 && saveEcho.applied[3] === 'sim-test-preset',
+      JSON.stringify(saveEcho.applied));
+    const rosterAfterSave = await waitFor(s1, 'state',
+      (ch, sm) => ch === CH19.PATTERN_PRESETS_ROSTER && sm.count === countBefore + 1,
+      2000, 'preset roster count+1').then(() => true).catch(() => false);
+    ok('0x1220 pattern-presets-roster STATE count increments after save (0x5220 STORE backs it)', rosterAfterSave);
+
+    // ap_mode is already true from the pattern-advanced-cmd test just above,
+    // so `load` re-asserting true would NOT change the STATE bytes and would
+    // NEVER produce a fresh push to wait on (diff-what-we-sent, same as the
+    // firmware) — flip it off first so `load` turning it back on is a REAL,
+    // observable diff, not a no-op this test would hang on.
+    await s1.sendIntent(CH19.PATTERN_ADVANCED_CMD, { 1: false });
+    const apModeP = waitFor(s1, 'state',
+      (ch, sm) => ch === CH19.PATTERN_ADVANCED && sm.ap_mode === 1,
+      2000, 'ap_mode after load').then(() => true).catch(() => false);
+    const loadEcho = await s1.sendIntent(CH19.PATTERN_PRESETS_CMD, { 1: 2, 2: 0 });
+    ok('pattern-presets-cmd load ECHO carries op/slot',
+      loadEcho.applied[1] === 2 && loadEcho.applied[2] === 0, JSON.stringify(loadEcho.applied));
+    const apModeAfterLoad = await apModeP;
+    ok('preset load engages Advanced mode (0x1210 ap_mode reflects on)', apModeAfterLoad);
+
+    const renameEcho = await s1.sendIntent(CH19.PATTERN_PRESETS_CMD, { 1: 4, 2: 0, 3: 'renamed' });
+    ok('pattern-presets-cmd rename ECHO carries op/slot/name',
+      renameEcho.applied[1] === 4 && renameEcho.applied[3] === 'renamed', JSON.stringify(renameEcho.applied));
+
+    const deleteEcho = await s1.sendIntent(CH19.PATTERN_PRESETS_CMD, { 1: 3, 2: 0 });
+    ok('pattern-presets-cmd delete ECHO carries op/slot',
+      deleteEcho.applied[1] === 3 && deleteEcho.applied[2] === 0, JSON.stringify(deleteEcho.applied));
+    const rosterAfterDelete = await waitFor(s1, 'state',
+      (ch, sm) => ch === CH19.PATTERN_PRESETS_ROSTER && sm.count === countBefore,
+      2000, 'preset roster count restored').then(() => true).catch(() => false);
+    ok('0x1220 roster count decrements back after delete', rosterAfterDelete);
+
+    let nacked = null;
+    try { await s1.sendIntent(CH19.PATTERN_PRESETS_CMD, { 1: 1, 2: 99, 3: 'oob' }); } catch (e) { nacked = e; }
+    ok('pattern-presets-cmd: an out-of-range slot (99 >= capacity 24) NACKs INVALID_VALUE',
+      !!nacked && nacked.name === 'INVALID_VALUE', nacked ? nacked.name : 'no NACK!');
+  }
+
+  // ---- machine-admin (0x30F0) ----------------------------------------------
+  {
+    const clearFault = await s1.sendIntent(CH19.MACHINE_ADMIN, { 1: 1 });
+    ok('machine-admin clear_fault ECHOes the accepted op', clearFault.applied[1] === 1);
+    const saveConfig = await s1.sendIntent(CH19.MACHINE_ADMIN, { 1: 2 });
+    ok('machine-admin save_config ECHOes the accepted op', saveConfig.applied[1] === 2);
+    const servoScan = await s1.sendIntent(CH19.MACHINE_ADMIN, { 1: 3 });
+    ok('machine-admin servo_scan ECHOes the accepted op', servoScan.applied[1] === 3);
+
+    let nacked = null;
+    try { await s1.sendIntent(CH19.MACHINE_ADMIN, { 1: 99 }); } catch (e) { nacked = e; }
+    ok('machine-admin: an unknown op (99) NACKs UNSUPPORTED_OP',
+      !!nacked && nacked.name === 'UNSUPPORTED_OP', nacked ? nacked.name : 'no NACK!');
+  }
+
+  // ========================================================================
   // CLIENT-ASSERTABLE E-STOP (RFC-010) — the headline.
   // ========================================================================
   console.log('\nClient-assertable E-STOP (safety_ops::estop = 6 on 0x0005):');

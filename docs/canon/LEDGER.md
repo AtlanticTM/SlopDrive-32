@@ -1050,14 +1050,13 @@ toward eviction for a send never attempted). Operator veto window open.
   - `minimal`: a NEW, literal subset of the real device catalog (same ids/
     field shapes) — spec-core + `motion`/`move`/`home`, 15 channels,
     2,442 B.
-  - **Flagged gap (not fixed this pass):** 19 device-catalog entries
-    (machine-modes/`modes_set`, the 3 SlopMotion tuning cards + `sm_set`,
-    fray-d Advanced pattern + 6 modifiers + its writer, the preset roster/
-    store/cmd trio, machine-admin) are catalog-advertised with full
-    fidelity but have no live STATE publish or INTENT handling in the sim
-    yet — their writes NACK `UNKNOWN_CHANNEL`. Needed before SlopDeck's
-    SlopMotion-tuning and fray-d-Advanced Tier-1 widgets can be built/
-    tested against the sim.
+  - **Flagged gap — RESOLVED, see "Sim fidelity 19-channel follow-on
+    (2026-07-28)" below:** 19 device-catalog entries (machine-modes/
+    `modes_set`, the 3 SlopMotion tuning cards + `sm_set`, fray-d Advanced
+    pattern + 6 modifiers + its writer, the preset roster/store/cmd trio,
+    machine-admin) were catalog-advertised with full fidelity but had no
+    live STATE publish or INTENT handling in the sim — their writes NACKed
+    `UNKNOWN_CHANNEL`. All 19 now have real, firmware-mirrored behavior.
   - `webui/test/fixtures/slopsim-catalog.{bin,etag}` re-captured from
     `device` (was benchrig, 21 ch / 4,272 B). `slopsync-wire.test.mjs`'s
     `[SKIP-EXPECTED-GAP]` (0x1100 motion / `raw_10um`) is CLOSED — now a
@@ -1075,6 +1074,142 @@ toward eviction for a send never attempted). Operator veto window open.
   (INA228 feature flags true/true — validated by the etag match; 44-channel
   faithful build over the brief's imprecise "32"; `minimal` = spec-core +
   motion/move/home). Operator veto window open.
+
+## Sim fidelity 19-channel follow-on (2026-07-28) — LANDED, morning ruling item 3
+
+Implements the ONE-WAY PARITY ruling (morning ruling item 3 below): the sim
+is the 1:1 device twin, so the 19 entries the milestone-1 pass flagged above
+now get REAL behavior — the machine is truth, the sim conforms to it, and
+where mirroring found a firmware quirk the sim copies the quirk rather than
+"fixing" it (the firmware is never edited to close a sim gap). No catalog
+change: `buildSlopDriveCatalog()` is shared verbatim with the firmware
+already, so the etag is unaffected by this pass — confirmed by re-capture,
+below.
+
+- **machine-modes (0x1030) / modes-set (0x3030):** `stream_speed_mode`
+  wired into the sim's pre-existing `uiSetStreamSpeedMode()`;
+  `overshoot_clamp` is plain sim state — inert on the device too (RENDERING.md
+  `ui_ranks::hidden`, no engine consumer on either side, so there is nothing
+  for it to drive in the sim either). Keys 1/2 (`blend_mode`/`transport`) are
+  mirrored as PERMANENT GAPS exactly like the firmware: the catalog declares
+  no schema field for them at all, and a write touching no recognized key
+  NACKs `INVALID_VALUE`.
+- **SlopMotion tuning — slopmotion-limits/chase/waveform (0x1120/1121/1122) +
+  sm-set (0x3120):** 17 of 20 keys write straight into the REAL embedded
+  `slopmotion::Engine`'s `Config` via one read-modify-write + `setConfig()`
+  call (the same seam the sim's existing `uiSetXxx` palette hooks use),
+  clamped to the firmware's OWN bounds — tuning takes effect on the very next
+  plan. `jmax_ovr`/`vmax_ovr`/`amax_ovr` (keys 1-3) are sim-held overrides
+  (0 = derive), mirroring `SystemState::sm_tune_{jmax,vmax,amax}_ovr`'s
+  "0 = derive from the mm limit set / window span" semantics exactly, feeding
+  `deriveEngineLimits()` (which gained the same vmax/amax override branch
+  `_jmax_norm` already had).
+- **fray-d Advanced pattern — pattern-advanced (0x1210) + 6 modifier lanes
+  (0x1211-1216) + writer pattern-advanced-cmd (0x3210):** reuses the
+  FIRMWARE's OWN `advpat::Settings`/`BaseControl`/`Modifier`
+  (`include/motion/AdvancedPattern.{h,cpp}` — pure math, zero Arduino/
+  FreeRTOS deps, now compiled into `slopsim` too) instead of re-deriving
+  equivalent sim-side structs, so clamps, depth-pair coupling
+  (`coupleDepths()`), and compile-time defaults are byte-identical to the
+  device BY CONSTRUCTION, not by transcription.
+- **Preset roster/store/cmd trio (0x1220 / 0x5220 / 0x3220):** reuses the
+  firmware's OWN `PatternPresetStore` (`include/comms/PatternPresetStore.h`,
+  header-only, zero Arduino deps) for save/load/delete/rename, plus a
+  `readBlob()` override (ns=store, store_id=2) so a real client's BLOB_REQ
+  against the STORE channel gets an honest payload — slot/name-length rules
+  and the 40-byte payload layout are byte-identical to the device.
+- **machine-admin (0x30F0):** `clear_fault`/`save_config`/`servo_scan` all
+  accept and ECHO the op; an unknown op NACKs `UNSUPPORTED_OP`.
+
+**Firmware quirks mirrored, flagged for the operator (not fixed, per the
+ONE-WAY rule):**
+1. `pattern-presets-cmd`'s `save` op captures ONLY `in_speed`/`out_speed`/
+   `in_accel`/`out_accel` + the 6 modifier blocks — NEVER `master` or the
+   depth pair (the firmware's own comment: "never depths or master speed").
+   A saved preset silently drops master speed and depth window; loading one
+   back does not restore them. Mirrored exactly; worth naming so nobody is
+   surprised the sim does the same thing the device does.
+2. The six modifier-lane channel ids are NOT in `advpat::BaseId` order: the
+   wire/channel order is speed-in/out, accel-in/out, depth-1/2, while the
+   writer's setting-key grouping (`base = 9 + 6*id`) and the preset payload
+   layout (`base = 4 + 6*id`) both use `BaseId` order (depth-max, depth-min,
+   speed-in/out, accel-in/out). The firmware's own `kModChannels` reorder
+   table is copied verbatim in the sim rather than re-derived, so both sides
+   carry the same non-obvious mapping — a client that assumed "channel id
+   order == BaseId order" would be wrong against either machine.
+   No new inconsistent clamp, wrong NACK code, or other genuine bug was found
+   while implementing this pass — both items above are documented, deliberate
+   firmware design choices, not defects.
+
+**Physics/hardware-model limitations flagged (not silently absorbed):**
+1. The fray-d Advanced pattern's write/clamp/echo/STATE-publish contract is
+   fully real, but the sim's pattern generator (`SimPattern`, a v1 stand-in:
+   stroke/tease/shallow-fast) does not yet consume `_ap` to drive the stepper
+   via `advpat::Settings::planStroke()` the way the firmware's PatternEngine
+   does — toggling `ap_mode` or dialing the 6 modifier lanes has NO motion
+   effect in the sim yet, only a wire effect. Flagged in `MachineSim.h`'s own
+   comment on `_ap`; porting the per-half-stroke scheduling loop is a
+   materially larger feature than wiring existing tuning into the existing
+   engine (the SlopMotion-tuning case above) and was not attempted this pass.
+2. `machine-admin` (0x30F0): the sim models NO fault or servo-Modbus concept
+   at all (grepped clean across `sim/slopsim/src`) — `clear_fault`/
+   `save_config`/`servo_scan` are honest no-ops (accept + echo the op) rather
+   than invented behavior. `servo_scan` can never NACK `INTERLOCK` the way
+   the firmware's async Modbus path sometimes can, because the sim has no
+   interlock condition to refuse it with.
+3. The preset STORE's `readBlob()` override was implemented (any real client
+   fetching preset names/payloads via BLOB_REQ, e.g. MFP or webui, exercises
+   it) but is NOT independently exercised by a dedicated BLOB_REQ line in
+   `slopsync-sim.mjs` this pass — a coverage gap, not a functionality gap.
+
+**Test coverage added:** `webui/test/slopsync-sim.mjs` gained one write ->
+post-clamp ECHO -> STATE-reflect round trip PLUS one invalid-write -> correct
+NACK case per family (5 families, ~33 new assertions). Two families needed
+every `waitFor` listener armed BEFORE the single write that touches more than
+one STATE channel in the same hub tick, rather than chained sequentially
+after each other — a real race (an earlier draft of this test hit it: the
+sim's WS client can deliver a tick's several STATE frames in one synchronous
+burst, and a listener registered only after an earlier `await` already
+resolved can miss a sibling frame from the SAME burst). Documented inline
+where it matters.
+
+**Gauntlet (all green):** sim rebuild (CMake+Ninja, MinGW GCC 16.1.0,
+`sim/slopsim/build`) clean, 0 new warnings from the new code (only
+pre-existing, unrelated `slopmotion.hpp`/vendored-SHA256 library warnings);
+fixture re-capture etag `b69eb06249ebe73a` — MATCHES the live device's
+post-wire-strings etag (fw 2.1.83/84) exactly, confirming the catalog itself
+needed no change, only sim behavior (byte-for-byte identical fixture to the
+one already committed — `git status` on `webui/test/fixtures/` shows no
+diff); `node webui/test/slopsync-sim.mjs` ALL PASS against a FRESH sim
+instance (a reused long-lived process can produce a false failure on a
+reflect check — re-sending an already-applied value is byte-identical to
+what is already published, so the diff-what-we-sent gate produces no new
+push to wait on; this bit an early draft of this test and is why the file's
+own "KILL ANY STALE SLOPSIM" warning is doubly true now); `node webui/test/
+slopsync-wire.test.mjs` ALL PASS; `npm run check` (webui/) ALL PASS;
+`python tools/canon_lint.py` 0 findings.
+
+**Judgment calls, flagged for veto:** (a) machine-admin's three ops treated
+as honest no-ops rather than invented fault/servo simulation (limitation 2
+above); (b) reused the firmware's own `AdvancedPattern.{h,cpp}` and
+`PatternPresetStore.h` verbatim rather than re-deriving equivalent sim-side
+structs — both are already host-clean (no Arduino/FreeRTOS deps), so this
+guarantees clamp/coupling/default parity by construction; it required one
+CMakeLists.txt include-path addition (`include/motion`) so CMake can resolve
+`AdvancedPattern.cpp`'s own unqualified `#include "AdvancedPattern.h"`
+(PlatformIO's LDF adds every `include/` subdirectory automatically; CMake
+does not); (c) fray-d motion-driving (physics limitation 1 above) deliberately
+NOT attempted this pass — flagged, not silently dropped.
+
+**Files touched:** `sim/slopsim/CMakeLists.txt` (new `AdvancedPattern.cpp`
+source + include path), `sim/slopsim/src/machine/MachineSim.h` (new state
+fields, reused firmware headers), `sim/slopsim/src/machine/MachineSim.cpp`
+(5 new `applyIntent` cases, 2 new free helper functions, 6 new STATE-publish
+blocks, `deriveEngineLimits()` vmax/amax branch), `webui/test/
+slopsync-sim.mjs` (new 19-channel write-plane section). `webui/test/
+fixtures/slopsim-catalog.{bin,etag}` re-captured (byte-identical, no diff).
+[verified 2026-07-28 — sim build clean, fixture etag match confirmed
+directly, full gauntlet commands run and exit codes/output observed above]
 
 ## Morning ruling batch (operator, 2026-07-28, on the overnight stamp list)
 
@@ -1095,10 +1230,12 @@ toward eviction for a send never attempted). Operator veto window open.
    machine ("it's a 1:1 sim and it should reflect that for quality
    testing"). PARITY IS ONE-WAY (operator, same date): the machine is the
    truth and the sim conforms to it — the firmware is NEVER edited to close
-   a sim gap; a mismatch is always a sim work item. The "be anything" role
-   moves to a NEW dumb test hub named **SlopBench** (operator-named):
-   config-file catalog, simple TUI showing live axis/channel values,
-   configurable fake delay on STATE echo.
+   a sim gap; a mismatch is always a sim work item.
+   **DONE — see the "Sim fidelity 19-channel follow-on (2026-07-28)" entry
+   above.** The "be anything" role moves to a NEW dumb test hub named
+   **SlopBench** (operator-named): config-file catalog, simple TUI showing
+   live axis/channel values, configurable fake delay on STATE echo.
+   (SlopBench itself is a separate, parallel work item — `sim/slopbench/`.)
 4. **Internal reference docs stay out of the repo — verified already true:**
    root tracking is LICENSE/NOTICE/README/THIRD_PARTY_LICENSES + 4 build
    files only; zero PDFs/.diy tracked. The visible root clutter is

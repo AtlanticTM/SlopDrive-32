@@ -51,6 +51,11 @@ add_executable(slopsim
     src/common/OpenBrowser.cpp
     src/machine/MachineSim.cpp
     src/tui/MachineScreen.cpp
+    # The firmware's own fray-d port — pure math (math.h only), no Arduino/
+    # FreeRTOS deps, already host-tested. MachineSim reuses advpat::Settings
+    # verbatim for pattern-advanced (0x1210) parity (19-channel sim-fidelity
+    # follow-on) rather than re-deriving the same clamp/coupling math twice.
+    "${REPO_ROOT}/src/motion/AdvancedPattern.cpp"
     ${RUCKIG_SOURCES})
 
 target_include_directories(slopsim PRIVATE
@@ -58,7 +63,12 @@ target_include_directories(slopsim PRIVATE
     "${REPO_ROOT}/lib/slopsync/include"
     "${REPO_ROOT}/lib/slopmotion/include"
     "${REPO_ROOT}/lib/ruckig/include"
-    "${REPO_ROOT}/include")
+    "${REPO_ROOT}/include"
+    # AdvancedPattern.cpp's own #include "AdvancedPattern.h" is unqualified —
+    # PlatformIO's LDF auto-adds every include/ subdirectory to -I, which is
+    # why the firmware build resolves it with no path prefix; CMake does not
+    # do that implicitly, so its home directory is added explicitly here.
+    "${REPO_ROOT}/include/motion")
     # include/comms (the firmware's own SlopSyncCatalog.h) IS on this path —
     # SlopDeck DESIGN.md's sim-fidelity ruling (docs/slopdeck/DESIGN.md §5/§7)
     # restores the `device` profile to LITERAL device-catalog fidelity: the

@@ -34,7 +34,9 @@
 
 #include "SlopMinimalCatalog.h"
 #include "SlopSimCatalog.h"
+#include "comms/PatternPresetStore.h"
 #include "comms/SlopSyncCatalog.h"
+#include "motion/AdvancedPattern.h"
 #include "slopmotion/slopmotion.hpp"
 #include "slopsync/hub/hub.hpp"
 
@@ -645,6 +647,14 @@ private:
     // Normalized OVERRIDE (units/s^3). 0 = derive from _input_jerk / span,
     // mirroring the firmware's `jovr`. See uiSetJmax.
     float _jmax_norm = 0.0f;
+    // sm-set (0x3120) keys 2/3 — same "0 = derive, held outside the engine"
+    // role as _jmax_norm just above, mirroring the firmware's
+    // SystemState::sm_tune_vmax_ovr/sm_tune_amax_ovr. Wire-clamped [0, 20] /
+    // [0, 500] directly in applyIntent (the sm-set writer's own bounds), NOT
+    // the tighter [1, 1e6] uiSetJmax() uses for the TUI/HTTP palette seam —
+    // that seam is a separate, sim-only convenience with its own clamp, not
+    // the wire contract this pair also serves.
+    float _vmax_norm = 0.0f, _amax_norm = 0.0f;
     float _commanded_target_mm = 0.0f;
     // SystemState::commanded_raw_mm — the PRE-PLANNING demand, one stage
     // upstream of _commanded_target_mm. Published as 0x0080's appended
@@ -683,6 +693,13 @@ private:
     float _measured_stroke_mm = 0.0f;
     // SystemState::stream_speed_mode — DEVICE DEFAULT SPEED_CEILING_PEGGED (0).
     uint8_t _stream_speed_mode = 0;
+    // machine-modes (0x1030) key 4 — RENDERING.md ui_ranks::hidden on the
+    // device too: SystemState::interp_clamp_overshoot has no live consumer on
+    // the engine (CLAUDE.md's released-but-inert-field case). Held as plain
+    // state so the wire round-trips exactly like the device's; there is
+    // nothing in the sim's engine config for it to drive either way.
+    // factory::overshoot_clamp == 0/false.
+    bool _overshoot_clamp = false;
     // Mirrors estop_requested: set by onEstop, consumed by the next motion
     // substep (motorTask's RMW on Core 1). canClearEstop refuses while pending.
     bool _estop_pending = false;
@@ -751,6 +768,33 @@ private:
     SimStepper _stepper;
     SimPattern _pattern;
 
+    // ---- fray-d Advanced pattern (pattern-advanced 0x1210 + its 6 modifier
+    // lanes 0x1211-0x1216, writer pattern_advanced_cmd 0x3210) ----------------
+    // Reuses the FIRMWARE's own advpat::Settings (include/motion/AdvancedPattern.h)
+    // — pure math/data, no Arduino/FreeRTOS, already host-tested — so the base-
+    // control clamps (BaseControl::set()), the depth-pair coupling
+    // (Settings::coupleDepths()), and the compile-time defaults are BYTE-
+    // IDENTICAL to the device by construction, not by transcription.
+    // PHYSICS LIMITATION (flagged, not silently absorbed): SimPattern above is
+    // a stand-in generator (v1: stroke/tease/shallow-fast) — it does not
+    // consume `_ap` at all. Toggling `ap_mode` and dialling these controls
+    // clamps/echoes/publishes byte-identically to the device, but does NOT
+    // yet drive the stepper via fray-d's per-half-stroke math
+    // (advpat::Settings::planStroke) the way the firmware's PatternEngine
+    // does. Porting that scheduling loop is a separate, larger feature than
+    // wiring existing tuning into the existing engine (see sm-* below) and is
+    // left as a follow-on, not attempted here.
+    advpat::Settings _ap;
+    bool _ap_mode = false;
+    // pattern-presets (0x5220 STORE, roster 0x1220, writer/CRUD 0x3220).
+    // Reuses the firmware's own PatternPresetStore (include/comms/
+    // PatternPresetStore.h) — pure byte-blob CRUD, no Arduino deps — so slot/
+    // name-length rules and the 40-byte payload layout are byte-identical to
+    // the device. NOT NVS-persisted here (sim convention throughout this
+    // class: session-volatile in-memory for the process lifetime, per the
+    // ONE-WAY PARITY ruling's documented simplification).
+    slopdrive::PatternPresetStore _presets;
+
     uint16_t _cfgGenBump = 0;       // local mirror of applied config generation
     uint64_t _lastSampleUs = 0;     // 1 ms substep cursor
     uint64_t _lastPumpUs = 0;       // 5 ms comms-pump cursor (taskLoop analog)
@@ -805,6 +849,26 @@ private:
     uint8_t _patIdx = 0xFF;
     float _patSpeed = -1, _patDepth = -1, _patStroke = -1, _patSensation = -1;
     uint16_t _estopSeq = 0;
+
+    // ---- 19-channel parity: diff-what-we-SENT change tracking, same idiom
+    // as _cfgEverSent/_lastCfgGen above and the firmware's own _xxxEverSent/
+    // _lastXxx pairs (SlopSyncHubService.cpp) — comparing the bytes a
+    // subscriber actually holds cannot disagree with them.
+    bool _modesEverSent = false;
+    std::array<std::byte, 4> _lastModes{};
+    bool _smLimEverSent = false;
+    std::array<std::byte, 18> _lastSmLim{};
+    bool _smChaseEverSent = false;
+    std::array<std::byte, 20> _lastSmChase{};
+    bool _smWavEverSent = false;
+    std::array<std::byte, 21> _lastSmWav{};
+    bool _apBaseEverSent = false;
+    std::array<std::byte, 9> _lastApBase{};
+    static constexpr uint8_t kApBaseCount = advpat::BASE_COUNT;
+    std::array<bool, kApBaseCount> _apModEverSent{};
+    std::array<std::array<std::byte, 7>, kApBaseCount> _lastApMod{};
+    bool _presetRosterEverSent = false;
+    uint16_t _lastPresetGen = 0;
 };
 
 }  // namespace slopsim

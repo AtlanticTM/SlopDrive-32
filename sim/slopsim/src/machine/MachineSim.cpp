@@ -116,6 +116,35 @@ std::string_view fieldTstr(const IntentValueField* f, std::string_view dflt) {
 
 float clampf(float v, float lo, float hi) { return v < lo ? lo : (v > hi ? hi : v); }
 
+// ---- fray-d Advanced pattern setters -- mirror PatternEngine::setApBase/
+// setApModifier (src/motion/PatternEngine.cpp) exactly, minus the Arduino
+// `constrain()` calls (plain clamps here) and the `_ap_gen` bump (no
+// generation-counted UI poll seam on the sim side). Free functions, not
+// MachineSim members, so pattern_advanced_cmd AND the preset "load" op
+// (pattern_presets_cmd) can share ONE clamp/coupling implementation instead
+// of two copies drifting apart.
+void setApBase(advpat::Settings& ap, uint8_t id, int v) {
+    advpat::BaseControl* c = ap.byId(id);
+    if (!c) return;
+    c->set(v);
+    // fray-d setDepthLimits: the depth pair may never cross.
+    if (id == advpat::DEPTH_MAX || id == advpat::DEPTH_MIN) ap.coupleDepths();
+}
+
+void setApModifier(advpat::Settings& ap, uint8_t id, int amplitude, int in_step, int in_wait,
+                    int out_step, int out_wait, int offset) {
+    advpat::BaseControl* c = ap.byId(id);
+    if (!c) return;
+    auto cl = [](int v, int lo, int hi) { return v < lo ? lo : (v > hi ? hi : v); };
+    advpat::Modifier& m = c->modifier;
+    m.amplitude = uint8_t(cl(amplitude, 0, 100));
+    m.in_step   = uint8_t(cl(in_step,   1, 25));
+    m.in_wait   = uint8_t(cl(in_wait,   0, 25));
+    m.out_step  = uint8_t(cl(out_step,  1, 25));
+    m.out_wait  = uint8_t(cl(out_wait,  0, 25));
+    m.offset    = uint8_t(cl(offset,    0, 100));
+}
+
 }  // namespace
 
 // ============================================================================
@@ -291,8 +320,13 @@ void MachineSim::deriveEngineLimits() {
     // INPUT limit set across the stroke-window span.
     slopmotion::Limits l;
     const float span = windowSpan();
-    l.vmax = _input_speed / span;
-    l.amax = _input_accel / span;
+    // v/a follow jerk's own "override wins when > 0" rule (main.cpp's
+    // smCfg.limits.vmax/amax derivation) via sm-set (0x3120) keys 2/3 —
+    // _vmax_norm/_amax_norm are sim-held for the SAME reason _jmax_norm is:
+    // this rebuild runs on every window/limit change and would otherwise
+    // clobber a standing override.
+    l.vmax = _vmax_norm > 0.0f ? _vmax_norm : _input_speed / span;
+    l.amax = _amax_norm > 0.0f ? _amax_norm : _input_accel / span;
     // Jerk derives the SAME way as v/a now (mm-domain limit ÷ span). The
     // normalized override (uiSetJmax / --jmax / motion.jmax) is sim-held so
     // this rebuild can't clobber it, and wins when > 0 — firmware `jovr`.
@@ -922,6 +956,155 @@ void MachineSim::publishTelemetry(uint32_t nowMs) {
                 slopsync::putU16(s.subspan(6, 2), uint16_t(clampI16(_die_c * 10.0f)));
                 _hub.publishState(ch::power, s);
             }
+
+            // ---- 0x1030 machine-modes — on change ---------------------------
+            // Byte-identical layout to the firmware's own publisher
+            // (SlopSyncHubService.cpp): blend_mode_reserved stays a literal 0
+            // (retired padding — no motor/blend concept exists here either),
+            // enabled_mask is ALL-ALWAYS (0x03) for the same "honest publish,
+            // not a stub" reason the firmware states — neither setter is ever
+            // refused.
+            {
+                std::array<std::byte, 4> buf{};
+                std::span<std::byte> s(buf);
+                slopsync::putU8(s.subspan(0, 1), 0);  // blend_mode_reserved
+                slopsync::putU8(s.subspan(1, 1), _stream_speed_mode);
+                slopsync::putU8(s.subspan(2, 1), _overshoot_clamp ? 1u : 0u);
+                slopsync::putU8(s.subspan(3, 1), 0x03u);
+                if (!_modesEverSent || buf != _lastModes) {
+                    _modesEverSent = true;
+                    _lastModes = buf;
+                    _hub.publishState(ch::machine_modes, s);
+                }
+            }
+
+            // ---- 0x1120/1121/1122 slopmotion-limits/chase/waveform — on change
+            // Byte-identical layout to the firmware's own publisher. Reads the
+            // REAL engine Config directly (the same source sm-set just wrote),
+            // never a shadow copy — same "one source of truth" rule the
+            // firmware comment states for 0x008B/C/D.
+            {
+                const slopmotion::Config& cfg = _engine.config();
+
+                std::array<std::byte, 18> lim{};
+                std::span<std::byte> l(lim);
+                slopsync::putF32(l.subspan(0, 4),  _jmax_norm);
+                slopsync::putF32(l.subspan(4, 4),  _vmax_norm);
+                slopsync::putF32(l.subspan(8, 4),  _amax_norm);
+                slopsync::putU8 (l.subspan(12, 1), cfg.wave_centering ? 1u : 0u);
+                slopsync::putF32(l.subspan(13, 4), cfg.wave_centering_gain);
+                slopsync::putU8 (l.subspan(17, 1), 0x1Fu);
+                if (!_smLimEverSent || lim != _lastSmLim) {
+                    _smLimEverSent = true;
+                    _lastSmLim = lim;
+                    _hub.publishState(ch::sm_limits, l);
+                }
+
+                std::array<std::byte, 20> chc{};
+                std::span<std::byte> h(chc);
+                slopsync::putU8 (h.subspan(0, 1),  cfg.chase_feedforward ? 1u : 0u);
+                slopsync::putU8 (h.subspan(1, 1),  cfg.chase_accel_ff ? 1u : 0u);
+                slopsync::putF32(h.subspan(2, 4),  cfg.chase_ff_gain);
+                slopsync::putF32(h.subspan(6, 4),  cfg.chase_lookahead);
+                slopsync::putU32(h.subspan(10, 4), cfg.chase_dense_us);
+                slopsync::putU8 (h.subspan(14, 1), cfg.chase_aim_accel_extrap ? 1u : 0u);
+                slopsync::putF32(h.subspan(15, 4), cfg.handoff_chord_factor);
+                slopsync::putU8 (h.subspan(19, 1), 0x7Fu);
+                if (!_smChaseEverSent || chc != _lastSmChase) {
+                    _smChaseEverSent = true;
+                    _lastSmChase = chc;
+                    _hub.publishState(ch::sm_chase, h);
+                }
+
+                std::array<std::byte, 21> wav{};
+                std::span<std::byte> w(wav);
+                slopsync::putU8 (w.subspan(0, 1),  uint8_t(cfg.curve_policy));
+                slopsync::putU8 (w.subspan(1, 1),  uint8_t(cfg.infeasible_policy));
+                slopsync::putF32(w.subspan(2, 4),  cfg.infeasible_scale_margin);
+                slopsync::putF32(w.subspan(6, 4),  cfg.infeasible_smooth_budget);
+                slopsync::putF32(w.subspan(10, 4), cfg.infeasible_amplitude_budget);
+                slopsync::putU8 (w.subspan(14, 1), cfg.infeasible_blend_steps);
+                slopsync::putU8 (w.subspan(15, 1), cfg.infeasible_reshape_steps);
+                slopsync::putU32(w.subspan(16, 4), cfg.settle_grace_us);
+                slopsync::putU8 (w.subspan(20, 1), 0xFFu);
+                if (!_smWavEverSent || wav != _lastSmWav) {
+                    _smWavEverSent = true;
+                    _lastSmWav = wav;
+                    _hub.publishState(ch::sm_waveform, w);
+                }
+            }
+
+            // ---- 0x1210 pattern-advanced + 0x1211..1216 pattern-adv-mod-* ---
+            // Byte-identical layout to the firmware's own publisher. Reads
+            // `_ap` directly — the SAME struct pattern_advanced_cmd/preset
+            // load write — never a shadow copy. Mask tracks e-stop alone (none
+            // of these setters is gated on `homed` either — see the field
+            // comment in SlopSyncCatalog.h).
+            {
+                const uint8_t mask = _estop_latched ? 0x00u : 0xFFu;
+
+                std::array<std::byte, 9> base{};
+                std::span<std::byte> b(base);
+                slopsync::putU8(b.subspan(0, 1), _ap_mode ? 1u : 0u);
+                slopsync::putU8(b.subspan(1, 1), _ap.master.value);
+                slopsync::putU8(b.subspan(2, 1), _ap.max_depth.value);
+                slopsync::putU8(b.subspan(3, 1), _ap.min_depth.value);
+                slopsync::putU8(b.subspan(4, 1), _ap.in_speed.value);
+                slopsync::putU8(b.subspan(5, 1), _ap.out_speed.value);
+                slopsync::putU8(b.subspan(6, 1), _ap.in_accel.value);
+                slopsync::putU8(b.subspan(7, 1), _ap.out_accel.value);
+                slopsync::putU8(b.subspan(8, 1), mask);
+                if (!_apBaseEverSent || base != _lastApBase) {
+                    _apBaseEverSent = true;
+                    _lastApBase = base;
+                    _hub.publishState(ch::pattern_advanced, b);
+                }
+
+                // Indexed by advpat::BaseId, NOT by ascending channel id —
+                // Phase C4 put the six modifier lanes in member order
+                // speedin/out, accelin/out, depth1/2 (see the ch:: namespace
+                // comment in SlopSyncCatalog.h), matching the firmware's own
+                // kModChannels table exactly.
+                static constexpr uint16_t kModChannels[kApBaseCount] = {
+                    ch::pattern_adv_mod_depth1, ch::pattern_adv_mod_depth2, ch::pattern_adv_mod_speedin,
+                    ch::pattern_adv_mod_speedout, ch::pattern_adv_mod_accelin, ch::pattern_adv_mod_accelout,
+                };
+                for (uint8_t id = 0; id < kApBaseCount; ++id) {
+                    const advpat::BaseControl* bc = _ap.byId(id);
+                    if (!bc) continue;
+                    const advpat::Modifier& m = bc->modifier;
+                    std::array<std::byte, 7> mb{};
+                    std::span<std::byte> ms(mb);
+                    slopsync::putU8(ms.subspan(0, 1), m.amplitude);
+                    slopsync::putU8(ms.subspan(1, 1), m.in_step);
+                    slopsync::putU8(ms.subspan(2, 1), m.in_wait);
+                    slopsync::putU8(ms.subspan(3, 1), m.out_step);
+                    slopsync::putU8(ms.subspan(4, 1), m.out_wait);
+                    slopsync::putU8(ms.subspan(5, 1), m.offset);
+                    slopsync::putU8(ms.subspan(6, 1), mask);
+                    if (!_apModEverSent[id] || mb != _lastApMod[id]) {
+                        _apModEverSent[id] = true;
+                        _lastApMod[id] = mb;
+                        _hub.publishState(kModChannels[id], ms);
+                    }
+                }
+            }
+
+            // ---- 0x1220 pattern-presets-roster — on change, generation-diffed
+            // Bare {generation,count,capacity}, same shape as the firmware's
+            // publishPresetRoster().
+            {
+                if (!_presetRosterEverSent || _presets.generation() != _lastPresetGen) {
+                    _lastPresetGen = _presets.generation();
+                    _presetRosterEverSent = true;
+                    std::array<std::byte, 4> buf{};
+                    std::span<std::byte> s(buf);
+                    slopsync::putU16(s.subspan(0, 2), _presets.generation());
+                    slopsync::putU8(s.subspan(2, 1), _presets.count());
+                    slopsync::putU8(s.subspan(3, 1), slopdrive::PatternPresetStore::kCapacity);
+                    _hub.publishState(ch::pattern_presets_roster, s);
+                }
+            }
         }
     }
 
@@ -1267,6 +1450,346 @@ slopsync::Result<IntentValueMap, NackCode> MachineSim::applyIntent(uint16_t chan
             applied.count = 1;
             applied.fields[0] = {1, IntentValue::ofU64(op)};
             return Ret::ok(applied);
+        }
+
+        // ---- modes-set (0x3030) -> machine-modes (0x1030) --------------------
+        // Mirrors SlopDriveHubDelegate's ch::modes_set case: keys 1/2 (retired
+        // blend_mode/transport) are PERMANENT GAPS on the firmware too, so a
+        // request touching ONLY those falls through unhandled here as well —
+        // same NACK. Echo is read back from the applied sim state, not the
+        // request, same Ground Truth rule the firmware comment states.
+        case ch::modes_set: {
+            applied.count = 0;
+            bool anyApplied = false;
+            if (const auto* f = findField(requested, 3)) {   // stream_speed_mode
+                const uint8_t applied_mode = uiSetStreamSpeedMode(uint8_t(fieldU64(f, _stream_speed_mode)));
+                applied.fields[applied.count++] = {3, IntentValue::ofU64(applied_mode)};
+                anyApplied = true;
+            }
+            if (const auto* f = findField(requested, 4)) {   // overshoot_clamp
+                _overshoot_clamp = fieldU64(f, _overshoot_clamp ? 1 : 0) != 0;
+                applied.fields[applied.count++] = {4, IntentValue::ofU64(_overshoot_clamp ? 1u : 0u)};
+                anyApplied = true;
+            }
+            if (!anyApplied) return Ret::err(NackCode::INVALID_VALUE);
+            return Ret::ok(applied);
+        }
+
+        // ---- sm-set (0x3120) -> slopmotion-limits/chase/waveform -------------
+        // Mirrors SlopDriveHubDelegate's ch::sm_set case: 20 keys, every one
+        // optional, clamped to the SAME bounds the catalog advertises, echoed
+        // post-clamp. jmax/vmax/amax overrides are sim-held (see the field
+        // comments in MachineSim.h) and rebuild the engine's Limits via
+        // deriveEngineLimits(); every other key writes straight into the REAL
+        // engine's Config — one read-modify-write, one setConfig() call, so
+        // the tuning takes effect on the very next plan, same as the
+        // firmware's per-tick config push (main.cpp) does.
+        case ch::sm_set: {
+            applied.count = 0;
+            bool any = false;
+            bool touchedLimits = false;
+            bool touchedCfg = false;
+            slopmotion::Config cfg = _engine.config();
+
+            auto setNorm = [&](uint8_t key, float lo, float hi, float& dst) {
+                if (const auto* f = findField(requested, key)) {
+                    dst = clampf(fieldF32(f, dst), lo, hi);
+                    applied.fields[applied.count++] = {key, IntentValue::ofF32(dst)};
+                    any = true;
+                    touchedLimits = true;
+                }
+            };
+            setNorm(1, 0.0f, 2000000.0f, _jmax_norm);
+            setNorm(2, 0.0f, 20.0f,      _vmax_norm);
+            setNorm(3, 0.0f, 500.0f,     _amax_norm);
+
+            if (const auto* f = findField(requested, 4)) {   // centering
+                cfg.wave_centering = fieldU64(f, cfg.wave_centering ? 1 : 0) != 0;
+                applied.fields[applied.count++] = {4, IntentValue::ofU64(cfg.wave_centering ? 1u : 0u)};
+                any = true; touchedCfg = true;
+            }
+            if (const auto* f = findField(requested, 5)) {   // centering_gain
+                cfg.wave_centering_gain = clampf(fieldF32(f, cfg.wave_centering_gain), 0.0f, 1.0f);
+                applied.fields[applied.count++] = {5, IntentValue::ofF32(cfg.wave_centering_gain)};
+                any = true; touchedCfg = true;
+            }
+            if (const auto* f = findField(requested, 6)) {   // chase_ff
+                cfg.chase_feedforward = fieldU64(f, cfg.chase_feedforward ? 1 : 0) != 0;
+                applied.fields[applied.count++] = {6, IntentValue::ofU64(cfg.chase_feedforward ? 1u : 0u)};
+                any = true; touchedCfg = true;
+            }
+            if (const auto* f = findField(requested, 7)) {   // chase_accel_ff
+                cfg.chase_accel_ff = fieldU64(f, cfg.chase_accel_ff ? 1 : 0) != 0;
+                applied.fields[applied.count++] = {7, IntentValue::ofU64(cfg.chase_accel_ff ? 1u : 0u)};
+                any = true; touchedCfg = true;
+            }
+            if (const auto* f = findField(requested, 8)) {   // chase_gain
+                cfg.chase_ff_gain = clampf(fieldF32(f, cfg.chase_ff_gain), 0.0f, 1.5f);
+                applied.fields[applied.count++] = {8, IntentValue::ofF32(cfg.chase_ff_gain)};
+                any = true; touchedCfg = true;
+            }
+            if (const auto* f = findField(requested, 9)) {   // chase_lookahead
+                cfg.chase_lookahead = clampf(fieldF32(f, cfg.chase_lookahead), 0.0f, 8.0f);
+                applied.fields[applied.count++] = {9, IntentValue::ofF32(cfg.chase_lookahead)};
+                any = true; touchedCfg = true;
+            }
+            if (const auto* f = findField(requested, 10)) {  // chase_dense_ms (wire ms, engine us)
+                const float ms = clampf(fieldF32(f, float(cfg.chase_dense_us) / 1000.0f), 10.0f, 500.0f);
+                cfg.chase_dense_us = uint32_t(ms * 1000.0f);
+                applied.fields[applied.count++] = {10, IntentValue::ofF32(ms)};
+                any = true; touchedCfg = true;
+            }
+            if (const auto* f = findField(requested, 11)) {  // chase_aim_extrap
+                cfg.chase_aim_accel_extrap = fieldU64(f, cfg.chase_aim_accel_extrap ? 1 : 0) != 0;
+                applied.fields[applied.count++] = {11, IntentValue::ofU64(cfg.chase_aim_accel_extrap ? 1u : 0u)};
+                any = true; touchedCfg = true;
+            }
+            if (const auto* f = findField(requested, 12)) {  // handoff_k
+                cfg.handoff_chord_factor = clampf(fieldF32(f, cfg.handoff_chord_factor), 0.0f, 8.0f);
+                applied.fields[applied.count++] = {12, IntentValue::ofF32(cfg.handoff_chord_factor)};
+                any = true; touchedCfg = true;
+            }
+            if (const auto* f = findField(requested, 13)) {  // curve_policy
+                uint64_t v = fieldU64(f, uint64_t(cfg.curve_policy));
+                if (v > 2) v = 2;
+                cfg.curve_policy = slopmotion::CurvePolicy(v);
+                applied.fields[applied.count++] = {13, IntentValue::ofU64(v)};
+                any = true; touchedCfg = true;
+            }
+            if (const auto* f = findField(requested, 14)) {  // infeasible_policy
+                uint64_t v = fieldU64(f, uint64_t(cfg.infeasible_policy));
+                if (v > 4) v = 4;
+                cfg.infeasible_policy = slopmotion::InfeasiblePolicy(v);
+                applied.fields[applied.count++] = {14, IntentValue::ofU64(v)};
+                any = true; touchedCfg = true;
+            }
+            if (const auto* f = findField(requested, 15)) {  // infeasible_margin
+                cfg.infeasible_scale_margin = clampf(fieldF32(f, cfg.infeasible_scale_margin), 0.5f, 1.0f);
+                applied.fields[applied.count++] = {15, IntentValue::ofF32(cfg.infeasible_scale_margin)};
+                any = true; touchedCfg = true;
+            }
+            if (const auto* f = findField(requested, 16)) {  // smooth_budget
+                cfg.infeasible_smooth_budget = clampf(fieldF32(f, cfg.infeasible_smooth_budget), 0.0f, 1.0f);
+                applied.fields[applied.count++] = {16, IntentValue::ofF32(cfg.infeasible_smooth_budget)};
+                any = true; touchedCfg = true;
+            }
+            if (const auto* f = findField(requested, 17)) {  // amplitude_budget
+                cfg.infeasible_amplitude_budget = clampf(fieldF32(f, cfg.infeasible_amplitude_budget), 0.0f, 1.0f);
+                applied.fields[applied.count++] = {17, IntentValue::ofF32(cfg.infeasible_amplitude_budget)};
+                any = true; touchedCfg = true;
+            }
+            if (const auto* f = findField(requested, 18)) {  // blend_steps
+                uint64_t v = fieldU64(f, cfg.infeasible_blend_steps);
+                if (v < 1) v = 1;
+                if (v > 10) v = 10;
+                cfg.infeasible_blend_steps = uint8_t(v);
+                applied.fields[applied.count++] = {18, IntentValue::ofU64(v)};
+                any = true; touchedCfg = true;
+            }
+            if (const auto* f = findField(requested, 19)) {  // reshape_steps
+                uint64_t v = fieldU64(f, cfg.infeasible_reshape_steps);
+                if (v > 8) v = 8;
+                cfg.infeasible_reshape_steps = uint8_t(v);
+                applied.fields[applied.count++] = {19, IntentValue::ofU64(v)};
+                any = true; touchedCfg = true;
+            }
+            if (const auto* f = findField(requested, 20)) {  // settle_grace_ms (wire ms, engine us)
+                const float ms = clampf(fieldF32(f, float(cfg.settle_grace_us) / 1000.0f), 0.0f, 200.0f);
+                cfg.settle_grace_us = uint32_t(ms * 1000.0f);
+                applied.fields[applied.count++] = {20, IntentValue::ofF32(ms)};
+                any = true; touchedCfg = true;
+            }
+
+            if (touchedCfg) _engine.setConfig(cfg);
+            if (touchedLimits) deriveEngineLimits();
+            if (!any) return Ret::err(NackCode::INVALID_VALUE);
+            return Ret::ok(applied);
+        }
+
+        // ---- machine-admin (0x30F0) -------------------------------------------
+        // ONE-WAY PARITY judgment call, flagged for the operator: the sim has
+        // NO fault/servo-Modbus concept at all (grepped clean across
+        // sim/slopsim/src), so these three ops get the closest HONEST
+        // equivalent rather than invented behavior. clear_fault/save_config
+        // are genuine no-ops here (nothing to clear, nothing persists — the
+        // sim's session-volatile convention throughout this class); servo_scan
+        // never NACKs INTERLOCK the way the firmware's async Modbus path can,
+        // because the sim models no interlock condition to refuse it with.
+        case ch::machine_admin: {
+            const uint64_t op = fieldU64(findField(requested, 1), 0);
+            switch (op) {
+                case 1:  // clear_fault — no fault state modeled; accepted no-op
+                    _log.logf('I', "sim: machine-admin clear_fault (no-op, no fault modeled)");
+                    break;
+                case 2:  // save_config — nothing persists in the sim; accepted no-op
+                    _log.logf('I', "sim: machine-admin save_config (no-op, sim does not persist)");
+                    break;
+                case 3:  // servo_scan — no Modbus/servo seam to scan; accepted no-op
+                    _log.logf('I', "sim: machine-admin servo_scan (no-op, no servo modeled)");
+                    break;
+                default:
+                    return Ret::err(NackCode::UNSUPPORTED_OP);
+            }
+            applied.count = 1;
+            applied.fields[0] = {1, IntentValue::ofU64(op)};
+            return Ret::ok(applied);
+        }
+
+        // ---- pattern-advanced-cmd (0x3210) -> pattern-advanced + 6 mod lanes -
+        // Mirrors SlopDriveHubDelegate's ch::pattern_advanced_cmd case: key 1
+        // ap_mode, key 2 master (BaseControl::set() direct), keys 3-8 the
+        // depth/speed/accel base controls in advpat::BaseId order (depth pair
+        // re-coupled on write via setApBase()), keys 9..44 the six modifier
+        // lanes (base = 9 + 6*id, sub-offsets amplitude/in_step/in_wait/
+        // out_step/out_wait/offset). Echo is Ground Truth for every control
+        // this call actually touched, never invented for the rest — same rule
+        // the firmware's touched[] array enforces.
+        //
+        // PHYSICS LIMITATION (flagged): see the `_ap`/SimPattern comment in
+        // MachineSim.h — this wire contract is real (clamp/echo/publish), but
+        // nothing here yet drives the stepper from `_ap`.
+        case ch::pattern_advanced_cmd: {
+            if (_estop_latched) return Ret::err(NackCode::ESTOP_ACTIVE);
+
+            if (const auto* f = findField(requested, 1)) {
+                _ap_mode = fieldBool(f, _ap_mode);
+                applied.fields[applied.count++] = {1, IntentValue::ofBool(_ap_mode)};
+            }
+            if (const auto* f = findField(requested, 2)) {
+                _ap.master.set(int(fieldU64(f, _ap.master.value)));
+                applied.fields[applied.count++] = {2, IntentValue::ofU64(_ap.master.value)};
+            }
+            // Key = 3 + advpat::BaseId: 3 max_depth, 4 min_depth, 5 in_speed,
+            // 6 out_speed, 7 in_accel, 8 out_accel.
+            for (uint8_t id = 0; id < kApBaseCount; ++id) {
+                const uint8_t key = uint8_t(3 + id);
+                if (const auto* f = findField(requested, key)) {
+                    setApBase(_ap, id, int(fieldU64(f, _ap.byId(id)->value)));
+                    applied.fields[applied.count++] = {key, IntentValue::ofU64(_ap.byId(id)->value)};
+                }
+            }
+            // Modifier cycles: keys 9..44, base = 9 + 6*id. Only rewrite (and
+            // only echo) a control whose modifier this request actually
+            // touched — the rest keep whatever they already held, read back
+            // from the engine state, never invented.
+            for (uint8_t id = 0; id < kApBaseCount; ++id) {
+                const uint8_t base = uint8_t(9 + 6 * id);
+                const auto* fa  = findField(requested, uint8_t(base + 0));
+                const auto* fis = findField(requested, uint8_t(base + 1));
+                const auto* fiw = findField(requested, uint8_t(base + 2));
+                const auto* fos = findField(requested, uint8_t(base + 3));
+                const auto* fow = findField(requested, uint8_t(base + 4));
+                const auto* fof = findField(requested, uint8_t(base + 5));
+                if (!fa && !fis && !fiw && !fos && !fow && !fof) continue;
+                const advpat::Modifier& m = _ap.byId(id)->modifier;
+                setApModifier(_ap, id,
+                              int(fieldU64(fa,  m.amplitude)),
+                              int(fieldU64(fis, m.in_step)),
+                              int(fieldU64(fiw, m.in_wait)),
+                              int(fieldU64(fos, m.out_step)),
+                              int(fieldU64(fow, m.out_wait)),
+                              int(fieldU64(fof, m.offset)));
+                const advpat::Modifier& out = _ap.byId(id)->modifier;
+                if (fa)  applied.fields[applied.count++] = {uint8_t(base + 0), IntentValue::ofU64(out.amplitude)};
+                if (fis) applied.fields[applied.count++] = {uint8_t(base + 1), IntentValue::ofU64(out.in_step)};
+                if (fiw) applied.fields[applied.count++] = {uint8_t(base + 2), IntentValue::ofU64(out.in_wait)};
+                if (fos) applied.fields[applied.count++] = {uint8_t(base + 3), IntentValue::ofU64(out.out_step)};
+                if (fow) applied.fields[applied.count++] = {uint8_t(base + 4), IntentValue::ofU64(out.out_wait)};
+                if (fof) applied.fields[applied.count++] = {uint8_t(base + 5), IntentValue::ofU64(out.offset)};
+            }
+
+            if (applied.count == 0) return Ret::err(NackCode::INVALID_VALUE);
+            cfgChanged = false;  // session-volatile, same as classic pattern-cmd
+            return Ret::ok(applied);
+        }
+
+        // ---- pattern-presets-cmd (0x3220) -> pattern-presets STORE CRUD ------
+        // Mirrors SlopDriveHubDelegate's ch::pattern_presets_cmd case exactly:
+        // save captures LIVE `_ap` state (never the request — Ground Truth),
+        // load decodes the stored payload and re-applies it through the SAME
+        // validated setApBase()/setApModifier() path a client's own 0x3210
+        // write uses (clamping included), delete/rename are pure store
+        // bookkeeping. The roster (0x1220) republishes lazily in
+        // publishTelemetry() once it notices the store's generation moved —
+        // no special-case publish needed here.
+        case ch::pattern_presets_cmd: {
+            using PPS = slopdrive::PatternPresetStore;
+            const uint64_t op = fieldU64(findField(requested, 1), 0);
+            const uint64_t slotRaw = fieldU64(findField(requested, 2), uint64_t(PPS::kCapacity));
+            if (slotRaw >= PPS::kCapacity) return Ret::err(NackCode::INVALID_VALUE);
+            const uint8_t slotIdx = uint8_t(slotRaw);
+
+            const auto* nameField = findField(requested, 3);
+            std::string_view name;
+            if (nameField && nameField->value.kind == IntentValue::Kind::Tstr) name = nameField->value.tstr_val;
+
+            switch (op) {
+                case 1: {  // save — captures LIVE `_ap` (never the request).
+                    if (name.empty()) return Ret::err(NackCode::INVALID_VALUE);
+                    uint8_t payload[PPS::kPayloadBytes];
+                    payload[0] = _ap.in_speed.value;
+                    payload[1] = _ap.out_speed.value;
+                    payload[2] = _ap.in_accel.value;
+                    payload[3] = _ap.out_accel.value;
+                    for (uint8_t id = 0; id < kApBaseCount; ++id) {
+                        const advpat::BaseControl* bc = _ap.byId(id);
+                        const uint8_t base = uint8_t(4 + id * 6);
+                        payload[base + 0] = bc->modifier.amplitude;
+                        payload[base + 1] = bc->modifier.in_step;
+                        payload[base + 2] = bc->modifier.in_wait;
+                        payload[base + 3] = bc->modifier.out_step;
+                        payload[base + 4] = bc->modifier.out_wait;
+                        payload[base + 5] = bc->modifier.offset;
+                    }
+                    if (!_presets.save(slotIdx, name, payload)) return Ret::err(NackCode::INVALID_VALUE);
+                    applied.count = 3;
+                    applied.fields[0] = {1, IntentValue::ofU64(1)};
+                    applied.fields[1] = {2, IntentValue::ofU64(slotIdx)};
+                    applied.fields[2] = {3, IntentValue::ofTstr(name)};
+                    cfgChanged = false;
+                    return Ret::ok(applied);
+                }
+                case 2: {  // load — engages Advanced mode, same as the firmware.
+                    if (_estop_latched) return Ret::err(NackCode::ESTOP_ACTIVE);
+                    const uint8_t* p = _presets.payload(slotIdx);
+                    if (p == nullptr) return Ret::err(NackCode::INVALID_VALUE);
+                    _ap_mode = true;
+                    setApBase(_ap, advpat::SPEED_IN,  int(p[0]));
+                    setApBase(_ap, advpat::SPEED_OUT, int(p[1]));
+                    setApBase(_ap, advpat::ACCEL_IN,  int(p[2]));
+                    setApBase(_ap, advpat::ACCEL_OUT, int(p[3]));
+                    for (uint8_t id = 0; id < kApBaseCount; ++id) {
+                        const uint8_t base = uint8_t(4 + id * 6);
+                        setApModifier(_ap, id, int(p[base + 0]), int(p[base + 1]), int(p[base + 2]),
+                                      int(p[base + 3]), int(p[base + 4]), int(p[base + 5]));
+                    }
+                    applied.count = 2;
+                    applied.fields[0] = {1, IntentValue::ofU64(2)};
+                    applied.fields[1] = {2, IntentValue::ofU64(slotIdx)};
+                    cfgChanged = false;
+                    return Ret::ok(applied);
+                }
+                case 3: {  // delete
+                    if (!_presets.remove(slotIdx)) return Ret::err(NackCode::INVALID_VALUE);
+                    applied.count = 2;
+                    applied.fields[0] = {1, IntentValue::ofU64(3)};
+                    applied.fields[1] = {2, IntentValue::ofU64(slotIdx)};
+                    cfgChanged = false;
+                    return Ret::ok(applied);
+                }
+                case 4: {  // rename
+                    if (name.empty()) return Ret::err(NackCode::INVALID_VALUE);
+                    if (!_presets.rename(slotIdx, name)) return Ret::err(NackCode::INVALID_VALUE);
+                    applied.count = 3;
+                    applied.fields[0] = {1, IntentValue::ofU64(4)};
+                    applied.fields[1] = {2, IntentValue::ofU64(slotIdx)};
+                    applied.fields[2] = {3, IntentValue::ofTstr(name)};
+                    cfgChanged = false;
+                    return Ret::ok(applied);
+                }
+                default:
+                    return Ret::err(NackCode::UNSUPPORTED_OP);
+            }
         }
 
         default:

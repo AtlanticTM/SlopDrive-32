@@ -1415,6 +1415,86 @@ directly, full gauntlet commands run and exit codes/output observed above]
   interactive) or installs+auths gh and the main loop does the rest.
   (d) publish timing vs the v1.0 tag-day bundle.
 
+  **SlopSync REPO SPLIT EXECUTED (sonnet-executed, 2026-07-28).** Extraction
+  side: SlopSync repo built at `../SlopSync`, 8 commits, HEAD `490d4b2`
+  ("fix(docs-site): American English in site.config.yml comment") — spec
+  suite (SPEC.md, RENDERING.md, RFC-QUEUE.md, registry/registry.yaml +
+  codegen, V1-READINESS.md, WEBUI-HANDOFF-RFC-BATCH.md), `lib/slopsync`
+  (C++ core, unchanged layering), `clients/js` + `clients/mfp` (JS + C#
+  reference clients, generalized off SlopDrive-32-specific comment paths
+  during extraction — spot-diffed against this repo's pre-removal copies,
+  doc-comment-only differences, confirmed byte-identical logic), `hub/
+  slopbench` (machine-agnostic reference hub), `tools/{slopsync_probe,
+  slopscope,slopsoak,gen_registry_header,slopsync_lint}.py`,
+  `test/native/test_slopsync_*` (minus devicecatalog/discovery),
+  `test/fuzz/**`, `docs-site/**`. Conversion side (this repo, three
+  commits `be9b08a`/`ad2da8e`/`d54cc43`): removed every extracted tree
+  (C-9 proofs in each commit message) except `docs/slopsync/CHANNEL-MAP.md`
+  (this machine's own channel allocation, stays; new `docs/slopsync/
+  README.md` points elsewhere) and `test/native/test_slopsync_
+  {devicecatalog,discovery}` (test this machine's own headers). Pin:
+  `slopsync.pin` at repo root, sha `490d4b2`. Consumption mechanics:
+  `platformio.ini` — `symlink://../SlopSync/lib/slopsync` in
+  `common_s3_libs.lib_deps` (PlatformIO resolves it as a `.pio-link`
+  reference, same as the existing vendored espasyncwebserver/asynctcp
+  pair — no manual OS symlink, no `lib_extra_dirs` fallback needed, it
+  worked on the first try); `env:native` gets an explicit
+  `-I../SlopSync/lib/slopsync/include`. `tools/canon_lint.py` gained a PIN
+  RULE (FAIL if `../SlopSync` missing or HEAD != pin; WARN on a dirty
+  sibling tree; sha256-cross-checks `mini_catalog.hpp`/`mini-catalog.yaml`
+  IN THE SIBLING against the same hashes SlopSync's own
+  `tools/slopsync_lint.py` pins) replacing the old in-tree frozen check and
+  the old registry `--check` (both moved with their targets).
+  `tools/gen_channel_map.py`'s `REGISTRY` now reads `../SlopSync/spec/
+  registry/registry.yaml`; `tools/catalog_lint.py` (untracked, gitignored
+  local tool) repointed the same way — both `--check`/lint green with NO
+  regeneration needed (moved content, unchanged bytes, unchanged hashes).
+  `sim/slopsim/CMakeLists.txt` repoints its `lib/slopsync` include to the
+  sibling; clean rebuild proved it. webui: `./core/slopsync/*` imports
+  became plain relative imports into the sibling's `clients/js/` — **not**
+  the vite-alias mechanism the task brief anticipated, and **not** a
+  package.json `imports` map either (both tried and rejected, see the
+  commit message on `ad2da8e` for why: a Vite alias is invisible to the
+  plain-node scripts under `webui/test/` that import the same `src/`
+  modules directly outside any bundler, and Node's `imports` field
+  categorically forbids a target that escapes the package via `../`,
+  which a sibling-repo path always does). Docs: ~30 markdown links into the
+  moved files converted to plain-text citations ("SlopSync SPEC §N",
+  "SlopSync RFC-NNN") across docs/canon/{CANON,DOCTRINE}.md and 6 other
+  docs files, plus in-code comment citations in 8 source files — `docs/
+  canon/LEDGER.md`'s own historical stamped entries and
+  `SD32-OVERNIGHT-REPORT.md`'s body (outside its tail) deliberately left
+  untouched as dated record (judgment call, stated in the `d54cc43` commit
+  message). `slopdrive.code-workspace` added (two folders, `.` +
+  `../SlopSync`, per the operator's one-VS-Code-view constraint).
+  **Gauntlet, all green, every command reproduced this session:**
+  `canon_lint.py` 0 findings; `catalog_lint.py` OK (32 entries); `pio test
+  -e native` 31/31 exit 0 (mingw64 PATH prepend, TRAPS T10); `pio run -e
+  sd32-ota` SUCCESS (RAM 24.1%/78,948 B, Flash 28.5%/1,870,292 B —
+  numbers reflect this branch's current state, not a regression: no `.cpp`/
+  `.h` logic changed, only include-path plumbing and comments; verified via
+  a byte-identical re-run after later comment-only edits); `pio run -e
+  c5_waveshare` SUCCESS (smoke build, unaffected by the split as expected);
+  `gen_channel_map.py --check` + `gen_channel_grid.py --check` green;
+  `sim/slopsim` clean rebuild exit 0, then machine-mode run + `npm run
+  check` ALL PASS + `node webui/test/slopsync-wire.test.mjs` ALL PASS +
+  `node webui/test/slopsync-sim.mjs` ALL PASS against it; webui production
+  build (`vite build` via `build_webui.py`'s PlatformIO pre-build hook)
+  succeeded as part of the `sd32-ota` build above. **Parked, not done this
+  pass:** the protocol-side interactive channel-grid page (`docs-site/
+  tools/gen_channel_grid_page.py`) already exists in the SlopSync repo from
+  extraction — Phase G's own remaining webui-aesthetic styling pass on it
+  is SlopSync-repo work now, out of scope here. `SlopSyncDiscoveryWire.h`
+  is a pure RFC-046 codec with zero Arduino/socket dependency and its own
+  native test (`test_slopsync_discovery`) — it is a protocol-shape
+  artifact that arguably belongs in the SlopSync repo long-term, staged
+  here for now because this machine's `SlopSyncCatalog.h`/UDP responder
+  are its only consumers; migrating it (and its test) is future work, not
+  blocked on anything. **REVIEW GATE (unchanged from the GO RULING above):
+  first push of either repo awaits operator review of both trees.** This
+  session's three commits are local only, exactly as the RELEASE HOLD
+  requires.
+
 - **Phase G (operator, 2026-07-28, runs after the live-verify + commits):**
   sonnet fleet updates ALL docs to final post-batch state, and the channel
   grid becomes a docs-site page — interactive like the standalone visual,

@@ -1,5 +1,8 @@
 #pragma once
 
+// LEGACY — dead on device, kept pending removal ruling; superseded by
+// lib/slopmotion, see CLAUDE.md §7.6.
+
 // ============================================================================
 // MotionInterpolator — on-device cubic motion generator for TCode v0.4 (A2)
 // ============================================================================
@@ -119,11 +122,9 @@ struct InterpDebug {
 };
 
 // ---- Anomaly instrumentation -----------------------------------------------
-// The interpolator records, into a small Core-1-local ring, any event where the
-// generated motion is suspect. Each event captures the INPUT that caused it so
-// the WebUI (and the offline capture harness) can pin the funscript point that
-// triggered a stutter / non-move without guessing. Drained by the sampler task
-// and forwarded to a cross-core ring for the 0x05 ANOMALY WS frame.
+// InterpAnomaly is the one part of this file still referenced by main.cpp
+// (legacy anomaly type). Anomaly reporting now rides SlopSync channel 0x0089;
+// this ring is undrained.
 enum class InterpAnomalyType : uint8_t {
     None         = 0,
     Overshoot    = 1,  // cubic left the [start,end] envelope (steep G tangent)

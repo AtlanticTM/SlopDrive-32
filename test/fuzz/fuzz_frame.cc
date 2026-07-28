@@ -84,7 +84,7 @@ extern "C" int LLVMFuzzerTestOneInput(const uint8_t* data, size_t size) {
         FuzzInput f2(data, size);
         uint16_t mtu = f2.u16();
         auto body = f2.rest();
-        // Skip the one input shape whose DOCUMENTED behaviour is an assert()
+        // Skip the one input shape whose DOCUMENTED behavior is an assert()
         // (a 12-byte ESTOP frame with an MTU below 12): fragmentFrame's own
         // comment says that combination is unreachable in any conformant
         // configuration and the assert is there to say so out loud. Firing a

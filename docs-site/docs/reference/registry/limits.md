@@ -27,6 +27,7 @@ registry's own rationale where it records one.
 | `header_bytes` | `8` |  |
 | `min_transport_payload` | `242` | ESP-NOW 250 − 8 header; STATE frames must fit this (§9.1) |
 | `catalog_chunk_payload` | `192` |  |
+| `blob_chunks_in_flight` | `4` | RFC-050: advertised SENDER pacing budget — the max unacknowledged-by-application-progress BLOB_CHUNKs a sender may have outstanding for one transfer before it MUST hold emission (§8.4's backpressure table). Concrete answer to the panel's "what IS the signal" finding: a hub MAY advertise a smaller value, MUST NOT advertise more. |
 | `bundle_max_samples` | `32` |  |
 | `bundle_max_span_ms` | `20` |  |
 | `seq_width_bits` | `16` |  |
@@ -47,6 +48,8 @@ registry's own rationale where it records one.
 | `deadman_max_ms` | `5000` |  |
 | `pairing_window_default_s` | `120` |  |
 | `pairing_pin_digits` | `4` |  |
+| `pairing_gesture_boot_count` | `3` | RFC-049g: N in §12.3(c)'s power-cycle gesture — this many CONSECUTIVE short boots arm the push-to-pair window on the next boot. Was prose-only ("N (default 3)"); the panel's own complaint pattern (registry doctrine says numbers are never left as hedges) applies to this one too. |
+| `pairing_gesture_max_uptime_ms` | `10000` | RFC-049g: the per-boot uptime ceiling that counts as "short" for the gesture above. Was prose-only ("~10 s") — the tilde was hedge language in a normative section; pinned here matching the value SPEC §12.3(c) already carried in prose. Reference-firmware conformance to this exact value is unverified by this pass — implementation is Phase D. |
 | `token_bytes` | `16` |  |
 | `instance_id_bytes` | `8` |  |
 | `etag_bytes` | `8` |  |
@@ -63,6 +66,7 @@ registry's own rationale where it records one.
 | `catalog_max_entries` | `256` |  |
 | `catalog_max_entry_bytes` | `4096` | feasibility pass: a 50-field FULLY annotated entry (defaults + options + groups + descs) encodes to ~8–10 KB, which violates RFC-028's no-unbounded-allocation rule for a per-entry decode buffer. Oversize is a catalog-AUTHORING error caught by conformance tooling, not a runtime surprise: the entry splits across channels or trims its descs. |
 | `max_subscriptions_per_session` | `64` |  |
+| `max_subscriptions_per_frame` | `16` | RFC-033.3: wishes one SUBSCRIBE/HELLO frame may carry (= the reference decoder's kSubscribeMaxWishes, which was previously discoverable only by binary-searching a live hub). Advertised in WELCOME limits key 4; a hub MAY advertise less, never more than it decodes. Overflow answers SUBSCRIBE_REJECTED, never silence. |
 | `ws_subprotocol` | `slopsync.v1` |  |
 | `mdns_service` | `_slopsync._tcp` |  |
 
@@ -82,12 +86,13 @@ registry's own rationale where it records one.
 | `catalog_ready_timeout_ms` | `15000` | RFC-015: a session that PINGs happily but never sends CATALOG_READY is GOODBYE'd READY_TIMEOUT. Liveness reaping alone NEVER fires on a pinging client, so without this a half-adopted session holds a slot forever with both planes gated shut. (READY itself is re-sent by the client at catalog_chunk_gap_timeout_ms until retained STATE arrives — idempotent, no handshake state machine.) |
 | `idle_reap_multiplier` | `3` | RFC-024: reap a non-owning session after this multiple of ping_interval_idle_ms of silence. §6.5 said "MAY"; it was never implemented, so a viewer that went dark held a slot forever. Two liveness regimes, deliberately different: source OWNERS get the deadman window + §11.3 loss policy; everyone else gets idle reaping with no motion consequence. |
 
-## Streaming (RFC-013, RFC-014)
+## Streaming (RFC-013, RFC-014, RFC-049c)
 
 | Name | Value | Notes |
 |---|---|---|
-| `max_future_schedule_ms` | `250` | RFC-014: for segment-class STREAM channels, t_base + t_off[i] IS the intended execution start of sample i; the hub clamps scheduling this far ahead. It was already the shipped fw 2.1.45 behaviour but registered NOWHERE — the MFP plugin carried a private SegLookaheadMs=120 against it. Interop by folklore, now by number. Recommended client lookahead <= half of this. |
+| `max_future_schedule_ms` | `250` | RFC-014: for segment-class STREAM channels, t_base + t_off[i] IS the intended execution start of sample i; the hub clamps scheduling this far ahead. It was already the shipped fw 2.1.45 behavior but registered NOWHERE — the MFP plugin carried a private SegLookaheadMs=120 against it. Interop by folklore, now by number. Recommended client lookahead <= half of this. |
 | `max_burst_multiple` | `4` | RFC-013: cap on `burst` relative to granted rate. An unbounded client-declared burst would reintroduce the exact flood the token bucket exists to stop. |
+| `segment_handoff_k` | `1.5` | RFC-049c: the H11 machine-side handoff-sanity bound (§9.6) — a hub SHOULD reject/bound an accepted end-velocity exceeding k * min(\|chord_in\|, \|chord_out\|). Was reference-implementation-only (the MFP plugin's own Fritsch-Carlson limiter and the firmware's boundHandoffVelocity both hardcoded 1.5 independently) — the panel quoted this registry's OWN doctrine ("a competing implementation has no authoritative source for the clamping constant") back at us. Pinned here so a second implementation matches shape without reverse-engineering the reference. Hub-side per-source scheduling-depth backstop (widening H11's lookahead-bounded coverage) is Phase D implementation, not a registry number. |
 
 ## String caps (RFC-009, RFC-022.5, RFC-028.2)
 

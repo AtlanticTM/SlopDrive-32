@@ -144,10 +144,18 @@ def gen(reg: dict) -> str:
                         ("safety_intent_ops", "safety_ops"),
                         ("session_admin_ops", "session_admin_ops"),
                         ("safety_causes", "safety_causes"),
-                        ("setting_categories", "setting_categories"),
                         ("stream_kinds", "stream_kinds"),
                         ("procedure_phases", "procedure_phases"),
-                        ("curve_families", "curve_families")):
+                        ("curve_families", "curve_families"),
+                        # ---- RFC-047/048 rendering metamodel (Phase C2) ----
+                        # setting_categories is RETIRED (tombstoned in registry.yaml);
+                        # ui_categories is its wire-key-10 successor vocabulary.
+                        ("ui_categories", "ui_categories"),
+                        ("ui_ranks", "ui_ranks"),
+                        ("value_aspects", "value_aspects"),
+                        ("value_scopes", "value_scopes"),
+                        ("value_provenance", "value_provenance"),
+                        ("unit_ids", "unit_ids")):
         p(f"namespace {ns} {{\n")
         for k in sorted(reg[section]):
             e = reg[section][k]
@@ -181,6 +189,8 @@ def gen(reg: dict) -> str:
         v = reg["limits"][key]
         if isinstance(v, str):
             p(f'inline constexpr std::string_view {ident(key)} = "{v}";\n')
+        elif isinstance(v, float):
+            p(f"inline constexpr float {ident(key)} = {v}f;\n")
         else:
             p(f"inline constexpr uint32_t {ident(key)} = {v};\n")
     p("}  // namespace limits\n\n")

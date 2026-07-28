@@ -48,7 +48,7 @@ WHAT THIS SCRIPT IS ALLOWED TO CHANGE
     4. front matter, the DO-NOT-EDIT banner, page titles, and clearly-marked
        site notes are added around the text.
 
-    No word of the normative register is rewritten, summarised or reordered.
+    No word of the normative register is rewritten, summarized or reordered.
 """
 from __future__ import annotations
 
@@ -126,7 +126,7 @@ def cddl_path() -> Path:
 #                          that never states the MTUs they are bounded by.
 #   - Appendices    (A-G)  the lookup material: tables, schema, worked sketch,
 #                          vector index. Kept together because a reader
-#                          consulting one usually consults its neighbour.
+#                          consulting one usually consults its neighbor.
 #   - Rationale     (H-J)  the informative history: rejected alternatives, the
 #                          gap-closure audit, the draft delta. Long, read once,
 #                          and never during implementation. Its own page keeps
@@ -211,12 +211,17 @@ PAGES: tuple[Page, ...] = (
          ("16",), promote=True),
     Page("conformance", "Conformance",
          "SlopSync clause 17: conformance profiles, golden vectors and the fixture freeze, "
-         "behavioural checklists, and the fuzzing totality gate.",
+         "behavioral checklists, and the fuzzing totality gate.",
          ("17",), promote=True),
     Page("limitations", "Known limitations",
          "SlopSync clause 18: every known limitation of v1.0, stated so that nobody "
          "rediscovers one as a surprise.",
          ("18",), promote=True),
+    Page("rendering", "Rendering",
+         "SlopSync clause 19: the rendering constitution, the three-tier channel "
+         "taxonomy, and capability interfaces — establishing RENDERING.md as the "
+         "normative client-rendering companion.",
+         ("19",), promote=True),
     Page("traces", "Worked session traces",
          "Five annotated end-to-end SlopSync session traces, each step citing the "
          "normative rule it exercises.",
@@ -267,6 +272,12 @@ SOURCE_LINKS: dict[str, tuple[str, str]] = {
     "vectors/": ("strip", ""),
     "RFC-QUEUE.md": ("strip", ""),
     "V1-READINESS.md": ("strip", ""),
+    # RENDERING.md is a normative companion (§19), same tier as SPEC.md itself,
+    # but has no splitter of its own yet — publishing it as a full generated
+    # site tier is out of scope for this landing (RFC-048 is spec/registry
+    # text only). It stays a repository artifact, like RFC-QUEUE.md, until a
+    # future batch gives it the same page-generation treatment SPEC.md has.
+    "RENDERING.md": ("strip", ""),
 }
 
 # Appendices that reproduce a registry table. The site generates the live view
@@ -753,7 +764,7 @@ def build_traces(page: Page, text: str, linker: Linker, src_display: str) -> str
     p(head + "\n\n")
     p('!!! info "Appendix E, in full"\n\n')
     p("    These traces are the narrative form of the [§17.3](conformance.md#s17-3)\n")
-    p("    behavioural checklist. Every step cites the normative rule it exercises,\n")
+    p("    behavioral checklist. Every step cites the normative rule it exercises,\n")
     p("    and a step with no rule to cite is a specification bug.\n\n")
     p(rest.lstrip("\n"))
     return w.getvalue().rstrip("\n") + "\n"

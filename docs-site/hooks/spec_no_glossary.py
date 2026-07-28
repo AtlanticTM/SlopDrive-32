@@ -38,7 +38,7 @@ log = logging.getLogger("mkdocs.hooks.spec_no_glossary")
 NORMATIVE_PREFIXES: tuple[str, ...] = ("spec/",)
 
 # `<abbr title="...">term</abbr>` — non-greedy, and DOTALL because a long
-# definition can be wrapped by the HTML serialiser.
+# definition can be wrapped by the HTML serializer.
 _ABBR = re.compile(r"<abbr\b[^>]*>(.*?)</abbr>", re.DOTALL)
 
 

@@ -21,8 +21,8 @@ Delete this file once absorbed.*
      can go; batching by count is the only constraint.
 
 2. **RFC-032 — the move/target roles exist and the device advertises them.**
-   `position` on `0x0100 move` now carries role `command.position`;
-   `tgt_10um` on `0x0080 motion` carries `telemetry.target`.
+   `position` on `0x3100 move` now carries role `command.position`;
+   `tgt_10um` on `0x1100 motion` carries `telemetry.target`.
    - `model/settings.js` already indexes non-action roles into `byRole`, so
      the rail tap-to-move tape, the `commanded` hero numeral, and `lag`
      (= target − position, computed client-side, per the RFC) should light up
@@ -30,7 +30,7 @@ Delete this file once absorbed.*
      "this catalog does not tag a move INTENT by role" disabled-state copy
      path if it renders anything stale.
 
-3. **RFC-035 — `plan.*` roles.** 0x0086 plan-strip fields now carry
+3. **RFC-035 — `plan.*` roles.** 0x1101 plan-strip fields now carry
    `plan.start/end/current/velocity/elapsed/duration/style`.
    - **Change:** PlanStrip should bind BY ROLE first and keep the documented
      `/plan/i` name heuristic only as a fallback for role-less hubs.
@@ -45,8 +45,8 @@ Delete this file once absorbed.*
 5. **RFC-034 (option 3) — kill the "reserved" button regex.** Normative rule:
    for a select field carrying an `action.*` role, wire value 0 is NEVER an
    operation. Replace the `/^(reserved|none|unused)$/i` label heuristic with
-   the index-0 rule (grey it, never hide — the option_access gating stays as
-   defense-in-depth and already greys it for sub-configure sessions).
+   the index-0 rule (gray it, never hide — the option_access gating stays as
+   defense-in-depth and already grays it for sub-configure sessions).
 
 6. **RFC-037 — prefer the catalog's explicit field width.** Layout fields MAY
    carry catalog key **18** = `size` (bytes). Decoder rule: prefer declared
@@ -64,7 +64,7 @@ Delete this file once absorbed.*
    browser client and keep the visibilitychange re-establish hack as belt +
    suspenders (background-tab throttling is ~60 s, still beyond any legal
    window). Always ADOPT key 24's echo as the real window — never assume the
-   wish was honoured.
+   wish was honored.
 
 8. **RFC-039 — blob refusal is answered.** If the reassembler refuses a
    declared blob (total_bytes over its cap), send GOODBYE with code
@@ -86,5 +86,5 @@ Every item above that changes a control or readout needs the live-device
 check: payload observed on the wire + device state change (or state render)
 confirmed. The rail tap-to-move is the headline — it goes from disabled-by-
 principle to the machine's most-used control, so it gets the full
-end-to-end pass (tap → 0x0100 INTENT with the role-bound key → post-clamp
+end-to-end pass (tap → 0x3100 INTENT with the role-bound key → post-clamp
 ECHO → carriage moves → `telemetry.target` follows).

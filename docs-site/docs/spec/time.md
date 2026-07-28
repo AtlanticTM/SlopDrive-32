@@ -37,7 +37,7 @@ CLOCK exchanges MUST NOT traverse buffering relays unless the relay performs tim
 - **STATE/EVENT:** u32 hub-ms (wraps ~49.7 days) with the same nearest-window rule.
 - `boot_id` ([§6.1](session.md#s6-1)) fences all of it: a new `boot_id` voids all prior timestamps, seqs, and offsets.
 
-**Consequence, stated because it surfaces in the trust ledger ([§12.6](security.md#s12-6)):** the protocol's own clock is boot-relative and wrapping. A hub can populate a wall-clock field (a "first paired at" timestamp) only if the *application* has a real time source and supplies it. Zero is the honest default and will be common. The protocol never invents one.
+**Consequence, stated because it surfaces in the trust ledger ([§12.6](security.md#s12-6)):** the protocol's own clock is boot-relative and wrapping. A hub can populate a wall-clock field (a "first paired at" timestamp) only if the *application* has a real time source and supplies it. **A hub with a wall-clock source SHOULD populate wall-clock fields it declares** (RFC-049d); zero is the honest default where no such source exists, and will be common. The protocol never invents one — it is not audit-grade, and a client MUST NOT present it as such. A client displaying a wall-clock field SHOULD visually distinguish a populated value from zero (e.g. "unknown" rather than a literal epoch date), so an operator can tell "this hub has no clock" from "this event genuinely happened at boot."
 
 ## 7.3 Sequence numbers {#s7-3}
 

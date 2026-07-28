@@ -63,7 +63,7 @@ class Pattern {
     virtual void setDepth(int depth) { _depth = depth; }
 
     //! Sensation is an additional parameter a pattern can take to alter its
-    //! behaviour
+    //! behavior
     /*!
       @param sensation Arbitrary value from -100 to 100, with 0 beeing neutral
     */

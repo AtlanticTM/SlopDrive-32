@@ -8,9 +8,9 @@ WHAT IT IS FOR
     stroke window, against what the motion planner actually did with it. Three
     lines on one mm axis:
 
-        ASKED     0x0080 raw_10um   -- the demand as it landed, pre-planning
-        PLANNED   0x0080 tgt_10um   -- where SlopMotion is driving to
-        ACHIEVED  0x0080 pos_10um   -- where the carriage actually is
+        ASKED     0x1100 raw_10um   -- the demand as it landed, pre-planning
+        PLANNED   0x1100 tgt_10um   -- where SlopMotion is driving to
+        ACHIEVED  0x1100 pos_10um   -- where the carriage actually is
 
     plus the planner's own current segment (plan-strip: start -> end over
     durationUs) drawn as the commanded envelope around the trace inside it,
@@ -39,7 +39,9 @@ RELATIONSHIP TO tools/slopsync_probe.py
     change without a code edit.
 
 DISCOVERY IS BY ROLE AND NAME, NEVER BY CHANNEL ID
-    Nothing in this file hardcodes 0x0080/0x0081/0x0086/0x0088/0x0089. The
+    Nothing in this file hardcodes 0x1100/0x1000/0x1110/0x1111/0x4100 (RFC-047
+    Phase C4; motion/machine-config/motion-anomaly never moved, plan-strip and
+    slopmotion-diag did — see CHANNEL-MAP.md for the renumber). The
     stroke window is resolved by the registry field_roles `window.min` /
     `window.max`; the position/velocity fields by `telemetry.position` /
     `telemetry.velocity`; the rest by the catalog's own declared entry and
@@ -275,7 +277,7 @@ def decode_event(payload, schema):
     (channel_id, timestamp, event_kind, body...), whose `body` (40) sub-map is
     in the CHANNEL'S OWN schema key space. Those two vocabularies are
     unrelated, and mixing them is how you end up printing a motion anomaly's
-    `target` as `client_name` -- so each half is relabelled with its own."""
+    `target` as `client_name` -- so each half is relabeled with its own."""
     try:
         m = ss.cb_decode_full(payload)
     except ValueError:
@@ -1090,7 +1092,7 @@ def _summary_line(header, state):
 # =============================================================================
 
 # ---- palette ---------------------------------------------------------------
-# Semantic, taken from the product's own tokens so an operator recognises it
+# Semantic, taken from the product's own tokens so an operator recognizes it
 # instantly:
 #   webui/src/style.css      --reality #4DA6FF (measured/achieved)
 #                            --intent  #A78BFA (commanded/unconfirmed)
@@ -1102,13 +1104,13 @@ def _summary_line(header, state):
 # target is the hub's ACCEPTED intent -- already through arbitration, clamping
 # and the window, i.e. across the boundary and on reality's side. Same hue =
 # same family; the lightness step says "accepted, not yet executed". It is also
-# the colour-blind-safest choice available, because lightness is the one
+# the color-blind-safest choice available, because lightness is the one
 # channel every CVD type keeps.
 #
 # HONEST NOTE ON THE PRODUCT PALETTE (measured, not guessed -- ΔE in OKLab×100
 # under Machado 2009 severity 1.0): #4DA6FF vs #A78BFA is ΔE 1.1 under
 # deuteranopia and 11.4 under normal vision. The product's reality/intent pair
-# is therefore NOT distinguishable by colour alone. Recognition across the
+# is therefore NOT distinguishable by color alone. Recognition across the
 # whole product is the requirement here, so the pair is kept -- and every
 # series carries mandatory secondary encoding (its own dash pattern, a legend
 # key drawn in that pattern, a direct end-label and a named crosshair readout).
@@ -1555,7 +1557,7 @@ summary{cursor:pointer;color:var(--tx-mut);font-size:11px}
   <table id="meta"></table>
 </details>
 <details><summary>anomaly log</summary><table id="anomtab"></table></details>
-<details><summary>series summary (the table view — every value is reachable without colour)</summary>
+<details><summary>series summary (the table view — every value is reachable without color)</summary>
   <table id="stats"></table></details>
 </div>
 
@@ -1567,7 +1569,7 @@ let theme = "__THEME__", palname = "__PALNAME__";
 const show = {asked:true, planned:true, achieved:true, env:true, anom:true};
 
 // anomaly kinds that mean "the machine could not do what it was told" get the
-// bad colour; the rest are shaping/limit events and get warn. Safety colours,
+// bad color; the rest are shaping/limit events and get warn. Safety colors,
 // safety meanings, nothing else.
 const SEVERE = new Set(["plan_failed"]);
 
@@ -1700,7 +1702,7 @@ function drawPlot(svg, h, ext, name, isPos){
   if (show.anom){
     const vis = D.anoms.filter(a => a.t >= view[0] && a.t <= view[1]);
     const hair = vis.length <= 40;
-    let lastLab = -1e9, labelled = 0;
+    let lastLab = -1e9, labeled = 0;
     for (const a of vis){
       const X = xs(a.t, h), sev = SEVERE.has(a.label);
       const cls = "anom" + (sev?" sev":"");
@@ -1708,16 +1710,16 @@ function drawPlot(svg, h, ext, name, isPos){
         {x1:X, x2:X, y1:isPos?MT+11:top, y2:isPos?MT+RAIL-1:top+8, class:cls}));
       if (hair) svg.appendChild(svgEl("line",
         {x1:X, x2:X, y1:top, y2:h-MB, class:cls, "stroke-opacity":0.22}));
-      if (isPos && X - lastLab > 120 && labelled < 12){
+      if (isPos && X - lastLab > 120 && labeled < 12){
         const t = svgEl("text", {x:X+2, y:MT+8, class:"anomlab" + (sev?" sev":"")});
         t.textContent = a.label;
-        svg.appendChild(t); lastLab = X; labelled++;
+        svg.appendChild(t); lastLab = X; labeled++;
       }
     }
     if (isPos && vis.length){
       const c = svgEl("text", {x:W-MR, y:MT+8, class:"anomlab", "text-anchor":"end"});
       c.textContent = vis.length + " anomaly event" + (vis.length===1?"":"s")
-        + (labelled < vis.length ? " (" + labelled + " labelled — zoom in for more)" : "");
+        + (labeled < vis.length ? " (" + labeled + " labeled — zoom in for more)" : "");
       svg.appendChild(c);
     }
   }
@@ -1735,7 +1737,7 @@ function drawPlot(svg, h, ext, name, isPos){
     const d = path(ts, vs, h, ext);
     if (d) svg.appendChild(svgEl("path", {d:d, class:"ser " + cls}));
   }
-  // Direct end-labels -- identity without relying on colour. These series
+  // Direct end-labels -- identity without relying on color. These series
   // CONVERGE (three lines describing one position), so the labels collide by
   // construction; they are nudged apart to a minimum gap and each keeps a
   // LEADER LINE back to its own end-dot, rather than being stacked loose where
@@ -1772,7 +1774,7 @@ function drawPlot(svg, h, ext, name, isPos){
 function drawLegend(){
   const l = document.getElementById("leg");
   const items = [
-    ["asked", "asked — the demand as it arrived (0x0080 raw), intent"],
+    ["asked", "asked — the demand as it arrived (0x1100 raw), intent"],
     ["planned", "planned — the planner's target + its segment envelope"],
     ["achieved", "achieved — where the carriage actually is, reality"],
   ];

@@ -10,7 +10,7 @@ row here is a bug in this ledger.*
 - **LIVE** — an existing catalog channel covers it today.
 - **RFC-nnn** — covered once that queue entry lands in v1.0.
 - **AUTHOR** — needs no spec change at all; just author a new device
-  channel (the 0x0085 pattern) + catalog entry.
+  channel (the 0x2101 pattern) + catalog entry.
 - **DEAD** — carted away by operator ruling; not migrated, deleted.
 - **OTA** — permanent HTTP escapee #1 (own token plane, rides next to the
   PsychicHttp work).
@@ -28,24 +28,24 @@ row here is a bug in this ledger.*
 | `GET /` static bundle | — | HTTP forever (asset serving is not an API) |
 | `POST /api/ota`, `/api/ota/fs`, ArduinoOTA :3232 | **OTA** | Operator ruling: firmware dev's problem; escapes AND should escape (rights never derivable from SlopSync roles) |
 | `GET /uitoken` (new, RFC-029 §4) | **UITOKEN** | Escapee #2 by ruling: same-origin-policy IS the security property, so it cannot move in-band. Optional per-device sideband — a hub with no WebUI simply omits it |
-| `/api/status` — homed/homing/paused/estop/override/position | **LIVE** | 0x0080 motion flags + 0x0003 safety |
-| `/api/status` — speeds, distance, strokes | **LIVE** | 0x0080 + 0x0083 odometer |
+| `/api/status` — homed/homing/paused/estop/override/position | **LIVE** | 0x1100 motion flags + 0x0003 safety |
+| `/api/status` — speeds, distance, strokes | **LIVE** | 0x1100 + 0x1002 odometer |
 | `/api/status` — wifi bssid/ip/channel/reconnects/tx_drops, transport chips, intiface/serial/ble link state | **RFC-026 + AUTHOR** | link-status STATE channel (needs `str<N>`); kills the WebUI's last 30 s HTTP poll |
 | `/api/status` — plan_derived/clamped/feasible/late, intent counters | **AUTHOR** | arbiter-diagnostics STATE channel |
 | `/api/capabilities` — fw_version, product, features | **RFC-016** | identity in WELCOME; capabilities = catalog introspection |
-| `/api/capabilities` — ceilings (speed/accel/jerk) | **LANDED (M5a)** | 0x0081 fields + `limit.*` role tags + min/max/default annotations |
-| `/api/settings` GET/POST — window, user/input speed/accel/jerk | **LANDED (M5a)** | 0x0081 ↔ 0x0101, fully RFC-009-annotated (setting_key/default/min/max/step/group/desc/role) + `enabled_mask` |
-| `/api/settings` — blend_mode, expert_mode, default_range, stream_speed_mode, overshoot_clamp, auto_duration, intiface_compat | **RFC-009** | settings metamodel (typed, categorized) |
+| `/api/capabilities` — ceilings (speed/accel/jerk) | **LANDED (M5a)** | 0x1000 fields + `limit.*` role tags + min/max/default annotations |
+| `/api/settings` GET/POST — window, user/input speed/accel/jerk | **LANDED (M5a)** | 0x1000 ↔ 0x3000, fully RFC-009-annotated (setting_key/default/min/max/step/group/desc/role) + `enabled_mask` |
+| `/api/settings` — blend_mode, expert_mode, default_range, stream_speed_mode, overshoot_clamp, auto_duration | **RFC-009** | settings metamodel (typed, categorized) |
 | `/api/settings {reset_stats}`, `{reset_peaks}` | **RFC-019** | action intents + observable `reset_gen` |
-| `/api/move` | **LIVE** | 0x0100 |
-| `/api/home` | **LIVE** | 0x0103 op 1 |
+| `/api/move` | **LIVE** | 0x3100 |
+| `/api/home` | **LIVE** | 0x3101 op 1 |
 | `/api/stop` (hard E-STOP latch) | **RFC-010** | `safety_ops: estop`; **gates :81 deletion** |
 | `/api/pause`, `/api/halt` | **LIVE** | 0x0005 ops 4/5, 2 |
 | `/api/override` (manual_override, bypass_limits) | **RFC-025** | safety domain per ruling: 0x0003 appended byte + 0x0005 ops |
 | `/api/servo` GET (26-reg mirror, bus health, encoder validation) | **AUTHOR** | register-mirror STATE (52 B fits) + servo-diag channel |
 | `/api/servo` POST (program sequence, raw write, save) | **RFC-020** | procedure pattern: action intent + progress STATE + verify-by-readback |
 | `/api/clearfault` | **DEAD** | stub returning `no_fault_readback`; its real effect (move home) already LIVE |
-| `/api/pattern` — 6 classic fields, run/stop | **LANDED (M5a)** | 0x0082 ↔ 0x0102, annotated; `pattern` is a NAMED u8 select (7 core PatternEngine names) + a genuinely dynamic `enabled_mask` (drops on e-stop / not-homed). JS migration still pending |
+| `/api/pattern` — 6 classic fields, run/stop | **LANDED (M5a)** | 0x1200 ↔ 0x3200, annotated; `pattern` is a NAMED u8 select (7 core PatternEngine names) + a genuinely dynamic `enabled_mask` (drops on e-stop / not-homed). JS migration still pending |
 | `/api/pattern` — `ap_*` baseline + 6 modifier blocks | **RFC-009 + AUTHOR** | flattened packed layout (50 f32 + 7 mask = 207 B ✓) + keyed intent writes; `ap_reset` via RFC-019 (bumps cfg_gen AND reset_gen). **Feasibility pass:** needs PER-ENTRY field capacity, not a uniform `Catalog<48,50>` (= 320 KiB); and its fully-annotated catalog entry must respect the new `catalog_max_entry_bytes` 4096 cap — trim descs or split |
 | `/api/pattern {rate_tick}` | **RFC-009** | ordinary tuning setting |
 | `/api/pattern/presets` GET/POST | **RFC-021** | preset stores (kind `pattern.frayd`) |
@@ -53,18 +53,18 @@ row here is a bug in this ledger.*
 | `/api/mode` GET/POST | **DEAD** | operator ruling: transport-mode switching is obsolete — SlopSync is the replacement |
 | `/api/clients` GET/POST | **RFC-018** | 0x0002 roster + session-admin evict |
 | `/api/slopmotion` — 14 tuning knobs | **RFC-009 + AUTHOR** | textbook typed settings (`flags: advanced`), device channel pair |
-| `/api/slopmotion` — stats/anomaly counters, plan bench | **LANDED (M5a)** | 0x0088 slopmotion-diag STATE (84 B: plans/failures/9 per-kind counters/plan-time bench/5 ingress counters — the 9th, `anom_handoff_bounded`, arrived with M4d) + RFC-019 `reset_gen`, fed by the existing HTTP reset. The reset ACTION INTENT still wants RFC-019 proper |
+| `/api/slopmotion` — stats/anomaly counters, plan bench | **LANDED (M5a)** | 0x1102 slopmotion-diag STATE (84 B: plans/failures/9 per-kind counters/plan-time bench/5 ingress counters — the 9th, `anom_handoff_bounded`, arrived with M4d) + RFC-019 `reset_gen`, fed by the existing HTTP reset. The reset ACTION INTENT still wants RFC-019 proper |
 | `/api/machine` GET | **AUTHOR** | backend/bus-health STATE channel |
 | `/api/machine/commit` (backend switch + deferred reboot) | **RFC-009 + RFC-020** | `restart_required` setting + reboot-commit handshake (`REBOOTING` GOODBYE) |
-| `/api/machine/homeoverride` (bench fake-home) | **RFC-025** | home 0x0103 ops 2/3 (safety-reviewed — op 2 clears an e-stop latch) |
+| `/api/machine/homeoverride` (bench fake-home) | **RFC-025** | home 0x3101 ops 2/3 (safety-reviewed — op 2 clears an e-stop latch) |
 | :81 0x00 HELLO / 0x03 CLOCK | **LIVE** | HELLO/WELCOME, CLOCK |
-| :81 0x01 TELE pos/tgt | **LIVE** | 0x0080 |
-| :81 0x01 TELE `raw` ("asked" line) + per-sample `i_bus_mA` | **LANDED (M5a)** | `raw_10um` APPENDED to 0x0080 (7 → 9 B): asked / planned / achieved in ONE frame, one seq, one timestamp. `i_bus_mA` went to 0x0087 instead — bus current is background diagnostics and did not belong on the 60 Hz channel |
-| :81 0x02 STATUS bus_mV/die_c10/peak_mA | **LANDED (M5a)** | 0x0087 power STATE, ≤10 Hz, background. FEATURE-GATED on `hasCurrentSensor()`/`hasPowerMonitor()`: a machine without the hardware does not advertise the channel, and that absence IS the capability answer (RFC-016) |
+| :81 0x01 TELE pos/tgt | **LIVE** | 0x1100 |
+| :81 0x01 TELE `raw` ("asked" line) + per-sample `i_bus_mA` | **LANDED (M5a)** | `raw_10um` APPENDED to 0x1100 (7 → 9 B): asked / planned / achieved in ONE frame, one seq, one timestamp. `i_bus_mA` went to 0x1001 instead — bus current is background diagnostics and did not belong on the 60 Hz channel |
+| :81 0x02 STATUS bus_mV/die_c10/peak_mA | **LANDED (M5a)** | 0x1001 power STATE, ≤10 Hz, background. FEATURE-GATED on `hasCurrentSensor()`/`hasPowerMonitor()`: a machine without the hardware does not advertise the channel, and that absence IS the capability answer (RFC-016) |
 | :81 0x02 STATUS link fields | **RFC-026 + AUTHOR** | same link-status channel as above |
-| :81 0x04 INTERP plan-strip (~45 Hz) | **LANDED (M5a)** | 0x0086 plan-strip STATE, 45 Hz, elevated, 18 B — flags/style/start/end/cur/vel/duration/elapsed, straight off slopmotion::Snapshot |
-| :81 0x05 ANOMALY | **LANDED (M5a)** | 0x0089 motion-anomaly EVENT — the FIRST device-authored EVENT channel, and therefore the proof that the M3b `body` (40) sub-map grammar works: it named its own fields with no registry change. Core 1 hands edges to Core 0 through an SPSC ring; the dead legacy feed is replaced, not revived |
-| :81 0x06 STATS energy_mwh + session_ms | **LANDED (M5a)** | `energy_wh` (f32 Wh, not the legacy fixed-point mWh — the wire is self-describing) + `session_ms` appended to 0x0083 (12 → 20 B) |
+| :81 0x04 INTERP plan-strip (~45 Hz) | **LANDED (M5a)** | 0x1101 plan-strip STATE, 45 Hz, elevated, 18 B — flags/style/start/end/cur/vel/duration/elapsed, straight off slopmotion::Snapshot |
+| :81 0x05 ANOMALY | **LANDED (M5a)** | 0x4100 motion-anomaly EVENT — the FIRST device-authored EVENT channel, and therefore the proof that the M3b `body` (40) sub-map grammar works: it named its own fields with no registry change. Core 1 hands edges to Core 0 through an SPSC ring; the dead legacy feed is replaced, not revived |
+| :81 0x06 STATS energy_mwh + session_ms | **LANDED (M5a)** | `energy_wh` (f32 Wh, not the legacy fixed-point mWh — the wire is self-describing) + `session_ms` appended to 0x1002 (12 → 20 B) |
 | :81 0x10/0x11 CMD/ECHO (20 ops) | **LIVE / RFC-009 / RFC-010 / RFC-025** | per-op mapping follows the rows above |
 | TCode WS :55555 / WSDM / BLE / dongle machine transports | — | machine-control transports, not WebUI surfaces; TCode passthrough remains RFC-008's named third mode |
 
@@ -75,7 +75,7 @@ Ruled dead or found dead; deleted during the WebUI refactor, never migrated:
 1. **`/api/mode` + the transport segmented control** — obsolete by ruling;
    SlopSync replaces the old OSSM-tool control path.
 2. **`/api/clearfault`** — firmware stub (`cleared:false` always); UI button
-   keeps only its move-home side effect, which is already 0x0100/0x0103.
+   keeps only its move-home side effect, which is already 0x3100/0x3101.
 3. **`settings.js` `/api/interp` callers** — no firmware route; the panel's
    DOM elements don't even exist in index.html. Dead code walking.
 4. **`#genTickSeg` → `/api/gen`** — SHIPPING BROKEN CONTROL: the element
@@ -105,12 +105,12 @@ channels now have a named consumer and should be prioritized accordingly.
 ### MFP plugin (`clients/mfp-slopsync/`)
 - **Condense the UI.** SlopSync.xaml is doing too much; tighten to what an
   operator actually touches mid-session.
-- **Add a Home control** (INTENT 0x0103 op 1 — already live).
+- **Add a Home control** (INTENT 0x3101 op 1 — already live).
 - **Add a mini stroke-window control** (compact min/max editor writing
-  config-set 0x0101 keys 1/2, adopting from 0x0081 per ground-truth).
+  config-set 0x3000 keys 1/2, adopting from 0x1000 per ground-truth).
 - **Read back input speed / accel / jerk — FOR DISPLAY.** Locate the
   fields by their **`field_roles`** (`limit.input.speed|accel|jerk`,
-  `window.min|max`) rather than hardcoding channel 0x0081, so the same
+  `window.min|max`) rather than hardcoding channel 0x1000, so the same
   code works against any conforming hub. First real proof of the role
   vocabulary earning its keep.
   **DOCTRINE CLAMP (operator ruling, 2026-07-25) — read before
@@ -147,8 +147,8 @@ not in any client.
   real position, better ground truth than the sender's script geometry.
 - **Observability:** `AnomalyType::HandoffBounded` (kind 8) → SlopLog
   `motion` tag through the existing Core-1 drain, `anom_handoff_bounded` on
-  0x0088 slopmotion-diag (80 → 84 B) and in `GET /api/slopmotion`
-  `anomalies_by_kind`, and an EVENT on 0x0089 motion-anomaly with the label
+  0x1102 slopmotion-diag (80 → 84 B) and in `GET /api/slopmotion`
+  `anomalies_by_kind`, and an EVENT on 0x4100 motion-anomaly with the label
   `handoff_bounded` — so a client can see its content being reshaped, which
   is the whole point.
 - **The knob:** `POST /api/slopmotion {"handoff_k": k}`, applied value
@@ -172,23 +172,23 @@ not in any client.
 ### Diagnostic CLI — motion-input vs planner graphing
 Requirement: **graph the raw commanded input arriving over SlopSync,
 scaled into the stroke window, against what the motion planner actually
-did** — so planner behaviour (quintic shaping, Ruckig guard fallbacks,
+did** — so planner behavior (quintic shaping, Ruckig guard fallbacks,
 chase lag) is visually comparable to the sender's intent.
 
 Needs three things, two of which are AUTHOR-pile items — **prioritize
 these in M5**:
 1. **The "asked" / raw demand value** — the pre-planning target, i.e. the
    legacy `:81 0x01 TELE raw` field. Already listed in §1 as AUTHOR
-   (extend 0x0080 append-only, or a dedicated channel). Without it there
+   (extend 0x1100 append-only, or a dedicated channel). Without it there
    is nothing to plot the planner against, and §1 already flags it as
    "the most likely thing to be silently lost" in the migration.
 2. **The plan-strip feed** — the planner's current segment
    (`startPos/endPos/curPos/curVel/durationUs/elapsedUs`), i.e. the
    legacy `:81 0x04 INTERP` frame. AUTHOR-pile, ~45-60 Hz, elevated
    priority; §1 notes it was tracked NOWHERE before this ledger.
-3. **Window bounds** from 0x0081 (`window.min|max` roles) to convert
+3. **Window bounds** from 0x1000 (`window.min|max` roles) to convert
    normalized 0..1 input into mm for a like-for-like plot.
-Note a subtlety: inbound motion (0x0084/0x0085) is c2h, so an observer
+Note a subtlety: inbound motion (0x2100/0x2101) is c2h, so an observer
 CLI cannot see another client's stream directly — it observes the hub's
 republished truth via (1) and (2). That is the correct design (ground
 truth: you see what the machine actually did), not a limitation to work
@@ -208,9 +208,9 @@ device-authored EVENT channel would need a registry PR for its own field
 keys.
 
 **M5a device-authoring pass (2026-07-26) — CLOSED 8 of the AUTHOR pile's
-rows.** Four new device channels (0x0086 plan-strip, 0x0087 power, 0x0088
-slopmotion-diag, 0x0089 motion-anomaly), four append-only layout extensions
-(0x0080 `raw_10um`, 0x0081 `enabled_mask`, 0x0082 `enabled_mask`, 0x0083
+rows.** Four new device channels (0x1101 plan-strip, 0x1001 power, 0x1102
+slopmotion-diag, 0x4100 motion-anomaly), four append-only layout extensions
+(0x1100 `raw_10um`, 0x1000 `enabled_mask`, 0x1200 `enabled_mask`, 0x1002
 `energy_wh`+`session_ms`), and the whole settings surface annotated per
 RFC-009. Device catalog 21 → 25 entries; its etag moved, as expected.
 STILL AUTHOR-PILE, deliberately deferred to a later pass: **link/transport

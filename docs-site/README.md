@@ -261,7 +261,7 @@ comment saying exactly that.
 **Do this before the first public deploy, not after.**
 
 Publishing straight to `https://<org>.github.io/<repo>/` welds every URL on the
-site to an organisation name and a repository name. Renaming either one after
+site to an organization name and a repository name. Renaming either one after
 people have linked to the site, cited a clause, or pinned a specification
 version breaks every one of those links. A protocol specification is exactly
 the kind of document people deep-link and cite, so link rot is a real cost, not

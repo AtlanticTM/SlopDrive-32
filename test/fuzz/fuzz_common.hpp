@@ -86,7 +86,7 @@ inline std::span<const std::byte> asBytes(const uint8_t* data, size_t size) {
 
 // Touch every byte of a decoded view so ASan actually witnesses an
 // out-of-bounds view rather than letting an unread bad span slide. Returns a
-// checksum purely so the compiler cannot optimise the reads away.
+// checksum purely so the compiler cannot optimize the reads away.
 inline uint32_t touch(std::span<const std::byte> s) {
     uint32_t acc = 0;
     for (std::byte b : s) acc = acc * 31u + uint32_t(b);

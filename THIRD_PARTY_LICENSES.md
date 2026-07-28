@@ -1,6 +1,9 @@
 # Third-Party Licenses
 
-SlopDrive-32 itself is released under the [MIT License](LICENSE).
+SlopDrive-32 itself is licensed under **CERN-OHL-S v2** — see
+[`LICENSE`](LICENSE) and [`NOTICE`](NOTICE) for the full text and the reason
+(it incorporates a strongly-reciprocal CERN-OHL-S v2 dependency, so the whole
+project must convey under the same license).
 
 It depends on the following third-party libraries (declared in
 [`platformio.ini`](platformio.ini)) plus the Espressif Arduino core. Each is the
@@ -14,22 +17,21 @@ text always lives with each upstream project.
 | FastAccelStepper | Jochen Kiemes (gin66) | MIT | https://github.com/gin66/FastAccelStepper |
 | Adafruit NeoPixel | Adafruit Industries | LGPL-3.0 | https://github.com/adafruit/Adafruit_NeoPixel |
 | ArduinoJson | Benoît Blanchon | MIT | https://github.com/bblanchon/ArduinoJson |
-| arduinoWebSockets | Markus Sattler (Links2004) | LGPL-2.1 | https://github.com/Links2004/arduinoWebSockets |
 | Arduino-ESP32 core | Espressif Systems | LGPL-2.1 (+ Apache-2.0 components) | https://github.com/espressif/arduino-esp32 |
 | OSSM StrokeEngine / pattern classes | theelims (vendored from KinkyMakers/OSSM-hardware) | MIT | https://github.com/KinkyMakers/OSSM-hardware |
 
-> **Note on LGPL libraries** (Adafruit NeoPixel, arduinoWebSockets, the
-> Espressif Arduino core): the LGPL permits use and linking in projects under
-> other licenses (including MIT), provided the LGPL components themselves remain
-> under the LGPL and their license/source is made available. These libraries are
-> not modified in this repository — they are pulled unmodified by PlatformIO from
-> their upstream sources, where their full license text and source are available.
+> **Note on LGPL libraries** (Adafruit NeoPixel, the Espressif Arduino core):
+> the LGPL permits use and linking in projects under other licenses, provided
+> the LGPL components themselves remain under the LGPL and their license/source
+> is made available. These libraries are not modified in this repository — they
+> are pulled unmodified by PlatformIO from their upstream sources, where their
+> full license text and source are available.
 
 ---
 
 ## Full license texts
 
-### MIT (TMCStepper, FastAccelStepper, ArduinoJson, and SlopDrive-32)
+### MIT (TMCStepper, FastAccelStepper, ArduinoJson, StrokeEngine)
 
 ```
 MIT License
@@ -66,15 +68,28 @@ Adafruit NeoPixel is licensed under the GNU Lesser General Public License,
 version 3. Full text: https://www.gnu.org/licenses/lgpl-3.0.txt
 Source and license: https://github.com/adafruit/Adafruit_NeoPixel
 
-### LGPL-2.1 (arduinoWebSockets, Espressif Arduino core)
+### LGPL-2.1 (Espressif Arduino core)
 
-arduinoWebSockets and the Espressif Arduino-ESP32 core are licensed under the
-GNU Lesser General Public License, version 2.1 (the Espressif core additionally
-includes components under Apache-2.0 and other compatible licenses).
+The Espressif Arduino-ESP32 core is licensed under the GNU Lesser General
+Public License, version 2.1 (it additionally includes components under
+Apache-2.0 and other compatible licenses).
 Full LGPL-2.1 text: https://www.gnu.org/licenses/old-licenses/lgpl-2.1.txt
 
-- arduinoWebSockets: https://github.com/Links2004/arduinoWebSockets
 - Arduino-ESP32: https://github.com/espressif/arduino-esp32
+
+---
+
+## Historical (removed from the build)
+
+These libraries were dependencies at one point but are no longer declared in
+`platformio.ini`. Attribution is kept here for provenance; they carry no
+obligations against the current build.
+
+- **arduinoWebSockets** — Markus Sattler (Links2004), LGPL-2.1 —
+  https://github.com/Links2004/arduinoWebSockets. Removed from the build in
+  M5c (see `CLAUDE.md` §8) when the `:81` WebUI telemetry plane and the
+  `:55555` Intiface/TCode WebSocket server were retired in favor of SlopSync.
+  Full LGPL-2.1 text: https://www.gnu.org/licenses/old-licenses/lgpl-2.1.txt
 
 ---
 

@@ -71,5 +71,5 @@ side effect of an unrelated edit. A change here is an RFC like any other. See
 ## See also
 
 - [Ecosystem and compatibility](../understand/ecosystem.md) — where this
-  stance is either honoured or broken in practice.
+  stance is either honored or broken in practice.
 - [Contributing](contributing.md).

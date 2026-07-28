@@ -101,7 +101,7 @@ extra_css:
 # turns every figure on this site into raw text.
 #
 # Material skips its own fetch whenever the global `mermaid` is already
-# defined, which this script does. Provenance, licence, hash and the update
+# defined, which this script does. Provenance, license, hash and the update
 # procedure are in VENDORED.md. The file is byte-identical to upstream: never
 # patch it locally.
 # --------------------------------------------------------------------------
@@ -146,7 +146,7 @@ markdown_extensions:
   - pymdownx.inlinehilite
   - pymdownx.keys
   # Diagrams. A ```mermaid fence is handed to Material's own Mermaid
-  # integration, which renders it to SVG in the browser and colours it from
+  # integration, which renders it to SVG in the browser and colors it from
   # the `--md-mermaid-*` custom properties. assets/stylesheets/datasheet.css
   # sets those per palette, so one diagram source renders correctly in both
   # schemes and follows the palette toggle live.
@@ -226,6 +226,7 @@ nav:
       - Errors and diagnostics: spec/errors.md
       - Conformance: spec/conformance.md
       - Known limitations: spec/limitations.md
+      - Rendering: spec/rendering.md
       - Worked session traces: spec/traces.md
       - Catalog schema (CDDL): spec/schema.md
       - Appendices A-G: spec/appendices.md
@@ -246,6 +247,8 @@ nav:
           - Pairing modes: reference/registry/pairing.md
           - NACK codes: reference/registry/errors.md
           - Limits and defaults: reference/registry/limits.md
+          - Discovery: reference/registry/discovery.md
+          - Rendering vocabulary: reference/registry/rendering.md
       - Channel catalog: reference/channel-catalog.md
 
   - Community:

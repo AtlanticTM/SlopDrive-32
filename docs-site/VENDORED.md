@@ -1,7 +1,7 @@
 # Vendored third-party assets
 
 This directory ships one third-party file. It is recorded here, in the same
-spirit as `lib/ruckig/VENDORED.md`: provenance, licence, and the exact
+spirit as `lib/ruckig/VENDORED.md`: provenance, license, and the exact
 procedure for updating it.
 
 ## `docs/assets/javascripts/mermaid.min.js`
@@ -14,10 +14,10 @@ procedure for updating it.
 | Retrieved | 2026-07-26 |
 | Size | 3,565,102 bytes |
 | SHA-256 | `74d7c46dabca328c2294733910a8aa1ed0c37451776e8d5295da38a2b758fb9b` |
-| Licence | MIT |
+| License | MIT |
 
 The file is **byte-identical to upstream**. Never patch it locally. If mermaid
-needs different behaviour, configure it, or wrap it — do not edit the vendored
+needs different behavior, configure it, or wrap it — do not edit the vendored
 bytes, because the next update silently reverts the edit.
 
 ### Why it is vendored
@@ -52,7 +52,7 @@ Update the table above with the new version, size and hash. Then **prove the
 diagrams still render**: a fence that fails to parse becomes silent raw text,
 and `mkdocs build --strict` reports nothing about it. Build the site, serve
 `site/`, and check that every `.mermaid` host contains an `<svg>` — in both
-colour schemes. Material renders into a **closed** shadow root, so page
+color schemes. Material renders into a **closed** shadow root, so page
 JavaScript cannot see the SVG; the check needs a browser driven over the
 DevTools Protocol with `DOM.getDocument { pierce: true }`.
 

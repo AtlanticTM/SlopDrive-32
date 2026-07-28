@@ -6,8 +6,7 @@
 *[conformance profile]: A named subset of the specification an implementation may claim to satisfy.
 *[Constrained client]: A client that ships a compiled-in catalog and pre-encoded templates instead of a CBOR parser.
 *[in-process binding]: The transport binding that connects a hub and a client inside one process, with injected faults and a deterministic mode.
-*[recognised-pending]: The rule that an observed client-version change drops a paired device to recognised-pending until re-approved.
-*[recognized-pending]: The rule that an observed client-version change drops a paired device to recognised-pending until re-approved.
+*[recognized-pending]: The rule that an observed client-version change drops a paired device to recognized-pending until re-approved.
 *[setting categories]: The tab a settings field belongs in, chosen from a registered list so placement is consistent across hubs.
 *[synthetic sessions]: A hub-side session object that wraps a legacy text-protocol edge so it obeys the same rules as a native client.
 *[knock and approve]: The primary pairing mode — a client knocks with no proof, and any configure session approves it.
@@ -20,7 +19,7 @@
 *[sequence numbers]: A per-channel, per-direction counter that lets a receiver reject anything older than what it already holds.
 *[setting category]: The tab a settings field belongs in, chosen from a registered list so placement is consistent across hubs.
 *[source ownership]: The rule that each arbiter source has at most one owning session at a time.
-*[change tripwire]: The rule that an observed client-version change drops a paired device to recognised-pending until re-approved.
+*[change tripwire]: The rule that an observed client-version change drops a paired device to recognized-pending until re-approved.
 *[channel classes]: One of STATE, STREAM, INTENT, EVENT or STORE.
 *[parser totality]: The requirement that every parser maps any byte string to accept or reject, with no crash in between.
 *[pending pairing]: The bounded list of unanswered pairing knocks, published as ordinary protocol state.

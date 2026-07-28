@@ -136,7 +136,7 @@ static constexpr int16_t FTR_Y       = 138;
 static constexpr int16_t FTR_H       = DISP_H - FTR_Y;    // 22px
 
 // =============================================================================
-// Colour palette — reworked for readability and contrast. :3
+// Color palette — reworked for readability and contrast. :3
 //
 // Background: deep navy #0a0a1a (darker than before, more contrast)
 // Accent:     electric purple #8b5cf6

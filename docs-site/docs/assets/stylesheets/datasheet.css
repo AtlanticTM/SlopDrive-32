@@ -2,7 +2,7 @@
    SlopSync — "technical datasheet" theme for Material for MkDocs.
 
    The reference point is a good component datasheet: warm paper, ink-black
-   text, one restrained spot colour, dense tables you can actually read a
+   text, one restrained spot color, dense tables you can actually read a
    column of numbers out of, and monospace wherever a number or an identifier
    lives. Restrained and authoritative. Not flashy.
 
@@ -28,7 +28,7 @@
 
 /* ---------------------------------------------------------------- light -- */
 [data-md-color-scheme="default"] {
-  --ss-paper:        #faf9f5;   /* warm paper, not white, not grey */
+  --ss-paper:        #faf9f5;   /* warm paper, not white, not gray */
   --ss-surface:      #ffffff;
   --ss-ink:          #15181c;
   --ss-ink-muted:    #5b6168;
@@ -473,7 +473,7 @@ body,
    =========================================================================
 
    The SlopDrive-32 web interface (webui/src/style.css, webui/src/core/theme.js)
-   encodes MEANING in two colours, and this site reuses that meaning exactly:
+   encodes MEANING in two colors, and this site reuses that meaning exactly:
 
        reality (blue)   measured truth. What the machine actually did, applied,
                         or is reporting right now.
@@ -481,11 +481,11 @@ body,
                         confirmed anything.
 
    Amber and red are SAFETY. In the machine's interface they are the only
-   colours a theme may never restyle, because hazard must read the same on
+   colors a theme may never restyle, because hazard must read the same on
    every skin. The same rule holds here: they never carry a second meaning.
 
-   Someone who operates the machine should recognise these diagrams. Someone
-   who reads these diagrams first should recognise the machine.
+   Someone who operates the machine should recognize these diagrams. Someone
+   who reads these diagrams first should recognize the machine.
 
    WHAT IS *NOT* BORROWED, DELIBERATELY. The machine's interface is a dark
    instrument panel, read at arm's length, in glances. Documentation is
@@ -545,12 +545,12 @@ body,
   --ss-glow-accent:   0 0 10px rgba(77, 166, 255, 0.35);
 }
 
-/* --------------------------------------------------------- link colour -- */
+/* --------------------------------------------------------- link color -- */
 /* Links take the theme accent in BOTH schemes. Material's default primary
-   (indigo) otherwise wins the link colour in slate, which puts a BLUE word in
+   (indigo) otherwise wins the link color in slate, which puts a BLUE word in
    running text — and blue means "measured truth" everywhere else on this
-   site. A link is navigation, not a semantic colour, so it must not borrow
-   one. Caught while checking diagram colour consistency in dark. */
+   site. A link is navigation, not a semantic color, so it must not borrow
+   one. Caught while checking diagram color consistency in dark. */
 .md-typeset a {
   color: var(--ss-accent);
 }
@@ -670,7 +670,7 @@ body,
    they are what the legend chips, byte strips and prose use, where CSS can
    adapt per scheme and mermaid cannot.
 
-   Node LABEL colour is left to Material in every diagram: semantic colour
+   Node LABEL color is left to Material in every diagram: semantic color
    lives in the frame and the fill, never in the text, so text contrast is
    never traded for meaning. */
 
@@ -778,7 +778,7 @@ body,
   color: var(--ss-ink-muted);
 }
 
-/* Field roles reuse the site-wide colour meanings. */
+/* Field roles reuse the site-wide color meanings. */
 .md-typeset .ss-f--hdr    { border-color: var(--ss-rule-strong); background-color: var(--ss-zebra); }
 .md-typeset .ss-f--reality{ border-color: var(--ss-reality-rule); background-color: var(--ss-reality-wash); }
 .md-typeset .ss-f--intent { border-color: var(--ss-intent-rule);  background-color: var(--ss-intent-wash); }

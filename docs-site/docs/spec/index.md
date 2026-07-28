@@ -35,7 +35,7 @@ generated: true
 **Document version:** v1.0 (public)  
 **Status:** Normative.  
 **Registry of record:** [`registry/registry.yaml`](../reference/registry/index.md) — Appendices [A](appendices.md#appendix-a), [B](appendices.md#appendix-b) and [G](appendices.md#appendix-g) are generated *views* of it. **On any conflict between this document and the registry, the registry wins** ([§5.7](wire-format.md#s5-7)).  
-**Companion normative artifacts:** [`schema/catalog.cddl`](schema.md) ([Appendix C](appendices.md#appendix-c)), `vectors/manifest.yaml` ([Appendix F](appendices.md#appendix-f)).  
+**Companion normative artifacts:** [`schema/catalog.cddl`](schema.md) ([Appendix C](appendices.md#appendix-c)), `vectors/manifest.yaml` ([Appendix F](appendices.md#appendix-f)), `RENDERING.md` (client-rendering conformance, [§19](rendering.md#s19)).  
 **Non-normative companions:** `RFC-QUEUE.md` (change history and rationale), `V1-READINESS.md`, [`examples/session-traces.md`](traces.md) ([Appendix E](appendices.md#appendix-e)).
 
 ## 0. Reading this document {#s0}
@@ -65,6 +65,7 @@ The document is split by concern. Clause numbering is unchanged: §6.4 is
 | [Errors and diagnostics](errors.md) | [§16 Errors and Diagnostics](errors.md#s16) |
 | [Conformance](conformance.md) | [§17 Conformance](conformance.md#s17) |
 | [Known limitations](limitations.md) | [§18 Known Limitations at v1.0](limitations.md#s18) |
+| [Rendering](rendering.md) | [§19 Rendering](rendering.md#s19) |
 | [Appendices A-G](appendices.md) | [Appendix A — Frame type table](appendices.md#appendix-a) · [Appendix B — CBOR key registry](appendices.md#appendix-b) · [Appendix C — Catalog schema](appendices.md#appendix-c) · [Appendix D — Worked catalog sketch](appendices.md#appendix-d) · [Appendix E — Worked traces](appendices.md#appendix-e) · [Appendix F — Golden vector index](appendices.md#appendix-f) · [Appendix G — Limits and defaults](appendices.md#appendix-g) |
 | [Rationale and history](rationale.md) | [Appendix H — Design rationale and rejected alternatives](rationale.md#appendix-h) · [Appendix I — Design-review gap closure map](rationale.md#appendix-i) · [Appendix J — What changed since v1-draft](rationale.md#appendix-j) |
 | [Worked session traces](traces.md) | Appendix [E](appendices.md#appendix-e), in full |

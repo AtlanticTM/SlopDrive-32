@@ -90,7 +90,7 @@ inside the system it would replace.
 
 These are a boundary, not a competition. Where a hub dials out to an
 application protocol, that outbound client is an adapter the hub owns, and it
-materialises as a synthetic session like any other legacy edge. Exposing
+materializes as a synthetic session like any other legacy edge. Exposing
 SlopSync to those stacks directly is out of scope.
 
 ### Any firmware's own interface, protocol or identity
@@ -121,7 +121,7 @@ These are non-goals. They were decided, not overlooked.
 - **No wide-area deployment.** The port is a LAN port. Exposing it to the
   internet is not a supported configuration.
 
-<p class="ss-point" markdown>**The point.** Every one of those non-goals removes a component that would otherwise have to be running, trusted, updated or paid for. A machine on a bench with no internet connection is the design centre, not a degraded mode.</p>
+<p class="ss-point" markdown>**The point.** Every one of those non-goals removes a component that would otherwise have to be running, trusted, updated or paid for. A machine on a bench with no internet connection is the design center, not a degraded mode.</p>
 
 ## What migration deletes, honestly
 
@@ -132,7 +132,7 @@ project has a version of this list.
 - **A transport-mode selector** that chose between competing ingest paths.
   SlopSync replaced the thing it was selecting between.
 - **An endpoint that always answered "not cleared"** — a stub whose only real
-  behaviour was a side effect available elsewhere.
+  behavior was a side effect available elsewhere.
 - **A control that posted to a route the firmware never had.** It rendered, it
   did nothing, and nobody noticed until the surfaces were enumerated.
 - **A panel wired to a data source that had already been superseded.** It

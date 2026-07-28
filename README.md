@@ -309,7 +309,7 @@ at configured ceilings.
 ### Web UI
 
 - **Served from LittleFS** — the web interface is an independent front-end
-  project (Vite/vanilla JS, no framework) processed at compile time through a
+  project (Vite + Svelte 5) processed at compile time through a
   PlatformIO extra-scripting hook (`build_webui.py`). It is minified,
   single-file inlined (fonts included as base64), gzipped, and packed into a
   LittleFS partition flashed alongside the firmware. No web assets are embedded
@@ -380,8 +380,8 @@ this is the default deployment path for routine changes, no cable required:
   are deferred until the flash window closes. A failed OTA resumes telemetry
   only — motion stays latched-stopped until manually cleared, never silently
   resuming.
-- **`FIRMWARE_VERSION`** (currently `2.1.4`, in `config_api.h`) is the single
-  source of truth for "which build is actually running," surfaced via
+- **`FIRMWARE_VERSION`** (`include/system/config_api.h`) is the single source
+  of truth for "which build is actually running," surfaced via
   `/api/capabilities` → `fw_version` and the boot log — the way to confirm an
   update actually landed.
 - Dedicated PlatformIO environments: `sd32` (serial/USB bench + rescue path,
@@ -624,89 +624,92 @@ SlopDrive-32/
 │   │   ├── BleTransport.h
 │   │   ├── DongleTransport.h              # UART relay from onboard C5-Zero → S3
 │   │   ├── OssmBleService.h               # OSSM-compatible BLE peripheral (server)
+│   │   ├── PatternPresetStore.h           # RFC-021 `pattern.frayd` preset backend
 │   │   ├── SerialTransport.h
-│   │   ├── ServoModbus.h                  # RS485/Modbus telemetry (config-only, not a MotorDriver)
+│   │   ├── ServoModbus.h                  # RS485/Modbus telemetry, or the AIM-servo motion path — see file banner
+│   │   ├── SlopSync{AsyncWsTransport,Catalog,Crypto,HubService,Platform,UiToken}.h  # SlopSync hub composition (CLAUDE.md §8)
 │   │   ├── TCodeAxisState.h               # Per-axis state for the TCode v0.4 axis registry
 │   │   ├── TCodeParser.h
-│   │   ├── TransportManager.h
-│   │   └── WebSocketTransport.h
+│   │   └── TransportManager.h
 │   ├── motion/                            # Motion engine interfaces
+│   │   ├── AdvancedPattern.h              # fray-d/OSSM-Lite-derived pattern math (why the project is CERN-OHL-S)
 │   │   ├── AIMServoDriver.h               # AIM-class closed-loop servo (step/dir), capstan-drum math
 │   │   ├── CurrentSensor.h                # INA228 bus current/voltage/power wrapper
 │   │   ├── Kinematics.h                   # Legacy trapezoid planner (dormant by default)
+│   │   ├── ModbusServoDriver.h            # AIM-servo MotorDriver (DRIVER_AIM_SERVO + FEATURE_RS485_MODBUS)
 │   │   ├── MotionArbiter.h                # Sole caller of MotorDriver; arbitration + safety gates
-│   │   ├── MotionInterpolator.h           # Cubic Hermite interpolation for TCode streaming
+│   │   ├── MotionInterpolator.h           # Legacy cubic-Hermite TCode generator — dead on device, superseded by lib/slopmotion (CLAUDE.md §7.6)
+│   │   ├── MotionProfile.h                # Closed-form trapezoid profile math (reference/diagnostics only, no longer sampled live)
 │   │   ├── MotorDriver.h                  # Abstract stepper/servo driver interface
+│   │   ├── MotorProxy.h                   # Runtime motion-backend forwarding shim (static-init ordering workaround)
 │   │   ├── PatternEngine.h                # StrokeEngine-derived pattern playback
-│   │   ├── PositionTime.h                 # Legacy Core 0→Core 1 waypoint struct
 │   │   ├── range_mapper.h                 # Stroke window mapping
-│   │   └── TMC2160StepperDriver.h         # TMC2160 SPI implementation (legacy belt-drive build)
+│   │   └── ServoMotionExecutor.h          # Jerk-limited target tracker streaming FC 0x10 deltas (AIM-servo build)
 │   ├── system/                            # System & configuration
-│   │   ├── AppLog.h                       # Ring-buffer log (streamed to Web UI)
-│   │   ├── config_api.h                   # All tunable defaults & pin maps
+│   │   ├── AppLog.h                       # SlopLog sink/bridge (lib/sloplog owns the logging API — CLAUDE.md §7.5)
+│   │   ├── config_api.h                   # All tunable defaults & pin maps; FIRMWARE_VERSION lives here
 │   │   ├── ConfigStore.h                  # NVS persistence
+│   │   ├── DeferredReboot.h               # The one audited "reboot soon, not now" helper
+│   │   ├── EncoderValidator.h             # AIM-servo encoder feedback cross-check (report-only)
+│   │   ├── MachineConfig.h                # Runtime machine/limit-set configuration model
 │   │   ├── OtaService.h                   # ArduinoOTA + HTTP OTA endpoints, safety gate
-│   │   ├── StatusLeds.h                   # Discrete status LED driver (Nano ESP32 — not a NeoPixel)
+│   │   ├── SlopGlowBoard.h                # This board's SlopGlow wiring (replaces the old StatusLeds — CLAUDE.md §7.5)
 │   │   └── SystemState.h                  # Global state, atomic e-stop/OTA flags
 │   └── ui/
-│       ├── UiProtocol.h                   # Binary WebSocket frame/opcode definitions
-│       ├── UiSocket.h                     # Binary WebSocket UI control plane (port 81)
+│       ├── IdleGuardWebServer.h           # Band-aid for the synchronous WebServer's single-serve-slot stall (absent under PsychicHttp)
+│       ├── SlopHttpServer.h               # HTTP backend A/B seam (sync WebServer vs. PsychicHttp)
+│       ├── UiProtocol.h                   # WS_OP_* opcodes consumed by SlopSyncHubService → WebUI::handleCommand
 │       └── WebUI.h                        # HTTP server & REST API
 ├── src/                                   # Implementation
 │   ├── main.cpp                           # Live main-controller composition root
 │   ├── s3_main/main.cpp                   # Dead placeholder stub — excluded from every build
 │   ├── c5_waveshare/main.cpp              # Onboard ESP32-C5-Zero coprocessor
 │   ├── c5_tdongle/main.cpp                # T-Dongle C5 — USB-CDC/ESP-NOW bridge + display
-│   ├── comms/                             # (mirrors include/comms/)
+│   ├── comms/                             # (mirrors include/comms/, minus header-only SlopSync* files)
 │   ├── motion/                            # (mirrors include/motion/)
-│   ├── system/                            # (mirrors include/system/)
+│   ├── system/                            # (mirrors include/system/, plus MotionGeometry.cpp)
 │   └── ui/                                # (mirrors include/ui/)
 ├── lib/                                   # Bundled libraries
 │   ├── SharedProtocol/
 │   │   └── SharedProtocol.h               # Cross-node binary protocol (defined, not yet wired in)
 │   ├── StrokeEnginePatterns/              # Vendored MIT pattern math backing PatternEngine
-│   └── lcd_st7735/                        # ST7735 driver for the T-Dongle C5 display
+│   ├── lcd_st7735/                        # ST7735 driver for the T-Dongle C5 display
+│   ├── ruckig/                            # Vendored Ruckig v0.19.4 Community subset (MIT) — see VENDORED.md
+│   ├── slopglow/                          # SlopGlow — LED semantics engine (CLAUDE.md §7.5)
+│   ├── sloplog/                           # SlopLog — logging (CLAUDE.md §7.5)
+│   ├── slopmotion/                        # SlopMotion — jerk-limited motion core (CLAUDE.md §7.6)
+│   ├── slopsync/                          # SlopSync — protocol reference library (CLAUDE.md §8)
+│   ├── asynctcp/                          # Vendored async TCP backend (the sd32-ota WS transport)
+│   └── espasyncwebserver/                 # Vendored ESP32Async AsyncWebSocket
 ├── boards/                                # Custom board definitions
 │   ├── arduino-nano-esp32.json            # Main controller (v0.0 PCB)
-│   ├── esp32-c5-zero.json                 # Onboard coprocessor
+│   ├── esp32-c5-zero.json                 # Onboard coprocessor (env:c5_waveshare's actual board)
+│   ├── esp32-c5-waveshare.json            # Full-size C5 devkit — unused by any env
 │   └── lilygo-t-dongle-c5.json            # T-Dongle C5
-├── webui/                                 # Independent Vite front-end project
+├── webui/                                 # Independent Vite + Svelte 5 front-end project
 │   ├── src/
 │   │   ├── main.js                        # App entry, boot sequence, top-level wiring
+│   │   ├── App.svelte                     # Root component
 │   │   ├── style.css                      # Full UI stylesheet
-│   │   ├── core/
-│   │   │   ├── api.js                     # HTTP fetch wrappers (fallback path)
-│   │   │   ├── capabilities.js            # /api/capabilities-driven feature discovery
-│   │   │   ├── cmd.js                     # Binary control-plane client (cmd ids, resend, cfg_gen watch)
-│   │   │   ├── link.js                    # WebSocket state machine, reconnect, clock sync
-│   │   │   ├── meter.js                   # Reusable instrument widget (Health tab)
-│   │   │   ├── range.js                   # Stroke-window state store
-│   │   │   ├── shadow.js                  # Desired/reported reconciliation state machine
-│   │   │   ├── telebuf.js                 # Clock-synced telemetry ring buffer
-│   │   │   ├── theme.js                   # Accent theme system
-│   │   │   ├── ui.js                      # DOM helpers, tabs, tooltips, toasts
-│   │   │   └── wire.js                    # Binary frame codecs
-│   │   ├── features/
-│   │   │   ├── diag.js                    # Diagnostics strip chart (position/lag/power)
-│   │   │   ├── pattern.js                 # Pattern Engine control panel
-│   │   │   ├── planstrip.js               # Live interpolator segment visualization
-│   │   │   ├── rail.js                    # Travel-rail control surface (stroke window editor)
-│   │   │   └── settings.js                # Transport, limits, blend mode, expert-mode settings
+│   │   ├── core/slopsync/                 # SlopSync wire client (cbor, frames, session, catalog, credentials)
+│   │   ├── model/                         # Reactive state: machine/dashboard/shadow stores, roles, settings, format
+│   │   ├── ui/                            # Svelte components (HeroStrip, RailWidget, SlopSyncPane, LogPane, PairingPane, ...)
 │   │   └── fonts/                         # Self-hosted webfonts (inlined at build time)
 │   ├── index.html
 │   ├── vite.config.js
 │   └── package.json
-├── data/                                  # LittleFS image source (auto-generated)
+├── data/                                  # LittleFS image source (auto-generated, gitignored)
 │   ├── index.html
 │   └── index.html.gz
 ├── intiface/                              # Intiface device-config JSON
 │   ├── README.md
 │   └── slopdrive32-device-config.json
 ├── build_webui.py                         # PlatformIO extra-scripting hook
-├── tools/
+├── tools/                                 # Gitignored except a few explicitly re-included scripts
 │   └── ota_auth.py                        # Injects the OTA secret into espota at build time
 ├── platformio.ini
 ├── LICENSE
+├── NOTICE
 ├── THIRD_PARTY_LICENSES.md
 └── README.md
 ```
@@ -741,20 +744,20 @@ SlopDrive-32/
 
 ## License
 
-SlopDrive-32 is licensed under the **CERN Open Hardware Licence Version 2 –
+SlopDrive-32 is licensed under the **CERN Open Hardware License Version 2 –
 Strongly Reciprocal (CERN-OHL-S v2)** — see [`LICENSE`](LICENSE) and
 [`NOTICE`](NOTICE). Provided **as-is, with no warranty**.
 
 **Why CERN-OHL-S:** this firmware incorporates the Advanced Penetration
 pattern engine ported from [fray-d/OSSM-Lite](https://github.com/fray-d/OSSM-Lite),
-which is CERN-OHL-S v2. That licence is *strongly reciprocal*, so any work that
+which is CERN-OHL-S v2. That license is *strongly reciprocal*, so any work that
 conveys its covered Source — including this project — must be made available
-under the same licence. Anyone distributing SlopDrive-32 (or hardware/firmware
+under the same license. Anyone distributing SlopDrive-32 (or hardware/firmware
 based on it) must likewise provide the Complete Source under CERN-OHL-S v2.
 
-Vendored components retain their original permissive licences (MIT) and their
+Vendored components retain their original permissive licenses (MIT) and their
 notices are preserved — the StrokeEngine pattern math, TempestMAx's `Axis`
 Hermite interpolation, and jcfain's TCode ramp struct. This project also links
 against third-party Arduino libraries and the Espressif Arduino core, each
-under its own licence (MIT / LGPL / Apache-2.0). See
+under its own license (MIT / LGPL / Apache-2.0). See
 [`THIRD_PARTY_LICENSES.md`](THIRD_PARTY_LICENSES.md) for full attribution.

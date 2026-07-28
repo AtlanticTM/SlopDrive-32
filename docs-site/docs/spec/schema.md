@@ -80,11 +80,18 @@ channel-entry = {
   ? 9  => { + int => schema-field }, ; CBOR classes (INTENT, EVENT): key -> field
   ? 12 => store-descriptor,    ; STORE class only (RFC-021)
   ; ---- RFC-009 settings metamodel (entry level) ----
-  ? 10 => uint,            ; category: setting_categories (0..127 registered, 128..255 device-defined)
-  ? 11 => tstr .size (1..24),  ; category_label: REQUIRED iff category >= 128
+  ? 10 => uint,            ; category: registry ui_categories (RFC-047/048, Phase C2). 1..14 registered
+                           ;   (+ vendor 0x40..0x7E device-defined); 0 and 15..0x3F reserved. Was
+                           ;   setting_categories (0..4) pre-Phase-C2 — same wire key, new vocabulary,
+                           ;   a pre-tag restructuring (registry header permits it before v1.0).
+  ? 11 => tstr .size (1..24),  ; category_label: REQUIRED iff category is in the vendor range (0x40..0x7E)
   ? 13 => uint,            ; replay_depth: entries the hub MAY replay on grant (RFC-017). Presence is THE exception to §9.4's no-replay rule.
   ? 14 => uint,            ; setting_channel: the u16 INTENT channel that writes this entry's setting-annotated fields. REQUIRED iff any field carries setting_key.
   ? 15 => uint,            ; stream_kind: registry stream_kinds (STREAM class only, RFC-014/023). Absent = 0 (samples) — replaces the M5 unit-string heuristic for segment-class classification (§9.2, §10.4).
+  ; ---- RFC-048 rendering metamodel (entry level, Phase C2) ----
+  ? 16 => uint,            ; rank: registry ui_ranks (RENDERING.md §4) — how much THIS CHANNEL
+                           ;   matters, independent of any per-field key-19 rank (a separate axis,
+                           ;   not inheritance). Absent = detail (2), per the unknown/absent-rank rule.
 }
 ; Exactly one of key 8 / key 9 / key 12 MUST be present, matching the class:
 ;   STATE | STREAM -> 8  (layout)
@@ -151,6 +158,28 @@ layout-field = {
   ? 13 => tstr .size (1..24),        ; role: registry field_roles vocabulary; unknown roles render generically
   ? 14 => float32,         ; step: range granularity hint
   ? 15 => uint,            ; flags: bitmask of registry setting_flags (advanced / restart_required / secret)
+  ; ---- RFC-037 forward decodability ----
+  ? 18 => uint,            ; size: this field's packed width in BYTES, stated explicitly.
+                           ;   Decoders prefer this over the type-derived width; an unknown TYPE
+                           ;   with a declared SIZE is a SKIPPABLE HOLE instead of a decode wall.
+                           ;   Without it, the first registry-added packed type strands every
+                           ;   existing client at the first field that uses it — later offsets
+                           ;   become unknowable and the entire layout tail goes dark (both
+                           ;   shipped generic clients carry the identical defensive truncation).
+                           ;   For known types conformance checks declared == type-derived width;
+                           ;   a mismatch is an authoring error. (Key 18: 16/17 are taken by
+                           ;   schema-field access/option_access under the shared numbering.)
+  ; ---- RFC-048 rendering metamodel (Phase C2). Keys start at 19, not 16: 16/17
+  ; are reserved by schema-field's access/option_access under the shared
+  ; numbering (layout-field never uses them, but the numbering is shared so one
+  ; reader handles both kinds — see the file banner), and 18 is RFC-037 size.
+  ? 19 => uint,            ; rank: registry ui_ranks (RENDERING.md §4). Absent = detail (2).
+  ? 20 => uint,            ; aspect: registry value_aspects (RENDERING.md §5.1). Absent = live (0).
+  ? 21 => uint,            ; scope: registry value_scopes (RENDERING.md §5.2). Absent = session (0).
+  ? 22 => uint,            ; provenance: registry value_provenance (RENDERING.md §5.3). Absent = actual (2).
+  ? 23 => uint,            ; unit_id: registry unit_ids (RENDERING.md §6), a frozen numeric companion
+                           ;   to the existing tstr `unit` (key 3). Absent/unrecognized -> the client
+                           ;   renders `unit` (key 3) verbatim, per the unknown-unit rule.
 }
 
 setting-default = int / float32 / bool / tstr
@@ -204,13 +233,23 @@ schema-field = {
                            ;   stop) would force channel 0x0005 down to `watch` access, and a
                            ;   generic renderer would then offer hold/pause/takeover to every
                            ;   viewer — discovering otherwise only by NACK, which violates
-                           ;   grey-never-hide.
+                           ;   gray-never-hide.
   ? 17 => [ + access ],    ; option_access: per-OPTION minimum role, index-aligned with key 10.
                            ;   Needed because an op-style INTENT can carry its verb as one
                            ;   ENUM-VALUED field (safety-intents does: `value` key 1 holds the
                            ;   op code), and per-FIELD access cannot vary across the values of
                            ;   one field. Omit it for the RFC-019 one-field-per-action shape,
                            ;   where key 16 alone is sufficient.
+  ; ---- RFC-048 rendering metamodel (Phase C2) — numbered identically to
+  ; layout-field's own 19..23 (see that block for per-key meaning); rare on a
+  ; schema field (INTENT/EVENT payloads are mostly verbs, not display values)
+  ; but not disallowed — e.g. an aspect-group `action.reset` targets a
+  ; specific aspect (RENDERING.md §5.4).
+  ? 19 => uint,            ; rank
+  ? 20 => uint,            ; aspect
+  ? 21 => uint,            ; scope
+  ? 22 => uint,            ; provenance
+  ? 23 => uint,            ; unit_id
 }
 
 cbor-type = 0 ; uint

@@ -96,7 +96,7 @@ groups:
           minimal BLE device sends its compiled-in etag in HELLO. If the hub's
           etag matches, it runs at full speed.
 
-          On mismatch it must pick a declared behaviour: run degraded, with
+          On mismatch it must pick a declared behavior: run degraded, with
           every control function it cannot re-verify suppressed; or refuse and
           show an "update me" indication. Silent full operation on a
           mismatched etag is non-conformant.
@@ -122,7 +122,7 @@ groups:
         short: A random non-zero 32-bit number the hub assigns to one association, unique within a hub boot.
         body: |
           The session id names this particular association. It is not a
-          secret. Authorisation lives in tokens, never in the id.
+          secret. Authorization lives in tokens, never in the id.
         see: [Instance id, Boot id, Session]
         source: SPEC
         abbr: [session_id]
@@ -396,7 +396,7 @@ groups:
           device-chosen suffix such as `action.reset_stats`.
 
           The doctrine is binding: **roles are opportunities, never
-          requirements**. A client that recognises `telemetry.position` may
+          requirements**. A client that recognizes `telemetry.position` may
           render a position scope. A client that does not must fall back to
           generic rendering by type and constraints. An unknown role is never
           an error.
@@ -466,7 +466,7 @@ groups:
         short: The catalog property saying whether a STREAM sample reports a value at an instant, or commands a time extent.
         body: |
           `samples` is the default. A dropped sample is recoverable by
-          interpolation from its neighbours, so it may be decimated under
+          interpolation from its neighbors, so it may be decimated under
           congestion.
 
           `segments` is not. Each sample carries its own duration, so it is
@@ -595,7 +595,7 @@ groups:
           event says "this just happened". The state says "this is still
           true".
 
-          No safety behaviour may depend on event delivery. Events are user
+          No safety behavior may depend on event delivery. Events are user
           interface garnish. States are truth.
         see: [State, Latch, Retained value]
         source: SPEC
@@ -866,7 +866,7 @@ groups:
         short: One STREAM data point reporting a value at an instant.
         body: |
           A dropped sample is recoverable by interpolating from its
-          neighbours. That is why sample channels may be decimated under
+          neighbors. That is why sample channels may be decimated under
           congestion.
         see: [Segment, Stream kind, Shedding]
         source: SPEC, RFC-014
@@ -987,7 +987,7 @@ groups:
       - term: Source ownership
         short: The rule that each arbiter source has at most one owning session at a time.
         body: |
-          The first authorised session to activate a source owns it. A second
+          The first authorized session to activate a source owns it. A second
           session's activating intent is refused with a source conflict.
 
           For an inbound motion STREAM, the **first accepted bundle** acquires
@@ -1037,7 +1037,7 @@ groups:
   - id: safety
     name: Safety
     intro: >
-      Safety outranks authorisation. You may always stop the machine. You may
+      Safety outranks authorization. You may always stop the machine. You may
       not always start it.
     terms:
 
@@ -1063,7 +1063,7 @@ groups:
       - term: Stop
         short: A controlled stop — decelerate to zero at the configured rate and deactivate the source.
         body: |
-          A stop clears on the next motion intent from an authorised source.
+          A stop clears on the next motion intent from an authorized source.
           It is the deadman's default consequence, and it is role-exempt: any
           session may send it.
         see: [ESTOP, Hold, Pause, Deadman]
@@ -1165,7 +1165,7 @@ groups:
     name: Trust and pairing
     intro: >
       The v1 threat model is casual and drive-by prevention on a trusted local
-      network. Where a defence is weak, the specification says so plainly
+      network. Where a defense is weak, the specification says so plainly
       rather than implying strength it does not have.
     terms:
 
@@ -1241,9 +1241,9 @@ groups:
         abbr: ["trust ledger"]
 
       - term: Change tripwire
-        short: The rule that an observed client-version change drops a paired device to recognised-pending until re-approved.
+        short: The rule that an observed client-version change drops a paired device to recognized-pending until re-approved.
         body: |
-          A recognised-pending device is admitted at `watch`; its granted role
+          A recognized-pending device is admitted at `watch`; its granted role
           is suspended and re-approval is surfaced to configure sessions.
 
           **Honesty clause:** the version is self-reported. This is a
@@ -1253,7 +1253,7 @@ groups:
           operations.
         see: [Trust ledger, Watch]
         source: RFC-029
-        abbr: ["change tripwire", "recognised-pending", "recognized-pending"]
+        abbr: ["change tripwire", "recognized-pending", "recognized-pending"]
 
       - term: Welcome signature
         short: An optional hub signature over client-supplied entropy, proving you reached the machine you paired with.
@@ -1359,7 +1359,7 @@ groups:
       - term: Stroke window
         short: The operator-set lower and upper position bounds that motion stays inside.
         body: |
-          Limits normalised against the window are window-relative, so they
+          Limits normalized against the window are window-relative, so they
           move when the window moves. That is exactly why the window is
           published as state and not handed out once at connect time.
         see: [Limit set, Field role]
@@ -1595,7 +1595,7 @@ groups:
         short: The requirement that every parser maps any byte string to accept or reject, with no crash in between.
         body: |
           No out-of-bounds read. No unbounded allocation. No unbounded
-          recursion. No undefined behaviour. The obligation is symmetric: a
+          recursion. No undefined behavior. The obligation is symmetric: a
           hostile hub must not be able to crash a conforming client, exactly
           as a hostile client must not be able to crash a hub.
 
@@ -1613,7 +1613,7 @@ groups:
           injected latency and jitter, and a seeded mode in which a run
           reproduces bit for bit.
 
-          The behavioural checklists run against it. An implementation with
+          The behavioral checklists run against it. An implementation with
           no fault injection cannot claim to have tested conformance.
         see: [Golden vector, Conformance profile]
         source: SPEC

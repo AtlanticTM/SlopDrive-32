@@ -54,6 +54,9 @@ header always carries the length, so skipping is safe.
 | `0x1B` | `BLOB_CHUNK` | `h2c` | `raw` | §8.4 |
 | `0x1C` | `AUTH` | `c2h` | `control` | §12.2 |
 | `0x1D` | `HUB_SIG` | `h2c` | `control` | §12.2 |
+| `0x1E` | `DISCOVER_PROBE` | `c2h` | `raw` | §13.8 |
+| `0x1F` | `DISCOVER_REPLY` | `h2c` | `raw` | §13.8 |
+| `0x20` | `BLOB_DONE` | `any` | `raw` | §8.4 |
 | `0xE5` | `ESTOP` | `any` | `raw` | §5.5, §11.2 |
 
 ## Burned and reserved ranges

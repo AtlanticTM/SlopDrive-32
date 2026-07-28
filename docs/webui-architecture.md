@@ -52,7 +52,7 @@ src/ui/                rendering — knows no machine
 
 The rule at the `src/model/` boundary: **a role is portable, a channel id is
 not.** `window.min` is registry vocabulary and means the same thing on every
-conforming hub forever; `0x0081` means something only here. Binding to the first
+conforming hub forever; `0x1000` means something only here. Binding to the first
 is why our nice widgets work on someone else's machine; binding to the second is
 the disease this refactor removes.
 
@@ -100,8 +100,8 @@ gates on them — a device-knowledge leak **fails the firmware build**.
 | 3 | A new firmware settings channel needs no client change | Demonstrated as a before/after — see §6. |
 | 4 | Ground truth everywhere | §3; visually verified in-browser via `test/browser-check.mjs`. |
 | 5 | Degrades honestly | No fallback control path exists: HTTP is read-only, so a page with no hub link says so instead of pretending. |
-| 6 | Unknown things render generically, never crash | Covered in `check:model`: unknown packed type → fallback widget, unlabelled device category → generated label, unknown role → carried not rejected. |
-| 7 | Accessible + responsive | Pinch-zoom re-enabled (the old page blocked it), 44px targets, real ARIA, `prefers-reduced-motion` honoured, 360px floor asserted by the browser check. |
+| 6 | Unknown things render generically, never crash | Covered in `check:model`: unknown packed type → fallback widget, unlabeled device category → generated label, unknown role → carried not rejected. |
+| 7 | Accessible + responsive | Pinch-zoom re-enabled (the old page blocked it), 44px targets, real ARIA, `prefers-reduced-motion` honored, 360px floor asserted by the browser check. |
 | 8 | One bundle, device and Tauri | The only delta is host selection + `setHttpGet`, both isolated in `src/main.js`. |
 
 ## 4a. The visual identity, and why it is not new
@@ -117,14 +117,14 @@ The one thing worth stating in full, because it is load-bearing:
 - **`--reality` (blue) = measured truth.** Live motion, confirmed values,
   active controls.
 - **`--intent` (purple) = commanded, not yet confirmed.**
-- **`--warn` / `--bad` are SAFETY colours and are never themed**, so hazard
+- **`--warn` / `--bad` are SAFETY colors and are never themed**, so hazard
   styling and e-stop read identically in all nine themes.
 
 That vocabulary already existed in the rail — the commanded marker is drawn in
 intent-purple — so the shadow lifecycle now speaks it too: **pending is
 intent-purple, overdue escalates to warn-amber, fault is bad-red, and the
 confirm flash is reality-blue.** An unconfirmed slider and an unconfirmed rail
-marker are now saying the same thing in the same colour, which is what the
+marker are now saying the same thing in the same color, which is what the
 first draft (amber-for-everything) got wrong.
 
 Themes are pure browser preference (`model/theme.js`, localStorage, nine
@@ -187,12 +187,12 @@ Both were found because a component *refused to fabricate data*, which is
 exactly what should happen. Both are small, additive, and worth doing next.
 
 **1. No generic client can command a manual move.**
-`0x0100 move` exists and works, but its `position` field carries no role. The
+`0x3100 move` exists and works, but its `position` field carries no role. The
 `action.*` convention deliberately marks VERBS, and position is a value — so
 tagging it `action.move` would make a generic client draw a button where a
 slider belongs (the roles agent was right to decline). The consequence is that
 the rail's tap-to-move tape is **disabled on every machine**, including ours,
-and the widget says so in plain text instead of hardcoding `0x0100`.
+and the widget says so in plain text instead of hardcoding `0x3100`.
 
 *Fix:* register a value-role for a commanded absolute target — e.g.
 `command.position` — and tag that field. `model/settings.js` already indexes
@@ -209,7 +209,7 @@ so the rail port dropped both numerals rather than invent them.
 *Fix:* register `telemetry.target` and tag that field. Lag is then just
 actual − commanded and both numerals come back for every client, not just ours.
 
-Neither gap is a regression in behaviour — the old page could only do these
+Neither gap is a regression in behavior — the old page could only do these
 things because it hardcoded this device. Making them portable is the work.
 
 ## 7. Known gaps and honest limits
@@ -229,7 +229,7 @@ things because it hardcoded this device. Making them portable is the work.
   client-side inference of hardware health exists anywhere in this UI, and none
   should be added: asserting a condition the machine never reported is the
   ground-truth defect in its flattering direction. The power card shows what
-  `0x0087` says, labelled as a sensor reading.
+  `0x1010` says, labeled as a sensor reading.
 - A categorized **EVENT** channel contributes no settings fields, so the live
   model check reports `motion-anomaly carries a category but produced no fields`.
   Benign — its events surface in the Log pane — but the warning is accurate and

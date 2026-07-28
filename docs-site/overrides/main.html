@@ -23,7 +23,7 @@
 
     Chromium-family browsers with "dark mode for web content" enabled apply
     auto-dark to pages they believe support only light: they REWRITE computed
-    background colours and hand back a mangled sheet — warm-black panels
+    background colors and hand back a mangled sheet — warm-black panels
     behind unchanged dark text, which is unreadable. Material declares
     `color-scheme: light` on the light palette (correct for form controls),
     which is exactly the signal auto-dark looks for.
@@ -32,7 +32,7 @@
     true here. HONEST LIMIT, measured: it does NOT stop headless Edge 150,
     which force-darkened the light scheme anyway during render verification
     (as did --disable-features and Emulation.setAutoDarkModeOverride). So
-    treat it as a correct declaration that helps where browsers honour it,
+    treat it as a correct declaration that helps where browsers honor it,
     not as a guarantee. Material's per-scheme CSS still wins for widget
     rendering, because CSS beats meta.
   #}

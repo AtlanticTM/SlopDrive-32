@@ -22,7 +22,7 @@ generated: true
 !!! info "Appendix E, in full"
 
     These traces are the narrative form of the [§17.3](conformance.md#s17-3)
-    behavioural checklist. Every step cites the normative rule it exercises,
+    behavioral checklist. Every step cites the normative rule it exercises,
     and a step with no rule to cite is a specification bug.
 
 Five end-to-end narratives. Every step cites the normative rule it exercises — **a step
@@ -58,7 +58,7 @@ Preconditions: hub LIVE with one pattern running; the client has no cached etag.
 | 7 | c | reassemble; verify SHA-256 over the exact deterministic bytes; cache. **The hash IS the acknowledgement** — no negotiation round trip | [§8.3](catalog.md#s8-3), [§6.4](session.md#s6-4) |
 | 8 | c→h | CATALOG_READY(payload = the 8-byte etag it now operates against); re-sent every 500 ms until the first STATE arrives | [§6.4](session.md#s6-4) |
 | 9 | h→c | retained STATE push: safety(0x0003), motion-status(0xEE05), machine-config(0xEE03), motion-diag(0xEE0C) — full snapshots, current seq | [§9.1](channels.md#s9-1), [§6.3](session.md#s6-3) |
-| 10 | c | all granted STATE received once ⇒ READY→LIVE; UI un-greys | [§2.2](foundations.md#s2-2) |
+| 10 | c | all granted STATE received once ⇒ READY→LIVE; UI un-grays | [§2.2](foundations.md#s2-2) |
 | 11 | h→c | STREAM(0xEE00) bundles begin at the granted 60 Hz (decimated hub-side from 240) | [§9.2](channels.md#s9-2) |
 | 12 | c | user drags a speed slider → **no local state change**; `watch` tier ⇒ the control renders locked, from `roles:0` at step 3 and the field's `access` in the catalog | [§1.2-1](foundations.md#s1-2), [§8.9](catalog.md#s8-9), [§12.2](security.md#s12-2) |
 
@@ -156,11 +156,11 @@ motion-status, one new channel).
 | 4 | c→h | CATALOG_READY carrying its **stale** etag E1. The hub sets ready, MAY record the session as degraded, and serves it | [§6.4](session.md#s6-4) |
 | 5 | c→h | canned SUBSCRIBE to position(0xEE00), safety(0x0003), power(0xEE0D) | [§6.7](session.md#s6-7) |
 | 6 | h→c | retained STATE: the motion-status payload is now one byte longer than the compiled struct → the client parses its known prefix and ignores the tail — nothing breaks | [§5.4](wire-format.md#s5-4) append-only, [§4.3](foundations.md#s4-3) |
-| 7 | c | degraded-mode obligation: control functions whose schema it cannot re-verify are suppressed — its speed knob greys out; display functions continue; an "update me" glyph appears | [§8.5](catalog.md#s8-5) |
+| 7 | c | degraded-mode obligation: control functions whose schema it cannot re-verify are suppressed — its speed knob grays out; display functions continue; an "update me" glyph appears | [§8.5](catalog.md#s8-5) |
 | 8 | c | position STREAM renders at the granted 30 Hz; the safety bit drives the red indicator | [§9.2](channels.md#s9-2), [§9.1](channels.md#s9-1) |
 | 9 | — | silent full operation on a mismatched etag would have been **non-conformant**; both legal behaviors ((a) shown here, (b) refuse loudly) were available | [§8.5](catalog.md#s8-5) |
 
 The quiet miracle in step 6 is the whole point of [§5.4](wire-format.md#s5-4): a firmware update shipped, the
-remote predates it, and the failure mode is a greyed knob — not a bricked remote, not a
+remote predates it, and the failure mode is a grayed knob — not a bricked remote, not a
 parse crash, not silent wrongness. And note step 1's omission: everything in [§12.4](security.md#s12-4) and
 [§12.5](security.md#s12-5) is optional, so this device's mandatory floor is unchanged from the draft.

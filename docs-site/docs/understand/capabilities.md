@@ -125,7 +125,7 @@ are exactly what a real encoder would have produced.
 
 That profile carries one obligation, and it is the interesting one. The client
 sends its compiled-in etag in the handshake. If the hub's etag differs, the
-client must take a declared behaviour. It may run degraded, with every control
+client must take a declared behavior. It may run degraded, with every control
 function it cannot re-verify suppressed. It may refuse, and show an "update
 me" indication. Silent full operation on a mismatched etag is non-conformant.
 

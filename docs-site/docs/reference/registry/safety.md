@@ -22,7 +22,7 @@ These are the `value` map key 1 of the `safety-intents` channel
 (`0x0005`).
 
 **`stop` and `estop` are role-exempt. Any session may send them,
-including a `watch` session.** Safety outranks authorisation. The wrong
+including a `watch` session.** Safety outranks authorization. The wrong
 choice here means the person standing in the room cannot stop the
 machine. Every other operation requires `control`.
 

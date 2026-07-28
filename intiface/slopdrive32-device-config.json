@@ -3,8 +3,8 @@
     "Intiface Central user device configuration for SlopDrive-32.",
     "",
     "This teaches Intiface to recognize the machine as a TCode v0.3 linear device",
-    "over Bluetooth LE, WebSocket, and USB Serial - all three transports the",
-    "firmware supports. The on-device parser is identical for every transport, so",
+    "over Bluetooth LE and USB Serial - the two transports the",
+    "firmware supports. The on-device parser is identical for both, so",
     "one protocol definition (tcode-v03) covers them all.",
     "",
     "HOW TO USE:",
@@ -14,10 +14,9 @@
     "  3. Start scanning:",
     "       - Bluetooth: pick Bluetooth in the machine's web UI (Settings ->",
     "         Connection), then Start Scanning in Intiface. 'SlopDrive-32' appears.",
-    "       - WebSocket / Serial: these still use the built-in TCode v0.3 device",
-    "         entry too; the BLE block below is the part that actually needs a",
-    "         custom config because Intiface can't auto-detect a custom BLE",
-    "         service without it.",
+    "       - Serial: uses the built-in TCode v0.3 entry; the BLE block below",
+    "                  is what needs a custom config (Intiface can't auto-detect a custom",
+    "          BLE service without it).",
     "",
     "FEATURE / RANGE NOTES:",
     "  - One linear actuator, command 'L0' (TCode linear axis 0).",
@@ -32,9 +31,10 @@
     "      BLE_NUS_RX_CHAR_UUID   = 8a846175-ea22-4411-88f5-9a8afcc20672 (host -> device, write)",
     "      BLE_NUS_TX_CHAR_UUID   = 8a846175-ea22-4411-88f5-9a8afcc20673 (device -> host, notify)"
   ],
-
-  "version": { "major": 3, "minor": 0 },
-
+  "version": {
+    "major": 3,
+    "minor": 0
+  },
   "user-configs": {
     "specifiers": {
       "tcode-v03": {
@@ -45,34 +45,45 @@
           "reads replies from the 'rx' endpoint (the device's TX/notify char)."
         ],
         "btle": {
-          "names": [ "SlopDrive-32" ],
+          "names": [
+            "SlopDrive-32"
+          ],
           "services": {
             "8a846175-ea22-4411-88f5-9a8afcc20671": {
               "tx": "8a846175-ea22-4411-88f5-9a8afcc20672",
               "rx": "8a846175-ea22-4411-88f5-9a8afcc20673"
             }
           }
-        },
-        "websocket": {
-          "$comment": "Optional: lets Intiface treat the ESP32 WebSocket server as a tcode-v03 device by name as well.",
-          "names": [ "SlopDrive-32" ]
         }
       }
     },
-
     "configurations": {
       "tcode-v03": [
         {
-          "identifier": [ "slopdrive32-0001" ],
+          "identifier": [
+            "slopdrive32-0001"
+          ],
           "name": "SlopDrive-32 Thruster",
           "features": [
             {
               "feature-type": "PositionWithDuration",
               "actuator-type": "Position",
               "descriptor": "Linear stroke axis (L0)",
-              "step-range": [ [ 0, 999 ] ],
+              "step-range": [
+                [
+                  0,
+                  999
+                ]
+              ],
               "messages": {
-                "LinearCmd": { "step-range": [ [ 0, 999 ] ] },
+                "LinearCmd": {
+                  "step-range": [
+                    [
+                      0,
+                      999
+                    ]
+                  ]
+                },
                 "StopDeviceCmd": {}
               }
             }

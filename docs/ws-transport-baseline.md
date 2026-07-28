@@ -280,9 +280,9 @@ resolves). Once reboots are excluded, steady state is clean: run D, 300 s, three
 clients, **zero**.
 
 **So what does the wedge result actually prove?** That there exists a client
-behaviour — stop reading, keep talking — that reliably and permanently kills
+behavior — stop reading, keep talking — that reliably and permanently kills
 every other SlopSync session and blocks the HTTP task for seconds. Whether that
-behaviour occurs in the field is a separate question. Plausible causes: a
+behavior occurs in the field is a separate question. Plausible causes: a
 browser tab backgrounded by the OS, a Wi‑Fi client whose radio sleeps, a paused
 MFP process, a laptop suspending. All of those produce exactly this pattern —
 TCP stays up, the receive window closes, the client's keepalive timer keeps
@@ -373,7 +373,7 @@ than that the new library is slow.
 
 ## 10. Not tested
 
-- **Real client behaviour.** Every client here is `slopsoak.py`. The MFP plugin
+- **Real client behavior.** Every client here is `slopsoak.py`. The MFP plugin
   and the WebUI's own SlopSync bridge were not exercised.
 - **More than 3 concurrent SlopSync sessions.** The hub floor is
   `kHubMaxSessions = 4`; the 4‑session and over‑subscription cases are untested.

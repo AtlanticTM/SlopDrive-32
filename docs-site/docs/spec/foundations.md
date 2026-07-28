@@ -74,7 +74,7 @@ Each of the following is a normative limitation of `slopsync/1`. An implementati
 | # | Clause | Where |
 |---|---|---|
 | H1 | The protocol ESTOP is a **software convenience layered above** the hardware e-stop path, never a substitute for it. | [§11.2](safety.md#s11-2) |
-| H2 | ESTOP queue preemption is a **per-hop** guarantee, not end-to-end latency: bytes already in flight ahead of it still drain first. | [§11.2](safety.md#s11-2) |
+| H2 | ESTOP queue preemption is a **per-hop** guarantee, not end-to-end latency: bytes already in flight ahead of it still drain first. | [§11.2](safety.md#s11-2), [§14.3](transports.md#s14-3) |
 | H3 | The PIN pairing proof is **offline brute-forceable** by a passive observer of the exchange (4 digits = 10⁴ HMACs). It prevents casual and drive-by pairing; it is not a cryptographic access control. | [§12.3](security.md#s12-3) |
 | H4 | v1 transports are **cleartext**. A passive LAN observer is outside the threat model; a bearer token presented in HELLO is sniffable, which is why proof presentation exists and is RECOMMENDED. | [§12.1](security.md#s12-1), [§12.4](security.md#s12-4) |
 | H5 | Active LAN MITM (including a clone page proxying a PIN to the real hub) is **outside the v1 threat model**. | [§12.1](security.md#s12-1), [§12.8](security.md#s12-8) |
@@ -123,7 +123,7 @@ any state → (send/observe ESTOP) → same state   # ESTOP is orthogonal to ses
 
 A client MUST NOT act on user input that requires hub state before reaching LIVE, and MUST visually distinguish SYNCING/READY from LIVE (a UI showing stale-or-absent data as fresh violates [§1.2-1](#s1-2)).
 
-**Hub, per session:** `ACCEPTING → VALIDATING (HELLO) → GRANTED (WELCOME sent) → READY → LIVE → CLOSED`. The hub MUST bound VALIDATING (RECOMMENDED 2 s) and drop clients that stall mid-handshake. A session that reaches GRANTED but never READY is closed at `catalog_ready_timeout_ms` ([§6.4](session.md#s6-4)).
+**Hub, per session:** `ACCEPTING → VALIDATING (HELLO) → GRANTED (WELCOME sent) → READY → LIVE → CLOSED`. The hub MUST bound VALIDATING (RECOMMENDED 2 s) and drop clients that stall mid-handshake. A session that reaches GRANTED but never READY is closed at `catalog_ready_timeout_ms` ([§6.4](session.md#s6-4)). RFC-042 ([§6.6](session.md#s6-6)) inserts a fifth, library-internal state between LIVE and CLOSED: `LIVE → (silence past its liveness window, or an out-of-band transport loss) → STALE → (any frame on its transport, or a reattaching HELLO) → LIVE`. `STALE` is never itself wire-visible; a client observes only that its own session resumed (or, once evicted under slot pressure, that it did not).
 
 **Relay:** `IDLE → PAIRED → FORWARDING`, with the ESTOP fast-path obligation ([§14.2](transports.md#s14-2)) active in every state after PAIRED.
 
@@ -157,7 +157,7 @@ Layering, bottom-up: **transport binding** ([§13](transports.md#s13): open/clos
 
 - **A browser connects:** WS upgrade with subprotocol `slopsync.v1` → HELLO (identity, token, subscription and publication wishes) → WELCOME (session id, boot id, roles, grants, catalog etag, hub identity, limits) → client's cached etag matches, so it is READY on the spot and downloads nothing → hub pushes retained STATE for every granted channel → client reaches LIVE and renders, entirely from device truth.
 - **A remote nudges speed:** INTENT {channel: config-set, value: 420, intent_id: 17} → hub clamps to 400 (its ceiling), applies via the arbiter, bumps `cfg_gen` because the applied value actually changed → ECHO {intent_id: 17, applied: 400, cfg_gen} to the sender → STATE update to *every* subscriber including the sender. Every screen now shows 400. Nobody shows 420, including the remote that asked for it.
-- **The wifi dies mid-stroke:** streaming client vanishes → hub deadman fires at 600 ms → the active streaming source decel-stops → `safety` STATE latches STOP with `cause=deadman` → its EVENT twin fires on the safety-events channel → every surviving subscriber renders it. Had a hub-autonomous pattern been driving, it would have kept running ([§11.3](safety.md#s11-3)) — it never depended on any client.
+- **The wifi dies mid-stroke:** streaming client vanishes → hub deadman fires at 600 ms → the session is marked `STALE` (RFC-042 — its slot, `session_id` and grants are RETAINED, not torn down) and the streaming source's ownership is released, unconditionally → the machine has no fresh command to execute and settles to rest on its own, latching nothing ([§11.3](safety.md#s11-3)/RFC-045) → `control-owner` updates so any authorized session may claim the source next → if the client's WiFi recovers, a fresh HELLO on the new connection REATTACHES the same session identity ([§6.3](session.md#s6-3)) rather than starting over. Had a hub-autonomous pattern been driving instead, its `source.background_run` setting would have governed (default `false`: the generator stops; `true`: it keeps running, unowned, stoppable only by the role-exempt `stop`/`estop` ops) — either way, nothing latches, and it never depended on any client staying connected.
 - **A new remote is adopted:** the remote has one button and no screen. It knocks (bare PAIR_REQ). The knock appears as protocol state on the pending-pairing channel and as an event; the operator's phone — any `configure` session, not "the WebUI" — approves it at the `control` tier; PAIR_GRANT delivers a token and the hub's public key. From then the remote can verify it is talking to *that* machine.
 
 ## 4. Versioning and Compatibility Model *(normative)* {#s4}
@@ -205,8 +205,16 @@ Additions (new frame types, keys, channels, codes, roles, categories) land in `r
 
 **Numbers are never reused or renumbered after a tagged release.** This rule binds from the **v1.0 tag forward**. The preceding v1-draft was a feasibility exercise and never a public release; the v1.0 base pass therefore restructured freely, retiring frame types `0x09` (CATALOG_REQ) and `0x0A` (CATALOG_CHUNK) without reallocating them — a stale draft-era peer meets an unknown type and fails loudly rather than misreading a BLOB frame ([§4.3](#s4-3) makes "loudly" mean "ignored", which is the correct failure).
 
-Reserved ranges: frame types `0x02` and `0x1E–0x3F` spec/core, `0x40–0x7F` future spec, `0x80–0xDF` experimental, `0xE0–0xFF` reserved except `0xE5`. CBOR keys 1–63 core, 64–127 reserved, 128+ experimental. Channel ids per `channel_id_ranges`. Blob namespaces 0–127 spec, 128–255 device. Setting categories 0–127 spec, 128–255 device. Procedure phases 0–127 spec, 128–255 device.
+Reserved ranges: frame types `0x02` and `0x21–0x3F` spec/core, `0x40–0x7F` future spec, `0x80–0xDF` experimental, `0xE0–0xFF` reserved except `0xE5`. CBOR keys 1–63 core, 64–127 reserved, 128+ experimental. Channel ids per `channel_id_ranges`. Blob namespaces 0–127 spec, 128–255 device. Setting categories 0–127 spec, 128–255 device. Procedure phases 0–127 spec, 128–255 device.
 
 **Experimental ranges MUST NOT appear in tagged releases.**
 
 Breaking the wire grammar requires a `proto_ver` bump, which requires exceptional justification. The intended lifetime of `slopsync/1` is the lifetime of the hardware.
+
+### 4.5 Every refusal is answered {#s4-5}
+
+**A conforming implementation never declines silently: every frame or transfer it cannot honor has a wire signal.** [§6.7](session.md#s6-7)'s SUBSCRIBE rule is the instance that was paid for in debugging time; the principle is general, and it binds clients as well as hubs. Three named applications beyond SUBSCRIBE:
+
+1. A **client** that cannot accept a declared blob (`total_bytes` over its reassembly budget) MUST GOODBYE with `BLOB_REFUSED` (0x0503) rather than idle in a half-session ([§8.4](catalog.md#s8-4)). The observed failure: a refused catalog transfer produced a session that went LIVE with no catalog, no error anywhere, and a `READY_TIMEOUT` fifteen seconds later that blamed the client. Refusal is legal; silent refusal is not.
+2. A HELLO whose `token` field is **present but malformed** (wrong length or type) fails decode and MUST be answered NACK `MALFORMED` — never silently demoted to watch tier. A *tokenless* HELLO keeps its legitimate watch-tier path; only present-but-broken credentials become loud. Under enforcement, silent demotion presents as "connects, plays nothing".
+3. Idle reaping ([§6.6](session.md#s6-6)) sends GOODBYE `IDLE_REAPED` (0x010C). It is distinct from `DEADMAN_TIMEOUT` on purpose: `DEADMAN_TIMEOUT` now means ONLY a [§11.3](safety.md#s11-3) deadman firing on a source-owning session. Reaping a dark viewer is housekeeping with zero motion consequence, and before the code existed it was reported with the motion-safety code in every log and client.

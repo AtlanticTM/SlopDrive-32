@@ -606,7 +606,7 @@ static void seedPacked() {
 }
 
 // ============================================================================
-// Regression seeds — the minimised inputs that crashed the library in this
+// Regression seeds — the minimized inputs that crashed the library in this
 // gate's first pass. They live in the corpus so CI re-executes them on every
 // run (`-runs=0` replay is the cheap, deterministic half of the gate), and
 // they live HERE rather than as opaque committed blobs so the bytes are

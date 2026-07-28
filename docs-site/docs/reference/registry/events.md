@@ -33,6 +33,8 @@ Session lifecycle and control-ownership transfer.
 | `1` | `takeover` | control source ownership transferred (§11.4) |
 | `2` | `session_joined` | a session reached GRANTED |
 | `3` | `session_left` | a session ended (any reason) |
+| `4` | `session_stale` | RFC-042: a session's silence exceeded its liveness window (deadman for a source-owner, idle reaping otherwise) and it was marked STALE rather than torn down — slot, session_id, and grants are RETAINED; any owned source was released (unconditionally, latching nothing per RFC-045). Body carries the affected session_id, same shape as `takeover`. |
+| `5` | `session_resumed` | RFC-042: a STALE session returned to LIVE, either by any frame arriving on its still-attached transport (§6.6: any received frame is proof of life) or by a fresh HELLO reattaching a new transport to the same session identity (§6.3 migration path). Body carries the affected session_id. |
 
 ## log (`0x0008`)
 

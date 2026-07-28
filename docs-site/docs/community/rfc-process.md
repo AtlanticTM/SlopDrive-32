@@ -21,7 +21,7 @@ status: stub
 The process is already being run; this page has to write it down.
 
 - **What needs an RFC.** Any new wire number. Any change to normative
-  behaviour. Any change to the governance stance.
+  behavior. Any change to the governance stance.
 - **What does not.** Authoring a new device channel needs no specification
   change at all. That is the point of a self-describing catalog, and this page
   should say so loudly, because it is the single biggest misconception a new

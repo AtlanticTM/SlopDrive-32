@@ -1,7 +1,7 @@
 # PsychicHttp migration — the HTTP backend A/B
 
 **Status:** built green on both sides, **never flashed**. Everything below about
-runtime behaviour is reasoned from the library source, not observed on the
+runtime behavior is reasoned from the library source, not observed on the
 device. The first Psychic boot is the operator's experiment.
 
 ---
@@ -110,7 +110,7 @@ One type name, two implementations, chosen by `-DUSE_PSYCHIC_HTTP`:
 
 * **default** — `class SlopHttpServer : public IdleGuardWebServer` — a
   zero‑member subclass with inherited constructors. Same code generation, same
-  static RAM, same behaviour as before.
+  static RAM, same behavior as before.
 * **`-DUSE_PSYCHIC_HTTP`** — a request‑scoped adapter over `PsychicHttpServer`
   presenting the *exact* `WebServer` surface the handlers already use:
   `on() / begin() / handleClient() / collectHeaders() / method() / arg() /
@@ -203,7 +203,7 @@ Set in `SlopHttpServer`'s constructor (`src/ui/SlopHttpServer.cpp`):
 | Field | Value | Why |
 |---|---|---|
 | `core_id` | **0** | IDF default is `tskNO_AFFINITY`, which would let the httpd task land on **Core 1 — the motion core**. Non‑negotiable (CLAUDE.md §2). |
-| `task_priority` | **1** | Same priority HTTP is served at today (httpTask). Deliberately **below** commsTask (2) and the SlopSyncHub task (2): the hub drains the 0x0084 inbound motion stream every 5 ms and a 115 KB page stream must never preempt it. httpd spends its life blocked in `select()`, so responsiveness does not suffer. |
+| `task_priority` | **1** | Same priority HTTP is served at today (httpTask). Deliberately **below** commsTask (2) and the SlopSyncHub task (2): the hub drains the 0x2100 inbound motion stream every 5 ms and a 115 KB page stream must never preempt it. httpd spends its life blocked in `select()`, so responsiveness does not suffer. |
 | `stack_size` | **12288** | Psychic's default is 8192; httpTask (which runs the same work today) is also 8192. Headroom taken on purpose: worst case is LittleFS/VFS file I/O + ArduinoJson + `Update.write()`. Two prior stack‑overflow incidents in this project, and host tests never see them (megabyte stacks). **Comes from the internal heap, not BSS.** |
 | `max_open_sockets` | **4** | See the budget below. |
 | `lru_purge_enable` | **true** | Chromium opens up to 6 sockets per origin; with purge the 5th connection evicts the oldest idle one *instantly* instead of queueing. A purged speculative socket costs the browser nothing. |
@@ -385,12 +385,12 @@ ownership leak, and it is exactly what exercises the salvage path here.
 * **404 body text** differs (`"That URI does not exist."` vs WebServer's). No
   caller depends on it.
 * **`max_open_sockets = 4`** is a judgement call, not a measurement. If the UI
-  feels like it is serialising with several tabs open, raise it — but read the
+  feels like it is serializing with several tabs open, raise it — but read the
   lwip budget in §5 first, because the failure mode of overshooting shows up in
   SlopSync, not in HTTP.
 * **PsychicHttp's upload loops retry forever on `HTTPD_SOCK_ERR_TIMEOUT`.** A
   client that opens an upload and then hangs without closing the socket can
-  occupy the httpd task indefinitely. Pre‑existing library behaviour, bounded in
+  occupy the httpd task indefinitely. Pre‑existing library behavior, bounded in
   practice by TCP keepalive; worth remembering if HTTP ever wedges mid‑upload.
 * **`CONFIG_HTTPD_MAX_REQ_HDR_LEN = 1024`** is baked into the prebuilt IDF libs
   and not exposed in `httpd_config_t`. A browser sending >1 KB of request

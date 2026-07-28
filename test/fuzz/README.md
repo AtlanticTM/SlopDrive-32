@@ -201,7 +201,7 @@ Stated plainly so nobody reads a green run as more than it is:
   not fuzzable in this harness. The library boundary is where the fuzzing
   stops; whatever a transport does to a buffer before calling into
   `lib/slopsync` is unproven by this gate.
-* **Cross-task/concurrency behaviour.** Single-threaded by construction.
+* **Cross-task/concurrency behavior.** Single-threaded by construction.
 * **Timing, rate limiting, token buckets, deadman policy.** Reachable in
   principle through a stateful hub harness; not attempted.
 * **Semantic correctness.** Fuzzing proves nothing about whether a decoded

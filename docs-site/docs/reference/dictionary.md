@@ -80,7 +80,7 @@ Also called the **static-client profile**. A coin-cell remote or a
 minimal BLE device sends its compiled-in etag in HELLO. If the hub's
 etag matches, it runs at full speed.
 
-On mismatch it must pick a declared behaviour: run degraded, with
+On mismatch it must pick a declared behavior: run degraded, with
 every control function it cannot re-verify suppressed; or refuse and
 show an "update me" indication. Silent full operation on a
 mismatched etag is non-conformant.
@@ -109,7 +109,7 @@ See also: [Session id](#session-id), [Boot id](#boot-id) · Source: SPEC
 **A random non-zero 32-bit number the hub assigns to one association, unique within a hub boot.**
 
 The session id names this particular association. It is not a
-secret. Authorisation lives in tokens, never in the id.
+secret. Authorization lives in tokens, never in the id.
 
 See also: [Instance id](#instance-id), [Boot id](#boot-id), [Session](#session) · Source: SPEC
 { .ss-termmeta }
@@ -387,7 +387,7 @@ A role is a string, not a number, because action roles carry a
 device-chosen suffix such as `action.reset_stats`.
 
 The doctrine is binding: **roles are opportunities, never
-requirements**. A client that recognises `telemetry.position` may
+requirements**. A client that recognizes `telemetry.position` may
 render a position scope. A client that does not must fall back to
 generic rendering by type and constraints. An unknown role is never
 an error.
@@ -462,7 +462,7 @@ See also: [Layout](#layout) · Source: RFC-026
 **The catalog property saying whether a STREAM sample reports a value at an instant, or commands a time extent.**
 
 `samples` is the default. A dropped sample is recoverable by
-interpolation from its neighbours, so it may be decimated under
+interpolation from its neighbors, so it may be decimated under
 congestion.
 
 `segments` is not. Each sample carries its own duration, so it is
@@ -595,7 +595,7 @@ client could not afford to miss must have a latched STATE twin. The
 event says "this just happened". The state says "this is still
 true".
 
-No safety behaviour may depend on event delivery. Events are user
+No safety behavior may depend on event delivery. Events are user
 interface garnish. States are truth.
 
 See also: [State](#state), [Latch](#latch), [Retained value](#retained-value) · Source: SPEC
@@ -877,7 +877,7 @@ See also: [Sample](#sample), [Segment](#segment), [Stream](#stream) · Source: S
 **One STREAM data point reporting a value at an instant.**
 
 A dropped sample is recoverable by interpolating from its
-neighbours. That is why sample channels may be decimated under
+neighbors. That is why sample channels may be decimated under
 congestion.
 
 See also: [Segment](#segment), [Stream kind](#stream-kind), [Shedding](#shedding) · Source: SPEC, RFC-014
@@ -1003,7 +1003,7 @@ See also: [Active source](#active-source), [Source ownership](#source-ownership)
 
 **The rule that each arbiter source has at most one owning session at a time.**
 
-The first authorised session to activate a source owns it. A second
+The first authorized session to activate a source owns it. A second
 session's activating intent is refused with a source conflict.
 
 For an inbound motion STREAM, the **first accepted bundle** acquires
@@ -1054,7 +1054,7 @@ See also: [Intent](#intent), [Echo](#echo), [Session](#session) · Source: SPEC
 
 ## Safety
 
-Safety outranks authorisation. You may always stop the machine. You may not always start it.
+Safety outranks authorization. You may always stop the machine. You may not always start it.
 
 ### ESTOP
 
@@ -1080,7 +1080,7 @@ See also: [Latch](#latch), [Stop](#stop), [Safety cause](#safety-cause) · Sourc
 
 **A controlled stop — decelerate to zero at the configured rate and deactivate the source.**
 
-A stop clears on the next motion intent from an authorised source.
+A stop clears on the next motion intent from an authorized source.
 It is the deadman's default consequence, and it is role-exempt: any
 session may send it.
 
@@ -1186,7 +1186,7 @@ See also: [Echo](#echo), [Ground truth](#ground-truth), [Intent](#intent) · Sou
 
 ## Trust and pairing
 
-The v1 threat model is casual and drive-by prevention on a trusted local network. Where a defence is weak, the specification says so plainly rather than implying strength it does not have.
+The v1 threat model is casual and drive-by prevention on a trusted local network. Where a defense is weak, the specification says so plainly rather than implying strength it does not have.
 
 ### Pairing
 
@@ -1266,9 +1266,9 @@ See also: [Store](#store), [Token](#token), [Configure](#configure) · Source: R
 
 ### Change tripwire
 
-**The rule that an observed client-version change drops a paired device to recognised-pending until re-approved.**
+**The rule that an observed client-version change drops a paired device to recognized-pending until re-approved.**
 
-A recognised-pending device is admitted at `watch`; its granted role
+A recognized-pending device is admitted at `watch`; its granted role
 is suspended and re-approval is surfaced to configure sessions.
 
 **Honesty clause:** the version is self-reported. This is a
@@ -1388,7 +1388,7 @@ See also: [Arbiter](#arbiter), [Stroke window](#stroke-window), [Jerk](#jerk) ·
 
 **The operator-set lower and upper position bounds that motion stays inside.**
 
-Limits normalised against the window are window-relative, so they
+Limits normalized against the window are window-relative, so they
 move when the window moves. That is exactly why the window is
 published as state and not handed out once at connect time.
 
@@ -1636,7 +1636,7 @@ See also: [RFC process](#rfc-process)
 **The requirement that every parser maps any byte string to accept or reject, with no crash in between.**
 
 No out-of-bounds read. No unbounded allocation. No unbounded
-recursion. No undefined behaviour. The obligation is symmetric: a
+recursion. No undefined behavior. The obligation is symmetric: a
 hostile hub must not be able to crash a conforming client, exactly
 as a hostile client must not be able to crash a hub.
 
@@ -1655,7 +1655,7 @@ a configurable MTU, injected loss, reorder and duplication,
 injected latency and jitter, and a seeded mode in which a run
 reproduces bit for bit.
 
-The behavioural checklists run against it. An implementation with
+The behavioral checklists run against it. An implementation with
 no fault injection cannot claim to have tested conformance.
 
 See also: [Golden vector](#golden-vector), [Conformance profile](#conformance-profile) · Source: SPEC

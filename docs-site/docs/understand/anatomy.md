@@ -12,7 +12,7 @@ frame is an eight-byte header followed by a payload.
 
 This is the only page in this section that shows bytes. Read
 [How it works](how-it-works.md) first; this page explains the envelope that
-carries everything on it. The same colours apply: blue is measured truth,
+carries everything on it. The same colors apply: blue is measured truth,
 purple is a request, amber and red are safety.
 
 ## 1. Four layers, four jobs
@@ -49,7 +49,7 @@ flowchart TD
 
 **The weakest transport writes the rules.** Every guarantee is stated against
 unordered, lossy, 242-byte datagrams. Anything correct there is correct
-everywhere, and a reliable transport simply gets stronger behaviour for free.
+everywhere, and a reliable transport simply gets stronger behavior for free.
 
 ## 2. Every frame starts the same way
 
@@ -92,7 +92,7 @@ never fragment.
 
 **Emergency stop is deliberately different.** The stop frame is twelve bytes,
 starts with a four-byte magic pattern, and carries a CRC. A receiver can
-recognise it in a raw byte stream without decoding anything, which is what lets
+recognize it in a raw byte stream without decoding anything, which is what lets
 every queue on the path admit it at the front. Its bytes are specified in
 [the safety codes reference](../reference/registry/safety.md).
 
@@ -142,7 +142,7 @@ value carries its own type.
 | Sent | Continuously, up to hundreds of times a second | Occasionally |
 | Self-describing | No. The catalog's [layout](../reference/dictionary.md#layout) is the only reader | Yes. Every value carries its type, every key means one thing everywhere |
 | Decoding cost | A field read at a known offset | A small parser, or a canned template on a device too small for one |
-| Evolution | Append at the tail only. Old readers parse the prefix they know | Add a key. Old readers ignore what they do not recognise |
+| Evolution | Append at the tail only. Old readers parse the prefix they know | Add a key. Old readers ignore what they do not recognize |
 
 Both halves of that last row are the same promise made twice, which is the
 reason for the split.

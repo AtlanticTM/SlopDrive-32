@@ -57,8 +57,11 @@ frame_types:
   0x1B: { name: BLOB_CHUNK,     dir: h2c, plane: raw,     ref: "§8.4" }   # RFC-021: generalizes CATALOG_CHUNK — raw header names the same identity fields as `blob_keys`, then chunk bytes
   0x1C: { name: AUTH,           dir: c2h, plane: control, ref: "§12.2" }  # RFC-029: post-WELCOME token proof (`trust`.token_proof); hub re-issues `roles` (23) on success, NACK UNAUTHORIZED on failure. Exists because a 2nd HELLO would self-evict via §6.3's duplicate-instance rule.
   0x1D: { name: HUB_SIG,        dir: h2c, plane: control, ref: "§12.2" }  # RFC-029 item 1, DEFERRED DELIVERY of the WELCOME signature. Payload is the `trust` (39) sub-map carrying `welcome_sig` (5) — nothing else, so the decode surface is one already-fuzzed sub-map. EXISTS BECAUSE SIGNING IS SLOW WHERE IT MATTERS: the S3 has no ECC accelerator, so mbedtls software ECDSA is ~30-80 ms in ONE uninterruptible call, and a hub that signed inline in WELCOME would stall its own tick (5 ms period) for 6-16 ticks — stalling STATE pacing, deadman detection and any motion-input drain sharing that task, for EVERY connecting client. A hub that CAN sign cheaply (host, sim, a C3/C6/H2 with the ECC peripheral) MAY instead put `welcome_sig` directly in WELCOME; the two are wire-alternatives with identical signature material and identical client handling, and a hub that never signs at all sends neither and stays conformant.
+  0x1E: { name: DISCOVER_PROBE, dir: c2h, plane: raw,     ref: "§13.8" }   # RFC-046 §5: UDP discovery probe, broadcast on `udp_discovery.port` by a client with no BLE (or wanting WS-side discovery). No session; unicast REPLY answers it. Raw payload: magic(4B, `udp_discovery.magic`) + proto_ver:u8 + nonce:u32 (client entropy, echoed in the reply).
+  0x1F: { name: DISCOVER_REPLY, dir: h2c, plane: raw,     ref: "§13.8" }   # RFC-046 §5, corrected by RFC-048 (operator veto, 2026-07-27): UDP discovery reply, hub-unicast back to the probe's source. Raw payload: magic(4B) + nonce:u32 (echoed) + hub_name:str32 (packed_field_types 9, RFC-026) + hub_instance_id:u64 (the hub's DURABLE cross-boot identity, identity_keys 5 — replaces this field's original RFC-046 payload, which reused the per-boot `boot_id`, §6.1; a boot-scoped id cannot deduplicate "two hubs sharing a name" across a reboot, which was this field's whole job) + proto_ver:u8 + ws_port:u16 + fw_version:str16 (packed_field_types 8) + catalog_etag:8B + flags:u8 (bit0 pairing_window_open — same philosophy as the 0x17 BEACON payload, plus the endpoint). Total payload grows 72B -> 76B (+4, u32->u64). Read-only identity, no control surface. Replies are rate-limited (`udp_discovery.reply_rate_limit_per_source_s`) so a probe storm cannot load the hub. RFC-046's own entry flagged this exact field for operator veto at landing; RFC-048 is that veto.
+  0x20: { name: BLOB_DONE,      dir: any, plane: raw,     ref: "§8.4" }   # RFC-050: positive transfer-completion signal, generalizing CATALOG_READY's pattern (§6.4) to every blob namespace rather than a second frame per namespace. Raw payload: the same identity fields as `blob_keys` (namespace, store_id, slot, generation) + status:u8 (0 verified-complete, 1 hash-mismatch, 2 aborted). **Sent by the RECEIVER of a transfer** — for a hub-to-client blob (the common case) that is the client; for a client-to-hub STORE import it is the hub. Idempotent, like CATALOG_READY: safe to re-send on a duplicate or a retried reassembly. The sender treats a nonzero `status` per its own retry policy (this frame reports outcome, it does not itself request a retry). Implementation: Phase D (post-batch hub work) — see RFC-050.
   0xE5: { name: ESTOP,          dir: any, plane: raw,     ref: "§5.5, §11.2" }
-# 0x02 and 0x1E–0x3F reserved for spec/core (35 slots free; 0x09/0x0A burned, see above).
+# 0x02 and 0x21–0x3F reserved for spec/core (31 slots free; 0x09/0x0A burned, see above; 0x1E/0x1F allocated to RFC-046 UDP discovery; 0x20 allocated to RFC-050 BLOB_DONE).
 # 0x40–0x7F reserved for future spec use.
 # 0x80–0xDF experimental (never in tagged releases). 0xE0–0xFF reserved except 0xE5.
 
@@ -99,7 +102,7 @@ channel_classes:
 # frozen mini-catalog fixture) is unaffected.
 # ---------------------------------------------------------------------------
 stream_kinds:
-  0: { name: samples,  note: "dense points reporting a value AT AN INSTANT (§9.2); a dropped sample is recoverable by interpolation from its neighbours. Decimable under congestion. The default — absent on the wire means this." }
+  0: { name: samples,  note: "dense points reporting a value AT AN INSTANT (§9.2); a dropped sample is recoverable by interpolation from its neighbors. Decimable under congestion. The default — absent on the wire means this." }
   1: { name: segments, note: "each sample COMMANDS A TIME EXTENT — it carries its own duration, so it is not a point on a continuous curve. A dropped segment is a permanently lost COMMAND, not a recoverable interpolation gap (RFC-014/023). NOT decimable: §10.4's shedding table sheds whole-source or not at all for these." }
 
 # ---------------------------------------------------------------------------
@@ -134,29 +137,29 @@ priority_classes:
 channel_id_ranges:
   0x0000:            { name: SESSION, note: "session-scoped frames; never subscribable" }
   0x0001-0x007F:     { name: spec-core, note: "allocated below; spec-governed" }
-  0x0080-0x7FFF:     { name: device-defined, note: "hub firmware allocates; described by catalog" }
+  0x0080-0x7FFF:     { name: device-defined, note: "hub firmware allocates; described by catalog. RFC-047: the RECOMMENDED allocation shape is the 0xCDSS grid (class nibble 1=STATE/2=STREAM/3=INTENT/4=EVENT/5=STORE, domain nibble device-chosen subsystem, slot byte) — see docs/slopsync/CHANNEL-MAP.md for the worked grid and SlopDrive-32's own renumber. Within this range, 0x7000-0x7FFF is reserved EXPERIMENTAL/VENDOR play space and MUST NEVER appear in a shipped catalog." }
   0x8000-0xFFFF:     { name: reserved }
 
 core_channels:
-  0x0001: { name: catalog,        class: STATE, note: "catalog meta: etag, chunk count, entry count" }
-  0x0002: { name: session-roster, class: STATE, note: "IMPLEMENTED at v1.0 (RFC-018): generation u16 + count u8 + flags u8, then 8 packed slots {session_id u32, role u8, flags u8, name str16} = 8x22 + 4 = 180 B, inside the 242 B floor at default_max_clients_ws 8. The str16 name (feasibility pass) also FIXES the never-replayed-join-events blocker: a late joiner learns existing sessions' names from the roster snapshot, not from missed 0x0007 events. Names over 16 B truncate here; the full name rides 0x0007 while the session lives." }
-  0x0003: { name: safety,         class: STATE, note: "latched safety word: estop/stop/hold/pause + cause + owner (§11.1); RFC-025 appends manual_override + bypass_limits to the same snapshot (append-only is legal)" }
-  0x0004: { name: control-owner,  class: STATE, note: "active arbiter source + owning session per source (§11.4)" }
-  0x0005: { name: safety-intents, class: INTENT, note: "STOP/HOLD/PAUSE/RESUME/ESTOP_CLEAR/ESTOP/TAKEOVER + override/bypass (§11, safety_intent_ops)" }
-  0x0006: { name: hub-status,     class: STATE, note: "boot_id, heap, uptime, transport stats. NO fw version: RFC-016 puts identity in WELCOME `identity` — one home, no drift." }
-  0x0007: { name: session-events, class: EVENT, note: "join/leave/takeover/eviction notifications" }
-  0x0008: { name: log,            class: EVENT, note: "RFC-017: device log in-band — {level u8, tag, hub-ms, message <=128 B} via the `body` sub-map. Bounded drop-oldest with the §9.4 visible drop counter, `background` priority, `watch` access. Declares a replay depth (log_replay_depth_default) so the hub MAY replay its ring tail on grant — the named exception to §9.4's no-replay rule. Retires /api/log; the serial-quiet handoff re-binds from 'first HTTP GET' to 'first log grant'." }
-  0x0009: { name: session-admin,  class: INTENT, note: "RFC-018: {op: evict, session_id} -> hub GOODBYEs the target with SESSION_EVICTED. `configure` access — and note RFC-027 makes configure reachable BY CEREMONY now (§12.2's 'admin only via the hub's own UI' sentence is struck), so this power is deliberately pairing-reachable." }
-  0x000A: { name: pending-pairing, class: STATE, note: "RFC-027(a) knock-and-approve: the bounded pending list (pairing_pending_max) as protocol state — {generation u16, count u8, flags u8} + slots {instance_id u64, kind u8, expires_s u16, name str16}. Any `configure` session approves/denies via 0x0009 (session_admin_ops pair_approve/pair_deny); the joiner needs one button and no display. TWO FIELD CLARIFICATIONS made when M4b implemented this: `kind` is the `pairing_modes` BIT that produced the knock (1 knock_approve / 2 pin_proof / 4 push_to_pair), so an approving UI can say HOW the device asked; and the countdown is `expires_s`, NOT ms — pairing_window_default_s is 120, i.e. 120000 ms, which does not fit the u16 the slot layout allocates. Seconds is also the only resolution an approval UI can use. `flags` bit0 = a pairing association window is currently OPEN (RFC-027(c) push-to-pair), which is how window state stays observable in-band for a session that connected before the window opened." }
-  0x000B: { name: pairing-events, class: EVENT, note: "RFC-027: knock arrived / approved / denied / expired, plus pairing-window open/close. EVENT twin of 0x000A." }
+  0x0001: { name: catalog,        class: STATE, status: active,   note: "catalog meta: etag, chunk count, entry count" }
+  0x0002: { name: session-roster, class: STATE, status: reserved, note: "RFC-047 §3: allocated and specified (RFC-018), NOT implemented — no reference catalog builder declares it (see RFC-QUEUE.md deferred ledger, SPEC.md §18). `status: reserved` is the machine-checkable fact the registry never carried before: a channel can be allocated and described on paper without any conformant hub being able to claim it is live. Specified layout: generation u16 + count u8 + flags u8, then 8 packed slots {session_id u32, role u8, flags u8, name str16} = 8x22 + 4 = 180 B, inside the 242 B floor at default_max_clients_ws 8. The str16 name (feasibility pass) is intended to FIX the never-replayed-join-events blocker: a late joiner would learn existing sessions' names from the roster snapshot instead of missed 0x0007 events. Names over 16 B would truncate here; the full name rides 0x0007 while the session lives." }
+  0x0003: { name: safety,         class: STATE, status: active,   note: "latched safety word: estop/stop/hold/pause + cause + owner (§11.1); RFC-025 appends manual_override + bypass_limits to the same snapshot (append-only is legal)" }
+  0x0004: { name: control-owner,  class: STATE, status: active,   note: "active arbiter source + owning session per source (§11.4)" }
+  0x0005: { name: safety-intents, class: INTENT, status: active,  note: "STOP/HOLD/PAUSE/RESUME/ESTOP_CLEAR/ESTOP/TAKEOVER + override/bypass (§11, safety_intent_ops)" }
+  0x0006: { name: hub-status,     class: STATE, status: active,   note: "boot_id, heap, uptime, transport stats. NO fw version: RFC-016 puts identity in WELCOME `identity` — one home, no drift." }
+  0x0007: { name: session-events, class: EVENT, status: active,   note: "join/leave/takeover/eviction notifications" }
+  0x0008: { name: log,            class: EVENT, status: active,   note: "RFC-017: device log in-band — {level u8, tag, hub-ms, message <=128 B} via the `body` sub-map. Bounded drop-oldest with the §9.4 visible drop counter, `background` priority, `watch` access. Declares a replay depth (log_replay_depth_default) so the hub MAY replay its ring tail on grant — the named exception to §9.4's no-replay rule. Retires /api/log; the serial-quiet handoff re-binds from 'first HTTP GET' to 'first log grant'." }
+  0x0009: { name: session-admin,  class: INTENT, status: active,  note: "RFC-018: {op: evict, session_id} -> hub GOODBYEs the target with SESSION_EVICTED. `configure` access — and note RFC-027 makes configure reachable BY CEREMONY now (§12.2's 'admin only via the hub's own UI' sentence is struck), so this power is deliberately pairing-reachable." }
+  0x000A: { name: pending-pairing, class: STATE, status: active,  note: "RFC-027(a) knock-and-approve: the bounded pending list (pairing_pending_max) as protocol state — {generation u16, count u8, flags u8} + slots {instance_id u64, kind u8, expires_s u16, name str16}. Any `configure` session approves/denies via 0x0009 (session_admin_ops pair_approve/pair_deny); the joiner needs one button and no display. TWO FIELD CLARIFICATIONS made when M4b implemented this: `kind` is the `pairing_modes` BIT that produced the knock (1 knock_approve / 2 pin_proof / 4 push_to_pair), so an approving UI can say HOW the device asked; and the countdown is `expires_s`, NOT ms — pairing_window_default_s is 120, i.e. 120000 ms, which does not fit the u16 the slot layout allocates. Seconds is also the only resolution an approval UI can use. `flags` bit0 = a pairing association window is currently OPEN (RFC-027(c) push-to-pair), which is how window state stays observable in-band for a session that connected before the window opened." }
+  0x000B: { name: pairing-events, class: EVENT, status: active,   note: "RFC-027: knock arrived / approved / denied / expired, plus pairing-window open/close. EVENT twin of 0x000A." }
   # RFC-027(4)/029(2) trust ledger. The feasibility pass ruled this a BLOB
   # STORE, never a packed roster — a ledger entry is {instance_id, kind, name,
   # version, first_seen, last_seen, role, state} and only 2-7 of those fit a
   # 242 B snapshot depending on field set. So it follows RFC-021's store shape
   # exactly, which is TWO catalog entries: a static STORE descriptor and a tiny
   # dynamic roster STATE. Every store in the protocol looks like this pair.
-  0x000C: { name: paired-devices,        class: STORE, note: "trust-ledger store descriptor: {store_id, kind 'trust.ledger', capacity paired_devices_max, per_item_max, name_max}. Items are read/revoked by any `configure` session via BLOB_REQ on blob_namespaces.store + the 0x0009 admin surface. Whole encoded ledger stays under trust_ledger_max_bytes (one NVS page)." }
-  0x000D: { name: paired-devices-roster, class: STATE, note: "the 0x000C store's roster: {generation u16, count u8, capacity u8}. On-change, tiny; a generation bump means 're-enumerate' (fetch again over BLOB_REQ). `configure` access — the paired-device list is not open reading." }
+  0x000C: { name: paired-devices,        class: STORE, status: active, note: "trust-ledger store descriptor: {store_id, kind 'trust.ledger', capacity paired_devices_max, per_item_max, name_max}. Items are read/revoked by any `configure` session via BLOB_REQ on blob_namespaces.store + the 0x0009 admin surface. Whole encoded ledger stays under trust_ledger_max_bytes (one NVS page)." }
+  0x000D: { name: paired-devices-roster, class: STATE, status: active, note: "the 0x000C store's roster: {generation u16, count u8, capacity u8}. On-change, tiny; a generation bump means 're-enumerate' (fetch again over BLOB_REQ). `configure` access — the paired-device list is not open reading." }
   # §9.4's event/state duality rule names e-stop as THE canonical pair — "EVENT
   # for the edge, `safety` 0x0003 for the latch" — and §5.5/§11.2 both require
   # the hub to "emit the EVENT twin". Until M4b there was no channel to emit it
@@ -166,7 +169,7 @@ core_channels:
   # safety edges" impossible without also taking every join/leave. So the twin
   # gets its own channel, which is also what makes the duality rule literally
   # true: 0x0003 is the latch, 0x000E is its edge, same domain, same priority.
-  0x000E: { name: safety-events, class: EVENT, note: "RFC/§9.4 duality: the EVENT TWIN of the `safety` STATE channel (0x0003). Kinds in `safety_event_kinds`; fields ride the scoped `body` (40) sub-map keyed by this channel's own catalog schema (word, cause, owner_session, estop_seq, level). `critical` priority and `watch` access, matching its STATE twin exactly — an edge nobody is allowed to be denied and nobody is allowed to shed. Carries `seq_of_state` (34) naming the 0x0003 frame it corresponds to, which is what lets a client that missed the edge reconcile against the latch it DID receive. Emitted on TRANSITIONS ONLY: a repeated ESTOP frame re-broadcasts the STATE (that is §11.2's loss recovery) but does NOT re-emit the edge, because an edge that did not happen is a lie." }
+  0x000E: { name: safety-events, class: EVENT, status: active, note: "RFC/§9.4 duality: the EVENT TWIN of the `safety` STATE channel (0x0003). Kinds in `safety_event_kinds`; fields ride the scoped `body` (40) sub-map keyed by this channel's own catalog schema (word, cause, owner_session, estop_seq, level). `critical` priority and `watch` access, matching its STATE twin exactly — an edge nobody is allowed to be denied and nobody is allowed to shed. Carries `seq_of_state` (34) naming the 0x0003 frame it corresponds to, which is what lets a client that missed the edge reconcile against the latch it DID receive. Emitted on TRANSITIONS ONLY: a repeated ESTOP frame re-broadcasts the STATE (that is §11.2's loss recovery) but does NOT re-emit the edge, because an edge that did not happen is a lie." }
 
 # ---------------------------------------------------------------------------
 # CBOR map integer keys (control plane). Global key space — a key means the
@@ -227,9 +230,12 @@ cbor_keys:
   41: { name: intent_seq,     type: uint,  note: "NACK: seq of the frame being rejected (RFC-001). Hubs SHOULD populate it whenever a specific inbound frame provoked the NACK; clients MUST tolerate its absence. Without it a client with two intents in flight on ONE channel cannot tell which was refused." }
   42: { name: burst,          type: float, note: "publishes / granted_publishes ENTRY maps: token-bucket capacity in samples, decoupled from rate (RFC-013). Default = granted rate (today's behavior). Clamped to rate x max_burst_multiple and echoed like every wish. Exists because §10.5 made rate double as bucket depth, so a 2-4/s segment sender with a 25/s peak had to declare 30 Hz — lying to admission control to buy burst." }
   43: { name: reboot_in_ms,   type: uint,  note: "ECHO `applied` (19): this accepted intent commits by rebooting, in about this many ms (RFC-020). The hub then GOODBYEs every session with REBOOTING; `boot_id` change handles the rest." }
-  44: { name: deadman_wish_ms, type: uint, note: "HELLO: requested deadman window (RFC-038). The hub clamps into [deadman_min_ms, deadman_max_ms] (a hub MAY clamp tighter) and echoes the APPLIED value via the existing key 24 — post-clamp echo, zero new response plumbing. Exists because a client that KNOWS its liveness cadence is coarse (a browser whose background-tab timers are throttled, a BLE client on a slow connection interval) could not ask for a window it can actually honour; §11.3's loss policy is untouched — this negotiates WHEN the deadman fires, never WHAT it does." }
-  45: { name: curve_family,   type: uint,  note: "publishes / granted_publishes ENTRY maps: which `curve_families` smoothness class the segment stream describes (RFC-030). Wish rides HELLO or PUBLISH (0x18) like `burst`, so a sender switching interpolators mid-session renegotiates without a reconnect; the GRANT echo carries the EFFECTIVE family — post `curve_policy` override — so a client can tell 'honoured' from 'downgraded' (M-2's open question). Absent = unspecified = today's behaviour." }
-# 46–63 free in the core space. 64–127 reserved. 128+ experimental.
+  44: { name: deadman_wish_ms, type: uint, note: "HELLO: requested deadman window (RFC-038). The hub clamps into [deadman_min_ms, deadman_max_ms] (a hub MAY clamp tighter) and echoes the APPLIED value via the existing key 24 — post-clamp echo, zero new response plumbing. Exists because a client that KNOWS its liveness cadence is coarse (a browser whose background-tab timers are throttled, a BLE client on a slow connection interval) could not ask for a window it can actually honor; §11.3's loss policy is untouched — this negotiates WHEN the deadman fires, never WHAT it does." }
+  45: { name: curve_family,   type: uint,  note: "publishes / granted_publishes ENTRY maps: which `curve_families` smoothness class the segment stream describes (RFC-030). Wish rides HELLO or PUBLISH (0x18) like `burst`, so a sender switching interpolators mid-session renegotiates without a reconnect; the GRANT echo carries the EFFECTIVE family — post `curve_policy` override — so a client can tell 'honored' from 'downgraded'. Absent = unspecified = today's behavior. RFC-049b: `requested_curve_family` (48) rides the SAME entry map echoing the original wish verbatim, so the honored-vs-downgraded read is a direct comparison of two present keys, not an inference from what the client remembers sending." }
+  46: { name: ws_port,        type: uint,  note: "WELCOME: the hub's own WebSocket listening port (RFC-046 §3). Present on every binding but load-bearing over BLE — it is the in-band endpoint disclosure a BLE-connected client needs to hop to WS (RFC-043's auto-upgrade). Also closes the sim's hub-identity gap for WS-side clients: the same key tells a WS client what the hub believes its own endpoint is. 0 = none (no WS listener right now)." }
+  47: { name: ipv4,           type: uint,  note: "WELCOME: the hub's own IPv4 address (RFC-046 §3), packed big-endian into one u32 (e.g. 192.168.1.229 = 0xC0A801E5) — there is no bstr(4) here because a plain integer makes '0 = none' the same natural sentinel 0.0.0.0 already is. Read alongside `ws_port` for the BLE→WS upgrade hop. 0 = none." }
+  48: { name: requested_curve_family, type: uint, note: "publishes / granted_publishes ENTRY maps (RFC-049b): echoes the client's `curve_family` (45) WISH verbatim, unmodified by `curve_policy`. Exists alongside the existing effective value at key 45 so a downgrade is a visible FACT (both numbers present, compare them) rather than an inference a client has to reconstruct from what it originally sent. Present only when a curve_family wish was made; a hub with no curve-family opinion omits both keys exactly as before this RFC. Implementation: Phase D (RFC-049)." }
+# 49–63 free in the core space. 64–127 reserved. 128+ experimental.
 
 # ---------------------------------------------------------------------------
 # WELCOME `limits` (key 22) sub-map integer keys — a separate tiny key space
@@ -265,6 +271,7 @@ identity_keys:
   2: { name: fw_version, note: "tstr: hub firmware version, e.g. '2.1.47' (<=24 B). Retires the mDNS-TXT-only exposure that made the MFP plugin label devices 'boot 0x...'. A change here SHOULD be surfaced to the user (RFC-029.3)." }
   3: { name: hub_name,   note: "tstr: operator-assigned machine name (<=32 B). Writable as a str16/str32 setting (RFC-026) where the hub offers one." }
   4: { name: info,       note: "map: OPTIONAL device-defined extras (hardware rev, build date...). Keys are device-defined tstr; the protocol never interprets them. Depth: WELCOME map -> identity map -> info map = 3, one under the §5.3 cap." }
+  5: { name: hub_instance_id, note: "uint (u64): RFC-048, operator veto of an RFC-046 decision. DURABLE hub identity — generated once and NVS-persisted, survives every reboot and firmware update (only a factory reset regenerates it) — as opposed to `boot_id` (cbor_keys 7, §6.1/§7.2), which is a FRESH random value EVERY boot and exists only to fence stale per-boot state. Distinguishes THIS PHYSICAL HUB from any other, across time. Present in WELCOME `identity` (37) for any hub that persists one; absent = the hub has no durable identity yet (a fresh dev build, a non-persisting simulator) and a client MUST tolerate its absence exactly as it tolerates the rest of `identity` (§6.3). Also the value DISCOVER_REPLY (0x1F, §13.8) now carries as `hub_instance_id`, replacing that frame's original `boot_id`-based disambiguator (see the `frame_types` 0x1F note) — a boot-scoped id could not deduplicate 'two hubs sharing a name' across a reboot, which was the field's whole job." }
 
 # ---------------------------------------------------------------------------
 # `blob` (key 38) sub-map integer keys — RFC-021. One vocabulary shared by:
@@ -376,6 +383,8 @@ session_event_kinds:
   1: { name: takeover,       note: "control source ownership transferred (§11.4)" }
   2: { name: session_joined, note: "a session reached GRANTED" }
   3: { name: session_left,   note: "a session ended (any reason)" }
+  4: { name: session_stale,  note: "RFC-042: a session's silence exceeded its liveness window (deadman for a source-owner, idle reaping otherwise) and it was marked STALE rather than torn down — slot, session_id, and grants are RETAINED; any owned source was released (unconditionally, latching nothing per RFC-045). Body carries the affected session_id, same shape as `takeover`." }
+  5: { name: session_resumed, note: "RFC-042: a STALE session returned to LIVE, either by any frame arriving on its still-attached transport (§6.6: any received frame is proof of life) or by a fresh HELLO reattaching a new transport to the same session identity (§6.3 migration path). Body carries the affected session_id." }
 
 # ---------------------------------------------------------------------------
 # log channel (0x0008) event_kind values (RFC-017).
@@ -481,7 +490,7 @@ log_levels:
 # optional `access`) — without it, role-exempt ops would force the whole
 # channel to `watch` access and a generic RFC-009 renderer would offer
 # hold/pause/takeover to every viewer, discovering otherwise only by NACK.
-# That violates grey-never-hide.
+# That violates gray-never-hide.
 # ---------------------------------------------------------------------------
 safety_intent_ops:
   1:  { name: estop_clear,  note: "clear the ESTOP latch (§11.2 conditions apply; NACK CLEAR_REFUSED otherwise). Requires `control`." }
@@ -515,7 +524,7 @@ safety_intent_ops:
 # precisely so that is true.
 #
 # CEILING RULING (operator, 2026-07-25): a configure session may grant UP TO
-# ITS OWN TIER, configure included. That is conventional admin behaviour; the
+# ITS OWN TIER, configure included. That is conventional admin behavior; the
 # audit trail is the paired-device roster (0x000C/D records which mode and
 # which role), not a hard ceiling that would make the first admin unable to
 # make a second.
@@ -585,7 +594,8 @@ nack_codes:
   0x0109: { name: REBOOTING,            note: "hub is committing a change by rebooting and is closing every session first (RFC-020/022.2, GOODBYE code). Preceded by an ECHO carrying reboot_in_ms; on return the changed boot_id tells clients what happened." }
   0x010A: { name: READY_TIMEOUT,        note: "session never sent CATALOG_READY within catalog_ready_timeout_ms (RFC-015, GOODBYE code). Needed because liveness reaping NEVER fires on a client that PINGs happily but never finishes adopting the catalog — it would hold a slot forever with both planes gated shut." }
   0x010B: { name: NOT_READY,            note: "frame refused because the session has not sent CATALOG_READY yet (RFC-015). READY gates BOTH planes: pre-READY INTENTs are NACK'd, not queued, because a client acting before it has adopted the retained safety latch breaks §11.5(2)." }
-  0x010C: { name: IDLE_REAPED,          note: "RFC-039.4: hub-initiated teardown of a NON-OWNING session that fell silent past idle_reap_multiplier x ping_interval_idle_ms (RFC-024, GOODBYE code). Distinct from DEADMAN_TIMEOUT on purpose: reaping a dark viewer is housekeeping with zero motion consequence, and before this code existed it was reported with the motion-safety code — a reaped dashboard read as a deadman event in every log and client." }
+  0x010C: { name: IDLE_REAPED,          note: "RFC-039.4: hub-initiated teardown of a NON-OWNING session that fell silent past idle_reap_multiplier x ping_interval_idle_ms (RFC-024, GOODBYE code). Distinct from DEADMAN_TIMEOUT on purpose: reaping a dark viewer is housekeeping with zero motion consequence, and before this code existed it was reported with the motion-safety code — a reaped dashboard read as a deadman event in every log and client. RFC-042: silence no longer reaches this code directly — it marks a session STALE instead (session_event_kinds.4) — so the reference hub no longer emits DEADMAN_TIMEOUT or IDLE_REAPED for silence; both stay registered for a hub/policy combination that still wants to terminate outright." }
+  0x010D: { name: SLOT_RECLAIMED,       note: "RFC-042: a HELLO that would otherwise NACK BUSY instead evicted a STALE session to make room (lowest access tier first, tie-break longest continuously stale) — best-effort GOODBYE code, since the reclaimed session was stale for a reason and may never receive it. Distinguishable from SESSION_EVICTED (admin/slow-consumer) and from DEADMAN_TIMEOUT/IDLE_REAPED (which no longer fire for silence at all)." }
   # 0x02xx — subscription / QoS
   0x0200: { name: UNKNOWN_CHANNEL,      note: "channel id not in catalog" }
   0x0201: { name: ACCESS_DENIED,        note: "channel access level above session role" }
@@ -605,10 +615,11 @@ nack_codes:
   0x0404: { name: TAKEOVER_REQUIRED,    note: "control exists; retry with takeover flag" }
   0x0405: { name: CLEAR_REFUSED,        note: "e-stop clear conditions not met (§11.2)" }
   # 0x05xx — transfer
-  0x0500: { name: CHUNK_UNAVAILABLE,    note: "blob chunk index out of range, or the requested namespace/store/slot does not exist (generalized from 'catalog chunk' by RFC-021 — the catalog is now namespace 0)" }
+  0x0500: { name: CHUNK_UNAVAILABLE,    note: "blob chunk index out of range, or a store/slot that does not exist WITHIN a registered namespace (generalized from 'catalog chunk' by RFC-021 — the catalog is now namespace 0). An unregistered NAMESPACE itself is the more specific INVALID_NAMESPACE (0x0504, RFC-049e) — this code no longer covers that case." }
   0x0501: { name: REASSEMBLY_TIMEOUT,   note: "fragment reassembly abandoned (5 s)" }
   0x0502: { name: ETAG_MISMATCH,        note: "static-profile client etag != hub catalog etag" }
   0x0503: { name: BLOB_REFUSED,         note: "RFC-039.2: a RECEIVER refusing a declared blob (total_bytes over its reassembly budget), sent as a GOODBYE code by the client rather than idling in a half-session. The observed failure: a client's DoS-guard cap silently refused a grown catalog's transfer header and the session went LIVE WITH NO CATALOG — no error anywhere, every STATE frame undecodable, READY_TIMEOUT eventually killing it 15 s later and blaming the client. Refusal is legal; SILENT refusal is not." }
+  0x0504: { name: INVALID_NAMESPACE,    note: "RFC-049e: a BLOB_REQ naming a `blob.ns` value not in the registered `blob_namespaces` table (0 catalog / 1 store; 128-255 device-defined are legal too — only a value truly outside every registered/device range trips this). Split out of CHUNK_UNAVAILABLE so a client can tell 'namespace does not exist' from 'namespace exists, item does not' (§18-8's panel-flagged gap) instead of receiving the same code for both. Same range as its siblings because it is a transfer-request refusal, not a new error class. Implementation: Phase D." }
 
 # ---------------------------------------------------------------------------
 # Packed payload field types (catalog schema `type` for STREAM/STATE layouts).
@@ -639,29 +650,15 @@ packed_field_types:
   10: { name: str64, note: "64 bytes, zero-padded UTF-8 (RFC-026). 26% of a 242 B snapshot — use deliberately." }
 
 # ---------------------------------------------------------------------------
-# Setting categories (u8) — catalog channel-entry `category` (RFC-009.2).
-# Two tiers, mirroring the channel-id range split:
-#   0–127   SPEC-REGISTERED here, with a canonical order. A client gets
-#           consistent placement, iconography and translation across every
-#           hub it ever meets.
-#   128–255 DEVICE-DEFINED. The hub MUST supply `category_label`; clients
-#           render these as additional tabs AFTER the spec set, ordered by id.
-#
-# A category SPANS CHANNELS: `user` and `user-2` merge into one tab. That is
-# the answer to a category outgrowing one 242 B snapshot (about 58 f32 or 115
-# u16 settings, INCLUSIVE of enabled_mask bytes).
-#
-# Presentation order is authoring order and carries NO wire metadata: tabs in
-# registry order then device ids; within a tab, channels ascending by id and
-# fields in layout order. SlopSync describes what things ARE, never how they
-# LOOK — there is no widget field, deliberately.
+# TOMBSTONE (Phase C2 catalog evolution): `setting_categories` (the four-value
+# device/user/limits/tuning/diagnostics vocabulary) is RETIRED. Every catalog
+# entry's `category` (channel-entry key 10) now carries a `ui_categories` id
+# instead — see that section below, and RENDERING.md §3. This is a pre-tag
+# restructuring (registry header above: permitted before the v1.0 tag), not an
+# append — the wire KEY (10/11) is unchanged, only the value vocabulary it
+# carries. No consumer reads `setting_categories` after this pass; the name is
+# retired rather than renumbered.
 # ---------------------------------------------------------------------------
-setting_categories:
-  0: { name: device,      note: "identity, network, storage, firmware — what the machine IS" }
-  1: { name: user,        note: "everyday operating preferences" }
-  2: { name: limits,      note: "safety envelope: windows, ceilings, e-stop behaviour" }
-  3: { name: tuning,      note: "motion/planner internals; typically `advanced`-flagged" }
-  4: { name: diagnostics, note: "counters, telemetry, resets — mostly read-only fields" }
 
 # ---------------------------------------------------------------------------
 # Setting flags (bit values) — catalog field annotation `flags` (RFC-009.1).
@@ -720,7 +717,7 @@ field_roles:
   "telemetry.temp":      { note: "a temperature reading; the field's own name/unit says which" }
   "telemetry.uptime":    { note: "hub uptime" }
   "identity.name":       { note: "the writable machine-name setting (RFC-026 tier 2, str16/str32). Its READ-ONLY twin is WELCOME identity.hub_name." }
-  "meta.enabled_mask":   { note: "RFC-009.4: a bitfield8 field whose bit i gates the i-th setting-annotated field of the SAME layout. On-change, retained, conflated — every client greys from one ground truth. Disabled means GREY, never hide." }
+  "meta.enabled_mask":   { note: "RFC-009.4: a bitfield8 field whose bit i gates the i-th setting-annotated field of the SAME layout. On-change, retained, conflated — every client grays from one ground truth. Disabled means GRAY, never hide." }
   "meta.reset_gen":      { note: "RFC-019: increments on every applied reset in this counter group, so ALL subscribers observe the reset, not just the sender who asked for it." }
   "pattern.running":     { note: "whether the built-in pattern generator is currently driving the machine" }
   "pattern.select":      { note: "which built-in pattern the generator plays; options are the device's pattern names, index-aligned with the wire value" }
@@ -750,6 +747,20 @@ field_roles:
   "plan.elapsed":        { note: "elapsed time within the segment in flight" }
   "plan.duration":       { note: "total duration of the segment in flight" }
   "plan.style":          { note: "which planning style produced the segment; options are the device's style names, index-aligned with the wire value" }
+  # ---- source.* (RFC-048): promotes RFC-045's `on_disconnect` setting from
+  # ordinary settings-metamodel data to a formally registered role, GENERALIZED
+  # to any autonomous source (a pattern generator today; future on-hub script
+  # or scene playback), not only PatternEngine. This is the whole point of
+  # registering it: a generic client can now find this control on ANY hub's
+  # catalog without hardcoding that hub's channel, the same upgrade `command.*`
+  # and `plan.*` already got. The field itself is still device-declared,
+  # rendered through the ordinary settings metamodel (SPEC §8.8) — only the
+  # ROLE is now registry-formal. See RENDERING.md §10.1 for its rendering rules
+  # (safety-relevant: co-located with the run control, confirm-gated to enable,
+  # distinct unattended-and-moving indicator). Streaming sources are explicitly
+  # OUT of scope: a dead stream leaves the machine still by construction
+  # (SETTLE, SPEC §11.3), so no switch exists or is wanted for them.
+  "source.background_run": { note: "bool, `setting_key`-annotated: whether THIS autonomous source keeps running when its owning session ends. false (DEFAULT) = the source stops when its controlling session ends. true = the source deliberately continues in the background, reachable only by the role-exempt stop/estop ops (§11.2) from any session. Applies to any hub-autonomous source, never to a command-driven one." }
 
 # ---------------------------------------------------------------------------
 # Curve families (u8) — the `curve_family` (cbor key 45) wish/echo value on a
@@ -764,20 +775,20 @@ field_roles:
 # in-span jerk than the quintic reconstruction of the same C1 script.
 #
 # Deliberately NOT a taxonomy of interpolator algorithms: the wire needs the
-# SMOOTHNESS CLASS the reconstruction must honour, not the vendor's name.
+# SMOOTHNESS CLASS the reconstruction must honor, not the vendor's name.
 # Pchip and Makima are both c1_cubic and that is the correct answer.
 #
 # The machine override outranks the declaration (`curve_policy`: follow
 # client / force C1 / force C2) — a feel and safety decision belonging to
 # whoever is strapped to the machine. NO CLAMPING SEMANTICS ARE IMPLIED
 # (operator ruling, RFC-030.5). The GRANT echo carries the EFFECTIVE family
-# post-override, so a client can tell "honoured" from "downgraded".
+# post-override, so a client can tell "honored" from "downgraded".
 # ---------------------------------------------------------------------------
 curve_families:
   0: { name: unspecified, note: "the compatible default — the hub behaves exactly as it did before RFC-030. What every pre-RFC-030 client is." }
   1: { name: c1_cubic,    note: "velocity-continuous cubic (Linear/Pchip/Makima/monotone-cubic senders). Acceleration lawfully STEPS at knots; a follow-client hub reconstructs C1 and does NOT smooth the corner the author put there." }
   2: { name: c2_quintic,  note: "curvature-continuous; the sender means the smoothness. A follow-client hub may use its C2 reconstruction (backward-difference af estimation is valid here — the quantity exists)." }
-  3: { name: step,        note: "held value with instantaneous transitions (step/none interpolation). The hub renders transitions as fast as its OWN limits allow; the family says intent, the machine owns feasibility as always." }
+  3: { name: step,        status: reserved, note: "held value with instantaneous transitions (step/none interpolation). The family says intent, the machine owns feasibility as always. RFC-049a: NUMBER KEPT, never renumbered, but status is `reserved` — the reference engine has no step renderer, so a `step` declaration renders as `c2_quintic` and the GRANT echo reports exactly that effective family (§9.6, §18-20). Declarable again when a step renderer exists in the reference engine; only the delegate's mapping changes when it does." }
 
 # ---------------------------------------------------------------------------
 # Pairing modes (bit values) — advertised as a BITMASK in WELCOME
@@ -807,9 +818,262 @@ procedure_phases:
   1: { name: running,   note: "started and in progress; `progress` 0–100 is advisory" }
   2: { name: succeeded, note: "terminal, ok. Also EVENTed (RFC-020)." }
   3: { name: failed,    note: "terminal, error — `result` u16 carries a nack_codes value or a device code" }
-  4: { name: aborted,   note: "terminal, cancelled or superseded" }
-# 5–127 reserved for spec. 128–255 device-defined intermediate steps (labelled
+  4: { name: aborted,   note: "terminal, canceled or superseded" }
+# 5–127 reserved for spec. 128–255 device-defined intermediate steps (labeled
 # by the device; a client that does not recognize one renders it as 'running').
+
+# ---------------------------------------------------------------------------
+# BLE GATT identity (RFC-046 §1-2) — ONE ecosystem-wide service + write(c2h) +
+# notify(h2c) characteristic UUID set. Every conformant BLE hub advertises the
+# SAME service UUID; every client scans for exactly one thing, the way the
+# 0x17 BEACON frame already does for the ESP-NOW peer radio (§13.7) — this is
+# the phone-facing twin.
+#
+# The first three groups spell the project name in ASCII, deliberately, so
+# the UUID is greppable and mnemonic rather than an opaque v4: 534C4F50 =
+# 'SLOP', 5359 = 'SY', 4E43 = 'NC'. The last two groups are a characteristic
+# discriminator matching the protocol's own c2h/h2c framing (§13.1): ...0002
+# is the WRITE characteristic (client -> hub), ...0003 is the NOTIFY
+# characteristic (hub -> client). ...0001 is the service itself.
+# ---------------------------------------------------------------------------
+ble_identity:
+  service_uuid:     "534C4F50-5359-4E43-8000-000000000001"
+  write_char_uuid:  "534C4F50-5359-4E43-8000-000000000002"   # c2h (write) — client submits frames here
+  notify_char_uuid: "534C4F50-5359-4E43-8000-000000000003"   # h2c (notify) — hub delivers frames here
+
+# ---------------------------------------------------------------------------
+# BLE advertising flags (u8) — RFC-046 §2. The one flags byte a legacy
+# (≤31 B) advertising payload can spare after the service UUID and a
+# shortened hub name; the fuller name rides the scan response. Bits not
+# listed MUST be zero.
+# ---------------------------------------------------------------------------
+ble_adv_flags:
+  bit0: { name: pairing_window_open, note: "a §12.3 association window is open right now (same meaning as the 0x17 BEACON pairing-open flag, ESP-NOW's equivalent)" }
+  bit1: { name: ws_available,        note: "the hub currently has a live IP and a listening WebSocket port — RFC-043's signal that a BLE-connected client SHOULD auto-upgrade to WS. The endpoint itself rides WELCOME `ws_port`/`ipv4` (cbor_keys 46/47), not this byte — a single bit cannot carry a port and an address, and the upgrade hop happens post-HELLO anyway." }
+  # bits 2-7 reserved, zero
+
+# ---------------------------------------------------------------------------
+# UDP discovery (RFC-046 §5) — a minimal broadcast probe/reply pair, the
+# canonical WS-side discovery path for LAN clients without BLE (desktop
+# shells, MFP, Intiface): plain sockets both ends, immune to the
+# multicast/mesh-AP/Android failure modes that make mDNS unreliable in real
+# homes. Frame ids DISCOVER_PROBE (0x1E) / DISCOVER_REPLY (0x1F) are
+# allocated in `frame_types`, which also carries the payload shape. This
+# section is the port/magic identity a socket-level implementation binds to
+# before it ever sees a frame. Read-only identity, no control surface: a
+# probe cannot command anything, and a reply carries nothing a passive
+# observer of WELCOME could not already learn.
+# ---------------------------------------------------------------------------
+udp_discovery:
+  port: 21328           # 0x5350 — ASCII 'SP' (SlopSync Probe), same naming convention as the BLE UUID's ASCII grouping
+  magic: "SLOP"         # 0x53 0x4C 0x4F 0x50, matching the ESTOP frame's own magic-byte convention (§5.5)
+  reply_rate_limit_per_source_s: 1   # hub replies at most once per second per source address, so a probe storm cannot load the hub
+
+# =============================================================================
+# RFC-048 — the UI/rendering constitution. Normative prose, tables, recipes
+# and rules live in RENDERING.md; this file holds only the NUMBERS, exactly
+# as it does for the wire protocol. Every vocabulary below is FROZEN at the
+# v1.0 tag (RENDERING.md §14, the Vocabulary Completeness Doctrine) — additions
+# are a new RFC, never a silent extension. None of these fields are wired onto
+# real catalog entries in this landing (spec/registry text only); wiring them
+# is next-phase work, named so it is never mistaken for done. See RENDERING.md
+# for the normative prose this data supports.
+# =============================================================================
+
+# ---------------------------------------------------------------------------
+# `category` (u8) — WHERE a catalog entry lives (RENDERING.md §3). Ids 1-14
+# are the frozen, complete spec set, in canonical menu order. 0x40-0x7E is the
+# vendor/device range (a hub declaring one MUST supply a label, mirroring
+# `setting_categories`' device-defined tail). Graceful-extension rule
+# (normative, RENDERING.md §3): a client MUST render ANY unrecognized category
+# id — including a vendor id it has not been taught — under `other` (14),
+# using the catalog-provided label, never dropped. This is the structural
+# valve that makes freezing the fourteen safe.
+# ---------------------------------------------------------------------------
+ui_categories:
+  1:  { name: control,    note: "driving the machine now: move, pattern run/speed/depth, streams" }
+  2:  { name: motion,     note: "live physical telemetry" }
+  3:  { name: safety,     note: "faults, interlocks, e-stop state — the stop affordance itself is rank-pinned (ui_ranks), not a menu item here" }
+  4:  { name: limits,     note: "window + ceilings" }
+  5:  { name: library,    note: "stored content: presets, patterns, scripts, positions, profiles" }
+  6:  { name: playback,   note: "hub-local content transport: play/pause/seek/queue" }
+  7:  { name: auxiliary,  note: "secondary actuators: heat, lube, suction, inflation" }
+  8:  { name: automation, note: "routines, schedules, scenes" }
+  9:  { name: tuning,     note: "engine internals, calibration" }
+  10: { name: hardware,   note: "geometry, drive config, sensors, homing" }
+  11: { name: network,    note: "WiFi/BLE state, endpoints, provisioning" }
+  12: { name: session,    note: "clients, roles, ownership, pairing/trust" }
+  13: { name: system,     note: "power, thermals, memory, firmware, logs" }
+  14: { name: other,      note: "the defined overflow — every unrecognized category id (including an untaught vendor id) renders here, per the graceful-extension rule" }
+# 15-0x3F reserved for future spec-registered categories. 0x40-0x7E vendor/
+# device range (MUST carry a label). 0x7F+ reserved.
+
+# ---------------------------------------------------------------------------
+# `rank` (u8) — HOW MUCH a catalog entry/field matters by default
+# (RENDERING.md §4). The existing `setting_flags.advanced` bit folds into this
+# ladder as its migration. Frozen at six. Unknown rank, or no rank annotation
+# at all, renders as `detail`.
+# ---------------------------------------------------------------------------
+ui_ranks:
+  0: { name: hero,       note: "the machine's face; surfaced by default on every renderer class" }
+  1: { name: control,    note: "everyday driving controls; surfaced by default on handheld/full, one navigation step away on glance" }
+  2: { name: detail,     note: "useful but not primary; reachable, not surfaced" }
+  3: { name: advanced,   note: "the `setting_flags.advanced` bit's migration into this ladder; hidden behind an advanced affordance by default, NEVER removed from the surface" }
+  4: { name: diagnostic, note: "reachable on every class; a renderer MAY choose to omit it under its own display budget, but that is the renderer's choice, not this rank's" }
+  5: { name: hidden,     note: "carried on the wire for compatibility, NEVER rendered — the honest home for an inert-but-released field" }
+
+# ---------------------------------------------------------------------------
+# Value axes (RENDERING.md §5) — three small orthogonal vocabularies tagging
+# WHAT STATISTIC a field is. Default when absent: aspect=live, scope=session,
+# provenance=actual. Companion composition, reset linkage and the honesty
+# rule (never present a live value as a peak or vice versa; scope always
+# displayed or unambiguously implied) are RENDERING.md §5.4, normative.
+# ---------------------------------------------------------------------------
+value_aspects:
+  0: { name: live,  note: "the value now (default)" }
+  1: { name: peak,  note: "highest observed" }
+  2: { name: min,   note: "lowest observed" }
+  3: { name: mean,  note: "average observed" }
+  4: { name: total, note: "cumulative (an odometer figure)" }
+  5: { name: rate,  note: "a derivative/frequency quantity" }
+
+value_scopes:
+  0: { name: session,  note: "since this client connected (default)" }
+  1: { name: lifetime, note: "since the device was manufactured/last factory-reset" }
+  2: { name: window,   note: "a bounded rolling window, device-defined width" }
+
+value_provenance:
+  0: { name: demand,  note: "the raw requested value" }
+  1: { name: planned, note: "the target the planner is currently aiming for" }
+  2: { name: actual,  note: "the measured value (default). demand/planned/actual are one quantity at three stages; the axis archetype's commanded-vs-actual overlay is their companion composition." }
+
+# ---------------------------------------------------------------------------
+# `unit` (u8) — a FROZEN NUMERIC companion to the existing free-string `unit`
+# field (§8.2). Both exist; wiring this table onto real catalog fields is
+# next-phase work. Deliberately over-provisioned for foreseeable actuators
+# (RENDERING.md §6). Unknown unit id -> render the catalog's label string
+# verbatim.
+# ---------------------------------------------------------------------------
+unit_ids:
+  0:  { name: mm,      note: "length" }
+  1:  { name: mm_s,    note: "speed (mm/s)" }
+  2:  { name: mm_s2,   note: "acceleration (mm/s²)" }
+  3:  { name: mm_s3,   note: "jerk (mm/s³)" }
+  4:  { name: normalized, note: "0-1" }
+  5:  { name: percent, note: "%" }
+  6:  { name: hz,      note: "Hz" }
+  7:  { name: ms,      note: "milliseconds" }
+  8:  { name: s,       note: "seconds" }
+  9:  { name: v,       note: "volts" }
+  10: { name: a,       note: "amps" }
+  11: { name: w,       note: "watts" }
+  12: { name: wh,      note: "watt-hours" }
+  13: { name: deg_c,   note: "°C" }
+  14: { name: count,   note: "dimensionless count" }
+  15: { name: bytes,   note: "data size" }
+  16: { name: db,      note: "decibels" }
+  17: { name: n,       note: "force — over-provisioned: force-feedback actuators" }
+  18: { name: kpa,     note: "pressure — over-provisioned: suction/inflation" }
+  19: { name: ml,      note: "volume — over-provisioned: lube dosing" }
+  20: { name: ml_min,  note: "flow rate — over-provisioned: lube dosing" }
+  21: { name: rpm,     note: "rotational speed — over-provisioned: rotary actuators" }
+  22: { name: bpm,     note: "beats per minute — over-provisioned: bio-sync accessories" }
+
+# ---------------------------------------------------------------------------
+# Action tags (tstr) — the specific `action.<name>` suffixes (§8.8 convention)
+# a conformant client MAY special-case to upgrade a generic `trigger`
+# (ui_archetypes) into a purpose-specific rendering. An unregistered
+# action.<name> suffix remains legal (nothing here is a requirement on the
+# device); unknown tag -> generic trigger/control per the derivation table
+# (RENDERING.md §7/§8.2). Frozen, thirteen, v1.0.
+# ---------------------------------------------------------------------------
+action_tags:
+  move:          { note: "the primary positional command — usually already the axis archetype's own binding, rarely a separate trigger" }
+  safety:        { note: "a safety-adjacent action outside the law-bound stop archetype itself (e.g. an override/bypass toggle's companion action)" }
+  home:          { note: "a homing-cycle trigger" }
+  calibrate:     { note: "a calibration-cycle trigger; commonly the entry point to a `wizard` widget pattern" }
+  reset:         { note: "aspect-group reset linkage (value_aspects/RENDERING.md §5.4); co-located with the group it resets, confirm-gated" }
+  save:          { note: "persist current state (settings, not a preset item)" }
+  persist:       { note: "commit a value past a reboot — distinct from `setting_flags.restart_required`, which is about WHEN a change takes effect, not whether it survives one" }
+  pair:          { note: "enters a pairing ceremony affordance" }
+  identify:      { note: "blink-to-find — every device ecosystem needs one" }
+  admin:         { note: "a generic administrative action not covered by a more specific tag" }
+  reboot:        { note: "firmware reboot; SHOULD always confirm (cbor_keys.reboot_in_ms)" }
+  preset_save:   { note: "save-to-store, part of the generator-advanced preset roster" }
+  preset_recall: { note: "load-from-store, same roster" }
+
+# ---------------------------------------------------------------------------
+# Archetypes (u8) — the control style + interaction contract a catalog field
+# or channel renders with (RENDERING.md §8). DERIVED by a normative decision
+# table in the common case (never carried on the wire); an optional explicit
+# `archetype` hint overrides. `fallback` is the MANDATORY composition-of-
+# frozen-primitives every archetype declares (the firmware-immortality rule,
+# RENDERING.md §14d) — a primitive lists itself; a composite lists the
+# primitives it degrades to on a client that has not been taught it. Frozen
+# at fifteen, v1.0.
+# ---------------------------------------------------------------------------
+ui_archetypes:
+  0:  { name: readout,   note: "display of a value; bounds present -> bar/gauge projection",                 fallback: [readout] }
+  1:  { name: indicator, note: "status lamp; never the sole carrier of a safety fact",                        fallback: [indicator] }
+  2:  { name: slider,    note: "bounded numeric intent; commit-on-release",                                   fallback: [slider] }
+  3:  { name: stepper,   note: "precision numeric, increments in `step`-sized ticks",                         fallback: [stepper] }
+  4:  { name: toggle,    note: "boolean",                                                                     fallback: [toggle] }
+  5:  { name: select,    note: "enum + options; wire value is the array index",                               fallback: [select] }
+  6:  { name: trigger,   note: "payload-less intent (button); destructive flag -> mandatory confirm on every class", fallback: [trigger] }
+  7:  { name: axis,      note: "1-D positional hero control (role command.position) with commanded-vs-actual overlay", fallback: [axis] }
+  8:  { name: chart,     note: "time-series; glance degrades to sparkline/value; missing samples render as gaps",     fallback: [chart] }
+  9:  { name: list,      note: "roster/store items + item actions; pending is a THIRD state distinct from success/failure", fallback: [list] }
+  10: { name: text,      note: "constrained string; glance projects a digit/char wheel — the pairing-PIN path",       fallback: [text] }
+  11: { name: stop,      note: "the safety stop affordance — bound BY LAW to safety-op identity, never derived from annotation; reachable at every rank on every class, never role-gated, never hidden", fallback: [stop] }
+  12: { name: pad2d,     note: "two-axis control — the multi-axis runway",                                     fallback: [slider, slider] }
+  13: { name: color,     note: "chromatic actuator setpoint (lighting/glow accessories)",                      fallback: [slider, slider, slider] }
+  14: { name: datetime,  note: "moment/interval input (automation schedules)",                                 fallback: [text] }
+
+# ---------------------------------------------------------------------------
+# Regions (u8) — four abstract placement zones + one modal layer
+# (RENDERING.md §9). Geometry/position/size/style within a region are the
+# renderer author's craft; WHAT lives in each region is normative. Frozen
+# at five.
+# ---------------------------------------------------------------------------
+ui_regions:
+  0: { name: primary,    note: "hero-rank patterns (axis-hero and peers); the machine's face, exactly one per axis/capability instance" }
+  1: { name: persistent, note: "the safety-strip: latch state, ownership, the stop archetype. MUST remain visible in every navigation state of every class" }
+  2: { name: content,    note: "the category tree's territory: cards/panes/menu screens in canonical category order; diagnostic-rank material last or collapsed by default" }
+  3: { name: utility,    note: "connection/session status, identity, theme — chrome about the CLIENT, kept out of the machine's way" }
+  4: { name: overlay,    note: "the modal layer: confirms, pairing knocks, alerts. Only ceremony/confirmation content may use it; nothing persistent lives here" }
+
+# ---------------------------------------------------------------------------
+# Renderer classes (u8) — all classes render ONE category tree; they differ
+# in projection and default surfacing, never in reachable content
+# (RENDERING.md §12). A device between budgets adopts the nearer class.
+# Frozen at three.
+# ---------------------------------------------------------------------------
+renderer_classes:
+  0: { name: glance,   note: "OLED remote — home screen = hero-rank; categories = a menu stack; everything except diagnostic reachable by navigation; stop affordance reachable from every screen" }
+  1: { name: handheld, note: "phone — categories as sections/tabs; hero+control surfaced, detail one tap away" }
+  2: { name: full,     note: "desktop — categories as panes, everything visible" }
+
+# ---------------------------------------------------------------------------
+# Widget patterns (u8) — proven compositions extracted from the reference
+# client (RENDERING.md §10): archetype composition + region + states +
+# per-class projection. `required: true` marks a pattern a handheld/full
+# client MUST provide when its capability is present (glance-class: reachable
+# via the category tree instead). Frozen at thirteen, three required.
+# ---------------------------------------------------------------------------
+widget_patterns:
+  0:  { name: axis-hero,         note: "rail + window band + command tape + live position/velocity numerals + nested plan-view; command-tape domain is the REPORTED window", required: true }
+  1:  { name: plan-view,         note: "in-flight plan lane; visibility gated by data freshness, collapses to zero height when idle" }
+  2:  { name: link-strip,        note: "utility region: connection phase, rx liveness, catalog state; safety-relevant chips pinned, rest may scroll" }
+  3:  { name: safety-strip,      note: "persistent region; ops sorted role-EXEMPT-first; stop sticky-visible within any overflow" }
+  4:  { name: settings-card,     note: "a subgroup's fields via the archetype decision table; every disabled control shows WHICH gate disabled it" }
+  5:  { name: scope,             note: "multi-lane strip chart: missing samples render as GAPS never zeros; series colors stable by declaration order across reconnects" }
+  6:  { name: event-stream,      note: "bounded rings; unknown body fields render generically as key=value, never dropped; auto-scroll with user-scroll override" }
+  7:  { name: roster,            note: "list + item actions; pending is a THIRD state distinct from success/failure; locked-by-role honestly distinct from empty" }
+  8:  { name: protocol-pane,     note: "the one deliberately device-aware diagnostic surface — wire ids visible by design" }
+  9:  { name: pattern-panel,     note: "the standard generator surface: run/stop with live state, pattern selection as an exclusive-choice group, knob sliders for whichever optional roles exist, source.background_run co-located with run/stop", required: true }
+  10: { name: generator-advanced, note: "the fray-d surface: master controls + the four modifier lanes rendered as parallel lane groups + preset save/recall via the store, source.background_run co-located with the master run/stop", required: true }
+  11: { name: transport,         note: "playback: play/pause/seek/queue cluster for hubs that play content" }
+  12: { name: wizard,            note: "stepped ceremony flow: pairing, calibration, provisioning; glance-class projects it as sequential menu screens" }
 
 # ---------------------------------------------------------------------------
 # Well-known limits & defaults. SPEC.md Appendix G mirrors this table; the
@@ -819,6 +1083,7 @@ limits:
   header_bytes: 8
   min_transport_payload: 242        # ESP-NOW 250 − 8 header; STATE frames must fit this (§9.1)
   catalog_chunk_payload: 192
+  blob_chunks_in_flight: 4          # RFC-050: advertised SENDER pacing budget — the max unacknowledged-by-application-progress BLOB_CHUNKs a sender may have outstanding for one transfer before it MUST hold emission (§8.4's backpressure table). Concrete answer to the panel's "what IS the signal" finding: a hub MAY advertise a smaller value, MUST NOT advertise more.
   bundle_max_samples: 32
   bundle_max_span_ms: 20
   seq_width_bits: 16
@@ -839,6 +1104,8 @@ limits:
   deadman_max_ms: 5000
   pairing_window_default_s: 120
   pairing_pin_digits: 4
+  pairing_gesture_boot_count: 3       # RFC-049g: N in §12.3(c)'s power-cycle gesture — this many CONSECUTIVE short boots arm the push-to-pair window on the next boot. Was prose-only ("N (default 3)"); the panel's own complaint pattern (registry doctrine says numbers are never left as hedges) applies to this one too.
+  pairing_gesture_max_uptime_ms: 10000 # RFC-049g: the per-boot uptime ceiling that counts as "short" for the gesture above. Was prose-only ("~10 s") — the tilde was hedge language in a normative section; pinned here matching the value SPEC §12.3(c) already carried in prose. Reference-firmware conformance to this exact value is unverified by this pass — implementation is Phase D.
   token_bytes: 16
   instance_id_bytes: 8
   etag_bytes: 8
@@ -872,9 +1139,10 @@ limits:
   catalog_ready_timeout_ms: 15000   # RFC-015: a session that PINGs happily but never sends CATALOG_READY is GOODBYE'd READY_TIMEOUT. Liveness reaping alone NEVER fires on a pinging client, so without this a half-adopted session holds a slot forever with both planes gated shut. (READY itself is re-sent by the client at catalog_chunk_gap_timeout_ms until retained STATE arrives — idempotent, no handshake state machine.)
   idle_reap_multiplier: 3           # RFC-024: reap a non-owning session after this multiple of ping_interval_idle_ms of silence. §6.5 said "MAY"; it was never implemented, so a viewer that went dark held a slot forever. Two liveness regimes, deliberately different: source OWNERS get the deadman window + §11.3 loss policy; everyone else gets idle reaping with no motion consequence.
 
-  # ---- streaming (RFC-013, RFC-014) ----------------------------------------
-  max_future_schedule_ms: 250       # RFC-014: for segment-class STREAM channels, t_base + t_off[i] IS the intended execution start of sample i; the hub clamps scheduling this far ahead. It was already the shipped fw 2.1.45 behaviour but registered NOWHERE — the MFP plugin carried a private SegLookaheadMs=120 against it. Interop by folklore, now by number. Recommended client lookahead <= half of this.
+  # ---- streaming (RFC-013, RFC-014, RFC-049c) ------------------------------
+  max_future_schedule_ms: 250       # RFC-014: for segment-class STREAM channels, t_base + t_off[i] IS the intended execution start of sample i; the hub clamps scheduling this far ahead. It was already the shipped fw 2.1.45 behavior but registered NOWHERE — the MFP plugin carried a private SegLookaheadMs=120 against it. Interop by folklore, now by number. Recommended client lookahead <= half of this.
   max_burst_multiple: 4             # RFC-013: cap on `burst` relative to granted rate. An unbounded client-declared burst would reintroduce the exact flood the token bucket exists to stop.
+  segment_handoff_k: 1.5            # RFC-049c: the H11 machine-side handoff-sanity bound (§9.6) — a hub SHOULD reject/bound an accepted end-velocity exceeding k * min(|chord_in|, |chord_out|). Was reference-implementation-only (the MFP plugin's own Fritsch-Carlson limiter and the firmware's boundHandoffVelocity both hardcoded 1.5 independently) — the panel quoted this registry's OWN doctrine ("a competing implementation has no authoritative source for the clamping constant") back at us. Pinned here so a second implementation matches shape without reverse-engineering the reference. Hub-side per-source scheduling-depth backstop (widening H11's lookahead-bounded coverage) is Phase D implementation, not a registry number.
 
   # ---- string caps (RFC-009, RFC-022.5, RFC-028.2) -------------------------
   # Reconciliation, normative: SENDERS truncate diagnostic strings to the cap;

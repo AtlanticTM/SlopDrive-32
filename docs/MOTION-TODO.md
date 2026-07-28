@@ -52,7 +52,7 @@ decision, not a purely aesthetic one.
    That number IS the required padding, and it is a clean answer rather than a
    guess.
 3. **Do the same for the C2 quintic**, which can bulge more than a cubic because
-   it must also honour boundary accelerations.
+   it must also honor boundary accelerations.
 4. **Decide the policy.** Candidates: (a) always clip (today); (b) pad by the
    computed bound, capped by the physical rail; (c) shrink the knot band so the
    padded curve fits the user window exactly — i.e. the user's window means "the
@@ -76,13 +76,13 @@ but it needs the numbers from (1)-(3) first.
 
 ---
 
-## M-2 — RFC: interpolation / curve-family signalling in SlopSync
+## M-2 — RFC: interpolation / curve-family signaling in SlopSync
 
-**Status:** design agreed 2026-07-26, RFC not yet written.
-**Disposition:** RFC against `docs/slopsync/` — protocol-visible, registry
-numbers required. Write it AFTER the sim and hardware passes confirm the feel,
-per the operator's sequencing: the wire change is the LAST thing committed,
-because released numbers can never be renumbered.
+**Status: DONE [2026-07-27].** Shipped as RFC-030 — `curve_family` (registry
+key 45), normatively specified in `docs/slopsync/SPEC.md` §9.6. Firmware
+deployment status: see `docs/canon/LEDGER.md`. The proposal below is kept as
+the design record; the shipped wire values (`unspecified`/`c1_cubic`/
+`c2_quintic`/`step`) are the registry's, not this section's draft names.
 
 ### Why it is needed
 
@@ -110,7 +110,7 @@ Two SEPARATE concepts, deliberately not fused:
   `FollowClient / ForceC1 / ForceC2`.
 
 (B)'s "follow" mode is only meaningful once (A) exists; today it resolves to C2,
-which is the pre-existing behaviour byte for byte.
+which is the pre-existing behavior byte for byte.
 
 Proposed for (A):
 
@@ -135,10 +135,10 @@ curve_family:  0 = unspecified   (points only, no tangent meaning — hub's choi
   (ground-truth doctrine: the hub reports what it will actually DO, which may
   differ from the wish if `curve_policy` is forcing).
 - Does the hub advertise which families it can reconstruct, so a client can tell
-  the difference between "honoured" and "silently downgraded"? Probably yes —
+  the difference between "honored" and "silently downgraded"? Probably yes —
   otherwise a client cannot know its C1 script is being rendered as C2.
 - Interaction with M-1: a C1 sender is exactly the case that overshoots the
-  window hardest, so the padding decision and this RFC touch the same behaviour.
+  window hardest, so the padding decision and this RFC touch the same behavior.
 
 ---
 

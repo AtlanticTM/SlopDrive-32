@@ -37,6 +37,17 @@ One SlopSync frame maps to exactly one transport datagram/message where the bind
 
 **`max_frame` is header-inclusive**: it bounds `8 + len`. Per-binding defaults are in the registry (`max_frame_ws`, `max_frame_espnow`, `max_frame_ble`, `max_frame_serial`; [Appendix G](appendices.md#appendix-g)). A hub advertises its own value in WELCOME `limits.max_frame` and MAY advertise less than its binding permits; it MUST NOT advertise more. A frame exceeding the negotiated maximum is answered with NACK `FRAME_TOO_LARGE` (if a session exists) and discarded.
 
+**What `header.channel` carries, per frame type** *(normative routing — previously discoverable only by reading the reference implementation)*:
+
+| Frame types | `header.channel` |
+|---|---|
+| HELLO, WELCOME, SUBSCRIBE, UNSUBSCRIBE, PUBLISH, GRANT, NACK, GOODBYE, PING, PONG, CLOCK, PROBE, PROBE_REPORT, PAIR_REQ, PAIR_GRANT, AUTH, HUB_SIG, CATALOG_READY, BLOB_REQ, ACKMASK, BEACON | `0x0000` (session-scoped). Any addressing rides the payload — NACK's `channel_id` (15), BLOB_REQ's `blob` (38) sub-map |
+| STATE, STREAM, INTENT, ECHO, EVENT | the **target channel id** |
+| BLOB_CHUNK | the id of the channel whose blob it carries (the `catalog` channel for namespace 0) |
+| ESTOP | not applicable — the [§5.5](#s5-5) fixed 12-byte layout has no conventional header |
+
+INTENT and ECHO *also* carry `channel_id` (15) inside the CBOR payload; the header copy is redundant-but-authoritative routing — the two name the same channel, and the header is what routes.
+
 ## 5.2 Frame type registry {#s5-2}
 
 The full table lives in `registry.yaml` (`frame_types`) and is reproduced in [Appendix A](appendices.md#appendix-a). Core points:
@@ -69,6 +80,8 @@ STATE and STREAM payloads are **packed little-endian structs**. There is no enco
 **STREAM sample layouts MUST NOT contain string fields.** The motion hot path never pays for text.
 
 **Append-only evolution rule:** a layout, once released, may only grow at the tail. Readers MUST parse the prefix they know and ignore trailing bytes; writers MUST NOT reorder, resize, or remove released fields. Consequence: a constrained client compiled against catalog etag *E* still reads every field it knows from a hub whose catalog moved to *E′* by appending — the etag check ([§8.5](catalog.md#s8-5)) then decides *policy* (warn/degrade), not parseability. Removing or changing a field requires allocating a **new channel id** and retiring the old one, which keeps its id forever ([§4.4](foundations.md#s4-4)).
+
+**Explicit field width (forward decodability).** A layout field MAY carry `size` (catalog key 18) — the field's packed width in **bytes**, stated explicitly. Decoders MUST prefer the declared size over the type-derived width; an unknown TYPE with a declared SIZE is then a **skippable hole** rather than a decode wall. Without it, the first registry-added packed type strands every existing client at the first field that uses it: later offsets become unknowable and the entire layout tail goes dark — both shipped generic clients independently carried the identical defensive truncation, which is why this key exists. For known types the declared width MUST equal the type-derived width; conformance checks the agreement, and a mismatch is a catalog-authoring error, never a runtime override.
 
 **STREAM bundle payload layout** (applies to every STREAM channel; the catalog defines only the per-sample struct):
 

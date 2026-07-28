@@ -91,7 +91,7 @@ suites:
   # are NOT yet generated. See SPEC §18-7 for what the FROZEN mini-catalog
   # fixture cannot cover at all (it carries no RFC-009 annotations and no
   # safety INTENT channel, so per-op `access`, `option_access` and the role
-  # exemption are behavioural-test-only until a v1.1 fixture pass — which would
+  # exemption are behavioral-test-only until a v1.1 fixture pass — which would
   # move the 775 B / F4 A2 8F BB 58 CE D1 6A pins and therefore was NOT done at
   # the v1.0 tag).
   readiness:                                          # RFC-015, SPEC §6.4
@@ -137,3 +137,26 @@ suites:
     - id: Z-02  # refused over-capacity transfer must not retain the attacker's numbers
     - id: Z-03  # over-cap structural string rejected; over-cap NACK `detail` TRUNCATED, never dropped
     - id: Z-04  # depth-5 CBOR document rejected without recursion blowup
+
+  # ---- RFC-030..042 batch (2026-07-26/27) -- HOLE, not yet covered here -----
+  # This manifest predates the RFC-030..042 batch (curve_family, deadman_wish_ms,
+  # session-admin, the identity codec, etc. all landed after the rows above were
+  # written). Per line 1's own "NORMATIVE as to coverage" rule, an uncovered
+  # feature must get an explicit hole row here, not silence. Each id below has
+  # BEHAVIORAL (non-byte-exact) coverage today in
+  # test/native/test_slopsync_streamingress/test_main.cpp (cited); no
+  # golden-vector .bin/.expected.yaml exists yet for any of them.
+  admin_and_negotiation:
+    - id: N-01  # hole: no vectors yet -- RFC-010 safety_ops::estop as an INTENT op
+                #   on 0x0005 (op encode + effect, exact bytes); no dedicated
+                #   byte-exact vector, only the raw-frame ESTOP path (E-01..E-04)
+    - id: N-02  # hole: no vectors yet -- RFC-018 session-admin (0x0009 INTENT)
+                #   {op: evict, session_id} -> GOODBYE, exact bytes
+    - id: N-03  # hole: no vectors yet -- RFC-030 curve_family: wish -> effective
+                #   value echo, exact bytes; behavioral coverage: SI-23
+    - id: N-04  # hole: no vectors yet -- RFC-038 deadman_wish_ms: clamp to
+                #   registry bounds, echoed applied on key 24, exact bytes;
+                #   behavioral coverage: SI-22
+    - id: N-05  # hole: no vectors yet -- RFC-016(a) WELCOME `identity` (key 37)
+                #   codec: product/fw_version/hub_name, emit-only-when-set,
+                #   exact bytes; behavioral coverage: SI-24

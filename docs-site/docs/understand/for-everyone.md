@@ -76,7 +76,7 @@ When an app is driving the machine directly, the machine watches for it. If
 that app goes quiet — the phone dies, the app crashes, the WiFi drops — the
 machine stops within a fraction of a second.
 
-There is one deliberate exception, and it is the behaviour you want. If you
+There is one deliberate exception, and it is the behavior you want. If you
 started a pattern that the *machine itself* is running, your screen locking
 does not interrupt it. The machine was never depending on your phone; your
 phone only pressed start.

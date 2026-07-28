@@ -39,7 +39,7 @@ read this property; they never guess it from a unit string.
 
 | Value | Kind | Meaning |
 |---|---|---|
-| `0` | `samples` | dense points reporting a value AT AN INSTANT (§9.2); a dropped sample is recoverable by interpolation from its neighbours. Decimable under congestion. The default — absent on the wire means this. |
+| `0` | `samples` | dense points reporting a value AT AN INSTANT (§9.2); a dropped sample is recoverable by interpolation from its neighbors. Decimable under congestion. The default — absent on the wire means this. |
 | `1` | `segments` | each sample COMMANDS A TIME EXTENT — it carries its own duration, so it is not a point on a continuous curve. A dropped segment is a permanently lost COMMAND, not a recoverable interpolation gap (RFC-014/023). NOT decimable: §10.4's shedding table sheds whole-source or not at all for these. |
 
 ## Access levels
@@ -73,7 +73,7 @@ A subscription carries a priority class. The lower number sheds first.
 |---|---|---|
 | `0x0000` | `SESSION` | session-scoped frames; never subscribable |
 | `0x0001-0x007F` | `spec-core` | allocated below; spec-governed |
-| `0x0080-0x7FFF` | `device-defined` | hub firmware allocates; described by catalog |
+| `0x0080-0x7FFF` | `device-defined` | hub firmware allocates; described by catalog. RFC-047: the RECOMMENDED allocation shape is the 0xCDSS grid (class nibble 1=STATE/2=STREAM/3=INTENT/4=EVENT/5=STORE, domain nibble device-chosen subsystem, slot byte) — see docs/slopsync/CHANNEL-MAP.md for the worked grid and SlopDrive-32's own renumber. Within this range, 0x7000-0x7FFF is reserved EXPERIMENTAL/VENDOR play space and MUST NEVER appear in a shipped catalog. |
 | `0x8000-0xFFFF` | `reserved` |  |
 
 ## Spec-core channels
@@ -85,7 +85,7 @@ catalog does not exist on that hub.
 | Id | Name | Class | Notes |
 |---|---|---|---|
 | `0x0001` | `catalog` | `STATE` | catalog meta: etag, chunk count, entry count |
-| `0x0002` | `session-roster` | `STATE` | IMPLEMENTED at v1.0 (RFC-018): generation u16 + count u8 + flags u8, then 8 packed slots {session_id u32, role u8, flags u8, name str16} = 8x22 + 4 = 180 B, inside the 242 B floor at default_max_clients_ws 8. The str16 name (feasibility pass) also FIXES the never-replayed-join-events blocker: a late joiner learns existing sessions' names from the roster snapshot, not from missed 0x0007 events. Names over 16 B truncate here; the full name rides 0x0007 while the session lives. |
+| `0x0002` | `session-roster` | `STATE` | RFC-047 §3: allocated and specified (RFC-018), NOT implemented — no reference catalog builder declares it (see RFC-QUEUE.md deferred ledger, SPEC.md §18). `status: reserved` is the machine-checkable fact the registry never carried before: a channel can be allocated and described on paper without any conformant hub being able to claim it is live. Specified layout: generation u16 + count u8 + flags u8, then 8 packed slots {session_id u32, role u8, flags u8, name str16} = 8x22 + 4 = 180 B, inside the 242 B floor at default_max_clients_ws 8. The str16 name (feasibility pass) is intended to FIX the never-replayed-join-events blocker: a late joiner would learn existing sessions' names from the roster snapshot instead of missed 0x0007 events. Names over 16 B would truncate here; the full name rides 0x0007 while the session lives. |
 | `0x0003` | `safety` | `STATE` | latched safety word: estop/stop/hold/pause + cause + owner (§11.1); RFC-025 appends manual_override + bypass_limits to the same snapshot (append-only is legal) |
 | `0x0004` | `control-owner` | `STATE` | active arbiter source + owning session per source (§11.4) |
 | `0x0005` | `safety-intents` | `INTENT` | STOP/HOLD/PAUSE/RESUME/ESTOP_CLEAR/ESTOP/TAKEOVER + override/bypass (§11, safety_intent_ops) |

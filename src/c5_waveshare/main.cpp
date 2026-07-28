@@ -27,11 +27,12 @@
 //   RED    solid       = fatal error (ESP-NOW init failed)
 //
 // ESP-NOW setup:
-//   - Wi-Fi driver initialised in STA mode, 5GHz-only band.
+//   - Wi-Fi driver initialized in STA mode, 5GHz-only band.
 //   - Channel locked to SECRET_ESPNOW_CHANNEL (from secrets.h).
 //   - Promiscuous receive — accepts packets from any peer MAC. owo
 //
-// Board: Waveshare ESP32-C5 Full-Size DevKit (16MB flash / 8MB PSRAM)
+// Board: Waveshare ESP32-C5-Zero (4MB flash, no PSRAM) — see env:c5_waveshare
+// in platformio.ini and boards/esp32-c5-zero.json.
 //   - ARDUINO_USB_CDC_ON_BOOT=0 → Serial = UART0 via USB-Serial chip
 //   - GPIO7 = UART1 TX (relay out to S3 or downstream device)
 //   - GPIO8 = UART1 RX (optional — accepts commands from downstream too)
@@ -57,7 +58,7 @@
 
 static constexpr int8_t   PIN_RELAY_TX  = 7;      // UART1 TX → downstream RX
 static constexpr int8_t   PIN_RELAY_RX  = 8;      // UART1 RX ← downstream TX
-// 460800 baud — must match DONGLE_UART_BAUD in config_api.h on the S3 side.
+// 460800 baud — this literal is its own source of truth now (no shared define).
 // Each byte takes ~22µs instead of 87µs at 115200, cutting UART jitter by ~4×.
 // Serial (UART0 / USB debug) stays at 115200 — only the relay UART1 is bumped. :3
 static constexpr uint32_t RELAY_BAUD    = 460800;
@@ -82,7 +83,7 @@ static inline void ledSet(uint8_t r, uint8_t g, uint8_t b) {
 
 static inline void ledOff() { ledSet(0, 0, 0); }
 
-// Scale a colour component by LED_BRIGHT/255 so we don't blind anyone. hehee
+// Scale a color component by LED_BRIGHT/255 so we don't blind anyone. hehee
 static inline uint8_t dim(uint8_t v) {
     return (uint8_t)((uint16_t)v * LED_BRIGHT / 255);
 }
@@ -465,7 +466,7 @@ void setup() {
     Serial1.begin(RELAY_BAUD, SERIAL_8N1, PIN_RELAY_RX, PIN_RELAY_TX);
 
     // LED init — start with a brief white flash so we know it's alive. owo
-    // Then settle into idle yellow pulse while ESP-NOW initialises.
+    // Then settle into idle yellow pulse while ESP-NOW initializes.
     ledSet(dim(255), dim(255), dim(255));  // white boot flash
     delay(150);
     ledOff();
@@ -476,7 +477,7 @@ void setup() {
     Serial.printf("[c5_waveshare] RGB LED: GPIO%d\n", PIN_LED);
 
     // ESP-NOW init — 5GHz, locked channel, promiscuous receive. :3
-    Serial.println("[c5_waveshare] Initialising ESP-NOW...");
+    Serial.println("[c5_waveshare] Initializing ESP-NOW...");
     initEspNow();
 
     Serial.printf("[c5_waveshare] My MAC: %s\n", WiFi.macAddress().c_str());

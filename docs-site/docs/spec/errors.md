@@ -29,7 +29,7 @@ NACK (CBOR): `code` (16) from the registry's ranged taxonomy, optional `channel_
 - **`detail` is diagnostic, never required for machine handling.** A sender truncates it to `nack_detail_max_bytes` (48); an over-length detail MUST NOT cause the NACK itself to vanish ([§5.8-4](wire-format.md#s5-8)).
 - **NACK never closes the session by itself; GOODBYE does.**
 
-**GOODBYE draws its `code` from the same `nack_codes` table.** A separate code space was considered and rejected: [§4.3](foundations.md#s4-3)'s unknown-code handling is a *range* fallback, and two overlapping spaces would make the range of an unknown code ambiguous, so a forward-compatible receiver could not classify it. Codes usable as a GOODBYE reason are marked as such in the registry: `NORMAL_CLOSURE`, `SESSION_EVICTED`, `DUPLICATE_INSTANCE`, `DEADMAN_TIMEOUT`, `READY_TIMEOUT`, `REBOOTING`, `UNAUTHORIZED`.
+**GOODBYE draws its `code` from the same `nack_codes` table.** A separate code space was considered and rejected: [§4.3](foundations.md#s4-3)'s unknown-code handling is a *range* fallback, and two overlapping spaces would make the range of an unknown code ambiguous, so a forward-compatible receiver could not classify it. Codes usable as a GOODBYE reason are marked as such in the registry: `NORMAL_CLOSURE`, `SESSION_EVICTED`, `DUPLICATE_INSTANCE`, `READY_TIMEOUT`, `SLOT_RECLAIMED` (RFC-042, [§6.6](session.md#s6-6)), `REBOOTING`, `UNAUTHORIZED`, and the client-sent `BLOB_REFUSED` ([§4.5](foundations.md#s4-5)). `DEADMAN_TIMEOUT` and `IDLE_REAPED` remain registered but, since RFC-042, silence produces no GOODBYE at all (a session goes `STALE`, not gone) — a hub/policy combination that still wants to terminate outright on silence remains free to emit them.
 
 ## 16.2 Observability {#s16-2}
 

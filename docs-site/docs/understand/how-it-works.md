@@ -21,19 +21,19 @@ Every diagram on this site uses one visual language. Learn it once here.
 <div class="ss-keys">
 <span class="ss-key ss-key--reality"><b>reality</b>Measured truth. What the machine actually did, applied, or is reporting now.</span>
 <span class="ss-key ss-key--intent"><b>intent</b>A wish. What somebody asked for, before the machine confirms anything.</span>
-<span class="ss-key ss-key--safety"><b>safety</b>Stops and latches. This colour never carries a second meaning.</span>
+<span class="ss-key ss-key--safety"><b>safety</b>Stops and latches. This color never carries a second meaning.</span>
 <span class="ss-key"><b>rectangle</b>A party or a step: a hub, a client, a decision.</span>
 <span class="ss-key"><b>cylinder</b>Something that persists somewhere.</span>
 <span class="ss-key"><b>rounded</b>One frame, in flight on the wire.</span>
 </div>
 
-The two colours are not decoration. They are the two colours the SlopDrive-32
+The two colors are not decoration. They are the two colors the SlopDrive-32
 machine paints on its own screen: blue for what the machine measured or
 applied, purple for what a person asked for. They mean the same thing in a
 diagram, in a table and on the machine. Amber and red are safety, in the
 documentation and on the machine alike, and neither may restyle them.
 
-The distinction those two colours carry is the whole product. Hold on to it and
+The distinction those two colors carry is the whole product. Hold on to it and
 the rest of this page is straightforward.
 
 ## 1. The machine hands you its datasheet
@@ -106,7 +106,7 @@ flowchart TD
 | [STATE](../reference/dictionary.md#state) | A full snapshot of a group of values | Harmless. The next snapshot supersedes it. There are no deltas, ever. |
 | [STREAM](../reference/dictionary.md#stream) | Timestamped [bundles](../reference/dictionary.md#bundle) of samples | Recoverable. Samples carry time, so a consumer interpolates across the hole. |
 | [INTENT](../reference/dictionary.md#intent) | One absolute command | The change does not happen. The hub answers every intent with an [ECHO](../reference/dictionary.md#echo) or an error, so the sender finds out. |
-| [EVENT](../reference/dictionary.md#event) | One occurrence, at one moment | A moment is missed. Events are never replayed, so no safety behaviour may depend on one. |
+| [EVENT](../reference/dictionary.md#event) | One occurrence, at one moment | A moment is missed. Events are never replayed, so no safety behavior may depend on one. |
 | [STORE](../reference/dictionary.md#store) | Numbered slots holding opaque documents | Harmless. The client asks for the document again. |
 
 Two rules follow from that table, and both are load-bearing.
@@ -304,12 +304,12 @@ same bytes, three honest interfaces.
 | [`setting_key`](../reference/dictionary.md#setting_key) | Writable, and here is the command key that writes it. Absent means read-only. |
 | `min`, `max`, `step`, `unit`, `default` | Choose and bound the control. The hub still validates; these are for display. |
 | `options` | Name the choices of a single-select, instead of showing raw numbers. |
-| [`role`](../reference/dictionary.md#field-role) | Say what the value *is* semantically, so a client that recognises it **may** upgrade to a purpose-built control. Fallback is mandatory; upgrades are optional. |
+| [`role`](../reference/dictionary.md#field-role) | Say what the value *is* semantically, so a client that recognizes it **may** upgrade to a purpose-built control. Fallback is mandatory; upgrades are optional. |
 | [`category`](../reference/dictionary.md#setting-category) | Which tab it belongs in, from a registered list, so placement stays consistent across different machines. |
 | `flags` | `advanced` hides it behind an affordance, never removes it. `secret` means the value never appears in state at all — only whether it is set. |
 
-A setting the machine cannot accept right now is greyed, never hidden. The
-machine says so in its own state, and every client greys from that one truth.
+A setting the machine cannot accept right now is grayed, never hidden. The
+machine says so in its own state, and every client grays from that one truth.
 
 The registered vocabularies — every category, role, flag and field type — are
 in the [catalog vocabulary reference](../reference/registry/catalog-vocabulary.md),

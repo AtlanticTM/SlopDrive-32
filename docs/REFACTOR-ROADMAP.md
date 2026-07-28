@@ -33,7 +33,7 @@ Compat is layered, not middleware:
 | Module | Status |
 |---|---|
 | **SlopSync** (protocol + lib + firmware hub) | LIVE — verified on hardware end-to-end, probe 8/8 |
-| **SlopMotion** (Ruckig motion core, §1) | PART 1 — lib/slopmotion + vendored Ruckig v0.19.4, 11 native suites green, trace bench + graphs; firmware wiring is part 2 |
+| **SlopMotion** (Ruckig motion core, §1) | LIVE — lib/slopmotion + vendored Ruckig v0.19.4, 11 native suites green, trace bench + graphs, AND firmware wiring landed (see §10 below, CLAUDE.md §7.6) |
 | **SlopLog** | LIVE — all legacy sites migrated, boot narration, serial handoff |
 | **SlopGlow** | LIVE — liveness gate field-proven on day one |
 | TMC2160 | 🪦 nuked (fw 2.1.38) |
@@ -165,14 +165,14 @@ rules) before touching anything.
   wedges on a stalled tab — the hub sheds it; this deletes the UiSocket
   activity-gate/reaper machinery wholesale).
 - STATE channels (h2c): 0x0003 safety (retained), 0x0004 control-owner,
-  0x0006 hub-status 1 Hz, 0x0080 motion ≤60 Hz (pos/tgt/speed/flags —
-  replaces 0x01 telemetry), 0x0081 machine-config on-change (replaces
-  config fetch), 0x0082 pattern-state, 0x0083 odometer (replaces 0x06),
+  0x0006 hub-status 1 Hz, 0x1100 motion ≤60 Hz (pos/tgt/speed/flags —
+  replaces 0x01 telemetry), 0x1000 machine-config on-change (replaces
+  config fetch), 0x1200 pattern-state, 0x1002 odometer (replaces 0x06),
   0x0007 session-events.
 - INTENT channels (c2h) with post-clamp applied-value ECHO 0x0E — the
-  ground-truth confirm the shadow layer needs: 0x0100 move, 0x0101
+  ground-truth confirm the shadow layer needs: 0x3100 move, 0x3000
   config-set (window_min/window_max/user & input limit sets — THE
-  stroke-window path), 0x0102 pattern-cmd, 0x0103 home; safety-intents
+  stroke-window path), 0x3200 pattern-cmd, 0x3101 home; safety-intents
   0x0005 (stop/hold/pause/resume/estop_clear).
 - Reference implementations for the wire, in order of usefulness:
   `clients/mfp-slopsync/SlopSync.cs` (complete C# client incl. CBOR codec
@@ -190,13 +190,13 @@ rules) before touching anything.
   verify visually against the live device, measure staleness.
 - **B — write plane:** intents with the existing shadow lifecycle wired
   to ECHO 0x0E applied values (stroke window FIRST — it's the reported
-  defect; verify end-to-end: drag → 0x0101 → echo → band renders the
+  defect; verify end-to-end: drag → 0x3000 → echo → band renders the
   device's clamped truth). Then move/pattern/mode/home/safety controls.
   Roles: viewer sessions render read-only (§9 trust model, enforcement
   flip comes later — build the UI assuming it).
 - **C — demolition:** retire UiSocket frames one-for-one as their
-  SlopSync replacement is verified (0x01→0x0080, 0x06→0x0083, 0x02→
-  0x0006+0x0081, CMD/ECHO→intents/0x0E, clock→CLOCK). Delete senderTask
+  SlopSync replacement is verified (0x01→0x1100, 0x06→0x1002, 0x02→
+  0x0006+0x1000, CMD/ECHO→intents/0x0E, clock→CLOCK). Delete senderTask
   + UiSocket when empty; port :81 dies (a §10 transport-demolition step).
   HTTP keeps only: static bundle, OTA, /api/log, /api/capabilities
   (bootstrap pointer to :82), and the sync-WebServer question then folds
@@ -206,7 +206,7 @@ rules) before touching anything.
   feed (currently deliberately silent — SLopLog only), the inert
   `interp_clamp_overshoot` toggle, and a /api/slopmotion tuning card.
   Anomalies want a proper SlopSync EVENT channel (new device channel id,
-  catalog entry — follow the 0x0085 authoring pattern), not a UiSocket
+  catalog entry — follow the 0x2101 authoring pattern), not a UiSocket
   frame revival.
 
 ### 5.4 Constraints & verification (non-negotiable)

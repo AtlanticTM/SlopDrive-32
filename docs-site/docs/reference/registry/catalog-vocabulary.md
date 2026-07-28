@@ -47,7 +47,7 @@ A role is the semantic tag on a catalog field. It is a text string, not
 a number, because action roles carry a device-chosen suffix.
 
 Roles are **opportunities, never requirements**. A client that
-recognises a role may render a bespoke widget. A client that does not
+recognizes a role may render a bespoke widget. A client that does not
 must fall back to generic rendering by type and constraints. An unknown
 role is never an error.
 
@@ -58,37 +58,40 @@ role is never an error.
 | `limit.input.speed` | speed ceiling of the INPUT (machine-driven: patterns, streams, TCode) limit set |
 | `limit.input.accel` | accel ceiling of the input limit set |
 | `limit.input.jerk` | jerk ceiling of the input limit set |
+| `geometry.max_travel` | the configured travel ceiling — how far the machine's rail geometry allows it to search/move (0x0081 max_rail is the worked example: also the sensorless-homing search sweep bound). Distinct from window.min/max, which is the operator-chosen SUB-range within this travel. |
+| `geometry.measured_travel` | the usable travel a real home actually measured between the two hard stops, as opposed to geometry.max_travel's configured ceiling. Zero/absent-of-meaning until the first successful home this session; a client MUST NOT treat zero as a real measurement. |
 | `window.min` | stroke window lower bound. Limits normalized against the window are window-relative and therefore MOVE when it does — which is exactly why this is a STATE field and not a one-shot WELCOME value. |
 | `window.max` | stroke window upper bound |
 | `telemetry.position` | live actuator position |
+| `telemetry.target` | RFC-032: the position the machine is currently COMMANDED to, as opposed to telemetry.position which is where it measurably is. Lag is deliberately NOT a role: it is target - position, computed client-side — registering a third field for a subtraction would invite two sources of truth for one number. |
 | `telemetry.velocity` | live actuator velocity |
 | `telemetry.current` | motor/drive current |
 | `telemetry.power.bus` | DC bus voltage or power |
 | `telemetry.temp` | a temperature reading; the field's own name/unit says which |
 | `telemetry.uptime` | hub uptime |
 | `identity.name` | the writable machine-name setting (RFC-026 tier 2, str16/str32). Its READ-ONLY twin is WELCOME identity.hub_name. |
-| `meta.enabled_mask` | RFC-009.4: a bitfield8 field whose bit i gates the i-th setting-annotated field of the SAME layout. On-change, retained, conflated — every client greys from one ground truth. Disabled means GREY, never hide. |
+| `meta.enabled_mask` | RFC-009.4: a bitfield8 field whose bit i gates the i-th setting-annotated field of the SAME layout. On-change, retained, conflated — every client grays from one ground truth. Disabled means GRAY, never hide. |
 | `meta.reset_gen` | RFC-019: increments on every applied reset in this counter group, so ALL subscribers observe the reset, not just the sender who asked for it. |
+| `pattern.running` | whether the built-in pattern generator is currently driving the machine |
+| `pattern.select` | which built-in pattern the generator plays; options are the device's pattern names, index-aligned with the wire value |
+| `pattern.speed` | pattern generator speed knob, as a percentage of its own range |
+| `pattern.depth` | pattern generator depth knob: how far into the stroke window it reaches |
+| `pattern.stroke` | pattern generator stroke-length knob, as a percentage of the available depth |
+| `pattern.sensation` | pattern generator character knob; what it changes depends on the selected pattern |
+| `command.position` | RFC-032: INTENT field carrying a commanded ABSOLUTE target position in the channel's own unit. A client that finds it MAY render a positional control (rail, tape, slider) and send the value on that field's channel. |
+| `plan.start` | normalized start position of the segment in flight |
+| `plan.end` | normalized end position of the segment in flight |
+| `plan.current` | normalized current position along the plan |
+| `plan.velocity` | current planned velocity |
+| `plan.elapsed` | elapsed time within the segment in flight |
+| `plan.duration` | total duration of the segment in flight |
+| `plan.style` | which planning style produced the segment; options are the device's style names, index-aligned with the wire value |
+| `source.background_run` | bool, `setting_key`-annotated: whether THIS autonomous source keeps running when its owning session ends. false (DEFAULT) = the source stops when its controlling session ends. true = the source deliberately continues in the background, reachable only by the role-exempt stop/estop ops (§11.2) from any session. Applies to any hub-autonomous source, never to a command-driven one. |
 
 Two conventions extend the list without registering entries:
 
 - `<role>.peak` is the peak companion of any telemetry role.
 - `action.<name>` marks an INTENT field as a verb, not a value.
-
-## Setting categories
-
-Values 0–127 are registered here and have a canonical order. Values
-128–255 are device-defined and the hub supplies the label.
-
-A category spans channels: `user` and `user-2` merge into one tab.
-
-| Value | Category | Notes |
-|---|---|---|
-| `0` | `device` | identity, network, storage, firmware — what the machine IS |
-| `1` | `user` | everyday operating preferences |
-| `2` | `limits` | safety envelope: windows, ceilings, e-stop behaviour |
-| `3` | `tuning` | motion/planner internals; typically `advanced`-flagged |
-| `4` | `diagnostics` | counters, telemetry, resets — mostly read-only fields |
 
 ## Setting flags
 
@@ -102,7 +105,7 @@ A category spans channels: `user` and `user-2` merge into one tab.
 
 Only the lifecycle phases are registered. Any generic client can render
 these without knowing the procedure. Values 128–255 are device-defined
-intermediate steps; a client that does not recognise one renders it as
+intermediate steps; a client that does not recognize one renders it as
 `running`.
 
 | Value | Phase | Notes |
@@ -111,5 +114,16 @@ intermediate steps; a client that does not recognise one renders it as
 | `1` | `running` | started and in progress; `progress` 0–100 is advisory |
 | `2` | `succeeded` | terminal, ok. Also EVENTed (RFC-020). |
 | `3` | `failed` | terminal, error — `result` u16 carries a nack_codes value or a device code |
-| `4` | `aborted` | terminal, cancelled or superseded |
+| `4` | `aborted` | terminal, canceled or superseded |
+
+## Curve families
+
+The `curve_family` sub-key (CBOR key 45) of a `publishes` / `granted_publishes` entry: which smoothness class a segment stream's sender means. The wish rides HELLO or PUBLISH; the grant echoes the effective family, so a client can tell honored from downgraded.
+
+| Value | Family | Notes |
+|---|---|---|
+| `0` | `unspecified` | the compatible default — the hub behaves exactly as it did before RFC-030. What every pre-RFC-030 client is. |
+| `1` | `c1_cubic` | velocity-continuous cubic (Linear/Pchip/Makima/monotone-cubic senders). Acceleration lawfully STEPS at knots; a follow-client hub reconstructs C1 and does NOT smooth the corner the author put there. |
+| `2` | `c2_quintic` | curvature-continuous; the sender means the smoothness. A follow-client hub may use its C2 reconstruction (backward-difference af estimation is valid here — the quantity exists). |
+| `3` | `step` | held value with instantaneous transitions (step/none interpolation). The family says intent, the machine owns feasibility as always. RFC-049a: NUMBER KEPT, never renumbered, but status is `reserved` — the reference engine has no step renderer, so a `step` declaration renders as `c2_quintic` and the GRANT echo reports exactly that effective family (§9.6, §18-20). Declarable again when a step renderer exists in the reference engine; only the delegate's mapping changes when it does. |
 

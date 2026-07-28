@@ -33,7 +33,7 @@ extern "C"
 #define COLSTART 26
 #define ROWSTART 1
 
-// Delay between some initialisation commands
+// Delay between some initialization commands
 #define TFT_INIT_DELAY 0x80
 
 #define TFT_INVOFF 0x20

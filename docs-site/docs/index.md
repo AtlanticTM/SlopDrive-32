@@ -69,7 +69,7 @@ sends intent; the hub decides how to execute it safely.
 
 SlopSync is not a security product. The v1 threat model is casual and drive-by
 prevention on a trusted local network, and the specification says so plainly
-wherever a defence is weak. See [Security model](understand/security.md).
+wherever a defense is weak. See [Security model](understand/security.md).
 
 ## Governance, briefly
 

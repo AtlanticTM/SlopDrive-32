@@ -28,7 +28,7 @@ The two permanent exceptions are sidebands, not control of the machine:
 
 Read-only JSON views (`/api/log`, `/api/capabilities`, `/api/status`,
 `GET /api/slopmotion`) stay, for the reason below — but a GET that stays is not
-licence for the matching POST to.
+license for the matching POST to.
 
 **Corollary, and it is the whole point of §5.8: a read-only HTTP view is not a
 substitute for a SlopSync channel.** If our UI can SEE something over HTTP that
@@ -206,7 +206,7 @@ is a good reason not to let it drift.
 ### Honest scope of `/uitoken` even after that
 
 While `/uitoken` is enabled (the default), anything on the LAN that can HTTP GET
-can mint a control-tier credential — the endpoint's only defence is the absence
+can mint a control-tier credential — the endpoint's only defense is the absence
 of CORS headers, which stops a hostile *web page* and nothing else. So the flip
 buys a **real chokepoint, an audit line per authorization, and a default-deny
 posture** — not LAN secrecy. The lockdown posture is `/uitoken` DISABLED plus
@@ -329,7 +329,7 @@ docs keep working.
   `getUint16()/10000` and the channel declares scale 10000 — so nothing is
   rescaled. Style names resolve from the CATALOG's option labels, never a client
   table: the firmware grew a fourth plan kind (`cubic`) after that UI was
-  written, and a hardcoded table would have mislabelled it.
+  written, and a hardcoded table would have mislabeled it.
 - **0x0089 motion-anomaly EVENT → the anomaly log**. An EVENT, not a STATE —
   one frame per occurrence, which is why it must never be polled or conflated.
 
@@ -517,7 +517,7 @@ later work. **slopsim's TUI is the operator's own live-tuning surface**, and it
 exposes **13** — the ones actually reached for:
 
 `curve`, `policy`, `margin`, `smoothbudget`, `ampbudget`, `blendsteps`,
-`reshapesteps`, `settlegrace`, `jmax`, `aimff`, `centring`, `centringgain`,
+`reshapesteps`, `settlegrace`, `jmax`, `aimff`, `centering`, `centeringgain`,
 `speedmode`.
 
 `speedmode` is already live on `0x008A machine-modes`, so **12 remain — which
@@ -526,8 +526,8 @@ fits in TWO channels, not three**:
 - `0x008B slopmotion-waveform` (8): `curve_policy`, `infeas_policy`,
   `infeas_margin`, `smooth_budget`, `amp_budget`, `blend_steps`,
   `reshape_steps`, `settle_grace_us`
-- `0x008C slopmotion-chase` (4): `jmax_ovr`, `aim_extrap`, `centring`,
-  `centring_gain`
+- `0x008C slopmotion-chase` (4): `jmax_ovr`, `aim_extrap`, `centering`,
+  `centering_gain`
 - `0x0105 slopmotion-set` (INTENT, keys 1..12)
 
 Deliberately NOT exposed — present in `SystemState`, absent from slopsim, and
@@ -599,7 +599,7 @@ needs:
 2. group by `category` (spans channels, §8.8) -> tabs; then by `group` -> cards
 3. pick the widget from the TYPE: `u8`+`options` = dropdown, `bitfield8` =
    checkbox group, numeric+`min`/`max`(+`step`) = slider, `str` = textbox
-4. adopt the retained STATE as the value; grey from `enabled_mask`
+4. adopt the retained STATE as the value; gray from `enabled_mask`
 5. write `{setting_key: value}` to the entry's `settingChannel`
 6. render the post-clamp ECHO, never the request
 
@@ -692,17 +692,17 @@ rather than an adjective:
    single sharpest test and M5c currently fails it: 20 tuning knobs shipped and
    the page shows nothing.
 4. **Ground truth, everywhere, provably.** Every control renders reported state,
-   shows pending until ECHO, reverts on NACK/timeout, and greys from
+   shows pending until ECHO, reverts on NACK/timeout, and grays from
    `enabled_mask`. No optimistic state anywhere — CLAUDE.md §3 calls a UI that
    lies about machine state a safety defect on this product, and it means it.
-5. **Degrades honestly.** Watch tier greys the write plane but keeps e-stop live
+5. **Degrades honestly.** Watch tier grays the write plane but keeps e-stop live
    (role-exempt by catalog, RFC-025b). Hub down = controls fail visibly, never
    silently. No fallback control path exists any more, and the UI must say so.
 6. **Unknown things render generically, never crash.** Unknown role, flag,
    category, annotation key or channel = fallback rendering (SPEC §8.8 item 8).
    A hub newer than the client must degrade, not break.
 7. **Accessible + responsive by default.** Keyboard reachable, `prefers-reduced-
-   motion` honoured (already true of the pending styling), touch targets sized
+   motion` honored (already true of the pending styling), touch targets sized
    for a phone. "Gold standard" is not just architecture.
 8. **The bundle is the product.** One build serves device-hosted and Tauri; the
    only permitted delta is credential acquisition and host selection.

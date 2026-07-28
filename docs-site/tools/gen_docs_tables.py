@@ -105,9 +105,11 @@ SECTION_HOMES: dict[str, str] = {
     "blob_namespaces": "cbor-keys.md",
     "packed_field_types": "catalog-vocabulary.md",
     "field_roles": "catalog-vocabulary.md",
-    "setting_categories": "catalog-vocabulary.md",
+    # setting_categories is RETIRED (Phase C2 tombstone in registry.yaml);
+    # ui_categories is its wire-key-10 successor, homed on rendering.md.
     "setting_flags": "catalog-vocabulary.md",
     "procedure_phases": "catalog-vocabulary.md",
+    "curve_families": "catalog-vocabulary.md",
     "session_event_kinds": "events.md",
     "log_event_kinds": "events.md",
     "pairing_event_kinds": "events.md",
@@ -121,6 +123,20 @@ SECTION_HOMES: dict[str, str] = {
     "presentation_modes": "pairing.md",
     "nack_codes": "errors.md",
     "limits": "limits.md",
+    "ble_identity": "discovery.md",
+    "ble_adv_flags": "discovery.md",
+    "udp_discovery": "discovery.md",
+    "ui_categories": "rendering.md",
+    "ui_ranks": "rendering.md",
+    "value_aspects": "rendering.md",
+    "value_scopes": "rendering.md",
+    "value_provenance": "rendering.md",
+    "unit_ids": "rendering.md",
+    "action_tags": "rendering.md",
+    "ui_archetypes": "rendering.md",
+    "ui_regions": "rendering.md",
+    "renderer_classes": "rendering.md",
+    "widget_patterns": "rendering.md",
 }
 
 
@@ -146,7 +162,7 @@ def code(text: object) -> str:
 
 
 def table(p, headers: list[str], rows: list[list[str]]) -> None:
-    """Emit a GitHub-flavoured Markdown table. Rows are already cell()-safe."""
+    """Emit a GitHub-flavored Markdown table. Rows are already cell()-safe."""
     p("| " + " | ".join(headers) + " |\n")
     p("|" + "|".join("---" for _ in headers) + "|\n")
     for r in rows:
@@ -292,6 +308,8 @@ PAGE_INDEX: list[tuple[str, str, str]] = [
     ("pairing.md", "Pairing modes", "The pairing mode bitmask advertised in WELCOME."),
     ("errors.md", "NACK codes", "Every NACK and GOODBYE reason code, by range."),
     ("limits.md", "Limits and defaults", "Well-known sizes, timeouts, caps and defaults."),
+    ("discovery.md", "Discovery", "BLE GATT identity and advertising flags, and the UDP discovery probe/reply."),
+    ("rendering.md", "Rendering vocabulary", "Categories, ranks, value axes, units, action tags, archetypes, regions, renderer classes and widget patterns — the numbers behind RENDERING.md (RFC-048)."),
 ]
 
 
@@ -472,7 +490,7 @@ def page_catalog_vocabulary(reg: dict, reg_display: str) -> str:
     p("A role is the semantic tag on a catalog field. It is a text string, not\n")
     p("a number, because action roles carry a device-chosen suffix.\n\n")
     p("Roles are **opportunities, never requirements**. A client that\n")
-    p("recognises a role may render a bespoke widget. A client that does not\n")
+    p("recognizes a role may render a bespoke widget. A client that does not\n")
     p("must fall back to generic rendering by type and constraints. An unknown\n")
     p("role is never an error.\n\n")
     rows = [[code(role), cell((reg["field_roles"][role] or {}).get("note", ""))]
@@ -482,14 +500,8 @@ def page_catalog_vocabulary(reg: dict, reg_display: str) -> str:
     p("- `<role>.peak` is the peak companion of any telemetry role.\n")
     p("- `action.<name>` marks an INTENT field as a verb, not a value.\n\n")
 
-    p("## Setting categories\n\n")
-    p("Values 0–127 are registered here and have a canonical order. Values\n")
-    p("128–255 are device-defined and the hub supplies the label.\n\n")
-    p("A category spans channels: `user` and `user-2` merge into one tab.\n\n")
-    rows = [[code(k), code(reg["setting_categories"][k]["name"]),
-             cell(reg["setting_categories"][k].get("note", ""))]
-            for k in sorted(reg["setting_categories"])]
-    table(p, ["Value", "Category", "Notes"], rows)
+    # `setting_categories` was retired in favor of `ui_categories` (RFC-047/048,
+    # Phase C2 tombstone in registry.yaml) — see "Categories" on rendering.md.
 
     p("## Setting flags\n\n")
     table(p, ["Mask", "Bit", "Name", "Notes"], bit_rows(reg["setting_flags"]))
@@ -497,12 +509,22 @@ def page_catalog_vocabulary(reg: dict, reg_display: str) -> str:
     p("## Procedure phases\n\n")
     p("Only the lifecycle phases are registered. Any generic client can render\n")
     p("these without knowing the procedure. Values 128–255 are device-defined\n")
-    p("intermediate steps; a client that does not recognise one renders it as\n")
+    p("intermediate steps; a client that does not recognize one renders it as\n")
     p("`running`.\n\n")
     rows = [[code(k), code(reg["procedure_phases"][k]["name"]),
              cell(reg["procedure_phases"][k].get("note", ""))]
             for k in sorted(reg["procedure_phases"])]
     table(p, ["Value", "Phase", "Notes"], rows)
+
+    p("## Curve families\n\n")
+    p("The `curve_family` sub-key (CBOR key 45) of a `publishes` / "
+      "`granted_publishes` entry: which smoothness class a segment stream's "
+      "sender means. The wish rides HELLO or PUBLISH; the grant echoes the "
+      "effective family, so a client can tell honored from downgraded.\n\n")
+    rows = [[code(k), code(reg["curve_families"][k]["name"]),
+             cell(reg["curve_families"][k].get("note", ""))]
+            for k in sorted(reg["curve_families"])]
+    table(p, ["Value", "Family", "Notes"], rows)
     return w.getvalue()
 
 
@@ -561,7 +583,7 @@ def page_safety(reg: dict, reg_display: str) -> str:
     p("These are the `value` map key 1 of the `safety-intents` channel\n")
     p("(`0x0005`).\n\n")
     p("**`stop` and `estop` are role-exempt. Any session may send them,\n")
-    p("including a `watch` session.** Safety outranks authorisation. The wrong\n")
+    p("including a `watch` session.** Safety outranks authorization. The wrong\n")
     p("choice here means the person standing in the room cannot stop the\n")
     p("machine. Every other operation requires `control`.\n\n")
     rows = [[code(k), code(reg["safety_intent_ops"][k]["name"]),
@@ -637,6 +659,157 @@ def page_pairing(reg: dict, reg_display: str) -> str:
     return w.getvalue()
 
 
+def page_discovery(reg: dict, reg_display: str) -> str:
+    w = io.StringIO()
+    p = w.write
+    front_matter(p, title="Discovery",
+                 description="Generated tables of the SlopSync BLE GATT identity, its advertising flags, and the UDP discovery probe/reply (RFC-046).",
+                 register="IEEE")
+    banner(p, reg_display)
+    p("# Discovery\n\n")
+    p("Two ways a client finds a hub before it has a session: a pinned BLE GATT\n")
+    p("identity, and a UDP broadcast probe for WS-side clients without BLE. Both\n")
+    p("are read-only identity surfaces — neither carries a control plane.\n\n")
+
+    p("## BLE GATT identity\n\n")
+    p("Every conformant BLE hub advertises the **same** service UUID, so a client\n")
+    p("scans for exactly one thing. The first three groups spell the project name\n")
+    p("in ASCII, deliberately, so the UUID is greppable rather than an opaque v4.\n\n")
+    ble = reg["ble_identity"]
+    rows = [
+        [cell("Service"), code(ble["service_uuid"])],
+        [cell("Write characteristic (c2h)"), code(ble["write_char_uuid"])],
+        [cell("Notify characteristic (h2c)"), code(ble["notify_char_uuid"])],
+    ]
+    table(p, ["Role", "UUID"], rows)
+
+    p("## BLE advertising flags\n\n")
+    p("The one flags byte a legacy (≤31 B) advertising payload can spare\n")
+    p("after the service UUID and a shortened hub name. Bits not listed are zero.\n\n")
+    table(p, ["Mask", "Bit", "Name", "Notes"], bit_rows(reg["ble_adv_flags"]))
+
+    p("## UDP discovery\n\n")
+    p("The canonical WS-side discovery path for a LAN client without BLE: plain\n")
+    p("UDP sockets both ends, immune to the multicast/mesh-AP/Android failure\n")
+    p("modes that make mDNS unreliable in real homes.\n\n")
+    ud = reg["udp_discovery"]
+    rows = [
+        [cell("Port"), code(ud["port"])],
+        [cell("Magic"), code(ud["magic"])],
+        [cell("Reply rate limit"), cell(f"{ud['reply_rate_limit_per_source_s']} / source / second")],
+    ]
+    table(p, ["Property", "Value"], rows)
+    p("The probe and reply frames themselves — `DISCOVER_PROBE` (`0x1E`) and\n")
+    p("`DISCOVER_REPLY` (`0x1F`) — are frame types; see [Frame types](frames.md).\n")
+    p("A reply carries `magic + nonce + hub_name + hub_id + proto_ver + ws_port +\n")
+    p("fw_version + catalog_etag + flags` — nothing a passive observer of a normal\n")
+    p("WELCOME could not already learn.\n")
+    return w.getvalue()
+
+
+def page_rendering(reg: dict, reg_display: str) -> str:
+    w = io.StringIO()
+    p = w.write
+    front_matter(p, title="Rendering vocabulary",
+                 description="Generated tables of the RFC-048 rendering vocabulary: categories, ranks, value axes, units, action tags, archetypes, regions, renderer classes and widget patterns.",
+                 register="IEEE")
+    banner(p, reg_display)
+    p("# Rendering vocabulary\n\n")
+    p("These are the numbers behind [RENDERING.md](../../spec/rendering.md), the "
+      "normative UI-rendering companion to the specification. Every vocabulary "
+      "below is frozen at the v1.0 tag. None is wired onto a real catalog entry "
+      "yet — see the specification's known limitations.\n\n")
+
+    p("## Categories\n\n")
+    p("`category` answers WHERE a catalog entry lives. Ids 1-14 are the frozen, "
+      "complete spec set, in canonical menu order. An unrecognized id — "
+      "including an untaught vendor id — MUST render under `other`, using the "
+      "catalog-provided label, never dropped.\n\n")
+    rows = [[code(k), code(reg["ui_categories"][k]["name"]), cell(reg["ui_categories"][k].get("note", ""))]
+            for k in sorted(reg["ui_categories"])]
+    table(p, ["Id", "Category", "Notes"], rows)
+    p("`0x40`-`0x7E` is the vendor/device range (a hub declaring one MUST supply "
+      "a label). `15`-`0x3F` is reserved for future spec-registered categories; "
+      "`0x7F`+ is reserved.\n\n")
+
+    p("## Ranks\n\n")
+    p("`rank` answers HOW MUCH a catalog entry or field matters by default. "
+      "Unknown rank, or no rank annotation at all, renders as `detail`.\n\n")
+    rows = [[code(k), code(reg["ui_ranks"][k]["name"]), cell(reg["ui_ranks"][k].get("note", ""))]
+            for k in sorted(reg["ui_ranks"])]
+    table(p, ["Id", "Rank", "Notes"], rows)
+
+    p("## Value axes\n\n")
+    p("Three small, orthogonal vocabularies tagging what statistic a field is. "
+      "Default when absent: `live` / `session` / `actual`.\n\n")
+    for section, heading in (("value_aspects", "Aspect"), ("value_scopes", "Scope"), ("value_provenance", "Provenance")):
+        p(f"### {heading}\n\n")
+        rows = [[code(k), code(reg[section][k]["name"]), cell(reg[section][k].get("note", ""))]
+                for k in sorted(reg[section])]
+        table(p, ["Id", heading, "Notes"], rows)
+
+    p("## Units\n\n")
+    p("A frozen numeric companion to the existing free-string `unit` field. "
+      "Both exist; wiring this table onto real catalog fields is next-phase "
+      "work. Deliberately over-provisioned for foreseeable actuators. An "
+      "unrecognized unit id renders the catalog's own label string "
+      "verbatim.\n\n")
+    rows = [[code(k), code(reg["unit_ids"][k]["name"]), cell(reg["unit_ids"][k].get("note", ""))]
+            for k in sorted(reg["unit_ids"])]
+    table(p, ["Id", "Unit", "Quantity"], rows)
+
+    p("## Action tags\n\n")
+    p("The specific `action.<name>` suffixes a conformant client MAY "
+      "special-case to upgrade a generic `trigger` archetype into a "
+      "purpose-specific rendering. An unregistered suffix remains legal; an "
+      "unrecognized one renders as a generic trigger.\n\n")
+    rows = [[code(tag), cell((reg["action_tags"][tag] or {}).get("note", ""))]
+            for tag in reg["action_tags"]]
+    table(p, ["Tag", "Meaning"], rows)
+
+    p("## Archetypes\n\n")
+    p("The control style and interaction contract a catalog field or channel "
+      "renders with. Derived by a normative decision table in the common "
+      "case (RENDERING.md §8.2); an explicit `archetype` hint overrides. "
+      "`Fallback` is the mandatory composition of frozen primitives every "
+      "archetype declares — a primitive lists itself.\n\n")
+    rows = []
+    for k in sorted(reg["ui_archetypes"]):
+        e = reg["ui_archetypes"][k]
+        fallback = " + ".join(code(f) for f in e.get("fallback", []))
+        rows.append([code(k), code(e["name"]), cell(e.get("note", "")), fallback])
+    table(p, ["Id", "Archetype", "Semantic", "Fallback"], rows)
+
+    p("## Regions\n\n")
+    p("Four abstract placement zones plus one modal layer. Geometry, "
+      "position, size and style within a region are the renderer author's "
+      "craft; what lives in each region is normative.\n\n")
+    rows = [[code(k), code(reg["ui_regions"][k]["name"]), cell(reg["ui_regions"][k].get("note", ""))]
+            for k in sorted(reg["ui_regions"])]
+    table(p, ["Id", "Region", "Contents"], rows)
+
+    p("## Renderer classes\n\n")
+    p("All classes render one category tree; they differ in projection and "
+      "default surfacing, never in reachable content. A device between "
+      "budgets adopts the nearer class.\n\n")
+    rows = [[code(k), code(reg["renderer_classes"][k]["name"]), cell(reg["renderer_classes"][k].get("note", ""))]
+            for k in sorted(reg["renderer_classes"])]
+    table(p, ["Id", "Class", "Notes"], rows)
+
+    p("## Widget patterns\n\n")
+    p("Proven compositions extracted from the reference client. `Required` "
+      "marks a pattern a handheld/full client MUST provide when its "
+      "capability is present (glance-class: reachable via the category tree "
+      "instead).\n\n")
+    rows = []
+    for k in sorted(reg["widget_patterns"]):
+        e = reg["widget_patterns"][k]
+        rows.append([code(k), code(e["name"]), cell(e.get("note", "")),
+                     code("yes") if e.get("required") else ""])
+    table(p, ["Id", "Pattern", "Composition", "Required"], rows)
+    return w.getvalue()
+
+
 def page_errors(reg: dict, reg_display: str) -> str:
     w = io.StringIO()
     p = w.write
@@ -654,7 +827,7 @@ def page_errors(reg: dict, reg_display: str) -> str:
 
     ranges = {
         0x00: ("`0x00xx` — protocol", "The frame itself is unusable."),
-        0x01: ("`0x01xx` — session and authorisation", "The session cannot proceed as asked."),
+        0x01: ("`0x01xx` — session and authorization", "The session cannot proceed as asked."),
         0x02: ("`0x02xx` — subscription and QoS", "The subscription request is refused."),
         0x03: ("`0x03xx` — intent", "The intent is refused on its own merits."),
         0x04: ("`0x04xx` — safety refusal", "The machine refuses on safety grounds. A client SHOULD render these distinctly."),
@@ -862,6 +1035,8 @@ def build_all() -> dict[Path, str]:
         GEN_DIR / "pairing.md": page_pairing(reg, reg_display),
         GEN_DIR / "errors.md": page_errors(reg, reg_display),
         GEN_DIR / "limits.md": page_limits(reg, reg_display, raw),
+        GEN_DIR / "discovery.md": page_discovery(reg, reg_display),
+        GEN_DIR / "rendering.md": page_rendering(reg, reg_display),
     }
 
     d = yaml.safe_load(DICT_SRC.read_text(encoding="utf-8"))

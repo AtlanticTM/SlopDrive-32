@@ -2,7 +2,7 @@
 title: Conformance
 description: >-
   SlopSync clause 17: conformance profiles, golden vectors and the fixture
-  freeze, behavioural checklists, and the fuzzing totality gate.
+  freeze, behavioral checklists, and the fuzzing totality gate.
 register: IEEE
 generated: true
 ---
@@ -23,7 +23,7 @@ generated: true
 
 | Profile | MUST implement | MAY omit |
 |---|---|---|
-| **hub** | everything not explicitly optional; ≥ `conformance_min_clients` concurrent sessions; all five channel classes it declares; retained STATE; the readiness gate; grants and the [§10.4](qos.md#s10-4) shedding table; [§11](safety.md#s11) complete; [§6.9](session.md#s6-9) teardown equivalence; at least one [§12.3](security.md#s12-3) association mode | probe; TLS; bindings its hardware lacks; hub signing ([§12.5](security.md#s12-5)); stores ([§8.7](catalog.md#s8-7)) if it declares none |
+| **hub** | everything not explicitly optional; ≥ `conformance_min_clients` concurrent sessions; all five channel classes it declares; retained STATE; the readiness gate; grants and the [§10.4](qos.md#s10-4) shedding table; [§11](safety.md#s11) complete; [§6.9](session.md#s6-9) teardown equivalence; at least one [§12.3](security.md#s12-3) association mode; on radio-bearing silicon, BLE GATT is MUST ([§13.1](transports.md#s13-1)'s hardware-hub profile, RFC-043) | probe; TLS; bindings its hardware lacks (a base-profile hub — sim, host, relay — needs only one); hub signing ([§12.5](security.md#s12-5)); stores ([§8.7](catalog.md#s8-7)) if it declares none |
 | **client-watch** | HELLO/WELCOME, catalog possession (dynamic or static) and CATALOG_READY, STATE adoption, seq rules, SYNCING/READY/LIVE distinction, ESTOP *send* | intents, streams, probe, crypto |
 | **client-control** | client-watch, plus INTENT/ECHO with idempotent reconcile and the absolute-value rule, pairing, deadman-aware liveness, [§11.4](safety.md#s11-4) ownership behavior | probe, hub-signature verification |
 | **client-configure** | client-control, plus the [§12.7](security.md#s12-7) administration surface and the [§8.9](catalog.md#s8-9) rendering checklist | stores it does not use |

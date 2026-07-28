@@ -57,11 +57,14 @@ generated: true
 | 0x1B | BLOB_CHUNK | h→c | raw | [§8.4](catalog.md#s8-4), [§8.7](catalog.md#s8-7) |
 | 0x1C | AUTH | c→h | control | [§12.4](security.md#s12-4) |
 | 0x1D | HUB_SIG | h→c | control | [§12.5](security.md#s12-5) |
+| 0x1E | DISCOVER_PROBE | c→h | raw | [§13.8](transports.md#s13-8) |
+| 0x1F | DISCOVER_REPLY | h→c | raw | [§13.8](transports.md#s13-8) |
+| 0x20 | BLOB_DONE | any | raw | [§8.4](catalog.md#s8-4) |
 | 0xE5 | ESTOP | any | raw | [§5.5](wire-format.md#s5-5), [§11.2](safety.md#s11-2) |
 
 **Burned, never to be reallocated:** `0x09` (was CATALOG_REQ) and `0x0A` (was CATALOG_CHUNK), superseded by BLOB_REQ/BLOB_CHUNK when chunked transfer was generalized into a namespaced verb ([§8.4](catalog.md#s8-4)). They stay burned so that a stale v1-draft peer meets an *unknown* type and is ignored per [§4.3](foundations.md#s4-3), rather than silently misreading a blob frame.
 
-**Reserved:** `0x02` and `0x1E–0x3F` spec/core (35 slots free); `0x40–0x7F` future spec; `0x80–0xDF` experimental (never in tagged releases); `0xE0–0xFF` reserved except `0xE5`.
+**Reserved:** `0x02` and `0x21–0x3F` spec/core (31 slots free); `0x40–0x7F` future spec; `0x80–0xDF` experimental (never in tagged releases); `0xE0–0xFF` reserved except `0xE5`.
 
 **Header flags:** bit0 `FRAG_START`, bit1 `FRAG_MORE` ([§5.6](wire-format.md#s5-6)). Other bits are zero on send and ignored on receive.
 
@@ -100,13 +103,18 @@ generated: true
 | 19 | `applied` | map | 41 | `intent_seq` | uint |
 | 20 | `value` | any | 42 | `burst` | float |
 | 21 | `timestamp` | uint | 43 | `reboot_in_ms` | uint |
-| 22 | `limits` | map | | *44–63 free* | |
+| 22 | `limits` | map | 44 | `deadman_wish_ms` | uint |
+| | | | 45 | `curve_family` | uint |
+| | | | 46 | `ws_port` | uint |
+| | | | 47 | `ipv4` | uint |
+| | | | 48 | `requested_curve_family` | uint |
+| | | | | *49–63 free* | |
 
 **Scoped sub-map key spaces ([§5.3](wire-format.md#s5-3)).** Each is local to its own map: key 1 of `blob` and key 1 of `trust` are unrelated, and neither is `proto_ver`.
 
 | Parent | Sub-keys |
 |---|---|
-| `limits` (22) | 1 `max_frame`, 2 `max_subscriptions`, 3 `retained_pending` |
+| `limits` (22) | 1 `max_frame`, 2 `max_subscriptions`, 3 `retained_pending`, 4 `max_subscriptions_per_frame` |
 | `probe_result` (26) | 1 `bytes_received`, 2 `span_ms`, 3 `loss_pct_x100`, 4 `rtt_ms` |
 | `identity` (37) | 1 `product`, 2 `fw_version`, 3 `hub_name`, 4 `info` (device-defined map) |
 | `blob` (38) | 1 `ns`, 2 `store_id`, 3 `slot`, 4 `generation`, 5 `name`, 6 `kind`, 7 `payload`, 8 `chunk_index`, 9 `chunk_count`, 10 `total_bytes` |
@@ -182,6 +190,7 @@ The fixture's coverage gaps at v1.0 are stated in [§18-7](limitations.md#s18) r
 | `header_bytes` | 8 | [§5.1](wire-format.md#s5-1) |
 | `min_transport_payload` | 242 | [§9.1](channels.md#s9-1), [§13.1](transports.md#s13-1) |
 | `catalog_chunk_payload` | 192 | [§8.4](catalog.md#s8-4) |
+| `blob_chunks_in_flight` | 4 | [§8.4](catalog.md#s8-4) |
 | `bundle_max_samples` | 32 | [§5.4](wire-format.md#s5-4) |
 | `bundle_max_span_ms` | 20 | [§5.4](wire-format.md#s5-4) |
 | `seq_width_bits` / `seq_newer_window` | 16 / 32768 | [§7.3](time.md#s7-3) |
@@ -200,8 +209,11 @@ The fixture's coverage gaps at v1.0 are stated in [§18-7](limitations.md#s18) r
 | `catalog_ready_timeout_ms` | 15000 | [§6.4](session.md#s6-4) |
 | `max_future_schedule_ms` | 250 | [§5.4](wire-format.md#s5-4) |
 | `max_burst_multiple` | 4 | [§10.5](qos.md#s10-5) |
+| `segment_handoff_k` | 1.5 | [§9.6](channels.md#s9-6) |
 | `pairing_window_default_s` | 120 | [§12.3](security.md#s12-3) |
 | `pairing_pin_digits` | 4 | [§12.3](security.md#s12-3) |
+| `pairing_gesture_boot_count` | 3 | [§12.3](security.md#s12-3) |
+| `pairing_gesture_max_uptime_ms` | 10000 | [§12.3](security.md#s12-3) |
 | `pairing_pending_max` | 4 | [§12.3](security.md#s12-3) |
 | `token_bytes` | 16 | [§12.3](security.md#s12-3) |
 | `auth_attempts_max` | 3 | [§12.4](security.md#s12-4) |
@@ -217,6 +229,7 @@ The fixture's coverage gaps at v1.0 are stated in [§18-7](limitations.md#s18) r
 | `catalog_max_entries` | 256 | [§8.1](catalog.md#s8-1) |
 | `catalog_max_entry_bytes` | 4096 | [§8.1](catalog.md#s8-1) |
 | `max_subscriptions_per_session` | 64 | [§6.7](session.md#s6-7) |
+| `max_subscriptions_per_frame` | 16 | [§6.3](session.md#s6-3), [§6.7](session.md#s6-7) |
 | `desc_max_bytes` | 128 | [§8.8](catalog.md#s8-8) |
 | `option_label_max_bytes` | 24 | [§8.8](catalog.md#s8-8) |
 | `nack_detail_max_bytes` | 48 | [§16.1](errors.md#s16-1) |

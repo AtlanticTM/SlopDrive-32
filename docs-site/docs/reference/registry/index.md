@@ -44,6 +44,8 @@ If a page here disagrees with prose elsewhere, this page wins.
 | [Pairing modes](pairing.md) | The pairing mode bitmask advertised in WELCOME. |
 | [NACK codes](errors.md) | Every NACK and GOODBYE reason code, by range. |
 | [Limits and defaults](limits.md) | Well-known sizes, timeouts, caps and defaults. |
+| [Discovery](discovery.md) | BLE GATT identity and advertising flags, and the UDP discovery probe/reply. |
+| [Rendering vocabulary](rendering.md) | Categories, ranks, value axes, units, action tags, archetypes, regions, renderer classes and widget patterns — the numbers behind RENDERING.md (RFC-048). |
 
 ## How to change a number
 

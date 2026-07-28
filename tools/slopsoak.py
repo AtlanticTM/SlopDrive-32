@@ -52,7 +52,7 @@ SCENARIOS (each individually selectable, or run as a suite)
                     mute on ANY inbound byte, so a client that talks but never
                     listens re-arms the blocking write over and over.
           What is measured is not the wedged client -- it is the HEALTHY ones.
-  stream  Streaming load: motion-input (0x0084) at rate while watchers watch.
+  stream  Streaming load: motion-input (0x2100) at rate while watchers watch.
           Default amplitude 0.0 == hold current position: full ingress path,
           zero machine motion (this device is shared; see --stream-amp).
   soak    N concurrent steady-state sessions for a long duration.  The plain
@@ -422,101 +422,10 @@ class LogMonitor(threading.Thread):
         return buckets
 
 
-class UiWsMonitor(threading.Thread):
-    """Passive observer of the WEBUI's OWN telemetry socket (ws://ip:81/ws/ui).
-
-    Why this is here even though the migration is about the SlopSync plane
-    (:82): the operator's actual reported symptom is "the WebUI says
-    unreachable", and the WebUI does not use SlopSync for that -- it uses this
-    separate legacy links2004 WebSocketsServer with its own sender task. A
-    harness that only watched :82 could report a spotless run while the thing
-    the user complains about was dropping every two minutes.
-
-    It mimics link.js exactly as far as liveness goes: connect, wait for the
-    0x00 HELLO, then send a 0x03 CLOCK every 2 s and count everything that
-    comes back. link.js declares the UI 'degraded' after two failures inside
-    10 s, so consecutive reconnects are the metric that matches what the user
-    sees on screen.
-
-    It never sends a 0x10 CMD. This observer must not be able to move anything."""
-
-    HELLO, CLOCK = 0x00, 0x03
-    CLOCK_INTERVAL_S = 2.0
-
-    def __init__(self, ip, port=81, path="/ws/ui"):
-        super().__init__(daemon=True)
-        self.url = "ws://%s:%d%s" % (ip, port, path)
-        self._stop = threading.Event()
-        self.lock = threading.Lock()
-        self.frames = []        # [(t, frame_type)]
-        self.events = []        # [(t, "connected"|"hello"|"disconnected: ...")]
-        self.connects = 0
-        self.disconnects = 0
-        self.connect_failures = 0
-
-    def _note(self, kind):
-        with self.lock:
-            self.events.append((now(), kind))
-
-    def run(self):
-        backoff = 0.5
-        while not self._stop.is_set():
-            ws = None
-            try:
-                ws = websocket.create_connection(self.url, timeout=5.0)
-                self.connects += 1
-                self._note("connected")
-                backoff = 0.5
-                last_clock = 0.0
-                while not self._stop.is_set():
-                    if now() - last_clock > self.CLOCK_INTERVAL_S:
-                        ws.send(struct.pack("<BI", self.CLOCK, sp.client_now_us()),
-                                opcode=websocket.ABNF.OPCODE_BINARY)
-                        last_clock = now()
-                    ws.settimeout(0.25)
-                    try:
-                        opcode, data = ws.recv_data()
-                    except websocket.WebSocketTimeoutException:
-                        continue
-                    if opcode == websocket.ABNF.OPCODE_CLOSE or not data:
-                        raise websocket.WebSocketConnectionClosedException("close frame")
-                    if opcode == websocket.ABNF.OPCODE_BINARY:
-                        with self.lock:
-                            self.frames.append((now(), data[0]))
-                            if data[0] == self.HELLO:
-                                self.events.append((now(), "hello"))
-            except Exception as e:  # noqa: BLE001 -- every failure mode is a datum
-                if not self._stop.is_set():
-                    self.disconnects += 1
-                    self._note("disconnected: %s: %s" % (type(e).__name__, e))
-            finally:
-                try:
-                    if ws:
-                        ws.close()
-                except Exception:  # noqa: BLE001
-                    pass
-            if self._stop.is_set():
-                break
-            self._stop.wait(backoff)
-            backoff = min(5.0, backoff * 2)   # link.js's own backoff shape
-
-    def stop(self):
-        self._stop.set()
-
-    def window(self, t0, t1):
-        with self.lock:
-            fr = [f for f in self.frames if t0 <= f[0] <= t1]
-            ev = [e for e in self.events if t0 <= e[0] <= t1]
-        drops = [e for e in ev if e[1].startswith("disconnected")]
-        gaps = [fr[i][0] - fr[i - 1][0] for i in range(1, len(fr))]
-        return {
-            "frames": len(fr),
-            "frame_hz": round(len(fr) / (t1 - t0), 2) if t1 > t0 else None,
-            "reconnects": sum(1 for e in ev if e[1] == "connected"),
-            "drops": len(drops),
-            "drop_reasons": [e[1] for e in drops][:6],
-            "max_gap_ms": round(max(gaps) * 1000, 1) if gaps else None,
-        }
+# UiWsMonitor (ws://ip:81/ws/ui) removed at M5c: UiSocket and the :81 WebUI
+# telemetry plane no longer exist in the firmware (CLAUDE.md §8 M5c). If a
+# WebUI-side liveness watcher is needed again, it belongs on the SlopSync
+# plane (0x1110 plan-strip / 0x4100 anomaly), not a resurrected :81 socket.
 
 
 def _slope(xs, ys):
@@ -1011,30 +920,19 @@ class Ctx:
         self.args = args
         self.http = HttpMonitor(args.ip, interval=args.http_interval)
         self.log = LogMonitor(args.ip, interval=args.log_interval)
-        self.uiws = UiWsMonitor(args.ip, port=args.uiws_port) if args.watch_uiws else None
         self.results = []
 
     def start_monitors(self):
         self.log.anchor()          # device-uptime <-> wall-clock, once
         self.http.start()
         self.log.start()
-        if self.uiws:
-            self.uiws.start()
 
     def stop_monitors(self):
         self.http.stop()
         self.log.stop()
-        if self.uiws:
-            self.uiws.stop()
 
     def envelope(self, name, t0, t1, findings, detail):
         http = self.http.window(t0, t1)
-        uw = self.uiws.window(t0, t1) if self.uiws else None
-        if uw and uw["drops"]:
-            findings = findings + [finding(
-                "fail", "the WEBUI's own :81 link dropped %d time(s) during this scenario (%s) -- "
-                        "this is the exact symptom the operator reports"
-                        % (uw["drops"], "; ".join(uw["drop_reasons"])))]
         if http["device_reboots"]:
             # Loud, and prepended: every other number in this scenario is
             # measured across a device restart and is therefore suspect.
@@ -1047,7 +945,6 @@ class Ctx:
             "started": stamp(t0), "ended": stamp(t1),
             "duration_s": round(t1 - t0, 1),
             "http": http,
-            "webui_ws": self.uiws.window(t0, t1) if self.uiws else None,
             "heap": self.log.heap_window(t0, t1),
             "device_log": self.log.evidence_counts(t0, t1),
             "device_log_lines": self.log.evidence_window(t0, t1),
@@ -1134,7 +1031,7 @@ def scenario_b2b(ctx):
 
     if grant_ok == n:
         findings.append(finding("pass", "all %d consecutive sessions were granted "
-                                "motion-input (0x0084) -- no stranded source ownership" % n))
+                                "motion-input (0x2100) -- no stranded source ownership" % n))
     else:
         findings.append(finding("fail", "only %d/%d consecutive sessions got the motion-input "
                                 "grant -- source ownership is leaking across teardown" % (grant_ok, n)))
@@ -1452,7 +1349,7 @@ def _window_stats(clients, t0, t1):
 
 
 def scenario_stream(ctx):
-    """Streaming load: one client publishes motion-input (0x0084) at rate while
+    """Streaming load: one client publishes motion-input (0x2100) at rate while
     watchers watch.  Amplitude defaults to 0.0 -- a hold at the machine's
     CURRENT position -- so the whole ingress path runs with zero machine motion
     on a shared device.  Raise --stream-amp deliberately, on a machine you own."""
@@ -1745,19 +1642,17 @@ def print_table(summary):
           % (summary["started"], summary["ended"], summary["wall_clock"]))
     print("=" * 78)
     name_w = max([len(r["scenario"]) for r in summary["scenarios"]] + [10])
-    print("%-*s  %-6s  %7s  %5s  %7s  %8s  %10s  %6s" %
+    print("%-*s  %-6s  %7s  %5s  %7s  %8s  %10s" %
           (name_w, "scenario", "result", "dur(s)", "http", "httpErr",
-           "logWarns", "heapMin(B)", "ui:81"))
+           "logWarns", "heapMin(B)"))
     print("-" * 78)
     for r in summary["scenarios"]:
         lw = sum(r["device_log"].values())
         hm = r.get("heap", {}).get("free_min")
-        uw = r.get("webui_ws") or {}
-        print("%-*s  %-6s  %7.1f  %5d  %7d  %8d  %10s  %6s" %
+        print("%-*s  %-6s  %7.1f  %5d  %7d  %8d  %10s" %
               (name_w, r["scenario"], r["verdict"], r["duration_s"],
                r["http"]["polls"], r["http"]["failures"], lw,
-               hm if hm is not None else "-",
-               ("%dd/%dr" % (uw["drops"], uw["reconnects"])) if uw else "-"))
+               hm if hm is not None else "-"))
     print("-" * 78)
     h = summary["heap"]
     if h.get("samples"):
@@ -1778,11 +1673,6 @@ def print_table(summary):
     if ha["device_reboots"]:
         print("REBOOT  the device restarted %d time(s) during this run: %s"
               % (ha["device_reboots"], ", ".join(ha["device_reboot_times"])))
-    uw = summary.get("webui_ws_overall")
-    if uw:
-        print("ui:81 %d frames (%.1f Hz), %d drop(s), %d reconnect(s), worst gap %s ms"
-              % (uw["frames"], uw["frame_hz"] or 0.0, uw["drops"], uw["reconnects"],
-                 uw["max_gap_ms"]))
     print("")
     print("FINDINGS")
     print("-" * 78)
@@ -1805,7 +1695,7 @@ def main():
     ap.add_argument("--ip", default="192.168.1.229")
     ap.add_argument("--port", type=int, default=82)
     ap.add_argument("--timeout", type=float, default=6.0)
-    ap.add_argument("--label", default="unlabelled",
+    ap.add_argument("--label", default="unlabeled",
                     help="tag for this run, e.g. links2004-baseline / asyncws")
     ap.add_argument("--scenarios", default="suite",
                     help="'suite', or a comma list: %s" % ",".join(SUITE_ORDER))
@@ -1843,10 +1733,6 @@ def main():
 
     ap.add_argument("--http-interval", type=float, default=2.0)
     ap.add_argument("--log-interval", type=float, default=6.0)
-    ap.add_argument("--watch-uiws", dest="watch_uiws", action="store_true", default=True,
-                    help="observe the WebUI's own ws://ip:81/ws/ui link (default on)")
-    ap.add_argument("--no-watch-uiws", dest="watch_uiws", action="store_false")
-    ap.add_argument("--uiws-port", type=int, default=81)
     args = ap.parse_args()
 
     if args.list:
@@ -1914,7 +1800,6 @@ def main():
         "scenarios": scenarios,
         "heap": ctx.log.heap_summary(),
         "http_overall": ctx.http.window(t_start, t_end),
-        "webui_ws_overall": ctx.uiws.window(t_start, t_end) if ctx.uiws else None,
         "device_log_totals": ctx.log.evidence_counts(),
         "slopmotion_before": (sm_before or {}).get("sync"),
         "slopmotion_after": (sm_after or {}).get("sync"),

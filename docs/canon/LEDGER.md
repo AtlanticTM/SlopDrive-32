@@ -27,7 +27,7 @@ commit as any change that alters it (C-3).
   2026-07-27 — git branch state]
 - Source-tree firmware version: see `FIRMWARE_VERSION` in
   `include/config_api.h` (its one home). [C-1 pointer]
-- Deployed firmware on the device: **2.1.84**, the RFC-042..050 + Phase C4 +
+- Deployed firmware on the device: **2.1.85**, the RFC-042..050 + Phase C4 +
   Phase E batch PLUS the `attachTransport()` STALE-slot-clobber fix + the
   boot reset-reason log line PLUS the HEAP RELIEF pass (BLOB_CHUNK backpressure
   reclass + WebRingSink PSRAM move — see the amended item (i) below) PLUS the
@@ -35,8 +35,10 @@ commit as any change that alters it (C-3).
   SAFETY BROADCAST entry below) PLUS the wire-string punctuation evolution
   (morning ruling item 2 — see the WIRE-STRING PUNCTUATION EVOLUTION entry
   below) PLUS the BLE advertising MSD fix (item (j) closed — see the BLE
-  ADVERTISING MSD FIX entry below), LIVE. [verified 2026-07-28 —
-  `/api/capabilities` `fw_version` = 2.1.84 post-OTA; DEPLOY + LIVE-VERIFY
+  ADVERTISING MSD FIX entry below) PLUS the STATE-coalescing congestion
+  wire-up (morning ruling item 1 — see its LANDED entry in the Morning
+  ruling batch), LIVE. [verified 2026-07-28 — `/api/capabilities`
+  `fw_version` = 2.1.85 post-OTA, coalescing bench session; DEPLOY + LIVE-VERIFY
   session, `/api/capabilities` `fw_version` before/after the OTA + a natural
   reboot + a deliberate re-flash reboot, all three confirmed `2.1.78`; see the
   DEPLOY + LIVE-VERIFY entry below for the full checklist, the "RFC-042
@@ -1213,11 +1215,31 @@ directly, full gauntlet commands run and exit codes/output observed above]
 
 ## Morning ruling batch (operator, 2026-07-28, on the overnight stamp list)
 
-1. **STATE burst congestion: COALESCE, not backpressure — approved.** STATE
-   is last-value-wins, so under congestion a newer value for a channel
-   REPLACES its queued older frame instead of stacking behind it (BLOB
-   keeps its hold-based gating; every chunk must arrive). Design note →
-   implementation → bench measurement of the subscribe-all worst case.
+1. **STATE burst congestion: COALESCE, not backpressure — LANDED
+   (2026-07-28, fw 2.1.84 → 2.1.85).** Root cause: the coalescing engine
+   (`RetainedStore` + per-subscriber pacing + `shedDecision()`) was already
+   correct and normatively tested (S-08) — the gap was that
+   `Hub::setCongestionLevel()`, the hub's own documented choke point for a
+   real binding's native congestion signal, was never called from
+   `src/comms/SlopSyncAsyncWsTransport.{h,cpp}`; `congestionLevel` sat at 0
+   forever on hardware, so shedding never engaged. Fixed by wiring it:
+   `pollCongestionLevel()` classifies 0/1/2 from `queueLen()` watermark
+   hysteresis (§10.3's own 50%/1s, 20%/5s numbers) + the existing
+   control-stall timer for severe; `Hub` gained an additive
+   `setCongestionLevel(ITransport&, uint8_t)` overload fed from
+   `SlopSyncAsyncWsPort::loop()`. New tests: `test_slopsync_safety` S-11
+   (bit-exact last-value-wins, seq never regresses, EVENT never coalesces).
+   Bench (worst-case repro ×3 on fw 2.1.85): heap low-water **60 B →
+   164–216 B** (~3x), no crash, 45/0/6 all runs, 10 session cycles + all
+   bench runs uptime-monotonic. **Flagged residual, PENDING OPERATOR
+   STAMP:** still not a fully healthy floor — normal-priority STATE is not
+   shed until level 2 (correct per the normative table) and the 1 s
+   sustained-congestion hysteresis means a ~2.7 s packed burst can mostly
+   complete before the signal engages; the next lever (burst-aware
+   escalation or shorter sustain window) risks shed-flapping on the hot
+   path, so it is parked for a ruling, not chased. [verified 2026-07-28 —
+   commit 3323e44, native 31/31 exit 0, sd32-ota SUCCESS (flash +840 B),
+   canon_lint 0, 3x live bench repro against fw 2.1.85]
 2. **Wire-visible catalog/registry strings get the punctuation pass —
    approved** ("do it, it's a single etag bump"). ONE atomic catalog
    evolution: em/en dashes + banned words fixed in SlopSyncCatalog.h descs
@@ -1235,7 +1257,22 @@ directly, full gauntlet commands run and exit codes/output observed above]
    above.** The "be anything" role moves to a NEW dumb test hub named
    **SlopBench** (operator-named): config-file catalog, simple TUI showing
    live axis/channel values, configurable fake delay on STATE echo.
-   (SlopBench itself is a separate, parallel work item — `sim/slopbench/`.)
+   **SlopBench LANDED (2026-07-28, host-build, verified):** `sim/slopbench/`
+   — config-file (`.bench`, custom line format, not YAML — dev-tool, no new
+   dependency) catalog builder with zero hardcoded channel knowledge,
+   generic INTENT-clamp/echo/STATE-mirror write plane, configurable fake
+   STATE-echo delay (pending-mirror queue), sine/ramp auto-animation,
+   plain-ANSI TUI (live channel table, sessions, recent-writes log, `q`
+   quits). 3 example configs: tiny-axis / alien (reserved domains) /
+   kitchen-sink. Every session gets `configure` (test double, not an auth
+   harness — deliberate). STREAM/EVENT/STORE declarable but functionally
+   inert (honest defaults), noted in its README. Verify:
+   CMake+Ninja build exit 0; `sim/slopbench/tools/smoke_test.py` (imports
+   tools/slopsync_probe.py wire layer unmodified) 12/12 PASS across all 3
+   configs — catalog-fetch-matches-config, clamped write + ECHO, measured
+   STATE-echo delay ≥ configured floor (561 ms on 400 ms config, 373 ms on
+   200 ms, 125 ms on 0); canon_lint 0. Commit 317b19d. [verified
+   2026-07-28 — smoke run + build tail observed in-session]
 4. **Internal reference docs stay out of the repo — verified already true:**
    root tracking is LICENSE/NOTICE/README/THIRD_PARTY_LICENSES + 4 build
    files only; zero PDFs/.diy tracked. The visible root clutter is

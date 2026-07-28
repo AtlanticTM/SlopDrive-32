@@ -56,16 +56,9 @@ it's kept as a legacy PlatformIO build environment (`esp32-s3-devkitc-1`) for
 reference, but the v0.0 PCB above is the real machine. See
 [Hardware](#hardware) for full specs.
 
-### SharedProtocol — a scaffold, not (yet) the wire format
+### Node-to-node protocol
 
-`lib/SharedProtocol/SharedProtocol.h` defines a hardware-agnostic binary packet
-protocol (`NodeRole` enum, `MessageType` enum, a `PacketHeader` with `{'S','D'}`
-magic bytes + checksum, `MotionCommand`/`MotionState` structs) intended as the
-eventual common tongue between all nodes. **It isn't actually used yet** — it's
-`#include`d only by `src/s3_main/main.cpp`, an 18-line placeholder stub that is
-deliberately excluded from every real build (`src/main.cpp` is the live main-
-controller entry point; see [Project Layout](#project-layout)). The real
-node-to-node links today are:
+The node-to-node links are ad-hoc, not a shared library:
 
 - **T-Dongle C5 → onboard C5-Zero**: raw ESP-NOW packets carrying ad-hoc structs
   (bundled TCode text fragments + a bitmask ACK scheme), on a configurable 5GHz
@@ -74,8 +67,10 @@ node-to-node links today are:
   wire (`DongleTransport`, GPIO 43/44 at 460800 baud) — the C5 side looks just
   like a USB-serial TCode source to the main controller's parser.
 
-SharedProtocol is real, compiled, and structurally sound — it's just not wired
-into either link yet.
+A prior `lib/SharedProtocol/` scaffold (a hardware-agnostic binary packet
+protocol meant as an eventual common tongue between nodes) was deleted: it was
+never wired into either link above, and its only includer (`src/s3_main/
+main.cpp`, a placeholder stub) had already been removed as dead code.
 
 ---
 
@@ -512,10 +507,10 @@ packages, no surprises.
 
 Each environment uses `build_src_filter` to compile ONLY its own source
 folder (`src/c5_waveshare/`, `src/c5_tdongle/`, or the shared main-controller
-tree — `src/main.cpp` + `src/comms/`, `src/motion/`, `src/system/`, `src/ui/`)
-while sharing the `lib/SharedProtocol/` library (currently unused, see
-[Hardware Overview](#hardware-overview)). Main-controller environments include
-FastAccelStepper, NimBLE, WebSockets, NeoPixel, and the INA228 current-sensor
+tree — `src/main.cpp` + `src/comms/`, `src/motion/`, `src/system/`, `src/ui/`),
+keeping the three firmware images strictly isolated. Main-controller
+environments include FastAccelStepper, NimBLE, WebSockets, NeoPixel, and the
+INA228 current-sensor
 library; C5 environments only include ArduinoJson (lightweight packet parsing)
 — FastAccelStepper explicitly throws `#error` on unsupported MCU derivatives
 (ESP32-C5 is not yet supported).
@@ -662,7 +657,6 @@ SlopDrive-32/
 │       └── WebUI.h                        # HTTP server & REST API
 ├── src/                                   # Implementation
 │   ├── main.cpp                           # Live main-controller composition root
-│   ├── s3_main/main.cpp                   # Dead placeholder stub — excluded from every build
 │   ├── c5_waveshare/main.cpp              # Onboard ESP32-C5-Zero coprocessor
 │   ├── c5_tdongle/main.cpp                # T-Dongle C5 — USB-CDC/ESP-NOW bridge + display
 │   ├── comms/                             # (mirrors include/comms/, minus header-only SlopSync* files)
@@ -670,8 +664,6 @@ SlopDrive-32/
 │   ├── system/                            # (mirrors include/system/, plus MotionGeometry.cpp)
 │   └── ui/                                # (mirrors include/ui/)
 ├── lib/                                   # Bundled libraries
-│   ├── SharedProtocol/
-│   │   └── SharedProtocol.h               # Cross-node binary protocol (defined, not yet wired in)
 │   ├── StrokeEnginePatterns/              # Vendored MIT pattern math backing PatternEngine
 │   ├── lcd_st7735/                        # ST7735 driver for the T-Dongle C5 display
 │   ├── ruckig/                            # Vendored Ruckig v0.19.4 Community subset (MIT) — see VENDORED.md

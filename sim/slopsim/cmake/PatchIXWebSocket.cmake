@@ -6,8 +6,17 @@
 set(F "ixwebsocket/IXWebSocketHandshake.cpp")
 file(READ ${F} C)
 if(NOT C MATCHES "slopsim-subprotocol-echo")
-    set(ANCHOR [[ss << "Server: " << userAgent() << "\r\n";]])
-    set(PATCHED [[ss << "Server: " << userAgent() << "\r\n";
+    # The bare "Server: ..." line appears TWICE in this file: the accept
+    # path (where `headers` is in scope) and sendErrorResponse (where it is
+    # not) — string(REPLACE) rewrites every occurrence, so anchoring on the
+    # bare line also injects into the error path. This three-line anchor is
+    # unique to the accept path. Same fix as sim/slopbench's vendored copy.
+    set(ANCHOR [[        ss << "Upgrade: websocket\r\n";
+        ss << "Connection: Upgrade\r\n";
+        ss << "Server: " << userAgent() << "\r\n";]])
+    set(PATCHED [[        ss << "Upgrade: websocket\r\n";
+        ss << "Connection: Upgrade\r\n";
+        ss << "Server: " << userAgent() << "\r\n";
 
         // slopsim-subprotocol-echo: RFC 6455 §4.2.2 — a server accepting a
         // connection that requested subprotocols MUST echo one, or strict

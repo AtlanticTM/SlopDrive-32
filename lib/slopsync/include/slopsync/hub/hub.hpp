@@ -105,11 +105,22 @@ public:
     }
     // §11.3: loss policy per source. Initiator-bound (streams, live control)
     // default Stop; hub-autonomous (pattern) returns Continue.
+    //
+    // RFC-045 note (additive, does not change this method's signature or
+    // default): the reference hub no longer CALLS sourcePolicy() — source loss
+    // latches nothing for any class, so the Stop-vs-Continue question it used
+    // to answer no longer has a caller. Declared here only as a frozen,
+    // additively-extended delegate interface; an application MAY still
+    // implement/consult it for its own purposes.
     virtual SourceLossPolicy sourcePolicy(uint8_t source_id) {
         (void)source_id; return SourceLossPolicy::Stop;
     }
     // §11.3: deadman fired on a Stop-policy source — STOP MOTION NOW (the
     // hub latches STOP in the safety word AFTER this returns).
+    //
+    // RFC-045 note (additive): the reference hub no longer calls this either,
+    // for the same reason as sourcePolicy() above — see releaseSessionSources()
+    // in hub_impl.hpp.
     virtual void onDeadmanStop(uint8_t source_id) { (void)source_id; }
     // §11.4: ownership transitions (reason: 0 acquire, 1 takeover, 2 release,
     // 3 deadman-release, 4 session-loss-release). owner_session 0 = released.
@@ -140,7 +151,7 @@ public:
     // client's wish AFTER the machine's own curve policy. Called at grant time
     // (HELLO and PUBLISH share it); the returned value is what the grant
     // echoes, so a force-C1/force-C2 machine tells the sender honestly that
-    // its declaration is being rendered as something else. Default honours the
+    // its declaration is being rendered as something else. Default honors the
     // wish verbatim (a hub with no override). `requested` is already clamped
     // to the registered `curve_families` range.
     virtual uint8_t effectiveCurveFamily(uint16_t channel_id, uint8_t requested) {
@@ -256,9 +267,17 @@ public:
     // did not fit still starts, still answers HELLO, and still serves an etag
     // — one computed over zero bytes, with an empty catalog behind it. Every
     // host SHOULD check this once at startup and shout; the firmware and the
-    // sim both do. Purely observational, no behaviour attached.
+    // sim both do. Purely observational, no behavior attached.
     size_t catalogEncodedBytes() const { return _catalogEncodedLen; }
     static constexpr size_t catalogScratchCapacity() { return kCatalogScratchBytes; }
+
+    // ---- RFC-046: read-only catalog etag view (§8.3) -----------------------
+    // Additive: something OUTSIDE the session/wire path (the UDP discovery
+    // responder, §13.8) needs the same etag WELCOME already serves, without
+    // going through a session at all. Computed once at construction and
+    // never mutated afterward (see the comment above), so a caller may hold
+    // this view for the hub's whole lifetime.
+    std::span<const std::byte> catalogEtag() const { return _etag; }
 
     // ---- RFC-016(a): hub identity for WELCOME key 37 -----------------------
     // The views must point at storage that OUTLIVES the hub — static/rodata
@@ -273,9 +292,43 @@ public:
         _idHubName = hub_name;
     }
 
+    // ---- RFC-048: durable cross-boot identity for WELCOME identity key 5 ---
+    // Additive to setIdentity() above (frozen API: extend, never reshape) — 0
+    // means "not set yet" (a fresh dev build, a non-persisting simulator) and
+    // the identity sub-map's hub_instance_id key is simply omitted, so a hub
+    // that never calls this stays byte-identical to a pre-RFC-048 WELCOME. The
+    // firmware persists this in NVS and calls it once at composition time,
+    // same timing contract as setIdentity().
+    void setHubInstanceId(uint64_t id) { _hubInstanceId = id; }
+    uint64_t hubInstanceId() const { return _hubInstanceId; }
+
+    // ---- RFC-046: the hub's own reachable WS endpoint, WELCOME keys 46/47 --
+    // 0/0 (the default) keeps WELCOME byte-identical to a pre-RFC-046 hub's —
+    // both keys are OMITTED from the wire when zero, not encoded as a literal
+    // 0 (see welcome.hpp's encodeWelcome), which is wire-compatible with
+    // §6.3's "0 means absent" rule for any client that tolerates the key's
+    // absence per §4.3. Call this whenever the WS listener/IP changes (up,
+    // down, or address change) — every session's NEXT WELCOME-shaped message
+    // picks up the new value, there is no push to already-LIVE sessions.
+    void setEndpoint(uint16_t wsPort, uint32_t ipv4Addr) {
+        _wsPort = wsPort;
+        _ipv4 = ipv4Addr;
+    }
+
+    // ---- RFC-046: "is a §12.3 association window open right now" -----------
+    // True while EITHER the PIN window (mode b) or the presence window (mode
+    // c) is open — the same meaning as the ESP-NOW BEACON frame's own
+    // pairing-open flag (§13.7) and this hub's BLE advertising flag bit0
+    // (§13.4/registry `ble_adv_flags`). Uses the hub's own clock so callers
+    // (an advertising-refresh hook, a status LED) never thread nowMs through.
+    bool pairingWindowOpen() const {
+        const uint32_t nowMs = _clock.nowMs();
+        return _pairing.windowOpen(nowMs) || _pairing.presenceWindowOpen(nowMs);
+    }
+
     // ---- RFC-030: the curve family granted to a live publish ---------------
     // 0 (unspecified) when the session/channel has no grant or declared no
-    // family. Read this at segment-drain time so the consumer honours the
+    // family. Read this at segment-drain time so the consumer honors the
     // sender's declared smoothness class (subject to the machine's own
     // curve policy, which already shaped this value at grant time).
     uint8_t publishCurveFamily(uint32_t session_id, uint16_t channel_id) const;
@@ -697,6 +750,11 @@ private:
     std::string_view _idProduct{};
     std::string_view _idFwVersion{};
     std::string_view _idHubName{};
+    // RFC-048/RFC-046 — see setHubInstanceId()/setEndpoint(). 0 = unset/absent
+    // in every case, which is also each field's byte-identical-to-legacy value.
+    uint64_t _hubInstanceId = 0;
+    uint16_t _wsPort = 0;
+    uint32_t _ipv4 = 0;
     uint32_t _bootId = 0;
     uint16_t _cfgGen = 1;
     MonotonicMs _monoMs;  // wrap-safe ms derivation for all deadline bookkeeping (§7.2)
@@ -768,6 +826,18 @@ private:
     void dispatchFrame(Slot& slot, const FrameHeader& h, std::span<const std::byte> payload, uint32_t nowMs);
     void handleEstopFrame(const EstopFrame& f, uint32_t nowMs);
     void handleHello(Slot& slot, std::span<const std::byte> payload, uint32_t nowMs);
+    // RFC-042 path B: `slot` names a fresh HELLO's arrival, `stale` an existing
+    // STALE session (a different physical slot) sharing its instance_id.
+    // Migrates identity + grants onto `slot`, vacates `stale` without running
+    // teardown's loss policy (a migration is not a session loss), and answers
+    // with its own WELCOME. See hub_impl.hpp's file-level comment on this
+    // function for the full contract.
+    void handleReattach(Slot& slot, Slot& stale, const HelloMsg& h, uint32_t nowMs);
+    // M4c (RFC-029 item 1) / RFC-042: arms or performs the optional WELCOME
+    // hub-authenticity signature, shared verbatim by handleHello() and
+    // handleReattach(). Returns true iff the caller must arm slot.signPending
+    // AFTER the WELCOME send succeeds.
+    bool armWelcomeSignature(Slot& slot, WelcomeMsg& w);
     // ---- M4c (RFC-029) ------------------------------------------------------
     void handleAuth(Slot& slot, std::span<const std::byte> payload, uint32_t nowMs);
     // The RFC-029 item-2 tripwire, shared VERBATIM by the HELLO bearer path and
@@ -837,10 +907,23 @@ private:
     void emitTakeoverEvent(uint8_t source_id, uint32_t newOwnerSession, uint32_t nowMs);  // §11.4, session-events 0x0007
     bool anySubscribed(uint16_t channel_id) const;
 
-    void pumpDeadman(Slot& slot, uint32_t nowMs);         // §11.3
-    // RFC-024: §6.5 idle reaping for sessions that own NO source. Returns true
-    // when the slot was torn down.
+    void pumpDeadman(Slot& slot, uint32_t nowMs);         // §11.3; RFC-042: marks STALE, no longer tears down
+    // RFC-024/RFC-042: §6.5 idle reaping for sessions that own NO source.
+    // Returns true when the slot was marked STALE (no longer torn down).
     bool pumpIdleReap(Slot& slot, uint32_t nowMs);
+    // ---- RFC-042: session staleness ------------------------------------
+    // The shared "mark stale" transition (releases sources, no stop latch —
+    // RFC-045) used by pumpDeadman()/pumpIdleReap().
+    void markStale(Slot& slot, uint32_t nowMs, uint8_t reason);
+    // Path A resumption: any frame on a STALE session's still-attached
+    // transport flips it straight back to LIVE. No-op on a non-stale session.
+    void reviveIfStale(Slot& slot, uint32_t nowMs);
+    // session_event_kinds 4/5 (session_stale/session_resumed): best-effort,
+    // one session_id in the body, same shape as emitTakeoverEvent's kind.
+    void emitSessionEvent(uint8_t kind, uint32_t session_id, uint32_t nowMs);
+    // RFC-042 item 5: the lowest-tier, longest-stale eligible session to
+    // reclaim under slot pressure, or nullptr if none is STALE.
+    Slot* findEvictableStale(const Slot* exclude);
     // §9.4: drain this session's bounded EVENT queue. Split out of publishEvent
     // because RFC-015's READY gate makes queued-but-not-yet-sendable a real
     // state (and RFC-017 replay deliberately fills the queue before the session
@@ -850,25 +933,32 @@ private:
     // replay_depth, seed the subscriber's queue with the ring tail.
     void replayEventsOnGrant(Slot& slot, uint16_t channel_id);
 
-    // §6.8/§11.3/§11.4: release EVERY source a session owns, running each
-    // source's §11.3 loss policy (Stop -> onDeadmanStop + latch STOP +
-    // publish/broadcast; Continue -> release only), then republish
+    // §6.8/§11.4: release EVERY source a session owns, then republish
     // control-owner STATE once if anything was released. `reason` is the §11.4
     // delegate ownership-release reason (3 = deadman-release, 4 =
-    // session-loss-release). Shared by pumpDeadman() and teardownSession() so
-    // "owner departs" is ONE behavior regardless of how the departure happened.
+    // session-loss-release), forwarded to onSourceOwnership() for the delegate
+    // to act on if it cares. RFC-045: latches NOTHING — no Stop-vs-Continue
+    // policy dispatch happens here any more; a hub-autonomous source's fate on
+    // release is entirely the FIRMWARE DELEGATE's call (`source.background_run`
+    // inside its own onSourceOwnership()). Shared by markStale() and
+    // teardownSession() so "owner departs" is ONE behavior regardless of
+    // whether the session went stale or was destroyed outright.
     void releaseSessionSources(uint32_t sessionId, uint8_t reason, uint32_t nowMs);
     // Centralized teardown for one session slot: releases source ownership
     // (above) with the given `reason` (default session-loss), notifies the
     // roster (onSessionLeft), and frees the slot (session.reset() +
-    // pushRecords). EVERY path that ends or recycles an occupied slot — GOODBYE,
-    // transport detach, slow-consumer/duplicate-instance eviction, same-slot
-    // re-HELLO, deadman fire — funnels through here so source ownership is
-    // never orphaned to a departed session_id (§6.8; the field bug this closes
-    // was a dead streamer's session_id owning motion-input forever, Conflict-
-    // dropping every later client's bundles until reboot). Safe on a FREE slot
-    // (no-op release, no onSessionLeft). Any GOODBYE frame a path wants to send
-    // must be sent BEFORE calling this (the slot is reset afterward).
+    // pushRecords). EVERY path that genuinely ENDS or recycles an occupied slot
+    // — GOODBYE, transport detach (when not a §6.3 migration), slow-consumer/
+    // duplicate-LIVE-instance eviction, same-slot re-HELLO, RFC-042 slot-
+    // pressure reclaim of a STALE session, readiness timeout — funnels through
+    // here so source ownership is never orphaned to a departed session_id
+    // (§6.8; the field bug this closes was a dead streamer's session_id owning
+    // motion-input forever, Conflict-dropping every later client's bundles
+    // until reboot). Safe on a FREE slot (no-op release, no onSessionLeft).
+    // Any GOODBYE frame a path wants to send must be sent BEFORE calling this
+    // (the slot is reset afterward). RFC-042: silence (deadman fire / idle
+    // reaping) no longer funnels through here — see markStale(), which
+    // releases sources identically but RETAINS the slot instead of freeing it.
     void teardownSession(Slot& slot, uint32_t nowMs, uint8_t reason = 4);
 
     // §12.2 pairing wire handling; §6.4 probe.

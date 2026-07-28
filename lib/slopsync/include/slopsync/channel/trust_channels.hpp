@@ -129,7 +129,7 @@ inline bool addSessionAdminChannel(Catalog32& cat, float maxRateHz = 5.0f) {
                         .unit = ""});
     // `role` is what pair_approve grants. The operator ruling is that a
     // configure session may grant UP TO ITS OWN TIER, configure included — the
-    // conventional admin behaviour, with the paired-device roster as the audit
+    // conventional admin behavior, with the paired-device roster as the audit
     // trail rather than a hard ceiling that would leave the first administrator
     // unable to appoint a second. min/max here describe the VALUE RANGE, not the
     // authorization; the hub still clamps to the requester's own tier.

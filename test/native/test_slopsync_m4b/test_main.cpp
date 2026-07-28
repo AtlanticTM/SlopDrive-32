@@ -469,9 +469,15 @@ TEST_CASE("M4B-04: stop/hold latch and resume clear emit edges whose `level` nam
           uint8_t(safety_bits::HOLD | safety_bits::PAUSE));
 }
 
-TEST_CASE("M4B-05: a session-loss STOP latch emits stop_latched carrying cause=session_loss") {
-    // THE REASON THIS EDGE IS WORTH HAVING: an operator STOP, a §11.3 deadman
-    // and a teardown loss policy are INDISTINGUISHABLE in the 0x0003 snapshot.
+TEST_CASE("M4B-05 (RFC-042/RFC-045): a rude transport detach releases ownership, goes STALE, and latches nothing") {
+    // Superseded expectation: this used to prove the session-loss STOP latch
+    // carried the right `cause` (an operator STOP, a §11.3 deadman and a
+    // teardown loss policy were otherwise INDISTINGUISHABLE in the 0x0003
+    // snapshot). RFC-045 removes the latch itself, so there is no cause byte
+    // left to prove. RFC-042 additionally reclassifies "transport reports
+    // closed out of band" as a STALE transition, not a teardown — the slot
+    // (session_id, grants) is RETAINED rather than freed, exactly like the
+    // deadman/idle-reap triggers.
     Catalog32 cat;
     makeM4bCatalog(cat);
     ManualClock clock;
@@ -498,14 +504,21 @@ TEST_CASE("M4B-05: a session-loss STOP latch emits stop_latched carrying cause=s
     tickAndDrain(hub, clock, linkA.endpointB());
     tickAndDrain(hub, clock, linkB.endpointB());
 
+    size_t sessionsBefore = hub.sessionCount();
+
     // Owner departs rudely.
     hub.detachTransport(linkA.endpointA());
     auto replies = tickAndDrain(hub, clock, linkB.endpointB());
-    auto evs = collectEvents(replies, channels::safety_events);
-    REQUIRE(evs.size() >= 1);
-    CHECK(evs[0].event_kind == safety_events::stop_latched);
-    CHECK(bodyU64(evs[0], safety_body::level).value_or(0) == safety_bits::STOP);
-    CHECK(bodyU64(evs[0], safety_body::cause).value_or(99) == safety_causes::session_loss);
+
+    // Nothing latches — no safety edge of any kind.
+    CHECK(collectEvents(replies, channels::safety_events).empty());
+    CHECK_FALSE(hub.stopLatched());
+    CHECK_FALSE(hub.estopLatched());
+
+    // The slot is RETAINED, marked STALE (not freed).
+    CHECK(hub.sessionCount() == sessionsBefore);
+    REQUIRE(hub.sessionBySlot(0) != nullptr);
+    CHECK(hub.sessionBySlot(0)->state == HubSessionState::STALE);
 }
 
 TEST_CASE("M4B-06: a hub whose catalog omits 0x000E still latches, and is simply silent") {
@@ -739,7 +752,7 @@ TEST_CASE("M4B-14: pair_deny clears the knock, EVENTs, and mints nothing") {
 
 TEST_CASE("M4B-15: the knock list is BOUNDED — a flood costs a fixed number of slots, no more") {
     // The bound is what makes an UNAUTHENTICATED queue safe to have at all: a
-    // knock costs a stranger nothing to send, so the only defence is that it
+    // knock costs a stranger nothing to send, so the only defense is that it
     // can never cost the hub more than pairing_pending_max slots.
     PendingPairingList<> list;
     for (uint8_t i = 0; i < uint8_t(limits::pairing_pending_max); ++i) {

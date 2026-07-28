@@ -6,7 +6,7 @@
 //
 // PURPOSE
 // -------
-// The successor to MotionInterpolator's cubic Hermite engine: every incoming
+// The jerk-limited motion core: every incoming
 // motion command becomes ONE planned trajectory computed from the engine's
 // ACTUAL current kinematic state (position + velocity + acceleration), and the
 // existing ~1 kHz stream sampler simply evaluates it. Event-driven, never
@@ -41,11 +41,11 @@
 //     below them, and never trusting an absurd wire command verbatim. Which
 //     fidelity to sacrifice depends on the sender — see InfeasiblePolicy.
 //     Whichever of the two timing-first policies is armed, the shortened band
-//     is then held on the COMMANDED MIDPOINT by the centring debt (Config::
+//     is then held on the COMMANDED MIDPOINT by the centering debt (Config::
 //     wave_centering) — including, deliberately, by shortening strokes the
 //     machine could have completed, because delivering one direction in full
-//     while the other is clipped is exactly what walks the band off centre.
-//     Every such stroke reports a WaveformCentred anomaly.
+//     while the other is clipped is exactly what walks the band off center.
+//     Every such stroke reports a WaveformCentered anomaly.
 //     Since 0.7.0 a waveform segment may also arrive with ONE-SEGMENT
 //     LOOKAHEAD (Command::next_chord), which arms the RFC-008 handoff sanity
 //     guard: the sender's end velocity is bounded to the Fritsch-Carlson knot
@@ -98,7 +98,7 @@
 //      softestFeasibleJerk). Only as sharp as the physics demands.
 //   3. Only when the true mechanical jmax is already spent and the stroke
 //      STILL does not fit does the endpoint shorten (the existing bisection),
-//      and the centring debt then decides how much of that reach this side of
+//      and the centering debt then decides how much of that reach this side of
 //      the band gets.
 // The mechanical jmax from Config::limits is a hard ceiling this feature
 // spends UP TO and never past — softening only ever makes a plan gentler than
@@ -126,7 +126,7 @@
 // operator's own headline chain (0.30↔1.00 in 167 ms = 140 mm) is in exactly
 // that regime at both 500 and 1000 mm/s: at full amplitude it needs 838 mm/s
 // mean against a 500 mm/s ceiling. Softening fires there only on the strokes
-// the CENTRING debt pulls in (which have slack again by construction). If you
+// the CENTERING debt pulls in (which have slack again by construction). If you
 // want curve back in that regime you have to buy it with amplitude — that is
 // InfeasiblePolicy::Scale, and it is a different intent, not a tuning of this
 // one.
@@ -155,7 +155,7 @@
 //
 // THREADING
 // ---------
-// Single-threaded by contract, same as MotionInterpolator: ALL of
+// Single-threaded by contract: ALL of
 // commit/positionAt/velocityAt/snapshot run on Core 1 (the sampler task).
 // Cross-core command handoff stays OUTSIDE this class. No locks, no heap in
 // steady state (Ruckig's waypoint vectors stay empty in community mode).
@@ -171,7 +171,7 @@
 
 namespace slopmotion {
 
-inline constexpr const char* kVersion = "0.7.0";
+inline constexpr const char* kVersion = "0.8.0";
 
 // ---- Configuration ----------------------------------------------------------
 
@@ -189,7 +189,7 @@ struct Limits {
 //
 //   Stretch — range-first. Keep the whole stroke, overrun the deadline. Right
 //             for a sender whose amplitude is the content (manual point moves,
-//             "go here" commands). This is the pre-0.3 behaviour.
+//             "go here" commands). This is the pre-0.3 behavior.
 //   Scale   — timing-first, SHAPE-first. Keep the deadline, keep the min-jerk
 //             quintic, shrink the stroke around the current position until
 //             the quintic fits. Right for a SCHEDULED sender (funscript
@@ -334,9 +334,9 @@ enum class InfeasiblePolicy : uint8_t {
 // knot it is estimated at. The operator identified this on hardware as motion
 // that tracked the script's positions but not its character.
 //
-//   FollowClient — the sender declares its curve family and we honour it. NO
-//                  WIRE SIGNALLING EXISTS YET (that is the pending RFC), so with
-//                  nothing declared this resolves to C2 — i.e. today's behaviour,
+//   FollowClient — the sender declares its curve family and we honor it. NO
+//                  WIRE SIGNALING EXISTS YET (that is the pending RFC), so with
+//                  nothing declared this resolves to C2 — i.e. today's behavior,
 //                  byte for byte. This value is the safe default and stays that
 //                  way; when the RFC lands, only the resolution changes.
 //   ForceC1      — always cubic. Reproduces a Pchip/Makima span exactly.
@@ -358,7 +358,7 @@ enum class InfeasiblePolicy : uint8_t {
 // before hardware: a knot between two very differently-sloped spans commands a
 // large torque step, and how that feels is a measurement, not a derivation.
 enum class CurvePolicy : uint8_t {
-    FollowClient = 0,   // honour the sender's declared family (today: C2)
+    FollowClient = 0,   // honor the sender's declared family (today: C2)
     ForceC1      = 1,   // cubic Hermite — reproduces the script's own spline
     ForceC2      = 2,   // quintic — curvature-continuous
 };
@@ -395,7 +395,7 @@ struct Config {
     // This flag gates the WHOLE second-order idea ("predictive aim v2"): the
     // ½·a_est·look² aim term AND the matching arrival-velocity extrapolation
     // (arrive at v_est + a_est·look, the velocity the stream will have when we
-    // get there — not the one it has now). Off = pre-v2 behaviour, byte for
+    // get there — not the one it has now). Off = pre-v2 behavior, byte for
     // byte.
     bool     chase_aim_accel_extrap = true;
     // Streams with mean interval above this are NOT dense: no feedforward, no
@@ -425,7 +425,7 @@ struct Config {
     uint8_t infeasible_reshape_steps = 6;
 
     // Curve family for waveform-segment reconstruction. FollowClient is today's
-    // behaviour byte for byte until the curve_family wire signalling lands.
+    // behavior byte for byte until the curve_family wire signaling lands.
     CurvePolicy curve_policy = CurvePolicy::FollowClient;
 
     // ---- Budgeted policies (PrioritizeAmplitude / PrioritizeSmooth) --------
@@ -463,13 +463,13 @@ struct Config {
     //
     // OFF restores the 0.5.0 contract exactly: every reshape plan is computed
     // at the full mechanical jmax, flat top and all. This knob is the whole
-    // feature's off switch — nothing else in the file changes behaviour with
+    // feature's off switch — nothing else in the file changes behavior with
     // it clear.
     //
     // The feature is RESHAPE-only on purpose. Scale plans a QUINTIC, whose
     // shape is fixed by its boundary conditions — there is no jerk ceiling to
     // spend there, only amplitude, which is exactly what Scale already trades.
-    // Stretch is untouched for the same reason it is exempt from centring: it
+    // Stretch is untouched for the same reason it is exempt from centering: it
     // promises the whole stroke and nothing else.
     bool     infeasible_soften       = true;
     // The SMOOTH END of the sharpness dial, as a fraction of the mechanical
@@ -488,15 +488,15 @@ struct Config {
     // geometric: N steps resolve the effective jerk to a factor of
     // (1/floor)^(1/2^N), i.e. 6 steps ≈ 6 % at the default floor, which is far
     // finer than anything the profile shape reveals. CLAMPED to [0, 10] on use;
-    // 0 disables the search (plan at jmax, 0.5.0 behaviour).
+    // 0 disables the search (plan at jmax, 0.5.0 behavior).
     uint8_t  infeasible_soften_steps = 6;
 
-    // ---- DC centring of the degraded band (SCALE + RESHAPE) ----------------
+    // ---- DC centering of the degraded band (SCALE + RESHAPE) ----------------
     // "The machine should gracefully handle infeasible input by shortening the
     // stroke, MIDPOINT ANCHORED." (operator, verbatim.) When the machine cannot
     // deliver the commanded amplitude on the commanded clock, the achieved band
     // must shrink SYMMETRICALLY about the commanded midpoint instead of walking
-    // off one end — see the centring note on commitWaveformReshaped for the
+    // off one end — see the centering note on commitWaveformReshaped for the
     // control law and the measured numbers.
     //
     // The debt is a WAVEFORM-level concept, not a policy's private business: it
@@ -507,8 +507,8 @@ struct Config {
     //
     // ON (default) the rule can shorten a stroke the machine COULD have made,
     // because delivering one direction in full while the other is clipped is
-    // exactly what walks the band off centre. Every such stroke is reported as
-    // a WaveformCentred anomaly — a deliberate, visible deviation, never a
+    // exactly what walks the band off center. Every such stroke is reported as
+    // a WaveformCentered anomaly — a deliberate, visible deviation, never a
     // silent one.
     //
     // OFF restores the 0.4.0 contract: a quintic-feasible segment is never
@@ -520,17 +520,17 @@ struct Config {
     // one bisection quantum — ≈1.5 % of the stroke — of where 0.4.0 put it.
     // Same rule, better-measured input.)
     //
-    // What OFF costs, measured on the operator's chains (band centre error vs
+    // What OFF costs, measured on the operator's chains (band center error vs
     // the commanded midpoint, last 10 cycles): mixed chain −23.6 mm off vs
     // −4.5 mm on (the operator measured −26.8 mm on the machine itself); Scale
     // on the same chain −45.8 mm off vs −8.5 mm on.
     bool  wave_centering      = true;
-    // Strength of the correction, 0..1 (clamped on use). 1 = full centring,
+    // Strength of the correction, 0..1 (clamped on use). 1 = full centering,
     // 0 = off (same as the bool). A feel dial, NOT a calibration, and not even
     // monotone: the debt loop closes around the pull it actually applied, so a
     // half-strength pull settles at a different fixed point rather than
     // half-way between the two extremes. Measured on the operator's chains,
-    // band centre error: OFF −23.6 mm, gain 0.5 −11.7 mm, gain 1.0 −4.5 mm on
+    // band center error: OFF −23.6 mm, gain 0.5 −11.7 mm, gain 1.0 −4.5 mm on
     // the mixed chain — but on the both-infeasible chain OFF +1.1 mm, gain 0.5
     // −3.3 mm, gain 1.0 +0.2 mm, i.e. the mid setting is WORSE than either
     // end. Use 1.0 or use the bool; the in-between is for experimenting.
@@ -549,7 +549,7 @@ struct Config {
     // sender through long shallow runs; this is the ONE knob for handoff
     // aggressiveness.
     //
-    // 0 DISABLES the guard entirely (pre-0.7.0 behaviour, byte for byte) —
+    // 0 DISABLES the guard entirely (pre-0.7.0 behavior, byte for byte) —
     // that is the A/B switch for comparing machine-side bounding against a
     // client that still carries its own limiter. CLAMPED to [0, 8] on use: a
     // config push is not a trusted input.
@@ -564,7 +564,7 @@ struct Config {
     // concludes the stream is starved and brakes to rest. Sized as
     // min(1.5 · estimated stream interval, this cap) and only applied while a
     // recent stream estimate exists — an isolated point move still settles
-    // immediately. 0 disables the grace (pre-0.4 behaviour: brake the instant
+    // immediately. 0 disables the grace (pre-0.4 behavior: brake the instant
     // the plan expires).
     uint32_t settle_grace_us = 30000;
 };
@@ -593,6 +593,8 @@ struct Command {
     // chord we do not have would trim well-behaved senders for free, which is
     // a feel regression; not guessing costs nothing, because an unbounded
     // handoff still meets the legality scan + Ruckig guard downstream.
+    // RFC-049c evaluated and REJECTED an own-chord fallback here — see
+    // commitWaveform's note beside boundHandoffVelocity's call site.
     float    next_chord     = 0.0f;
     bool     has_next_chord = false;
 
@@ -602,7 +604,7 @@ struct Command {
     // included): 0 = unspecified, 1 = c1_cubic, 2 = c2_quintic, 3 = step.
     // Consumed ONLY by the waveform path's FollowClient resolution — 1 selects
     // the cubic reconstruction, everything else keeps the quintic (today's
-    // behaviour, including `step`, honestly: no step renderer exists yet).
+    // behavior, including `step`, honestly: no step renderer exists yet).
     // Callers with no wire knowledge leave it 0 and nothing changes.
     uint8_t  client_curve_family = 0;
 };
@@ -699,7 +701,7 @@ enum class AnomalyType : uint8_t {
     DeadlineStretched = 4,  // commanded duration infeasible; guard profile runs longer. detail = actual s
     WaveformFallback  = 5,  // quintic broke a ceiling/window → Ruckig shaped the segment instead. detail = worst ratio
     WaveformScaled    = 6,  // the stroke was shrunk to hold the deadline. detail = achieved fraction 0..1, target = the shortened target
-    WaveformCentred   = 7,  // the stroke was shrunk to hold the MIDPOINT (the machine could have gone further). detail = achieved fraction 0..1, target = the shortened endpoint
+    WaveformCentered   = 7,  // the stroke was shrunk to hold the MIDPOINT (the machine could have gone further). detail = achieved fraction 0..1, target = the shortened endpoint
     HandoffBounded    = 8,  // RFC-008: a wire end velocity was cut to the Fritsch-Carlson knot bound of the FOLLOWING segment. detail = the accepted (bounded) vf
     WaveformSmoothed  = 9   // the span's END handle was lerped toward the chord to make the shape legal. detail = alpha spent, 0..1 (1 = straight line)
 };
@@ -707,8 +709,8 @@ enum class AnomalyType : uint8_t {
 // sm_anom_kind + kSmAnomalyNames) and the sim (MachineSim.h mirror) index
 // per-kind counter tables by this enum, and their drain loops bounds-check
 // against the NAME table — a kind with no name there is dropped, not
-// miscounted. WaveformCentred = 7 fits the existing SM_ANOM_KINDS = 8 counter
-// width, but both name tables need "waveform_centred" appended before the
+// miscounted. WaveformCentered = 7 fits the existing SM_ANOM_KINDS = 8 counter
+// width, but both name tables need "waveform_centered" appended before the
 // count becomes visible in /api/slopmotion or the sim TUI.
 // HandoffBounded = 8 SPENT that width: SM_ANOM_KINDS went 8 -> 9 in the same
 // change, together with kSmAnomalyNames, the sim's mirror of it, and the
@@ -727,7 +729,7 @@ enum class AnomalyType : uint8_t {
 //             segment" is exactly what WaveformFallback has always meant, and
 //             the absence of a companion DeadlineStretched/WaveformScaled is
 //             already the "nothing was sacrificed" signal.
-//   Centring: WaveformCentred — the endpoint was pulled in to keep the band on
+//   Centering: WaveformCentered — the endpoint was pulled in to keep the band on
 //             the commanded midpoint, and the MACHINE was not the binding
 //             constraint (it could have gone further, quintic-feasible strokes
 //             included). This one DID get its own kind, because "the machine
@@ -735,7 +737,7 @@ enum class AnomalyType : uint8_t {
 //             different diagnoses and only one of them is a hardware/limit
 //             question. Exactly one event per segment: whichever constraint
 //             BINDS is the one reported (machine short ⇒ WaveformScaled,
-//             centring short ⇒ WaveformCentred).
+//             centering short ⇒ WaveformCentered).
 //   Handoff : HandoffBounded — the SENDER'S HANDOFF was reshaped, one segment
 //             BEFORE any of the above could happen. This is the only kind on
 //             this list that reports a preventive act rather than a rescue,
@@ -775,7 +777,7 @@ struct Snapshot {
     // which is what the 0.6.0 sharpness search moves — see the header's
     // SHARPNESS BEFORE AMPLITUDE note. For a quintic it is the scanned peak of
     // its own shape, so the field means the same thing on both plan kinds
-    // instead of being a policy artefact.
+    // instead of being a policy artifact.
     //
     // NOT monotone across the quintic→reshape boundary, and that is real, not a
     // bug: a velocity-saturated Ruckig double-S at its critical jerk can be
@@ -894,7 +896,7 @@ public:
 
     // ---- Evaluation (Core 1, ~1 kHz hot path) ------------------------------
     // May engage the SETTLE transition when the clock runs past a trajectory
-    // that ends moving (mirrors MotionInterpolator::handleTimeout).
+    // that ends moving.
     float positionAt(uint64_t now_us) {
         maybeSettle(now_us);
         double p, v, a;
@@ -1000,16 +1002,16 @@ private:
     static constexpr double   kQuinticVPeak = 1.875;      // 15/8
     static constexpr double   kQuinticAPeak = 5.7735027;  // 10/√3
     static constexpr double   kQuinticJPeak = 60.0;
-    // ---- DC-centring constants (see the control-law note) ------------------
+    // ---- DC-centering constants (see the control-law note) ------------------
     // "Nothing was given up" threshold, in normalized units — well under the
     // 1 % quantum of the 0x0085 wire target field.
-    static constexpr double   kCentreEps     = 1e-6;
+    static constexpr double   kCenterEps     = 1e-6;
     // Largest pull-in a single stroke may pay, as a fraction of its own
     // commanded travel. Keeps the endpoint on the far side of the start
     // position by construction (never inverted, never past the target).
-    static constexpr double   kCentreCapFrac = 0.50;
-    // The 0.4.0 cap, still used when centring is disabled so that knob really
-    // does restore the old behaviour.
+    static constexpr double   kCenterCapFrac = 0.50;
+    // The 0.4.0 cap, still used when centering is disabled so that knob really
+    // does restore the old behavior.
     static constexpr double   kLegacyOwedCap = 0.25;
     // Debt filter gains (see the control-law note). LAG is how much of each
     // stroke's observation is folded into the debt — the lag is what stops the
@@ -1017,8 +1019,8 @@ private:
     // back when a stroke was shortened voluntarily — the release valve that
     // stops the band ratcheting shut. Swept on the operator's chains, both
     // speeds, both policies; see the note for the measured table.
-    static constexpr double   kCentreLag     = 0.50;
-    static constexpr double   kCentreRelax   = 0.25;
+    static constexpr double   kCenterLag     = 0.50;
+    static constexpr double   kCenterRelax   = 0.25;
     // A debt this old belongs to a phrase that has ended (the machine settled
     // somewhere else). 1 s is far longer than any segment cadence a sender
     // pushes — 0x0085 funscript segments run ~2–4 per second.
@@ -1085,7 +1087,7 @@ private:
                         double target, uint64_t now_us) {
         // RFC-030: adopt the command's declared family BEFORE any curve is
         // built — every later re-solve of this plan (Scale, the budgeted
-        // search, centring) reads it through waveformIsCubic() and therefore
+        // search, centering) reads it through waveformIsCubic() and therefore
         // re-solves in the SAME family the sender declared.
         _client_curve_family = cmd.client_curve_family;
         const double T = (double)cmd.duration_us * 1e-6;
@@ -1110,6 +1112,25 @@ private:
         // geometry, and free. chord_out comes from the caller's lookahead; no
         // lookahead means no bound (see Command::has_next_chord).
         //
+        // RFC-049c NOTE (the panel's "sparse-segment scheduling-depth
+        // backstop" ask, H11): a variant bounding chord_out against chord_in
+        // itself when no lookahead is present was PROTOTYPED and REJECTED
+        // here, not merely deferred. Measured live against this file's own
+        // "Mixed feasible/infeasible chain settles centered and STAYS there"
+        // regression (the operator's real 26.8 mm-off-center bench case): the
+        // own-chord fallback materially shrank the characterized defect's
+        // magnitude in the centering-OFF baseline (-23.6 mm -> -9.4 mm) purely
+        // by clamping SOME declared down-stroke end velocities whenever the
+        // reshape/centering feedback loop's own dynamics had already pulled
+        // chord_in below the k-factor bound — an interaction with a physically
+        // sensitive, operator-tuned control loop that this pass could not
+        // adequately re-validate. Left OPEN, per docs/slopsync/RFC-QUEUE.md's
+        // RFC-049(c): a real fix needs the scheduling-depth signal to come
+        // from somewhere that can tell "a successor is coming, just not yet
+        // queued" apart from "this is genuinely the last segment" — which
+        // chord_in alone cannot do — rather than trading the tail case's
+        // documented honesty clause for an unverified motion-quality risk.
+        //
         // Engages only on an EXPLICIT wire handoff. When has_end_vel is false
         // vf is the engine's OWN stream estimate, which is already conservative
         // and is not the sender's claim to sanity-check.
@@ -1132,7 +1153,7 @@ private:
         // sender's claimed velocity there is precisely the number we have
         // decided not to believe. Feeding it forward is how one oversized
         // tangent used to poison the NEXT segment's boundary conditions too.
-        // Identical to the old behaviour whenever the guard does not engage,
+        // Identical to the old behavior whenever the guard does not engage,
         // which is every well-behaved stream.
         const double vf_handoff = vf;
         vf = applyEndVelGuard(vf, target, now_us);
@@ -1159,11 +1180,11 @@ private:
         double c[6];
         buildWaveformCurve(p, v, a, target, vf, af, T, c);
 
-        // Stroke geometry + the centring debt owed at the extreme this stroke
+        // Stroke geometry + the centering debt owed at the extreme this stroke
         // heads toward. Computed ONCE, here, and handed to whichever sizing
         // rule ends up running: the debt is a property of the BAND the sender
         // is drawing, not of the policy that happened to pick the endpoint
-        // (that coupling was artificial — Scale needs centring exactly as much
+        // (that coupling was artificial — Scale needs centering exactly as much
         // as Reshape does, and for the same reason).
         const int8_t dir   = target >= p ? (int8_t)1 : (int8_t)-1;
         const double sgn   = dir > 0 ? 1.0 : -1.0;
@@ -1176,7 +1197,7 @@ private:
             // it, on the clock, as the sender's own spline.
             //
             // ...and delivering all of it is exactly what walks the band off
-            // centre when the OTHER direction is being clipped (the operator's
+            // center when the OTHER direction is being clipped (the operator's
             // measured case: down-strokes quintic-feasible thanks to the wire
             // end velocities, up-strokes reach-limited → the band sat 26.8 mm
             // low and never self-corrected, because "feasible segments are
@@ -1185,7 +1206,7 @@ private:
             // hit. That is a ground-truth-visible deviation on a stroke the
             // machine could have made — it gets its own anomaly kind, never
             // silence.
-            if (centringArmed() && pull > kCentreEps) {
+            if (centeringArmed() && pull > kCenterEps) {
                 const double goal = clamp01(target - sgn * pull);
                 const double gvf  = applyEndVelGuard(vf, goal, now_us);
                 double gc[6];
@@ -1194,11 +1215,11 @@ private:
                     adoptQuintic(gc, T, now_us);
                     // Machine shortfall 0: the machine could have reached the
                     // commanded target. That zero is the signal that lets the
-                    // OTHER extreme relax again (see the centring note) — it
+                    // OTHER extreme relax again (see the centering note) — it
                     // is why the band converges instead of ratcheting shut.
                     noteWaveformExtreme(dir, target, goal, 0.0, 1.0 - worst,
                                         now_us);
-                    recordAnomaly(AnomalyType::WaveformCentred, (float)goal,
+                    recordAnomaly(AnomalyType::WaveformCentered, (float)goal,
                                   (float)(std::fabs(goal - p) /
                                           std::fmax(adist, 1e-6)), now_us);
                     return true;
@@ -1309,9 +1330,9 @@ private:
 
     // Is the WAVEFORM path reconstructing with a cubic right now? This is the
     // ONE function that knows — and as of RFC-030 the curve_family wire
-    // signalling EXISTS, so FollowClient finally has something to follow:
+    // signaling EXISTS, so FollowClient finally has something to follow:
     // the family the active waveform command declared (1 = c1_cubic → cubic;
-    // 0/2/3 → quintic, i.e. the pre-RFC behaviour). The machine override
+    // 0/2/3 → quintic, i.e. the pre-RFC behavior). The machine override
     // still outranks the declaration, exactly as the policy enum promises.
     bool waveformIsCubic() const {
         switch (_cfg.curve_policy) {
@@ -1323,7 +1344,7 @@ private:
     }
 
     // THE waveform-path curve builder. Every sizing rule (plain commit,
-    // centring, Scale, the budgeted search) goes through here rather than
+    // centering, Scale, the budgeted search) goes through here rather than
     // calling buildQuintic directly, so the family is chosen in exactly one
     // place and no policy can silently disagree with another about it.
     void buildWaveformCurve(double p, double v, double a, double target,
@@ -1520,16 +1541,16 @@ private:
         }
         if (!found) return false;          // both axes spent → Ruckig guard
 
-        // ---- Centring, same contract as the other policies -----------------
+        // ---- Centering, same contract as the other policies -----------------
         // A debt outstanding at this extreme may pull the endpoint IN further
         // than the search did. Whichever constraint BINDS is the one reported.
-        bool centre_bound = false;
-        if (centringArmed() && pull > kCentreEps) {
+        bool center_bound = false;
+        if (centeringArmed() && pull > kCenterEps) {
             const double sgn  = dir > 0 ? 1.0 : -1.0;
             const double goal = clamp01(target - sgn * pull);
             if (std::fabs(goal - p) < std::fabs(ep - p)) {
                 double gc[6], gep;
-                // Re-express the centring goal in the search's own geometry so
+                // Re-express the centering goal in the search's own geometry so
                 // one code path builds every adopted shape.
                 const double denom = target - 0.5 * (p + target);
                 const double gf = std::fabs(denom) > 1e-12
@@ -1540,7 +1561,7 @@ private:
                 if (gw <= 1.0) {
                     for (int i = 0; i < 6; i++) c[i] = gc[i];
                     ep = gep; adopted_f = gf; adopted_worst = gw;
-                    centre_bound = true;
+                    center_bound = true;
                 }
                 // A shortened shape can break a ceiling the longer one did not
                 // (same boundary conditions over a shorter span curve harder).
@@ -1560,15 +1581,15 @@ private:
         const double adist    = std::fabs(target - p);
         const double achieved = adist > 1e-9 ? std::fabs(ep - p) / adist : 1.0;
         if (adopted_f < 1.0 - 1e-6) {
-            recordAnomaly(centre_bound ? AnomalyType::WaveformCentred
+            recordAnomaly(center_bound ? AnomalyType::WaveformCentered
                                        : AnomalyType::WaveformScaled,
                           (float)ep, (float)achieved, now_us);
         }
-        // Machine shortfall is zero when CENTRING chose the endpoint — the
+        // Machine shortfall is zero when CENTERING chose the endpoint — the
         // machine could have gone further. That zero is what lets the other
         // extreme relax again instead of the band ratcheting shut.
         noteWaveformExtreme(dir, target, ep,
-                            centre_bound ? 0.0 : std::fabs(target - ep),
+                            center_bound ? 0.0 : std::fabs(target - ep),
                             1.0 - adopted_worst, now_us);
         return true;
     }
@@ -1605,17 +1626,17 @@ private:
     // ladder's whole remaining job. Cost is bounded and plan-time only
     // (≤ 3 × 65 polynomial evaluations, on an event that just failed anyway).
     //
-    // CENTRING RIDES ON TOP (0.5.0), and it rides on top AFTER the sizing rule
+    // CENTERING RIDES ON TOP (0.5.0), and it rides on top AFTER the sizing rule
     // has had its say — the ladder runs from d_max exactly as it always did,
-    // and only then is the centred (shorter) endpoint tried, once, with its own
+    // and only then is the centered (shorter) endpoint tried, once, with its own
     // legality scan. That ordering is not cosmetic: the debt rule needs the
-    // SHAPE-forced shortfall measured with the centring pull absent, or the
+    // SHAPE-forced shortfall measured with the centering pull absent, or the
     // control loop is reading back its own output. Feeding the pull into the
     // ladder's first guess (the obvious implementation, tried first) let the
     // ladder's 15 %-per-rung steps into the feedback path and produced a stable
     // ±5 mm / 10 mm-amplitude wobble on the operator's mixed chain — the same
     // class of oscillation Reshape avoids by probing the machine's reach
-    // against the COMMANDED target rather than the centred one.
+    // against the COMMANDED target rather than the centered one.
     // Cost when the pull binds: one extra quintic build + 65-point scan. No
     // Ruckig calls — this path has never had any.
     bool commitWaveformScaled(double p, double v, double a, double target,
@@ -1662,16 +1683,16 @@ private:
         }
         if (!sized) return false;   // scan never accepted → guard takes it
 
-        // Everything the SHAPE refused, measured with the centring pull absent
+        // Everything the SHAPE refused, measured with the centering pull absent
         // (see the note above — this is the debt rule's machine term and it has
         // to be independent of the debt).
         const double mach = adist - std::fabs(st - p);
 
-        // ---- Centring, once, on top of the sized endpoint -------------------
-        bool centred = false;
-        if (pull > kCentreEps) {
+        // ---- Centering, once, on top of the sized endpoint -------------------
+        bool centered = false;
+        if (pull > kCenterEps) {
             const double d_goal = adist - pull;   // pull ≤ half the stroke
-            if (d_goal > 0.0 && d_goal < std::fabs(st - p) - kCentreEps) {
+            if (d_goal > 0.0 && d_goal < std::fabs(st - p) - kCenterEps) {
                 const double ct  = clamp01(p + sgn * d_goal);
                 const double cvf = applyEndVelGuard(vf, ct, now_us);
                 double cc[6];
@@ -1679,7 +1700,7 @@ private:
                 if (quinticWorstRatio(cc, T) <= 1.0) {
                     for (int i = 0; i < 6; i++) sc[i] = cc[i];
                     st = ct;
-                    centred = centringArmed();   // see the note in Reshape
+                    centered = centeringArmed();   // see the note in Reshape
                 }
                 // Rejected: the shorter stroke curves harder under the same
                 // boundary derivatives. Symmetry is a preference, legality is
@@ -1690,16 +1711,16 @@ private:
         adoptQuintic(sc, T, now_us);
         // Slack 0: this path only runs on a segment the quintic envelope
         // already refused, so the shape had no room to give.
-        if (centringArmed()) {
+        if (centeringArmed()) {
             noteWaveformExtreme(dir, target, st, mach, 0.0, now_us);
         }
         // Honest reporting is the whole point of choosing Scale: the fraction
         // tells the operator (and the WebUI) exactly how much amplitude was not
         // delivered on schedule, and the KIND says which constraint bound —
         // the quintic envelope (WaveformScaled) or the band's midpoint
-        // (WaveformCentred, i.e. the machine could have gone further).
+        // (WaveformCentered, i.e. the machine could have gone further).
         const double frac = std::fabs(st - p) / std::fmax(adist, 1e-6);
-        recordAnomaly(centred ? AnomalyType::WaveformCentred
+        recordAnomaly(centered ? AnomalyType::WaveformCentered
                               : AnomalyType::WaveformScaled,
                       (float)st, (float)frac, now_us);
         return true;
@@ -1737,7 +1758,7 @@ private:
     //      header's SHARPNESS BEFORE AMPLITUDE note. Amplitude is never traded
     //      for smoothness: step 3 runs strictly after the endpoint is fixed.
     // Whichever branch ran, the adopted endpoint is then the nearer of that
-    // reach and the centring goal — the search measures the MACHINE, the debt
+    // reach and the centering goal — the search measures the MACHINE, the debt
     // decides how much of that reach we spend on this side of the band.
     //
     // The search parameter f runs [-1, +1] over the stroke geometry:
@@ -1756,7 +1777,7 @@ private:
     // annihilated by applyEndVelGuard at the wall anyway (measured: scaling vf
     // alone, without the sizing fix, changed nothing at all).
     //
-    // DC CENTRING — READ THIS BEFORE "SIMPLIFYING" IT. (The rule itself now
+    // DC CENTERING — READ THIS BEFORE "SIMPLIFYING" IT. (The rule itself now
     // lives in wavePull/noteWaveformExtreme and serves Scale too; this is where
     // it was derived and measured, so the derivation stays here.)
     // A shrink that simply takes the farthest reachable endpoint is NEUTRALLY
@@ -1764,7 +1785,7 @@ private:
     // midpoint does NOT change that: the geometry is a reparameterization of
     // the same endpoint set, and a greedy search returns the same answer
     // either way. MEASURED (0.30↔1.00 chain at 167 ms, operator's machine):
-    // midpoint-parameterized greedy Reshape centres the achieved motion at
+    // midpoint-parameterized greedy Reshape centers the achieved motion at
     // 0.6008 against a commanded 0.65 — a 9.8 mm sag, better than Scale's
     // 29.0 mm but still a sag. The mechanism is easy to see in the chain: from
     // the bottom extreme the machine cannot reach the top, so the top gets
@@ -1780,7 +1801,7 @@ private:
     // a monotone ramp is not symmetry, it is lag.
     //
     // THE CONTROL LAW (0.5.0). Write the two extremes' achieved shortfalls as
-    // x (bottom) and y (top); centred means x == y, and the band we want is
+    // x (bottom) and y (top); centered means x == y, and the band we want is
     // x = y = (A−R)/2, where A is the commanded amplitude and R the amplitude
     // the machine can actually deliver on the commanded clock. Each stroke
     // ends short by max(debt, whatever the sizing rule forced), and hands the
@@ -1810,13 +1831,13 @@ private:
     //    the fixed point: a correction at one extreme reduces the next
     //    stroke's shortfall one-for-one, so the band does not converge, it
     //    ORBITS. Measured, mixed chain: a rock-stable period-4 cycle, band
-    //    centre swinging ±7 mm forever with the MEAN in exactly the right
+    //    center swinging ±7 mm forever with the MEAN in exactly the right
     //    place — the kind of bug that looks fine in a summary statistic and
     //    feels like the machine wandering.
     //
     // Gains swept over the operator's chains at both speeds, both policies
     // (LAG 0.30–1.00 × relax 0.00–0.50): 0.50 / 0.25 is the knee — every band
-    // spread ≤ 0.9 mm with the centring error at its best, while LAG ≥ 0.65
+    // spread ≤ 0.9 mm with the centering error at its best, while LAG ≥ 0.65
     // starts to ring again (3–4 mm spreads) and LAG ≤ 0.40 just converges
     // slower for no gain.
     //
@@ -1833,7 +1854,7 @@ private:
         const double sgn = dist >= 0.0 ? 1.0 : -1.0;
 
         // ---- 1. How far can the MACHINE actually go by the deadline? -------
-        // Probed against the COMMANDED target, not the centred goal: the
+        // Probed against the COMMANDED target, not the centered goal: the
         // machine's own shortfall is the debt rule's other half, and a probe
         // of the goal would only ever tell us "at least this far".
         double reach = target;               // farthest endpoint that fits in T
@@ -1876,18 +1897,18 @@ private:
         const double mach = std::fabs(target - reach);
 
         // ---- 3. Endpoint = whichever cap is tighter ------------------------
-        // The machine's reach and the centring debt are both ceilings on the
+        // The machine's reach and the centering debt are both ceilings on the
         // same travel; the nearer one wins, and it is also the one the anomaly
         // must name (one event per segment, naming the BINDING constraint).
         const double goal =
-            pull > kCentreEps ? clamp01(target - sgn * pull) : target;
+            pull > kCenterEps ? clamp01(target - sgn * pull) : target;
         const bool pull_binds =
-            std::fabs(goal - p) < std::fabs(reach - p) - kCentreEps;
-        // Only an ARMED centring debt gets the new anomaly kind. With centring
+            std::fabs(goal - p) < std::fabs(reach - p) - kCenterEps;
+        // Only an ARMED centering debt gets the new anomaly kind. With centering
         // off the pull is 0.4.0's own reversal debt, which has always reported
         // as WaveformScaled — the knob restores the telemetry too, not just the
         // motion.
-        const bool centred = pull_binds && centringArmed();
+        const bool centered = pull_binds && centeringArmed();
         const double ep   = pull_binds ? goal : reach;
         const double frac = std::fabs(ep - p) / std::fmax(adist, 1e-6);
         // The end velocity is scaled with the delivered travel fraction — a
@@ -1910,7 +1931,7 @@ private:
         //     there is definitely sharpness to give back. This is the branch
         //     0.5.0 got for 2 calculate() calls and the branch where the
         //     measured 74 %→21 % saturation win lives.
-        //   * pull_binds — the CENTRING debt pulled the endpoint in short of
+        //   * pull_binds — the CENTERING debt pulled the endpoint in short of
         //     the machine's reach, which manufactures slack even on a segment
         //     the machine could not fully deliver.
         // Otherwise `ep` IS the bisected reach, where jmax is marginal by
@@ -1939,7 +1960,7 @@ private:
         noteWaveformExtreme(dir, target, ep, mach, slack, now_us);
 
         const double lost = std::fabs(target - ep);
-        if (lost <= kCentreEps) {
+        if (lost <= kCenterEps) {
             // Shape lost, nothing else: no WaveformScaled, and no
             // DeadlineStretched either (min_dur = T holds the deadline by
             // construction, and opt ≤ T means Ruckig is stretching, not
@@ -1949,18 +1970,18 @@ private:
         } else {
             // Same honest-reporting contract as Scale: the fraction is how
             // much of the COMMANDED stroke actually got delivered on schedule.
-            recordAnomaly(centred ? AnomalyType::WaveformCentred
+            recordAnomaly(centered ? AnomalyType::WaveformCentered
                                   : AnomalyType::WaveformScaled,
                           (float)ep, (float)frac, now_us);
         }
         return true;
     }
 
-    // Is the centring rule armed for this segment? Stretch is deliberately
+    // Is the centering rule armed for this segment? Stretch is deliberately
     // exempt: it delivers the full amplitude (late) by definition, so there is
     // never a deficit to share out, and touching it would break the one policy
     // whose whole promise is "the stroke you asked for".
-    bool centringArmed() const {
+    bool centeringArmed() const {
         return _cfg.wave_centering &&
                _cfg.wave_centering_gain > 0.0f &&
                _cfg.infeasible_policy != InfeasiblePolicy::Stretch;
@@ -1970,8 +1991,8 @@ private:
     // Zero unless this is a REVERSAL and a debt is outstanding.
     double wavePull(int8_t dir, double adist, uint64_t now_us) const {
         if (_wave_dir == 0 || dir == _wave_dir) return 0.0;
-        if (!centringArmed()) {
-            // 0.4.0 behaviour: the debt existed, but only Reshape ever spent
+        if (!centeringArmed()) {
+            // 0.4.0 behavior: the debt existed, but only Reshape ever spent
             // it, and only up to a quarter of the stroke.
             return _cfg.infeasible_policy == InfeasiblePolicy::Reshape
                        ? std::fmin(_wave_owed, kLegacyOwedCap * adist)
@@ -1993,10 +2014,10 @@ private:
         // of the start position by construction. Never negative, never past
         // the commanded target.
         const double pull = _wave_owed * g;
-        return pull <= 0.0 ? 0.0 : std::fmin(pull, kCentreCapFrac * adist);
+        return pull <= 0.0 ? 0.0 : std::fmin(pull, kCenterCapFrac * adist);
     }
 
-    // Book-keeping for the centring rule: remember which way this stroke went
+    // Book-keeping for the centering rule: remember which way this stroke went
     // and update the debt the next REVERSAL will pay at the other extreme.
     // See the control-law note on commitWaveformReshaped for the derivation;
     // the two constants are why it settles instead of hunting.
@@ -2005,7 +2026,7 @@ private:
         _wave_dir     = dir;
         _wave_last_us = now_us;
         const double d = std::fabs(target - achieved);
-        if (!centringArmed()) {
+        if (!centeringArmed()) {
             _wave_owed = 0.5 * d;         // 0.4.0 rule, verbatim
             return;
         }
@@ -2020,9 +2041,9 @@ private:
         // formulas, same meaning, and it is only ever used to decide how fast
         // the debt lets go — never how large it is.
         const double sl = slack < 0.0 ? 0.0 : (slack > 1.0 ? 1.0 : slack);
-        const double relax = kCentreRelax + (1.0 - kCentreRelax) * sl;
+        const double relax = kCenterRelax + (1.0 - kCenterRelax) * sl;
         const double level = d - relax * (d - m);
-        _wave_owed += kCentreLag * (level - _wave_owed);
+        _wave_owed += kCenterLag * (level - _wave_owed);
         if (_wave_owed < 0.0) _wave_owed = 0.0;
     }
 
@@ -2113,7 +2134,7 @@ private:
     // `worst_out`, when asked for, reports the probed profile's ceiling/window
     // ratio (see ruckigWorstRatio). Only the sharpness search asks: it is the
     // one caller that varies the jerk ceiling, and therefore the one caller
-    // that can steer Ruckig into the region where it stops honouring vmax.
+    // that can steer Ruckig into the region where it stops honoring vmax.
     bool probeRuckigDuration(double p, double v, double a, double target,
                              double vf, double& dur_out, double j_ovr = 0.0,
                              double* worst_out = nullptr) {
@@ -2238,7 +2259,7 @@ private:
             // same acap-limited a_est (so a noisy second difference cannot
             // fling it either). One flag, one coherent "predictive aim v2":
             // with chase_aim_accel_extrap off, both the aim's a-term and this
-            // revert to the pre-v2 behaviour byte for byte.
+            // revert to the pre-v2 behavior byte for byte.
             const double vf_req = _cfg.chase_aim_accel_extrap
                                       ? v_est + a_est * look
                                       : v_est;
@@ -2426,7 +2447,7 @@ private:
     // was counting on inheriting. The legacy cubic engine did NOT have this
     // failure mode: handleTimeout simply FROZE at the endpoint, which is why
     // it degraded smoothly under the same jitter. The grace restores exactly
-    // that behaviour for the jitter case and keeps the brake for the real one.
+    // that behavior for the jitter case and keeps the brake for the real one.
     // The §11.3 600 ms SlopSync deadman remains the actual starvation
     // authority; this window only stops the engine from panicking on ms-scale
     // pacing noise.
@@ -2552,7 +2573,7 @@ private:
     double   _est_last_target = 0.5;
     uint64_t _est_last_us = 0;
 
-    // DC-centring memory (see the control-law note on commitWaveformReshaped):
+    // DC-centering memory (see the control-law note on commitWaveformReshaped):
     // direction of the last waveform stroke, the amplitude owed back at the
     // next reversal, and when that stroke was planned (a debt older than
     // kWaveDebtStaleUs belongs to a phrase that has ended).

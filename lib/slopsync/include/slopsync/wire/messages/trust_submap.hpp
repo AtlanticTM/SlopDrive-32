@@ -22,7 +22,7 @@
 // presentation_mode (7) are CARRIED (decoded, stored, echoed) but not acted on;
 // hub_pubkey (4), welcome_sig (5) and token_proof (6) are carried purely as the
 // M4c seam. Carrying them now is deliberate: it means the decoder that a fuzzer
-// hammers is the final one, and M4c adds behaviour rather than wire surface.
+// hammers is the final one, and M4c adds behavior rather than wire surface.
 #pragma once
 
 #include <array>

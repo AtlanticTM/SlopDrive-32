@@ -538,7 +538,7 @@ void buildAnnotatedCatalog(Catalog32& c) {
                 .cls = ChannelClass::STATE, .dir = Direction::h2c,
                 .access = AccessLevel::watch, .maxRateHz = 0.0f,
                 .defaultPriority = Priority::normal,
-                .hasCategory = true, .category = setting_categories::limits,
+                .hasCategory = true, .category = ui_categories::limits,
                 .hasSettingChannel = true, .settingChannel = 0x0101});
     // A SETTING: setting_key present -> writable through 0x0101 key 3.
     c.addLayoutField({.name = "user_speed", .type = PackedFieldType::f32, .unit = "mm/s",

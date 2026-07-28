@@ -51,11 +51,19 @@ struct GrantedPublish {
     bool has_burst = false;
     float burst = 0.0f;
     // RFC-030: the EFFECTIVE curve family (key 45) — the wish AFTER the hub's
-    // own curve_policy override, so a client can tell "honoured" from
+    // own curve_policy override, so a client can tell "honored" from
     // "downgraded". Emitted only when the wish declared a family, mirroring
     // burst's byte-identical rule for everyone else.
     bool has_curve_family = false;
     uint8_t curve_family = 0;
+    // RFC-049b: the client's ORIGINAL `curve_family` wish (key 48), echoed
+    // verbatim — unmodified by `curve_policy`, unlike `curve_family` above.
+    // Present iff the wish declared a family, exactly mirroring that field's
+    // own presence rule. Comparing this against `curve_family` is how a
+    // client tells "honored" from "downgraded" without remembering what it
+    // sent.
+    bool has_requested_curve_family = false;
+    uint8_t requested_curve_family = 0;
 };
 
 // §6.3's `limits` (22) is itself a CBOR map with its OWN small integer key
@@ -91,7 +99,15 @@ struct IdentityInfo {
     std::string_view product;     // <= kIdentityProductMaxBytes
     std::string_view fw_version;  // <= kIdentityFwVersionMaxBytes
     std::string_view hub_name;    // <= kIdentityHubNameMaxBytes
-    bool any() const { return !product.empty() || !fw_version.empty() || !hub_name.empty(); }
+    // RFC-048: durable cross-boot identity (identity_keys 5, u64). An explicit
+    // presence flag rather than a 0-sentinel — unlike ws_port/ipv4 below, 0 is
+    // a value esp_random() could plausibly produce, however unlikely, and
+    // "the hub has no durable identity yet" is a real, distinct state.
+    bool has_hub_instance_id = false;
+    uint64_t hub_instance_id = 0;
+    bool any() const {
+        return !product.empty() || !fw_version.empty() || !hub_name.empty() || has_hub_instance_id;
+    }
 };
 
 struct WelcomeMsg {
@@ -121,6 +137,15 @@ struct WelcomeMsg {
     bool has_identity = false;
     IdentityInfo identity{};
 
+    // RFC-046: the hub's own WS endpoint (keys 46/47). 0 = absent — same
+    // sentinel the registry's own note documents ("0 = none") — and the key
+    // is OMITTED from the wire at 0, not encoded as a literal zero, so a hub
+    // that never calls Hub::setEndpoint() stays byte-identical to a
+    // pre-RFC-046 WELCOME. Same additive-safe pattern as every other optional
+    // key here (max_subscriptions_per_frame, identity, trust).
+    uint16_t ws_port = 0;
+    uint32_t ipv4 = 0;
+
     // The scoped `trust` (39) sub-map. M4b puts `pairing_modes` here — the
     // BITMASK of association ceremonies this hub is offering RIGHT NOW, which
     // is why it is re-evaluated per session rather than fixed at boot: a
@@ -142,6 +167,8 @@ inline size_t encodeWelcome(const WelcomeMsg& m, std::span<std::byte> out) {
     const bool hasGrantedPublishes = m.granted_publishes_count > 0;
     const bool hasIdentity = m.has_identity && m.identity.any();
     const bool hasTrust = m.has_trust && m.trust_map.any();
+    const bool hasWsPort = m.ws_port != 0;
+    const bool hasIpv4 = m.ipv4 != 0;
     if (hasIdentity) {
         if (m.identity.product.size() > kIdentityProductMaxBytes) return 0;
         if (m.identity.fw_version.size() > kIdentityFwVersionMaxBytes) return 0;
@@ -149,7 +176,8 @@ inline size_t encodeWelcome(const WelcomeMsg& m, std::span<std::byte> out) {
     }
 
     CborWriter w(out);
-    w.mapHeader(11 + uint32_t(hasGrantedPublishes) + uint32_t(hasIdentity) + uint32_t(hasTrust));
+    w.mapHeader(11 + uint32_t(hasGrantedPublishes) + uint32_t(hasIdentity) + uint32_t(hasTrust) +
+                uint32_t(hasWsPort) + uint32_t(hasIpv4));
     w.key(CborKey::proto_ver).uintVal(m.proto_ver);
     w.key(CborKey::session_id).uintVal(m.session_id);
     w.key(CborKey::boot_id).uintVal(m.boot_id);
@@ -187,12 +215,16 @@ inline size_t encodeWelcome(const WelcomeMsg& m, std::span<std::byte> out) {
         w.key(CborKey::granted_publishes).arrayHeader(m.granted_publishes_count);
         for (uint32_t i = 0; i < m.granted_publishes_count; ++i) {
             const GrantedPublish& gp = m.granted_publishes[i];
-            // Entry keys ascending: granted_rate_hz(14) < channel_id(15) < burst(42) < curve_family(45).
-            w.mapHeader(2 + uint32_t(gp.has_burst) + uint32_t(gp.has_curve_family));
+            // Entry keys ascending: granted_rate_hz(14) < channel_id(15) < burst(42)
+            // < curve_family(45) < requested_curve_family(48).
+            w.mapHeader(2 + uint32_t(gp.has_burst) + uint32_t(gp.has_curve_family) +
+                        uint32_t(gp.has_requested_curve_family));
             w.key(CborKey::granted_rate_hz).f32Val(gp.granted_rate_hz);
             w.key(CborKey::channel_id).uintVal(gp.channel_id);
             if (gp.has_burst) w.key(CborKey::burst).f32Val(gp.burst);
             if (gp.has_curve_family) w.key(CborKey::curve_family).uintVal(gp.curve_family);
+            if (gp.has_requested_curve_family)
+                w.key(CborKey::requested_curve_family).uintVal(gp.requested_curve_family);
         }
     }
     if (hasIdentity) {
@@ -203,6 +235,7 @@ inline size_t encodeWelcome(const WelcomeMsg& m, std::span<std::byte> out) {
         if (!m.identity.product.empty()) ++idKeys;
         if (!m.identity.fw_version.empty()) ++idKeys;
         if (!m.identity.hub_name.empty()) ++idKeys;
+        if (m.identity.has_hub_instance_id) ++idKeys;
         w.key(CborKey::identity).mapHeader(idKeys);
         if (!m.identity.product.empty())
             w.key(uint64_t(identity_subkeys::product)).tstrVal(m.identity.product);
@@ -210,8 +243,14 @@ inline size_t encodeWelcome(const WelcomeMsg& m, std::span<std::byte> out) {
             w.key(uint64_t(identity_subkeys::fw_version)).tstrVal(m.identity.fw_version);
         if (!m.identity.hub_name.empty())
             w.key(uint64_t(identity_subkeys::hub_name)).tstrVal(m.identity.hub_name);
+        // hub_instance_id(5) sorts after info(4, unimplemented) — ascending order intact.
+        if (m.identity.has_hub_instance_id)
+            w.key(uint64_t(identity_subkeys::hub_instance_id)).uintVal(m.identity.hub_instance_id);
     }
-    if (hasTrust) encodeTrustMap(w, m.trust_map);  // key 39 is last: §5.3 ascending
+    if (hasTrust) encodeTrustMap(w, m.trust_map);  // key 39
+    // ws_port(46) / ipv4(47) sort after trust(39): §5.3 ascending order intact.
+    if (hasWsPort) w.key(CborKey::ws_port).uintVal(m.ws_port);
+    if (hasIpv4) w.key(CborKey::ipv4).uintVal(m.ipv4);
     return w.size();
 }
 
@@ -421,6 +460,14 @@ inline Result<WelcomeMsg, DecodeError> decodeWelcome(std::span<const std::byte> 
                                 gp.has_curve_family = true;
                                 break;
                             }
+                            case uint64_t(CborKey::requested_curve_family): {
+                                auto vv = r.readUint();
+                                if (!vv) return Ret::err(vv.error());
+                                if (vv.value() > 0xFF) return Ret::err(DecodeError::Malformed);
+                                gp.requested_curve_family = uint8_t(vv.value());
+                                gp.has_requested_curve_family = true;
+                                break;
+                            }
                             default: {
                                 auto sv = r.skipValue();
                                 if (!sv) return Ret::err(sv.error());
@@ -467,6 +514,13 @@ inline Result<WelcomeMsg, DecodeError> decodeWelcome(std::span<const std::byte> 
                             m.identity.hub_name = vv.value();
                             break;
                         }
+                        case identity_subkeys::hub_instance_id: {
+                            auto vv = r.readUint();
+                            if (!vv) return Ret::err(vv.error());
+                            m.identity.hub_instance_id = vv.value();
+                            m.identity.has_hub_instance_id = true;
+                            break;
+                        }
                         default: {
                             auto sv = r.skipValue();
                             if (!sv) return Ret::err(sv.error());
@@ -481,6 +535,24 @@ inline Result<WelcomeMsg, DecodeError> decodeWelcome(std::span<const std::byte> 
                 auto tR = decodeTrustMap(r, m.trust_map);
                 if (!tR) return Ret::err(tR.error());
                 m.has_trust = true;
+                break;
+            }
+            case uint64_t(CborKey::ws_port): {
+                // RFC-046. Optional (§4.3 tolerance) — NOT added to the
+                // required-keys set below, mirroring granted_publishes: absent
+                // from a pre-RFC-046 hub and from any WELCOME the sender chose
+                // not to populate (0 = absent is the wire convention, §6.3).
+                auto v = r.readUint();
+                if (!v) return Ret::err(v.error());
+                if (v.value() > 0xFFFF) return Ret::err(DecodeError::Malformed);
+                m.ws_port = uint16_t(v.value());
+                break;
+            }
+            case uint64_t(CborKey::ipv4): {
+                auto v = r.readUint();
+                if (!v) return Ret::err(v.error());
+                if (v.value() > 0xFFFFFFFFull) return Ret::err(DecodeError::Malformed);
+                m.ipv4 = uint32_t(v.value());
                 break;
             }
             default: {

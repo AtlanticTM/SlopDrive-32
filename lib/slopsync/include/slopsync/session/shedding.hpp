@@ -44,7 +44,7 @@
 //   WHY: §9.2 justifies decimation with "timestamps make dropped samples
 //   recoverable by interpolation". True for dense position samples; FALSE for
 //   timed segments, where a dropped bundle is a permanently lost command and
-//   its neighbours describe different intervals, not adjacent points on one
+//   its neighbors describe different intervals, not adjacent points on one
 //   curve. Halving a segment stream does not halve its fidelity — it deletes
 //   half the motion. See catalog.hpp's isSegmentClass() / the registry's
 //   `stream_kind` catalog property (RFC-014/023) for how a hub decides which

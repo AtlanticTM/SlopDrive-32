@@ -872,7 +872,7 @@ TEST_CASE("MB-09: bumpConfigGeneration advances cfg_gen and invalidates a stale 
 // was written and never implemented, so a viewer session that went dark held a
 // slot until reboot. A session that keeps PINGing is never touched.
 // ============================================================================
-TEST_CASE("MB-10: a silent non-owning session is reaped at idle_reap_multiplier x the idle interval") {
+TEST_CASE("MB-10 (RFC-042): a silent non-owning session goes STALE at idle_reap_multiplier x the idle interval, slot retained") {
     Catalog32 cat;
     makeM3bCatalog(cat);
     ManualClock clock;
@@ -901,21 +901,29 @@ TEST_CASE("MB-10: a silent non-owning session is reaped at idle_reap_multiplier 
         tickAndDrain(hub, clock, linkB.endpointB(), /*stepUs=*/0);
     }
     CHECK(hub.sessionCount() == 2);
+    REQUIRE(hub.sessionBySlot(0) != nullptr);
+    CHECK(hub.sessionBySlot(0)->state == HubSessionState::LIVE);
 
-    // Past it: A goes, B stays.
+    // Past it: A goes STALE, but the slot is RETAINED (RFC-042) — B stays LIVE.
     for (int i = 0; i < 6; ++i) {
         writeFrame(linkB.endpointB(), FrameType::PING, 0, std::span<const std::byte>{});
         auto r = tickAndDrain(hub, clock, linkA.endpointB(), /*stepUs=*/250000);
         fromA.insert(fromA.end(), r.begin(), r.end());
         tickAndDrain(hub, clock, linkB.endpointB(), /*stepUs=*/0);
     }
-    CHECK(hub.sessionCount() == 1);
+    // occupied() counts STALE too, so the slot is not given back.
+    CHECK(hub.sessionCount() == 2);
+    REQUIRE(hub.sessionBySlot(0) != nullptr);
+    CHECK(hub.sessionBySlot(0)->state == HubSessionState::STALE);
 
     bool sawGoodbye = false;
     for (const auto& r : fromA) {
         if (r.type == FrameType::GOODBYE) sawGoodbye = true;
     }
-    CHECK(sawGoodbye);  // reaping is announced, never a silent disappearance
+    // RFC-042: staleness is NOT an ending — no GOODBYE, the client may never
+    // even notice. (A silent A never sees anything either way, since it never
+    // reads its own transport in this harness; the point is the hub SENDS none.)
+    CHECK_FALSE(sawGoodbye);
 }
 
 // ============================================================================
@@ -924,7 +932,7 @@ TEST_CASE("MB-10: a silent non-owning session is reaped at idle_reap_multiplier 
 // loss policy (motion consequence); everyone else by idle reaping (no motion
 // consequence at all). A hub with no sources only ever exercises the latter.
 // ============================================================================
-TEST_CASE("MB-11: idle reaping never runs a loss policy — that is the deadman's job alone") {
+TEST_CASE("MB-11 (RFC-042): idle reaping marks STALE, never runs a loss policy, never frees the slot") {
     Catalog32 cat;
     makeM3bCatalog(cat);
     ManualClock clock;
@@ -941,7 +949,11 @@ TEST_CASE("MB-11: idle reaping never runs a loss policy — that is the deadman'
     for (uint32_t t = 0; t <= kIdleMs + 1000; t += 250) {
         tickAndDrain(hub, clock, link.endpointB(), /*stepUs=*/250000);
     }
-    CHECK(hub.sessionCount() == 0);
+    // RFC-042: the slot is RETAINED — a session that owns nothing still costs
+    // the hub exactly as much as a live one, and only slot pressure evicts it.
+    CHECK(hub.sessionCount() == 1);
+    REQUIRE(hub.sessionBySlot(0) != nullptr);
+    CHECK(hub.sessionBySlot(0)->state == HubSessionState::STALE);
     // No source was owned, so nothing latched: the machine is untouched.
     CHECK_FALSE(hub.stopLatched());
     CHECK_FALSE(hub.estopLatched());
@@ -950,7 +962,7 @@ TEST_CASE("MB-11: idle reaping never runs a loss policy — that is the deadman'
 // ============================================================================
 // RFC-028 regression — ChunkReassembler TOTALITY (found by test/fuzz/fuzz_blob).
 //
-// Minimised crashing input: a BLOB_CHUNK header whose chunk_count is far
+// Minimized crashing input: a BLOB_CHUNK header whose chunk_count is far
 // larger than the reassembler's MaxChunks, followed by a call to
 // missingIndices() — the exact thing a client does on its gap timer.
 //

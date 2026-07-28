@@ -673,7 +673,7 @@ TEST_CASE("Writer sets failed on output-span overflow") {
 // ============================================================================
 // RFC-028 regression — parser TOTALITY (found by test/fuzz/fuzz_cbor).
 //
-// Minimised crashing input, verbatim from libFuzzer:
+// Minimized crashing input, verbatim from libFuzzer:
 //   7B FF FF FF FF FF FF FF FF        (major 3 | ai=27 -> 8-byte length,
 //                                      length = 2^64-1)
 //

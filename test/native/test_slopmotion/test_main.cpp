@@ -50,14 +50,14 @@ Config machineConfig() {
     Config cfg;
     cfg.limits.vmax = 1.1f;    // 550 mm/s  / 500 mm
     cfg.limits.amax = 16.0f;   // 8000 mm/s² / 500 mm
-    cfg.limits.jmax = 500.0f;  // firmware default (SystemState::sm_tune_jmax)
+    cfg.limits.jmax = 500.0f;  // firmware default (SystemState::sm_tune_jmax_ovr)
     return cfg;
 }
 
 // The OPERATOR's machine, measured: stroke window [150, 350] mm (span 200),
 // input speed 1000 mm/s, input accel 50000 mm/s², jerk 2e6 mm/s³ — normalized
 // by the span exactly as the firmware glue does. All the Reshape numbers below
-// are quoted in millimetres against this window, because that is the domain
+// are quoted in millimeters against this window, because that is the domain
 // the amplitude complaint was made in.
 constexpr double kSpanMm = 200.0;
 Config operatorConfig() {
@@ -124,7 +124,7 @@ SweepStats sweep(Engine& e, uint64_t t0_us, uint64_t t1_us) {
     return s;
 }
 
-// ---- Band measurement for the DC-centring tests ----------------------------
+// ---- Band measurement for the DC-centering tests ----------------------------
 // A stroke chain's achieved BAND: where the motion actually sits and how wide
 // it is, measured on the SAMPLED position (what the operator feels), averaged
 // over the last 10 cycles — plus the per-cycle spread, which is what tells a
@@ -133,7 +133,7 @@ SweepStats sweep(Engine& e, uint64_t t0_us, uint64_t t1_us) {
 // note; the undamped version parked in a rock-stable ±7 mm period-4 orbit).
 struct ChainOpts {
     InfeasiblePolicy pol      = InfeasiblePolicy::Reshape;
-    bool             centring = true;
+    bool             centering = true;
     float            gain     = 1.0f;
     float            vmax     = 5.0f;      // 1000 mm/s on the 200 mm window
     bool             ev_down  = false;     // wire end velocity on down-strokes
@@ -145,11 +145,11 @@ struct ChainOpts {
 };
 
 struct Band {
-    double centre_err_mm   = 0.0;   // signed, vs the commanded midpoint
+    double center_err_mm   = 0.0;   // signed, vs the commanded midpoint
     double amp_mm          = 0.0;
-    double centre_spread_mm = 0.0;  // over the measured cycles: hunting metric
+    double center_spread_mm = 0.0;  // over the measured cycles: hunting metric
     double amp_spread_mm   = 0.0;
-    int    centred = 0, scaled = 0, fallback = 0;
+    int    centered = 0, scaled = 0, fallback = 0;
     bool   bounds_ok = true;        // every endpoint inside [start, target]
     // ---- SHAPE, averaged over the measured segments (0.6.0) ----------------
     // sharp = Snapshot::sharpness (peak jerk / jmax); flat_pct = share of the
@@ -168,7 +168,7 @@ Band runChain(const ChainOpts& o) {
     cfg.limits.jmax = 10000.0f;
     cfg.infeasible_policy   = o.pol;
     cfg.infeasible_soften   = o.soften;
-    cfg.wave_centering      = o.centring;
+    cfg.wave_centering      = o.centering;
     cfg.wave_centering_gain = o.gain;
     Engine e(cfg, (float)o.lo);
 
@@ -198,7 +198,7 @@ Band runChain(const ChainOpts& o) {
         }
         slopmotion::Anomaly ev;
         while (e.popAnomaly(ev)) {
-            if (ev.kind == (uint8_t)AnomalyType::WaveformCentred)  b.centred++;
+            if (ev.kind == (uint8_t)AnomalyType::WaveformCentered)  b.centered++;
             if (ev.kind == (uint8_t)AnomalyType::WaveformScaled)   b.scaled++;
             if (ev.kind == (uint8_t)AnomalyType::WaveformFallback) b.fallback++;
         }
@@ -219,7 +219,7 @@ Band runChain(const ChainOpts& o) {
             vv.push_back(v); n++;
         }
         // Shape stats over the SETTLED tail of the chain only (the first few
-        // strokes are the centring loop converging, not steady state).
+        // strokes are the centering loop converging, not steady state).
         if (i >= 2 * o.cycles - 19) {
             for (double v : vv) if (v >= 0.98 * vpk) flat++;
             sh_sum   += e.snapshot(next_cmd).sharpness;
@@ -247,18 +247,18 @@ Band runChain(const ChainOpts& o) {
         c_lo = std::min(c_lo, cen); c_hi = std::max(c_hi, cen);
         a_lo = std::min(a_lo, amp); a_hi = std::max(a_hi, amp);
     }
-    b.centre_err_mm    = (c_sum / cyc - 0.5 * (o.lo + o.hi)) * kSpanMm;
+    b.center_err_mm    = (c_sum / cyc - 0.5 * (o.lo + o.hi)) * kSpanMm;
     b.amp_mm           = (a_sum / cyc) * kSpanMm;
-    b.centre_spread_mm = (c_hi - c_lo) * kSpanMm;
+    b.center_spread_mm = (c_hi - c_lo) * kSpanMm;
     b.amp_spread_mm    = (a_hi - a_lo) * kSpanMm;
     return b;
 }
 
 void reportBand(const std::string& name, const Band& b) {
-    MESSAGE(name << ": centre " << b.centre_err_mm << " mm off, amplitude "
-                 << b.amp_mm << " mm, spread (centre/amp) "
-                 << b.centre_spread_mm << "/" << b.amp_spread_mm
-                 << " mm, anomalies centred/scaled/fallback " << b.centred
+    MESSAGE(name << ": center " << b.center_err_mm << " mm off, amplitude "
+                 << b.amp_mm << " mm, spread (center/amp) "
+                 << b.center_spread_mm << "/" << b.amp_spread_mm
+                 << " mm, anomalies centered/scaled/fallback " << b.centered
                  << "/" << b.scaled << "/" << b.fallback);
 }
 
@@ -743,7 +743,7 @@ TEST_CASE("Stretch policy: same command keeps the stroke and overruns the deadli
     c.has_duration = true;
     REQUIRE(e.commit(c, 0));
 
-    // Pre-0.3 behaviour, byte for byte: the Ruckig guard owns the segment.
+    // Pre-0.3 behavior, byte for byte: the Ruckig guard owns the segment.
     CHECK(e.planKind() == slopmotion::PlanKind::Ruckig);
     const double dur = e.snapshot(0).duration_s;
     MESSAGE("Stretch 0->1 in 100ms: plan runs " << dur << " s");
@@ -771,7 +771,7 @@ TEST_CASE("Feasible segment with NO debt outstanding is bit-identical under ALL 
     // is armed — Reshape included (it must never reach for Ruckig on a segment
     // the quintic can shape honestly).
     //
-    // NOTE (0.5.0): "untouched" is now conditional on there being NO CENTRING
+    // NOTE (0.5.0): "untouched" is now conditional on there being NO CENTERING
     // DEBT. A feasible stroke that follows a clipped one IS deliberately
     // shortened — see the next test for that contract. With a fresh engine
     // there is no debt, so this one still holds exactly as written.
@@ -812,20 +812,20 @@ TEST_CASE("Feasible segment WITH a debt outstanding is shortened — by the debt
     // THE 0.5.0 CONTRACT, and the operator's explicit instruction: "the machine
     // should gracefully handle infeasible input by shortening the stroke,
     // MIDPOINT ANCHORED". The old rule ("a feasible segment is never touched")
-    // is exactly what let the band walk off centre — the clipped direction lost
+    // is exactly what let the band walk off center — the clipped direction lost
     // amplitude while the feasible one kept all of it, so the midpoint sagged
     // and nothing ever pushed it back. Deliberately giving up amplitude on a
-    // stroke the machine COULD have finished is now correct behaviour.
+    // stroke the machine COULD have finished is now correct behavior.
     //
     // Setup: one infeasible up-stroke (140 mm in 167 ms — the machine cannot),
     // then a long, comfortably feasible down-stroke. The down-stroke is the one
     // under test.
-    struct Run { double endpoint; double start; int centred; int scaled;
+    struct Run { double endpoint; double start; int centered; int scaled;
                  float detail; float anom_target; slopmotion::PlanKind kind; };
-    auto run = [](InfeasiblePolicy pol, bool centring) {
+    auto run = [](InfeasiblePolicy pol, bool centering) {
         auto cfg = operatorConfig();
         cfg.infeasible_policy = pol;
-        cfg.wave_centering    = centring;
+        cfg.wave_centering    = centering;
         Engine e(cfg, 0.30f);
 
         Command up;
@@ -845,8 +845,8 @@ TEST_CASE("Feasible segment WITH a debt outstanding is shortened — by the debt
         r.endpoint = e.snapshot(167 * kMs).target;
         r.kind     = e.planKind();
         while (e.popAnomaly(ev)) {
-            if (ev.kind == (uint8_t)AnomalyType::WaveformCentred) {
-                r.centred++; r.detail = ev.detail; r.anom_target = ev.target;
+            if (ev.kind == (uint8_t)AnomalyType::WaveformCentered) {
+                r.centered++; r.detail = ev.detail; r.anom_target = ev.target;
             }
             if (ev.kind == (uint8_t)AnomalyType::WaveformScaled) r.scaled++;
         }
@@ -858,38 +858,38 @@ TEST_CASE("Feasible segment WITH a debt outstanding is shortened — by the debt
     const Run st = run(InfeasiblePolicy::Stretch, true);
     const Run off = run(InfeasiblePolicy::Reshape, false);
     MESSAGE("feasible down-stroke to 0.30 after a clipped up-stroke:"
-            << "  reshape+centring " << rs.endpoint
-            << "  scale+centring " << sc.endpoint
+            << "  reshape+centering " << rs.endpoint
+            << "  scale+centering " << sc.endpoint
             << "  stretch " << st.endpoint
-            << "  centring OFF " << off.endpoint);
+            << "  centering OFF " << off.endpoint);
 
     for (const Run* r : {&rs, &sc}) {
         // Shortened — deliberately, on a stroke the machine could have made.
         CHECK(r->endpoint > 0.30);
         // ...and it is STILL the sender's quintic, on the sender's clock: the
-        // centring correction moves the endpoint, it never changes the shape
+        // centering correction moves the endpoint, it never changes the shape
         // or hands the segment to the guard.
         CHECK(r->kind == slopmotion::PlanKind::Quintic);
         // Bounded: never past the commanded target, never past the start (the
         // pull is capped at half the stroke), never inverted.
         CHECK(r->endpoint < r->start);
         CHECK(r->endpoint <= 0.30 + 0.5 * (r->start - 0.30) + 1e-9);
-        // NOT silent — one WaveformCentred, carrying the achieved fraction and
+        // NOT silent — one WaveformCentered, carrying the achieved fraction and
         // the shortened endpoint, and NOT reported as WaveformScaled (the
         // machine was not the constraint here; the midpoint was).
-        CHECK(r->centred == 1);
+        CHECK(r->centered == 1);
         CHECK(r->scaled == 0);
         CHECK(r->anom_target == doctest::Approx((float)r->endpoint).epsilon(1e-4));
         const double frac = (r->start - r->endpoint) / (r->start - 0.30);
         CHECK(r->detail == doctest::Approx((float)frac).epsilon(0.01));
         CHECK(r->detail < 1.0f);
     }
-    // Stretch keeps its promise ("the stroke you asked for") and centring is
-    // never armed for it; the old behaviour is one config flag away.
+    // Stretch keeps its promise ("the stroke you asked for") and centering is
+    // never armed for it; the old behavior is one config flag away.
     CHECK(st.endpoint == doctest::Approx(0.30).epsilon(1e-6));
-    CHECK(st.centred == 0);
+    CHECK(st.centered == 0);
     CHECK(off.endpoint == doctest::Approx(0.30).epsilon(1e-6));
-    CHECK(off.centred == 0);
+    CHECK(off.centered == 0);
 }
 
 TEST_CASE("All three policies keep the sampled window invariant [0,1]") {
@@ -1142,7 +1142,7 @@ TEST_CASE("Moving start still resolves: the shortened ladder is enough") {
     // the carriage already moving fast the wrong way can fail the scan at the
     // closed-form size — that is the only remaining job of the ladder.
     // Sweep a chain of infeasible reversals and prove every one of them still
-    // gets a deadline-honouring quintic (or an honest guard fallback), never a
+    // gets a deadline-honoring quintic (or an honest guard fallback), never a
     // window violation.
     auto cfg = machineConfig();
     cfg.infeasible_policy = InfeasiblePolicy::Scale;
@@ -1445,7 +1445,7 @@ TEST_CASE("Reshape: an impossible stroke shrinks to the machine's real reach") {
 }
 
 // ============================================================================
-// DC centring — the band shrinks about the commanded MIDPOINT
+// DC centering — the band shrinks about the commanded MIDPOINT
 // ============================================================================
 
 TEST_CASE("Both directions infeasible: the degraded band sits on the commanded midpoint") {
@@ -1458,143 +1458,143 @@ TEST_CASE("Both directions infeasible: the degraded band sits on the commanded m
     ChainOpts o;                       // 0.30 <-> 1.00 @167 ms, no wire vf
     o.pol = InfeasiblePolicy::Reshape;
     const Band on  = runChain(o);
-    o.centring = false;
+    o.centering = false;
     const Band off = runChain(o);
-    o.pol = InfeasiblePolicy::Scale; o.centring = true;
+    o.pol = InfeasiblePolicy::Scale; o.centering = true;
     const Band s_on  = runChain(o);
-    o.centring = false;
+    o.centering = false;
     const Band s_off = runChain(o);
-    reportBand("both-infeasible  reshape + centring", on);
-    reportBand("both-infeasible  reshape centring OFF", off);
-    reportBand("both-infeasible  scale + centring", s_on);
-    reportBand("both-infeasible  scale centring OFF", s_off);
+    reportBand("both-infeasible  reshape + centering", on);
+    reportBand("both-infeasible  reshape centering OFF", off);
+    reportBand("both-infeasible  scale + centering", s_on);
+    reportBand("both-infeasible  scale centering OFF", s_off);
 
-    CHECK(std::fabs(on.centre_err_mm) < 3.0);      // measured +0.16 mm
-    CHECK(on.centre_spread_mm < 2.0);              // settled, not orbiting
+    CHECK(std::fabs(on.center_err_mm) < 3.0);      // measured +0.16 mm
+    CHECK(on.center_spread_mm < 2.0);              // settled, not orbiting
     CHECK(on.bounds_ok);
-    // Reshape's amplitude advantage over Scale survives the centring work.
+    // Reshape's amplitude advantage over Scale survives the centering work.
     CHECK(on.amp_mm > s_on.amp_mm * 1.3);
-    // Scale is centred now too (0.5.0 hoisted the debt out of Reshape) — and
+    // Scale is centered now too (0.5.0 hoisted the debt out of Reshape) — and
     // that is the whole point: -29 mm was Scale's measured sag before.
-    CHECK(std::fabs(s_on.centre_err_mm) < 3.0);
-    CHECK(std::fabs(s_off.centre_err_mm) > 20.0);
-    CHECK(s_on.centred > 0);
-    // Centring off restores the 0.4.0 TELEMETRY too: its own reversal debt
+    CHECK(std::fabs(s_on.center_err_mm) < 3.0);
+    CHECK(std::fabs(s_off.center_err_mm) > 20.0);
+    CHECK(s_on.centered > 0);
+    // Centering off restores the 0.4.0 TELEMETRY too: its own reversal debt
     // reports as WaveformScaled, exactly as it always did. A kind the
     // firmware/sim counter tables do not know yet must not appear when the
     // feature is switched off.
-    CHECK(s_off.centred == 0);
-    CHECK(off.centred == 0);
-    // Centring costs amplitude only at the margins, never a collapse.
+    CHECK(s_off.centered == 0);
+    CHECK(off.centered == 0);
+    // Centering costs amplitude only at the margins, never a collapse.
     CHECK(on.amp_mm > off.amp_mm * 0.95);
     CHECK(s_on.amp_mm > s_off.amp_mm * 0.95);
 }
 
-TEST_CASE("Mixed feasible/infeasible chain settles centred and STAYS there") {
+TEST_CASE("Mixed feasible/infeasible chain settles centered and STAYS there") {
     // THE OPERATOR'S REAL CASE. 0.30 <-> 1.00 at 167 ms with wire end
     // velocities: the down-strokes come out quintic-feasible, the up-strokes do
     // not. Under the old "feasible segments are untouched" rule the feasible
     // direction kept its full amplitude while the other was clipped, so the
-    // band walked off centre and never came back — measured 26.8 mm low on the
+    // band walked off center and never came back — measured 26.8 mm low on the
     // operator's machine, 23.6 mm here.
     ChainOpts o;
     o.ev_down = true;
     const Band rs  = runChain(o);
-    o.centring = false;
+    o.centering = false;
     const Band rs_off = runChain(o);
-    o.centring = true; o.gain = 0.5f;
+    o.centering = true; o.gain = 0.5f;
     const Band rs_half = runChain(o);
     o.gain = 1.0f; o.pol = InfeasiblePolicy::Scale;
     const Band sc = runChain(o);
-    o.centring = false;
+    o.centering = false;
     const Band sc_off = runChain(o);
-    reportBand("mixed  reshape + centring", rs);
-    reportBand("mixed  reshape centring OFF", rs_off);
+    reportBand("mixed  reshape + centering", rs);
+    reportBand("mixed  reshape centering OFF", rs_off);
     reportBand("mixed  reshape gain 0.5", rs_half);
-    reportBand("mixed  scale + centring", sc);
-    reportBand("mixed  scale centring OFF", sc_off);
+    reportBand("mixed  scale + centering", sc);
+    reportBand("mixed  scale centering OFF", sc_off);
 
     // The defect: uncorrected, the band hangs off its bottom extreme.
-    CHECK(rs_off.centre_err_mm < -15.0);
-    CHECK(sc_off.centre_err_mm < -30.0);
+    CHECK(rs_off.center_err_mm < -15.0);
+    CHECK(sc_off.center_err_mm < -30.0);
     // Fixed — and by a factor of five, not a nudge. (The residual is the
     // sender's OWN doing: it asked to still be moving at the bottom of each
     // stroke, so the carriage dips past the planned endpoint on the turn. The
-    // engine centres what it controls — the endpoints — which land within
+    // engine centers what it controls — the endpoints — which land within
     // ~1 mm; the dip rides on top, exactly as commanded.)
-    CHECK(std::fabs(rs.centre_err_mm) < 8.0);
-    CHECK(std::fabs(rs.centre_err_mm) * 4.0 < std::fabs(rs_off.centre_err_mm));
-    CHECK(std::fabs(sc.centre_err_mm) * 4.0 < std::fabs(sc_off.centre_err_mm));
+    CHECK(std::fabs(rs.center_err_mm) < 8.0);
+    CHECK(std::fabs(rs.center_err_mm) * 4.0 < std::fabs(rs_off.center_err_mm));
+    CHECK(std::fabs(sc.center_err_mm) * 4.0 < std::fabs(sc_off.center_err_mm));
     // SETTLED, not hunting: the loop's undamped form parked in a stable
-    // period-4 orbit swinging the centre ±7 mm with a perfect mean.
-    CHECK(rs.centre_spread_mm < 2.0);
+    // period-4 orbit swinging the center ±7 mm with a perfect mean.
+    CHECK(rs.center_spread_mm < 2.0);
     CHECK(rs.amp_spread_mm    < 3.0);
-    CHECK(sc.centre_spread_mm < 2.0);
+    CHECK(sc.center_spread_mm < 2.0);
     CHECK(sc.amp_spread_mm    < 3.0);
-    // Amplitude is not the price: centring took none of it here.
+    // Amplitude is not the price: centering took none of it here.
     CHECK(rs.amp_mm >= rs_off.amp_mm);
     CHECK(sc.amp_mm >= sc_off.amp_mm * 0.98);
     // The deviation is visible, on every stroke it happens to.
-    CHECK(rs.centred > 10);
-    CHECK(sc.centred > 10);
-    CHECK(rs_off.centred == 0);
-    CHECK(sc_off.centred == 0);
+    CHECK(rs.centered > 10);
+    CHECK(sc.centered > 10);
+    CHECK(rs_off.centered == 0);
+    CHECK(sc_off.centered == 0);
     CHECK(rs.bounds_ok);
     CHECK(sc.bounds_ok);
     // The strength dial does something in between — but NOT monotonically
     // (the loop closes around the pull it applied), which is why it is
     // documented as a feel dial and 1.0 is the default.
-    CHECK(std::fabs(rs_half.centre_err_mm) < std::fabs(rs_off.centre_err_mm));
+    CHECK(std::fabs(rs_half.center_err_mm) < std::fabs(rs_off.center_err_mm));
 }
 
-TEST_CASE("Centring holds at half machine speed (the 500 mm/s bench case)") {
+TEST_CASE("Centering holds at half machine speed (the 500 mm/s bench case)") {
     // The operator halved the speed ceiling and Reshape started rendering
     // near-linear (velocity-saturated) strokes — correct, and the reason Scale
-    // became interesting again. Both policies must stay centred there too.
+    // became interesting again. Both policies must stay centered there too.
     ChainOpts o;
     o.vmax = 2.5f;                       // 500 mm/s on the 200 mm window
     const Band both = runChain(o);
-    o.centring = false;
+    o.centering = false;
     const Band both_off = runChain(o);
-    o.centring = true; o.ev_down = true;
+    o.centering = true; o.ev_down = true;
     const Band mixed = runChain(o);
-    o.centring = false;
+    o.centering = false;
     const Band mixed_off = runChain(o);
-    o.centring = true; o.ev_down = false; o.pol = InfeasiblePolicy::Scale;
+    o.centering = true; o.ev_down = false; o.pol = InfeasiblePolicy::Scale;
     const Band s_both = runChain(o);
-    o.centring = false;
+    o.centering = false;
     const Band s_both_off = runChain(o);
-    reportBand("500 mm/s  both-infeasible reshape + centring", both);
+    reportBand("500 mm/s  both-infeasible reshape + centering", both);
     reportBand("500 mm/s  both-infeasible reshape OFF", both_off);
-    reportBand("500 mm/s  mixed reshape + centring", mixed);
+    reportBand("500 mm/s  mixed reshape + centering", mixed);
     reportBand("500 mm/s  mixed reshape OFF", mixed_off);
-    reportBand("500 mm/s  both-infeasible scale + centring", s_both);
+    reportBand("500 mm/s  both-infeasible scale + centering", s_both);
     reportBand("500 mm/s  both-infeasible scale OFF", s_both_off);
 
-    CHECK(std::fabs(both.centre_err_mm) < 3.0);
-    CHECK(std::fabs(mixed.centre_err_mm) < 6.0);
-    CHECK(both.centre_spread_mm < 2.0);
-    CHECK(mixed.centre_spread_mm < 2.0);
-    CHECK(std::fabs(both.centre_err_mm)  < std::fabs(both_off.centre_err_mm));
-    CHECK(std::fabs(mixed.centre_err_mm) < std::fabs(mixed_off.centre_err_mm));
-    CHECK(both_off.centred == 0);        // OFF means off, telemetry included
-    CHECK(mixed_off.centred == 0);
-    CHECK(s_both_off.centred == 0);
+    CHECK(std::fabs(both.center_err_mm) < 3.0);
+    CHECK(std::fabs(mixed.center_err_mm) < 6.0);
+    CHECK(both.center_spread_mm < 2.0);
+    CHECK(mixed.center_spread_mm < 2.0);
+    CHECK(std::fabs(both.center_err_mm)  < std::fabs(both_off.center_err_mm));
+    CHECK(std::fabs(mixed.center_err_mm) < std::fabs(mixed_off.center_err_mm));
+    CHECK(both_off.centered == 0);        // OFF means off, telemetry included
+    CHECK(mixed_off.centered == 0);
+    CHECK(s_both_off.centered == 0);
     // Scale at half speed: still a big improvement, though this limit set
     // leaves it further off than Reshape (its envelope binds much harder).
-    CHECK(std::fabs(s_both.centre_err_mm) * 3.0 <
-          std::fabs(s_both_off.centre_err_mm));
+    CHECK(std::fabs(s_both.center_err_mm) * 3.0 <
+          std::fabs(s_both_off.center_err_mm));
 }
 
-TEST_CASE("Stretch is untouched by the centring work, sample for sample") {
+TEST_CASE("Stretch is untouched by the centering work, sample for sample") {
     // Stretch delivers the full commanded amplitude (late) by definition, so
-    // there is never a deficit to share out — centring must not even arm for
+    // there is never a deficit to share out — centering must not even arm for
     // it. Prove it the only way that means anything: identical samples with the
     // flag on and off, across a chain that hammers the guard.
-    auto sample = [](bool centring, std::vector<float>& out) {
+    auto sample = [](bool centering, std::vector<float>& out) {
         auto cfg = operatorConfig();
         cfg.infeasible_policy = InfeasiblePolicy::Stretch;
-        cfg.wave_centering    = centring;
+        cfg.wave_centering    = centering;
         Engine e(cfg, 0.30f);
         const uint64_t seg = 167 * kMs;
         uint64_t next_cmd = 0;
@@ -1611,7 +1611,7 @@ TEST_CASE("Stretch is untouched by the centring work, sample for sample") {
             next_cmd += seg;
             slopmotion::Anomaly ev;
             while (e.popAnomaly(ev)) {
-                CHECK(ev.kind != (uint8_t)AnomalyType::WaveformCentred);
+                CHECK(ev.kind != (uint8_t)AnomalyType::WaveformCentered);
             }
         }
     };
@@ -1622,7 +1622,7 @@ TEST_CASE("Stretch is untouched by the centring work, sample for sample") {
     for (size_t i = 0; i < on.size(); i++) REQUIRE(on[i] == off[i]);
 }
 
-TEST_CASE("The centring debt lets go when the machine stops being the constraint") {
+TEST_CASE("The centering debt lets go when the machine stops being the constraint") {
     // The failure mode a self-referential debt would have: a stroke shortened
     // for symmetry reports a shortfall, which justifies shortening the next
     // one, and the band ratchets shut forever. It must instead re-open as soon
@@ -1684,7 +1684,7 @@ TEST_CASE("Reshape bisection depth is a bounded, honest dial") {
         MESSAGE("reshape_steps=" << steps << "  travel " << travel_mm << " mm");
         if (steps == 0) {
             // No bisection and the full stroke does not fit → the guard takes
-            // it (Stretch behaviour: full stroke, overrun deadline).
+            // it (Stretch behavior: full stroke, overrun deadline).
             CHECK(e.planKind() == slopmotion::PlanKind::Ruckig);
         } else {
             CHECK(travel_mm >= prev - 1e-6);   // never gets worse with depth
@@ -1894,7 +1894,7 @@ TEST_CASE("infeasible_soften = false is 0.5.0, sample for sample") {
         }
         t += 167 * kMs;
     }
-    // Same for steps = 0: no probes, no softening, 0.5.0 behaviour.
+    // Same for steps = 0: no probes, no softening, 0.5.0 behavior.
     auto z = a; z.infeasible_soften = true; z.infeasible_soften_steps = 0;
     Engine ez(z, 0.30f);
     Engine e0(a, 0.30f);
@@ -1911,11 +1911,11 @@ TEST_CASE("infeasible_soften = false is 0.5.0, sample for sample") {
     }
 }
 
-TEST_CASE("Softening costs the centred band nothing (amplitude AND centre)") {
-    // The centring debt is a control loop; the sharpness search sits strictly
+TEST_CASE("Softening costs the centered band nothing (amplitude AND center)") {
+    // The centering debt is a control loop; the sharpness search sits strictly
     // downstream of the endpoint it settles on, so the loop must not even
     // notice. The operator's own chains, both speeds, with and without the wire
-    // end velocities — amplitude and band centre have to land where 0.5.0 put
+    // end velocities — amplitude and band center have to land where 0.5.0 put
     // them, and only the SHAPE columns may move.
     for (float vmax : {2.5f, 5.0f}) {
         for (bool ev : {false, true}) {
@@ -1927,17 +1927,17 @@ TEST_CASE("Softening costs the centred band nothing (amplitude AND centre)") {
             o.soften = true;
             const Band on  = runChain(o);
             MESSAGE("vmax " << vmax << " ev " << ev
-                    << " | 0.5.0 amp " << off.amp_mm << " mm centre "
-                    << off.centre_err_mm << " mm, sharp " << off.sharp
+                    << " | 0.5.0 amp " << off.amp_mm << " mm center "
+                    << off.center_err_mm << " mm, sharp " << off.sharp
                     << ", flat " << off.flat_pct << " %, apk " << off.apk_mm
-                    << " mm/s^2   ||   0.6.0 amp " << on.amp_mm << " mm centre "
-                    << on.centre_err_mm << " mm, sharp " << on.sharp
+                    << " mm/s^2   ||   0.6.0 amp " << on.amp_mm << " mm center "
+                    << on.center_err_mm << " mm, sharp " << on.sharp
                     << ", flat " << on.flat_pct << " %, apk " << on.apk_mm
                     << " mm/s^2");
             CHECK(on.amp_mm == doctest::Approx(off.amp_mm).epsilon(0.01));
-            CHECK(on.centre_err_mm ==
-                  doctest::Approx(off.centre_err_mm).epsilon(0.05).scale(1.0));
-            CHECK(std::fabs(on.centre_err_mm - off.centre_err_mm) < 0.5);
+            CHECK(on.center_err_mm ==
+                  doctest::Approx(off.center_err_mm).epsilon(0.05).scale(1.0));
+            CHECK(std::fabs(on.center_err_mm - off.center_err_mm) < 0.5);
             CHECK(on.bounds_ok);
             CHECK(on.sharp <= off.sharp + 1e-6);      // never sharper than 0.5.0
             CHECK(on.flat_pct <= off.flat_pct + 1e-6);
@@ -1946,7 +1946,7 @@ TEST_CASE("Softening costs the centred band nothing (amplitude AND centre)") {
 }
 
 TEST_CASE("The operator's chain: sharpness spent only where there is slack") {
-    // The honest half of the story. With WIRE END VELOCITIES the centring debt
+    // The honest half of the story. With WIRE END VELOCITIES the centering debt
     // pulls each endpoint in short of the machine's reach, which manufactures
     // deadline slack — and the search finds it (measured: flat 70.3 % → 46.7 %
     // at 500 mm/s, 57.6 % → 32.8 % at 1000 mm/s, peak accel down 23 % / 19 %).
@@ -2077,7 +2077,7 @@ TEST_CASE("Softening can only make a plan gentler — never worse, never absent"
 
 TEST_CASE("Snapshot::sharpness reports the plan's real peak jerk") {
     // The field has to mean the same thing on both plan kinds, or it is a
-    // policy artefact rather than telemetry. Cross-check it against the
+    // policy artifact rather than telemetry. Cross-check it against the
     // SAMPLED jerk on an easy quintic (where the shape is entirely the
     // sender's) and on a softened reshape (where it is the search's).
     auto cfg = operatorConfig();
@@ -2104,7 +2104,7 @@ TEST_CASE("Snapshot::sharpness reports the plan's real peak jerk") {
 TEST_CASE("Settle grace holds the end state, then brakes when the stream is really gone") {
     // Two paced segments establish a cadence estimate, the second ends MOVING,
     // then the stream stops. Inside the grace the engine must HOLD (legacy
-    // handleTimeout behaviour); past it, the brake must engage as it always
+    // handleTimeout behavior); past it, the brake must engage as it always
     // did.
     auto run = [](uint32_t grace_us) {
         auto cfg = operatorConfig();
@@ -2155,7 +2155,7 @@ TEST_CASE("Settle grace holds the end state, then brakes when the stream is real
         CHECK(e.velocityAt(600 * kMs) == doctest::Approx(0.0).epsilon(1e-6));
     }
 
-    SUBCASE("grace off (0): pre-0.4 behaviour, brakes the instant it expires") {
+    SUBCASE("grace off (0): pre-0.4 behavior, brakes the instant it expires") {
         Engine e = run(0);
         e.positionAt(201 * kMs);
         CHECK(e.mode() == Mode::Settle);
@@ -2185,7 +2185,7 @@ TEST_CASE("Segment chain with 5 ms arrival jitter: no settle storm, no mode flap
     // changing on a sample where no command arrived, i.e. the engine acting on
     // the transport's timing rather than on the sender's intent. Counting
     // those is sharper than counting PlanKind flips (a flip also happens
-    // legitimately when a segment is quintic-feasible and its neighbour is
+    // legitimately when a segment is quintic-feasible and its neighbor is
     // not).
     struct Run { int settles; int unsolicited; int flips; double amp_mm; };
     auto run = [](InfeasiblePolicy pol, uint32_t grace_us, uint64_t jitter_us,
@@ -2302,7 +2302,7 @@ TEST_CASE("Reset drops everything back to a hold") {
 // proof by construction, not by sampling three points and hoping.
 //
 // The MEASURED pathology that motivated RFC-008 is a NAMED POINT inside that
-// swept domain (kPathoEndVel below), so the real-world failure is a labelled
+// swept domain (kPathoEndVel below), so the real-world failure is a labeled
 // regression case rather than folklore.
 // ============================================================================
 
@@ -2547,7 +2547,10 @@ TEST_CASE("RFC-008 guard in the engine: lookahead arms it, absence changes nothi
     SUBCASE("TAIL CASE: no known successor is accepted exactly as sent") {
         // Deliberate -- see the ingress note in
         // SlopSyncHubService::drainMotionStream. Guessing a chord we do not
-        // have would trim well-behaved senders for free.
+        // have would trim well-behaved senders for free. RFC-049c evaluated an
+        // own-chord fallback for exactly this case and REJECTED it (see
+        // commitWaveform's comment) after it measurably perturbed the
+        // centering/reshape regression bench — this stays the honest tail case.
         std::vector<double> tail;
         CHECK(runGuardedSegment(false, kPathoEndVel, kPathoNext, kK, tail) == 0);
     }
@@ -2588,7 +2591,7 @@ TEST_CASE("RFC-008 guard: a bounded handoff does not poison the NEXT segment's a
     MESSAGE("successor segment peak |a|: unguarded " << poisoned.max_abs_a
             << " vs guarded " << guarded.max_abs_a);
     // The successor is a 0.01-unit crawl; with the guard armed it stays a crawl
-    // instead of inheriting a wild af from a handoff nobody could honour.
+    // instead of inheriting a wild af from a handoff nobody could honor.
     CHECK(guarded.max_abs_a < poisoned.max_abs_a);
 }
 

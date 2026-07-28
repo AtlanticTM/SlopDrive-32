@@ -146,7 +146,7 @@ public:
         }
     }
 
-    // RFC-030: 0 = honour the wish (the library default); nonzero = act like a
+    // RFC-030: 0 = honor the wish (the library default); nonzero = act like a
     // machine whose curve_policy forces a family, so tests can see the grant
     // echo the EFFECTIVE value rather than parroting the request.
     uint8_t forceCurveFamily = 0;
@@ -540,7 +540,7 @@ TEST_CASE("SI-07: flooding samples past the grant NACKs RATE_LIMITED, then a leg
 // ============================================================================
 // SI-08 — source ownership: first bundle acquires; silence fires the deadman
 // ============================================================================
-TEST_CASE("SI-08: first accepted bundle acquires the source; quiet past the deadman window fires onDeadmanStop") {
+TEST_CASE("SI-08 (RFC-042/RFC-045): first accepted bundle acquires the source; quiet past the deadman window releases it, latches nothing, and marks the session STALE") {
     Catalog32 cat;
     makeStreamCatalog(cat);
     ManualClock clock;
@@ -562,14 +562,27 @@ TEST_CASE("SI-08: first accepted bundle acquires the source; quiet past the dead
     CHECK(del.ownership[0].owner_session == w.session_id);
     CHECK(del.ownership[0].reason == 0);  // acquire
 
+    size_t sessionsBefore = hub.sessionCount();
+
     // Go quiet. deadman_default_ms is 600 — advance well past it with no frames.
     CHECK(del.deadmanStops.empty());
     for (int i = 0; i < 20; ++i) {   // 20 * 50 ms = 1 s > 600 ms
         clock.advanceUs(50'000);
         hub.update(clock.nowUs());
     }
-    REQUIRE(del.deadmanStops.size() == 1);
-    CHECK(del.deadmanStops[0] == 0);   // source 0 stopped
+    // RFC-045: onDeadmanStop is never called any more — the deadman is
+    // liveness bookkeeping, not a safety mechanism. Ownership is still
+    // released (unconditionally, §11.4), it just latches nothing on the way.
+    CHECK(del.deadmanStops.empty());
+    REQUIRE(del.ownership.size() == 2);
+    CHECK(del.ownership[1].source_id == 0);
+    CHECK(del.ownership[1].owner_session == 0);
+    CHECK(del.ownership[1].reason == 3);  // deadman-release, still reported
+    CHECK_FALSE(hub.stopLatched());
+    // RFC-042: the session goes STALE, the slot is RETAINED (not freed).
+    CHECK(hub.sessionCount() == sessionsBefore);
+    REQUIRE(hub.sessionBySlot(0) != nullptr);
+    CHECK(hub.sessionBySlot(0)->state == HubSessionState::STALE);
 }
 
 // ============================================================================
@@ -862,14 +875,18 @@ TEST_CASE("SI-14: a 6-B motion-segment bundle is granted and its sentinel end_ve
 }
 
 // ============================================================================
-// SI-15 — GROUND TRUTH: after a deadman STOP latch, the FIRST accepted stream
-// bundle from the (new) owning source clears the STOP bit, exactly as a
-// source-mapped INTENT does (§11.1 "cleared by any new motion intent"). Without
-// the fix the resumed stream drives the arbiter's soft-start while the safety
-// STATE still reports STOP — a lie. Verified here on the SEGMENT channel so the
-// clear covers 0x0085 too (both map to source 0).
+// SI-15 (RFC-045) — GROUND TRUTH, restated: a deadman fire never lies in the
+// first place, so there is nothing left for a resumed stream to "clear". The
+// original SI-15 proved a workaround (an accepted STREAM bundle silently
+// clearing a latched STOP) that existed only to un-wedge reconnect ergonomics
+// after the deadman's OWN forced-STOP latch — RFC-045 removed that latch
+// entirely, making the workaround moot (not merely obsolete: there is no
+// longer a deadman-born STOP to clear). This test proves the STRONGER
+// property directly: silence never latches STOP, so a resumed stream finds
+// the safety plane exactly as it left it. Verified on the SEGMENT channel so
+// the release covers 0x0085 too (both map to source 0).
 // ============================================================================
-TEST_CASE("SI-15: a resumed stream bundle clears the deadman STOP latch (safety STATE stops lying)") {
+TEST_CASE("SI-15: a deadman fire never latches STOP, so a resumed stream finds nothing to clear") {
     Catalog32 cat;
     makeStreamCatalog(cat);
     ManualClock clock;
@@ -889,20 +906,26 @@ TEST_CASE("SI-15: a resumed stream bundle clears the deadman STOP latch (safety 
     REQUIRE(del.ownership.size() == 1);
     CHECK_FALSE(hub.stopLatched());   // no latch yet
 
-    // 2) Go silent past the 600 ms deadman -> STOP latches + the session is torn
-    // down (owner-loss release runs the Stop policy: onDeadmanStop + STOP bit).
+    // 2) Go silent past the 600 ms deadman -> ownership releases (RFC-042: the
+    // session goes STALE, slot retained) but RFC-045 means NOTHING latches.
     for (int i = 0; i < 20; ++i) { clock.advanceUs(50'000); hub.update(clock.nowUs()); }
-    REQUIRE(del.deadmanStops.size() == 1);
-    REQUIRE(hub.stopLatched());       // safety STATE now says STOP
+    CHECK(del.deadmanStops.empty());          // never called any more
+    CHECK_FALSE(hub.stopLatched());           // safety STATE was never touched
+    REQUIRE(hub.sessionBySlot(0) != nullptr);
+    CHECK(hub.sessionBySlot(0)->state == HubSessionState::STALE);
 
-    // 3) Reconnect on the same transport, re-wish, and resume streaming. The
-    // first ACCEPTED bundle acquires the freed source AND must clear STOP.
+    // 3) Reconnect on the same transport, re-wish, and resume streaming (this
+    // is a fresh HELLO on the SAME physical slot the stale session already
+    // occupies, so it recycles the slot exactly like any same-transport
+    // re-HELLO — SI-13's path — rather than RFC-042's cross-transport
+    // reattach). The first ACCEPTED bundle acquires the freed source; the
+    // safety plane was clean the entire time.
     connectSession(hub, clock, link.endpointB(), 15, true, {PublishWish{kSegCh, 50.0f}});
-    REQUIRE(hub.stopLatched());       // still latched right up until the bundle lands
+    CHECK_FALSE(hub.stopLatched());
     writeSegmentBundle(link.endpointB(), {SegSample{7000, 900, kSegNoEndVel}}, /*tBase=*/900000);
     tickAndDrain(hub, clock, link.endpointB());
     REQUIRE(del.bundles.size() == 2);           // resumed bundle delivered
-    CHECK_FALSE(hub.stopLatched());             // STOP cleared by the accepted bundle
+    CHECK_FALSE(hub.stopLatched());
     CHECK_FALSE((hub.safetyWord() & slopsync::safety_bits::STOP));
 }
 
@@ -1335,7 +1358,7 @@ TEST_CASE("SI-20: segment-class is the catalog's explicit stream_kind property")
     // RFC-014/023 in the shedding table: segment-class is NEVER decimated. Its
     // decisions collapse to Send or Drop — shed whole-source or not at all,
     // because a dropped segment is a permanently lost command and its
-    // neighbours describe different intervals, not adjacent points on a curve.
+    // neighbors describe different intervals, not adjacent points on a curve.
     CHECK(shedDecision(Priority::normal, ChannelClass::STREAM, 1, false) == ShedDecision::Decimate2x);
     CHECK(shedDecision(Priority::normal, ChannelClass::STREAM, 1, true) == ShedDecision::Send);
     CHECK(shedDecision(Priority::background, ChannelClass::STREAM, 1, true) == ShedDecision::Send);
@@ -1467,7 +1490,7 @@ TEST_CASE("SI-22: deadman_wish_ms clamps to registry bounds and echoes applied o
 
 // ============================================================================
 // SI-23 (RFC-030) — curve family: wish in, EFFECTIVE value out.
-// A declaring client sees its family echoed by an honouring hub, sees the
+// A declaring client sees its family echoed by an honoring hub, sees the
 // FORCED family from an overriding hub (never a parroted lie), and the
 // application can read the granted family back at drain time.
 // ============================================================================
@@ -1493,7 +1516,7 @@ TEST_CASE("SI-23: curve_family wish echoes effective value and is readable via p
 
     REQUIRE(w.granted_publishes_count == 1);
     CHECK(w.granted_publishes[0].has_curve_family);
-    CHECK(w.granted_publishes[0].curve_family == curve_families::c1_cubic);  // honoured
+    CHECK(w.granted_publishes[0].curve_family == curve_families::c1_cubic);  // honored
     CHECK(hub.publishCurveFamily(w.session_id, kSegCh) == curve_families::c1_cubic);
     CHECK(hub.publishCurveFamily(w.session_id, kStreamCh) == 0);  // no grant -> unspecified
 
@@ -1519,6 +1542,67 @@ TEST_CASE("SI-23: curve_family wish echoes effective value and is readable via p
     REQUIRE(g2.has_value());
     REQUIRE(g2->granted_publishes_count == 1);
     CHECK_FALSE(g2->granted_publishes[0].has_curve_family);
+}
+
+// ============================================================================
+// SI-23b (RFC-049b) — downgrade visibility: `requested_curve_family` (key 48)
+// echoes the client's ORIGINAL wish verbatim, alongside the EFFECTIVE
+// `curve_family` (45) a curve_policy override may have replaced it with. A
+// client compares the two present keys directly instead of remembering what
+// it asked for.
+// ============================================================================
+TEST_CASE("SI-23b: requested_curve_family echoes the original wish verbatim, distinct from a downgraded effective value") {
+    Catalog32 cat;
+    makeStreamCatalog(cat);
+    ManualClock clock;
+    XorShift32 rng(2331);
+    StreamHubDelegate del;
+    Hub hub(cat, clock, rng, del);
+
+    InProcessLink link(clock, rng);
+    REQUIRE(hub.attachTransport(link.endpointA()));
+    REQUIRE(link.endpointB().open());
+    ITransport& ep = link.endpointB();
+
+    PublishWish wish{};
+    wish.channel_id = kSegCh;
+    wish.rate_hz = 30.0f;
+    wish.has_curve_family = true;
+    wish.curve_family = curve_families::c1_cubic;
+
+    // Honored (no override): requested == effective, both present.
+    WelcomeMsg w = connectSession(hub, clock, ep, 0x42, /*token=*/true, {wish});
+    REQUIRE(w.granted_publishes_count == 1);
+    CHECK(w.granted_publishes[0].has_curve_family);
+    CHECK(w.granted_publishes[0].curve_family == curve_families::c1_cubic);
+    CHECK(w.granted_publishes[0].has_requested_curve_family);
+    CHECK(w.granted_publishes[0].requested_curve_family == curve_families::c1_cubic);
+
+    // Downgraded via PUBLISH renegotiation against a machine forcing C2: the
+    // requested key stays the CLIENT's original ask, unmodified by the
+    // override — the two now visibly disagree, which IS the downgrade fact.
+    del.forceCurveFamily = curve_families::c2_quintic;
+    writePublish(ep, {wish});
+    auto replies = tickAndDrain(hub, clock, ep);
+    auto g = findGrant(replies);
+    REQUIRE(g.has_value());
+    REQUIRE(g->granted_publishes_count == 1);
+    CHECK(g->granted_publishes[0].curve_family == curve_families::c2_quintic);          // effective: downgraded
+    CHECK(g->granted_publishes[0].has_requested_curve_family);
+    CHECK(g->granted_publishes[0].requested_curve_family == curve_families::c1_cubic);  // requested: unchanged
+
+    // A wish that declares no family gets neither key back (byte-compat rule
+    // extends to the new key exactly like the existing one).
+    PublishWish plain{};
+    plain.channel_id = kSegCh;
+    plain.rate_hz = 30.0f;
+    writePublish(ep, {plain});
+    auto replies2 = tickAndDrain(hub, clock, ep);
+    auto g2 = findGrant(replies2);
+    REQUIRE(g2.has_value());
+    REQUIRE(g2->granted_publishes_count == 1);
+    CHECK_FALSE(g2->granted_publishes[0].has_curve_family);
+    CHECK_FALSE(g2->granted_publishes[0].has_requested_curve_family);
 }
 
 // ============================================================================

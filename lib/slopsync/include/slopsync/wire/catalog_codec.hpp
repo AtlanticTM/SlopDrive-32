@@ -11,22 +11,30 @@
 //     6 => float32, 7 => priority,
 //     ? 8  => [ + layout-field ],            ; STATE|STREAM
 //     ? 9  => { + int => schema-field },     ; INTENT|EVENT
-//     ? 10 => uint,                          ; category           (RFC-009)
+//     ? 10 => uint,                          ; category    (RFC-009; ui_categories vocab as of RFC-047/048)
 //     ? 11 => tstr(1..24),                   ; category_label     (RFC-009)
 //     ? 12 => store-descriptor,              ; STORE              (RFC-021)
+//     ? 13 => uint,                          ; replay_depth       (RFC-017)
 //     ? 14 => uint,                          ; setting_channel    (RFC-009)
 //     ? 15 => uint,                          ; stream_kind        (RFC-014/023, STREAM only)
+//     ? 16 => uint,                          ; rank               (RFC-048, Phase C2)
 //   }
 //   layout-field  = { 1=>tstr(1..24), 2=>packed-type, 3=>tstr(0..8), 4=>float32,
 //                     ?5=>float32, ?6=>float32, ?7=>{ + uint => tstr },
 //                     ?8=>uint, ?9=>setting-default, ?10=>[ + tstr ],
-//                     ?11=>tstr, ?12=>tstr, ?13=>tstr, ?14=>float32, ?15=>uint }
+//                     ?11=>tstr, ?12=>tstr, ?13=>tstr, ?14=>float32, ?15=>uint,
+//                     ?18=>uint, ?19=>uint, ?20=>uint, ?21=>uint, ?22=>uint, ?23=>uint }
 //   schema-field  = { 1=>tstr(1..24), 2=>cbor-type, 3=>tstr(0..8),
 //                     ?5=>float32, ?6=>float32,
 //                     ?9=>setting-default, ?10=>[ + tstr ], ?11=>tstr, ?12=>tstr,
 //                     ?13=>tstr, ?14=>float32, ?15=>uint, ?16=>access,
-//                     ?17=>[ + access ] }
+//                     ?17=>[ + access ], ?19=>uint, ?20=>uint, ?21=>uint, ?22=>uint, ?23=>uint }
 //   store-descriptor = { 1=>uint, 2=>tstr(1..32), 3=>uint, 4=>uint, 5=>uint }
+//
+//   RFC-048 (Phase C2) added: layout-field/schema-field 19=rank, 20=aspect,
+//   21=scope, 22=provenance, 23=unit_id (numbered identically across both
+//   kinds, shared-numbering convention); channel-entry 16=rank. See
+//   schema/catalog.cddl for the per-key prose.
 //
 // THE RFC-009 ANNOTATION BLOCK IS ENTIRELY OPTIONAL, and §5.3's deterministic
 // profile does not emit absent optional keys. A catalog carrying NO annotations
@@ -36,7 +44,7 @@
 // been optional was made mandatory.
 //
 // Every map in the CBOR profile (§5.3) is sorted-ascending-by-key, including
-// the entry's OWN keys (1..7, then 8-xor-9, then 10/11/12/14 — ascending by
+// the entry's OWN keys (1..7, then 8-xor-9, then 10/11/12/13/14 — ascending by
 // construction as written below) and the schema map's field keys (arbitrary
 // per-entry integers — NOT guaranteed ascending in the catalog's schema-pool
 // storage order, so the encoder sorts by SchemaField::key before emitting; the
@@ -164,6 +172,11 @@ inline void encodeLayoutField(CborWriter& w, const LayoutField& f,
     if (!f.role.empty()) ++nKeys;
     if (f.hasStep) ++nKeys;
     if (f.flags != 0) ++nKeys;
+    if (f.hasRank) ++nKeys;
+    if (f.hasAspect) ++nKeys;
+    if (f.hasScope) ++nKeys;
+    if (f.hasProvenance) ++nKeys;
+    if (f.hasUnitId) ++nKeys;
 
     w.mapHeader(nKeys);
     w.key(1).tstrVal(f.name);
@@ -192,6 +205,13 @@ inline void encodeLayoutField(CborWriter& w, const LayoutField& f,
     if (!f.role.empty()) w.key(13).tstrVal(f.role);
     if (f.hasStep) w.key(14).f32Val(f.step);
     if (f.flags != 0) w.key(15).uintVal(f.flags);
+    // RFC-048 (Phase C2), keys 19-23 — ascending, after 18 (RFC-037 size, this
+    // library never authors) and the reserved-for-schema-field 16/17.
+    if (f.hasRank) w.key(19).uintVal(f.rank);
+    if (f.hasAspect) w.key(20).uintVal(f.aspect);
+    if (f.hasScope) w.key(21).uintVal(f.scope);
+    if (f.hasProvenance) w.key(22).uintVal(f.provenance);
+    if (f.hasUnitId) w.key(23).uintVal(f.unitId);
 }
 
 // Emits one schema-field map (CDDL `schema-field`): keys 1,2,3 always, then
@@ -211,6 +231,11 @@ inline void encodeSchemaField(CborWriter& w, const SchemaField& f,
     if (f.flags != 0) ++nKeys;
     if (f.hasAccess) ++nKeys;
     if (!optionAccess.empty()) ++nKeys;
+    if (f.hasRank) ++nKeys;
+    if (f.hasAspect) ++nKeys;
+    if (f.hasScope) ++nKeys;
+    if (f.hasProvenance) ++nKeys;
+    if (f.hasUnitId) ++nKeys;
 
     w.mapHeader(nKeys);
     w.key(1).tstrVal(f.name);
@@ -236,6 +261,12 @@ inline void encodeSchemaField(CborWriter& w, const SchemaField& f,
         w.key(17).arrayHeader(uint32_t(optionAccess.size()));
         for (AccessLevel a : optionAccess) w.uintVal(uint64_t(a));
     }
+    // RFC-048 (Phase C2), numbered identically to LayoutField's own 19-23.
+    if (f.hasRank) w.key(19).uintVal(f.rank);
+    if (f.hasAspect) w.key(20).uintVal(f.aspect);
+    if (f.hasScope) w.key(21).uintVal(f.scope);
+    if (f.hasProvenance) w.key(22).uintVal(f.provenance);
+    if (f.hasUnitId) w.key(23).uintVal(f.unitId);
 }
 
 // Emits one store-descriptor map (CDDL `store-descriptor`, RFC-021). All five
@@ -283,6 +314,7 @@ inline void encodeEntry(CborWriter& w, const BasicCatalog<E, L, S, B, T>& cat, c
     if (e.hasReplayDepth) ++nKeys;
     if (e.hasSettingChannel) ++nKeys;
     if (e.streamKind != 0) ++nKeys;  // RFC-014/023: omitted when 0 (stream_kinds::samples, the default)
+    if (e.hasRank) ++nKeys;  // RFC-048 (Phase C2), key 16
 
     w.mapHeader(nKeys);
     w.key(1).uintVal(e.id);
@@ -333,6 +365,7 @@ inline void encodeEntry(CborWriter& w, const BasicCatalog<E, L, S, B, T>& cat, c
     if (e.hasReplayDepth) w.key(13).uintVal(e.replayDepth);  // RFC-017
     if (e.hasSettingChannel) w.key(14).uintVal(e.settingChannel);
     if (e.streamKind != 0) w.key(15).uintVal(e.streamKind);  // RFC-014/023
+    if (e.hasRank) w.key(16).uintVal(e.rank);  // RFC-048 (Phase C2)
 }
 
 }  // namespace detail
@@ -599,6 +632,47 @@ inline Result<LayoutField, DecodeError> decodeLayoutField(CborReader& r, BasicCa
                 f.flags = uint8_t(v.value());
                 break;
             }
+            // RFC-048 (Phase C2), keys 19-23 — see catalog_codec.hpp banner.
+            case 19: {
+                auto v = r.readUint();
+                if (!v) return Ret::err(v.error());
+                if (v.value() > 0xFF) return Ret::err(DecodeError::Malformed);
+                f.rank = uint8_t(v.value());
+                f.hasRank = true;
+                break;
+            }
+            case 20: {
+                auto v = r.readUint();
+                if (!v) return Ret::err(v.error());
+                if (v.value() > 0xFF) return Ret::err(DecodeError::Malformed);
+                f.aspect = uint8_t(v.value());
+                f.hasAspect = true;
+                break;
+            }
+            case 21: {
+                auto v = r.readUint();
+                if (!v) return Ret::err(v.error());
+                if (v.value() > 0xFF) return Ret::err(DecodeError::Malformed);
+                f.scope = uint8_t(v.value());
+                f.hasScope = true;
+                break;
+            }
+            case 22: {
+                auto v = r.readUint();
+                if (!v) return Ret::err(v.error());
+                if (v.value() > 0xFF) return Ret::err(DecodeError::Malformed);
+                f.provenance = uint8_t(v.value());
+                f.hasProvenance = true;
+                break;
+            }
+            case 23: {
+                auto v = r.readUint();
+                if (!v) return Ret::err(v.error());
+                if (v.value() > 0xFF) return Ret::err(DecodeError::Malformed);
+                f.unitId = uint8_t(v.value());
+                f.hasUnitId = true;
+                break;
+            }
             default: {
                 auto sv = r.skipValue();  // §4.3: unknown key -> ignore
                 if (!sv) return Ret::err(sv.error());
@@ -739,6 +813,47 @@ inline Result<SchemaField, DecodeError> decodeSchemaField(CborReader& r, BasicCa
                 f.hasOptionAccess = true;
                 break;
             }
+            // RFC-048 (Phase C2) — numbered identically to layout-field's own 19-23.
+            case 19: {
+                auto v = r.readUint();
+                if (!v) return Ret::err(v.error());
+                if (v.value() > 0xFF) return Ret::err(DecodeError::Malformed);
+                f.rank = uint8_t(v.value());
+                f.hasRank = true;
+                break;
+            }
+            case 20: {
+                auto v = r.readUint();
+                if (!v) return Ret::err(v.error());
+                if (v.value() > 0xFF) return Ret::err(DecodeError::Malformed);
+                f.aspect = uint8_t(v.value());
+                f.hasAspect = true;
+                break;
+            }
+            case 21: {
+                auto v = r.readUint();
+                if (!v) return Ret::err(v.error());
+                if (v.value() > 0xFF) return Ret::err(DecodeError::Malformed);
+                f.scope = uint8_t(v.value());
+                f.hasScope = true;
+                break;
+            }
+            case 22: {
+                auto v = r.readUint();
+                if (!v) return Ret::err(v.error());
+                if (v.value() > 0xFF) return Ret::err(DecodeError::Malformed);
+                f.provenance = uint8_t(v.value());
+                f.hasProvenance = true;
+                break;
+            }
+            case 23: {
+                auto v = r.readUint();
+                if (!v) return Ret::err(v.error());
+                if (v.value() > 0xFF) return Ret::err(DecodeError::Malformed);
+                f.unitId = uint8_t(v.value());
+                f.hasUnitId = true;
+                break;
+            }
             default: {
                 auto sv = r.skipValue();
                 if (!sv) return Ret::err(sv.error());
@@ -820,7 +935,7 @@ inline Result<StoreDescriptor, DecodeError> decodeStoreDescriptor(CborReader& r)
 //
 // Payload is pushed STRAIGHT INTO `cat`'s pools as it is read (the entry's
 // fieldOffset is the pool mark taken before this entry started), so no
-// per-entry field buffer is ever materialised on the stack — which is what
+// per-entry field buffer is ever materialized on the stack — which is what
 // lets kMaxFields be 64 at zero stack cost. The returned entry is NOT yet in
 // `cat`; the caller validates ordering and then pushes it with
 // addEntryVerbatim(). Failure may leave orphaned fields/labels in the pools:
@@ -983,6 +1098,14 @@ inline Result<CatalogEntry, DecodeError> decodeEntry(CborReader& r, BasicCatalog
                 if (!v) return Ret::err(v.error());
                 if (v.value() > 0xFF) return Ret::err(DecodeError::Malformed);
                 e.streamKind = uint8_t(v.value());
+                break;
+            }
+            case 16: {  // RFC-048 (Phase C2) rank
+                auto v = r.readUint();
+                if (!v) return Ret::err(v.error());
+                if (v.value() > 0xFF) return Ret::err(DecodeError::Malformed);
+                e.rank = uint8_t(v.value());
+                e.hasRank = true;
                 break;
             }
             default: {

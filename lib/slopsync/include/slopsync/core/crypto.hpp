@@ -137,7 +137,7 @@ inline ICrypto& defaultCrypto() {
 }
 
 // ---------------------------------------------------------------------------
-// Test double, mirroring ManualClock / FixedSequenceRandom: real behaviour for
+// Test double, mirroring ManualClock / FixedSequenceRandom: real behavior for
 // the primitives that must actually work, plus scriptable answers for the M4c
 // half and call counters so a test can PROVE the hub routed a comparison
 // through the injected delegate rather than reaching for std::equal.

@@ -334,9 +334,16 @@ private:
     size_t _pendingCount = 0;
     uint16_t _nextIntentId = 1;
 
-    // Liveness (§6.5, M4 minimal).
+    // Liveness (§6.5/§6.6, M4 minimal + the holding-control cadence switch).
     uint32_t _lastRxMs = 0;
     uint32_t _lastTxMs = 0;
+    // §6.6: true once an INTENT this session sent has been ECHOed. A
+    // conservative proxy for "may own an active motion source" — this class
+    // has no catalog channel-class awareness to know precisely which channel
+    // is source-mapped, so it errs toward the faster PING cadence rather than
+    // risking the hub's 600 ms deadman firing during a real pause. Reset per
+    // connect() (a new session never inherits ownership, §6.8).
+    bool _holdingSource = false;
 
     // ESTOP repeat-until-latched (§11.2).
     bool _estopActive = false;

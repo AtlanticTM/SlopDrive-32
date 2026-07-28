@@ -88,6 +88,7 @@ inline bool Client::connect() {
     _readyAttempts = 0;
     _estopActive = false;
     _estopSendFailed = false;
+    _holdingSource = false;  // §6.8: a new session never inherits ownership
 
     // ---- M4c: the RFC-029 trust state, reset per session --------------------
     _hubAuth = HubAuthState::NotRequested;
@@ -189,7 +190,12 @@ inline void Client::update(uint32_t nowUs) {
     }
 
     if (_state != ClientSessionState::CLOSED) {
-        if (timeReached(nowMs, _lastTxMs + limits::ping_interval_idle_ms)) {
+        // §6.6: tighten to ping_interval_holding_control_ms while _holdingSource
+        // is set, so the client stays ahead of the hub's 600 ms deadman instead
+        // of relying on ping_interval_idle_ms (1 s) the whole time.
+        uint32_t pingIntervalMs =
+            _holdingSource ? limits::ping_interval_holding_control_ms : limits::ping_interval_idle_ms;
+        if (timeReached(nowMs, _lastTxMs + pingIntervalMs)) {
             std::array<std::byte, 8> buf{};
             size_t n = encodePing(std::span<const std::byte>(), std::span<std::byte>(buf));
             sendFrame(FrameType::PING, 0, std::span<const std::byte>(buf.data(), n));
@@ -429,6 +435,7 @@ inline void Client::handleEcho(std::span<const std::byte> payload) {
     if (!found) return;  // stray/duplicate ECHO for an id we're not tracking: ignore (§4.3-style tolerance)
 
     _cfgGen = m.cfg_gen;
+    _holdingSource = true;  // §6.6: an applied INTENT is the proxy for source ownership (see declaration)
     IntentValueMap applied{m.applied_count, m.applied};
     _delegate.onEcho(m.intent_id, applied, m.cfg_gen);
 }

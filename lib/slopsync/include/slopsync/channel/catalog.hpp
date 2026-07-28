@@ -211,6 +211,27 @@ struct LayoutField {
     bool hasSettingKey = false;
     bool hasStep = false;
 
+    // ---- RFC-048 rendering metamodel (Phase C2, all optional) --------------
+    // APPENDED AT THE TAIL, same authoring-order rule as the RFC-009 block
+    // above. Keys 19-23 (wire/catalog_codec.hpp's file banner explains why
+    // they start at 19, not 16): registry vocabulary ids
+    // (generated/registry_constants.hpp) ui_ranks, value_aspects,
+    // value_scopes, value_provenance, unit_ids. Absent = the RENDERING.md
+    // default for that axis (rank->detail, aspect->live, scope->session,
+    // provenance->actual, unit_id-> render the tstr `unit` above verbatim).
+    // has-flag BEFORE value, matching this struct's own hasMin/min convention,
+    // so `.hasRank = true, .rank = x` authors in declaration order.
+    bool hasRank = false;
+    uint8_t rank = 0;
+    bool hasAspect = false;
+    uint8_t aspect = 0;
+    bool hasScope = false;
+    uint8_t scope = 0;
+    bool hasProvenance = false;
+    uint8_t provenance = 0;
+    bool hasUnitId = false;
+    uint8_t unitId = 0;
+
     // Bytes this field occupies in a packed payload. EXHAUSTIVE by design:
     // no `default:` arm, so adding a PackedFieldType without giving it a
     // width is a -Wswitch compile error rather than a silent wrong answer.
@@ -274,6 +295,23 @@ struct SchemaField {
     // label pool's PARALLEL access array at the very same offsets, so it needs
     // no ref of its own — only a presence bit.
     bool hasOptionAccess = false;
+
+    // ---- RFC-048 rendering metamodel (Phase C2, all optional) --------------
+    // Numbered IDENTICALLY to LayoutField's own 19..23 (shared numbering, see
+    // that struct's comment for per-key meaning) — rare on a schema field
+    // (INTENT/EVENT payloads are mostly verbs, not display values) but not
+    // disallowed, e.g. an aspect-group `action.reset` targeting a specific
+    // aspect (RENDERING.md §5.4).
+    bool hasRank = false;
+    uint8_t rank = 0;
+    bool hasAspect = false;
+    uint8_t aspect = 0;
+    bool hasScope = false;
+    uint8_t scope = 0;
+    bool hasProvenance = false;
+    uint8_t provenance = 0;
+    bool hasUnitId = false;
+    uint8_t unitId = 0;
 };
 
 // A STORE-class entry's descriptor (CDDL `store-descriptor`, RFC-021). The
@@ -332,8 +370,12 @@ struct CatalogEntry {
 
     // ---- RFC-009 entry-level annotations (all optional) --------------------
     bool hasCategory = false;
-    uint8_t category = 0;               // key 10: setting_categories (>=128 device-defined)
-    std::string_view categoryLabel{};   // key 11: REQUIRED iff category >= 128
+    // key 10: registry ui_categories (RFC-047/048, Phase C2) — 1..14 registered,
+    // 0x40..0x7E vendor/device-defined. Was setting_categories (0..4) pre-Phase-
+    // C2: same wire key, new vocabulary, a pre-tag restructuring the registry
+    // header permits before v1.0.
+    uint8_t category = 0;
+    std::string_view categoryLabel{};   // key 11: REQUIRED iff category is in the vendor range (0x40..0x7E)
     // key 13 (RFC-017): how many PAST events this channel replays to a newly
     // granted subscriber. PRESENCE IS THE EXCEPTION to §9.4's no-replay rule —
     // a channel that declares one is saying "a client that connects after a
@@ -355,6 +397,13 @@ struct CatalogEntry {
     // the default and is OMITTED on the wire — see isSegmentClass() below for
     // the one place this field is read.
     uint8_t streamKind = 0;             // stream_kinds::samples (0) / ::segments (1)
+
+    // key 16 (RFC-048, Phase C2): registry ui_ranks — how much THIS CHANNEL
+    // matters (RENDERING.md §4), independent of any per-field rank (key 19 on
+    // its own fields — the two are separate axes, not an inheritance chain).
+    // Absent = detail (2).
+    bool hasRank = false;
+    uint8_t rank = 0;
 
     // EXHAUSTIVE by design (no `default:` arm): adding a ChannelClass without
     // giving it a payload form is a -Wswitch compile error, not a silent
@@ -799,9 +848,10 @@ struct BasicCatalog {
 // The workhorse alias for tests/tools and for this project's firmware hub;
 // hubs pick capacities fitting their RAM. Budgets, not per-entry maxima:
 // 200 layout slots is room for the whole device catalog PLUS the wide
-// (~50-field) advanced-pattern channel RFC-009 wants; 128 label slots cover
-// every bit label and dropdown a device this size declares; 4 stores is
-// RFC-021's presets + saved positions + the trust ledger with a spare.
+// (~50-field) advanced-pattern channel RFC-009 wants; 192 label slots (above
+// BasicCatalog's 128 default) cover every bit label and dropdown a device
+// this size declares; 4 stores is RFC-021's presets + saved positions + the
+// trust ledger with a spare.
 // 32 -> 40 entries at M5c. RFC-009 called this out as expected ("the library's
 // per-entry cap is a RAM knob that must rise for settings-dense categories"),
 // and the SlopMotion tuning surface is what cashed it: 17 live-tune knobs

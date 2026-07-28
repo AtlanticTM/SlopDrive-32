@@ -29,8 +29,10 @@ enum class ViolationKind : uint8_t {
                          //   error the catalog's owner fixes by splitting the channel or
                          //   trimming descriptions. Only the scratch-buffer overload of
                          //   checkCatalog() can see it — measuring means encoding.
-    CategoryLabelMissing, // RFC-009: category >= 128 is device-defined and MUST carry a
-                          //   category_label, else clients have no name for the tab.
+    CategoryLabelMissing, // RFC-047/048 (Phase C2): a ui_categories vendor-range id
+                          //   (0x40..0x7E, device-defined) MUST carry a category_label, else
+                          //   clients have no name for the tab. Was "category >= 128" under
+                          //   the retired setting_categories vocabulary (same wire key).
     SettingChannelMissing, // RFC-009: a field carrying setting_key is unwritable without the
                            //   entry's setting_channel naming the INTENT it writes through.
 };
@@ -107,9 +109,10 @@ inline ConformanceReport checkCatalog(const BasicCatalog<E, L, S, B, T>& c,
             r.add(ViolationKind::StateTooLarge, e.id);
         }
 
-        // ---- RFC-009 annotation coherence ---------------------------------
-        // A device-defined category with no label renders as a nameless tab.
-        if (e.hasCategory && e.category >= 128 && e.categoryLabel.empty()) {
+        // ---- RFC-009/047/048 annotation coherence --------------------------
+        // A vendor-range ui_categories id (0x40..0x7E) with no label renders as
+        // a nameless tab.
+        if (e.hasCategory && e.category >= 0x40 && e.category <= 0x7E && e.categoryLabel.empty()) {
             r.add(ViolationKind::CategoryLabelMissing, e.id);
         }
         // setting_key says "write me through the entry's setting_channel" — so

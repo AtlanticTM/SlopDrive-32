@@ -859,3 +859,61 @@ TEST_CASE("fresh hub with no publishes still serves the retained safety snapshot
     CHECK(bytesEqual(del.lastStateByChannel[0x0003],
                      std::span<const std::byte>(expect)));
 }
+
+// ============================================================================
+// P-01 — SPEC §6.6 idle-PING cadence switch: holding-control (200 ms) after
+// an ECHOed intent vs. idle (1 s) for a session that never sent one. Without
+// this switch a session that stops emitting intents (e.g. between segments)
+// would rely on the 1 s idle cadence and get torn down by the hub's 600 ms
+// deadman before its next scheduled PING.
+// ============================================================================
+TEST_CASE("P-01: Client::update() tightens PING cadence to holding_control after an ECHOed intent") {
+    Catalog32 catalog;
+    conformance::buildMiniCatalog(catalog);
+    ManualClock clock;
+    XorShift32 hubRng(1701);
+    TestHubDelegate hubDelegate;
+    Hub hub(catalog, clock, hubRng, hubDelegate);
+    hubDelegate.hub = &hub;
+
+    InProcessLink linkCtrl(clock, hubRng);
+    InProcessLink linkIdle(clock, hubRng);
+    REQUIRE(hub.attachTransport(linkCtrl.endpointA()));
+    REQUIRE(hub.attachTransport(linkIdle.endpointA()));
+
+    XorShift32 rngCtrl(9001), rngIdle(9002);
+    TestClientDelegate delCtrl, delIdle;
+    Client controller(makeIdentity(90, true), linkCtrl.endpointB(), clock, rngCtrl, delCtrl);
+    Client idler(makeIdentity(91, false), linkIdle.endpointB(), clock, rngIdle, delIdle);
+    REQUIRE(controller.connect());
+    REQUIRE(idler.connect());
+    pump(hub, clock, {&controller, &idler}, 6);
+    REQUIRE(controller.state() == ClientSessionState::LIVE);
+    REQUIRE(idler.state() == ClientSessionState::LIVE);
+
+    // `controller` takes a source (speed intent on 0x0084) and gets ECHOed;
+    // `idler` never sends anything.
+    REQUIRE(controller.sendIntent(0x0084, makeSpeedIntent(50.0f)).has_value());
+    pump(hub, clock, {&controller, &idler}, 4);
+    REQUIRE(!delCtrl.echoes.empty());
+
+    // Drain whatever the pump loop left in flight so the next reads see only
+    // what update() sends from this point forward.
+    while (linkCtrl.endpointA().read()) {}
+    while (linkIdle.endpointA().read()) {}
+
+    // Advance past ping_interval_holding_control_ms (200 ms) but short of
+    // ping_interval_idle_ms (1 s), and drive ONLY the clients (not the hub) so
+    // the frames each writes are directly observable on their own link.
+    clock.advanceUs((limits::ping_interval_holding_control_ms + 50) * 1000);
+    controller.update(clock.nowUs());
+    idler.update(clock.nowUs());
+
+    auto ctrlFrame = linkCtrl.endpointA().read();
+    REQUIRE(ctrlFrame.has_value());
+    auto ctrlHeader = ctrlFrame->header();
+    REQUIRE(ctrlHeader.has_value());
+    CHECK(ctrlHeader->type == uint8_t(FrameType::PING));  // holding a source: pinged already
+
+    CHECK_FALSE(linkIdle.endpointA().read().has_value());  // idle: still well under 1 s, nothing sent yet
+}

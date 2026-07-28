@@ -788,3 +788,81 @@ TEST_CASE("EVENT: kind-specific fields ride the scoped `body` sub-map, key 40, l
     CHECK(d.value().body[0].key == 4);
     CHECK(d.value().body[0].value.u64_val == 9);
 }
+
+// ============================================================================
+// WELCOME (§6.3) — RFC-046/RFC-048 additive keys: ws_port(46), ipv4(47), and
+// identity's hub_instance_id (identity_keys 5). All three are 0/unset by
+// default and OMITTED from the wire in that state (§6.3: "0 means absent" for
+// ws_port/ipv4; an absent identity map is simply not emitted) — additive-safe
+// by the same rule every other optional WELCOME key already follows
+// (max_subscriptions_per_frame, granted_publishes, identity, trust). No prior
+// suite exercised encodeWelcome/decodeWelcome directly (WELCOME is otherwise
+// covered only through session-level HELLO/reconnect integration tests), so
+// this is also the first direct unit coverage of the codec.
+// ============================================================================
+TEST_CASE("WELCOME: ws_port/ipv4/hub_instance_id round-trip when all three are set") {
+    WelcomeMsg m{};
+    m.session_id = 42;
+    m.boot_id = 7;
+    m.cfg_gen = 3;
+    m.roles = 2;
+    m.ws_port = 82;
+    m.ipv4 = 0xC0A801E5u;  // 192.168.1.229 — the registry note's own example
+    m.has_identity = true;
+    m.identity.has_hub_instance_id = true;
+    m.identity.hub_instance_id = 0x0123456789ABCDEFull;
+
+    std::array<std::byte, 256> buf{};
+    size_t n = encodeWelcome(m, buf);
+    REQUIRE(n > 0);
+    checkDeterministic(encodeWelcome, m);  // determinism property, encodes into its own scratch
+
+    auto d = decodeWelcome(std::span<const std::byte>(buf.data(), n));
+    REQUIRE(d.isOk());
+    CHECK(d.value().session_id == 42);
+    CHECK(d.value().ws_port == 82);
+    CHECK(d.value().ipv4 == 0xC0A801E5u);
+    REQUIRE(d.value().has_identity);
+    CHECK(d.value().identity.has_hub_instance_id);
+    CHECK(d.value().identity.hub_instance_id == 0x0123456789ABCDEFull);
+}
+
+TEST_CASE("WELCOME: hub_instance_id alone (no product/fw_version/hub_name) still emits the identity map") {
+    WelcomeMsg m{};
+    m.has_identity = true;
+    m.identity.has_hub_instance_id = true;
+    m.identity.hub_instance_id = 99;
+
+    std::array<std::byte, 256> buf{};
+    size_t n = encodeWelcome(m, buf);
+    REQUIRE(n > 0);
+
+    auto d = decodeWelcome(std::span<const std::byte>(buf.data(), n));
+    REQUIRE(d.isOk());
+    REQUIRE(d.value().has_identity);
+    CHECK(d.value().identity.product.empty());
+    CHECK(d.value().identity.hub_instance_id == 99);
+}
+
+TEST_CASE("WELCOME: ws_port/ipv4/hub_instance_id left at their defaults are OMITTED — byte-identical to a "
+          "pre-RFC-046/048 encode") {
+    WelcomeMsg withoutNewFields{};
+    WelcomeMsg withNewFieldsAtDefault{};
+    withNewFieldsAtDefault.ws_port = 0;
+    withNewFieldsAtDefault.ipv4 = 0;
+    withNewFieldsAtDefault.identity.has_hub_instance_id = false;
+
+    std::array<std::byte, 256> bufA{};
+    std::array<std::byte, 256> bufB{};
+    size_t nA = encodeWelcome(withoutNewFields, bufA);
+    size_t nB = encodeWelcome(withNewFieldsAtDefault, bufB);
+    REQUIRE(nA > 0);
+    REQUIRE(nA == nB);
+    CHECK(std::memcmp(bufA.data(), bufB.data(), nA) == 0);
+
+    auto d = decodeWelcome(std::span<const std::byte>(bufA.data(), nA));
+    REQUIRE(d.isOk());
+    CHECK(d.value().ws_port == 0);
+    CHECK(d.value().ipv4 == 0);
+    CHECK_FALSE(d.value().has_identity);
+}

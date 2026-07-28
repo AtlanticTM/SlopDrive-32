@@ -25,9 +25,15 @@ enum class ClientSessionState : uint8_t {
 // Hub-side per-session state (SPEC §2.2): VALIDATING is bounded (2 s
 // recommended); GRANTED = WELCOME sent, retained pushes streaming; LIVE
 // after the client is presumed synced (hub-side this is bookkeeping only —
-// no hub behavior gates on the client reaching LIVE).
+// no hub behavior gates on the client reaching LIVE). STALE (RFC-042,
+// library-internal — never itself wire-visible) sits between LIVE and CLOSED:
+// silence past the deadman/idle-reap window marks a session STALE instead of
+// tearing it down. A STALE session's slot, session_id, subs, publishGrants,
+// intent ring, and readiness are all RETAINED (occupied() below is still
+// true) so the same client resumes without a full HELLO/WELCOME/catalog
+// cycle — see Hub::pumpDeadman/pumpIdleReap/handleHello's reattach branch.
 enum class HubSessionState : uint8_t {
-    FREE, VALIDATING, GRANTED, LIVE, CLOSED
+    FREE, VALIDATING, GRANTED, LIVE, STALE, CLOSED
 };
 
 struct ClientIdentity {
@@ -117,7 +123,7 @@ struct HubSession {
         uint32_t lastOverageNackMs = 0;
         // RFC-030: the EFFECTIVE curve family granted to this publish (post
         // delegate override), 0 = unspecified. Read back at drain time via
-        // Hub::publishCurveFamily() so the segment consumer honours the
+        // Hub::publishCurveFamily() so the segment consumer honors the
         // sender's declared smoothness class.
         uint8_t curveFamily = 0;
     };
@@ -173,12 +179,14 @@ struct HubSession {
     uint32_t deadmanMs = limits::deadman_default_ms;
     uint32_t lastTxMs = 0;                                     // idle-PING scheduling (§6.5)
     uint16_t retainedPending = 0;                              // remaining retained pushes after WELCOME
+    // RFC-042: hub-ms this session entered STALE, 0 while not stale. Backs the
+    // slot-pressure eviction tie-break (lowest access tier first, then longest
+    // continuously stale) — findEvictableStale() in hub_impl.hpp.
+    uint32_t staleSinceMs = 0;
 
-    // In-place destroy + reconstruct, NOT `*this = HubSession()`: the
-    // assignment form materializes a whole-object TEMPORARY on the stack —
-    // ~9 KB for this struct — which blew the hub task's stack canary on
-    // target (panic decoded to exactly this line). Host tests never noticed
-    // (megabyte stacks). Same semantics, zero stack cost.
+    // In-place destroy + reconstruct — never whole-object reassignment:
+    // this struct is ~8 KB and the assignment form puts a full temporary on
+    // the caller's task stack. Mechanism: docs/canon/TRAPS.md T1.
     void reset() {
         this->~HubSession();
         new (this) HubSession();

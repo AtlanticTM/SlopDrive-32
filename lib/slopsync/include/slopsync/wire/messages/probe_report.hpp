@@ -3,16 +3,10 @@
 // possible upward GRANT.
 //
 // CBOR map: `probe_result` (26) = nested map { bytes_received, span_ms,
-// loss_pct_x100, rtt_ms }.
-//
-// REGISTRY GAP (flagged for a follow-up registry.yaml PR, same pattern as
-// welcome.hpp's `welcome_limits` sub-key space): SPEC §6.4 names the
-// probe_result fields in prose ("bytes, span_ms, loss_pct, rtt_ms") but
-// registry.yaml has no `probe_result_keys` section yet, unlike `limits` (22)
-// which got `welcome_limits`. The sub-key numbers below are therefore
-// LOCALLY allocated by this header, not generated — small, scoped to this
-// one sub-map, and safe to allocate here under the same reasoning
-// welcome.hpp used before its own gap was closed at the source of truth.
+// loss_pct_x100, rtt_ms }. Sub-keys come from registry.yaml's
+// `probe_result_keys` section, generated into namespace slopsync::probe_result
+// (registry gap found during implementation, since closed at the source of
+// truth — see the `probe_result_subkeys` alias below).
 // `loss_pct` is carried as `loss_pct_x100` (percentage * 100, integer) to
 // stay an integer field per §5.3's "integral values ... encoded as
 // integers, not floats" rather than a float32 percentage.
@@ -28,9 +22,7 @@
 
 namespace slopsync {
 
-// `probe_result` (26) sub-key space — registry section `probe_result_keys`,
-// generated into namespace slopsync::probe_result (gap found during
-// implementation, since fixed at the source of truth).
+// `probe_result` (26) sub-key space — see the file header.
 namespace probe_result_subkeys = ::slopsync::probe_result;
 
 struct ProbeResult {

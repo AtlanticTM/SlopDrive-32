@@ -3,7 +3,7 @@
 // CRYPTOGRAPHIC PROOF layer (RFC-029 items 1 and 6).
 //
 //   M4C-01..04  the signature MATERIAL and its codecs (AUTH / HUB_SIG / the
-//               GRANT `roles` key) — the wire, before any behaviour.
+//               GRANT `roles` key) — the wire, before any behavior.
 //   M4C-05..12  ITEM 1, HUB SIDE: on-request signing, the DEFERRED sign queue
 //               (the answer to "an ECDSA sign would stall the hub's tick"),
 //               the inline alternative, and session-scoped cleanup.
@@ -641,7 +641,7 @@ TEST_CASE("M4C-10: a signature for a dead session is dropped, never delivered in
     CHECK_FALSE(findHubSig(tickAndDrain(hub, clock, link.endpointB())).has_value());
 }
 
-TEST_CASE("M4C-11: a pending sign job dies with its session") {
+TEST_CASE("M4C-11 (RFC-042): a pending sign job dies on rude detach even though the session goes STALE, not gone") {
     Catalog32 catalog;
     makeM4cCatalog(catalog);
     ManualClock clock;
@@ -658,11 +658,19 @@ TEST_CASE("M4C-11: a pending sign job dies with its session") {
     REQUIRE(findWelcome(tickAndDrain(hub, clock, link.endpointB())).has_value());
     CHECK(hub.pendingSignJobs() == 1);
 
-    // Rude detach — the harshest of §6.8's six teardown paths.
+    // Rude detach: RFC-042 reclassifies "transport reports closed out of
+    // band" as a STALE transition, not a teardown — the session's SLOT is
+    // RETAINED (sessionCount unchanged). The pending sign job is per-slot
+    // handshake state scoped to "if the transport itself is still attached"
+    // (it plainly is not, here), so it is reset exactly like a true reattach's
+    // path-B reset would — it was mid-flight against a socket that no longer
+    // exists.
+    size_t sessionsBefore = hub.sessionCount();
     hub.detachTransport(link.endpointA());
-    tickAndDrain(hub, clock, link.endpointB());
     CHECK(hub.pendingSignJobs() == 0);
-    CHECK(hub.sessionCount() == 0);
+    CHECK(hub.sessionCount() == sessionsBefore);
+    REQUIRE(hub.sessionBySlot(0) != nullptr);
+    CHECK(hub.sessionBySlot(0)->state == HubSessionState::STALE);
 }
 
 TEST_CASE("M4C-12: submitSignature refuses garbage sizes and unknown sessions") {

@@ -156,13 +156,13 @@ TEST_CASE("M2b: a well-formed STORE entry is clean; a malformed one is caught") 
 }
 
 TEST_CASE("M2b: RFC-009 annotation coherence") {
-    SUBCASE("a device-defined category (>=128) without a label is caught") {
+    SUBCASE("a vendor-range ui_categories id (0x40..0x7E) without a label is caught") {
         Catalog32 c;
         c.addEntry({.id = 0x0080, .name = "motion",
                     .cls = ChannelClass::STATE, .dir = Direction::h2c,
                     .access = AccessLevel::watch, .maxRateHz = 0.0f,
                     .defaultPriority = Priority::normal,
-                    .hasCategory = true, .category = 200});
+                    .hasCategory = true, .category = 0x64});
         c.addLayoutField({.name = "pos", .type = PackedFieldType::u16, .unit = "mm", .scale = 100.0f});
         REQUIRE(c.ok());
         auto r = checkCatalog(c);
@@ -171,13 +171,13 @@ TEST_CASE("M2b: RFC-009 annotation coherence") {
         c.entries[0].categoryLabel = "SlopDrive";
         CHECK(checkCatalog(c).ok());
     }
-    SUBCASE("a registered category (<128) needs no label") {
+    SUBCASE("a registered ui_categories id (1..14) needs no label") {
         Catalog32 c;
         c.addEntry({.id = 0x0080, .name = "motion",
                     .cls = ChannelClass::STATE, .dir = Direction::h2c,
                     .access = AccessLevel::watch, .maxRateHz = 0.0f,
                     .defaultPriority = Priority::normal,
-                    .hasCategory = true, .category = setting_categories::limits});
+                    .hasCategory = true, .category = ui_categories::limits});
         c.addLayoutField({.name = "pos", .type = PackedFieldType::u16, .unit = "mm", .scale = 100.0f});
         REQUIRE(c.ok());
         CHECK(checkCatalog(c).ok());

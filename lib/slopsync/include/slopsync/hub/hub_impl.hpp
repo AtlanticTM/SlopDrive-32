@@ -91,12 +91,41 @@ inline Hub::Hub(const Catalog32& catalog, IClock& clock, IRandom& rng, HubDelega
 }
 
 inline bool Hub::attachTransport(ITransport& t) {
+    // A genuinely-free slot only: no session at all. A STALE session's
+    // transport is null by definition (RFC-042's silence/detach triggers) so
+    // it LOOKS exactly like a free slot on `transport == nullptr` alone — that
+    // was the bug: a brand-new, identity-unrelated connection would win the
+    // race against handleHello()'s own identity-matched reattach path
+    // (findSlotByInstance()/handleReattach()), which never gets a chance to
+    // run because the STALE slot is gone by the time HELLO arrives. STALE
+    // slots stay `occupied()` on purpose (session.hpp) precisely so this loop
+    // can tell the two apart.
     for (auto& slot : _slots) {
-        if (slot.transport == nullptr) {
+        if (slot.transport == nullptr && !slot.session.occupied()) {
             if (!t.open()) return false;
             slot.transport = &t;
             return true;
         }
+    }
+    // No free slot: fall back to the SAME oldest-parked eviction policy
+    // RFC-042 item 5 already uses under HELLO slot-pressure
+    // (findEvictableStale()) — reusing it rather than inventing a second
+    // reclaim rule for the identical "slots full, something STALE must yield"
+    // situation.
+    if (Slot* victim = findEvictableStale(nullptr)) {
+        // A STALE session's transport is USUALLY already null (the
+        // out-of-band-detach trigger clears it), but a deadman/idle-reap
+        // staleness can leave one still attached and never formally detached
+        // — sever it first, same as handleReattach()'s path-B severing of
+        // `stale.transport`, so it isn't silently overwritten and leaked.
+        if (victim->transport != nullptr) {
+            victim->transport->close();
+            victim->transport = nullptr;
+        }
+        teardownSession(*victim, _clock.nowMs());
+        if (!t.open()) return false;
+        victim->transport = &t;
+        return true;
     }
     return false;
 }
@@ -104,17 +133,43 @@ inline bool Hub::attachTransport(ITransport& t) {
 inline void Hub::detachTransport(ITransport& t) {
     for (auto& slot : _slots) {
         if (slot.transport == &t) {
-            // Detaching physically removes the transport; whatever session (if
-            // any) was riding it is no longer reachable. §6.8: a rude socket
-            // death is handled identically to GOODBYE — tear the session down
-            // so its source ownership is RELEASED (the bug this fixes left it
-            // owned by a departed session_id forever). Teardown runs FIRST,
-            // while slot.transport is still valid, so any §11.3 loss-policy
-            // safety broadcast to the remaining sessions is unaffected and this
-            // slot's own last frame simply drains into the closing link. No
-            // nowMs is threaded to detach (the transport layer, not update(),
-            // drives it), so read the injected clock — same as latchEstop().
-            teardownSession(slot, _clock.nowMs());
+            // RFC-042's third staleness trigger: "transport reports closed/
+            // errored out of band" — the case that matters most for a genuine
+            // WiFi blip, and unlike silence it is DETECTED, not timed out.
+            // Ownership is released (RFC-045: no stop latch, exactly like the
+            // silence triggers) but the slot — session_id, grants, intent ring
+            // — is RETAINED, not freed: a reconnecting client reattaches via
+            // handleHello()'s §6.3 migration path instead of a full
+            // HELLO/WELCOME/catalog cycle. Skip the already-STALE case (a
+            // formal detach arriving for a slot idle-reaped/deadmanned
+            // earlier) so a late transport-layer cleanup doesn't reset
+            // staleSinceMs and unfairly un-age it for RFC-042 item 5's
+            // eviction tie-break. No nowMs is threaded to detach (the
+            // transport layer, not update(), drives it), so read the injected
+            // clock — same as latchEstop().
+            if (slot.session.occupied() && slot.session.state != HubSessionState::STALE) {
+                markStale(slot, _clock.nowMs(), /*reason=*/4 /*session-loss-release*/);
+                // The transport is CONFIRMED gone here — unlike the silence
+                // triggers (where it might still be attached), RFC-042's
+                // "kept while stale" table scopes pending-knock/AUTH/blob
+                // state to "if the transport itself is still attached". Reset
+                // it, exactly like handleReattach()'s path-B reset: it was
+                // mid-flight against a socket that no longer exists.
+                bool droppedAny = false;
+                _pairing.pending().dropBySession(slot.session.session_id, [&](const PendingKnock& k) {
+                    droppedAny = true;
+                    emitPairingEvent(pairing_events::expired, std::span<const std::byte>(k.instance_id),
+                                     k.name.view(), k.mode, AccessLevel::watch, {}, _clock.nowMs());
+                });
+                if (droppedAny) publishPendingPairingState(_clock.nowMs());
+                slot.hasClientNonce = false;
+                slot.clientNonce.fill(std::byte{0});
+                slot.sigRequested = false;
+                slot.signPending = false;
+                slot.signDelivered = false;
+                slot.authFailures = 0;
+                slot.blob = typename Slot::PendingBlob{};
+            }
             t.close();
             slot.transport = nullptr;
             return;
@@ -197,6 +252,7 @@ inline void Hub::pumpSlot(Slot& slot, uint32_t nowMs) {
             auto decoded = decodeEstop(bytes);
             if (decoded) {
                 if (slot.session.occupied()) slot.session.lastRxMs = nowMs;
+                reviveIfStale(slot, nowMs);  // RFC-042 path A: any frame is proof of life
                 handleEstopFrame(decoded.value(), nowMs);
             }
             // BadCrc: silently drop (§5.5) — not a real ESTOP, never acted on.
@@ -206,6 +262,12 @@ inline void Hub::pumpSlot(Slot& slot, uint32_t nowMs) {
         auto header = decodeFrameHeader(bytes);
         if (!header) continue;  // too short to be a frame at all: drop
         if (slot.session.occupied()) slot.session.lastRxMs = nowMs;  // §6.5: any rx is proof of life
+        // RFC-042 path A: a STALE session's own transport reviving on ANY
+        // frame (a PING is enough) — the dominant resumption case, since
+        // backgrounding/locking a screen throttles JS timers without closing
+        // the socket. Before dispatch, so a HELLO arriving here (a client
+        // choosing to fully reconnect anyway) still sees a coherent state.
+        reviveIfStale(slot, nowMs);
         dispatchFrame(slot, *header, fb->payload(), nowMs);
     }
 }
@@ -346,6 +408,31 @@ inline Hub::Slot* Hub::findSlotByInstance(std::span<const std::byte> instanceId,
     return nullptr;
 }
 
+// ---- M4c (RFC-029 item 1) / RFC-042: the hub authenticity signature, shared
+// verbatim by handleHello() and handleReattach() (a reattach WELCOME is a real
+// WELCOME and gets the identical signing treatment). See registry.yaml's
+// HUB_SIG note for the full latency argument for why this is deferred by
+// default rather than signed inline. Mutates `w` (may set `trust`/
+// `welcome_sig` for inline signing) and `slot` (signDelivered on the inline
+// path). Returns true iff the caller must arm slot.signPending AFTER the
+// WELCOME actually sends successfully.
+inline bool Hub::armWelcomeSignature(Slot& slot, WelcomeMsg& w) {
+    if (!(slot.sigRequested && slot.hasClientNonce)) return false;
+    const auto material = hubSigMaterial(std::span<const std::byte, kTrustClientNonceBytes>(slot.clientNonce),
+                                         slot.session.session_id, _bootId);
+    if (!_inlineSigning) return true;  // armed, not computed — caller arms after the send succeeds
+    std::array<std::byte, kTrustSigMaxBytes> sig{};
+    const size_t sigLen = _crypto.signP256(std::span<const std::byte>(material), std::span<std::byte>(sig));
+    if (sigLen > 0 && sigLen <= sig.size()) {
+        w.has_trust = true;
+        w.trust_map.has_welcome_sig = true;
+        w.trust_map.welcome_sig_len = uint8_t(sigLen);
+        w.trust_map.welcome_sig = sig;
+        slot.signDelivered = true;
+    }
+    return false;
+}
+
 inline void Hub::handleHello(Slot& slot, std::span<const std::byte> payload, uint32_t nowMs) {
     auto helloR = decodeHello(payload);
     if (!helloR) {
@@ -356,10 +443,16 @@ inline void Hub::handleHello(Slot& slot, std::span<const std::byte> payload, uin
     }
     const HelloMsg& h = helloR.value();
 
-    // §6.3 duplicate identity: evict ANY live session (anywhere) bearing this
-    // instance_id, honor the new HELLO in its place.
+    // §6.3 duplicate identity: a LIVE session evicts as before. A STALE one
+    // REATTACHES (RFC-042 §6.3 migration path) — this is a resumption, not a
+    // competing claimant, so it skips eviction, BUSY pressure, and grant
+    // renegotiation entirely; handleReattach() answers with its own WELCOME.
     std::span<const std::byte> instanceSpan(h.instance_id);
     if (Slot* dup = findSlotByInstance(instanceSpan, &slot)) {
+        if (dup->session.state == HubSessionState::STALE) {
+            handleReattach(slot, *dup, h, nowMs);
+            return;
+        }
         GoodbyeMsg gb;
         gb.code = NackCode::DUPLICATE_INSTANCE;
         std::array<std::byte, 64> gbuf{};
@@ -377,12 +470,30 @@ inline void Hub::handleHello(Slot& slot, std::span<const std::byte> payload, uin
     // a HELLO replacing this very slot's own (already-occupied, e.g. a
     // retried) session isn't new capacity pressure.
     if (occupiedCount(&slot) >= kHubMaxSessions) {
-        NackMsg n;
-        n.code = NackCode::BUSY;
-        n.has_retry_after_ms = true;
-        n.retry_after_ms = kHubBusyRetryAfterMs;
-        sendNack(*slot.transport, n);
-        return;
+        // RFC-042 item 5: a STALE session yields its slot under pressure
+        // before a genuinely new identity is refused — lowest access tier
+        // first, tie-break longest continuously stale. A LIVE session is
+        // NEVER evicted for pressure (only a duplicate-instance_id HELLO,
+        // above, ever displaces one).
+        if (Slot* victim = findEvictableStale(&slot)) {
+            GoodbyeMsg gb;
+            gb.code = NackCode::SLOT_RECLAIMED;
+            std::array<std::byte, 64> gbuf{};
+            size_t glen = encodeGoodbye(gb, std::span<std::byte>(gbuf));
+            if (glen > 0 && victim->transport != nullptr) {
+                // Best-effort: the reclaimed session was stale for a reason
+                // and this GOODBYE may never arrive.
+                sendFrameTo(*victim->transport, FrameType::GOODBYE, 0, std::span<const std::byte>(gbuf.data(), glen));
+            }
+            teardownSession(*victim, nowMs);
+        } else {
+            NackMsg n;
+            n.code = NackCode::BUSY;
+            n.has_retry_after_ms = true;
+            n.retry_after_ms = kHubBusyRetryAfterMs;
+            sendNack(*slot.transport, n);
+            return;
+        }
     }
 
     // Fresh session in this slot. A HELLO can land on a slot that is STILL
@@ -526,7 +637,16 @@ inline void Hub::handleHello(Slot& slot, std::span<const std::byte> payload, uin
     w.boot_id = _bootId;
     w.catalog_etag = _etag;
     w.cfg_gen = _cfgGen;
-    w.limits_info.max_frame = uint32_t(kFrameBufferCapacity);
+    // §13.1/§13.4: a hub MAY advertise a smaller max_frame than kFrameBufferCapacity
+    // permits (a binding's OWN declared MTU, e.g. BLE's negotiated ATT MTU-3) but
+    // MUST NOT advertise a larger one — so this is the transport's honest
+    // properties().mtu, capped at the buffer capacity, not a flat constant. WS's
+    // own properties().mtu already equals kFrameBufferCapacity, so this is a no-op
+    // there; only a small-MTU binding (BLE pre-negotiation) sees a smaller number.
+    w.limits_info.max_frame =
+        (slot.transport != nullptr)
+            ? uint32_t(std::min<uint16_t>(slot.transport->properties().mtu, uint16_t(kFrameBufferCapacity)))
+            : uint32_t(kFrameBufferCapacity);
     w.limits_info.max_subscriptions = uint32_t(limits::max_subscriptions_per_session);
     w.limits_info.retained_pending = retainedPending;
     w.roles = uint8_t(slot.session.role);
@@ -554,6 +674,17 @@ inline void Hub::handleHello(Slot& slot, std::span<const std::byte> payload, uin
         w.identity.fw_version = _idFwVersion;
         w.identity.hub_name = _idHubName;
     }
+    // RFC-048: durable identity rides the SAME identity map, independently of
+    // product/fw_version/hub_name above — a hub with a durable id but no other
+    // identity strings still gets the map (IdentityInfo::any() covers it).
+    if (_hubInstanceId != 0) {
+        w.has_identity = true;
+        w.identity.has_hub_instance_id = true;
+        w.identity.hub_instance_id = _hubInstanceId;
+    }
+    // RFC-046: the hub's own WS endpoint, 0/0 = absent (omitted on the wire).
+    w.ws_port = _wsPort;
+    w.ipv4 = _ipv4;
     _rng.fill(std::span<std::byte>(w.nonce));
     slot.nonce = w.nonce;  // §12.2: remembered so a later PAIR_REQ on this session can be verified
 
@@ -589,27 +720,7 @@ inline void Hub::handleHello(Slot& slot, std::span<const std::byte> payload, uin
     // runs the same verification. A hub that can do neither arms nothing, sends
     // neither, and is conformant — signing is ON REQUEST and a request is not a
     // promise.
-    bool armSignJob = false;
-    if (slot.sigRequested && slot.hasClientNonce) {
-        const auto material = hubSigMaterial(std::span<const std::byte, kTrustClientNonceBytes>(slot.clientNonce),
-                                             slot.session.session_id, _bootId);
-        if (_inlineSigning) {
-            std::array<std::byte, kTrustSigMaxBytes> sig{};
-            const size_t sigLen = _crypto.signP256(std::span<const std::byte>(material), std::span<std::byte>(sig));
-            if (sigLen > 0 && sigLen <= sig.size()) {
-                w.has_trust = true;
-                w.trust_map.has_welcome_sig = true;
-                w.trust_map.welcome_sig_len = uint8_t(sigLen);
-                w.trust_map.welcome_sig = sig;
-                slot.signDelivered = true;
-            }
-        } else {
-            // Armed, not computed — and armed only AFTER the WELCOME actually
-            // goes out (below). takePendingSignJob() is how the work leaves this
-            // task; nothing here touches the curve.
-            armSignJob = true;
-        }
-    }
+    bool armSignJob = armWelcomeSignature(slot, w);
 
     std::array<std::byte, 700> wbuf{};
     size_t wlen = encodeWelcome(w, std::span<std::byte>(wbuf));
@@ -627,6 +738,200 @@ inline void Hub::handleHello(Slot& slot, std::span<const std::byte> payload, uin
     // note) — no separate immediate-push code path is needed here.
     slot.session.state = HubSessionState::LIVE;  // hub-side bookkeeping only, §2.2
     _delegate.onSessionJoined(slot.session.session_id);
+}
+
+// ============================================================================
+// RFC-042 path B — reattach: a fresh HELLO names a STALE session's instance_id
+// on a NEW transport. This is §6.3's migration path applied to a resumption
+// rather than a live-duplicate hop: SAME session_id, SAME grants (subs and
+// publishGrants are carried over verbatim, not renegotiated from this HELLO's
+// wishes — RFC-042's own design table), role RE-DERIVED from the presented
+// token exactly as any HELLO does. No BUSY pressure is spent (not new
+// capacity) and no teardown/loss-policy runs on `stale` (a migration is not a
+// session loss, §6.3) — its slot is simply vacated once its state has moved to
+// `slot`.
+// ============================================================================
+
+inline void Hub::handleReattach(Slot& slot, Slot& stale, const HelloMsg& h, uint32_t nowMs) {
+    // `slot` may itself already hold an unrelated session (a re-HELLO on a
+    // transport that was previously talking to a DIFFERENT identity) —
+    // release that first, exactly like a fresh HELLO does.
+    teardownSession(slot, nowMs);
+
+    // Migrate identity + grants verbatim. This is a plain member-wise copy
+    // from an EXISTING object — NOT the whole-object `T{}`-reassignment reset
+    // pattern TRAPS T1 forbids: there is no temporary construction of a fresh
+    // HubSession, just a field-by-field copy into a slot that already exists.
+    slot.session = stale.session;
+    slot.pushRecords = stale.pushRecords;
+    slot.conflictNacks = stale.conflictNacks;
+
+    // AUTH/pending-blob/sign state is retained ONLY while the transport itself
+    // is still attached (RFC-042's kept-table, path A) — path B always resets
+    // it, because it was mid-flight against a socket that no longer exists.
+    slot.hasClientNonce = false;
+    slot.clientNonce.fill(std::byte{0});
+    slot.sigRequested = false;
+    slot.signPending = false;
+    slot.signDelivered = false;
+    slot.authFailures = 0;
+    slot.congestionLevel = 0;
+    slot.criticalStalling = false;
+    slot.hasProbeReport = false;
+    slot.blob = typename Slot::PendingBlob{};
+
+    // Sever the stale slot's own transport if one is still attached (a
+    // genuine WiFi blip can leave a zombie socket behind that never formally
+    // detached) — this identity now lives on `slot`'s transport only.
+    if (stale.transport != nullptr) {
+        stale.transport->close();
+        stale.transport = nullptr;
+    }
+    // Vacate the old physical slot WITHOUT teardownSession's ownership-release/
+    // onSessionLeft: this session is CONTINUING, not ending (§6.3: "a
+    // migration is not a session loss"). reset() is T1-safe in-place
+    // destroy+placement-new.
+    stale.session.reset();
+    stale.pushRecords.fill(PushRecord{});
+    stale.conflictNacks.fill(typename Slot::ConflictNack{});
+    stale.clientNonce.fill(std::byte{0});
+    stale.hasClientNonce = false;
+    stale.blob = typename Slot::PendingBlob{};
+
+    // ---- Refresh identity fields from THIS HELLO — it is a real HELLO ------
+    slot.session.clientKind.assign(h.client_kind);
+    slot.session.clientName.assign(h.client_name);
+    slot.session.hasClientVer = h.has_trust && h.trust_map.has_client_ver;
+    if (slot.session.hasClientVer) slot.session.clientVer.assign(h.trust_map.client_ver);
+    slot.session.presentationMode =
+        (h.has_trust && h.trust_map.has_presentation_mode) ? h.trust_map.presentation_mode : 0;
+    slot.hasClientNonce = h.has_trust && h.trust_map.has_client_nonce;
+    if (slot.hasClientNonce) slot.clientNonce = h.trust_map.client_nonce;
+    slot.sigRequested = h.has_trust && h.trust_map.has_sig_request && h.trust_map.sig_request;
+
+    // ---- Role RE-DERIVED from the presented token, exactly as any HELLO ----
+    // (§6.3's migration text): a revoked credential downgrades correctly; an
+    // unrevoked one cheaply reproduces the identical role it already had.
+    std::span<const std::byte> instanceSpan(h.instance_id);
+    AccessLevel role = h.has_token
+                            ? _pairing.validate(instanceSpan, std::span<const std::byte>(h.token), _crypto)
+                            : AccessLevel::watch;
+    if (role == AccessLevel::watch) {
+        role = _delegate.validateToken(instanceSpan, std::span<const std::byte>(h.token), h.has_token);
+    }
+    if (h.has_token) {
+        slot.session.role = role;  // applyTrustObservation reads the pre-observation role
+        role = applyTrustObservation(slot, nowMs);
+    }
+    slot.session.role = role;
+    slot.session.helloSeenCfgGen = _cfgGen;
+    slot.session.clientEtagMatched =
+        h.has_catalog_etag && std::equal(h.catalog_etag.begin(), h.catalog_etag.end(), _etag.begin());
+    // Readiness is RETAINED from before staleness UNLESS the freshly-declared
+    // etag now disagrees — a hub whose catalog changed WHILE the session was
+    // away must not let a reattaching client believe it is still ready
+    // against a shape that no longer exists. Matching keeps `ready` exactly as
+    // it was (RFC-042's kept-table: "no re-SYNC").
+    if (!slot.session.clientEtagMatched) {
+        slot.session.ready = false;
+        slot.session.readyEtagMismatch = h.has_catalog_etag;
+        slot.session.grantedAtMs = nowMs;  // re-arm RFC-015 READY_TIMEOUT fresh
+    }
+    slot.session.staleSinceMs = 0;
+    slot.session.lastRxMs = nowMs;
+    slot.session.lastTxMs = nowMs;
+
+    // "Fresh grant for PUSH purposes only" (RFC-042 §4): every existing STATE
+    // subscription re-arms its first-push-after-grant treatment, so a resumed
+    // session's very first frames back are a full resync (cfg_gen, a latched
+    // safety word, anything it may have missed while away) — reused machinery
+    // (SubscriptionEntry::everPushed), not new machinery.
+    for (auto& e : slot.session.subs) e.everPushed = false;
+
+    // Build a normal WELCOME, but from the RETAINED grants — SAME session_id,
+    // SAME grants, this is a reattach, not a renegotiation.
+    WelcomeMsg w{};
+    for (const auto& e : slot.session.subs) {
+        if (w.grants_count >= kWelcomeMaxGrants) break;
+        Grant g;
+        g.channel_id = e.channel_id;
+        g.granted_rate_hz = e.granted_rate_hz;
+        g.priority = uint8_t(e.priority);
+        w.grants[w.grants_count++] = g;
+    }
+    for (const auto& pg : slot.session.publishGrants) {
+        if (!pg.used) continue;
+        if (w.granted_publishes_count >= kWelcomeMaxGrantedPublishes) break;
+        GrantedPublish gp;
+        gp.channel_id = pg.channel_id;
+        gp.granted_rate_hz = pg.granted_rate_hz;
+        gp.has_burst = pg.burstRequested;
+        gp.burst = pg.granted_burst;
+        gp.has_curve_family = pg.curveFamily != 0;
+        gp.curve_family = pg.curveFamily;
+        w.granted_publishes[w.granted_publishes_count++] = gp;
+    }
+
+    uint32_t retainedPending = 0;
+    for (uint32_t i = 0; i < w.grants_count; ++i) {
+        const CatalogEntry* entry = _catalog.find(w.grants[i].channel_id);
+        if (entry && entry->cls == ChannelClass::STATE && _retained.get(w.grants[i].channel_id)) {
+            ++retainedPending;
+        }
+    }
+
+    w.proto_ver = kProtocolVersion;
+    w.session_id = slot.session.session_id;  // UNCHANGED — same identity, RFC-042
+    w.boot_id = _bootId;
+    w.catalog_etag = _etag;
+    w.cfg_gen = _cfgGen;
+    // See the identical rationale in handleHello's WELCOME build above.
+    w.limits_info.max_frame =
+        (slot.transport != nullptr)
+            ? uint32_t(std::min<uint16_t>(slot.transport->properties().mtu, uint16_t(kFrameBufferCapacity)))
+            : uint32_t(kFrameBufferCapacity);
+    w.limits_info.max_subscriptions = uint32_t(limits::max_subscriptions_per_session);
+    w.limits_info.retained_pending = retainedPending;
+    w.roles = uint8_t(slot.session.role);
+    w.deadman_ms = slot.session.deadmanMs;  // RFC-038 window kept, not renegotiated
+    w.deadman_policy = 0;
+    w.limits_info.max_subscriptions_per_frame = uint32_t(kSubscribeMaxWishes);
+    if (!_idProduct.empty() || !_idFwVersion.empty() || !_idHubName.empty()) {
+        w.has_identity = true;
+        w.identity.product = _idProduct;
+        w.identity.fw_version = _idFwVersion;
+        w.identity.hub_name = _idHubName;
+    }
+    // RFC-048/RFC-046 — see the identical block in handleHello's WELCOME build.
+    if (_hubInstanceId != 0) {
+        w.has_identity = true;
+        w.identity.has_hub_instance_id = true;
+        w.identity.hub_instance_id = _hubInstanceId;
+    }
+    w.ws_port = _wsPort;
+    w.ipv4 = _ipv4;
+    _rng.fill(std::span<std::byte>(w.nonce));
+    slot.nonce = w.nonce;
+
+    const uint8_t offered = _pairing.offeredModes(nowMs);
+    if (offered != 0) {
+        w.has_trust = true;
+        w.trust_map.has_pairing_modes = true;
+        w.trust_map.pairing_modes_mask = offered;
+    }
+
+    bool armSignJob = armWelcomeSignature(slot, w);
+
+    std::array<std::byte, 700> wbuf{};
+    size_t wlen = encodeWelcome(w, std::span<std::byte>(wbuf));
+    if (wlen == 0) return;  // catalog-conformance/encode bug; nothing sane to do
+    if (!sendFrameTo(*slot.transport, FrameType::WELCOME, 0, std::span<const std::byte>(wbuf.data(), wlen))) return;
+    if (armSignJob) slot.signPending = true;
+
+    slot.session.state = HubSessionState::LIVE;
+    emitSessionEvent(session_events::session_resumed, slot.session.session_id, nowMs);
+    // Deliberately NOT _delegate.onSessionJoined(): this is a resumption, not
+    // a new join (session_events::session_joined's own registry note).
 }
 
 // ============================================================================
@@ -966,7 +1271,7 @@ inline std::optional<GrantedPublish> Hub::grantPublishWish(Slot& slot, const Pub
     // RFC-030: the declared curve family, passed through the application's
     // curve policy so the echo is the EFFECTIVE family. An unknown (future)
     // family value is treated as unspecified rather than parroted — the hub
-    // must never claim to honour a smoothness class it cannot name.
+    // must never claim to honor a smoothness class it cannot name.
     uint8_t effectiveFamily = 0;
     if (wish.has_curve_family) {
         uint8_t fam = (wish.curve_family <= curve_families::step) ? wish.curve_family
@@ -986,6 +1291,11 @@ inline std::optional<GrantedPublish> Hub::grantPublishWish(Slot& slot, const Pub
     gp.burst = grantedBurst;
     gp.has_curve_family = wish.has_curve_family;  // echo a family only to a client that declared one
     gp.curve_family = effectiveFamily;
+    // RFC-049b: echo the ORIGINAL wish verbatim alongside the effective value
+    // so a downgrade (curve_policy overrode it) is two present keys a client
+    // compares, not an inference from what it remembers sending.
+    gp.has_requested_curve_family = wish.has_curve_family;
+    gp.requested_curve_family = wish.curve_family;
     return gp;
 }
 
@@ -1064,8 +1374,8 @@ inline void Hub::handleCatalogReady(Slot& slot, std::span<const std::byte> paylo
 // RFC-025/010 per-op access, resolved GENERICALLY from the catalog — no
 // channel-id special case anywhere in this function, deliberately: a generic
 // client reads exactly these annotations to decide which ops to offer, so the
-// hub must enforce exactly what the catalog advertises or grey-never-hide
-// becomes a lie (a client would grey a control it was actually allowed, or
+// hub must enforce exactly what the catalog advertises or gray-never-hide
+// becomes a lie (a client would gray a control it was actually allowed, or
 // offer one it wasn't and discover the truth only by NACK).
 //
 // The entry's own `access` is the FLOOR. Two annotations may RAISE it:
@@ -1264,7 +1574,7 @@ inline void Hub::handleIntent(Slot& slot, std::span<const std::byte> payload, ui
     // (motion stops before any protocol bookkeeping, §11.2), then latches,
     // publishes 0x0003 and broadcasts it at critical priority to every
     // subscriber, bypassing pacing. The raw 0xE5 frame remains the
-    // deframed/relay guarantee for transports that need to recognise a stop
+    // deframed/relay guarantee for transports that need to recognize a stop
     // without a session; this op is the trivially-implementable client path,
     // and its absence is why a UI's red button silently degraded to `stop` —
     // which maps to a decel HALT, NOT an e-stop latch.
@@ -1605,22 +1915,16 @@ inline void Hub::handleStream(Slot& slot, const FrameHeader& h, std::span<const 
     // caller doctrine §3.1) — the hub has done all gating.
     ++slot.session.streamBundlesAccepted;
 
-    // §11.1: an ACCEPTED bundle on a source-mapped channel is "new motion" from
-    // the owning source and clears a latched STOP the SAME way a source-mapped
-    // INTENT does (see handleIntent) — otherwise, after a deadman STOP, a
-    // resumed stream drives the arbiter (soft-start) while the safety STATE
-    // still lies "STOP", a Ground-Truth violation. The bundle was ownership-
-    // gated above (a non-owner Conflict-drops before here), so this only fires
-    // for the source's live owner.
-    if (mappedSource && (_safetyWord & safety_bits::STOP)) {
-        const uint8_t before = _safetyWord;
-        _safetyWord &= ~safety_bits::STOP;
-        _safetyOwnerSession = 0;
-        publishSafetySnapshot();
-        broadcastSafetyNow(nowMs);
-        emitSafetyEdgeEvents(before, nowMs);
-    }
-
+    // RFC-045 REMOVED the STOP-clearing block that used to live here: an
+    // accepted STREAM bundle silently clearing a latched STOP was a workaround
+    // for the deadman's OWN forced-STOP latch (SI-15) — un-wedging a reconnect
+    // after a deadman fire that, post-RFC-045, no longer latches anything in
+    // the first place. It is moot, not merely obsolete: there is no longer a
+    // deadman-born STOP for a resumed stream to clear. An EXPLICIT stop/estop
+    // (0x0005) is still a command and still requires an explicit resume/clear
+    // to lift (§11.1's INTENT-side clear in handleIntent is separate and
+    // unaffected — a genuine operator move-intent still clears STOP the way it
+    // always has; a raw STREAM sample no longer does).
     _delegate.onStreamBundle(channel_id, slot.session.session_id, bundle);
 }
 
@@ -1668,7 +1972,7 @@ inline void Hub::handleGoodbye(Slot& slot, uint32_t nowMs) {
 //
 // Every resume re-runs this (see Slot::PendingBlob): the bytes are borrowed, so
 // the identity is the only thing safe to keep between ticks. Re-running it also
-// re-evaluates the ACCESS GATE for free, and that is the behaviour you want — a
+// re-evaluates the ACCESS GATE for free, and that is the behavior you want — a
 // session demoted mid-transfer (RFC-029's tripwire suspends a changed client to
 // `watch`) stops receiving the trust ledger at the next chunk boundary rather
 // than at the end of the document.
@@ -2140,6 +2444,14 @@ inline void Hub::broadcastSafetyNow(uint32_t nowMs) {
     if (!retained) return;
     for (auto& slot : _slots) {
         if (!slot.session.occupied()) continue;
+        // A PARKED session keeps its slot, grants and subscriptions but has NO
+        // transport (RFC-042; detachTransport() nulls it). sendFrameToTracked()
+        // takes an ITransport&, so a null here is a panic, not a missed frame —
+        // see TRAPS T13. Skipping loses nothing: the snapshot is retained and
+        // §9.1 re-pushes it the instant the session reattaches. Deliberately
+        // NOT routed through trackCriticalSend(): an unattached session is not
+        // a congested link and must not be aged toward eviction as one.
+        if (slot.transport == nullptr) continue;
         // RFC-015: even the never-shed critical broadcast respects the gate —
         // a session that cannot decode a packed safety snapshot gains nothing
         // from receiving one, and §11.5(2) is satisfied instead by the retained
@@ -2217,7 +2529,7 @@ inline void Hub::setSafetyModes(bool manualOverride, bool bypassLimits) {
 // mode bits). Called only after the delegate ACCEPTED the op, so "the delegate
 // does not implement HOLD" resolves to a NACK UNSUPPORTED_OP from the delegate
 // and no latch ever happens — discoverable and honest, instead of the pre-v1.0
-// behaviour where HOLD/PAUSE had registry codes and wire bits but no rule about
+// behavior where HOLD/PAUSE had registry codes and wire bits but no rule about
 // who set them, so a generic client could not know whether sending HOLD did
 // anything at all on an arbitrary hub.
 //
@@ -2670,7 +2982,7 @@ inline void Hub::handleKnock(Slot& slot, const PairReqMsg& m, uint32_t nowMs) {
     if (k == nullptr) {
         // The bound did its job: pairing_pending_max strangers are already
         // waiting. BUSY, not DENIED — nothing was refused on the merits and
-        // retrying later is the correct client behaviour. `retry_after_ms` is
+        // retrying later is the correct client behavior. `retry_after_ms` is
         // the knock window, because that is genuinely when a slot next frees.
         NackMsg n;
         n.code = NackCode::BUSY;
@@ -2786,7 +3098,7 @@ inline bool Hub::handleAdminIntent(Slot& slot, const IntentMsg& m, uint32_t nowM
             if (wantRole > uint64_t(AccessLevel::configure)) { nack(NackCode::INVALID_VALUE); return true; }
             const AccessLevel role = hasRole ? AccessLevel(uint8_t(wantRole)) : AccessLevel::control;
             // CEILING: up to the approver's OWN tier, configure included
-            // (operator ruling). Conventional admin behaviour; the roster is
+            // (operator ruling). Conventional admin behavior; the roster is
             // the audit trail rather than a hard ceiling that would leave the
             // first administrator unable to appoint a second. Asking for MORE
             // than you hold is REFUSED rather than silently clamped, because a
@@ -2963,14 +3275,22 @@ inline void Hub::evictSlot(Slot& slot, NackCode code, uint32_t nowMs) {
     slot.criticalStalling = false;
 }
 
+// Both *Tracked helpers refuse a detached slot BEFORE dereferencing, and
+// without tracking the miss (TRAPS T13): a parked session has no link to be
+// congested on, so arming the critical-stall timer would evict it for a
+// failure that never happened. The `update()` walk guards its own slot; these
+// two are also reachable from the fan-out senders, where the slot being
+// written to is NOT the slot being pumped.
 inline bool Hub::sendFrameToTracked(Slot& slot, FrameType type, uint16_t channel, std::span<const std::byte> payload,
                                      uint32_t nowMs, uint16_t seq) {
+    if (slot.transport == nullptr) return false;
     bool ok = sendFrameTo(*slot.transport, type, channel, payload, seq);
     trackCriticalSend(slot, ok, nowMs);
     return ok;
 }
 
 inline void Hub::sendNackTracked(Slot& slot, const NackMsg& n, uint32_t nowMs) {
+    if (slot.transport == nullptr) return;
     NackMsg stamped = n;  // RFC-001, same rule as sendNack()
     if (!stamped.has_intent_seq && _dispatchSeqValid) {
         stamped.has_intent_seq = true;
@@ -3035,10 +3355,91 @@ inline void Hub::emitTakeoverEvent(uint8_t source_id, uint32_t newOwnerSession, 
 }
 
 // ============================================================================
+// RFC-042: session staleness — the shared "mark stale" path + the observability
+// edges (session_stale/session_resumed, session_event_kinds 4/5).
+// ============================================================================
+
+// Best-effort EVENT on the spec-core session-events channel (0x0007), same
+// shape as emitTakeoverEvent's single-id kinds: body key 1 = the affected
+// session_id. Skips the encode entirely when nobody is subscribed (§9.4).
+inline void Hub::emitSessionEvent(uint8_t kind, uint32_t session_id, uint32_t nowMs) {
+    if (!anySubscribed(channels::session_events)) return;
+
+    EventMsg ev{};
+    ev.channel_id = channels::session_events;
+    ev.timestamp = nowMs;
+    ev.event_kind = kind;
+    ev.has_body = true;
+    ev.body_count = 1;
+    ev.body[0] = IntentValueField{1, IntentValue::ofU64(session_id)};
+
+    std::array<std::byte, 32> buf{};
+    size_t n = encodeEvent(ev, std::span<std::byte>(buf));
+    if (n > 0) publishEvent(channels::session_events, std::span<const std::byte>(buf.data(), n));
+}
+
+// The RFC-042 staleness transition, shared by pumpDeadman() and pumpIdleReap():
+// releases every source the session owns (unconditionally, latching nothing —
+// RFC-045) and marks the session STALE instead of tearing it down. Slot,
+// session_id, subs, publishGrants, intent ring, and readiness are all left
+// exactly as they were (session.hpp's RFC-042 doc comment enumerates the kept
+// fields) — only `state` and `staleSinceMs` change. NO GOODBYE: staleness is
+// not termination, and the client may never even notice.
+inline void Hub::markStale(Slot& slot, uint32_t nowMs, uint8_t reason) {
+    releaseSessionSources(slot.session.session_id, reason, nowMs);
+    slot.session.state = HubSessionState::STALE;
+    slot.session.staleSinceMs = nowMs;
+    emitSessionEvent(session_events::session_stale, slot.session.session_id, nowMs);
+}
+
+// Path A resumption (§6.6 "any received frame is proof of life", RFC-042):
+// called from pumpSlot() before dispatch, for every frame on an occupied
+// slot. A STALE session that is still attached to its ORIGINAL transport —
+// the dominant case, since backgrounding/locking a screen throttles JS timers
+// without closing the socket — needs nothing more than any frame (a PING is
+// enough) to flip straight back to LIVE: no HELLO, no re-SUBSCRIBE, no catalog
+// fetch, because the grants never left. Path B (a fresh transport reattaching
+// via HELLO) is handleReattach(), below.
+inline void Hub::reviveIfStale(Slot& slot, uint32_t nowMs) {
+    if (slot.session.state != HubSessionState::STALE) return;
+    slot.session.state = HubSessionState::LIVE;
+    slot.session.staleSinceMs = 0;
+    emitSessionEvent(session_events::session_resumed, slot.session.session_id, nowMs);
+}
+
+// RFC-042 item 5: under slot pressure (a HELLO that would otherwise NACK BUSY)
+// a STALE session yields its slot before a genuinely new identity is refused.
+// Eligible: STALE only — a LIVE session is never evicted for pressure, full
+// stop (only a duplicate-instance_id HELLO ever displaces one). Choice: lowest
+// access tier first, tie-break longest continuously stale (earliest
+// staleSinceMs loses first). Returns nullptr when nothing is eligible.
+inline Hub::Slot* Hub::findEvictableStale(const Slot* exclude) {
+    Slot* best = nullptr;
+    for (auto& s : _slots) {
+        if (&s == exclude) continue;
+        if (s.session.state != HubSessionState::STALE) continue;
+        if (best == nullptr) {
+            best = &s;
+            continue;
+        }
+        const bool lowerTier = uint8_t(s.session.role) < uint8_t(best->session.role);
+        const bool sameTierStaler = uint8_t(s.session.role) == uint8_t(best->session.role) &&
+                                    timeDelta(s.session.staleSinceMs, best->session.staleSinceMs) < 0;
+        if (lowerTier || sameTierStaler) best = &s;
+    }
+    return best;
+}
+
+// ============================================================================
 // M5: deadman (§11.3) — evaluated once per occupied session per update()
 // ============================================================================
 
 inline void Hub::pumpDeadman(Slot& slot, uint32_t nowMs) {
+    // A session already STALE (or otherwise not LIVE — VALIDATING/GRANTED
+    // never own a source) has nothing further for this pump to do; re-firing
+    // on an already-stale session would be a harmless but pointless restate.
+    if (slot.session.state != HubSessionState::LIVE) return;
+
     // Scope note (documented clarification of a spec/task tension — see the
     // M5 report): §11.3's deadman window binds to the ACTIVE SOURCE, not to
     // sessions in general ("Every session that owns an active source has a
@@ -3060,55 +3461,51 @@ inline void Hub::pumpDeadman(Slot& slot, uint32_t nowMs) {
     // no wish). WELCOME key 24 echoed exactly this value.
     if (!timeReached(nowMs, slot.session.lastRxMs + slot.session.deadmanMs)) return;
 
-    // §6.5/§11.3: the session itself dies with its lost source(s) in this M5
-    // pass (see the scoping note above) — GOODBYE best-effort FIRST (the slot
-    // is reset below), then the shared teardown releases every owned source
-    // with reason=3 (deadman-release), running each source's §11.3 loss policy
-    // (Stop latches STOP + stops motion; Continue releases only). Registry code
-    // DEADMAN_TIMEOUT (0x0108, allocated when this gap was flagged).
-    GoodbyeMsg gb;
-    gb.code = NackCode::DEADMAN_TIMEOUT;
-    std::array<std::byte, 64> buf{};
-    size_t n = encodeGoodbye(gb, std::span<std::byte>(buf));
-    if (n > 0 && slot.transport != nullptr) {
-        sendFrameTo(*slot.transport, FrameType::GOODBYE, 0, std::span<const std::byte>(buf.data(), n));
-    }
-    teardownSession(slot, nowMs, /*reason=*/3 /*deadman-release*/);
+    // RFC-042: silence past the deadman window means the SESSION is STALE, not
+    // gone — the slot is RETAINED so the same client resumes without a full
+    // HELLO/WELCOME/catalog cycle. RFC-045: this releases ownership but forces
+    // no stop (see markStale()/releaseSessionSources()'s own comments); the
+    // reference hub no longer emits DEADMAN_TIMEOUT for silence at all (the
+    // code stays registered for a hub/policy combination that still wants to
+    // terminate outright).
+    markStale(slot, nowMs, /*reason=*/3 /*deadman-release*/);
 }
 
 // ============================================================================
-// RFC-024: idle reaping for sessions that own NO source
+// RFC-024/RFC-042: idle reaping for sessions that own NO source
 //
 // THE COMBINED LIVENESS MODEL (three regimes, one per failure it protects
 // against; they are checked in this order and the first to fire wins):
 //
 //   1. SOURCE-OWNING sessions -> §11.3 DEADMAN, deadman_default_ms (600).
-//      Silence means motion is unmonitored, so the loss policy runs: STOP
-//      latched, motion stopped, ownership released, session torn down
-//      (DEADMAN_TIMEOUT). Tight, because the consequence is physical.
+//      RFC-042: marked STALE, ownership released (RFC-045: nothing latched).
 //
 //   2. EVERY OTHER session -> §6.5 IDLE REAPING, this function:
 //      idle_reap_multiplier (3) x ping_interval_idle_ms (1000) = 3000 ms of
-//      total silence. NO motion consequence — nothing this session held can
-//      hurt anyone; it is purely a slot that a live client could use. §6.5's
-//      "MAY reap at 3x the idle interval" was written and never implemented,
-//      so a viewer that went dark held a slot until reboot.
+//      total silence. RFC-042: also marked STALE, not torn down — a dark
+//      viewer's slot is retained under the SAME staleness model as a
+//      source-owner's, and only yields under RFC-042 item 5's slot-pressure
+//      eviction, never merely for having gone quiet.
 //
 //   3. Sessions that are ALIVE but never adopted the catalog ->
 //      RFC-015 READY TIMEOUT, catalog_ready_timeout_ms (15000) since GRANT.
 //      Neither 1 nor 2 can ever fire on a client that PINGs happily (it IS
 //      alive, and it owns nothing because both planes are gated), so without
 //      this it would hold a slot forever. Measured from grant, not from last
-//      rx, because that is the thing that is not progressing.
+//      rx, because that is the thing that is not progressing. UNAFFECTED by
+//      RFC-042 on purpose: a session stuck mid-handshake has no partially-
+//      adopted state worth preserving, so this remains a hard teardown.
 //
 // The three do not overlap: 1 and 2 are disjoint by definition (owns / does
 // not own), and 3 keys off a different clock entirely. A session can only be
-// reaped by 2 or 3 once — teardownSession() frees the slot either way.
+// marked stale by 1 or 2 once — markStale() changes `state` either way.
 // ============================================================================
 
 inline bool Hub::pumpIdleReap(Slot& slot, uint32_t nowMs) {
+    if (slot.session.state != HubSessionState::LIVE) return false;
+
     // Source owners belong to regime 1 and are already handled, on a tighter
-    // window and with the loss policy that only they need.
+    // window.
     for (uint8_t src = 0; src < SourceOwnershipTable::kMaxSources; ++src) {
         if (_ownership.ownerOf(src) == slot.session.session_id) return false;
     }
@@ -3116,20 +3513,9 @@ inline bool Hub::pumpIdleReap(Slot& slot, uint32_t nowMs) {
     constexpr uint32_t kIdleReapMs = limits::idle_reap_multiplier * limits::ping_interval_idle_ms;
     if (!timeReached(nowMs, slot.session.lastRxMs + kIdleReapMs)) return false;
 
-    // GOODBYE best-effort FIRST (teardownSession resets the slot right after).
-    // RFC-039.4: IDLE_REAPED, its own code. This function's original comment
-    // argued a distinct code was "a difference the client cannot act on
-    // differently" — true for the CLIENT's next move (reconnect either way),
-    // but wrong for every OBSERVER: logs and telemetry were blaming a reaped
-    // dashboard on the motion-safety timeout. Housekeeping is not a deadman.
-    GoodbyeMsg gb;
-    gb.code = NackCode::IDLE_REAPED;
-    std::array<std::byte, 64> buf{};
-    size_t n = encodeGoodbye(gb, std::span<std::byte>(buf));
-    if (n > 0 && slot.transport != nullptr) {
-        sendFrameTo(*slot.transport, FrameType::GOODBYE, 0, std::span<const std::byte>(buf.data(), n));
-    }
-    teardownSession(slot, nowMs);
+    // RFC-042: STALE, not torn down (see pumpDeadman's twin comment). No
+    // GOODBYE — staleness is not an ending.
+    markStale(slot, nowMs, /*reason=*/4 /*session-loss-release — owns nothing, forwarded for uniformity*/);
     return true;
 }
 
@@ -3138,6 +3524,7 @@ inline bool Hub::pumpIdleReap(Slot& slot, uint32_t nowMs) {
 // ============================================================================
 
 inline bool Hub::pumpReadyTimeout(Slot& slot, uint32_t nowMs) {
+    if (slot.session.state == HubSessionState::STALE) return false;  // RFC-042: not this pump's business
     if (slot.session.ready) return false;
     if (!timeReached(nowMs, slot.session.grantedAtMs + limits::catalog_ready_timeout_ms)) return false;
 
@@ -3165,34 +3552,28 @@ inline bool Hub::pumpReadyTimeout(Slot& slot, uint32_t nowMs) {
 // ============================================================================
 
 inline void Hub::releaseSessionSources(uint32_t sessionId, uint8_t reason, uint32_t nowMs) {
-    // RFC-022.3: the latched cause must say HOW the owner went away. `reason`
-    // is already the §11.4 ownership-release reason (3 = deadman-release,
-    // 4 = session-loss-release), and it is the ONLY thing distinguishing the
-    // two callers — pumpDeadman() passes 3, teardownSession() defaults to 4.
-    // Before `safety_causes::session_loss` existed this line was a hardcoded
-    // 1, so a client closing its tab, an eviction, and a slot reuse all told
-    // every subscriber "deadman" — a silence-TIMEOUT that never happened. On a
-    // safety channel that is an observable-truth bug, not a naming nit.
-    const uint8_t cause =
-        (reason == 3) ? safety_causes::deadman : safety_causes::session_loss;
+    (void)nowMs;  // RFC-045: nothing here broadcasts a safety edge any more
+    // RFC-045: source-loss is liveness bookkeeping, not a safety event. This
+    // used to run a per-source Stop-vs-Continue POLICY dispatch here — latching
+    // STOP + delegate.onDeadmanStop() for every "initiator-bound" source,
+    // regardless of which of the six teardown doors (or, since RFC-042, a
+    // plain staleness transition) triggered it. REMOVED: a command-driven
+    // source has nothing left to execute once its owner is gone and settles on
+    // its own by construction (§9.6's closed motion surface — every mode is a
+    // continuously-fed stream or an individually time-bounded segment), so the
+    // forced latch only ever converted a graceful settle into a spurious,
+    // operator-visible STOP edge. The one case that is genuinely different — a
+    // hub-autonomous generator whose owning session went away — is now the
+    // FIRMWARE DELEGATE's call via the registered `source.background_run`
+    // field role, decided entirely inside its OWN onSourceOwnership()
+    // implementation; the library stays device-agnostic and only ever reports
+    // the release, exactly as it always has for every source class.
+    //
+    // `SourceLossPolicy`/`HubDelegate::sourcePolicy()`/`onDeadmanStop()` remain
+    // declared (frozen delegate interface) but are no longer called from here.
     bool releasedAny = false;
     _ownership.releaseAllOf(sessionId, [&](uint8_t source) {
         releasedAny = true;
-        SourceLossPolicy pol = _delegate.sourcePolicy(source);
-        if (pol == SourceLossPolicy::Stop) {
-            const uint8_t before = _safetyWord;
-            _delegate.onDeadmanStop(source);  // §11.3: stop motion BEFORE the latch publishes
-            _safetyWord |= safety_bits::STOP;
-            _safetyCause = cause;
-            _safetyOwnerSession = sessionId;  // §11.1: "owning session_id where applicable"
-            publishSafetySnapshot();
-            broadcastSafetyNow(nowMs);  // bypass pacing, like the ESTOP latch does
-            // The edge that makes this worth having: an operator STOP, a §11.3
-            // deadman and a teardown loss policy are INDISTINGUISHABLE in the
-            // snapshot, and the event carries the cause that tells them apart.
-            emitSafetyEdgeEvents(before, nowMs);
-        }
-        // Continue-policy sources: release only, no STOP latch.
         _delegate.onSourceOwnership(source, 0, reason);
     });
     if (releasedAny) publishControlOwnerStateIfPresent();

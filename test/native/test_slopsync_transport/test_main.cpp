@@ -649,7 +649,7 @@ TEST_CASE("T-12: a large control frame reassembles byte-identical over a 20%-los
 // ============================================================================
 // RFC-028 regression — Reassembler TOTALITY (found by test/fuzz/fuzz_frame).
 //
-// Minimised crashing input, as the harness's replay format:
+// Minimized crashing input, as the harness's replay format:
 //   type=0x11 flags=0x00 seq=0 channel=0 dt=0 len=0x0FA0(4000)
 //   payload = [00 00] + 3998 x 'A'
 //

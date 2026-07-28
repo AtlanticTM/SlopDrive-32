@@ -106,7 +106,7 @@ TEST_CASE("Warn+ overflow drops oldest and accounts the loss") {
     log.addSink(&sink);
 
     // Warn+ is the reserved class: it evicts rather than being refused, so
-    // this is the classic drop-oldest FIFO behaviour.
+    // this is the classic drop-oldest FIFO behavior.
     for (int i = 0; i < 11; ++i) log.logf(Level::Warn, "t", "m%d", i);
 
     // 8 slots, 11 pushes: m0..m2 dropped, m3..m10 survive.

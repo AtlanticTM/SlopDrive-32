@@ -401,10 +401,13 @@ TEST_CASE("shed table (pure): shedDecision matches the M5 exhaustive table") {
 }
 
 // ============================================================================
-// S-05 — deadman, Stop policy: silent streamer's source stops motion, latches
-// STOP, and the session itself is freed.
+// S-05 — RFC-042/RFC-045: deadman on a Stop-policy source releases ownership
+// and marks the session STALE — it no longer latches STOP or calls
+// onDeadmanStop, and the session's SLOT is RETAINED (not freed). The declared
+// SourceLossPolicy::Stop is proven INERT: the reference hub no longer consults
+// it at all (see releaseSessionSources()'s RFC-045 comment).
 // ============================================================================
-TEST_CASE("S-05: deadman fires onDeadmanStop + latches STOP for a Stop-policy source, then frees the session") {
+TEST_CASE("S-05: deadman on a Stop-policy source releases ownership, marks STALE, latches nothing") {
     Catalog32 catalog;
     safetyCatalog(catalog);
     ManualClock clock;
@@ -447,28 +450,34 @@ TEST_CASE("S-05: deadman fires onDeadmanStop + latches STOP for a Stop-policy so
     // in one jump — B keeps being pumped so it can observe the result.
     pump(hub, clock, {&clientB}, /*rounds=*/1, /*stepUs=*/700000);
 
-    REQUIRE(hubDelegate.deadmanStopped.size() == 1);
-    CHECK(hubDelegate.deadmanStopped[0] == 1);
+    CHECK(hubDelegate.deadmanStopped.empty());  // RFC-045: never called, any more, any policy
     REQUIRE(hubDelegate.ownershipEvents.size() == 2);
     CHECK(hubDelegate.ownershipEvents[1].source == 1);
     CHECK(hubDelegate.ownershipEvents[1].owner == 0);
-    CHECK(hubDelegate.ownershipEvents[1].reason == 3);  // deadman-release
+    CHECK(hubDelegate.ownershipEvents[1].reason == 3);  // deadman-release, still reported
 
-    CHECK(hub.stopLatched());
-    CHECK(hub.sessionCount() == sessionsBefore - 1);
+    CHECK_FALSE(hub.stopLatched());
+    // RFC-042: the slot is RETAINED (marked STALE), not freed.
+    CHECK(hub.sessionCount() == sessionsBefore);
+    REQUIRE(hub.sessionBySlot(0) != nullptr);
+    CHECK(hub.sessionBySlot(0)->state == HubSessionState::STALE);
 
-    // B observes the STOP latch via its own safety shadow.
-    CHECK(clientB.stopLatched());
+    // B observes NO STOP latch via its own safety shadow — a deadman never
+    // was a safety edge after RFC-045.
+    CHECK_FALSE(clientB.stopLatched());
     auto w = clientB.safetyWord();
     REQUIRE(w.has_value());
-    CHECK((*w & safety_bits::STOP) != 0);
+    CHECK((*w & safety_bits::STOP) == 0);
 }
 
 // ============================================================================
-// S-06 — deadman, Continue policy: hub-autonomous source keeps running,
-// ownership just releases; no STOP; the source is immediately reacquirable.
+// S-06 — RFC-042/RFC-045: deadman on a Continue-policy source is
+// behaviorally IDENTICAL to S-05's Stop-policy case at the hub-library level —
+// ownership releases, the session goes STALE, nothing latches, regardless of
+// what sourcePolicy() answers. The source is immediately reacquirable by a
+// different session, exactly as before.
 // ============================================================================
-TEST_CASE("S-06: deadman on a Continue-policy source releases ownership only, no STOP, immediately reacquirable") {
+TEST_CASE("S-06: deadman on a Continue-policy source releases ownership, marks STALE, immediately reacquirable") {
     Catalog32 catalog;
     safetyCatalog(catalog);
     ManualClock clock;
@@ -502,13 +511,14 @@ TEST_CASE("S-06: deadman on a Continue-policy source releases ownership only, no
 
     pump(hub, clock, {&clientB}, /*rounds=*/1, /*stepUs=*/700000);
 
-    CHECK(hubDelegate.deadmanStopped.empty());  // Continue policy: no onDeadmanStop
+    CHECK(hubDelegate.deadmanStopped.empty());  // Continue policy: no onDeadmanStop (and never called at all now)
     REQUIRE(hubDelegate.ownershipEvents.size() == 2);
     CHECK(hubDelegate.ownershipEvents[1].source == 2);
     CHECK(hubDelegate.ownershipEvents[1].owner == 0);
     CHECK(hubDelegate.ownershipEvents[1].reason == 3);
     CHECK_FALSE(hub.stopLatched());
-    CHECK(hub.sessionCount() == sessionsBefore - 1);  // the session itself still dies (§6.5, M5 scope note)
+    // RFC-042: the session goes STALE, not gone — slot count is unchanged.
+    CHECK(hub.sessionCount() == sessionsBefore);
 
     // B can acquire source 2 immediately — no lingering conflict.
     REQUIRE(clientB.sendIntent(0x0084, makeSpeedIntent(75.0f)).has_value());
@@ -1094,9 +1104,13 @@ TEST_CASE("M4a/RFC-025c: setSafetyModes is the machine-side direction, publishin
 }
 
 // ============================================================================
-// RFC-022.3 — the latched cause tells the truth about HOW the owner left.
+// RFC-045 — source loss (any door, any cause) latches NOTHING any more. This
+// supersedes the old RFC-022.3 test pair, which proved the latched CAUSE told
+// GOODBYE apart from a real silence timeout; RFC-045 removed the latch itself,
+// so there is no cause byte left to distinguish — both tests now prove the
+// stronger, simpler property directly.
 // ============================================================================
-TEST_CASE("M4a/RFC-022.3: a GOODBYE latches session_loss, not deadman") {
+TEST_CASE("M4a/RFC-045: a GOODBYE releases ownership but latches nothing") {
     Catalog32 catalog;
     safetyCatalog(catalog);
     ManualClock clock;
@@ -1122,22 +1136,25 @@ TEST_CASE("M4a/RFC-022.3: a GOODBYE latches session_loss, not deadman") {
     REQUIRE(a.state() == ClientSessionState::LIVE);
     REQUIRE(b.state() == ClientSessionState::LIVE);
 
-    // A takes the source, then says GOODBYE — a graceful departure, which is
-    // precisely the case that used to be blamed on a deadman TIMEOUT in every
-    // subscriber's UI and log line.
+    // A takes the source, then says GOODBYE — a graceful departure. Before
+    // RFC-045 this latched STOP with cause=session_loss (the fix that stopped
+    // it being misreported as a deadman); RFC-045 removes the latch entirely,
+    // so a graceful departure is now — correctly — silent on the safety plane.
     REQUIRE(a.sendIntent(0x0084, makeSpeedIntent(100.0f)).has_value());
     pump(hub, clock, {&a, &b}, 6);
     a.disconnect();
     pump(hub, clock, {&a, &b}, 10);
 
-    CHECK((hub.safetyWord() & safety_bits::STOP) != 0);   // the loss policy still ran
+    CHECK((hub.safetyWord() & safety_bits::STOP) == 0);
+    CHECK_FALSE(hub.stopLatched());
+    // The retained snapshot is UNCHANGED (still all-clear) — release-only
+    // teardown never republishes it at all now that nothing latches.
     auto& snap = delB.lastStateByChannel[0x0003];
     REQUIRE(snap.size() == 9);
-    CHECK(uint8_t(snap[1]) == safety_causes::session_loss);
-    CHECK(uint8_t(snap[1]) != safety_causes::deadman);
+    CHECK((uint8_t(snap[0]) & safety_bits::STOP) == 0);
 }
 
-TEST_CASE("M4a/RFC-022.3: an actual silence timeout still reports deadman") {
+TEST_CASE("M4a/RFC-045: an actual silence timeout ALSO latches nothing — the deadman is not a safety mechanism") {
     Catalog32 catalog;
     safetyCatalog(catalog);
     ManualClock clock;
@@ -1166,22 +1183,23 @@ TEST_CASE("M4a/RFC-022.3: an actual silence timeout still reports deadman") {
         clock.advanceUs(5000);
         hub.update(clock.nowUs());
     }
-    REQUIRE_FALSE(hubDelegate.deadmanStopped.empty());
-    CHECK((hub.safetyWord() & safety_bits::STOP) != 0);
+    // RFC-045: onDeadmanStop is never called any more, for any policy — the
+    // session went STALE (RFC-042) and its source was released, and that is
+    // the whole story.
+    CHECK(hubDelegate.deadmanStopped.empty());
+    CHECK((hub.safetyWord() & safety_bits::STOP) == 0);
+    CHECK_FALSE(hub.stopLatched());
+    REQUIRE(hub.sessionBySlot(0) != nullptr);
+    CHECK(hub.sessionBySlot(0)->state == HubSessionState::STALE);
 
-    // Now let the (formerly silent) client drain what the hub already put on
-    // the wire — going silent is what FIRES the deadman; it does not stop the
-    // client from reading the broadcast afterwards.
+    // Nothing new is on the wire to drain — no safety edge happened — but the
+    // formerly-silent client still gets a coherent, all-clear shadow.
     for (int i = 0; i < 6; ++i) {
         clock.advanceUs(1000);
         hub.update(clock.nowUs());
         a.update(clock.nowUs());
     }
-
-    // The subscriber's own retained snapshot is where the cause is observable
-    // (there is no hub getter for it, and nor should there be — the wire IS
-    // the observation).
     auto& snap = delA.lastStateByChannel[0x0003];
     REQUIRE(snap.size() == 9);
-    CHECK(uint8_t(snap[1]) == safety_causes::deadman);
+    CHECK((uint8_t(snap[0]) & safety_bits::STOP) == 0);
 }

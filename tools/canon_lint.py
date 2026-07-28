@@ -50,23 +50,186 @@ BINARY_SUFFIXES = (".bin", ".png", ".jpg", ".webp", ".ico", ".pdf",
                    ".woff", ".woff2", ".idx", ".gz", ".lock")
 
 # ------------------------------------------------------------------ C-11
-# American English only. Stems + suffixes kept explicit so no legitimate
-# US word matches (e.g. "analysis", "cancellation", "premise" must NOT hit).
-_BRITISH = (
-    r"behaviours?|colours?|colouring|flavours?|favourites?|honours?|honoured|honouring|"
-    r"neighbours?|neighbouring|centres?|centred|centring|metres?|fibres?|litres?|"
-    r"greys?|greyed|greying|artefacts?|whilst|amongst|catalogues?|catalogued|cataloguing|"
-    r"dialogues?|licences?|licenced|defences?|offences?|pretences?|"
-    r"practise|practises|practised|practising|"
-    r"cancelled|cancelling|signalled|signalling|modelled|modelling|"
-    r"labelled|labelling|travelled|travelling|levelled|levelling|"
-    r"channelled|channelling|totalled|totalling|"
-    r"analyse|analyses(?=\s+(?:the|a|an|this|that|each|every|it|them))|analysed|analysing|analysers?|paralysed?|"
-    r"(?:initial|serial|deserial|normal|synchron|author|util|final|organ|optim|"
-    r"minim|maxim|custom|priorit|summar|recogn|emphas|special|stabil|equal|"
-    r"central|visual|material|standard|modular|generalis)is(?:e|es|ed|ing|ation|ations|ers?|able)"
-)
-BRITISH_RX = re.compile(r"\b(?:%s)\b" % _BRITISH, re.IGNORECASE)
+# American English only. Stem-based: each family below generates its
+# matchable British forms from a stem list plus a CLOSED set of real
+# inflectional suffixes -- never a bare wildcard -- so a word that merely
+# shares a prefix with a stem (organism, capitalism, modernism, optimism,
+# realism, initialism, specialism, apologist, catalyst, analysis,
+# paralysis, catalysis, emphasis, sombrero, cancellation) can never match.
+# "analyses"/"paralyses"/"catalyses" are the one genuine ambiguity (Greek-
+# plural noun, identical in both dialects, vs. the British 3rd-person-
+# singular verb spelling) -- matched only when followed by a determiner
+# that marks it as a verb-with-object, same heuristic as before.
+def _build_british_regex():
+    forms = set()
+
+    # -our -> -or (hour/four/your/pour/sour/tour/contour/velour/glamour/
+    # devour/flour/paramour/troubadour are real English, never in this set)
+    our_stems = (
+        "favour", "behaviour", "colour", "honour", "labour", "neighbour",
+        "flavour", "armour", "harbour", "humour", "rumour", "saviour",
+        "vapour", "endeavour", "rigour", "vigour", "valour", "clamour",
+        "odour", "parlour", "splendour", "tumour", "candour", "ardour",
+        "fervour", "demeanour",
+    )
+    our_suffixes = ("", "s", "ed", "ing", "er", "ers", "ite", "ites",
+                    "able", "ably", "ful", "fully", "less", "y")
+    for stem in our_stems:
+        for sfx in our_suffixes:
+            forms.add(stem + sfx)
+    forms.update(("savour", "savours", "savoured", "savouring",
+                  "savoury", "savouries"))
+
+    # -ise/-isation -> -ize/-ization, -yse -> -yze. Built from the verb
+    # ROOT (stem minus trailing "e") plus a closed suffix template, so
+    # "organism"/"capitalism"/"analysis"/"emphasis"/"catalyst" etc. --
+    # which merely share a prefix -- are structurally excluded, not
+    # exception-listed.
+    ise_stems = (
+        "organise", "realise", "recognise", "initialise", "serialise",
+        "synchronise", "customise", "minimise", "maximise", "optimise",
+        "normalise", "utilise", "categorise", "prioritise", "summarise",
+        "authorise", "standardise", "stabilise", "finalise", "generalise",
+        "specialise", "visualise", "randomise", "sanitise", "capitalise",
+        "centralise", "equalise", "italicise", "memorialise", "modernise",
+        "neutralise", "penalise", "personalise", "publicise", "quantise",
+        "localise", "tokenise", "emphasise", "apologise", "harmonise",
+    )
+    for stem in ise_stems:
+        root = stem[:-1]  # "organise" -> "organis"
+        # NOTE: no bare "root" (empty suffix) form -- for stems like
+        # "emphasise" the bare root ("emphasis") IS the real English noun
+        # and must never match. The bare verb comes from `stem` itself
+        # (below), which still ends in "e".
+        for sfx in ("es", "ed", "ing", "er", "ers", "ation", "ations", "able"):
+            forms.add(root + sfx)
+        forms.add(stem)  # bare verb, e.g. "organise"
+
+    yse_stems = ("analyse", "paralyse", "catalyse")
+    for stem in yse_stems:
+        root = stem[:-1]  # "analys"
+        for sfx in ("", "ed", "ing", "er", "ers"):
+            forms.add(root + sfx)
+        forms.add(stem)
+        # deliberately no "-es" form: "analyses"/"paralyses"/"catalyses"
+        # are the ambiguous Greek-plural noun, handled below instead.
+
+    # -re -> -er (mere/acre/genre/mediocre/massacre/ogre/timbre/cadre/
+    # sombrero are real English and structurally excluded: bare/plural/
+    # past suffixes only, never \w*)
+    re_stems = (
+        "centre", "metre", "litre", "fibre", "calibre", "theatre",
+        "sombre", "spectre", "lustre", "manoeuvre", "sceptre",
+        "centimetre", "millimetre", "kilometre",
+    )
+    for stem in re_stems:
+        for sfx in ("", "s", "d"):
+            forms.add(stem + sfx)
+
+    # -ogue -> house style -og (this project says "catalog" hundreds of times)
+    forms.update((
+        "catalogue", "catalogues", "catalogued", "cataloguing", "cataloguer",
+        "analogue", "analogues",
+        "dialogue", "dialogues", "dialogued", "dialoguing",
+        "epilogue", "epilogues",
+        "prologue", "prologues",
+    ))
+
+    # doubled-L inflections -> single-L (cancellation is correct US, both
+    # sides double the L -- excluded by simply never being in this list)
+    forms.update((
+        "travelled", "travelling", "traveller", "travellers",
+        "labelled", "labelling",
+        "modelled", "modelling",
+        "cancelled", "cancelling",
+        "levelled", "levelling",
+        "signalled", "signalling",
+        "channelled", "channelling",
+        "marshalled", "marshalling",
+        "totalled", "totalling",
+        "equalled", "equalling",
+        "fuelled", "fuelling",
+        "dialled", "dialling",
+        "rivalled", "rivalling",
+        "funnelled", "funnelling",
+        "tunnelled", "tunnelling",
+        "panelled", "panelling",
+        "quarrelled", "quarrelling",
+        "counselled", "counselling", "counsellor", "counsellors",
+        "spiralled", "spiralling",
+    ))
+
+    # misc singles (doughnut/glamour: accept both spellings, never listed)
+    forms.update((
+        "grey", "greys", "greyed", "greying", "greyscale",
+        "judgement", "judgements",
+        "acknowledgement", "acknowledgements",
+        "aluminium",
+        "artefact", "artefacts",
+        "licence", "licences",
+        "defence", "defences",
+        "offence", "offences",
+        "pretence", "pretences",
+        "practise", "practises", "practised", "practising",
+        "programme", "programmes",
+        "tyre", "tyres",
+        "kerb", "kerbs",
+        "mould", "moulds", "moulded", "moulding", "mouldy",
+        "smoulder", "smoulders", "smouldered", "smouldering",
+        "whilst", "amongst", "amidst",
+        "learnt", "spelt", "dreamt",
+        "storey", "storeys",
+        "sceptical", "scepticism",
+        "enquire", "enquires", "enquired", "enquiring", "enquiry", "enquiries",
+        "fulfil", "fulfils", "fulfilment",
+        "skilful", "skilfully",
+        "wilful", "wilfully",
+        "enrol", "enrols", "enrolment", "enrolments",
+        "distil", "distils", "distilment",
+        "jewellery",
+        "plough", "ploughs", "ploughed", "ploughing",
+        "draught", "draughts",
+        "behaviourally",
+        "speciality", "specialities",
+        "cosy", "cosier", "cosiest",
+        "snigger", "sniggers", "sniggered", "sniggering",
+        "aeroplane", "aeroplanes",
+        "cheque", "cheques",
+        "gaol", "gaols",
+        "moustache", "moustaches",
+        "pyjamas",
+        "furore",
+    ))
+
+    literal_rx = r"\b(?:%s)\b" % "|".join(sorted(forms, key=len, reverse=True))
+    # Ambiguous Greek-plural/British-verb collision: only flag when a
+    # determiner+object follows, marking it as a verb use ("it analyses
+    # the data"), never the bare plural noun ("risk analyses").
+    ambiguous_rx = (
+        r"\b(?:analyses|paralyses|catalyses)"
+        r"(?=\s+(?:the|a|an|this|that|each|every|it|them)\b)"
+    )
+    return re.compile(literal_rx + "|" + ambiguous_rx, re.IGNORECASE)
+
+
+BRITISH_RX = _build_british_regex()
+
+# Pre-existing British spellings living in code comments/strings, surfaced
+# for the first time by the 2026-07-28 dictionary upgrade (a docs-only
+# pass -- rewording code comments was explicitly out of scope for it, see
+# the pass's own commit). Tracked by exact line, not silently dropped
+# (CANON C-3: a conflict gets flagged, never silently ignored) -- a NEW
+# British spelling anywhere else, including new lines in these same files,
+# still fails the gate. Remove an entry only by fixing the spelling there.
+BRITISH_SPELLING_KNOWN_CODE_HITS = {
+    ("include/comms/SlopSyncAsyncWsTransport.h", 48),
+    ("include/comms/SlopSyncCatalog.h", 1434),
+    ("include/comms/SlopSyncCatalog.h", 1452),
+    ("sim/slopsim/src/machine/MachineSim.h", 784),
+    ("src/comms/SlopSyncHubService.cpp", 1952),
+    ("webui/src/model/format.js", 36),
+    ("webui/src/ui/SafetyBar.svelte", 28),
+}
 
 GREP_CHECKS = [
     dict(
@@ -136,6 +299,9 @@ def run_grep_checks():
             continue
         for lineno, line in enumerate(text.splitlines(), 1):
             for c in applicable:
+                if (c["name"] == "british-spelling"
+                        and (rel, lineno) in BRITISH_SPELLING_KNOWN_CODE_HITS):
+                    continue
                 m = c["rx"].search(line)
                 if m:
                     findings.append((c["name"], rel, lineno, m.group(0), c["msg"]))

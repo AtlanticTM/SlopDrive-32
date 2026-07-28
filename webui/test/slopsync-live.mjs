@@ -98,7 +98,7 @@ async function runOnce(runLabel) {
     info(names);
     const motionEntry = seen.catalog.find((e) => e.id === CH.MOTION);
     if (motionEntry && motionEntry.layout) {
-      info('catalog 0x0080 layout: ' + motionEntry.layout.map((f) => f.name + '(' + f.typeName + '/' + f.scale + ')').join(', '));
+      info('catalog 0x1100 layout: ' + motionEntry.layout.map((f) => f.name + '(' + f.typeName + '/' + f.scale + ')').join(', '));
     }
   } else {
     fail('no CATALOG decoded within window');
@@ -106,7 +106,7 @@ async function runOnce(runLabel) {
 
   // GRANTs
   if (seen.grantChannels.has(CH.SAFETY) && seen.grantChannels.has(CH.MOTION)) {
-    pass('GRANTs applied for safety(0x0003) + motion(0x0080)' + (seen.grantChannels.has(CH.HUB_STATUS) ? ' + hub-status(0x0006)' : ''));
+    pass('GRANTs applied for safety(0x0003) + motion(0x1100)' + (seen.grantChannels.has(CH.HUB_STATUS) ? ' + hub-status(0x0006)' : ''));
   } else {
     fail('missing GRANT — got channels: ' + [...seen.grantChannels].map((c) => '0x' + c.toString(16)).join(','));
   }
@@ -121,7 +121,7 @@ async function runOnce(runLabel) {
 
   // ≥10 motion STATE samples, sane range
   if (seen.motionSamples.length >= 10) {
-    pass('motion(0x0080) STATE: ' + seen.motionSamples.length + ' samples received (>=10)');
+    pass('motion(0x1100) STATE: ' + seen.motionSamples.length + ' samples received (>=10)');
     // catalog field names (per include/comms/SlopSyncCatalog.h): pos_10um /
     // tgt_10um are scaled to mm, speed to mm/s. Value is mm despite the label.
     let sane = true;

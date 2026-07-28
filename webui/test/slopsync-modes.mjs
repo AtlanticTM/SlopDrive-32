@@ -1,5 +1,5 @@
 /**
- * slopsync-modes.mjs — LIVE proof of the 0x008A / 0x0104 MODE channel pair.
+ * slopsync-modes.mjs — LIVE proof of the 0x1030 / 0x3030 MODE channel pair.
  *
  * These settings (blend, stream-speed, overshoot-clamp) were reachable ONLY over
  * the legacy HTTP/`:81` plane until M5b. They are the last SETTINGS that made
@@ -7,17 +7,17 @@
  * one reads and writes over SlopSync, the HTTP control surface has no settings
  * left that are exclusively its own.
  *
- * Flow, per setting: read device truth from the retained 0x008A → write a
- * DIFFERENT legal value via 0x0104 → assert the ECHO carries the applied value
- * → assert an on-change 0x008A reflects it → RESTORE the original → assert.
+ * Flow, per setting: read device truth from the retained 0x1030 → write a
+ * DIFFERENT legal value via 0x3030 → assert the ECHO carries the applied value
+ * → assert an on-change 0x1030 reflects it → RESTORE the original → assert.
  *
- * SAFETY: sends only 0x0104. No move, no home, no pattern, no safety intent.
+ * SAFETY: sends only 0x3030. No move, no home, no pattern, no safety intent.
  * Every setting is restored, including after a failed assertion.
  *
  * `transport` (the old WS/SER/BT/DONGLE/OSSM input-source selector) was RETIRED
  * rather than tested: SlopSync is the only way in now and the hub listens on
  * WebSocket and BLE by default, so there is no mode left for an operator to
- * pick. Key 2 on 0x0104 is a permanent gap.
+ * pick. Key 2 on 0x3030 is a permanent gap.
  *
  * Run:  node webui/test/slopsync-modes.mjs [host] [port]
  */
@@ -45,7 +45,7 @@ function open() {
       token: (h) => acquireToken(h),
       subscriptions: [[CH.MACHINE_MODES, 0, PRIORITY.elevated]],
     });
-    const to = setTimeout(() => { try { s.close(); } catch (e) {} reject(new Error('timeout waiting for 0x008A')); }, 8000);
+    const to = setTimeout(() => { try { s.close(); } catch (e) {} reject(new Error('timeout waiting for 0x1030')); }, 8000);
     let welcomed = false;
     s.on('welcome', (w) => { welcomed = true; s._roles = w.roles; });
     s.on('state', (ch, sample) => {
@@ -74,7 +74,7 @@ async function roundTrip(s, key, name, current, alt) {
      'applied=' + echo.applied[key] + ' requested=' + alt);
   const st = await seen;
   ok(name + ' on-change STATE reflects it', st != null && st[name] === alt,
-     st ? 'state=' + st[name] : 'NO on-change 0x008A seen');
+     st ? 'state=' + st[name] : 'NO on-change 0x1030 seen');
   // RESTORE — always, even if the assertions above failed, so a red test never
   // leaves the machine in a mode the operator did not choose.
   const back = await s.sendModesSet({ [key]: current });
@@ -83,9 +83,9 @@ async function roundTrip(s, key, name, current, alt) {
 }
 
 async function main() {
-  console.log('slopsync modes live test → ws://' + HOST + ':' + PORT + '/  (0x008A / 0x0104)');
+  console.log('slopsync modes live test → ws://' + HOST + ':' + PORT + '/  (0x1030 / 0x3030)');
   const { s, modes } = await open();
-  ok('WELCOME + retained 0x008A adopted', typeof modes.blend_mode === 'number',
+  ok('WELCOME + retained 0x1030 adopted', typeof modes.blend_mode === 'number',
      'roles=' + s._roles + ' blend=' + modes.blend_mode +
      ' stream=' + modes.stream_speed_mode + ' overshoot=' + modes.overshoot_clamp);
   ok('all three mode fields decoded from the catalog',

@@ -36,7 +36,7 @@
   const reason = $derived(
     field.readOnly ? 'read-only — the machine reports this, it is not a setting'
     : !linkUp ? 'no hub link'
-    : !tierOk ? 'this session is not authorised to change settings'
+    : !tierOk ? 'this session is not authorized to change settings'
     : !maskOn ? 'the machine is refusing this setting right now'
     : ''
   );
@@ -44,7 +44,7 @@
   /**
    * Does this session's access tier permit writing here? The INTENT channel
    * advertises its own required access; we compare rather than assume, so a
-   * watch-tier viewer greys the write plane instead of discovering it by NACK.
+   * watch-tier viewer grays the write plane instead of discovering it by NACK.
    */
   function canWrite(f) {
     if (f.readOnly) return false;
@@ -96,7 +96,7 @@
     </button>
 
   {:else if field.widget === WIDGET.segmented}
-    <div class="segmented" role="radiogroup" aria-labelledby={field.uid} id={field.uid}>
+    <div class="segmented" role="radiogroup" aria-labeledby={field.uid} id={field.uid}>
       {#each field.options as opt, i}
         <button type="button" role="radio" aria-checked={Number(value) === i}
                 class:on={Number(value) === i} disabled={!enabled}

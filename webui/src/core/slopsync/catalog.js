@@ -367,8 +367,8 @@ function decodeSchemaField(key, fm) {
   decodeSharedAnnotations(fm, f);
   if (fm.has(16)) f.access = fm.get(16); // per-field minimum role
   // RFC-009/025b: index-aligned with `options` — element i is the minimum role
-  // for wire value i. A client that reads this GREYS the ops it cannot use
-  // instead of discovering them by NACK (grey, never hide).
+  // for wire value i. A client that reads this GRAYS the ops it cannot use
+  // instead of discovering them by NACK (gray, never hide).
   if (fm.has(17)) f.optionAccess = fm.get(17);
   return f;
 }
@@ -428,7 +428,7 @@ export function optionAccessFor(entry, key, optionValue) {
 
 /**
  * May a session holding `roles` send `optionValue` on this field? RFC-009's
- * grey-never-hide input: a client greys what this returns false for, and the
+ * gray-never-hide input: a client grays what this returns false for, and the
  * hub gates on the very same catalog data (Hub::requiredAccessFor), so the two
  * cannot disagree.
  */

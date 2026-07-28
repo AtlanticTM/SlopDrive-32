@@ -1,6 +1,6 @@
 <script>
   /**
-   * PlanStrip.svelte — in-flight motion-plan visualiser, bound by ROLE.
+   * PlanStrip.svelte — in-flight motion-plan visualizer, bound by ROLE.
    *
    * Reproduces the character of the pre-refactor features/planstrip.js (a
    * glowing span between the plan's start/end, a sweep head at the live
@@ -100,7 +100,7 @@
   // channel already gives for free, generically: how recently it last
   // pushed. This device's plan-strip publisher only republishes while a plan
   // is live (an idle machine costs a subscriber nothing after one baseline
-  // snapshot) — the exact behaviour the original's own "is the 0x04 frame
+  // snapshot) — the exact behavior the original's own "is the 0x04 frame
   // still arriving" check depended on, just read off the generic per-channel
   // sample clock instead of a wire-specific staleness field. FRESH_MS mirrors
   // the original's 250ms recency window; HIDE_GRACE_MS mirrors its 1000ms

@@ -64,7 +64,7 @@ std::string nameOf(const char* const (&tbl)[N], unsigned i) {
 // device's /api/slopmotion echoes, so a TUI readout and an API response say the
 // same word about the same state. FIVE policies since slopmotion 0.8.0 — the
 // two budgeted ones subsume scale/reshape (which are exactly themselves with
-// the budget pinned at 100 %), kept alongside so the old behaviour stays
+// the budget pinned at 100 %), kept alongside so the old behavior stays
 // A/B-able against the new.
 const char* kInfeasPolicyName(slopmotion::InfeasiblePolicy p) {
     switch (p) {
@@ -79,7 +79,7 @@ const char* kInfeasPolicyName(slopmotion::InfeasiblePolicy p) {
 
 // Canonical wire names for slopmotion::CurvePolicy — same string the sim's
 // /api/slopmotion echoes. "follow" resolves to c2 until the curve_family wire
-// signalling lands, and the readout says so rather than pretending otherwise.
+// signaling lands, and the readout says so rather than pretending otherwise.
 const char* kCurvePolicyName(slopmotion::CurvePolicy p) {
     switch (p) {
         case slopmotion::CurvePolicy::FollowClient: return "follow(->c2)";
@@ -309,7 +309,7 @@ int runMachineScreen(MachineSim& sim, SessionLog& log, uint16_t wsPort, uint16_t
                  case slopmotion::CurvePolicy::ForceC2:
                      return std::string("curve -> c2-quintic (curvature continuous; knot kinks rounded off)");
                  default:
-                     return std::string("curve -> follow client (no wire signalling yet -> resolves to c2)");
+                     return std::string("curve -> follow client (no wire signaling yet -> resolves to c2)");
              }
          }},
         {"motion.smoothbudget", "<0-1>", "prio-amplitude: max handle reduction toward the chord before amplitude is spent",
@@ -366,23 +366,23 @@ int runMachineScreen(MachineSim& sim, SessionLog& log, uint16_t wsPort, uint16_t
                         ? std::string("chase aim accel-extrap -> on")
                         : std::string("chase aim accel-extrap -> off");
          }},
-        {"motion.centring", "<on|off>", "midpoint-anchored stroke shortening when the machine can't reach",
+        {"motion.centering", "<on|off>", "midpoint-anchored stroke shortening when the machine can't reach",
          [&](auto& a) {
-             if (a.empty()) return std::string("usage: motion.centring <on|off>");
+             if (a.empty()) return std::string("usage: motion.centering <on|off>");
              const std::string v = lower(a[0]);
-             if (v != "on" && v != "off") return std::string("usage: motion.centring <on|off>");
+             if (v != "on" && v != "off") return std::string("usage: motion.centering <on|off>");
              return sim.uiSetWaveCentering(v == "on")
-                        ? std::string("waveform centring -> on (degraded band stays symmetric "
-                                      "about the commanded midpoint; reported as waveform_centred)")
-                        : std::string("waveform centring -> off (slopmotion 0.4.0 contract: the "
+                        ? std::string("waveform centering -> on (degraded band stays symmetric "
+                                      "about the commanded midpoint; reported as waveform_centered)")
+                        : std::string("waveform centering -> off (slopmotion 0.4.0 contract: the "
                                       "band is free to walk off one end)");
          }},
-        {"motion.centringgain", "<0-1>", "centring strength (1 = full; a FEEL dial, not monotone)",
+        {"motion.centeringgain", "<0-1>", "centering strength (1 = full; a FEEL dial, not monotone)",
          [&](auto& a) {
              const float applied = sim.uiSetWaveCenteringGain(num(a, 0, 1.0f));
              return applied > 0.0f
-                        ? fmt("centring gain -> %.2f", double(applied))
-                        : std::string("centring gain -> 0.00 (same effect as motion.centring off)");
+                        ? fmt("centering gain -> %.2f", double(applied))
+                        : std::string("centering gain -> 0.00 (same effect as motion.centering off)");
          }},
         {"pattern", "<0|1|2|off>", "run a built-in pattern / stop",
          [&](auto& a) {
@@ -462,7 +462,7 @@ int runMachineScreen(MachineSim& sim, SessionLog& log, uint16_t wsPort, uint16_t
 
     // Palette column geometry, derived from the table itself so a longer command
     // can never silently clip the column again (motion.smoothbudget /
-    // motion.centringgain / the 34-char motion.policy hint all landed after the
+    // motion.centeringgain / the 34-char motion.policy hint all landed after the
     // old fixed width was chosen).
     size_t nameW = 0, hintW = 0;
     for (const auto& c : commands) {
@@ -648,7 +648,7 @@ int runMachineScreen(MachineSim& sim, SessionLog& log, uint16_t wsPort, uint16_t
         const size_t show = n < rows ? n : rows;
         for (size_t i = n - show; i < n; ++i) {
             const auto& r = sim.ingressAt(i);
-            const bool seg = (r.channel_id == 0x0085);
+            const bool seg = (r.channel_id == benchrig::ch::motion_segment);
             const double dur_ms = double(r.duration_us) / 1000.0;
             Color durC = kChrome;
             if (seg) {
@@ -760,9 +760,9 @@ int runMachineScreen(MachineSim& sim, SessionLog& log, uint16_t wsPort, uint16_t
             kv("dense if <=", fmt("%.0f ms", double(c.chase_dense_us) / 1000.0)),
             kv("stale after", fmt("%.0f ms", double(c.chase_stale_us) / 1000.0)),
             text(""),
-            head("centring"),
-            kv("wave centre", onoff(c.wave_centering)),
-            kv("centre gain", fmt("%.2f", double(c.wave_centering_gain))),
+            head("centering"),
+            kv("wave center", onoff(c.wave_centering)),
+            kv("center gain", fmt("%.2f", double(c.wave_centering_gain))),
         };
 
         // Column widths are the longest label (13) + the longest value each
@@ -894,7 +894,7 @@ int runMachineScreen(MachineSim& sim, SessionLog& log, uint16_t wsPort, uint16_t
                 for (size_t k = 1; k < kSmAnomalyNameCount; ++k) {
                     if (!s.anom_kind[k]) continue;
                     // waveform_scaled/_fallback mean the planner could NOT
-                    // honour the command as sent — red. The rest are the
+                    // honor the command as sent — red. The rest are the
                     // engine working as designed.
                     const bool loud = (k == 5 || k == 6 || k == 1);
                     anom.push_back(text(fmt("  %s ", kSmAnomalyNames[k])) | color(kChrome));

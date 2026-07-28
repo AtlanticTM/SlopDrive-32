@@ -62,7 +62,7 @@ value echoed in the toast), `motion` + `motion.policy <scale|stretch>` /
 `motion.speedmode <pegged|matched>` (SlopMotion + arbiter knobs —
 the palette twin of the device's `POST /api/slopmotion`; bare `motion`, or `m`,
 toggles the **engine config panel** — the applied `slopmotion::Config` grouped
-into policy / limits / chase / centring, read from the engine itself so it shows
+into policy / limits / chase / centering, read from the engine itself so it shows
 the same numbers as `GET /api/slopmotion`), `machine.stroke <mm|0>` (measured-stroke ceiling;
 0 = fall back to the max rail), `pattern <0|1|2|off>` + `pattern.speed/depth/
 stroke/sensation`, `graph freeze zoom export [file.csv]`,
@@ -217,7 +217,7 @@ mm/s², default jerk):
 
 | mode | achieved amplitude | peak velocity |
 |---|---|---|
-| matched (old sim-only behaviour) | 196.4 mm (98 %) | 937 mm/s |
+| matched (old sim-only behavior) | 196.4 mm (98 %) | 937 mm/s |
 | **pegged (device default)** | **200.1 mm (100 %)** | 950 mm/s |
 
 That missing 2 % was never the planner — it was the sim running the wrong mode.
@@ -301,27 +301,47 @@ Measured, 50 Hz sine chase (0.5 Hz, ±40 % of a 500 mm window, 1000 mm/s):
 | setpoint flat-run length | mean 3.75 ms, 15-17 ms whenever a commit landed | **mean 1.00 ms**, p90 1 ms |
 | largest single-sample `tgt` jump | 21.13 mm | **1.00 mm** |
 
-## Motion policy (Scale vs Stretch) — and the EXPERT-ceiling divergence
+## Motion policy — and the EXPERT-ceiling divergence
 
 When a commanded segment is physically impossible in its commanded duration,
-something has to give, and the two answers are both correct for different
-senders. **Scale** (the default, `motion.policy scale`) is *timing-first*: it
-keeps the deadline and shrinks the stroke around the current position — rhythm
-preserved, depth lost. That is what a *scheduled* sender wants (funscript
-segments over 0x0085 arrive on their own clock whether or not we finished, so
-an overrun plan just gets preempted mid-flight). **Stretch** (`motion.policy
-stretch`) is *range-first*: it keeps the full stroke and overruns the deadline —
-depth preserved, timing lost — which is what a "go here" sender (manual point
-moves) wants. `motion.margin` is how much of the physically-achievable stroke
-Scale actually asks for (headroom against the ceilings); `motion.aimff` makes
-the chase-mode predictive aim second-order so it stops overshooting the
-stroke-window rails at crests.
+something has to give. The full policy set and their semantics are owned by
+`InfeasiblePolicy` in `lib/slopmotion/include/slopmotion/slopmotion.hpp` — this
+section is a summary for sim users, not the source of truth; read the enum's
+own doc comment for the derivation. The engine default is **Reshape**, not
+Scale — the sim only overrides it if you pass `--policy`/`motion.policy`.
 
-`--policy <scale|stretch>`, `--jerk <mm/s3>` and `--jmax <units/s3>` set the
-same knobs at launch, before the first segment is planned. They exist as FLAGS
-because comparing engine behaviour is a scripted job (headless run → drive the
-wire → read `/api/trace.bin`) and the palette needs a terminal. All go through
-the same `MachineSim::uiSet*` seam the palette uses.
+Five policies, in registry order:
+
+* **Stretch** — range-first: keeps the full stroke, overruns the deadline
+  (what a "go here" manual point move wants).
+* **Scale** — timing-first + shape-first: keeps the deadline, shrinks the
+  stroke around the current position, keeping a quintic shape.
+* **Reshape** (engine default) — timing-first + machine-first: keeps the
+  deadline AND the full stroke's shape as far as the machine allows, giving up
+  shape fidelity before range. `motion.reshape` / `--reshape-steps 0-8` sets
+  the bisection depth (0 = no bisection).
+* **PrioritizeAmplitude** (`amp` on the CLI) — budgeted: spends a smoothness
+  budget before touching amplitude. `--smooth-budget 0-1` caps how far a
+  handle may shorten toward the chord.
+* **PrioritizeSmooth** (`smooth` on the CLI) — budgeted: spends an amplitude
+  budget before touching smoothness. `--amplitude-budget 0-1` caps how much
+  stroke may be surrendered.
+
+`motion.margin` is how much of the physically-achievable stroke Scale/Reshape
+actually ask for (headroom against the ceilings); `motion.aimff` makes the
+chase-mode predictive aim second-order so it stops overshooting the
+stroke-window rails at crests. `motion.curve` / `--curve follow|c1|c2` selects
+the waveform curve family (`CurvePolicy`, same header) independently of the
+infeasible policy. `--settle-grace <ms>` and `--centering on|off` /
+`--centering-gain 0-1` are separate engine knobs also set at launch — see
+`slopsim machine --help` for their current defaults.
+
+`--policy <scale|stretch|reshape|amp|smooth>`, `--jerk <mm/s3>` and `--jmax
+<units/s3>` set these knobs at launch, before the first segment is planned.
+They exist as FLAGS because comparing engine behavior is a scripted job
+(headless run → drive the wire → read `/api/trace.bin`) and the palette needs
+a terminal. All go through the same `MachineSim::uiSet*` seam the palette
+uses.
 
 ## Jerk is a mechanical limit, not a smoothing crutch
 
@@ -393,9 +413,11 @@ enforces 1000/20000 — so *the sim accepting an accel is not proof the device
 will*.
 
 **Sim DEFAULT input limits are 1000 mm/s / 60000 mm/s² — NOT the device factory
-pair (550/8000).** They were changed to the operator's bench numbers. A device
-still on 550/8000 will not reproduce a sim trace taken at these defaults: set
-one side to match the other before comparing traces. The user set is unchanged
+pair.** The device's factory-default INPUT limits live in exactly one place:
+`DEFAULT_MAX_SPEED_MM_S` / `DEFAULT_ACCEL_MM_S2` in
+`include/system/config_api.h`. A device still on those factory defaults will
+not reproduce a sim trace taken at the sim's own defaults above: set one side
+to match the other before comparing traces. The user set is unchanged
 (50 mm/s / 200 mm/s²).
 
 ## What the sim models faithfully — and what it does not
@@ -439,7 +461,7 @@ named firmware source and verified over the wire, not "looks about right".
 
 **Not modeled (do not conclude anything about these from a sim run):**
 
-* **Step quantization, RMT jitter, driver electrical behaviour, motor current,
+* **Step quantization, RMT jitter, driver electrical behavior, motor current,
   encoder feedback, thermal or mechanical compliance.** `SimStepper` is an ideal
   trapezoidal follower in the mm domain (real quantization is 0.0491 mm at
   `AIM_STEPS_PER_MM` = 20.372 — below anything the UI shows).

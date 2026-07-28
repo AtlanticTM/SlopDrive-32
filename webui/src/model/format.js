@@ -20,7 +20,7 @@ import { ROLE_LABEL } from './roles.js';
  * display text; every component reads through it rather than field.label
  * directly, so a role gets its human label wherever it appears (hero
  * numerals, the rail, the generic Field control, the hero widgets) and an
- * unroled field keeps today's behaviour everywhere too.
+ * unroled field keeps today's behavior everywhere too.
  */
 export function labelFor(field) {
   if (!field) return '';
@@ -74,7 +74,7 @@ export function formatWithUnit(field, value) {
 
 /**
  * Option label for a select-ish field. Falls back to the raw index rather than
- * inventing a name — an unlabelled option is the machine's omission to show,
+ * inventing a name — an unlabeled option is the machine's omission to show,
  * not ours to paper over.
  */
 export function optionLabel(field, value) {

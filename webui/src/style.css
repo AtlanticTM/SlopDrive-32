@@ -4,12 +4,12 @@
  * The palette, type ramp and accent semantics are ported from the pre-refactor
  * page (tag `webui-prerefactor`). That identity is deliberate and locked: the
  * neutral chassis is frozen, only the two ACCENT hues change with a theme, and
- * the SAFETY colours (--warn amber, --bad red) are identical in every theme so
+ * the SAFETY colors (--warn amber, --bad red) are identical in every theme so
  * hazard styling reads the same however the operator dresses the instrument.
  *
  * ── ONE NAMING COLLISION, READ THIS ────────────────────────────────────────
  * The original sheet used `--ink` for the page BACKGROUND. Here `--ink` is the
- * primary TEXT colour, matching the rest of the rebuilt component layer. The
+ * primary TEXT color, matching the rest of the rebuilt component layer. The
  * original background/ramp names (--screen, --chip, --line-0..4, --tx-*) are
  * all still defined below with their original meanings, so CSS ported from the
  * old page works — except that it must use `--bg` where it used to say
@@ -153,8 +153,8 @@ h1, h2, h3, p { margin: 0; }
    =========================================================================
 
    The ladder reuses the page's own accent semantics rather than inventing a
-   colour: INTENT purple already means "commanded, not yet measured truth"
-   everywhere else in this instrument (it is the colour of the rail's commanded
+   color: INTENT purple already means "commanded, not yet measured truth"
+   everywhere else in this instrument (it is the color of the rail's commanded
    marker), so an unconfirmed control wearing intent-purple is saying exactly
    what the rail says. Escalation then borrows the safety ramp.
 
@@ -169,7 +169,7 @@ h1, h2, h3, p { margin: 0; }
      page that updates constantly.
    - `fault` does NOT pulse. A pulsing failure reads as "still trying"; a
      refused write has already finished failing and should sit still to be read.
-   - Colour is never the only channel — every unconfirmed control also renders
+   - Color is never the only channel — every unconfirmed control also renders
      a textual reason beneath it (Field.svelte's .field-reason/.field-error).
 */
 [data-shadow='pending'] {

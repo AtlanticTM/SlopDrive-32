@@ -5,7 +5,7 @@
  *
  * Simulates constant-velocity motion (10 mm/s) pushed into a telebuf at
  * irregular intervals drawn from the measured distribution, then compares
- * rAF-rendered output (a) sampled at raw "now" (the current/buggy behaviour)
+ * rAF-rendered output (a) sampled at raw "now" (the current/buggy behavior)
  * vs (b) sampled at renderClock.stableRenderTime(now) (the fix). Metric:
  * per-frame velocity implied by consecutive rendered positions — smooth
  * motion should show a tight, low-variance distribution around 10mm/s;

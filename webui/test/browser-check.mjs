@@ -6,8 +6,8 @@
  * the credential ladder mints its token with an HTTP GET to /uitoken on the
  * device. From a localhost origin that request is cross-origin, and the device
  * deliberately sends no CORS headers — that absence is the endpoint's only
- * defence against a hostile web page. So a locally-served page gets `watch`
- * tier and every write control correctly greys out. Useful for layout, useless
+ * defense against a hostile web page. So a locally-served page gets `watch`
+ * tier and every write control correctly grays out. Useful for layout, useless
  * for proving the write plane. The bundle must be deployed and loaded from the
  * device for this to mean anything.
  *

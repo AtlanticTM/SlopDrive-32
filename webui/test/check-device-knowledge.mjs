@@ -53,7 +53,7 @@ function walk(dir, out = []) {
 /**
  * Harvest this device's wire FIELD NAMES from the firmware catalog header.
  *
- * Deliberately narrow: only `.name = "..."` initialisers, i.e. the names of
+ * Deliberately narrow: only `.name = "..."` initializers, i.e. the names of
  * actual layout/schema fields. An earlier version swept every snake_case
  * string literal in the header, which also caught OPTION LABELS — and that
  * produced a false positive on `estop_clear`, which is simultaneously a device

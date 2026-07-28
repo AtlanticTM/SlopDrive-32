@@ -6,7 +6,7 @@
  * bytes. That is correct for a probe and WRONG for anything that pairs — the
  * trust ledger (RFC-029) is keyed on instance_id, so a client that re-rolls its
  * identity every page load appears as a brand-new device to the hub on every
- * refresh. It would never be recognised, it would burn a ledger slot per reload
+ * refresh. It would never be recognized, it would burn a ledger slot per reload
  * until the ledger evicted real devices, and "pair once" would become "pair
  * forever". The identity is the thing being trusted, so it has to outlive the
  * page.

@@ -107,7 +107,7 @@ export const K = {
 };
 
 // WELCOME's `identity` (key 37) sub-map (registry identity_keys) — RFC-016 put
-// product/fw_version in band so a client stops labelling devices "boot 0x…".
+// product/fw_version in band so a client stops labeling devices "boot 0x…".
 export const IDENTITY_K = { product: 1, fw_version: 2, hub_name: 3, info: 4 };
 
 // `blob` (key 38) sub-map (registry blob_keys). The SAME vocabulary names the
@@ -207,25 +207,27 @@ export const CH_PAIRED_DEVICES_ROSTER = 0x000d; // channels::paired_devices_rost
 export const CH_SAFETY_EVENTS = 0x000e; // channels::safety_events (EVENT twin of 0x0003)
 
 // ---- Device channel ids (include/comms/SlopSyncCatalog.h ch::) -------------
-export const CH_MOTION = 0x0080; // ch::motion (STATE)
-export const CH_MACHINE_CONFIG = 0x0081; // ch::machine_config (STATE)
-export const CH_PATTERN_STATE = 0x0082; // ch::pattern_state (STATE)
-export const CH_ODOMETER = 0x0083; // ch::odometer (STATE)
-export const CH_MOTION_INPUT = 0x0084; // ch::motion_input (STREAM c2h)
-export const CH_MOTION_SEGMENT = 0x0085; // ch::motion_segment (STREAM c2h)
-export const CH_PLAN_STRIP = 0x0086; // ch::plan_strip (STATE, 45 Hz diagnostics)
-export const CH_POWER = 0x0087; // ch::power (STATE, only when the hardware exists)
-export const CH_MOTION_DIAG = 0x0088; // ch::motion_diag (STATE, slopmotion counters)
-export const CH_MOTION_ANOMALY = 0x0089; // ch::motion_anomaly (EVENT)
+// RFC-047 "Phase C2" renumbered these onto the new grid (Jul 2026). Values
+// below are current; see the RFC for the old->new table if you need history.
+export const CH_MOTION = 0x1100; // ch::motion (STATE)
+export const CH_MACHINE_CONFIG = 0x1000; // ch::machine_config (STATE)
+export const CH_PATTERN_STATE = 0x1200; // ch::pattern_state (STATE)
+export const CH_ODOMETER = 0x1020; // ch::odometer (STATE)
+export const CH_MOTION_INPUT = 0x2100; // ch::motion_input (STREAM c2h)
+export const CH_MOTION_SEGMENT = 0x2101; // ch::motion_segment (STREAM c2h)
+export const CH_PLAN_STRIP = 0x1110; // ch::plan_strip (STATE, 45 Hz diagnostics)
+export const CH_POWER = 0x1010; // ch::power (STATE, only when the hardware exists)
+export const CH_MOTION_DIAG = 0x1111; // ch::motion_diag (STATE, slopmotion counters)
+export const CH_MOTION_ANOMALY = 0x4100; // ch::motion_anomaly (EVENT)
 // M5b: the four MODE settings the legacy :81/HTTP plane owned. A separate
-// category from 0x0081 because that channel's RFC-009 enabled_mask is a
+// category from 0x1000 because that channel's RFC-009 enabled_mask is a
 // bitfield8 with seven of eight bits already spoken for.
-export const CH_MACHINE_MODES = 0x008a; // ch::machine_modes (STATE)
-export const CH_MOVE = 0x0100; // ch::move (INTENT)
-export const CH_CONFIG_SET = 0x0101; // ch::config_set (INTENT)
-export const CH_PATTERN_CMD = 0x0102; // ch::pattern_cmd (INTENT)
-export const CH_HOME = 0x0103; // ch::home (INTENT)
-export const CH_MODES_SET = 0x0104; // ch::modes_set (INTENT)
+export const CH_MACHINE_MODES = 0x1030; // ch::machine_modes (STATE)
+export const CH_MOVE = 0x3100; // ch::move (INTENT)
+export const CH_CONFIG_SET = 0x3000; // ch::config_set (INTENT)
+export const CH_PATTERN_CMD = 0x3200; // ch::pattern_cmd (INTENT)
+export const CH_HOME = 0x3101; // ch::home (INTENT)
+export const CH_MODES_SET = 0x3030; // ch::modes_set (INTENT)
 
 // ---- Safety intent ops (registry safety_ops::) -----------------------------
 // estop(6) is RFC-010's client-assertable e-stop: the hub treats it exactly as
@@ -239,7 +241,7 @@ export const SAFETY_OP = {
 /** ops any session may send regardless of role (RFC-025b) — safety outranks authorization. */
 export const SAFETY_OP_ROLE_EXEMPT = new Set([SAFETY_OP.stop, SAFETY_OP.estop]);
 
-// ---- Home intent ops (registry home ops; see SlopSyncCatalog.h 0x0103) -----
+// ---- Home intent ops (registry home ops; see SlopSyncCatalog.h 0x3101) -----
 export const HOME_OP = { home: 1, force_home: 2, clear_override: 3 };
 
 // ---- Safety causes (registry safety_causes::) ------------------------------

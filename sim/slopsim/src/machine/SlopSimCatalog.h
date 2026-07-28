@@ -14,9 +14,13 @@
 // (0x0003-0x000E) and the library that encodes them.
 //
 // WHAT IS DIFFERENT FROM include/comms/SlopSyncCatalog.h, ON PURPOSE:
-//   * Every DEVICE-range channel id is different (0x0090+ / 0x0110+ instead
-//     of 0x0080+ / 0x0100+) — the sharpest part of the test: any client with
-//     a channel id hardcoded anywhere breaks visibly against this catalog.
+//   * Every DEVICE-range channel id is different (0x0090+ / 0x0110+ here vs.
+//     the real device's RFC-047 grid — 0x1000+/0x1100+/0x1200+/0x2100+/
+//     0x3000+/0x3100+/0x3200+/0x4100+/0x5200+ as of Phase C2) — the sharpest
+//     part of the test: any client with a channel id hardcoded anywhere
+//     breaks visibly against this catalog. This file's OWN ids are NOT part
+//     of that renumber and never need to change to stay non-colliding with
+//     it — the two catalogs were never in numeric correspondence.
 //   * NO input (machine-driven) limit set and NO jerk setting — benchrig only
 //     exposes the window and the user (manual) limit set. Its motion core
 //     still needs internal speed/accel/jerk ceilings to plan at all (see
@@ -75,12 +79,14 @@ inline constexpr uint16_t move            = 0x0112;  // INTENT: manual point mov
 inline constexpr uint16_t home            = 0x0113;  // INTENT: home / bench ops
 }  // namespace ch
 
-// A device-defined category (registry `setting_categories` tops out at 4;
-// anything >=128 is this hub's own and REQUIRES a `category_label`, per
-// catalog.hpp's CatalogEntry::categoryLabel comment). Proves a client renders
-// a category heading it cannot possibly have a name for baked in.
+// A device-defined category (registry `ui_categories` -- RFC-047/048, Phase
+// C2 -- registers 1..14; the vendor/device-defined range is 0x40..0x7E and
+// REQUIRES a `category_label`, per catalog.hpp's CatalogEntry::categoryLabel
+// comment). Proves a client renders a category heading it cannot possibly
+// have a name for baked in. Was 128 under the retired setting_categories
+// vocabulary's >=128 device-defined tail; 0x40 is the equivalent floor here.
 namespace category {
-inline constexpr uint8_t bench_extras = 128;
+inline constexpr uint8_t bench_extras = 0x40;
 }
 
 // ---- Factory DEFAULTS, advertised as RFC-009 `default` annotations --------
@@ -246,7 +252,7 @@ inline bool buildDivergentCatalog(slopsync::Catalog32& c) {
                 .cls = ChannelClass::STATE, .dir = Direction::h2c,
                 .access = AccessLevel::watch, .maxRateHz = 0.0f,
                 .defaultPriority = Priority::normal,
-                .hasCategory = true, .category = slopsync::setting_categories::limits,
+                .hasCategory = true, .category = slopsync::ui_categories::limits,
                 .hasSettingChannel = true, .settingChannel = ch::limits_set});
     c.addLayoutField({.name = "window_min", .type = PackedFieldType::f32, .unit = "mm", .scale = 1.0f,
                       .hasMin = true, .hasMax = true, .min = 0.0f, .max = ceiling::rail_mm,

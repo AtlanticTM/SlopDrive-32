@@ -33,7 +33,7 @@
   // ---- role resolution --------------------------------------------------
   //
   // Fixed input order (the `roles` prop), never the order channels happen to
-  // resolve in — that is what lets a series keep the SAME colour for its
+  // resolve in — that is what lets a series keep the SAME color for its
   // whole lifetime even if an earlier role in the list drops off the catalog
   // mid-session (reconnect to a different / reconfigured machine).
   const resolvedSeries = $derived.by(() => {
@@ -53,7 +53,7 @@
 
   // Fixed-order palette drawn from the app's own status tokens (style.css)
   // rather than an invented categorical ramp — this UI has none, and the
-  // hard rule is "invent no colours". Index is the role's POSITION IN THE
+  // hard rule is "invent no colors". Index is the role's POSITION IN THE
   // PROP, not in resolvedSeries, so identity survives a series appearing or
   // disappearing (see comment above).
   const PALETTE_VARS = ['--reality', '--good', '--warn', '--bad'];

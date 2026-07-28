@@ -4,14 +4,14 @@
  *
  * Flow (config-only, fully restored — NO motion-adjacent intents):
  *   connect → WELCOME → subscribe machine-config → record device window
- *   → config-set 0x0101 {1:min,2:max} a few mm off → assert ECHO applied
- *   → assert a machine-config 0x0081 on-change reflects the applied values
+ *   → config-set 0x3000 {1:min,2:max} a few mm off → assert ECHO applied
+ *   → assert a machine-config 0x1000 on-change reflects the applied values
  *   → RESTORE the original window → assert restore ECHO + state
  *   → close cleanly (GOODBYE), then a SECOND session re-reads to prove the
  *     restore stuck AND a back-to-back session (field bug #3) works.
  *
- * SAFETY: this sends ONLY config-set (0x0101). It never sends 0x0100 move,
- * 0x0102 pattern-cmd, 0x0103 home, or 0x0005 safety intents. The machine is
+ * SAFETY: this sends ONLY config-set (0x3000). It never sends 0x3100 move,
+ * 0x3200 pattern-cmd, 0x3101 home, or 0x0005 safety intents. The machine is
  * unhomed + latched STOP; window config is not motion and is restored.
  *
  * Run:  node webui/test/slopsync-writeplane.mjs           (exits 1 on any failure)
@@ -77,7 +77,7 @@ async function main() {
   ok('WELCOME + retained machine-config adopted', typeof origMin === 'number' && typeof origMax === 'number',
      'window=[' + origMin + ', ' + origMax + '] user_speed=' + origSpd + ' max_rail=' + maxRail + ' roles=' + s._roles);
 
-  // ===== Part 1: STROKE WINDOW write (0x0101 {1,2}) — the reported defect =====
+  // ===== Part 1: STROKE WINDOW write (0x3000 {1,2}) — the reported defect =====
   // Pick a legal nudge: shrink both ends a few mm, staying inside [0, max_rail], min<max.
   const rail = (typeof maxRail === 'number' && maxRail > 0) ? maxRail : 500;
   let newMin = Math.min(rail - 10, Math.max(0, Math.round(origMin) + 5));
@@ -85,7 +85,7 @@ async function main() {
   ok('picked legal test window inside [0, ' + rail + ']', newMin >= 0 && newMax <= rail && newMin < newMax,
      'new=[' + newMin + ', ' + newMax + ']');
 
-  // config-set 0x0101 → ECHO (post-clamp APPLIED) — the ground-truth confirm the
+  // config-set 0x3000 → ECHO (post-clamp APPLIED) — the ground-truth confirm the
   // bridge adopts into the rail band. This IS the write-plane defect path.
   const wConfirm = waitConfig(s, () => true); // any re-publish proves the device processed it
   const echo = await s.sendConfigSet({ 1: newMin, 2: newMax });
@@ -94,7 +94,7 @@ async function main() {
      'applied=[' + a1 + ', ' + a2 + '] cfg_gen=' + echo.cfgGen);
   ok('window ECHO applied == request (legal → unclamped)', near(a1, newMin) && near(a2, newMax));
   const wSt = await wConfirm;
-  // NUANCE (found live, not a bug): the 0x0081 STATE publishes the EFFECTIVE
+  // NUANCE (found live, not a bug): the 0x1000 STATE publishes the EFFECTIVE
   // motion window, which while UNHOMED is clamped to the full rail [0,max_rail]
   // regardless of the stored config the ECHO confirms. So the STATE re-publishes
   // (proving the device processed the set) but shows effective bounds, not the
@@ -114,7 +114,7 @@ async function main() {
      'applied=[' + rEcho.applied[1] + ', ' + rEcho.applied[2] + ']');
 
   // ===== Part 2: config-set → machine-config STATE reflects APPLIED (user_speed)
-  // user_speed (field 3) is NOT homing-gated, so its 0x0081 STATE field DOES
+  // user_speed (field 3) is NOT homing-gated, so its 0x1000 STATE field DOES
   // reflect the applied value — proving the full request→echo→on-change-STATE
   // adoption loop the bridge depends on, end-to-end at the wire level. =========
   const newSpd = Math.round((typeof origSpd === 'number' ? origSpd : 50)) + 15;

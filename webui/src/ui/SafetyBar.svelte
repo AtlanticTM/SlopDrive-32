@@ -109,7 +109,7 @@
   function reasonFor(action, value) {
     if (value === 0) return 'wire value 0 is reserved, never an operation (RFC-034)';
     if (!linkUp) return 'no hub link';
-    if (!canFire(action, value)) return 'this session is not authorised for this op';
+    if (!canFire(action, value)) return 'this session is not authorized for this op';
     return '';
   }
 
@@ -152,10 +152,10 @@
    * language, sailed straight through and rendered a button that meant
    * nothing and earned a NACK if pressed.
    *
-   * GREY, never hide — same doctrine as option_access gating below it (which
+   * GRAY, never hide — same doctrine as option_access gating below it (which
    * stays as defense in depth for sub-configure sessions; a hub CAN gate
    * index 0 itself the way 0x0009 session-admin does, and if it does, this
-   * still greys it). Hiding index 0 outright would have been the simpler fix
+   * still grays it). Hiding index 0 outright would have been the simpler fix
    * but breaks a keyboard/screen-reader user's expectation that the option
    * list is index-complete.
    */

@@ -102,7 +102,7 @@ function createLayout(viewId) {
    * fully-specified render list: [{id, title, snippet, span, order}, ...].
    *
    * PURE — never writes to `map`. Safe to call from a $derived on every
-   * render; the "give unknown ids a default and append them" behaviour
+   * render; the "give unknown ids a default and append them" behavior
    * described above happens here at read time rather than by mutating
    * storage, so merely *looking* at a layout never persists anything.
    */

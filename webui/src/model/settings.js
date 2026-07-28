@@ -17,7 +17,7 @@
  * type numbers, the `role` strings from the registry, the `setting_key`
  * presence rule. That is not device knowledge: a role like `window.min` is
  * defined by the registry and means the same thing on every conforming hub,
- * whereas channel 0x0081 means something only here. Binding to the former is
+ * whereas channel 0x1000 means something only here. Binding to the former is
  * portable; binding to the latter is the disease. See roles.js.
  *
  * Pure and synchronous — no session, no DOM, no reactivity. That makes it
@@ -137,7 +137,7 @@ function categoryLabel(entry) {
  *
  * `meta.enabled_mask` is registry vocabulary, so this works on a machine that
  * calls its mask something else entirely. If a hub ships a mask without the
- * role we simply do not gate — greying nothing is a safe failure; greying the
+ * role we simply do not gate — graying nothing is a safe failure; graying the
  * WRONG control because we pattern-matched a name would not be.
  */
 function findMaskField(layout) {
@@ -337,7 +337,7 @@ export function buildSettingsModel(entries) {
  * Is this field currently writable, per the device's own live enabled_mask?
  *
  * Ground truth, not a guess: the mask arrives in the same retained STATE
- * snapshot as the values, so the client greys from exactly what the hub would
+ * snapshot as the values, so the client grays from exactly what the hub would
  * refuse. RFC-009 item 3.
  *
  * @param {Object} field from buildSettingsModel

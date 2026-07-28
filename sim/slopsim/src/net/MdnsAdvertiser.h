@@ -2,7 +2,7 @@
 
 // ============================================================================
 // MdnsAdvertiser — advertises the sim exactly like the firmware advertises
-// itself (src/comms/TransportManager.cpp): service `_slopsync._tcp`, TXT
+// itself (src/system/WifiLink.cpp): service `_slopsync._tcp`, TXT
 // proto=<ws subprotocol> fw=<version>, so discovery-capable clients (the MFP
 // plugin's hand-rolled DNS-SD query, future slopsim client mode) find the
 // virtual machine the same way they find hardware.

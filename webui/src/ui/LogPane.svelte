@@ -8,7 +8,7 @@
    * each key against the CHANNEL'S OWN catalog schema at render time (for an
    * `options`-typed field that turns a raw number into the label the device
    * chose) and falls through to a plain "key = value" chip for anything it
-   * does not recognise. Nothing here assumes a device-specific field name —
+   * does not recognize. Nothing here assumes a device-specific field name —
    * the one exception is the spec-core log channel's `level`/`tag`/`message`
    * fields, which are fixed by the SlopSync *library* (lib/slopsync/), not by
    * this device's own catalog, the same way every conforming hub's session

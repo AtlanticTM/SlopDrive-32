@@ -369,7 +369,7 @@ export function connect(opts = {}) {
 
   // A PAIR_GRANT upgrades this session's tier IN PLACE — the hub does not
   // require a reconnect, so neither may we. Without mirroring it here, every
-  // widget outside the pairing pane keeps rendering the OLD tier and greys
+  // widget outside the pairing pane keeps rendering the OLD tier and grays
   // configure-only controls that the machine would now accept: the UI would be
   // lying about what this session can do, in the direction that hides working
   // controls. PairingPane tracks session.state.roles directly and so was
@@ -431,7 +431,7 @@ export function connect(opts = {}) {
     machine.link.closeReason = c.reason || '';
     machine.link.sessionId = null;
     // Roles are a property of the session, not of the machine. Dropping them
-    // here is what makes every write control grey the instant the link dies,
+    // here is what makes every write control gray the instant the link dies,
     // instead of looking usable until the user tries.
     machine.link.roles = 0;
     if (c.willReconnect) machine.stats.reconnects++;

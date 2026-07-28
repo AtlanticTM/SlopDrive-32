@@ -28,7 +28,7 @@ const IP = argOf('--ip', '192.168.1.229');
 const PORT = parseInt(argOf('--port', '82'), 10);
 // Which posture are we asserting? Pre-flip, validateToken() returns control
 // unconditionally, so a tokenless HELLO and a replayed token BOTH come back
-// `control` and that is correct behaviour to assert. Post-flip both must be
+// `control` and that is correct behavior to assert. Post-flip both must be
 // `watch`. Same script, same device, one flag — so the flip is provable rather
 // than assumed.
 const ENFORCED = args.includes('--expect-enforced');

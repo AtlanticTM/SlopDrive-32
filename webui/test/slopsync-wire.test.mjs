@@ -70,11 +70,17 @@ function buildHelloWithPublish(kind, name, instanceId, ch, rate) {
     [K.publishes, cbArray([cbMap([[K.rate_hz, cbF32(rate)], [K.channel_id, cbUint(ch)]])])],
   ]);
 }
-const hello = buildHelloWithPublish('probe', 'slopsync_probe.py', inst, 0x0084, 100.0);
+// RFC-047 (Phase C2): the probe wishes for motion-input, now 0x2100 (was
+// 0x0084) — golden bytes cross-checked byte-for-byte against
+// clients/mfp-slopsync/WireSelfTest.cs's own regenerated golden (same
+// payload string), which is itself derived by running slopsync_probe.py's
+// builders. 0x2100 needs CBOR's 2-byte uint form (0x19 0x21 0x00) where
+// 0x0084 fit in the 1-byte form (0x18 0x84) — the payload grows 1 byte.
+const hello = buildHelloWithPublish('probe', 'slopsync_probe.py', inst, 0x2100, 100.0);
 check('HELLO payload (CBOR)', hello,
-  'A50101026570726F62650371736C6F7073796E635F70726F62652E7079044800010203040506070B81A20CFA42C800000F1884');
+  'A50101026570726F62650371736C6F7073796E635F70726F62652E7079044800010203040506070B81A20CFA42C800000F192100');
 check('HELLO frame', encodeFrame(FRAME.HELLO, 0, hello, 0),
-  '0000000000003300A50101026570726F62650371736C6F7073796E635F70726F62652E7079044800010203040506070B81A20CFA42C800000F1884');
+  '0000000000003400A50101026570726F62650371736C6F7073796E635F70726F62652E7079044800010203040506070B81A20CFA42C800000F192100');
 
 // ---- SUBSCRIBE — the real browser builder ----------------------------------
 // {10:[{12:rate,13:prio,15:channel}]} keys ascending 12<13<15.
@@ -83,8 +89,11 @@ function buildSubscribe(wishes) {
     cbMap([[K.rate_hz, cbF32(rate)], [K.priority, cbUint(prio)], [K.channel_id, cbUint(ch)]]));
   return cbMap([[K.subscriptions, cbArray(entries)]]);
 }
-const sub = buildSubscribe([[0x0003, 0.0, PRIORITY.critical], [0x0080, 20.0, PRIORITY.elevated]]);
-check('SUBSCRIBE payload (CBOR)', sub, 'A10A82A30CFA000000000D030F03A30CFA41A000000D020F1880');
+// RFC-047 (Phase C2): motion is now 0x1100 (was 0x0080) -- CBOR needs its
+// 3-byte uint form (0x19 0x11 0x00) where 0x0080 fit the 2-byte form
+// (0x18 0x80).
+const sub = buildSubscribe([[0x0003, 0.0, PRIORITY.critical], [0x1100, 20.0, PRIORITY.elevated]]);
+check('SUBSCRIBE payload (CBOR)', sub, 'A10A82A30CFA000000000D030F03A30CFA41A000000D020F191100');
 
 // ---- GOODBYE (NORMAL_CLOSURE 0x0107) ---------------------------------------
 // RFC-022.2: GOODBYE has NO code space of its own — its codes are DRAWN FROM
@@ -351,7 +360,7 @@ assert('option_access: stop(2) and estop(6) are ROLE-EXEMPT (watch)',
   optionAccessFor(si, 1, SAFETY_OP.estop) === ACCESS.watch);
 assert('option_access: hold(3) needs control',
   optionAccessFor(si, 1, SAFETY_OP.hold) === ACCESS.control);
-assert('grey-never-hide: a watch session may estop but not hold',
+assert('gray-never-hide: a watch session may estop but not hold',
   canUseOption(si, 1, SAFETY_OP.estop, ACCESS.watch) === true &&
   canUseOption(si, 1, SAFETY_OP.hold, ACCESS.watch) === false &&
   canUseOption(si, 1, SAFETY_OP.hold, ACCESS.control) === true);
@@ -386,9 +395,6 @@ if (existsSync(FIXTURE) && existsSync(FIXTURE_ETAG)) {
   const realEntries = decodeCatalog(catBytes);
   const realMap = catalogChannelMap(realEntries);
   assert('fixture: real catalog decodes (' + realEntries.length + ' channels)', realEntries.length > 5);
-  const motion = realMap.get(0x0080);
-  assert('fixture: 0x0080 motion carries the APPENDED raw_10um field (7 -> 9 B)',
-    !!motion && motion.layout.some((f) => f.name === 'raw_10um'));
   const safety = realMap.get(0x0003);
   assert('fixture: 0x0003 safety carries the APPENDED modes bitfield (8 -> 9 B)',
     !!safety && safety.layout.some((f) => f.name === 'modes'));
@@ -396,6 +402,20 @@ if (existsSync(FIXTURE) && existsSync(FIXTURE_ETAG)) {
   assert('fixture: 0x0005 advertises option_access with estop role-exempt',
     optionAccessFor(realSi, 1, SAFETY_OP.estop) === ACCESS.watch &&
     optionAccessFor(realSi, 1, SAFETY_OP.hold) === ACCESS.control);
+
+  // ---- GAP CLOSED (SlopDeck milestone 1, sim fidelity) -------------------
+  // Was an [SKIP-EXPECTED-GAP]: sim/slopsim's DEFAULT catalog used to be
+  // benchrig::buildDivergentCatalog() (a deliberately different third-party
+  // catalog, SlopSimCatalog.h), which never had a channel shaped like the
+  // real device's motion telemetry (0x1100, RFC-047; was 0x0080). DESIGN.md's
+  // catalog-profiles ruling made benchrig `--profile alien` instead and
+  // restored `--profile device` (now the default) to literal device-catalog
+  // fidelity — buildSlopDriveCatalog() from include/comms/SlopSyncCatalog.h,
+  // the SAME definition the firmware ships — so this fixture (captured from
+  // the `device` profile) now always carries the real 0x1100 shape.
+  const motion = realMap.get(0x1100);
+  assert('fixture: 0x1100 motion carries the raw_10um field (7 -> 9 B)',
+    !!motion && motion.layout.some((f) => f.name === 'raw_10um'));
 } else {
   console.log('  [SKIP] real-catalog fixture (run: node webui/test/slopsync-sim.mjs)');
 }

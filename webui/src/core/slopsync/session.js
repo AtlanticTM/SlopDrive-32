@@ -209,7 +209,7 @@ export function createSession(opts = {}) {
   const instanceId = opts.instanceId || newInstanceId();
   // `token` may be BYTES or a PROVIDER. The provider form exists because the
   // device's /uitoken credential is single-use and short-lived: bytes captured
-  // once at construction authorise the first connect and silently demote every
+  // once at construction authorize the first connect and silently demote every
   // reconnect to `watch`, which presents as "connected, but every control is
   // dead" after any blip. A provider is re-asked per connect, so a fresh
   // credential is fetched exactly when one is needed. May return a promise.
@@ -438,7 +438,7 @@ export function createSession(opts = {}) {
 
   /**
    * RFC-039.2: this client's reassembler refuses a declared blob whose
-   * `total_bytes` exceeds its cap. The old behaviour — silently returning
+   * `total_bytes` exceeds its cap. The old behavior — silently returning
    * from handleBlobChunk() — is BlobReassembler's own documented failure: the
    * session went LIVE WITH NO CATALOG, every STATE frame after it arrived
    * undecodable, and nothing said why until READY_TIMEOUT killed the session
@@ -708,7 +708,7 @@ export function createSession(opts = {}) {
   const sendMove = (positionMm, bypass = false, o) => sendIntent(CH_MOVE, { 1: positionMm, 2: bypass }, o);
   const sendConfigSet = (fields, o) => sendIntent(CH_CONFIG_SET, fields, o); // {1:window_min,...}
   const sendPatternCmd = (fields, o) => sendIntent(CH_PATTERN_CMD, fields, o);
-  // M5b 0x0104 {1:blend_mode, 2:transport, 3:stream_speed_mode, 4:overshoot_clamp}.
+  // M5b 0x3030 {1:blend_mode, 2:transport, 3:stream_speed_mode, 4:overshoot_clamp}.
   // Every key optional; the ECHO carries what the machine ACTUALLY took, which
   // for these is re-read post-apply rather than assumed (the hub clamps blend
   // and may refuse a transport this build cannot enter).
@@ -997,8 +997,13 @@ export function createSession(opts = {}) {
       timestamp: decoded.has(K.timestamp) ? decoded.get(K.timestamp) : null,
       body: decodeEventBody(decoded.get(K.body), entry),
     };
+    // 'event' alone carries this: machine.svelte.js routes by channel name
+    // (log/anomaly/else) off that single emit. Do not also emit
+    // 'sessionEvent' here — that name is reserved for genuine session-
+    // lifecycle frames outside this generic dispatch (GOODBYE below, the
+    // out-of-band ESTOP frame) and double-emitting duplicated every log
+    // and anomaly entry into machine.events.session.
     emit('event', evt);
-    emit('sessionEvent', evt); // legacy listener name, same payload
   }
 
   function handleClock(payload) {
@@ -1190,11 +1195,11 @@ export function createSession(opts = {}) {
       optionAccessFor(channelMap && channelMap.get(channelId), key, value),
     /**
      * May this session use `value` on field `key` of `channelId`? RFC-009's
-     * grey-never-hide input. NOTE there is deliberately NO channel-id special
+     * gray-never-hide input. NOTE there is deliberately NO channel-id special
      * case here for the role-exempt safety ops: 0x0005 advertises
      * `option_access` (catalog key 17) with `stop` and `estop` at `watch`, and
      * the hub gates on that SAME data (Hub::requiredAccessFor), so the client's
-     * greying and the hub's enforcement cannot disagree. Hardcoding the
+     * graying and the hub's enforcement cannot disagree. Hardcoding the
      * exemption here would reintroduce exactly the drift the catalog removes.
      */
     canUse: (channelId, key, value) =>

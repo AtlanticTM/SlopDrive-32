@@ -87,18 +87,18 @@
         <span class="name">Custom</span>
       </button>
       <label class="color-input">
-        <span class="sr-only">Custom reality accent colour — measured truth</span>
-        <input type="color" value={custom.reality} oninput={setRealityColor} aria-label="Reality accent colour" />
+        <span class="sr-only">Custom reality accent color — measured truth</span>
+        <input type="color" value={custom.reality} oninput={setRealityColor} aria-label="Reality accent color" />
       </label>
       <label class="color-input">
-        <span class="sr-only">Custom intent accent colour — commanded / window band</span>
-        <input type="color" value={custom.intent} oninput={setIntentColor} aria-label="Intent accent colour" />
+        <span class="sr-only">Custom intent accent color — commanded / window band</span>
+        <input type="color" value={custom.intent} oninput={setIntentColor} aria-label="Intent accent color" />
       </label>
     </div>
   </div>
 
   <p class="hint">
-    Accent colours only — safety amber/red are identical in every theme. Browser preference; the machine is unaffected.
+    Accent colors only — safety amber/red are identical in every theme. Browser preference; the machine is unaffected.
   </p>
 
   <!-- High-legibility toggle: brighter, heavier text, hierarchy preserved.

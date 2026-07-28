@@ -73,8 +73,8 @@
  * ── Writing at the rate the machine accepts ────────────────────────────────
  *
  * Dragging a slider (or the rail tape) can generate 60 changes a second; the
- * catalog says what the INTENT channel will actually take (0x0101 is 10 Hz,
- * 0x0105 is 5 Hz). So each write CHANNEL gets a coalescing queue clocked at its
+ * catalog says what the INTENT channel will actually take (0x3000 is 10 Hz,
+ * 0x3120 is 5 Hz). So each write CHANNEL gets a coalescing queue clocked at its
  * OWN advertised rate, read from the catalog — settings and commands share this
  * queue, keyed by channel id, because both write real INTENT fields subject to
  * the same rate the hub enforces. Exceeding it would earn RATE_LIMITED NACKs

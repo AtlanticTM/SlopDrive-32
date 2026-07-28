@@ -73,7 +73,7 @@ bool MdnsAdvertiser::begin(uint16_t wsPort, SessionLog* log) {
     GetComputerNameW(computer, &len);
     std::wstring hostName = std::wstring(computer) + L".local";
 
-    // TXT records mirror the firmware's (TransportManager.cpp): proto + fw.
+    // TXT records mirror the firmware's (WifiLink.cpp): proto + fw.
     PCWSTR keys[] = {L"proto", L"fw"};
     PCWSTR values[] = {L"slopsync.v1", L"slopsim-0.2.0"};
 

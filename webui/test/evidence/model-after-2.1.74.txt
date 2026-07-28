@@ -29,7 +29,7 @@ tier      : 1
       slider    depth                %       [0..100]           -> ch 0x102 key 4
       slider    stroke               %       [0..100]           -> ch 0x102 key 5
       slider    sensation                    [0..100]           -> ch 0x102 key 6
-    CARD  Motion behaviour
+    CARD  Motion behavior
       segmented blend_mode                                      -> ch 0x104 key 1
       segmented stream_speed_mode                               -> ch 0x104 key 3
       toggle    overshoot_clamp                                 -> ch 0x104 key 4
@@ -128,7 +128,7 @@ tier      : 1
       readout   anom_deadline_stretched                            read-only
       readout   anom_waveform_fallback                            read-only
       readout   anom_waveform_scaled                            read-only
-      readout   anom_waveform_centred                            read-only
+      readout   anom_waveform_centered                            read-only
       readout   anom_handoff_bounded                            read-only
       readout   anom_waveform_smoothed                            read-only
     CARD  Plan time
@@ -147,9 +147,9 @@ tier      : 1
       slider    jmax_ovr             1/s3    [0..2000000]       -> ch 0x105 key 1
       slider    vmax_ovr             1/s     [0..20]            -> ch 0x105 key 2
       slider    amax_ovr             1/s2    [0..500]           -> ch 0x105 key 3
-    CARD  Centring
-      toggle    centring                                        -> ch 0x105 key 4
-      slider    centring_gain                [0..1]             -> ch 0x105 key 5
+    CARD  Centering
+      toggle    centering                                        -> ch 0x105 key 4
+      slider    centering_gain                [0..1]             -> ch 0x105 key 5
     CARD  Sample streams
       toggle    chase_ff                                        -> ch 0x105 key 6
       toggle    chase_accel_ff                                  -> ch 0x105 key 7

@@ -131,12 +131,12 @@ async function main() {
 
   // the gate opened: retained STATE only flows to a READY session
   ok('retained 0x0003 safety STATE received after readiness', seen1.states.has(CH.SAFETY));
-  ok('retained 0x0081 machine-config STATE received', seen1.states.has(CH.MACHINE_CONFIG));
+  ok('retained 0x1000 machine-config STATE received', seen1.states.has(CH.MACHINE_CONFIG));
   ok('session reached LIVE (§2.2 SYNCING → LIVE)', s1.isLive);
 
   // ---- catalog-driven decode of the v1.0 device channels -------------------
   const motionEntry = s1.channelMap.get(CH.MOTION);
-  ok('0x0080 motion decodes raw_10um from the CATALOG (no fallback table)',
+  ok('0x1100 motion decodes raw_10um from the CATALOG (no fallback table)',
     !!motionEntry && motionEntry.layout.some((f) => f.name === 'raw_10um'));
   const safetySample = seen1.states.get(CH.SAFETY);
   ok('0x0003 safety decodes the RFC-025c `modes` byte',
@@ -147,12 +147,12 @@ async function main() {
     info('0x' + id.toString(16) + ' ' + (e ? e.name + ' (' + e.clsName + ', ' +
       (e.layout ? e.layout.length + ' fields' : e.schema.length + ' schema keys') + ')' : 'NOT ADVERTISED'));
   }
-  ok('0x0088 slopmotion-diag decodes live', seen1.states.has(CH.MOTION_DIAG),
+  ok('0x1111 slopmotion-diag decodes live', seen1.states.has(CH.MOTION_DIAG),
     seen1.states.has(CH.MOTION_DIAG)
       ? 'plans=' + seen1.states.get(CH.MOTION_DIAG).plans + ' anomalies=' + seen1.states.get(CH.MOTION_DIAG).anomalies
       : '');
 
-  // ---- per-op access (RFC-009 grey-never-hide) ----------------------------
+  // ---- per-op access (RFC-009 gray-never-hide) ----------------------------
   ok('0x0005 option_access read from the catalog: estop role-exempt, hold needs control',
     s1.optionAccessFor(CH.SAFETY_INTENTS, 1, SAFETY_OP.estop) === ACCESS.watch &&
     s1.optionAccessFor(CH.SAFETY_INTENTS, 1, SAFETY_OP.hold) === ACCESS.control);
@@ -169,7 +169,7 @@ async function main() {
   // ========================================================================
   // INTENT → post-clamp ECHO, encoded from the catalog's own schema.
   // ========================================================================
-  console.log('\nWrite plane (config-set 0x0101, catalog-typed, restored):');
+  console.log('\nWrite plane (config-set 0x3000, catalog-typed, restored):');
   const cfg0 = seen1.states.get(CH.MACHINE_CONFIG);
   const origMin = cfg0.window_min, origMax = cfg0.window_max;
   info('device window = [' + origMin + ', ' + origMax + '] mm, max_rail ' + cfg0.max_rail);
@@ -183,7 +183,7 @@ async function main() {
   const reflected = await waitFor(s1, 'state',
     (ch, sm) => ch === CH.MACHINE_CONFIG && Math.abs(sm.window_min - testMin) < 0.6, 3000,
     'machine-config reflect').then(() => true).catch(() => false);
-  ok('0x0081 STATE reflects the applied window (ground truth, not our request)', reflected);
+  ok('0x1000 STATE reflects the applied window (ground truth, not our request)', reflected);
   const restore = await s1.sendConfigSet({ 1: origMin, 2: origMax });
   ok('window RESTORED', Math.abs(restore.applied[1] - origMin) < 0.6 &&
     Math.abs(restore.applied[2] - origMax) < 0.6);

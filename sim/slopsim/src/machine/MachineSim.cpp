@@ -15,6 +15,11 @@ using slopsync::IntentValueField;
 using slopsync::IntentValueMap;
 using slopsync::NackCode;
 
+// Unqualified `ch::` below means the REAL device catalog's channel ids
+// (include/comms/SlopSyncCatalog.h) — `benchrig::ch::` (Alien) stays fully
+// qualified everywhere so the two id spaces are never visually confusable.
+namespace ch = slopdrive::ch;
+
 namespace {
 
 // Firmware clamp ceilings — these mirror the EXPERT-mode values in
@@ -79,6 +84,20 @@ bool fieldBool(const IntentValueField* f, bool dflt) {
     return dflt;
 }
 
+// Device-profile scaled-u16/i16 wire helpers (0x1100 motion, 0x1110 plan-strip
+// etc. — the real device's packed layouts, unlike Alien's plain f32 shapes).
+uint16_t clampU16(float v) {
+    if (v <= 0.0f) return 0;
+    if (v >= 65535.0f) return 65535;
+    return uint16_t(v + 0.5f);
+}
+
+int16_t clampI16(float v) {
+    if (v >= 32767.0f) return 32767;
+    if (v <= -32768.0f) return -32768;
+    return int16_t(v >= 0.0f ? v + 0.5f : v - 0.5f);
+}
+
 uint64_t fieldU64(const IntentValueField* f, uint64_t dflt) {
     if (!f) return dflt;
     if (f->value.kind == IntentValue::Kind::U64) return f->value.u64_val;
@@ -108,25 +127,63 @@ float clampf(float v, float lo, float hi) { return v < lo ? lo : (v > hi ? hi : 
 // the catalog by reference and encodes it in ITS constructor — so the fill has
 // to happen inside the member-initializer list, not the constructor body.
 //
-// slopsim advertises its OWN catalog (SlopSimCatalog.h's benchrig::), not the
-// firmware's — see that file's header for why: a client pointed at slopsim
-// must prove it can render a machine it has never met, not SlopDrive-32 again
-// over a fresh socket.
-static slopsync::Catalog32& initCatalog(slopsync::Catalog32& c) {
-    benchrig::buildDivergentCatalog(c);
+// slopsim's catalog is SELECTED BY PROFILE (SlopDeck DESIGN.md §5/§7):
+// `device` (default) is the REAL SlopDrive-32 catalog, LITERALLY
+// buildSlopDriveCatalog() from include/comms/SlopSyncCatalog.h — the two can
+// never silently diverge because there is only one definition. `alien` is
+// benchrig (SlopSimCatalog.h) — a deliberately different conformant hub, so a
+// client pointed at it must prove it renders a machine it has never met.
+// `minimal` is a SUBSET of the real device catalog (SlopMinimalCatalog.h).
+static slopsync::Catalog32& initCatalog(slopsync::Catalog32& c, Profile profile) {
+    switch (profile) {
+        case Profile::Alien:
+            benchrig::buildDivergentCatalog(c);
+            break;
+        case Profile::Minimal:
+            slopdrive::buildMinimalCatalog(c);
+            break;
+        case Profile::Device:
+        default:
+            // has_current_sensor/has_power_monitor: true/true — the sim mirrors
+            // the real SlopDrive-32's INA228-equipped build, so the `power`
+            // channel (0x1010) is advertised exactly like the live device.
+            slopdrive::buildSlopDriveCatalog(c, {/*current sensor*/ true, /*power monitor*/ true});
+            break;
+    }
     return c;
 }
 
-MachineSim::MachineSim(SessionLog& log)
+MachineSim::MachineSim(SessionLog& log, Profile profile)
     : _log(log),
+      _profile(profile),
+      _realDeviceIds(profile != Profile::Alien),
+      _hasFullDeviceCatalog(profile == Profile::Device),
       _catalog(),
-      _hub(initCatalog(_catalog), _clock, _rng, *this, _crypto) {
+      _hub(initCatalog(_catalog, profile), _clock, _rng, *this, _crypto) {
     // A fixed, printable "keypair" so a probe run is reproducible across
     // restarts — the real device generates one at first boot and persists it in
     // NVS (firmware M5), which is the only part of this that is not simulable
     // without hardware.
     _crypto.p256Supported = true;
     for (size_t i = 0; i < _crypto.pubkey.size(); ++i) _crypto.pubkey[i] = std::byte(uint8_t(0x02 + i));
+
+    // Runtime defaults are profile-dependent — see the field comments in
+    // MachineSim.h. Alien keeps its own smaller/cheaper benchrig:: numbers;
+    // Device and Minimal use the real device's config_api-mirrored factory::
+    // numbers, so a `device`-profile trace is comparable to a hardware one.
+    if (profile == Profile::Alien) {
+        _win_min_mm = benchrig::factory::window_min;
+        _win_max_mm = benchrig::factory::window_max;
+        _max_rail_mm = benchrig::factory::window_max;
+        _user_speed = benchrig::factory::user_speed;
+        _user_accel = benchrig::factory::user_accel;
+    } else {
+        _win_min_mm = slopdrive::factory::window_min;
+        _win_max_mm = slopdrive::factory::window_max;
+        _max_rail_mm = slopdrive::factory::max_rail;
+        _user_speed = slopdrive::factory::user_speed;
+        _user_accel = slopdrive::factory::user_accel;
+    }
 }
 
 bool MachineSim::begin(uint16_t wsPort, bool startHomed) {
@@ -599,7 +656,35 @@ void MachineSim::drainAnomalies(uint64_t now64) {
         // tuning/diagnostics surface at all — see SlopSimCatalog.h) — this
         // machine doesn't expose planner internals over the wire, only the
         // resulting telemetry. The counters still accumulate for local
-        // logging/bench diagnosis; only the wire publish is gone.
+        // logging/bench diagnosis either way; only the wire publish is
+        // profile-gated.
+        if (_hasFullDeviceCatalog) {
+            // 0x4100 motion-anomaly — the same body-map grammar as the
+            // firmware's (slopdrive::anom_body): kind mirrored into both the
+            // frame's event_kind AND body key 1 (the catalog's only mechanism
+            // for LABELING an event kind via `options`).
+            slopsync::EventMsg em{};
+            em.channel_id = ch::motion_anomaly;
+            em.timestamp = _clock.nowMs();
+            em.event_kind = ev.kind;
+            em.has_body = true;
+            em.body_count = 0;
+            em.body[em.body_count++] = {slopdrive::anom_body::kind,
+                                        slopsync::IntentValue::ofU64(ev.kind)};
+            em.body[em.body_count++] = {slopdrive::anom_body::seq,
+                                        slopsync::IntentValue::ofU64(ev.seq)};
+            em.body[em.body_count++] = {slopdrive::anom_body::target,
+                                        slopsync::IntentValue::ofF32(ev.target)};
+            em.body[em.body_count++] = {slopdrive::anom_body::detail,
+                                        slopsync::IntentValue::ofF32(ev.detail)};
+            em.body[em.body_count++] = {slopdrive::anom_body::t_us,
+                                        slopsync::IntentValue::ofU64(uint32_t(ev.t_us & 0xFFFFFFFFull))};
+            std::array<std::byte, 96> buf{};
+            const size_t n = slopsync::encodeEvent(em, std::span<std::byte>(buf));
+            if (n > 0)
+                _hub.publishEvent(ch::motion_anomaly, std::span<const std::byte>(buf.data(), n));
+        }
+
         const uint32_t nowMs = uint32_t(now64 / 1000);
         if (nowMs - _lastAnomLogMs >= 1000 || _lastAnomLogMs == 0) {
             _lastAnomLogMs = nowMs;
@@ -649,69 +734,237 @@ void MachineSim::syncSafety() {
 }
 
 void MachineSim::publishTelemetry(uint32_t nowMs) {
-    // ---- 0x0090 telemetry — >=33 ms (<=30 Hz), plain f32, not the real -----
-    // device's scaled u16/i16 — proves a client isn't assuming a specific
-    // numeric wire encoding. No raw/target split and only two status bits:
-    // benchrig doesn't expose planner internals (see SlopSimCatalog.h).
-    if (nowMs - _lastMotionMs >= 33) {
-        _lastMotionMs = nowMs;
-        std::array<std::byte, 9> buf{};
-        std::span<std::byte> s(buf);
-        uint8_t flags = 0;
-        if (_homed) flags |= 1u << 0;
-        if (std::fabs(_stepper.velocityMmS()) > 0.5f) flags |= 1u << 1;  // moving
-        slopsync::putF32(s.subspan(0, 4), _stepper.positionMm());
-        slopsync::putF32(s.subspan(4, 4), _stepper.velocityMmS());
-        slopsync::putU8(s.subspan(8, 1), flags);
-        _hub.publishState(benchrig::ch::telemetry, s);
-    }
+    if (!_realDeviceIds) {
+        // ================================================================
+        // ALIEN (benchrig) — plain f32 shapes, deliberately NOT the real
+        // device's scaled u16/i16 packing (proves a client isn't assuming a
+        // specific numeric wire encoding). See SlopSimCatalog.h.
+        // ================================================================
 
-    // ---- 0x0091 limits — on cfg_gen change OR machine-side edit ------------
-    // Window + the user limit set only — no input limit set, no jerk (see
-    // SlopSimCatalog.h). Same RFC-011 cfg_gen-bump-on-machine-edit rule as the
-    // real device's twin.
-    const uint16_t gen = _hub.cfgGen();
-    if (!_cfgEverSent || gen != _lastCfgGen || _cfgDirty) {
-        if (_cfgDirty) _hub.bumpConfigGeneration();
-        _cfgEverSent = true;
-        _lastCfgGen = _hub.cfgGen();
-        _cfgDirty = false;
-        std::array<std::byte, 21> buf{};   // 4*f32 + max_rail f32 + enabled_mask
-        std::span<std::byte> s(buf);
-        slopsync::putF32(s.subspan(0, 4), _win_min_mm);
-        slopsync::putF32(s.subspan(4, 4), _win_max_mm);
-        slopsync::putF32(s.subspan(8, 4), _user_speed);
-        slopsync::putF32(s.subspan(12, 4), _user_accel);
-        slopsync::putF32(s.subspan(16, 4), _max_rail_mm);
-        // Nothing on this channel is ever refused for a REASON, only clamped
-        // by value — all four bits stay set, honestly.
-        slopsync::putU8(s.subspan(20, 1), 0x0F);
-        _hub.publishState(benchrig::ch::limits, s);
-    }
-
-    // ---- 0x0092 device-settings — on change ---------------------------------
-    // The setting the real device does not have. Change-detected the same way
-    // the real catalog's pattern-state card is (no natural cfg_gen coupling
-    // for a device-local settings card that isn't part of the safety envelope).
-    if (_warmup_mode != _lastWarmupMode || _device_label != _lastDeviceLabel || !_devSettingsSent) {
-        _devSettingsSent = true;
-        _lastWarmupMode = _warmup_mode;
-        _lastDeviceLabel = _device_label;
-        std::array<std::byte, 18> buf{};   // u8 + str16(16) + enabled_mask
-        std::span<std::byte> s(buf);
-        slopsync::putU8(s.subspan(0, 1), _warmup_mode);
-        {
-            const std::string_view label = _device_label;
-            const size_t n = std::min<size_t>(label.size(), 16);
-            if (n > 0) std::memcpy(s.data() + 1, label.data(), n);
-            if (n < 16) std::memset(s.data() + 1 + n, 0, 16 - n);
+        // ---- 0x0090 telemetry — >=33 ms (<=30 Hz) --------------------------
+        if (nowMs - _lastMotionMs >= 33) {
+            _lastMotionMs = nowMs;
+            std::array<std::byte, 9> buf{};
+            std::span<std::byte> s(buf);
+            uint8_t flags = 0;
+            if (_homed) flags |= 1u << 0;
+            if (std::fabs(_stepper.velocityMmS()) > 0.5f) flags |= 1u << 1;  // moving
+            slopsync::putF32(s.subspan(0, 4), _stepper.positionMm());
+            slopsync::putF32(s.subspan(4, 4), _stepper.velocityMmS());
+            slopsync::putU8(s.subspan(8, 1), flags);
+            _hub.publishState(benchrig::ch::telemetry, s);
         }
-        // Always accepted — both bits stay set, honestly (same rule as 0x0091).
-        slopsync::putU8(s.subspan(17, 1), 0x03);
-        _hub.publishState(benchrig::ch::device_settings, s);
+
+        // ---- 0x0091 limits — on cfg_gen change OR machine-side edit --------
+        const uint16_t gen = _hub.cfgGen();
+        if (!_cfgEverSent || gen != _lastCfgGen || _cfgDirty) {
+            if (_cfgDirty) _hub.bumpConfigGeneration();
+            _cfgEverSent = true;
+            _lastCfgGen = _hub.cfgGen();
+            _cfgDirty = false;
+            std::array<std::byte, 21> buf{};   // 4*f32 + max_rail f32 + enabled_mask
+            std::span<std::byte> s(buf);
+            slopsync::putF32(s.subspan(0, 4), _win_min_mm);
+            slopsync::putF32(s.subspan(4, 4), _win_max_mm);
+            slopsync::putF32(s.subspan(8, 4), _user_speed);
+            slopsync::putF32(s.subspan(12, 4), _user_accel);
+            slopsync::putF32(s.subspan(16, 4), _max_rail_mm);
+            slopsync::putU8(s.subspan(20, 1), 0x0F);
+            _hub.publishState(benchrig::ch::limits, s);
+        }
+
+        // ---- 0x0092 device-settings — on change ----------------------------
+        if (_warmup_mode != _lastWarmupMode || _device_label != _lastDeviceLabel || !_devSettingsSent) {
+            _devSettingsSent = true;
+            _lastWarmupMode = _warmup_mode;
+            _lastDeviceLabel = _device_label;
+            std::array<std::byte, 18> buf{};   // u8 + str16(16) + enabled_mask
+            std::span<std::byte> s(buf);
+            slopsync::putU8(s.subspan(0, 1), _warmup_mode);
+            {
+                const std::string_view label = _device_label;
+                const size_t n = std::min<size_t>(label.size(), 16);
+                if (n > 0) std::memcpy(s.data() + 1, label.data(), n);
+                if (n < 16) std::memset(s.data() + 1 + n, 0, 16 - n);
+            }
+            slopsync::putU8(s.subspan(17, 1), 0x03);
+            _hub.publishState(benchrig::ch::device_settings, s);
+        }
+    } else {
+        // ================================================================
+        // DEVICE / MINIMAL — byte-identical to the real firmware's own
+        // publishers (SlopSyncHubService.cpp), same scaled u16/i16 packing.
+        // ================================================================
+
+        // ---- 0x1100 motion — >=16 ms (<=60 Hz) -----------------------------
+        if (nowMs - _lastMotionMs >= 16) {
+            _lastMotionMs = nowMs;
+            std::array<std::byte, 9> buf{};   // M5a: + raw_10um
+            std::span<std::byte> s(buf);
+            const uint16_t pos10 = clampU16(_stepper.positionMm() * 100.0f);
+            const uint16_t tgt10 = clampU16(_commanded_target_mm * 100.0f);
+            const uint16_t raw10 = clampU16(_commanded_raw_mm * 100.0f);
+            const int16_t spd10 = clampI16(_stepper.velocityMmS() * 10.0f);
+            uint8_t flags = 0;
+            if (_homed) flags |= 1u << 0;
+            if (_homing) flags |= 1u << 1;
+            if (_pattern.running) flags |= 1u << 2;
+            if (_paused) flags |= 1u << 3;
+            if (_override) flags |= 1u << 4;
+            if (_estop_latched) flags |= 1u << 5;
+            if (_last_intiface_ms != 0 && (nowMs - _last_intiface_ms) < 250) flags |= 1u << 6;
+            slopsync::putU16(s.subspan(0, 2), pos10);
+            slopsync::putU16(s.subspan(2, 2), tgt10);
+            slopsync::putU16(s.subspan(4, 2), uint16_t(spd10));
+            slopsync::putU8(s.subspan(6, 1), flags);
+            slopsync::putU16(s.subspan(7, 2), raw10);
+            _hub.publishState(ch::motion, s);
+        }
+
+        if (_hasFullDeviceCatalog) {
+            // ---- 0x1000 machine-config — on cfg_gen change OR machine edit -
+            const uint16_t gen = _hub.cfgGen();
+            if (!_cfgEverSent || gen != _lastCfgGen || _cfgDirty) {
+                if (_cfgDirty) _hub.bumpConfigGeneration();
+                _cfgEverSent = true;
+                _lastCfgGen = _hub.cfgGen();
+                _cfgDirty = false;
+                std::array<std::byte, 37> buf{};   // 8*f32 + enabled_mask + measured_stroke
+                std::span<std::byte> s(buf);
+                slopsync::putF32(s.subspan(0, 4), _win_min_mm);
+                slopsync::putF32(s.subspan(4, 4), _win_max_mm);
+                slopsync::putF32(s.subspan(8, 4), _user_speed);
+                slopsync::putF32(s.subspan(12, 4), _user_accel);
+                slopsync::putF32(s.subspan(16, 4), _input_speed);
+                slopsync::putF32(s.subspan(20, 4), _input_accel);
+                slopsync::putF32(s.subspan(24, 4), _max_rail_mm);
+                slopsync::putF32(s.subspan(28, 4), _input_jerk);
+                // fw 2.1.76: max_rail joined the setting-annotated set (bit 6),
+                // pushing input_jerk to bit 7 — all 8 bits spoken for, 0xFF.
+                slopsync::putU8(s.subspan(32, 1), 0xFF);
+                slopsync::putF32(s.subspan(33, 4), _measured_stroke_mm);
+                _hub.publishState(ch::machine_config, s);
+            }
+
+            // ---- 0x1200 pattern-state — on change, >=100 ms ----------------
+            {
+                const uint8_t mask = uint8_t(((_estop_latched || !_homed) ? 0x00 : 0x3F) | 0x40);
+                const bool changed = _pattern.running != _patRunning || _pattern.idx != _patIdx ||
+                                     _pattern.speed != _patSpeed || _pattern.depth != _patDepth ||
+                                     _pattern.stroke != _patStroke || _pattern.sensation != _patSensation ||
+                                     mask != _patMask;
+                if (changed && (nowMs - _lastPatternMs >= 100 || !_planEverSent)) {
+                    _lastPatternMs = nowMs;
+                    _patRunning = _pattern.running;
+                    _patIdx = _pattern.idx;
+                    _patSpeed = _pattern.speed;
+                    _patDepth = _pattern.depth;
+                    _patStroke = _pattern.stroke;
+                    _patSensation = _pattern.sensation;
+                    _patMask = mask;
+                    std::array<std::byte, 20> buf{};   // Phase D: + background_run
+                    std::span<std::byte> s(buf);
+                    slopsync::putU8(s.subspan(0, 1), _pattern.running ? 1 : 0);
+                    slopsync::putU8(s.subspan(1, 1), _pattern.idx);
+                    slopsync::putF32(s.subspan(2, 4), _pattern.speed);
+                    slopsync::putF32(s.subspan(6, 4), _pattern.depth);
+                    slopsync::putF32(s.subspan(10, 4), _pattern.stroke);
+                    slopsync::putF32(s.subspan(14, 4), _pattern.sensation);
+                    slopsync::putU8(s.subspan(18, 1), mask);
+                    slopsync::putU8(s.subspan(19, 1), _pattern.background_run ? 1 : 0);
+                    _hub.publishState(ch::pattern_state, s);
+                }
+            }
+
+            // ---- 0x1110 plan-strip — >=22 ms (<=45 Hz) ---------------------
+            if (nowMs - _lastPlanMs >= 22) {
+                _lastPlanMs = nowMs;
+                const slopmotion::Snapshot d = _engine.snapshot(_clock.nowUs64());
+                const bool active = d.duration_s > 0.0f;
+                if (active || !_planEverSent) {
+                    _planEverSent = true;
+                    uint8_t flags = 0;
+                    if (active) flags |= 1u << 0;
+                    if (d.mode == uint8_t(slopmotion::Mode::Chase)) flags |= 1u << 1;
+                    if (d.plan_kind == uint8_t(slopmotion::PlanKind::Quintic) ||
+                        d.plan_kind == uint8_t(slopmotion::PlanKind::Cubic)) flags |= 1u << 2;
+                    std::array<std::byte, 18> buf{};
+                    std::span<std::byte> s(buf);
+                    slopsync::putU8(s.subspan(0, 1), flags);
+                    slopsync::putU8(s.subspan(1, 1), d.mode);
+                    slopsync::putU16(s.subspan(2, 2), clampU16(d.start * 10000.0f));
+                    slopsync::putU16(s.subspan(4, 2), clampU16(d.target * 10000.0f));
+                    slopsync::putU16(s.subspan(6, 2), clampU16(d.pos * 10000.0f));
+                    slopsync::putU16(s.subspan(8, 2), uint16_t(clampI16(d.vel * 1000.0f)));
+                    slopsync::putU32(s.subspan(10, 4), uint32_t(d.duration_s * 1e6f));
+                    slopsync::putU32(s.subspan(14, 4), uint32_t(d.elapsed_s * 1e6f));
+                    _hub.publishState(ch::plan_strip, s);
+                }
+            }
+
+            // ---- 0x1010 power — 2 Hz. MODELED, and labeled as such ---------
+            if (nowMs - _lastPowerMs >= 500) {
+                const float dt = _lastPowerMs == 0 ? 0.5f : float(nowMs - _lastPowerMs) / 1000.0f;
+                _lastPowerMs = nowMs;
+                const float speed = std::fabs(_stepper.velocityMmS());
+                _bus_a = 0.15f + speed * 0.004f;
+                if (_bus_a > _bus_peak_a) _bus_peak_a = _bus_a;
+                _bus_v = 24.0f - _bus_a * 0.08f;
+                const float target_c = 30.0f + _bus_a * 6.0f;
+                _die_c += (target_c - _die_c) * 0.05f;
+                _energy_wh += _bus_v * _bus_a * dt / 3600.0f;
+
+                std::array<std::byte, 8> buf{};
+                std::span<std::byte> s(buf);
+                slopsync::putU16(s.subspan(0, 2), clampU16(_bus_v * 1000.0f));
+                slopsync::putU16(s.subspan(2, 2), clampU16(_bus_peak_a * 1000.0f));
+                slopsync::putU16(s.subspan(4, 2), uint16_t(clampI16(_bus_a * 1000.0f)));
+                slopsync::putU16(s.subspan(6, 2), uint16_t(clampI16(_die_c * 10.0f)));
+                _hub.publishState(ch::power, s);
+            }
+        }
     }
 
-    // ---- 1 Hz block: 0x0006 hub-status (SPEC-CORE; unchanged) --------------
+    if (_hasFullDeviceCatalog && (nowMs - _lastSlowMs >= 1000)) {
+        // ---- 0x1020 odometer -----------------------------------------------
+        {
+            std::array<std::byte, 20> buf{};
+            std::span<std::byte> s(buf);
+            slopsync::putU32(s.subspan(0, 4), _strokes);
+            slopsync::putF32(s.subspan(4, 4), _distance_mm / 1000.0f);
+            slopsync::putF32(s.subspan(8, 4), _peak_mm_s);
+            slopsync::putF32(s.subspan(12, 4), _energy_wh);
+            slopsync::putU32(s.subspan(16, 4), nowMs - _sessionStartMs);
+            _hub.publishState(ch::odometer, s);
+        }
+        // ---- 0x1111 slopmotion-diag — the /api/slopmotion stats+sync blocks
+        {
+            const slopmotion::Snapshot d = _engine.snapshot(_clock.nowUs64());
+            std::array<std::byte, 88> buf{};   // slopmotion 0.8.0: + waveform_smoothed
+            std::span<std::byte> s(buf);
+            slopsync::putU32(s.subspan(0, 4), d.plans);
+            slopsync::putU32(s.subspan(4, 4), d.failures);
+            slopsync::putU32(s.subspan(8, 4), _anom_total);
+            slopsync::putU8(s.subspan(12, 1), d.mode);
+            slopsync::putU8(s.subspan(13, 1), d.plan_kind);
+            for (size_t k = 0; k < kSmAnomalyKinds; ++k)
+                slopsync::putU32(s.subspan(14 + k * 4, 4), _anom_kind[k]);
+            // No honest host analog of the xtensa plan-time bench; zero rather
+            // than invent a number an operator might compare.
+            slopsync::putU32(s.subspan(54, 4), 0);
+            slopsync::putU32(s.subspan(58, 4), 0);
+            slopsync::putF32(s.subspan(62, 4), 0.0f);
+            slopsync::putU32(s.subspan(66, 4), _sync_bundles);
+            slopsync::putU32(s.subspan(70, 4), _sync_samples);
+            slopsync::putU32(s.subspan(74, 4), _sync_enqueued);
+            slopsync::putU32(s.subspan(78, 4), _sync_dropped);
+            slopsync::putU32(s.subspan(82, 4), _sync_seg_bundles);
+            slopsync::putU16(s.subspan(86, 2), _reset_gen);
+            _hub.publishState(ch::motion_diag, s);
+        }
+    }
+
+    // ---- 1 Hz block: 0x0006 hub-status (SPEC-CORE; every profile) ---------
     if (nowMs - _lastSlowMs >= 1000) {
         _lastSlowMs = nowMs;
         std::array<std::byte, 14> buf{};  // 14 B since M5b: log_dropped appended
@@ -745,10 +998,14 @@ slopsync::Result<IntentValueMap, NackCode> MachineSim::applyIntent(uint16_t chan
     IntentValueMap applied{};
 
     switch (channel_id) {
-        case benchrig::ch::move: {
+        // benchrig::ch::move and the real device's ch::move (0x3100) are the
+        // SAME shape (key 1 position f32, key 2 bypass bool) and the SAME
+        // semantics — one body serves both profiles.
+        case benchrig::ch::move:
+        case ch::move: {
             if (_estop_latched) return Ret::err(NackCode::ESTOP_ACTIVE);
             if (!_homed) return Ret::err(NackCode::NOT_HOMED);
-            // Per-request bypass wins; otherwise honour the STANDING bypass
+            // Per-request bypass wins; otherwise honor the STANDING bypass
             // mode (RFC-025c), exactly like WebUI::applyMove does — otherwise
             // the 0x0003 `modes` byte would advertise a bypass the sim never
             // actually applied.
@@ -837,7 +1094,99 @@ slopsync::Result<IntentValueMap, NackCode> MachineSim::applyIntent(uint16_t chan
             return Ret::ok(applied);
         }
 
-        case benchrig::ch::home: {
+        // Device-profile config_set (0x3000) — the real device's SEVEN-key
+        // writer: window + BOTH limit sets (user AND input) + jerk. benchrig
+        // has no equivalent (see ch::limits_set above, a 4-key subset).
+        case ch::config_set: {
+            const auto* f1 = findField(requested, 1);
+            const auto* f2 = findField(requested, 2);
+            const auto* f3 = findField(requested, 3);
+            const auto* f4 = findField(requested, 4);
+            const auto* f5 = findField(requested, 5);
+            const auto* f6 = findField(requested, 6);
+            const auto* f7 = findField(requested, 7);
+
+            const float wmin = f1 ? fieldF32(f1, _win_min_mm) : _win_min_mm;
+            const float wmax = f2 ? fieldF32(f2, _win_max_mm) : _win_max_mm;
+            if (wmin >= wmax) return Ret::err(NackCode::INVALID_VALUE);
+
+            // RFC-002: cfg_gen advances IFF an applied value actually CHANGED.
+            const float p0 = _win_min_mm, p1 = _win_max_mm, p2 = _user_speed, p3 = _user_accel;
+            const float p4 = _input_speed, p5 = _input_accel, p6 = _input_jerk;
+
+            applyWindowLegality(wmin, wmax);
+            if (f3) _user_speed = float(lroundf(clampf(fieldF32(f3, _user_speed), 1.0f, kSpeedCeiling)));
+            if (f4) _user_accel = float(lroundf(clampf(fieldF32(f4, _user_accel), 1.0f, kAccelCeiling)));
+            if (f5) _input_speed = float(lroundf(clampf(fieldF32(f5, _input_speed), 1.0f, kSpeedCeiling)));
+            if (f6) _input_accel = float(lroundf(clampf(fieldF32(f6, _input_accel), 1.0f, kAccelCeiling)));
+            if (f7) _input_jerk = float(lroundf(clampf(fieldF32(f7, _input_jerk), 1.0f, kJerkCeiling)));
+            deriveEngineLimits();
+            cfgChanged = (p0 != _win_min_mm) || (p1 != _win_max_mm) || (p2 != _user_speed) ||
+                         (p3 != _user_accel) || (p4 != _input_speed) || (p5 != _input_accel) ||
+                         (p6 != _input_jerk);
+
+            uint32_t n = 0;
+            if (f1) applied.fields[n++] = {1, IntentValue::ofF32(_win_min_mm)};
+            if (f2) applied.fields[n++] = {2, IntentValue::ofF32(_win_max_mm)};
+            if (f3) applied.fields[n++] = {3, IntentValue::ofF32(_user_speed)};
+            if (f4) applied.fields[n++] = {4, IntentValue::ofF32(_user_accel)};
+            if (f5) applied.fields[n++] = {5, IntentValue::ofF32(_input_speed)};
+            if (f6) applied.fields[n++] = {6, IntentValue::ofF32(_input_accel)};
+            if (f7) applied.fields[n++] = {7, IntentValue::ofF32(_input_jerk)};
+            applied.count = n;
+            return Ret::ok(applied);
+        }
+
+        // Device-profile pattern-cmd (0x3200) — the 6 stand-in generator
+        // params PLUS Phase D's background_run (key 7). Not advertised at all
+        // on Minimal (subset catalog) or Alien (no pattern channel).
+        case ch::pattern_cmd: {
+            if (_estop_latched) return Ret::err(NackCode::ESTOP_ACTIVE);
+            const auto* f1 = findField(requested, 1);
+            const auto* f2 = findField(requested, 2);
+            const auto* f3 = findField(requested, 3);
+            const auto* f4 = findField(requested, 4);
+            const auto* f5 = findField(requested, 5);
+            const auto* f6 = findField(requested, 6);
+            const auto* f7 = findField(requested, 7);
+
+            const bool wantRunning = fieldBool(f1, _pattern.running);
+            if (wantRunning && !_homed) return Ret::err(NackCode::NOT_HOMED);
+
+            if (f2) _pattern.idx = uint8_t(std::min<uint64_t>(fieldU64(f2, 0), 6));
+            if (f3) _pattern.speed = clampf(fieldF32(f3, _pattern.speed), 0.0f, 100.0f);
+            if (f4) _pattern.depth = clampf(fieldF32(f4, _pattern.depth), 0.0f, 100.0f);
+            if (f5) _pattern.stroke = clampf(fieldF32(f5, _pattern.stroke), 0.0f, 100.0f);
+            if (f6) _pattern.sensation = clampf(fieldF32(f6, _pattern.sensation), -100.0f, 100.0f);
+            if (f7) _pattern.background_run = fieldBool(f7, _pattern.background_run);
+            if (f1) {
+                _pattern.running = wantRunning;
+                _pattern.next_due_us = 0;  // next tickPattern emits immediately
+                // Stopping a pattern does NOT stop the motor on the device:
+                // PatternEngine::stop() only clears its own flags, so the leg
+                // already submitted to the arbiter runs to completion.
+            }
+            // background_run (key 7) is a standing NVS-persisted policy on the
+            // device — session-volatile here (sim restart resets it, like every
+            // other bench default), so it does NOT bump cfg_gen either.
+            cfgChanged = false;
+
+            uint32_t n = 0;
+            if (f1) applied.fields[n++] = {1, IntentValue::ofBool(_pattern.running)};
+            if (f2) applied.fields[n++] = {2, IntentValue::ofU64(_pattern.idx)};
+            if (f3) applied.fields[n++] = {3, IntentValue::ofF32(_pattern.speed)};
+            if (f4) applied.fields[n++] = {4, IntentValue::ofF32(_pattern.depth)};
+            if (f5) applied.fields[n++] = {5, IntentValue::ofF32(_pattern.stroke)};
+            if (f6) applied.fields[n++] = {6, IntentValue::ofF32(_pattern.sensation)};
+            if (f7) applied.fields[n++] = {7, IntentValue::ofBool(_pattern.background_run)};
+            applied.count = n;
+            return Ret::ok(applied);
+        }
+
+        // benchrig::ch::home and the real device's ch::home (0x3101) share the
+        // SAME three bench ops (home / force_home / clear_override) — one body.
+        case benchrig::ch::home:
+        case ch::home: {
             const uint64_t op = fieldU64(findField(requested, 1), 0);
             switch (op) {
                 case 1:
@@ -956,12 +1305,13 @@ bool MachineSim::canClearEstop() {
 }
 
 std::optional<uint8_t> MachineSim::sourceForChannel(uint16_t channel_id) {
-    // benchrig has no pattern channel (see SlopSimCatalog.h) — kSrcPattern is
-    // never reachable over the wire here, but sourcePolicy() below still
-    // handles it for the local, TUI-only pattern generator.
-    if (channel_id == benchrig::ch::move) return kSrcManual;
-    if (channel_id == benchrig::ch::motion_input) return kSrcTcodeStream;
-    if (channel_id == benchrig::ch::motion_segment) return kSrcTcodeStream;
+    // Alien (benchrig) never advertises pattern_cmd, so kSrcPattern is only
+    // ever reachable over the wire on Device/Minimal — sourcePolicy() below
+    // still handles it either way for the local, TUI-only pattern generator.
+    if (channel_id == benchrig::ch::move || channel_id == ch::move) return kSrcManual;
+    if (channel_id == benchrig::ch::motion_input || channel_id == ch::motion_input) return kSrcTcodeStream;
+    if (channel_id == benchrig::ch::motion_segment || channel_id == ch::motion_segment) return kSrcTcodeStream;
+    if (channel_id == ch::pattern_cmd) return kSrcPattern;
     return std::nullopt;
 }
 
@@ -992,8 +1342,8 @@ void MachineSim::onSessionLeft(uint32_t session_id) {
 // nearest-window timestamp resolve, far-future clamp, 0x0085 sentinel).
 void MachineSim::onStreamBundle(uint16_t channel_id, uint32_t /*session_id*/,
                                 const slopsync::BundleView& bundle) {
-    const bool isSegment = (channel_id == benchrig::ch::motion_segment);
-    if (channel_id != benchrig::ch::motion_input && !isSegment) return;
+    const bool isSegment = (channel_id == benchrig::ch::motion_segment || channel_id == ch::motion_segment);
+    if (channel_id != benchrig::ch::motion_input && channel_id != ch::motion_input && !isSegment) return;
 
     const int64_t now64 = int64_t(_clock.nowUs64());
     const uint32_t now32 = uint32_t(now64 & 0xFFFFFFFFll);
@@ -1324,7 +1674,7 @@ void MachineSim::recordIngress(IngressRecord* rows, uint8_t n) {
     std::lock_guard<std::mutex> lk(_ingressM);
     for (uint8_t i = 0; i < n; ++i) {
         IngressRecord& r = rows[i];
-        const bool isSeg = (r.channel_id == benchrig::ch::motion_segment);
+        const bool isSeg = (r.channel_id == benchrig::ch::motion_segment || r.channel_id == ch::motion_segment);
         const size_t chIdx = isSeg ? 1 : 0;
 
         // Inter-arrival gap is PER CHANNEL — a client running both a chase feed
@@ -1402,7 +1752,7 @@ const char* MachineSim::ingressCsvHeader() {
 }
 
 void MachineSim::formatIngressCsvRow(char* buf, size_t cap, const IngressRecord& r) {
-    const bool seg = (r.channel_id == benchrig::ch::motion_segment);
+    const bool seg = (r.channel_id == benchrig::ch::motion_segment || r.channel_id == ch::motion_segment);
     std::snprintf(buf, cap,
                   "%.6f,0x%04X,%s,%u,%u,%d,%.4f,%.3f,%.4f,%d,%d,%d,%u,%u,%llu,%.3f,%.3f\n",
                   double(r.t_s), unsigned(r.channel_id), seg ? "segment" : "sample",

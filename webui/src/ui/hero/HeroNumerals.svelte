@@ -95,7 +95,7 @@
   {/if}
 
   <div class="hn-item hn-secondary">
-    <!-- Same treatment as the speed VALUE above: labelled from velField when
+    <!-- Same treatment as the speed VALUE above: labeled from velField when
          the machine annotated telemetry.velocity, else the plain fallback
          (this number is client-derived from position, not its own field). -->
     <span class="hn-label">{velField ? labelFor(velField).toLowerCase() : 'speed'}</span>

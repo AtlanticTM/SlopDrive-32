@@ -3,7 +3,7 @@
 //   slopsim machine [--port 82] [--homed] [--headless] [--duration S]
 //                   [--policy scale|stretch|reshape] [--reshape-steps 0-8]
 //                   [--settle-grace <ms>] [--jerk <mm/s^3>] [--jmax <units/s^3>]
-//                   [--centring on|off] [--centring-gain 0-1]
+//                   [--centering on|off] [--centering-gain 0-1]
 //                   [--pairing-window]
 //   slopsim client <host> [--port 82]        (next milestone)
 //
@@ -60,18 +60,23 @@ int main(int argc, char** argv) {
     float smoothBudget    = -1.0f;
     float amplitudeBudget = -1.0f;
     // Waveform curve family. Empty = leave the engine default (FollowClient,
-    // which is today's C2 behaviour until curve_family wire signalling lands).
+    // which is today's C2 behavior until curve_family wire signaling lands).
     std::string curve;
     float settleGrace  = -1.0f; // ms; <0 = leave the engine default (30 ms)
     float jmax = 0.0f;   // NORMALIZED override (units/s^3); 0 = derive
     float jerk = 0.0f;   // mm-domain INPUT jerk ceiling (mm/s^3); 0 = leave default
     std::string speedmode;      // pegged|matched (SystemState::stream_speed_mode)
-    // DC centring of a degraded band (slopmotion 0.5.0). Empty/<0 = leave the
+    // DC centering of a degraded band (slopmotion 0.5.0). Empty/<0 = leave the
     // engine default (on, gain 1.0) — the A/B this exists for is exactly
-    // "centred vs not" on a scripted infeasible chain.
-    std::string centring;       // on|off
-    float centringGain = -1.0f; // <0 = leave the engine default (1.0)
+    // "centered vs not" on a scripted infeasible chain.
+    std::string centering;       // on|off
+    float centeringGain = -1.0f; // <0 = leave the engine default (1.0)
     bool noTimerBoost = false;  // A/B escape hatch for the 1 ms scheduler tick
+    // Catalog profile (SlopDeck DESIGN.md §5/§7 sim-fidelity ruling). `device`
+    // is the DEFAULT: the real SlopDrive-32 catalog, byte-for-byte. `alien` is
+    // benchrig, a deliberately different conformant hub. `minimal` is a subset
+    // of the real device catalog — the potato-client floor.
+    std::string profileArg = "device";
 
     // claude-CLI shape: a bare `slopsim` (or `SlopCLI`) drops straight into the
     // machine TUI; subcommands stay for scripting. Flags may follow either way.
@@ -100,10 +105,19 @@ int main(int argc, char** argv) {
         else if (!std::strcmp(argv[i], "--jmax") && i + 1 < argc) jmax = float(atof(argv[++i]));
         else if (!std::strcmp(argv[i], "--jerk") && i + 1 < argc) jerk = float(atof(argv[++i]));
         else if (!std::strcmp(argv[i], "--speedmode") && i + 1 < argc) speedmode = argv[++i];
-        else if (!std::strcmp(argv[i], "--centring") && i + 1 < argc) centring = argv[++i];
-        else if (!std::strcmp(argv[i], "--centring-gain") && i + 1 < argc) centringGain = float(atof(argv[++i]));
+        else if (!std::strcmp(argv[i], "--centering") && i + 1 < argc) centering = argv[++i];
+        else if (!std::strcmp(argv[i], "--centering-gain") && i + 1 < argc) centeringGain = float(atof(argv[++i]));
         else if (!std::strcmp(argv[i], "--no-timer-boost")) noTimerBoost = true;
+        else if (!std::strcmp(argv[i], "--profile") && i + 1 < argc) profileArg = argv[++i];
     }
+
+    if (profileArg != "device" && profileArg != "alien" && profileArg != "minimal") {
+        std::fprintf(stderr, "slopsim: --profile takes 'device', 'alien' or 'minimal'\n");
+        return 2;
+    }
+    const Profile profile = profileArg == "alien"   ? Profile::Alien
+                           : profileArg == "minimal" ? Profile::Minimal
+                                                      : Profile::Device;
 
     if (!policy.empty() && policy != "scale" && policy != "stretch" &&
         policy != "reshape" && policy != "amp" && policy != "prio-amplitude" &&
@@ -137,12 +151,12 @@ int main(int argc, char** argv) {
         std::fprintf(stderr, "slopsim: --speedmode takes 'pegged' or 'matched'\n");
         return 2;
     }
-    if (!centring.empty() && centring != "on" && centring != "off") {
-        std::fprintf(stderr, "slopsim: --centring takes 'on' or 'off'\n");
+    if (!centering.empty() && centering != "on" && centering != "off") {
+        std::fprintf(stderr, "slopsim: --centering takes 'on' or 'off'\n");
         return 2;
     }
-    if (centringGain > 1.0f) {
-        std::fprintf(stderr, "slopsim: --centring-gain takes 0..1\n");
+    if (centeringGain > 1.0f) {
+        std::fprintf(stderr, "slopsim: --centering-gain takes 0..1\n");
         return 2;
     }
 
@@ -174,15 +188,20 @@ int main(int argc, char** argv) {
                      "                                        limit; default 2000000, /span -> jmax)\n"
                      "                  [--jmax <units/s^3>]  NORMALIZED jerk override; wins over\n"
                      "                                        --jerk when > 0 (0 = derive)\n"
-                     "                  [--centring on|off]   midpoint-anchored stroke shortening\n"
+                     "                  [--centering on|off]   midpoint-anchored stroke shortening\n"
                      "                                        when the machine can't reach\n"
                      "                                        (engine default: on)\n"
-                     "                  [--centring-gain 0-1] centring strength (default 1.0;\n"
+                     "                  [--centering-gain 0-1] centering strength (default 1.0;\n"
                      "                                        a feel dial, not monotone)\n"
                      "                  [--speedmode pegged|matched]  stream speed feed\n"
                      "                                        (device default: pegged)\n"
                      "                  [--no-timer-boost]    leave Windows at its 15.6 ms timer\n"
                      "                                        tick (A/B only — wrecks fidelity)\n"
+                     "                  [--profile device|alien|minimal]\n"
+                     "                                        catalog profile (default: device — the\n"
+                     "                                        real SlopDrive-32 catalog, byte-for-byte;\n"
+                     "                                        alien = benchrig, deliberately different;\n"
+                     "                                        minimal = a subset of device)\n"
                      "  slopsim client <host>       (not yet)\n");
         return 2;
     }
@@ -196,7 +215,8 @@ int main(int argc, char** argv) {
 
     SessionLog log;
     if (headless) log.setEcho(true);
-    MachineSim sim(log);
+    log.logf('I', "sim: catalog profile = %s (--profile)", profileArg.c_str());
+    MachineSim sim(log, profile);
     // Applied before begin() so the very first planned segment already sees
     // them; both go through the same setters the palette uses (one seam).
     if (!policy.empty()) {
@@ -257,13 +277,13 @@ int main(int argc, char** argv) {
     if (jmax > 0.0f) {
         log.logf('I', "sim: jmax override = %.0f units/s^3 (--jmax)", double(sim.uiSetJmax(jmax)));
     }
-    if (!centring.empty()) {
-        log.logf('I', "sim: waveform centring = %s (--centring)",
-                 sim.uiSetWaveCentering(centring == "on") ? "on" : "off");
+    if (!centering.empty()) {
+        log.logf('I', "sim: waveform centering = %s (--centering)",
+                 sim.uiSetWaveCentering(centering == "on") ? "on" : "off");
     }
-    if (centringGain >= 0.0f) {
-        log.logf('I', "sim: centring gain = %.2f (--centring-gain)",
-                 double(sim.uiSetWaveCenteringGain(centringGain)));
+    if (centeringGain >= 0.0f) {
+        log.logf('I', "sim: centering gain = %.2f (--centering-gain)",
+                 double(sim.uiSetWaveCenteringGain(centeringGain)));
     }
     if (!speedmode.empty()) {
         const uint8_t m = sim.uiSetStreamSpeedMode(speedmode == "matched" ? 1 : 0);

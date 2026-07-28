@@ -75,7 +75,7 @@ private:
 //   high-res waitable timer 1000us      1.54 ms           1.53 ms
 //   yield-spin to a 1 ms deadline       1.000 ms          1.000 ms
 // Two surprises worth keeping written down: (1) MinGW's sleep_for does NOT
-// honour the multimedia timer period at all, so raising it fixes everything in
+// honor the multimedia timer period at all, so raising it fixes everything in
 // the process EXCEPT the C++ sleep we were using; (2) the high-resolution
 // waitable timer (Win10 1803+) is good without any period raising, but still
 // has ~0.5 ms of its own overhead — which is half our loop period.

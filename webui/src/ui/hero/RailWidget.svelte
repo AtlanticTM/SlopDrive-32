@@ -116,7 +116,7 @@
   const moveReason = $derived.by(() => {
     if (!move) return '';
     if (machine.link.phase !== 'live') return 'no hub link';
-    if (!moveEnabled) return 'this session is not authorised to command motion';
+    if (!moveEnabled) return 'this session is not authorized to command motion';
     return '';
   });
 
@@ -145,7 +145,7 @@
   // number the operator typed in. Both are OPTIONAL claims: no catalog has
   // tagged them yet (RFC-041 is filed, not landed), so `hi` falls back to
   // `max.max` exactly as before on every hub live today — that fallback is
-  // the documented, permanent behaviour for an unroled hub, not a stopgap.
+  // the documented, permanent behavior for an unroled hub, not a stopgap.
   const lo = $derived(min.min ?? 0);
   const measuredTravel = $derived(
     extentMeasured ? displayValue(extentMeasured, sampleOf(extentMeasured)) : null);
@@ -1000,7 +1000,7 @@
     transition: left .25s ease, width .25s ease;
   }
   /* Disabled (fallback: no move role, or this session may not command) —
-     inert grey strip, same shape as the live one so the rhythm survives. */
+     inert gray strip, same shape as the live one so the rhythm survives. */
   .rail-tape:not(.live) {
     background:
       repeating-linear-gradient(90deg, var(--line-2) 0 1px, transparent 1px 7px),

@@ -32,7 +32,9 @@
 #include <string>
 #include <vector>
 
+#include "SlopMinimalCatalog.h"
 #include "SlopSimCatalog.h"
+#include "comms/SlopSyncCatalog.h"
 #include "slopmotion/slopmotion.hpp"
 #include "slopsync/hub/hub.hpp"
 
@@ -41,6 +43,17 @@
 #include "net/WsServerPort.h"
 
 namespace slopsim {
+
+// ---- Catalog profile (SlopDeck DESIGN.md §5/§7 sim-fidelity ruling) --------
+// `--profile device` (DEFAULT): the REAL SlopDrive-32 catalog, byte-for-byte
+// (buildSlopDriveCatalog(), include/comms/SlopSyncCatalog.h) — what the
+// committed fixture is captured from and what SlopDeck develops against.
+// `--profile alien`: benchrig — a deliberately DIFFERENT conformant hub
+// (SlopSimCatalog.h). Proves a client renders from the catalog, not from
+// hardcoded SlopDrive-32 knowledge.
+// `--profile minimal`: the potato-client floor — a SUBSET of the real device
+// catalog (SlopMinimalCatalog.h), not a third catalog.
+enum class Profile : uint8_t { Device, Alien, Minimal };
 
 // ---- SlopMotion anomaly kind names --------------------------------------
 // MIRROR of the device's kSmAnomalyNames (include/system/SystemState.h), kept
@@ -59,7 +72,7 @@ inline constexpr const char* kSmAnomalyNames[] = {
     "deadline_stretched",  //                        ::DeadlineStretched = 4
     "waveform_fallback",   //                        ::WaveformFallback  = 5
     "waveform_scaled",     //                        ::WaveformScaled    = 6
-    "waveform_centred",    //                        ::WaveformCentred   = 7
+    "waveform_centered",    //                        ::WaveformCentered   = 7
     "handoff_bounded",     //                        ::HandoffBounded    = 8
     "waveform_smoothed",   //                        ::WaveformSmoothed  = 9
 };
@@ -197,12 +210,18 @@ struct SimPattern {
     float sensation = 0.0f;   // -100..100 -> in/out skew
     bool goingDeep = false;
     uint64_t next_due_us = 0;
+    // RFC-045/048 source.background_run (Device profile's pattern-cmd key 7):
+    // keep the generator running after its owning session disconnects. Device
+    // catalog default is false; Alien has no pattern channel at all.
+    bool background_run = false;
 };
 
 // ---- The sim machine --------------------------------------------------------
 class MachineSim final : public slopsync::HubDelegate {
 public:
-    explicit MachineSim(SessionLog& log);
+    explicit MachineSim(SessionLog& log, Profile profile = Profile::Device);
+
+    Profile profile() const { return _profile; }
 
     bool begin(uint16_t wsPort, bool startHomed);
     void shutdown();
@@ -279,7 +298,7 @@ public:
     //                      surrendered. 0.5 stops at the segment midpoint.
     //                      Clamped [0 .. 1].
     // Curve family for waveform-segment reconstruction (slopmotion 0.8.0).
-    // FollowClient == today's behaviour until curve_family wire signalling
+    // FollowClient == today's behavior until curve_family wire signaling
     // exists; ForceC1 rebuilds a Pchip/Makima span as the cubic it actually is.
     slopmotion::CurvePolicy uiSetCurvePolicy(slopmotion::CurvePolicy p);
     float   uiSetSmoothBudget(float budget);
@@ -292,7 +311,7 @@ public:
     // conversion happens in the setter. Clamped [0 .. 200] ms; returns APPLIED ms.
     float uiSetSettleGraceMs(float ms);
     bool  uiSetChaseAimAccelExtrap(bool on);
-    // DC centring of a degraded band (slopmotion 0.5.0, WAVEFORM path): keep the
+    // DC centering of a degraded band (slopmotion 0.5.0, WAVEFORM path): keep the
     // achieved stroke symmetric about the COMMANDED midpoint when the machine
     // cannot deliver the full amplitude on the clock. ON is the engine default;
     // OFF restores the 0.4.0 contract. Gain is a feel dial clamped [0 .. 1] and
@@ -576,6 +595,17 @@ private:
     void applyWindowLegality(float min_mm, float max_mm);
 
     SessionLog& _log;
+    Profile _profile;
+    // True for Device and Minimal (both real slopdrive:: catalogs/ids) —
+    // false only for Alien (benchrig::). Gates which of the two wire-shape
+    // branches publishTelemetry()/applyIntent() take; Minimal further gates
+    // individual channels within the "real" branch since its catalog is a
+    // strict subset (see the _hasFullDeviceCatalog uses below).
+    bool _realDeviceIds = true;
+    // True only for Device — Minimal's catalog omits machine-config/pattern-
+    // state/plan-strip/power/odometer/slopmotion-diag/motion-anomaly, so
+    // publishing to those ids would be dead weight (harmless, but pointless).
+    bool _hasFullDeviceCatalog = true;
 
     // ---- Machine state (mirrors the SystemState slice a UI sees) ------------
     bool _homed = false, _homing = false, _paused = false, _override = false, _estop_latched = false;
@@ -590,12 +620,13 @@ private:
     uint8_t _warmup_mode = benchrig::factory::warmup_mode;
     std::string _device_label = benchrig::factory::device_label;
     uint64_t _homing_done_us = 0;
-    // benchrig's runtime defaults match its OWN catalog factory:: numbers
-    // (SlopSimCatalog.h) — a smaller/cheaper machine than SlopDrive-32, not
-    // the real device's config_api defaults.
-    float _win_min_mm = benchrig::factory::window_min, _win_max_mm = benchrig::factory::window_max;
-    float _max_rail_mm = benchrig::factory::window_max;
-    float _user_speed = benchrig::factory::user_speed, _user_accel = benchrig::factory::user_accel;
+    // Runtime defaults are PROFILE-DEPENDENT (benchrig's own smaller/cheaper
+    // numbers for Alien; the real slopdrive::factory:: numbers for Device and
+    // Minimal) — assigned in the constructor BODY, where `_profile` is known,
+    // not here (a field initializer can't branch on a constructor argument).
+    float _win_min_mm = 0.0f, _win_max_mm = 0.0f;
+    float _max_rail_mm = 0.0f;
+    float _user_speed = 0.0f, _user_accel = 0.0f;
     // Stream/pattern (INPUT) set. NOT the device factory defaults (550/8000) —
     // these are the operator's OWN HARDWARE defaults (1000 mm/s, 50000 mm/s²),
     // so a sim trace is comparable with a hardware trace out of the box.

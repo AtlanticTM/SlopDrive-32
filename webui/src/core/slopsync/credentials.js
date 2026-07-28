@@ -17,14 +17,14 @@
  *      to anything that can HTTP GET it. See the honesty note below.
  *
  *   3. NOTHING. HELLO carries no token and the hub answers `watch`: the UI
- *      renders, telemetry flows, controls grey out, and the e-stop STILL WORKS
+ *      renders, telemetry flows, controls gray out, and the e-stop STILL WORKS
  *      (safety ops are role-exempt by catalog `option_access`, RFC-025b — the
  *      person standing next to the machine can always stop it). Degraded is a
  *      designed state here, not a failure.
  *
  * ── HONESTY ABOUT /uitoken ──────────────────────────────────────────────────
  *
- * The endpoint's only defence is the ABSENCE of CORS headers, which stops a
+ * The endpoint's only defense is the ABSENCE of CORS headers, which stops a
  * malicious *web page* in the operator's browser from reading the response. It
  * stops nothing else: `curl http://<device>/uitoken` works from anywhere on the
  * LAN and yields control tier. So while /uitoken is enabled, "authentication is
@@ -117,7 +117,7 @@ export function setHttpGet(fn) { _httpGet = typeof fn === 'function' ? fn : brow
  * quietly dropped to `watch` with three console errors as the only clue.
  *
  * Same-origin is also the safer request: it is the shape the endpoint's
- * no-CORS defence is designed around.
+ * no-CORS defense is designed around.
  */
 function mintUrl(host) {
   if (typeof location !== 'undefined' && location.hostname === host) return '/uitoken';
@@ -159,7 +159,7 @@ export async function mintUiToken(host, attempts = 4) {
  * CALLED PER CONNECT, NOT PER SESSION — and that is load-bearing. A /uitoken is
  * consumed by the hub the moment it validates (single-use, by design, so a page
  * cannot hoard one and replay it later). A token captured once at construction
- * would therefore authorise exactly the FIRST connect and silently demote every
+ * would therefore authorize exactly the FIRST connect and silently demote every
  * reconnect to `watch`: the UI would come back after a blip looking connected
  * with every control dead. Minting per connect is what makes reconnection
  * transparent.

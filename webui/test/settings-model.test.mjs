@@ -168,7 +168,7 @@ ok('a setting knows its INTENT channel and key',
 // gate bit 0 -> travel_lo, bit 1 -> travel_hi. Publish only bit 0 set.
 const sample = { travel_lo: 10, travel_hi: 800, travel_measured: 812, gate: 0b01 };
 ok('mask bit set -> field writable', isFieldEnabled(byName.get('travel_lo'), sample));
-ok('mask bit clear -> field greyed', !isFieldEnabled(byName.get('travel_hi'), sample));
+ok('mask bit clear -> field grayed', !isFieldEnabled(byName.get('travel_hi'), sample));
 ok('the mask field itself is never drawn as a control',
    !model.fields.some((f) => f.role === ROLE.enabledMask));
 
@@ -213,7 +213,7 @@ const weird = buildSettingsModel([{
 ok('a field of an unknown packed type still renders (fallback widget)',
    weird.fields.length === 1 && weird.fields[0].widget === WIDGET.number,
    weird.fields[0] && weird.fields[0].widget);
-ok('an unlabelled device category gets a generated label',
+ok('an unlabeled device category gets a generated label',
    weird.categories[0] && /250/.test(weird.categories[0].label), weird.categories[0].label);
 ok('an unknown role is carried, not rejected', weird.fields[0].role === 'some.future.role');
 

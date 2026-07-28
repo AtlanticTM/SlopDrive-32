@@ -357,7 +357,7 @@
     flex: 0 0 auto;
   }
 
-  /* Pinned chips carry the tone as text colour + a tinted wash, so phase and
+  /* Pinned chips carry the tone as text color + a tinted wash, so phase and
      tier read at a glance without relying on the dot alone. */
   .chip-pin {
     font-weight: 700;

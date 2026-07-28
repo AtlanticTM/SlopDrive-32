@@ -57,12 +57,16 @@ target_include_directories(slopsim PRIVATE
     src
     "${REPO_ROOT}/lib/slopsync/include"
     "${REPO_ROOT}/lib/slopmotion/include"
-    "${REPO_ROOT}/lib/ruckig/include")
-    # NOTE: include/comms (the firmware's own SlopSyncCatalog.h) is
-    # DELIBERATELY NOT on this path. slopsim declares its own, different
-    # device catalog — src/machine/SlopSimCatalog.h — so that pointing a
-    # client at the sim proves it can render a machine it has never met, not
-    # just SlopDrive-32 again over a fresh socket. See that file's header.
+    "${REPO_ROOT}/lib/ruckig/include"
+    "${REPO_ROOT}/include")
+    # include/comms (the firmware's own SlopSyncCatalog.h) IS on this path —
+    # SlopDeck DESIGN.md's sim-fidelity ruling (docs/slopdeck/DESIGN.md §5/§7)
+    # restores the `device` profile to LITERAL device-catalog fidelity: the
+    # sim calls buildSlopDriveCatalog() from THIS header rather than
+    # re-authoring a parallel copy, so the two can never silently diverge.
+    # That header is hardware-free (native tests already build it), so this
+    # is a safe include on the host. src/machine/SlopSimCatalog.h's
+    # benchrig:: catalog is UNCHANGED and still used for `--profile alien`.
 
 target_compile_options(slopsim PRIVATE -Wall -Wextra)
 

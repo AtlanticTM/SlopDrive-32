@@ -5,7 +5,7 @@
  * ── Why this is not "device knowledge" ─────────────────────────────────────
  *
  * The rule for the layer above core/slopsync/ is: know nothing about THIS
- * machine. Channel 0x0081, the field name `window_min`, the option label
+ * machine. Channel 0x1000, the field name `window_min`, the option label
  * "Half'n'Half" — all of those describe one device and hardcoding them is what
  * made our UI privileged.
  *

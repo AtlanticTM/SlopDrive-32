@@ -6,7 +6,7 @@ RangeMapper::RangeMapper()
     , _max_rail_mm(DEFAULT_MAX_RAIL_MM) {}
 
 // Update the physical ceiling and re-clamp the current window to it so a
-// shortened rail immediately trims an over-long window. :3
+// shortened rail immediately trims an over-long window.
 void RangeMapper::setMaxRailMm(float mm) {
     if (mm <= 0.0f) return;
     _max_rail_mm = mm;
@@ -29,10 +29,6 @@ void RangeMapper::setRange(float min_mm, float max_mm) {
     }
 }
 
-// Take a raw 0..1 intensity value from Intiface and ram it deep into our
-// physical range, stretching from the rearmost snuggle spot all the way to
-// the forwardmost bulge. The higher the intensity, the deeper we pump it —
-// at 1.0 he's absolutely packed to the hilt with nowhere left to go. :3
 float RangeMapper::intensityToPosition(float intensity) const {
     intensity = clampIntensity(intensity);
     return _range_min_mm + (intensity * getRangeSize());
@@ -53,7 +49,7 @@ float RangeMapper::getCenterPosition() const {
 float RangeMapper::clampToPhysicalLimits(float pos_mm) const {
     // Rail-length agnostic: clamp to the user-set max rail length. There is no
     // hardcoded geometry ceiling anymore — _max_rail_mm is pushed from
-    // ConfigStore/WebUI (default DEFAULT_MAX_RAIL_MM = 500mm). :3
+    // ConfigStore/WebUI (default DEFAULT_MAX_RAIL_MM = 500mm).
     return constrain(pos_mm, 0.0f, _max_rail_mm);
 }
 

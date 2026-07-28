@@ -43,12 +43,11 @@ enum BaseId : uint8_t {
 constexpr float SPEED_CURVE_EXP = 0.8f;
 constexpr float ACCEL_CURVE_EXP = 0.6f;
 
-// ----------------------------------------------------------------------------
-// Modifier — cyclic per-stroke modulation of one base control.
-// One cycle = in_step strokes ramping toward full modification, in_wait
-// strokes held there, out_step strokes ramping back, out_wait strokes at
-// rest. amplitude 100 = modifier off; offset phase-shifts the cycle.
-// ----------------------------------------------------------------------------
+// ---- Modifier ---------------------------------------------------------------
+// Cyclic per-stroke modulation of one base control. One cycle = in_step
+// strokes ramping toward full modification, in_wait strokes held there,
+// out_step strokes ramping back, out_wait strokes at rest. amplitude 100 =
+// modifier off; offset phase-shifts the cycle.
 struct Modifier {
     volatile uint8_t amplitude = 100;  // 0..100 (100 = off)
     volatile uint8_t in_step   = 1;    // 1..25
@@ -64,11 +63,10 @@ struct Modifier {
     float modification(int cycle) const;
 };
 
-// ----------------------------------------------------------------------------
-// BaseControl — one 0..100 knob with an optional modifier. invert_ref marks
-// the control whose modifier swings toward its MAX bound (DEPTH_MIN pulls up
-// toward max depth) instead of toward its MIN bound.
-// ----------------------------------------------------------------------------
+// ---- BaseControl ------------------------------------------------------------
+// One 0..100 knob with an optional modifier. invert_ref marks the control
+// whose modifier swings toward its MAX bound (DEPTH_MIN pulls up toward max
+// depth) instead of toward its MIN bound.
 struct BaseControl {
     volatile uint8_t value;
     volatile uint8_t min_value;   // dynamic for the depth pair (coupled)
@@ -90,10 +88,9 @@ struct BaseControl {
     float rampedModified(float curve_exp, int stroke_count) const;
 };
 
-// ----------------------------------------------------------------------------
-// StrokePlan — what one half-stroke asks of the machine, in unitless
-// fractions. PatternEngine turns this into mm + mm/s + mm/s² + deadline.
-// ----------------------------------------------------------------------------
+// ---- StrokePlan -------------------------------------------------------------
+// What one half-stroke asks of the machine, in unitless fractions.
+// PatternEngine turns this into mm + mm/s + mm/s² + deadline.
 struct StrokePlan {
     bool  moving;        // false = master speed is 0: hold position
     float target_frac;   // 0..1 within the stroke window
@@ -101,10 +98,9 @@ struct StrokePlan {
     float accel_knob;    // 0..1 → accel = minAccel × (1 + 9·knob), fray-d's 1×–10× range
 };
 
-// ----------------------------------------------------------------------------
-// Settings — the full advanced-mode control set (fray-d defaults: shallow
-// 10% max depth and master speed 0, so a fresh boot cannot lunge).
-// ----------------------------------------------------------------------------
+// ---- Settings ---------------------------------------------------------------
+// The full advanced-mode control set (fray-d defaults: shallow 10% max
+// depth and master speed 0, so a fresh boot cannot lunge).
 struct Settings {
     BaseControl master    { 0,   0, 100, false };  // master speed (no modifier)
     BaseControl max_depth { 10,  0, 100, false };

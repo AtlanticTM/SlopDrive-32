@@ -1,29 +1,26 @@
 #pragma once
 
-// ============================================================================
-// MachineSim — the virtual SlopDrive. Roadmap §6 "SlopSim" v1+v2 rough-in.
-//
-// Composition mirrors the firmware's SlopSyncHubService one-for-one:
-//   HostClock/HostRandom  (SlopSyncPlatform.h's EspClock/EspRandom analogs)
-//   buildSlopDriveCatalog()   — the REAL device catalog, included verbatim
-//   slopsync::Hub             — the REAL hub, byte-identical protocol behavior
-//   slopmotion::Engine        — the REAL motion core (quintic/chase/settle)
-//   SimStepper                — FAS modeled at the MotorDriver seam: the
-//                               trapezoidal ramp follower that streamToSteps()
-//                               drives. ACTUAL position comes from HERE, the
-//                               engine only provides the 1 kHz setpoints —
-//                               same division of truth as the hardware.
-//   SlopSimWsPort             — real WS transport (net/WsServerPort.h)
-//
-// The delegate half of this class is a transcription of SlopDriveHubDelegate
-// (src/comms/SlopSyncHubService.cpp) with WebUI::handleCommand replaced by
-// direct application to the sim's machine state — gates, NACK codes, clamp
-// semantics, and post-clamp echoes are kept intentionally identical so a
-// client cannot tell the difference (Ground Truth doctrine).
-//
-// THREADING: everything in this class runs on the ONE sim thread (tick()).
-// The WS port marshals its connection threads; see WsServerPort.h.
-// ============================================================================
+// MachineSim — the virtual SlopDrive (roadmap §6 "SlopSim").
+// Constraints:
+//   Composition mirrors the firmware's SlopSyncHubService one-for-one:
+//     HostClock/HostRandom — SlopSyncPlatform.h's EspClock/EspRandom analogs
+//     buildSlopDriveCatalog() — the REAL device catalog, included verbatim
+//     slopsync::Hub        — the REAL hub, byte-identical protocol behavior
+//     slopmotion::Engine   — the REAL motion core (quintic/chase/settle)
+//     SimStepper           — FAS modeled at the MotorDriver seam: the
+//                            trapezoidal ramp follower that streamToSteps()
+//                            drives. ACTUAL position comes from HERE, the
+//                            engine only provides the 1 kHz setpoints — same
+//                            division of truth as the hardware.
+//     SlopSimWsPort        — real WS transport (net/WsServerPort.h)
+//   The delegate half of this class is a transcription of
+//   SlopDriveHubDelegate (src/comms/SlopSyncHubService.cpp) with
+//   WebUI::handleCommand replaced by direct application to the sim's
+//   machine state — gates, NACK codes, clamp semantics, and post-clamp
+//   echoes are kept intentionally identical so a client cannot tell the
+//   difference (Ground Truth doctrine).
+//   THREADING: everything in this class runs on the ONE sim thread (tick()).
+//   The WS port marshals its connection threads; see WsServerPort.h.
 
 #include <array>
 #include <cstdint>
@@ -46,7 +43,8 @@
 
 namespace slopsim {
 
-// ---- Catalog profile (SlopDeck DESIGN.md §5/§7 sim-fidelity ruling) --------
+// ---- Catalog profile --------------------------------------------------------
+// See docs/slopdeck/DESIGN.md §5/§7 (sim-fidelity ruling).
 // `--profile device` (DEFAULT): the REAL SlopDrive-32 catalog, byte-for-byte
 // (buildSlopDriveCatalog(), include/comms/SlopSyncCatalog.h) — what the
 // committed fixture is captured from and what SlopDeck develops against.
@@ -57,7 +55,7 @@ namespace slopsim {
 // catalog (SlopMinimalCatalog.h), not a third catalog.
 enum class Profile : uint8_t { Device, Alien, Minimal };
 
-// ---- SlopMotion anomaly kind names --------------------------------------
+// ---- SlopMotion anomaly kind names ------------------------------------------
 // MIRROR of the device's kSmAnomalyNames (include/system/SystemState.h), kept
 // byte-identical ON PURPOSE: the whole value of this table is that
 // GET /api/slopmotion on the sim and on the device produce the SAME
@@ -95,8 +93,9 @@ inline constexpr size_t kSmAnomalyKinds = 10;
 static_assert(kSmAnomalyNameCount <= kSmAnomalyKinds,
               "kSmAnomalyNames outgrew the counter array — bump kSmAnomalyKinds");
 
-// ---- PacingRing — verbatim host copy of the firmware's (SlopSyncHubService.h).
-// Same single-thread producer/consumer (onStreamBundle fires inside
+// ---- PacingRing -------------------------------------------------------------
+// Verbatim host copy of the firmware's (SlopSyncHubService.h). Same
+// single-thread producer/consumer (onStreamBundle fires inside
 // hub.update() on the sim thread; drain runs on the sim thread), so it stays
 // lock-free for the same structural reason.
 struct PacingEntry {
@@ -143,8 +142,9 @@ private:
     size_t _head = 0, _tail = 0, _count = 0;
 };
 
-// ---- SimStepper — FastAccelStepper modeled at the MotorDriver seam ---------
-// The firmware's 1 kHz sampler path ends in streamToSteps(target, speed,
+// ---- SimStepper -------------------------------------------------------------
+// FastAccelStepper modeled at the MotorDriver seam. The firmware's 1 kHz
+// sampler path ends in streamToSteps(target, speed,
 // accel) -> FAS re-ramps from CURRENT velocity toward the micro-target under
 // those ceilings. FAS's ramp generator is a trapezoidal follower; this is that
 // follower in the mm domain (step quantization is 1/AIM_STEPS_PER_MM =
@@ -199,8 +199,10 @@ private:
     float _vmax = 100.0f, _amax = 1000.0f;
 };
 
-// ---- SimPattern — stand-in generators (PatternEngine is FreeRTOS-tainted) --
-// Emits ONE waveform segment per half-stroke into the engine — the same seam
+// ---- SimPattern -------------------------------------------------------------
+// Stand-in generators — PatternEngine is FreeRTOS-tainted, so it cannot run
+// host-side. Emits ONE waveform segment per half-stroke into the engine — the
+// same seam
 // the firmware PatternEngine drives. v1 patterns: 0 stroke, 1 tease (sensation
 // skews in/out durations), 2 shallow-fast.
 struct SimPattern {
@@ -238,7 +240,7 @@ public:
     //          "current" for one 1 ms sample exactly like the device.
     void tick();
 
-    // ---- Fault injection / TUI controls (sim thread) -----------------------
+    // ---- Fault injection / TUI controls (sim thread) ------------------------
     void injectEstop();
     void injectClearEstop();
     void startHoming();
@@ -548,7 +550,7 @@ public:
 
     slopsync::Hub& hub() { return _hub; }
 
-    // ---- HubDelegate (called from inside _hub.update(), sim thread) --------
+    // ---- HubDelegate (called from inside _hub.update(), sim thread) ---------
     slopsync::AccessLevel validateToken(std::span<const std::byte> instance_id,
                                         std::span<const std::byte> token, bool hasToken) override;
     slopsync::Result<slopsync::IntentValueMap, slopsync::NackCode> applyIntent(
@@ -616,8 +618,9 @@ private:
     // a one-shot property of one commanded move; this is the machine mode that
     // 0x0003's appended `modes` byte publishes and 0x0005's bypass_on/off write.
     bool _bypass_limits = false;
-    // ---- benchrig-only device settings (0x0092 / written via 0x0111) -------
-    // The setting the real device does not have: proves a brand-new
+    // ---- benchrig-only device settings --------------------------------------
+    // 0x0092, written via 0x0111. The setting the real device does not have:
+    // proves a brand-new
     // select+str16 pair renders and round-trips with zero client changes.
     uint8_t _warmup_mode = benchrig::factory::warmup_mode;
     std::string _device_label = benchrig::factory::device_label;
@@ -669,7 +672,7 @@ private:
     // This slot answers a different question — "what was the machine last told
     // to do, in the units it was told in" — and feeds TraceSample::cmd_norm.
     float _trace_cmd_norm = -1.0f;
-    // ---- Sender-curve shadow (the analyzer's "raw" line) -------------------
+    // ---- Sender-curve shadow (the analyzer's "raw" line) --------------------
     // A second, parallel curve carrying what the CLIENT described. It is
     // advanced entirely in the SENDER'S frame: each segment starts where the
     // PREVIOUS SEGMENT'S CURVE ENDED, not where the machine got to. That is the
@@ -695,7 +698,7 @@ private:
     uint8_t _stream_speed_mode = 0;
     // machine-modes (0x1030) key 4 — RENDERING.md ui_ranks::hidden on the
     // device too: SystemState::interp_clamp_overshoot has no live consumer on
-    // the engine (CLAUDE.md's released-but-inert-field case). Held as plain
+    // the engine. Held as plain
     // state so the wire round-trips exactly like the device's; there is
     // nothing in the sim's engine config for it to drive either way.
     // factory::overshoot_clamp == 0/false.
@@ -768,8 +771,9 @@ private:
     SimStepper _stepper;
     SimPattern _pattern;
 
-    // ---- fray-d Advanced pattern (pattern-advanced 0x1210 + its 6 modifier
-    // lanes 0x1211-0x1216, writer pattern_advanced_cmd 0x3210) ----------------
+    // ---- fray-d Advanced pattern --------------------------------------------
+    // pattern-advanced 0x1210 + its 6 modifier lanes 0x1211-0x1216, writer
+    // pattern_advanced_cmd 0x3210.
     // Reuses the FIRMWARE's own advpat::Settings (include/motion/AdvancedPattern.h)
     // — pure math/data, no Arduino/FreeRTOS, already host-tested — so the base-
     // control clamps (BaseControl::set()), the depth-pair coupling

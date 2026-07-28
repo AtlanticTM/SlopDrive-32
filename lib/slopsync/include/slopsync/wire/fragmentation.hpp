@@ -36,8 +36,8 @@ namespace slopsync {
 // Each fragment payload is prefixed with a 2-byte frag_index (§5.6).
 inline constexpr size_t kFragIndexBytes = 2;
 
-// ============================================================================
-// Fragmenter — splits ONE oversized control frame (header + payload) into
+// ---- Fragmenter -------------------------------------------------------------
+// Splits ONE oversized control frame (header + payload) into
 // fragments that each fit `maxFrameBytes`, and emits them via `emit`.
 //
 // Flags per fragment (§5.6): first = FRAG_START|FRAG_MORE, middle =
@@ -74,7 +74,7 @@ inline bool fragmentFrame(std::span<const std::byte> wholeFrame, uint16_t maxFra
         return true;
     }
 
-    // Past this point we ARE about to fragment — defend the ESTOP invariant.
+    // Past this point fragmentation WILL happen — defend the ESTOP invariant.
     bool looksLikeEstop = wholeFrame.size() == kEstopFrameBytes &&
                            wholeFrame[0] == kEstopMagicByte && wholeFrame[1] == kEstopMagicByte &&
                            wholeFrame[2] == kEstopMagicByte && wholeFrame[3] == kEstopMagicByte;
@@ -114,8 +114,8 @@ inline bool fragmentFrame(std::span<const std::byte> wholeFrame, uint16_t maxFra
     return true;
 }
 
-// ============================================================================
-// Reassembler — the receive side. Fixed slots (SPEC §5.6:
+// ---- Reassembler ------------------------------------------------------------
+// The receive side. Fixed slots (SPEC §5.6:
 // limits::frag_max_concurrent_per_session = 2 concurrent reassemblies),
 // keyed by (type, seq). Handles out-of-order arrival, idempotent duplicates,
 // 5 s timeout (limits::frag_reassembly_timeout_ms), and slot exhaustion by

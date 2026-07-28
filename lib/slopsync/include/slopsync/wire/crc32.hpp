@@ -35,7 +35,7 @@ inline constexpr std::array<uint32_t, 256> makeCrc32Table() {
 
 inline constexpr std::array<uint32_t, 256> kCrc32Table = detail::makeCrc32Table();
 
-// ---- Incremental API: init -> update (any number of times) -> final. -------
+// ---- Incremental API: init -> update (any number of times) -> final. --------
 // Lets a caller CRC a header-shaped-but-scattered buffer (e.g. compute over
 // bytes assembled piecewise) without a temporary contiguous copy.
 inline constexpr uint32_t crc32Init() { return 0xFFFFFFFFu; }

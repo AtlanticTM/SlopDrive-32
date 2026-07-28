@@ -39,7 +39,7 @@ class IdleGuardWebServer : public WebServer {
 public:
     using WebServer::WebServer;
 
-    /// Call once per httpTask loop, right after handleClient(). Never blocks.
+    // Call once per httpTask loop, right after handleClient(). Never blocks.
     void dropIdleCapture(uint32_t maxSilentMs = 300) {
         if (_currentStatus == HC_WAIT_READ && _currentClient &&
             !_currentClient.available() &&

@@ -1,5 +1,4 @@
-// ============================================================================
-// test_main.cpp — doctest unit tests for slopsync-core's M3 pieces:
+// test_slopsync_transport — slopsync-core's M3 pieces:
 // wire/fragmentation.hpp (Fragmenter + Reassembler, SPEC §5.6) and
 // transport/inprocess_binding.hpp (the in-process fault-injection binding,
 // SPEC §13.1, §13.6).
@@ -12,7 +11,6 @@
 // Suite ids: T-xx = transport/binding mechanics, F-xx = fragmentation unit
 // tests. T-10 is the M3 verification gate (determinism proof); T-12 is the
 // M3 "fragmentation end-to-end over a lossy simulated link" requirement.
-// ============================================================================
 
 #define DOCTEST_CONFIG_IMPLEMENT_WITH_MAIN
 #include <doctest/doctest.h>
@@ -94,9 +92,8 @@ bool bytesEqual(std::span<const std::byte> a, std::span<const std::byte> b) {
 
 }  // namespace
 
-// ============================================================================
-// T-01..T-02 — clean link mechanics
-// ============================================================================
+// ---- T-01..T-02 -------------------------------------------------------------
+// clean link mechanics
 TEST_CASE("T-01: clean link round-trips A->B and B->A byte-identical; read-before-write is nullopt") {
     ManualClock clock;
     XorShift32 rng(12345);
@@ -136,9 +133,8 @@ TEST_CASE("T-02: ring-full (capacity 16) makes write() return false") {
     CHECK(!a.write(frame));
 }
 
-// ============================================================================
-// T-03 — MTU admission gate, and Fragmenter + link + Reassembler together
-// ============================================================================
+// ---- T-03 -------------------------------------------------------------------
+// MTU admission gate, and Fragmenter + link + Reassembler together
 TEST_CASE("T-03: oversized frame rejected by MTU; fragmented pieces fit and reassemble byte-identical") {
     ManualClock clock;
     XorShift32 rng(7);
@@ -178,9 +174,8 @@ TEST_CASE("T-03: oversized frame rejected by MTU; fragmented pieces fit and reas
     CHECK(bytesEqual(complete->bytes(), whole));
 }
 
-// ============================================================================
-// F-01..F-06 — Fragmenter/Reassembler unit tests
-// ============================================================================
+// ---- F-01..F-06 -------------------------------------------------------------
+// Fragmenter/Reassembler unit tests
 TEST_CASE("F-01: 600-byte control frame at mtu 250 => 3 fragments with derived flag pattern") {
     // Hand derivation (SPEC §5.6):
     //   budget = maxFrameBytes - header(8) - frag_index(2) = 250-8-2 = 240
@@ -348,9 +343,8 @@ TEST_CASE("F-06: reassembled size exceeding capacity is reported via DecodeError
     CHECK(res2.error() == DecodeError::CapacityExceeded);
 }
 
-// ============================================================================
-// T-04..T-06 — latency, jitter, properties()
-// ============================================================================
+// ---- T-04..T-06 -------------------------------------------------------------
+// latency, jitter, properties()
 TEST_CASE("T-04: latency delays delivery until the clock catches up") {
     ManualClock clock;
     XorShift32 rng(2);
@@ -422,9 +416,8 @@ TEST_CASE("T-06: properties() reflects mtu/ordered/reliable/congestion") {
     CHECK(a.properties().reliable == false);
 }
 
-// ============================================================================
-// T-07..T-09 — loss / duplication / reorder smoke, seeded & deterministic
-// ============================================================================
+// ---- T-07..T-09 -------------------------------------------------------------
+// loss / duplication / reorder smoke, seeded & deterministic
 TEST_CASE("T-07: seeded loss over 200 frames is deterministic and lands in (100,180)") {
     auto run = [](uint32_t seed) {
         ManualClock clock;
@@ -510,9 +503,8 @@ TEST_CASE("T-09: reorder produces at least one inversion; the delivered sequence
     CHECK(delivered2 == delivered1);  // determinism, exact sequence
 }
 
-// ============================================================================
-// T-10 — THE M3 VERIFICATION GATE: determinism proof
-// ============================================================================
+// ---- T-10 -------------------------------------------------------------------
+// THE M3 VERIFICATION GATE: determinism proof
 namespace {
 
 // A busy scripted scenario mixing loss/dup/reorder/latency/jitter, driven by
@@ -571,9 +563,8 @@ TEST_CASE("T-10: identical seed+script => bit-identical transcript; a different 
     CHECK(differs);
 }
 
-// ============================================================================
-// T-11 — ESTOP fast path
-// ============================================================================
+// ---- T-11 -------------------------------------------------------------------
+// ESTOP fast path
 TEST_CASE("T-11: ESTOP jumps the queue ahead of everything already waiting") {
     ManualClock clock;
     XorShift32 rng(9);
@@ -596,9 +587,8 @@ TEST_CASE("T-11: ESTOP jumps the queue ahead of everything already waiting") {
     CHECK(bytesEqual(got->bytes(), estop));
 }
 
-// ============================================================================
-// T-12 — fragmentation end-to-end over a lossy simulated link (M3 requirement)
-// ============================================================================
+// ---- T-12 -------------------------------------------------------------------
+// fragmentation end-to-end over a lossy simulated link (M3 requirement)
 TEST_CASE("T-12: a large control frame reassembles byte-identical over a 20%-loss link, retried <=10x") {
     ManualClock clock;
     XorShift32 rng(777);
@@ -646,8 +636,8 @@ TEST_CASE("T-12: a large control frame reassembles byte-identical over a 20%-los
     CHECK(bytesEqual(complete->bytes(), whole));
 }
 
-// ============================================================================
-// RFC-028 regression — Reassembler TOTALITY (found by test/fuzz/fuzz_frame).
+// ---- RFC-028 regression -----------------------------------------------------
+// Reassembler TOTALITY (found by test/fuzz/fuzz_frame).
 //
 // Minimized crashing input, as the harness's replay format:
 //   type=0x11 flags=0x00 seq=0 channel=0 dt=0 len=0x0FA0(4000)
@@ -669,7 +659,6 @@ TEST_CASE("T-12: a large control frame reassembles byte-identical over a 20%-los
 //
 // The fix reports it as the capacity overflow it is (CapacityExceeded, slot
 // discarded), identical to placeFragment()'s own overflow path.
-// ============================================================================
 TEST_CASE("RFC-028: an oversized last-fragment is refused, never memcpy'd past the slot") {
     Reassembler ra;
 

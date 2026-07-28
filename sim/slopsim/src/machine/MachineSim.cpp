@@ -1,3 +1,6 @@
+// MachineSim — virtual SlopDrive implementation (see MachineSim.h for the
+// composition contract and threading rule).
+
 #include "machine/MachineSim.h"
 
 #include <algorithm>
@@ -147,9 +150,7 @@ void setApModifier(advpat::Settings& ap, uint8_t id, int amplitude, int in_step,
 
 }  // namespace
 
-// ============================================================================
-// Lifecycle
-// ============================================================================
+// ---- Lifecycle --------------------------------------------------------------
 
 // See SlopSyncHubService.cpp's twin: buildSlopDriveCatalog() is an out-param
 // builder (a Catalog32 is ~22 KB and never a return value), but `_hub` binds
@@ -249,7 +250,7 @@ void MachineSim::tick() {
     const uint64_t now64 = _clock.nowUs64();
     const uint32_t nowMs = uint32_t(now64 / 1000);
 
-    // ---- Host loop-period instrumentation ---------------------------------
+    // ---- Host loop-period instrumentation -----------------------------------
     // The sim's whole motion fidelity rests on being CALLED often enough: the
     // substep loop can only place commits on the 1 ms grid if ticks arrive on
     // roughly that grid. Windows' default 15.6 ms timer resolution used to make
@@ -263,7 +264,7 @@ void MachineSim::tick() {
     }
     _lastTickUs = now64;
 
-    // ---- COMMS pump @ ~5 ms (SlopSyncHubService::taskLoop) -----------------
+    // ---- COMMS pump @ ~5 ms (SlopSyncHubService::taskLoop) ------------------
     // The device's hub task runs on a pdMS_TO_TICKS(5) delay; frames, pacing,
     // deadman and telemetry all inherit that granularity. Pumping it at the
     // motion rate would make the sim's wire FASTER than the device's, which is
@@ -304,7 +305,7 @@ void MachineSim::tick() {
         }
     }
 
-    // ---- MOTION @ 1 ms (streamSamplerTask) --------------------------------
+    // ---- MOTION @ 1 ms (streamSamplerTask) ----------------------------------
     // Drains the pacing ring INSIDE the substep loop, so a commit is current
     // for exactly one 1 ms sample — see tickMachine().
     tickMachine(now64);
@@ -334,9 +335,8 @@ void MachineSim::deriveEngineLimits() {
     _engine.setLimits(l);
 }
 
-// ============================================================================
-// Machine physics — homing, pattern, the 1 ms sampler/stepper substep loop
-// ============================================================================
+// ---- Machine physics --------------------------------------------------------
+// Homing, pattern, the 1 ms sampler/stepper substep loop.
 
 // SystemState::safeSpeedCap, transcribed verbatim (SystemState.h ~403-412).
 float MachineSim::safeSpeedCap(float configured_max, uint32_t now_ms) const {
@@ -557,9 +557,8 @@ void MachineSim::applyWindowLegality(float min_mm, float max_mm) {
     }
 }
 
-// ============================================================================
-// Stream drain — transcription of SlopSyncHubService::drainMotionStream
-// ============================================================================
+// ---- Stream drain -----------------------------------------------------------
+// Transcription of SlopSyncHubService::drainMotionStream.
 
 // Rebuild the sender's own curve for this segment. See the state block in
 // MachineSim.h for why it is advanced in the sender's frame and never chases
@@ -749,9 +748,8 @@ void MachineSim::resetAnomalies() {
     _facade.anom_kind.fill(0);
 }
 
-// ============================================================================
-// Safety sync + telemetry — transcriptions of the firmware service
-// ============================================================================
+// ---- Safety sync + telemetry ------------------------------------------------
+// Transcriptions of the firmware service.
 
 void MachineSim::syncSafety() {
     const bool hubLatched = _hub.estopLatched();
@@ -769,13 +767,12 @@ void MachineSim::syncSafety() {
 
 void MachineSim::publishTelemetry(uint32_t nowMs) {
     if (!_realDeviceIds) {
-        // ================================================================
-        // ALIEN (benchrig) — plain f32 shapes, deliberately NOT the real
-        // device's scaled u16/i16 packing (proves a client isn't assuming a
-        // specific numeric wire encoding). See SlopSimCatalog.h.
-        // ================================================================
+        // ---- ALIEN (benchrig) -----------------------------------------------
+        // Plain f32 shapes, deliberately NOT the real device's scaled
+        // u16/i16 packing (proves a client isn't assuming a specific
+        // numeric wire encoding). See SlopSimCatalog.h.
 
-        // ---- 0x0090 telemetry — >=33 ms (<=30 Hz) --------------------------
+        // ---- 0x0090 telemetry — >=33 ms (<=30 Hz) ---------------------------
         if (nowMs - _lastMotionMs >= 33) {
             _lastMotionMs = nowMs;
             std::array<std::byte, 9> buf{};
@@ -789,7 +786,7 @@ void MachineSim::publishTelemetry(uint32_t nowMs) {
             _hub.publishState(benchrig::ch::telemetry, s);
         }
 
-        // ---- 0x0091 limits — on cfg_gen change OR machine-side edit --------
+        // ---- 0x0091 limits — on cfg_gen change OR machine-side edit ---------
         const uint16_t gen = _hub.cfgGen();
         if (!_cfgEverSent || gen != _lastCfgGen || _cfgDirty) {
             if (_cfgDirty) _hub.bumpConfigGeneration();
@@ -807,7 +804,7 @@ void MachineSim::publishTelemetry(uint32_t nowMs) {
             _hub.publishState(benchrig::ch::limits, s);
         }
 
-        // ---- 0x0092 device-settings — on change ----------------------------
+        // ---- 0x0092 device-settings — on change -----------------------------
         if (_warmup_mode != _lastWarmupMode || _device_label != _lastDeviceLabel || !_devSettingsSent) {
             _devSettingsSent = true;
             _lastWarmupMode = _warmup_mode;
@@ -825,12 +822,11 @@ void MachineSim::publishTelemetry(uint32_t nowMs) {
             _hub.publishState(benchrig::ch::device_settings, s);
         }
     } else {
-        // ================================================================
-        // DEVICE / MINIMAL — byte-identical to the real firmware's own
-        // publishers (SlopSyncHubService.cpp), same scaled u16/i16 packing.
-        // ================================================================
+        // ---- DEVICE / MINIMAL -----------------------------------------------
+        // Byte-identical to the real firmware's own publishers
+        // (SlopSyncHubService.cpp), same scaled u16/i16 packing.
 
-        // ---- 0x1100 motion — >=16 ms (<=60 Hz) -----------------------------
+        // ---- 0x1100 motion — >=16 ms (<=60 Hz) ------------------------------
         if (nowMs - _lastMotionMs >= 16) {
             _lastMotionMs = nowMs;
             std::array<std::byte, 9> buf{};   // M5a: + raw_10um
@@ -880,7 +876,7 @@ void MachineSim::publishTelemetry(uint32_t nowMs) {
                 _hub.publishState(ch::machine_config, s);
             }
 
-            // ---- 0x1200 pattern-state — on change, >=100 ms ----------------
+            // ---- 0x1200 pattern-state — on change, >=100 ms -----------------
             {
                 const uint8_t mask = uint8_t(((_estop_latched || !_homed) ? 0x00 : 0x3F) | 0x40);
                 const bool changed = _pattern.running != _patRunning || _pattern.idx != _patIdx ||
@@ -910,7 +906,7 @@ void MachineSim::publishTelemetry(uint32_t nowMs) {
                 }
             }
 
-            // ---- 0x1110 plan-strip — >=22 ms (<=45 Hz) ---------------------
+            // ---- 0x1110 plan-strip — >=22 ms (<=45 Hz) ----------------------
             if (nowMs - _lastPlanMs >= 22) {
                 _lastPlanMs = nowMs;
                 const slopmotion::Snapshot d = _engine.snapshot(_clock.nowUs64());
@@ -936,7 +932,7 @@ void MachineSim::publishTelemetry(uint32_t nowMs) {
                 }
             }
 
-            // ---- 0x1010 power — 2 Hz. MODELED, and labeled as such ---------
+            // ---- 0x1010 power — 2 Hz. MODELED, and labeled as such ----------
             if (nowMs - _lastPowerMs >= 500) {
                 const float dt = _lastPowerMs == 0 ? 0.5f : float(nowMs - _lastPowerMs) / 1000.0f;
                 _lastPowerMs = nowMs;
@@ -1109,7 +1105,7 @@ void MachineSim::publishTelemetry(uint32_t nowMs) {
     }
 
     if (_hasFullDeviceCatalog && (nowMs - _lastSlowMs >= 1000)) {
-        // ---- 0x1020 odometer -----------------------------------------------
+        // ---- 0x1020 odometer ------------------------------------------------
         {
             std::array<std::byte, 20> buf{};
             std::span<std::byte> s(buf);
@@ -1147,7 +1143,7 @@ void MachineSim::publishTelemetry(uint32_t nowMs) {
         }
     }
 
-    // ---- 1 Hz block: 0x0006 hub-status (SPEC-CORE; every profile) ---------
+    // ---- 1 Hz block: 0x0006 hub-status (SPEC-CORE; every profile) -----------
     if (nowMs - _lastSlowMs >= 1000) {
         _lastSlowMs = nowMs;
         std::array<std::byte, 14> buf{};  // 14 B since M5b: log_dropped appended
@@ -1161,11 +1157,10 @@ void MachineSim::publishTelemetry(uint32_t nowMs) {
     }
 }
 
-// ============================================================================
-// HubDelegate — transcription of SlopDriveHubDelegate with the model applied
-// directly (no WebUI::handleCommand on the host; the gates/clamps/echoes are
-// kept semantically identical).
-// ============================================================================
+// ---- HubDelegate ------------------------------------------------------------
+// Transcription of SlopDriveHubDelegate with the model applied directly (no
+// WebUI::handleCommand on the host; the gates/clamps/echoes are kept
+// semantically identical).
 
 slopsync::AccessLevel MachineSim::validateToken(std::span<const std::byte>, std::span<const std::byte>,
                                                 bool) {
@@ -1452,7 +1447,7 @@ slopsync::Result<IntentValueMap, NackCode> MachineSim::applyIntent(uint16_t chan
             return Ret::ok(applied);
         }
 
-        // ---- modes-set (0x3030) -> machine-modes (0x1030) --------------------
+        // ---- modes-set (0x3030) -> machine-modes (0x1030) -------------------
         // Mirrors SlopDriveHubDelegate's ch::modes_set case: keys 1/2 (retired
         // blend_mode/transport) are PERMANENT GAPS on the firmware too, so a
         // request touching ONLY those falls through unhandled here as well —
@@ -1475,7 +1470,7 @@ slopsync::Result<IntentValueMap, NackCode> MachineSim::applyIntent(uint16_t chan
             return Ret::ok(applied);
         }
 
-        // ---- sm-set (0x3120) -> slopmotion-limits/chase/waveform -------------
+        // ---- sm-set (0x3120) -> slopmotion-limits/chase/waveform ------------
         // Mirrors SlopDriveHubDelegate's ch::sm_set case: 20 keys, every one
         // optional, clamped to the SAME bounds the catalog advertises, echoed
         // post-clamp. jmax/vmax/amax overrides are sim-held (see the field
@@ -1606,7 +1601,7 @@ slopsync::Result<IntentValueMap, NackCode> MachineSim::applyIntent(uint16_t chan
             return Ret::ok(applied);
         }
 
-        // ---- machine-admin (0x30F0) -------------------------------------------
+        // ---- machine-admin (0x30F0) -----------------------------------------
         // ONE-WAY PARITY judgment call, flagged for the operator: the sim has
         // NO fault/servo-Modbus concept at all (grepped clean across
         // sim/slopsim/src), so these three ops get the closest HONEST
@@ -1703,7 +1698,7 @@ slopsync::Result<IntentValueMap, NackCode> MachineSim::applyIntent(uint16_t chan
             return Ret::ok(applied);
         }
 
-        // ---- pattern-presets-cmd (0x3220) -> pattern-presets STORE CRUD ------
+        // ---- pattern-presets-cmd (0x3220) -> pattern-presets STORE CRUD -----
         // Mirrors SlopDriveHubDelegate's ch::pattern_presets_cmd case exactly:
         // save captures LIVE `_ap` state (never the request — Ground Truth),
         // load decodes the stored payload and re-applies it through the SAME
@@ -1966,9 +1961,7 @@ void MachineSim::onStreamBundle(uint16_t channel_id, uint32_t /*session_id*/,
     }
 }
 
-// ============================================================================
-// Fault injection + snapshot
-// ============================================================================
+// ---- Fault injection + snapshot ---------------------------------------------
 
 void MachineSim::injectEstop() {
     if (_estop_latched) return;
@@ -2004,9 +1997,7 @@ void MachineSim::togglePause() {
 
 void MachineSim::toggleOverride() { _override = !_override; }
 
-// ============================================================================
-// Palette-driven config + trace export
-// ============================================================================
+// ---- Palette-driven config + trace export -----------------------------------
 
 float MachineSim::uiSetLimit(LimitKind kind, float value) {
     float applied;
@@ -2072,7 +2063,7 @@ void MachineSim::uiSetPatternParam(int key, float value) {
     }
 }
 
-// ---- SlopMotion engine knobs (POST /api/slopmotion parity) -----------------
+// ---- SlopMotion engine knobs (POST /api/slopmotion parity) ------------------
 // Read-modify-write on the engine's own Config — same seam deriveEngineLimits()
 // drives, so the sim keeps ONE source of truth for engine state (the engine)
 // rather than a shadow copy that can drift. Returns the APPLIED value.

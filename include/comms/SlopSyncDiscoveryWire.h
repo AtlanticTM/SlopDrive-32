@@ -1,29 +1,33 @@
 #pragma once
 
-// ============================================================================
-// SlopSyncDiscoveryWire — pure, hardware-free byte encode/decode for:
-//   * the SlopSync UDP discovery probe/reply (SPEC §13.8; registry
-//     `udp_discovery`; frame_types 0x1E DISCOVER_PROBE / 0x1F DISCOVER_REPLY)
-//   * the BLE-advertising flags byte (SPEC §13.4/§13.6; registry
-//     `ble_adv_flags`) — SHARED with the UDP reply's own `flags` field, which
-//     the registry's 0x1F note says carries "the same philosophy... plus the
-//     endpoint" as the BLE/BEACON flag.
+// SlopSyncDiscoveryWire — pure, hardware-free byte encode/decode for the
+// SlopSync UDP discovery probe/reply and the BLE-advertising flags byte
 //
-// registry.yaml sections cited directly rather than via generated/
-// registry_constants.hpp: tools/gen_registry_header.py does not emit
-// `udp_discovery`/`ble_adv_flags` as C++ constants as of the RFC-046 landing
-// (they are the identity/port numbers a SOCKET binds to and an ADVERTISING
-// PAYLOAD builds from, not CBOR wire numbers the codegen's schema covers).
-// Per CLAUDE.md's Phase E instructions this is the documented fallback, not a
-// spec gap — the numbers below are transcribed from registry.yaml verbatim
-// and must be kept in sync by hand if that file ever changes them.
+// Constraints:
+//   Covers the UDP discovery probe/reply (SPEC §13.8; registry
+//   `udp_discovery`; frame_types 0x1E DISCOVER_PROBE / 0x1F DISCOVER_REPLY)
+//   and the BLE-advertising flags byte (SPEC §13.4/§13.6; registry
+//   `ble_adv_flags`) — SHARED with the UDP reply's own `flags` field, which
+//   the registry's 0x1F note says carries "the same philosophy... plus the
+//   endpoint" as the BLE/BEACON flag.
 //
-// No Arduino/NimBLE/socket code lives here on purpose: this is the part of
-// the radios work that is a pure function of bytes in, bytes out, and
-// therefore host-testable (test/native/test_slopsync_discovery). The AsyncUDP
-// glue (SlopSyncUdpDiscovery.{h,cpp}) and the NimBLE advertising glue
-// (SlopSyncBleTransport.{h,cpp}) are thin shells around these functions.
-// ============================================================================
+//   registry.yaml sections are cited directly rather than via
+//   generated/registry_constants.hpp: tools/gen_registry_header.py does not
+//   emit `udp_discovery`/`ble_adv_flags` as C++ constants as of the RFC-046
+//   landing (they are the identity/port numbers a SOCKET binds to and an
+//   ADVERTISING PAYLOAD builds from, not CBOR wire numbers the codegen's
+//   schema covers) — a documented fallback (LEDGER.md Phase E entry), not
+//   a spec gap. The numbers below are transcribed
+//   from registry.yaml verbatim and must be kept in sync by hand if that
+//   file ever changes them.
+//
+//   No Arduino/NimBLE/socket code lives here: this is the part of the radio
+//   work that is a pure function of bytes in, bytes out, and therefore
+//   host-testable (test/native/test_slopsync_discovery).
+//
+// See:
+//   SlopSyncUdpDiscovery.{h,cpp} — AsyncUDP glue built on these functions
+//   SlopSyncBleTransport.{h,cpp} — NimBLE advertising glue built on these functions
 
 #include <array>
 #include <cstddef>
@@ -35,12 +39,12 @@
 
 namespace slopdrive::discovery {
 
-// ---- registry.yaml `udp_discovery` (RFC-046 §5) ----------------------------
+// ---- registry.yaml `udp_discovery` (RFC-046 §5) -----------------------------
 inline constexpr uint16_t kPort = 21328;  // 0x5350 — ASCII "SP" ("SlopSync Probe")
 inline constexpr uint32_t kReplyRateLimitPerSourceS = 1;  // one reply per source IP per second
 inline constexpr std::array<uint8_t, 4> kMagic = {0x53, 0x4C, 0x4F, 0x50};  // ASCII "SLOP"
 
-// ---- registry.yaml `ble_adv_flags` (RFC-046 §2) — shared byte -------------
+// ---- registry.yaml `ble_adv_flags` (RFC-046 §2) — shared byte ---------------
 // Bits 2-7 reserved, MUST be zero (enforced structurally: buildFlags() has no
 // way to set them).
 inline constexpr uint8_t kFlagPairingWindowOpen = 0x01;  // bit0
@@ -53,9 +57,8 @@ constexpr uint8_t buildFlags(bool pairingWindowOpen, bool wsAvailable) {
     return f;
 }
 
-// ============================================================================
-// DISCOVER_PROBE (0x1E, c2h, raw): magic(4) + proto_ver:u8 + nonce:u32
-// ============================================================================
+// ---- DISCOVER_PROBE (0x1E, c2h, raw) ----------------------------------------
+// magic(4) + proto_ver:u8 + nonce:u32
 inline constexpr size_t kProbeBytes = 4 + 1 + 4;
 
 struct Probe {
@@ -78,18 +81,17 @@ inline std::optional<Probe> parseProbe(std::span<const std::byte> in) {
     return p;
 }
 
-// ============================================================================
-// DISCOVER_REPLY (0x1F, h2c, raw) — RFC-048-corrected layout, 76 bytes:
-//   magic(4) + nonce:u32(4) + hub_name:str32(32) + hub_instance_id:u64(8) +
-//   proto_ver:u8(1) + ws_port:u16(2) + fw_version:str16(16) +
-//   catalog_etag(8) + flags:u8(1)
+// ---- DISCOVER_REPLY (0x1F, h2c, raw) — RFC-048-corrected layout, 76 bytes -
+// magic(4) + nonce:u32(4) + hub_name:str32(32) + hub_instance_id:u64(8) +
+// proto_ver:u8(1) + ws_port:u16(2) + fw_version:str16(16) +
+// catalog_etag(8) + flags:u8(1)
+//
 // str16/str32 are the fixed-width, zero-padded, byte-truncated field types of
 // §5.4/RFC-026 — same semantics as slopsync-core's packStringField()
 // (lib/slopsync/include/slopsync/wire/packed/layout_codec.hpp), reimplemented
 // here rather than shared because this header intentionally has zero
 // dependency on lib/slopsync (this is firmware-side discovery-socket glue,
 // not protocol-core).
-// ============================================================================
 inline constexpr size_t kHubNameMaxBytes = 32;
 inline constexpr size_t kFwVersionMaxBytes = 16;
 inline constexpr size_t kEtagBytes = 8;

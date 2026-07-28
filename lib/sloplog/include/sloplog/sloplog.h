@@ -56,7 +56,7 @@ inline FirmwareLog& logger() {
 // NON-BLOCKING BY CONTRACT: on the Nano ESP32, Serial is USB-CDC — writes
 // with no host draining the port can block ~100 ms PER LINE, and this sink
 // runs on the drain task (httpTask), which also serves the WebUI and pumps
-// the LEDs. So we only write when the TX buffer can take the whole line;
+// the LEDs. So this sink writes only when the TX buffer can take the whole line;
 // otherwise the line is dropped and counted (same drop-and-count posture as
 // the core ring). Attach a serial monitor and the stream returns, with a
 // "(serial dropped N)" marker admitting the gap.
@@ -160,7 +160,7 @@ inline void drainToSinks() { logger().drain(); }
 #endif
 #define SLOGF(tag, ...) SLOPLOG_EMIT(::sloplog::Level::Fatal, tag, __VA_ARGS__)
 
-// ---- Per-call-site rate limiting -------------------------------------------
+// ---- Per-call-site rate limiting --------------------------------------------
 // Each macro expansion owns its own static throttle state (that's the point:
 // the rate limit is per SITE, not per tag). Suppressed emissions are counted
 // and reported on the next one that passes: "... (suppressed 42)".

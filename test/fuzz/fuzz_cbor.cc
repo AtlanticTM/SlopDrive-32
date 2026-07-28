@@ -1,4 +1,5 @@
-// Target: the deterministic-profile CBOR reader (wire/cbor/cbor_reader.hpp).
+// fuzz_cbor — target: the deterministic-profile CBOR reader
+// (wire/cbor/cbor_reader.hpp).
 //
 // This is the substrate every control-plane decoder sits on, so it gets its
 // own target rather than being reached only incidentally through HELLO et al.

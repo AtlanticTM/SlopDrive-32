@@ -1,5 +1,4 @@
-// ============================================================================
-// test_main.cpp — doctest behavioral tests for slopsync-core's M4 session
+// test_slopsync_session — slopsync-core's M4 session
 // engine: hub/hub.hpp (Hub) and client/client.hpp (Client), driven end-to-end
 // over InProcessLink + ManualClock + XorShift32 + conformance::miniCatalog().
 //
@@ -11,7 +10,6 @@
 // Suite ids: S-xx = session lifecycle, I-xx = intent/echo/nack, E-04 = ESTOP
 // repeat-until-latched under loss. Each maps to one behavioral requirement in
 // the M4 milestone brief.
-// ============================================================================
 
 #define DOCTEST_CONFIG_IMPLEMENT_WITH_MAIN
 #include <doctest/doctest.h>
@@ -39,9 +37,7 @@ using namespace slopsync;
 
 namespace {
 
-// ============================================================================
-// Test fixtures
-// ============================================================================
+// ---- Test fixtures ----------------------------------------------------------
 
 ClientIdentity makeIdentity(uint8_t idByte, bool withToken) {
     ClientIdentity id;
@@ -238,9 +234,8 @@ void pump(Hub& hub, ManualClock& clock, std::initializer_list<Client*> clients, 
 
 }  // namespace
 
-// ============================================================================
-// S-01 — cold connect: retained push, SYNCING->LIVE gate, shadow fidelity
-// ============================================================================
+// ---- S-01 -------------------------------------------------------------------
+// cold connect: retained push, SYNCING->LIVE gate, shadow fidelity
 TEST_CASE("S-01: cold connect adopts retained STATE and gates SYNCING->LIVE exactly at retained_pending") {
     Catalog32 catalog;
     conformance::buildMiniCatalog(catalog);
@@ -296,9 +291,8 @@ TEST_CASE("S-01: cold connect adopts retained STATE and gates SYNCING->LIVE exac
     CHECK(hubDelegate.sessionsJoined == 1);
 }
 
-// ============================================================================
-// S-02 — reconnect: cached-etag skip vs. wrong-etag full transfer
-// ============================================================================
+// ---- S-02 -------------------------------------------------------------------
+// reconnect: cached-etag skip vs. wrong-etag full transfer
 TEST_CASE("S-02: matching cached etag skips BLOB_REQ on reconnect; wrong etag triggers chunk transfer") {
     Catalog32 catalog;
     conformance::buildMiniCatalog(catalog);
@@ -354,9 +348,8 @@ TEST_CASE("S-02: matching cached etag skips BLOB_REQ on reconnect; wrong etag tr
     CHECK(bytesEqual(client2.hubEtag(), std::span<const std::byte>(realEtag)));
 }
 
-// ============================================================================
-// S-03 — reconcile: dropped-before-processed intent is flushed, never resent
-// ============================================================================
+// ---- S-03 -------------------------------------------------------------------
+// reconcile: dropped-before-processed intent is flushed, never resent
 TEST_CASE("S-03: an intent lost before the hub processes it is flushed via onPendingDropped, never auto-resent") {
     Catalog32 catalog;
     conformance::buildMiniCatalog(catalog);
@@ -409,9 +402,8 @@ TEST_CASE("S-03: an intent lost before the hub processes it is flushed via onPen
     CHECK(clientDelegate.echoes[0].intent_id == *id2);
 }
 
-// ============================================================================
-// S-04 — duplicate instance eviction, and BUSY admission
-// ============================================================================
+// ---- S-04 -------------------------------------------------------------------
+// duplicate instance eviction, and BUSY admission
 TEST_CASE("S-04: duplicate instance_id evicts the old session; a hub at capacity NACKs BUSY") {
     Catalog32 catalog;
     conformance::buildMiniCatalog(catalog);
@@ -489,9 +481,8 @@ TEST_CASE("S-04: duplicate instance_id evicts the old session; a hub at capacity
     }
 }
 
-// ============================================================================
-// S-09 — unsolicited GRANT
-// ============================================================================
+// ---- S-09 -------------------------------------------------------------------
+// unsolicited GRANT
 TEST_CASE("S-09: an unsolicited GRANT updates one client's recorded grant without touching the other") {
     Catalog32 catalog;
     conformance::buildMiniCatalog(catalog);
@@ -542,9 +533,8 @@ TEST_CASE("S-09: an unsolicited GRANT updates one client's recorded grant withou
     CHECK(clientB.grantedRateHz(0x0082).value() == doctest::Approx(5.0f));  // untouched
 }
 
-// ============================================================================
-// I-01 — clamp + cfg_gen bump + broadcast to other subscribers
-// ============================================================================
+// ---- I-01 -------------------------------------------------------------------
+// clamp + cfg_gen bump + broadcast to other subscribers
 TEST_CASE("I-01: an out-of-range intent is clamped, cfg_gen bumps, and other subscribers see the STATE broadcast") {
     Catalog32 catalog;
     conformance::buildMiniCatalog(catalog);
@@ -594,9 +584,8 @@ TEST_CASE("I-01: an out-of-range intent is clamped, cfg_gen bumps, and other sub
     CHECK(delegateViewer.onStateCallCount >= 1);
 }
 
-// ============================================================================
-// I-02 — duplicate intent_id at the transport level: identical ECHO, one apply
-// ============================================================================
+// ---- I-02 -------------------------------------------------------------------
+// duplicate intent_id at the transport level: identical ECHO, one apply
 TEST_CASE("I-02: resending the identical encoded INTENT frame re-emits identical ECHO bytes, applies once") {
     Catalog32 catalog;
     conformance::buildMiniCatalog(catalog);
@@ -662,9 +651,8 @@ TEST_CASE("I-02: resending the identical encoded INTENT frame re-emits identical
     CHECK(hubDelegate.applyIntentCallCount == applyBefore + 1);
 }
 
-// ============================================================================
-// I-03 — precondition CAS mismatch -> NACK CONFLICT, no apply
-// ============================================================================
+// ---- I-03 -------------------------------------------------------------------
+// precondition CAS mismatch -> NACK CONFLICT, no apply
 TEST_CASE("I-03: a wrong precondition cfg_gen is refused with NACK CONFLICT and never applied") {
     Catalog32 catalog;
     conformance::buildMiniCatalog(catalog);
@@ -697,9 +685,8 @@ TEST_CASE("I-03: a wrong precondition cfg_gen is refused with NACK CONFLICT and 
     CHECK(delegate.echoes.empty());
 }
 
-// ============================================================================
-// I-04 — refusal mode -> NACK NOT_HOMED
-// ============================================================================
+// ---- I-04 -------------------------------------------------------------------
+// refusal mode -> NACK NOT_HOMED
 TEST_CASE("I-04: the delegate's NOT_HOMED refusal surfaces via onNack") {
     Catalog32 catalog;
     conformance::buildMiniCatalog(catalog);
@@ -729,9 +716,8 @@ TEST_CASE("I-04: the delegate's NOT_HOMED refusal surfaces via onNack") {
     CHECK(delegate.echoes.empty());
 }
 
-// ============================================================================
-// E-04 — ESTOP repeat-until-latched under 30% loss both directions
-// ============================================================================
+// ---- E-04 -------------------------------------------------------------------
+// ESTOP repeat-until-latched under 30% loss both directions
 TEST_CASE("E-04: initiateEstop survives 30% loss both directions within estop_repeat_max attempts") {
     Catalog32 catalog;
     conformance::buildMiniCatalog(catalog);
@@ -771,14 +757,13 @@ TEST_CASE("E-04: initiateEstop survives 30% loss both directions within estop_re
     CHECK_FALSE(client.estopSendFailed());
 }
 
-// ============================================================================
-// §7.2 regression — the 71.6-minute wrap bug. nowUs/1000 does not wrap mod
+// ---- §7.2 regression --------------------------------------------------------
+// the 71.6-minute wrap bug. nowUs/1000 does not wrap mod
 // 2^32 (it jumps 4294967 -> 0), which stranded every ms deadline ~71 min in
 // the future at each µs wrap: STATE pacing stalled and liveness went dormant
 // for up to a whole wrap period. Fixed by MonotonicMs (util/serial_arithmetic
 // .hpp) feeding Hub::update()/Client::update(). This session starts 8 s
 // before the wrap and must sail straight through it.
-// ============================================================================
 TEST_CASE("wrap regression: session pushes flow at full rate straight across the u32 microsecond wrap") {
     Catalog32 catalog;
     conformance::buildMiniCatalog(catalog);
@@ -827,12 +812,11 @@ TEST_CASE("wrap regression: session pushes flow at full rate straight across the
     CHECK(post >= 30);                // pre-fix: ~0 for up to 71 minutes
 }
 
-// ============================================================================
-// Probe-found regression (first live hardware session): safety (0x0003) is
+// ---- Probe-found regression (first live hardware session) -------------------
+// safety (0x0003) is
 // hub-owned and edge-driven, so a fresh boot held NO retained value for it —
 // violating §9.1's "retained value immediately upon grant". The Hub ctor now
 // seeds the all-clear snapshot whenever the catalog declares the channel.
-// ============================================================================
 TEST_CASE("fresh hub with no publishes still serves the retained safety snapshot") {
     Catalog32 catalog;
     conformance::buildMiniCatalog(catalog);
@@ -860,13 +844,12 @@ TEST_CASE("fresh hub with no publishes still serves the retained safety snapshot
                      std::span<const std::byte>(expect)));
 }
 
-// ============================================================================
-// P-01 — SPEC §6.6 idle-PING cadence switch: holding-control (200 ms) after
+// ---- P-01 -------------------------------------------------------------------
+// SPEC §6.6 idle-PING cadence switch: holding-control (200 ms) after
 // an ECHOed intent vs. idle (1 s) for a session that never sent one. Without
 // this switch a session that stops emitting intents (e.g. between segments)
 // would rely on the 1 s idle cadence and get torn down by the hub's 600 ms
 // deadman before its next scheduled PING.
-// ============================================================================
 TEST_CASE("P-01: Client::update() tightens PING cadence to holding_control after an ECHOed intent") {
     Catalog32 catalog;
     conformance::buildMiniCatalog(catalog);

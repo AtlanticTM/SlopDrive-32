@@ -77,7 +77,7 @@ public:
     // True once begin() succeeded. Readable from any task.
     bool ready() const { return _ready.load(std::memory_order_acquire); }
 
-    // ---- slopsync::ICrypto — the P-256 half --------------------------------
+    // ---- slopsync::ICrypto — the P-256 half ---------------------------------
     // Signing is SINGLE-TASK by contract: it mutates member MPI scratch. Only
     // SlopSyncHubService's "SlopSyncSign" task may call it.
     size_t signP256(std::span<const std::byte> message, std::span<std::byte> sigOut) override;

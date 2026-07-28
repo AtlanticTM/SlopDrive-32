@@ -1,10 +1,9 @@
-// ============================================================================
-// SlopHttpServer — B-side implementation (PsychicHttp / esp_http_server).
+// SlopHttpServer — B-side HTTP backend (PsychicHttp / esp_http_server).
 //
-// The whole file compiles to nothing unless -DUSE_PSYCHIC_HTTP is set, so the
-// shipping sd32/sd32-ota build is not affected in any way (no symbols, no
-// static RAM, no lib_deps).
-// ============================================================================
+// Constraints:
+// - Compiles to nothing unless -DUSE_PSYCHIC_HTTP is set; the shipping
+//   sd32/sd32-ota build is unaffected (no symbols, no static RAM, no
+//   lib_deps).
 
 #if defined(USE_PSYCHIC_HTTP)
 
@@ -22,7 +21,7 @@ namespace {
 // page load, and this project has already been bitten once by internal-heap
 // starvation (the SlopSync service had to move to PSRAM). 4 KB is ~3 TCP
 // segments per chunk — plenty of pipelining, half the transient footprint,
-// and far friendlier to a fragmented maxblock. :3
+// and far friendlier to a fragmented maxblock.
 constexpr size_t kStreamChunk = 4096;
 
 bool endsWithNoCase(const char* s, const char* suffix) {
@@ -33,12 +32,10 @@ bool endsWithNoCase(const char* s, const char* suffix) {
 
 }  // namespace
 
-// ----------------------------------------------------------------------------
-// Construction — the httpd config is the interesting part
-// ----------------------------------------------------------------------------
+// ---- Construction -----------------------------------------------------------
 
 SlopHttpServer::SlopHttpServer(uint16_t port) : _server(port) {
-    // ---- Task placement (NON-NEGOTIABLE, CLAUDE.md §2 dual-core rule) -------
+    // ---- Task placement (NON-NEGOTIABLE, DOCTRINE.md §2 dual-core rule) -----
     // esp_http_server defaults to tskNO_AFFINITY, which would let the httpd
     // task land on CORE 1 — the motion real-time core. Pin it to Core 0 with
     // the rest of the system/comms work.
@@ -60,7 +57,7 @@ SlopHttpServer::SlopHttpServer(uint16_t port) : _server(port) {
     // not BSS, so this does not move the static-RAM figure.
     _server.config.stack_size = 12288;
 
-    // ---- Socket budget (the number that actually fixes the bug) ------------
+    // ---- Socket budget (the number that actually fixes the bug) -------------
     // The stall was never a lack of parallelism — it was that ONE synchronous
     // accept()ed socket blocked everyone for HTTP_MAX_DATA_WAIT. select() over
     // N sockets makes a silent speculative socket cost nothing at all.
@@ -94,9 +91,7 @@ SlopHttpServer::SlopHttpServer(uint16_t port) : _server(port) {
     // POST this firmware accepts is orders of magnitude smaller.
 }
 
-// ----------------------------------------------------------------------------
-// Registration
-// ----------------------------------------------------------------------------
+// ---- Registration -----------------------------------------------------------
 
 void SlopHttpServer::collectHeaders(const char** /*headers*/, size_t /*count*/) {
     // Intentionally empty — see the header. esp_http_server keeps the raw
@@ -166,9 +161,7 @@ void SlopHttpServer::handleClient() {
     }
 }
 
-// ----------------------------------------------------------------------------
-// Per-request accessors
-// ----------------------------------------------------------------------------
+// ---- Per-request accessors --------------------------------------------------
 
 http_method SlopHttpServer::method() const {
     return _req ? _req->method() : HTTP_GET;

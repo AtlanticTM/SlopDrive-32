@@ -88,9 +88,9 @@ inline bool applyStateFrame(uint16_t frameSeq, std::span<const std::byte> payloa
 // knownLayout.size() fields and never looks past them, so calling it
 // with a prefix `knownLayout` against a longer `payload` (e.g. straight out
 // of a ShadowSlot::value/size pair) IS the rule. This wrapper exists purely
-// so call sites reaching for "read what I know out of whatever the hub
-// actually sent" say so by name, rather than re-deriving the reasoning
-// inline at every call site.
+// so call sites reading the known prefix out of whatever the hub actually
+// sent say so by name, rather than re-deriving the reasoning inline at
+// every call site.
 //
 // `knownLayout` is a field span — get one from cat.layoutFields(entry), and
 // .first(n) it to model a client that only knows the first n fields.

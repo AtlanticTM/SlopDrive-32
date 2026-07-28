@@ -1,11 +1,9 @@
-// ============================================================================
-// test_main.cpp — doctest unit tests for SlopSyncDiscoveryWire.h (Phase E:
+// test_slopsync_discovery — SlopSyncDiscoveryWire.h (Phase E:
 // the radios). Pure byte encode/decode, no Arduino/NimBLE/socket — this is
 // exactly the host-testable slice of the UDP discovery probe/reply (SPEC
 // §13.8) and the BLE-advertising flags byte (§13.4/§13.6, `ble_adv_flags`).
 // The AsyncUDP and NimBLE glue that call into this header are hardware-only
 // and are LIVE-VERIFY scope, not unit-tested here (see the Phase E report).
-// ============================================================================
 
 #define DOCTEST_CONFIG_IMPLEMENT_WITH_MAIN
 #include <doctest/doctest.h>
@@ -21,9 +19,8 @@ namespace {
 constexpr std::byte B(int x) { return std::byte(uint8_t(x)); }
 }  // namespace
 
-// ============================================================================
-// buildFlags — the byte shared between BLE advertising and DISCOVER_REPLY.
-// ============================================================================
+// ---- buildFlags -------------------------------------------------------------
+// the byte shared between BLE advertising and DISCOVER_REPLY.
 TEST_CASE("buildFlags: every bit combination, and bits 2-7 are structurally unreachable") {
     CHECK(buildFlags(false, false) == 0x00);
     CHECK(buildFlags(true, false) == 0x01);
@@ -31,9 +28,7 @@ TEST_CASE("buildFlags: every bit combination, and bits 2-7 are structurally unre
     CHECK(buildFlags(true, true) == 0x03);
 }
 
-// ============================================================================
-// DISCOVER_PROBE (0x1E) parsing
-// ============================================================================
+// ---- DISCOVER_PROBE (0x1E) parsing ------------------------------------------
 TEST_CASE("parseProbe: a well-formed probe round-trips proto_ver and nonce") {
     std::array<std::byte, kProbeBytes> buf{B('S'), B('L'), B('O'), B('P'), B(1),
                                             B(0xEF), B(0xBE), B(0xAD), B(0xDE)};  // nonce=0xDEADBEEF LE
@@ -57,9 +52,8 @@ TEST_CASE("parseProbe: wrong length is rejected (too short and too long)") {
     CHECK_FALSE(parseProbe(longBuf).has_value());
 }
 
-// ============================================================================
-// DISCOVER_REPLY (0x1F) building — RFC-048's 76-byte layout
-// ============================================================================
+// ---- DISCOVER_REPLY (0x1F) building -----------------------------------------
+// RFC-048's 76-byte layout
 TEST_CASE("buildReply: exact byte layout for a fully-populated reply") {
     ReplyFields f;
     f.nonce = 0xDEADBEEFu;

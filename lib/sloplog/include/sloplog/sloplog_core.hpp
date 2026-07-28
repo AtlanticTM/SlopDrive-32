@@ -241,7 +241,7 @@ public:
     // the number the low cap governs. Diagnostic; racy read is fine.
     size_t lowPending() const { return _lowPending; }
 
-    // ---- Honest visibility -------------------------------------------------
+    // ---- Honest visibility --------------------------------------------------
     // Per-level lifetime drop counts. A silent drop is the one thing this
     // logger refuses to do, so every shed record lands in exactly one of
     // these six buckets and stays there.
@@ -278,7 +278,7 @@ private:
     // Called with the port lock HELD. Accounts one shed record: per-level
     // bucket, lifetime total, and the "lost" marker that rides out on the
     // next record a reader actually sees (saturating — a wrapped gap count
-    // would understate the hole, which is the one lie we cannot tell).
+    // would understate the hole, which this counter must never misreport).
     void dropLocked(Level l) {
         if (uint8_t(l) < kLevelCount) ++_dropped[uint8_t(l)];
         if (_lostSinceDrain != 0xFFFFu) ++_lostSinceDrain;

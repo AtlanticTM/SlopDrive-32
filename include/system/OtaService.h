@@ -91,10 +91,10 @@ private:
     // Exactly one Update.begin/write/end/abort state machine. Both the
     // WebServer HTTPUpload pump and the PsychicHttp upload callback funnel
     // through these; nothing else in the class touches Update.
-    void otaBeginWrite(int command);              ///< first chunk: gate + Update.begin
+    void otaBeginWrite(int command);              // first chunk: gate + Update.begin
     void otaWriteChunk(const uint8_t* data, size_t len);
-    void otaEndWrite(size_t total);               ///< last chunk: Update.end(true)
-    void otaAbortWrite(const char* why);          ///< transfer died: Update.abort()
+    void otaEndWrite(size_t total);               // last chunk: Update.end(true)
+    void otaAbortWrite(const char* why);          // transfer died: Update.abort()
 
     // Shared final-response policy (401 / 400 / 200 + arm reboot + finishOta).
     // Speaks through SlopHttpServer::send(), which both backends implement.
@@ -126,8 +126,8 @@ private:
     // Per-HTTP-upload scratch (single in-flight, so plain members are fine).
     bool    _uploadAuthOk  = false;
     bool    _uploadBegun   = false;
-    bool    _uploadStarted = false;   ///< otaBeginWrite() has run for this request
-    bool    _uploadFinished = false;  ///< otaEndWrite() has run for this request
+    bool    _uploadStarted = false;   // otaBeginWrite() has run for this request
+    bool    _uploadFinished = false;  // otaEndWrite() has run for this request
     String  _uploadError;
 
     // Deferred reboot after a successful HTTP flash so the JSON response flushes.

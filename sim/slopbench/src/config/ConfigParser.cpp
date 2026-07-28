@@ -1,3 +1,6 @@
+// ConfigParser — .bench file parser implementation (see ConfigParser.h for
+// the grammar contract).
+
 #include "config/ConfigParser.h"
 
 #include <cstdlib>
@@ -62,7 +65,7 @@ const std::map<std::string, SchemaKind>& schemaKindNames() {
     return m;
 }
 
-// ---- Parser state ------------------------------------------------------------
+// ---- Parser state -----------------------------------------------------------
 
 enum class Mode { None, Hub, Channel };
 
@@ -253,7 +256,7 @@ bool parseHubProp(ParseState& st, const std::vector<std::string>& tok) {
     return st.fail("unknown hub property '" + kw + "'");
 }
 
-// ---- Cross-reference validation (runs after the whole file is parsed) ------
+// ---- Cross-reference validation (runs after the whole file is parsed) -------
 
 bool validate(HubConfig& cfg, std::string& error) {
     std::set<uint16_t> seenIds;

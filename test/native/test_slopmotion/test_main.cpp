@@ -1,6 +1,4 @@
-// ============================================================================
-// test_slopmotion — native doctest suite for the SlopMotion engine
-// ============================================================================
+// test_slopmotion — native doctest suite for the SlopMotion engine.
 //
 // Hardware-free, fully deterministic: time is a synthetic uint64 microsecond
 // counter, no clocks, no randomness. Every kinematic assertion is checked by
@@ -151,7 +149,7 @@ struct Band {
     double amp_spread_mm   = 0.0;
     int    centered = 0, scaled = 0, fallback = 0;
     bool   bounds_ok = true;        // every endpoint inside [start, target]
-    // ---- SHAPE, averaged over the measured segments (0.6.0) ----------------
+    // ---- SHAPE, averaged over the measured segments (0.6.0) -----------------
     // sharp = Snapshot::sharpness (peak jerk / jmax); flat_pct = share of the
     // segment spent within 2 % of its own peak velocity, i.e. how much of the
     // stroke is the straight line the operator complained about.
@@ -262,7 +260,7 @@ void reportBand(const std::string& name, const Band& b) {
                  << "/" << b.scaled << "/" << b.fallback);
 }
 
-// ---- Single-segment SHAPE measurement (the 0.6.0 sharpness work) -----------
+// ---- Single-segment SHAPE measurement (the 0.6.0 sharpness work) ------------
 // Everything the operator asked to see for one timed segment: what it actually
 // delivered, and how straight the line was while it delivered it. Sampled on a
 // 0.2 ms grid strictly INSIDE the plan (positionAt runs maybeSettle, and a
@@ -690,9 +688,8 @@ TEST_CASE("Determinism: identical command/time sequences → identical samples")
     for (size_t i = 0; i < a.size(); i++) REQUIRE(a[i] == b[i]);
 }
 
-// ============================================================================
-// InfeasiblePolicy — which fidelity gets sacrificed when the wire lies
-// ============================================================================
+// ---- InfeasiblePolicy -------------------------------------------------------
+// which fidelity gets sacrificed when the wire lies
 
 TEST_CASE("Scale policy: infeasible segment shrinks its stroke, keeps the deadline") {
     // 0→1 in 100 ms on the real limit set demands ~10 full strokes per second
@@ -1180,9 +1177,7 @@ TEST_CASE("Moving start still resolves: the shortened ladder is enough") {
     CHECK(fallback * 4 < i);
 }
 
-// ============================================================================
-// Second-order predictive aim
-// ============================================================================
+// ---- Second-order predictive aim --------------------------------------------
 
 TEST_CASE("Second-order chase aim stops overshooting a crest near the rail") {
     // A sine cresting just under the top rail is the shape that exposed the
@@ -1337,9 +1332,8 @@ TEST_CASE("Predictive aim v2 arrives at the velocity the stream will HAVE") {
     CHECK(v2.max_pos < v1.max_pos);
 }
 
-// ============================================================================
-// InfeasiblePolicy::Reshape — size the stroke to the MACHINE, not to a shape
-// ============================================================================
+// ---- InfeasiblePolicy::Reshape ----------------------------------------------
+// size the stroke to the MACHINE, not to a shape
 
 TEST_CASE("Reshape: a stroke the machine CAN make keeps its full amplitude") {
     // The measured 80 mm / 133 ms funscript segment on the operator's machine.
@@ -1444,9 +1438,8 @@ TEST_CASE("Reshape: an impossible stroke shrinks to the machine's real reach") {
     CHECK(sc.target == doctest::Approx(peak).epsilon(0.01));
 }
 
-// ============================================================================
-// DC centering — the band shrinks about the commanded MIDPOINT
-// ============================================================================
+// ---- DC centering -----------------------------------------------------------
+// the band shrinks about the commanded MIDPOINT
 
 TEST_CASE("Both directions infeasible: the degraded band sits on the commanded midpoint") {
     // A greedy shrink is neutrally stable in DC: every segment travels as far
@@ -1693,9 +1686,8 @@ TEST_CASE("Reshape bisection depth is a bounded, honest dial") {
     }
 }
 
-// ============================================================================
-// SHARPNESS BEFORE AMPLITUDE (0.6.0) — jerk is the shape parameter
-// ============================================================================
+// ---- SHARPNESS BEFORE AMPLITUDE (0.6.0) -------------------------------------
+// jerk is the shape parameter
 // The operator, watching Reshape at 500 mm/s: "is there a hybrid between scale
 // and stretch where we just adjust the slope factor, so it stays smooth when
 // close to max speed, and straightens out the further it is away?"
@@ -2097,9 +2089,8 @@ TEST_CASE("Snapshot::sharpness reports the plan's real peak jerk") {
     CHECK(r.sharp * jmax == doctest::Approx(r.jpk).epsilon(0.10));
 }
 
-// ============================================================================
-// Settle grace — transport jitter is not starvation
-// ============================================================================
+// ---- Settle grace -----------------------------------------------------------
+// transport jitter is not starvation
 
 TEST_CASE("Settle grace holds the end state, then brakes when the stream is really gone") {
     // Two paced segments establish a cadence estimate, the second ends MOVING,
@@ -2289,9 +2280,8 @@ TEST_CASE("Reset drops everything back to a hold") {
     CHECK(e.mode() == Mode::Idle);
 }
 
-// ============================================================================
-// RFC-008 — hub-side handoff sanity guard (one-segment lookahead)
-// ============================================================================
+// ---- RFC-008 ----------------------------------------------------------------
+// hub-side handoff sanity guard (one-segment lookahead)
 //
 // "The machine plans for the worst so clients don't have to."
 //
@@ -2595,9 +2585,8 @@ TEST_CASE("RFC-008 guard: a bounded handoff does not poison the NEXT segment's a
     CHECK(guarded.max_abs_a < poisoned.max_abs_a);
 }
 
-// ============================================================================
-// M7a — THE SPEED CEILING HOLDS IN BOTH DIRECTIONS
-// ============================================================================
+// ---- M7a --------------------------------------------------------------------
+// THE SPEED CEILING HOLDS IN BOTH DIRECTIONS
 //
 // Found by SlopScope on its first real capture against slopsim: the plan-strip
 // channel reported cur_vel = -896 mm/s on a machine whose input speed ceiling

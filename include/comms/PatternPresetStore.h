@@ -1,31 +1,32 @@
 #pragma once
 
-// ============================================================================
-// PatternPresetStore — RFC-021 `pattern.frayd` preset backend.
+// PatternPresetStore — RFC-021 `pattern.frayd` preset backend
 //
-// Firmware-side, device-local (NOT part of lib/slopsync — RFC-021 deliberately
-// leaves the STORE backend as "the application's job", see hub.hpp's readBlob
-// seam doc). Retires the last HTTP writer, POST /api/pattern/presets.
+// Constraints:
+//   Firmware-side, device-local (NOT part of lib/slopsync — RFC-021
+//   deliberately leaves the STORE backend as "the application's job", see
+//   hub.hpp's readBlob seam doc). Retires the last HTTP writer, POST
+//   /api/pattern/presets.
 //
-// This class is PURE byte-blob CRUD and knows NOTHING about what a preset
-// MEANS — same "opaque payload" philosophy the wire protocol itself uses
-// (blob_keys key 7's note: "the hub validates kind + size on import... it
-// never inspects the payload itself"). SlopDriveHubDelegate (SlopSyncHubService
-// .cpp) is the ONLY place that knows the 40-byte payload is really four
-// advpat base scalars plus six modifier blocks — encoding/decoding that
-// meaning lives there, next to the PatternEngine it reads from and writes to.
+//   PURE byte-blob CRUD — knows NOTHING about what a preset MEANS, same
+//   "opaque payload" philosophy the wire protocol itself uses (blob_keys key
+//   7's note: "the hub validates kind + size on import... it never inspects
+//   the payload itself"). SlopDriveHubDelegate (SlopSyncHubService.cpp) is
+//   the ONLY place that knows the 40-byte payload is really four advpat base
+//   scalars plus six modifier blocks — encoding/decoding that meaning lives
+//   there, next to the PatternEngine it reads from and writes to.
 //
-// ---- Shape ------------------------------------------------------------------
-// kCapacity (24) matches the retired HTTP handler's AP_PRESET_MAX_COUNT for
-// parity. The roster STATE (0x0096) is BARE — {generation,count,capacity}
-// only, same shape as the trust ledger's 0x000D — a client enumerates names
-// via BLOB_REQ per slot (kPayloadBytes is tiny, 40 B, so 24 fetches is cheap).
-// An embedded per-slot name preview was the original plan and was cut for a
-// real, measured reason: Catalog32's layout-field pool (channel/catalog.hpp,
-// capacity 200) had only 11 free slots left on this device, nowhere near the
-// 17 a 3-field header + 14 str16 names would have needed. See the 0x0096
-// entry's comment in SlopSyncCatalog.h.
-// ============================================================================
+//   kCapacity (24) matches the retired HTTP handler's AP_PRESET_MAX_COUNT for
+//   parity. The roster STATE (0x0096) is BARE — {generation,count,capacity}
+//   only, same shape as the trust ledger's 0x000D — a client enumerates names
+//   via BLOB_REQ per slot (kPayloadBytes is tiny, 40 B, so 24 fetches is
+//   cheap). An embedded per-slot name preview was cut for a measured reason:
+//   Catalog32's layout-field pool (channel/catalog.hpp, capacity 200) had
+//   only 11 free slots left on this device, nowhere near the 17 a 3-field
+//   header + 14 str16 names would have needed.
+//
+// See:
+//   SlopSyncCatalog.h — the 0x0096 entry's comment on the name-preview cut
 
 #include <array>
 #include <cstdint>

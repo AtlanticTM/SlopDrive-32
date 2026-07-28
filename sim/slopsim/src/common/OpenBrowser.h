@@ -1,11 +1,14 @@
 #pragma once
 
+// OpenBrowser — opens a URL in the user's default browser.
+// Constraints:
+//   Fire-and-forget, never blocks. Isolated in its own TU because the
+//   Windows implementation drags in <windows.h>.
+
 #include <string>
 
 namespace slopsim {
 
-// Opens `url` in the user's default browser (fire-and-forget). Isolated in its
-// own TU because the Windows path drags in <windows.h>.
 void openBrowser(const std::string& url);
 
 }  // namespace slopsim

@@ -1,23 +1,21 @@
-/**
- * MotionGeometry — runtime steps/rev → steps/mm for the AIM servo build. :3
- *
- * The AIM drive's steps/rev is an electronic-gear register (0x0B) that the
- * Configure pane can reprogram over RS485 Modbus. The firmware's step<->mm
- * math has to follow it EXACTLY or every commanded millimeter is a lie, so
- * the value lives here as runtime state:
- *
- *   - Seeded from NVS (namespace "servocfg", key "mspr") in setup(), default
- *     AIM_MOTOR_STEPS_PER_REV_DEFAULT (800 — the OSSM/factory standard).
- *   - aimSetMotorStepsPerRev() recomputes steps/mm live and persists, called
- *     by WebUI's servo-program path the moment reg 0x0B is written. The
- *     caller is responsible for forcing a re-home — the position reference's
- *     step<->mm mapping is void after the change.
- *
- * Thread-safety: readers (Core 1 motion path) hit a single aligned volatile
- * float / uint16 — 32-bit stores are atomic on Xtensa, so a mid-change read
- * sees old or new, never a torn value. Changes are additionally gated on
- * machine-idle by the caller.
- */
+// MotionGeometry — runtime steps/rev → steps/mm for the AIM servo build.
+//
+// The AIM drive's steps/rev is an electronic-gear register (0x0B) that the
+// Configure pane can reprogram over RS485 Modbus. The firmware's step<->mm
+// math has to follow it EXACTLY or every commanded millimeter is a lie, so
+// the value lives here as runtime state:
+//
+//   - Seeded from NVS (namespace "servocfg", key "mspr") in setup(), default
+//     AIM_MOTOR_STEPS_PER_REV_DEFAULT (800 — the OSSM/factory standard).
+//   - aimSetMotorStepsPerRev() recomputes steps/mm live and persists, called
+//     by WebUI's servo-program path the moment reg 0x0B is written. The
+//     caller is responsible for forcing a re-home — the position reference's
+//     step<->mm mapping is void after the change.
+//
+// Thread-safety: readers (Core 1 motion path) hit a single aligned volatile
+// float / uint16 — 32-bit stores are atomic on Xtensa, so a mid-change read
+// sees old or new, never a torn value. Changes are additionally gated on
+// machine-idle by the caller.
 
 #include "config_api.h"
 

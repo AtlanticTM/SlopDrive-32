@@ -114,18 +114,18 @@ private:
     int _sock = -1;  // POSIX/lwIP socket fd, -1 = not bound
     DiscoveryRateLimiter _rateLimiter;
 
-    // ---- write-once identity snapshot (see class doc) ----------------------
+    // ---- write-once identity snapshot (see class doc) -----------------------
     const char* _hubName = "";
     uint64_t _hubInstanceId = 0;
     uint16_t _wsPort = 0;
     const char* _fwVersion = "";
     std::array<std::byte, discovery::kEtagBytes> _catalogEtag{};
 
-    // ---- the two live fields -------------------------------------------------
+    // ---- the two live fields ------------------------------------------------
     bool _pairingOpen = false;
     bool _wsAvailable = true;
 
-    // ---- diagnostics ---------------------------------------------------------
+    // ---- diagnostics --------------------------------------------------------
     uint32_t _repliesSent = 0;
     uint32_t _probesRejected = 0;
     uint32_t _probesThrottled = 0;

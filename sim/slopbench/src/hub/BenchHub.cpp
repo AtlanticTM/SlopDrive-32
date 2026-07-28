@@ -1,3 +1,6 @@
+// BenchHub — config-driven HubDelegate implementation (see BenchHub.h for
+// the catalog-authoring contract).
+
 #include "hub/BenchHub.h"
 
 #include <algorithm>
@@ -122,7 +125,7 @@ std::string formatFieldValue(const FieldConfig& f, float physical, const std::st
     return buf;
 }
 
-// ---- Catalog authoring -----------------------------------------------------
+// ---- Catalog authoring ------------------------------------------------------
 // Free functions, not BenchHub methods: Hub::Hub() encodes the catalog (and
 // its etag) ONCE, synchronously, reading its Catalog32& argument at that
 // exact moment — see BenchHub.h's comment on the `_catalog`/`_hub` member
@@ -522,7 +525,7 @@ void BenchHub::tick() {
     tickPendingMirrors(nowMs);
 }
 
-// ---- HubDelegate -------------------------------------------------------------
+// ---- HubDelegate ------------------------------------------------------------
 
 AccessLevel BenchHub::validateToken(std::span<const std::byte>, std::span<const std::byte>, bool) {
     // See the class-level comment: SlopBench grants every session `configure`
@@ -593,7 +596,7 @@ void BenchHub::onSessionLeft(uint32_t session_id) {
     _log.logf('I', "session %u left", unsigned(session_id));
 }
 
-// ---- TUI read surface --------------------------------------------------------
+// ---- TUI read surface -------------------------------------------------------
 
 std::vector<BenchHub::StateSnapshot> BenchHub::snapshotStates() const {
     std::vector<StateSnapshot> out;

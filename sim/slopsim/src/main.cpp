@@ -1,15 +1,10 @@
-// slopsim — SlopDrive-32 terminal simulator (roadmap §6 "SlopSim").
-//
-//   slopsim machine [--port 82] [--homed] [--headless] [--duration S]
-//                   [--policy scale|stretch|reshape] [--reshape-steps 0-8]
-//                   [--settle-grace <ms>] [--jerk <mm/s^3>] [--jmax <units/s^3>]
-//                   [--centering on|off] [--centering-gain 0-1]
-//                   [--pairing-window]
-//   slopsim client <host> [--port 82]        (next milestone)
-//
-// Machine mode is a virtual SlopDrive: the REAL slopsync::Hub + REAL
-// slopmotion::Engine behind a real WebSocket server, with FAS modeled at the
-// MotorDriver seam. Verify with: python tools/slopsync_probe.py --ip 127.0.0.1
+// slopsim — SlopDrive-32 terminal simulator entry point (roadmap §6 "SlopSim").
+// Constraints:
+//   Machine mode is a virtual SlopDrive: the REAL slopsync::Hub + REAL
+//   slopmotion::Engine behind a real WebSocket server, with FAS modeled at
+//   the MotorDriver seam. Flag usage is the single copy printed below (the
+//   unknown-mode branch); it is not restated here to avoid the two drifting.
+// See: python tools/slopsync_probe.py --ip 127.0.0.1 (conformance check)
 
 #include <atomic>
 #include <chrono>
@@ -40,10 +35,11 @@ int main(int argc, char** argv) {
     uint16_t port = 82;
     uint16_t httpPort = 80;
     bool homed = false;
-    // M4b: open the RFC-027(c) push-to-pair presence window at boot, standing
-    // in for the firmware's physical-presence gesture (M5's NVS boot counter).
-    // The library provides the WINDOW; deciding presence was proven is the
-    // application's job, and on a simulator the flag IS the gesture.
+    // Opens the RFC-027(c) push-to-pair presence window at boot, standing in
+    // for the firmware's physical-presence gesture (a future NVS boot
+    // counter). The library provides the WINDOW; deciding presence was
+    // proven is the application's job, and on a simulator the flag IS the
+    // gesture.
     bool pairingWindow = false;
     bool headless = false;
     int durationS = 0;

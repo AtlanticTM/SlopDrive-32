@@ -1,21 +1,21 @@
 #pragma once
 
-// ============================================================================
-// SlopSyncHubService — the composition root for the firmware SlopSync hub.
+// SlopSyncHubService — composition root for the firmware SlopSync hub.
 //
-// Owns (and wires, in the one order that satisfies the Hub's by-reference
-// dependencies): the ESP clock/rng adapters, this device's channel catalog,
-// the HubDelegate (which bridges intents onto WebUI::handleCommand → the
-// MotionArbiter, honoring the sole-caller rule), the slopsync::Hub itself, and
-// the WebSocket port. Spawns ONE FreeRTOS task ("SlopSyncHub", Core 0) that is
-// the ONLY thread ever touching the hub. The WS transport itself is NOT
-// single-threaded (AsyncTCP owns its own task) — see the threading model in
-// SlopSyncAsyncWsTransport.h.
-//
-// The delegate NEVER commands the motor directly (CLAUDE.md §2 sole-caller):
-// every motion-bearing intent becomes a WebUI::handleCommand() call, exactly
-// the path the WS UI already uses, which submits to the MotionArbiter.
-// ============================================================================
+// Constraints:
+// - Owns and wires, in the one order that satisfies the Hub's by-reference
+//   dependencies: the ESP clock/rng adapters, this device's channel catalog,
+//   the HubDelegate (bridges intents onto WebUI::handleCommand -> the
+//   MotionArbiter, honoring the sole-caller rule), the slopsync::Hub itself,
+//   and the WebSocket port.
+// - Spawns ONE FreeRTOS task ("SlopSyncHub", Core 0) that is the ONLY thread
+//   ever touching the hub. The WS transport itself is NOT single-threaded
+//   (AsyncTCP owns its own task) — see the threading model in
+//   SlopSyncAsyncWsTransport.h.
+// - The delegate NEVER commands the motor directly (DOCTRINE.md §2 sole-caller
+//   rule): every motion-bearing intent becomes a WebUI::handleCommand() call,
+//   exactly the path the WS UI already uses, which submits to the
+//   MotionArbiter.
 
 #include <freertos/FreeRTOS.h>
 #include <freertos/task.h>
@@ -32,7 +32,7 @@
 #include "SlopSyncCrypto.h"
 #include "SlopSyncPlatform.h"
 #include "SlopSyncUiToken.h"
-// THE transport (CLAUDE.md §8 M5c) — ESP32Async is the only WS stack in the
+// THE transport (DOCTRINE.md §9) — ESP32Async is the only WS stack in the
 // build now. History + the A/B that settled it: docs/http-plane-retirement.md.
 #include "SlopSyncAsyncWsTransport.h"
 // RFC-043 (Phase E): the second transport. Self-excludes to nothing when
@@ -56,7 +56,7 @@ class SlopHttpServer;
 
 namespace slopdrive {
 
-// ---- Motion-input pacing ring (SlopSync STREAM 0x0084 -> Core-1 sampler) ---
+// ---- Motion-input pacing ring (SlopSync STREAM 0x0084 -> Core-1 sampler) ----
 // Roadmap backlog #5 rough-in. Bridges onStreamBundle() — which fires inside
 // _hub.update(), i.e. ON the SlopSyncHub task — to taskLoop's own 5 ms tick,
 // which drains due entries into the Core-1 sampler queue. Both the producer
@@ -137,7 +137,7 @@ private:
     size_t _head = 0, _tail = 0, _count = 0;
 };
 
-// ---- The application delegate ----------------------------------------------
+// ---- The application delegate -----------------------------------------------
 // Translates the hub's role-layer callbacks into device actions. Applies +
 // clamps intents via WebUI::handleCommand (Ground Truth: echoes the APPLIED,
 // post-clamp values the handler reports, never the request).
@@ -147,7 +147,7 @@ public:
                          SlopSyncUiTokenMinter& uiTokens)
         : _state(state), _webui(webui), _arbiter(arbiter), _pacingRing(pacingRing), _uiTokens(uiTokens) {}
 
-    // ---- RFC-011 cfg_gen origin flag ---------------------------------------
+    // ---- RFC-011 cfg_gen origin flag ----------------------------------------
     // Set by applyIntent whenever a CONFIG intent actually changed a value —
     // i.e. whenever the HUB already bumped its own cfg_gen for this change. The
     // service reads-and-clears it on the same tick (delegate and service both
@@ -266,7 +266,7 @@ public:
     bool _patternBackgroundRunDirty = false;
 };
 
-// ---- The service -----------------------------------------------------------
+// ---- The service ------------------------------------------------------------
 class SlopSyncHubService {
 public:
     // `motor` is taken by reference (not wired later like the PatternEngine)

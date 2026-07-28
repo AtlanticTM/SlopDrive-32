@@ -112,10 +112,9 @@ TEST_CASE("seeded violations are each caught") {
     }
 }
 
-// ============================================================================
-// M2b — the checks that came in with RFC-009 annotations, STORE entries, and
+// ---- M2b --------------------------------------------------------------------
+// the checks that came in with RFC-009 annotations, STORE entries, and
 // the per-entry byte cap.
-// ============================================================================
 
 TEST_CASE("M2b: a well-formed STORE entry is clean; a malformed one is caught") {
     SUBCASE("clean") {

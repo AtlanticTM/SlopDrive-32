@@ -1,33 +1,25 @@
 #pragma once
 
-// ============================================================================
-// SlopSyncCatalog — the SlopDrive-32 device's SlopSync channel catalog (§8.1).
+// SlopSyncCatalog — builds this device's SlopSync channel catalog (SPEC §8.1).
 //
-// This is the machine-specific half of the protocol: WHICH channels this hub
-// advertises, their classes, directions, access levels, rates, and packed/CBOR
-// layouts. The etag (§8.3) is a hash over this catalog's deterministic encoding
-// — every field, unit, scale, and bit label below is wire-visible and part of
-// the client-invariant, so it is authored with the same care as the FROZEN
-// conformance fixture (conformance/mini_catalog.hpp), whose authoring style
-// this imitates verbatim.
-//
-// INVARIANTS this file must uphold (the codec + etag depend on them):
-//   * entries MUST be in ASCENDING id order (etag is order-sensitive, §8.3).
-//   * layout entries (STATE/STREAM) must fit limits::min_transport_payload
-//     (242 B) unfragmented — the largest here is 0x0088 at 88 B. ✓
-//   * names ≤32 B, field names ≤24 B, units ≤8 B (schema/catalog.cddl).
-//   * a fully-annotated entry must fit limits::catalog_max_entry_bytes (4096) —
-//     `desc` strings are the only unbounded cost, so they stay TIGHT. The
-//     conformance checker enforces it; the device-catalog test asserts it.
-//   * 0x0003/0x0004/0x0005/0x0007 layouts are pinned by the hub's own internal
-//     encoders/handlers (buildSafetyPayload / buildControlOwnerPayload /
-//     handleIntent's ESTOP_CLEAR path / emitTakeoverEvent) — those field
-//     shapes are NOT free to change here without changing the hub in lockstep.
-//
-// Wire sizes are commented per entry (layout classes) so a future edit that
-// blows the 242 B budget is caught by eye; there is no packed struct to
-// static_assert against (the catalog is field-descriptors, not a struct).
-// ============================================================================
+// Constraints:
+//   Every field, unit, scale, and bit label below is wire-visible and part
+//   of the client-invariant etag (SPEC §8.3) — author with the same care as
+//   the FROZEN conformance fixture (conformance/mini_catalog.hpp).
+//   Entries MUST be added in ASCENDING id order (etag is order-sensitive).
+//   Layout entries (STATE/STREAM) must fit limits::min_transport_payload
+//   (242 B) unfragmented; largest entry here is 88 B.
+//   Names ≤32 B, field names ≤24 B, units ≤8 B (schema/catalog.cddl).
+//   A fully-annotated entry must fit limits::catalog_max_entry_bytes (4096);
+//   `desc` strings are the only unbounded cost and must stay tight.
+//   0x0003/0x0004/0x0005/0x0007 layouts are pinned by the hub's own encoders
+//   (buildSafetyPayload / buildControlOwnerPayload / handleIntent's
+//   ESTOP_CLEAR path / emitTakeoverEvent) — not free to reshape here without
+//   changing the hub in lockstep.
+//   Wire sizes are noted per entry so a budget overrun is caught by eye;
+//   there is no packed struct to static_assert against.
+// See: docs/slopsync/SPEC.md, docs/slopsync/registry/registry.yaml,
+// docs/slopsync/CHANNEL-MAP.md (channel id grid / renumber history).
 
 #include <cstdint>
 
@@ -38,45 +30,40 @@
 
 namespace slopdrive {
 
-// Device-catalog channel ids (the reserved 0x0001–0x0007 range is owned by the
-// registry — slopsync::channels::; everything ≥0x0080 is this device's own
-// allocation). Named here so buildSlopDriveCatalog() AND the telemetry
-// publisher in SlopSyncHubService reference ONE definition — a literal in only
-// one of the two would be a silent wire mismatch.
-// RFC-047 (Phase C2, then Phase C4): device ids follow the 0xCDSS grid —
-// C=class (1 STATE/2 STREAM/3 INTENT/4 EVENT/5 STORE), D=domain (0 machine/
-// 1 motion/2 pattern), S=family, S=member (member 0 = family master; a twin
-// channel across class bands sharing domain+family+member is a MIRROR; family
-// 0xF = admin/meta). Phase C4 (operator-stamped, see docs/canon/LEDGER.md)
-// moved every sub-slot onto that family-nibble convention; per-line `(was
-// 0xXXXX)` names the immediately preceding id — the full renumber history
-// lives in docs/slopsync/CHANNEL-MAP.md's generated table and git log, not
-// here. The etag moves with every renumber, which is the designed re-fetch
-// mechanism, not a break: 0x0080-0x7FFF is device-allocated space per the
-// registry, and CHANNEL-MAP.md records C4 as the last legal one.
+// Device-catalog channel ids. The reserved 0x0001-0x0007 range is owned by
+// the registry (slopsync::channels::); everything >=0x0080 is this device's
+// own allocation. Named here so buildSlopDriveCatalog() AND the telemetry
+// publisher in SlopSyncHubService reference ONE definition — a literal in
+// only one of the two would be a silent wire mismatch.
+// Device ids follow the 0xCDSS grid: C=class (1 STATE/2 STREAM/3 INTENT/
+// 4 EVENT/5 STORE), D=domain (0 machine/1 motion/2 pattern), S=family,
+// S=member (member 0 = family master; a twin channel across class bands
+// sharing domain+family+member is a MIRROR; family 0xF = admin/meta).
+// Per-line `(was 0xXXXX)` names the immediately preceding id — full renumber
+// history lives in docs/slopsync/CHANNEL-MAP.md's generated table, not here.
+// A renumber moves the etag, which is the designed re-fetch mechanism, not a
+// break; 0x0080-0x7FFF is device-allocated space per the registry.
 namespace ch {
 inline constexpr uint16_t motion         = 0x1100;  // STATE·motion, family 0 member 0 (master)
 inline constexpr uint16_t machine_config = 0x1000;  // STATE·machine, family 0 member 0 (master)
-inline constexpr uint16_t pattern_state  = 0x1200;  // STATE·pattern, family 0 member 0 (master) — Phase D's background_run field rides here, untouched by C4
+inline constexpr uint16_t pattern_state  = 0x1200;  // STATE·pattern, family 0 member 0 (master); background_run field rides here
 inline constexpr uint16_t odometer       = 0x1020;  // STATE·machine, family 2 member 0 (was 0x1002)
 inline constexpr uint16_t motion_input   = 0x2100;  // STREAM·motion, family 0 member 0 (master)
 inline constexpr uint16_t motion_segment = 0x2101;  // STREAM·motion, family 0 member 1
-// ---- M5a: the telemetry channels the legacy :81 plane owned ---------------
+// ---- telemetry channels the legacy :81 plane owned --------------------------
 inline constexpr uint16_t plan_strip     = 0x1110;  // STATE·motion, family 1 member 0 (master; was 0x1101)
 inline constexpr uint16_t power          = 0x1010;  // STATE·machine, family 1 member 0 (was 0x1001)
 inline constexpr uint16_t motion_diag    = 0x1111;  // STATE·motion, family 1 member 1 (was 0x1102)
 inline constexpr uint16_t motion_anomaly = 0x4100;  // EVENT·motion, family 0 member 0 (master)
-// ---- M5b: the MODE settings the legacy :81/HTTP plane owned ---------------
-// A SECOND settings category, not more fields on 0x0081 — and the reason is
-// structural, not stylistic. 0x0081's RFC-009 `enabled_mask` is a bitfield8
-// whose bit i gates its i-th setting-annotated field, and seven of those eight
-// bits are already spoken for. A fifth limit would fit; four MODE settings
-// would not, and widening the mask would change an existing field's type,
-// which is a protocol break rather than the append-only evolution the packed
-// layouts promise. RFC-009's own answer is the one taken here: a settings
+// ---- MODE settings the legacy :81/HTTP plane owned --------------------------
+// A SECOND settings category, not more fields on 0x0081 — the reason is
+// structural. 0x0081's `enabled_mask` is a bitfield8 whose bit i gates its
+// i-th setting-annotated field, and seven of eight bits are already spoken
+// for; widening the mask to fit these four would change an existing field's
+// type, which is a protocol break, not append-only evolution. A settings
 // category that outgrows its channel SPLITS into a new STATE+INTENT pair.
 inline constexpr uint16_t machine_modes  = 0x1030;  // STATE·machine, family 3 member 0 (master; was 0x1003)
-// ---- M5c: SlopMotion live tuning, off HTTP and onto the protocol ----------
+// ---- SlopMotion live tuning, off HTTP and onto the protocol -----------------
 // THREE state cards, ONE shared writer (0x0105). `settingChannel` is per-entry
 // and `setting_key` is a key WITHIN that writer, so several STATE channels may
 // name the same INTENT channel as long as their keys do not collide. That is
@@ -86,19 +73,14 @@ inline constexpr uint16_t sm_limits      = 0x1120;  // STATE·motion, family 2 m
 inline constexpr uint16_t sm_chase       = 0x1121;  // STATE·motion, family 2 member 1 (was 0x1104)
 inline constexpr uint16_t sm_waveform    = 0x1122;  // STATE·motion, family 2 member 2 (was 0x1105)
 // ---- Advanced pattern — off the dead /api/pattern HTTP surface, onto SlopSync
-// THE SAME FLATTENED-ENTRY BUDGET SPLIT AS 0x008B/C/D. AdvancedPattern.h's real
-// (firmware, not legacy-JS) parameter set is 8 base controls (advpat::Settings)
-// plus a 6-field cyclic Modifier PER base control (advpat::BASE_COUNT = 6) — 44
-// settings total, which is exactly the ~50-field case channel/catalog.hpp's own
-// comment says CatalogEntry::kMaxFields was raised to 64 (8 -> 64) FOR. But
-// registry.yaml's catalog_max_entry_bytes note is the other half of that
-// story: a 50-field FULLY annotated entry encodes to ~8-10 KB, so "fits in one
-// entry" and "affordable in one entry" are different questions — this device
-// answers the second one by splitting, same as 0x008B/C/D. One channel per
-// BASE CONTROL's modifier (6 fields, well under the 8-bit enabled_mask) keeps
-// every group boundary a real conceptual one instead of an artifact of
-// bit-packing, exactly like sm_limits/sm_chase/sm_waveform split by subsystem
-// rather than by filling every last mask bit.
+// Same flattened-entry budget split as 0x008B/C/D. AdvancedPattern.h's real
+// parameter set is 8 base controls (advpat::Settings) plus a 6-field cyclic
+// Modifier per base control (advpat::BASE_COUNT = 6), 44 settings total. A
+// fully-annotated 50-field entry encodes to ~8-10 KB (catalog_max_entry_bytes);
+// fitting in kMaxFields (64) and being affordable in one entry are different
+// constraints, so this splits by subsystem — one channel per base control's
+// modifier (6 fields each, well under the 8-bit enabled_mask) — same
+// principle as the sm_limits/sm_chase/sm_waveform split.
 inline constexpr uint16_t pattern_advanced          = 0x1210;  // STATE·pattern, family 1 member 0 (master; was 0x1201) — ap_mode + 7 base controls
 // The six fray-d modifier lanes: ONE family (domain=pattern, family=1),
 // members 1-6. Member order is speed-in/out, accel-in/out, depth-1/2 — NOT
@@ -150,7 +132,7 @@ inline constexpr uint8_t kPresetPayloadBytes = 40;
 // silent wire mismatch.
 inline constexpr uint8_t kApBaseCount = 6;
 
-// ---- motion-anomaly EVENT: the `body` (40) sub-map keys -------------
+// ---- motion-anomaly EVENT: the `body` (40) sub-map keys ---------------------
 // These are the CHANNEL'S OWN schema keys, exactly as slopsync::safety_body is
 // for 0x000E — that is the v1.0 EVENT grammar (registry key 40's own note: with
 // kind-specific fields at the TOP level, every device-authored EVENT channel
@@ -165,7 +147,7 @@ inline constexpr uint8_t detail = 4;  // KIND-SPECIFIC scalar — see the option
 inline constexpr uint8_t t_us   = 5;  // engine time at record, µs (low 32 bits)
 }  // namespace anom_body
 
-// ---- Machine FEATURES that gate whether a channel is advertised AT ALL -----
+// ---- Machine FEATURES that gate whether a channel is advertised AT ALL ------
 // RFC-016 in practice: "capability discovery IS catalog introspection". A hub
 // with no INA228 must not advertise a power channel that would publish zeros
 // forever — a client cannot tell "0.0 A" from "no sensor", and a UI that shows
@@ -181,13 +163,13 @@ struct DeviceFeatures {
     bool has_power_monitor  = false;  // MotorDriver::hasPowerMonitor() (die temp)
 };
 
-// ---- Factory DEFAULTS advertised as RFC-009 `default` annotations ----------
+// ---- Factory DEFAULTS advertised as RFC-009 `default` annotations -----------
 // MIRROR of getDefaultConfig() in include/system/config_api.h, which cannot be
 // included here: it pulls in <Arduino.h>, and this header must stay hardware-
 // free (the native test suite and the sim both build it with nothing but the
-// library). Duplication is therefore forced — so the drift is caught instead of
-// tolerated: SlopSyncHubService.cpp, which DOES include config_api.h, carries a
-// static_assert per constant below. Change a factory default there and the
+// library). Duplication is forced so drift is caught, not tolerated:
+// SlopSyncHubService.cpp, which DOES include config_api.h, carries a
+// static_assert per constant below — change a factory default there and the
 // FIRMWARE fails to compile until this table follows.
 namespace factory {
 inline constexpr float window_min  = 0.0f;        // getDefaultConfig().min_position_mm
@@ -197,22 +179,19 @@ inline constexpr float user_accel  = 200.0f;      // DEFAULT_USER_ACCEL_MM_S2
 inline constexpr float input_speed = 950.0f;      // DEFAULT_MAX_SPEED_MM_S
 inline constexpr float input_accel = 50000.0f;    // DEFAULT_ACCEL_MM_S2
 inline constexpr float input_jerk  = 2000000.0f;  // DEFAULT_INPUT_MAX_JERK_MM_S3
-// max_rail (fw 2.1.76 / operator ruling 2026-07-27): promoted from read-only
-// derived truth to a real savable setting (item 1) — see the field comment on
-// 0x0081 below. Same mirror rule as its siblings above.
+// max_rail is a real savable setting, not derived truth — see the field
+// comment on 0x0081 below. Same mirror rule as its siblings above.
 inline constexpr float max_rail    = 500.0f;      // DEFAULT_MAX_RAIL_MM
-// M5b mode defaults (0x008A). Same forced-duplication rule as above — each one
+// Mode defaults (0x008A). Same forced-duplication rule as above — each one
 // is static_assert'd against its real source in SlopSyncHubService.cpp.
-//
-// `blend_mode` REMOVED 2026-07-27 (operator ruling — item 2): the setting it
-// used to default was retired from 0x008A (see the field comment there), so
-// there is no longer a `.dflt` annotation to mirror. Do not re-add without
-// re-adding the field's setting_key first.
+// `blend_mode` has no `.dflt` here: the setting it defaulted was retired from
+// 0x008A (see the field comment there). Do not re-add without re-adding the
+// field's setting_key first.
 inline constexpr uint8_t stream_speed_mode = 0;   // SystemState::SPEED_CEILING_PEGGED
 inline constexpr uint8_t overshoot_clamp   = 0;   // SystemState::interp_clamp_overshoot = false
 }  // namespace factory
 
-// ---- Hard firmware ceilings advertised as `min`/`max` ----------------------
+// ---- Hard firmware ceilings advertised as `min`/`max` -----------------------
 // The bounds WebUI::applySettings actually clamps to (src/ui/WebUI.cpp), NOT
 // the NORMAL/EXPERT UI guardrails — those are a client-side affordance and a
 // static catalog must advertise what the hub will really accept. Same
@@ -249,16 +228,15 @@ inline bool buildSlopDriveCatalog(slopsync::Catalog32& c, DeviceFeatures feat = 
 
     c.clear();
 
-    // ---- "safety" — STATE, critical, on-change --------------------
+    // ---- "safety" — STATE, critical, on-change ------------------------------
     // VERBATIM copy of conformance/mini_catalog.hpp's safety entry: the hub's
     // buildSafetyPayload() hardcodes exactly this 9-byte layout (word
     // bitfield8, cause u8, owner_session u32, estop_seq u16, modes bitfield8).
     // Do NOT reshape it.  [9 B]
     //
-    // RFC-025c APPENDED `modes` (manual_override + bypass_limits) at v1.0.
-    // These are SAFETY-domain state by operator ruling — they render near the
-    // rail in a UI, but they change what the machine does with a motion
-    // command, so every surface needs them and they belong on the retained,
+    // `modes` (manual_override + bypass_limits): SAFETY-domain state — they
+    // render near the rail in a UI, but they change what the machine does
+    // with a motion command, so every surface needs them on the retained,
     // critical-priority snapshot rather than a legacy HTTP endpoint. Written
     // via 0x0005 ops override_on/off + bypass_on/off. Append-only: bytes 0..7
     // keep their meaning and offsets exactly.
@@ -276,7 +254,7 @@ inline bool buildSlopDriveCatalog(slopsync::Catalog32& c, DeviceFeatures feat = 
                         .scale = 1.0f},
                        {"override", "bypass"});
 
-    // ---- "control-owner" — STATE, critical, on-change -------------
+    // ---- "control-owner" — STATE, critical, on-change -----------------------
     // Matches Hub::buildControlOwnerPayload(): 4 × {source u8, owner u32}, in
     // ascending source order, 20 bytes total. Each pair is one arbiter source
     // (0 manual, 1 tcode, 2 pattern, 3 ossm) and the session id that owns it
@@ -294,7 +272,7 @@ inline bool buildSlopDriveCatalog(slopsync::Catalog32& c, DeviceFeatures feat = 
     c.addLayoutField({.name = "src3",   .type = PackedFieldType::u8,  .unit = "", .scale = 1.0f});
     c.addLayoutField({.name = "owner3", .type = PackedFieldType::u32, .unit = "", .scale = 1.0f});
 
-    // ---- "safety-intents" — INTENT, critical, modest rate ----------
+    // ---- "safety-intents" — INTENT, critical, modest rate -------------------
     // The client sends {1:"op"} where op is a safety_ops:: value (estop=6 and
     // estop_clear=1 are hub-handled; the rest reach the delegate and the hub
     // latches the result — RFC-025a).
@@ -344,7 +322,7 @@ inline bool buildSlopDriveCatalog(slopsync::Catalog32& c, DeviceFeatures feat = 
                             AccessLevel::control,  // 9  bypass_on
                             AccessLevel::control});// 10 bypass_off
 
-    // ---- "hub-status" — STATE, background, 1 Hz --------------------
+    // ---- "hub-status" — STATE, background, 1 Hz -----------------------------
     // Slow health telemetry.  [4+4+1+1 = 10 B]
     c.addEntry({.id = slopsync::channels::hub_status, .name = "hub-status",
                 .cls = ChannelClass::STATE, .dir = Direction::h2c,
@@ -355,16 +333,16 @@ inline bool buildSlopDriveCatalog(slopsync::Catalog32& c, DeviceFeatures feat = 
                       .role = roles::telemetry_uptime});
     c.addLayoutField({.name = "rssi",      .type = PackedFieldType::i8,  .unit = "dBm",   .scale = 1.0f});
     c.addLayoutField({.name = "sessions",  .type = PackedFieldType::u8,  .unit = "count", .scale = 1.0f});
-    // M5b APPENDED (10 -> 14 B): RFC-017 / §9.4's VISIBLE drop counter for the
-    // log plane. A bounded log that silently eats lines under load is a log you
-    // cannot reason about, so the number has to be reachable on the wire and not
-    // just in a counter someone remembers to print. Sums both places a line can
-    // be lost: the hub's replay ring (Hub::logDropped) and the firmware's
-    // httpTask->hub hand-off ring. Append-only — bytes 0..9 keep their offsets.
+    // `log_dropped` (field 5, appended 10 -> 14 B): SPEC §9.4's VISIBLE drop
+    // counter for the log plane. A bounded log that silently eats lines under
+    // load is a log you cannot reason about, so the number must be reachable
+    // on the wire. Sums both places a line can be lost: the hub's replay ring
+    // (Hub::logDropped) and the firmware's httpTask->hub hand-off ring.
+    // Append-only — bytes 0..9 keep their offsets.
     c.addLayoutField({.name = "log_dropped", .type = PackedFieldType::u32, .unit = "count", .scale = 1.0f,
                       .desc = "Log lines dropped since boot (replay ring + cross-task bridge)."});
 
-    // ---- "session-events" — EVENT, watch ----------------------------
+    // ---- "session-events" — EVENT, watch ------------------------------------
     // Payload keys match Hub::emitTakeoverEvent(): {1:"source", 2:"session"}.
     c.addEntry({.id = slopsync::channels::session_events, .name = "session-events",
                 .cls = ChannelClass::EVENT, .dir = Direction::h2c,
@@ -373,11 +351,11 @@ inline bool buildSlopDriveCatalog(slopsync::Catalog32& c, DeviceFeatures feat = 
     c.addSchemaField({.key = 1, .name = "source",  .type = CborFieldType::uint_t, .unit = ""});
     c.addSchemaField({.key = 2, .name = "session", .type = CborFieldType::uint_t, .unit = ""});
 
-    // ---- "log" — EVENT, watch, background, replay_depth 32 ----------
-    // RFC-017 / M5b: the device log, in band. Declared by the library's own
-    // builder for the same reason the trust channels are — it is a SPEC-CORE
-    // channel whose shape hub and client cannot negotiate, so a hand-authored
-    // near-copy would be quietly non-conforming.
+    // ---- "log" — EVENT, watch, background, replay_depth 32 ------------------
+    // The device log, in band. Declared by the library's own builder for the
+    // same reason the trust channels are — it is a SPEC-CORE channel whose
+    // shape hub and client cannot negotiate, so a hand-authored near-copy
+    // would be quietly non-conforming.
     //
     // Declaring it is what makes the SlopLog bridge REACHABLE: publishLog()
     // returns false on a hub whose catalog has no 0x0008, so without this line
@@ -387,7 +365,7 @@ inline bool buildSlopDriveCatalog(slopsync::Catalog32& c, DeviceFeatures feat = 
     // §9.4's no-replay rule.
     if (!slopsync::addLogChannel(c)) return false;
 
-    // ---- the TRUST ADMINISTRATION surface (M4b) -----------
+    // ---- the TRUST ADMINISTRATION surface -----------------------------------
     // session-admin, pending-pairing, pairing-events, and the paired-devices
     // store + its roster, all in the canonical shapes the library declares
     // (lib/slopsync/include/slopsync/channel/trust_channels.hpp). Declared as a
@@ -404,44 +382,29 @@ inline bool buildSlopDriveCatalog(slopsync::Catalog32& c, DeviceFeatures feat = 
     // store number is agreed by being published rather than legislated.
     if (!slopsync::addTrustChannels(c)) return false;
 
-    // ---- "safety-events" — EVENT, critical, watch -------------------
-    // The §9.4 EVENT TWIN of the safety latch (0x0003). §5.5/§11.2 have always
-    // required the hub to emit it and until M4b there was no channel to emit it
-    // ON. Same access and priority as its STATE twin: an edge nobody may be
-    // denied and nobody's may be shed.
+    // ---- "safety-events" — EVENT, critical, watch ---------------------------
+    // The §9.4 EVENT TWIN of the safety latch (0x0003). §5.5/§11.2 require the
+    // hub to emit it. Same access and priority as its STATE twin: an edge
+    // nobody may be denied and nobody's may be shed.
     if (!slopsync::addSafetyEventsChannel(c)) return false;
 
-    // ---- "motion" — STATE, elevated, 60 Hz ------------------------
+    // ---- "motion" — STATE, elevated, 60 Hz ----------------------------------
     // The live carriage snapshot. scale 100 on positions = 10µm wire units;
     // scale 10 on speed = 0.1 mm/s wire units.  [2+2+2+1+2 = 9 B]
     //
-    // M5a APPENDED "raw_10um" as field 5 (7 -> 9 B) — the PRE-PLANNING demand,
-    // i.e. the legacy :81 0x01 TELE `raw` line, which V1-READINESS §1 named
-    // "the most likely thing to be silently lost" in the migration.
+    // raw_10um (field 5) is the pre-planning demand — do not split it into
+    // its own channel. raw/target/actual are ONE measurement of ONE quantity
+    // at three pipeline stages (asked, planned, achieved); splitting them
+    // would give the diagnostic CLI independently-paced STATE streams to
+    // re-correlate, reintroducing the sampling skew the plot exists to
+    // measure. Appending keeps ONE frame/seq/timestamp. Append-only: bytes
+    // 0..6 keep their offsets; the etag moves on append, which is the
+    // designed re-fetch mechanism.
     //
-    // WHY HERE AND NOT A NEW CHANNEL (the choice the brief asked me to make and
-    // justify): raw / target / actual are ONE measurement of ONE quantity at
-    // three pipeline stages — asked, planned, achieved. Splitting them across
-    // channels would hand the diagnostic CLI two independently-paced,
-    // independently-conflated STATE streams and make it re-correlate samples
-    // that were simultaneous at the source; at 60 Hz with per-channel grant
-    // pacing that reintroduces exactly the sampling skew the plot exists to
-    // measure. Appending keeps ONE frame, ONE seq, ONE timestamp, and costs a
-    // client that already subscribes to motion precisely nothing extra to
-    // adopt. Append-only, so bytes 0..6 keep their offsets and an old client's
-    // prefix parse stays correct; the etag moves, which is the re-fetch
-    // mechanism working as designed.
-    //
-    // The three roles are the CLI's other half: with `window.min|max` from
-    // 0x0081 it converts a normalized sender intent into mm and plots it
-    // against telemetry.position without hardcoding a single channel id.
-    // RFC-047/048 (Phase C2): category = motion (RENDERING.md's own example —
-    // "0x1100 = STATE·motion·00, the motion telemetry channel"), rank = hero
-    // — THE live motion feed, the machine's face. provenance on pos/tgt/raw is
-    // the worked example RENDERING.md §5.3 names by name: demand (raw),
-    // planned (target), actual (position) — one quantity at three pipeline
-    // stages, and the axis archetype's commanded-vs-actual overlay is their
-    // companion composition.
+    // category = motion, rank = hero: THE live motion feed, the machine's
+    // face. provenance on pos/tgt/raw marks one quantity at three pipeline
+    // stages (demand/planned/actual) for the CLI, which combines it with
+    // `window.min|max` from 0x0081 to convert normalized intent into mm.
     auto addMotion = [&]() {
     c.addEntry({.id = ch::motion, .name = "motion",
                 .cls = ChannelClass::STATE, .dir = Direction::h2c,
@@ -479,40 +442,28 @@ inline bool buildSlopDriveCatalog(slopsync::Catalog32& c, DeviceFeatures feat = 
                       .hasUnitId = true, .unitId = slopsync::unit_ids::mm});
     };
 
-    // ---- "machine-config" — STATE, normal, on-change ---------------
+    // ---- "machine-config" — STATE, normal, on-change ------------------------
     // The full geometry + dual-limit-set snapshot in physical units (f32).
-    // [8 × 4 = 32 B]
-    // fw 2.1.47 APPENDED "input_jerk" as field 7 (28 → 32 B). Append-only layout
-    // evolution, which the library invariants permit: every existing field keeps
-    // its offset, so an old client decoding the first 28 B is still correct. The
-    // etag DOES change — that is the designed re-fetch mechanism, not a break.
-    // NOTE: fields live in the catalog's shared layout POOL, and M2b raised
-    // CatalogEntry::kMaxFields (the CODEC's per-entry bound) from 8 to 64 — so a
-    // 9th field here is now merely an append-only layout evolution + etag bump,
-    // no longer a library change. :3
+    // Append-only layout: every existing field keeps its offset; the etag
+    // changes on append, which is the designed re-fetch mechanism, not a
+    // break. Fields live in the catalog's shared layout pool; CatalogEntry::
+    // kMaxFields (the codec's per-entry bound) is 64, so appending a field
+    // here is an etag bump, not a library change.
     //
-    // M5a (RFC-009) ANNOTATED the whole surface and APPENDED "enabled_mask" as
-    // field 9 (32 -> 33 B). Every field below now carries the paired INTENT key
-    // (`setting_key` -> 0x0101), a factory `default`, min/max/step, a `group`
-    // card heading, a USER-FACING `desc`, and a registry `role`. The entry
-    // declares `settingChannel` = 0x0101 and `category` = limits, which is what
-    // makes "render me a settings page" answerable from the catalog alone.
+    // Every field below carries the paired INTENT key (`setting_key` ->
+    // 0x0101), a factory `default`, min/max/step, a `group` card heading, a
+    // USER-FACING `desc`, and a registry `role`. `settingChannel` = 0x0101,
+    // `category` = limits — a generic client renders a full settings page
+    // from the catalog alone.
     //
-    // fw 2.1.76 (operator ruling 2026-07-27, item 1): `max_rail` is now a REAL
-    // SAVABLE SETTING, not derived truth. It is the user-configured ceiling
-    // that bounds the sensorless-homing search sweep AND serves as the
-    // position ceiling before homing has measured the real stroke (see
-    // config_api.h's DEFAULT_MAX_RAIL_MM doc) — on a 2 m rail you set it above
-    // 2000mm so homing's search actually reaches both hard stops. That is a
-    // machine-geometry INPUT, which is why it belongs on 0x0101 like its
-    // siblings. THE OLD "derived machine truth" ROLE THIS FIELD USED TO PLAY —
-    // "what did homing actually measure" — is now `measured_stroke` (appended
-    // below, field 10): a SEPARATE, still read-only quantity. Conflating the
-    // two was the bug RFC-003's own note here used to warn against without
-    // fixing: this field's description claimed "measured for itself" while the
-    // publisher always wrote the CONFIGURED value, never the measurement.
-    // They are different quantities now published distinctly, and a client
-    // must not adopt one as a stand-in for the other.
+    // `max_rail` is a REAL SAVABLE SETTING, not derived truth: the
+    // user-configured ceiling that bounds the sensorless-homing search sweep
+    // and serves as the position ceiling before homing has measured the real
+    // stroke (see config_api.h's DEFAULT_MAX_RAIL_MM doc) — on a 2 m rail,
+    // set it above 2000 mm so homing's search reaches both hard stops.
+    // `measured_stroke` (field 10, below) is the SEPARATE, read-only quantity
+    // — what homing actually measured. The two must never be conflated: a
+    // client must not adopt one as a stand-in for the other.
     auto addMachineConfig = [&]() {
     c.addEntry({.id = ch::machine_config, .name = "machine-config",
                 .cls = ChannelClass::STATE, .dir = Direction::h2c,
@@ -602,21 +553,17 @@ inline bool buildSlopDriveCatalog(slopsync::Catalog32& c, DeviceFeatures feat = 
                       .hasSettingKey = true, .hasStep = true,
                       .hasRank = true, .rank = slopsync::ui_ranks::advanced,
                       .hasUnitId = true, .unitId = slopsync::unit_ids::mm_s3});
-    // RFC-009 item 4 — DYNAMIC ENABLED STATE. Bit i gates the i-th
-    // SETTING-ANNOTATED field of this layout, in layout order:
+    // DYNAMIC ENABLED STATE. Bit i gates the i-th SETTING-ANNOTATED field of
+    // this layout, in layout order:
     //   0 window_min  1 window_max  2 user_speed  3 user_accel
     //   4 input_speed 5 input_accel 6 max_rail     7 input_jerk
-    // fw 2.1.76: max_rail joined the setting-annotated set (item 1) and takes
-    // bit 6 in LAYOUT order (it is declared before input_jerk), which pushes
-    // input_jerk to bit 7 — a pure relabeling of what bit 6/7 mean, not a
-    // reshuffle of any BYTE offset (enabled_mask is metadata about the layout,
-    // not part of it). All 8 bits of the bitfield8 are now spoken for; a 9th
-    // setting on this entry would need to split into a new channel, same as
-    // 0x008B/C/D's category-split precedent. `enabled_mask` itself is never
-    // setting-annotated — "setting-annotated" is the only membership rule,
-    // which is why it needs no second list to stay in step. Disabled means
-    // GRAY, NEVER HIDE. Bit labels name the field each bit gates so the
-    // mapping survives encode/decode without a client re-deriving it.
+    // max_rail sits at bit 6 (declared before input_jerk, which takes bit 7)
+    // — a relabeling of what a bit means, never a byte-offset reshuffle
+    // (enabled_mask is metadata about the layout, not part of it). All 8
+    // bits are spoken for; a 9th setting on this entry must split into a new
+    // channel (same precedent as 0x008B/C/D). `enabled_mask` is never itself
+    // setting-annotated. Disabled means GRAY, NEVER HIDE. Bit labels name the
+    // field each bit gates so the mapping survives encode/decode.
     c.addBitfieldField({.name = "enabled_mask", .type = PackedFieldType::bitfield8, .unit = "flag",
                         .scale = 1.0f,
                         .desc = "Which of these settings the machine will accept right now.",
@@ -624,18 +571,16 @@ inline bool buildSlopDriveCatalog(slopsync::Catalog32& c, DeviceFeatures feat = 
                         .hasRank = true, .rank = slopsync::ui_ranks::detail},
                        {"window_min", "window_max", "user_speed", "user_accel",
                         "input_speed", "input_accel", "max_rail", "input_jerk"});
-    // measured_stroke (field 10, byte 33) — fw 2.1.76, item 3. THE REAL
-    // HOMING MEASUREMENT, distinct from max_rail (the configured ceiling
-    // above): 0 until the first successful home this boot has completed, then
-    // the usable stroke sensorless homing actually felt out between the two
-    // hard stops. No setting_key: this is derived machine truth exactly like
-    // max_rail used to claim to be, just honestly this time — the publisher
-    // (SlopSyncHubService.cpp) clamps the PRE-HOME value to max_rail (item 4:
-    // a stale NVS-restored measurement from a prior boot must never overstate
-    // the configured ceiling), but a measurement earned by a fresh home this
-    // session is trusted even past max_rail — the search sweep bounds
-    // hunting, not the result. Append-only: added after enabled_mask so bytes
-    // 0..32 keep their offsets.
+    // measured_stroke (field 10, byte 33): THE REAL HOMING MEASUREMENT,
+    // distinct from max_rail (the configured ceiling above). 0 until the
+    // first successful home this boot; then the usable stroke sensorless
+    // homing actually felt out between the two hard stops. No setting_key —
+    // derived machine truth. The publisher (SlopSyncHubService.cpp) clamps
+    // the PRE-HOME value to max_rail (a stale NVS-restored measurement from a
+    // prior boot must never overstate the configured ceiling), but a
+    // measurement earned by a fresh home this session is trusted even past
+    // max_rail — the search sweep bounds hunting, not the result.
+    // Append-only: added after enabled_mask, bytes 0..32 keep their offsets.
     c.addLayoutField({.name = "measured_stroke", .type = PackedFieldType::f32, .unit = "mm", .scale = 1.0f,
                       .desc = "Usable stroke length sensorless homing actually measured between the "
                               "two hard stops. Zero until the first successful home.",
@@ -644,38 +589,27 @@ inline bool buildSlopDriveCatalog(slopsync::Catalog32& c, DeviceFeatures feat = 
                       .hasUnitId = true, .unitId = slopsync::unit_ids::mm});
     };
 
-    // ---- "pattern-state" — STATE, normal, on-change ----------------
-    // PatternEngine live snapshot.  [1+1+4+4+4+4+1+1 = 20 B]
+    // ---- "pattern-state" — STATE, normal, on-change -------------------------
+    // PatternEngine live snapshot.  [1+1+4+4+4+4+1+1 = 20 B]. Append-only:
+    // enabled_mask (field 7) and background_run (field 8, settingKey 7 on the
+    // paired 0x3200 pattern-cmd intent) keep bytes 0..18 at their offsets.
+    // category = user; settingChannel = 0x0102 pattern-cmd.
     //
-    // M5a: annotated + "enabled_mask" APPENDED as field 7 (18 -> 19 B).
-    // Phase D (RFC-045/048): "background_run" APPENDED as field 8 (19 -> 20 B,
-    // settingKey 7 on the paired 0x3200 pattern-cmd intent) — bytes 0..18 keep
-    // their offsets.
-    // category = user (this is the everyday operating surface, not the safety
-    // envelope); settingChannel = 0x0102 pattern-cmd.
+    // `pattern` option labels are PatternEngine::patternName()'s own strings,
+    // index-aligned with the wire value exactly as setPattern(idx) consumes
+    // it — must stay in sync with that function.
     //
-    // `pattern` is the worked example of RFC-009 gap 3: a u8-backed
-    // single-select that a generic client could previously only render as a
-    // raw number. The option labels below are PatternEngine::patternName()'s
-    // own strings, index-aligned with the wire value exactly as
-    // setPattern(idx) consumes it — so a client shows "Teasing Pounding", not
-    // "1", without knowing anything about this machine.
+    // Fields carry `pattern.*` roles (registry field_roles) so a generic
+    // client can draw a proper generator card instead of unrelated sliders —
+    // a hint a client MAY upgrade a widget on, never a requirement.
     //
-    // Fields carry `pattern.*` roles (registry field_roles, additive) so a
-    // generic client can draw a proper generator card — running toggle,
-    // pattern picker, speed/depth/stroke/sensation knobs — instead of six
-    // unrelated sliders. Same doctrine as every other role: a hint a client
-    // MAY upgrade to a bespoke widget on, never a requirement.
-    //
-    // THE COMPILE-GATED TAIL: PatternEngine's registry is
-    // CORE_PATTERN_COUNT (7) plus up to two build-flagged extended patterns
-    // (PATTERN_EXT_TESTPATTERN1/2). Only the seven CORE names are advertised,
-    // because this header is hardware-free and cannot see those flags — and
-    // advertising a choice the running firmware might clamp away would be a
-    // lie in exactly the direction the ground-truth doctrine forbids. A build
-    // that ships the extended patterns can append their labels here; the
-    // labels are index-aligned and append-only, so that is an etag bump and
-    // nothing more.
+    // Only PatternEngine::CORE_PATTERN_COUNT (7) names are advertised, never
+    // the build-flagged extended patterns (PATTERN_EXT_TESTPATTERN1/2): this
+    // header is hardware-free and cannot see those flags, and advertising a
+    // choice the running firmware might clamp away would violate the
+    // ground-truth doctrine. A build that ships the extended patterns can
+    // append their labels here — index-aligned and append-only, an etag
+    // bump and nothing more.
     auto addPatternState = [&]() {
     c.addEntry({.id = ch::pattern_state, .name = "pattern-state",
                 .cls = ChannelClass::STATE, .dir = Direction::h2c,
@@ -740,28 +674,28 @@ inline bool buildSlopDriveCatalog(slopsync::Catalog32& c, DeviceFeatures feat = 
                       .role = roles::pattern_sensation,
                       .step = 1.0f, .settingKey = 6, .hasSettingKey = true, .hasStep = true,
                       .hasRank = true, .rank = slopsync::ui_ranks::control});
-    // RFC-009 item 4 — bit i gates the i-th setting-annotated field above:
+    // Bit i gates the i-th setting-annotated field above:
     //   0 running  1 pattern  2 speed  3 depth  4 stroke  5 sensation
-    //   6 background_run (Phase D, RFC-045/048 — see its own field comment
-    //     for why its bit is unconditionally 1, unlike bits 0-5)
-    // Bits 0-5 are genuinely DYNAMIC here, unlike 0x0081's: the delegate
-    // refuses 0x0102 outright while the e-stop is latched (ESTOP_ACTIVE) or
-    // before homing (NOT_HOMED), so all six drop together in either state and
-    // a client grays the whole pattern card from one ground truth instead of
-    // discovering it one NACK at a time.
+    //   6 background_run (see its own field comment for why its bit is
+    //     unconditionally 1, unlike bits 0-5)
+    // Bits 0-5 are genuinely DYNAMIC: the delegate refuses 0x0102 outright
+    // while the e-stop is latched (ESTOP_ACTIVE) or before homing
+    // (NOT_HOMED), so all six drop together and a client grays the whole
+    // pattern card from one ground truth instead of discovering it one NACK
+    // at a time.
     c.addBitfieldField({.name = "enabled_mask", .type = PackedFieldType::bitfield8, .unit = "flag",
                         .scale = 1.0f,
                         .desc = "Which pattern controls the machine will accept right now.",
                         .role = roles::meta_enabled_mask,
                         .hasRank = true, .rank = slopsync::ui_ranks::detail},
                        {"running", "pattern", "speed", "depth", "stroke", "sensation", "background_run"});
-    // RFC-045/048 `source.background_run` — APPENDED after enabled_mask
-    // (settingKey 7; append-only, never inserted before an existing field).
-    // Bit 6 of the mask above is UNCONDITIONALLY 1: this is a standing policy
-    // choice ("should the generator keep going if I disconnect"), not a live
-    // motion command, so — unlike bits 0-5 — it is never gated by homed/estop.
-    // It still needs a bit (every setting-annotated field does, RFC-009 item
-    // 4), just one that never drops.
+    // `source.background_run` — appended after enabled_mask, settingKey 7
+    // (append-only, never inserted before an existing field). Bit 6 of the
+    // mask above is UNCONDITIONALLY 1: this is a standing policy choice
+    // ("should the generator keep going if I disconnect"), not a live motion
+    // command, so unlike bits 0-5 it is never gated by homed/estop — it
+    // still needs a bit (every setting-annotated field does), just one that
+    // never drops.
     c.addLayoutField({.name = "background_run", .type = PackedFieldType::u8, .unit = "", .scale = 1.0f,
                       .hasMin = true, .hasMax = true, .min = 0.0f, .max = 1.0f,
                       .dflt = SettingDefault::ofBool(false),
@@ -773,16 +707,14 @@ inline bool buildSlopDriveCatalog(slopsync::Catalog32& c, DeviceFeatures feat = 
                       .hasRank = true, .rank = slopsync::ui_ranks::control});
     };
 
-    // ---- "odometer" — STATE, background, 1 Hz ---------------------
-    // Session totals.  [4+4+4+4+4 = 20 B]
-    // M5a APPENDED "energy_wh" + "session_ms" (fields 4/5, 12 -> 20 B) — the
-    // legacy :81 0x06 STATS frame's two remaining fields, which had no
-    // SlopSync home. Append-only: strokes/distance_m/peak_mm_s keep their
-    // offsets. energy_wh is Wh as a float rather than the legacy frame's
-    // milli-Wh u32: the wire is self-describing (unit + scale), so there is no
-    // reason to carry a fixed-point encoding a client has to know about.
-    // Reads 0.0 forever on a machine with no power monitor — honest, and the
-    // capability question is answered by 0x0087's presence, not by this field.
+    // ---- "odometer" — STATE, background, 1 Hz -------------------------------
+    // Session totals.  [4+4+4+4+4 = 20 B]. Append-only: energy_wh/session_ms
+    // (fields 4/5) keep strokes/distance_m/peak_mm_s at their offsets.
+    // energy_wh is Wh as a float, not a fixed-point milli-Wh u32: the wire is
+    // self-describing (unit + scale), so there is no reason to carry an
+    // encoding a client has to know about. Reads 0.0 forever on a machine
+    // with no power monitor — honest; the capability question is answered
+    // by 0x0087's presence, not by this field.
     auto addOdometer = [&]() {
     c.addEntry({.id = ch::odometer, .name = "odometer",
                 .cls = ChannelClass::STATE, .dir = Direction::h2c,
@@ -790,11 +722,11 @@ inline bool buildSlopDriveCatalog(slopsync::Catalog32& c, DeviceFeatures feat = 
                 .defaultPriority = Priority::background,
                 .hasCategory = true, .category = slopsync::ui_categories::system,
                 .hasRank = true, .rank = slopsync::ui_ranks::diagnostic});
-    // aspect/scope (RFC-048, Phase C2): every field here is a session-scope
-    // figure (RENDERING.md §5.2 scope=session is the default, set explicitly
-    // per the honesty rule — §5.4 "scope MUST always be displayed or
-    // unambiguously implied"). aspect is total(4) for the cumulative counters
-    // and peak(1) for peak_mm_s, its companion-instrument tag (§5.4).
+    // aspect/scope: every field here is a session-scope figure (RENDERING.md
+    // §5.2 scope=session is the default, set explicitly per the honesty rule
+    // — §5.4 "scope MUST always be displayed or unambiguously implied").
+    // aspect is total(4) for the cumulative counters and peak(1) for
+    // peak_mm_s, its companion-instrument tag (§5.4).
     c.addLayoutField({.name = "strokes",    .type = PackedFieldType::u32, .unit = "",     .scale = 1.0f,
                       .group = "Session", .desc = "Direction reversals counted this session.",
                       .hasAspect = true, .aspect = slopsync::value_aspects::total,
@@ -826,19 +758,17 @@ inline bool buildSlopDriveCatalog(slopsync::Catalog32& c, DeviceFeatures feat = 
                       .hasUnitId = true, .unitId = slopsync::unit_ids::ms});
     };
 
-    // ---- "motion-input" — STREAM, c2h, control, ≤333 Hz -----------
-    // The SlopSync-native TCode successor: continuous stroke-window targets
-    // + optional signed handoff velocity, decoded straight off BundleView by
-    // the hub delegate's onStreamBundle() into the SlopMotion pacing ring
-    // (maps to arbiter source 1 / MotionSource::TCODE_STREAM — the same
-    // source id legacy TCode uses, since this IS that source, just arriving
-    // over SlopSync instead of a text transport). scale 10000 on target =
-    // 1e-4 resolution over the 0..1 stroke window; scale 1000 on vel = 1e-3
-    // resolution, i16 signed (0 = no handoff velocity). NOTE: SPEC Appendix D
-    // sketches 0x0081 as "motion-input" — this firmware already spent 0x0081
-    // on machine-config, so 0x0084 is this device's actual allocation; the
-    // catalog is self-describing and authoritative per Appendix D's own
-    // disclaimer.  [2+2 = 4 B]
+    // ---- "motion-input" — STREAM, c2h, control, ≤333 Hz ---------------------
+    // Continuous stroke-window targets + optional signed handoff velocity,
+    // decoded straight off BundleView by the hub delegate's onStreamBundle()
+    // into the SlopMotion pacing ring; maps to arbiter source 1
+    // (MotionSource::TCODE_STREAM), the same source id legacy TCode uses.
+    // scale 10000 on target = 1e-4 resolution over the 0..1 stroke window;
+    // scale 1000 on vel = 1e-3 resolution, i16 signed (0 = no handoff
+    // velocity). SPEC Appendix D sketches 0x0081 as "motion-input", but this
+    // firmware spent 0x0081 on machine-config — 0x0084 is this device's
+    // actual allocation; the catalog is self-describing and authoritative
+    // per Appendix D's own disclaimer.  [2+2 = 4 B]
     auto addMotionInput = [&]() {
     c.addEntry({.id = ch::motion_input, .name = "motion-input",
                 .cls = ChannelClass::STREAM, .dir = Direction::c2h,
@@ -854,38 +784,34 @@ inline bool buildSlopDriveCatalog(slopsync::Catalog32& c, DeviceFeatures feat = 
                       // (a documented gap, same class as the sm_limits override fields below).
     };
 
-    // ---- "motion-segment" — STREAM, c2h, control, ≤50 Hz ----------
-    // TIMED-SEGMENT motion streaming: the WAVEFORM-mode companion to 0x0084.
-    // Where motion-input carries dense point samples the sender interpolates
-    // (chase mode, ~50 Hz), THIS channel carries the sender's NATIVE segments —
-    // ONE {target, duration, end_vel} per stroke leg — which the SlopMotion
-    // engine renders as a C2 quintic over EXACTLY the commanded duration (the
-    // same waveform path a timed 0x0084 sample drives). Funscript
-    // players know their segments natively, so a segment stream is ~2–4
-    // packets/s instead of 50, with strictly better motion. Decoded by FIXED
-    // OFFSET in the delegate's onStreamBundle() (same convention as 0x0084),
-    // enqueued into the SAME SlopMotion pacing ring, and mapped to arbiter
-    // source 1 / TCODE_STREAM — a client uses 0x0084 OR 0x0085, both ARE "the
-    // stream input".
+    // ---- "motion-segment" — STREAM, c2h, control, ≤50 Hz --------------------
+    // TIMED-SEGMENT motion streaming, the WAVEFORM-mode companion to 0x0084.
+    // Carries the sender's native segments — ONE {target, duration, end_vel}
+    // per stroke leg — which the SlopMotion engine renders as a C2 quintic
+    // over EXACTLY the commanded duration. Decoded by FIXED OFFSET in the
+    // delegate's onStreamBundle() (same convention as 0x0084), enqueued into
+    // the SAME SlopMotion pacing ring, mapped to arbiter source 1
+    // (TCODE_STREAM) — a client uses 0x0084 OR 0x0085, both ARE "the stream
+    // input".
     //   * duration_ms is the commanded segment duration and MUST be ≥1;
-    //     durationless points belong on 0x0084 (a 0 here is skipped + counted
-    //     dropped, never sent to the engine).
-    //   * end_vel_norm == -32768 (INT16_MIN) is the "NO end velocity" SENTINEL:
-    //     0 is a legitimate slope (a reversal ends AT rest), so 0 cannot mean
-    //     "absent". On the sentinel the engine estimates the boundary accel/vel
-    //     itself (backward-difference af + stream vf); otherwise it honors the
-    //     wire handoff velocity verbatim.
-    //   * bundle sample timestamps (§5.4 t_off) are the intended segment START
-    //     in hub time, resolved through the same nearest-window pacing as 0x0084.
-    // scale 10000 on target = 1e-4 over the 0..1 window; scale 1000 on end_vel =
-    // 1e-3 units/s, i16 signed.  [2+2+2 = 6 B]
-    // RFC-014/023: streamKind = segments — EACH SAMPLE HERE CARRIES ITS OWN
-    // duration_ms, so it commands a time extent, not an instant. A dropped
-    // segment is a permanently lost motion command (not a recoverable
-    // interpolation gap like 0x0084's points), so the hub's shedding table
-    // must never decimate this channel. 0x0084 stays at the stream_kind
-    // DEFAULT (samples) deliberately — absent-means-samples is the rule, and
-    // this catalog demonstrates it rather than marking it redundantly.
+    //     durationless points belong on 0x0084 (a 0 here is skipped and
+    //     counted dropped, never sent to the engine).
+    //   * end_vel_norm == -32768 (INT16_MIN) is the "NO end velocity"
+    //     SENTINEL: 0 is a legitimate slope (a reversal ends AT rest), so 0
+    //     cannot mean "absent". On the sentinel the engine estimates the
+    //     boundary accel/vel itself (backward-difference af + stream vf);
+    //     otherwise it honors the wire handoff velocity verbatim.
+    //   * bundle sample timestamps (§5.4 t_off) are the intended segment
+    //     START in hub time, resolved through the same nearest-window pacing
+    //     as 0x0084.
+    // scale 10000 on target = 1e-4 over the 0..1 window; scale 1000 on
+    // end_vel = 1e-3 units/s, i16 signed.  [2+2+2 = 6 B]
+    // streamKind = segments: EACH SAMPLE CARRIES ITS OWN duration_ms, so it
+    // commands a time extent, not an instant. A dropped segment is a
+    // permanently lost motion command (not a recoverable interpolation gap
+    // like 0x0084's points) — the hub's shedding table must NEVER decimate
+    // this channel. 0x0084 stays at the stream_kind DEFAULT (samples)
+    // deliberately: absent-means-samples is the rule.
     auto addMotionSegment = [&]() {
     c.addEntry({.id = ch::motion_segment, .name = "motion-segment",
                 .cls = ChannelClass::STREAM, .dir = Direction::c2h,
@@ -901,28 +827,23 @@ inline bool buildSlopDriveCatalog(slopsync::Catalog32& c, DeviceFeatures feat = 
     c.addLayoutField({.name = "end_vel_norm", .type = PackedFieldType::i16, .unit = "norm/s", .scale = 1000.0f});
     };
 
-    // ---- "plan-strip" — STATE, elevated, 45 Hz --------------------
+    // ---- "plan-strip" — STATE, elevated, 45 Hz ------------------------------
     // THE PLANNER'S CURRENT SEGMENT: what SlopMotion is executing right now,
-    // as a strip you can draw. The SlopSync home of the legacy :81 0x04 INTERP
-    // frame (~45 Hz), which V1-READINESS §1 notes "was tracked NOWHERE before
-    // this ledger" and which powers the WebUI's planstrip. Together with
-    // 0x0080's raw/tgt/pos triple it is the whole input for the diagnostic
-    // graphing CLI: raw demand in, planner shape out, carriage response.
+    // as a strip you can draw. Together with 0x0080's raw/tgt/pos triple it
+    // is the whole input for the diagnostic graphing CLI: raw demand in,
+    // planner shape out, carriage response.
     //
-    // STATE, not STREAM: this is a SNAPSHOT of a thing that is continuously
-    // true (the active plan), not a series of commands or timed samples, and
-    // conflation is exactly the right loss behavior — a subscriber that falls
-    // behind wants the CURRENT segment, never a backlog of stale ones. It
-    // therefore stays at the stream_kind DEFAULT and declares nothing:
-    // `streamKind` is read only for STREAM-class entries (isSegmentClass), so
-    // marking a STATE channel `samples` would encode nothing (0 is omitted per
-    // §5.3) and imply a classification that does not apply.
+    // STATE, not STREAM: a SNAPSHOT of a thing that is continuously true (the
+    // active plan), not a series of commands or timed samples — a subscriber
+    // that falls behind wants the CURRENT segment, never a backlog of stale
+    // ones, so conflation is the right loss behavior. Stays at the
+    // stream_kind DEFAULT and declares nothing: `streamKind` is read only for
+    // STREAM-class entries (isSegmentClass), so marking a STATE channel
+    // `samples` would imply a classification that does not apply.
     //
     // Normalized units, matching the engine's own domain (1.0 == the full
-    // stroke window): positions scale 10000, velocity scale 1000, both exactly
-    // as the legacy frame encoded them, so a port is a re-plumb and not a
-    // re-derivation. durationUs/elapsedUs stay µs u32.
-    //   [1+1+2+2+2+2+4+4 = 18 B]
+    // stroke window): positions scale 10000, velocity scale 1000.
+    // durationUs/elapsedUs stay µs u32.  [1+1+2+2+2+2+4+4 = 18 B]
     auto addPlanStrip = [&]() {
     c.addEntry({.id = ch::plan_strip, .name = "plan-strip",
                 .cls = ChannelClass::STATE, .dir = Direction::h2c,
@@ -964,31 +885,27 @@ inline bool buildSlopDriveCatalog(slopsync::Catalog32& c, DeviceFeatures feat = 
                       .role = roles::plan_elapsed});
     };
 
-    // ---- "power" — STATE, background, 10 Hz -----------------------
-    // Bus voltage / current / die temperature: the legacy :81 0x02 STATUS
-    // frame's power fields, which feed the BUS A/V and DIE °C meter tiles.
+    // ---- "power" — STATE, background, 10 Hz ---------------------------------
+    // Bus voltage / current / die temperature, feeding the BUS A/V and DIE
+    // degC meter tiles.
     //
-    // *** DECLARED ONLY WHEN THE HARDWARE EXISTS. *** RFC-016's "capability
-    // discovery IS catalog introspection", made concrete: a machine with no
-    // INA228 does not advertise this channel at all, so its ABSENCE is the
-    // answer to "can this hub measure power?". Publishing zeros instead would
-    // be indistinguishable from an idle machine, which is the same class of
-    // lie as the WebUI's dead anomaly gauges.
+    // *** DECLARED ONLY WHEN THE HARDWARE EXISTS. *** A machine with no
+    // INA228 does not advertise this channel at all — its ABSENCE answers
+    // "can this hub measure power?". Publishing zeros instead would be
+    // indistinguishable from an idle machine, the same class of lie as a
+    // dead gauge.
     //
-    // The two flags gate different fields and are honored separately —
-    // hasCurrentSensor() gives bus V/A, hasPowerMonitor() adds die temp — so a
-    // rig with a shunt but no thermal sensor advertises a 3-field entry rather
-    // than a 4-field one with a permanently-zero column. Byte offsets differ
-    // between those two builds; that is fine and is precisely why the catalog
-    // is fetched per firmware and etag-keyed rather than assumed.
+    // hasCurrentSensor() gates bus V/A, hasPowerMonitor() adds die temp
+    // separately, so a rig with a shunt but no thermal sensor advertises a
+    // 3-field entry rather than a 4-field one with a permanently-zero
+    // column. Byte offsets differ between those builds; that is fine and is
+    // precisely why the catalog is fetched per firmware and etag-keyed
+    // rather than assumed.
     //
-    // i_bus_mA lives HERE and not on 0x0080, deliberately. The legacy plane
-    // carried it per telemetry sample; bus current is a slow, background
-    // diagnostic and putting it on the 60 Hz motion snapshot would have grown
-    // the highest-rate channel on the machine to carry a value nothing on the
-    // motion path reads. The named consumer (the graphing CLI) wants raw vs
-    // planner, not amps.
-    //   [2+2 = 4 B, or +2 = 6 B with a power monitor]
+    // i_bus_mA lives HERE, not on 0x0080, deliberately: it is a slow,
+    // background diagnostic, and putting it on the 60 Hz motion snapshot
+    // would grow the highest-rate channel to carry a value nothing on the
+    // motion path reads.  [2+2 = 4 B, or +2 = 6 B with a power monitor]
     auto addPower = [&]() {
     if (feat.has_current_sensor) {
         c.addEntry({.id = ch::power, .name = "power",
@@ -1014,30 +931,23 @@ inline bool buildSlopDriveCatalog(slopsync::Catalog32& c, DeviceFeatures feat = 
     }
     };
 
-    // ---- "slopmotion-diag" — STATE, background, 1 Hz --------------
-    // The `stats` + `sync` blocks of GET /api/slopmotion, in band. Plan
-    // counts, the per-kind anomaly breakdown, the on-device plan-time bench,
-    // and the SlopSync stream-ingress counters.
+    // ---- "slopmotion-diag" — STATE, background, 1 Hz ------------------------
+    // Plan counts, the per-kind anomaly breakdown, the on-device plan-time
+    // bench, and the SlopSync stream-ingress counters.
     //
-    // The per-kind counters are ten NAMED fields rather than one array
-    // because "42 anomalies" told an investigation nothing and "40
-    // waveform_scaled + 2 endvel_clamped" tells it everything — and a generic
-    // client renders named fields with no per-device knowledge. Their order is
-    // slopmotion::AnomalyType's own, which is APPEND-ONLY upstream, so a new
-    // engine kind appends a field to the END OF THIS BLOCK — which does shift
-    // every offset after it (the M4d `handoff_bounded` growth moved plan_us_*,
-    // sync_* and reset_gen by 4 B, 80 -> 84; slopmotion 0.8.0's
-    // `waveform_smoothed` moved the same three blocks another 4 B, 84 -> 88).
-    // The catalog's own layout is what a client decodes against and the etag
-    // moves with it, so that is a resync, not a break — before the v1.0 tag.
-    // After it, an eleventh kind wants its own channel rather than a
-    // reshuffled 0x0088.
+    // The per-kind counters are ten NAMED fields rather than one array: a
+    // generic client renders named fields with no per-device knowledge.
+    // Their order is slopmotion::AnomalyType's own, which is APPEND-ONLY
+    // upstream, so a new engine kind appends a field to the END OF THIS
+    // BLOCK — shifting every offset after it. The catalog's own layout is
+    // what a client decodes against and the etag moves with it, so that is
+    // a resync, not a break — before the v1.0 tag. After it, a new kind
+    // wants its own channel rather than a reshuffled 0x0088.
     //
-    // reset_gen (RFC-019) is the observable-reset half: every applied counter
-    // reset increments it, so EVERY subscriber sees that a reset happened
-    // rather than only the session that asked for it. Without it a client that
-    // was watching the counters simply sees them jump backwards and cannot
-    // tell a reset from a reboot from a wrap.
+    // reset_gen is the observable-reset half: every applied counter reset
+    // increments it, so EVERY subscriber sees the reset happened, not only
+    // the session that asked for it. Without it a client watching the
+    // counters cannot tell a reset from a reboot from a wrap.
     //   [3*4 + 10*4 + 12 + 5*4 + 2 + 1 + 1 = 88 B]
     auto addMotionDiag = [&]() {
     c.addEntry({.id = ch::motion_diag, .name = "slopmotion-diag",
@@ -1113,33 +1023,26 @@ inline bool buildSlopDriveCatalog(slopsync::Catalog32& c, DeviceFeatures feat = 
                       .role = roles::meta_reset_gen});
     };
 
-    // ---- "motion-anomaly" — EVENT, watch, normal ------------------
-    // SlopMotion's anomaly feed, as EDGES. The roadmap already prescribed this
-    // channel, and it is a live ground-truth REPAIR, not a new feature: the
-    // legacy :81 0x05 ANOMALY ring is written only by the superseded
-    // legacy interpolator, so today the WebUI's anomaly panel renders dead
-    // gauges while the real engine's anomalies go only to SlopLog. This is the
-    // feed that panel gets rebuilt against.
+    // ---- "motion-anomaly" — EVENT, watch, normal ----------------------------
+    // SlopMotion's anomaly feed, as EDGES.
     //
-    // FIRST DEVICE-AUTHORED EVENT CHANNEL — and therefore the proof that the
-    // M3b `body` (40) grammar fix works. Every field below is keyed by THIS
-    // CHANNEL'S OWN schema (slopdrive::anom_body), so naming them cost no
-    // registry PR; under the pre-fix grammar (kind-specific fields at the top
-    // level) this channel could not have existed without one, which was the
-    // precise coupling the self-describing catalog exists to prevent.
+    // FIRST DEVICE-AUTHORED EVENT CHANNEL: every field below is keyed by
+    // THIS CHANNEL'S OWN schema (slopdrive::anom_body), naming them costs no
+    // registry PR — under a kind-specific-fields-at-top-level grammar this
+    // channel could not exist without one, which the self-describing
+    // catalog's body-map grammar exists to prevent.
     //
     // `kind` appears BOTH as the frame's event_kind (33) — the protocol's own
-    // discriminator, which is what a client switches on — and as body key 1
-    // carrying the identical value. That is not redundancy for its own sake:
-    // the catalog has no vocabulary for LABELING event kinds (there is no
-    // per-entry kind-label list), and `options` on a schema field is the one
-    // registered mechanism for turning a number into a name. Mirroring it into
-    // the body is what lets a generic client print "waveform_scaled" instead
-    // of "6". Worth a future RFC; not worth inventing a key for here.
+    // discriminator a client switches on — and as body key 1 carrying the
+    // identical value. Not redundancy for its own sake: the catalog has no
+    // vocabulary for LABELING event kinds, and `options` on a schema field is
+    // the one registered mechanism for turning a number into a name.
+    // Mirroring it into the body lets a generic client print
+    // "waveform_scaled" instead of "6".
     //
     // NO replay depth: an anomaly is an edge, and §9.4's default (edges are
-    // never replayed) is right for it. The counters on 0x0088 are the durable
-    // record — that is the event/state duality doing its job.
+    // never replayed) is right for it. The counters on 0x0088 are the
+    // durable record — the event/state duality doing its job.
     auto addMotionAnomaly = [&]() {
     c.addEntry({.id = ch::motion_anomaly, .name = "motion-anomaly",
                 .cls = ChannelClass::EVENT, .dir = Direction::h2c,
@@ -1165,35 +1068,26 @@ inline bool buildSlopDriveCatalog(slopsync::Catalog32& c, DeviceFeatures feat = 
                       .desc = "Motion-core time when it happened."});
     };
 
-    // ---- "machine-modes" — STATE, elevated, on-change -------------
-    // M5b. Originally the four MODE settings the legacy :81/HTTP plane owned
-    // outright: WS_OP_BLEND (0x07), WS_OP_MODE (0x06), WS_OP_STREAM_MODE
-    // (0x12) and WS_OP_OVERSHOOT (0x13). `transport`/WS_OP_MODE was RETIRED
-    // before it ever shipped a byte on this channel (SlopSync is the only way
-    // in now) — see ch::modes_set's key-2-is-a-permanent-gap note. Left with
-    // three: blend_mode, stream_speed_mode, overshoot_clamp.
+    // ---- "machine-modes" — STATE, elevated, on-change -----------------------
+    // Three MODE settings: blend_mode_reserved (retired, see below),
+    // stream_speed_mode, overshoot_clamp. `transport` (WS_OP_MODE) is a
+    // PERMANENT GAP at INTENT key 2 — see ch::modes_set's note.
     //
-    // fw 2.1.76 (operator ruling 2026-07-27, item 2): `blend_mode` is ALSO
-    // retired. MotionArbiter::setBlendMode() has aliased every mode to
-    // "allow" since before this catalog existed (let-it-land/hybrid were
-    // already dead, just still settable), and the driver-level stream
-    // dispatch (AIMServoDriver::streamTo/streamToSteps) never reads its own
-    // _blend_mode field either — there has been no live motion behavior
-    // behind this control for a while, only a setting UI that could still
-    // change a number nothing acted on. Picked option (b) from the CLAUDE.md
-    // ritual for retiring a packed STATE field: the BYTE STAYS (renamed
-    // `blend_mode_reserved`, still occupies byte 0 so bytes 1..3 keep their
-    // offsets — packed layouts are append-only, deleting the byte would be a
-    // wire break) but it carries NO setting_key, so no generic client renders
-    // a control for it. The paired INTENT key (0x0104 key 1) is retired too —
-    // see the modes_set case in SlopSyncHubService.cpp — making key 1 a
-    // SECOND permanent gap alongside key 2's `transport`.
+    // `blend_mode` is RETIRED: MotionArbiter::setBlendMode() aliases every
+    // mode to "allow", and the driver-level stream dispatch
+    // (AIMServoDriver::streamTo/streamToSteps) never reads _blend_mode —
+    // there is no live motion behavior behind this control. The BYTE STAYS
+    // (renamed `blend_mode_reserved`, still occupies byte 0 so bytes 1..3
+    // keep their offsets — packed layouts are append-only, deleting the byte
+    // would be a wire break) but carries NO setting_key, so no generic
+    // client renders a control for it. The paired INTENT key (0x0104 key 1)
+    // is retired too — see the modes_set case in SlopSyncHubService.cpp —
+    // a SECOND permanent gap alongside key 2's `transport`.
     //
-    // They are MODES, not limits: each one changes what the machine DOES with a
-    // command rather than how far or how fast it may go. That is why they are
-    // their own category rather than more fields on 0x0081 (see ch::
-    // machine_modes for the enabled_mask arithmetic that makes the split
-    // structural rather than tidy-minded).
+    // They are MODES, not limits: each one changes what the machine DOES
+    // with a command rather than how far or how fast it may go — their own
+    // category rather than more fields on 0x0081 (see ch::machine_modes for
+    // the enabled_mask arithmetic that makes the split structural).
     //
     // Layout [1+1+1+1 = 4 B], all u8 — small enough that the on-change
     // cadence costs nothing, and every live value is an enum the catalog
@@ -1207,11 +1101,11 @@ inline bool buildSlopDriveCatalog(slopsync::Catalog32& c, DeviceFeatures feat = 
                 .hasCategory = true, .category = slopsync::ui_categories::tuning,
                 .hasSettingChannel = true, .settingChannel = ch::modes_set,
                 .hasRank = true, .rank = slopsync::ui_ranks::advanced});
-    // RETIRED (item 2) — see the entry comment above. Plain reserved byte, no
+    // RETIRED — see the entry comment above. Plain reserved byte, no
     // options/group/default/setting_key: nothing should render this. The
     // publisher still writes the driver's (inert) getBlendMode() value here
-    // rather than a hardcoded 0, purely because that is the smaller diff —
-    // the byte's CONTENT is no longer meaningful either way.
+    // rather than a hardcoded 0 — the byte's CONTENT is no longer meaningful
+    // either way.
     c.addLayoutField({.name = "blend_mode_reserved", .type = PackedFieldType::u8, .unit = "", .scale = 1.0f,
                       .desc = "Retired. Unused padding now, the motion policy it once set is gone. "
                               "Motion always behaves as 'allow'."});
@@ -1224,11 +1118,11 @@ inline bool buildSlopDriveCatalog(slopsync::Catalog32& c, DeviceFeatures feat = 
                       .hasSettingKey = true,
                       .hasRank = true, .rank = slopsync::ui_ranks::advanced},
                      {"ceiling-pegged", "velocity-matched"});
-    // RFC-048 (Phase C2): rank = hidden. INERT — CLAUDE.md §SlopMotion records
-    // `interp_clamp_overshoot` as consumed by nothing on the live engine; this
-    // is the released-but-inert-field case ui_ranks::hidden exists for
-    // (RENDERING.md §4), overriding the `advanced` setting_flag rather than
-    // stacking with it — hidden is the stronger, terminal statement.
+    // rank = hidden. INERT: `interp_clamp_overshoot` is consumed by nothing
+    // on the live engine; this is the released-but-inert-field case
+    // ui_ranks::hidden exists for (RENDERING.md §4), overriding the
+    // `advanced` setting_flag rather than stacking with it — hidden is the
+    // stronger, terminal statement.
     c.addSelectField({.name = "overshoot_clamp", .type = PackedFieldType::u8, .unit = "", .scale = 1.0f,
                       .dflt = SettingDefault::ofInt(factory::overshoot_clamp),
                       .group = "Motion behavior",
@@ -1250,27 +1144,26 @@ inline bool buildSlopDriveCatalog(slopsync::Catalog32& c, DeviceFeatures feat = 
                        {"stream_speed_mode", "overshoot_clamp"});
     };
 
-    // ---- "slopmotion-*" — STATE, tuning ---------------
-    // M5c: the SlopMotion live-tune surface, off HTTP and onto the protocol.
+    // ---- "slopmotion-*" — STATE, tuning -------------------------------------
+    // The SlopMotion live-tune surface, off HTTP and onto the protocol.
     // POST /api/slopmotion retires with it — no controls outside SlopSync.
     //
     // THREE CHANNELS, ONE TAB. A settings channel is capped at 8 settings
-    // because its RFC-009 enabled_mask is a bitfield8 and bit i gates the i-th
-    // setting of ITS layout. That is a WIRE limit the user never sees: SPEC
-    // §8.8 — "a category spans channels; two channels in the same category
-    // merge into one tab" — so all three carry category = tuning and differ
-    // only by `group`. 20 knobs, one Tuning tab, three cards, nothing dropped
-    // to make it fit.
+    // because its enabled_mask is a bitfield8 and bit i gates the i-th
+    // setting of ITS layout — a WIRE limit the user never sees: SPEC §8.8
+    // ("a category spans channels; two channels in the same category merge
+    // into one tab") lets all three carry category = tuning and differ only
+    // by `group`. 20 knobs, one Tuning tab, three cards, nothing dropped.
     //
     // ONE SHARED WRITER (0x0105). `settingChannel` is per-entry and
-    // `setting_key` is a key WITHIN that writer, so several STATE channels may
-    // name the same INTENT channel provided their keys never collide. Keys are
-    // allocated 1..20 across the three cards and are never reused.
+    // `setting_key` is a key WITHIN that writer, so several STATE channels
+    // may name the same INTENT channel provided their keys never collide.
+    // Keys are allocated 1..20 across the three cards and are never reused.
     //
-    // PERSISTED to NVS (operator ruling 2026-07-27). /api/slopmotion was a
-    // session-only surface that reset on reboot; these are real settings and
-    // survive one. That is also why they carry `default` annotations — a
-    // generic client needs to offer "reset to factory" for a value that sticks.
+    // PERSISTED to NVS: /api/slopmotion was a session-only surface that
+    // reset on reboot; these are real settings and survive one. That is
+    // also why they carry `default` annotations — a generic client needs to
+    // offer "reset to factory" for a value that sticks.
     auto addSmLimits = [&]() {
     c.addEntry({.id = ch::sm_limits, .name = "slopmotion-limits",
                 .cls = ChannelClass::STATE, .dir = Direction::h2c,
@@ -1444,15 +1337,15 @@ inline bool buildSlopDriveCatalog(slopsync::Catalog32& c, DeviceFeatures feat = 
                         "amplitude_budget", "blend_steps", "reshape_steps", "settle_grace_ms"});
     };
 
-    // ---- "pattern-advanced" — STATE, normal, on-change -------------
-    // Advanced mode's 8 BASE controls (advpat::Settings, everything except the
-    // per-control cyclic Modifier — see 0x008F..0x0094 for those). This is the
-    // real fix the roadmap asked for: POST /api/pattern used to carry ap_mode/
-    // ap_speed/ap_max_depth/ap_min_depth/ap_in_speed/ap_out_speed/ap_in_accel/
-    // ap_out_accel as ad-hoc JSON keys a generic client could not discover; now
-    // they are 8 RFC-009 settings a generic client renders without knowing this
-    // firmware exists. That endpoint answers 410 today (M5c); this channel is
-    // what makes Advanced mode reachable again at all.
+    // ---- "pattern-advanced" — STATE, normal, on-change ----------------------
+    // Advanced mode's 8 BASE controls (advpat::Settings, everything except
+    // the per-control cyclic Modifier — see 0x008F..0x0094 for those).
+    // Replaces the ad-hoc JSON keys POST /api/pattern used to carry
+    // (ap_mode/ap_speed/ap_max_depth/ap_min_depth/ap_in_speed/ap_out_speed/
+    // ap_in_accel/ap_out_accel, undiscoverable by a generic client) with 8
+    // settings a generic client renders without knowing this firmware
+    // exists. That endpoint answers 410 today; this channel is what makes
+    // Advanced mode reachable at all.
     //
     // SAME CATEGORY AS 0x0082 (`user`), DIFFERENT settingChannel (0x0107, not
     // 0x0102): Advanced is a separate sub-mode of the SAME pattern generator,
@@ -1548,31 +1441,28 @@ inline bool buildSlopDriveCatalog(slopsync::Catalog32& c, DeviceFeatures feat = 
                         "in_accel", "out_accel"});
     };
 
-    // ---- "pattern-adv-mod-*" — STATE, background -----------
+    // ---- "pattern-adv-mod-*" — STATE, background ----------------------------
     // The 6-field cyclic Modifier (advpat::Modifier) that rides EACH of the 6
-    // base controls (advpat::BASE_COUNT) — the "modifier cycle" the roadmap
-    // asked for: amplitude ramps a control's swing in over `in_step` strokes,
-    // holds `in_wait`, ramps back over `out_step`, rests `out_wait`, and
-    // `offset` phase-shifts the whole cycle. ONE CHANNEL PER BASE CONTROL
-    // rather than binpacking 36 fields into the fewest possible 8-field
-    // channels: each is a real, separate concept (fray-d lets you set a
-    // completely different breathing pattern on depth vs. speed vs. accel),
-    // and a channel boundary that means something is worth six channel ids
-    // more than a denser one that doesn't — same judgement 0x008B/C/D already
-    // made splitting by subsystem, not by bit-count.
+    // base controls (advpat::BASE_COUNT): amplitude ramps a control's swing
+    // in over `in_step` strokes, holds `in_wait`, ramps back over
+    // `out_step`, rests `out_wait`, and `offset` phase-shifts the whole
+    // cycle. ONE CHANNEL PER BASE CONTROL rather than binpacking 36 fields
+    // into the fewest possible 8-field channels: each is a real, separate
+    // concept (a different breathing pattern on depth vs. speed vs. accel),
+    // same judgement 0x008B/C/D made splitting by subsystem, not by
+    // bit-count.
     //
-    // ALL SIX SHARE ch::pattern_advanced_cmd as settingChannel (same writer as
-    // ch::pattern_advanced) and `user` as category, so all seven
+    // ALL SIX SHARE ch::pattern_advanced_cmd as settingChannel (same writer
+    // as ch::pattern_advanced) and `user` as category, so all seven
     // advanced-pattern cards merge into ONE tab. setting_keys are allocated
-    // 9..44 across the six, 6 keys apiece, and match the wire layout below
+    // 9..44 across the six, 6 keys apiece, matching the wire layout below
     // exactly: keyBase+0 amplitude, +1 in_step, +2 in_wait, +3 out_step,
-    // +4 out_wait, +5 offset — which is also SlopSyncHubService's
-    // applyIntent(ch::pattern_advanced_cmd) grouping formula
-    // (base = 9 + 6*advpat::BaseId), so the two can be eyeballed against each
-    // other without cross-referencing a third table. `advanced`-flagged: this
-    // is the deep-customization layer under the 8 base controls, not the
-    // everyday knobs.
-    //   [1*6 fields + 1 mask = 7 B, ×6 channels]
+    // +4 out_wait, +5 offset — the SAME formula as SlopSyncHubService's
+    // applyIntent(ch::pattern_advanced_cmd) grouping (base = 9 +
+    // 6*advpat::BaseId); the two must be kept in sync. `advanced`-flagged:
+    // this is the deep-customization layer under the 8 base controls, not
+    // the everyday knobs.
+    //   [1*6 fields + 1 mask = 7 B, x6 channels]
     auto addApModifierChannel = [&](uint16_t id, const char* wireName, const char* group,
                                     uint8_t keyBase) {
         c.addEntry({.id = id, .name = wireName,
@@ -1647,9 +1537,9 @@ inline bool buildSlopDriveCatalog(slopsync::Catalog32& c, DeviceFeatures feat = 
                            {"amplitude", "in_step", "in_wait", "out_step", "out_wait", "offset"});
     };
     // The six invocations move to the final ascending-id call sequence below
-    // (RFC-047 Phase C2 reorder) — see the end of this function.
+    // — see the end of this function.
 
-    // ---- "pattern-presets" — STORE, control -------------------------
+    // ---- "pattern-presets" — STORE, control ---------------------------------
     // RFC-021's `pattern.frayd` worked example, landed: retires the last HTTP
     // writer, POST /api/pattern/presets (NVS "advpreset", 24 x {name, def}
     // opaque JSON). `access = control` matches this store's CRUD writer
@@ -1677,7 +1567,7 @@ inline bool buildSlopDriveCatalog(slopsync::Catalog32& c, DeviceFeatures feat = 
                           .nameMax = kPresetNameMax});
     };
 
-    // ---- "pattern-presets-roster" — STATE, watch, on-change --------
+    // ---- "pattern-presets-roster" — STATE, watch, on-change -----------------
     // {generation u16, count u8, capacity u8} — BARE, deliberately, same shape
     // as 0x000D paired-devices-roster. An embedded str16 name preview per slot
     // was the original plan (see PatternPresetStore.h's earlier revision) and
@@ -1702,7 +1592,7 @@ inline bool buildSlopDriveCatalog(slopsync::Catalog32& c, DeviceFeatures feat = 
     c.addLayoutField({.name = "capacity",   .type = PackedFieldType::u8,  .unit = "count", .scale = 1.0f});
     };
 
-    // ---- "move" — INTENT, control, 20 Hz, critical ----------------
+    // ---- "move" — INTENT, control, 20 Hz, critical --------------------------
     // {1:"position" f32 mm, 2:"bypass" bool}. This channel maps to arbiter
     // source 0 (MANUAL) in the delegate.
     //
@@ -1730,19 +1620,20 @@ inline bool buildSlopDriveCatalog(slopsync::Catalog32& c, DeviceFeatures feat = 
     c.addSchemaField({.key = 2, .name = "bypass", .type = CborFieldType::bool_t, .unit = ""});
     };
 
-    // ---- "config-set" — INTENT, control, 10 Hz --------------------
-    // Every field optional; present keys are applied. cfg_gen bumps on success.
-    // fw 2.1.47 APPENDED key 7 "input_jerk" — append-only (keys 1-6 keep their
-    // meaning exactly), and released key numbers are never reused. :3
+    // ---- "config-set" — INTENT, control, 10 Hz ------------------------------
+    // Every field optional; present keys are applied. cfg_gen bumps on
+    // success. Key 7 "input_jerk" and key 8 "max_rail" (below) are
+    // append-only additions — keys 1-6 keep their meaning exactly, and
+    // released key numbers are never reused.
     auto addConfigSet = [&]() {
     c.addEntry({.id = ch::config_set, .name = "config-set",
                 .cls = ChannelClass::INTENT, .dir = Direction::c2h,
                 .access = AccessLevel::control, .maxRateHz = 10.0f,
                 .defaultPriority = Priority::normal});
     //
-    // M5a: each key now advertises the SAME bounds its 0x0081 twin does, so a
-    // client that validates before sending gets the same answer the hub would
-    // NACK with. The user-facing text (desc/group/default/role) lives ONCE, on
+    // Each key advertises the SAME bounds its 0x0081 twin does, so a client
+    // that validates before sending gets the same answer the hub would NACK
+    // with. The user-facing text (desc/group/default/role) lives ONCE, on
     // the STATE side — RFC-009 renders settings from the snapshot and resolves
     // the write key through `settingChannel`, so duplicating 128-byte descs
     // here would double the flash cost of every tooltip for no new meaning.
@@ -1760,14 +1651,14 @@ inline bool buildSlopDriveCatalog(slopsync::Catalog32& c, DeviceFeatures feat = 
                       .hasMin = true, .hasMax = true, .min = ceiling::accel_min, .max = ceiling::accel_max});
     c.addSchemaField({.key = 7, .name = "input_jerk",  .type = CborFieldType::f32_t, .unit = "mm/s3",
                       .hasMin = true, .hasMax = true, .min = ceiling::jerk_min, .max = ceiling::jerk_max});
-    // fw 2.1.76 APPENDED key 8 "max_rail" (item 1, operator ruling
-    // 2026-07-27): promoted from read-only derived truth to a real setting —
-    // see the field comment on 0x0081's `max_rail` for the full rationale.
+    // key 8 "max_rail": promoted from read-only derived truth to a real
+    // setting — see the field comment on 0x0081's `max_rail` for the full
+    // rationale.
     c.addSchemaField({.key = 8, .name = "max_rail",    .type = CborFieldType::f32_t, .unit = "mm",
                       .hasMin = true, .hasMax = true, .min = ceiling::rail_min, .max = ceiling::rail_mm});
     };
 
-    // ---- "pattern-cmd" — INTENT, control, 20 Hz -------------------
+    // ---- "pattern-cmd" — INTENT, control, 20 Hz -----------------------------
     // Session-volatile (cfg_gen does NOT bump). Maps to arbiter source 2
     // (PATTERN) via the delegate; running drives start/stop.
     auto addPatternCmd = [&]() {
@@ -1790,18 +1681,17 @@ inline bool buildSlopDriveCatalog(slopsync::Catalog32& c, DeviceFeatures feat = 
                       .hasMin = true, .hasMax = true, .min = 0.0f, .max = 100.0f});
     c.addSchemaField({.key = 6, .name = "sensation", .type = CborFieldType::f32_t,  .unit = "",
                       .hasMin = true, .hasMax = true, .min = 0.0f, .max = 100.0f});
-    // Phase D (RFC-045/048) APPENDED key 7: `source.background_run`, pairing
-    // 0x1200 pattern-state's field of the same settingKey. Unlike keys 1-6,
-    // NOT session-volatile — applyIntent persists it (coalesced, like
-    // max_rail) because it is a standing policy, not a live pattern param.
+    // key 7 `source.background_run`, appended, pairs 0x1200 pattern-state's
+    // field of the same settingKey. Unlike keys 1-6, NOT session-volatile —
+    // applyIntent persists it (coalesced, like max_rail) because it is a
+    // standing policy, not a live pattern param.
     c.addSchemaField({.key = 7, .name = "background_run", .type = CborFieldType::bool_t, .unit = ""});
     };
 
-    // ---- "home" — INTENT, control --------------------------------
+    // ---- "home" — INTENT, control -------------------------------------------
     // {1:"op", 2:"stroke"} — op 1 starts sensorless homing; ops 2/3 are the
     // BENCH ops (RFC-025, safety-reviewed) that make motorless dev work
-    // possible at all: they are the in-band twin of the legacy
-    // POST /api/machine/homeoverride that every bench session already used.
+    // possible at all.
     //
     // *** OP 2 (force_home) CLEARS AN E-STOP LATCH. *** That is exactly why
     // RFC-025 placed these under safety review rather than in a convenience
@@ -1834,8 +1724,8 @@ inline bool buildSlopDriveCatalog(slopsync::Catalog32& c, DeviceFeatures feat = 
                       .hasMin = true, .hasMax = true, .min = 1.0f, .max = 2000.0f});
     };
 
-    // ---- "modes-set" — INTENT, control, 5 Hz ----------------------
-    // M5b: the write half of 0x008A. Every key optional; present keys applied,
+    // ---- "modes-set" — INTENT, control, 5 Hz --------------------------------
+    // The write half of 0x008A. Every key optional; present keys applied,
     // and the ECHO carries the POST-CLAMP value the handler actually took.
     //
     // NOT cfg_gen-bumping and NOT persisted here — each op routes to the same
@@ -1851,13 +1741,13 @@ inline bool buildSlopDriveCatalog(slopsync::Catalog32& c, DeviceFeatures feat = 
                 .cls = ChannelClass::INTENT, .dir = Direction::c2h,
                 .access = AccessLevel::control, .maxRateHz = 5.0f,
                 .defaultPriority = Priority::normal});
-    // KEY 1 IS DELIBERATELY UNUSED (fw 2.1.76, operator ruling 2026-07-27,
-    // item 2). It held "blend_mode" until MotionArbiter's already-standing
-    // alias-everything-to-"allow" behavior (see setBlendMode()) made clear
-    // there was no live setting left to write — see the field comment on
-    // 0x008A's `blend_mode_reserved`. SlopSyncHubService.cpp's modes_set case
-    // no longer recognizes this key; a client that still sends it gets
-    // NACK(INVALID_VALUE) same as any other unrecognized key would.
+    // KEY 1 IS DELIBERATELY UNUSED. It held "blend_mode" until
+    // MotionArbiter's alias-everything-to-"allow" behavior (see
+    // setBlendMode()) made clear there was no live setting left to write —
+    // see the field comment on 0x008A's `blend_mode_reserved`.
+    // SlopSyncHubService.cpp's modes_set case no longer recognizes this key;
+    // a client that still sends it gets NACK(INVALID_VALUE) same as any
+    // other unrecognized key would.
     //
     // KEY 2 IS ALSO DELIBERATELY UNUSED. It briefly held "transport" (the WS/
     // SER/BT/DONGLE/OSSM input-source selector) before that setting was
@@ -1875,7 +1765,7 @@ inline bool buildSlopDriveCatalog(slopsync::Catalog32& c, DeviceFeatures feat = 
                       .hasMin = true, .hasMax = true, .min = 0.0f, .max = 1.0f});
     };
 
-    // ---- "slopmotion-set" — INTENT, control, 5 Hz -------------------
+    // ---- "slopmotion-set" — INTENT, control, 5 Hz ---------------------------
     // The single writer behind all three slopmotion-* cards. Keys 1..20 are
     // allocated across those cards and never collide; every key optional, only
     // the keys PRESENT are applied, and each echoes the value the machine
@@ -1933,7 +1823,7 @@ inline bool buildSlopDriveCatalog(slopsync::Catalog32& c, DeviceFeatures feat = 
                       .hasMin = true, .hasMax = true, .min = 0.0f, .max = 200.0f});
     };
 
-    // ---- "machine-admin" — INTENT, control -------------------------
+    // ---- "machine-admin" — INTENT, control ----------------------------------
     // The device ACTIONS that are not settings and not motion: clear a driver
     // fault, persist config, kick off a servo register scan. They were HTTP
     // writers (/api/clearfault, WS_OP_SAVE, POST /api/servo {"scan":true});
@@ -1961,7 +1851,7 @@ inline bool buildSlopDriveCatalog(slopsync::Catalog32& c, DeviceFeatures feat = 
                             AccessLevel::control}); // 3 servo_scan
     };
 
-    // ---- "pattern-advanced-cmd" — INTENT, control, 20 Hz -----------
+    // ---- "pattern-advanced-cmd" — INTENT, control, 20 Hz --------------------
     // The single writer behind ALL SEVEN 0x008E..0x0094 advanced-pattern
     // cards. Same lean-schema convention as every other settings writer in
     // this catalog (config_set, pattern_cmd, modes_set, sm_set): the
@@ -2018,7 +1908,7 @@ inline bool buildSlopDriveCatalog(slopsync::Catalog32& c, DeviceFeatures feat = 
     }
     };
 
-    // ---- "pattern-presets-cmd" — INTENT, control -------------------
+    // ---- "pattern-presets-cmd" — INTENT, control ----------------------------
     // The CRUD writer behind the 0x0095 store / 0x0096 roster pair (RFC-021).
     // {1:"op", 2:"slot", 3:"name"}. `op` is RFC-019's OPEN `action.<name>`
     // convention (no registry change needed, same as 0x0005's action.safety):
@@ -2042,16 +1932,15 @@ inline bool buildSlopDriveCatalog(slopsync::Catalog32& c, DeviceFeatures feat = 
     c.addSchemaField({.key = 3, .name = "name", .type = CborFieldType::tstr_t, .unit = ""});
     };
 
-    // ---- RFC-047 (Phase C2, renumbered again at Phase C4): invoke every
-    // device-channel builder ABOVE in ASCENDING NEW-ID ORDER. The authoring
-    // order above (kept close to its history for reviewability) does not
-    // match wire order, so each entry's build logic is wrapped in a lambda
-    // (`add*`) and the calls below are the one place that has to stay
-    // ascending (encodeCatalog/etag require it, §8.3). Core channels
-    // (0x0003-0x000E) are unaffected: they were already emitted above, in
-    // order, before any device channel. The six AP-modifier calls are in
-    // MEMBER order (speedin/out, accelin/out, depth1/2), NOT advpat::BaseId
-    // order — see the ch:: namespace comment on those constants.
+    // ---- invoke every device-channel builder above in ASCENDING NEW-ID ORDER --
+    // The authoring order above does not match wire order, so each entry's
+    // build logic is wrapped in a lambda (`add*`) and the calls below are the
+    // one place that has to stay ascending (encodeCatalog/etag require it,
+    // §8.3). Core channels (0x0003-0x000E) are unaffected: they were already
+    // emitted above, in order, before any device channel. The six AP-modifier
+    // calls are in MEMBER order (speedin/out, accelin/out, depth1/2), NOT
+    // advpat::BaseId order — see the ch:: namespace comment on those
+    // constants.
     addMachineConfig();          // 0x1000 STATE·machine, family 0 member 0
     addPower();                  // 0x1010 STATE·machine, family 1 member 0 (no-ops without feat.has_current_sensor)
     addOdometer();                // 0x1020 STATE·machine, family 2 member 0

@@ -1,10 +1,13 @@
+// WsServerPort — SlopBenchWsTransport/SlopBenchWsPort implementation (see
+// WsServerPort.h for the marshaling contract).
+
 #include "net/WsServerPort.h"
 
 #include <cstring>
 
 namespace slopbench {
 
-// ---- SlopBenchWsTransport ----------------------------------------------------
+// ---- SlopBenchWsTransport ---------------------------------------------------
 
 void SlopBenchWsTransport::onOpen(ix::WebSocket* ws, const std::string& peer) {
     std::lock_guard<std::mutex> lk(_m);
@@ -104,7 +107,7 @@ std::string SlopBenchWsTransport::peer() const {
     return _peer;
 }
 
-// ---- SlopBenchWsPort -----------------------------------------------------
+// ---- SlopBenchWsPort --------------------------------------------------------
 
 bool SlopBenchWsPort::begin(slopsync::Hub* hub, uint16_t port, SessionLog* log) {
     _hub = hub;

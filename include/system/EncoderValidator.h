@@ -30,7 +30,7 @@
 //
 // REPORT-ONLY by doctrine: this module never touches the arbiter or the
 // driver. A false positive that kills a session is worse than a warning the
-// operator evaluates — wire it to a gate later only with real-world stats. :3
+// operator evaluates — wire it to a gate later only with real-world stats.
 //
 // Runs entirely on Core 0 httpTask (same task as ServoModbus::update() and the
 // HTTP handlers — see servo-configure architecture), so no locking is needed.
@@ -62,7 +62,7 @@ class EncoderValidator {
 public:
     EncoderValidator(ServoModbus& bus, MotorDriver& motor);
 
-    // ---- Lifecycle -----------------------------------------------------------
+    // ---- Lifecycle ----------------------------------------------------------
     void init() {}
     /// Call from httpTask right after servoModbus.update(). Cheap: does work
     /// only when a NEW encoder sample has committed (~3.7 Hz).

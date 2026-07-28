@@ -1,5 +1,22 @@
 #pragma once
 
+// SystemState.h — centralized, thread-safe runtime state shared between
+// Core 0 (WebUI/HTTP/hub tasks) and Core 1 (motor/generator/sampler tasks).
+//
+// Constraints:
+// - Each field group's own banner states its cross-core contract (volatile
+//   aligned scalar, std::atomic, portMUX, or single-task-owned) — follow that
+//   comment, not this one, for a given field.
+// - Stays engine-header-free on purpose: nothing here includes a slopmotion
+//   header. Fields that mirror an engine enum (sm_tune_infeas_policy,
+//   sm_tune_curve_policy) are plain uint8_t; the enum mapping lives in
+//   main.cpp's per-tick config push, and an out-of-range value there falls
+//   back to the ENGINE's own default rather than silently picking one the
+//   operator never asked for.
+// - kSmAnomalyNames is THE ONE TABLE for anomaly-kind names: the Core-1 drain
+//   log line and the GET /api/slopmotion JSON keys both read only this table,
+//   and its bounds derive from its own size, never a literal.
+
 #include <atomic>
 #include <cstdint>
 #include <freertos/FreeRTOS.h>
@@ -9,9 +26,7 @@
 #include "MotorDriver.h"           // for DriverConfig
 #include "slopsync/generated/registry_constants.hpp"  // limits::segment_handoff_k (RFC-049c)
 
-// ============================================================================
-// On-device motion generator configuration
-// ============================================================================
+// ---- On-device motion generator configuration -------------------------------
 // Held in RAM; parameters pushed live from the web UI via /api/gen.
 //
 // gen_mux (portMUX spinlock) serializes writes from Core 0 (WebUI handler)
@@ -34,9 +49,7 @@ struct GeneratorConfig {
     float   mod_amp   = 0.80f; // modulation amplitude / swing (Hz)
 };
 
-// ============================================================================
-// Input control mode (how raw Intiface samples become motion)
-// ============================================================================
+// ---- Input control mode (how raw Intiface samples become motion) ------------
 //
 // Two strategies, selectable from the web UI:
 //
@@ -54,17 +67,13 @@ struct GeneratorConfig {
 // local tick rate + buffer depth control timing instead.
 enum class InputMode : uint8_t { EXTRAPOLATE = 0, BUFFERED = 1 };
 
-// ============================================================================
-// Sample ring entry (BUFFERED input mode)
-// ============================================================================
+// ---- Sample ring entry (BUFFERED input mode) --------------------------------
 struct BufSample {
     float    pos_mm;
     uint32_t t_ms;
 };
 
-// ============================================================================
-// SlopMotion anomaly kind names — THE ONE TABLE
-// ============================================================================
+// ---- SlopMotion anomaly kind names -- THE ONE TABLE -------------------------
 // Index == slopmotion::AnomalyType ordinal. Both consumers read this and only
 // this: the Core-1 drain log line (src/main.cpp) and the
 // GET /api/slopmotion `stats.anomalies_by_kind` JSON keys (src/ui/WebUI.cpp).
@@ -96,22 +105,15 @@ inline constexpr const char* kSmAnomalyNames[] = {
 inline constexpr uint8_t kSmAnomalyNameCount =
     uint8_t(sizeof(kSmAnomalyNames) / sizeof(kSmAnomalyNames[0]));
 
-// ============================================================================
-// SystemState — centralized, thread-safe runtime state container
-// ============================================================================
-//
-// All mutable runtime globals that were previously file-scope statics in
-// main.cpp live here.  Scalars crossing Core0 ↔ Core1 are marked volatile
-// (32-bit aligned loads/stores are hardware-atomic on ESP32-S3).  The ring
-// buffer and generator config use portMUX critical-section protection for
-// multi-field updates that must appear atomic.
-//
-// Fields are grouped by subsystem; initial values mirror the original file-
-// scope defaults exactly.
+// ---- SystemState -- centralized, thread-safe runtime state container --------
+// Scalars crossing Core 0 <-> Core 1 are marked volatile (32-bit aligned
+// loads/stores are hardware-atomic on ESP32-S3). The ring buffer and
+// generator config use portMUX critical-section protection for multi-field
+// updates that must appear atomic. Fields below are grouped by subsystem.
 
 struct SystemState {
 
-    // ---- Buffered-sample ring (BUFFERED mode) --------------------------------
+    // ---- Buffered-sample ring (BUFFERED mode) -------------------------------
     static constexpr uint8_t BUF_CAP = 8;   // ring capacity (≥ max depth + slack)
 
     BufSample              buf[BUF_CAP] {};
@@ -122,9 +124,9 @@ struct SystemState {
     // Interpolator playback state — DORMANT (Interpolator engine removed)
     // The ring-buffer config fields (buf_easing, buf_depth, buf_tick_hz) are
     // retained for persisted settings compatibility and the WebUI config card.
-    // buf_active is always false now — no engine is behind it to thrust. :3
+    // buf_active is always false now — no engine is behind it.
     volatile bool          buf_active         = false;
-    // ---- Loading / flow (cross-core) -----------------------------------------
+    // ---- Loading / flow (cross-core) ----------------------------------------
     volatile bool          homed               = false;
     volatile bool          homing_in_progress  = false;
     // Item 3 (fw 2.1.76): raised by motorTask (Core 1) the instant a homing
@@ -138,7 +140,7 @@ struct SystemState {
     volatile bool          stroke_measured_pending = false;
     // WebUI "home override" (bench test, no motor): when >0 the UI is told the
     // machine is homed and this value is reported as the measured stroke (mm) so
-    // the rail populates without a real homing cycle. 0 = normal (use motor). :3
+    // the rail populates without a real homing cycle. 0 = normal (use motor).
     volatile float         test_stroke_override_mm = 0.0f;
     std::atomic<bool>      estop_requested{false};        // Core 0 stores, Core 1 exchanges — atomic RMW closes TOCTOU window
     // Latched "device is in an e-stopped state" flag. estop_requested is a
@@ -146,24 +148,25 @@ struct SystemState {
     // sampling at ~45Hz almost never catches it — the UI could never learn an
     // e-stop happened from another client/transport. This latch is set when an
     // e-stop is requested, cleared when a new homing cycle starts, and is what
-    // the 0x01 telemetry flags bit3 actually reports. :3
+    // the 0x01 telemetry flags bit3 actually reports.
     volatile bool          estop_latched = false;
     bool                   wifi_ready          = false;   // Core 0 only
 
-    // ---- OTA update in flight (cross-core, Core 0 sets/clears) ----------------
+    // ---- OTA update in flight (cross-core, Core 0 sets/clears) --------------
     // Raised by OtaService::prepareForOta() the instant an over-the-air update
     // is accepted, BEFORE the first flash write. While true, ConfigStore::save()
     // (the only NVS flash writer reachable from the gated state) DEFERS instead
     // of writing — a flash-cache access during an OTA write window can reset the
     // chip. Cleared on OTA failure; on success the device reboots so the flag is
     // moot. Read/written only on Core 0 but atomic for a clean cross-core read
-    // barrier from any diagnostic path. :3
+    // barrier from any diagnostic path.
     std::atomic<bool>      ota_active{false};
 
-    // ---- WiFi link telemetry (Core 0 only — written by WifiLink's
-    // event handler + poll timer, read by WebUI::handleApiStatus. Both run on
-    // Core 0 (WiFi event task + httpTask), so no cross-core mutex needed —
-    // this is a simple diagnostic readout, not a control path. :3 ----------
+    // ---- WiFi link telemetry ------------------------------------------------
+    // Core 0 only — written by WifiLink's event handler + poll timer, read by
+    // WebUI::handleApiStatus. Both run on Core 0 (WiFi event task + httpTask),
+    // so no cross-core mutex needed — this is a simple diagnostic readout,
+    // not a control path.
     int8_t                 wifi_rssi                = 0;      // dBm, 0 = unknown
     uint8_t                wifi_channel             = 0;
     char                   wifi_bssid[18]           = {0};    // "AA:BB:CC:DD:EE:FF\0" — proves which AP we're actually on (band-steering evidence)
@@ -171,27 +174,27 @@ struct SystemState {
     uint8_t                wifi_last_disconnect_reason = 0;   // esp_wifi disconnect reason code
     uint32_t               wifi_last_disconnect_ms  = 0;      // millis() at last disconnect
 
-    // ---- Config snapshots ----------------------------------------------------
+    // ---- Config snapshots ---------------------------------------------------
     DeviceConfig           config;                        // read cross-core
     DriverConfig           driver;                        // Core 0 only
 
-    // ---- Control gating (cross-core) -----------------------------------------
+    // ---- Control gating (cross-core) ----------------------------------------
     volatile bool          paused               = false;
     volatile bool          manual_override      = false;
     volatile uint32_t      resume_start_ms      = 0;
     bool                   expert_mode          = false;   // Core 0 only
 
-    // ---- Cadence / auto-duration ---------------------------------------------
+    // ---- Cadence / auto-duration --------------------------------------------
     volatile bool          auto_duration        = true;
     uint32_t               last_cmd_ms          = 0;      // Core 1 only
     volatile float         measured_interval_ms = 0.0f;   // written Core 0 (commsTask), read Core 1 — mark volatile (F-024)
     volatile uint16_t      measured_hz          = 0;      // written Core 1, read Core 0
 
-    // ---- Default range (Core 0 only) -----------------------------------------
+    // ---- Default range (Core 0 only) ----------------------------------------
     float                  default_range_min = 0.0f;
     float                  default_range_max = DEFAULT_MAX_RAIL_MM;
 
-    // ---- On-device motion generator ------------------------------------------
+    // ---- On-device motion generator -----------------------------------------
     GeneratorConfig        gen;
     portMUX_TYPE           gen_mux     = portMUX_INITIALIZER_UNLOCKED;
 
@@ -208,10 +211,10 @@ struct SystemState {
     // in hot gating paths (streamSamplerTask's recent-packet gate and the
     // arbiter's Intiface-recency gate in _gatesPass). 32-bit aligned store is
     // hardware-atomic on the S3; volatile keeps the Core-1 reads fresh. The
-    // old "Core 1 only" comment here was factually wrong. :3
+    // old "Core 1 only" comment here was factually wrong.
     volatile uint32_t      last_intiface_ms = 0;
 
-    // ---- Stream-vs-pattern arbitration (yield on MOTION, not packets) --------
+    // ---- Stream-vs-pattern arbitration (yield on MOTION, not packets) -------
     // Streaming hosts (Intiface/XToys) keep sending position packets as
     // keep-alives while connected, so packet recency alone held the pattern
     // gated off FOREVER after any stream session ("running" in the UI, machine
@@ -235,32 +238,32 @@ struct SystemState {
     // onSourceOwnership() — no cross-core access, plain bool is correct.
     bool                   pattern_background_run = false;
 
-    // ---- Bypass-limits toggle (cross-core, Core 0 writes) --------------------
+    // ---- Bypass-limits toggle (cross-core, Core 0 writes) -------------------
     // Set by WS_OP_BYPASS, honored by applyMove when a move doesn't carry its
     // own per-request bypass_limits field, exposed in WS_OP_GET_CFG so clients
     // can resync the real state on reconnect. Session-only (not persisted) —
-    // a reboot always comes back with limits enforced. :3
+    // a reboot always comes back with limits enforced.
     volatile bool          bypass_limits = false;
 
-    // ---- Commanded target (cross-core) ---------------------------------------
+    // ---- Commanded target (cross-core) --------------------------------------
     // The position the host/generator just TOLD us to go to (mm), before FAS
     // has actually pounded its way there. Written by whoever issues the move
     // (MotionArbiter on the arbitrated dispatch path, generatorTask on the gen
     // path), read by Core 0's telemetry capture so the UI can draw "what we were asked
     // for" right next to "where the shaft actually is." 32-bit aligned float =
-    // hardware-atomic on the S3, no mutex needed. :3
+    // hardware-atomic on the S3, no mutex needed.
     volatile float         commanded_target_mm = 0.0f;
 
-    // ---- Raw parsed target (cross-core) --------------------------------------
+    // ---- Raw parsed target (cross-core) -------------------------------------
     // The position the TCode parser + RangeMapper spat out (mm), BEFORE the
     // kinematics planner gets its hands on it. This is the rawest "what the host
     // actually asked for, mapped into our stroke window" — one stage upstream of
     // commanded_target_mm (which is the planner's clamped/shaped result). Drawing
     // all three (raw → planned → actual) side by side lets us see exactly which
-    // stage mangles the motion path. Same hardware-atomic float deal, no mutex. :3
+    // stage mangles the motion path. Same hardware-atomic float deal, no mutex.
     volatile float         commanded_raw_mm = 0.0f;
 
-    // ---- Actual dispatched position (cross-core) -----------------------------
+    // ---- Actual dispatched position (cross-core) ----------------------------
     // Written ONLY by WebUI::applyMove's seed store (Core 0, after a manual
     // point move lands) — NOT by the arbiter/planner or the telemetry sampler;
     // MotionArbiter deliberately never writes this from motion dispatch (see
@@ -270,7 +273,7 @@ struct SystemState {
     // the interpolator from the last known manual endpoint.
     // std::atomic<float> gives the no-tear guarantee with zero overhead on S3.
     // memory_order_relaxed is correct — telemetry is display-only, no ordering
-    // dependency with any other variable. :3
+    // dependency with any other variable.
     std::atomic<float>     actual_position_mm{0.0f};
 
     // ---- Session odometer stats (single-writer: WebUI::captureTelemetry 240Hz) --
@@ -278,34 +281,34 @@ struct SystemState {
     // a stroke (direction-reversal) count. Read by the 0x06 STATS frame + the
     // dashboard SESSION card. Only the telemetry timer writes them; every other
     // core only loads → relaxed read-modify-write in the single writer is safe.
-    // Zeroed by resetSessionStats() (also resets the INA228 Wh accumulator). :3
+    // Zeroed by resetSessionStats() (also resets the INA228 Wh accumulator).
     std::atomic<float>     live_speed_mm_s{0.0f};    // EMA-smoothed current speed
     std::atomic<float>     max_speed_mm_s{0.0f};     // session peak speed
     std::atomic<float>     session_distance_mm{0.0f};// cumulative |Δposition|
     std::atomic<uint32_t>  stroke_count{0};          // direction reversals
     volatile uint32_t      session_start_ms{0};      // millis() at boot / last reset
 
-    // ---- WS UI config generation counter (Core 0 only, atomic) ---------------
+    // ---- WS UI config generation counter (Core 0 only, atomic) --------------
     // Incremented on every applied settings change (HTTP, WS, serial/BLE).
     // Sent in HELLO and 0x02 STATUS so clients can detect stale state and
     // request a full resync via get_cfg. uint16_t wraps harmlessly — clients
-    // detect a difference, not a direction. :3
+    // detect a difference, not a direction.
     std::atomic<uint16_t>  cfg_gen{0};
 
 
     // Generator local tick rate (cross-core)
 
     // Default cadence we pound at — 100 Hz gives buttery-smooth position updates
-    // without making the S3 break a sweat. Bump to 200 if you're feeling greedy. :3
+    // without making the S3 break a sweat. Bump to 200 for a faster cadence.
     volatile uint16_t      gen_rate_tick_hz = 100;
     
-    // ---- Input mode & buffer tuning (cross-core) -----------------------------
+    // ---- Input mode & buffer tuning (cross-core) ----------------------------
     volatile uint8_t       input_mode   = static_cast<uint8_t>(InputMode::BUFFERED);
     volatile uint8_t       buf_easing   = 1;    // 0=linear 1=ease-in-out …
     volatile uint8_t       buf_depth    = 2;    // 1..5 samples of look-behind
     volatile uint16_t      buf_tick_hz  = 100;   // local interpolation rate (Hz)
 
-    // ---- Stream sampler speed-feed mode (cross-core) -------------------------
+    // ---- Stream sampler speed-feed mode (cross-core) ------------------------
     // Selects how the Core-1 streamSamplerTask feeds FAS speed each tick while
     // sampling the slopmotion::Engine plan. Written by Core 0 (WebUI toggle),
     // read by Core 1 (sampler). 32-bit read/write is hardware-atomic on the S3.
@@ -314,24 +317,24 @@ struct SystemState {
     //       57AIM grit-cache quiet (speed/accel steady → no FAS ramp re-plan).
     //   1 = VELOCITY_MATCHED: feed |plan velocity| each tick so FAS coasts the
     //       exact planned speed. Truer curve, but rewrites setSpeedInHz per tick.
-    // Exposed as a live A/B toggle so it can be felt on real hardware. :3
+    // Exposed as a live A/B toggle so it can be felt on real hardware.
     enum StreamSpeedMode : uint8_t { SPEED_CEILING_PEGGED = 0, SPEED_VELOCITY_MATCHED = 1 };
     volatile uint8_t       stream_speed_mode = SPEED_CEILING_PEGGED;
 
-    // ---- Interpolator overshoot clamp (cross-core) ---------------------------
+    // ---- Interpolator overshoot clamp (cross-core) --------------------------
     // WebUI toggle, INERT on the current engine: slopmotion's quintic legality
     // scan owns overshoot handling and nothing consumes this flag yet. Kept
     // because the 0x008A machine-modes channel carries it (released wire
     // field); wire it into the engine or retire it via a modes-channel
-    // evolution — never silently repurpose. :3
+    // evolution — never silently repurpose.
     volatile bool          interp_clamp_overshoot = false;
 
-    // ---- Interpolator telemetry (cross-core, display-only) -------------------
+    // ---- Interpolator telemetry (cross-core, display-only) ------------------
     // Written by Core 1 (streamSamplerTask) once per tick from the live
     // slopmotion::Engine snapshot; read by Core 0 telemetry for the WebUI's
     // high-refresh planned-path / interp-state overlay. Each field is an
     // independently-readable aligned scalar — no lock needed for a display feed
-    // (a torn set across fields is visually harmless at UI refresh rates). :3
+    // (a torn set across fields is visually harmless at UI refresh rates).
     volatile float         interp_start_pos   = 0.5f;  // segment start (0..1)
     volatile float         interp_end_pos     = 0.5f;  // segment target (0..1)
     volatile float         interp_cur_pos     = 0.5f;  // sampled position (0..1)
@@ -344,8 +347,9 @@ struct SystemState {
     volatile bool          interp_active       = false; // sampler currently driving motion
 
 
-    // ---- SlopMotion live tuning (ROUGH-IN — WebUI card lands with the UI
-    // refactor; until then this is driven by GET/POST /api/slopmotion). -------
+    // ---- SlopMotion live tuning ---------------------------------------------
+    // ROUGH-IN: the WebUI card lands with the UI refactor; until then this is
+    // driven by GET/POST /api/slopmotion.
     // Core 0 (HTTP handler) writes the sm_tune_* fields; Core 1's sampler
     // pushes them into the slopmotion::Engine every tick, so a POST takes
     // effect within ~1 ms. Aligned 32-bit scalars, single writer per field —
@@ -479,11 +483,11 @@ struct SystemState {
     volatile uint32_t      sm_plan_us_max  = 0;    // POST {"reset_stats":true} clears
     volatile float         sm_plan_us_avg  = 0.0f; // EMA(0.1)
 
-    // ---- SlopSync motion-input (0x0084) stream counters — the SlopSyncHub
-    // Core-0 task writes all four (onStreamBundle + taskLoop's drain), the
-    // HTTP handler (also Core 0) reads them for GET /api/slopmotion. Same
-    // aligned-scalar single-writer-per-field pattern as sm_tune_* above; not
-    // persisted, reboot zeroes them. ------------------------------------------
+    // ---- SlopSync motion-input (0x0084) stream counters ---------------------
+    // The SlopSyncHub Core-0 task writes all four (onStreamBundle +
+    // taskLoop's drain); the HTTP handler (also Core 0) reads them for
+    // GET /api/slopmotion. Same aligned-scalar single-writer-per-field
+    // pattern as sm_tune_* above; not persisted, reboot zeroes them.
     volatile uint32_t      sm_sync_bundles  = 0;  // accepted onStreamBundle() calls (both stream channels)
     volatile uint32_t      sm_sync_samples  = 0;  // total decoded samples across those bundles
     volatile uint32_t      sm_sync_enqueued = 0;  // samples handed to the Core-1 sampler queue
@@ -641,9 +645,7 @@ struct SystemState {
         return true;
     }
 
-    // --------------------------------------------------------------------------
-    // Convenience helpers — zero-cost inline
-    // --------------------------------------------------------------------------
+    // ---- Convenience helpers -- zero-cost inline ----------------------------
 
     InputMode getInputMode() const {
         return static_cast<InputMode>(input_mode);
@@ -652,13 +654,13 @@ struct SystemState {
         input_mode = static_cast<uint8_t>(m);
     }
 
-    // ---- Safe-approach soft start (config_api.h SAFE_*) ----------------------
+    // ---- Safe-approach soft start (config_api.h SAFE_*) ---------------------
     // Returns the speed ceiling (mm/s) to use RIGHT NOW. For the first
     // SAFE_RESUME_RAMP_MS after resume_start_ms was stamped (un-pause, override
     // off, new stream, generator start, homing complete, window jump) the cap
     // ramps linearly from SAFE_APPROACH_SPEED_MM_S up to configured_max, so the
     // first move after a discontinuity glides instead of lunging. After the
-    // ramp (or if never stamped) this returns configured_max unchanged. :3
+    // ramp (or if never stamped) this returns configured_max unchanged.
     float safeSpeedCap(float configured_max, uint32_t now_ms) const {
         uint32_t t0 = resume_start_ms;
         if (t0 == 0) return configured_max;

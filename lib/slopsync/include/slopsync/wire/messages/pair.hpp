@@ -62,6 +62,7 @@ struct PairGrantMsg {
     TrustMap trust_map{};  // M4c: `hub_pubkey`, delivered at the ceremony
 };
 
+// ---- PAIR_REQ ---------------------------------------------------------------
 // Encodes into `out`; returns bytes written, or 0 on any failure.
 inline size_t encodePairReq(const PairReqMsg& m, std::span<std::byte> out) {
     CborWriter w(out);
@@ -117,6 +118,7 @@ inline Result<PairReqMsg, DecodeError> decodePairReq(std::span<const std::byte> 
     return Ret::ok(m);
 }
 
+// ---- PAIR_GRANT -------------------------------------------------------------
 // Encodes into `out`; returns bytes written, or 0 on any failure.
 inline size_t encodePairGrant(const PairGrantMsg& m, std::span<std::byte> out) {
     const bool hasTrust = m.has_trust && m.trust_map.any();

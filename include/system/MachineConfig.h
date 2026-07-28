@@ -12,7 +12,7 @@
 // before ANY motor.* call. The backend choice decides WHICH concrete driver
 // MotorProxy binds to, so it has to be known before anything else touches the
 // motor reference. A shared namespace would tangle this read with the rest of
-// DeviceConfig's load order for no benefit. :3
+// DeviceConfig's load order for no benefit.
 //
 // Two keys, two independent settings:
 //   "backend"   — 0 = FAS step/dir (default), 1 = Modbus direct drive.

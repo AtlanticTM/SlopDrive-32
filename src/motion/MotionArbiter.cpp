@@ -1,45 +1,33 @@
+// MotionArbiter — sole caller of MotorDriver for positioning; arbitrates
+// MANUAL / PATTERN / TCODE_STREAM sources into one dispatched plan per call.
+// Constraints:
+//   submit(), submitStreamSample(), and processDeferred() run on Core 1 only;
+//   submitDeferred() is the Core 0 -> Core 1 handoff (FreeRTOS queue) — never
+//   call submit() directly from Core 0.
+//   E-stop and hard step bounds are absolute: no source, including MANUAL,
+//   may bypass the physical envelope. MANUAL bypasses only the stroke WINDOW.
+//   Never write actual_position_mm from here — WebUI's 240Hz telemetry
+//   sampler owns that atomic (see the callouts at each dispatch site).
 #include "MotionArbiter.h"
 #include "range_mapper.h"
 #include "sloplog/sloplog.h"
 #include "config_api.h"
 #include <math.h>              // for fabsf, fminf, sqrtf
 
-// ============================================================================
-// Helper: read the motor's live velocity in steps/s from FAS
-// ============================================================================
-// FAS does not expose a direct getCurrentSpeedInSteps() method on all versions.
-// We derive velocity from the last commanded speed if FAS is still running,
-// else zero. This is the same approach OSSM uses (stepper->getSpeed() returns
-// the last setSpeedInHz value while running, which is the cruise speed of the
-// in-flight plan — NOT instantaneous velocity. For retarget-from-live-v0 this
-// is correct: FAS re-plans from its internal velocity state regardless of what
-// we supply here; the v0 parameter is for the trapezoid math, not FAS).
-//
-// For a more accurate v0 we would need FAS's getCurrentSpeedInMilliHz() or
-// equivalent — but the vendored version's API does not expose instantaneous
-// velocity externally (it's internal to the ramp planner). We use 0 (assume
-// stopped) for the plan math, which is safe: it overestimates accel slightly
-// on a retarget (plan assumes v0=0, so it calculates a higher accel to reach
-// the deadline). The ceiling clamp then brings it down. At retarget rates
-// >100Hz the error is negligible — the plan is recomputed on every arrival.
-//
-// [VERIFY]: FAS vendored version 0.34.x. The `getCurrentSpeed()` method
-// returns the LAST SET speedInHz, not instantaneous velocity. There is no
-// `getCurrentSpeedInMilliHz()` in the vendored header. This is confirmed by
-// reviewing the FastAccelStepper.h vendored in the PlatformIO packages.
-//
-// DECIDE: use v0 = 0 for all plans. The ramp shape is derived purely from
-// distance and deadline. Justification: (a) FAS retargeting is velocity-
-// continuous regardless of our v0 parameter — it re-plans from TRUE internal
-// velocity; (b) assuming v0=0 gives the planner a worst-case (largest) accel
-// requirement which the ceiling clamp handles correctly; (c) the error
-// shrinks as retarget rate increases — at 100Hz the gap between true and
-// assumed v0 is one 10ms segment's worth of velocity, which is ≤1% of the
-// machine's speed range. Acceptable fidelity for event-driven planning.
-
-// ============================================================================
-// MotionArbiter — implementation
-// ============================================================================
+// ---- Planning assumption: v0 = 0 --------------------------------------------
+// _planAndDispatch's trapezoid math always assumes the carriage starts each
+// plan at rest (v0 = 0), never the true in-flight velocity.
+// FAS's getCurrentSpeed() (vendored FastAccelStepper 0.34.x) returns the
+// last SET speedInHz, not instantaneous velocity, and the vendored header
+// has no getCurrentSpeedInMilliHz() equivalent — true v0 is not observable
+// through this driver's API.
+// Safe because FAS retargets velocity-continuously from its own internal
+// state regardless of the v0 fed to the trapezoid math, so v0=0 only
+// affects the DERIVED accel, never the actual motion: it overestimates the
+// accel needed to hit the deadline (worst case), which the ceiling clamp
+// then brings down. The error shrinks as retarget rate rises — at >100Hz
+// the gap between true and assumed v0 is at most one 10ms segment's worth
+// of velocity, ≤1% of the machine's speed range.
 
 MotionArbiter::MotionArbiter(SystemState& state, RangeMapper& mapper, MotorDriver& motor)
     : _state(state), _mapper(mapper), _motor(motor)
@@ -51,10 +39,9 @@ void MotionArbiter::init() {
     SLOGI("arbiter", "MotionArbiter: initialized — D4, %u-slot defer queue active", DEFER_QUEUE_DEPTH);
 }
 
-// ============================================================================
-// submitDeferred — Core 0 → Core 1 handoff (DEFER_QUEUE_DEPTH-slot FreeRTOS
-// queue, drained in full by processDeferred() every Core-1 tick)
-// ============================================================================
+// ---- submitDeferred ---------------------------------------------------------
+// Core 0 -> Core 1 handoff: DEFER_QUEUE_DEPTH-slot FreeRTOS queue, drained in
+// full by processDeferred() every Core-1 tick.
 
 void MotionArbiter::submitDeferred(const MotionIntent& intent) {
     // Non-blocking push — drops if full, correct for retarget semantics.
@@ -65,13 +52,12 @@ void MotionArbiter::submitDeferred(const MotionIntent& intent) {
     }
 }
 
-// ============================================================================
-// processDeferred — consumed by Core 1 task
-// ============================================================================
+// ---- processDeferred --------------------------------------------------------
+// Consumed by the Core 1 task.
 
 void MotionArbiter::processDeferred() {
     // Drain the entire queue each tick. Each intent is planned from live FAS
-    // state — sequential retargets are the normal D4 operating mode. :3
+    // state — sequential retargets are the normal D4 operating mode.
     MotionIntent intent;
     uint8_t drained = 0;
     uint32_t max_plan_us = 0;
@@ -80,13 +66,9 @@ void MotionArbiter::processDeferred() {
         if (rpt.plan_us > max_plan_us) max_plan_us = rpt.plan_us;
         drained++;
     }
-    // Diagnostic: ONLY a new depth watermark. This used to be a 2 s periodic
-    // "STATS: drained=0 peak=0 total=0 homed=0" — which, sitting in a 1 kHz
-    // Core-1 loop, reported the same four numbers forever and burned ~1900
-    // throttle hits per window to say nothing. A rising peak is the only part
-    // of it that was ever information: it means the queue got deeper than it
-    // has ever been, i.e. Core 1 started falling behind. total/homed are
-    // already live in telemetry.
+    // Log only a new depth watermark: a rising peak means the queue got
+    // deeper than ever before, i.e. Core 1 started falling behind. total/
+    // homed are already live in telemetry, so they add nothing here.
     static uint8_t peak_drain = 0;  // highest drain seen in any tick
     if (drained > peak_drain) {
         peak_drain = drained;
@@ -95,33 +77,30 @@ void MotionArbiter::processDeferred() {
     }
 }
 
-// ============================================================================
-// submitStreamSample — Core 1 fast path for the streamSamplerTask sampler
-// ============================================================================
-//
-// This is NOT the trapezoid planner. streamSamplerTask's slopmotion::Engine
-// (see CLAUDE.md §7.6) has ALREADY shaped the curve — start/end position,
-// velocity, curvature. Every ~1ms it hands us the sampled point on that curve
-// and we feed it straight to FAS. The only work here is safety + unit conversion:
+// ---- submitStreamSample -----------------------------------------------------
+// Core 1 fast path for the streamSamplerTask sampler. NOT the trapezoid
+// planner: streamSamplerTask's slopmotion::Engine (docs/canon doctrine
+// §SlopMotion) has already shaped the curve — start/end position, velocity,
+// curvature. Every ~1ms it hands us the sampled point on that curve and we
+// feed it straight to FAS. The only work here is safety + unit conversion:
 //   1. Gates: estop / homed / paused / manual_override (stream honors all).
 //   2. Map normalized 0..1 into the configured stroke window (mm).
 //   3. Hard physical step bounds — the machine envelope, never bypassed.
-//   4. Speed feed by mode; accel is the CONSTANT input ceiling.
+//   4. Speed feed by mode; accel is the constant input ceiling.
 //
-// Why constant accel + (in ceiling-pegged mode) constant speed matters: the
-// 57AIM streamToSteps() grit-cache only re-plans the FAS ramp when speed or
-// accel CHANGE. Keeping them steady means each 1ms micro-target is a cheap
-// moveTo() with no ramp recompute — the exact opposite of the per-point re-plan
-// that caused the v4 microstutter. The curve's velocity is reproduced by the
-// position deltas between micro-targets, not by re-ramping FAS. :3
+// Constant accel + (in ceiling-pegged mode) constant speed matters because
+// the 57AIM streamToSteps() grit-cache only re-plans the FAS ramp when speed
+// or accel change. Keeping them steady means each 1ms micro-target is a
+// cheap moveTo() with no ramp recompute; the curve's velocity is reproduced
+// by the position deltas between micro-targets, not by re-ramping FAS.
 bool MotionArbiter::submitStreamSample(float norm_pos, float norm_vel_per_s) {
-    // ---- Safety gates (a stream sample honors every gate) --------------------
+    // ---- Safety gates (a stream sample honors every gate) -------------------
     if (_state.estop_requested.load(std::memory_order_relaxed)) return false;
     if (!_state.homed)          return false;
     if (_state.paused)          return false;
     if (_state.manual_override) return false;
 
-    // ---- Map normalized position into the stroke window ----------------------
+    // ---- Map normalized position into the stroke window ---------------------
     if (norm_pos < 0.0f) norm_pos = 0.0f;
     if (norm_pos > 1.0f) norm_pos = 1.0f;
     float target_mm = _mapper.intensityToPosition(norm_pos);
@@ -129,21 +108,21 @@ bool MotionArbiter::submitStreamSample(float norm_pos, float norm_vel_per_s) {
 
     int32_t target_steps = -_motor.mmToNative(target_mm);
 
-    // ---- HARD STEP BOUNDS — machine envelope, always enforced ----------------
+    // ---- HARD STEP BOUNDS — machine envelope, always enforced ---------------
     // Ceiling is the effective physical bound: measured stroke once homed, else
-    // the configured max rail length (rail-length agnostic). :3
+    // the configured max rail length (rail-length agnostic).
     int32_t hard_min_steps = -_motor.mmToNative(_motor.effectiveCeilingMm());
     int32_t hard_max_steps = 0;
     target_steps = constrain(target_steps, hard_min_steps, hard_max_steps);
 
-    // ---- Window-entry gentleness (honor USER limits on the way in) -----------
+    // ---- Window-entry gentleness (honor USER limits on the way in) ----------
     // If the carriage is currently OUTSIDE the stroke window, the sample that
     // carries it in honors the gentle USER limits instead of the input ceiling
     // — the same "glide, don't lunge" rule as the trapezoid planner. Once the
-    // carriage is inside the window, the normal INPUT set resumes. :3
+    // carriage is inside the window, the normal INPUT set resumes.
     bool entering = _isOutsideWindow(_motor.getPosition());
 
-    // ---- Speed ceiling (with safe-approach soft-start) -----------------------
+    // ---- Speed ceiling (with safe-approach soft-start) ----------------------
     float speed_ceiling = entering ? fminf(_input_speed_limit_mm_s, _user_speed_limit_mm_s)
                                    : _input_speed_limit_mm_s;
     {
@@ -158,7 +137,7 @@ bool MotionArbiter::submitStreamSample(float norm_pos, float norm_vel_per_s) {
     // ceiling (USER limit, possibly < SAFE_APPROACH_SPEED_MM_S) isn't overridden.
     float speed_floor = fminf(SAFE_APPROACH_SPEED_MM_S, speed_ceiling);
 
-    // ---- Speed feed — mode dependent -----------------------------------------
+    // ---- Speed feed — mode dependent ----------------------------------------
     float speed_mm_s;
     if (_state.stream_speed_mode == SystemState::SPEED_VELOCITY_MATCHED) {
         // Convert the interpolator's normalized units/second into mm/s across
@@ -179,20 +158,20 @@ bool MotionArbiter::submitStreamSample(float norm_pos, float norm_vel_per_s) {
     // resolves to exactly the same value AIM_STEPS_PER_MM does (both derive
     // from aimStepsPerMm()), so FAS behavior is numerically identical to
     // before. A counts-native driver (Modbus, ~834/mm) now gets its own
-    // correct scale instead of FAS's ~20/mm — the ~41x unit bug plan.md
-    // flagged, fixed before any Modbus motion exists. :3
+    // correct scale instead of FAS's ~20/mm — the wrong constant would have
+    // under/overstepped every Modbus move ~41x; fixed before any motion exists.
     uint32_t speed_steps_s  = (uint32_t)(speed_mm_s   * _motor.nativePerMm());
     uint32_t accel_steps_s2 = (uint32_t)(accel_ceiling * _motor.nativePerMm());
     if (speed_steps_s < 1)   speed_steps_s  = 1;
     if (accel_steps_s2 < 10) accel_steps_s2 = 10;
 
-    // ---- Stream-lag diagnostic ------------------------------------------------
+    // ---- Stream-lag diagnostic ----------------------------------------------
     // The interpolator glides open-loop: if the curve's instantaneous velocity
     // exceeds the input ceiling, the motor saturates and falls behind the
     // commanded curve — fast endpoints clip and any catch-up is a full-ceiling
     // lunge (felt as drift while streaming). Normal chase lag is ~1-2mm; a
     // sustained gap beyond that means the content is outrunning the machine.
-    // Surface it instead of drifting silently. :3
+    // Surface it instead of drifting silently.
     {
         float lag_mm = fabsf(target_mm - _motor.getPosition());
         if (lag_mm > 8.0f) {
@@ -203,20 +182,19 @@ bool MotionArbiter::submitStreamSample(float norm_pos, float norm_vel_per_s) {
         }
     }
 
-    // ---- Dispatch to FAS ------------------------------------------------------
+    // ---- Dispatch to FAS ----------------------------------------------------
     // Lockless, matching _planAndDispatch: all motor callers are Core-1 tasks
     // and streamToSteps() owns its own grit-cache statics. During active
     // streaming the sampler is the primary caller; pattern is gated off.
     _motor.streamToSteps(target_steps, speed_steps_s, accel_steps_s2);
 
-    // ---- Telemetry ------------------------------------------------------------
+    // ---- Telemetry ----------------------------------------------------------
     _state.commanded_target_mm = target_mm;
     return true;
 }
 
-// ============================================================================
-// submit — Core 1 direct entry point. Plans + dispatches.
-// ============================================================================
+// ---- submit -----------------------------------------------------------------
+// Core 1 direct entry point. Plans + dispatches.
 
 PlanReport MotionArbiter::submit(const MotionIntent& intent) {
     if (!_state.homed && intent.source != MotionSource::MANUAL) {
@@ -263,16 +241,14 @@ PlanReport MotionArbiter::submit(const MotionIntent& intent) {
     _state.commanded_target_mm = intent.target_mm;
     // actual_position_mm is NOT ours to write — not here, not in
     // _planAndDispatch. WebUI's 240Hz telemetry sampler owns that atomic and
-    // fills it from _motor.getPosition() (FAS step-counter truth). The arbiter
-    // publishes INTENT only. (The old comment here claimed _planAndDispatch
-    // wrote it; it never did — see fw 2.1.48.)
+    // fills it from _motor.getPosition() (FAS step-counter truth). The
+    // arbiter publishes INTENT only.
 
     return report;
 }
 
-// ============================================================================
-// Gate evaluation — centralized, encoding EXISTING semantics
-// ============================================================================
+// ---- Gate evaluation --------------------------------------------------------
+// Centralized; encodes existing per-source semantics.
 
 bool MotionArbiter::_gatesPass(const MotionIntent& intent) {
     // MANUAL always wins — bypasses all source gates
@@ -305,9 +281,8 @@ bool MotionArbiter::_gatesPass(const MotionIntent& intent) {
     return true;
 }
 
-// ============================================================================
-// Window clamping — MANUAL bypasses, everything else is window-bound
-// ============================================================================
+// ---- Window clamping --------------------------------------------------------
+// MANUAL bypasses; every other source is window-bound.
 
 float MotionArbiter::_clampToWindow(float mm, MotionSource source) {
     if (source == MotionSource::MANUAL) {
@@ -320,9 +295,8 @@ float MotionArbiter::_clampToWindow(float mm, MotionSource source) {
     return constrain(mm, lo, hi);
 }
 
-// ============================================================================
-// Window-entry detection — is the carriage currently outside the stroke window?
-// ============================================================================
+// ---- Window-entry detection -------------------------------------------------
+// Is the carriage currently outside the stroke window?
 
 bool MotionArbiter::_isOutsideWindow(float p0_mm) const {
     const float eps = 0.5f;  // 0.5mm slack — sub-safety-zone, avoids edge chatter
@@ -330,56 +304,32 @@ bool MotionArbiter::_isOutsideWindow(float p0_mm) const {
     return (p0_mm < lo - eps) || (p0_mm > hi + eps);
 }
 
-// ============================================================================
-// _planAndDispatch — the heart of D4, run under _dispatch_mux on Core 1
-// ============================================================================
+// ---- _planAndDispatch -------------------------------------------------------
+// The heart of D4; runs under _dispatch_mux on Core 1.
 //
-// Algorithm: trapezoid with initial velocity v0 = 0 (see header doc for
+// Algorithm: trapezoid with initial velocity v0 = 0 (see the top-of-file
 // rationale). Given distance d = |p1 - p0| and deadline T (seconds):
 //
-//   If no deadline (T = 0): plan at the source's ceiling speed + accel.
-//     This is the "point move" case — go there as fast as the user configured.
+//   No deadline (T = 0): the "point move" case — plan at the source's
+//   ceiling speed + accel, i.e. go there as fast as the user configured.
 //
-//   With deadline: derive the trapezoidal profile.
-//     Let v_peak be the cruise speed, a be the acceleration.
-//     Trapezoid: time to accelerate = v_peak / a
-//                distance during accel+decel = v_peak² / a
-//                cruise time = T - 2*v_peak/a     (if positive, else degenerate)
+//   With deadline: derive the triangle-peak profile that is the minimum
+//   needed to arrive on time.
+//     derived_speed = d / T           (constant-velocity minimum)
+//     derived_accel = 4 * d / T²      (triangle-peak accel, no cruise phase)
+//   Apply the ramp multiplier: accel *= min(entryRamp, exitRamp).
+//   Clamp speed and accel at the source's limit set; if the clamped accel
+//   is below the derived accel, the deadline is infeasible and gets marked
+//   late. Dispatch: set FAS speed + accel, call moveTo(target_steps).
 //
-//     Degenerate (triangular) case: distance fully determined by accel/decel
-//       d = a * (T/2)²  →  a = 4d / T²
-//       v_peak = a * T/2 = 2d/T
-//
-//     Trapezoid case: solve for v_peak given T and d:
-//       d = v_peak * T - v_peak² / a
-//       BUT a is unknown. Standard approach: set a = 4d/T² (minimum to complete),
-//       then compute v_peak = d/T + a*T/4 approximately. Actually the clean way:
-//
-//       Given d and T, the MINIMUM possible peak speed is d/T (constant velocity).
-//       The MAXIMUM peak speed with triangular profile is 2d/T.
-//       We derive a from the intended profile shape: use the ramp multipliers to
-//       scale the base triangle accel. Base triangle: a0 = 4*d / (T*T).
-//       Then v_peak = a0 * T/2 = 2*d/T (triangle peak).
-//       We clamp v_peak at the source's speed limit; if clamped, recalc a.
-//
-//       SIMPLIFIED APPROACH (D4: simplest possible dispatch that is correct):
-//       Compute derived speed = distance / deadline (the minimum to arrive on time).
-//       Compute derived accel = 4 * distance / (deadline * deadline) (triangle peak).
-//       Apply ramp multiplier: accel *= min(entryRamp, exitRamp).
-//       Clamp speed and accel at the source's limit set.
-//       If clamped accel < derived accel: deadline is infeasible, mark late.
-//       Dispatch: set FAS speed + accel, call moveTo(target_steps).
-//
-//       This is the standard engineering approach — derive from geometry, clamp
-//       at ceilings. A slow command plans gentle; a tight deadline plans fast
-//       but never exceeds ceilings. The ceiling IS the ceiling; it only
-//       activates when the command genuinely demands more than is safe.
-//
+//   A slow command plans gentle; a tight deadline plans fast but never
+//   exceeds ceilings — the ceiling only activates when the command
+//   genuinely demands more than is safe.
 PlanReport MotionArbiter::_planAndDispatch(const MotionIntent& intent, bool /*locked*/) {
     uint32_t start_us = micros();
     PlanReport report = {};
 
-    // ---- Select limit set by source ------------------------------------------
+    // ---- Select limit set by source -----------------------------------------
     float speed_ceiling, accel_ceiling;
     if (intent.source == MotionSource::MANUAL) {
         speed_ceiling = _user_speed_limit_mm_s;
@@ -389,14 +339,14 @@ PlanReport MotionArbiter::_planAndDispatch(const MotionIntent& intent, bool /*lo
         accel_ceiling = _input_accel_limit_mm_s2;
     }
 
-    // ---- Apply safeSpeedCap soft-start ---------------------------------------
+    // ---- Apply safeSpeedCap soft-start --------------------------------------
     // On a new stream or after un-pause, the speed ceiling ramps up from
     // SAFE_APPROACH_SPEED_MM_S to the configured limit over
     // SAFE_RESUME_RAMP_MS. This prevents the first move from lunging.
     // Accel is NOT scaled — only speed. When slow commands arrive during
     // the ramp, the planner uses the full accel ceiling to reach whatever
     // speed is allowed, avoiding the "freeze then jump" where soft accel
-    // can't even reach the already-soft speed cap. :3
+    // can't even reach the already-soft speed cap.
     {
         uint32_t now_ms = millis();
         float safe_cap = _state.safeSpeedCap(speed_ceiling, now_ms);
@@ -405,7 +355,7 @@ PlanReport MotionArbiter::_planAndDispatch(const MotionIntent& intent, bool /*lo
         }
     }
 
-    // ---- Clamp target to window -----------------------------------------------
+    // ---- Clamp target to window ---------------------------------------------
     float target_mm = _clampToWindow(intent.target_mm, intent.source);
     // Diagnostic: log when the intent was outside the window at submit time.
     // This tells us whether the TCode stream is producing targets outside the
@@ -417,9 +367,9 @@ PlanReport MotionArbiter::_planAndDispatch(const MotionIntent& intent, bool /*lo
                        intent.target_mm, target_mm, lo, hi, (unsigned)intent.source);
     }
 
-    // ---- Read actual machine state --------------------------------------------
-    // [VERIFY]: getCurrentPosition() returns int32_t native steps — open-loop
-    // commanded position (no encoder). This is OSSM-correct.
+    // ---- Read actual machine state ------------------------------------------
+    // getCurrentPosition() returns int32_t native steps — open-loop commanded
+    // position (no encoder). OSSM-correct.
     float p0_mm = _motor.getPosition();    // current position in mm (driver converts)
     int32_t p0_steps = -_motor.mmToNative(p0_mm);  // convert to our native step frame
     // NOTE: mmToNative returns positive for increase-toward-rear.
@@ -428,36 +378,31 @@ PlanReport MotionArbiter::_planAndDispatch(const MotionIntent& intent, bool /*lo
     int32_t target_steps = -_motor.mmToNative(target_mm);
     float distance_mm = fabsf(target_mm - p0_mm);
 
-    // ---- Window-entry gentleness (honor USER limits on the way in) -----------
+    // ---- Window-entry gentleness (honor USER limits on the way in) ----------
     // A machine-driven source currently sitting OUTSIDE the stroke window is
     // about to be dragged to the clamped window edge. Doing that at the INPUT
     // ceiling is the "shoot to the window" lunge. Instead, cap this move at the
     // gentle USER limits so the carriage glides into the window; once it's
-    // inside, subsequent intents fall back to the normal input set. :3
+    // inside, subsequent intents fall back to the normal input set.
     if (intent.source != MotionSource::MANUAL && _isOutsideWindow(p0_mm)) {
         speed_ceiling = fminf(speed_ceiling, _user_speed_limit_mm_s);
         accel_ceiling = fminf(accel_ceiling, _user_accel_limit_mm_s2);
     }
 
-    // ---- Even for zero-distance, dispatch to FAS to re-arm the stall watchdog.
+    // ---- Always dispatch to FAS, even for zero-distance intents -------------
     // The 57AIM driver has a stream stall watchdog (STREAM_STALL_MS = 80ms):
-    // if no streamToSteps() call is received within that window, it one-shot
-    // settles on the last sample and permanently disables further stream motion.
-    // A high-rate steady-state stream (motor sitting at the endpoint, every
-    // command arriving with target already at position) would silently hit this
-    // watchdog if we skip dispatch on distance_steps==0. The fix: ALWAYS
-    // dispatch, even for zero-distance. Use a minimal FAS pulse (1 step/s,
-    // 10 step/s²) — enough to keep the watchdog alive without producing
-    // audible movement.
-    // D4: Always dispatch to FAS, even when already at target. FAS moveTo()
-    // with the SAME position as current is internally a cheap no-op — but it
-    // keeps the motor controller engaged. Without this, consecutive zero-
-    // distance intents at slow speeds let FAS complete and stop, then the
-    // next non-zero intent restarts from dead-stop → visible freeze-jump
-    // on slow moves. Removed the early return for cleaner path. :3
+    // if no streamToSteps() call arrives within that window, it one-shot
+    // settles on the last sample and permanently disables further stream
+    // motion. A high-rate steady-state stream (motor sitting at the endpoint,
+    // every command already at target) would silently trip this watchdog if
+    // dispatch were skipped on distance_steps==0. FAS moveTo() with the same
+    // position as current is internally a cheap no-op, so dispatching always
+    // is free — and skipping it lets FAS complete and stop between zero-
+    // distance intents, so the next non-zero intent restarts from dead-stop
+    // (visible freeze-jump on slow moves).
     int32_t distance_steps = target_steps - p0_steps;
 
-    // ---- Derive speed and acceleration from geometry --------------------------
+    // ---- Derive speed and acceleration from geometry ------------------------
     float derived_speed_mm_s = 0.0f;
     float derived_accel_mm_s2 = 0.0f;
 
@@ -524,7 +469,7 @@ PlanReport MotionArbiter::_planAndDispatch(const MotionIntent& intent, bool /*lo
         }
     }
 
-    // ---- Apply ramp multipliers -----------------------------------------------
+    // ---- Apply ramp multipliers ---------------------------------------------
     // MIT attribution: RampShape derived from jcfain/TCodeESP32 v0.4 AxisRampData.
     // FAS supports only symmetric accel — use the conservative min of the two.
     float ramp_mult = 1.0f;
@@ -547,11 +492,11 @@ PlanReport MotionArbiter::_planAndDispatch(const MotionIntent& intent, bool /*lo
         }
     }
 
-    // ---- Record derived values before clamp -----------------------------------
+    // ---- Record derived values before clamp ---------------------------------
     report.derived_speed_mm_s  = derived_speed_mm_s;
     report.derived_accel_mm_s2 = derived_accel_mm_s2;
 
-    // ---- Clamp at limit set ---------------------------------------------------
+    // ---- Clamp at limit set -------------------------------------------------
     float clamped_speed = derived_speed_mm_s;
     float clamped_accel = derived_accel_mm_s2;
 
@@ -594,8 +539,8 @@ PlanReport MotionArbiter::_planAndDispatch(const MotionIntent& intent, bool /*lo
         distance_mm = fabsf(_motor.nativeToMm(-target_steps) - _motor.nativeToMm(-p0_steps));
     }
 
-    // ---- Dispatch to FAS ------------------------------------------------------
-    // [VERIFY]: FAS moveTo() retargets velocity-continuously from current state.
+    // ---- Dispatch to FAS ----------------------------------------------------
+    // FAS moveTo() retargets velocity-continuously from current state.
     //
     // STALL PREVENTION: at near-zero distance (endpoint reversals, slow moves),
     // the triangle math produces speed≈0 which gets clamped to 1 step/s.
@@ -604,12 +549,10 @@ PlanReport MotionArbiter::_planAndDispatch(const MotionIntent& intent, bool /*lo
     // restores full speed → visible freeze-jump. Fix: NEVER dispatch speed
     // below the safe-approach floor. FAS retargets smoothly from its current
     // velocity when we keep the speed/accel pegged at meaningful values.
-    // This exactly matches main-branch v3 behavior at 333Hz where small
-    // distances always planned at the full accel ceiling. :3
     // Floor the dispatch speed at the safe-approach minimum — but never ABOVE
     // the active ceiling. During a window-entry glide the ceiling is the gentle
     // USER limit (e.g. 50 mm/s), which is below SAFE_APPROACH_SPEED_MM_S (100);
-    // flooring at the raw constant there would undo the gentleness. :3
+    // flooring at the raw constant there would undo the gentleness.
     float speed_floor = fminf(SAFE_APPROACH_SPEED_MM_S, speed_ceiling);
     if (clamped_speed < speed_floor && distance_mm > 0.01f) {
         clamped_speed = speed_floor;
@@ -623,7 +566,7 @@ PlanReport MotionArbiter::_planAndDispatch(const MotionIntent& intent, bool /*lo
     if (speed_steps_s < 1)   speed_steps_s  = 1;
     if (accel_steps_s2 < 10) accel_steps_s2 = 10;
 
-    // ---- Raise-only acceleration guard (D4, same as OSSM exact) ------------
+    // ---- Raise-only acceleration guard (D4, same as OSSM exact) -------------
     uint32_t final_accel = accel_steps_s2;
     if (_motor.isMoving()) {
         uint32_t live_accel = _motor.getLiveAcceleration();
@@ -633,8 +576,7 @@ PlanReport MotionArbiter::_planAndDispatch(const MotionIntent& intent, bool /*lo
     // Single FAS dispatch — streamToSteps handles its own grit-fix caching
     // internally. DO NOT call _motor.setMaxSpeed / setAcceleration here —
     // those add a redundant FAS path that conflicts with streamToSteps'
-    // internal statics and causes jitter at 333Hz. This single-call pattern
-    // is exactly what the v3 main branch used and never choked. :3
+    // internal statics and causes jitter at 333Hz.
     _motor.streamToSteps(target_steps, speed_steps_s, final_accel);
 
     report.dispatched_steps = target_steps;
@@ -648,9 +590,7 @@ PlanReport MotionArbiter::_planAndDispatch(const MotionIntent& intent, bool /*lo
     return report;
 }
 
-// ============================================================================
-// Emergency / gate helpers
-// ============================================================================
+// ---- Emergency / gate helpers -----------------------------------------------
 
 void MotionArbiter::emergencyStop() {
     _motor.emergencyStop();
@@ -661,10 +601,9 @@ void MotionArbiter::emergencyStop() {
 
 void MotionArbiter::stopMotion() {
     // Full stop with power cut — the driver's stop() semantics (halts the pulse
-    // train, kills any homing task, disables outputs, clears homed). This is
-    // deliberately DIFFERENT from hardStopMotion(), which halts but keeps the
-    // motor powered and homed. Previously both called hardStop(), making this
-    // method's documented "stop + cut power" a lie. :3
+    // train, kills any homing task, disables outputs, clears homed). Deliberately
+    // DIFFERENT from hardStopMotion(), which halts but keeps the motor powered
+    // and homed.
     _motor.stop();
 }
 
@@ -681,9 +620,7 @@ void MotionArbiter::resume() {
     _state.resume_start_ms = millis();  // stamp for safeSpeedCap soft-start
 }
 
-// ============================================================================
-// Limit set setters
-// ============================================================================
+// ---- Limit set setters ------------------------------------------------------
 
 void MotionArbiter::setUserSpeedLimit(float mm_s) {
     _user_speed_limit_mm_s = constrain(mm_s, 1.0f, MAX_SPEED_MM_S);
@@ -701,9 +638,7 @@ void MotionArbiter::setInputAccelLimit(float mm_s2) {
     _input_accel_limit_mm_s2 = constrain(mm_s2, 10.0f, MAX_ACCEL_MM_S2);
 }
 
-// ============================================================================
-// Telemetry
-// ============================================================================
+// ---- Telemetry --------------------------------------------------------------
 
 PlanReport MotionArbiter::lastReport() const {
     PlanReport rpt;
@@ -713,9 +648,8 @@ PlanReport MotionArbiter::lastReport() const {
     return rpt;
 }
 
-// ============================================================================
-// Blend/reversal policy — all alias to "allow"
-// ============================================================================
+// ---- Blend/reversal policy --------------------------------------------------
+// All modes alias to "allow".
 
 void MotionArbiter::setBlendMode(uint8_t mode) {
     // Store the requested mode but always behave as "allow" (2).

@@ -58,7 +58,7 @@ struct BlobId {
 
     constexpr bool isCatalog() const { return ns == blob_ns::catalog; }
     // Identity equality used by receivers to detect "these chunks belong to a
-    // DIFFERENT transfer than the one I am assembling". `generation` is
+    // DIFFERENT transfer than the one currently being assembled". `generation` is
     // deliberately excluded: a generation change means the same item moved on,
     // which the reassembler reports as staleness rather than as a mismatch.
     constexpr bool sameTarget(const BlobId& o) const {
@@ -75,6 +75,7 @@ struct BlobReqMsg {
     std::array<uint16_t, kBlobReqMaxChunks> chunks{};
 };
 
+// ---- Encode -----------------------------------------------------------------
 // Encodes into `out`; returns bytes written, or 0 on failure: too many
 // indices, an inconsistent full+chunks_count>0 combination, a repair naming
 // zero chunks, a catalog-namespace request carrying store_id/slot, or `out`
@@ -163,6 +164,7 @@ inline Result<uint32_t, DecodeError> decodeBlobId(CborReader& r, BlobId& id) {
     return Ret::ok(nR.value());
 }
 
+// ---- Decode -----------------------------------------------------------------
 // Decodes `in` into a BlobReqMsg. Unknown keys are skipped per §4.3.
 inline Result<BlobReqMsg, DecodeError> decodeBlobReq(std::span<const std::byte> in) {
     using Ret = Result<BlobReqMsg, DecodeError>;

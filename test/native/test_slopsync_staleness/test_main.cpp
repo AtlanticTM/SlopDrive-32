@@ -1,5 +1,4 @@
-// ============================================================================
-// test_main.cpp — doctest behavioral tests for RFC-042 (session staleness:
+// test_slopsync_staleness — RFC-042 (session staleness:
 // separate "the session ends" from "motion stops") and the RFC-045 removal of
 // the source-loss forced-stop latch, at the session-lifecycle level.
 //
@@ -33,7 +32,6 @@
 // Native (host-side, hardware-free): InProcessLink + ManualClock + XorShift32,
 // doctest's bundled main(), same harness shape as the other M4/M5 suites.
 // Suite ids: STALE-xx.
-// ============================================================================
 
 #define DOCTEST_CONFIG_IMPLEMENT_WITH_MAIN
 #include <doctest/doctest.h>
@@ -63,12 +61,11 @@ using namespace slopsync;
 
 namespace {
 
-// ============================================================================
-// Test catalog: 0x0003 safety, 0x0007 session-events (RFC-042 observability),
+// ---- Test catalog -----------------------------------------------------------
+// 0x0003 safety, 0x0007 session-events (RFC-042 observability),
 // 0x0080 "motion" (STREAM c2h controller, mapped to source 0 for the
 // deadman/reattach-under-ownership cases), 0x0082 "telemetry" (STATE h2c
 // viewer, the grant this suite proves survives a reattach unrenegotiated).
-// ============================================================================
 constexpr uint16_t kMotionCh = 0x0080;
 constexpr uint16_t kTelemetryCh = 0x0082;
 
@@ -134,7 +131,7 @@ public:
     void onDeadmanStop(uint8_t source_id) override { deadmanStopped.push_back(source_id); }
 };
 
-// ---- raw frame helpers, same shape as the other M4/M5 suites --------------
+// ---- raw frame helpers, same shape as the other M4/M5 suites ----------------
 void writeFrame(ITransport& ep, FrameType type, uint16_t channel, std::span<const std::byte> payload) {
     std::array<std::byte, 300> buf{};
     FrameHeader h;
@@ -265,9 +262,8 @@ WelcomeMsg connectSession(Hub& hub, ManualClock& clock, ITransport& ep, uint8_t 
 
 }  // namespace
 
-// ============================================================================
-// STALE-01 — silence marks a NON-OWNING session STALE, never a teardown.
-// ============================================================================
+// ---- STALE-01 ---------------------------------------------------------------
+// silence marks a NON-OWNING session STALE, never a teardown.
 TEST_CASE("STALE-01: silence past the idle window marks a non-owning session STALE, not torn down") {
     Catalog32 cat;
     makeStaleCatalog(cat);
@@ -307,11 +303,10 @@ TEST_CASE("STALE-01: silence past the idle window marks a non-owning session STA
     CHECK_FALSE(findGoodbye(allReplies).has_value());
 }
 
-// ============================================================================
-// STALE-02 — a fresh HELLO naming a STALE session's instance_id reattaches:
+// ---- STALE-02 ---------------------------------------------------------------
+// a fresh HELLO naming a STALE session's instance_id reattaches:
 // same session_id, same grant (retained, NOT renegotiated from this HELLO's
 // — empty — wish list), role re-derived, and a session_resumed EVENT fires.
-// ============================================================================
 TEST_CASE("STALE-02: a fresh HELLO on a new transport reattaches a STALE session's identity and grants") {
     Catalog32 cat;
     makeStaleCatalog(cat);
@@ -371,10 +366,9 @@ TEST_CASE("STALE-02: a fresh HELLO on a new transport reattaches a STALE session
     CHECK(collectEvents(replies, channels::session_events).empty());
 }
 
-// ============================================================================
-// STALE-02b — the SAME reattach, but the resuming session actually watches
+// ---- STALE-02b --------------------------------------------------------------
+// the SAME reattach, but the resuming session actually watches
 // session-events, so the session_resumed edge is directly observable.
-// ============================================================================
 TEST_CASE("STALE-02b: reattach emits a session_resumed EVENT (kind 5) to a subscriber") {
     Catalog32 cat;
     makeStaleCatalog(cat);
@@ -415,11 +409,10 @@ TEST_CASE("STALE-02b: reattach emits a session_resumed EVENT (kind 5) to a subsc
     CHECK(foundId);
 }
 
-// ============================================================================
-// STALE-03 — slot pressure: a HELLO that would otherwise NACK BUSY instead
+// ---- STALE-03 ---------------------------------------------------------------
+// slot pressure: a HELLO that would otherwise NACK BUSY instead
 // reclaims the lowest-tier, longest-stale eligible session (GOODBYE
 // SLOT_RECLAIMED). A LIVE session is NEVER evicted for pressure.
-// ============================================================================
 TEST_CASE("STALE-03: slot pressure reclaims a STALE session (lowest tier first), never a LIVE one") {
     Catalog32 cat;
     makeStaleCatalog(cat);
@@ -482,14 +475,13 @@ TEST_CASE("STALE-03: slot pressure reclaims a STALE session (lowest tier first),
     CHECK(hub.sessionCount() == kHubMaxSessions);  // still full: one left, one joined
 }
 
-// ============================================================================
-// STALE-04 (TRAPS T3, applied to the new model) — TWO full stale/reattach
+// ---- STALE-04 (TRAPS T3, applied to the new model) --------------------------
+// TWO full stale/reattach
 // cycles on the SAME identity, back to back, with no hub restart between
 // them. Session-lifecycle field bugs have historically only shown up on the
 // SECOND cycle (a leaked pending-knock, a stale ownership entry, a
 // reset-that-wasn't) — this is the mandatory regression shape for any change
 // in this area.
-// ============================================================================
 TEST_CASE("STALE-04: two full stale-then-reattach cycles on one identity, back to back, no reboot") {
     Catalog32 cat;
     makeStaleCatalog(cat);
@@ -569,15 +561,14 @@ TEST_CASE("STALE-04: two full stale-then-reattach cycles on one identity, back t
     CHECK(hub.sessionCount() == 1);
 }
 
-// ============================================================================
-// STALE-05 — the live-bug clobber, reproduced directly: a session parked
+// ---- STALE-05 ---------------------------------------------------------------
+// the live-bug clobber, reproduced directly: a session parked
 // STALE by an OUT-OF-BAND transport loss (detachTransport() — the real
 // trigger behind the field bug's SO_LINGER-RST/no-GOODBYE repro, not idle
 // silence) must NOT be handed to an unrelated new connection's
 // attachTransport() before identity is ever checked. The parked session
 // survives the interloper untouched and its OWN identity can still reattach
 // afterward — the exact "interleaved" scenario from the live verification.
-// ============================================================================
 TEST_CASE("STALE-05: attachTransport() never hands a STALE slot to an unrelated new identity") {
     Catalog32 cat;
     makeStaleCatalog(cat);
@@ -625,12 +616,11 @@ TEST_CASE("STALE-05: attachTransport() never hands a STALE slot to an unrelated 
     CHECK(w3->session_id == staleSessionId);
 }
 
-// ============================================================================
-// STALE-06 — same identity reattaches after a detachTransport()-triggered
+// ---- STALE-06 ---------------------------------------------------------------
+// same identity reattaches after a detachTransport()-triggered
 // staleness (as opposed to STALE-02's idle-silence trigger, which never nulls
 // the transport): session revives with session_id, role, and grants intact,
 // no renegotiation from this HELLO's — empty — wish list.
-// ============================================================================
 TEST_CASE("STALE-06: same identity reattaches after a detachTransport()-triggered staleness, state intact") {
     Catalog32 cat;
     makeStaleCatalog(cat);
@@ -665,13 +655,12 @@ TEST_CASE("STALE-06: same identity reattaches after a detachTransport()-triggere
     CHECK(hub.sessionCount() == 1);
 }
 
-// ============================================================================
-// STALE-07 — attachTransport()'s eviction fallback: when every PHYSICAL slot
+// ---- STALE-07 ---------------------------------------------------------------
+// attachTransport()'s eviction fallback: when every PHYSICAL slot
 // (kHubMaxSessions live + the one spare kSlotCapacity adds, §6.3/§17.1) is
 // accounted for and none is genuinely free, a STALE occupant yields via the
 // SAME findEvictableStale() policy HELLO's own slot-pressure eviction already
 // uses (RFC-042 item 5) — no second reclaim rule invented for this fix.
-// ============================================================================
 TEST_CASE("STALE-07: attachTransport() evicts a STALE slot via findEvictableStale() when physically full") {
     Catalog32 cat;
     makeStaleCatalog(cat);
@@ -739,8 +728,8 @@ TEST_CASE("STALE-07: attachTransport() evicts a STALE slot via findEvictableStal
     }
 }
 
-// ============================================================================
-// STALE-08 — THE PARKED-SLOT SAFETY BROADCAST (live panic, fw 2.1.81).
+// ---- STALE-08 ---------------------------------------------------------------
+// THE PARKED-SLOT SAFETY BROADCAST (live panic, fw 2.1.81).
 // broadcastSafetyNow() fans out to EVERY subscribed slot, not just the one
 // being pumped, and gated only on occupied()/ready/subscription — none of
 // which a detachTransport() clears. A session parked by RFC-042 therefore
@@ -752,7 +741,6 @@ TEST_CASE("STALE-07: attachTransport() evicts a STALE slot via findEvictableStal
 // (§11.2) and setSafetyModes() (RFC-025c override/bypass — the probe's own
 // Step 5.9). Both must reach the LIVE subscriber and leave the parked one
 // intact and reattachable.
-// ============================================================================
 namespace {
 
 // The retained safety snapshot as it lands on the wire: 9 packed bytes, byte 0

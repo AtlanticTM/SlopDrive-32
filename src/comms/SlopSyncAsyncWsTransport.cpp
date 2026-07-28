@@ -1,12 +1,22 @@
-// The WHOLE file compiles to nothing unless -DSLOPSYNC_WS_ASYNC=1 is set, the
-// same pattern src/ui/SlopHttpServer.cpp uses for the PsychicHttp backend.
-//
-// This guard is NOT optional tidiness. Everything under src/ is compiled by
-// every environment whether or not that environment wants it, so without it an
-// env that doesn't set the flag (e.g. s3_main) fails on
-// `ESPAsyncWebServer.h: No such file or directory`. Trying to fix that from
-// platformio.ini (lib_ignore juggling) treats the symptom; the file excluding
-// itself is the actual fix.
+// SlopSyncAsyncWsTransport — ESPAsyncWebServer/AsyncTCP transport binding
+// for the SlopSync hub.
+// Constraints:
+//   Build-guarded behind SLOPSYNC_WS_ASYNC; compiles to nothing otherwise.
+//   Everything under src/ is compiled by every environment regardless of
+//   whether that environment wants it, so the guard is load-bearing, not
+//   tidiness: without it, an env that doesn't set the flag (e.g. s3_main)
+//   fails on a missing ESPAsyncWebServer.h. Fix it here, not via
+//   platformio.ini lib_ignore juggling.
+//   write() MUST NOT block (§9/§13.1) — AsyncWebSocket queues and returns.
+//   The RX ring resets only in attachClient() (AsyncTCP task, on connect) —
+//   never in open() (hub task); see attachClient()'s comment for why (field
+//   bug #5).
+//   onEvent() runs on the AsyncTCP task, not the hub task. It only sets
+//   intent flags; loop() (hub task) performs the actual hub
+//   attachTransport()/detachTransport() calls, detach processed before
+//   attach.
+//   Never cache an AsyncWebSocketClient*: address clients by id, since the
+//   AsyncTCP task may destroy a client between a lookup and its use.
 #if defined(SLOPSYNC_WS_ASYNC) && SLOPSYNC_WS_ASYNC
 
 #include "SlopSyncAsyncWsTransport.h"
@@ -16,9 +26,7 @@
 
 namespace slopdrive {
 
-// ---------------------------------------------------------------------------
-// SlopSyncAsyncWsTransport
-// ---------------------------------------------------------------------------
+// ---- SlopSyncAsyncWsTransport -----------------------------------------------
 
 bool SlopSyncAsyncWsTransport::isDroppable(std::span<const std::byte> frame) {
     // Byte 0 of every frame is the type (wire/frame_header.hpp), so this costs
@@ -116,19 +124,15 @@ bool SlopSyncAsyncWsTransport::write(std::span<const std::byte> frame) {
         return true;
     }
 
-    // ---- The queue refused it. THIS IS USUALLY NOT AN ERROR. ---------------
-    // ITransport::write returning false already MEANS "not accepted right now;
-    // the caller's class semantics decide retry vs drop" (§13.1). A burst that
-    // outruns the queue is ordinary flow control.
-    //
-    // An earlier version of this function tore the session down on the first
-    // refused control frame. That killed every session partway through the
-    // catalog BLOB transfer -- caught on hardware, by this file's own log
-    // line. Do not reintroduce it: "queue full once" and "client is not
-    // draining" are different facts. (BLOB_CHUNK no longer reaches this far
-    // under ordinary backpressure at all -- see the budget gate above -- but
-    // AsyncWebSocket can still refuse it for OTHER reasons, e.g. queue room
-    // taken by unrelated traffic, so the fallback stays.)
+    // A refused write is ordinary flow control, not an error: returning false
+    // already means "not accepted right now; the caller's class semantics
+    // decide retry vs drop" (§13.1). Never tear the session down on a single
+    // refused control frame -- "queue full once" and "client is not draining"
+    // are different facts; the stall timer below is what actually detects the
+    // latter. BLOB_CHUNK no longer reaches this far under ordinary
+    // backpressure (see the budget gate above), but AsyncWebSocket can still
+    // refuse it for other reasons (e.g. queue room taken by unrelated
+    // traffic), so the fallback below stays live.
     if (droppable) {
         _txDataDrops.fetch_add(1, std::memory_order_relaxed);
         return false;
@@ -274,9 +278,7 @@ void SlopSyncAsyncWsTransport::pushRx(const uint8_t* data, size_t len) {
     _rxTail.store(next, std::memory_order_release);
 }
 
-// ---------------------------------------------------------------------------
-// SlopSyncAsyncWsPort
-// ---------------------------------------------------------------------------
+// ---- SlopSyncAsyncWsPort ----------------------------------------------------
 
 SlopSyncAsyncWsPort::SlopSyncAsyncWsPort()
     : _http(SLOPSYNC_WS_PORT), _ws("/") {}
@@ -400,12 +402,14 @@ void SlopSyncAsyncWsPort::loop() {
     // given up on, so hub slots do not leak if a disconnect event was missed.
     _ws.cleanupClients(kSlots);
 
-    // ---- Deferred attach/detach, ON THE HUB TASK (field bug #5) ------------
-    // DETACH IS PROCESSED FIRST, and the ordering is load-bearing: a client
-    // that connected and vanished between two ticks has BOTH flags set, and
-    // the honest resolution is "nothing was ever attached, so there is nothing
-    // to tear down" -- handling attach first would hand the hub a session that
-    // is already gone and immediately tear it down again.
+    // ---- Deferred attach/detach (hub task only) -----------------------------
+    // Field bug #5 (docs/http-plane-retirement.md): the hub must only ever be
+    // touched from the hub task. Detach is processed FIRST, and the ordering
+    // is load-bearing: a client that connected and vanished between two ticks
+    // has BOTH flags set, and the honest resolution is "nothing was ever
+    // attached, so there is nothing to tear down" -- handling attach first
+    // would hand the hub a session that is already gone and immediately tear
+    // it down again.
     for (int i = 0; i < int(kSlots); ++i) {
         if (_wantDetach[i].exchange(false, std::memory_order_acq_rel)) {
             _wantAttach[i].store(false, std::memory_order_release);

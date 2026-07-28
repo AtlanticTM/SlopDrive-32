@@ -84,7 +84,7 @@ public:
     std::vector<SessionRow> sessionRows() const;
     size_t sessionCount() const { return _hub.sessionCount(); }
 
-    // ---- HubDelegate ---------------------------------------------------------
+    // ---- HubDelegate --------------------------------------------------------
     // SlopBench is a write-plane/catalog test double, not an auth conformance
     // tool: every session is granted `configure` regardless of token, so a
     // test client exercises INTENT clamping/echo/mirroring instead of fighting

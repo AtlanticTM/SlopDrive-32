@@ -1,14 +1,39 @@
 #pragma once
 
+// config_api.h — board pins, geometry/motion-limit macros, and the persisted
+// DeviceConfig struct for the AIMServo build (DRIVER_AIM_SERVO).
+//
+// Constraints:
+// - FIRMWARE_VERSION is bumped by hand every deploy; it is the single source
+//   of truth for "which build is running" (/api/capabilities fw_version +
+//   boot log).
+// - AIM_STEPS_PER_MM is a RUNTIME value once DRIVER_AIM_SERVO is defined (the
+//   drive's e-gear steps/rev register 0x0B is reprogrammable over Modbus) —
+//   go through aimStepsPerMm()/aimGeometryInit(), never treat the _DEFAULT
+//   macros as live.
+// - DEFAULT_MAX_RAIL_MM only seeds state.config.max_rail_mm; the runtime
+//   ceiling is that user setting, and homing's MEASURED stroke wins once it
+//   has run.
+// - NORMAL_*/EXPERT_* speed/accel/jerk ceilings are UI-only guardrails; the
+//   firmware itself always accepts anything up to the hard MAX_* ceiling.
+// - DEFAULT_INPUT_MAX_JERK_MM_S3 (planner jerk, mm-domain) and
+//   AIM_MODBUS_JERK_MM_S3 (the Modbus executor's own target-tracker glide
+//   limit) sit on two different pipeline stages — never conflate or equalize
+//   them.
+// - TCODE_MAGNITUDE_MAX / TCODE_MAGNITUDE_MAX_DIGITS are dead: the TCode
+//   parser is retired (SlopSync is the only wire protocol). Kept only because
+//   docs / the Intiface device-config JSON still reference the historical
+//   [0,999] range — do not wire either back into a parser.
+// - SLOPSYNC_WS_SUBPROTOCOL has exactly one definition, shared by the
+//   transport's bind and its log line, so the two cannot drift apart.
+
 #include <Arduino.h>
 
-// =============================================================================
-// Secrets (WiFi password, network addresses) — kept OUT of git like a good
-// pup keeps its leash on. No accidental exposure here. :3
-// =============================================================================
-// Real values live in include/secrets.h (git-ignored). If that file is missing
-// (e.g. a fresh clone before you copy secrets.example.h -> secrets.h), we fall
-// back to harmless placeholders so the project still compiles.
+// ---- Secrets ----------------------------------------------------------------
+// Kept OUT of git. Real values live in include/secrets.h (git-ignored); if
+// that file is missing (e.g. a fresh clone before secrets.example.h is
+// copied), we fall back to harmless placeholders so the project still
+// compiles.
 #if __has_include("secrets.h")
   #include "secrets.h"
 #else
@@ -23,20 +48,18 @@
 // SECRET_OTA_PASSWORD. Fall back to an empty string — OtaService treats an
 // empty password as "HTTP OTA hard-refused + ArduinoOTA unauthenticated" and
 // logs a loud warning, so a stale secrets.h fails safe rather than silently
-// exposing an open flash endpoint. Copy the new line from secrets.example.h. :3
+// exposing an open flash endpoint. Copy the new line from secrets.example.h.
 #if !defined(SECRET_OTA_PASSWORD)
   #define SECRET_OTA_PASSWORD    ""
 #endif
 
-// ---- Firmware version --------------------------------------------------------
+// ---- Firmware version -------------------------------------------------------
 // Bumped by hand on each firmware change so an OTA can be verified as landed
-// (surfaced via /api/capabilities → "fw_version" and the boot log). This is the
-// single source of truth for "which build is actually running." :3
+// (surfaced via /api/capabilities → "fw_version" and the boot log). This is
+// the single source of truth for "which build is actually running."
 #define FIRMWARE_VERSION        "2.1.85"
 
-// =============================================================================
-// WiFi Configuration (values come from secrets.h)
-// =============================================================================
+// ---- WiFi Configuration (values come from secrets.h) ------------------------
 #define WIFI_SSID      SECRET_WIFI_SSID
 #define WIFI_PASSWORD  SECRET_WIFI_PASSWORD
 
@@ -45,15 +68,15 @@
 // same window, before falling back to the serial rescue path (SlopSync needs
 // WiFi; there is no other control plane). 10s is enough for a normal WPA2
 // associate + DHCP without stalling boot for a network that isn't there.
-// Boot-only blocking — never hit on the real-time path. :3
+// Boot-only blocking — never hit on the real-time path.
 #define WIFI_CONNECT_TIMEOUT_MS   10000
 
-// ---- Boot-time / reconnect strongest-AP selection --------------------------
+// ---- Boot-time / reconnect strongest-AP selection ---------------------------
 // Our deployment is a multi-AP network sharing ONE SSID. The ESP32 default
 // fast-scan latches onto the first-heard AP (often the weakest) and never
 // roams. The rig is stationary during use, so a full scan + strongest-BSSID
 // pin at every WiFi bring-up (cold boot AND every reconnect-from-disconnected
-// cycle) is the complete fix. See WifiLink::_connectBest(). :3
+// cycle) is the complete fix. See WifiLink::_connectBest().
 #define WIFI_SCAN_PIN_ENABLED       1
 // Consecutive pinned-connect failures tolerated before a bring-up cycle falls
 // back to an unpinned WiFi.begin() (lets the core associate with ANY live AP so
@@ -66,16 +89,13 @@
 #define WIFI_MIN_RSSI_LOG_DBM       (-90)
 // While the link is down, minimum spacing between supervised reconnect cycles.
 // Keeps a WiFi outage from turning into a continuous scan storm on the comms
-// task (each cycle blocks ~scan + connect-wait). :3
+// task (each cycle blocks ~scan + connect-wait).
 #define WIFI_RECONNECT_INTERVAL_MS  5000
 
-// =============================================================================
-// Device Geometry — AIMServo build (DRIVER_AIM_SERVO)
-// =============================================================================
+// ---- Device Geometry -- AIMServo build (DRIVER_AIM_SERVO) -------------------
 // 57AIM30 closed-loop servo drive on a CAPSTAN DRUM (custom v0.0 controller).
 // The Dyneema line wraps the drum, so linear travel = drum circumference per
-// drum revolution — no belt teeth, just a slick wrap that pulls the carriage
-// in balls-deep and lets it slide back out with zero backlash. :3
+// drum revolution — no belt teeth, no backlash.
 //
 // Drive train math (motor -> drum through a 2:1 reduction):
 //   MOTOR_STEPS_PER_REV: 800   (drive DIP switch, at the motor shaft)
@@ -87,13 +107,12 @@
 //                        ceiling. The user's configured max rail length
 //                        (DEFAULT_MAX_RAIL_MM, runtime-set) bounds the homing
 //                        search sweep, and sensorless homing MEASURES the real
-//                        usable stroke between the two hard stops. :3
+//                        usable stroke between the two hard stops.
 //   HOMING_BACKOFF:      10.0 mm — pull out 10mm after the stall so the carriage
-//                        isn't grinding balls-deep against the hard stop. :3
+//                        isn't parked against the hard stop.
 //
 // Keep AIM_STEPS_PER_MM a FLOAT — 20.372 truncated to an int would slowly drift
-// the carriage off by mm over a long stroke. Single-precision float feeds the
-// FPU and keeps every thrust landing exactly where it's told. :3
+// the carriage off by mm over a long stroke.
 //
 // RUNTIME GEOMETRY: the AIM drive's steps/rev is an electronic-gear register
 // (0x0B) reprogrammable over RS485 Modbus, so steps/mm is a RUNTIME value —
@@ -112,7 +131,7 @@
 // (4 polls @150Hz) + INA228 averaging lag — the carriage is already parked
 // against the wall while ~1-3mm of phantom steps keep counting, at BOTH ends.
 // Backoff only accounts for the rear (home) side; this margin keeps full
-// extension off the FRONT hard stop instead of commanding into it. :3
+// extension off the FRONT hard stop instead of commanding into it.
 #define AIM_HOMING_FRONT_MARGIN_MM 5.0f
 
 // ---- Encoder cross-check (FAS commanded vs drive-reported position) ---------
@@ -123,7 +142,7 @@
 #define AIM_ENC_COUNTS_PER_MM     ((AIM_ENC_COUNTS_PER_REV * AIM_REDUCTION) / AIM_MM_PER_REV)
 // Standstill deviation beyond this (for 3 consecutive steady samples) raises
 // the lost-steps warning. ~1.5mm ≈ 61 steps @ 40.7 steps/mm — far above noise,
-// far below anything that could hurt. Report-only: it never gates motion. :3
+// far below anything that could hurt. Report-only: it never gates motion.
 #define AIM_ENC_DEV_WARN_MM       1.5f
 // Excursion (mm of FAS travel) needed before the validator trusts a measured
 // encoder direction + scale and starts scoring deviation.
@@ -152,16 +171,16 @@ float    aimStepsPerMm();
 // a reprogrammed steps/rev can never turn the gentle homing crawl into a
 // freight-train slam (600 steps/s was ~29.5 mm/s at the default 20.372
 // steps/mm — same crawl, now invariant). forceStopAndNewPosition() kills the
-// pulse train the instant we detect the current spike. :3
+// pulse train the instant we detect the current spike.
 #define AIM_HOMING_SPEED_MM_S     29.5f
 #define AIM_HOMING_SPEED_STEPS_S  ((int32_t)(AIM_HOMING_SPEED_MM_S * AIM_STEPS_PER_MM))
 
-// ---- Sensorless homing tunables (INA228 current-stall detection) ----
+// ---- Sensorless homing tunables (INA228 current-stall detection) ------------
 // The new PCB has NO endstop switch — we feel our way to the hard stop by
 // watching motor current on the INA228. Free travel draws low single-digit
 // amps; when the carriage buries itself against the stop the current climbs
 // fast toward the drive's limit. We call it a stall when current sits above the
-// free-run baseline by STALL_MARGIN_A for STALL_CONSEC consecutive polls. :3
+// free-run baseline by STALL_MARGIN_A for STALL_CONSEC consecutive polls.
 // Tune these empirically on the real machine — start gentle, tighten later.
 #define AIM_HOME_STALL_MARGIN_A     3.0f   // amps above free-run baseline = stall
 #define AIM_HOME_STALL_CONSEC       4      // consecutive over-threshold samples
@@ -177,21 +196,21 @@ float    aimStepsPerMm();
 // "no stall found at all" (see _sweepToStall()/`_homingTask()`'s FAILED path).
 #define AIM_HOME_STALL_PLAUSIBLE_FRAC 0.90f
 
-// ---- Modbus direct-drive backend tunables (Phase 3 — see plan.md) ----------
+// ---- Modbus direct-drive backend tunables (Phase 3) -------------------------
 // Streamed-setpoint executor cadence: how often StreamedSetpointExecutor's
 // tracker streams one FC 0x10 position delta while genuinely moving. 10ms matches the OSSM-RS reference cadence and fits
-// comfortably inside the bus budget at 115200 (plan.md "Bus budget"). :3
+// comfortably inside the bus budget at 115200.
 #define AIM_SP_PERIOD_MS            10
 // Idle/frozen keep-alive cadence — slower than the motion cadence since
 // nothing's actually changing; also doubles as a passive bus-liveness probe
 // (a keep-alive echo failing is just as valid a health signal as a motion
-// setpoint failing). :3
+// setpoint failing).
 #define AIM_SP_KEEPALIVE_MS         250
 // Bus-health watchdog thresholds (consecutive missed 0x7B echoes, see
 // ServoModbus::getBusHealth().sp_fail_streak): FREEZE holds position and
 // latches a soft fault (recoverable by re-home); ESTOP additionally cuts
 // drive output. Both are one-shot logged — this is read on the 1ms
-// motorTask tick and must never spam the ring. :3
+// motorTask tick and must never spam the ring.
 #define AIM_SP_FAIL_FREEZE          3      // ~30ms of silence -> freeze in place
 #define AIM_SP_FAIL_ESTOP           15     // ~150ms of silence -> output off
 // Wire-mapping sign: wire_counts = wire_offset + AIM_MODBUS_WIRE_SIGN * cmd_counts.
@@ -199,30 +218,28 @@ float    aimStepsPerMm();
 // relative to the arbiter's home=0/front=negative convention until confirmed
 // on the bench — this is a PLACEHOLDER default. First bench step: force-home,
 // jog a small positive mm move, watch which way the encoder count actually
-// moves, and flip this if it's backwards. :3
+// moves, and flip this if it's backwards.
 // Jerk ceiling (mm/s^3) for the Modbus executor's jerk-limited target tracker
 // — OSSM-RS parity (their Ruckig streams at MAX_JERK = 100000 mm/s^3). The
 // tracker glides toward every target under vmax/amax/jmax; this is what
-// killed the "clocked waypoint" texture of raw trapezoid streaming. :3
+// killed the "clocked waypoint" texture of raw trapezoid streaming.
 #define AIM_MODBUS_JERK_MM_S3       100000.0f
 // BENCH-DETERMINED (fw 2.1.27, first live jog): +1 ran the carriage the wrong
 // way — a positive-depth command must move the same physical direction as the
 // FAS build's negative-step convention, and on this wiring that is encoder
-// NEGATIVE. Flipped to -1 and verified by the operator. :3
+// NEGATIVE. Flipped to -1 and verified by the operator.
 #define AIM_MODBUS_WIRE_SIGN        (-1)
 // Standstill max-output written to drive reg 0x18 whenever Modbus-mode
 // applies its expected register set. BENCH-LEARNED ENCODING (fw 2.1.24): the
 // RAW register packs PWM*10 + alarm-mode digit — factory value reads 600
 // (= PWM 60, alarm 0), and OSSM-RS's "12-60" range describes the DECODED PWM
 // field, not the raw register. Writing a bare 20 here (= PWM 2) made the
-// standstill hold MEGA weak — the operator felt the shaft go limp. 600 =
-// factory full hold. Lower for squish-safety as PWM*10 (e.g. 200 = PWM 20). :3
+// standstill hold too weak to feel reliable. 600 =
+// factory full hold. Lower for squish-safety as PWM*10 (e.g. 200 = PWM 20).
 #define AIM_MODBUS_STANDSTILL_MAX   600
 
 
-// =============================================================================
-// DEFAULT_MAX_RAIL_MM — rail-length-agnostic default ceiling
-// =============================================================================
+// ---- DEFAULT_MAX_RAIL_MM -- rail-length-agnostic default ceiling ------------
 // This firmware is agnostic to the physical length of the rail — you can run
 // it on a machine of ANY stroke. There is NO hardcoded geometry ceiling. The
 // "max rail length" is a RUNTIME user setting (state.config.max_rail_mm,
@@ -234,56 +251,47 @@ float    aimStepsPerMm();
 //      the source of truth and governs the usable range (measurement wins).
 // This macro is only the factory default that seeds that setting — 500mm is a
 // sane, generous rail length. The AIM drive-train constants above (steps/mm,
-// drum geometry) remain purely for the motion math. :3
+// drum geometry) remain purely for the motion math.
 #define DEFAULT_MAX_RAIL_MM  500.0f
 
-// =============================================================================
-// Motor Driver Pins (ESP32-S3)
-// =============================================================================
-// --- AIMServo build (DRIVER_AIM_SERVO) — CUSTOM v0.0 CONTROLLER (Nano ESP32) ---
+// ---- Motor Driver Pins (ESP32-S3) -------------------------------------------
+// ---- AIMServo build (DRIVER_AIM_SERVO) -- Nano ESP32 v0.0 controller --------
 // New board routes the servo drive through an SN74AHCT125 buffer -> opto inputs.
 // PUL → GPIO 5 (D2), DIR → GPIO 6 (D3). No endstop on this board — homing is
 // sensorless via the INA228 current sensor (see below). The old GPIO12 endstop
-// is kept only for the legacy HOMING_USE_ENDSTOP fallback. :3
+// is kept only for the legacy HOMING_USE_ENDSTOP fallback.
 //
 // The AHCT125's output-enable is tied LOW (always on), so ANY boot glitch on
 // PUL/DIR squirts straight through to the motor's opto inputs — pull both LOW
-// as early as possible in setup(). No premature twitching before we're ready. :3
+// as early as possible in setup(), before any premature motion.
 #define AIM_PIN_STEP            5    // PUL — pulse train to the servo drive (D2)
 #define AIM_PIN_DIR             6    // DIR — direction signal (D3) [was GPIO4 on old PCB]
 #define AIM_PIN_ENDSTOP         12   // Legacy endstop (only used if HOMING_USE_ENDSTOP)
 
-// =============================================================================
-// I2C bus (INA228 current sensor @ 0x40, AS5600 encoder @ 0x36 — deferred)
-// =============================================================================
+// ---- I2C bus -- INA228 current sensor @ 0x40, AS5600 encoder (deferred) -----
 // Nano ESP32 does NOT default I2C to these pins — call Wire.begin(SDA, SCL)
 // explicitly. INA228 lives behind an ISO1640 isolator but is transparent to
-// software. The bus is where the machine feels itself out — every current
-// reading is the drive telling us how hard it's straining. :3
+// software.
 #define PIN_I2C_SDA             8    // D5
 #define PIN_I2C_SCL             9    // D6
 
 // INA228 high-side current/voltage monitor on the 36V bus. Register map differs
-// from the INA226 — use an INA228-specific library. 5mΩ shunt, ADCRANGE=0. :3
+// from the INA226 — use an INA228-specific library. 5mΩ shunt, ADCRANGE=0.
 #define INA228_I2C_ADDR         0x40
 #define INA228_SHUNT_OHMS       0.005f   // 5 mΩ, 2W
 #define INA228_MAX_CURRENT_A    32.768f  // ADCRANGE=0 full scale (163.84mV / 5mΩ)
 
-// =============================================================================
-// RS485 / Modbus to motor — DEFERRED (do not implement this pass)
-// =============================================================================
+// ---- RS485 / Modbus to motor -- DEFERRED (do not implement this pass) -------
 // XY-G485 auto-direction module, 19200 8N1. Gives access to the motor's
-// internal 15-bit encoder, temps, fault codes. Wired but not yet driven. :3
+// internal 15-bit encoder, temps, fault codes. Wired but not yet driven.
 #define AIM_PIN_485_TX          17   // D8 (deferred)
 #define AIM_PIN_485_RX          18   // D9 (deferred)
 
-// =============================================================================
-// Status LEDs — Arduino Nano ESP32 (NOT a NeoPixel!)
-// =============================================================================
+// ---- Status LEDs -- Arduino Nano ESP32 (not a NeoPixel) ---------------------
 // The Nano ESP32's onboard "RGB" is three DISCRETE LEDs on separate pins, plus
 // a standalone orange user LED. All of them are ACTIVE-LOW (drive the pin LOW to
 // light it). There is NO addressable NeoPixel on this board — the old
-// Adafruit_NeoPixel status path must drive these discrete pins instead. :3
+// Adafruit_NeoPixel status path must drive these discrete pins instead.
 //
 //   Orange user LED : GPIO48 (was the old NeoPixel data pin — now just a dumb LED)
 //   RGB Red         : GPIO46
@@ -291,7 +299,7 @@ float    aimStepsPerMm();
 //   RGB Blue        : GPIO45
 //
 // Heartbeat LED (yellow-green on the PCB, ACTIVE-HIGH): GPIO21 (D10). Blinks to
-// prove the S3 is alive during bring-up before the displays are wired. :3
+// confirm the S3 is alive during bring-up before the displays are wired.
 #define PIN_LED_ORANGE          48
 #define PIN_LED_R               46
 #define PIN_LED_G               0    // strapping pin — init after boot
@@ -302,20 +310,18 @@ float    aimStepsPerMm();
 
 // Legacy alias — some status code still references PIN_NEOPIXEL_PIN. Point it at
 // the orange LED so it compiles; the status module should migrate to the RGB
-// pins above. There is no real NeoPixel to drive. :3
+// pins above. There is no real NeoPixel to drive.
 #define PIN_NEOPIXEL_PIN        48
 #define NEOPIXEL_COUNT          1
 
 
-// =============================================================================
-// Motor Defaults
-// =============================================================================
+// ---- Motor Defaults ---------------------------------------------------------
 // Maximum motor speed in mm/s.
 // Normal UI cap: 5000 mm/s. Expert mode UI cap: 10000 mm/s.
 // This firmware ceiling is set to 10000 so expert mode values aren't rejected
-// by the ConfigStore validator. The WebUI enforces the normal/expert split. :3
+// by the ConfigStore validator. The WebUI enforces the normal/expert split.
 // The 57AIM servo drive at 800 steps/rev × 10 steps/mm can push this — it's
-// a closed-loop servo, not a stepper, so it won't skip steps. Strap in. :3
+// a closed-loop servo, not a stepper, so it won't skip steps.
 #define MAX_SPEED_MM_S              10000.0f
 #define DEFAULT_MAX_SPEED_MM_S      950.0f   // factory default on fresh boot (operator's hardware)
 
@@ -325,30 +331,31 @@ float    aimStepsPerMm();
 // 50 mm/s / 200 mm/s² means the carriage eases into the window instead of
 // lunging to the edge at the input ceiling. Raise them in Settings once you've
 // felt the machine out. Distinct from DEFAULT_MAX_SPEED/ACCEL which seed the
-// INPUT set (streams/patterns). :3
+// INPUT set (streams/patterns).
 #define DEFAULT_USER_MAX_SPEED_MM_S  50.0f    // gentle HAND-DRIVEN default — deliberately NOT the
                                              // master/input pair below. Manual jogging stays slow.
 #define DEFAULT_USER_ACCEL_MM_S2     200.0f   // gentle hand-driven default (see above)
 
 // Split ceilings the WebUI's expert-mode toggle switches between. Advertised
 // via /api/capabilities so the UI derives its slider `max` attrs from the API
-// instead of hardcoding 3000/8000 literals (the "half-updated slider" bug in
-// plan.md §5.10.1). Firmware itself always accepts anything up to the hard
-// MAX_SPEED_MM_S/MAX_ACCEL_MM_S2 ceiling above — these are UI-only guardrails. :3
+// instead of hardcoding 3000/8000 literals (the "half-updated slider" bug: a
+// UI with a stale hardcoded max silently clamps input below the real ceiling).
+// Firmware itself always accepts anything up to the hard
+// MAX_SPEED_MM_S/MAX_ACCEL_MM_S2 ceiling above — these are UI-only guardrails.
 //
 // Normal mode is confirmed safe up to 1000 mm/s for regular use. Expert mode
 // unlocks the full hardware ceiling for those who know what they're asking for.
-// The machine advertises these — the UI only ever asks, never assumes. :3
+// The machine advertises these — the UI only ever asks, never assumes.
 #define NORMAL_MAX_SPEED_MM_S       1000.0f
 #define EXPERT_MAX_SPEED_MM_S       MAX_SPEED_MM_S      // 10000
 
 // Default acceleration mm/s^2
 // Normal UI cap: 50000 mm/s². Expert mode UI cap: 100000 mm/s².
 // The 57AIM servo drive can hit these — it's a closed-loop servo that will
-// absolutely fist the carriage into the endstop if you let it. yippie! :3
+// drive the carriage straight into the endstop if commanded to.
 // Firmware ceiling is 100000 — the WebUI enforces the normal/expert split.
 // NOTE: accel is stored as uint32_t in NVS (not uint16_t) — values above
-// 65535 would silently overflow a uint16_t and corrupt the saved setting. :3
+// 65535 would silently overflow a uint16_t and corrupt the saved setting.
 #define DEFAULT_ACCEL_MM_S2     50000.0f
 #define MAX_ACCEL_MM_S2         100000.0f
 
@@ -357,9 +364,7 @@ float    aimStepsPerMm();
 #define NORMAL_MAX_ACCEL_MM_S2      20000.0f
 #define EXPERT_MAX_ACCEL_MM_S2      MAX_ACCEL_MM_S2     // 100000
 
-// =============================================================================
-// INPUT-set JERK ceiling (mm/s^3) — third member of the limit family
-// =============================================================================
+// ---- INPUT-set jerk ceiling (mm/s^3) -- third member of the limit family ----
 // The planner (SlopMotion, §7.6) is jerk-limited, and until fw 2.1.47 its jmax
 // was a BARE NORMALIZED CONSTANT (500 units/s^3) with no mm-domain source. That
 // made the PHYSICAL jerk ceiling `500 * window_span` — i.e. it SHRANK as the
@@ -370,7 +375,7 @@ float    aimStepsPerMm();
 // raising the effective jerk took the same script to 98%. So jerk gets promoted
 // to a first-class, mm-domain, persisted, wire-exposed limit that lives beside
 // speed and accel, and main.cpp divides it by the window span exactly like the
-// other two. Narrow the window now and the physical ceiling stays put. :3
+// other two. Narrow the window now and the physical ceiling stays put.
 //
 // WHY THE DEFAULT IS THIS HIGH — jerk here is a MECHANICAL PROTECTION limit,
 // not a smoothing crutch. The classic reason to hold jerk low is to hide the
@@ -394,18 +399,16 @@ float    aimStepsPerMm();
 // the Modbus servo executor's OWN target-tracker glide limit, downstream of the
 // planner and specific to that driver's incremental-delta wire protocol. Two
 // different limits on two different stages of the pipeline — do not conflate
-// them, and do not "fix" a mismatch by making them equal. :3
+// them, and do not "fix" a mismatch by making them equal.
 #define DEFAULT_INPUT_MAX_JERK_MM_S3  2000000.0f   // factory default (2e6)
 #define MAX_JERK_MM_S3               50000000.0f   // hard firmware ceiling (5e7)
 
 // Split jerk ceilings — same expert-mode split as speed/accel above, advertised
-// via /api/capabilities so the UI derives its slider max from the API. :3
+// via /api/capabilities so the UI derives its slider max from the API.
 #define NORMAL_MAX_JERK_MM_S3        10000000.0f   // 1e7
 #define EXPERT_MAX_JERK_MM_S3        MAX_JERK_MM_S3 // 5e7
 
-// =============================================================================
-// Safe-approach soft start — no more scary full-speed lunges. :3
-// =============================================================================
+// ---- Safe-approach soft start -----------------------------------------------
 // Whenever motion (re)engages after a discontinuity — a brand-new stream
 // connection, un-pausing, turning manual override OFF, the generator starting,
 // or a target that jumps from outside the stroke window into it — the first
@@ -415,18 +418,16 @@ float    aimStepsPerMm();
 // Instead, for the first SAFE_RESUME_RAMP_MS after (re)engagement the speed
 // ceiling ramps linearly from SAFE_APPROACH_SPEED_MM_S up to the configured
 // max. The carriage glides to where the stream wants it, THEN opens the
-// throttle. Ease in first — nobody likes being slammed into from cold. :3
+// throttle.
 #define SAFE_APPROACH_SPEED_MM_S    100.0f   // initial speed cap on re-engage (mm/s)
 #define SAFE_RESUME_RAMP_MS         1200u    // ramp duration back to full speed (ms)
 
 
-// =============================================================================
-// Driver Tunable Defaults
-// =============================================================================
+// ---- Driver Tunable Defaults ------------------------------------------------
 // Seed DriverConfig / the Motor-tab driver settings, persisted to NVS. These are
 // legacy stepper-chopper params retained for the shared driver-config plumbing;
 // the closed-loop 57AIM servo configures its gains over Modbus and ignores most
-// of them, but the struct is still populated + persisted + echoed to the UI. :3
+// of them, but the struct is still populated + persisted + echoed to the UI.
 #define DRIVER_DEFAULT_RUN_CURRENT_MA   2000     // mA (default run current)
 #define DRIVER_DEFAULT_STALLGUARD_DMA   -64
 #define DRIVER_DEFAULT_TOFF             3        // off-time regulation
@@ -438,18 +439,14 @@ float    aimStepsPerMm();
 #define DRIVER_DEFAULT_HEND             1        // chopper hysteresis end
 
 
-// =============================================================================
-// Serial Control Mode
-// =============================================================================
-// SlopSync (WiFi) is the only control plane (CLAUDE.md §8, M5c). USB Serial
+// ---- Serial Control Mode ----------------------------------------------------
+// SlopSync (WiFi) is the only control plane (DOCTRINE.md §9). USB Serial
 // is boot-log + the rescue/OTA-recovery path only. SERIAL_CONTROL_MODE just
 // gates the boot banner and the /api/status → serial_mode diagnostic field.
 #define SERIAL_CONTROL_MODE     1            // 1 = boot banner says serial-rescue, 0 = WiFi-only banner
 #define SERIAL_CONTROL_BAUD     115200       // USB serial baud (boot log + rescue path)
 
-// =============================================================================
-// Intiface / Buttplug — REMOVED (M5c, fw 2.1.65)
-// =============================================================================
+// ---- Intiface / Buttplug -- REMOVED (M5c, fw 2.1.65) ------------------------
 // BUTTPLUG_WEBSOCKET_PORT (55555), INTIFACE_HOST/PORT/ENABLED/IDENTIFIER/ADDRESS
 // all lived here. Their one consumer, WebSocketTransport, is deleted: SlopSync
 // is now the only input and output on this device, and Intiface is planned to
@@ -459,7 +456,7 @@ float    aimStepsPerMm();
 // SECRET_INTIFACE_HOST/PORT survive in secrets.h and secrets.example.h only so
 // an existing (git-ignored) secrets.h keeps compiling. Nothing reads them.
 
-// TCode magnitude scaling — DEPRECATED, NO LONGER USED IN THE DECODE PATH. :3
+// TCode magnitude scaling — DEPRECATED, NO LONGER USED IN THE DECODE PATH.
 //
 // Old assumption (WRONG): Intiface emits the magnitude against a fixed 0–999
 // scale unpadded ("L086" = 86/999), so we divided by this constant. That broke
@@ -477,7 +474,7 @@ float    aimStepsPerMm();
 // The divisor is 10^(digit count), never a fixed magic number, which is
 // immune to Intiface's occasional extra-leading-zero padding glitch. Kept here
 // only because docs / the Intiface device-config JSON still reference the
-// historical [0,999] range. Don't wire it back into the parser. :3
+// historical [0,999] range. Don't wire it back into the parser.
 #define TCODE_MAGNITUDE_MAX    999.0f
 
 
@@ -487,15 +484,12 @@ float    aimStepsPerMm();
 // anything past this. 6 digits = ~1 part in a million, comfortably finer than a
 // float's ~7 significant figures and WAY finer than the stepper can physically
 // resolve. Capping here also keeps mag_value safely inside uint32 no matter how
-// long a greedy app makes the value. Take six, spit the rest — that's all this
-// good boy can swallow without overflowing. :3
+// long a greedy app makes the value.
 #define TCODE_MAGNITUDE_MAX_DIGITS  6
 
 
 
-// =============================================================================
-// HTTP Server Port
-// =============================================================================
+// ---- HTTP Server Port -------------------------------------------------------
 
 #define SLOPSYNC_WS_PORT        82           // SlopSync hub transport (binary WS)
 // The negotiated WS subprotocol. ONE definition, used by both the transport's
@@ -507,7 +501,7 @@ float    aimStepsPerMm();
 // firmware — the device is permanently wall-powered via a brick, so there's
 // no power budget to protect and toggling PS modes only adds WiFi radio
 // latency/jitter. WifiLink::setupWiFi() calls WiFi.setSleep(false)
-// once at boot and that's the end of it. :3
+// once at boot and that's the end of it.
 
 #define HTTP_SERVER_PORT        80
 #define HTTP_PORT               80           // alias used in main.cpp
@@ -515,9 +509,7 @@ float    aimStepsPerMm();
 // MDNS service name
 #define MDNSServiceName         "slopdrive32"
 
-// =============================================================================
-// Device State for Configuration (persisted to EEPROM/NVS)
-// =============================================================================
+// ---- Device State for Configuration (persisted to EEPROM/NVS) ---------------
 struct DeviceConfig {
     // Range mapping (mm) - where buttplug 0.0 and 1.0 map to physically
     float min_position_mm;     // default: 0mm (rearmost)
@@ -525,7 +517,7 @@ struct DeviceConfig {
 
     // Max rail length (mm) — user-set, rail-length-agnostic ceiling. Bounds the
     // homing search sweep and acts as the position ceiling until homing measures
-    // the real stroke. Default DEFAULT_MAX_RAIL_MM (500mm). :3
+    // the real stroke. Default DEFAULT_MAX_RAIL_MM (500mm).
     float max_rail_mm;         // default: 500mm
 
     // Speed limit (mm/s) - legacy; migrated to input_max_speed_mm_s on save
@@ -543,7 +535,7 @@ struct DeviceConfig {
     float input_max_accel_mm_s2;   // default: 1500
     // Third member of the INPUT limit family (fw 2.1.47). Feeds SlopMotion's
     // jmax after division by the stroke-window span, exactly like the two
-    // above — a MECHANICAL protection ceiling, never a smoothing knob. :3
+    // above — a MECHANICAL protection ceiling, never a smoothing knob.
     float input_max_jerk_mm_s3;    // default: 2000000
 
     // Driver settings (live-tunable from the Motor tab)
@@ -565,7 +557,7 @@ struct DeviceConfig {
     // NVS corruption defense: FNV-1a hash over the raw stored config values,
     // computed by ConfigStore::save() (stored under "cfg_crc") and verified by
     // ConfigStore::load() — a mismatch is logged as possible corruption. This
-    // field mirrors the last computed hash for diagnostics. :3
+    // field mirrors the last computed hash for diagnostics.
     uint32_t checksum;
 };
 
@@ -578,7 +570,7 @@ inline DeviceConfig getDefaultConfig() {
     cfg.max_speed_mm_s = DEFAULT_MAX_SPEED_MM_S;  // 950 mm/s factory default
     cfg.acceleration_mm_s2 = DEFAULT_ACCEL_MM_S2;
     // Dual limit sets. USER set defaults gentle (glide-into-window + manual);
-    // INPUT set seeds from the legacy full-speed default (streams/patterns). :3
+    // INPUT set seeds from the legacy full-speed default (streams/patterns).
     cfg.user_max_speed_mm_s   = DEFAULT_USER_MAX_SPEED_MM_S;   // 50 mm/s
     cfg.user_max_accel_mm_s2  = DEFAULT_USER_ACCEL_MM_S2;      // 200 mm/s²
     cfg.input_max_speed_mm_s  = DEFAULT_MAX_SPEED_MM_S;

@@ -38,10 +38,10 @@ public:
     // compile-time primary creds (secrets.h) fail to connect. Set over USB
     // serial with the `WIFI <ssid> <password>` command so a rig on an unknown
     // network can be recovered without a reflash. Stored as NVS strings in the
-    // same "strokeengine" namespace (keys "wifi_ssid2" / "wifi_pass2"). :3
+    // same "strokeengine" namespace (keys "wifi_ssid2" / "wifi_pass2").
     // Both writers take the SystemState so they can honor the OTA-in-flight
     // guard (state.ota_active) — an NVS flash write during the OTA write window
-    // can reset the chip, same hazard save() already defers around. :3
+    // can reset the chip, same hazard save() already defers around.
     static void saveWifiCreds(const SystemState& state, const char* ssid, const char* pass);
     // Returns true and fills the buffers when a non-empty secondary SSID exists.
     static bool loadWifiCreds(char* ssid, size_t ssidLen, char* pass, size_t passLen);

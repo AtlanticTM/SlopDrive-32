@@ -1,24 +1,18 @@
 #pragma once
 
-// The slopsim analyzer page, embedded so the exe stays standalone. Served at
-// GET /graph by HttpFacade; data comes from GET /api/trace.bin (20-byte header
-// {u32 n, f32 max_rail, f32 win_min, f32 win_max, u32 stride} + n × stride f32
-// LE, stride = 6: {t, pos, tgt, vel, cmd_norm, raw_norm}, query ?since=<t_s> for
-// incremental polls). This is a dev-tool page, not the device WebUI — the
-// firmware's compile-time asset pipeline rules don't apply.
-//
-// PERFORMANCE DOCTRINE (read before editing the script)
-//   The trace feed is 1 kHz and a session runs for hours, so the client-side
-//   sample count is UNBOUNDED (the server ring holds ~4 min; the browser keeps
-//   everything it has ever polled). Every per-frame cost in here must therefore
-//   be O(canvas pixels), never O(samples). That is what the min/max PYRAMID
-//   below buys: level 0 folds 32 raw samples into one exact {min,max} pair,
-//   each higher level folds 4 of the level below, so a query at any zoom walks
-//   a few thousand buckets instead of millions of samples. The pyramid is built
-//   INCREMENTALLY (append-only data) and stores EXACT extremes, so decimation
-//   can never average a brief excursion away — a 3 ms velocity spike is still
-//   the max of its bucket at every level. That property is the whole reason
-//   this tool exists; do not replace it with sub-sampling or averaging.
+// GraphPage — the slopsim analyzer page, embedded so the exe stays standalone.
+// Constraints:
+//   Served at GET /graph by HttpFacade; data comes from GET /api/trace.bin
+//   (20-byte header {u32 n, f32 max_rail, f32 win_min, f32 win_max, u32
+//   stride} + n x stride f32 LE, stride = 6: {t, pos, tgt, vel, cmd_norm,
+//   raw_norm}, query ?since=<t_s> for incremental polls). A dev-tool page,
+//   not the device WebUI — the firmware's compile-time asset pipeline rules
+//   don't apply.
+//   PERFORMANCE (read before editing the embedded script): the trace feed
+//   is 1 kHz and a session runs for hours, so the client-side sample count
+//   is UNBOUNDED. Every per-frame cost in the script must be O(canvas
+//   pixels), never O(samples) — the min/max pyramid inside the script is
+//   what makes that true; do not replace it with sub-sampling or averaging.
 
 namespace slopsim {
 

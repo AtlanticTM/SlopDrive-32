@@ -1,3 +1,14 @@
+// ConfigStore — persist/restore runtime settings (NVS "strokeengine" namespace)
+// Constraints:
+//   save() / saveWifiCreds() / clearWifiCreds() all defer while
+//   state.ota_active is set: a concurrent NVS write during the OTA flash
+//   write window can reset the chip mid-flash.
+//   Every put*() call's return value is checked; a write that did not
+//   persist is counted as a failure, never logged as a success.
+//   load() recomputes cfg_crc (see nvsConfigChecksum()) and warns on
+//   mismatch; per-field validation still clamps any out-of-range value
+//   regardless of the checksum result.
+
 #include "ConfigStore.h"
 
 #include <Preferences.h>
@@ -6,17 +17,12 @@
 #include "MotorDriver.h"
 #include "range_mapper.h"
 
-// ============================================================================
-// Config checksum — FNV-1a over the raw stored values, in canonical key order
-// ============================================================================
-//
-// DeviceConfig::checksum was declared but never computed or checked — a
-// bit-flipped NVS value that still fell inside a field's accepted range passed
-// through undetected. This actually implements the defense: save() writes the
-// hash of everything it stored under "cfg_crc"; load() recomputes from the raw
-// stored values and warns on mismatch (per-field validation still clamps any
-// out-of-range value regardless). Reading the keys back keeps save/load
-// byte-identical without threading thirty values through two functions. :3
+// ---- Config checksum -- FNV-1a over the raw stored values, canonical key order --
+// save() writes the hash of everything it stored under "cfg_crc"; load()
+// recomputes from the raw stored values and warns on mismatch (per-field
+// validation still clamps any out-of-range value regardless). Reading the
+// keys back keeps save/load byte-identical without threading every value
+// through two functions.
 
 static uint32_t nvsConfigChecksum(Preferences& prefs) {
     uint32_t crc = 2166136261u;                       // FNV-1a offset basis
@@ -43,7 +49,7 @@ static uint32_t nvsConfigChecksum(Preferences& prefs) {
     // one. Absent key → hash is bit-identical to the pre-2.1.47 hash; present key
     // → fully covered. (A bit-flip that lands inp_jrk on exactly 0 escapes the
     // hash, but 0 is out of range and the loader falls back to default anyway.)
-    // Any future key added here should follow the same present-only idiom. :3
+    // Any future key added here should follow the same present-only idiom.
     { uint32_t jrk = prefs.getUInt("inp_jrk", 0); if (jrk) mixU32(jrk); }
     mixU32(prefs.getBool("auto_dur", false) ? 1u : 0u);
     mixF(prefs.getFloat("def_rmin", 0.0f));
@@ -66,24 +72,18 @@ static uint32_t nvsConfigChecksum(Preferences& prefs) {
     return crc;
 }
 
-// ============================================================================
-// ConfigStore::save — persist all runtime settings to NVS
-// ============================================================================
+// ---- ConfigStore::save -- persist all runtime settings to NVS ---------------
 
 void ConfigStore::save(SystemState& state, RangeMapper& mapper, MotorDriver& motor) {
-    // OTA flash-write guard (.clinerules §2 / OTA §4): if an over-the-air update
-    // is in flight, a concurrent NVS write would touch the flash cache during the
-    // OTA write window and can reset the chip mid-flash. Defer the save — the
-    // gated state stops motion anyway, so nothing config-worthy is changing, and
-    // a successful OTA reboots into freshly-loaded config regardless. :3
+    // OTA flash-write guard (.clinerules §2 / OTA §4): a concurrent NVS write
+    // would touch the flash cache during the OTA write window and can reset
+    // the chip mid-flash. Defer the save — the gated state stops motion
+    // anyway, so nothing config-worthy is changing, and a successful OTA
+    // reboots into freshly-loaded config regardless.
     if (state.ota_active.load()) {
         SLOGW("cfg", "saveConfig: deferred - OTA update in flight");
         return;
     }
-    // Inflate the NVS storage with the current running state — every stroke
-    // window limit, every current setting, every tune knob the user has
-    // lubed up gets packed tight and sealed away. Next boot, it all leaks
-    // back out exactly as it was, like a well-trained bladder holding it in. :3
     Preferences prefs;
     if (!prefs.begin("strokeengine", false)) {   // false = read-WRITE
         SLOGE("cfg", "saveConfig: failed to open NVS for write!");
@@ -91,25 +91,23 @@ void ConfigStore::save(SystemState& state, RangeMapper& mapper, MotorDriver& mot
     }
     // Every put*() returns bytes written — 0 on failure (full partition,
     // brownout mid-write). Count failures instead of discarding them, so a
-    // save that DIDN'T persist is never logged as a success. :3
+    // save that DIDN'T persist is never logged as a success.
     uint32_t fails = 0;
     auto ck = [&fails](size_t written) { if (written == 0) fails++; };
 
     ck(prefs.putFloat("range_min", mapper.getMinMm()));
     ck(prefs.putFloat("range_max", mapper.getMaxMm()));
     // Max rail length (mm) — rail-length-agnostic ceiling. Persisted so the
-    // homing sweep bound + pre-homing scale survive a reboot. :3
+    // homing sweep bound + pre-homing scale survive a reboot.
     ck(prefs.putFloat("rail_mm", state.config.max_rail_mm));
     // Speed stored as UShort (max 65535) — max speed is 10000 mm/s, fits fine.
     // Accel stored as UInt (uint32_t) — expert mode allows 100000 mm/s² which
-    // overflows a uint16_t (max 65535). Old "accel key" was UShort and silently
-    // truncated anything above 65535 — that was the save bug. New key "accel32"
-    // uses putUInt so the full 100000 survives the round-trip. yippie! :3
+    // overflows a uint16_t (max 65535); the legacy "accel" key (UShort) would
+    // silently truncate anything above that. "accel32" uses putUInt so the
+    // full 100000 survives the round-trip.
     ck(prefs.putUShort("max_speed", (uint16_t)state.config.max_speed_mm_s));
     ck(prefs.putUInt("accel32", (uint32_t)state.config.acceleration_mm_s2));
-    // Continuous-blend policy (1=let-it-land, 2=allow-reversal, 3=hybrid).
-    // Replaces the old lookahead/overshoot NVS keys — those tunables retired
-    // when the predictive extrapolator got thrown out. :3
+    // Continuous-blend policy: 1=let-it-land, 2=allow-reversal, 3=hybrid.
     ck(prefs.putUChar("blend_mode", motor.getBlendMode()));
 
     // Dual limit sets (v0.4 / D4 Phase 3) — persist per-source ceilings
@@ -117,9 +115,8 @@ void ConfigStore::save(SystemState& state, RangeMapper& mapper, MotorDriver& mot
     ck(prefs.putUInt("user_acc", (uint32_t)state.config.user_max_accel_mm_s2));
     ck(prefs.putUShort("inp_spd", (uint16_t)state.config.input_max_speed_mm_s));
     ck(prefs.putUInt("inp_acc", (uint32_t)state.config.input_max_accel_mm_s2));
-    // Jerk is UInt like accel — the ceiling is 5e7 mm/s³, which needs the full
-    // 32 bits (a UShort would truncate it into nonsense, the exact bug that bit
-    // accel back when it lived under the old 16-bit "accel" key). :3
+    // Jerk is UInt like accel — the ceiling is 5e7 mm/s³, needing the full 32
+    // bits; a UShort would truncate it into nonsense.
     ck(prefs.putUInt("inp_jrk", (uint32_t)state.config.input_max_jerk_mm_s3));
 
     ck(prefs.putBool("auto_dur", state.auto_duration));
@@ -137,12 +134,12 @@ void ConfigStore::save(SystemState& state, RangeMapper& mapper, MotorDriver& mot
 
     // Measured stroke from sensorless homing — persists across reboot so the
     // rail scale is correct before the first homing cycle runs. Rounded to the
-    // nearest 1mm because the safety zone makes sub-mm precision meaningless. :3
+    // nearest 1mm because the safety zone makes sub-mm precision meaningless.
     ck(prefs.putFloat("stroke_mm", motor.getMeasuredStrokeMm()));
 
     // Driver tunables (from the Motor tab). NVS keys keep their legacy "tmc_"
     // prefix so saved settings survive across this rename — they're persistence
-    // identifiers, not driver references. :3
+    // identifiers, not driver references.
     ck(prefs.putUShort("tmc_run", state.driver.run_current_ma));
     ck(prefs.putUChar("tmc_hold", state.driver.hold_current_pct));
     ck(prefs.putUChar("tmc_sc", state.driver.stealthchop));
@@ -152,17 +149,14 @@ void ConfigStore::save(SystemState& state, RangeMapper& mapper, MotorDriver& mot
     ck(prefs.putChar("tmc_hs", state.driver.hstart));
     ck(prefs.putChar("tmc_he", state.driver.hend));
 
-    // ---- SlopMotion live tuning (M5c) --------------------------------------
-    // These used to be session-only: /api/slopmotion wrote SystemState and a
-    // reboot took them back to defaults. They are real settings now (operator
-    // ruling 2026-07-27) and are written via SlopSync 0x0105.
-    //
+    // ---- SlopMotion live tuning (M5c) ---------------------------------------
+    // Real settings (operator ruling 2026-07-27), written via SlopSync 0x0105.
     // NVS keys are capped at 15 chars, hence the abbreviations. They are NOT
     // mixed into cfg_crc: that checksum covers the motion-safety envelope, and
     // widening it would silently invalidate every existing device's stored
     // hash on the first boot after this change. A corrupt tuning value is
     // clamped on load like every other field; a corrupt WINDOW is what the
-    // checksum is there to shout about.
+    // checksum is there to catch.
     ck(prefs.putFloat("sm_jmax",   state.sm_tune_jmax_ovr));
     ck(prefs.putFloat("sm_vmax",   state.sm_tune_vmax_ovr));
     ck(prefs.putFloat("sm_amax",   state.sm_tune_amax_ovr));
@@ -186,7 +180,7 @@ void ConfigStore::save(SystemState& state, RangeMapper& mapper, MotorDriver& mot
 
 
     // Corruption defense: hash what actually landed in NVS (read back raw) and
-    // store it. load() recomputes + compares. See nvsConfigChecksum(). :3
+    // store it. load() recomputes + compares. See nvsConfigChecksum().
     uint32_t crc = nvsConfigChecksum(prefs);
     ck(prefs.putUInt("cfg_crc", crc));
     state.config.checksum = crc;
@@ -203,16 +197,14 @@ void ConfigStore::save(SystemState& state, RangeMapper& mapper, MotorDriver& mot
     }
 }
 
-// ============================================================================
-// ConfigStore::load — load persisted settings (or factory defaults)
-// ============================================================================
+// ---- ConfigStore::load -- load persisted settings (or factory defaults) -----
 
 void ConfigStore::load(SystemState& state, RangeMapper& mapper, MotorDriver& motor) {
     // Always start with defaults
     state.config = getDefaultConfig();
     state.driver = DriverConfig();   // default-constructed = config.h defaults
     // Seed the rail-length ceiling everywhere from the default BEFORE clamping
-    // any ranges, so the no-NVS path is still rail-length aware. :3
+    // any ranges, so the no-NVS path is still rail-length aware.
     motor.setMaxRailMm(state.config.max_rail_mm);
     mapper.setMaxRailMm(state.config.max_rail_mm);
     mapper.setRange(state.config.min_position_mm, state.config.max_position_mm);
@@ -227,7 +219,7 @@ void ConfigStore::load(SystemState& state, RangeMapper& mapper, MotorDriver& mot
         // We warn rather than reject: the per-field validation below clamps
         // anything out of range, and an in-range corrupt value is at least now
         // VISIBLE instead of silently trusted. stored==0 → pre-checksum save,
-        // nothing to verify yet. :3
+        // nothing to verify yet.
         uint32_t stored_crc = prefs.getUInt("cfg_crc", 0);
         if (stored_crc != 0) {
             uint32_t crc = nvsConfigChecksum(prefs);
@@ -240,7 +232,7 @@ void ConfigStore::load(SystemState& state, RangeMapper& mapper, MotorDriver& mot
         }
         // Max rail length FIRST — every range/default validation below clamps
         // against it. Sanity-bound 10..2000mm so a corrupt NVS write can't set a
-        // nonsensical ceiling. Pushed to the motor + mapper once resolved. :3
+        // nonsensical ceiling. Pushed to the motor + mapper once resolved.
         float rail = prefs.getFloat("rail_mm", state.config.max_rail_mm);
         if (rail < 10.0f || rail > 2000.0f) rail = DEFAULT_MAX_RAIL_MM;
         state.config.max_rail_mm = rail;
@@ -254,14 +246,14 @@ void ConfigStore::load(SystemState& state, RangeMapper& mapper, MotorDriver& mot
         // (device was previously saved with the old uint16_t "accel" key), fall
         // back to the old key so existing saves aren't silently reset to default.
         // Once the user saves again, "accel32" gets written and the old key is
-        // ignored forever. Smooth migration, no data loss. yippie! :3
+        // ignored forever.
         uint32_t acc32_saved = prefs.getUInt("accel32", 0);
         uint32_t acc;
         if (acc32_saved > 0) {
             acc = acc32_saved;
         } else {
             // Legacy fallback: old uint16_t key — max it could hold was 65535.
-            // If the old key is also absent, getUShort returns the default. :3
+            // If the old key is also absent, getUShort returns the default.
             acc = (uint32_t)prefs.getUShort("accel", (uint16_t)state.config.acceleration_mm_s2);
         }
         uint8_t blend = prefs.getUChar("blend_mode", 1);  // 1=let-it-land default
@@ -271,12 +263,12 @@ void ConfigStore::load(SystemState& state, RangeMapper& mapper, MotorDriver& mot
         // max_speed/accel (streams should inherit the old full-speed default).
         // The USER set falls back to its GENTLE factory default (50/200) — NOT
         // the legacy values — so a fresh device (or one that only ever saved the
-        // legacy keys) boots gentle for manual moves + window-entry glides. :3
+        // legacy keys) boots gentle for manual moves + window-entry glides.
         // INPUT jerk (fw 2.1.47) has NO legacy predecessor to migrate from — a
         // blob written before this key existed reads 0 and keeps the factory
         // default seeded by getDefaultConfig() above, never a zero ceiling
         // (jmax == 0 would wedge the planner solid). Same >0 idiom as the rest,
-        // then hard-clamped to the firmware ceiling below. :3
+        // then hard-clamped to the firmware ceiling below.
         float usr_spd = state.config.user_max_speed_mm_s;   // 50 (gentle default)
         float usr_acc = state.config.user_max_accel_mm_s2;  // 200 (gentle default)
         float inp_spd = spd, inp_acc = (float)acc;
@@ -299,7 +291,7 @@ void ConfigStore::load(SystemState& state, RangeMapper& mapper, MotorDriver& mot
         state.config.input_max_speed_mm_s  = inp_spd;
         state.config.input_max_accel_mm_s2 = inp_acc;
 
-        // ---- SlopMotion live tuning (M5c) ----------------------------------
+        // ---- SlopMotion live tuning (M5c) -----------------------------------
         // Every getter passes the CURRENT value as its default, so a device
         // whose NVS predates this block keeps the compiled-in defaults instead
         // of being zeroed. Bounds mirror the 0x0105 clamps exactly — a value
@@ -349,13 +341,13 @@ void ConfigStore::load(SystemState& state, RangeMapper& mapper, MotorDriver& mot
         state.buf_depth  = constrain((int)prefs.getUChar("buf_depth", state.buf_depth), 1, 5);
         { uint16_t bt = prefs.getUShort("buf_tick", state.buf_tick_hz);
           state.buf_tick_hz = (bt >= 150) ? 200 : (bt >= 75) ? 100 : (bt >= 35) ? 50 : 20; }
-        // Gen tick rungs updated: 20/50/100/250/500 Hz. Old saved value of 200
-        // snaps to 250 on load — close enough, and the operator can re-save. :3
+        // Gen tick rungs: 20/50/100/250/500 Hz. A saved value of 200 snaps to
+        // 250 on load — close enough, and the operator can re-save.
         { uint16_t gt = prefs.getUShort("gen_tick", state.gen_rate_tick_hz);
           state.gen_rate_tick_hz = (gt >= 375) ? 500 : (gt >= 175) ? 250 : (gt >= 75) ? 100 : (gt >= 35) ? 50 : 20; }
 
         // Validate startup defaults; fall back to full rail if nonsensical.
-        // Clamps against the configured max rail length (rail-length agnostic). :3
+        // Clamps against the configured max rail length (rail-length agnostic).
         if (state.default_range_min < 0.0f || state.default_range_min > state.config.max_rail_mm ||
             state.default_range_max <= 0.0f || state.default_range_max > state.config.max_rail_mm ||
             state.default_range_min >= state.default_range_max) {
@@ -375,7 +367,7 @@ void ConfigStore::load(SystemState& state, RangeMapper& mapper, MotorDriver& mot
 
         // Restore previously-measured stroke from NVS so the rail scale is
         // correct at boot BEFORE the first homing cycle. The homing task
-        // overwrites this with a fresh measurement when it completes. :3
+        // overwrites this with a fresh measurement when it completes.
         float saved_stroke = prefs.getFloat("stroke_mm", 0.0f);
         if (saved_stroke > 0.0f) motor.setMeasuredStrokeMm(saved_stroke);
 
@@ -383,18 +375,16 @@ void ConfigStore::load(SystemState& state, RangeMapper& mapper, MotorDriver& mot
 
         // Validate: reject 0 or out-of-range values against the configured max
         // rail length (rail-length agnostic) — a saved range_max within the
-        // user's rail survives the round-trip untouched. :3
+        // user's rail survives the round-trip untouched.
         if (rmin < 0.0f || rmin > state.config.max_rail_mm) rmin = state.config.min_position_mm;
         if (rmax <= 0.0f || rmax > state.config.max_rail_mm) rmax = state.config.max_rail_mm;
         if (rmin >= rmax) { rmin = state.config.min_position_mm; rmax = state.config.max_rail_mm; }
         // Speed: floor at 1, ceiling at MAX_SPEED_MM_S (10000). Anything outside
-        // that window is a corrupt NVS write — reset to the running default. :3
+        // that window is a corrupt NVS write — reset to the running default.
         if (spd == 0 || spd > (uint16_t)MAX_SPEED_MM_S) spd = (uint16_t)state.config.max_speed_mm_s;
         // Accel: floor at 10 (zero/garbage = bricked planner), ceiling at
-        // MAX_ACCEL_MM_S2 (100000). Expert mode can write up to 100000 mm/s²
-        // and the servo drive can take it — we just need to not reject it on
-        // load. The old ceiling of 30000 was silently resetting any expert-mode
-        // accel save back to the 8000 default. That was the bug. Fixed. :3
+        // MAX_ACCEL_MM_S2 (100000) — expert mode can write up to that and the
+        // servo drive can take it.
         if (acc < 10 || acc > (uint32_t)MAX_ACCEL_MM_S2) acc = (uint32_t)state.config.acceleration_mm_s2;
 
 
@@ -403,11 +393,11 @@ void ConfigStore::load(SystemState& state, RangeMapper& mapper, MotorDriver& mot
         if (state.driver.toff < 1 || state.driver.toff > 15) state.driver.toff = DRIVER_DEFAULT_TOFF;
 
         mapper.setRange(rmin, rmax);
-        // Write the resolved range back into state.config too — SystemState.h
+        // Write the resolved range back into state.config too: SystemState.h
         // documents config as cross-core-read state, and config_api.h's
-        // mapToPosition/mapFromPosition/getUsableRange helpers consume exactly
-        // these fields. Leaving them at compile-time defaults after loading a
-        // custom range was a silent divergence from the mapper's real range. :3
+        // mapToPosition/mapFromPosition/getUsableRange helpers consume these
+        // fields directly. Skipping this leaves state.config diverged from
+        // the mapper's actual range.
         state.config.min_position_mm = rmin;
         state.config.max_position_mm = rmax;
         state.config.max_speed_mm_s = (float)spd;
@@ -415,7 +405,7 @@ void ConfigStore::load(SystemState& state, RangeMapper& mapper, MotorDriver& mot
         state.config.run_current_ma = state.driver.run_current_ma;
 
         // Apply persisted continuous-blend policy to the motor. Clamp 1..3 so a
-        // corrupt/legacy NVS value can't put us in an undefined mode. :3
+        // corrupt/legacy NVS value can't put us in an undefined mode.
         if (blend < 1 || blend > 3) blend = 1;
         motor.setBlendMode(blend);
 
@@ -428,19 +418,16 @@ void ConfigStore::load(SystemState& state, RangeMapper& mapper, MotorDriver& mot
     }
 }
 
-// ============================================================================
-// Secondary WiFi credentials — serial-settable NVS fallback
-// ============================================================================
-//
+// ---- Secondary WiFi credentials -- serial-settable NVS fallback -------------
 // A second SSID/password pair, tried by setupWiFi() after the compile-time
 // primary (secrets.h) fails. Written over USB serial via the `WIFI <ssid>
 // <pass>` command so a rig on an unknown network can be recovered without a
-// reflash. Uses the same "strokeengine" namespace with putString/getString —
-// the first string fields in this store. Keys stay ≤15 chars for NVS. :3
+// reflash. Uses the same "strokeengine" namespace with putString/getString.
+// Keys stay ≤15 chars for NVS.
 
 void ConfigStore::saveWifiCreds(const SystemState& state, const char* ssid, const char* pass) {
     // Same OTA flash-contention guard as save() — a `WIFI ...` serial command
-    // landing mid-OTA must not write NVS during the flash write window. :3
+    // landing mid-OTA must not write NVS during the flash write window.
     if (state.ota_active.load()) {
         SLOGW("cfg", "saveWifiCreds: REFUSED — OTA update in flight, retry after it completes");
         return;
@@ -479,7 +466,7 @@ bool ConfigStore::loadWifiCreds(char* ssid, size_t ssidLen, char* pass, size_t p
 }
 
 void ConfigStore::clearWifiCreds(const SystemState& state) {
-    // Same OTA flash-contention guard as save()/saveWifiCreds(). :3
+    // Same OTA flash-contention guard as save()/saveWifiCreds().
     if (state.ota_active.load()) {
         SLOGW("cfg", "clearWifiCreds: REFUSED — OTA update in flight, retry after it completes");
         return;

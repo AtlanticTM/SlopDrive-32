@@ -157,6 +157,7 @@ struct WelcomeMsg {
     TrustMap trust_map{};
 };
 
+// ---- Encode -----------------------------------------------------------------
 // Encodes into `out`; returns bytes written, or 0 on any failure.
 inline size_t encodeWelcome(const WelcomeMsg& m, std::span<std::byte> out) {
     if (m.grants_count > kWelcomeMaxGrants) return 0;
@@ -254,6 +255,7 @@ inline size_t encodeWelcome(const WelcomeMsg& m, std::span<std::byte> out) {
     return w.size();
 }
 
+// ---- Decode -----------------------------------------------------------------
 // Decodes `in` into a WelcomeMsg. Unknown keys are skipped per §4.3.
 inline Result<WelcomeMsg, DecodeError> decodeWelcome(std::span<const std::byte> in) {
     using Ret = Result<WelcomeMsg, DecodeError>;

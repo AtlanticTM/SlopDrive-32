@@ -1,3 +1,14 @@
+// PatternEngine — generates OSSM/community stroke patterns and fray-d
+// Advanced Penetration mode, submitting one MotionIntent per stroke segment
+// to the arbiter.
+// Constraints:
+//   Task loop runs on its own Core 1 FreeRTOS task (see init()); user-facing
+//   setters are called from Core 0 and rely on single-volatile-field writes
+//   being hardware-atomic — no lock between the two.
+//   Event-driven (D4): one intent per stroke segment, no periodic motion tick.
+//   Yields to an actively-driving TCode/Intiface stream — packet recency
+//   alone does not count as "driving"; only actual target motion within
+//   1.5s does (see the emit gate in run() and MotionArbiter::_gatesPass).
 #include "PatternEngine.h"
 #include "pattern.h"         // vendored core pattern classes (lib/StrokeEnginePatterns/src/)
 #include "patternExtended.h" // extended patterns from community branches
@@ -9,9 +20,8 @@
 
 #include <Arduino.h>
 
-// ============================================================================
-// Static pattern registry — byte-identical names to upstream OSSM
-// ============================================================================
+// ---- Static pattern registry ------------------------------------------------
+// Names must stay byte-identical to upstream OSSM.
 
 static const char* kExtendedNames[] = {
 #if PATTERN_EXT_TESTPATTERN1 && PATTERN_EXT_ARRAYPATTERN
@@ -38,9 +48,7 @@ const char* PatternEngine::patternName(int idx) {
     return (extIdx < EXT_COUNT) ? kExtendedNames[extIdx] : "Invalid";
 }
 
-// ============================================================================
-// Constructor / destructor
-// ============================================================================
+// ---- Constructor / destructor -----------------------------------------------
 
 PatternEngine::PatternEngine(SystemState& state, RangeMapper& mapper, MotorDriver& motor)
     : _state(state), _mapper(mapper), _motor(motor)
@@ -50,9 +58,7 @@ PatternEngine::~PatternEngine() {
     if (_task) vTaskDelete(_task);
 }
 
-// ============================================================================
-// Lifecycle
-// ============================================================================
+// ---- Lifecycle --------------------------------------------------------------
 
 void PatternEngine::init() {
     // Allocate the 7 vendored pattern objects once — no heap churn in the loop.
@@ -77,8 +83,6 @@ void PatternEngine::init() {
 
     _active_pattern = _patterns[0];
 
-    // Pin to Core 1, priority 2, 4k stack — identical to Generator's task
-    // so they share the same scheduling tier.
     xTaskCreatePinnedToCore(taskFunction, "PatternEng", 4096, this, 2, &_task, 1);
 }
 
@@ -93,16 +97,14 @@ bool PatternEngine::isActive() const {
     return _running && _state.homed;
 }
 
-// ============================================================================
-// User-facing controls
-// ============================================================================
+// ---- User-facing controls ---------------------------------------------------
 
 void PatternEngine::start() {
     if (!_state.homed) return;
     _running        = true;
     _stroke_index   = 0;   // fresh start
     // Explicit user claim: starting the pattern takes the machine back from a
-    // chattering (keep-alive-only) stream. A stream that actually MOVES again
+    // chattering (keep-alive-only) stream. A stream that actually moves again
     // re-stamps last_intiface_move_ms and reclaims — see the yield gate.
     _state.pattern_running = true;
 }
@@ -112,9 +114,8 @@ void PatternEngine::stop() {
     _state.pattern_running = false;
 }
 
-// ============================================================================
-// Parameter setters (Core 0 — single volatile fields, hardware-atomic)
-// ============================================================================
+// ---- Parameter setters ------------------------------------------------------
+// Core 0 callers; single volatile fields, hardware-atomic writes.
 
 void PatternEngine::setSpeed(float speed) {
     if (speed < 0.0f) speed = 0.0f;
@@ -146,11 +147,10 @@ void PatternEngine::setPattern(int idx) {
     _pattern_idx = idx;
 }
 
-// ============================================================================
-// Advanced-mode setters (Core 0 — single volatile u8 writes, hardware-atomic).
+// ---- Advanced-mode setters --------------------------------------------------
+// Core 0 callers; single volatile u8 writes, hardware-atomic.
 // Every write bumps _ap_gen so a stroke in flight retargets immediately
 // (fray-d semantics: sliders act now, not at the next stroke boundary).
-// ============================================================================
 
 void PatternEngine::setAdvancedMode(bool on) {
     if (_advanced == on) return;
@@ -212,17 +212,14 @@ void PatternEngine::setApModifier(uint8_t base_id, int amplitude, int in_step, i
     _ap_gen = _ap_gen + 1;
 }
 
-// ============================================================================
-// Set the arbiter reference — called from main.cpp after arbiter is created.
-// ============================================================================
+// ---- Arbiter wiring ---------------------------------------------------------
+// Called from main.cpp after the arbiter is constructed.
 
 void PatternEngine::setArbiter(MotionArbiter* arbiter) {
     _arbiter = arbiter;
 }
 
-// ============================================================================
-// Unit conversion / parameter plumbing
-// ============================================================================
+// ---- Unit conversion / parameter plumbing -----------------------------------
 
 float PatternEngine::stepToMm(int step) const {
     return (float)step / (float)MAX_ABSTRACT_STEPS;
@@ -263,20 +260,16 @@ void PatternEngine::_recalcParameters() {
     // limit set (what the arbiter clamps PATTERN intents at), not the generic
     // max-speed box (which caps the motor driver / manual point moves). Tying
     // the knob to a different ceiling than the clamp meant the dial lied
-    // whenever the two settings diverged. :3
+    // whenever the two settings diverged.
     _max_steps_per_second = mmPerSecToStepsPerSec(_state.config.input_max_speed_mm_s);
 }
 
-// ============================================================================
-// Diagnostics — mirrors Generator's heartbeat style
-// ============================================================================
-
-// Log on CHANGE, not per stroke. Every field printed here is an OPERATOR KNOB
-// — it is identical between fires unless somebody is actively dragging a
-// slider, so the old 1 Hz throttle transcribed the same settings for the whole
-// session. The knobs are folded into a cheap FNV-1a fingerprint; the line
-// fires only when the fingerprint moves, which is exactly "the operator
-// changed something" (plus mode switches, which change the fingerprint too).
+// ---- Diagnostics ------------------------------------------------------------
+// Logs on CHANGE, not per stroke: every field here is an operator knob,
+// identical between fires unless a slider is actively moving, so a periodic
+// throttle would repeat the same settings for the whole session. The knobs
+// are folded into a cheap FNV-1a fingerprint; the line fires only when the
+// fingerprint moves (operator change, or a mode switch).
 void PatternEngine::_diagnostics() {
     if (!_running) {
         _diag_fingerprint = 0;   // a stop/start always re-announces
@@ -318,42 +311,34 @@ void PatternEngine::_diagnostics() {
           _pattern_idx, patternName(_pattern_idx), _speed, _depth, _stroke, _sensation);
 }
 
-// ============================================================================
-// Static trampoline → member function
-// ============================================================================
+// ---- Static trampoline to member function -----------------------------------
 
 void PatternEngine::taskFunction(void* param) {
     static_cast<PatternEngine*>(param)->run();
 }
 
-// ============================================================================
-// Task loop — D4 REFACTORED: emit ONE intent per stroke segment (event-driven)
-// ============================================================================
+// ---- Task loop --------------------------------------------------------------
+// D4 event-driven: ONE COMMAND -> ONE PLAN -> FAS EXECUTES. The pattern's
+// nextTarget() generates a motionParameter {stroke, speed, accel, skip} for
+// the next half-stroke; that becomes a MotionIntent with a deadline derived
+// from the pattern's speed parameter, submitted to the arbiter, then the
+// task sleeps for the segment duration and wakes only to emit the next
+// stroke. No periodic clock, no chase loop.
 //
-// The old disease (v3 era): tick at gen_rate_tick_hz, emit dense position
-// points, replan at MAX accel. Gone.
+// StopNGo's skip=true segments: the task blocks for the pattern's internal
+// delay without submitting an intent.
 //
-// The cure (D4): ONE COMMAND → ONE PLAN → FAS EXECUTES. The pattern's
-// nextTarget() generates a motionParameter {stroke, speed, accel, skip}
-// for the next half-stroke. We convert that into a MotionIntent with the
-// segment's deadline (derived from the pattern's speed parameter), submit
-// it to the arbiter, and SLEEP for the segment duration. The task wakes
-// only to emit the next stroke — no periodic clock, no chase loop.
+// The task reads MachineState and publishes telemetry AFTER the arbiter
+// returns, so the report reflects derived/clamped dynamics from the actual
+// plan, not the raw request.
 //
-// StopNGo's skip=true segments: the task simply blocks for the pattern's
-// internal delay without submitting an intent.
-//
-// D4 bidirectionality: the task reads MachineState and publishes
-// telemetry AFTER the arbiter returns — the report contains derived/
-// clamped dynamics from the actual plan.
-//
-// gen_rate_tick_hz: legacy, kept parsed but the task no longer ticks at
-// this rate. Used only for diagnostics cadence and WebUI reporting.
-// Marked deprecated.
+// gen_rate_tick_hz: parsed but unused for pacing — this task no longer
+// ticks at that rate. Kept only for diagnostics cadence and WebUI reporting;
+// deprecated.
 
 void PatternEngine::run() {
     while (true) {
-        // ---- Consistent snapshot of user parameters (Core 1 read side) ----
+        // ---- Consistent snapshot of user parameters (Core 1 read side) ------
         float  speed     = _speed;
         float  depth     = _depth;
         float  stroke    = _stroke;
@@ -361,7 +346,7 @@ void PatternEngine::run() {
         int    pat_idx   = _pattern_idx;
         bool   running   = _running;
 
-        // ---- Gate checks — yield to stream MOTION, not stream packets -----
+        // ---- Gate checks — yield to stream MOTION, not stream packets -------
         // Packet recency (last_intiface_ms) let keep-alive-only hosts pin the
         // pattern off forever. The pattern now yields only while the stream is
         // actually driving the target (moved within 1.5s) — matching the
@@ -375,25 +360,25 @@ void PatternEngine::run() {
         // Expose activity state for WebUI
         _state.gen_active = emit_ok;
 
-        // ---- Diagnostics --------------------------------------------------
+        // ---- Diagnostics ----------------------------------------------------
         _diagnostics();
 
         if (emit_ok && _arbiter && _advanced) {
-            // ---- Advanced mode (fray-d Advanced Penetration port) ---------
+            // ---- Advanced mode (fray-d Advanced Penetration port) -----------
             // One half-stroke per call; the wait happens inside so a live
             // parameter write retargets the stroke in flight.
             _advancedStroke();
         } else if (emit_ok && _arbiter) {
-            // ---- Select active pattern -----------------------------------
+            // ---- Select active pattern --------------------------------------
             int idx = pat_idx;
             if (idx < 0) idx = 0;
             if (idx >= PATTERN_COUNT) idx = PATTERN_COUNT - 1;
             _active_pattern = _patterns[idx];
 
-            // ---- Recompute step-space params -----------------------------
+            // ---- Recompute step-space params --------------------------------
             _recalcParameters();
 
-            // ---- Feed pattern the current user params ---------------------
+            // ---- Feed pattern the current user params -----------------------
             float timeOfStroke = 0.0f;
             if (speed > 0.0f && _max_steps_per_second > 0.0f) {
                 float peak_rate_s = (speed / 100.0f) * _max_steps_per_second;
@@ -402,7 +387,7 @@ void PatternEngine::run() {
                 // per direction and cruises at 1.5×stroke/half — i.e. peak =
                 // 3×stroke/timeOfStroke — so feed it 3× the naive traversal
                 // time. (Before this, 33% on the knob already demanded the
-                // full ceiling and the top ⅔ of the dial did nothing.) :3
+                // full ceiling and the top ⅔ of the dial did nothing.)
                 if (peak_rate_s > 1.0f)
                     timeOfStroke = 3.0f * (float)_stroke_steps / peak_rate_s;
             }
@@ -416,7 +401,7 @@ void PatternEngine::run() {
                                            (unsigned int)_max_steps_per_second,
                                            1);
 
-            // ---- Ask the pattern for the NEXT target ----------------------
+            // ---- Ask the pattern for the NEXT target ------------------------
             motionParameter mp = _active_pattern->nextTarget(_stroke_index);
 
             if (mp.skip) {
@@ -442,7 +427,7 @@ void PatternEngine::run() {
                 if (!_running) continue;
             }
 
-            // ---- Convert pattern output to MotionIntent -------------------
+            // ---- Convert pattern output to MotionIntent ---------------------
             float lo = _mapper.getMinMm(), hi = _mapper.getMaxMm();
             float span  = hi - lo;
             float pos_mm = lo + stepToMm(mp.stroke) * span;
@@ -461,7 +446,7 @@ void PatternEngine::run() {
             // most patterns (fast-in/slow-out ratios up to 5×): the fast half
             // arrived early and idled, the slow half got an infeasible T/2
             // deadline, fell back to triangle math and executed FAST anyway.
-            // Sensation felt near-dead because pacing overrode the pattern. :3
+            // Sensation felt near-dead because pacing overrode the pattern.
             float half_stroke_s = timeOfStroke / 2.0f;   // fallback pacing
             float d_mm = fabsf(pos_mm - _motor.getPosition());
             float seg_s;
@@ -485,7 +470,7 @@ void PatternEngine::run() {
             // the stroke drifts. Never ask for more than the machine may give:
             // clamp the demand at the input ceiling and stretch the deadline
             // by the same ratio so pacing, planner and motor all agree on when
-            // the stroke lands. :3
+            // the stroke lands.
             float input_ceiling = _state.config.input_max_speed_mm_s;
             if (input_ceiling >= 1.0f && speed_mm_s > input_ceiling) {
                 float stretch = speed_mm_s / input_ceiling;
@@ -507,7 +492,7 @@ void PatternEngine::run() {
             // Deadline-feasibility feedback: if the plan got clamped at the
             // INPUT limit set, the pattern is running slower/softer than the
             // operator dialed in. Surface that (rate-limited) instead of
-            // silently degrading the stroke. :3
+            // silently degrading the stroke.
             if (report.deadline_late) {
                 SLOGW_EVERY_MS(2000, "pattern",
                                "PatternEngine CLAMPED: stroke wants %.0f mm/s @ %.0f mm/s² "
@@ -516,7 +501,7 @@ void PatternEngine::run() {
                                report.clamped_speed_mm_s, report.clamped_accel_mm_s2);
             }
 
-            // ---- Publish telemetry ----------------------------------------
+            // ---- Publish telemetry ------------------------------------------
             // D4: actual_position_mm is NEVER written here — WebUI's 240Hz
             // telemetry sampler owns that atomic and fills it from
             // _motor.getPosition(). We only set commanded_target
@@ -524,10 +509,10 @@ void PatternEngine::run() {
             _state.commanded_target_mm = pos_mm;
             _state.commanded_raw_mm    = pos_mm;
 
-            // ---- Advance stroke index -------------------------------------
+            // ---- Advance stroke index ---------------------------------------
             _stroke_index++;
 
-            // ---- D4 pacing: sleep for the segment duration ----------------
+            // ---- D4 pacing: sleep for the segment duration ------------------
             // The arbiter dispatched to FAS non-blockingly. We sleep here
             // so the next stroke arrives when the current segment should
             // have completed. This is the event-driven clock replacement.
@@ -551,16 +536,14 @@ void PatternEngine::run() {
     }
 }
 
-// ============================================================================
-// Advanced mode — one half-stroke, event-driven (fray-d Advanced Penetration)
-// ============================================================================
-//
-// D4 preserved: ONE intent per half-stroke, dynamics DERIVED from the stroke's
-// own geometry (per-direction speed/accel controls), arbiter clamps at the
-// INPUT ceilings. The wait below is not a motion clock — it sleeps out the
-// stroke and wakes for exactly two events: the stroke completing (next intent
-// due) or a parameter write (_ap_gen bump → retarget the stroke in flight,
-// which is fray-d's live-slider semantics).
+// ---- Advanced mode ----------------------------------------------------------
+// One half-stroke, event-driven (fray-d Advanced Penetration).
+// One intent per half-stroke, dynamics derived from the stroke's own
+// geometry (per-direction speed/accel controls); arbiter clamps at the
+// input ceilings. The wait below is not a motion clock — it sleeps out the
+// stroke and wakes for exactly two events: the stroke completing (next
+// intent due) or a parameter write (_ap_gen bump -> retarget the stroke in
+// flight, which is fray-d's live-slider semantics).
 
 void PatternEngine::_advancedStroke() {
     advpat::StrokePlan sp = _ap.planStroke(_stroke_index);
@@ -633,7 +616,7 @@ float PatternEngine::_submitApStroke(uint32_t stroke_count, const advpat::Stroke
 
     // Input limit set, not the max-speed box — same authority the arbiter
     // clamps PATTERN intents at (the header comment always said "input
-    // ceiling"; the code just didn't). :3
+    // ceiling"; the code just didn't).
     float v = sp.speed_frac * _state.config.input_max_speed_mm_s;
     if (v < 1.0f) v = 1.0f;                 // keep the deadline finite at knob extremes
 

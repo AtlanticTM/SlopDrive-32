@@ -73,7 +73,7 @@ public:
         }
     }
 
-    // ---- Containers ---------------------------------------------------
+    // ---- Containers ---------------------------------------------------------
     // Enters a definite-length map; returns its pair count. Pushes a frame
     // that (a) enforces the nesting-depth ceiling, (b) tracks the last key
     // seen at this level for readKey()'s sorted/duplicate check, and
@@ -109,7 +109,7 @@ public:
         return Result<uint64_t, DecodeError>::ok(h.arg);
     }
 
-    // ---- Scalars --------------------------------------------------------
+    // ---- Scalars ------------------------------------------------------------
     Result<uint64_t, DecodeError> readUint() {
         auto hr = parseHeadRaw();
         if (!hr) return Result<uint64_t, DecodeError>::err(hr.error());

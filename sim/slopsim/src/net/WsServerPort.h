@@ -1,37 +1,35 @@
 #pragma once
 
-// ============================================================================
-// SlopSimWsTransport / SlopSimWsPort — the host WebSocket binding for the
-// slopsim hub, modeled on the firmware's SlopSyncWsTransport/SlopSyncWsPort
-// (include/comms/SlopSyncWsTransport.h) with one structural difference:
-//
-// IXWebSocket runs ONE THREAD PER CONNECTION and fires its callbacks there,
-// while the hub is strictly single-threaded (the sim thread pumps
-// hub.update()). The firmware's one-task invariant therefore becomes a
-// MARSHALING rule here: connection threads only ever (a) push inbound frames
-// into a per-slot mutex-guarded RX ring and (b) flip open/close event flags;
-// the sim thread consumes both in loop(). Nothing but the sim thread ever
-// calls hub.attach/detachTransport or ITransport::read()/write().
-//
-// The one true cross-thread hazard is ITransport::write() (sim thread) racing
-// connection teardown (conn thread destroys the ix::WebSocket after its final
-// callback returns). The per-slot mutex closes it: write() holds the mutex
-// across sendBinary(), and the CLOSE callback takes the same mutex before
-// nulling _ws — so teardown cannot complete while a send is in flight, and no
-// send can start after the pointer is nulled.
-//
-// Backpressure doctrine is the firmware's, verbatim: write() never blocks;
-// bufferedAmount() over threshold (or a failed send) MUTES the client so every
-// later write() returns false instantly; mute clears on any inbound frame;
-// muted continuously > kStallEvictMs -> the sweep disconnects the client.
-//
-// KNOWN GAP (decided at M0, revisit before the browser milestone): IXWebSocket's
-// server handshake does NOT echo Sec-WebSocket-Protocol. Python/websocket-client
-// and the C# plugin tolerate that; BROWSERS hard-fail it. Before pointing
-// slopsync-js at the sim, this port either gets a patched handshake or is
-// swapped for a minimal single-threaded RFC6455 server (which would also make
-// the marshaling above unnecessary — firmware-identical structure).
-// ============================================================================
+// SlopSimWsTransport / SlopSimWsPort — host WebSocket binding for the
+// slopsim hub.
+// Constraints:
+//   Modeled on the firmware's SlopSyncWsTransport/SlopSyncWsPort
+//   (include/comms/SlopSyncWsTransport.h) with one structural difference:
+//   IXWebSocket runs ONE THREAD PER CONNECTION and fires its callbacks
+//   there, while the hub is strictly single-threaded (the sim thread pumps
+//   hub.update()). The firmware's one-task invariant becomes a MARSHALING
+//   rule here: connection threads only ever (a) push inbound frames into a
+//   per-slot mutex-guarded RX ring and (b) flip open/close event flags; the
+//   sim thread consumes both in loop(). Nothing but the sim thread ever
+//   calls hub.attach/detachTransport or ITransport::read()/write().
+//   The one true cross-thread hazard is ITransport::write() (sim thread)
+//   racing connection teardown (conn thread destroys the ix::WebSocket
+//   after its final callback returns). The per-slot mutex closes it:
+//   write() holds the mutex across sendBinary(), and the CLOSE callback
+//   takes the same mutex before nulling _ws — so teardown cannot complete
+//   while a send is in flight, and no send can start after the pointer is
+//   nulled.
+//   Backpressure doctrine is the firmware's, verbatim: write() never
+//   blocks; bufferedAmount() over threshold (or a failed send) MUTES the
+//   client so every later write() returns false instantly; mute clears on
+//   any inbound frame; muted continuously > kStallEvictMs -> the sweep
+//   disconnects the client.
+//   KNOWN GAP: IXWebSocket's server handshake does NOT echo
+//   Sec-WebSocket-Protocol. Python/websocket-client and the C# plugin
+//   tolerate that; BROWSERS hard-fail it. Before pointing slopsync-js at
+//   the sim, this port either gets a patched handshake or is swapped for a
+//   minimal single-threaded RFC6455 server (which would also make the
+//   marshaling above unnecessary — firmware-identical structure).
 
 #include <cstdint>
 #include <memory>
@@ -57,7 +55,7 @@ public:
     static constexpr uint32_t kStallEvictMs = 2000;   // firmware doctrine
     static constexpr size_t kMuteBufferedBytes = 64 * 1024;
 
-    // ---- ITransport (sim thread only) -------------------------------------
+    // ---- ITransport (sim thread only) ---------------------------------------
     bool open() override { return true; }
     void close() override;
     bool write(std::span<const std::byte> frame) override;
@@ -71,12 +69,12 @@ public:
         return p;
     }
 
-    // ---- Connection-thread side (marshaling producers) ---------------------
+    // ---- Connection-thread side (marshaling producers) ----------------------
     void onOpen(ix::WebSocket* ws, const std::string& peer);
     void onClose();
     void pushRx(const void* data, size_t len);
 
-    // ---- Sim-thread bookkeeping -------------------------------------------
+    // ---- Sim-thread bookkeeping ---------------------------------------------
     bool consumeOpenEvent();      // true once per connection, after which attach
     bool consumeCloseEvent();     // true once per teardown, after which detach
     bool inUse() const;           // slot holds a live or not-yet-reaped connection

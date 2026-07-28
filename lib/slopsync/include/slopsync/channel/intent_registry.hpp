@@ -5,16 +5,16 @@
 // framing or the session engine that will own them (M4 scope: build the
 // building blocks; Hub/Client wiring is a later milestone). Nothing here
 // calls a transport, touches a catalog, or knows what an INTENT's `value`
-// means — it only tracks "have I seen this id" and "how many per second".
+// means — it only tracks whether an id has been seen and how many per second.
 //
-// ---- IntentRing: exact-match idempotency (§9.3) ---------------------------
+// ---- IntentRing: exact-match idempotency (§9.3) -----------------------------
 //
 // "The hub keeps a ring of the last 32 (id -> ECHO) per session; a duplicate
 // id re-emits the stored ECHO and MUST NOT re-apply." Client ids are
 // session-scoped and client-assigned monotonically increasing (§9.3), so the
 // ring never needs to know the current id — it just remembers the last
 // `idempotency_ring_depth` (32) stores, oldest evicted first, and answers
-// "do I have bytes for this exact id" by exact match. No hashing, no
+// whether bytes exist for this exact id by exact match. No hashing, no
 // ordering assumptions beyond "store() is called at most once per id" (true
 // by construction: a session only ever stores an id when it first computes
 // and applies that intent — every subsequent sight of the same id is a
@@ -119,7 +119,7 @@ private:
     size_t _count = 0;  // slots ever used, saturating at Depth
 };
 
-// ---- IngressRateLimiter: per-session intent ingress cap (§9.3, §10.5) -----
+// ---- IngressRateLimiter: per-session intent ingress cap (§9.3, §10.5) -------
 //
 // "Rate limiting: hub-enforced per session (NACK RATE_LIMITED); Appendix G
 // default 50 intents/s." Algorithm: continuous-refill TOKEN BUCKET, not a
@@ -140,7 +140,7 @@ private:
 // math goes through util/serial_arithmetic.hpp's timeDelta (wrap-safe hub-ms
 // per SPEC §7.2) — no inline `now - last` anywhere in this file.
 //
-// ---- Capacity is DECOUPLED from rate (RFC-013) -----------------------------
+// ---- Capacity is DECOUPLED from rate (RFC-013) ------------------------------
 // §10.5 originally made the granted rate double as the bucket depth, which
 // forced a sparse-but-bursty producer (the MFP segment streamer: 2–4/s mean,
 // ~25/s peak) to declare a ~10x inflated rate purely to buy burst headroom —

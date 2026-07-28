@@ -1,3 +1,16 @@
+// OtaService — shared WiFi OTA path (ArduinoOTA + HTTP), one safety gate
+// Constraints:
+//   ArduinoOTA and the HTTP upload path share one _active flag
+//   (prepareForOta): concurrent-update refusal and "refuse if ArduinoOTA is
+//   already active" both fall out of that single CAS -- never add a second
+//   in-flight flag.
+//   prepareForOta() MUST complete before the first flash write on either
+//   path: it stops all motion, then raises the OTA-active guard so
+//   ConfigStore::save() defers any NVS write for the duration (a concurrent
+//   write can reset the chip mid-flash).
+//   A failed OTA never resumes motion by itself -- the operator clears the
+//   fault / re-homes.
+
 #include "OtaService.h"
 
 #include "ui/SlopHttpServer.h"
@@ -10,18 +23,12 @@
 #include "MotionArbiter.h"
 #include "PatternEngine.h"
 
-// ============================================================================
-// OtaService — shared WiFi OTA path (ArduinoOTA + HTTP), one safety gate
-// ============================================================================
-
 OtaService::OtaService(SystemState& state,
                        MotionArbiter& arbiter,
                        PatternEngine& pattern)
     : _state(state), _arbiter(arbiter), _pattern(pattern) {}
 
-// ----------------------------------------------------------------------------
-// begin() — configure + start ArduinoOTA (call once, after WiFi is up)
-// ----------------------------------------------------------------------------
+// ---- begin() -- configure + start ArduinoOTA (call once, after WiFi is up) --
 
 void OtaService::begin(const char* hostname, const char* password) {
     _password = password ? password : "";
@@ -55,9 +62,7 @@ void OtaService::begin(const char* hostname, const char* password) {
     SLOGI("ota", "ArduinoOTA ready — hostname='%s' (espota)", hostname);
 }
 
-// ----------------------------------------------------------------------------
-// handle() — service ArduinoOTA + deferred HTTP reboot. Core-0 low-prio only.
-// ----------------------------------------------------------------------------
+// ---- handle() -- service ArduinoOTA + deferred HTTP reboot (Core-0 low-prio only) --
 
 void OtaService::handle() {
     ArduinoOTA.handle();
@@ -65,13 +70,11 @@ void OtaService::handle() {
     _reboot.poll();
 }
 
-// ----------------------------------------------------------------------------
-// prepareForOta() — SHARED SAFETY GATE (.clinerules §2 / OTA §2/§3)
-// ----------------------------------------------------------------------------
-//
+// ---- prepareForOta() -- shared safety gate ----------------------------------
 // Runs BEFORE the first flash write on BOTH paths. Single in-flight flag gives
 // the concurrent-refusal + "refuse if ArduinoOTA active" guarantee for free
 // (both paths compete for the same _active CAS).
+// See: .clinerules §2, OTA §2/§3.
 
 bool OtaService::prepareForOta(const char* source) {
     bool expected = false;
@@ -109,10 +112,9 @@ bool OtaService::prepareForOta(const char* source) {
     return true;
 }
 
-// ----------------------------------------------------------------------------
-// finishOta() — clear the in-flight flag on failure (motion stays held, never
-// auto-resumed); success leaves the machine gated through the reboot.
-// ----------------------------------------------------------------------------
+// ---- finishOta() -- clear the in-flight flag on failure ---------------------
+// Success leaves the machine gated through the reboot; failure leaves motion
+// held, never auto-resumed.
 
 void OtaService::finishOta(bool success, const char* what) {
     if (success) {
@@ -130,9 +132,7 @@ void OtaService::finishOta(bool success, const char* what) {
     // The user re-arms via the normal clear-fault / home flow.
 }
 
-// ----------------------------------------------------------------------------
-// Auth — constant-time X-OTA-Token check
-// ----------------------------------------------------------------------------
+// ---- Auth -- constant-time X-OTA-Token check --------------------------------
 
 bool OtaService::constantTimeEquals(const char* a, const char* b) {
     if (!a || !b) return false;
@@ -166,14 +166,10 @@ bool OtaService::checkAuthTokenValue(const char* token) {
     return constantTimeEquals(token, _password.c_str());
 }
 
-// ----------------------------------------------------------------------------
-// SHARED OTA byte pump — the ONLY place Update.* is called
-// ----------------------------------------------------------------------------
-//
+// ---- OTA byte pump -- the ONLY place Update.* is called ---------------------
 // Both backends' chunk pumps funnel through these four. Keeping them together
-// (rather than one copy per backend) is the whole point of the port: the
-// operator's only working deployment path must not have two subtly different
-// flash state machines that can drift.
+// (rather than one copy per backend) means the operator's only working
+// deployment path never has two flash state machines that can drift apart.
 
 void OtaService::otaBeginWrite(int command) {
     _uploadStarted = true;
@@ -222,15 +218,12 @@ void OtaService::otaAbortWrite(const char* why) {
     SLOGW("ota", "HTTP upload %s — old image intact", why ? why : "aborted");
 }
 
-// ----------------------------------------------------------------------------
-// SHARED final-response policy — 401 / 400 / 200 + arm reboot + finishOta
-// ----------------------------------------------------------------------------
-//
-// Speaks only through SlopHttpServer::send(), which BOTH backends implement,
-// so this is literally the same code on both sides. Ordering is load-bearing
-// and unchanged: send the 200 FIRST, then arm the deferred reboot (so the
-// response actually flushes to curl), then finishOta(true) which deliberately
-// leaves the machine gated through the reboot.
+// ---- sendUploadResult() -- shared final-response policy ---------------------
+// Speaks only through SlopHttpServer::send(), which both backends implement,
+// so this is the same code on both sides. Ordering is load-bearing: send the
+// 200 FIRST, then arm the deferred reboot (so the response actually flushes
+// to curl), then finishOta(true), which deliberately leaves the machine
+// gated through the reboot.
 
 void OtaService::sendUploadResult(int command) {
     const bool isApp = (command == U_FLASH);
@@ -262,13 +255,11 @@ void OtaService::sendUploadResult(int command) {
     finishOta(true, what);
 }
 
-// ----------------------------------------------------------------------------
-// HTTP routes — POST /api/ota (U_FLASH) + POST /api/ota/fs (U_SPIFFS)
-// ----------------------------------------------------------------------------
+// ---- HTTP routes -- POST /api/ota (U_FLASH) + POST /api/ota/fs (U_SPIFFS) ---
 
 #if !defined(USE_PSYCHIC_HTTP)
 
-// ---- A-SIDE: synchronous Arduino WebServer ---------------------------------
+// ---- A-SIDE: synchronous Arduino WebServer ----------------------------------
 
 void OtaService::registerHttpRoutes(SlopHttpServer* server) {
     _server = server;
@@ -290,9 +281,7 @@ void OtaService::registerHttpRoutes(SlopHttpServer* server) {
     SLOGI("ota", "HTTP routes: POST /api/ota (app), POST /api/ota/fs (LittleFS) — X-OTA-Token auth");
 }
 
-// ----------------------------------------------------------------------------
-// handleUpload() — sync-WebServer chunked upload pump for both endpoints
-// ----------------------------------------------------------------------------
+// ---- handleUpload() -- sync-WebServer chunked upload pump for both endpoints --
 
 void OtaService::handleUpload(int command) {
     HTTPUpload& up = _server->upload();
@@ -334,7 +323,7 @@ void OtaService::handleUpload(int command) {
 
 #else   // USE_PSYCHIC_HTTP
 
-// ---- B-SIDE: PsychicHttp / esp_http_server ---------------------------------
+// ---- B-SIDE: PsychicHttp / esp_http_server ----------------------------------
 //
 // Two structural differences from the sync path, both improvements:
 //
@@ -433,13 +422,10 @@ void OtaService::registerHttpRoutes(SlopHttpServer* server) {
     SLOGI("ota", "HTTP routes: POST /api/ota (app), POST /api/ota/fs (LittleFS) — X-OTA-Token auth [psychic]");
 }
 
-// ----------------------------------------------------------------------------
-// psychicUploadChunk() — PsychicHttp chunked upload pump for both endpoints
-// ----------------------------------------------------------------------------
-//
+// ---- psychicUploadChunk() -- PsychicHttp chunked upload pump ----------------
 // ALWAYS returns ESP_OK: a non-OK return makes PsychicHttp abandon the drain
-// and answer 500, which would cost us the clean 401 on a bad token. Failures
-// are carried in _uploadError and reported by sendUploadResult().
+// and answer 500, which would cost the clean 401 on a bad token. Failures are
+// carried in _uploadError and reported by sendUploadResult().
 
 int OtaService::psychicUploadChunk(int command, uint64_t index,
                                    uint8_t* data, size_t len, bool final) {

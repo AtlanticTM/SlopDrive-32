@@ -1,12 +1,14 @@
-/**
- * EncoderValidator — FAS commanded position vs AIM drive encoder. :3
- *
- * See EncoderValidator.h for the model. Short version: latch a reference pair
- * at homed-rising-edge, measure the encoder's sign (and effective counts/mm)
- * from the first real excursion, then score deviation on every new encoder
- * sample — but only pass verdicts on samples taken at standstill, because a
- * Modbus read of a moving axis is time-skewed by design.
- */
+// EncoderValidator — FAS commanded position vs AIM drive encoder
+//
+// Constraints:
+//   Latch a reference pair at homed-rising-edge, measure the encoder's sign
+//   (and effective counts/mm) from the first real excursion, then score
+//   deviation on every new encoder sample — but only pass verdicts on
+//   samples taken at standstill, because a Modbus read of a moving axis is
+//   time-skewed by design.
+//
+// See:
+//   EncoderValidator.h — the model
 
 #include "EncoderValidator.h"
 
@@ -43,7 +45,7 @@ void EncoderValidator::update() {
 
     // Not homed (or no encoder on the wire): no reference frame exists. Drop
     // everything — the next homed edge latches a fresh reference, which also
-    // covers steps/mm reprogramming (that path force-unhomes the machine). :3
+    // covers steps/mm reprogramming (that path force-unhomes the machine).
     if (!_motor.isHomed() || !t.enc_valid) {
         if (_v.state != 0) {
             SLOGI("enc", "EncoderValidator: reference dropped (unhomed) — will re-latch on next home");
@@ -60,13 +62,13 @@ void EncoderValidator::update() {
     _v.enc_counts    = t.enc_counts;
     _v.sample_age_ms = millis() - t.enc_stamp_ms;
 
-    // ---- Standstill detection ------------------------------------------------
+    // ---- Standstill detection -----------------------------------------------
     // An encoder sample is read over a ~20ms Modbus transaction up to ~270ms
     // before we consume it, while FAS keeps stepping — so ONLY samples taken
     // with the machine still are skew-free. Everything that anchors the model
     // (reference latch, sign/scale measurement, verdicts) demands a streak of
     // ≥2 consecutive still samples (~540ms), which also defeats the pattern-
-    // turnaround alias where one sample can catch fas equal + rpm near zero. :3
+    // turnaround alias where one sample can catch fas equal + rpm near zero.
     bool steady = _have_prev &&
                   (fabsf(fas_mm - _prev_fas_mm) < STEADY_FAS_MM) &&
                   (fabsf(t.speed_rpm) < STEADY_RPM);
@@ -75,10 +77,10 @@ void EncoderValidator::update() {
     _have_prev   = true;
     bool anchored = _steady_streak >= 2;
 
-    // ---- State 0 → 1: latch the reference pair at standstill -----------------
+    // ---- State 0 → 1: latch the reference pair at standstill ----------------
     // Latching on the homed edge itself froze a mid-backoff (stale-by-~270ms)
     // encoder read against a fresh FAS read — several mm of skew baked into
-    // the reference as a permanent phantom offset. Wait for genuine rest. :3
+    // the reference as a permanent phantom offset. Wait for genuine rest.
     if (_v.state == 0) {
         if (!anchored) return;
         _enc0 = t.enc_counts;
@@ -89,7 +91,7 @@ void EncoderValidator::update() {
         return;
     }
 
-    // ---- State 1: measure encoder sign + effective counts/mm -----------------
+    // ---- State 1: measure encoder sign + effective counts/mm ----------------
     // Scored only between two standstill anchors ≥8mm apart, so the measured
     // counts/mm is clean — it latches at the first pause after real travel,
     // not mid-stroke where skew pollutes the ratio.
@@ -117,7 +119,7 @@ void EncoderValidator::update() {
         return;
     }
 
-    // ---- State 2: track deviation --------------------------------------------
+    // ---- State 2: track deviation -------------------------------------------
     float enc_mm = (float)(t.enc_counts - _enc0) * (float)_v.sign / AIM_ENC_COUNTS_PER_MM;
     float dev    = enc_mm - (fas_mm - _fas0);
     _v.dev_mm   = dev;
@@ -140,7 +142,7 @@ void EncoderValidator::update() {
     } else {
         _over_count = 0;
         // warn stays latched until re-home — a drift that wandered back is
-        // still a drift the operator should know happened. :3
+        // still a drift the operator should know happened.
     }
 }
 

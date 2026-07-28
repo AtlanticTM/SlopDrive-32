@@ -1,30 +1,35 @@
 #pragma once
 
+// MotorDriver — pure abstract interface for all motor hardware drivers.
+//
+// Constraints:
+// - Every physical hardware interaction (steppers, servos, encoders) sits
+//   behind this interface; concrete drivers (AIMServoDriver, ModbusServoDriver,
+//   future backends) implement the pure virtuals.
+// - Sole-caller rule (DOCTRINE.md §2): the motion methods (moveTo/streamTo/
+//   streamToSteps/stop/hardStop) are `protected`, with `friend class
+//   MotionArbiter` as the only grant, so any call through a MotorDriver&
+//   from outside MotionArbiter is a compile error. MotorProxy also holds a
+//   friend grant so it can forward to whichever concrete driver main.cpp
+//   binds at boot (NVS is not readable at static-init time); friendship does
+//   not inherit, so a concrete driver's overrides must stay protected too or
+//   the lock leaks through the derived type.
+// - init() runs once from setup(); update() runs every tick from motorTask
+//   (Core 1); emergencyStop() cuts power and clears state immediately.
+// - mmToNative()/nativeToMm() are driver-owned: a stepper uses steps/mm, a
+//   servo may use encoder counts, degrees, or raw DAC values. Callers stay
+//   unit-agnostic. nativePerMm() derives from mmToNative() so every driver
+//   gets a working native/mm ratio for free unless its native unit isn't a
+//   simple linear scale of mm, in which case it overrides nativePerMm()
+//   directly.
+// - The FastAccelStepperEngine instance lives as a protected member here
+//   (`_engine`) so every concrete driver shares access to it, instead of it
+//   being buried inside a driver-specific #if block.
+
 #include <cstdint>
 
-// Forward declarations
 class FastAccelStepperEngine;
 class FastAccelStepper;
-
-// ============================================================================
-// MotorDriver — pure abstract base class for all motor hardware drivers
-// ============================================================================
-//
-// All physical hardware interactions (steppers, servos, encoders) MUST be
-// abstracted behind this interface.  Concrete drivers (AIMServoDriver,
-// ModbusServoDriver, future V2 brushless servo, etc.) implement these pure virtuals.
-//
-// Lifecycle hooks:
-//   init()          — hardware setup, pin config, driver init (called once in setup())
-//   update()        — per-tick maintenance (called from motorTask on Core 1)
-//   emergencyStop() — immediate safe-stop, cut power, clear state
-//
-// Unit conversion (Risk #4):  mmToNative() / nativeToMm() are owned by the
-// driver because a stepper uses steps/mm while a servo may use encoder counts,
-// degrees, or raw DAC values.  Callers remain unit-agnostic.
-//
-// FastAccelStepper (Risk #5):  the engine lives as a protected member so every
-// concrete driver has access to it — NOT buried inside a driver-specific #if block.
 
 struct DriverConfig {
     uint16_t microsteps       = 16;
@@ -48,25 +53,17 @@ public:
     virtual void update()         = 0;
     virtual void emergencyStop()  = 0;
 
-    // ---- Sole-caller enforcement ---------------------------------------------
-    // MotionArbiter is the ONLY class permitted to command motor position.
-    // All motion dispatch routes through MotionArbiter::submit(). The motion
-    // methods (moveTo/streamTo/streamToSteps/stop/hardStop) live in the
-    // `protected:` section below, so any direct call from an input source (UI,
-    // transport, pattern, BLE) through a MotorDriver& is a COMPILE ERROR — this
-    // friend grant is the single door in. Concrete drivers must keep their
-    // overrides protected too, or the lock leaks through the derived type. :3
+    // ---- Sole-caller enforcement --------------------------------------------
+    // See the file-header constraint above. This friend grant is the single
+    // door in for MotionArbiter.
     friend class MotionArbiter;
 
     // MotorProxy is the runtime-backend forwarding shim (mode dispatch door):
     // it stands in for the concrete driver so main.cpp can pick FAS vs Modbus
-    // at boot (NVS isn't readable at static-init time) without ever exposing
-    // a raw switch to the input sources. The sole-caller lock is PRESERVED
-    // through it — friendship isn't inherited, so without this grant a
-    // MotorProxy couldn't reach the protected motion methods on the concrete
-    // driver it forwards to. Only MotionArbiter can call motion methods on
-    // the proxy (via the grant above), and only the proxy forwards them on to
-    // whichever concrete driver is bound. One door in, one door further in. :3
+    // at boot without ever exposing a raw switch to the input sources. Only
+    // MotionArbiter can call motion methods on the proxy (via the grant
+    // above), and only the proxy forwards them on to whichever concrete
+    // driver is bound. One door in, one door further in.
     friend class MotorProxy;
 
     // ---- Homing -------------------------------------------------------------
@@ -83,7 +80,7 @@ public:
     // internal _homed is false. This hook flips that flag (and enables outputs)
     // so pulses genuinely go out. Default no-op: drivers that don't support a
     // fake-home are simply unaffected. Do NOT call on real hardware you don't
-    // want to move without homing first. :3
+    // want to move without homing first.
     virtual void forceHomeState(bool /*homed*/) {}
 
     // Push-to-home: when NOT homed and NOT actively homing, the user can simply
@@ -95,11 +92,11 @@ public:
     virtual void runMotorStep()    = 0;
 
 protected:
-    // ---- Motion (MotionArbiter-only — sole-caller rule, CLAUDE.md §2) --------
+    // ---- Motion (MotionArbiter-only — sole-caller rule, DOCTRINE.md §2) -----
     // Protected + `friend class MotionArbiter` above: access is checked on the
     // static type (MotorDriver&), so no input source can dispatch motion
     // directly. Everything routes through MotionArbiter::submit() and its
-    // stop/hardStop/emergencyStop helpers, which own every safety gate. :3
+    // stop/hardStop/emergencyStop helpers, which own every safety gate.
     // moveTo returns true when FAS accepted the move (false = refused/not homed)
     // so a silently-rejected move is distinguishable at the call site.
     virtual bool moveTo(float pos_mm)                              = 0;
@@ -108,7 +105,7 @@ protected:
     // Dispatch a pre-planned move in native steps — called exclusively from
     // Core 1 via MotionArbiter. Speed and accel are already in steps/s and
     // steps/s² (converted by the arbiter before calling). No unit conversion
-    // happens inside this function — it goes straight to FAS. :3
+    // happens inside this function — it goes straight to FAS.
     virtual void streamToSteps(int32_t target_steps,
                                uint32_t speed_steps_s,
                                uint32_t accel_steps_s2)            = 0;
@@ -127,11 +124,11 @@ public:
     virtual float    getMaxSpeed()          const        = 0;
     // Acceleration ACTUALLY applied by the driver (mm/s², post-internal-clamp).
     // The driver may cap lower than config_api.h's MAX_ACCEL_MM_S2 ceiling —
-    // Ground Truth Doctrine: echoes must report this, never the raw request. :3
+    // Ground Truth Doctrine: echoes must report this, never the raw request.
     virtual float    getAcceleration()      const        = 0;
     // Returns the acceleration currently active inside the FAS ramp engine —
     // NOT the configured ceiling. Used by MotionArbiter's raise-only guard to
-    // match OSSM's stepper->getAcceleration() call. :3
+    // match OSSM's stepper->getAcceleration() call.
     virtual uint32_t getLiveAcceleration()  const        = 0;
 
     // ---- Status -------------------------------------------------------------
@@ -156,13 +153,13 @@ public:
     // Usable stroke (mm) measured by sensorless homing between the two hard
     // stops. Default 0 = "not measured / not supported" so drivers without
     // sensorless homing (an endstop-switch build) don't have to implement it. The
-    // 57AIM servo driver overrides this once it's felt out both ends. :3
+    // 57AIM servo driver overrides this once it's felt out both ends.
     virtual float   getMeasuredStrokeMm() const { return 0.0f; }
     // Restore a previously-measured stroke from NVS after boot. Default no-op
     // for drivers that don't support sensorless homing — ConfigStore calls this
     // with the persisted value so the rail scale is correct before the first
     // homing cycle runs. The homing task itself overwrites this with a fresh
-    // measurement when it completes. :3
+    // measurement when it completes.
     virtual void    setMeasuredStrokeMm(float /*mm*/) {}
 
     // ---- Max rail length (rail-length-agnostic ceiling) ---------------------
@@ -172,7 +169,7 @@ public:
     // the sensorless homing search sweep and serves as the position ceiling
     // BEFORE homing has measured the real stroke. Written from Core 0
     // (WebUI/ConfigStore), read from Core 1 (arbiter + driver clamps). An aligned
-    // 32-bit float is atomic on the ESP32-S3, same as _measured_stroke_mm. :3
+    // 32-bit float is atomic on the ESP32-S3, same as _measured_stroke_mm.
     virtual void    setMaxRailMm(float mm) { if (mm > 0.0f) _max_rail_mm = mm; }
     virtual float   getMaxRailMm() const   { return _max_rail_mm; }
 
@@ -181,7 +178,7 @@ public:
     // wins (it may even exceed the configured rail length — the search sweep
     // bounds hunting, not the result). Until then, fall back to the configured
     // max rail length. This is the true outer bound every position command is
-    // clamped to, regardless of source. :3
+    // clamped to, regardless of source.
     virtual float   effectiveCeilingMm() const {
         float m = getMeasuredStrokeMm();
         return (m > 0.0f) ? m : getMaxRailMm();
@@ -189,45 +186,45 @@ public:
 
     // ---- Live bus telemetry (INA228 on the 57AIM board) ---------------------
     // Instantaneous motor-bus current in AMPS and the 36V rail voltage. Only the
-    // 57AIM servo driver has an INA228 to gulp these off the shunt; every other
+    // 57AIM servo driver has an INA228 to read off the shunt; every other
     // driver returns 0 so the WebUI just shows a flat, harmless zero. This is
     // the live readout the operator watches during bring-up to confirm the
-    // sensor is alive BEFORE trusting sensorless homing not to ram anything. :3
+    // sensor is alive BEFORE trusting sensorless homing not to ram anything.
     virtual float   getBusCurrentA() const { return 0.0f; }
     virtual float   getBusVoltageV() const { return 0.0f; }
     // True when a real current sensor is present and calibrated. Lets the UI
-    // gray out / hide the readout on boards that don't have one. :3
+    // gray out / hide the readout on boards that don't have one.
     virtual bool    hasCurrentSensor() const { return false; }
 
     // ---- Extended power telemetry (INA228 full measurement set) -------------
-    // NEW virtuals alongside the existing current/voltage ones above — kept
-    // separate so drivers that only implemented the basic pair don't need any
-    // changes. Every driver without a power monitor returns a harmless 0/false
-    // default, same pattern as getBusCurrentA()/getBusVoltageV(). :3
+    // Kept separate from the current/voltage pair above so drivers that only
+    // implemented the basic pair don't need any changes. Every driver without
+    // a power monitor returns a harmless 0/false default, same pattern as
+    // getBusCurrentA()/getBusVoltageV().
     virtual float   getBusPowerW()      const { return 0.0f; }
     virtual float   getDieTempC()       const { return 0.0f; }
     // Highest |current| seen since boot / since the last resetPeaks() call —
     // lets the operator glance at the Health tab after a session and see how
-    // hard the machine strained without having to watch the live number. :3
+    // hard the machine strained without having to watch the live number.
     virtual float   getPeakBusCurrentA() const { return 0.0f; }
     // True when the driver has a real power monitor (INA228 or similar) that
     // exposes power/temp/peak telemetry beyond basic current/voltage. Lets the
-    // UI show/hide the extended Health-tab power card. :3
+    // UI show/hide the extended Health-tab power card.
     virtual bool    hasPowerMonitor()   const { return false; }
 
     // Session energy in WATT-HOURS from the power monitor's own hardware
     // accumulator (integrates continuously in the chip). Drives the dashboard
-    // SESSION card. Zeroed by resetPowerStats(). 0 when no monitor. :3
+    // SESSION card. Zeroed by resetPowerStats(). 0 when no monitor.
     virtual float   getBusEnergyWh()    const { return 0.0f; }
     // Reset the session power stats — software peaks AND the hardware energy
     // accumulator — back to zero. Called on home and by the reset-session
-    // control. No-op on drivers without a monitor. :3
+    // control. No-op on drivers without a monitor.
     virtual void    resetPowerStats()   {}
 
 
 
 
-    // ---- Unit conversion (driver-owned — Risk #4) ---------------------------
+    // ---- Unit conversion (driver-owned) -------------------------------------
     // Convert a physical millimeter position to the driver's native unit
     // (steps for steppers, encoder counts for servos, etc.).
     virtual int32_t mmToNative(float mm)        const = 0;
@@ -241,18 +238,18 @@ public:
     // steps/mm scale (AIM_STEPS_PER_MM): a counts-native driver (encoder
     // counts, ~834/mm) would otherwise get its dynamics scaled ~41x wrong if
     // the arbiter assumed steps/mm (~20/mm) universally. Drivers whose native
-    // unit isn't a simple linear scale of mm can still override this. :3
+    // unit isn't a simple linear scale of mm can still override this.
     virtual float   nativePerMm() const { return (float)mmToNative(1000.0f) / 1000.0f; }
 
 protected:
-    // FastAccelStepper engine — shared across ALL concrete drivers (Risk #5).
-    // Created once by the first driver's init(); must be forward-declared to
-    // avoid pulling the full header into every compilation unit.
+    // FastAccelStepper engine — shared across ALL concrete drivers. Created
+    // once by the first driver's init(); forward-declared here to avoid
+    // pulling the full header into every compilation unit.
     FastAccelStepperEngine* _engine = nullptr;
 
     // User-configured max rail length (mm). Literal default mirrors
     // DEFAULT_MAX_RAIL_MM in config_api.h (not included here to keep this
     // interface header dependency-free). ConfigStore overwrites it at boot with
-    // the persisted value; the WebUI updates it live via setMaxRailMm(). :3
+    // the persisted value; the WebUI updates it live via setMaxRailMm().
     float _max_rail_mm = 500.0f;
 };

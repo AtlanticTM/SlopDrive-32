@@ -7,14 +7,14 @@
 
 class ServoModbus;
 
-// ============================================================================
-// IServoExecutor — pluggable motion-execution strategy for ModbusServoDriver
-// ============================================================================
+// IServoExecutor / StreamedSetpointExecutor — pluggable motion-execution
+// strategy for ModbusServoDriver
 //
-// The executor is the "ISR" for Modbus-mode motion. Current design (see
-// StreamedSetpointExecutor below): callers move a target via track(), and
-// onTick() integrates its own (pos, vel, acc) state toward that target every
-// tick under vmax/amax/jmax, streaming FC 0x10 incremental deltas.
+// Constraints:
+//   The executor is the "ISR" for Modbus-mode motion: callers move a target
+//   via track(), and onTick() integrates its own (pos, vel, acc) state
+//   toward that target every tick under vmax/amax/jmax, streaming FC 0x10
+//   incremental deltas.
 class IServoExecutor {
 public:
     virtual ~IServoExecutor() = default;
@@ -23,38 +23,36 @@ public:
     // the last sample if frozen/done), map to wire units, and stream a
     // setpoint if the schedule calls for it. Called from servoBusTask,
     // Core 1, every 2ms — BEFORE servoModbus.update() so a setpoint always
-    // gets first crack at an IDLE bus (main.cpp "setpoint-first priority"). :3
+    // gets first crack at an IDLE bus (main.cpp "setpoint-first priority").
     virtual void onTick(int64_t now_us) = 0;
 
-    // Last SAMPLED position/velocity — this IS "commanded = truth" (plan.md
-    // "Position truth" doctrine). ModbusServoDriver::getPosition() and
-    // getLiveAcceleration() read straight off these. :3
+    // Last SAMPLED position/velocity — this IS "commanded = truth": open-loop,
+    // no external feedback. ModbusServoDriver::getPosition() and
+    // getLiveAcceleration() read straight off these.
     virtual float commandedPos() const = 0;
     virtual float commandedVel() const = 0;
     virtual float liveAccel()    const = 0;
 
     // True while a profile is actively generating motion — not done, not
-    // frozen, not merely idle-holding. Drives MotorDriver::isMoving(). :3
+    // frozen, not merely idle-holding. Drives MotorDriver::isMoving().
     virtual bool active() const = 0;
 
     // Latch the current sample as a hold position and invalidate the active
     // profile. Used by hardStop()/stop()/emergencyStop() and the bus-health
     // watchdog — after this call the executor keeps streaming the SAME
-    // position (keep-alive cadence) until a fresh track() target. :3
+    // position (keep-alive cadence) until a fresh track() target.
     virtual void freeze() = 0;
 
     // Establish the FIRST motionless sample, in the driver's native cmd-frame
     // (home=0, front=negative — same units/sign as track()'s target, NOT raw
     // wire counts). Nothing is EVER sent to the bus before
-    // this runs — the hard safety requirement behind "first bench step: send
-    // current encoder position as setpoint, observe zero motion" (plan.md). :3
+    // this runs — the hard safety requirement: never command motion before a
+    // live encoder seed exists (first bench step sends the current encoder
+    // position as setpoint and must observe zero motion).
     virtual void seed(float cmd_pos) = 0;
 };
 
-// ============================================================================
-// StreamedSetpointExecutor — jerk-limited target tracker, FC 0x10 delta stream
-// ============================================================================
-//
+// ---- StreamedSetpointExecutor -----------------------------------------------
 // track() moves the target; onTick() (every servoBusTask tick, 2ms) integrates
 // this executor's own (pos, vel, acc) toward it under vmax/amax/jmax and
 // streams the result as FC 0x10 incremental position deltas via
@@ -79,25 +77,23 @@ public:
     void freeze() override;
     void seed(float cmd_pos) override;
 
-    // ---- JERK-LIMITED TARGET TRACKER (operator decision, bench night 1) -----
+    // ---- Jerk-limited target tracker ----------------------------------------
     // OSSM-RS parity architecture: every motion source just MOVES THE TARGET;
     // this executor glides toward it under vmax/amax/jmax limits, integrating
     // its own (pos, vel, acc) state every servoBusTask tick and streaming the
-    // result as FC 0x10 deltas. This replaced per-intent TrapezoidProfile
-    // sampling because (a) trapezoids carry jerk spikes at every accel
-    // transition and (b) the 1kHz stream path re-planned a fresh trapezoid
-    // toward every interpolator waypoint — trapezoid confetti, felt as the
-    // "clocked waypoint" roughness. OSSM-RS streams Ruckig S-curve output;
-    // this tracker is the same idea in ~20 lines. Doctrine framing: intent ->
-    // target update (the "plan" IS the target + limits); the tracker is the
-    // executor/ISR. :3
+    // result as FC 0x10 deltas. Trapezoid-per-intent sampling is not used here:
+    // trapezoids carry jerk spikes at every accel transition, and a 1kHz
+    // stream path re-planning a fresh trapezoid toward every interpolator
+    // waypoint produces the "clocked waypoint" roughness. Doctrine framing:
+    // intent -> target update (the "plan" IS the target + limits); the
+    // tracker is the executor/ISR.
     void track(float target_counts, float vmax_counts_s, float amax_counts_s2);
     void setJerkLimit(float jmax_counts_s3);
 
     // Wire mapping: wire_counts = offset + sign * cmd_pos. `offset` is the
     // encoder reading captured at home/force-home time; `sign` (+1/-1) is
     // AIM_MODBUS_WIRE_SIGN, bench-determined (config_api.h). Set by the
-    // driver whenever it (re)establishes home. :3
+    // driver whenever it (re)establishes home.
     void setWireMap(int32_t offset, int8_t sign);
 
 private:
@@ -105,7 +101,7 @@ private:
 
     // Every mutable field below is guarded by this spinlock — same pattern
     // ServoModbus itself uses for its cross-core telemetry (_mux). Entered
-    // for a handful of assignments only, NEVER held across UART I/O. :3
+    // for a handful of assignments only, NEVER held across UART I/O.
     mutable portMUX_TYPE _mux = portMUX_INITIALIZER_UNLOCKED;
 
     // Tracker target + limits (guarded; updated up to 1kHz by track()).
@@ -126,7 +122,7 @@ private:
     // Setpoint-send scheduling — only ever touched from onTick(), and onTick()
     // is only ever called from servoBusTask (single task, single core), so
     // these need no lock. Fast cadence whenever the WIRE value would change;
-    // keep-alive (zero-delta liveness probe) otherwise. :3
+    // keep-alive (zero-delta liveness probe) otherwise.
     uint32_t _last_sent_ms   = 0;
     int32_t  _last_sent_wire = 0;
     bool     _have_sent      = false;

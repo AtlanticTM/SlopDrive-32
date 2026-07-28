@@ -1,17 +1,16 @@
 #pragma once
 
-// ============================================================================
 // SlopSimCatalog — a DELIBERATELY DIFFERENT SlopSync catalog for slopsim.
-//
-// WHY THIS FILE EXISTS: sim/slopsim used to embed the real firmware's catalog
-// verbatim (include/comms/SlopSyncCatalog.h::buildSlopDriveCatalog) — same
-// channel ids, same fields, byte for byte. That proves a client can render
-// SlopDrive-32 again over a fresh socket; it does NOT prove the falsifiable
-// claim the WebUI refactor rests on: "the client renders a machine it has
-// never met." This header is slopsim's OWN device catalog — a plausible,
-// simpler/cheaper third-party machine ("benchrig") that shares nothing with
-// the real device except the SPEC-CORE channels every SlopSync hub carries
-// (0x0003-0x000E) and the library that encodes them.
+// Constraints:
+//   Proves the falsifiable claim the WebUI refactor rests on: "the client
+//   renders a machine it has never met." This is slopsim's OWN device
+//   catalog — a plausible, simpler/cheaper third-party machine ("benchrig")
+//   that shares nothing with the real device except the SPEC-CORE channels
+//   every SlopSync hub carries (0x0003-0x000E) and the library that encodes
+//   them. Not included by the firmware build; wired in by
+//   sim/slopsim/CMakeLists.txt instead of include/comms/SlopSyncCatalog.h.
+//   See MachineSim.cpp's initCatalog().
+// See: docs/slopdeck/DESIGN.md §5/§7 (sim-fidelity ruling)
 //
 // WHAT IS DIFFERENT FROM include/comms/SlopSyncCatalog.h, ON PURPOSE:
 //   * Every DEVICE-range channel id is different (0x0090+ / 0x0110+ here vs.
@@ -48,11 +47,6 @@
 // safety-events, declared the same way the real catalog does: by calling the
 // library's own builders. These are SPEC-CORE — every hub carries them
 // unchanged, by protocol definition, not by choice.
-//
-// This file is intentionally NOT included by the firmware build — it lives
-// under sim/slopsim and is wired in by sim/slopsim/CMakeLists.txt instead of
-// include/comms/SlopSyncCatalog.h. See MachineSim.cpp's initCatalog().
-// ============================================================================
 
 #include <cstdint>
 
@@ -89,7 +83,7 @@ namespace category {
 inline constexpr uint8_t bench_extras = 0x40;
 }
 
-// ---- Factory DEFAULTS, advertised as RFC-009 `default` annotations --------
+// ---- Factory DEFAULTS, advertised as RFC-009 `default` annotations ----------
 // Deliberately DIFFERENT numbers from the real device's factory:: block
 // (include/comms/SlopSyncCatalog.h) — smaller machine, smaller everything.
 namespace factory {
@@ -101,7 +95,7 @@ inline constexpr uint8_t warmup_mode = 0;         // 0 = off
 inline constexpr const char* device_label = "bench-rig";
 }  // namespace factory
 
-// ---- Hard ceilings advertised as `min`/`max` -------------------------------
+// ---- Hard ceilings advertised as `min`/`max` --------------------------------
 // Also different from the real device: a cheaper rail, a lower top speed, no
 // jerk ceiling at all (there is no jerk SETTING to bound).
 namespace ceiling {
@@ -127,17 +121,15 @@ inline bool buildDivergentCatalog(slopsync::Catalog32& c) {
 
     c.clear();
 
-    // ======================================================================
-    // SPEC-CORE (0x0003-0x000E) — verbatim copy of the pattern in
-    // include/comms/SlopSyncCatalog.h. Every hub carries these unchanged; see
-    // that file's own comments for why each shape is pinned to Hub internals.
-    // Copied rather than shared because that file is off-limits to this
-    // change (another agent is editing it) and because the library's stance
-    // is that hand-authored spec-core entries are authored per hub anyway —
-    // only the log/trust/safety-events triplet comes from a shared builder.
-    // ======================================================================
+    // ---- SPEC-CORE (0x0003-0x000E) ------------------------------------------
+    // Verbatim copy of the pattern in include/comms/SlopSyncCatalog.h. Every
+    // hub carries these unchanged; see that file's own comments for why each
+    // shape is pinned to Hub internals. Copied rather than shared because the
+    // library's stance is that hand-authored spec-core entries are authored
+    // per hub anyway — only the log/trust/safety-events triplet comes from a
+    // shared builder.
 
-    // ---- 0x0003 "safety" — STATE, critical, on-change ----------------------
+    // ---- 0x0003 "safety" — STATE, critical, on-change -----------------------
     c.addEntry({.id = slopsync::channels::safety, .name = "safety",
                 .cls = ChannelClass::STATE, .dir = Direction::h2c,
                 .access = AccessLevel::watch, .maxRateHz = 0.0f,
@@ -152,7 +144,7 @@ inline bool buildDivergentCatalog(slopsync::Catalog32& c) {
                         .scale = 1.0f},
                        {"override", "bypass"});
 
-    // ---- 0x0004 "control-owner" — STATE, critical, on-change ---------------
+    // ---- 0x0004 "control-owner" — STATE, critical, on-change ----------------
     c.addEntry({.id = slopsync::channels::control_owner, .name = "control-owner",
                 .cls = ChannelClass::STATE, .dir = Direction::h2c,
                 .access = AccessLevel::watch, .maxRateHz = 0.0f,
@@ -166,7 +158,7 @@ inline bool buildDivergentCatalog(slopsync::Catalog32& c) {
     c.addLayoutField({.name = "src3",   .type = PackedFieldType::u8,  .unit = "", .scale = 1.0f});
     c.addLayoutField({.name = "owner3", .type = PackedFieldType::u32, .unit = "", .scale = 1.0f});
 
-    // ---- 0x0005 "safety-intents" — INTENT, critical, modest rate ----------
+    // ---- 0x0005 "safety-intents" — INTENT, critical, modest rate ------------
     c.addEntry({.id = slopsync::channels::safety_intents, .name = "safety-intents",
                 .cls = ChannelClass::INTENT, .dir = Direction::c2h,
                 .access = AccessLevel::watch, .maxRateHz = 20.0f,
@@ -186,7 +178,7 @@ inline bool buildDivergentCatalog(slopsync::Catalog32& c) {
                             AccessLevel::control,  // 9  bypass_on
                             AccessLevel::control});// 10 bypass_off
 
-    // ---- 0x0006 "hub-status" — STATE, background, 1 Hz ---------------------
+    // ---- 0x0006 "hub-status" — STATE, background, 1 Hz ----------------------
     c.addEntry({.id = slopsync::channels::hub_status, .name = "hub-status",
                 .cls = ChannelClass::STATE, .dir = Direction::h2c,
                 .access = AccessLevel::watch, .maxRateHz = 1.0f,
@@ -209,16 +201,15 @@ inline bool buildDivergentCatalog(slopsync::Catalog32& c) {
     // ---- 0x0008 "log" — EVENT (library builder; SPEC-CORE) ------------------
     if (!slopsync::addLogChannel(c)) return false;
 
-    // ---- 0x0009..0x000D — trust administration (library builder) -----------
+    // ---- 0x0009..0x000D — trust administration (library builder) ------------
     if (!slopsync::addTrustChannels(c)) return false;
 
     // ---- 0x000E "safety-events" — EVENT (library builder) -------------------
     if (!slopsync::addSafetyEventsChannel(c)) return false;
 
-    // ======================================================================
-    // DEVICE RANGE — benchrig's OWN allocation. Every id, every field set,
-    // every bound below is deliberately different from the real device.
-    // ======================================================================
+    // ---- DEVICE RANGE -------------------------------------------------------
+    // benchrig's OWN allocation. Every id, every field set, every bound below
+    // is deliberately different from the real device.
 
     // ---- 0x0090 "telemetry" — STATE, elevated, 30 Hz ------------------------
     // Just position + velocity + a two-bit status word. No raw/target split,
@@ -241,7 +232,7 @@ inline bool buildDivergentCatalog(slopsync::Catalog32& c) {
                         .desc = "Live machine status bits."},
                        {"homed", "moving"});
 
-    // ---- 0x0091 "limits" — STATE, normal, on-change --------------------------
+    // ---- 0x0091 "limits" — STATE, normal, on-change -------------------------
     // The window + the USER (manual) limit set only. DELIBERATELY NO input
     // (machine-driven) limit set and NO jerk field — this machine has no
     // separate machine-driven ceiling to tune and no jerk-limited planner to
@@ -293,7 +284,7 @@ inline bool buildDivergentCatalog(slopsync::Catalog32& c) {
                         .role = roles::meta_enabled_mask},
                        {"window_min", "window_max", "user_speed", "user_accel"});
 
-    // ---- 0x0092 "device-settings" — STATE, normal, on-change -----------------
+    // ---- 0x0092 "device-settings" — STATE, normal, on-change ----------------
     // THE channel the real device does not have. A DEVICE-DEFINED category
     // (>=128) with its own `category_label` — a client cannot possibly know
     // this heading's name in advance, which is exactly the point: it must
@@ -328,7 +319,7 @@ inline bool buildDivergentCatalog(slopsync::Catalog32& c) {
                         .role = roles::meta_enabled_mask},
                        {"warmup_mode", "device_label"});
 
-    // ---- 0x0095 "motion-input" — STREAM, c2h, control, <=200 Hz --------------
+    // ---- 0x0095 "motion-input" — STREAM, c2h, control, <=200 Hz -------------
     // Same wire shape as the real device's 0x0084 (dense point samples), a
     // different id and a lower rate ceiling — a cheaper machine, cheaper feed.
     c.addEntry({.id = ch::motion_input, .name = "motion-input",
@@ -338,7 +329,7 @@ inline bool buildDivergentCatalog(slopsync::Catalog32& c) {
     c.addLayoutField({.name = "target_norm", .type = PackedFieldType::u16, .unit = "norm",   .scale = 10000.0f});
     c.addLayoutField({.name = "vel_norm",    .type = PackedFieldType::i16, .unit = "norm/s", .scale = 1000.0f});
 
-    // ---- 0x0096 "motion-segment" — STREAM, c2h, control, <=30 Hz -------------
+    // ---- 0x0096 "motion-segment" — STREAM, c2h, control, <=30 Hz ------------
     c.addEntry({.id = ch::motion_segment, .name = "motion-segment",
                 .cls = ChannelClass::STREAM, .dir = Direction::c2h,
                 .access = AccessLevel::control, .maxRateHz = 30.0f,
@@ -348,7 +339,7 @@ inline bool buildDivergentCatalog(slopsync::Catalog32& c) {
     c.addLayoutField({.name = "duration_ms",  .type = PackedFieldType::u16, .unit = "ms",     .scale = 1.0f});
     c.addLayoutField({.name = "end_vel_norm", .type = PackedFieldType::i16, .unit = "norm/s", .scale = 1000.0f});
 
-    // ---- 0x0110 "limits-set" — INTENT, control, 10 Hz ------------------------
+    // ---- 0x0110 "limits-set" — INTENT, control, 10 Hz -----------------------
     c.addEntry({.id = ch::limits_set, .name = "limits-set",
                 .cls = ChannelClass::INTENT, .dir = Direction::c2h,
                 .access = AccessLevel::control, .maxRateHz = 10.0f,
@@ -362,7 +353,7 @@ inline bool buildDivergentCatalog(slopsync::Catalog32& c) {
     c.addSchemaField({.key = 4, .name = "user_accel", .type = CborFieldType::f32_t, .unit = "mm/s2",
                       .hasMin = true, .hasMax = true, .min = ceiling::accel_min, .max = ceiling::accel_max});
 
-    // ---- 0x0111 "device-set" — INTENT, control, 5 Hz -------------------------
+    // ---- 0x0111 "device-set" — INTENT, control, 5 Hz ------------------------
     c.addEntry({.id = ch::device_set, .name = "device-set",
                 .cls = ChannelClass::INTENT, .dir = Direction::c2h,
                 .access = AccessLevel::control, .maxRateHz = 5.0f,
@@ -372,7 +363,7 @@ inline bool buildDivergentCatalog(slopsync::Catalog32& c) {
     c.addSchemaField({.key = 2, .name = "device_label", .type = CborFieldType::tstr_t, .unit = "",
                       .desc = "Truncated to 16 bytes on the wire (the str16 field it writes)."});
 
-    // ---- 0x0112 "move" — INTENT, control, 20 Hz, critical --------------------
+    // ---- 0x0112 "move" — INTENT, control, 20 Hz, critical -------------------
     c.addEntry({.id = ch::move, .name = "move",
                 .cls = ChannelClass::INTENT, .dir = Direction::c2h,
                 .access = AccessLevel::control, .maxRateHz = 20.0f,
@@ -381,7 +372,7 @@ inline bool buildDivergentCatalog(slopsync::Catalog32& c) {
                       .hasMin = true, .hasMax = true, .min = 0.0f, .max = ceiling::rail_mm});
     c.addSchemaField({.key = 2, .name = "bypass", .type = CborFieldType::bool_t, .unit = ""});
 
-    // ---- 0x0113 "home" — INTENT, control --------------------------------------
+    // ---- 0x0113 "home" — INTENT, control ------------------------------------
     // Same bench-op shape as the real device's 0x0103 (op 2 clears an e-stop
     // latch, same safety-reviewed rationale) — a different id, identical
     // semantics, because homing is protocol-shaped machinery this machine

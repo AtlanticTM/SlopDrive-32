@@ -1,10 +1,8 @@
-// CurrentSensor — INA228 driver implementation for the 36V motor bus.
-// Build-guarded behind DRIVER_AIM_SERVO.
+// CurrentSensor — INA228 driver implementation for the 36V motor bus
 //
-// The register map differs from the INA226 — this uses RobTillaart/INA228.
-// We drink the current straight off the 5mΩ shunt: full travel is a thirsty
-// gulp, a stall is the drive choking as the carriage stuffs itself against the
-// hard stop until it can't take another step. yippie! :3
+// Constraints:
+//   Build-guarded behind DRIVER_AIM_SERVO. Register map differs from the
+//   INA226 — this uses RobTillaart/INA228, current read off the 5mΩ shunt.
 #if defined(DRIVER_AIM_SERVO)
 
 #include "CurrentSensor.h"
@@ -14,12 +12,12 @@
 #include "sloplog/sloplog.h"
 
 // Single INA228 instance at 0x40 on the default Wire bus. The isolator is
-// transparent, so this is just a normal I2C device to us. :3
+// transparent, so this is just a normal I2C device to us.
 static INA228 _ina(INA228_I2C_ADDR);
 
 bool CurrentSensor::init() {
     // Wire.begin(SDA, SCL) is the CALLER's job (main setup) — we assume the bus
-    // is already up. begin() just probes whether the chip acknowledges. :3
+    // is already up. begin() just probes whether the chip acknowledges.
     if (!_ina.begin()) {
         SLOGE("power", "INA228: NOT FOUND at 0x%02X — current sensing DISABLED, homing will refuse. uhoh :3",
               INA228_I2C_ADDR);
@@ -27,20 +25,18 @@ bool CurrentSensor::init() {
         return false;
     }
 
-    // Calibrate: max current 32.768A across the 5mΩ shunt. The library computes
-    // SHUNT_CAL from these; per NewPCB §5 this must land on 4096 exactly. We
-    // feed it the full-scale numbers and let it do the math. :3
-    // INA228 v0.3.x setMaxCurrentShunt(maxCurrent, shunt) — no normalize arg on
-    // this release. With maxCurrent = 32.768A across the 5mΩ shunt the library
-    // derives CURRENT_LSB = 32.768/2^19 = 62.5µA and SHUNT_CAL = 4096 exactly,
-    // no rounding needed — the numbers are already the natural full-scale fit. :3
+    // Calibrate: max current 32.768A across the 5mΩ shunt (INA228 v0.3.x
+    // setMaxCurrentShunt(maxCurrent, shunt) — no normalize arg on this
+    // release). Derives CURRENT_LSB = 32.768/2^19 = 62.5µA and SHUNT_CAL =
+    // 4096 exactly, no rounding needed — per NewPCB §5, SHUNT_CAL must land
+    // on 4096 exactly.
     int rc = _ina.setMaxCurrentShunt(INA228_MAX_CURRENT_A, INA228_SHUNT_OHMS);
 
     if (rc != 0) {
         // A failed calibration means every current reading is mis-scaled — a
         // stall at the hard stop might never trip the threshold. Do NOT mark
         // the sensor ready: sensorless homing gates on isReady() and must
-        // refuse rather than trust garbage feel. :3
+        // refuse rather than trust garbage feel.
         SLOGE("power", "INA228: setMaxCurrentShunt() FAILED (rc=%d) — calibration invalid, "
               "current sensing DISABLED, sensorless homing will refuse. uhoh :3", rc);
         _ready = false;
@@ -49,7 +45,7 @@ bool CurrentSensor::init() {
 
     // ADCRANGE = 0 -> ±163.84mV full scale. Do NOT use range 1 (±40.96mV) — it
     // clips at ~8A, well below the motor's 16-20A ceiling and we'd never see a
-    // real stall. Range 0 lets us feel the full 32.768A gape. :3
+    // real stall.
     _ina.setADCRange(0);
 
     // Averaging + conversion time: a touch of averaging cleans the reading for
@@ -67,13 +63,13 @@ bool CurrentSensor::init() {
 
 float CurrentSensor::readCurrentA() {
     if (!_ready) return 0.0f;
-    // getCurrent() returns amps directly (library applies CURRENT_LSB). :3
+    // getCurrent() returns amps directly (library applies CURRENT_LSB).
     float a = (float)_ina.getCurrent();
     _last_current_a = a;   // stash for the I2C-free cached read the WebUI sips
 
     // Track the peak |current| seen since boot / since the last resetPeaks().
     // Homing and normal strokes both feed this — the operator can glance at
-    // the Health tab after a session and see exactly how hard it strained. :3
+    // the Health tab after a session and see exactly how hard it strained.
     float mag = fabsf(a);
     if (mag > _peak_current_a) _peak_current_a = mag;
 
@@ -83,16 +79,16 @@ float CurrentSensor::readCurrentA() {
 float CurrentSensor::readBusV() {
     if (!_ready) return 0.0f;
     // getBusVoltage() returns volts directly. VBUS is tied to the shunt high
-    // side so this reads the real 36V rail — free telemetry. :3
+    // side so this reads the real 36V rail — free telemetry.
     float v = (float)_ina.getBusVoltage();
-    _last_bus_v = v;       // stash for the cached cross-core read :3
+    _last_bus_v = v;       // stash for the cached cross-core read
     return v;
 }
 
 float CurrentSensor::readPowerW() {
     if (!_ready) return 0.0f;
     // getPower() returns watts directly — the chip multiplies V×I on-die from
-    // the same registers we already calibrated for current. Free telemetry. :3
+    // the same registers we already calibrated for current. Free telemetry.
     float w = (float)_ina.getPower();
     _last_power_w = w;
 
@@ -105,7 +101,7 @@ float CurrentSensor::readDieTempC() {
     if (!_ready) return 0.0f;
     // getTemperature() returns the INA228's own die temp in °C — a free health
     // signal on the isolated dirty side of the board. Not the motor, but if
-    // this chip is cooking, something nearby probably is too. :3
+    // this chip is cooking, something nearby probably is too.
     float t = (float)_ina.getTemperature();
     _last_die_temp_c = t;
     return t;
@@ -114,7 +110,7 @@ float CurrentSensor::readDieTempC() {
 float CurrentSensor::readShuntV() {
     if (!_ready) return 0.0f;
     // getShuntVoltage() returns volts directly — the raw signal the current
-    // reading is derived from. Mostly a diagnostic sanity-check value. :3
+    // reading is derived from. Mostly a diagnostic sanity-check value.
     float v = (float)_ina.getShuntVoltage();
     _last_shunt_v = v;
     return v;
@@ -126,7 +122,7 @@ float CurrentSensor::readEnergyWh() {
     // (integrated continuously in hardware since power-up or the last
     // RSTACC) and converts Joules -> Wh. Library returns double for the
     // extra headroom on the 40-bit register; we truncate to float since that's
-    // plenty of precision for a session Wh readout. :3
+    // plenty of precision for a session Wh readout.
     float wh = (float)_ina.getWattHour();
     _last_energy_wh = wh;
     return wh;
@@ -140,7 +136,7 @@ void CurrentSensor::resetPeaks() {
     // ...AND the chip's own hardware energy/charge accumulators, so a fresh
     // home/session starts the Wh counter back at zero too. setAccumulation(1)
     // is the INA228's RSTACC bit (register 0) — momentary reset, self-clearing.
-    // Only touch the hardware if the chip actually answered init(). :3
+    // Only touch the hardware if the chip actually answered init().
     if (_ready) {
         _ina.setAccumulation(1);
         _last_energy_wh = 0.0f;

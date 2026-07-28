@@ -1,64 +1,46 @@
 #pragma once
 
+// AIMServoDriver — concrete MotorDriver for the AIM-class closed-loop servos.
+//
+// Constraints:
+// - Build-guarded behind DRIVER_AIM_SERVO (platformio.ini). Uses
+//   FastAccelStepper for pulse generation on ESP32-S3.
+// - Targets the whole AIM family of Step/Direction closed-loop servo drives
+//   (57AIM30 and functionally-compatible siblings), not one specific motor.
+//   Step/Direction only — no SPI, no Modbus, no register config; the AIM
+//   drive owns the closed-loop control internally.
+// - Pinout (config_api.h, custom v0.0 Nano ESP32 board): AIM_PIN_STEP -> PUL
+//   (GPIO 5, D2), pulse train, one step per rising edge; AIM_PIN_DIR -> DIR
+//   (GPIO 6, D3). No endstop — homing is SENSORLESS via the INA228 current
+//   sensor.
+// - Geometry (capstan drum, 2:1 motor->drum reduction): rail-length agnostic,
+//   no fixed travel ceiling — the user's max rail length setting bounds the
+//   homing sweep, and homing MEASURES the real usable stroke between the two
+//   hard stops. STEPS_PER_REV = 1600/drum-rev (800 motor steps x 2:1);
+//   MM_PER_REV = pi x 25mm drum = 78.5398 mm/drum-rev; STEPS_PER_MM =~ 20.372;
+//   HOMING_BACKOFF = 10.0 mm.
+// - No enable pin: the AIM drive is always energized when powered. enable()/
+//   disable() are no-ops that satisfy the MotorDriver interface.
+// - CONTINUOUS BLENDING: streamTo() never softens a committed brake ramp
+//   (raise-only accel) — every sample just retargets FAS's in-flight move,
+//   which handles same-direction moves and reversals on its own.
+// - _blend_mode is VESTIGIAL (operator ruling 2026-07-27): neither streamTo()
+//   nor streamToSteps() reads it anymore — FAS retargeting handles every case
+//   uniformly, which is why MotionArbiter::setBlendMode() already aliases
+//   every mode to "allow" (MotionArbiter.cpp). The getter/setter pair stays
+//   only because MotorDriver's ABC contract, NVS persistence, and the WebUI
+//   HTTP settings JSON still reference it; SlopSync's wire exposure was
+//   retired outright (SlopSyncCatalog.h's `blend_mode_reserved`).
+
 #include <Arduino.h>
 #include "freertos/FreeRTOS.h"
 #include "config_api.h"
 #include "MotorDriver.h"
 #include "CurrentSensor.h"
 
-
-// Forward declarations — we only need the FAS types here, full headers in .cpp
+// Forward-declared: only the FAS type is needed here, the full header stays
+// in the .cpp.
 class FastAccelStepper;
-
-// ============================================================================
-// AIMServoDriver — concrete MotorDriver for the AIM-class closed-loop servos
-// ============================================================================
-//
-// Build-guarded behind DRIVER_AIM_SERVO (set in platformio.ini).
-// Uses FastAccelStepper for pulse generation on ESP32-S3.
-//
-// This driver targets the whole AIM family of Step/Direction closed-loop servo
-// drives (57AIM30 and functionally-compatible siblings), NOT one specific
-// motor. It's a "dumb" Step/Direction driver — no SPI, no Modbus, no register
-// config. The AIM drive handles all the closed-loop magic internally. We just
-// send PUL (pulse) and DIR (direction) signals and let the drive do its thing.
-// Clean, simple, and absolutely relentless. :3
-//
-// Hardware pinout (defined in config_api.h — custom v0.0 Nano ESP32 board):
-//   AIM_PIN_STEP → PUL (GPIO 5, D2) — pulse train, one step per rising edge
-//   AIM_PIN_DIR  → DIR (GPIO 6, D3) — direction signal
-//   NO ENDSTOP   → homing is SENSORLESS via the INA228 current sensor. :3
-//
-// Machine geometry (capstan drum, 2:1 motor->drum reduction):
-//   MAX_TRAVEL:    rail-length agnostic — no fixed ceiling. The user's max rail
-//                  length setting bounds the homing sweep; homing MEASURES the
-//                  real usable stroke between the two hard stops.
-//   STEPS_PER_REV: 1600 per DRUM rev (800 motor steps × 2:1 reduction)
-//   MM_PER_REV:    π × 25mm drum = 78.5398 mm/drum-rev
-//   STEPS_PER_MM:  1600 / 78.5398 = ~20.372 steps/mm
-//   HOMING_BACKOFF: 10.0 mm
-
-//
-// No enable pin — the AIM drive is always energized when powered. The driver
-// enable/disable calls are no-ops that satisfy the MotorDriver interface.
-//
-// CONTINUOUS BLENDING: streamTo() never softens a committed brake ramp
-// (raise-only accel) — every sample just retargets FAS's in-flight move, which
-// handles same-direction moves AND reversals cleanly on its own. No stop-and-
-// go stutter between waypoints — we keep pounding through the stream instead
-// of edging to a dead stop on every sample. The shaft just keeps thrusting,
-// relentless and full, stuffed all the way in until the belly bulges and it
-// can't take anymore yippie! :3
-//
-// _blend_mode below (2026-07-27, operator ruling — item 2) is VESTIGIAL: this
-// comment used to say behavior branched "per the selectable _blend_mode", but
-// neither streamTo() nor streamToSteps() has read that field for a while — FAS
-// retargeting handles every case uniformly now, which is exactly what let
-// MotionArbiter::setBlendMode() alias every mode to "allow" already (see
-// MotionArbiter.cpp). The getter/setter pair stays only because MotorDriver's
-// ABC contract, NVS persistence, and the WebUI HTTP settings JSON all still
-// reference it; SlopSync's 0x008A/0x0104 wire exposure was retired outright
-// (SlopSyncCatalog.h's `blend_mode_reserved`).
 
 class AIMServoDriver : public MotorDriver {
 public:
@@ -76,12 +58,12 @@ public:
     bool isHoming() const override { return _homing; }
 
     // Force the driver's internal homed flag for bench/remote testing WITHOUT a
-    // real homing cycle. Unlike the old inline flag-flip, this also enables FAS
-    // outputs and establishes a zero reference so moveTo()/streamTo()/
-    // streamToSteps() actually emit step/dir pulses to a (possibly disconnected)
-    // motor — the whole point of a bench HOME_OVERRIDE. Implementation lives in
-    // the .cpp because it has to touch the FastAccelStepper instance. Do NOT
-    // call on real hardware you don't want moving without a genuine home. :3
+    // real homing cycle. Enables FAS outputs and establishes a zero reference
+    // so moveTo()/streamTo()/streamToSteps() actually emit step/dir pulses to
+    // a (possibly disconnected) motor — the whole point of a bench
+    // HOME_OVERRIDE. Implementation lives in the .cpp because it has to touch
+    // the FastAccelStepper instance. Do NOT call on real hardware you don't
+    // want moving without a genuine home.
     void forceHomeState(bool homed) override;
     bool checkPushToHome() override;
 
@@ -89,7 +71,7 @@ public:
     void runMotorStep() override;
 
 protected:
-    // ---- Motion (MotionArbiter-only — see MotorDriver.h sole-caller lock) ----
+    // ---- Motion (MotionArbiter-only — see MotorDriver.h sole-caller lock) ---
     // Kept protected in the derived class too so the compile-time lock can't be
     // bypassed by holding a concrete AIMServoDriver& instead of a MotorDriver&.
     bool moveTo(float pos_mm) override;
@@ -107,7 +89,7 @@ protected:
 
 public:
     // No enable pin on the 57AIM30 — always energized when powered.
-    // These satisfy the interface but do nothing to hardware. :3
+    // These satisfy the interface but do nothing to hardware.
     void enable()  override;
     void disable() override;
 
@@ -116,12 +98,12 @@ public:
     void     setAcceleration(float accel_mm_s2) override;
     float    getMaxSpeed() const override { return _max_speed_mm_s; }
     // The accel ACTUALLY applied (post the driver's internal 20000 mm/s² clamp)
-    // — this is what settings echoes report back, never the raw request. :3
+    // — this is what settings echoes report back, never the raw request.
     float    getAcceleration() const override { return _accel_mm_s2; }
 
     // Returns the live FAS acceleration — what the ramp engine is actually
     // using right now, not the configured ceiling. Mirrors OSSM's
-    // stepper->getAcceleration() call in the raise-only guard. :3
+    // stepper->getAcceleration() call in the raise-only guard.
     uint32_t getLiveAcceleration() const override;
 
     // ---- Status -------------------------------------------------------------
@@ -133,7 +115,7 @@ public:
     // No driver chip registers to write — the 57AIM30 is configured via its own
     // front-panel DIP switches and parameter software. This is a no-op that
     // satisfies the interface. We accept the struct so the rest of the system
-    // (ConfigStore, WebUI) doesn't need to know we're a dumb drive. :3
+    // (ConfigStore, WebUI) doesn't need to know we're a dumb drive.
     void applyDriverConfig(const DriverConfig& cfg) override;
 
     // ---- Diagnostics --------------------------------------------------------
@@ -141,16 +123,13 @@ public:
     uint16_t getCurrentmA()  override { return 0; }
     uint8_t  getMicrosteps() override { return (uint8_t)(AIM_STEPS_PER_REV / 200); }
 
-    // ---- Continuous-blend tuning (VESTIGIAL — item 2, 2026-07-27) -----------
+    // ---- Continuous-blend tuning (VESTIGIAL) --------------------------------
     // Used to pick how streamTo() handled a new waypoint that reverses
     // direction mid-stroke (1=let-it-land, 2=allow-reversal, 3=hybrid). Dead
     // since streamTo()/streamToSteps() stopped reading _blend_mode — see the
-    // class-level comment above. MotionArbiter::setBlendMode() already
-    // aliased every mode to "allow" before this field was retired from the
-    // SlopSync wire (SlopSyncCatalog.h's `blend_mode_reserved`); this
-    // accessor pair just keeps the ABC contract / NVS / legacy HTTP JSON
-    // compiling. Still clamped to [1,3] purely to keep old callers' NVS
-    // round-trip harmless.
+    // file-header Constraints note. This accessor pair just keeps the ABC
+    // contract / NVS / legacy HTTP JSON compiling. Still clamped to [1,3]
+    // purely to keep old callers' NVS round-trip harmless.
     void    setBlendMode(uint8_t mode) { _blend_mode = constrain((int)mode, 1, 3); }
     uint8_t getBlendMode() const       { return _blend_mode; }
 
@@ -161,16 +140,15 @@ public:
 private:
     // Clears all streaming / blend / target-monitor state so that a stale
     // stream from before a Halt/Home can't keep issuing moveTo() commands
-    // that fight a fresh homing cycle. Clean slate, ready to be filled again. :3
+    // that fight a fresh homing cycle.
     void resetStreamState();
 
     // Self-contained homing task — spawned by home(), deletes itself when done.
-    // Mirrors StrokeEngine's _homingProcedure pattern exactly. :3
     static void _homingTaskImpl(void* param);
     void        _homingTask();
     // Sweep in one direction (dir_sign +1 rear / -1 front) until an INA228
     // current spike says we've buried the carriage against a hard stop.
-    // Returns true on stall, false if the full sweep ran with no wall. :3
+    // Returns true on stall, false if the full sweep ran with no wall.
     bool        _sweepToStall(int8_t dir_sign);
     TaskHandle_t _homingTaskHandle = nullptr;
 
@@ -180,7 +158,7 @@ private:
     // INA228 current sensor — the machine's sense of feel. Sensorless homing
     // reads this to know when the carriage has buried itself against the hard
     // stop (current spikes as it strains). Owned by the driver, initialized in
-    // init() after the caller has brought up the Wire bus. :3
+    // init() after the caller has brought up the Wire bus.
     CurrentSensor _current;
 
     bool    _homed   = false;
@@ -192,19 +170,19 @@ private:
     // two hard stops minus safety margins. 0 = not yet measured → fall back to
     // the configured max rail length (getMaxRailMm()). The WebUI reads this so
     // the stroke designer rescales to the REAL rail length once we've felt both
-    // ends. :3
+    // ends.
     float   _measured_stroke_mm = 0.0f;
 public:
     // Measured stroke accessor for the WebUI / status layer. Returns 0 until
-    // homing has measured both ends. :3
+    // homing has measured both ends.
     float getMeasuredStrokeMm() const override { return _measured_stroke_mm; }
     // Restore a previously-measured stroke from NVS so the rail scale is
     // correct at boot BEFORE the first homing cycle. Homing itself overwrites
-    // this with a fresh measurement when it completes. :3
+    // this with a fresh measurement when it completes.
     void setMeasuredStrokeMm(float mm) override {
         // Sanity bound only — NOT a rail-length clamp (measurement wins). The
         // homing sweep already caps how far a real span can be; this just
-        // rejects a garbage value from a corrupt NVS restore. :3
+        // rejects a garbage value from a corrupt NVS restore.
         if (mm > 0.0f && mm < 2000.0f) _measured_stroke_mm = mm;
     }
 
@@ -212,14 +190,14 @@ public:
     // These return the CACHED last reading (no I2C from the HTTP thread). The
     // cache is refreshed by update() on Core 1 at a low rate and by the homing
     // loop while it runs. Lets the operator watch the current live during
-    // bring-up and confirm the sensor works before trusting homing. :3
+    // bring-up and confirm the sensor works before trusting homing.
     float getBusCurrentA()  const override { return _current.cachedCurrentA(); }
     float getBusVoltageV()  const override { return _current.cachedBusV(); }
     bool  hasCurrentSensor() const override { return _current.isReady(); }
 
     // ---- Extended INA228 power telemetry for the WebUI Health tab -----------
     // Same cached, I2C-free pattern as the current/voltage pair above — safe
-    // to call from the Core 0 HTTP handler at any time. :3
+    // to call from the Core 0 HTTP handler at any time.
     float getBusPowerW()      const override { return _current.cachedPowerW(); }
     float getDieTempC()       const override { return _current.cachedDieTempC(); }
     float getPeakBusCurrentA() const override { return _current.getPeakCurrentA(); }
@@ -228,7 +206,7 @@ public:
     void  resetPowerStats()   override { _current.resetPeaks(); }  // clears peaks + INA228 Wh accumulator
 private:
     // Throttle for the update()-driven telemetry refresh. We only need the
-    // toolbar number a few times a second, not every motion tick. :3
+    // toolbar number a few times a second, not every motion tick.
     uint32_t _last_current_poll_ms = 0;       // fast poll (current+busV, 40Hz)
     uint32_t _last_current_full_poll_ms = 0;  // full poll (temp/energy/shunt, 1Hz)
 
@@ -246,8 +224,8 @@ private:
     int32_t  _last_target_steps  = 0;
     int8_t   _last_dir           = 0;       // -1, 0, +1 (native-step sign)
     bool     _have_last_target   = false;
-    // Watchdog: if the host stops talking dirty to us, settle on the last real
-    // sample so the carriage can't keep coasting toward a stale target. :3
+    // Watchdog: if the host stops sending updates, settle on the last real
+    // sample so the carriage can't keep coasting toward a stale target.
     float    _last_sample_mm     = 0.0f;
     uint32_t _last_sample_ms     = 0;
     bool     _have_last_sample   = false;
@@ -256,7 +234,7 @@ private:
     // Speed/accel cache for streamToSteps() — only call FAS setters when the
     // value actually changes. Calling them every waypoint forces a ramp recalc
     // mid-flight on every single command, which is the source of gritty motion.
-    // Cache starts at 0 so the first call always goes through. :3
+    // Cache starts at 0 so the first call always goes through.
     uint32_t _last_speed_steps_s  = 0;
     uint32_t _last_accel_steps_s2 = 0;
 

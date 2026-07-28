@@ -1,5 +1,4 @@
-// ============================================================================
-// test_main.cpp — doctest behavioral tests for the MILESTONE 3b data-plane and
+// test_slopsync_m3b — the MILESTONE 3b data-plane and
 // channel-semantics work:
 //
 //   MB-01..05  RFC-021  BLOB namespacing: one transfer verb, catalog = ns 0,
@@ -12,7 +11,6 @@
 //
 // Native (host-side, hardware-free): InProcessLink + ManualClock + XorShift32,
 // doctest's bundled main(), same harness shape as test_slopsync_streamingress.
-// ============================================================================
 
 #define DOCTEST_CONFIG_IMPLEMENT_WITH_MAIN
 #include <doctest/doctest.h>
@@ -75,7 +73,7 @@ void makeM3bCatalog(Catalog32& c, uint16_t replayDepth = uint16_t(limits::log_re
                           .perItemMax = 4096, .nameMax = 16});
 }
 
-// ---- delegate --------------------------------------------------------------
+// ---- delegate ---------------------------------------------------------------
 // Models a real config store: applyIntent reports `cfgChanged` iff the applied
 // value actually MOVED, which is exactly what RFC-002 tightened the contract to
 // mean. It also serves blob namespace 1 (a two-slot "preset store") through the
@@ -124,7 +122,7 @@ public:
     }
 };
 
-// ---- raw frame helpers -----------------------------------------------------
+// ---- raw frame helpers ------------------------------------------------------
 void writeFrame(ITransport& ep, FrameType type, uint16_t channel, std::span<const std::byte> payload) {
     std::array<std::byte, 600> buf{};
     FrameHeader h;
@@ -250,7 +248,7 @@ uint64_t bodyUint(const EventMsg& e, uint8_t key) {
     return 0;
 }
 
-// ---- MB-12..14 helpers: backpressure without inventing a transport ---------
+// ---- MB-12..14 helpers: backpressure without inventing a transport ----------
 // The in-process binding ALREADY refuses writes when its 16-deep egress queue
 // is full (detail::FrameQueue::kCapacity — "a full ring means write() returns
 // false, same as any real binding's egress queue"). So a stall is produced by
@@ -296,13 +294,12 @@ void tallyChunks(const std::vector<DecodedReply>& replies, std::vector<int>& per
 
 }  // namespace
 
-// ============================================================================
-// MB-01 (RFC-021) — BLOB_REQ's namespacing is ADDITIVE-BY-DEFAULT: a bare
+// ---- MB-01 (RFC-021) --------------------------------------------------------
+// BLOB_REQ's namespacing is ADDITIVE-BY-DEFAULT: a bare
 // catalog request is still the empty CBOR map, because namespace 0 IS the
 // default. The generalization costs the common case exactly zero bytes, which
 // is what lets catalog transfer keep working unchanged through the generalized
 // path.
-// ============================================================================
 TEST_CASE("MB-01: BLOB_REQ round-trips namespace/store/slot; the catalog request stays an empty map") {
     SUBCASE("bare catalog request encodes to an empty map") {
         BlobReqMsg m{};
@@ -388,12 +385,11 @@ TEST_CASE("MB-01: BLOB_REQ round-trips namespace/store/slot; the catalog request
     }
 }
 
-// ============================================================================
-// MB-02 (RFC-021) — the BLOB_CHUNK identity header is namespace-agnostic and
+// ---- MB-02 (RFC-021) --------------------------------------------------------
+// the BLOB_CHUNK identity header is namespace-agnostic and
 // round-trips; a reassembler REFUSES chunks belonging to a different blob,
 // which is what lets a catalog transfer and a preset fetch be in flight at the
 // same time without corrupting each other.
-// ============================================================================
 TEST_CASE("MB-02: BLOB_CHUNK header carries identity; a reassembler rejects a foreign blob's chunks") {
     std::array<std::byte, 400> payload{};
     for (size_t i = 0; i < payload.size(); ++i) payload[i] = std::byte(uint8_t(i));
@@ -446,12 +442,11 @@ TEST_CASE("MB-02: BLOB_CHUNK header carries identity; a reassembler rejects a fo
     CHECK(std::equal(assembled.begin(), assembled.end(), payload.begin()));
 }
 
-// ============================================================================
-// MB-03 (RFC-021) — the hub serves namespace 0 ITSELF (never through the
+// ---- MB-03 (RFC-021) --------------------------------------------------------
+// the hub serves namespace 0 ITSELF (never through the
 // delegate: the catalog bytes here are the same buffer the etag was computed
 // over, so catalog and etag cannot drift), and every chunk it emits is stamped
 // with the catalog identity.
-// ============================================================================
 TEST_CASE("MB-03: catalog transfer works unchanged through the generalized BLOB path") {
     Catalog32 cat;
     makeM3bCatalog(cat);
@@ -494,12 +489,11 @@ TEST_CASE("MB-03: catalog transfer works unchanged through the generalized BLOB 
     for (size_t i = 0; i < w.catalog_etag.size(); ++i) CHECK(digest[i] == w.catalog_etag[i]);
 }
 
-// ============================================================================
-// MB-04 (RFC-021) — namespace 1 rides the SAME verb, resolved through the
+// ---- MB-04 (RFC-021) --------------------------------------------------------
+// namespace 1 rides the SAME verb, resolved through the
 // delegate's readBlob() seam. This is the seam milestone 5's NVS-backed preset
 // store plugs into: it implements one method and inherits chunking, selective
 // repair, total_bytes pre-sizing and CHUNK_UNAVAILABLE for free.
-// ============================================================================
 TEST_CASE("MB-04: a store item transfers through the same verb via the delegate seam") {
     Catalog32 cat;
     makeM3bCatalog(cat);
@@ -559,12 +553,11 @@ TEST_CASE("MB-04: a store item transfers through the same verb via the delegate 
                      reinterpret_cast<const std::byte*>(del.storeItems[1].data())));
 }
 
-// ============================================================================
-// MB-05 (RFC-021) — the failure surface is honest and namespace-agnostic:
+// ---- MB-05 (RFC-021) --------------------------------------------------------
+// the failure surface is honest and namespace-agnostic:
 // unknown namespace / store / slot, and a repair naming an index the blob does
 // not have, all answer CHUNK_UNAVAILABLE (whose registry note was generalized
 // from "catalog chunk" for exactly this).
-// ============================================================================
 TEST_CASE("MB-05: unresolvable blobs and out-of-range repairs NACK CHUNK_UNAVAILABLE") {
     Catalog32 cat;
     makeM3bCatalog(cat);
@@ -617,12 +610,11 @@ TEST_CASE("MB-05: unresolvable blobs and out-of-range repairs NACK CHUNK_UNAVAIL
     }
 }
 
-// ============================================================================
-// MB-06 (RFC-017 + the EVENT `body` grammar fix) — a published log line lands
+// ---- MB-06 (RFC-017 + the EVENT `body` grammar fix) -------------------------
+// a published log line lands
 // as ONE log_events::entry EVENT whose kind-specific fields ride the scoped
 // `body` (40) sub-map, keyed by 0x0008's OWN catalog schema. That is what makes
 // device-authored EVENT channels possible without a registry PR per field.
-// ============================================================================
 TEST_CASE("MB-06: publishLog emits a body-scoped EVENT; over-length strings truncate, never vanish") {
     Catalog32 cat;
     makeM3bCatalog(cat);
@@ -666,12 +658,11 @@ TEST_CASE("MB-06: publishLog emits a body-scoped EVENT; over-length strings trun
     }
 }
 
-// ============================================================================
-// MB-07 (RFC-017) — replay_depth. §9.4 says events are edges and are NEVER
+// ---- MB-07 (RFC-017) --------------------------------------------------------
+// replay_depth. §9.4 says events are edges and are NEVER
 // replayed; the log declares a replay depth, which is the ONE sanctioned
 // exception, and it exists because a client that connects AFTER a fault must
 // still be able to see what happened.
-// ============================================================================
 TEST_CASE("MB-07: a late subscriber replays the ring tail, bounded by the declared replay_depth") {
     Catalog32 cat;
     makeM3bCatalog(cat, /*replayDepth=*/3);
@@ -716,15 +707,14 @@ TEST_CASE("MB-07: a late subscriber replays the ring tail, bounded by the declar
     CHECK_FALSE(pe->hasReplayDepth);
 }
 
-// ============================================================================
-// MB-07b (RFC-017 / M5b) — §9.4's VISIBLE drop counter for the log ring.
+// ---- MB-07b (RFC-017 / M5b) -------------------------------------------------
+// §9.4's VISIBLE drop counter for the log ring.
 //
 // A bounded log is fine. A bounded log that silently eats lines is not: the
 // operator reading it cannot tell "nothing happened" from "the interesting part
 // scrolled off". The firmware wires logDropped() (plus its own httpTask->hub
 // bridge ring's drops) into the 0x0006 hub-status snapshot, so this counter is
 // load-bearing on the wire and not merely diagnostic.
-// ============================================================================
 TEST_CASE("MB-07b: overflowing the log ring counts every dropped line and still replays the newest tail") {
     Catalog32 cat;
     makeM3bCatalog(cat, /*replayDepth=*/4);
@@ -760,12 +750,11 @@ TEST_CASE("MB-07b: overflowing the log ring counts every dropped line and still 
     CHECK(bodyTstr(events[3], log_body::message) == "line " + std::to_string(lines));
 }
 
-// ============================================================================
-// MB-08 (RFC-002) — the CLIENT half of the cfg_gen rule: an accepted but
+// ---- MB-08 (RFC-002) --------------------------------------------------------
+// the CLIENT half of the cfg_gen rule: an accepted but
 // VALUE-IDENTICAL config-set still gets its post-clamp ECHO (ground truth is
 // unaffected) but does NOT bump cfg_gen. The old "accepted therefore bumped"
 // reading re-armed on-change publications and resync storms for no-op writes.
-// ============================================================================
 TEST_CASE("MB-08: a value-identical accepted config-set echoes but does not bump cfg_gen") {
     Catalog32 cat;
     makeM3bCatalog(cat);
@@ -824,12 +813,11 @@ TEST_CASE("MB-08: a value-identical accepted config-set echoes but does not bump
     CHECK(hub.cfgGen() == uint16_t(gen0 + 2));
 }
 
-// ============================================================================
-// MB-09 (RFC-011) — the HUB half, the mirror twin: a machine-side config
+// ---- MB-09 (RFC-011) --------------------------------------------------------
+// the HUB half, the mirror twin: a machine-side config
 // change (physical control, boot adoption, internal recalculation) had no way
 // to advance the generation at all, so a client's `precondition` CAS passed
 // against config that had already moved.
-// ============================================================================
 TEST_CASE("MB-09: bumpConfigGeneration advances cfg_gen and invalidates a stale CAS") {
     Catalog32 cat;
     makeM3bCatalog(cat);
@@ -867,11 +855,10 @@ TEST_CASE("MB-09: bumpConfigGeneration advances cfg_gen and invalidates a stale 
     CHECK(del.speed == 321.0f);  // the stale write never reached the machine
 }
 
-// ============================================================================
-// MB-10 (RFC-024) — idle reaping. §6.5's "MAY reap at 3x the idle interval"
+// ---- MB-10 (RFC-024) --------------------------------------------------------
+// idle reaping. §6.5's "MAY reap at 3x the idle interval"
 // was written and never implemented, so a viewer session that went dark held a
 // slot until reboot. A session that keeps PINGing is never touched.
-// ============================================================================
 TEST_CASE("MB-10 (RFC-042): a silent non-owning session goes STALE at idle_reap_multiplier x the idle interval, slot retained") {
     Catalog32 cat;
     makeM3bCatalog(cat);
@@ -926,12 +913,11 @@ TEST_CASE("MB-10 (RFC-042): a silent non-owning session goes STALE at idle_reap_
     CHECK_FALSE(sawGoodbye);
 }
 
-// ============================================================================
-// MB-11 (RFC-024 + §11.3) — the two liveness regimes are DISJOINT and coexist:
+// ---- MB-11 (RFC-024 + §11.3) ------------------------------------------------
+// the two liveness regimes are DISJOINT and coexist:
 // a source-owning session is governed by the tighter deadman window and its
 // loss policy (motion consequence); everyone else by idle reaping (no motion
 // consequence at all). A hub with no sources only ever exercises the latter.
-// ============================================================================
 TEST_CASE("MB-11 (RFC-042): idle reaping marks STALE, never runs a loss policy, never frees the slot") {
     Catalog32 cat;
     makeM3bCatalog(cat);
@@ -959,8 +945,8 @@ TEST_CASE("MB-11 (RFC-042): idle reaping marks STALE, never runs a loss policy, 
     CHECK_FALSE(hub.estopLatched());
 }
 
-// ============================================================================
-// RFC-028 regression — ChunkReassembler TOTALITY (found by test/fuzz/fuzz_blob).
+// ---- RFC-028 regression -----------------------------------------------------
+// ChunkReassembler TOTALITY (found by test/fuzz/fuzz_blob).
 //
 // Minimized crashing input: a BLOB_CHUNK header whose chunk_count is far
 // larger than the reassembler's MaxChunks, followed by a call to
@@ -977,7 +963,6 @@ TEST_CASE("MB-11 (RFC-042): idle reaping marks STALE, never runs a loss policy, 
 // The lesson worth keeping: refusing a transfer has to refuse its NUMBERS
 // too. A guard that leaves attacker-chosen sizes in members is a guard that
 // only moved the bug one call to the right.
-// ============================================================================
 TEST_CASE("RFC-028: a refused blob transfer leaves no attacker-chosen sizes behind") {
     ChunkReassembler<8> reasm;
 
@@ -1017,8 +1002,7 @@ TEST_CASE("RFC-028: an accepted transfer still reports its real missing set") {
     CHECK(missing[2] == 2);
 }
 
-// ============================================================================
-// MB-12 (Â§8.4 + Â§13.1) â€” THE BACKPRESSURE REGRESSION.
+// ---- MB-12 (Â§8.4 + Â§13.1) â€” THE BACKPRESSURE REGRESSION. ----------------
 //
 // handleBlobReq used to answer a request by blasting every chunk in one
 // synchronous loop and THROWING THE TRANSPORT'S RETURN VALUE AWAY. Â§13.1 says
@@ -1032,7 +1016,6 @@ TEST_CASE("RFC-028: an accepted transfer still reports its real missing set") {
 // update(), pausing exactly when the transport pushes back. Both halves are
 // asserted here: that it PACES (one transfer cannot own a tick), and that a
 // link which refuses and later accepts still receives EVERY chunk ONCE.
-// ============================================================================
 TEST_CASE("MB-12: a refusing transport pauses a blob transfer; it resumes and delivers every chunk once") {
     Catalog32 cat;
     makeM3bCatalog(cat);
@@ -1111,15 +1094,14 @@ TEST_CASE("MB-12: a refusing transport pauses a blob transfer; it resumes and de
     }
 }
 
-// ============================================================================
-// MB-13 (Â§8.4) â€” SELECTIVE REPAIR resumes too, and resumes CORRECTLY.
+// ---- MB-13 (§8.4) -----------------------------------------------------------
+// SELECTIVE REPAIR resumes too, and resumes CORRECTLY.
 //
 // The repair path is the one that would rot quietly if a resumable transfer
 // only remembered "next index": a repair is an arbitrary index LIST, so the
 // cursor has to walk the list, not a range. A resume that fell back to
 // counting would silently start streaming the whole blob at a client that
 // asked for a handful of holes.
-// ============================================================================
 TEST_CASE("MB-13: a selective repair survives backpressure and delivers exactly the named indices") {
     Catalog32 cat;
     makeM3bCatalog(cat);
@@ -1163,15 +1145,13 @@ TEST_CASE("MB-13: a selective repair survives backpressure and delivers exactly 
     }
 }
 
-// ============================================================================
-// MB-14 (Â§6.8) â€” the cursor DIES WITH ITS SESSION.
+// ---- MB-14 (Â§6.8) â€” the cursor DIES WITH ITS SESSION. --------------------
 //
 // Â§8's third field bug was session-scoped state (source ownership) that
 // outlived its session and poisoned every later client. A stalled blob cursor
 // is the same shape, so it is cleared on the same one path every session death
 // funnels through â€” and it is checked the way that bug taught us to check:
 // back-to-back sessions with NO reboot in between.
-// ============================================================================
 TEST_CASE("MB-14: a stalled transfer is torn down with its session and never resumes into the next one") {
     Catalog32 cat;
     makeM3bCatalog(cat);

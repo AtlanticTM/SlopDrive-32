@@ -1,20 +1,17 @@
-// SlopDrive-32 — main.cpp
-//
-// Thin composition root. All logic lives in the modules under
-// system/, motion/, comms/, and ui/. This file only:
-//   1. Declares module instances.
-//   2. Wires them together in setup().
-//   3. Creates FreeRTOS tasks with correct core pinning.
-//   4. Idles in loop().
-//
-// Core assignment (.clinerules §2):
-//   Core 1 (real-time):  motorTask, Generator task
-//   Core 0 (system):     commsTask, httpTask
-//
-// D4 (event-driven): TCode callbacks submit MotionIntent via arbiter
-// (Core 0 → Core 1 single-slot deferral). PatternEngine emits one intent
-// per stroke segment. motorTask processes deferred intents on Core 1.
-// No periodic motion tick, no chase loop. ONE COMMAND → ONE PLAN → FAS.
+// SlopDrive-32 — main.cpp: composition root, wires modules and creates tasks.
+// Constraints:
+//   All logic lives in system/, motion/, comms/, ui/. This file only declares
+//   module instances, wires them in setup(), creates FreeRTOS tasks with
+//   correct core pinning, and idles in loop().
+//   Core 1 (real-time): motorTask, streamSamplerTask, PatternEngine's own
+//   task, servoBusTask (Modbus backend only).
+//   Core 0 (system): commsTask, httpTask.
+//   D4 event-driven: TCode/SlopSync callbacks submit MotionIntent via the
+//   arbiter (Core 0 -> Core 1 deferral queue); PatternEngine emits one
+//   intent per stroke segment; motorTask drains deferred intents on Core 1.
+//   No periodic motion tick, no chase loop — ONE COMMAND -> ONE PLAN -> FAS.
+// See: docs/canon/DOCTRINE.md (motion doctrine, sole-caller rule, dual-core
+//   task separation).
 
 #include <Arduino.h>
 #include <LittleFS.h>
@@ -68,20 +65,16 @@ extern "C" bool bleInUse(void) { return true; }
 #endif
 
 
-// ============================================================================
-// Module instances
-// ============================================================================
+// ---- Module instances -------------------------------------------------------
 
-// ServoModbus — moved ABOVE the motor-driver block (Phase 2) so
-// ModbusServoDriver can take it by reference at construction. Was previously
-// declared further down, right before its own #include block; the transport
-// object itself doesn't care where it's declared, but the new Modbus motor
-// driver needs a live ServoModbus& to bind to. :3
+// ServoModbus must be declared above the motor-driver block: ModbusServoDriver
+// takes it by reference at construction, so the reference must already exist.
+// The transport object itself has no ordering requirement of its own.
 #if defined(FEATURE_RS485_MODBUS)
 static ServoModbus     servoModbus(Serial1, /* addr */ 1);
 #endif
 
-// Runtime-selectable motion backend (Phase 2 — MotorProxy/plan.md "Design").
+// Runtime-selectable motion backend (Phase 2, via MotorProxy indirection).
 // g_motion_backend (below) picks FAS vs. Modbus; the pick is read from NVS as
 // early as possible in setup() and applied via motor.bind() before ANY other
 // module touches `motor`. Every other module (patternEngine, arbiter, webui,
@@ -101,7 +94,7 @@ static ServoModbus     servoModbus(Serial1, /* addr */ 1);
 // 0 = FAS step/dir (default), 1 = Modbus direct drive. Set once, early in
 // setup(), from machineBackendLoad() — read-only after that point until the
 // next reboot (backend switch is strict reboot-to-apply, see WebUI.cpp
-// POST /api/machine/commit). AIM servo backend only. :3
+// POST /api/machine/commit). AIM servo backend only.
 static uint8_t g_motion_backend = 0;
 
 static SystemState        g_state;
@@ -135,23 +128,21 @@ static slopdrive::SlopSyncHubService* slopSyncHub = nullptr;
 
 // WiFi OTA path (firmware + LittleFS bundle). Owns the shared safety gate for
 // both ArduinoOTA (espota) and the HTTP /api/ota endpoints. Serviced from the
-// Core-0 httpTask only — never the motion-critical core. :3
+// Core-0 httpTask only — never the motion-critical core.
 static OtaService      otaService(g_state, arbiter, patternEngine);
 
-// NOTE: servoModbus itself now lives further up (right above the motor-driver
-// block) so ModbusServoDriver can bind to it — see the comment there. :3
+// servoModbus itself is declared above the motor-driver block so
+// ModbusServoDriver can bind to it — see the comment there.
 
 #if defined(FEATURE_RS485_MODBUS) && defined(DRIVER_AIM_SERVO)
 // Report-only FAS-vs-encoder cross-check — reads servoModbus telemetry + the
-// motor's step counter, never commands anything. Lives on httpTask Core 0. :3
+// motor's step counter, never commands anything. Lives on httpTask Core 0.
 static EncoderValidator encoderValidator(servoModbus, motor);
 #endif
 
 
 
-// ============================================================================
-// FreeRTOS Tasks
-// ============================================================================
+// ---- FreeRTOS Tasks ---------------------------------------------------------
 
 // Core 1 — real-time: homing + D4 deferred-intent consumer
 static void motorTask(void* /*param*/) {
@@ -199,7 +190,7 @@ static void motorTask(void* /*param*/) {
             }
         }
         motor.update();
-        // D4: process any Core 0 → Core 1 deferred intents
+        // D4: process any Core 0 -> Core 1 deferred intents
         arbiter.processDeferred();
         // SlopGlow liveness: this pulse is what keeps the status LEDs
         // animating. If this loop dies, the lights freeze — by design.
@@ -209,11 +200,11 @@ static void motorTask(void* /*param*/) {
 }
 
 // Core 1 — real-time: SlopMotion sampler. Plans Core-0 commands on the
-// slopmotion::Engine (quintic waveform / Ruckig chase + guard, CLAUDE.md
-// §7.6), samples the plan at ~1kHz, and feeds the arbiter's stream fast-path
-// (submitStreamSample). Publishes telemetry for the WebUI overlay. Only
-// drives motion while a TCode stream is recently active — otherwise it
-// yields the motor to PatternEngine / manual moves. :3
+// slopmotion::Engine (quintic waveform / Ruckig chase + guard, docs/canon
+// doctrine §SlopMotion), samples the plan at ~1kHz, and feeds the arbiter's
+// stream fast-path (submitStreamSample). Publishes telemetry for the WebUI
+// overlay. Only drives motion while a TCode stream is recently active —
+// otherwise it yields the motor to PatternEngine / manual moves.
 static void streamSamplerTask(void* /*param*/) {
     TickType_t lastWake     = xTaskGetTickCount();
     bool       wasActive    = false;
@@ -234,18 +225,18 @@ static void streamSamplerTask(void* /*param*/) {
         // the whole cubic, and only start the idle countdown once the curve has
         // genuinely settled to a hold. The recent-packet clause still holds the
         // motor for the timeout AFTER the last move completes so a same-position
-        // re-command doesn't drop-then-reacquire. :3
+        // re-command doesn't drop-then-reacquire.
         bool recentPacket = g_state.last_intiface_ms != 0 &&
                             (now_ms - g_state.last_intiface_ms < STREAM_IDLE_TIMEOUT_MS);
         bool interpBusy   = g_slopmotion.isBusy(nowUs);
 
         // Trailing hold measured from MOVE-END, not packet arrival. While the
         // curve is gliding we keep stamping lastMotionMs; once it settles to a
-        // hold we keep the motor for one more STREAM_IDLE_TIMEOUT_MS window. This
-        // is the operator's requested \"finish the move, THEN hold ~500 ms\" — a
+        // hold we keep the motor for one more STREAM_IDLE_TIMEOUT_MS window.
+        // This is the "finish the move, THEN hold ~500 ms" requirement — a
         // long final segment (e.g. 933 ms) no longer releases with 0 ms trailing
         // hold just because the last packet arrived >500 ms ago. recentPacket
-        // still covers the between-packets case on a live stream. :3
+        // still covers the between-packets case on a live stream.
         if (interpBusy) lastMotionMs = now_ms;
         bool postMoveHold = lastMotionMs != 0 &&
                             (now_ms - lastMotionMs < STREAM_IDLE_TIMEOUT_MS);
@@ -353,9 +344,10 @@ static void streamSamplerTask(void* /*param*/) {
             g_state.sm_eff_jmax = smCfg.limits.jmax;
         }
 
-        // Drain the Core-0 → Core-1 command handoff; each commit is ONE plan.
+        // Drain the Core-0 -> Core-1 command handoff; each commit is ONE plan.
         // Plan time is the software-double cost — benched right here, where it
-        // runs, and surfaced via GET /api/slopmotion (the §7.6 part-2 gate).
+        // runs, and surfaced via GET /api/slopmotion (docs/canon doctrine
+        // §SlopMotion part-2 gate).
         slopmotion::Command cmd;
         while (xQueueReceive(g_interp_queue, &cmd, 0) == pdTRUE) {
             const uint32_t t0 = (uint32_t)esp_timer_get_time();
@@ -477,7 +469,7 @@ static void streamSamplerTask(void* /*param*/) {
 // at the tail of httpTask, so any blocked step freezes the breath; this names
 // the offender in the web log ([STALL] ...) instead of guesswork. Near-zero
 // cost — only two millis() reads per step, logs only when a step exceeds the
-// threshold. Keep it: it's how the WS-loop-on-httpTask freeze was found. :3
+// threshold.
 #define STALL_LOG_MS 120u
 #define TIME_STEP(call, name) do {                                            \
         uint32_t _s0 = millis(); call; uint32_t _dt = millis() - _s0;         \
@@ -506,23 +498,17 @@ static void httpTask(void* param) {
     WebUI* ui = static_cast<WebUI*>(param);
     while (true) {
         TIME_STEP(ui->update(),           "http:ui.update");
-        // M5c: the :81 telemetry WebSocket is GONE. It once had to be moved off
-        // this task because a wedged client's blocking socket ops (~2.6 s
-        // observed) froze the heartbeat + HTTP + OTA on Core 0; the replacement
-        // never blocks at all, because ESP32Async's write() queues or refuses
-        // rather than waiting. The whole class of failure left with it.
-        //
-        // Kept as history because the ISOLATION LESSON outlives the plane:
-        // never service a socket that can block from the task that also owns
-        // the heartbeat, HTTP and OTA. A stuck client may delay telemetry; it
-        // must never be able to delay any of those three. :3
+        // M5c: the :81 telemetry WebSocket is gone — see TRAPS.md T8 (never
+        // stream to a wedged WebSocket client under a shared lock). The
+        // replacement never blocks: ESP32Async's write() queues or refuses
+        // rather than waiting, so a stuck client can never delay the
+        // heartbeat, HTTP, or OTA that share this task.
         TIME_STEP(otaService.handle(),    "http:ota.handle");
 #if defined(FEATURE_RS485_MODBUS)
         // In Modbus motion-backend mode the bus is serviced from Core 1
         // (servoBusTask) instead — single-owner rule, ServoModbus is not
         // thread-safe to poll from two tasks. In FAS mode (the default,
-        // backend 0) nothing changes: httpTask keeps servicing it here
-        // exactly like before Phase 2. :3
+        // backend 0) httpTask keeps servicing it here.
         if (g_motion_backend == 0) {
             TIME_STEP(servoModbus.update(),   "http:servoModbus");
         }
@@ -549,7 +535,7 @@ static void httpTask(void* param) {
 // the DRIVER_AIM_SERVO branch above. g_motion_backend can only ever be 1
 // there too, so this doesn't lose any real configuration, just keeps a
 // hypothetical FEATURE_RS485_MODBUS-without-DRIVER_AIM_SERVO build compiling.
-// Phase 3 (plan.md "Task/core layout"): setpoint-first priority. Every 2ms
+// Phase 3: setpoint-first priority. Every 2ms
 // tick, mbMotor.executorTick() runs FIRST — it only sends a setpoint from an
 // IDLE bus (StreamedSetpointExecutor::onTick), so a setpoint due this tick
 // always gets first crack at the wire. servoModbus.update() runs SECOND and
@@ -558,7 +544,7 @@ static void httpTask(void* param) {
 // constants (POLL_INTERVAL_MS etc.) already keep that traffic from hogging
 // the bus. A poll already in flight when a setpoint comes due can delay that
 // setpoint by up to ~1 transaction (~4ms @19200, less @115200) — acceptable
-// jitter for this phase; reprogramBaud(115200) below shrinks it. :3
+// jitter for this phase; reprogramBaud(115200) below shrinks it.
 static void servoBusTask(void* /*param*/) {
     while (true) {
         mbMotor.executorTick(esp_timer_get_time());
@@ -570,9 +556,7 @@ static void servoBusTask(void* /*param*/) {
 
 
 // Decodes esp_reset_reason()'s enum to its name for the boot log — the only
-// diagnostic a spontaneous, unlogged-cause reboot leaves behind (bench
-// overnight session, 2026-07-28: one such reboot with nothing in /api/log to
-// explain it).
+// diagnostic a spontaneous, unlogged-cause reboot leaves behind.
 static const char* resetReasonName(esp_reset_reason_t r) {
     switch (r) {
         case ESP_RST_UNKNOWN:    return "UNKNOWN";
@@ -595,9 +579,7 @@ static const char* resetReasonName(esp_reset_reason_t r) {
     }
 }
 
-// ============================================================================
-// setup() — ordered wiring only
-// ============================================================================
+// ---- setup() — ordered wiring only ------------------------------------------
 
 void setup() {
     Serial.begin(SERIAL_CONTROL_BAUD);
@@ -624,7 +606,7 @@ void setup() {
 #endif
 
 #if defined(DRIVER_AIM_SERVO)
-    // Runtime motion-backend selection (Phase 2 — plan.md "Static-init trap").
+    // Runtime motion-backend selection (Phase 2 — see MotorProxy.h's static-init-trap note).
     // Read NVS ("machcfg"/backend) and bind the proxy to a concrete driver as
     // early as physically possible — BEFORE aimGeometryInit(), BEFORE
     // ConfigStore::load(), BEFORE motor.init()/applyDriverConfig(), before
@@ -633,7 +615,7 @@ void setup() {
     // boot-order bug that must halt loudly, not limp along silently. NVS
     // itself is safe to read this early: the Arduino core's own startup
     // brings up nvs_flash_init() before setup() ever runs, well before
-    // LittleFS.begin() below. :3
+    // LittleFS.begin() below.
     g_motion_backend = machineBackendLoad();
 #if defined(FEATURE_RS485_MODBUS)
     if (g_motion_backend == 1) {
@@ -646,7 +628,7 @@ void setup() {
 #else
     // Modbus feature not compiled into this build at all — always FAS,
     // regardless of what a stale NVS value might say (machineBackendLoad()
-    // already clamps to 0 in this case too — belt and suspenders). :3
+    // already clamps to 0 in this case too — belt and suspenders).
     motor.bind(fasMotor);
     SLOGI("boot", "Motion backend: FAS step/dir (FEATURE_RS485_MODBUS not compiled)");
 #endif
@@ -658,7 +640,7 @@ void setup() {
     Wire.setClock(400000);
     // Runtime steps/mm — load the persisted motor steps/rev (drive reg 0x0B
     // mirror) BEFORE any motion math runs. Reprogramming steps/rev from the
-    // Configure pane updates this live (+ forces a re-home) — no reboot. :3
+    // Configure pane updates this live (+ forces a re-home) — no reboot.
     aimGeometryInit();
 #endif
 
@@ -697,7 +679,7 @@ void setup() {
 #if defined(DRIVER_AIM_SERVO)
     webui.setEncoderValidator(encoderValidator);
 
-    // ---- Modbus-mode baud auto-config (Phase 3) ------------------------------
+    // ---- Modbus-mode baud auto-config (Phase 3) -----------------------------
     // OSSM-RS-style: the drive boots factory-19200 every power-cycle (we NEVER
     // save baud to its EEPROM — see ServoModbus::reprogramBaud() doc — so a
     // power-cycle always recovers factory state no matter what we did last
@@ -705,13 +687,13 @@ void setup() {
     // ACTIVE backend — FAS mode only needs telemetry, and its dual-baud probe
     // already finds a drive at either speed. Runs BEFORE the reg-0x0B e-gear
     // adoption below so that read (and everything else in this boot) lands at
-    // the FINAL baud, not the ephemeral 19200 the probe started at. :3
+    // the FINAL baud, not the ephemeral 19200 the probe started at.
     if (g_motion_backend == 1 && servoModbus.isReady() && servoModbus.baud() == 19200) {
         if (servoModbus.reprogramBaud(115200)) {
             SLOGI("boot", "Modbus mode: drive reprogrammed 19200 -> 115200 (OSSM-RS magic sequence) :3");
         } else {
             SLOGW("boot", "Modbus mode: 19200 -> 115200 reprogram FAILED — staying at 19200 "
-                  "(motion still works, just tighter bus budget per plan.md).");
+                  "(motion still works, just tighter bus budget at the lower baud).");
         }
     }
 
@@ -719,7 +701,7 @@ void setup() {
     // motor.applyDriverConfig() call (right after motor.init()) ran BEFORE
     // servoModbus.init(), so in Modbus mode its queued register writes (output
     // state, torque clamp 0x18) were dropped by the !_ready guard. FAS mode is
-    // untouched — its applyDriverConfig is a no-op either way. :3
+    // untouched — its applyDriverConfig is a no-op either way.
     if (g_motion_backend == 1 && servoModbus.isReady()) {
         motor.applyDriverConfig(g_state.driver);
     }
@@ -730,7 +712,7 @@ void setup() {
     // where the firmware would otherwise boot at the 800 default while the
     // drive physically needs 1600 pulses/rev, silently halving every commanded
     // millimeter until the mismatch is noticed. Machine is unhomed at this
-    // point, so the forced re-home semantics of a steps/rev change are free. :3
+    // point, so the forced re-home semantics of a steps/rev change are free.
     if (servoModbus.isReady()) {
         uint16_t drive_spr = 0;
         if (servoModbus.readRegisterBlocking(0x0B, drive_spr) &&
@@ -773,7 +755,7 @@ void setup() {
     // that fails to spin up under heap pressure (motorTask IS the homing +
     // e-stop servicer) must halt loudly, not boot a device that silently can't
     // home, e-stop, or move. Same configASSERT discipline as the queue
-    // creations above. :3
+    // creations above.
     // End of the single-task boot phase: from here logs are ring-buffered and
     // drained by httpTask (immediate synchronous drain is only safe pre-tasks).
     sloplog::logger().setImmediateDrain(false);
@@ -785,7 +767,7 @@ void setup() {
     // streamSamplerTask: Core 1, priority 4 — SlopMotion sampler. 16 KB stack:
     // commit() nests Ruckig temporaries (InputParameter 328 B + Trajectory
     // 2.2 KB per frame, measured on xtensa) — the 4 KB stack that fit the
-    // cubic is exactly the HubSession stack-bomb class waiting to recur. :3
+    // cubic is exactly the TRAPS.md T1 stack-bomb class waiting to recur.
     task_ok = xTaskCreatePinnedToCore(streamSamplerTask, "Sampler", 16384, nullptr, 4, nullptr, 1);
     configASSERT(task_ok == pdPASS);
     task_ok = xTaskCreatePinnedToCore(commsTask, "Comms", 6144, nullptr, 2, nullptr, 0);
@@ -800,7 +782,7 @@ void setup() {
     // polling it — verified by reading through setup() top to bottom, not
     // assumed. In FAS mode (g_motion_backend == 0, the default) this task is
     // never created at all; httpTask keeps servicing servoModbus as it always
-    // has (see the guard in httpTask above). :3
+    // has (see the guard in httpTask above).
     if (g_motion_backend == 1) {
         task_ok = xTaskCreatePinnedToCore(servoBusTask, "ServoBus", 4096, nullptr, 5, nullptr, 1);
         configASSERT(task_ok == pdPASS);
@@ -849,9 +831,7 @@ void setup() {
 }
 
 
-// ============================================================================
-// loop() — idle
-// ============================================================================
+// ---- loop() — idle ----------------------------------------------------------
 
 void loop() {
     vTaskDelay(pdMS_TO_TICKS(100));

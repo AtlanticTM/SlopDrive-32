@@ -1,12 +1,14 @@
 // ModbusServoDriver — FAS-bypass direct-drive backend, Phase 3: real motion.
-// Build-guarded behind DRIVER_AIM_SERVO && FEATURE_RS485_MODBUS.
 //
-// Streamed 0x7B setpoints via StreamedSetpointExecutor (the "ISR" for this
-// backend — see ServoMotionExecutor.h). Every motion entry point stays
-// gated behind the exact same homed/enabled discipline FAS mode uses
-// (CLAUDE.md §2 — nothing moves spontaneously); the only way _homed becomes
-// true this phase is the BENCH forceHomeState() path (real homing is
-// Phase 4). See ModbusServoDriver.h for the full doctrine writeup. :3
+// Constraints:
+// - Build-guarded behind DRIVER_AIM_SERVO && FEATURE_RS485_MODBUS.
+// - Streamed 0x7B setpoints via StreamedSetpointExecutor (the "ISR" for this
+//   backend — see ServoMotionExecutor.h). Every motion entry point stays
+//   gated behind the exact same homed/enabled discipline FAS mode uses
+//   (DOCTRINE.md §2 — nothing moves spontaneously); the only way _homed
+//   becomes true this phase is the BENCH forceHomeState() path (real homing
+//   is Phase 4).
+// See: ModbusServoDriver.h for the full doctrine writeup.
 #if defined(DRIVER_AIM_SERVO) && defined(FEATURE_RS485_MODBUS)
 
 #include "ModbusServoDriver.h"
@@ -20,30 +22,30 @@ ModbusServoDriver::ModbusServoDriver(ServoModbus& bus)
     , _executor(bus)
 {}
 
-// ---- Lifecycle ---------------------------------------------------------------
+// ---- Lifecycle --------------------------------------------------------------
 
 void ModbusServoDriver::init() {
     // Bring up the INA228 the same way AIMServoDriver does — the Wire bus is
-    // already up (main setup() calls Wire.begin() before motor.init()). :3
+    // already up (main setup() calls Wire.begin() before motor.init()).
     if (!_current.init()) {
         SLOGW("servo", "ModbusServoDriver: WARNING — INA228 not found, live current telemetry unavailable. uhoh :3");
     }
 
     // Jerk ceiling for the executor's tracking integrator — OSSM-RS parity
-    // (their Ruckig runs 100000 mm/s^3), converted to native counts. :3
+    // (their Ruckig runs 100000 mm/s^3), converted to native counts.
     _executor.setJerkLimit(AIM_MODBUS_JERK_MM_S3 * AIM_ENC_COUNTS_PER_MM);
 
     // Deliberately do NOT enable the drive output here — Modbus mode never
     // spontaneously energizes anything at boot, exactly like FAS mode never
     // pulses the motor before a home. Output only comes on via
-    // forceHomeState(true)/enable() (Phase 4's real home() will do the same). :3
+    // forceHomeState(true)/enable() (Phase 4's real home() will do the same).
     SLOGI("servo", "ModbusServoDriver: init — Modbus direct-drive backend, %.1f counts/mm, "
           "wire_sign=%d (bench-tune AIM_MODBUS_WIRE_SIGN if position runs backwards)",
           AIM_ENC_COUNTS_PER_MM, (int)_wire_sign);
 }
 
 void ModbusServoDriver::update() {
-    // ---- INA228 telemetry cache refresh — identical two-tier cadence to ----
+    // ---- INA228 telemetry cache refresh — identical two-tier cadence to -----
     // ---- AIMServoDriver::update() (40Hz fast / 1Hz full). -------------------
     if (_current.isReady()) {
         uint32_t now = millis();
@@ -61,7 +63,7 @@ void ModbusServoDriver::update() {
     // Runs on the 1ms motorTask tick — both branches are one-shot logged so
     // a sustained fault never spams the ring. Fault clears ONLY via
     // forceHomeState()/home(), never automatically just because the bus
-    // health streak recovers on its own. :3
+    // health streak recovers on its own.
     ServoBusHealth health = _bus.getBusHealth();
     if (health.sp_fail_streak >= AIM_SP_FAIL_ESTOP) {
         if (!_fault_estop_logged) {
@@ -85,7 +87,7 @@ void ModbusServoDriver::update() {
     } else {
         // Streak dropped back under the freeze threshold — reset the LOG
         // latches (not the fault/homed gates) so a fresh episode logs again
-        // instead of staying silently latched from the first one. :3
+        // instead of staying silently latched from the first one.
         _fault_freeze_logged = false;
         _fault_estop_logged  = false;
     }
@@ -101,7 +103,7 @@ void ModbusServoDriver::emergencyStop() {
     SLOGW("servo", "ModbusServoDriver: EMERGENCY STOP — output off, homed cleared.");
 }
 
-// ---- Homing ------------------------------------------------------------------
+// ---- Homing -----------------------------------------------------------------
 
 bool ModbusServoDriver::home(int32_t /*home_speed_steps_s*/) {
     SLOGW("servo", "ModbusServoDriver: home() refused — real homing lands in Phase 4. "
@@ -109,7 +111,7 @@ bool ModbusServoDriver::home(int32_t /*home_speed_steps_s*/) {
     return false;
 }
 
-// BENCH PATH (HOME_OVERRIDE) — see the loud doc comment in the header. :3
+// BENCH PATH (HOME_OVERRIDE) — see the header's Constraints note.
 void ModbusServoDriver::forceHomeState(bool homed) {
     if (homed) {
         ServoTelemetry t = _bus.getTelemetry();
@@ -119,14 +121,12 @@ void ModbusServoDriver::forceHomeState(bool homed) {
             return;
         }
 
-        // ====================================================================
         // Establish the wire mapping from WHATEVER the shaft is sitting at
         // right now — NOT a real homed position. Seeds the executor at cmd=0
         // so the wire mapping's identity (wire_offset + sign*0 == wire_offset
         // == the encoder reading we just read) makes the FIRST setpoint we
         // ever send exactly equal to the current physical position: zero
-        // motion, per plan.md's hard safety requirement. :3
-        // ====================================================================
+        // motion — never command motion before a live encoder seed exists.
         _wire_offset = t.enc_counts;
         _executor.setWireMap(_wire_offset, AIM_MODBUS_WIRE_SIGN);
         _executor.seed(0.0f);
@@ -149,7 +149,7 @@ void ModbusServoDriver::forceHomeState(bool homed) {
     }
 }
 
-// ---- Motion --------------------------------------------------------------------
+// ---- Motion -----------------------------------------------------------------
 
 bool ModbusServoDriver::moveTo(float pos_mm) {
     if (!_homed || !_enabled || _bus_fault) {
@@ -164,10 +164,10 @@ bool ModbusServoDriver::moveTo(float pos_mm) {
     float accel_counts_s2 = _accel_mm_s2    * nativePerMm();
 
     _target_counts = target_counts;
-    // Jerk-limited tracker: just move the target; the executor glides. :3
+    // Jerk-limited tracker: just move the target; the executor glides.
     _executor.track(target_counts, speed_counts_s, accel_counts_s2);
     // A discrete moveTo() must not be masked by a stale streamToSteps()
-    // grit-cache hit later. :3
+    // grit-cache hit later.
     _have_last_stream = false;
 
     SLOGD("servo", "ModbusServoDriver moveTo: %.1fmm -> %.0f counts (v=%.0f a=%.0f counts/s, counts/s^2)",
@@ -192,8 +192,8 @@ void ModbusServoDriver::streamTo(float pos_mm, float speed_mm_s) {
 }
 
 // Pre-planned native-count dispatch — called from Core 1 via MotionArbiter at
-// up to ~1kHz. GRIT-CACHE FIRST (plan.md): skip the executor
-// hand-off entirely when nothing changed since last call. :3
+// up to ~1kHz. GRIT-CACHE FIRST: skip the executor
+// hand-off entirely when nothing changed since last call.
 void ModbusServoDriver::streamToSteps(int32_t target_steps,
                                        uint32_t speed_steps_s,
                                        uint32_t accel_steps_s2) {
@@ -212,7 +212,7 @@ void ModbusServoDriver::streamToSteps(int32_t target_steps,
 
     // Hard bounds — clamp into [-ceiling_counts, 0] in cmd-frame, the same
     // physical fence the arbiter itself enforces before dispatch. Belt and
-    // suspenders: this driver is the last stop before a wire frame goes out. :3
+    // suspenders: this driver is the last stop before a wire frame goes out.
     int32_t ceiling_counts = mmToNative(effectiveCeilingMm());
     int32_t clamped = target_steps;
     if (clamped > 0) clamped = 0;
@@ -221,7 +221,7 @@ void ModbusServoDriver::streamToSteps(int32_t target_steps,
     _target_counts = (float)clamped;
     // Jerk-limited tracker — the 1kHz stream path just moves the target along
     // the interpolator's cubic; the tracker glides after it. This is what
-    // fixed the trapezoid-confetti roughness (see ServoMotionExecutor.h). :3
+    // fixed the trapezoid-confetti roughness (see ServoMotionExecutor.h).
     _executor.track((float)clamped, (float)speed_steps_s, (float)accel_steps_s2);
 }
 
@@ -233,7 +233,7 @@ void ModbusServoDriver::stop() {
     // the write queue is the only thread-safe way into ServoModbus from
     // outside whichever task currently owns update() (servoBusTask in
     // Modbus mode). "Output off" per MotorDriver.h's "cut power" semantics
-    // for stop() vs hardStop(). :3
+    // for stop() vs hardStop().
     _bus.queueWrite(0x01, 0);
     _homed   = false;
     _enabled = false;
@@ -242,12 +242,12 @@ void ModbusServoDriver::stop() {
 
 void ModbusServoDriver::hardStop() {
     // Setpoint-freeze: servo-hold at the current sample, stays powered,
-    // _homed is NOT touched — this is "stop moving," not "cut power." :3
+    // _homed is NOT touched — this is "stop moving," not "cut power."
     _executor.freeze();
     _have_last_stream = false;
 }
 
-// ---- Enable / Disable ----------------------------------------------------------
+// ---- Enable / Disable -------------------------------------------------------
 
 void ModbusServoDriver::enable() {
     _bus.queueWrite(0x01, 1);
@@ -260,7 +260,7 @@ void ModbusServoDriver::disable() {
     _enabled = false;
 }
 
-// ---- Speed & Acceleration ----------------------------------------------------
+// ---- Speed & Acceleration ---------------------------------------------------
 
 void ModbusServoDriver::setMaxSpeed(float speed_mm_s) {
     _max_speed_mm_s = constrain(speed_mm_s, 0.0f, MAX_SPEED_MM_S);
@@ -270,12 +270,12 @@ void ModbusServoDriver::setAcceleration(float accel_mm_s2) {
     _accel_mm_s2 = constrain(accel_mm_s2, 10.0f, MAX_ACCEL_MM_S2);
 }
 
-// ---- Status --------------------------------------------------------------------
+// ---- Status -----------------------------------------------------------------
 
 float ModbusServoDriver::getPosition() const {
-    // "Commanded = truth" (plan.md) — the executor's last sampled position IS
+    // "Commanded = truth" — the executor's last sampled position IS
     // the reported position, exactly like AIMServoDriver reads FAS's own
-    // commanded step counter rather than any external feedback. :3
+    // commanded step counter rather than any external feedback.
     return nativeToMm(-(int32_t)lroundf(_executor.commandedPos()));
 }
 
@@ -283,13 +283,13 @@ float ModbusServoDriver::getTargetPosition() const {
     return nativeToMm(-(int32_t)lroundf(_target_counts));
 }
 
-// ---- Driver config -------------------------------------------------------------
+// ---- Driver config ----------------------------------------------------------
 
 void ModbusServoDriver::applyDriverConfig(const DriverConfig& cfg) {
     // No stepper-chip register map to apply — the AIM drive's gains live on the
     // Configure pane (handleApiServo talks to ServoModbus directly). This is
     // the MINIMAL Modbus-mode expected register set: output state (matches
-    // our own _enabled flag) + torque/current clamp. No PID writes. :3
+    // our own _enabled flag) + torque/current clamp. No PID writes.
     (void)cfg;
     _bus.queueWrite(0x01, _enabled ? 1 : 0);
     _bus.queueWrite(0x18, AIM_MODBUS_STANDSTILL_MAX);
@@ -297,13 +297,13 @@ void ModbusServoDriver::applyDriverConfig(const DriverConfig& cfg) {
           (int)_enabled, (int)AIM_MODBUS_STANDSTILL_MAX);
 }
 
-// ---- Diagnostics -----------------------------------------------------------------
+// ---- Diagnostics ------------------------------------------------------------
 
 uint16_t ModbusServoDriver::getCurrentmA() {
     return (uint16_t)(_current.cachedCurrentA() * 1000.0f);
 }
 
-// ---- Unit conversion (encoder counts — see class doc in the header) -----------
+// ---- Unit conversion (encoder counts — see class doc in the header) ---------
 
 int32_t ModbusServoDriver::mmToNative(float mm) const {
     return (int32_t)lroundf(mm * AIM_ENC_COUNTS_PER_MM);

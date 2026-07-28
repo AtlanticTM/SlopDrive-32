@@ -1,3 +1,18 @@
+// SlopSyncBleTransport — BLE GATT transport binding for the SlopSync hub
+// Constraints:
+//   Build-guarded behind BLE_ENABLED; compiles to nothing otherwise.
+//   The RX ring resets only in attachConn() (NimBLE host task, on the
+//   connect event) — never in open() (hub task). A reset in open() would
+//   race a HELLO that already arrived between attachConn() and the hub
+//   task reaching open().
+//   onConnect/onDisconnect/onWrite run on the NimBLE host task, not the hub
+//   task. They only set intent flags (_wantAttach/_wantDetach); loop() (hub
+//   task) performs the actual hub attachTransport()/detachTransport() calls,
+//   detach processed before attach.
+//   notify() failure is the only congestion signal available — NimBLE
+//   exposes no separate notify-queue-depth counter.
+// See: docs/canon/TRAPS.md T14 (advertising payload budget).
+
 #if defined(BLE_ENABLED)
 
 #include "SlopSyncBleTransport.h"
@@ -7,9 +22,7 @@
 
 namespace slopdrive {
 
-// ---------------------------------------------------------------------------
-// SlopSyncBleTransport
-// ---------------------------------------------------------------------------
+// ---- SlopSyncBleTransport ---------------------------------------------------
 
 bool SlopSyncBleTransport::isDroppable(std::span<const std::byte> frame) {
     if (frame.size() < 1) return false;
@@ -150,9 +163,7 @@ void SlopSyncBleTransport::pushRx(const uint8_t* data, size_t len) {
     _rxTail.store(next, std::memory_order_release);
 }
 
-// ---------------------------------------------------------------------------
-// SlopSyncBlePort
-// ---------------------------------------------------------------------------
+// ---- SlopSyncBlePort --------------------------------------------------------
 
 void SlopSyncBlePort::begin(slopsync::Hub* hub, const char* fullName, const char* shortName) {
     _hub = hub;

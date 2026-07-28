@@ -1,27 +1,23 @@
-/**
- * ServoModbus — RS485 / Modbus RTU telemetry & config for AIM servo drive. :3
- *
- * Non-blocking state-machine design: a single update() call sends the read
- * request on the first cycle, then checks for the response on subsequent
- * cycles — no delay(), no blocking. The 2 Hz poll cadence gives the UART
- * ~500ms to fill the RX buffer; the actual transaction takes ~4ms at 19200
- * baud (faster still at 115200), so there's zero risk of timeout.
- *
- * Dual-baud: the drive is factory-19200, but may have been reprogrammed to
- * 115200 (OSSM-RS style). init() probes both at boot; the not-ready reprobe
- * loop in update() keeps alternating between them so a drive that shows up
- * later at either baud still gets found. baud() reports which one landed.
- *
- * DRIVER_AIM_SERVO builds: sendPositionDelta() (FC 0x10 incremental writes) IS
- * the Core-1 real-time motion path (bench-proven fw 2.1.26; called every
- * servoBusTask tick from ServoMotionExecutor — see its own doc). This module
- * is telemetry/config-only ONLY on the FastAccelStepper step/dir variant,
- * where Modbus never touches real-time motion. sendSetpoint() (the proprietary
- * 0x7B absolute-setpoint frame) is plumbed in but has no caller on this device.
- *
- * Per AIM_servo_modbus_reference.md: 8N1 @ 19200 or 115200, slave addr 1, all
- * values 16-bit two's-complement for signed fields, CRC16 polynomial 0xA001.
- */
+// ServoModbus — RS485 / Modbus RTU telemetry and config for the AIM servo drive.
+// Constraints:
+// - Non-blocking state machine only: update() sends a read request on one
+//   cycle and checks for the response on a later cycle. No delay(), no
+//   blocking. Poll cadence and the ~4ms transaction time at 19200 baud
+//   (faster at 115200) leave no realistic timeout risk.
+// - Dual-baud: drive is factory-19200, may be reprogrammed to 115200
+//   (OSSM-RS style). init() probes both at boot; the not-ready reprobe loop
+//   in update() keeps alternating baud so a drive appearing later at either
+//   speed is still found. baud() reports which one landed.
+// - DRIVER_AIM_SERVO builds: sendPositionDelta() (FC 0x10 incremental writes)
+//   IS the Core-1 real-time motion path, called every servoBusTask tick from
+//   ServoMotionExecutor. On the FastAccelStepper step/dir variant this module
+//   is telemetry/config-only — Modbus never touches real-time motion there.
+//   sendSetpoint() (the proprietary 0x7B absolute-setpoint frame) is plumbed
+//   in but has no caller on this device.
+// - Frame format per AIM_servo_modbus_reference.md: 8N1 @ 19200 or 115200,
+//   slave addr 1, values 16-bit two's-complement for signed fields, CRC16
+//   polynomial 0xA001.
+// See: AIM_servo_modbus_reference.md
 
 #include "ServoModbus.h"
 
@@ -33,14 +29,11 @@
 
 #include "sloplog/sloplog.h"
 
-// ============================================================================
-// Constructor / destructor
-// ============================================================================
+// ---- Constructor / destructor -----------------------------------------------
 
-// Poll cycle — one register per transaction, exactly like the known-working
-// OSSM gold-motor tool. These drives commonly ignore multi-register FC 0x03
-// requests, so we never batch. Order: enable, output, alarm, current, speed,
-// voltage, temp, PWM. :3
+// Poll order: enable, output, alarm, current, speed, voltage, temp, PWM.
+// One register per transaction — these drives commonly ignore multi-register
+// FC 0x03 requests, so reads are never batched.
 const uint16_t ServoModbus::POLL_REGS[ServoModbus::POLL_REG_COUNT] =
     { 0x00, 0x01, 0x0E, 0x0F, 0x10, 0x11, 0x12, 0x13 };
 
@@ -51,12 +44,10 @@ ServoModbus::ServoModbus(HardwareSerial& port, uint8_t addr)
 }
 
 ServoModbus::~ServoModbus() {
-    // port is a reference — no ownership. :3
+    // port is a reference — no ownership.
 }
 
-// ============================================================================
-// CRC16 — Modbus RTU polynomial 0xA001 (reflected)
-// ============================================================================
+// ---- CRC16 — Modbus RTU polynomial 0xA001 (reflected) -----------------------
 
 uint16_t ServoModbus::crc16(const uint8_t* buf, size_t len) const {
     uint16_t crc = 0xFFFF;
@@ -72,13 +63,10 @@ uint16_t ServoModbus::crc16(const uint8_t* buf, size_t len) const {
     return crc;
 }
 
-// ============================================================================
-// FC 0x03 — Read Holding Registers (non-blocking, split across cycles)
-// ============================================================================
-//
-// sendReadRequest() builds + sends the frame and returns the expected response
-// length. On the next update() call, tryReadResponse() checks if enough bytes
-// have accumulated in the RX buffer, validates CRC, and decodes the data.
+// ---- FC 0x03 — Read Holding Registers (non-blocking, split across cycles) ---
+// sendReadRequest() sends the frame and returns the expected response length.
+// tryReadResponse(), called on a later update() cycle, checks whether enough
+// bytes have accumulated in the RX buffer, validates CRC, and decodes.
 
 size_t ServoModbus::sendReadRequest(uint16_t reg, size_t count) {
     // Flush stale bytes before sending
@@ -132,9 +120,7 @@ bool ServoModbus::tryReadResponse(uint16_t* out, size_t count) {
     return true;
 }
 
-// ============================================================================
-// FC 0x06 — Write Single Register (fire-and-forget)
-// ============================================================================
+// ---- FC 0x06 — Write Single Register (fire-and-forget) ----------------------
 
 void ServoModbus::sendWriteCommand(uint16_t reg, uint16_t value) {
     while (_port.available()) _port.read();
@@ -154,22 +140,17 @@ void ServoModbus::sendWriteCommand(uint16_t reg, uint16_t value) {
     _port.write(req, 8);
     _port.flush();
     // Fire-and-forget — the drive echoes back but we don't wait for it.
-    // A stale echo byte will be flushed by the next sendReadRequest() flush. :3
+    // A stale echo byte is flushed by the next sendReadRequest()'s pre-flush.
 }
 
-// ============================================================================
-// FC 0x10 — Write Multiple Registers (bench: paired 0x0C/0x0D position write)
-// ============================================================================
-// BENCH HYPOTHESIS (fw 2.1.25 findings): single-register FC 0x06 writes to the
-// position pair 0x0C/0x0D are REJECTED (read back unchanged) — classic
-// torn-half protection — while multi-register FC 0x03 READS work fine, so
-// this firmware is more standard-Modbus than its translated datasheet admits.
-// A 32-bit position command may only be accepted as ONE atomic FC 0x10
-// transaction covering both words. Frame:
+// ---- FC 0x10 — Write Multiple Registers (paired 0x0C/0x0D position write) ---
+// Single-register FC 0x06 writes to the position pair 0x0C/0x0D are REJECTED
+// (read back unchanged) — torn-half protection. A 32-bit position command
+// must be one atomic FC 0x10 transaction covering both words. Frame:
 //   [addr][0x10][startHi][startLo][cntHi][cntLo][byteCount=4]
 //   [w1Hi][w1Lo][w2Hi][w2Lo][crcLo][crcHi]  = 13 bytes
-// Normal reply: [addr][0x10][start][count][crc] = 8 bytes — fire-and-forget
-// here (bench), flushed by the next transaction like the FC 0x06 echoes. :3
+// Normal reply: [addr][0x10][start][count][crc] = 8 bytes; treated
+// fire-and-forget, flushed by the next transaction like the FC 0x06 echoes.
 
 void ServoModbus::sendWriteMulti(uint16_t start_reg, uint16_t w1, uint16_t w2) {
     while (_port.available()) _port.read();
@@ -194,24 +175,19 @@ void ServoModbus::sendWriteMulti(uint16_t start_reg, uint16_t w1, uint16_t w2) {
     _port.flush();
 }
 
-// ============================================================================
-// Absolute-position setpoint — FC + byte order RUNTIME-TUNABLE (bench)
-// ============================================================================
-// Frame: [addr][FC][pos32][CRC16-LE], 8 bytes total. Our drive's datasheet
-// documents FC 0x78 "Write Target Position" (default); OSSM-RS's 57AIMxx
-// generation uses proprietary 0x7B with a big-endian payload — SAME shape,
-// different code. Bench finding (fw 2.1.21, 285 frames): this drive never
-// answers 0x7B at all, so the FC and payload byte order are runtime knobs
-// (setSetpointFraming(), driven from POST /api/servo {"sp_fc":..,"sp_le":..})
-// to let the bench find the variant's true framing without a reflash per
-// guess. Unlike the fire-and-forget FC 0x06 write, we DO validate the echo —
-// this IS the motion path, so a garbled or missing echo has to be visible
-// (see the WAITING/SETPOINT handling in update()). :3
+// ---- Absolute-position setpoint — FC and byte order are runtime-tunable -----
+// Frame: [addr][FC][pos32][CRC16-LE], 8 bytes total. FC and payload byte
+// order are runtime knobs (setSetpointFraming(), driven from
+// POST /api/servo {"sp_fc":..,"sp_le":..}) rather than compile-time constants
+// — different drive variants answer to different FC/endianness combinations.
+// Unlike the fire-and-forget FC 0x06 write, the echo IS validated here — this
+// is the motion path, so a garbled or missing echo must be visible (see the
+// WAITING/SETPOINT handling in update()).
 
 void ServoModbus::setSetpointFraming(uint8_t fc, bool le) {
     _sp_fc = fc;
     _sp_le = le;
-    _sp_exception_logged = false;   // fresh knob, fresh one-shot diagnostic
+    _sp_exception_logged = false;   // fresh knob resets the one-shot diagnostic latch
     SLOGI("servobus", "ServoModbus: setpoint framing -> FC 0x%02X, payload %s-endian (bench knob)",
           fc, le ? "little" : "big");
 }
@@ -255,9 +231,9 @@ bool ServoModbus::sendSetpoint(int32_t pos_counts) {
     _sp_last_fc = _sp_fc;
 
     if (_sp_noecho) {
-        // BENCH mode: fire-and-forget like FC 0x06 — no echo wait, bus goes
+        // No-echo mode: fire-and-forget like FC 0x06 — no echo wait, bus goes
         // straight back to IDLE (any stray reply bytes get flushed by the next
-        // transaction's pre-flush). Watchdog is blind in this mode. :3
+        // transaction's pre-flush). Watchdog is blind to setpoint loss here.
         return true;
     }
 
@@ -274,7 +250,7 @@ bool ServoModbus::sendPositionDelta(int32_t delta_counts) {
     while (_port.available()) _port.read();
 
     // FC 0x10, start 0x000C, 2 registers, 4 data bytes: low word then high
-    // word (bench-proven order, fw 2.1.26: +100 -> +103 counts moved). :3
+    // word — the byte order the drive expects for this register pair.
     uint32_t d  = (uint32_t)delta_counts;
     uint16_t lw = (uint16_t)(d & 0xFFFF);
     uint16_t hw = (uint16_t)((d >> 16) & 0xFFFF);
@@ -297,7 +273,7 @@ bool ServoModbus::sendPositionDelta(int32_t delta_counts) {
     _sp_sent++;
     _sp_last_fc = 0x10;
 
-    if (_sp_noecho) return true;           // bench knob still honored
+    if (_sp_noecho) return true;           // no-echo mode still honored
 
     // Standard FC 0x10 reply: [addr][0x10][startHi][startLo][cntHi][cntLo][crc]
     _rx_expected  = 8;
@@ -307,20 +283,18 @@ bool ServoModbus::sendPositionDelta(int32_t delta_counts) {
     return true;
 }
 
-// ============================================================================
-// Lifecycle
-// ============================================================================
+// ---- Lifecycle --------------------------------------------------------------
 
 bool ServoModbus::init() {
     // Caller already opened the port at 19200 (factory default) — probe there
     // first. If nobody answers, the drive may have been reprogrammed OSSM-RS
     // style to 115200; rebaud the port and probe again. Whichever baud
     // answers wins and _baud latches to it for every subsequent transaction
-    // (including the not-ready reprobe in update()). :3
+    // (including the not-ready reprobe in update()).
     SLOGI("servobus", "ServoModbus: probing drive @ addr %d (19200)...", _addr);
 
-    // Try to read alarm register (0x0E) as a quick health check.
-    // Two attempts — RS485 can be temperamental on first contact. :3
+    // Read the alarm register (0x0E) as a quick health check.
+    // Two attempts — RS485 can be temperamental on first contact.
     for (int attempt = 0; attempt < 2; attempt++) {
         size_t expected = sendReadRequest(0x0E, 1);
         _rx_expected = expected;
@@ -371,7 +345,7 @@ bool ServoModbus::init() {
 
     // Neither baud answered — restore 19200 so the port and _baud are back in
     // a known state for the not-ready reprobe loop in update() to alternate
-    // from. :3
+    // from.
     _port.updateBaudRate(19200);
     _baud = 19200;
     SLOGW("servobus", "ServoModbus: drive @ addr %d did NOT answer at either baud — RS485 probe failed.", _addr);
@@ -396,14 +370,14 @@ bool ServoModbus::readRegisterBlocking(uint16_t reg, uint16_t& out, uint32_t tim
 void ServoModbus::update() {
     uint32_t now = millis();
 
-    // ---- Not ready? Keep knocking. -----------------------------------------
+    // ---- Not ready? Keep knocking. ------------------------------------------
     // The boot probe can fail for boring reasons (36V rail off at flash time,
-    // drive still booting, A/B swapped). Instead of going silent forever, we
-    // re-send the probe frame every REPROBE_INTERVAL_MS. Bonus: the RS485
-    // module's TX LED pulses on every attempt — if that LED NEVER lights, the
-    // frames aren't leaving the ESP32 (wrong TX pin / dead module). If TX
+    // drive still booting, A/B swapped). Re-sends the probe frame every
+    // REPROBE_INTERVAL_MS rather than going silent forever. Wiring diagnostic:
+    // the RS485 module's TX LED pulses on every attempt — if it never lights,
+    // frames aren't leaving the ESP32 (wrong TX pin / dead module); if TX
     // lights but RX never does, the drive isn't answering (A/B swapped, wrong
-    // baud/addr, drive unpowered). Cheap built-in wiring diagnostic. :3
+    // baud/addr, drive unpowered).
     if (!_ready) {
         switch (_rx_state) {
         case RxState::IDLE:
@@ -412,8 +386,8 @@ void ServoModbus::update() {
             // Alternate baud on every reprobe attempt — a drive that later
             // shows up reprogrammed to 115200 (or power-cycled back to
             // factory 19200) gets found either way. Same TX-LED wiring
-            // diagnostic as before: no TX blink means the frames never left
-            // the ESP32 regardless of which baud we're trying. :3
+            // diagnostic as above: no TX blink means the frames never left
+            // the ESP32 regardless of which baud we're trying.
             _baud = (_baud == 19200) ? 115200 : 19200;
             _port.updateBaudRate(_baud);
             _rx_expected = sendReadRequest(0x0E, 1);
@@ -446,15 +420,14 @@ void ServoModbus::update() {
     }
 
     // ---- Ready: writes > config scan > telemetry poll -----------------------
-    // One register per transaction — the gold-motor tool's access pattern.
     // Writes preempt reads but only launch from IDLE, so a write echo can
-    // never masquerade as a poll response (the next read's flush eats it). :3
+    // never masquerade as a poll response (the next read's flush eats it).
     switch (_rx_state) {
     case RxState::IDLE: {
         // 1. Drain the write queue first (user-facing config writes). Peek
         //    the count under the mux; if there's work AND spacing allows,
         //    snapshot the head op + advance/pop under the mux, THEN do the
-        //    wire write outside it — never hold the spinlock across UART. :3
+        //    wire write outside it — never hold the spinlock across UART.
         portENTER_CRITICAL(&_mux);
         size_t wq_count = _wq_count;
         portEXIT_CRITICAL(&_mux);
@@ -477,7 +450,7 @@ void ServoModbus::update() {
             _last_write_ms = now;
             if (op.rep <= 1) {
                 // Follow a device-address change so the bus keeps talking to
-                // the drive it just renamed. :3
+                // the drive it just renamed.
                 if (op.reg == 0x15 && op.val >= 1 && op.val <= 247) {
                     _addr = (uint8_t)op.val;
                     SLOGI("servobus", "ServoModbus: following device-address change -> %u", _addr);
@@ -503,7 +476,7 @@ void ServoModbus::update() {
         // 3. Telemetry poll cycle, rate-limited to POLL_INTERVAL_MS.
         //    Slots 0..7 are the single telemetry registers; slot 8 is the
         //    encoder-position pair (one count=2 read, or LO/HI singles in
-        //    fallback mode with slot 9 as the HI half). :3
+        //    fallback mode with slot 9 as the HI half).
         if (now - _last_poll_ms < POLL_INTERVAL_MS) return;
         _last_poll_ms = now;
         if (_reg_idx < POLL_REG_COUNT) {
@@ -529,17 +502,16 @@ void ServoModbus::update() {
         if (_port.available() < (int)_rx_expected) {
             // Setpoint frames get their own short timeout — this is a future
             // motion-stream frame, not telemetry, so a stall here must fail
-            // fast rather than sit on the 80ms telemetry budget. :3
+            // fast rather than sit on the 80ms telemetry budget.
             uint32_t timeout_ms = (_pending_kind == PendingKind::SETPOINT) ? SETPOINT_TIMEOUT_MS : 80;
             if (now - _rx_start_ms > timeout_ms) {
                 if (_pending_kind == PendingKind::SETPOINT) {
-                    // Before writing this off as silence: a drive that DOESN'T
-                    // support the setpoint FC answers with a 5-byte Modbus
-                    // exception ([addr][FC|0x80][code][crc]) — shorter than
-                    // the 8-byte echo we wait for, so it lands HERE, not in
-                    // the success path. Log it ONCE: "exception code N" tells
-                    // the bench operator to try the next framing knob, where
-                    // pure silence says the FC isn't even parsed. :3
+                    // A drive that DOESN'T support the setpoint FC answers with
+                    // a 5-byte Modbus exception ([addr][FC|0x80][code][crc]) —
+                    // shorter than the 8-byte echo waited for, so it lands
+                    // HERE, not the success path. Logged ONCE: an exception
+                    // code means the FC was parsed and rejected; pure silence
+                    // means the FC wasn't parsed at all.
                     int avail = _port.available();
                     if (avail >= 5 && !_sp_exception_logged) {
                         size_t n = _port.readBytes(_rx_buf, (avail < (int)MAX_RSP_LEN) ? avail : MAX_RSP_LEN);
@@ -551,8 +523,8 @@ void ServoModbus::update() {
                     }
                     _sp_fail_streak++;
                 } else if (_pending_kind == PendingKind::SCAN) {
-                    // A register that times out 3× is marked unknown and
-                    // skipped — some drive variants stop at 0x14. :3
+                    // A register that times out 3x is marked unknown and
+                    // skipped — some drive variants stop at 0x14.
                     if (++_scan_retries >= 3) {
                         _scan_retries = 0;
                         _cfg_staged[_scan_idx] = 0;
@@ -561,7 +533,7 @@ void ServoModbus::update() {
                 } else if (_pending_kind == PendingKind::ENC_PAIR) {
                     // A drive that rejects count=2 answers with a 5-byte
                     // exception frame (< the 9 we expect) — lands here too.
-                    // 3 strikes latches the single-read fallback for good. :3
+                    // 3 strikes latches the single-read fallback for good.
                     if (++_enc_pair_fails >= 3 && !_enc_single_mode) {
                         _enc_single_mode = true;
                         SLOGW("servobus", "ServoModbus: drive ignores 2-reg reads — encoder falls back to single-register LO/HI");
@@ -578,7 +550,7 @@ void ServoModbus::update() {
 
         // Setpoint echo — its own framing (addr + FC 0x7B + 6 bytes), not a
         // 1- or 2-register FC 0x03 response, so validate it before any of the
-        // read-response paths below touch the buffer. :3
+        // read-response paths below touch the buffer.
         if (_pending_kind == PendingKind::SETPOINT) {
             bool ok = false;
             if (_rx_expected <= MAX_RSP_LEN) {
@@ -617,7 +589,7 @@ void ServoModbus::update() {
 
         if (_pending_kind == PendingKind::ENC_LO) {
             // Stage LO and go straight for HI; a garble aborts the pair so a
-            // fresh LO is always matched with its own HI. :3
+            // fresh LO is always matched with its own HI.
             _reg_idx  = ok ? (POLL_REG_COUNT + 1) : 0;
             if (ok) _enc_lo_staged = val;
             _rx_state = RxState::IDLE;
@@ -651,7 +623,7 @@ void ServoModbus::update() {
                 // so getTelemetry() never sees a torn read. _reg_idx parks at
                 // POLL_REG_COUNT: the encoder-pair slot runs next, then wraps.
                 // enc_* fields are untouched here — they commit on their own
-                // cadence in _commitEncoder(). :3
+                // cadence in _commitEncoder().
                 portENTER_CRITICAL(&_mux);
                 _telemetry.valid     = true;
                 _telemetry.enabled   = (_staged[0] != 0);            // 0x00
@@ -677,7 +649,7 @@ void ServoModbus::update() {
 }
 
 // Advance the config scan to the next register; commit the mirror as one
-// consistent snapshot when the last register lands. :3
+// consistent snapshot when the last register lands.
 void ServoModbus::_scanAdvance(uint32_t now) {
     _scan_idx++;
     if (_scan_idx < CFG_REG_COUNT) return;
@@ -693,7 +665,7 @@ void ServoModbus::_scanAdvance(uint32_t now) {
 
 // Commit a freshly assembled encoder sample. Separate from the 8-reg snapshot
 // commit so the position is as fresh as the wire allows (~3.7 Hz) and stamped
-// — the EncoderValidator keys off enc_stamp_ms to spot NEW samples. :3
+// — the EncoderValidator keys off enc_stamp_ms to spot NEW samples.
 void ServoModbus::_commitEncoder(int32_t counts, uint32_t now) {
     portENTER_CRITICAL(&_mux);
     _telemetry.enc_valid    = true;
@@ -702,14 +674,12 @@ void ServoModbus::_commitEncoder(int32_t counts, uint32_t now) {
     portEXIT_CRITICAL(&_mux);
 }
 
-// ============================================================================
-// reprogramBaud() — OSSM-RS magic sequence, blocking, init-context ONLY
-// ============================================================================
+// ---- reprogramBaud() — OSSM-RS magic sequence, blocking, init-context only --
 // Same "no RTOS tasks yet" exception as init()/readRegisterBlocking(): this
 // touches the port and the low-level send/receive helpers directly, bypassing
 // the update() state machine entirely, so it must never run once
 // servoBusTask/httpTask are alive and polling. main.cpp calls it right after
-// servoModbus.init() succeeds, well before any task is created. :3
+// servoModbus.init() succeeds, well before any task is created.
 bool ServoModbus::reprogramBaud(uint32_t target_baud) {
     if (!_ready) return false;
 
@@ -729,13 +699,13 @@ bool ServoModbus::reprogramBaud(uint32_t target_baud) {
           (unsigned long)previous_baud, (unsigned long)target_baud);
 
     // OSSM-RS magic sequence — fire-and-forget FC 0x06 writes, ~30ms gaps.
-    // NEVER reg 0x14 (the EEPROM save flag) — this is a deliberately VOLATILE
-    // runtime change so a drive power-cycle always recovers factory 19200; a
-    // botched rebaud can never permanently brick the link. Reg 0x03 doubles
-    // as the magic sequence's baud-code carrier here — it's normally the
+    // NEVER write reg 0x14 (the EEPROM save flag) here — this must stay a
+    // VOLATILE runtime change so a drive power-cycle always recovers factory
+    // 19200; a botched rebaud can never permanently brick the link. Reg 0x03
+    // doubles as the magic sequence's baud-code carrier — it's normally the
     // drive's ACCEL register, so whatever real accel value lived there may
-    // need rewriting afterward (the Configure pane / handleApiServo owns
-    // that, not this function). :3
+    // need rewriting afterward (owned by the Configure pane / handleApiServo,
+    // not this function).
     sendWriteCommand(0x00, 1);
     delay(30);
     sendWriteCommand(0x03, baud_code);
@@ -747,7 +717,7 @@ bool ServoModbus::reprogramBaud(uint32_t target_baud) {
 
     _port.updateBaudRate(target_baud);
 
-    // Probe to confirm — two attempts, same pattern as init(). :3
+    // Probe to confirm — two attempts, same pattern as init().
     for (int attempt = 0; attempt < 2; attempt++) {
         size_t expected = sendReadRequest(0x0E, 1);
         _rx_expected = expected;
@@ -766,7 +736,7 @@ bool ServoModbus::reprogramBaud(uint32_t target_baud) {
 
     // Didn't answer at the new baud — restore the PREVIOUS baud and re-probe
     // so the link is left in a KNOWN state, never stranded between two
-    // possible speeds. :3
+    // possible speeds.
     SLOGW("servobus", "ServoModbus: reprogramBaud() to %lu did NOT confirm — restoring %lu...",
           (unsigned long)target_baud, (unsigned long)previous_baud);
     _port.updateBaudRate(previous_baud);
@@ -788,7 +758,7 @@ bool ServoModbus::reprogramBaud(uint32_t target_baud) {
     // Neither the new nor the old baud answered — link is likely down for an
     // unrelated reason. Leave _baud at the best-known previous value; the
     // not-ready reprobe loop in update() will keep alternating and find the
-    // drive again once it's back. :3
+    // drive again once it's back.
     SLOGE("servobus", "ServoModbus: reprogramBaud() — restore probe at %lu ALSO failed. Link may be down; "
           "the reprobe loop will keep looking.", (unsigned long)previous_baud);
     _baud = previous_baud;
@@ -797,7 +767,7 @@ bool ServoModbus::reprogramBaud(uint32_t target_baud) {
 
 void ServoModbus::emergencyStop() {
     if (!_ready) return;
-    // Never keep programming through an e-stop — drop everything queued. :3
+    // Never keep programming through an e-stop — drop everything queued.
     portENTER_CRITICAL(&_mux);
     _wq_count = 0;
     _scan_active = false;
@@ -807,14 +777,12 @@ void ServoModbus::emergencyStop() {
     // an unrelated read when this fires from another context) — acceptable
     // for e-stop: worst case is one garbled frame on either side. What has to
     // stay consistent is the drain state above (queue now empty), not this
-    // specific transaction. :3
+    // specific transaction.
     sendWriteCommand(0x01, 0);
     SLOGW("servobus", "ServoModbus: drive output disabled (emergency stop)");
 }
 
-// ============================================================================
-// Configure-pane plumbing — config mirror, scan, write queue
-// ============================================================================
+// ---- Configure-pane plumbing — config mirror, scan, write queue -------------
 
 ServoConfig ServoModbus::getConfig() const {
     ServoConfig snap;
@@ -832,7 +800,7 @@ void ServoModbus::requestConfigScan() {
     // it, the cursor must already be at zero — raise-then-reset would let a
     // scan launch mid-reset with a stale index. The staging fields themselves
     // are only ever touched by update() while _scan_active is up, so resetting
-    // them outside the mux here is safe when the flag is down. :3
+    // them outside the mux here is safe when the flag is down.
     portENTER_CRITICAL(&_mux);
     bool already = _scan_active;
     portEXIT_CRITICAL(&_mux);
@@ -889,7 +857,7 @@ bool ServoModbus::queuePositionPair(int32_t counts, bool low_first) {
 
 size_t ServoModbus::pendingWrites() const {
     // Count each remaining repeat as one pending wire-write so the UI's
-    // progress hint drains linearly. :3
+    // progress hint drains linearly.
     portENTER_CRITICAL(&_mux);
     size_t n = 0;
     for (size_t i = 0; i < _wq_count; i++)
@@ -898,7 +866,8 @@ size_t ServoModbus::pendingWrites() const {
     return n;
 }
 
-// ---- Bus health snapshot ---------------------------------------------------
+// ---- Bus health snapshot ----------------------------------------------------
+
 ServoBusHealth ServoModbus::getBusHealth() const {
     ServoBusHealth h;
     h.baud  = _baud;
@@ -911,9 +880,7 @@ ServoBusHealth ServoModbus::getBusHealth() const {
     return h;
 }
 
-// ============================================================================
-// Thread-safe telemetry accessor
-// ============================================================================
+// ---- Thread-safe telemetry accessor -----------------------------------------
 
 ServoTelemetry ServoModbus::getTelemetry() const {
     ServoTelemetry snap;
@@ -923,9 +890,7 @@ ServoTelemetry ServoModbus::getTelemetry() const {
     return snap;
 }
 
-// ============================================================================
-// Config writes (fire-and-forget — we don't wait for the echo)
-// ============================================================================
+// ---- Config writes (fire-and-forget — we don't wait for the echo) -----------
 
 void ServoModbus::setEnable(bool on) {
     if (!_ready) return;

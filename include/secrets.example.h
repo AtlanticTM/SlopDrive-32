@@ -1,6 +1,7 @@
 #pragma once
 //
-// SECRETS TEMPLATE  ->  copy this file to "secrets.h" and fill in your values.
+// secrets.example.h — template for the git-ignored secrets.h; copy, fill in
+// your own values, build.
 //
 //   include/secrets.example.h   (committed to git - safe, no real secrets)
 //   include/secrets.h           (git-IGNORED - your real WiFi/network values)
@@ -12,31 +13,31 @@
 //
 // After cloning:  copy secrets.example.h -> secrets.h, edit, build.
 
-// ---- WiFi ----
+// ---- WiFi -------------------------------------------------------------------
 #define SECRET_WIFI_SSID       "YourWiFiName"
 #define SECRET_WIFI_PASSWORD   "YourWiFiPassword"
 
-// ---- OTA (over-the-air firmware + web-UI updates over WiFi) ----
+// ---- OTA (over-the-air firmware + web-UI updates over WiFi) -----------------
 // Shared secret guarding BOTH OTA paths:
 //   1. ArduinoOTA / espota  (pio run -e sd32-ota -t upload / -t uploadfs)
 //   2. HTTP endpoints        (curl POST /api/ota and /api/ota/fs, X-OTA-Token)
 // The PlatformIO sd32-ota env feeds this same value to espota via --auth
 // (see tools/ota_auth.py). Pick something long/random; it's the only thing
-// standing between your network and a firmware flash. :3
+// standing between your network and a firmware flash.
 #define SECRET_OTA_PASSWORD    "ChangeMeToALongRandomOtaSecret"
 
-// ---- Intiface (only used in WiFi/WSDM mode; ignored in serial-control mode) ----
+// ---- Intiface (only used in WiFi/WSDM mode; ignored in serial-control mode) --
 // IP of the PC running Intiface, and the WSDM device-server port it prints.
 #define SECRET_INTIFACE_HOST   "192.168.1.100"
 #define SECRET_INTIFACE_PORT   54817
 
-// ---- ESP-NOW 5GHz Channel Configuration ----
+// ---- ESP-NOW 5GHz Channel Configuration -------------------------------------
 //
 // The T-Dongle C5 and Waveshare C5 communicate via ESP-NOW on a 5GHz channel.
 // The ESP32-C5 supports 5GHz Wi-Fi (802.11ax), which includes DFS channels
 // (Dynamic Frequency Selection) — channels that require radar detection in
 // some regulatory domains but are perfectly legal for short-range unlicensed
-// use in many regions. Check your local regulations. :3
+// use in many regions. Check your local regulations.
 //
 // Channel mapping (5GHz, 20MHz bandwidth):
 //   Channel 36  = 5180 MHz  (UNII-1, universally safe, no DFS)

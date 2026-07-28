@@ -7,8 +7,8 @@
 // negotiate INTO — this file has no wire dependency, no knowledge of the
 // session engine that will call it, and does not send anything itself.
 //
-// ---- Conflation with zero queues (design note, ties together with
-// retained_store.hpp) --------------------------------------------------------
+// ---- Conflation with zero queues --------------------------------------------
+// Design note, ties together with retained_store.hpp.
 //
 // SPEC §9.1 describes conflation as "at most a depth-1 queue per (channel,
 // subscriber) — a newer snapshot replaces a queued unsent one". This file
@@ -26,7 +26,7 @@
 // with no queue anywhere in the picture.
 //
 // dueForPush()'s "changePending" input is owned by the caller (e.g. "does
-// RetainedStore's seq for this channel differ from the seq I last pushed to
+// RetainedStore's seq for this channel differ from the seq last pushed to
 // this subscriber" — a comparison this file deliberately doesn't make itself
 // since it doesn't track per-subscriber last-seen seq; that bookkeeping is
 // the session engine's, one layer up).

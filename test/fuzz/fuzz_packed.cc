@@ -1,5 +1,6 @@
-// Target: packed layout decode (wire/packed/layout_codec.hpp) and the STATE
-// shadow apply/append-only read on top of it (channel/state_apply.hpp).
+// fuzz_packed — target: packed layout decode (wire/packed/layout_codec.hpp)
+// and the STATE shadow apply/append-only read on top of it
+// (channel/state_apply.hpp).
 //
 // Per the brief: fuzz against a FIXED known-good catalog so the fuzzer
 // explores the DATA (the packed bytes a hub sends for a channel) rather than

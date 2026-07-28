@@ -1,12 +1,16 @@
-// ServoMotionExecutor — StreamedSetpointExecutor implementation.
-// Build-guarded behind DRIVER_AIM_SERVO && FEATURE_RS485_MODBUS.
+// ServoMotionExecutor — StreamedSetpointExecutor implementation
 //
-// JERK-LIMITED TARGET TRACKER (see the header doctrine writeup). Every motion
-// source moves `_target` (+ vmax/amax limits) via track(); this file's
-// onTick() integrates a third-order-smooth (pos, vel, acc) state toward that
-// target every servoBusTask tick (2ms) and streams the result as FC 0x10
-// incremental deltas on the send cadence. OSSM-RS parity: their Ruckig
-// S-curve feeds a 10ms 0x7B stream; our tracker feeds a 6-10ms delta stream.
+// Constraints:
+//   Build-guarded behind DRIVER_AIM_SERVO && FEATURE_RS485_MODBUS. Every
+//   motion source moves `_target` (+ vmax/amax limits) via track(); onTick()
+//   integrates a third-order-smooth (pos, vel, acc) state toward that target
+//   every servoBusTask tick (2ms) and streams the result as FC 0x10
+//   incremental deltas on the send cadence. OSSM-RS parity: their Ruckig
+//   S-curve feeds a 10ms 0x7B stream; our tracker feeds a 6-10ms delta
+//   stream.
+//
+// See:
+//   ServoMotionExecutor.h — the tracker design doctrine
 #if defined(DRIVER_AIM_SERVO) && defined(FEATURE_RS485_MODBUS)
 
 #include "ServoMotionExecutor.h"
@@ -43,7 +47,7 @@ void StreamedSetpointExecutor::freeze() {
     portENTER_CRITICAL(&_mux);
     // Hold RIGHT HERE: target snaps to the current tracker position and the
     // kinematic state zeroes. Deliberately jerk-UNLIMITED — freeze is a stop,
-    // not a move. :3
+    // not a move.
     _target  = _cmd_pos;
     _cmd_vel = 0.0f;
     _trk_acc = 0.0f;
@@ -103,7 +107,7 @@ bool StreamedSetpointExecutor::active() const {
 
 void StreamedSetpointExecutor::onTick(int64_t now_us) {
     // ---- Integration dt — real elapsed time, bounded. A scheduling hiccup
-    // must never integrate a giant step (first tick after seed uses 0). :3
+    // must never integrate a giant step (first tick after seed uses 0).
     float dt = 0.0f;
     if (_last_tick_us != 0) {
         dt = (float)(now_us - _last_tick_us) * 1.0e-6f;
@@ -127,18 +131,18 @@ void StreamedSetpointExecutor::onTick(int64_t now_us) {
     portEXIT_CRITICAL(&_mux);
 
     // Nothing is EVER sent before the driver seeds us with a live encoder
-    // reading — the hard safety requirement from plan.md. :3
+    // reading — never command motion before a live encoder seed exists.
     if (!seeded) return;
 
     bool moving = false;
     if (!frozen && dt > 0.0f) {
-        // ---- Jerk-limited tracking step (ruckig-lite) ----------------------
+        // ---- Jerk-limited tracking step (ruckig-lite) -----------------------
         // 1. Desired velocity: braking-curve toward the target, capped at
         //    vmax. The 0.85 accel margin keeps the sqrt curve conservative so
         //    the jerk-limited accel response can always land without ringing.
         // 2. Desired accel: reach v_des within this tick, capped at amax.
         // 3. Jerk limit: slew the actual accel toward desired at jmax.
-        // 4. Integrate. Snap when both error and speed are sub-count. :3
+        // 4. Integrate. Snap when both error and speed are sub-count.
         float d    = target - p;
         float dir  = (d >= 0.0f) ? 1.0f : -1.0f;
         float dmag = fabsf(d);
@@ -175,14 +179,14 @@ void StreamedSetpointExecutor::onTick(int64_t now_us) {
     _active  = moving;
     portEXIT_CRITICAL(&_mux);
 
-    // ---- DELTA WIRE PROTOCOL (bench-proven fw 2.1.26) ----------------------
+    // ---- Delta wire protocol ------------------------------------------------
     // Incremental FC 0x10 pair writes; _last_sent_wire is the accumulated
     // commanded wire position, advanced only on an ACCEPTED send. First send
     // after seed() zeroes the delta against the seed offset (the "send
     // current position, observe zero motion" invariant). Zero deltas still go
     // out on the keep-alive cadence as liveness probes. Lost-echo-but-
     // executed = model desync until re-home — bounded by the 3-miss freeze +
-    // EncoderValidator. :3
+    // EncoderValidator.
     int32_t  wire      = offset + (int32_t)sign * (int32_t)lroundf(p);
     uint32_t now_ms    = (uint32_t)(now_us / 1000);
     if (!_have_sent) _last_sent_wire = offset;

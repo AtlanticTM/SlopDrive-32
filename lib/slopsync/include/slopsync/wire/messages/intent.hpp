@@ -203,6 +203,7 @@ struct IntentMsg {
     bool takeover = false;
 };
 
+// ---- Encode -----------------------------------------------------------------
 // Encodes into `out`; returns bytes written, or 0 on any failure.
 inline size_t encodeIntent(const IntentMsg& m, std::span<std::byte> out) {
     if (m.value_count > kIntentMaxValueFields) return 0;
@@ -230,6 +231,7 @@ inline size_t encodeIntent(const IntentMsg& m, std::span<std::byte> out) {
     return w.size();
 }
 
+// ---- Decode -----------------------------------------------------------------
 // Decodes `in` into an IntentMsg. Unknown keys are skipped per §4.3.
 inline Result<IntentMsg, DecodeError> decodeIntent(std::span<const std::byte> in) {
     using Ret = Result<IntentMsg, DecodeError>;

@@ -1,3 +1,11 @@
+// SlopSyncUiTokenMinter — mints and validates single-use /uitoken
+// control-tier credentials
+//
+// Constraints:
+//   RFC-028.3: token = HMAC(boot secret, counter || now)[0..15]. The HMAC
+//   makes the token unguessable; the slot table makes it single-use and
+//   expiring — a stateless token cannot be revoked on use, so both halves
+//   are required.
 #include "SlopSyncUiToken.h"
 
 #include <Arduino.h>
@@ -31,27 +39,12 @@ portMUX_TYPE s_mux = portMUX_INITIALIZER_UNLOCKED;
 // from httpTask — SoftwareCrypto's methods are pure, so a second instance costs
 // nothing and shares no state with the signing path.
 //
-// NAMESPACE SCOPE, NOT A FUNCTION-LOCAL STATIC — AND THAT IS LOAD-BEARING.
-// This used to be `static SoftwareCrypto c;` inside an accessor, and consume()
-// calls it from INSIDE portENTER_CRITICAL. A function-local static of a type
-// with a non-trivial destructor is constructed on first use, and that
-// construction registers the destructor through __cxa_atexit, which takes a
-// recursive newlib lock, which calls abort() when interrupts are disabled.
-// Result: the FIRST HELLO ever to present a live, unexpired /uitoken panicked
-// the device — and only that one, because every other path through the loop
-// (all-slots-stale after the reboot) skipped the call and looked healthy.
-// Decoded from a real backtrace, not deduced:
-//   consume():171 -> __cxa_atexit -> __register_exitproc
-//                 -> __retarget_lock_acquire_recursive -> abort()
-// At namespace scope the object is built during static init, before main, on a
-// task with interrupts enabled — so there is nothing left to initialize lazily
-// and the critical section below does pure arithmetic.
-//
-// THE GENERAL RULE, since this will not be the last spinlock in this codebase:
-// NOTHING lazily-initialized may be touched inside portENTER_CRITICAL. That
-// includes function-local statics, first-use singletons, and anything that
-// might allocate, log, or take a lock. If you need one, construct it in
-// begin().
+// NAMESPACE SCOPE, NOT A FUNCTION-LOCAL STATIC — LOAD-BEARING (TRAPS T4):
+// consume() calls this from INSIDE portENTER_CRITICAL, where a lazily-
+// constructed function-local static would abort the core on first use. At
+// namespace scope the object is built during static init, before main, so
+// there is nothing left to initialize lazily and the critical section below
+// does pure arithmetic.
 slopsync::SoftwareCrypto s_cmp;
 
 slopsync::SoftwareCrypto& cmp() { return s_cmp; }
@@ -103,7 +96,7 @@ void SlopSyncUiTokenMinter::attachRoutes(SlopHttpServer* server) {
 }
 
 void SlopSyncUiTokenMinter::handleGet(SlopHttpServer* server) {
-    // ---- DO NOT ADD CORS HEADERS BELOW THIS LINE ---------------------------
+    // ---- DO NOT ADD CORS HEADERS BELOW THIS LINE ----------------------------
     // Their absence IS the security mechanism (see the header). A cross-origin
     // page may send this request; the browser must refuse to let it read the
     // answer. There is no legitimate reason for this endpoint to be readable
@@ -117,7 +110,7 @@ void SlopSyncUiTokenMinter::handleGet(SlopHttpServer* server) {
 
     const uint32_t now = millis();
 
-    // ---- Pass 1 (locked, ~1 µs): rate limit + claim a counter --------------
+    // ---- Pass 1 (locked, ~1 µs): rate limit + claim a counter ---------------
     // Rate limit: one mint per kMinIntervalMs, device-wide. A page needs exactly
     // one token per session, so this is generous for real use and flattens the
     // "spray requests and grab whichever lands" pattern.
@@ -133,7 +126,7 @@ void SlopSyncUiTokenMinter::handleGet(SlopHttpServer* server) {
     counter = ++_counter;
     portEXIT_CRITICAL(&s_mux);
 
-    // ---- The HMAC runs UNLOCKED, deliberately ------------------------------
+    // ---- The HMAC runs UNLOCKED, deliberately -------------------------------
     // token = HMAC(boot secret, counter || now)[0..15]. The HMAC is what makes
     // it unguessable; the slot table is what makes it single-use and expiring.
     // Both halves are needed — a stateless token cannot be revoked on use.

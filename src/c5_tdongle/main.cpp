@@ -1,62 +1,29 @@
-// =============================================================================
 // SlopDrive-32 — T-Dongle C5 Transmitter Node
-// src/c5_tdongle/main.cpp
-//
-// This little guy sits between MFP and the machine, swallowing every T-Code
-// byte that comes down the USB pipe and squirting it out over ESP-NOW to the
-// Waveshare C5 relay. The display shows you exactly how hard it's working —
-// a vertical bar that fills up as the position climbs, a live Hz readout that
-// changes color depending on how fast the data is pumping, and a status line
-// at the bottom so you know if the serial link is alive. yippie! :3
-//
-// WiFi/ESP-NOW starts OFF at boot and only turns on when the host opens the
-// COM port (DTR asserted). After the host closes the port, if no new connection
-// arrives within 5 minutes, WiFi shuts down completely to save power. The
-// dongle sits there tight and quiet until someone plugs in again — like a
-// needy hole waiting for the cable to slide back in. hehee :3
-//
-// Display layout (portrait 80×160) — full 160px used, no dead zones:
-//   Y 0–15:    Header — [WIFI] left, RDY/TX right (16px)
-//   Y 16:      Divider line (1px)
-//   Y 17–136:  Content zone (120px):
-//              Left  0–37px:  vertical position bar (fills bottom-to-top)
-//              X 38:          1px vertical divider
-//              Right 39–79px: RATE label + Hz value (color-coded)
-//                             POS label + position in mm
-//                             PKT label + loss % (app-layer ACK)
-//   Y 137:     Divider line (1px)
-//   Y 138–159: Footer — "serial: CONN" / "RDY" / "WiFi:OFF" (22px)
-//
-// Hz color coding:
-//   < 50 Hz  → RED    (barely dribbling, something is wrong)
-//   < 100 Hz → ORANGE (sluggish, check your connection)
-//   < 200 Hz → CYAN   (good, steady stream)
-//   ≥ 200 Hz → GREEN  (absolutely railing it, full send)
-//
-// Packet loss tracking — APPLICATION LAYER, not hardware ACK.
-// Broadcast ESP-NOW has NO MAC-layer ACK — the send callback ALWAYS returns
-// FAIL for broadcast. Instead: we embed a 1-byte seq# at the front of every
-// packet. The Waveshare echoes back a 2-byte ACK {0xAC, seq}. We track which
-// seq#s came back in a 256-bit sliding window. Real RF loss, real numbers. :3
-//
-// Rendering — FULL FRAMEBUFFER, ONE DMA PUSH PER FRAME.
-// 80×160×2 = 25,600 bytes rendered in RAM, then blasted to the display in a
-// single setAddrWindow + writePixels call. The ST7735 scans continuously; if
-// we're mid-write when it scans, we get tearing. One atomic push = no tearing,
-// no flicker, no partial-frame garbage. Like inflating the whole cavity at once
-// instead of pumping one cc at a time — the stomach bulges all at once. hehee :3
-//
-// APA102 LED status (CI=4, DI=5):
-//   WHITE  — WiFi off, waiting for serial data / idle
-//   CYAN   — actively receiving and forwarding T-Code
-//   BLUE   — ESP-NOW ready but no serial activity
-//   RED    — error / ESP-NOW not ready
-//
-// Hardware (LilyGO T-Dongle C5):
-//   Display:  ST7735 80×160, SPI — CS=10, DC=3, RST=1, MOSI=2, SCLK=6, BL=0
-//   Button:   GPIO 28 (boot button — rotates display 180°)
-//   LED:      APA102 RGB — CI=4, DI=5
-// =============================================================================
+// Relays T-Code from the USB CDC serial link to the Waveshare C5 over
+// ESP-NOW, with an on-device status display and RGB status LED.
+// Constraints:
+// - WiFi/ESP-NOW starts OFF at boot; only turns on when the host opens the
+//   COM port (DTR asserted). Shuts down after 5 minutes with no open port.
+// - Packet loss is tracked at the APPLICATION layer: broadcast ESP-NOW never
+//   returns a MAC-layer ACK, so loss comes from a 1-byte seq# on every
+//   outgoing packet plus a batched ACK bitmask echoed back by the Waveshare.
+// - Display renders into a full 80x160 RAM framebuffer, flushed to the ST7735
+//   in one DMA burst per frame — a partial/mid-scan write tears the screen.
+// - Single-core target: state shared between callbacks and loop() is
+//   volatile, no mutex.
+// - Display layout (portrait 80x160, all 160px used):
+//     Y 0-15:    Header — [WIFI] left, RDY/TX right
+//     Y 16:      Divider
+//     Y 17-136:  Content — left 0-37px position bar, X38 divider,
+//                right 39-79px RATE/Hz, POS/mm, PKT/loss%
+//     Y 137:     Divider
+//     Y 138-159: Footer — "serial: CONN" / "RDY" / "WiFi:OFF"
+// - Hz color coding: <50 red, <100 amber, <200 cyan, >=200 green.
+// - APA102 LED (CI=4, DI=5): white = WiFi off/idle, cyan = actively
+//   relaying, blue = ESP-NOW ready but no serial activity, red = error.
+// - Hardware (LilyGO T-Dongle C5): ST7735 80x160 SPI display (CS=10, DC=3,
+//   RST=1, MOSI=2, SCLK=6, BL=0), boot button GPIO28 (rotates display 180),
+//   APA102 RGB LED (CI=4, DI=5).
 
 #include <Arduino.h>
 #include <esp_now.h>
@@ -67,13 +34,12 @@
 #include "esp_system.h"
 #include "esp_sleep.h"
 
-// =============================================================================
-// POWER-ON SELF-RESET — kills the DTR-triggered reboot on first enumeration.
-// Windows asserts DTR when it opens the port, the C5 hardware resets, display
-// goes black, MFP gets a semaphore timeout. We self-reset on power-on so the
-// DTR storm hits during the first enumeration cycle before MFP opens the port.
-// The hole takes the hit before the fist arrives. Smart. :3
-// =============================================================================
+// ---- Power-on self-reset ----------------------------------------------------
+// Kills the DTR-triggered reboot on first enumeration. Windows asserts DTR
+// when it opens the port, which resets the C5 hardware, blanks the display,
+// and gives MFP a semaphore timeout. Self-resetting on power-on forces the
+// DTR-triggered reset to happen during the first enumeration cycle, before
+// MFP ever opens the port.
 __attribute__((constructor)) static void disableUsbReset() {
     USB_SERIAL_JTAG.chip_rst.usb_uart_chip_rst_dis = 1;
     if (esp_reset_reason() == ESP_RST_POWERON) {
@@ -87,9 +53,7 @@ __attribute__((constructor)) static void disableUsbReset() {
   #include <secrets.example.h>
 #endif
 
-// =============================================================================
-// Pin definitions
-// =============================================================================
+// ---- Pin definitions --------------------------------------------------------
 static constexpr int8_t  PIN_TFT_CS   = 10;
 static constexpr int8_t  PIN_TFT_DC   = 3;
 static constexpr int8_t  PIN_TFT_RST  = 1;
@@ -100,12 +64,8 @@ static constexpr uint8_t PIN_BUTTON   = 28;  // boot button, active LOW
 static constexpr uint8_t PIN_LED_CI   = 4;   // APA102 clock
 static constexpr uint8_t PIN_LED_DI   = 5;   // APA102 data
 
-// =============================================================================
-// Display geometry — portrait 80×160, ALL 160px used. No dead zones. :3
-//
-// Old layout wasted 32px at the bottom (only used 128 of 160px).
-// New layout: HDR=16, DIV=1, CONTENT=120, DIV=1, FTR=22 → total=160. yippie!
-// =============================================================================
+// ---- Display geometry — portrait 80x160, all 160px used ---------------------
+// HDR=16, DIV=1, CONTENT=120, DIV=1, FTR=22 -> total=160.
 static constexpr int16_t DISP_W      = 80;
 static constexpr int16_t DISP_H      = 160;
 
@@ -135,21 +95,7 @@ static constexpr int16_t FTR_DIV_Y   = 137;
 static constexpr int16_t FTR_Y       = 138;
 static constexpr int16_t FTR_H       = DISP_H - FTR_Y;    // 22px
 
-// =============================================================================
-// Color palette — reworked for readability and contrast. :3
-//
-// Background: deep navy #0a0a1a (darker than before, more contrast)
-// Accent:     electric purple #8b5cf6
-// Good:       bright green #22c55e (replaces cyan for Hz≥200 — pops more)
-// Mid:        amber #f59e0b (replaces yellow — warmer, less harsh)
-// Bad:        hot red #ef4444
-// Text:       near-white #f1f5f9
-// Label:      slate #94a3b8
-// Bar fill:   electric purple #8b5cf6
-// Bar empty:  very dark #1e1e2e
-// Header bg:  slightly lighter than bg #111128
-// Divider:    deep purple #2d1b69
-// =============================================================================
+// ---- Color palette ----------------------------------------------------------
 static constexpr uint16_t COL_BG          = 0x0001;  // #0a0a1a deep navy
 static constexpr uint16_t COL_HDR_BG      = 0x0882;  // #111128 header bg
 static constexpr uint16_t COL_DIVIDER     = 0x280D;  // #2d1b69 deep purple
@@ -165,9 +111,7 @@ static constexpr uint16_t COL_PURPLE      = 0x8B7B;  // #8b5cf6 electric purple
 static constexpr uint16_t COL_TEAL        = 0x0676;  // #06b6d4 teal (pos value)
 static constexpr uint16_t COL_WHITE       = 0xFFFF;
 
-// =============================================================================
-// Minimal 5×7 bitmap font — column-major, LSB = top row. :3
-// =============================================================================
+// ---- Minimal 5x7 bitmap font — column-major, LSB = top row ------------------
 static const uint8_t FONT5X7[][5] PROGMEM = {
     {0x00,0x00,0x00,0x00,0x00}, // 0x20 space
     {0x00,0x00,0x5F,0x00,0x00}, // 0x21 !
@@ -266,31 +210,23 @@ static const uint8_t FONT5X7[][5] PROGMEM = {
     {0x10,0x08,0x08,0x10,0x08}, // 0x7E ~
 };
 
-// =============================================================================
-// FULL-SCREEN FRAMEBUFFER — 80×160×2 = 25,600 bytes.
-//
+// ---- Full-screen framebuffer — 80x160x2 = 25,600 bytes ----------------------
 // Every frame is rendered entirely in RAM, then pushed to the display in ONE
 // DMA burst via setAddrWindow(0,0,79,159) + writePixels(). The ST7735 scans
-// continuously at ~60Hz; if we're mid-write when it scans, we get tearing.
-// One atomic push = zero tearing, zero flicker, zero partial-frame garbage.
-//
-// Like fisting the whole thing open in one push — the stomach bulges all at
-// once, nothing leaks out the sides, the whole cavity fills simultaneously.
-// That's the energy we're going for. yippie! :3
-//
-// 25.6KB is fine — C5 has 320KB RAM, we're at ~17% used. owo
-// =============================================================================
+// continuously at ~60Hz; a mid-write scan tears the screen. One atomic push
+// is the only way to avoid tearing/flicker/partial-frame garbage.
+// 25.6KB is well within the C5's 320KB RAM (~17% used).
 static constexpr int16_t FB_W = DISP_W;   // 80
 static constexpr int16_t FB_H = DISP_H;   // 160
 static uint16_t s_fb[FB_W * FB_H];        // 25,600 bytes
 
-// Write a pixel into the framebuffer — big-endian 565 for transferBytes(). :3
+// Write a pixel into the framebuffer — big-endian 565 for transferBytes().
 static inline void fbPixel(int16_t x, int16_t y, uint16_t color) {
     if ((uint16_t)x >= (uint16_t)FB_W || (uint16_t)y >= (uint16_t)FB_H) return;
     s_fb[y * FB_W + x] = (color >> 8) | (color << 8);
 }
 
-// Fill a rectangle in the framebuffer. :3
+// Fill a rectangle in the framebuffer.
 static void fbFillRect(int16_t x, int16_t y, int16_t w, int16_t h, uint16_t color) {
     if (w <= 0 || h <= 0) return;
     uint16_t sw = (color >> 8) | (color << 8);
@@ -304,17 +240,17 @@ static void fbFillRect(int16_t x, int16_t y, int16_t w, int16_t h, uint16_t colo
     }
 }
 
-// Draw a horizontal line in the framebuffer. :3
+// Draw a horizontal line in the framebuffer.
 static void fbHLine(int16_t x, int16_t y, int16_t w, uint16_t color) {
     fbFillRect(x, y, w, 1, color);
 }
 
-// Draw a vertical line in the framebuffer. :3
+// Draw a vertical line in the framebuffer.
 static void fbVLine(int16_t x, int16_t y, int16_t h, uint16_t color) {
     fbFillRect(x, y, 1, h, color);
 }
 
-// Draw a 5×7 glyph into the framebuffer at (sx, sy). :3
+// Draw a 5x7 glyph into the framebuffer at (sx, sy).
 static void fbDrawChar(int16_t sx, int16_t sy, char c, uint16_t fg, uint16_t bg, uint8_t sc) {
     if (c < 0x20 || c > 0x7E) c = '?';
     const uint8_t* glyph = FONT5X7[c - 0x20];
@@ -333,7 +269,7 @@ static void fbDrawChar(int16_t sx, int16_t sy, char c, uint16_t fg, uint16_t bg,
     fbFillRect(sx + 5 * sc, sy, sc, 7 * sc, bg);
 }
 
-// Draw a string into the framebuffer. Returns x after last char. :3
+// Draw a string into the framebuffer. Returns x after last char.
 static int16_t fbPrint(int16_t sx, int16_t sy, const char* str,
                         uint16_t fg, uint16_t bg, uint8_t sc) {
     while (*str) {
@@ -344,8 +280,8 @@ static int16_t fbPrint(int16_t sx, int16_t sy, const char* str,
 }
 
 // Flush the entire framebuffer to the display in one DMA burst.
-// One setAddrWindow + one writePixels = one SPI transaction for the whole screen.
-// The display controller gets the full frame atomically — no tearing possible. :3
+// One setAddrWindow + one writePixels = one SPI transaction for the whole
+// screen — the display controller gets the full frame atomically.
 static Adafruit_ST7735* s_tft_ptr = nullptr;
 
 static void fbFlush() {
@@ -356,10 +292,8 @@ static void fbFlush() {
     s_tft_ptr->endWrite();
 }
 
-// =============================================================================
-// APA102 LED driver — bitbang, single LED. No library needed. :3
+// ---- APA102 LED driver — bitbang, single LED --------------------------------
 // APA102 frame: 4 bytes 0x00, then [0xFF, B, G, R], then 4 bytes 0xFF.
-// =============================================================================
 static void ledWrite(uint8_t r, uint8_t g, uint8_t b) {
     // Start frame — 32 clocks with data LOW
     for (int i = 0; i < 32; i++) {
@@ -367,7 +301,7 @@ static void ledWrite(uint8_t r, uint8_t g, uint8_t b) {
         digitalWrite(PIN_LED_DI, LOW);
         digitalWrite(PIN_LED_CI, HIGH);
     }
-    // LED frame: [0xFF brightness][blue][green][red] — APA102 is BGR. owo
+    // LED frame: [0xFF brightness][blue][green][red] — APA102 is BGR.
     uint32_t frame = 0xFF000000UL | ((uint32_t)b << 16) | ((uint32_t)g << 8) | r;
     for (int i = 31; i >= 0; i--) {
         digitalWrite(PIN_LED_CI, LOW);
@@ -403,51 +337,42 @@ static void applyLed(LedState state) {
     }
 }
 
-// =============================================================================
-// Application-layer packet loss tracking — fixed window math.
-//
+// ---- Application-layer packet loss tracking ---------------------------------
 // Broadcast ESP-NOW has NO MAC-layer ACK — the send callback ALWAYS returns
 // ESP_NOW_SEND_FAIL for broadcast because there's no 802.11 ACK frame for
-// multicast/broadcast addresses. This is documented behavior, not a bug.
-//
-// Instead we do it properly:
+// multicast/broadcast addresses. This is documented ESP-NOW behavior, not a
+// bug, so loss is tracked at the application layer instead:
 //   1. Prepend a 1-byte sequence number to every outgoing packet.
 //      Packet format: [seq_byte][T-Code string...]
-//   2. The Waveshare receiver strips the seq byte, relays the T-Code,
-//      then sends back a batched broadcast ACK every 10ms:
+//   2. The Waveshare receiver strips the seq byte, relays the T-Code, then
+//      sends back a batched broadcast ACK every 10ms:
 //      {0xAC, base_seq, mask_b0, mask_b1, mask_b2, mask_b3}
-//   3. We track which seq#s came back in a 256-bit sliding window (32 bytes).
+//   3. Track which seq#s came back in a 256-bit sliding window (32 bytes).
 //
-// WINDOW MATH FIX: At 333Hz the seq# (uint8_t, wraps at 256) completes a full
-// cycle every 0.77 seconds. If we reset the window every 1 second, seq#s from
-// the previous cycle overwrite bits from the current cycle — double-counting.
-//
-// Fix: track loss using a rolling counter instead of a bit window.
+// At 333Hz the seq# (uint8_t, wraps at 256) completes a full cycle every
+// 0.77 seconds. Resetting the tracking window every 1 second would let
+// seq#s from the previous wrap cycle collide with the current one and
+// double-count, so loss uses monotonic counters instead of a periodic reset:
 //   - s_seq_sent_total: monotonic count of packets sent
 //   - s_seq_acked_total: monotonic count of ACKs received
 //   - Every second: loss = 1 - (acked_delta / sent_delta)
-//
-// The bit window is still used to deduplicate ACKs (prevent double-counting
-// when the Waveshare sends the same seq# twice). But we don't reset it on
-// the 1-second boundary — we let it roll with the seq# naturally. :3
-//
-// This gives us REAL RF packet loss numbers. The hole knows when it's been
-// filled and when the fist missed. :3
-// =============================================================================
+// The bit window still deduplicates ACKs (the Waveshare can send the same
+// seq# twice) but is never reset on the 1-second boundary — it rolls with
+// the seq# naturally.
 static constexpr uint8_t  ACK_MAGIC    = 0xAC;  // ACK packet first byte
 
-// Dedup window: bit N set = seq# N was already counted as acked this cycle. :3
-// Cleared when seq# wraps (every 256 packets = ~0.77s at 333Hz). owo
+// Dedup window: bit N set = seq# N was already counted as acked this cycle.
+// Cleared when seq# wraps (every 256 packets = ~0.77s at 333Hz).
 static uint8_t  s_ack_dedup[32] = {};  // 256 bits
 
-// Monotonic counters — never reset, delta computed each second. :3
+// Monotonic counters — never reset, delta computed each second.
 static uint32_t s_seq_sent_total  = 0;
 static uint32_t s_seq_acked_total = 0;
 static uint8_t  s_seq_tx          = 0;   // next sequence number to send
 static float    g_loss_pct        = 0.0f;
 
-// Mark a seq# as acknowledged — dedup prevents double-counting. :3
-// Returns true if this is a new ACK (not a duplicate). owo
+// Mark a seq# as acknowledged — dedup prevents double-counting.
+// Returns true if this is a new ACK (not a duplicate).
 static inline bool ackMark(uint8_t seq) {
     uint8_t byte_idx = seq >> 3;
     uint8_t bit_mask = 1u << (seq & 7);
@@ -456,8 +381,8 @@ static inline bool ackMark(uint8_t seq) {
     return true;
 }
 
-// Compute loss % from monotonic counters. Called once per second. :3
-// Uses delta since last call — immune to seq# wrap-around. yippie! :3
+// Compute loss % from monotonic counters. Called once per second.
+// Uses delta since last call — immune to seq# wrap-around.
 static void ackComputeLoss() {
     static uint32_t s_last_sent  = 0;
     static uint32_t s_last_acked = 0;
@@ -474,14 +399,12 @@ static void ackComputeLoss() {
         g_loss_pct = 0.0f;
     }
 
-    // Clear dedup window every second — seq# has likely wrapped by now. :3
+    // Clear dedup window every second — seq# has likely wrapped by now.
     memset(s_ack_dedup, 0, sizeof(s_ack_dedup));
 }
 
-// =============================================================================
-// Shared volatile state — written by serial/ESP-NOW callbacks, read by loop()
-// Single-core C5 so no mutex needed, volatile prevents register caching. :3
-// =============================================================================
+// ---- Shared volatile state — written by serial/ESP-NOW callbacks, read by loop() -
+// Single-core C5: no mutex needed, volatile prevents register caching.
 static volatile float    g_position      = 0.0f;
 static volatile uint32_t g_pkt_count     = 0;
 static float             g_hz            = 0.0f;
@@ -489,24 +412,19 @@ static volatile bool     g_flipped       = false;
 static bool              g_last_flipped  = false;
 static volatile bool     g_serial_active = false;
 
-// =============================================================================
-// WiFi power management — WiFi starts OFF at boot, turns on when host opens COM
-// port (DTR asserted), shuts down after 5 minutes of no open port. :3
-// =============================================================================
+// ---- WiFi power management --------------------------------------------------
+// WiFi starts OFF at boot, turns on when the host opens the COM port (DTR
+// asserted), shuts down after 5 minutes of no open port.
 static constexpr uint32_t IDLE_SHUTDOWN_MS = 300000;  // 5 minutes
 static bool     s_wifi_on         = false;   // WiFi + ESP-NOW currently active
 static bool     s_wifi_starting   = false;   // init task in flight (prevents double-start)
 static uint32_t s_idle_start_ms   = 0;       // when Serial last dropped (DTR de-asserted)
 
-// =============================================================================
-// TFT instance
-// =============================================================================
+// ---- TFT instance -----------------------------------------------------------
 static Adafruit_ST7735 tft(PIN_TFT_CS, PIN_TFT_DC, PIN_TFT_RST,
                             PIN_TFT_SCLK, PIN_TFT_MOSI);
 
-// =============================================================================
-// Minimal inline T-Code parser — same as before, it's correct. :3
-// =============================================================================
+// ---- Minimal inline T-Code parser -------------------------------------------
 static void parseTCode(const char* str, float* out_pos, bool* out_stop) {
     *out_pos  = -1.0f;
     *out_stop = false;
@@ -539,29 +457,22 @@ static void parseTCode(const char* str, float* out_pos, bool* out_stop) {
     }
 }
 
-// =============================================================================
-// ESP-NOW receive callback — handles BATCHED ACK packets from the Waveshare.
-//
-// Batched ACK format (6 bytes):
-//   [0xAC][base_seq][mask_b0][mask_b1][mask_b2][mask_b3]
-//
-// base_seq = seq# of bit 0. Bits 0-31 = seq base..base+31.
-// We unpack the bitmask and mark each set bit as acknowledged. :3
-//
-// At 333Hz the Waveshare sends ~100 batched ACKs/sec instead of 333 individual
-// ones. Each batch covers up to 32 seq#s. The Wi-Fi stack breathes again. owo
-// =============================================================================
+// ---- ESP-NOW receive callback — handles batched ACK packets -----------------
+// Batched ACK format (6 bytes): [0xAC][base_seq][mask_b0][mask_b1][mask_b2][mask_b3]
+// base_seq = seq# of bit 0; bits 0-31 = seq base..base+31. At 333Hz the
+// Waveshare sends ~100 batched ACKs/sec instead of 333 individual ones, each
+// batch covering up to 32 seq#s.
 static void onEspNowRecv(const esp_now_recv_info_t* info,
                          const uint8_t* data, int len) {
     (void)info;
-    // Batched broadcast ACK: exactly 6 bytes, first byte = 0xAC. :3
+    // Batched broadcast ACK: exactly 6 bytes, first byte = 0xAC.
     if (len == 6 && data[0] == ACK_MAGIC) {
         uint8_t  base = data[1];
         uint32_t mask = (uint32_t)data[2]
                       | ((uint32_t)data[3] << 8)
                       | ((uint32_t)data[4] << 16)
                       | ((uint32_t)data[5] << 24);
-        // Mark each set bit as acknowledged — dedup prevents double-counting. :3
+        // Mark each set bit as acknowledged — dedup prevents double-counting.
         for (int i = 0; i < 32; i++) {
             if (mask & (1u << i)) {
                 if (ackMark((uint8_t)(base + i))) {
@@ -571,19 +482,17 @@ static void onEspNowRecv(const esp_now_recv_info_t* info,
         }
         return;
     }
-    // Anything else — ignore (we're the TX side). :3
+    // Anything else — ignore (this node is the TX side).
 }
 
 static void initDisplay(bool flipped);
 static bool s_espnow_ready = false;
 
-// =============================================================================
-// Forward declarations for WiFi power management. :3
-// =============================================================================
+// ---- Forward declarations for WiFi power management -------------------------
 static void startWiFi();
 static void stopWiFi();
 
-// Bundle state — declared here so stopWiFi() can clear the accumulator. :3
+// Bundle state — declared here so stopWiFi() can clear the accumulator.
 static constexpr uint8_t  BUNDLE_MAX_CMDS   = 4;
 static constexpr uint8_t  BUNDLE_CMD_MAXLEN = 60;   // max bytes per T-Code cmd
 static constexpr uint32_t BUNDLE_INTERVAL_MS = 10;  // send bundle every 10ms = 100Hz
@@ -598,11 +507,10 @@ static BundleCmd  s_bundle[BUNDLE_MAX_CMDS];
 static uint8_t    s_bundle_count    = 0;
 static uint32_t   s_bundle_start_ms = 0;  // when the current window opened
 
-// =============================================================================
-// Wi-Fi + ESP-NOW init task — background so USB CDC stays alive during init.
-// Without this, Windows fires "semaphore timeout" when WiFi.mode() blocks. :3
-// Called by startWiFi() only when the host opens the COM port. :3
-// =============================================================================
+// ---- WiFi + ESP-NOW init task -----------------------------------------------
+// Runs as a background task so USB CDC stays alive during init — without
+// this, Windows fires a "semaphore timeout" when WiFi.mode() blocks. Called
+// by startWiFi() only when the host opens the COM port.
 static void espNowInitTask(void* arg) {
     vTaskDelay(pdMS_TO_TICKS(50));
 
@@ -630,8 +538,8 @@ static void espNowInitTask(void* arg) {
         return;
     }
     esp_now_register_recv_cb(onEspNowRecv);
-    // NOTE: We do NOT register a send callback — broadcast always returns FAIL
-    // and it's useless noise. App-layer ACK via onEspNowRecv() is the real deal. :3
+    // No send callback registered — broadcast always returns FAIL, which is
+    // useless noise. App-layer ACK via onEspNowRecv() is the real signal.
     s_espnow_ready = true;
     s_wifi_on      = true;
     s_wifi_starting = false;
@@ -640,11 +548,8 @@ static void espNowInitTask(void* arg) {
     vTaskDelete(NULL);
 }
 
-// =============================================================================
-// startWiFi — fires up the WiFi radio and ESP-NOW when the host plugs in.
-// Guarded against double-start (s_wifi_on / s_wifi_starting flags). :3
-// The dongle goes from cold and tight to radiating heat in under 2 seconds. owo
-// =============================================================================
+// ---- startWiFi — fires up the WiFi radio and ESP-NOW when the host plugs in -
+// Guarded against double-start (s_wifi_on / s_wifi_starting flags).
 static void startWiFi() {
     if (s_wifi_on || s_wifi_starting) return;
     s_wifi_starting = true;
@@ -652,15 +557,12 @@ static void startWiFi() {
     xTaskCreate(espNowInitTask, "espnow_init", 4096, NULL, 1, NULL);
 }
 
-// =============================================================================
-// stopWiFi — shuts down ESP-NOW and WiFi radio after the idle timeout.
+// ---- stopWiFi — shuts down ESP-NOW and WiFi radio after the idle timeout ----
 // Clears the bundle accumulator so no stale packets try to send post-deinit.
-// The dongle goes soft and quiet, saving power until the next cable slides in. :3
-// =============================================================================
 static void stopWiFi() {
     if (!s_wifi_on) return;
 
-    // Clear the bundle accumulator — we're about to kill ESP-NOW. No stale sends. :3
+    // Clear the bundle accumulator — about to kill ESP-NOW, no stale sends.
     s_bundle_count = 0;
     s_bundle_start_ms = 0;
 
@@ -675,10 +577,10 @@ static void stopWiFi() {
     s_wifi_on = false;
     s_led_state = LedState::WAITING;
 
-    // Clear serial-active too — no point showing stale data. :3
+    // Clear serial-active too — no point showing stale data.
     g_serial_active = false;
 
-    // Reset the ACK tracking counters for a clean slate on next connect. :3
+    // Reset the ACK tracking counters for a clean slate on next connect.
     s_seq_sent_total  = 0;
     s_seq_acked_total = 0;
     s_seq_tx          = 0;
@@ -688,11 +590,9 @@ static void stopWiFi() {
     Serial.println("[power] Idle timeout — WiFi off. Going soft... :3");
 }
 
-// =============================================================================
-// Display rendering — all into the framebuffer, flushed once per frame. :3
-// =============================================================================
+// ---- Display rendering — all into the framebuffer, flushed once per frame ---
 
-// Hz color: red < 50, amber 50-100, cyan 100-200, green >= 200. :3
+// Hz color: red < 50, amber 50-100, cyan 100-200, green >= 200.
 static uint16_t hzColor(float hz) {
     if (hz < 50.0f)  return COL_RED;
     if (hz < 100.0f) return COL_AMBER;
@@ -701,30 +601,22 @@ static uint16_t hzColor(float hz) {
 }
 
 // Render the entire frame into the framebuffer.
-// Called every loop() iteration — cheap because it's all RAM writes. :3
+// Called every loop() iteration — cheap because it's all RAM writes.
+// See the file header for the layout diagram.
 //
-// Layout:
-//   Header (Y 0–15):   [WIFI/----] left | [TX/RDY] right
-//   Divider (Y 16):    1px deep purple line
-//   Bar (Y 17–136):    X 0–36: vertical fill bar (bottom-to-top, purple)
-//   VDiv (X 38):       1px deep purple vertical line
-//   Stats (Y 17–136):  X 39–79: RATE/Hz, POS/mm, PKT/loss%
-//   Divider (Y 137):   1px deep purple line
-//   Footer (Y 138–159): "serial: CONN" / "RDY" / "WiFi:OFF"
-//
-// The bar uses a cached fill height to avoid clearing the whole bar every frame.
-// Only the delta pixels get redrawn in the framebuffer — then the whole thing
-// flushes anyway, but the RAM writes are fast. The DMA push is the bottleneck. :3
+// The bar tracks a cached fill height so only the changed rows are redrawn
+// in the framebuffer; the whole framebuffer still flushes every frame
+// regardless, but the RAM writes are cheap — the DMA push is the bottleneck.
 static int16_t s_last_fill_h = -1;
 
 static void renderFrame(float hz, float position, float loss_pct,
                          bool wifi_up, bool serial_active) {
-    // ---- Background: only clear zones that change ----
-    // On first call (s_last_fill_h == -1) we clear everything. :3
+    // ---- Background: only clear zones that change ---------------------------
+    // On first call (s_last_fill_h == -1) everything is cleared.
     bool full_clear = (s_last_fill_h < 0);
 
     if (full_clear) {
-        // Clear entire framebuffer to background. :3
+        // Clear entire framebuffer to background.
         fbFillRect(0, 0, FB_W, FB_H, COL_BG);
         // Header background
         fbFillRect(0, 0, FB_W, HDR_H, COL_HDR_BG);
@@ -736,8 +628,8 @@ static void renderFrame(float hz, float position, float loss_pct,
         fbVLine(DIV_X, CONTENT_Y, CONTENT_H, COL_DIVIDER);
     }
 
-    // ---- Header ----
-    // Always redraw header — it's only 16px and changes rarely. :3
+    // ---- Header -------------------------------------------------------------
+    // Always redraw header — it's only 16px and changes rarely.
     fbFillRect(0, 0, FB_W, HDR_H, COL_HDR_BG);
 
     // [WIFI] badge left — cyan if up, slate if not
@@ -751,14 +643,14 @@ static void renderFrame(float hz, float position, float loss_pct,
         fbPrint(FB_W - 21, 5, "RDY", COL_TEXT, COL_HDR_BG, 1);
     }
 
-    // ---- Position bar (left column) ----
-    // Map 0.0–1.0 to 0–BAR_H pixels, fill from bottom. :3
+    // ---- Position bar (left column) -----------------------------------------
+    // Map 0.0-1.0 to 0-BAR_H pixels, fill from bottom.
     int16_t fill_h = (int16_t)(position * BAR_H);
     if (fill_h < 0)     fill_h = 0;
     if (fill_h > BAR_H) fill_h = BAR_H;
 
     if (fill_h != s_last_fill_h || full_clear) {
-        // Clear the whole bar zone and redraw — fast in RAM. :3
+        // Clear the whole bar zone and redraw — fast in RAM.
         fbFillRect(BAR_X, BAR_Y, BAR_W, BAR_H, COL_BAR_EMPTY);
         if (fill_h > 0) {
             int16_t bar_top = BAR_Y + (BAR_H - fill_h);
@@ -767,8 +659,8 @@ static void renderFrame(float hz, float position, float loss_pct,
         s_last_fill_h = fill_h;
     }
 
-    // ---- Stats panel (right column) ----
-    // Clear stats zone — 41×120px. :3
+    // ---- Stats panel (right column) -----------------------------------------
+    // Clear stats zone — 41x120px.
     fbFillRect(STATS_X, CONTENT_Y, STATS_W, CONTENT_H, COL_BG);
 
     // RATE section — label + Hz value (scale 2 = 10×14px per char)
@@ -785,13 +677,13 @@ static void renderFrame(float hz, float position, float loss_pct,
     fbPrint(STATS_X + 2, CONTENT_Y + 42, "POS",  COL_LABEL, COL_BG, 1);
     {
         char pos_buf[8];
-        // 260mm travel — display as integer mm. :3
+        // 260mm travel — display as integer mm.
         snprintf(pos_buf, sizeof(pos_buf), "%3d", (int)(position * 260.0f));
         fbPrint(STATS_X + 2, CONTENT_Y + 52, pos_buf, COL_TEAL, COL_BG, 2);
     }
 
     // PKT section — label at Y+82, value at Y+92
-    // Loss color: green=0%, amber<5%, red>=5%. :3
+    // Loss color: green=0%, amber<5%, red>=5%.
     fbPrint(STATS_X + 2, CONTENT_Y + 82, "PKT",  COL_LABEL, COL_BG, 1);
     {
         uint16_t loss_col;
@@ -807,12 +699,12 @@ static void renderFrame(float hz, float position, float loss_pct,
         fbPrint(STATS_X + 2, CONTENT_Y + 92, loss_buf, loss_col, COL_BG, 1);
     }
 
-    // ---- Dividers (redraw over bar/stats in case they got clobbered) ----
+    // ---- Dividers (redraw over bar/stats in case they got clobbered) --------
     fbHLine(0, HDR_DIV_Y, FB_W, COL_DIVIDER);
     fbHLine(0, FTR_DIV_Y, FB_W, COL_DIVIDER);
     fbVLine(DIV_X, CONTENT_Y, CONTENT_H, COL_DIVIDER);
 
-    // ---- Footer ----
+    // ---- Footer -------------------------------------------------------------
     fbFillRect(0, FTR_Y, FB_W, FTR_H, COL_BG);
     {
         const char* label     = "serial:";
@@ -828,43 +720,38 @@ static void renderFrame(float hz, float position, float loss_pct,
             state_str = "WiFi:OFF";
             state_col = COL_AMBER;
         }
-        // "serial: CONN" = 12 chars × 6px = 72px → center at x=4. :3
+        // "serial: CONN" = 12 chars x 6px = 72px, centered at x=4.
         int16_t fy = FTR_Y + (FTR_H - 7) / 2;  // vertically center the 7px text
         fbPrint(4,  fy, label,     COL_LABEL, COL_BG, 1);
         fbPrint(46, fy, state_str, state_col, COL_BG, 1);
     }
 }
 
-// =============================================================================
-// Full display init — called at boot and on rotation change. :3
-// =============================================================================
+// ---- Full display init — called at boot and on rotation change --------------
 static void initDisplay(bool flipped) {
     tft.setRotation(flipped ? 0 : 2);
 
-    // Clear framebuffer and force full redraw on next renderFrame(). :3
+    // Clear framebuffer and force full redraw on next renderFrame().
     memset(s_fb, 0, sizeof(s_fb));
     s_last_fill_h = -1;
 
-    // Push the blank frame immediately so the display isn't showing garbage. :3
+    // Push the blank frame immediately so the display isn't showing garbage.
     fbFlush();
 }
 
-// =============================================================================
-// Button debounce
-// =============================================================================
+// ---- Button debounce --------------------------------------------------------
 static uint32_t s_btn_last_ms    = 0;
 static bool     s_btn_last_state = HIGH;
 static constexpr uint32_t BTN_DEBOUNCE_MS = 50;
 
-// =============================================================================
-// setup()
-// =============================================================================
+// ---- setup() ----------------------------------------------------------------
 void setup() {
-    // Bump RX buffer — MFP blasts at 100Hz, default 256-byte buffer fills in ~22ms. :3
+    // Bump RX buffer — MFP blasts at 100Hz; the default 256-byte buffer
+    // fills in ~22ms.
     Serial.setRxBufferSize(1024);
     Serial.begin(460800);
 
-    // Disable RTS-triggered reset (belt-and-suspenders with the constructor). :3
+    // Disable RTS-triggered reset (belt-and-suspenders with the constructor).
     USB_SERIAL_JTAG.chip_rst.usb_uart_chip_rst_dis = 1;
 
     // GPIO setup
@@ -872,38 +759,36 @@ void setup() {
     digitalWrite(PIN_TFT_BL, HIGH);  // backlight OFF during init
     pinMode(PIN_BUTTON, INPUT_PULLUP);
 
-    // APA102 LED — start dim white (WiFi off, waiting for host to plug in). :3
+    // APA102 LED — start dim white (WiFi off, waiting for host to plug in).
     pinMode(PIN_LED_CI, OUTPUT);
     pinMode(PIN_LED_DI, OUTPUT);
     digitalWrite(PIN_LED_CI, LOW);
     digitalWrite(PIN_LED_DI, LOW);
     ledWrite(15, 15, 15);
 
-    // Init the display immediately so it's not black — WiFi starts later
-    // only when the host opens the COM port. Lazy WiFi = cool dongle. :3
+    // Init the display immediately so it's not black — WiFi starts later,
+    // only when the host opens the COM port.
     tft.begin();
     s_tft_ptr = &tft;
     initDisplay(false);
     digitalWrite(PIN_TFT_BL, LOW);  // backlight ON
 
-    // Render the "WiFi:OFF" boot screen once before loop takes over. :3
+    // Render the "WiFi:OFF" boot screen once before loop takes over.
     renderFrame(0.0f, 0.0f, 0.0f, false, false);
     fbFlush();
 }
 
-// =============================================================================
-// Serial relay — reads USB CDC, parses T-Code, forwards over ESP-NOW.
-//
-// LATENCY CRITICAL PATH: Serial.read() → parseTCode() → esp_now_send().
-// Everything in this path must be non-blocking and O(1). :3
+// ---- Serial relay — reads USB CDC, parses T-Code, forwards over ESP-NOW -----
+// LATENCY CRITICAL PATH: Serial.read() -> parseTCode() -> esp_now_send().
+// Everything in this path must be non-blocking and O(1).
 //
 // Packet format: [1-byte seq#][T-Code string]
-// The seq# is prepended so the Waveshare can echo it back as an ACK. :3
-// =============================================================================
-// =============================================================================
-// Bundle accumulator — pack 1-4 T-Code commands per ESP-NOW packet, send at
-// 100Hz (every 10ms). Each command carries a relative timestamp so the
-// Waveshare can replay them with correct inter-command spacing. No jitter. :3
+// The seq# is prepended so the Waveshare can echo it back as an ACK.
+
+// ---- Bundle accumulator -----------------------------------------------------
+// Packs 1-4 T-Code commands per ESP-NOW packet, sent at 100Hz (every 10ms).
+// Each command carries a relative timestamp so the Waveshare can replay them
+// with correct inter-command spacing.
 //
 // Bundle packet format (max 250 bytes, ESP-NOW hard limit):
 //   [seq:1][N:1][rel_ms_0:1][len_0:1][cmd_0:len_0]...[rel_ms_N:1][len_N:1][cmd_N:len_N]
@@ -915,21 +800,17 @@ void setup() {
 // len    = byte length of the T-Code command string (no NUL)
 // cmd    = raw T-Code bytes (no newline, no NUL)
 //
-// At 333Hz input, 10ms window = ~3-4 commands/bundle.
-// At 100Hz send rate, even 26% loss = only ~26 bundles/sec lost.
-// Each bundle covers 10ms of commands — a single missed bundle is invisible
-// to motion because T-Code I-values are typically 50-200ms. yippie! :3
+// At 333Hz input, a 10ms window holds ~3-4 commands. At 100Hz send rate, even
+// 26% loss drops only ~26 bundles/sec, and each bundle covers 10ms of
+// commands — a single missed bundle is invisible to motion because T-Code
+// I-values are typically 50-200ms.
 //
-// Jitter analysis:
-//   Commands arrive at the Waveshare ~0-10ms before their fire time.
-//   rel_ms preserves inter-command spacing exactly.
-//   Even a 2ms late arrival still fires in the correct order. :3
-// =============================================================================
+// Jitter: commands arrive at the Waveshare ~0-10ms before their fire time;
+// rel_ms preserves inter-command spacing exactly, so even a late arrival
+// still fires in the correct order.
 
-// Flush the accumulated bundle over ESP-NOW. Called from loop() every 10ms. :3
-// Packs all queued commands into one packet and blasts it out as broadcast.
-// Like stuffing everything in at once — the hole takes the whole fist, not
-// one finger at a time. The stomach bulges with the full payload. hehee :3
+// Flush the accumulated bundle over ESP-NOW. Called from loop() every 10ms.
+// Packs all queued commands into one packet and sends it as broadcast.
 static void flushBundle() {
     if (!s_espnow_ready || s_bundle_count == 0) {
         s_bundle_count    = 0;
@@ -949,7 +830,7 @@ static void flushBundle() {
     }
 
     // Pack: [seq][N][rel_ms_0][len_0][cmd_0...]...[rel_ms_N-1][len_N-1][cmd_N-1...]
-    // Max size: 2 + 4*(1+1+60) = 2 + 248 = 250 bytes — exactly at ESP-NOW limit. :3
+    // Max size: 2 + 4*(1+1+60) = 2 + 248 = 250 bytes — exactly at ESP-NOW limit.
     uint8_t pkt[250];
     uint8_t seq = s_seq_tx++;
     pkt[0] = seq;
@@ -969,20 +850,20 @@ static void flushBundle() {
     s_bundle_start_ms = millis();
 }
 
-// Push a T-Code command into the bundle accumulator. Called from flushSerialBuf(). :3
-// Does NOT send immediately — waits for the 10ms window to fill up. owo
+// Push a T-Code command into the bundle accumulator. Called from
+// flushSerialBuf(). Does NOT send immediately — waits for the 10ms window.
 static void pushToBundle(const char* cmd, uint8_t len) {
     if (len == 0 || len > BUNDLE_CMD_MAXLEN) return;
 
-    // If accumulator is full, flush immediately to make room. :3
-    // This shouldn't happen at 333Hz (only ~3-4 cmds per 10ms window) but
-    // handles burst cases gracefully — better to send early than drop. uhoh :C
+    // If accumulator is full, flush immediately to make room. Shouldn't
+    // happen at 333Hz (only ~3-4 cmds per 10ms window) but handles burst
+    // cases gracefully — better to send early than drop.
     if (s_bundle_count >= BUNDLE_MAX_CMDS) {
         flushBundle();
     }
 
     uint32_t now_ms = millis();
-    // Open a new window on first command. :3
+    // Open a new window on first command.
     if (s_bundle_count == 0) {
         s_bundle_start_ms = now_ms;
     }
@@ -1002,7 +883,7 @@ static void flushSerialBuf() {
     if (s_serial_len == 0) return;
     s_serial_buf[s_serial_len] = '\0';
 
-    // Push to bundle accumulator — actual send happens in loop() every 10ms. :3
+    // Push to bundle accumulator — actual send happens in loop() every 10ms.
     pushToBundle(s_serial_buf, s_serial_len);
 
     // Update shared state for display
@@ -1031,16 +912,15 @@ static void pollSerial() {
     }
 }
 
-// =============================================================================
-// loop() — non-blocking, no delay(). Pumps serial, renders frame, flushes.
-// Handles lazy WiFi start on COM port open and 5-minute idle shutdown. :3
-// =============================================================================
+// ---- loop() — non-blocking, no delay() --------------------------------------
+// Pumps serial, renders frame, flushes. Handles lazy WiFi start on COM port
+// open and 5-minute idle shutdown.
 void loop() {
     uint32_t now_ms = millis();
 
-    // ---- WiFi power management: turn on when host opens COM, off after 5 min idle ----
+    // ---- WiFi power management: turn on when host opens COM, off after 5 min idle --
     // `(bool)Serial` returns true when DTR is asserted (host has port open).
-    // The CDC driver's operator bool checks the DTR/RTS line state. :3
+    // The CDC driver's operator bool checks the DTR/RTS line state.
     bool host_connected = (bool)Serial;
 
     if (host_connected && !s_wifi_on && !s_wifi_starting) {
@@ -1061,15 +941,15 @@ void loop() {
         s_idle_start_ms = 0;  // host reconnected before timeout — reset timer
     }
 
-    // ---- LATENCY CRITICAL: drain serial first ----
+    // ---- LATENCY CRITICAL: drain serial first -------------------------------
     pollSerial();
 
-    // Serial-active timeout — clear after 500ms of silence. :3
+    // Serial-active timeout — clear after 500ms of silence.
     if (g_serial_active && (now_ms - s_last_serial_ms) > 500) {
         g_serial_active = false;
     }
 
-    // ---- Button: rotate display 180° on press ----
+    // ---- Button: rotate display 180 degrees on press ------------------------
     bool btn_state = digitalRead(PIN_BUTTON);
     if (btn_state == LOW && s_btn_last_state == HIGH &&
         (now_ms - s_btn_last_ms) > BTN_DEBOUNCE_MS) {
@@ -1083,18 +963,16 @@ void loop() {
         if (s_tft_ptr) initDisplay(g_flipped);
     }
 
-    // ---- Bundle flush — every 10ms = 100Hz send rate ----
+    // ---- Bundle flush — every 10ms = 100Hz send rate ------------------------
     // Packs accumulated T-Code commands into one ESP-NOW broadcast packet.
-    // At 333Hz input this bundles ~3-4 commands per packet. At 100Hz send rate
-    // even 26% loss only drops ~26 bundles/sec — each covering 10ms of motion.
-    // T-Code I-values are 50-200ms so a single missed bundle is invisible. :3
+    // See the bundle accumulator comment above for the loss-tolerance math.
     static uint32_t s_bundle_last_ms = 0;
     if (now_ms - s_bundle_last_ms >= BUNDLE_INTERVAL_MS) {
         s_bundle_last_ms = now_ms;
         flushBundle();
     }
 
-    // ---- Hz + packet loss — once per second ----
+    // ---- Hz + packet loss — once per second ---------------------------------
     static uint32_t s_hz_last_ms    = 0;
     static uint32_t s_hz_last_count = 0;
 
@@ -1102,11 +980,11 @@ void loop() {
         uint32_t cur    = g_pkt_count;
         g_hz            = (float)(cur - s_hz_last_count);
         s_hz_last_count = cur;
-        ackComputeLoss();  // compute loss from the ACK window, reset for next second. :3
+        ackComputeLoss();  // compute loss from the ACK window, reset for next second.
         s_hz_last_ms = now_ms;
     }
 
-    // ---- LED state machine ----
+    // ---- LED state machine --------------------------------------------------
     if (!s_wifi_on) {
         s_led_state = LedState::WAITING;
     } else if (!s_espnow_ready) {
@@ -1118,19 +996,19 @@ void loop() {
     }
     applyLed(s_led_state);
 
-    // ---- Display: render + flush at 30fps max ----
-    // fbFlush() pushes 25,600 bytes over SPI at 40MHz = ~5ms per flush.
-    // At 333Hz that would be 333 × 5ms = 1.6 seconds of SPI per second —
-    // completely saturated, starving the serial relay path. Throttle to 30fps
-    // (every 33ms) so the loop spends <15% of its time on display. :3
+    // ---- Display: render + flush at 30fps max -------------------------------
+    // fbFlush() pushes 25,600 bytes over SPI at 40MHz = ~5ms per flush. At
+    // 333Hz that would be 333 x 5ms = 1.6 seconds of SPI per second —
+    // completely saturated, starving the serial relay path. Throttled to
+    // 30fps (every 33ms) so the loop spends <15% of its time on display.
     static uint32_t s_disp_last_ms = 0;
     if (s_tft_ptr != nullptr && (now_ms - s_disp_last_ms) >= 33) {
         s_disp_last_ms = now_ms;
         // Pass s_wifi_on (not s_espnow_ready) so the footer shows "WiFi:OFF"
-        // before init finishes and after idle shutdown. :3
+        // before init finishes and after idle shutdown.
         bool show_wifi_up = s_wifi_on && s_espnow_ready;
         renderFrame(g_hz, g_position, g_loss_pct, show_wifi_up, g_serial_active);
         fbFlush();
     }
-    // No delay() — let it pump freely. The C5 at 240MHz can handle it. :3
+    // No delay() — the C5 at 240MHz keeps up without one.
 }

@@ -1,8 +1,4 @@
-#pragma once
-
-// ============================================================================
-// SlopMotion — jerk-limited dual-mode motion core (quintic waveform + Ruckig)
-// ============================================================================
+// SlopMotion — jerk-limited dual-mode motion core (quintic waveform + Ruckig).
 //
 // PURPOSE
 // -------
@@ -162,6 +158,7 @@
 //
 // Hardware-free: std headers + vendored lib/ruckig only. Native-tested in
 // test/native/test_slopmotion; scenario bench in examples/slopmotion_traces. :3
+#pragma once
 
 #include <cstdint>
 #include <cmath>
@@ -405,7 +402,7 @@ struct Config {
     // Estimator resets after a stream gap this long.
     uint32_t chase_stale_us    = 400000;
 
-    // ---- Infeasible-segment handling (WAVEFORM path only) ------------------
+    // ---- Infeasible-segment handling (WAVEFORM path only) -------------------
     InfeasiblePolicy infeasible_policy = InfeasiblePolicy::Reshape;
     // Safety factor on the SCALE policy's stroke size estimate. The estimate
     // is a heuristic, the legality scan is the referee — the margin just
@@ -428,7 +425,7 @@ struct Config {
     // behavior byte for byte until the curve_family wire signaling lands.
     CurvePolicy curve_policy = CurvePolicy::FollowClient;
 
-    // ---- Budgeted policies (PrioritizeAmplitude / PrioritizeSmooth) --------
+    // ---- Budgeted policies (PrioritizeAmplitude / PrioritizeSmooth) ---------
     // How much of each axis the policy may spend before it switches to the
     // other one. Both are FRACTIONS in [0, 1], clamped on use (a config push is
     // not a trusted input).
@@ -454,7 +451,7 @@ struct Config {
     // 1/64 of the budget, well under anything perceptible.
     uint8_t infeasible_blend_steps = 6;
 
-    // ---- Sharpness-first reshaping (RESHAPE only) --------------------------
+    // ---- Sharpness-first reshaping (RESHAPE only) ---------------------------
     // "Is there a hybrid between scale and stretch where we just adjust the
     // slope factor, so it stays smooth when close to max speed, and straightens
     // out the further it is away?" (operator, verbatim.) Yes: jerk is the slope
@@ -536,7 +533,7 @@ struct Config {
     // end. Use 1.0 or use the bool; the in-between is for experimenting.
     float wave_centering_gain = 1.0f;
 
-    // ---- Handoff sanity guard (RFC-008; WAVEFORM path only) ----------------
+    // ---- Handoff sanity guard (RFC-008; WAVEFORM path only) -----------------
     // Fritsch-Carlson chord factor `k` for the one-segment-lookahead bound on
     // an explicit wire end velocity (see boundHandoffVelocity below for the
     // derivation and the measured pathology it exists for).
@@ -559,7 +556,7 @@ struct Config {
     // it did before this knob existed, whatever k says.
     float handoff_chord_factor = 1.5f;
 
-    // ---- Settle grace (see maybeSettle) ------------------------------------
+    // ---- Settle grace (see maybeSettle) -------------------------------------
     // How long an expired plan may HOLD its end state before the engine
     // concludes the stream is starved and brakes to rest. Sized as
     // min(1.5 · estimated stream interval, this cap) and only applied while a
@@ -569,7 +566,7 @@ struct Config {
     uint32_t settle_grace_us = 30000;
 };
 
-// ---- Command (POD, queue-safe — the InterpSegment successor) ---------------
+// ---- Command (POD, queue-safe — the InterpSegment successor) ----------------
 struct Command {
     float    target       = 0.5f;   // normalized 0..1
     uint32_t duration_us  = 0;      // I<ms> * 1000 when present
@@ -577,7 +574,7 @@ struct Command {
     bool     has_end_vel  = false;  // true → v4 gradient handoff velocity
     bool     has_duration = false;  // true + duration ≥ 50 ms → WAVEFORM
 
-    // ---- ONE-SEGMENT LOOKAHEAD (RFC-008 handoff sanity guard) --------------
+    // ---- ONE-SEGMENT LOOKAHEAD (RFC-008 handoff sanity guard) ---------------
     // The mean speed (|Δtarget| / duration, same normalized units/s as
     // end_vel) of the segment that FOLLOWS this one, when the caller already
     // holds it. The firmware's SlopSync pacing ring schedules 0x0085 segments
@@ -598,7 +595,7 @@ struct Command {
     float    next_chord     = 0.0f;
     bool     has_next_chord = false;
 
-    // ---- RFC-030: the sender's DECLARED curve family -----------------------
+    // ---- RFC-030: the sender's DECLARED curve family ------------------------
     // Values mirror the SlopSync registry's `curve_families` table verbatim
     // (this header stays slopsync-free, so the numbering is documented, not
     // included): 0 = unspecified, 1 = c1_cubic, 2 = c2_quintic, 3 = step.
@@ -609,7 +606,7 @@ struct Command {
     uint8_t  client_curve_family = 0;
 };
 
-// ---- RFC-008 handoff sanity guard ------------------------------------------
+// ---- RFC-008 handoff sanity guard -------------------------------------------
 // "The machine plans for the worst so clients don't have to."
 //
 // THE FAILURE THIS EXISTS FOR (measured live, MFP plugin v0.2.1-0.2.3 against
@@ -692,7 +689,7 @@ enum class Mode : uint8_t {
 // loudly — it silently evaluates as a Ruckig profile that was never planned.
 enum class PlanKind : uint8_t { None = 0, Quintic = 1, Ruckig = 2, Cubic = 3 };
 
-// ---- Anomaly instrumentation (same drain pattern as the cubic engine) ------
+// ---- Anomaly instrumentation (same drain pattern as the cubic engine) -------
 enum class AnomalyType : uint8_t {
     None              = 0,
     PlanFailed        = 1,  // plan rejected; previous plan kept. detail = (float)Result or -99 input guard
@@ -758,7 +755,7 @@ struct Anomaly {
     float    detail = 0.0f;   // kind-specific (see AnomalyType)
 };
 
-// ---- Telemetry snapshot (WebUI planned-path overlay feed) ------------------
+// ---- Telemetry snapshot (WebUI planned-path overlay feed) -------------------
 struct Snapshot {
     float    pos        = 0.5f;
     float    vel        = 0.0f;   // units/s
@@ -791,12 +788,10 @@ struct Snapshot {
     float    sharpness  = 1.0f;
 };
 
-// ============================================================================
-// Engine
-// ============================================================================
+// ---- Engine -----------------------------------------------------------------
 class Engine {
 public:
-    // ---- Sender-curve reconstruction (ANALYZER / tooling API) --------------
+    // ---- Sender-curve reconstruction (ANALYZER / tooling API) ---------------
     // Rebuild the curve a SENDER described, from the SENDER'S OWN boundary
     // conditions instead of the machine's live state.
     //
@@ -830,7 +825,7 @@ public:
         resetAt(start_pos, 0);
     }
 
-    // ---- Lifecycle ---------------------------------------------------------
+    // ---- Lifecycle ----------------------------------------------------------
     // Hard-reset to a static hold at `pos`. Used on home/estop/resume/stream
     // rising-edge (seed at the machine's actual position).
     void resetAt(float pos, uint64_t now_us) {
@@ -861,7 +856,7 @@ public:
     // config every sampler tick — same-core with commit(), no lock needed).
     void setConfig(const Config& c) { _cfg = c; }
 
-    // ---- Command entry (Core 1, after queue drain) -------------------------
+    // ---- Command entry (Core 1, after queue drain) --------------------------
     // Plan a new trajectory NOW from the current sampled state. Returns false
     // if the input was rejected (previous plan keeps executing).
     bool commit(const Command& cmd, uint64_t now_us) {
@@ -894,7 +889,7 @@ public:
         return ok;
     }
 
-    // ---- Evaluation (Core 1, ~1 kHz hot path) ------------------------------
+    // ---- Evaluation (Core 1, ~1 kHz hot path) -------------------------------
     // May engage the SETTLE transition when the clock runs past a trajectory
     // that ends moving.
     float positionAt(uint64_t now_us) {
@@ -964,7 +959,7 @@ public:
         return s;
     }
 
-    // ---- Anomaly drain (Core 1, single-threaded — no lock) -----------------
+    // ---- Anomaly drain (Core 1, single-threaded — no lock) ------------------
     bool popAnomaly(Anomaly& out) {
         if (_anom_count == 0) return false;
         const uint8_t read =
@@ -1039,7 +1034,7 @@ private:
                                      : (double)(now_us - _plan_start) * 1e-6;
     }
 
-    // ---- Active-plan evaluation --------------------------------------------
+    // ---- Active-plan evaluation ---------------------------------------------
     // Is the active plan one of the Hermite families (evaluated by quinticAt,
     // a cubic being a quintic with two zero high-order terms)? See PlanKind:
     // every branch below reads "Hermite -> quinticAt, else -> Ruckig", so a
@@ -1082,7 +1077,7 @@ private:
         a = (((20*c[5]*tau + 12*c[4])*tau + 6*c[3])*tau + 2*c[2]) / (_q_T * _q_T);
     }
 
-    // ---- WAVEFORM (v4 / timed segments): quintic + Ruckig guard ------------
+    // ---- WAVEFORM (v4 / timed segments): quintic + Ruckig guard -------------
     bool commitWaveform(const Command& cmd, double p, double v, double a,
                         double target, uint64_t now_us) {
         // RFC-030: adopt the command's declared family BEFORE any curve is
@@ -1099,7 +1094,7 @@ private:
                         ? _est_v_ema * (double)_cfg.chase_ff_gain
                         : 0.0;
 
-        // ---- RFC-008 HANDOFF SANITY GUARD (one-segment lookahead) ---------
+        // ---- RFC-008 HANDOFF SANITY GUARD (one-segment lookahead) -----------
         // Runs FIRST, ahead of every other treatment of vf, because it is the
         // only one that answers "is this handoff a physically meaningful thing
         // for the sender to have asked for at all?" — the wall/vmax guard
@@ -1383,9 +1378,8 @@ private:
         return pk;
     }
 
-    // ======================================================================
-    // THE SMOOTHNESS AXIS (0.8.0) — handle reduction toward the chord
-    // ======================================================================
+    // ---- THE SMOOTHNESS AXIS (0.8.0) ----------------------------------------
+    // handle reduction toward the chord
     // Lerp the span's END handle toward its own chord slope by `alpha`, so the
     // curve walks continuously from the sender's spline (alpha = 0) to a dead
     // straight line (alpha = 1). See InfeasiblePolicy for the derivation, the
@@ -1437,7 +1431,7 @@ private:
         return quinticWorstRatio(out_c, T);
     }
 
-    // ---- InfeasiblePolicy::PrioritizeAmplitude / PrioritizeSmooth ----------
+    // ---- InfeasiblePolicy::PrioritizeAmplitude / PrioritizeSmooth -----------
     // Spend one axis up to its budget, then the other one freely; adopt the
     // first legal quintic found. Returns false only when BOTH axes are
     // exhausted and the shape is still illegal — the routine "conservative
@@ -1572,7 +1566,7 @@ private:
 
         adoptQuintic(c, T, now_us);
 
-        // ---- Telemetry: one event per axis actually spent ------------------
+        // ---- Telemetry: one event per axis actually spent -------------------
         // Never silent, and never a lie about WHICH axis paid.
         if (adopted_alpha > 1e-6) {
             recordAnomaly(AnomalyType::WaveformSmoothed, (float)ep,
@@ -1688,7 +1682,7 @@ private:
         // to be independent of the debt).
         const double mach = adist - std::fabs(st - p);
 
-        // ---- Centering, once, on top of the sized endpoint -------------------
+        // ---- Centering, once, on top of the sized endpoint ------------------
         bool centered = false;
         if (pull > kCenterEps) {
             const double d_goal = adist - pull;   // pull ≤ half the stroke
@@ -1726,7 +1720,7 @@ private:
         return true;
     }
 
-    // ---- InfeasiblePolicy::Reshape — keep the deadline AND the machine's -----
+    // ---- InfeasiblePolicy::Reshape — keep the deadline AND the machine's ----
     // ---- real reach, pay with the quintic's shape ---------------------------
     // Returns true if a Ruckig profile spanning exactly the commanded duration
     // T was adopted; false leaves everything untouched for the Ruckig guard.
@@ -1853,7 +1847,7 @@ private:
         if (!(adist > 1e-9)) return false;  // degenerate: nothing to do
         const double sgn = dist >= 0.0 ? 1.0 : -1.0;
 
-        // ---- 1. How far can the MACHINE actually go by the deadline? -------
+        // ---- 1. How far can the MACHINE actually go by the deadline? --------
         // Probed against the COMMANDED target, not the centered goal: the
         // machine's own shortfall is the debt rule's other half, and a probe
         // of the goal would only ever tell us "at least this far".
@@ -1868,7 +1862,7 @@ private:
             slack = 1.0 - opt / T;
             full_fits = true;
         } else {
-            // ---- 2. Bisect the endpoint about the midpoint -----------------
+            // ---- 2. Bisect the endpoint about the midpoint ------------------
             const double mid  = 0.5 * (p + target);
             const double half = target - mid;   // signed half-stroke
             const int steps = _cfg.infeasible_reshape_steps > 8
@@ -1896,7 +1890,7 @@ private:
         }
         const double mach = std::fabs(target - reach);
 
-        // ---- 3. Endpoint = whichever cap is tighter ------------------------
+        // ---- 3. Endpoint = whichever cap is tighter -------------------------
         // The machine's reach and the centering debt are both ceilings on the
         // same travel; the nearer one wins, and it is also the one the anomaly
         // must name (one event per segment, naming the BINDING constraint).
@@ -1917,7 +1911,7 @@ private:
         // scaling vf alone, without the sizing fix, changed nothing at all).
         const double ev = applyEndVelGuard(vf * frac, ep, now_us);
 
-        // ---- 4. Spend SHARPNESS before amplitude ---------------------------
+        // ---- 4. Spend SHARPNESS before amplitude ----------------------------
         // The endpoint is settled; the only fidelity still on the table is the
         // SHAPE, and 0.5.0 always paid all of it (plan at jmax → short ramps,
         // long flat top, a straight line at velocity saturation). Buy back as
@@ -2220,7 +2214,7 @@ private:
         return worst;
     }
 
-    // ---- CHASE (bare / short-interval points) ------------------------------
+    // ---- CHASE (bare / short-interval points) -------------------------------
     bool commitChase(const Command& cmd, double p, double v, double a,
                      double target, uint64_t now_us) {
         double aim = target;
@@ -2273,7 +2267,7 @@ private:
         return ok;
     }
 
-    // ---- Shared Ruckig point-planner (chase, guard fallback) ---------------
+    // ---- Shared Ruckig point-planner (chase, guard fallback) ----------------
     // min_dur 0 = time-optimal; > 0 = stretch toward the deadline.
     // j_ovr 0 = plan at the mechanical jerk ceiling; > 0 = plan at a SOFTER one
     // (0.6.0 sharpness search — jerkCeil enforces "softer only, never harder").
@@ -2301,7 +2295,7 @@ private:
                           (float)(int)res, now_us);
             return false;
         }
-        // ---- A SOFTENED PLAN MAY ONLY EVER BE GENTLER, NEVER ILLEGAL -------
+        // ---- A SOFTENED PLAN MAY ONLY EVER BE GENTLER, NEVER ILLEGAL --------
         // The sharpness search proved its chosen ceiling legal against a
         // TIME-OPTIMAL probe, but the plan adopted here additionally pins
         // minimum_duration, and Ruckig's stretched profile families are not the
@@ -2372,7 +2366,7 @@ private:
         return vf;
     }
 
-    // ---- Stream estimator (velocity + cadence of the incoming points) ------
+    // ---- Stream estimator (velocity + cadence of the incoming points) -------
     // Fed by every commit; consumed by chase aim and waveform vf/af fill-ins.
     // EMAs are deliberately calm (the ±ms arrival jitter of real transports
     // otherwise buzzes straight into the acceleration trace — bench-measured).
@@ -2411,7 +2405,7 @@ private:
                _est_dt_ema * 1e6 <= (double)_cfg.chase_dense_us;
     }
 
-    // ---- Settle grace ------------------------------------------------------
+    // ---- Settle grace -------------------------------------------------------
     // How long an expired plan may hold its end state before we call the
     // stream starved. Sized from the stream's OWN cadence — a sender pacing
     // segments every 167 ms is not late until it is late BY that stream's
@@ -2429,7 +2423,7 @@ private:
         return std::fmin(kSettleGraceMult * _est_dt_ema, cap);
     }
 
-    // ---- Starve-settle -----------------------------------------------------
+    // ---- Starve-settle ------------------------------------------------------
     // The clock ran past a plan that ends moving and no fresh command
     // replanned it → plan a jerk-limited brake-to-rest from the end state
     // (velocity control interface; lands wherever braking lands, clamped by
@@ -2545,7 +2539,7 @@ private:
         if (_anom_count < kAnomalyDepth) _anom_count++;
     }
 
-    // ---- State -------------------------------------------------------------
+    // ---- State --------------------------------------------------------------
     Config                _cfg;
     ruckig::Ruckig<1>     _calc;        // offline calculate() only — no cycle time
     ruckig::Trajectory<1> _traj;        // active Ruckig plan (chase/guard/settle)

@@ -1,3 +1,25 @@
+// SlopSyncHubService — SlopSync hub composition root: owns the hub's Core-0
+// task, the delegate that resolves INTENT channels into motion/config/pattern
+// commands, and the telemetry publisher.
+// Constraints:
+//   slopsync::Hub is mutex-free and single-task by contract: every Hub call
+//   (publish*, update(), submitSignature(), takePendingSignJob(), ...) must
+//   run from the SlopSyncHub task and never from another task (TRAPS T5).
+//   SlopSyncHubService is placement-new'd into PSRAM (see the header); do not
+//   assume internal-RAM access or lifetime rules for it (TRAPS T2).
+//   Motion/config/pattern intents route through WebUI::handleCommand only —
+//   never call MotionArbiter directly from a channel handler here, so
+//   WebUI stays its sole caller.
+//   Session release (onSourceOwnership, onSessionLeft) only ever releases —
+//   never latch a stop from these hooks outside the funneled teardown path
+//   (TRAPS T3).
+//   Wire byte layouts in onStreamBundle() (decode) and publishTelemetry()
+//   (encode) are fixed-offset maps that must stay byte-for-byte in step with
+//   the matching entries in SlopSyncCatalog.h.
+// See:
+//   docs/canon/TRAPS.md (T2 PSRAM placement-new, T3 session teardown, T5 single-task hub)
+//   include/comms/SlopSyncCatalog.h
+
 #include "SlopSyncHubService.h"
 
 #include <Arduino.h>
@@ -27,20 +49,18 @@
 
 namespace slopdrive {
 
-// ============================================================================
-// ANTI-DRIFT GUARDS for the catalog's RFC-009 annotations.
-//
+// ---- Anti-drift guards for the catalog's RFC-009 defaults -------------------
 // SlopSyncCatalog.h is hardware-free by contract (the native test suite and
 // the sim both build it against nothing but the library), so it cannot include
 // config_api.h — <Arduino.h> comes with it. The factory defaults and hard
 // ceilings it advertises to every client are therefore a hand-mirror of
 // getDefaultConfig()/applySettings(), and a hand-mirror rots.
 //
-// This translation unit DOES see both, so it is where the mirror is nailed
-// down: change a default in config_api.h and the FIRMWARE stops compiling
-// until the catalog follows. The alternative — a wrong `default` on the wire —
-// is invisible, because it only shows up as a client's "reset to factory"
-// button writing a number this machine never shipped with.
+// This translation unit sees both, so it is where the mirror is nailed down:
+// change a default in config_api.h and the firmware stops compiling until the
+// catalog follows. The alternative — a wrong `default` on the wire — is
+// invisible, because it only shows up as a client's "reset to factory" button
+// writing a number this machine never shipped with.
 static_assert(factory::window_min  == 0.0f,                        "catalog default window_min drifted from getDefaultConfig()");
 static_assert(factory::window_max  == DEFAULT_MAX_RAIL_MM,         "catalog default window_max drifted from DEFAULT_MAX_RAIL_MM");
 static_assert(factory::user_speed  == DEFAULT_USER_MAX_SPEED_MM_S, "catalog default user_speed drifted");
@@ -52,7 +72,7 @@ static_assert(factory::max_rail    == DEFAULT_MAX_RAIL_MM,         "catalog defa
 static_assert(ceiling::speed_max   == MAX_SPEED_MM_S,              "catalog speed ceiling drifted from MAX_SPEED_MM_S");
 static_assert(ceiling::accel_max   == MAX_ACCEL_MM_S2,             "catalog accel ceiling drifted from MAX_ACCEL_MM_S2");
 static_assert(ceiling::jerk_max    == MAX_JERK_MM_S3,              "catalog jerk ceiling drifted from MAX_JERK_MM_S3");
-// M5b mode defaults (0x008A). Same contract: this TU sees BOTH the catalog's
+// Mode defaults (0x008A). Same contract: this TU sees both the catalog's
 // mirrored table and the real source, so drift fails the build here rather than
 // shipping a catalog that advertises a factory default the machine never had.
 static_assert(factory::stream_speed_mode == SystemState::SPEED_CEILING_PEGGED,
@@ -73,9 +93,7 @@ static_assert(slopdrive::kPresetNameMax == PatternPresetStore::kNameMax,
 static_assert(slopdrive::kPresetPayloadBytes == PatternPresetStore::kPayloadBytes,
               "catalog kPresetPayloadBytes drifted from PatternPresetStore::kPayloadBytes");
 
-// ============================================================================
-// Small helpers
-// ============================================================================
+// ---- Small helpers ----------------------------------------------------------
 
 namespace {
 
@@ -134,13 +152,11 @@ int16_t clampI16(float v) {
 
 }  // namespace
 
-// ============================================================================
-// SlopDriveHubDelegate
-// ============================================================================
+// ---- SlopDriveHubDelegate ---------------------------------------------------
 
 slopsync::AccessLevel SlopDriveHubDelegate::validateToken(std::span<const std::byte> instance_id,
                                                           std::span<const std::byte> token, bool hasToken) {
-    // ================= ENFORCEMENT IS ON (fw 2.1.59) ========================
+    // ---- Enforcement is on --------------------------------------------------
     // This used to `return control` unconditionally. It no longer does. The
     // chain is /uitoken -> trust ledger -> watch, and `watch` is the floor for
     // anything that cannot prove otherwise.
@@ -161,23 +177,22 @@ slopsync::AccessLevel SlopDriveHubDelegate::validateToken(std::span<const std::b
     // authorization, and a default-deny posture — NOT LAN secrecy. The
     // lockdown posture is setUiTokenEnabled(false) plus paired tokens, and this
     // function already implements it: rung 1 simply stops answering.
-    // ========================================================================
 
-    // ---- Rung 1: RFC-029 §4, the browser-borne credential ------------------
+    // ---- Rung 1: RFC-029 §4, the browser-borne credential -------------------
     // A /uitoken mint grants CONTROL and never configure. It is consumed here
     // (single-use), which is why this check comes FIRST: a valid token must be
     // burned even if a later branch would have granted the same tier anyway, or
     // a page could hoard one and replay it after the posture is tightened.
     //
     // DO NOT MOVE A LAZILY-INITIALIZED ANYTHING INTO consume()'s spinlock —
-    // field bug #4 (fw 2.1.58) was exactly that, and it aborted the device on
-    // the first HELLO that ever presented a live token. See SlopSyncUiToken.cpp.
+    // see docs/canon/TRAPS.md T4 (this exact mistake aborted the device on the
+    // first HELLO that ever presented a live token). See SlopSyncUiToken.cpp.
     if (hasToken && _uiTokens.consume(token)) {
         SLOGI("slopsync", "session authorized by /uitoken (control tier)");
         return slopsync::AccessLevel::control;
     }
 
-    // ---- Rung 2: the persisted trust ledger (§12.2) ------------------------
+    // ---- Rung 2: the persisted trust ledger (§12.2) -------------------------
     // validate() is constant-time (RFC-028.3) and answers `watch` for BOTH an
     // unknown device and a recognized-but-suspended one — deliberately
     // indistinguishable, so this can never be used as an instance-id oracle.
@@ -189,7 +204,7 @@ slopsync::AccessLevel SlopDriveHubDelegate::validateToken(std::span<const std::b
         }
     }
 
-    // ---- Rung 3: default deny (to `watch`, not to a closed door) -----------
+    // ---- Rung 3: default deny (to `watch`, not to a closed door) ------------
     // Logged at WARN because a client silently losing its write plane is the
     // single most confusing failure this change can produce, and the operator
     // should be able to see it in /api/log without instrumenting anything.
@@ -201,7 +216,7 @@ slopsync::AccessLevel SlopDriveHubDelegate::validateToken(std::span<const std::b
 slopsync::Result<IntentValueMap, NackCode> SlopDriveHubDelegate::applyIntent(
     uint16_t channel_id, const IntentValueMap& requested, slopsync::AccessLevel role, bool& cfgChanged) {
     using Ret = slopsync::Result<IntentValueMap, NackCode>;
-    (void)role;  // catalog access level already gated by the hub before we run
+    (void)role;  // catalog access level already gated by the hub before this runs
 
     // JsonDocument translation is a COLD path (intent application, not the
     // telemetry hot loop) — a stack JsonDocument here is fine per the brief.
@@ -210,7 +225,7 @@ slopsync::Result<IntentValueMap, NackCode> SlopDriveHubDelegate::applyIntent(
     IntentValueMap applied{};
 
     switch (channel_id) {
-        // ---- 0x0100 move → WS_OP_MOVE ------------------------------------
+        // ---- 0x0100 move → WS_OP_MOVE ---------------------------------------
         case ch::move: {
             if (_state.estop_latched) return Ret::err(NackCode::ESTOP_ACTIVE);
             if (!_state.homed) return Ret::err(NackCode::NOT_HOMED);
@@ -228,7 +243,7 @@ slopsync::Result<IntentValueMap, NackCode> SlopDriveHubDelegate::applyIntent(
             return Ret::ok(applied);
         }
 
-        // ---- 0x0101 config-set → WS_OP_SET_WINDOW ------------------------
+        // ---- 0x0101 config-set → WS_OP_SET_WINDOW ---------------------------
         case ch::config_set: {
             const auto* f1 = findField(requested, 1);  // window_min
             const auto* f2 = findField(requested, 2);  // window_max
@@ -236,8 +251,8 @@ slopsync::Result<IntentValueMap, NackCode> SlopDriveHubDelegate::applyIntent(
             const auto* f4 = findField(requested, 4);  // user_accel
             const auto* f5 = findField(requested, 5);  // input_speed
             const auto* f6 = findField(requested, 6);  // input_accel
-            const auto* f7 = findField(requested, 7);  // input_jerk (fw 2.1.47)
-            const auto* f8 = findField(requested, 8);  // max_rail (fw 2.1.76, item 1)
+            const auto* f7 = findField(requested, 7);  // input_jerk
+            const auto* f8 = findField(requested, 8);  // max_rail
             if (f1) in["range_min"] = fieldF32(f1, 0.0f);
             if (f2) in["range_max"] = fieldF32(f2, 0.0f);
             // applySettings gates the user/input branches on is<uint32_t>(), so
@@ -256,7 +271,7 @@ slopsync::Result<IntentValueMap, NackCode> SlopDriveHubDelegate::applyIntent(
             // max_rail is the one exception: it is a rare, deliberate geometry
             // edit (never a streamed value), so it earns an explicit COALESCED
             // persist via _maxRailDirty below rather than waiting on a manual
-            // WebUI save — see item 1's "savable" requirement.
+            // WebUI save.
             in["no_persist"] = true;
 
             // RFC-002: cfg_gen advances IFF an applied value actually CHANGED.
@@ -265,7 +280,7 @@ slopsync::Result<IntentValueMap, NackCode> SlopDriveHubDelegate::applyIntent(
             // (ground truth is unaffected) but must NOT bump the generation,
             // because a bump re-arms every observer's on-change republish and
             // resync cycle. That amplification is the wire-side accomplice of
-            // the 2026-07-24 dual-plane config storm.
+            // a dual-plane config storm this guard exists to prevent.
             const auto& cfg = _state.config;
             const float p0 = cfg.min_position_mm, p1 = cfg.max_position_mm;
             const float p2 = cfg.user_max_speed_mm_s, p3 = cfg.user_max_accel_mm_s2;
@@ -301,7 +316,7 @@ slopsync::Result<IntentValueMap, NackCode> SlopDriveHubDelegate::applyIntent(
             return Ret::ok(applied);
         }
 
-        // ---- 0x0102 pattern-cmd → WS_OP_GEN_CFG --------------------------
+        // ---- 0x0102 pattern-cmd → WS_OP_GEN_CFG -----------------------------
         case ch::pattern_cmd: {
             if (_state.estop_latched) return Ret::err(NackCode::ESTOP_ACTIVE);
             const auto* f1 = findField(requested, 1);  // running
@@ -350,7 +365,7 @@ slopsync::Result<IntentValueMap, NackCode> SlopDriveHubDelegate::applyIntent(
             return Ret::ok(applied);
         }
 
-        // ---- 0x0103 home → WS_OP_HOME / WS_OP_HOME_OVERRIDE ---------------
+        // ---- 0x0103 home → WS_OP_HOME / WS_OP_HOME_OVERRIDE -----------------
         case ch::home: {
             uint64_t op = fieldU64(findField(requested, 1), 0);
             switch (op) {
@@ -381,7 +396,7 @@ slopsync::Result<IntentValueMap, NackCode> SlopDriveHubDelegate::applyIntent(
                     // The hub's ESTOP latch is dropped in lockstep by
                     // syncSafety() on the next service tick (it reconciles the
                     // hub to _state.estop_latched in BOTH directions), so the
-                    // safety snapshot never lies about the latch we just
+                    // safety snapshot never lies about the latch this op just
                     // cleared.
                     const auto* fs = findField(requested, 2);
                     float stroke = fieldF32(fs, 250.0f);
@@ -412,19 +427,19 @@ slopsync::Result<IntentValueMap, NackCode> SlopDriveHubDelegate::applyIntent(
             }
         }
 
-        // ---- 0x0104 modes-set → MODE / STREAM_MODE / OVERSHOOT ------------
-        // M5b: originally the four MODE settings the legacy :81/HTTP plane
-        // owned. Every key optional; only the keys PRESENT are applied, and
-        // each one echoes the value the handler actually took.
+        // ---- 0x0104 modes-set → MODE / STREAM_MODE / OVERSHOOT --------------
+        // Originally the four MODE settings the legacy :81/HTTP plane owned.
+        // Every key optional; only the keys PRESENT are applied, and each one
+        // echoes the value the handler actually took.
         //
         // KEY 1 (blend_mode) IS NOW A PERMANENT GAP, same treatment as key 2
-        // (transport) below — fw 2.1.76, operator ruling 2026-07-27, item 2.
-        // MotionArbiter has aliased every blend mode to "allow" since before
-        // this channel existed, so there was no live setting left to write;
-        // see the field comment on 0x008A's `blend_mode_reserved` in
-        // SlopSyncCatalog.h. A client that still sends key 1 falls through
-        // unhandled below, same as key 2 always has — if it is the ONLY key
-        // present the call NACKs INVALID_VALUE (anyApplied stays false).
+        // (transport) below. MotionArbiter has aliased every blend mode to
+        // "allow" since before this channel existed, so there was no live
+        // setting left to write; see the field comment on 0x008A's
+        // `blend_mode_reserved` in SlopSyncCatalog.h. A client that still
+        // sends key 1 falls through unhandled below, same as key 2 always
+        // has — if it is the ONLY key present the call NACKs INVALID_VALUE
+        // (anyApplied stays false).
         //
         // GROUND TRUTH, and it is not decoration here: these clamp or
         // reinterpret their input somewhere downstream. So the echo is
@@ -455,8 +470,8 @@ slopsync::Result<IntentValueMap, NackCode> SlopDriveHubDelegate::applyIntent(
         }
 
 
-        // ---- 0x0105 slopmotion-set → the live tuning knobs -----------------
-        // M5c: what POST /api/slopmotion used to do. Every key optional; each
+        // ---- 0x0105 slopmotion-set → the live tuning knobs ------------------
+        // What POST /api/slopmotion used to do. Every key optional; each
         // applied value is CLAMPED HERE to the same bounds the catalog
         // advertises and then echoed, so a client always renders what the
         // machine took rather than what it asked for.
@@ -523,17 +538,16 @@ slopsync::Result<IntentValueMap, NackCode> SlopDriveHubDelegate::applyIntent(
             setMs(20, 0.0f, 200.0f,   _state.sm_tune_settle_grace_us);
 
             if (!any) return Ret::err(NackCode::INVALID_VALUE);
-            // PERSIST (operator ruling 2026-07-27): tuning survives a reboot.
-            // Flagged rather than written here -- NVS is flash and this runs on
-            // the hub task at up to 5 Hz; the service coalesces it onto its own
-            // 1 Hz housekeeping tick so a slider drag costs ONE write, not
-            // thirty.
+            // PERSIST: tuning survives a reboot. Flagged rather than written
+            // here -- NVS is flash and this runs on the hub task at up to
+            // 5 Hz; the service coalesces it onto its own 1 Hz housekeeping
+            // tick so a slider drag costs ONE write, not thirty.
             _smTuneDirty = true;
             return Ret::ok(applied);
         }
 
 
-        // ---- 0x0106 machine-admin → the non-motion device actions ----------
+        // ---- 0x0106 machine-admin → the non-motion device actions -----------
         // Routed through WebUI::handleCommand like every other intent, so the
         // sole-caller rule and the existing OTA/idle deferrals apply unchanged.
         case ch::machine_admin: {
@@ -567,7 +581,7 @@ slopsync::Result<IntentValueMap, NackCode> SlopDriveHubDelegate::applyIntent(
             return Ret::ok(applied);
         }
 
-        // ---- 0x0005 safety-intents ----------------------------------------
+        // ---- 0x0005 safety-intents ------------------------------------------
         // estop (op 6) and estop_clear (op 1) are HUB-handled and never reach
         // the delegate. Everything below returns accepted-or-UNSUPPORTED_OP,
         // and the HUB latches the resulting level/mode into the 0x0003
@@ -833,7 +847,7 @@ slopsync::Result<IntentValueMap, NackCode> SlopDriveHubDelegate::applyIntent(
 void SlopDriveHubDelegate::onEstop(uint8_t cause, uint8_t origin) {
     (void)cause;
     (void)origin;
-    // §11.2: motion must STOP before protocol bookkeeping. We set the exact
+    // §11.2: motion must STOP before protocol bookkeeping. Sets the exact
     // field set WS_OP_ESTOP writes — done inline (not via handleCommand) on
     // purpose: onEstop runs deep inside the hub's per-slot iteration on the
     // safety-critical path; the inline writes avoid a JsonDocument allocation
@@ -859,8 +873,8 @@ bool SlopDriveHubDelegate::canClearEstop() {
 
     // Clean drop point for the firmware latch: this is the ONLY delegate hook
     // the hub calls on the clear path, and the hub guarantees the clear WILL
-    // proceed iff we return true (it has already checked its own ESTOP bit is
-    // set). So dropping the firmware latch here keeps both sides in lockstep.
+    // proceed iff this returns true (it has already checked its own ESTOP bit
+    // is set). So dropping the firmware latch here keeps both sides in lockstep.
     // Clearing NEVER rehomes: homed stays false, so motion stays refused
     // (NOT_HOMED) until an explicit HOME intent.
     _state.estop_latched = false;
@@ -879,7 +893,7 @@ std::optional<uint8_t> SlopDriveHubDelegate::sourceForChannel(uint16_t channel_i
 }
 
 slopsync::SourceLossPolicy SlopDriveHubDelegate::sourcePolicy(uint8_t source_id) {
-    // VESTIGIAL as of RFC-045 (Phase D): the hub library no longer calls this
+    // VESTIGIAL as of RFC-045: the hub library no longer calls this
     // — releaseSessionSources() latches nothing for any source class, so the
     // Stop-vs-Continue question it used to answer has no caller any more (see
     // hub_impl.hpp's comment). Kept only because HubDelegate's interface is
@@ -891,7 +905,7 @@ slopsync::SourceLossPolicy SlopDriveHubDelegate::sourcePolicy(uint8_t source_id)
 
 void SlopDriveHubDelegate::onDeadmanStop(uint8_t source_id) {
     (void)source_id;
-    // VESTIGIAL as of RFC-045 (Phase D): the hub library no longer calls this
+    // VESTIGIAL as of RFC-045: the hub library no longer calls this
     // — a deadman fire never forces a stop for any source class (§11.3). Kept
     // only because HubDelegate's interface is frozen-additive.
     JsonDocument in;
@@ -955,7 +969,7 @@ void SlopDriveHubDelegate::onStreamBundle(uint16_t channel_id, uint32_t session_
     // t_base/t_off are u32 HUB-µs — the SAME wrapping domain EspClock::nowUs()
     // reads (esp_timer_get_time() truncated to 32 bits, §7.2). now64 stays the
     // FULL 64-bit esp_timer reading so due_us in the ring never itself wraps;
-    // only the WIRE timestamp we're resolving against it does.
+    // only the WIRE timestamp being resolved against it does.
     const int64_t now64 = esp_timer_get_time();
     const uint32_t now32 = uint32_t(now64 & 0xFFFFFFFFull);
 
@@ -1064,15 +1078,13 @@ std::optional<slopsync::HubDelegate::BlobView> SlopDriveHubDelegate::readBlob(ui
     return v;
 }
 
-// ============================================================================
-// SlopSyncHubService
-// ============================================================================
+// ---- SlopSyncHubService -----------------------------------------------------
 
 // Fills `c` in place and hands back a reference to it, so the catalog can be
 // built INSIDE the member-initializer list — `_hub`'s constructor encodes the
 // catalog immediately, so it must already be populated by the time _hub is
-// constructed, and _hub is a by-reference binding we cannot defer to the
-// constructor BODY. buildSlopDriveCatalog() is an out-param builder precisely
+// constructed, and _hub is a by-reference binding that cannot be deferred to
+// the constructor BODY. buildSlopDriveCatalog() is an out-param builder precisely
 // because a ~22 KB Catalog32 must never be a return value.
 static slopsync::Catalog32& initCatalog(slopsync::Catalog32& c, DeviceFeatures feat) {
     if (!buildSlopDriveCatalog(c, feat)) {
@@ -1084,7 +1096,7 @@ static slopsync::Catalog32& initCatalog(slopsync::Catalog32& c, DeviceFeatures f
     // (its first loop refuses outright, at any buffer size). The existing
     // "DID NOT ENCODE (scratch N B)" line names only the first, so an ORDERING
     // mistake reads as a sizing problem and sends you off growing a buffer that
-    // was never the constraint. That cost a build-flash-observe cycle at M5b.
+    // was never the constraint (docs/canon/TRAPS.md T12).
     //
     // The order is a real wire requirement (§8.1), not a style rule, so this
     // check is cheap and belongs here regardless — it turns "advertises
@@ -1127,9 +1139,7 @@ void SlopSyncHubService::init() {
 
     // A catalog that did not fit the hub's encode scratch produces ZERO bytes,
     // an etag over nothing, and an empty catalog served to every client — the
-    // machine looks healthy and advertises nothing. It cost a live probe run to
-    // find once (M5a's annotations pushed the encoding past the old 8 KB
-    // default); it will never cost that again.
+    // machine looks healthy and advertises nothing (docs/canon/TRAPS.md T12).
     const size_t encoded = _hub.catalogEncodedBytes();
     if (encoded == 0) {
         SLOGE("slopsync", "CATALOG DID NOT ENCODE (scratch %u B) — this hub advertises NOTHING",
@@ -1168,7 +1178,7 @@ void SlopSyncHubService::init() {
     // RFC-048: the hub's DURABLE cross-boot identity (WELCOME identity key 5,
     // also carried by DISCOVER_REPLY, §13.8) — generated ONCE with the
     // hardware RNG and persisted in NVS; every later boot just reads it back.
-    // Blocking NVS I/O here is the CLAUDE.md §2 boot-sequence exception (this
+    // Blocking NVS I/O here is the DOCTRINE.md §2 boot-sequence exception (this
     // runs once, before the hub task exists), same as checkQuickBootPairingGesture().
     {
         Preferences prefs;
@@ -1188,14 +1198,14 @@ void SlopSyncHubService::init() {
         }
     }
 
-    // RFC-021 pattern-preset store (M5): load/migrate before binding, same
+    // RFC-021 pattern-preset store: load/migrate before binding, same
     // ordering reason as pairing above — the delegate must never see an
     // instant where it's bound to a store the boot-time migration hasn't run
     // against yet.
     loadPresets();
     _delegate.bindPresets(_presets);
 
-    // ---- Wall clock (RFC-029's first_seen/last_seen) -----------------------
+    // ---- Wall clock (RFC-029's first_seen/last_seen) ------------------------
     // THIS DEVICE HAS NO WALL CLOCK. There is no SNTP client anywhere in the
     // firmware (checked, not assumed — no configTime(), no sntp_*), and protocol
     // time is boot-relative and wraps in ~71 minutes (§7.2), so it cannot stand
@@ -1209,13 +1219,13 @@ void SlopSyncHubService::init() {
     _port.begin(&_hub);
 
 #if defined(BLE_ENABLED)
-    // RFC-043 (Phase E): the BLE GATT ITransport + advertising. "SD32" is the
+    // RFC-043: the BLE GATT ITransport + advertising. "SD32" is the
     // shortened name the legacy ≤31-byte advertising budget can afford
     // (§13.4); the full "SlopDrive-32" name rides the scan response.
     _blePort.begin(&_hub, "SlopDrive-32", "SD32");
 #endif
 
-    // RFC-046 (Phase E): the UDP discovery responder — the WS-side discovery
+    // RFC-046: the UDP discovery responder — the WS-side discovery
     // path for a LAN client without BLE (§13.8). Started after the WS port so
     // ws_port below is meaningful the instant the first probe can arrive;
     // hub_instance_id was resolved just above.
@@ -1228,10 +1238,10 @@ void SlopSyncHubService::init() {
     applogSyncBridgeArm();
 
     // 16 KB stack: the HELLO path proved capable of several KB of frame
-    // buffers + WS-handshake stack on top of baseline (an 8 KB stack blew
-    // its canary in the field even after the ~9 KB HubSession::reset()
-    // temporary was eliminated at the source). Internal RAM is plentiful
-    // post-PSRAM-relocation; this is cheap insurance on the safety plane.
+    // buffers + WS-handshake stack on top of baseline, and an 8 KB stack has
+    // blown its canary here before (docs/canon/TRAPS.md T1). Internal RAM is
+    // plentiful post-PSRAM-relocation (T2); this is cheap insurance on the
+    // safety plane.
     BaseType_t ok = xTaskCreatePinnedToCore(&SlopSyncHubService::taskTrampoline, "SlopSyncHub", 16384, this,
                                             2, &_task, 0);
     if (ok != pdPASS) {
@@ -1241,7 +1251,7 @@ void SlopSyncHubService::init() {
         SLOGI("slopsync", "hub service up — catalog %u channels, Core 0", unsigned(_catalog.count));
     }
 
-    // ---- M4c: the deferred-signing worker ----------------------------------
+    // ---- The deferred-signing worker ----------------------------------------
     // INLINE SIGNING MUST STAY OFF ON THIS PART. Hub::setInlineSigning(true)
     // would move signP256() onto the hub task — 30-80 ms inside a 5 ms tick that
     // also paces STATE, runs the deadman and drains the motion-input ring, i.e.
@@ -1266,16 +1276,14 @@ void SlopSyncHubService::init() {
         // real peak in the 2-4 KB band for P-256.
         //
         // 8 KB is therefore roughly 2x headroom, and it is deliberate rather
-        // than generous: this project has had TWO stack incidents (a ~9 KB
-        // whole-object-reassignment reset temporary that blew an 8 KB task on
-        // every client connect -- see hub-is-single-task memory / CLAUDE.md §8
-        // field bug #1 -- and a 320 KiB by-value catalog it narrowly avoided),
-        // and a guessed-tight crypto stack that overflows only on the rare code path
-        // where the scalar has an unusual bit pattern is exactly the kind of bug
-        // this codebase should not ship. It is 8 KB of internal RAM on a part
-        // where the WHOLE SlopSync service was moved to PSRAM to protect the
-        // heap — cheap insurance, and the high-water mark is logged after the
-        // first sign so on the first flash the number stops being an estimate.
+        // than generous: this project has shipped both stack-incident classes
+        // TRAPS T1 and T2 warn about, and a guessed-tight crypto stack that
+        // overflows only on the rare code path where the scalar has an
+        // unusual bit pattern is exactly the kind of bug this codebase should
+        // not ship. It is 8 KB of internal RAM on a part where the whole
+        // SlopSync service was moved to PSRAM to protect the heap (T2) —
+        // cheap insurance, and the high-water mark is logged after the first
+        // sign so on the first flash the number stops being an estimate.
         //
         // PRIORITY 1 = below the hub task (2), below motion, below comms. A
         // sign is allowed to take as long as it likes; nothing waits on it
@@ -1305,8 +1313,8 @@ void SlopSyncHubService::taskLoop() {
         vTaskDelayUntil(&last, period);
 
         // OTA flash-write window: skip all XIP/WS/hub work. OtaService also
-        // suspendTask()s us outright (belt AND braces) — this flag guard covers
-        // the gap between the flag rising and the suspend landing.
+        // suspends this task outright (belt AND braces) — this flag guard
+        // covers the gap between the flag rising and the suspend landing.
         if (_state.ota_active.load(std::memory_order_relaxed)) continue;
 
         _port.loop();                 // service WS: accept/read/heartbeat/stall-sweep
@@ -1325,19 +1333,16 @@ void SlopSyncHubService::taskLoop() {
         pumpConfigGeneration();       // RFC-011: machine-side config change -> cfg_gen
         publishAnomalies();           // Core-1 anomaly ring -> 0x0089 EVENTs
         drainLogBridge();             // RFC-017: httpTask's SlopLog ring -> 0x0008 EVENTs
-        pumpSigning();                // M4c: hub <-> SlopSyncSign task
+        pumpSigning();                // hub <-> SlopSyncSign task
     }
 }
 
-// ============================================================================
-// RFC-017: the SlopLog -> 0x0008 log-channel bridge (consumer half)
-// ============================================================================
-//
+// ---- The SlopLog to 0x0008 log-channel bridge (consumer half) ---------------
 // Producer is the SlopSyncSink in AppLog.cpp, on httpTask. This is the ONLY
 // place a log line is allowed to become a frame, because slopsync::Hub is
-// mutex-free and single-task by contract — publishLog() straight from the drain
-// task would be a data race on the safety plane, which is the worst class of bug
-// this codebase can have.
+// mutex-free and single-task by contract (TRAPS T5) — publishLog() straight
+// from the drain task would be a data race on the safety plane, which is the
+// worst class of bug this codebase can have.
 //
 // BOUNDED PER TICK for the same reason publishAnomalies() is: one burst of log
 // lines must not turn a 5 ms tick into a dozen CBOR encodes and fan-outs on the
@@ -1379,9 +1384,7 @@ void SlopSyncHubService::drainLogBridge() {
     }
 }
 
-// ============================================================================
-// M4c: the deferred-signing shuttle (RFC-029 item 1)
-// ============================================================================
+// ---- The deferred-signing shuttle (RFC-029 item 1) --------------------------
 //
 // Runs on the hub task. Both Hub calls live HERE and nowhere else; the actual
 // ECDSA happens on "SlopSyncSign" (see signTaskLoop). Results first so a
@@ -1436,8 +1439,8 @@ void SlopSyncHubService::signTaskLoop() {
     for (;;) {
         if (xQueueReceive(_signReqQ, &req, portMAX_DELAY) != pdTRUE) continue;
         // OTA: a flash-write window is no time to be burning 80 ms of CPU with
-        // the cache disabled around us. Drop the job; the client stays
-        // unverified, which is a correct answer during a firmware update.
+        // the cache disabled. Drop the job; the client stays unverified,
+        // which is a correct answer during a firmware update.
         if (_state.ota_active.load(std::memory_order_relaxed)) continue;
 
         SignResult res{};
@@ -1457,13 +1460,11 @@ void SlopSyncHubService::signTaskLoop() {
     }
 }
 
-// ============================================================================
-// RFC-011: the MACHINE-SIDE half of the one cfg_gen rule
-// ============================================================================
+// ---- RFC-011: the machine-side half of the one cfg_gen rule -----------------
 //
 // The client-driven half lives in the delegate (applyIntent reports cfgChanged
-// and the hub bumps). This is the other half M3b deliberately left unwired: a
-// config change that did NOT come from an intent — a physical control, boot
+// and the hub bumps). This is the other half, deliberately left unwired until
+// now: a config change that did NOT come from an intent — a physical control, boot
 // adoption, an internal recalculation, the legacy HTTP/WS settings plane — must
 // still advance `cfg_gen`, or a client's `precondition` CAS silently succeeds
 // against config that already moved.
@@ -1556,7 +1557,7 @@ void SlopSyncHubService::drainMotionStream() {
             continue;
         }
 
-        // ---- Sampler gating stamps -------------------------------------------
+        // ---- Sampler gating stamps ------------------------------------------
         // Without these the Core-1 sampler never drives.
         const uint32_t now = millis();
 
@@ -1608,7 +1609,7 @@ void SlopSyncHubService::drainMotionStream() {
         cmd.has_duration = entry.has_duration;
         cmd.client_curve_family = entry.curve_family;  // RFC-030: FollowClient's input
 
-        // ---- RFC-008 one-segment LOOKAHEAD --------------------------------
+        // ---- RFC-008 one-segment LOOKAHEAD ----------------------------------
         // The whole hub-side handoff sanity guard reduces, here, to answering
         // ONE question: "how fast does the segment AFTER this one move, on
         // average?" The engine does the bounding (slopmotion::
@@ -1631,8 +1632,8 @@ void SlopSyncHubService::drainMotionStream() {
         // stream cannot happen anyway (§11.4 source ownership gives one client
         // one motion source). No successor -> has_next_chord stays false and
         // the engine plans exactly as it did before the guard existed. That
-        // TAIL CASE is a deliberate accept-unchanged: guessing a chord we do
-        // not have would trim well-behaved senders, and the segment is DUE, so
+        // TAIL CASE is a deliberate accept-unchanged: guessing a chord that is
+        // not available would trim well-behaved senders, and the segment is DUE, so
         // deferring it to wait for its successor would trade a shape problem
         // for a deadline problem. The legality scan + Ruckig guard remain the
         // backstop they have always been, so nothing is less safe.
@@ -1656,9 +1657,9 @@ void SlopSyncHubService::drainMotionStream() {
 void SlopSyncHubService::publishTelemetry() {
     uint32_t now = millis();
 
-    // ---- 0x0080 motion — ≥16 ms (≤~60 Hz) --------------------------------
-    // 9 B as of M5a — "raw_10um" appended. MUST stay byte-for-byte in step
-    // with the 0x0080 layout in SlopSyncCatalog.h.
+    // ---- 0x0080 motion — ≥16 ms (≤~60 Hz) -----------------------------------
+    // 9 B, including "raw_10um". MUST stay byte-for-byte in step with the
+    // 0x0080 layout in SlopSyncCatalog.h.
     if (now - _lastMotionMs >= 16) {
         _lastMotionMs = now;
         std::array<std::byte, 9> buf{};
@@ -1686,17 +1687,16 @@ void SlopSyncHubService::publishTelemetry() {
         _hub.publishState(ch::motion, s);
     }
 
-    // ---- 0x0081 machine-config — on cfg_gen change -----------------------
+    // ---- 0x0081 machine-config — on cfg_gen change --------------------------
     uint16_t gen = _state.cfg_gen.load(std::memory_order_relaxed);
     if (!_cfgEverSent || gen != _lastCfgGen) {
         _cfgEverSent = true;
         _lastCfgGen = gen;
         // 37 B — MUST stay byte-for-byte in step with the 0x0081 layout in
-        // SlopSyncCatalog.h (field 7 "input_jerk" appended in fw 2.1.47,
-        // field 8 "enabled_mask" appended at M5a, field 9 "measured_stroke"
-        // appended in fw 2.1.76 / item 3). max_rail (field 6) became a real
-        // setting in the SAME release (item 1) — that is a metadata change
-        // only, it keeps its byte 24 offset.
+        // SlopSyncCatalog.h: field 7 "input_jerk", field 8 "enabled_mask",
+        // field 9 "measured_stroke". max_rail (field 6) became a real setting
+        // in the same release that added measured_stroke — that was a
+        // metadata change only, it keeps its byte 24 offset.
         std::array<std::byte, 37> buf{};
         std::span<std::byte> s(buf);
         slopsync::putF32(s.subspan(0, 4), _state.config.min_position_mm);
@@ -1712,8 +1712,8 @@ void SlopSyncHubService::publishTelemetry() {
         //   4 input_speed 5 input_accel 6 max_rail 7 input_jerk
         //
         // ALL EIGHT, ALWAYS — and that is the HONEST publish, not a stub.
-        // I went looking for a gate to make this dynamic and there isn't one:
-        // the delegate's 0x0101 handler has no e-stop, homed, or pause guard,
+        // No gate exists to make this dynamic (checked, not assumed): the
+        // delegate's 0x0101 handler has no e-stop, homed, or pause guard,
         // and applySettings clamps values rather than refusing them (its only
         // refusal is min >= max, which is value VALIDATION and belongs to
         // min/max, not to enablement). Publishing a bit low here to make the
@@ -1723,9 +1723,9 @@ void SlopSyncHubService::publishTelemetry() {
         // while latched, which is exactly when an operator wants to lower one.
         // 0x0082's mask is where this field earns its keep dynamically.
         slopsync::putU8(s.subspan(32, 1), 0xFF);
-        // measured_stroke (item 3): the REAL homing measurement, distinct
-        // from max_rail above. Item 4: a value carried over from a PRIOR
-        // boot's NVS restore (ConfigStore::load() seeds this into the motor
+        // measured_stroke: the REAL homing measurement, distinct from
+        // max_rail above. A value carried over from a PRIOR boot's NVS
+        // restore (ConfigStore::load() seeds this into the motor
         // regardless of _state.homed) must never overstate the CONFIGURED
         // ceiling while this session hasn't yet earned "measurement wins" by
         // completing a fresh home — only a home that finished THIS session
@@ -1738,21 +1738,21 @@ void SlopSyncHubService::publishTelemetry() {
         _hub.publishState(ch::machine_config, s);
     }
 
-    // ---- 0x008A machine-modes — on change --------------------------------
-    // M5b. Cheap enough (5 B) to diff locally rather than lean on cfg_gen:
+    // ---- 0x008A machine-modes — on change -----------------------------------
+    // Cheap enough (5 B) to diff locally rather than lean on cfg_gen:
     // these modes route through WebUI::handleCommand, which does NOT bump
     // cfg_gen for all of them, so gating on cfg_gen would silently drop mode
     // changes and leave every client rendering a stale dropdown. Comparing the
-    // bytes we last SENT is the honest trigger — it cannot disagree with what
+    // bytes last SENT is the honest trigger — it cannot disagree with what
     // the subscribers actually hold.
     {
         // _motor, NOT _arbiter: applySettings writes the MOTOR's blend mode and
         // echoes it, so publishing the arbiter's copy could report a value no
         // write ever produced. One source of truth per field.
         //
-        // `blend` (byte 0, "blend_mode_reserved") is RETIRED (item 2, fw
-        // 2.1.76) — still read from _motor.getBlendMode() only because that is
-        // the smaller diff, not because the value means anything anymore. It
+        // `blend` (byte 0, "blend_mode_reserved") is RETIRED — still read from
+        // _motor.getBlendMode() only because that is the smaller diff, not
+        // because the value means anything anymore. It
         // is excluded from `mask` below and no client should render it.
         const uint8_t blend  = _motor.getBlendMode();
         const uint8_t smode  = _state.stream_speed_mode;
@@ -1762,8 +1762,8 @@ void SlopSyncHubService::publishTelemetry() {
         // already in flight, and none is refused while latched, paused or
         // driven. `transport` was retired rather than gated (SlopSync is the
         // only way in now; the hub listens on WS and BLE by default), and
-        // `blend_mode` was retired outright (item 2 — see the field comment on
-        // SlopSyncCatalog.h's `blend_mode_reserved`). If a future mode CAN be
+        // `blend_mode` was retired outright — see the field comment on
+        // SlopSyncCatalog.h's `blend_mode_reserved`. If a future mode CAN be
         // refused, drop its bit — a UI graying a control the machine would
         // accept is the same lie as one offering a control it would refuse.
         const uint8_t mask = 0x03u;           // bits 0..1 = stream_speed_mode, overshoot_clamp
@@ -1781,8 +1781,8 @@ void SlopSyncHubService::publishTelemetry() {
     }
 
 
-    // ---- 0x008B/0x008C/0x008D slopmotion-* tuning — on change -------------
-    // M5c. Same diff-what-we-SENT trigger as 0x008A: these are written from
+    // ---- 0x008B/0x008C/0x008D slopmotion-* tuning — on change ---------------
+    // Same diff-what-was-SENT trigger as 0x008A: these are written from
     // httpTask today and from the hub task via 0x0105, and neither bumps
     // cfg_gen, so gating on cfg_gen would silently strand a client on a stale
     // card. Comparing the bytes subscribers actually hold cannot disagree with
@@ -1833,7 +1833,7 @@ void SlopSyncHubService::publishTelemetry() {
         }
     }
 
-    // ---- 0x0082 pattern-state — on change, ≥100 ms -----------------------
+    // ---- 0x0082 pattern-state — on change, ≥100 ms --------------------------
     if (_patternEngine && (now - _lastPatternMs >= 100)) {
         bool running = _patternEngine->isRunning();
         uint8_t idx = uint8_t(_patternEngine->getPatternIdx());
@@ -1883,8 +1883,8 @@ void SlopSyncHubService::publishTelemetry() {
         }
     }
 
-    // ---- 0x008E pattern-advanced + 0x008F..0x0094 pattern-adv-mod-* -------
-    // Same diff-what-we-SENT trigger as 0x008B/C/D: written from the hub task
+    // ---- 0x008E pattern-advanced + 0x008F..0x0094 pattern-adv-mod-* ---------
+    // Same diff-what-was-SENT trigger as 0x008B/C/D: written from the hub task
     // via 0x0107 and never bumps cfg_gen, so gating on cfg_gen would strand a
     // client on a stale card. Reads PatternEngine directly — the SAME source
     // 0x0082 above reads — never a shadow copy: two sources of truth for the
@@ -1942,7 +1942,7 @@ void SlopSyncHubService::publishTelemetry() {
         }
     }
 
-    // ---- 0x0086 plan-strip — ≥22 ms (≤~45 Hz) ----------------------------
+    // ---- 0x0086 plan-strip — ≥22 ms (≤~45 Hz) -------------------------------
     // The planner's CURRENT SEGMENT. Fed from the interp_* SystemState slots
     // that Core 1's streamSamplerTask fills from slopmotion::Snapshot each
     // tick — the same source the legacy :81 0x04 INTERP frame reads, so this
@@ -1982,7 +1982,7 @@ void SlopSyncHubService::publishTelemetry() {
         }
     }
 
-    // ---- 0x0087 power — 2 Hz (catalog allows up to 10) -------------------
+    // ---- 0x0087 power — 2 Hz (catalog allows up to 10) ----------------------
     // Only reached on a machine whose driver reports a current sensor; the
     // channel does not exist otherwise (see the constructor's feature probe),
     // so this block is both the publisher AND the proof the gate is real.
@@ -2003,7 +2003,7 @@ void SlopSyncHubService::publishTelemetry() {
     if (now - _lastSlowMs >= 1000) {
         _lastSlowMs = now;
 
-        {  // 0x0083 odometer — 20 B (energy_wh + session_ms appended at M5a)
+        {  // 0x0083 odometer — 20 B, including energy_wh + session_ms
             std::array<std::byte, 20> buf{};
             std::span<std::byte> s(buf);
             slopsync::putU32(s.subspan(0, 4), _state.stroke_count.load(std::memory_order_relaxed));
@@ -2018,16 +2018,15 @@ void SlopSyncHubService::publishTelemetry() {
         }
 
         {  // 0x0088 slopmotion-diag — 88 B, the /api/slopmotion stats+sync blocks
-            // 80 -> 84 at M4d (a ninth per-kind counter, handoff_bounded) and
-            // 84 -> 88 with slopmotion 0.8.0 (a tenth, waveform_smoothed).
-            // Because that block sits in the MIDDLE of the layout, every field
-            // after it shifted by 4 bytes BOTH times. That is a layout CHANGE,
-            // not an append — legal here only because the catalog is
-            // self-describing and its etag moves with it, so a client re-reads
-            // the layout before it decodes a byte, and because 0x0088 is a
-            // pre-v1.0 device channel under the RFC-queue's standing "breaking
-            // is allowed before the v1.0 tag" ruling. After that tag this same
-            // growth would need a new channel id.
+            // This layout has grown from the MIDDLE before — new per-kind
+            // counters inserted into the per-kind block, shifting every field
+            // after it. That is a layout CHANGE, not an append — legal here
+            // only because the catalog is self-describing and its etag moves
+            // with it, so a client re-reads the layout before it decodes a
+            // byte, and because 0x0088 is a pre-v1.0 device channel under the
+            // RFC-queue's standing "breaking is allowed before the v1.0 tag"
+            // ruling. After that tag this same growth would need a new
+            // channel id.
             //
             // The offsets below are NOT independent constants: the per-kind
             // loop ends at 14 + SM_ANOM_KINDS*4 and everything after starts
@@ -2062,7 +2061,7 @@ void SlopSyncHubService::publishTelemetry() {
             _hub.publishState(ch::motion_diag, s);
         }
 
-        {  // 0x0006 hub-status — 14 B (log_dropped appended at M5b)
+        {  // 0x0006 hub-status — 14 B, including log_dropped
             std::array<std::byte, 14> buf{};
             std::span<std::byte> s(buf);
             slopsync::putU32(s.subspan(0, 4), uint32_t(ESP.getFreeHeap()));
@@ -2082,10 +2081,10 @@ void SlopSyncHubService::publishTelemetry() {
 
         persistPairingIfChanged();
         pumpPresencePairingWindow(now);  // RFC-027(c): streak reset + SlopGlow mirror
-        pumpEndpointAndRadios(now);      // RFC-046 (Phase E): WELCOME endpoint + BLE/UDP radios
+        pumpEndpointAndRadios(now);      // RFC-046: WELCOME endpoint + BLE/UDP radios
         persistPresetsIfChanged();       // RFC-021 pattern-preset store, write-on-change
         publishPresetRoster();           // 0x0096, on-change (generation-diffed internally)
-        // M5c: coalesced tuning persist. 0x0105 only FLAGS a change; the write
+        // Coalesced tuning persist. 0x0105 only FLAGS a change; the write
         // happens here, at most once a second. NVS is flash — a slider dragged
         // at the channel's 5 Hz would otherwise be five erase/write cycles per
         // second for a value the operator is still moving.
@@ -2099,27 +2098,26 @@ void SlopSyncHubService::publishTelemetry() {
             _webui.handleCommand(WS_OP_SAVE, in, out);
             SLOGI("slopsync", "slopmotion tuning persisted to NVS");
         }
-        // Item 1 (fw 2.1.76): max_rail is now a savable setting. Same
-        // coalesced-persist contract as _smTuneDirty above — 0x0101 key 8
-        // only flags the change, the write happens here at most once a
-        // second.
+        // max_rail is a savable setting. Same coalesced-persist contract as
+        // _smTuneDirty above — 0x0101 key 8 only flags the change, the write
+        // happens here at most once a second.
         if (_delegate._maxRailDirty) {
             _delegate._maxRailDirty = false;
             JsonDocument in, out;
             _webui.handleCommand(WS_OP_SAVE, in, out);
             SLOGI("slopsync", "max_rail persisted to NVS");
         }
-        // RFC-045/048 (Phase D): source.background_run, same coalesced-persist
-        // contract as _maxRailDirty above.
+        // RFC-045/048: source.background_run, same coalesced-persist contract
+        // as _maxRailDirty above.
         if (_delegate._patternBackgroundRunDirty) {
             _delegate._patternBackgroundRunDirty = false;
             JsonDocument in, out;
             _webui.handleCommand(WS_OP_SAVE, in, out);
             SLOGI("slopsync", "pattern background_run persisted to NVS");
         }
-        // Item 3 (fw 2.1.76): persist the freshly-measured stroke on EVERY
-        // successful home, not just whenever the operator happens to hit
-        // Save next. motorTask (Core 1) raises this flag the instant a
+        // Persist the freshly-measured stroke on EVERY successful home, not
+        // just whenever the operator happens to hit Save next. motorTask
+        // (Core 1) raises this flag the instant a
         // homing cycle completes with _state.homed true; NVS writes are
         // flash I/O and must never run on the real-time core, so the actual
         // ConfigStore::save() happens here, on the hub's Core-0 task.
@@ -2132,9 +2130,7 @@ void SlopSyncHubService::publishTelemetry() {
     }
 }
 
-// ============================================================================
-// 0x0089 motion-anomaly — the Core-1 anomaly ring, turned into EVENTs
-// ============================================================================
+// ---- 0x0089 motion-anomaly: the Core-1 anomaly ring, as EVENTs --------------
 //
 // Runs on the SlopSyncHub task (Core 0) like every other publisher here. The
 // engine's own anomaly ring lives on Core 1 and MUST be drained there (that is
@@ -2174,11 +2170,9 @@ void SlopSyncHubService::publishAnomalies() {
     }
 }
 
-// ============================================================================
-// RFC-027(c) push-to-pair — the boot-counter gesture (namespace "slopsync")
-// ============================================================================
+// ---- RFC-027(c) push-to-pair: the boot-counter gesture ----------------------
 //
-// hub.hpp is explicit that the library provides the window, never the
+// NVS namespace "slopsync". hub.hpp is explicit that the library provides the
 // gesture: "the application's job and only the application's". This is that
 // job. Registry `pairing_modes` bit2 (docs/slopsync/registry/registry.yaml)
 // is the normative text: N=3 consecutive boots with uptime <10 s opens the
@@ -2194,7 +2188,7 @@ constexpr uint32_t kQuickBootSurviveMs = 10000;  // "uptime < ~10 s" per the reg
 }  // namespace
 
 // Runs ONCE from init(), before the hub task exists — this is boot-sequence
-// work, exactly the CLAUDE.md §2 exception that permits a blocking NVS open
+// work, exactly the DOCTRINE.md §2 exception that permits a blocking NVS open
 // here (never in a runtime loop).
 void SlopSyncHubService::checkQuickBootPairingGesture() {
     Preferences prefs;
@@ -2251,13 +2245,12 @@ void SlopSyncHubService::pumpPresencePairingWindow(uint32_t nowMs) {
     }
 }
 
-// ============================================================================
-// RFC-046 (Phase E) — the hub's own endpoint (WELCOME keys 46/47) and the
-// live-changing half of the BLE-advertising / UDP-discovery flags byte.
-// Runs at 1 Hz on the hub task; every downstream call here is diff-gated
-// against its own last-published state, so a quiet second (nothing changed)
-// costs a WiFi.status() call and a couple of bool compares — no radio touch.
-// ============================================================================
+// ---- RFC-046: the hub's own endpoint and radio-advertising flags ------------
+// The hub's own endpoint (WELCOME keys 46/47) and the live-changing half of
+// the BLE-advertising / UDP-discovery flags byte. Runs at 1 Hz on the hub
+// task; every downstream call here is diff-gated against its own
+// last-published state, so a quiet second (nothing changed) costs a
+// WiFi.status() call and a couple of bool compares — no radio touch.
 void SlopSyncHubService::pumpEndpointAndRadios(uint32_t /*nowMs*/) {
     const bool wifiUp = (WiFi.status() == WL_CONNECTED);
 
@@ -2289,9 +2282,7 @@ void SlopSyncHubService::pumpEndpointAndRadios(uint32_t /*nowMs*/) {
     _udpDiscovery.setWsAvailable(wifiUp);
 }
 
-// ============================================================================
-// Pairing window + NVS persistence (namespace "slopsync")
-// ============================================================================
+// ---- Pairing window and NVS persistence (namespace "slopsync") --------------
 
 void SlopSyncHubService::openPairing(const char* pin) {
     if (!pin) return;
@@ -2311,7 +2302,7 @@ void SlopSyncHubService::closePairing() {
     SLOGI("slopsync", "pairing window closed");
 }
 
-// ---- RFC-029 item 3: the trust ledger, persisted ---------------------------
+// ---- RFC-029 item 3: the trust ledger, persisted ----------------------------
 // ONE CBOR blob, all-or-nothing, under limits::trust_ledger_max_bytes (1900 —
 // one NVS page). The library owns the format (PairingManager::encodeLedger /
 // decodeLedger); this side owns only the flash.
@@ -2322,17 +2313,17 @@ void SlopSyncHubService::closePairing() {
 // of one. A half-applied ledger is an authorization decision nobody made.
 namespace {
 constexpr const char* kLedgerKey = "ledger";
-constexpr const char* kLegacyTokensKey = "tokens";  // pre-M5b 25-byte-per-entry blob
+constexpr const char* kLegacyTokensKey = "tokens";  // legacy 25-byte-per-entry blob
 }  // namespace
 
 void SlopSyncHubService::loadPairing() {
     Preferences prefs;
     // Open read-WRITE: a read-only begin() on a namespace that has never been
     // written fails NOT_FOUND and the Preferences lib logs a scary E-line on
-    // serial right as the first client connects — operators read it as a boot
-    // blocker (field-reported 2026-07-24). Read-write creates the (empty)
-    // namespace on first boot; every later open is quiet. Still honors the
-    // OTA gate pattern: this runs at service init only, never during a flash.
+    // serial right as the first client connects — operators have read it as
+    // a boot blocker. Read-write creates the (empty) namespace on first boot;
+    // every later open is quiet. Still honors the OTA gate pattern: this runs
+    // at service init only, never during a flash.
     if (!prefs.begin("slopsync", false)) return;
 
     size_t n = prefs.getBytesLength(kLedgerKey);
@@ -2354,7 +2345,7 @@ void SlopSyncHubService::loadPairing() {
         return;
     }
 
-    // ---- One-time migration from the pre-M5b hand-rolled blob ---------------
+    // ---- One-time migration from the legacy hand-rolled blob ----------------
     // 25 bytes per entry: instance_id(8) + token(16) + role(1). Everything the
     // richer ledger adds (name, kind, version, state, seen timestamps) simply
     // starts unknown, which is honest — the old format never held it.
@@ -2426,10 +2417,9 @@ void SlopSyncHubService::persistPairingIfChanged() {
     if (_hub.pairing().dirty()) savePairing();
 }
 
-// ============================================================================
-// RFC-021 pattern-preset store — NVS persistence (namespace "slopsync") + the
-// one-time legacy migration off the retired /api/pattern/presets handler.
-// ============================================================================
+// ---- RFC-021 pattern-preset store: NVS persistence and migration ------------
+// NVS persistence (namespace "slopsync") + the one-time legacy migration off
+// the retired /api/pattern/presets handler.
 namespace {
 constexpr const char* kPresetKey = "presets";  // NVS key, <=15 chars, namespace "slopsync"
 }  // namespace
@@ -2455,8 +2445,8 @@ void SlopSyncHubService::loadPresets() {
     }
     if (n != 0) {
         // Some OTHER size lives under this key — not a format this build
-        // recognizes (the key is new at M5, so this should never fire in
-        // practice). Leave it alone rather than guess at a decode.
+        // recognizes, so this should never fire in practice. Leave it alone
+        // rather than guess at a decode.
         SLOGW("slopsync", "pattern preset blob is %u B, expected %u — ignoring", unsigned(n),
               unsigned(PatternPresetStore::kEncodedBytes));
         prefs.end();
@@ -2464,7 +2454,7 @@ void SlopSyncHubService::loadPresets() {
     }
     prefs.end();
 
-    // ---- One-time migration from the pre-M5 HTTP handler's NVS format ------
+    // ---- One-time migration from the legacy HTTP handler's NVS format -------
     // "advpreset"/"list": a JSON array of {name, def:{in_speed, out_speed,
     // in_accel, out_accel, mods:[{ctrl, amplitude, in_step, in_wait, out_step,
     // out_wait, offset}]}} — src/ui/WebUI.cpp's own retired format. Read-only
@@ -2567,18 +2557,17 @@ void SlopSyncHubService::publishPresetRoster() {
     _hub.publishState(ch::pattern_presets_roster, s);
 }
 
-// ============================================================================
-// OTA park/revive
-// ============================================================================
+// ---- OTA park/revive --------------------------------------------------------
 
 void SlopSyncHubService::suspendTask() {
     if (_task) vTaskSuspend(_task);
     // The signing task goes down too, and for a HARDER reason than the hub
     // task's: mid-sign it is deep inside mbedtls reading this object's MPI
-    // state, and this object lives in PSRAM. A flash-write window disables the
-    // cache, which makes PSRAM unreachable — a suspended task cannot be caught
-    // there. (It also checks ota_active before starting a job; that guard
-    // handles the arrive-during-OTA case, this one handles already-running.)
+    // state, and this object lives in PSRAM (TRAPS T2). A flash-write window
+    // disables the cache, which makes PSRAM unreachable — a suspended task
+    // cannot be caught there. (It also checks ota_active before starting a
+    // job; that guard handles the arrive-during-OTA case, this one handles
+    // already-running.)
     if (_signTask) vTaskSuspend(_signTask);
 }
 

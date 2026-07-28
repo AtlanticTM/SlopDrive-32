@@ -1,4 +1,5 @@
-// Target: every control-plane CBOR message decoder, BOTH directions.
+// fuzz_messages — target: every control-plane CBOR message decoder, BOTH
+// directions.
 //
 // Hub-side (untrusted CLIENT bytes): HELLO, INTENT, SUBSCRIBE, UNSUBSCRIBE,
 // PUBLISH, PAIR_REQ, AUTH, BLOB_REQ, GOODBYE, PROBE_REPORT.

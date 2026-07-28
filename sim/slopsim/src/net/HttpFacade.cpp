@@ -1,3 +1,5 @@
+// HttpFacade — read-only HTTP handlers (see HttpFacade.h for the doctrine).
+
 #include "net/HttpFacade.h"
 
 #include <cstdio>
@@ -144,7 +146,7 @@ bool HttpFacade::begin(MachineSim* sim, uint16_t httpPort, uint16_t wsPort, Sess
         res.set_content(buf, "application/json");
     });
 
-    // ---- Inbound wire recorder ---------------------------------------------
+    // ---- Inbound wire recorder ----------------------------------------------
     // CSV is the requirement, not a convenience: the operator diffs this
     // against the funscript that was SUPPOSED to be sent. Raw (pre-scale) and
     // decoded columns sit side by side so a units bug shows up as a mismatch
@@ -210,7 +212,7 @@ bool HttpFacade::begin(MachineSim* sim, uint16_t httpPort, uint16_t wsPort, Sess
         res.set_content(std::move(body), "application/json");
     });
 
-    // ---- The analyzer popout: rendered graph + analysis in the browser -----
+    // ---- The analyzer popout: rendered graph + analysis in the browser ------
     _srv->Get("/graph", [](const httplib::Request&, httplib::Response& res) {
         res.set_content(kGraphPageHtml, "text/html");
     });

@@ -1,5 +1,4 @@
-// ============================================================================
-// test_main.cpp — doctest unit tests for slopsync-core's wire modules:
+// test_slopsync_wire — slopsync-core's wire modules:
 // frame_header.hpp, crc32.hpp, estop_frame.hpp, serial_cobs.hpp, and the
 // serial-arithmetic helpers in util/serial_arithmetic.hpp.
 //
@@ -11,7 +10,6 @@
 // docs/slopsync/vectors/manifest.yaml; SPEC section numbers cite
 // docs/slopsync/SPEC.md. E-04 (repeat-until-latch, behavioral) is out of
 // scope for this native/unit suite per the brief.
-// ============================================================================
 
 #define DOCTEST_CONFIG_IMPLEMENT_WITH_MAIN
 #include <doctest/doctest.h>
@@ -31,9 +29,8 @@
 
 using namespace slopsync;
 
-// ============================================================================
-// H-01 — encode/decode every FrameType's header, seq 0 and 0xFFFF.
-// ============================================================================
+// ---- H-01 -------------------------------------------------------------------
+// encode/decode every FrameType's header, seq 0 and 0xFFFF.
 TEST_CASE("H-01: header round-trip for every registered FrameType, seq 0 and 0xFFFF") {
     // The full registry list (registry_constants.hpp). ESTOP (0xE5) is
     // included here too: this test only exercises the generic 8-byte codec's
@@ -158,9 +155,8 @@ TEST_CASE("H-01: byte-exact header encoding for HELLO and STATE") {
     }
 }
 
-// ============================================================================
-// H-02 — len bounds: 0, min_transport_payload (242), 65535; short-buffer decode.
-// ============================================================================
+// ---- H-02 -------------------------------------------------------------------
+// len bounds: 0, min_transport_payload (242), 65535; short-buffer decode.
 TEST_CASE("H-02: len bounds round-trip (0, 242, 65535); 7-byte buffer decodes to nullopt") {
     for (uint16_t len : {uint16_t(0), uint16_t(limits::min_transport_payload), uint16_t(0xFFFF)}) {
         FrameHeader h;
@@ -187,9 +183,8 @@ TEST_CASE("H-02: len bounds round-trip (0, 242, 65535); 7-byte buffer decodes to
     CHECK(encodeFrameHeader(h, shortOut) == 0);
 }
 
-// ============================================================================
-// H-03 — unknown frame type decodes fine; tolerance is the caller's concern.
-// ============================================================================
+// ---- H-03 -------------------------------------------------------------------
+// unknown frame type decodes fine; tolerance is the caller's concern.
 TEST_CASE("H-03: unknown frame type 0x7A decodes without failure (SPEC §4.3 tolerance)") {
     FrameHeader h;
     h.type = 0x7A;
@@ -206,9 +201,8 @@ TEST_CASE("H-03: unknown frame type 0x7A decodes without failure (SPEC §4.3 tol
     CHECK(decoded->len == 10);
 }
 
-// ============================================================================
-// H-04 — reserved flag bits are preserved; fragStart/fragMore read only bits 0/1.
-// ============================================================================
+// ---- H-04 -------------------------------------------------------------------
+// reserved flag bits are preserved; fragStart/fragMore read only bits 0/1.
 TEST_CASE("H-04: reserved flag bits are preserved and readable; fragStart/fragMore reflect only bits 0/1") {
     SUBCASE("all 8 bits set: both frag accessors true, flags fully readable") {
         FrameHeader h;
@@ -256,9 +250,7 @@ TEST_CASE("H-04: reserved flag bits are preserved and readable; fragStart/fragMo
     }
 }
 
-// ============================================================================
-// CRC-32 known-answer check (IEEE 802.3 / ISO-HDLC).
-// ============================================================================
+// ---- CRC-32 known-answer check (IEEE 802.3 / ISO-HDLC). ---------------------
 TEST_CASE("CRC-32 known-answer: crc32(\"123456789\") == 0xCBF43926") {
     const char check[] = "123456789";
     std::array<std::byte, 9> bytes{};
@@ -274,9 +266,8 @@ TEST_CASE("CRC-32 known-answer: crc32(\"123456789\") == 0xCBF43926") {
     CHECK(crc32Final(state) == 0xCBF43926u);
 }
 
-// ============================================================================
-// E-01 — ESTOP frame bytes: cause/origin/seq/CRC, exact 12 bytes.
-// ============================================================================
+// ---- E-01 -------------------------------------------------------------------
+// ESTOP frame bytes: cause/origin/seq/CRC, exact 12 bytes.
 TEST_CASE("E-01: ESTOP frame encoding — exact 12 bytes for cause=user origin=1 seq=1") {
     // Hand-derivation: the 8 header bytes to CRC are
     //   E5 E5 E5 E5  00  01  01 00      (magic | cause=0 | origin=1 | seq=1 LE)
@@ -312,10 +303,9 @@ TEST_CASE("E-01: ESTOP frame encoding — exact 12 bytes for cause=user origin=1
     CHECK(decoded.value().seq == 1);
 }
 
-// ============================================================================
-// E-02 — magic scanner: offsets 0..3, CRC rejection with continued scan,
+// ---- E-02 -------------------------------------------------------------------
+// magic scanner: offsets 0..3, CRC rejection with continued scan,
 // truncated-tail safety (no OOB read).
-// ============================================================================
 TEST_CASE("E-02: scanForEstop finds the frame at offsets 0..3 in a noise buffer") {
     EstopFrame f;
     f.cause = safety_causes::fault;
@@ -385,11 +375,10 @@ TEST_CASE("E-02: 4x0xE5 at buffer end with fewer than 8 trailing bytes -> not fo
     CHECK_FALSE(scanForEstop(tooShort).found);
 }
 
-// ============================================================================
-// E-03 — COBS: classic small vectors (byte-exact), max-run boundary, ESTOP
+// ---- E-03 -------------------------------------------------------------------
+// COBS: classic small vectors (byte-exact), max-run boundary, ESTOP
 // round-trip through COBS, and raw-scan transparency when no 0x00 falls
 // inside the frame (SPEC §13.5).
-// ============================================================================
 TEST_CASE("E-03: COBS classic vectors — exact encoded bytes") {
     auto encodeToVec = [](std::span<const std::byte> src) {
         std::vector<std::byte> dst(src.size() + src.size() / 254 + 2, std::byte{0xCC});
@@ -498,10 +487,9 @@ TEST_CASE("E-03: raw magic scan survives COBS encoding when no 0x00 falls inside
     CHECK(result.frame.seq == f.seq);
 }
 
-// ============================================================================
-// serial_arithmetic — seqIsNewer truth table (incl. wrap), timeDelta/
+// ---- serial_arithmetic ------------------------------------------------------
+// seqIsNewer truth table (incl. wrap), timeDelta/
 // timeReached across the u32 wrap boundary.
-// ============================================================================
 TEST_CASE("serial_arithmetic: seqIsNewer truth table incl. wrap") {
     CHECK(seqIsNewer(1, 0));
     CHECK_FALSE(seqIsNewer(0, 0));            // equal is NOT newer

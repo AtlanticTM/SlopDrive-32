@@ -1,3 +1,15 @@
+// SlopSyncCrypto — P-256 ECDSA hub identity: NVS-backed keygen, sign, verify.
+//
+// Constraints:
+// - NVS private-key write is skipped while OTA is active (a flash-cache
+//   access during an OTA write window can reset the chip); the key
+//   regenerates and persists on the next boot instead.
+// - espRngCb (hardware TRNG) blinds scalar multiplication only — the ECDSA
+//   nonce is RFC 6979 deterministic, so RNG quality here affects
+//   side-channel hardening, not key secrecy.
+// - verifyP256() returns false for both "invalid" and "unsupported"; a
+//   caller that needs to tell them apart checks publicKey()/ready() first.
+
 #include "SlopSyncCrypto.h"
 
 #include <Arduino.h>
@@ -73,7 +85,7 @@ bool EspCrypto::loadOrGenerate(SystemState& state) {
         // Read-WRITE open, same reasoning as loadPairing(): a read-only begin()
         // on a namespace that has never been written fails NOT_FOUND and the
         // Preferences library logs a scary E-line operators read as a boot
-        // failure (field-reported 2026-07-24).
+        // failure.
         if (prefs.begin(kNvsNamespace, false)) {
             if (prefs.getBytesLength(kNvsKeyPriv) == kScalarBytes) {
                 prefs.getBytes(kNvsKeyPriv, d, kScalarBytes);

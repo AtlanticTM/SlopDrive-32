@@ -1,4 +1,5 @@
-// Target: decodeCatalog (wire/catalog_codec.hpp) — the CLIENT-side surface.
+// fuzz_catalog — target: decodeCatalog (wire/catalog_codec.hpp) — the
+// CLIENT-side surface.
 //
 // RFC-028's asymmetry point: a client that auto-connects to a discovered
 // `_slopsync._tcp` beacon parses whatever catalog that hub sends, and the

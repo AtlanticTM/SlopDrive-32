@@ -1,56 +1,60 @@
 #pragma once
 
-// ============================================================================
 // SlopSyncBleTransport / SlopSyncBlePort — the NimBLE GATT binding for the
-// SlopSync hub (SPEC §13.4: real transport adapters live in firmware, NEVER
-// in lib/slopsync). RFC-043: BLE GATT is the hardware-hub CONFORMANCE FLOOR
-// (infrastructure-free control + discovery + future WiFi provisioning);
-// WebSocket stays the preferred high-throughput path. Clients SHOULD
-// auto-upgrade BLE->WS once connected (WELCOME's ws_port/ipv4, §6.3).
+// SlopSync hub
 //
-// This file compiles to nothing unless -DBLE_ENABLED is set (the same
-// self-exclusion idiom SlopSyncAsyncWsTransport.h documents for
-// -DSLOPSYNC_WS_ASYNC) — an env without the flag never needs NimBLE-Arduino
-// on its include path at all.
+// Constraints:
+//   SPEC §13.4: real transport adapters live in firmware, NEVER in
+//   lib/slopsync. RFC-043: BLE GATT is the hardware-hub CONFORMANCE FLOOR
+//   (infrastructure-free control + discovery + future WiFi provisioning);
+//   WebSocket stays the preferred high-throughput path. Clients SHOULD
+//   auto-upgrade BLE->WS once connected (WELCOME's ws_port/ipv4, §6.3).
 //
-// ─── THE THREADING MODEL (READ THIS BEFORE TOUCHING ANYTHING; mirrors
-// SlopSyncAsyncWsTransport.h's own header note almost exactly) ─────────────
-// NimBLE-Arduino runs its host stack on its OWN FreeRTOS task ("NimBLEHost" /
-// the Bluedroid/NimBLE port's controller-host task), so every
-// NimBLEServerCallbacks/NimBLECharacteristicCallbacks method below fires on
-// THAT task, concurrently with the SlopSyncHub task running hub.update().
-// TRAPS T5 applies verbatim: these callbacks NEVER touch slopsync::Hub or
-// session state directly — they only ever (a) push into a lock-free SPSC
-// ring, or (b) set an atomic "intent" flag that SlopSyncBlePort::loop()
-// (called from the hub task, exactly like SlopSyncAsyncWsPort::loop())
-// resolves into an actual hub.attachTransport()/detachTransport() call. The
-// hub is single-task BY DESIGN; this file keeps that true for BLE exactly as
-// SlopSyncAsyncWsTransport.h keeps it true for WS.
+//   Compiles to nothing unless -DBLE_ENABLED is set (the same self-exclusion
+//   idiom SlopSyncAsyncWsTransport.h documents for -DSLOPSYNC_WS_ASYNC) — an
+//   env without the flag never needs NimBLE-Arduino on its include path.
 //
-// RX — the identical lock-free SPSC ring pattern as the WS transport: ONE
+//   Threading model (read this before touching anything; mirrors
+//   SlopSyncAsyncWsTransport.h's own header note almost exactly):
+//   NimBLE-Arduino runs its host stack on its OWN FreeRTOS task ("NimBLEHost"
+//   / the Bluedroid/NimBLE port's controller-host task), so every
+//   NimBLEServerCallbacks/NimBLECharacteristicCallbacks method below fires on
+//   THAT task, concurrently with the SlopSyncHub task running hub.update().
+//   TRAPS T5 applies verbatim: these callbacks NEVER touch slopsync::Hub or
+//   session state directly — they only ever (a) push into a lock-free SPSC
+//   ring, or (b) set an atomic "intent" flag that SlopSyncBlePort::loop()
+//   (called from the hub task, exactly like SlopSyncAsyncWsPort::loop())
+//   resolves into an actual hub.attachTransport()/detachTransport() call.
+//   The hub is single-task BY DESIGN; this file keeps that true for BLE
+//   exactly as SlopSyncAsyncWsTransport.h keeps it true for WS.
+//
+//   RX — the identical lock-free SPSC ring pattern as the WS transport: ONE
 //   producer (the NimBLE host task, from onWrite) advances the tail with a
 //   RELEASE store; ONE consumer (the hub task, from read()) advances the
 //   head with an ACQUIRE load. See SlopSyncAsyncWsTransport.h's own comment
 //   for the full memory-ordering argument — it applies unchanged here.
 //
-// TX — NimBLECharacteristic::notify() is the library's own non-blocking send
-//   (it enqueues onto the host's outgoing event queue and returns
+//   TX — NimBLECharacteristic::notify() is the library's own non-blocking
+//   send (it enqueues onto the host's outgoing event queue and returns
 //   success/failure immediately; it does not wait for the radio). A failed
 //   notify() IS this binding's congestion signal (§13.1 "notify queue
 //   depth") — there is no separate depth counter to read, so a failure is
 //   treated as "the queue is full right now," which is the only fact §13.1
 //   asks a binding to report.
 //
-// ─── WHY 2 CONCURRENT CONNECTIONS (not more, not fewer) ────────────────────
-// A hardware hub's BLE role here is "phone finds and provisions the
-// machine, then upgrades to WS" (§13.1) — it is not the high-throughput
-// motion plane (that is WS). Two lets one phone hold a BLE session mid
-// BLE->WS migration while a second BLE-only client (a different phone, a
-// diagnostic tool) is still served, without carrying the RAM/GATT-slot cost
-// of matching kHubMaxSessions+1. Raising this later is a one-line constant
-// change plus NimBLE's own CONFIG_BT_NIMBLE_MAX_CONNECTIONS ceiling (default
-// 3, comfortably above this).
-// ============================================================================
+//   Why 2 concurrent connections (not more, not fewer): a hardware hub's BLE
+//   role here is "phone finds and provisions the machine, then upgrades to
+//   WS" (§13.1) — it is not the high-throughput motion plane (that is WS).
+//   Two lets one phone hold a BLE session mid BLE->WS migration while a
+//   second BLE-only client (a different phone, a diagnostic tool) is still
+//   served, without carrying the RAM/GATT-slot cost of matching
+//   kHubMaxSessions+1. Raising this later is a one-line constant change plus
+//   NimBLE's own CONFIG_BT_NIMBLE_MAX_CONNECTIONS ceiling (default 3,
+//   comfortably above this).
+//
+// See:
+//   SlopSyncAsyncWsTransport.h — the WS-side twin this file mirrors throughout
+//   TRAPS.md T5 — why transport callbacks never touch hub state directly
 
 #if defined(BLE_ENABLED)
 
@@ -68,7 +72,7 @@
 
 namespace slopdrive {
 
-// ---- registry.yaml `ble_identity` (RFC-046 item 1) -------------------------
+// ---- registry.yaml `ble_identity` (RFC-046 item 1) --------------------------
 // NOT emitted by tools/gen_registry_header.py (the codegen has no CBOR-key
 // schema for a GATT UUID string) — transcribed here verbatim per Phase E's
 // documented fallback (see SlopSyncDiscoveryWire.h's own note on the same
@@ -118,19 +122,19 @@ public:
         _server = server;
     }
 
-    // ---- ITransport (hub task) --------------------------------------------
+    // ---- ITransport (hub task) ----------------------------------------------
     bool open() override;
     void close() override;
     bool write(std::span<const std::byte> frame) override;
     std::optional<slopsync::FrameBuffer> read() override;
     slopsync::TransportProperties properties() const override;
 
-    // ---- Driven by the port, on the NimBLE host task -----------------------
+    // ---- Driven by the port, on the NimBLE host task ------------------------
     void attachConn(uint16_t connHandle);
     void detachConn();
     void pushRx(const uint8_t* data, size_t len);
 
-    // ---- Diagnostics (either task; all relaxed loads) ---------------------
+    // ---- Diagnostics (either task; all relaxed loads) -----------------------
     uint16_t connHandle() const { return _connHandle.load(std::memory_order_relaxed); }
     uint32_t rxDrops() const { return _rxDrops.load(std::memory_order_relaxed); }
     uint32_t txDataDrops() const { return _txDataDrops.load(std::memory_order_relaxed); }
@@ -185,11 +189,11 @@ public:
     void updateAdvertising(bool pairingWindowOpen, bool wsAvailable);
 
 private:
-    // ---- NimBLEServerCallbacks (NimBLE host task) --------------------------
+    // ---- NimBLEServerCallbacks (NimBLE host task) ---------------------------
     void onConnect(NimBLEServer* server, NimBLEConnInfo& connInfo) override;
     void onDisconnect(NimBLEServer* server, NimBLEConnInfo& connInfo, int reason) override;
 
-    // ---- NimBLECharacteristicCallbacks (NimBLE host task) ------------------
+    // ---- NimBLECharacteristicCallbacks (NimBLE host task) -------------------
     void onWrite(NimBLECharacteristic* characteristic, NimBLEConnInfo& connInfo) override;
 
     void refreshAdvertisingData(uint8_t flags);

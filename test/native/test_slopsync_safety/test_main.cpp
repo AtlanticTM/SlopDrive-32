@@ -1,5 +1,4 @@
-// ============================================================================
-// test_main.cpp — doctest behavioral tests for slopsync-core's M5 safety
+// test_slopsync_safety — slopsync-core's M5 safety
 // milestone: full stop taxonomy (§11), QoS shedding (§10.4), pairing (§12.2),
 // and the network probe (§6.4). Driven end-to-end over InProcessLink +
 // ManualClock + XorShift32, same harness shape as test_slopsync_session's M4
@@ -16,7 +15,6 @@
 // and an HMAC-SHA256 known-answer test round out the coverage the milestone
 // brief asks for. Existing M4 suites (S-01..04, S-09, I-*, E-04) are
 // untouched — see the M5 report for the regression statement.
-// ============================================================================
 
 #define DOCTEST_CONFIG_IMPLEMENT_WITH_MAIN
 #include <doctest/doctest.h>
@@ -47,10 +45,9 @@ using namespace slopsync;
 
 namespace {
 
-// ============================================================================
-// Test catalog: miniCatalog() + 0x0004 control-owner + 0x0005 safety-intents,
+// ---- Test catalog -----------------------------------------------------------
+// miniCatalog() + 0x0004 control-owner + 0x0005 safety-intents,
 // ids kept ascending (superset copy — mini_catalog.hpp itself is untouched).
-// ============================================================================
 
 // Out-param builder (a Catalog32 is tens of KiB — never a return value).
 // Entries are APPENDED in ascending id order, which is also the order the
@@ -109,9 +106,8 @@ void safetyCatalog(Catalog32& c) {
     REQUIRE(c.ok());
 }
 
-// ============================================================================
-// Shared fixtures (same shapes as test_slopsync_session's, independent copy)
-// ============================================================================
+// ---- Shared fixtures --------------------------------------------------------
+// Same shapes as test_slopsync_session's, independent copy.
 
 ClientIdentity makeIdentity(uint8_t idByte, bool withToken) {
     ClientIdentity id;
@@ -334,9 +330,8 @@ public:
 
 }  // namespace
 
-// ============================================================================
-// Pure function: shedDecision() exhaustive table (§10.4, M5 milestone brief)
-// ============================================================================
+// ---- Pure function ----------------------------------------------------------
+// shedDecision() exhaustive table (§10.4, M5 milestone brief)
 TEST_CASE("shed table (pure): shedDecision matches the M5 exhaustive table") {
     using SD = ShedDecision;
     struct Case {
@@ -411,13 +406,12 @@ TEST_CASE("shed table (pure): shedDecision matches the M5 exhaustive table") {
     }
 }
 
-// ============================================================================
-// S-05 — RFC-042/RFC-045: deadman on a Stop-policy source releases ownership
+// ---- S-05 -------------------------------------------------------------------
+// RFC-042/RFC-045: deadman on a Stop-policy source releases ownership
 // and marks the session STALE — it no longer latches STOP or calls
 // onDeadmanStop, and the session's SLOT is RETAINED (not freed). The declared
 // SourceLossPolicy::Stop is proven INERT: the reference hub no longer consults
 // it at all (see releaseSessionSources()'s RFC-045 comment).
-// ============================================================================
 TEST_CASE("S-05: deadman on a Stop-policy source releases ownership, marks STALE, latches nothing") {
     Catalog32 catalog;
     safetyCatalog(catalog);
@@ -481,13 +475,12 @@ TEST_CASE("S-05: deadman on a Stop-policy source releases ownership, marks STALE
     CHECK((*w & safety_bits::STOP) == 0);
 }
 
-// ============================================================================
-// S-06 — RFC-042/RFC-045: deadman on a Continue-policy source is
+// ---- S-06 -------------------------------------------------------------------
+// RFC-042/RFC-045: deadman on a Continue-policy source is
 // behaviorally IDENTICAL to S-05's Stop-policy case at the hub-library level —
 // ownership releases, the session goes STALE, nothing latches, regardless of
 // what sourcePolicy() answers. The source is immediately reacquirable by a
 // different session, exactly as before.
-// ============================================================================
 TEST_CASE("S-06: deadman on a Continue-policy source releases ownership, marks STALE, immediately reacquirable") {
     Catalog32 catalog;
     safetyCatalog(catalog);
@@ -542,10 +535,9 @@ TEST_CASE("S-06: deadman on a Continue-policy source releases ownership, marks S
     CHECK(hubDelegate.ownershipEvents[2].reason == 0);
 }
 
-// ============================================================================
-// S-07 — takeover: NACK TAKEOVER_REQUIRED without the flag; TakenOver with it
+// ---- S-07 -------------------------------------------------------------------
+// takeover: NACK TAKEOVER_REQUIRED without the flag; TakenOver with it
 // (equal role); control-owner STATE (0x0004) reflects the change to both.
-// ============================================================================
 TEST_CASE("S-07: same-source contention — TAKEOVER_REQUIRED, then takeover=true transfers ownership") {
     Catalog32 catalog;
     safetyCatalog(catalog);
@@ -609,8 +601,8 @@ TEST_CASE("S-07: same-source contention — TAKEOVER_REQUIRED, then takeover=tru
     CHECK(ownerFromControlOwnerPayload(delegateB.lastStateByChannel[0x0004], 1) == clientB.sessionId());
 }
 
-// ============================================================================
-// S-08 — congestion shedding order (§10.4) live through the hub's STATE
+// ---- S-08 -------------------------------------------------------------------
+// congestion shedding order (§10.4) live through the hub's STATE
 // pacing loop, plus slow-consumer eviction after a stalled never-shed queue.
 //
 // Deviation note: the milestone brief frames the shedding half of S-08 around
@@ -623,7 +615,6 @@ TEST_CASE("S-07: same-source contention — TAKEOVER_REQUIRED, then takeover=tru
 // above; THIS test demonstrates the same §10.4 ordering live, through the
 // only pacing loop that exists, using two real STATE channels of different
 // priority (0x0090 diag/background, 0x0082 motion-status/normal).
-// ============================================================================
 TEST_CASE("S-08: congestion shedding decimates background before normal/critical; stalled critical writes evict") {
     Catalog32 catalog;
     safetyCatalog(catalog);
@@ -725,8 +716,8 @@ TEST_CASE("S-08: congestion shedding decimates background before normal/critical
     }
 }
 
-// ============================================================================
-// S-11 — STATE congestion coalescing is last-value-wins (LEDGER "Morning
+// ---- S-11 -------------------------------------------------------------------
+// STATE congestion coalescing is last-value-wins (LEDGER "Morning
 // ruling batch" item 1, 2026-07-28). RetainedStore already holds exactly one
 // value per channel and pumpStatePacing() always reads it fresh at send time
 // (see retained_store.hpp/subscription.hpp's own design notes) — no queue
@@ -739,7 +730,6 @@ TEST_CASE("S-08: congestion shedding decimates background before normal/critical
 // SlopSyncAsyncWsPort::loop() now feeds from the real WS queue watermark
 // (src/comms/SlopSyncAsyncWsTransport.cpp) — previously wired for the
 // in-process/sim binding only.
-// ============================================================================
 TEST_CASE("S-11: STATE congestion coalescing is last-value-wins, never reordered, never permanently lost") {
     Catalog32 catalog;
     safetyCatalog(catalog);
@@ -863,9 +853,8 @@ TEST_CASE("S-11: STATE congestion coalescing is last-value-wins, never reordered
     }
 }
 
-// ============================================================================
-// S-10 — pairing ceremony (§12.2)
-// ============================================================================
+// ---- S-10 -------------------------------------------------------------------
+// pairing ceremony (§12.2)
 TEST_CASE("S-10: pairing grants a controller token via correct PIN proof; a reconnect with it adopts controller") {
     Catalog32 catalog;
     safetyCatalog(catalog);
@@ -954,11 +943,10 @@ TEST_CASE("S-10: wrong PIN denies pairing; three failures close the window; furt
     CHECK(delegate.pairGrants.empty());
 }
 
-// ============================================================================
-// HMAC-SHA256 known-answer test — RFC 4231 Test Case 2 (key "Jefe").
+// ---- HMAC-SHA256 known-answer test ------------------------------------------
+// RFC 4231 Test Case 2 (key "Jefe").
 // Ground truth independently computed via .NET's HMACSHA256 (not transcribed
 // from memory) to avoid a hand-copied-hex-digit error.
-// ============================================================================
 TEST_CASE("S-10 (HMAC KAT): RFC 4231 test case 2 — key \"Jefe\", full 32-byte digest") {
     const std::string key = "Jefe";
     const std::string msg = "what do ya want for nothing?";
@@ -1047,9 +1035,8 @@ struct SafetyRig {
 
 }  // namespace
 
-// ============================================================================
-// RFC-025c — the snapshot itself: 9 bytes, appended `modes`, prefix-stable.
-// ============================================================================
+// ---- RFC-025c ---------------------------------------------------------------
+// the snapshot itself: 9 bytes, appended `modes`, prefix-stable.
 TEST_CASE("M4a: the 0x0003 snapshot is 9 bytes and its first 8 are unchanged") {
     SafetyRig rig(/*withToken=*/true);
 
@@ -1068,9 +1055,8 @@ TEST_CASE("M4a: the 0x0003 snapshot is 9 bytes and its first 8 are unchanged") {
     CHECK(rig.catalog.layoutWireSize(*e) == 9);
 }
 
-// ============================================================================
-// RFC-010 — a client can ASSERT the e-stop, and a WATCH session can too.
-// ============================================================================
+// ---- RFC-010 ----------------------------------------------------------------
+// a client can ASSERT the e-stop, and a WATCH session can too.
 TEST_CASE("M4a/RFC-010: safety_ops::estop latches exactly like a 0xE5 frame") {
     SafetyRig rig(/*withToken=*/true);
     REQUIRE_FALSE(rig.hub->estopLatched());
@@ -1160,9 +1146,8 @@ TEST_CASE("M4a/RFC-025b: role-exempt ops are STILL rate-limited") {
     CHECK(rateLimited > 0);   // exemption is from ROLE, never from the limiter
 }
 
-// ============================================================================
-// RFC-025a — the hub latches all four levels, on delegate ACCEPTANCE.
-// ============================================================================
+// ---- RFC-025a ---------------------------------------------------------------
+// the hub latches all four levels, on delegate ACCEPTANCE.
 TEST_CASE("M4a/RFC-025a: the HUB latches STOP/HOLD/PAUSE and RESUME lifts the right two") {
     SafetyRig rig(/*withToken=*/true);
 
@@ -1202,9 +1187,8 @@ TEST_CASE("M4a/RFC-025a: a delegate that does not implement a level NACKs and la
     CHECK(rig.hub->safetyWord() == 0);                          // and NOT silently latched
 }
 
-// ============================================================================
-// RFC-025c — override/bypass write through 0x0005 and read back on 0x0003.
-// ============================================================================
+// ---- RFC-025c ---------------------------------------------------------------
+// override/bypass write through 0x0005 and read back on 0x0003.
 TEST_CASE("M4a/RFC-025c: override/bypass ops drive the appended modes byte") {
     SafetyRig rig(/*withToken=*/true);
     CHECK(rig.hub->safetyModes() == 0);
@@ -1252,13 +1236,12 @@ TEST_CASE("M4a/RFC-025c: setSafetyModes is the machine-side direction, publishin
     CHECK(rig.del.stateCountByChannel[0x0003] == afterChange);
 }
 
-// ============================================================================
-// RFC-045 — source loss (any door, any cause) latches NOTHING any more. This
+// ---- RFC-045 ----------------------------------------------------------------
+// source loss (any door, any cause) latches NOTHING any more. This
 // supersedes the old RFC-022.3 test pair, which proved the latched CAUSE told
 // GOODBYE apart from a real silence timeout; RFC-045 removed the latch itself,
 // so there is no cause byte left to distinguish — both tests now prove the
 // stronger, simpler property directly.
-// ============================================================================
 TEST_CASE("M4a/RFC-045: a GOODBYE releases ownership but latches nothing") {
     Catalog32 catalog;
     safetyCatalog(catalog);

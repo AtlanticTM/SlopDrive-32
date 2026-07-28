@@ -58,6 +58,7 @@ struct GrantMsg {
     std::array<GrantedPublish, kWelcomeMaxGrantedPublishes> granted_publishes{};
 };
 
+// ---- Encode -----------------------------------------------------------------
 // Encodes into `out`; returns bytes written, or 0 on any failure.
 inline size_t encodeGrant(const GrantMsg& m, std::span<std::byte> out) {
     if (m.grants_count > kGrantMsgMaxGrants) return 0;
@@ -101,6 +102,7 @@ inline size_t encodeGrant(const GrantMsg& m, std::span<std::byte> out) {
     return w.size();
 }
 
+// ---- Decode -----------------------------------------------------------------
 // Decodes `in` into a GrantMsg. Unknown keys are skipped per §4.3.
 inline Result<GrantMsg, DecodeError> decodeGrant(std::span<const std::byte> in) {
     using Ret = Result<GrantMsg, DecodeError>;

@@ -1,5 +1,4 @@
-// ============================================================================
-// test_main.cpp — doctest unit tests for the slopsync-core deterministic
+// test_slopsync_cbor — the slopsync-core deterministic
 // CBOR profile codec (cbor_writer.hpp / cbor_reader.hpp) and the HELLO /
 // WELCOME message codecs (wire/messages/hello.hpp, welcome.hpp).
 //
@@ -28,7 +27,6 @@
 // the point of writing them by hand instead of just trusting the encoder's
 // own output is that a bug shared between encoder and "expected" would
 // otherwise go undetected.
-// ============================================================================
 
 #define DOCTEST_CONFIG_IMPLEMENT_WITH_MAIN
 #include <doctest/doctest.h>
@@ -81,9 +79,8 @@ constexpr std::array<std::byte, 8> kPlaceholderEtag = {
 
 }  // namespace
 
-// ============================================================================
-// C-01 — HELLO minimal (viewer, no token): exact bytes, round-trip.
-// ============================================================================
+// ---- C-01 -------------------------------------------------------------------
+// HELLO minimal (viewer, no token): exact bytes, round-trip.
 TEST_CASE("C-01: HELLO minimal (viewer, no token) — exact bytes + round-trip") {
     HelloMsg m{};
     m.proto_ver = 1;
@@ -127,10 +124,9 @@ TEST_CASE("C-01: HELLO minimal (viewer, no token) — exact bytes + round-trip")
     CHECK(dec.value().publishes_count == 0);
 }
 
-// ============================================================================
-// C-02 — HELLO full (token, etag, wish-lists): exact bytes, sorted keys,
+// ---- C-02 -------------------------------------------------------------------
+// HELLO full (token, etag, wish-lists): exact bytes, sorted keys,
 // round-trip.
-// ============================================================================
 TEST_CASE("C-02: HELLO full (token, etag, wish-lists) — exact bytes + round-trip") {
     HelloMsg m{};
     m.proto_ver = 1;
@@ -209,9 +205,8 @@ TEST_CASE("C-02: HELLO full (token, etag, wish-lists) — exact bytes + round-tr
     CHECK(d.publishes[0].rate_hz == doctest::Approx(60.0f));
 }
 
-// ============================================================================
-// C-03 — WELCOME with grants/limits/nonce: exact bytes, round-trip.
-// ============================================================================
+// ---- C-03 -------------------------------------------------------------------
+// WELCOME with grants/limits/nonce: exact bytes, round-trip.
 TEST_CASE("C-03: WELCOME with grants/limits/nonce — exact bytes + round-trip") {
     WelcomeMsg m{};
     m.proto_ver = 1;
@@ -290,11 +285,10 @@ TEST_CASE("C-03: WELCOME with grants/limits/nonce — exact bytes + round-trip")
     CHECK(d.grants[0].priority == 2);
 }
 
-// ============================================================================
-// C-04 — profile violations rejected (decode direction). Each hand-crafted
+// ---- C-04 -------------------------------------------------------------------
+// profile violations rejected (decode direction). Each hand-crafted
 // fragment is fed directly to CborReader (not a full HELLO/WELCOME) — these
 // probe the profile-enforcement machinery in isolation.
-// ============================================================================
 TEST_CASE("C-04: profile violations are rejected") {
     SUBCASE("indefinite-length map (0xBF)") {
         static constexpr std::byte buf[] = {B(0xBF)};
@@ -356,11 +350,10 @@ TEST_CASE("C-04: profile violations are rejected") {
     }
 }
 
-// ============================================================================
-// C-05 — unknown map key ignored (SPEC §4.3). A valid deterministic HELLO
+// ---- C-05 -------------------------------------------------------------------
+// unknown map key ignored (SPEC §4.3). A valid deterministic HELLO
 // map with an extra key 99 (ascending, after instance_id=4) whose value is a
 // nested 2-element array must decode fine, with 99 silently skipped.
-// ============================================================================
 TEST_CASE("C-05: unknown key (99) with nested array value is skipped") {
     // map(5 pairs): 1,2,3,4 (the required HELLO fields) then 99 -> [7,8]
     static constexpr std::byte buf[] = {
@@ -384,11 +377,10 @@ TEST_CASE("C-05: unknown key (99) with nested array value is skipped") {
     CHECK(d.publishes_count == 0);
 }
 
-// ============================================================================
-// C-06 — canned-template equivalence: patching C-01's instance_id bytes in
+// ---- C-06 -------------------------------------------------------------------
+// canned-template equivalence: patching C-01's instance_id bytes in
 // place equals a fresh encode with that id (proves template-patching, §5.3
 // / §8.5's whole reason for existing, is legal for this message shape).
-// ============================================================================
 TEST_CASE("C-06: template-patched instance_id equals a fresh encode") {
     HelloMsg m{};
     m.proto_ver = 1;
@@ -418,9 +410,8 @@ TEST_CASE("C-06: template-patched instance_id equals a fresh encode") {
     CHECK(std::memcmp(patchedBuf.data(), freshBuf.data(), freshLen) == 0);
 }
 
-// ============================================================================
-// Shortest-form integer boundary tests (23/24, 255/256, 65535/65536).
-// ============================================================================
+// ---- Shortest-form integer boundary tests -----------------------------------
+// 23/24, 255/256, 65535/65536.
 TEST_CASE("Shortest-form integer boundaries: writer produces the minimal head") {
     auto encodeOne = [](uint64_t v) {
         std::array<std::byte, 16> buf{};
@@ -503,9 +494,7 @@ TEST_CASE("Shortest-form integer boundaries: reader rejects non-shortest encodin
     }
 }
 
-// ============================================================================
-// float32 encode of 1.5 and -0.0 (binary32, big-endian payload).
-// ============================================================================
+// ---- float32 encode of 1.5 and -0.0 (binary32, big-endian payload). ---------
 TEST_CASE("float32: 1.5 and -0.0 encode to the exact IEEE-754 big-endian bytes") {
     {
         // 1.5 = 1.1(binary) * 2^0 -> sign0 exp01111111 mant1000...0 = 0x3FC00000
@@ -546,13 +535,12 @@ TEST_CASE("float32: 1.5 and -0.0 encode to the exact IEEE-754 big-endian bytes")
     }
 }
 
-// ============================================================================
-// Nesting depth: depth-4 accepted, depth-5 rejected. Top-level container is
+// ---- Nesting depth ----------------------------------------------------------
+// depth-4 accepted, depth-5 rejected. Top-level container is
 // depth 1; opening a 5th nested container must fail on both writer and
 // reader. These are structural probes of the depth ceiling in isolation —
 // they don't produce a decodable message (each open has no matching keys),
 // which is fine: only the depth bookkeeping is under test here.
-// ============================================================================
 TEST_CASE("Nesting depth 4 is accepted, depth 5 is rejected (writer)") {
     std::array<std::byte, 32> buf{};
     CborWriter w(buf);
@@ -577,10 +565,9 @@ TEST_CASE("Nesting depth 4 is accepted, depth 5 is rejected (reader)") {
     CHECK(fifth.error() == DecodeError::DepthExceeded);
 }
 
-// ============================================================================
-// tstr/bstr length boundaries (23/24 byte lengths): 23 fits the direct
+// ---- tstr/bstr length boundaries (23/24 byte lengths) -----------------------
+// 23 fits the direct
 // single-byte head; 24 needs the 1-byte-follow form.
-// ============================================================================
 TEST_CASE("tstr/bstr length boundary: 23 vs 24 bytes") {
     const std::string_view s23(
         "01234567890123456789012");  // 23 chars
@@ -625,11 +612,10 @@ TEST_CASE("tstr/bstr length boundary: 23 vs 24 bytes") {
     }
 }
 
-// ============================================================================
-// Bonus coverage (not in the manifest, but part of the writer/reader API
-// surface the brief asked for): bool/null round trip, and overflow /
-// out-of-order-key detection on the writer.
-// ============================================================================
+// ---- Bonus coverage: writer/reader API surface ------------------------------
+// Not in the manifest, but part of the surface the brief asked for:
+// bool/null round trip, and overflow / out-of-order-key detection on the
+// writer.
 TEST_CASE("bool and null round-trip") {
     std::array<std::byte, 8> buf{};
     CborWriter w(buf);
@@ -670,8 +656,8 @@ TEST_CASE("Writer sets failed on output-span overflow") {
     CHECK(w.size() == 0);
 }
 
-// ============================================================================
-// RFC-028 regression — parser TOTALITY (found by test/fuzz/fuzz_cbor).
+// ---- RFC-028 regression -----------------------------------------------------
+// parser TOTALITY (found by test/fuzz/fuzz_cbor).
 //
 // Minimized crashing input, verbatim from libFuzzer:
 //   7B FF FF FF FF FF FF FF FF        (major 3 | ai=27 -> 8-byte length,
@@ -688,7 +674,6 @@ TEST_CASE("Writer sets failed on output-span overflow") {
 // The fix is `arg > remaining` instead of `start + len > size` (cbor_reader
 // .hpp). These cases pin BOTH string types, at the 8-, 4- and 2-byte head
 // widths, and confirm the legal maximum still parses.
-// ============================================================================
 TEST_CASE("RFC-028: a tstr length of 2^64-1 is rejected, not trusted") {
     const std::array<std::byte, 9> evil{
         std::byte{0x7B}, std::byte{0xFF}, std::byte{0xFF}, std::byte{0xFF}, std::byte{0xFF},

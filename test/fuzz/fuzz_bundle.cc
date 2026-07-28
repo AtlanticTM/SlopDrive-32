@@ -1,5 +1,6 @@
-// Target: STREAM bundle validation (wire/stream_bundle.hpp) — §5.4's caps
-// (n <= 32, span <= 20 ms, strictly-increasing t_off, size == n x S).
+// fuzz_bundle — target: STREAM bundle validation (wire/stream_bundle.hpp) —
+// §5.4's caps (n <= 32, span <= 20 ms, strictly-increasing t_off,
+// size == n x S).
 //
 // Scope note found during this gate's first pass: of those four caps,
 // BundleView::parse enforces n, span and size — NOT t_off monotonicity. It is

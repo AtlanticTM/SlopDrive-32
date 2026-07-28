@@ -48,23 +48,23 @@ inline constexpr size_t kTrustTokenProofBytes = 16;
 inline constexpr size_t kTrustClientNonceBytes = 8;
 
 struct TrustMap {
-    // ---- HELLO ----
+    // ---- HELLO --------------------------------------------------------------
     bool has_client_ver = false;
     std::string_view client_ver{};  // zero-copy view into the decoded frame
     bool has_client_nonce = false;
     std::array<std::byte, kTrustClientNonceBytes> client_nonce{};
     bool has_sig_request = false;
     bool sig_request = false;
-    // ---- HELLO / AUTH ----
+    // ---- HELLO / AUTH -------------------------------------------------------
     bool has_presentation_mode = false;
     uint8_t presentation_mode = 0;
     bool has_token_proof = false;
     std::array<std::byte, kTrustTokenProofBytes> token_proof{};
-    // ---- PAIR_GRANT (M4c) ----
+    // ---- PAIR_GRANT (M4c) ---------------------------------------------------
     bool has_hub_pubkey = false;
     uint8_t hub_pubkey_len = 0;
     std::array<std::byte, kTrustPubkeyMaxBytes> hub_pubkey{};
-    // ---- WELCOME ----
+    // ---- WELCOME ------------------------------------------------------------
     bool has_welcome_sig = false;
     uint8_t welcome_sig_len = 0;
     std::array<std::byte, kTrustSigMaxBytes> welcome_sig{};

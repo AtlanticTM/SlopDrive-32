@@ -1,5 +1,4 @@
-// ============================================================================
-// test_main.cpp — doctest behavioral tests for MILESTONE 4c: SlopSync's
+// test_slopsync_m4c — MILESTONE 4c: SlopSync's
 // CRYPTOGRAPHIC PROOF layer (RFC-029 items 1 and 6).
 //
 //   M4C-01..04  the signature MATERIAL and its codecs (AUTH / HUB_SIG / the
@@ -23,7 +22,6 @@
 // Native (host-side, hardware-free): InProcessLink + ManualClock + XorShift32
 // + ScriptedCrypto, doctest's bundled main(), same harness shape as
 // test_slopsync_m4b.
-// ============================================================================
 
 #define DOCTEST_CONFIG_IMPLEMENT_WITH_MAIN
 #include <doctest/doctest.h>
@@ -110,7 +108,7 @@ public:
     void onEstop(uint8_t, uint8_t) override {}
 };
 
-// ---- raw frame helpers -----------------------------------------------------
+// ---- raw frame helpers ------------------------------------------------------
 
 void writeFrame(ITransport& ep, FrameType type, uint16_t channel, std::span<const std::byte> payload) {
     std::array<std::byte, 600> buf{};
@@ -294,7 +292,7 @@ ScriptedCrypto makeCrypto(uint8_t keyTag) {
     return c;
 }
 
-// ---- client-side harness ---------------------------------------------------
+// ---- client-side harness ----------------------------------------------------
 
 class M4cClientDelegate final : public ClientDelegate {
 public:
@@ -349,9 +347,8 @@ ClientIdentity makeIdentity(uint8_t idByte, bool withToken, uint8_t tokenTag = 0
 
 }  // namespace
 
-// ============================================================================
-// M4C-01..04 — the material and the codecs
-// ============================================================================
+// ---- M4C-01..04 -------------------------------------------------------------
+// the material and the codecs
 
 TEST_CASE("M4C-01: signature material is client_nonce || session_id(LE) || boot_id(LE)") {
     auto n = nonceOf(0xA0);
@@ -453,9 +450,8 @@ TEST_CASE("M4C-04: GRANT carries `roles` additively — absent by default, wire-
     CHECK(!decodeGrant(std::span<const std::byte>(withRoles.data(), w.size())));
 }
 
-// ============================================================================
-// M4C-05..12 — ITEM 1, hub side: on-request signing and the deferred queue
-// ============================================================================
+// ---- M4C-05..12 -------------------------------------------------------------
+// ITEM 1, hub side: on-request signing and the deferred queue
 
 TEST_CASE("M4C-05: no sig_request means no signature, no job, and no extra WELCOME bytes") {
     Catalog32 catalog;
@@ -698,14 +694,13 @@ TEST_CASE("M4C-12: submitSignature refuses garbage sizes and unknown sessions") 
     CHECK_FALSE(hub.submitSignature(w->session_id ^ 0xFFFFu, std::span<const std::byte>(ok)));
 }
 
-// ============================================================================
-// M4C-13..16 — THE REPLAY FIX. These are the milestone's load-bearing tests.
+// ---- M4C-13..16 -------------------------------------------------------------
+// THE REPLAY FIX. These are the milestone's load-bearing tests.
 //
 // The design this replaces had the hub sign its own WELCOME nonce, which
 // contains ZERO client entropy: an evil twin that captured one handshake could
 // replay {nonce, signature} verbatim at every future victim and pass. The fix
 // is that the client contributes the entropy. What follows is the receipt.
-// ============================================================================
 
 TEST_CASE("M4C-13: a signature captured from one session does NOT verify for a second") {
     Catalog32 catalog;
@@ -823,9 +818,8 @@ TEST_CASE("M4C-16: boot_id is in the material, so a rebooted machine cannot be i
                                   std::span<const std::byte>(sigA.data(), 64)));
 }
 
-// ============================================================================
-// M4C-17..24 — ITEM 1, client side
-// ============================================================================
+// ---- M4C-17..24 -------------------------------------------------------------
+// ITEM 1, client side
 
 TEST_CASE("M4C-17: client pins the hub key at PAIR_GRANT and verifies on the next session") {
     Catalog32 catalog;
@@ -1119,9 +1113,8 @@ TEST_CASE("M4C-24: the client draws FRESH entropy every connect") {
     CHECK(nonceDiffers);
 }
 
-// ============================================================================
-// M4C-25..33 — ITEMS 2+3: presentation modes and the AUTH frame
-// ============================================================================
+// ---- M4C-25..33 -------------------------------------------------------------
+// ITEMS 2+3: presentation modes and the AUTH frame
 
 namespace {
 
@@ -1462,9 +1455,8 @@ TEST_CASE("M4C-34: client-side proof round trip re-subscribes what the upgrade u
     CHECK(*client.grantedRateHz(0x0102) == doctest::Approx(5.0f));
 }
 
-// ============================================================================
-// M4C-35..37 — THE POTATO FLOOR. If these fail, the weight covenant is broken.
-// ============================================================================
+// ---- M4C-35..37 -------------------------------------------------------------
+// THE POTATO FLOOR. If these fail, the weight covenant is broken.
 
 TEST_CASE("M4C-35: a zero-crypto client's HELLO is byte-identical with and without M4c") {
     // The floor, stated as bytes: instance_id + a raw token + subscription

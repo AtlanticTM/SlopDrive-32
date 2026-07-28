@@ -29,7 +29,7 @@ bool SlopSyncUdpDiscovery::begin(const char* hubName, uint64_t hubInstanceId, ui
     }
 
     // Non-blocking: poll() runs on the hub task's 5 ms tick and must never
-    // wait on a syscall (CLAUDE.md §2 — no blocking in real-time paths).
+    // wait on a syscall (DOCTRINE.md §2 — no blocking in real-time paths).
     const int flags = fcntl(_sock, F_GETFL, 0);
     fcntl(_sock, F_SETFL, flags | O_NONBLOCK);
 

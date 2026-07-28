@@ -10,7 +10,7 @@
 // Namespace "machcfg" — separate from ConfigStore's "strokeengine" namespace
 // on purpose (see header doc). Preferences opens/closes per call, same
 // lightweight pattern ConfigStore.cpp uses elsewhere — this is read once at
-// boot and written only on an explicit commit, never on a hot path. :3
+// boot and written only on an explicit commit, never on a hot path.
 
 static const char* MACHCFG_NS = "machcfg";
 
@@ -26,7 +26,7 @@ uint8_t machineBackendLoad() {
 #else
     // Guard: without the Modbus feature compiled in, there is no second
     // backend to select — always FAS, regardless of what NVS might hold from
-    // a previous build. :3
+    // a previous build.
     (void)v;
     v = 0;
 #endif

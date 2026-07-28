@@ -1,3 +1,6 @@
+// MachineScreen — FTXUI panel implementation (see MachineScreen.h for the
+// threading contract).
+
 #include "tui/MachineScreen.h"
 
 #include <cctype>
@@ -879,7 +882,7 @@ int runMachineScreen(MachineSim& sim, SessionLog& log, uint16_t wsPort, uint16_t
                                           unsigned(s.strokes), double(s.distance_m))) |
                                      color(kChrome)}));
 
-            // ---- Engine anomaly breakdown ---------------------------------
+            // ---- Engine anomaly breakdown -----------------------------------
             // The engine's ring used to be drained by NOBODY, so every one of
             // these events was invisible here. Compact by design: names only
             // appear once their count is nonzero, so a clean run stays quiet

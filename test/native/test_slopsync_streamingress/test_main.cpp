@@ -1,5 +1,4 @@
-// ============================================================================
-// test_main.cpp — doctest behavioral tests for slopsync-core's inbound
+// test_slopsync_streamingress — slopsync-core's inbound
 // STREAM-ingress path (client→hub motion-input bundles): the HELLO/WELCOME
 // `publishes` grant (§6.2/§6.3), Hub::handleStream ingress validation
 // (§9.2/§5.4), granted-rate token bucket (§10.5), and source-ownership +
@@ -13,7 +12,6 @@
 // channel is built here — the frozen mini-catalog has no c2h STREAM entry.
 //
 // Suite ids: SI-xx = stream ingress.
-// ============================================================================
 
 #define DOCTEST_CONFIG_IMPLEMENT_WITH_MAIN
 #include <doctest/doctest.h>
@@ -42,12 +40,10 @@ using namespace slopsync;
 
 namespace {
 
-// ============================================================================
-// Local catalog with a c2h STREAM channel (ascending ids, §8.1):
+// ---- Local catalog with a c2h STREAM channel (ascending ids, §8.1): ---------
 //   0x0080 "motion-input"  STREAM c2h controller  maxRate 200 Hz  sample 2 B (i16)
 //   0x0081 "pos-tele"      STREAM h2c viewer       maxRate 240 Hz  (wrong DIR target)
 //   0x0084 "cfg-set"       INTENT c2h controller                   (wrong CLASS target)
-// ============================================================================
 constexpr uint16_t kStreamCh = 0x0080;   // the c2h STREAM channel under test
 constexpr uint16_t kH2cStreamCh = 0x0081;
 constexpr uint16_t kIntentCh = 0x0084;
@@ -94,7 +90,7 @@ void makeStreamCatalog(Catalog32& c) {
     c.addLayoutField({.name = "end_vel_norm", .type = PackedFieldType::i16, .unit = "norm/s", .scale = 1000.0f});
 }
 
-// ---- delegate: records ingress + ownership + deadman callbacks -------------
+// ---- delegate: records ingress + ownership + deadman callbacks --------------
 struct RecordedBundle {
     uint16_t channel_id = 0;
     uint32_t session_id = 0;
@@ -155,7 +151,7 @@ public:
     }
 };
 
-// ---- raw frame helpers -----------------------------------------------------
+// ---- raw frame helpers ------------------------------------------------------
 void writeFrame(ITransport& ep, FrameType type, uint16_t channel, std::span<const std::byte> payload) {
     std::array<std::byte, 300> buf{};
     FrameHeader h;
@@ -338,9 +334,8 @@ WelcomeMsg connectSession(Hub& hub, ManualClock& clock, ITransport& ep, uint8_t 
 
 }  // namespace
 
-// ============================================================================
-// SI-01 — publish wish on a c2h STREAM channel is granted, rate clamped
-// ============================================================================
+// ---- SI-01 ------------------------------------------------------------------
+// publish wish on a c2h STREAM channel is granted, rate clamped
 TEST_CASE("SI-01: a publish wish clamps to catalog max_rate_hz and echoes in granted_publishes") {
     Catalog32 cat;
     makeStreamCatalog(cat);
@@ -361,9 +356,8 @@ TEST_CASE("SI-01: a publish wish clamps to catalog max_rate_hz and echoes in gra
     CHECK(w.granted_publishes[0].granted_rate_hz == doctest::Approx(200.0f));
 }
 
-// ============================================================================
-// SI-02 — unknown / wrong-class / wrong-dir wishes are omitted, no NACK
-// ============================================================================
+// ---- SI-02 ------------------------------------------------------------------
+// unknown / wrong-class / wrong-dir wishes are omitted, no NACK
 TEST_CASE("SI-02: invalid publish wishes are silently omitted; the session still comes up") {
     Catalog32 cat;
     makeStreamCatalog(cat);
@@ -387,9 +381,8 @@ TEST_CASE("SI-02: invalid publish wishes are silently omitted; the session still
     CHECK(w->session_id != 0);                        // session is live
 }
 
-// ============================================================================
-// SI-03 — a viewer wishing a controller-access channel is not granted
-// ============================================================================
+// ---- SI-03 ------------------------------------------------------------------
+// a viewer wishing a controller-access channel is not granted
 TEST_CASE("SI-03: a viewer session cannot be granted a controller-access publish") {
     Catalog32 cat;
     makeStreamCatalog(cat);
@@ -408,9 +401,8 @@ TEST_CASE("SI-03: a viewer session cannot be granted a controller-access publish
     CHECK(w.granted_publishes_count == 0);
 }
 
-// ============================================================================
-// SI-04 — a granted session's valid bundle is delivered to the delegate
-// ============================================================================
+// ---- SI-04 ------------------------------------------------------------------
+// a granted session's valid bundle is delivered to the delegate
 TEST_CASE("SI-04: a valid bundle on a granted channel reaches onStreamBundle with a parseable view") {
     Catalog32 cat;
     makeStreamCatalog(cat);
@@ -435,9 +427,8 @@ TEST_CASE("SI-04: a valid bundle on a granted channel reaches onStreamBundle wit
     CHECK(del.bundles[0].tBase == 7777);
 }
 
-// ============================================================================
-// SI-05 — an ungranted session's bundle is silently dropped (no NACK)
-// ============================================================================
+// ---- SI-05 ------------------------------------------------------------------
+// an ungranted session's bundle is silently dropped (no NACK)
 TEST_CASE("SI-05: a bundle on a channel the session never published is dropped, uncounted-as-error") {
     Catalog32 cat;
     makeStreamCatalog(cat);
@@ -461,9 +452,8 @@ TEST_CASE("SI-05: a bundle on a channel the session never published is dropped, 
     CHECK(hub.streamIngressCounters(0).dropped == 1);
 }
 
-// ============================================================================
-// SI-06 — malformed bundles are dropped whole, delegate never called
-// ============================================================================
+// ---- SI-06 ------------------------------------------------------------------
+// malformed bundles are dropped whole, delegate never called
 TEST_CASE("SI-06: n=0 / over-span / non-monotonic / first!=0 / truncated bundles all drop") {
     Catalog32 cat;
     makeStreamCatalog(cat);
@@ -499,9 +489,8 @@ TEST_CASE("SI-06: n=0 / over-span / non-monotonic / first!=0 / truncated bundles
     CHECK(hub.streamIngressCounters(0).dropped == 5);
 }
 
-// ============================================================================
-// SI-07 — sustained overage NACKs RATE_LIMITED; legal traffic resumes after
-// ============================================================================
+// ---- SI-07 ------------------------------------------------------------------
+// sustained overage NACKs RATE_LIMITED; legal traffic resumes after
 TEST_CASE("SI-07: flooding samples past the grant NACKs RATE_LIMITED, then a legal bundle is delivered") {
     Catalog32 cat;
     makeStreamCatalog(cat);
@@ -537,9 +526,8 @@ TEST_CASE("SI-07: flooding samples past the grant NACKs RATE_LIMITED, then a leg
     CHECK(del.bundles.size() == acceptedBefore + 1);        // legal traffic delivered again
 }
 
-// ============================================================================
-// SI-08 — source ownership: first bundle acquires; silence fires the deadman
-// ============================================================================
+// ---- SI-08 ------------------------------------------------------------------
+// source ownership: first bundle acquires; silence fires the deadman
 TEST_CASE("SI-08 (RFC-042/RFC-045): first accepted bundle acquires the source; quiet past the deadman window releases it, latches nothing, and marks the session STALE") {
     Catalog32 cat;
     makeStreamCatalog(cat);
@@ -585,9 +573,8 @@ TEST_CASE("SI-08 (RFC-042/RFC-045): first accepted bundle acquires the source; q
     CHECK(hub.sessionBySlot(0)->state == HubSessionState::STALE);
 }
 
-// ============================================================================
-// SI-09 — GOODBYE/reset clears the publish grant; reconnect must re-grant
-// ============================================================================
+// ---- SI-09 ------------------------------------------------------------------
+// GOODBYE/reset clears the publish grant; reconnect must re-grant
 TEST_CASE("SI-09: a session reset clears publish grants — a reconnect without re-wishing cannot stream") {
     Catalog32 cat;
     makeStreamCatalog(cat);
@@ -624,10 +611,9 @@ TEST_CASE("SI-09: a session reset clears publish grants — a reconnect without 
     CHECK(del.bundles.size() == 2);
 }
 
-// ============================================================================
-// SI-10 — §7.1 CLOCK exchange: hub answers with the 13-byte (header + 12)
+// ---- SI-10 ------------------------------------------------------------------
+// §7.1 CLOCK exchange: hub answers with the 13-byte (header + 12)
 // reply; a truncated CLOCK request is silently dropped
-// ============================================================================
 TEST_CASE("SI-10: the hub answers a CLOCK frame with echoed t0 + hub-time t1/t2, and drops a truncated one") {
     Catalog32 cat;
     makeStreamCatalog(cat);
@@ -678,13 +664,12 @@ TEST_CASE("SI-10: the hub answers a CLOCK frame with echoed t0 + hub-time t1/t2,
     }
 }
 
-// ============================================================================
-// SI-11 — source-ownership release on GOODBYE (§6.8/§11.4). REGRESSION for the
+// ---- SI-11 ------------------------------------------------------------------
+// source-ownership release on GOODBYE (§6.8/§11.4). REGRESSION for the
 // field bug: a streaming owner's ownership used to leak past teardown, so after
 // the owner left, EVERY later client's bundles were Conflict-dropped until
 // reboot. Proves: A owns -> B is Conflict-dropped while A lives -> A GOODBYEs
 // -> B's bundles are now ACCEPTED (ownership was released, not orphaned).
-// ============================================================================
 TEST_CASE("SI-11: after a streaming owner sends GOODBYE, a new session can acquire the source and stream") {
     Catalog32 cat;
     makeStreamCatalog(cat);
@@ -734,11 +719,10 @@ TEST_CASE("SI-11: after a streaming owner sends GOODBYE, a new session can acqui
     CHECK(del.ownership[2].reason == 0);                    // B acquires
 }
 
-// ============================================================================
-// SI-12 — source-ownership release on rude transport detach (§6.8: a socket
+// ---- SI-12 ------------------------------------------------------------------
+// source-ownership release on rude transport detach (§6.8: a socket
 // death is handled identically to GOODBYE). Same regression as SI-11 but the
 // owner never says goodbye — the hub's detachTransport() must still release.
-// ============================================================================
 TEST_CASE("SI-12: after a streaming owner's transport detaches (no GOODBYE), a new session can acquire the source") {
     Catalog32 cat;
     makeStreamCatalog(cat);
@@ -782,12 +766,11 @@ TEST_CASE("SI-12: after a streaming owner's transport detaches (no GOODBYE), a n
     CHECK(del.ownership[2].reason == 0);
 }
 
-// ============================================================================
-// SI-13 — slot reuse: a re-HELLO on the SAME transport without a GOODBYE (a
+// ---- SI-13 ------------------------------------------------------------------
+// slot reuse: a re-HELLO on the SAME transport without a GOODBYE (a
 // reconnect reusing the socket) recycles the slot. The outgoing session's
 // source ownership must be released as the new session is minted, else the new
 // session — on the very same transport — could never re-acquire its own source.
-// ============================================================================
 TEST_CASE("SI-13: a re-HELLO recycling a live slot releases the old session's source before the new one streams") {
     Catalog32 cat;
     makeStreamCatalog(cat);
@@ -827,13 +810,12 @@ TEST_CASE("SI-13: a re-HELLO recycling a live slot releases the old session's so
     CHECK(del.ownership[2].reason == 0);                    // A' acquires cleanly
 }
 
-// ============================================================================
-// SI-14 — a 6-byte timed-SEGMENT bundle (0x0085) round-trips through the hub's
+// ---- SI-14 ------------------------------------------------------------------
+// a 6-byte timed-SEGMENT bundle (0x0085) round-trips through the hub's
 // generic STREAM ingress: it is granted, delivered, and every byte — crucially
 // the INT16_MIN "no end velocity" sentinel that 0 cannot stand in for — reaches
 // the delegate's BundleView intact. Proves the segment layout rides the same
 // channel-generic path as motion-input with zero library changes.
-// ============================================================================
 TEST_CASE("SI-14: a 6-B motion-segment bundle is granted and its sentinel end_vel round-trips to the delegate") {
     Catalog32 cat;
     makeStreamCatalog(cat);
@@ -874,8 +856,8 @@ TEST_CASE("SI-14: a 6-B motion-segment bundle is granted and its sentinel end_ve
     CHECK(sampleEndVel(del.lastSamples[1]) == kSegNoEndVel);
 }
 
-// ============================================================================
-// SI-15 (RFC-045) — GROUND TRUTH, restated: a deadman fire never lies in the
+// ---- SI-15 (RFC-045) --------------------------------------------------------
+// GROUND TRUTH, restated: a deadman fire never lies in the
 // first place, so there is nothing left for a resumed stream to "clear". The
 // original SI-15 proved a workaround (an accepted STREAM bundle silently
 // clearing a latched STOP) that existed only to un-wedge reconnect ergonomics
@@ -885,7 +867,6 @@ TEST_CASE("SI-14: a 6-B motion-segment bundle is granted and its sentinel end_ve
 // property directly: silence never latches STOP, so a resumed stream finds
 // the safety plane exactly as it left it. Verified on the SEGMENT channel so
 // the release covers 0x0085 too (both map to source 0).
-// ============================================================================
 TEST_CASE("SI-15: a deadman fire never latches STOP, so a resumed stream finds nothing to clear") {
     Catalog32 cat;
     makeStreamCatalog(cat);
@@ -929,13 +910,12 @@ TEST_CASE("SI-15: a deadman fire never latches STOP, so a resumed stream finds n
     CHECK_FALSE((hub.safetyWord() & slopsync::safety_bits::STOP));
 }
 
-// ============================================================================
-// SI-16 — PUBLISH (0x18): a producer adds a publish grant MID-SESSION. Before
+// ---- SI-16 ------------------------------------------------------------------
+// PUBLISH (0x18): a producer adds a publish grant MID-SESSION. Before
 // RFC-013 the only way to want a new c2h STREAM channel was to tear the whole
 // session down and reconnect with a different HELLO. Also proves the §6.2
 // validation rules are unchanged: an invalid wish is silently OMITTED from the
 // grants (absence, never a NACK), exactly as in HELLO.
-// ============================================================================
 TEST_CASE("SI-16: PUBLISH grants a new publish mid-session; invalid wishes are silently omitted") {
     Catalog32 cat;
     makeStreamCatalog(cat);
@@ -979,10 +959,9 @@ TEST_CASE("SI-16: PUBLISH grants a new publish mid-session; invalid wishes are s
     CHECK(del.bundles[0].channel_id == kSegCh);
 }
 
-// ============================================================================
-// SI-17 — PUBLISH REPLACES an existing grant for the same channel (semantics
+// ---- SI-17 ------------------------------------------------------------------
+// PUBLISH REPLACES an existing grant for the same channel (semantics
 // mirror SUBSCRIBE's re-subscribe), rather than stacking a second entry.
-// ============================================================================
 TEST_CASE("SI-17: a PUBLISH for an already-granted channel replaces that grant in place") {
     Catalog32 cat;
     makeStreamCatalog(cat);
@@ -1017,13 +996,12 @@ TEST_CASE("SI-17: a PUBLISH for an already-granted channel replaces that grant i
     CHECK(countNacks(after, NackCode::RATE_LIMITED) == 1);
 }
 
-// ============================================================================
-// SI-18 — RFC-013 burst: the token bucket's CAPACITY is the granted burst
+// ---- SI-18 ------------------------------------------------------------------
+// RFC-013 burst: the token bucket's CAPACITY is the granted burst
 // while its REFILL RATE stays the granted sample rate. This is what lets the
 // real segment streamer (2-4/s mean, ~25/s peak) declare what it actually is
 // instead of inflating its rate 10x to buy burst headroom. The hub clamps to
 // max_burst_multiple x rate and ECHOES the applied value (ground truth).
-// ============================================================================
 TEST_CASE("SI-18: a requested burst is clamped to max_burst_multiple, echoed, and becomes the bucket depth") {
     Catalog32 cat;
     makeStreamCatalog(cat);
@@ -1068,11 +1046,10 @@ TEST_CASE("SI-18: a requested burst is clamped to max_burst_multiple, echoed, an
     CHECK(countNacks(over, NackCode::RATE_LIMITED) == 1);
 }
 
-// ============================================================================
-// SI-19 — no burst asked = today's behavior EXACTLY: capacity equals the
+// ---- SI-19 ------------------------------------------------------------------
+// no burst asked = today's behavior EXACTLY: capacity equals the
 // granted rate and the grant echoes no `burst` key at all (so a non-bursty
 // client's WELCOME stays byte-identical to a pre-RFC-013 hub's).
-// ============================================================================
 TEST_CASE("SI-19: an unrequested burst defaults to the granted rate and is not echoed") {
     Catalog32 cat;
     makeStreamCatalog(cat);
@@ -1106,12 +1083,11 @@ TEST_CASE("SI-19: an unrequested burst defaults to the granted rate and is not e
     CHECK(countNacks(second, NackCode::RATE_LIMITED) == 1);
 }
 
-// ============================================================================
-// SI-20 — RFC-015 gates the c2h data plane too: a granted producer that has
+// ---- SI-20 ------------------------------------------------------------------
+// RFC-015 gates the c2h data plane too: a granted producer that has
 // not declared CATALOG_READY has never received the retained safety latch, so
 // its bundles must not reach the arbiter. Dropped + counted, never NACKed
 // (§9.2's data-plane rule); accepted the moment readiness is declared.
-// ============================================================================
 TEST_CASE("SI-20: bundles from a pre-READY session are dropped, then accepted once it declares readiness") {
     Catalog32 cat;
     makeStreamCatalog(cat);
@@ -1147,8 +1123,8 @@ TEST_CASE("SI-20: bundles from a pre-READY session are dropped, then accepted on
     CHECK(del.ownership[0].owner_session == w.session_id);
 }
 
-// ============================================================================
-// SI-16 (RFC-012) — a producer whose arbiter source is owned by another LIVE
+// ---- SI-16 (RFC-012) --------------------------------------------------------
+// a producer whose arbiter source is owned by another LIVE
 // session gets NACK SOURCE_CONFLICT on its FIRST dropped bundle, then is
 // throttled exactly like §10.5's RATE_LIMITED NACK.
 //
@@ -1156,7 +1132,6 @@ TEST_CASE("SI-20: bundles from a pre-READY session are dropped, then accepted on
 // dead: every bundle dropped for ownership, zero wire signal, no way to tell
 // "the machine ignores me" from "my socket is fine". The bundles are STILL
 // dropped — nothing is queued or retried — the client is just told why.
-// ============================================================================
 TEST_CASE("SI-16: second live producer gets SOURCE_CONFLICT, throttled per (session, source)") {
     Catalog32 cat;
     makeStreamCatalog(cat);
@@ -1216,11 +1191,10 @@ TEST_CASE("SI-16: second live producer gets SOURCE_CONFLICT, throttled per (sess
     CHECK(countNacks(later, NackCode::SOURCE_CONFLICT) == 1);
 }
 
-// ============================================================================
-// SI-17 (RFC-012) — the throttle is keyed by SOURCE, not by channel. This
+// ---- SI-17 (RFC-012) --------------------------------------------------------
+// the throttle is keyed by SOURCE, not by channel. This
 // device maps BOTH 0x0084 and 0x0085 to one arbiter source, and a producer
 // failing over between them is ONE dead producer, not two.
-// ============================================================================
 TEST_CASE("SI-17: SOURCE_CONFLICT throttle is per-source across channels sharing it") {
     Catalog32 cat;
     makeStreamCatalog(cat);
@@ -1249,8 +1223,8 @@ TEST_CASE("SI-17: SOURCE_CONFLICT throttle is per-source across channels sharing
     CHECK(countNacks(tickAndDrain(hub, clock, linkB.endpointB()), NackCode::SOURCE_CONFLICT) == 0);
 }
 
-// ============================================================================
-// SI-18 (RFC-014) — the segment SCHEDULING CONTRACT. For a segment-class
+// ---- SI-18 (RFC-014) --------------------------------------------------------
+// the segment SCHEDULING CONTRACT. For a segment-class
 // channel, t_base + t_off[i] IS the intended execution start of sample i,
 // resolved via §7.2's nearest-window rule. A schedule further ahead than
 // limits::max_future_schedule_ms is rejected whole; a PAST one is fine (a late
@@ -1258,7 +1232,6 @@ TEST_CASE("SI-17: SOURCE_CONFLICT throttle is per-source across channels sharing
 //
 // This replaces the unregistered 250 ms folklore constant the MFP plugin was
 // guessing against with a private SegLookaheadMs = 120.
-// ============================================================================
 TEST_CASE("SI-18: segment schedules beyond max_future_schedule_ms are rejected; past ones accepted") {
     Catalog32 cat;
     makeStreamCatalog(cat);
@@ -1302,11 +1275,10 @@ TEST_CASE("SI-18: segment schedules beyond max_future_schedule_ms are rejected; 
     CHECK(del.bundles.size() == 2);
 }
 
-// ============================================================================
-// SI-19 (RFC-014) — the future-schedule clamp applies ONLY to segment-class
+// ---- SI-19 (RFC-014) --------------------------------------------------------
+// the future-schedule clamp applies ONLY to segment-class
 // channels. A dense point-sample stream carries timestamps, not schedules, and
 // clamping it would break legitimate lookahead buffering.
-// ============================================================================
 TEST_CASE("SI-19: the schedule clamp does not apply to non-segment STREAM channels") {
     Catalog32 cat;
     makeStreamCatalog(cat);
@@ -1326,8 +1298,8 @@ TEST_CASE("SI-19: the schedule clamp does not apply to non-segment STREAM channe
     CHECK(del.bundles.size() == 1);  // accepted: 0x0080 declares no time-unit field
 }
 
-// ============================================================================
-// SI-20 (RFC-014/023) — the CLASSIFICATION itself, evaluated straight from the
+// ---- SI-20 (RFC-014/023) ----------------------------------------------------
+// the CLASSIFICATION itself, evaluated straight from the
 // catalog's explicit `stream_kind` entry property (registry key 15): a STREAM
 // channel is segment-class iff it declares stream_kind = segments, because a
 // sample that carries its own DURATION commands a time extent rather than
@@ -1336,7 +1308,6 @@ TEST_CASE("SI-19: the schedule clamp does not apply to non-segment STREAM channe
 // free-form tstr and two conforming hubs could disagree ("ms" vs "msec") and
 // therefore shed differently under identical congestion. Plus the shedding
 // table's segment exception.
-// ============================================================================
 TEST_CASE("SI-20: segment-class is the catalog's explicit stream_kind property") {
     Catalog32 cat;
     makeStreamCatalog(cat);
@@ -1369,14 +1340,13 @@ TEST_CASE("SI-20: segment-class is the catalog's explicit stream_kind property")
     CHECK(shedDecision(Priority::critical, ChannelClass::STREAM, 2, true) == ShedDecision::Send);
 }
 
-// ============================================================================
-// SI-21 (RFC-033) — an unacceptable SUBSCRIBE is ANSWERED, never dropped.
+// ---- SI-21 (RFC-033) --------------------------------------------------------
+// an unacceptable SUBSCRIBE is ANSWERED, never dropped.
 // The exact silent failure that cost two debugging nights: a frame carrying
 // more wishes than the decoder's 16-entry cap produced nothing at all — no
 // GRANT, no NACK — and the session sat LIVE with zero STATE. Now it NACKs
 // SUBSCRIBE_REJECTED, and the cap itself is advertised in WELCOME limits so
 // no client ever has to binary-search it against a live machine again.
-// ============================================================================
 TEST_CASE("SI-21: oversized SUBSCRIBE answers NACK SUBSCRIBE_REJECTED; WELCOME advertises the per-frame cap") {
     Catalog32 cat;
     makeStreamCatalog(cat);
@@ -1434,12 +1404,11 @@ TEST_CASE("SI-21: oversized SUBSCRIBE answers NACK SUBSCRIBE_REJECTED; WELCOME a
     CHECK(g->grants_count == 1);
 }
 
-// ============================================================================
-// SI-22 (RFC-038) — the deadman window is a negotiation, not a decree.
+// ---- SI-22 (RFC-038) --------------------------------------------------------
+// the deadman window is a negotiation, not a decree.
 // A HELLO wish is clamped into [deadman_min_ms, deadman_max_ms] and the
 // APPLIED value comes back on WELCOME key 24 — which was already the echo, so
 // a pre-RFC-038 client sees nothing new. No wish = default = today.
-// ============================================================================
 TEST_CASE("SI-22: deadman_wish_ms clamps to registry bounds and echoes applied on key 24") {
     Catalog32 cat;
     makeStreamCatalog(cat);
@@ -1488,12 +1457,11 @@ TEST_CASE("SI-22: deadman_wish_ms clamps to registry bounds and echoes applied o
     CHECK(wc->deadman_ms == limits::deadman_default_ms);
 }
 
-// ============================================================================
-// SI-23 (RFC-030) — curve family: wish in, EFFECTIVE value out.
+// ---- SI-23 (RFC-030) --------------------------------------------------------
+// curve family: wish in, EFFECTIVE value out.
 // A declaring client sees its family echoed by an honoring hub, sees the
 // FORCED family from an overriding hub (never a parroted lie), and the
 // application can read the granted family back at drain time.
-// ============================================================================
 TEST_CASE("SI-23: curve_family wish echoes effective value and is readable via publishCurveFamily") {
     Catalog32 cat;
     makeStreamCatalog(cat);
@@ -1544,13 +1512,12 @@ TEST_CASE("SI-23: curve_family wish echoes effective value and is readable via p
     CHECK_FALSE(g2->granted_publishes[0].has_curve_family);
 }
 
-// ============================================================================
-// SI-23b (RFC-049b) — downgrade visibility: `requested_curve_family` (key 48)
+// ---- SI-23b (RFC-049b) ------------------------------------------------------
+// downgrade visibility: `requested_curve_family` (key 48)
 // echoes the client's ORIGINAL wish verbatim, alongside the EFFECTIVE
 // `curve_family` (45) a curve_policy override may have replaced it with. A
 // client compares the two present keys directly instead of remembering what
 // it asked for.
-// ============================================================================
 TEST_CASE("SI-23b: requested_curve_family echoes the original wish verbatim, distinct from a downgraded effective value") {
     Catalog32 cat;
     makeStreamCatalog(cat);
@@ -1605,12 +1572,11 @@ TEST_CASE("SI-23b: requested_curve_family echoes the original wish verbatim, dis
     CHECK_FALSE(g2->granted_publishes[0].has_requested_curve_family);
 }
 
-// ============================================================================
-// SI-24 (RFC-016a) — WELCOME identity: fw_version finally has an in-band home.
+// ---- SI-24 (RFC-016a) -------------------------------------------------------
+// WELCOME identity: fw_version finally has an in-band home.
 // A hub that declares identity serves it on key 37; one that doesn't stays
 // byte-identical to a pre-identity hub (implicitly proven by every other test
 // in this suite decoding WELCOMEs from an identity-less hub).
-// ============================================================================
 TEST_CASE("SI-24: setIdentity() serves product/fw_version/hub_name on WELCOME key 37") {
     Catalog32 cat;
     makeStreamCatalog(cat);

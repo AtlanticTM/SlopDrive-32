@@ -80,12 +80,10 @@ private:
     Entry* findOrCreate(uint8_t source_id);
 };
 
-// ============================================================================
-// SourceOwnershipTable — method bodies (§11.4). Pure state machine, no I/O;
-// see the class doc comment above for the exact contract each method
-// implements (frozen). Defined inline here (no companion _impl file exists
-// for this header, unlike Hub/Client).
-// ============================================================================
+// ---- SourceOwnershipTable method bodies -------------------------------------
+// §11.4. Pure state machine, no I/O; see the class doc comment above for the
+// exact contract each method implements (frozen). Defined inline here (no
+// companion _impl file exists for this header, unlike Hub/Client).
 
 inline SourceOwnershipTable::Entry* SourceOwnershipTable::find(uint8_t source_id) {
     for (auto& e : _entries) {

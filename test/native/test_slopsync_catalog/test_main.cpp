@@ -1,5 +1,4 @@
-// ============================================================================
-// test_main.cpp — doctest unit tests for slopsync-core's catalog wire layer:
+// test_slopsync_catalog — slopsync-core's catalog wire layer:
 // wire/sha256.hpp, wire/catalog_codec.hpp, wire/catalog_etag.hpp,
 // wire/blob_chunks.hpp, wire/messages/blob_req.hpp, and
 // session/static_profile.hpp.
@@ -24,7 +23,6 @@
 // channel/catalog.hpp, or conformance/mini_catalog.hpp that shifts a single
 // byte of the encoding will fail these tests loudly — which is the point
 // (§8.3's whole premise is that the encoding is reproducible byte-for-byte).
-// ============================================================================
 
 #define DOCTEST_CONFIG_IMPLEMENT_WITH_MAIN
 #include <doctest/doctest.h>
@@ -56,9 +54,7 @@ namespace {
 constexpr std::byte B(int x) { return std::byte(uint8_t(x)); }
 }  // namespace
 
-// ============================================================================
-// SHA-256 known-answer tests.
-// ============================================================================
+// ---- SHA-256 known-answer tests. --------------------------------------------
 TEST_CASE("SHA-256 known-answer: empty string and \"abc\"") {
     auto h1 = Sha256::hash(std::span<const std::byte>{});
     std::array<std::byte, 32> expectEmpty = {
@@ -95,11 +91,10 @@ TEST_CASE("SHA-256 known-answer: empty string and \"abc\"") {
     CHECK(incremental == oneShot);
 }
 
-// ============================================================================
-// K-01 — mini-catalog deterministic encoding: exact bytes (pinned length),
+// ---- K-01 -------------------------------------------------------------------
+// mini-catalog deterministic encoding: exact bytes (pinned length),
 // determinism (encode twice byte-identical; decode -> re-encode
 // byte-identical), and hand-derived structural spot-checks.
-// ============================================================================
 TEST_CASE("K-01: mini-catalog deterministic encoding") {
     Catalog32 cat;
     conformance::buildMiniCatalog(cat);
@@ -112,7 +107,7 @@ TEST_CASE("K-01: mini-catalog deterministic encoding") {
     REQUIRE(n1 == n2);
     CHECK(std::equal(buf1.begin(), buf1.begin() + n1, buf2.begin()));
 
-    // ---- Hand-derived structural spot-checks -------------------------------
+    // ---- Hand-derived structural spot-checks --------------------------------
     // catalog = [ * channel-entry ], miniCatalog() has 6 entries: an array
     // head of 6 elements (major type 4, additional-info == count since
     // 6 <= 23) is a single byte: (4<<5)|6 = 0x80|0x06 = 0x86.
@@ -153,10 +148,9 @@ TEST_CASE("K-01: mini-catalog deterministic encoding") {
     CHECK(std::equal(buf1.begin(), buf1.begin() + n1, buf3.begin()));
 }
 
-// ============================================================================
-// K-02 — etag computation over K-01 bytes: exact 8-byte value (pinned),
+// ---- K-02 -------------------------------------------------------------------
+// etag computation over K-01 bytes: exact 8-byte value (pinned),
 // changes when catalog content changes, stable across re-encode.
-// ============================================================================
 TEST_CASE("K-02: catalogEtag over mini-catalog") {
     Catalog32 cat;
     conformance::buildMiniCatalog(cat);
@@ -194,10 +188,9 @@ TEST_CASE("K-02: catalogEtag over mini-catalog") {
     CHECK(etagFromDecoded == expected);
 }
 
-// ============================================================================
-// K-03 — chunking at 192B: chunk_count for the encoded size, byte-exact
+// ---- K-03 -------------------------------------------------------------------
+// chunking at 192B: chunk_count for the encoded size, byte-exact
 // reassembly in order and in reverse order (order independence).
-// ============================================================================
 TEST_CASE("K-03: chunking and reassembly") {
     Catalog32 cat;
     conformance::buildMiniCatalog(cat);
@@ -240,10 +233,9 @@ TEST_CASE("K-03: chunking and reassembly") {
     }
 }
 
-// ============================================================================
-// K-04 — selective repair: withhold chunks {1,3}; missingIndices reports
+// ---- K-04 -------------------------------------------------------------------
+// selective repair: withhold chunks {1,3}; missingIndices reports
 // exactly {1,3}; deliver them; complete() true; reassembled bytes identical.
-// ============================================================================
 TEST_CASE("K-04: selective repair of withheld chunks {1,3}") {
     Catalog32 cat;
     conformance::buildMiniCatalog(cat);
@@ -284,12 +276,10 @@ TEST_CASE("K-04: selective repair of withheld chunks {1,3}") {
     CHECK(std::equal(assembled.begin(), assembled.end(), buf.begin()));
 }
 
-// ============================================================================
-// Bonus (not its own manifest id, but exercises blob_chunks.hpp's timer
-// logic that K-03/K-04 don't touch): the gap and total-abandon thresholds
-// from SPEC §8.4 fire at exactly the registry's configured millisecond
-// values.
-// ============================================================================
+// ---- Bonus: blob_chunks.hpp timer logic -------------------------------------
+// Not its own manifest id, but exercises timer logic that K-03/K-04 don't
+// touch: the gap and total-abandon thresholds from SPEC §8.4 fire at
+// exactly the registry's configured millisecond values.
 TEST_CASE("blob_chunks: gapElapsed and timedOut fire at their SPEC §8.4 thresholds") {
     ChunkReassembler<> reasm;
     reasm.begin(BlobId{}, 2, 10, /*nowMs=*/1000);
@@ -301,10 +291,9 @@ TEST_CASE("blob_chunks: gapElapsed and timedOut fire at their SPEC §8.4 thresho
     CHECK(reasm.timedOut(1000 + limits::frag_reassembly_timeout_ms));
 }
 
-// ============================================================================
-// BLOB_REQ message codec: empty map (full transfer) and {chunks:[...]}
+// ---- BLOB_REQ message codec -------------------------------------------------
+// empty map (full transfer) and {chunks:[...]}
 // (selective repair) round-trip.
-// ============================================================================
 TEST_CASE("BLOB_REQ: full-transfer (empty map) and selective-repair round-trip") {
     SUBCASE("full transfer encodes to an empty CBOR map") {
         BlobReqMsg m{};  // full = true by default
@@ -340,11 +329,10 @@ TEST_CASE("BLOB_REQ: full-transfer (empty map) and selective-repair round-trip")
     }
 }
 
-// ============================================================================
-// K-05 — static-profile decisions (SPEC §8.5): etag match -> proceed, no
+// ---- K-05 -------------------------------------------------------------------
+// static-profile decisions (SPEC §8.5): etag match -> proceed, no
 // suppression; mismatch + DegradeGracefully -> proceed with
 // controlSuppressed; mismatch + RefuseLoudly -> !proceed.
-// ============================================================================
 TEST_CASE("K-05: static-profile decision table") {
     std::array<std::byte, 8> etagA = {B(1), B(2), B(3), B(4), B(5), B(6), B(7), B(8)};
     std::array<std::byte, 8> etagB = {B(9), B(9), B(9), B(9), B(9), B(9), B(9), B(9)};
@@ -368,9 +356,7 @@ TEST_CASE("K-05: static-profile decision table") {
     }
 }
 
-// ============================================================================
-// CDDL conformance negatives.
-// ============================================================================
+// ---- CDDL conformance negatives. --------------------------------------------
 TEST_CASE("catalog decode: an entry map with BOTH keys 8 and 9 is Malformed") {
     // Hand-built (bypassing encodeCatalog, which never emits both keys on
     // one entry by construction): one entry, map of 9 pairs (1..7, then
@@ -452,15 +438,14 @@ TEST_CASE("catalog decode: entries out of ascending id order is Malformed") {
     CHECK(dr.error() == DecodeError::Malformed);
 }
 
-// ============================================================================
-// M2b — RFC-009 annotations, interned labels, STORE entries, the raised
+// ---- M2b --------------------------------------------------------------------
+// RFC-009 annotations, interned labels, STORE entries, the raised
 // kMaxFields, and the per-entry byte cap.
 //
 // The BASELINE for all of it is K-01/K-02 above: the frozen fixture carries no
 // annotations, every annotation key is OPTIONAL, and §5.3 does not emit absent
 // optional keys — so its 775-byte length and its etag are UNMOVED by this whole
 // block. If either pin ever shifts, something optional was made mandatory.
-// ============================================================================
 
 namespace {
 
@@ -845,13 +830,12 @@ TEST_CASE("M2b: an entry over catalog_max_entry_bytes is refused by the encoder"
     CHECK(n <= limits::catalog_max_entry_bytes + 8);  // + the outer array header
 }
 
-// ============================================================================
-// replay_depth (entry key 13, RFC-017) — the last CDDL<->struct gap closed.
+// ---- replay_depth (entry key 13, RFC-017) -----------------------------------
+// the last CDDL<->struct gap closed.
 // It was in catalog.cddl but not in the data model, so a catalog could declare
 // it and the reference implementation would silently discard it on the way
 // through. Presence of this key IS the opt-in that makes a channel the one
 // sanctioned exception to §9.4's no-replay rule.
-// ============================================================================
 TEST_CASE("catalog codec: replay_depth (key 13) round-trips and sorts between 12 and 14") {
     Catalog32 cat;
     cat.clear();
@@ -891,8 +875,8 @@ TEST_CASE("catalog codec: replay_depth (key 13) round-trips and sorts between 12
     CHECK(n > pn);
 }
 
-// ============================================================================
-// stream_kind (entry key 15, RFC-014/023) — the explicit, registered catalog
+// ---- stream_kind (entry key 15, RFC-014/023) --------------------------------
+// the explicit, registered catalog
 // property that REPLACES the M5 unit-string heuristic (isTimeUnit() /
 // isSegmentLayout(), deleted from channel/catalog.hpp by this milestone: a
 // STREAM channel is segment-class iff `stream_kind` == stream_kinds::segments,
@@ -901,7 +885,6 @@ TEST_CASE("catalog codec: replay_depth (key 13) round-trips and sorts between 12
 // the mini-catalog fixture declares no stream_kind, so §5.3's "never emit an
 // absent optional key" rule keeps its bytes identical to before this key
 // existed.
-// ============================================================================
 TEST_CASE("catalog codec: stream_kind (key 15) classifies segment-class STREAM channels and round-trips") {
     Catalog32 cat;
     cat.clear();
@@ -996,8 +979,8 @@ TEST_CASE("catalog codec: stream_kind (key 15) classifies segment-class STREAM c
     CHECK(n > nDefault);  // key 15 on 0x0090 really is on the wire only when non-default
 }
 
-// ============================================================================
-// M4a — authoring guard: an EMPTY option label is an authoring error, caught
+// ---- M4a --------------------------------------------------------------------
+// authoring guard: an EMPTY option label is an authoring error, caught
 // at build time instead of at a client's decoder.
 //
 // Found while adding index-aligned `option_access` to a device catalog whose
@@ -1010,7 +993,6 @@ TEST_CASE("catalog codec: stream_kind (key 15) classifies segment-class STREAM c
 // Note the deliberate contrast with BIT labels, which MAY be empty: an
 // unnamed bit is meaningful ("bit 5 has no name"), an unnamed option is not
 // (there is no way to offer a choice with no label).
-// ============================================================================
 TEST_CASE("M4a: an empty OPTION label is rejected at authoring time") {
     SUBCASE("schema-field select") {
         Catalog32 c;

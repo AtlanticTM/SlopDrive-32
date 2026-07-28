@@ -1,21 +1,18 @@
 #pragma once
 
-// ============================================================================
-// MdnsAdvertiser — advertises the sim exactly like the firmware advertises
-// itself (src/system/WifiLink.cpp): service `_slopsync._tcp`, TXT
-// proto=<ws subprotocol> fw=<version>, so discovery-capable clients (the MFP
-// plugin's hand-rolled DNS-SD query, future slopsim client mode) find the
-// virtual machine the same way they find hardware.
-//
-// Windows implementation uses the native mDNS responder (dnsapi.dll,
-// DnsServiceRegister — Windows 10 1809+): the OS owns the multicast socket,
-// answers PTR/SRV/TXT/A, and de-registers on process exit. No thread of ours,
-// no packet code. Non-Windows builds compile to a no-op stub for now (Linux
-// would use avahi — future).
-//
-// Instance name is "slopsim" (never the firmware's "slopdrive32" — a sim on
-// the LAN must not impersonate the real machine in discovery).
-// ============================================================================
+// MdnsAdvertiser — advertises the sim over mDNS like the firmware advertises
+// itself (src/system/WifiLink.cpp).
+// Constraints:
+//   Service `_slopsync._tcp`, TXT proto=<ws subprotocol> fw=<version>, so
+//   discovery-capable clients find the virtual machine the same way they
+//   find hardware. Instance name is "slopsim" (never the firmware's
+//   "slopdrive32" — a sim on the LAN must not impersonate the real machine
+//   in discovery).
+//   Windows implementation uses the native mDNS responder (dnsapi.dll,
+//   DnsServiceRegister — Windows 10 1809+): the OS owns the multicast
+//   socket, answers PTR/SRV/TXT/A, and de-registers on process exit. No
+//   thread of ours, no packet code. Non-Windows builds compile to a no-op
+//   stub (no avahi backend yet).
 
 #include <cstdint>
 

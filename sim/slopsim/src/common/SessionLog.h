@@ -1,9 +1,11 @@
 #pragma once
 
-// Bounded in-memory log ring feeding the TUI's log pane. The sim thread is the
-// main writer, but IXWebSocket connection threads may log too — hence the one
-// small mutex (this and the WS port's slot mutexes are the only locks in
-// slopsim, mirroring the firmware's one-task doctrine everywhere else).
+// SessionLog — bounded in-memory log ring feeding the TUI's log pane.
+// Constraints:
+//   The sim thread is the main writer, but IXWebSocket connection threads
+//   may log too — hence the one small mutex (this and the WS port's slot
+//   mutexes are the only locks in slopsim, mirroring the firmware's
+//   one-task doctrine everywhere else).
 
 #include <cstdarg>
 #include <cstdio>

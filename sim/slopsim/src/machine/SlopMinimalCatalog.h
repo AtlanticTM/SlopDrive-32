@@ -1,31 +1,23 @@
 #pragma once
 
-// ============================================================================
 // SlopMinimalCatalog — the `--profile minimal` catalog: the potato-client
-// floor (docs/slopdeck/DESIGN.md §5, "the smallest conformant catalog...the
-// 'any hub at all' floor").
-//
-// UNLIKE benchrig (SlopSimCatalog.h), this is explicitly a SUBSET OF THE REAL
-// DEVICE catalog, not a different one: every id/name/field shape below is
-// copied verbatim from `slopdrive::` (include/comms/SlopSyncCatalog.h) — it
-// just declares far fewer channels. That is the point of the test this
-// profile exists for: a Tier-0 client that renders `device` fully must also
-// render THIS with nothing but its own generic catalog renderer, because
-// there is nothing device-specific to fall back on — no plan-strip, no
-// tuning surface, no patterns, not even a configurable stroke window.
-//
-// SPEC-CORE (0x0003-0x000E) is unconditional — every conformant hub carries
-// it, minimal or not — declared the same way both other profiles do (hand-
-// authored for the ones the Hub internals pin, library builders for the
-// log/trust/safety-events triplet).
-//
-// Device range: just enough to prove liveness and control exist at all —
-// `motion` (0x1100, watch the carriage), `move` (0x3100, point control),
-// `home` (0x3101, the only way this floor machine ever gets a measured
-// stroke). No `machine-config`/`config_set`: this machine's window and
-// limits are NOT settable — proving Tier 0 renders a machine with literally
-// no settings page just as well as one with twenty.
-// ============================================================================
+// floor ("the smallest conformant catalog...the 'any hub at all' floor").
+// Constraints:
+//   UNLIKE benchrig (SlopSimCatalog.h), this is explicitly a SUBSET OF THE
+//   REAL DEVICE catalog, not a different one: every id/name/field shape
+//   below is copied verbatim from `slopdrive::`
+//   (include/comms/SlopSyncCatalog.h) — it just declares far fewer channels.
+//   A Tier-0 client that renders `device` fully must also render THIS with
+//   nothing but its own generic catalog renderer, because there is nothing
+//   device-specific to fall back on — no plan-strip, no tuning surface, no
+//   patterns, not even a configurable stroke window.
+//   SPEC-CORE (0x0003-0x000E) is unconditional — every conformant hub
+//   carries it, minimal or not. Device range is just enough to prove
+//   liveness and control exist at all — `motion` (0x1100), `move` (0x3100),
+//   `home` (0x3101, the only way this floor machine ever gets a measured
+//   stroke). No `machine-config`/`config_set`: this machine's window and
+//   limits are NOT settable.
+// See: docs/slopdeck/DESIGN.md §5
 
 #include <cstdint>
 
@@ -49,7 +41,7 @@ inline bool buildMinimalCatalog(slopsync::Catalog32& c) {
 
     c.clear();
 
-    // ---- SPEC-CORE (0x0003-0x000E) — verbatim, same shapes every profile --
+    // ---- SPEC-CORE (0x0003-0x000E) — verbatim, same shapes every profile ----
     c.addEntry({.id = slopsync::channels::safety, .name = "safety",
                 .cls = ChannelClass::STATE, .dir = Direction::h2c,
                 .access = AccessLevel::watch, .maxRateHz = 0.0f,
@@ -111,7 +103,7 @@ inline bool buildMinimalCatalog(slopsync::Catalog32& c) {
     if (!slopsync::addTrustChannels(c)) return false;
     if (!slopsync::addSafetyEventsChannel(c)) return false;
 
-    // ---- 0x1100 "motion" — the SAME 9-byte shape as the device, verbatim --
+    // ---- 0x1100 "motion" — the SAME 9-byte shape as the device, verbatim ----
     c.addEntry({.id = ch::motion, .name = "motion",
                 .cls = ChannelClass::STATE, .dir = Direction::h2c,
                 .access = AccessLevel::watch, .maxRateHz = 60.0f,
@@ -141,7 +133,7 @@ inline bool buildMinimalCatalog(slopsync::Catalog32& c) {
                       .hasProvenance = true, .provenance = slopsync::value_provenance::demand,
                       .hasUnitId = true, .unitId = slopsync::unit_ids::mm});
 
-    // ---- 0x3100 "move" — verbatim -----------------------------------------
+    // ---- 0x3100 "move" — verbatim -------------------------------------------
     c.addEntry({.id = ch::move, .name = "move",
                 .cls = ChannelClass::INTENT, .dir = Direction::c2h,
                 .access = AccessLevel::control, .maxRateHz = 20.0f,
@@ -150,7 +142,7 @@ inline bool buildMinimalCatalog(slopsync::Catalog32& c) {
                       .hasMin = true, .hasMax = true, .min = 0.0f, .max = ceiling::rail_mm});
     c.addSchemaField({.key = 2, .name = "bypass", .type = CborFieldType::bool_t, .unit = ""});
 
-    // ---- 0x3101 "home" — verbatim ------------------------------------------
+    // ---- 0x3101 "home" — verbatim -------------------------------------------
     c.addEntry({.id = ch::home, .name = "home",
                 .cls = ChannelClass::INTENT, .dir = Direction::c2h,
                 .access = AccessLevel::control, .maxRateHz = 5.0f,

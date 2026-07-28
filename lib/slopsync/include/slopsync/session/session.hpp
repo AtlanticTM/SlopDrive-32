@@ -71,7 +71,7 @@ struct HubSession {
     // exists so the roster can show posture (RFC-029.6) the moment it does.
     uint8_t presentationMode = 0;
 
-    // ---- §8.4/RFC-015 catalog readiness: the dual-plane gate ---------------
+    // ---- §8.4/RFC-015 catalog readiness: the dual-plane gate ----------------
     // `ready` is the whole mechanism — ONE flag, zero RAM, never blocks.
     // While false the hub emits NO data-plane frame to this session (no
     // retained push, no STATE, no STREAM) and refuses its INTENTs with

@@ -29,14 +29,13 @@ class EncoderValidator;
 // is why none of the ~30 handlers below care which one they are talking to.
 class SlopHttpServer;
 
-// ---- Batched telemetry sample ring ----------------------------------------
+// ---- Batched telemetry sample ring ------------------------------------------
 // A dedicated 10ms-cadence sampler (esp_timer on Core 0) stuffs one of these
 // every 10ms — actual carriage position + the target it was TOLD to take. The
 // browser polls every ~100ms, drains the ~10 NEW samples since its last visit
 // (tracked by a monotonic seq counter), and replays them 10ms apart on its own
-// local clock. No firmware-millis() dependency on the browser side, so an ESP32
-// reboot can't desync the playback — the pup keeps a steady rhythm no matter
-// what. :3
+// local clock. No firmware-millis() dependency on the browser side, so an
+// ESP32 reboot can't desync the playback.
 struct TelemetrySample {
     float    position_mm;   // where the shaft ACTUALLY is (motor.getPosition) — "took"
     float    target_mm;     // where the PLANNER told it to go (post-kinematics) — "told"
@@ -44,28 +43,25 @@ struct TelemetrySample {
     uint32_t t_dev_us;      // esp_timer_get_time() truncated u32 — device clock at capture
 };
 
-// 64 slots × 4166µs = 266ms of buffered history at 240Hz.
-// Grown from 25 to feed the WS 0x01 batching without wrap-around collisions
-// at 40–50Hz drain rates (6 samples per batch at 240Hz × 50Hz = enough headroom).
-// LittleFS BSS overhead is the real flash hog — 64 samples (24 bytes each = 1.5KB)
-// is negligible against the 320KB heap. :3
+// 64 slots × 4166µs = 266ms of buffered history at 240Hz. Sized to feed the
+// WS 0x01 batching without wrap-around collisions at 40–50Hz drain rates (6
+// samples per batch at 240Hz × 50Hz = enough headroom). LittleFS BSS overhead
+// is the real flash hog — 64 samples (24 bytes each = 1.5KB) is negligible
+// against the 320KB heap.
 #define TELEMETRY_RING_SIZE 64
 #define TELEMETRY_SAMPLE_INTERVAL_MS 4   // 240Hz = ~4166µs, rounded to 4ms (250Hz)
 
 
-// ============================================================================
 // WebUI — all HTTP API handlers + LittleFS root-page serving
-// ============================================================================
 //
-// Owns the WebServer instance.  All route registration, page serving, and
-// /api/* JSON handlers live here so main.cpp only does composition wiring.
+// Constraints:
+//   Owns the WebServer instance. All route registration, page serving, and
+//   /api/* JSON handlers live here so main.cpp only does composition wiring.
+//   Handlers take references to every subsystem they query or mutate
+//   (injected via the constructor) — no global reach-through.
 //
-// Handlers take references to every subsystem they query or mutate (injected
-// via the constructor) — no global reach-through.
-//
-// Lifecycle:
-//   init()          — registers every route + calls httpServer.begin()
-//   update()        — httpServer.handleClient(); call frequently (was httpTask)
+//   Lifecycle: init() registers every route and calls httpServer.begin();
+//   update() calls httpServer.handleClient() (was httpTask) — call frequently.
 
 class WebUI {
 public:
@@ -76,79 +72,79 @@ public:
 
     ~WebUI();
 
-    /// Register all HTTP routes and start the server.
+    // Register all HTTP routes and start the server.
     void init();
 
-    /// Service the HTTP server (was httpTask body).  Call frequently.
+    // Service the HTTP server (was httpTask body).  Call frequently.
     void update();
 
-    /// Expose the owned HTTP server so OtaService can register its POST
-    /// /api/ota routes — and SlopSyncUiTokenMinter its GET /uitoken — on the
-    /// SAME server instance (no second listener on port 80).
+    // Expose the owned HTTP server so OtaService can register its POST
+    // /api/ota routes — and SlopSyncUiTokenMinter its GET /uitoken — on the
+    // SAME server instance (no second listener on port 80).
     SlopHttpServer* server() { return _httpServer; }
 
 
-    /// Tell WebUI which motion backend is actually bound (0=FAS, 1=Modbus).
-    /// Called once from setup() right after main.cpp's motor.bind() — this is
-    /// what GET /api/machine and /api/capabilities echo as ground truth. Not
-    /// itself a mutator: the only WRITER of the persisted backend choice is
-    /// POST /api/machine/commit below (reboot-to-apply contract). :3
+    // Tell WebUI which motion backend is actually bound (0=FAS, 1=Modbus).
+    // Called once from setup() right after main.cpp's motor.bind() — this is
+    // what GET /api/machine and /api/capabilities echo as ground truth. Not
+    // itself a mutator: the only WRITER of the persisted backend choice is
+    // POST /api/machine/commit below (reboot-to-apply contract).
     void setMachineBackend(uint8_t active) { _machine_backend = active; }
 
-    // ---- Batched telemetry ring buffer (Core 0) ----------------------------
+    // ---- Batched telemetry ring buffer (Core 0) -----------------------------
     TelemetrySample _telemetry_ring[TELEMETRY_RING_SIZE];
     volatile uint32_t _telemetry_seq = 0;   // total samples ever written
     portMUX_TYPE      _telemetry_mux = portMUX_INITIALIZER_UNLOCKED;
 
-    /// Append one sample to the ring. Called from the 10ms esp_timer callback.
+    // Append one sample to the ring. Called from the 10ms esp_timer callback.
     void captureTelemetry(float position_mm, float target_mm, float raw_mm);
 
-    /// Bridge for the C-style esp_timer callback to reach the instance.
+    // Bridge for the C-style esp_timer callback to reach the instance.
     static void telemetryTimerCb(void* arg);
-    /// Start the dedicated 10ms telemetry sampler (called from init()).
+    // Start the dedicated 10ms telemetry sampler (called from init()).
     void startTelemetrySampler();
 
-    /// Zero the session odometer stats (distance/max/strokes) + the INA228 Wh
-    /// accumulator, and restamp the session clock. Called by the reset-session
-    /// control (POST /api/settings {reset_stats:true}).
+    // Zero the session odometer stats (distance/max/strokes) + the INA228 Wh
+    // accumulator, and restamp the session clock. Called by the reset-session
+    // control (POST /api/settings {reset_stats:true}).
     void resetSessionStats();
 
 #if defined(FEATURE_RS485_MODBUS)
-    /// Set the ServoModbus reference after construction.
+    // Set the ServoModbus reference after construction.
     void setServoModbus(ServoModbus& modbus) { _servoModbus = &modbus; }
 #endif
 
 #if defined(FEATURE_RS485_MODBUS) && defined(DRIVER_AIM_SERVO)
-    /// Set the FAS-vs-encoder validator reference after construction.
+    // Set the FAS-vs-encoder validator reference after construction.
     void setEncoderValidator(EncoderValidator& v) { _encValidator = &v; }
 #endif
 
-    // ---- 0x10 CMD dispatch ---------------------------------------------------
-    /// Parse a 0x10 CMD WS frame op, apply the mutation, return {ok, response_json}.
-    /// Callers wrap the result in their own echo (SlopSync's post-clamp ECHO).
-    /// Returns true on success, false on failure (but still sets payload_out["ok"]=false).
+    // ---- 0x10 CMD dispatch --------------------------------------------------
+    // Parse a 0x10 CMD WS frame op, apply the mutation, return {ok, response_json}.
+    // Callers wrap the result in their own echo (SlopSync's post-clamp ECHO).
+    // Returns true on success, false on failure (but still sets payload_out["ok"]=false).
     bool handleCommand(uint8_t op, JsonDocument& payload_in,
                        JsonDocument& payload_out);
 
-    // ---- Shared apply functions (used by both HTTP handlers and WS ops) ------
+    // ---- Shared apply functions (used by both HTTP handlers and WS ops) -----
     // Every apply path bumps _state.cfg_gen via _bumpGen() — called at the end
     // of each mutation.  Returns the post-apply response JSON doc.
 
-    /// Apply a settings change (window, speed, accel, blend, auto_dur, expert, default_range).
-    /// payload_in: {range_min?, range_max?, max_speed?, accel?, blend_mode?, no_persist?, auto_duration?, expert_mode?, default_range_min?, default_range_max?}
+    // Apply a settings change (window, speed, accel, blend, auto_dur, expert, default_range).
+    // payload_in: {range_min?, range_max?, max_speed?, accel?, blend_mode?, no_persist?, auto_duration?, expert_mode?, default_range_min?, default_range_max?}
     bool applySettings(JsonDocument& payload_in, JsonDocument& payload_out);
 
-    /// Apply a manual move command.  payload_in: {position, stream?, bypass_limits?, speed?}
+    // Apply a manual move command.  payload_in: {position, stream?, bypass_limits?, speed?}
     bool applyMove(JsonDocument& payload_in, JsonDocument& payload_out);
 
-    /// Apply a pattern/generator config change.  payload_in: {speed?, depth?, stroke?, sensation?, pattern?, rate_tick?, running?}
+    // Apply a pattern/generator config change.  payload_in: {speed?, depth?, stroke?, sensation?, pattern?, rate_tick?, running?}
     bool applyPattern(JsonDocument& payload_in, JsonDocument& payload_out);
 
-    /// Apply driver config change.  payload_in: {run_current?, hold_current?, stealthchop?, tpwm_thrs?, toff?, tbl?, hstart?, hend?, reset?, save?}
+    // Apply driver config change.  payload_in: {run_current?, hold_current?, stealthchop?, tpwm_thrs?, toff?, tbl?, hstart?, hend?, reset?, save?}
     bool applyDriverConfig(JsonDocument& payload_in, JsonDocument& payload_out);
 
 private:
-    // ---- Injected dependencies ----
+    // ---- Injected dependencies ----------------------------------------------
     SystemState&        _state;
     MotorDriver&        _motor;
     RangeMapper&        _mapper;
@@ -166,30 +162,30 @@ private:
     EncoderValidator*   _encValidator = nullptr;
 #endif
 
-    // ---- cfg_gen helper ------------------------------------------------------
+    // ---- cfg_gen helper -----------------------------------------------------
     void _bumpGen() { _state.cfg_gen.store(_state.cfg_gen.load(std::memory_order_relaxed) + 1, std::memory_order_relaxed); }
 
-    // ---- Arbiter reference (set once from setup(), used by applySettings) -----
+    // ---- Arbiter reference (set once from setup(), used by applySettings) ---
     MotionArbiter* _arbiter = nullptr;
 public:
     void setArbiter(MotionArbiter* arb) { _arbiter = arb; }
 private:
 
-    // ---- Machine backend (Phase 2 — /api/machine) -----------------------------
+    // ---- Machine backend (Phase 2 — /api/machine) ---------------------------
     // Mirrors what main.cpp actually bound the MotorProxy to (set via
     // setMachineBackend() above). POST /api/machine/commit is the ONLY writer
     // of the persisted NVS value — this member is just the live echo. Reboot
     // scheduling reuses OtaService's deferred-restart pattern: set a pending
     // flag + deadline here, fire ESP.restart() from update() (never block the
     // HTTP handler itself so the 200 response actually reaches the browser
-    // before the device goes down). :3
+    // before the device goes down).
     uint8_t  _machine_backend        = 0;
     DeferredReboot _machineReboot;
     void handleApiMachine();
     void handleApiMachineCommit();
     void handleApiHomeOverride();
 
-    // ---- HTTP handler methods (one per route) --------------------------------
+    // ---- HTTP handler methods (one per route) -------------------------------
     void handleRoot();
     void handleApiStatus();
     void handleApiCapabilities();

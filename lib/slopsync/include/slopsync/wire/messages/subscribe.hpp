@@ -45,6 +45,7 @@ struct UnsubscribeMsg {
     std::array<uint16_t, kUnsubscribeMaxChannels> channel_ids{};
 };
 
+// ---- SUBSCRIBE --------------------------------------------------------------
 // Encodes into `out`; returns bytes written, or 0 on any failure.
 inline size_t encodeSubscribe(const SubscribeMsg& m, std::span<std::byte> out) {
     if (m.subscriptions_count > kSubscribeMaxWishes) return 0;
@@ -134,6 +135,7 @@ inline Result<SubscribeMsg, DecodeError> decodeSubscribe(std::span<const std::by
     return Ret::ok(m);
 }
 
+// ---- UNSUBSCRIBE ------------------------------------------------------------
 // Encodes into `out`; returns bytes written, or 0 on any failure.
 inline size_t encodeUnsubscribe(const UnsubscribeMsg& m, std::span<std::byte> out) {
     if (m.channel_count > kUnsubscribeMaxChannels) return 0;

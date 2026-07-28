@@ -1,5 +1,5 @@
 // LEGACY — dead on device, kept pending removal ruling; superseded by
-// lib/slopmotion, see CLAUDE.md §7.6.
+// lib/slopmotion, see DOCTRINE.md §8.
 
 // ============================================================================
 // MotionInterpolator — implementation (float / normalized 0..1 port)

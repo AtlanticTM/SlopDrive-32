@@ -2,17 +2,10 @@
 
 #include "config_api.h"
 
-/**
- * RangeMapper - Maps Buttplug intensity (0.0-1.0) to physical positions
- *
- * The user configures:
- * - range_min_mm: Start of the usable range (e.g., 0mm)
- * - range_max_mm: End of the usable range (e.g., 120mm out of 240mm max)
- * - max_speed_mm_s: Maximum speed for movements
- *
- * Buttplug sends intensity values 0.0-1.0 which are mapped linearly
- * to [range_min_mm, range_max_mm].
- */
+// RangeMapper — maps Buttplug intensity (0.0-1.0) to physical positions.
+// User configures range_min_mm/range_max_mm (usable window) and
+// max_speed_mm_s (movement ceiling). Intensity maps linearly onto
+// [range_min_mm, range_max_mm].
 class RangeMapper {
 public:
     RangeMapper();
@@ -37,7 +30,7 @@ public:
 
     // Set the max rail length (mm) — the rail-length-agnostic physical ceiling
     // the window is clamped to. Pushed from ConfigStore/WebUI whenever the user
-    // changes the max rail length setting. Re-clamps the current range. :3
+    // changes the max rail length setting. Re-clamps the current range.
     void setMaxRailMm(float mm);
     float getMaxRailMm() const { return _max_rail_mm; }
 

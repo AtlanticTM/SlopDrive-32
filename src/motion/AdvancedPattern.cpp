@@ -8,9 +8,8 @@
 
 namespace advpat {
 
-// ----------------------------------------------------------------------------
-// Modifier::modification — fray-d getModification()
-// ----------------------------------------------------------------------------
+// ---- Modifier::modification -------------------------------------------------
+// fray-d: getModification()
 float Modifier::modification(int cycle) const {
     float ratio = (float)(100 - amplitude) / 100.0f;
     if (cycle < 0) return 1.0f - ratio;
@@ -32,9 +31,8 @@ float Modifier::modification(int cycle) const {
     return 1.0f;
 }
 
-// ----------------------------------------------------------------------------
-// BaseControl::modifiedValue — fray-d getModifiedValue()
-// ----------------------------------------------------------------------------
+// ---- BaseControl::modifiedValue ---------------------------------------------
+// fray-d: getModifiedValue()
 float BaseControl::modifiedValue(int stroke_count) const {
     if (!modifier.active()) return (float)value;
     float difference = (float)value - (float)(invert_ref ? max_value : min_value);
@@ -44,11 +42,10 @@ float BaseControl::modifiedValue(int stroke_count) const {
     return (float)value - difference * (1.0f - modifier.modification(cycle));
 }
 
-// ----------------------------------------------------------------------------
-// BaseControl::rampedModified — fray-d getRampedModifiedValue():
-// pow(1 - pow(1 - x, e), 1/e) — an ease curve that keeps low knob values
-// gentle and expands resolution at the top end.
-// ----------------------------------------------------------------------------
+// ---- BaseControl::rampedModified --------------------------------------------
+// fray-d: getRampedModifiedValue(): pow(1 - pow(1 - x, e), 1/e) — an ease
+// curve that keeps low knob values gentle and expands resolution at the top
+// end.
 float BaseControl::rampedModified(float curve_exp, int stroke_count) const {
     float x = normalizedModified(stroke_count);
     if (x <= 0.0f) return 0.0f;
@@ -56,9 +53,8 @@ float BaseControl::rampedModified(float curve_exp, int stroke_count) const {
     return powf(1.0f - powf(1.0f - x, curve_exp), 1.0f / curve_exp);
 }
 
-// ----------------------------------------------------------------------------
-// Settings::byId — wire-id lookup (BaseId order)
-// ----------------------------------------------------------------------------
+// ---- Settings::byId ---------------------------------------------------------
+// Wire-id lookup (BaseId order).
 BaseControl* Settings::byId(uint8_t id) {
     switch (id) {
         case DEPTH_MAX: return &max_depth;
@@ -75,9 +71,8 @@ const BaseControl* Settings::byId(uint8_t id) const {
     return const_cast<Settings*>(this)->byId(id);
 }
 
-// ----------------------------------------------------------------------------
-// Settings::planStroke — one half-stroke's demand, fray-d's motion task math
-// ----------------------------------------------------------------------------
+// ---- Settings::planStroke ---------------------------------------------------
+// One half-stroke's demand; fray-d's motion task math.
 StrokePlan Settings::planStroke(uint32_t stroke_count) const {
     StrokePlan p = {};
     float master_frac = (float)master.value / 100.0f;

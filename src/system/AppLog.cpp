@@ -1,7 +1,14 @@
-// AppLog — the SlopLog sink bridge for the S3 main controller. The web
-// line-ring (/api/log) is a SlopLog sink; the four bridge functions register
-// the sinks and pump/gate them. All logging now flows through SLOGx directly
-// — see the header for the migration story.
+// AppLog — the SlopLog sink bridge for the S3 main controller.
+//
+// Constraints:
+// - The ONLY place SlopLog sinks are registered (DOCTRINE.md §7); all
+//   logging flows through SLOGx.
+// - Every sink registered here must be non-blocking and non-allocating on
+//   write() — sinks run inline on whatever task called SLOGx (TRAPS.md T6).
+// - The web /api/log ring and its dump-time snapshot buffers are
+//   placement-new'd into PSRAM from applogBegin() (TRAPS.md T2) — never
+//   move them back to a static/BSS instance.
+// - applogBegin() runs single-task, before any FreeRTOS task exists.
 
 #include "AppLog.h"
 
@@ -58,12 +65,10 @@ public:
     void dump(String& out) {
         // Copy under the lock, then build the String outside it (String
         // append can reallocate — never allocate in a critical section).
-        // _loSnap/_hiSnap used to be function-local `static` here (comment:
-        // "far too big for an HTTP stack") — moved to instance members
-        // (TRAPS T2 pass, 2026-07-28) so they ride into PSRAM with the rest
-        // of this object instead of adding a SECOND ~8.9 KB internal-BSS
-        // reservation on top of _low/_high. Same single-shared-buffer
-        // semantics either way; dump() is never reentrant (httpTask only).
+        // _loSnap/_hiSnap are instance members (not function-local statics)
+        // so they ride into PSRAM with the rest of this object instead of
+        // adding a second ~8.9 KB internal-BSS reservation (TRAPS.md T2).
+        // dump() is never reentrant (httpTask only).
         LowSub& loSnap = _loSnap;
         HighSub& hiSnap = _hiSnap;
         portENTER_CRITICAL(&_mux);
@@ -172,21 +177,14 @@ private:
     portMUX_TYPE _mux = portMUX_INITIALIZER_UNLOCKED;
 };
 
-// ~17.8 KB total (_low + _high + _loSnap + _hiSnap) — TRAPS T2: this used to
-// be a magic-static object (`static WebRingSink s;`), i.e. ~17.8 KB of
-// internal BSS for a ring that ONLY httpTask ever touches (write() from the
-// drain caller, dump() from HTTP handlers) — no ISR, no DMA, nothing that
-// requires internal RAM. Found during the 2026-07-28 heap-relief pass as the
-// single largest non-mandatory internal-RAM reservation in the build
-// (xtensa-esp32s3-elf-nm --size-sort), on a device already down to ~15 KB
-// free heap post-NimBLE-return. Placement-new'd into PSRAM from
-// applogBegin() instead, same idiom as SlopSyncHubService in main.cpp
-// (heap_caps_malloc + placement new, refuse rather than eat internal RAM if
-// PSRAM is somehow absent). applogBegin() runs single-task, before any
-// FreeRTOS task exists, so there is no construction-order race to worry
-// about (unlike the magic-static version, whose first call could in
-// principle race — it never did in practice, since applogBegin() always ran
-// first, but this is now explicit rather than incidental).
+// ~17.8 KB total (_low + _high + _loSnap + _hiSnap). Placement-new'd into
+// PSRAM from applogBegin() (TRAPS.md T2) rather than living as a static: only
+// httpTask ever touches this ring (write() from the drain caller, dump()
+// from HTTP handlers) — no ISR, no DMA, nothing that requires internal RAM.
+// Same idiom as SlopSyncHubService in main.cpp: heap_caps_malloc +
+// placement-new, refuse rather than eat internal RAM if PSRAM is absent.
+// applogBegin() runs single-task, before any FreeRTOS task exists, so there
+// is no construction-order race.
 static WebRingSink* s_webRing = nullptr;
 
 // nullptr iff the one-time PSRAM allocation above failed. Every call site
@@ -194,9 +192,10 @@ static WebRingSink* s_webRing = nullptr;
 // honest degradation is "no web log ring this boot", never a crash.
 WebRingSink* webRingOrNull() { return s_webRing; }
 
-// ---- RFC-017: the SlopLog -> SlopSync bridge sink --------------------------
+// ---- SlopLog -> SlopSync bridge sink ----------------------------------------
 // Every drained record is copied into the SPSC ring in SystemState; the Core-0
-// "SlopSyncHub" task drains it and turns each line into a 0x0008 log EVENT.
+// "SlopSyncHub" task drains it and turns each line into a 0x0008 log EVENT
+// (RFC-017).
 //
 // THE CONTRACT, identical to SerialSink's and for the same field-bug reason
 // (USB-CDC with no host blocked ~100 ms/line ON HTTPTASK): this sink MUST NOT
@@ -264,10 +263,9 @@ SlopSyncSink& syncSink() {
 
 }  // namespace
 
-// Serial-sink gating is RUNTIME, not compile-time (the SERIAL_CONTROL_MODE
-// #if that used to exclude the sink silenced ALL serial logging forever —
-// a field incident). One input picks the sink's floor: handshook — the
-// WebUI served /api/log at least once -> Warn+ only; until then, full.
+// Serial-sink gating is RUNTIME, not compile-time (TRAPS.md T17). One input
+// picks the sink's floor: handshook — the WebUI served /api/log at least
+// once -> Warn+ only; until then, full.
 static bool s_serialHandshook = false;
 
 static void applySerialFloor() {
@@ -281,10 +279,9 @@ static SystemState* s_state = nullptr;
 
 void applogBegin(SystemState* state) {
     s_state = state;
-    // TRAPS T2: placement-new the web ring into PSRAM (see webRingOrNull()'s
-    // comment) instead of the ~17.8 KB magic-static this used to be. Runs
-    // single-task, before any other setup() work — no construction-order
-    // race, unlike a lazily-first-called magic static would have.
+    // Placement-new the web ring into PSRAM (TRAPS.md T2; see webRingOrNull()'s
+    // comment). Runs single-task, before any other setup() work — no
+    // construction-order race.
     void* mem = heap_caps_malloc(sizeof(WebRingSink), MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT);
     if (mem != nullptr) {
         s_webRing = new (mem) WebRingSink();
@@ -313,7 +310,7 @@ void applogSyncBridgeArm() { syncSink().arm(); }
 
 void applogDrain() { sloplog::drainToSinks(); }
 
-// Called from TWO tasks now: httpTask (first /api/log serve) and the SlopSync
+// Called from two tasks: httpTask (first /api/log serve) and the SlopSync
 // hub task (first in-band log GRANT, RFC-017). Both only ever set the flag
 // TRUE, so the worst possible interleaving is a harmless redundant write —
 // not worth a lock on a one-shot handoff.

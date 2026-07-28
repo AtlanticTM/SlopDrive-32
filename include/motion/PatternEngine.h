@@ -9,30 +9,28 @@ class RangeMapper;
 class MotorDriver;
 class Pattern; // forward — vendored from lib/StrokeEnginePatterns/src/pattern.h
 
-// ============================================================================
 // PatternEngine — OSSM StrokeEngine pattern math driving OUR motor layer
-// ============================================================================
 //
-// Structural sibling of Generator: same construction style (SystemState&,
-// RangeMapper&, MotorDriver&), same Core-1 task cadence and gates (homed /
-// paused / e-stop / streaming-override / Intiface-yield), dispatching motion
-// exclusively through MotorDriver so soft-start caps, accel guards, and
-// telemetry keep working unchanged.
+// Constraints:
+//   Structural sibling of Generator: same construction style (SystemState&,
+//   RangeMapper&, MotorDriver&), same Core-1 task cadence and gates (homed /
+//   paused / e-stop / streaming-override / Intiface-yield), dispatching
+//   motion exclusively through MotorDriver so soft-start caps, accel guards,
+//   and telemetry keep working unchanged.
 //
-// The 7 vendored pattern classes (SimpleStroke through Insist) live in
-// lib/StrokeEnginePatterns/src/pattern.h. They are pure-math function objects
-// that return motionParameter { position, speed, accel, skip } in abstract
-// "steps". PatternEngine converts these into mm-space and streams them to the
-// motor via MotorDriver::streamTo().
+//   The 7 vendored pattern classes (SimpleStroke through Insist) live in
+//   lib/StrokeEnginePatterns/src/pattern.h. They are pure-math function
+//   objects that return motionParameter { position, speed, accel, skip } in
+//   abstract "steps"; PatternEngine converts these into mm-space and streams
+//   them to the motor via MotorDriver::streamTo().
 //
-// Lifecycle:
-//   PatternEngine(SystemState&, RangeMapper&, MotorDriver&)
-//   init()          — creates the FreeRTOS task (pinned Core 1, priority 2)
-//   emergencyStop() — flags running=false; task holds position
-//   start()/stop()  — user-facing gate (requires homed)
+//   Lifecycle: init() creates the FreeRTOS task (pinned Core 1, priority 2);
+//   emergencyStop() flags running=false and the task holds position;
+//   start()/stop() is the user-facing gate (requires homed).
 //
-// Public setters run on Core 0 (WebUI / API); volatile scalars are hardware-
-// atomic on ESP32-S3 for single-field reads/writes. No portMUX needed here.
+//   Public setters run on Core 0 (WebUI / API); volatile scalars are
+//   hardware-atomic on ESP32-S3 for single-field reads/writes — no portMUX
+//   needed here.
 
 class PatternEngine {
 public:
@@ -85,7 +83,7 @@ public:
     void setSensation(float sensation);  // 0..100 external; maps to -100..+100 internal
     void setPattern(int idx);            // 0..patternCount()-1; out-of-range clamps
 
-    // ---- Arbiter wiring — called once from setup() after arbiter is created -- 
+    // ---- Arbiter wiring — called once from setup() after arbiter is created --
     void setArbiter(class MotionArbiter* arbiter);
 
     // ---- Metadata -----------------------------------------------------------
@@ -130,12 +128,12 @@ private:
     volatile int   _pattern_idx = 0;
     volatile bool  _running     = false;
 
-    // ---- Advanced mode state --------------------------------------------------
+    // ---- Advanced mode state ------------------------------------------------
     advpat::Settings  _ap;                  // Core 0 writes via setters, Core 1 reads
     volatile bool     _advanced = true;     // advanced IS the default generator
     volatile uint32_t _ap_gen   = 0;        // bumped on any advanced write → live retarget
 
-    // ---- Virtual step system --------------------------------------------------
+    // ---- Virtual step system ------------------------------------------------
     // The vendored pattern classes work in integer "steps". We define a fixed
     // abstract step range; all conversions to/from mm happen in this module.
     static constexpr int MAX_ABSTRACT_STEPS = 10000;
@@ -151,7 +149,7 @@ private:
     // The actual task loop (runs on Core 1).
     void run();
 
-    // ---- Advanced-mode stroke cycle (Core 1) ---------------------------------
+    // ---- Advanced-mode stroke cycle (Core 1) --------------------------------
     // One half-stroke: plan → submit ONE intent → event-driven wait (with live
     // retarget when a parameter write bumps _ap_gen mid-stroke).
     void _advancedStroke();
@@ -160,7 +158,7 @@ private:
     // travel (nothing dispatched).
     float _submitApStroke(uint32_t stroke_count, const advpat::StrokePlan& sp);
 
-    // ---- Unit conversion helpers (all inline, float) --------------------------
+    // ---- Unit conversion helpers (all inline, float) ------------------------
     float stepToMm(int step) const;
     int   mmToStep(float mm) const;
     float stepsPerSecToMmPerSec(int steps_s) const;
@@ -172,6 +170,6 @@ private:
     // Debug heartbeat — per-call-site throttled via SLOGD_EVERY_MS.
     void _diagnostics();
 
-    // ---- D4: MotionArbiter reference (set once by main.cpp) ------------------
+    // ---- D4: MotionArbiter reference (set once by main.cpp) -----------------
     MotionArbiter* _arbiter = nullptr;
 };

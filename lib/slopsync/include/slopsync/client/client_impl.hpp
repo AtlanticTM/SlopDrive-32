@@ -41,9 +41,7 @@ inline bool isAllZero(std::span<const std::byte> b) {
 }
 }  // namespace detail
 
-// ============================================================================
-// Construction / identity / wishes
-// ============================================================================
+// ---- Construction / identity / wishes ---------------------------------------
 
 inline Client::Client(const ClientIdentity& id, ITransport& transport, IClock& clock, IRandom& rng,
                        ClientDelegate& delegate, ICrypto& crypto)
@@ -64,9 +62,7 @@ inline void Client::setState(ClientSessionState s) {
     _delegate.onStateChange(s);
 }
 
-// ============================================================================
-// connect() / disconnect()
-// ============================================================================
+// ---- connect() / disconnect() -----------------------------------------------
 
 inline bool Client::connect() {
     // §6.7: pending intents from whatever session existed before this call
@@ -178,9 +174,8 @@ inline void Client::disconnect() {
     setState(ClientSessionState::CLOSED);
 }
 
-// ============================================================================
-// update() — frame pump + idle-PING liveness + ESTOP repeat
-// ============================================================================
+// ---- update() ---------------------------------------------------------------
+// frame pump + idle-PING liveness + ESTOP repeat
 
 inline void Client::update(uint32_t nowUs) {
     // NOT nowUs / 1000 — see MonotonicMs in util/serial_arithmetic.hpp.
@@ -208,9 +203,7 @@ inline void Client::update(uint32_t nowUs) {
     pumpHubSigTimeout(nowMs);
 }
 
-// ============================================================================
-// Small send helper
-// ============================================================================
+// ---- Small send helper ------------------------------------------------------
 
 inline bool Client::sendFrame(FrameType type, uint16_t channel, std::span<const std::byte> payload) {
     std::array<std::byte, kFrameBufferCapacity> buf{};
@@ -234,9 +227,8 @@ inline void Client::flushPending() {
     _pendingCount = 0;
 }
 
-// ============================================================================
-// Frame dispatch: ESTOP magic BEFORE header decode (§5.5), then by type.
-// ============================================================================
+// ---- Frame dispatch ---------------------------------------------------------
+// ESTOP magic checked BEFORE header decode (§5.5), then dispatch by type.
 
 inline void Client::handleFrame(const FrameBuffer& fb, uint32_t nowMs) {
     std::span<const std::byte> bytes = fb.bytes();
@@ -296,9 +288,7 @@ inline void Client::handleFrame(const FrameBuffer& fb, uint32_t nowMs) {
     }
 }
 
-// ============================================================================
-// WELCOME (§6.3, §6.7, §8.4)
-// ============================================================================
+// ---- WELCOME (§6.3, §6.7, §8.4) ---------------------------------------------
 
 inline void Client::handleWelcome(std::span<const std::byte> payload, uint32_t nowMs) {
     if (_state != ClientSessionState::HELLO_SENT) return;  // tolerant: ignore stray/duplicate WELCOME
@@ -359,9 +349,7 @@ inline void Client::checkLiveTransition() {
     }
 }
 
-// ============================================================================
-// STATE shadow-apply (§9.1/§7.3) + the ESTOP repeat-until-latch observer
-// ============================================================================
+// ---- STATE shadow-apply (§9.1/§7.3) + the ESTOP repeat-until-latch observer --
 
 inline Client::ShadowEntry* Client::findOrCreateShadow(uint16_t channel_id) {
     for (auto& e : _shadows) {
@@ -383,9 +371,10 @@ inline void Client::handleState(uint16_t channel, uint16_t seq, std::span<const 
     ShadowEntry* e = findOrCreateShadow(channel);
     if (!e) return;
 
-    // §8.4/RFC-015: STATE arriving is proof the hub opened our data plane, so
-    // the CATALOG_READY re-declaration loop stops here (even for a frame this
-    // client then discards as stale — the gate is what we were waiting on).
+    // §8.4/RFC-015: STATE arriving is proof the hub opened this client's data
+    // plane, so the CATALOG_READY re-declaration loop stops here (even for a
+    // frame this client then discards as stale — the gate is what it was
+    // waiting on).
     _readyPending = false;
 
     bool wasValid = e->slot.valid;
@@ -414,9 +403,7 @@ inline void Client::handleState(uint16_t channel, uint16_t seq, std::span<const 
     }
 }
 
-// ============================================================================
-// ECHO / NACK / GRANT / EVENT (§9.3, §10.2, §9.4)
-// ============================================================================
+// ---- ECHO / NACK / GRANT / EVENT (§9.3, §10.2, §9.4) ------------------------
 
 inline void Client::handleEcho(std::span<const std::byte> payload) {
     auto res = decodeEcho(payload);
@@ -432,7 +419,7 @@ inline void Client::handleEcho(std::span<const std::byte> payload) {
             break;
         }
     }
-    if (!found) return;  // stray/duplicate ECHO for an id we're not tracking: ignore (§4.3-style tolerance)
+    if (!found) return;  // stray/duplicate ECHO for an untracked id: ignore (§4.3-style tolerance)
 
     _cfgGen = m.cfg_gen;
     _holdingSource = true;  // §6.6: an applied INTENT is the proxy for source ownership (see declaration)
@@ -509,9 +496,7 @@ inline void Client::handleEvent(uint16_t channel, std::span<const std::byte> pay
     _delegate.onEvent(channel, payload);
 }
 
-// ============================================================================
-// Catalog transfer (§8.4)
-// ============================================================================
+// ---- Catalog transfer (§8.4) ------------------------------------------------
 
 inline void Client::sendBlobReq() {
     BlobReqMsg m{};
@@ -561,11 +546,12 @@ inline void Client::handleBlobChunk(std::span<const std::byte> payload, uint32_t
         _catalogReady = true;
 
         // §8.4/RFC-015: the hash IS the acknowledgement — declare which
-        // catalog we now operate against so the hub opens our data plane. On a
-        // verified transfer that is the hub's etag; on a transfer that did NOT
-        // verify we declare what we actually hold (the digest of the bytes we
-        // assembled), which is the honest §8.5 "degraded operation" statement
-        // and is what lets the hub flag the session rather than be misled.
+        // catalog this client now operates against so the hub opens its data
+        // plane. On a verified transfer that is the hub's etag; on a transfer
+        // that did NOT verify, declare what was actually assembled (the digest
+        // of the received bytes), which is the honest §8.5 "degraded
+        // operation" statement and is what lets the hub flag the session
+        // rather than be misled.
         std::array<std::byte, limits::etag_bytes> declared{};
         for (size_t i = 0; i < declared.size(); ++i) declared[i] = match ? _hubEtag[i] : digest[i];
         sendCatalogReady(std::span<const std::byte>(declared));
@@ -574,9 +560,8 @@ inline void Client::handleBlobChunk(std::span<const std::byte> payload, uint32_t
     }
 }
 
-// ============================================================================
-// CATALOG_READY (§8.4 / RFC-015) — declaring which catalog we operate against
-// ============================================================================
+// ---- CATALOG_READY (§8.4 / RFC-015) -----------------------------------------
+// Declaring which catalog this client operates against.
 
 inline void Client::sendCatalogReady(std::span<const std::byte> etag) {
     std::array<std::byte, kCatalogReadyBytes> buf{};
@@ -616,9 +601,7 @@ inline void Client::pumpCatalogReady(uint32_t nowMs) {
     ++_readyAttempts;
 }
 
-// ============================================================================
-// PING/PONG (§6.5)
-// ============================================================================
+// ---- PING/PONG (§6.5) -------------------------------------------------------
 
 inline void Client::handlePing(std::span<const std::byte> payload) {
     std::array<std::byte, 32> buf{};
@@ -626,9 +609,7 @@ inline void Client::handlePing(std::span<const std::byte> payload) {
     sendFrame(FrameType::PONG, 0, std::span<const std::byte>(buf.data(), n));
 }
 
-// ============================================================================
-// sendIntent (§9.3)
-// ============================================================================
+// ---- sendIntent (§9.3) ------------------------------------------------------
 
 inline std::optional<uint16_t> Client::sendIntent(uint16_t channel_id, const IntentValueMap& values,
                                                    std::optional<uint16_t> preconditionCfgGen, bool takeover) {
@@ -668,9 +649,7 @@ inline std::optional<uint16_t> Client::sendIntent(uint16_t channel_id, const Int
     return id;
 }
 
-// ============================================================================
-// ESTOP initiate + repeat (§11.2)
-// ============================================================================
+// ---- ESTOP initiate + repeat (§11.2) ----------------------------------------
 
 inline void Client::initiateEstop(uint8_t cause) {
     _estopActive = true;
@@ -719,9 +698,7 @@ inline void Client::pumpEstopRepeat(uint32_t nowMs) {
 
 inline bool Client::estopSendFailed() const { return _estopSendFailed; }
 
-// ============================================================================
-// Accessors
-// ============================================================================
+// ---- Accessors --------------------------------------------------------------
 
 inline ClientSessionState Client::state() const { return _state; }
 inline uint32_t Client::sessionId() const { return _sessionId; }
@@ -739,9 +716,7 @@ inline std::optional<float> Client::grantedRateHz(uint16_t channel_id) const {
 
 inline size_t Client::catalogReqCount() const { return _catalogReqSentCount; }
 
-// ============================================================================
-// M5: pairing (§12.2)
-// ============================================================================
+// ---- M5: pairing (§12.2) ----------------------------------------------------
 
 inline std::span<const std::byte> Client::nonce() const { return std::span<const std::byte>(_nonce); }
 
@@ -775,7 +750,7 @@ inline void Client::handlePairGrant(std::span<const std::byte> payload) {
     // ---- M4c (RFC-029 item 1): TOFU AT A VERIFIED MOMENT --------------------
     // The hub's durable identity arrives HERE and nowhere else: the pairing
     // ceremony is the one moment physical presence was already proven, so it is
-    // the only moment at which "whatever key I am handed is the right key" is a
+    // the only moment at which "whatever key is handed over is the right key" is a
     // defensible assumption. Pinning it at an arbitrary later connection would
     // be trust-on-first-CONNECT, which an evil twin satisfies trivially.
     if (m.has_trust && m.trust_map.has_hub_pubkey) {
@@ -786,9 +761,7 @@ inline void Client::handlePairGrant(std::span<const std::byte> payload) {
     _delegate.onPairGrant(std::span<const std::byte>(m.token), AccessLevel(m.roles));
 }
 
-// ============================================================================
-// M4c: RFC-029 item 1 (hub authenticity) + item 6 (token proof presentation)
-// ============================================================================
+// ---- M4c: RFC-029 item 1 (hub authenticity) + item 6 (token proof presentation) --
 
 inline void Client::setClientVersion(const char* ver) { _clientVer = ver; }
 
@@ -898,10 +871,8 @@ inline void Client::resendSubscriptionWishes() {
     sendFrame(FrameType::SUBSCRIBE, 0, std::span<const std::byte>(buf.data(), n));
 }
 
-// ============================================================================
-// M5: network probe (§6.4) — client side: request the burst, measure it,
-// report back.
-// ============================================================================
+// ---- M5: network probe (§6.4) -----------------------------------------------
+// client side: request the burst, measure it, report back.
 
 inline bool Client::runProbe() {
     if (_state != ClientSessionState::LIVE) return false;
@@ -917,7 +888,7 @@ inline bool Client::runProbe() {
 }
 
 inline void Client::handleProbeFrame(std::span<const std::byte> payload) {
-    if (!_probeActive) return;  // a stray/late burst frame after we already reported: ignore (§4.3-style tolerance)
+    if (!_probeActive) return;  // a stray/late burst frame after reporting already happened: ignore (§4.3-style tolerance)
     auto idx = decodeProbeFrame(payload);
     if (!idx) return;
 
@@ -952,9 +923,7 @@ inline void Client::pumpProbe(uint32_t nowMs) {
     _probeActive = false;
 }
 
-// ============================================================================
-// M5: safety shadow accessors (§9.1/§11.1), extended from M4's estop-only read
-// ============================================================================
+// ---- M5: safety shadow accessors (§9.1/§11.1), extended from M4's estop-only read --
 
 inline std::optional<uint8_t> Client::safetyWord() const {
     for (const auto& e : _shadows) {

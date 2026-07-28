@@ -111,9 +111,9 @@ inline Result<size_t, DecodeError> cobsDecode(std::span<const std::byte> src,
             dst[writeIndex++] = src[readIndex++];
         }
 
-        // A code < 0xFF implies a zero byte followed, UNLESS we've just
-        // consumed the last code byte in this buffer (that trailing zero is
-        // the frame delimiter, which lives outside this function).
+        // A code < 0xFF implies a zero byte followed, UNLESS the last code
+        // byte in this buffer was just consumed (that trailing zero is the
+        // frame delimiter, which lives outside this function).
         if (code != 0xFFu && readIndex < src.size()) {
             if (writeIndex >= dst.size()) {
                 return Result<size_t, DecodeError>::err(DecodeError::CapacityExceeded);

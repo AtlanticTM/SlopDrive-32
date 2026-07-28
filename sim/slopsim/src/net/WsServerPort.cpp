@@ -1,12 +1,13 @@
+// WsServerPort — SlopSimWsTransport/SlopSimWsPort implementation (see
+// WsServerPort.h for the marshaling contract).
+
 #include "net/WsServerPort.h"
 
 #include <cstring>
 
 namespace slopsim {
 
-// ============================================================================
-// SlopSimWsTransport
-// ============================================================================
+// ---- SlopSimWsTransport -----------------------------------------------------
 
 void SlopSimWsTransport::onOpen(ix::WebSocket* ws, const std::string& peer) {
     std::lock_guard<std::mutex> lk(_m);
@@ -108,9 +109,7 @@ std::string SlopSimWsTransport::peer() const {
     return _peer;
 }
 
-// ============================================================================
-// SlopSimWsPort
-// ============================================================================
+// ---- SlopSimWsPort ----------------------------------------------------------
 
 bool SlopSimWsPort::begin(slopsync::Hub* hub, uint16_t port, SessionLog* log) {
     _hub = hub;

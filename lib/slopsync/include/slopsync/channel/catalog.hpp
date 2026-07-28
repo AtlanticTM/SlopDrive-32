@@ -186,7 +186,7 @@ struct LayoutField {
     // addBitfieldField().
     LabelRef bits{};
 
-    // ---- RFC-009 annotation block (all optional) ---------------------------
+    // ---- RFC-009 annotation block (all optional) ----------------------------
     // Ordered widest-first so the block costs 56 B rather than 64 — the four
     // one-byte members share one tail word instead of each opening a padding
     // hole. Declaration order is authoring order (designated initializers), so
@@ -211,7 +211,7 @@ struct LayoutField {
     bool hasSettingKey = false;
     bool hasStep = false;
 
-    // ---- RFC-048 rendering metamodel (Phase C2, all optional) --------------
+    // ---- RFC-048 rendering metamodel (Phase C2, all optional) ---------------
     // APPENDED AT THE TAIL, same authoring-order rule as the RFC-009 block
     // above. Keys 19-23 (wire/catalog_codec.hpp's file banner explains why
     // they start at 19, not 16): registry vocabulary ids
@@ -279,7 +279,7 @@ struct SchemaField {
     float min = 0.0f;                   // key 5 (optional)
     float max = 0.0f;                   // key 6 (optional)
 
-    // ---- RFC-009 annotation block (all optional) ---------------------------
+    // ---- RFC-009 annotation block (all optional) ----------------------------
     // Widest-first, same packing rationale as LayoutField's block.
     SettingDefault dflt{};              // key 9
     LabelRef options{};                 // key 10 (author with addSelectSchemaField)
@@ -296,7 +296,7 @@ struct SchemaField {
     // no ref of its own — only a presence bit.
     bool hasOptionAccess = false;
 
-    // ---- RFC-048 rendering metamodel (Phase C2, all optional) --------------
+    // ---- RFC-048 rendering metamodel (Phase C2, all optional) ---------------
     // Numbered IDENTICALLY to LayoutField's own 19..23 (shared numbering, see
     // that struct's comment for per-key meaning) — rare on a schema field
     // (INTENT/EVENT payloads are mostly verbs, not display values) but not
@@ -368,7 +368,7 @@ struct CatalogEntry {
                                         // (STORE: always 1 — its descriptor)
     uint16_t fieldOffset = 0;           // index into the OWNING catalog's pool
 
-    // ---- RFC-009 entry-level annotations (all optional) --------------------
+    // ---- RFC-009 entry-level annotations (all optional) ---------------------
     bool hasCategory = false;
     // key 10: registry ui_categories (RFC-047/048, Phase C2) — 1..14 registered,
     // 0x40..0x7E vendor/device-defined. Was setting_categories (0..4) pre-Phase-
@@ -481,7 +481,7 @@ struct BasicCatalog {
         overflow = false;
     }
 
-    // ---- Authoring (the human-facing builder) ------------------------------
+    // ---- Authoring (the human-facing builder) -------------------------------
     // Usage, and the ONLY supported authoring shape:
     //
     //   c.addEntry({.id = 0x0080, .name = "motion", .cls = ChannelClass::STATE,
@@ -710,7 +710,7 @@ struct BasicCatalog {
         return true;
     }
 
-    // ---- Access ------------------------------------------------------------
+    // ---- Access -------------------------------------------------------------
     const CatalogEntry* find(uint16_t id) const {
         for (uint16_t i = 0; i < count; ++i)
             if (entries[i].id == id) return &entries[i];

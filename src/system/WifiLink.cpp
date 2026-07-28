@@ -1,4 +1,12 @@
 // WifiLink — WiFi STA bring-up, link telemetry, scan-and-pin reconnect.
+//
+// Constraints:
+// - delay() here is permitted only under the init-exception (DOCTRINE.md §2):
+//   boot setup() or a supervised reconnect cycle while the link is down,
+//   never the real-time motion path.
+// - Reconnection is driven manually (WiFi.setAutoReconnect(false)) so every
+//   cycle re-scans and re-pins the strongest AP; Arduino's own auto-reconnect
+//   would re-associate to the last pinned BSSID without ever re-scanning.
 
 #include "WifiLink.h"
 
@@ -11,13 +19,10 @@
 #include "ConfigStore.h"
 #include "slopsync/generated/registry_constants.hpp"
 
-// ---- WiFi + mDNS -----------------------------------------------------------
+// ---- WiFi + mDNS ------------------------------------------------------------
 
-// Bounded blocking wait for association. The delay() here is permitted under
-// the init-exception rule — this runs only during boot setup() or a supervised
-// reconnect cycle (when the link is already down and there's nothing to service
-// on this task anyway), never on the real-time motion path. Split into 500ms
-// poll slices. :3
+// Bounded blocking wait for association (see file-header constraint). Split
+// into 500ms poll slices.
 bool WifiLink::_waitConnected(uint32_t timeoutMs) {
     uint32_t waited = 0;
     while (WiFi.status() != WL_CONNECTED && waited < timeoutMs) {
@@ -29,7 +34,7 @@ bool WifiLink::_waitConnected(uint32_t timeoutMs) {
 
 // Attempt a single SSID/password unpinned (Arduino fast-scan). Used for the
 // NVS-secondary recovery creds — the target network is unknown, so pinning a
-// scanned BSSID buys nothing there. :3
+// scanned BSSID buys nothing there.
 bool WifiLink::_connectWith(const char* ssid, const char* pass, uint32_t timeoutMs) {
     if (!ssid || ssid[0] == '\0') return false;
     SLOGI("transport", "Connecting to WiFi: %s", ssid);
@@ -37,19 +42,19 @@ bool WifiLink::_connectWith(const char* ssid, const char* pass, uint32_t timeout
     return _waitConnected(timeoutMs);
 }
 
-// Full scan → strongest-BSSID pin. This is the crux of the boot-time selection
-// fix: the ESP32 fast-scan latches the first-heard AP and never roams, so we
-// enumerate EVERY AP for our SSID, applog each candidate, and pin WiFi.begin()
-// to the one with the best RSSI. Rule-2 fallback: after WIFI_PIN_MAX_ATTEMPTS
-// consecutive pinned failures (or if no candidate is heard at all) we drop to
-// an unpinned begin() so a dead pinned AP can't strand the rig; the next cycle
-// re-scans and re-pins. _pinFailStreak persists across bring-up cycles. :3
+// Full scan → strongest-BSSID pin. The ESP32 fast-scan latches the
+// first-heard AP and never roams, so this enumerates EVERY AP for our SSID,
+// applogs each candidate, and pins WiFi.begin() to the one with the best
+// RSSI. Fallback: after WIFI_PIN_MAX_ATTEMPTS consecutive pinned failures (or
+// if no candidate is heard at all) it drops to an unpinned begin() so a dead
+// pinned AP can't strand the rig; the next cycle re-scans and re-pins.
+// _pinFailStreak persists across bring-up cycles.
 bool WifiLink::_connectBest(const char* ssid, const char* pass, uint32_t timeoutMs) {
     if (!ssid || ssid[0] == '\0') return false;
 
 #if WIFI_SCAN_PIN_ENABLED
-    // Synchronous full scan (all channels, no hidden). ~2-3s — accepted boot
-    // cost per the task; we applog the duration so it's visible. :3
+    // Synchronous full scan (all channels, no hidden). ~2-3s accepted boot
+    // cost; the duration is applogged so it's visible.
     uint32_t scanStart = millis();
     int n = WiFi.scanNetworks(/*async=*/false, /*show_hidden=*/false);
     uint32_t scanMs = millis() - scanStart;
@@ -66,7 +71,7 @@ bool WifiLink::_connectBest(const char* ssid, const char* pass, uint32_t timeout
         char bs[18];
         snprintf(bs, sizeof(bs), "%02X:%02X:%02X:%02X:%02X:%02X",
                  b[0], b[1], b[2], b[3], b[4], b[5]);
-        // Log every candidate strong enough to matter — this is the V1 evidence.
+        // Log every candidate whose RSSI clears WIFI_MIN_RSSI_LOG_DBM.
         if (rssi >= WIFI_MIN_RSSI_LOG_DBM)
             SLOGD("transport", "  AP %s ch%d %ddBm", bs, (int)WiFi.channel(i), (int)rssi);
         if (rssi > bestRssi) { bestRssi = rssi; bestIdx = i; }
@@ -115,21 +120,20 @@ bool WifiLink::setupWiFi() {
     });
 
     WiFi.mode(WIFI_STA);
-    // We drive reconnection ourselves (superviseWifi) so every reconnect cycle
-    // re-scans and re-pins the strongest AP. The Arduino auto-reconnect would
-    // just re-associate with the last pinned BSSID (possibly now the weakest, or
-    // dead) and never re-scan — the exact bug this feature fixes. :3
+    // See file-header constraint: manual reconnection (superviseWifi) so every
+    // cycle re-scans and re-pins, instead of Arduino auto-reconnect silently
+    // re-associating to a possibly weak or dead pinned BSSID.
     WiFi.setAutoReconnect(false);
     WiFi.setSleep(false);
     WiFi.setTxPower(WIFI_POWER_19_5dBm);
 
     // Stage 1 — compile-time primary creds (secrets.h): full scan + strongest-AP
-    // pin. 10s associate window on top of the ~2-3s scan. :3
+    // pin. 10s associate window on top of the ~2-3s scan.
     bool connected = _connectBest(WIFI_SSID, WIFI_PASSWORD, WIFI_CONNECT_TIMEOUT_MS);
 
     // Stage 2 — serial-settable secondary creds from NVS. Only if the primary
     // failed. This is the recovery path for a rig on an unknown network: set
-    // creds over USB with `WIFI <ssid> <pass>` and reboot. 10s window. :3
+    // creds over USB with `WIFI <ssid> <pass>` and reboot. 10s window.
     if (!connected) {
         char ssid2[33], pass2[65];
         if (ConfigStore::loadWifiCreds(ssid2, sizeof(ssid2), pass2, sizeof(pass2))) {
@@ -145,11 +149,10 @@ bool WifiLink::setupWiFi() {
 
         if (MDNS.begin(MDNSServiceName)) {
             MDNS.addService("http", "tcp", HTTP_PORT);
-            // M5c: the generic "_ws" record advertised the :55555 Intiface/TCode
-            // server, which is deleted. Advertising a port that refuses
-            // connections is worse than advertising nothing — a discovering
-            // client would find it, dial it, and fail, with the device itself as
-            // the source of the bad address.
+            // Advertising a port that refuses connections is worse than
+            // advertising nothing — a discovering client would find it, dial
+            // it, and fail, with the device itself as the source of the bad
+            // address.
             MDNS.addService("slopsync", "tcp", SLOPSYNC_WS_PORT);
             MDNS.addServiceTxt("slopsync", "tcp", "proto", slopsync::limits::ws_subprotocol.data());
             MDNS.addServiceTxt("slopsync", "tcp", "fw", FIRMWARE_VERSION);
@@ -164,7 +167,7 @@ bool WifiLink::setupWiFi() {
     } else {
         // Both credential sets failed. Stop the STA radio so it isn't burning
         // cycles endlessly retrying a network that isn't there — the caller
-        // (main.cpp) drops us to serial TCode control so the rig still runs. :3
+        // (main.cpp) drops us to serial TCode control so the rig still runs.
         SLOGW("transport", "WiFi connection failed (primary + secondary) — falling back to serial TCode");
         WiFi.disconnect(true, true);
         WiFi.mode(WIFI_OFF);
@@ -173,7 +176,7 @@ bool WifiLink::setupWiFi() {
     }
 }
 
-// ---- WiFi link telemetry ---------------------------------------------------
+// ---- WiFi link telemetry ----------------------------------------------------
 
 void WifiLink::onWifiEvent(arduino_event_id_t event, arduino_event_info_t info) {
     switch (event) {
@@ -207,7 +210,7 @@ void WifiLink::pollWifiLink() {
     }
 }
 
-// ---- WiFi reconnect supervisor ---------------------------------------------
+// ---- WiFi reconnect supervisor ----------------------------------------------
 
 void WifiLink::superviseWifi() {
     if (!_wifiEnabled) return;                      // WiFi never came up at boot
@@ -224,5 +227,3 @@ void WifiLink::superviseWifi() {
         pollWifiLink();
     }
 }
-
-// ---- Transport selection ---------------------------------------------------

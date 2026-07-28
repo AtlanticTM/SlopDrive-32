@@ -21,7 +21,7 @@ enum class ViolationKind : uint8_t {
                          //       STORE needs a store descriptor
     NoFields,            // an entry with zero fields describes nothing
     CoreChannelMisclass, // 0x0001–0x007F ids must match registry core_channels classes (spot: 0x0003 STATE, 0x0005 INTENT)
-    // ---- appended by M2b (existing values are unchanged on purpose) --------
+    // ---- appended by M2b (existing values are unchanged on purpose) ---------
     EntryTooLarge,       // §8.1 / RFC-028: encoded entry exceeds limits::catalog_max_entry_bytes
                          //   (4096). An entry is an INDEPENDENTLY-DECODABLE document and a
                          //   conforming peer must be able to buffer one; a ~50-field entry with
@@ -109,7 +109,7 @@ inline ConformanceReport checkCatalog(const BasicCatalog<E, L, S, B, T>& c,
             r.add(ViolationKind::StateTooLarge, e.id);
         }
 
-        // ---- RFC-009/047/048 annotation coherence --------------------------
+        // ---- RFC-009/047/048 annotation coherence ---------------------------
         // A vendor-range ui_categories id (0x40..0x7E) with no label renders as
         // a nameless tab.
         if (e.hasCategory && e.category >= 0x40 && e.category <= 0x7E && e.categoryLabel.empty()) {
@@ -126,7 +126,7 @@ inline ConformanceReport checkCatalog(const BasicCatalog<E, L, S, B, T>& c,
             }
         }
 
-        // ---- §8.1 / RFC-028 per-entry byte cap ----------------------------
+        // ---- §8.1 / RFC-028 per-entry byte cap ------------------------------
         if (!scratch.empty()) {
             CborWriter w(scratch);
             detail::encodeEntry(w, c, e);

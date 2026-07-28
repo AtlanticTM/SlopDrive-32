@@ -41,9 +41,7 @@ namespace slopsync {
 // promoted from a code-local M4 constant when the gap was flagged).
 inline constexpr uint32_t kHubBusyRetryAfterMs = limits::busy_retry_after_default_ms;
 
-// ============================================================================
-// Construction / attach / detach
-// ============================================================================
+// ---- Construction / attach / detach -----------------------------------------
 
 inline Hub::Hub(const Catalog32& catalog, IClock& clock, IRandom& rng, HubDelegate& delegate, ICrypto& crypto)
     : _catalog(catalog), _clock(clock), _rng(rng), _delegate(delegate), _crypto(crypto) {
@@ -184,9 +182,8 @@ inline Hub::Slot* Hub::attachedSlotFor(ITransport& t) {
     return nullptr;
 }
 
-// ============================================================================
-// update() — the frame pump + STATE pacing walk
-// ============================================================================
+// ---- update() ---------------------------------------------------------------
+// the frame pump + STATE pacing walk
 
 inline void Hub::update(uint32_t nowUs) {
     // NOT nowUs / 1000: the quotient of a wrapping counter is not itself a
@@ -238,10 +235,8 @@ inline void Hub::update(uint32_t nowUs) {
     }
 }
 
-// ============================================================================
-// Frame pump for one slot: ESTOP magic BEFORE header decode (§5.5), then
-// normal header dispatch.
-// ============================================================================
+// ---- Frame pump for one slot ------------------------------------------------
+// ESTOP magic checked BEFORE header decode (§5.5), then normal header dispatch.
 
 inline void Hub::pumpSlot(Slot& slot, uint32_t nowMs) {
     while (auto fb = slot.transport->read()) {
@@ -350,9 +345,7 @@ inline void Hub::dispatchFrame(Slot& slot, const FrameHeader& h, std::span<const
     }
 }
 
-// ============================================================================
-// Small send helpers
-// ============================================================================
+// ---- Small send helpers -----------------------------------------------------
 
 inline bool Hub::sendFrameTo(ITransport& t, FrameType type, uint16_t channel, std::span<const std::byte> payload,
                               uint16_t seq) const {
@@ -371,7 +364,7 @@ inline bool Hub::sendFrameTo(ITransport& t, FrameType type, uint16_t channel, st
 }
 
 inline void Hub::sendNack(ITransport& t, const NackMsg& n) const {
-    // RFC-001: correlate to the inbound frame we are refusing (see _dispatchSeq).
+    // RFC-001: correlate to the inbound frame being refused (see _dispatchSeq).
     NackMsg stamped = n;
     if (!stamped.has_intent_seq && _dispatchSeqValid) {
         stamped.has_intent_seq = true;
@@ -383,9 +376,7 @@ inline void Hub::sendNack(ITransport& t, const NackMsg& n) const {
     sendFrameTo(t, FrameType::NACK, 0, std::span<const std::byte>(buf.data(), len));
 }
 
-// ============================================================================
-// HELLO / WELCOME (§6.2, §6.3)
-// ============================================================================
+// ---- HELLO / WELCOME (§6.2, §6.3) -------------------------------------------
 
 inline size_t Hub::occupiedCount(const Slot* exclude) const {
     size_t n = 0;
@@ -522,7 +513,7 @@ inline void Hub::handleHello(Slot& slot, std::span<const std::byte> payload, uin
         role = _delegate.validateToken(instanceSpan, std::span<const std::byte>(h.token), h.has_token);
     }
 
-    // ---- M4b: remember WHO this is, in bytes we own -------------------------
+    // ---- M4b: remember WHO this is, in hub-owned bytes ----------------------
     // HELLO's strings are views into the frame buffer and die with this
     // dispatch; a pending knock and a ledger entry both have to name the device
     // long afterwards.
@@ -740,17 +731,15 @@ inline void Hub::handleHello(Slot& slot, std::span<const std::byte> payload, uin
     _delegate.onSessionJoined(slot.session.session_id);
 }
 
-// ============================================================================
-// RFC-042 path B — reattach: a fresh HELLO names a STALE session's instance_id
-// on a NEW transport. This is §6.3's migration path applied to a resumption
-// rather than a live-duplicate hop: SAME session_id, SAME grants (subs and
-// publishGrants are carried over verbatim, not renegotiated from this HELLO's
-// wishes — RFC-042's own design table), role RE-DERIVED from the presented
-// token exactly as any HELLO does. No BUSY pressure is spent (not new
-// capacity) and no teardown/loss-policy runs on `stale` (a migration is not a
-// session loss, §6.3) — its slot is simply vacated once its state has moved to
-// `slot`.
-// ============================================================================
+// ---- RFC-042 path B — reattach ----------------------------------------------
+// A fresh HELLO names a STALE session's instance_id on a NEW transport. This is
+// §6.3's migration path applied to a resumption rather than a live-duplicate
+// hop: SAME session_id, SAME grants (subs and publishGrants are carried over
+// verbatim, not renegotiated from this HELLO's wishes — RFC-042's own design
+// table), role RE-DERIVED from the presented token exactly as any HELLO does.
+// No BUSY pressure is spent (not new capacity) and no teardown/loss-policy runs
+// on `stale` (a migration is not a session loss, §6.3) — its slot is simply
+// vacated once its state has moved to `slot`.
 
 inline void Hub::handleReattach(Slot& slot, Slot& stale, const HelloMsg& h, uint32_t nowMs) {
     // `slot` may itself already hold an unrelated session (a re-HELLO on a
@@ -798,7 +787,7 @@ inline void Hub::handleReattach(Slot& slot, Slot& stale, const HelloMsg& h, uint
     stale.hasClientNonce = false;
     stale.blob = typename Slot::PendingBlob{};
 
-    // ---- Refresh identity fields from THIS HELLO — it is a real HELLO ------
+    // ---- Refresh identity fields from THIS HELLO — it is a real HELLO -------
     slot.session.clientKind.assign(h.client_kind);
     slot.session.clientName.assign(h.client_name);
     slot.session.hasClientVer = h.has_trust && h.trust_map.has_client_ver;
@@ -809,7 +798,7 @@ inline void Hub::handleReattach(Slot& slot, Slot& stale, const HelloMsg& h, uint
     if (slot.hasClientNonce) slot.clientNonce = h.trust_map.client_nonce;
     slot.sigRequested = h.has_trust && h.trust_map.has_sig_request && h.trust_map.sig_request;
 
-    // ---- Role RE-DERIVED from the presented token, exactly as any HELLO ----
+    // ---- Role RE-DERIVED from the presented token, exactly as any HELLO -----
     // (§6.3's migration text): a revoked credential downgrades correctly; an
     // unrevoked one cheaply reproduces the identical role it already had.
     std::span<const std::byte> instanceSpan(h.instance_id);
@@ -934,9 +923,8 @@ inline void Hub::handleReattach(Slot& slot, Slot& stale, const HelloMsg& h, uint
     // a new join (session_events::session_joined's own registry note).
 }
 
-// ============================================================================
-// M4c (RFC-029) — the trust tripwire, shared; AUTH; and the signing queue.
-// ============================================================================
+// ---- M4c (RFC-029) ----------------------------------------------------------
+// the trust tripwire, shared; AUTH; and the signing queue.
 
 // The RFC-029 item-2 tripwire. Reads the pre-observation role from
 // slot.session.role and returns the effective one. Called from HELLO (bearer
@@ -1065,7 +1053,7 @@ inline void Hub::handleAuth(Slot& slot, std::span<const std::byte> payload, uint
     publishPairedRosterState();  // presentation_mode moved: posture is roster-visible
 }
 
-// ---- the deferred-signing queue (RFC-029 item 1) ---------------------------
+// ---- the deferred-signing queue (RFC-029 item 1) ----------------------------
 
 inline void Hub::setInlineSigning(bool on) { _inlineSigning = on; }
 inline bool Hub::inlineSigning() const { return _inlineSigning; }
@@ -1138,9 +1126,7 @@ inline void Hub::emitHubSig(Slot& slot, std::span<const std::byte> sig) {
     sendFrameTo(*slot.transport, FrameType::HUB_SIG, 0, std::span<const std::byte>(buf.data(), n));
 }
 
-// ============================================================================
-// SUBSCRIBE / UNSUBSCRIBE (§6.6)
-// ============================================================================
+// ---- SUBSCRIBE / UNSUBSCRIBE (§6.6) -----------------------------------------
 
 inline void Hub::handleSubscribe(Slot& slot, std::span<const std::byte> payload, uint32_t nowMs) {
     (void)nowMs;
@@ -1234,10 +1220,8 @@ inline void Hub::handleUnsubscribe(Slot& slot, std::span<const std::byte> payloa
     }
 }
 
-// ============================================================================
-// PUBLISH (§6.6 / RFC-013) — mid-session publish renegotiation, plus the ONE
-// implementation of §6.2's publish-wish validation both entry points share.
-// ============================================================================
+// ---- PUBLISH (§6.6 / RFC-013) -----------------------------------------------
+// mid-session publish renegotiation, plus the ONE implementation of §6.2's publish-wish validation both entry points share.
 
 inline std::optional<GrantedPublish> Hub::grantPublishWish(Slot& slot, const PublishWish& wish, uint32_t nowMs) {
     // A wish is granted iff the channel exists, is class STREAM, is direction
@@ -1346,9 +1330,8 @@ inline void Hub::handlePublish(Slot& slot, std::span<const std::byte> payload, u
     }
 }
 
-// ============================================================================
-// CATALOG_READY (§8.4 / RFC-015) — the dual-plane readiness gate's one input
-// ============================================================================
+// ---- CATALOG_READY (§8.4 / RFC-015) -----------------------------------------
+// the dual-plane readiness gate's one input
 
 inline void Hub::handleCatalogReady(Slot& slot, std::span<const std::byte> payload) {
     auto etag = decodeCatalogReady(payload);
@@ -1367,9 +1350,7 @@ inline void Hub::handleCatalogReady(Slot& slot, std::span<const std::byte> paylo
     // to be queued while the gate was shut.
 }
 
-// ============================================================================
-// INTENT / ECHO / NACK (§9.3, exact order)
-// ============================================================================
+// ---- INTENT / ECHO / NACK (§9.3, exact order) -------------------------------
 
 // RFC-025/010 per-op access, resolved GENERICALLY from the catalog — no
 // channel-id special case anywhere in this function, deliberately: a generic
@@ -1587,7 +1568,7 @@ inline void Hub::handleIntent(Slot& slot, std::span<const std::byte> payload, ui
     //
     // Repeats are meaningful (§11.2: repeat-until-latch is the client's only
     // loss-recovery mechanism) so an estop while ALREADY latched is not an
-    // error: latchEstop re-broadcasts, and we still ECHO.
+    // error: latchEstop re-broadcasts, and the hub still ECHOes.
     // THE EVENT TWIN, honestly: §5.5/§11.2's "emit the EVENT twin" has NO
     // registry home yet — there is no safety EVENT channel and no
     // `session_event_kinds` value for a latch — so the raw 0xE5 path
@@ -1724,9 +1705,7 @@ inline void Hub::handleIntent(Slot& slot, std::span<const std::byte> payload, ui
     sendFrameToTracked(slot, FrameType::ECHO, m.channel_id, std::span<const std::byte>(ebuf.data(), elen), nowMs);
 }
 
-// ============================================================================
-// STREAM ingress (§9.2 c2h motion input, §10.5 rate, §11.3/§11.4 source)
-// ============================================================================
+// ---- STREAM ingress (§9.2 c2h motion input, §10.5 rate, §11.3/§11.4 source) --
 
 inline void Hub::sendStreamOverageNack(Slot& slot, HubSession::PublishGrant& pg, uint16_t channel_id, uint32_t nowMs) {
     // Throttle to limits::stream_ingress_overage_nack_per_s per channel: the
@@ -1928,9 +1907,7 @@ inline void Hub::handleStream(Slot& slot, const FrameHeader& h, std::span<const 
     _delegate.onStreamBundle(channel_id, slot.session.session_id, bundle);
 }
 
-// ============================================================================
-// PING/PONG, GOODBYE, BLOB_REQ
-// ============================================================================
+// ---- PING/PONG, GOODBYE, BLOB_REQ -------------------------------------------
 
 inline void Hub::handlePing(Slot& slot, std::span<const std::byte> payload) {
     std::array<std::byte, 32> buf{};
@@ -2229,9 +2206,8 @@ inline void Hub::pumpBlobTransfer(Slot& slot) {
     if (done) pb.active = false;
 }
 
-// ============================================================================
-// STATE pacing (§9.1) — conflated push using RetainedStore + SubscriptionTable
-// ============================================================================
+// ---- STATE pacing (§9.1) ----------------------------------------------------
+// conflated push using RetainedStore + SubscriptionTable
 
 inline Hub::PushRecord* Hub::findOrCreatePushRecord(Slot& slot, uint16_t channel_id) {
     for (auto& pr : slot.pushRecords) {
@@ -2317,9 +2293,7 @@ inline void Hub::pumpStatePacing(Slot& slot, uint32_t nowMs) {
     }
 }
 
-// ============================================================================
-// Publication API
-// ============================================================================
+// ---- Publication API --------------------------------------------------------
 
 inline bool Hub::publishState(uint16_t channel_id, std::span<const std::byte> payload) {
     return _retained.publish(channel_id, payload).has_value();
@@ -2360,9 +2334,8 @@ inline void Hub::pumpEventDrain(Slot& slot) {
     }
 }
 
-// ============================================================================
-// RFC-017: the log channel (0x0008) — publication + replay_depth backfill
-// ============================================================================
+// ---- RFC-017: the log channel (0x0008) --------------------------------------
+// publication + replay_depth backfill
 
 inline void Hub::replayEventsOnGrant(Slot& slot, uint16_t channel_id) {
     // §9.4's no-replay rule gains exactly one exception: "except where a
@@ -2416,9 +2389,7 @@ inline bool Hub::publishLog(uint8_t level, std::string_view tag, std::string_vie
 
 inline uint32_t Hub::logDropped() const { return _logRing.dropped(); }
 
-// ============================================================================
-// Safety: ESTOP/STOP latch + critical-priority broadcast (§11.1, §11.2, §11.3)
-// ============================================================================
+// ---- Safety: ESTOP/STOP latch + critical-priority broadcast (§11.1, §11.2, §11.3) --
 
 inline std::array<std::byte, 9> Hub::buildSafetyPayload() const {
     std::array<std::byte, 9> buf{};
@@ -2595,9 +2566,7 @@ inline bool Hub::clearEstop() {
     return true;
 }
 
-// ============================================================================
-// M5: pairing (§12.2)
-// ============================================================================
+// ---- M5: pairing (§12.2) ----------------------------------------------------
 
 inline void Hub::openPairingWindow(std::span<const char> pinAscii) { _pairing.openWindow(pinAscii, _clock.nowMs()); }
 
@@ -2682,8 +2651,7 @@ inline void Hub::handlePairReq(Slot& slot, std::span<const std::byte> payload, u
     }
 }
 
-// ============================================================================
-// M4b: the §9.4 EVENT TWIN of the safety latch (channel 0x000E).
+// ---- M4b: the §9.4 EVENT TWIN of the safety latch (channel 0x000E) ----------
 //
 // ONE FUNCTION, called from every site that mutates `_safetyWord`, taking the
 // word as it was BEFORE. That shape is deliberate: it makes "did an edge
@@ -2696,7 +2664,6 @@ inline void Hub::handlePairReq(Slot& slot, std::span<const std::byte> payload, u
 // Silent by construction when the catalog does not declare 0x000E (a hub
 // without the channel keeps every §11.2 guarantee, because the LATCH was always
 // the load-bearing half), or when nothing actually moved.
-// ============================================================================
 
 inline void Hub::emitSafetyEdgeEvents(uint8_t beforeWord, uint32_t nowMs) {
     if (_catalog.find(channels::safety_events) == nullptr) return;
@@ -2740,9 +2707,7 @@ inline void Hub::emitSafetyEdgeEvents(uint8_t beforeWord, uint32_t nowMs) {
     if (const uint8_t c = uint8_t(newlyClear & kStopBits)) emit(safety_events::stop_cleared, c);
 }
 
-// ============================================================================
-// M4b: pairing + trust (RFC-027 modes (a)/(b)/(c), RFC-029 items 2 & 4)
-// ============================================================================
+// ---- M4b: pairing + trust (RFC-027 modes (a)/(b)/(c), RFC-029 items 2 & 4) --
 
 inline const PairingManager& Hub::pairing() const { return _pairing; }
 inline ICrypto& Hub::crypto() { return _crypto; }
@@ -3005,8 +2970,7 @@ inline void Hub::handleKnock(Slot& slot, const PairReqMsg& m, uint32_t nowMs) {
     publishPendingPairingState(nowMs);
 }
 
-// ============================================================================
-// M4b: RFC-018/027/029 admin verbs on session-admin (0x0009).
+// ---- M4b: RFC-018/027/029 admin verbs on session-admin (0x0009) -------------
 //
 // Reached ONLY from handleIntent, AFTER the generic §9.3 pipeline has already
 // done rate limiting, catalog lookup, class check, readiness, per-op access
@@ -3017,7 +2981,6 @@ inline void Hub::handleKnock(Slot& slot, const PairReqMsg& m, uint32_t nowMs) {
 //
 // THE TRUSTED SURFACE IS A TIER, NOT AN APP. There is no check anywhere below
 // asking WHO a session is — only what tier it holds.
-// ============================================================================
 inline bool Hub::handleAdminIntent(Slot& slot, const IntentMsg& m, uint32_t nowMs) {
     auto nack = [&](NackCode code) {
         NackMsg n;
@@ -3184,10 +3147,8 @@ inline bool Hub::handleAdminIntent(Slot& slot, const IntentMsg& m, uint32_t nowM
     }
 }
 
-// ============================================================================
-// M5: network probe (§6.4) — hub side: answer PROBE with a timed burst,
-// receive PROBE_REPORT and surface its counters.
-// ============================================================================
+// ---- M5: network probe (§6.4) -----------------------------------------------
+// hub side: answer PROBE with a timed burst, receive PROBE_REPORT and surface its counters.
 
 inline void Hub::handleProbeRequest(Slot& slot, uint32_t nowMs) {
     (void)nowMs;
@@ -3226,9 +3187,7 @@ inline std::optional<ProbeResult> Hub::probeReportFor(size_t slotIdx) const {
     return _slots[slotIdx].lastProbeReport;
 }
 
-// ============================================================================
-// M5: congestion input (§10.3) + slow-consumer eviction (§10.4 step 4)
-// ============================================================================
+// ---- M5: congestion input (§10.3) + slow-consumer eviction (§10.4 step 4) ---
 
 inline void Hub::setCongestionLevel(size_t slotIdx, uint8_t level) {
     if (slotIdx >= _slots.size()) return;
@@ -3308,10 +3267,9 @@ inline void Hub::sendNackTracked(Slot& slot, const NackMsg& n, uint32_t nowMs) {
     trackCriticalSend(slot, ok, nowMs);
 }
 
-// ============================================================================
-// M5: source ownership plumbing shared by the intent pipeline + deadman
-// (§11.4 control-owner STATE, session-events takeover EVENT)
-// ============================================================================
+// ---- M5: source ownership plumbing ------------------------------------------
+// Shared by the intent pipeline and deadman (§11.4 control-owner STATE,
+// session-events takeover EVENT).
 
 inline std::array<std::byte, 20> Hub::buildControlOwnerPayload() const {
     std::array<std::byte, 20> buf{};
@@ -3360,10 +3318,8 @@ inline void Hub::emitTakeoverEvent(uint8_t source_id, uint32_t newOwnerSession, 
     if (n > 0) publishEvent(channels::session_events, std::span<const std::byte>(buf.data(), n));
 }
 
-// ============================================================================
-// RFC-042: session staleness — the shared "mark stale" path + the observability
-// edges (session_stale/session_resumed, session_event_kinds 4/5).
-// ============================================================================
+// ---- RFC-042: session staleness ---------------------------------------------
+// the shared "mark stale" path + the observability edges (session_stale/session_resumed, session_event_kinds 4/5).
 
 // Best-effort EVENT on the spec-core session-events channel (0x0007), same
 // shape as emitTakeoverEvent's single-id kinds: body key 1 = the affected
@@ -3436,9 +3392,8 @@ inline Hub::Slot* Hub::findEvictableStale(const Slot* exclude) {
     return best;
 }
 
-// ============================================================================
-// M5: deadman (§11.3) — evaluated once per occupied session per update()
-// ============================================================================
+// ---- M5: deadman (§11.3) ----------------------------------------------------
+// evaluated once per occupied session per update()
 
 inline void Hub::pumpDeadman(Slot& slot, uint32_t nowMs) {
     // A session already STALE (or otherwise not LIVE — VALIDATING/GRANTED
@@ -3477,8 +3432,7 @@ inline void Hub::pumpDeadman(Slot& slot, uint32_t nowMs) {
     markStale(slot, nowMs, /*reason=*/3 /*deadman-release*/);
 }
 
-// ============================================================================
-// RFC-024/RFC-042: idle reaping for sessions that own NO source
+// ---- RFC-024/RFC-042: idle reaping for sessions that own NO source ----------
 //
 // THE COMBINED LIVENESS MODEL (three regimes, one per failure it protects
 // against; they are checked in this order and the first to fire wins):
@@ -3505,7 +3459,6 @@ inline void Hub::pumpDeadman(Slot& slot, uint32_t nowMs) {
 // The three do not overlap: 1 and 2 are disjoint by definition (owns / does
 // not own), and 3 keys off a different clock entirely. A session can only be
 // marked stale by 1 or 2 once — markStale() changes `state` either way.
-// ============================================================================
 
 inline bool Hub::pumpIdleReap(Slot& slot, uint32_t nowMs) {
     if (slot.session.state != HubSessionState::LIVE) return false;
@@ -3525,9 +3478,8 @@ inline bool Hub::pumpIdleReap(Slot& slot, uint32_t nowMs) {
     return true;
 }
 
-// ============================================================================
-// RFC-015: catalog-readiness timeout — the one liveness hole READY opens
-// ============================================================================
+// ---- RFC-015: catalog-readiness timeout -------------------------------------
+// the one liveness hole READY opens
 
 inline bool Hub::pumpReadyTimeout(Slot& slot, uint32_t nowMs) {
     if (slot.session.state == HubSessionState::STALE) return false;  // RFC-042: not this pump's business
@@ -3551,11 +3503,8 @@ inline bool Hub::pumpReadyTimeout(Slot& slot, uint32_t nowMs) {
     return true;
 }
 
-// ============================================================================
-// Shared session teardown (§6.8, §11.3, §11.4) — the single choke point every
-// slot-ending path funnels through, so source ownership is released the SAME
-// way no matter how the session departed.
-// ============================================================================
+// ---- Shared session teardown (§6.8, §11.3, §11.4) ---------------------------
+// the single choke point every slot-ending path funnels through, so source ownership is released the SAME way no matter how the session departed.
 
 inline void Hub::releaseSessionSources(uint32_t sessionId, uint8_t reason, uint32_t nowMs) {
     (void)nowMs;  // RFC-045: nothing here broadcasts a safety edge any more
@@ -3627,9 +3576,7 @@ inline void Hub::teardownSession(Slot& slot, uint32_t nowMs, uint8_t reason) {
     slot.blob = typename Slot::PendingBlob{};
 }
 
-// ============================================================================
-// Accessors
-// ============================================================================
+// ---- Accessors --------------------------------------------------------------
 
 inline uint16_t Hub::cfgGen() const { return _cfgGen; }
 inline uint32_t Hub::bootId() const { return _bootId; }
@@ -3654,9 +3601,7 @@ inline Hub::StreamIngressCounters Hub::streamIngressCounters(size_t slotIdx) con
                                  _slots[slotIdx].session.streamBundlesDropped};
 }
 
-// ============================================================================
-// M4 test-only unsolicited GRANT hook (§10.2; real policy is M5)
-// ============================================================================
+// ---- M4 test-only unsolicited GRANT hook (§10.2; real policy is M5) ---------
 
 inline bool Hub::regrantForTest(size_t slotIdx, uint16_t channel_id, float new_rate) {
     if (slotIdx >= _slots.size()) return false;

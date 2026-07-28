@@ -1,8 +1,9 @@
 #pragma once
 
-// Machine-mode TUI — Claude-Code-CLI-flavored panel screen for the virtual
-// SlopDrive. Runs the sim and the FTXUI loop on ONE thread (ftxui::Loop::
-// RunOnce inside the sim tick loop), preserving the one-task invariant.
+// MachineScreen — CLI-flavored FTXUI panel for the virtual SlopDrive.
+// Constraints:
+//   Runs the sim and the FTXUI loop on ONE thread (ftxui::Loop::RunOnce
+//   inside the sim tick loop), preserving the one-task invariant.
 
 #include "common/SessionLog.h"
 #include "machine/MachineSim.h"

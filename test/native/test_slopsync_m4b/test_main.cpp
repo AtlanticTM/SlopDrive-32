@@ -1,5 +1,4 @@
-// ============================================================================
-// test_main.cpp — doctest behavioral tests for MILESTONE 4b: SlopSync PAIRING
+// test_slopsync_m4b — MILESTONE 4b: SlopSync PAIRING
 // and TRUST.
 //
 //   M4B-01..06  ITEM 0  the §9.4 EVENT TWIN of the safety latch (0x000E) —
@@ -18,7 +17,6 @@
 //
 // Native (host-side, hardware-free): InProcessLink + ManualClock + XorShift32,
 // doctest's bundled main(), same harness shape as test_slopsync_m3b.
-// ============================================================================
 
 #define DOCTEST_CONFIG_IMPLEMENT_WITH_MAIN
 #include <doctest/doctest.h>
@@ -149,7 +147,7 @@ public:
     void onDeadmanStop(uint8_t) override { ++deadmanStops; }
 };
 
-// ---- raw frame helpers -----------------------------------------------------
+// ---- raw frame helpers ------------------------------------------------------
 void writeFrame(ITransport& ep, FrameType type, uint16_t channel, std::span<const std::byte> payload) {
     std::array<std::byte, 600> buf{};
     FrameHeader h;
@@ -353,9 +351,8 @@ void writeKnock(ITransport& ep, uint8_t idByte) {
 
 }  // namespace
 
-// ============================================================================
-// ITEM 0 — the §9.4 EVENT TWIN of the safety latch (channel 0x000E)
-// ============================================================================
+// ---- ITEM 0 -----------------------------------------------------------------
+// the §9.4 EVENT TWIN of the safety latch (channel 0x000E)
 
 TEST_CASE("M4B-01: an ESTOP latch emits the estop_latched EVENT twin, carrying seq_of_state") {
     Catalog32 cat;
@@ -539,9 +536,8 @@ TEST_CASE("M4B-06: a hub whose catalog omits 0x000E still latches, and is simply
     CHECK(collectEvents(replies, channels::safety_events).empty());
 }
 
-// ============================================================================
-// ITEM 1 — the ICrypto seam (RFC-028 obligation 3)
-// ============================================================================
+// ---- ITEM 1 -----------------------------------------------------------------
+// the ICrypto seam (RFC-028 obligation 3)
 
 TEST_CASE("M4B-07: constantTimeEqual is correct across lengths and every differing position") {
     SoftwareCrypto c;
@@ -635,9 +631,8 @@ TEST_CASE("M4B-11: the ICrypto hmacSha256 delegate agrees with the library's own
     CHECK(std::memcmp(direct.data(), viaDelegate.data(), direct.size()) == 0);
 }
 
-// ============================================================================
-// ITEM 2 — knock-and-approve (RFC-027 mode (a))
-// ============================================================================
+// ---- ITEM 2 -----------------------------------------------------------------
+// knock-and-approve (RFC-027 mode (a))
 
 TEST_CASE("M4B-12: a bare knock enters the pending list, EVENTs, and shows up in 0x000A STATE") {
     Catalog32 cat;
@@ -972,9 +967,8 @@ TEST_CASE("M4B-21: evict runs the full teardown and is reachable from the same a
     CHECK(sawGoodbye);
 }
 
-// ============================================================================
-// ITEM 3 — push-to-pair (RFC-027 mode (c)) and mode advertisement
-// ============================================================================
+// ---- ITEM 3 -----------------------------------------------------------------
+// push-to-pair (RFC-027 mode (c)) and mode advertisement
 
 TEST_CASE("M4B-22: FACTORY-FRESH — with zero configure tokens the presence window grants configure") {
     Catalog32 cat;
@@ -1135,9 +1129,8 @@ TEST_CASE("M4B-26: PIN mode (b) still pairs, and is advertised only while its wi
     CHECK(hub.pairing().entry(0)->pairingMode == pairing_modes::pin_proof);
 }
 
-// ============================================================================
-// ITEM 4 — the trust ledger as a BLOB STORE
-// ============================================================================
+// ---- ITEM 4 -----------------------------------------------------------------
+// the trust ledger as a BLOB STORE
 
 TEST_CASE("M4B-27: a configure session enumerates the ledger over BLOB_REQ, and the item carries NO token") {
     Catalog32 cat;
@@ -1306,8 +1299,8 @@ TEST_CASE("M4B-30: `dirty` is the write-only-on-change half of the NVS seam") {
     CHECK(pm.entryCount() == 0);
 }
 
-// ============================================================================
-// M4B-30b (M5b) — the LOAD half of the same seam, and the trap in it.
+// ---- M4B-30b (M5b) ----------------------------------------------------------
+// the LOAD half of the same seam, and the trap in it.
 //
 // decodeLedger() touch()es the ledger, because from the manager's point of view
 // the entries genuinely changed. But an application restoring from NVS at boot
@@ -1316,7 +1309,6 @@ TEST_CASE("M4B-30: `dirty` is the write-only-on-change half of the NVS seam") {
 // pump rewrites the identical bytes back on its very first tick, every boot,
 // forever. That is flash wear bought with nothing, and it is invisible in
 // testing because the resulting blob is byte-identical.
-// ============================================================================
 TEST_CASE("M4B-30b: a restored ledger reports dirty — the loader MUST clear it or it rewrites flash at boot") {
     PairingManager src;
     XorShift32 rng(40302);
@@ -1385,14 +1377,13 @@ TEST_CASE("M4B-31: revocation is PROTOCOL — it bumps the roster, EVENTs, and b
     CHECK(w.roles == uint8_t(AccessLevel::watch));
 }
 
-// ============================================================================
-// ITEM 5 — the client-change tripwire (RFC-029 item 2)
+// ---- ITEM 5 -----------------------------------------------------------------
+// the client-change tripwire (RFC-029 item 2)
 //
 // HONESTY CLAUSE, repeated where a reader of the TESTS meets it: `client_ver`
 // is self-reported. Everything below proves the tripwire fires on an HONEST
 // version change. None of it proves anything about a dishonest one, and no
 // test could — a malicious update reports whatever version it likes.
-// ============================================================================
 
 namespace {
 // Pair a device via the presence window and hand back its token.

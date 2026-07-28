@@ -1,18 +1,17 @@
 #pragma once
 
-// ============================================================================
 // HostPlatform — desktop adapters for the SlopSync injected-dependency seams
-// (IClock / IRandom), mirroring include/comms/SlopSyncPlatform.h's EspClock /
-// EspRandom. This is the ONE place slopsim binds the hub's clock/rng to the
-// host OS.
-//
-// SPEC §7.2: hub time is u32 µs since boot, WRAPPING every ~71.6 min — the
-// wrap is BY SPEC. nowUs() therefore truncates a 64-bit steady_clock reading
-// to u32 exactly like EspClock truncates esp_timer_get_time(). nowUs64() is
-// the sim's esp_timer_get_time() analog: the UNWRAPPED domain used for
-// PacingRing due_us and slopmotion::Engine time, mirroring how the firmware
-// keeps now64 full-width and only lets the WIRE timestamp wrap.
-// ============================================================================
+// (IClock/IRandom).
+// Constraints:
+//   Mirrors include/comms/SlopSyncPlatform.h's EspClock/EspRandom; the ONE
+//   place slopsim binds the hub's clock/rng to the host OS.
+//   SPEC §7.2: hub time is u32 µs since boot, WRAPPING every ~71.6 min.
+//   nowUs() truncates a 64-bit steady_clock reading to u32 exactly like
+//   EspClock truncates esp_timer_get_time(). nowUs64() is the unwrapped
+//   esp_timer_get_time() analog used for PacingRing due_us and
+//   slopmotion::Engine time — only the WIRE timestamp wraps, like the
+//   firmware's now64.
+// See: include/comms/SlopSyncPlatform.h
 
 #include <chrono>
 #include <cstdint>
@@ -33,8 +32,9 @@
 
 namespace slopsim {
 
-// ---- HostTimerResolution — the single most important line in the sim -------
-// Windows' default scheduler tick is 15.625 ms, and sleep_for() rounds UP to
+// ---- HostTimerResolution ----------------------------------------------------
+// The single most important line in the sim: Windows' default scheduler
+// tick is 15.625 ms, and sleep_for() rounds UP to
 // it: `sleep_for(2ms)` measured 15.713 ms per iteration on this host. The sim's
 // motion loop then ran at ~64 Hz while claiming a 1 kHz sampler, which made
 // every stream commit land at the head of a ~16 ms substep burst — a staircase

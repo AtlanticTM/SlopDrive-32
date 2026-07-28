@@ -10,7 +10,7 @@
 
 namespace slopsync {
 
-// ---- Writers: return bytes written, or 0 if `out` is too small. ------------
+// ---- Writers: return bytes written, or 0 if `out` is too small. -------------
 inline size_t putU8(std::span<std::byte> out, uint8_t v) {
     if (out.size() < 1) return 0;
     out[0] = std::byte{v};

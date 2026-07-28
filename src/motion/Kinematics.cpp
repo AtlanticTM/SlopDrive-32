@@ -23,11 +23,9 @@ float modShape(uint8_t shape, float m) {
     }
 }
 
-// Optional "ease" smoothing — pulls the carrier toward an S-curve so the
-// stroke doesn't slam the end with a hard mechanical crack. Instead the
-// shaft kisses the very bottom, presses into that stretched-out wall with
-// a slow swelling pressure, and then pulls back with the same gentle
-// reluctance. ease 0 = raw piston, ease 1 = smoothstep gut-filler. :3
+// Optional ease smoothing: pulls the carrier toward an S-curve so each
+// stroke's end is less of a hard reversal. ease 0 = unmodified (raw),
+// ease 1 = full smoothstep.
 float ease(float v, float ease_factor) {
     if (ease_factor <= 0.0f) return v;
     float s = v * v * (3.0f - 2.0f * v);   // smoothstep
@@ -35,8 +33,6 @@ float ease(float v, float ease_factor) {
 }
 
 // Apply the selected easing curve to a linear progress t (0..1) -> shaped 0..1.
-// Think of it as picking your stroke's personality — straight and businesslike,
-// or a coy little S-curve that teases before giving it all. :3
 float bufEase(uint8_t kind, float t) {
     t = constrain(t, 0.0f, 1.0f);
     switch (kind) {

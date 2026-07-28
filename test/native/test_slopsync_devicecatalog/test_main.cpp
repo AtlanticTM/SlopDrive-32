@@ -1,19 +1,16 @@
-// ============================================================================
-// test_main.cpp — conformance tests for THE SHIPPED DEVICE CATALOG
-// (include/comms/SlopSyncCatalog.h), as opposed to the frozen mini-catalog
-// fixture every other suite exercises.
+// test_slopsync_devicecatalog — conformance tests for THE SHIPPED DEVICE
+// CATALOG (include/comms/SlopSyncCatalog.h), as opposed to the frozen
+// mini-catalog fixture every other suite exercises.
 //
 // Why this suite exists: every wire-visible promise this machine makes to a
-// generic client lives in that one header, and until M4a nothing in the test
-// tree ever built it. The library suites can be perfectly green while the
-// machine advertises a catalog that contradicts the hub's own encoders — and
-// the two failures that would cause are (a) a client that cannot decode the
-// SAFETY channel, and (b) a client that grays the wrong controls on a
-// safety-critical surface. Both are silent.
+// generic client lives in that one header. The library suites can be
+// perfectly green while the machine advertises a catalog that contradicts
+// the hub's own encoders — and the two failures that would cause are (a) a
+// client that cannot decode the SAFETY channel, and (b) a client that grays
+// the wrong controls on a safety-critical surface. Both are silent.
 //
 // The catalog is hardware-free by construction (field descriptors, no Arduino),
 // so it builds natively with nothing but the library + `-Iinclude/comms`.
-// ============================================================================
 
 #define DOCTEST_CONFIG_IMPLEMENT_WITH_MAIN
 #include <doctest/doctest.h>
@@ -96,10 +93,9 @@ bool isRegisteredRole(std::string_view r) {
 
 }  // namespace
 
-// ============================================================================
+// ---- Baseline conformance ---------------------------------------------------
 // The catalog builds, is self-consistent, and satisfies the conformance
 // checker — the baseline every other case here assumes.
-// ============================================================================
 TEST_CASE("device catalog: builds, sorts ascending, and passes checkCatalog") {
     DeviceCatalog dc;
     CHECK(dc.c.ok());
@@ -157,9 +153,8 @@ TEST_CASE("device catalog: builds, sorts ascending, and passes checkCatalog") {
     CHECK(report.ok());
 }
 
-// ============================================================================
-// ITEM 0 — stream_kind: the segment channel must be NON-DECIMABLE.
-// ============================================================================
+// ---- ITEM 0 -----------------------------------------------------------------
+// stream_kind: the segment channel must be NON-DECIMABLE.
 TEST_CASE("device catalog: 0x0085 is segment-class, 0x0084 is not") {
     DeviceCatalog dc;
 
@@ -183,9 +178,8 @@ TEST_CASE("device catalog: 0x0085 is segment-class, 0x0084 is not") {
     CHECK_FALSE(dc.c.isSegmentClass(*pts));
 }
 
-// ============================================================================
-// ITEM 4 — the safety snapshot's shape must match Hub::buildSafetyPayload().
-// ============================================================================
+// ---- ITEM 4 -----------------------------------------------------------------
+// the safety snapshot's shape must match Hub::buildSafetyPayload().
 TEST_CASE("device catalog: 0x0003 is the 9-byte safety snapshot, modes appended last") {
     DeviceCatalog dc;
     const CatalogEntry* e = dc.c.find(channels::safety);
@@ -216,10 +210,9 @@ TEST_CASE("device catalog: 0x0003 is the 9-byte safety snapshot, modes appended 
     CHECK(bits[1] == "bypass");     // safety_mode_bits::BYPASS
 }
 
-// ============================================================================
-// ITEM 2 — per-op access, expressed in the catalog so a GENERIC client can
+// ---- ITEM 2 -----------------------------------------------------------------
+// per-op access, expressed in the catalog so a GENERIC client can
 // render 0x0005 correctly without hardcoding this device.
-// ============================================================================
 TEST_CASE("device catalog: 0x0005 declares the role exemption via option_access") {
     DeviceCatalog dc;
     const CatalogEntry* e = dc.c.find(channels::safety_intents);
@@ -278,9 +271,8 @@ TEST_CASE("device catalog: 0x0005 declares the role exemption via option_access"
     CHECK(e->defaultPriority == Priority::critical);
 }
 
-// ============================================================================
-// ITEM 5 — the bench home ops exist, are named, and are control-gated.
-// ============================================================================
+// ---- ITEM 5 -----------------------------------------------------------------
+// the bench home ops exist, are named, and are control-gated.
 TEST_CASE("device catalog: 0x0103 home declares the bench ops with a stroke field") {
     DeviceCatalog dc;
     const CatalogEntry* e = dc.c.find(slopdrive::ch::home);
@@ -316,12 +308,11 @@ TEST_CASE("device catalog: 0x0103 home declares the bench ops with a stroke fiel
     CHECK(stroke->min >= 1.0f);   // a zero/negative bench stroke is not a window
 }
 
-// ============================================================================
-// The catalog round-trips through its own codec — the annotations added above
+// ---- The catalog round-trips through its own codec --------------------------
+// the annotations added above
 // are not just in-memory struct fields, they actually reach the wire and come
 // back. Without this, a client would receive a catalog with no option_access
 // and silently fall back to offering every op to everyone.
-// ============================================================================
 TEST_CASE("device catalog: encode -> decode preserves option_access and stream_kind") {
     DeviceCatalog dc;
     std::vector<std::byte> buf(65536);
@@ -363,14 +354,13 @@ TEST_CASE("device catalog: encode -> decode preserves option_access and stream_k
     CHECK(std::equal(buf.begin(), buf.begin() + n, buf2.begin()));
 }
 
-// ============================================================================
-// M5a — EVERY LAYOUT FITS THE 242 B STATE FLOOR.
+// ---- M5a --------------------------------------------------------------------
+// EVERY LAYOUT FITS THE 242 B STATE FLOOR.
 //
 // A STATE payload that does not fit limits::min_transport_payload unfragmented
 // is a channel that simply does not work on the smallest conforming transport
 // (§9.1). Asserted over EVERY layout entry rather than the ones this milestone
 // touched, because the failure is silent on WS and only appears on ESP-NOW/BLE.
-// ============================================================================
 TEST_CASE("device catalog: every STATE/STREAM layout fits 242 B unfragmented") {
     DeviceCatalog dc;
     for (uint16_t i = 0; i < dc.c.count; ++i) {
@@ -381,14 +371,13 @@ TEST_CASE("device catalog: every STATE/STREAM layout fits 242 B unfragmented") {
     }
 }
 
-// ============================================================================
-// M5a — the exact byte counts the firmware's publishTelemetry() writes.
+// ---- M5a --------------------------------------------------------------------
+// the exact byte counts the firmware's publishTelemetry() writes.
 //
 // These are the numbers a `std::array<std::byte, N>` in SlopSyncHubService.cpp
 // is sized with. If a layout grows here and the publisher does not, the machine
 // publishes a payload SHORTER than its own catalog claims — which decodes as a
 // truncated prefix and looks like plausible data, not like an error.
-// ============================================================================
 TEST_CASE("device catalog: published layout sizes match the firmware's encoders") {
     DeviceCatalog dc;
     struct { uint16_t id; size_t bytes; } expect[] = {
@@ -409,12 +398,11 @@ TEST_CASE("device catalog: published layout sizes match the firmware's encoders"
     }
 }
 
-// ============================================================================
-// M5a — APPEND-ONLY EVOLUTION. The released prefix of every grown layout keeps
+// ---- M5a --------------------------------------------------------------------
+// APPEND-ONLY EVOLUTION. The released prefix of every grown layout keeps
 // its field ORDER, and therefore its byte offsets. This is the whole contract
 // that lets an old client keep decoding after an etag bump, so it is asserted
 // name-by-name rather than trusted to review.
-// ============================================================================
 TEST_CASE("device catalog: M5a growth is append-only on 0x0080/0x0081/0x0082/0x0083") {
     DeviceCatalog dc;
 
@@ -440,15 +428,14 @@ TEST_CASE("device catalog: M5a growth is append-only on 0x0080/0x0081/0x0082/0x0
                                         "session_ms"});
 }
 
-// ============================================================================
-// RFC-009 — EVERY setting_key RESOLVES in its entry's settingChannel.
+// ---- RFC-009 ----------------------------------------------------------------
+// EVERY setting_key RESOLVES in its entry's settingChannel.
 //
 // The single most load-bearing invariant this milestone adds: a settings UI is
 // built by reading a STATE field's `setting_key` and writing THAT key on the
 // entry's `settingChannel`. A key that resolves to nothing produces a control
-// that renders perfectly and drives nothing — the exact defect class CLAUDE.md
-// calls a shipping-broken control.
-// ============================================================================
+// that renders perfectly and drives nothing — the exact defect class
+// DOCTRINE.md §3 calls a shipping-broken control.
 TEST_CASE("device catalog: every setting_key resolves in its declared settingChannel") {
     DeviceCatalog dc;
     int annotated = 0;
@@ -492,9 +479,8 @@ TEST_CASE("device catalog: every setting_key resolves in its declared settingCha
     CHECK(annotated == 81);
 }
 
-// ============================================================================
-// RFC-009 — every `role` on this machine is a REGISTERED role.
-// ============================================================================
+// ---- RFC-009 ----------------------------------------------------------------
+// every `role` on this machine is a REGISTERED role.
 TEST_CASE("device catalog: every field role is a registered field_roles value") {
     DeviceCatalog dc;
     int roled = 0;
@@ -522,12 +508,11 @@ TEST_CASE("device catalog: every field role is a registered field_roles value") 
     CHECK(roled > 0);
 }
 
-// ============================================================================
-// RFC-009 / RFC-006 — the roles the MFP plugin and the graphing CLI look
+// ---- RFC-009 / RFC-006 ------------------------------------------------------
+// the roles the MFP plugin and the graphing CLI look
 // fields up BY, asserted to exist exactly once each. That lookup is the whole
 // point of the vocabulary: locate the limit by role, never by channel id, and
 // the same code works against any conforming hub.
-// ============================================================================
 TEST_CASE("device catalog: the limit + window roles are discoverable and unique") {
     DeviceCatalog dc;
     using namespace slopsync::field_roles;
@@ -548,8 +533,8 @@ TEST_CASE("device catalog: the limit + window roles are discoverable and unique"
     }
 }
 
-// ============================================================================
-// RFC-003 — the STORED-vs-EFFECTIVE distinction, which IS the presence of
+// ---- RFC-003 ----------------------------------------------------------------
+// the STORED-vs-EFFECTIVE distinction, which IS the presence of
 // setting_key and nothing else. `measured_stroke` is derived machine truth: it
 // has no config-set key, so a client must render it read-only and must NEVER
 // write it back into a setting's shadow. Adopting an EFFECTIVE value as stored
@@ -561,7 +546,6 @@ TEST_CASE("device catalog: the limit + window roles are discoverable and unique"
 // homing search sweep — an INPUT, not derived truth) and item 3 gave the
 // derived-truth role its own honest field, `measured_stroke`, which is what
 // this test pins now.
-// ============================================================================
 TEST_CASE("device catalog: measured_stroke is read-only, max_rail is now a setting") {
     DeviceCatalog dc;
     const CatalogEntry* e = dc.c.find(slopdrive::ch::machine_config);
@@ -613,11 +597,10 @@ TEST_CASE("device catalog: measured_stroke is read-only, max_rail is now a setti
     }
 }
 
-// ============================================================================
-// RFC-009 item 4 — enabled_mask exists on BOTH settings STATE channels, is
+// ---- RFC-009 item 4 ---------------------------------------------------------
+// enabled_mask exists on BOTH settings STATE channels, is
 // role-tagged so a generic client recognizes it without knowing this device,
 // and names the field each bit gates.
-// ============================================================================
 TEST_CASE("device catalog: both settings channels carry a role-tagged enabled_mask") {
     DeviceCatalog dc;
 
@@ -663,11 +646,10 @@ TEST_CASE("device catalog: both settings channels carry a role-tagged enabled_ma
     }
 }
 
-// ============================================================================
-// RFC-009 gap 3 — the u8 single-select renders as NAMES. Without options a
+// ---- RFC-009 gap 3 ----------------------------------------------------------
+// the u8 single-select renders as NAMES. Without options a
 // client can only show "3", and the user would have to own the firmware source
 // to know what pattern 3 is.
-// ============================================================================
 TEST_CASE("device catalog: pattern is a named select matching PatternEngine") {
     DeviceCatalog dc;
     const CatalogEntry* e = dc.c.find(slopdrive::ch::pattern_state);
@@ -695,8 +677,8 @@ TEST_CASE("device catalog: pattern is a named select matching PatternEngine") {
     CHECK(p->max == doctest::Approx(float(opts.size() - 1)));
 }
 
-// ============================================================================
-// RFC-009 rendering checklist — the SETTINGS SURFACE IS COMPLETE.
+// ---- RFC-009 rendering checklist --------------------------------------------
+// the SETTINGS SURFACE IS COMPLETE.
 //
 // The question this whole milestone answers is "could a client that has never
 // seen this device build a correct settings page from the catalog alone?".
@@ -704,7 +686,6 @@ TEST_CASE("device catalog: pattern is a named select matching PatternEngine") {
 // EVERY writable field must carry enough to choose a widget, label it, explain
 // it, bound it, and reset it. A single unannotated field is a control the
 // client can only render as a bare number with no name.
-// ============================================================================
 TEST_CASE("device catalog: every setting is fully renderable from the catalog alone") {
     DeviceCatalog dc;
     for (uint16_t i = 0; i < dc.c.count; ++i) {
@@ -736,9 +717,8 @@ TEST_CASE("device catalog: every setting is fully renderable from the catalog al
     }
 }
 
-// ============================================================================
-// M5a — 0x0086 plan-strip: the planner's current segment.
-// ============================================================================
+// ---- M5a --------------------------------------------------------------------
+// 0x0086 plan-strip: the planner's current segment.
 TEST_CASE("device catalog: 0x0086 plan-strip is an elevated diagnostics STATE") {
     DeviceCatalog dc;
     const CatalogEntry* e = dc.c.find(slopdrive::ch::plan_strip);
@@ -778,14 +758,13 @@ TEST_CASE("device catalog: 0x0086 plan-strip is an elevated diagnostics STATE") 
     }
 }
 
-// ============================================================================
-// RFC-016 in practice — CAPABILITY DISCOVERY IS CATALOG INTROSPECTION.
+// ---- RFC-016 in practice ----------------------------------------------------
+// CAPABILITY DISCOVERY IS CATALOG INTROSPECTION.
 //
 // The power channel exists IFF the hardware does. A hub with no sensor must
 // not advertise a channel that would publish zeros forever, because a client
 // cannot tell "0.0 A" from "no sensor" — the same lie as the WebUI's dead
 // anomaly gauges this milestone exists to kill.
-// ============================================================================
 TEST_CASE("device catalog: 0x0087 power is declared only when the hardware exists") {
     Catalog32 none{};
     REQUIRE(slopdrive::buildSlopDriveCatalog(none, {false, false}));
@@ -825,9 +804,8 @@ TEST_CASE("device catalog: 0x0087 power is declared only when the hardware exist
     CHECK(bus->role == slopsync::field_roles::telemetry_power_bus);
 }
 
-// ============================================================================
-// M5a — 0x0088 slopmotion-diag, incl. RFC-019's observable reset generation.
-// ============================================================================
+// ---- M5a --------------------------------------------------------------------
+// 0x0088 slopmotion-diag, incl. RFC-019's observable reset generation.
 TEST_CASE("device catalog: 0x0088 carries the per-kind breakdown and a reset_gen") {
     DeviceCatalog dc;
     const CatalogEntry* e = dc.c.find(slopdrive::ch::motion_diag);
@@ -864,15 +842,14 @@ TEST_CASE("device catalog: 0x0088 carries the per-kind breakdown and a reset_gen
     CHECK_FALSE(rg->hasSettingKey);   // it is a generation counter, not a knob
 }
 
-// ============================================================================
-// M5a — 0x0089 motion-anomaly: THE FIRST DEVICE-AUTHORED EVENT CHANNEL, and
+// ---- M5a --------------------------------------------------------------------
+// 0x0089 motion-anomaly: THE FIRST DEVICE-AUTHORED EVENT CHANNEL, and
 // therefore the proof that the M3b `body` (40) sub-map grammar fix works.
 //
 // Under the pre-fix grammar (kind-specific fields at the frame's top level)
 // this channel could not have been authored without a registry PR for its own
 // field keys — exactly the coupling the self-describing catalog exists to
 // prevent. Every key below comes from the channel's OWN schema.
-// ============================================================================
 TEST_CASE("device catalog: 0x0089 motion-anomaly is a device-authored EVENT channel") {
     DeviceCatalog dc;
     const CatalogEntry* e = dc.c.find(slopdrive::ch::motion_anomaly);
@@ -918,11 +895,10 @@ TEST_CASE("device catalog: 0x0089 motion-anomaly is a device-authored EVENT chan
     CHECK(schemaFieldByKey(dc.c, *e, slopdrive::anom_body::target)->type == CborFieldType::f32_t);
 }
 
-// ============================================================================
-// M5a — the annotation block SURVIVES THE WIRE. In-memory struct fields prove
+// ---- M5a --------------------------------------------------------------------
+// the annotation block SURVIVES THE WIRE. In-memory struct fields prove
 // nothing: a client only ever sees the decoded catalog, so an annotation the
 // codec drops is an annotation that does not exist.
-// ============================================================================
 TEST_CASE("device catalog: annotations survive encode -> decode") {
     DeviceCatalog dc;
     std::vector<std::byte> buf(65536);
@@ -998,12 +974,11 @@ TEST_CASE("device catalog: annotations survive encode -> decode") {
     CHECK(std::equal(buf.begin(), buf.begin() + n, buf2.begin()));
 }
 
-// ============================================================================
-// M5a — the conformance checker is CLEAN for every feature combination, incl.
+// ---- M5a --------------------------------------------------------------------
+// the conformance checker is CLEAN for every feature combination, incl.
 // limits::catalog_max_entry_bytes (4096). A heavily-annotated entry with long
 // descs is the one thing that can blow that cap, and 0x0088 (24 fields) plus
 // 0x0081 (10 fields as of fw 2.1.76) are the two candidates.
-// ============================================================================
 TEST_CASE("device catalog: conformance is clean under every feature combination") {
     std::vector<std::byte> scratch(65536);
     for (int f = 0; f < 4; ++f) {
@@ -1015,8 +990,8 @@ TEST_CASE("device catalog: conformance is clean under every feature combination"
     }
 }
 
-// ============================================================================
-// M5a — THE CATALOG MUST FIT THE HUB'S ENCODE SCRATCH.
+// ---- M5a --------------------------------------------------------------------
+// THE CATALOG MUST FIT THE HUB'S ENCODE SCRATCH.
 //
 // This is the test that would have saved a live probe run. encodeCatalog()
 // returns 0 when the buffer is too small, and Hub's constructor has no way to
@@ -1028,7 +1003,6 @@ TEST_CASE("device catalog: conformance is clean under every feature combination"
 // Checked for EVERY feature combination, because the power channel changes the
 // size, and with real headroom asserted — a catalog at 99% of the buffer is a
 // catalog one desc away from silently vanishing.
-// ============================================================================
 TEST_CASE("device catalog: encodes inside the hub's catalog scratch, with headroom") {
     std::vector<std::byte> buf(Hub::catalogScratchCapacity());
     for (int f = 0; f < 4; ++f) {

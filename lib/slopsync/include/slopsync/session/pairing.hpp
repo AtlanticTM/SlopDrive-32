@@ -69,9 +69,8 @@ inline constexpr size_t kLedgerKindMaxBytes = size_t(limits::trust_ledger_kind_m
 inline constexpr size_t kLedgerNameMaxBytes = size_t(limits::trust_ledger_name_max_bytes);
 inline constexpr size_t kLedgerVersionMaxBytes = size_t(limits::client_ver_max_bytes);
 
-// ============================================================================
-// The PENDING list (RFC-027(a)) — knocks awaiting a configure session's answer.
-// ============================================================================
+// ---- The PENDING list (RFC-027(a)) ------------------------------------------
+// knocks awaiting a configure session's answer.
 
 // One pending knock. `mode` is the registry's `kind u8` field of the 0x000A
 // slot layout: the `pairing_modes` BIT that produced this knock, so an
@@ -190,9 +189,8 @@ private:
     std::array<PendingKnock, Cap> _slots{};
 };
 
-// ============================================================================
-// PairingManager — the ledger, the ceremonies, and the windows.
-// ============================================================================
+// ---- PairingManager ---------------------------------------------------------
+// the ledger, the ceremonies, and the windows.
 
 class PairingManager {
 public:
@@ -218,14 +216,14 @@ public:
         bool used = false;
     };
 
-    // ---- PIN window (§12.2, mode (b)) --------------------------------------
+    // ---- PIN window (§12.2, mode (b)) ---------------------------------------
     // `pinAscii` must stay valid while the window is open (points at app
     // memory, e.g. the digits also shown on the OLED/WebUI).
     void openWindow(std::span<const char> pinAscii, uint32_t nowMs);
     void closeWindow();
     bool windowOpen(uint32_t nowMs) const;  // auto-expires after limits::pairing_window_default_s
 
-    // ---- Presence window (RFC-027(c), mode (c)) ----------------------------
+    // ---- Presence window (RFC-027(c), mode (c)) -----------------------------
     // SINGLE-GRANT: the first knock consumes it. Opened by the APPLICATION
     // after it observed a physical-presence proof (firmware M5: the boot-count
     // gesture); this library never touches a GPIO and never decides what
@@ -252,13 +250,13 @@ public:
     void setKnockApproveEnabled(bool on) { _knockApproveEnabled = on; }
     bool knockApproveEnabled() const { return _knockApproveEnabled; }
 
-    // ---- Wall clock (the first_seen/last_seen seam) ------------------------
+    // ---- Wall clock (the first_seen/last_seen seam) -------------------------
     // The application pushes UNIX epoch seconds when it HAS them (SNTP). 0
     // means unknown and is the honest default; see PairedEntry.
     void setWallClockSeconds(uint32_t s) { _wallSeconds = s; }
     uint32_t wallClockSeconds() const { return _wallSeconds; }
 
-    // ---- PIN-proof ceremony (mode (b)) -------------------------------------
+    // ---- PIN-proof ceremony (mode (b)) --------------------------------------
     enum class PairOutcome : uint8_t { Granted, Denied, WindowClosed };
     // Verifies proof against (PIN, nonce) in CONSTANT TIME through the injected
     // ICrypto (RFC-028.3 makes that protocol-wide). On success: creates or
@@ -273,7 +271,7 @@ public:
                               std::span<std::byte> tokenOut,
                               ICrypto& crypto = defaultCrypto());
 
-    // ---- Granting (shared by every mode) -----------------------------------
+    // ---- Granting (shared by every mode) ------------------------------------
     // Mints a fresh token for `instance_id` at `role`, recording which ceremony
     // did it. Create-or-replace: re-pairing an already-known instance reissues
     // rather than consuming a second slot, and always resets `state` to trusted
@@ -282,14 +280,14 @@ public:
     PairedEntry* grant(std::span<const std::byte> instance_id, AccessLevel role, uint8_t pairingMode,
                        IRandom& rng, std::span<std::byte> tokenOut);
 
-    // ---- Token validation (HELLO path, §12.2) ------------------------------
+    // ---- Token validation (HELLO path, §12.2) -------------------------------
     // CONSTANT-TIME token comparison (RFC-028.3). Returns `watch` for no match,
     // and `watch` for a RECOGNIZED-PENDING device whose role is suspended —
     // both are "you may look, you may not act", which is the whole design.
     AccessLevel validate(std::span<const std::byte> instance_id, std::span<const std::byte> token,
                          ICrypto& crypto = defaultCrypto()) const;
 
-    // ---- RFC-029 item 6: PROOF presentation (the AUTH path) ----------------
+    // ---- RFC-029 item 6: PROOF presentation (the AUTH path) -----------------
     // Same answer as validate(), from a proof instead of the credential:
     // HMAC-SHA256(key = this device's token, message = the session's WELCOME
     // nonce) truncated to 16 bytes. The token NEVER crosses the wire, so a
@@ -320,7 +318,7 @@ public:
                               std::span<const std::byte> nonce, ICrypto& crypto = defaultCrypto(),
                               bool* proofMatched = nullptr) const;
 
-    // ---- RFC-029 item 2: THE CLIENT-CHANGE TRIPWIRE ------------------------
+    // ---- RFC-029 item 2: THE CLIENT-CHANGE TRIPWIRE -------------------------
     // Called once per HELLO from a device whose token validated. Records what
     // was observed and reports whether trust just dropped.
     //
@@ -351,7 +349,7 @@ public:
     void setTrustChangeAutoKeepMax(AccessLevel r) { _autoKeepMax = r; }
     AccessLevel trustChangeAutoKeepMax() const { return _autoKeepMax; }
 
-    // ---- Ledger management (revocation, roster, NVS adapters) --------------
+    // ---- Ledger management (revocation, roster, NVS adapters) ---------------
     bool revoke(std::span<const std::byte> instance_id);
     size_t entryCount() const;
     const PairedEntry* entry(size_t i) const;        // i-th USED entry, compacted
@@ -361,7 +359,7 @@ public:
     bool importEntry(const PairedEntry& e);          // app restores from NVS at boot
     uint16_t generation() const { return _generation; }
 
-    // ---- THE M5 PERSISTENCE SEAM -------------------------------------------
+    // ---- THE M5 PERSISTENCE SEAM --------------------------------------------
     // The whole ledger as ONE CBOR blob (registry `trust_ledger_keys`), which
     // is exactly the shape the feasibility pass mandates for NVS: one blob in
     // the existing `slopsync` namespace, under trust_ledger_max_bytes (1900 =
@@ -402,10 +400,8 @@ private:
     }
 };
 
-// ============================================================================
-// PairingManager — method bodies. Defined inline here (no companion _impl file
-// exists for this header, unlike Hub/Client).
-// ============================================================================
+// ---- PairingManager ---------------------------------------------------------
+// method bodies. Defined inline here (no companion _impl file exists for this header, unlike Hub/Client).
 
 inline PairingManager::PairedEntry* PairingManager::findByInstance(std::span<const std::byte> instance_id) {
     if (instance_id.size() != limits::instance_id_bytes) return nullptr;
@@ -420,7 +416,7 @@ inline const PairingManager::PairedEntry* PairingManager::findByInstance(
     return const_cast<PairingManager*>(this)->findByInstance(instance_id);
 }
 
-// ---- windows ---------------------------------------------------------------
+// ---- windows ----------------------------------------------------------------
 
 inline void PairingManager::openWindow(std::span<const char> pinAscii, uint32_t nowMs) {
     _pin = pinAscii;
@@ -472,7 +468,7 @@ inline uint8_t PairingManager::offeredModes(uint32_t nowMs) const {
     return m;
 }
 
-// ---- granting --------------------------------------------------------------
+// ---- granting ---------------------------------------------------------------
 
 inline PairingManager::PairedEntry* PairingManager::grant(std::span<const std::byte> instance_id, AccessLevel role,
                                                           uint8_t pairingMode, IRandom& rng,
@@ -530,7 +526,7 @@ inline PairingManager::PairOutcome PairingManager::handlePairReq(std::span<const
     return PairOutcome::Granted;
 }
 
-// ---- validation + tripwire -------------------------------------------------
+// ---- validation + tripwire --------------------------------------------------
 
 inline AccessLevel PairingManager::validate(std::span<const std::byte> instance_id,
                                             std::span<const std::byte> token, ICrypto& crypto) const {
@@ -623,7 +619,7 @@ inline PairingManager::HelloObservation PairingManager::observeHello(std::span<c
     return out;
 }
 
-// ---- ledger management -----------------------------------------------------
+// ---- ledger management ------------------------------------------------------
 
 inline bool PairingManager::revoke(std::span<const std::byte> instance_id) {
     PairedEntry* e = findByInstance(instance_id);
@@ -669,13 +665,13 @@ inline bool PairingManager::importEntry(const PairedEntry& e) {
     return false;
 }
 
-// ---- CBOR (registry `trust_ledger_keys`) -----------------------------------
+// ---- CBOR (registry `trust_ledger_keys`) ------------------------------------
 
 inline size_t PairingManager::encodeEntry(const PairedEntry& e, std::span<std::byte> out) const {
     // NOTE what is ABSENT: the TOKEN. The ledger item is read by any
     // `configure` session over BLOB_REQ, and shipping a live credential to a
-    // reader — even an authorized one — turns "list my paired devices" into
-    // "hand out everyone's keys". A configure session can REVOKE any entry; it
+    // reader — even an authorized one — turns "list its own paired devices"
+    // into "hand out everyone's keys". A configure session can REVOKE any entry; it
     // has no business impersonating one.
     CborWriter w(out);
     uint32_t n = 5;  // instance_id, role, state, presentation_mode, pairing_mode

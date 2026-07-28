@@ -72,7 +72,7 @@ public:
     // leaks.
     virtual bool constantTimeEqual(std::span<const std::byte> a, std::span<const std::byte> b) const = 0;
 
-    // ---- M4c seam: P-256 (declared, not implemented) -----------------------
+    // ---- M4c seam: P-256 (declared, not implemented) ------------------------
     // Deterministic ECDSA (RFC 6979) over SHA-256 of `message`, DER or raw r||s
     // per the implementation's own contract (M4c fixes it; nothing depends on
     // it yet). Returns bytes written, or 0 for "this hub cannot sign".

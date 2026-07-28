@@ -1,6 +1,6 @@
-// Target: frame header + fragmentation reassembly (wire/frame_header.hpp,
-// wire/fragmentation.hpp) — plus the ESTOP frame and the COBS serial framing
-// that sit at the same layer.
+// fuzz_frame — target: frame header + fragmentation reassembly
+// (wire/frame_header.hpp, wire/fragmentation.hpp) — plus the ESTOP frame and
+// the COBS serial framing that sit at the same layer.
 //
 // Length fields are the classic trust-the-attacker bug, and the Reassembler
 // is where an attacker gets to choose an INDEX and a LENGTH that together

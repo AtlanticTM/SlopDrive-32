@@ -1,3 +1,5 @@
+// OpenBrowser — platform-specific default-browser launch (see OpenBrowser.h).
+
 #include "common/OpenBrowser.h"
 
 #ifdef _WIN32

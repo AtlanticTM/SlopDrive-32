@@ -22,7 +22,7 @@
 
 namespace slopdrive {
 
-// ---- IClock over esp_timer -------------------------------------------------
+// ---- IClock over esp_timer --------------------------------------------------
 // SPEC §7.2: hub time is u32 µs since boot, WRAPPING every ~71.6 min. The wrap
 // is BY SPEC, not an accident — every ms deadline in the hub goes through
 // MonotonicMs/timeReached() which own the wrap window. So we deliberately
@@ -35,7 +35,7 @@ public:
     }
 };
 
-// ---- IRandom over the hardware RNG -----------------------------------------
+// ---- IRandom over the hardware RNG ------------------------------------------
 // esp_random() is the SoC hardware entropy source (valid once RF/Wi-Fi is up,
 // which it always is on the main controller by the time the hub spins up). This
 // feeds session ids, boot id, WELCOME nonces, and pairing tokens (§6.1, §12.2)

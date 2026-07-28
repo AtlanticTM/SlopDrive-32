@@ -1,3 +1,20 @@
+// WebUI — HTTP route handlers and settings-mutation logic for the /api/* plane
+// Constraints:
+//   Motion mutation must route through MotionArbiter — this file is an input
+//   source, never a direct driver caller (sole-caller rule).
+//   Per HTTP-plane retirement, SlopSync is the only control surface: mutating
+//   HTTP routes registered in init() answer 410 with a pointer to their
+//   SlopSync twin; GET siblings remain as read-only diagnostics and
+//   fallback-poll, and must not regress into writers.
+//   Every applied-value echo (applySettings, applyMove, handleApiSlopMotion,
+//   etc.) reports the post-clamp value actually running on the device, never
+//   the raw request — the UI must never display machine state that differs
+//   from the device's (Ground Truth Doctrine).
+//   update()/handleClient() runs on the HTTP task; the telemetry sampler runs
+//   on its own esp_timer callback at 240Hz and is the sole writer of
+//   _state.actual_position_mm (see telemetryTimerCb()).
+// See: docs/http-plane-retirement.md, docs/canon/DOCTRINE.md
+
 #include "WebUI.h"
 
 #include <ArduinoJson.h>
@@ -33,7 +50,7 @@
 #include "slopsync/generated/registry_constants.hpp"  // limits::ws_subprotocol (single source of the proto id)
 #include "SlopSyncDiscoveryWire.h"  // discovery::kPort — single source for the capabilities UDP port advert
 
-// ---- Fallback HTML page (shown when LittleFS /index.html is missing) -------
+// ---- Fallback HTML page -----------------------------------------------------
 static const char* htmlFallbackPage = R"RAWHTML(
 <!DOCTYPE html>
 <html lang="en">
@@ -54,9 +71,7 @@ static const char* htmlFallbackPage = R"RAWHTML(
 </html>
 )RAWHTML";
 
-// ============================================================================
-// Constructor — capture references to all subsystems
-// ============================================================================
+// ---- Constructor ------------------------------------------------------------
 
 WebUI::WebUI(SystemState&        state,
              MotorDriver&        motor,
@@ -79,9 +94,7 @@ WebUI::~WebUI() {
     delete _httpServer;
 }
 
-// ============================================================================
-// init() — register every route and start the server
-// ============================================================================
+// ---- init() -----------------------------------------------------------------
 
 void WebUI::init() {
     // WebServer only exposes request headers that were explicitly collected —
@@ -99,7 +112,7 @@ void WebUI::init() {
         _httpServer->send(410, "application/json",
                           "{\"ok\":false,\"error\":\"retired\",\"use\":\"0x0101 config-set\"}");
     });
-    // ---- HTTP CONTROL IS RETIRED (M5c) ---------------------------------
+    // ---- HTTP CONTROL IS RETIRED --------------------------------------------
     // "No controls outside SlopSync, HTTP is read only." Every route below
     // has an exact SlopSync twin and now answers 410 with a pointer to it.
     // GET siblings survive as read-only diagnostics; OTA and /uitoken are
@@ -130,7 +143,7 @@ void WebUI::init() {
                           "{\"ok\":false,\"error\":\"retired\",\"use\":\"0x0005 safety op=override_on/off\"}");
     });
     _httpServer->on("/api/servo",     HTTP_GET,  [this]() { handleApiServo(); });
-    // POST /api/servo is RETIRED (M5c) — THE LAST HTTP WRITER. "No controls
+    // POST /api/servo is RETIRED — THE LAST HTTP WRITER. "No controls
     // outside SlopSync, HTTP is read only."
     //
     // Retired rather than ported, deliberately: unlike the other writers this
@@ -150,7 +163,7 @@ void WebUI::init() {
                           "\"see\":\"RFC-031\","
                           "\"use\":\"slopsync 0x0106 machine-admin op=servo_scan (scan only)\"}");
     });
-    // POST /api/clearfault is RETIRED (M5c) — it is now machine-admin op 1 on
+    // POST /api/clearfault is RETIRED — it is now machine-admin op 1 on
     // SlopSync 0x0106. No controls outside SlopSync.
     _httpServer->on("/api/clearfault", HTTP_POST, [this]() {
         _httpServer->send(410, "application/json",
@@ -163,7 +176,7 @@ void WebUI::init() {
                           "{\"ok\":false,\"error\":\"retired\",\"use\":\"0x0102 pattern-cmd\"}");
     });
     _httpServer->on("/api/pattern/presets", HTTP_GET,  [this]() { handleApiPatternPresets(); });
-    // POST /api/pattern/presets is RETIRED (M5) — THE LAST HTTP WRITER. "No
+    // POST /api/pattern/presets is RETIRED — THE LAST HTTP WRITER. "No
     // controls outside SlopSync, HTTP is read only." save/load/delete/rename
     // are now SlopSync 0x0108 pattern-presets-cmd (RFC-021 store 0x0095 +
     // roster 0x0096, SlopSyncHubService.cpp). GET stays: the legacy NVS
@@ -176,7 +189,7 @@ void WebUI::init() {
     });
     _httpServer->on("/api/log",       HTTP_GET,  [this]() { handleApiLog(); });
     _httpServer->on("/api/slopmotion", HTTP_GET,  [this]() { handleApiSlopMotion(); });
-    // POST /api/slopmotion is RETIRED (M5c). "No controls outside SlopSync,
+    // POST /api/slopmotion is RETIRED. "No controls outside SlopSync,
     // HTTP is read only" — the 20 live-tune knobs are channels 0x008B/0x008C/
     // 0x008D written through 0x0105 slopmotion-set, which ALSO persists them to
     // NVS (this endpoint never did). GET stays: a read-only view of the tuning
@@ -200,9 +213,7 @@ void WebUI::init() {
     startTelemetrySampler();
 }
 
-// ============================================================================
-// update()
-// ============================================================================
+// ---- update() ---------------------------------------------------------------
 
 void WebUI::update() {
     // Sync backend: this IS the request pump.
@@ -224,24 +235,23 @@ void WebUI::update() {
     _machineReboot.poll();
 }
 
-// ---- Dedicated telemetry sampler -------------------------------------------
+// ---- Dedicated telemetry sampler --------------------------------------------
 void WebUI::telemetryTimerCb(void* arg) {
     WebUI* self = static_cast<WebUI*>(arg);
-    // D4: actual = stepper.getCurrentPosition() ONLY — FAS truth, never the planner's inbox.
-    // The position graph draws three lines:
+    // actual = stepper.getCurrentPosition() ONLY — FAS truth, never the
+    // planner's inbox. The position graph draws three lines:
     //   took (actual)  = motor position NOW           → reality blue
     //   told (target)  = planner output after clamping → intent purple
     //   asked (raw)    = TCode parser + mapper demand  → dotted asked
     // When the planner derives a slower profile (gentle command), the gap
     // between "told" and "took" shows exactly how much the planner backed off.
     //
-    // ONE read of FAS, TWO consumers: the graph AND the shared atomic. Before
-    // fw 2.1.48 this callback only fed the graph, so actual_position_mm had a
-    // single writer (applyMove) and sat frozen at the last manual endpoint —
-    // which meant SlopSync's 0x0080 `pos` field lied through every stream,
-    // pattern and homing cycle, and main.cpp's stream rising-edge re-seeded
-    // SlopMotion from a stale position. This sampler is the writer now.
-    // Do NOT call getPosition() twice — one sample, both uses. :3
+    // ONE read of FAS, TWO consumers: the graph AND the shared atomic. This
+    // sampler is the SOLE writer of _state.actual_position_mm — a callback
+    // that only fed the graph would leave the atomic frozen at the last
+    // manual endpoint between moves, and SlopSync's 0x0080 `pos` field would
+    // lie through every stream, pattern, and homing cycle.
+    // Do NOT call getPosition() twice — one sample, both uses.
     const float actual_mm = self->_motor.getPosition();
     self->_state.actual_position_mm.store(actual_mm, std::memory_order_relaxed);
     self->captureTelemetry(actual_mm,
@@ -277,10 +287,10 @@ void WebUI::resetSessionStats() {
 }
 
 void WebUI::captureTelemetry(float position_mm, float target_mm, float raw_mm) {
-    // ---- Session odometer stats (single-writer: this 240Hz timer task) --------
+    // ---- Session odometer stats (single-writer: this 240Hz timer task) ------
     // Derive live/peak speed, accumulate distance, and count strokes (direction
     // reversals) straight from the position stream. Cheap float math; publishes
-    // to SystemState atomics that the 0x06 STATS frame + SESSION card read. :3
+    // to SystemState atomics that the 0x06 STATS frame + SESSION card read.
     {
         static float    last_pos_mm = position_mm;
         static uint32_t last_us     = (uint32_t)(esp_timer_get_time() & 0xFFFFFFFFu);
@@ -301,7 +311,7 @@ void WebUI::captureTelemetry(float position_mm, float target_mm, float raw_mm) {
             // dpos stays step-quantized (~0.049mm/step) — inst comes out 10%+
             // high and the session PEAK ratchets above the real dispatch
             // ceiling (a stat the UI must never overstate). Nominal tick is
-            // 4.17ms; anything under ~2.5ms is a burst artifact, skip it. :3
+            // 4.17ms; anything under ~2.5ms is a burst artifact, skip it.
             if (dt > 2.5e-3f) {
                 float inst = adpos / dt;                    // instantaneous mm/s
                 spd_ema += 0.25f * (inst - spd_ema);        // ~17ms time constant
@@ -330,17 +340,15 @@ void WebUI::captureTelemetry(float position_mm, float target_mm, float raw_mm) {
     portEXIT_CRITICAL_ISR(&_telemetry_mux);
 }
 
-// ============================================================================
-// Route handlers
-// ============================================================================
+// ---- Route handlers ---------------------------------------------------------
 
 void WebUI::handleRoot() {
-    // Streaming the 115 KB bundle out of LittleFS blocks httpTask ~0.5-1 s
-    // per load (sync WebServer — the known roadmap-§4 class; [STALL]
-    // http:ui.update names it). Until that rework: ETag + Cache-Control
-    // no-cache. Every load still REVALIDATES (ground truth — an uploadfs is
+    // Streaming the 115 KB bundle out of LittleFS blocks httpTask ~0.5-1 s per
+    // load under the sync WebServer (see docs/webui-legacy-diagnosis.md §4;
+    // [STALL] http:ui.update names it). Until that rework: ETag + Cache-Control
+    // no-cache. Every load still revalidates (ground truth — an uploadfs is
     // picked up immediately because size/mtime change the tag), but an
-    // unchanged bundle answers 304 in ~10 ms instead of restreaming. :3
+    // unchanged bundle answers 304 in ~10 ms instead of restreaming.
     for (const char* path : { "/index.html.gz", "/index.html" }) {
         if (!LittleFS.exists(path)) continue;
         File f = LittleFS.open(path, "r");
@@ -377,10 +385,10 @@ void WebUI::handleApiStatus() {
 
     doc["homed"] = _state.homed;
     doc["homing"] = _state.homing_in_progress;
-    // M5c: the Intiface/TCode :55555 WebSocket is DELETED — SlopSync is the
-    // only input and output now, and Intiface is planned to speak SlopSync
-    // natively rather than us speaking its protocol. Reported as a constant
-    // false rather than dropped from the payload, so an older cached page reads
+    // The Intiface/TCode :55555 WebSocket is deleted — SlopSync is the only
+    // input and output now, and Intiface is planned to speak SlopSync natively
+    // rather than us speaking its protocol. Reported as a constant false
+    // rather than dropped from the payload, so an older cached page reads
     // "not connected" instead of "undefined". The key goes when the HTTP
     // control surface does.
     doc["buttplug_connected"] = false;
@@ -412,11 +420,11 @@ void WebUI::handleApiStatus() {
     doc["measured_interval_ms"] = (hz > 0) ? (uint16_t)(1000 / hz) : 0;
     doc["auto_duration"] = _state.auto_duration;
     {
-        // Item 4 (fw 2.1.76): a pre-home carryover (ConfigStore::load()
-        // restores a PRIOR boot's measurement into the motor regardless of
-        // _state.homed) must never overstate the configured ceiling. The
-        // override branch is exempt — WS_OP_HOME_OVERRIDE always sets
-        // _state.homed=true alongside it, so it is never "unhomed".
+        // A pre-home carryover (ConfigStore::load() restores a PRIOR boot's
+        // measurement into the motor regardless of _state.homed) must never
+        // overstate the configured ceiling. The override branch is exempt —
+        // WS_OP_HOME_OVERRIDE always sets _state.homed=true alongside it, so
+        // it is never "unhomed".
         float ms = (_state.test_stroke_override_mm > 0.0f)
                    ? _state.test_stroke_override_mm
                    : _motor.getMeasuredStrokeMm();
@@ -430,7 +438,7 @@ void WebUI::handleApiStatus() {
     doc["manual_override"] = _state.manual_override;
     doc["estopped"] = (bool)_state.estop_latched;   // latched e-stop state for the fallback poll
 
-    // ---- Motion-generation diagnostics (D4: intent rate + plan dynamics) ----
+    // Motion-generation diagnostics: intent rate + plan dynamics.
     if (_arbiter) {
         PlanReport rpt = _arbiter->lastReport();
         doc["intent_count"] = _arbiter->totalIntents();
@@ -471,10 +479,10 @@ void WebUI::handleApiStatus() {
     }
 
     // Driver-health block: NO live fault readback exists on the AIM drive — it
-    // exposes no fault status over the step/dir interface. Report that honestly
-    // instead of a hardcoded all-clear (otpw/ot/s2g/faulted
-    // all false) that would show "no fault" during a real overtemperature or
-    // short-to-ground event. valid:false = this block carries no live data. :3
+    // exposes no fault status over the step/dir interface. Report that
+    // honestly instead of a hardcoded all-clear (otpw/ot/s2g/faulted all
+    // false) that would show "no fault" during a real overtemperature or
+    // short-to-ground event. valid:false = this block carries no live data.
     JsonObject drv = doc["driver"].to<JsonObject>();
     drv["supported"] = false;
     drv["valid"]     = false;
@@ -492,9 +500,9 @@ void WebUI::handleApiCapabilities() {
     doc["max_travel_mm"] = _state.config.max_rail_mm;
     doc["max_rail_mm"]   = _state.config.max_rail_mm;
     {
-        // Item 4 (fw 2.1.76): same pre-home clamp as handleApiStatus() above —
-        // see that comment for why. Kept in step deliberately; these are the
-        // HTTP twin of the SlopSync 0x0081 `measured_stroke` field.
+        // Same pre-home clamp as handleApiStatus() above — see that comment
+        // for why. Kept in step deliberately; these are the HTTP twin of the
+        // SlopSync 0x0081 `measured_stroke` field.
         float ms = _motor.getMeasuredStrokeMm();
         if (!_state.homed && ms > _state.config.max_rail_mm) ms = _state.config.max_rail_mm;
         doc["measured_stroke_mm"] = ms;
@@ -508,8 +516,8 @@ void WebUI::handleApiCapabilities() {
     accel["normal"] = (uint32_t)NORMAL_MAX_ACCEL_MM_S2;
     accel["expert"] = (uint32_t)EXPERT_MAX_ACCEL_MM_S2;
 
-    // Jerk joined the limit family in fw 2.1.47 — advertised the same way so the
-    // UI derives its slider max from the API instead of hardcoding a literal. :3
+    // Jerk is advertised the same way as speed/accel so the UI derives its
+    // slider max from the API instead of hardcoding a literal.
     JsonObject jerk = doc["jerk_ceiling_mm_s3"].to<JsonObject>();
     jerk["normal"] = (uint32_t)NORMAL_MAX_JERK_MM_S3;
     jerk["expert"] = (uint32_t)EXPERT_MAX_JERK_MM_S3;
@@ -524,9 +532,9 @@ void WebUI::handleApiCapabilities() {
 #endif
 #if defined(BLE_ENABLED)
     feat["has_ble"] = true;
-    // RFC-043 (Phase E): the BLE surface IS a SlopSync GATT transport now, not
-    // the removed OssmBleService masquerade — a client should not infer
-    // "legacy BLE protocol" from has_ble alone.
+    // RFC-043: the BLE surface is a SlopSync GATT transport, not a legacy
+    // protocol — a client must not infer "legacy BLE protocol" from has_ble
+    // alone.
     feat["slopsync_ble"] = true;
 #else
     feat["has_ble"] = false;
@@ -534,8 +542,8 @@ void WebUI::handleApiCapabilities() {
 #endif
     feat["blend_mode"] = _motor.getBlendMode();
     feat["expert_ceilings"] = _state.expert_mode;
-    // Advanced pattern mode (fray-d port) — the UI builds the Advanced/Classic
-    // pattern card split only when the firmware actually has the engine.
+    // Advanced pattern mode — the UI builds the Advanced/Classic pattern card
+    // split only when the firmware actually has the engine.
     feat["advanced_pattern"] = true;
 
     // SlopSync hub — ecosystem clients discover the sync plane from here:
@@ -545,18 +553,18 @@ void WebUI::handleApiCapabilities() {
     // Single source of truth: the registry constant that also names the WS
     // subprotocol + the mDNS TXT `proto` record (was a stale "slopsync/1").
     doc["slopsync_proto"] = slopsync::limits::ws_subprotocol.data();
-    // RFC-046 (Phase E): the WS-side UDP discovery responder (§13.8) is
-    // unconditional (no BLE_ENABLED gate — it needs no extra hardware), so
-    // its port is always advertised once SlopSync itself is.
+    // RFC-046: the WS-side UDP discovery responder (§13.8) is unconditional
+    // (no BLE_ENABLED gate — it needs no extra hardware), so its port is
+    // always advertised once SlopSync itself is.
     doc["udp_discovery_port"] = (uint16_t)slopdrive::discovery::kPort;
 
-    // Phase 2 — runtime motion backend. _machine_backend mirrors whatever
-    // main.cpp actually bound the MotorProxy to (Ground Truth: NOT re-read
-    // from NVS here — this is the live-applied value, which for the FIRST
-    // read after a commit is intentionally the pre-reboot value until the
-    // device actually restarts). available_backends tells the UI whether the
-    // toggle should even be offered. home_style is read live from NVS since
-    // it's not reboot-gated (Phase 4 wires its actual effect). :3
+    // Runtime motion backend. _machine_backend mirrors whatever main.cpp
+    // actually bound the MotorProxy to (Ground Truth: NOT re-read from NVS
+    // here — this is the live-applied value, which for the FIRST read after
+    // a commit is intentionally the pre-reboot value until the device
+    // actually restarts). available_backends tells the UI whether the toggle
+    // should even be offered. home_style is read live from NVS since it is
+    // not reboot-gated (its actual effect is not yet wired up).
     feat["motion_backend"] = (_machine_backend == 1) ? "modbus" : "fas";
     JsonArray backends = feat["available_backends"].to<JsonArray>();
     backends.add("fas");
@@ -571,21 +579,20 @@ void WebUI::handleApiCapabilities() {
 }
 
 
-// ============================================================================
-// handleApiSettings (HTTP GET only — POST is a 410 stub registered in init(),
-// see WebUI::init()'s "/api/settings" HTTP_POST route; mutation lives in
-// applySettings(), reached only via the WS_OP_* config-set path)
-// ============================================================================
+// ---- handleApiSettings ------------------------------------------------------
+// HTTP GET only — POST is a 410 stub registered in init() (see the
+// "/api/settings" HTTP_POST route); mutation lives in applySettings(),
+// reached only via the WS_OP_* config-set path.
 
 void WebUI::handleApiSettings() {
     JsonDocument doc;
     doc["range_min"] = _mapper.getMinMm();
     doc["range_max"] = _mapper.getMaxMm();
     // Ground truth: speed + accel read back from the DRIVER (post its
-    // internal clamps), never the raw config request. :3
+    // internal clamps), never the raw config request.
     doc["max_speed"] = (uint32_t)_motor.getMaxSpeed();
     doc["accel"] = (uint32_t)_motor.getAcceleration();
-    // Dual limit sets (v0.4 / D4 Phase 3) — same shape as the WS echo
+    // Dual limit sets — same shape as the WS echo.
     doc["user_max_speed"] = (uint32_t)_state.config.user_max_speed_mm_s;
     doc["user_max_accel"] = (uint32_t)_state.config.user_max_accel_mm_s2;
     doc["input_max_speed"] = (uint32_t)_state.config.input_max_speed_mm_s;
@@ -598,7 +605,7 @@ void WebUI::handleApiSettings() {
     doc["expert_mode"] = _state.expert_mode;
     doc["stream_speed_mode"] = (uint8_t)_state.stream_speed_mode;
     // max_travel = pre-homing rail scale (= configured max rail length);
-    // max_rail is the explicit setting the WebUI edits. :3
+    // max_rail is the explicit setting the WebUI edits.
     doc["max_travel"] = _state.config.max_rail_mm;
     doc["max_rail"] = _state.config.max_rail_mm;
     doc["measured_stroke"] = _motor.getMeasuredStrokeMm();
@@ -608,13 +615,13 @@ void WebUI::handleApiSettings() {
     _httpServer->send(200, "application/json", json);
 }
 
-// ============================================================================
-// applySettings — shared mutation used by HTTP POST /api/settings AND WS op
-// ============================================================================
+// ---- applySettings ----------------------------------------------------------
+// Shared mutation, reached only via WS_OP_* config-set (SlopSync) — HTTP
+// POST /api/settings is retired (see handleApiSettings above).
 
 bool WebUI::applySettings(JsonDocument& doc, JsonDocument& resp) {
     // Session-odometer reset — the SESSION card's reset button posts this
-    // (with no_persist). Handle it up front so a reset-only POST works. :3
+    // (with no_persist). Handle it up front so a reset-only POST works.
     if (doc["reset_stats"] | false) resetSessionStats();
 
     float rmin = doc["range_min"] | _mapper.getMinMm();
@@ -637,7 +644,7 @@ bool WebUI::applySettings(JsonDocument& doc, JsonDocument& resp) {
     // so it just lands in config and main.cpp's per-tick push picks it up within
     // ~1 ms. Clamped to the same HARD firmware ceiling its siblings use — the
     // NORMAL/EXPERT split is a UI guardrail advertised via /api/capabilities,
-    // not something the firmware enforces here. :3
+    // not something the firmware enforces here.
     if (doc["input_max_speed"].is<uint32_t>() || doc["input_max_accel"].is<uint32_t>() ||
         doc["input_max_jerk"].is<uint32_t>()) {
         float is = doc["input_max_speed"] | _state.config.input_max_speed_mm_s;
@@ -673,7 +680,7 @@ bool WebUI::applySettings(JsonDocument& doc, JsonDocument& resp) {
 
     // Stream speed-feed mode + overshoot clamp — accepted here too so the WS
     // ops (WS_OP_STREAM_MODE / WS_OP_OVERSHOOT) have a working HTTP-fallback
-    // route. Session-only volatile state, same semantics as the WS ops. :3
+    // route. Session-only volatile state, same semantics as the WS ops.
     if (doc["stream_speed_mode"].is<int>()) {
         uint8_t m = (uint8_t)(doc["stream_speed_mode"] | (int)_state.stream_speed_mode);
         if (m > SystemState::SPEED_VELOCITY_MATCHED) m = SystemState::SPEED_VELOCITY_MATCHED;
@@ -685,7 +692,7 @@ bool WebUI::applySettings(JsonDocument& doc, JsonDocument& resp) {
 
     // Max rail length (mm) — rail-length-agnostic ceiling. Apply BEFORE the
     // window/default-range clamps below so they validate against the new rail.
-    // Sanity-bound 10..2000mm. Pushed live to the motor + mapper. :3
+    // Sanity-bound 10..2000mm. Pushed live to the motor + mapper.
     if (doc["max_rail"].is<float>() || doc["max_rail"].is<int>()) {
         float rail = doc["max_rail"] | _state.config.max_rail_mm;
         if (rail < 10.0f)   rail = 10.0f;
@@ -715,12 +722,12 @@ bool WebUI::applySettings(JsonDocument& doc, JsonDocument& resp) {
     // never did, which starved two things that read state.config instead of
     // the mapper: SlopSyncHubService's 0x0081 machine-config STATE broadcast
     // (so the UI's ground-truth rail band always redisplayed the stale
-    // boot-time window after a live edit — CLAUDE.md 3's Ground Truth
-    // Doctrine was doing exactly its job, faithfully reporting a firmware
-    // value that was itself wrong) and pumpConfigGeneration()'s change
-    // detector (so the SlopSync protocol cfg_gen never advanced for a window
-    // edit either). The physical machine was never the bug; its own STATE
-    // channel lying about itself was. :3
+    // boot-time window after a live edit — the Ground Truth Doctrine
+    // (docs/canon/DOCTRINE.md) was doing exactly its job, faithfully
+    // reporting a firmware value that was itself wrong) and
+    // pumpConfigGeneration()'s change detector (so the SlopSync protocol
+    // cfg_gen never advanced for a window edit either). The physical machine
+    // was never the bug; its own STATE channel lying about itself was.
     _state.config.min_position_mm = _mapper.getMinMm();
     _state.config.max_position_mm = _mapper.getMaxMm();
 
@@ -736,7 +743,7 @@ bool WebUI::applySettings(JsonDocument& doc, JsonDocument& resp) {
     // Echo post-clamp values — BOTH speed and accel read back from the driver.
     // The driver hard-clamps accel lower (20000) than config_api.h's ceiling
     // (100000); echoing the config value here reported a number the motor was
-    // never going to run at. Ground Truth Doctrine: echo what was APPLIED. :3
+    // never going to run at. Ground Truth Doctrine: echo what was APPLIED.
     resp["ok"] = true;
     resp["range_min"] = _mapper.getMinMm();
     resp["range_max"] = _mapper.getMaxMm();
@@ -760,9 +767,8 @@ bool WebUI::applySettings(JsonDocument& doc, JsonDocument& resp) {
     return true;
 }
 
-// ============================================================================
-// applyMove — the WS_OP_MOVE mutation (SlopSync 0x0100 move → handleCommand)
-// ============================================================================
+// ---- applyMove --------------------------------------------------------------
+// The WS_OP_MOVE mutation (SlopSync 0x0100 move → handleCommand).
 
 bool WebUI::applyMove(JsonDocument& doc, JsonDocument& resp) {
     if (!_state.homed) {
@@ -773,25 +779,27 @@ bool WebUI::applyMove(JsonDocument& doc, JsonDocument& resp) {
 
     float pos = doc["position"] | 0.0f;
     // Per-request bypass wins; otherwise honor the stored WS_OP_BYPASS state so
-    // the toggle actually does what its echo claims. :3
+    // the toggle actually does what its echo claims.
     bool bypass = doc["bypass_limits"] | (bool)_state.bypass_limits;
     if (bypass) {
-        // Bypass the window but NOT the machine: clamp to the effective physical
-        // ceiling (measured stroke once homed, else configured max rail). :3
+        // Bypass the window but NOT the machine: clamp to the effective
+        // physical ceiling (measured stroke once homed, else configured max
+        // rail).
         pos = constrain(pos, 0.0f, _motor.effectiveCeilingMm());
     } else {
         pos = constrain(pos, _mapper.getMinMm(), _mapper.getMaxMm());
     }
     bool stream = doc["stream"] | true;
 
-    // Sole-Caller doctrine (CLAUDE.md §2): the UI is an input source — it MUST
-    // submit intents to the MotionArbiter, never call the driver directly. This
-    // is also what makes a manual move honor the USER speed/accel limit set: a
-    // MANUAL point move (deadline 0) plans AT the user ceiling instead of lunging
-    // at the driver's raw max_speed. MANUAL bypasses the window inside the arbiter
-    // (already clamped above per bypass_limits), and bypasses homed/pause gates.
-    // Deferred push: applyMove runs on Core 0; the arbiter dispatches to FAS on
-    // Core 1 (drained by processDeferred every ~1ms). :3
+    // Sole-caller rule (docs/canon/DOCTRINE.md): the UI is an input source — it
+    // must submit intents to the MotionArbiter, never call the driver
+    // directly. This is also what makes a manual move honor the USER
+    // speed/accel limit set: a MANUAL point move (deadline 0) plans AT the
+    // user ceiling instead of lunging at the driver's raw max_speed. MANUAL
+    // bypasses the window inside the arbiter (already clamped above per
+    // bypass_limits), and bypasses homed/pause gates.
+    // Deferred push: applyMove runs on Core 0; the arbiter dispatches to FAS
+    // on Core 1 (drained by processDeferred every ~1ms).
     if (_arbiter) {
         MotionIntent intent = {};
         intent.source          = MotionSource::MANUAL;
@@ -802,8 +810,8 @@ bool WebUI::applyMove(JsonDocument& doc, JsonDocument& resp) {
         _arbiter->submitDeferred(intent);
     } else {
         // No direct-driver fallback — the sole-caller rule is compile-enforced
-        // now (MotorDriver motion methods are arbiter-only). An unwired arbiter
-        // is a boot-order bug; refuse loudly instead of bypassing every gate. :3
+        // (MotorDriver motion methods are arbiter-only). An unwired arbiter is
+        // a boot-order bug; refuse loudly instead of bypassing every gate.
         SLOGW("ui", "applyMove REFUSED: MotionArbiter not wired — no motion dispatched");
         resp["ok"] = false;
         resp["error"] = "Motion arbiter unavailable";
@@ -817,8 +825,8 @@ bool WebUI::applyMove(JsonDocument& doc, JsonDocument& resp) {
     // submitted, before the shaft has actually traveled there. A stream started
     // in the same breath as a manual move therefore plans toward the endpoint
     // rather than the mid-flight sample. The sampler overwrites it within one
-    // 4.2 ms tick either way. The live posdot/readout reads _motor.getPosition()
-    // directly. :3
+    // 4.2 ms tick either way. The live posdot/readout reads
+    // _motor.getPosition() directly.
     _state.actual_position_mm.store(pos, std::memory_order_relaxed);
     _state.commanded_target_mm = pos;
 
@@ -831,18 +839,8 @@ bool WebUI::applyMove(JsonDocument& doc, JsonDocument& resp) {
     return true;
 }
 
-
-
-
-
-
-// ============================================================================
-// ============================================================================
-//
-
-// ============================================================================
-// applyDriverConfig — shared driver-config mutation (used by the WS op)
-// ============================================================================
+// ---- applyDriverConfig ------------------------------------------------------
+// Shared driver-config mutation, used by the WS op.
 
 bool WebUI::applyDriverConfig(JsonDocument& doc, JsonDocument& resp) {
     if (doc["reset"] | false) {
@@ -878,9 +876,8 @@ bool WebUI::applyDriverConfig(JsonDocument& doc, JsonDocument& resp) {
     return true;
 }
 
-// ============================================================================
-// handleApiServo — AIM servo drive over RS485 Modbus (Configure pane + card)
-// ============================================================================
+// ---- handleApiServo ---------------------------------------------------------
+// AIM servo drive over RS485 Modbus (Configure pane + card).
 //
 // GET  → live telemetry snapshot + config-register mirror + runtime geometry.
 // POST → {"scan":true}                    start async register scan
@@ -895,7 +892,7 @@ bool WebUI::applyDriverConfig(JsonDocument& doc, JsonDocument& resp) {
 // restore, save-to-flash, then verify by rescan (Ground Truth — the UI adopts
 // the mirror, never its own request). Writing steps/rev (reg 0x0B) recalcs the
 // firmware's steps/mm LIVE and forces a re-home: the step<->mm meaning of the
-// position reference is void across an electronic-gear change. No reboot. :3
+// position reference is void across an electronic-gear change. No reboot.
 
 #if defined(FEATURE_RS485_MODBUS)
 // Live-tunable while running: speed/accel ceilings, loop gains, feed-forward,
@@ -993,7 +990,7 @@ void WebUI::handleApiServo() {
         return;
     }
 
-    // ---- POST ----------------------------------------------------------------
+    // ---- POST ---------------------------------------------------------------
     JsonDocument doc;
     if (deserializeJson(doc, _httpServer->arg("plain"))) {
         _httpServer->send(400, "application/json", "{\"error\":\"Invalid JSON\"}");
@@ -1006,11 +1003,11 @@ void WebUI::handleApiServo() {
 
     if (doc["scan"] | false) _servoModbus->requestConfigScan();
 
-    // ---- Setpoint-framing bench knobs (Modbus motion bring-up) ---------------
+    // ---- Setpoint-framing bench knobs ---------------------------------------
     // POST {"sp_fc": 0x78, "sp_le": false} — retunes the motion setpoint frame
     // LIVE (no reflash) so the bench can hunt this drive variant's real "write
     // target position" framing. The executor's keep-alive stream immediately
-    // starts using the new shape; watch bus.sp_ok in the GET response. :3
+    // starts using the new shape; watch bus.sp_ok in the GET response.
     if (doc["sp_fc"].is<int>() || doc["sp_le"].is<bool>()) {
         uint8_t fc = doc["sp_fc"] | (int)_servoModbus->setpointFc();
         bool    le = doc["sp_le"] | _servoModbus->setpointLe();
@@ -1018,20 +1015,20 @@ void WebUI::handleApiServo() {
     }
     // {"sp_noecho": true} — BENCH ONLY: fire-and-forget setpoints, watchdog
     // blind. For discovering whether the drive executes position frames it
-    // never echoes. Operator hand on the power switch. :3
+    // never echoes. Operator hand on the power switch.
     if (doc["sp_noecho"].is<bool>()) {
         _servoModbus->setSetpointNoEcho(doc["sp_noecho"].as<bool>());
     }
     // {"bench_pair":{"val":100,"low_first":true}} — BENCH ONLY: one atomic
     // FC 0x10 write of a 32-bit value to the position pair 0x0C/0x0D
-    // (torn-half-protection hypothesis). Keep |val| tiny (~100 counts). :3
+    // (torn-half-protection hypothesis). Keep |val| tiny (~100 counts).
     if (doc["bench_pair"].is<JsonObject>()) {
         int32_t v  = doc["bench_pair"]["val"] | 0;
         bool    lf = doc["bench_pair"]["low_first"] | true;
         resp["bench_pair_queued"] = _servoModbus->queuePositionPair(v, lf);
     }
     // {"sp_period_ms": 8} — BENCH: live A/B of the delta-stream cadence
-    // (clamped 4..50ms inside ServoModbus). :3
+    // (clamped 4..50ms inside ServoModbus).
     if (doc["sp_period_ms"].is<int>()) {
         _servoModbus->setSpPeriodMs((uint8_t)doc["sp_period_ms"].as<int>());
         SLOGI("ui", "ServoBench: sp_period_ms -> %u", (unsigned)_servoModbus->spPeriodMs());
@@ -1069,7 +1066,7 @@ void WebUI::handleApiServo() {
         // position pair 0x0C/0x0D ONLY — for the operator-present trigger-
         // discovery experiment (which register write fires an incremental
         // move on this drive variant, since 0x7B/0x78 proved absent). Keep
-        // experimental deltas tiny (±100 counts ≈ 0.12mm). :3
+        // experimental deltas tiny (±100 counts ≈ 0.12mm).
         bool bench_pos = doc["bench_pos"] | false;
         bool pos_reg   = (reg == 0x0C || reg == 0x0D);
         if (reg >= ServoModbus::CFG_REG_COUNT || (pos_reg && !bench_pos) ||
@@ -1160,9 +1157,8 @@ void WebUI::handleApiServo() {
 #endif // FEATURE_RS485_MODBUS
 }
 
-// ============================================================================
-// handleApiPattern (HTTP GET + POST) — delegates to applyPattern
-// ============================================================================
+// ---- handleApiPattern -------------------------------------------------------
+// HTTP GET + POST — delegates to applyPattern.
 
 // Advanced-mode readback (post-clamp device truth — Ground Truth Doctrine).
 // Base values always; the six modifier blocks only when include_mods (the GET
@@ -1232,9 +1228,8 @@ void WebUI::handleApiPattern() {
     _httpServer->send(200, "application/json", json);
 }
 
-// ============================================================================
-// handleApiPatternPresets — NVS-backed user-preset store (fray-d port)
-// ============================================================================
+// ---- handleApiPatternPresets ------------------------------------------------
+// NVS-backed user-preset store.
 //
 // One NVS string key "list" in namespace "advpreset" holds a JSON array of
 // {name, def} objects. `def` is the opaque advanced-mode snapshot the UI
@@ -1270,7 +1265,7 @@ void WebUI::handleApiPatternPresets() {
         return;
     }
 
-    // ---- POST: save or delete -------------------------------------------------
+    // ---- POST: save or delete -----------------------------------------------
     JsonDocument body;
     if (deserializeJson(body, _httpServer->arg("plain"))) {
         _httpServer->send(400, "application/json", "{\"ok\":false,\"error\":\"Invalid JSON\"}");
@@ -1342,19 +1337,17 @@ void WebUI::handleApiPatternPresets() {
     _httpServer->send(200, "application/json", json);
 }
 
-// ============================================================================
-// applyPattern — shared mutation used by HTTP POST /api/pattern AND WS op
-// ============================================================================
+// ---- applyPattern -----------------------------------------------------------
+// Shared mutation, reached via WS_OP_GEN_CFG/WS_OP_GEN_RUN (SlopSync) — HTTP
+// POST /api/pattern is retired (see the 410 stub in init()).
 
 bool WebUI::applyPattern(JsonDocument& doc, JsonDocument& resp) {
     // gen_rate_tick_hz is the ONLY field this handler touches that ConfigStore
-    // persists. The old code mutated it but never saved — so a changed generator
-    // tick rate silently reverted on the next boot (part of the "NVS works for
-    // some settings, not others" bug). We now persist it, but ONLY when it
-    // actually changes: applyPattern is also the hot path for live speed/depth/
-    // stroke slider streaming while a pattern runs, and blindly saving on every
-    // call would pound NVS flash into an early grave. Guarding on a real change
-    // means one write per rate-rung change, zero writes during live scrubbing. :3
+    // persists, and only when it actually changes: applyPattern is also the
+    // hot path for live speed/depth/stroke slider streaming while a pattern
+    // runs, and blindly saving on every call would pound NVS flash into an
+    // early grave. Guarding on a real change means one write per rate-rung
+    // change, zero writes during live scrubbing.
     bool persistTick = false;
     if (doc["rate_tick"].is<int>()) {
         int r = doc["rate_tick"];
@@ -1371,9 +1364,9 @@ bool WebUI::applyPattern(JsonDocument& doc, JsonDocument& resp) {
     if (doc["sensation"].is<float>()) _patternEngine.setSensation(doc["sensation"]);
     if (doc["pattern"].is<int>())     _patternEngine.setPattern(doc["pattern"]);
 
-    // ---- Advanced mode (fray-d port) — all fields optional/additive ---------
-    // ap_reset FIRST: preset application layers deltas on the fray-d reset
-    // baseline in a single atomic request ({ap_reset:true, <deltas>, ap_mods}).
+    // ---- Advanced mode — all fields optional/additive -----------------------
+    // ap_reset FIRST: preset application layers deltas on the reset baseline
+    // in a single atomic request ({ap_reset:true, <deltas>, ap_mods}).
     if (doc["ap_reset"].is<bool>() && doc["ap_reset"].as<bool>())
         _patternEngine.resetAdvanced();
 
@@ -1505,9 +1498,7 @@ void WebUI::handleApiLog() {
     applogSerialQuiet();
 }
 
-// ============================================================================
-// handleApiMachine (GET) / handleApiMachineCommit (POST) — Phase 2
-// ============================================================================
+// ---- handleApiMachine (GET) / handleApiMachineCommit (POST) -----------------
 //
 // GET  /api/machine         → {backend_active, backend_code, home_style,
 //                               bus:{...}}   (bus only when Modbus is compiled
@@ -1519,7 +1510,7 @@ void WebUI::handleApiLog() {
 //   change what boots next. On a genuine change we respond first, THEN
 //   schedule ESP.restart() ~500ms later (WebUI::update(), same deferred
 //   pattern OtaService uses for its post-response reboot) so the 200 actually
-//   reaches the browser before the device drops off the network. :3
+//   reaches the browser before the device drops off the network.
 
 void WebUI::handleApiMachine() {
     JsonDocument doc;
@@ -1574,18 +1565,18 @@ void WebUI::handleApiMachineCommit() {
 #if defined(FEATURE_RS485_MODBUS)
     // Modbus -> FAS: best-effort factory-restore the drive's RUNTIME baud
     // back to 19200 BEFORE the reboot. Why: FAS mode's own dual-baud probe
-    // would still happily find the drive at 115200 (Phase 1 plumbing), so
-    // this isn't required for FAS to work — it's here so the FAS boot path
-    // looks byte-identical to pre-Phase-3 behavior (telemetry lands on the
-    // first probe attempt instead of the fallback one) and so power-cycling
-    // the drive later doesn't matter either way (factory 19200 is already
-    // where we left it). BEST-EFFORT + accepted race: reprogramBaud() is
-    // normally init-context-only (it bypasses ServoModbus's update() state
-    // machine and touches the port directly), but servoBusTask is still
-    // alive here — we're one commit away from ESP.restart() torching all of
-    // this state anyway, so a garbled frame or two on the way out is a
-    // non-issue. A failed restore just means the NEXT boot's probe finds
-    // 115200 and moves on — not a bricked link either way. :3
+    // would still happily find the drive at 115200, so this isn't required
+    // for FAS to work — it's here so the FAS boot path looks byte-identical
+    // to prior behavior (telemetry lands on the first probe attempt instead
+    // of the fallback one) and so power-cycling the drive later doesn't
+    // matter either way (factory 19200 is already where we left it).
+    // BEST-EFFORT + accepted race: reprogramBaud() is normally
+    // init-context-only (it bypasses ServoModbus's update() state machine
+    // and touches the port directly), but servoBusTask is still alive here —
+    // we're one commit away from ESP.restart() torching all of this state
+    // anyway, so a garbled frame or two on the way out is a non-issue. A
+    // failed restore just means the NEXT boot's probe finds 115200 and moves
+    // on — not a bricked link either way.
     if (_machine_backend == 1 && backend == 0 && _servoModbus) {
         bool ok = _servoModbus->reprogramBaud(19200);
         SLOGI("ui", "backend commit: best-effort baud restore to 19200 %s",
@@ -1600,15 +1591,13 @@ void WebUI::handleApiMachineCommit() {
     _machineReboot.arm(500, "motion-backend change commit");
 }
 
-// ============================================================================
-// handleApiHomeOverride (POST) — HTTP twin of WS_OP_HOME_OVERRIDE
-// ============================================================================
-// {"on":true,"stroke":250} / {"on":false}. Added during Modbus bench bring-up:
-// the WS route required console-spawned WebSocket clients, and every one of
-// those leaked a socket that went half-open on the next device reboot —
-// feeding the exact ws-send-blocks-HTTP-mutex wedge the [STALL] watchdog
-// caught at 158s. Plain HTTP request/response leaks nothing. Same state
-// transitions as the WS case, byte for byte. :3
+// ---- handleApiHomeOverride (POST) — HTTP twin of WS_OP_HOME_OVERRIDE --------
+// {"on":true,"stroke":250} / {"on":false}. Exists because the WS route
+// requires a console-spawned WebSocket client, and every one of those leaked
+// a socket that went half-open on the next device reboot — feeding the exact
+// ws-send-blocks-HTTP-mutex wedge the [STALL] watchdog catches. Plain HTTP
+// request/response leaks nothing. Same state transitions as the WS case,
+// byte for byte.
 
 void WebUI::handleApiHomeOverride() {
     JsonDocument doc;
@@ -1644,10 +1633,9 @@ void WebUI::handleApiHomeOverride() {
     _httpServer->send(200, "application/json", json);
 }
 
-// ============================================================================
-// handleApiSlopMotion (HTTP GET + POST) — SlopMotion live-tuning ROUGH-IN
-// ============================================================================
-// Curl-driven bench tuning until the WebUI refactor grows a proper card.
+// ---- handleApiSlopMotion (HTTP GET + POST) ----------------------------------
+// SlopMotion live-tuning rough-in: curl-driven bench tuning until the WebUI
+// refactor grows a proper card.
 // POST writes the sm_tune_* fields in SystemState (Core 0 single-writer);
 // the Core-1 sampler pushes them into the engine every tick, so a change is
 // live within ~1 ms. Values are clamped HERE and the response echoes the
@@ -1674,7 +1662,7 @@ void WebUI::handleApiSlopMotion() {
     // Canonical wire names for slopmotion::CurvePolicy — same table-and-bound
     // discipline, same sim parity. "follow" is FollowClient: honor the
     // sender's declared family, which with no wire signaling yet resolves to
-    // C2, i.e. pre-0.8.0 behavior byte for byte.
+    // C2.
     static const char* kCurvePolicyNames[] = { "follow", "c1", "c2" };
     static constexpr uint8_t kCurvePolicyCount =
         uint8_t(sizeof(kCurvePolicyNames) / sizeof(kCurvePolicyNames[0]));
@@ -1687,11 +1675,11 @@ void WebUI::handleApiSlopMotion() {
         auto clampf = [](float v, float lo, float hi) {
             return v < lo ? lo : (v > hi ? hi : v);
         };
-        // jmax is a mm-domain PERSISTED limit as of fw 2.1.47 (settings key
-        // input_max_jerk) — what lives here is only the normalized bench
-        // OVERRIDE, exactly like vmax_ovr/amax_ovr. Legacy key "jmax" is still
-        // accepted as an alias so bench scripts written against the rough-in
-        // keep working; both mean "0 = derive from the mm limit / window span".
+        // jmax is a mm-domain PERSISTED limit (settings key input_max_jerk) —
+        // what lives here is only the normalized bench OVERRIDE, exactly like
+        // vmax_ovr/amax_ovr. Legacy key "jmax" is still accepted as an alias
+        // so bench scripts written against the rough-in keep working; both
+        // mean "0 = derive from the mm limit / window span".
         if (doc["jmax_ovr"].is<float>())          // 0 = derive from mm limits
             _state.sm_tune_jmax_ovr = clampf(doc["jmax_ovr"], 0.0f, 2000000.0f);
         else if (doc["jmax"].is<float>())         // deprecated alias
@@ -1750,9 +1738,9 @@ void WebUI::handleApiSlopMotion() {
         // so "c1" reproduces the sender's own span exactly, where the quintic
         // necessarily rounds off the acceleration step the script has at each
         // knot. "follow" (engine default) honors a declared family; no wire
-        // signaling exists yet, so today it resolves to C2 — pre-0.8.0
-        // behavior byte for byte. Strings only, mirroring the sim's
-        // /api/slopmotion vocabulary so the two responses diff directly.
+        // signaling exists yet, so today it resolves to C2. Strings only,
+        // mirroring the sim's /api/slopmotion vocabulary so the two
+        // responses diff directly.
         if (doc["curve_policy"].is<const char*>()) {
             const char* p = doc["curve_policy"];
             if      (strcasecmp(p, "follow") == 0) _state.sm_tune_curve_policy = 0;
@@ -1782,8 +1770,9 @@ void WebUI::handleApiSlopMotion() {
         // Settle grace. The ENGINE field is MICROSECONDS; this API talks
         // MILLISECONDS because that is the unit an operator thinks in (same
         // convention as chase_dense_ms above) — convert at the boundary, here,
-        // and nowhere else. Clamped [0, 200] ms: 0 = pre-0.4 brake-on-expiry,
-        // 200 ms is already far past any sane stream interval.
+        // and nowhere else. Clamped [0, 200] ms: 0 = brake-on-expiry (the
+        // original behavior), 200 ms is already far past any sane stream
+        // interval.
         if (doc["settle_grace_ms"].is<float>())
             _state.sm_tune_settle_grace_us =
                 (uint32_t)(clampf(doc["settle_grace_ms"], 0.0f, 200.0f) * 1000.0f);
@@ -1792,9 +1781,10 @@ void WebUI::handleApiSlopMotion() {
         // DC centering of a degraded band: keep the achieved stroke symmetric
         // about the COMMANDED midpoint when the machine cannot deliver the full
         // amplitude on the clock. ON is the engine default; OFF restores the
-        // slopmotion 0.4.0 contract. The gain is a feel dial (0..1, and NOT
-        // monotone — see SystemState) clamped to the engine's own range here so
-        // the GET echo below is the value Core 1 will actually push.
+        // original (no-centering) contract. The gain is a feel dial (0..1,
+        // and NOT monotone — see SystemState) clamped to the engine's own
+        // range here so the GET echo below is the value Core 1 will actually
+        // push.
         if (doc["wave_centering"].is<bool>())
             _state.sm_tune_centering = doc["wave_centering"].as<bool>();
         if (doc["wave_centering_gain"].is<float>())
@@ -1803,9 +1793,9 @@ void WebUI::handleApiSlopMotion() {
         // RFC-008 handoff sanity guard — the Fritsch-Carlson chord factor k
         // used to bound an inbound segment's end velocity against the FOLLOWING
         // segment's chord. 1.5 is the shape-preserving bound (engine default);
-        // 0 turns the guard OFF, which is the machine half of the M5d A/B
-        // against the MFP plugin's own limiter. Clamped to the engine's [0, 8]
-        // here too, so the GET echo is what Core 1 will actually push.
+        // 0 turns the guard OFF — useful for A/B against the MFP plugin's own
+        // limiter. Clamped to the engine's [0, 8] here too, so the GET echo
+        // is what Core 1 will actually push.
         if (doc["handoff_k"].is<float>())
             _state.sm_tune_handoff_k = clampf(doc["handoff_k"], 0.0f, 8.0f);
         if (doc["reset_stats"].as<bool>()) {
@@ -1889,7 +1879,7 @@ void WebUI::handleApiSlopMotion() {
     // "effective" is what Core 1 ACTUALLY pushed into the engine last tick —
     // post-derivation, post-override, post-clamp. All three are read back from
     // the sm_eff_* back-channel, never recomputed here, so this block cannot
-    // lie about the machine's real ceilings (ground-truth doctrine). :3
+    // lie about the machine's real ceilings (ground-truth doctrine).
     JsonObject eff = resp["effective"].to<JsonObject>();
     eff["vmax"] = _state.sm_eff_vmax;   // normalized units/s (window span = 1)
     eff["amax"] = _state.sm_eff_amax;
@@ -1935,9 +1925,7 @@ void WebUI::handleApiSlopMotion() {
     _httpServer->send(200, "application/json", json);
 }
 
-// ============================================================================
-// handleCommand — dispatch 0x10 CMD ops from WS control plane
-// ============================================================================
+// ---- handleCommand — dispatch 0x10 CMD ops from WS control plane ------------
 // Called for each command frame by whichever plane received it. The caller
 // handles JSON parsing of the payload, then passes the parsed doc here.
 // Returns true on success; payload_out always gets "ok" set.
@@ -1945,7 +1933,7 @@ void WebUI::handleApiSlopMotion() {
 bool WebUI::handleCommand(uint8_t op, JsonDocument& payload_in,
                            JsonDocument& payload_out) {
     switch (op) {
-    // ---- Config mutations ------------------------------------------------
+    // ---- Config mutations ---------------------------------------------------
     case WS_OP_SET_WINDOW:
     case WS_OP_SET_SPEED:
     case WS_OP_SET_ACCEL:
@@ -1957,12 +1945,12 @@ bool WebUI::handleCommand(uint8_t op, JsonDocument& payload_in,
     case WS_OP_GEN_RUN:
         return applyPattern(payload_in, payload_out);
 
-    // ---- Driver config ---------------------------------------------------
+    // ---- Driver config ------------------------------------------------------
     case WS_OP_CLEAR_FAULT:
         // No driver fault readback exists on this build — nothing to clear or
         // verify. Re-apply the current driver config (on the AIM step/dir drive
         // this is effectively a no-op refresh, not a register rewrite) but say
-        // honestly that no fault was cleared. :3
+        // honestly that no fault was cleared.
         {
             JsonDocument dummy;
             dummy["reset"] = false;  // don't reset, just re-apply current config
@@ -1980,7 +1968,7 @@ bool WebUI::handleCommand(uint8_t op, JsonDocument& payload_in,
         return true;
     }
 
-    // ---- Motion commands -------------------------------------------------
+    // ---- Motion commands ----------------------------------------------------
     case WS_OP_MOVE:
         return applyMove(payload_in, payload_out);
 
@@ -2011,7 +1999,7 @@ bool WebUI::handleCommand(uint8_t op, JsonDocument& payload_in,
             // moveTo()/streamTo()/streamToSteps() all bail on `if (!_homed)`, so
             // no pulses ever leave the board. forceHomeState() energizes the FAS
             // outputs and zeroes position so a bench move genuinely drives step/
-            // dir out to a (possibly disconnected) motor. :3
+            // dir out to a (possibly disconnected) motor.
             _motor.forceHomeState(true);
             SLOGI("ui", "WS Home-Override: faking homed for bench test — no motor required :3");
             payload_out["measured_stroke"] = stroke;
@@ -2078,11 +2066,10 @@ bool WebUI::handleCommand(uint8_t op, JsonDocument& payload_in,
     }
 
     case WS_OP_BYPASS: {
-        // Bypass limits toggle — STORED in SystemState (previously this echoed
-        // the requested value without storing anything, so the echo was a lie
-        // and there was no truth to resync on reconnect). applyMove honors it
-        // when a move doesn't carry a per-request bypass field; GET_CFG exposes
-        // it. Session-only, never persisted. :3
+        // Bypass limits toggle — STORED in SystemState so there is a truth to
+        // resync on reconnect. applyMove honors it when a move doesn't carry
+        // a per-request bypass field; GET_CFG exposes it. Session-only, never
+        // persisted.
         bool val = payload_in["on"] | false;
         _state.bypass_limits = val;
         SLOGW("ui", "WS bypass-limits: %s", val ? "ON (window clamp bypassed, physical ceiling still enforced)" : "OFF");
@@ -2093,7 +2080,7 @@ bool WebUI::handleCommand(uint8_t op, JsonDocument& payload_in,
     }
 
     case WS_OP_STREAM_MODE: {
-        // v0.4 stream speed-feed A/B: 0=ceiling-pegged, 1=velocity-matched.
+        // Stream speed-feed mode: 0=ceiling-pegged, 1=velocity-matched.
         // Core 1's streamSamplerTask reads _state.stream_speed_mode each cruise
         // feed; a plain volatile write is sufficient (single producer here).
         uint8_t m = (uint8_t)(payload_in["mode"] | (int)_state.stream_speed_mode);
@@ -2106,7 +2093,7 @@ bool WebUI::handleCommand(uint8_t op, JsonDocument& payload_in,
     }
 
     case WS_OP_OVERSHOOT: {
-        // Monotone (Fritsch–Carlson) tangent clamp on the v4 gradient cubic.
+        // Monotone (Fritsch–Carlson) tangent clamp on the gradient cubic.
         // Core 1's streamSamplerTask pushes _state.interp_clamp_overshoot into
         // the interpolator each tick; a plain volatile write is sufficient.
         bool on = payload_in["on"] | (bool)_state.interp_clamp_overshoot;
@@ -2117,13 +2104,13 @@ bool WebUI::handleCommand(uint8_t op, JsonDocument& payload_in,
         return true;
     }
 
-    // ---- Read-only: get_cfg snapshot -------------------------------------
+    // ---- Read-only: get_cfg snapshot ----------------------------------------
     case WS_OP_GET_CFG: {
         // Full config snapshot — same shape as /api/settings GET
         payload_out["range_min"] = _mapper.getMinMm();
         payload_out["range_max"] = _mapper.getMaxMm();
         // Ground truth: read back from the driver (post-internal-clamp), same
-        // as the applySettings echo. :3
+        // as the applySettings echo.
         payload_out["max_speed"] = (uint32_t)_motor.getMaxSpeed();
         payload_out["accel"] = (uint32_t)_motor.getAcceleration();
         payload_out["blend_mode"] = _motor.getBlendMode();

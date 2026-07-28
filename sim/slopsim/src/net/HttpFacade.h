@@ -1,18 +1,14 @@
 #pragma once
 
-// ============================================================================
-// HttpFacade — the sim's minimal HTTP surface. Doctrine: 100% of CONTROL goes
-// through SlopSync; HTTP exists only to deliver the page and a couple of
-// read-only JSON views:
-//   GET /api/capabilities  — discovery (slopsync_port/proto, features.slopsync)
-//   GET /api/slopmotion    — the "sync" counter block the probe cross-checks
-//   GET /                  — the built webui (webui/dist/index.html) when
-//                            --webui points at it (M5; optional now)
-//
-// cpp-httplib runs its own listener thread. It NEVER touches the hub or the
-// engine: the sim thread deposits a FacadeStats copy under a mutex
-// (MachineSim::facadeStats), and handlers format JSON from that copy.
-// ============================================================================
+// HttpFacade — the sim's minimal HTTP surface: discovery JSON and the built
+// webui, never control.
+// Constraints:
+//   100% of CONTROL goes through SlopSync; HTTP exists only to deliver the
+//   page and read-only JSON views (GET /api/capabilities, GET /api/slopmotion,
+//   GET / when --webui points at a built bundle).
+//   cpp-httplib runs its own listener thread. It NEVER touches the hub or the
+//   engine: the sim thread deposits a FacadeStats copy under a mutex
+//   (MachineSim::facadeStats), and handlers format JSON from that copy.
 
 #include <cstdint>
 #include <memory>

@@ -1,5 +1,4 @@
-// ============================================================================
-// test_main.cpp — doctest behavioral tests for the CATALOG_READY dual-plane
+// test_slopsync_readygate — the CATALOG_READY dual-plane
 // readiness gate (SPEC §8.4 / RFC-015) and NACK↔frame correlation (RFC-001).
 //
 // The problem being tested: a hub used to push retained STATE the instant a
@@ -18,7 +17,6 @@
 // can deliberately NOT declare readiness.
 //
 // Suite ids: RG-xx = readiness gate.
-// ============================================================================
 
 #define DOCTEST_CONFIG_IMPLEMENT_WITH_MAIN
 #include <doctest/doctest.h>
@@ -195,11 +193,10 @@ std::array<std::byte, limits::etag_bytes> miniEtag() {
 
 }  // namespace
 
-// ============================================================================
-// RG-01 — a session with no cached etag gets NOTHING on the data plane until
+// ---- RG-01 ------------------------------------------------------------------
+// a session with no cached etag gets NOTHING on the data plane until
 // it declares CATALOG_READY; the retained push then fires (not a spool: the
 // value was never queued anywhere, it just stayed in the hub's channel table).
-// ============================================================================
 TEST_CASE("RG-01: retained STATE is withheld until CATALOG_READY, then flows") {
     Catalog32 cat;
     REQUIRE(conformance::buildMiniCatalog(cat));
@@ -237,11 +234,10 @@ TEST_CASE("RG-01: retained STATE is withheld until CATALOG_READY, then flows") {
     }
 }
 
-// ============================================================================
-// RG-02 — HELLO carrying a MATCHING etag is proof of possession: ready
+// ---- RG-02 ------------------------------------------------------------------
+// HELLO carrying a MATCHING etag is proof of possession: ready
 // immediately, retained push in the very same update() the WELCOME went out
 // in. This is the 99% reconnect case and MUST keep its zero added latency.
-// ============================================================================
 TEST_CASE("RG-02: a matching HELLO etag is instantly ready — retained STATE rides the WELCOME tick") {
     Catalog32 cat;
     REQUIRE(conformance::buildMiniCatalog(cat));
@@ -262,11 +258,10 @@ TEST_CASE("RG-02: a matching HELLO etag is instantly ready — retained STATE ri
     CHECK(countType(replies, FrameType::STATE) == 1);  // same tick — no extra round trip
 }
 
-// ============================================================================
-// RG-03 — the gate covers the CONTROL plane: a pre-READY INTENT is refused
+// ---- RG-03 ------------------------------------------------------------------
+// the gate covers the CONTROL plane: a pre-READY INTENT is refused
 // NOT_READY and NEVER applied (§11.5(2) — it has not adopted the safety latch).
 // The same intent succeeds once readiness is declared.
-// ============================================================================
 TEST_CASE("RG-03: a pre-READY INTENT is NACKed NOT_READY and not applied; post-READY it applies") {
     Catalog32 cat;
     REQUIRE(conformance::buildMiniCatalog(cat));
@@ -307,10 +302,9 @@ TEST_CASE("RG-03: a pre-READY INTENT is NACKed NOT_READY and not applied; post-R
     CHECK(del.applyIntentCallCount == 1);
 }
 
-// ============================================================================
-// RG-04 — CATALOG_READY is IDEMPOTENT (a client on a lossy binding re-sends it
+// ---- RG-04 ------------------------------------------------------------------
+// CATALOG_READY is IDEMPOTENT (a client on a lossy binding re-sends it
 // until STATE arrives), and a wrong-size payload is dropped like any raw frame.
-// ============================================================================
 TEST_CASE("RG-04: duplicate CATALOG_READY frames are harmless; a wrong-size one is dropped") {
     Catalog32 cat;
     REQUIRE(conformance::buildMiniCatalog(cat));
@@ -351,11 +345,10 @@ TEST_CASE("RG-04: duplicate CATALOG_READY frames are harmless; a wrong-size one 
     CHECK(del.sessionsLeft == 0);
 }
 
-// ============================================================================
-// RG-05 — §8.5 degraded operation: a client declaring a DIFFERENT etag still
+// ---- RG-05 ------------------------------------------------------------------
+// §8.5 degraded operation: a client declaring a DIFFERENT etag still
 // becomes ready (it told us what it operates against, and append-only layouts
 // make its prefix-parse safe), but the divergence is recorded on the session.
-// ============================================================================
 TEST_CASE("RG-05: a mismatched CATALOG_READY etag still opens the plane, flagged degraded") {
     Catalog32 cat;
     REQUIRE(conformance::buildMiniCatalog(cat));
@@ -381,11 +374,10 @@ TEST_CASE("RG-05: a mismatched CATALOG_READY etag still opens the plane, flagged
     CHECK(countType(after, FrameType::STATE) == 1);   // still served (§8.5)
 }
 
-// ============================================================================
-// RG-06 — a client that PINGs forever but never READYs is ALIVE, so no
+// ---- RG-06 ------------------------------------------------------------------
+// a client that PINGs forever but never READYs is ALIVE, so no
 // liveness path would ever reap it; catalog_ready_timeout_ms GOODBYEs it with
 // READY_TIMEOUT and frees the slot. A session that DID ready is never reaped.
-// ============================================================================
 TEST_CASE("RG-06: a never-READY session is GOODBYE'd READY_TIMEOUT; a ready one is untouched") {
     Catalog32 cat;
     REQUIRE(conformance::buildMiniCatalog(cat));
@@ -437,12 +429,11 @@ TEST_CASE("RG-06: a never-READY session is GOODBYE'd READY_TIMEOUT; a ready one 
     CHECK(sawReadyTimeout);
 }
 
-// ============================================================================
-// RG-07 — RFC-001: a NACK carries `intent_seq`, the frame-header seq of the
+// ---- RG-07 ------------------------------------------------------------------
+// RFC-001: a NACK carries `intent_seq`, the frame-header seq of the
 // inbound frame it refuses, so a client pipelining several frames on ONE
 // channel can tell which one was rejected. `intent_id` alone cannot: an
 // UNKNOWN_CHANNEL on a SUBSCRIBE/PUBLISH has no intent id at all.
-// ============================================================================
 TEST_CASE("RG-07: NACKs echo the refused frame's header seq in intent_seq") {
     Catalog32 cat;
     REQUIRE(conformance::buildMiniCatalog(cat));
@@ -473,12 +464,11 @@ TEST_CASE("RG-07: NACKs echo the refused frame's header seq in intent_seq") {
     CHECK(n->intent_id == 12);
 }
 
-// ============================================================================
-// RG-08 — end-to-end with the library's own Client: a cold connect (no cached
+// ---- RG-08 ------------------------------------------------------------------
+// end-to-end with the library's own Client: a cold connect (no cached
 // etag) fetches the catalog, verifies the hash locally, declares readiness on
 // its own, and reaches LIVE. This is the loop every external client must
 // mirror, so it is asserted from BOTH sides: hub-side ready bit + client LIVE.
-// ============================================================================
 TEST_CASE("RG-08: Client cold-connects, self-declares CATALOG_READY, and reaches LIVE") {
     class CountingDelegate final : public ClientDelegate {
     public:

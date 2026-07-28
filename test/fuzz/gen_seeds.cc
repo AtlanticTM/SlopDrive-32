@@ -1,4 +1,4 @@
-// Seed-corpus generator for the SlopSync fuzz targets.
+// gen_seeds — seed-corpus generator for the SlopSync fuzz targets.
 //
 // Fuzzing raw random bytes against a deterministic CBOR profile mostly
 // produces immediate rejects — the profile rejects on the FIRST byte for most
@@ -63,9 +63,7 @@ static void emitPrefixed(const char* target, uint8_t prefix, std::span<const std
     emit(target, std::span<const std::byte>(v.data(), v.size()));
 }
 
-// ============================================================================
-// Catalogs
-// ============================================================================
+// ---- Catalogs ---------------------------------------------------------------
 
 static std::array<std::byte, 64 * 1024> g_buf;
 
@@ -173,9 +171,8 @@ static void seedCatalogs() {
     emitPrefixed("cbor", 1, std::span<const std::byte>(miniBytes.data(), miniBytes.size()));
 }
 
-// ============================================================================
-// Control-plane messages (selector byte matches fuzz_messages.cc's enum)
-// ============================================================================
+// ---- Control-plane messages -------------------------------------------------
+// Selector byte matches fuzz_messages.cc's enum.
 
 static void seedMessages() {
     std::array<std::byte, 2048> buf{};
@@ -448,9 +445,7 @@ static void seedMessages() {
     }
 }
 
-// ============================================================================
-// Bundles / blobs / frames / packed
-// ============================================================================
+// ---- Bundles / blobs / frames / packed --------------------------------------
 
 static void seedBundles() {
     for (size_t S : {size_t(4), size_t(6), size_t(8)}) {
@@ -605,14 +600,13 @@ static void seedPacked() {
     }
 }
 
-// ============================================================================
-// Regression seeds — the minimized inputs that crashed the library in this
-// gate's first pass. They live in the corpus so CI re-executes them on every
-// run (`-runs=0` replay is the cheap, deterministic half of the gate), and
-// they live HERE rather than as opaque committed blobs so the bytes are
-// readable and the reason is written down next to them. See test/fuzz/README
-// and the matching doctest cases named "RFC-028: ...".
-// ============================================================================
+// ---- Regression seeds -------------------------------------------------------
+// The minimized inputs that crashed the library in this gate's first pass.
+// They live in the corpus so CI re-executes them on every run (`-runs=0`
+// replay is the cheap, deterministic half of the gate), and they live HERE
+// rather than as opaque committed blobs so the bytes are readable and the
+// reason is written down next to them. See test/fuzz/README and the
+// matching doctest cases named "RFC-028: ...".
 static void seedRegressions() {
     // #1 CborReader::readTstr/readBstr length-check integer overflow.
     // 7B FF*8 = tstr claiming 2^64-1 bytes; `start + len` wrapped past the

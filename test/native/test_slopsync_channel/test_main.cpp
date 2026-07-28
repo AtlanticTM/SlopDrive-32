@@ -1,5 +1,4 @@
-// ============================================================================
-// test_main.cpp — doctest unit tests for slopsync-core's M4 channel-layer
+// test_slopsync_channel — slopsync-core's M4 channel-layer
 // building blocks:
 //   channel/intent_registry.hpp  (IntentRing, IngressRateLimiter — §9.3)
 //   channel/subscription.hpp     (SubscriptionTable, SubscriptionEntry — §10.2, §9.1)
@@ -19,7 +18,6 @@
 // conflation with zero queues, per both files' design notes), the test
 // wires them together itself — that wiring is exactly what a later
 // milestone's session engine will do for real.
-// ============================================================================
 
 #define DOCTEST_CONFIG_IMPLEMENT_WITH_MAIN
 #include <doctest/doctest.h>
@@ -54,9 +52,8 @@ std::vector<std::byte> fillBytes(size_t n, int fill) {
 }
 }  // namespace
 
-// ============================================================================
-// IntentRing — §9.3 idempotency ring.
-// ============================================================================
+// ---- IntentRing -------------------------------------------------------------
+// §9.3 idempotency ring.
 TEST_CASE("IntentRing: store/lookup roundtrip") {
     IntentRing<> ring;
     auto echo = bytesOf({0xDE, 0xAD, 0xBE, 0xEF});
@@ -141,9 +138,8 @@ TEST_CASE("IntentRing: an echo larger than kSlotCapacity is rejected, ring unmod
     CHECK(ring.lookup(2).has_value());
 }
 
-// ============================================================================
-// IngressRateLimiter — §9.3/§10.5 ingress rate limiting.
-// ============================================================================
+// ---- IngressRateLimiter -----------------------------------------------------
+// §9.3/§10.5 ingress rate limiting.
 TEST_CASE("IngressRateLimiter: 50 allowed in second one, 51st denied") {
     IngressRateLimiter limiter(50, /*nowMs=*/0);
     for (int i = 0; i < 50; ++i) {
@@ -182,9 +178,8 @@ TEST_CASE("IngressRateLimiter: burst then sustained pattern") {
     }
 }
 
-// ============================================================================
-// SubscriptionTable — §10.2 grants, §9.1 push pacing.
-// ============================================================================
+// ---- SubscriptionTable ------------------------------------------------------
+// §10.2 grants, §9.1 push pacing.
 TEST_CASE("SubscriptionTable: upsert-replaces semantics") {
     SubscriptionTable<> table;
     CHECK(table.upsert(0x0100, 10.0f, Priority::normal));
@@ -332,9 +327,8 @@ TEST_CASE("SubscriptionTable: remove() and iteration") {
     CHECK(seen == 2);
 }
 
-// ============================================================================
-// EventQueue — §9.4 bounded per-subscriber event queue.
-// ============================================================================
+// ---- EventQueue -------------------------------------------------------------
+// §9.4 bounded per-subscriber event queue.
 TEST_CASE("EventQueue: fill 16, push 17th -> oldest dropped, counter 1, FIFO order intact") {
     EventQueue<> q;
     REQUIRE(EventQueue<>::kDepth == 16);
@@ -379,9 +373,8 @@ TEST_CASE("EventQueue: an event larger than kSlotCapacity is rejected, queue unm
     CHECK(q.size() == 1);
 }
 
-// ============================================================================
-// RetainedStore — §9.1 hub-side retained STATE values.
-// ============================================================================
+// ---- RetainedStore ----------------------------------------------------------
+// §9.1 hub-side retained STATE values.
 TEST_CASE("RetainedStore: publish bumps seq monotonically; get returns latest bytes") {
     RetainedStore<> store;
 

@@ -1,5 +1,4 @@
-// ============================================================================
-// test_main.cpp — doctest unit tests for slopsync-core's data-plane + raw
+// test_slopsync_datastream — slopsync-core's data-plane + raw
 // wire layer: wire/stream_bundle.hpp, wire/packed/layout_codec.hpp,
 // channel/state_apply.hpp, wire/raw/{ping_pong,clock_frame,probe,ackmask,
 // beacon}.hpp.
@@ -11,7 +10,6 @@
 // BEACON/PROBE/PING have no assigned vector ids in the current manifest —
 // their round-trip checks below are plain byte-exact coverage, not a
 // numbered vector.
-// ============================================================================
 
 #define DOCTEST_CONFIG_IMPLEMENT_WITH_MAIN
 #include <doctest/doctest.h>
@@ -53,10 +51,9 @@ bool approxEq(float a, float b, float quantum) {
 
 }  // namespace
 
-// ============================================================================
-// D-01 — STATE/STREAM layout round-trip for every layout-class mini-catalog
+// ---- D-01 -------------------------------------------------------------------
+// STATE/STREAM layout round-trip for every layout-class mini-catalog
 // entry, via the runtime layout_codec (wire/packed/layout_codec.hpp).
-// ============================================================================
 TEST_CASE("D-01: safety (0x0003) round-trip — bitfield8 + u8/u32/u16 + appended modes") {
     Catalog32 cat;
     buildMiniCatalog(cat);
@@ -198,10 +195,9 @@ TEST_CASE("D-01: diag (0x0090) round-trip — signed i8/i16/i32 negative values,
     CHECK(approxEq(decoded[4], physical[4], 1e-5f));
 }
 
-// ============================================================================
-// D-02 — state_apply newest-wins (SPEC §9.1/§7.3): accept/reject by seq,
+// ---- D-02 -------------------------------------------------------------------
+// state_apply newest-wins (SPEC §9.1/§7.3): accept/reject by seq,
 // including the u16 wraparound case.
-// ============================================================================
 TEST_CASE("D-02: newest-wins — seq 10 accepted, then seq 9 rejected") {
     ShadowSlot slot;
     const std::array<std::byte, 3> payloadA = {std::byte{1}, std::byte{2}, std::byte{3}};
@@ -262,8 +258,8 @@ TEST_CASE("D-02: oversized payload is rejected with the capacity flag, shadow un
     CHECK(slot.size == limits::min_transport_payload);
 }
 
-// ============================================================================
-// D-03 — STATE-fit conformance check: every layout-class mini-catalog entry
+// ---- D-03 -------------------------------------------------------------------
+// STATE-fit conformance check: every layout-class mini-catalog entry
 // fits limits::min_transport_payload (242 B).
 //
 // M2b note: an oversized CatalogEntry USED to be mechanically unconstructible
@@ -272,7 +268,6 @@ TEST_CASE("D-02: oversized payload is rejected with the capacity flag, shadow un
 // half of D-03 lives in test_slopsync_conformance, which asserts both sides of
 // the 242 B boundary. This case keeps the fixture-side half: the shipped
 // fixture fits, and the comparison the CLI will run is the right one.
-// ============================================================================
 TEST_CASE("D-03: every mini-catalog layout entry fits the 242-byte STATE floor") {
     Catalog32 cat;
     buildMiniCatalog(cat);
@@ -292,7 +287,7 @@ TEST_CASE("D-03: every mini-catalog layout entry fits the 242-byte STATE floor")
     constexpr size_t kMaxPossibleLayoutBytes = CatalogEntry::kMaxFields * 4;
     CHECK(kMaxPossibleLayoutBytes > limits::min_transport_payload);
 
-    // ---- RFC-026 fixed-width string types ---------------------------------
+    // ---- RFC-026 fixed-width string types -----------------------------------
     // wireSize() used to end in `default: return 4`, so str16/str32/str64 all
     // reported 4 bytes — which silently shifted the offset of EVERY field
     // packed after one of them. Pin the real widths, and pin that a layout
@@ -333,8 +328,8 @@ TEST_CASE("D-03: the fit comparison itself, against synthetic sizes (243 over / 
     CHECK_FALSE(size_t(243) <= limits::min_transport_payload);
 }
 
-// ============================================================================
-// D-04 — BundleWriter: 240 Hz-spaced samples, byte-exact header + t_off
+// ---- D-04 -------------------------------------------------------------------
+// BundleWriter: 240 Hz-spaced samples, byte-exact header + t_off
 // array, sampleTimeUs correctness.
 //
 // NOTE ON SAMPLE COUNT (deviation from the literal "8 samples" brief):
@@ -350,7 +345,6 @@ TEST_CASE("D-03: the fit comparison itself, against synthetic sizes (243 over / 
 // within the cap) to check byte-exact 240 Hz-spaced encoding; D-05 below
 // uses the literal 8-sample/240 Hz case to prove the span cap correctly
 // REJECTS it.
-// ============================================================================
 TEST_CASE("D-04: BundleWriter — 5 samples @240Hz spacing, byte-exact header/t_off, sampleTimeUs") {
     constexpr uint32_t kTBase = 1000000;  // fixtures.hub_time_origin_us
     constexpr size_t kSampleSize = 6;
@@ -397,11 +391,10 @@ TEST_CASE("D-04: BundleWriter — 5 samples @240Hz spacing, byte-exact header/t_
     }
 }
 
-// ============================================================================
-// D-05 — bundle caps enforced: 33rd sample rejected, span > 20ms rejected,
+// ---- D-05 -------------------------------------------------------------------
+// bundle caps enforced: 33rd sample rejected, span > 20ms rejected,
 // out-span too small rejected, BundleView on a truncated buffer errors
 // (never crashes).
-// ============================================================================
 TEST_CASE("D-05: 33rd sample rejected purely by the n<=32 cap") {
     std::array<std::byte, 300> buf{};  // ample room; not the limiting factor
     BundleWriter w(buf, 0, 1);
@@ -489,11 +482,10 @@ TEST_CASE("D-05: BundleView on a truncated buffer errors, does not crash") {
     CHECK(view2.error() == DecodeError::Truncated);
 }
 
-// ============================================================================
-// D-06 — append-only evolution: a short 3-field prefix view reads diag's
+// ---- D-06 -------------------------------------------------------------------
+// append-only evolution: a short 3-field prefix view reads diag's
 // full 15-byte payload correctly, ignoring the trailing (unknown-to-it)
 // bytes (SPEC §5.4).
-// ============================================================================
 TEST_CASE("D-06: append-only prefix parse — 3-field view over diag's full 15-byte payload") {
     Catalog32 cat;
     buildMiniCatalog(cat);
@@ -528,9 +520,8 @@ TEST_CASE("D-06: append-only prefix parse — 3-field view over diag's full 15-b
     // for the reader to know they exist.
 }
 
-// ============================================================================
-// T-01 — CLOCK offset/RTT math, exact values.
-// ============================================================================
+// ---- T-01 -------------------------------------------------------------------
+// CLOCK offset/RTT math, exact values.
 TEST_CASE("T-01: computeClockSync exact values — t0=1000,t1=6000,t2=6500,t3=3500") {
     // offset = ((t1-t0)+(t2-t3))/2 = ((6000-1000)+(6500-3500))/2 = (5000+3000)/2 = 4000
     // rtt    = (t3-t0)-(t2-t1)           = (3500-1000)-(6500-6000) = 2500-500 = 2000
@@ -569,10 +560,9 @@ TEST_CASE("CLOCK request/reply byte-exact round-trip") {
     CHECK(replyDecoded.value().t2 == 6500);
 }
 
-// ============================================================================
-// T-02 — µs wraparound: BundleView.sampleTimeUs across the u32 wrap, and
+// ---- T-02 -------------------------------------------------------------------
+// µs wraparound: BundleView.sampleTimeUs across the u32 wrap, and
 // computeClockSync with values straddling it.
-// ============================================================================
 TEST_CASE("T-02: BundleView.sampleTimeUs wraps correctly across 0xFFFFFFFF") {
     constexpr uint32_t kTBase = 0xFFFFFFF0u;
     constexpr size_t kSampleSize = 1;
@@ -614,9 +604,8 @@ TEST_CASE("T-02: computeClockSync with t0/t2/t3 straddling the u32 wrap still yi
     CHECK(s.rttUs == 72);
 }
 
-// ============================================================================
-// PING/PONG — SPEC §6.5.
-// ============================================================================
+// ---- PING/PONG --------------------------------------------------------------
+// SPEC §6.5.
 TEST_CASE("PING/PONG: empty PING payload, and PONG echoes a non-empty PING payload byte-exact") {
     std::array<std::byte, 4> out{};
     CHECK(encodePing(std::span<const std::byte>{}, out) == 0);
@@ -628,9 +617,8 @@ TEST_CASE("PING/PONG: empty PING payload, and PONG echoes a non-empty PING paylo
     CHECK(out[1] == std::byte{0xCD});
 }
 
-// ============================================================================
-// PROBE — SPEC §6.4.
-// ============================================================================
+// ---- PROBE ------------------------------------------------------------------
+// SPEC §6.4.
 TEST_CASE("PROBE: burst frame byte-exact — probe_index=5, zero-filled padding") {
     std::array<std::byte, 8> out{};
     out.fill(std::byte{0xEE});  // pre-fill with non-zero to prove padding gets zeroed
@@ -651,9 +639,8 @@ TEST_CASE("PROBE: burst frame byte-exact — probe_index=5, zero-filled padding"
     CHECK(decoded2.value() == 0x2A);
 }
 
-// ============================================================================
-// ACKMASK — SPEC §13.3.
-// ============================================================================
+// ---- ACKMASK ----------------------------------------------------------------
+// SPEC §13.3.
 TEST_CASE("ACKMASK: byte-exact round-trip — base_seq=100, mask=0x00000005") {
     AckMask m{100, 0x00000005u};
     std::array<std::byte, kAckMaskBytes> buf{};
@@ -699,9 +686,8 @@ TEST_CASE("ACKMASK: AckTracker record() + window slide + stale-drop") {
     CHECK(t.mask() == 0x80000000u);
 }
 
-// ============================================================================
-// BEACON — SPEC §13.7.
-// ============================================================================
+// ---- BEACON -----------------------------------------------------------------
+// SPEC §13.7.
 TEST_CASE("BEACON: byte-exact round-trip — boot_id=0xB007CAFE, etag=0102..08, pairing_open=true") {
     BeaconFrame b;
     b.boot_id = 0xB007CAFE;
@@ -729,8 +715,8 @@ TEST_CASE("BEACON: byte-exact round-trip — boot_id=0xB007CAFE, etag=0102..08, 
     CHECK(decoded.value().pairing_open == true);
 }
 
-// ============================================================================
-// M4a / RFC-028 — BundleView::parse enforces the t_off ORDERING rules, not
+// ---- M4a / RFC-028 ----------------------------------------------------------
+// BundleView::parse enforces the t_off ORDERING rules, not
 // just the span.
 //
 // Why this suite exists: BundleWriter has always refused to EMIT a bundle
@@ -744,7 +730,6 @@ TEST_CASE("BEACON: byte-exact round-trip — boot_id=0xB007CAFE, etag=0102..08, 
 //
 // These bundles are HAND-FORGED byte by byte: BundleWriter cannot produce
 // them, which is exactly why the parser is the thing under test.
-// ============================================================================
 
 namespace {
 

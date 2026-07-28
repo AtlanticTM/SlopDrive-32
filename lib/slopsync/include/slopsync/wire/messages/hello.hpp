@@ -91,6 +91,7 @@ struct HelloMsg {
     uint32_t deadman_wish_ms = 0;
 };
 
+// ---- Encode -----------------------------------------------------------------
 // Encodes into `out`; returns bytes written, or 0 on any failure (bad sizes,
 // or the writer running out of room / catching an ordering mistake).
 inline size_t encodeHello(const HelloMsg& m, std::span<std::byte> out) {
@@ -148,6 +149,7 @@ inline size_t encodeHello(const HelloMsg& m, std::span<std::byte> out) {
     return w.size();
 }
 
+// ---- Decode -----------------------------------------------------------------
 // Decodes `in` into a HelloMsg. Unknown keys are skipped per §4.3, never an
 // error. `client_kind`/`client_name` are zero-copy views into `in`.
 inline Result<HelloMsg, DecodeError> decodeHello(std::span<const std::byte> in) {

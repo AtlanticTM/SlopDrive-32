@@ -43,7 +43,7 @@ public:
     static constexpr uint32_t kStallEvictMs = 2000;
     static constexpr size_t kMuteBufferedBytes = 64 * 1024;
 
-    // ---- ITransport (hub thread only) --------------------------------------
+    // ---- ITransport (hub thread only) ---------------------------------------
     bool open() override { return true; }
     void close() override;
     bool write(std::span<const std::byte> frame) override;
@@ -57,7 +57,7 @@ public:
         return p;
     }
 
-    // ---- Connection-thread side (marshaling producers) ---------------------
+    // ---- Connection-thread side (marshaling producers) ----------------------
     void onOpen(ix::WebSocket* ws, const std::string& peer);
     void onClose();
     void pushRx(const void* data, size_t len);

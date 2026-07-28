@@ -1,3 +1,6 @@
+// BenchTui — ANSI console redraw implementation (see BenchTui.h for the
+// keymap/threading contract).
+
 #include "tui/BenchTui.h"
 
 #include <cstdio>

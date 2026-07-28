@@ -1,5 +1,4 @@
-// ============================================================================
-// test_main.cpp — doctest unit tests for slopsync-core's remaining
+// test_slopsync_messages — slopsync-core's remaining
 // control-plane message codecs: subscribe.hpp, grant.hpp, intent.hpp,
 // echo.hpp, event.hpp, nack.hpp, goodbye.hpp, pair.hpp, probe_report.hpp.
 //
@@ -23,7 +22,6 @@
 //       encoder produces byte-identical output on a repeat call
 // (c) is the brief's byte-exact hand-derived goldens, done once each for
 // INTENT (set-speed) and NACK (NOT_CONTROLLER alone).
-// ============================================================================
 
 #define DOCTEST_CONFIG_IMPLEMENT_WITH_MAIN
 #include <doctest/doctest.h>
@@ -100,9 +98,7 @@ std::vector<std::byte> spliceUnknownKey(std::span<const std::byte> encoded) {
 
 }  // namespace
 
-// ============================================================================
-// SUBSCRIBE (§6.6)
-// ============================================================================
+// ---- SUBSCRIBE (§6.6) -------------------------------------------------------
 TEST_CASE("SUBSCRIBE: full round-trip (2 wishes) + determinism") {
     SubscribeMsg m{};
     m.subscriptions_count = 2;
@@ -135,9 +131,8 @@ TEST_CASE("SUBSCRIBE: minimal (empty wish array) — no top-level optionals to o
     CHECK(dec.value().subscriptions_count == 0);
 }
 
-// ============================================================================
-// UNSUBSCRIBE (§6.6) — bare channel_id array under the same key 10.
-// ============================================================================
+// ---- UNSUBSCRIBE (§6.6) -----------------------------------------------------
+// bare channel_id array under the same key 10.
 TEST_CASE("UNSUBSCRIBE: full round-trip (3 channel ids) + determinism") {
     UnsubscribeMsg m{};
     m.channel_count = 3;
@@ -166,9 +161,8 @@ TEST_CASE("UNSUBSCRIBE: minimal (empty channel array)") {
     CHECK(dec.value().channel_count == 0);
 }
 
-// ============================================================================
-// GRANT (§10.2) — reuses WELCOME's Grant struct.
-// ============================================================================
+// ---- GRANT (§10.2) ----------------------------------------------------------
+// reuses WELCOME's Grant struct.
 TEST_CASE("GRANT: full round-trip (2 grants) + determinism") {
     GrantMsg m{};
     m.grants_count = 2;
@@ -199,9 +193,7 @@ TEST_CASE("GRANT: minimal (empty grants array) — no top-level optionals to omi
     CHECK(dec.value().grants_count == 0);
 }
 
-// ============================================================================
-// INTENT (§9.3)
-// ============================================================================
+// ---- INTENT (§9.3) ----------------------------------------------------------
 TEST_CASE("INTENT: full round-trip (precondition + takeover present) + determinism") {
     IntentMsg m{};
     m.channel_id = 5;
@@ -323,9 +315,7 @@ TEST_CASE("INTENT golden (c): set-speed channel=0x0084 intent_id=1 value{1:400.0
     CHECK(dec.value().value[0].value.f32_val == doctest::Approx(400.0f));
 }
 
-// ============================================================================
-// ECHO (§9.3)
-// ============================================================================
+// ---- ECHO (§9.3) ------------------------------------------------------------
 TEST_CASE("ECHO: full round-trip (2 applied fields) + determinism") {
     EchoMsg m{};
     m.intent_id = 9;
@@ -365,9 +355,7 @@ TEST_CASE("ECHO: minimal (empty applied map) — ECHO has no top-level optionals
     CHECK(dec.value().applied_count == 0);
 }
 
-// ============================================================================
-// EVENT (§9.4)
-// ============================================================================
+// ---- EVENT (§9.4) -----------------------------------------------------------
 TEST_CASE("EVENT: full round-trip (body + seq_of_state present) + determinism") {
     EventMsg m{};
     m.channel_id = 7;
@@ -414,9 +402,7 @@ TEST_CASE("EVENT: minimal (no body, no seq_of_state) — map shrinks from 5 to 3
     CHECK_FALSE(dec.value().has_body);
 }
 
-// ============================================================================
-// NACK (§16.1)
-// ============================================================================
+// ---- NACK (§16.1) -----------------------------------------------------------
 TEST_CASE("NACK: full round-trip (all optionals present) + determinism") {
     NackMsg m{};
     m.code = NackCode::BUSY;
@@ -481,9 +467,7 @@ TEST_CASE("NACK golden (c) + minimal (b): code=NOT_CONTROLLER alone") {
     CHECK_FALSE(d.has_retry_after_ms);
 }
 
-// ============================================================================
-// GOODBYE (§6.8)
-// ============================================================================
+// ---- GOODBYE (§6.8) ---------------------------------------------------------
 TEST_CASE("GOODBYE: full round-trip (detail present) + determinism") {
     GoodbyeMsg m{};
     m.code = NackCode::SESSION_EVICTED;
@@ -517,14 +501,12 @@ TEST_CASE("GOODBYE: minimal (detail absent) — map shrinks from 2 to 1 pair") {
     CHECK_FALSE(dec.value().has_detail);
 }
 
-// ============================================================================
-// PAIR_REQ / PAIR_GRANT (§12.2, RFC-027).
+// ---- PAIR_REQ / PAIR_GRANT (§12.2, RFC-027). --------------------------------
 //
 // `pin_proof` BECAME OPTIONAL at M4b and that absence is a MEANING, not a
 // degenerate case: a PAIR_REQ with only an instance id is a KNOCK (mode (a)/(c)
 // — a device with one button and no display asking to be let in). Both shapes
 // are pinned here.
-// ============================================================================
 TEST_CASE("PAIR_REQ: round-trip + determinism, PIN-proof form") {
     PairReqMsg m{};
     m.instance_id = {B(0x01), B(0x02), B(0x03), B(0x04), B(0x05), B(0x06), B(0x07), B(0x08)};
@@ -576,12 +558,11 @@ TEST_CASE("PAIR_GRANT: round-trip + determinism (no optional fields exist to omi
     CHECK(dec.value().roles == 1);
 }
 
-// ============================================================================
-// PROBE_REPORT (§6.4) — no top-level optionals; the sub-map's four fields
+// ---- PROBE_REPORT (§6.4) ----------------------------------------------------
+// no top-level optionals; the sub-map's four fields
 // are always all present (mirrors WELCOME's `limits` treatment). "Minimal"
 // here means the natural all-zero report a client would send if it measured
 // nothing, not a shorter map.
-// ============================================================================
 TEST_CASE("PROBE_REPORT: full round-trip (populated sub-fields) + determinism") {
     ProbeReportMsg m{};
     m.probe_result = ProbeResult{/*bytes_received=*/8192, /*span_ms=*/1200,
@@ -614,9 +595,8 @@ TEST_CASE("PROBE_REPORT: all-zero sub-fields still decode correctly") {
     CHECK(dec.value().probe_result.rtt_ms == 0);
 }
 
-// ============================================================================
-// (d) Unknown-key tolerance (§4.3): every family, one shared splice helper.
-// ============================================================================
+// ---- (d) Unknown-key tolerance (§4.3) ---------------------------------------
+// every family, one shared splice helper.
 TEST_CASE("Unknown-key tolerance (§4.3): an out-of-range top-level key is skipped, "
           "decode still succeeds, for every message family in this suite") {
     SUBCASE("SUBSCRIBE") {
@@ -740,8 +720,8 @@ TEST_CASE("Unknown-key tolerance (§4.3): an out-of-range top-level key is skipp
     }
 }
 
-// ============================================================================
-// EVENT `body` (40) — the v1.0 GRAMMAR FIX, asserted at the byte level.
+// ---- EVENT `body` (40) ------------------------------------------------------
+// the v1.0 GRAMMAR FIX, asserted at the byte level.
 //
 // Kind-specific fields used to sit at the TOP level of the EVENT map and
 // therefore drew their keys from the GLOBAL cbor_keys space. That made
@@ -753,7 +733,6 @@ TEST_CASE("Unknown-key tolerance (§4.3): an out-of-range top-level key is skipp
 //
 // `event_kind` (33) and `seq_of_state` (34) deliberately STAY at the top
 // level: those are protocol framing, not payload.
-// ============================================================================
 TEST_CASE("EVENT: kind-specific fields ride the scoped `body` sub-map, key 40, last in order") {
     EventMsg m{};
     m.channel_id = 8;
@@ -789,8 +768,8 @@ TEST_CASE("EVENT: kind-specific fields ride the scoped `body` sub-map, key 40, l
     CHECK(d.value().body[0].value.u64_val == 9);
 }
 
-// ============================================================================
-// WELCOME (§6.3) — RFC-046/RFC-048 additive keys: ws_port(46), ipv4(47), and
+// ---- WELCOME (§6.3) ---------------------------------------------------------
+// RFC-046/RFC-048 additive keys: ws_port(46), ipv4(47), and
 // identity's hub_instance_id (identity_keys 5). All three are 0/unset by
 // default and OMITTED from the wire in that state (§6.3: "0 means absent" for
 // ws_port/ipv4; an absent identity map is simply not emitted) — additive-safe
@@ -799,7 +778,6 @@ TEST_CASE("EVENT: kind-specific fields ride the scoped `body` sub-map, key 40, l
 // suite exercised encodeWelcome/decodeWelcome directly (WELCOME is otherwise
 // covered only through session-level HELLO/reconnect integration tests), so
 // this is also the first direct unit coverage of the codec.
-// ============================================================================
 TEST_CASE("WELCOME: ws_port/ipv4/hub_instance_id round-trip when all three are set") {
     WelcomeMsg m{};
     m.session_id = 42;

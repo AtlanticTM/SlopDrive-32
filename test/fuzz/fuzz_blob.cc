@@ -1,4 +1,5 @@
-// Target: BLOB_CHUNK header + ChunkReassembler (wire/blob_chunks.hpp).
+// fuzz_blob — target: BLOB_CHUNK header + ChunkReassembler
+// (wire/blob_chunks.hpp).
 //
 // Reassembly across chunks is where allocation bugs live, and this header is
 // the one place `total_bytes` (RFC-028's know-the-size-before-you-allocate

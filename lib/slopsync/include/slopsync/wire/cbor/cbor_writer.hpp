@@ -44,11 +44,11 @@ public:
 
     // Bytes written so far, or 0 if any write has failed (overflow or an
     // out-of-order key) — callers never have to check failed() separately
-    // before trusting size() as the "how much did I write" answer.
+    // before trusting size() as the "how much was written" answer.
     size_t size() const { return _failed ? 0 : _pos; }
     bool failed() const { return _failed; }
 
-    // ---- Containers -------------------------------------------------------
+    // ---- Containers ---------------------------------------------------------
     // Definite-length only: the count is written up front and there is no
     // closing marker. The writer tracks how many key/value (map) or element
     // (array) slots remain at each open depth and pops automatically the
@@ -66,7 +66,7 @@ public:
         return *this;
     }
 
-    // ---- Map keys -----------------------------------------------------
+    // ---- Map keys -----------------------------------------------------------
     // A registry CborKey, or (for provisional/local sub-key spaces not yet
     // in registry.yaml — see wire/messages/welcome.hpp) a raw key number.
     // Both funnel through the same sorted-ascending / duplicate check.
@@ -75,7 +75,7 @@ public:
     }
     CborWriter& key(uint64_t rawKey) { return keyRaw(rawKey); }
 
-    // ---- Scalars ------------------------------------------------------
+    // ---- Scalars ------------------------------------------------------------
     CborWriter& uintVal(uint64_t v) {
         writeHead(0, v);
         consumeOne();

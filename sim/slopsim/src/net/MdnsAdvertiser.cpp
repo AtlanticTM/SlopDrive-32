@@ -1,3 +1,6 @@
+// MdnsAdvertiser — Windows native-responder implementation (see
+// MdnsAdvertiser.h for the discovery contract).
+
 #include "net/MdnsAdvertiser.h"
 
 #ifdef _WIN32

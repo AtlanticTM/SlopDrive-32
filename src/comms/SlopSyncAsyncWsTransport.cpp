@@ -162,6 +162,40 @@ bool SlopSyncAsyncWsTransport::write(std::span<const std::byte> frame) {
     return false;
 }
 
+uint8_t SlopSyncAsyncWsTransport::pollCongestionLevel(uint32_t nowMs) {
+    // Severe: reuses write()'s existing stall bookkeeping directly rather
+    // than inventing a second timer -- see the header comment.
+    if (_ctrlStallSinceMs != 0) {
+        _aboveSinceMs = 0;
+        _belowSinceMs = 0;
+        _congestionLevel = 2;
+        return _congestionLevel;
+    }
+
+    const uint32_t id = _clientId.load(std::memory_order_relaxed);
+    AsyncWebSocketClient* c = (id != 0 && _ws != nullptr) ? _ws->client(id) : nullptr;
+    const uint32_t q = c != nullptr ? uint32_t(c->queueLen()) : 0;
+    const uint32_t pct = (q * 100u) / uint32_t(WS_MAX_QUEUED_MESSAGES);
+
+    if (pct > 50) {
+        _belowSinceMs = 0;
+        if (_aboveSinceMs == 0) _aboveSinceMs = nowMs;
+        if (uint32_t(nowMs - _aboveSinceMs) >= kCongestedSustainMs) _congestionLevel = 1;
+    } else if (pct < 20) {
+        _aboveSinceMs = 0;
+        if (_belowSinceMs == 0) _belowSinceMs = nowMs;
+        if (uint32_t(nowMs - _belowSinceMs) >= kRecoveredSustainMs) _congestionLevel = 0;
+    } else {
+        // The dead zone between the two bands: hold whatever level is
+        // already active rather than resetting toward either one on a
+        // single sample -- this is what makes the hysteresis actually
+        // hysteresis instead of a debounced instant threshold.
+        _aboveSinceMs = 0;
+        _belowSinceMs = 0;
+    }
+    return _congestionLevel;
+}
+
 std::optional<slopsync::FrameBuffer> SlopSyncAsyncWsTransport::read() {
     // Consumer side of the SPSC ring (hub task). ACQUIRE on the tail pairs with
     // the producer's RELEASE store in pushRx: it is what guarantees the frame's
@@ -194,6 +228,13 @@ void SlopSyncAsyncWsTransport::attachClient(uint32_t id) {
     _rxHead.store(0, std::memory_order_relaxed);
     _rxTail.store(0, std::memory_order_relaxed);
     _ctrlStallSinceMs = 0;
+    // A fresh client starts clear -- the hysteresis timers are hub-task-only
+    // state (like _ctrlStallSinceMs above) but this write happens before the
+    // hub task can observe the new clientId, so there is no live poller to
+    // race.
+    _congestionLevel = 0;
+    _aboveSinceMs = 0;
+    _belowSinceMs = 0;
     _rxDrops.store(0, std::memory_order_relaxed);
     _txDataDrops.store(0, std::memory_order_relaxed);
     _txCtrlFails.store(0, std::memory_order_relaxed);
@@ -394,6 +435,23 @@ void SlopSyncAsyncWsPort::loop() {
             SLOGW("slopsync", "slot %d client#%u vanished without an event — reaping",
                   i, unsigned(id));
             detachSlot(i);
+        }
+    }
+
+    // §10.3: feed each attached slot's real congestion signal into the hub's
+    // own coalescing/shedding engine (Hub::setCongestionLevel — previously
+    // wired for the in-process/sim binding only; see
+    // SlopSyncAsyncWsTransport::pollCongestionLevel()'s header comment).
+    // Attach-only: a slot with no live client has nothing to congest, and a
+    // slot whose attach/detach is still pending this tick either has no
+    // clientId yet or is about to lose the hub's slot mapping the calls
+    // above already resolved.
+    if (_hub) {
+        const uint32_t nowMs = millis();
+        for (int i = 0; i < int(kSlots); ++i) {
+            if (!_attached[i].load(std::memory_order_relaxed)) continue;
+            const uint8_t level = _slots[i].pollCongestionLevel(nowMs);
+            _hub->setCongestionLevel(_slots[i], level);
         }
     }
 }

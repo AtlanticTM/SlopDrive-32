@@ -508,6 +508,13 @@ public:
     // §10.4 step 4 eviction clock runs).
     void setCongestionLevel(size_t slotIdx, uint8_t level);
 
+    // Overload for a real binding's own port/pump loop, which holds an
+    // ITransport& (its own bookkeeping), never the hub's internal slot index.
+    // Resolves the slot by transport identity, the same lookup
+    // detachTransport() uses. No-op if `t` is not currently attached to any
+    // slot (nothing to congest).
+    void setCongestionLevel(ITransport& t, uint8_t level);
+
     // ---- M5: network probe (§6.4) -------------------------------------------
     // The client's most recently received PROBE_REPORT for the session in
     // `slotIdx`, nullopt if none has arrived yet. M5 scope is deliberately

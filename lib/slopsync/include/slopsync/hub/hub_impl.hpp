@@ -3236,6 +3236,12 @@ inline void Hub::setCongestionLevel(size_t slotIdx, uint8_t level) {
     if (level < 2) _slots[slotIdx].criticalStalling = false;
 }
 
+inline void Hub::setCongestionLevel(ITransport& t, uint8_t level) {
+    Slot* slot = attachedSlotFor(t);
+    if (!slot) return;
+    setCongestionLevel(size_t(slot - _slots.data()), level);
+}
+
 inline void Hub::trackCriticalSend(Slot& slot, bool sendOk, uint32_t nowMs) {
     if (slot.congestionLevel < 2) {
         slot.criticalStalling = false;

@@ -291,20 +291,31 @@ public:
     std::vector<ClientSessionState> stateHistory;
     std::map<uint16_t, std::vector<std::byte>> lastStateByChannel;
     std::map<uint16_t, int> stateCountByChannel;
+    // Every seq observed per channel, in receipt order — S-11 asserts this is
+    // monotonic non-decreasing (never-reordered) across a coalesced burst.
+    std::map<uint16_t, std::vector<uint16_t>> seqHistoryByChannel;
     std::vector<RecordedEcho> echoes;
     std::vector<RecordedNack> nacks;
     std::vector<uint16_t> droppedIntentIds;
     std::vector<RecordedPairGrant> pairGrants;
+    // Every EVENT received, in receipt order, bytes intact — EVENT never
+    // coalesces (S-11), so this stays a full list, not a last-value map.
+    std::vector<std::vector<std::byte>> events;
 
     void onStateChange(ClientSessionState s) override { stateHistory.push_back(s); }
 
-    void onState(uint16_t channel_id, uint16_t, std::span<const std::byte> payload) override {
+    void onState(uint16_t channel_id, uint16_t seq, std::span<const std::byte> payload) override {
         lastStateByChannel[channel_id] = std::vector<std::byte>(payload.begin(), payload.end());
         ++stateCountByChannel[channel_id];
+        seqHistoryByChannel[channel_id].push_back(seq);
     }
 
     void onEcho(uint16_t intent_id, const IntentValueMap& applied, uint16_t cfg_gen) override {
         echoes.push_back(RecordedEcho{intent_id, applied, cfg_gen});
+    }
+
+    void onEvent(uint16_t /*channel_id*/, std::span<const std::byte> encodedPayload) override {
+        events.emplace_back(encodedPayload.begin(), encodedPayload.end());
     }
 
     void onNack(const NackMsg& n) override {
@@ -711,6 +722,144 @@ TEST_CASE("S-08: congestion shedding decimates background before normal/critical
         hub.update(clock.nowUs());
 
         CHECK(hub.sessionCount() == 0);  // GOODBYE SESSION_EVICTED, slot freed
+    }
+}
+
+// ============================================================================
+// S-11 — STATE congestion coalescing is last-value-wins (LEDGER "Morning
+// ruling batch" item 1, 2026-07-28). RetainedStore already holds exactly one
+// value per channel and pumpStatePacing() always reads it fresh at send time
+// (see retained_store.hpp/subscription.hpp's own design notes) — no queue
+// ever exists to stack duplicates in. S-08 above proves the shedDecision()
+// COUNTS; this suite proves the CORRECTNESS invariants a count can't show:
+// the final value is bit-exact, seq order is never violated, every channel's
+// final value survives even a fully-Dropped congestion window once it
+// clears, and EVENT never coalesces or drops under the same congestion this
+// throttles STATE under. This is the same hub-side mechanism
+// SlopSyncAsyncWsPort::loop() now feeds from the real WS queue watermark
+// (src/comms/SlopSyncAsyncWsTransport.cpp) — previously wired for the
+// in-process/sim binding only.
+// ============================================================================
+TEST_CASE("S-11: STATE congestion coalescing is last-value-wins, never reordered, never permanently lost") {
+    Catalog32 catalog;
+    safetyCatalog(catalog);
+    ManualClock clock;
+    XorShift32 hubRng(3001);
+    SafetyHubDelegate hubDelegate;
+    Hub hub(catalog, clock, hubRng, hubDelegate);
+    hubDelegate.hub = &hub;
+
+    InProcessLink link(clock, hubRng);
+    REQUIRE(hub.attachTransport(link.endpointA()));
+    XorShift32 rng(3101);
+    TestClientDelegate delegate;
+    Client client(makeIdentity(9, true), link.endpointB(), clock, rng, delegate);
+    client.addSubscriptionWish(0x0090, 2.0f, Priority::background);   // diag
+    client.addSubscriptionWish(0x0082, 10.0f, Priority::normal);      // motion-status
+    client.addSubscriptionWish(0x008A, 0.0f, Priority::normal);       // anomalies (EVENT)
+    client.addSubscriptionWish(channels::safety, 0.0f, Priority::critical);
+
+    REQUIRE(client.connect());
+    pump(hub, clock, {&client}, 6);
+    REQUIRE(client.state() == ClientSessionState::LIVE);
+
+    size_t slot = findSlotForSession(hub, client.sessionId());
+    REQUIRE(slot != size_t(-1));
+
+    // §9.1's push-on-grant freebie, drained before congestion is set — same
+    // reasoning as S-08: a never-shed first push must not be mistaken for a
+    // coalesced one.
+    {
+        auto diagPayload = makeDiagPayload();
+        auto motionPayload = makeMotionStatusPayload(0);
+        hub.publishState(0x0090, std::span<const std::byte>(diagPayload));
+        hub.publishState(0x0082, std::span<const std::byte>(motionPayload));
+        pump(hub, clock, {&client}, 1, 600000);
+    }
+
+    SUBCASE("burst to one channel under severe congestion: bit-exact final value, seq never regresses") {
+        hub.setCongestionLevel(slot, 2);  // normal priority -> Decimate4x (§10.4 row 14)
+
+        constexpr int kBurst = 16;
+        for (int i = 1; i <= kBurst; ++i) {
+            auto motionPayload = makeMotionStatusPayload(uint8_t(i));
+            hub.publishState(0x0082, std::span<const std::byte>(motionPayload));
+            pump(hub, clock, {&client}, 1, 600000);  // one due-opportunity per iteration
+        }
+
+        // Fewer than half the burst actually crossed the wire (Decimate4x) —
+        // the point being proven is not the count (S-08 already covers that)
+        // but that whichever ones did arrive are correct and in order.
+        CHECK(delegate.stateCountByChannel[0x0082] < kBurst);
+        CHECK(delegate.stateCountByChannel[0x0082] > 0);
+
+        const auto& lastPayload = delegate.lastStateByChannel[0x0082];
+        REQUIRE(lastPayload.size() == 2);
+        CHECK(uint8_t(lastPayload[0]) == uint8_t(kBurst));  // last-value-wins, exact bytes
+
+        const auto& seqs = delegate.seqHistoryByChannel[0x0082];
+        for (size_t i = 1; i < seqs.size(); ++i) {
+            CHECK(seqIsNewer(seqs[i], seqs[i - 1]));  // never delivered out of order
+        }
+
+        // Recovery: once congestion clears, the FINAL retained value is not
+        // stranded behind the Decimate4x counter forever — the very next due
+        // opportunity delivers it (changePending stays true until a send
+        // actually lands, see pumpStatePacing's pr->lastSeq bookkeeping).
+        hub.setCongestionLevel(slot, 0);
+        pump(hub, clock, {&client}, 1, 600000);
+        REQUIRE(delegate.lastStateByChannel[0x0082].size() == 2);
+        CHECK(uint8_t(delegate.lastStateByChannel[0x0082][0]) == uint8_t(kBurst));
+    }
+
+    SUBCASE("interleaved multi-channel burst: every channel's final value survives, even one fully Dropped") {
+        hub.setCongestionLevel(slot, 2);  // background -> Drop entirely (row 13), normal -> Decimate4x (row 14)
+        const int diag0 = delegate.stateCountByChannel[0x0090];  // baseline: the pre-congestion priming push
+
+        constexpr int kBurst = 12;
+        for (int i = 1; i <= kBurst; ++i) {
+            auto diagPayload = makeDiagPayload();
+            diagPayload[0] = std::byte(i);
+            auto motionPayload = makeMotionStatusPayload(uint8_t(i));
+            hub.publishState(0x0090, std::span<const std::byte>(diagPayload));
+            hub.publishState(0x0082, std::span<const std::byte>(motionPayload));
+            pump(hub, clock, {&client}, 1, 600000);
+        }
+
+        // 0x0090 is background: every single one of these kBurst pushes was
+        // Dropped (delta since the pre-congestion priming push is zero).
+        CHECK(delegate.stateCountByChannel[0x0090] - diag0 == 0);
+
+        // Congestion clears; both channels' CURRENT (latest-published) value
+        // must still reach the client — a Dropped channel is never a
+        // permanently lost one, only a deferred one (§10.4's own framing).
+        hub.setCongestionLevel(slot, 0);
+        pump(hub, clock, {&client}, 2, 600000);
+
+        REQUIRE(delegate.lastStateByChannel[0x0090].size() == 15);
+        CHECK(uint8_t(delegate.lastStateByChannel[0x0090][0]) == uint8_t(kBurst));
+        REQUIRE(delegate.lastStateByChannel[0x0082].size() == 2);
+        CHECK(uint8_t(delegate.lastStateByChannel[0x0082][0]) == uint8_t(kBurst));
+    }
+
+    SUBCASE("EVENT never coalesces or drops while STATE is being shed under the same congestion") {
+        hub.setCongestionLevel(slot, 2);  // severe: 0x0090 STATE would Drop entirely (see above)
+
+        constexpr int kEvents = 5;
+        for (int i = 1; i <= kEvents; ++i) {
+            std::array<std::byte, 1> ev{std::byte(i)};
+            REQUIRE(hub.publishEvent(0x008A, std::span<const std::byte>(ev)));
+            pump(hub, clock, {&client}, 1, 10000);  // short step: EVENT has no pacing gate to clear
+        }
+
+        // Every one arrived, in order, bytes intact — the shedding table's
+        // congestion levels never touch EVENT (its own bounded drop-OLDEST
+        // queue, §9.4, is independent of link congestion entirely).
+        REQUIRE(delegate.events.size() == size_t(kEvents));
+        for (int i = 0; i < kEvents; ++i) {
+            REQUIRE(delegate.events[size_t(i)].size() == 1);
+            CHECK(uint8_t(delegate.events[size_t(i)][0]) == uint8_t(i + 1));
+        }
     }
 }
 

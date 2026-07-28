@@ -176,6 +176,11 @@ public:
     // hold a session open indefinitely.
     static constexpr uint32_t kCtrlStallMs = 2000;
 
+    // §10.3 hysteresis windows for pollCongestionLevel()'s watermark bands —
+    // the SPEC's own numbers, not tuned locally.
+    static constexpr uint32_t kCongestedSustainMs = 1000;
+    static constexpr uint32_t kRecoveredSustainMs = 5000;
+
     SlopSyncAsyncWsTransport() = default;
 
     void bind(AsyncWebSocket* ws) { _ws = ws; }
@@ -204,6 +209,27 @@ public:
     // counter, not a loss counter, and deliberately not folded into txDataDrops.
     uint32_t txBlobHolds() const { return _txBlobHolds.load(std::memory_order_relaxed); }
 
+    // ---- §10.3 congestion classification, HUB TASK ONLY --------------------
+    // Feeds Hub::setCongestionLevel(ITransport&, level) — see hub.hpp: "real
+    // bindings feed their native signals through the same choke point". This
+    // was the missing wire (LEDGER "Morning ruling batch" item 1): without
+    // it, congestionLevel sits at 0 forever and pumpStatePacing()'s
+    // shedDecision()/ConflateHard coalescing never engages on real hardware,
+    // no matter how backed up the socket gets.
+    //
+    // Reuses signals this transport already tracks; no new queue, no
+    // allocation:
+    //   severe (2): a CONTROL/never-shed frame is CURRENTLY stalled
+    //     (_ctrlStallSinceMs != 0) -- §10.4's own definition of "the
+    //     never-shed queue itself can't drain".
+    //   congested (1) / clear (0): the data queue watermark, hysteresis per
+    //     §10.3 -- sustained > 50% for 1 s -> congested; < 20% for 5 s ->
+    //     recovered. Between the two bands, the level holds (no flapping on
+    //     one noisy sample).
+    // Caller (SlopSyncAsyncWsPort::loop()) polls this once per attached slot
+    // per tick and republishes the result into the hub.
+    uint8_t pollCongestionLevel(uint32_t nowMs);
+
 private:
     // Is this frame type shed-able under backpressure? Byte 0 of the header is
     // the frame type (wire/frame_header.hpp), so this needs no parsing.
@@ -228,6 +254,12 @@ private:
     // millis() of the first control frame we could not queue, 0 = none
     // outstanding. Written on the hub task only.
     uint32_t _ctrlStallSinceMs = 0;
+
+    // pollCongestionLevel() hysteresis state. Hub task only (same as
+    // _ctrlStallSinceMs) -- no atomics needed.
+    uint8_t _congestionLevel = 0;
+    uint32_t _aboveSinceMs = 0;  // 0 = not currently above the congested watermark
+    uint32_t _belowSinceMs = 0;  // 0 = not currently below the recovered watermark
 
     std::atomic<uint32_t> _rxDrops{0};
     std::atomic<uint32_t> _txDataDrops{0};

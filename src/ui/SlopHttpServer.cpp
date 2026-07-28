@@ -72,10 +72,10 @@ SlopHttpServer::SlopHttpServer(uint16_t port) : _server(port) {
     //
     // Why not more: lwip is built with CONFIG_LWIP_MAX_SOCKETS=16 and httpd
     // consumes max_open_sockets + 3 (listener + the ctrl UDP pair) = 7 here.
-    // The rest of the budget is already spoken for — UiSocket's WebSocket
-    // server (1 listener + up to 5 clients), the SlopSync WS transport on :82
-    // (1 listener + clients), ArduinoOTA, mDNS. Raising this is a real risk of
-    // socket exhaustion elsewhere, so raise it only with that budget in hand.
+    // The rest of the budget is already spoken for — the SlopSync WS transport
+    // on :82 (1 listener + clients), ArduinoOTA, mDNS. Raising this is a real
+    // risk of socket exhaustion elsewhere, so raise it only with that budget
+    // in hand.
     _server.config.max_open_sockets = 4;
     _server.config.lru_purge_enable = true;
 

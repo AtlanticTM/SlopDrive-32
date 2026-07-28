@@ -46,11 +46,9 @@ static uint32_t nvsConfigChecksum(Preferences& prefs) {
     // Any future key added here should follow the same present-only idiom. :3
     { uint32_t jrk = prefs.getUInt("inp_jrk", 0); if (jrk) mixU32(jrk); }
     mixU32(prefs.getBool("auto_dur", false) ? 1u : 0u);
-    mixU32(prefs.getBool("if_compat", false) ? 1u : 0u);
     mixF(prefs.getFloat("def_rmin", 0.0f));
     mixF(prefs.getFloat("def_rmax", 0.0f));
     mixU32(prefs.getBool("expert", false) ? 1u : 0u);
-    mixU32(prefs.getUChar("transport", 0));
     mixU32(prefs.getUChar("input_mode", 0));
     mixU32(prefs.getUChar("buf_easing", 0));
     mixU32(prefs.getUChar("buf_depth", 0));
@@ -125,14 +123,10 @@ void ConfigStore::save(SystemState& state, RangeMapper& mapper, MotorDriver& mot
     ck(prefs.putUInt("inp_jrk", (uint32_t)state.config.input_max_jerk_mm_s3));
 
     ck(prefs.putBool("auto_dur", state.auto_duration));
-    // Intiface compat — whether we decode magnitudes against the legacy /999
-    // ceiling (Intiface's mangled scale) or the spec-correct digit count (MFP).
-    // Persisted so the operator's chosen app stays satisfied across reboots. :3
-    ck(prefs.putBool("if_compat", state.intiface_compat));
     ck(prefs.putFloat("def_rmin", state.default_range_min));
     ck(prefs.putFloat("def_rmax", state.default_range_max));
     ck(prefs.putBool("expert", state.expert_mode));
-    ck(prefs.putUChar("transport", (uint8_t)state.getTransport()));
+    ck(prefs.putBool("pat_bgrun", state.pattern_background_run));
 
     // Input mode + buffered interpolation + generator tick rate
     ck(prefs.putUChar("input_mode", (uint8_t)state.getInputMode()));
@@ -172,8 +166,8 @@ void ConfigStore::save(SystemState& state, RangeMapper& mapper, MotorDriver& mot
     ck(prefs.putFloat("sm_jmax",   state.sm_tune_jmax_ovr));
     ck(prefs.putFloat("sm_vmax",   state.sm_tune_vmax_ovr));
     ck(prefs.putFloat("sm_amax",   state.sm_tune_amax_ovr));
-    ck(prefs.putUChar("sm_cent",   state.sm_tune_centring ? 1 : 0));
-    ck(prefs.putFloat("sm_cgain",  state.sm_tune_centring_gain));
+    ck(prefs.putUChar("sm_cent",   state.sm_tune_centering ? 1 : 0));
+    ck(prefs.putFloat("sm_cgain",  state.sm_tune_centering_gain));
     ck(prefs.putUChar("sm_cff",    state.sm_tune_chase_ff ? 1 : 0));
     ck(prefs.putUChar("sm_caff",   state.sm_tune_chase_aff ? 1 : 0));
     ck(prefs.putFloat("sm_cgn",    state.sm_tune_chase_gain));
@@ -319,8 +313,8 @@ void ConfigStore::load(SystemState& state, RangeMapper& mapper, MotorDriver& mot
         state.sm_tune_jmax_ovr    = clf(prefs.getFloat("sm_jmax",  state.sm_tune_jmax_ovr), 0.0f, 2000000.0f);
         state.sm_tune_vmax_ovr    = clf(prefs.getFloat("sm_vmax",  state.sm_tune_vmax_ovr), 0.0f, 20.0f);
         state.sm_tune_amax_ovr    = clf(prefs.getFloat("sm_amax",  state.sm_tune_amax_ovr), 0.0f, 500.0f);
-        state.sm_tune_centring    = prefs.getUChar("sm_cent",  state.sm_tune_centring ? 1 : 0) != 0;
-        state.sm_tune_centring_gain = clf(prefs.getFloat("sm_cgain", state.sm_tune_centring_gain), 0.0f, 1.0f);
+        state.sm_tune_centering    = prefs.getUChar("sm_cent",  state.sm_tune_centering ? 1 : 0) != 0;
+        state.sm_tune_centering_gain = clf(prefs.getFloat("sm_cgain", state.sm_tune_centering_gain), 0.0f, 1.0f);
         state.sm_tune_chase_ff    = prefs.getUChar("sm_cff",   state.sm_tune_chase_ff ? 1 : 0) != 0;
         state.sm_tune_chase_aff   = prefs.getUChar("sm_caff",  state.sm_tune_chase_aff ? 1 : 0) != 0;
         state.sm_tune_chase_gain  = clf(prefs.getFloat("sm_cgn", state.sm_tune_chase_gain), 0.0f, 1.5f);
@@ -339,19 +333,11 @@ void ConfigStore::load(SystemState& state, RangeMapper& mapper, MotorDriver& mot
         state.config.input_max_jerk_mm_s3  = inp_jrk;
 
         state.auto_duration = prefs.getBool("auto_dur", true);
-        // Intiface compat — default false (spec-correct/MFP decode) when the key
-        // was never written. main.cpp pushes this into TCodeParser::intifaceCompat
-        // right after load() so the parser is in lockstep from the first frame. :3
-        state.intiface_compat = prefs.getBool("if_compat", false);
 
         state.default_range_min = prefs.getFloat("def_rmin", 0.0f);
         state.default_range_max = prefs.getFloat("def_rmax", state.config.max_rail_mm);
         state.expert_mode = prefs.getBool("expert", false);
-        {
-            TransportMode t = (TransportMode)prefs.getUChar("transport", (uint8_t)DEFAULT_TRANSPORT_MODE);
-            if ((uint8_t)t > (uint8_t)TransportMode::BT) t = DEFAULT_TRANSPORT_MODE;
-            state.setTransport(t);
-        }
+        state.pattern_background_run = prefs.getBool("pat_bgrun", false);
 
         // Input mode + buffered interpolation + generator tick rate
         {

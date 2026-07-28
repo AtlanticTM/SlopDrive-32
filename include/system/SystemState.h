@@ -7,14 +7,14 @@
 
 #include "config_api.h"
 #include "MotorDriver.h"           // for DriverConfig
-#include "MotionInterpolator.h"    // for InterpAnomaly (cross-core ring)
+#include "slopsync/generated/registry_constants.hpp"  // limits::segment_handoff_k (RFC-049c)
 
 // ============================================================================
 // On-device motion generator configuration
 // ============================================================================
 // Held in RAM; parameters pushed live from the web UI via /api/gen.
 //
-// gen_mux (portMUX spinlock) serialises writes from Core 0 (WebUI handler)
+// gen_mux (portMUX spinlock) serializes writes from Core 0 (WebUI handler)
 // and reads from Core 1 (generator task) so that the task always sees a
 // complete, consistent snapshot — no torn field-by-field reads mid-update.
 //
@@ -89,7 +89,7 @@ inline constexpr const char* kSmAnomalyNames[] = {
     "deadline_stretched",  //              ::DeadlineStretched = 4
     "waveform_fallback",   //              ::WaveformFallback  = 5
     "waveform_scaled",     //              ::WaveformScaled    = 6
-    "waveform_centred",    //              ::WaveformCentred   = 7
+    "waveform_centered",    //              ::WaveformCentered   = 7
     "handoff_bounded",     //              ::HandoffBounded    = 8
     "waveform_smoothed",   //              ::WaveformSmoothed  = 9
 };
@@ -97,7 +97,7 @@ inline constexpr uint8_t kSmAnomalyNameCount =
     uint8_t(sizeof(kSmAnomalyNames) / sizeof(kSmAnomalyNames[0]));
 
 // ============================================================================
-// SystemState — centralised, thread-safe runtime state container
+// SystemState — centralized, thread-safe runtime state container
 // ============================================================================
 //
 // All mutable runtime globals that were previously file-scope statics in
@@ -160,7 +160,7 @@ struct SystemState {
     // barrier from any diagnostic path. :3
     std::atomic<bool>      ota_active{false};
 
-    // ---- WiFi link telemetry (Core 0 only — written by TransportManager's
+    // ---- WiFi link telemetry (Core 0 only — written by WifiLink's
     // event handler + poll timer, read by WebUI::handleApiStatus. Both run on
     // Core 0 (WiFi event task + httpTask), so no cross-core mutex needed —
     // this is a simple diagnostic readout, not a control path. :3 ----------
@@ -180,25 +180,6 @@ struct SystemState {
     volatile bool          manual_override      = false;
     volatile uint32_t      resume_start_ms      = 0;
     bool                   expert_mode          = false;   // Core 0 only
-
-    // ---- Transport (cross-core) ----------------------------------------------
-    volatile uint8_t       transport = static_cast<uint8_t>(DEFAULT_TRANSPORT_MODE);
-
-    // ---- Intiface parser workaround (cross-core) -----------------------------
-    // Intiface's buttplug→TCode bridge does fuckshit to the magnitude: instead
-    // of the spec-correct variable-digit fraction (L0500 = 0.500) that MFP and
-    // the TCode v0.3 spec use, it emits values that only decode correctly when
-    // scaled against the legacy fixed /999 magnitude ceiling. With the normal
-    // digit-count decode, an Intiface "full depth" command lands shallow and
-    // the stroke never fully gapes. :3
-    //
-    // When TRUE: parser scales magnitude as mag / TCODE_MAGNITUDE_MAX (legacy
-    //            Intiface/buttplug convention).
-    // When FALSE (default): parser uses spec-correct mag / 10^digits — the
-    //            decode MFP needs. We had a hard-coded Intiface fix before and
-    //            it broke MFP; a per-source toggle lets each app get what it
-    //            wants without one stealing the other's lube. :3
-    volatile bool          intiface_compat      = false;
 
     // ---- Cadence / auto-duration ---------------------------------------------
     volatile bool          auto_duration        = true;
@@ -222,8 +203,8 @@ struct SystemState {
     // Whether the generator is actually emitting motion (cross-core)
     volatile bool          gen_active      = false;
 
-    // Timestamp of last Intiface command (cross-core!). Written on Core 0
-    // (commsTask → buttplugLinearCmd/buttplugStop in main.cpp), read on Core 1
+    // Timestamp of last streamed motion command (cross-core!). Written on
+    // Core 0 (SlopSyncHubService::drainMotionStream), read on Core 1
     // in hot gating paths (streamSamplerTask's recent-packet gate and the
     // arbiter's Intiface-recency gate in _gatesPass). 32-bit aligned store is
     // hardware-atomic on the S3; volatile keeps the Core-1 reads fresh. The
@@ -241,6 +222,19 @@ struct SystemState {
     volatile uint32_t      last_intiface_move_ms = 0;  // Core 0 writes, Core 1 reads
     volatile bool          pattern_running       = false; // PatternEngine user start/stop
 
+    // RFC-045/048 `source.background_run` (registered field_roles entry) —
+    // whether the PATTERN source keeps generating motion after the session
+    // that owns it goes away (SlopSyncHubService's SlopDriveHubDelegate::
+    // onSourceOwnership() reads this on release, reason-agnostic: staleness
+    // and genuine teardown are the same "the owner is gone" event per
+    // RFC-042/045). false (DEFAULT) = the generator stops. NVS-persisted
+    // (ConfigStore) like an ordinary preference, unlike the session-volatile
+    // pattern parameters (running/speed/depth/...) on the same 0x1200/0x3200
+    // pair — this is a standing policy choice, not a live control. Core 0
+    // only: written by applyIntent (SlopSyncHub task), read by the same task's
+    // onSourceOwnership() — no cross-core access, plain bool is correct.
+    bool                   pattern_background_run = false;
+
     // ---- Bypass-limits toggle (cross-core, Core 0 writes) --------------------
     // Set by WS_OP_BYPASS, honored by applyMove when a move doesn't carry its
     // own per-request bypass_limits field, exposed in WS_OP_GET_CFG so clients
@@ -251,8 +245,8 @@ struct SystemState {
     // ---- Commanded target (cross-core) ---------------------------------------
     // The position the host/generator just TOLD us to go to (mm), before FAS
     // has actually pounded its way there. Written by whoever issues the move
-    // (buttplugLinearCmd on the TCode path, generatorTask on the gen path),
-    // read by Core 0's telemetry capture so the UI can draw "what we were asked
+    // (MotionArbiter on the arbitrated dispatch path, generatorTask on the gen
+    // path), read by Core 0's telemetry capture so the UI can draw "what we were asked
     // for" right next to "where the shaft actually is." 32-bit aligned float =
     // hardware-atomic on the S3, no mutex needed. :3
     volatile float         commanded_target_mm = 0.0f;
@@ -313,29 +307,28 @@ struct SystemState {
 
     // ---- Stream sampler speed-feed mode (cross-core) -------------------------
     // Selects how the Core-1 streamSamplerTask feeds FAS speed each tick while
-    // following the MotionInterpolator's cubic. Written by Core 0 (WebUI toggle),
+    // sampling the slopmotion::Engine plan. Written by Core 0 (WebUI toggle),
     // read by Core 1 (sampler). 32-bit read/write is hardware-atomic on the S3.
     //   0 = CEILING_PEGGED  (default): feed a constant high speed; the 1kHz
     //       micro-target position deltas themselves shape velocity. Keeps the
     //       57AIM grit-cache quiet (speed/accel steady → no FAS ramp re-plan).
-    //   1 = VELOCITY_MATCHED: feed |interp velocity| each tick so FAS coasts the
-    //       exact cubic speed. Truer curve, but rewrites setSpeedInHz per tick.
+    //   1 = VELOCITY_MATCHED: feed |plan velocity| each tick so FAS coasts the
+    //       exact planned speed. Truer curve, but rewrites setSpeedInHz per tick.
     // Exposed as a live A/B toggle so it can be felt on real hardware. :3
     enum StreamSpeedMode : uint8_t { SPEED_CEILING_PEGGED = 0, SPEED_VELOCITY_MATCHED = 1 };
     volatile uint8_t       stream_speed_mode = SPEED_CEILING_PEGGED;
 
     // ---- Interpolator overshoot clamp (cross-core) ---------------------------
-    // WebUI toggle. When true, Core 1's streamSamplerTask pushes the flag into
-    // the MotionInterpolator so the v4 gradient cubic's Hermite tangents get
-    // monotone-limited (Fritsch–Carlson) before setCubic — the invented
-    // overshoot-then-return micromotion is eliminated at the cost of slightly
-    // softer MFP slope shaping. Written by Core 0 (handler), read by Core 1
-    // (sampler). 32-bit aligned bool → hardware-atomic on the S3, no mutex. :3
+    // WebUI toggle, INERT on the current engine: slopmotion's quintic legality
+    // scan owns overshoot handling and nothing consumes this flag yet. Kept
+    // because the 0x008A machine-modes channel carries it (released wire
+    // field); wire it into the engine or retire it via a modes-channel
+    // evolution — never silently repurpose. :3
     volatile bool          interp_clamp_overshoot = false;
 
     // ---- Interpolator telemetry (cross-core, display-only) -------------------
     // Written by Core 1 (streamSamplerTask) once per tick from the live
-    // MotionInterpolator snapshot; read by Core 0 telemetry for the WebUI's
+    // slopmotion::Engine snapshot; read by Core 0 telemetry for the WebUI's
     // high-refresh planned-path / interp-state overlay. Each field is an
     // independently-readable aligned scalar — no lock needed for a display feed
     // (a torn set across fields is visually harmless at UI refresh rates). :3
@@ -347,23 +340,9 @@ struct SystemState {
     volatile uint32_t      interp_elapsed_us  = 0;     // time into segment
     volatile bool          interp_live_mode   = false; // v3 high-rate live extrapolation
     volatile bool          interp_grad_mode   = false; // v4 G<slope> gradient segment
-    volatile uint8_t       interp_style       = 0;     // InterpStyle enum
+    volatile uint8_t       interp_style       = 0;     // legacy style code (live=chase, grad=quintic mapping)
     volatile bool          interp_active       = false; // sampler currently driving motion
 
-    // ---- Interpolator anomaly ring (cross-core) ------------------------------
-    // Core 1's streamSamplerTask drains the MotionInterpolator's local anomaly
-    // ring each tick and publishes events here; Core 0's UiSocket sender drains
-    // them into 0x05 ANOMALY frames. Seq-counter ring identical in spirit to the
-    // telemetry ring: the producer bumps anom_write, the consumer tracks how far
-    // it has read. portMUX serialises the multi-field InterpAnomaly copy so a
-    // reader never sees a torn event. Overflow (producer laps consumer by > CAP)
-    // is clamped on the read side — oldest unread events are dropped, newest win,
-    // since a fresh anomaly is always more actionable than a stale one. :3
-    static constexpr uint8_t ANOM_CAP = 32;
-    InterpAnomaly          anom_ring[ANOM_CAP] {};
-    volatile uint32_t      anom_write = 0;   // total events ever enqueued (Core 1)
-    volatile uint32_t      anom_read  = 0;   // total events drained    (Core 0)
-    portMUX_TYPE           anom_mux   = portMUX_INITIALIZER_UNLOCKED;
 
     // ---- SlopMotion live tuning (ROUGH-IN — WebUI card lands with the UI
     // refactor; until then this is driven by GET/POST /api/slopmotion). -------
@@ -406,35 +385,38 @@ struct SystemState {
     // Settle grace: how long an expired plan may HOLD its end state before the
     // engine concludes the stream is starved and brakes to rest. Microseconds
     // here (engine units); the /api/slopmotion surface talks MILLISECONDS.
-    // 0 = pre-0.4 behaviour (brake the instant the plan expires).
+    // 0 = pre-0.4 behavior (brake the instant the plan expires).
     volatile uint32_t      sm_tune_settle_grace_us = 30000;  // 30 ms, slopmotion default
     volatile bool          sm_tune_aim_extrap      = true;   // 2nd-order chase aim (crest overshoot)
-    // DC centring of a degraded band (WAVEFORM path, Scale + Reshape policies).
+    // DC centering of a degraded band (WAVEFORM path, Scale + Reshape policies).
     // When the machine cannot deliver the commanded amplitude on the commanded
     // clock, ON (engine default) shrinks the achieved band SYMMETRICALLY about
     // the commanded midpoint instead of letting it walk off one end — every such
-    // stroke is reported as a WaveformCentred anomaly, so the deviation is
+    // stroke is reported as a WaveformCentered anomaly, so the deviation is
     // visible, never silent. OFF restores the slopmotion 0.4.0 contract.
-    volatile bool          sm_tune_centring        = true;   // slopmotion wave_centering
+    volatile bool          sm_tune_centering        = true;   // slopmotion wave_centering
     // Correction strength 0..1 (clamped both here and in the engine). 1 = full
-    // centring, 0 = same as the bool off. A FEEL dial, not a calibration, and
+    // centering, 0 = same as the bool off. A FEEL dial, not a calibration, and
     // deliberately not monotone — the debt loop closes around the pull it
     // actually applied, so the mid settings are for experimenting only.
-    volatile float         sm_tune_centring_gain   = 1.0f;   // slopmotion wave_centering_gain
+    volatile float         sm_tune_centering_gain   = 1.0f;   // slopmotion wave_centering_gain
     // RFC-008 handoff sanity guard: the Fritsch-Carlson chord factor k applied
     // to an inbound segment's end velocity against the FOLLOWING segment's
-    // chord. 1.5 = the shape-preserving bound (engine default); 0 DISABLES the
-    // guard, which is the A/B switch for comparing machine-side bounding
+    // chord. limits::segment_handoff_k (RFC-049c) = the shape-preserving bound
+    // (engine default) — the ONE registry-pinned source for this constant;
+    // never re-hardcode 1.5 elsewhere (it used to live independently here AND
+    // in slopmotion's own default AND in the MFP plugin's limiter). 0 DISABLES
+    // the guard, which is the A/B switch for comparing machine-side bounding
     // against a client that still carries its own limiter (the MFP plugin's
     // SegHandoffLimiterEnabled is the other half of that experiment). Clamped
     // [0, 8] here AND in the engine — a config push is not a trusted input.
-    volatile float         sm_tune_handoff_k       = 1.5f;   // slopmotion handoff_chord_factor
+    volatile float         sm_tune_handoff_k       = slopsync::limits::segment_handoff_k;   // slopmotion handoff_chord_factor
     // Which CURVE FAMILY the waveform path rebuilds a segment with. A funscript
     // rendered through Pchip/Makima is a C1 CUBIC Hermite spline, and a C2
     // quintic cannot reproduce one across a knot by construction — the script's
-    // acceleration genuinely STEPS there. 0 = FollowClient (honour the sender's
-    // declared family; no wire signalling exists yet, so today it resolves to
-    // C2 — pre-0.8.0 behaviour byte for byte), 1 = ForceC1 (cubic), 2 = ForceC2
+    // acceleration genuinely STEPS there. 0 = FollowClient (honor the sender's
+    // declared family; no wire signaling exists yet, so today it resolves to
+    // C2 — pre-0.8.0 behavior byte for byte), 1 = ForceC1 (cubic), 2 = ForceC2
     // (quintic, always). Plain uint8_t for the same reason as
     // sm_tune_infeas_policy: SystemState.h stays engine-header-free, and the
     // mapping to slopmotion::CurvePolicy lives in main.cpp's per-tick push,
@@ -662,13 +644,6 @@ struct SystemState {
     // --------------------------------------------------------------------------
     // Convenience helpers — zero-cost inline
     // --------------------------------------------------------------------------
-
-    TransportMode getTransport() const {
-        return static_cast<TransportMode>(transport);
-    }
-    void setTransport(TransportMode m) {
-        transport = static_cast<uint8_t>(m);
-    }
 
     InputMode getInputMode() const {
         return static_cast<InputMode>(input_mode);

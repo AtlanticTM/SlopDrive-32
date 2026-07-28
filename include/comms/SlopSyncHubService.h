@@ -8,8 +8,9 @@
 // the HubDelegate (which bridges intents onto WebUI::handleCommand → the
 // MotionArbiter, honoring the sole-caller rule), the slopsync::Hub itself, and
 // the WebSocket port. Spawns ONE FreeRTOS task ("SlopSyncHub", Core 0) that is
-// the ONLY thread ever touching the hub or the WS server — see the one-task
-// invariant documented in SlopSyncWsTransport.h.
+// the ONLY thread ever touching the hub. The WS transport itself is NOT
+// single-threaded (AsyncTCP owns its own task) — see the threading model in
+// SlopSyncAsyncWsTransport.h.
 //
 // The delegate NEVER commands the motor directly (CLAUDE.md §2 sole-caller):
 // every motion-bearing intent becomes a WebUI::handleCommand() call, exactly
@@ -31,13 +32,17 @@
 #include "SlopSyncCrypto.h"
 #include "SlopSyncPlatform.h"
 #include "SlopSyncUiToken.h"
-// THE transport. There used to be two behind -DSLOPSYNC_WS_ASYNC so the
-// links2004-vs-ESP32Async swap could be A/B'd with one variable moving; the
-// A/B is settled (docs/http-plane-retirement.md 2 -- three device reboots and
-// a 112-byte heap watermark with the old plane attached, 7/7 clean without)
-// and links2004 has been removed from the build entirely. The #else branch
-// pointed at a file that no longer exists, so it is gone with it.
+// THE transport (CLAUDE.md §8 M5c) — ESP32Async is the only WS stack in the
+// build now. History + the A/B that settled it: docs/http-plane-retirement.md.
 #include "SlopSyncAsyncWsTransport.h"
+// RFC-043 (Phase E): the second transport. Self-excludes to nothing when
+// BLE_ENABLED is not set, exactly like SlopSyncAsyncWsTransport.h does for
+// SLOPSYNC_WS_ASYNC — see that file's header note.
+#include "SlopSyncBleTransport.h"
+// RFC-046 (Phase E): the WS-side UDP discovery responder. Unconditional —
+// unlike BLE, this needs no extra hardware/library, just a socket, and it is
+// the canonical discovery path for a LAN client with no BLE (§13.8).
+#include "SlopSyncUdpDiscovery.h"
 #include "slopsync/hub/hub.hpp"
 
 // Firmware types the service/delegate reference — forward-declared to keep this
@@ -173,7 +178,7 @@ public:
     // Same ctor-ordering reason as bindPairing. Needed so onStreamBundle can
     // stamp each pacing entry with the session's GRANTED curve family
     // (Hub::publishCurveFamily). Null = family stays 0 (unspecified), which is
-    // the safe pre-RFC-030 behaviour.
+    // the safe pre-RFC-030 behavior.
     void bindHub(slopsync::Hub& h) { _hub = &h; }
 
     // ---- RFC-021 pattern-preset store, bound AFTER construction (M5) --------
@@ -200,6 +205,15 @@ public:
     std::optional<uint8_t> sourceForChannel(uint16_t channel_id) override;
     slopsync::SourceLossPolicy sourcePolicy(uint8_t source_id) override;
     void onDeadmanStop(uint8_t source_id) override;
+    // RFC-045/048 `source.background_run`: the hub library only ever RELEASES
+    // ownership (latching nothing — see hub_impl.hpp's releaseSessionSources()
+    // comment); this is where the firmware decides an autonomous source's
+    // actual fate. Fires on every release (any of RFC-042's staleness
+    // transitions or a genuine teardown, reason-agnostic) for MotionSource::
+    // PATTERN — stops the generator unless `pattern_background_run` says
+    // otherwise. Command-driven sources (MANUAL/TCODE_STREAM) need no action
+    // here: they settle on their own by construction (§9.6).
+    void onSourceOwnership(uint8_t source_id, uint32_t owner_session, uint8_t reason) override;
 
     void onSessionJoined(uint32_t session_id) override;
     void onSessionLeft(uint32_t session_id) override;
@@ -212,7 +226,7 @@ public:
 
     // RFC-030: the grant echo carries the EFFECTIVE curve family — the wish
     // filtered through this machine's curve_policy. ForceC1/ForceC2 report the
-    // forced family (a downgrade the sender can SEE); FollowClient honours the
+    // forced family (a downgrade the sender can SEE); FollowClient honors the
     // declaration. Ground-truth doctrine on the grant plane.
     uint8_t effectiveCurveFamily(uint16_t channel_id, uint8_t requested) override;
 
@@ -245,6 +259,11 @@ public:
     // savable geometry setting doesn't wait on a manual WebUI save to survive
     // a reboot.
     bool _maxRailDirty = false;
+    // Set by 0x3200 key 7 (source.background_run) when a client changes it
+    // (RFC-045/048, Phase D) — same coalesced-persist contract as
+    // _maxRailDirty above: a standing policy setting persists without a
+    // manual WebUI save.
+    bool _patternBackgroundRunDirty = false;
 };
 
 // ---- The service -----------------------------------------------------------
@@ -316,6 +335,13 @@ private:
     void drainLogBridge();      // RFC-017: SlopLog SPSC ring -> 0x0008 log EVENTs
     void pumpSigning();         // M4c: hub <-> signing task, both directions
     void pumpConfigGeneration();// RFC-011: machine-side config change -> cfg_gen
+    // RFC-046 (Phase E): pushes the hub's own WS endpoint (WELCOME keys 46/47)
+    // and refreshes BLE advertising + the UDP responder's live flags from
+    // WiFi/pairing state. Called once from the 1 Hz slow block in
+    // publishTelemetry — nothing here is a per-5ms-tick cost, and
+    // updateAdvertising()/the UDP setters are themselves diff-gated so this
+    // never touches a radio unless something actually changed.
+    void pumpEndpointAndRadios(uint32_t nowMs);
 
     void loadPairing();         // NVS -> PairingManager at boot (ledger + legacy migration)
     void savePairing();         // PairingManager -> NVS (skips while OTA active)
@@ -360,6 +386,10 @@ private:
     SlopDriveHubDelegate _delegate;
     slopsync::Hub _hub;
     SlopSyncAsyncWsPort _port;
+#if defined(BLE_ENABLED)
+    SlopSyncBlePort _blePort;    // RFC-043 (Phase E): the BLE GATT ITransport
+#endif
+    SlopSyncUdpDiscovery _udpDiscovery;  // RFC-046 (Phase E): the UDP probe/reply responder
 
     // RFC-021 pattern-preset store (M5). NOT bound by reference into the Hub's
     // constructor (unlike the pool above) — the delegate learns about it via
@@ -458,6 +488,9 @@ private:
     uint8_t _patIdx = 0xFF;
     uint8_t _patMask = 0xFF;
     float _patSpeed = -1.0f, _patDepth = -1.0f, _patStroke = -1.0f, _patSensation = -1.0f;
+    // Phase D (RFC-045/048): background_run's own last-published value —
+    // impossible initial state so the very first snapshot always publishes.
+    bool _patBackgroundRun = true;
 
     // 0x008E pattern-advanced + 0x008F..0x0094 pattern-adv-mod-* — last
     // PUBLISHED bytes, same diff-what-subscribers-hold rule as _lastModes/

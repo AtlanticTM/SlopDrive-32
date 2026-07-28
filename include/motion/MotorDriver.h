@@ -106,8 +106,8 @@ protected:
     virtual void streamTo(float pos_mm, float speed_mm_s)          = 0;
 
     // Dispatch a pre-planned move in native steps — called exclusively from
-    // Core 1 (motionConsumerTask). Speed and accel are already in steps/s and
-    // steps/s² (converted by the consumer before calling). No unit conversion
+    // Core 1 via MotionArbiter. Speed and accel are already in steps/s and
+    // steps/s² (converted by the arbiter before calling). No unit conversion
     // happens inside this function — it goes straight to FAS. :3
     virtual void streamToSteps(int32_t target_steps,
                                uint32_t speed_steps_s,
@@ -130,8 +130,8 @@ public:
     // Ground Truth Doctrine: echoes must report this, never the raw request. :3
     virtual float    getAcceleration()      const        = 0;
     // Returns the acceleration currently active inside the FAS ramp engine —
-    // NOT the configured ceiling. Used by the raise-only guard in
-    // motionConsumerTask to match OSSM's stepper->getAcceleration() call. :3
+    // NOT the configured ceiling. Used by MotionArbiter's raise-only guard to
+    // match OSSM's stepper->getAcceleration() call. :3
     virtual uint32_t getLiveAcceleration()  const        = 0;
 
     // ---- Status -------------------------------------------------------------
@@ -196,7 +196,7 @@ public:
     virtual float   getBusCurrentA() const { return 0.0f; }
     virtual float   getBusVoltageV() const { return 0.0f; }
     // True when a real current sensor is present and calibrated. Lets the UI
-    // grey out / hide the readout on boards that don't have one. :3
+    // gray out / hide the readout on boards that don't have one. :3
     virtual bool    hasCurrentSensor() const { return false; }
 
     // ---- Extended power telemetry (INA228 full measurement set) -------------
@@ -228,14 +228,14 @@ public:
 
 
     // ---- Unit conversion (driver-owned — Risk #4) ---------------------------
-    // Convert a physical millimetre position to the driver's native unit
+    // Convert a physical millimeter position to the driver's native unit
     // (steps for steppers, encoder counts for servos, etc.).
     virtual int32_t mmToNative(float mm)        const = 0;
 
-    // Convert a driver-native position back to millimetres.
+    // Convert a driver-native position back to millimeters.
     virtual float   nativeToMm(int32_t native)  const = 0;
 
-    // Native units per millimetre — derived from mmToNative so every driver
+    // Native units per millimeter — derived from mmToNative so every driver
     // gets this for free without a separate override. The arbiter uses this
     // to convert speed/accel into native units instead of hardcoding the FAS
     // steps/mm scale (AIM_STEPS_PER_MM): a counts-native driver (encoder

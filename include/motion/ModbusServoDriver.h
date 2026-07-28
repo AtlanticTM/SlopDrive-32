@@ -18,8 +18,7 @@ class ServoModbus;
 // StreamedSetpointExecutor, gated behind the SAME homed/enabled discipline
 // FAS mode uses — nothing here ever commands motion on its own; the arbiter
 // is still the sole caller (MotorDriver.h friend grant), this driver just
-// turns arbiter intents into TrapezoidProfiles and hands them to the
-// executor. Homing itself (both styles) is Phase 4 — this phase only has the
+// hands arbiter intents to the executor as track() targets. Homing itself (both styles) is Phase 4 — this phase only has the
 // BENCH forceHomeState() path to get outputs live for bring-up.
 //
 // Native unit: ENCODER COUNTS, not FAS steps. mmToNative()/nativeToMm() use
@@ -35,9 +34,9 @@ class ServoModbus;
 //   - Wire mapping: wire_counts = _wire_offset + _wire_sign * cmd_counts.
 //     _wire_offset is the encoder reading captured at (force-)home time;
 //     _wire_sign is AIM_MODBUS_WIRE_SIGN (config_api.h, bench-determined).
-//   - streamToSteps()/moveTo()/streamTo() plan a TrapezoidProfile from the
-//     executor's OWN live commanded pos/vel (never a stale target) and adopt
-//     it — one plan per intent, the executor just samples it (CLAUDE.md §2).
+//   - streamToSteps()/moveTo()/streamTo() hand the target to the executor's
+//     jerk-limited tracker (track()), which integrates from its OWN live
+//     commanded pos/vel — never a stale target (CLAUDE.md §2).
 //   - getPosition()/getTargetPosition() read the executor's commanded sample
 //     — "commanded = truth," open-loop, exactly like AIMServoDriver's FAS
 //     position readback (plan.md "Position truth" doctrine).

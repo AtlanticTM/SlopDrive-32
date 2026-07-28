@@ -27,14 +27,11 @@
 #include "PatternEngine.h"
 #include "MotorDriver.h"
 
-#include "TransportManager.h"
-#include "TCodeParser.h"
-#include "SerialTransport.h"
-#include "BleTransport.h"
 #include "MotionArbiter.h"
 #include "config_api.h"
 #include "range_mapper.h"
 #include "slopsync/generated/registry_constants.hpp"  // limits::ws_subprotocol (single source of the proto id)
+#include "SlopSyncDiscoveryWire.h"  // discovery::kPort — single source for the capabilities UDP port advert
 
 // ---- Fallback HTML page (shown when LittleFS /index.html is missing) -------
 static const char* htmlFallbackPage = R"RAWHTML(
@@ -64,18 +61,11 @@ static const char* htmlFallbackPage = R"RAWHTML(
 WebUI::WebUI(SystemState&        state,
              MotorDriver&        motor,
              RangeMapper&        mapper,
-             PatternEngine&      patternEngine,
-             TransportManager&   transportMgr,
-             SerialTransport&    serialTransport,
-             BleTransport&       bleTransport)
+             PatternEngine&      patternEngine)
     : _state(state)
     , _motor(motor)
     , _mapper(mapper)
     , _patternEngine(patternEngine)
-    , _transportMgr(transportMgr)
-
-    , _serialTransport(serialTransport)
-    , _bleTransport(bleTransport)
 {
     // The build-flag-selected HTTP backend (include/ui/SlopHttpServer.h):
     //   default            -> IdleGuardWebServer (sync WebServer + the
@@ -185,11 +175,6 @@ void WebUI::init() {
                           "{\"ok\":false,\"error\":\"retired\",\"use\":\"slopsync 0x0108 pattern-presets-cmd\"}");
     });
     _httpServer->on("/api/log",       HTTP_GET,  [this]() { handleApiLog(); });
-    _httpServer->on("/api/mode",      HTTP_GET,  [this]() { handleApiMode(); });
-    _httpServer->on("/api/mode", HTTP_POST, [this]() {
-        _httpServer->send(410, "application/json",
-                          "{\"ok\":false,\"error\":\"retired\",\"use\":\"retired with the transport selector (M5c)\"}");
-    });
     _httpServer->on("/api/slopmotion", HTTP_GET,  [this]() { handleApiSlopMotion(); });
     // POST /api/slopmotion is RETIRED (M5c). "No controls outside SlopSync,
     // HTTP is read only" — the 20 live-tune knobs are channels 0x008B/0x008C/
@@ -440,14 +425,6 @@ void WebUI::handleApiStatus() {
     }
     doc["home_override"] = (_state.test_stroke_override_mm > 0.0f);
     doc["serial_mode"] = (bool)SERIAL_CONTROL_MODE;
-    doc["serial_active"] = _serialTransport.isActive();
-    doc["serial_linked"] = _serialTransport.isLinked();
-
-    doc["transport"] = TransportManager::transportName(_state.getTransport());
-    doc["ble_running"]   = _bleTransport.isRunning();
-    doc["ble_connected"] = _bleTransport.isConnected();
-    doc["ble_linked"]    = _bleTransport.isLinked();
-    doc["dongle_active"] = _transportMgr.isDongleActive();
 
     doc["paused"] = _state.paused;
     doc["manual_override"] = _state.manual_override;
@@ -547,10 +524,14 @@ void WebUI::handleApiCapabilities() {
 #endif
 #if defined(BLE_ENABLED)
     feat["has_ble"] = true;
+    // RFC-043 (Phase E): the BLE surface IS a SlopSync GATT transport now, not
+    // the removed OssmBleService masquerade — a client should not infer
+    // "legacy BLE protocol" from has_ble alone.
+    feat["slopsync_ble"] = true;
 #else
     feat["has_ble"] = false;
+    feat["slopsync_ble"] = false;
 #endif
-    feat["has_dongle"] = true;
     feat["blend_mode"] = _motor.getBlendMode();
     feat["expert_ceilings"] = _state.expert_mode;
     // Advanced pattern mode (fray-d port) — the UI builds the Advanced/Classic
@@ -564,6 +545,10 @@ void WebUI::handleApiCapabilities() {
     // Single source of truth: the registry constant that also names the WS
     // subprotocol + the mDNS TXT `proto` record (was a stale "slopsync/1").
     doc["slopsync_proto"] = slopsync::limits::ws_subprotocol.data();
+    // RFC-046 (Phase E): the WS-side UDP discovery responder (§13.8) is
+    // unconditional (no BLE_ENABLED gate — it needs no extra hardware), so
+    // its port is always advertised once SlopSync itself is.
+    doc["udp_discovery_port"] = (uint16_t)slopdrive::discovery::kPort;
 
     // Phase 2 — runtime motion backend. _machine_backend mirrors whatever
     // main.cpp actually bound the MotorProxy to (Ground Truth: NOT re-read
@@ -585,73 +570,42 @@ void WebUI::handleApiCapabilities() {
     _httpServer->send(200, "application/json", json);
 }
 
-void WebUI::handleApiClearFault() {
-    // No driver fault readback exists on this build — there is no fault state
-    // to clear and no way to verify a clear took effect. Say so explicitly
-    // (cleared:false) instead of an unqualified ok that implies a fault was
-    // observed and cleared. :3
-    SLOGI("ui", "Clear-fault requested — no driver fault readback on this build (nothing to clear/verify)");
-    _httpServer->send(200, "application/json",
-                      "{\"ok\":true,\"cleared\":false,\"reason\":\"no_fault_readback\"}");
-}
 
 // ============================================================================
-// handleApiSettings (HTTP GET + POST) — delegates to applySettings for mutations
+// handleApiSettings (HTTP GET only — POST is a 410 stub registered in init(),
+// see WebUI::init()'s "/api/settings" HTTP_POST route; mutation lives in
+// applySettings(), reached only via the WS_OP_* config-set path)
 // ============================================================================
 
 void WebUI::handleApiSettings() {
-    if (_httpServer->method() == HTTP_GET) {
-        JsonDocument doc;
-        doc["range_min"] = _mapper.getMinMm();
-        doc["range_max"] = _mapper.getMaxMm();
-        // Ground truth: speed + accel read back from the DRIVER (post its
-        // internal clamps), never the raw config request. :3
-        doc["max_speed"] = (uint32_t)_motor.getMaxSpeed();
-        doc["accel"] = (uint32_t)_motor.getAcceleration();
-        // Dual limit sets (v0.4 / D4 Phase 3) — same shape as the WS echo
-        doc["user_max_speed"] = (uint32_t)_state.config.user_max_speed_mm_s;
-        doc["user_max_accel"] = (uint32_t)_state.config.user_max_accel_mm_s2;
-        doc["input_max_speed"] = (uint32_t)_state.config.input_max_speed_mm_s;
-        doc["input_max_accel"] = (uint32_t)_state.config.input_max_accel_mm_s2;
-        doc["input_max_jerk"]  = (uint32_t)_state.config.input_max_jerk_mm_s3;
-        doc["blend_mode"] = _motor.getBlendMode();
-        doc["auto_duration"] = _state.auto_duration;
-        doc["intiface_compat"] = _state.intiface_compat;
-        doc["default_range_min"] = _state.default_range_min;
-        doc["default_range_max"] = _state.default_range_max;
-        doc["expert_mode"] = _state.expert_mode;
-        doc["stream_speed_mode"] = (uint8_t)_state.stream_speed_mode;
-        // max_travel = pre-homing rail scale (= configured max rail length);
-        // max_rail is the explicit setting the WebUI edits. :3
-        doc["max_travel"] = _state.config.max_rail_mm;
-        doc["max_rail"] = _state.config.max_rail_mm;
-        doc["measured_stroke"] = _motor.getMeasuredStrokeMm();
+    JsonDocument doc;
+    doc["range_min"] = _mapper.getMinMm();
+    doc["range_max"] = _mapper.getMaxMm();
+    // Ground truth: speed + accel read back from the DRIVER (post its
+    // internal clamps), never the raw config request. :3
+    doc["max_speed"] = (uint32_t)_motor.getMaxSpeed();
+    doc["accel"] = (uint32_t)_motor.getAcceleration();
+    // Dual limit sets (v0.4 / D4 Phase 3) — same shape as the WS echo
+    doc["user_max_speed"] = (uint32_t)_state.config.user_max_speed_mm_s;
+    doc["user_max_accel"] = (uint32_t)_state.config.user_max_accel_mm_s2;
+    doc["input_max_speed"] = (uint32_t)_state.config.input_max_speed_mm_s;
+    doc["input_max_accel"] = (uint32_t)_state.config.input_max_accel_mm_s2;
+    doc["input_max_jerk"]  = (uint32_t)_state.config.input_max_jerk_mm_s3;
+    doc["blend_mode"] = _motor.getBlendMode();
+    doc["auto_duration"] = _state.auto_duration;
+    doc["default_range_min"] = _state.default_range_min;
+    doc["default_range_max"] = _state.default_range_max;
+    doc["expert_mode"] = _state.expert_mode;
+    doc["stream_speed_mode"] = (uint8_t)_state.stream_speed_mode;
+    // max_travel = pre-homing rail scale (= configured max rail length);
+    // max_rail is the explicit setting the WebUI edits. :3
+    doc["max_travel"] = _state.config.max_rail_mm;
+    doc["max_rail"] = _state.config.max_rail_mm;
+    doc["measured_stroke"] = _motor.getMeasuredStrokeMm();
 
-        String json;
-        serializeJson(doc, json);
-        _httpServer->send(200, "application/json", json);
-    } else if (_httpServer->method() == HTTP_POST) {
-        String body = _httpServer->arg("plain");
-        JsonDocument doc;
-        DeserializationError err = deserializeJson(doc, body);
-
-        if (err) {
-            _httpServer->send(400, "application/json", "{\"error\":\"Invalid JSON\"}");
-            return;
-        }
-
-        JsonDocument resp;
-        if (!applySettings(doc, resp)) {
-            String json;
-            serializeJson(resp, json);
-            _httpServer->send(400, "application/json", json);
-            return;
-        }
-
-        String json;
-        serializeJson(resp, json);
-        _httpServer->send(200, "application/json", json);
-    }
+    String json;
+    serializeJson(doc, json);
+    _httpServer->send(200, "application/json", json);
 }
 
 // ============================================================================
@@ -714,8 +668,6 @@ bool WebUI::applySettings(JsonDocument& doc, JsonDocument& resp) {
     if (blend_mode > 3) blend_mode = 3;
 
     _state.auto_duration = doc["auto_duration"] | _state.auto_duration;
-    _state.intiface_compat = doc["intiface_compat"] | _state.intiface_compat;
-    TCodeParser::intifaceCompat = _state.intiface_compat;
 
     _state.expert_mode = doc["expert_mode"] | _state.expert_mode;
 
@@ -798,7 +750,6 @@ bool WebUI::applySettings(JsonDocument& doc, JsonDocument& resp) {
     resp["input_max_jerk"]  = (uint32_t)_state.config.input_max_jerk_mm_s3;
     resp["blend_mode"] = _motor.getBlendMode();
     resp["auto_duration"] = _state.auto_duration;
-    resp["intiface_compat"] = _state.intiface_compat;
     resp["expert_mode"] = _state.expert_mode;
     resp["default_range_min"] = _state.default_range_min;
     resp["default_range_max"] = _state.default_range_max;
@@ -810,35 +761,7 @@ bool WebUI::applySettings(JsonDocument& doc, JsonDocument& resp) {
 }
 
 // ============================================================================
-// handleApiMove (HTTP POST) — delegates to applyMove
-// ============================================================================
-
-void WebUI::handleApiMove() {
-    if (_httpServer->method() == HTTP_POST) {
-        String body = _httpServer->arg("plain");
-        JsonDocument doc;
-        DeserializationError err = deserializeJson(doc, body);
-
-        if (err || !doc["position"].is<float>()) {
-            _httpServer->send(400, "application/json", "{\"error\":\"position required\"}");
-            return;
-        }
-        if (!_state.homed) {
-            _httpServer->send(400, "application/json", "{\"error\":\"Invalid request or not homed\"}");
-            return;
-        }
-
-        JsonDocument resp;
-        applyMove(doc, resp);
-
-        String json;
-        serializeJson(resp, json);
-        _httpServer->send(200, "application/json", json);
-    }
-}
-
-// ============================================================================
-// applyMove — shared mutation used by HTTP POST /api/move AND WS op
+// applyMove — the WS_OP_MOVE mutation (SlopSync 0x0100 move → handleCommand)
 // ============================================================================
 
 bool WebUI::applyMove(JsonDocument& doc, JsonDocument& resp) {
@@ -891,7 +814,7 @@ bool WebUI::applyMove(JsonDocument& doc, JsonDocument& resp) {
     // rising-edge reads (main.cpp). The 240 Hz telemetry sampler maintains this
     // atomic continuously from _motor.getPosition(), so this store is only a
     // head start: it publishes the manual ENDPOINT the instant the intent is
-    // submitted, before the shaft has actually travelled there. A stream started
+    // submitted, before the shaft has actually traveled there. A stream started
     // in the same breath as a manual move therefore plans toward the endpoint
     // rather than the mid-flight sample. The sampler overwrites it within one
     // 4.2 ms tick either way. The live posdot/readout reads _motor.getPosition()
@@ -908,69 +831,10 @@ bool WebUI::applyMove(JsonDocument& doc, JsonDocument& resp) {
     return true;
 }
 
-void WebUI::handleApiHome() {
-    if (!_state.homing_in_progress) {
-        _state.homed = false;
-        _state.homing_in_progress = true;
-        _state.estop_latched = false;   // a fresh homing cycle exits the e-stopped state
-        _state.resume_start_ms = millis();   // arm soft-start NOW so the first post-rehome move doesn't lunge (F-003)
-    }
-    _httpServer->send(200, "application/json", "{\"ok\":true}");
-}
 
-void WebUI::handleApiStop() {
-    _state.estop_requested.store(true);
-    _state.estop_latched = true;   // latched for telemetry — UI fault banner rises from this
-    _state.homed = false;
-    _state.homing_in_progress = false;
-    _state.paused = false;
-    _state.manual_override = false;
-    _state.resume_start_ms = 0;
-    _bumpGen();
-    _httpServer->send(200, "application/json", "{\"ok\":true}");
-}
 
-void WebUI::handleApiPause() {
-    JsonDocument doc;
-    deserializeJson(doc, _httpServer->arg("plain"));
-    bool was = _state.paused;
-    _state.paused = doc["paused"] | (!_state.paused);
-    if (_state.paused && !was) {
-        if (_motor.isHomed() && _arbiter) _arbiter->hardStopMotion();
-        SLOGI("ui", "Paused: hands off the puppers — Intiface input edged out :3");
-    } else if (!_state.paused && was) {
-        _state.resume_start_ms = millis();
-        SLOGI("ui", "Unpaused: easing back in, letting Intiface take the reins again~ :3");
-    }
-    _bumpGen();
-    String json; JsonDocument r; r["ok"] = true; r["paused"] = _state.paused;
-    serializeJson(r, json);
-    _httpServer->send(200, "application/json", json);
-}
 
-void WebUI::handleApiHalt() {
-    if (_motor.isHomed() && _arbiter) _arbiter->hardStopMotion();
-    SLOGI("ui", "Halt: motor stopped — still homed and ready for round two~ :3");
-    _bumpGen();
-    _httpServer->send(200, "application/json", "{\"ok\":true}");
-}
 
-void WebUI::handleApiOverride() {
-    JsonDocument doc;
-    deserializeJson(doc, _httpServer->arg("plain"));
-    bool was = _state.manual_override;
-    _state.manual_override = doc["override"] | (!_state.manual_override);
-    if (_state.manual_override && !was) {
-        SLOGI("ui", "Manual override ON: you're topping now — Intiface can watch but can't touch :3");
-    } else if (!_state.manual_override && was) {
-        _state.resume_start_ms = millis();
-        SLOGI("ui", "Manual override OFF: handing the leash back to Intiface~ :3");
-    }
-    _bumpGen();
-    String json; JsonDocument r; r["ok"] = true; r["manual_override"] = _state.manual_override;
-    serializeJson(r, json);
-    _httpServer->send(200, "application/json", json);
-}
 
 // ============================================================================
 // ============================================================================
@@ -1808,9 +1672,9 @@ void WebUI::handleApiSlopMotion() {
     static constexpr uint8_t kInfeasPolicyCount =
         uint8_t(sizeof(kInfeasPolicyNames) / sizeof(kInfeasPolicyNames[0]));
     // Canonical wire names for slopmotion::CurvePolicy — same table-and-bound
-    // discipline, same sim parity. "follow" is FollowClient: honour the
-    // sender's declared family, which with no wire signalling yet resolves to
-    // C2, i.e. pre-0.8.0 behaviour byte for byte.
+    // discipline, same sim parity. "follow" is FollowClient: honor the
+    // sender's declared family, which with no wire signaling yet resolves to
+    // C2, i.e. pre-0.8.0 behavior byte for byte.
     static const char* kCurvePolicyNames[] = { "follow", "c1", "c2" };
     static constexpr uint8_t kCurvePolicyCount =
         uint8_t(sizeof(kCurvePolicyNames) / sizeof(kCurvePolicyNames[0]));
@@ -1885,9 +1749,9 @@ void WebUI::handleApiSlopMotion() {
         // {target, duration, end_vel} on 0x0085 is a COMPLETE encoding of one —
         // so "c1" reproduces the sender's own span exactly, where the quintic
         // necessarily rounds off the acceleration step the script has at each
-        // knot. "follow" (engine default) honours a declared family; no wire
-        // signalling exists yet, so today it resolves to C2 — pre-0.8.0
-        // behaviour byte for byte. Strings only, mirroring the sim's
+        // knot. "follow" (engine default) honors a declared family; no wire
+        // signaling exists yet, so today it resolves to C2 — pre-0.8.0
+        // behavior byte for byte. Strings only, mirroring the sim's
         // /api/slopmotion vocabulary so the two responses diff directly.
         if (doc["curve_policy"].is<const char*>()) {
             const char* p = doc["curve_policy"];
@@ -1925,16 +1789,16 @@ void WebUI::handleApiSlopMotion() {
                 (uint32_t)(clampf(doc["settle_grace_ms"], 0.0f, 200.0f) * 1000.0f);
         if (doc["chase_aim_accel_extrap"].is<bool>())
             _state.sm_tune_aim_extrap = doc["chase_aim_accel_extrap"].as<bool>();
-        // DC centring of a degraded band: keep the achieved stroke symmetric
+        // DC centering of a degraded band: keep the achieved stroke symmetric
         // about the COMMANDED midpoint when the machine cannot deliver the full
         // amplitude on the clock. ON is the engine default; OFF restores the
         // slopmotion 0.4.0 contract. The gain is a feel dial (0..1, and NOT
         // monotone — see SystemState) clamped to the engine's own range here so
         // the GET echo below is the value Core 1 will actually push.
         if (doc["wave_centering"].is<bool>())
-            _state.sm_tune_centring = doc["wave_centering"].as<bool>();
+            _state.sm_tune_centering = doc["wave_centering"].as<bool>();
         if (doc["wave_centering_gain"].is<float>())
-            _state.sm_tune_centring_gain =
+            _state.sm_tune_centering_gain =
                 clampf(doc["wave_centering_gain"], 0.0f, 1.0f);
         // RFC-008 handoff sanity guard — the Fritsch-Carlson chord factor k
         // used to bound an inbound segment's end velocity against the FOLLOWING
@@ -1961,7 +1825,7 @@ void WebUI::handleApiSlopMotion() {
         }
         SLOGI("ui", "slopmotion tuning: jmax_ovr=%.0f gain=%.2f look=%.2f ff=%d aff=%d "
                     "policy=%s margin=%.2f steps=%u grace=%.0fms aimx=%d "
-                    "centring=%d@%.2f handoff_k=%.2f curve=%s "
+                    "centering=%d@%.2f handoff_k=%.2f curve=%s "
                     "smooth_bud=%.2f amp_bud=%.2f blend=%u",
               (double)_state.sm_tune_jmax_ovr, (double)_state.sm_tune_chase_gain,
               (double)_state.sm_tune_chase_look,
@@ -1972,8 +1836,8 @@ void WebUI::handleApiSlopMotion() {
               (unsigned)_state.sm_tune_reshape_steps,
               (double)_state.sm_tune_settle_grace_us / 1000.0,
               (int)_state.sm_tune_aim_extrap,
-              (int)_state.sm_tune_centring,
-              (double)_state.sm_tune_centring_gain,
+              (int)_state.sm_tune_centering,
+              (double)_state.sm_tune_centering_gain,
               (double)_state.sm_tune_handoff_k,
               kCurvePolicyNames[_state.sm_tune_curve_policy < kCurvePolicyCount
                                     ? _state.sm_tune_curve_policy : 0],
@@ -2016,10 +1880,10 @@ void WebUI::handleApiSlopMotion() {
     // MILLISECONDS on the wire, microseconds in the engine (see the POST side).
     tuning["settle_grace_ms"]         = _state.sm_tune_settle_grace_us / 1000.0f;
     tuning["chase_aim_accel_extrap"]  = (bool)_state.sm_tune_aim_extrap;
-    // Centring: the APPLIED pair (post-clamp), i.e. exactly what the per-tick
+    // Centering: the APPLIED pair (post-clamp), i.e. exactly what the per-tick
     // Core-1 push writes into slopmotion::Config.
-    tuning["wave_centering"]          = (bool)_state.sm_tune_centring;
-    tuning["wave_centering_gain"]     = _state.sm_tune_centring_gain;
+    tuning["wave_centering"]          = (bool)_state.sm_tune_centering;
+    tuning["wave_centering_gain"]     = _state.sm_tune_centering_gain;
     // RFC-008 handoff guard strength (0 = off). APPLIED value, post-clamp.
     tuning["handoff_k"]               = _state.sm_tune_handoff_k;
     // "effective" is what Core 1 ACTUALLY pushed into the engine last tick —
@@ -2072,69 +1936,6 @@ void WebUI::handleApiSlopMotion() {
 }
 
 // ============================================================================
-// handleApiMode (HTTP GET + POST) — delegates to applyMode
-// ============================================================================
-
-void WebUI::handleApiMode() {
-    if (_httpServer->method() == HTTP_GET) {
-        JsonDocument doc;
-        doc["mode"]          = TransportManager::transportName(_state.getTransport());
-        doc["ble_running"]   = _bleTransport.isRunning();
-        doc["ble_connected"] = _bleTransport.isConnected();
-        String json;
-        serializeJson(doc, json);
-        _httpServer->send(200, "application/json", json);
-        return;
-    }
-
-    JsonDocument doc;
-    if (deserializeJson(doc, _httpServer->arg("plain"))) {
-        _httpServer->send(400, "application/json", "{\"error\":\"Invalid JSON\"}");
-        return;
-    }
-
-    JsonDocument resp;
-    if (!applyMode(doc, resp)) {
-        String json;
-        serializeJson(resp, json);
-        _httpServer->send(400, "application/json", json);
-        return;
-    }
-
-    String json;
-    serializeJson(resp, json);
-    _httpServer->send(200, "application/json", json);
-}
-
-// ============================================================================
-// applyMode — shared mutation used by HTTP POST /api/mode AND WS op
-// ============================================================================
-
-bool WebUI::applyMode(JsonDocument& doc, JsonDocument& resp) {
-    const char* m = doc["mode"] | "";
-    TransportMode mode = _state.getTransport();
-    if      (strcasecmp(m, "WS")     == 0) mode = TransportMode::WS;
-    else if (strcasecmp(m, "SER")    == 0) mode = TransportMode::SER;
-    else if (strcasecmp(m, "BT")     == 0) mode = TransportMode::BT;
-    else if (strcasecmp(m, "DONGLE") == 0) mode = TransportMode::DONGLE;
-    else if (strcasecmp(m, "OSSM") == 0) mode = TransportMode::OSSM_BLE;
-    else {
-        resp["ok"] = false;
-        resp["error"] = "mode must be WS|SER|BT|DONGLE|OSSM";
-        return false;
-    }
-
-    _transportMgr.applyTransport(mode);
-    ConfigStore::save(_state, _mapper, _motor);
-
-    resp["ok"]   = true;
-    resp["mode"] = TransportManager::transportName(_state.getTransport());
-
-    _bumpGen();
-    return true;
-}
-
-// ============================================================================
 // handleCommand — dispatch 0x10 CMD ops from WS control plane
 // ============================================================================
 // Called for each command frame by whichever plane received it. The caller
@@ -2155,9 +1956,6 @@ bool WebUI::handleCommand(uint8_t op, JsonDocument& payload_in,
     case WS_OP_GEN_CFG:
     case WS_OP_GEN_RUN:
         return applyPattern(payload_in, payload_out);
-
-    case WS_OP_MODE:
-        return applyMode(payload_in, payload_out);
 
     // ---- Driver config ---------------------------------------------------
     case WS_OP_CLEAR_FAULT:
@@ -2330,7 +2128,6 @@ bool WebUI::handleCommand(uint8_t op, JsonDocument& payload_in,
         payload_out["accel"] = (uint32_t)_motor.getAcceleration();
         payload_out["blend_mode"] = _motor.getBlendMode();
         payload_out["auto_duration"] = _state.auto_duration;
-        payload_out["intiface_compat"] = _state.intiface_compat;
         payload_out["default_range_min"] = _state.default_range_min;
         payload_out["default_range_max"] = _state.default_range_max;
         payload_out["expert_mode"] = _state.expert_mode;
@@ -2348,7 +2145,6 @@ bool WebUI::handleCommand(uint8_t op, JsonDocument& payload_in,
 
         payload_out["paused"] = _state.paused;
         payload_out["manual_override"] = _state.manual_override;
-        payload_out["transport"] = TransportManager::transportName(_state.getTransport());
         payload_out["homed"] = _state.homed;
         payload_out["stream_speed_mode"] = (uint8_t)_state.stream_speed_mode;
         payload_out["overshoot_clamp"] = (bool)_state.interp_clamp_overshoot;

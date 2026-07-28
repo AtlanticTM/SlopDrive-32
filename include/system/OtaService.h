@@ -33,12 +33,13 @@
 //
 // SAFETY GATE (prepareForOta(), .clinerules §2 real-time safety):
 //   Before ANY flash write begins we (1) stop the pattern engine and hard-stop
-//   the motor via the existing arbiter stop semantics, (2) suspend the WS
-//   telemetry sender task (flash-cache access during a write window causes
-//   resets), and (3) raise SystemState::ota_active so ConfigStore::save() (the
-//   only NVS flash writer reachable while gated) defers instead of writing.
-//   A failed OTA never resumes motion by itself — finishOta(false) resumes
-//   only telemetry, leaving the machine stopped until the user acts.
+//   the motor via the existing arbiter stop semantics, (2) [no-op since M5c —
+//   the :81 telemetry sender this used to suspend is deleted; the SlopSync hub
+//   task is deliberately left running, see OtaService.cpp], and (3) raise
+//   SystemState::ota_active so ConfigStore::save() (the only NVS flash writer
+//   reachable while gated) defers instead of writing.
+//   A failed OTA never resumes motion by itself — finishOta(false) leaves the
+//   machine stopped until the user acts.
 //
 // Lifecycle hooks (.clinerules §4): begin() / handle() / (implicit stop via
 // the safety gate). Placement is Core 0 only — never the motion-critical core.

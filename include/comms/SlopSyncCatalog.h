@@ -43,18 +43,29 @@ namespace slopdrive {
 // allocation). Named here so buildSlopDriveCatalog() AND the telemetry
 // publisher in SlopSyncHubService reference ONE definition — a literal in only
 // one of the two would be a silent wire mismatch.
+// RFC-047 (Phase C2, then Phase C4): device ids follow the 0xCDSS grid —
+// C=class (1 STATE/2 STREAM/3 INTENT/4 EVENT/5 STORE), D=domain (0 machine/
+// 1 motion/2 pattern), S=family, S=member (member 0 = family master; a twin
+// channel across class bands sharing domain+family+member is a MIRROR; family
+// 0xF = admin/meta). Phase C4 (operator-stamped, see docs/canon/LEDGER.md)
+// moved every sub-slot onto that family-nibble convention; per-line `(was
+// 0xXXXX)` names the immediately preceding id — the full renumber history
+// lives in docs/slopsync/CHANNEL-MAP.md's generated table and git log, not
+// here. The etag moves with every renumber, which is the designed re-fetch
+// mechanism, not a break: 0x0080-0x7FFF is device-allocated space per the
+// registry, and CHANNEL-MAP.md records C4 as the last legal one.
 namespace ch {
-inline constexpr uint16_t motion         = 0x0080;
-inline constexpr uint16_t machine_config = 0x0081;
-inline constexpr uint16_t pattern_state  = 0x0082;
-inline constexpr uint16_t odometer       = 0x0083;
-inline constexpr uint16_t motion_input   = 0x0084;
-inline constexpr uint16_t motion_segment = 0x0085;
+inline constexpr uint16_t motion         = 0x1100;  // STATE·motion, family 0 member 0 (master)
+inline constexpr uint16_t machine_config = 0x1000;  // STATE·machine, family 0 member 0 (master)
+inline constexpr uint16_t pattern_state  = 0x1200;  // STATE·pattern, family 0 member 0 (master) — Phase D's background_run field rides here, untouched by C4
+inline constexpr uint16_t odometer       = 0x1020;  // STATE·machine, family 2 member 0 (was 0x1002)
+inline constexpr uint16_t motion_input   = 0x2100;  // STREAM·motion, family 0 member 0 (master)
+inline constexpr uint16_t motion_segment = 0x2101;  // STREAM·motion, family 0 member 1
 // ---- M5a: the telemetry channels the legacy :81 plane owned ---------------
-inline constexpr uint16_t plan_strip     = 0x0086;
-inline constexpr uint16_t power          = 0x0087;
-inline constexpr uint16_t motion_diag    = 0x0088;
-inline constexpr uint16_t motion_anomaly = 0x0089;
+inline constexpr uint16_t plan_strip     = 0x1110;  // STATE·motion, family 1 member 0 (master; was 0x1101)
+inline constexpr uint16_t power          = 0x1010;  // STATE·machine, family 1 member 0 (was 0x1001)
+inline constexpr uint16_t motion_diag    = 0x1111;  // STATE·motion, family 1 member 1 (was 0x1102)
+inline constexpr uint16_t motion_anomaly = 0x4100;  // EVENT·motion, family 0 member 0 (master)
 // ---- M5b: the MODE settings the legacy :81/HTTP plane owned ---------------
 // A SECOND settings category, not more fields on 0x0081 — and the reason is
 // structural, not stylistic. 0x0081's RFC-009 `enabled_mask` is a bitfield8
@@ -64,16 +75,16 @@ inline constexpr uint16_t motion_anomaly = 0x0089;
 // which is a protocol break rather than the append-only evolution the packed
 // layouts promise. RFC-009's own answer is the one taken here: a settings
 // category that outgrows its channel SPLITS into a new STATE+INTENT pair.
-inline constexpr uint16_t machine_modes  = 0x008A;
+inline constexpr uint16_t machine_modes  = 0x1030;  // STATE·machine, family 3 member 0 (master; was 0x1003)
 // ---- M5c: SlopMotion live tuning, off HTTP and onto the protocol ----------
 // THREE state cards, ONE shared writer (0x0105). `settingChannel` is per-entry
 // and `setting_key` is a key WITHIN that writer, so several STATE channels may
 // name the same INTENT channel as long as their keys do not collide. That is
 // what lets 17 knobs -- more than any single channel's bitfield8 enabled_mask
 // can gate -- stay one coherent write path instead of three.
-inline constexpr uint16_t sm_limits      = 0x008B;
-inline constexpr uint16_t sm_chase       = 0x008C;
-inline constexpr uint16_t sm_waveform    = 0x008D;
+inline constexpr uint16_t sm_limits      = 0x1120;  // STATE·motion, family 2 member 0 (master; was 0x1103)
+inline constexpr uint16_t sm_chase       = 0x1121;  // STATE·motion, family 2 member 1 (was 0x1104)
+inline constexpr uint16_t sm_waveform    = 0x1122;  // STATE·motion, family 2 member 2 (was 0x1105)
 // ---- Advanced pattern — off the dead /api/pattern HTTP surface, onto SlopSync
 // THE SAME FLATTENED-ENTRY BUDGET SPLIT AS 0x008B/C/D. AdvancedPattern.h's real
 // (firmware, not legacy-JS) parameter set is 8 base controls (advpat::Settings)
@@ -88,28 +99,35 @@ inline constexpr uint16_t sm_waveform    = 0x008D;
 // every group boundary a real conceptual one instead of an artifact of
 // bit-packing, exactly like sm_limits/sm_chase/sm_waveform split by subsystem
 // rather than by filling every last mask bit.
-inline constexpr uint16_t pattern_advanced          = 0x008E;  // ap_mode + 7 base controls
-inline constexpr uint16_t pattern_adv_mod_depth1    = 0x008F;  // advpat::DEPTH_MAX modifier
-inline constexpr uint16_t pattern_adv_mod_depth2    = 0x0090;  // advpat::DEPTH_MIN modifier
-inline constexpr uint16_t pattern_adv_mod_speedin   = 0x0091;  // advpat::SPEED_IN modifier
-inline constexpr uint16_t pattern_adv_mod_speedout  = 0x0092;  // advpat::SPEED_OUT modifier
-inline constexpr uint16_t pattern_adv_mod_accelin   = 0x0093;  // advpat::ACCEL_IN modifier
-inline constexpr uint16_t pattern_adv_mod_accelout  = 0x0094;  // advpat::ACCEL_OUT modifier
-inline constexpr uint16_t move           = 0x0100;
-inline constexpr uint16_t config_set     = 0x0101;
-inline constexpr uint16_t pattern_cmd    = 0x0102;
-inline constexpr uint16_t home           = 0x0103;
-inline constexpr uint16_t modes_set      = 0x0104;
-inline constexpr uint16_t sm_set         = 0x0105;
-inline constexpr uint16_t machine_admin  = 0x0106;
-// Shared writer behind ALL SEVEN 0x008E..0x0094 advanced-pattern STATE
-// channels — same "one settingChannel, many cards" pattern as 0x0105.
-inline constexpr uint16_t pattern_advanced_cmd = 0x0107;
+inline constexpr uint16_t pattern_advanced          = 0x1210;  // STATE·pattern, family 1 member 0 (master; was 0x1201) — ap_mode + 7 base controls
+// The six fray-d modifier lanes: ONE family (domain=pattern, family=1),
+// members 1-6. Member order is speed-in/out, accel-in/out, depth-1/2 — NOT
+// advpat::BaseId order (depth,depth,speedin,speedout,accelin,accelout) — see
+// kModChannels in SlopSyncHubService.cpp, which maps between the two.
+inline constexpr uint16_t pattern_adv_mod_speedin   = 0x1211;  // STATE·pattern, family 1 member 1 (was 0x1204)
+inline constexpr uint16_t pattern_adv_mod_speedout  = 0x1212;  // STATE·pattern, family 1 member 2 (was 0x1205)
+inline constexpr uint16_t pattern_adv_mod_accelin   = 0x1213;  // STATE·pattern, family 1 member 3 (was 0x1206)
+inline constexpr uint16_t pattern_adv_mod_accelout  = 0x1214;  // STATE·pattern, family 1 member 4 (was 0x1207)
+inline constexpr uint16_t pattern_adv_mod_depth1    = 0x1215;  // STATE·pattern, family 1 member 5 (was 0x1202) — advpat::DEPTH_MAX modifier
+inline constexpr uint16_t pattern_adv_mod_depth2    = 0x1216;  // STATE·pattern, family 1 member 6 (was 0x1203) — advpat::DEPTH_MIN modifier
+inline constexpr uint16_t move           = 0x3100;  // INTENT·motion, family 0 member 0 (master)
+inline constexpr uint16_t config_set     = 0x3000;  // INTENT·machine, family 0 member 0 (master), MIRROR of machine_config
+inline constexpr uint16_t pattern_cmd    = 0x3200;  // INTENT·pattern, family 0 member 0 (master), MIRROR of pattern_state
+inline constexpr uint16_t home           = 0x3101;  // INTENT·motion, family 0 member 1
+inline constexpr uint16_t modes_set      = 0x3030;  // INTENT·machine, family 3 member 0, MIRROR of machine_modes (was 0x3001)
+inline constexpr uint16_t sm_set         = 0x3120;  // INTENT·motion, family 2 member 0, MIRROR of the sm_* family (was 0x3102)
+inline constexpr uint16_t machine_admin  = 0x30F0;  // INTENT·machine, family F member 0 = admin (was 0x3002)
+// Shared writer behind ALL SEVEN pattern-advanced STATE channels — same
+// "one settingChannel, many cards" pattern as sm_set. MIRROR of
+// pattern_advanced (family 1 member 0 on both sides).
+inline constexpr uint16_t pattern_advanced_cmd = 0x3210;  // INTENT·pattern, family 1 member 0 (was 0x3201)
 // RFC-021 `pattern.frayd` preset store — retires POST /api/pattern/presets.
 // See PatternPresetStore.h for the backend and the STORE/roster entries below.
-inline constexpr uint16_t pattern_presets        = 0x0095;  // STORE
-inline constexpr uint16_t pattern_presets_roster = 0x0096;  // its roster STATE
-inline constexpr uint16_t pattern_presets_cmd    = 0x0108;  // save/load/delete/rename INTENT
+// All three ride domain=pattern, family=2, member=0 (roster is the STATE
+// master; presets/presets_cmd MIRROR it on the STORE and INTENT bands).
+inline constexpr uint16_t pattern_presets_roster = 0x1220;  // STATE·pattern, family 2 member 0 (master; was 0x1208)
+inline constexpr uint16_t pattern_presets_cmd    = 0x3220;  // INTENT·pattern, family 2 member 0 (was 0x3202)
+inline constexpr uint16_t pattern_presets        = 0x5220;  // STORE·pattern, family 2 member 0 (was 0x5200)
 }  // namespace ch
 
 // MIRROR of PatternPresetStore::{kCapacity,kNameMax,kPayloadBytes}
@@ -294,8 +312,8 @@ inline bool buildSlopDriveCatalog(slopsync::Catalog32& c, DeviceFeatures feat = 
     // requires `control`, expressed as index-aligned `option_access` (catalog
     // key 17) on the enum-valued `op` field rather than as hub-side code,
     // because a GENERIC client renders this channel from the catalog and must
-    // know which ops it may offer. A client that honours key 17 greys the
-    // rest correctly (RFC-009's grey-never-hide); one that ignores it
+    // know which ops it may offer. A client that honors key 17 grays the
+    // rest correctly (RFC-009's gray-never-hide); one that ignores it
     // discovers the same truth by NACK. Encoding it only in hub code would
     // make the honest client impossible.
     //
@@ -417,25 +435,49 @@ inline bool buildSlopDriveCatalog(slopsync::Catalog32& c, DeviceFeatures feat = 
     // The three roles are the CLI's other half: with `window.min|max` from
     // 0x0081 it converts a normalized sender intent into mm and plots it
     // against telemetry.position without hardcoding a single channel id.
+    // RFC-047/048 (Phase C2): category = motion (RENDERING.md's own example —
+    // "0x1100 = STATE·motion·00, the motion telemetry channel"), rank = hero
+    // — THE live motion feed, the machine's face. provenance on pos/tgt/raw is
+    // the worked example RENDERING.md §5.3 names by name: demand (raw),
+    // planned (target), actual (position) — one quantity at three pipeline
+    // stages, and the axis archetype's commanded-vs-actual overlay is their
+    // companion composition.
+    auto addMotion = [&]() {
     c.addEntry({.id = ch::motion, .name = "motion",
                 .cls = ChannelClass::STATE, .dir = Direction::h2c,
                 .access = AccessLevel::watch, .maxRateHz = 60.0f,
-                .defaultPriority = Priority::elevated});
+                .defaultPriority = Priority::elevated,
+                .hasCategory = true, .category = slopsync::ui_categories::motion,
+                .hasRank = true, .rank = slopsync::ui_ranks::hero});
     c.addLayoutField({.name = "pos_10um", .type = PackedFieldType::u16, .unit = "mm",   .scale = 100.0f,
                       .desc = "Where the carriage actually is.",
-                      .role = roles::telemetry_position});
+                      .role = roles::telemetry_position,
+                      .hasRank = true, .rank = slopsync::ui_ranks::hero,
+                      .hasProvenance = true, .provenance = slopsync::value_provenance::actual,
+                      .hasUnitId = true, .unitId = slopsync::unit_ids::mm});
     c.addLayoutField({.name = "tgt_10um", .type = PackedFieldType::u16, .unit = "mm",   .scale = 100.0f,
                       .desc = "Where the motion planner is currently driving to.",
-                      .role = roles::telemetry_target});
+                      .role = roles::telemetry_target,
+                      .hasRank = true, .rank = slopsync::ui_ranks::hero,
+                      .hasProvenance = true, .provenance = slopsync::value_provenance::planned,
+                      .hasUnitId = true, .unitId = slopsync::unit_ids::mm});
     c.addLayoutField({.name = "speed",    .type = PackedFieldType::i16, .unit = "mm/s", .scale = 10.0f,
                       .desc = "Live carriage speed; sign is the direction of travel.",
-                      .role = roles::telemetry_velocity});
+                      .role = roles::telemetry_velocity,
+                      .hasRank = true, .rank = slopsync::ui_ranks::hero,
+                      .hasProvenance = true, .provenance = slopsync::value_provenance::actual,
+                      .hasUnitId = true, .unitId = slopsync::unit_ids::mm_s});
     c.addBitfieldField({.name = "flags", .type = PackedFieldType::bitfield8, .unit = "flag", .scale = 1.0f,
-                        .desc = "Live machine mode bits."},
+                        .desc = "Live machine mode bits.",
+                        .hasRank = true, .rank = slopsync::ui_ranks::detail},
                        {"homed", "homing", "gen_running", "paused", "override", "estop", "stream"});
     c.addLayoutField({.name = "raw_10um", .type = PackedFieldType::u16, .unit = "mm",   .scale = 100.0f,
                       .desc = "What the controlling input ASKED for, mapped into the stroke "
-                              "window, before the planner shaped it."});
+                              "window, before the planner shaped it.",
+                      .hasRank = true, .rank = slopsync::ui_ranks::diagnostic,
+                      .hasProvenance = true, .provenance = slopsync::value_provenance::demand,
+                      .hasUnitId = true, .unitId = slopsync::unit_ids::mm});
+    };
 
     // ---- 0x0081 "machine-config" — STATE, normal, on-change ---------------
     // The full geometry + dual-limit-set snapshot in physical units (f32).
@@ -471,12 +513,14 @@ inline bool buildSlopDriveCatalog(slopsync::Catalog32& c, DeviceFeatures feat = 
     // publisher always wrote the CONFIGURED value, never the measurement.
     // They are different quantities now published distinctly, and a client
     // must not adopt one as a stand-in for the other.
+    auto addMachineConfig = [&]() {
     c.addEntry({.id = ch::machine_config, .name = "machine-config",
                 .cls = ChannelClass::STATE, .dir = Direction::h2c,
                 .access = AccessLevel::watch, .maxRateHz = 0.0f,
                 .defaultPriority = Priority::normal,
-                .hasCategory = true, .category = slopsync::setting_categories::limits,
-                .hasSettingChannel = true, .settingChannel = ch::config_set});
+                .hasCategory = true, .category = slopsync::ui_categories::limits,
+                .hasSettingChannel = true, .settingChannel = ch::config_set,
+                .hasRank = true, .rank = slopsync::ui_ranks::control});
     c.addLayoutField({.name = "window_min",  .type = PackedFieldType::f32, .unit = "mm",    .scale = 1.0f,
                       .hasMin = true, .hasMax = true, .min = 0.0f, .max = ceiling::rail_mm,
                       .dflt = SettingDefault::ofFloat(factory::window_min),
@@ -484,7 +528,9 @@ inline bool buildSlopDriveCatalog(slopsync::Catalog32& c, DeviceFeatures feat = 
                       .desc = "Rearmost point of travel. Everything the machine is told to do is "
                               "mapped into the window between this and the front limit.",
                       .role = roles::window_min, .step = 1.0f,
-                      .settingKey = 1, .hasSettingKey = true, .hasStep = true});
+                      .settingKey = 1, .hasSettingKey = true, .hasStep = true,
+                      .hasRank = true, .rank = slopsync::ui_ranks::control,
+                      .hasUnitId = true, .unitId = slopsync::unit_ids::mm});
     c.addLayoutField({.name = "window_max",  .type = PackedFieldType::f32, .unit = "mm",    .scale = 1.0f,
                       .hasMin = true, .hasMax = true, .min = 0.0f, .max = ceiling::rail_mm,
                       .dflt = SettingDefault::ofFloat(factory::window_max),
@@ -492,7 +538,9 @@ inline bool buildSlopDriveCatalog(slopsync::Catalog32& c, DeviceFeatures feat = 
                       .desc = "Frontmost point of travel. Must be greater than the rear limit; the "
                               "machine never moves past it.",
                       .role = roles::window_max, .step = 1.0f,
-                      .settingKey = 2, .hasSettingKey = true, .hasStep = true});
+                      .settingKey = 2, .hasSettingKey = true, .hasStep = true,
+                      .hasRank = true, .rank = slopsync::ui_ranks::control,
+                      .hasUnitId = true, .unitId = slopsync::unit_ids::mm});
     c.addLayoutField({.name = "user_speed",  .type = PackedFieldType::f32, .unit = "mm/s",  .scale = 1.0f,
                       .hasMin = true, .hasMax = true, .min = ceiling::speed_min, .max = ceiling::speed_max,
                       .dflt = SettingDefault::ofFloat(factory::user_speed),
@@ -500,7 +548,9 @@ inline bool buildSlopDriveCatalog(slopsync::Catalog32& c, DeviceFeatures feat = 
                       .desc = "Speed ceiling for moves YOU drive by hand. Kept gentle by default: "
                               "it is a ceiling, not a target.",
                       .role = roles::limit_user_speed, .step = 1.0f,
-                      .settingKey = 3, .hasSettingKey = true, .hasStep = true});
+                      .settingKey = 3, .hasSettingKey = true, .hasStep = true,
+                      .hasRank = true, .rank = slopsync::ui_ranks::control,
+                      .hasUnitId = true, .unitId = slopsync::unit_ids::mm_s});
     c.addLayoutField({.name = "user_accel",  .type = PackedFieldType::f32, .unit = "mm/s2", .scale = 1.0f,
                       .hasMin = true, .hasMax = true, .min = ceiling::accel_min, .max = ceiling::accel_max,
                       .dflt = SettingDefault::ofFloat(factory::user_accel),
@@ -508,7 +558,9 @@ inline bool buildSlopDriveCatalog(slopsync::Catalog32& c, DeviceFeatures feat = 
                       .desc = "How hard a hand-driven move is allowed to pick up speed. Lower "
                               "feels softer at the start and end of every move.",
                       .role = roles::limit_user_accel, .step = 10.0f,
-                      .settingKey = 4, .hasSettingKey = true, .hasStep = true});
+                      .settingKey = 4, .hasSettingKey = true, .hasStep = true,
+                      .hasRank = true, .rank = slopsync::ui_ranks::control,
+                      .hasUnitId = true, .unitId = slopsync::unit_ids::mm_s2});
     c.addLayoutField({.name = "input_speed", .type = PackedFieldType::f32, .unit = "mm/s",  .scale = 1.0f,
                       .hasMin = true, .hasMax = true, .min = ceiling::speed_min, .max = ceiling::speed_max,
                       .dflt = SettingDefault::ofFloat(factory::input_speed),
@@ -516,7 +568,9 @@ inline bool buildSlopDriveCatalog(slopsync::Catalog32& c, DeviceFeatures feat = 
                       .desc = "Speed ceiling for everything the machine drives itself: patterns, "
                               "scripts and live streams. This is your top-speed safety limit.",
                       .role = roles::limit_input_speed, .step = 10.0f,
-                      .settingKey = 5, .hasSettingKey = true, .hasStep = true});
+                      .settingKey = 5, .hasSettingKey = true, .hasStep = true,
+                      .hasRank = true, .rank = slopsync::ui_ranks::control,
+                      .hasUnitId = true, .unitId = slopsync::unit_ids::mm_s});
     c.addLayoutField({.name = "input_accel", .type = PackedFieldType::f32, .unit = "mm/s2", .scale = 1.0f,
                       .hasMin = true, .hasMax = true, .min = ceiling::accel_min, .max = ceiling::accel_max,
                       .dflt = SettingDefault::ofFloat(factory::input_accel),
@@ -524,7 +578,9 @@ inline bool buildSlopDriveCatalog(slopsync::Catalog32& c, DeviceFeatures feat = 
                       .desc = "How hard patterns and scripts may change speed. Raise it for snappy "
                               "content, lower it if the machine feels harsh.",
                       .role = roles::limit_input_accel, .step = 100.0f,
-                      .settingKey = 6, .hasSettingKey = true, .hasStep = true});
+                      .settingKey = 6, .hasSettingKey = true, .hasStep = true,
+                      .hasRank = true, .rank = slopsync::ui_ranks::control,
+                      .hasUnitId = true, .unitId = slopsync::unit_ids::mm_s2});
     c.addLayoutField({.name = "max_rail",    .type = PackedFieldType::f32, .unit = "mm",    .scale = 1.0f,
                       .hasMin = true, .hasMax = true, .min = ceiling::rail_min, .max = ceiling::rail_mm,
                       .dflt = SettingDefault::ofFloat(factory::max_rail),
@@ -532,7 +588,9 @@ inline bool buildSlopDriveCatalog(slopsync::Catalog32& c, DeviceFeatures feat = 
                       .desc = "How far sensorless homing searches for the hard stops. Set it above "
                               "your rail's real length (e.g. 2000mm+ for a 2m rail).",
                       .role = roles::geometry_max_travel, .step = 1.0f,
-                      .settingKey = 8, .hasSettingKey = true, .hasStep = true});
+                      .settingKey = 8, .hasSettingKey = true, .hasStep = true,
+                      .hasRank = true, .rank = slopsync::ui_ranks::control,
+                      .hasUnitId = true, .unitId = slopsync::unit_ids::mm});
     c.addLayoutField({.name = "input_jerk",  .type = PackedFieldType::f32, .unit = "mm/s3", .scale = 1.0f,
                       .hasMin = true, .hasMax = true, .min = ceiling::jerk_min, .max = ceiling::jerk_max,
                       .dflt = SettingDefault::ofFloat(factory::input_jerk),
@@ -541,26 +599,29 @@ inline bool buildSlopDriveCatalog(slopsync::Catalog32& c, DeviceFeatures feat = 
                               "Protects the mechanics; it is not a smoothing knob.",
                       .role = roles::limit_input_jerk, .step = 1000.0f,
                       .settingKey = 7, .flags = slopsync::setting_flags::advanced,
-                      .hasSettingKey = true, .hasStep = true});
+                      .hasSettingKey = true, .hasStep = true,
+                      .hasRank = true, .rank = slopsync::ui_ranks::advanced,
+                      .hasUnitId = true, .unitId = slopsync::unit_ids::mm_s3});
     // RFC-009 item 4 — DYNAMIC ENABLED STATE. Bit i gates the i-th
     // SETTING-ANNOTATED field of this layout, in layout order:
     //   0 window_min  1 window_max  2 user_speed  3 user_accel
     //   4 input_speed 5 input_accel 6 max_rail     7 input_jerk
     // fw 2.1.76: max_rail joined the setting-annotated set (item 1) and takes
     // bit 6 in LAYOUT order (it is declared before input_jerk), which pushes
-    // input_jerk to bit 7 — a pure relabelling of what bit 6/7 mean, not a
+    // input_jerk to bit 7 — a pure relabeling of what bit 6/7 mean, not a
     // reshuffle of any BYTE offset (enabled_mask is metadata about the layout,
     // not part of it). All 8 bits of the bitfield8 are now spoken for; a 9th
     // setting on this entry would need to split into a new channel, same as
     // 0x008B/C/D's category-split precedent. `enabled_mask` itself is never
     // setting-annotated — "setting-annotated" is the only membership rule,
     // which is why it needs no second list to stay in step. Disabled means
-    // GREY, NEVER HIDE. Bit labels name the field each bit gates so the
+    // GRAY, NEVER HIDE. Bit labels name the field each bit gates so the
     // mapping survives encode/decode without a client re-deriving it.
     c.addBitfieldField({.name = "enabled_mask", .type = PackedFieldType::bitfield8, .unit = "flag",
                         .scale = 1.0f,
                         .desc = "Which of these settings the machine will accept right now.",
-                        .role = roles::meta_enabled_mask},
+                        .role = roles::meta_enabled_mask,
+                        .hasRank = true, .rank = slopsync::ui_ranks::detail},
                        {"window_min", "window_max", "user_speed", "user_accel",
                         "input_speed", "input_accel", "max_rail", "input_jerk"});
     // measured_stroke (field 10, byte 33) — fw 2.1.76, item 3. THE REAL
@@ -578,12 +639,18 @@ inline bool buildSlopDriveCatalog(slopsync::Catalog32& c, DeviceFeatures feat = 
     c.addLayoutField({.name = "measured_stroke", .type = PackedFieldType::f32, .unit = "mm", .scale = 1.0f,
                       .desc = "Usable stroke length sensorless homing actually measured between the "
                               "two hard stops. Zero until the first successful home.",
-                      .role = roles::geometry_measured_travel});
+                      .role = roles::geometry_measured_travel,
+                      .hasRank = true, .rank = slopsync::ui_ranks::detail,
+                      .hasUnitId = true, .unitId = slopsync::unit_ids::mm});
+    };
 
     // ---- 0x0082 "pattern-state" — STATE, normal, on-change ----------------
-    // PatternEngine live snapshot.  [1+1+4+4+4+4+1 = 19 B]
+    // PatternEngine live snapshot.  [1+1+4+4+4+4+1+1 = 20 B]
     //
     // M5a: annotated + "enabled_mask" APPENDED as field 7 (18 -> 19 B).
+    // Phase D (RFC-045/048): "background_run" APPENDED as field 8 (19 -> 20 B,
+    // settingKey 7 on the paired 0x3200 pattern-cmd intent) — bytes 0..18 keep
+    // their offsets.
     // category = user (this is the everyday operating surface, not the safety
     // envelope); settingChannel = 0x0102 pattern-cmd.
     //
@@ -609,12 +676,14 @@ inline bool buildSlopDriveCatalog(slopsync::Catalog32& c, DeviceFeatures feat = 
     // that ships the extended patterns can append their labels here; the
     // labels are index-aligned and append-only, so that is an etag bump and
     // nothing more.
+    auto addPatternState = [&]() {
     c.addEntry({.id = ch::pattern_state, .name = "pattern-state",
                 .cls = ChannelClass::STATE, .dir = Direction::h2c,
                 .access = AccessLevel::watch, .maxRateHz = 0.0f,
                 .defaultPriority = Priority::normal,
-                .hasCategory = true, .category = slopsync::setting_categories::user,
-                .hasSettingChannel = true, .settingChannel = ch::pattern_cmd});
+                .hasCategory = true, .category = slopsync::ui_categories::control,
+                .hasSettingChannel = true, .settingChannel = ch::pattern_cmd,
+                .hasRank = true, .rank = slopsync::ui_ranks::control});
     c.addLayoutField({.name = "running",   .type = PackedFieldType::u8,  .unit = "",  .scale = 1.0f,
                       .hasMin = true, .hasMax = true, .min = 0.0f, .max = 1.0f,
                       .dflt = SettingDefault::ofBool(false),
@@ -622,14 +691,16 @@ inline bool buildSlopDriveCatalog(slopsync::Catalog32& c, DeviceFeatures feat = 
                       .desc = "Whether the built-in pattern generator is currently driving the "
                               "machine.",
                       .role = roles::pattern_running,
-                      .step = 1.0f, .settingKey = 1, .hasSettingKey = true, .hasStep = true});
+                      .step = 1.0f, .settingKey = 1, .hasSettingKey = true, .hasStep = true,
+                      .hasRank = true, .rank = slopsync::ui_ranks::control});
     c.addSelectField({.name = "pattern",   .type = PackedFieldType::u8,  .unit = "",  .scale = 1.0f,
                       .hasMin = true, .hasMax = true, .min = 0.0f, .max = 6.0f,
                       .dflt = SettingDefault::ofInt(0),
                       .group = "Pattern",
                       .desc = "Which stroke pattern the generator plays.",
                       .role = roles::pattern_select,
-                      .step = 1.0f, .settingKey = 2, .hasSettingKey = true, .hasStep = true},
+                      .step = 1.0f, .settingKey = 2, .hasSettingKey = true, .hasStep = true,
+                      .hasRank = true, .rank = slopsync::ui_ranks::control},
                      {"Simple Stroke", "Teasing Pounding", "Robo Stroke", "Half'n'Half",
                       "Deeper", "Stop'n'Go", "Insist"});
     c.addLayoutField({.name = "speed",     .type = PackedFieldType::f32, .unit = "%", .scale = 1.0f,
@@ -639,21 +710,27 @@ inline bool buildSlopDriveCatalog(slopsync::Catalog32& c, DeviceFeatures feat = 
                       .desc = "How fast the pattern strokes, as a percentage of its own range. "
                               "Bounded by the machine-driven speed limit.",
                       .role = roles::pattern_speed,
-                      .step = 1.0f, .settingKey = 3, .hasSettingKey = true, .hasStep = true});
+                      .step = 1.0f, .settingKey = 3, .hasSettingKey = true, .hasStep = true,
+                      .hasRank = true, .rank = slopsync::ui_ranks::control,
+                      .hasUnitId = true, .unitId = slopsync::unit_ids::percent});
     c.addLayoutField({.name = "depth",     .type = PackedFieldType::f32, .unit = "%", .scale = 1.0f,
                       .hasMin = true, .hasMax = true, .min = 0.0f, .max = 100.0f,
                       .dflt = SettingDefault::ofFloat(0.0f),
                       .group = "Pattern",
                       .desc = "How far into the stroke window the pattern reaches.",
                       .role = roles::pattern_depth,
-                      .step = 1.0f, .settingKey = 4, .hasSettingKey = true, .hasStep = true});
+                      .step = 1.0f, .settingKey = 4, .hasSettingKey = true, .hasStep = true,
+                      .hasRank = true, .rank = slopsync::ui_ranks::control,
+                      .hasUnitId = true, .unitId = slopsync::unit_ids::percent});
     c.addLayoutField({.name = "stroke",    .type = PackedFieldType::f32, .unit = "%", .scale = 1.0f,
                       .hasMin = true, .hasMax = true, .min = 0.0f, .max = 100.0f,
                       .dflt = SettingDefault::ofFloat(0.0f),
                       .group = "Pattern",
                       .desc = "Length of each stroke, as a percentage of the available depth.",
                       .role = roles::pattern_stroke,
-                      .step = 1.0f, .settingKey = 5, .hasSettingKey = true, .hasStep = true});
+                      .step = 1.0f, .settingKey = 5, .hasSettingKey = true, .hasStep = true,
+                      .hasRank = true, .rank = slopsync::ui_ranks::control,
+                      .hasUnitId = true, .unitId = slopsync::unit_ids::percent});
     c.addLayoutField({.name = "sensation", .type = PackedFieldType::f32, .unit = "",  .scale = 1.0f,
                       .hasMin = true, .hasMax = true, .min = 0.0f, .max = 100.0f,
                       .dflt = SettingDefault::ofFloat(50.0f),
@@ -661,19 +738,40 @@ inline bool buildSlopDriveCatalog(slopsync::Catalog32& c, DeviceFeatures feat = 
                       .desc = "Pattern character knob. 50 is neutral; what it changes depends on "
                               "the pattern you picked.",
                       .role = roles::pattern_sensation,
-                      .step = 1.0f, .settingKey = 6, .hasSettingKey = true, .hasStep = true});
+                      .step = 1.0f, .settingKey = 6, .hasSettingKey = true, .hasStep = true,
+                      .hasRank = true, .rank = slopsync::ui_ranks::control});
     // RFC-009 item 4 — bit i gates the i-th setting-annotated field above:
     //   0 running  1 pattern  2 speed  3 depth  4 stroke  5 sensation
-    // Genuinely DYNAMIC here, unlike 0x0081's: the delegate refuses 0x0102
-    // outright while the e-stop is latched (ESTOP_ACTIVE) or before homing
-    // (NOT_HOMED), so all six bits drop together in either state and a client
-    // greys the whole pattern card from one ground truth instead of
+    //   6 background_run (Phase D, RFC-045/048 — see its own field comment
+    //     for why its bit is unconditionally 1, unlike bits 0-5)
+    // Bits 0-5 are genuinely DYNAMIC here, unlike 0x0081's: the delegate
+    // refuses 0x0102 outright while the e-stop is latched (ESTOP_ACTIVE) or
+    // before homing (NOT_HOMED), so all six drop together in either state and
+    // a client grays the whole pattern card from one ground truth instead of
     // discovering it one NACK at a time.
     c.addBitfieldField({.name = "enabled_mask", .type = PackedFieldType::bitfield8, .unit = "flag",
                         .scale = 1.0f,
                         .desc = "Which pattern controls the machine will accept right now.",
-                        .role = roles::meta_enabled_mask},
-                       {"running", "pattern", "speed", "depth", "stroke", "sensation"});
+                        .role = roles::meta_enabled_mask,
+                        .hasRank = true, .rank = slopsync::ui_ranks::detail},
+                       {"running", "pattern", "speed", "depth", "stroke", "sensation", "background_run"});
+    // RFC-045/048 `source.background_run` — APPENDED after enabled_mask
+    // (settingKey 7; append-only, never inserted before an existing field).
+    // Bit 6 of the mask above is UNCONDITIONALLY 1: this is a standing policy
+    // choice ("should the generator keep going if I disconnect"), not a live
+    // motion command, so — unlike bits 0-5 — it is never gated by homed/estop.
+    // It still needs a bit (every setting-annotated field does, RFC-009 item
+    // 4), just one that never drops.
+    c.addLayoutField({.name = "background_run", .type = PackedFieldType::u8, .unit = "", .scale = 1.0f,
+                      .hasMin = true, .hasMax = true, .min = 0.0f, .max = 1.0f,
+                      .dflt = SettingDefault::ofBool(false),
+                      .group = "Pattern",
+                      .desc = "Keep the pattern running after its session disconnects. Off stops "
+                              "it; on leaves it running, stoppable via Stop/E-Stop.",
+                      .role = roles::source_background_run,
+                      .step = 1.0f, .settingKey = 7, .hasSettingKey = true, .hasStep = true,
+                      .hasRank = true, .rank = slopsync::ui_ranks::control});
+    };
 
     // ---- 0x0083 "odometer" — STATE, background, 1 Hz ---------------------
     // Session totals.  [4+4+4+4+4 = 20 B]
@@ -685,23 +783,48 @@ inline bool buildSlopDriveCatalog(slopsync::Catalog32& c, DeviceFeatures feat = 
     // reason to carry a fixed-point encoding a client has to know about.
     // Reads 0.0 forever on a machine with no power monitor — honest, and the
     // capability question is answered by 0x0087's presence, not by this field.
+    auto addOdometer = [&]() {
     c.addEntry({.id = ch::odometer, .name = "odometer",
                 .cls = ChannelClass::STATE, .dir = Direction::h2c,
                 .access = AccessLevel::watch, .maxRateHz = 1.0f,
                 .defaultPriority = Priority::background,
-                .hasCategory = true, .category = slopsync::setting_categories::diagnostics});
+                .hasCategory = true, .category = slopsync::ui_categories::system,
+                .hasRank = true, .rank = slopsync::ui_ranks::diagnostic});
+    // aspect/scope (RFC-048, Phase C2): every field here is a session-scope
+    // figure (RENDERING.md §5.2 scope=session is the default, set explicitly
+    // per the honesty rule — §5.4 "scope MUST always be displayed or
+    // unambiguously implied"). aspect is total(4) for the cumulative counters
+    // and peak(1) for peak_mm_s, its companion-instrument tag (§5.4).
     c.addLayoutField({.name = "strokes",    .type = PackedFieldType::u32, .unit = "",     .scale = 1.0f,
-                      .group = "Session", .desc = "Direction reversals counted this session."});
+                      .group = "Session", .desc = "Direction reversals counted this session.",
+                      .hasAspect = true, .aspect = slopsync::value_aspects::total,
+                      .hasScope = true, .scope = slopsync::value_scopes::session,
+                      .hasUnitId = true, .unitId = slopsync::unit_ids::count});
     c.addLayoutField({.name = "distance_m", .type = PackedFieldType::f32, .unit = "m",    .scale = 1.0f,
-                      .group = "Session", .desc = "Total distance the carriage has travelled this session."});
+                      .group = "Session", .desc = "Total distance the carriage has traveled this session.",
+                      .hasAspect = true, .aspect = slopsync::value_aspects::total,
+                      .hasScope = true, .scope = slopsync::value_scopes::session});
+                      // unit_id deliberately absent: unit_ids has no meters (only mm, id 0) and
+                      // reporting mm here would misstate the physical unit — falls back to the
+                      // "m" string label (the honest, documented unit_ids gap).
     c.addLayoutField({.name = "peak_mm_s",  .type = PackedFieldType::f32, .unit = "mm/s", .scale = 1.0f,
-                      .group = "Session", .desc = "Fastest the carriage moved this session."});
+                      .group = "Session", .desc = "Fastest the carriage moved this session.",
+                      .hasAspect = true, .aspect = slopsync::value_aspects::peak,
+                      .hasScope = true, .scope = slopsync::value_scopes::session,
+                      .hasUnitId = true, .unitId = slopsync::unit_ids::mm_s});
     c.addLayoutField({.name = "energy_wh",  .type = PackedFieldType::f32, .unit = "Wh",   .scale = 1.0f,
                       .group = "Session", .desc = "Electrical energy drawn this session. Zero if this "
-                                                  "machine has no power monitor."});
+                                                  "machine has no power monitor.",
+                      .hasAspect = true, .aspect = slopsync::value_aspects::total,
+                      .hasScope = true, .scope = slopsync::value_scopes::session,
+                      .hasUnitId = true, .unitId = slopsync::unit_ids::wh});
     c.addLayoutField({.name = "session_ms", .type = PackedFieldType::u32, .unit = "ms",   .scale = 1.0f,
                       .group = "Session", .desc = "Time since boot, or since the session counters were "
-                                                  "last reset."});
+                                                  "last reset.",
+                      .hasAspect = true, .aspect = slopsync::value_aspects::total,
+                      .hasScope = true, .scope = slopsync::value_scopes::session,
+                      .hasUnitId = true, .unitId = slopsync::unit_ids::ms});
+    };
 
     // ---- 0x0084 "motion-input" — STREAM, c2h, control, ≤333 Hz -----------
     // The SlopSync-native TCode successor: continuous stroke-window targets
@@ -716,12 +839,20 @@ inline bool buildSlopDriveCatalog(slopsync::Catalog32& c, DeviceFeatures feat = 
     // on machine-config, so 0x0084 is this device's actual allocation; the
     // catalog is self-describing and authoritative per Appendix D's own
     // disclaimer.  [2+2 = 4 B]
+    auto addMotionInput = [&]() {
     c.addEntry({.id = ch::motion_input, .name = "motion-input",
                 .cls = ChannelClass::STREAM, .dir = Direction::c2h,
                 .access = AccessLevel::control, .maxRateHz = 333.0f,
-                .defaultPriority = Priority::elevated});
-    c.addLayoutField({.name = "target_norm", .type = PackedFieldType::u16, .unit = "norm",   .scale = 10000.0f});
+                .defaultPriority = Priority::elevated,
+                // ui_categories::control's own note names "streams" explicitly.
+                .hasCategory = true, .category = slopsync::ui_categories::control,
+                .hasRank = true, .rank = slopsync::ui_ranks::control});
+    c.addLayoutField({.name = "target_norm", .type = PackedFieldType::u16, .unit = "norm",   .scale = 10000.0f,
+                      .hasUnitId = true, .unitId = slopsync::unit_ids::normalized});
     c.addLayoutField({.name = "vel_norm",    .type = PackedFieldType::i16, .unit = "norm/s", .scale = 1000.0f});
+                      // unit_id left absent for vel_norm: unit_ids has no "normalized/s" variant
+                      // (a documented gap, same class as the sm_limits override fields below).
+    };
 
     // ---- 0x0085 "motion-segment" — STREAM, c2h, control, ≤50 Hz ----------
     // TIMED-SEGMENT motion streaming: the WAVEFORM-mode companion to 0x0084.
@@ -729,7 +860,7 @@ inline bool buildSlopDriveCatalog(slopsync::Catalog32& c, DeviceFeatures feat = 
     // (chase mode, ~50 Hz), THIS channel carries the sender's NATIVE segments —
     // ONE {target, duration, end_vel} per stroke leg — which the SlopMotion
     // engine renders as a C2 quintic over EXACTLY the commanded duration (the
-    // same waveform path TCode v4 drives via buttplugLinearCmd). Funscript
+    // same waveform path a timed 0x0084 sample drives). Funscript
     // players know their segments natively, so a segment stream is ~2–4
     // packets/s instead of 50, with strictly better motion. Decoded by FIXED
     // OFFSET in the delegate's onStreamBundle() (same convention as 0x0084),
@@ -755,14 +886,20 @@ inline bool buildSlopDriveCatalog(slopsync::Catalog32& c, DeviceFeatures feat = 
     // must never decimate this channel. 0x0084 stays at the stream_kind
     // DEFAULT (samples) deliberately — absent-means-samples is the rule, and
     // this catalog demonstrates it rather than marking it redundantly.
+    auto addMotionSegment = [&]() {
     c.addEntry({.id = ch::motion_segment, .name = "motion-segment",
                 .cls = ChannelClass::STREAM, .dir = Direction::c2h,
                 .access = AccessLevel::control, .maxRateHz = 50.0f,
                 .defaultPriority = Priority::elevated,
-                .streamKind = slopsync::stream_kinds::segments});
-    c.addLayoutField({.name = "target_norm",  .type = PackedFieldType::u16, .unit = "norm",   .scale = 10000.0f});
-    c.addLayoutField({.name = "duration_ms",  .type = PackedFieldType::u16, .unit = "ms",     .scale = 1.0f});
+                .hasCategory = true, .category = slopsync::ui_categories::control,
+                .streamKind = slopsync::stream_kinds::segments,
+                .hasRank = true, .rank = slopsync::ui_ranks::control});
+    c.addLayoutField({.name = "target_norm",  .type = PackedFieldType::u16, .unit = "norm",   .scale = 10000.0f,
+                      .hasUnitId = true, .unitId = slopsync::unit_ids::normalized});
+    c.addLayoutField({.name = "duration_ms",  .type = PackedFieldType::u16, .unit = "ms",     .scale = 1.0f,
+                      .hasUnitId = true, .unitId = slopsync::unit_ids::ms});
     c.addLayoutField({.name = "end_vel_norm", .type = PackedFieldType::i16, .unit = "norm/s", .scale = 1000.0f});
+    };
 
     // ---- 0x0086 "plan-strip" — STATE, elevated, 45 Hz --------------------
     // THE PLANNER'S CURRENT SEGMENT: what SlopMotion is executing right now,
@@ -774,7 +911,7 @@ inline bool buildSlopDriveCatalog(slopsync::Catalog32& c, DeviceFeatures feat = 
     //
     // STATE, not STREAM: this is a SNAPSHOT of a thing that is continuously
     // true (the active plan), not a series of commands or timed samples, and
-    // conflation is exactly the right loss behaviour — a subscriber that falls
+    // conflation is exactly the right loss behavior — a subscriber that falls
     // behind wants the CURRENT segment, never a backlog of stale ones. It
     // therefore stays at the stream_kind DEFAULT and declares nothing:
     // `streamKind` is read only for STREAM-class entries (isSegmentClass), so
@@ -786,11 +923,13 @@ inline bool buildSlopDriveCatalog(slopsync::Catalog32& c, DeviceFeatures feat = 
     // as the legacy frame encoded them, so a port is a re-plumb and not a
     // re-derivation. durationUs/elapsedUs stay µs u32.
     //   [1+1+2+2+2+2+4+4 = 18 B]
+    auto addPlanStrip = [&]() {
     c.addEntry({.id = ch::plan_strip, .name = "plan-strip",
                 .cls = ChannelClass::STATE, .dir = Direction::h2c,
                 .access = AccessLevel::watch, .maxRateHz = 45.0f,
                 .defaultPriority = Priority::elevated,
-                .hasCategory = true, .category = slopsync::setting_categories::diagnostics});
+                .hasCategory = true, .category = slopsync::ui_categories::tuning,
+                .hasRank = true, .rank = slopsync::ui_ranks::diagnostic});
     c.addBitfieldField({.name = "flags", .type = PackedFieldType::bitfield8, .unit = "flag",
                         .scale = 1.0f,
                         .group = "Active plan",
@@ -823,6 +962,7 @@ inline bool buildSlopDriveCatalog(slopsync::Catalog32& c, DeviceFeatures feat = 
     c.addLayoutField({.name = "elapsed_us",  .type = PackedFieldType::u32, .unit = "us",    .scale = 1.0f,
                       .group = "Active plan", .desc = "How far into the current plan we are.",
                       .role = roles::plan_elapsed});
+    };
 
     // ---- 0x0087 "power" — STATE, background, 10 Hz -----------------------
     // Bus voltage / current / die temperature: the legacy :81 0x02 STATUS
@@ -835,7 +975,7 @@ inline bool buildSlopDriveCatalog(slopsync::Catalog32& c, DeviceFeatures feat = 
     // be indistinguishable from an idle machine, which is the same class of
     // lie as the WebUI's dead anomaly gauges.
     //
-    // The two flags gate different fields and are honoured separately —
+    // The two flags gate different fields and are honored separately —
     // hasCurrentSensor() gives bus V/A, hasPowerMonitor() adds die temp — so a
     // rig with a shunt but no thermal sensor advertises a 3-field entry rather
     // than a 4-field one with a permanently-zero column. Byte offsets differ
@@ -849,12 +989,14 @@ inline bool buildSlopDriveCatalog(slopsync::Catalog32& c, DeviceFeatures feat = 
     // motion path reads. The named consumer (the graphing CLI) wants raw vs
     // planner, not amps.
     //   [2+2 = 4 B, or +2 = 6 B with a power monitor]
+    auto addPower = [&]() {
     if (feat.has_current_sensor) {
         c.addEntry({.id = ch::power, .name = "power",
                     .cls = ChannelClass::STATE, .dir = Direction::h2c,
                     .access = AccessLevel::watch, .maxRateHz = 10.0f,
                     .defaultPriority = Priority::background,
-                    .hasCategory = true, .category = slopsync::setting_categories::diagnostics});
+                    .hasCategory = true, .category = slopsync::ui_categories::system,
+                    .hasRank = true, .rank = slopsync::ui_ranks::diagnostic});
         c.addLayoutField({.name = "bus_mV",  .type = PackedFieldType::u16, .unit = "V", .scale = 1000.0f,
                           .group = "Power", .desc = "DC bus voltage feeding the motor drive.",
                           .role = roles::telemetry_power_bus});
@@ -870,6 +1012,7 @@ inline bool buildSlopDriveCatalog(slopsync::Catalog32& c, DeviceFeatures feat = 
                               .role = roles::telemetry_temp});
         }
     }
+    };
 
     // ---- 0x0088 "slopmotion-diag" — STATE, background, 1 Hz --------------
     // The `stats` + `sync` blocks of GET /api/slopmotion, in band. Plan
@@ -896,11 +1039,13 @@ inline bool buildSlopDriveCatalog(slopsync::Catalog32& c, DeviceFeatures feat = 
     // was watching the counters simply sees them jump backwards and cannot
     // tell a reset from a reboot from a wrap.
     //   [3*4 + 10*4 + 12 + 5*4 + 2 + 1 + 1 = 88 B]
+    auto addMotionDiag = [&]() {
     c.addEntry({.id = ch::motion_diag, .name = "slopmotion-diag",
                 .cls = ChannelClass::STATE, .dir = Direction::h2c,
                 .access = AccessLevel::watch, .maxRateHz = 1.0f,
                 .defaultPriority = Priority::background,
-                .hasCategory = true, .category = slopsync::setting_categories::diagnostics});
+                .hasCategory = true, .category = slopsync::ui_categories::tuning,
+                .hasRank = true, .rank = slopsync::ui_ranks::diagnostic});
     c.addLayoutField({.name = "plans",    .type = PackedFieldType::u32, .unit = "", .scale = 1.0f,
                       .group = "Planner", .desc = "Motion plans computed successfully."});
     c.addLayoutField({.name = "failures", .type = PackedFieldType::u32, .unit = "", .scale = 1.0f,
@@ -933,8 +1078,8 @@ inline bool buildSlopDriveCatalog(slopsync::Catalog32& c, DeviceFeatures feat = 
                       .group = "Anomalies", .desc = "The sender's curve broke a limit; the machine reshaped it."});
     c.addLayoutField({.name = "anom_waveform_scaled",    .type = PackedFieldType::u32, .unit = "", .scale = 1.0f,
                       .group = "Anomalies", .desc = "A stroke was shortened to finish on time."});
-    c.addLayoutField({.name = "anom_waveform_centred",   .type = PackedFieldType::u32, .unit = "", .scale = 1.0f,
-                      .group = "Anomalies", .desc = "A shortened stroke was re-centred on its midpoint."});
+    c.addLayoutField({.name = "anom_waveform_centered",   .type = PackedFieldType::u32, .unit = "", .scale = 1.0f,
+                      .group = "Anomalies", .desc = "A shortened stroke was re-centered on its midpoint."});
     c.addLayoutField({.name = "anom_handoff_bounded",    .type = PackedFieldType::u32, .unit = "", .scale = 1.0f,
                       .group = "Anomalies",
                       .desc = "A sender asked to arrive at a speed the next segment could not "
@@ -966,12 +1111,13 @@ inline bool buildSlopDriveCatalog(slopsync::Catalog32& c, DeviceFeatures feat = 
                       .desc = "Counts up every time these counters are reset, so every viewer "
                               "sees the reset and not just whoever asked for it.",
                       .role = roles::meta_reset_gen});
+    };
 
     // ---- 0x0089 "motion-anomaly" — EVENT, watch, normal ------------------
     // SlopMotion's anomaly feed, as EDGES. The roadmap already prescribed this
     // channel, and it is a live ground-truth REPAIR, not a new feature: the
     // legacy :81 0x05 ANOMALY ring is written only by the superseded
-    // MotionInterpolator, so today the WebUI's anomaly panel renders dead
+    // legacy interpolator, so today the WebUI's anomaly panel renders dead
     // gauges while the real engine's anomalies go only to SlopLog. This is the
     // feed that panel gets rebuilt against.
     //
@@ -985,7 +1131,7 @@ inline bool buildSlopDriveCatalog(slopsync::Catalog32& c, DeviceFeatures feat = 
     // `kind` appears BOTH as the frame's event_kind (33) — the protocol's own
     // discriminator, which is what a client switches on — and as body key 1
     // carrying the identical value. That is not redundancy for its own sake:
-    // the catalog has no vocabulary for LABELLING event kinds (there is no
+    // the catalog has no vocabulary for LABELING event kinds (there is no
     // per-entry kind-label list), and `options` on a schema field is the one
     // registered mechanism for turning a number into a name. Mirroring it into
     // the body is what lets a generic client print "waveform_scaled" instead
@@ -994,16 +1140,18 @@ inline bool buildSlopDriveCatalog(slopsync::Catalog32& c, DeviceFeatures feat = 
     // NO replay depth: an anomaly is an edge, and §9.4's default (edges are
     // never replayed) is right for it. The counters on 0x0088 are the durable
     // record — that is the event/state duality doing its job.
+    auto addMotionAnomaly = [&]() {
     c.addEntry({.id = ch::motion_anomaly, .name = "motion-anomaly",
                 .cls = ChannelClass::EVENT, .dir = Direction::h2c,
                 .access = AccessLevel::watch, .maxRateHz = 0.0f,
                 .defaultPriority = Priority::normal,
-                .hasCategory = true, .category = slopsync::setting_categories::diagnostics});
+                .hasCategory = true, .category = slopsync::ui_categories::tuning,
+                .hasRank = true, .rank = slopsync::ui_ranks::diagnostic});
     c.addSelectSchemaField({.key = anom_body::kind, .name = "kind", .type = CborFieldType::uint_t,
                             .unit = "",
                             .desc = "What the motion core had to do differently, and why."},
                            {"none", "plan_failed", "settle", "endvel_clamped", "deadline_stretched",
-                            "waveform_fallback", "waveform_scaled", "waveform_centred",
+                            "waveform_fallback", "waveform_scaled", "waveform_centered",
                             "handoff_bounded", "waveform_smoothed"});
     c.addSchemaField({.key = anom_body::seq, .name = "seq", .type = CborFieldType::uint_t, .unit = "",
                       .desc = "Rolling event id from the motion core; wraps."});
@@ -1015,6 +1163,7 @@ inline bool buildSlopDriveCatalog(slopsync::Catalog32& c, DeviceFeatures feat = 
                               "the fraction of the stroke actually achieved."});
     c.addSchemaField({.key = anom_body::t_us, .name = "t_us", .type = CborFieldType::uint_t, .unit = "us",
                       .desc = "Motion-core time when it happened."});
+    };
 
     // ---- 0x008A "machine-modes" — STATE, elevated, on-change -------------
     // M5b. Originally the four MODE settings the legacy :81/HTTP plane owned
@@ -1029,7 +1178,7 @@ inline bool buildSlopDriveCatalog(slopsync::Catalog32& c, DeviceFeatures feat = 
     // "allow" since before this catalog existed (let-it-land/hybrid were
     // already dead, just still settable), and the driver-level stream
     // dispatch (AIMServoDriver::streamTo/streamToSteps) never reads its own
-    // _blend_mode field either — there has been no live motion behaviour
+    // _blend_mode field either — there has been no live motion behavior
     // behind this control for a while, only a setting UI that could still
     // change a number nothing acted on. Picked option (b) from the CLAUDE.md
     // ritual for retiring a packed STATE field: the BYTE STAYS (renamed
@@ -1050,12 +1199,14 @@ inline bool buildSlopDriveCatalog(slopsync::Catalog32& c, DeviceFeatures feat = 
     // cadence costs nothing, and every live value is an enum the catalog
     // names, so a generic client renders two dropdowns without knowing this
     // device exists.
+    auto addMachineModes = [&]() {
     c.addEntry({.id = ch::machine_modes, .name = "machine-modes",
                 .cls = ChannelClass::STATE, .dir = Direction::h2c,
                 .access = AccessLevel::watch, .maxRateHz = 0.0f,
                 .defaultPriority = Priority::elevated,
-                .hasCategory = true, .category = slopsync::setting_categories::user,
-                .hasSettingChannel = true, .settingChannel = ch::modes_set});
+                .hasCategory = true, .category = slopsync::ui_categories::tuning,
+                .hasSettingChannel = true, .settingChannel = ch::modes_set,
+                .hasRank = true, .rank = slopsync::ui_ranks::advanced});
     // RETIRED (item 2) — see the entry comment above. Plain reserved byte, no
     // options/group/default/setting_key: nothing should render this. The
     // publisher still writes the driver's (inert) getBlendMode() value here
@@ -1066,19 +1217,26 @@ inline bool buildSlopDriveCatalog(slopsync::Catalog32& c, DeviceFeatures feat = 
                               "motion always behaves as 'allow'."});
     c.addSelectField({.name = "stream_speed_mode", .type = PackedFieldType::u8, .unit = "", .scale = 1.0f,
                       .dflt = SettingDefault::ofInt(factory::stream_speed_mode),
-                      .group = "Motion behaviour",
+                      .group = "Motion behavior",
                       .desc = "How a streamed point picks its speed: the machine's ceiling, "
                               "or the speed the sender asked for.",
                       .settingKey = 3, .flags = slopsync::setting_flags::advanced,
-                      .hasSettingKey = true},
+                      .hasSettingKey = true,
+                      .hasRank = true, .rank = slopsync::ui_ranks::advanced},
                      {"ceiling-pegged", "velocity-matched"});
+    // RFC-048 (Phase C2): rank = hidden. INERT — CLAUDE.md §SlopMotion records
+    // `interp_clamp_overshoot` as consumed by nothing on the live engine; this
+    // is the released-but-inert-field case ui_ranks::hidden exists for
+    // (RENDERING.md §4), overriding the `advanced` setting_flag rather than
+    // stacking with it — hidden is the stronger, terminal statement.
     c.addSelectField({.name = "overshoot_clamp", .type = PackedFieldType::u8, .unit = "", .scale = 1.0f,
                       .dflt = SettingDefault::ofInt(factory::overshoot_clamp),
-                      .group = "Motion behaviour",
+                      .group = "Motion behavior",
                       .desc = "Stops a smoothed curve from bulging past the points it was given. "
                               "Costs a little smoothness to remove overshoot micromotion.",
                       .settingKey = 4, .flags = slopsync::setting_flags::advanced,
-                      .hasSettingKey = true},
+                      .hasSettingKey = true,
+                      .hasRank = true, .rank = slopsync::ui_ranks::hidden},
                      {"off", "on"});
     // Bit i gates the i-th setting-annotated field, same rule as 0x0081.
     // blend_mode_reserved carries no setting_key so it is NOT bit 0 anymore —
@@ -1087,8 +1245,10 @@ inline bool buildSlopDriveCatalog(slopsync::Catalog32& c, DeviceFeatures feat = 
     c.addBitfieldField({.name = "enabled_mask", .type = PackedFieldType::bitfield8, .unit = "flag",
                         .scale = 1.0f,
                         .desc = "Which of these the machine will accept right now.",
-                        .role = roles::meta_enabled_mask},
+                        .role = roles::meta_enabled_mask,
+                        .hasRank = true, .rank = slopsync::ui_ranks::detail},
                        {"stream_speed_mode", "overshoot_clamp"});
+    };
 
     // ---- 0x008B/0x008C/0x008D "slopmotion-*" — STATE, tuning ---------------
     // M5c: the SlopMotion live-tune surface, off HTTP and onto the protocol.
@@ -1111,12 +1271,14 @@ inline bool buildSlopDriveCatalog(slopsync::Catalog32& c, DeviceFeatures feat = 
     // session-only surface that reset on reboot; these are real settings and
     // survive one. That is also why they carry `default` annotations — a
     // generic client needs to offer "reset to factory" for a value that sticks.
+    auto addSmLimits = [&]() {
     c.addEntry({.id = ch::sm_limits, .name = "slopmotion-limits",
                 .cls = ChannelClass::STATE, .dir = Direction::h2c,
                 .access = AccessLevel::watch, .maxRateHz = 0.0f,
                 .defaultPriority = Priority::background,
-                .hasCategory = true, .category = slopsync::setting_categories::tuning,
-                .hasSettingChannel = true, .settingChannel = ch::sm_set});
+                .hasCategory = true, .category = slopsync::ui_categories::tuning,
+                .hasSettingChannel = true, .settingChannel = ch::sm_set,
+                .hasRank = true, .rank = slopsync::ui_ranks::advanced});
     c.addLayoutField({.name = "jmax_ovr", .type = PackedFieldType::f32, .unit = "1/s3", .scale = 1.0f,
                       .hasMin = true, .hasMax = true, .min = 0.0f, .max = 2000000.0f,
                       .dflt = SettingDefault::ofFloat(0.0f), .group = "Ceiling overrides",
@@ -1127,29 +1289,31 @@ inline bool buildSlopDriveCatalog(slopsync::Catalog32& c, DeviceFeatures feat = 
     c.addLayoutField({.name = "vmax_ovr", .type = PackedFieldType::f32, .unit = "1/s", .scale = 1.0f,
                       .hasMin = true, .hasMax = true, .min = 0.0f, .max = 20.0f,
                       .dflt = SettingDefault::ofFloat(0.0f), .group = "Ceiling overrides",
-                      .desc = "Speed ceiling override, normalised. 0 derives it from the mm limits.",
+                      .desc = "Speed ceiling override, normalized. 0 derives it from the mm limits.",
                       .settingKey = 2, .flags = slopsync::setting_flags::advanced,
                       .hasSettingKey = true});
     c.addLayoutField({.name = "amax_ovr", .type = PackedFieldType::f32, .unit = "1/s2", .scale = 1.0f,
                       .hasMin = true, .hasMax = true, .min = 0.0f, .max = 500.0f,
                       .dflt = SettingDefault::ofFloat(0.0f), .group = "Ceiling overrides",
-                      .desc = "Acceleration ceiling override, normalised. 0 derives it from the mm limits.",
+                      .desc = "Acceleration ceiling override, normalized. 0 derives it from the mm limits.",
                       .settingKey = 3, .flags = slopsync::setting_flags::advanced,
                       .hasSettingKey = true});
-    c.addSelectField({.name = "centring", .type = PackedFieldType::u8, .unit = "", .scale = 1.0f,
-                      .dflt = SettingDefault::ofInt(1), .group = "Centring",
+    c.addSelectField({.name = "centering", .type = PackedFieldType::u8, .unit = "", .scale = 1.0f,
+                      .dflt = SettingDefault::ofInt(1), .group = "Centering",
                       .desc = "Pulls a drifting waveform back toward the middle of the stroke window.",
                       .settingKey = 4, .hasSettingKey = true},
                      {"off", "on"});
-    c.addLayoutField({.name = "centring_gain", .type = PackedFieldType::f32, .unit = "", .scale = 1.0f,
+    c.addLayoutField({.name = "centering_gain", .type = PackedFieldType::f32, .unit = "", .scale = 1.0f,
                       .hasMin = true, .hasMax = true, .min = 0.0f, .max = 1.0f,
-                      .dflt = SettingDefault::ofFloat(1.0f), .group = "Centring",
-                      .desc = "How hard centring pulls. Higher recentres faster and follows the script less.",
+                      .dflt = SettingDefault::ofFloat(1.0f), .group = "Centering",
+                      .desc = "How hard centering pulls. Higher recenters faster and follows the script less.",
                       .step = 0.05f, .settingKey = 5, .hasSettingKey = true, .hasStep = true});
     c.addBitfieldField({.name = "enabled_mask", .type = PackedFieldType::bitfield8, .unit = "flag",
                         .scale = 1.0f, .desc = "Which of these the machine will accept right now.",
-                        .role = roles::meta_enabled_mask},
-                       {"jmax_ovr", "vmax_ovr", "amax_ovr", "centring", "centring_gain"});
+                        .role = roles::meta_enabled_mask,
+                        .hasRank = true, .rank = slopsync::ui_ranks::detail},
+                       {"jmax_ovr", "vmax_ovr", "amax_ovr", "centering", "centering_gain"});
+    };
 
     // BOTH INPUT PATHS ARE LIVE AND IN USE. These knobs steer the CHASE path
     // (dense sample streams — MFP's Samples mode); the waveform path
@@ -1160,14 +1324,16 @@ inline bool buildSlopDriveCatalog(slopsync::Catalog32& c, DeviceFeatures feat = 
     // All of them are wired — every one reaches the engine config on the
     // per-tick push — so the mask reports them ENABLED, which is the truth. A
     // knob that is accepted but whose path is not currently active is a
-    // different statement from a knob the machine refuses, and greying it would
+    // different statement from a knob the machine refuses, and graying it would
     // be exactly the lie enabled_mask exists to prevent.
+    auto addSmChase = [&]() {
     c.addEntry({.id = ch::sm_chase, .name = "slopmotion-chase",
                 .cls = ChannelClass::STATE, .dir = Direction::h2c,
                 .access = AccessLevel::watch, .maxRateHz = 0.0f,
                 .defaultPriority = Priority::background,
-                .hasCategory = true, .category = slopsync::setting_categories::tuning,
-                .hasSettingChannel = true, .settingChannel = ch::sm_set});
+                .hasCategory = true, .category = slopsync::ui_categories::tuning,
+                .hasSettingChannel = true, .settingChannel = ch::sm_set,
+                .hasRank = true, .rank = slopsync::ui_ranks::advanced});
     c.addSelectField({.name = "chase_ff", .type = PackedFieldType::u8, .unit = "", .scale = 1.0f,
                       .dflt = SettingDefault::ofInt(1), .group = "Sample streams",
                       .desc = "Aim at where the sender is heading, not just where it last was.",
@@ -1212,17 +1378,24 @@ inline bool buildSlopDriveCatalog(slopsync::Catalog32& c, DeviceFeatures feat = 
                       .hasSettingKey = true, .hasStep = true});
     c.addBitfieldField({.name = "enabled_mask", .type = PackedFieldType::bitfield8, .unit = "flag",
                         .scale = 1.0f, .desc = "Which of these the machine will accept right now.",
-                        .role = roles::meta_enabled_mask},
+                        .role = roles::meta_enabled_mask,
+                        .hasRank = true, .rank = slopsync::ui_ranks::detail},
                        {"chase_ff", "chase_accel_ff", "chase_gain", "chase_lookahead",
                         "chase_dense_ms", "chase_aim_extrap", "handoff_k"});
+    };
 
     // The WAVEFORM path (timed segments — MFP's Segments mode). Equally live.
+    auto addSmWaveform = [&]() {
     c.addEntry({.id = ch::sm_waveform, .name = "slopmotion-waveform",
                 .cls = ChannelClass::STATE, .dir = Direction::h2c,
                 .access = AccessLevel::watch, .maxRateHz = 0.0f,
                 .defaultPriority = Priority::background,
-                .hasCategory = true, .category = slopsync::setting_categories::tuning,
-                .hasSettingChannel = true, .settingChannel = ch::sm_set});
+                .hasCategory = true, .category = slopsync::ui_categories::tuning,
+                .hasSettingChannel = true, .settingChannel = ch::sm_set,
+                // Unlike its sm_limits/sm_chase siblings, none of these fields carry
+                // setting_flags::advanced in code — rank matches that: control, not
+                // advanced, so it stays visible without an advanced-affordance gate.
+                .hasRank = true, .rank = slopsync::ui_ranks::control});
     c.addSelectField({.name = "curve_policy", .type = PackedFieldType::u8, .unit = "", .scale = 1.0f,
                       .dflt = SettingDefault::ofInt(0), .group = "Curve",
                       .desc = "Rebuild the sender's curve as sent, or force one smoothness family.",
@@ -1232,7 +1405,7 @@ inline bool buildSlopDriveCatalog(slopsync::Catalog32& c, DeviceFeatures feat = 
                       .dflt = SettingDefault::ofInt(2), .group = "Infeasible moves",
                       .desc = "What to do when a move cannot be finished in the time it was given.",
                       .settingKey = 14, .hasSettingKey = true},
-                     {"stretch", "scale", "reshape", "prioritise amplitude", "prioritise smooth"});
+                     {"stretch", "scale", "reshape", "prioritize amplitude", "prioritize smooth"});
     c.addLayoutField({.name = "infeasible_margin", .type = PackedFieldType::f32, .unit = "", .scale = 1.0f,
                       .hasMin = true, .hasMax = true, .min = 0.5f, .max = 1.0f,
                       .dflt = SettingDefault::ofFloat(0.92f), .group = "Infeasible moves",
@@ -1265,9 +1438,11 @@ inline bool buildSlopDriveCatalog(slopsync::Catalog32& c, DeviceFeatures feat = 
                       .settingKey = 20, .hasSettingKey = true});
     c.addBitfieldField({.name = "enabled_mask", .type = PackedFieldType::bitfield8, .unit = "flag",
                         .scale = 1.0f, .desc = "Which of these the machine will accept right now.",
-                        .role = roles::meta_enabled_mask},
+                        .role = roles::meta_enabled_mask,
+                        .hasRank = true, .rank = slopsync::ui_ranks::detail},
                        {"curve_policy", "infeasible_policy", "infeasible_margin", "smooth_budget",
                         "amplitude_budget", "blend_steps", "reshape_steps", "settle_grace_ms"});
+    };
 
     // ---- 0x008E "pattern-advanced" — STATE, normal, on-change -------------
     // Advanced mode's 8 BASE controls (advpat::Settings, everything except the
@@ -1285,60 +1460,77 @@ inline bool buildSlopDriveCatalog(slopsync::Catalog32& c, DeviceFeatures feat = 
     // sharing the category so both render as ONE tab (SPEC §8.8 — "a category
     // spans channels").
     //   [1*8 fields + 1 mask = 9 B]
+    auto addPatternAdvanced = [&]() {
     c.addEntry({.id = ch::pattern_advanced, .name = "pattern-advanced",
                 .cls = ChannelClass::STATE, .dir = Direction::h2c,
                 .access = AccessLevel::watch, .maxRateHz = 0.0f,
                 .defaultPriority = Priority::normal,
-                .hasCategory = true, .category = slopsync::setting_categories::user,
-                .hasSettingChannel = true, .settingChannel = ch::pattern_advanced_cmd});
+                .hasCategory = true, .category = slopsync::ui_categories::control,
+                .hasSettingChannel = true, .settingChannel = ch::pattern_advanced_cmd,
+                .hasRank = true, .rank = slopsync::ui_ranks::control});
     c.addLayoutField({.name = "ap_mode", .type = PackedFieldType::u8, .unit = "", .scale = 1.0f,
                       .hasMin = true, .hasMax = true, .min = 0.0f, .max = 1.0f,
                       .dflt = SettingDefault::ofBool(false),
                       .group = "Advanced pattern",
                       .desc = "Drive the generator with Advanced mode instead of the classic patterns.",
-                      .step = 1.0f, .settingKey = 1, .hasSettingKey = true, .hasStep = true});
+                      .step = 1.0f, .settingKey = 1, .hasSettingKey = true, .hasStep = true,
+                      .hasRank = true, .rank = slopsync::ui_ranks::control});
     c.addLayoutField({.name = "master", .type = PackedFieldType::u8, .unit = "%", .scale = 1.0f,
                       .hasMin = true, .hasMax = true, .min = 0.0f, .max = 100.0f,
                       .dflt = SettingDefault::ofInt(0),
                       .group = "Advanced pattern",
                       .desc = "Overall stroke speed. 0 holds position.",
-                      .step = 1.0f, .settingKey = 2, .hasSettingKey = true, .hasStep = true});
+                      .step = 1.0f, .settingKey = 2, .hasSettingKey = true, .hasStep = true,
+                      .hasRank = true, .rank = slopsync::ui_ranks::control,
+                      .hasUnitId = true, .unitId = slopsync::unit_ids::percent});
     c.addLayoutField({.name = "max_depth", .type = PackedFieldType::u8, .unit = "%", .scale = 1.0f,
                       .hasMin = true, .hasMax = true, .min = 0.0f, .max = 100.0f,
                       .dflt = SettingDefault::ofInt(10),
                       .group = "Depth window",
                       .desc = "Deepest point of the stroke (the in-stroke target).",
-                      .step = 1.0f, .settingKey = 3, .hasSettingKey = true, .hasStep = true});
+                      .step = 1.0f, .settingKey = 3, .hasSettingKey = true, .hasStep = true,
+                      .hasRank = true, .rank = slopsync::ui_ranks::control,
+                      .hasUnitId = true, .unitId = slopsync::unit_ids::percent});
     c.addLayoutField({.name = "min_depth", .type = PackedFieldType::u8, .unit = "%", .scale = 1.0f,
                       .hasMin = true, .hasMax = true, .min = 0.0f, .max = 100.0f,
                       .dflt = SettingDefault::ofInt(0),
                       .group = "Depth window",
                       .desc = "Shallowest point of the stroke (the out-stroke target).",
-                      .step = 1.0f, .settingKey = 4, .hasSettingKey = true, .hasStep = true});
+                      .step = 1.0f, .settingKey = 4, .hasSettingKey = true, .hasStep = true,
+                      .hasRank = true, .rank = slopsync::ui_ranks::control,
+                      .hasUnitId = true, .unitId = slopsync::unit_ids::percent});
     c.addLayoutField({.name = "in_speed", .type = PackedFieldType::u8, .unit = "%", .scale = 1.0f,
                       .hasMin = true, .hasMax = true, .min = 1.0f, .max = 100.0f,
                       .dflt = SettingDefault::ofInt(100),
                       .group = "Speed",
                       .desc = "In-stroke speed, as a percentage of master speed.",
-                      .step = 1.0f, .settingKey = 5, .hasSettingKey = true, .hasStep = true});
+                      .step = 1.0f, .settingKey = 5, .hasSettingKey = true, .hasStep = true,
+                      .hasRank = true, .rank = slopsync::ui_ranks::control,
+                      .hasUnitId = true, .unitId = slopsync::unit_ids::percent});
     c.addLayoutField({.name = "out_speed", .type = PackedFieldType::u8, .unit = "%", .scale = 1.0f,
                       .hasMin = true, .hasMax = true, .min = 1.0f, .max = 100.0f,
                       .dflt = SettingDefault::ofInt(100),
                       .group = "Speed",
                       .desc = "Out-stroke speed, as a percentage of master speed.",
-                      .step = 1.0f, .settingKey = 6, .hasSettingKey = true, .hasStep = true});
+                      .step = 1.0f, .settingKey = 6, .hasSettingKey = true, .hasStep = true,
+                      .hasRank = true, .rank = slopsync::ui_ranks::control,
+                      .hasUnitId = true, .unitId = slopsync::unit_ids::percent});
     c.addLayoutField({.name = "in_accel", .type = PackedFieldType::u8, .unit = "%", .scale = 1.0f,
                       .hasMin = true, .hasMax = true, .min = 0.0f, .max = 100.0f,
                       .dflt = SettingDefault::ofInt(40),
                       .group = "Acceleration",
                       .desc = "How hard the in-stroke accelerates.",
-                      .step = 1.0f, .settingKey = 7, .hasSettingKey = true, .hasStep = true});
+                      .step = 1.0f, .settingKey = 7, .hasSettingKey = true, .hasStep = true,
+                      .hasRank = true, .rank = slopsync::ui_ranks::control,
+                      .hasUnitId = true, .unitId = slopsync::unit_ids::percent});
     c.addLayoutField({.name = "out_accel", .type = PackedFieldType::u8, .unit = "%", .scale = 1.0f,
                       .hasMin = true, .hasMax = true, .min = 0.0f, .max = 100.0f,
                       .dflt = SettingDefault::ofInt(40),
                       .group = "Acceleration",
                       .desc = "How hard the out-stroke accelerates.",
-                      .step = 1.0f, .settingKey = 8, .hasSettingKey = true, .hasStep = true});
+                      .step = 1.0f, .settingKey = 8, .hasSettingKey = true, .hasStep = true,
+                      .hasRank = true, .rank = slopsync::ui_ranks::control,
+                      .hasUnitId = true, .unitId = slopsync::unit_ids::percent});
     // Bit i gates the i-th setting-annotated field above, same rule as 0x0082.
     // GENUINELY dynamic, and genuinely NARROWER than 0x0082's: unlike `running`
     // on 0x0102, none of these 8 setters is gated on `homed` (PatternEngine::
@@ -1350,9 +1542,11 @@ inline bool buildSlopDriveCatalog(slopsync::Catalog32& c, DeviceFeatures feat = 
     c.addBitfieldField({.name = "enabled_mask", .type = PackedFieldType::bitfield8, .unit = "flag",
                         .scale = 1.0f,
                         .desc = "Which of these the machine will accept right now.",
-                        .role = roles::meta_enabled_mask},
+                        .role = roles::meta_enabled_mask,
+                        .hasRank = true, .rank = slopsync::ui_ranks::detail},
                        {"ap_mode", "master", "max_depth", "min_depth", "in_speed", "out_speed",
                         "in_accel", "out_accel"});
+    };
 
     // ---- 0x008F..0x0094 "pattern-adv-mod-*" — STATE, background -----------
     // The 6-field cyclic Modifier (advpat::Modifier) that rides EACH of the 6
@@ -1367,12 +1561,13 @@ inline bool buildSlopDriveCatalog(slopsync::Catalog32& c, DeviceFeatures feat = 
     // more than a denser one that doesn't — same judgement 0x008B/C/D already
     // made splitting by subsystem, not by bit-count.
     //
-    // ALL SIX SHARE 0x0107 as settingChannel (see 0x008E) and `user` as
-    // category, so all seven advanced-pattern cards merge into ONE tab.
-    // setting_keys are allocated 9..44 across the six, 6 keys apiece, and
-    // match the wire layout below exactly: keyBase+0 amplitude, +1 in_step,
-    // +2 in_wait, +3 out_step, +4 out_wait, +5 offset — which is also
-    // SlopSyncHubService's applyIntent(0x0107) grouping formula
+    // ALL SIX SHARE ch::pattern_advanced_cmd as settingChannel (same writer as
+    // ch::pattern_advanced) and `user` as category, so all seven
+    // advanced-pattern cards merge into ONE tab. setting_keys are allocated
+    // 9..44 across the six, 6 keys apiece, and match the wire layout below
+    // exactly: keyBase+0 amplitude, +1 in_step, +2 in_wait, +3 out_step,
+    // +4 out_wait, +5 offset — which is also SlopSyncHubService's
+    // applyIntent(ch::pattern_advanced_cmd) grouping formula
     // (base = 9 + 6*advpat::BaseId), so the two can be eyeballed against each
     // other without cross-referencing a third table. `advanced`-flagged: this
     // is the deep-customization layer under the 8 base controls, not the
@@ -1384,65 +1579,75 @@ inline bool buildSlopDriveCatalog(slopsync::Catalog32& c, DeviceFeatures feat = 
                     .cls = ChannelClass::STATE, .dir = Direction::h2c,
                     .access = AccessLevel::watch, .maxRateHz = 0.0f,
                     .defaultPriority = Priority::background,
-                    .hasCategory = true, .category = slopsync::setting_categories::user,
-                    .hasSettingChannel = true, .settingChannel = ch::pattern_advanced_cmd});
+                    .hasCategory = true, .category = slopsync::ui_categories::control,
+                    .hasSettingChannel = true, .settingChannel = ch::pattern_advanced_cmd,
+                    // rank = advanced at BOTH entry and field level — this whole
+                    // channel IS the deep-customization layer under the 8 base
+                    // controls (see the comment above), and every field it declares
+                    // already carries setting_flags::advanced.
+                    .hasRank = true, .rank = slopsync::ui_ranks::advanced});
         c.addLayoutField({.name = "amplitude", .type = PackedFieldType::u8, .unit = "%", .scale = 1.0f,
                           .hasMin = true, .hasMax = true, .min = 0.0f, .max = 100.0f,
                           .dflt = SettingDefault::ofInt(100), .group = group,
                           .desc = "Modulation strength; 100 = off.",
                           .step = 1.0f, .settingKey = uint8_t(keyBase + 0),
                           .flags = slopsync::setting_flags::advanced,
-                          .hasSettingKey = true, .hasStep = true});
+                          .hasSettingKey = true, .hasStep = true,
+                          .hasRank = true, .rank = slopsync::ui_ranks::advanced,
+                          .hasUnitId = true, .unitId = slopsync::unit_ids::percent});
         c.addLayoutField({.name = "in_step", .type = PackedFieldType::u8, .unit = "", .scale = 1.0f,
                           .hasMin = true, .hasMax = true, .min = 1.0f, .max = 25.0f,
                           .dflt = SettingDefault::ofInt(1), .group = group,
                           .desc = "Strokes ramping into the modulation.",
                           .step = 1.0f, .settingKey = uint8_t(keyBase + 1),
                           .flags = slopsync::setting_flags::advanced,
-                          .hasSettingKey = true, .hasStep = true});
+                          .hasSettingKey = true, .hasStep = true,
+                          .hasRank = true, .rank = slopsync::ui_ranks::advanced});
         c.addLayoutField({.name = "in_wait", .type = PackedFieldType::u8, .unit = "", .scale = 1.0f,
                           .hasMin = true, .hasMax = true, .min = 0.0f, .max = 25.0f,
                           .dflt = SettingDefault::ofInt(0), .group = group,
                           .desc = "Strokes held at full modulation.",
                           .step = 1.0f, .settingKey = uint8_t(keyBase + 2),
                           .flags = slopsync::setting_flags::advanced,
-                          .hasSettingKey = true, .hasStep = true});
+                          .hasSettingKey = true, .hasStep = true,
+                          .hasRank = true, .rank = slopsync::ui_ranks::advanced});
         c.addLayoutField({.name = "out_step", .type = PackedFieldType::u8, .unit = "", .scale = 1.0f,
                           .hasMin = true, .hasMax = true, .min = 1.0f, .max = 25.0f,
                           .dflt = SettingDefault::ofInt(1), .group = group,
                           .desc = "Strokes ramping back out.",
                           .step = 1.0f, .settingKey = uint8_t(keyBase + 3),
                           .flags = slopsync::setting_flags::advanced,
-                          .hasSettingKey = true, .hasStep = true});
+                          .hasSettingKey = true, .hasStep = true,
+                          .hasRank = true, .rank = slopsync::ui_ranks::advanced});
         c.addLayoutField({.name = "out_wait", .type = PackedFieldType::u8, .unit = "", .scale = 1.0f,
                           .hasMin = true, .hasMax = true, .min = 0.0f, .max = 25.0f,
                           .dflt = SettingDefault::ofInt(0), .group = group,
                           .desc = "Strokes resting before the cycle repeats.",
                           .step = 1.0f, .settingKey = uint8_t(keyBase + 4),
                           .flags = slopsync::setting_flags::advanced,
-                          .hasSettingKey = true, .hasStep = true});
+                          .hasSettingKey = true, .hasStep = true,
+                          .hasRank = true, .rank = slopsync::ui_ranks::advanced});
         c.addLayoutField({.name = "offset", .type = PackedFieldType::u8, .unit = "", .scale = 1.0f,
                           .hasMin = true, .hasMax = true, .min = 0.0f, .max = 100.0f,
                           .dflt = SettingDefault::ofInt(0), .group = group,
                           .desc = "Phase shift of the cycle.",
                           .step = 1.0f, .settingKey = uint8_t(keyBase + 5),
                           .flags = slopsync::setting_flags::advanced,
-                          .hasSettingKey = true, .hasStep = true});
+                          .hasSettingKey = true, .hasStep = true,
+                          .hasRank = true, .rank = slopsync::ui_ranks::advanced,
+                          .hasUnitId = true, .unitId = slopsync::unit_ids::percent});
         // Same honesty note as 0x008E: no setter here checks `homed` either
         // (setApModifier has no gate beyond the delegate's e-stop check), so
         // the mask tracks e-stop alone.
         c.addBitfieldField({.name = "enabled_mask", .type = PackedFieldType::bitfield8, .unit = "flag",
                             .scale = 1.0f,
                             .desc = "Which of these the machine will accept right now.",
-                            .role = roles::meta_enabled_mask},
+                            .role = roles::meta_enabled_mask,
+                        .hasRank = true, .rank = slopsync::ui_ranks::detail},
                            {"amplitude", "in_step", "in_wait", "out_step", "out_wait", "offset"});
     };
-    addApModifierChannel(ch::pattern_adv_mod_depth1,   "pattern-adv-mod-depth1",   "Depth 1 modifier",   9);
-    addApModifierChannel(ch::pattern_adv_mod_depth2,   "pattern-adv-mod-depth2",   "Depth 2 modifier",   15);
-    addApModifierChannel(ch::pattern_adv_mod_speedin,  "pattern-adv-mod-speedin",  "Speed in modifier",  21);
-    addApModifierChannel(ch::pattern_adv_mod_speedout, "pattern-adv-mod-speedout", "Speed out modifier", 27);
-    addApModifierChannel(ch::pattern_adv_mod_accelin,  "pattern-adv-mod-accelin",  "Accel in modifier",  33);
-    addApModifierChannel(ch::pattern_adv_mod_accelout, "pattern-adv-mod-accelout", "Accel out modifier", 39);
+    // The six invocations move to the final ascending-id call sequence below
+    // (RFC-047 Phase C2 reorder) — see the end of this function.
 
     // ---- 0x0095 "pattern-presets" — STORE, control -------------------------
     // RFC-021's `pattern.frayd` worked example, landed: retires the last HTTP
@@ -1459,14 +1664,18 @@ inline bool buildSlopDriveCatalog(slopsync::Catalog32& c, DeviceFeatures feat = 
     // "never depths or master speed"). See PatternPresetStore.h for the
     // 40-byte layout and SlopDriveHubDelegate::applyIntent's 0x0108 case for
     // the encode/decode.
+    auto addPatternPresets = [&]() {
     c.addEntry({.id = ch::pattern_presets, .name = "pattern-presets",
                 .cls = ChannelClass::STORE, .dir = Direction::h2c,
                 .access = AccessLevel::control, .maxRateHz = 0.0f,
-                .defaultPriority = Priority::background});
+                .defaultPriority = Priority::background,
+                .hasCategory = true, .category = slopsync::ui_categories::library,
+                .hasRank = true, .rank = slopsync::ui_ranks::detail});
     c.addStoreDescriptor({.storeId = 2, .kind = "pattern.frayd",
                           .capacity = kPresetCapacity,
                           .perItemMax = kPresetPayloadBytes,
                           .nameMax = kPresetNameMax});
+    };
 
     // ---- 0x0096 "pattern-presets-roster" — STATE, watch, on-change --------
     // {generation u16, count u8, capacity u8} — BARE, deliberately, same shape
@@ -1480,15 +1689,18 @@ inline bool buildSlopDriveCatalog(slopsync::Catalog32& c, DeviceFeatures feat = 
     // (kPayloadBytes is tiny — 40 B — so kPresetCapacity fetches is cheap) or
     // read the name back from a save/rename ECHO it sent itself. A generation
     // bump means "re-enumerate", exactly like 0x000D.
+    auto addPatternPresetsRoster = [&]() {
     c.addEntry({.id = ch::pattern_presets_roster, .name = "pattern-presets-roster",
                 .cls = ChannelClass::STATE, .dir = Direction::h2c,
                 .access = AccessLevel::watch, .maxRateHz = 0.0f,
                 .defaultPriority = Priority::background,
-                .hasCategory = true, .category = slopsync::setting_categories::user,
-                .hasSettingChannel = true, .settingChannel = ch::pattern_presets_cmd});
+                .hasCategory = true, .category = slopsync::ui_categories::library,
+                .hasSettingChannel = true, .settingChannel = ch::pattern_presets_cmd,
+                .hasRank = true, .rank = slopsync::ui_ranks::detail});
     c.addLayoutField({.name = "generation", .type = PackedFieldType::u16, .unit = "count", .scale = 1.0f});
     c.addLayoutField({.name = "count",      .type = PackedFieldType::u8,  .unit = "count", .scale = 1.0f});
     c.addLayoutField({.name = "capacity",   .type = PackedFieldType::u8,  .unit = "count", .scale = 1.0f});
+    };
 
     // ---- 0x0100 "move" — INTENT, control, 20 Hz, critical ----------------
     // {1:"position" f32 mm, 2:"bypass" bool}. This channel maps to arbiter
@@ -1501,19 +1713,28 @@ inline bool buildSlopDriveCatalog(slopsync::Catalog32& c, DeviceFeatures feat = 
     // honest annotation is the value-role `command.position`, which is what
     // lets ANY client (the rail widget's tap-to-move tape first among them)
     // find "put the carriage there" without hardcoding 0x0100.
+    auto addMove = [&]() {
     c.addEntry({.id = ch::move, .name = "move",
                 .cls = ChannelClass::INTENT, .dir = Direction::c2h,
                 .access = AccessLevel::control, .maxRateHz = 20.0f,
-                .defaultPriority = Priority::critical});
+                .defaultPriority = Priority::critical,
+                // THE primary positional command — the machine's face, same rank
+                // as motion's own hero fields it commands.
+                .hasCategory = true, .category = slopsync::ui_categories::control,
+                .hasRank = true, .rank = slopsync::ui_ranks::hero});
     c.addSchemaField({.key = 1, .name = "position", .type = CborFieldType::f32_t, .unit = "mm",
                       .hasMin = true, .hasMax = true, .min = 0.0f, .max = 2000.0f,
-                      .role = roles::command_position});
+                      .role = roles::command_position,
+                      .hasRank = true, .rank = slopsync::ui_ranks::hero,
+                      .hasUnitId = true, .unitId = slopsync::unit_ids::mm});
     c.addSchemaField({.key = 2, .name = "bypass", .type = CborFieldType::bool_t, .unit = ""});
+    };
 
     // ---- 0x0101 "config-set" — INTENT, control, 10 Hz --------------------
     // Every field optional; present keys are applied. cfg_gen bumps on success.
     // fw 2.1.47 APPENDED key 7 "input_jerk" — append-only (keys 1-6 keep their
     // meaning exactly), and released key numbers are never reused. :3
+    auto addConfigSet = [&]() {
     c.addEntry({.id = ch::config_set, .name = "config-set",
                 .cls = ChannelClass::INTENT, .dir = Direction::c2h,
                 .access = AccessLevel::control, .maxRateHz = 10.0f,
@@ -1544,14 +1765,18 @@ inline bool buildSlopDriveCatalog(slopsync::Catalog32& c, DeviceFeatures feat = 
     // see the field comment on 0x0081's `max_rail` for the full rationale.
     c.addSchemaField({.key = 8, .name = "max_rail",    .type = CborFieldType::f32_t, .unit = "mm",
                       .hasMin = true, .hasMax = true, .min = ceiling::rail_min, .max = ceiling::rail_mm});
+    };
 
     // ---- 0x0102 "pattern-cmd" — INTENT, control, 20 Hz -------------------
     // Session-volatile (cfg_gen does NOT bump). Maps to arbiter source 2
     // (PATTERN) via the delegate; running drives start/stop.
+    auto addPatternCmd = [&]() {
     c.addEntry({.id = ch::pattern_cmd, .name = "pattern-cmd",
                 .cls = ChannelClass::INTENT, .dir = Direction::c2h,
                 .access = AccessLevel::control, .maxRateHz = 20.0f,
-                .defaultPriority = Priority::normal});
+                .defaultPriority = Priority::normal,
+                .hasCategory = true, .category = slopsync::ui_categories::control,
+                .hasRank = true, .rank = slopsync::ui_ranks::control});
     // Bounds mirror the 0x0082 twin (see the config-set note above for why the
     // prose lives only on the STATE side).
     c.addSchemaField({.key = 1, .name = "running",   .type = CborFieldType::bool_t, .unit = ""});
@@ -1565,6 +1790,12 @@ inline bool buildSlopDriveCatalog(slopsync::Catalog32& c, DeviceFeatures feat = 
                       .hasMin = true, .hasMax = true, .min = 0.0f, .max = 100.0f});
     c.addSchemaField({.key = 6, .name = "sensation", .type = CborFieldType::f32_t,  .unit = "",
                       .hasMin = true, .hasMax = true, .min = 0.0f, .max = 100.0f});
+    // Phase D (RFC-045/048) APPENDED key 7: `source.background_run`, pairing
+    // 0x1200 pattern-state's field of the same settingKey. Unlike keys 1-6,
+    // NOT session-volatile — applyIntent persists it (coalesced, like
+    // max_rail) because it is a standing policy, not a live pattern param.
+    c.addSchemaField({.key = 7, .name = "background_run", .type = CborFieldType::bool_t, .unit = ""});
+    };
 
     // ---- 0x0103 "home" — INTENT, control --------------------------------
     // {1:"op", 2:"stroke"} — op 1 starts sensorless homing; ops 2/3 are the
@@ -1584,10 +1815,14 @@ inline bool buildSlopDriveCatalog(slopsync::Catalog32& c, DeviceFeatures feat = 
     // allocation, so unlike 0x0005's registry-governed `safety_ops` these
     // numbers live in this catalog and nowhere else — which is precisely why
     // they carry option labels, so a generic client can name them.
+    auto addHome = [&]() {
     c.addEntry({.id = ch::home, .name = "home",
                 .cls = ChannelClass::INTENT, .dir = Direction::c2h,
                 .access = AccessLevel::control, .maxRateHz = 5.0f,
-                .defaultPriority = Priority::normal});
+                .defaultPriority = Priority::normal,
+                // ui_categories::hardware's own note names "homing" explicitly.
+                .hasCategory = true, .category = slopsync::ui_categories::hardware,
+                .hasRank = true, .rank = slopsync::ui_ranks::control});
     c.addSelectSchemaField({.key = 1, .name = "op", .type = CborFieldType::uint_t, .unit = "",
                             .role = "action.home"},
                            {"reserved", "home", "force_home", "clear_override"},
@@ -1597,6 +1832,7 @@ inline bool buildSlopDriveCatalog(slopsync::Catalog32& c, DeviceFeatures feat = 
                             AccessLevel::control}); // 3 clear_override
     c.addSchemaField({.key = 2, .name = "stroke", .type = CborFieldType::f32_t, .unit = "mm",
                       .hasMin = true, .hasMax = true, .min = 1.0f, .max = 2000.0f});
+    };
 
     // ---- 0x0104 "modes-set" — INTENT, control, 5 Hz ----------------------
     // M5b: the write half of 0x008A. Every key optional; present keys applied,
@@ -1610,13 +1846,14 @@ inline bool buildSlopDriveCatalog(slopsync::Catalog32& c, DeviceFeatures feat = 
     // 5 Hz because these are human dropdown changes, not a control loop. The
     // bounds are the enum ranges the catalog's own option arrays declare, so a
     // client that validates locally gets the same answer the hub would NACK.
+    auto addModesSet = [&]() {
     c.addEntry({.id = ch::modes_set, .name = "modes-set",
                 .cls = ChannelClass::INTENT, .dir = Direction::c2h,
                 .access = AccessLevel::control, .maxRateHz = 5.0f,
                 .defaultPriority = Priority::normal});
     // KEY 1 IS DELIBERATELY UNUSED (fw 2.1.76, operator ruling 2026-07-27,
     // item 2). It held "blend_mode" until MotionArbiter's already-standing
-    // alias-everything-to-"allow" behaviour (see setBlendMode()) made clear
+    // alias-everything-to-"allow" behavior (see setBlendMode()) made clear
     // there was no live setting left to write — see the field comment on
     // 0x008A's `blend_mode_reserved`. SlopSyncHubService.cpp's modes_set case
     // no longer recognizes this key; a client that still sends it gets
@@ -1636,6 +1873,7 @@ inline bool buildSlopDriveCatalog(slopsync::Catalog32& c, DeviceFeatures feat = 
                       .hasMin = true, .hasMax = true, .min = 0.0f, .max = 1.0f});
     c.addSchemaField({.key = 4, .name = "overshoot_clamp", .type = CborFieldType::uint_t, .unit = "",
                       .hasMin = true, .hasMax = true, .min = 0.0f, .max = 1.0f});
+    };
 
     // ---- 0x0105 "slopmotion-set" — INTENT, control, 5 Hz -------------------
     // The single writer behind all three slopmotion-* cards. Keys 1..20 are
@@ -1648,6 +1886,7 @@ inline bool buildSlopDriveCatalog(slopsync::Catalog32& c, DeviceFeatures feat = 
     // MILLISECONDS on the wire (the engine stores microseconds) — same
     // vocabulary /api/slopmotion used, so the two are diffable during the
     // transition.
+    auto addSmSet = [&]() {
     c.addEntry({.id = ch::sm_set, .name = "slopmotion-set",
                 .cls = ChannelClass::INTENT, .dir = Direction::c2h,
                 .access = AccessLevel::control, .maxRateHz = 5.0f,
@@ -1658,9 +1897,9 @@ inline bool buildSlopDriveCatalog(slopsync::Catalog32& c, DeviceFeatures feat = 
                       .hasMin = true, .hasMax = true, .min = 0.0f, .max = 20.0f});
     c.addSchemaField({.key = 3, .name = "amax_ovr", .type = CborFieldType::f32_t, .unit = "1/s2",
                       .hasMin = true, .hasMax = true, .min = 0.0f, .max = 500.0f});
-    c.addSchemaField({.key = 4, .name = "centring", .type = CborFieldType::uint_t, .unit = "",
+    c.addSchemaField({.key = 4, .name = "centering", .type = CborFieldType::uint_t, .unit = "",
                       .hasMin = true, .hasMax = true, .min = 0.0f, .max = 1.0f});
-    c.addSchemaField({.key = 5, .name = "centring_gain", .type = CborFieldType::f32_t, .unit = "",
+    c.addSchemaField({.key = 5, .name = "centering_gain", .type = CborFieldType::f32_t, .unit = "",
                       .hasMin = true, .hasMax = true, .min = 0.0f, .max = 1.0f});
     c.addSchemaField({.key = 6, .name = "chase_ff", .type = CborFieldType::uint_t, .unit = "",
                       .hasMin = true, .hasMax = true, .min = 0.0f, .max = 1.0f});
@@ -1692,6 +1931,7 @@ inline bool buildSlopDriveCatalog(slopsync::Catalog32& c, DeviceFeatures feat = 
                       .hasMin = true, .hasMax = true, .min = 0.0f, .max = 8.0f});
     c.addSchemaField({.key = 20, .name = "settle_grace_ms", .type = CborFieldType::f32_t, .unit = "ms",
                       .hasMin = true, .hasMax = true, .min = 0.0f, .max = 200.0f});
+    };
 
     // ---- 0x0106 "machine-admin" — INTENT, control -------------------------
     // The device ACTIONS that are not settings and not motion: clear a driver
@@ -1703,10 +1943,15 @@ inline bool buildSlopDriveCatalog(slopsync::Catalog32& c, DeviceFeatures feat = 
     // these are rare, human-initiated, and share a shape. 2 Hz because a human
     // presses them; a client that needs to press one faster than twice a second
     // is doing something the machine should not help with.
+    auto addMachineAdmin = [&]() {
     c.addEntry({.id = ch::machine_admin, .name = "machine-admin",
                 .cls = ChannelClass::INTENT, .dir = Direction::c2h,
                 .access = AccessLevel::control, .maxRateHz = 2.0f,
-                .defaultPriority = Priority::normal});
+                .defaultPriority = Priority::normal,
+                // clear_fault/servo_scan are hardware-adjacent (2 of 3 ops);
+                // save_config rides along on the same rare-admin-action channel.
+                .hasCategory = true, .category = slopsync::ui_categories::hardware,
+                .hasRank = true, .rank = slopsync::ui_ranks::control});
     c.addSelectSchemaField({.key = 1, .name = "op", .type = CborFieldType::uint_t, .unit = "",
                             .role = "action.admin"},
                            {"reserved", "clear_fault", "save_config", "servo_scan"},
@@ -1714,6 +1959,7 @@ inline bool buildSlopDriveCatalog(slopsync::Catalog32& c, DeviceFeatures feat = 
                             AccessLevel::control,   // 1 clear_fault
                             AccessLevel::control,   // 2 save_config
                             AccessLevel::control}); // 3 servo_scan
+    };
 
     // ---- 0x0107 "pattern-advanced-cmd" — INTENT, control, 20 Hz -----------
     // The single writer behind ALL SEVEN 0x008E..0x0094 advanced-pattern
@@ -1730,6 +1976,7 @@ inline bool buildSlopDriveCatalog(slopsync::Catalog32& c, DeviceFeatures feat = 
     // in reverse to decode a wire frame back into a control + sub-field.
     //
     // Session-volatile, same as 0x0102 pattern-cmd: cfg_gen does not bump.
+    auto addPatternAdvancedCmd = [&]() {
     c.addEntry({.id = ch::pattern_advanced_cmd, .name = "pattern-advanced-cmd",
                 .cls = ChannelClass::INTENT, .dir = Direction::c2h,
                 .access = AccessLevel::control, .maxRateHz = 20.0f,
@@ -1769,6 +2016,7 @@ inline bool buildSlopDriveCatalog(slopsync::Catalog32& c, DeviceFeatures feat = 
         c.addSchemaField({.key = uint8_t(base + 5), .name = "offset",    .type = CborFieldType::uint_t,
                           .unit = "", .hasMin = true, .hasMax = true, .min = 0.0f, .max = 100.0f});
     }
+    };
 
     // ---- 0x0108 "pattern-presets-cmd" — INTENT, control -------------------
     // The CRUD writer behind the 0x0095 store / 0x0096 roster pair (RFC-021).
@@ -1781,6 +2029,7 @@ inline bool buildSlopDriveCatalog(slopsync::Catalog32& c, DeviceFeatures feat = 
     // HTTP handler had. `name` is required for save/rename, ignored for
     // load/delete. See SlopDriveHubDelegate::applyIntent's 0x0108 case for
     // exactly what each op does and PatternPresetStore.h for the backend.
+    auto addPatternPresetsCmd = [&]() {
     c.addEntry({.id = ch::pattern_presets_cmd, .name = "pattern-presets-cmd",
                 .cls = ChannelClass::INTENT, .dir = Direction::c2h,
                 .access = AccessLevel::control, .maxRateHz = 5.0f,
@@ -1791,6 +2040,50 @@ inline bool buildSlopDriveCatalog(slopsync::Catalog32& c, DeviceFeatures feat = 
     c.addSchemaField({.key = 2, .name = "slot", .type = CborFieldType::uint_t, .unit = "",
                       .hasMin = true, .hasMax = true, .min = 0.0f, .max = float(kPresetCapacity - 1)});
     c.addSchemaField({.key = 3, .name = "name", .type = CborFieldType::tstr_t, .unit = ""});
+    };
+
+    // ---- RFC-047 (Phase C2, renumbered again at Phase C4): invoke every
+    // device-channel builder ABOVE in ASCENDING NEW-ID ORDER. The authoring
+    // order above (kept close to its history for reviewability) does not
+    // match wire order, so each entry's build logic is wrapped in a lambda
+    // (`add*`) and the calls below are the one place that has to stay
+    // ascending (encodeCatalog/etag require it, §8.3). Core channels
+    // (0x0003-0x000E) are unaffected: they were already emitted above, in
+    // order, before any device channel. The six AP-modifier calls are in
+    // MEMBER order (speedin/out, accelin/out, depth1/2), NOT advpat::BaseId
+    // order — see the ch:: namespace comment on those constants.
+    addMachineConfig();          // 0x1000 STATE·machine, family 0 member 0
+    addPower();                  // 0x1010 STATE·machine, family 1 member 0 (no-ops without feat.has_current_sensor)
+    addOdometer();                // 0x1020 STATE·machine, family 2 member 0
+    addMachineModes();           // 0x1030 STATE·machine, family 3 member 0
+    addMotion();                 // 0x1100 STATE·motion, family 0 member 0
+    addPlanStrip();              // 0x1110 STATE·motion, family 1 member 0
+    addMotionDiag();             // 0x1111 STATE·motion, family 1 member 1
+    addSmLimits();               // 0x1120 STATE·motion, family 2 member 0
+    addSmChase();                // 0x1121 STATE·motion, family 2 member 1
+    addSmWaveform();             // 0x1122 STATE·motion, family 2 member 2
+    addPatternState();           // 0x1200 STATE·pattern, family 0 member 0
+    addPatternAdvanced();        // 0x1210 STATE·pattern, family 1 member 0
+    addApModifierChannel(ch::pattern_adv_mod_speedin,  "pattern-adv-mod-speedin",  "Speed in modifier",  21);  // 0x1211
+    addApModifierChannel(ch::pattern_adv_mod_speedout, "pattern-adv-mod-speedout", "Speed out modifier", 27);  // 0x1212
+    addApModifierChannel(ch::pattern_adv_mod_accelin,  "pattern-adv-mod-accelin",  "Accel in modifier",  33);  // 0x1213
+    addApModifierChannel(ch::pattern_adv_mod_accelout, "pattern-adv-mod-accelout", "Accel out modifier", 39);  // 0x1214
+    addApModifierChannel(ch::pattern_adv_mod_depth1,   "pattern-adv-mod-depth1",   "Depth 1 modifier",   9);   // 0x1215
+    addApModifierChannel(ch::pattern_adv_mod_depth2,   "pattern-adv-mod-depth2",   "Depth 2 modifier",   15);  // 0x1216
+    addPatternPresetsRoster();   // 0x1220 STATE·pattern, family 2 member 0
+    addMotionInput();            // 0x2100 STREAM·motion, family 0 member 0
+    addMotionSegment();          // 0x2101 STREAM·motion, family 0 member 1
+    addConfigSet();              // 0x3000 INTENT·machine, family 0 member 0
+    addModesSet();               // 0x3030 INTENT·machine, family 3 member 0
+    addMachineAdmin();           // 0x30F0 INTENT·machine, family F member 0
+    addMove();                   // 0x3100 INTENT·motion, family 0 member 0
+    addHome();                   // 0x3101 INTENT·motion, family 0 member 1
+    addSmSet();                  // 0x3120 INTENT·motion, family 2 member 0
+    addPatternCmd();             // 0x3200 INTENT·pattern, family 0 member 0
+    addPatternAdvancedCmd();     // 0x3210 INTENT·pattern, family 1 member 0
+    addPatternPresetsCmd();      // 0x3220 INTENT·pattern, family 2 member 0
+    addMotionAnomaly();          // 0x4100 EVENT·motion, family 0 member 0
+    addPatternPresets();         // 0x5220 STORE·pattern, family 2 member 0
 
     return c.ok();
 }

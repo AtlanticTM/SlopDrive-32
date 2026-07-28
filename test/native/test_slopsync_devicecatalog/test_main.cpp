@@ -8,7 +8,7 @@
 // tree ever built it. The library suites can be perfectly green while the
 // machine advertises a catalog that contradicts the hub's own encoders — and
 // the two failures that would cause are (a) a client that cannot decode the
-// SAFETY channel, and (b) a client that greys the wrong controls on a
+// SAFETY channel, and (b) a client that grays the wrong controls on a
 // safety-critical surface. Both are silent.
 //
 // The catalog is hardware-free by construction (field descriptors, no Arduino),
@@ -85,6 +85,8 @@ bool isRegisteredRole(std::string_view r) {
         command_position,
         plan_start, plan_end, plan_current, plan_velocity, plan_elapsed,
         plan_duration, plan_style,
+        // RFC-045/048, Phase D: the hub-autonomous-source policy control.
+        source_background_run,
     };
     for (std::string_view k : kAll) {
         if (k == r) return true;
@@ -165,7 +167,7 @@ TEST_CASE("device catalog: 0x0085 is segment-class, 0x0084 is not") {
     REQUIRE(seg != nullptr);
     CHECK(seg->streamKind == stream_kinds::segments);
     // The classification the shedding table actually consults. A dropped
-    // POSITION SAMPLE is recoverable by interpolating its neighbours; a
+    // POSITION SAMPLE is recoverable by interpolating its neighbors; a
     // dropped TIMED SEGMENT is a permanently lost motion command, because the
     // sample carries its own duration_ms and therefore commands a time extent
     // rather than reporting an instant.
@@ -190,7 +192,7 @@ TEST_CASE("device catalog: 0x0003 is the 9-byte safety snapshot, modes appended 
     REQUIRE(e != nullptr);
     CHECK(e->cls == ChannelClass::STATE);
     CHECK(e->defaultPriority == Priority::critical);
-    // Open to viewers: a watcher that cannot see the latch cannot honour it.
+    // Open to viewers: a watcher that cannot see the latch cannot honor it.
     CHECK(e->access == AccessLevel::watch);
 
     auto fields = dc.c.layoutFields(*e);
@@ -392,7 +394,7 @@ TEST_CASE("device catalog: published layout sizes match the firmware's encoders"
     struct { uint16_t id; size_t bytes; } expect[] = {
         {slopdrive::ch::motion,         9},   // + raw_10um (M5a)
         {slopdrive::ch::machine_config, 37},  // + enabled_mask (M5a) + measured_stroke (fw 2.1.76)
-        {slopdrive::ch::pattern_state,  19},  // + enabled_mask (M5a)
+        {slopdrive::ch::pattern_state,  20},  // + enabled_mask (M5a) + background_run (Phase D, RFC-045/048)
         {slopdrive::ch::odometer,       20},  // + energy_wh, session_ms (M5a)
         {slopdrive::ch::plan_strip,     18},
         {slopdrive::ch::power,           8},  // 6 without a power monitor
@@ -432,7 +434,7 @@ TEST_CASE("device catalog: M5a growth is append-only on 0x0080/0x0081/0x0082/0x0
                                         "enabled_mask", "measured_stroke"});
     CHECK(names(slopdrive::ch::pattern_state) ==
           std::vector<std::string_view>{"running", "pattern", "speed", "depth", "stroke",
-                                        "sensation", "enabled_mask"});
+                                        "sensation", "enabled_mask", "background_run"});
     CHECK(names(slopdrive::ch::odometer) ==
           std::vector<std::string_view>{"strokes", "distance_m", "peak_mm_s", "energy_wh",
                                         "session_ms"});
@@ -482,9 +484,12 @@ TEST_CASE("device catalog: every setting_key resolves in its declared settingCha
     // unchanged. `max_rail` on 0x0081 gained a setting_key (item 1 — it is a
     // real savable geometry setting now) and `blend_mode` on 0x008A lost its
     // setting_key + INTENT key, retired to `blend_mode_reserved` (item 2 —
-    // dead motion behaviour, MotionArbiter has aliased every mode to "allow"
+    // dead motion behavior, MotionArbiter has aliased every mode to "allow"
     // for a while). One in, one out.
-    CHECK(annotated == 80);
+    // 80 -> 81 at Phase D (RFC-045/048): `background_run` on 0x0082
+    // (settingKey 7, paired 0x0102 key 7) — the `source.background_run`
+    // field role finally has a real setting behind it on this device.
+    CHECK(annotated == 81);
 }
 
 // ============================================================================
@@ -564,7 +569,7 @@ TEST_CASE("device catalog: measured_stroke is read-only, max_rail is now a setti
     CHECK(e->hasSettingChannel);
     CHECK(e->settingChannel == slopdrive::ch::config_set);
     CHECK(e->hasCategory);
-    CHECK(e->category == setting_categories::limits);
+    CHECK(e->category == ui_categories::limits);
 
     const LayoutField* stroke = layoutFieldByName(dc.c, *e, "measured_stroke");
     REQUIRE(stroke != nullptr);
@@ -618,7 +623,7 @@ TEST_CASE("device catalog: both settings channels carry a role-tagged enabled_ma
 
     struct { uint16_t id; size_t bits; } cases[] = {
         {slopdrive::ch::machine_config, 8},
-        {slopdrive::ch::pattern_state,  6},
+        {slopdrive::ch::pattern_state,  7},  // Phase D: + background_run (RFC-045/048)
     };
     for (auto& c : cases) {
         CAPTURE(c.id);
@@ -667,7 +672,7 @@ TEST_CASE("device catalog: pattern is a named select matching PatternEngine") {
     DeviceCatalog dc;
     const CatalogEntry* e = dc.c.find(slopdrive::ch::pattern_state);
     REQUIRE(e != nullptr);
-    CHECK(e->category == setting_categories::user);
+    CHECK(e->category == ui_categories::control);
     CHECK(e->settingChannel == slopdrive::ch::pattern_cmd);
 
     const LayoutField* p = layoutFieldByName(dc.c, *e, "pattern");
@@ -743,7 +748,7 @@ TEST_CASE("device catalog: 0x0086 plan-strip is an elevated diagnostics STATE") 
     CHECK(e->access == AccessLevel::watch);
     CHECK(e->defaultPriority == Priority::elevated);
     CHECK(e->maxRateHz >= 45.0f);
-    CHECK(e->category == setting_categories::diagnostics);
+    CHECK(e->category == ui_categories::tuning);
     // STATE, so stream_kind does not apply and must be left at the default —
     // an explicit `samples` on a STATE entry would imply a classification that
     // isSegmentClass() never reads.
@@ -829,7 +834,7 @@ TEST_CASE("device catalog: 0x0088 carries the per-kind breakdown and a reset_gen
     REQUIRE(e != nullptr);
     CHECK(e->cls == ChannelClass::STATE);
     CHECK(e->defaultPriority == Priority::background);
-    CHECK(e->category == setting_categories::diagnostics);
+    CHECK(e->category == ui_categories::tuning);
 
     // One named field per slopmotion::AnomalyType, in the enum's own order.
     const char* kinds[] = {"anom_none",
@@ -839,7 +844,7 @@ TEST_CASE("device catalog: 0x0088 carries the per-kind breakdown and a reset_gen
                            "anom_deadline_stretched",
                            "anom_waveform_fallback",
                            "anom_waveform_scaled",
-                           "anom_waveform_centred",
+                           "anom_waveform_centered",
                            "anom_handoff_bounded",
                            "anom_waveform_smoothed"};
     for (const char* nm : kinds) {
@@ -894,13 +899,13 @@ TEST_CASE("device catalog: 0x0089 motion-anomaly is a device-authored EVENT chan
     CHECK(labels[4] == "deadline_stretched");
     CHECK(labels[5] == "waveform_fallback");
     CHECK(labels[6] == "waveform_scaled");
-    CHECK(labels[7] == "waveform_centred");
+    CHECK(labels[7] == "waveform_centered");
     // M4d (RFC-008): the guard's own kind. Its label must exist here or a
     // generic client prints the ordinal "8" for the one anomaly that is about
     // the CLIENT's own content.
     CHECK(labels[8] == "handoff_bounded");
     // slopmotion 0.8.0: the budgeted policies' own kind — the span's end handle
-    // was lerped toward its chord to make the shape legal. Unlabelled it would
+    // was lerped toward its chord to make the shape legal. Unlabeled it would
     // print as "9" for the one anomaly that reports a deliberate TRADEOFF the
     // operator configured, rather than a limit the machine ran into.
     CHECK(labels[9] == "waveform_smoothed");
@@ -933,7 +938,7 @@ TEST_CASE("device catalog: annotations survive encode -> decode") {
     CHECK(cfg->hasSettingChannel);
     CHECK(cfg->settingChannel == slopdrive::ch::config_set);
     CHECK(cfg->hasCategory);
-    CHECK(cfg->category == setting_categories::limits);
+    CHECK(cfg->category == ui_categories::limits);
 
     const LayoutField* us = layoutFieldByName(back, *cfg, "user_speed");
     REQUIRE(us != nullptr);

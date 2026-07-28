@@ -7,8 +7,6 @@
 // target every servoBusTask tick (2ms) and streams the result as FC 0x10
 // incremental deltas on the send cadence. OSSM-RS parity: their Ruckig
 // S-curve feeds a 10ms 0x7B stream; our tracker feeds a 6-10ms delta stream.
-// The profile math in MotionProfile.h is no longer sampled here — kept for
-// reference/diagnostics. :3
 #if defined(DRIVER_AIM_SERVO) && defined(FEATURE_RS485_MODBUS)
 
 #include "ServoMotionExecutor.h"
@@ -18,13 +16,9 @@
 
 StreamedSetpointExecutor::StreamedSetpointExecutor(ServoModbus& bus) : _bus(bus) {}
 
-// Legacy entry point — a couple of call sites may still hand us a planned
-// profile; all we need from it is the destination + limits. The tracker does
-// the rest (and does it smoother). :3
-void StreamedSetpointExecutor::adoptProfile(const TrapezoidProfile& profile) {
-    track(profile.target, profile.vmax, profile.accel);
-}
-
+// Superseded — no current caller (ModbusServoDriver calls track() directly).
+// Kept only to satisfy IServoExecutor; forwards profile.target/vmax/accel
+// into track() if ever invoked.
 void StreamedSetpointExecutor::track(float target_counts,
                                      float vmax_counts_s,
                                      float amax_counts_s2) {

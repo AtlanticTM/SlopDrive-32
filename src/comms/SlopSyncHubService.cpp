@@ -4,6 +4,7 @@
 #include <ArduinoJson.h>
 #include <Preferences.h>
 #include <WiFi.h>
+#include <esp_random.h>
 #include <esp_timer.h>
 
 #include <array>
@@ -154,7 +155,7 @@ slopsync::AccessLevel SlopDriveHubDelegate::validateToken(std::span<const std::b
     //
     // HONEST SCOPE — read this before believing the machine is locked down:
     // while /uitoken is enabled (the default), anything on the LAN that can
-    // HTTP GET can mint a control-tier credential. The endpoint's only defence
+    // HTTP GET can mint a control-tier credential. The endpoint's only defense
     // is the absence of CORS headers, which stops a hostile WEB PAGE and
     // nothing else. So this flip buys a real chokepoint, an audit line per
     // authorization, and a default-deny posture — NOT LAN secrecy. The
@@ -168,7 +169,7 @@ slopsync::AccessLevel SlopDriveHubDelegate::validateToken(std::span<const std::b
     // burned even if a later branch would have granted the same tier anyway, or
     // a page could hoard one and replay it after the posture is tightened.
     //
-    // DO NOT MOVE A LAZILY-INITIALISED ANYTHING INTO consume()'s spinlock —
+    // DO NOT MOVE A LAZILY-INITIALIZED ANYTHING INTO consume()'s spinlock —
     // field bug #4 (fw 2.1.58) was exactly that, and it aborted the device on
     // the first HELLO that ever presented a live token. See SlopSyncUiToken.cpp.
     if (hasToken && _uiTokens.consume(token)) {
@@ -309,25 +310,42 @@ slopsync::Result<IntentValueMap, NackCode> SlopDriveHubDelegate::applyIntent(
             const auto* f4 = findField(requested, 4);  // depth
             const auto* f5 = findField(requested, 5);  // stroke
             const auto* f6 = findField(requested, 6);  // sensation
-            if (f1) in["running"] = fieldBool(f1, false);
-            if (f2) in["pattern"] = int(fieldU64(f2, 0));
-            if (f3) in["speed"] = fieldF32(f3, 0.0f);
-            if (f4) in["depth"] = fieldF32(f4, 0.0f);
-            if (f5) in["stroke"] = fieldF32(f5, 0.0f);
-            if (f6) in["sensation"] = fieldF32(f6, 0.0f);
-            if (!_webui.handleCommand(WS_OP_GEN_CFG, in, out)) {
-                return Ret::err(_state.homed ? NackCode::INVALID_VALUE : NackCode::NOT_HOMED);
-            }
-            cfgChanged = false;  // session-volatile
-            // applyPattern echoes running(bool), pattern/speed/depth/stroke/
-            // sensation as ints — re-widen to the schema's f32.
+            const auto* f7 = findField(requested, 7);  // background_run (RFC-045/048)
             uint32_t n = 0;
-            if (f1) applied.fields[n++] = {1, IntentValue::ofBool(out["running"] | false)};
-            if (f2) applied.fields[n++] = {2, IntentValue::ofU64(uint64_t(int(out["pattern"] | 0)))};
-            if (f3) applied.fields[n++] = {3, IntentValue::ofF32(float(int(out["speed"] | 0)))};
-            if (f4) applied.fields[n++] = {4, IntentValue::ofF32(float(int(out["depth"] | 0)))};
-            if (f5) applied.fields[n++] = {5, IntentValue::ofF32(float(int(out["stroke"] | 0)))};
-            if (f6) applied.fields[n++] = {6, IntentValue::ofF32(float(int(out["sensation"] | 0)))};
+            if (f1 || f2 || f3 || f4 || f5 || f6) {
+                if (f1) in["running"] = fieldBool(f1, false);
+                if (f2) in["pattern"] = int(fieldU64(f2, 0));
+                if (f3) in["speed"] = fieldF32(f3, 0.0f);
+                if (f4) in["depth"] = fieldF32(f4, 0.0f);
+                if (f5) in["stroke"] = fieldF32(f5, 0.0f);
+                if (f6) in["sensation"] = fieldF32(f6, 0.0f);
+                if (!_webui.handleCommand(WS_OP_GEN_CFG, in, out)) {
+                    return Ret::err(_state.homed ? NackCode::INVALID_VALUE : NackCode::NOT_HOMED);
+                }
+                // applyPattern echoes running(bool), pattern/speed/depth/stroke/
+                // sensation as ints — re-widen to the schema's f32.
+                if (f1) applied.fields[n++] = {1, IntentValue::ofBool(out["running"] | false)};
+                if (f2) applied.fields[n++] = {2, IntentValue::ofU64(uint64_t(int(out["pattern"] | 0)))};
+                if (f3) applied.fields[n++] = {3, IntentValue::ofF32(float(int(out["speed"] | 0)))};
+                if (f4) applied.fields[n++] = {4, IntentValue::ofF32(float(int(out["depth"] | 0)))};
+                if (f5) applied.fields[n++] = {5, IntentValue::ofF32(float(int(out["stroke"] | 0)))};
+                if (f6) applied.fields[n++] = {6, IntentValue::ofF32(float(int(out["sensation"] | 0)))};
+            }
+            // RFC-045/048: source.background_run is a STANDING POLICY, not a
+            // live pattern parameter — handled independently of WS_OP_GEN_CFG
+            // (so it never trips NOT_HOMED: a preference about what happens on
+            // disconnect is legal to set before ever homing) and PERSISTED
+            // (coalesced, like max_rail's _maxRailDirty) rather than
+            // session-volatile like keys 1-6.
+            if (f7) {
+                bool bg = fieldBool(f7, false);
+                if (bg != _state.pattern_background_run) {
+                    _state.pattern_background_run = bg;
+                    _patternBackgroundRunDirty = true;
+                }
+                applied.fields[n++] = {7, IntentValue::ofBool(bg)};
+            }
+            cfgChanged = false;  // session-volatile (background_run persists via its own dirty flag)
             applied.count = n;
             return Ret::ok(applied);
         }
@@ -486,8 +504,8 @@ slopsync::Result<IntentValueMap, NackCode> SlopDriveHubDelegate::applyIntent(
             setF(1, 0.0f, 2000000.0f, _state.sm_tune_jmax_ovr);
             setF(2, 0.0f, 20.0f,      _state.sm_tune_vmax_ovr);
             setF(3, 0.0f, 500.0f,     _state.sm_tune_amax_ovr);
-            setU(4, 0, 1, [&](uint32_t v) { _state.sm_tune_centring = (v != 0); });
-            setF(5, 0.0f, 1.0f,       _state.sm_tune_centring_gain);
+            setU(4, 0, 1, [&](uint32_t v) { _state.sm_tune_centering = (v != 0); });
+            setF(5, 0.0f, 1.0f,       _state.sm_tune_centering_gain);
             setU(6, 0, 1, [&](uint32_t v) { _state.sm_tune_chase_ff = (v != 0); });
             setU(7, 0, 1, [&](uint32_t v) { _state.sm_tune_chase_aff = (v != 0); });
             setF(8, 0.0f, 1.5f,       _state.sm_tune_chase_gain);
@@ -861,20 +879,46 @@ std::optional<uint8_t> SlopDriveHubDelegate::sourceForChannel(uint16_t channel_i
 }
 
 slopsync::SourceLossPolicy SlopDriveHubDelegate::sourcePolicy(uint8_t source_id) {
-    // Pattern is hub-autonomous — a controller dropping off must NOT kill a
-    // running pattern (user-locked "pattern continues" doctrine). Live control
-    // (move) is initiator-bound: silence stops motion.
+    // VESTIGIAL as of RFC-045 (Phase D): the hub library no longer calls this
+    // — releaseSessionSources() latches nothing for any source class, so the
+    // Stop-vs-Continue question it used to answer has no caller any more (see
+    // hub_impl.hpp's comment). Kept only because HubDelegate's interface is
+    // frozen-additive; PATTERN's actual "keep going after disconnect" fate is
+    // now onSourceOwnership()'s `pattern_background_run` check, below.
     if (source_id == uint8_t(MotionSource::PATTERN)) return slopsync::SourceLossPolicy::Continue;
     return slopsync::SourceLossPolicy::Stop;
 }
 
 void SlopDriveHubDelegate::onDeadmanStop(uint8_t source_id) {
     (void)source_id;
-    // §11.3: STOP MOTION NOW, via the same hard-stop path WS_OP_HALT uses.
+    // VESTIGIAL as of RFC-045 (Phase D): the hub library no longer calls this
+    // — a deadman fire never forces a stop for any source class (§11.3). Kept
+    // only because HubDelegate's interface is frozen-additive.
     JsonDocument in;
     JsonDocument out;
     _webui.handleCommand(WS_OP_HALT, in, out);
-    SLOGW("slopsync", "deadman stop on source %u — motion halted", source_id);
+    SLOGW("slopsync", "onDeadmanStop fired (unexpected post-RFC-045) on source %u — motion halted", source_id);
+}
+
+void SlopDriveHubDelegate::onSourceOwnership(uint8_t source_id, uint32_t owner_session, uint8_t reason) {
+    // RFC-045: the hub library only ever RELEASES here (latches nothing) — see
+    // hub_impl.hpp's releaseSessionSources(). `owner_session == 0` is a
+    // release; anything else (acquire/takeover) needs no action from THIS
+    // device — the arbiter already has the intent/stream that caused it.
+    if (owner_session != 0) return;
+    if (source_id != uint8_t(MotionSource::PATTERN)) return;  // command-driven sources settle on their own (§9.6)
+    if (_state.pattern_background_run) return;  // RFC-045/048: policy says keep going, unattended
+
+    // false (default): stop the generator. Fires identically whether the
+    // owning session went STALE (RFC-042) or was genuinely torn down —
+    // `reason` (3 deadman-release / 4 session-loss-release) is not consulted,
+    // matching the library's own "reason-agnostic release" doctrine.
+    if (_presetPatternEngine != nullptr && _presetPatternEngine->isRunning()) {
+        _presetPatternEngine->stop();
+        SLOGI("slopsync", "pattern generator stopped: owning session released source %u (reason %u), "
+                          "background_run is off",
+             source_id, reason);
+    }
 }
 
 void SlopDriveHubDelegate::onSessionJoined(uint32_t session_id) {
@@ -995,9 +1039,9 @@ uint8_t SlopDriveHubDelegate::effectiveCurveFamily(uint16_t channel_id, uint8_t 
         case 1:  return slopsync::curve_families::c1_cubic;    // ForceC1
         case 2:  return slopsync::curve_families::c2_quintic;  // ForceC2
         default:
-            // FollowClient honours what it can RENDER. No step renderer
+            // FollowClient honors what it can RENDER. No step renderer
             // exists (SPEC §18): the engine plans a step declaration as a
-            // quintic, so the echo says quintic — claiming "step honoured"
+            // quintic, so the echo says quintic — claiming "step honored"
             // would be the exact lie the effective-family echo exists to kill.
             return (requested == slopsync::curve_families::step)
                        ? slopsync::curve_families::c2_quintic
@@ -1121,6 +1165,29 @@ void SlopSyncHubService::init() {
     // finally has an answer a client can get without HTTP.
     _hub.setIdentity("slopdrive-32", FIRMWARE_VERSION, "");
 
+    // RFC-048: the hub's DURABLE cross-boot identity (WELCOME identity key 5,
+    // also carried by DISCOVER_REPLY, §13.8) — generated ONCE with the
+    // hardware RNG and persisted in NVS; every later boot just reads it back.
+    // Blocking NVS I/O here is the CLAUDE.md §2 boot-sequence exception (this
+    // runs once, before the hub task exists), same as checkQuickBootPairingGesture().
+    {
+        Preferences prefs;
+        if (prefs.begin("slopsync", false)) {
+            uint64_t id = prefs.getULong64("hubid", 0);
+            if (id == 0) {
+                // esp_random() x2: a single call only yields 32 bits.
+                id = (uint64_t(esp_random()) << 32) | uint64_t(esp_random());
+                if (id == 0) id = 1;  // astronomically unlikely, but 0 means "unset" — never persist it
+                prefs.putULong64("hubid", id);
+                SLOGI("slopsync", "hub_instance_id generated: %016llX", (unsigned long long)id);
+            }
+            prefs.end();
+            _hub.setHubInstanceId(id);
+        } else {
+            SLOGW("slopsync", "hub_instance_id: NVS unavailable — WELCOME/DISCOVER_REPLY omit it this boot");
+        }
+    }
+
     // RFC-021 pattern-preset store (M5): load/migrate before binding, same
     // ordering reason as pairing above — the delegate must never see an
     // instant where it's bound to a store the boot-time migration hasn't run
@@ -1140,6 +1207,20 @@ void SlopSyncHubService::init() {
     _hub.setWallClockSeconds(0);
 
     _port.begin(&_hub);
+
+#if defined(BLE_ENABLED)
+    // RFC-043 (Phase E): the BLE GATT ITransport + advertising. "SD32" is the
+    // shortened name the legacy ≤31-byte advertising budget can afford
+    // (§13.4); the full "SlopDrive-32" name rides the scan response.
+    _blePort.begin(&_hub, "SlopDrive-32", "SD32");
+#endif
+
+    // RFC-046 (Phase E): the UDP discovery responder — the WS-side discovery
+    // path for a LAN client without BLE (§13.8). Started after the WS port so
+    // ws_port below is meaningful the instant the first probe can arrive;
+    // hub_instance_id was resolved just above.
+    _udpDiscovery.begin("slopdrive-32", _hub.hubInstanceId(), SLOPSYNC_WS_PORT, FIRMWARE_VERSION,
+                         _hub.catalogEtag());
 
     // RFC-017: arm the log bridge now — from here on every SlopLog line is also
     // an in-band 0x0008 EVENT. Deliberately AFTER the boot narration and
@@ -1186,9 +1267,10 @@ void SlopSyncHubService::init() {
         //
         // 8 KB is therefore roughly 2x headroom, and it is deliberate rather
         // than generous: this project has had TWO stack incidents (a ~9 KB
-        // `*this = T{}` temporary that blew an 8 KB task on every client
-        // connect, and a 320 KiB by-value catalog it narrowly avoided), and a
-        // guessed-tight crypto stack that overflows only on the rare code path
+        // whole-object-reassignment reset temporary that blew an 8 KB task on
+        // every client connect -- see hub-is-single-task memory / CLAUDE.md §8
+        // field bug #1 -- and a 320 KiB by-value catalog it narrowly avoided),
+        // and a guessed-tight crypto stack that overflows only on the rare code path
         // where the scalar has an unusual bit pattern is exactly the kind of bug
         // this codebase should not ship. It is 8 KB of internal RAM on a part
         // where the WHOLE SlopSync service was moved to PSRAM to protect the
@@ -1228,6 +1310,10 @@ void SlopSyncHubService::taskLoop() {
         if (_state.ota_active.load(std::memory_order_relaxed)) continue;
 
         _port.loop();                 // service WS: accept/read/heartbeat/stall-sweep
+#if defined(BLE_ENABLED)
+        _blePort.loop();              // service BLE: deferred attach/detach (TRAPS T5)
+#endif
+        _udpDiscovery.poll();         // RFC-046: drain + answer pending DISCOVER_PROBEs
         _hub.update(_clock.nowUs());  // pump every session: frames, pacing, deadman (fires onStreamBundle)
         drainMotionStream();          // pop due 0x0084 pacing-ring entries -> Core-1 sampler queue
         syncSafety();
@@ -1459,7 +1545,7 @@ void SlopSyncHubService::drainMotionStream() {
     const uint64_t now64 = uint64_t(esp_timer_get_time());
 
     while (_pacingRing.popDue(now64, entry)) {
-        // ---- Gates (mirror main.cpp's buttplugLinearCmd early-outs) --------
+        // ---- Gates: standard motion-command early-outs ----------------------
         if (!_state.homed) {
             _state.sm_sync_dropped = _state.sm_sync_dropped + 1;
             continue;
@@ -1470,8 +1556,8 @@ void SlopSyncHubService::drainMotionStream() {
             continue;
         }
 
-        // ---- Sampler gating stamps (mirror buttplugLinearCmd, main.cpp
-        //      ~176-249) — without these the Core-1 sampler never drives. ----
+        // ---- Sampler gating stamps -------------------------------------------
+        // Without these the Core-1 sampler never drives.
         const uint32_t now = millis();
 
         // New-stream soft start — stamp resume so safeSpeedCap eases the
@@ -1480,8 +1566,8 @@ void SlopSyncHubService::drainMotionStream() {
             _state.resume_start_ms = now;
         }
 
-        // Cadence measurement (EMA), same 0.7/0.3 filter + <1000 ms gap
-        // window buttplugLinearCmd uses, feeding the same UI rate readout.
+        // Cadence measurement (EMA), 0.7/0.3 filter + <1000 ms gap window,
+        // feeding the UI rate readout.
         if (_state.last_cmd_ms != 0) {
             const uint32_t gap = now - _state.last_cmd_ms;
             if (gap > 0 && gap < 1000) {
@@ -1501,6 +1587,14 @@ void SlopSyncHubService::drainMotionStream() {
             _state.last_intiface_move_ms = now;
             _syncPrevTarget = entry.target;
         }
+
+        // Pre-planning demand telemetry (0x0080 raw_10um): the window-mapped
+        // mm this entry's normalized target represents, one stage upstream of
+        // commanded_target_mm (still-normalized Command.target, planned by
+        // the engine below). Same window bounds pumpConfigGeneration snapshots
+        // (_state.config.min/max_position_mm) — mirrors MachineSim::normToMm.
+        _state.commanded_raw_mm = _state.config.min_position_mm +
+            entry.target * (_state.config.max_position_mm - _state.config.min_position_mm);
 
         // Both stream channels land here; the ingress decode already resolved
         // has_end_vel (0x0084: vel≠0; 0x0085: sentinel) and has_duration/
@@ -1573,7 +1667,7 @@ void SlopSyncHubService::publishTelemetry() {
         uint16_t tgt10 = clampU16(_state.commanded_target_mm * 100.0f);
         // The PRE-PLANNING demand: what the controlling input asked for, mapped
         // into the stroke window, one stage upstream of commanded_target_mm.
-        // Written by buttplugLinearCmd (main.cpp) on the TCode/stream path.
+        // Stamped by drainMotionStream() for the SlopSync motion-stream path.
         uint16_t raw10 = clampU16(_state.commanded_raw_mm * 100.0f);
         int16_t spd10 = clampI16(_state.live_speed_mm_s.load(std::memory_order_relaxed) * 10.0f);
         uint8_t flags = 0;
@@ -1670,7 +1764,7 @@ void SlopSyncHubService::publishTelemetry() {
         // only way in now; the hub listens on WS and BLE by default), and
         // `blend_mode` was retired outright (item 2 — see the field comment on
         // SlopSyncCatalog.h's `blend_mode_reserved`). If a future mode CAN be
-        // refused, drop its bit — a UI greying a control the machine would
+        // refused, drop its bit — a UI graying a control the machine would
         // accept is the same lie as one offering a control it would refuse.
         const uint8_t mask = 0x03u;           // bits 0..1 = stream_speed_mode, overshoot_clamp
         std::array<std::byte, 4> buf{};
@@ -1699,8 +1793,8 @@ void SlopSyncHubService::publishTelemetry() {
         slopsync::putF32(l.subspan(0, 4),  _state.sm_tune_jmax_ovr);
         slopsync::putF32(l.subspan(4, 4),  _state.sm_tune_vmax_ovr);
         slopsync::putF32(l.subspan(8, 4),  _state.sm_tune_amax_ovr);
-        slopsync::putU8 (l.subspan(12, 1), _state.sm_tune_centring ? 1u : 0u);
-        slopsync::putF32(l.subspan(13, 4), _state.sm_tune_centring_gain);
+        slopsync::putU8 (l.subspan(12, 1), _state.sm_tune_centering ? 1u : 0u);
+        slopsync::putF32(l.subspan(13, 4), _state.sm_tune_centering_gain);
         slopsync::putU8 (l.subspan(17, 1), 0x1Fu);   // all 5 always settable
         if (!_smLimEverSent || lim != _lastSmLim) {
             _smLimEverSent = true; _lastSmLim = lim;
@@ -1752,11 +1846,16 @@ void SlopSyncHubService::publishTelemetry() {
         // GENUINELY dynamic and derived from the delegate's OWN refusals, not
         // from a guess: applyIntent(pattern_cmd) returns ESTOP_ACTIVE while the
         // latch is set and NOT_HOMED before homing, so in either state none of
-        // the six is settable and every bit drops together. Grey, never hide.
-        const uint8_t mask = (_state.estop_latched || !_state.homed) ? 0x00 : 0x3F;
+        // the six is settable and every bit drops together. Gray, never hide.
+        // Bit 6 (background_run) is UNCONDITIONALLY set: it is a standing
+        // policy control, not a live motion command, so it is never gated by
+        // homed/estop the way bits 0-5 are (SlopSyncCatalog.h's enabled_mask
+        // comment).
+        const uint8_t mask = ((_state.estop_latched || !_state.homed) ? 0x00 : 0x3F) | 0x40;
+        bool backgroundRun = _state.pattern_background_run;
         bool changed = running != _patRunning || idx != _patIdx || speed != _patSpeed ||
                        depth != _patDepth || stroke != _patStroke || sensation != _patSensation ||
-                       mask != _patMask;
+                       mask != _patMask || backgroundRun != _patBackgroundRun;
         if (changed) {
             _lastPatternMs = now;
             _patRunning = running;
@@ -1766,7 +1865,11 @@ void SlopSyncHubService::publishTelemetry() {
             _patStroke = stroke;
             _patSensation = sensation;
             _patMask = mask;
-            std::array<std::byte, 19> buf{};
+            _patBackgroundRun = backgroundRun;
+            // Phase D (RFC-045/048): background_run APPENDED at offset 19 (19
+            // -> 20 B) — bytes 0..18 keep their offsets, per the catalog's own
+            // append-only comment.
+            std::array<std::byte, 20> buf{};
             std::span<std::byte> s(buf);
             slopsync::putU8(s.subspan(0, 1), running ? 1 : 0);
             slopsync::putU8(s.subspan(1, 1), idx);
@@ -1775,6 +1878,7 @@ void SlopSyncHubService::publishTelemetry() {
             slopsync::putF32(s.subspan(10, 4), stroke);
             slopsync::putF32(s.subspan(14, 4), sensation);
             slopsync::putU8(s.subspan(18, 1), mask);
+            slopsync::putU8(s.subspan(19, 1), backgroundRun ? 1 : 0);
             _hub.publishState(ch::pattern_state, s);
         }
     }
@@ -1810,7 +1914,9 @@ void SlopSyncHubService::publishTelemetry() {
             _hub.publishState(ch::pattern_advanced, b);
         }
 
-        // Ascending BaseId order == ascending channel id order (0x008F..0x0094).
+        // Indexed by advpat::BaseId, NOT by ascending channel id (Phase C4 put
+        // the six modifier lanes in member order speedin/out, accelin/out,
+        // depth1/2 — see the ch:: namespace comment on these constants).
         static constexpr uint16_t kModChannels[kApBaseCount] = {
             ch::pattern_adv_mod_depth1, ch::pattern_adv_mod_depth2, ch::pattern_adv_mod_speedin,
             ch::pattern_adv_mod_speedout, ch::pattern_adv_mod_accelin, ch::pattern_adv_mod_accelout,
@@ -1976,6 +2082,7 @@ void SlopSyncHubService::publishTelemetry() {
 
         persistPairingIfChanged();
         pumpPresencePairingWindow(now);  // RFC-027(c): streak reset + SlopGlow mirror
+        pumpEndpointAndRadios(now);      // RFC-046 (Phase E): WELCOME endpoint + BLE/UDP radios
         persistPresetsIfChanged();       // RFC-021 pattern-preset store, write-on-change
         publishPresetRoster();           // 0x0096, on-change (generation-diffed internally)
         // M5c: coalesced tuning persist. 0x0105 only FLAGS a change; the write
@@ -2002,6 +2109,14 @@ void SlopSyncHubService::publishTelemetry() {
             _webui.handleCommand(WS_OP_SAVE, in, out);
             SLOGI("slopsync", "max_rail persisted to NVS");
         }
+        // RFC-045/048 (Phase D): source.background_run, same coalesced-persist
+        // contract as _maxRailDirty above.
+        if (_delegate._patternBackgroundRunDirty) {
+            _delegate._patternBackgroundRunDirty = false;
+            JsonDocument in, out;
+            _webui.handleCommand(WS_OP_SAVE, in, out);
+            SLOGI("slopsync", "pattern background_run persisted to NVS");
+        }
         // Item 3 (fw 2.1.76): persist the freshly-measured stroke on EVERY
         // successful home, not just whenever the operator happens to hit
         // Save next. motorTask (Core 1) raises this flag the instant a
@@ -2026,11 +2141,6 @@ void SlopSyncHubService::publishTelemetry() {
 // where slopmotion runs), so main.cpp's sampler forwards each edge into the
 // SPSC ring in SystemState and this is the consumer half.
 //
-// This is a ground-truth REPAIR: the WebUI's anomaly panel currently renders
-// gauges fed by the superseded MotionInterpolator's ring, which nothing writes
-// any more, so it displays dead numbers today. This channel is the live feed it
-// gets rebuilt against.
-//
 // BOUNDED PER TICK. A pathological replan burst could otherwise turn one 5 ms
 // tick into dozens of encodes + fan-outs on the task that also pumps the WS
 // port and the deadman; the ring's own drop counter (never silent) covers the
@@ -2048,7 +2158,7 @@ void SlopSyncHubService::publishAnomalies() {
         ev.has_body = true;
         ev.body_count = 0;
         // ...and the SAME value again in the body, where the catalog's option
-        // labels can name it. The catalog has no vocabulary for labelling
+        // labels can name it. The catalog has no vocabulary for labeling
         // event kinds; `options` on a schema field is the one registered
         // mechanism that turns a number into a word, so this is what lets a
         // generic client print "waveform_scaled" instead of "6".
@@ -2139,6 +2249,44 @@ void SlopSyncHubService::pumpPresencePairingWindow(uint32_t nowMs) {
         slopglowEngine().set(slopglow::GlowState::Pairing, open);
         if (!open) SLOGI("slopsync", "pairing: presence window closed");
     }
+}
+
+// ============================================================================
+// RFC-046 (Phase E) — the hub's own endpoint (WELCOME keys 46/47) and the
+// live-changing half of the BLE-advertising / UDP-discovery flags byte.
+// Runs at 1 Hz on the hub task; every downstream call here is diff-gated
+// against its own last-published state, so a quiet second (nothing changed)
+// costs a WiFi.status() call and a couple of bool compares — no radio touch.
+// ============================================================================
+void SlopSyncHubService::pumpEndpointAndRadios(uint32_t /*nowMs*/) {
+    const bool wifiUp = (WiFi.status() == WL_CONNECTED);
+
+    // §6.3: "0 means absent" for BOTH keys — Hub::setEndpoint already omits
+    // them from the wire at 0 (see welcome.hpp), so WiFi being down simply
+    // means every session's next WELCOME-shaped message stops offering an
+    // endpoint, which is the honest answer (Ground Truth doctrine).
+    uint16_t wsPort = 0;
+    uint32_t ipv4 = 0;
+    if (wifiUp) {
+        wsPort = uint16_t(SLOPSYNC_WS_PORT);
+        // Packed big-endian per registry.yaml's own worked example
+        // (192.168.1.229 = 0xC0A801E5) — NOT IPAddress's raw in-memory byte
+        // order, which this codebase does not rely on matching.
+        const IPAddress ip = WiFi.localIP();
+        ipv4 = (uint32_t(ip[0]) << 24) | (uint32_t(ip[1]) << 16) | (uint32_t(ip[2]) << 8) | uint32_t(ip[3]);
+    }
+    _hub.setEndpoint(wsPort, ipv4);
+
+    // §13.4/§13.6/§13.8: the same "is an association window open right now"
+    // signal feeds the BLE advertising flag, the UDP DISCOVER_REPLY flag, and
+    // (already) WELCOME's trust.pairing_modes — one source of truth.
+    const bool pairingOpen = _hub.pairingWindowOpen();
+
+#if defined(BLE_ENABLED)
+    _blePort.updateAdvertising(pairingOpen, wifiUp);
+#endif
+    _udpDiscovery.setPairingWindowOpen(pairingOpen);
+    _udpDiscovery.setWsAvailable(wifiUp);
 }
 
 // ============================================================================

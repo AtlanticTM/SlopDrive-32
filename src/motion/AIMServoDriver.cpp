@@ -795,18 +795,13 @@ void AIMServoDriver::streamTo(float pos_mm, float speed_mm_s) {
 }
 
 // ============================================================================
-// streamToSteps() — pre-planned native-step dispatch from motionConsumerTask
+// streamToSteps() — pre-planned native-step dispatch
 // ============================================================================
 //
-// Called exclusively from Core 1 (motionConsumerTask). Speed and accel arrive
-// already converted to steps/s and steps/s² by the consumer — no unit math
-// here, just arm the watchdog and fire straight to FAS.
-//
-// This is the clean path: the consumer owns all the kinematic math, this
-// function owns the hardware dispatch. Single responsibility, no cross-core
-// touching. The shaft gets told exactly what to do and does it. Obedient,
-// precise, and absolutely relentless. Like a good hole that takes every
-// command without question and holds position until the next one. :3
+// Called exclusively from Core 1, via MotionArbiter::submit() (motorTask) or
+// ::submitStreamSample() (streamSamplerTask). Speed and accel arrive already
+// converted to steps/s and steps/s² by the arbiter — no unit math here, just
+// arm the watchdog and fire straight to FAS.
 void AIMServoDriver::streamToSteps(int32_t target_steps,
                                         uint32_t speed_steps_s,
                                         uint32_t accel_steps_s2) {

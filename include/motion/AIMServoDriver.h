@@ -51,7 +51,7 @@ class FastAccelStepper;
 // can't take anymore yippie! :3
 //
 // _blend_mode below (2026-07-27, operator ruling — item 2) is VESTIGIAL: this
-// comment used to say behaviour branched "per the selectable _blend_mode", but
+// comment used to say behavior branched "per the selectable _blend_mode", but
 // neither streamTo() nor streamToSteps() has read that field for a while — FAS
 // retargeting handles every case uniformly now, which is exactly what let
 // MotionArbiter::setBlendMode() alias every mode to "allow" already (see
@@ -95,10 +95,9 @@ protected:
     bool moveTo(float pos_mm) override;
     void streamTo(float pos_mm, float speed_mm_s) override;
 
-    // Pre-planned native-step dispatch — called from Core 1 motionConsumerTask.
+    // Pre-planned native-step dispatch — called from Core 1 via MotionArbiter.
     // Speed and accel arrive already converted to steps/s and steps/s².
-    // Fires straight to FAS — no unit math here. The shaft gets told exactly
-    // where to go and it goes there, no questions asked, no hesitation. :3
+    // Fires straight to FAS — no unit math here.
     void streamToSteps(int32_t target_steps,
                        uint32_t speed_steps_s,
                        uint32_t accel_steps_s2) override;
@@ -180,7 +179,7 @@ private:
 
     // INA228 current sensor — the machine's sense of feel. Sensorless homing
     // reads this to know when the carriage has buried itself against the hard
-    // stop (current spikes as it strains). Owned by the driver, initialised in
+    // stop (current spikes as it strains). Owned by the driver, initialized in
     // init() after the caller has brought up the Wire bus. :3
     CurrentSensor _current;
 

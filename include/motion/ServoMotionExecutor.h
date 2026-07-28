@@ -4,7 +4,6 @@
 
 #include <cstdint>
 #include "freertos/FreeRTOS.h"
-#include "MotionProfile.h"
 
 class ServoModbus;
 
@@ -12,24 +11,13 @@ class ServoModbus;
 // IServoExecutor — pluggable motion-execution strategy for ModbusServoDriver
 // ============================================================================
 //
-// The executor is the "ISR" for Modbus-mode motion (plan.md "User's
-// architectural decisions" #1): ModbusServoDriver computes ONE
-// TrapezoidProfile per intent and hands it over via adoptProfile(); the
-// executor's own onTick() merely SAMPLES that precomputed plan and streams
-// the result — it never re-plans, never integrates on a clock. Today's only
-// implementation (StreamedSetpointExecutor) streams one 0x7B absolute-
-// position setpoint per tick; a future DrivePlannerExecutor (write the
-// drive's own 0x02 speed/0x03 accel once + a single target) slots into this
-// same interface without touching ModbusServoDriver — NOT built this phase.
+// The executor is the "ISR" for Modbus-mode motion. Current design (see
+// StreamedSetpointExecutor below): callers move a target via track(), and
+// onTick() integrates its own (pos, vel, acc) state toward that target every
+// tick under vmax/amax/jmax, streaming FC 0x10 incremental deltas.
 class IServoExecutor {
 public:
     virtual ~IServoExecutor() = default;
-
-    // Swap in a freshly-planned profile. Thread-safe, short critical section,
-    // no allocation (plan.md: the 1kHz stream-sampler and the 2ms
-    // servoBusTask tick are both Core 1, different tasks — a profile swap
-    // must never block either one). :3
-    virtual void adoptProfile(const TrapezoidProfile& profile) = 0;
 
     // Advance the executor by one tick: sample the active profile (or hold
     // the last sample if frozen/done), map to wire units, and stream a
@@ -52,37 +40,35 @@ public:
     // Latch the current sample as a hold position and invalidate the active
     // profile. Used by hardStop()/stop()/emergencyStop() and the bus-health
     // watchdog — after this call the executor keeps streaming the SAME
-    // position (keep-alive cadence) until a fresh adoptProfile(). :3
+    // position (keep-alive cadence) until a fresh track() target. :3
     virtual void freeze() = 0;
 
     // Establish the FIRST motionless sample, in the driver's native cmd-frame
-    // (home=0, front=negative — same units/sign as adoptProfile()'s
-    // p0/target, NOT raw wire counts). Nothing is EVER sent to the bus before
+    // (home=0, front=negative — same units/sign as track()'s target, NOT raw
+    // wire counts). Nothing is EVER sent to the bus before
     // this runs — the hard safety requirement behind "first bench step: send
     // current encoder position as setpoint, observe zero motion" (plan.md). :3
     virtual void seed(float cmd_pos) = 0;
 };
 
 // ============================================================================
-// StreamedSetpointExecutor — 0x7B absolute-position setpoint streaming
+// StreamedSetpointExecutor — jerk-limited target tracker, FC 0x10 delta stream
 // ============================================================================
 //
-// Every AIM_SP_PERIOD_MS (10ms, config_api.h) while a profile is actively
-// moving, samples it and sends ONE setpoint. When idle (done or frozen) it
-// drops to a AIM_SP_KEEPALIVE_MS (250ms) cadence, re-sending the SAME held
-// position — this is both "the drive holds last setpoint if we stop talking"
-// reassurance and a passive bus-liveness probe (plan.md "Watchdog").
+// track() moves the target; onTick() (every servoBusTask tick, 2ms) integrates
+// this executor's own (pos, vel, acc) toward it under vmax/amax/jmax and
+// streams the result as FC 0x10 incremental position deltas via
+// ServoModbus::sendPositionDelta(). Idle (done or frozen) drops to a
+// keep-alive cadence, re-sending a zero delta — both "the drive holds last
+// commanded position if we stop talking" and a passive bus-liveness probe.
 //
 // Deadline-scheduled, not a fixed-phase timer: onTick() only advances its
-// "last sent" mark on an ACTUAL send. If the bus is mid-poll/write when a
-// setpoint is due (sendSetpoint() returns false — bus not IDLE), the very
-// next 2ms servoBusTask tick retries; the schedule never drifts forward past
-// its true period because of a busy bus. :3
+// "last sent" mark on an ACTUAL send, so a busy bus never drifts the schedule
+// forward past its true period.
 class StreamedSetpointExecutor : public IServoExecutor {
 public:
     explicit StreamedSetpointExecutor(ServoModbus& bus);
 
-    void adoptProfile(const TrapezoidProfile& profile) override;
     void onTick(int64_t now_us) override;
 
     float commandedPos() const override;

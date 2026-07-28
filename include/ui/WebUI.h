@@ -10,11 +10,7 @@
 class MotorDriver;
 class RangeMapper;
 class PatternEngine;
-class TransportManager;
 class MotionArbiter;
-
-class SerialTransport;
-class BleTransport;
 
 #if defined(FEATURE_RS485_MODBUS)
 class ServoModbus;
@@ -76,11 +72,7 @@ public:
     WebUI(SystemState&        state,
           MotorDriver&        motor,
           RangeMapper&        mapper,
-          PatternEngine&      patternEngine,
-          TransportManager&   transportMgr,
-
-          SerialTransport&    serialTransport,
-          BleTransport&       bleTransport);
+          PatternEngine&      patternEngine);
 
     ~WebUI();
 
@@ -142,8 +134,8 @@ public:
     // Every apply path bumps _state.cfg_gen via _bumpGen() — called at the end
     // of each mutation.  Returns the post-apply response JSON doc.
 
-    /// Apply a settings change (window, speed, accel, blend, auto_dur, intiface_compat, expert, default_range).
-    /// payload_in: {range_min?, range_max?, max_speed?, accel?, blend_mode?, no_persist?, auto_duration?, intiface_compat?, expert_mode?, default_range_min?, default_range_max?}
+    /// Apply a settings change (window, speed, accel, blend, auto_dur, expert, default_range).
+    /// payload_in: {range_min?, range_max?, max_speed?, accel?, blend_mode?, no_persist?, auto_duration?, expert_mode?, default_range_min?, default_range_max?}
     bool applySettings(JsonDocument& payload_in, JsonDocument& payload_out);
 
     /// Apply a manual move command.  payload_in: {position, stream?, bypass_limits?, speed?}
@@ -151,9 +143,6 @@ public:
 
     /// Apply a pattern/generator config change.  payload_in: {speed?, depth?, stroke?, sensation?, pattern?, rate_tick?, running?}
     bool applyPattern(JsonDocument& payload_in, JsonDocument& payload_out);
-
-    /// Apply a transport mode change.  payload_in: {mode}
-    bool applyMode(JsonDocument& payload_in, JsonDocument& payload_out);
 
     /// Apply driver config change.  payload_in: {run_current?, hold_current?, stealthchop?, tpwm_thrs?, toff?, tbl?, hstart?, hend?, reset?, save?}
     bool applyDriverConfig(JsonDocument& payload_in, JsonDocument& payload_out);
@@ -164,10 +153,6 @@ private:
     MotorDriver&        _motor;
     RangeMapper&        _mapper;
     PatternEngine&      _patternEngine;
-    TransportManager&   _transportMgr;
-
-    SerialTransport&    _serialTransport;
-    BleTransport&       _bleTransport;
 
     // ---- Owned instance (pointer — allocated in constructor, freed in dtor) --
     SlopHttpServer*     _httpServer = nullptr;
@@ -208,14 +193,7 @@ private:
     void handleRoot();
     void handleApiStatus();
     void handleApiCapabilities();
-    void handleApiClearFault();
     void handleApiSettings();
-    void handleApiMove();
-    void handleApiHome();
-    void handleApiStop();
-    void handleApiPause();
-    void handleApiHalt();
-    void handleApiOverride();
     // AIM servo drive over RS485 Modbus — GET: telemetry + config-register
     // mirror + runtime geometry; POST ops: scan / live-tune / program (full
     // gold-motor sequence, structural regs, forces re-home) / raw / save.
@@ -228,7 +206,6 @@ private:
     // localStorage and can import/export for sharing.
     void handleApiPatternPresets();
     void handleApiLog();
-    void handleApiMode();
     // SlopMotion live-tuning rough-in (GET state+bench / POST knobs). No
     // persistence, no UI card yet — curl-driven until the WebUI refactor.
     void handleApiSlopMotion();

@@ -47,7 +47,7 @@ void OtaService::begin(const char* hostname, const char* password) {
 
     ArduinoOTA.onError([this](ota_error_t error) {
         SLOGE("ota", "ArduinoOTA error [%u]", (unsigned)error);
-        // Failed OTA NEVER resumes motion by itself — telemetry back, motion held.
+        // Failed OTA NEVER resumes motion by itself — motion stays held.
         finishOta(false, "ArduinoOTA");
     });
 
@@ -80,7 +80,7 @@ bool OtaService::prepareForOta(const char* source) {
         return false;
     }
 
-    SLOGI("ota", "start (%s) — stopping motion + suspending telemetry BEFORE flash write", source);
+    SLOGI("ota", "start (%s) — stopping motion BEFORE flash write", source);
 
     // (1) Refuse/stop all motion first. Stop the pattern engine, hard-stop the
     //     motor via the existing stop semantics, and latch the e-stop flag so
@@ -110,8 +110,8 @@ bool OtaService::prepareForOta(const char* source) {
 }
 
 // ----------------------------------------------------------------------------
-// finishOta() — resume telemetry on failure; success leaves the machine gated
-// (motion held, never auto-resumed) and reboots.
+// finishOta() — clear the in-flight flag on failure (motion stays held, never
+// auto-resumed); success leaves the machine gated through the reboot.
 // ----------------------------------------------------------------------------
 
 void OtaService::finishOta(bool success, const char* what) {
@@ -122,7 +122,7 @@ void OtaService::finishOta(bool success, const char* what) {
         return;
     }
 
-    SLOGE("ota", "%s FAILED — old image kept, telemetry resumed, MOTION STAYS STOPPED", what);
+    SLOGE("ota", "%s FAILED — old image kept, MOTION STAYS STOPPED", what);
 
     _state.ota_active.store(false);
     _active.store(false);

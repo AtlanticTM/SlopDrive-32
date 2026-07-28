@@ -9,7 +9,7 @@
 //   (default)            SlopHttpServer : IdleGuardWebServer : WebServer
 //                        The synchronous Arduino core WebServer plus the
 //                        speculative-socket idle guard. Byte-for-byte the
-//                        behaviour the device has shipped with. Envs: sd32,
+//                        behavior the device has shipped with. Envs: sd32,
 //                        sd32-ota, s3_main.
 //
 //   -DUSE_PSYCHIC_HTTP   SlopHttpServer wraps PsychicHttpServer (hoeken's
@@ -24,7 +24,7 @@
 //
 // WHY THIS SHAPE AND NOT TWO COPIES OF THE HANDLERS:
 //   src/ui/WebUI.cpp is ~2200 lines holding ~30 route handlers and a large
-//   amount of hard-won behaviour. Duplicating it per backend would guarantee
+//   amount of hard-won behavior. Duplicating it per backend would guarantee
 //   the two copies drift. So the handler BODIES are untouched: they keep
 //   calling _httpServer->send()/arg()/method()/sendHeader()/streamFile(), and
 //   only this file changes what those calls mean. The Psychic side is a thin

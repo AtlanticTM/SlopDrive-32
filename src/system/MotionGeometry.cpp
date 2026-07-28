@@ -3,7 +3,7 @@
  *
  * The AIM drive's steps/rev is an electronic-gear register (0x0B) that the
  * Configure pane can reprogram over RS485 Modbus. The firmware's step<->mm
- * math has to follow it EXACTLY or every commanded millimetre is a lie, so
+ * math has to follow it EXACTLY or every commanded millimeter is a lie, so
  * the value lives here as runtime state:
  *
  *   - Seeded from NVS (namespace "servocfg", key "mspr") in setup(), default

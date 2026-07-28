@@ -47,13 +47,9 @@
 // Single portMUX_TYPE spinlock on dispatch — sub-microsecond float math,
 // microcritical. No heap alloc. No ISR contexts. FAS calls only from Core 1
 // (task-context, same core as FAS engine). For Core 0 callers: intent is
-// enqueued via a single-slot atomic deferral consumed by motionConsumerTask
-// (or FAS dispatch task) on Core 1. DECIDE: single-slot atomic deferral
-// (Core 0 sets intent, Core 1 consumer checks and applies). Justification:
-// avoids mutex contention on the FAS call path and keeps ALL FAS interaction
-// on Core 1. The single-slot design means a rapid burst of Core 0 submits
-// only keeps the latest intent — correct for TCode retarget semantics where
-// only the freshest command matters.
+// enqueued via submitDeferred() into a DEFER_QUEUE_DEPTH-slot FreeRTOS queue,
+// drained in full by processDeferred() on motorTask (Core 1) every tick —
+// every queued intent is planned in order, not just the latest.
 
 #include <cstdint>
 #include <freertos/FreeRTOS.h>
@@ -134,21 +130,20 @@ public:
     void submitDeferred(const MotionIntent& intent);
 
     // ---- Core 1 direct dispatch (called from Core 1 tasks only) ---------------
-    // PatternEngine, motionConsumerTask, and the deferred-intent consumer call
-    // this directly. Plans and dispatches to FAS immediately. All FAS
-    // interaction stays on Core 1.
-    // Returns the plan report for telemetry.
+    // PatternEngine and this class's own processDeferred() call this directly.
+    // Plans and dispatches to FAS immediately. All FAS interaction stays on
+    // Core 1. Returns the plan report for telemetry.
     PlanReport submit(const MotionIntent& intent);
 
     // ---- Core 1 deferred-intent consumer --------------------------------------
-    // Called periodically from the Core 1 motion task. Checks the atomic
-    // deferral slot and applies any pending intent from Core 0.
+    // Called periodically from motorTask (Core 1). Drains the defer queue in
+    // full, planning each intent via submit() in arrival order.
     void processDeferred();
 
-    // ---- Core 1 stream-sample fast path (MotionInterpolator sampler) ----------
-    // Called at ~1kHz by streamSamplerTask with a pre-planned point sampled from
-    // the MotionInterpolator's cubic. This is NOT the trapezoid planner — the
-    // interpolator already shaped the curve. This path only runs the safety
+    // ---- Core 1 stream-sample fast path (streamSamplerTask's Engine) ----------
+    // Called at ~1kHz by streamSamplerTask with a point sampled from its
+    // slopmotion::Engine (CLAUDE.md §7.6). This is NOT the trapezoid planner —
+    // the Engine already shaped the curve. This path only runs the safety
     // gates (estop/homed/paused/override), maps the normalized position into the
     // stroke window, enforces the hard physical step bounds, and feeds FAS
     // directly via streamToSteps(). Accel is the constant input ceiling (kept
@@ -203,10 +198,10 @@ private:
     // ---- Dispatch lock (microcritical — protects FAS calls on Core 1) ---------
     mutable portMUX_TYPE _dispatch_mux = portMUX_INITIALIZER_UNLOCKED;
 
-    // ---- Core 0 → Core 1 deferral queue (8 slots, non-blocking push) ---------
-    // Handles 333Hz streams: Core 0 pushes intents at 3ms intervals, Core 1
-    // drains the entire queue each loop tick. Drop-if-full — at >100Hz the
-    // latest intent always arrives within 1 queue depth. Created by init().
+    // ---- Core 0 → Core 1 deferral queue (DEFER_QUEUE_DEPTH slots, non-blocking
+    // push) — see DEFER_QUEUE_DEPTH below for the actual depth. Handles 333Hz
+    // streams: Core 0 pushes intents at 3ms intervals, Core 1 drains the entire
+    // queue each loop tick. Drop-if-full. Created by init().
     QueueHandle_t     _defer_queue = nullptr;
     static constexpr uint8_t DEFER_QUEUE_DEPTH = 16;
 
@@ -233,7 +228,7 @@ private:
 
     // ---- Gate evaluation ------------------------------------------------------
     // Returns true if the intent should proceed. MANUAL bypasses all gates
-    // except E-stop; stream/pattern sources honour homed/paused/override/window.
+    // except E-stop; stream/pattern sources honor homed/paused/override/window.
     bool _gatesPass(const MotionIntent& intent);
 
     // ---- Window clamping ------------------------------------------------------

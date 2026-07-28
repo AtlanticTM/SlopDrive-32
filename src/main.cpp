@@ -21,6 +21,7 @@
 #include <Wire.h>
 #include <new>              // placement new (SlopSync hub goes into PSRAM)
 #include "esp_heap_caps.h"
+#include "esp_system.h"     // esp_reset_reason() — boot-time crash/reboot diagnostics
 
 #include "config_api.h"
 
@@ -45,16 +46,10 @@
 #endif
 
 #include "MotionArbiter.h"
-#include "MotionInterpolator.h"     // InterpAnomaly type only (legacy 0x05 ring)
 #include <slopmotion/slopmotion.hpp>
 #include "PatternEngine.h"
-#include "OssmBleService.h"
 
-#include "TCodeParser.h"
-#include "SerialTransport.h"
-#include "BleTransport.h"
-#include "DongleTransport.h"
-#include "TransportManager.h"
+#include "WifiLink.h"
 #include "SlopSyncHubService.h"
 
 #include "WebUI.h"
@@ -114,11 +109,11 @@ static RangeMapper        mapper;
 static PatternEngine      patternEngine(g_state, mapper, motor);
 static MotionArbiter      arbiter(g_state, mapper, motor);
 
-// SlopMotion — Core-1-owned jerk-limited motion core (the MotionInterpolator
-// successor, CLAUDE.md §7.6). buttplugLinearCmd (Core 0) builds
-// slopmotion::Commands and hands them across via g_interp_queue;
-// streamSamplerTask (Core 1) plans them (quintic waveform / Ruckig chase +
-// guard) and samples the plan at ~1kHz into arbiter.submitStreamSample().
+// SlopMotion — Core-1-owned jerk-limited motion core (docs/canon doctrine
+// §SlopMotion). The SlopSync ingress (Core 0) builds slopmotion::Commands
+// and hands them across via g_interp_queue; streamSamplerTask (Core 1)
+// plans them (quintic waveform / Ruckig chase + guard) and samples the plan
+// at ~1kHz into arbiter.submitStreamSample().
 // ~3.4 KB object — plain BSS static is fine (measured on xtensa).
 static slopmotion::Engine g_slopmotion({}, 0.5f);
 static constexpr size_t   INTERP_QUEUE_DEPTH     = 16;
@@ -127,21 +122,9 @@ static QueueHandle_t      g_interp_queue         = nullptr;
 // yields the motor back to PatternEngine / manual moves.
 static constexpr uint32_t STREAM_IDLE_TIMEOUT_MS = 500;
 
-// v0.4 axis state — L0 ("Stroke") is ALWAYS registered.
-// Additional axes are registered conditionally when hardware pins exist.
-static TCodeAxisState     axisL0("Stroke", {AxisType::Linear, 0}, 0.5f);
+static WifiLink           wifiLink(g_state);
 
-static TCodeParser        tcodeParser;
-static SerialTransport    serialTransport(tcodeParser);
-static BleTransport       bleTransport(tcodeParser);
-static DongleTransport    dongleTransport(tcodeParser);
-static OssmBleService     ossmBleService(g_state, patternEngine, mapper);
-static TransportManager   transportMgr(g_state, tcodeParser,
-                                        serialTransport, bleTransport,
-                                        dongleTransport, ossmBleService);
-
-static WebUI webui(g_state, motor, mapper, patternEngine,
-                    transportMgr, serialTransport, bleTransport);
+static WebUI webui(g_state, motor, mapper, patternEngine);
 
 // SlopSync hub — the ecosystem sync plane (binary WS :SLOPSYNC_WS_PORT).
 // Lives in PSRAM: as a BSS static its ~100 KB reservation starved internal
@@ -164,145 +147,6 @@ static OtaService      otaService(g_state, arbiter, patternEngine);
 static EncoderValidator encoderValidator(servoModbus, motor);
 #endif
 
-
-
-// ============================================================================
-// Glue callbacks — D4: submit MotionIntent to arbiter (Core 0 → Core 1)
-// ============================================================================
-
-static void buttplugLinearCmd(float position, uint32_t duration_ms,
-                              float slope, bool hasSlope, bool hasDuration) {
-    if (!g_state.homed) return;
-    if (g_state.paused || g_state.manual_override) {
-        g_state.resume_start_ms = millis();
-        return;
-    }
-
-    // New-stream soft start — stamp resume so safeSpeedCap eases the first move
-    {
-        uint32_t now0 = millis();
-        if (g_state.last_intiface_ms == 0 ||
-            (now0 - g_state.last_intiface_ms) > 2000)
-            g_state.resume_start_ms = now0;
-    }
-
-    // Cadence measurement (Core 0 only) — EMA filter. The interpolator derives
-    // its own live-mode timing from segment arrival, but we still keep this for
-    // the WebUI rate readout and the auto-duration fallback below.
-    uint32_t now = millis();
-    if (g_state.last_cmd_ms != 0) {
-        uint32_t gap = now - g_state.last_cmd_ms;
-        if (gap > 0 && gap < 1000) {
-            if (g_state.measured_interval_ms <= 0.0f)
-                g_state.measured_interval_ms = (float)gap;
-            else
-                g_state.measured_interval_ms =
-                    0.7f * g_state.measured_interval_ms + 0.3f * (float)gap;
-        }
-    }
-    g_state.last_cmd_ms      = now;
-    g_state.last_intiface_ms = now;   // marks the stream active for the sampler
-
-    // Yield-on-MOTION stamp: only a packet that moves the commanded target
-    // counts as "the stream is driving". Keep-alive packets repeating the same
-    // position hold the sampler (recentPacket) but no longer suppress a
-    // user-started pattern indefinitely.
-    {
-        static float s_prev_stream_pos = -1.0f;
-        if (s_prev_stream_pos < 0.0f || fabsf(position - s_prev_stream_pos) > 0.003f) {
-            g_state.last_intiface_move_ms = now;
-            s_prev_stream_pos = position;
-        }
-    }
-
-    // Raw target telemetry (pre-planner) — mapped into the stroke window.
-    g_state.commanded_raw_mm = mapper.intensityToPosition(position);
-
-    // Build a POD slopmotion::Command and hand it to the Core-1 sampler. The
-    // engine owns ALL trajectory shaping (quintic waveform for timed points,
-    // Ruckig chase/guard otherwise); main.cpp only translates parser output.
-    //   target   : normalized 0..1 magnitude (engine window == TCode 0..1)
-    //   duration : I<ms> * 1000 (engine treats < 50 ms as a chase point)
-    //   end_vel  : wire G / 1000 → normalized units per SECOND (the engine
-    //              speaks physical velocity, not the raw MFP slope encoding)
-    slopmotion::Command cmd;
-    cmd.target       = position;
-    cmd.duration_us  = duration_ms * 1000UL;
-    cmd.end_vel      = slope / 1000.0f;
-    cmd.has_end_vel  = hasSlope;
-    cmd.has_duration = hasDuration;
-    // Live motion-command path: a full queue means the Core-1 sampler is
-    // stalled or overloaded and this command is LOST. Count it and log
-    // (rate-limited) — a silently-dropped TCode command is a motion glitch
-    // with no trace otherwise. :3
-    if (g_interp_queue && xQueueSend(g_interp_queue, &cmd, 0) != pdTRUE) {
-        static uint32_t interp_drops = 0;
-        interp_drops++;
-        SLOGW_EVERY_MS(2000, "sys", "SlopMotion queue FULL — %lu TCode command(s) dropped; sampler stalled?",
-                       (unsigned long)interp_drops);
-    }
-
-}
-
-static void buttplugStop() {
-    // DSTOP = stop moving now. Mark the stream idle so the Core-1 sampler stops
-    // feeding FAS and releases the motor, then force-stop FAS. hardStop() keeps
-    // homed + stream state — DSTOP is "stop moving," not "cut power forever."
-    g_state.last_intiface_ms      = 0;
-    g_state.last_intiface_move_ms = 0;
-    arbiter.hardStopMotion();
-}
-
-
-// ============================================================================
-// WIFI sideband command — set secondary credentials over USB serial
-// ============================================================================
-//
-// `WIFI <ssid> <password>` arrives here (un-tokenised tail) via the TCodeParser
-// WifiCmdCallback hook. This is the recovery path for a rig on an unknown
-// network: the operator plugs in USB, opens a serial monitor, types the creds,
-// and reboots — setupWiFi() then tries these NVS-stored creds as its second
-// stage. We split on the FIRST space: everything before is the SSID, the rest
-// (which may itself contain spaces) is the password. `WIFI CLEAR` wipes the
-// stored secondary creds. The reply goes back on the same serial hose. :3
-static void handleWifiCmd(const char* args) {
-    if (!args || args[0] == '\0') {
-        Serial.print("WIFI ERR empty\n");
-        return;
-    }
-
-    // `WIFI CLEAR` — wipe stored secondary creds.
-    if (strncasecmp(args, "CLEAR", 5) == 0 && (args[5] == '\0' || args[5] == ' ')) {
-        ConfigStore::clearWifiCreds(g_state);
-        Serial.print("WIFI OK cleared\n");
-        return;
-    }
-
-    // Split SSID (first token) from password (remainder after first space).
-    const char* sp = strchr(args, ' ');
-    if (!sp) {
-        Serial.print("WIFI ERR need <ssid> <password>\n");
-        return;
-    }
-    char ssid[33];
-    size_t ssid_len = (size_t)(sp - args);
-    if (ssid_len == 0 || ssid_len >= sizeof(ssid)) {
-        Serial.print("WIFI ERR ssid length\n");
-        return;
-    }
-    memcpy(ssid, args, ssid_len);
-    ssid[ssid_len] = '\0';
-
-    const char* pass = sp + 1;
-    while (*pass == ' ') pass++;   // skip extra spaces between ssid and pass
-    if (*pass == '\0') {
-        Serial.print("WIFI ERR empty password\n");
-        return;
-    }
-
-    ConfigStore::saveWifiCreds(g_state, ssid, pass);
-    Serial.printf("WIFI OK saved SSID='%s' — reboot to connect\n", ssid);
-}
 
 
 // ============================================================================
@@ -493,11 +337,11 @@ static void streamSamplerTask(void* /*param*/) {
                 case 2: smCfg.curve_policy = slopmotion::CurvePolicy::ForceC2;      break;
                 default: /* leave slopmotion::Config's own default in place */      break;
             }
-            // DC centring of a degraded band (slopmotion 0.5.0). The engine
+            // DC centering of a degraded band (slopmotion 0.5.0). The engine
             // clamps the gain itself; clamping on the POST side too just keeps
             // the /api/slopmotion echo honest about what Core 1 pushed.
-            smCfg.wave_centering      = g_state.sm_tune_centring;
-            smCfg.wave_centering_gain = g_state.sm_tune_centring_gain;
+            smCfg.wave_centering      = g_state.sm_tune_centering;
+            smCfg.wave_centering_gain = g_state.sm_tune_centering_gain;
             // RFC-008 handoff sanity guard (0 = off). The guard itself only
             // engages when the INGRESS supplied a one-segment lookahead
             // (SlopSyncHubService::drainMotionStream), so this knob is the
@@ -553,10 +397,8 @@ static void streamSamplerTask(void* /*param*/) {
             g_state.interp_active = false;
         }
 
-        // Drain the engine's anomaly ring. ROUGH-IN: counted + logged via
-        // SlopLog (kinds don't map onto the legacy InterpAnomaly wire codes,
-        // and a mislabeled anomaly feed is worse than a quiet one — the 0x05
-        // WS frame goes silent until the WebUI refactor plumbs the new kinds).
+        // Drain the engine's anomaly ring: count (lossless), log (throttled),
+        // and forward each edge to Core 0 for the SlopSync 0x0089 EVENT feed.
         {
             slopmotion::Anomaly ev;
             char nmbuf[8];
@@ -577,7 +419,7 @@ static void streamSamplerTask(void* /*param*/) {
                 // UNGATED by the ring's own name table on purpose: an unknown
                 // kind still deserves to reach a subscriber (the catalog's
                 // option labels stop at the last named kind, so a client shows
-                // the ordinal — the same self-identifying behaviour the log
+                // the ordinal — the same self-identifying behavior the log
                 // line's "?<n>" gives, rather than silence).
                 {
                     SystemState::SmAnomalyRec rec;
@@ -643,45 +485,12 @@ static void streamSamplerTask(void* /*param*/) {
     } while (0)
 static void commsTask(void* /*param*/) {
     uint32_t last_report_ms   = 0;
-    uint32_t last_frame_count = 0;
     while (true) {
-        TransportMode activeMode = g_state.getTransport();
-        // DIAG: commsTask is prio 2 (> httpTask prio 1) — a block here preempts
-        // and freezes the heartbeat too. Time the transport poll + wifi supervise.
-        if (activeMode == TransportMode::SER) {
-            TIME_STEP(serialTransport.poll(), "comms:serial.poll");
-        } else if (activeMode == TransportMode::DONGLE) {
-            TIME_STEP(dongleTransport.poll(), "comms:dongle.poll");
-        } else {
-        }
-
         uint32_t now = millis();
         if (now - last_report_ms >= 1000) {
-            uint32_t frames  = tcodeParser.rxFrameCount;
-            uint32_t per_sec = frames - last_frame_count;
-            last_frame_count = frames;
-            last_report_ms   = now;
-            g_state.measured_hz = (uint16_t)per_sec;
-            // Log on CHANGE, not on tick. This was an unconditional 1 Hz line
-            // printing the SAME "rx=50 frames/s" for the whole session — and
-            // measured_hz is already live telemetry the UI reads. What is
-            // actually worth a log line is the stream starting, stopping, or
-            // its rate shifting by more than jitter.
-            static uint32_t last_logged_hz = 0;
-            const bool linked = serialTransport.isActive() ||
-                                dongleTransport.isActive();
-            if (linked) {
-                const uint32_t delta = per_sec > last_logged_hz ? per_sec - last_logged_hz
-                                                                : last_logged_hz - per_sec;
-                if (delta >= 5 || (per_sec == 0) != (last_logged_hz == 0)) {
-                    last_logged_hz = per_sec;
-                    SLOGD("sys", "rx=%u frames/s", per_sec);
-                }
-            } else {
-                last_logged_hz = 0;
-            }
-            transportMgr.pollWifiLink();
-            transportMgr.superviseWifi();   // re-scan + re-pin if link dropped
+            last_report_ms = now;
+            wifiLink.pollWifiLink();
+            wifiLink.superviseWifi();   // re-scan + re-pin if link dropped
         }
 
         if (auto* hb = slopglowCommsHeartbeat()) hb->pulse();  // SlopGlow liveness (Core 0)
@@ -689,7 +498,7 @@ static void commsTask(void* /*param*/) {
     }
 }
 
-// Core 0 — HTTP server + OSSM BLE + Status LEDs
+// Core 0 — HTTP server + status LEDs
 // Each step is wrapped in TIME_STEP (the Core-0 stall watchdog, defined above
 // commsTask). The heartbeat is at the tail, so a blocked step freezes the
 // breath; the [STALL] web-log line names which call blocked.
@@ -721,11 +530,6 @@ static void httpTask(void* param) {
 #if defined(FEATURE_RS485_MODBUS) && defined(DRIVER_AIM_SERVO)
         TIME_STEP(encoderValidator.update(), "http:encValidator");
 #endif
-        TIME_STEP(ossmBleService.update(),"http:ossmBle");
-        // Serial-log gating follows LIVE serial TCode traffic (not the old
-        // compile-time flag): Intiface streaming -> serial sink mutes; idle ->
-        // full logs return. Self-healing in both directions.
-        applogSerialDedicated(serialTransport.isActive());
         TIME_STEP(applogDrain(),          "http:logDrain");   // SlopLog ring -> web/serial sinks
         slopglowUpdate(g_state);
         // Heap health beacon: free / low-water / largest-block. maxblock is
@@ -765,6 +569,32 @@ static void servoBusTask(void* /*param*/) {
 #endif
 
 
+// Decodes esp_reset_reason()'s enum to its name for the boot log — the only
+// diagnostic a spontaneous, unlogged-cause reboot leaves behind (bench
+// overnight session, 2026-07-28: one such reboot with nothing in /api/log to
+// explain it).
+static const char* resetReasonName(esp_reset_reason_t r) {
+    switch (r) {
+        case ESP_RST_UNKNOWN:    return "UNKNOWN";
+        case ESP_RST_POWERON:    return "POWERON";
+        case ESP_RST_EXT:        return "EXT";
+        case ESP_RST_SW:         return "SW";
+        case ESP_RST_PANIC:      return "PANIC";
+        case ESP_RST_INT_WDT:    return "INT_WDT";
+        case ESP_RST_TASK_WDT:   return "TASK_WDT";
+        case ESP_RST_WDT:        return "WDT";
+        case ESP_RST_DEEPSLEEP:  return "DEEPSLEEP";
+        case ESP_RST_BROWNOUT:   return "BROWNOUT";
+        case ESP_RST_SDIO:       return "SDIO";
+        case ESP_RST_USB:        return "USB";
+        case ESP_RST_JTAG:       return "JTAG";
+        case ESP_RST_EFUSE:      return "EFUSE";
+        case ESP_RST_PWR_GLITCH: return "PWR_GLITCH";
+        case ESP_RST_CPU_LOCKUP: return "CPU_LOCKUP";
+        default:                 return "UNRECOGNIZED";
+    }
+}
+
 // ============================================================================
 // setup() — ordered wiring only
 // ============================================================================
@@ -773,9 +603,24 @@ void setup() {
     Serial.begin(SERIAL_CONTROL_BAUD);
     applogBegin(&g_state);
     SLOGI("boot", "=== SlopDrive-32 v2.0 — D4 event-driven ===");
+    // AppLog.cpp's WebRingSink partitions /api/log into a 44-line Trace/Debug/
+    // Info ring that the 10 s heap beacon alone recycles in well under a
+    // minute, and a 16-line Warn+ ring that ordinary churn never touches.
+    // POWERON/SW are the two EXPECTED reasons (cold boot, esp_restart() after
+    // an OTA); anything else is exactly the "why did it reboot" question this
+    // line exists to answer, so it goes in the ring that survives long enough
+    // for someone to actually read it.
+    {
+        const esp_reset_reason_t reason = esp_reset_reason();
+        const char* name = resetReasonName(reason);
+        if (reason == ESP_RST_POWERON || reason == ESP_RST_SW) {
+            SLOGI("boot", "Reset reason: %s", name);
+        } else {
+            SLOGW("boot", "Reset reason: %s (unexpected)", name);
+        }
+    }
 #if SERIAL_CONTROL_MODE
-    SLOGI("boot", "Serial control mode ON: USB Serial is dedicated to Intiface TCode.");
-    SLOGI("boot", "Add a 'Serial' device in Intiface pointing at this COM port.");
+    SLOGI("boot", "USB Serial is boot-log + rescue path only — SlopSync (WiFi) is the control plane.");
 #endif
 
 #if defined(DRIVER_AIM_SERVO)
@@ -824,14 +669,12 @@ void setup() {
 
     ConfigStore::load(g_state, mapper, motor);
 
-    TCodeParser::intifaceCompat = g_state.intiface_compat;
-
     motor.init();
     motor.applyDriverConfig(g_state.driver);
 
     slopglowInit();
 
-    bool wifi_ok = transportMgr.setupWiFi();
+    bool wifi_ok = wifiLink.setupWiFi();
 
     webui.init();
 
@@ -886,7 +729,7 @@ void setup() {
     // at boot whenever the drive answers — this heals the NVS-mirror-lost case
     // where the firmware would otherwise boot at the 800 default while the
     // drive physically needs 1600 pulses/rev, silently halving every commanded
-    // millimetre until the mismatch is noticed. Machine is unhomed at this
+    // millimeter until the mismatch is noticed. Machine is unhomed at this
     // point, so the forced re-home semantics of a steps/rev change are free. :3
     if (servoModbus.isReady()) {
         uint16_t drive_spr = 0;
@@ -922,28 +765,7 @@ void setup() {
     // live limit-set updates directly through the sole caller.
     webui.setArbiter(&arbiter);
 
-    // Register L0 axis with the parser (v0.4 multi-axis model)
-    tcodeParser.registerAxis(&axisL0);
-
-    // Wire TCode parser callbacks
-    tcodeParser.onLinearRampTo(buttplugLinearCmd);
-    tcodeParser.onLinearStop(buttplugStop);
-    tcodeParser.onWifiCmd(handleWifiCmd);
-
-    // WiFi-dependent transport fallback: if WiFi never associated at boot and
-    // the persisted transport is WS (which needs the network), drop to USB
-    // serial so the machine stays controllable. The operator can then send
-    // `WIFI <ssid> <password>` over serial to store creds and reboot. :3
-    if (!wifi_ok && g_state.getTransport() == TransportMode::WS) {
-        SLOGW("boot", "WiFi down at boot — falling back to USB serial transport. "
-              "Send 'WIFI <ssid> <password>' over serial, then reboot.");
-        g_state.setTransport(TransportMode::SER);
-    }
-
-
-    transportMgr.applyTransport(g_state.getTransport());
-
-    // SlopMotion command queue — Core 0 (buttplugLinearCmd) → Core 1 sampler
+    // SlopMotion command queue — Core 0 (SlopSync ingress) → Core 1 sampler
     g_interp_queue = xQueueCreate(INTERP_QUEUE_DEPTH, sizeof(slopmotion::Command));
     configASSERT(g_interp_queue != nullptr);
 
@@ -985,7 +807,6 @@ void setup() {
     }
 #endif
 
-    ossmBleService.init();
     patternEngine.init();    // creates its own Core 1 task
 
     // SlopSync hub last: WiFi is up, arbiter/webui/patternEngine are wired.

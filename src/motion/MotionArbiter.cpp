@@ -52,7 +52,8 @@ void MotionArbiter::init() {
 }
 
 // ============================================================================
-// submitDeferred — Core 0 → Core 1 atomic handoff (single-slot, latest wins)
+// submitDeferred — Core 0 → Core 1 handoff (DEFER_QUEUE_DEPTH-slot FreeRTOS
+// queue, drained in full by processDeferred() every Core-1 tick)
 // ============================================================================
 
 void MotionArbiter::submitDeferred(const MotionIntent& intent) {
@@ -95,13 +96,13 @@ void MotionArbiter::processDeferred() {
 }
 
 // ============================================================================
-// submitStreamSample — Core 1 fast path for the MotionInterpolator sampler
+// submitStreamSample — Core 1 fast path for the streamSamplerTask sampler
 // ============================================================================
 //
-// This is NOT the trapezoid planner. The MotionInterpolator (streamSamplerTask)
-// has ALREADY shaped the curve — start/end position, tangents, live/gradient
-// timing. Every ~1ms it hands us the sampled point on that curve and we feed it
-// straight to FAS. The only work here is safety + unit conversion:
+// This is NOT the trapezoid planner. streamSamplerTask's slopmotion::Engine
+// (see CLAUDE.md §7.6) has ALREADY shaped the curve — start/end position,
+// velocity, curvature. Every ~1ms it hands us the sampled point on that curve
+// and we feed it straight to FAS. The only work here is safety + unit conversion:
 //   1. Gates: estop / homed / paused / manual_override (stream honors all).
 //   2. Map normalized 0..1 into the configured stroke window (mm).
 //   3. Hard physical step bounds — the machine envelope, never bypassed.

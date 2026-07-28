@@ -21,7 +21,7 @@ class MotorDriver;
 //                                  factory defaults when nothing is stored).
 //
 // Thread-safety: save/load are always called from Core 0 context (setup + HTTP
-// handlers).  They serialise internally via Preferences so no extra mutex is
+// handlers).  They serialize internally via Preferences so no extra mutex is
 // needed.
 
 class ConfigStore {

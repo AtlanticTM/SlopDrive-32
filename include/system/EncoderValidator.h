@@ -25,7 +25,7 @@
 // Verdicts are STANDSTILL-ONLY: an encoder sample is read over a ~20ms Modbus
 // transaction while FAS keeps stepping, so mid-motion comparison carries up to
 // ~15mm of pure timing skew at speed. The live deviation is still exposed for
-// the UI (labelled as noisy-while-moving); the lost-steps warning only scores
+// the UI (labeled as noisy-while-moving); the lost-steps warning only scores
 // samples taken while both FAS and the drive report the machine still.
 //
 // REPORT-ONLY by doctrine: this module never touches the arbiter or the

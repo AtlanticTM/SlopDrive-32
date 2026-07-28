@@ -1,9 +1,6 @@
-// Transport Manager — implementation
-//
-// Extracted verbatim from main.cpp: setupWiFi(), applyTransport(),
-// transportName() (Step 8).
+// WifiLink — WiFi STA bring-up, link telemetry, scan-and-pin reconnect.
 
-#include "TransportManager.h"
+#include "WifiLink.h"
 
 #include <WiFi.h>
 #include <ESPmDNS.h>
@@ -12,20 +9,7 @@
 #include "config_api.h"
 #include "sloplog/sloplog.h"
 #include "ConfigStore.h"
-#include "TCodeParser.h"
-#include "SerialTransport.h"
-#include "BleTransport.h"
-#include "DongleTransport.h"
-#include "OssmBleService.h"
 #include "slopsync/generated/registry_constants.hpp"
-
-TransportManager::TransportManager(SystemState&        state,
-                                   TCodeParser&        parser,
-                                   SerialTransport&    serial,
-                                   BleTransport&       ble,
-                                   DongleTransport&    dongle,
-                                   OssmBleService&     ossm)
-    : _state(state), _parser(parser), _serial(serial), _ble(ble), _dongle(dongle), _ossm(ossm) {}
 
 // ---- WiFi + mDNS -----------------------------------------------------------
 
@@ -34,7 +18,7 @@ TransportManager::TransportManager(SystemState&        state,
 // reconnect cycle (when the link is already down and there's nothing to service
 // on this task anyway), never on the real-time motion path. Split into 500ms
 // poll slices. :3
-bool TransportManager::_waitConnected(uint32_t timeoutMs) {
+bool WifiLink::_waitConnected(uint32_t timeoutMs) {
     uint32_t waited = 0;
     while (WiFi.status() != WL_CONNECTED && waited < timeoutMs) {
         delay(500);
@@ -46,7 +30,7 @@ bool TransportManager::_waitConnected(uint32_t timeoutMs) {
 // Attempt a single SSID/password unpinned (Arduino fast-scan). Used for the
 // NVS-secondary recovery creds — the target network is unknown, so pinning a
 // scanned BSSID buys nothing there. :3
-bool TransportManager::_connectWith(const char* ssid, const char* pass, uint32_t timeoutMs) {
+bool WifiLink::_connectWith(const char* ssid, const char* pass, uint32_t timeoutMs) {
     if (!ssid || ssid[0] == '\0') return false;
     SLOGI("transport", "Connecting to WiFi: %s", ssid);
     WiFi.begin(ssid, pass);
@@ -60,7 +44,7 @@ bool TransportManager::_connectWith(const char* ssid, const char* pass, uint32_t
 // consecutive pinned failures (or if no candidate is heard at all) we drop to
 // an unpinned begin() so a dead pinned AP can't strand the rig; the next cycle
 // re-scans and re-pins. _pinFailStreak persists across bring-up cycles. :3
-bool TransportManager::_connectBest(const char* ssid, const char* pass, uint32_t timeoutMs) {
+bool WifiLink::_connectBest(const char* ssid, const char* pass, uint32_t timeoutMs) {
     if (!ssid || ssid[0] == '\0') return false;
 
 #if WIFI_SCAN_PIN_ENABLED
@@ -125,7 +109,7 @@ bool TransportManager::_connectBest(const char* ssid, const char* pass, uint32_t
     return ok;
 }
 
-bool TransportManager::setupWiFi() {
+bool WifiLink::setupWiFi() {
     WiFi.onEvent([this](arduino_event_id_t event, arduino_event_info_t info) {
         onWifiEvent(event, info);
     });
@@ -191,7 +175,7 @@ bool TransportManager::setupWiFi() {
 
 // ---- WiFi link telemetry ---------------------------------------------------
 
-void TransportManager::onWifiEvent(arduino_event_id_t event, arduino_event_info_t info) {
+void WifiLink::onWifiEvent(arduino_event_id_t event, arduino_event_info_t info) {
     switch (event) {
         case ARDUINO_EVENT_WIFI_STA_DISCONNECTED:
             _state.wifi_reconnects++;
@@ -211,7 +195,7 @@ void TransportManager::onWifiEvent(arduino_event_id_t event, arduino_event_info_
     }
 }
 
-void TransportManager::pollWifiLink() {
+void WifiLink::pollWifiLink() {
     if (WiFi.status() != WL_CONNECTED) return;
     _state.wifi_rssi    = (int8_t)WiFi.RSSI();
     _state.wifi_channel = (uint8_t)WiFi.channel();
@@ -225,7 +209,7 @@ void TransportManager::pollWifiLink() {
 
 // ---- WiFi reconnect supervisor ---------------------------------------------
 
-void TransportManager::superviseWifi() {
+void WifiLink::superviseWifi() {
     if (!_wifiEnabled) return;                      // WiFi never came up at boot
     if (WiFi.status() == WL_CONNECTED) return;      // link healthy — nothing to do
 
@@ -242,61 +226,3 @@ void TransportManager::superviseWifi() {
 }
 
 // ---- Transport selection ---------------------------------------------------
-
-void TransportManager::applyTransport(TransportMode mode) {
-    // Remove all response hooks — clean palate before new hose
-    _serial.removeResponseHooks();
-    _ble.removeResponseHooks();
-    _dongle.removeResponseHooks();
-
-    // Close dongle UART if switching away from DONGLE
-    if (mode != TransportMode::DONGLE && _dongle.isOpen()) {
-        _dongle.end();
-    }
-
-    _state.setTransport(mode);
-
-    if (mode == TransportMode::OSSM_BLE) {
-        // OSSM masquerade: stop native NUS BLE, start OSSM GATT service
-        if (_ble.isRunning()) _ble.stop();
-        _ossm.start();
-    } else {
-        // Stop OSSM service if switching away
-        if (_ossm.isRunning()) _ossm.stop();
-
-        if (mode == TransportMode::BT) {
-            _ble.begin();
-            _ble.installResponseHooks();
-        } else if (mode == TransportMode::DONGLE) {
-            if (_ble.isRunning()) _ble.stop();
-            _dongle.begin();
-            _dongle.installResponseHooks();
-        } else {
-            // M5c: TransportMode::WS used to mean "the :55555 Intiface/TCode
-            // WebSocket". That transport is DELETED — SlopSync is the only way
-            // in or out now, and it does not live behind this selector. WS
-            // therefore falls through to serial hooks, which is the honest
-            // behaviour for "no legacy text transport is attached".
-            if (_ble.isRunning()) _ble.stop();
-            _serial.installResponseHooks();
-        }
-    }
-
-    const char* name = transportName(mode);
-    SLOGI("transport", "Transport mode: %s", name);
-}
-
-// static
-const char* TransportManager::transportName(TransportMode m) {
-    switch (m) {
-        case TransportMode::SER:     return "SER";
-        case TransportMode::BT:      return "BT";
-        case TransportMode::DONGLE:  return "DONGLE";
-        case TransportMode::OSSM_BLE: return "OSSM";
-        default:                     return "WS";
-    }
-}
-
-bool TransportManager::isDongleActive() const {
-    return _dongle.isActive();
-}

@@ -191,10 +191,9 @@ void ModbusServoDriver::streamTo(float pos_mm, float speed_mm_s) {
     _have_last_stream = false;
 }
 
-// Pre-planned native-count dispatch — called from Core 1 (the stream sampler
-// / motionConsumerTask) at up to ~1kHz. GRIT-CACHE FIRST (plan.md): skip
-// TrapezoidProfile::plan() entirely (sqrtf + branches) when nothing changed
-// since last call. :3
+// Pre-planned native-count dispatch — called from Core 1 via MotionArbiter at
+// up to ~1kHz. GRIT-CACHE FIRST (plan.md): skip the executor
+// hand-off entirely when nothing changed since last call. :3
 void ModbusServoDriver::streamToSteps(int32_t target_steps,
                                        uint32_t speed_steps_s,
                                        uint32_t accel_steps_s2) {

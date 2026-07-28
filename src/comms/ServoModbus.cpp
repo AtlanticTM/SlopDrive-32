@@ -12,10 +12,12 @@
  * loop in update() keeps alternating between them so a drive that shows up
  * later at either baud still gets found. baud() reports which one landed.
  *
- * Motion stays pure step/dir on Core 1. This module is telemetry +
- * config-only — the real-time path is never touched by Modbus traffic. The
- * proprietary 0x7B setpoint frame (sendSetpoint()) is plumbed in but unused —
- * a future streamed-motion executor is the only intended caller.
+ * DRIVER_AIM_SERVO builds: sendPositionDelta() (FC 0x10 incremental writes) IS
+ * the Core-1 real-time motion path (bench-proven fw 2.1.26; called every
+ * servoBusTask tick from ServoMotionExecutor — see its own doc). This module
+ * is telemetry/config-only ONLY on the FastAccelStepper step/dir variant,
+ * where Modbus never touches real-time motion. sendSetpoint() (the proprietary
+ * 0x7B absolute-setpoint frame) is plumbed in but has no caller on this device.
  *
  * Per AIM_servo_modbus_reference.md: 8N1 @ 19200 or 115200, slave addr 1, all
  * values 16-bit two's-complement for signed fields, CRC16 polynomial 0xA001.

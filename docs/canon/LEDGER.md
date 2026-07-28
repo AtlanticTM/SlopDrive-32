@@ -27,18 +27,21 @@ commit as any change that alters it (C-3).
   2026-07-27 — git branch state]
 - Source-tree firmware version: see `FIRMWARE_VERSION` in
   `include/config_api.h` (its one home). [C-1 pointer]
-- Deployed firmware on the device: **2.1.82**, the RFC-042..050 + Phase C4 +
+- Deployed firmware on the device: **2.1.83**, the RFC-042..050 + Phase C4 +
   Phase E batch PLUS the `attachTransport()` STALE-slot-clobber fix + the
   boot reset-reason log line PLUS the HEAP RELIEF pass (BLOB_CHUNK backpressure
   reclass + WebRingSink PSRAM move — see the amended item (i) below) PLUS the
   parked-slot safety-broadcast panic fix (TRAPS T13 — see the PARKED-SLOT
-  SAFETY BROADCAST entry below), LIVE. [verified 2026-07-28 —
-  `/api/capabilities` `fw_version` = 2.1.82 post-OTA; DEPLOY + LIVE-VERIFY
-  session, `/api/capabilities` `fw_version` before/after the OTA + a natural
-  reboot + a deliberate re-flash reboot, all three confirmed `2.1.78`; see the
-  DEPLOY + LIVE-VERIFY entry below for the full checklist, and the
-  "RFC-042 attachTransport() clobber — FIXED" entry further down for the
-  2.1.78 → 2.1.80 follow-up fix session]
+  SAFETY BROADCAST entry below) PLUS the wire-string punctuation evolution
+  (morning ruling item 2 — see the WIRE-STRING PUNCTUATION EVOLUTION entry
+  below), LIVE. [verified 2026-07-28 — `/api/capabilities` `fw_version` =
+  2.1.83 post-OTA; DEPLOY + LIVE-VERIFY session, `/api/capabilities`
+  `fw_version` before/after the OTA + a natural reboot + a deliberate
+  re-flash reboot, all three confirmed `2.1.78`; see the DEPLOY + LIVE-VERIFY
+  entry below for the full checklist, the "RFC-042 attachTransport() clobber
+  — FIXED" entry further down for the 2.1.78 → 2.1.80 follow-up fix session,
+  and the WIRE-STRING PUNCTUATION EVOLUTION entry for the 2.1.82 → 2.1.83
+  deploy]
 
 ## Milestones & landed state
 
@@ -1076,6 +1079,8 @@ toward eviction for a send never attempted). Operator veto window open.
    evolution: em/en dashes + banned words fixed in SlopSyncCatalog.h descs
    + registry.yaml desc strings; fixtures/goldens regenerated once; etag
    changes on deploy; frozen mini-catalog untouched (C-11 precedent).
+   **DONE — see the WIRE-STRING PUNCTUATION EVOLUTION entry below** (fw
+   2.1.82 → 2.1.83, etag `9275f578ada7d314` → `b69eb06249ebe73a`).
 3. **Sim division-of-labor ruling:** `sim/slopsim` is the 1:1 DEVICE TWIN —
    the 19 advertised-but-inert entries get REAL behavior in parity with the
    machine ("it's a 1:1 sim and it should reflect that for quality
@@ -1209,12 +1214,15 @@ the uncommitted `git diff`, not taken on faith):
   client) through session-events + the trust ledger, which ARE implemented —
   matching this ledger's own "0x0002 session-roster: reserved, NOT
   implemented" entry above.
-- **"BLE overclaim downgraded" — NOT found, not recorded as done.** This was
-  named as expected work for this pass; a full search of every BLE/GATT/
-  discovery hunk in the uncommitted diff found no line that downgrades an
-  overclaim (every BLE-related change in this pass is punctuation/link
-  cleanup, or new text adding a caveat to a page that previously said
-  nothing about BLE). Flagging instead of fabricating the claim (C-8).
+- **"BLE overclaim downgraded" — RESOLVED: the fix exists and is
+  committed.** The close-out agent searched the wrong surface and honestly
+  recorded not-found rather than fabricate (correct C-8 instinct); the
+  main loop then verified the fix directly: `docs/REFACTOR-ROADMAP.md`
+  line 55 (module table, SlopSync row) reads "BLE GATT is deployed and its
+  advertising is confirmed by a real scan, but no client has yet held a
+  live GATT session" — the round-2 docs-root sweep's reported edit,
+  landed in the Phase G commits. [verified 2026-07-28 — grep of the
+  committed file by the main loop]
   **Separately found, and worth its own look:** `SPEC.md` §18 item 22 ("BLE
   GATT... specified with no reference implementation... until a BLE
   `ITransport` and a UDP responder land") is itself stale in the OTHER
@@ -1434,6 +1442,112 @@ as having covered ground it hadn't yet.
   the slopmotion/slopsync core standard (injected clock, purer hardware-free
   core, tighter conformance tests); operator explicitly opened them to
   improvement. (sonnet, mapped by main loop first)
+
+## SPEC §18 status reconcile (2026-07-28)
+
+Every SS18 known-limitations item (1-24) checked against this ledger's
+landed state plus a direct code read; five were stale, nineteen checked out
+still accurate and were left untouched (docs commit only, no wire change).
+
+- **Item 8 (blob `INVALID_NAMESPACE`):** still NOT shipped — Phase D landed
+  without it. `Hub::resolveBlobBytes` (`hub_impl.hpp`) has no
+  `INVALID_NAMESPACE` branch; an unregistered `blob.ns` still answers
+  `CHUNK_UNAVAILABLE`. Reworded so "Implementation: Phase D" no longer reads
+  as pending work under a phase that has since closed — now "open, no phase
+  currently owns it."
+- **Item 9 (empty-chunks / `ns=0` MALFORMED grammar):** the reference hub
+  was ALREADY compliant before RFC-049 restated the rule precisely —
+  `decodeBlobReq` (`blob_req.hpp`) rejects both shapes, its own comment
+  citing the older RFC-022.6. Nothing to implement; corrected from
+  "Implementation: Phase D."
+- **Item 22 (BLE GATT / UDP discovery):** both shipped and live-verified on
+  the deployed fw 2.1.78+ reference hub (`SlopSyncBleTransport.*`,
+  `SlopSyncUdpDiscovery.*`; live UDP unicast/broadcast/rate-limit and a live
+  BLE scan both confirmed — see the DEPLOY + LIVE-VERIFY entry's items (f)
+  and (j) above). Kept true: no client has held a live GATT session, no
+  small-MTU control-frame fragmentation, and cross-transport migration —
+  mechanically in place via identity-based reattach — has never been
+  exercised across two bindings live.
+- **Item 23 (RENDERING.md vocabulary):** the catalog side landed in Phase C2
+  (entry `rank` key 16, field `rank`/`aspect`/`scope`/`provenance`/`unit_id`
+  keys 19-23, `category` repurposed for `ui_categories`; `catalog_lint` 113
+  desc / 44 role annotations). Kept true: `webui/src` decodes
+  `category`/`categoryLabel` and stops there — no reference client builds
+  pages from the full derivation chain.
+- **Item 24 (blob backpressure/completion):** the hold-not-drop half shipped
+  in the HEAP RELIEF pass (fw 2.1.81, `SlopSyncAsyncWsTransport::write()`
+  gates `BLOB_CHUNK` on `limits::blob_chunks_in_flight`). Kept true: no NACK
+  `BUSY` on sustained congestion, no reference `BLOB_DONE` emission.
+
+[verified 2026-07-28 — direct reads of `hub_impl.hpp` (resolveBlobBytes,
+handleReattach), `blob_req.hpp` (decodeBlobReq), `SlopSyncAsyncWsTransport.cpp`,
+`SlopSyncCatalog.h` (category/rank annotations), `webui/src/core/slopsync/
+catalog.js` (no rank/archetype consumption); commit `ea072aa`]
+
+## WIRE-STRING PUNCTUATION EVOLUTION (2026-07-28) — morning ruling item 2, fw 2.1.82 → 2.1.83
+
+ONE atomic catalog evolution: em/en dashes, double-hyphens, and banned prose
+words (delve/leverage/robust/seamless/synergy/testament/tapestry/unlock/
+quiet/notable) purged from every wire-emitted `.desc` string in
+`include/comms/SlopSyncCatalog.h` (3 instances, incl. the named "quiet" hit
+in a serial/settle-adjacent desc) and from `docs/slopsync/registry/
+registry.yaml`'s desc/note documentation strings (95 mechanically converted
++ 13 hand-rewritten to avoid same-clause double punctuation + 1 named
+banned-word instance — prose only, no keys/numbers/names/refs/status
+touched). Frozen artifacts (`lib/slopsync` conformance `mini_catalog.hpp`,
+`vectors/fixtures/mini-catalog.yaml`, golden byte arrays) checked and
+confirmed to carry no dash or banned word already — untouched, C-11/T11
+precedent.
+
+Regenerated once (lockstep, all `--check` green): `gen_registry_header`,
+`gen_docs_tables` (9 of 14 pages changed), `gen_spec_pages` (0 changed —
+SPEC.md prose is independent of registry.yaml notes), `gen_channel_map`,
+`gen_channel_grid`, `gen_channel_grid_page`. `webui/test/fixtures/
+slopsim-catalog.{bin,etag}` re-captured from a fresh `sim/slopsim`
+device-profile build (44 channels, 24,585 B, etag `b69eb06249ebe73a` —
+independently matches the live device's new etag, below).
+
+**Gauntlet (all green, every command run directly this session):** native
+suite 31/31 environments PASSED exit 0 (mingw64 PATH prepend, TRAPS T10);
+`pio run -e sd32-ota` SUCCESS (RAM 24.1% / 78,948 B, flash 28.5% /
+1,869,456 B — byte-identical to the pre-pass build); `canon_lint.py` 0
+findings; `catalog_lint.py` OK (32 entries, 113 desc / 44 role annotations,
+every desc still under its byte cap); `mkdocs build --strict` exit 0, zero
+warnings; `node webui/test/slopsync-sim.mjs` (fresh device-profile slopsim)
+ALL PASS; `node webui/test/slopsync-wire.test.mjs` ALL PASS; webui `npm run
+check` ALL PASS. A standalone decode-and-scan of the served catalog bytes
+(webui's own `decodeCatalog` against the device-identical fixture): 44
+entries, 935 text fields scanned, 0 dash hits, 0 banned-word hits, 0
+British-spelling hits.
+
+**Live deploy + verify.** `FIRMWARE_VERSION` 2.1.82 → 2.1.83
+(`include/system/config_api.h`), OTA'd via `deploy.ps1`. `/api/capabilities`
+confirms `fw_version 2.1.83`. `tools/slopsync_probe.py --estop --bench-home
+--bench-home-no-revert`: **50 passed / 0 failed / 3 skipped**, exit 0.
+Catalog etag CHANGED `9275f578ada7d314` → `b69eb06249ebe73a` (matches the
+sim's independently captured etag above). BLOB transfer completes: 129
+chunks, 24,585 bytes, reassembly verifies against the WELCOME etag.
+
+**Pre-existing drift found at session start, not caused by this pass:** the
+device's `home_override` was `false` on connect (the PARKED-SLOT SAFETY
+BROADCAST entry's documented end-state was `home_override=true`) — a reboot
+between sessions cleared the volatile bench override, as it always does.
+Restored via `--bench-home --bench-home-no-revert` in the same probe run
+that verified the deploy.
+
+**Device end-state:** fw **2.1.83**, reachable at 192.168.1.229,
+`homed=true` `home_override=true` (fake-homed, left ON per
+`--bench-home-no-revert`), `estopped=false`, not moving,
+`measured_stroke_mm=250`.
+
+**Files touched:** `include/comms/SlopSyncCatalog.h`,
+`docs/slopsync/registry/registry.yaml`,
+`lib/slopsync/include/slopsync/generated/registry_constants.hpp`,
+`docs/slopsync/CHANNEL-MAP.md`, 9 `docs-site/docs/reference/registry/*.md`
+pages, `include/system/config_api.h` (version bump),
+`webui/test/fixtures/slopsim-catalog.{bin,etag}`. [verified 2026-07-28 —
+every command above run directly this session, exit codes checked; commit
+`274abc3`]
 
 ## Deferred / planned (homes: docs/REFACTOR-ROADMAP.md, docs/MOTION-TODO.md)
 

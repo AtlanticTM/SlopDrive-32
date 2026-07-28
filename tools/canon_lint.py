@@ -193,20 +193,41 @@ BRITISH_SPELLING_SCAN_EXEMPT = ("THIRD_PARTY_LICENSES.md", "LICENSE", "NOTICE",
 # a MECHANISM, not a list: adding an entry here requires an operator-visible
 # justification in the commit that adds it, never a silent exemption.
 #
-# Justification for the docs/canon/LEDGER.md lines below (2026-07-28 BRITISH-
-# SPELLING TOTAL SWEEP entry): that entry is an audit record, and quotes the
-# actual banned strings it found/fixed/flagged/false-positived (the same
-# reason this file's own BRITISH_SPELLING_EXTRAS comment above is exempt) --
-# not a live comment or prose defect. Never add a line here for an ordinary
-# hit; fix it instead.
-BRITISH_SPELLING_KNOWN_CODE_HITS = {
-    ("docs/canon/LEDGER.md", 2104), ("docs/canon/LEDGER.md", 2111),
-    ("docs/canon/LEDGER.md", 2126), ("docs/canon/LEDGER.md", 2151),
-    ("docs/canon/LEDGER.md", 2152), ("docs/canon/LEDGER.md", 2155),
-    ("docs/canon/LEDGER.md", 2161), ("docs/canon/LEDGER.md", 2162),
-    ("docs/canon/LEDGER.md", 2166), ("docs/canon/LEDGER.md", 2167),
-    ("docs/canon/LEDGER.md", 2186), ("docs/canon/LEDGER.md", 2187),
+# Justification for the docs/canon/LEDGER.md section below (2026-07-28
+# BRITISH-SPELLING TOTAL SWEEP entry): that entry is an audit record, and
+# quotes the actual banned strings it found/fixed/flagged/false-positived
+# (the same reason this file's own BRITISH_SPELLING_EXTRAS comment above is
+# exempt) -- not a live comment or prose defect. Never add a section here
+# for an ordinary hit; fix it instead.
+#
+# Anchored to the SECTION HEADER, never line numbers: the ledger is a living
+# document and line-pinned exemptions break on any edit above the section
+# (proven 2026-07-28 -- a 6-line insertion shifted the sweep entry and
+# produced 18 false findings). A section runs from its `## ` header to the
+# next `## ` header.
+BRITISH_SPELLING_EXEMPT_SECTIONS = {
+    "docs/canon/LEDGER.md": ("## BRITISH-SPELLING TOTAL SWEEP",),
 }
+
+
+def _exempt_section_lines():
+    hits = set()
+    for rel, headers in BRITISH_SPELLING_EXEMPT_SECTIONS.items():
+        try:
+            lines = (ROOT / rel).read_text(encoding="utf-8",
+                                           errors="replace").splitlines()
+        except OSError:
+            continue
+        active = False
+        for lineno, line in enumerate(lines, 1):
+            if line.startswith("## "):
+                active = any(line.startswith(h) for h in headers)
+            if active:
+                hits.add((rel, lineno))
+    return hits
+
+
+BRITISH_SPELLING_KNOWN_CODE_HITS = _exempt_section_lines()
 
 GREP_CHECKS = [
     dict(

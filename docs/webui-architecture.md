@@ -59,7 +59,7 @@ conforming hub forever; `0x1000` means something only here. Binding to the first
 is why our nice widgets work on someone else's machine; binding to the second is
 the disease this refactor removes. The normative rule this client implements —
 category → rank → archetype → widget pattern → region — is
-[RENDERING.md](slopsync/RENDERING.md); `roles.js` and `heroes.js` are this
+SlopSync's RENDERING.md; `roles.js` and `heroes.js` are this
 client's read of that derivation chain.
 
 ## 3. Ground truth, mechanically
@@ -171,7 +171,7 @@ on a phone.
 
 All additive; no released number reused; frozen artifacts untouched.
 
-- **`action.*` roles** ([RFC-019](slopsync/RFC-QUEUE.md) open convention, no registry change) on the home,
+- **`action.*` roles** (SlopSync RFC-019 open convention, no registry change) on the home,
   admin and safety op fields — so action buttons are *discoverable* instead of
   hardcoded. `move` was deliberately **not** tagged: its fields are values, not
   verbs, and tagging them would make a generic client draw a button where a
@@ -206,10 +206,10 @@ annotations are. Evidence in `webui/test/evidence/`.
 ## 6a. TWO PROTOCOL GAPS THE REBUILD EXPOSED — read this first
 
 **Truth check (2026-07-28): both gaps below are landed on the registry/catalog
-side.** [RFC-032](slopsync/RFC-QUEUE.md) shipped the same day this section was
+side.** SlopSync RFC-032 shipped the same day this section was
 written: `position` on `0x3100 move` now carries role `command.position`,
 `tgt_10um` on `0x1100 motion` carries `telemetry.target` — see
-[WEBUI-HANDOFF-RFC-BATCH.md](slopsync/WEBUI-HANDOFF-RFC-BATCH.md) item 2. Per
+SlopSync's WEBUI-HANDOFF-RFC-BATCH.md item 2. Per
 this doc's own §3/§5 model, the client needed no code change (`model/
 settings.js` already indexes non-action roles into `byRole`). **Not confirmed:**
 `LEDGER.md` has no record of the tap-to-move end-to-end live check the handoff
@@ -250,7 +250,7 @@ things because it hardcoded this device. Making them portable is the work.
   approve pairings, and `PairingPane` says exactly that rather than showing an
   empty list that would read as "nobody is knocking".
   **Truth check (2026-07-28): partially closed since this was written.**
-  [RFC-027](slopsync/RFC-QUEUE.md)(c)'s push-to-pair mode landed with no UI
+  SlopSync RFC-027(c)'s push-to-pair mode landed with no UI
   at all — three quick power-cycles calls `Hub::openPresenceWindow()` from
   the firmware's own boot-gesture detector, granting `configure` to the
   first knock if the trust ledger is factory-fresh. See

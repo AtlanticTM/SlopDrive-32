@@ -73,7 +73,7 @@
 namespace slopdrive {
 
 // ---- registry.yaml `ble_identity` (RFC-046 item 1) --------------------------
-// NOT emitted by tools/gen_registry_header.py (the codegen has no CBOR-key
+// NOT emitted by the SlopSync repo's tools/gen_registry_header.py (the codegen has no CBOR-key
 // schema for a GATT UUID string) — transcribed here verbatim per Phase E's
 // documented fallback (see SlopSyncDiscoveryWire.h's own note on the same
 // pattern for `udp_discovery`/`ble_adv_flags`). The first three groups spell

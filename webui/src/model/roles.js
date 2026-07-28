@@ -4,13 +4,13 @@
  *
  * ── Why this is not "device knowledge" ─────────────────────────────────────
  *
- * The rule for the layer above core/slopsync/ is: know nothing about THIS
+ * The rule for the layer above the SlopSync protocol client is: know nothing about THIS
  * machine. Channel 0x1000, the field name `window_min`, the option label
  * "Half'n'Half" — all of those describe one device and hardcoding them is what
  * made our UI privileged.
  *
  * A ROLE is the opposite kind of fact. `window.min` is defined in
- * docs/slopsync/registry/registry.yaml and means the same thing on every
+ * the SlopSync repo's registry.yaml and means the same thing on every
  * conforming hub, forever. Binding a rail widget to `window.min` + `window.max`
  * + `telemetry.position` means it draws correctly on a machine built by someone
  * we have never met, provided they annotated their catalog — and if they did
@@ -28,7 +28,7 @@
  * unknown role must never be an error. Both rules are enforced by claimRoles()
  * below rather than left to each widget's good manners.
  *
- * SOURCE OF TRUTH: docs/slopsync/registry/registry.yaml, `field_roles`. This
+ * SOURCE OF TRUTH: the SlopSync repo's registry.yaml, `field_roles`. This
  * file mirrors it by hand, the same way frames.js mirrors the wire constants.
  * If the two ever disagree, the registry wins.
  */
@@ -102,7 +102,7 @@ export const ROLE = {
 /**
  * ROLE -> HUMAN DISPLAY LABEL.
  *
- * A role is registry vocabulary (docs/slopsync/registry/registry.yaml,
+ * A role is registry vocabulary (the SlopSync repo's registry.yaml,
  * `field_roles`) — it means the same thing on every conforming hub, so a
  * label keyed off it is not device knowledge any more than the role string
  * itself is. This is the ONLY place a field's wire NAME may be overridden for

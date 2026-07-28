@@ -12,7 +12,7 @@
    * ── RFC-035, and ROLE-ONLY discipline ────────────────────────────────────
    *
    * The registry names `plan.start/end/current/velocity/elapsed/duration/
-   * style` (docs/slopsync/registry/registry.yaml, field_roles), so this binds
+   * style` (the SlopSync repo's registry.yaml, field_roles), so this binds
    * like every other hero/widget: claimRoles() against
    * machine.catalog.model.byRole, same as RailWidget. That claim resolves
    * per-FIELD, not per-channel — each resolved field carries its own

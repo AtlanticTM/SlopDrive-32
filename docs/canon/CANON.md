@@ -26,15 +26,16 @@ places with different values, that is not information — that is a **flag** (§
 
 | Domain | Sole home |
 |---|---|
-| Wire numbers (frames, CBOR keys, NACK codes, channels, limits) | [`docs/slopsync/registry/registry.yaml`](../slopsync/registry/registry.yaml) |
-| SlopSync protocol behavior | [`docs/slopsync/SPEC.md`](../slopsync/SPEC.md) |
+| Wire numbers (frames, CBOR keys, NACK codes, channels, limits) | the SlopSync repo's `spec/registry/registry.yaml` (sibling checkout, pinned by `slopsync.pin` at this repo's root) |
+| SlopSync protocol behavior | the SlopSync repo's `spec/SPEC.md` |
+| This machine's device-channel allocation | [`docs/slopsync/CHANNEL-MAP.md`](../slopsync/CHANNEL-MAP.md) (stays here — machine-specific, not protocol spec) |
 | Governance law — this rule system | this file |
 | Engineering doctrine (architecture, motion, subsystem rules, build/deploy procedure) | [`docs/canon/DOCTRINE.md`](DOCTRINE.md) |
 | Volatile project/device state (fw versions, what's deployed, what's live-verified, milestone status) | [`docs/canon/LEDGER.md`](LEDGER.md) |
 | Operator preferences & working relationship | `CLAUDE.md` (repo root, gitignored) |
 | Firmware version constant | `FIRMWARE_VERSION` in `include/config_api.h` |
 | Subsystem deep detail | that subsystem's own README / spec |
-| Public docs site content | generated/derived from the homes above — never hand-forked |
+| Public docs site content | SlopSync repo's docs-site — generated/derived from its spec homes, never hand-forked |
 
 `CLAUDE.md` is the auto-loaded entry point: operator preferences plus binding
 pointers into this directory. It holds **no rules and no status** — rules live

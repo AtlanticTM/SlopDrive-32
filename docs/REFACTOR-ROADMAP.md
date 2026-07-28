@@ -52,7 +52,7 @@ section below for what has moved since.)*
 
 | Module | Status |
 |---|---|
-| **SlopSync** (protocol + lib + firmware hub) | LIVE — verified on hardware end-to-end, probe 8/8. Now also carries the [RFC-030..050 batch](slopsync/RFC-QUEUE.md), deployed on fw 2.1.82: UDP discovery is live-verified (unicast, broadcast, rate limit); BLE GATT is deployed and its advertising is confirmed by a real scan, but no client has yet held a live GATT session — see [LEDGER.md](canon/LEDGER.md). |
+| **SlopSync** (protocol + lib + firmware hub) | LIVE — verified on hardware end-to-end, probe 8/8. Now also carries the RFC-030..050 batch (SlopSync repo), deployed on fw 2.1.82: UDP discovery is live-verified (unicast, broadcast, rate limit); BLE GATT is deployed and its advertising is confirmed by a real scan, but no client has yet held a live GATT session — see [LEDGER.md](canon/LEDGER.md). |
 | **SlopMotion** (Ruckig motion core, §1) | LIVE — `lib/slopmotion` + vendored Ruckig v0.19.4, 11 native suites green, trace bench + graphs, firmware wiring landed (see §10 below, [DOCTRINE.md](canon/DOCTRINE.md) §8) |
 | **SlopLog** | LIVE — all legacy sites migrated, boot narration, serial handoff |
 | **SlopGlow** | LIVE — liveness gate field-proven on day one |
@@ -335,7 +335,7 @@ Plumbing exists (PairingManager, NVS store, SlopGlow Pairing state).
 WebUI card + PIN display when hardware settles.
 
 **Landed since:** push-to-pair (mode (c), `pairing_modes` bit2) shipped
-with no UI at all — [RFC-027](slopsync/RFC-QUEUE.md)(c) deliberately needs neither display nor
+with no UI at all — SlopSync RFC-027(c) deliberately needs neither display nor
 button: three quick power-cycles opens a 120 s presence window, SlopGlow
 shows Pairing state, and the first `PAIR_REQ` in that window is granted.
 See [http-plane-retirement.md](http-plane-retirement.md) §7 "Push-to-pair
@@ -473,7 +473,7 @@ DONE ──► segment streaming (fw 2.1.45): channel 0x0085 motion-segment
 DONE ──► slopsync-js / WebUI refactor (operator call 2026-07-24: UI was the
          pain point — slow, laggy, stroke window broken. Full brief in §5;
          landed 2026-07-27, see [webui-architecture.md](webui-architecture.md))
-DONE ──► HTTP control surface retirement + [RFC-030..050 batch](slopsync/RFC-QUEUE.md)
+DONE ──► HTTP control surface retirement + RFC-030..050 batch (SlopSync repo)
          (Phases B through E) + deploy/live-verify to fw 2.1.82 — see
          [LEDGER.md](canon/LEDGER.md)
 NOW  ──► merge feat/cpp20-slopsync → main + pairing rough-in (model C)

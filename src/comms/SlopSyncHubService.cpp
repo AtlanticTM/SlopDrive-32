@@ -2174,7 +2174,7 @@ void SlopSyncHubService::publishAnomalies() {
 //
 // NVS namespace "slopsync". hub.hpp is explicit that the library provides the
 // gesture: "the application's job and only the application's". This is that
-// job. Registry `pairing_modes` bit2 (docs/slopsync/registry/registry.yaml)
+// job. Registry `pairing_modes` bit2 (SlopSync registry.yaml)
 // is the normative text: N=3 consecutive boots with uptime <10 s opens the
 // window, NVS counter only — it cannot collide with a live session because
 // any power loss already stops motion and forces re-home, and FACTORY RESET

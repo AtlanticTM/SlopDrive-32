@@ -99,9 +99,10 @@ and a literal `// ToDo` in upstream's own code). Until it is merged and released
 4. Re-apply the patch — or, if the PR landed upstream, DELETE the patch and this
    section, and set the pin to the release that contains it.
 5. Update the table at the top of this file.
-6. Rebuild and re-run `tools/slopsoak.py`. A transport change is not verified by
-   compiling; it is verified by soaking. See `docs/ws-transport-baseline.md` for
-   the links2004 numbers this replacement has to beat.
+6. Rebuild and re-run `tools/slopsoak.py` (SlopSync repo). A transport change
+   is not verified by compiling; it is verified by soaking. See
+   `docs/ws-transport-baseline.md` for the links2004 numbers this replacement
+   has to beat.
 
 ## Notes
 

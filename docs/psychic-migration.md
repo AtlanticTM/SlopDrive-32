@@ -360,9 +360,9 @@ have.
   `SlopHttpServer`'s constructor is the first knob (8192 is Psychic's own
   default and is probably fine).
 * **`/api/log`**: `[STALL] http:ui.update` should disappear as an HTTP symptom.
-* **SlopSync**: `tools/slopsync_probe.py --ip <ip> --port 82` should be
-  unaffected — the WS transport is a different library on a different port and
-  its symbol footprint is byte‑identical between the two builds.
+* **SlopSync**: `tools/slopsync_probe.py --ip <ip> --port 82` (SlopSync repo)
+  should be unaffected — the WS transport is a different library on a different
+  port and its symbol footprint is byte‑identical between the two builds.
 * **OTA**: the very first thing worth proving is that you can OTA *again* from
   the Psychic build. See §9.
 

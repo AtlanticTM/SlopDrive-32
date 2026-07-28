@@ -89,12 +89,11 @@ but it needs the numbers from (1)-(3) first.
 ## M-2 — RFC: interpolation / curve-family signaling in SlopSync
 
 **Status: DONE [2026-07-27].** Shipped as RFC-030 — `curve_family` (registry
-key 45), normatively specified in [`docs/slopsync/SPEC.md`](slopsync/SPEC.md)
-§9.6. Firmware deployment status: see
-[`docs/canon/LEDGER.md`](canon/LEDGER.md). The proposal below is kept as
-the design record; the shipped wire values (`unspecified`/`c1_cubic`/
+key 45), normatively specified in SlopSync SPEC.md §9.6. Firmware deployment
+status: see [`docs/canon/LEDGER.md`](canon/LEDGER.md). The proposal below is
+kept as the design record; the shipped wire values (`unspecified`/`c1_cubic`/
 `c2_quintic`/`step`) are the registry's, not this section's draft names.
-**[RFC-049](slopsync/RFC-QUEUE.md)(b) landed on top of this** (also 2026-07-27/28):
+**SlopSync RFC-049(b) landed on top of this** (also 2026-07-27/28):
 `requested_curve_family` (CBOR key 48) echoes the wish verbatim alongside
 the effective, possibly-downgraded `curve_family` (45) — see LEDGER.md
 Phase D, so a client can tell "honored" from "silently downgraded" without

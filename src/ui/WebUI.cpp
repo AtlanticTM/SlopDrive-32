@@ -547,7 +547,7 @@ void WebUI::handleApiCapabilities() {
     feat["advanced_pattern"] = true;
 
     // SlopSync hub — ecosystem clients discover the sync plane from here:
-    // binary WS on its own port, protocol id per docs/slopsync/SPEC.md.
+    // binary WS on its own port, protocol id per SlopSync SPEC.md.
     feat["slopsync"] = true;
     doc["slopsync_port"]  = (uint16_t)SLOPSYNC_WS_PORT;
     // Single source of truth: the registry constant that also names the WS

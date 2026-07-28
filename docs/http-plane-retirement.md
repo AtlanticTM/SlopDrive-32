@@ -161,14 +161,14 @@ flowchart LR
     n4 -->|"nothing left references it"| n5
     n5 --> done
 
-    n2 -.->|"soak re-run"| watch["watch: heap min-watermark\n(tools/slopsoak.py)"]
+    n2 -.->|"soak re-run"| watch["watch: heap min-watermark\n(slopsoak, SlopSync repo)"]
     n5 -.->|"soak re-run"| watch
 
     classDef startNode fill:#2b6cb0,color:#fff,stroke:#2b6cb0,stroke-width:2px
     classDef doneNode fill:#276749,color:#fff,stroke:#276749,stroke-width:2px
 ```
 
-Re-run `tools/slopsoak.py` after step 3 and again after step 5 (dashed
+Re-run `tools/slopsoak.py` (SlopSync repo) after step 3 and again after step 5 (dashed
 lines above). The number to watch is the heap min-watermark; the target is
 that it stops being interesting.
 
@@ -219,7 +219,7 @@ wire, not just asserted in a comment).
 
 A demoted client is not a locked-out client. It may connect, fetch the catalog,
 subscribe to telemetry, and **still e-stop** — `stop`/`estop` are role-exempt in
-0x0005's `option_access` ([RFC-025b](slopsync/RFC-QUEUE.md)), because safety outranks authorization. What
+0x0005's `option_access` (SlopSync RFC-025b), because safety outranks authorization. What
 it loses is the ability to command motion. That is the correct degraded state for
 a machine someone may be standing next to.
 
@@ -279,7 +279,7 @@ plus an operator-reachable PIN window. Until then the lockdown posture is
 
 New settings category: **`0x008A machine-modes` (STATE) + `0x0104 modes-set`
 (INTENT)** carrying `blend_mode`, `stream_speed_mode`, `overshoot_clamp`. Fully
-[RFC-009](slopsync/RFC-QUEUE.md) annotated, so a generic client renders them without knowing this device
+SlopSync RFC-009 annotated, so a generic client renders them without knowing this device
 exists. Live round-trip verified (`webui/test/slopsync-modes.mjs`): read device
 truth → write → ECHO carries the applied value → on-change STATE reflects it →
 restore.
@@ -533,8 +533,8 @@ status.
 | Servo status + register config | `/api/servo` | ❌ HTTP-only (LANDED since — `machine-admin` 0x30F0) |
 | clear fault | `/api/clearfault` | ❌ HTTP-only (LANDED since — `machine-admin` 0x30F0) |
 | save to NVS | (`WS_OP_SAVE`) | ❌ HTTP-only (LANDED since — `machine-admin` 0x30F0) |
-| capabilities (rail, ceilings, features) | `/api/capabilities` | ⚠️ duplicated — [RFC-016](slopsync/RFC-QUEUE.md) says capability discovery IS catalog introspection |
-| pattern presets | `/api/pattern/presets` | ⚠️ [RFC-021](slopsync/RFC-QUEUE.md) store channel exists; not wired |
+| capabilities (rail, ceilings, features) | `/api/capabilities` | ⚠️ duplicated — SlopSync RFC-016 says capability discovery IS catalog introspection |
+| pattern presets | `/api/pattern/presets` | ⚠️ SlopSync RFC-021 store channel exists; not wired |
 | limits, modes, move/home/pattern/safety | — | ✅ SlopSync |
 | all telemetry incl. plan-strip + anomalies | — | ✅ SlopSync |
 
@@ -700,7 +700,7 @@ missing piece is entirely on the machine's side of the glass.
 The knock-and-approve gap above (mode (a), `pairing_modes` bit0) is still open
 — it needs the WebUI ceremony described above. But mode (c), push-to-pair
 (`pairing_modes` bit2), landed on the firmware side without any UI at all,
-because [RFC-027](slopsync/RFC-QUEUE.md)(c) deliberately requires no display and no button: *"the power
+because SlopSync RFC-027(c) deliberately requires no display and no button: *"the power
 cord is the button."*
 
 `SlopSyncHubService::checkQuickBootPairingGesture()` (called once from

@@ -263,7 +263,7 @@ at configured ceilings.
   |------|-------------|
   | **Serial** | USB Serial dedicated to Intiface's serial comm manager — lowest latency/jitter path. |
   | **BLE** | NimBLE-based GATT server advertising a Nordic-UART-style service (separate write/notify characteristics) for a TCode RX/TX pair. |
-  | ~~**WebSocket Server** / **WSDM Client**~~ | **REMOVED (fw 2.1.65).** The `:55555` TCode WebSocket server and the outbound Intiface Device-WebSocket client are both gone. **SlopSync is now the only input and output.** MultiFunPlayer talks to the device through the native SlopSync plugin (`clients/mfp-slopsync/`); Intiface is planned to gain native SlopSync support rather than the device continuing to speak Intiface's protocol. |
+  | ~~**WebSocket Server** / **WSDM Client**~~ | **REMOVED (fw 2.1.65).** The `:55555` TCode WebSocket server and the outbound Intiface Device-WebSocket client are both gone. **SlopSync is now the only input and output.** MultiFunPlayer talks to the device through the native SlopSync plugin (`clients/mfp/` in the SlopSync repo); Intiface is planned to gain native SlopSync support rather than the device continuing to speak Intiface's protocol. |
   | **Dongle Transport** | UART relay from the onboard C5-Zero coprocessor (itself fed wirelessly by the external T-Dongle C5 over ESP-NOW). `DongleTransport` reads that UART (GPIO 43/44, 460800 baud) and feeds the parser exactly like `SerialTransport` does for USB. |
   | **OSSM BLE** | SlopDrive-32 advertises itself as a **stock KinkyMakers OSSM device** (BLE peripheral/server, not a client) so third-party OSSM-ecosystem apps (OSSM Possum, XToys) can control it directly — full command/state/pattern-list characteristic set, with a 1s-grace + 2s ease-out safety ramp on disconnect. See the Known Gap note above re: continuous position streaming. |
 
@@ -670,7 +670,6 @@ SlopDrive-32/
 │   ├── slopglow/                          # SlopGlow — LED semantics engine (CLAUDE.md §7.5)
 │   ├── sloplog/                           # SlopLog — logging (CLAUDE.md §7.5)
 │   ├── slopmotion/                        # SlopMotion — jerk-limited motion core (CLAUDE.md §7.6)
-│   ├── slopsync/                          # SlopSync — protocol reference library (CLAUDE.md §8)
 │   ├── asynctcp/                          # Vendored async TCP backend (the sd32-ota WS transport)
 │   └── espasyncwebserver/                 # Vendored ESP32Async AsyncWebSocket
 ├── boards/                                # Custom board definitions
@@ -683,7 +682,6 @@ SlopDrive-32/
 │   │   ├── main.js                        # App entry, boot sequence, top-level wiring
 │   │   ├── App.svelte                     # Root component
 │   │   ├── style.css                      # Full UI stylesheet
-│   │   ├── core/slopsync/                 # SlopSync wire client (cbor, frames, session, catalog, credentials)
 │   │   ├── model/                         # Reactive state: machine/dashboard/shadow stores, roles, settings, format
 │   │   ├── ui/                            # Svelte components (HeroStrip, RailWidget, SlopSyncPane, LogPane, PairingPane, ...)
 │   │   └── fonts/                         # Self-hosted webfonts (inlined at build time)

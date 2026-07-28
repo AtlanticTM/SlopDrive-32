@@ -12,7 +12,7 @@
 //   endpoint" as the BLE/BEACON flag.
 //
 //   registry.yaml sections are cited directly rather than via
-//   generated/registry_constants.hpp: tools/gen_registry_header.py does not
+//   generated/registry_constants.hpp: the SlopSync repo's tools/gen_registry_header.py does not
 //   emit `udp_discovery`/`ble_adv_flags` as C++ constants as of the RFC-046
 //   landing (they are the identity/port numbers a SOCKET binds to and an
 //   ADVERTISING PAYLOAD builds from, not CBOR wire numbers the codegen's

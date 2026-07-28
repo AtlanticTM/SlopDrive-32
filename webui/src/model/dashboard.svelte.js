@@ -5,7 +5,7 @@
  * file has never heard of a channel, a field, or a machine; it only knows
  * "some string id wants a span and a position." That is deliberate: the
  * device-knowledge checker (test/check-device-knowledge.mjs) enforces zero
- * wire vocabulary above core/slopsync/, and a dashboard-layout engine has no
+ * wire vocabulary above the SlopSync protocol client, and a dashboard-layout engine has no
  * business needing any.
  *
  * ── STABILITY ACROSS MACHINES IS THE KEY REQUIREMENT ────────────────────────

@@ -178,36 +178,37 @@ Every command becomes ONE trajectory planned from the engine's actual
   temporaries. Never shrink it ([TRAPS.md](TRAPS.md) T1 class).
 
 ## 9. SlopSync (protocol + library — NON-NEGOTIABLE)
-The ecosystem sync protocol (device-shadow + capability negotiation). **The
-spec is the product; the library is its reference implementation.**
-* **Map:** [`docs/slopsync/SPEC.md`](../slopsync/SPEC.md) (normative);
-  [`docs/slopsync/registry/registry.yaml`](../slopsync/registry/registry.yaml) (**single source of truth for every
-  wire number**); `schema/catalog.cddl`, `vectors/manifest.yaml`,
-  `examples/session-traces.md`. Library `lib/slopsync/`: zero-dependency,
-  header-only C++20, hardware-free; layering acyclic bottom-up
-  `generated/ → core/ → util/ → wire/ → transport/ → channel/ → session/ →
-  hub|client`. Tests `test/native/test_slopsync_*`; codegen
-  `tools/gen_registry_header.py`.
-* **Registry discipline:** never hand-edit `generated/registry_constants.hpp`.
-  `registry.yaml` → regenerate → commit both; `--check` green before commit.
-  Released numbers are never reused or renumbered. `tools/catalog_lint.py`
-  after catalog changes ([TRAPS.md](TRAPS.md) T12).
-* **Spec-gap ritual:** need a number/rule the spec lacks → fix
-  `registry.yaml`/`SPEC.md` FIRST, regenerate, then code against the constant.
-  Never a code-local magic number for anything wire-visible.
-* **Frozen ([CANON C-6](CANON.md)):** `conformance/mini_catalog.hpp` +
-  `vectors/fixtures/mini-catalog.yaml` (hash-pinned in canon_lint), golden
-  byte arrays in tests, and the public APIs + delegate interfaces + doc
-  comments of `hub.hpp`/`client.hpp` (extend additively; never change
-  signatures/semantics).
-* **Library invariants:** std headers only (no Arduino/FreeRTOS/
-  heap-in-steady-state/exceptions/threads); time via injected `IClock`,
-  randomness via injected `IRandom` (determinism is conformance); wraparound
-  compares only in `util/serial_arithmetic.hpp`; packed layouts evolve
-  append-only (changed/removed field = NEW channel id); transport adapters
-  live in firmware `src/comms/` implementing `ITransport`, never in the lib.
-  The firmware `HubDelegate` submits to the MotionArbiter — SlopSync never
-  bypasses the sole-caller rule.
+The ecosystem sync protocol (device-shadow + capability negotiation) is
+developed in its OWN repo, **SlopSync** (sibling checkout `../SlopSync`,
+pinned at this repo's root by `slopsync.pin`) — this machine repo CONSUMES
+it, never edits it. The spec (SPEC.md, RENDERING.md, registry.yaml, its
+codegen, its own library invariants, its own frozen-artifact list, its
+`lib/slopsync/` layering and tests) is that repo's doctrine now, documented
+there — restating it here would violate CANON C-1. What follows is this
+machine's half of the boundary.
+* **Consumption mechanics:** `platformio.ini` pulls `lib/slopsync` via
+  `symlink://../SlopSync/lib/slopsync` in `common_s3_libs.lib_deps`, and an
+  explicit `-I../SlopSync/lib/slopsync/include` for `env:native` (the two
+  surviving native suites, `test_slopsync_devicecatalog` +
+  `test_slopsync_discovery`, are this machine's own headers exercising the
+  sibling's library). `tools/gen_channel_map.py` and `tools/gen_channel_grid.py`
+  read the sibling's `spec/registry/registry.yaml` to render THIS device's
+  `docs/slopsync/CHANNEL-MAP.md`. `tools/catalog_lint.py` reads the sibling's
+  generated `registry_constants.hpp`. `tools/canon_lint.py`'s pin rule FAILs
+  if `../SlopSync`'s HEAD doesn't match `slopsync.pin`, and cross-checks the
+  sibling's frozen conformance artifacts (`mini_catalog.hpp`,
+  `mini-catalog.yaml`) against the same hashes SlopSync's own
+  `tools/slopsync_lint.py` pins — belt and suspenders across the repo
+  boundary.
+* **Spec-gap ritual (cross-repo order):** need a number/rule the spec lacks →
+  fix it in the SlopSync repo FIRST (registry.yaml/SPEC.md, regenerated,
+  committed there), bump `slopsync.pin` to the new sha, THEN code against the
+  constant here. Never a code-local magic number for anything wire-visible,
+  and never a spec change made from this repo.
+* **Frozen ([CANON C-6](CANON.md)):** the conformance artifacts and the
+  `hub.hpp`/`client.hpp` public API freeze are SlopSync's own frozen list now
+  (enforced by its `tools/slopsync_lint.py`); this repo's belt-and-suspenders
+  half is the sha256 cross-check in `tools/canon_lint.py` described above.
 * **Firmware shape:** `SlopSyncHubService` (composition root, own Core-0
   task, single-task hub — [TRAPS.md](TRAPS.md) T5) + `SlopSyncAsyncWsTransport`
   (AsyncWebSocket on `SLOPSYNC_WS_PORT`, subprotocol `slopsync.v1`) +
@@ -224,7 +225,7 @@ spec is the product; the library is its reference implementation.**
   channels; HTTP remains for fallback polling and bootstrap only
   ([`docs/http-plane-retirement.md`](../http-plane-retirement.md)).
 * **Transport doctrine (operator rulings 2026-07-27, calibrated):** SlopSync
-  is the only protocol; transport-agnostic (SPEC §13, RFC-043 profiles).
+  is the only protocol; transport-agnostic (SlopSync SPEC §13, SlopSync RFC-043 profiles).
   Hardware hubs: **BLE GATT is the conformance floor** (infrastructure-free
   control, discovery, future WiFi provisioning); **WebSocket is the
   preferred high-throughput path**, expected on ESP32-class silicon; clients
@@ -234,19 +235,20 @@ spec is the product; the library is its reference implementation.**
   OSSM-reference-PCB hubs are first-class and serve nothing).
 * **Intake doctrine (operator ruling 2026-07-27):** on THIS machine the only
   way in and out is SlopSync. Other firmwares are never forced — SlopSync
-  competes via the CLIENT ONRAMP (RFC-044): TCode passthrough (criminally
+  competes via the CLIENT ONRAMP (SlopSync RFC-044): TCode passthrough (criminally
   easy — clients feed the TCode they already generate through a SlopSync
   session) → native segments (0x2101, better) → native samples (0x2100,
   dense). First-party client support in MFP/Intiface/etc. is maintained and
   encouraged. Legacy raw-TCode transports (SER/BT/DONGLE) were REMOVED
   2026-07-27 (operator ruling executed: SlopSync is the only plane; TCode
-  integration is a CLIENT-SIDE adapter per RFC-044, never a hub-side
+  integration is a CLIENT-SIDE adapter per SlopSync RFC-044, never a hub-side
   stream). This firmware's BLE GATT `ITransport` LANDED and is deployed
   (Phase E + overnight bench, fw 2.1.82; ledger has the receipts); the
   `OssmBleService` masquerade was REMOVED 2026-07-27 (SlopSync-over-BLE
   replaces it, ledger has the receipt).
-* **Clients:** `clients/mfp-slopsync/` — SlopSync.cs + SlopSync.xaml are the
-  whole shipped plugin (dev-only harnesses never ship). `LiveWireTest`
-  refuses to run homed; run it TWICE back-to-back ([TRAPS.md](TRAPS.md) T3 check). Verifier:
-  `tools/slopsync_probe.py --ip <ip> --port 82`.
+* **Clients:** the MFP plugin (SlopSync.cs + SlopSync.xaml, dev-only harnesses
+  never ship) and the verifier (`tools/slopsync_probe.py --ip <ip> --port 82`)
+  both live in the SlopSync repo's `clients/mfp/` and `tools/` now.
+  `LiveWireTest` refuses to run homed; run it TWICE back-to-back
+  ([TRAPS.md](TRAPS.md) T3 check).
 * **Branch/milestone status:** [`docs/canon/LEDGER.md`](LEDGER.md) — never here.

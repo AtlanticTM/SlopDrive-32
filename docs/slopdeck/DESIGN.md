@@ -2,9 +2,9 @@
 
 Status: DESIGN (operator-ratified direction, 2026-07-27; §8 delivery ruling
 landed same day). This is the home ([CANON C-1](../canon/CANON.md)) for
-the client/widget architecture. Wire truth stays in
-[`docs/slopsync/`](../slopsync/SPEC.md); SlopDeck is everything above the
-wire.
+the client/widget architecture. Wire truth stays in the SlopSync repo
+(sibling checkout, pinned by `slopsync.pin`); SlopDeck is everything above
+the wire.
 
 ## 1. What SlopDeck is
 
@@ -48,7 +48,7 @@ channel from catalog metadata alone: layout fields → readouts, schema keys →
 typed setting cards, options → selects, `option_access` → role gating, safety
 exemptions honored. Never removed, never machine-specific. This tier is the
 conformance claim "works with every hub" and is the client-side floor of
-[RENDERING.md](../slopsync/RENDERING.md)'s derivation chain (catalog entry →
+the SlopSync repo's RENDERING.md derivation chain (catalog entry →
 category → rank → archetype → widget pattern → region → page).
 
 **Tier 1 — standard widgets (the earned set).** Rich widgets that BIND TO
@@ -114,7 +114,7 @@ later firmware and being picked up automatically (left).
 A widget declares:
 - `binds`: registered channel id(s) (and/or intent families) it upgrades;
 - `renders`: the slot it fills (dashboard card, hero, strip, pane) — the same
-  regions [RENDERING.md](../slopsync/RENDERING.md) §9 defines for the generic
+  regions SlopSync's RENDERING.md §9 defines for the generic
   renderer, so a Tier-1 widget composes into the page tree Tier 0 already
   builds instead of fighting it;
 - what it receives: a scoped view of the shadow store for its channels + the
@@ -205,7 +205,7 @@ building/testing the SlopMotion-tuning and fray-d-Advanced Tier-1 widgets
 ## 8. RULED (operator, 2026-07-27) — delivery vehicles
 
 **Serving a UI is a hub capability, never a requirement**
-([RFC-043](../slopsync/RFC-QUEUE.md#rfc-043--transport-conformance-profiles-which-bindings-a-hub-must-offer)). One
+(SlopSync RFC-043). One
 Svelte client kernel, three delivery vehicles, tiers orthogonal to delivery:
 
 - **Embedded (hubs with the capability):** a thin client exposing ALL
@@ -222,7 +222,7 @@ Svelte client kernel, three delivery vehicles, tiers orthogonal to delivery:
   buying back what browsers confiscate: mDNS discovery (`_slopsync._tcp` —
   no web page can ever do this), no mixed-content wall, Tier 2 plugin
   loading from disk, and non-WS transports (SlopSync over BLE GATT /
-  serial — [RFC-043](../slopsync/RFC-QUEUE.md#rfc-043--transport-conformance-profiles-which-bindings-a-hub-must-offer)'s hub-side twin).
+  serial — SlopSync RFC-043's hub-side twin).
 
   **Truth check (2026-07-28): the firmware half of this landed.**
   SlopSync-over-BLE-GATT (the hub-side `ITransport`) plus UDP discovery
@@ -288,12 +288,12 @@ just works — and if an iOS store listing ever becomes possible, it just
 works too (the Tauri iOS target stays buildable; no promises on Apple).
 
 **Transport doctrine (same ruling):** SlopSync is the only protocol that
-matters and is transport-agnostic ([SPEC.md](../slopsync/SPEC.md) §13);
+matters and is transport-agnostic (SlopSync SPEC.md §13);
 every hub SHOULD expose both WS and BLE GATT on ESP32-class hardware. The
 legacy OSSM BLE masquerade is EOL — SlopSync-over-BLE replaces it, and
 SlopDeck's Shell is what speaks it client-side (browsers can't, portably).
 See [`docs/canon/DOCTRINE.md`](../canon/DOCTRINE.md) §9 (transport
-doctrine) + [RFC-043](../slopsync/RFC-QUEUE.md#rfc-043--transport-conformance-profiles-which-bindings-a-hub-must-offer).
+doctrine) + SlopSync RFC-043.
 
 ## 9. Framework ruling — Svelte 5, with one piece of insurance
 

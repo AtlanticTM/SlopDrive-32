@@ -4,7 +4,7 @@
 //   slopmotion::Engine behind a real WebSocket server, with FAS modeled at
 //   the MotorDriver seam. Flag usage is the single copy printed below (the
 //   unknown-mode branch); it is not restated here to avoid the two drifting.
-// See: python tools/slopsync_probe.py --ip 127.0.0.1 (conformance check)
+// See: python ../SlopSync/tools/slopsync_probe.py --ip 127.0.0.1 (conformance check)
 
 #include <atomic>
 #include <chrono>

@@ -227,7 +227,7 @@ That missing 2 % was never the planner — it was the sim running the wrong mode
 ```bash
 # full wire pass: HELLO→WELCOME→GRANT→retained safety→move INTENT/ECHO→
 # 0x0084 chase stream→deadman→0x0085 segments→HTTP counters   (16/16)
-.venv/Scripts/python.exe tools/slopsync_probe.py --ip 127.0.0.1 --port 8282 --stream 4 --segments 4
+.venv/Scripts/python.exe ../SlopSync/tools/slopsync_probe.py --ip 127.0.0.1 --port 8282 --stream 4 --segments 4
 
 # slopsync-js core (the WebUI's future wire layer), two back-to-back sessions
 node webui/test/slopsync-live.mjs --ip 127.0.0.1 --port 8282
@@ -515,6 +515,6 @@ named firmware source and verified over the wire, not "looks about right".
 * **Sim/capabilities discovery over SlopSync**: `fw_version`/feature flags still
   come from HTTP `/api/capabilities`; a hub-identity STATE channel (or WELCOME
   extension) would finish the HTTP demolition for apps without a page.
-* Existing queue (docs/slopsync/RFC-QUEUE.md) RFC-001 (NACK intent correlation)
+* Existing queue (SlopSync repo's RFC-QUEUE.md) RFC-001 (NACK intent correlation)
   and RFC-003 (stored-vs-effective flags) will matter for the client cockpit's
   shadow lifecycle — same batch.

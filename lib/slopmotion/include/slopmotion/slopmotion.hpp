@@ -1119,8 +1119,8 @@ private:
         // reshape/centering feedback loop's own dynamics had already pulled
         // chord_in below the k-factor bound — an interaction with a physically
         // sensitive, operator-tuned control loop that this pass could not
-        // adequately re-validate. Left OPEN, per docs/slopsync/RFC-QUEUE.md's
-        // RFC-049(c): a real fix needs the scheduling-depth signal to come
+        // adequately re-validate. Left OPEN, per SlopSync RFC-049(c) (SlopSync
+        // repo): a real fix needs the scheduling-depth signal to come
         // from somewhere that can tell "a successor is coming, just not yet
         // queued" apart from "this is genuinely the last segment" — which
         // chord_in alone cannot do — rather than trading the tail case's

@@ -402,8 +402,8 @@ def check_catalog_annotations(catalog_bytes):
 
     # RFC-009 item 4 -- dynamic enabled state. Bit i gates the i-th
     # setting-annotated field of the SAME layout, so the check is that the mask
-    # can address every setting on its channel. A mask with fewer labelled bits
-    # than the channel has settings cannot grey the tail of the card.
+    # can address every setting on its channel. A mask with fewer labeled bits
+    # than the channel has settings cannot gray the tail of the card.
     if not masks:
         bad("cat_enabled_mask", "no channel declares a meta.enabled_mask -- nothing tells a client "
             "which controls are settable RIGHT NOW (RFC-009 item 4)")
@@ -414,14 +414,14 @@ def check_catalog_annotations(catalog_bytes):
             n_settings = sum(1 for x in e.get(CAT_E["layout"], []) if CAT_F["setting_key"] in x)
             bits = f.get(CAT_F["bits"]) or {}
             if len(bits) < n_settings:
-                problems.append("0x%04X: %d labelled bits for %d settings"
+                problems.append("0x%04X: %d labeled bits for %d settings"
                                 % (eid, len(bits), n_settings))
         if problems:
             bad("cat_enabled_mask", "enabled_mask cannot address every setting: %s"
                 % ", ".join(problems))
         else:
             ok("cat_enabled_mask", "%d enabled_mask field(s), each addressing every setting on its "
-               "channel (disabled means grey, never hide)" % len(masks))
+               "channel (disabled means gray, never hide)" % len(masks))
 
     # RFC-009 gap 3 -- a u8-backed single-select must NAME its choices, or the
     # client can only show a number and the user needs the firmware source.
@@ -492,7 +492,7 @@ ROLE_NAME = {0: "watch", 1: "control", 2: "configure"}
 # registry `safety_intent_ops` (docs/slopsync/registry/registry.yaml). estop and
 # stop are ROLE-EXEMPT (any session, including `watch`, may stop the machine);
 # everything else needs `control`. The catalog carries this per-op split as
-# index-aligned `option_access`, so a generic client greys correctly instead of
+# index-aligned `option_access`, so a generic client grays correctly instead of
 # discovering it by NACK.
 SAFETY_OP = {
     "estop_clear": 1, "stop": 2, "hold": 3, "pause": 4, "resume": 5, "estop": 6,
@@ -1636,7 +1636,7 @@ def _run_session(ws, args):
         # The two RFC-009 settings channels. Subscribed so the enabled_mask can
         # be cross-checked against live machine state rather than merely
         # decoded -- a mask is only worth anything if it AGREES with the
-        # machine, and a mask that lies is a UI that greys the wrong control.
+        # machine, and a mask that lies is a UI that grays the wrong control.
         (CH_MACHINE_CONFIG, 0.0, PRIORITY["normal"]),
         (CH_PATTERN_STATE, 0.0, PRIORITY["normal"]),
         (CH_MOTION_ANOMALY, 0.0, PRIORITY["normal"]),
@@ -1938,7 +1938,7 @@ def _run_session(ws, args):
     # same refusals the delegate applies (ESTOP_ACTIVE / NOT_HOMED), so it is
     # checked against the e-stop bit in 0x0003 and the homed bit in 0x1100.
     # This is the ground-truth doctrine as a wire test: a mask that disagrees
-    # with the machine greys the wrong control, and on this product a UI that
+    # with the machine grays the wrong control, and on this product a UI that
     # lies about machine state is a safety defect.
     cfg_snap, pat_snap = _last(CH_MACHINE_CONFIG), _last(CH_PATTERN_STATE)
     if cfg_snap is None or len(cfg_snap) < 33:
@@ -1949,7 +1949,7 @@ def _run_session(ws, args):
         cfg_mask = cfg_snap[32]
         # All seven limits are editable at all times on this machine (nothing
         # REFUSES a config-set; out-of-range values are clamped, which is what
-        # min/max is for). A hub that greys one here had better mean it.
+        # min/max is for). A hub that grays one here had better mean it.
         ok("cfg_mask", "machine-config(0x1000) enabled_mask=0x%02X (%d of 7 limit settings "
            "currently writable)" % (cfg_mask, bin(cfg_mask & 0x7F).count("1")))
 
@@ -1971,10 +1971,10 @@ def _run_session(ws, args):
         if actually_enabled == expect_enabled:
             ok("pattern_mask", "pattern-state(0x1200) enabled_mask=0x%02X AGREES with the machine "
                "(homed=%s estop=%s -> pattern controls %s)"
-               % (pat_mask, homed, estop, "settable" if expect_enabled else "greyed"))
+               % (pat_mask, homed, estop, "settable" if expect_enabled else "grayed"))
         else:
             bad("pattern_mask", "pattern-state(0x1200) enabled_mask=0x%02X CONTRADICTS the machine "
-                "(homed=%s estop=%s) -- a client would grey the wrong controls"
+                "(homed=%s estop=%s) -- a client would gray the wrong controls"
                 % (pat_mask, homed, estop))
 
     # RFC-016 -- the feature gate, verified in BOTH directions: a hub that

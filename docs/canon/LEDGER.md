@@ -92,9 +92,10 @@ commit as any change that alters it (C-3).
 
 - **Wire-visible British spellings: RESPELLED** (pre-release ruling — "that's
   a stain that never comes out if deferred"). All catalog strings, the
-  `centring` field/schema name, and the `waveform_centered` token family
-  (enum + label tables + device catalog + sim + test asserts + evidence
-  captures) flipped in one pass; device catalog etag changes on next deploy.
+  schema field name respelled to `centering`, and the `waveform_centered`
+  token family (enum + label tables + device catalog + sim + test asserts +
+  evidence captures) flipped in one pass; device catalog etag changes on next
+  deploy.
   Frozen mini-catalog untouched (contains no British spellings). canon_lint
   C-11: 0 findings. [verified 2026-07-27 — lint + native suite + sd32-ota
   build]
@@ -115,8 +116,8 @@ commit as any change that alters it (C-3).
   flagged the fixture-regen fork as a pending ruling; Phase C2's explicit
   instruction was to regenerate, so it was. `webui/test/fixtures/slopsim-catalog.bin`
   is now the FRESH capture (4,272 B, 21 channels, etag `e54d5e81c589f31d`) —
-  the old 10,283 B fixture (which carried `centred`, since respelled, and
-  mirrored the device far more fully) is superseded. `slopsync-wire.test.mjs`'s
+  the old 10,283 B fixture (which carried the pre-respell British field name,
+  since fixed, and mirrored the device far more fully) is superseded. `slopsync-wire.test.mjs`'s
   one dependent assertion (0x1100 motion / `raw_10um`, was 0x0080) was moved to
   an explicit `[SKIP-EXPECTED-GAP]` (never deleted) rather than left failing —
   `ALL PASS`. The sim-fidelity gap this entry described is now CLOSED — see
@@ -998,7 +999,8 @@ T13), `docs/canon/LEDGER.md`, `SD32-OVERNIGHT-REPORT.md`.
 
 **Lane note (resolved, recorded for the audit trail):** mid-pass
 `canon_lint.py` briefly showed one british-spelling finding
-(`sim/slopsim/src/machine/MachineSim.cpp:905`, 'labelled') — pre-existing,
+(`sim/slopsim/src/machine/MachineSim.cpp:905`, a British-spelled word in a
+comment) — pre-existing,
 unrelated to this bug, and inside the file a PARALLEL sim agent was editing
 at the time, so it was deliberately NOT touched from this lane (concurrent
 edits to one file lose updates). That agent fixed it during this pass; the

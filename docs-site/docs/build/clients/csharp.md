@@ -37,7 +37,7 @@ skim another.
 4. Adopt retained STATE before rendering anything.
 5. Send an [intent](../../reference/dictionary.md#intent) and render the
    [echo](../../reference/dictionary.md#echo), never the request.
-6. Keep the session alive, and honour the
+6. Keep the session alive, and honor the
    [deadman](../../reference/dictionary.md#deadman) if you own a source.
 7. Handle NACKs, including the range fallback for a code you do not know.
 

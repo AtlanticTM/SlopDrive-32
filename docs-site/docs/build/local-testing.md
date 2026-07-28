@@ -105,7 +105,7 @@ python tools/slopsync_probe.py --ip <hub-ip> --pair           # pairing scenario
 | `--pair-state <file>` | Keep the administrator's identity, so a second run reconnects as the same device |
 
 Two practical notes. Motion steps are dropped by the hub's homed gate on an
-unhomed machine, which is correct behaviour and still proves the whole wire
+unhomed machine, which is correct behavior and still proves the whole wire
 path — use `--no-motion` when you only want the protocol checked. And point it
 at the simulator before you point it at hardware; the transcript is identical.
 
@@ -155,7 +155,7 @@ pio test -e native
 `test/fuzz/` holds seven libFuzzer targets, one per parser surface. They prove
 [parser totality](../reference/dictionary.md#parser-totality): any byte string
 maps to accept-or-reject, with no out-of-bounds read, no unbounded allocation
-or recursion, and no undefined behaviour.
+or recursion, and no undefined behavior.
 
 Both directions are in scope. A client that auto-connects to a discovered
 machine parses whatever that machine sends, so a hostile hub must not be able

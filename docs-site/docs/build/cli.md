@@ -88,7 +88,7 @@ python tools/slopscope.py record --ip 127.0.0.1 --port 82 \
 | `--seconds` | Capture length. `0` runs until ctrl-c |
 | `--out` | Trace file. Defaults to `slopscope-<stamp>.jsonl` |
 | `--render` | Also write the HTML graph here |
-| `--theme`, `--palette` | Passed to the renderer. See [colour](#colour) |
+| `--theme`, `--palette` | Passed to the renderer. See [color](#color) |
 | `--window MIN:MAX` | Escape hatch for a hub whose catalog declares no window role. Recorded as an operator override, never as machine truth |
 
 It prints how it found every channel, which is worth reading once:
@@ -163,7 +163,7 @@ function of the trace file, so anyone you send a trace to can render it.
 The page carries a toolbar: each series on or off, the plan envelope, the
 anomaly marks, palette, theme and reset-zoom. Under the graph are three
 collapsed tables — trace metadata, the anomaly log, and a series summary. Every
-value on the graph is reachable in those tables without seeing a single colour.
+value on the graph is reachable in those tables without seeing a single color.
 
 ### The trace format
 
@@ -262,9 +262,9 @@ tuning question. A gap with speed pinned at the ceiling is a demand the machine
 was never able to serve, and the fix belongs in the app, in the script, or in
 the limits — not in the planner.
 
-### Colour {#colour}
+### Color {#color}
 
-The colours are the product's own, so a graph reads like the WebUI and like
+The colors are the product's own, so a graph reads like the WebUI and like
 these docs.
 
 | Series | Meaning |
@@ -279,12 +279,12 @@ The planner's target has already passed arbitration, clamping and the window,
 so it belongs to the reality family; the lightness step says "accepted, not yet
 executed".
 
-!!! warning "Two of these lines are not distinguishable by colour"
+!!! warning "Two of these lines are not distinguishable by color"
 
     Measured, not assumed: the reality and intent pair is **ΔE 1.1** under
     deuteranopia, against 11.4 under normal vision.
 
-    So colour is never the only encoding. Every series also carries its own
+    So color is never the only encoding. Every series also carries its own
     dash pattern, a legend key drawn in that pattern, a direct end-label on the
     line, and a named readout under the crosshair. The series-summary table
     gives every value in text.
@@ -361,7 +361,7 @@ the machine and leaves it unhomed. `--bench-home` asserts a stroke window
 nothing measured, and is for motorless rigs. Neither is a default.
 
 Motion steps are dropped by the hub's homed gate on an unhomed machine. That is
-correct behaviour, and the wire path is still fully exercised, so an unhomed
+correct behavior, and the wire path is still fully exercised, so an unhomed
 run is the safe way to prove a hub.
 
 ### Run it twice

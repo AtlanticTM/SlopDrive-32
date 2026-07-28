@@ -101,6 +101,7 @@ AIM_Servo_Motor_Datasheet_EN_with_images.pdf
 # swallowed docs-site/docs/build/ (authored pages, never build output).
 /build/
 sim/slopsim/build/
+sim/slopbench/build/
 test/fuzz/build/
 $null
 flashpack/

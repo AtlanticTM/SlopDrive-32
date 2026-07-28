@@ -1,0 +1,23 @@
+# tiny-axis.bench — the potato-client floor: one axis, one state, one intent.
+# Smoke-test target for "does the write plane work at all".
+
+hub
+  name tiny-axis
+  product SlopBench-Tiny
+  fw_version 0.1.0
+  echo_delay_ms 0
+
+# A live telemetry channel: pos_mm is the mirror target of axis-set below;
+# vel_mm_s is never written, only animated, so a client sees SOMETHING move
+# with nobody driving it (task item 5).
+state 0x1000 telemetry
+  category motion
+  rate_hz 20
+  field pos_mm f32 mm 0 500
+  field vel_mm_s f32 mm/s -1000 1000
+  animate vel_mm_s sine 0.1 200 0
+
+intent 0x3000 axis-set
+  writes 0x1000
+  access control
+  field pos_mm f32 mm 0 500 key=1

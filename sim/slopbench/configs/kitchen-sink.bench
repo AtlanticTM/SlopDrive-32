@@ -1,0 +1,79 @@
+# kitchen-sink.bench — exercises every archetype SlopBench understands: every
+# packed field type, every schema field type, both animation kinds, a
+# hub-wide default echo delay AND a per-channel override, a vendor-defined
+# category, and one declared-only channel of each of STREAM/EVENT/STORE.
+
+hub
+  name kitchen-sink
+  product SlopBench-KitchenSink
+  fw_version 0.2.0
+  echo_delay_ms 200
+
+state 0x1000 telemetry
+  category motion
+  rate_hz 30
+  field pos_mm f32 mm 0 1000
+  field vel_mm_s f32 mm/s -2000 2000
+  field flags bitfield8 flag
+  field servo_temp_c f32 C 20 90
+  animate vel_mm_s sine 0.2 300 0
+  animate servo_temp_c ramp 0.05 20 90
+
+state 0x1010 limits
+  category limits
+  rate_hz 0
+  field window_min f32 mm 0 1000
+  field window_max f32 mm 0 1000 default=1000
+  field user_speed f32 mm/s 1 5000 default=500
+
+state 0x1020 device-info
+  category system
+  rate_hz 0
+  field label str16 -
+  field mode u8 - 0 3
+  field warmup_pct u16 % 0 100
+
+# A device-defined category (not one of the fourteen registry names):
+# categoryIdFor() assigns it a vendor id (>=0x40) and carries its own name as
+# the required categoryLabel, exactly like the real device's benchrig-style
+# vendor categories.
+state 0x1030 vendor-card
+  category weirdthing
+  rate_hz 1
+  field arb_counter u32 count 0 4000000000
+
+# writes 0x1010 -- uses the hub-wide default echo_delay_ms (200 ms above).
+intent 0x3000 config-set
+  writes 0x1010
+  access control
+  field window_min f32 mm 0 1000 key=1
+  field window_max f32 mm 0 1000 key=2
+  field user_speed f32 mm/s 1 5000 key=3
+
+# writes 0x1020 -- overrides the hub default with its OWN echo delay, and
+# carries one write-only field (armed) that mirrors nowhere: still clamped
+# and echoed, just not reflected into any STATE.
+intent 0x3010 device-set
+  writes 0x1020
+  access configure
+  echo_delay_ms 800
+  field label tstr - key=1
+  field mode uint - 0 3 key=2
+  field warmup_pct f32 % 0 100 key=3
+  field armed bool - key=4
+
+event 0x4000 alerts
+  category safety
+  field code uint - key=1
+  field detail tstr - key=2
+
+stream 0x2100 raw-samples
+  category tuning
+  rate_hz 100
+
+store 0x5000 presets
+  category library
+  kind bench.preset
+  capacity 16
+  per_item_max 256
+  name_max 24

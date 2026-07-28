@@ -2402,6 +2402,14 @@ per the prior ruling.
   planned below.
 - The 35 `DEMO-CANDIDATE:` markers remain a separate parked pass, per the
   kickoff brief.
+- **Actual-is-actual (operator, 2026-07-28, post-kickoff):** the motor does
+  NOT need to be plugged in for step 1's end-to-end check. The firmware's
+  reported position IS "actual" for UI-verification purposes; lag =
+  commanded − reported actual. Divergence between reported and physical
+  position is hardware failure outside any client's control — and the UI
+  doctrine already forbids client-side hardware-health inference
+  (`docs/webui-architecture.md` §7). Step 1 is fully verifiable on the
+  unplugged bench; the "partial until motor-powered" caveat is void.
 
 **Findings recorded (kickoff truth pass):**
 

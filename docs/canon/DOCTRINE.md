@@ -74,6 +74,27 @@ ESP32-S3 ecosystem. Hardware-agnostic, community-extensible.
 * `float` over `double` (S3 hardware FPU) — double math only at plan-time
   events, never per-sample.
 * Comments are constraints, not stories ([CANON C-12](CANON.md)).
+* **Comment style law (operator-stamped 2026-07-28, applied retroactively
+  by the ruling-5 pass):** scope src/, include/, lib/, sim/, test/ C++.
+  * FILE HEADER: every .h/.hpp/.cpp opens with `// <Name> — <one-line job>`,
+    then `// Constraints:` lines holding only load-bearing rules (threading,
+    ownership, units, never-do's), then `// See:` pointers if real ones
+    exist. No history, no authorship, no dates, no feature lists.
+  * SECTION BANNERS: `// ---- <section name> ----` dash-padded to column
+    80 (the tree's dominant pre-law width; amended from 76 on 2026-07-28
+    to normalize to reality instead of repadding against it). Name only —
+    no hex ids, no numbering, no box art. RFC-nnn/T-nn references in a
+    banner name are POINTERS (allowed), not numbering. Files over ~150
+    lines are divided into their natural sections this way.
+  * STYLE: `//` everywhere; `/* */` only in license headers. Multi-line =
+    consecutive `//` lines indented with the code they bind to.
+  * CONTENT (C-12 mechanized): a comment is exactly one of — a CONSTRAINT,
+    an INVARIANT the code cannot show, a POINTER (TRAPS/SPEC/docs), or
+    `// TODO(<ledger item or RFC-nnn>): <change>`. A TODO without a home
+    reference is a finding. Narration, history, restated code, and diff
+    justification are deleted; a story worth keeping moves to docs/ with a
+    pointer left behind.
+  * VOICE: American English, fragments fine, no first person, no emoji.
 * **Naming doctrine:** invented ecosystem-level things (protocols, subsystems,
   tools) get zero-collision, SEO-unique names ("SlopSync", never
   "SyncManager"). Ordinary classes/variables keep plain descriptive names.

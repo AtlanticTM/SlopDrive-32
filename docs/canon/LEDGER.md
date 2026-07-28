@@ -2346,6 +2346,18 @@ stays machine-checked at zero local cost). Rationale: nobody is using this
 yet; more minor changes are expected; hours of ceremony per minor change is
 waste. Lift the ruling at UI completion / first release.
 
+## BLE DUAL-CENTRAL SLOT TEST (2026-07-28) — kSlots=2 live-verified, fw 2.1.86
+
+Operator phone (nRF Connect, GATT connect only) held BLE slot 0 while the
+host probe (`--ble`, direct address) claimed slot 1 and ran a full
+`--listen-only` session to a clean GOODBYE — 44 passed / 0 failed / 6
+skipped, phone connection uninterrupted throughout (log: conn#2 slot 0
+attached 535s with no detach; conn#1 slot 1 attached 551s, session, gone
+565s). Both `SlopSyncBlePort::kSlots` occupied concurrently. This was the
+last unexercised piece of the BLE binding; the BLE ladder (advertising
+layout, MSD on air, single session, dual central) is complete. Third-slot
+refusal remains untestable on this bench (no third radio).
+
 ## BLE MSD ON-AIR CONFIRMED (operator phone, nRF Connect, 2026-07-28)
 
 The BLE ADVERTISING MSD FIX entry's one remaining open check — "an operator

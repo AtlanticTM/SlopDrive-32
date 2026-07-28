@@ -96,8 +96,12 @@ PCB Layout.diy
 AIM_servo_modbus_reference.md
 AIM_Servo_Motor_Datasheet_EN_with_images.pdf
 
-# Build outputs, captures & scratch artifacts — generated, not source
-build/
+# Build outputs, captures & scratch artifacts — generated, not source.
+# Root-anchored + explicit per-tree rules: a bare `build/` here silently
+# swallowed docs-site/docs/build/ (authored pages, never build output).
+/build/
+sim/slopsim/build/
+test/fuzz/build/
 $null
 flashpack/
 
@@ -106,7 +110,7 @@ clients/**/bin/
 clients/**/obj/
 
 # SlopSync fuzz gate (test/fuzz) — build outputs and scratch corpora.
-# `build/` above already covers test/fuzz/build/. Only test/fuzz/corpus/ (the
+# test/fuzz/build/ is ignored explicitly above. Only test/fuzz/corpus/ (the
 # committed seed set) and the sources belong in git; see test/fuzz/README.md.
 test/fuzz/work/
 crash-*

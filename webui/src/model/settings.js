@@ -2,7 +2,7 @@
  * settings.js — the catalog -> renderable model transform (RFC-009).
  *
  * THIS FILE IS THE WHOLE POINT OF THE REFACTOR. Everything above
- * core/slopsync/ used to know what a SlopDrive-32 is: which channel held the
+ * the SlopSync protocol client used to know what a SlopDrive-32 is: which channel held the
  * stroke window, which CBOR key wrote the user speed, what the blend-mode
  * options were called. That knowledge is what made our UI privileged and every
  * third-party client second-class, and it is why shipping 20 annotated tuning
@@ -25,7 +25,7 @@
  * how the "renders a machine it has never met" claim gets checked in CI.
  */
 
-import { PACKED, SETTING_CATEGORY_NAME } from '../core/slopsync/index.js';
+import { PACKED, SETTING_CATEGORY_NAME } from '../../../../SlopSync/clients/js/index.js';
 import { ROLE, isActionRole } from './roles.js';
 
 // ---------------------------------------------------------------------------

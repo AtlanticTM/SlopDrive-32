@@ -18,9 +18,9 @@
  * Run:  node webui/test/slopsync-auth.mjs [--ip 192.168.1.229] [--port 82]
  */
 
-import { createSession, ACCESS, ACCESS_NAME } from '../src/core/slopsync/index.js';
-import { mintUiToken, acquireToken } from '../src/core/slopsync/credentials.js';
-import { getInstanceId } from '../src/core/slopsync/identity.js';
+import { createSession, ACCESS, ACCESS_NAME } from '../../../SlopSync/clients/js/index.js';
+import { mintUiToken, acquireToken } from '../../../SlopSync/clients/js/credentials.js';
+import { getInstanceId } from '../../../SlopSync/clients/js/identity.js';
 
 const args = process.argv.slice(2);
 const argOf = (f, d) => { const i = args.indexOf(f); return i >= 0 ? args[i + 1] : d; };

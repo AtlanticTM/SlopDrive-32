@@ -18,9 +18,9 @@
  *       node webui/test/slopsync-writeplane.mjs 192.168.1.229 82
  */
 
-import { createSession, CH } from '../src/core/slopsync/index.js';
-import { PRIORITY } from '../src/core/slopsync/frames.js';
-import { acquireToken } from '../src/core/slopsync/credentials.js';
+import { createSession, CH } from '../../../SlopSync/clients/js/index.js';
+import { PRIORITY } from '../../../SlopSync/clients/js/frames.js';
+import { acquireToken } from '../../../SlopSync/clients/js/credentials.js';
 
 const HOST = process.argv[2] || '192.168.1.229';
 const PORT = parseInt(process.argv[3] || '82', 10);

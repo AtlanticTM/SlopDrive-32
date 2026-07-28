@@ -22,7 +22,7 @@
    * isn't something the machine actually sent.
    */
   import { machine } from '../model/machine.svelte.js';
-  import { ACCESS_NAME } from '../core/slopsync/index.js';
+  import { ACCESS_NAME } from '../../../../SlopSync/clients/js/index.js';
   import { bytes, since } from '../model/format.js';
   import { ROLE } from '../model/roles.js';
   import { ac } from '../model/theme.js';

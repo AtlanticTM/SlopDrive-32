@@ -33,8 +33,8 @@
 import { mkdirSync, writeFileSync } from 'node:fs';
 import { dirname } from 'node:path';
 import { fileURLToPath } from 'node:url';
-import { createSession, CH, PRIORITY, SAFETY_OP, ACCESS, NACK } from '../src/core/slopsync/index.js';
-import { toHex } from '../src/core/slopsync/sha256.js';
+import { createSession, CH, PRIORITY, SAFETY_OP, ACCESS, NACK } from '../../../SlopSync/clients/js/index.js';
+import { toHex } from '../../../SlopSync/clients/js/sha256.js';
 
 const args = process.argv.slice(2);
 const argOf = (flag, def) => { const i = args.indexOf(flag); return i >= 0 ? args[i + 1] : def; };

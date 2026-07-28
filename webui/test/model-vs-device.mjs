@@ -16,8 +16,8 @@
  * Run: node webui/test/model-vs-device.mjs [host] [port]
  */
 
-import { createSession } from '../src/core/slopsync/index.js';
-import { acquireToken } from '../src/core/slopsync/credentials.js';
+import { createSession } from '../../../SlopSync/clients/js/index.js';
+import { acquireToken } from '../../../SlopSync/clients/js/credentials.js';
 import { buildSettingsModel, WIDGET } from '../src/model/settings.js';
 import { claimRoles, ROLE } from '../src/model/roles.js';
 

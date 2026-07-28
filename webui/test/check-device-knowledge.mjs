@@ -3,8 +3,8 @@
  * #1: "Zero device knowledge in the rendering layer."
  *
  * A claim you cannot fail is not a standard, it is a mood. So this script
- * FAILS THE BUILD if the UI layer above core/slopsync/ contains knowledge that
- * only applies to this one machine:
+ * FAILS THE BUILD if the UI layer above the SlopSync protocol client contains
+ * knowledge that only applies to this one machine:
  *
  *   1. A channel-id literal (0x0081, 0x0105, ...). Binding to an id is the
  *      original sin — it works here and nowhere else.
@@ -14,8 +14,9 @@
  *      the device and this check immediately starts guarding it too.
  *
  * WHAT IS DELIBERATELY ALLOWED:
- *   - core/slopsync/    — the protocol client. It is SUPPOSED to know wire
- *                         numbers; that is its entire job.
+ *   - the protocol client — consumed from the sibling SlopSync repo's
+ *                         clients/js/ (relative import, slopsync.pin pins the
+ *                         sha); not under src/, so this walk never sees it.
  *   - model/roles.js    — role strings like `window.min` are REGISTRY
  *                         vocabulary, not device facts. They mean the same
  *                         thing on every conforming hub, which is exactly why
@@ -37,7 +38,6 @@ const CATALOG_H = join(WEBUI, '..', 'include', 'comms', 'SlopSyncCatalog.h');
 
 /** Paths exempt from the check, and why. */
 const EXEMPT = [
-  join('src', 'core', 'slopsync'),   // the protocol client itself
   join('src', 'model', 'roles.js'),  // registry vocabulary, not device facts
 ];
 
@@ -145,7 +145,7 @@ if (!findings.length) {
   process.exit(0);
 }
 
-console.log('\nFAIL — ' + findings.length + ' leak(s) of device knowledge above core/slopsync/:\n');
+console.log('\nFAIL — ' + findings.length + ' leak(s) of device knowledge above the SlopSync protocol client:\n');
 for (const f of findings) {
   console.log('  ' + f.rel + ':' + f.line + '  [' + f.kind + ': ' + f.hit + ']');
   console.log('      ' + f.text.slice(0, 120));

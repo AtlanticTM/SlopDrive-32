@@ -17,7 +17,7 @@
   import { machine } from '../model/machine.svelte.js';
   import {
     CH, SESSION_EVENT_KIND, SAFETY_EVENT_KIND, LOG_EVENT_KIND, LOG_LEVEL_NAME,
-  } from '../core/slopsync/index.js';
+  } from '../../../../SlopSync/clients/js/index.js';
   import { optionLabel, formatValue, formatWithUnit } from '../model/format.js';
 
   let tab = $state('log'); // log | anomaly | session

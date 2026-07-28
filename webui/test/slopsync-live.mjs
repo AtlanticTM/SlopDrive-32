@@ -11,7 +11,7 @@
  * Uses node's built-in WebSocket (node ≥22). Exits 1 on any failure.
  */
 
-import { createSession, CH, PRIORITY, nackName } from '../src/core/slopsync/index.js';
+import { createSession, CH, PRIORITY, nackName } from '../../../SlopSync/clients/js/index.js';
 
 const args = process.argv.slice(2);
 function argOf(flag, def) { const i = args.indexOf(flag); return i >= 0 ? args[i + 1] : def; }

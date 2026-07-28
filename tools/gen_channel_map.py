@@ -1,11 +1,12 @@
 #!/usr/bin/env python3
 """Generate the two tables in docs/slopsync/CHANNEL-MAP.md from the wire
-sources of truth: docs/slopsync/registry/registry.yaml (core channels,
-0x0000-0x007F) and include/comms/SlopSyncCatalog.h (this device's own
-channels, 0x0080-0x7FFF). RFC-047 (Phase C2, then Phase C4's family-nibble
-sub-slot convention): the device grid was renumbered onto 0xCDSS and the
-hand-written tables drifted from the code the moment a single id changed —
-this script is how CHANNEL-MAP.md never lies again.
+sources of truth: the SlopSync repo's spec/registry/registry.yaml (sibling
+checkout, pinned by slopsync.pin; core channels, 0x0000-0x007F) and
+include/comms/SlopSyncCatalog.h (this device's own channels, 0x0080-0x7FFF).
+RFC-047 (Phase C2, then Phase C4's family-nibble sub-slot convention): the
+device grid was renumbered onto 0xCDSS and the hand-written tables drifted
+from the code the moment a single id changed — this script is how
+CHANNEL-MAP.md never lies again.
 
 Usage:
     python tools/gen_channel_map.py           # (re)write the two GENERATED
@@ -36,7 +37,9 @@ from pathlib import Path
 import yaml
 
 ROOT = Path(__file__).resolve().parent.parent
-REGISTRY = ROOT / "docs" / "slopsync" / "registry" / "registry.yaml"
+# SlopSync repo split (slopsync.pin pins the sha): registry.yaml is consumed
+# from the sibling checkout, never vendored back into this tree.
+REGISTRY = ROOT.parent / "SlopSync" / "spec" / "registry" / "registry.yaml"
 CATALOG_H = ROOT / "include" / "comms" / "SlopSyncCatalog.h"
 DOC = ROOT / "docs" / "slopsync" / "CHANNEL-MAP.md"
 

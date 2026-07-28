@@ -47,7 +47,7 @@
 
 import {
   createSession, CHANNEL_CLASS, PRIORITY, NACK, acquireToken, getInstanceId, toHex,
-} from '../core/slopsync/index.js';
+} from '../../../../SlopSync/clients/js/index.js';
 import { buildSettingsModel } from './settings.js';
 import { ROLE } from './roles.js';
 

@@ -17,7 +17,7 @@
  * and the only thing it checks for, is OUR OWN bugs in the path between the
  * wire and the pixel:
  *
- *   (1) DECODE — could our own CBOR/packed-STATE decode (core/slopsync) be
+ *   (1) DECODE — could our own CBOR/packed-STATE decode (the SlopSync protocol client) be
  *       misreading a good sample (wrong offset/scale/sign)? Read the code,
  *       not guessed: see the report for what was checked.
  *   (2) TIMESTAMP bookkeeping — out-of-order, duplicate, or zero arrival
@@ -49,8 +49,8 @@
  *
  * Run: node webui/test/streamed-outlier-probe.mjs [host] [durationMs]
  */
-import { createSession, CHANNEL_CLASS, PRIORITY } from '../src/core/slopsync/index.js';
-import { acquireToken } from '../src/core/slopsync/credentials.js';
+import { createSession, CHANNEL_CLASS, PRIORITY } from '../../../SlopSync/clients/js/index.js';
+import { acquireToken } from '../../../SlopSync/clients/js/credentials.js';
 import { buildSettingsModel } from '../src/model/settings.js';
 import { claimRoles, ROLE } from '../src/model/roles.js';
 import { createTelebuf, createRenderClock } from '../src/ui/hero/telebuf.js';

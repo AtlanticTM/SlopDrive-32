@@ -15,7 +15,7 @@
    * reverted.
    */
   import { machine } from '../model/machine.svelte.js';
-  import { ACCESS_NAME, toHex } from '../core/slopsync/index.js';
+  import { ACCESS_NAME, toHex } from '../../../../SlopSync/clients/js/index.js';
   import { bytes, since } from '../model/format.js';
 
   // A liveness pane full of "since" readouts needs its own clock, or every

@@ -52,8 +52,8 @@
    */
   import { machine, getSession } from '../model/machine.svelte.js';
   import { runAction } from '../model/shadow.svelte.js';
-  import { ACCESS, ACCESS_NAME, NACK, bytesEqual, getInstanceId, setPairedToken } from '../core/slopsync/index.js';
-  import { PAIRING_MODE, PAIRING_MODE_NAME, PAIRING_EVENT_KIND } from '../core/slopsync/frames.js';
+  import { ACCESS, ACCESS_NAME, NACK, bytesEqual, getInstanceId, setPairedToken } from '../../../../SlopSync/clients/js/index.js';
+  import { PAIRING_MODE, PAIRING_MODE_NAME, PAIRING_EVENT_KIND } from '../../../../SlopSync/clients/js/frames.js';
 
   const entryNamed = (n) => machine.catalog.entries.find((e) => e.name === n) || null;
 

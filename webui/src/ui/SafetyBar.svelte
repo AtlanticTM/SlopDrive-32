@@ -29,7 +29,7 @@
    */
   import { machine, getSession } from '../model/machine.svelte.js';
   import { runAction, lastRefusal, remedyForLastRefusal, clearLastRefusal } from '../model/shadow.svelte.js';
-  import { SAFETY_OP } from '../core/slopsync/index.js';
+  import { SAFETY_OP } from '../../../../SlopSync/clients/js/index.js';
   import { optionLabel } from '../model/format.js';
 
   const roleActions = $derived(

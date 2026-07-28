@@ -60,7 +60,9 @@ add_executable(slopsim
 
 target_include_directories(slopsim PRIVATE
     src
-    "${REPO_ROOT}/lib/slopsync/include"
+    # SlopSync repo split (slopsync.pin pins the sha): lib/slopsync is consumed
+    # from the sibling checkout, not vendored back into this tree.
+    "${REPO_ROOT}/../SlopSync/lib/slopsync/include"
     "${REPO_ROOT}/lib/slopmotion/include"
     "${REPO_ROOT}/lib/ruckig/include"
     "${REPO_ROOT}/include"

@@ -20,19 +20,19 @@ import { webcrypto } from 'node:crypto';
 import {
   cbUint, cbF32, cbTstr, cbBstr, cbBool, cbInt, cbNull, cbArray, cbMap,
   cbDecodeFull, concatBytes,
-} from '../src/core/slopsync/cbor.js';
+} from '../../../SlopSync/clients/js/cbor.js';
 import {
   K, PRIORITY, FRAME, ACCESS, PACKED, PACKED_SIZE, GOODBYE_CODE, NACK,
   SAFETY_OP, BLOB_NS, CH_SAFETY, LIMITS,
   encodeFrame, encodeEstopFrame, crc32, ESTOP_FRAME_BYTES,
-} from '../src/core/slopsync/frames.js';
+} from '../../../SlopSync/clients/js/frames.js';
 import {
   buildBlobReq, buildCatalogRequest, buildCatalogRepair,
   parseBlobChunk, BlobReassembler, BLOB_CHUNK_HEADER_BYTES,
   decodeCatalog, catalogChannelMap, decodePacked, decodeEventBody,
   schemaByKey, optionAccessFor, canUseOption,
-} from '../src/core/slopsync/catalog.js';
-import { sha256, catalogEtag, toHex, bytesEqual } from '../src/core/slopsync/sha256.js';
+} from '../../../SlopSync/clients/js/catalog.js';
+import { sha256, catalogEtag, toHex, bytesEqual } from '../../../SlopSync/clients/js/sha256.js';
 
 let failures = 0;
 

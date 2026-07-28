@@ -11,7 +11,7 @@
  * The wire has three shapes of outbound INTENT, and this file is now the ONLY
  * place any of them may be fired — `session.sendIntent` must never be called
  * from a component. `grep -rn "sendIntent" src/` outside this file and
- * core/slopsync/ should come back empty.
+ * the SlopSync protocol client should come back empty.
  *
  *   writeSetting(field, value)   RFC-009 settings   — a STORED value with a
  *                                                      shadow record and an
@@ -85,7 +85,7 @@
 import { machine, getSession } from './machine.svelte.js';
 import { reportedValue, WIDGET } from './settings.js';
 import { labelFor } from './format.js';
-import { NACK, NACK_NAME, SAFETY_OP, HOME_OP } from '../core/slopsync/index.js';
+import { NACK, NACK_NAME, SAFETY_OP, HOME_OP } from '../../../../SlopSync/clients/js/index.js';
 
 const OVERDUE_MS = 500;
 const FAULT_MS = 2000;
@@ -150,7 +150,7 @@ export function clearLastRefusal() {
 /**
  * NACK code -> the RFC-019 action ROLE (and registry op enum) that clears it.
  * Both the role strings and the op enums are registry vocabulary: `HOME_OP`/
- * `SAFETY_OP` come straight from core/slopsync/index.js (generated from
+ * `SAFETY_OP` come straight from the SlopSync protocol client's index.js (generated from
  * registry.yaml), and `action.home`/`action.safety` are the same open-role
  * strings ui/SafetyBar.svelte already keys its own discovery on. Extending
  * this table to a new code needs no protocol change — it is a mapping between

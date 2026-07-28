@@ -26,8 +26,8 @@
  * Run: node webui/test/telemetry-latency-probe.mjs [host] [port] [seconds]
  */
 
-import { createSession, CHANNEL_CLASS, PRIORITY } from '../src/core/slopsync/index.js';
-import { acquireToken } from '../src/core/slopsync/credentials.js';
+import { createSession, CHANNEL_CLASS, PRIORITY } from '../../../SlopSync/clients/js/index.js';
+import { acquireToken } from '../../../SlopSync/clients/js/credentials.js';
 import { buildSettingsModel } from '../src/model/settings.js';
 import { ROLE } from '../src/model/roles.js';
 

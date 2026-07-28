@@ -13,7 +13,7 @@ Deliberately NOT here (judgment calls belong to review, not grep):
 
 Usage:
     python tools/canon_lint.py            # all checks
-    python tools/canon_lint.py --no-gen   # skip registry codegen --check
+    python tools/canon_lint.py --no-gen   # skip the CHANNEL-MAP.md codegen --check
 
 Exit codes: 0 clean, 1 findings, 2 could not run.
 """
@@ -25,21 +25,26 @@ import sys
 from pathlib import Path
 
 ROOT = Path(__file__).resolve().parent.parent
+SIBLING = ROOT.parent / "SlopSync"
+PIN_FILE = ROOT / "slopsync.pin"
 
 # ---------------------------------------------------------------- frozen (C-6)
-# Byte-identical or it's a protocol break. Changing these requires a Canon Flag,
-# an explicit operator ruling, and an updated hash here in the SAME commit.
-FROZEN_SHA256 = {
+# mini_catalog.hpp/mini-catalog.yaml moved to the SlopSync repo split (they are
+# lib/slopsync + spec conformance artifacts, not machine-repo files) -- this
+# tree no longer holds them, so the frozen check now runs against the pinned
+# SIBLING checkout (see run_pin_check below). Byte-identical there or it's a
+# protocol break; SlopSync's own tools/slopsync_lint.py carries the same pins
+# as its half of the belt-and-suspenders check.
+FROZEN_SHA256_SIBLING = {
     "lib/slopsync/include/slopsync/conformance/mini_catalog.hpp":
         "2a90bf8a5658b4ecb2c96a28d9aa9e39a908926c91e0aebba5844366c3252eb2",
-    "docs/slopsync/vectors/fixtures/mini-catalog.yaml":
+    "spec/vectors/fixtures/mini-catalog.yaml":
         "b2b6a3063e66b56916683c6878ce237085fbcd8ea145c02369f5b96a45c6901c",
 }
 
 VENDORED_PREFIXES = (
     "lib/ruckig/", "lib/espasyncwebserver/", "lib/asynctcp/",
     "webui/src/fonts/", ".cache/",
-    "docs-site/docs/assets/javascripts/",  # vendored mermaid bundle
 )
 BINARY_SUFFIXES = (".bin", ".png", ".jpg", ".webp", ".ico", ".pdf",
                    ".woff", ".woff2", ".idx", ".gz", ".lock")
@@ -137,32 +142,48 @@ def run_grep_checks():
     return findings
 
 
-def run_frozen_check():
+def run_pin_check():
+    """slopsync.pin RULE: FAIL if ../SlopSync is missing or its HEAD doesn't
+    match the pin; WARN (not fail) if the sibling working tree is dirty; FAIL
+    if the sibling's frozen conformance artifacts don't match our pinned
+    hashes (the moved half of the old in-tree frozen check, C-6)."""
     findings = []
-    for rel, want in FROZEN_SHA256.items():
-        p = ROOT / rel
+    try:
+        pinned = PIN_FILE.read_text(encoding="utf-8").splitlines()[0].strip()
+    except OSError:
+        return [("pin-missing", "slopsync.pin", 0, "", "slopsync.pin is missing")]
+
+    if not SIBLING.is_dir():
+        return [("pin-sibling-missing", "../SlopSync", 0, "",
+                 "sibling checkout not found next to this repo -- clone SlopSync alongside SlopDrive-32")]
+
+    r = subprocess.run(["git", "rev-parse", "HEAD"], cwd=SIBLING,
+                       capture_output=True, text=True)
+    if r.returncode != 0:
+        return [("pin-sibling-not-git", "../SlopSync", 0, "",
+                 "sibling exists but `git rev-parse HEAD` failed there")]
+    head = r.stdout.strip()
+    if head != pinned:
+        findings.append(("pin-mismatch", "slopsync.pin", 0, head[:16],
+                         f"../SlopSync HEAD {head[:16]} != pinned {pinned[:16]} -- "
+                         "bump slopsync.pin (and re-run the gauntlet) or check out the pinned sha"))
+
+    dirty = subprocess.run(["git", "status", "--porcelain"], cwd=SIBLING,
+                           capture_output=True, text=True).stdout.strip()
+    if dirty:
+        print("WARN: ../SlopSync working tree is dirty (not a lint failure)")
+
+    for rel, want in FROZEN_SHA256_SIBLING.items():
+        p = SIBLING / rel
         if not p.exists():
-            findings.append(("frozen-missing", rel, 0, "", "frozen artifact is GONE"))
+            findings.append(("pin-frozen-missing", f"../SlopSync/{rel}", 0, "",
+                             "frozen artifact is GONE from the sibling"))
             continue
         got = hashlib.sha256(p.read_bytes()).hexdigest()
         if got != want:
-            findings.append(("frozen-changed", rel, 0, got[:16],
-                             "frozen artifact modified (C-6) -- protocol break unless amended"))
+            findings.append(("pin-frozen-changed", f"../SlopSync/{rel}", 0, got[:16],
+                             "frozen artifact modified in the sibling (C-6) -- protocol break unless amended"))
     return findings
-
-
-def run_registry_check():
-    gen = ROOT / "tools" / "gen_registry_header.py"
-    try:
-        r = subprocess.run([sys.executable, str(gen), "--check"], cwd=ROOT,
-                           capture_output=True, text=True, timeout=120)
-    except Exception as e:  # missing yaml module etc. -- report, don't hide
-        return [("registry-check", "tools/gen_registry_header.py", 0, str(e)[:60],
-                 "could not run registry --check (run it manually with the pio python)")]
-    if r.returncode != 0:
-        return [("registry-drift", "docs/slopsync/registry/registry.yaml", 0, "",
-                 "generated registry header out of sync -- regenerate, never hand-edit")]
-    return []
 
 
 def run_channel_map_check():
@@ -181,9 +202,8 @@ def run_channel_map_check():
 
 
 def main(argv):
-    findings = run_grep_checks() + run_frozen_check()
+    findings = run_grep_checks() + run_pin_check()
     if "--no-gen" not in argv:
-        findings += run_registry_check()
         findings += run_channel_map_check()
 
     if not findings:

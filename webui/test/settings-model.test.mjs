@@ -17,7 +17,7 @@
 
 import { buildSettingsModel, isFieldEnabled, WIDGET, resolveWidget } from '../src/model/settings.js';
 import { claimRoles, withoutClaimed, ROLE } from '../src/model/roles.js';
-import { PACKED, CHANNEL_CLASS } from '../src/core/slopsync/index.js';
+import { PACKED, CHANNEL_CLASS } from '../../../SlopSync/clients/js/index.js';
 
 let fails = 0;
 const ok = (name, cond, extra) => {

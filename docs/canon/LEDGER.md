@@ -2461,6 +2461,53 @@ posture floor's smoke):**
 Execution ladder per standing preference: main loop architects + reviews,
 sonnet executes Svelte/JS chunks, opus on hard debugging.
 
+## WEBUI PHASE STEP 1 — TRUTH PASS DONE (2026-07-28): tap-to-move live-verified, handoff doc retired
+
+- **Setup:** fs image redeployed from HEAD before verifying (guarantees the
+  check ran against current webui + pinned clients/js, not archaeology about
+  the last fs deploy). Observed: an fs-only flash DOES reboot the device
+  (`/api/ota/fs` answers `reboot_ms:500`, uptime reset confirmed) — the
+  run-slopdrive-32 SKILL.md's "fs flashes don't reboot" note was drift,
+  fixed this session. Device then fake-homed via
+  `slopsync_probe.py --bench-home --bench-home-no-revert` (48/0/4), end
+  state `homed=true home_override=true measured_stroke_mm=250`.
+- **RFC-032 tap-to-move end-to-end — VERIFIED LIVE, ALL PASS (15/15).** New
+  harness `webui/test/tap-to-move-live.mjs` (Playwright page loaded FROM the
+  device + an INDEPENDENT read-only wire session watching `tgt_10um` at
+  20 Hz): input tape live (`command.position` resolved + control tier);
+  role-less fallback copy correctly absent (path kept — it is Tier-1
+  graceful absence, not stale code, resolving the old handoff item 2
+  caveat); commanded + lag numerals present (`telemetry.target` resolved);
+  TWO taps (75% → 100.0 mm, 30% → 55.0 mm of window [25,125]): each showed
+  shadow `pending → confirmed` (post-clamp ECHO), UI tape cursor
+  (aria-valuenow, device-reported) converged exactly, wire watcher saw
+  `tgt_10um` land at 100.00 / 55.00 independently of the UI, commanded
+  numeral matched, lag = commanded − actual exact. Actual-is-actual ruling
+  applied (motor unplugged; reported position is actual). Evidence
+  screenshot `webui/test/evidence/tap-to-move-live.png`.
+- **Harness bug found on first run, mechanism worth keeping:** tap 1's
+  motion expands the plan strip → page grows a scrollbar → layout shifts →
+  a CACHED bounding box aims tap 2 at the wrong fraction (commanded 59.23
+  instead of 55 — and UI cursor, wire tgt, and commanded numeral all agreed
+  on 59.23, i.e. ground truth held perfectly under a mis-aimed tap; the
+  three-way agreement is what proved it was the harness, not the page).
+  Fixed: re-acquire the rect per tap.
+- **WEBUI-HANDOFF-RFC-BATCH.md DELETED (SlopSync repo)** per its own
+  "delete this file once absorbed" instruction. C-9 proof: items 1/3/5/6/7/9
+  verified absorbed by grep this session (limits-key-4 batching, PlanStrip
+  role-first, index-0 rule replacing the reserved-regex, declared-size
+  decode, deadman wish, relative `/uitoken`), item 8 superseded by RFC-042,
+  item 4 (identity in link surface) shipped with the rebuilt LinkBar, item
+  2 live-verified above. References repointed, not dangled: RFC-QUEUE.md
+  RFC-032/034/035 status lines now record completion; CHANNEL-MAP.md's
+  historical-docs example list and webui-architecture.md §6a updated in the
+  same pass (§6a now records the live verification). `slopsync.pin` bumped
+  to the SlopSync commit carrying the deletion.
+- **Verification floor met:** canon_lint 0; the touched suite here IS the
+  new live harness (ALL PASS ×2 runs); live smoke = the verification
+  itself. [verified 2026-07-28 — harness output reproduced above, both
+  runs; probe 48/0/4; /api/status before/after]
+
 ## Deferred / planned (homes: docs/REFACTOR-ROADMAP.md, docs/MOTION-TODO.md)
 
 - TCode pass-through channel (post-MFP; parser cross-task race was the

@@ -144,6 +144,5 @@ sign that another renumber is coming.
 - [RFC-047](RFC-QUEUE.md#rfc-047--the-0xcdss-channel-allocation-grid-structure-over-arrival-order-history) and [RFC-048](RFC-QUEUE.md#rfc-048--the-rendering-constitution-catalog-vocabulary-capability-interfaces-renderer-law) — the
   RFCs that stamped the sub-slot grid and its capability interfaces.
 - Historical docs written before Phase C4 (e.g.
-  [V1-READINESS.md](V1-READINESS.md),
-  [WEBUI-HANDOFF-RFC-BATCH.md](WEBUI-HANDOFF-RFC-BATCH.md)) quote
+  [V1-READINESS.md](V1-READINESS.md)) quote
   pre-renumber ids verbatim — this file is always the current map.

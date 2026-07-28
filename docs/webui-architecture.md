@@ -205,18 +205,21 @@ annotations are. Evidence in `webui/test/evidence/`.
 
 ## 6a. TWO PROTOCOL GAPS THE REBUILD EXPOSED — read this first
 
-**Truth check (2026-07-28): both gaps below are landed on the registry/catalog
-side.** SlopSync RFC-032 shipped the same day this section was
-written: `position` on `0x3100 move` now carries role `command.position`,
-`tgt_10um` on `0x1100 motion` carries `telemetry.target` — see
-SlopSync's WEBUI-HANDOFF-RFC-BATCH.md item 2. Per
-this doc's own §3/§5 model, the client needed no code change (`model/
-settings.js` already indexes non-action roles into `byRole`). **Not confirmed:**
-`LEDGER.md` has no record of the tap-to-move end-to-end live check the handoff
-doc calls for (tap → INTENT → ECHO → carriage moves → `telemetry.target`
-follows) — treat as landed-but-unverified-live, not as an open protocol gap.
-Original diagnosis kept below for the reasoning; both were found because a
-component *refused to fabricate data*, which is exactly what should happen.
+**Truth check (2026-07-28): both gaps below are landed AND live-verified.**
+SlopSync RFC-032 shipped the same day this section was written: `position` on
+`0x3100 move` carries role `command.position`, `tgt_10um` on `0x1100 motion`
+carries `telemetry.target`. Per this doc's own §3/§5 model, the client needed
+no code change (`model/settings.js` already indexes non-action roles into
+`byRole`). **Live-verified 2026-07-28** (webui-phase truth pass): tap →
+INTENT → post-clamp ECHO (shadow pending → confirmed) → device target
+followed → tape cursor + commanded/lag numerals rendered it, two taps at
+different fractions, with an independent wire session confirming `tgt_10um`
+off-UI — `webui/test/tap-to-move-live.mjs`, ALL PASS, evidence screenshot in
+`webui/test/evidence/`. The role-less-hub fallback copy correctly does NOT
+render against this catalog (it stays — that path is Tier-1 graceful
+absence, not dead code). Original diagnosis kept below for the reasoning;
+both gaps were found because a component *refused to fabricate data*, which
+is exactly what should happen.
 
 **1. No generic client can command a manual move.**
 `0x3100 move` exists and works, but its `position` field carries no role. The

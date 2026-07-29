@@ -171,12 +171,18 @@ async fn subscribe_channel(
     service: Option<Uuid>,
 ) -> Result<mpsc::Receiver<Vec<u8>>> {
     let handler = get_handler()?;
-    let (tx, rx) = tokio::sync::mpsc::channel(1);
+    // SLOPDECK PATCH: capacity 1 + try_send().expect() panicked the notify
+    // listener task the moment two notifications arrived faster than the JS
+    // IPC forwarder drained (e.g. a catalog blob burst right after WELCOME) —
+    // killing ALL further notifications for the session. Real capacity;
+    // a full/closed channel logs and drops, never panics.
+    let (tx, rx) = tokio::sync::mpsc::channel(64);
     handler
         .subscribe(characteristic, service, move |data: Vec<u8>| {
             info!("subscribe_channel: {:?}", data);
-            tx.try_send(data)
-                .expect("failed to send data to the channel");
+            if let Err(e) = tx.try_send(data) {
+                tracing::warn!("subscription data dropped: {e}");
+            }
         })
         .await?;
     Ok(rx)
@@ -191,9 +197,12 @@ pub(crate) async fn subscribe<R: Runtime>(
     let mut rx = subscribe_channel(characteristic, service).await?;
     async_runtime::spawn(async move {
         while let Some(data) = rx.recv().await {
-            on_data
-                .send(data)
-                .expect("failed to send data to the front-end");
+            // SLOPDECK PATCH: a webview mid-navigation makes this send fail;
+            // end the forwarder instead of panicking the runtime task.
+            if on_data.send(data).is_err() {
+                tracing::warn!("subscription forwarder ended: front-end gone");
+                break;
+            }
         }
     });
     Ok(())

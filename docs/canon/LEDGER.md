@@ -2603,10 +2603,36 @@ cmd.exe eats `;` in the old-style ids, a second trap).
   now cold-starts at the discovery surface on both desktop and Android;
   auto-connect only re-joins a host the operator explicitly connected to
   before. Plus: stopScan before GATT connect, empty-host guard.
+- **SPIKE COMPLETE — FULL LADDER LIVE-VERIFIED ON THE PHONE (operator,
+  2026-07-28, rounds 3-5).** Round 3: GATT connect+subscribe+notify all
+  worked; app aborted receiving (the vendored-patch story above). Round 4:
+  write-WITH-response proved structurally broken on real Android hardware —
+  one lost ATT-ack completion wedged the one-op-in-flight GATT queue
+  forever (Kotlin log: the same 12-byte frame retried 45+ times); machine
+  log simultaneously proved c2h delivery (sessions joined watch-tier,
+  idle-reaped at 15 s of client silence). Fix: c2h writes go
+  withoutResponse (firmware RX char is WRITE|WRITE_NR; mirrors unacked
+  h2c NOTIFY, §13.1). Round 5 root cause of the remaining stall: blec's
+  OTHER capacity-1 landmine — `subscribe_channel`'s `try_send().expect()`
+  panicked the notify-listener task on the first notification burst
+  (WELCOME + anything), silently killing all further notifications;
+  round 3's abort was this corpse being discovered late. Patched
+  (capacity 64, warn-and-drop, forwarder soft-fail) + live rx/tx wire
+  counters on the ShellBar (on-device diagnostics without adb).
+  **RESULT: discovery → BLE GATT session (watch tier, catalog over GATT,
+  UI built) → ↑WS upgrade → control tier, all on the operator's phone.**
+  Machine-log evidence: BLE session joined → `session authorized by
+  /uitoken (control tier)` → BLE conn detached — the §6.3 same-identity
+  handover, live. [verified 2026-07-28 — operator confirmation + /api/log
+  captured in-session]
+- **NEXT PHASE (operator direction, 2026-07-28): desktop shell UX** —
+  "mostly UX, which naturally gets implemented everywhere for free" (one
+  kernel, all delivery targets). Then the parked flesh-out queue.
 - Spike-scope shortcuts, tighten at flesh-out: http scope `http://**` in
   capabilities; ShellBar visual design is placeholder chrome; blec
-  upstream issue + patch retirement; release-build cleartext flag
-  (recorded in the M3 entry above).
+  upstream issue (now TWO fixes to offer: JNI-abort paths + the
+  subscribe_channel capacity-1 panic) + patch retirement; release-build
+  cleartext flag (recorded in the M3 entry above).
 
 ## Deferred / planned (homes: docs/REFACTOR-ROADMAP.md, docs/MOTION-TODO.md)
 

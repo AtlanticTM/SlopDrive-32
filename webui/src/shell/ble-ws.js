@@ -29,6 +29,10 @@ export const BLE_SERVICE = '534c4f50-5359-4e43-8000-000000000001';
 const CHAR_C2H_WRITE = '534c4f50-5359-4e43-8000-000000000002';
 const CHAR_H2C_NOTIFY = '534c4f50-5359-4e43-8000-000000000003';
 
+// Live wire counters for the ShellBar's diagnostics line — on-device field
+// debugging without adb. Reset on each bridge instantiation.
+export const bleStats = { rx: 0, tx: 0, lastError: '' };
+
 /**
  * Build a WebSocket-duck class bound to one BLE peripheral address.
  * session.js instantiates it per (re)connect; the url argument is ignored.
@@ -45,6 +49,9 @@ export function makeBleWebSocket(address) {
       this.onerror = null;
       this._dead = false;
       this._writeQ = Promise.resolve();
+      bleStats.rx = 0;
+      bleStats.tx = 0;
+      bleStats.lastError = '';
       this._open();
     }
 
@@ -53,6 +60,7 @@ export function makeBleWebSocket(address) {
         await blecConnect(address, () => this._dropped());
         await blecSubscribe(CHAR_H2C_NOTIFY, BLE_SERVICE, (data) => {
           if (this._dead || !this.onmessage) return;
+          bleStats.rx++;
           this.onmessage({ data: new Uint8Array(data).buffer });
         });
         this.mtu = await getMtu().catch(() => 0);
@@ -75,6 +83,7 @@ export function makeBleWebSocket(address) {
       if (this._dead) return;
       this._dead = true;
       this.readyState = 3;
+      bleStats.lastError = String(e);
       if (this.onerror) this.onerror(e);
       if (this.onclose) this.onclose({ code: 1006, reason: String(e) });
     }
@@ -86,9 +95,16 @@ export function makeBleWebSocket(address) {
         : null;
       if (!bytes) { this._fail(new Error('ble-ws: non-binary send')); return; }
       const arr = Array.from(bytes);
+      // withoutResponse, deliberately: the firmware's RX char is WRITE|WRITE_NR,
+      // and Android's write-WITH-response completion callback proved lossy on
+      // real hardware (one lost ATT ack jammed the one-op-in-flight GATT queue
+      // forever — 45 retry-failures on a 12-byte frame, phone field test
+      // 2026-07-28). Unacked c2h mirrors the unacked h2c NOTIFY (§13.1); frame
+      // order is still kept by the ATT bearer + this promise chain.
       this._writeQ = this._writeQ.then(
-        () => blecSend(CHAR_C2H_WRITE, arr, 'withResponse', BLE_SERVICE),
-      ).catch((e) => this._fail(e));
+        () => blecSend(CHAR_C2H_WRITE, arr, 'withoutResponse', BLE_SERVICE),
+      ).then(() => { bleStats.tx++; })
+        .catch((e) => this._fail(e));
     }
 
     close() {

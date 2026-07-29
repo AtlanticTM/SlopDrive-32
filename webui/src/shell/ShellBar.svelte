@@ -14,7 +14,7 @@
    */
   import { startScan, stopScan, checkPermissions } from '@mnlphlp/plugin-blec';
   import { machine, connect, disconnect } from '../model/machine.svelte.js';
-  import { makeBleWebSocket, ipv4ToString, BLE_SERVICE } from './ble-ws.js';
+  import { makeBleWebSocket, ipv4ToString, BLE_SERVICE, bleStats } from './ble-ws.js';
 
   let scanning = $state(false);
   let hubs = $state([]);
@@ -36,6 +36,18 @@
 
   const phase = $derived(machine.link.phase);
   const endpoint = $derived(machine.link.endpoint || null);
+
+  // BLE wire counters, polled — bleStats is a plain module object (the bridge
+  // is not reactive code), so a 1 Hz sample into $state is the honest view.
+  let stats = $state('');
+  $effect(() => {
+    if (mode !== 'ble') { stats = ''; return; }
+    const t = setInterval(() => {
+      stats = 'rx ' + bleStats.rx + ' tx ' + bleStats.tx
+        + (bleStats.lastError ? ' err ' + bleStats.lastError : '');
+    }, 1000);
+    return () => clearInterval(t);
+  });
   const canUpgrade = $derived(
     mode === 'ble' && phase === 'live' && endpoint && endpoint.ipv4 && endpoint.wsPort
   );
@@ -115,6 +127,7 @@
       </button>
     {/if}
     {#if note}<span class="sb-note">{note}</span>{/if}
+    {#if stats}<span class="sb-note mono">{stats}</span>{/if}
   {/if}
 </div>
 

@@ -1,6 +1,6 @@
 {
   "name": "slopmotion",
-  "version": "0.1.0",
+  "version": "0.8.0",
   "description": "SlopMotion — jerk-limited dual-mode motion core (Ruckig-powered): v4 one-shot deadline planner + v3 cyclic chase tracker. Hardware-free, deterministic, native-tested.",
   "keywords": ["motion", "jerk-limited", "trajectory", "slopmotion"],
   "license": "MIT",

@@ -1,7 +1,8 @@
 // EncoderValidator — FAS commanded position vs AIM drive encoder
 //
 // Constraints:
-//   Latch a reference pair at homed-rising-edge, measure the encoder's sign
+//   Latch a reference pair at the first standstill after homing (not the
+//   homed edge itself), measure the encoder's sign
 //   (and effective counts/mm) from the first real excursion, then score
 //   deviation on every new encoder sample — but only pass verdicts on
 //   samples taken at standstill, because a Modbus read of a moving axis is

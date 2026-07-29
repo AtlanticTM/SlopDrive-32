@@ -1,12 +1,10 @@
-> **DEPRECATED 2026-07-27 — the WebSocket instructions below no longer work.**
-> M5c removed the `:55555` Intiface/TCode WebSocket server from the firmware
-> (`WebSocketTransport` and its outbound WSDM client are deleted; see
-> CLAUDE.md §8 M5c and `src/comms/TransportManager.cpp`). SlopSync is now the
-> only control/telemetry plane. The plan is native SlopSync support in
-> Intiface itself (not yet built) — until that lands, the **Bluetooth** row
-> below is the only transport in this file that still works; the **WebSocket**
-> row is kept for historical reference only. This file is not deleted per
-> C-9; do not follow the WebSocket row on current firmware.
+> **DEPRECATED 2026-07-27/29 — NOTHING in this file works on current
+> firmware.** The `:55555` TCode WebSocket server AND the NUS-style TCode BLE
+> service are both deleted (the whole raw-TCode transport zoo went 2026-07-27;
+> the `BLE_NUS_*` UUIDs this file's sync table references no longer exist in
+> `config_api.h`). SlopSync is the only control/telemetry plane. This file is
+> kept for historical reference until native SlopSync support in Intiface
+> lands — do not follow ANY row on current firmware.
 
 # Intiface device config for SlopDrive-32
 

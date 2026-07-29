@@ -31,7 +31,9 @@
 static constexpr uint32_t kAcceptHeapFloorBytes = 14336;
 static constexpr uint32_t kAcceptHeapFloorBlock = 6144;
 // Idle-RX reap window (see the sweep in SlopSyncAsyncWsPort::loop). Ten
-// missed ~2 s proof-of-life PINGs; the BLE transport reaps at 15 s.
+// missed ~2 s proof-of-life PINGs. WS-only: BLE has NO transport-level
+// idle-RX reap (link-layer supervision timeout covers dead radios, not a
+// wedged-but-connected central) — ledger has the residual + fix shape.
 static constexpr uint32_t kWsIdleReapMs = 20000;
 
 namespace slopdrive {
@@ -471,7 +473,7 @@ void SlopSyncAsyncWsPort::loop() {
         }
     }
 
-    // ---- Idle-RX reap: the WS twin of the BLE 15 s reap ---------------------
+    // ---- Idle-RX reap (WS-only; BLE has no equivalent — see ledger) ---------
     // A silently dead peer (locked phone, killed tab, dropped link — no FIN)
     // passes cleanupClients() and hasClient() indefinitely, while clients PING
     // within their granted deadman window (~2 s): kWsIdleReapMs of RX silence

@@ -9,8 +9,9 @@
 //   drive); init() probes both, and update()'s not-ready reprobe alternates
 //   between them, so the transport finds the drive at whichever baud it is
 //   actually running.
-//   FC 0x03 (read), 0x06 (write), 0x78 (write target position), 0x7A
-//   (change address).
+//   FC 0x03 (read), 0x06 (write), 0x10 (write multiple — the real motion
+//   path), 0x7A (change address). 0x78 is bench-verified DEAD on this drive
+//   variant — never dispatch motion through it.
 //   Readable telemetry: 0x0E alarm, 0x0F current (÷2000 A), 0x10 speed
 //   (÷10 r/min), 0x11 voltage (÷327 V), 0x12 temp °C, 0x13 PWM (±100%).
 //   Writable config: 0x00 enable, 0x01 output enable, 0x02 speed, 0x03

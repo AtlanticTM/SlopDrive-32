@@ -33,7 +33,7 @@ places with different values, that is not information — that is a **flag** (§
 | Engineering doctrine (architecture, motion, subsystem rules, build/deploy procedure) | [`docs/canon/DOCTRINE.md`](DOCTRINE.md) |
 | Volatile project/device state (fw versions, what's deployed, what's live-verified, milestone status) | [`docs/canon/LEDGER.md`](LEDGER.md) |
 | Operator preferences & working relationship | `CLAUDE.md` (repo root, gitignored) |
-| Firmware version constant | `FIRMWARE_VERSION` in `include/config_api.h` |
+| Firmware version constant | `FIRMWARE_VERSION` in `include/system/config_api.h` |
 | Subsystem deep detail | that subsystem's own README / spec |
 | Public docs site content | SlopSync repo's docs-site — generated/derived from its spec homes, never hand-forked |
 
@@ -229,3 +229,4 @@ confirmed (typically by a C-10 scrub).
 | 2026-07-27 | Operator-override path added to §3: overrides become amendments, never silent exceptions. | operator |
 | 2026-07-27 | C-11 ruling: pre-release wire strings ARE respelled (one atomic catalog-evolution pass, fixtures/goldens regenerated). "Frozen wire artifacts" carve-out applies only to released/frozen bytes. | operator |
 | 2026-07-27 | Dead-code ruling: all proven-dead code is deleted (tests before + after). CLAUDE.md restructured: preferences only, all rules/doctrine live under docs/canon/. | operator |
+| 2026-07-28 | Map of Truth repointed for the SlopSync repo split: wire numbers + protocol behavior rows now name the sibling checkout (pinned by `slopsync.pin`); CHANNEL-MAP.md row added for this machine's channel allocation. (Recorded retroactively 2026-07-29 by the C-10 scrub — the split commit missed this log.) | operator |

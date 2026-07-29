@@ -517,4 +517,4 @@ named firmware source and verified over the wire, not "looks about right".
   extension) would finish the HTTP demolition for apps without a page.
 * Existing queue (SlopSync repo's RFC-QUEUE.md) RFC-001 (NACK intent correlation)
   and RFC-003 (stored-vs-effective flags) will matter for the client cockpit's
-  shadow lifecycle — same batch.
+  shadow lifecycle — same batch.- ~~cfg_gen bump~~ RESOLVED: RFC-011 landed `Hub::bumpConfigGeneration()`.

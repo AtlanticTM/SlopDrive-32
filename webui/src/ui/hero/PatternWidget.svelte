@@ -126,7 +126,7 @@
     gap: var(--gap);
   }
 
-  /* Card-state chip — OG .card-state: mono, small, ghost-grey ALWAYS (the
+  /* Card-state chip — OG .card-state: mono, small, ghost-gray ALWAYS (the
      text itself carries "standby" vs "running", the color does not). */
   .pattern-topline {
     display: flex;

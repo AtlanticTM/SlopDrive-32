@@ -63,9 +63,10 @@ The node-to-node links are ad-hoc, not a shared library:
 - **T-Dongle C5 → onboard C5-Zero**: raw ESP-NOW packets carrying ad-hoc structs
   (bundled TCode text fragments + a bitmask ACK scheme), on a configurable 5GHz
   channel (`SECRET_ESPNOW_CHANNEL`, `SECRET_ESPNOW_PEER_MAC` in `secrets.h`).
-- **Onboard C5-Zero → main controller**: plain TCode text over a physical UART
-  wire (`DongleTransport`, GPIO 43/44 at 460800 baud) — the C5 side looks just
-  like a USB-serial TCode source to the main controller's parser.
+- **Onboard C5-Zero → main controller**: a physical UART wire exists
+  (GPIO 43/44) but has NO live firmware consumer since the transport-zoo
+  deletion — future work is a SlopSync-native C5 link, not a TCode relay
+  (docs/canon/LEDGER.md, deferred).
 
 A prior `lib/SharedProtocol/` scaffold (a hardware-agnostic binary packet
 protocol meant as an eventual common tongue between nodes) was deleted: it was
@@ -104,19 +105,19 @@ classes (Abstract Base Classes with pure virtual functions):
 
 - **`MotorDriver`** — abstracts stepper/servo communication, including bus
   current/voltage/power telemetry getters. Implemented today by
-  `AIMServoDriver` (the AIM-class closed-loop servos — 57AIM30 and compatible
-  siblings — current production driver) and `TMC2160StepperDriver` (the legacy
-  belt-drive stepper build).
+  `AIMServoDriver` (step/dir) and `ModbusServoDriver` (RS485) — both driving
+  the AIM-class closed-loop servos (57AIM30 and compatible siblings).
   **`MotionArbiter` is the only class permitted to call a driver's motion
-  methods** (`moveTo`/`streamTo`/`streamToSteps`/`stop`/`hardStop`) — this is
+  methods** (`streamToSteps`/`stop`/`hardStop`) — this is
   enforced at compile time via a `friend class MotionArbiter` declaration on
   `MotorDriver` itself, not just convention. The interface is structured for
   further community extensions — CANopen drives, external pulse generators,
   whatever hardware you strap to the rail.
-- **`Transport`** — abstracts communication transport (Serial, BLE, WebSocket,
-  Dongle UART relay, OSSM BLE). `TransportManager` routes data between the
-  active transport and the TCode parser; exactly one transport is active at a
-  time, selectable from the web UI.
+- **`ITransport` (SlopSync)** — the single control/telemetry plane. Two
+  bindings: AsyncWebSocket (`SlopSyncAsyncWsTransport`, subprotocol
+  `slopsync.v1`) and BLE GATT (`SlopSyncBleTransport`). Clients auto-upgrade
+  BLE→WS; there is no transport picker and no TCode parser on the hub —
+  TCode integration is a client-side adapter (SlopSync RFC-044).
 - Build-flags (`-DDRIVER_AIM_SERVO`, `-DBLE_ENABLED`, `-DFEATURE_RS485_MODBUS`)
   gate driver/feature code inclusion; unused drivers are not compiled into the
   binary.
@@ -238,34 +239,13 @@ at configured ceilings.
 
 ### Communication & Control
 
-- **TCode v0.4** (wire-compatible with v0.3) — the parser now supports a
-  runtime **axis registry** (only the stroke axis, `L0`, is registered by
-  default; other axes are opt-in), a **`D2`** command that dynamically
-  enumerates whatever's actually registered instead of a hardcoded reply, and a
-  **`G<slope>`** extension carrying MultiFunPlayer's v0.4 interpolation tangent
-  (the "MFP slope"), which `MotionInterpolator` uses to shape a smooth Hermite
-  curve through each point instead of just extrapolating. `D1` reports
-  `"TCode v0.4"`. Plain unslowed v0.3 lines (`L0500`) still work exactly as
-  before. Magnitude decoding is an **implicit decimal fraction** of the digit
-  string (`L0500` → 0.500, `L050000` → 0.5 with more precision) rather than a
-  fixed divisor, so arbitrary digit counts don't clip or overflow — truncated
-  at 6 digits, which is far beyond any real-world magnitude precision.
-
-  The device still **identifies itself to Intiface as `tcode-v03`** — this is
-  deliberate, not a bug: Intiface Central has no v0.4 protocol entry, and v0.4
-  is a strict wire-compatible superset, so identifying as v0.3 is how a v0.4
-  device stays plug-and-play with the existing ecosystem.
-
-- **Six transport modes**, exactly one active at a time (selected in the web UI,
-  persisted to NVS):
-
-  | Mode | Description |
-  |------|-------------|
-  | **Serial** | USB Serial dedicated to Intiface's serial comm manager — lowest latency/jitter path. |
-  | **BLE** | NimBLE-based GATT server advertising a Nordic-UART-style service (separate write/notify characteristics) for a TCode RX/TX pair. |
-  | ~~**WebSocket Server** / **WSDM Client**~~ | **REMOVED (fw 2.1.65).** The `:55555` TCode WebSocket server and the outbound Intiface Device-WebSocket client are both gone. **SlopSync is now the only input and output.** MultiFunPlayer talks to the device through the native SlopSync plugin (`clients/mfp/` in the SlopSync repo); Intiface is planned to gain native SlopSync support rather than the device continuing to speak Intiface's protocol. |
-  | **Dongle Transport** | UART relay from the onboard C5-Zero coprocessor (itself fed wirelessly by the external T-Dongle C5 over ESP-NOW). `DongleTransport` reads that UART (GPIO 43/44, 460800 baud) and feeds the parser exactly like `SerialTransport` does for USB. |
-  | **OSSM BLE** | SlopDrive-32 advertises itself as a **stock KinkyMakers OSSM device** (BLE peripheral/server, not a client) so third-party OSSM-ecosystem apps (OSSM Possum, XToys) can control it directly — full command/state/pattern-list characteristic set, with a 1s-grace + 2s ease-out safety ramp on disconnect. See the Known Gap note above re: continuous position streaming. |
+- **SlopSync is the only input and output plane.** Motion input, telemetry,
+  settings, events, and safety all ride SlopSync channels (WS + BLE GATT);
+  HTTP remains for bootstrap/fallback polling and OTA only. The historical
+  transport zoo (Serial TCode, NUS BLE, Dongle UART relay, OSSM BLE
+  masquerade, `:55555` WS TCode) was REMOVED 2026-07-27 — TCode reaches this
+  machine only through a client-side adapter feeding a SlopSync session
+  (SlopSync RFC-044; MFP plugin in the SlopSync repo's `clients/mfp/`).
 
 - **~~Binary WebSocket UI control plane (`:81`)~~ — REMOVED (fw 2.1.65).** The
   compact binary frame protocol on port `81` (`HELLO`/`TELE`/`STATUS`/`CLOCK`/
@@ -601,11 +581,11 @@ declares a standard positional stroker with a `[0, 999]` value range and
 fraction TCode parsing (any digit length is valid), but the config JSON keeps
 the historical `[0, 999]` range for Intiface compatibility.
 
-> The BLE service/characteristic UUIDs in
-> `intiface/slopdrive32-device-config.json` are kept in sync with the
-> firmware's `BLE_NUS_*` UUIDs in `config_api.h` — see
-> [`intiface/README.md`](intiface/README.md) for the sync table if you ever
-> change one side.
+> The UUIDs in `intiface/slopdrive32-device-config.json` point at the
+> DELETED NUS TCode service (the `BLE_NUS_*` constants no longer exist) —
+> the file is kept for reference until native SlopSync support in Intiface
+> lands. The live BLE identity UUIDs come from the SlopSync registry
+> (`ble_identity`), transcribed in `SlopSyncBleTransport.cpp`.
 
 ---
 
@@ -615,17 +595,10 @@ the historical `[0, 999]` range for Intiface compatibility.
 SlopDrive-32/
 ├── include/                               # Public headers
 │   ├── secrets.example.h                  # WiFi / OTA / Intiface / ESP-NOW credentials template
-│   ├── comms/                             # Transport layer interfaces
-│   │   ├── BleTransport.h
-│   │   ├── DongleTransport.h              # UART relay from onboard C5-Zero → S3
-│   │   ├── OssmBleService.h               # OSSM-compatible BLE peripheral (server)
+│   ├── comms/                             # SlopSync hub composition + servo bus
 │   │   ├── PatternPresetStore.h           # RFC-021 `pattern.frayd` preset backend
-│   │   ├── SerialTransport.h
 │   │   ├── ServoModbus.h                  # RS485/Modbus telemetry, or the AIM-servo motion path — see file banner
-│   │   ├── SlopSync{AsyncWsTransport,Catalog,Crypto,HubService,Platform,UiToken}.h  # SlopSync hub composition (CLAUDE.md §8)
-│   │   ├── TCodeAxisState.h               # Per-axis state for the TCode v0.4 axis registry
-│   │   ├── TCodeParser.h
-│   │   └── TransportManager.h
+│   │   └── SlopSync{AsyncWsTransport,BleTransport,Catalog,Crypto,HubService,Platform,UdpDiscovery,UiToken}.h
 │   ├── motion/                            # Motion engine interfaces
 │   │   ├── AdvancedPattern.h              # fray-d/OSSM-Lite-derived pattern math (why the project is CERN-OHL-S)
 │   │   ├── AIMServoDriver.h               # AIM-class closed-loop servo (step/dir), capstan-drum math
@@ -633,8 +606,6 @@ SlopDrive-32/
 │   │   ├── Kinematics.h                   # Legacy trapezoid planner (dormant by default)
 │   │   ├── ModbusServoDriver.h            # AIM-servo MotorDriver (DRIVER_AIM_SERVO + FEATURE_RS485_MODBUS)
 │   │   ├── MotionArbiter.h                # Sole caller of MotorDriver; arbitration + safety gates
-│   │   ├── MotionInterpolator.h           # Legacy cubic-Hermite TCode generator — dead on device, superseded by lib/slopmotion (CLAUDE.md §7.6)
-│   │   ├── MotionProfile.h                # Closed-form trapezoid profile math (reference/diagnostics only, no longer sampled live)
 │   │   ├── MotorDriver.h                  # Abstract stepper/servo driver interface
 │   │   ├── MotorProxy.h                   # Runtime motion-backend forwarding shim (static-init ordering workaround)
 │   │   ├── PatternEngine.h                # StrokeEngine-derived pattern playback
@@ -721,7 +692,7 @@ SlopDrive-32/
   OSR2/SR6 `Axis` library (MIT).
 - Built on [FastAccelStepper](https://github.com/gin66/FastAccelStepper),
   [ArduinoJson](https://arduinojson.org/),
-  [arduinoWebSockets](https://github.com/Links2004/arduinoWebSockets),
+  [ESPAsyncWebServer/AsyncTCP](https://github.com/ESP32Async/ESPAsyncWebServer),
   [NimBLE-Arduino](https://github.com/h2zero/NimBLE-Arduino),
   [Adafruit NeoPixel](https://github.com/adafruit/Adafruit_NeoPixel),
   [INA228 (RobTillaart)](https://github.com/RobTillaart/INA228), and the

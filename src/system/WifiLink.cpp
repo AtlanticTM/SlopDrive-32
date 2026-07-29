@@ -166,9 +166,10 @@ bool WifiLink::setupWiFi() {
         return true;
     } else {
         // Both credential sets failed. Stop the STA radio so it isn't burning
-        // cycles endlessly retrying a network that isn't there — the caller
-        // (main.cpp) drops us to serial TCode control so the rig still runs.
-        SLOGW("transport", "WiFi connection failed (primary + secondary) — falling back to serial TCode");
+        // cycles endlessly retrying a network that isn't there. There is NO
+        // fallback control plane: serial is boot-log/rescue-OTA only
+        // (config_api.h), so the device runs headless until WiFi returns.
+        SLOGW("transport", "WiFi connection failed (primary + secondary) — no control plane until WiFi returns");
         WiFi.disconnect(true, true);
         WiFi.mode(WIFI_OFF);
         _state.wifi_ready = false;

@@ -6,7 +6,7 @@
 //   Core 1 (real-time): motorTask, streamSamplerTask, PatternEngine's own
 //   task, servoBusTask (Modbus backend only).
 //   Core 0 (system): commsTask, httpTask.
-//   D4 event-driven: TCode/SlopSync callbacks submit MotionIntent via the
+//   D4 event-driven: SlopSync callbacks submit MotionIntent via the
 //   arbiter (Core 0 -> Core 1 deferral queue); PatternEngine emits one
 //   intent per stroke segment; motorTask drains deferred intents on Core 1.
 //   No periodic motion tick, no chase loop — ONE COMMAND -> ONE PLAN -> FAS.
@@ -178,7 +178,7 @@ static void motorTask(void* /*param*/) {
                     g_state.cfg_gen.fetch_add(1, std::memory_order_relaxed);
                     SLOGI("sys", "System is now homed and ready to pound :3");
                 } else {
-                    SLOGW("sys", "Homing failed — endstop not found. Check wiring.");
+                    SLOGW("sys", "Homing failed — no current-spike stall found in the search sweep. Check motor wiring/power.");
                 }
             }
         } else {
@@ -204,8 +204,9 @@ static void motorTask(void* /*param*/) {
 // slopmotion::Engine (quintic waveform / Ruckig chase + guard, docs/canon
 // doctrine §SlopMotion), samples the plan at ~1kHz, and feeds the arbiter's
 // stream fast-path (submitStreamSample). Publishes telemetry for the WebUI
-// overlay. Only drives motion while a TCode stream is recently active —
-// otherwise it yields the motor to PatternEngine / manual moves.
+// overlay. Only drives motion while a SlopSync motion-input stream is
+// recently active — otherwise it yields the motor to PatternEngine / manual
+// moves.
 static void streamSamplerTask(void* /*param*/) {
     TickType_t lastWake     = xTaskGetTickCount();
     bool       wasActive    = false;

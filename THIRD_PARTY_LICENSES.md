@@ -13,7 +13,8 @@ text always lives with each upstream project.
 
 | Library | Author | License | Project |
 |---------|--------|---------|---------|
-| TMCStepper | Teemu Mäntykallio (teemuatlut) | MIT | https://github.com/teemuatlut/TMCStepper |
+| NimBLE-Arduino | h2zero | Apache-2.0 | https://github.com/h2zero/NimBLE-Arduino |
+| INA228 | Rob Tillaart | MIT | https://github.com/RobTillaart/INA228 |
 | FastAccelStepper | Jochen Kiemes (gin66) | MIT | https://github.com/gin66/FastAccelStepper |
 | Adafruit NeoPixel | Adafruit Industries | LGPL-3.0 | https://github.com/adafruit/Adafruit_NeoPixel |
 | ArduinoJson | Benoît Blanchon | MIT | https://github.com/bblanchon/ArduinoJson |
@@ -31,7 +32,7 @@ text always lives with each upstream project.
 
 ## Full license texts
 
-### MIT (TMCStepper, FastAccelStepper, ArduinoJson, StrokeEngine)
+### MIT (FastAccelStepper, ArduinoJson, StrokeEngine, INA228)
 
 ```
 MIT License
@@ -80,6 +81,9 @@ Full LGPL-2.1 text: https://www.gnu.org/licenses/old-licenses/lgpl-2.1.txt
 ---
 
 ## Historical (removed from the build)
+
+- **TMCStepper** (Teemu Mäntykallio, MIT) — the legacy TMC2160 belt-drive
+  stepper build; driver deleted with the transport-era cleanup.
 
 These libraries were dependencies at one point but are no longer declared in
 `platformio.ini`. Attribution is kept here for provenance; they carry no

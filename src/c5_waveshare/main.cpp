@@ -148,7 +148,6 @@ static void ledUpdate(uint32_t now_ms) {
     }
 }
 
-// Ring buffer removed — replaced by the scheduled replay queue below.
 // schedPush() is called from the ESP-NOW recv callback (Wi-Fi task) and
 // writes into s_sched[]. schedDrain() is called from loop() and fires
 // commands at the correct time. Single-core C5 = no mutex needed.

@@ -242,10 +242,10 @@ machine's half of the boundary.
   encouraged. Legacy raw-TCode transports (SER/BT/DONGLE) were REMOVED
   2026-07-27 (operator ruling executed: SlopSync is the only plane; TCode
   integration is a CLIENT-SIDE adapter per SlopSync RFC-044, never a hub-side
-  stream). This firmware's BLE GATT `ITransport` LANDED and is deployed
-  (Phase E + overnight bench, fw 2.1.82; ledger has the receipts); the
-  `OssmBleService` masquerade was REMOVED 2026-07-27 (SlopSync-over-BLE
-  replaces it, ledger has the receipt).
+  stream). This firmware carries a BLE GATT `ITransport` (deployment state:
+  [`LEDGER.md`](LEDGER.md), never here); the `OssmBleService` masquerade was
+  REMOVED 2026-07-27 (SlopSync-over-BLE replaces it, ledger has the
+  receipt).
 * **Clients:** the MFP plugin (SlopSync.cs + SlopSync.xaml, dev-only harnesses
   never ship) and the verifier (`tools/slopsync_probe.py --ip <ip> --port 82`)
   both live in the SlopSync repo's `clients/mfp/` and `tools/` now.

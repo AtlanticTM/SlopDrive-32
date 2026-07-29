@@ -21,6 +21,7 @@
 #include "slopsync/generated/registry_constants.hpp"
 #include "slopsync/hub/hub.hpp"
 #include "slopsync/wire/catalog_codec.hpp"
+#include "slopsync/wire/catalog_etag.hpp"
 
 #include <algorithm>
 #include <array>
@@ -92,6 +93,26 @@ bool isRegisteredRole(std::string_view r) {
 }
 
 }  // namespace
+
+// ---- Etag pin ---------------------------------------------------------------
+// The byte-identity gate for the authoring-layer refactor (see the campaign
+// entry in docs/canon/LEDGER.md): a surprise change here IS an accidental wire
+// change. Update this pin only on a DELIBERATE catalog-evolution commit that
+// says so. Pinned over the fully-featured {true, true} fixture build.
+TEST_CASE("device catalog: etag pinned — accidental-wire-change tripwire") {
+    DeviceCatalog dc;
+    std::vector<std::byte> scratch(65536);
+    const auto etag = slopsync::catalogEtag(dc.c, std::span<std::byte>(scratch));
+    std::string hex;
+    for (std::byte b : etag) {
+        static constexpr char d[] = "0123456789ABCDEF";
+        hex += d[unsigned(b) >> 4];
+        hex += d[unsigned(b) & 0xF];
+        hex += ' ';
+    }
+    hex.pop_back();
+    CHECK(hex == "B6 9E B0 62 49 EB E7 3A");
+}
 
 // ---- Baseline conformance ---------------------------------------------------
 // The catalog builds, is self-consistent, and satisfies the conformance

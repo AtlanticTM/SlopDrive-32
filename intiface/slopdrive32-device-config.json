@@ -25,7 +25,7 @@
     "  - The web UI's Stroke Window / trim / max-speed math is applied AFTER this",
     "    on the device, so Intiface always sends the full 0..999 range and the",
     "    machine maps it into your chosen physical window.",
-    "  - These UUIDs/name MUST stay in sync with include/system/config_api.h:",
+    "  - These UUIDs/name DEPRECATED: points at the DELETED NUS TCode service (no BLE_NUS_* constants exist anymore); kept for reference until native SlopSync Intiface support:",
     "      BLE_DEVICE_NAME        = SlopDrive-32",
     "      BLE_NUS_SERVICE_UUID   = 8a846175-ea22-4411-88f5-9a8afcc20671",
     "      BLE_NUS_RX_CHAR_UUID   = 8a846175-ea22-4411-88f5-9a8afcc20672 (host -> device, write)",

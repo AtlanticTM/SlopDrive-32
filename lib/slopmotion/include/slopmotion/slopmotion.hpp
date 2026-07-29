@@ -712,6 +712,8 @@ enum class AnomalyType : uint8_t {
 // HandoffBounded = 8 SPENT that width: SM_ANOM_KINDS went 8 -> 9 in the same
 // change, together with kSmAnomalyNames, the sim's mirror of it, and the
 // per-kind field list on the 0x0088 slopmotion-diag channel.
+// WaveformSmoothed = 9 SPENT the next slot: SM_ANOM_KINDS went 9 -> 10, same
+// three-place update (names, sim mirror, 0x0088 field list).
 
 // ANOMALY VOCABULARY FOR THE INFEASIBLE PATHS (one event per infeasible
 // segment, so the counts read as a diagnosis rather than a pile):
@@ -2438,10 +2440,9 @@ private:
     // to the sender. Each of those settles is a Ruckig brake plan that the
     // next segment preempts ~5 ms later, so it costs plan time, corrupts the
     // mode/plan telemetry, and (worst) bleeds the velocity the next segment
-    // was counting on inheriting. The legacy cubic engine did NOT have this
-    // failure mode: handleTimeout simply FROZE at the endpoint, which is why
-    // it degraded smoothly under the same jitter. The grace restores exactly
-    // that behavior for the jitter case and keeps the brake for the real one.
+    // was counting on inheriting. The grace window holds at the endpoint for
+    // ms-scale stream jitter (degrading smoothly) and keeps the brake for a
+    // real starvation.
     // The §11.3 600 ms SlopSync deadman remains the actual starvation
     // authority; this window only stops the engine from panicking on ms-scale
     // pacing noise.

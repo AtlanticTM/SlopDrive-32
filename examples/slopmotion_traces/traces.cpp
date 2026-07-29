@@ -1,13 +1,14 @@
 // slopmotion_traces — scenario harness: SlopMotion (Ruckig) vs the legacy
 // cubic MotionInterpolator, same command streams, sampled side by side.
-// Desktop-only; emits one JSON trace file per scenario for graphing. Both
-// engines are the REAL code: the vendored Ruckig solvers and the actual
-// src/motion/MotionInterpolator.cpp the firmware runs today.
+// Desktop-only; emits one JSON trace file per scenario for graphing. The
+// Ruckig side is the REAL vendored solver; the cubic side is the RETIRED
+// bench baseline (this directory's local MotionInterpolator.cpp — not
+// firmware; see MotionInterpolator.h's own banner).
 //
 // Build & run (from repo root, MinGW g++ on PATH):
 //   g++ -std=gnu++2b -O2 -I lib/slopmotion/include -I lib/ruckig/include \
-//       -I include/motion examples/slopmotion_traces/traces.cpp \
-//       src/motion/MotionInterpolator.cpp lib/ruckig/src/ruckig/*.cpp \
+//       -I examples/slopmotion_traces examples/slopmotion_traces/traces.cpp \
+//       examples/slopmotion_traces/MotionInterpolator.cpp lib/ruckig/src/ruckig/*.cpp \
 //       -o slopmotion_traces && ./slopmotion_traces <out_dir>
 //
 // Determinism: synthetic clock, LCG jitter with fixed seed — identical JSON

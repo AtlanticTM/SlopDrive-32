@@ -26,7 +26,7 @@ commit as any change that alters it (C-3).
   firmware; `main` is behind until stabilization + merge. [verified
   2026-07-27 — git branch state]
 - Source-tree firmware version: see `FIRMWARE_VERSION` in
-  `include/config_api.h` (its one home). [C-1 pointer]
+  `include/system/config_api.h` (its one home). [C-1 pointer]
 - Deployed firmware on the device: **2.1.88** (2.1.87 + the WS IDLE-RX REAP entry below; reap live-proven) — 2.1.85 + RFC-051
   (critical-stall parks, see its entry) at 2.1.86, then the CRASH RING +
   HEAP-PRESSURE GUARDS entry's build (2026-07-29; /api/crash live-proven on
@@ -139,8 +139,9 @@ commit as any change that alters it (C-3).
   [verified 2026-07-27, superseded 2026-07-28 — see milestone entry]
 - **CLAUDE.md is gitignored** — the covenant is not in version control; one
   clean checkout loses it. Track it (or an agreed public variant)?
-- **tools/slopsync_probe.py untracked** — primary verification tool, one
-  checkout from gone (long-standing note in .gitignore).
+- ~~tools/slopsync_probe.py untracked~~ — RESOLVED by the repo split: the
+  probe lives tracked in the SlopSync repo (`tools/slopsync_probe.py` there);
+  this repo's copy concern is moot. [verified 2026-07-29 — C-10 scrub]
 
 ## Active plan — SlopDeck (gold-standard client & widget system)
 
@@ -3046,7 +3047,7 @@ floor fires BEFORE HELLO processing, so ghost-held heap refused the very
 connect whose slot-pressure path is the only other evictor — a deadlock.
 
 Fix: the WS transport's idle-RX reap (kWsIdleReapMs=20000 — ten missed
-~2 s proof-of-life PINGs; the twin of BLE's 15 s reap). RX silence past
+~2 s proof-of-life PINGs). RX silence past
 the window force-closes the client; the close lands as RFC-042's
 transport-closed staleness trigger, the session parks for reattach as
 designed, and the slot + heap free. `ws-idlereap` crumb added to the T19
@@ -3070,3 +3071,90 @@ bullets orphaned under the wrong title. Restored from `a24c42c`'s version of
 the file; no content was lost (the BLE session entry's real body was intact
 above). [verified 2026-07-28 — `git show a24c42c:docs/canon/LEDGER.md` diffed
 against working tree]
+
+## AUTHORING-LEGIBILITY CAMPAIGN KICKOFF + C-10 SCRUB (2026-07-29)
+
+Operator rulings this session (chat, campaign plan approved):
+
+- **Campaign:** SlopSync authoring legibility — the catalog reads like the
+  UI it renders. Plan: `~/.claude/plans/pure-crafting-thacker.md`. Phases:
+  scrub (done, below) → etag pin (landed: `test_slopsync_devicecatalog`
+  pins `B6 9E B0 62 49 EB E7 3A`; flips ONCE, at the Phase-6 sweep) →
+  RENDERING.md §3 fix + AUTHORING.md + RFC-052 (SlopSync repo) → reference
+  client implements the §1 derivation chain → `slopsync::author` tables →
+  byte-identical catalog port → derived cold encoders + hot-path layout
+  guards → operator sweep + deploy.
+- **Ceilings ruling:** new machine maximums, operator-derived safe values:
+  **1000 mm/s speed, 60000 mm/s² accel, across the board.** Applied at the
+  Phase-6 sweep (they move catalog `.max` annotations → the one planned
+  etag bump), NOT before. May be tuned up later.
+- **RENDERING.md §3 flag ruling:** ledger + shipped catalog win — Phase C2
+  DID wire `ui_categories` onto entries; RENDERING.md §3's "until a later
+  catalog-evolution RFC" note and clients/js frames.js's 5-entry
+  SETTING_CATEGORY_NAME are the stale halves. Fix lands in SlopSync repo
+  (Phase 0). [ruled 2026-07-29]
+- **Dead-code ruling:** scrub's dead-code batch deleted in full per C-9
+  (moveTo/streamTo interface + impls, handleApiHomeOverride, ramp fields,
+  seq counters, PIN_NEOPIXEL alias, esp32-c5-waveshare board json,
+  FanoutOutput). Proofs in the deletion commit messages.
+- **BLE ghost-reap residual:** BLE has NO transport-level idle-RX reap
+  (the WS-side comments claiming a "15 s BLE reap" were fiction — scrub
+  finding 0/18, corrected). Partial cover: BLE link-layer supervision
+  timeout reaps dead radios; a wedged-but-connected central still holds
+  its GATT slot + heap indefinitely (T19 class). Fix shape when wanted:
+  mirror the WS idle-RX sweep in `SlopSyncBlePort::loop()` — per-slot
+  last-RX stamp on every GATT write/notify-ack, sweep vs a kBleIdleReapMs,
+  force-disconnect → RFC-042 parks the session, T3 back-to-back-session
+  live verify mandatory. [recorded 2026-07-29 — scrub + operator ruling]
+- **C-10 scrub record:** 17 agents over this repo's areas; 59 raw → 55
+  deduped → 39 adversarially verified, 0 refuted, +16 lows. Coverage note:
+  sibling SlopSync repo covered only via seed findings, not swept.
+  Headliners beyond the rulings above: MotionArbiter's always-dispatch
+  rationale cites the AIM stream-stall watchdog that is DISABLED in D4
+  (comment corrected); WifiLink's "drops to serial TCode control" failure
+  log described a deleted fallback (corrected — WiFi death = no control
+  plane); README.md still described the pre-retirement transport zoo
+  (rewritten). Full digest: scrub session transcript, 2026-07-29.
+  [verified 2026-07-29 — truth-scrub wf_ac7c5f00-855, findings applied
+  this commit]
+
+**PARKED (recorded per campaign plan):** webui rapid-fire list — manual
+slider entry box, ⓘ centering, intent/pending glow redesign, power-bar max
+ticks + click-reset + hover-read + per-category reset-all, session ms →
+h:m:s (click for ms), telemetry-rate trace (position vs plan-strip),
+reset-to-default buttons, label casing. Queued behind the campaign.
+`_webui.handleCommand` WS_OP bridge collapse — future milestone. YAML
+codegen sugar — only if tables prove insufficient. Session-gate/closeout
+system (C-13 proposal + ledger diet + tiered canon loading) — designed in
+chat 2026-07-29, implement after campaign Phase 0.
+
+## ⏭ NEXT STEPS (written at 2026-07-29 session closeout — START HERE)
+
+The answer to "what's next on the ledger":
+
+1. **Campaign: SlopSync authoring legibility** — plan APPROVED and
+   RE-VALIDATED post-scrub (2026-07-29, operator + main loop):
+   `~/.claude/plans/pure-crafting-thacker.md`. Status: Phase −1 (scrub) DONE,
+   applied, committed. Etag pin DONE (`B6 9E B0 62 49 EB E7 3A`,
+   test_slopsync_devicecatalog). Next up, in order:
+   - **Phase 0** (SlopSync repo first, DOCTRINE §9): fix RENDERING.md §3's
+     stale "future work" note per the recorded ruling; write spec/AUTHORING.md
+     (pointer-style hub-author quickstart); author RFC-052 (authoring tables,
+     released-marker §5.4 mechanization, generated client vocabularies,
+     group-desc annotation proposal). Commit there, bump slopsync.pin here.
+   - **Phase 1a** (safe): JS vocabulary codegen + rank/keys-19-23 decode +
+     settings.js rank/category law. Screenshot-verified in Tauri.
+   - **Phase 1b** (widget churn — operator eyeballs before merge): §8.2
+     archetype table with the pinned slider/stepper rule (see plan).
+   - Then Phases 2–6 per plan. Phase 6 carries the ceilings ruling
+     (1000 mm/s / 60k mm/s²) + the ONE etag bump + deploy.
+2. **Parked webui rapid-fire list** — see the kickoff entry above; queued
+   BEHIND the campaign (several items become trivial on the new surface).
+3. **Session-gate/closeout system** (C-13 proposal + ledger diet + tiered
+   canon loading, designed in chat 2026-07-29) — implement after Phase 0;
+   this closeout entry is its manual prototype.
+4. **Deploy state:** device runs 2.1.88. This session's fixes (dead-code
+   deletions, comment/doc corrections) are committed but NOT deployed — no
+   behavior change intended; deploy rides with the next firmware-touching
+   phase. The morning's webui OG-alignment commit is likewise built but not
+   uploadfs'd.

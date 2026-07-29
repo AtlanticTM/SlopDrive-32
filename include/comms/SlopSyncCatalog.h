@@ -905,7 +905,7 @@ inline bool buildSlopDriveCatalog(slopsync::Catalog32& c, DeviceFeatures feat = 
     // i_bus_mA lives HERE, not on 0x0080, deliberately: it is a slow,
     // background diagnostic, and putting it on the 60 Hz motion snapshot
     // would grow the highest-rate channel to carry a value nothing on the
-    // motion path reads.  [2+2 = 4 B, or +2 = 6 B with a power monitor]
+    // motion path reads.  [2+2+2 = 6 B, or +2 = 8 B with a power monitor]
     auto addPower = [&]() {
     if (feat.has_current_sensor) {
         c.addEntry({.id = ch::power, .name = "power",

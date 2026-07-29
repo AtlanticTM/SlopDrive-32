@@ -278,3 +278,11 @@ not OTA (queued bench reflash).
 Bit us: the 2026-07-29 wedge-then-PANIC (second unexplained PANIC on
 2.1.86), diagnosed only from heap beacons and the arrival pattern because
 nothing else survived the reboot.
+**Addendum — the floor deadlocks against ghosts (fw 2.1.88):** the accept
+floor fires BEFORE HELLO processing, but a silently dead peer (locked
+phone, killed tab — no FIN) never reads as stale at the transport level:
+it holds its slot and heap forever, and the ghost-held heap refuses the
+very connect whose HELLO slot-pressure path is the only other evictor.
+A refuse-new-load floor MUST be paired with a transport-level idle-RX
+reap (WS: kWsIdleReapMs, ten missed proof-of-life PINGs) or the floor
+becomes the deadlock. Ledger's FW 2.1.88 entry has the live proof.

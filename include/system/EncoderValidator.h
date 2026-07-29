@@ -78,7 +78,8 @@ private:
 
     EncoderValidation _v;
 
-    // Reference pair latched on homed-rising-edge
+    // Reference pair latched at the first post-home standstill (never the
+    // homed edge itself — see the file header)
     int32_t  _enc0 = 0;
     float    _fas0 = 0.0f;
     uint32_t _last_stamp = 0;     // enc_stamp_ms of the last consumed sample

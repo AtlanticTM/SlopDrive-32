@@ -255,8 +255,9 @@ struct SystemState {
     volatile float         commanded_target_mm = 0.0f;
 
     // ---- Raw parsed target (cross-core) -------------------------------------
-    // The position the TCode parser + RangeMapper spat out (mm), BEFORE the
-    // kinematics planner gets its hands on it. This is the rawest "what the host
+    // The raw requested position (mm) from the live intent producers —
+    // SlopSync motion ingress or PatternEngine — BEFORE the kinematics
+    // planner gets its hands on it. This is the rawest "what the host
     // actually asked for, mapped into our stroke window" — one stage upstream of
     // commanded_target_mm (which is the planner's clamped/shaped result). Drawing
     // all three (raw → planned → actual) side by side lets us see exactly which

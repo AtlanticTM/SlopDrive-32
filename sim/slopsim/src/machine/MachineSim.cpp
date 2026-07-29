@@ -1162,9 +1162,20 @@ void MachineSim::publishTelemetry(uint32_t nowMs) {
 // WebUI::handleCommand on the host; the gates/clamps/echoes are kept
 // semantically identical).
 
-slopsync::AccessLevel MachineSim::validateToken(std::span<const std::byte>, std::span<const std::byte>,
-                                                bool) {
-    // LAN-trust parity with the firmware's current posture: control for all.
+slopsync::AccessLevel MachineSim::validateToken(std::span<const std::byte> instance_id,
+                                                std::span<const std::byte> token, bool hasToken) {
+    // Rung 1: the hub's own trust ledger — REAL, so knock-and-approve round
+    // trips are testable in-sim (the device's rung 2; there is no /uitoken
+    // sideband here). validate() is the same constant-time lookup the
+    // firmware consults.
+    if (hasToken) {
+        const auto role = _hub.pairing().validate(instance_id, token);
+        if (role > slopsync::AccessLevel::watch) return role;
+    }
+    // Sim convenience floor: bare sessions get `control` (parity with the
+    // device's /uitoken-on-LAN posture) — but NEVER `configure`. Configure
+    // must be EARNED through pairing, or the session-admin surface's tier
+    // gate would be untestable here.
     return slopsync::AccessLevel::control;
 }
 

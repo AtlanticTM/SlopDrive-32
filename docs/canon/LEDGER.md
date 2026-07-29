@@ -2985,6 +2985,39 @@ Both incident work items implemented and LIVE:
   [verified 2026-07-29 — deploy 2.1.86 -> 2.1.87 + fs, render smoke ALL
   PASS, canon_lint clean]
 
+## PAIRING PROVEN END-TO-END + MFP SETTLE FIX (2026-07-29)
+
+- **Knock-and-approve WORKS — and always did; what was missing was proof.**
+  Recon correction to the WEBUI PHASE KICKOFF entry: the "firmware caller
+  missing" note was true ONLY of PIN-mode (SlopSyncHubService::openPairing/
+  closePairing — still uncalled, now comment-marked as a planned caller).
+  Knock-and-approve needed no caller: `_knockApproveEnabled` defaults true
+  and every layer (hub lib, trust NVS, catalog, transports, JS client,
+  PairingPane) was already implemented and lib-tested (M4B-12..26).
+- **First full round trip recorded** (webui/test/pairing-roundtrip.mjs,
+  fresh slopsim, both modes): push-to-pair window -> first knock grants
+  `configure` on a fresh ledger -> token reconnect lands configure via the
+  TRUST-LEDGER rung -> second joiner's knock parks (pending STATE + knocked
+  EVENT) -> operator approves over session-admin -> PAIR_GRANT -> token
+  reconnect at the approved tier. ALL PASS.
+- **Sim gap closed to make that provable**: slopsim's `validateToken` was a
+  control-for-all stub whose "parity with the firmware's posture" comment
+  had gone stale (the firmware enforces /uitoken -> ledger -> watch since
+  RFC-029). The sim now consults its hub's own PairingManager first, then
+  floats bare sessions at `control` (never configure — configure must be
+  earned or the admin tier gate is untestable). `--pairing-window` was
+  already fully wired.
+- Live-device PairingPane two-tab check remains a bench nicety (the device
+  runs the same lib + a stricter validateToken); queued, not blocking.
+- **MFP settle fix shipped** (SlopSync 540325f + installed into the
+  operator's MultiFunPlayer 1.34.5 Plugins folder): segment wish 5->20 Hz
+  sustained / burst 25->50 — dense passages starved the emitter's token
+  bucket, deferred segments eroded the 120 ms lookahead, and the hub's
+  settle brake fired mid-stroke. Verified: build + WireSelfTest + LiveWireTest
+  --segments twice back-to-back on one sim process (sole red check =
+  slopsim's missing /uitoken endpoint, pre-existing). Real-content MFP
+  playback check is the operator's.
+
 ## Deferred / planned (homes: docs/REFACTOR-ROADMAP.md, docs/MOTION-TODO.md)
 
 - TCode pass-through channel (post-MFP; parser cross-task race was the

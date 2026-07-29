@@ -2284,6 +2284,10 @@ void SlopSyncHubService::pumpEndpointAndRadios(uint32_t /*nowMs*/) {
 
 // ---- Pairing window and NVS persistence (namespace "slopsync") --------------
 
+// PLANNED CALLER, none today: PIN-mode (SPEC §12.3 mode (b)) needs an
+// operator-side admin affordance that does not exist yet (webui phase queue).
+// Knock-and-approve and push-to-pair need NEITHER of these — proven
+// end-to-end 2026-07-29 (webui/test/pairing-roundtrip.mjs; ledger).
 void SlopSyncHubService::openPairing(const char* pin) {
     if (!pin) return;
     std::strncpy(_pairPin, pin, sizeof(_pairPin) - 1);

@@ -3137,13 +3137,23 @@ The answer to "what's next on the ledger":
    `~/.claude/plans/pure-crafting-thacker.md`. Status: Phase −1 (scrub) DONE,
    applied, committed. Etag pin DONE (`B6 9E B0 62 49 EB E7 3A`,
    test_slopsync_devicecatalog). Next up, in order:
-   - **Phase 0** (SlopSync repo first, DOCTRINE §9): fix RENDERING.md §3's
-     stale "future work" note per the recorded ruling; write spec/AUTHORING.md
-     (pointer-style hub-author quickstart); author RFC-052 (authoring tables,
-     released-marker §5.4 mechanization, generated client vocabularies,
-     group-desc annotation proposal). Commit there, bump slopsync.pin here.
-   - **Phase 1a** (safe): JS vocabulary codegen + rank/keys-19-23 decode +
-     settings.js rank/category law. Screenshot-verified in Tauri.
+   - **Phase 0 DONE (2026-07-29, SlopSync `1a930e6`, pin bumped):**
+     RENDERING.md §3 corrected per the recorded ruling; the SAME stale
+     vocabulary found and fixed in SPEC.md §8.1 key table + §8.8 Categories
+     (still said setting_categories, 0–127/128–255) and the registry
+     tombstone's four-value-for-five miscount; spec/AUTHORING.md written
+     (reverse-chain hub-author quickstart, pointers only); **RFC-052
+     authored, status PROPOSED — awaiting operator stamp** (a: author
+     tables, b: released marker, c: JS vocab codegen, d: entry key 17
+     `group_descs`) [veto-able; written exactly to the approved plan's
+     scope]. Bycatch: SlopSync's docs-site generator had been failing
+     since RFC-051 landed (missing SOURCE_LINKS anchor) — fixed, 4 stale
+     generated pages caught up. Gates: slopsync_lint 0,
+     gen_registry_header --check clean, etag pin test green post-bump.
+   - **Phase 1a** (safe; NEXT UP): JS vocabulary codegen + rank/keys-19-23
+     decode + settings.js rank/category law. Screenshot-verified in Tauri.
+     Note: the codegen half IS RFC-052(c) — if the operator amends RFC-052,
+     1a's codegen follows the amended shape.
    - **Phase 1b** (widget churn — operator eyeballs before merge): §8.2
      archetype table with the pinned slider/stepper rule (see plan).
    - Then Phases 2–6 per plan. Phase 6 carries the ceilings ruling

@@ -89,7 +89,11 @@
     const cssVar = (name) => getComputedStyle(root).getPropertyValue(name).trim();
     const paletteColors = PALETTE_VARS.map(cssVar);
     const inkFaint = cssVar('--ink-faint');
-    const line = cssVar('--line-soft');
+    // Hairline color only (paint, not the sampling/scaling math below) —
+    // matched to the OG DIAG graph's gridline token (--line-1), the same
+    // hairline every other panel divider in this app uses; --line-soft reads
+    // as near-invisible against --bg and doesn't match the reference.
+    const line = cssVar('--line-1');
     function colorFor(f) {
       const idx = roles.indexOf(f.role);
       return paletteColors[(idx < 0 ? 0 : idx) % paletteColors.length];
@@ -236,6 +240,12 @@
 
 {#if resolvedSeries.length}
   <div class="tchart">
+    <!-- OG DIAG strip legend (.diag-key, verified against index.html's literal
+         markup): the label and value stay neutral (tx-mut / tx-val) — only
+         the small line swatch carries the series color. A colored label AND
+         value would be redundant with the swatch and wash out the reading
+         hierarchy the rest of this app uses (label quiet, value quiet,
+         reality/intent color reserved for state, not decoration). -->
     <div class="tchart-legend">
       {#each resolvedSeries as f, i (f.uid)}
         <span class="leg">
@@ -245,7 +255,7 @@
         </span>
       {/each}
     </div>
-    <div class="tchart-canvas-wrap" style="height: {Math.max(56, resolvedSeries.length * 56)}px">
+    <div class="tchart-canvas-wrap og-screen" style="height: {Math.max(56, resolvedSeries.length * 56)}px">
       <canvas bind:this={canvasEl} role="img" aria-label="Live telemetry strip chart"></canvas>
     </div>
   </div>
@@ -268,41 +278,44 @@
     gap: 10px 16px;
   }
 
+  /* Sizes/colors verified against the OG's .diag-key (style.css): Chakra
+     Petch label + mono value, both .68rem, neither tinted by series. */
   .leg {
     display: inline-flex;
     align-items: center;
     gap: 6px;
-    font-size: 0.78rem;
-    color: var(--ink-dim);
+    font-family: var(--font);
+    font-size: .68rem;
+    color: var(--tx-mut);
   }
 
+  /* A short line, not a dot — reads as "this is what the plotted line looks
+     like", matching the OG's .diag-key i. */
   .swatch {
-    width: 8px;
-    height: 8px;
-    border-radius: 2px;
+    width: 10px;
+    height: 2px;
     flex: 0 0 auto;
   }
 
   .leg-label { white-space: nowrap; }
 
   .leg-val {
-    color: var(--ink);
-    font-size: 0.85em;
+    font-weight: var(--num-wght);
+    font-size: .68rem;
+    color: var(--tx-val);
   }
 
   .unit {
-    color: var(--ink-dim);
+    color: var(--tx-ghost);
     font-size: 0.85em;
     margin-left: 2px;
   }
 
+  /* Surface (background/border/inset shadow) comes from the global
+     .og-screen utility — restating it here would fork the recipe. */
   .tchart-canvas-wrap {
     position: relative;
     width: 100%;
-    background: var(--bg-sunken);
-    border: 1px solid var(--line);
-    border-radius: var(--r-s);
-    box-shadow: inset 0 2px 8px rgba(0, 0, 0, 0.5);
     overflow: hidden;
   }
 

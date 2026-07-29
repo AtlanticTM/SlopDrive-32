@@ -59,6 +59,21 @@
   }
 
   const step = $derived(field.step || (precisionFor(field) === 0 ? 1 : 0.01));
+
+  // Readout archetype (OG "Power card" bar recipe): a read-only numeric with
+  // published bounds gets a thin proportional bar under the value, same as
+  // every bounded live measurement in the OG right-hand instrument column.
+  // A readout with no bounds (a status string, an unbounded counter) gets no
+  // bar — there is no range to show it against.
+  const hasBounds = $derived(
+    field.widget === WIDGET.readout && field.min != null && field.max != null && field.max > field.min
+  );
+  const boundedFrac = $derived.by(() => {
+    if (!hasBounds) return 0;
+    const n = Number(value);
+    if (!isFinite(n)) return 0;
+    return Math.max(0, Math.min(1, (n - field.min) / (field.max - field.min)));
+  });
 </script>
 
 <div class="field" data-shadow={status} data-widget={field.widget}
@@ -73,7 +88,7 @@
       {#if field.flagBits.restart_required}<span class="tag warn" title="Takes effect after restart">restart</span>{/if}
     </label>
     {#if field.widget !== WIDGET.toggle && field.widget !== WIDGET.bitfield}
-      <output class="field-value" for={field.uid}>
+      <output class="field-value" class:readout={field.widget === WIDGET.readout} for={field.uid}>
         {#if field.options}
           {optionLabel(field, value)}
         {:else}
@@ -86,6 +101,11 @@
   {#if field.widget === WIDGET.readout}
     <!-- No control at all. A field with no setting_key is effective truth and
          must never render as something you can push. -->
+    {#if hasBounds}
+      <div class="readout-bar" aria-hidden="true">
+        <div class="readout-bar-fill" style="width: {boundedFrac * 100}%"></div>
+      </div>
+    {/if}
 
   {:else if field.widget === WIDGET.toggle}
     <div class="toggle-row">
@@ -186,10 +206,12 @@
     gap: 8px;
   }
 
-  /* Quiet label voice — same recipe as the hero numerals' .hn-label. */
+  /* Quiet label voice — same recipe as the hero numerals' .hn-label. Size
+     matches the OG stylesheet's base `label` rule (.76rem, Chakra Petch 500,
+     tx-mut) verified against og-ref/style.css. */
   .field-label {
     font-family: var(--font);
-    font-size: .8rem;
+    font-size: .76rem;
     font-weight: 500;
     color: var(--tx-mut);
     text-transform: lowercase;
@@ -221,24 +243,56 @@
   /* Ground-truth readout: same recess recipe as the editable .og-num value
      input (var(--screen), inset hairline, Martian Mono at a narrower width),
      written locally because this is an <output>, not an input — the global
-     .og-num utility targets editable controls. */
+     .og-num utility targets editable controls. Size/padding verified against
+     the OG stylesheet's .field-val chip (.76rem, 1px 6px). */
   .field-value {
     display: inline-flex;
     align-items: center;
     font-family: var(--mono);
     font-variation-settings: 'wdth' 90;
     font-weight: var(--num-wght);
-    font-size: .85rem;
+    font-size: .76rem;
     color: var(--tx-val);
     background: var(--screen);
     box-shadow: inset 0 0 0 1px var(--line-1);
     border-radius: var(--r-s);
-    padding: 2px 8px;
+    padding: 1px 6px;
   }
+  /* Unit suffix — OG's .field-val em: Chakra Petch (not mono), tx-ghost,
+     .64rem literal (not a relative em) so it stays legible at the chip's
+     smallest sizes. */
   .field-value .unit {
     margin-left: 3px;
-    font-size: .82em;
-    color: var(--tx-mut);
+    font-family: var(--font);
+    font-weight: 500;
+    font-size: .64rem;
+    color: var(--tx-ghost);
+  }
+
+  /* Read-only bounded numeric (readout archetype) — the OG "Power card"
+     instrument voice: the value glows reality-blue like a live measurement
+     instead of sitting quiet like a settings chip. */
+  .field-value.readout {
+    color: var(--reality);
+    text-shadow: 0 0 8px rgba(var(--reality-rgb), .35);
+  }
+
+  /* Thin proportional bar under a bounded readout — OG Power-card meter
+     recipe (core/meter.js's .mtr-track/.mtr-fill), simplified to the plain
+     no-hazard case: this is a generic reading, not a bus-voltage instrument. */
+  .readout-bar {
+    height: 2px;
+    margin-top: 2px;
+    background: var(--line-2);
+    border-radius: 1px;
+    overflow: hidden;
+  }
+  .readout-bar-fill {
+    height: 100%;
+    width: 0%;
+    background: var(--reality);
+    box-shadow: 0 0 6px rgba(var(--reality-rgb), .4);
+    transition: width .4s cubic-bezier(.3, .7, .3, 1);
   }
 
   /* Free-text/secret value entries — og-num-like recess, left-aligned since

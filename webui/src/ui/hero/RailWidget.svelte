@@ -785,6 +785,7 @@
       posField={pos} velField={vel} targetField={target}
       posVal={posDisplay} speedVal={speedDisplay} targetVal={targetDisplay}
       moving={moving} fresh={fresh} targetFresh={targetFresh}
+      extentHi={hi}
     />
   {/if}
 

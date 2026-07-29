@@ -2825,6 +2825,52 @@ agent, five implementation agents on disjoint files):
   dock estop hidden at desktop, dock list free of pause/stop/home).
   [verified 2026-07-28 — this session]
 
+## PIXEL FIDELITY PASS (operator-directed, 2026-07-28) — "like someone explained it over the phone"
+
+Operator rejected the agent-paraphrase pipeline's output; METHOD CHANGE,
+standing for all future UI fidelity work: the OG is extracted from `main`
+into scratch, served under Vite (namespace-import patch in the scratch copy
+only), and screenshotted as PIXEL ground truth
+(webui/test/og-reference-shots.mjs) — implementation agents receive the
+IMAGES plus the runnable OG source, and disputed details get settled by
+zoomed crops, never memory or prose. Landed this pass (three agents +
+reconciliation):
+
+- Transport buttons: true OG two-line tbtns — icon + capitalized catalog
+  label over a muted subtitle; icons/subtitles come from a REGISTRY-
+  VOCABULARY table keyed on SAFETY_OP/HOME_OP wire values (spec op
+  semantics: estop "cut power" per RFC-010, stop "stop motion", pause
+  "hold position", home "seek home"); unknown ops render label-only.
+  Pixel-crop verification corrected two inventions: E-Stop is normal-case
+  and QUIET at rest (reddens only on interaction), and Home's subtitle is
+  plain muted (no amber). Home's armed/amber glow needs an honest homed
+  fact via a role — protocol-surface item.
+- Hero numerals: OG zero-padded fixed-width ("000.0" — pad width derived
+  from the rail's own extent, default 3; catalog precision is a FLOOR,
+  never truncated), unit folded into the label once, commanded numeral's
+  intent-purple restored (a real fidelity gap — it had been dropped
+  entirely), one shared baseline.
+- Sliders/tiles/telemetry: OG .fld row metrics on Field; readout archetype
+  gains the OG bar treatment (2px reality fill against bounds);
+  PatternWidget tiles = OG .pat-grid with INTENT-purple active (selection
+  is commanded, not measured truth; waveform glyphs deliberately absent —
+  catalog/RFC candidate, never client art) and its knobs now reuse Field
+  (duplicate slider implementation deleted); TelemetryChart legend/grid per
+  the OG DIAG (neutral text, only the swatch carries series color — the
+  verified source contradicted the paraphrase and won).
+- Cascade bug found by smoke: the dock e-stop's ≥960 px hide rule tied on
+  specificity with the new two-line `.btn` base rule and lost by source
+  order — hides are now compound selectors (`.btn.btn-estop` /
+  `.tbtn.btn-estop`), order-proof. Encoding repair: two hero widgets had
+  UTF-8 comments mangled through a PS5.1 ANSI round-trip (BOM + mojibake)
+  from an earlier automated edit — repaired, BOM-less.
+- Verification: canon_lint clean; build green; fs deployed (fw 2.1.86);
+  render smoke 27/27; side-by-side against the OG reference render
+  reviewed by the main loop. Residual deltas recorded: transport row sits
+  slightly above the OG's numeral-baseline alignment; catalog labels
+  capitalize to "Estop" (the OG's "E-Stop" spelling is the catalog's to
+  change, not the client's). [verified 2026-07-28 — this session]
+
 ## Deferred / planned (homes: docs/REFACTOR-ROADMAP.md, docs/MOTION-TODO.md)
 
 - TCode pass-through channel (post-MFP; parser cross-task race was the

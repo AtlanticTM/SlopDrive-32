@@ -109,6 +109,58 @@
   }
 
   /**
+   * REGISTRY VOCABULARY — icon + subtitle keyed by SAFETY_OP/HOME_OP wire
+   * value. Duplicated from TransportBar.svelte (icon path strings copied
+   * VERBATIM from the OG's ui.js ICONS table, Lucide MIT) — this task's
+   * edit scope is limited to these two files, so there is no shared module
+   * to hoist this into yet; do that if a third consumer needs it. Same
+   * two-namespace split as TransportBar's copy: a SAFETY_OP value and a
+   * HOME_OP value are different verbs, so one flat table keyed by raw
+   * number would risk a silent cross-namespace collision. pause/stop/home
+   * never actually reach this dock's option groups (see optionButtons'
+   * filters below) — they render in TransportBar now — so in practice only
+   * a future op could ever match here; absence still means label-only.
+   */
+  const SAFETY_META = {
+    [SAFETY_OP.pause]: {
+      icon: '<rect x="6" y="4" width="4" height="16" rx="1"/><rect x="14" y="4" width="4" height="16" rx="1"/>',
+      subtitle: 'hold position',
+    },
+    [SAFETY_OP.stop]: {
+      icon: '<rect x="5" y="5" width="14" height="14" rx="2"/>',
+      subtitle: 'stop motion',
+    },
+    [SAFETY_OP.estop]: {
+      icon: '<path d="M10.29 3.86L1.82 18a2 2 0 001.71 3h16.94a2 2 0 001.71-3L13.71 3.86a2 2 0 00-3.42 0z"/><path d="M12 9v4"/><path d="M12 17h.01"/>',
+      subtitle: 'cut power',
+    },
+  };
+  const HOME_META = {
+    [HOME_OP.home]: {
+      icon: '<path d="M3 9l9-7 9 7v11a2 2 0 01-2 2H5a2 2 0 01-2-2z"/><path d="M9 22V12h6v10"/>',
+      subtitle: 'seek home',
+    },
+  };
+  function metaFor(action, value) {
+    if (isSafetyRole(action)) return SAFETY_META[value];
+    if (isHomeRole(action)) return HOME_META[value];
+    return undefined;
+  }
+  /** Wrap an OG-derived path string in the exact svg attrs its ICONS table uses. */
+  function iconMarkup(paths) {
+    return `<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">${paths}</svg>`;
+  }
+  /**
+   * Presentation only: swap the hub's own '_' for a space so multi-word ops
+   * ("override_on") wrap and read naturally; CSS text-transform:capitalize
+   * does the casing. Not inventing text — this is the catalog's own label
+   * string, reformatted for display.
+   */
+  function displayLabel(label) {
+    return String(label).replace(/_/g, ' ');
+  }
+
+  /**
    * The remedy for the CURRENT global refusal, if this hub advertises one.
    * Reactive to `lastRefusal` (a new refusal anywhere in the app) and to the
    * catalog (the action has to actually exist on THIS hub) — both reads
@@ -250,14 +302,11 @@
           title={reasonFor(estopCtl.action, estopCtl.value) || estopCtl.label}
           onclick={() => fire(estopCtl.action, estopCtl.value, estopCtl.label, estopCtl.key)}
         >
-          <span class="estop-ico" aria-hidden="true">
-            <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
-              <path d="M10.29 3.86L1.82 18a2 2 0 001.71 3h16.94a2 2 0 001.71-3L13.71 3.86a2 2 0 00-3.42 0z"/>
-              <path d="M12 9v4"/>
-              <path d="M12 17h.01"/>
-            </svg>
+          <span class="row">
+            <span class="ico" aria-hidden="true">{@html iconMarkup(SAFETY_META[SAFETY_OP.estop].icon)}</span>
+            <span class="lbl">{busy[estopCtl.key] ? '…' : estopCtl.label}</span>
           </span>
-          {busy[estopCtl.key] ? '…' : estopCtl.label}
+          <small>{SAFETY_META[SAFETY_OP.estop].subtitle}</small>
         </button>
       {/if}
 
@@ -271,6 +320,7 @@
                 <div class="grp-btns">
                   {#each opts as opt (action.uid + ':' + opt.value)}
                     {@const key = action.uid + ':' + opt.value}
+                    {@const meta = metaFor(action, opt.value)}
                     <button
                       type="button"
                       class="btn"
@@ -278,13 +328,18 @@
                       title={reasonFor(action, opt.value) || opt.label}
                       onclick={() => fire(action, opt.value, opt.label, key)}
                     >
-                      {busy[key] ? '…' : opt.label}
+                      <span class="row">
+                        {#if meta}<span class="ico" aria-hidden="true">{@html iconMarkup(meta.icon)}</span>{/if}
+                        <span class="lbl">{busy[key] ? '…' : displayLabel(opt.label)}</span>
+                      </span>
+                      {#if meta}<small>{meta.subtitle}</small>{/if}
                     </button>
                   {/each}
                 </div>
               </div>
             {/if}
           {:else}
+            {@const meta = metaFor(action, 1)}
             <div class="grp">
               <span class="grp-lbl">{groupLabel(action)}</span>
               <div class="grp-btns">
@@ -295,7 +350,11 @@
                   title={reasonFor(action, 1) || action.label}
                   onclick={() => fire(action, 1, action.label, action.uid)}
                 >
-                  {busy[action.uid] ? '…' : action.label}
+                  <span class="row">
+                    {#if meta}<span class="ico" aria-hidden="true">{@html iconMarkup(meta.icon)}</span>{/if}
+                    <span class="lbl">{busy[action.uid] ? '…' : displayLabel(action.label)}</span>
+                  </span>
+                  {#if meta}<small>{meta.subtitle}</small>{/if}
                 </button>
               </div>
             </div>
@@ -350,35 +409,31 @@
   }
 
   /* ---- the e-stop: OG hazard-stripe wash (tag webui-prerefactor) ---------
-     No fill, no glow: a quiet outline chip whose hazard cue is a diagonal
-     stripe wash in the safety red. Fixed OUTSIDE .groups: the one control
-     that must never scroll away. */
+     No fill, no glow, no uppercase/bold override — pixel-checked against
+     webui/test/evidence/og-ref/og-full.png: a quiet two-line chip like
+     every other transport button, whose only hazard cue is the diagonal
+     stripe wash in the safety red plus the alert-triangle icon; text and
+     icon stay the default ink color at rest and only redden on hover/active.
+     Same visual as TransportBar's copy (operator requirement: shared look).
+     Fixed OUTSIDE .groups: the one control that must never scroll away. */
   .btn-estop {
     align-self: stretch;
-    display: inline-flex;
+    display: flex;
+    flex-direction: column;
     align-items: center;
     justify-content: center;
-    gap: 6px;
+    gap: 0;
     min-width: 96px;
     padding: 0 14px;
     background-image: repeating-linear-gradient(135deg, rgba(255, 71, 87, .09) 0 5px, rgba(255, 71, 87, .012) 5px 10px);
     border-color: var(--line-2);
     color: var(--ink);
-    font-weight: 700;
-    letter-spacing: .05em;
-    text-transform: uppercase;
   }
   .btn-estop:not(:disabled):hover {
     border-color: var(--bad);
   }
   .btn-estop:not(:disabled):active {
     border-color: var(--bad);
-    color: var(--bad);
-  }
-  .estop-ico {
-    width: 14px;
-    height: 14px;
-    display: inline-grid;
     color: var(--bad);
   }
 
@@ -388,11 +443,11 @@
      button that happens to be off-screen when it is needed. Breakpoint
      matches App.svelte's `isDesktop` matchMedia. */
   @media (min-width: 960px) {
-    .btn-estop { display: none; }
-  }
-  .estop-ico svg {
-    width: 14px;
-    height: 14px;
+    /* Compound selector on purpose: the base `.btn` rule also sets display
+       and sits later in this block — a bare `.btn-estop` ties on specificity
+       and loses the cascade to it. `.btn.btn-estop` outranks both regardless
+       of rule order. */
+    .btn.btn-estop { display: none; }
   }
 
   /* ---- op groups: labeled clusters, one scrolling row --------------------
@@ -432,6 +487,11 @@
     /* Never shrink: flex would otherwise squeeze the labels and clip them
        mid-word ("estop_cle"). */
     flex: 0 0 auto;
+    display: flex;
+    flex-direction: column;
+    align-items: center;
+    justify-content: center;
+    gap: 0;
     min-height: 36px;
     min-width: 56px;
     padding: 0 12px;
@@ -447,6 +507,21 @@
   .btn:disabled { opacity: 0.4; }
   .btn:not(:disabled):hover { border-color: var(--line-4); }
   .btn:not(:disabled):active { border-color: var(--reality); color: var(--reality); }
+
+  /* ---- two-line treatment (TransportBar's .tbtn, shared here) ------------
+     Labels are the hub's own catalog strings — capitalize is presentation
+     only (see displayLabel()), never a hardcoded string. Ops absent from
+     SAFETY_META/HOME_META render no .ico/small — label-only, single line,
+     same as before this pass; a future hub op must not break this dock. */
+  .btn .row { display: flex; align-items: center; gap: 4px; }
+  .btn .lbl { text-transform: capitalize; }
+  .btn .ico { width: 14px; height: 14px; display: inline-grid; }
+  .btn .ico :global(svg) { width: 14px; height: 14px; }
+  .btn small {
+    font-size: .56rem;
+    color: var(--tx-mut);
+    font-weight: 400;
+  }
 
   .recovery {
     display: flex;

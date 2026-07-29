@@ -74,6 +74,51 @@
   const estopCtl = $derived.by(() => findOp(isSafetyRole, SAFETY_OP.estop, 'estop'));
   const homeCtl = $derived.by(() => findOp(isHomeRole, HOME_OP.home, 'home'));
 
+  /**
+   * REGISTRY VOCABULARY — icon + subtitle keyed by SAFETY_OP/HOME_OP wire
+   * value, the same op-identity findOp() above locates each control by.
+   * Two separate tables, not one keyed by raw number: a SAFETY_OP value and
+   * a HOME_OP value are different verbs (see SafetyBar.svelte's estopCtl
+   * comment on this exact hazard), so one flat table would risk a silent
+   * cross-namespace collision. Icon path strings are copied VERBATIM from
+   * the OG's ui.js ICONS table (Lucide, MIT); the svg wrapper attrs below
+   * match that table's icon() output exactly. An op absent from its table
+   * renders label-only — a future hub op must not break this bar.
+   */
+  const SAFETY_META = {
+    [SAFETY_OP.pause]: {
+      icon: '<rect x="6" y="4" width="4" height="16" rx="1"/><rect x="14" y="4" width="4" height="16" rx="1"/>',
+      subtitle: 'hold position',
+    },
+    [SAFETY_OP.stop]: {
+      icon: '<rect x="5" y="5" width="14" height="14" rx="2"/>',
+      subtitle: 'stop motion',
+    },
+    [SAFETY_OP.estop]: {
+      icon: '<path d="M10.29 3.86L1.82 18a2 2 0 001.71 3h16.94a2 2 0 001.71-3L13.71 3.86a2 2 0 00-3.42 0z"/><path d="M12 9v4"/><path d="M12 17h.01"/>',
+      subtitle: 'cut power',
+    },
+  };
+  const HOME_META = {
+    [HOME_OP.home]: {
+      icon: '<path d="M3 9l9-7 9 7v11a2 2 0 01-2 2H5a2 2 0 01-2-2z"/><path d="M9 22V12h6v10"/>',
+      subtitle: 'seek home',
+    },
+  };
+  const pauseMeta = SAFETY_META[SAFETY_OP.pause];
+  const stopMeta = SAFETY_META[SAFETY_OP.stop];
+  const estopMeta = SAFETY_META[SAFETY_OP.estop];
+  // Home glows amber in the OG reference (its armed/un-homed treatment), but
+  // that needs an honest "homed" fact wired through a role — we don't have
+  // one yet, so this bar does NOT invent the glow. Plain tbtn until that
+  // fact exists (protocol-surface item).
+  const homeMeta = HOME_META[HOME_OP.home];
+
+  /** Wrap an OG-derived path string in the exact svg attrs its ICONS table uses. */
+  function iconMarkup(paths) {
+    return `<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">${paths}</svg>`;
+  }
+
   /** May THIS session fire this exact op, per the catalog's own access data? */
   function canFire(action, value) {
     void machine.link.roles; void machine.link.phase; void machine.catalog.ready;
@@ -107,7 +152,11 @@
       title={reasonFor(pauseCtl.action, pauseCtl.value) || pauseCtl.label}
       onclick={() => fire(pauseCtl.action, pauseCtl.value, pauseCtl.label, pauseCtl.key)}
     >
-      {busy[pauseCtl.key] ? '…' : pauseCtl.label}
+      <span class="row">
+        <span class="ico" aria-hidden="true">{@html iconMarkup(pauseMeta.icon)}</span>
+        <span class="lbl">{busy[pauseCtl.key] ? '…' : pauseCtl.label}</span>
+      </span>
+      <small>{pauseMeta.subtitle}</small>
     </button>
   {/if}
 
@@ -119,7 +168,11 @@
       title={reasonFor(stopCtl.action, stopCtl.value) || stopCtl.label}
       onclick={() => fire(stopCtl.action, stopCtl.value, stopCtl.label, stopCtl.key)}
     >
-      {busy[stopCtl.key] ? '…' : stopCtl.label}
+      <span class="row">
+        <span class="ico" aria-hidden="true">{@html iconMarkup(stopMeta.icon)}</span>
+        <span class="lbl">{busy[stopCtl.key] ? '…' : stopCtl.label}</span>
+      </span>
+      <small>{stopMeta.subtitle}</small>
     </button>
   {/if}
 
@@ -131,14 +184,11 @@
       title={reasonFor(estopCtl.action, estopCtl.value) || estopCtl.label}
       onclick={() => fire(estopCtl.action, estopCtl.value, estopCtl.label, estopCtl.key)}
     >
-      <span class="estop-ico" aria-hidden="true">
-        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
-          <path d="M10.29 3.86L1.82 18a2 2 0 001.71 3h16.94a2 2 0 001.71-3L13.71 3.86a2 2 0 00-3.42 0z"/>
-          <path d="M12 9v4"/>
-          <path d="M12 17h.01"/>
-        </svg>
+      <span class="row">
+        <span class="ico" aria-hidden="true">{@html iconMarkup(estopMeta.icon)}</span>
+        <span class="lbl">{busy[estopCtl.key] ? '…' : estopCtl.label}</span>
       </span>
-      {busy[estopCtl.key] ? '…' : estopCtl.label}
+      <small>{estopMeta.subtitle}</small>
     </button>
   {/if}
 
@@ -150,7 +200,11 @@
       title={reasonFor(homeCtl.action, homeCtl.value) || homeCtl.label}
       onclick={() => fire(homeCtl.action, homeCtl.value, homeCtl.label, homeCtl.key)}
     >
-      {busy[homeCtl.key] ? '…' : homeCtl.label}
+      <span class="row">
+        <span class="ico" aria-hidden="true">{@html iconMarkup(homeMeta.icon)}</span>
+        <span class="lbl">{busy[homeCtl.key] ? '…' : homeCtl.label}</span>
+      </span>
+      <small>{homeMeta.subtitle}</small>
     </button>
   {/if}
 </div>
@@ -162,8 +216,17 @@
     justify-content: flex-end;
   }
 
-  /* ---- OG transport button (tag webui-prerefactor's .spine-transport) ---- */
+  /* ---- OG transport button (tag webui-prerefactor's .spine-transport) ----
+     Two-line layout verified pixel-for-pixel against
+     webui/test/evidence/og-ref/og-full.png and the OG's src/style.css
+     `.transport .tbtn` / `.transport .tbtn small` rules: column flex, the
+     icon+label on one row, a tiny muted subtitle line below. */
   .tbtn {
+    display: flex;
+    flex-direction: column;
+    align-items: center;
+    justify-content: center;
+    gap: 0;
     min-height: 36px;
     min-width: 48px;
     padding: 4px 10px;
@@ -181,21 +244,30 @@
   .tbtn:not(:disabled):hover { border-color: var(--line-4); }
   .tbtn:not(:disabled):active { border-color: var(--reality); color: var(--reality); }
 
+  .tbtn .row { display: flex; align-items: center; gap: 4px; }
+  /* Labels are catalog wire values (lowercase) — capitalize is presentation
+     only, never a hardcoded string. Subtitles stay as authored (lowercase,
+     per the reference image) so this rule targets .lbl, not the button. */
+  .tbtn .lbl { text-transform: capitalize; }
+  .tbtn .ico { width: 14px; height: 14px; display: inline-grid; }
+  .tbtn .ico :global(svg) { width: 14px; height: 14px; }
+  .tbtn small {
+    font-size: .56rem;
+    color: var(--tx-mut);
+    font-weight: 400;
+  }
+
   /* ---- the e-stop: OG hazard-stripe wash (copied from SafetyBar's
-     .btn-estop — same visual, same constraint). No fill, no glow: a quiet
-     outline chip whose hazard cue is a diagonal stripe wash in the safety
-     red. */
+     .btn-estop — same visual, same constraint). No fill, no glow, no
+     uppercase/bold override: pixel-checked against og-full.png, this is a
+     plain tbtn like its neighbors whose only hazard cue is the diagonal
+     stripe wash in the safety red plus the alert-triangle icon; text and
+     icon stay the default ink color at rest and only redden on hover/active
+     (RFC-010: a REAL e-stop, not decorated as more special than it is). */
   .btn-estop {
-    display: inline-flex;
-    align-items: center;
-    justify-content: center;
-    gap: 6px;
     background-image: repeating-linear-gradient(135deg, rgba(255, 71, 87, .09) 0 5px, rgba(255, 71, 87, .012) 5px 10px);
     border-color: var(--line-2);
     color: var(--ink);
-    font-weight: 700;
-    letter-spacing: .05em;
-    text-transform: uppercase;
   }
   .btn-estop:not(:disabled):hover {
     border-color: var(--bad);
@@ -204,16 +276,6 @@
     border-color: var(--bad);
     color: var(--bad);
   }
-  .estop-ico {
-    width: 14px;
-    height: 14px;
-    display: inline-grid;
-    color: var(--bad);
-  }
-  .estop-ico svg {
-    width: 14px;
-    height: 14px;
-  }
 
   /* MOBILE/DESKTOP E-STOP SPLIT. Breakpoint matches App.svelte's `isDesktop`
      matchMedia and SafetyBar's own 960px rule (the two are one positioning
@@ -221,7 +283,10 @@
      scrollable-away — owns the e-stop instead; this bar's copy only exists
      at desktop widths. */
   @media (max-width: 959px) {
-    .btn-estop { display: none; }
+    /* Compound selector on purpose: the base `.tbtn` rule also sets display —
+       a bare `.btn-estop` ties on specificity and can lose the cascade to it
+       depending on rule order. `.tbtn.btn-estop` outranks both. */
+    .tbtn.btn-estop { display: none; }
   }
 
   @media (prefers-reduced-motion: reduce) {

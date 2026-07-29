@@ -3434,14 +3434,61 @@ The answer to "what's next on the ledger":
      apptrace options; all need ESP32 Arduino Lib Builder, i.e. replacing
      the toolchain. Already OFF and therefore not wasting anything:
      `ESP_WIFI_IRAM_OPT`, `ESP_WIFI_RX_IRAM_OPT`, `LWIP_IRAM_OPTIMIZATION`.
-   - **NEXT STEP, cheapest first and no ruling needed to be useful:**
-     boot-stage heap beacons (free/maxblock either side of LittleFS, WiFi,
-     BLE, task creation, slopsync) plus a one-shot stack-high-water dump.
-     Today there is exactly ONE boot beacon, `post-slopsync`
-     ([main.cpp:831](src/main.cpp#L831)), which is why 230 KB has never been
-     attributed and why every previous fix aimed at a number nobody had
-     broken down. ~8 log lines, no sdkconfig, no JTAG — this IS the
-     "debugging as simple as logging" the operator asked for.
+   - **ATTRIBUTED (fw 2.1.89, live, 2026-07-29). The 230 KB is named, and the
+     answer is NOT the vendor stacks — it is our own hub.** Boot heap
+     `entry free=258,380` -> `post-slopsync free=31,756`, 226,624 B spent:
+     | stage | bytes | share |
+     |---|---:|---:|
+     | **slopsync** | **110,208** | **48.6%** |
+     | wifi | 56,804 | 25.1% |
+     | tasks | 45,564 | 20.1% |
+     | config+motor | 4,656 | 2.1% |
+     | webui | 4,352 | 1.9% |
+     | ota | 2,828 | 1.2% |
+     | littlefs | 1,920 | 0.8% |
+     | slopglow | 292 | 0.1% |
+     **The webui costs 4,352 B — 1.9%.** Stripping it saves almost nothing;
+     that kills "drop the web UI to save RAM" as a memory strategy (it
+     remains valid for FLASH and for the WROOM port's other reasons).
+     **SlopSync takes 110 KB of INTERNAL heap even though the hub service
+     struct itself is placement-new'd into PSRAM (240,976 B).** So the big
+     struct is external and 110 KB of init allocation is not. Prime suspects,
+     UNMEASURED: NimBLE host+controller (both task stacks confirmed present),
+     AsyncTCP, the P-256 sign task, the UDP discovery socket, and per-session
+     buffers — all individually under the 4 KB `ALWAYSINTERNAL` threshold, so
+     the PSRAM auto-offload never catches them. Sub-attribution inside
+     `SlopSyncHubService::init()` is the obvious next probe.
+   - **Stack census (fw 2.1.89, 30 s one-shot, ESP-IDF reports bytes
+     REMAINING):** `Sampler` declared 16,384 and peaked at **1,152** — 15 KB
+     never touched, 6% of the whole heap idle. Reclaimable from our four
+     tasks at >=2x headroom over measured peak: Sampler 16384->4096,
+     HTTP 8192->6144, Comms 6144->4096, Motor unchanged = **16,384 B**.
+     Library slack on top: `async_tcp` 15,592 B and `SlopSyncHub` 13,804 B
+     unused. **Danger end of the same census — `ipc0` has 88 B remaining**,
+     `IDLE0` 236, `ipc1` 256, `IDLE1` 356. Those are IDF-sized and NOT ours
+     to trim; recorded because a stack-overflow canary trip there would
+     read as a random panic.
+   - **INSTRUMENTATION DONE (fw 2.1.89, operator-approved 2026-07-29):**
+     `bootheap::mark/report` + `dumpTaskStacks` in `src/main.cpp`. Before
+     this there was exactly ONE boot beacon, `post-slopsync`, which is why
+     230 KB had never been attributed and why every previous fix aimed at a
+     number nobody had broken down. Emitted as ONE census at 30 s rather
+     than scattered through boot, because SlopLog's Info ring is 44 lines
+     with a 104-byte message cap and SILENT truncation — boot-time lines
+     recycle before they can be fetched. Deliberately on the LOG and not an
+     HTTP endpoint, so it keeps working on a build with no web UI. No
+     sdkconfig change, no JTAG.
+   - **PARKED, operator-directed 2026-07-29 ("future task once all of this
+     is rock solid"): stripped-down ESP32-WROOM-32D variant, no webui.** The
+     ambush to know before starting: **WROOM-32D has NO PSRAM.** This build
+     places the 240,976 B hub service in PSRAM and `SLOGE`s "SlopSync
+     DISABLED this boot" when it is absent, and
+     `SPIRAM_MALLOC_ALWAYSINTERNAL=4096` silently offloads every >=4 KB
+     allocation there. So a WROOM port is NOT "strip the webui" — the webui
+     is 4,352 B, 1.9% — it is a catalog/session-capacity reshape to fit
+     ~240 KB of hub into internal SRAM alongside SlopSync's 110 KB of init
+     and WiFi's 57 KB. RFC-043's hardware-hub profile and the STAMPED
+     `minimal` sim profile are the precedent to build that on.
    - 🚩 **Tooling blocker, flagged against the operator's JTAG proposal:**
      pioarduino ships Arduino as PRECOMPILED libraries, and its
      `framework-arduinoespressif32-libs/esp32s3/sdkconfig` has

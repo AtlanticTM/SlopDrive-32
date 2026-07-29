@@ -143,6 +143,96 @@ static EncoderValidator encoderValidator(servoModbus, motor);
 
 
 
+// ---- Boot heap attribution --------------------------------------------------
+//
+// A single post-boot total cannot say WHICH subsystem took the RAM. The measured
+// budget (LEDGER, "memory pressure" entry) is ~163 KB static, so the heap starts
+// near 256 KB — and the device reports ~33 KB free after init. That ~230 KB is
+// spent by WiFi/lwIP/NimBLE/task stacks during setup(), and NONE of it appears
+// in the linker map, so it can only be attributed by reading the heap between
+// stages.
+//
+// Deliberately NOT behind a build flag: the boot that needs this is the one
+// nobody planned for. Cost is one reading per stage.
+//
+// Readings are RETAINED rather than only logged, because SlopLog's Info ring is
+// 44 lines and boot lines do not survive long enough to fetch reliably —
+// census() re-emits the whole table at a defined later moment. Do not replace
+// this with an HTTP endpoint: the log is the transport-independent diagnostics
+// channel, and it has to keep working on a build with no web UI.
+namespace bootheap {
+
+struct Stage {
+    const char* name;
+    uint32_t    free_after;
+    int32_t     consumed;   // positive = this stage took it
+};
+
+static constexpr size_t kMaxStages = 12;
+static Stage    s_stages[kMaxStages];
+static size_t   s_count = 0;
+static uint32_t s_prev_free = 0;
+
+static void mark(const char* name) {
+    const uint32_t now = ESP.getFreeHeap();
+    const int32_t consumed = (s_count == 0) ? 0 : int32_t(s_prev_free) - int32_t(now);
+    if (s_count < kMaxStages) {
+        s_stages[s_count++] = Stage{ name, now, consumed };
+    }
+    s_prev_free = now;
+}
+
+static void report() {
+    for (size_t i = 0; i < s_count; ++i) {
+        SLOGI("sys", "bootheap %-12s free=%u took=%+ld",
+              s_stages[i].name, unsigned(s_stages[i].free_after),
+              long(s_stages[i].consumed));
+    }
+}
+
+}  // namespace bootheap
+
+// ---- Task stack census ------------------------------------------------------
+//
+// Our five task stacks are 38,912 B of a ~256 KB heap; a stack sized by guess is
+// pure waste, and the high-water mark is the only honest way to size one.
+// uxTaskGetSystemState() reports EVERY task, IDF's own included, so WiFi/lwIP/
+// NimBLE stacks show up in the same budget — it needs
+// CONFIG_FREERTOS_USE_TRACE_FACILITY, which this framework's sdkconfig sets.
+//
+// ESP-IDF reports the mark in BYTES REMAINING (vanilla FreeRTOS reports words) —
+// so a SMALL number is the dangerous one, and the reclaimable slack is
+// (stack size - peak use), which this figure is the tail of.
+//
+// Only meaningful once tasks have done real work: never call this from setup().
+// httpTask owns the trigger, so this needs no synchronization.
+static bool s_census_done = false;
+
+static void dumpTaskStacks() {
+    const UBaseType_t count = uxTaskGetNumberOfTasks();
+    const size_t bytes = size_t(count) * sizeof(TaskStatus_t);
+    // PSRAM by preference — a diagnostic must not take internal RAM away from
+    // the thing it is measuring. The fallback keeps this working on a board
+    // with no PSRAM at all.
+    TaskStatus_t* snap = static_cast<TaskStatus_t*>(
+        heap_caps_malloc(bytes, MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT));
+    if (snap == nullptr) {
+        snap = static_cast<TaskStatus_t*>(heap_caps_malloc(bytes, MALLOC_CAP_8BIT));
+    }
+    if (snap == nullptr) {
+        SLOGW("sys", "stack census skipped — no room for %u tasks", unsigned(count));
+        return;
+    }
+    const UBaseType_t got = uxTaskGetSystemState(snap, count, nullptr);
+    for (UBaseType_t i = 0; i < got; ++i) {
+        SLOGI("sys", "stack %-10s core=%d free=%u B",
+              snap[i].pcTaskName,
+              (snap[i].xCoreID == tskNO_AFFINITY) ? -1 : int(snap[i].xCoreID),
+              unsigned(snap[i].usStackHighWaterMark));
+    }
+    heap_caps_free(snap);
+}
+
 // ---- FreeRTOS Tasks ---------------------------------------------------------
 
 // Core 1 — real-time: homing + D4 deferred-intent consumer
@@ -526,6 +616,15 @@ static void httpTask(void* param) {
         SLOGI_EVERY_MS(10000, "sys", "heap free=%u min=%u maxblock=%u psram=%u",
                        unsigned(ESP.getFreeHeap()), unsigned(ESP.getMinFreeHeap()),
                        unsigned(ESP.getMaxAllocHeap()), unsigned(ESP.getFreePsram()));
+        // One-shot memory census at 30 s. Stack high-water is meaningless until
+        // the tasks have run, and putting the boot-heap table and the stack
+        // table in ONE known moment is what makes both fetchable from a 44-line
+        // ring — scattered across boot they recycle before anyone reads them.
+        if (!s_census_done && millis() > 30000) {
+            s_census_done = true;
+            bootheap::report();
+            dumpTaskStacks();
+        }
         // Crash-ring watermark: three u32 stores per tick — cheap enough for
         // 100 Hz, and the ring's post-mortem value depends on it being fresh.
         crashring::heapSample(ESP.getFreeHeap(), ESP.getMaxAllocHeap());
@@ -655,21 +754,28 @@ void setup() {
     aimGeometryInit();
 #endif
 
+    bootheap::mark("entry");
+
     if (LittleFS.begin(true))
         SLOGI("boot", "LittleFS mounted");
     else
         SLOGE("boot", "LittleFS mount FAILED - upload filesystem image (pio run -t uploadfs)");
+    bootheap::mark("littlefs");
 
     ConfigStore::load(g_state, mapper, motor);
 
     motor.init();
     motor.applyDriverConfig(g_state.driver);
+    bootheap::mark("config+motor");
 
     slopglowInit();
+    bootheap::mark("slopglow");
 
     bool wifi_ok = wifiLink.setupWiFi();
+    bootheap::mark("wifi");
 
     webui.init();
+    bootheap::mark("webui");
 
 
     // OTA — only meaningful when WiFi actually came up. ArduinoOTA needs the
@@ -682,6 +788,7 @@ void setup() {
     } else {
         SLOGW("boot", "OTA skipped — WiFi down at boot (serial rescue path only)");
     }
+    bootheap::mark("ota");
 
 #if defined(FEATURE_RS485_MODBUS)
     Serial1.begin(19200, SERIAL_8N1, AIM_PIN_485_RX, AIM_PIN_485_TX);
@@ -801,6 +908,9 @@ void setup() {
 #endif
 
     patternEngine.init();    // creates its own Core 1 task
+    // Covers every task stack above plus patternEngine's own: 38,912 B of
+    // declared stack for our five, and the stack census names the slack.
+    bootheap::mark("tasks");
 
     // SlopSync hub last: WiFi is up, arbiter/webui/patternEngine are wired.
     // Placement-new into PSRAM (see the declaration comment); refuses to
@@ -828,9 +938,11 @@ void setup() {
             SLOGE("slopsync", "no PSRAM block for hub service — SlopSync DISABLED this boot");
         }
     }
+    bootheap::mark("slopsync");
     SLOGI("sys", "post-slopsync heap free=%u maxblock=%u psram free=%u",
           unsigned(ESP.getFreeHeap()), unsigned(ESP.getMaxAllocHeap()),
           unsigned(ESP.getFreePsram()));
+    bootheap::report();
 
 #if HOMING_DISABLED
     g_state.homed = true;

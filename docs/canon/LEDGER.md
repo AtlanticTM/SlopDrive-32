@@ -3161,15 +3161,58 @@ The answer to "what's next on the ledger":
      archetype table with the pinned slider/stepper rule (see plan).
    - Then Phases 2–6 per plan. Phase 6 carries the ceilings ruling
      (1000 mm/s / 60k mm/s²) + the ONE etag bump + deploy.
-2. **RFC-053/054 (2026-07-29, chat):** BLE milestone — first live GATT
-   session with full control + the §6.3 BLE→WS mid-session upgrade, both
-   operator-verified 2026-07-28 (SPEC limitation 22 updated). RFC-053
-   **ACCEPTED** (datagram ESTOP: UDP 21328 + ESP-NOW; operator condition,
-   amended 2026-07-29: **opt-out, default ON**, catalog-exposed NVS
-   setting visible in all clients + build flag) — fw implementation queued
-   behind the campaign; ESP-NOW half queued behind that binding + the
-   PSRAM-offload work. RFC-054 (BLE WiFi/ESP-NOW credential handoff)
-   PROPOSED, awaiting ruling.
+2. **DATAGRAM-SAFETY + PROVISIONING TODO (2026-07-29 chat; smart order;
+   each item carries the context its implementer needs. Discipline,
+   operator-directed: once an item is implemented AND verified, RIP it
+   from this ledger — the durable record is the RFC + the commit; this
+   list is working memory, not archive).**
+   Milestone context (keep until the v1 tag): first live BLE client held
+   a full-control GATT session AND performed the §6.3 BLE→WS mid-session
+   migration, operator-verified 2026-07-28 — SPEC limitation 22 updated;
+   BLE binding is field-real now.
+   - **T1 — RFC-053 hub implementation. RIDES THE PHASE 6 SWEEP:** the
+     opt-out setting is a catalog field addition = etag movement, and the
+     campaign plan allows exactly ONE bump, at Phase 6 — fold it in
+     there, do not spend a second bump. Work: (i) ESTOP dispatch in
+     `src/comms/SlopSyncUdpDiscovery.cpp` — E5-magic prefix match
+     (disjoint from the SLOP probe magic by construction) + CRC-32 over
+     first 8 bytes + dispatch into the SAME single e-stop function the
+     WS/BLE paths use (§11.2's by-construction rule); (ii) NVS-persisted
+     bool, DEFAULT ON (opt-out, operator-amended ruling), catalog-exposed
+     (`configure` tier; home = safety or network channel, decide at
+     implementation and 🚩 flag if contentious); (iii) build flag for
+     hard removal; (iv) per-source rate limit mirroring discovery
+     replies; (v) DISCOVER_REPLY flags bit1 `datagram_estop` = live
+     setting value (RFC-053 2b, APPROVED, trivial). Verify: broadcast +
+     unicast scream from a LAN peer latches; toggle-off refuses; limiter
+     holds under spray; T3 back-to-back-sessions posture unaffected.
+   - **T2 — RFC-054 ruling (operator), then implement:** pick option
+     a/b/c in the RFC. Binding constraints for whoever implements:
+     credential rides a UNICAST-ONLY surface (never STATE, never
+     broadcast ECHO — RFC-009.5 logic), `configure` tier + open pairing
+     window + BLE bonding SHOULD; SPEC §13.2 already names this admin
+     channel as BLE's purpose. ESP-NOW half stays dormant until T3.
+   - **T3 — ESP-NOW binding (§13.3, zero implementation today).
+     SEQUENCED BEHIND PSRAM OFFLOAD** (live pressure snapshot bottomed
+     internal heap at 40 B; ESP-NOW adds few-KB buffers). Mechanism
+     context: it rides the already-up WiFi MAC — not a third radio
+     contender; peers must sit on the STA's AP channel; the real coex
+     cost is BLE latency jitter under WiFi bursts — measure with motion
+     streaming + a live BLE client attached before calling it good.
+     Carries RFC-053's ESP-NOW ESTOP acceptance + BEACON mirror bit.
+   - **T4 — e-stop fob (hardware, operator project):** BLE-only fob is
+     buildable TODAY (raw-frame path is unconditional on every binding a
+     hub runs); UDP leg unlocks at T1, no-network leg at T3. Intended
+     semantics recorded in RFC-053 item 5: repeat-while-latched — fresh
+     seq per interval while the button is physically down, so an
+     authorized clear re-latches within a second; the fob never holds
+     clear authority. Confirmation gap: fob surfaces UNCONFIRMED locally
+     (RFC-053 open question, lean (i)).
+   - **T5 — residuals, low:** ATT-MTU control-frame fragmentation
+     (oversize control frame fails to send rather than splitting — SPEC
+     §18-22); WS→BLE migration direction never exercised live. BLE
+     idle-reap and PSRAM offload have their own ledger entries — pointed
+     at, not restated (C-1).
 3. **Parked webui rapid-fire list** — see the kickoff entry above; queued
    BEHIND the campaign (several items become trivial on the new surface).
 4. **Session-gate/closeout system** (C-13 proposal + ledger diet + tiered

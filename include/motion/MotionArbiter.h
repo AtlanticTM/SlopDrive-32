@@ -45,14 +45,6 @@
 
 class RangeMapper;
 
-// ---- RampShape --------------------------------------------------------------
-// Per-intent acceleration multipliers.
-// MIT attribution: struct shape derived from jcfain/TCodeESP32 v0.4 AxisRampData
-struct RampShape {
-    float entryMultiplier = 1.0f;   // 1.0 = full derived accel (disabled)
-    float exitMultiplier  = 1.0f;   // 1.0 = full derived accel (disabled)
-};
-
 // ---- MotionSource -----------------------------------------------------------
 // Tags the origin of an intent so the arbiter can pick the right limit set
 // and gating (MANUAL always wins the safety gates).
@@ -76,8 +68,6 @@ struct MotionIntent {
     // ceiling clamps still apply. 0 = absent: accel is derived from distance +
     // deadline as before.
     float        accel_hint_mm_s2 = 0.0f;
-    RampShape    rampIn;            // entry accel multiplier (1.0 = disabled)
-    RampShape    rampOut;           // exit accel multiplier (1.0 = disabled)
     uint16_t     seq;               // per-source monotonic, telemetry attribution
 };
 
@@ -193,12 +183,6 @@ private:
     volatile uint32_t    _intent_count = 0;
     volatile uint32_t    _rejected_count = 0;
     mutable portMUX_TYPE _telemetry_mux = portMUX_INITIALIZER_UNLOCKED;
-
-    // ---- Per-source sequence counters ---------------------------------------
-    uint16_t _seq_manual      = 0;
-    uint16_t _seq_tcode       = 0;
-    uint16_t _seq_pattern     = 0;
-    uint16_t _seq_osssm       = 0;
 
     // ---- Core planner (the heart — D4) --------------------------------------
     // Executed under _dispatch_mux on Core 1. Reads actual machine state from

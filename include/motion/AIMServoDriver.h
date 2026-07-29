@@ -21,12 +21,11 @@
 //   HOMING_BACKOFF = 10.0 mm.
 // - No enable pin: the AIM drive is always energized when powered. enable()/
 //   disable() are no-ops that satisfy the MotorDriver interface.
-// - CONTINUOUS BLENDING: streamTo() never softens a committed brake ramp
-//   (raise-only accel) — every sample just retargets FAS's in-flight move,
-//   which handles same-direction moves and reversals on its own.
-// - _blend_mode is VESTIGIAL (operator ruling 2026-07-27): neither streamTo()
-//   nor streamToSteps() reads it anymore — FAS retargeting handles every case
-//   uniformly, which is why MotionArbiter::setBlendMode() already aliases
+// - CONTINUOUS RETARGETING: streamToSteps() never force-stops — every dispatch
+//   just retargets FAS's in-flight move, which handles same-direction moves
+//   and reversals on its own.
+// - _blend_mode is VESTIGIAL (operator ruling 2026-07-27): streamToSteps()
+//   does not read it — FAS retargeting handles every case uniformly, which is why MotionArbiter::setBlendMode() already aliases
 //   every mode to "allow" (MotionArbiter.cpp). The getter/setter pair stays
 //   only because MotorDriver's ABC contract, NVS persistence, and the WebUI
 //   HTTP settings JSON still reference it; SlopSync's wire exposure was
@@ -59,7 +58,7 @@ public:
 
     // Force the driver's internal homed flag for bench/remote testing WITHOUT a
     // real homing cycle. Enables FAS outputs and establishes a zero reference
-    // so moveTo()/streamTo()/streamToSteps() actually emit step/dir pulses to
+    // so streamToSteps() actually emits step/dir pulses to
     // a (possibly disconnected) motor — the whole point of a bench
     // HOME_OVERRIDE. Implementation lives in the .cpp because it has to touch
     // the FastAccelStepper instance. Do NOT call on real hardware you don't
@@ -74,8 +73,6 @@ protected:
     // ---- Motion (MotionArbiter-only — see MotorDriver.h sole-caller lock) ---
     // Kept protected in the derived class too so the compile-time lock can't be
     // bypassed by holding a concrete AIMServoDriver& instead of a MotorDriver&.
-    bool moveTo(float pos_mm) override;
-    void streamTo(float pos_mm, float speed_mm_s) override;
 
     // Pre-planned native-step dispatch — called from Core 1 via MotionArbiter.
     // Speed and accel arrive already converted to steps/s and steps/s².
@@ -124,9 +121,8 @@ public:
     uint8_t  getMicrosteps() override { return (uint8_t)(AIM_STEPS_PER_REV / 200); }
 
     // ---- Continuous-blend tuning (VESTIGIAL) --------------------------------
-    // Used to pick how streamTo() handled a new waypoint that reverses
-    // direction mid-stroke (1=let-it-land, 2=allow-reversal, 3=hybrid). Dead
-    // since streamTo()/streamToSteps() stopped reading _blend_mode — see the
+    // Reversal policy selector (1=let-it-land, 2=allow-reversal, 3=hybrid).
+    // Dead: streamToSteps() does not read _blend_mode — see the
     // file-header Constraints note. This accessor pair just keeps the ABC
     // contract / NVS / legacy HTTP JSON compiling. Still clamped to [1,3]
     // purely to keep old callers' NVS round-trip harmless.
@@ -138,11 +134,6 @@ public:
     float   nativeToMm(int32_t native)  const override;
 
 private:
-    // Clears all streaming / blend / target-monitor state so that a stale
-    // stream from before a Halt/Home can't keep issuing moveTo() commands
-    // that fight a fresh homing cycle.
-    void resetStreamState();
-
     // Self-contained homing task — spawned by home(), deletes itself when done.
     static void _homingTaskImpl(void* param);
     void        _homingTask();
@@ -216,20 +207,10 @@ private:
     float    _accel_mm_s2         = DEFAULT_ACCEL_MM_S2;
     float    _current_position_mm = 0.0f;
 
-    // ---- Continuous-blend / stream state ------------------------------------
-    // Blend mode: 1=let-it-land (default), 2=allow-reversal, 3=hybrid.
+    // ---- Stream state -------------------------------------------------------
+    // Retired mode byte, still published on 0x1030 byte 0 (wire compatibility;
+    // see SlopSyncCatalog.h's `blend_mode_reserved`). Do not consume.
     uint8_t  _blend_mode         = 1;
-    // Last commanded target + its direction sign, so streamTo() can detect a
-    // reversal vs. the in-flight move and apply the selected blend policy.
-    int32_t  _last_target_steps  = 0;
-    int8_t   _last_dir           = 0;       // -1, 0, +1 (native-step sign)
-    bool     _have_last_target   = false;
-    // Watchdog: if the host stops sending updates, settle on the last real
-    // sample so the carriage can't keep coasting toward a stale target.
-    float    _last_sample_mm     = 0.0f;
-    uint32_t _last_sample_ms     = 0;
-    bool     _have_last_sample   = false;
-    static const uint16_t STREAM_STALL_MS = 80;
 
     // Speed/accel cache for streamToSteps() — only call FAS setters when the
     // value actually changes. Calling them every waypoint forces a ramp recalc

@@ -151,46 +151,6 @@ void ModbusServoDriver::forceHomeState(bool homed) {
 
 // ---- Motion -----------------------------------------------------------------
 
-bool ModbusServoDriver::moveTo(float pos_mm) {
-    if (!_homed || !_enabled || _bus_fault) {
-        SLOGW("servo", "ModbusServoDriver: moveTo() refused — not homed/enabled, or a bus fault is latched.");
-        return false;
-    }
-
-    pos_mm = constrain(pos_mm, 0.0f, effectiveCeilingMm());
-    float target_counts = -(float)mmToNative(pos_mm);   // front = negative counts, same convention as FAS
-
-    float speed_counts_s  = _max_speed_mm_s * nativePerMm();
-    float accel_counts_s2 = _accel_mm_s2    * nativePerMm();
-
-    _target_counts = target_counts;
-    // Jerk-limited tracker: just move the target; the executor glides.
-    _executor.track(target_counts, speed_counts_s, accel_counts_s2);
-    // A discrete moveTo() must not be masked by a stale streamToSteps()
-    // grit-cache hit later.
-    _have_last_stream = false;
-
-    SLOGD("servo", "ModbusServoDriver moveTo: %.1fmm -> %.0f counts (v=%.0f a=%.0f counts/s, counts/s^2)",
-          pos_mm, target_counts, speed_counts_s, accel_counts_s2);
-    return true;
-}
-
-void ModbusServoDriver::streamTo(float pos_mm, float speed_mm_s) {
-    if (!_homed || !_enabled || _bus_fault) return;
-
-    pos_mm = constrain(pos_mm, 0.0f, effectiveCeilingMm());
-    float target_counts = -(float)mmToNative(pos_mm);
-
-    float spd = (speed_mm_s > 0.0f) ? speed_mm_s : _max_speed_mm_s;
-    spd = constrain(spd, 1.0f, _max_speed_mm_s);
-    float speed_counts_s  = spd          * nativePerMm();
-    float accel_counts_s2 = _accel_mm_s2 * nativePerMm();
-
-    _target_counts = target_counts;
-    _executor.track(target_counts, speed_counts_s, accel_counts_s2);
-    _have_last_stream = false;
-}
-
 // Pre-planned native-count dispatch — called from Core 1 via MotionArbiter at
 // up to ~1kHz. GRIT-CACHE FIRST: skip the executor
 // hand-off entirely when nothing changed since last call.

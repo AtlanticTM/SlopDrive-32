@@ -122,14 +122,10 @@ void AIMServoDriver::update() {
         }
     }
 
-
-    // Stream stall watchdog: DISABLED in D4 event-driven mode (MotionArbiter).
-    // Intents there are event-driven — sporadic retargets at arbitrary
-    // intervals, not a continuous stream, so a gate-blocked intent (pause,
-    // override, not-homed) is a valid resting state, not a stall. A watchdog
-    // sized for a continuous push-model stream would fire during any
-    // pause/override lasting >80ms and permanently disable motion, requiring
-    // a reboot to recover.
+    // Deliberately NO stream-stall watchdog here: intents are event-driven,
+    // so a quiet line is a valid resting state (pause, override, not-homed) —
+    // a stream-sized timeout would fire during any legal pause and latch
+    // motion off. SETTLE on stream death is SlopMotion's job.
 }
 
 void AIMServoDriver::emergencyStop() {
@@ -168,19 +164,6 @@ void AIMServoDriver::disable() {
         _stepper->disableOutputs();
     }
     _enabled = false;
-}
-
-// ---- Stream-state reset -----------------------------------------------------
-
-void AIMServoDriver::resetStreamState() {
-    _have_last_sample  = false;
-    _last_sample_ms    = 0;
-    // Forget the in-flight target/direction so the next stream starts a fresh
-    // blend instead of inheriting a stale reversal decision from before the
-    // Halt/Home.
-    _have_last_target  = false;
-    _last_target_steps = 0;
-    _last_dir          = 0;
 }
 
 // ---- Homing -----------------------------------------------------------------
@@ -494,8 +477,6 @@ bool AIMServoDriver::home(int32_t home_speed_steps_s) {
 
     // Drop any leftover stream/target state — a stale in-flight target fights
     // the homing sweep and can bang the endstop without ever finishing.
-    resetStreamState();
-
     // Enable outputs via FAS before spawning the task — FAS needs
     // _outputEnabled = true before move() will execute.
     if (_stepper) {
@@ -624,138 +605,20 @@ bool AIMServoDriver::checkPushToHome() {
 
 // ---- Motion -----------------------------------------------------------------
 
-bool AIMServoDriver::moveTo(float pos_mm) {
-    if (!_homed) {
-        SLOGW("aim", "AIMServo: Cannot move — not homed!");
-        return false;
-    }
-
-    enable();
-
-    // Clamp to the effective physical ceiling — the measured stroke once
-    // homing has felt out the real wall, else the configured max rail length.
-    // The carriage never goes past the end of the rail.
-    pos_mm = constrain(pos_mm, 0.0f, effectiveCeilingMm());
-
-    // Coordinate system: home (endstop) = 0mm = step 0
-    // "Out" (extended/front) = positive mm = NEGATIVE steps
-    int32_t target_steps = -mmToNative(pos_mm);
-
-    if (!_stepper) return false;
-
-    uint32_t speed_hz = (uint32_t)(_max_speed_mm_s * AIM_STEPS_PER_MM);
-    if (speed_hz < 1) speed_hz = 1;
-    uint32_t accel_hz = (uint32_t)(_accel_mm_s2 * AIM_STEPS_PER_MM);
-    if (accel_hz < 100) accel_hz = 100;
-
-    _stepper->setSpeedInHz(speed_hz);
-    _stepper->setAcceleration(accel_hz);
-
-    int32_t pos_before = _stepper->getCurrentPosition();
-
-    if (target_steps == pos_before) {
-        SLOGD("aim", "AIMServo moveTo: %.1fmm already at target step %d",
-              pos_mm, target_steps);
-        return true;   // already there — a satisfied move, not a refusal
-    }
-
-    // If a previous move is still draining the queue, force-stop and re-sync
-    // position first — otherwise FastAccelStepper ignores the new moveTo().
-    if (_stepper->isRunning()) {
-        _stepper->forceStopAndNewPosition(pos_before);
-        uint32_t to = millis() + 300;
-        while (_stepper->isRunning() && millis() < to) {
-            vTaskDelay(pdMS_TO_TICKS(2));
-        }
-    }
-
-    // FAS 0.34.0+ returns MoveResultCode (an enum) instead of int8_t.
-    // Cast to int for the log — the numeric value is identical. 0 = OK.
-    int mret = (int)_stepper->moveTo(target_steps);
-
-    SLOGD("aim", "AIMServo moveTo: %.1fmm -> step %d (from %d) at %u Hz ret=%d",
-          pos_mm, target_steps, pos_before, speed_hz, mret);
-    // Propagate FAS's verdict — a silently-refused move must be visible to the
-    // caller (MotionArbiter), not just this log line.
-    return mret == 0;
-}
-
-// ---- streamTo() — continuous position streaming -----------------------------
-// Smooth streaming move for Intiface/TCode. Unlike moveTo(), this NEVER
-// force-stops between commands — FastAccelStepper accepts a fresh moveTo()
-// target while already running and re-plans on the fly. Matches the pattern
-// position-streaming engines (OSSM-Sauce / OSSM-stream / StrokeEngine) use:
-// EVERY incoming sample is the latest truth about where the shaft should be,
-// so this ALWAYS retargets — a waypoint is never dropped.
-//
-// This path always commands the full configured accel (no raise-only clamp
-// here) — see streamToSteps()/setAcceleration() for the raise-only guard that
-// DOES apply on the MotionArbiter dispatch path.
-void AIMServoDriver::streamTo(float pos_mm, float speed_mm_s) {
-    if (!_homed || !_stepper) return;
-    enable();
-
-    pos_mm = constrain(pos_mm, 0.0f, effectiveCeilingMm());
-    int32_t target_steps = -mmToNative(pos_mm);  // front = negative steps
-
-    // Arm the stall watchdog with this REAL commanded sample. Speed 0 means
-    // "settle" and is re-issued BY the watchdog itself — this must not re-arm
-    // the timer or it would never time out.
-    if (speed_mm_s > 0.0f) {
-        _last_sample_mm   = pos_mm;
-        _last_sample_ms   = millis();
-        _have_last_sample = true;
-    }
-
-    // Track direction for telemetry / future tuning. Reversals are never
-    // dropped — every sample retargets; FAS handles mid-flight reversals
-    // cleanly.
-    int32_t cur_steps = _stepper->getCurrentPosition();
-    int32_t delta     = target_steps - cur_steps;
-    int8_t  new_dir   = (delta > 0) ? 1 : (delta < 0) ? -1 : 0;
-
-    // Speed / acceleration — always command the full configured accel; FAS
-    // re-plans from current velocity and handles mid-flight retargets
-    // cleanly at any accel.
-    float spd = (speed_mm_s > 0.0f) ? speed_mm_s : _max_speed_mm_s;
-    spd = constrain(spd, 1.0f, _max_speed_mm_s);
-
-    uint32_t speed_hz = (uint32_t)(spd * AIM_STEPS_PER_MM);
-    if (speed_hz < 1) speed_hz = 1;
-    uint32_t accel_hz = (uint32_t)(_accel_mm_s2 * AIM_STEPS_PER_MM);
-    if (accel_hz < 100) accel_hz = 100;
-
-    _stepper->setSpeedInHz(speed_hz);
-    _stepper->setAcceleration(accel_hz);
-
-    // No force-stop, no busy-wait: just retarget. If the new target equals
-    // the current commanded target, FastAccelStepper ignores it cheaply.
-    _stepper->moveTo(target_steps);
-
-    _last_target_steps = target_steps;
-    if (new_dir != 0) _last_dir = new_dir;
-    _have_last_target = true;
-}
 
 // ---- streamToSteps() — pre-planned native-step dispatch ---------------------
 // Called exclusively from Core 1, via MotionArbiter::submit() (motorTask) or
 // ::submitStreamSample() (streamSamplerTask). Speed and accel arrive already
 // converted to steps/s and steps/s² by the arbiter, including the arbiter's
-// own raise-only acceleration clamp — no unit math or accel policy here, just
-// arm the watchdog and fire straight to FAS.
+// own raise-only acceleration clamp — no unit math or accel policy here,
+// straight to FAS. No stall watchdog by design: intents are event-driven, so
+// quiet is a valid resting state (SETTLE is SlopMotion's job, not this
+// driver's).
 void AIMServoDriver::streamToSteps(int32_t target_steps,
                                         uint32_t speed_steps_s,
                                         uint32_t accel_steps_s2) {
     if (!_homed || !_stepper) return;
     enable();
-
-    // Arm the stall watchdog — convert target_steps back to mm for the
-    // existing watchdog logic (which works in mm). If the host goes quiet,
-    // update() will settle here.
-    float pos_mm = nativeToMm(-target_steps);  // negative because front=negative steps
-    _last_sample_mm   = pos_mm;
-    _last_sample_ms   = millis();
-    _have_last_sample = true;
 
     // Only call setAcceleration()/setSpeedInHz() when the value actually
     // changes. Calling them on every waypoint (30-100x/sec) forces FAS to
@@ -777,8 +640,7 @@ void AIMServoDriver::streamToSteps(int32_t target_steps,
 }
 
 void AIMServoDriver::runMotorStep() {
-    // NOP — moveTo()/streamTo()/streamToSteps() retarget through FAS directly.
-    // Stream stall watchdog (streamTo() stashing) lives in update().
+    // NOP — streamToSteps() retargets through FAS directly.
     // This stub exists to satisfy the MotorDriver interface.
 }
 
@@ -789,10 +651,10 @@ void AIMServoDriver::setMaxSpeed(float speed_mm_s) {
 }
 
 void AIMServoDriver::setAcceleration(float accel_mm_s2) {
-    // Ceiling at 20000 mm/s² — well within what the 57AIM30 can handle for
-    // short bursts. MotionArbiter uses this as the cruise accel; its
-    // raise-only guard (reads getLiveAcceleration() before each
-    // streamToSteps() dispatch) is what keeps it from softening mid-flight.
+    // Driver-internal ceiling; the arbiter's streamToSteps() dispatch path
+    // carries its own accel and does NOT route through this setter.
+    // TODO(LEDGER: AUTHORING-LEGIBILITY ceilings ruling 2026-07-29): clamp
+    // moves to the ruled 60000 mm/s² in the Phase-6 ceiling sweep.
     _accel_mm_s2 = constrain(accel_mm_s2, 10.0f, 20000.0f);
 
     if (_stepper) {
@@ -847,7 +709,6 @@ void AIMServoDriver::stop() {
     // _homed so the driver's internal state matches g_state.homed.
     _homed = false;
     // Drop stale stream/target state so the next Home/move starts clean.
-    resetStreamState();
 }
 
 void AIMServoDriver::hardStop() {
@@ -859,7 +720,6 @@ void AIMServoDriver::hardStop() {
     if (_stepper) {
         _stepper->forceStop();
     }
-    resetStreamState();
 }
 
 // ---- Driver config ----------------------------------------------------------

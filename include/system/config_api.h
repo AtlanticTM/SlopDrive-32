@@ -308,13 +308,6 @@ float    aimStepsPerMm();
 #define PIN_HB_LED              21   // heartbeat, ACTIVE-HIGH (PCB yellow-green LED, D10)
 #define HB_LED_ACTIVE_HIGH      1
 
-// Legacy alias — some status code still references PIN_NEOPIXEL_PIN. Point it at
-// the orange LED so it compiles; the status module should migrate to the RGB
-// pins above. There is no real NeoPixel to drive.
-#define PIN_NEOPIXEL_PIN        48
-#define NEOPIXEL_COUNT          1
-
-
 // ---- Motor Defaults ---------------------------------------------------------
 // Maximum motor speed in mm/s.
 // Normal UI cap: 5000 mm/s. Expert mode UI cap: 10000 mm/s.

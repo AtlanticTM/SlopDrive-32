@@ -20,9 +20,9 @@
 
 StreamedSetpointExecutor::StreamedSetpointExecutor(ServoModbus& bus) : _bus(bus) {}
 
-// Superseded — no current caller (ModbusServoDriver calls track() directly).
-// Kept only to satisfy IServoExecutor; forwards profile.target/vmax/accel
-// into track() if ever invoked.
+// The concrete class's own public entry point — ModbusServoDriver calls it
+// directly (not via the IServoExecutor vtable, which never declared it) on
+// every streamToSteps() dispatch.
 void StreamedSetpointExecutor::track(float target_counts,
                                      float vmax_counts_s,
                                      float amax_counts_s2) {

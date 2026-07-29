@@ -390,16 +390,10 @@ PlanReport MotionArbiter::_planAndDispatch(const MotionIntent& intent, bool /*lo
     }
 
     // ---- Always dispatch to FAS, even for zero-distance intents -------------
-    // The 57AIM driver has a stream stall watchdog (STREAM_STALL_MS = 80ms):
-    // if no streamToSteps() call arrives within that window, it one-shot
-    // settles on the last sample and permanently disables further stream
-    // motion. A high-rate steady-state stream (motor sitting at the endpoint,
-    // every command already at target) would silently trip this watchdog if
-    // dispatch were skipped on distance_steps==0. FAS moveTo() with the same
-    // position as current is internally a cheap no-op, so dispatching always
-    // is free — and skipping it lets FAS complete and stop between zero-
-    // distance intents, so the next non-zero intent restarts from dead-stop
-    // (visible freeze-jump on slow moves).
+    // A zero-distance dispatch is internally a cheap no-op in FAS, and
+    // skipping it would let FAS complete and stop between zero-distance
+    // intents, so the next non-zero intent restarts from dead-stop (visible
+    // freeze-jump on slow moves). Dispatching always is free; keep it.
     int32_t distance_steps = target_steps - p0_steps;
 
     // ---- Derive speed and acceleration from geometry ------------------------
@@ -466,29 +460,6 @@ PlanReport MotionArbiter::_planAndDispatch(const MotionIntent& intent, bool /*lo
             // Use the triangle profile.
             derived_speed_mm_s  = triangle_speed;
             derived_accel_mm_s2 = triangle_accel;
-        }
-    }
-
-    // ---- Apply ramp multipliers ---------------------------------------------
-    // MIT attribution: RampShape derived from jcfain/TCodeESP32 v0.4 AxisRampData.
-    // FAS supports only symmetric accel — use the conservative min of the two.
-    float ramp_mult = 1.0f;
-    if (intent.rampIn.entryMultiplier < 1.0f || intent.rampOut.exitMultiplier < 1.0f) {
-        ramp_mult = fminf(intent.rampIn.entryMultiplier, intent.rampOut.exitMultiplier);
-        if (ramp_mult < 0.01f) ramp_mult = 0.01f;
-        derived_accel_mm_s2 *= ramp_mult;
-        // Log on CHANGE, not on tick: a ramping stream held the old 1 s
-        // throttle open forever repeating one multiplier. Quantized to 1% so
-        // float jitter cannot chatter the line.
-        static uint8_t last_mult_pct = 0xFF;
-        const uint8_t mult_pct = uint8_t(ramp_mult * 100.0f + 0.5f);
-        if (mult_pct != last_mult_pct) {
-            last_mult_pct = mult_pct;
-            SLOGD("arbiter",
-                  "MotionArbiter RAMP: mult=%.2f entry=%.2f exit=%.2f accel %.0f→%.0f mm/s²",
-                  ramp_mult, intent.rampIn.entryMultiplier, intent.rampOut.exitMultiplier,
-                  report.derived_accel_mm_s2 / ((ramp_mult > 0.01f) ? ramp_mult : 1.0f),
-                  derived_accel_mm_s2);
         }
     }
 

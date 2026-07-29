@@ -70,8 +70,6 @@ protected:
     // Kept protected here too, exactly like every concrete driver — otherwise
     // holding a `MotorProxy&` instead of a `MotorDriver&` would reopen the
     // door the base class closes.
-    bool moveTo(float pos_mm) override { return d().moveTo(pos_mm); }
-    void streamTo(float pos_mm, float speed_mm_s) override { d().streamTo(pos_mm, speed_mm_s); }
     void streamToSteps(int32_t target_steps,
                        uint32_t speed_steps_s,
                        uint32_t accel_steps_s2) override {

@@ -34,7 +34,7 @@ class ServoModbus;
 //     - Wire mapping: wire_counts = _wire_offset + _wire_sign * cmd_counts.
 //       _wire_offset is the encoder reading captured at (force-)home time;
 //       _wire_sign is AIM_MODBUS_WIRE_SIGN (config_api.h, bench-determined).
-//     - streamToSteps()/moveTo()/streamTo() hand the target to the
+//     - streamToSteps() hands the target to the
 //       executor's jerk-limited tracker (track()), which integrates from
 //       its OWN live commanded pos/vel — never a stale target (DOCTRINE.md
 //       §2).
@@ -81,8 +81,6 @@ public:
 
 protected:
     // ---- Motion (MotionArbiter-only — sole-caller rule, see MotorDriver.h) --
-    bool moveTo(float pos_mm) override;
-    void streamTo(float pos_mm, float speed_mm_s) override;
     void streamToSteps(int32_t target_steps,
                        uint32_t speed_steps_s,
                        uint32_t accel_steps_s2) override;

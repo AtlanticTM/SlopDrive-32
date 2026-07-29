@@ -1636,48 +1636,6 @@ void WebUI::handleApiMachineCommit() {
     _machineReboot.arm(500, "motion-backend change commit");
 }
 
-// ---- handleApiHomeOverride (POST) — HTTP twin of WS_OP_HOME_OVERRIDE --------
-// {"on":true,"stroke":250} / {"on":false}. Exists because the WS route
-// requires a console-spawned WebSocket client, and every one of those leaked
-// a socket that went half-open on the next device reboot — feeding the exact
-// ws-send-blocks-HTTP-mutex wedge the [STALL] watchdog catches. Plain HTTP
-// request/response leaks nothing. Same state transitions as the WS case,
-// byte for byte.
-
-void WebUI::handleApiHomeOverride() {
-    JsonDocument doc;
-    deserializeJson(doc, _httpServer->arg("plain"));   // empty body -> defaults
-    bool on = doc["on"] | true;
-
-    JsonDocument resp;
-    if (on) {
-        float stroke = doc["stroke"] | 250.0f;
-        if (stroke < 1.0f) stroke = 250.0f;
-        _state.estop_latched = false;      // bench-home exits the e-stopped state
-        _state.test_stroke_override_mm = stroke;
-        _state.homing_in_progress = false;
-        _state.homed = true;
-        _state.resume_start_ms = millis(); // soft-start guard like a real home
-        _motor.forceHomeState(true);       // driver-side flag + (Modbus) wire re-anchor
-        SLOGI("ui", "HTTP Home-Override: faking homed for bench test :3");
-        resp["measured_stroke"] = stroke;
-    } else {
-        _state.test_stroke_override_mm = 0.0f;
-        _state.homed = false;
-        _motor.forceHomeState(false);
-        SLOGI("ui", "HTTP Home-Override: cleared — back to real homing.");
-        resp["measured_stroke"] = _motor.getMeasuredStrokeMm();
-    }
-    resp["ok"] = true;
-    resp["home_override"] = on;
-    resp["homed"] = _state.homed;
-    _bumpGen();
-
-    String json;
-    serializeJson(resp, json);
-    _httpServer->send(200, "application/json", json);
-}
-
 // ---- handleApiSlopMotion (HTTP GET + POST) ----------------------------------
 // SlopMotion live-tuning rough-in: curl-driven bench tuning until the WebUI
 // refactor grows a proper card.

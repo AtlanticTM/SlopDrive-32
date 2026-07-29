@@ -86,35 +86,6 @@ private:
     Rgb _pending{};
 };
 
-// Fans one logical frame out to several physical outputs (e.g. the RGB
-// status LED + the mono heartbeat lamp showing the same state).
-template <size_t MaxChildren = 3>
-class FanoutOutput final : public IGlowOutput {
-public:
-    bool add(IGlowOutput* o) {
-        if (o == nullptr || _count >= MaxChildren) return false;
-        _children[_count++] = o;
-        return true;
-    }
-    size_t pixelCount() const override {
-        size_t n = 1;
-        for (size_t i = 0; i < _count; ++i)
-            if (_children[i]->pixelCount() > n) n = _children[i]->pixelCount();
-        return n;
-    }
-    void set(size_t i, Rgb c) override {
-        for (size_t k = 0; k < _count; ++k)
-            if (i < _children[k]->pixelCount()) _children[k]->set(i, c);
-    }
-    void show() override {
-        for (size_t k = 0; k < _count; ++k) _children[k]->show();
-    }
-
-private:
-    IGlowOutput* _children[MaxChildren] = {};
-    size_t _count = 0;
-};
-
 }  // namespace slopglow
 
 #endif  // ARDUINO

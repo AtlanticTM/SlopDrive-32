@@ -97,15 +97,10 @@ protected:
     // static type (MotorDriver&), so no input source can dispatch motion
     // directly. Everything routes through MotionArbiter::submit() and its
     // stop/hardStop/emergencyStop helpers, which own every safety gate.
-    // moveTo returns true when FAS accepted the move (false = refused/not homed)
-    // so a silently-rejected move is distinguishable at the call site.
-    virtual bool moveTo(float pos_mm)                              = 0;
-    virtual void streamTo(float pos_mm, float speed_mm_s)          = 0;
-
-    // Dispatch a pre-planned move in native steps — called exclusively from
-    // Core 1 via MotionArbiter. Speed and accel are already in steps/s and
-    // steps/s² (converted by the arbiter before calling). No unit conversion
-    // happens inside this function — it goes straight to FAS.
+    // Dispatch a pre-planned move in native steps — the ONLY motion dispatch
+    // entry point. Speed and accel are already in steps/s and steps/s²
+    // (converted by the arbiter before calling). No unit conversion happens
+    // inside this function — it goes straight to FAS.
     virtual void streamToSteps(int32_t target_steps,
                                uint32_t speed_steps_s,
                                uint32_t accel_steps_s2)            = 0;

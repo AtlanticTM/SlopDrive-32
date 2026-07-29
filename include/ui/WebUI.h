@@ -183,7 +183,6 @@ private:
     DeferredReboot _machineReboot;
     void handleApiMachine();
     void handleApiMachineCommit();
-    void handleApiHomeOverride();
 
     // ---- HTTP handler methods (one per route) -------------------------------
     void handleRoot();

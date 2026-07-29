@@ -3161,12 +3161,20 @@ The answer to "what's next on the ledger":
      archetype table with the pinned slider/stepper rule (see plan).
    - Then Phases 2–6 per plan. Phase 6 carries the ceilings ruling
      (1000 mm/s / 60k mm/s²) + the ONE etag bump + deploy.
-2. **Parked webui rapid-fire list** — see the kickoff entry above; queued
+2. **RFC-053/054 (2026-07-29, chat):** BLE milestone — first live GATT
+   session with full control + the §6.3 BLE→WS mid-session upgrade, both
+   operator-verified 2026-07-28 (SPEC limitation 22 updated). RFC-053
+   **ACCEPTED** (datagram ESTOP: UDP 21328 + ESP-NOW; operator condition:
+   default OFF, NVS setting + build flag) — fw implementation queued
+   behind the campaign; ESP-NOW half queued behind that binding + the
+   PSRAM-offload work. RFC-054 (BLE WiFi/ESP-NOW credential handoff)
+   PROPOSED, awaiting ruling.
+3. **Parked webui rapid-fire list** — see the kickoff entry above; queued
    BEHIND the campaign (several items become trivial on the new surface).
-3. **Session-gate/closeout system** (C-13 proposal + ledger diet + tiered
+4. **Session-gate/closeout system** (C-13 proposal + ledger diet + tiered
    canon loading, designed in chat 2026-07-29) — implement after Phase 0;
    this closeout entry is its manual prototype.
-4. **Deploy state:** device runs 2.1.88. This session's fixes (dead-code
+5. **Deploy state:** device runs 2.1.88. This session's fixes (dead-code
    deletions, comment/doc corrections) are committed but NOT deployed — no
    behavior change intended; deploy rides with the next firmware-touching
    phase. The morning's webui OG-alignment commit is likewise built but not

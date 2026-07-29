@@ -253,7 +253,7 @@
 <style>
   .crosshair {
     position: fixed;
-    top: 8px;
+    top: calc(8px + env(safe-area-inset-top, 0px));
     right: 8px;
     width: 14px;
     height: 14px;
@@ -268,7 +268,9 @@
     z-index: 20;
     background: var(--bg-raised);
     border-bottom: 1px solid var(--line);
-    padding: 8px var(--gap);
+    /* Edge-to-edge devices (viewport-fit=cover): keep the bar's content out
+       of the status-bar/notch zone; the background still paints under it. */
+    padding: calc(8px + env(safe-area-inset-top, 0px)) var(--gap) 8px;
     display: flex;
     flex-direction: column;
     gap: 6px;

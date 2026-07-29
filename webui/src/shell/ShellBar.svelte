@@ -18,6 +18,15 @@
 
   let scanning = $state(false);
   let hubs = $state([]);
+  // The bar publishes its own height as --shell-chrome-bottom so kernel
+  // chrome pinned to the screen bottom (SafetyBar) stacks ABOVE it instead
+  // of being covered — the e-stop surface always wins the bottom edge. The
+  // kernel reads the var with a 0px default and never knows the shell exists.
+  let barH = $state(0);
+  $effect(() => {
+    document.documentElement.style.setProperty('--shell-chrome-bottom', barH + 'px');
+    return () => document.documentElement.style.removeProperty('--shell-chrome-bottom');
+  });
   // No baked-in address: discovery is the front door. The input remembers
   // only a host the operator themselves connected to before.
   let manualHost = $state(localStorage.getItem('shell_host') || '');
@@ -80,7 +89,7 @@
   }
 </script>
 
-<div class="shellbar" class:collapsed={!expanded}>
+<div class="shellbar" class:collapsed={!expanded} bind:clientHeight={barH}>
   <button class="sb-toggle" onclick={() => (expanded = !expanded)}
           aria-label="toggle shell bar">{expanded ? '▾' : '▴'} shell</button>
   {#if expanded}
@@ -115,18 +124,23 @@
     bottom: 0;
     left: 0;
     right: 0;
-    z-index: 9999;
+    z-index: 25; /* below SafetyBar (30): safety chrome always wins */
     display: flex;
     align-items: center;
     gap: 8px;
     flex-wrap: wrap;
-    padding: 4px 10px;
+    /* Gesture-nav clearance on edge-to-edge devices; 0 elsewhere. */
+    padding: 4px 10px calc(4px + env(safe-area-inset-bottom, 0px));
     background: rgba(10, 12, 16, 0.92);
     border-top: 1px solid #2a2e38;
     font-size: 0.72rem;
     color: #aab;
   }
-  .collapsed { padding: 0 10px; background: rgba(10, 12, 16, 0.6); border-top: none; }
+  .collapsed {
+    padding: 0 10px env(safe-area-inset-bottom, 0px);
+    background: rgba(10, 12, 16, 0.6);
+    border-top: none;
+  }
   .sb-toggle { color: #778; font-size: 0.68rem; padding: 3px 4px; }
   .sb-mode { padding: 1px 6px; border-radius: 2px; font-weight: 600; }
   .sb-mode[data-mode='ws'] { background: #16324a; color: #7fc4ff; }

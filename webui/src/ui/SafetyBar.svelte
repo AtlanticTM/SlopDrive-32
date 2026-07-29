@@ -245,12 +245,16 @@
     position: fixed;
     left: 0;
     right: 0;
-    bottom: 0;
+    /* --shell-chrome-bottom: set only by a shell's own bottom chrome (0
+       otherwise) — the e-stop surface stacks ABOVE it, never under it. */
+    bottom: var(--shell-chrome-bottom, 0px);
     z-index: 30;
     background: var(--bg-raised);
     border-top: 1px solid var(--line);
     padding: 8px var(--gap);
-    padding-bottom: calc(8px + env(safe-area-inset-bottom));
+    /* When shell chrome sits below, IT carries the safe-area inset — don't
+       double-pad; max() collapses this to the plain 8px in that case. */
+    padding-bottom: calc(8px + max(env(safe-area-inset-bottom, 0px) - var(--shell-chrome-bottom, 0px), 0px));
     display: flex;
     flex-direction: column;
     gap: 6px;

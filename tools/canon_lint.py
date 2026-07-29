@@ -163,7 +163,7 @@ def run_camelcase_check():
                                      "British spelling inside a filename component "
                                      "(CANON C-11 -- camelCase/subword gap)"))
 
-    content_files = [f for f in all_files if f not in BRITISH_SPELLING_SCAN_EXEMPT]
+    content_files = [f for f in all_files if not _spelling_exempt(f)]
     for rel in content_files:
         try:
             text = (ROOT / rel).read_text(encoding="utf-8", errors="strict")
@@ -188,6 +188,18 @@ def run_camelcase_check():
 # verbatim by law, not by style.
 BRITISH_SPELLING_SCAN_EXEMPT = ("THIRD_PARTY_LICENSES.md", "LICENSE", "NOTICE",
                                 "tools/canon_lint.py")
+
+# Directory prefixes the spelling scan must never touch: VENDORED THIRD-PARTY
+# SOURCE. C-11 governs OUR prose and identifiers; upstream API names (e.g.
+# blec's set_write_behaviour) are not ours to respell, and respelling a
+# vendored crate balloons its patch surface against upstream. Same class as
+# THIRD_PARTY_LICENSES.md above. Never put first-party code under vendor/.
+BRITISH_SPELLING_SCAN_EXEMPT_PREFIXES = ("webui/src-tauri/vendor/",)
+
+
+def _spelling_exempt(rel):
+    return (rel in BRITISH_SPELLING_SCAN_EXEMPT
+            or rel.startswith(BRITISH_SPELLING_SCAN_EXEMPT_PREFIXES))
 
 # Every catalogued code-comment hit was fixed in the 2026-07-28 pass. Kept as
 # a MECHANISM, not a list: adding an entry here requires an operator-visible
@@ -307,7 +319,7 @@ def run_codespell_check():
                  "pip install codespell (>=2.4) -- the British-spelling rule "
                  "has no fallback and refuses to silently skip")]
 
-    files = [f for f in tracked_files() if f not in BRITISH_SPELLING_SCAN_EXEMPT]
+    files = [f for f in tracked_files() if not _spelling_exempt(f)]
     if not files:
         return []
     abs_paths = [str(ROOT / f) for f in files]

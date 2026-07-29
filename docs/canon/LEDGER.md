@@ -2583,9 +2583,30 @@ cmd.exe eats `;` in the old-style ids, a second trap).
   stack ride in the `.so`; a release build minifies to a fraction of
   that). Rust cross-compile for aarch64 was clean on the FIRST attempt —
   every failure was packaging, none were code.
+- **Phone field test round 1 (operator, 2026-07-28): two findings, both
+  fixed same session (commit 4fa3a9e).** (1) HARD CRASH on the first BLE
+  notification — NOT our code: `tauri-plugin-blec` 0.12.0's Android
+  notify/event channel closures run on the binder thread via JNI
+  (`extern "C"`) and used `blocking_send().expect()`; a receiver dropped
+  in a disconnect race turns that panic into a nounwind process abort
+  (crash buffer: `PluginManager_sendChannelData` →
+  `panic_cannot_unwind` → SIGABRT). The GATT connect/subscribe/notify
+  chain itself WORKED — the app died receiving, which is the T5 lesson
+  wearing Android clothes: foreign-task callbacks must fail soft. Fixed
+  by vendoring the crate (`src-tauri/vendor/tauri-plugin-blec`,
+  `[patch.crates-io]`): both closures warn-and-drop, channel capacity
+  1 → 64 (capacity 1 also blocked the binder thread in lockstep with the
+  consumer — a throughput bug waiting for 25 Hz STATE). UPSTREAM ISSUE
+  PENDING (flesh-out item; patch marked for deletion when a fixed
+  release ships). (2) Operator ruling: **no baked-in host** — the M0
+  auto-point at the bench IP defeated discovery validation. The shell
+  now cold-starts at the discovery surface on both desktop and Android;
+  auto-connect only re-joins a host the operator explicitly connected to
+  before. Plus: stopScan before GATT connect, empty-host guard.
 - Spike-scope shortcuts, tighten at flesh-out: http scope `http://**` in
-  capabilities; ShellBar visual design is placeholder chrome; BLE Android
-  manifest permissions pending `android init`.
+  capabilities; ShellBar visual design is placeholder chrome; blec
+  upstream issue + patch retirement; release-build cleartext flag
+  (recorded in the M3 entry above).
 
 ## Deferred / planned (homes: docs/REFACTOR-ROADMAP.md, docs/MOTION-TODO.md)
 

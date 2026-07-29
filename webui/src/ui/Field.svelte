@@ -21,6 +21,12 @@
 
   let { field } = $props();
 
+  // ⓘ affordance state (OG density doctrine — a description is NOT printed
+  // inline by default, it lives behind a per-field toggle). Local, default
+  // closed; resets whenever this component instance changes field.
+  let descOpen = $state(false);
+  const descId = $derived(field.uid + '-desc');
+
   const sample = $derived(machine.samples[field.channelId]);
   const value = $derived(displayValue(field, sample));
   const status = $derived(statusOf(field));
@@ -82,11 +88,20 @@
      class:settled={sh && sh.settled}>
 
   <div class="field-head">
-    <label class="field-label" for={field.uid}>
-      {labelFor(field)}
-      {#if field.flagBits.advanced}<span class="tag adv" title="Advanced setting">adv</span>{/if}
-      {#if field.flagBits.restart_required}<span class="tag warn" title="Takes effect after restart">restart</span>{/if}
-    </label>
+    <span class="field-label-group">
+      <label class="field-label" for={field.uid}>
+        {labelFor(field)}
+        {#if field.flagBits.advanced}<span class="tag adv" title="Advanced setting">adv</span>{/if}
+        {#if field.flagBits.restart_required}<span class="tag warn" title="Takes effect after restart">restart</span>{/if}
+      </label>
+      {#if field.desc}
+        <button type="button" class="info" aria-expanded={descOpen} aria-controls={descId}
+                onclick={() => (descOpen = !descOpen)}>
+          <span aria-hidden="true">ⓘ</span>
+          <span class="sr-only">{descOpen ? 'Hide' : 'Show'} description</span>
+        </button>
+      {/if}
+    </span>
     {#if field.widget !== WIDGET.toggle && field.widget !== WIDGET.bitfield}
       <output class="field-value" class:readout={field.widget === WIDGET.readout} for={field.uid}>
         {#if field.options}
@@ -156,7 +171,10 @@
            min={field.min} max={field.max} step={step}
            value={value ?? field.min} disabled={!enabled}
            oninput={(e) => commit(Number(e.currentTarget.value))} />
-    <div class="bounds"><span>{formatValue(field, field.min)}</span><span>{formatValue(field, field.max)}</span></div>
+    <!-- No printed min…max caption (OG density doctrine — the slider's own
+         extent plus the value chip already carry the bounds; a bounds line
+         under every slider is exactly the "flat wall of gray text" the OG
+         never had). -->
 
   {:else if field.widget === WIDGET.number}
     <input id={field.uid} type="number" class="og-num"
@@ -176,7 +194,7 @@
            disabled={!enabled} onchange={(e) => commit(e.currentTarget.value)} />
   {/if}
 
-  {#if field.desc}<p class="field-desc">{field.desc}</p>{/if}
+  {#if field.desc && descOpen}<p class="field-desc" id={descId}>{field.desc}</p>{/if}
 
   {#if sh && sh.status === 'fault' && sh.error}
     <p class="field-error" role="status">refused: {sh.error}</p>
@@ -193,10 +211,13 @@
      the ground-truth value readout, free-text/secret inputs, labels, tags,
      bitfield rows and the toggle's paired text. */
 
+  /* OG .fld cadence: label/chip/slider read as ONE instrument row — tightened
+     from .5rem so the control sits close under its head instead of floating
+     in its own paragraph-sized band. */
   .field {
     display: flex;
     flex-direction: column;
-    gap: .5rem;
+    gap: 6px;
   }
 
   .field-head {
@@ -204,6 +225,21 @@
     align-items: baseline;
     justify-content: space-between;
     gap: 8px;
+  }
+
+  /* Groups the label with its ⓘ toggle so field-head's space-between still
+     splits into exactly two things: this group, and the value chip. */
+  .field-label-group {
+    display: flex;
+    align-items: center;
+    gap: 6px;
+  }
+
+  /* Slider row tightened to the OG's compact cadence (.fld2 input[type=range]
+     margin, verified against og-ref/style.css) instead of the global 12px 0 —
+     part of reading as one instrument row with its label/chip. */
+  .field input[type='range'] {
+    margin: 8px 0 2px;
   }
 
   /* Quiet label voice — same recipe as the hero numerals' .hn-label. Size
@@ -240,11 +276,56 @@
     box-shadow: inset 0 0 0 1px rgba(245, 185, 77, .4);
   }
 
+  /* ⓘ description toggle — the OG .info affordance (og-ref/style.css: base
+     .info box + its .label-row 18px/11px in-field variant, since this button
+     rides beside a field label rather than a card-head). The OG's own hover
+     state only brightens its floating .tip popover, not the button itself;
+     the border-brightens-on-hover idiom here is the one every other outlined
+     icon button in this sheet already uses (.og-btn:hover, .og-seg button:hover). */
+  .info {
+    position: relative;
+    width: 18px;
+    height: 18px;
+    flex: 0 0 auto;
+    display: inline-grid;
+    place-items: center;
+    border-radius: var(--r-s);
+    border: 1px solid var(--line-2);
+    background: transparent;
+    color: var(--tx-mut);
+    font-size: .62rem;
+    line-height: 1;
+    cursor: pointer;
+    transition: border-color .12s, color .12s;
+  }
+  .info:hover {
+    border-color: var(--line-4);
+    color: var(--tx);
+  }
+  .info[aria-expanded='true'] {
+    border-color: var(--reality);
+    color: var(--reality);
+  }
+
+  .sr-only {
+    position: absolute;
+    width: 1px;
+    height: 1px;
+    padding: 0;
+    margin: -1px;
+    overflow: hidden;
+    clip: rect(0, 0, 0, 0);
+    white-space: nowrap;
+    border: 0;
+  }
+
   /* Ground-truth readout: same recess recipe as the editable .og-num value
-     input (var(--screen), inset hairline, Martian Mono at a narrower width),
-     written locally because this is an <output>, not an input — the global
-     .og-num utility targets editable controls. Size/padding verified against
-     the OG stylesheet's .field-val chip (.76rem, 1px 6px). */
+     input (var(--screen), inset shadow + hairline border, Martian Mono at a
+     narrower width), written locally because this is an <output>, not an
+     input — the global .og-num utility targets editable controls. Recess
+     verified verbatim against the OG stylesheet's .num (inset 0 2px 5px
+     rgba(0,0,0,.6)) — the old flat 1px inset ring read shallow next to it.
+     Size/padding verified against the OG's .field-val chip (.76rem, 1px 6px). */
   .field-value {
     display: inline-flex;
     align-items: center;
@@ -254,7 +335,8 @@
     font-size: .76rem;
     color: var(--tx-val);
     background: var(--screen);
-    box-shadow: inset 0 0 0 1px var(--line-1);
+    box-shadow: inset 0 2px 5px rgba(0, 0, 0, .6);
+    border: 1px solid var(--line-1);
     border-radius: var(--r-s);
     padding: 1px 6px;
   }
@@ -295,17 +377,18 @@
     transition: width .4s cubic-bezier(.3, .7, .3, 1);
   }
 
-  /* Free-text/secret value entries — og-num-like recess, left-aligned since
-     the content isn't numeric (SSID strings, passphrases). */
+  /* Free-text/secret value entries — same recess as .field-value/.og-num
+     (OG .num verbatim), left-aligned since the content isn't numeric (SSID
+     strings, passphrases). */
   .value-input {
     background: var(--screen);
-    box-shadow: inset 0 0 0 1px var(--line-1);
+    box-shadow: inset 0 2px 5px rgba(0, 0, 0, .6);
+    border: 1px solid var(--line-1);
     color: var(--tx-val);
     font-family: var(--mono);
     font-variation-settings: 'wdth' 90;
     font-weight: var(--num-wght);
     border-radius: var(--r-s);
-    border: none;
     padding: 6px 8px;
     text-align: left;
   }
@@ -315,14 +398,6 @@
               input[type='password'], select, .og-num, .value-input) {
     width: 100%;
     display: block;
-  }
-
-  .bounds {
-    display: flex;
-    justify-content: space-between;
-    font-family: var(--mono);
-    font-size: .7rem;
-    color: var(--tx-ghost);
   }
 
   .toggle-row {

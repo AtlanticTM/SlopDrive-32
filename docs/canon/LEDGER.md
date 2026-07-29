@@ -2817,9 +2817,20 @@ agent, five implementation agents on disjoint files):
   out for trusted stamps (tests; the future device-stamped batched frame).
   Burst-replay regression test added to telebuf-sim (reproduces the
   measured clump pattern): zero snaps, zero holds, mean vel 9.98 vs 10
-  true. Idle probe post-fix: zero phantom motion. LIVE MOVING confirmation
-  pending the next bench window (machine went idle before the post-fix
-  trace); the probe hook ships permanently (free when unset).
+  true. Idle probe post-fix: zero phantom motion; the probe hook ships
+  permanently (free when unset). **LIVE CONFIRMED — operator, on the
+  bench, 2026-07-28: "the jitter is gone."** Residual found in the same
+  bench pass: a one-tick wrong position at first movement / direction
+  change. Mechanism: the reconstruction's period EMA learned from
+  IDLE/DWELL gaps (the hub sheds an unchanging channel; sensation dwell
+  strokes park the target), ballooning the estimated period, so the first
+  spans after motion resumed were garbage — and the MAX_LEAD cap could
+  still DROP a sample. Fix: the EMA only learns plausible streaming gaps
+  (< min(4×period, 200 ms)); a >500 ms gap RESYNCS the schedule to the
+  arrival; the cap clamps monotonic (+1 ms) and never drops.
+  Dwell/resume replay added to telebuf-sim (stream → 600 ms shed dwell →
+  reversed bursty resume): zero wild frames. [operator confirmation +
+  sim; live re-check on the next moving window]
 - Verification: canon_lint clean; checks + Vite build green; fs deployed to
   fw 2.1.86; render smoke 27/27 (incl. TransportBar estop visible top /
   dock estop hidden at desktop, dock list free of pause/stop/home).
@@ -2870,6 +2881,24 @@ reconciliation):
   slightly above the OG's numeral-baseline alignment; catalog labels
   capitalize to "Estop" (the OG's "E-Stop" spelling is the catalog's to
   change, not the client's). [verified 2026-07-28 — this session]
+
+## AESTHETIC AUDIT + DENSITY PASS (operator-directed, 2026-07-29)
+
+Operator: "the sliders look bad, not obv a slider, the page looks flat, but
+not in an appeasing way — use all tools." Instrumented audit (zoomed crops +
+computed-style forensics, ours vs the running OG reference):
+
+- Flatness root cause was DENSITY, not chrome: Field rendered a bounds
+  caption row and every catalog description inline — walls of ghost-gray
+  paragraph text the OG never had (its .fld rows are label + recessed chip
+  + hairline slider, descriptions behind ⓘ). RULING (amends the terse-mode
+  presentation, veto-able): settings descriptions now collapse behind a
+  per-field ⓘ toggle (OG .info affordance), absent from the DOM until
+  opened; .field-reason/.field-error stay ALWAYS visible (ground truth).
+  Bounds row deleted. Value chips get the OG .num recess verbatim
+  (inset 0 2px 5px), replacing a flat 1px ring. Note: computed-style
+  probing of ::-webkit-slider-thumb is unreliable in Chromium — the crop
+  proved the thumb renders; trust pixels over pseudo-element getComputedStyle.
 
 ## Deferred / planned (homes: docs/REFACTOR-ROADMAP.md, docs/MOTION-TODO.md)
 

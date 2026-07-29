@@ -226,5 +226,45 @@ console.log('\ntelebuf.js — Hermite continuity and clamp assertions\n');
      'mean=' + mean.toFixed(2) + 'mm/s');
 }
 
+// ---------------------------------------------------------------------------
+// Dwell/resume replay — the "random position for one tick on first movement
+// or direction change" report (operator, 2026-07-28). A pattern dwells at a
+// stroke end; the hub sheds the unchanging channel (gaps of ~600ms); motion
+// resumes with a burst. The period estimator must NOT learn from the dwell
+// gaps, and the schedule must resync across the hole — no wild frame on
+// resume.
+// ---------------------------------------------------------------------------
+{
+  const tele = createTelebuf();
+  const clock = createRenderClock();
+  const VEL = 20 / 1000; // mm per ms while moving
+  let t = 0, pos = 0;
+  const push = (p2, at) => { tele.push(p2, at); clock.noteArrival(at); };
+
+  // Phase 1: steady streaming, 30ms cadence, 2s.
+  for (; t < 2000; t += 30) { pos = VEL * t; push(pos, t); }
+  // Phase 2: dwell — value frozen, shed to one push each 600ms for 3s.
+  const dwellPos = pos;
+  for (; t < 5000; t += 600) push(dwellPos, t);
+  // Phase 3: resume — direction REVERSED, bursty 3-at-a-time clumps every 90ms.
+  const t0 = t;
+  for (; t < 8000; t += 90) {
+    for (let k = 2; k >= 0; k--) push(dwellPos - VEL * ((t - t0) - k * 30), t);
+  }
+
+  // Render Phase 3 (plus a short settle) and hunt wild frames.
+  const frames = [];
+  for (let now = t0 + 200; now < t; now += RAF_DT) {
+    clock.update(RAF_DT);
+    const r = tele.sampleAt(clock.stableRenderTime(now));
+    if (r.value != null) frames.push(r.value);
+  }
+  const vels = [];
+  for (let i = 1; i < frames.length; i++) vels.push(Math.abs((frames[i] - frames[i - 1]) / (RAF_DT / 1000)));
+  const wild = vels.filter((v) => v > 2 * 20).length;
+  ok('dwell/resume replay: no wild frame after motion resumes', wild === 0,
+     'wild=' + wild + '/' + vels.length + ' maxVel=' + Math.max(...vels).toFixed(1) + 'mm/s');
+}
+
 console.log('\n' + (fails ? 'FAILURES: ' + fails : 'ALL PASS'));
 process.exit(fails ? 1 : 0);

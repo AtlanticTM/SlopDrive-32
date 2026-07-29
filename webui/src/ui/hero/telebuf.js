@@ -157,18 +157,30 @@ export function createTelebuf(opts = {}) {
       if (newestIdx >= 0 && tsMs <= bufT[newestIdx]) return; // trusted stamps: not newer, drop
       ts = tsMs;
     } else {
-      if (lastArrivalTs > 0) {
-        const gap = tsMs - lastArrivalTs;
-        if (gap >= 0 && gap < 1000) periodMs += 0.05 * (gap - periodMs);
+      const gapSinceLast = lastArrivalTs > 0 ? tsMs - lastArrivalTs : -1;
+      // Only plausible STREAMING gaps teach the period. Idle/dwell gaps (the
+      // hub sheds an unchanging channel; a pattern dwells at a stroke end)
+      // are MODE SWITCHES, not cadence — letting one 600ms gap into the EMA
+      // ballooned the period and made the first spans after motion resumed
+      // garbage: the operator-reported "random position for one tick on
+      // first movement / direction change."
+      if (gapSinceLast >= 0 && gapSinceLast < Math.min(4 * periodMs, 200)) {
+        periodMs += 0.05 * (gapSinceLast - periodMs);
       }
       lastArrivalTs = tsMs;
 
       if (newestIdx < 0) {
         ts = tsMs;
+      } else if (gapSinceLast > 500) {
+        // Stream resumed after a genuine stall: resync the schedule to the
+        // arrival instead of extending the old cadence across the hole.
+        ts = Math.max(tsMs, bufT[newestIdx] + 1);
       } else {
         ts = Math.max(tsMs + LEAD_MS, bufT[newestIdx] + Math.max(1, periodMs));
-        if (ts > tsMs + MAX_LEAD_MS) ts = tsMs + MAX_LEAD_MS;
-        if (ts <= bufT[newestIdx]) return; // schedule cannot advance within the lead budget
+        // Cap schedule-ahead-of-arrival drift, but NEVER drop a sample for
+        // it — monotonic +1ms is always available (dropping data was the
+        // original regression-#5 sin).
+        ts = Math.max(Math.min(ts, tsMs + MAX_LEAD_MS), bufT[newestIdx] + 1);
       }
     }
 

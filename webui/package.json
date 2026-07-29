@@ -10,7 +10,8 @@
     "preview": "vite preview",
     "check": "node test/check-device-knowledge.mjs && node test/settings-model.test.mjs",
     "check:generic": "node test/check-device-knowledge.mjs",
-    "check:model": "node test/settings-model.test.mjs"
+    "check:model": "node test/settings-model.test.mjs",
+    "tauri": "tauri"
   },
   "devDependencies": {
     "@sveltejs/vite-plugin-svelte": "^4.0.4",

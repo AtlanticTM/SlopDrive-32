@@ -2562,10 +2562,27 @@ cmd.exe eats `;` in the old-style ids, a second trap).
   the SAME `instance_id` — the hub's duplicate-identity rule makes that a
   clean handover on TODAY'S firmware (no fw change needed for the spike;
   state-preserving cross-binding migration stays a flesh-out item).
-- **M3 — Android: toolchain complete** (JDK 17, platform-36, build-tools
-  36.0.0, NDK 29.0.14206865 stable — the first script's auto-pick grabbed
-  an rc by accident, caught and pinned; all four Rust Android targets).
-  `tauri android init` + APK build not yet run.
+- **M3 — Android: DEBUG APK BUILT** (not yet sideloaded/run on the phone —
+  that live check is the operator's). Toolchain: JDK 17, platform-36,
+  build-tools 36.0.0, NDK 29.0.14206865 stable (the first script's
+  auto-pick grabbed an rc by accident, caught and pinned), all four Rust
+  Android targets. `tauri android init` clean; manifest carries the BLE
+  permission set (BLUETOOTH_SCAN `neverForLocation` + BLUETOOTH_CONNECT,
+  legacy trio capped at API 30). Four packaging traps burned down in
+  sequence, each recorded: (1) symlinking the built `.so` into the Android
+  project requires Windows Developer Mode (operator enabled); (2)
+  tauri-plugin-blec's manifest floor is minSdk 26 vs the template's 24
+  (raised, comment in build.gradle.kts); (3) Gradle's rust plugin calls
+  back into the CLI via `npm run tauri` — package.json needs the standard
+  `"tauri": "tauri"` script; (4) debug cleartext-traffic placeholder is
+  already true in the debug buildType (LAN ws/http works), but the RELEASE
+  manifest pins it false — must be deliberately flipped per the plain-http
+  delivery doctrine before any release build. Artifact:
+  `webui/src-tauri/gen/android/app/build/outputs/apk/universal/debug/
+  app-universal-debug.apk` (216 MB — debug symbols for the whole Rust
+  stack ride in the `.so`; a release build minifies to a fraction of
+  that). Rust cross-compile for aarch64 was clean on the FIRST attempt —
+  every failure was packaging, none were code.
 - Spike-scope shortcuts, tighten at flesh-out: http scope `http://**` in
   capabilities; ShellBar visual design is placeholder chrome; BLE Android
   manifest permissions pending `android init`.

@@ -113,6 +113,9 @@ analyze('AFTER  (adaptive render-delay clock)', simulate(true));
 // velocity estimate rather than only on paper.
 // ---------------------------------------------------------------------------
 
+// The deterministic fixtures below hand-craft TRUSTED timestamps to probe the
+// interpolation math itself, so they opt out of the arrival-time rescheduling
+// (jitter regression #5) — which has its own burst-replay section further down.
 let fails = 0;
 const ok = (name, cond, extra) => {
   console.log('  [' + (cond ? 'PASS' : 'FAIL') + '] ' + name + (extra ? '  — ' + extra : ''));
@@ -123,7 +126,7 @@ console.log('\ntelebuf.js — Hermite continuity and clamp assertions\n');
 
 // ---- claim: velocity is continuous across a shared sample boundary --------
 {
-  const tele = createTelebuf();
+  const tele = createTelebuf({ reschedule: false });
   // Three real samples with uneven spans (40ms then 50ms) and different
   // implied velocities either side of B, so a naive per-span tangent would
   // show a visible kink at B if continuity did not hold.
@@ -142,7 +145,7 @@ console.log('\ntelebuf.js — Hermite continuity and clamp assertions\n');
 
 // ---- claim: linear fallback still applies to the first (tangent-less) span ----
 {
-  const tele = createTelebuf();
+  const tele = createTelebuf({ reschedule: false });
   tele.push(0, 0);    // A: no prior sample -> bufVel[A] is NaN
   tele.push(10, 40);  // B
   const mid = tele.sampleAt(20).value; // exact midpoint of a straight 0->10 run
@@ -152,7 +155,7 @@ console.log('\ntelebuf.js — Hermite continuity and clamp assertions\n');
 
 // ---- claim: a bad velocity estimate cannot fling the marker past the clamp ----
 {
-  const tele = createTelebuf();
+  const tele = createTelebuf({ reschedule: false });
   tele.push(0, 0);      // A
   tele.push(1000, 10);  // B: v_B = 100 units/ms — an absurd jump
   tele.push(1001, 20);  // C: v_C = 0.1 units/ms
@@ -169,6 +172,58 @@ console.log('\ntelebuf.js — Hermite continuity and clamp assertions\n');
   // rather than the fixture happening to land inside the bound on its own.
   ok('the clamp actually engaged (value pinned to the ceiling)',
      Math.abs(mid - hi) < 1e-9, `value=${mid.toFixed(4)} hi=${hi.toFixed(4)}`);
+}
+
+// ---------------------------------------------------------------------------
+// Burst replay — jitter regression #5 (arrival-time stamping).
+//
+// Reproduces the on-device measurement of 2026-07-28: the hub samples evenly
+// (~30ms) but the network delivers CLUMPS — three samples land with one
+// identical Date.now() stamp, then nothing for ~90ms. The old push() dropped
+// the duplicates (~18% of all motion) and the display snapped/froze (107
+// snap frames + 17 freezes in 719 rendered). With rescheduling (the default),
+// every sample must survive and the rendered output must be smooth.
+// ---------------------------------------------------------------------------
+{
+  const tele = createTelebuf();
+  const clock = createRenderClock();
+  const VEL = 10 / 1000;               // 10 mm/s in mm per ms
+  const BURST_EVERY = 90, PER_BURST = 3, SIM = 6000;
+
+  let pushed = 0;
+  const frames = [];
+  let nextBurst = 0;
+  for (let now = 0; now < SIM; now += RAF_DT) {
+    while (nextBurst <= now) {
+      const arrive = nextBurst;        // all three share ONE arrival stamp
+      for (let k = PER_BURST - 1; k >= 0; k--) {
+        const sampledAt = arrive - k * (BURST_EVERY / PER_BURST); // hub's even sampling instants
+        tele.push(VEL * sampledAt, arrive);
+        clock.noteArrival(arrive);
+        pushed++;
+      }
+      nextBurst += BURST_EVERY;
+    }
+    clock.update(RAF_DT);
+    const r = tele.sampleAt(clock.stableRenderTime(now));
+    frames.push(r.value);
+  }
+
+  ok('burst replay keeps every sample (duplicates no longer dropped)',
+     tele.length === Math.min(pushed, 256), 'kept=' + tele.length + ' pushed=' + pushed);
+
+  const warm = frames.filter((v, i) => v != null && i > 30);
+  const vels = [];
+  for (let i = 1; i < warm.length; i++) vels.push((warm[i] - warm[i - 1]) / (RAF_DT / 1000));
+  const spikes = vels.filter((v) => Math.abs(v) > 2 * 10).length;
+  const holds = vels.filter((v) => Math.abs(v) < 0.01).length;
+  const mean = vels.reduce((a, b) => a + b, 0) / vels.length;
+  ok('burst replay renders zero snap frames (implied vel never >2x true)',
+     spikes === 0, 'spikes=' + spikes + '/' + vels.length);
+  ok('burst replay renders (almost) zero held frames', holds <= vels.length * 0.02,
+     'held=' + holds + '/' + vels.length);
+  ok('burst replay mean implied velocity tracks truth', Math.abs(mean - 10) < 1,
+     'mean=' + mean.toFixed(2) + 'mm/s');
 }
 
 console.log('\n' + (fails ? 'FAILURES: ' + fails : 'ALL PASS'));

@@ -77,6 +77,32 @@
  * instead of chasing it for the burst's whole duration. Do not lower either
  * without re-measuring the on-device gap distribution — these are sized to
  * the worst observed tail, not the mean.
+ *
+ * ── jitter regression #5: arrival-time stamping (THE big one, measured) ─────
+ *
+ * The pushed `tsMs` is Date.now() AT DECODE TIME — and STATE frames arrive in
+ * TCP clumps. Measured on-device during real motion (rail-probe.mjs,
+ * 2026-07-28): 71 of 393 arrivals in 12s carried an IDENTICAL stamp to their
+ * predecessor and p95 arrival gap was 90ms against a ~30ms true period. Under
+ * arrival-time stamping the old push() dropped every duplicate outright
+ * (~18% of all motion samples discarded), then interpolated across the hole:
+ * 107 of 719 rendered frames were snaps and 17 were multi-frame freezes.
+ * No interpolation, however smooth, can survive garbage timestamps.
+ *
+ * The pre-refactor rail never trusted arrival time: `railFeed` re-spaced
+ * every batch by the known sample period and anchored it slightly in the
+ * FUTURE of "now", so the interpolator always saw an even timeline. push()
+ * now restores that mechanism: `tsMs` is treated as an arrival HINT, and the
+ * STORED timestamp is reconstructed as max(arrival + LEAD, prev + period),
+ * capped at arrival + MAX_LEAD — where `period` is an EMA of arrival gaps
+ * (bursts average out: 0,0,90,0,0,85… means ~30). Steady state stores
+ * perfectly even spans; a burst after a gap lands as N even spans that
+ * exactly absorb the gap; a genuine stall (arrival far past the schedule)
+ * resyncs forward through the max(). The render clock keeps measuring RAW
+ * arrival gaps, so its delay stays sized to the real burstiness and the
+ * sampled instant stays safely inside the reconstructed, future-extended
+ * ring. Do not "simplify" this back to storing arrival time — that IS
+ * regression #5.
  */
 
 /**
@@ -110,15 +136,45 @@ export function createTelebuf(opts = {}) {
   let lastVelPerMs = 0;      // value units per ms, from the last two real samples
   let lastPushTs = 0;
 
-  /** Push one ground-truth sample. Out-of-order/duplicate timestamps are ignored. */
+  // Timestamp reconstruction (jitter regression #5, header): arrival time is
+  // a HINT; stored time is an even, future-anchored schedule. Callers with
+  // TRUSTED timestamps (a device-stamped batched-telemetry frame, or a test
+  // exercising pure interpolation math) pass `reschedule: false` and their
+  // stamps are stored as-is.
+  const RESCHEDULE = opts.reschedule !== false;
+  const LEAD_MS = 30;        // how far ahead of arrival the schedule aims
+  const MAX_LEAD_MS = 150;   // hard cap on schedule-ahead-of-arrival drift
+  let periodMs = 40;         // EMA of arrival gaps — zero-gap bursts average out
+  let lastArrivalTs = 0;
+
+  /** Push one ground-truth sample. `tsMs` is the ARRIVAL hint (see header). */
   function push(value, tsMs) {
     if (value == null || !isFinite(value) || !isFinite(tsMs)) return;
+
     const newestIdx = len ? (head + len - 1) % CAP : -1;
-    if (newestIdx >= 0 && tsMs <= bufT[newestIdx]) return; // not newer: drop
+    let ts;
+    if (!RESCHEDULE) {
+      if (newestIdx >= 0 && tsMs <= bufT[newestIdx]) return; // trusted stamps: not newer, drop
+      ts = tsMs;
+    } else {
+      if (lastArrivalTs > 0) {
+        const gap = tsMs - lastArrivalTs;
+        if (gap >= 0 && gap < 1000) periodMs += 0.05 * (gap - periodMs);
+      }
+      lastArrivalTs = tsMs;
+
+      if (newestIdx < 0) {
+        ts = tsMs;
+      } else {
+        ts = Math.max(tsMs + LEAD_MS, bufT[newestIdx] + Math.max(1, periodMs));
+        if (ts > tsMs + MAX_LEAD_MS) ts = tsMs + MAX_LEAD_MS;
+        if (ts <= bufT[newestIdx]) return; // schedule cannot advance within the lead budget
+      }
+    }
 
     const idx = (head + len) % CAP;
     if (len === CAP) { head = (head + 1) % CAP; len--; }
-    bufT[idx] = tsMs;
+    bufT[idx] = ts;
     bufV[idx] = value;
     len++;
 
@@ -208,6 +264,7 @@ export function createTelebuf(opts = {}) {
   /** Reset to empty — call when the bound field's channel/uid changes identity. */
   function reset() {
     head = 0; len = 0; lastVelPerMs = 0; lastPushTs = 0;
+    lastArrivalTs = 0; periodMs = 40;
   }
 
   return { push, sampleAt, reset, get length() { return len; } };

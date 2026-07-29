@@ -2802,12 +2802,24 @@ agent, five implementation agents on disjoint files):
   Field.svelte collapsing to a thin router. This IS the recorded phase
   centerpiece (RFC-048 vocabulary consumption); today's OG dress becomes the
   skin those components wear. Sequenced after this pass's seal.
-- Jitter: STILL OPEN. The idle probe run proved rAF pacing is perfect
-  (720 frames, max dt 16.8 ms) and the wire feed is rough (35 Hz avg, p95
-  gap 93 ms, 17% duplicate-timestamp arrivals, 69 gaps >80 ms in 12 s). A
-  MOVING trace (operator runs a pattern while rail-probe.mjs records) is
-  the missing evidence; the probe hook ships in RailWidget permanently
-  (free when unset).
+- **Jitter ROOT CAUSE FOUND AND FIXED (moving trace, 2026-07-28) — jitter
+  regression #5, arrival-time stamping.** The moving probe run measured:
+  rAF perfect (max dt 16.8 ms), but 107 of 719 rendered frames were snaps
+  and 17 were multi-frame freezes — because STATE frames arrive in TCP
+  clumps (71 of 393 arrivals with IDENTICAL Date.now() stamps, p95 gap
+  90 ms vs ~30 ms true period) and telebuf.push() DROPPED every
+  duplicate-stamped sample (~18% of all motion discarded), then
+  interpolated across the hole. No interpolation survives garbage
+  timestamps — this is why Hermite (#4) changed nothing visible. Fix: the
+  OG railFeed mechanism restored inside telebuf.push() — arrival time is a
+  HINT, stored timestamps are reconstructed future-anchored and evenly
+  spaced by an EMA period (bursts average out); `reschedule: false` opts
+  out for trusted stamps (tests; the future device-stamped batched frame).
+  Burst-replay regression test added to telebuf-sim (reproduces the
+  measured clump pattern): zero snaps, zero holds, mean vel 9.98 vs 10
+  true. Idle probe post-fix: zero phantom motion. LIVE MOVING confirmation
+  pending the next bench window (machine went idle before the post-fix
+  trace); the probe hook ships permanently (free when unset).
 - Verification: canon_lint clean; checks + Vite build green; fs deployed to
   fw 2.1.86; render smoke 27/27 (incl. TransportBar estop visible top /
   dock estop hidden at desktop, dock list free of pause/stop/home).

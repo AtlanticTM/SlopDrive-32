@@ -202,6 +202,7 @@ private:
     // localStorage and can import/export for sharing.
     void handleApiPatternPresets();
     void handleApiLog();
+    void handleApiCrash();
     // SlopMotion live-tuning rough-in (GET state+bench / POST knobs). No
     // persistence, no UI card yet — curl-driven until the WebUI refactor.
     void handleApiSlopMotion();

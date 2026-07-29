@@ -26,6 +26,7 @@
 // -DUSE_PSYCHIC_HTTP. Every handler below is written against the surface both
 // sides present, so nothing past init()/update() knows which one is live.
 #include "ui/SlopHttpServer.h"
+#include "CrashRing.h"
 #include <WiFi.h>
 #include <esp_timer.h>
 
@@ -188,6 +189,9 @@ void WebUI::init() {
                           "{\"ok\":false,\"error\":\"retired\",\"use\":\"slopsync 0x0108 pattern-presets-cmd\"}");
     });
     _httpServer->on("/api/log",       HTTP_GET,  [this]() { handleApiLog(); });
+    // Previous boot's last words (RTC-noinit crash ring) — the post-mortem
+    // surface the 2026-07-29 PANIC had nothing to answer with.
+    _httpServer->on("/api/crash",     HTTP_GET,  [this]() { handleApiCrash(); });
     _httpServer->on("/api/slopmotion", HTTP_GET,  [this]() { handleApiSlopMotion(); });
     // POST /api/slopmotion is RETIRED. "No controls outside SlopSync,
     // HTTP is read only" — the 20 live-tune knobs are channels 0x008B/0x008C/
@@ -343,6 +347,20 @@ void WebUI::captureTelemetry(float position_mm, float target_mm, float raw_mm) {
 // ---- Route handlers ---------------------------------------------------------
 
 void WebUI::handleRoot() {
+    // Heap floor (2026-07-29 incident): streaming the bundle needs a large
+    // contiguous send buffer (SlopHttpServer::streamFile), and grinding that
+    // allocation against a starved heap is how HTTP crawled to 8 s loads
+    // before the PANIC. Under pressure, answer 503 fast — the page is a
+    // convenience surface; the machine's control plane (SlopSync) and the
+    // e-stop page already loaded elsewhere matter more than a new tab.
+    if (ESP.getMaxAllocHeap() < 12288) {
+        crashring::crumb("http-503");
+        SLOGW_EVERY_MS(5000, "ui", "handleRoot: 503, heap pressure (maxblock=%u)",
+                       unsigned(ESP.getMaxAllocHeap()));
+        _httpServer->send(503, "text/plain", "hub under memory pressure - retry shortly");
+        return;
+    }
+    crashring::crumb("http-root");
     // Streaming the 115 KB bundle out of LittleFS blocks httpTask ~0.5-1 s per
     // load under the sync WebServer (see docs/webui-legacy-diagnosis.md §4;
     // [STALL] http:ui.update names it). Until that rework: ETag + Cache-Control
@@ -1496,6 +1514,33 @@ void WebUI::handleApiLog() {
     // The UI has provably received the log stream — serial's job is done.
     // From here serial carries Warn+ only; the web ring is primary.
     applogSerialQuiet();
+}
+
+// GET /api/crash — the PREVIOUS boot's last words (RTC-noinit crash ring).
+// prev_valid false means the ring held no recovered data: first boot after
+// a power cycle (RTC RAM cleared) or a pre-crash-ring firmware.
+void WebUI::handleApiCrash() {
+    const crashring::PrevReport& p = crashring::prev();
+    JsonDocument doc;
+    doc["prev_valid"] = p.prevValid;
+    if (p.prevValid) {
+        doc["prev_abnormal"]  = p.prevAbnormal;
+        doc["reset_reason"]   = p.resetReason;
+        doc["boot_seq"]       = p.bootSeq;
+        doc["heap_min"]       = p.heapMin;
+        doc["heap_last"]      = p.heapLast;
+        doc["max_block_last"] = p.maxBlockLast;
+        doc["crumb_count"]    = p.crumbCount;
+        JsonArray arr = doc["crumbs"].to<JsonArray>();
+        for (uint8_t i = 0; i < p.crumbsRecovered; ++i) {
+            JsonObject c = arr.add<JsonObject>();
+            c["tag"]  = p.crumbs[i].tag;
+            c["t_ms"] = p.crumbs[i].tMs;
+        }
+    }
+    String json;
+    serializeJson(doc, json);
+    _httpServer->send(200, "application/json", json);
 }
 
 // ---- handleApiMachine (GET) / handleApiMachineCommit (POST) -----------------

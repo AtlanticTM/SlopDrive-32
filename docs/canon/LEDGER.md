@@ -2959,6 +2959,32 @@ was lost with the reboot.
   bench window): re-fake-home, ONE armed wire probe, tap-to-move harness
   drives, correlate outlier values field-by-field.
 
+## FW 2.1.87 — CRASH RING + HEAP-PRESSURE GUARDS (operator-stamped, 2026-07-29)
+
+Both incident work items implemented and LIVE:
+
+- **Crash ring** (include/system/CrashRing.h + src/system/CrashRing.cpp):
+  RTC_NOINIT last-words ring — boot seq, heap min/last, maxblock last, 12
+  breadcrumb checkpoints (ws-attach/ws-detach/ws-refuse/http-root/http-503;
+  alloc- and lock-free by constraint, torn crumbs tolerated). Recovered on
+  the next boot: SLOGW dump into the Warn ring when the death was abnormal,
+  always served at GET /api/crash. NOT a backtrace — that needs a core-dump
+  partition, and partition tables do not OTA (serial-reflash bench item,
+  still queued).
+- **Heap floors**: new WS sessions refused below free<14336 OR
+  maxblock<6144 (checked before slot claim, AsyncTCP task; existing
+  sessions never touched); the page serve answers 503 below
+  maxblock<12288 instead of grinding a starved allocator.
+- **First-boot proof**: /api/crash on 2.1.87 reported the fw-flash boot's
+  life (seq 1, heap_min 26364) including TWO ws-refuse crumbs — the floor
+  fired during the fs flash while flash writes fragmented the heap. Ring,
+  endpoint, floor, and crumbs all verified live in one shot.
+- Same deploy: webui LimitsWidget now reuses Field (the second hand-rolled
+  slider aesthetic deleted — operator screenshot evidence; one slider
+  language, one write path, descs behind the field's own info toggle).
+  [verified 2026-07-29 — deploy 2.1.86 -> 2.1.87 + fs, render smoke ALL
+  PASS, canon_lint clean]
+
 ## Deferred / planned (homes: docs/REFACTOR-ROADMAP.md, docs/MOTION-TODO.md)
 
 - TCode pass-through channel (post-MFP; parser cross-task race was the

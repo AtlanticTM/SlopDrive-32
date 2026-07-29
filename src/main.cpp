@@ -22,7 +22,8 @@
 
 #include "config_api.h"
 
-#include "AppLog.h"          // bridge only: applogBegin/applogDrain (SlopLog sinks)
+#include "AppLog.h"
+#include "CrashRing.h"       // last-words ring: begin/crumb/heapSample          // bridge only: applogBegin/applogDrain (SlopLog sinks)
 #include "sloplog/sloplog.h"
 #include "SystemState.h"
 #include "ConfigStore.h"
@@ -524,6 +525,9 @@ static void httpTask(void* param) {
         SLOGI_EVERY_MS(10000, "sys", "heap free=%u min=%u maxblock=%u psram=%u",
                        unsigned(ESP.getFreeHeap()), unsigned(ESP.getMinFreeHeap()),
                        unsigned(ESP.getMaxAllocHeap()), unsigned(ESP.getFreePsram()));
+        // Crash-ring watermark: three u32 stores per tick — cheap enough for
+        // 100 Hz, and the ring's post-mortem value depends on it being fresh.
+        crashring::heapSample(ESP.getFreeHeap(), ESP.getMaxAllocHeap());
         vTaskDelay(pdMS_TO_TICKS(10));
     }
 }
@@ -595,11 +599,17 @@ void setup() {
     {
         const esp_reset_reason_t reason = esp_reset_reason();
         const char* name = resetReasonName(reason);
-        if (reason == ESP_RST_POWERON || reason == ESP_RST_SW) {
+        const bool expected = (reason == ESP_RST_POWERON || reason == ESP_RST_SW);
+        if (expected) {
             SLOGI("boot", "Reset reason: %s", name);
         } else {
             SLOGW("boot", "Reset reason: %s (unexpected)", name);
         }
+        // Recover the previous boot's last words (RTC-noinit crash ring) and
+        // re-arm it for this boot. Must run after applogBegin() so the
+        // recovered report lands in a readable ring, and before anything that
+        // drops crumbs.
+        crashring::begin(name, !expected);
     }
 #if SERIAL_CONTROL_MODE
     SLOGI("boot", "USB Serial is boot-log + rescue path only — SlopSync (WiFi) is the control plane.");

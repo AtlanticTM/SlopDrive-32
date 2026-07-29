@@ -1,18 +1,16 @@
 <script>
   /**
    * LimitsWidget.svelte — the two kinematic ceilings: manual (user) and
-   * machine-driven (input). CLAUDE.md is explicit that these are CEILINGS, never
-   * targets, so every descriptor's `desc` prose is surfaced rather than dropped
-   * on the floor the way a bare slider would.
+   * machine-driven (input). Renders each knob through Field.svelte (OG .fld2
+   * compact grid, same recipe as PatternWidget) instead of a hand-rolled
+   * slider — one slider aesthetic for the whole app, one home for a field's
+   * description (behind its own ⓘ, not restated here).
    *
    * The input-set group is opportunistic: a machine with no machine-driven
    * motion source simply never annotates those roles, and the whole second
    * group disappears rather than showing three permanently-empty sliders.
    */
-  import { machine } from '../../model/machine.svelte.js';
-  import { isFieldEnabled } from '../../model/settings.js';
-  import { writeSetting, displayValue, statusOf } from '../../model/shadow.svelte.js';
-  import { formatValue, unitOf, precisionFor, labelFor } from '../../model/format.js';
+  import Field from '../Field.svelte';
 
   let { fields } = $props();
   // Read through the prop rather than destructuring once — heroes.js hands us
@@ -23,26 +21,6 @@
   const inputAccel = $derived(fields.inputAccel);
   const inputJerk = $derived(fields.inputJerk);
 
-  function sampleOf(f) { return f ? machine.samples[f.channelId] : undefined; }
-
-  function enabledOf(f) {
-    if (!f || f.readOnly) return false;
-    if (!isFieldEnabled(f, sampleOf(f))) return false;
-    if (machine.link.phase !== 'live') return false;
-    const e = machine.catalog.entries.find((x) => x.id === f.writeChannel);
-    if (!e) return false;
-    return (machine.link.roles | 0) >= (e.access | 0);
-  }
-
-  function stepOf(f) {
-    return f.step || (precisionFor(f) === 0 ? 1 : 0.01);
-  }
-
-  function commit(f, v) {
-    if (!enabledOf(f)) return;
-    writeSetting(f, v);
-  }
-
   const userKnobs = $derived([userSpeed, userAccel].filter((f) => f != null));
   const inputKnobs = $derived(
     [inputSpeed, inputAccel, inputJerk].filter((f) => f != null)
@@ -52,22 +30,9 @@
 <div class="hero limits-hero">
   <section class="limit-group">
     <h3 class="group-title">Manual limits <span class="group-sub">ceiling, not target</span></h3>
-    <div class="limit-list">
+    <div class="fld2">
       {#each userKnobs as f (f.uid)}
-        {@const val = displayValue(f, sampleOf(f))}
-        {@const en = enabledOf(f)}
-        <div class="limit-row" class:disabled={!en} data-shadow={statusOf(f)}>
-          <div class="limit-head">
-            <span class="limit-label">{labelFor(f)}</span>
-            <output class="mono">{formatValue(f, val)}<span class="unit">{unitOf(f)}</span></output>
-          </div>
-          <input type="range" class="limit-slider"
-                 min={f.min} max={f.max} step={stepOf(f)}
-                 value={val ?? f.min} disabled={!en}
-                 aria-label={labelFor(f)}
-                 oninput={(e) => commit(f, Number(e.currentTarget.value))} />
-          {#if f.desc}<p class="limit-desc explain">{f.desc}</p>{/if}
-        </div>
+        <Field field={f} />
       {/each}
     </div>
   </section>
@@ -75,22 +40,9 @@
   {#if inputKnobs.length}
     <section class="limit-group">
       <h3 class="group-title">Machine-driven limits <span class="group-sub">ceiling, not target</span></h3>
-      <div class="limit-list">
+      <div class="fld2">
         {#each inputKnobs as f (f.uid)}
-          {@const val = displayValue(f, sampleOf(f))}
-          {@const en = enabledOf(f)}
-          <div class="limit-row" class:disabled={!en} data-shadow={statusOf(f)}>
-            <div class="limit-head">
-              <span class="limit-label">{labelFor(f)}</span>
-              <output class="mono">{formatValue(f, val)}<span class="unit">{unitOf(f)}</span></output>
-            </div>
-            <input type="range" class="limit-slider"
-                   min={f.min} max={f.max} step={stepOf(f)}
-                   value={val ?? f.min} disabled={!en}
-                   aria-label={labelFor(f)}
-                   oninput={(e) => commit(f, Number(e.currentTarget.value))} />
-            {#if f.desc}<p class="limit-desc explain">{f.desc}</p>{/if}
-          </div>
+          <Field field={f} />
         {/each}
       </div>
     </section>
@@ -131,40 +83,16 @@
     letter-spacing: 0.03em;
   }
 
-  .limit-list {
-    display: flex;
-    flex-direction: column;
-    gap: 12px;
+  /* OG .fld2 — compact 2-col slider grid (mock r6, Pattern card), same recipe
+     as PatternWidget's. Field.svelte owns every other visual (label, chip,
+     hairline slider); this only owns the grid rhythm and tightens the
+     slider's vertical margin to the OG's fld2-specific value. */
+  .fld2 {
+    display: grid;
+    grid-template-columns: 1fr 1fr;
+    gap: 12px 16px;
   }
-
-  .limit-row {
-    display: flex;
-    flex-direction: column;
-    gap: 4px;
-    padding: 2px;
-    border-radius: var(--r-s);
-  }
-  .limit-row.disabled { opacity: 0.55; }
-
-  .limit-head {
-    display: flex;
-    justify-content: space-between;
-    align-items: baseline;
-    font-size: 0.85rem;
-  }
-  .limit-label { color: var(--ink-dim); }
-  .limit-head output { color: var(--reality); }
-  .unit { color: var(--ink-dim); font-size: 0.75em; margin-left: 2px; }
-
-  .limit-slider {
-    width: 100%;
-    height: var(--tap);
-    accent-color: var(--reality);
-  }
-
-  .limit-desc {
-    margin: 0;
-    color: var(--ink-faint);
-    font-size: 0.74rem;
+  .fld2 :global(input[type='range']) {
+    margin: 8px 0 2px;
   }
 </style>

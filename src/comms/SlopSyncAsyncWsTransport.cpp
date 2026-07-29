@@ -22,7 +22,14 @@
 #include "SlopSyncAsyncWsTransport.h"
 
 #include "sloplog/sloplog.h"
+#include "CrashRing.h"       // crumbs on the accept/detach path (alloc-free)
 #include "slopsync/generated/registry_constants.hpp"  // limits::blob_chunks_in_flight
+
+// Refuse-new-sessions floors (see the WS_EVT_CONNECT comment). Raise, don't
+// lower, without re-measuring: the 2026-07-29 incident wedged with free
+// ~14-20 KB and maxblock 8-14 KB while HTTP still had to serve pages.
+static constexpr uint32_t kAcceptHeapFloorBytes = 14336;
+static constexpr uint32_t kAcceptHeapFloorBlock = 6144;
 
 namespace slopdrive {
 
@@ -339,6 +346,21 @@ void SlopSyncAsyncWsPort::onEvent(AsyncWebSocket* /*server*/, AsyncWebSocketClie
 
     switch (type) {
         case WS_EVT_CONNECT: {
+            // Heap floor (2026-07-29 incident: N sessions + page serves starved
+            // internal heap to min=60 B and ended in a PANIC). A hub under
+            // memory pressure REFUSES new load; it never degrades the sessions
+            // it already serves, and it never dies. Floors sized against the
+            // ~32 KB post-init headroom: a session's frame buffers need whole
+            // blocks, so maxblock is checked too (fragmentation kills big
+            // allocations long before free hits zero).
+            if (ESP.getFreeHeap() < kAcceptHeapFloorBytes ||
+                ESP.getMaxAllocHeap() < kAcceptHeapFloorBlock) {
+                SLOGW("slopsync", "WS client#%u refused: heap floor (free=%u maxblock=%u)",
+                      unsigned(id), unsigned(ESP.getFreeHeap()), unsigned(ESP.getMaxAllocHeap()));
+                crashring::crumb("ws-refuse");
+                client->close();
+                return;
+            }
             int slot = -1;
             for (int i = 0; i < int(kSlots); ++i) {
                 if (_slots[i].clientId() == 0) { slot = i; break; }
@@ -351,6 +373,7 @@ void SlopSyncAsyncWsPort::onEvent(AsyncWebSocket* /*server*/, AsyncWebSocketClie
                 client->close();
                 return;
             }
+            crashring::crumb("ws-attach");
             // Claim the slot HERE (so a second connect cannot take it) but do
             // NOT call the hub from this task -- see the flags' note in the
             // header. loop() completes the attach on the hub task.
@@ -365,6 +388,7 @@ void SlopSyncAsyncWsPort::onEvent(AsyncWebSocket* /*server*/, AsyncWebSocketClie
         case WS_EVT_ERROR: {
             const int slot = slotForClient(id);
             if (slot >= 0) {
+                crashring::crumb("ws-detach");
                 SLOGI("slopsync", "WS client#%u gone (slot %d) — detach deferred", unsigned(id), slot);
                 // Flag only. The slot's clientId is deliberately NOT cleared
                 // here: leaving it occupied until the hub task has finished the

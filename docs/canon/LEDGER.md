@@ -3128,7 +3128,7 @@ codegen sugar — only if tables prove insufficient. Session-gate/closeout
 system (C-13 proposal + ledger diet + tiered canon loading) — designed in
 chat 2026-07-29, implement after campaign Phase 0.
 
-## ⏭ NEXT STEPS (written at 2026-07-29 session closeout — START HERE)
+## ⏭ NEXT STEPS (2026-07-29 closeout, updated through the same-day spec/RFC session — START HERE)
 
 The answer to "what's next on the ledger":
 
@@ -3228,4 +3228,7 @@ The answer to "what's next on the ledger":
    deletions, comment/doc corrections) are committed but NOT deployed — no
    behavior change intended; deploy rides with the next firmware-touching
    phase. The morning's webui OG-alignment commit is likewise built but not
-   uploadfs'd.
+   uploadfs'd. The evening spec/RFC session's commits (Phase 0 spec work,
+   RFC-052(d)/053/054 rulings, AUTHORING.md + containment model, catalog
+   header pointer) are docs/comments only on both repos — still nothing
+   owed to the device.

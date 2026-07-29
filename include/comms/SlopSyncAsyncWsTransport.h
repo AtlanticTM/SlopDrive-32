@@ -193,6 +193,7 @@ public:
     // ---- Diagnostics (either task; all relaxed loads) -----------------------
     uint32_t clientId() const { return _clientId.load(std::memory_order_relaxed); }
     uint32_t rxDrops()  const { return _rxDrops.load(std::memory_order_relaxed); }
+    uint32_t lastRxMs() const { return _lastRxMs.load(std::memory_order_relaxed); }
     uint32_t txDataDrops() const { return _txDataDrops.load(std::memory_order_relaxed); }
     uint32_t txCtrlFails() const { return _txCtrlFails.load(std::memory_order_relaxed); }
     // Held-not-dropped: a BLOB_CHUNK refused because the in-flight budget
@@ -254,6 +255,10 @@ private:
     uint32_t _belowSinceMs = 0;  // 0 = not currently below the recovered watermark
 
     std::atomic<uint32_t> _rxDrops{0};
+    // millis() of the last RX from this client (AsyncTCP task writes,
+    // hub-task reap sweep reads). Clients PING within their granted deadman
+    // window (~2 s), so a long RX silence is a DEAD PEER, not a quiet one.
+    std::atomic<uint32_t> _lastRxMs{0};
     std::atomic<uint32_t> _txDataDrops{0};
     std::atomic<uint32_t> _txCtrlFails{0};
     std::atomic<uint32_t> _txBlobHolds{0};

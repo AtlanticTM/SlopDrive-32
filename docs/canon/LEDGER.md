@@ -27,7 +27,7 @@ commit as any change that alters it (C-3).
   2026-07-27 — git branch state]
 - Source-tree firmware version: see `FIRMWARE_VERSION` in
   `include/config_api.h` (its one home). [C-1 pointer]
-- Deployed firmware on the device: **2.1.87** — 2.1.85 + RFC-051
+- Deployed firmware on the device: **2.1.88** (2.1.87 + the WS IDLE-RX REAP entry below; reap live-proven) — 2.1.85 + RFC-051
   (critical-stall parks, see its entry) at 2.1.86, then the CRASH RING +
   HEAP-PRESSURE GUARDS entry's build (2026-07-29; /api/crash live-proven on
   first boot). [verified 2026-07-29 — deploy log `2.1.86 -> 2.1.87` +
@@ -3033,6 +3033,26 @@ Both incident work items implemented and LIVE:
   --segments twice back-to-back on one sim process (sole red check =
   slopsim's missing /uitoken endpoint, pre-existing). Real-content MFP
   playback check is the operator's.
+
+## FW 2.1.88 — WS IDLE-RX REAP: ghost sessions were the pressure (2026-07-29)
+
+Operator correction of the pressure-snapshot verdict: "those clients don't
+exist, we are not reaping for new clients." Confirmed: RFC-042 keeps stale
+sessions PARKED (for reattach) and evicts only under HELLO slot-pressure —
+but a silently dead peer (locked phone, killed tab; no FIN) never went
+stale at the transport level at all: it passed cleanupClients() and
+hasClient() forever, holding its slot and heap. Worse, the T19 accept
+floor fires BEFORE HELLO processing, so ghost-held heap refused the very
+connect whose slot-pressure path is the only other evictor — a deadlock.
+
+Fix: the WS transport's idle-RX reap (kWsIdleReapMs=20000 — ten missed
+~2 s proof-of-life PINGs; the twin of BLE's 15 s reap). RX silence past
+the window force-closes the client; the close lands as RFC-042's
+transport-closed staleness trigger, the session parks for reattach as
+designed, and the slot + heap free. `ws-idlereap` crumb added to the T19
+crash ring. LIVE-PROVEN: a Playwright session forced offline (no FIN) was
+reaped at 20001 ms with a clean deferred detach.
+[verified 2026-07-29 — deploy 2.1.87 -> 2.1.88 + /api/log reap line]
 
 ## Deferred / planned (homes: docs/REFACTOR-ROADMAP.md, docs/MOTION-TODO.md)
 

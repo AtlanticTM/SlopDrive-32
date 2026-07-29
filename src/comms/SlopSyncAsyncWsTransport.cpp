@@ -30,6 +30,9 @@
 // ~14-20 KB and maxblock 8-14 KB while HTTP still had to serve pages.
 static constexpr uint32_t kAcceptHeapFloorBytes = 14336;
 static constexpr uint32_t kAcceptHeapFloorBlock = 6144;
+// Idle-RX reap window (see the sweep in SlopSyncAsyncWsPort::loop). Ten
+// missed ~2 s proof-of-life PINGs; the BLE transport reaps at 15 s.
+static constexpr uint32_t kWsIdleReapMs = 20000;
 
 namespace slopdrive {
 
@@ -250,6 +253,7 @@ void SlopSyncAsyncWsTransport::attachClient(uint32_t id) {
     _txDataDrops.store(0, std::memory_order_relaxed);
     _txCtrlFails.store(0, std::memory_order_relaxed);
     _txBlobHolds.store(0, std::memory_order_relaxed);
+    _lastRxMs.store(millis(), std::memory_order_relaxed);
     _clientId.store(id, std::memory_order_release);
 }
 
@@ -260,6 +264,7 @@ void SlopSyncAsyncWsTransport::detachClient() {
 }
 
 void SlopSyncAsyncWsTransport::pushRx(const uint8_t* data, size_t len) {
+    _lastRxMs.store(millis(), std::memory_order_relaxed);
     // Producer side (AsyncTCP task). One WS message == one SlopSync frame.
     if (len == 0 || len > slopsync::kFrameBufferCapacity) {
         _rxDrops.fetch_add(1, std::memory_order_relaxed);
@@ -463,6 +468,29 @@ void SlopSyncAsyncWsPort::loop() {
             SLOGW("slopsync", "slot %d client#%u vanished without an event — reaping",
                   i, unsigned(id));
             detachSlot(i);
+        }
+    }
+
+    // ---- Idle-RX reap: the WS twin of the BLE 15 s reap ---------------------
+    // A silently dead peer (locked phone, killed tab, dropped link — no FIN)
+    // passes cleanupClients() and hasClient() indefinitely, while clients PING
+    // within their granted deadman window (~2 s): kWsIdleReapMs of RX silence
+    // is ten missed proofs of life, not a quiet client. Closing here lands as
+    // RFC-042's transport-closed staleness trigger — the session PARKS for
+    // reattach as designed; what frees is the slot and the ghost's heap.
+    // Without this sweep, ghosts held heap above the T19 accept floor and the
+    // floor then refused the very HELLO whose slot-pressure path is the only
+    // OTHER thing that evicts a ghost — a deadlock the operator hit live
+    // (2026-07-29 pressure snapshot).
+    for (int i = 0; i < int(kSlots); ++i) {
+        const uint32_t id = _slots[i].clientId();
+        if (id == 0 || !_attached[i].load(std::memory_order_acquire)) continue;
+        const uint32_t silent = millis() - _slots[i].lastRxMs();
+        if (silent > kWsIdleReapMs) {
+            SLOGW("slopsync", "slot %d client#%u idle-reaped (%u ms RX silence)",
+                  i, unsigned(id), unsigned(silent));
+            crashring::crumb("ws-idlereap");
+            _ws.close(id);   // WS_EVT_DISCONNECT completes the deferred detach
         }
     }
 

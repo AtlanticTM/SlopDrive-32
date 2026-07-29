@@ -3164,8 +3164,9 @@ The answer to "what's next on the ledger":
 2. **RFC-053/054 (2026-07-29, chat):** BLE milestone — first live GATT
    session with full control + the §6.3 BLE→WS mid-session upgrade, both
    operator-verified 2026-07-28 (SPEC limitation 22 updated). RFC-053
-   **ACCEPTED** (datagram ESTOP: UDP 21328 + ESP-NOW; operator condition:
-   default OFF, NVS setting + build flag) — fw implementation queued
+   **ACCEPTED** (datagram ESTOP: UDP 21328 + ESP-NOW; operator condition,
+   amended 2026-07-29: **opt-out, default ON**, catalog-exposed NVS
+   setting visible in all clients + build flag) — fw implementation queued
    behind the campaign; ESP-NOW half queued behind that binding + the
    PSRAM-offload work. RFC-054 (BLE WiFi/ESP-NOW credential handoff)
    PROPOSED, awaiting ruling.

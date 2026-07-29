@@ -1,6 +1,6 @@
 <script>
   /**
-   * SafetyBar.svelte — the persistent, always-reachable safety controls.
+   * SafetyBar.svelte — the persistent, always-reachable safety dock.
    *
    * Discovers what to render entirely from the catalog: any INTENT action
    * whose RFC-019 role starts with `action.safety` or `action.home` lands
@@ -13,10 +13,12 @@
    * connected session, including a bare watch-tier viewer, may fire them. We
    * never guess which ops are exempt; `session.canUse(channelId, key, value)`
    * asks the catalog's own per-option `option_access` (RFC-009 key 17), the
-   * exact same data the hub gates on, so this bar and the hub cannot disagree
-   * about what a given session may press.
+   * exact same data the hub gates on, so this dock and the hub cannot disagree
+   * about what a given session may press. The e-stop itself renders OUTSIDE
+   * the scrolling op groups as the dock's one fixed, oversized control — it
+   * must never be the button that happens to be off-screen when it is needed.
    *
-   * GLOBAL REFUSAL SURFACE: this bar is pinned to the viewport, so it is the
+   * GLOBAL REFUSAL SURFACE: this dock is pinned to the viewport, so it is the
    * one place a refusal from ANY control (a settings slider, an action
    * button, the rail's move tape — any of shadow.svelte.js's three entry
    * points) is guaranteed to be visible even after the control that sent it
@@ -24,8 +26,6 @@
    * come from shadow.svelte.js, which is also where the NACK-code -> action-
    * role table lives (`NOT_HOMED` -> `action.home`, `ESTOP_ACTIVE` ->
    * `action.safety`'s `estop_clear` op) — this component only renders it.
-   * This REPLACES the old estop-only local recovery banner: same mechanism,
-   * generalized to every refusal instead of hardcoded to one NACK.
    */
   import { machine, getSession } from '../model/machine.svelte.js';
   import { runAction, lastRefusal, remedyForLastRefusal, clearLastRefusal } from '../model/shadow.svelte.js';
@@ -77,6 +77,36 @@
   );
   const linkUp = $derived(machine.link.phase === 'live');
 
+  const isSafetyRole = (a) => typeof a.role === 'string' && a.role.startsWith('action.safety');
+
+  /**
+   * The e-stop, pulled out of its op group and rendered as the dock's one
+   * oversized fixed control. Matched by wire value ONLY within a safety-role
+   * action — SAFETY_OP numbers are the safety op table's; the same integer in
+   * a home channel is a different verb entirely.
+   */
+  const estopCtl = $derived.by(() => {
+    for (const a of actions) {
+      if (!isSafetyRole(a) || !a.options || !a.options.length) continue;
+      if (SAFETY_OP.estop < a.options.length) {
+        const label = a.options[SAFETY_OP.estop] || 'estop';
+        return { action: a, value: SAFETY_OP.estop, label, key: a.uid + ':' + SAFETY_OP.estop };
+      }
+    }
+    return null;
+  });
+
+  /**
+   * Group caption from the ROLE that put the action in this dock — registry
+   * vocabulary, not device knowledge. An action here by any other role prefix
+   * falls back to its own catalog label.
+   */
+  function groupLabel(a) {
+    if (isSafetyRole(a)) return 'safety';
+    if (typeof a.role === 'string' && a.role.startsWith('action.home')) return 'home';
+    return a.label || a.name || '';
+  }
+
   /**
    * The remedy for the CURRENT global refusal, if this hub advertises one.
    * Reactive to `lastRefusal` (a new refusal anywhere in the app) and to the
@@ -107,23 +137,22 @@
   }
 
   function reasonFor(action, value) {
-    if (value === 0) return 'wire value 0 is reserved, never an operation (RFC-034)';
     if (!linkUp) return 'no hub link';
     if (!canFire(action, value)) return 'this session is not authorized for this op';
     return '';
   }
 
   let busy = $state({});
-  let lastResult = $state(null); // { ok, label, error, at } — this button's OWN last press
+  let lastResult = $state(null); // { ok, label, error, at } — this dock's OWN last press
 
   async function fire(action, value, label, btnKey) {
     busy = { ...busy, [btnKey]: true };
     const result = await runAction(action, value);
     busy = { ...busy, [btnKey]: false };
     lastResult = { ok: result.ok, label, error: result.error || null, at: Date.now() };
-    // The global refusal banner below is driven by shadow.svelte.js's
-    // `lastRefusal` — runAction() already updated it on failure, so there is
-    // nothing left to do here for that surface.
+    // The global refusal banner is driven by shadow.svelte.js's `lastRefusal`
+    // — runAction() already updated it on failure, so there is nothing left
+    // to do here for that surface.
   }
 
   /**
@@ -134,30 +163,24 @@
    * there is. So sorting ascending by required access puts the emergency ops
    * at the head of the row on every conforming hub, without this component
    * knowing which ops those are.
-   *
-   * It fixes a real defect: authoring order put `estop` sixth, which on a
-   * phone left it off the right-hand edge of a horizontally scrolling bar. The
-   * one control that must always be reachable was the one you had to go
-   * looking for.
    */
   /**
-   * Option-select INTENT fields are index-aligned with their wire value, and
-   * RFC-034 made it NORMATIVE (registry.yaml, `field_roles` doctrine): for a
-   * select field carrying an `action.*` role, wire value 0 is NEVER an
-   * operation — every op table numbers its real ops from 1, and 0 exists only
-   * to keep the array aligned. This used to be guessed from the option's own
-   * LABEL text (a regex for "reserved"/"none"/"unused"/...), which is exactly
-   * the kind of device-knowledge-shaped heuristic this layer is supposed to
-   * refuse: a machine that spelled its placeholder differently, or in another
-   * language, sailed straight through and rendered a button that meant
-   * nothing and earned a NACK if pressed.
+   * WIRE VALUE 0 IS NOT RENDERED. RFC-034 (registry.yaml `field_roles`
+   * doctrine) is normative: for a select field carrying an `action.*` role,
+   * value 0 is NEVER an operation — every op table numbers its real ops from
+   * 1, and 0 exists only to keep the option array index-aligned. This dock
+   * used to gray it instead (an index-completeness argument borrowed from
+   * listbox semantics), which put a permanently dead button labeled
+   * "reserved" in the operator's face — a wire-format alignment artifact
+   * rendered as chrome. Operator ruling 2026-07-28: drop it. These are
+   * buttons, not an index-addressed listbox; nothing an operator can do
+   * refers to option INDEX, so omitting the placeholder loses nothing.
+   * Real ops a session merely lacks access to stay GRAYED, never hidden —
+   * that doctrine is unchanged.
    *
-   * GRAY, never hide — same doctrine as option_access gating below it (which
-   * stays as defense in depth for sub-configure sessions; a hub CAN gate
-   * index 0 itself the way 0x0009 session-admin does, and if it does, this
-   * still grays it). Hiding index 0 outright would have been the simpler fix
-   * but breaks a keyboard/screen-reader user's expectation that the option
-   * list is index-complete.
+   * The e-stop is also filtered from its group here — it renders separately
+   * as the dock's fixed control, and drawing it twice would be worse than
+   * either rendering alone.
    */
   function optionButtons(action) {
     const floor = action.access | 0;
@@ -166,12 +189,23 @@
       return a == null ? floor : a;
     };
     return (action.options || [])
-      .map((label, i) => ({ label: label || String(i), value: i, access: accessOf(i), reserved: i === 0 }))
+      .map((label, i) => ({ label: label || String(i), value: i, access: accessOf(i) }))
+      .filter((o) => o.value !== 0)
+      .filter((o) => !(isSafetyRole(action) && o.value === SAFETY_OP.estop))
       .sort((a, b) => a.access - b.access);
   }
+
+  // The dock publishes its MEASURED height (it varies: refusal banners come
+  // and go) so the page can reserve exactly enough bottom padding — see
+  // style.css's .app. The kernel-side twin of --shell-chrome-bottom.
+  let dockH = $state(0);
+  $effect(() => {
+    document.documentElement.style.setProperty('--safety-h', dockH + 'px');
+    return () => document.documentElement.style.removeProperty('--safety-h');
+  });
 </script>
 
-<div class="safetybar" role="group" aria-label="Safety controls">
+<div class="safetydock" role="group" aria-label="Safety controls" bind:clientHeight={dockH}>
   {#if lastRefusal.code != null}
     <!-- THE GLOBAL REFUSAL SURFACE. Any of shadow.svelte.js's three write
          paths — a settings slider, an action button, the rail's move tape —
@@ -204,44 +238,77 @@
   {:else if !actions.length}
     <p class="empty">This hub advertises no safety or home actions.</p>
   {:else}
-    <div class="buttons">
-      {#each actions as action (action.uid)}
-        {#if action.options && action.options.length}
-          {#each optionButtons(action) as opt (action.uid + ':' + opt.value)}
-            {@const key = action.uid + ':' + opt.value}
-            <button
-              type="button"
-              class="btn"
-              class:estop={opt.value === SAFETY_OP.estop}
-              disabled={opt.reserved || !canFire(action, opt.value)}
-              title={reasonFor(action, opt.value) || opt.label}
-              onclick={() => fire(action, opt.value, opt.label, key)}
-            >
-              {busy[key] ? '…' : opt.label}
-            </button>
-          {/each}
-        {:else}
-          <button
-            type="button"
-            class="btn"
-            disabled={!canFire(action, 1)}
-            title={reasonFor(action, 1) || action.label}
-            onclick={() => fire(action, 1, action.label, action.uid)}
-          >
-            {busy[action.uid] ? '…' : action.label}
-          </button>
-        {/if}
-      {/each}
-    </div>
-  {/if}
+    <div class="dock">
+      {#if estopCtl}
+        <button
+          type="button"
+          class="btn btn-estop"
+          disabled={!canFire(estopCtl.action, estopCtl.value)}
+          title={reasonFor(estopCtl.action, estopCtl.value) || estopCtl.label}
+          onclick={() => fire(estopCtl.action, estopCtl.value, estopCtl.label, estopCtl.key)}
+        >
+          <span class="estop-ico" aria-hidden="true">
+            <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+              <path d="M10.29 3.86L1.82 18a2 2 0 001.71 3h16.94a2 2 0 001.71-3L13.71 3.86a2 2 0 00-3.42 0z"/>
+              <path d="M12 9v4"/>
+              <path d="M12 17h.01"/>
+            </svg>
+          </span>
+          {busy[estopCtl.key] ? '…' : estopCtl.label}
+        </button>
+      {/if}
 
-  {#if lastResult && !lastResult.ok}
-    <p class="err" role="status">refused ({lastResult.label}): {lastResult.error}</p>
+      <div class="groups">
+        {#each actions as action (action.uid)}
+          {#if action.options && action.options.length}
+            {@const opts = optionButtons(action)}
+            {#if opts.length}
+              <div class="grp">
+                <span class="grp-lbl">{groupLabel(action)}</span>
+                <div class="grp-btns">
+                  {#each opts as opt (action.uid + ':' + opt.value)}
+                    {@const key = action.uid + ':' + opt.value}
+                    <button
+                      type="button"
+                      class="btn"
+                      disabled={!canFire(action, opt.value)}
+                      title={reasonFor(action, opt.value) || opt.label}
+                      onclick={() => fire(action, opt.value, opt.label, key)}
+                    >
+                      {busy[key] ? '…' : opt.label}
+                    </button>
+                  {/each}
+                </div>
+              </div>
+            {/if}
+          {:else}
+            <div class="grp">
+              <span class="grp-lbl">{groupLabel(action)}</span>
+              <div class="grp-btns">
+                <button
+                  type="button"
+                  class="btn"
+                  disabled={!canFire(action, 1)}
+                  title={reasonFor(action, 1) || action.label}
+                  onclick={() => fire(action, 1, action.label, action.uid)}
+                >
+                  {busy[action.uid] ? '…' : action.label}
+                </button>
+              </div>
+            </div>
+          {/if}
+        {/each}
+      </div>
+
+      {#if lastResult && !lastResult.ok}
+        <p class="err" role="status">refused ({lastResult.label}): {lastResult.error}</p>
+      {/if}
+    </div>
   {/if}
 </div>
 
 <style>
-  .safetybar {
+  .safetydock {
     position: fixed;
     left: 0;
     right: 0;
@@ -251,60 +318,110 @@
     z-index: 30;
     background: var(--bg-raised);
     border-top: 1px solid var(--line);
-    padding: 8px var(--gap);
+    padding: 6px var(--gap);
     /* When shell chrome sits below, IT carries the safe-area inset — don't
-       double-pad; max() collapses this to the plain 8px in that case. */
-    padding-bottom: calc(8px + max(env(safe-area-inset-bottom, 0px) - var(--shell-chrome-bottom, 0px), 0px));
+       double-pad; max() collapses this to the plain 6px in that case. */
+    padding-bottom: calc(6px + max(env(safe-area-inset-bottom, 0px) - var(--shell-chrome-bottom, 0px), 0px));
     display: flex;
     flex-direction: column;
     gap: 6px;
   }
 
-  /* ONE ROW, always. A wrapping safety bar grows as the machine advertises
-     more ops, and a bar that grows upward covers the tab bar and the bottom of
-     the page — which is exactly what it did. Scrolling horizontally keeps the
-     bar's height constant and predictable, so the page can reserve space for
-     it without measuring. */
-  .buttons {
+  .dock {
     display: flex;
-    flex-wrap: nowrap;
-    gap: 6px;
-    overflow-x: auto;
-    scrollbar-width: none;
+    align-items: stretch;
+    gap: 12px;
   }
-  .buttons::-webkit-scrollbar { display: none; }
 
-  .btn {
-    /* Never shrink: in a nowrap scrolling row flex would otherwise squeeze the
-       labels and clip them mid-word ("estop_cle"). */
-    flex: 0 0 auto;
-    min-height: var(--tap);
-    min-width: 64px;
-    padding: 0 12px;
-    border-radius: var(--r-s);
-    background: var(--bg-card);
-    border: 1px solid var(--line);
-    color: var(--ink);
-    font-size: 13px;
-    font-weight: 500;
-    white-space: nowrap;
-  }
-  .btn:disabled { opacity: 0.4; }
-  .btn:not(:disabled):active { background: var(--line-soft); }
-  /* E-stop is pinned to the left edge and stays put while the rest of the row
-     scrolls under it. Any connected session may assert it (RFC-025b makes
-     stop/estop role-exempt), so it must never be the button that happens to be
-     off-screen when it is needed. */
-  .btn.estop {
-    background: color-mix(in srgb, var(--estop) 22%, var(--bg-card));
-    border-color: var(--estop);
+  /* ---- the e-stop: OG hazard-stripe wash (tag webui-prerefactor) ---------
+     No fill, no glow: a quiet outline chip whose hazard cue is a diagonal
+     stripe wash in the safety red. Fixed OUTSIDE .groups: the one control
+     that must never scroll away. */
+  .btn-estop {
+    align-self: stretch;
+    display: inline-flex;
+    align-items: center;
+    justify-content: center;
+    gap: 6px;
+    min-width: 96px;
+    padding: 0 14px;
+    background-image: repeating-linear-gradient(135deg, rgba(255, 71, 87, .09) 0 5px, rgba(255, 71, 87, .012) 5px 10px);
+    border-color: var(--line-2);
     color: var(--ink);
     font-weight: 700;
-    position: sticky;
-    left: 0;
-    z-index: 1;
-    box-shadow: 6px 0 8px -4px var(--bg-raised);
+    letter-spacing: .05em;
+    text-transform: uppercase;
   }
+  .btn-estop:not(:disabled):hover {
+    border-color: var(--bad);
+  }
+  .btn-estop:not(:disabled):active {
+    border-color: var(--bad);
+    color: var(--bad);
+  }
+  .estop-ico {
+    width: 14px;
+    height: 14px;
+    display: inline-grid;
+    color: var(--bad);
+  }
+  .estop-ico svg {
+    width: 14px;
+    height: 14px;
+  }
+
+  /* ---- op groups: labeled clusters, one scrolling row --------------------
+     ONE ROW, always. A wrapping dock grows as the machine advertises more
+     ops, and a dock that grows upward covers the page. Scrolling keeps the
+     height constant; the e-stop sits outside this scroll area entirely. */
+  .groups {
+    display: flex;
+    align-items: flex-end;
+    gap: 14px;
+    overflow-x: auto;
+    scrollbar-width: none;
+    min-width: 0;
+  }
+  .groups::-webkit-scrollbar { display: none; }
+
+  .grp {
+    flex: 0 0 auto;
+    display: flex;
+    flex-direction: column;
+    gap: 3px;
+  }
+  .grp-lbl {
+    font-size: 9px;
+    font-weight: 600;
+    text-transform: uppercase;
+    letter-spacing: .1em;
+    color: var(--ink-faint);
+    padding-left: 1px;
+  }
+  .grp-btns {
+    display: flex;
+    gap: 6px;
+  }
+
+  .btn {
+    /* Never shrink: flex would otherwise squeeze the labels and clip them
+       mid-word ("estop_cle"). */
+    flex: 0 0 auto;
+    min-height: 36px;
+    min-width: 56px;
+    padding: 0 12px;
+    background: transparent;
+    border: 1px solid var(--line-2);
+    border-radius: var(--r-s);
+    color: var(--ink);
+    font-weight: 500;
+    font-size: .72rem;
+    white-space: nowrap;
+    transition: border-color .12s, color .12s;
+  }
+  .btn:disabled { opacity: 0.4; }
+  .btn:not(:disabled):hover { border-color: var(--line-4); }
+  .btn:not(:disabled):active { border-color: var(--reality); color: var(--reality); }
 
   .recovery {
     display: flex;
@@ -334,6 +451,7 @@
 
   .err {
     margin: 0;
+    align-self: center;
     font-size: 12px;
     color: var(--bad);
   }

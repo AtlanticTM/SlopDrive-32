@@ -25,6 +25,7 @@
     item,
     span,
     dragging = false,
+    editing = false,
     ongrabstart,
     ongrabmove,
     ongrabend,
@@ -106,22 +107,26 @@
   }
 </script>
 
-<div class="dash-item" class:dragging bind:this={rootEl}>
+<div class="dash-item" class:dragging class:editing bind:this={rootEl}>
   <div class="dash-head">
-    <button type="button" class="handle grab"
-            aria-label={'Drag to reorder ' + item.title + '. Arrow keys move it; shift plus arrow keys resize it.'}
-            title="Drag to reorder — arrow keys move, shift+arrow resizes"
-            onpointerdown={onGrabPointerDown}
-            onpointermove={onGrabPointerMove}
-            onpointerup={onGrabPointerUp}
-            onpointercancel={onGrabPointerUp}
-            onkeydown={onGrabKeyDown}>
-      <svg viewBox="0 0 16 16" aria-hidden="true" focusable="false">
-        <circle cx="4" cy="4" r="1.3" /><circle cx="10" cy="4" r="1.3" />
-        <circle cx="4" cy="8" r="1.3" /><circle cx="10" cy="8" r="1.3" />
-        <circle cx="4" cy="12" r="1.3" /><circle cx="10" cy="12" r="1.3" />
-      </svg>
-    </button>
+    <!-- Handles are edit-mode-only: the reading surface stays quiet and a
+         card's own controls never compete with layout chrome. -->
+    {#if editing}
+      <button type="button" class="handle grab"
+              aria-label={'Drag to reorder ' + item.title + '. Arrow keys move it; shift plus arrow keys resize it.'}
+              title="Drag to reorder — arrow keys move, shift+arrow resizes"
+              onpointerdown={onGrabPointerDown}
+              onpointermove={onGrabPointerMove}
+              onpointerup={onGrabPointerUp}
+              onpointercancel={onGrabPointerUp}
+              onkeydown={onGrabKeyDown}>
+        <svg viewBox="0 0 16 16" aria-hidden="true" focusable="false">
+          <circle cx="4" cy="4" r="1.3" /><circle cx="10" cy="4" r="1.3" />
+          <circle cx="4" cy="8" r="1.3" /><circle cx="10" cy="8" r="1.3" />
+          <circle cx="4" cy="12" r="1.3" /><circle cx="10" cy="12" r="1.3" />
+        </svg>
+      </button>
+    {/if}
     <h3 class="dash-title">{item.title}</h3>
   </div>
 
@@ -135,18 +140,20 @@
     {@render item.snippet(item)}
   </div>
 
-  <button type="button" class="handle resize"
-          aria-label={'Resize ' + item.title + ' — currently ' + span + ' of 12 columns. Arrow keys shrink or grow it.'}
-          title="Drag to resize — arrow keys shrink/grow"
-          onpointerdown={onResizePointerDown}
-          onpointermove={onResizePointerMove}
-          onpointerup={onResizePointerUp}
-          onpointercancel={onResizePointerUp}
-          onkeydown={onResizeKeyDown}>
-    <svg viewBox="0 0 10 10" aria-hidden="true" focusable="false">
-      <path d="M9 1 L1 9 M9 5 L5 9 M9 9 L9 9" />
-    </svg>
-  </button>
+  {#if editing}
+    <button type="button" class="handle resize"
+            aria-label={'Resize ' + item.title + ' — currently ' + span + ' of 12 columns. Arrow keys shrink or grow it.'}
+            title="Drag to resize — arrow keys shrink/grow"
+            onpointerdown={onResizePointerDown}
+            onpointermove={onResizePointerMove}
+            onpointerup={onResizePointerUp}
+            onpointercancel={onResizePointerUp}
+            onkeydown={onResizeKeyDown}>
+      <svg viewBox="0 0 10 10" aria-hidden="true" focusable="false">
+        <path d="M9 1 L1 9 M9 5 L5 9 M9 9 L9 9" />
+      </svg>
+    </button>
+  {/if}
 </div>
 
 <style>
@@ -173,6 +180,11 @@
     padding: 4px 8px 4px 4px;
     border-bottom: 1px solid var(--line);
     min-width: 0;
+  }
+  /* Without the grab handle, the header loses its leading element — restore
+     the tucked-in 4px of the handle's negative margin as plain padding. */
+  .dash-item:not(.editing) .dash-head {
+    padding-left: 8px;
   }
   .dash-title {
     font-size: .8rem;

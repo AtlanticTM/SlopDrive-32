@@ -102,7 +102,7 @@
 </script>
 
 <div class="shellbar" class:collapsed={!expanded} bind:clientHeight={barH}>
-  <button class="sb-toggle" onclick={() => (expanded = !expanded)}
+  <button class="sb-toggle mono" onclick={() => (expanded = !expanded)}
           aria-label="toggle shell bar">{expanded ? '▾' : '▴'} shell</button>
   {#if expanded}
     <span class="sb-mode mono" data-mode={mode}>{mode.toUpperCase()}</span>
@@ -111,7 +111,9 @@
     <button class="sb-btn" onclick={scan}>{scanning ? 'stop' : 'scan BLE'}</button>
     {#each hubs as h (h.address)}
       <button class="sb-hub mono" onclick={() => connectBle(h)}>
-        {h.name || '?'} {h.address} {h.rssi ? h.rssi + 'dBm' : ''}
+        <span class="hub-name">{h.name || 'hub'}</span>
+        <span class="hub-addr">{h.address}</span>
+        {#if h.rssi}<span class="hub-rssi">{h.rssi} dBm</span>{/if}
       </button>
     {/each}
     {#if scanning && hubs.length === 0}<span class="sb-note">scanning…</span>{/if}
@@ -144,40 +146,82 @@
     flex-wrap: wrap;
     /* Gesture-nav clearance on edge-to-edge devices; 0 elsewhere. */
     padding: 4px 10px calc(4px + env(safe-area-inset-bottom, 0px));
-    background: rgba(10, 12, 16, 0.92);
-    border-top: 1px solid #2a2e38;
+    background: color-mix(in srgb, var(--bg-raised) 94%, transparent);
+    border-top: 1px solid var(--line);
     font-size: 0.72rem;
-    color: #aab;
+    color: var(--ink-dim);
   }
   .collapsed {
     padding: 0 10px env(safe-area-inset-bottom, 0px);
-    background: rgba(10, 12, 16, 0.6);
+    background: color-mix(in srgb, var(--bg-raised) 70%, transparent);
     border-top: none;
   }
-  .sb-toggle { color: #778; font-size: 0.68rem; padding: 3px 4px; }
-  .sb-mode { padding: 1px 6px; border-radius: 2px; font-weight: 600; }
-  .sb-mode[data-mode='ws'] { background: #16324a; color: #7fc4ff; }
-  .sb-mode[data-mode='ble'] { background: #2c1e4a; color: #c0a4ff; }
-  .sb-phase { color: #889; }
-  .sb-btn {
-    border: 1px solid #2a2e38;
-    border-radius: 2px;
-    padding: 2px 8px;
-    color: #ccd;
-    font-size: 0.72rem;
+  .sb-toggle {
+    color: var(--ink-faint);
+    font-size: 0.68rem;
+    padding: 3px 4px;
+    text-transform: uppercase;
+    letter-spacing: .04em;
   }
-  .sb-btn:hover { border-color: #55617a; }
-  .sb-upgrade { border-color: #2e5d3a; color: #8fe0a4; }
-  .sb-hub { border: 1px dashed #3a4152; border-radius: 2px; padding: 2px 8px; color: #c0a4ff; }
+  .sb-toggle:hover { color: var(--ink); }
+  .sb-mode {
+    padding: 4px 7px;
+    border-radius: var(--radius);
+    font-weight: 700;
+    background: var(--bg-card);
+    border: 1px solid var(--line);
+  }
+  .sb-mode[data-mode='ws'] {
+    border-color: color-mix(in srgb, var(--reality) 45%, var(--line));
+    color: var(--reality);
+  }
+  .sb-mode[data-mode='ble'] {
+    border-color: color-mix(in srgb, var(--intent) 45%, var(--line));
+    color: var(--intent);
+  }
+  .sb-phase { color: var(--ink-dim); }
+  .sb-btn {
+    display: inline-flex;
+    align-items: center;
+    justify-content: center;
+    min-height: 36px;
+    padding: 0 12px;
+    background: var(--bg-card);
+    border: 1px solid var(--line);
+    border-radius: var(--radius);
+    color: var(--ink);
+    font-size: 12.5px;
+  }
+  .sb-btn:hover { border-color: var(--line-4); }
+  .sb-upgrade {
+    border-color: color-mix(in srgb, var(--reality) 45%, var(--line));
+    background: color-mix(in srgb, var(--reality) 12%, var(--bg-card));
+    color: var(--reality);
+  }
+  .sb-hub {
+    display: inline-flex;
+    align-items: center;
+    min-height: 36px;
+    padding: 0 12px;
+    gap: 7px;
+    background: var(--bg-card);
+    border: 1px dashed color-mix(in srgb, var(--intent) 55%, var(--line));
+    border-radius: var(--radius);
+    color: var(--intent);
+  }
+  .sb-hub .hub-name { font-weight: 600; }
+  .sb-hub .hub-addr { color: var(--ink-dim); }
+  .sb-hub .hub-rssi { color: var(--ink-faint); }
   .sb-host {
     width: 130px;
-    background: #12151c;
-    border: 1px solid #2a2e38;
-    border-radius: 2px;
-    padding: 2px 6px;
-    color: #ccd;
+    min-height: 36px;
+    background: var(--bg-sunken);
+    border: 1px solid var(--line);
+    border-radius: var(--radius);
+    padding: 2px 8px;
+    color: var(--ink);
     font-size: 0.72rem;
   }
   .sb-sep { flex: 0 0 8px; }
-  .sb-note { color: #98a; font-style: italic; }
+  .sb-note { color: var(--ink-faint); font-style: italic; font-size: 11px; }
 </style>

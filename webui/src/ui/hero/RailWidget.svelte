@@ -916,12 +916,12 @@
        its own logic beyond the role-purity fix documented there. -->
   <PlanStrip />
 
-  <div class="rail-hint">
+  <div class="rail-hint explain">
     <span>drag band &middot; drag edges &middot; arrow keys to nudge</span>
   </div>
 
   {#if min.desc || max.desc}
-    <p class="rail-desc">{min.desc || max.desc}</p>
+    <p class="rail-desc explain">{min.desc || max.desc}</p>
   {/if}
 </div>
 

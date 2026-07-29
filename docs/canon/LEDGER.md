@@ -2629,10 +2629,74 @@ cmd.exe eats `;` in the old-style ids, a second trap).
   "mostly UX, which naturally gets implemented everywhere for free" (one
   kernel, all delivery targets). Then the parked flesh-out queue.
 - Spike-scope shortcuts, tighten at flesh-out: http scope `http://**` in
-  capabilities; ShellBar visual design is placeholder chrome; blec
-  upstream issue (now TWO fixes to offer: JNI-abort paths + the
-  subscribe_channel capacity-1 panic) + patch retirement; release-build
-  cleartext flag (recorded in the M3 entry above).
+  capabilities; blec upstream issue (now TWO fixes to offer: JNI-abort
+  paths + the subscribe_channel capacity-1 panic) + patch retirement;
+  release-build cleartext flag (recorded in the M3 entry above).
+  (ShellBar placeholder chrome: closed by the FLAGSHIP UI PASS below.)
+
+## FLAGSHIP UI PASS (operator-directed, 2026-07-28) — desktop-shell UX phase, first slice
+
+Operator brief: "intra-module visual identity and design language, but with
+the optimizations and layout customizability of a mature user interface …
+I don't love the safety bar, idk what reserved are for, build me a flagship
+ui." Interpretation applied: the instrument identity (tokens, mono numerals,
+square corners, reality/intent semantics, crosshair/heatmap/wordmark) is
+KEPT; the chassis around it grows up. One kernel — everything below lands on
+embedded, hosted, and shell builds alike; only the ShellBar item is
+shell-only.
+
+- **Desktop frame:** ≥960 px gets a left nav rail (sections: MACHINE = the
+  hub's own catalog categories, still fully generic; CONSOLE = Pairing /
+  SlopSync / Log / Display), collapsible to a two-glyph mini rail (glyphs
+  DERIVED from catalog labels — an icon table would be device knowledge).
+  Phones keep the horizontal tab strip. ONE nav model, two renderings, same
+  `active` id — resizing mid-session never loses the operator's place. The
+  machine dashboard tab is labeled "Overview". App max-width 1400 → 1680.
+- **RULING — reserved (wire value 0) ops are NOT rendered.** AMENDS the
+  earlier gray-never-hide treatment of option index 0. Mechanism: RFC-034 is
+  normative that value 0 of an `action.*` select is never an operation — it
+  exists only to keep the option array index-aligned with wire values. The
+  old bar grayed it (listbox index-completeness argument), which shipped a
+  permanently dead button labeled "reserved" to the operator's face; the
+  operator's own "idk what reserved are for" is the field evidence that
+  rendering it communicates nothing. These are buttons, not an
+  index-addressed listbox — omission loses nothing. UNCHANGED: real ops a
+  session merely lacks access for stay GRAYED, never hidden (option_access
+  doctrine untouched).
+- **Safety dock redesign:** the e-stop is an oversized OG-language hazard
+  button — quiet outline chip with the pre-refactor page's diagonal
+  red hazard-stripe wash (tag `webui-prerefactor`'s `.tbtn.estop`; a first
+  cut used a clip-path octagon, operator-rejected same session: "look at the
+  OG webui for guidance") — pinned OUTSIDE the scrolling op row, so
+  reachability is by construction, not sort order. Remaining ops are plain
+  OG outline chips in role-labeled clusters (safety / home — labels from the
+  ROLE prefix that discovered them, registry vocabulary not device
+  knowledge); the catalog's access-sort keeps stop at the head of its row.
+  Refusal-surface mechanics (global lastRefusal banner + remedy button)
+  unchanged.
+- **Edit-layout mode:** DashGrid drag/resize handles are hidden until an
+  explicit "Edit layout" toggle (Reset lives inside edit mode, with Done) —
+  the reading surface stays quiet; customization is deliberate.
+- **Measured-height chrome contract:** LinkBar publishes `--linkbar-h`, the
+  safety dock publishes `--safety-h` (both bind:clientHeight — heights are
+  VARIABLE, banners come and go). Sticky nav offsets and the page's bottom
+  clearance consume the vars; nothing hardcodes a bar height anymore. Twin of
+  the shell's `--shell-chrome-bottom` mechanism from the spike.
+- **ShellBar** restyled from placeholder chrome to the design language
+  (tokens only; behavior byte-identical — it was phone-live-verified
+  yesterday). Closes the "ShellBar visual design is placeholder" flesh-out
+  bullet in the spike section above.
+- **Terse-instruments mode (operator ask, same session):** browser preference
+  (`ui_terse`, twin of hivis) hiding the `.explain` convention class — the
+  teaching copy on hero instruments (rail usage hint, restated field
+  descriptions on the limits/pattern cards). Settings pages NEVER hide their
+  descriptions; that split is the ruling, not an accident. Toggle lives in
+  the Display pane.
+- Verification (bare-minimum floor per the 2026-07-28 posture ruling):
+  device-knowledge check + settings-model suite + Vite build green;
+  canon_lint zero findings; fs image deployed to the live device and a
+  no-motion Playwright render smoke (nav, dock, no reserved button) passed.
+  [verified 2026-07-28 — this session; details in the commit]
 
 ## Deferred / planned (homes: docs/REFACTOR-ROADMAP.md, docs/MOTION-TODO.md)
 

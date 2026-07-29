@@ -22,6 +22,7 @@ import { applyTheme, currentThemeId } from './model/theme.js';
 applyTheme(currentThemeId());
 try {
   if (localStorage.getItem('ui_hivis') === '1') document.documentElement.classList.add('hivis');
+  if (localStorage.getItem('ui_terse') === '1') document.documentElement.classList.add('terse');
 } catch (e) { /* private mode: preferences are an optimization, never a requirement */ }
 
 // The device serves this bundle, so it IS the machine — except inside the

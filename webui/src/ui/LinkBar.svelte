@@ -105,6 +105,15 @@
   const AG_COLS = 14, AG_CELL = 4, AG_GAP = 1;
   let heatCanvas = $state(null);
 
+  // The bar's height is variable (banners appear and disappear). Publishing
+  // the MEASURED height lets everything else that sticks to the viewport top
+  // (nav rail, tab strip) sit exactly below this bar instead of under it.
+  let barH = $state(0);
+  $effect(() => {
+    document.documentElement.style.setProperty('--linkbar-h', barH + 'px');
+    return () => document.documentElement.style.removeProperty('--linkbar-h');
+  });
+
   $effect(() => {
     const rows = heatRows;             // establishes the reactive dependency
     const canvas = heatCanvas;
@@ -197,7 +206,7 @@
   <circle cx="7" cy="7" r="2.5"/>
 </svg>
 
-<header class="linkbar">
+<header class="linkbar" bind:clientHeight={barH}>
   <div class="hdr-row">
     <div class="header-left">
       <canvas bind:this={heatCanvas} class="act-grid" aria-label={heatmapAriaLabel}></canvas>

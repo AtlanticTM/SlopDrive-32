@@ -105,6 +105,13 @@
   color-scheme: dark;
 }
 
+/* Terse instrument — `.explain` marks TEACHING COPY in common modules (hero
+   instruments: usage hints, field descriptions restated on cards). Settings
+   fields (Field.svelte's .field-desc) deliberately never carry it: a knob you
+   visit occasionally keeps its explanation, an instrument you live on does
+   not. Browser preference (ui_terse), twin of hivis below. */
+html.terse .explain { display: none; }
+
 /* High legibility — brighter text, heavier numerals, hierarchy preserved. */
 html.hivis {
   --tx:       #E4E8EF;
@@ -201,8 +208,12 @@ h1, h2, h3, p { margin: 0; }
 
 /* ---- app frame --------------------------------------------------------- */
 .app {
-  max-width: 1400px;
+  max-width: 1680px;
   margin: 0 auto;
-  padding: 0 var(--gap) calc(var(--tap) + 40px);
+  /* Bottom clearance for the fixed safety dock (and shell chrome under it):
+     both publish their MEASURED heights (--safety-h / --shell-chrome-bottom)
+     so a refusal banner growing the dock never covers the last card. */
+  padding: 0 var(--gap)
+    calc(var(--safety-h, 72px) + var(--shell-chrome-bottom, 0px) + var(--gap));
   min-height: 100vh;
 }

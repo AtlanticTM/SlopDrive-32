@@ -53,6 +53,19 @@
     document.documentElement.classList.toggle('hivis', hivis);
     try { localStorage.setItem('ui_hivis', hivis ? '1' : '0'); } catch (e) { /* private mode: preference only */ }
   }
+
+  // Terse instrument: hides `.explain` teaching copy on the hero instruments
+  // (style.css owns the rule + the convention). Settings descriptions are
+  // NOT affected — that split is the point, not an accident. Same
+  // localStorage-before-first-paint mechanism as hivis (main.js restores).
+  let terse = $state(
+    typeof document !== 'undefined' && document.documentElement.classList.contains('terse')
+  );
+  function toggleTerse() {
+    terse = !terse;
+    document.documentElement.classList.toggle('terse', terse);
+    try { localStorage.setItem('ui_terse', terse ? '1' : '0'); } catch (e) { /* private mode: preference only */ }
+  }
 </script>
 
 <div class="theme-picker">
@@ -108,6 +121,15 @@
     High legibility
     <span class="hv-state">{hivis ? 'on' : 'off'}</span>
   </button>
+
+  <button type="button" class="hivis-toggle" aria-pressed={terse} onclick={toggleTerse}>
+    <span class="hv-dot" aria-hidden="true"></span>
+    Terse instruments
+    <span class="hv-state">{terse ? 'on' : 'off'}</span>
+  </button>
+  <p class="hint">
+    Terse hides usage hints and descriptions on the instrument cards once you know them. Settings pages always keep their explanations.
+  </p>
 </div>
 
 <style>

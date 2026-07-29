@@ -1,6 +1,6 @@
-<script>
+﻿<script>
   /**
-   * LimitsWidget.svelte — the two kinematic ceilings: manual (user) and
+   * LimitsWidget.svelte â€” the two kinematic ceilings: manual (user) and
    * machine-driven (input). CLAUDE.md is explicit that these are CEILINGS, never
    * targets, so every descriptor's `desc` prose is surfaced rather than dropped
    * on the floor the way a bare slider would.
@@ -15,7 +15,7 @@
   import { formatValue, unitOf, precisionFor, labelFor } from '../../model/format.js';
 
   let { fields } = $props();
-  // Read through the prop rather than destructuring once — heroes.js hands us
+  // Read through the prop rather than destructuring once â€” heroes.js hands us
   // a fresh `fields` object whenever the catalog rebuilds.
   const userSpeed = $derived(fields.userSpeed);
   const userAccel = $derived(fields.userAccel);
@@ -66,7 +66,7 @@
                  value={val ?? f.min} disabled={!en}
                  aria-label={labelFor(f)}
                  oninput={(e) => commit(f, Number(e.currentTarget.value))} />
-          {#if f.desc}<p class="limit-desc">{f.desc}</p>{/if}
+          {#if f.desc}<p class="limit-desc explain">{f.desc}</p>{/if}
         </div>
       {/each}
     </div>
@@ -89,7 +89,7 @@
                    value={val ?? f.min} disabled={!en}
                    aria-label={labelFor(f)}
                    oninput={(e) => commit(f, Number(e.currentTarget.value))} />
-            {#if f.desc}<p class="limit-desc">{f.desc}</p>{/if}
+            {#if f.desc}<p class="limit-desc explain">{f.desc}</p>{/if}
           </div>
         {/each}
       </div>

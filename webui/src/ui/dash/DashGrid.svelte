@@ -38,6 +38,7 @@
   let resizeId = $state(null);
   let resizePreviewSpan = $state(null);
   let announceMsg = $state('');
+  let editing = $state(false);
 
   // What actually renders: the committed arrangement, overlaid with whatever
   // drag/resize preview is currently in flight (if any).
@@ -151,11 +152,29 @@
     resizePreviewSpan = null;
     announce('Layout reset to default');
   }
+
+  function enterEditing() {
+    editing = true;
+    announce('Layout edit mode on');
+  }
+  function doneEditing() {
+    editing = false;
+    dragId = null;
+    previewIds = null;
+    resizeId = null;
+    resizePreviewSpan = null;
+    announce('Layout edit mode off');
+  }
 </script>
 
 <div class="dash-wrap">
   <div class="dash-toolbar">
-    <button type="button" class="reset-btn" onclick={resetLayout}>Reset layout</button>
+    {#if editing}
+      <button type="button" class="reset-btn" onclick={resetLayout}>Reset layout</button>
+      <button type="button" class="reset-btn done-btn" onclick={doneEditing}>Done</button>
+    {:else}
+      <button type="button" class="reset-btn" onclick={enterEditing}>Edit layout</button>
+    {/if}
   </div>
 
   <div class="dash-grid">
@@ -164,6 +183,7 @@
         <DashItem
           {item}
           span={item.span}
+          editing={editing}
           dragging={dragId === item.id}
           ongrabstart={() => dragStart(item.id)}
           ongrabmove={(x, y) => dragMove(item.id, x, y)}
@@ -194,6 +214,7 @@
   .dash-toolbar {
     display: flex;
     justify-content: flex-end;
+    gap: 6px;
   }
   .reset-btn {
     min-height: var(--tap);
@@ -206,6 +227,10 @@
   .reset-btn:hover,
   .reset-btn:focus-visible {
     color: var(--ink);
+    border-color: var(--line-4);
+  }
+  .done-btn {
+    color: var(--ink-hi);
     border-color: var(--line-4);
   }
 

@@ -1,10 +1,10 @@
-<script>
+﻿<script>
   /**
-   * PatternWidget.svelte — the built-in pattern generator, as a start/stop
+   * PatternWidget.svelte â€” the built-in pattern generator, as a start/stop
    * control plus a pattern-tile grid plus whichever knobs the machine publishes.
    *
    * `running` and `select` are guaranteed by the claim spec in heroes.js; the
-   * four knobs (speed/depth/stroke/sensation) are opportunistic — a machine
+   * four knobs (speed/depth/stroke/sensation) are opportunistic â€” a machine
    * that only publishes speed still gets a clean card with one slider.
    */
   import { machine } from '../../model/machine.svelte.js';
@@ -13,7 +13,7 @@
   import { formatValue, unitOf, optionLabel, precisionFor, labelFor } from '../../model/format.js';
 
   let { fields } = $props();
-  // Read through the prop rather than destructuring once — heroes.js hands us
+  // Read through the prop rather than destructuring once â€” heroes.js hands us
   // a fresh `fields` object whenever the catalog rebuilds.
   const running = $derived(fields.running);
   const select = $derived(fields.select);
@@ -109,7 +109,7 @@
     </div>
   {/if}
 
-  {#if select.desc}<p class="hint">{select.desc}</p>{/if}
+  {#if select.desc}<p class="hint explain">{select.desc}</p>{/if}
 </div>
 
 <style>

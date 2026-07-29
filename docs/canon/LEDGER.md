@@ -3394,6 +3394,54 @@ The answer to "what's next on the ledger":
    - **Which allocator eats the 8.7 KB is NOT yet proven** (lwIP TX pbufs
      during the stream is the hypothesis, not a finding). Naming it is
      exactly what the tooling below would settle.
+   - **BUDGET MEASURED from the linker map + live boot beacon (supersedes
+     the "move the page buffer to PSRAM" suggestion first written in this
+     entry — see the correction two bullets down):**
+     `.dram0.data` 24,249 B + `.dram0.bss` 54,968 B + `.dram0.dummy`
+     84,224 B (DRAM stolen by 99,563 B of `.iram0.text`) = 163,441 B static
+     out of 425,984 B of DRAM address space. So the heap STARTS at
+     ~262,543 B, and the device reports 32,744 B free after init:
+     **~229,800 B is consumed at RUNTIME during init, not by our statics.**
+     Our own code is nearly innocent at 55 KB of `.bss`.
+     Of the runtime cost, 38,912 B is our five task stacks (Sampler 16384,
+     HTTP 8192, Comms 6144, Motor 4096, ServoBus 4096 — ESP32 takes bytes,
+     not words). The rest is WiFi + lwIP + NimBLE + AsyncTCP, unattributed.
+   - **Compiler flags are the WRONG LEVER, settled with numbers, not
+     opinion** (operator asked about `-O3`/LTO/"ultra-compile"): the missing
+     SRAM is `.bss` and runtime allocation. An optimizer may not shrink a
+     declared buffer — its size is the program's contract — and the only
+     code resident in RAM at all is the 99,563 B of IRAM, where LTO might
+     save single-digit KB. Host CPU cores cannot buy SRAM.
+   - **CORRECTION to this entry's earlier "8.1 MB of PSRAM sits unused"
+     framing:** `CONFIG_SPIRAM_USE_MALLOC=y` with
+     `CONFIG_SPIRAM_MALLOC_ALWAYSINTERNAL=4096` is ALREADY set, so every
+     allocation >= 4 KB already lands in PSRAM automatically. The
+     page-serve buffer is therefore almost certainly external already, and
+     "move it to PSRAM" would be a no-op. What stays internal is everything
+     UNDER 4 KB — which is exactly the shape of lwIP pbufs (~1.5 KB per TCP
+     segment), strengthening the pbuf hypothesis. The decisive knob is
+     `CONFIG_SPIRAM_TRY_ALLOCATE_WIFI_LWIP`, which is NOT set: WiFi and
+     lwIP buffers are pinned to internal DRAM by build config.
+   - **What is actually reachable, given the precompiled-lib constraint:**
+     REACHABLE AT RUNTIME — WiFi buffer counts via `wifi_init_config_t`
+     before `esp_wifi_init` (`CONFIG_ESP_WIFI_STATIC_RX_BUFFER_NUM=8`,
+     `DYNAMIC_RX_BUFFER_NUM=32`, `TX_BUFFER_TYPE=0` static; plausibly
+     40-60 KB internal, with throughput/burst-loss as the tradeoff), and
+     task-stack trimming after reading `uxTaskGetStackHighWaterMark`
+     (Sampler's 16 KB is the first suspect at 6% of the whole heap).
+     BLOCKED BY THE PRECOMPILED LIBS — `SPIRAM_TRY_ALLOCATE_WIFI_LWIP`,
+     `BT_NIMBLE_MAX_CONNECTIONS=3` (only 1 is ever needed), and the heap/
+     apptrace options; all need ESP32 Arduino Lib Builder, i.e. replacing
+     the toolchain. Already OFF and therefore not wasting anything:
+     `ESP_WIFI_IRAM_OPT`, `ESP_WIFI_RX_IRAM_OPT`, `LWIP_IRAM_OPTIMIZATION`.
+   - **NEXT STEP, cheapest first and no ruling needed to be useful:**
+     boot-stage heap beacons (free/maxblock either side of LittleFS, WiFi,
+     BLE, task creation, slopsync) plus a one-shot stack-high-water dump.
+     Today there is exactly ONE boot beacon, `post-slopsync`
+     ([main.cpp:831](src/main.cpp#L831)), which is why 230 KB has never been
+     attributed and why every previous fix aimed at a number nobody had
+     broken down. ~8 log lines, no sdkconfig, no JTAG — this IS the
+     "debugging as simple as logging" the operator asked for.
    - 🚩 **Tooling blocker, flagged against the operator's JTAG proposal:**
      pioarduino ships Arduino as PRECOMPILED libraries, and its
      `framework-arduinoespressif32-libs/esp32s3/sdkconfig` has

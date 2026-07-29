@@ -46,6 +46,10 @@ tools/*
 # same standing as canon_lint.
 !tools/catalog_lint.py
 .clangd
+# clangd's index cache — 844 files that get rewritten on every parse. It was
+# tracked until 2026-07-29, which is why the repo showed 1249 tracked files
+# when only 405 are real.
+.cache/
 .clang-format
 .cache/
 

@@ -29,7 +29,7 @@
    */
   import { machine, getSession } from '../model/machine.svelte.js';
   import { runAction, lastRefusal, remedyForLastRefusal, clearLastRefusal } from '../model/shadow.svelte.js';
-  import { SAFETY_OP } from '../../../../SlopSync/clients/js/index.js';
+  import { SAFETY_OP, HOME_OP } from '../../../../SlopSync/clients/js/index.js';
   import { optionLabel } from '../model/format.js';
 
   const roleActions = $derived(
@@ -78,6 +78,7 @@
   const linkUp = $derived(machine.link.phase === 'live');
 
   const isSafetyRole = (a) => typeof a.role === 'string' && a.role.startsWith('action.safety');
+  const isHomeRole = (a) => typeof a.role === 'string' && a.role.startsWith('action.home');
 
   /**
    * The e-stop, pulled out of its op group and rendered as the dock's one
@@ -181,6 +182,11 @@
    * The e-stop is also filtered from its group here — it renders separately
    * as the dock's fixed control, and drawing it twice would be worse than
    * either rendering alone.
+   *
+   * Operator ruling 2026-07-28: pause/stop and home also leave this group —
+   * they render in TransportBar now (see below). `force_home` is dev-only
+   * and stays here for now, unfiltered, until a dev affordance exists to
+   * hide/disable it properly.
    */
   function optionButtons(action) {
     const floor = action.access | 0;
@@ -192,6 +198,11 @@
       .map((label, i) => ({ label: label || String(i), value: i, access: accessOf(i) }))
       .filter((o) => o.value !== 0)
       .filter((o) => !(isSafetyRole(action) && o.value === SAFETY_OP.estop))
+      // Operator ruling 2026-07-28: pause/stop (safety-role) and home
+      // (home-role) moved out of the dock into TransportBar, the top-of-page
+      // hero-row transport row — they render there now, not here.
+      .filter((o) => !(isSafetyRole(action) && (o.value === SAFETY_OP.pause || o.value === SAFETY_OP.stop)))
+      .filter((o) => !(isHomeRole(action) && o.value === HOME_OP.home))
       .sort((a, b) => a.access - b.access);
   }
 
@@ -369,6 +380,15 @@
     height: 14px;
     display: inline-grid;
     color: var(--bad);
+  }
+
+  /* Operator ruling 2026-07-28: desktop shows the e-stop in TransportBar
+     (top of page) instead — hide the dock's copy there. The dock keeps
+     rendering it below 960px, wherever the page scrolls, so it is never the
+     button that happens to be off-screen when it is needed. Breakpoint
+     matches App.svelte's `isDesktop` matchMedia. */
+  @media (min-width: 960px) {
+    .btn-estop { display: none; }
   }
   .estop-ico svg {
     width: 14px;

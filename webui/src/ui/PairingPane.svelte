@@ -322,7 +322,7 @@
   }
 </script>
 
-<section class="pairing">
+<section class="pairing og-panel">
   <header>
     <h2>Pairing</h2>
     {#if windowOpen}
@@ -357,7 +357,7 @@
 
   {#if liveRoles < ACCESS.configure}
     <div class="claim">
-      <button class="pair-btn" disabled={claiming} onclick={startClaim}>
+      <button class="pair-btn og-btn" disabled={claiming} onclick={startClaim}>
         {claiming ? 'Waiting for a response…' : 'Pair this client'}
       </button>
       {#if claimResult}
@@ -418,8 +418,8 @@
             <span class="meta">expires in {k.expires}s</span>
           </div>
           <div class="acts">
-            <button class="deny" disabled={busy !== null} onclick={() => decide(k, false)}>Deny</button>
-            <button class="approve" disabled={busy !== null} onclick={() => decide(k, true)}>Approve</button>
+            <button class="deny og-btn sm" disabled={busy !== null} onclick={() => decide(k, false)}>Deny</button>
+            <button class="approve og-btn sm" disabled={busy !== null} onclick={() => decide(k, true)}>Approve</button>
           </div>
         </li>
       {/each}
@@ -432,7 +432,7 @@
 </section>
 
 {#if ownerEntry}
-  <section class="ownership">
+  <section class="ownership og-panel">
     <header>
       <h2>Control ownership</h2>
     </header>
@@ -454,7 +454,7 @@
             </div>
             {#if o.owner}
               <div class="acts">
-                <button class="deny" disabled={!canAdminister || evictBusy !== null}
+                <button class="deny og-btn sm" disabled={!canAdminister || evictBusy !== null}
                         title={!canAdminister ? 'Requires the configure tier to evict a session' : ''}
                         onclick={() => evict(o.owner)}>
                   {evictBusy === o.owner ? 'Evicting…' : 'Evict'}
@@ -473,7 +473,9 @@
 {/if}
 
 <style>
-  .pairing, .ownership { background: var(--bg-card); border: 1px solid var(--line); border-radius: var(--r); padding: var(--gap); }
+  /* Chrome (background, inner border, outer bracket outline) is .og-panel —
+     both sections are control groups (approve/deny/evict/pair), not readouts. */
+  .pairing, .ownership { padding: var(--gap); }
   .ownership { margin-top: var(--gap); }
   header { display: flex; align-items: center; gap: var(--gap); margin-bottom: var(--gap); }
   h2 { font-size: 1rem; font-weight: 500; }
@@ -487,9 +489,8 @@
   .tier p + p { margin-top: .35rem; }
   .tier .modes { color: var(--ink-dim); }
   .claim { margin-bottom: var(--gap); padding-bottom: var(--gap); border-bottom: 1px solid var(--line-soft); }
-  .pair-btn { min-height: var(--tap); border-radius: var(--r-s); border: 1px solid var(--line);
-              background: color-mix(in srgb, var(--good) 12%, transparent); padding: 0 16px; }
-  .pair-btn:disabled { opacity: .7; }
+  /* Base chrome is .og-btn — only the good-accent tint is added here. */
+  .pair-btn { border-color: var(--good); background: color-mix(in srgb, var(--good) 12%, transparent); padding: 0 16px; }
   .howto { margin-top: .6rem; font-size: .8rem; color: var(--ink-dim); }
   .howto summary { cursor: pointer; color: var(--ink); }
   .howto ol { margin: .5rem 0 .5rem 1.1rem; padding: 0; }
@@ -500,9 +501,10 @@
   .name { font-weight: 500; }
   .meta { color: var(--ink-faint); font-size: .8rem; margin-left: 8px; font-family: var(--mono); }
   .acts { display: flex; gap: 8px; }
-  .acts button { min-height: var(--tap); min-width: 88px; border-radius: var(--r-s); border: 1px solid var(--line); }
+  /* Base chrome is .og-btn.sm — min-width and the approve/deny accents stay. */
+  .acts button { min-width: 88px; }
   .approve { background: color-mix(in srgb, var(--good) 18%, transparent); border-color: var(--good); }
-  .deny { background: transparent; color: var(--ink-dim); }
+  .deny { color: var(--ink-dim); }
   .result { margin-top: var(--gap); font-size: .875rem; color: var(--good); }
   .result.bad { color: var(--bad); }
   .result.pending { color: var(--ink-dim); }

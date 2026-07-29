@@ -2760,6 +2760,59 @@ and the current widgets, then fixed by three parallel implementation agents.
   real motion NOT yet judged — that is the operator's bench call.
   [verified 2026-07-28 — this session]
 
+## OG VISUAL LANGUAGE PASS (operator-directed, 2026-07-28) — "apply the visual language everywhere"
+
+Second operator correction of the maturity pass, same day: the OG dress had
+only reached the chrome, not the controls. Findings + fixes (one extraction
+agent, five implementation agents on disjoint files):
+
+- **Root cause of the amateur look:** Field.svelte — the generic renderer
+  every settings control goes through — had NO styles at all; every slider,
+  toggle, select, and input was bare browser-default markup. The OG control
+  language now lives as style.css global element defaults + `og-*` utility
+  classes (verbatim port from `webui-prerefactor`): rectangular
+  reality-ignite range thumbs on 2px hairline tracks, chevron selects, the
+  `.og-panel` corner-bracket card recipe, `.og-screen` recessed surfaces,
+  `.og-btn`/`.og-seg`/`.og-switch`/`.og-num` families, 4px scrollbars.
+  Deliberate deviation: `.og-btn` is width:auto (the OG's width:100% was the
+  recorded flex trap). Field/dash/log/slopsync/pairing all dressed; dash
+  cards carry the OG numbered heads (`01 ▸ TITLE`, runtime `data-pidx`
+  following reorders — a CSS counter breaks across hidden panes).
+- **Rail ticks root cause (real bug, not styling):** the ruler SVG used an
+  abstract 100×100 viewBox with `preserveAspectRatio="none"` — vertical
+  tick strokes scaled by the ~7× horizontal stretch, rendering 1px ticks as
+  ~7px slabs. Fixed: pixel-true `viewBox="0 0 w h"`; OG tick geometry
+  verbatim (majors 10 mm `--line-3`, mids 5 mm .85, minors 1 mm .5, all
+  fractions of BASE_H=72, hard 600-tick cap, baseline at 33/72).
+- **RULING — transport row returns to the top (OG layout):** pause / stop /
+  estop / home (registry op constants, labels from the catalog) render as an
+  OG `.tbtn` row top-right of the instrument zone (TransportBar.svelte,
+  fires through the same runAction path — no new write surface). The dock
+  keeps everything else. `force_home` is DEV-ONLY by ruling: stays in the
+  dock for now, to be hidden/disabled behind a dev affordance later.
+  **E-stop reachability exception (flagged, standing unless vetoed):** on
+  mobile the instrument zone scrolls, so the e-stop stays in the FIXED
+  bottom dock below 960 px; ≥960 px (fixed viewport, everything visible) it
+  shows in the TransportBar per the ruling. Both renderings exist in the
+  DOM; CSS decides. "Manual" is absent — manual mode still has no protocol
+  role (RailWidget header).
+- **NEXT WORK ITEM (operator direction, 2026-07-28): the archetype library**
+  per SlopSync RENDERING.md §8.2/§8.4 — `deriveArchetype()` implementing the
+  normative decision table + one component per frozen archetype (fifteen),
+  Field.svelte collapsing to a thin router. This IS the recorded phase
+  centerpiece (RFC-048 vocabulary consumption); today's OG dress becomes the
+  skin those components wear. Sequenced after this pass's seal.
+- Jitter: STILL OPEN. The idle probe run proved rAF pacing is perfect
+  (720 frames, max dt 16.8 ms) and the wire feed is rough (35 Hz avg, p95
+  gap 93 ms, 17% duplicate-timestamp arrivals, 69 gaps >80 ms in 12 s). A
+  MOVING trace (operator runs a pattern while rail-probe.mjs records) is
+  the missing evidence; the probe hook ships in RailWidget permanently
+  (free when unset).
+- Verification: canon_lint clean; checks + Vite build green; fs deployed to
+  fw 2.1.86; render smoke 27/27 (incl. TransportBar estop visible top /
+  dock estop hidden at desktop, dock list free of pause/stop/home).
+  [verified 2026-07-28 — this session]
+
 ## Deferred / planned (homes: docs/REFACTOR-ROADMAP.md, docs/MOTION-TODO.md)
 
 - TCode pass-through channel (post-MFP; parser cross-task race was the

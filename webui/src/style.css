@@ -206,6 +206,247 @@ h1, h2, h3, p { margin: 0; }
   * { transition: none !important; }
 }
 
+/* =========================================================================
+   OG CONTROL LANGUAGE — element defaults + og-* utility classes, ported
+   verbatim from tag `webui-prerefactor`.
+
+   Values are unchanged from the original; only token names are adapted for
+   this file's naming fix (--nwght -> --num-wght, --ink -> --bg — see the
+   collision note at the top of this file).
+
+   Transition timing convention: state color changes run .12-.15s, glow
+   shadows run .2-.3s. Nothing in this control language runs longer.
+   ========================================================================= */
+
+/* ---- Range sliders: thin hairline track, rectangular thumb ---- */
+input[type="range"] {
+  width: 100%;
+  height: 2px;
+  -webkit-appearance: none;
+  appearance: none;
+  margin: 12px 0;
+  background: var(--line-2);
+  outline: none;
+  touch-action: pan-y;
+}
+input[type="range"]::-webkit-slider-thumb {
+  -webkit-appearance: none;
+  width: calc(var(--s) * 11px);
+  height: calc(var(--s) * 18px);
+  border-radius: 0;
+  background: var(--bg);
+  border: 1px solid var(--tx-val);
+  cursor: pointer;
+  box-shadow: 0 0 0 2px var(--bg);
+  transition: border-color .12s, box-shadow .12s;
+}
+input[type="range"]::-moz-range-thumb {
+  width: calc(var(--s) * 11px);
+  height: calc(var(--s) * 18px);
+  border-radius: 0;
+  background: var(--bg);
+  border: 1px solid var(--tx-val);
+  cursor: pointer;
+  box-shadow: 0 0 0 2px var(--bg);
+  transition: border-color .12s, box-shadow .12s;
+}
+/* Thumb ignites --reality + glow while dragged. */
+input[type="range"]:active::-webkit-slider-thumb {
+  border-color: var(--reality);
+  box-shadow: 0 0 0 2px var(--bg), 0 0 10px rgba(var(--reality-rgb),.5);
+}
+input[type="range"]:active::-moz-range-thumb {
+  border-color: var(--reality);
+  box-shadow: 0 0 0 2px var(--bg), 0 0 10px rgba(var(--reality-rgb),.5);
+}
+
+/* ---- Select ---- */
+select {
+  width: 100%;
+  padding: 8px 10px;
+  border-radius: var(--radius);
+  border: 1px solid var(--line-2);
+  background: var(--bg);
+  color: var(--tx);
+  font-size: .82rem;
+  font-family: 'Chakra Petch', sans-serif;
+  appearance: none;
+  background-image: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 24 24' fill='none' stroke='%23575C66' stroke-width='2'%3E%3Cpath d='M6 9l6 6 6-6'/%3E%3C/svg%3E");
+  background-repeat: no-repeat;
+  background-position: right 8px center;
+  background-size: 14px;
+}
+select:focus { outline: none; border-color: var(--reality); }
+
+/* ---- Scrollbars ---- */
+::-webkit-scrollbar { width: 4px; height: 4px; }
+::-webkit-scrollbar-track { background: var(--bg); }
+::-webkit-scrollbar-thumb { background: var(--line-2); border-radius: 0; }
+* { scrollbar-width: thin; scrollbar-color: var(--line-2) var(--bg); }
+
+/* ---- Panel chrome: the canonical OG panel recipe. Components apply
+   .og-panel instead of restating background + border + outline + the
+   corner-bracket SVGs by hand. ---- */
+.og-panel {
+  position: relative;
+  background: var(--bg);
+  border: 1px solid var(--line-1);
+  outline: 1px solid var(--line-0);
+  outline-offset: 4px;
+  /* Corner brackets: TL=--line-4, TR=--line-2, BL=--line-2, BR=--line-3 */
+  background-image:
+    url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 8 8'%3E%3Cpath d='M8 0L0 0L0 8' stroke='%23454A54' stroke-width='1' fill='none'/%3E%3C/svg%3E"),
+    url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 8 8'%3E%3Cpath d='M0 0L8 0L8 8' stroke='%23272B31' stroke-width='1' fill='none'/%3E%3C/svg%3E"),
+    url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 8 8'%3E%3Cpath d='M8 8L0 8L0 0' stroke='%23272B31' stroke-width='1' fill='none'/%3E%3C/svg%3E"),
+    url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 8 8'%3E%3Cpath d='M0 8L8 8L8 0' stroke='%2333373E' stroke-width='1' fill='none'/%3E%3C/svg%3E");
+  background-position: top left, top right, bottom left, bottom right;
+  background-size: 8px 8px;
+  background-repeat: no-repeat;
+}
+
+/* Recessed display surface: scopes, readouts, the log. */
+.og-screen {
+  background: var(--screen);
+  box-shadow: inset 0 2px 8px rgba(0,0,0,.7);
+  border: 1px solid var(--line-1);
+  border-radius: var(--radius);
+}
+
+/* ---- Value input: recessed numeral field ---- */
+.og-num {
+  width: 100%;
+  padding: 8px 10px;
+  border-radius: var(--radius);
+  border: 1px solid var(--line-1);
+  background: var(--screen);
+  box-shadow: inset 0 2px 5px rgba(0,0,0,.6);
+  color: var(--tx-val);
+  font-size: .9rem;
+  font-family: 'Martian Mono', monospace;
+  font-variation-settings: "wght" var(--num-wght), "wdth" 90;
+}
+.og-num:focus { outline: none; border-color: var(--reality); }
+/* Native spinners clash with the instrument styling and are too small to be
+   useful touch targets — nudge/trim buttons cover the increment use-case. */
+.og-num::-webkit-outer-spin-button,
+.og-num::-webkit-inner-spin-button { -webkit-appearance: none; margin: 0; }
+.og-num[type="number"] { -moz-appearance: textfield; appearance: textfield; }
+
+/* ---- Switch ---- */
+.og-switch { display: flex; align-items: center; gap: 10px; cursor: pointer; user-select: none; }
+/* Visually hidden, NOT display:none — keeps the checkbox in the tab order for
+   keyboard focus; the focus ring draws on .track instead. */
+.og-switch input {
+  position: absolute;
+  opacity: 0;
+  width: 1px;
+  height: 1px;
+  pointer-events: none;
+}
+.og-switch input:focus-visible + .track {
+  outline: 2px solid var(--reality);
+  outline-offset: 1px;
+}
+.og-switch .track {
+  width: 40px;
+  height: 22px;
+  border-radius: var(--radius);
+  background: var(--bg);
+  border: 1px solid var(--line-2);
+  position: relative;
+  transition: border-color .15s;
+  flex: 0 0 auto;
+}
+.og-switch .track::after {
+  content: "";
+  position: absolute;
+  top: 2px;
+  left: 2px;
+  width: 16px;
+  height: 16px;
+  border-radius: var(--radius);
+  background: var(--tx-mut);
+  transition: transform .15s, background .15s;
+}
+.og-switch input:checked + .track { border-color: var(--reality); }
+.og-switch input:checked + .track::after {
+  transform: translateX(18px);
+  background: var(--reality);
+  box-shadow: 0 0 6px rgba(var(--reality-rgb),.4);
+}
+
+/* ---- Buttons ----
+   Deviation from the OG: .og-btn does NOT carry width:100%. The original
+   .btn did, and that was a documented flex-row trap — width is auto here,
+   callers opt into full width themselves. */
+.og-btn {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  gap: 6px;
+  width: auto;
+  min-height: var(--tap);
+  padding: 10px 12px;
+  border: 1px solid var(--line-2);
+  border-radius: var(--radius);
+  font-size: .82rem;
+  font-weight: 500;
+  font-family: 'Chakra Petch', sans-serif;
+  cursor: pointer;
+  background: transparent;
+  color: var(--tx);
+  transition: border-color .12s, color .12s;
+}
+.og-btn:hover { border-color: var(--line-4); }
+.og-btn:active { border-color: var(--reality); color: var(--reality); }
+.og-btn:disabled, .og-btn[aria-disabled="true"] {
+  opacity: .45;
+  cursor: not-allowed;
+  pointer-events: none;
+}
+.og-btn.primary { border-color: var(--reality); color: var(--reality); }
+.og-btn.primary:hover { box-shadow: var(--glow-reality); }
+.og-btn.danger { border-color: var(--bad); color: var(--bad); }
+.og-btn.danger:hover { box-shadow: 0 0 10px rgba(255,71,87,.2); }
+/* Running is AMBER, never red — --bad is reserved for hazard/e-stop. */
+.og-btn.running {
+  border-color: var(--warn);
+  color: var(--warn);
+  box-shadow: var(--glow-warn);
+  letter-spacing: .14em;
+}
+.og-btn.running:hover { box-shadow: var(--glow-warn); }
+.og-btn.on {
+  border-color: var(--reality);
+  color: var(--reality);
+  box-shadow: var(--glow-reality);
+}
+.og-btn.sm { min-height: 30px; font-size: .72rem; padding: 4px 8px; }
+
+/* ---- Segmented control ---- */
+.og-seg { display: flex; gap: 4px; flex-wrap: wrap; }
+.og-seg button {
+  flex: 1;
+  min-width: 50px;
+  min-height: 36px;
+  border: 1px solid var(--line-2);
+  border-radius: var(--radius);
+  background: transparent;
+  color: var(--tx-mut);
+  font-size: .76rem;
+  font-weight: 500;
+  font-family: 'Chakra Petch', sans-serif;
+  cursor: pointer;
+  transition: border-color .12s, color .12s;
+}
+.og-seg button:hover { border-color: var(--line-4); }
+.og-seg button:disabled { opacity: .45; cursor: not-allowed; }
+.og-seg button.active {
+  border-color: var(--reality);
+  color: var(--reality);
+  box-shadow: var(--glow-reality);
+}
+
 /* ---- app frame --------------------------------------------------------- */
 .app {
   max-width: 1680px;

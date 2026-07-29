@@ -187,12 +187,10 @@
   // ---------------------------------------------------------------------------
   // Ruler ticks — a faithful port of the pre-refactor rail's ruler
   // (`drawStaticLayer` in `webui-prerefactor`'s rail.js), NOT the "nice
-  // numbers" scheme this port originally replaced it with. That replacement
-  // picked spacing from a target tick COUNT (span / 50, rounded to 1-2-5-10)
-  // — technically scale-agnostic, but on this rail it landed on a 10-unit
-  // minor step with majors every 50 units: ~6 major ticks total, and the
-  // last tick could overshoot the far end because `round(span/step)` doesn't
-  // generally divide evenly. That is the "goofy" the operator flagged.
+  // numbers" scheme this port originally replaced it with, and NOT the
+  // 0-100 abstract viewBox this port temporarily regressed to either (see the
+  // FAT TICKS note below — that regression is what the operator flagged as
+  // "the ticks on the rail look wrong").
   //
   // The original ticked every WHOLE UNIT of the reported span (1mm on every
   // hub live today — nothing here hardcodes "mm", it is just whatever unit
@@ -203,45 +201,77 @@
   // (`railWidthPx` below), same as the original measured against its own
   // host — the generalization is real (any span/unit gets sane ticks), the
   // visual RESULT for an integer-unit rail is unchanged.
+  //
+  // FAT TICKS BUG: this widget used to render into `viewBox="0 0 100 100"`
+  // with `preserveAspectRatio="none"`. That viewBox is square, but the host
+  // is not (it is short and wide), so "none" scaled x and y by DIFFERENT
+  // factors to fill it — e.g. a 700px-wide, 72px-tall host scaled x by 7x
+  // and y by 1x. A vertical tick's stroke-width is a horizontal thickness,
+  // so it rode the x scale: `stroke-width="1"` came out ~7px wide, i.e. a
+  // gray block, not a hairline. The original avoided this by giving the SVG
+  // a viewBox of the host's REAL pixel size (`0 0 w h`), so the CTM is 1:1
+  // and `stroke-width="1"` is a literal 1px line regardless of host aspect.
+  // Ported back here via `railWidthPx`/`railHeightPx` below.
   // ---------------------------------------------------------------------------
-  function buildTicks(loV, hiV, railWidthPx) {
+  // BASE_H: the OG host's reference height (px) that its tick geometry was
+  // authored against. Every tick dimension below is a fraction of BASE_H,
+  // rescaled to the ACTUAL host height (`h`) so a differently sized host
+  // still gets correctly proportioned ticks instead of the OG's fixed pixel
+  // constants.
+  const BASE_H = 72;
+
+  function buildTicks(loV, hiV, w, h) {
     const out = [];
     const spanV = hiV - loV;
     if (!(spanV > 0)) return out;
     const railUnits = Math.max(Math.round(spanV), 1);
-    // Before the ResizeObserver below has fired, railWidthPx is 0 — default
-    // to "dense enough for 1-unit ticks" rather than falling back to the
-    // coarsest step, so the very first paint already looks right.
-    const pxPerUnit = railWidthPx > 0 ? railWidthPx / railUnits : 2;
+    // Before the ResizeObserver below has fired, w is 0 — default to "dense
+    // enough for 1-unit ticks" rather than falling back to the coarsest
+    // step, so the very first paint already looks right.
+    const pxPerUnit = w > 0 ? w / railUnits : 2;
     let minorStep = 1;
     if (pxPerUnit < 2) minorStep = 2;
     if (pxPerUnit < 1) minorStep = 5;
+    // Hard tick-count cap: however dense the span, never emit more than 600
+    // ticks — without this a huge span with a 1-unit minorStep would flood
+    // the SVG with thousands of <line> nodes.
     if (railUnits / minorStep > 600) minorStep = Math.ceil(railUnits / 600);
+    // Nothing to position ticks against yet (host not measured/laid out) —
+    // the step-count math above still ran so a later call has nothing to
+    // redo, but there is no real pixel space to place a tick in.
+    if (!(w > 0) || !(h > 0)) return out;
+    const tickTop = (26 / BASE_H) * h;
+    const majorLen = (14 / BASE_H) * h;
+    const midLen = (10 / BASE_H) * h;
+    const minorLen = (7 / BASE_H) * h;
     for (let u = 0; u <= railUnits; u += minorStep) {
       const major = u % 10 === 0;
       const mid = !major && u % 5 === 0;
-      out.push({ frac: u / railUnits, major, mid });
+      const x = (u / railUnits) * w;
+      const len = major ? majorLen : (mid ? midLen : minorLen);
+      out.push({ x, y1: tickTop, y2: tickTop + len, major, mid });
     }
     return out;
   }
 
-  // Actual pixel width of the rail host — the ruler's density check needs a
-  // real measurement (percentages alone can't tell "1mm tick" from "1px
-  // smear"), tracked the same way the canvas sizing effect below tracks it,
-  // but kept independent so the ruler doesn't depend on the canvas ever
-  // mounting.
+  // Actual pixel size of the rail host — the ruler's density check needs a
+  // real width measurement (percentages alone can't tell "1mm tick" from "1px
+  // smear"), and the SVG viewBox needs the real width AND height to stay 1:1
+  // with the CTM (see FAT TICKS above). Tracked independently of the canvas
+  // sizing effect below so the ruler doesn't depend on the canvas mounting.
   let railWidthPx = $state(0);
+  let railHeightPx = $state(0);
   $effect(() => {
     if (!hostEl) return;
-    railWidthPx = hostEl.clientWidth;
-    const ro = (typeof ResizeObserver !== 'undefined')
-      ? new ResizeObserver(() => { railWidthPx = hostEl.clientWidth; })
-      : null;
+    function measure() { railWidthPx = hostEl.clientWidth; railHeightPx = hostEl.clientHeight; }
+    measure();
+    const ro = (typeof ResizeObserver !== 'undefined') ? new ResizeObserver(measure) : null;
     if (ro) ro.observe(hostEl);
     return () => { if (ro) ro.disconnect(); };
   });
 
-  const ticks = $derived(buildTicks(lo, hi, railWidthPx));
+  const ticks = $derived(buildTicks(lo, hi, railWidthPx, railHeightPx));
+  const baselineY = $derived(railHeightPx > 0 ? (33 / BASE_H) * railHeightPx : 0);
 
   // ---------------------------------------------------------------------------
   // Telemetry smoothing — one telebuf per available role, fed on every real
@@ -464,6 +494,13 @@
         targetFresh = rt.fresh;
       } else {
         targetDisplay = null; targetFresh = false;
+      }
+
+      // Jitter probe: test/rail-probe.mjs sets window.__railProbe = [] and
+      // harvests it, so marker smoothness is MEASURED per frame instead of
+      // eyeballed. Zero cost when the flag is unset (the normal case).
+      if (window.__railProbe) {
+        window.__railProbe.push([nowMs, tRender, posDisplay, targetDisplay, fresh ? 1 : 0]);
       }
 
       ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
@@ -828,18 +865,22 @@
   {/if}
 
   <div class="spine-rail-host" class:drag-live={dragMode !== null} bind:this={hostEl}>
-    <!-- Tick geometry mirrors the original's 72px-tall host ratios
-         (tickTop 26px, majorLen 14px, midLen 10px, minorLen 7px, baseline
-         33px) as percentages of this 0-100 viewBox — minor ticks land
-         exactly on the baseline from above; mid/major poke a bit past it,
-         which is what reads as "ruler" rather than "tally marks". -->
-    <svg class="rail-ruler-svg" viewBox="0 0 100 100" preserveAspectRatio="none" aria-hidden="true">
+    <!-- Tick geometry mirrors the original's 72px-tall host ratios (tickTop
+         26px, majorLen 14px, midLen 10px, minorLen 7px, baseline 33px),
+         rescaled to the host's ACTUAL height (see BASE_H above) — minor
+         ticks land exactly on the baseline from above; mid/major poke a bit
+         past it, which is what reads as "ruler" rather than "tally marks".
+         viewBox is the host's REAL pixel size (not an abstract 0-100 box),
+         so the CTM is 1:1 and stroke-width="1" stays a true hairline instead
+         of stretching into a block on a wide-short host. -->
+    <svg class="rail-ruler-svg" viewBox="0 0 {Math.max(railWidthPx, 1)} {Math.max(railHeightPx, 1)}"
+         preserveAspectRatio="none" aria-hidden="true">
       {#each ticks as t}
-        <line x1={t.frac * 100} x2={t.frac * 100} y1="36.11" y2={t.major ? 55.56 : (t.mid ? 50 : 45.83)}
+        <line x1={t.x} x2={t.x} y1={t.y1} y2={t.y2}
               stroke={t.major ? 'var(--line-3)' : 'var(--line-1)'} stroke-width="1"
               opacity={t.major ? 1 : (t.mid ? 0.85 : 0.5)} />
       {/each}
-      <line x1="0" y1="45.83" x2="100" y2="45.83" stroke="var(--line-1)" stroke-width="1" />
+      <line x1="0" y1={baselineY} x2={railWidthPx} y2={baselineY} stroke="var(--line-1)" stroke-width="1" />
     </svg>
     <span class="rail-endcap lo mono">{formatValue(min, lo)}</span>
     <span class="rail-endcap hi mono">{formatValue(max, hi)}</span>

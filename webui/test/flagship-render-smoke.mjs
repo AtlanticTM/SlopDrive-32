@@ -5,9 +5,12 @@
  * Asserts, at a desktop viewport:
  *   - the nav rail renders with an Overview tab plus machine-derived entries,
  *     switching tabs swaps the pane, and the mini-rail collapse works;
- *   - the safety dock renders the hazard-striped e-stop OUTSIDE the scrolling
- *     op groups, and NO control anywhere in the dock is the RFC-034 value-0
- *     placeholder (no "reserved" button — the flagship ruling);
+ *   - TransportBar (top-of-page, operator ruling 2026-07-28) renders the
+ *     hazard-striped e-stop, visible and fireable, while the safety dock's
+ *     own copy is hidden at this width (the dock keeps it below 960px);
+ *   - NO control anywhere in the dock is the RFC-034 value-0 placeholder (no
+ *     "reserved" button — the flagship ruling); pause/stop/home no longer
+ *     appear in the dock at all, having moved to TransportBar;
  *   - dashboard handles are hidden until "Edit layout" and hide again on Done;
  * and at a phone viewport, that the tab strip renders instead of the rail.
  *
@@ -74,10 +77,24 @@ ok('rail expands again', (await page.$$('nav.rail .rail-name')).length >= 6);
 const dock = await page.waitForSelector('.safetydock .dock', { timeout: 10000 })
   .then(() => true).catch(() => false);
 ok('safety dock renders', dock);
-ok('hazard-striped e-stop present', (await page.$('.safetydock .btn-estop')) != null);
-const estopEnabled = await page.$eval('.safetydock .btn-estop', (b) => !b.disabled).catch(() => false);
-ok('e-stop is fireable for this session', estopEnabled);
 
+// TransportBar owns the visible e-stop at this (desktop) width now (operator
+// ruling 2026-07-28) — the dock still renders its own copy in the DOM (never
+// removed from either surface's logic) but keeps it CSS-hidden here.
+const tbEstopUp = await page.waitForSelector('.transportbar .btn-estop', { timeout: 10000 })
+  .then(() => true).catch(() => false);
+ok('hazard-striped e-stop present in TransportBar', tbEstopUp);
+const tbEstopVisible = await page.$eval('.transportbar .btn-estop',
+  (b) => getComputedStyle(b).display !== 'none').catch(() => false);
+ok('TransportBar e-stop visible at desktop', tbEstopVisible);
+const estopEnabled = await page.$eval('.transportbar .btn-estop', (b) => !b.disabled).catch(() => false);
+ok('e-stop is fireable for this session', estopEnabled);
+const dockEstopHidden = await page.$eval('.safetydock .btn-estop',
+  (b) => getComputedStyle(b).display === 'none').catch(() => false);
+ok('safety dock e-stop CSS-hidden at desktop (TransportBar shows it here instead)', dockEstopHidden);
+
+// Pause/stop/home moved to TransportBar (operator ruling 2026-07-28) and no
+// longer render as dock buttons at all.
 const dockLabels = await page.$$eval('.safetydock button', (els) => els.map((e) => e.textContent.trim().toLowerCase()));
 ok('no value-0 "reserved" placeholder rendered', !dockLabels.some((t) => /reserved|unused|none/.test(t)),
    dockLabels.join(' | '));

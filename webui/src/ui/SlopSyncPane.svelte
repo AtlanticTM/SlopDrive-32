@@ -54,7 +54,7 @@
 </script>
 
 <div class="pane-scroll">
-  <section class="block">
+  <section class="block og-screen">
     <h2>Session</h2>
     <dl class="facts">
       <dt>session id</dt><dd class="mono">{link.sessionId ?? '--'}</dd>
@@ -75,7 +75,7 @@
     </dl>
   </section>
 
-  <section class="block">
+  <section class="block og-screen">
     <h2>Catalog</h2>
     <dl class="facts">
       <dt>state</dt><dd>{machine.catalog.ready ? 'ready' : 'not loaded'}</dd>
@@ -86,7 +86,7 @@
     </dl>
   </section>
 
-  <section class="block">
+  <section class="block og-screen">
     <h2>Channels</h2>
     {#if !machine.catalog.entries.length}
       <p class="empty">No catalog yet.</p>
@@ -120,7 +120,7 @@
     {/if}
   </section>
 
-  <section class="block">
+  <section class="block og-screen">
     <h2>Link counters</h2>
     <dl class="facts">
       <dt>state pushes</dt><dd class="mono">{machine.stats.statePushes}</dd>
@@ -134,7 +134,7 @@
     </dl>
   </section>
 
-  <section class="block">
+  <section class="block og-screen">
     <h2>Recent NACKs</h2>
     {#if !nacks.length}
       <p class="empty">None seen this session.</p>
@@ -166,10 +166,9 @@
     flex-direction: column;
     gap: var(--gap);
   }
+  /* Recessed surface (background, inset shadow, border) is .og-screen — every
+     section here is a data readout, never a control group. */
   .block {
-    background: var(--bg-card);
-    border: 1px solid var(--line);
-    border-radius: var(--r);
     padding: 10px 12px;
   }
   h2 {

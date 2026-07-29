@@ -88,18 +88,21 @@
          must never render as something you can push. -->
 
   {:else if field.widget === WIDGET.toggle}
-    <button id={field.uid} type="button" class="toggle"
-            role="switch" aria-checked={!!value} disabled={!enabled}
-            onclick={() => commit(value ? 0 : 1)}>
-      <span class="toggle-track"><span class="toggle-thumb"></span></span>
+    <div class="toggle-row">
+      <label class="og-switch" class:is-disabled={!enabled}>
+        <input type="checkbox" id={field.uid}
+               role="switch" aria-checked={!!value} checked={!!value} disabled={!enabled}
+               onchange={(e) => commit(e.currentTarget.checked ? 1 : 0)} />
+        <span class="track"></span>
+      </label>
       <span class="toggle-text">{field.options ? optionLabel(field, value) : (value ? 'on' : 'off')}</span>
-    </button>
+    </div>
 
   {:else if field.widget === WIDGET.segmented}
-    <div class="segmented" role="radiogroup" aria-labeledby={field.uid} id={field.uid}>
+    <div class="og-seg" role="radiogroup" aria-labeledby={field.uid} id={field.uid}>
       {#each field.options as opt, i}
         <button type="button" role="radio" aria-checked={Number(value) === i}
-                class:on={Number(value) === i} disabled={!enabled}
+                class:active={Number(value) === i} disabled={!enabled}
                 onclick={() => commit(i)}>{opt || i}</button>
       {/each}
     </div>
@@ -129,27 +132,27 @@
     </div>
 
   {:else if field.widget === WIDGET.slider}
-    <input id={field.uid} type="range" class="slider"
+    <input id={field.uid} type="range"
            min={field.min} max={field.max} step={step}
            value={value ?? field.min} disabled={!enabled}
            oninput={(e) => commit(Number(e.currentTarget.value))} />
     <div class="bounds"><span>{formatValue(field, field.min)}</span><span>{formatValue(field, field.max)}</span></div>
 
   {:else if field.widget === WIDGET.number}
-    <input id={field.uid} type="number" class="numbox"
+    <input id={field.uid} type="number" class="og-num"
            min={field.min} max={field.max} step={step}
            value={value ?? ''} disabled={!enabled}
            onchange={(e) => commit(Number(e.currentTarget.value))} />
 
   {:else if field.widget === WIDGET.text}
-    <input id={field.uid} type="text" class="textbox"
+    <input id={field.uid} type="text" class="value-input"
            value={value ?? ''} disabled={!enabled}
            onchange={(e) => commit(e.currentTarget.value)} />
 
   {:else if field.widget === WIDGET.secret}
     <!-- RFC-009.4: a secret's value NEVER appears in STATE. We can say whether
          one is set, and we can replace it. We can never show it. -->
-    <input id={field.uid} type="password" class="textbox" placeholder={value ? '•••••• (set)' : 'not set'}
+    <input id={field.uid} type="password" class="value-input" placeholder={value ? '•••••• (set)' : 'not set'}
            disabled={!enabled} onchange={(e) => commit(e.currentTarget.value)} />
   {/if}
 
@@ -161,3 +164,150 @@
     <p class="field-reason">{reason}</p>
   {/if}
 </div>
+
+<style>
+  /* Layout only below — track/thumb/chevron chrome for input[type=range] and
+     select, plus .og-seg/.og-switch/.og-num visuals, are owned globally
+     (style.css) so every instrument control reads identically. This block
+     places things and dresses the parts the global sheet does not own:
+     the ground-truth value readout, free-text/secret inputs, labels, tags,
+     bitfield rows and the toggle's paired text. */
+
+  .field {
+    display: flex;
+    flex-direction: column;
+    gap: .5rem;
+  }
+
+  .field-head {
+    display: flex;
+    align-items: baseline;
+    justify-content: space-between;
+    gap: 8px;
+  }
+
+  /* Quiet label voice — same recipe as the hero numerals' .hn-label. */
+  .field-label {
+    font-family: var(--font);
+    font-size: .8rem;
+    font-weight: 500;
+    color: var(--tx-mut);
+    text-transform: lowercase;
+    letter-spacing: .04em;
+  }
+
+  .tag {
+    display: inline-block;
+    margin-left: 6px;
+    padding: 1px 5px;
+    font-size: .62rem;
+    font-weight: 500;
+    text-transform: uppercase;
+    letter-spacing: .04em;
+    border-radius: var(--r-s);
+    vertical-align: middle;
+  }
+  .tag.adv {
+    color: var(--tx-mut);
+    background: var(--bg-sunken);
+    box-shadow: inset 0 0 0 1px var(--line-2);
+  }
+  .tag.warn {
+    color: var(--warn);
+    background: rgba(245, 185, 77, .12);
+    box-shadow: inset 0 0 0 1px rgba(245, 185, 77, .4);
+  }
+
+  /* Ground-truth readout: same recess recipe as the editable .og-num value
+     input (var(--screen), inset hairline, Martian Mono at a narrower width),
+     written locally because this is an <output>, not an input — the global
+     .og-num utility targets editable controls. */
+  .field-value {
+    display: inline-flex;
+    align-items: center;
+    font-family: var(--mono);
+    font-variation-settings: 'wdth' 90;
+    font-weight: var(--num-wght);
+    font-size: .85rem;
+    color: var(--tx-val);
+    background: var(--screen);
+    box-shadow: inset 0 0 0 1px var(--line-1);
+    border-radius: var(--r-s);
+    padding: 2px 8px;
+  }
+  .field-value .unit {
+    margin-left: 3px;
+    font-size: .82em;
+    color: var(--tx-mut);
+  }
+
+  /* Free-text/secret value entries — og-num-like recess, left-aligned since
+     the content isn't numeric (SSID strings, passphrases). */
+  .value-input {
+    background: var(--screen);
+    box-shadow: inset 0 0 0 1px var(--line-1);
+    color: var(--tx-val);
+    font-family: var(--mono);
+    font-variation-settings: 'wdth' 90;
+    font-weight: var(--num-wght);
+    border-radius: var(--r-s);
+    border: none;
+    padding: 6px 8px;
+    text-align: left;
+  }
+
+  /* Layout-only: full-width controls, chrome untouched. */
+  .field :is(input[type='range'], input[type='number'], input[type='text'],
+              input[type='password'], select, .og-num, .value-input) {
+    width: 100%;
+    display: block;
+  }
+
+  .bounds {
+    display: flex;
+    justify-content: space-between;
+    font-family: var(--mono);
+    font-size: .7rem;
+    color: var(--tx-ghost);
+  }
+
+  .toggle-row {
+    display: flex;
+    align-items: center;
+    gap: 8px;
+  }
+  .toggle-text {
+    font-family: var(--mono);
+    font-size: .85rem;
+    color: var(--tx-val);
+  }
+  /* Fallback dimming in case the global .og-switch does not itself gate on
+     the checkbox's disabled state; harmless if it already does. */
+  .og-switch.is-disabled {
+    opacity: .45;
+    cursor: not-allowed;
+  }
+
+  .bitfield {
+    display: flex;
+    flex-wrap: wrap;
+    gap: 10px 16px;
+  }
+  .bitfield .bit {
+    display: flex;
+    align-items: center;
+    gap: 6px;
+    font-size: .85rem;
+    color: var(--tx);
+  }
+  .bitfield input[type='checkbox'] {
+    width: 16px;
+    height: 16px;
+    accent-color: var(--reality);
+  }
+
+  .field-desc {
+    font-size: .72rem;
+    color: var(--tx-mut);
+  }
+</style>

@@ -170,19 +170,20 @@
 <div class="dash-wrap">
   <div class="dash-toolbar">
     {#if editing}
-      <button type="button" class="reset-btn" onclick={resetLayout}>Reset layout</button>
-      <button type="button" class="reset-btn done-btn" onclick={doneEditing}>Done</button>
+      <button type="button" class="reset-btn og-btn sm" onclick={resetLayout}>Reset layout</button>
+      <button type="button" class="reset-btn done-btn og-btn sm" onclick={doneEditing}>Done</button>
     {:else}
-      <button type="button" class="reset-btn" onclick={enterEditing}>Edit layout</button>
+      <button type="button" class="reset-btn og-btn sm" onclick={enterEditing}>Edit layout</button>
     {/if}
   </div>
 
   <div class="dash-grid">
-    {#each displayList as item (item.id)}
+    {#each displayList as item, i (item.id)}
       <div class="dash-cell" style={'--span:' + item.span} use:registerCell={item.id}>
         <DashItem
           {item}
           span={item.span}
+          pidx={String(i + 1).padStart(2, '0')}
           editing={editing}
           dragging={dragId === item.id}
           ongrabstart={() => dragStart(item.id)}
@@ -216,19 +217,8 @@
     justify-content: flex-end;
     gap: 6px;
   }
-  .reset-btn {
-    min-height: var(--tap);
-    padding: 0 10px;
-    font-size: .75rem;
-    color: var(--ink-dim);
-    border: 1px solid var(--line);
-    border-radius: var(--radius);
-  }
-  .reset-btn:hover,
-  .reset-btn:focus-visible {
-    color: var(--ink);
-    border-color: var(--line-4);
-  }
+  /* Base chrome (border, padding, font) comes from .og-btn.sm — only the
+     Done state's distinguishing color is layered on top here. */
   .done-btn {
     color: var(--ink-hi);
     border-color: var(--line-4);
@@ -237,7 +227,13 @@
   .dash-grid {
     display: grid;
     grid-template-columns: repeat(12, 1fr);
-    gap: var(--gap);
+    /* .og-panel's outer outline paints 4px OUTSIDE each card's border box
+       (outline-offset), so the grid needs room on both axes: a gap wide
+       enough that neighboring outlines never touch, and edge padding so
+       outlines on the outermost row/column never clip against this
+       container. */
+    gap: max(var(--gap), 14px);
+    padding: 5px;
     align-items: start;
   }
 

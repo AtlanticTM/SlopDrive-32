@@ -24,6 +24,10 @@
   let {
     item,
     span,
+    // 1-based display-order position, zero-padded ("01", "02"...), supplied
+    // by DashGrid from the arranged list — absent for any caller that omits
+    // it, which renders the plain unnumbered prefix instead.
+    pidx = null,
     dragging = false,
     editing = false,
     ongrabstart,
@@ -107,8 +111,8 @@
   }
 </script>
 
-<div class="dash-item" class:dragging class:editing bind:this={rootEl}>
-  <div class="dash-head">
+<div class="dash-item og-panel" class:dragging class:editing bind:this={rootEl}>
+  <div class="dash-head card-head">
     <!-- Handles are edit-mode-only: the reading surface stays quiet and a
          card's own controls never compete with layout chrome. -->
     {#if editing}
@@ -127,7 +131,7 @@
         </svg>
       </button>
     {/if}
-    <h3 class="dash-title">{item.title}</h3>
+    <h3 class="dash-title" data-pidx={pidx}>{item.title}</h3>
   </div>
 
   <div class="dash-body">
@@ -157,13 +161,11 @@
 </div>
 
 <style>
+  /* Chrome (background, inner border, outer bracket outline) comes from the
+     .og-panel utility in style.css — restating it here would fork the recipe. */
   .dash-item {
-    position: relative;
     display: flex;
     flex-direction: column;
-    background: var(--bg-card);
-    border: 1px solid var(--line);
-    border-radius: var(--radius);
     min-width: 0;
   }
   .dash-item.dragging {
@@ -187,14 +189,32 @@
     padding-left: 8px;
   }
   .dash-title {
+    font-family: var(--font);
     font-size: .8rem;
     font-weight: 500;
-    letter-spacing: .04em;
-    color: var(--ink-dim);
+    text-transform: uppercase;
+    letter-spacing: .12em;
+    color: var(--tx-val);
     white-space: nowrap;
     overflow: hidden;
     text-overflow: ellipsis;
     min-width: 0;
+  }
+  /* Runtime index, not a CSS counter: mirrors the OG's renumberPanels() —
+     a counter renumbers by DOM order and breaks across hidden/filtered
+     panes, so DashGrid computes the 1-based position and stamps it here. */
+  .dash-title[data-pidx]::before {
+    content: attr(data-pidx) "\2002\25B8\2002";
+    font-family: var(--mono);
+    font-size: .62rem;
+    letter-spacing: normal;
+    text-transform: none;
+    color: var(--tx-faint);
+  }
+  .dash-title:not([data-pidx])::before {
+    content: "\25B8 ";
+    letter-spacing: normal;
+    color: var(--line-3);
   }
 
   .dash-body {

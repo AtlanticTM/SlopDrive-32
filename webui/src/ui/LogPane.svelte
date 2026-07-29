@@ -114,18 +114,18 @@
 
 <div class="logpane">
   <div class="tabs" role="tablist" aria-label="Event feed">
-    <button role="tab" aria-selected={tab === 'log'} class:on={tab === 'log'} onclick={() => selectTab('log')}>
+    <button role="tab" class="og-btn sm" aria-selected={tab === 'log'} class:on={tab === 'log'} onclick={() => selectTab('log')}>
       Log <span class="count">{machine.events.log.length}</span>
     </button>
-    <button role="tab" aria-selected={tab === 'anomaly'} class:on={tab === 'anomaly'} onclick={() => selectTab('anomaly')}>
+    <button role="tab" class="og-btn sm" aria-selected={tab === 'anomaly'} class:on={tab === 'anomaly'} onclick={() => selectTab('anomaly')}>
       Anomalies <span class="count">{machine.events.anomaly.length}</span>
     </button>
-    <button role="tab" aria-selected={tab === 'session'} class:on={tab === 'session'} onclick={() => selectTab('session')}>
+    <button role="tab" class="og-btn sm" aria-selected={tab === 'session'} class:on={tab === 'session'} onclick={() => selectTab('session')}>
       Session <span class="count">{machine.events.session.length}</span>
     </button>
   </div>
 
-  <div class="feed" bind:this={containerEl} onscroll={onScroll} role="log" aria-live="polite">
+  <div class="feed og-screen" bind:this={containerEl} onscroll={onScroll} role="log" aria-live="polite">
     {#if !currentList.length}
       <p class="empty">Nothing yet.</p>
     {:else if tab === 'log'}
@@ -166,7 +166,7 @@
   </div>
 
   {#if !atBottom && currentList.length}
-    <button type="button" class="jump" onclick={() => { atBottom = true; if (containerEl) containerEl.scrollTop = containerEl.scrollHeight; }}>
+    <button type="button" class="jump og-btn sm" onclick={() => { atBottom = true; if (containerEl) containerEl.scrollTop = containerEl.scrollHeight; }}>
       jump to latest
     </button>
   {/if}
@@ -187,15 +187,7 @@
     gap: 6px;
     flex-wrap: wrap;
   }
-  .tabs button {
-    min-height: var(--tap);
-    padding: 0 12px;
-    border-radius: var(--r-s);
-    background: var(--bg-card);
-    border: 1px solid var(--line);
-    color: var(--ink-dim);
-    font-size: 13px;
-  }
+  /* Base chrome is .og-btn.sm — only the selected-tab accent is added here. */
   .tabs button.on {
     color: var(--ink);
     border-color: var(--reality);
@@ -208,10 +200,9 @@
     margin-left: 4px;
   }
 
+  /* Recessed surface (background, inset shadow, border) is .og-screen —
+     only layout properties stay here. */
   .feed {
-    background: var(--bg-sunken);
-    border: 1px solid var(--line);
-    border-radius: var(--r);
     padding: 8px 10px;
     overflow-y: auto;
     max-height: 52vh;
@@ -270,15 +261,13 @@
     flex: 0 0 auto;
   }
 
+  /* Base chrome is .og-btn.sm — pill shape + reality accent distinguish
+     this specific action from a plain button. */
   .jump {
     align-self: center;
-    min-height: 32px;
-    padding: 0 14px;
     border-radius: 999px;
-    background: var(--bg-card);
-    border: 1px solid var(--reality);
+    border-color: var(--reality);
     color: var(--reality);
-    font-size: 12px;
   }
 
   @media (prefers-reduced-motion: reduce) {

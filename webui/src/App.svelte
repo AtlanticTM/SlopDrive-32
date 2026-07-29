@@ -19,6 +19,7 @@
   import LinkBar from './ui/LinkBar.svelte';
   import FootStrip from './ui/FootStrip.svelte';
   import SafetyBar from './ui/SafetyBar.svelte';
+  import TransportBar from './ui/TransportBar.svelte';
   import SlopSyncPane from './ui/SlopSyncPane.svelte';
   import LogPane from './ui/LogPane.svelte';
   import PairingPane from './ui/PairingPane.svelte';
@@ -256,7 +257,10 @@
            and pretending otherwise would be the exact lie the doctrine forbids. -->
     </section>
   {:else if isDesktop}
-    <HeroStrip heroes={instrumentHeroes} />
+    <div class="instrument">
+      <TransportBar />
+      <HeroStrip heroes={instrumentHeroes} />
+    </div>
     <div class="frame">
       <!-- The tablist role lives on an inner div: <nav> is a landmark, and ARIA
            forbids giving a non-interactive landmark an interactive role. -->
@@ -289,7 +293,10 @@
       </div>
     </div>
   {:else}
-    <HeroStrip heroes={instrumentHeroes} />
+    <div class="instrument">
+      <TransportBar />
+      <HeroStrip heroes={instrumentHeroes} />
+    </div>
     <nav class="tabs" aria-label="Sections" bind:this={tabsNav}>
       <div role="tablist">
         {#each tabs as t (t.id)}
@@ -307,6 +314,39 @@
 </div>
 
 <style>
+  /* ---- instrument zone: hero strip + transport row -----------------------
+     TransportBar is the OG's `.spine-transport` (Pause/Halt/E-Stop/Home),
+     promoted out of the safety dock into the hero row (operator ruling
+     2026-07-28). Desktop overlays it top-right over the hero strip, the way
+     the OG's hero row carried it; a phone's page scrolls instead, so it gets
+     its own full-width row ABOVE the hero strip (OG mobile behavior), each
+     button sharing the row equally. Breakpoint matches the `isDesktop`
+     matchMedia above and SafetyBar's own 960px rule. */
+  .instrument {
+    position: relative;
+  }
+  @media (min-width: 960px) {
+    .instrument :global(.transportbar) {
+      position: absolute;
+      top: 0;
+      right: 0;
+      z-index: 5;
+    }
+  }
+  @media (max-width: 959px) {
+    .instrument {
+      display: flex;
+      flex-direction: column;
+      gap: 6px;
+    }
+    .instrument :global(.transportbar) {
+      width: 100%;
+    }
+    .instrument :global(.transportbar .tbtn) {
+      flex: 1 1 0;
+    }
+  }
+
   /* ---- desktop frame: rail + pane ----------------------------------------
      The one non-scrolling row of the desktop column (style.css's .app):
      bounded to whatever height is left after LinkBar/hero-strip/FootStrip/

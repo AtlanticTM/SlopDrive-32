@@ -2926,6 +2926,39 @@ Systematic computed-style + rule-text diff, both pages LIVE (ours on the
   internals — rule-text + pixels are the evidence standard (restated from
   the aesthetic audit).
 
+## INCIDENT: HEAP-STARVED HTTP -> PANIC REBOOT UNDER SESSION LOAD (2026-07-29)
+
+Timeline (bench, fw 2.1.86, motor drive unpowered): several concurrent
+SlopSync WS sessions (operator clients + the main loop's forensics probe +
+Playwright harness pages, accumulated during square-pulse debugging) plus
+repeated 270 KB page serves. Observed: WS STATE delivery stayed PERFECT
+(25 Hz, zero gaps, probe heartbeats healthy) while HTTP crawled to 5-8 s
+page loads (operator: "something is wedging it, heartbeat is frozen");
+sys heap lines recorded `min=60` — a 60-BYTE internal-heap low-water mark.
+Post-slopsync boot headroom is only ~32 KB internal (boot log:
+143 KB free -> 32 KB after hub init). The episode ended in a PANIC reboot
+("Reset reason: PANIC (unexpected)" — the SECOND unexplained PANIC on
+2.1.86; the first is already on watch in the OTA entry above). Fake-home
+was lost with the reboot.
+
+- Evidence limitation: NO panic backtrace exists — serial is not attached
+  in normal use and the firmware has no crash ring. FIRMWARE WORK ITEM
+  (queued for operator stamp): persist panic reason + backtrace to
+  RTC/NVS and expose it via /api (the phone-side blec crash buffer proved
+  how much a persisted backtrace is worth).
+- FIRMWARE WORK ITEM (queued): graceful degradation under heap pressure —
+  a hub that sheds/refuses new sessions must never panic under N clients
+  + HTTP serving. Reproduce with heap tracing before changing anything.
+- Session hygiene lesson (main loop, standing): probe fleets against the
+  live hub are LOAD — arm ONE probe at a time, stop it before starting
+  another, and never leave harness pages half-open (a killed harness
+  leaks its WS session until reap).
+- Square-pulse forensics: STILL OPEN — operator narrowed the trigger to
+  MANUAL tape driving (patterns are clean), which points at the move-
+  INTENT/arbiter path, not the pattern engine. Reproduction plan (next
+  bench window): re-fake-home, ONE armed wire probe, tap-to-move harness
+  drives, correlate outlier values field-by-field.
+
 ## Deferred / planned (homes: docs/REFACTOR-ROADMAP.md, docs/MOTION-TODO.md)
 
 - TCode pass-through channel (post-MFP; parser cross-task race was the

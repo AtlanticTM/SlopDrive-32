@@ -21,6 +21,9 @@ const watcher = createSession({
   host: HOST, port: 82, clientKind: 'webui', clientName: 'wire forensics',
   autoReconnect: false, subscriptions: [[CH.MOTION, 25.0, PRIORITY.elevated]],
 });
+watcher.on('welcome', () => console.log('WELCOME — session up'));
+watcher.on('error', (e) => console.log('SESSION ERROR:', String(e)));
+watcher.on('close', (why) => console.log('SESSION CLOSED:', String(why)));
 watcher.on('state', (ch, sample) => {
   if (ch === CH.MOTION) samples.push({ t: Date.now(), ...sample });
 });
@@ -29,12 +32,19 @@ watcher.connect();
 console.log('waiting for motion (up to 15 min)…');
 let movingSince = 0;
 const t0 = Date.now();
+let lastHeartbeat = 0;
 while (Date.now() - t0 < 900000) {
   await sleep(500);
   const recent = samples.filter((s) => s.t > Date.now() - 1500);
-  if (recent.length >= 5) {
+  // Liveness heartbeat: a silent probe hides a dead subscription (that
+  // already cost one capture window).
+  if (Date.now() - lastHeartbeat > 5000) {
+    lastHeartbeat = Date.now();
+    console.log('…armed: ' + samples.length + ' samples total, ' + recent.length + ' in last 1.5s');
+  }
+  if (recent.length >= 4) {
     const posz = recent.map((s) => s.pos_10um);
-    if (Math.max(...posz) - Math.min(...posz) > 2000) { movingSince = Date.now(); break; }
+    if (Math.max(...posz) - Math.min(...posz) > 1000) { movingSince = Date.now(); break; }
   }
 }
 if (!movingSince) { console.log('NO MOTION SEEN — start a pattern and rerun.'); process.exit(2); }

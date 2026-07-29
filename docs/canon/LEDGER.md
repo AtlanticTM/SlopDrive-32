@@ -3274,7 +3274,7 @@ the parts worth ledgering because they are invisible in a fresh clone:
   rather than CLAUDE.md because CLAUDE.md is gitignored and a rule that binds
   every agent cannot live in an untracked file.
 
-## ⏭ NEXT STEPS (2026-07-29 closeout, updated through the same-day spec/RFC session — START HERE)
+## ⏭ NEXT STEPS (2026-07-29 closeout, restamped after the Phase 1a session — START HERE)
 
 The answer to "what's next on the ledger":
 
@@ -3289,8 +3289,9 @@ The answer to "what's next on the ledger":
      (still said setting_categories, 0–127/128–255) and the registry
      tombstone's four-value-for-five miscount; spec/AUTHORING.md written
      (reverse-chain hub-author quickstart, pointers only); **RFC-052
-     authored, status PROPOSED — awaiting operator stamp** (a: author
-     tables, b: released marker, c: JS vocab codegen, d: entry key 17
+     authored, status PROPOSED at the time — ALL FOUR PARTS NOW STAMPED,
+     see the RFC-052 entry below** (a: author tables, b: released marker,
+     c: JS vocab codegen, d: entry key 17
      `group_descs`) [veto-able; written exactly to the approved plan's
      scope]. **(d) RULED IN (operator, 2026-07-29, SlopSync `f93353f`):**
      card descs a necessity — context factors out of field desc budgets;
@@ -3342,9 +3343,20 @@ The answer to "what's next on the ledger":
      duplicate rule = first-in-catalog-order (in the RFC). Reference
      catalog ADOPTION (preset-meta card descs and friends) rides the
      Phase 6 sweep inside the one etag bump.
-   - **Phase 1b** (widget churn — operator eyeballs before merge): §8.2
-     archetype table with the pinned slider/stepper rule (see plan).
-   - Then Phases 2–6 per plan. Phase 6 carries the ceilings ruling
+   - **Phase 1b — NEXT UP** (widget churn — operator eyeballs before
+     merge): replace `resolveWidget()`'s hand-guess with §8.2's archetype
+     table, adding `stepper`/`indicator`/`chart` + the explicit-override
+     row. MUST first pin the §8.2 row 9/10 "range wide enough for a drag
+     gesture" rule — plan's proposal is (max−min)/step ≥ 20 → slider, else
+     stepper; a naive reading flips half the sliders to steppers. Wants a
+     screenshot diff of every settings tab before/after. The 1a render
+     harness is the cheap way to get those without the device: serve
+     `webui/dist` on a local port and point it at slopsim's WS on :82
+     (`connect()` defaults to port 82 + `location.hostname`, so nothing
+     needs shimming; localhost origin = watch tier, which still renders
+     the whole settings tree).
+   - Then Phases 2–6 per plan. Phase 2 is (a)'s first three headers only,
+     per the staging ruling. Phase 6 carries the ceilings ruling
      (1000 mm/s / 60k mm/s²) + the ONE etag bump + deploy.
 2. **DATAGRAM-SAFETY + PROVISIONING TODO (2026-07-29 chat; smart order;
    each item carries the context its implementer needs. Discipline,

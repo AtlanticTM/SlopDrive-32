@@ -215,28 +215,28 @@
       <span class="link-dot tone-{rxTone}" role="img" aria-label={'telemetry: ' + rxToneLabel}></span>
     </div>
 
+    <!-- ONE flat row of equal chips (OG). Phase and tier lead it because they
+         are the two safety-relevant reads and the narrow-viewport rules below
+         drop from the tail — they are the last to go, without needing a
+         separate pinned zone to say so. -->
     <div class="chips">
-      <!-- Safety-relevant facts: pinned, never scrolled out of view. -->
-      <span class="chip chip-pin tone-{phaseInfo.tone}" role="status" aria-live="polite">
+      <span class="chip tone-{phaseInfo.tone}" role="status" aria-live="polite">
         <span class="chip-dot"></span>{phaseInfo.label}
       </span>
-      <span class="chip chip-pin">
+      <span class="chip">
         <span class="chip-lbl">tier</span>{tierLabel}
       </span>
-
-      <div class="chips-scroll">
-        <span class="chip" title={fwLabel ? ('firmware ' + fwLabel) : ''}>
-          <span class="chip-lbl">hub</span>
-          <span class="mono">{hubLabel}{fwLabel ? ' · ' + fwLabel : ''}</span>
-        </span>
-        <span class="chip">
-          <span class="chip-lbl">catalog</span>{catalogLabel}
-        </span>
-        <span class="chip tone-{rxTone}">
-          <span class="chip-lbl">rx</span>
-          <span class="mono">{rxAge}</span>
-        </span>
-      </div>
+      <span class="chip chip-opt" title={fwLabel ? ('firmware ' + fwLabel) : ''}>
+        <span class="chip-lbl">hub</span>
+        <span class="mono">{hubLabel}{fwLabel ? ' · ' + fwLabel : ''}</span>
+      </span>
+      <span class="chip chip-opt">
+        <span class="chip-lbl">catalog</span>{catalogLabel}
+      </span>
+      <span class="chip chip-opt-last tone-{rxTone}">
+        <span class="chip-lbl">rx</span>
+        <span class="mono">{rxAge}</span>
+      </span>
     </div>
   </div>
 
@@ -285,12 +285,14 @@
     gap: 6px;
   }
 
+  /* OG .hdr-row verbatim. Deliberately does NOT wrap: the linkbar is fixed
+     chrome the whole page reserves height for, so a row that grows a second
+     line silently covers content below it. The chips shed instead of wrapping
+     — see the narrow-viewport drops below. */
   .hdr-row {
     display: flex;
     align-items: center;
-    gap: 10px;
-    flex-wrap: wrap;
-    row-gap: 6px;
+    gap: 12px;
   }
 
   .header-left {
@@ -306,11 +308,14 @@
     border-radius: 1px;
   }
 
+  /* OG .wordmark verbatim: Chakra Petch 500 at 1rem, NOT mono/700. The
+     letter-spacing is --s-scaled so the mark tracks the global control scale
+     rather than the font size. */
   .wordmark {
-    font-family: var(--mono);
-    font-weight: 700;
-    font-size: 15px;
-    letter-spacing: 0.02em;
+    font-family: var(--font);
+    font-weight: 500;
+    font-size: 1rem;
+    letter-spacing: calc(var(--s) * 1px);
     color: var(--ink-hi);
     flex: 0 0 auto;
     white-space: nowrap;
@@ -329,30 +334,31 @@
   .link-dot.tone-bad  { background: var(--bad); box-shadow: 0 0 8px var(--bad); }
   .link-dot.tone-dim  { background: var(--line-2); box-shadow: none; }
 
-  /* ---- chips: pinned safety facts + a horizontally-scrolling rest ---- */
+  /* ---- chips: ONE flat right-justified row ---- */
   .chips {
     display: flex;
     align-items: center;
     gap: 6px;
     margin-left: auto;
     min-width: 0;
-    flex: 1 1 auto;
-    justify-content: flex-end;
+    flex: 0 0 auto;
+    flex-wrap: nowrap;
   }
 
+  /* OG .chip verbatim (.62rem/400/3px 6px/--chip/--chip-line/--tx-val). Every
+     chip wears these exact metrics — there is no heavier variant. A chip that
+     matters more says so with its tone color and its position in the row, not
+     by being bolder than its neighbors. */
   .chip {
     display: inline-flex;
     align-items: center;
     gap: 4px;
-    /* OG .chip metrics (CSS-diff audit 2026-07-29): .62rem/400/--tx-val —
-       the rebuild had drifted brighter-and-bolder. .chip-pin below stays
-       deliberately heavier: phase/tier are safety-relevant reads. */
     font-size: .62rem;
     font-weight: 400;
-    padding: 4px 7px;
+    padding: 3px 6px;
     border-radius: var(--radius);
-    background: var(--bg-card);
-    border: 1px solid var(--line);
+    background: var(--chip);
+    border: 1px solid var(--chip-line);
     color: var(--tx-val);
     white-space: nowrap;
     flex: 0 0 auto;
@@ -371,27 +377,27 @@
     flex: 0 0 auto;
   }
 
-  /* Pinned chips carry the tone as text color + a tinted wash, so phase and
-     tier read at a glance without relying on the dot alone. */
-  .chip-pin {
-    font-weight: 700;
-    color: var(--ink-hi);
-  }
-  .chip-pin.tone-good { border-color: color-mix(in srgb, var(--good) 45%, var(--line)); color: var(--good); }
-  .chip-pin.tone-warn { border-color: color-mix(in srgb, var(--warn) 45%, var(--line)); color: var(--warn); }
-  .chip-pin.tone-bad  { border-color: color-mix(in srgb, var(--bad) 45%, var(--line)); color: var(--bad); }
+  /* Tone rides the text color plus a tinted border, on any chip that has one.
+     The dot already carries the state; the border tint is the second,
+     non-color-dependent channel. */
+  .chip.tone-good { border-color: color-mix(in srgb, var(--good) 45%, var(--chip-line)); color: var(--good); }
+  .chip.tone-warn { border-color: color-mix(in srgb, var(--warn) 45%, var(--chip-line)); color: var(--warn); }
+  .chip.tone-bad  { border-color: color-mix(in srgb, var(--bad) 45%, var(--chip-line)); color: var(--bad); }
   .chip.tone-good .mono { color: var(--good); }
   .chip.tone-warn .mono { color: var(--warn); }
   .chip.tone-bad  .mono { color: var(--bad); }
 
-  .chips-scroll {
-    display: flex;
-    gap: 6px;
-    overflow-x: auto;
-    scrollbar-width: none;
-    min-width: 0;
+  /* Narrow viewports shed chips from the tail rather than wrapping the row or
+     scrolling it. Phase and tier carry no drop class and therefore never
+     leave — they are the two facts an operator must be able to see before
+     touching anything. Marked by class, not :nth-child: a positional selector
+     silently retargets the moment a chip becomes conditional. */
+  @media (max-width: 560px) {
+    .chip-opt { display: none; }
   }
-  .chips-scroll::-webkit-scrollbar { display: none; }
+  @media (max-width: 400px) {
+    .chip-opt-last { display: none; }
+  }
 
   .banner {
     display: flex;
@@ -416,8 +422,10 @@
   }
   .reason { color: var(--ink-faint); }
 
+  /* The chip metrics this used to restate here are now the base .chip rule
+     (OG values), so only the wordmark still needs narrowing. Kept in rem so it
+     still tracks --s instead of pinning to a literal px at one scale. */
   @media (max-width: 400px) {
-    .chip { font-size: .62rem; padding: 3px 6px; }
-    .wordmark { font-size: 13px; }
+    .wordmark { font-size: .82rem; }
   }
 </style>

@@ -49,6 +49,7 @@
 
   --line-0: #121419;   /* outer nested frame */
   --line-1: #1D2026;   /* inner panel frame, dividers */
+  --chip-line: #1D2026;   /* original name for the chip's own hairline */
   --line-2: #272B31;   /* dim glyphs, hairline emphasis */
   --line-3: #33373E;   /* brackets, ruler majors */
   --line-4: #454A54;   /* bracket highlight */

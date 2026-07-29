@@ -37,14 +37,8 @@
     min-width: 0; /* let sliders/rails shrink instead of forcing horizontal scroll */
   }
 
-  /* The first registered hero (the rail, when present) reads best as a full-
-     width instrument; the rest are happy sharing a row once there is room. */
-  @media (min-width: 720px) {
-    .hero-strip { grid-template-columns: repeat(2, 1fr); }
-    .hero-slot:first-child { grid-column: 1 / -1; }
-  }
-
-  @media (min-width: 1000px) {
-    .hero-strip { grid-template-columns: repeat(3, 1fr); }
-  }
+  /* ONE column at every width — do not reintroduce a multi-column grid here.
+     The OG had no hero grid at all: every instrument was a full-bleed row
+     (og style.css .hero-strip/.hero-row), and a hero is an instrument you read
+     across, not a dashboard tile that tolerates being a third as wide. */
 </style>

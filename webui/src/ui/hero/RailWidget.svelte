@@ -1004,13 +1004,20 @@
 
   /* OG .rail-panel spacing: 10px vertical margin so the og-panel's 4px
      outline-offset frame never collides with the row above or the content
-     below; padding per the OG desktop override. */
+     below. Padding is the OG's two-tier recipe, not one value — the base is
+     --s-scaled (18/16/8, so the panel breathes proportionally with the global
+     control scale on a phone), and the OG's own >=761px block replaces it with
+     flat pixels. Stating only the desktop value here left mobile ~40% too
+     tight at the top. */
   .rail-panel {
     margin: 10px 0;
-    padding: 10px 20px 6px;
+    padding: calc(var(--s) * 18px) calc(var(--s) * 16px) calc(var(--s) * 8px);
     display: flex;
     flex-direction: column;
     gap: var(--gap);
+  }
+  @media (min-width: 761px) {
+    .rail-panel { padding: 10px 20px 6px; }
   }
 
   /* ---- input tape (disabled command surface) ------------------------------ */

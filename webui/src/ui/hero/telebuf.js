@@ -78,7 +78,7 @@
  * without re-measuring the on-device gap distribution — these are sized to
  * the worst observed tail, not the mean.
  *
- * ── jitter regression #5: arrival-time stamping (THE big one, measured) ─────
+ * ── jitter regression #5: arrival-time stamping (TRAPS T18, measured) ─────
  *
  * The pushed `tsMs` is Date.now() AT DECODE TIME — and STATE frames arrive in
  * TCP clumps. Measured on-device during real motion (rail-probe.mjs,

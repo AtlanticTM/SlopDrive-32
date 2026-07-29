@@ -1,5 +1,5 @@
 #pragma once
-// CrashRing — last-words diagnostics that survive a panic reboot.
+// CrashRing — last-words diagnostics that survive a panic reboot (TRAPS T19).
 //
 // The 2026-07-29 incident (heap-starved httpTask -> the second unexplained
 // PANIC on 2.1.86) died with no serial attached and nothing persisted: the

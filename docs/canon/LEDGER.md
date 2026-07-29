@@ -27,7 +27,12 @@ commit as any change that alters it (C-3).
   2026-07-27 — git branch state]
 - Source-tree firmware version: see `FIRMWARE_VERSION` in
   `include/config_api.h` (its one home). [C-1 pointer]
-- Deployed firmware on the device: **2.1.85**, the RFC-042..050 + Phase C4 +
+- Deployed firmware on the device: **2.1.87** — 2.1.85 + RFC-051
+  (critical-stall parks, see its entry) at 2.1.86, then the CRASH RING +
+  HEAP-PRESSURE GUARDS entry's build (2026-07-29; /api/crash live-proven on
+  first boot). [verified 2026-07-29 — deploy log `2.1.86 -> 2.1.87` +
+  /api/crash answering]. History of the 2.1.85 build's contents follows:
+  the RFC-042..050 + Phase C4 +
   Phase E batch PLUS the `attachTransport()` STALE-slot-clobber fix + the
   boot reset-reason log line PLUS the HEAP RELIEF pass (BLOB_CHUNK backpressure
   reclass + WebRingSink PSRAM move — see the amended item (i) below) PLUS the

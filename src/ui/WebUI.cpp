@@ -347,7 +347,7 @@ void WebUI::captureTelemetry(float position_mm, float target_mm, float raw_mm) {
 // ---- Route handlers ---------------------------------------------------------
 
 void WebUI::handleRoot() {
-    // Heap floor (2026-07-29 incident): streaming the bundle needs a large
+    // Heap floor (TRAPS T19): streaming the bundle needs a large
     // contiguous send buffer (SlopHttpServer::streamFile), and grinding that
     // allocation against a starved heap is how HTTP crawled to 8 s loads
     // before the PANIC. Under pressure, answer 503 fast — the page is a

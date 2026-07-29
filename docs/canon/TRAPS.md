@@ -223,3 +223,58 @@ log by then). A sink's existence is never compile-time-conditional on a
 flag that means something else.
 Bit us: USB serial going permanently quiet with no runtime symptom to chase,
 traced back to a transport-selection macro moonlighting as a logging gate.
+
+## T18 — Arrival-time stamping destroys a stream's timeline
+**Rule:** never stamp streamed samples with local receive time and then
+interpolate/derive against those stamps. Reconstruct the SOURCE's timeline
+(re-space by the known/estimated production cadence, future-anchored), or
+carry source timestamps on the wire; treat arrival time as a hint only.
+**Mechanism:** the network batches — TCP clumps several STATE frames into
+one segment, so decode-time `Date.now()` gives them IDENTICAL stamps
+followed by a gap. Measured on-device: 71 of 393 motion samples in 12 s
+carried a duplicate stamp (p95 arrival gap 90 ms against a ~30 ms true
+period). Downstream, a "not newer than the last" guard silently DISCARDED
+every duplicate (~18% of all motion), and the interpolator played the
+missing span in one frame (snap) then starved to the next clump (freeze):
+107 snap frames + 17 multi-frame freezes in 719 rendered. No interpolation
+upgrade can survive garbage timestamps — a Hermite pass shipped first and
+changed nothing visible, which is itself the diagnostic: when smoothing
+math does not help, question the time base, not the curve.
+**Corollary:** any cadence ESTIMATOR feeding the reconstruction must learn
+only from plausible streaming gaps — idle/shed/dwell gaps are mode
+switches, and one 600 ms gap taught the estimator a garbage period whose
+first post-resume spans rendered as a one-tick wrong position.
+**Fix:** `webui/src/ui/hero/telebuf.js` `push()` — timestamps
+reconstructed (max(arrival + lead, prev + EMA period), capped, monotonic,
+never dropping a sample); EMA gated to gaps < min(4×period, 200 ms);
+>500 ms gap resyncs the schedule. Burst-replay + dwell/resume regression
+tests in `webui/test/telebuf-sim.mjs`.
+Bit us: the rail marker "jitter" that survived a whole interpolation
+rewrite, then the "random position for one tick on first movement" residual
+— both the same trap wearing two coats.
+
+## T19 — Split-plane starvation: the pre-allocated plane stays healthy while the allocating plane dies
+**Rule:** under memory pressure a hub must REFUSE NEW LOAD (close new
+sessions early, 503 heavyweight serves) and must never let "one plane looks
+fine" pass for health — the plane that allocates per-request starves first
+while the plane running on pre-allocated buffers keeps humming. And a
+system with no persisted last words cannot be debugged after it dies:
+keep a crash ring.
+**Mechanism:** N concurrent WS sessions plus repeated ~270 KB LittleFS page
+serves ground internal heap to a 60-BYTE low-water mark (post-init headroom
+is only ~32 KB). SlopSync STATE delivery stayed PERFECT throughout (25 Hz,
+zero gaps — its buffers pre-exist), while httpTask's per-request
+allocations crawled page loads to 5-8 s; the episode ended in a PANIC
+reboot with no serial attached and nothing persisted — the reset reason was
+the entire post-mortem. The healthy WS plane actively MISLED diagnosis
+("the link is fine, so the device is fine").
+**Fix:** fw 2.1.87 — WS accept refuses below free<14336 or maxblock<6144
+(before slot claim; existing sessions untouched), page serve answers 503
+below maxblock<12288, and `CrashRing` (RTC_NOINIT, `include/system/
+CrashRing.h`) persists boot seq, heap watermarks, and breadcrumb
+checkpoints across panic reboots, surfaced in AppLog and GET /api/crash.
+A true backtrace still needs a core-dump partition — partition tables do
+not OTA (queued bench reflash).
+Bit us: the 2026-07-29 wedge-then-PANIC (second unexplained PANIC on
+2.1.86), diagnosed only from heap beacons and the arrival pattern because
+nothing else survived the reboot.

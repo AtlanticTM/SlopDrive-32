@@ -346,7 +346,7 @@ void SlopSyncAsyncWsPort::onEvent(AsyncWebSocket* /*server*/, AsyncWebSocketClie
 
     switch (type) {
         case WS_EVT_CONNECT: {
-            // Heap floor (2026-07-29 incident: N sessions + page serves starved
+            // Heap floor (TRAPS T19 — 2026-07-29: N sessions + page serves starved
             // internal heap to min=60 B and ended in a PANIC). A hub under
             // memory pressure REFUSES new load; it never degrades the sessions
             // it already serves, and it never dies. Floors sized against the

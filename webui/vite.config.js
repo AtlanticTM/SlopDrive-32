@@ -43,5 +43,13 @@ export default defineConfig({
     minify: 'esbuild',
     assetsInlineLimit: 100 * 1024, // 100KB — fonts (~21KB max) inline as data URIs
   },
-  envPrefix: 'VITE_',
+  server: {
+    // src-tauri/target is cargo's build dir — watching it EBUSY-crashes vite
+    // on Windows when cargo holds a build-script exe open.
+    watch: { ignored: ['**/src-tauri/**'] },
+  },
+  // TAURI_ENV_* exists only when the Tauri CLI drives the build — main.js's
+  // shell branch keys on it, so the embedded bundle dead-code-eliminates the
+  // entire shell path (delivery accord: divergence is build config, not code).
+  envPrefix: ['VITE_', 'TAURI_ENV_'],
 });

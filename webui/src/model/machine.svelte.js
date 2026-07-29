@@ -317,6 +317,9 @@ export function connect(opts = {}) {
     instanceId: getInstanceId(),
     token: (h) => acquireToken(h),
     autoReconnect: true,
+    // Shell seam: a non-WS binding (BLE GATT) rides in as a WebSocket duck.
+    // undefined = the platform WebSocket, which is every non-shell build.
+    WebSocketImpl: opts.WebSocketImpl,
   });
 
   session.on('open', () => {
@@ -330,6 +333,9 @@ export function connect(opts = {}) {
     machine.link.deadmanMs = w.deadmanMs || 0;
     machine.link.cfgGen = w.cfgGen || 0;
     machine.link.hubIdentity = w.identity || null;
+    // RFC-046: where the WS upgrade lives, for a session that arrived over
+    // BLE. null on hubs that advertise none.
+    machine.link.endpoint = w.endpoint || null;
     // The hub's own declared ceilings. max_subscriptions is the one that bites:
     // exceeding it drops the whole SUBSCRIBE silently. See subscriptionWishes().
     machine.link.limits = w.limits || {};

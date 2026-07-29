@@ -24,11 +24,37 @@ try {
   if (localStorage.getItem('ui_hivis') === '1') document.documentElement.classList.add('hivis');
 } catch (e) { /* private mode: preferences are an optimization, never a requirement */ }
 
-// The device serves this bundle, so it IS the machine. A Tauri build replaces
-// this line with the operator's chosen host and calls setHttpGet() with a
-// native fetch that is not bound by browser same-origin rules.
-const host = location.hostname || '192.168.1.229';
+// The device serves this bundle, so it IS the machine — except inside the
+// Tauri shell, where the host is the operator's choice and /uitoken minting
+// runs through the shell's Rust-side fetch (no browser same-origin rules).
+// TAURI_ENV_PLATFORM is set only by the Tauri CLI's build, so the embedded
+// bundle compiles this branch away entirely.
+const SHELL = !!import.meta.env.TAURI_ENV_PLATFORM;
 
-connect({ host });
+async function boot() {
+  let host = location.hostname || '192.168.1.229';
+  if (SHELL) {
+    const { fetch: tauriFetch } = await import('@tauri-apps/plugin-http');
+    const { setHttpGet } = await import('../../../SlopSync/clients/js/index.js');
+    setHttpGet(async (url) => {
+      const r = await tauriFetch(url, { method: 'GET' });
+      return r.ok ? await r.text() : null;
+    });
+    host = localStorage.getItem('shell_host') || '192.168.1.229';
+
+    // Shell chrome: discovery + transport control live OUTSIDE the kernel UI.
+    const { default: ShellBar } = await import('./shell/ShellBar.svelte');
+    const bar = document.createElement('div');
+    document.body.appendChild(bar);
+    mount(ShellBar, { target: bar });
+
+    // In BLE mode the ShellBar owns connecting (needs a scan/pick first);
+    // auto-connect only the WS path.
+    if ((localStorage.getItem('shell_mode') || 'ws') === 'ws') connect({ host });
+    return;
+  }
+  connect({ host });
+}
+boot();
 
 export default mount(App, { target: document.getElementById('app') });

@@ -2461,6 +2461,16 @@ posture floor's smoke):**
 Execution ladder per standing preference: main loop architects + reviews,
 sonnet executes Svelte/JS chunks, opus on hard debugging.
 
+**RE-ORDERED (operator, 2026-07-28, post-step-1):** the shell jumps from
+step 7 to the FRONT as a feasibility spike — Tauri 2 APK on the operator's
+phone + desktop build, BLE discovery → WS upgrade actually happening, the
+existing UI rendering live in the shell — THEN the flesh-out (steps 2-6
+unchanged in content, queued behind the spike). Rationale accepted by main
+loop without pushback: the shell is the highest-uncertainty work in the
+phase (new toolchain, Android packaging, client-side BLE, a transport the
+JS client core has never spoken); proving it early is de-risking, not
+scope creep.
+
 ## WEBUI PHASE STEP 1 — TRUTH PASS DONE (2026-07-28): tap-to-move live-verified, handoff doc retired
 
 - **Setup:** fs image redeployed from HEAD before verifying (guarantees the
@@ -2507,6 +2517,58 @@ sonnet executes Svelte/JS chunks, opus on hard debugging.
   new live harness (ALL PASS ×2 runs); live smoke = the verification
   itself. [verified 2026-07-28 — harness output reproduced above, both
   runs; probe 48/0/4; /api/status before/after]
+
+## SHELL FEASIBILITY SPIKE (2026-07-28, in flight) — M0 LIVE-VERIFIED; M1/M2 BUILT; M3 toolchain up
+
+Per the RE-ORDERED ruling above. Operator-authorized toolchain installs:
+rustup (Rust 1.97.1, existing VS 2022 MSVC), Temurin JDK 17, Android
+cmdline-tools + SDK/NDK (the 2026 cmdline-tools DEPRECATED `sdkmanager` —
+it exits 0 without installing anything; packages actually install via the
+new `android` CLI with slash-format ids, e.g. `ndk/29.0.14206865` — and
+cmd.exe eats `;` in the old-style ids, a second trap).
+
+- **M0 — desktop shell: LIVE-VERIFIED.** `webui/src-tauri/` (Tauri 2.11,
+  identifier `com.slopdeck.app`, productName SlopDeck) wraps the EXISTING
+  Vite project; the kernel's designed seam did its job: `main.js` grew a
+  SHELL branch keyed on `import.meta.env.TAURI_ENV_PLATFORM` (set only by
+  the Tauri CLI's build) that wires `setHttpGet` to `tauri-plugin-http`'s
+  Rust-side fetch. Device log evidence: `session authorized by /uitoken
+  (control tier)` from the shell window — the native-origin CORS problem
+  never materializes because the mint bypasses the webview exactly as
+  `credentials.js`'s header designed. Embedded-bundle purity PROVEN: fresh
+  `npm run build:only` emits a byte-identical-size 261,698 B bundle with
+  ZERO matches for blec/__TAURI/plugin-http (the SHELL branch dead-code
+  eliminates). `npm run check` (device-knowledge + model) ALL PASS.
+  Windows+nested-src-tauri trap recorded: vite's watcher must ignore
+  `**/src-tauri/**` or cargo's locked build artifacts EBUSY-crash the dev
+  server (fixed in vite.config.js).
+- **M1 — BLE client path: BUILT, NOT LIVE-VERIFIED (C-8 — needs an
+  operator scan/connect in the shell window).** `tauri-plugin-blec` 0.12
+  (btleplug on desktop, native Kotlin via Tauri's plugin system on
+  Android). `webui/src/shell/ble-ws.js`: SlopSync-over-GATT as a WebSocket
+  duck passed through `createSession({WebSocketImpl})` — a seam session.js
+  ALREADY had; one notification = one frame, writes chained on a promise
+  queue (frame order is protocol-critical), registry `ble_identity` UUIDs.
+  `webui/src/shell/ShellBar.svelte`: shell-chrome discovery bar (scan by
+  service UUID, connect BLE, manual WS host, upgrade button) mounted only
+  by the SHELL branch — the kernel UI is untouched. BLE sessions land at
+  watch tier by design (no HTTP sideband → no /uitoken); control arrives
+  with the WS upgrade.
+- **M2 — WS upgrade: BUILT, NOT LIVE-VERIFIED.** SlopSync `77c275d`
+  (clients/js): WELCOME keys 46 `ws_port`/47 `ipv4` + identity key 5
+  `hub_instance_id` decoded (additive), exposed as `state.endpoint`;
+  machine.svelte.js mirrors it to `machine.link.endpoint`. ShellBar's
+  upgrade = disconnect BLE, reconnect WS to the advertised endpoint with
+  the SAME `instance_id` — the hub's duplicate-identity rule makes that a
+  clean handover on TODAY'S firmware (no fw change needed for the spike;
+  state-preserving cross-binding migration stays a flesh-out item).
+- **M3 — Android: toolchain complete** (JDK 17, platform-36, build-tools
+  36.0.0, NDK 29.0.14206865 stable — the first script's auto-pick grabbed
+  an rc by accident, caught and pinned; all four Rust Android targets).
+  `tauri android init` + APK build not yet run.
+- Spike-scope shortcuts, tighten at flesh-out: http scope `http://**` in
+  capabilities; ShellBar visual design is placeholder chrome; BLE Android
+  manifest permissions pending `android init`.
 
 ## Deferred / planned (homes: docs/REFACTOR-ROADMAP.md, docs/MOTION-TODO.md)
 

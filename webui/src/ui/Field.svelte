@@ -91,7 +91,7 @@
     <span class="field-label-group">
       <label class="field-label" for={field.uid}>
         {labelFor(field)}
-        {#if field.flagBits.advanced}<span class="tag adv" title="Advanced setting">adv</span>{/if}
+        {#if field.advanced}<span class="tag adv" title="Advanced setting">adv</span>{/if}
         {#if field.flagBits.restart_required}<span class="tag warn" title="Takes effect after restart">restart</span>{/if}
       </label>
       {#if field.desc}

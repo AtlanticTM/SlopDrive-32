@@ -25,7 +25,7 @@
  * how the "renders a machine it has never met" claim gets checked in CI.
  */
 
-import { PACKED, SETTING_CATEGORY_NAME } from '../../../../SlopSync/clients/js/index.js';
+import { PACKED, UI_RANK } from '../../../../SlopSync/clients/js/index.js';
 import { ROLE, isActionRole } from './roles.js';
 
 // ---------------------------------------------------------------------------
@@ -118,13 +118,21 @@ export function humanize(name) {
   return s.charAt(0).toUpperCase() + s.slice(1);
 }
 
-/** Category display name: registry name if known, device label if not. */
+/**
+ * Category display name: device label if it shipped one, else the registry name
+ * catalog.js already resolved.
+ *
+ * The resolution (including unknown -> `other`) lives in catalog.js, not here —
+ * this only decides how to WRITE it. An unrecognized id with no label falls
+ * back to its number rather than "Other", because the raw id is what actually
+ * distinguishes two untaught categories from each other; either way the tab
+ * renders and its settings are never dropped on the floor (SPEC 8.8 item 8).
+ */
 function categoryLabel(entry) {
   if (entry.categoryLabel) return entry.categoryLabel;
-  const n = SETTING_CATEGORY_NAME[entry.category];
-  if (n) return n.charAt(0).toUpperCase() + n.slice(1);
-  // A device-defined category (>=128) that shipped no label. Render it rather
-  // than dropping its settings on the floor — SPEC 8.8 item 8.
+  if (entry.categoryKnown && entry.categoryName) {
+    return entry.categoryName.charAt(0).toUpperCase() + entry.categoryName.slice(1);
+  }
   return 'Category ' + entry.category;
 }
 
@@ -167,6 +175,13 @@ function makeField(entry, f, settingIndex, maskField) {
     role: f.role || '',
     flags: f.flags || 0,
     flagBits: f.flagBits || { advanced: false, restart_required: false, secret: false },
+    rank: f.rank,
+    rankName: f.rankName,
+    // ONE truth for the disclosure affordance. RENDERING.md §4 calls ui_ranks
+    // `advanced` the migration of the setting_flags.advanced BIT into the rank
+    // ladder, so both spellings mean the same thing and a machine may ship
+    // either. Deciding it once here keeps every consumer from re-ORing it.
+    advanced: f.rank === UI_RANK.advanced || !!(f.flagBits && f.flagBits.advanced),
     bits: f.bits || null,
     settingKey: readOnly ? null : f.settingKey,
     writeChannel: readOnly ? null : entry.settingChannel,
@@ -222,7 +237,19 @@ export function buildSettingsModel(entries) {
       if (maskField && f === maskField) continue;
       const isSetting = f.settingKey != null && entry.settingChannel != null;
       const field = makeField(entry, f, isSetting ? settingIndex : null, maskField);
+      // COUNT BEFORE SKIPPING. The enabled_mask's bit i gates the i-th
+      // SETTING-annotated field in layout order (RFC-009 item 3) — a rank the
+      // client chose not to draw does not remove the field from the hub's own
+      // numbering. Skipping before this increment shifts every later field's
+      // bit by one and grays the WRONG controls, silently: the reference device
+      // ships exactly this shape (a rank=hidden field holding settingKey 4).
       if (isSetting) settingIndex++;
+      // rank=hidden: carried on the wire for compatibility, NEVER rendered
+      // (RENDERING.md §4). Dropped before it reaches `fields` OR `byRole`, so a
+      // hero widget cannot resurrect it by claiming its role either. This is
+      // the machine's own statement that a released-but-inert field should stop
+      // showing up — do not add an "unhide" affordance, that defeats the point.
+      if (f.rank === UI_RANK.hidden) continue;
       // Roles are indexed for EVERY field, categorized or not — a hero widget
       // wants `telemetry.position` from the motion channel, which carries no
       // category because it is not a setting.
@@ -240,6 +267,7 @@ export function buildSettingsModel(entries) {
   for (const entry of entries) {
     if (!entry.schema) continue;
     for (const f of entry.schema) {
+      if (f.rank === UI_RANK.hidden) continue;   // same law as pass 1
       // Index EVERY roled schema field, not just the verbs.
       //
       // An INTENT field can carry a role that names a VALUE rather than an
@@ -303,7 +331,7 @@ export function buildSettingsModel(entries) {
       catMap.set(key, {
         key,
         id: entry.category,
-        name: SETTING_CATEGORY_NAME[entry.category] || ('category' + entry.category),
+        name: entry.categoryKnown ? entry.categoryName : ('category' + entry.category),
         label: categoryLabel(entry),
         groups: new Map(),
         // A category is writable if ANY of its channels names a settingChannel.

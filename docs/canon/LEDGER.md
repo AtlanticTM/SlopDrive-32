@@ -3299,10 +3299,43 @@ The answer to "what's next on the ledger":
      since RFC-051 landed (missing SOURCE_LINKS anchor) — fixed, 4 stale
      generated pages caught up. Gates: slopsync_lint 0,
      gen_registry_header --check clean, etag pin test green post-bump.
-   - **Phase 1a** (safe; NEXT UP): JS vocabulary codegen + rank/keys-19-23
-     decode + settings.js rank/category law. Screenshot-verified in Tauri.
-     Note: the codegen half IS RFC-052(c) — if the operator amends RFC-052,
-     1a's codegen follows the amended shape.
+   - **RFC-052 (a)(b)(c) STAMPED (operator, 2026-07-29)** — RFC now reads
+     ACCEPTED on all four parts. (a) ruled in STAGED: home is the SlopSync
+     lib, `field_spec`/`channel_table`/`catalog_feed` in Phase 2 and
+     `packer`/`layout_guard` deferred to Phase 4 so the guard API is designed
+     against real encoder call sites. (b) ruled in REDUCED to the
+     compile-time half (`released` marker + mandatory static_assert pins);
+     the §5.4 reorder/insert-before-tail lint needs a recorded golden shape
+     no static_assert can see and would bind zero layouts pre-tag, so it is
+     deferred to the v1 tag. (c) ruled in as written — no open choice
+     remained, the committed-artifact-plus-`--check` posture being settled
+     precedent. Rejected alternative for (a), recorded: build the layer in
+     SlopDrive and promote later; Phase 6's `examples/author_minimal_hub/`
+     is already a second consumer, and relocating headers afterward means
+     rewriting includes across the whole ported catalog.
+   - **Phase 1a DONE (2026-07-29, SlopSync `42c7299`, pin bumped to it).**
+     JS vocabulary codegen (= RFC-052(c)) + entry-rank/keys-19-23 decode +
+     settings.js rank/category law. The C++ header regenerated
+     BYTE-IDENTICAL, so the firmware had zero exposure. **Seven drifts
+     found by diffing every hand table against the registry — receipts in
+     the commit message, mechanism in TRAPS T20.** The load-bearing
+     one: `SETTING_CATEGORY_NAME` was a 5-entry 0-based array standing in
+     for 14-entry 1-based `ui_categories`, so every settings tab in every
+     JS client had been mislabeled since RFC-047 Phase C2 shipped
+     (category 2 `motion` drew as "Limits", 5 `library` as "Category 5").
+     `SETTING_CATEGORY*` is REMOVED, not aliased. Also landed: the
+     enabled-mask ordering trap — a `rank=hidden` field still CONSUMES its
+     mask bit, so the skip must happen after the counter increments (the
+     reference catalog ships exactly that shape at `settingKey` 4).
+     Gates: slopsync_lint 0, canon_lint 0, gen --check clean on both
+     artifacts, clients/js wire suite ALL PASS with the etag pin
+     `B6 9E B0 62 49 EB E7 3A` still green, webui settings-model suite ALL
+     PASS, `npm run build` clean, device-knowledge gate PASS, slopsim wire
+     smoke ALL PASS, and a render check against slopsim confirming the rail
+     now reads Tuning/Motion/Control/Library.
+     NOT verified against the live device: it was offline this session, and
+     `flagship-render-smoke.mjs` needs a hub that serves the bundle (the
+     sim's HTTP is an API facade only). Owed at the next deploy.
    - **RFC-052(d) landing** (SlopSync repo, additive; land with or before
      Phase 2): catalog.cddl entry key 17 `group_descs` + SPEC §8.1/§8.8
      text + C++ codec encode/decode + clients/js decode + vectors;
@@ -3376,5 +3409,12 @@ The answer to "what's next on the ledger":
    phase. The morning's webui OG-alignment commit is likewise built but not
    uploadfs'd. The evening spec/RFC session's commits (Phase 0 spec work,
    RFC-052(d)/053/054 rulings, AUTHORING.md + containment model, catalog
-   header pointer) are docs/comments only on both repos — still nothing
-   owed to the device.
+   header pointer) are docs/comments only on both repos — nothing owed to
+   the firmware there.
+   **Phase 1a adds a real uploadfs debt:** the settings surface now resolves
+   categories and ranks correctly, and that fix only reaches the machine's
+   own served page via `uploadfs`. Firmware is untouched (the generated C++
+   header is byte-identical), so no `pio run` and no version bump is owed —
+   `uploadfs` alone, stacked with the morning's OG-alignment build. The
+   device was offline this session, so it is also where `flagship-render-
+   smoke.mjs` gets its first run against the new surface.

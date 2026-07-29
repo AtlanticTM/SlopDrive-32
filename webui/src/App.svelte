@@ -123,11 +123,14 @@
   /**
    * ADVANCED DISCLOSURE.
    *
-   * RFC-009 ships an `advanced` flag on settings and nothing used it beyond a
-   * small label. That stopped being cosmetic once this machine started
-   * advertising 44 advanced pattern-modifier settings on top of 20 advanced
-   * tuning knobs: the honest generic rendering of that is a wall of sliders
-   * that buries the six controls anyone actually reaches for.
+   * A setting is advanced when it says so EITHER way — the RFC-009 flag bit or
+   * ui_ranks.advanced, which RENDERING.md §4 defines as that bit's migration
+   * into the rank ladder. settings.js resolves both into one `f.advanced`.
+   *
+   * That stopped being cosmetic once this machine started advertising 44
+   * advanced pattern-modifier settings on top of 20 advanced tuning knobs: the
+   * honest generic rendering of that is a wall of sliders that buries the six
+   * controls anyone actually reaches for.
    *
    * Collapsed by default, per page, with the hidden count stated plainly.
    * Nothing is removed and nothing is hidden silently.
@@ -150,7 +153,7 @@
     const groups = [];
     for (const g of current.cat.groups) {
       const fields = g.fields.filter((f) => {
-        if (showAdvanced || !f.flagBits.advanced) return true;
+        if (showAdvanced || !f.advanced) return true;
         hidden++;
         return false;
       });

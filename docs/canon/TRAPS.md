@@ -286,3 +286,44 @@ very connect whose HELLO slot-pressure path is the only other evictor.
 A refuse-new-load floor MUST be paired with a transport-level idle-RX
 reap (WS: kWsIdleReapMs, ten missed proof-of-life PINGs) or the floor
 becomes the deadlock. Ledger's FW 2.1.88 entry has the live proof.
+
+## T20 — A hand-copied vocabulary drifts silently, and a RETIRED one lies
+
+**Mechanism:** when two languages consume one registry and only one of them
+generates its constants, the hand-written side has no failure mode that looks
+like failure. A wrong wire NUMBER crashes or NACKs; a wrong wire NAME renders.
+The copy compiles, the session goes LIVE, the page draws, and the only symptom
+is a label nobody cross-checks against the source of truth. Drift accumulates
+one skipped registry addition at a time, and every skip is individually
+invisible.
+
+Retiring a vocabulary converts that lag into an active lie. `setting_categories`
+was tombstoned in registry.yaml and succeeded by `ui_categories` on the same
+wire key (10), with a different base (1, not 0) and 14 entries instead of 5.
+The generated C++ side followed. `clients/js/frames.js` kept the old 5-entry
+0-based array, so from the moment the firmware emitted the new vocabulary
+(RFC-047 Phase C2), EVERY settings tab in EVERY JS client was mislabeled:
+category 2 `motion` drew as "Limits", 4 `limits` as "Diagnostics", and 5..14
+resolved to `undefined` and fell back to "Category 5". Nothing errored. The
+UI looked finished.
+
+The census matters more than the one bug: diffing all 24 hand tables against
+the registry found SEVEN drifted — missing frame types, three missing NACK
+codes surfacing as raw numbers, missing CBOR keys, missing session-event
+kinds, and `LIMITS` carrying 16 of 68 entries. Not one had been noticed.
+
+**Fix:** RFC-052(c), SlopSync `42c7299` — `tools/gen_registry_header.py` emits
+`clients/js/generated/registry_vocab.js` alongside the C++ header, committed
+for the same reason (browsers import `clients/js` directly, so there is no
+build step to generate it on demand), with `--check` covering both artifacts.
+The hand tables are gone; what legitimately stays hand-written is named and
+justified in the file banner, because "this one is fine to transcribe" is the
+belief that produced all seven.
+
+**The rule:** a vocabulary with more than one consumer language gets a
+generator and a staleness gate, or it gets one consumer. Never a generator on
+one side and a comment saying "transcribed from" on the other. And when a
+vocabulary is retired, DELETE its identifiers rather than aliasing them onto
+the successor — a working alias is how this survived from Phase C2 to now.
+Bit us: 2026-07-29, found by the authoring-legibility campaign's Phase 1a
+while looking for something else entirely.

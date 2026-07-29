@@ -17,7 +17,7 @@
 
 import { buildSettingsModel, isFieldEnabled, WIDGET, resolveWidget } from '../src/model/settings.js';
 import { claimRoles, withoutClaimed, ROLE } from '../src/model/roles.js';
-import { PACKED, CHANNEL_CLASS } from '../../../SlopSync/clients/js/index.js';
+import { PACKED, CHANNEL_CLASS, UI_CATEGORY, UI_RANK } from '../../../SlopSync/clients/js/index.js';
 
 let fails = 0;
 const ok = (name, cond, extra) => {
@@ -45,10 +45,13 @@ const CATALOG = [
     schema: null,
   },
 
-  // --- category 2 (limits), channel A --------------------------------------
+  // --- ui_categories.limits, channel A -------------------------------------
+  // `categoryKnown` is what catalog.js sets when the id IS in the registry
+  // vocabulary; the fixture mirrors decoder output, so it carries it too.
   {
     id: 0x0211, name: 'travel', cls: CHANNEL_CLASS.STATE, dir: 0, access: 0,
-    maxRateHz: 0, priority: 1, category: 2, settingChannel: 0x0290,
+    maxRateHz: 0, priority: 1, category: UI_CATEGORY.limits, categoryKnown: true,
+    categoryName: 'limits', settingChannel: 0x0290,
     layout: [
       lf('travel_lo', PACKED.f32, {
         unit: 'mm', min: 0, max: 900, step: 1, settingKey: 1,
@@ -69,21 +72,37 @@ const CATALOG = [
     schema: null,
   },
 
-  // --- category 2 (limits), channel B -- SAME category, DIFFERENT channel ---
+  // --- SAME category, DIFFERENT channel ------------------------------------
   // SPEC 8.8: a category spans channels. These must MERGE into one tab.
   {
     id: 0x0212, name: 'ceilings', cls: CHANNEL_CLASS.STATE, dir: 0, access: 0,
-    maxRateHz: 0, priority: 1, category: 2, settingChannel: 0x0290,
+    maxRateHz: 0, priority: 1, category: UI_CATEGORY.limits, categoryKnown: true,
+    categoryName: 'limits', settingChannel: 0x0290,
     layout: [
       lf('hand_speed', PACKED.f32, {
         unit: 'mm/s', min: 1, max: 400, step: 1, settingKey: 7,
         role: ROLE.limitUserSpeed, group: 'Ceilings', default: 60,
       }),
+      // rank=hidden AND a setting: never drawn, but it still CONSUMES mask bit
+      // 1, so hand_accel below must land on bit 2. Ordered between two visible
+      // settings on purpose — that is the arrangement a naive skip corrupts.
+      lf('inert_knob', PACKED.f32, {
+        unit: 'mm', min: 0, max: 1, settingKey: 9, group: 'Ceilings',
+        rank: UI_RANK.hidden, rankName: 'hidden',
+      }),
       lf('hand_accel', PACKED.f32, {
         unit: 'mm/s2', min: 10, max: 9000, step: 10, settingKey: 8,
         role: ROLE.limitUserAccel, group: 'Ceilings', default: 300,
       }),
-      lf('gate', PACKED.bitfield8, { role: ROLE.enabledMask, bits: ['hand_speed', 'hand_accel'] }),
+      // rank=advanced with NO flag bit: the ladder alone must fold it away.
+      lf('jerk_trim', PACKED.f32, {
+        unit: 'mm/s3', min: 0, max: 100, step: 1, settingKey: 10,
+        group: 'Ceilings', rank: UI_RANK.advanced, rankName: 'advanced',
+      }),
+      lf('gate', PACKED.bitfield8, {
+        role: ROLE.enabledMask,
+        bits: ['hand_speed', 'inert_knob', 'hand_accel', 'jerk_trim'],
+      }),
     ],
     schema: null,
   },
@@ -134,13 +153,36 @@ console.log('settings model vs. a machine that does not exist\n');
 const model = buildSettingsModel(CATALOG);
 
 // ---- claim: categories become tabs, and a category SPANS channels ---------
-const limits = model.categories.find((c) => c.id === 2);
+const limits = model.categories.find((c) => c.id === UI_CATEGORY.limits);
 ok('a categorized channel becomes a tab', !!limits);
 ok('two channels sharing a category MERGE into one tab (SPEC 8.8)',
    limits && limits.groups.length === 2,
    limits ? 'groups: ' + limits.groups.map((g) => g.name).join(', ') : 'no tab');
 ok('the merged tab holds fields from BOTH channels',
    limits && new Set(limits.groups.flatMap((g) => g.fields.map((f) => f.channelId))).size === 2);
+
+ok('a known category is labeled from the registry vocabulary',
+   limits && limits.label === 'Limits' && limits.name === 'limits',
+   limits ? limits.label : '');
+
+// ---- claim: the ui_ranks ladder is honored (RENDERING.md §4) --------------
+const ceilings = model.fields.filter((f) => f.channelId === 0x0212);
+ok('rank=hidden NEVER renders',
+   !ceilings.some((f) => f.name === 'inert_knob') && !model.byRole.has('inert_knob'),
+   'drawn: ' + ceilings.map((f) => f.name).join(', '));
+ok('...but its mask bit is still consumed: hand_accel keeps bit 2',
+   ceilings.find((f) => f.name === 'hand_accel').maskBit === 2,
+   'maskBit = ' + ceilings.find((f) => f.name === 'hand_accel').maskBit);
+ok('...and the field after it too: jerk_trim keeps bit 3',
+   ceilings.find((f) => f.name === 'jerk_trim').maskBit === 3);
+ok('rank=advanced folds behind the affordance with no flag bit set',
+   ceilings.find((f) => f.name === 'jerk_trim').advanced === true &&
+   ceilings.find((f) => f.name === 'jerk_trim').flagBits.advanced === false);
+ok('an ordinary field is not advanced',
+   ceilings.find((f) => f.name === 'hand_speed').advanced === false);
+// The absent-rank default (-> detail) is the DECODER's job, pinned in
+// SlopSync's clients/js/test/slopsync-wire.test.mjs. Asserting it here against
+// a hand-built fixture would only prove the fixture.
 
 // ---- claim: a device-defined category renders with ITS OWN label ----------
 const upkeep = model.categories.find((c) => c.id === 180);

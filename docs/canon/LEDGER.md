@@ -3334,9 +3334,15 @@ The answer to "what's next on the ledger":
      PASS, `npm run build` clean, device-knowledge gate PASS, slopsim wire
      smoke ALL PASS, and a render check against slopsim confirming the rail
      now reads Tuning/Motion/Control/Library.
-     NOT verified against the live device: it was offline this session, and
-     `flagship-render-smoke.mjs` needs a hub that serves the bundle (the
-     sim's HTTP is an API facade only). Owed at the next deploy.
+     **LIVE-VERIFIED and DEPLOYED (2026-07-29, same session).** `uploadfs`
+     landed on the device; fw stayed 2.1.88 (page-only, no bump owed) and
+     the served bundle's UI build stamp moved `7190240` -> `2388ea2`, which
+     IS the proof-of-landing for an fs-only deploy (vite stamps
+     `__UI_BUILD__` from `git rev-parse --short HEAD`; a version bump would
+     have needed a firmware flash to mean anything). Live gates:
+     `flagship-render-smoke.mjs` ALL PASS (27 assertions), the Phase 1a
+     render check ALL PASS against the device at control tier, `smoke.ps1
+     -ExpectFw 2.1.88` PASS with no `[STALL]` lines.
    - **RFC-052(d) landing** (SlopSync repo, additive; land with or before
      Phase 2): catalog.cddl entry key 17 `group_descs` + SPEC §8.1/§8.8
      text + C++ codec encode/decode + clients/js decode + vectors;
@@ -3358,7 +3364,59 @@ The answer to "what's next on the ledger":
    - Then Phases 2–6 per plan. Phase 2 is (a)'s first three headers only,
      per the staging ruling. Phase 6 carries the ceilings ruling
      (1000 mm/s / 60k mm/s²) + the ONE etag bump + deploy.
-2. **DATAGRAM-SAFETY + PROVISIONING TODO (2026-07-29 chat; smart order;
+2. **OPEN: the recurring "hub under memory pressure" 503, characterized
+   (2026-07-29, live). Operator-directed root-cause, not another
+   mitigation.** Measured on fw 2.1.88, clean boot, `prev_valid:false`:
+   - **It is NOT a leak.** Free heap returns to ~28-30 KB after both session
+     churn and page serves. The blocker is CONTIGUITY: during churn, free
+     sat at ~23 KB while `maxblock` fell to 11252 B against `handleRoot`'s
+     12288 B floor ([WebUI.cpp:343](src/ui/WebUI.cpp#L343)). 23 KB free in
+     pieces none of which is 12 KB serves no page. Observed `maxblock`
+     ceiling during churn was **12276 B — twelve bytes under the floor**, so
+     the 503 was permanent, not intermittent (5/5 attempts).
+   - **The churn is the webui tab itself** (operator-confirmed nothing else
+     was connected). A BACKGROUNDED tab has its JS timers frozen by the
+     browser, so it stops sending proof-of-life PINGs, hits the 20 s
+     idle-reap, auto-reconnects, and repeats — 19 WS clients in ~100 s.
+     Reap and re-claim overlap by ~1 s (`detach deferred` to the hub task,
+     new client claims the slot before the old one's buffers are released),
+     so two sessions' allocations briefly coexist every cycle. That is the
+     TRAPS T19 addendum ghost pattern with a NEW origin: not a dead peer,
+     a *throttled live* one.
+   - **Serving the page is itself the big transient:** free 28564 ->
+     19836 and `maxblock` 14836 -> 7668 during one load, recovering by
+     ~10 s later, with `http:ui.update blocked 2571ms`. So a single page
+     serve halves the largest block and lands it BELOW the floor that gates
+     the next serve. Steady-state headroom (~28-30 KB free / 14-18 KB
+     maxblock) is simply too thin for a 12 KB contiguous requirement, while
+     **8.1 MB of PSRAM sits unused** — the hub service was already moved
+     there (240976 B); this path never was.
+   - **Which allocator eats the 8.7 KB is NOT yet proven** (lwIP TX pbufs
+     during the stream is the hypothesis, not a finding). Naming it is
+     exactly what the tooling below would settle.
+   - 🚩 **Tooling blocker, flagged against the operator's JTAG proposal:**
+     pioarduino ships Arduino as PRECOMPILED libraries, and its
+     `framework-arduinoespressif32-libs/esp32s3/sdkconfig` has
+     `CONFIG_HEAP_TRACING_OFF=y` and `CONFIG_APPTRACE_DEST_NONE=y`. Both are
+     compile-time kconfig baked into the shipped `.a` files, so JTAG
+     app-trace AND standalone heap tracing are unavailable without building
+     ESP-IDF from source with Arduino as a component — which replaces the
+     working C++23 build model (see the C++20-branch entry). Recommended
+     instead, and available with ZERO sdkconfig change: `heap_caps_get_info()`
+     fills `multi_heap_info_t` with `free_blocks`/`allocated_blocks`/
+     `largest_free_block`, which is a fragmentation histogram over the
+     diagnostics channel we already have — it would have answered
+     "fragmentation or leak?" in one request. `HEAP_POISONING_LIGHT` is
+     already on. Callsite attribution is the ONLY thing this cannot give,
+     and it is not what this bug needed. AWAITING OPERATOR RULING before
+     any implementation.
+   - Two independent fixes, deliberately separated: (i) proximate — the
+     webui must not reconnect-loop while hidden; on `visibilitychange` to
+     hidden it should CLOSE cleanly and reconnect on focus, because fighting
+     browser timer throttling is unwinnable (webui/JS, cheap); (ii)
+     structural — the page-serve path should not need a contiguous internal
+     block while PSRAM is idle (firmware). Neither is started.
+3. **DATAGRAM-SAFETY + PROVISIONING TODO (2026-07-29 chat; smart order;
    each item carries the context its implementer needs. Discipline,
    operator-directed: once an item is implemented AND verified, RIP it
    from this ledger — the durable record is the RFC + the commit; this
@@ -3410,12 +3468,12 @@ The answer to "what's next on the ledger":
      §18-22); WS→BLE migration direction never exercised live. BLE
      idle-reap and PSRAM offload have their own ledger entries — pointed
      at, not restated (C-1).
-3. **Parked webui rapid-fire list** — see the kickoff entry above; queued
+4. **Parked webui rapid-fire list** — see the kickoff entry above; queued
    BEHIND the campaign (several items become trivial on the new surface).
-4. **Session-gate/closeout system** (C-13 proposal + ledger diet + tiered
+5. **Session-gate/closeout system** (C-13 proposal + ledger diet + tiered
    canon loading, designed in chat 2026-07-29) — implement after Phase 0;
    this closeout entry is its manual prototype.
-5. **Deploy state:** device runs 2.1.88. This session's fixes (dead-code
+6. **Deploy state:** device runs 2.1.88. This session's fixes (dead-code
    deletions, comment/doc corrections) are committed but NOT deployed — no
    behavior change intended; deploy rides with the next firmware-touching
    phase. The morning's webui OG-alignment commit is likewise built but not
@@ -3423,10 +3481,8 @@ The answer to "what's next on the ledger":
    RFC-052(d)/053/054 rulings, AUTHORING.md + containment model, catalog
    header pointer) are docs/comments only on both repos — nothing owed to
    the firmware there.
-   **Phase 1a adds a real uploadfs debt:** the settings surface now resolves
-   categories and ranks correctly, and that fix only reaches the machine's
-   own served page via `uploadfs`. Firmware is untouched (the generated C++
-   header is byte-identical), so no `pio run` and no version bump is owed —
-   `uploadfs` alone, stacked with the morning's OG-alignment build. The
-   device was offline this session, so it is also where `flagship-render-
-   smoke.mjs` gets its first run against the new surface.
+   **Phase 1a's uploadfs is PAID (2026-07-29):** device serves UI build
+   `2388ea2`, fw still 2.1.88, all live gates green — details in the Phase
+   1a entry above. That also carried the morning's OG-alignment build to the
+   device, since an fs image is whole-bundle. **Nothing is owed to the
+   device as of this closeout.**

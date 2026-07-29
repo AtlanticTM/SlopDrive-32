@@ -198,6 +198,10 @@
   <TelemetryChart />
 {/snippet}
 
+{#snippet transportAccessory()}
+  <TransportBar />
+{/snippet}
+
 {#snippet heroCard(item)}
   <item.hero.component fields={item.hero.fields} />
 {/snippet}
@@ -257,10 +261,10 @@
            and pretending otherwise would be the exact lie the doctrine forbids. -->
     </section>
   {:else if isDesktop}
-    <div class="instrument">
-      <TransportBar />
-      <HeroStrip heroes={instrumentHeroes} />
-    </div>
+    <!-- Desktop: the transport row rides INSIDE the instrument hero row
+         (the OG .hero-row — numerals left, transport right, one baseline),
+         threaded down as a layout snippet. -->
+    <HeroStrip heroes={instrumentHeroes} accessory={transportAccessory} />
     <div class="frame">
       <!-- The tablist role lives on an inner div: <nav> is a landmark, and ARIA
            forbids giving a non-interactive landmark an interactive role. -->
@@ -314,25 +318,14 @@
 </div>
 
 <style>
-  /* ---- instrument zone: hero strip + transport row -----------------------
+  /* ---- instrument zone (mobile only) -------------------------------------
      TransportBar is the OG's `.spine-transport` (Pause/Halt/E-Stop/Home),
-     promoted out of the safety dock into the hero row (operator ruling
-     2026-07-28). Desktop overlays it top-right over the hero strip, the way
-     the OG's hero row carried it; a phone's page scrolls instead, so it gets
-     its own full-width row ABOVE the hero strip (OG mobile behavior), each
-     button sharing the row equally. Breakpoint matches the `isDesktop`
-     matchMedia above and SafetyBar's own 960px rule. */
-  .instrument {
-    position: relative;
-  }
-  @media (min-width: 960px) {
-    .instrument :global(.transportbar) {
-      position: absolute;
-      top: 0;
-      right: 0;
-      z-index: 5;
-    }
-  }
+     promoted out of the safety dock (operator ruling 2026-07-28). Desktop
+     threads it INTO the instrument hero row via the accessory snippet — no
+     overlay positioning; the row itself is the alignment. A phone's page
+     scrolls instead, so it keeps its own full-width row ABOVE the hero
+     strip (OG mobile behavior), each button sharing the row equally.
+     Breakpoint matches the `isDesktop` matchMedia above. */
   @media (max-width: 959px) {
     .instrument {
       display: flex;

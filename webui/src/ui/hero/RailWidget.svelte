@@ -59,7 +59,7 @@
   import HeroNumerals from './HeroNumerals.svelte';
   import PlanStrip from '../widgets/PlanStrip.svelte';
 
-  let { fields } = $props();
+  let { fields, accessory = null } = $props();
   // Read through the prop rather than destructuring once — heroes.js hands us
   // a fresh `fields` object whenever the catalog rebuilds, and a plain
   // destructure would freeze on the first machine we ever saw.
@@ -780,20 +780,36 @@
 </script>
 
 <div class="hero rail-hero">
-  {#if pos}
-    <HeroNumerals
-      posField={pos} velField={vel} targetField={target}
-      posVal={posDisplay} speedVal={speedDisplay} targetVal={targetDisplay}
-      moving={moving} fresh={fresh} targetFresh={targetFresh}
-      extentHi={hi}
-    />
-  {/if}
+  <!-- The OG .hero-row: numerals left, transport accessory right, ONE flex
+       row sharing a baseline (align-items flex-end). The accessory is a
+       layout slot handed down by the composition root — this widget never
+       knows what is in it, only that the hero row's right side is where the
+       OG carried its transport controls. -->
+  <div class="rw-hero-row">
+    {#if pos}
+      <HeroNumerals
+        posField={pos} velField={vel} targetField={target}
+        posVal={posDisplay} speedVal={speedDisplay} targetVal={targetDisplay}
+        moving={moving} fresh={fresh} targetFresh={targetFresh}
+        extentHi={hi}
+      />
+    {:else}
+      <span aria-hidden="true"></span>
+    {/if}
+    {#if accessory}
+      <div class="rw-hero-accessory">{@render accessory()}</div>
+    {/if}
+  </div>
 
   <!-- OG information architecture: the window readout is NOT a separate hero
        numeral row — it lives exactly once, on the band label below
        (`lo–hi · width`). A second min/max readout up here would be the same
        fact with two homes (CANON C-1); removed rather than restyled. -->
 
+  <!-- The OG split: the hero row above is a FLAT strip; everything from the
+       tape down lives in the outlined rail panel (`.rail-panel`, the OG's
+       corner-bracket chrome). One card around both was never the OG look. -->
+  <div class="rail-panel og-panel">
   {#if move}
     <!-- Input tape — a live command surface. In the original this was
          two layers: a full-width TRACK (dashed guides marking full travel)
@@ -962,14 +978,36 @@
   {#if min.desc || max.desc}
     <p class="rail-desc explain">{min.desc || max.desc}</p>
   {/if}
+  </div>
 </div>
 
 <style>
+  /* FLAT, deliberately — the OG hero strip carried no card chrome; the
+     outlined panel below (.rail-panel) is where the instrument frame lives.
+     One card around both was never the OG look. */
   .hero {
-    background: var(--bg-card);
-    border: 1px solid var(--line);
-    border-radius: var(--r);
-    padding: var(--gap);
+    display: flex;
+    flex-direction: column;
+    gap: 0;
+  }
+
+  /* The OG .hero-row: numerals left, transport accessory right, one shared
+     baseline. */
+  .rw-hero-row {
+    display: flex;
+    justify-content: space-between;
+    align-items: flex-end;
+    gap: 12px;
+    padding: 10px 0 8px;
+  }
+  .rw-hero-accessory { flex: 0 0 auto; }
+
+  /* OG .rail-panel spacing: 10px vertical margin so the og-panel's 4px
+     outline-offset frame never collides with the row above or the content
+     below; padding per the OG desktop override. */
+  .rail-panel {
+    margin: 10px 0;
+    padding: 10px 20px 6px;
     display: flex;
     flex-direction: column;
     gap: var(--gap);

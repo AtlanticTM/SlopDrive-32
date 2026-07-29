@@ -33,7 +33,12 @@ try {
 const SHELL = !!import.meta.env.TAURI_ENV_PLATFORM;
 
 async function boot() {
-  let host = location.hostname || '192.168.1.229';
+  // ?hub=<ip> points THIS page at a hub other than its own origin — the dev
+  // loop (vite dev against the live machine; /uitoken stays same-origin-only
+  // so such a session lands at watch tier, which is honest). Harmless on the
+  // embedded page: absent parameter, origin rules as always.
+  const hubOverride = new URLSearchParams(location.search).get('hub');
+  let host = hubOverride || location.hostname || '192.168.1.229';
   if (SHELL) {
     const { fetch: tauriFetch } = await import('@tauri-apps/plugin-http');
     const { setHttpGet } = await import('../../../SlopSync/clients/js/index.js');

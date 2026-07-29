@@ -1,0 +1,14 @@
+import { chromium } from 'playwright';
+import { mkdirSync } from 'node:fs';
+const OUT = 'test/evidence';
+mkdirSync(OUT, { recursive: true });
+const b = await chromium.launch();
+const p = await b.newPage({ viewport: { width: 1440, height: 900 } });
+await p.goto('http://localhost:5199/?hub=192.168.1.229', { waitUntil: 'domcontentloaded' });
+await p.waitForSelector('.spine-rail-host', { timeout: 25000 });
+await p.waitForTimeout(1200);
+await p.screenshot({ path: OUT + '/ours-dev.png' });
+const hero = await p.$('.rail-hero');
+if (hero) await hero.screenshot({ path: OUT + '/ours-hero.png' });
+console.log('done');
+await b.close();

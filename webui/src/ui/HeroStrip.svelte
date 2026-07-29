@@ -9,14 +9,17 @@
    * renders nothing — a bare settings page is the correct, honest result for
    * that machine, not an error state.
    */
-  let { heroes } = $props();
+  // `accessory` is a layout snippet forwarded to the FIRST hero only — the
+  // instrument hero's row carries the transport controls (OG .hero-row).
+  // This strip stays ignorant of what the snippet contains.
+  let { heroes, accessory = null } = $props();
 </script>
 
 {#if heroes && heroes.length}
   <div class="hero-strip">
-    {#each heroes as hero (hero.id)}
+    {#each heroes as hero, i (hero.id)}
       <div class="hero-slot" data-hero={hero.id}>
-        <hero.component fields={hero.fields} />
+        <hero.component fields={hero.fields} accessory={i === 0 ? accessory : null} />
       </div>
     {/each}
   </div>

@@ -18,8 +18,10 @@
 //   changing the hub in lockstep.
 //   Wire sizes are noted per entry so a budget overrun is caught by eye;
 //   there is no packed struct to static_assert against.
-// See: SlopSync SPEC.md and registry.yaml (SlopSync repo),
-// docs/slopsync/CHANNEL-MAP.md (channel id grid / renumber history).
+// See: SlopSync spec/AUTHORING.md ("you want X on screen -> you author Y" —
+// read it BEFORE editing annotations here), SPEC.md and registry.yaml
+// (SlopSync repo), docs/slopsync/CHANNEL-MAP.md (channel id grid /
+// renumber history).
 
 #include <cstdint>
 

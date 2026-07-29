@@ -3157,6 +3157,12 @@ The answer to "what's next on the ledger":
      decode + settings.js rank/category law. Screenshot-verified in Tauri.
      Note: the codegen half IS RFC-052(c) — if the operator amends RFC-052,
      1a's codegen follows the amended shape.
+   - **RFC-052(d) landing** (SlopSync repo, additive; land with or before
+     Phase 2): catalog.cddl entry key 17 `group_descs` + SPEC §8.1/§8.8
+     text + C++ codec encode/decode + clients/js decode + vectors;
+     duplicate rule = first-in-catalog-order (in the RFC). Reference
+     catalog ADOPTION (preset-meta card descs and friends) rides the
+     Phase 6 sweep inside the one etag bump.
    - **Phase 1b** (widget churn — operator eyeballs before merge): §8.2
      archetype table with the pinned slider/stepper rule (see plan).
    - Then Phases 2–6 per plan. Phase 6 carries the ceilings ruling

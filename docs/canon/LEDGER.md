@@ -3146,7 +3146,10 @@ The answer to "what's next on the ledger":
      authored, status PROPOSED — awaiting operator stamp** (a: author
      tables, b: released marker, c: JS vocab codegen, d: entry key 17
      `group_descs`) [veto-able; written exactly to the approved plan's
-     scope]. Bycatch: SlopSync's docs-site generator had been failing
+     scope]. **(d) RULED IN (operator, 2026-07-29, SlopSync `f93353f`):**
+     card descs a necessity — context factors out of field desc budgets;
+     first-in-catalog-order duplicate rule added at the ruling. (a)–(c)
+     still awaiting stamp. Bycatch: SlopSync's docs-site generator had been failing
      since RFC-051 landed (missing SOURCE_LINKS anchor) — fixed, 4 stale
      generated pages caught up. Gates: slopsync_lint 0,
      gen_registry_header --check clean, etag pin test green post-bump.

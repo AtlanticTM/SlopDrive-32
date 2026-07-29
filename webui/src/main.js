@@ -40,17 +40,19 @@ async function boot() {
       const r = await tauriFetch(url, { method: 'GET' });
       return r.ok ? await r.text() : null;
     });
-    host = localStorage.getItem('shell_host') || '192.168.1.229';
-
     // Shell chrome: discovery + transport control live OUTSIDE the kernel UI.
     const { default: ShellBar } = await import('./shell/ShellBar.svelte');
     const bar = document.createElement('div');
     document.body.appendChild(bar);
     mount(ShellBar, { target: bar });
 
-    // In BLE mode the ShellBar owns connecting (needs a scan/pick first);
-    // auto-connect only the WS path.
-    if ((localStorage.getItem('shell_mode') || 'ws') === 'ws') connect({ host });
+    // NO baked-in host: discovery IS the shell's front door (operator ruling,
+    // 2026-07-28). Auto-connect only re-joins a hub the operator explicitly
+    // chose before (saved by ShellBar on a successful WS connect).
+    const saved = localStorage.getItem('shell_host');
+    if (saved && (localStorage.getItem('shell_mode') || 'ws') === 'ws') {
+      connect({ host: saved });
+    }
     return;
   }
   connect({ host });

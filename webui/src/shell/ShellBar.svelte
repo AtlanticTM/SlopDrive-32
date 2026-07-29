@@ -18,7 +18,9 @@
 
   let scanning = $state(false);
   let hubs = $state([]);
-  let manualHost = $state(localStorage.getItem('shell_host') || '192.168.1.229');
+  // No baked-in address: discovery is the front door. The input remembers
+  // only a host the operator themselves connected to before.
+  let manualHost = $state(localStorage.getItem('shell_host') || '');
   let mode = $state(localStorage.getItem('shell_mode') || 'ws');
   let note = $state('');
   let expanded = $state(true);
@@ -49,7 +51,10 @@
     }
   }
 
-  function connectBle(dev) {
+  async function connectBle(dev) {
+    // Never GATT-connect with a scan still running: Android's stack handles
+    // it badly, and the scan has done its job the moment a hub is chosen.
+    if (scanning) { await stopScan().catch(() => {}); scanning = false; }
     disconnect();
     mode = 'ble';
     localStorage.setItem('shell_mode', 'ble');
@@ -58,6 +63,8 @@
   }
 
   function connectWs(host, port) {
+    if (!host || !host.trim()) { note = 'enter a hub address or scan'; return; }
+    host = host.trim();
     disconnect();
     mode = 'ws';
     localStorage.setItem('shell_mode', 'ws');

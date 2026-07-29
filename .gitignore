@@ -38,6 +38,13 @@ tools/*
 # Channel-space grid VISUAL generator (RFC-047 companion; output is generated
 # per-run evidence, gitignored below).
 !tools/gen_channel_grid.py
+# platformio.ini names this as pre:tools/ota_auth.py in every -ota env, so a
+# clone without it cannot build ANY over-the-air target. It reads the password
+# out of include/secrets.h at build time and holds no secret of its own.
+!tools/ota_auth.py
+# DOCTRINE and TRAPS T-nn treat catalog_lint as binding doctrine enforcement,
+# same standing as canon_lint.
+!tools/catalog_lint.py
 .clangd
 .clang-format
 .cache/
@@ -66,8 +73,6 @@ AIM_Servo_Motor_Datasheet_EN_with_images.pdf
 # Build outputs, captures & scratch artifacts — generated, not source.
 /build/
 sim/slopsim/build/
-$null
-flashpack/
 
 # Generated channel-grid visual (tools/gen_channel_grid.py)
 docs/slopsync/channel-grid.html

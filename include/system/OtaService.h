@@ -21,15 +21,12 @@
 //      the curl-from-anywhere fallback, token-authenticated.
 //
 //      THIS IS THE OPERATOR'S ONLY WORKING DEPLOYMENT PATH (espota is broken
-//      on their host), so it is ported to the PsychicHttp backend with the
-//      byte pump FACTORED, not forked: otaBeginWrite/otaWriteChunk/
-//      otaEndWrite/otaAbortWrite are the single Update.begin/write/end/abort
-//      state machine, and sendUploadResult() is the single final-response
-//      policy. Only the ~15 lines that shovel chunks INTO that pump differ per
-//      backend, because the two frameworks hand over chunks differently
-//      (WebServer's HTTPUpload status enum vs Psychic's upload callback).
-//      Auth, the safety gate, the constant-time compare, and the
-//      arm-reboot-then-finish ordering are shared code, reached identically.
+//      on their host). The byte pump is FACTORED, not inlined into the route:
+//      otaBeginWrite/otaWriteChunk/otaEndWrite/otaAbortWrite are the single
+//      Update.begin/write/end/abort state machine, and sendUploadResult() is
+//      the single final-response policy. Auth, the safety gate, the
+//      constant-time compare, and the arm-reboot-then-finish ordering all live
+//      in that shared code.
 //
 // SAFETY GATE (prepareForOta(), .clinerules §2 real-time safety):
 //   Before ANY flash write begins we (1) stop the pattern engine and hard-stop
@@ -45,7 +42,6 @@
 // the safety gate). Placement is Core 0 only — never the motion-critical core.
 
 class SlopHttpServer;
-class PsychicRequest;
 class MotionArbiter;
 class PatternEngine;
 struct SystemState;
@@ -82,38 +78,26 @@ private:
 
     // Constant-time X-OTA-Token header check against the shared secret.
     bool checkAuthToken();
-    // The same check against an already-extracted header value (the Psychic
-    // path reads headers straight off the request). NULL/absent => refuse.
+    // The same check against an already-extracted header value.
+    // NULL/absent => refuse.
     bool checkAuthTokenValue(const char* token);
     static bool constantTimeEquals(const char* a, const char* b);
 
-    // ---- SHARED OTA byte pump (backend-neutral) -----------------------------
-    // Exactly one Update.begin/write/end/abort state machine. Both the
-    // WebServer HTTPUpload pump and the PsychicHttp upload callback funnel
-    // through these; nothing else in the class touches Update.
+    // ---- OTA byte pump ------------------------------------------------------
+    // Exactly one Update.begin/write/end/abort state machine. The WebServer
+    // HTTPUpload pump funnels through these; nothing else in the class touches
+    // Update.
     void otaBeginWrite(int command);              // first chunk: gate + Update.begin
     void otaWriteChunk(const uint8_t* data, size_t len);
     void otaEndWrite(size_t total);               // last chunk: Update.end(true)
     void otaAbortWrite(const char* why);          // transfer died: Update.abort()
 
-    // Shared final-response policy (401 / 400 / 200 + arm reboot + finishOta).
-    // Speaks through SlopHttpServer::send(), which both backends implement.
+    // Final-response policy (401 / 400 / 200 + arm reboot + finishOta).
+    // Speaks through SlopHttpServer::send().
     void sendUploadResult(int command);
 
     // Sync-WebServer chunked upload pump. command = U_FLASH or U_SPIFFS.
     void handleUpload(int command);
-
-#if defined(USE_PSYCHIC_HTTP)
-    // PsychicHttp chunked upload pump. Returns ESP_OK ALWAYS so the body is
-    // fully drained even on a rejected token — that is what lets the final
-    // response reach curl as a clean 401 instead of a broken pipe, exactly as
-    // the WebServer path behaves today.
-    int  psychicUploadChunk(int command, uint64_t index,
-                            uint8_t* data, size_t len, bool final);
-    // Called when the framework abandoned the transfer before the final chunk
-    // (socket error, malformed multipart). Idempotent.
-    void psychicUploadSalvage(int command);
-#endif
 
     SystemState&    _state;
     MotionArbiter&  _arbiter;

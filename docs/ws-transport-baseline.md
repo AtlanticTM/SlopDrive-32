@@ -5,7 +5,7 @@
 
 **Status:** measured live on 192.168.1.229, 2026‑07‑26, fw **2.1.56** (the
 pre‑migration build). Everything below is observed, not reasoned — every number
-has a JSON summary behind it, produced by `tools/slopsoak.py`.
+has a JSON summary behind it, produced by the SlopSync repo's `tools/slopsoak.py`.
 
 **Truth check (2026-07-28): this is the BEFORE side of a migration that
 has since landed.** links2004 is gone — deleted outright, not swapped —
@@ -44,20 +44,20 @@ before touching it: build a harness, capture the old numbers, and write down wha
 
 ## 2. The harness
 
-`tools/slopsoak.py` — a stability/soak harness, tracked in git precisely because
+the SlopSync repo's `tools/slopsoak.py` — a stability/soak harness, tracked in git precisely because
 it is the evidence‑generating tool for this migration.
 
 ```bash
 set PYTHONIOENCODING=utf-8         # or unicode output dies on cp1252
 
-python tools/slopsoak.py --label links2004-baseline            # full suite
-python tools/slopsoak.py --scenarios wedge-chatty              # just the killer
-python tools/slopsoak.py --scenarios soak --soak-duration 300  # steady state
-python tools/slopsoak.py --list
+python ../SlopSync/tools/slopsoak.py --label links2004-baseline            # full suite
+python ../SlopSync/tools/slopsoak.py --scenarios wedge-chatty              # just the killer
+python ../SlopSync/tools/slopsoak.py --scenarios soak --soak-duration 300  # steady state
+python ../SlopSync/tools/slopsoak.py --list
 ```
 
 It emits a human table **and** `slopsoak-<label>-<timestamp>.json`, so two runs
-diff directly. It imports `tools/slopsync_probe.py` for the wire layer (frame
+diff directly. It imports the SlopSync repo's `tools/slopsync_probe.py` for the wire layer (frame
 header, the §5.3 deterministic CBOR profile, message builders, registry
 constants) rather than duplicating it — one wire implementation, no drift.
 

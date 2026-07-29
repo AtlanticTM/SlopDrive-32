@@ -356,9 +356,10 @@ dropping them is free (the browser reconnects on demand). Verified: 75 s
 live-tab sampler went from 5 stalls (2× 9.7 s) to worst-case ~1 s across
 two runs; page loads 0.6–0.7 s steady.
 
-This subclass is scheduled demolition at the §4 PsychicHttp migration —
-whose case is now evidence-backed for the HTTP half (parallel sockets make
-this whole class structurally impossible). Riding along in 2.1.46:
+This subclass was scheduled demolition at the §4 PsychicHttp migration. That
+migration was retired unflashed (2026-07-29), so the subclass is PERMANENT —
+see the header comment in `include/ui/IdleGuardWebServer.h`. Riding along in
+2.1.46:
 SlopSyncHubService::loadPairing() opens the "slopsync" NVS namespace
 read-write so first boot creates it and the scary Preferences NOT_FOUND
 E-line (operator-misread as a boot blocker) never logs again.

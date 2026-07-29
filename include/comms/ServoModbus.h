@@ -23,7 +23,7 @@
 //   auto-direction module handles DE/RE from TX with no explicit pin.
 //   Motion stays pure step/dir on Core 1 — this bus is telemetry/config
 //   only, never that backend's motion path.
-// See: AIM_servo_modbus_reference.md (datasheet).
+// See: reference/AIM_servo_modbus_reference.md (datasheet).
 
 #if defined(FEATURE_RS485_MODBUS)
 
@@ -322,7 +322,7 @@ private:
     uint8_t _sp_period_ms = 10;
 
     // BENCH KNOB — no-echo (fire-and-forget) setpoint mode. OSSM-RS (ground
-    // truth per operator: the local AIM_servo_modbus_reference.md is a
+    // truth per operator: the local reference/AIM_servo_modbus_reference.md is a
     // translated datasheet of uncertain accuracy) says the drive echoes 0x7B;
     // ours never has — but every frame so far commanded the CURRENT position,
     // so "accepted silently, no echo" is still unfalsified. With this knob on,

@@ -3128,6 +3128,152 @@ codegen sugar — only if tables prove insufficient. Session-gate/closeout
 system (C-13 proposal + ledger diet + tiered canon loading) — designed in
 chat 2026-07-29, implement after campaign Phase 0.
 
+## TREE CLEANUP (operator: "if it doesn't spark joy get rid of it", 2026-07-29)
+
+Repo went **13.7 GB -> 618 MB**. Nothing was deleted outright unless it was a
+pure regenerable cache; everything with content was MOVED, not destroyed.
+
+**Archive home:** `../SlopDrive-32-archive/2026-07-29-cleanup/` (48 MB, outside
+the repo root). This is the one home for the answer to "where did that
+artifact go" — dated soak runs, simrun captures, the three `SD32-*.md` dated
+reports, root `build/`, `flashpack/`, `tools/` scratch, obsolete `intiface/`,
+retired webui evidence, and the pre-strip 720-line README. LEDGER entries that
+cite `SD32-OVERNIGHT-REPORT.md` and the soak JSONs by name still resolve —
+the evidence exists, it just lives there now (stamp-or-hearsay intact).
+
+- **13.1 GB was regenerable build output**: `webui/src-tauri/target` (12 GB,
+  `cargo build`), `gen/android/app/build` (1.1 GB, `tauri android build`),
+  plus `gen/schemas` and `webui/dist` (rebuilt by `build_webui.py` on every fs
+  build). `sim/slopsim/build` went 150 MB -> 5.8 MB: **`slopsim.exe` and its
+  `compile_commands.json` were KEPT IN PLACE** because `~/bin/slopsim.cmd` and
+  `~/bin/SlopCLI.cmd` both launch that exact path, and clangd has no other
+  compile db for `sim/`. 118 MB of it was three vendored `.git` histories
+  (`GIT_SHALLOW` never took effect on the FetchContent clones).
+- **`intiface/` retired** (operator ruling): its device-config described the
+  deleted NUS TCode BLE service — nothing in it worked on current firmware.
+  README's three pointers rewritten rather than left dangling.
+- **README stripped to a stub** (operator: "empty it except the most basic
+  info"). The CERN-OHL-S v2 notice and vendored-component attribution were
+  kept substantive on purpose — that license is strongly reciprocal, so
+  conveyance obligations are not tidyable prose.
+- **`reference/` created**: AIM datasheet PDF, `PCB Layout.diy`, and
+  `AIM_servo_modbus_reference.md` moved out of root. The four firmware comment
+  pointers in `ServoModbus.{h,cpp}` were repointed in the same pass.
+- **Two `.gitignore` defects fixed, both pre-existing:** `tools/*` excluded
+  `tools/ota_auth.py`, which `platformio.ini` names as `pre:` in every `-ota`
+  env — **a fresh clone could not build ANY over-the-air target.** Same for
+  `tools/catalog_lint.py`, which DOCTRINE and TRAPS treat as binding. Both now
+  whitelisted; `ota_auth.py` holds no secret of its own (it parses
+  `include/secrets.h` at build time). Also removed a literal `$null` line left
+  by a botched PowerShell append.
+- **Stale claims corrected** in living docs: CHANNEL-MAP.md's RFC-QUEUE links
+  (file moved repos; the GENERATED block was left alone and
+  `gen_channel_map.py --check` still passes), slopdeck/DESIGN.md's "Tauri 2
+  shell still open" (the wrap landed; loader/Tier-2 remain open),
+  REFACTOR-ROADMAP's "async web server parked" heading and its
+  no-live-GATT-session line, and ws-transport-baseline.md's copy-pasteable
+  `python tools/slopsoak.py` commands (harness lives in the SlopSync repo).
+- **Kept deliberately, against a subagent's archive recommendation:**
+  `docs/ws-transport-baseline.md` and `docs/webui-legacy-diagnosis.md`.
+  `lib/espasyncwebserver/VENDORED.md` cites the baseline PROSPECTIVELY as the
+  numbers a future transport replacement must beat, and both docs supply the
+  "why" behind live comments in `WebUI.cpp` and
+  `SlopSyncAsyncWsTransport.h`. Historical in origin, load-bearing in use.
+  `docs/http-plane-retirement.md` also stays — historical by its own
+  admission, but ~15 inbound pointers including five firmware comments.
+- `webui/test/evidence/` reduced to what is actually READ: `og-ref/` (the
+  pixel ground-truth set) and `trace-{25,30}hz.json` (read by
+  `render-vs-samplerate-probe.mjs`). Everything else there was write-only
+  output, overwritten on each run.
+- Empty directories: **zero** repo-wide. `docs-site/` was a stray `mkdocs
+  build` artifact left after the split; the real one is in the SlopSync repo.
+
+**PSYCHICHTTP RETIRED + GLM BRANCH DELETED (operator ruling 2026-07-29).**
+"psychichttp is dead, and the glm branch, both can go."
+
+- **The HTTP plane is now single-backend, permanently.** The sync `WebServer` +
+  `IdleGuardWebServer` is it. Removed: `[env:sd32-psychic]` and
+  `[env:sd32-psychic-ota]` plus their A/B rationale (73 lines of
+  platformio.ini), the whole `USE_PSYCHIC_HTTP` B-side of
+  `OtaService.cpp` (139 lines) and its two declarations in `OtaService.h`,
+  the B-side of `include/ui/SlopHttpServer.h`, and
+  `src/ui/SlopHttpServer.cpp` **entirely** — proof-of-no-callers (C-9): the
+  file's whole body sat between `#if defined(USE_PSYCHIC_HTTP)` at line 8 and
+  `#endif` at line 268, its last line, so it compiled to nothing in every
+  shipping env. `docs/psychic-migration.md` archived.
+- **`SlopHttpServer` KEPT as a name** — it is now a zero-member subclass with
+  one implementation, which ponytail would delete on sight. It stays: 57 call
+  sites across 11 files name it, and `WebUI.h`/`OtaService.h` forward-declare
+  it instead of including the WebServer headers. Collapsing it is a wide
+  rename for zero functional gain. Comment rewritten to say what it now IS
+  rather than the A/B it no longer is (C-12).
+- **The idle guard is now PERMANENT, not transitional.** Three places said it
+  was "scheduled demolition" at the Psychic migration — `IdleGuardWebServer.h`,
+  `webui-legacy-diagnosis.md`, REFACTOR-ROADMAP §4. All corrected. §4 is CLOSED:
+  its re-evaluation is answered, and its research shortlist is kept only so the
+  option is never re-shopped.
+- **Verified, not assumed:** `pio run -e sd32-ota` SUCCESS (RAM 24.2%, flash
+  28.5%) and `-e sd32-async-ota` SUCCESS. This touched the OTA upload path,
+  which is the only working deployment path on this host, so a compile was the
+  floor. `compile_commands.json` regenerated so clangd does not index a
+  deleted file. Not deployed — no behavior change intended for the shipping
+  envs, which never defined `USE_PSYCHIC_HTTP`.
+- **Branch `T2WebuiGLM` deleted.** It held 1 unmerged commit, `b2db0fb`
+  "webui pass test". Recovery, while the reflog lives:
+  `git branch T2WebuiGLM b2db0fb`.
+
+**Still unresolved:** four probably-superseded probe scripts in
+`webui/test/` (`gap-probe`, `tap-probe`, `jitter-measure`,
+`render-vs-samplerate-probe`) — left alone because they are hand-written
+source, not output.
+
+## AGENT TOOLING SET UP (2026-07-29) — clangd/LSP, playwright, ponytail scope
+
+Operator installed five plugins (frontend-design, claude-md-management,
+playwright, typescript-lsp, clangd-lsp) plus ponytail. Configuration landed;
+the parts worth ledgering because they are invisible in a fresh clone:
+
+- **clangd** is the Espressif fork already shipped by PlatformIO
+  (`tool-clangd-esp`, v21.1.3) — no LLVM install. Its bin dir and
+  `toolchain-xtensa-esp-elf/bin` were appended to the **user PATH** (registry
+  API, not `setx` — PATH is 1386 chars and `setx` truncates at 1024). The
+  xtensa driver must be on PATH or clangd cannot extract system includes for
+  any firmware TU.
+- **`.clangd` is gitignored in both repos** and holds absolute host paths, so
+  it does not survive a clone. Its trap comments are the only record of three
+  mechanisms: the ESP fork defaults to a riscv32 triple (kills every host
+  parse), fallback commands name a driver `clang` that is not installed, and
+  clangd *infers* a command for db-absent files from the nearest firmware TU —
+  dragging every IDF include into a host parse. Fixed via `Compiler:` and a
+  deliberately-empty `CompilationDatabase:` in the host-path fragment.
+- SlopSync had **no** `.clangd` at all; one was added there (host g++ driver,
+  `gnu++2b`, slopsync/doctest/fuzz include roots).
+- Verified with `clangd --check`: firmware TU and `examples/slopsync_demo`
+  clean; SlopSync native tests clean; SlopDrive `test/native` down to one
+  benign GCC-intrinsic-vs-clang diagnostic (`conflicting_types` on
+  `_m_prefetchw`) — deliberately NOT suppressed, since blanket-suppressing a
+  real diagnostic class to hide a header artifact is how a genuine
+  conflicting declaration slips through later.
+- **typescript-lsp** needs TypeScript **5.x**; `npm i -g typescript` now
+  installs 7.x, whose native rewrite has no `lib/tsserver.js` and which the
+  language server rejects outright. Pinned to 5.9.3.
+- **playwright MCP** defaults to the real Chrome channel, absent on this host.
+  Repo `.mcp.json` pins `--browser chromium` to use the bundled build the
+  webui evidence tooling already uses.
+- **claude-md-management DISABLED** (operator, 2026-07-29): its improver
+  rewrites CLAUDE.md against generic templates, which would inline rules that
+  belong in CANON/DOCTRINE (C-1 break) — and CLAUDE.md is gitignored, so a bad
+  rewrite is not recoverable with `git checkout`.
+- **frontend-design KEPT, scoped** — binding home is DOCTRINE §3 "House look
+  is ground truth". Short form: `webui/src/style.css` is the house look and it
+  already exists; the skill is for precedent-free surfaces, and safety colors
+  are never an aesthetic decision.
+- **Ponytail scope is an operator ruling** — binding home is DOCTRINE §4
+  "Minimalism-mode precedence", not restated here (C-1). Short form:
+  webui/docs/tools yes, firmware C++ and SlopSync no. Landed in DOCTRINE
+  rather than CLAUDE.md because CLAUDE.md is gitignored and a rule that binds
+  every agent cannot live in an untracked file.
+
 ## ⏭ NEXT STEPS (2026-07-29 closeout, updated through the same-day spec/RFC session — START HERE)
 
 The answer to "what's next on the ledger":

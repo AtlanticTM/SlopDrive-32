@@ -1,14 +1,7 @@
 #pragma once
 
-// This band-aid exists ONLY for the synchronous WebServer's single-serve-slot
-// stall. Under the PsychicHttp backend (-DUSE_PSYCHIC_HTTP) the stall class is
-// structurally impossible, so this file must be ABSENT from that build rather
-// than merely unused — pulling it in would drag <WebServer.h> back along with
-// it. Include ui/SlopHttpServer.h instead; it picks the right backend.
-#if defined(USE_PSYCHIC_HTTP)
-#error "IdleGuardWebServer is the sync-WebServer band-aid and does not exist in the PsychicHttp build. Include ui/SlopHttpServer.h."
-#endif
-
+// This exists ONLY for the synchronous WebServer's single-serve-slot stall.
+// Prefer including ui/SlopHttpServer.h — that is the name call sites use.
 #include <WebServer.h>
 
 // ============================================================================
@@ -31,9 +24,11 @@
 // nothing (it opens a fresh connection on demand).
 //
 // _currentClient/_currentStatus/_statusChange are protected in the core
-// class, which is why this is a subclass rather than a wrapper. Scheduled to
-// die with the roadmap-§4 PsychicHttp migration (parallel sockets make the
-// whole starvation class impossible).
+// class, which is why this is a subclass rather than a wrapper.
+//
+// NOT transitional. The PsychicHttp A/B that was going to retire this whole
+// starvation class was retired instead (2026-07-29), so the sync WebServer is
+// the HTTP plane and this guard is load-bearing until something replaces it.
 // ============================================================================
 class IdleGuardWebServer : public WebServer {
 public:

@@ -34,9 +34,7 @@
 // serves ONE connection at a time, so a slow handler is a machine-wide stall.
 // Minting is an HMAC-SHA256 over a counter — microseconds. An ECDSA sign (tens
 // of ms) in this handler would be a defect, which is exactly why the hub's own
-// signing is deferred to a task. (Under -DUSE_PSYCHIC_HTTP the server
-// multiplexes sockets so one slow handler no longer deafens the machine — but
-// it still occupies the single httpd task, so the rule stands unchanged.)
+// signing is deferred to a task.
 //
 // THREADING: mint() runs on httpTask, consume() runs on the Core-0 SlopSyncHub
 // task. Neither touches slopsync::Hub, so the one-task invariant is untouched;

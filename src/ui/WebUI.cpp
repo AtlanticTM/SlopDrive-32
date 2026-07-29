@@ -21,10 +21,7 @@
 #include <ESPmDNS.h>
 #include <LittleFS.h>
 #include <Preferences.h>
-// The HTTP backend A/B seam. Pulls in either the sync Arduino WebServer (+
-// IdleGuardWebServer) or the PsychicHttp adapter, depending on
-// -DUSE_PSYCHIC_HTTP. Every handler below is written against the surface both
-// sides present, so nothing past init()/update() knows which one is live.
+// The HTTP backend: sync Arduino WebServer + IdleGuardWebServer.
 #include "ui/SlopHttpServer.h"
 #include "CrashRing.h"
 #include <WiFi.h>
@@ -83,11 +80,9 @@ WebUI::WebUI(SystemState&        state,
     , _mapper(mapper)
     , _patternEngine(patternEngine)
 {
-    // The build-flag-selected HTTP backend (include/ui/SlopHttpServer.h):
-    //   default            -> IdleGuardWebServer (sync WebServer + the
-    //                         speculative-socket idle guard that kills the
-    //                         measured 5 s HTTP_MAX_DATA_WAIT captures)
-    //   -DUSE_PSYCHIC_HTTP -> PsychicHttp / esp_http_server adapter
+    // IdleGuardWebServer (include/ui/SlopHttpServer.h): sync WebServer plus the
+    // speculative-socket idle guard that kills the measured 5 s
+    // HTTP_MAX_DATA_WAIT captures.
     _httpServer = new SlopHttpServer(HTTP_PORT);
 }
 
@@ -100,8 +95,7 @@ WebUI::~WebUI() {
 void WebUI::init() {
     // WebServer only exposes request headers that were explicitly collected —
     // without this, header("If-None-Match") is always empty and the ETag
-    // revalidation in handleRoot() silently never fires. (Under PsychicHttp
-    // this is a no-op: esp_http_server can read any header on demand.)
+    // revalidation in handleRoot() silently never fires.
     static const char* kCollectHeaders[] = { "If-None-Match" };
     _httpServer->collectHeaders(kCollectHeaders, 1);
 
@@ -220,18 +214,11 @@ void WebUI::init() {
 // ---- update() ---------------------------------------------------------------
 
 void WebUI::update() {
-    // Sync backend: this IS the request pump.
-    // Psychic backend: esp_http_server serves on its own task, so this is only
-    // the deferred-start retry (Psychic refuses to start with no IP, which the
-    // sync WebServer never did). Either way it must keep being called.
+    // This IS the request pump.
     _httpServer->handleClient();
-#if !defined(USE_PSYCHIC_HTTP)
     // Drop speculative browser sockets that hold the single serve slot while
     // sending nothing — otherwise each one deafens HTTP for 5 s (measured).
-    // Structurally unnecessary under Psychic: a silent socket simply never
-    // becomes readable in select(), so it costs the server nothing.
     _httpServer->dropIdleCapture();
-#endif
 
     // Deferred reboot for the machine-backend commit: the HTTP handler arms
     // this and returns immediately so its 200 response actually flushes to

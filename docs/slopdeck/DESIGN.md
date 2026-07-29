@@ -193,8 +193,11 @@ building/testing the SlopMotion-tuning and fray-d-Advanced Tier-1 widgets
 2. **Widget interface extraction** — formalize the contract from the four
    founding widgets; Tier 0/1 split becomes explicit in the codebase.
    **Still open** as of 2026-07-28.
-3. **Tauri 2 shell** — wrap the client, plugin loader, first Tier-2 plugin
-   (dogfood: something small, e.g. a session-stats card). **Still open.**
+3. **Tauri 2 shell** — the WRAP has LANDED: `webui/src-tauri/` ships, with a
+   vendored `tauri-plugin-blec` carrying a local panic-across-JNI fix, an
+   Android build, and screenshot verification (see LEDGER). Plugin loader and
+   first Tier-2 plugin (dogfood: something small, e.g. a session-stats card)
+   are **still open**.
 4. **API freeze + docs** — widget contract documented, versioned, frozen;
    community plugin list opened. **Still open.**
 5. Embedded-UI ruling (§8) executed wherever it lands. **§8 is RULED**

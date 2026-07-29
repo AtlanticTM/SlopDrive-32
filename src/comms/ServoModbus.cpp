@@ -14,10 +14,10 @@
 //   is telemetry/config-only — Modbus never touches real-time motion there.
 //   sendSetpoint() (the proprietary 0x7B absolute-setpoint frame) is plumbed
 //   in but has no caller on this device.
-// - Frame format per AIM_servo_modbus_reference.md: 8N1 @ 19200 or 115200,
+// - Frame format per reference/AIM_servo_modbus_reference.md: 8N1 @ 19200 or 115200,
 //   slave addr 1, values 16-bit two's-complement for signed fields, CRC16
 //   polynomial 0xA001.
-// See: AIM_servo_modbus_reference.md
+// See: reference/AIM_servo_modbus_reference.md
 
 #include "ServoModbus.h"
 

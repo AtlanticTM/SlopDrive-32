@@ -67,6 +67,21 @@ ESP32-S3 ecosystem. Hardware-agnostic, community-extensible.
   Every new/modified control is verified end-to-end against the live device
   before it is done — a control that renders but drives nothing is a defect; a
   UI that lies about machine state is a safety defect on this product.
+* **House look is ground truth (operator ruling 2026-07-29):**
+  `webui/src/style.css` IS the visual language — tokens, type ramp, accent
+  semantics. Not restated here (C-1); read that file's header. Three
+  properties are load-bearing rather than decorative:
+  * The neutral chassis is FROZEN. New surfaces consume the tokens; they do
+    not introduce a parallel palette or a second type ramp.
+  * `--warn` amber and `--bad` red are identical in EVERY theme, on purpose —
+    hazard styling must read the same however the operator dresses the
+    instrument. Restyling safety colors for aesthetic reasons is a safety
+    defect, not a design change.
+  * Only the two accent hues vary by theme.
+  Generative design tooling (the frontend-design skill) is for surfaces with
+  no precedent yet — new SlopDeck widgets, docs-site. On the existing webui it
+  consumes this file; it does not re-litigate it. Aesthetic drift already cost
+  one CSS drift audit and one OG-realignment pass (see LEDGER).
 
 ## 4. Coding Style & Extensibility
 * Strict OOP; `.h`/`.cpp` isolation; lifecycle hooks (`init()`, `update()`,
@@ -95,6 +110,21 @@ ESP32-S3 ecosystem. Hardware-agnostic, community-extensible.
     justification are deleted; a story worth keeping moves to docs/ with a
     pointer left behind.
   * VOICE: American English, fragments fine, no first person, no emoji.
+* **Minimalism-mode precedence (operator ruling 2026-07-29):** the ponytail
+  agent mode governs `webui/`, `docs/`, and host `tools/`. It does
+  NOT govern `src/`, `include/`, `lib/`, or the SlopSync repo — there CANON and
+  DOCTRINE outrank it. Diff size is not a correctness argument.
+  * Memory and concurrency reasoning is never the thing that gets shortened.
+    Stack cost, heap/BSS/PSRAM placement, and which task a callback runs on are
+    stated before a change is called done (§2).
+  * Single-implementation indirection that this doctrine mandates — SlopLog and
+    SlopGlow sole paths (§7), the sole-caller rule — is law, not speculative
+    abstraction to delete.
+  * A SPEC-defined SlopSync field is not dead weight because one implementation
+    currently ignores it. The spec decides; changes ride the RFC ritual (§9).
+  * See [TRAPS.md](TRAPS.md): every field bug there was the small obvious
+    change. The cost landed on stack depth, allocation lifetime, and task
+    context — none of which a diff-size heuristic can see.
 * **Naming doctrine:** invented ecosystem-level things (protocols, subsystems,
   tools) get zero-collision, SEO-unique names ("SlopSync", never
   "SyncManager"). Ordinary classes/variables keep plain descriptive names.

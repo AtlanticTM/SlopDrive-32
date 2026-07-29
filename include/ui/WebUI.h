@@ -23,10 +23,8 @@ class EncoderValidator;
 // Forward-declared to avoid pulling the HTTP backend's headers into every
 // translation unit that includes this one (works around a PlatformIO
 // include-path quirk when framework headers are included from a subdirectory
-// header). SlopHttpServer is the build-flag-selected backend — the sync
-// Arduino WebServer by default, PsychicHttp under -DUSE_PSYCHIC_HTTP. See
-// include/ui/SlopHttpServer.h; both sides present the same call surface, which
-// is why none of the ~30 handlers below care which one they are talking to.
+// header). SlopHttpServer is the HTTP backend — the sync Arduino WebServer
+// plus the speculative-socket idle guard. See include/ui/SlopHttpServer.h.
 class SlopHttpServer;
 
 // ---- Batched telemetry sample ring ------------------------------------------

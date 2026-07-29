@@ -52,7 +52,7 @@ section below for what has moved since.)*
 
 | Module | Status |
 |---|---|
-| **SlopSync** (protocol + lib + firmware hub) | LIVE — verified on hardware end-to-end, probe 8/8. Now also carries the RFC-030..050 batch (SlopSync repo), deployed on fw 2.1.82: UDP discovery is live-verified (unicast, broadcast, rate limit); BLE GATT is deployed and its advertising is confirmed by a real scan, but no client has yet held a live GATT session — see [LEDGER.md](canon/LEDGER.md). |
+| **SlopSync** (protocol + lib + firmware hub) | LIVE — verified on hardware end-to-end, probe 8/8. Now also carries the RFC-030..050 batch (SlopSync repo), UDP discovery is live-verified (unicast, broadcast, rate limit); BLE GATT has held a full-control live session AND a live BLE-to-WS mid-session migration, operator-verified. Firmware version and deploy state live in [LEDGER.md](canon/LEDGER.md) — its one home, never restated here. |
 | **SlopMotion** (Ruckig motion core, §1) | LIVE — `lib/slopmotion` + vendored Ruckig v0.19.4, 11 native suites green, trace bench + graphs, firmware wiring landed (see §10 below, [DOCTRINE.md](canon/DOCTRINE.md) §8) |
 | **SlopLog** | LIVE — all legacy sites migrated, boot narration, serial handoff |
 | **SlopGlow** | LIVE — liveness gate field-proven on day one |
@@ -107,11 +107,17 @@ architecture, that file is the working list.
 Own fixed structures + std cover us; String-churn paths die with
 slopsync-js; no retrofit crusade. Revisit only on concrete need.
 
-## 4. Async web server — parked (final); candidate pre-selected
+## 4. Async web server — CLOSED (2026-07-29): HTTP plane stays synchronous
+
+**Resolved.** The plain HTTP server stays the sync `WebServer` +
+`IdleGuardWebServer`. The PsychicHttp A/B that was this section's candidate was
+**retired unflashed** on operator ruling 2026-07-29 — envs, the
+`USE_PSYCHIC_HTTP` seam, and its migration doc are all gone (see LEDGER). The
+idle guard is therefore permanent, not transitional. The shortlist below is
+kept only so the option is never re-shopped from scratch.
 
 **Scope note (2026-07-28): this section is about the plain HTTP server
-only** (`WebServer` vs. PsychicHttp — see
-[psychic-migration.md](psychic-migration.md)). The *other* async swap this
+only.** The *other* async swap this
 section used to also cover — the SlopSync WebSocket transport — already
 happened, by a different route than planned here: ESP32Async's
 `AsyncWebSocket` replaced links2004 during the M5c control-plane migration
@@ -123,9 +129,9 @@ exorcising. Sync WebServer + isolated WS tasks until HTTP is static-files +
 OTA only, then re-evaluate whether it matters at all. (Interim mitigation
 landed fw 2.1.40: ETag revalidation — reloads 304 in ~40 ms; only the
 first-load ~600 ms stall remains.) HTTP is now static-files + OTA only, per
-the [http-plane-retirement.md](http-plane-retirement.md) ruling — the
-re-evaluation this section calls for is now due; see
-[psychic-migration.md](psychic-migration.md), built but **never flashed**.
+the [http-plane-retirement.md](http-plane-retirement.md) ruling, and the
+re-evaluation this section called for has been answered: it does not matter
+enough to carry a second backend. See the CLOSED note above.
 
 **Re-evaluation shortlist (researched 2026-07-23 — web-verified, so we
 never re-shop this):**
@@ -233,8 +239,8 @@ CLAUDE.md split; section numbers updated to match. See
   0x0005 (stop/hold/pause/resume/estop_clear).
 - Reference implementations for the wire, in order of usefulness:
   `clients/mfp-slopsync/SlopSync.cs` (complete C# client incl. CBOR codec
-  — port its shape to JS), `tools/slopsync_probe.py` (Python, golden
-  bytes), `test_slopsync_*` native suites. Browser CBOR: hand-roll the
+  — port its shape to JS), the SlopSync repo's `tools/slopsync_probe.py`
+  (Python, golden bytes), `test_slopsync_*` native suites. Browser CBOR: hand-roll the
   same minimal subset (ints/bstr/tstr/arrays/maps/f32); golden-byte-test
   it against the probe's builders like WireSelfTest.cs does. slopsync-js
   becomes the THIRD client implementation — same discipline: mirror the
@@ -256,9 +262,8 @@ CLAUDE.md split; section numbers updated to match. See
   0x0006+0x1000, CMD/ECHO→intents/0x0E, clock→CLOCK). Delete senderTask
   + UiSocket when empty; port :81 dies (a §10 transport-demolition step).
   HTTP keeps only: static bundle, OTA, /api/log, /api/capabilities
-  (bootstrap pointer to :82), and the sync-WebServer question then folds
-  into §4's PsychicHttp decision — do NOT migrate the HTTP server in this
-  refactor.
+  (bootstrap pointer to :82). The sync-WebServer question is CLOSED per §4 —
+  do NOT migrate the HTTP server.
 - SlopMotion plumbing debts ride along ([DOCTRINE.md](canon/DOCTRINE.md)
   §8): the 0x05 anomaly
   feed (currently deliberately silent — SlopLog only), the inert

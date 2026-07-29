@@ -210,10 +210,38 @@ h1, h2, h3, p { margin: 0; }
 .app {
   max-width: 1680px;
   margin: 0 auto;
-  /* Bottom clearance for the fixed safety dock (and shell chrome under it):
-     both publish their MEASURED heights (--safety-h / --shell-chrome-bottom)
-     so a refusal banner growing the dock never covers the last card. */
-  padding: 0 var(--gap)
-    calc(var(--safety-h, 72px) + var(--shell-chrome-bottom, 0px) + var(--gap));
-  min-height: 100vh;
+  padding-left: var(--gap);
+  padding-right: var(--gap);
+  /* ShellBar (Tauri shell only, see shell/ShellBar.svelte) is fixed chrome
+     under the LinkBar and publishes its measured height here (0 otherwise) —
+     extra top padding keeps it from covering the LinkBar/hero zone, in both
+     scroll modes below. */
+  padding-top: var(--shell-chrome-top, 0px);
+}
+
+/* Mobile: a normally-scrolling page. SafetyBar is fixed bottom:0 and no
+   longer publishes a measured height (--safety-h is gone with the desktop
+   restructure below), so reserve FIXED clearance instead — it must clear
+   the tallest normal dock: one op row + one banner.
+   Breakpoint matches App.svelte's `isDesktop` matchMedia (960px). */
+@media (max-width: 959px) {
+  .app {
+    min-height: 100vh;
+    padding-bottom: calc(96px + env(safe-area-inset-bottom, 0px));
+  }
+}
+
+/* Desktop: the page NEVER scrolls as a page. .app is a viewport-height flex
+   column (dvh with a vh fallback for browsers that lack it); App.svelte's
+   .frame (the nav+pane row) is the one region with its own scroll/overflow,
+   so the column's total height always fits without spilling the viewport.
+   Breakpoint matches App.svelte's `isDesktop` matchMedia (960px). */
+@media (min-width: 960px) {
+  .app {
+    height: 100vh;
+    height: 100dvh;
+    display: flex;
+    flex-direction: column;
+    overflow: hidden;
+  }
 }

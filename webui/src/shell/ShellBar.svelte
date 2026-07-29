@@ -18,14 +18,14 @@
 
   let scanning = $state(false);
   let hubs = $state([]);
-  // The bar publishes its own height as --shell-chrome-bottom so kernel
-  // chrome pinned to the screen bottom (SafetyBar) stacks ABOVE it instead
-  // of being covered — the e-stop surface always wins the bottom edge. The
-  // kernel reads the var with a 0px default and never knows the shell exists.
+  // The bar publishes its own height as --shell-chrome-top so the page can
+  // reserve exactly that much extra top padding (style.css's .app), keeping
+  // this chrome from covering the LinkBar/hero zone below it. The kernel
+  // reads the var with a 0px default and never knows the shell exists.
   let barH = $state(0);
   $effect(() => {
-    document.documentElement.style.setProperty('--shell-chrome-bottom', barH + 'px');
-    return () => document.documentElement.style.removeProperty('--shell-chrome-bottom');
+    document.documentElement.style.setProperty('--shell-chrome-top', barH + 'px');
+    return () => document.documentElement.style.removeProperty('--shell-chrome-top');
   });
   // No baked-in address: discovery is the front door. The input remembers
   // only a host the operator themselves connected to before.
@@ -102,8 +102,11 @@
 </script>
 
 <div class="shellbar" class:collapsed={!expanded} bind:clientHeight={barH}>
+  <!-- Hangs from the top now: the glyph points toward where tapping moves
+       the bar's free edge — down (▾) when collapsed-and-about-to-expand,
+       up (▴) when expanded-and-about-to-collapse. -->
   <button class="sb-toggle mono" onclick={() => (expanded = !expanded)}
-          aria-label="toggle shell bar">{expanded ? '▾' : '▴'} shell</button>
+          aria-label="toggle shell bar">{expanded ? '▴' : '▾'} shell</button>
   {#if expanded}
     <span class="sb-mode mono" data-mode={mode}>{mode.toUpperCase()}</span>
     <span class="sb-phase mono">{phase}</span>
@@ -136,25 +139,29 @@
 <style>
   .shellbar {
     position: fixed;
-    bottom: 0;
+    /* Sits directly under the LinkBar (LinkBar is sticky top, so this holds
+       in both the desktop no-scroll column and the mobile scrolling page). */
+    top: var(--linkbar-h, 0px);
     left: 0;
     right: 0;
-    z-index: 25; /* below SafetyBar (30): safety chrome always wins */
+    z-index: 18; /* below the LinkBar's stacking (20), above page content */
     display: flex;
     align-items: center;
     gap: 8px;
     flex-wrap: wrap;
-    /* Gesture-nav clearance on edge-to-edge devices; 0 elsewhere. */
-    padding: 4px 10px calc(4px + env(safe-area-inset-bottom, 0px));
+    /* No safe-area-inset-bottom: this chrome no longer touches the bottom
+       edge (SafetyBar owns that exclusively). No safe-area-inset-top either:
+       the LinkBar above already carries that inset. */
+    padding: 4px 10px;
     background: color-mix(in srgb, var(--bg-raised) 94%, transparent);
-    border-top: 1px solid var(--line);
+    border-bottom: 1px solid var(--line);
     font-size: 0.72rem;
     color: var(--ink-dim);
   }
   .collapsed {
-    padding: 0 10px env(safe-area-inset-bottom, 0px);
+    padding: 0 10px;
     background: color-mix(in srgb, var(--bg-raised) 70%, transparent);
-    border-top: none;
+    border-bottom: none;
   }
   .sb-toggle {
     color: var(--ink-faint);

@@ -195,17 +195,9 @@
       .sort((a, b) => a.access - b.access);
   }
 
-  // The dock publishes its MEASURED height (it varies: refusal banners come
-  // and go) so the page can reserve exactly enough bottom padding — see
-  // style.css's .app. The kernel-side twin of --shell-chrome-bottom.
-  let dockH = $state(0);
-  $effect(() => {
-    document.documentElement.style.setProperty('--safety-h', dockH + 'px');
-    return () => document.documentElement.style.removeProperty('--safety-h');
-  });
 </script>
 
-<div class="safetydock" role="group" aria-label="Safety controls" bind:clientHeight={dockH}>
+<div class="safetydock" role="group" aria-label="Safety controls">
   {#if lastRefusal.code != null}
     <!-- THE GLOBAL REFUSAL SURFACE. Any of shadow.svelte.js's three write
          paths — a settings slider, an action button, the rail's move tape —
@@ -309,22 +301,35 @@
 
 <style>
   .safetydock {
-    position: fixed;
     left: 0;
     right: 0;
-    /* --shell-chrome-bottom: set only by a shell's own bottom chrome (0
-       otherwise) — the e-stop surface stacks ABOVE it, never under it. */
-    bottom: var(--shell-chrome-bottom, 0px);
+    /* Safety chrome always wins the bottom edge, and that ownership is now
+       EXCLUSIVE: ShellBar's chrome moved to the top of the page (see
+       ShellBar.svelte), so nothing else ever competes for this z-index. */
     z-index: 30;
     background: var(--bg-raised);
     border-top: 1px solid var(--line);
     padding: 6px var(--gap);
-    /* When shell chrome sits below, IT carries the safe-area inset — don't
-       double-pad; max() collapses this to the plain 6px in that case. */
-    padding-bottom: calc(6px + max(env(safe-area-inset-bottom, 0px) - var(--shell-chrome-bottom, 0px), 0px));
     display: flex;
     flex-direction: column;
     gap: 6px;
+  }
+
+  /* Breakpoint matches App.svelte's `isDesktop` matchMedia (960px) — the two
+     rules below are the mobile/desktop halves of one positioning decision. */
+  @media (max-width: 959px) {
+    .safetydock {
+      position: fixed;
+      bottom: 0;
+      padding-bottom: calc(6px + env(safe-area-inset-bottom, 0px));
+    }
+  }
+  @media (min-width: 960px) {
+    .safetydock {
+      /* .app is a 100dvh flex column (style.css) and this is its last row —
+         a normal flex item, always on screen without being pinned. */
+      position: static;
+    }
   }
 
   .dock {

@@ -134,14 +134,18 @@
 
   .hn-val { font-size: 1.35rem; color: var(--tx-val); }
 
-  /* The flagship numeral. clamp() keeps it huge on desktop and sane on a
-     phone without a breakpoint to maintain. */
+  /* The flagship numeral — OG sizing: clamp(54px, 6.2vw, 80px) desktop,
+     dropping to a tighter clamp under 1024px so the hero row never wraps on
+     a tablet (`webui-prerefactor` .hero-val breakpoints). */
   .hn-primary .hn-val {
-    font-size: clamp(48px, 6.2vw, 80px);
+    font-size: clamp(54px, 6.2vw, 80px);
     line-height: 0.95;
     color: var(--reality);
     text-shadow: var(--glow-reality);
     font-variation-settings: 'wght' 500;
+  }
+  @media (max-width: 1023px) {
+    .hn-primary .hn-val { font-size: clamp(42px, 8.5vw, 54px); }
   }
   .hn-val.glow {
     color: var(--reality);

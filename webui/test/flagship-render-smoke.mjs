@@ -83,9 +83,25 @@ ok('no value-0 "reserved" placeholder rendered', !dockLabels.some((t) => /reserv
    dockLabels.join(' | '));
 ok('op groups carry role labels', (await page.$$('.safetydock .grp-lbl')).length >= 1);
 
+// ---- fixed-viewport architecture (UX maturity pass) ------------------------
+// Desktop must never scroll as a page: the pane region is the only scroll
+// area, so the safety dock and footer are on screen by construction.
+const pageScrolls = await page.evaluate(() =>
+  document.scrollingElement.scrollHeight > window.innerHeight + 2);
+ok('desktop page does not scroll (fixed-viewport column)', !pageScrolls);
+const dockBox = await page.$eval('.safetydock', (el) => {
+  const r = el.getBoundingClientRect();
+  return r.top >= 0 && r.bottom <= window.innerHeight + 1 && r.height > 0;
+});
+ok('safety dock fully on screen without scrolling', dockBox);
+
 // ---- edit-layout mode -------------------------------------------------------
 await page.click('nav.rail [role="tab"]');            // back to Overview
 await page.waitForSelector('.dash-grid', { timeout: 5000 });
+// Card-zone heroes (pattern, limits) now live in the Overview grid beside
+// the telemetry card — the instrument zone holds only the rail.
+ok('Overview holds telemetry + card-zone hero cards', (await page.$$('.dash-item')).length >= 3,
+   (await page.$$('.dash-item')).length + ' cards');
 ok('handles hidden while reading', (await page.$$('.dash-item .handle')).length === 0);
 const editBtn = await page.$$('.dash-toolbar button');
 await editBtn[0].click();                              // Edit layout

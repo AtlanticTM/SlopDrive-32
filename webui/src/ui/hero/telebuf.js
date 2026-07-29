@@ -53,14 +53,30 @@
  * much a live problem — SlopSync STATE pushes arrive at ~20-30 Hz with real
  * gaps (measured on-device: mean ~20-45ms, p95 45-55ms, occasional gaps past
  * 100ms). Sampling at raw "now" with no buffer means any push arriving a
- * little late leaves "now" sitting PAST the newest sample, past the tight
- * 50ms extrapolate window, so the display FREEZES (the `pastMs > EXTRAPOLATE_MS`
+ * little late leaves "now" sitting PAST the newest sample, past the
+ * extrapolate window, so the display FREEZES (the `pastMs > EXTRAPOLATE_MS`
  * hold branch) until the next push arrives and it SNAPS forward to catch up —
  * a visible stutter, worse the larger the gap. `createRenderClock` below is a
  * single-clock re-derivation of the old technique: no device/client offset
  * (nothing to sync), but the same "buffer by a bit more than the typical gap
  * between samples" idea, driven by the MEASURED gap between real pushes
  * instead of a removed network-clock jitter estimate.
+ *
+ * ── jitter regression #4: 50/2 outrun by hub-pacing bursts ──────────────────
+ *
+ * EXTRAPOLATE_MS=50 / SLEW_MS_PER_FRAME=2 (the values regression #3 above
+ * landed with) held for steady ~20-45ms gaps but were sized to the p95, not
+ * the tail: the hub's 5ms tick pacing occasionally strings together several
+ * >100ms real gaps in a row (a burst, not one straggler). A single >100ms gap
+ * already outruns a 50ms extrapolate window (hold-then-snap for that frame);
+ * a BURST of them also outruns delayMs's ability to slew up fast enough — at
+ * 2ms/frame, closing even a 60ms shortfall takes 30 frames (~0.5s at 60fps),
+ * so the display sits in hold/snap for the whole burst instead of buffering
+ * through it. EXTRAPOLATE_MS=80 covers a single straggler outright;
+ * SLEW_MS_PER_FRAME=4 acquires a safe delay within ~1s of a burst starting
+ * instead of chasing it for the burst's whole duration. Do not lower either
+ * without re-measuring the on-device gap distribution — these are sized to
+ * the worst observed tail, not the mean.
  */
 
 /**
@@ -72,10 +88,23 @@
 export function createTelebuf(opts = {}) {
   const CAP = opts.capacity || 256;
   const HOLD_MS = opts.holdMs != null ? opts.holdMs : 1200;
-  const EXTRAPOLATE_MS = opts.extrapolateMs != null ? opts.extrapolateMs : 50;
+  // 80ms: covers a single >100ms hub-pacing straggler outright (see this
+  // file's header, "jitter regression #4") without falling into the
+  // hold-then-snap branch below.
+  const EXTRAPOLATE_MS = opts.extrapolateMs != null ? opts.extrapolateMs : 80;
 
   const bufT = new Float64Array(CAP);
   const bufV = new Float64Array(CAP);
+  // Per-sample INCOMING velocity (value units/ms, from the previous real
+  // sample to this one), stored at push time so sampleAt() can Hermite-
+  // interpolate rather than linearly interpolate. NaN means "no prior
+  // sample" (the first push ever, or the first after reset()) — sampleAt()
+  // must fall back to linear for any span touching such an entry. Reusing
+  // the SAME stored value as both a span's outgoing tangent (v1) and the
+  // next span's incoming tangent (v0) is what makes the curve velocity-
+  // continuous across sample boundaries: it is one number read twice, not
+  // two independent estimates that happen to agree.
+  const bufVel = new Float64Array(CAP);
   let head = 0;
   let len = 0;
   let lastVelPerMs = 0;      // value units per ms, from the last two real samples
@@ -95,7 +124,10 @@ export function createTelebuf(opts = {}) {
 
     if (newestIdx >= 0) {
       const dt = tsMs - bufT[newestIdx];
-      if (dt > 0) lastVelPerMs = (value - bufV[newestIdx]) / dt;
+      bufVel[idx] = dt > 0 ? (value - bufV[newestIdx]) / dt : NaN;
+      if (dt > 0) lastVelPerMs = bufVel[idx];
+    } else {
+      bufVel[idx] = NaN; // no prior sample to derive a tangent from
     }
     lastPushTs = tsMs;
   }
@@ -134,7 +166,42 @@ export function createTelebuf(opts = {}) {
     }
     const span = bufT[hi] - bufT[lo];
     const frac = span > 0 ? Math.min(1, Math.max(0, (tMs - bufT[lo]) / span)) : 1;
-    const value = bufV[lo] + (bufV[hi] - bufV[lo]) * frac;
+    const p0 = bufV[lo];
+    const p1 = bufV[hi];
+    const v0 = bufVel[lo];
+    const v1 = bufVel[hi];
+
+    let value;
+    if (span > 0 && isFinite(v0) && isFinite(v1)) {
+      // Cubic Hermite, not linear: linear interp puts a slope kink at every
+      // ~40ms sample boundary — measured as the rail marker's visible
+      // jitter. Tangents are scaled by `span` (m = v*span) so the curve's
+      // real-time derivative at each endpoint equals the stored per-ms
+      // velocity exactly, independent of how long this particular span is —
+      // that scaling is what keeps the derivative continuous across the
+      // shared boundary with the NEXT span (see bufVel's comment above).
+      const t = frac;
+      const t2 = t * t;
+      const t3 = t2 * t;
+      const h00 = 2 * t3 - 3 * t2 + 1;
+      const h10 = t3 - 2 * t2 + t;
+      const h01 = -2 * t3 + 3 * t2;
+      const h11 = t3 - t2;
+      const m0 = v0 * span;
+      const m1 = v1 * span;
+      const raw = h00 * p0 + h10 * m0 + h01 * p1 + h11 * m1;
+      // Hermite can legitimately overshoot p0/p1 a little on curved motion,
+      // but a bad velocity estimate must never fling the marker off-screen:
+      // clamp to the span's range plus a fixed fraction of headroom.
+      const overshoot = 0.15 * Math.abs(p1 - p0);
+      const clampLo = Math.min(p0, p1) - overshoot;
+      const clampHi = Math.max(p0, p1) + overshoot;
+      value = Math.min(clampHi, Math.max(clampLo, raw));
+    } else {
+      // No stored tangent on one side (first sample in the buffer's life,
+      // or a degenerate zero-length span): fall back to linear.
+      value = p0 + (p1 - p0) * frac;
+    }
     return { value, velPerMs: lastVelPerMs, fresh, extrapolating: false };
   }
 
@@ -210,7 +277,10 @@ export function createTrail(opts = {}) {
 export function createRenderClock(opts = {}) {
   const MIN_DELAY_MS = opts.minDelayMs != null ? opts.minDelayMs : 20;
   const MAX_DELAY_MS = opts.maxDelayMs != null ? opts.maxDelayMs : 120;
-  const SLEW_MS_PER_FRAME = opts.slewMsPerFrame != null ? opts.slewMsPerFrame : 2;
+  // 4ms/frame: acquires a safe delay within ~1s of a hub-pacing burst
+  // starting (see this file's header, "jitter regression #4") instead of
+  // chasing it for the burst's whole duration.
+  const SLEW_MS_PER_FRAME = opts.slewMsPerFrame != null ? opts.slewMsPerFrame : 4;
   const GAP_CAP = opts.gapCapacity || 32; // ~1s of history at ~30Hz — plenty for a p95
 
   const gaps = new Float64Array(GAP_CAP);

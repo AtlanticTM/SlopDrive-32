@@ -751,16 +751,10 @@
     />
   {/if}
 
-  <div class="rail-readouts">
-    <span class="ro">
-      <span class="ro-label">{labelFor(min)}</span>
-      <output class="mono" data-shadow={statusOf(min)}>{formatValue(min, minVal)}<span class="unit">{unitOf(min)}</span></output>
-    </span>
-    <span class="ro">
-      <span class="ro-label">{labelFor(max)}</span>
-      <output class="mono" data-shadow={statusOf(max)}>{formatValue(max, maxVal)}<span class="unit">{unitOf(max)}</span></output>
-    </span>
-  </div>
+  <!-- OG information architecture: the window readout is NOT a separate hero
+       numeral row — it lives exactly once, on the band label below
+       (`lo–hi · width`). A second min/max readout up here would be the same
+       fact with two homes (CANON C-1); removed rather than restyled. -->
 
   {#if move}
     <!-- Input tape — a live command surface. In the original this was
@@ -850,6 +844,8 @@
     <span class="rail-endcap lo mono">{formatValue(min, lo)}</span>
     <span class="rail-endcap hi mono">{formatValue(max, hi)}</span>
     <span class="rail-ghost mono">{formatValue(max, (lo + hi) / 2)}</span>
+    <span class="rail-tri lo" aria-hidden="true"></span>
+    <span class="rail-tri hi" aria-hidden="true"></span>
 
     <div class="rail-hz lo" style="clip-path: inset(0 {haveWindow ? (100 - minPct * 100) : 100}% 0 0)"></div>
     <div class="rail-hz hi" style="clip-path: inset(0 0 0 {haveWindow ? (maxPct * 100) : 100}%)"></div>
@@ -918,6 +914,7 @@
 
   <div class="rail-hint explain">
     <span>drag band &middot; drag edges &middot; arrow keys to nudge</span>
+    <span class="rail-trk">trk 00</span>
   </div>
 
   {#if min.desc || max.desc}
@@ -936,21 +933,6 @@
     gap: var(--gap);
   }
 
-  .rail-readouts {
-    display: flex;
-    flex-wrap: wrap;
-    gap: 14px;
-  }
-  .ro { display: flex; flex-direction: column; align-items: flex-start; line-height: 1.2; }
-  .ro-label {
-    font-size: 0.68rem;
-    color: var(--tx-mut);
-    text-transform: lowercase;
-    letter-spacing: 0.04em;
-  }
-  .ro output { font-size: 0.95rem; color: var(--reality); padding: 1px 4px; }
-  .unit { color: var(--tx-mut); font-size: 0.75em; margin-left: 2px; }
-
   /* ---- input tape (disabled command surface) ------------------------------ */
   .rail-tape-assembly { width: 100%; }
   .rail-tape-assembly.disabled { opacity: 0.7; }
@@ -961,12 +943,12 @@
     margin-bottom: 4px;
   }
   .rail-tape-mode {
-    font-size: 0.62rem;
-    letter-spacing: 0.12em;
+    font-size: calc(var(--s) * 10px);
+    letter-spacing: 0.14em;
     text-transform: lowercase;
-    color: var(--tx-mut);
+    color: color-mix(in srgb, var(--intent) 78%, var(--tx-mut));
   }
-  .rail-tape-extent { font-size: 0.62rem; color: var(--tx-ghost); }
+  .rail-tape-extent { font-size: calc(var(--s) * 10px); color: var(--tx-ghost); }
   /* Track spans the full assembly width with dashed top/bottom guides — the
      original's "shows where full travel is even when the strip only covers
      the window" landmark. The STRIP (.rail-tape) is what actually commands;
@@ -975,7 +957,7 @@
   .rail-tape-track {
     position: relative;
     width: 100%;
-    height: max(calc(var(--tap) * 0.6), 22px);
+    height: calc(var(--s) * 26px);
     border-top: 1px dashed var(--line-1);
     border-bottom: 1px dashed var(--line-1);
     touch-action: none;
@@ -1013,15 +995,15 @@
      pairs with the window band on the rail below it. */
   .rail-tape.live {
     background:
-      repeating-linear-gradient(90deg, rgba(var(--intent-rgb), .12) 0 1px, transparent 1px 7px),
-      var(--bg-sunken);
+      repeating-linear-gradient(90deg, rgba(var(--intent-rgb), .10) 0 1px, transparent 1px 7px),
+      var(--screen);
     border: 1px solid rgba(var(--intent-rgb), .45);
-    box-shadow: inset 0 2px 6px rgba(0, 0, 0, .5);
+    box-shadow: inset 0 2px 6px rgba(0, 0, 0, .6);
   }
   .rail-tape-assembly.drag-live .rail-tape { transition: none; }
   .rail-tape-micro {
-    font-size: 0.58rem;
-    letter-spacing: 0.1em;
+    font-size: calc(var(--s) * 9px);
+    letter-spacing: 0.18em;
     color: var(--tx-ghost);
     white-space: nowrap;
     text-transform: uppercase;
@@ -1072,20 +1054,43 @@
     position: absolute;
     left: 50%; top: 50%;
     transform: translate(-50%, -50%);
-    font-size: 0.7rem;
+    font-size: 0.72rem;
     color: var(--tx-ghost);
     opacity: 0.5;
     pointer-events: none;
   }
 
+  /* Endcap arrows — pure CSS border-triangles, no glyph/asset. */
+  .rail-tri {
+    position: absolute;
+    width: 0; height: 0;
+    border-style: solid;
+    top: 50%;
+    pointer-events: none;
+  }
+  .rail-tri.lo {
+    left: 0;
+    transform: translateY(-50%);
+    border-width: 4px 0 4px 6px;
+    border-color: transparent transparent transparent var(--line-3);
+  }
+  .rail-tri.hi {
+    right: 0;
+    transform: translateY(-50%);
+    border-width: 4px 6px 4px 0;
+    border-color: transparent var(--line-3) transparent transparent;
+  }
+
   /* Hazard keep-out ribbons — whisper-level red hatch outside the window,
      full-track boxes revealed only via clip-path so the hatch never slides
-     when a window edge is dragged (matches the original's fix for that). */
+     when a window edge is dragged (matches the original's fix for that).
+     Centered on the ruler baseline (45.83% — same 33/72 fraction the ticks'
+     baseline line uses above), not dead-center on the host. */
   .rail-hz {
     position: absolute;
     left: 0; right: 0;
-    top: 50%;
-    height: 9px;
+    top: 45.83%;
+    height: calc(var(--s) * 9px);
     transform: translateY(-50%);
     pointer-events: none;
     background: repeating-linear-gradient(135deg, rgba(255, 71, 87, .22) 0 3px, rgba(255, 71, 87, .03) 3px 7px);
@@ -1097,8 +1102,8 @@
 
   .rail-band {
     position: absolute;
-    top: 18%;
-    height: 44%;
+    top: calc(var(--s) * 18px);
+    height: calc(var(--s) * 30px);
     background: rgba(var(--intent-deep-rgb), .08);
     border-left: 1px solid var(--intent);
     border-right: 1px solid var(--intent);
@@ -1120,7 +1125,7 @@
 
   .rail-band-label {
     position: absolute;
-    top: -16px;
+    top: calc(var(--s) * -17px);
     left: 50%;
     transform: translateX(-50%);
     font-size: 0.6rem;
@@ -1131,15 +1136,17 @@
 
   /* Handles are siblings of the band (not nested — each positions from its own
      independent pct so a keyboard nudge on one never has to touch the other's
-     DOM), so their top/height are percentages of the RAIL HOST, tuned to
-     straddle the band's 18%-62% vertical span. `left` is set inline per handle
-     from minPct/maxPct; the transform centers the touch target on that edge. */
+     DOM), so top/height are set here in the SAME host-relative units as the
+     band's own (18px top, 30px height, both scaled by --s) plus the OG's
+     2px/4px overshoot — a 12px-wide hit zone straddling the band edge,
+     centered horizontally on `left` (set inline per handle from minPct/
+     maxPct) via translateX. */
   .rail-band-handle {
     position: absolute;
-    top: 40%;
-    width: var(--tap);
-    height: var(--tap);
-    transform: translate(-50%, -50%);
+    top: calc(var(--s) * 16px);
+    height: calc(var(--s) * 34px);
+    width: calc(var(--s) * 12px);
+    transform: translateX(-50%);
     cursor: ew-resize;
     touch-action: none;
     display: flex;
@@ -1147,10 +1154,16 @@
     justify-content: center;
     transition: left .12s ease;
   }
+  /* The OG 12px zone is a mouse-era number. On a touch screen the INVISIBLE
+     hit area widens to the tap floor — the 3px visible bar is unchanged, so
+     1:1 fidelity holds while a fingertip can still find the edge. */
+  @media (pointer: coarse) {
+    .rail-band-handle { width: var(--tap); }
+  }
   .rail-band-handle::before {
     content: '';
     width: 3px;
-    height: 16px;
+    height: calc(var(--s) * 16px);
     background: var(--intent);
     box-shadow: 0 0 8px rgba(var(--intent-rgb), .65);
   }
@@ -1170,9 +1183,13 @@
   .rail-hint {
     display: flex;
     justify-content: space-between;
-    font-size: 0.62rem;
+    align-items: center;
+    margin-top: 4px;
+    font-family: var(--mono);
+    font-size: 0.58rem;
     color: var(--tx-ghost);
   }
+  .rail-trk { color: var(--tx-ghost); }
 
   .rail-desc { margin: 0; color: var(--tx-mut); font-size: 0.78rem; }
 </style>

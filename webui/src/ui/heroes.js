@@ -29,10 +29,17 @@ import LimitsWidget from './hero/LimitsWidget.svelte';
  * `require` roles must ALL resolve or the hero declines entirely — a rail that
  * knows its window but not its position would draw a carriage that is always
  * at zero, which is worse than no rail at all.
+ *
+ * `zone` decides where App.svelte puts a claimed hero:
+ *   'instrument' — pinned chrome in the hero strip (never scrolls away with a
+ *                  settings tab; the operator's live instrument).
+ *   'card'       — an ordinary dashboard card in the Overview pane, laid out
+ *                  and reordered by DashGrid like any other card.
  */
 const HEROES = [
   {
     id: 'rail',
+    zone: 'instrument',
     component: RailWidget,
     spec: {
       require: { min: ROLE.windowMin, max: ROLE.windowMax },
@@ -55,6 +62,7 @@ const HEROES = [
   },
   {
     id: 'pattern',
+    zone: 'card',
     component: PatternWidget,
     spec: {
       require: { running: ROLE.patternRunning, select: ROLE.patternSelect },
@@ -68,6 +76,7 @@ const HEROES = [
   },
   {
     id: 'limits',
+    zone: 'card',
     component: LimitsWidget,
     spec: {
       // A machine with only a user limit set still gets the widget; the input
@@ -95,7 +104,7 @@ export function heroClaims(byRole) {
   for (const h of HEROES) {
     const fields = claimRoles(byRole, h.spec);
     if (!fields) continue;             // machine lacks the roles: decline
-    widgets.push({ id: h.id, component: h.component, fields });
+    widgets.push({ id: h.id, component: h.component, fields, zone: h.zone });
     for (const uid of fields.claimed) claimed.add(uid);
   }
   return { widgets, claimed };

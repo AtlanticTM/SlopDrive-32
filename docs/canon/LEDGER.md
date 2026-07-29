@@ -2698,6 +2698,68 @@ shell-only.
   no-motion Playwright render smoke (nav, dock, no reserved button) passed.
   [verified 2026-07-28 — this session; details in the commit]
 
+## UX MATURITY PASS (operator-directed, 2026-07-28) — "this feels amateur, not mature"
+
+Operator verdict on the first flagship slice, four defects; mechanisms found
+by a three-agent extraction/diagnosis sweep of the OG page (`main:webui/`)
+and the current widgets, then fixed by three parallel implementation agents.
+
+- **Bottom-edge pileup:** LINK footer + safety dock + (shell) ShellBar
+  stacked three similar strips on the bottom edge. RULING — one owner per
+  edge: shell transport chrome moves to the TOP (fixed under the LinkBar —
+  it is link management, same domain; publishes `--shell-chrome-top`,
+  `--shell-chrome-bottom` retired); the safety dock alone owns the bottom;
+  the LINK strip is a quiet in-flow footer (OG-style).
+- **Desktop = OG fixed-viewport architecture:** the page never scrolls as a
+  page at ≥960 px. 100 dvh flex column — LinkBar / instrument zone / nav +
+  pane frame (flex:1, the pane is the ONLY scroll region) / LINK footer /
+  safety dock as normal rows (dock always visible by construction, fixed
+  positioning and `--safety-h` retired on desktop; mobile keeps the fixed
+  dock + scrolling page). This is also the structural fix for "the left
+  machine bar opens tabs in a section of the page that may not even be
+  visible" — the pane region starts in view by construction; mobile
+  additionally scrolls the tab strip into view on switch.
+- **Hero zone split (registry-level, not device knowledge):** heroes carry a
+  `zone` — `instrument` (rail: pinned chrome, never scrolls away) vs `card`
+  (pattern, limits: ordinary Overview dashboard cards, the OG's numbered-
+  card pattern). Kills the 500 px instrument wall that pushed panes below
+  the fold.
+- **Rail 1:1 to the OG** (operator: "pretty much 1:1 to the old one"):
+  RailWidget rebuilt to `main:webui/src/features/rail.js` + `style.css`
+  spec — tape assembly with mode/extent labels, 72 px host with endcaps/
+  ruler/ghost, clip-path-revealed hazard ribbons (never resized — stripe
+  crawl), intent window band with the `084–176 · 092mm` center label and
+  3 px glow handles, canvas marker geometry (reality stroke y16..52 + core
+  dot, intent caret y22..46, 850 ms tapered comet ribbon), OG hero numeral
+  row (clamp(54px,6.2vw,80px) glowing actual; commanded/lag/speed
+  secondaries; window numerals removed — the band label is the window
+  readout).
+- **Marker jitter/lag — the real mechanisms** (diagnosis, not guesswork):
+  the Svelte rail already carried the OG's render-clock + telebuf port
+  faithfully. (a) Constant jitter = LINEAR interpolation over the ~25 Hz
+  single-sample STATE feed — a velocity-discontinuous slope kink at every
+  ~40 ms sample boundary (the OG never had this problem because its 0x01
+  telemetry frame batched ~4.2 ms sub-samples, ~240 Hz effective). Fix:
+  cubic Hermite in `telebuf.sampleAt()` using per-sample velocities,
+  overshoot-clamped. (b) Intermittent lag = render-delay clock slew (2 ms/
+  frame) + 50 ms extrapolation ceiling losing to occasional >100 ms
+  hub-tick pacing gaps → hold-then-snap. Fix: EXTRAPOLATE_MS 80,
+  SLEW_MS_PER_FRAME 4.
+- **RFC CANDIDATE (Prime Rule ritual — client hit a protocol ceiling):**
+  batched telemetry sub-samples per STATE push for the telemetry roles
+  (several pre-spaced samples per frame, the OG 0x01 design generalized).
+  Client-side smoothing is now at the interpolation-order ceiling of a
+  25 Hz single-sample feed; if Hermite does not reach OG-grade smoothness
+  on the bench, this is the real cure. NOT implemented — queued for
+  operator stamp as an RFC.
+- Verification (bare-minimum floor): telebuf sim + new Hermite assertions
+  PASS; device-knowledge + settings-model suites + Vite build green;
+  canon_lint zero findings; fs deployed to the live device; no-motion
+  render smoke 25/25 incl. new fixed-viewport assertions (page does not
+  scroll, dock on screen, hero cards in Overview). Marker smoothness on
+  real motion NOT yet judged — that is the operator's bench call.
+  [verified 2026-07-28 — this session]
+
 ## Deferred / planned (homes: docs/REFACTOR-ROADMAP.md, docs/MOTION-TODO.md)
 
 - TCode pass-through channel (post-MFP; parser cross-task race was the

@@ -37,6 +37,11 @@
   const heroes = $derived(model ? heroClaims(model.byRole) : { widgets: [], claimed: new Set() });
   const categories = $derived(model ? withoutClaimed(model.categories, heroes.claimed) : []);
 
+  // heroes.js's zone split: 'instrument' heroes are pinned chrome (the hero
+  // strip, below); 'card' heroes render as ordinary Overview cards instead
+  // (folded into machineItems below).
+  const instrumentHeroes = $derived(heroes.widgets.filter((h) => h.zone === 'instrument'));
+
   // Nav: the machine's categories, plus our own fixed views. The fixed ones are
   // about the LINK and the BROWSER rather than the machine, which is why they
   // are the only hardcoded entries in the page.
@@ -71,6 +76,28 @@
     return () => mq.removeEventListener('change', apply);
   });
 
+  // NAV-SWITCH VISIBILITY. A tab switch must always produce visible change
+  // (operator-reported defect: a pane switched below the fold, with nothing
+  // on screen indicating anything had happened).
+  //
+  // Desktop needs no scrollIntoView: .content is the scroll container and a
+  // freshly rendered pane starts at its own top by construction. It DOES
+  // need its scroll position reset on every switch, though, or a pane opened
+  // while scrolled halfway down the previous one inherits that scroll offset.
+  let contentEl = $state(null);
+  $effect(() => {
+    active; // dependency: re-run this on every tab switch
+    if (isDesktop && contentEl) contentEl.scrollTop = 0;
+  });
+
+  // Mobile: the tab strip itself must scroll to the top of the viewport on
+  // activation, since the page (not a bounded region) is what scrolls here.
+  let tabsNav = $state(null);
+  function selectTab(id) {
+    active = id;
+    tabsNav?.scrollIntoView({ block: 'start', behavior: 'auto' });
+  }
+
   // Rail collapse is a browser preference. Collapsed entries show a two-glyph
   // abbreviation DERIVED from the machine's own label — never an icon table,
   // which would be device knowledge dressed as art.
@@ -84,6 +111,12 @@
   }
   function glyph(label) {
     return (label || '?').slice(0, 2).toUpperCase();
+  }
+
+  // Card-zone hero titles come from OUR registry ids (heroes.js), never a
+  // device string — a plain first-letter capitalization is all that needs.
+  function capitalize(s) {
+    return s ? s.charAt(0).toUpperCase() + s.slice(1) : s;
   }
 
   /**
@@ -144,6 +177,11 @@
 
   const machineItems = $derived([
     { id: 'widget:telemetry', title: 'Telemetry', snippet: telemetryCard },
+    // Card-zone heroes (heroes.js) are ordinary Overview cards, not pinned
+    // chrome — same component, generic DashGrid treatment (drag/resize/etc).
+    ...heroes.widgets
+      .filter((h) => h.zone === 'card')
+      .map((h) => ({ id: 'hero:' + h.id, title: capitalize(h.id), snippet: heroCard, hero: h })),
   ]);
 </script>
 
@@ -157,6 +195,10 @@
 
 {#snippet telemetryCard()}
   <TelemetryChart />
+{/snippet}
+
+{#snippet heroCard(item)}
+  <item.hero.component fields={item.hero.fields} />
 {/snippet}
 
 {#snippet pane()}
@@ -190,11 +232,12 @@
 <div class="app">
   <LinkBar />
 
-  <!-- The hero instruments render above every view's PANE (never inside one
-       tab): losing sight of the carriage because you opened a settings tab
-       would be a regression from the old page. On desktop they live inside
-       the content column so the nav rail runs the full height beside them;
-       on a phone they sit above the tab strip. -->
+  <!-- Only INSTRUMENT-zone heroes (heroes.js) render here, pinned above every
+       view's PANE and never inside one: losing sight of the carriage because
+       you opened a settings tab would be a regression from the old page. On
+       desktop they run full width above the nav+pane frame; on a phone they
+       sit above the tab strip. CARD-zone heroes render as ordinary Overview
+       dashboard cards instead (see machineItems). -->
   {#if !machine.catalog.ready}
     <section class="boot">
       <p class="boot-msg">
@@ -213,6 +256,7 @@
            and pretending otherwise would be the exact lie the doctrine forbids. -->
     </section>
   {:else if isDesktop}
+    <HeroStrip heroes={instrumentHeroes} />
     <div class="frame">
       <!-- The tablist role lives on an inner div: <nav> is a landmark, and ARIA
            forbids giving a non-interactive landmark an interactive role. -->
@@ -240,19 +284,18 @@
           {/each}
         </div>
       </nav>
-      <div class="content">
-        <HeroStrip heroes={heroes.widgets} />
+      <div class="content" bind:this={contentEl}>
         {@render pane()}
       </div>
     </div>
   {:else}
-    <HeroStrip heroes={heroes.widgets} />
-    <nav class="tabs" aria-label="Sections">
+    <HeroStrip heroes={instrumentHeroes} />
+    <nav class="tabs" aria-label="Sections" bind:this={tabsNav}>
       <div role="tablist">
         {#each tabs as t (t.id)}
           <button role="tab" aria-selected={current && current.id === t.id}
                   class:on={current && current.id === t.id}
-                  onclick={() => (active = t.id)}>{t.label}</button>
+                  onclick={() => selectTab(t.id)}>{t.label}</button>
         {/each}
       </div>
     </nav>
@@ -264,20 +307,32 @@
 </div>
 
 <style>
-  /* ---- desktop frame: rail + pane ---------------------------------------- */
+  /* ---- desktop frame: rail + pane ----------------------------------------
+     The one non-scrolling row of the desktop column (style.css's .app):
+     bounded to whatever height is left after LinkBar/hero-strip/FootStrip/
+     SafetyBar, with no overflow of its own — .content is the only region
+     that scrolls. min-height:0 is required for a flex child to shrink below
+     its content's natural height instead of forcing the column to overflow. */
   .frame {
     display: grid;
     grid-template-columns: auto minmax(0, 1fr);
     gap: var(--gap);
-    align-items: start;
     padding-top: var(--gap);
+    flex: 1 1 0;
+    min-height: 0;
+    overflow: hidden;
   }
-  .content { min-width: 0; }
+  .content {
+    min-width: 0;
+    min-height: 0;
+    overflow-y: auto;
+  }
 
   .rail {
     width: 188px;
-    position: sticky;
-    top: calc(var(--linkbar-h, 48px) + var(--gap));
+    /* No longer sticky: its container (.frame) doesn't scroll on desktop —
+       only .content does — so sticky positioning had nothing to stick
+       against. Grid's default stretch gives it the frame's full height. */
     display: flex;
     flex-direction: column;
     gap: 2px;
@@ -285,6 +340,8 @@
     background: var(--bg-raised);
     border: 1px solid var(--line-0);
     border-radius: var(--radius);
+    /* Independent scroll for a catalog with many categories. */
+    overflow-y: auto;
   }
   .rail.mini { width: 56px; }
 

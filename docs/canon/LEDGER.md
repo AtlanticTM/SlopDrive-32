@@ -2984,6 +2984,17 @@ Both incident work items implemented and LIVE:
   life (seq 1, heap_min 26364) including TWO ws-refuse crumbs — the floor
   fired during the fs flash while flash writes fragmented the heap. Ring,
   endpoint, floor, and crumbs all verified live in one shot.
+- **PRESSURE SNAPSHOT UNDER LIVE CHURN (operator bench, 2026-07-29,
+  webui/test/evidence/pressure-snapshot-20260729-014239):** ~42 min of
+  deliberate client connect/disconnect churn drove heap min to 40 BYTES —
+  worse than the boot that PANICKED — and the guards HELD: ws-refuse
+  crumbs, handleRoot 503 at maxblock 7668, no panic. On three clients
+  detaching, heap snapped back to ~30 K free / 15 K maxblock (the
+  post-init baseline) — churn FRAGMENTS transiently but does NOT leak.
+  Verdict: 3-4 concurrent sessions is the honest ceiling of the ~32 KB
+  post-init internal headroom; the structural relief is moving more of the
+  slopsync service's ~110 KB internal-heap footprint to PSRAM (8 MB idle)
+  — queued as the next firmware work item, operator stamp pending.
 - Same deploy: webui LimitsWidget now reuses Field (the second hand-rolled
   slider aesthetic deleted — operator screenshot evidence; one slider
   language, one write path, descs behind the field's own info toggle).

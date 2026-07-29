@@ -2900,6 +2900,32 @@ computed-style forensics, ours vs the running OG reference):
   probing of ::-webkit-slider-thumb is unreliable in Chromium — the crop
   proved the thumb renders; trust pixels over pseudo-element getComputedStyle.
 
+## CSS DRIFT AUDIT (operator: "honestly diff the css", 2026-07-29)
+
+Systematic computed-style + rule-text diff, both pages LIVE (ours on the
+?hub dev loop, OG under Vite from main). Findings:
+
+- **ROOT CAUSE of the residual "off" feel: the missing root scale.** OG sets
+  `html { font-size: calc(var(--s) * 16px) }` (17.92 px) and every rem rides
+  it; the rebuild never set it AND pinned body to 15 px — every rem-based
+  size in the whole UI rendered ~11% smaller than OG, uniformly. Fixed
+  (root scale added, body hardcode removed); card titles now compute
+  identical px on both pages.
+- Slider thumb: rule text byte-identical to OG (the hollow ink-filled
+  rectangle IS the OG design; "no sliding looking element" as a complaint
+  about the OG look itself is a NEW design ask, not a drift — awaiting
+  operator call before inventing a filled/accent thumb).
+- Buttons/panels/brackets: byte-identical (two documented deliberate
+  deviations stand: og-btn width:auto flex trap; field-value recess).
+- Fixed drifts: dash numbered-prefix inherited bold (OG explicit 400 +
+  mono variation); LinkBar chips (.62rem/400/--tx-val, pins stay heavy —
+  safety reads); dock group labels to the OG .pidx-label voice (quiet
+  mono, no uppercase). Card-body padding density (12 vs OG 16-22 px)
+  recorded as a structural choice of the grid dashboard, not drift.
+- Chromium pseudo-element getComputedStyle is unreliable for form-control
+  internals — rule-text + pixels are the evidence standard (restated from
+  the aesthetic audit).
+
 ## Deferred / planned (homes: docs/REFACTOR-ROADMAP.md, docs/MOTION-TODO.md)
 
 - TCode pass-through channel (post-MFP; parser cross-task race was the

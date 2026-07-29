@@ -344,13 +344,16 @@
     display: inline-flex;
     align-items: center;
     gap: 4px;
-    font-size: .68rem;
-    font-weight: 500;
+    /* OG .chip metrics (CSS-diff audit 2026-07-29): .62rem/400/--tx-val —
+       the rebuild had drifted brighter-and-bolder. .chip-pin below stays
+       deliberately heavier: phase/tier are safety-relevant reads. */
+    font-size: .62rem;
+    font-weight: 400;
     padding: 4px 7px;
     border-radius: var(--radius);
     background: var(--bg-card);
     border: 1px solid var(--line);
-    color: var(--ink-dim);
+    color: var(--tx-val);
     white-space: nowrap;
     flex: 0 0 auto;
   }

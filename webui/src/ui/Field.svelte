@@ -97,7 +97,14 @@
       {#if field.desc}
         <button type="button" class="info" aria-expanded={descOpen} aria-controls={descId}
                 onclick={() => (descOpen = !descOpen)}>
-          <span aria-hidden="true">ⓘ</span>
+          <!-- Drawn glyph, not the ⓘ character: text glyphs carry baseline
+               metrics that refuse to center inside a small square box. -->
+          <svg viewBox="0 0 12 12" width="11" height="11" aria-hidden="true"
+               fill="none" stroke="currentColor" stroke-width="1.2">
+            <circle cx="6" cy="6" r="4.7"/>
+            <line x1="6" y1="5.4" x2="6" y2="8.4"/>
+            <circle cx="6" cy="3.6" r="0.4" fill="currentColor" stroke="none"/>
+          </svg>
           <span class="sr-only">{descOpen ? 'Hide' : 'Show'} description</span>
         </button>
       {/if}

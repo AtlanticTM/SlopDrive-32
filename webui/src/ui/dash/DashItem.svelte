@@ -207,9 +207,14 @@
     content: attr(data-pidx) "\2002\25B8\2002";
     font-family: var(--mono);
     font-size: .62rem;
+    /* weight/width axis pinned rather than inherited from .dash-title's 500 —
+       OG's card-head h2[data-pidx]::before verbatim (og-ref/style.css). */
+    font-weight: 400;
+    font-variation-settings: 'wght' var(--num-wght), 'wdth' 90;
     letter-spacing: normal;
     text-transform: none;
     color: var(--tx-faint);
+    vertical-align: 1px;
   }
   .dash-title:not([data-pidx])::before {
     content: "\25B8 ";

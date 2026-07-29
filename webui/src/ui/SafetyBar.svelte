@@ -471,11 +471,12 @@
     gap: 3px;
   }
   .grp-lbl {
-    font-size: 9px;
-    font-weight: 600;
-    text-transform: uppercase;
-    letter-spacing: .1em;
-    color: var(--ink-faint);
+    /* OG .pidx-label voice (CSS-diff audit 2026-07-29): quiet mono, no
+       uppercase shouting — the label is a waypoint, not a heading. */
+    font-family: var(--mono);
+    font-size: .62rem;
+    letter-spacing: .08em;
+    color: var(--tx-faint);
     padding-left: 1px;
   }
   .grp-btns {

@@ -127,11 +127,20 @@ html.hivis {
 /* ---- reset ------------------------------------------------------------- */
 *, *::before, *::after { box-sizing: border-box; }
 html, body { margin: 0; padding: 0; }
+/* Root scale — every rem-sized rule in this sheet (labels, chips, buttons,
+   card titles) rides on this. Ported verbatim from the pre-refactor page
+   (og-ref/style.css: `html { font-size: calc(var(--s) * 16px); }`) — omitting
+   it left every rem-based size in the rebuild ~11% smaller than the OG at
+   the same --s, which was the single biggest source of the "everything
+   reads smaller/off" drift. */
+html { font-size: calc(var(--s) * 16px); }
 body {
   background: var(--bg);
   color: var(--ink);
   font-family: var(--font);
-  font-size: 15px;
+  /* No font-size here: inherits the scaled html size above, same as the OG
+     sheet (og-ref/style.css's `body` rule never set one either). A literal
+     px value here would peg body text regardless of --s. */
   line-height: 1.45;
   -webkit-text-size-adjust: 100%;
   padding-bottom: env(safe-area-inset-bottom);

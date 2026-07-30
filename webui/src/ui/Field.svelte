@@ -79,12 +79,15 @@
 
   const step = $derived(field.step || (precisionFor(field) === 0 ? 1 : 0.01));
 
-  // Controls that already spell their own state out in words own the whole
-  // row; a chip repeating it is the duplicate-truth the density pass killed.
+  // A control that prints its own value owns the whole row; a chip repeating it
+  // is the duplicate-truth the density pass killed. So the chip is a WHITELIST,
+  // not an exclusion list — it has to earn the row by carrying something the
+  // control cannot: a slider has no numerals, a readout has no control at all,
+  // and a bare number input has nowhere to put a unit.
   const showValueChip = $derived(
-    field.widget !== WIDGET.toggle
-    && field.widget !== WIDGET.bitfield
-    && field.widget !== WIDGET.indicator
+    field.widget === WIDGET.slider
+    || field.widget === WIDGET.readout
+    || (field.widget === WIDGET.stepper && unitOf(field) !== '')
   );
 
   // Readout archetype (OG "Power card" bar recipe): a read-only numeric with
@@ -118,13 +121,18 @@
       {#if field.desc}
         <button type="button" class="info" aria-expanded={descOpen} aria-controls={descId}
                 onclick={() => (descOpen = !descOpen)}>
-          <!-- Drawn glyph, not the ⓘ character: text glyphs carry baseline
-               metrics that refuse to center inside a small square box. -->
-          <svg viewBox="0 0 12 12" width="11" height="11" aria-hidden="true"
-               fill="none" stroke="currentColor" stroke-width="1.2">
-            <circle cx="6" cy="6" r="4.7"/>
-            <line x1="6" y1="5.4" x2="6" y2="8.4"/>
-            <circle cx="6" cy="3.6" r="0.4" fill="currentColor" stroke="none"/>
+          <!-- The OG `i-info` glyph verbatim (core/ui.js sprite + its 24-unit
+               stroke-2 round-cap wrapper), at the OG's own in-field metrics.
+               Do not redraw it by hand on a smaller viewBox: the dot's ink
+               (7..9) and the stem's (11..17) straddle cy 12 exactly, and a
+               hand-fitted copy loses that balance while looking correct in
+               the source. -->
+          <svg viewBox="0 0 24 24" width="11" height="11" aria-hidden="true"
+               fill="none" stroke="currentColor" stroke-width="2"
+               stroke-linecap="round" stroke-linejoin="round">
+            <circle cx="12" cy="12" r="10"/>
+            <path d="M12 16v-4"/>
+            <path d="M12 8h.01"/>
           </svg>
           <span class="sr-only">{descOpen ? 'Hide' : 'Show'} description</span>
         </button>

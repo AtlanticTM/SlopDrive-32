@@ -3321,7 +3321,7 @@ the parts worth ledgering because they are invisible in a fresh clone:
   rather than CLAUDE.md because CLAUDE.md is gitignored and a rule that binds
   every agent cannot live in an untracked file.
 
-## ⏭ NEXT STEPS (2026-07-29 closeout, restamped after the Phase 1a + memory session — START HERE)
+## ⏭ NEXT STEPS (2026-07-29 closeout, restamped after the Phase 1b + desktop-shell + page-serve session — START HERE)
 
 The answer to "what's next on the ledger":
 
@@ -3530,6 +3530,33 @@ The answer to "what's next on the ledger":
      fresh load returned **200 at maxblock 10,740** — the exact value that
      used to latch a permanent 503. Mechanism: TRAPS T19 addendum + its
      resolution note.
+   - **PROPOSED (operator, 2026-07-29), not implemented: a boot watchdog in
+     the page that reloads when the bundle arrived truncated.** Verdict: it
+     works, but only in one specific shape, and it is a load amplifier unless
+     built carefully — so it is written down rather than dropped in.
+     Why it works at all: HTML parsing is streaming, so a *tiny* inline script
+     in `<head>` is received in the first packet and executes long before the
+     document ends. It arms a timer; `main.js` sets the flag on mount; if the
+     rest of the bundle never lands, the timer fires and reloads. A watchdog
+     placed anywhere else — bundled with the app, or after the 114 KB inline
+     script — is cut off by the very truncation it is meant to catch and never
+     runs. This is a `vite-plugin-singlefile` bundle, so "top of head, before
+     everything" has to survive the inliner; verify it does before trusting it.
+     Two things that must be designed in, not bolted on:
+     (i) **backoff and jitter are mandatory.** Truncation happens because the
+     hub is over-loaded; a fleet of tabs each retrying on a fixed 5 s timer
+     feeds exactly the load that caused it. Exponential with jitter and a
+     retry cap, and the give-up state must SAY it gave up rather than sit
+     blank.
+     (ii) it is a mitigation for a residual, not a fix. 2.1.95 sheds before it
+     truncates, and 2.1.94's 304 path means a returning tab transfers no body
+     at all — so the window this covers is "first load, during pressure".
+     Unverified assumption to test FIRST, because it decides whether the whole
+     idea holds: the body is `Content-Encoding: gzip`, and a truncated gzip
+     stream with a `Content-Length` that promises more may be discarded whole
+     by the browser rather than parsed up to the cut. If Chrome throws the
+     partial document away, the head script never runs and the watchdog is
+     worthless. Test with a deliberately aborted body before building it.
    - **The accepted 503 is NOT transient — it holds until reboot.** Measured
      2026-07-29 during the Phase 1b screenshot pass, which stacked ~25 page
      loads and a dozen WS sessions in a few minutes. Per session the cost is
@@ -3619,6 +3646,12 @@ The answer to "what's next on the ledger":
      at, not restated (C-1).
 5. **Parked webui rapid-fire list** — see the kickoff entry above; queued
    BEHIND the campaign (several items become trivial on the new surface).
+   Two items joined it this session, both in the SHELL FEASIBILITY SPIKE
+   entry: the truncated-bundle reload watchdog (item 2, test the gzip
+   assumption first) and M1/M2's still-unverified BLE + WS-upgrade paths,
+   which the desktop shell now makes clickable — the shell launches, so
+   "scan BLE / connect / upgrade to WS" is a five-minute operator check
+   rather than a build.
 6. **Session-gate/closeout system** (C-13 proposal + ledger diet + tiered
    canon loading, designed in chat 2026-07-29) — implement after Phase 0;
    this closeout entry is its manual prototype.
@@ -3634,3 +3667,17 @@ The answer to "what's next on the ledger":
    The three rs485 FAILs in every smoke run are the operator's motor being
    unplugged (connected only during testing) — expected, not a regression.
    Both repos' docs/spec commits carry nothing the firmware wants.
+8. **The ONE thing owed to a human, not a machine: the Phase 1b eyeball.**
+   Shots are in `webui/test/evidence/phase1b/` (gitignored, per-run). Look at
+   `rejected-card-stepper-without-nudges.png` beside
+   `after-card-infeasible-moves.png` — the −/+ nudges were a judgment call
+   made after seeing how empty a bare number input read, and `DRAG_TICKS_MIN`
+   is veto-able. Nothing downstream is blocked on it; Phase 2 can start first.
+9. **Session shape, for whoever restamps this next.** Three threads ran:
+   Phase 1b (done, awaiting eyeball), the desktop shell (first release build
+   ever + a stacking bug fixed, TRAPS T22), and the page-serve pin (fixed
+   across 2.1.92-2.1.95, TRAPS T19 addendum). The firmware thread is the one
+   worth reading before touching heap thresholds again: a confident mechanism
+   analysis — correct arithmetic, wrong conclusion — panicked the device, and
+   only an on-hardware A/B caught that the floor was a load shedder rather
+   than a sizing gate. Bench-only reasoning would have shipped it.

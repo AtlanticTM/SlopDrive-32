@@ -22,6 +22,8 @@
 
 #include "SlopSyncHubService.h"
 
+#include "BootHeap.h"   // sub-attribution of this init()'s internal-heap cost
+
 #include <Arduino.h>
 #include <ArduinoJson.h>
 #include <Preferences.h>
@@ -1217,12 +1219,14 @@ void SlopSyncHubService::init() {
     _hub.setWallClockSeconds(0);
 
     _port.begin(&_hub);
+    bootheap::mark("ss:ws");
 
 #if defined(BLE_ENABLED)
     // RFC-043: the BLE GATT ITransport + advertising. "SD32" is the
     // shortened name the legacy ≤31-byte advertising budget can afford
     // (§13.4); the full "SlopDrive-32" name rides the scan response.
     _blePort.begin(&_hub, "SlopDrive-32", "SD32");
+    bootheap::mark("ss:ble");
 #endif
 
     // RFC-046: the UDP discovery responder — the WS-side discovery
@@ -1231,6 +1235,7 @@ void SlopSyncHubService::init() {
     // hub_instance_id was resolved just above.
     _udpDiscovery.begin("slopdrive-32", _hub.hubInstanceId(), SLOPSYNC_WS_PORT, FIRMWARE_VERSION,
                          _hub.catalogEtag());
+    bootheap::mark("ss:udp");
 
     // RFC-017: arm the log bridge now — from here on every SlopLog line is also
     // an in-band 0x0008 EVENT. Deliberately AFTER the boot narration and
@@ -1250,6 +1255,7 @@ void SlopSyncHubService::init() {
     } else {
         SLOGI("slopsync", "hub service up — catalog %u channels, Core 0", unsigned(_catalog.count));
     }
+    bootheap::mark("ss:hubtask");
 
     // ---- The deferred-signing worker ----------------------------------------
     // INLINE SIGNING MUST STAY OFF ON THIS PART. Hub::setInlineSigning(true)
@@ -1296,6 +1302,7 @@ void SlopSyncHubService::init() {
             _signTask = nullptr;
         }
     }
+    bootheap::mark("ss:sign");
 }
 
 void SlopSyncHubService::attachHttpRoutes(SlopHttpServer* server) {

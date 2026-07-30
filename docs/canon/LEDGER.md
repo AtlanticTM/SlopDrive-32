@@ -3456,8 +3456,38 @@ The answer to "what's next on the ledger":
      UNMEASURED: NimBLE host+controller (both task stacks confirmed present),
      AsyncTCP, the P-256 sign task, the UDP discovery socket, and per-session
      buffers — all individually under the 4 KB `ALWAYSINTERNAL` threshold, so
-     the PSRAM auto-offload never catches them. Sub-attribution inside
-     `SlopSyncHubService::init()` is the obvious next probe.
+     the PSRAM auto-offload never catches them.
+   - **SUB-ATTRIBUTED (fw 2.1.90, live). The 110 KB is BLE.** Full leaderboard
+     of the 226,244 B init spend, `entry free=257,580` -> `31,336`:
+     | consumer | bytes | share |
+     |---|---:|---:|
+     | **ss:ble (NimBLE)** | **64,076** | **28.3%** |
+     | wifi | 56,412 | 24.9% |
+     | tasks (our 5 stacks) | 45,592 | 20.2% |
+     | ss:ws (AsyncTCP) | 18,056 | 8.0% |
+     | ss:hubtask (16 K stack) | 17,784 | 7.9% |
+     | ss:sign (8 K stack) | 9,504 | 4.2% |
+     | config+motor | 4,648 | 2.1% |
+     | webui | 4,348 | 1.9% |
+     | ota | 2,836 | 1.3% |
+     | littlefs | 1,920 | 0.8% |
+     | ss:udp / slopglow / ss:ctor / resid | 1,068 | 0.5% |
+     **The two radios are 120,488 B — 53% of everything spent at init.**
+     `_blePort.begin()` alone costs more than WiFi. It is the single largest
+     line item in the entire system and nothing before this measured it.
+   - **`ss:ctor` is 240 B — the catalog costs essentially NO internal RAM.**
+     The PSRAM placement is doing its job completely. Two consequences:
+     (i) there is no catalog win to find on the S3; (ii) the WROOM problem is
+     confirmed as stated — that whole ~240 KB has to come from somewhere with
+     no PSRAM to put it in.
+   - **Two stack line items are DEFENDED BY EXISTING COMMENTS and must not be
+     trimmed on census data alone** (C-12, comments-are-constraints):
+     `ss:hubtask`'s 16 KB was raised FROM 8 KB after a real canary blowout
+     (TRAPS T1) and `ss:sign`'s 8 KB is a deliberate 2x over a measured
+     2-4 KB P-256 peak. The census reports ~2.5 KB peak for the hub task,
+     which is exactly the reading that would tempt someone into re-creating
+     T1. The comment is the ground truth about the WORST case; the census
+     only knows what it has seen.
    - **Stack census (fw 2.1.89, 30 s one-shot, ESP-IDF reports bytes
      REMAINING):** `Sampler` declared 16,384 and peaked at **1,152** — 15 KB
      never touched, 6% of the whole heap idle. Reclaimable from our four
@@ -3468,6 +3498,20 @@ The answer to "what's next on the ledger":
      `IDLE0` 236, `ipc1` 256, `IDLE1` 356. Those are IDF-sized and NOT ours
      to trim; recorded because a stack-overflow canary trip there would
      read as a random panic.
+     🚩 **NO STACK HAS BEEN TRIMMED, deliberately, and the reason is the
+     measurement's own limit:** a high-water mark covers only the paths
+     exercised SINCE BOOT. That census ran on an idle, un-homed machine with
+     the motor unplugged, so `Sampler` — whose deep path is streaming through
+     the planner — never ran its real workload, and `httpTask`'s deepest path
+     is OTA, whose peak is UNOBSERVABLE BY CONSTRUCTION because the flash is
+     followed by a reboot that resets the mark. Sizing Sampler 16K->4K from
+     idle data is how a panic arrives three weeks later mid-session.
+     Mitigation shipped in 2.1.90 instead: `dumpTaskStacks()` now re-scans
+     every 30 s and prints ONLY tasks that have gone DEEPER than last
+     reported, so a bench session that exercises motion names the stacks it
+     actually grew and a quiet machine stays silent. **Trim only after a
+     motion-exercising bench pass has produced no new regressions** (motion
+     verification is a bench activity with the operator present, DOCTRINE §6).
    - **INSTRUMENTATION DONE (fw 2.1.89, operator-approved 2026-07-29):**
      `bootheap::mark/report` + `dumpTaskStacks` in `src/main.cpp`. Before
      this there was exactly ONE boot beacon, `post-slopsync`, which is why

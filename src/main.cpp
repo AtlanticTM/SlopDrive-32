@@ -23,6 +23,7 @@
 #include "config_api.h"
 
 #include "AppLog.h"
+#include "BootHeap.h"        // per-init-stage heap attribution (shared with SlopSyncHubService)
 #include "CrashRing.h"       // last-words ring: begin/crumb/heapSample          // bridge only: applogBegin/applogDrain (SlopLog sinks)
 #include "sloplog/sloplog.h"
 #include "SystemState.h"
@@ -143,55 +144,6 @@ static EncoderValidator encoderValidator(servoModbus, motor);
 
 
 
-// ---- Boot heap attribution --------------------------------------------------
-//
-// A single post-boot total cannot say WHICH subsystem took the RAM. The measured
-// budget (LEDGER, "memory pressure" entry) is ~163 KB static, so the heap starts
-// near 256 KB — and the device reports ~33 KB free after init. That ~230 KB is
-// spent by WiFi/lwIP/NimBLE/task stacks during setup(), and NONE of it appears
-// in the linker map, so it can only be attributed by reading the heap between
-// stages.
-//
-// Deliberately NOT behind a build flag: the boot that needs this is the one
-// nobody planned for. Cost is one reading per stage.
-//
-// Readings are RETAINED rather than only logged, because SlopLog's Info ring is
-// 44 lines and boot lines do not survive long enough to fetch reliably —
-// census() re-emits the whole table at a defined later moment. Do not replace
-// this with an HTTP endpoint: the log is the transport-independent diagnostics
-// channel, and it has to keep working on a build with no web UI.
-namespace bootheap {
-
-struct Stage {
-    const char* name;
-    uint32_t    free_after;
-    int32_t     consumed;   // positive = this stage took it
-};
-
-static constexpr size_t kMaxStages = 12;
-static Stage    s_stages[kMaxStages];
-static size_t   s_count = 0;
-static uint32_t s_prev_free = 0;
-
-static void mark(const char* name) {
-    const uint32_t now = ESP.getFreeHeap();
-    const int32_t consumed = (s_count == 0) ? 0 : int32_t(s_prev_free) - int32_t(now);
-    if (s_count < kMaxStages) {
-        s_stages[s_count++] = Stage{ name, now, consumed };
-    }
-    s_prev_free = now;
-}
-
-static void report() {
-    for (size_t i = 0; i < s_count; ++i) {
-        SLOGI("sys", "bootheap %-12s free=%u took=%+ld",
-              s_stages[i].name, unsigned(s_stages[i].free_after),
-              long(s_stages[i].consumed));
-    }
-}
-
-}  // namespace bootheap
-
 // ---- Task stack census ------------------------------------------------------
 //
 // Our five task stacks are 38,912 B of a ~256 KB heap; a stack sized by guess is
@@ -206,7 +158,47 @@ static void report() {
 //
 // Only meaningful once tasks have done real work: never call this from setup().
 // httpTask owns the trigger, so this needs no synchronization.
-static bool s_census_done = false;
+//
+// A HIGH-WATER MARK ONLY COVERS PATHS ACTUALLY EXERCISED SINCE BOOT — the whole
+// reason this re-reports instead of printing once. An idle machine never runs
+// the sampler's planner path, and httpTask's deepest path is OTA, whose peak is
+// unobservable by construction because the flash is followed by a reboot. So
+// after the first full census, ONLY REGRESSIONS print: a task that has gone
+// deeper than last reported is news, everything else is noise in a 44-line ring.
+// DO NOT size a stack from a census that has not seen motion and a page serve.
+// File-scope, not function-local: a function-local static gets a lazy-init
+// guard and an __cxa_atexit registration, which is the field bug TRAPS records
+// for /uitoken. Nothing here needs either.
+static bool     s_census_done = false;
+static uint32_t s_census_last_ms = 0;
+
+// Deepest-seen-so-far per task, keyed by name. Linear scan at 0.1 Hz over a
+// couple dozen entries costs nothing and avoids owning task handles.
+struct StackSeen {
+    char     name[16];
+    uint32_t free_min;   // smallest remaining-bytes seen = deepest use
+};
+static StackSeen s_seen[32];
+static size_t    s_seen_count = 0;
+
+// Returns true if this reading is deeper than anything reported for `name`.
+static bool stackWentDeeper(const char* name, uint32_t free_now) {
+    for (size_t i = 0; i < s_seen_count; ++i) {
+        if (strncmp(s_seen[i].name, name, sizeof(s_seen[i].name) - 1) == 0) {
+            if (free_now < s_seen[i].free_min) {
+                s_seen[i].free_min = free_now;
+                return true;
+            }
+            return false;
+        }
+    }
+    if (s_seen_count < (sizeof(s_seen) / sizeof(s_seen[0]))) {
+        StackSeen& e = s_seen[s_seen_count++];
+        snprintf(e.name, sizeof(e.name), "%s", name);
+        e.free_min = free_now;
+    }
+    return true;   // first sighting always reports
+}
 
 static void dumpTaskStacks() {
     const UBaseType_t count = uxTaskGetNumberOfTasks();
@@ -225,10 +217,12 @@ static void dumpTaskStacks() {
     }
     const UBaseType_t got = uxTaskGetSystemState(snap, count, nullptr);
     for (UBaseType_t i = 0; i < got; ++i) {
+        const uint32_t free_bytes = unsigned(snap[i].usStackHighWaterMark);
+        if (!stackWentDeeper(snap[i].pcTaskName, free_bytes)) continue;
         SLOGI("sys", "stack %-10s core=%d free=%u B",
               snap[i].pcTaskName,
               (snap[i].xCoreID == tskNO_AFFINITY) ? -1 : int(snap[i].xCoreID),
-              unsigned(snap[i].usStackHighWaterMark));
+              unsigned(free_bytes));
     }
     heap_caps_free(snap);
 }
@@ -623,6 +617,13 @@ static void httpTask(void* param) {
         if (!s_census_done && millis() > 30000) {
             s_census_done = true;
             bootheap::report();
+        }
+        // Re-scanned every 30 s forever, but dumpTaskStacks() prints ONLY tasks
+        // that have gone deeper than last reported — so a bench session that
+        // exercises motion names the stacks it actually grew, and a quiet
+        // machine stays silent. This is what makes a stack trim defensible.
+        if (s_census_done && (millis() - s_census_last_ms) >= 30000) {
+            s_census_last_ms = millis();
             dumpTaskStacks();
         }
         // Crash-ring watermark: three u32 stores per tick — cheap enough for
@@ -925,6 +926,9 @@ void setup() {
             // before the hub computes the catalog etag. Safe here — this runs
             // long after motor.bind() picked the backend.
             slopSyncHub = new (mem) slopdrive::SlopSyncHubService(g_state, webui, arbiter, motor);
+            // Separate from init(): the catalog is built HERE, and its cost has
+            // to be distinguishable from the transports' (see LEDGER's 110 KB).
+            bootheap::mark("ss:ctor");
             slopSyncHub->setPatternEngine(&patternEngine);
             slopSyncHub->setMotionStreamQueue(g_interp_queue);  // 0x0084 motion-input -> Core-1 sampler
             slopSyncHub->init();

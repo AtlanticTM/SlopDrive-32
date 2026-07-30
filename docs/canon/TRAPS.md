@@ -365,3 +365,33 @@ whose comment records a previous canary blowout (T1) — the comment knows the
 worst case, the census only knows what it has seen.
 Bit us: 2026-07-29, chasing a recurring 503 that four earlier mitigations had
 aimed at the wrong number.
+
+## T22 — A sticky offset is measured from a DIFFERENT box depending on who scrolls
+
+**Rule:** when fixed chrome reserves its height as a container's padding, the
+sticky bars inside that container must NOT restate the reserve as their own
+`top` — unless the page, not the container, is the scrollport. The correct
+offset is not a property of the layout; it is a property of *which element
+scrolls*, and this codebase has one of each at the 960px breakpoint.
+**Mechanism:** a sticky element's offset is resolved against the nearest
+scrollport **inset by that scroll container's padding** (CSS Position §6.3).
+Mobile: the page scrolls, the scrollport is the viewport, its padding is zero,
+so `top: <chrome>` parks the bar correctly below the chrome. Desktop: `.app`
+is the scroll container (height-capped flex column, `overflow: hidden` — which
+still establishes a scrollport), so the constraint rectangle already starts at
+`.app`'s CONTENT box, below the padding that reserved the chrome. The same
+`top: <chrome>` then insets a second time and the bar lands at exactly twice
+the chrome height. Both modes read as correct in code review; only one is.
+**Bit us:** the Tauri desktop shell shipped its bar at
+`top: var(--linkbar-h)` while `.app` separately reserved
+`--shell-chrome-top`, two offsets measured from different origins. The bar
+landed over the LinkBar's lower half, drew BEHIND it (z-index 18 vs 20), and
+left dead space above and below — the exact symptom the operator reported.
+The first fix then reintroduced the doubling on desktop via the sticky path.
+**Fix:** one reserve (`.app` padding-top), chrome pinned at `top: 0`, and the
+sticky offset restated ONLY in the mode where the page is the scrollport.
+`webui/test/shell-chrome-geometry.test.mjs` asserts flush-stacking in both
+modes with no device present (`npm run check:shell`).
+**Companion:** exactly one bar may absorb `env(safe-area-inset-top)`. The
+topmost one owns it via `--chrome-inset-top`; two bars padding for the same
+notch is the same double-gap bug wearing a phone.

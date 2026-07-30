@@ -120,6 +120,15 @@ html.hivis {
   --tx-mut:   #8A919D;
   --tx-ghost: #6B7280;
   --num-wght: 480;
+
+  /* Edge-to-edge devices (index.html sets viewport-fit=cover): the status
+     bar / notch overlaps the viewport, and exactly ONE bar — whichever is
+     topmost — absorbs that inset so content clears it. The LinkBar owns it
+     by default; when the Tauri shell mounts its own chrome ABOVE the
+     LinkBar, ShellBar takes ownership and zeroes this. Do not read
+     env(safe-area-inset-top) anywhere else: two bars padding for the same
+     notch is the double-gap bug. */
+  --chrome-inset-top: env(safe-area-inset-top, 0px);
 }
 @media (prefers-contrast: more) {
   :root { --tx: #E4E8EF; --tx-mut: #8A919D; --tx-ghost: #6B7280; --line-1: #2A2F36; }

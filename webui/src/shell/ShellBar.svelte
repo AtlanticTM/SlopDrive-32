@@ -18,14 +18,24 @@
 
   let scanning = $state(false);
   let hubs = $state([]);
-  // The bar publishes its own height as --shell-chrome-top so the page can
-  // reserve exactly that much extra top padding (style.css's .app), keeping
-  // this chrome from covering the LinkBar/hero zone below it. The kernel
-  // reads the var with a 0px default and never knows the shell exists.
+  // The bar publishes its own MEASURED height as --shell-chrome-top so the
+  // page reserves exactly that much top padding (style.css's .app) and the
+  // LinkBar sticks below it. clientHeight includes padding, so the notch
+  // inset this bar absorbs is already in the number. The kernel reads the var
+  // with a 0px default and never knows the shell exists.
+  //
+  // Zeroing --chrome-inset-top is the other half of that: this bar is now the
+  // topmost chrome, so it owns the notch and the LinkBar must not pad for the
+  // same inset a second time.
   let barH = $state(0);
   $effect(() => {
-    document.documentElement.style.setProperty('--shell-chrome-top', barH + 'px');
-    return () => document.documentElement.style.removeProperty('--shell-chrome-top');
+    const root = document.documentElement.style;
+    root.setProperty('--shell-chrome-top', barH + 'px');
+    root.setProperty('--chrome-inset-top', '0px');
+    return () => {
+      root.removeProperty('--shell-chrome-top');
+      root.removeProperty('--chrome-inset-top');
+    };
   });
   // No baked-in address: discovery is the front door. The input remembers
   // only a host the operator themselves connected to before.
@@ -139,20 +149,24 @@
 <style>
   .shellbar {
     position: fixed;
-    /* Sits directly under the LinkBar (LinkBar is sticky top, so this holds
-       in both the desktop no-scroll column and the mobile scrolling page). */
-    top: var(--linkbar-h, 0px);
+    /* TOPMOST chrome. It must be, and the offset must be 0: `.app` reserves
+       this bar's measured height as its own padding-top, which pushes the
+       LinkBar down by exactly that much. Offsetting the bar as well
+       double-counts — it lands over the LinkBar's lower half (drawing behind
+       it) with dead space above and below. */
+    top: 0;
     left: 0;
     right: 0;
-    z-index: 18; /* below the LinkBar's stacking (20), above page content */
+    z-index: 21; /* above the LinkBar's stacking (20): it scrolls under this */
     display: flex;
     align-items: center;
     gap: 8px;
     flex-wrap: wrap;
-    /* No safe-area-inset-bottom: this chrome no longer touches the bottom
-       edge (SafetyBar owns that exclusively). No safe-area-inset-top either:
-       the LinkBar above already carries that inset. */
-    padding: 4px 10px;
+    /* Topmost chrome owns the notch inset (style.css --chrome-inset-top),
+       and the $effect above zeroes that var so the LinkBar stops padding for
+       it. No inset-bottom: this never touches the bottom edge, SafetyBar
+       owns that exclusively. */
+    padding: calc(4px + env(safe-area-inset-top, 0px)) 10px 4px;
     background: color-mix(in srgb, var(--bg-raised) 94%, transparent);
     border-bottom: 1px solid var(--line);
     font-size: 0.72rem;

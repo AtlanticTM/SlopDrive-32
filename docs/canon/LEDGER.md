@@ -2538,6 +2538,28 @@ Fixed on the way in: `tauri.conf.json` shipped an **800x600** window while
 the rail breakpoint is `min-width: 960px`, so the desktop shell would have
 booted into the PHONE layout. Now 1440x900 with `minWidth` 1000 (above the
 breakpoint, not on it) so it cannot be dragged into the mobile tree.
+**Chrome stacking FIXED (2026-07-29, operator report from the first launch:
+"shell is behind the top bar and there's a gap above and below").** Not a
+safe-area bug — the insets were already `env()`-driven. It was two offsets
+measured from different origins: `.app` reserved `--shell-chrome-top` as
+padding (pushing the LinkBar down by the bar's height) while `.shellbar` ALSO
+offset itself by `--linkbar-h`, so it landed over the LinkBar's lower half,
+drew behind it (z-index 18 vs 20), and left dead space above and below.
+ShellBar is now the topmost chrome at `top: 0` / z-index 21, and the LinkBar
+sticks below it. Mechanism and the second, subtler half — a sticky offset is
+inset by the SCROLL CONTAINER's padding, so the same `top` value is correct
+on mobile and double-counts on desktop where `.app` is the scrollport — are
+**TRAPS T22**. Safe-area ownership is now explicit: `--chrome-inset-top`
+(style.css) defaults to `env(safe-area-inset-top)`, the LinkBar reads the var
+instead of `env()` directly, and ShellBar zeroes it when it mounts because
+the topmost bar owns the notch. Exactly one bar ever pads for it.
+Guard: `webui/test/shell-chrome-geometry.test.mjs` (`npm run check:shell`)
+asserts flush stacking with and without chrome, in both scroll modes, with no
+device present. Kept OUT of `npm run check` on purpose — that script runs
+inside every firmware build and must not spawn a browser.
+**Rebuild of the exe is OWED: it failed with "Access is denied" because the
+operator had SlopDeck running and the binary was locked.** The shipped exe
+still has the stacking bug; close the app and re-run `npm run tauri build`.
 🚩 **TRAP, burned live: `npm run tauri build` REPLACES `webui/dist/` with
 the SHELL bundle.** `beforeBuildCommand` is `npm run build`, and the Tauri
 CLI sets `TAURI_ENV_PLATFORM` for it, so the SHELL branch survives

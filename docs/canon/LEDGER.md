@@ -3717,12 +3717,59 @@ deferred half (the §5.4 reorder/insert-before-tail lint, which needs the golden
 shape the pin records); re-freeze of the conformance fixture pins; delete the
 FREEZE STATE notice.
 
-## ⏭ NEXT STEPS (restamped 2026-07-30 after the UI-punch-list + intent-echo + tauri-build session — START HERE)
+## SESSION CLOSEOUT 2026-07-30b — introspection, SSManager, freeze state
+
+No code shipped, no deploy, no firmware change. This was a decisions session:
+four operator rulings, three of which corrected something the repo was
+asserting falsely. Commits: SlopDrive `20ad5ad`, `b049f46`; SlopSync `7a430bd`,
+`37b6366`. Both repos clean and ahead of their remotes by exactly those; no
+divergence, nothing behind.
+
+**SSManager schema v1 LANDED (SlopSync `7a430bd`)** — `ssmanager/SCHEMA.md`
+plus a real `ssmanager.toml` with 8 tool entries and 6 toolchains. Data only,
+no console code: the schema shape is the expensive thing to get wrong, so it is
+argued before it is built. Two of its rules exist ONLY because the probes were
+run instead of trusted, which is the same lesson as the previous session:
+- **`probe` is a candidate LIST.** `pio --version` fails on this host while
+  PlatformIO is fully installed at `~/.platformio/penv/Scripts/`, and mkdocs
+  lives in `docs-site/.venv`. A single-command probe tells a developer to
+  reinstall tools they already have — exactly the failure SSManager exists to
+  prevent. A toolchain id appearing as `argv[0]` is substituted with its
+  resolved candidate; that is the ONLY substitution, and a template language
+  would be a 🚩.
+- **Candidate paths resolve from the REPO ROOT, never the shell cwd.** Caught
+  by a probe reporting `docs-site/.venv/Scripts/mkdocs.exe` missing while run
+  from the sibling checkout. The binary was there the whole time.
+Verified: the three entries whose toolchains exist here were run from the
+manifest's own argv, all exit 0 (slopsync_lint, `gen_registry_header --check`,
+JS wire suite ALL PASS). The two fuzz entries need clang, which is genuinely
+absent — UNRUN, not passing.
+**Still open, worth settling before the Rust:** whether `error_exit` earns its
+place (only slopsync_lint uses it today) and whether `group` stays free text or
+becomes a fixed set.
+
+**Note for whoever builds SSManager: ponytail does NOT govern it.** DOCTRINE §4
+bars minimalism mode from the SlopSync repo, which is where SSManager lives.
+The schema is deliberately complete — reserved onboarding fields, explicit
+`error_exit` — rather than trimmed to today's need.
+
+**Measurement corrected, mine:** SlopSync is ALREADY its own repo with its own
+remote. An earlier statement this session that the split happens "around v1.0"
+was wrong; the split executed 2026-07-28.
+
+## ⏭ NEXT STEPS (restamped 2026-07-30b after the introspection + SSManager + freeze-state session — START HERE)
 
 **ORDER OF OPERATIONS (operator-ruled 2026-07-30, supersedes the bare item
 order below):** SSManager v0 → campaign Phase 2, registering its gates as the
 first real manifest content → UI punch item 4 (card columns) → Phase 3 →
-SSManager v1 → Phases 4–6. The reasoning: building SSManager after the campaign
+SSManager v1 → Phases 4–6.
+**Immediate next action:** SSManager v0's Rust half — manifest parse,
+capability probe with candidate resolution, process spawn, input-hash
+staleness. The schema it consumes is landed and verified (closeout above);
+settle `error_exit` and `group` first, both one-line decisions.
+**Nothing is frozen and nothing is owed to a tag** — see the FREEZE STATE
+ruling. Work freely; the lock-day checklist is what the release pin costs when
+it eventually happens. The reasoning: building SSManager after the campaign
 means the campaign's own verification runs through the scattered surface that
 prompted it, and building all of SSManager first stalls the campaign — so v0
 is deliberately small and the campaign is its first customer. Every phase

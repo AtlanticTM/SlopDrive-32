@@ -21,6 +21,7 @@
    * fields) plus the browser's own location/theme — never a device fact that
    * isn't something the machine actually sent.
    */
+  import { untrack } from 'svelte';
   import { machine } from '../model/machine.svelte.js';
   import { ACCESS_NAME } from '../../../../SlopSync/clients/js/index.js';
   import { bytes, since } from '../model/format.js';
@@ -143,7 +144,10 @@
     // observed peak, so "fully lit" always means "near this row's own recent
     // peak" rather than a guessed, device-specific number.
     const peaks = {};
-    let lastPushes = machine.stats.statePushes;
+    // untrack: see the note on the first paint below. This seed read is in the
+    // effect body itself, so tracking it re-runs the whole effect on every
+    // telemetry frame and the history buffer above never survives a tick.
+    let lastPushes = untrack(() => machine.stats.statePushes);
 
     function sampleFrac(row) {
       if (row.key === 'link') {
@@ -194,7 +198,14 @@
       draw();
     }
 
-    tick();
+    // The first paint MUST be untracked. sampleFrac() reads machine.stats and
+    // machine.samples, and a read made synchronously inside an effect becomes
+    // that effect's dependency — so a tracked first tick re-runs this whole
+    // body on every telemetry frame, re-declaring `data` and refilling it with
+    // zeros ~25x a second. The grid still scrolls; it just has no history left
+    // to scroll, so every column but the newest reads empty. The interval's
+    // own ticks are untracked by construction (async, outside the scope).
+    untrack(tick);
     const id = setInterval(tick, 220);
     return () => clearInterval(id);
   });

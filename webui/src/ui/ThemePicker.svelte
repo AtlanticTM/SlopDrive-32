@@ -55,8 +55,10 @@
   }
 
   // Terse instrument: hides `.explain` teaching copy on the hero instruments
-  // (style.css owns the rule + the convention). Settings descriptions are
-  // NOT affected — that split is the point, not an accident. Same
+  // (style.css owns the rule + the convention), and moves a settings field's
+  // description from an inline line under the control to the hover tip on its
+  // `i` (Field.svelte owns that half). A description is reachable either way;
+  // terse only changes whether it costs vertical space. Same
   // localStorage-before-first-paint mechanism as hivis (main.js restores).
   let terse = $state(
     typeof document !== 'undefined' && document.documentElement.classList.contains('terse')
@@ -128,7 +130,7 @@
     <span class="hv-state">{terse ? 'on' : 'off'}</span>
   </button>
   <p class="hint">
-    Terse hides usage hints and descriptions on the instrument cards once you know them. Settings pages always keep their explanations.
+    Terse hides usage hints and descriptions on the instrument cards once you know them. On settings pages a field's description moves out of the layout and onto its info button, which shows it on hover.
   </p>
 </div>
 

@@ -119,23 +119,18 @@
         {#if field.flagBits.restart_required}<span class="tag warn" title="Takes effect after restart">restart</span>{/if}
       </label>
       {#if field.desc}
-        <button type="button" class="info" aria-expanded={descOpen} aria-controls={descId}
-                onclick={() => (descOpen = !descOpen)}>
-          <!-- The OG `i-info` glyph verbatim (core/ui.js sprite + its 24-unit
-               stroke-2 round-cap wrapper), at the OG's own in-field metrics.
-               Do not redraw it by hand on a smaller viewBox: the dot's ink
-               (7..9) and the stem's (11..17) straddle cy 12 exactly, and a
-               hand-fitted copy loses that balance while looking correct in
-               the source. -->
-          <svg viewBox="0 0 24 24" width="11" height="11" aria-hidden="true"
-               fill="none" stroke="currentColor" stroke-width="2"
-               stroke-linecap="round" stroke-linejoin="round">
-            <circle cx="12" cy="12" r="10"/>
-            <path d="M12 16v-4"/>
-            <path d="M12 8h.01"/>
-          </svg>
-          <span class="sr-only">{descOpen ? 'Hide' : 'Show'} description</span>
-        </button>
+        <!-- Hover reveals the description; the click toggle stays because
+             touch has no hover and :focus-visible covers the keyboard. The
+             tip is a SIBLING of the button, not a child — inside it, its text
+             would join the button's accessible name. -->
+        <span class="info-wrap">
+          <button type="button" class="info" aria-expanded={descOpen} aria-controls={descId}
+                  onclick={() => (descOpen = !descOpen)}>
+            <span class="glyph" aria-hidden="true">i</span>
+            <span class="sr-only">{descOpen ? 'Hide' : 'Show'} description</span>
+          </button>
+          <span class="tip" id={descId} role="tooltip">{field.desc}</span>
+        </span>
       {/if}
     </span>
     {#if showValueChip}
@@ -260,7 +255,7 @@
            disabled={!enabled} onchange={(e) => commit(e.currentTarget.value)} />
   {/if}
 
-  {#if field.desc && descOpen}<p class="field-desc" id={descId}>{field.desc}</p>{/if}
+  {#if field.desc}<p class="field-desc" id={descId + '-inline'}>{field.desc}</p>{/if}
 
   {#if sh && sh.status === 'fault' && sh.error}
     <p class="field-error" role="status">refused: {sh.error}</p>
@@ -342,24 +337,34 @@
     box-shadow: inset 0 0 0 1px rgba(245, 185, 77, .4);
   }
 
-  /* ⓘ description toggle — the OG .info affordance (og-ref/style.css: base
-     .info box + its .label-row 18px/11px in-field variant, since this button
-     rides beside a field label rather than a card-head). The OG's own hover
-     state only brightens its floating .tip popover, not the button itself;
-     the border-brightens-on-hover idiom here is the one every other outlined
+  /* ⓘ description affordance — the OG .info box at its .label-row in-field
+     size (18px), since this button rides beside a field label rather than a
+     card-head. The glyph is a letter in the instrument typeface, not a drawn
+     icon. The border-brightens-on-hover idiom is the one every other outlined
      icon button in this sheet already uses (.og-btn:hover, .og-seg button:hover). */
+  .info-wrap {
+    position: relative;
+    display: inline-flex;
+    flex: 0 0 auto;
+  }
+
   .info {
     position: relative;
     width: 18px;
     height: 18px;
     flex: 0 0 auto;
     display: inline-grid;
+    /* MUST stay 0. The UA gives a button `padding: 1px 6px`, and under
+       border-box that leaves this 18px control a 4px-wide content box — too
+       narrow for the glyph, so `place-items: center` cannot center an item
+       wider than its own track and pins it to the content edge instead.
+       Measured result: the glyph sat 3.5px right of the button's center. */
+    padding: 0;
     place-items: center;
     border-radius: var(--r-s);
     border: 1px solid var(--line-2);
     background: transparent;
     color: var(--tx-mut);
-    font-size: .62rem;
     line-height: 1;
     cursor: pointer;
     transition: border-color .12s, color .12s;
@@ -371,6 +376,66 @@
   .info[aria-expanded='true'] {
     border-color: var(--reality);
     color: var(--reality);
+  }
+
+  /* A lowercase Martian Mono `i` — the typeface this UI already uses for
+     values and readouts, so the mark reads as instrument, not as prose. At
+     10px/line-height 1 the ink lands centered in the box on its own; no
+     optical nudge is applied. Re-check that if the size or family changes,
+     because the grid centers the LINE BOX, not the ink inside it. */
+  .info .glyph {
+    display: block;
+    font-family: var(--mono);
+    font-weight: 400;
+    font-size: 10px;
+    line-height: 1;
+  }
+
+  /* Floating description. OG .tip recipe, re-sourced to this palette: the OG
+     set `background: var(--ink)` when --ink was the page color, but here
+     --ink IS the text color (style.css names the collision), so a raised
+     surface + the nested-frame outline carries it instead. */
+  .tip {
+    position: absolute;
+    left: 0;
+    top: calc(100% + 6px);
+    z-index: 30;
+    width: max-content;
+    max-width: 240px;
+    padding: 8px 10px;
+    background: var(--bg-card);
+    border: 1px solid var(--line-1);
+    outline: 1px solid var(--line-0);
+    outline-offset: 2px;
+    border-radius: var(--r-s);
+    font-size: .72rem;
+    line-height: 1.5;
+    color: var(--tx);
+    text-align: left;
+    opacity: 0;
+    visibility: hidden;
+    transform: translateY(-4px);
+    transition: opacity .12s, transform .12s, visibility .12s;
+    pointer-events: none;
+  }
+  :global(html.terse) .info-wrap:hover .tip,
+  :global(html.terse) .info:focus-visible ~ .tip,
+  :global(html.terse) .info[aria-expanded='true'] ~ .tip {
+    opacity: 1;
+    visibility: visible;
+    transform: translateY(0);
+  }
+
+  /* Terse is the switch between the two ways a description can reach the
+     operator, and only ONE is ever live: verbose prints it inline under the
+     field, terse holds it back until hover/focus. Never both — that is the
+     duplicate truth the density pass exists to prevent. */
+  .field-desc {
+    font-size: .72rem;
+    color: var(--tx-mut);
+  }
+  :global(html.terse) .field-desc {
+    display: none;
   }
 
   .sr-only {
@@ -568,8 +633,4 @@
     accent-color: var(--reality);
   }
 
-  .field-desc {
-    font-size: .72rem;
-    color: var(--tx-mut);
-  }
 </style>

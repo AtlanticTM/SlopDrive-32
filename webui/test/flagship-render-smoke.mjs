@@ -138,10 +138,78 @@ ok('hero instruments carry explain copy', explainCount > 0, explainCount + ' ele
 await page.click('button:has-text("Terse instruments")');
 const allHidden = await page.$$eval('.explain', (els) => els.every((e) => getComputedStyle(e).display === 'none'));
 ok('terse hides instrument explanations', allHidden);
-const fieldDescVisible = await page.$$eval('.field-desc', (els) =>
-  els.length === 0 || els.some((e) => getComputedStyle(e).display !== 'none'));
-ok('settings descriptions survive terse', fieldDescVisible);
 await page.click('button:has-text("Terse instruments")');
+
+// ---- settings descriptions: terse MOVES them, never drops them -------------
+// Field.svelte: verbose prints a field's description inline under the control,
+// terse holds it on the info button's hover tip. Exactly one carrier is ever
+// live — both at once is the duplicate truth the density pass exists to stop.
+const fieldTabs = await page.$$('nav.rail [role="tab"]');
+for (const t of fieldTabs) {
+  const txt = (await t.textContent()).trim().toLowerCase();
+  if (txt.includes('tuning') || txt.includes('motion')) { await t.click(); break; }
+}
+const infoUp = await page.waitForSelector('.info-wrap .info', { timeout: 15000 })
+  .then(() => true).catch(() => false);
+ok('described settings fields render an info affordance', infoUp);
+
+// Centering regression guard: a `button` carries UA padding, and under
+// border-box that shrinks this 18px control's content box below the glyph's
+// own width — which pins the glyph to the content edge instead of centering
+// it. Measured 3.5px off before `padding: 0` landed.
+const glyphOffset = await page.$eval('.info-wrap .info', (el) => {
+  const b = el.getBoundingClientRect(), g = el.querySelector('.glyph').getBoundingClientRect();
+  return Math.max(Math.abs((g.x + g.width / 2) - (b.x + b.width / 2)),
+                  Math.abs((g.y + g.height / 2) - (b.y + b.height / 2)));
+});
+ok('info glyph is centered in its button', glyphOffset < 0.51, glyphOffset.toFixed(3) + 'px off');
+
+// Hover is the terse-mode carrier; verbose must NOT also pop the tip.
+// Hover AFTER the mode switch, never before: terse hides every inline
+// description at once, and that reflow slides the button out from under a
+// pointer parked at fixed viewport coordinates.
+const setTerse = async (on) => {
+  await page.evaluate((v) => document.documentElement.classList.toggle('terse', v), on);
+  await page.hover('.info-wrap .info');
+  await page.waitForTimeout(220);            // clear the .12s tip transition
+  return page.evaluate(() => {
+    const d = document.querySelector('.field .field-desc');
+    const t = document.querySelector('.info-wrap .tip');
+    return { inline: d ? getComputedStyle(d).display !== 'none' : null,
+             tip: t ? getComputedStyle(t).visibility : null };
+  });
+};
+const verbose = await setTerse(false);
+ok('verbose prints the description inline', verbose.inline === true, JSON.stringify(verbose));
+ok('verbose does not also pop the hover tip', verbose.tip === 'hidden', JSON.stringify(verbose));
+const terseMode = await setTerse(true);
+ok('terse drops the inline description', terseMode.inline === false, JSON.stringify(terseMode));
+ok('terse reveals the tip on hover', terseMode.tip === 'visible', JSON.stringify(terseMode));
+await setTerse(false);
+
+// ---- activity heatmap keeps its scroll history -----------------------------
+// A reactive read made SYNCHRONOUSLY inside LinkBar's $effect becomes that
+// effect's dependency, so a telemetry frame re-runs the body and refills the
+// history buffer with zeros ~25x a second: the grid still scrolls, with
+// nothing in it. Signature of that bug is every column but the newest sitting
+// at the v=0 baseline alpha, so that is what this counts.
+await page.waitForTimeout(3600);            // ~16 ticks at 220ms
+const staleCols = await page.$eval('canvas.act-grid', (c) => {
+  const ctx = c.getContext('2d');
+  const d = ctx.getImageData(0, 0, c.width, c.height).data;
+  const dpr = c.width / parseFloat(c.style.width);
+  const cols = 14, cell = 4, gap = 1;
+  const rows = Math.round(parseFloat(c.style.height) / (cell + gap + 1));
+  const y = Math.round(((rows - 1) * (cell + gap + 1) + 1) * dpr);   // link-activity row
+  let atBaseline = 0;
+  for (let col = 0; col < cols; col++) {
+    const x = Math.round((col * (cell + gap) + 1) * dpr);
+    if (d[(y * c.width + x) * 4 + 3] <= 16) atBaseline++;            // alpha of v=0
+  }
+  return atBaseline;
+});
+ok('activity grid retains scroll history', staleCols <= 2,
+   staleCols + '/14 columns at the empty baseline');
 
 await page.click('nav.rail [role="tab"]');             // back to Overview for the shot
 await page.evaluate(() => window.scrollTo(0, 0));

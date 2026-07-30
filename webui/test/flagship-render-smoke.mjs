@@ -217,6 +217,53 @@ ok('every slider chip is typeable', typeable.sliders > 0 && typeable.sliders ===
 ok('no readout became typeable', typeable.typeableReadouts === 0);
 ok('typeable chip keeps native spinners stripped', typeable.spinners === 'textfield', typeable.spinners);
 
+// ---- intent echo is wired --------------------------------------------------
+// Drives the lifecycle by setting data-shadow directly. Fires NO intent and
+// writes nothing to the machine — the point is the CSS wiring, which dies
+// silently in three ways: Svelte renames scoped @keyframes, `@property --pr`
+// can go unregistered (then the radius SNAPS instead of spreading), and the
+// mask can be pruned as unused.
+const echo = await page.evaluate(async () => {
+  const f = document.querySelector('.field[data-widget="slider"]');
+  if (!f) return null;
+  const read = () => {
+    const cs = getComputedStyle(f, '::after');
+    return { anim: cs.animationName, dur: cs.animationDuration,
+             iter: cs.animationIterationCount, mask: cs.maskImage || cs.webkitMaskImage || 'none' };
+  };
+  const orig = f.getAttribute('data-shadow');
+  const res = { originX: f.style.getPropertyValue('--pulse-x'), originY: f.style.getPropertyValue('--pulse-y') };
+  f.setAttribute('data-shadow', 'pending'); res.pending = read();
+  f.setAttribute('data-shadow', 'fault');   res.fault = read();
+  f.setAttribute('data-shadow', orig ?? 'confirmed');
+  f.classList.add('settled');
+  await new Promise((r) => setTimeout(r, 250));
+  res.settled = read();
+  res.pr = getComputedStyle(f, '::after').getPropertyValue('--pr');
+  f.classList.remove('settled');
+  return res;
+});
+ok('a slider field exists to carry the echo', echo !== null);
+if (echo) {
+  ok('pending pulses on a repeating wavefront',
+     echo.pending.anim.includes('intent-echo') && echo.pending.iter === 'infinite'
+     && echo.pending.dur === '0.5s', JSON.stringify(echo.pending));
+  ok('pending echo carries a radial mask', echo.pending.mask.includes('radial-gradient'));
+  ok('confirm echo runs once over the settle window',
+     echo.settled.anim.includes('confirm-echo') && echo.settled.iter === '1'
+     && echo.settled.dur === '0.9s', JSON.stringify(echo.settled));
+  // The registration guard: an unregistered --pr never interpolates, so a
+  // mid-flight sample would read 0% (or the raw token) instead of a radius.
+  const pr = parseFloat(echo.pr);
+  ok('--pr interpolates, so the pulse spreads instead of snapping',
+     isFinite(pr) && pr > 5 && pr < 165, 'mid-flight --pr = ' + echo.pr);
+  // Doctrine: a refused write has finished failing; a pulsing failure reads
+  // as "still trying".
+  ok('fault does not pulse', echo.fault.anim === 'none', JSON.stringify(echo.fault));
+  ok('echo origin tracks the handle, not a hardcoded guess',
+     echo.originX.length > 0 && echo.originY.length > 0, echo.originX + ' / ' + echo.originY);
+}
+
 // ---- activity heatmap keeps its scroll history -----------------------------
 // A reactive read made SYNCHRONOUSLY inside LinkBar's $effect becomes that
 // effect's dependency, so a telemetry frame re-runs the body and refills the

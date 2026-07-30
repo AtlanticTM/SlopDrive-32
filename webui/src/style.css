@@ -192,7 +192,11 @@ h1, h2, h3, p { margin: 0; }
    Deliberate details:
    - INSET box-shadow, never a border: a border changes layout metrics and
      makes controls jump a pixel as state changes, which reads as jitter on a
-     page that updates constantly.
+     page that updates constantly. A settings field ALSO draws an outward echo
+     that spreads from its control (Field.svelte owns it, and says why there);
+     that one is allowed to read as an outline because it lives on an
+     absolutely-positioned pseudo-element and so contributes no layout at all.
+     Anything that occupies space still obeys the rule above.
    - `fault` does NOT pulse. A pulsing failure reads as "still trying"; a
      refused write has already finished failing and should sit still to be read.
    - Color is never the only channel — every unconfirmed control also renders
@@ -209,6 +213,15 @@ h1, h2, h3, p { margin: 0; }
   box-shadow: inset 0 0 0 2px var(--bad);
 }
 .settled { animation: confirm-flash 0.9s ease-out 1; }
+
+/* Radius of the intent echo's wavefront (Field.svelte). Registered rather than
+   plain, because an unregistered custom property is a raw token and animates
+   as a discrete swap — the pulse would jump instead of spreading. */
+@property --pr {
+  syntax: '<percentage>';
+  inherits: false;
+  initial-value: 0%;
+}
 
 @keyframes unconfirmed-breathe {
   0%, 100% { box-shadow: inset 0 0 0 2px var(--warn); }

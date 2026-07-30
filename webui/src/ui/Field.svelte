@@ -96,6 +96,36 @@
     || (field.widget === WIDGET.stepper && unitOf(field) !== '')
   );
 
+  // ---- intent echo origin ---------------------------------------------------
+  // Where the pulse is born. X is exact: a slider handle sits at its value's
+  // own fraction of the published range, so the echo leaves from under the
+  // operator's thumb. Anything without a handle pulses from its center.
+  const pulseX = $derived.by(() => {
+    if (field.widget !== WIDGET.slider) return 50;
+    const n = Number(value);
+    if (!isFinite(n) || field.min == null || field.max == null || field.max <= field.min) return 50;
+    return Math.max(0, Math.min(1, (n - field.min) / (field.max - field.min))) * 100;
+  });
+
+  // Y is MEASURED, not assumed. A field grows a whole line taller the moment
+  // its description prints inline — which is the default mode — so a fixed
+  // percentage would launch the pulse from below the control it is supposed to
+  // come from. ResizeObserver's callback is async, so it never becomes a
+  // dependency of the effect that installs it.
+  let fieldEl = $state(null);
+  let ctrlEl = $state(null);
+  let pulseY = $state(50);
+  $effect(() => {
+    const f = fieldEl, c = ctrlEl;
+    if (!f || !c) return;
+    const ro = new ResizeObserver(() => {
+      const fr = f.getBoundingClientRect(), cr = c.getBoundingClientRect();
+      if (fr.height > 0) pulseY = ((cr.top + cr.height / 2 - fr.top) / fr.height) * 100;
+    });
+    ro.observe(f);
+    return () => ro.disconnect();
+  });
+
   // The slider is the one writable numeric with no numerals of its own, so its
   // chip carries the typing. A readout must never become typeable (no
   // setting_key at all), and the stepper/text/secret controls already type.
@@ -127,6 +157,8 @@
 </script>
 
 <div class="field" data-shadow={status} data-widget={field.widget}
+     bind:this={fieldEl}
+     style="--pulse-x: {pulseX}%; --pulse-y: {pulseY}%"
      class:disabled={!enabled && !field.readOnly}
      class:readonly={field.readOnly}
      class:settled={sh && sh.settled}>
@@ -253,7 +285,7 @@
     </div>
 
   {:else if field.widget === WIDGET.slider}
-    <input id={field.uid} type="range"
+    <input id={field.uid} type="range" bind:this={ctrlEl}
            min={field.min} max={field.max} step={step}
            value={value ?? field.min} disabled={!enabled}
            oninput={(e) => commit(Number(e.currentTarget.value))} />
@@ -311,9 +343,87 @@
      from .5rem so the control sits close under its head instead of floating
      in its own paragraph-sized band. */
   .field {
+    position: relative;
     display: flex;
     flex-direction: column;
     gap: 6px;
+  }
+
+  /* ---- intent echo ---------------------------------------------------------
+     The write's lifecycle, drawn as a wave leaving the control the operator
+     just touched. Two phases, and they mean different things:
+
+       pending/overdue  a wavefront leaves the handle every 500ms and dies at
+                        the field's edge — the question is still outstanding,
+                        and it keeps being asked. The mask is an ANNULUS, so
+                        what travels is an edge, not a growing blob.
+       settled          one reality-blue disc expands until the whole outline
+                        is lit, holds, then fades out uniformly. The mask is
+                        FILLED, which is what makes it read as an answer
+                        arriving rather than another question leaving.
+
+     500ms is not a taste number: it is shadow.svelte.js's OVERDUE_MS, so the
+     second wavefront and the escalation to amber land together. The fade is
+     900ms = SETTLE_MS, the window the model keeps `settled` true for.
+
+     This draws an OUTLINE where style.css's state rule says inset-only. That
+     rule exists so state changes cannot shift layout; this element is
+     absolutely positioned and shifts nothing. The inset box-shadow states
+     still do the actual state-telling underneath, and the textual reason
+     still renders, so color remains not-the-only-channel.
+
+     `fault` is deliberately absent: a refused write has finished failing, and
+     a pulsing failure reads as "still trying". */
+  .field::after {
+    content: '';
+    position: absolute;
+    inset: -5px;
+    border: 1.5px solid transparent;
+    border-radius: 4px;
+    pointer-events: none;
+    opacity: 0;
+  }
+
+  .field[data-shadow='pending']::after,
+  .field[data-shadow='overdue']::after {
+    border-color: rgb(var(--intent-rgb));
+    box-shadow: 0 0 12px rgba(var(--intent-rgb), .45);
+    -webkit-mask-image: radial-gradient(circle at var(--pulse-x, 50%) var(--pulse-y, 50%),
+      transparent calc(var(--pr) - 34%), #000 var(--pr), transparent calc(var(--pr) + 4%));
+    mask-image: radial-gradient(circle at var(--pulse-x, 50%) var(--pulse-y, 50%),
+      transparent calc(var(--pr) - 34%), #000 var(--pr), transparent calc(var(--pr) + 4%));
+    animation: intent-echo 500ms ease-out infinite;
+  }
+  /* Escalation keeps the existing safety ramp — same wave, amber. */
+  .field[data-shadow='overdue']::after {
+    border-color: var(--warn);
+    box-shadow: 0 0 12px rgba(245, 185, 77, .45);
+  }
+
+  .field.settled::after {
+    border-color: rgb(var(--reality-rgb));
+    box-shadow: 0 0 14px rgba(var(--reality-rgb), .5);
+    -webkit-mask-image: radial-gradient(circle at var(--pulse-x, 50%) var(--pulse-y, 50%),
+      #000 0, #000 var(--pr), transparent calc(var(--pr) + 4%));
+    mask-image: radial-gradient(circle at var(--pulse-x, 50%) var(--pulse-y, 50%),
+      #000 0, #000 var(--pr), transparent calc(var(--pr) + 4%));
+    animation: confirm-echo 900ms cubic-bezier(.22, .7, .3, 1) 1;
+  }
+
+  @keyframes intent-echo {
+    0%   { --pr: 0%;   opacity: 0; }
+    15%  { opacity: 1; }
+    100% { --pr: 150%; opacity: 0; }
+  }
+  @keyframes confirm-echo {
+    0%   { --pr: 0%;   opacity: 1; }
+    45%  { --pr: 165%; opacity: 1; }
+    60%  { --pr: 165%; opacity: 1; }
+    100% { --pr: 165%; opacity: 0; }
+  }
+
+  @media (prefers-reduced-motion: reduce) {
+    .field::after { animation: none; }
   }
 
   .field-head {

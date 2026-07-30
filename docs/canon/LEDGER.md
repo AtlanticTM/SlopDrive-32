@@ -2526,6 +2526,31 @@ scope creep.
 
 ## SHELL FEASIBILITY SPIKE (2026-07-28, in flight) — M0 LIVE-VERIFIED; M1/M2 BUILT; M3 toolchain up
 
+**Desktop release build DONE (2026-07-29), first one ever — the spike had
+only been run through `tauri dev`.** `npm run tauri build` in `webui/`,
+1m20s, exit 0. Artifacts under `webui/src-tauri/target/release/`:
+`slopdeck.exe` (17 MB portable), `bundle/nsis/SlopDeck_0.1.0_x64-setup.exe`
+(3.9 MB) and `bundle/msi/SlopDeck_0.1.0_x64_en-US.msi` (5.7 MB) — the
+installers write Start Menu and desktop shortcuts themselves, so no
+launcher script is owed. Not installed and not launched; that is the
+operator's call.
+Fixed on the way in: `tauri.conf.json` shipped an **800x600** window while
+the rail breakpoint is `min-width: 960px`, so the desktop shell would have
+booted into the PHONE layout. Now 1440x900 with `minWidth` 1000 (above the
+breakpoint, not on it) so it cannot be dragged into the mobile tree.
+🚩 **TRAP, burned live: `npm run tauri build` REPLACES `webui/dist/` with
+the SHELL bundle.** `beforeBuildCommand` is `npm run build`, and the Tauri
+CLI sets `TAURI_ENV_PLATFORM` for it, so the SHELL branch survives
+tree-shaking: 313,763 B carrying `__TAURI_INTERNALS__` and 8 `blec`
+matches, vs the device bundle's 296,821 B and zero. M0's purity proof used
+`build:only` from a clean tree and does not cover this direction. The
+firmware path is SAFE — `build_webui.py` runs its own `npm run build`
+without the env var — but anything trusting `dist/` as-is is not, and the
+Phase 1b entry's offline render check (serve `webui/dist` against slopsim)
+is exactly such a consumer: it would have served Tauri IPC code to a plain
+browser. Rule: after any `tauri build`, run `npm run build` to put the
+device bundle back. `dist/` restored at the time of writing.
+
 Per the RE-ORDERED ruling above. Operator-authorized toolchain installs:
 rustup (Rust 1.97.1, existing VS 2022 MSVC), Temurin JDK 17, Android
 cmdline-tools + SDK/NDK (the 2026 cmdline-tools DEPRECATED `sdkmanager` —

@@ -429,3 +429,86 @@ modes with no device present (`npm run check:shell`).
 **Companion:** exactly one bar may absorb `env(safe-area-inset-top)`. The
 topmost one owns it via `--chrome-inset-top`; two bars padding for the same
 notch is the same double-gap bug wearing a phone.
+
+## T23 — A synchronous read inside an effect is a SUBSCRIPTION; the async callback next to it is not
+
+**Rule:** in a reactive effect that installs a timer/observer and keeps state
+across ticks, every reactive value the effect body touches SYNCHRONOUSLY must
+be read through `untrack()`. Seeding a local from reactive state is a
+subscription, and re-running the effect re-runs its initializers.
+**Mechanism:** Svelte 5 records dependencies during the effect's synchronous
+execution. Reads from a `setInterval`/`ResizeObserver`/`requestAnimationFrame`
+callback happen outside that window and register nothing. So the two halves of
+the same function behave oppositely: `tick()` called once at the bottom of the
+effect subscribes to everything it touches, while the identical `tick()` fired
+by the interval subscribes to nothing. When the subscribed value updates at
+telemetry rate, the effect tears down and re-runs tens of times a second —
+re-executing `let data = []` and every buffer fill above it. The timer keeps
+running and the drawing keeps happening, so the feature looks ALIVE. Only the
+accumulated history is gone.
+**Bit us:** LinkBar's activity heatmap. Two synchronous reads leaked —
+`lastPushes = machine.stats.statePushes` in the body, and a first-paint
+`tick()` reaching `machine.samples` through `sampleFrac()`. At ~25 Hz the
+14-column history was refilled with zeros before it could ever fill, so every
+column but the newest painted empty. Read as "the grid does not scroll left",
+and the scroll was never the broken part. Two confident diagnoses (reduced
+motion, then genuinely-flat idle data) were both wrong; the operator's
+screenshot — all gray but the rightmost column — was the actual evidence,
+because "exactly one live column" is the signature of a per-tick wipe.
+**Fix:** `untrack()` on both reads. The guard counts columns sitting at the
+v=0 baseline alpha and fails above 2 (`flagship-render-smoke`), because the
+bug's signature is 13-of-14 empty and any threshold on "distinct values" would
+have passed the broken version.
+
+## T24 — A control's own box is not the box you can see
+
+**Rule:** never derive geometry from an interactive element's rect without
+checking what the UA and the design system did to that rect first. Measure the
+rendered box; do not reason about it from the stylesheet.
+**Mechanism:** two independent ways the box lies. (1) The UA gives `button` a
+default `padding: 1px 6px`. Under `box-sizing: border-box` on a small fixed
+control that padding is subtracted from the INSIDE: an 18px button keeps a
+4px-wide content box. A grid item wider than its own track cannot be centered
+in it — the overflow has nowhere symmetric to go, so alignment resolves to
+start and the item is pinned to the content edge, overflowing one side only.
+`place-items: center` is then present, correct-looking, and doing nothing.
+(2) A styled `input[type=range]` is `height: 2px` — its box is the hairline
+TRACK. The thumb is `::-webkit-slider-thumb`, a pseudo-element that overflows
+the box entirely, so the input's rect excludes the very part the operator
+grabs.
+**Bit us:** the field info button drew its glyph 3.5px right of center — a
+whole quarter of the control — while the CSS said `place-items: center` and the
+padding was never mentioned. Two diagnoses were argued from the stylesheet
+first (glyph ink balance, then a half-pixel raster offset); both were wrong,
+and the second was worth 0.18px at that size, i.e. invisible. One
+`getBoundingClientRect()` comparison found it immediately. Then the same
+feature's echo outline, cropped to a slider's rect, produced a 10px box around
+a "2px control" and would have left the handle outside the outline meant to
+enclose it.
+**Fix:** `padding: 0` on the icon button; the echo expands by half
+`--slider-thumb-h`, which style.css now defines ONCE and the thumb rules read,
+so the outline and the thing it encloses cannot drift. Guards assert a
+non-zero box BEFORE trusting an offset — a `display: none` element reports an
+all-zero rect, which had made the centering assertion pass while measuring
+nothing.
+
+## T25 — An unregistered custom property animates as a discrete swap
+
+**Rule:** a custom property driving an animation or transition must be
+declared with `@property` (a real `syntax`, not `*`). Without it the value is
+an untyped token and interpolation is impossible.
+**Mechanism:** CSS custom properties are substituted as raw token streams.
+With no registered `syntax` the engine cannot know `0%` and `150%` are
+lengths, so it falls back to discrete interpolation: the value flips at the
+keyframe boundary instead of sweeping. Registration gives it a type, an
+initial value, and `inherits: false` — after which it interpolates like any
+other animatable length.
+**Bit us:** the intent echo's wavefront radius. The failure mode is the
+dangerous kind — the animation still plays, the timing is right, and the shape
+jumps from nothing to fully-expanded, which at 500ms reads as "a slightly
+janky pulse" rather than as a bug with a name.
+**Fix:** `@property --pr { syntax: '<percentage>'; inherits: false;
+initial-value: 0% }` in style.css. The guard samples the property MID-FLIGHT
+and requires a real intermediate radius (measured 157.495% of a 165% sweep);
+asserting only that the animation is running would have passed the broken
+version.

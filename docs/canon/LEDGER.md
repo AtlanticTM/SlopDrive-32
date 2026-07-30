@@ -2557,9 +2557,14 @@ Guard: `webui/test/shell-chrome-geometry.test.mjs` (`npm run check:shell`)
 asserts flush stacking with and without chrome, in both scroll modes, with no
 device present. Kept OUT of `npm run check` on purpose — that script runs
 inside every firmware build and must not spawn a browser.
-**Rebuild of the exe is OWED: it failed with "Access is denied" because the
-operator had SlopDeck running and the binary was locked.** The shipped exe
-still has the stacking bug; close the app and re-run `npm run tauri build`.
+**Rebuild DONE (2026-07-30, operator-requested).** `npm run tauri build`,
+Rust compile 26.8s, exit 0, nothing holding the binary this time. Artifacts:
+`slopdeck.exe` 16.17 MB, `bundle/nsis/SlopDeck_0.1.0_x64-setup.exe` 3.82 MB,
+`bundle/msi/SlopDeck_0.1.0_x64_en-US.msi` 5.62 MB. This is the first exe to
+carry the T22 stacking fix AND the 2026-07-30 UI rulings. Not installed and not
+launched -- operator's call. The `dist/` trap below fired exactly as recorded
+and was cleaned up: shell bundle 319,201 B with 3 `__TAURI_INTERNALS__` and 8
+`blec` hits, restored to the device bundle at 302,162 B with zero of each.
 🚩 **TRAP, burned live: `npm run tauri build` REPLACES `webui/dist/` with
 the SHELL bundle.** `beforeBuildCommand` is `npm run build`, and the Tauri
 CLI sets `TAURI_ENV_PLATFORM` for it, so the SHELL branch survives
@@ -3321,79 +3326,203 @@ the parts worth ledgering because they are invisible in a fresh clone:
   rather than CLAUDE.md because CLAUDE.md is gitignored and a rule that binds
   every agent cannot live in an untracked file.
 
-## OPERATOR UI FEEDBACK QUEUE (2026-07-30) — the Phase 1b eyeball, answered
+## OPERATOR UI FEEDBACK QUEUE (2026-07-30) -- 3 of 7 CLOSED, 4 still open
 
-The verdict on Phase 1b: **lamps approved, steppers not objected to, no veto
-on `DRAG_TICKS_MIN`.** What came back instead is a punch list. Recorded here
-with the analysis each item needs, because two of them are not the cosmetic
-jobs they look like. Ordered by "how much do we know", not by size.
+Phase 1b's verdict was **lamps approved, steppers unchallenged, no veto on
+`DRAG_TICKS_MIN`**, plus this punch list. Closed items are RIPPED per this
+list's own discipline -- the durable record is the commit, and the mechanism
+lessons are TRAPS T23/T24/T25.
 
-1. **The ⓘ glyph is off-center.** `.info` in `webui/src/ui/Field.svelte` is
-   already an 18px `inline-grid` with `place-items: center`, so the BOX is
-   centered and the drift is inside the drawing: the glyph spans y 3.2..8.4
-   of a 12-unit viewBox (dot at 3.6 r 0.4, stem 5.4..8.4), midpoint 5.8
-   against a circle centered at 6.0. Nudge the dot and stem down ~0.2 units,
-   or center the pair on the circle rather than eyeballing the coordinates.
-   Measure a zoomed screenshot before AND after — this is small enough to
-   "fix" in the wrong direction and not notice.
-2. **Dropdowns print the current value twice** — once in the head chip, once
-   in the control. Real duplicate truth, same class the density pass killed
-   for toggles. One-line fix: `showValueChip` in Field.svelte already excludes
-   `toggle`/`bitfield`/`indicator`; `select` and `segmented` belong on that
-   list too, because both render their own current value. Check `secret` and
-   `text` while there — a text input also shows its own value, so the chip may
-   be duplicate for the whole write plane and only genuinely useful for
-   `slider` (no numerals of its own) and `readout`.
+**CLOSED (2026-07-30, `eb1d900` / `6d8bab9` / `a83673b` / `e41daac`, deployed
+and live-verified):** item 1 the off-center info glyph, item 2 dropdowns
+printing their value twice, item 6 the activity grid "not scrolling left".
+Two of the three had a RECORDED DIAGNOSIS IN THIS LEDGER THAT WAS WRONG, which
+is the part worth carrying forward. Item 1 was blamed on the glyph's ink
+balance -- worth 0.18px at an 11px render, invisible -- when the cause was
+un-reset UA button padding shrinking the content box below the glyph's own
+width, putting it 3.5px off, a quarter of the control. Item 6 was written up as
+"probably NOT broken, likely reduced-motion or genuinely flat data" when the
+history buffer was in fact being refilled with zeros ~25x a second by a leaked
+`$effect` dependency. Both were found by MEASURING the live DOM after arguing
+from the stylesheet twice, and the operator's screenshot -- every column gray
+but the rightmost -- was the evidence that broke item 6 open.
+
+STILL OPEN:
+
 3. **`raw_10um` is a meaningless label** (renders "Raw 10um" on the Motion
    tab, rank=diagnostic). `_10um` describes the WIRE unit; the field ships
-   `unit: "mm"`, `unitId: mm`, `scale: 100`, so the operator never sees 10 µm
+   `unit: "mm"`, `unitId: mm`, `scale: 100`, so the operator never sees 10 um
    at all. Siblings `pos_10um`/`tgt_10um` have the same wart but are
    hero-claimed by role and rarely drawn loose. Suggested: `demand` /
    `position` / `target`, whose meanings are already spelled out in the descs
    and in `value_provenance` (demand/planned/actual).
-   🚩 **THIS IS A WIRE CHANGE, NOT A RENAME — TRAPS T11.** Catalog field names
-   are protocol bytes: they move the etag and invalidate the pinned fixture.
-   The campaign budget allows exactly ONE etag bump, at Phase 6. Fold it in
-   there or not at all. Safe on the client side — `roles.js` binds by ROLE and
-   the device-knowledge gate forbids name knowledge in `webui/src` — but the
-   C++ STATE packer and any vector fixtures move with it.
+   [FLAG] **THIS IS A WIRE CHANGE, NOT A RENAME -- TRAPS T11.** Catalog field
+   names are protocol bytes: they move the etag and invalidate the pinned
+   fixture. The campaign budget allows exactly ONE etag bump, at Phase 6. Fold
+   it in there or not at all. Safe on the client side -- `roles.js` binds by
+   ROLE and the device-knowledge gate forbids name knowledge in `webui/src` --
+   but the C++ STATE packer and any vector fixtures move with it.
 4. **Cards are too wide to track left-to-right.** At 1440px a label sits ~1200
    px from its value. The card body should flow into columns rather than one
    full-bleed row per field: `repeat(auto-fit, minmax(~320px, 1fr))` on the
-   field container is the cheap version. Watch two things — sliders need
+   field container is the cheap version. Watch two things -- sliders need
    enough width to stay draggable (see `DRAG_TICKS_MIN`, same concern from the
    other end), and the OG reference is the arbiter of the final cadence, so
    shoot it against `og-ref` rather than inventing a grid.
+   **Largest remaining UI item: it reshapes the surface every other settings
+   change lands on.** Blocked in practice by the page-serve shedding recorded
+   below -- it cannot be shot against `og-ref` on a device that will not
+   complete a browser navigation.
 5. **Position telemetry jitters in the Tauri shell but not on the
    device-served page.** Same source, same bundle build, so the difference is
-   environmental — do NOT start by editing the smoothing. Bisect in this order:
-   (a) **access tier** — the device page mints control via same-origin
+   environmental -- do NOT start by editing the smoothing. Bisect in this
+   order:
+   (a) **access tier** -- the device page mints control via same-origin
    `/uitoken`; the shell mints through `tauri-plugin-http`. If the shell lands
    at watch, subscription rate drops and interpolation starves. Read
    `machine.link.roles` in the shell window first, it is one glance.
-   (b) **subscribed sample rate** — compare the actual arrival cadence, not
+   (b) **subscribed sample rate** -- compare the actual arrival cadence, not
    the requested one.
-   (c) **rAF cadence** — WebView2 is not Chrome; if the render clock assumes
+   (c) **rAF cadence** -- WebView2 is not Chrome; if the render clock assumes
    ~60 Hz vsync and WebView2 delivers something else, the interpolation the
    jitter fix relies on breaks even with a perfect stream. TRAPS T18 is the
    background (arrival-time stamping destroys the timeline).
    Existing instruments answer all three without new code:
    `webui/test/position-jitter-probe.mjs`, `render-vs-samplerate-probe.mjs`,
    `jitter-measure.mjs`, `streamed-outlier-probe.mjs`.
-6. **The top-left activity grid does not scroll left.** Probably NOT broken:
-   `tick()` in LinkBar.svelte does `data.shift(); data.push(frame)` every
-   220 ms, which IS a leftward scroll. Two likelier explanations, check both
-   before touching it — (a) `prefers-reduced-motion: reduce` on the operator's
-   machine takes the deliberate freeze branch, which paints every column with
-   the same live value by design; (b) with the motor unplugged the data really
-   is uniform (velocity pinned at 0, and the `link` row's adaptive ceiling
-   tracks a steady ~25 Hz push rate to a flat ~1.0), so a correctly scrolling
-   grid of identical columns looks frozen. Compare against what the OG grid
-   actually plotted before concluding ours regressed.
+   **Now one operator click away:** a current desktop shell exists (see the
+   shell entry), so step (a) is a glance rather than a build.
 7. **Phone layout: DEFERRED by operator ruling** until the desktop layout is
    settled. Do not spend passes there; it will churn again.
 
-## ⏭ NEXT STEPS (2026-07-29 closeout, restamped after the Phase 1b + desktop-shell + page-serve session — START HERE)
+## OPERATOR UI RULINGS LANDED (2026-07-30) -- beyond the punch list
+
+Taken in the same session, all deployed, all veto-able:
+
+- **The info glyph is a LETTER, not a drawn icon.** Martian Mono 400 at 10px;
+  the operator chose it against a rendered 1x comparison of five candidates
+  (the OG `i-info` sprite and a Chakra Petch cut were the runners-up).
+- **A description reaches the reader exactly ONE way, and `terse` is the
+  switch.** Verbose prints it inline under the control; terse moves it to a
+  hover tip on the info button. Never both. The info button renders ONLY under
+  terse -- in verbose it was an affordance for revealing text already on
+  screen. Click-to-pin is kept on every pointer type AGAINST the operator's
+  instinct that it should be touch-only: touch has no hover, the keyboard uses
+  `:focus-visible`, and on a pointer device the click pins a multi-line tip so
+  it can be read without holding the pointer still. One media query reverses
+  it. ThemePicker's help text and its terse comment both claimed settings
+  pages always keep their explanations; both were corrected, not left to rot.
+- **Slider values are typeable.** A slider was the one writable numeric with
+  no way to enter an exact number, so its head chip is now an input (commits
+  on `change`, never per keystroke). Readouts deliberately did NOT become
+  typeable -- no `setting_key` means effective truth, not a control.
+  `commitNumber()` is the single clamp path for both typing and the stepper's
+  nudges, so the two cannot clamp differently.
+- **The intent echo pulses out from the handle it was thrown from.** Pending
+  sends an annulus wavefront out from the slider handle every 500ms
+  (`OVERDUE_MS`, so the second wave and the amber escalation land together);
+  confirm expands one filled reality-blue disc until the outline is lit, then
+  fades uniformly over 900ms (`SETTLE_MS`, so the animation cannot outlive the
+  state it draws). `fault` still does not pulse. The echo is cropped to the
+  CONTROL's band, not the whole field, and expands past the 2px track to
+  enclose the thumb (T24).
+  [FLAG] This draws an OUTLINE where style.css's state block says inset-only.
+  The rule's stated reason is that a state change must not shift layout, and
+  the echo lives on an absolutely-positioned pseudo-element that shifts
+  nothing -- so the constraint is honored, not bent. The rule now says so and
+  points at Field.svelte.
+- **NOT GATE-VERIFIED ON HARDWARE: the echo crop (`e41daac`).** Its three
+  assertions are written and will run on a device that is not shedding page
+  loads. Everything before it passed `flagship-render-smoke` at 43 assertions.
+
+## INCIDENT: 4-CLIENT PANIC + PAGE-SERVE SHEDDING IS WORSE THAN RECORDED (2026-07-30)
+
+**Operator ruling: capture and park, diagnose later.** Raw data is in
+`tools/diag/crash-20260730-4clients/` (gitignored -- crash.json, log.txt,
+log-preDeploy.txt, status.json, caps.json, truncation-sample.txt). This entry
+holds only what changes a DECISION; the numbers live in those files.
+
+**The panic.** Operator connected 4 clients while idly prodding and the device
+PANICked. `/api/crash` for the previous boot: `reset_reason PANIC`,
+`boot_seq 10`, `heap_min 524`, `max_block_last 2548`, 13 crumbs. The crumb
+trail is all `http-root` / `ws-attach` / `ws-detach`, and the final two crumbs
+are `ws-attach@344210` then `ws-attach@446733`.
+
+**The decision this changes: it died on the SESSION-ATTACH path, not the page
+serve.** 2.1.95's load-shedding covers `handleRoot` only -- entry gates on
+`maxblock >= 4096` plus `free >= 12288`, and it re-checks free inside the send
+loop. The attach path has no equivalent gate, and this is the same signature as
+the 2.1.92 candidate that panicked (`heap_min=260`, `max_block_last=124`). Any
+future work on the accepted-503 posture should start here, not on the serve.
+
+**The serve is ALSO worse than this ledger currently claims, and that claim is
+corrected here.** The PAGE-SERVE FLOOR entry above says the covered window is
+"first load, during pressure" and that a clean boot reads 41,928 / 31,732.
+Measured 2026-07-30 on a FRESHLY BOOTED, CLIENT-FREE device, after boot-heap
+init settled: sequential `curl` loads of `/` go full, full, then TRUNCATE
+(115,970 / 115,970 / 6,800 bytes). Roughly every third load sheds. Earlier in
+the same session, loads 1-3 went full and 4-5 truncated at 25,840.
+
+**A browser cannot complete a navigation at all right now.** `curl` gets two
+full loads back to back; Chromium fails every time, because a browser opens
+MULTIPLE CONCURRENT connections where curl makes one sequential request, and
+the concurrency is what drives the transient dip. The ledger's accepted "a 503
+from two tabs opened at once is ACCEPTED" is now being hit by a single tab.
+
+**Why sampling will never show you this:** the abandon fires between beacons.
+`[355.112 W ui] handleRoot: body abandoned mid-send (free=9468 maxblock=7668)`
+and one second later `[356.163 I sys] heap free=35648 maxblock=24564`. The
+10-second `[sys] heap` beacon reads healthy through the whole event. That is
+T19's addendum demonstrated live -- fragmentation latches and is visible at
+entry, exhaustion is a transient that arrives DURING the transfer.
+
+**Consequence for UI work, not just firmware:** browser-based verification is
+blocked. `flagship-render-smoke` cannot run, so no visual change can be
+gate-verified or shot against `og-ref` until this is addressed. That blocks
+punch-list item 4 and the plan strip below. It is the reason both are recorded
+as NOT STARTED rather than attempted.
+
+Also observed, no action owed: `min=136` and `min=200` in the heap beacon on
+boots during this session, i.e. the floor is being touched routinely, and
+`http:ui.update blocked ~1000ms` warnings cluster around the sheds.
+
+Not an incident: the operator latched the e-stop deliberately while prodding
+("no biggie"), and `flagship-render-smoke` was verified NOT to fire it -- the
+assertion only reads `!button.disabled`.
+
+## PLAN STRIP -- SCALE THE SEGMENT TO TRAVEL (operator-ruled 2026-07-30, NOT STARTED)
+
+**Ruling: the lane represents FULL TRAVEL, and `window.min`/`window.max` map
+the planned segment into it. The operator classed this a visual mod, NOT a
+spec-driven change** -- and that holds, because every fact it needs is already
+role-tagged on the wire. Verified before accepting it: `window.min`/
+`window.max`, plus `geometry.max_travel` (`SlopSyncCatalog.h:543`) and
+`geometry.measured_travel` (`:589`).
+
+Why it currently fills the lane: `plan.start_norm`/`end_norm` are u16,
+`unit: "norm"`, scale 10000, and declare NO min/max, so PlanStrip's `pct()`
+takes its already-normalized branch. Normalized against the stroke window, a
+stroke spanning that window is always 0->1 -- the whole lane, every time.
+
+[FLAG] **Do NOT copy the mapping into PlanStrip.** `RailWidget.svelte:150-170`
+already derives exactly this fact -- `lo` from the window field's own `min`
+annotation, `hi` preferring `geometry.measured_travel` over the configured
+ceiling because it is ground truth from this session's own home, then `span`
+and a `pct()`. Duplicating it is one-fact-two-homes (C-1), and the precedence
+is subtle enough to drift: the naive `max.max` fallback draws the rail 4x too
+long on this device (window.max caps at 2000mm, the rail is ~500mm). Extract it
+into a shared helper both widgets consume.
+
+**C-12 violation to fix in the same pass:** `RailWidget.svelte:145` still says
+`geometry.*` is untagged -- "RFC-041 is filed, not landed" -- and calls its
+fallback permanent behavior. Both roles ARE tagged now, so the comment lies and
+the fallback it documents is dead on this hub.
+
+Not started deliberately: this is canvas drawing work and the device cannot
+currently complete a browser navigation, so it cannot be verified. Shipping
+visual work blind is what produced two wrong diagnoses earlier the same day.
+
+## ⏭ NEXT STEPS (restamped 2026-07-30 after the UI-punch-list + intent-echo + tauri-build session — START HERE)
 
 The answer to "what's next on the ledger":
 
@@ -3623,12 +3752,19 @@ The answer to "what's next on the ledger":
      (ii) it is a mitigation for a residual, not a fix. 2.1.95 sheds before it
      truncates, and 2.1.94's 304 path means a returning tab transfers no body
      at all — so the window this covers is "first load, during pressure".
-     Unverified assumption to test FIRST, because it decides whether the whole
-     idea holds: the body is `Content-Encoding: gzip`, and a truncated gzip
-     stream with a `Content-Length` that promises more may be discarded whole
-     by the browser rather than parsed up to the cut. If Chrome throws the
-     partial document away, the head script never runs and the watchdog is
-     worthless. Test with a deliberately aborted body before building it.
+     **That gating assumption is now TESTED and it HOLDS (2026-07-30).** The
+     fear was that a truncated gzip body with a `Content-Length` promising more
+     would be discarded whole, so the head script would never run and the whole
+     idea would be worthless. Chrome does NOT discard it. Measured against a
+     real shed response: navigation commits with no error, the partial document
+     is parsed and live (108,630 chars of HTML in the DOM), `<head>` is fully
+     parsed with 6 children, and `document.title` is applied. Only the 114 KB
+     inline bundle dies -- an inline script executes when the parser reaches
+     its `</script>`, which never arrives. `readyState` then stays `"loading"`
+     forever, which is exactly the hung half-drawn page this would rescue.
+     So a tiny top-of-`<head>` script WILL execute; the remaining requirement
+     is unchanged, that `vite-plugin-singlefile` keeps it ahead of the bundle.
+     Backoff/jitter/give-up-state are still mandatory (above).
    - **The accepted 503 is NOT transient — it holds until reboot.** Measured
      2026-07-29 during the Phase 1b screenshot pass, which stacked ~25 page
      loads and a dozen WS sessions in a few minutes. Per session the cost is
@@ -3727,30 +3863,34 @@ The answer to "what's next on the ledger":
 6. **Session-gate/closeout system** (C-13 proposal + ledger diet + tiered
    canon loading, designed in chat 2026-07-29) — implement after Phase 0;
    this closeout entry is its manual prototype.
-7. **Deploy state: device runs 2.1.95, firmware AND filesystem both current.
-   NOTHING IS OWED TO THE DEVICE.** Everything this session produced is on it
-   and live-verified: Phase 1a's settings surface (UI build `1d117e2`), the
-   boot-heap/stack instrumentation (2.1.89, 2.1.90), and the memory margin
-   (2.1.91), plus Phase 1b's §8.2 archetypes and the page-serve revalidation
-   fix (2.1.95). 2.1.92 and 2.1.93 were the A/B pair for the floor experiment
-   above and are superseded — 2.1.92 is the candidate that panicked, do not
-   resurrect it. Live gates at closeout: `flagship-render-smoke` ALL PASS,
-   `smoke.ps1 -ExpectFw 2.1.95` PASS, no `[STALL]`.
-   The three rs485 FAILs in every smoke run are the operator's motor being
-   unplugged (connected only during testing) — expected, not a regression.
-   Both repos' docs/spec commits carry nothing the firmware wants.
-8. **Phase 1b eyeball: DONE (operator, 2026-07-30).** No veto — lamps
-   approved, steppers unchallenged, `DRAG_TICKS_MIN` stands. It came back as a
-   punch list instead: **OPERATOR UI FEEDBACK QUEUE**, its own section above.
-   Items 1/2/6 are small and independent; item 4 (card columns) is the one
-   that changes how the whole settings surface reads; item 3 is a WIRE change
-   that must ride Phase 6's single etag bump (T11); item 5 (shell telemetry
-   jitter) is an investigation with a named bisect order, not a fix.
-9. **Session shape, for whoever restamps this next.** Three threads ran:
-   Phase 1b (done, awaiting eyeball), the desktop shell (first release build
-   ever + a stacking bug fixed, TRAPS T22), and the page-serve pin (fixed
-   across 2.1.92-2.1.95, TRAPS T19 addendum). The firmware thread is the one
-   worth reading before touching heap thresholds again: a confident mechanism
-   analysis — correct arithmetic, wrong conclusion — panicked the device, and
-   only an on-hardware A/B caught that the floor was a load shedder rather
-   than a sizing gate. Bench-only reasoning would have shipped it.
+7. **Deploy state: device runs fw 2.1.95; the filesystem is current at
+   `e41daac`.** No firmware bump is owed -- every 2026-07-30 change was
+   page-only, and an fs-only deploy proves itself by the served bundle's
+   `__UI_BUILD__` stamp (vite stamps it from `git rev-parse --short HEAD`), not
+   by a version. **Redeploy `-Target fs` after any commit rewrite**: squashing
+   moves HEAD and leaves the device stamped with a commit that no longer
+   exists. The three rs485 FAILs in every smoke run are the operator's motor
+   being unplugged -- expected, not a regression.
+8. **UI punch list: 3 of 7 closed, 4 open** -- see the OPERATOR UI FEEDBACK
+   QUEUE section, which now carries only what is still open. Item 4 (card
+   columns) is the big one and is BLOCKED on the shedding incident, not on
+   design. Item 3 rides Phase 6's single etag bump. Item 5 is now one operator
+   click away because a current desktop shell exists.
+9. **The plan strip is ruled and specced but NOT STARTED** -- own section
+   above. It needs the `RailWidget` travel-extent derivation extracted into a
+   shared helper first (C-1), and it fixes a C-12 lying comment on the way.
+   Blocked on the same verification problem as item 4.
+10. **Session shape, for whoever restamps this next.** The lesson of the day
+   was the same one three times: **a diagnosis argued from the source is a
+   hypothesis, and the DOM/hardware is the only witness.** Three separate bugs
+   this session had a confident, plausible, written-down cause that measurement
+   overturned in one read -- the info glyph (ink balance vs UA padding, off by
+   a factor of 20), the activity grid (flat data vs a leaked `$effect`
+   dependency), and the page-serve floor from the previous session (correct
+   arithmetic, wrong conclusion, panicked the device). Two of those wrong
+   diagnoses were in THIS FILE, written with full confidence. The habit that
+   caught all three: measure the rendered thing, and write the guard around
+   the SIGNATURE of the bug rather than around "does the feature run" -- every
+   naive assertion drafted this session would have passed the broken version,
+   and one of them (glyph centering) was silently passing on an all-zero rect
+   from a `display: none` element until it was forced to prove the box existed.

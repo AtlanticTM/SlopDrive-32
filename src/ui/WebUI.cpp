@@ -333,20 +333,38 @@ void WebUI::captureTelemetry(float position_mm, float target_mm, float raw_mm) {
 
 // ---- Route handlers ---------------------------------------------------------
 
+// Page-serve heap floor (TRAPS T19). DELIBERATELY UNCHANGED at 12288, and
+// deliberately still on maxblock, despite being ~9x the largest allocation
+// this path can make (see sPageSendBuf). Measured 2026-07-29: it is not
+// really a sizing gate, it is a LOAD SHEDDER, and it is load-bearing. Under
+// three concurrent browsers this hub reaches a ~250 B low-water either way;
+// the difference is that refusing here stops the bleeding, and a build that
+// kept serving through the same hammer PANICked. Lowering it is a memory-
+// architecture question (concurrency limiting, not a threshold tweak) and is
+// an OPEN OPERATOR DECISION in the ledger — do not "correct" this number
+// because the arithmetic looks generous.
+//
+// What DID change is what the floor gates: only the body path, so a
+// revalidation still answers. See handleRoot.
+static constexpr uint32_t kPageServeBlockFloor = 12288;
+
+// Send buffer for the bundle. In .bss, not the heap, and deliberately so:
+// WebServer::streamFile() delegates to NetworkClient::write(Stream&), which
+// malloc()s 1360 B per call — the last per-request allocation on this path,
+// and the one that let a fragmented heap deny a serve outright. T19's own
+// lesson, applied to the plane that had not learned it yet: pre-allocated
+// planes keep humming, allocating planes starve.
+// SOLE CALLER: WebUI::handleRoot, which only ever runs on httpTask (route
+// handlers are dispatched from handleClient()). Do not reuse this from
+// another task or another handler — it is unsynchronized by design.
+//
+// 1360 B is the core's own chunk size and is NOT arbitrary: it sits under the
+// 1460 B TCP MSS, so one chunk is one segment. Sizing it larger straddles the
+// segment boundary and buys an extra small pbuf per chunk — more allocations
+// under exactly the pressure this path is trying to survive.
+static uint8_t sPageSendBuf[1360];
+
 void WebUI::handleRoot() {
-    // Heap floor (TRAPS T19): streaming the bundle needs a large
-    // contiguous send buffer (SlopHttpServer::streamFile), and grinding that
-    // allocation against a starved heap is how HTTP crawled to 8 s loads
-    // before the PANIC. Under pressure, answer 503 fast — the page is a
-    // convenience surface; the machine's control plane (SlopSync) and the
-    // e-stop page already loaded elsewhere matter more than a new tab.
-    if (ESP.getMaxAllocHeap() < 12288) {
-        crashring::crumb("http-503");
-        SLOGW_EVERY_MS(5000, "ui", "handleRoot: 503, heap pressure (maxblock=%u)",
-                       unsigned(ESP.getMaxAllocHeap()));
-        _httpServer->send(503, "text/plain", "hub under memory pressure - retry shortly");
-        return;
-    }
     crashring::crumb("http-root");
     // Streaming the 115 KB bundle out of LittleFS blocks httpTask ~0.5-1 s per
     // load under the sync WebServer (see docs/webui-legacy-diagnosis.md §4;
@@ -360,6 +378,11 @@ void WebUI::handleRoot() {
         if (!f) continue;
         String etag = "\"" + String((unsigned long)f.size()) + "-" +
                       String((unsigned long)f.getLastWrite()) + "\"";
+        // A revalidation is NOT a serve: no body, no buffer, no pressure. It
+        // is answered above the heap floor on purpose. Gating it was the worst
+        // part of the old order — under pressure the hub 503'd the browsers
+        // that already held the bundle, which are exactly the ones it could
+        // still afford.
         if (_httpServer->header("If-None-Match") == etag) {
             f.close();
             _httpServer->sendHeader("ETag", etag);
@@ -367,9 +390,31 @@ void WebUI::handleRoot() {
             _httpServer->send(304, "text/html", "");
             return;
         }
+        // Only the body path is heavyweight, so only the body path is gated.
+        // Under pressure the page is the right thing to drop: it is a
+        // convenience surface, while the control plane (SlopSync) and any
+        // e-stop already loaded elsewhere are not.
+        if (ESP.getMaxAllocHeap() < kPageServeBlockFloor) {
+            f.close();
+            crashring::crumb("http-503");
+            SLOGW_EVERY_MS(5000, "ui", "handleRoot: 503, heap pressure (free=%u maxblock=%u)",
+                           unsigned(ESP.getFreeHeap()), unsigned(ESP.getMaxAllocHeap()));
+            _httpServer->send(503, "text/plain", "hub under memory pressure - retry shortly");
+            return;
+        }
         _httpServer->sendHeader("ETag", etag);
         _httpServer->sendHeader("Cache-Control", "no-cache");
-        _httpServer->streamFile(f, "text/html");
+        // Hand-rolled instead of streamFile() purely to own the buffer above;
+        // the header work is what _streamFileCore() does, restated.
+        _httpServer->setContentLength(f.size());
+        if (strstr(path, ".gz")) _httpServer->sendHeader("Content-Encoding", "gzip");
+        _httpServer->send(200, "text/html", "");
+        NetworkClient& client = _httpServer->client();
+        while (f.available() && client.connected()) {
+            size_t n = f.read(sPageSendBuf, sizeof(sPageSendBuf));
+            if (n == 0) break;
+            client.write(sPageSendBuf, n);
+        }
         f.close();
         return;
     }

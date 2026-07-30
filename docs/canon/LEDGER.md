@@ -3495,6 +3495,30 @@ The answer to "what's next on the ledger":
      `ss:sign` from census data at all; both comments record why (T1).
    - Not reproduced deliberately: whether a real backgrounded phone still
      churns sessions against 2.1.91. The mechanism says it cannot.
+   - **PAGE-SERVE FLOOR: half fixed, half ruled OPEN after a live A/B
+     (fw 2.1.91 -> 2.1.94, 2026-07-29).** Shipped, deployed, verified:
+     (i) the pressure gate now sits BELOW the ETag check, so a 304
+     revalidation answers even while fresh loads are refused — the old order
+     503'd exactly the browsers that already held the bundle; (ii) the serve
+     no longer allocates per request. `WebServer::streamFile()` delegates to
+     `NetworkClient::write(Stream&)`, which `malloc()`s 1360 B per call; that
+     is replaced by a 1360 B `.bss` buffer and an explicit loop (1360 because
+     it sits under the 1460 B TCP MSS — a larger chunk straddles the segment
+     boundary and buys an extra pbuf). Live proof under real pressure: **55
+     fresh loads 503'd while all 55 revalidations answered 304**, no panic,
+     heap recovered to maxblock 20,468 afterwards.
+     **STILL OPEN, needs an operator call: the floor's VALUE.** The
+     `maxblock < 12288` test is ~9x the largest allocation the path can make,
+     which reads like an obvious over-estimate. It is not a sizing number, it
+     is the only backpressure a single httpTask has, and the A/B proved it:
+     control and a candidate with the floor sized to the real allocation were
+     driven by the same three-concurrent-browser harness, both bottomed near
+     250 B free, the control WEDGED and survived, the candidate kept serving
+     and **PANICked** (boot_seq 12, `heap_min=260`, `max_block_last=124`).
+     That candidate was NOT shipped. Making the floor honest is therefore a
+     concurrency-limiting problem, not a threshold tweak — mechanism in
+     TRAPS T19's addendum. Until then the pin still latches for fresh loads;
+     what changed is that an already-loaded client rides through it.
    - **The accepted 503 is NOT transient — it holds until reboot.** Measured
      2026-07-29 during the Phase 1b screenshot pass, which stacked ~25 page
      loads and a dozen WS sessions in a few minutes. Per session the cost is
@@ -3587,12 +3611,15 @@ The answer to "what's next on the ledger":
 6. **Session-gate/closeout system** (C-13 proposal + ledger diet + tiered
    canon loading, designed in chat 2026-07-29) — implement after Phase 0;
    this closeout entry is its manual prototype.
-7. **Deploy state: device runs 2.1.91, firmware AND filesystem both current.
+7. **Deploy state: device runs 2.1.94, firmware AND filesystem both current.
    NOTHING IS OWED TO THE DEVICE.** Everything this session produced is on it
    and live-verified: Phase 1a's settings surface (UI build `1d117e2`), the
    boot-heap/stack instrumentation (2.1.89, 2.1.90), and the memory margin
-   (2.1.91). Live gates at closeout: `flagship-render-smoke` ALL PASS,
-   `smoke.ps1 -ExpectFw 2.1.91` PASS, no `[STALL]`, 6/6 page serves 200.
+   (2.1.91), plus Phase 1b's §8.2 archetypes and the page-serve revalidation
+   fix (2.1.94). 2.1.92 and 2.1.93 were the A/B pair for the floor experiment
+   above and are superseded — 2.1.92 is the candidate that panicked, do not
+   resurrect it. Live gates at closeout: `flagship-render-smoke` ALL PASS,
+   `smoke.ps1 -ExpectFw 2.1.94` PASS, no `[STALL]`.
    The three rs485 FAILs in every smoke run are the operator's motor being
    unplugged (connected only during testing) — expected, not a regression.
    Both repos' docs/spec commits carry nothing the firmware wants.

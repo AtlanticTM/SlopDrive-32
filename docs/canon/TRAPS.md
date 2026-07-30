@@ -286,6 +286,23 @@ very connect whose HELLO slot-pressure path is the only other evictor.
 A refuse-new-load floor MUST be paired with a transport-level idle-RX
 reap (WS: kWsIdleReapMs, ten missed proof-of-life PINGs) or the floor
 becomes the deadlock. Ledger's FW 2.1.88 entry has the live proof.
+**Addendum — a refusal floor is a LOAD SHEDDER, and its number is not
+a sizing number (fw 2.1.92 -> 2.1.94, A/B'd live 2026-07-29):** the page
+floor reads `maxblock < 12288` while the largest allocation that path can
+make is 1360 B, so the arithmetic invites "correcting" it downward. Doing
+so is what the A/B measured. Control (old floor) and candidate (floor sized
+to the real allocation) were driven by the same harness — three concurrent
+browsers, repeated — and BOTH bottomed near 250 B free. The control
+survived: refusing stopped the bleeding, and it wedged. The candidate kept
+serving through the same hammer and PANICked. The floor's value is not
+"how much this request needs", it is "how much concurrent work the hub will
+still admit", and shedding is the only backpressure a single httpTask has.
+Lowering one is a concurrency-limiting question, never a threshold tweak.
+What IS safe to change is WHAT the floor gates: a 304 revalidation sends no
+body and allocates nothing, so gating it merely refuses the browsers that
+already hold the bundle — the cheapest population to serve. Measured under
+live pressure: 55 fresh loads 503'd while all 55 revalidations answered 304,
+device never panicked.
 
 ## T20 — A hand-copied vocabulary drifts silently, and a RETIRED one lies
 

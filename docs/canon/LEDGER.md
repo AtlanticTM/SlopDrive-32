@@ -3475,6 +3475,51 @@ The answer to "what's next on the ledger":
      **The two radios are 120,488 B — 53% of everything spent at init.**
      `_blePort.begin()` alone costs more than WiFi. It is the single largest
      line item in the entire system and nothing before this measured it.
+   - **WHERE BLE's 64 KB GOES, and how much is movable (priced from
+     sdkconfig, 2026-07-29).** Host side, every figure a config product:
+     MSYS_1 12x256 = 3,072; MSYS_2 24x320 = 7,680; ACL-from-LL 24x255 =
+     6,120; HCI evt hi 30x70 = 2,100; HCI evt lo 8x70 = 560; host task stack
+     5,120. **Named host subtotal 24,652 B.** The remaining **39,424 B is
+     the controller** (`libbtdm_app` link-layer pools, advertising/scan
+     buffers, `btController` task, PHY state).
+     **The 39 KB controller share can NEVER go to PSRAM — this is a property
+     of the part, not a config gap.** PSRAM is reached through the same cache
+     as flash, and writing/erasing SPI flash requires disabling that cache on
+     the core doing it. Any ISR that can fire inside that window needs its
+     code in IRAM AND its data in DRAM. The BT controller's link-layer ISR is
+     exactly such an ISR: a connection event must be serviced inside its slot
+     and anchor points cannot slip. Controller buffers in PSRAM therefore
+     fail SPECIFICALLY while saving a setting, mounting LittleFS, or flashing
+     — an intermittent that only appears when config is touched mid-session.
+     That is why ESP-IDF forces controller memory internal and offers an
+     EXTERNAL option for the HOST only.
+     **The 24,652 B host share could move at ~zero performance cost** — the
+     NimBLE host is an ordinary task (`nimble_host`, visible in the census),
+     not an ISR, and mbuf cache misses are nothing against a 1 Mbps radio
+     with >=7.5 ms connection intervals. **BLOCKED:**
+     `CONFIG_BT_NIMBLE_MEM_ALLOC_MODE_INTERNAL=y` with `..._EXTERNAL` not
+     set. Also compiled-in and pure waste for a hub, also blocked:
+     `BT_NIMBLE_ROLE_CENTRAL` and `ROLE_OBSERVER` — a hub advertises and
+     accepts, it never scans for or connects to peers.
+   - **So on THIS toolchain the only reachable BLE lever is WHEN it runs, not
+     how big it is** — `NimBLEDevice::deinit(true)` +
+     `esp_bt_controller_mem_release(ESP_BT_MODE_BLE)`, i.e. the deferred-start
+     design question. Note `src/comms/SlopSyncBleTransport.cpp` has an
+     `init()` and an advertising `stop()` but NO teardown path today, so that
+     is net-new work. Deferred start is also the ONLY way to reclaim the
+     39 KB controller share, since it is immovable by any other means.
+   - **The precompiled-lib wall now blocks FOUR separate wins, which changes
+     the cost/benefit of an ESP32 Arduino Lib Builder rebuild from "not worth
+     it" to a real option deserving a ruling:** (1) NimBLE EXTERNAL alloc
+     ~24.7 KB; (2) dropping BLE central/observer roles; (3)
+     `SPIRAM_TRY_ALLOCATE_WIFI_LWIP`, which attacks BOTH WiFi's 56 KB and the
+     sub-4 KB lwIP pbuf churn that caused the original 503; (4) heap tracing
+     + apptrace, the tooling originally asked for. The cost is unchanged —
+     it replaces the working pioarduino/GCC13/C++23 build model.
+   - **WROOM-32D footnote (for the parked port):** the original ESP32 HAS
+     Classic BT, so `esp_bt_mem_release(ESP_BT_MODE_CLASSIC_BT)` reclaims
+     real memory there. The S3 is BLE-only and has nothing to release — a win
+     available to the future port that does not exist on current hardware.
    - **`ss:ctor` is 240 B — the catalog costs essentially NO internal RAM.**
      The PSRAM placement is doing its job completely. Two consequences:
      (i) there is no catalog win to find on the S3; (ii) the WROOM problem is

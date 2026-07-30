@@ -3274,7 +3274,7 @@ the parts worth ledgering because they are invisible in a fresh clone:
   rather than CLAUDE.md because CLAUDE.md is gitignored and a rule that binds
   every agent cannot live in an untracked file.
 
-## ⏭ NEXT STEPS (2026-07-29 closeout, restamped after the Phase 1a session — START HERE)
+## ⏭ NEXT STEPS (2026-07-29 closeout, restamped after the Phase 1a + memory session — START HERE)
 
 The answer to "what's next on the ledger":
 
@@ -3364,289 +3364,70 @@ The answer to "what's next on the ledger":
    - Then Phases 2–6 per plan. Phase 2 is (a)'s first three headers only,
      per the staging ruling. Phase 6 carries the ceilings ruling
      (1000 mm/s / 60k mm/s²) + the ONE etag bump + deploy.
-2. **MARGIN BANKED (fw 2.1.91 + uploadfs, live 2026-07-29). Operator ruling:
-   "this is not a computer with a ballooning memory load... we need a few more
-   inches, and that's enough tolerance"** — so the big architectural swings
-   (deferred BLE start, toolchain rebuild) are DEPRIORITIZED in favor of
-   low-risk margin. A 503 from two tabs opened simultaneously is explicitly
-   accepted. Measured before -> after at `post-slopsync`:
-   | | 2.1.90 | 2.1.91 | delta |
-   |---|---:|---:|---:|
-   | free | 31,336 | **42,064** | +10,728 (+34%) |
-   | maxblock | 14,836 | **31,732** | +16,896 (+114%) |
-   | low-water (steady) | 10,536 | 24,016 | +13,480 |
-   **`maxblock` MORE THAN DOUBLED, and that is the number the 503 gates on.**
-   It sat 2,548 B above `handleRoot`'s 12,288 floor; it now sits 19,444 B
-   above it. A page serve costs ~7.2 KB of contiguous space, so before, one
-   serve pushed it UNDER the floor (14,836 -> 7,668); now a serve lands near
-   24,500, still ~2x the floor. Verified: 6 back-to-back serves all 200, and
-   `maxblock` never fell below 22,516.
-   Two changes, both sized from the 2.1.90 census:
-   - `CONFIG_ASYNC_TCP_STACK_SIZE=8192` moved into `env:s3_main` (AsyncTCP's
-     own default is `8192*2`; measured peak was **792 B** because field bug #5
-     moved frame handling off that task onto the hub task). Predicted 8,192 B;
-     actual stage delta 11,196 B — the oversized allocation had been costing
-     fragmentation on top of its size. `env:sd32-async` is now a pure alias
-     and both stale comments about the flag were corrected (C-12).
-   - `Comms` task 6144 -> 4096 (measured 1,784 B peak, 2.3x headroom).
-     Trimmable from that census SPECIFICALLY because WiFi supervision had
-     already run by then.
-   - **`Sampler` (15 KB of visible slack) and `Motor` remain UNTRIMMED** —
-     their deep paths are motion and homing, which an idle bench boot never
-     exercises. `httpTask` likewise: its deepest path is OTA, unobservable
-     because the flash reboots. The 2.1.90 regression watcher is the gate on
-     those; see the stack-census bullet below.
-   - webui: the hidden-tab **close-on-blur** half of the alt-tab fix. The
-     existing `installVisibilityRecovery()` already reconnected on return but
-     never released on the way out, which is what produced 19 sessions in
-     100 s from ONE backgrounded phone. Now a hidden tab sends GOODBYE and
-     hands its slot back immediately instead of costing a 20 s idle-reap per
-     cycle. Reconnect stays cheap (etag-cached catalog = warm session, zero
-     transfer frames), and releasing control while hidden matches what the
-     600 ms deadman has already done.
-   Gates: canon_lint 0, settings-model ALL PASS, `npm run build` clean,
-   flagship-render-smoke ALL PASS against the device, `smoke.ps1 -ExpectFw
-   2.1.91` PASS with no `[STALL]`. rs485 FAILs are the unplugged motor.
-   NOT YET RE-MEASURED: whether a real backgrounded-phone session still
-   fragments the heap. The mechanism says it cannot churn any more, but the
-   original 19-sessions-in-100-s observation was accidental and has not been
-   deliberately reproduced against 2.1.91.
-3. **OPEN: the recurring "hub under memory pressure" 503, characterized
-   (2026-07-29, live). Operator-directed root-cause, not another
-   mitigation.** Measured on fw 2.1.88, clean boot, `prev_valid:false`:
-   - **It is NOT a leak.** Free heap returns to ~28-30 KB after both session
-     churn and page serves. The blocker is CONTIGUITY: during churn, free
-     sat at ~23 KB while `maxblock` fell to 11252 B against `handleRoot`'s
-     12288 B floor ([WebUI.cpp:343](src/ui/WebUI.cpp#L343)). 23 KB free in
-     pieces none of which is 12 KB serves no page. Observed `maxblock`
-     ceiling during churn was **12276 B — twelve bytes under the floor**, so
-     the 503 was permanent, not intermittent (5/5 attempts).
-   - **The churn is the webui tab itself** (operator-confirmed nothing else
-     was connected). A BACKGROUNDED tab has its JS timers frozen by the
-     browser, so it stops sending proof-of-life PINGs, hits the 20 s
-     idle-reap, auto-reconnects, and repeats — 19 WS clients in ~100 s.
-     Reap and re-claim overlap by ~1 s (`detach deferred` to the hub task,
-     new client claims the slot before the old one's buffers are released),
-     so two sessions' allocations briefly coexist every cycle. That is the
-     TRAPS T19 addendum ghost pattern with a NEW origin: not a dead peer,
-     a *throttled live* one.
-   - **Serving the page is itself the big transient:** free 28564 ->
-     19836 and `maxblock` 14836 -> 7668 during one load, recovering by
-     ~10 s later, with `http:ui.update blocked 2571ms`. So a single page
-     serve halves the largest block and lands it BELOW the floor that gates
-     the next serve. Steady-state headroom (~28-30 KB free / 14-18 KB
-     maxblock) is simply too thin for a 12 KB contiguous requirement, while
-     **8.1 MB of PSRAM sits unused** — the hub service was already moved
-     there (240976 B); this path never was.
-   - **Which allocator eats the 8.7 KB is NOT yet proven** (lwIP TX pbufs
-     during the stream is the hypothesis, not a finding). Naming it is
-     exactly what the tooling below would settle.
-   - **BUDGET MEASURED from the linker map + live boot beacon (supersedes
-     the "move the page buffer to PSRAM" suggestion first written in this
-     entry — see the correction two bullets down):**
-     `.dram0.data` 24,249 B + `.dram0.bss` 54,968 B + `.dram0.dummy`
-     84,224 B (DRAM stolen by 99,563 B of `.iram0.text`) = 163,441 B static
-     out of 425,984 B of DRAM address space. So the heap STARTS at
-     ~262,543 B, and the device reports 32,744 B free after init:
-     **~229,800 B is consumed at RUNTIME during init, not by our statics.**
-     Our own code is nearly innocent at 55 KB of `.bss`.
-     Of the runtime cost, 38,912 B is our five task stacks (Sampler 16384,
-     HTTP 8192, Comms 6144, Motor 4096, ServoBus 4096 — ESP32 takes bytes,
-     not words). The rest is WiFi + lwIP + NimBLE + AsyncTCP, unattributed.
-   - **Compiler flags are the WRONG LEVER, settled with numbers, not
-     opinion** (operator asked about `-O3`/LTO/"ultra-compile"): the missing
-     SRAM is `.bss` and runtime allocation. An optimizer may not shrink a
-     declared buffer — its size is the program's contract — and the only
-     code resident in RAM at all is the 99,563 B of IRAM, where LTO might
-     save single-digit KB. Host CPU cores cannot buy SRAM.
-   - **CORRECTION to this entry's earlier "8.1 MB of PSRAM sits unused"
-     framing:** `CONFIG_SPIRAM_USE_MALLOC=y` with
-     `CONFIG_SPIRAM_MALLOC_ALWAYSINTERNAL=4096` is ALREADY set, so every
-     allocation >= 4 KB already lands in PSRAM automatically. The
-     page-serve buffer is therefore almost certainly external already, and
-     "move it to PSRAM" would be a no-op. What stays internal is everything
-     UNDER 4 KB — which is exactly the shape of lwIP pbufs (~1.5 KB per TCP
-     segment), strengthening the pbuf hypothesis. The decisive knob is
-     `CONFIG_SPIRAM_TRY_ALLOCATE_WIFI_LWIP`, which is NOT set: WiFi and
-     lwIP buffers are pinned to internal DRAM by build config.
-   - **What is actually reachable, given the precompiled-lib constraint:**
-     REACHABLE AT RUNTIME — WiFi buffer counts via `wifi_init_config_t`
-     before `esp_wifi_init` (`CONFIG_ESP_WIFI_STATIC_RX_BUFFER_NUM=8`,
-     `DYNAMIC_RX_BUFFER_NUM=32`, `TX_BUFFER_TYPE=0` static; plausibly
-     40-60 KB internal, with throughput/burst-loss as the tradeoff), and
-     task-stack trimming after reading `uxTaskGetStackHighWaterMark`
-     (Sampler's 16 KB is the first suspect at 6% of the whole heap).
-     BLOCKED BY THE PRECOMPILED LIBS — `SPIRAM_TRY_ALLOCATE_WIFI_LWIP`,
-     `BT_NIMBLE_MAX_CONNECTIONS=3` (only 1 is ever needed), and the heap/
-     apptrace options; all need ESP32 Arduino Lib Builder, i.e. replacing
-     the toolchain. Already OFF and therefore not wasting anything:
-     `ESP_WIFI_IRAM_OPT`, `ESP_WIFI_RX_IRAM_OPT`, `LWIP_IRAM_OPTIMIZATION`.
-   - **ATTRIBUTED (fw 2.1.89, live, 2026-07-29). The 230 KB is named, and the
-     answer is NOT the vendor stacks — it is our own hub.** Boot heap
-     `entry free=258,380` -> `post-slopsync free=31,756`, 226,624 B spent:
-     | stage | bytes | share |
-     |---|---:|---:|
-     | **slopsync** | **110,208** | **48.6%** |
-     | wifi | 56,804 | 25.1% |
-     | tasks | 45,564 | 20.1% |
-     | config+motor | 4,656 | 2.1% |
-     | webui | 4,352 | 1.9% |
-     | ota | 2,828 | 1.2% |
-     | littlefs | 1,920 | 0.8% |
-     | slopglow | 292 | 0.1% |
-     **The webui costs 4,352 B — 1.9%.** Stripping it saves almost nothing;
-     that kills "drop the web UI to save RAM" as a memory strategy (it
-     remains valid for FLASH and for the WROOM port's other reasons).
-     **SlopSync takes 110 KB of INTERNAL heap even though the hub service
-     struct itself is placement-new'd into PSRAM (240,976 B).** So the big
-     struct is external and 110 KB of init allocation is not. Prime suspects,
-     UNMEASURED: NimBLE host+controller (both task stacks confirmed present),
-     AsyncTCP, the P-256 sign task, the UDP discovery socket, and per-session
-     buffers — all individually under the 4 KB `ALWAYSINTERNAL` threshold, so
-     the PSRAM auto-offload never catches them.
-   - **SUB-ATTRIBUTED (fw 2.1.90, live). The 110 KB is BLE.** Full leaderboard
-     of the 226,244 B init spend, `entry free=257,580` -> `31,336`:
-     | consumer | bytes | share |
-     |---|---:|---:|
-     | **ss:ble (NimBLE)** | **64,076** | **28.3%** |
-     | wifi | 56,412 | 24.9% |
-     | tasks (our 5 stacks) | 45,592 | 20.2% |
-     | ss:ws (AsyncTCP) | 18,056 | 8.0% |
-     | ss:hubtask (16 K stack) | 17,784 | 7.9% |
-     | ss:sign (8 K stack) | 9,504 | 4.2% |
-     | config+motor | 4,648 | 2.1% |
-     | webui | 4,348 | 1.9% |
-     | ota | 2,836 | 1.3% |
-     | littlefs | 1,920 | 0.8% |
-     | ss:udp / slopglow / ss:ctor / resid | 1,068 | 0.5% |
-     **The two radios are 120,488 B — 53% of everything spent at init.**
-     `_blePort.begin()` alone costs more than WiFi. It is the single largest
-     line item in the entire system and nothing before this measured it.
-   - **WHERE BLE's 64 KB GOES, and how much is movable (priced from
-     sdkconfig, 2026-07-29).** Host side, every figure a config product:
-     MSYS_1 12x256 = 3,072; MSYS_2 24x320 = 7,680; ACL-from-LL 24x255 =
-     6,120; HCI evt hi 30x70 = 2,100; HCI evt lo 8x70 = 560; host task stack
-     5,120. **Named host subtotal 24,652 B.** The remaining **39,424 B is
-     the controller** (`libbtdm_app` link-layer pools, advertising/scan
-     buffers, `btController` task, PHY state).
-     **The 39 KB controller share can NEVER go to PSRAM — this is a property
-     of the part, not a config gap.** PSRAM is reached through the same cache
-     as flash, and writing/erasing SPI flash requires disabling that cache on
-     the core doing it. Any ISR that can fire inside that window needs its
-     code in IRAM AND its data in DRAM. The BT controller's link-layer ISR is
-     exactly such an ISR: a connection event must be serviced inside its slot
-     and anchor points cannot slip. Controller buffers in PSRAM therefore
-     fail SPECIFICALLY while saving a setting, mounting LittleFS, or flashing
-     — an intermittent that only appears when config is touched mid-session.
-     That is why ESP-IDF forces controller memory internal and offers an
-     EXTERNAL option for the HOST only.
-     **The 24,652 B host share could move at ~zero performance cost** — the
-     NimBLE host is an ordinary task (`nimble_host`, visible in the census),
-     not an ISR, and mbuf cache misses are nothing against a 1 Mbps radio
-     with >=7.5 ms connection intervals. **BLOCKED:**
-     `CONFIG_BT_NIMBLE_MEM_ALLOC_MODE_INTERNAL=y` with `..._EXTERNAL` not
-     set. Also compiled-in and pure waste for a hub, also blocked:
-     `BT_NIMBLE_ROLE_CENTRAL` and `ROLE_OBSERVER` — a hub advertises and
-     accepts, it never scans for or connects to peers.
-   - **So on THIS toolchain the only reachable BLE lever is WHEN it runs, not
-     how big it is** — `NimBLEDevice::deinit(true)` +
-     `esp_bt_controller_mem_release(ESP_BT_MODE_BLE)`, i.e. the deferred-start
-     design question. Note `src/comms/SlopSyncBleTransport.cpp` has an
-     `init()` and an advertising `stop()` but NO teardown path today, so that
-     is net-new work. Deferred start is also the ONLY way to reclaim the
-     39 KB controller share, since it is immovable by any other means.
-   - **The precompiled-lib wall now blocks FOUR separate wins, which changes
-     the cost/benefit of an ESP32 Arduino Lib Builder rebuild from "not worth
-     it" to a real option deserving a ruling:** (1) NimBLE EXTERNAL alloc
-     ~24.7 KB; (2) dropping BLE central/observer roles; (3)
-     `SPIRAM_TRY_ALLOCATE_WIFI_LWIP`, which attacks BOTH WiFi's 56 KB and the
-     sub-4 KB lwIP pbuf churn that caused the original 503; (4) heap tracing
-     + apptrace, the tooling originally asked for. The cost is unchanged —
-     it replaces the working pioarduino/GCC13/C++23 build model.
-   - **WROOM-32D footnote (for the parked port):** the original ESP32 HAS
-     Classic BT, so `esp_bt_mem_release(ESP_BT_MODE_CLASSIC_BT)` reclaims
-     real memory there. The S3 is BLE-only and has nothing to release — a win
-     available to the future port that does not exist on current hardware.
-   - **`ss:ctor` is 240 B — the catalog costs essentially NO internal RAM.**
-     The PSRAM placement is doing its job completely. Two consequences:
-     (i) there is no catalog win to find on the S3; (ii) the WROOM problem is
-     confirmed as stated — that whole ~240 KB has to come from somewhere with
-     no PSRAM to put it in.
-   - **Two stack line items are DEFENDED BY EXISTING COMMENTS and must not be
-     trimmed on census data alone** (C-12, comments-are-constraints):
-     `ss:hubtask`'s 16 KB was raised FROM 8 KB after a real canary blowout
-     (TRAPS T1) and `ss:sign`'s 8 KB is a deliberate 2x over a measured
-     2-4 KB P-256 peak. The census reports ~2.5 KB peak for the hub task,
-     which is exactly the reading that would tempt someone into re-creating
-     T1. The comment is the ground truth about the WORST case; the census
-     only knows what it has seen.
-   - **Stack census (fw 2.1.89, 30 s one-shot, ESP-IDF reports bytes
-     REMAINING):** `Sampler` declared 16,384 and peaked at **1,152** — 15 KB
-     never touched, 6% of the whole heap idle. Reclaimable from our four
-     tasks at >=2x headroom over measured peak: Sampler 16384->4096,
-     HTTP 8192->6144, Comms 6144->4096, Motor unchanged = **16,384 B**.
-     Library slack on top: `async_tcp` 15,592 B and `SlopSyncHub` 13,804 B
-     unused. **Danger end of the same census — `ipc0` has 88 B remaining**,
-     `IDLE0` 236, `ipc1` 256, `IDLE1` 356. Those are IDF-sized and NOT ours
-     to trim; recorded because a stack-overflow canary trip there would
-     read as a random panic.
-     🚩 **NO STACK HAS BEEN TRIMMED, deliberately, and the reason is the
-     measurement's own limit:** a high-water mark covers only the paths
-     exercised SINCE BOOT. That census ran on an idle, un-homed machine with
-     the motor unplugged, so `Sampler` — whose deep path is streaming through
-     the planner — never ran its real workload, and `httpTask`'s deepest path
-     is OTA, whose peak is UNOBSERVABLE BY CONSTRUCTION because the flash is
-     followed by a reboot that resets the mark. Sizing Sampler 16K->4K from
-     idle data is how a panic arrives three weeks later mid-session.
-     Mitigation shipped in 2.1.90 instead: `dumpTaskStacks()` now re-scans
-     every 30 s and prints ONLY tasks that have gone DEEPER than last
-     reported, so a bench session that exercises motion names the stacks it
-     actually grew and a quiet machine stays silent. **Trim only after a
-     motion-exercising bench pass has produced no new regressions** (motion
-     verification is a bench activity with the operator present, DOCTRINE §6).
-   - **INSTRUMENTATION DONE (fw 2.1.89, operator-approved 2026-07-29):**
-     `bootheap::mark/report` + `dumpTaskStacks` in `src/main.cpp`. Before
-     this there was exactly ONE boot beacon, `post-slopsync`, which is why
-     230 KB had never been attributed and why every previous fix aimed at a
-     number nobody had broken down. Emitted as ONE census at 30 s rather
-     than scattered through boot, because SlopLog's Info ring is 44 lines
-     with a 104-byte message cap and SILENT truncation — boot-time lines
-     recycle before they can be fetched. Deliberately on the LOG and not an
-     HTTP endpoint, so it keeps working on a build with no web UI. No
-     sdkconfig change, no JTAG.
-   - **PARKED, operator-directed 2026-07-29 ("future task once all of this
-     is rock solid"): stripped-down ESP32-WROOM-32D variant, no webui.** The
-     ambush to know before starting: **WROOM-32D has NO PSRAM.** This build
-     places the 240,976 B hub service in PSRAM and `SLOGE`s "SlopSync
-     DISABLED this boot" when it is absent, and
-     `SPIRAM_MALLOC_ALWAYSINTERNAL=4096` silently offloads every >=4 KB
-     allocation there. So a WROOM port is NOT "strip the webui" — the webui
-     is 4,352 B, 1.9% — it is a catalog/session-capacity reshape to fit
-     ~240 KB of hub into internal SRAM alongside SlopSync's 110 KB of init
-     and WiFi's 57 KB. RFC-043's hardware-hub profile and the STAMPED
-     `minimal` sim profile are the precedent to build that on.
-   - 🚩 **Tooling blocker, flagged against the operator's JTAG proposal:**
-     pioarduino ships Arduino as PRECOMPILED libraries, and its
-     `framework-arduinoespressif32-libs/esp32s3/sdkconfig` has
-     `CONFIG_HEAP_TRACING_OFF=y` and `CONFIG_APPTRACE_DEST_NONE=y`. Both are
-     compile-time kconfig baked into the shipped `.a` files, so JTAG
-     app-trace AND standalone heap tracing are unavailable without building
-     ESP-IDF from source with Arduino as a component — which replaces the
-     working C++23 build model (see the C++20-branch entry). Recommended
-     instead, and available with ZERO sdkconfig change: `heap_caps_get_info()`
-     fills `multi_heap_info_t` with `free_blocks`/`allocated_blocks`/
-     `largest_free_block`, which is a fragmentation histogram over the
-     diagnostics channel we already have — it would have answered
-     "fragmentation or leak?" in one request. `HEAP_POISONING_LIGHT` is
-     already on. Callsite attribution is the ONLY thing this cannot give,
-     and it is not what this bug needed. AWAITING OPERATOR RULING before
-     any implementation.
-   - Two independent fixes, deliberately separated: (i) proximate — the
-     webui must not reconnect-loop while hidden; on `visibilitychange` to
-     hidden it should CLOSE cleanly and reconnect on focus, because fighting
-     browser timer throttling is unwinnable (webui/JS, cheap); (ii)
-     structural — the page-serve path should not need a contiguous internal
-     block while PSRAM is idle (firmware). Neither is started.
+2. **MEMORY PRESSURE — root-caused, margin banked, remaining decisions open
+   (2026-07-29). Mechanism lessons are TRAPS T21; measured receipts are in
+   commits `f6e8159`, `1d117e2`, `a467bee`. This entry keeps only what is still
+   a DECISION.**
+   Where the ~226 KB of init spend goes, live-attributed at fw 2.1.90 (heap
+   starts near 258 KB; `bootheap`/`dumpTaskStacks` in `src/main.cpp` +
+   `include/system/BootHeap.h` re-measure this on any boot):
+   | consumer | bytes | share |
+   |---|---:|---:|
+   | ss:ble (NimBLE) | 64,076 | 28.3% |
+   | wifi | 56,412 | 24.9% |
+   | tasks (our stacks) | 45,592 | 20.2% |
+   | ss:ws (AsyncTCP) | 18,056 | 8.0% |
+   | ss:hubtask / ss:sign | 27,288 | 12.1% |
+   | webui | 4,348 | 1.9% |
+   | everything else | 10,472 | 4.6% |
+   Three findings that settle old arguments: the **webui is 1.9%**, so
+   "drop the web UI to save RAM" is dead; **`ss:ctor` is 240 B**, so the
+   catalog costs no internal RAM and the PSRAM placement works completely;
+   and **compiler flags are the wrong lever entirely** — `.bss` is 55 KB, the
+   spend is runtime, and an optimizer may not shrink a declared buffer.
+   **BANKED (fw 2.1.91, deployed + verified):** AsyncTCP stack 16K->8K and
+   `Comms` 6144->4096, both sized from the census; plus the webui
+   hidden-tab close-on-blur fix that removes the session-churn fragmentation
+   driver. Result: free 31,336 -> 42,064 (+34%), **maxblock 14,836 -> 31,732
+   (+114%)**. maxblock is what the 503 gates on, and it moved from 2.5 KB
+   above the floor to 19.4 KB above it. Operator ruling that scoped this:
+   *"this is not a computer with a ballooning memory load... we need a few
+   more inches, and that's enough tolerance"* — a 503 from two tabs opened
+   at once is ACCEPTED, so no further work is owed on the 503 itself.
+   **STILL OPEN, all three needing an operator call, none blocking:**
+   - **Deferred BLE start** — the only reachable way to reclaim BLE's 64 KB
+     on this toolchain, and the ONLY way to touch its 39,424 B controller
+     share, which cannot go to PSRAM at all (the controller's link-layer ISR
+     must be reachable while the flash cache is disabled — TRAPS T21's
+     sibling constraint, detail in `1d117e2`). Costs: it only helps while BLE
+     is OFF, RFC-043 makes BLE GATT a MUST for the hardware-hub profile, and
+     `SlopSyncBleTransport` has no teardown path today, so it is net-new work.
+   - **ESP32 Arduino Lib Builder rebuild** — the precompiled-lib wall blocks
+     FOUR wins: NimBLE `MEM_ALLOC_MODE_EXTERNAL` (~24.7 KB of host pools, at
+     ~zero performance cost), dropping BLE central/observer roles a hub never
+     uses, `SPIRAM_TRY_ALLOCATE_WIFI_LWIP` (attacks WiFi's 56 KB *and* the
+     sub-4 KB pbuf churn), and heap tracing + apptrace. Cost is unchanged and
+     large: it replaces the working pioarduino/GCC13/C++23 build model.
+   - **`Sampler`'s 15 KB of apparent slack** — gated on a motion-exercising
+     bench pass producing no new stack regressions (TRAPS T21). `Motor` and
+     `httpTask` sit behind the same gate. Do NOT trim `ss:hubtask` or
+     `ss:sign` from census data at all; both comments record why (T1).
+   - Not reproduced deliberately: whether a real backgrounded phone still
+     churns sessions against 2.1.91. The mechanism says it cannot.
+
+3. **PARKED (operator: "future task once all of this is rock solid"):
+   stripped-down ESP32-WROOM-32D variant, no webui.** For the widest user
+   base; operator believes it is achievable and nothing measured contradicts
+   that. The ambush to know BEFORE starting: **WROOM-32D has no PSRAM.** This
+   build places the 240,976 B hub service in PSRAM and hard-disables SlopSync
+   when it is absent, and `SPIRAM_MALLOC_ALWAYSINTERNAL=4096` silently
+   offloads every >=4 KB allocation there. So the port is NOT "strip the
+   webui" — that is 4,352 B, 1.9% (item 2) — it is a catalog/session-capacity
+   reshape to fit ~240 KB of hub into internal SRAM alongside BLE's 64 KB and
+   WiFi's 56 KB. Build on RFC-043's hardware-hub profile and the STAMPED
+   `minimal` sim profile. One freebie the S3 does not get: the original ESP32
+   HAS Classic BT, so `esp_bt_mem_release(ESP_BT_MODE_CLASSIC_BT)` reclaims
+   real memory there.
 4. **DATAGRAM-SAFETY + PROVISIONING TODO (2026-07-29 chat; smart order;
    each item carries the context its implementer needs. Discipline,
    operator-directed: once an item is implemented AND verified, RIP it
@@ -3704,16 +3485,12 @@ The answer to "what's next on the ledger":
 6. **Session-gate/closeout system** (C-13 proposal + ledger diet + tiered
    canon loading, designed in chat 2026-07-29) — implement after Phase 0;
    this closeout entry is its manual prototype.
-7. **Deploy state:** device runs **2.1.91** (fw + fs both current). This session's fixes (dead-code
-   deletions, comment/doc corrections) are committed but NOT deployed — no
-   behavior change intended; deploy rides with the next firmware-touching
-   phase. The morning's webui OG-alignment commit is likewise built but not
-   uploadfs'd. The evening spec/RFC session's commits (Phase 0 spec work,
-   RFC-052(d)/053/054 rulings, AUTHORING.md + containment model, catalog
-   header pointer) are docs/comments only on both repos — nothing owed to
-   the firmware there.
-   **Phase 1a's uploadfs is PAID (2026-07-29):** device serves UI build
-   `2388ea2`, fw still 2.1.88, all live gates green — details in the Phase
-   1a entry above. That also carried the morning's OG-alignment build to the
-   device, since an fs image is whole-bundle. **Nothing is owed to the
-   device as of this closeout.**
+7. **Deploy state: device runs 2.1.91, firmware AND filesystem both current.
+   NOTHING IS OWED TO THE DEVICE.** Everything this session produced is on it
+   and live-verified: Phase 1a's settings surface (UI build `1d117e2`), the
+   boot-heap/stack instrumentation (2.1.89, 2.1.90), and the memory margin
+   (2.1.91). Live gates at closeout: `flagship-render-smoke` ALL PASS,
+   `smoke.ps1 -ExpectFw 2.1.91` PASS, no `[STALL]`, 6/6 page serves 200.
+   The three rs485 FAILs in every smoke run are the operator's motor being
+   unplugged (connected only during testing) — expected, not a regression.
+   Both repos' docs/spec commits carry nothing the firmware wants.

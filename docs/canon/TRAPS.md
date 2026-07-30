@@ -327,3 +327,41 @@ vocabulary is retired, DELETE its identifiers rather than aliasing them onto
 the successor — a working alias is how this survived from Phase C2 to now.
 Bit us: 2026-07-29, found by the authoring-legibility campaign's Phase 1a
 while looking for something else entirely.
+
+## T21 — Free heap is not contiguous heap, and a high-water mark only knows the paths it has walked
+
+Two measurement traps, one family: the number that is easy to read is not the
+number that decides anything.
+
+**Fragmentation, not exhaustion.** `handleRoot` needs ONE contiguous ~12 KB
+block to stream the bundle. An allocator can hold 23 KB of total free space
+split into pieces whose largest is 11 KB — and then zero pages serve, forever,
+while every "free heap" reading looks survivable. Measured live on fw 2.1.88:
+`free=23408 maxblock=11252` against a 12288 floor, with the observed `maxblock`
+CEILING at 12276 — twelve bytes under. 5/5 page loads returned 503 and it read
+as a hard failure rather than a flaky one. **Watch `maxblock`; `free` is the
+comforting lie.** The 10 s beacon prints both for this reason.
+
+The corollary bit us in the fix, too: shrinking an oversized task stack from
+16 KB to 8 KB returned **11,196 B**, not the 8,192 B of arithmetic — a big
+allocation costs its own size *plus* the hole it leaves. Oversized allocations
+are a fragmentation source, not just a size problem.
+
+**A high-water mark is only as good as the workload since boot.**
+`uxTaskGetStackHighWaterMark` reports the deepest point actually reached, which
+on an idle machine means "nothing interesting ran yet." The Sampler task showed
+1,152 B of 16,384 used — a tempting 15 KB — measured on an un-homed bench boot
+with the motor unplugged, i.e. with its entire reason for existing (streaming
+through the planner) never executed. Worse, `httpTask`'s deepest path is OTA,
+whose peak is **unobservable by construction**: the flash is followed by a reboot
+that resets the mark. Sizing either from that census would panic mid-session
+weeks later, and the canary names the task but not the day you caused it.
+
+**Fix:** fw 2.1.90 — `dumpTaskStacks()` re-scans every 30 s and reports ONLY
+tasks that have gone DEEPER than last reported, so a bench session that
+exercises motion names the stacks it actually grew. Trim only after a
+representative workload has produced no new regressions, and NEVER trim a stack
+whose comment records a previous canary blowout (T1) — the comment knows the
+worst case, the census only knows what it has seen.
+Bit us: 2026-07-29, chasing a recurring 503 that four earlier mitigations had
+aimed at the wrong number.

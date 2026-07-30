@@ -65,16 +65,22 @@
   }
 
   /**
-   * Move one step-sized tick and stay inside the published bounds. Rounded off
-   * the float grid because repeated 0.1 nudges otherwise drift into
-   * 0.30000000000000004 and write that to the machine.
+   * Write a number the operator produced, held inside the published bounds and
+   * rounded off the float grid — repeated 0.1 nudges otherwise drift into
+   * 0.30000000000000004 and write THAT to the machine. Sole path for both the
+   * stepper's nudges and a typed value, so neither can clamp differently.
    */
+  function commitNumber(n) {
+    if (!isFinite(n)) return;
+    if (field.min != null) n = Math.max(field.min, n);
+    if (field.max != null) n = Math.min(field.max, n);
+    commit(Math.round(n * 1e6) / 1e6);
+  }
+
+  /** Move one step-sized tick from wherever the value currently sits. */
   function nudge(dir) {
     const base = Number(value);
-    let next = (isFinite(base) ? base : (field.min ?? 0)) + dir * step;
-    if (field.min != null) next = Math.max(field.min, next);
-    if (field.max != null) next = Math.min(field.max, next);
-    commit(Math.round(next * 1e6) / 1e6);
+    commitNumber((isFinite(base) ? base : (field.min ?? 0)) + dir * step);
   }
 
   const step = $derived(field.step || (precisionFor(field) === 0 ? 1 : 0.01));
@@ -89,6 +95,20 @@
     || field.widget === WIDGET.readout
     || (field.widget === WIDGET.stepper && unitOf(field) !== '')
   );
+
+  // The slider is the one writable numeric with no numerals of its own, so its
+  // chip carries the typing. A readout must never become typeable (no
+  // setting_key at all), and the stepper/text/secret controls already type.
+  const typeableChip = $derived(showValueChip && field.widget === WIDGET.slider && !field.options);
+
+  // Size the box from the field's OWN published bounds, so a 0..1 budget knob
+  // does not reserve room for six digits. Falls back wide, never narrow: a
+  // clipped numeral is a misread setting.
+  const chipChars = $derived.by(() => {
+    const p = precisionFor(field);
+    const widest = Math.max(Math.abs(field.min ?? 0), Math.abs(field.max ?? 9999));
+    return String(Math.round(widest)).length + (p > 0 ? p + 1 : 0) + ((field.min ?? 0) < 0 ? 1 : 0) + 1;
+  });
 
   // Readout archetype (OG "Power card" bar recipe): a read-only numeric with
   // published bounds gets a thin proportional bar under the value, same as
@@ -133,7 +153,22 @@
         </span>
       {/if}
     </span>
-    {#if showValueChip}
+    {#if typeableChip}
+      <!-- A slider publishes no numerals of its own, so this chip is the only
+           place an exact value can be entered. Editable values must LOOK
+           editable, so it wears the same recess as the chip it replaces rather
+           than hiding as a click-to-reveal. Commits on change, never on input:
+           writing a setting per keystroke would spray the machine. -->
+      <span class="field-value typeable" class:disabled={!enabled}>
+        <input type="number" class="chip-num"
+               min={field.min} max={field.max} step={step}
+               value={value ?? ''} disabled={!enabled}
+               style="width: {chipChars}ch"
+               aria-label={'exact value for ' + labelFor(field)}
+               onchange={(e) => commitNumber(Number(e.currentTarget.value))} />
+        <span class="unit">{unitOf(field)}</span>
+      </span>
+    {:else if showValueChip}
       <output class="field-value" class:readout={field.widget === WIDGET.readout} for={field.uid}>
         {#if field.options}
           {optionLabel(field, value)}
@@ -342,10 +377,16 @@
      card-head. The glyph is a letter in the instrument typeface, not a drawn
      icon. The border-brightens-on-hover idiom is the one every other outlined
      icon button in this sheet already uses (.og-btn:hover, .og-seg button:hover). */
+  /* The button only has a job in TERSE mode. Verbose already prints the
+     description inline under the control, so an affordance whose whole
+     purpose is revealing text that is already on screen is noise. */
   .info-wrap {
     position: relative;
-    display: inline-flex;
+    display: none;
     flex: 0 0 auto;
+  }
+  :global(html.terse) .info-wrap {
+    display: inline-flex;
   }
 
   .info {
@@ -488,6 +529,44 @@
   .field-value.readout {
     color: var(--reality);
     text-shadow: 0 0 8px rgba(var(--reality-rgb), .35);
+  }
+
+  /* Typeable chip (slider archetype). The recess comes from .field-value; the
+     input inside carries no chrome of its own. Two rules it MUST win against:
+     the full-width control rule further down, which is written for controls
+     that own their whole row, and the design system's deliberate removal of
+     native spinners (style.css: nudge/trim buttons cover the increment
+     use-case) — a chip that grew spinners would break that on this one
+     control. Width is set inline from the field's published bounds. */
+  .field-value.typeable {
+    padding: 0 6px 0 5px;
+  }
+  .field-value .chip-num {
+    display: inline-block;
+    appearance: textfield;
+    min-width: 0;
+    padding: 1px 0;
+    border: 0;
+    background: none;
+    box-shadow: none;
+    color: var(--tx-val);
+    font-family: var(--mono);
+    font-variation-settings: 'wdth' 90;
+    font-weight: var(--num-wght);
+    font-size: .76rem;
+    text-align: right;
+  }
+  .field-value .chip-num::-webkit-inner-spin-button,
+  .field-value .chip-num::-webkit-outer-spin-button {
+    -webkit-appearance: none;
+    margin: 0;
+  }
+  .field-value .chip-num:focus-visible {
+    outline: 1px solid var(--reality);
+    outline-offset: 1px;
+  }
+  .field-value.typeable.disabled {
+    opacity: .45;
   }
 
   /* Thin proportional bar under a bounded readout — OG Power-card meter

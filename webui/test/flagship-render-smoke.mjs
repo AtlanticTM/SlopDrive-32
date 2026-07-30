@@ -149,7 +149,11 @@ for (const t of fieldTabs) {
   const txt = (await t.textContent()).trim().toLowerCase();
   if (txt.includes('tuning') || txt.includes('motion')) { await t.click(); break; }
 }
-const infoUp = await page.waitForSelector('.info-wrap .info', { timeout: 15000 })
+// The affordance only renders in TERSE, so it has to be measured there. A
+// display:none element reports an all-zero rect, which would make the
+// centering check below pass without measuring anything.
+await page.evaluate(() => document.documentElement.classList.add('terse'));
+const infoUp = await page.waitForSelector('.info-wrap .info', { state: 'visible', timeout: 15000 })
   .then(() => true).catch(() => false);
 ok('described settings fields render an info affordance', infoUp);
 
@@ -157,35 +161,61 @@ ok('described settings fields render an info affordance', infoUp);
 // border-box that shrinks this 18px control's content box below the glyph's
 // own width — which pins the glyph to the content edge instead of centering
 // it. Measured 3.5px off before `padding: 0` landed.
-const glyphOffset = await page.$eval('.info-wrap .info', (el) => {
+const glyph = await page.$eval('.info-wrap .info', (el) => {
   const b = el.getBoundingClientRect(), g = el.querySelector('.glyph').getBoundingClientRect();
-  return Math.max(Math.abs((g.x + g.width / 2) - (b.x + b.width / 2)),
-                  Math.abs((g.y + g.height / 2) - (b.y + b.height / 2)));
+  return { w: b.width, h: b.height,
+           off: Math.max(Math.abs((g.x + g.width / 2) - (b.x + b.width / 2)),
+                         Math.abs((g.y + g.height / 2) - (b.y + b.height / 2))) };
 });
-ok('info glyph is centered in its button', glyphOffset < 0.51, glyphOffset.toFixed(3) + 'px off');
+ok('info button is actually laid out (guards a vacuous zero)', glyph.w > 0 && glyph.h > 0,
+   glyph.w + 'x' + glyph.h);
+ok('info glyph is centered in its button', glyph.off < 0.51, glyph.off.toFixed(3) + 'px off');
 
-// Hover is the terse-mode carrier; verbose must NOT also pop the tip.
-// Hover AFTER the mode switch, never before: terse hides every inline
-// description at once, and that reflow slides the button out from under a
-// pointer parked at fixed viewport coordinates.
+// Verbose hides the button outright — the description is already on screen,
+// so there is nothing for it to reveal. Only terse can be hovered, and the
+// hover must come AFTER the mode switch: terse hides every inline description
+// at once, and that reflow slides the button out from under a pointer parked
+// at fixed viewport coordinates.
 const setTerse = async (on) => {
   await page.evaluate((v) => document.documentElement.classList.toggle('terse', v), on);
-  await page.hover('.info-wrap .info');
+  if (on) await page.hover('.info-wrap .info');
   await page.waitForTimeout(220);            // clear the .12s tip transition
   return page.evaluate(() => {
     const d = document.querySelector('.field .field-desc');
     const t = document.querySelector('.info-wrap .tip');
+    const w = document.querySelector('.info-wrap');
     return { inline: d ? getComputedStyle(d).display !== 'none' : null,
-             tip: t ? getComputedStyle(t).visibility : null };
+             tip: t ? getComputedStyle(t).visibility : null,
+             affordance: w ? getComputedStyle(w).display !== 'none' : null };
   });
 };
 const verbose = await setTerse(false);
 ok('verbose prints the description inline', verbose.inline === true, JSON.stringify(verbose));
+ok('verbose hides the info button entirely', verbose.affordance === false, JSON.stringify(verbose));
 ok('verbose does not also pop the hover tip', verbose.tip === 'hidden', JSON.stringify(verbose));
 const terseMode = await setTerse(true);
 ok('terse drops the inline description', terseMode.inline === false, JSON.stringify(terseMode));
+ok('terse shows the info button', terseMode.affordance === true, JSON.stringify(terseMode));
 ok('terse reveals the tip on hover', terseMode.tip === 'visible', JSON.stringify(terseMode));
 await setTerse(false);
+
+// ---- slider values are typeable --------------------------------------------
+// A slider carries no numerals of its own, so its chip is the only place an
+// exact value can be entered. A readout must never gain one: no setting_key
+// means it is effective truth, not a control.
+const typeable = await page.evaluate(() => {
+  const q = (sel) => Array.from(document.querySelectorAll(sel));
+  return {
+    sliders: q('.field[data-widget="slider"]').length,
+    typeableSliders: q('.field[data-widget="slider"] .field-value .chip-num').length,
+    typeableReadouts: q('.field[data-widget="readout"] .chip-num').length,
+    spinners: getComputedStyle(document.querySelector('.chip-num') || document.body).appearance,
+  };
+});
+ok('every slider chip is typeable', typeable.sliders > 0 && typeable.sliders === typeable.typeableSliders,
+   typeable.typeableSliders + '/' + typeable.sliders);
+ok('no readout became typeable', typeable.typeableReadouts === 0);
+ok('typeable chip keeps native spinners stripped', typeable.spinners === 'textfield', typeable.spinners);
 
 // ---- activity heatmap keeps its scroll history -----------------------------
 // A reactive read made SYNCHRONOUSLY inside LinkBar's $effect becomes that

@@ -3670,6 +3670,53 @@ mechanical frontend over the table type afterward; `registry.yaml` →
 blob at build time, which buys ~nothing here (`ss:ctor` is 240 B) but is a real
 lever for the no-PSRAM WROOM-32D port — recorded against that parked item.
 
+## FREEZE STATE RULED (operator, 2026-07-30): NOTHING IS PINNED YET
+
+**Ruling, verbatim intent: everything is up in the air until the protocol has
+been put through its paces. Then one commit gets pinned and locked, and after
+that only documentation, clients, and tools move.** The lock event is the
+**release pin**: one commit sha, not a tag — a sha is stricter because a tag
+can be moved.
+**Two different things are called "pin"; do not confuse them.** `slopsync.pin`
+is the BUILD pin — which SlopSync commit SlopDrive compiles against — and it is
+bumped routinely, gated by canon_lint. The RELEASE pin is the one-time freeze
+this ruling is about. Same mechanism, unrelated events.
+
+**Measured 2026-07-30: the SlopSync repo has ZERO git tags**, while SPEC.md's
+header read "Document version: v1.0 (public)". The spec's whole freeze
+discipline keys off "the v1.0 tag forward" in at least eight normative places
+(SPEC §5.7 never-renumber, §16 fixture freeze, §19; RENDERING.md §14 and its
+status line; RFC-QUEUE lines 29-30 and 751). So the freeze was **written but
+not armed**, on a PUBLIC repo, while RFC-QUEUE explicitly plans a registry
+regeneration *at* the pin. A stranger reading it would reasonably build against
+numbers we still intend to move. **Corrected in the same session:** the header
+now reads `v1.0-draft (public, not yet pinned)` and a FREEZE STATE notice sits
+above §0 saying the clauses bind nothing yet and that consumers must pin by
+commit sha. That notice is deleted at the pin, and its deletion is the
+announcement.
+
+**TWO ETAGS, ONE COMPATIBILITY SURFACE — do not conflate them, it makes the
+plan look far more constrained than it is:**
+- `B6 9E B0 62 49 EB E7 3A` — SlopDrive's DEVICE catalog etag. Per-hub;
+  clients re-fetch on mismatch by design. Changing it is NEVER a protocol
+  break. The campaign's "exactly ONE etag bump at Phase 6" is self-imposed
+  test-fixture and cache-churn discipline, not a compatibility rule.
+- `F4 A2 8F BB 58 CE D1 6A` (775 bytes) — the CONFORMANCE mini-catalog fixture
+  in SPEC §16. Frozen at the pin; changing it after is a genuine protocol
+  break.
+Consequence: Phase 6's bump, the ceilings ruling, and punch item 3's
+`raw_10um` rename are free forever. RFC-052(d)'s entry key 17 is safe on either
+side of the pin — SPEC §4.3 requires decoders to ignore unknown CBOR map keys
+at any nesting level, so additive keys are forward-compatible by construction.
+
+**Accumulating LOCK-DAY checklist** (nothing here is owed before then; it is
+recorded so the pin is not spent half-ready): the planned registry
+regeneration/renumber (RFC-QUEUE 29-30) MUST land before the pin, not after;
+CHANNEL-MAP Old-column retirement; the `(was 0x...)` comment sweep; RFC-052(b)'s
+deferred half (the §5.4 reorder/insert-before-tail lint, which needs the golden
+shape the pin records); re-freeze of the conformance fixture pins; delete the
+FREEZE STATE notice.
+
 ## ⏭ NEXT STEPS (restamped 2026-07-30 after the UI-punch-list + intent-echo + tauri-build session — START HERE)
 
 **ORDER OF OPERATIONS (operator-ruled 2026-07-30, supersedes the bare item

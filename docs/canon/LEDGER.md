@@ -3459,9 +3459,16 @@ The answer to "what's next on the ledger":
      2.1.91 figures, reconfirmed). This does not change the ruling that a
      503 from two tabs is ACCEPTED, but it means the recovery story is
      "reboot", not "wait" — worth knowing before anyone reads a stuck 503 as
-     a new bug. Agent-side lesson, no firmware owed: run browser probes one
-     at a time, and note that `flagship-render-smoke.mjs` leaks its chromium
-     when an assertion throws mid-run.
+     a new bug. Crossing the floor is what pins it, NOT depth of dip: a
+     later boot under the same probe load bottomed at 240 B free and still
+     coalesced maxblock back to 29,684 B every time, serving `/` in 0.69 s
+     afterwards. And the heartbeat LED says nothing either way — a frozen
+     LED means httpTask is BLOCKED, whereas the 503 is httpTask bailing out
+     fast, so a pinned device heartbeats normally. `maxblock` in the
+     `[sys] heap` beacon is the only readout for this. Agent-side lesson, no
+     firmware owed: run browser probes one at a time, and note that
+     `flagship-render-smoke.mjs` leaks its chromium when an assertion throws
+     mid-run.
 
 3. **PARKED (operator: "future task once all of this is rock solid"):
    stripped-down ESP32-WROOM-32D variant, no webui.** For the widest user

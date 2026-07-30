@@ -889,7 +889,12 @@ void setup() {
     // cubic is exactly the TRAPS.md T1 stack-bomb class waiting to recur.
     task_ok = xTaskCreatePinnedToCore(streamSamplerTask, "Sampler", 16384, nullptr, 4, nullptr, 1);
     configASSERT(task_ok == pdPASS);
-    task_ok = xTaskCreatePinnedToCore(commsTask, "Comms", 6144, nullptr, 2, nullptr, 0);
+    // 4096: measured 1,784 B peak in the fw 2.1.90 stack census (2.3x headroom).
+    // Safe to size from that census specifically because this task's whole job —
+    // WiFi supervision, scan, reconnect — HAD run by then. Sampler and Motor are
+    // deliberately NOT trimmed on the same data: their deep paths are motion and
+    // homing, which an idle bench boot never exercises.
+    task_ok = xTaskCreatePinnedToCore(commsTask, "Comms", 4096, nullptr, 2, nullptr, 0);
     configASSERT(task_ok == pdPASS);
     task_ok = xTaskCreatePinnedToCore(httpTask, "HTTP", 8192, &webui, 1, nullptr, 0);
     configASSERT(task_ok == pdPASS);

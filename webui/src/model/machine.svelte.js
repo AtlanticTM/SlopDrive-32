@@ -463,14 +463,35 @@ export function connect(opts = {}) {
  * There is no client-side fix for the throttling itself. What we can do is
  * treat regaining visibility as an explicit signal to re-establish now rather
  * than waiting for a timer that may be minutes away.
+ *
+ * ...and CLOSE ON THE WAY OUT, which is the other half. Left to itself a hidden
+ * tab keeps the socket open with frozen timers, so the hub sees 20 s of RX
+ * silence, idle-reaps the slot, and the (throttled) backoff timer reconnects to
+ * be reaped again — measured live on fw 2.1.88 as 19 sessions in 100 s. Each
+ * cycle briefly overlaps two sessions' buffers because the hub defers detach to
+ * its own task, and the resulting internal-heap fragmentation dropped the
+ * largest free block under the page-serve floor, so the machine served 503 to
+ * every new tab until the churn stopped. One backgrounded phone did that.
+ *
+ * A clean close hands the slot back immediately instead of costing a reap, and
+ * reconnect is cheap: the catalog is etag-cached, so coming back is a warm
+ * session with zero transfer frames. Releasing control while hidden is also the
+ * honest posture — the hub's 600 ms deadman has already stopped motion by then.
  */
 let _visibilityInstalled = false;
 function installVisibilityRecovery() {
   if (_visibilityInstalled || typeof document === 'undefined') return;
   _visibilityInstalled = true;
   document.addEventListener('visibilitychange', () => {
-    if (document.visibilityState !== 'visible') return;
     if (!session) return;
+    if (document.visibilityState !== 'visible') {
+      // Deliberate teardown, not a drop: the hub gets a GOODBYE and frees the
+      // slot now. Do not "optimize" this into a delay — a throttled timer is
+      // exactly what cannot be relied on here.
+      try { session.close(); } catch (e) { /* already closing: harmless */ }
+      machine.link.phase = 'idle';
+      return;
+    }
     if (!session.isLive) {
       machine.link.phase = 'connecting';
       try { session.connect(); } catch (e) { /* already connecting: harmless */ }

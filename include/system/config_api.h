@@ -57,7 +57,7 @@
 // Bumped by hand on each firmware change so an OTA can be verified as landed
 // (surfaced via /api/capabilities → "fw_version" and the boot log). This is
 // the single source of truth for "which build is actually running."
-#define FIRMWARE_VERSION        "2.1.90"
+#define FIRMWARE_VERSION        "2.1.91"
 
 // ---- WiFi Configuration (values come from secrets.h) ------------------------
 #define WIFI_SSID      SECRET_WIFI_SSID

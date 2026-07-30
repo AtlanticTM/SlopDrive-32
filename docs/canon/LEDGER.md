@@ -3364,7 +3364,54 @@ The answer to "what's next on the ledger":
    - Then Phases 2–6 per plan. Phase 2 is (a)'s first three headers only,
      per the staging ruling. Phase 6 carries the ceilings ruling
      (1000 mm/s / 60k mm/s²) + the ONE etag bump + deploy.
-2. **OPEN: the recurring "hub under memory pressure" 503, characterized
+2. **MARGIN BANKED (fw 2.1.91 + uploadfs, live 2026-07-29). Operator ruling:
+   "this is not a computer with a ballooning memory load... we need a few more
+   inches, and that's enough tolerance"** — so the big architectural swings
+   (deferred BLE start, toolchain rebuild) are DEPRIORITIZED in favor of
+   low-risk margin. A 503 from two tabs opened simultaneously is explicitly
+   accepted. Measured before -> after at `post-slopsync`:
+   | | 2.1.90 | 2.1.91 | delta |
+   |---|---:|---:|---:|
+   | free | 31,336 | **42,064** | +10,728 (+34%) |
+   | maxblock | 14,836 | **31,732** | +16,896 (+114%) |
+   | low-water (steady) | 10,536 | 24,016 | +13,480 |
+   **`maxblock` MORE THAN DOUBLED, and that is the number the 503 gates on.**
+   It sat 2,548 B above `handleRoot`'s 12,288 floor; it now sits 19,444 B
+   above it. A page serve costs ~7.2 KB of contiguous space, so before, one
+   serve pushed it UNDER the floor (14,836 -> 7,668); now a serve lands near
+   24,500, still ~2x the floor. Verified: 6 back-to-back serves all 200, and
+   `maxblock` never fell below 22,516.
+   Two changes, both sized from the 2.1.90 census:
+   - `CONFIG_ASYNC_TCP_STACK_SIZE=8192` moved into `env:s3_main` (AsyncTCP's
+     own default is `8192*2`; measured peak was **792 B** because field bug #5
+     moved frame handling off that task onto the hub task). Predicted 8,192 B;
+     actual stage delta 11,196 B — the oversized allocation had been costing
+     fragmentation on top of its size. `env:sd32-async` is now a pure alias
+     and both stale comments about the flag were corrected (C-12).
+   - `Comms` task 6144 -> 4096 (measured 1,784 B peak, 2.3x headroom).
+     Trimmable from that census SPECIFICALLY because WiFi supervision had
+     already run by then.
+   - **`Sampler` (15 KB of visible slack) and `Motor` remain UNTRIMMED** —
+     their deep paths are motion and homing, which an idle bench boot never
+     exercises. `httpTask` likewise: its deepest path is OTA, unobservable
+     because the flash reboots. The 2.1.90 regression watcher is the gate on
+     those; see the stack-census bullet below.
+   - webui: the hidden-tab **close-on-blur** half of the alt-tab fix. The
+     existing `installVisibilityRecovery()` already reconnected on return but
+     never released on the way out, which is what produced 19 sessions in
+     100 s from ONE backgrounded phone. Now a hidden tab sends GOODBYE and
+     hands its slot back immediately instead of costing a 20 s idle-reap per
+     cycle. Reconnect stays cheap (etag-cached catalog = warm session, zero
+     transfer frames), and releasing control while hidden matches what the
+     600 ms deadman has already done.
+   Gates: canon_lint 0, settings-model ALL PASS, `npm run build` clean,
+   flagship-render-smoke ALL PASS against the device, `smoke.ps1 -ExpectFw
+   2.1.91` PASS with no `[STALL]`. rs485 FAILs are the unplugged motor.
+   NOT YET RE-MEASURED: whether a real backgrounded-phone session still
+   fragments the heap. The mechanism says it cannot churn any more, but the
+   original 19-sessions-in-100-s observation was accidental and has not been
+   deliberately reproduced against 2.1.91.
+3. **OPEN: the recurring "hub under memory pressure" 503, characterized
    (2026-07-29, live). Operator-directed root-cause, not another
    mitigation.** Measured on fw 2.1.88, clean boot, `prev_valid:false`:
    - **It is NOT a leak.** Free heap returns to ~28-30 KB after both session
@@ -3600,7 +3647,7 @@ The answer to "what's next on the ledger":
      browser timer throttling is unwinnable (webui/JS, cheap); (ii)
      structural — the page-serve path should not need a contiguous internal
      block while PSRAM is idle (firmware). Neither is started.
-3. **DATAGRAM-SAFETY + PROVISIONING TODO (2026-07-29 chat; smart order;
+4. **DATAGRAM-SAFETY + PROVISIONING TODO (2026-07-29 chat; smart order;
    each item carries the context its implementer needs. Discipline,
    operator-directed: once an item is implemented AND verified, RIP it
    from this ledger — the durable record is the RFC + the commit; this
@@ -3652,12 +3699,12 @@ The answer to "what's next on the ledger":
      §18-22); WS→BLE migration direction never exercised live. BLE
      idle-reap and PSRAM offload have their own ledger entries — pointed
      at, not restated (C-1).
-4. **Parked webui rapid-fire list** — see the kickoff entry above; queued
+5. **Parked webui rapid-fire list** — see the kickoff entry above; queued
    BEHIND the campaign (several items become trivial on the new surface).
-5. **Session-gate/closeout system** (C-13 proposal + ledger diet + tiered
+6. **Session-gate/closeout system** (C-13 proposal + ledger diet + tiered
    canon loading, designed in chat 2026-07-29) — implement after Phase 0;
    this closeout entry is its manual prototype.
-6. **Deploy state:** device runs 2.1.88. This session's fixes (dead-code
+7. **Deploy state:** device runs **2.1.91** (fw + fs both current). This session's fixes (dead-code
    deletions, comment/doc corrections) are committed but NOT deployed — no
    behavior change intended; deploy rides with the next firmware-touching
    phase. The morning's webui OG-alignment commit is likewise built but not

@@ -3370,9 +3370,9 @@ STILL OPEN:
    other end), and the OG reference is the arbiter of the final cadence, so
    shoot it against `og-ref` rather than inventing a grid.
    **Largest remaining UI item: it reshapes the surface every other settings
-   change lands on.** Blocked in practice by the page-serve shedding recorded
-   below -- it cannot be shot against `og-ref` on a device that will not
-   complete a browser navigation.
+   change lands on.** UNBLOCKED (2026-07-30 ruling, shedding entry below).
+   Sequencing note: Phase 6's sweep is the operator editing annotations ON this
+   surface, so landing item 4 first means sweeping once instead of twice.
 5. **Position telemetry jitters in the Tauri shell but not on the
    device-served page.** Same source, same bundle build, so the difference is
    environmental -- do NOT start by editing the smoothing. Bisect in this
@@ -3435,9 +3435,28 @@ Taken in the same session, all deployed, all veto-able:
   assertions are written and will run on a device that is not shedding page
   loads. Everything before it passed `flagship-render-smoke` at 43 assertions.
 
-## INCIDENT: 4-CLIENT PANIC + PAGE-SERVE SHEDDING IS WORSE THAN RECORDED (2026-07-30)
+## INCIDENT: 4-CLIENT PANIC + PAGE-SERVE SHEDDING (2026-07-30) — DEFERRED, NOT BLOCKING
 
-**Operator ruling: capture and park, diagnose later.** Raw data is in
+**OPERATOR RULING (2026-07-30, second pass): this is an EDGE CASE and it
+blocks nothing. Deferred to the pre-merge stability campaign.** The evidence
+that reclassified it: the operator held F5 down across three windows for
+several minutes while streaming motion into the machine and watching telemetry
+on three more clients, and saw no shed and no panic. That is a harder load than
+the sequential-`curl` measurement below and it passed, so whatever the `curl`
+run caught is narrower than "roughly every third load." **Browser-based
+verification is therefore NOT blocked** — the previously recorded consequence
+for UI work is struck, and punch-list item 4 and the plan strip are open.
+Reasoning of record, operator's: chasing a fault into code that the campaign
+may replace is wasted work, and mega-stability testing lands as its own pass
+before the merge to `main`.
+One correction to that reasoning, recorded because it changes where the work
+would start if it were resumed: **campaign Phases 2–5 do not touch this code.**
+The suspect paths are `handleRoot` and the WS attach path in `WebServer` /
+AsyncTCP; the campaign reshapes the catalog and its encoders. The deferral
+stands on the edge-case finding, not on pending replacement.
+
+Everything below is the captured measurement, kept as the starting point for
+the stability campaign. Raw data is in
 `tools/diag/crash-20260730-4clients/` (gitignored -- crash.json, log.txt,
 log-preDeploy.txt, status.json, caps.json, truncation-sample.txt). This entry
 holds only what changes a DECISION; the numbers live in those files.
@@ -3476,11 +3495,12 @@ and one second later `[356.163 I sys] heap free=35648 maxblock=24564`. The
 T19's addendum demonstrated live -- fragmentation latches and is visible at
 entry, exhaustion is a transient that arrives DURING the transfer.
 
-**Consequence for UI work, not just firmware:** browser-based verification is
-blocked. `flagship-render-smoke` cannot run, so no visual change can be
-gate-verified or shot against `og-ref` until this is addressed. That blocks
-punch-list item 4 and the plan strip below. It is the reason both are recorded
-as NOT STARTED rather than attempted.
+**The consequence-for-UI-work paragraph that stood here is STRUCK** by the
+ruling at the head of this section. It claimed browser verification was blocked
+and that punch-list item 4 and the plan strip were blocked with it; the
+operator's three-window F5 pass under stream load disproved it. Kept as a
+pointer only so nobody re-derives the blocked claim from the measurements
+below. Confirm with one `flagship-render-smoke` run before a visual pass.
 
 Also observed, no action owed: `min=136` and `min=200` in the heap beacon on
 boots during this session, i.e. the floor is being touched routinely, and
@@ -3518,11 +3538,149 @@ into a shared helper both widgets consume.
 fallback permanent behavior. Both roles ARE tagged now, so the comment lies and
 the fallback it documents is dead on this hub.
 
-Not started deliberately: this is canvas drawing work and the device cannot
-currently complete a browser navigation, so it cannot be verified. Shipping
-visual work blind is what produced two wrong diagnoses earlier the same day.
+UNBLOCKED (2026-07-30 ruling, shedding entry above); still NOT STARTED. The
+standing condition is not the device, it is the discipline: this is canvas
+drawing work, and shipping visual work blind is what produced two wrong
+diagnoses on 2026-07-30. Verify against the rendered thing.
+
+## SSManager RULED (operator, 2026-07-30) — one door over the whole tool surface
+
+**Operator ruling: build it, name is SSManager.** The rules it must obey are
+DOCTRINE §10 (binding form); this entry holds scope, the measured case, and
+what is still veto-able.
+
+**The measured case.** The surface is **~85 distinct entry points across 5
+languages and 5 build systems**: 10 Python tools over both repos, 27 `.mjs`
+probes in `webui/test/`, 16 SlopSync native suites, 7 fuzz harnesses, 11
+PlatformIO environments, 8 npm scripts, slopsim, slopbench, mkdocs,
+`smoke.ps1`, and the C# plugin build. The operator's complaint was not the
+count — it was that nothing says which results are still true.
+
+**What it is, in one line:** a developer clones a repo, runs SSManager, and it
+reports what toolchains exist, what is green, and what went stale since the
+code moved — with no flags to look up.
+
+**The staleness mechanic is the product, not a feature.** Results are stored
+against a hash of each entry's declared inputs; when inputs move the tile goes
+STALE (gray), never failed. This is CANON C-4 mechanized: today a human or an
+agent has to remember that a green run from two commits ago is hearsay.
+
+**Design constraints, all operator-confirmed:** funnel the surface, never
+reduce it — no tool gets deleted or dumbed down; a funnel covering 80% is
+WORSE than none, because it adds a second place to look; every tool stays
+runnable standalone; adding a tool is a manifest entry and never a code change.
+All four are DOCTRINE §10 now.
+
+**Stack: reuse the Tauri shell** (Rust + the existing Svelte/vite chain).
+Cross-platform portable binary is already solved there, and it makes the
+catalog inspector free — SSManager IS a SlopSync client, rendering through the
+same `roles.js`/`Field.svelte` path a real client uses, so the inspector cannot
+drift from what users see.
+
+**Honest limit, state it in the UI:** SSManager orchestrates host toolchains,
+it cannot contain them (PlatformIO alone is hundreds of MB). The first-run
+capability probe turns that limit into the best onboarding feature — "34 of 85
+gates runnable; PlatformIO is missing and unlocks firmware build + OTA."
+
+**SEPARATE BINARY from the SlopDeck operator shell — operator-stamped
+2026-07-30**, sharing stack and components. Bundling a test runner into the app
+that drives a moving machine was scope nobody asked for.
+
+**THE UI IS THIN (operator ruling).** The view renders manifest data and
+results; it holds no logic worth testing. Everything real — discovery,
+spawning, hashing, staleness, capability probing — lives behind it in Rust.
+The test for this: SSManager's behavior must be exercisable with the UI closed.
+A frontend that grows its own state machine is the same failure as a console
+that grows tool-specific branches.
+
+**ONBOARDING IS THE POINT, and it is DEFERRED (operator: "not a concern for
+now, but some logic to build into it").** The target flow is: clone the
+SlopSync repo, run SSManager, and be walked into developing a client or hub
+firmware. v0 does NOT build the guided flow. What v0 owes is a schema that can
+carry it later without a migration — entries need ordering, prerequisites, and
+a statement of what each one unlocks, because those are exactly what a guide
+reads. Adding those fields costs nothing now and is a schema break later.
+
+**v0 scope (the clone-to-productive path only):** manifest schema, process
+runner, input-hash staleness, results grid, capability probe. ~15 manifest
+entries, NOT all 85 — the rest arrive by accretion under DOCTRINE §10.
+**Acceptance criterion, testable:** registering a new tool touches zero lines
+of SSManager code.
+v1 adds the catalog inspector and sim launcher (mostly wiring existing
+components); v2 moves `smoke.ps1`, OTA, and the log viewer behind buttons.
+
+## HUB IMPLEMENTATION COST — MEASURED (2026-07-30). SDK proposal AWAITING RULING.
+
+Measured, not estimated, so the next pass does not re-derive it. SlopDrive's
+hub side is **7,619 lines** on top of the 18,315-line library, and **~3,200 of
+them (42%) are code every ESP32 hub author rewrites identically**: the WS/BLE/UDP
+transports (1,803), crypto (345), the `IClock`/`IRandom` binding (52), and
+~1,000 lines of plumbing inside `SlopSyncHubService.cpp` (task loop, log
+bridge, signing shuttle, `cfg_gen` pump, trust-ledger NVS, pairing window, OTA
+park/revive). The coupling is thin BY MEASUREMENT, not by impression: the three
+transports touch SlopDrive at 27 log-macro calls and 2 crash crumbs, and
+`SlopSyncCrypto.cpp` reads exactly one machine field (`state.ota_active`).
+
+Why this is a location problem and not a design problem: the lib already
+forbids itself from naming a platform source (SPEC §17.2), `ITransport` lives
+at `transport/transport.hpp`, and the lib already ships one implementation of
+it (`inprocess_binding.hpp`). An `esp32` port follows precedent.
+
+**The authoring campaign does not cover any of this** — it reshapes the
+machine-specific half (Phase 3 halves the catalog, Phase 4 the encoders) and
+never touches the platform half.
+
+Client side, same measurement: the JS client (3,969 lines) IS a library, so a
+new JS client costs nearly nothing; `clients/mfp/SlopSync.cs` is **3,861
+hand-written lines** re-implementing the wire because no C# library exists.
+
+**PROPOSED, no ruling yet:** (i) move the ESP32 port into the lib behind a
+build flag — pure relocation, etag-neutral; (ii) a C# emitter in
+`gen_registry_header` (it already emits C++ and JS, so a third target follows
+the pattern and kills the transcription-drift class TRAPS T20 records);
+(iii) do NOT extract the `SlopSyncHubService.cpp` plumbing yet — its seams
+would be invented rather than found, and the parked WROOM-32D port is the
+forcing function that shapes them honestly.
+
+**Spec-only fresh-eyes review, TRIAGED 2026-07-30 — recorded so it is not
+re-raised.** An outside model reviewed SPEC.md with no access to the
+implementation and recommended ~15 items. Nearly all were already built, and
+several are implemented more carefully than recommended: the ESTOP magic scan
+(`estop_frame.hpp`, which resumes at `i+1` not `i+4` because `0xE5` runs can
+overlap), deadman (11 files + `test_slopsync_safety`), the readiness gate
+(`test_slopsync_readygate`), the `arg > remaining` bounds idiom (already a
+constraint comment at `cbor_reader.hpp:174`), mutation testing (7 fuzz
+harnesses + corpus), `static_profile.hpp`, deferred HUB_SIG, bundle limits,
+and the honest-limitations duty (the spec's numbered HONESTY CLAUSES + §18,
+normative in that they MUST NOT be denied). Three were rejected on merit:
+**ISR-level ESTOP scanning** (a scan loop plus CRC-32 over an
+attacker-controlled buffer, in an ISR, is a self-inflicted DoS on the motion
+loop — the ring-plus-high-priority-task shape is correct), **tinycbor**
+(a regression against a canonical encoder with fuzz harnesses and a pinned
+etag), and generic sample-sizing advice already covered by normative limits.
+**Operator ruling on the e-stop cluster: null and void — a physical e-stop is
+the integrator's and hardware manufacturer's responsibility; the webui exposes
+it and that is the extent of our duty.** Confirmed compatible with the spec,
+which already says exactly this normatively (H2: preemption is per-hop, "not
+magic end-to-end latency").
+Two live items came out of it: a YAML catalog frontend (do NOT fork Phase 2/3
+for it — the byte-identical port is the safety net, and YAML becomes a
+mechanical frontend over the table type afterward; `registry.yaml` →
+`gen_registry_header` is the working precedent) and pre-encoding the catalog
+blob at build time, which buys ~nothing here (`ss:ctor` is 240 B) but is a real
+lever for the no-PSRAM WROOM-32D port — recorded against that parked item.
 
 ## ⏭ NEXT STEPS (restamped 2026-07-30 after the UI-punch-list + intent-echo + tauri-build session — START HERE)
+
+**ORDER OF OPERATIONS (operator-ruled 2026-07-30, supersedes the bare item
+order below):** SSManager v0 → campaign Phase 2, registering its gates as the
+first real manifest content → UI punch item 4 (card columns) → Phase 3 →
+SSManager v1 → Phases 4–6. The reasoning: building SSManager after the campaign
+means the campaign's own verification runs through the scattered surface that
+prompted it, and building all of SSManager first stalls the campaign — so v0
+is deliberately small and the campaign is its first customer. Every phase
+writes its gate list down either way; under DOCTRINE §10 it goes in the
+manifest instead of a ledger paragraph, at no extra cost.
 
 The answer to "what's next on the ledger":
 
@@ -3873,13 +4031,13 @@ The answer to "what's next on the ledger":
    being unplugged -- expected, not a regression.
 8. **UI punch list: 3 of 7 closed, 4 open** -- see the OPERATOR UI FEEDBACK
    QUEUE section, which now carries only what is still open. Item 4 (card
-   columns) is the big one and is BLOCKED on the shedding incident, not on
-   design. Item 3 rides Phase 6's single etag bump. Item 5 is now one operator
-   click away because a current desktop shell exists.
+   columns) is the big one and is now UNBLOCKED; land it before Phase 6 so the
+   annotation sweep happens once. Item 3 rides Phase 6's single etag bump. Item
+   5 is one operator click away because a current desktop shell exists.
 9. **The plan strip is ruled and specced but NOT STARTED** -- own section
    above. It needs the `RailWidget` travel-extent derivation extracted into a
    shared helper first (C-1), and it fixes a C-12 lying comment on the way.
-   Blocked on the same verification problem as item 4.
+   Unblocked with item 4.
 10. **Session shape, for whoever restamps this next.** The lesson of the day
    was the same one three times: **a diagnosis argued from the source is a
    hypothesis, and the DOM/hardware is the only witness.** Three separate bugs

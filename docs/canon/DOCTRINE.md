@@ -282,3 +282,33 @@ machine's half of the boundary.
   `LiveWireTest` refuses to run homed; run it TWICE back-to-back
   ([TRAPS.md](TRAPS.md) T3 check).
 * **Branch/milestone status:** [`docs/canon/LEDGER.md`](LEDGER.md) — never here.
+
+## 10. SSManager (the tool surface has ONE door)
+
+SSManager is the SlopSync project manager: one UI over every tool in the
+ecosystem. Home is the SlopSync repo, so it ships with the SDK — a vendor
+building a hub who never clones SlopDrive still gets it. Landing state lives
+in [`LEDGER.md`](LEDGER.md), never here.
+
+* **Every tool registers a manifest entry, and that is the whole of adding
+  it.** A tool is declarative data: name, command, input globs, how its
+  pass/fail reads, what toolchain it needs. Adding tool N+1 must require ZERO
+  changes to SSManager's own code. If SSManager has to learn about a tool, the
+  registration is wrong — fix the manifest schema, not the console.
+* **SSManager knows nothing tool-specific.** No branch anywhere may name a
+  tool, a repo, a language, or a build system. It reads manifests and spawns
+  processes. A single `if tool == ...` is the whole design failing, and it is
+  a 🚩 flag, not a shortcut.
+* **Standalone invocation NEVER stops working.** Every tool stays runnable
+  from a plain shell exactly as it is today. SSManager is a funnel, not a
+  gate: CI, headless agents, and an operator with a terminal must never
+  depend on it. A tool that only works through the UI is a defect.
+* **A result carries a fingerprint of its inputs — this is C-4 in software.**
+  Results are stored against a hash of the entry's declared inputs. When
+  those inputs move, the result goes STALE, never "failed": stale means
+  no-longer-evidence, which is exactly [CANON](CANON.md) C-4's "touched by
+  commits since its stamp is hearsay." Never show a stale pass as a pass.
+* **The manifest is the home for how-to-run.** PLANNED CHANGE: §5 and §6
+  above become pointers into it in the same commit that lands v0. Until then
+  they remain the home — one fact, one home (C-1), so do not split them
+  early and do not let both stand afterward.

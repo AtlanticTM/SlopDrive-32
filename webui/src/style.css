@@ -94,6 +94,10 @@
   --r-s: var(--radius);
   --s:   1.12;                        /* global control scale */
   --tap: calc(var(--s) * 44px);       /* minimum touch target */
+  /* Slider thumb — named because the intent echo must enclose the HANDLE, and
+     a range input's own box is only the 2px track (range-slider block below). */
+  --slider-thumb-w: calc(var(--s) * 11px);
+  --slider-thumb-h: calc(var(--s) * 18px);
   --gap: 12px;
 
   --font: 'Chakra Petch', system-ui, sans-serif;
@@ -250,7 +254,11 @@ h1, h2, h3, p { margin: 0; }
    shadows run .2-.3s. Nothing in this control language runs longer.
    ========================================================================= */
 
-/* ---- Range sliders: thin hairline track, rectangular thumb ---- */
+/* ---- Range sliders: thin hairline track, rectangular thumb ----
+   The thumb's size is a NAMED fact because two unrelated things need it: the
+   thumb rules below, and the intent echo, which has to expand past the 2px
+   track to enclose the handle (Field.svelte). Both read the var; neither
+   restates the number. */
 input[type="range"] {
   width: 100%;
   height: 2px;
@@ -263,8 +271,8 @@ input[type="range"] {
 }
 input[type="range"]::-webkit-slider-thumb {
   -webkit-appearance: none;
-  width: calc(var(--s) * 11px);
-  height: calc(var(--s) * 18px);
+  width: var(--slider-thumb-w);
+  height: var(--slider-thumb-h);
   border-radius: 0;
   background: var(--bg);
   border: 1px solid var(--tx-val);
@@ -273,8 +281,8 @@ input[type="range"]::-webkit-slider-thumb {
   transition: border-color .12s, box-shadow .12s;
 }
 input[type="range"]::-moz-range-thumb {
-  width: calc(var(--s) * 11px);
-  height: calc(var(--s) * 18px);
+  width: var(--slider-thumb-w);
+  height: var(--slider-thumb-h);
   border-radius: 0;
   background: var(--bg);
   border: 1px solid var(--tx-val);

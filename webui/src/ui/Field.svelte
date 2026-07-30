@@ -107,20 +107,30 @@
     return Math.max(0, Math.min(1, (n - field.min) / (field.max - field.min))) * 100;
   });
 
-  // Y is MEASURED, not assumed. A field grows a whole line taller the moment
-  // its description prints inline — which is the default mode — so a fixed
-  // percentage would launch the pulse from below the control it is supposed to
-  // come from. ResizeObserver's callback is async, so it never becomes a
-  // dependency of the effect that installs it.
+  // The echo hugs the CONTROL, not the whole field. An outline thrown around
+  // the label, the value chip and the description reads as "this whole card is
+  // busy" when what actually fired is one slider. These insets crop the echo
+  // box down to the control's own band, and they are MEASURED, not assumed:
+  // the control's offset inside its field moves the moment the description
+  // prints inline, which is the default mode.
+  //
+  // Both default to 0, so a widget that binds no control keeps the full-field
+  // echo rather than losing its feedback.
+  //
+  // ResizeObserver's callback is async, so it never becomes a dependency of the
+  // effect that installs it — the trap that ate the activity heatmap.
   let fieldEl = $state(null);
   let ctrlEl = $state(null);
-  let pulseY = $state(50);
+  let echoTop = $state(0);
+  let echoBottom = $state(0);
   $effect(() => {
     const f = fieldEl, c = ctrlEl;
     if (!f || !c) return;
     const ro = new ResizeObserver(() => {
       const fr = f.getBoundingClientRect(), cr = c.getBoundingClientRect();
-      if (fr.height > 0) pulseY = ((cr.top + cr.height / 2 - fr.top) / fr.height) * 100;
+      if (fr.height <= 0) return;
+      echoTop = Math.max(0, cr.top - fr.top);
+      echoBottom = Math.max(0, fr.bottom - cr.bottom);
     });
     ro.observe(f);
     return () => ro.disconnect();
@@ -158,7 +168,7 @@
 
 <div class="field" data-shadow={status} data-widget={field.widget}
      bind:this={fieldEl}
-     style="--pulse-x: {pulseX}%; --pulse-y: {pulseY}%"
+     style="--pulse-x: {pulseX}%; --echo-top: {echoTop}px; --echo-bottom: {echoBottom}px"
      class:disabled={!enabled && !field.readOnly}
      class:readonly={field.readOnly}
      class:settled={sh && sh.settled}>
@@ -377,20 +387,34 @@
   .field::after {
     content: '';
     position: absolute;
-    inset: -5px;
+    /* Cropped to the control's own band (see the measured insets in the
+       script). Left/right still overhang so the outline clears the track. */
+    inset: calc(var(--echo-top, 0px) - var(--echo-pad, 4px))
+           -5px
+           calc(var(--echo-bottom, 0px) - var(--echo-pad, 4px))
+           -5px;
     border: 1.5px solid transparent;
     border-radius: 4px;
     pointer-events: none;
     opacity: 0;
   }
 
+  /* A range input's own box is JUST the 2px hairline track — the thumb is a
+     pseudo-element that overflows it, so cropping to the input's rect would
+     leave the handle outside the very outline it is supposed to be inside.
+     Expand to the thumb's band; --slider-thumb-h is style.css's single source
+     for that height, shared with the thumb rules themselves. */
+  .field[data-widget='slider']::after {
+    --echo-pad: calc(var(--slider-thumb-h) / 2 + 2px);
+  }
+
   .field[data-shadow='pending']::after,
   .field[data-shadow='overdue']::after {
     border-color: rgb(var(--intent-rgb));
     box-shadow: 0 0 12px rgba(var(--intent-rgb), .45);
-    -webkit-mask-image: radial-gradient(circle at var(--pulse-x, 50%) var(--pulse-y, 50%),
+    -webkit-mask-image: radial-gradient(circle at var(--pulse-x, 50%) 50%,
       transparent calc(var(--pr) - 34%), #000 var(--pr), transparent calc(var(--pr) + 4%));
-    mask-image: radial-gradient(circle at var(--pulse-x, 50%) var(--pulse-y, 50%),
+    mask-image: radial-gradient(circle at var(--pulse-x, 50%) 50%,
       transparent calc(var(--pr) - 34%), #000 var(--pr), transparent calc(var(--pr) + 4%));
     animation: intent-echo 500ms ease-out infinite;
   }
@@ -403,9 +427,9 @@
   .field.settled::after {
     border-color: rgb(var(--reality-rgb));
     box-shadow: 0 0 14px rgba(var(--reality-rgb), .5);
-    -webkit-mask-image: radial-gradient(circle at var(--pulse-x, 50%) var(--pulse-y, 50%),
+    -webkit-mask-image: radial-gradient(circle at var(--pulse-x, 50%) 50%,
       #000 0, #000 var(--pr), transparent calc(var(--pr) + 4%));
-    mask-image: radial-gradient(circle at var(--pulse-x, 50%) var(--pulse-y, 50%),
+    mask-image: radial-gradient(circle at var(--pulse-x, 50%) 50%,
       #000 0, #000 var(--pr), transparent calc(var(--pr) + 4%));
     animation: confirm-echo 900ms cubic-bezier(.22, .7, .3, 1) 1;
   }

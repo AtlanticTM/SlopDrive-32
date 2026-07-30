@@ -264,6 +264,39 @@ if (echo) {
      echo.originX.length > 0 && echo.originY.length > 0, echo.originX + ' / ' + echo.originY);
 }
 
+// The echo box is cropped to the control's band, but a range input's own box is
+// only the 2px hairline track — the thumb is a pseudo-element that overflows
+// it. If the crop follows the input's rect alone, the HANDLE ends up outside
+// the outline that is supposed to enclose it.
+const encl = await page.evaluate(() => {
+  const f = document.querySelector('.field[data-widget="slider"]');
+  if (!f) return null;
+  const ctrl = f.querySelector('input[type=range]');
+  const fr = f.getBoundingClientRect(), cr = ctrl.getBoundingClientRect();
+  const was = f.getAttribute('data-shadow');
+  f.setAttribute('data-shadow', 'pending');
+  const cs = getComputedStyle(f, '::after');
+  const top = parseFloat(cs.top), bottom = parseFloat(cs.bottom);
+  f.setAttribute('data-shadow', was ?? 'confirmed');
+  const probe = document.createElement('div');
+  probe.style.height = 'var(--slider-thumb-h)';
+  f.appendChild(probe);
+  const thumbH = probe.getBoundingClientRect().height;
+  probe.remove();
+  const cy = cr.top + cr.height / 2 - fr.top;
+  return { boxTop: top, boxBottom: fr.height - bottom,
+           thumbTop: cy - thumbH / 2, thumbBottom: cy + thumbH / 2,
+           fieldH: fr.height, thumbH };
+});
+if (encl) {
+  ok('echo encloses the slider handle', encl.boxTop <= encl.thumbTop && encl.boxBottom >= encl.thumbBottom,
+     `box ${encl.boxTop.toFixed(1)}..${encl.boxBottom.toFixed(1)} vs thumb ${encl.thumbTop.toFixed(1)}..${encl.thumbBottom.toFixed(1)}`);
+  ok('echo is cropped to the control, not the whole field',
+     (encl.boxBottom - encl.boxTop) < encl.fieldH * 0.75,
+     `${(encl.boxBottom - encl.boxTop).toFixed(1)}px of a ${encl.fieldH.toFixed(1)}px field`);
+  ok('thumb height comes from the shared var, not a literal', encl.thumbH > 0, encl.thumbH.toFixed(2) + 'px');
+}
+
 // ---- activity heatmap keeps its scroll history -----------------------------
 // A reactive read made SYNCHRONOUSLY inside LinkBar's $effect becomes that
 // effect's dependency, so a telemetry frame re-runs the body and refills the

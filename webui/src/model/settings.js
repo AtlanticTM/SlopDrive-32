@@ -25,29 +25,38 @@
  * how the "renders a machine it has never met" claim gets checked in CI.
  */
 
-import { PACKED, UI_RANK } from '../../../../SlopSync/clients/js/index.js';
+import {
+  PACKED, UI_RANK, UI_ARCHETYPE, UI_ARCHETYPE_NAME, VALUE_ASPECT,
+} from '../../../../SlopSync/clients/js/index.js';
 import { ROLE, isActionRole } from './roles.js';
 
 // ---------------------------------------------------------------------------
-// Widget resolution
+// Archetype derivation (RENDERING.md §8.2) and its widget projection
 // ---------------------------------------------------------------------------
+//
+// An ARCHETYPE is the interaction contract — normative, spec-derived, the same
+// on every conforming client. A WIDGET is this client's pixels for it. Keeping
+// them separate is what lets a `select` draw as a segmented row here and as a
+// scroll wheel on a glance-class screen while both stay conformant (§8).
 
 /**
- * WIDGET KINDS. Deliberately few. Every one is driven by the field's TYPE plus
- * its RFC-009 constraints — never by its name. If a machine adds a field we
- * have never seen, it still lands on one of these.
+ * WIDGET KINDS — this renderer's projections. Most are an archetype 1:1; the
+ * three that are not (`segmented`, `bitfield`, `secret`) are pixel-level
+ * variants chosen from facts §8.2 deliberately does not rank: how many options
+ * fit on one row, whether the bits are named, whether the value is withheld.
  */
 export const WIDGET = {
-  readout: 'readout',     // no setting_key: effective truth, display only
-  toggle: 'toggle',       // 2 options that read as off/on, or a 0..1 integer
-  segmented: 'segmented', // small option set, all choices worth showing at once
-  select: 'select',       // larger option set
-  bitfield: 'bitfield',   // bitfield8 with named bits -> checkbox group
-  slider: 'slider',       // numeric with BOTH bounds known
-  number: 'number',       // numeric with unknown bounds
-  text: 'text',           // str16/32/64
-  secret: 'secret',       // flags.secret: write-only, value never on the wire
-  action: 'action',       // an INTENT verb (role action.*)
+  readout: 'readout',     // §8.2 rows 12/13: no setting_key, display only
+  indicator: 'indicator', // §8.2 row 14: read-only boolean/bitfield status
+  toggle: 'toggle',       // row 7
+  segmented: 'segmented', // row 8, small option set: all choices worth showing
+  select: 'select',       // row 8, larger option set
+  bitfield: 'bitfield',   // row 7 composed: named bits -> a toggle per bit
+  slider: 'slider',       // row 9
+  stepper: 'stepper',     // row 10
+  text: 'text',           // row 11
+  secret: 'secret',       // row 11 + flags.secret: value never on the wire
+  action: 'action',       // row 6 (`trigger`), discovered by role in pass 2
 };
 
 const NUMERIC_TYPES = new Set([
@@ -55,6 +64,34 @@ const NUMERIC_TYPES = new Set([
   PACKED.u32, PACKED.i32, PACKED.f32,
 ]);
 const STRING_TYPES = new Set([PACKED.str16, PACKED.str32, PACKED.str64]);
+
+/**
+ * §8.2 rows 9/10 say a bounded numeric is a `slider` when its range is "wide
+ * enough for a drag gesture" and a `stepper` otherwise, without pinning a
+ * number. THIS IS THAT PIN: at least 20 distinct positions to drag through.
+ *
+ * The number is a floor on drag RESOLUTION, not on the span — 0..1 by 0.05 is
+ * a fine slider, 1..10 by 1 is not, and both are bounded. Raising it much
+ * turns whole cards of 25-tick modulation controls into spinners; lowering it
+ * lets a 9-position control pretend a drag can hit its middle value.
+ */
+export const DRAG_TICKS_MIN = 20;
+
+/**
+ * How many distinct values the range holds, or null when it has no bounds.
+ *
+ * An unannotated `step` is not "no quantization": an integer wire type is
+ * quantized by its own representation, at 1/scale of a display unit (a u8
+ * counting 1..10 has 9 ticks and belongs on a stepper even though it declares
+ * no step). Only a float with no step is genuinely continuous — Infinity, so
+ * it always reads as drag-worthy.
+ */
+function ticksOf(f) {
+  if (f.min == null || f.max == null) return null;
+  const quantum = f.step || (f.type === PACKED.f32 ? 0 : 1 / (f.scale || 1));
+  if (!quantum) return Infinity;
+  return (f.max - f.min) / quantum;
+}
 
 /**
  * Does a 2-option set read as a boolean? Purely a PRESENTATION upgrade — the
@@ -71,29 +108,90 @@ function looksBoolean(options) {
 }
 
 /**
- * Choose a widget from type + annotations alone.
+ * There is no `bool` packed type, so a boolean arrives wearing one of two
+ * disguises: an off/on option pair, or an integer bounded to exactly [0,1].
+ * Both are what §8.2 rows 7 and 14 mean by "bool field".
+ */
+function looksBooleanField(f) {
+  if (f.options && f.options.length) return looksBoolean(f.options);
+  return f.min === 0 && f.max === 1 && f.type !== PACKED.f32 && NUMERIC_TYPES.has(f.type);
+}
+
+/**
+ * RENDERING.md §8.2's decision table, evaluated top to bottom, first match
+ * wins. Returns a `UI_ARCHETYPE` code.
  *
- * Order matters: read-only wins over everything (a field with no setting_key
- * must never render as an input, no matter how invitingly typed it is), and
- * `secret` wins over `text` (never render a value the wire deliberately
- * withholds).
+ * Rows 2-5 and 16-17 are absent BY DESIGN, not by omission: `stop` is bound to
+ * safety-op identity (row 2) and lives in the safety UI; `axis`, `pad2d` and
+ * `list` are claimed by hero widgets from roles before a field reaches here
+ * (roles.js); `color`/`datetime` need an explicit hint no catalog key carries
+ * yet. Row 6 is the action pass at the bottom of this file.
+ */
+export function resolveArchetype(f) {
+  // Row 1. No catalog key carries an archetype override today, so this is
+  // dormant — one line to honor the day a hub ships one, per §14d's rule that
+  // an unrecognized annotation must never break a client that ignores it.
+  if (f.archetypeHint != null && UI_ARCHETYPE_NAME[f.archetypeHint] != null) return f.archetypeHint;
+
+  // Read-only wins over everything below it: a field with no setting_key is
+  // effective truth and must never render as something you can push, no matter
+  // how invitingly typed it is.
+  if (f.readOnly) {
+    if (f.aspect === VALUE_ASPECT.rate) return UI_ARCHETYPE.chart;         // row 15
+    if (looksBooleanField(f) || f.type === PACKED.bitfield8) return UI_ARCHETYPE.indicator;  // row 14
+    return UI_ARCHETYPE.readout;                                           // rows 12/13
+  }
+
+  if (looksBooleanField(f)) return UI_ARCHETYPE.toggle;                    // row 7
+  if (f.options && f.options.length) return UI_ARCHETYPE.select;           // row 8
+  // A writable named-bit bitfield8 is a SET of booleans — row 7 composed the
+  // way §8.4 composes pad2d out of sliders. §8.2 has no row of its own for it;
+  // if one ever lands, this line is where it goes.
+  if (f.type === PACKED.bitfield8) return UI_ARCHETYPE.toggle;
+  if (STRING_TYPES.has(f.type)) return UI_ARCHETYPE.text;                  // row 11
+
+  // Rows 9/10, plus the case neither row names: a writable numeric with no
+  // bounds at all. It cannot be dragged against a range it never published, so
+  // it lands on the stepper with the rest of the type-in controls.
+  const ticks = ticksOf(f);
+  // `step` rides the wire as an f32, so an exactly-N-tick range computes a hair
+  // under N (0..1 by 0.05 gives 19.9999997). Compare with float slack or every
+  // round-decimal step lands on the wrong side of the pin.
+  return (ticks != null && ticks >= DRAG_TICKS_MIN * (1 - 1e-6))
+    ? UI_ARCHETYPE.slider
+    : UI_ARCHETYPE.stepper;
+}
+
+/**
+ * Project a derived archetype onto this renderer's controls.
+ *
+ * `chart` has no generic control — the only time-series drawing we own is a
+ * hero widget with a subscription behind it, and a lone catalog field has
+ * neither. §14d's fallback rule and §8.4's "glance degrades to sparkline/value"
+ * both make the plain numeral a conformant answer, so it takes one.
  */
 export function resolveWidget(f) {
-  if (f.readOnly) return WIDGET.readout;
-  if (f.flagBits && f.flagBits.secret) return WIDGET.secret;
-  if (f.options && f.options.length) {
-    if (looksBoolean(f.options)) return WIDGET.toggle;
-    return f.options.length <= 4 ? WIDGET.segmented : WIDGET.select;
+  const a = f.archetype != null ? f.archetype : resolveArchetype(f);
+  switch (a) {
+    case UI_ARCHETYPE.indicator:
+      return WIDGET.indicator;
+    case UI_ARCHETYPE.toggle:
+      return (f.type === PACKED.bitfield8 && f.bits) ? WIDGET.bitfield : WIDGET.toggle;
+    case UI_ARCHETYPE.select:
+      return f.options.length <= 4 ? WIDGET.segmented : WIDGET.select;
+    case UI_ARCHETYPE.slider:
+      return WIDGET.slider;
+    case UI_ARCHETYPE.stepper:
+      return WIDGET.stepper;
+    case UI_ARCHETYPE.text:
+      // `secret` beats `text`: never render a value the wire deliberately
+      // withholds (RFC-009.4).
+      return (f.flagBits && f.flagBits.secret) ? WIDGET.secret : WIDGET.text;
+    case UI_ARCHETYPE.trigger:
+      return WIDGET.action;
+    default:
+      return WIDGET.readout;
   }
-  if (f.type === PACKED.bitfield8) return f.bits ? WIDGET.bitfield : WIDGET.number;
-  if (STRING_TYPES.has(f.type)) return WIDGET.text;
-  if (NUMERIC_TYPES.has(f.type)) {
-    // An integer bounded to exactly [0,1] is a toggle wearing a number's
-    // clothes. Common enough on real machines to be worth the special case.
-    if (f.min === 0 && f.max === 1 && f.type !== PACKED.f32) return WIDGET.toggle;
-    return (f.min != null && f.max != null) ? WIDGET.slider : WIDGET.number;
-  }
-  return WIDGET.number;
 }
 
 // ---------------------------------------------------------------------------
@@ -177,6 +275,10 @@ function makeField(entry, f, settingIndex, maskField) {
     flagBits: f.flagBits || { advanced: false, restart_required: false, secret: false },
     rank: f.rank,
     rankName: f.rankName,
+    aspect: f.aspect,
+    // §8.2 row 1's override. Nothing sets it yet — no catalog key carries an
+    // archetype — but the derivation honors it the moment one does.
+    archetypeHint: f.archetype,
     // ONE truth for the disclosure affordance. RENDERING.md §4 calls ui_ranks
     // `advanced` the migration of the setting_flags.advanced BIT into the rank
     // ladder, so both spellings mean the same thing and a machine may ship
@@ -191,6 +293,7 @@ function makeField(entry, f, settingIndex, maskField) {
     maskBit: readOnly ? null : settingIndex,
     readOnly,
   };
+  out.archetype = resolveArchetype(out);
   out.widget = resolveWidget(out);
   return out;
 }
@@ -308,6 +411,7 @@ export function buildSettingsModel(entries) {
         optionAccess: f.optionAccess || null,
         access: f.access != null ? f.access : entry.access,
         group: f.group || '',
+        archetype: UI_ARCHETYPE.trigger,   // §8.2 row 6
         widget: WIDGET.action,
       };
       addRole(act.role, act);

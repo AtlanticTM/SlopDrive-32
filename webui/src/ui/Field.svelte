@@ -64,7 +64,28 @@
     writeSetting(field, v);
   }
 
+  /**
+   * Move one step-sized tick and stay inside the published bounds. Rounded off
+   * the float grid because repeated 0.1 nudges otherwise drift into
+   * 0.30000000000000004 and write that to the machine.
+   */
+  function nudge(dir) {
+    const base = Number(value);
+    let next = (isFinite(base) ? base : (field.min ?? 0)) + dir * step;
+    if (field.min != null) next = Math.max(field.min, next);
+    if (field.max != null) next = Math.min(field.max, next);
+    commit(Math.round(next * 1e6) / 1e6);
+  }
+
   const step = $derived(field.step || (precisionFor(field) === 0 ? 1 : 0.01));
+
+  // Controls that already spell their own state out in words own the whole
+  // row; a chip repeating it is the duplicate-truth the density pass killed.
+  const showValueChip = $derived(
+    field.widget !== WIDGET.toggle
+    && field.widget !== WIDGET.bitfield
+    && field.widget !== WIDGET.indicator
+  );
 
   // Readout archetype (OG "Power card" bar recipe): a read-only numeric with
   // published bounds gets a thin proportional bar under the value, same as
@@ -109,7 +130,7 @@
         </button>
       {/if}
     </span>
-    {#if field.widget !== WIDGET.toggle && field.widget !== WIDGET.bitfield}
+    {#if showValueChip}
       <output class="field-value" class:readout={field.widget === WIDGET.readout} for={field.uid}>
         {#if field.options}
           {optionLabel(field, value)}
@@ -128,6 +149,26 @@
         <div class="readout-bar-fill" style="width: {boundedFrac * 100}%"></div>
       </div>
     {/if}
+
+  {:else if field.widget === WIDGET.indicator}
+    <!-- §8.4 indicator: a status lamp is NEVER the sole carrier of the fact,
+         so every lamp is paired with its state in words (§13). Read-only by
+         construction — this branch draws no control at all. -->
+    <div class="lamps" id={field.uid}>
+      {#if field.bits}
+        {#each field.bits as bitName, b}
+          {#if bitName}
+            <span class="lamp" class:lit={((value | 0) & (1 << b)) !== 0}>
+              <i aria-hidden="true"></i>{bitName}
+            </span>
+          {/if}
+        {/each}
+      {:else}
+        <span class="lamp" class:lit={!!value}>
+          <i aria-hidden="true"></i>{field.options ? optionLabel(field, value) : (value ? 'on' : 'off')}
+        </span>
+      {/if}
+    </div>
 
   {:else if field.widget === WIDGET.toggle}
     <div class="toggle-row">
@@ -183,11 +224,21 @@
          under every slider is exactly the "flat wall of gray text" the OG
          never had). -->
 
-  {:else if field.widget === WIDGET.number}
-    <input id={field.uid} type="number" class="og-num"
-           min={field.min} max={field.max} step={step}
-           value={value ?? ''} disabled={!enabled}
-           onchange={(e) => commit(Number(e.currentTarget.value))} />
+  {:else if field.widget === WIDGET.stepper}
+    <!-- §8.4 stepper: typeable, and increments in step-sized ticks. The typing
+         half is the native input; the increment half CANNOT be, because the
+         global sheet strips native spinners on purpose. Hence the flanking
+         nudges — without them this archetype is just a text box. -->
+    <div class="stepper">
+      <button type="button" disabled={!enabled} aria-label="decrease {labelFor(field)}"
+              onclick={() => nudge(-1)}>&minus;</button>
+      <input id={field.uid} type="number" class="og-num"
+             min={field.min} max={field.max} step={step}
+             value={value ?? ''} disabled={!enabled}
+             onchange={(e) => commit(Number(e.currentTarget.value))} />
+      <button type="button" disabled={!enabled} aria-label="increase {labelFor(field)}"
+              onclick={() => nudge(1)}>+</button>
+    </div>
 
   {:else if field.widget === WIDGET.text}
     <input id={field.uid} type="text" class="value-input"
@@ -422,6 +473,73 @@
   .og-switch.is-disabled {
     opacity: .45;
     cursor: not-allowed;
+  }
+
+  /* Stepper (indicator's writable neighbor): a compact centered value flanked
+     by nudges. The value box does NOT stretch — a 9-position control reading
+     as a full-bleed text field is what made it look emptier than the slider it
+     replaced. */
+  .stepper {
+    display: flex;
+    align-items: stretch;
+    gap: 6px;
+  }
+  .stepper input {
+    flex: 1 1 auto;
+    min-width: 0;
+    text-align: center;
+  }
+  .stepper button {
+    flex: 0 0 34px;
+    border-radius: var(--r-s);
+    border: 1px solid var(--line-2);
+    background: var(--bg-sunken);
+    color: var(--tx-mut);
+    font-family: var(--mono);
+    font-size: .9rem;
+    line-height: 1;
+    cursor: pointer;
+    transition: border-color .12s, color .12s;
+  }
+  .stepper button:hover:not(:disabled) {
+    border-color: var(--line-4);
+    color: var(--tx);
+  }
+  .stepper button:disabled {
+    opacity: .45;
+    cursor: not-allowed;
+  }
+
+  /* Status lamps (indicator archetype). Same wrap cadence as .bitfield so a
+     read-only status byte and a writable one read as the same kind of thing;
+     the lamp is a dot rather than a checkbox because nothing here is pushable.
+     The lit dot borrows the Power-card instrument glow — a lamp is a live
+     measurement, not a settings chip. */
+  .lamps {
+    display: flex;
+    flex-wrap: wrap;
+    gap: 6px 14px;
+  }
+  .lamp {
+    display: flex;
+    align-items: center;
+    gap: 6px;
+    font-size: .78rem;
+    color: var(--tx-mut);
+  }
+  .lamp i {
+    width: 7px;
+    height: 7px;
+    border-radius: 50%;
+    background: var(--line-2);
+    box-shadow: inset 0 1px 2px rgba(0, 0, 0, .6);
+  }
+  .lamp.lit {
+    color: var(--tx-val);
+  }
+  .lamp.lit i {
+    background: var(--reality);
+    box-shadow: 0 0 6px rgba(var(--reality-rgb), .55);
   }
 
   .bitfield {

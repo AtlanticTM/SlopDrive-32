@@ -17,7 +17,9 @@
 
 import { buildSettingsModel, isFieldEnabled, WIDGET, resolveWidget } from '../src/model/settings.js';
 import { claimRoles, withoutClaimed, ROLE } from '../src/model/roles.js';
-import { PACKED, CHANNEL_CLASS, UI_CATEGORY, UI_RANK } from '../../../SlopSync/clients/js/index.js';
+import {
+  PACKED, CHANNEL_CLASS, UI_CATEGORY, UI_RANK, UI_ARCHETYPE,
+} from '../../../SlopSync/clients/js/index.js';
 
 let fails = 0;
 const ok = (name, cond, extra) => {
@@ -202,6 +204,36 @@ ok('no setting_key -> readout, never an input',
 ok('read-only field carries no write target',
    byName.get('travel_measured').writeChannel === null);
 
+// ---- claim: §8.2 rows 9/10 are PINNED, and the pin survives f32 step dust --
+// The spec says "range wide enough for a drag gesture" and stops there;
+// DRAG_TICKS_MIN is this client's number. These cases are the ones that flip
+// if it moves, so they are also the record of what it was chosen to do.
+const num = (extra) => resolveWidget(
+  { readOnly: false, type: PACKED.f32, scale: 1, flagBits: {}, ...extra });
+ok('a 100-tick range drags -> slider', num({ min: 0, max: 100, step: 1 }) === WIDGET.slider);
+ok('a 16-tick range does not -> stepper', num({ min: 0, max: 8, step: 0.5 }) === WIDGET.stepper);
+ok('exactly DRAG_TICKS_MIN ticks still drags, f32 step dust and all',
+   num({ min: 0, max: 1, step: Math.fround(0.05) }) === WIDGET.slider);
+ok('an unstepped integer is quantized by its own type: 9 ticks -> stepper',
+   num({ type: PACKED.u8, min: 1, max: 10 }) === WIDGET.stepper);
+ok('an unstepped float is genuinely continuous -> slider',
+   num({ min: 0, max: 20 }) === WIDGET.slider);
+ok('an unstepped integer scaled x1000 is finely quantized -> slider',
+   num({ type: PACKED.u32, scale: 1000, min: 10, max: 500 }) === WIDGET.slider);
+ok('a writable numeric with no bounds cannot be dragged -> stepper',
+   num({ type: PACKED.u16 }) === WIDGET.stepper);
+ok('an explicit archetype hint beats the whole table (§8.2 row 1)',
+   num({ min: 0, max: 100, step: 1, archetypeHint: UI_ARCHETYPE.stepper }) === WIDGET.stepper);
+
+// ---- claim: read-only status bits are lamps, not numerals (§8.2 row 14) ----
+const ro = (extra) => resolveWidget({ readOnly: true, scale: 1, flagBits: {}, ...extra });
+ok('a read-only bitfield -> indicator',
+   ro({ type: PACKED.bitfield8, bits: ['armed', 'homed'] }) === WIDGET.indicator);
+ok('a read-only off/on pair -> indicator',
+   ro({ type: PACKED.u8, min: 0, max: 1 }) === WIDGET.indicator);
+ok('a read-only unbounded numeric is still a plain readout',
+   ro({ type: PACKED.f32 }) === WIDGET.readout);
+
 // ---- claim: writes are addressed by the catalog, not by our guesswork -----
 ok('a setting knows its INTENT channel and key',
    byName.get('hand_speed').writeChannel === 0x0290 && byName.get('hand_speed').settingKey === 7);
@@ -253,7 +285,7 @@ const weird = buildSettingsModel([{
   schema: null,
 }]);
 ok('a field of an unknown packed type still renders (fallback widget)',
-   weird.fields.length === 1 && weird.fields[0].widget === WIDGET.number,
+   weird.fields.length === 1 && weird.fields[0].widget === WIDGET.stepper,
    weird.fields[0] && weird.fields[0].widget);
 ok('an unlabeled device category gets a generated label',
    weird.categories[0] && /250/.test(weird.categories[0].label), weird.categories[0].label);

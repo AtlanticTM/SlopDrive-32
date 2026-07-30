@@ -3349,18 +3349,52 @@ The answer to "what's next on the ledger":
      duplicate rule = first-in-catalog-order (in the RFC). Reference
      catalog ADOPTION (preset-meta card descs and friends) rides the
      Phase 6 sweep inside the one etag bump.
-   - **Phase 1b — NEXT UP** (widget churn — operator eyeballs before
-     merge): replace `resolveWidget()`'s hand-guess with §8.2's archetype
-     table, adding `stepper`/`indicator`/`chart` + the explicit-override
-     row. MUST first pin the §8.2 row 9/10 "range wide enough for a drag
-     gesture" rule — plan's proposal is (max−min)/step ≥ 20 → slider, else
-     stepper; a naive reading flips half the sliders to steppers. Wants a
-     screenshot diff of every settings tab before/after. The 1a render
-     harness is the cheap way to get those without the device: serve
-     `webui/dist` on a local port and point it at slopsim's WS on :82
-     (`connect()` defaults to port 82 + `location.hostname`, so nothing
-     needs shimming; localhost origin = watch tier, which still renders
-     the whole settings tree).
+   - **Phase 1b DONE (2026-07-29), DEPLOYED AND LIVE-VERIFIED — the one
+     thing still owed is the OPERATOR EYEBALL the plan reserved.**
+     `resolveWidget()`'s hand-guess is replaced by §8.2's table:
+     `resolveArchetype()` walks the rows in order and returns a
+     `UI_ARCHETYPE` code, `resolveWidget()` projects that onto this
+     renderer's controls, and every field now carries `archetype` beside
+     `widget`. Rows 2-5 and 16-17 are absent BY DESIGN and the code says
+     so — `stop` is safety-op identity, `axis`/`pad2d`/`list` are claimed
+     by heroes from roles before a field reaches the generic path.
+     **THE ROW 9/10 PIN, veto-able and measured before it was chosen:
+     `DRAG_TICKS_MIN = 20` distinct positions**, exported from
+     `webui/src/model/settings.js`. Two corrections to the plan's proposal,
+     both forced by the live catalog:
+     (i) a bare `(max−min)/step` cannot see the fields that most need a
+     stepper, because `blend_steps` (u8 1..10) and `reshape_steps` (u8 0..8)
+     declare NO step — an unannotated integer is quantized by its own type
+     at `1/scale` of a display unit, and only a float with no step is
+     genuinely continuous;
+     (ii) `step` rides the wire as an f32, so an exactly-20-tick range
+     computes 19.9999997 and a bare `>= 20` would have flipped all three
+     0..1-by-0.05 budget sliders. The comparison carries float slack.
+     Measured effect: **8 of 184 fields change, 5 of them on a rendered
+     tab** — `chase_lookahead`/`blend_steps`/`reshape_steps` slider→stepper
+     (Tuning), `plan-strip.flags` and `motion.flags` readout→indicator
+     (Tuning/Motion). The plan's feared "half the sliders flip" needs
+     T≈32, which was measured and rejected. Nothing derived to `chart`:
+     this catalog ships no `aspect: rate` field, so that row is live but
+     unexercised and falls back to the plain numeral (§14d, §8.4's own
+     glance degradation).
+     Two renderer findings the screenshot pass caught, both fixed:
+     **the design system strips native number spinners on purpose**
+     (`style.css`: "nudge/trim buttons cover the increment use-case"), so
+     `<input type=number>` alone does NOT satisfy §8.4's "increments in
+     step-sized ticks" — the stepper draws its own −/+ nudges; and a
+     read-only bitfield had been rendering as the numeral `0.00`, which
+     the indicator lamps replace with named per-bit state.
+     🚩 SPEC GAP, recorded not resolved: §8.2 has NO row for a WRITABLE
+     named-bit bitfield8. It derives to `toggle` here (a set of booleans,
+     composed the way §8.4 composes pad2d out of sliders) and the code
+     names the line to change if a row ever lands.
+     Gates: settings-model suite ALL PASS (12 new assertions pinning the
+     rule, including the f32-dust case), canon_lint 0, device-knowledge
+     gate PASS, `npm run build` clean, `flagship-render-smoke` ALL PASS
+     (27) against the device, `smoke.ps1 -ExpectFw 2.1.91` PASS with no
+     `[STALL]`. Deployed `-Target fs`; fw stays 2.1.91 (page-only, no bump
+     owed), UI build stamp `1d117e2` -> `5624b6a`.
    - Then Phases 2–6 per plan. Phase 2 is (a)'s first three headers only,
      per the staging ruling. Phase 6 carries the ceilings ruling
      (1000 mm/s / 60k mm/s²) + the ONE etag bump + deploy.
@@ -3414,6 +3448,20 @@ The answer to "what's next on the ledger":
      `ss:sign` from census data at all; both comments record why (T1).
    - Not reproduced deliberately: whether a real backgrounded phone still
      churns sessions against 2.1.91. The mechanism says it cannot.
+   - **The accepted 503 is NOT transient — it holds until reboot.** Measured
+     2026-07-29 during the Phase 1b screenshot pass, which stacked ~25 page
+     loads and a dozen WS sessions in a few minutes. Per session the cost is
+     ~1-2 KB of free heap and a little maxblock, and it mostly comes back;
+     but once maxblock crosses under `handleRoot`'s 12,288 B floor it PINS
+     — observed flat at 10,740 B for 100+ s with every client gone and
+     `free` still fluctuating around 25 KB, so nothing was leaking, the big
+     block was simply gone. A clean boot reads 41,928 / 31,732 (the recorded
+     2.1.91 figures, reconfirmed). This does not change the ruling that a
+     503 from two tabs is ACCEPTED, but it means the recovery story is
+     "reboot", not "wait" — worth knowing before anyone reads a stuck 503 as
+     a new bug. Agent-side lesson, no firmware owed: run browser probes one
+     at a time, and note that `flagship-render-smoke.mjs` leaks its chromium
+     when an assertion throws mid-run.
 
 3. **PARKED (operator: "future task once all of this is rock solid"):
    stripped-down ESP32-WROOM-32D variant, no webui.** For the widest user

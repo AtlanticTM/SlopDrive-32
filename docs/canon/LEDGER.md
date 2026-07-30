@@ -3321,6 +3321,78 @@ the parts worth ledgering because they are invisible in a fresh clone:
   rather than CLAUDE.md because CLAUDE.md is gitignored and a rule that binds
   every agent cannot live in an untracked file.
 
+## OPERATOR UI FEEDBACK QUEUE (2026-07-30) — the Phase 1b eyeball, answered
+
+The verdict on Phase 1b: **lamps approved, steppers not objected to, no veto
+on `DRAG_TICKS_MIN`.** What came back instead is a punch list. Recorded here
+with the analysis each item needs, because two of them are not the cosmetic
+jobs they look like. Ordered by "how much do we know", not by size.
+
+1. **The ⓘ glyph is off-center.** `.info` in `webui/src/ui/Field.svelte` is
+   already an 18px `inline-grid` with `place-items: center`, so the BOX is
+   centered and the drift is inside the drawing: the glyph spans y 3.2..8.4
+   of a 12-unit viewBox (dot at 3.6 r 0.4, stem 5.4..8.4), midpoint 5.8
+   against a circle centered at 6.0. Nudge the dot and stem down ~0.2 units,
+   or center the pair on the circle rather than eyeballing the coordinates.
+   Measure a zoomed screenshot before AND after — this is small enough to
+   "fix" in the wrong direction and not notice.
+2. **Dropdowns print the current value twice** — once in the head chip, once
+   in the control. Real duplicate truth, same class the density pass killed
+   for toggles. One-line fix: `showValueChip` in Field.svelte already excludes
+   `toggle`/`bitfield`/`indicator`; `select` and `segmented` belong on that
+   list too, because both render their own current value. Check `secret` and
+   `text` while there — a text input also shows its own value, so the chip may
+   be duplicate for the whole write plane and only genuinely useful for
+   `slider` (no numerals of its own) and `readout`.
+3. **`raw_10um` is a meaningless label** (renders "Raw 10um" on the Motion
+   tab, rank=diagnostic). `_10um` describes the WIRE unit; the field ships
+   `unit: "mm"`, `unitId: mm`, `scale: 100`, so the operator never sees 10 µm
+   at all. Siblings `pos_10um`/`tgt_10um` have the same wart but are
+   hero-claimed by role and rarely drawn loose. Suggested: `demand` /
+   `position` / `target`, whose meanings are already spelled out in the descs
+   and in `value_provenance` (demand/planned/actual).
+   🚩 **THIS IS A WIRE CHANGE, NOT A RENAME — TRAPS T11.** Catalog field names
+   are protocol bytes: they move the etag and invalidate the pinned fixture.
+   The campaign budget allows exactly ONE etag bump, at Phase 6. Fold it in
+   there or not at all. Safe on the client side — `roles.js` binds by ROLE and
+   the device-knowledge gate forbids name knowledge in `webui/src` — but the
+   C++ STATE packer and any vector fixtures move with it.
+4. **Cards are too wide to track left-to-right.** At 1440px a label sits ~1200
+   px from its value. The card body should flow into columns rather than one
+   full-bleed row per field: `repeat(auto-fit, minmax(~320px, 1fr))` on the
+   field container is the cheap version. Watch two things — sliders need
+   enough width to stay draggable (see `DRAG_TICKS_MIN`, same concern from the
+   other end), and the OG reference is the arbiter of the final cadence, so
+   shoot it against `og-ref` rather than inventing a grid.
+5. **Position telemetry jitters in the Tauri shell but not on the
+   device-served page.** Same source, same bundle build, so the difference is
+   environmental — do NOT start by editing the smoothing. Bisect in this order:
+   (a) **access tier** — the device page mints control via same-origin
+   `/uitoken`; the shell mints through `tauri-plugin-http`. If the shell lands
+   at watch, subscription rate drops and interpolation starves. Read
+   `machine.link.roles` in the shell window first, it is one glance.
+   (b) **subscribed sample rate** — compare the actual arrival cadence, not
+   the requested one.
+   (c) **rAF cadence** — WebView2 is not Chrome; if the render clock assumes
+   ~60 Hz vsync and WebView2 delivers something else, the interpolation the
+   jitter fix relies on breaks even with a perfect stream. TRAPS T18 is the
+   background (arrival-time stamping destroys the timeline).
+   Existing instruments answer all three without new code:
+   `webui/test/position-jitter-probe.mjs`, `render-vs-samplerate-probe.mjs`,
+   `jitter-measure.mjs`, `streamed-outlier-probe.mjs`.
+6. **The top-left activity grid does not scroll left.** Probably NOT broken:
+   `tick()` in LinkBar.svelte does `data.shift(); data.push(frame)` every
+   220 ms, which IS a leftward scroll. Two likelier explanations, check both
+   before touching it — (a) `prefers-reduced-motion: reduce` on the operator's
+   machine takes the deliberate freeze branch, which paints every column with
+   the same live value by design; (b) with the motor unplugged the data really
+   is uniform (velocity pinned at 0, and the `link` row's adaptive ceiling
+   tracks a steady ~25 Hz push rate to a flat ~1.0), so a correctly scrolling
+   grid of identical columns looks frozen. Compare against what the OG grid
+   actually plotted before concluding ours regressed.
+7. **Phone layout: DEFERRED by operator ruling** until the desktop layout is
+   settled. Do not spend passes there; it will churn again.
+
 ## ⏭ NEXT STEPS (2026-07-29 closeout, restamped after the Phase 1b + desktop-shell + page-serve session — START HERE)
 
 The answer to "what's next on the ledger":
@@ -3667,12 +3739,13 @@ The answer to "what's next on the ledger":
    The three rs485 FAILs in every smoke run are the operator's motor being
    unplugged (connected only during testing) — expected, not a regression.
    Both repos' docs/spec commits carry nothing the firmware wants.
-8. **The ONE thing owed to a human, not a machine: the Phase 1b eyeball.**
-   Shots are in `webui/test/evidence/phase1b/` (gitignored, per-run). Look at
-   `rejected-card-stepper-without-nudges.png` beside
-   `after-card-infeasible-moves.png` — the −/+ nudges were a judgment call
-   made after seeing how empty a bare number input read, and `DRAG_TICKS_MIN`
-   is veto-able. Nothing downstream is blocked on it; Phase 2 can start first.
+8. **Phase 1b eyeball: DONE (operator, 2026-07-30).** No veto — lamps
+   approved, steppers unchallenged, `DRAG_TICKS_MIN` stands. It came back as a
+   punch list instead: **OPERATOR UI FEEDBACK QUEUE**, its own section above.
+   Items 1/2/6 are small and independent; item 4 (card columns) is the one
+   that changes how the whole settings surface reads; item 3 is a WIRE change
+   that must ride Phase 6's single etag bump (T11); item 5 (shell telemetry
+   jitter) is an investigation with a named bisect order, not a fix.
 9. **Session shape, for whoever restamps this next.** Three threads ran:
    Phase 1b (done, awaiting eyeball), the desktop shell (first release build
    ever + a stacking bug fixed, TRAPS T22), and the page-serve pin (fixed

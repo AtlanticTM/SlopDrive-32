@@ -3507,18 +3507,29 @@ The answer to "what's next on the ledger":
      boundary and buys an extra pbuf). Live proof under real pressure: **55
      fresh loads 503'd while all 55 revalidations answered 304**, no panic,
      heap recovered to maxblock 20,468 afterwards.
-     **STILL OPEN, needs an operator call: the floor's VALUE.** The
-     `maxblock < 12288` test is ~9x the largest allocation the path can make,
-     which reads like an obvious over-estimate. It is not a sizing number, it
-     is the only backpressure a single httpTask has, and the A/B proved it:
-     control and a candidate with the floor sized to the real allocation were
-     driven by the same three-concurrent-browser harness, both bottomed near
-     250 B free, the control WEDGED and survived, the candidate kept serving
-     and **PANICked** (boot_seq 12, `heap_min=260`, `max_block_last=124`).
-     That candidate was NOT shipped. Making the floor honest is therefore a
-     concurrency-limiting problem, not a threshold tweak — mechanism in
-     TRAPS T19's addendum. Until then the pin still latches for fresh loads;
-     what changed is that an already-loaded client rides through it.
+     The floor's VALUE was open for one build and is now **CLOSED (2.1.95)**.
+     History worth keeping, because it is why the fix looks the way it does:
+     the `maxblock < 12288` test is ~9x the largest allocation the path can
+     make, so "correct the arithmetic" was tried and A/B'd. Control and a
+     candidate with the floor sized to the real allocation met the same
+     three-concurrent-browser harness; both bottomed near 250 B free; the
+     control WEDGED and survived, the candidate kept serving and **PANICked**
+     (2.1.92, boot_seq 12, `heap_min=260`, `max_block_last=124`). The floor
+     was doing load-shedding, not sizing.
+     **The resolution was to split the two failures by timescale rather than
+     to pick a better number.** Fragmentation is latched and visible AT ENTRY;
+     exhaustion is a transient that arrives DURING the transfer, after entry
+     has already said yes, so no entry threshold can see it. 2.1.95 therefore
+     gates entry only on "can an internal allocation happen at all"
+     (`maxblock >= 4096` — the true ceiling under
+     `CONFIG_SPIRAM_MALLOC_ALWAYSINTERNAL=4096`) plus a `free >= 12288` floor,
+     and re-checks free INSIDE the send loop, abandoning the body below
+     12288. Truncation is a page the browser retries. Live A/B/C: the harness
+     that killed 2.1.92 ran twice as hard against 2.1.95 with **no reboot**,
+     the abort fired at `free=11,572` and again at `maxblock=2,548`, and a
+     fresh load returned **200 at maxblock 10,740** — the exact value that
+     used to latch a permanent 503. Mechanism: TRAPS T19 addendum + its
+     resolution note.
    - **The accepted 503 is NOT transient — it holds until reboot.** Measured
      2026-07-29 during the Phase 1b screenshot pass, which stacked ~25 page
      loads and a dozen WS sessions in a few minutes. Per session the cost is
@@ -3611,15 +3622,15 @@ The answer to "what's next on the ledger":
 6. **Session-gate/closeout system** (C-13 proposal + ledger diet + tiered
    canon loading, designed in chat 2026-07-29) — implement after Phase 0;
    this closeout entry is its manual prototype.
-7. **Deploy state: device runs 2.1.94, firmware AND filesystem both current.
+7. **Deploy state: device runs 2.1.95, firmware AND filesystem both current.
    NOTHING IS OWED TO THE DEVICE.** Everything this session produced is on it
    and live-verified: Phase 1a's settings surface (UI build `1d117e2`), the
    boot-heap/stack instrumentation (2.1.89, 2.1.90), and the memory margin
    (2.1.91), plus Phase 1b's §8.2 archetypes and the page-serve revalidation
-   fix (2.1.94). 2.1.92 and 2.1.93 were the A/B pair for the floor experiment
+   fix (2.1.95). 2.1.92 and 2.1.93 were the A/B pair for the floor experiment
    above and are superseded — 2.1.92 is the candidate that panicked, do not
    resurrect it. Live gates at closeout: `flagship-render-smoke` ALL PASS,
-   `smoke.ps1 -ExpectFw 2.1.94` PASS, no `[STALL]`.
+   `smoke.ps1 -ExpectFw 2.1.95` PASS, no `[STALL]`.
    The three rs485 FAILs in every smoke run are the operator's motor being
    unplugged (connected only during testing) — expected, not a regression.
    Both repos' docs/spec commits carry nothing the firmware wants.

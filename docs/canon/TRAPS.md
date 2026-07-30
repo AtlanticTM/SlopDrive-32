@@ -303,6 +303,23 @@ body and allocates nothing, so gating it merely refuses the browsers that
 already hold the bundle — the cheapest population to serve. Measured under
 live pressure: 55 fresh loads 503'd while all 55 revalidations answered 304,
 device never panicked.
+**Resolution — shed DURING the work, not only before it (fw 2.1.95):** the
+two failures live on different timescales, which is why one gate could not
+serve both. Fragmentation is a latched fact visible at ENTRY; exhaustion is
+a transient that arrives WHILE several bodies are in flight, after entry has
+already said yes — three concurrent first-loads pass a check at ~36 KB free
+and reach ~250 B afterward, so no entry threshold can predict it. Splitting
+them fixes both: entry asks only "can an internal allocation happen at all"
+(`maxblock >= 4096`, the true ceiling under
+`CONFIG_SPIRAM_MALLOC_ALWAYSINTERNAL=4096`) plus a cheap free floor, and the
+SEND LOOP re-checks free every chunk and abandons the body when it collapses.
+Truncation is a page the browser retries; the alternative was a reboot.
+Live A/B/C: the harness that panicked the entry-gate-only build ran twice as
+hard against 2.1.95 with no reboot, the abort fired at free=11,572 and again
+at maxblock=2,548, and a fresh load returned 200 at maxblock 10,740 — the
+exact value that used to latch a permanent 503. Do NOT turn the abort into a
+wait: httpTask is the task under pressure, so blocking there starves the one
+thing that has to finish draining.
 
 ## T20 — A hand-copied vocabulary drifts silently, and a RETIRED one lies
 

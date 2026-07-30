@@ -333,20 +333,31 @@ void WebUI::captureTelemetry(float position_mm, float target_mm, float raw_mm) {
 
 // ---- Route handlers ---------------------------------------------------------
 
-// Page-serve heap floor (TRAPS T19). DELIBERATELY UNCHANGED at 12288, and
-// deliberately still on maxblock, despite being ~9x the largest allocation
-// this path can make (see sPageSendBuf). Measured 2026-07-29: it is not
-// really a sizing gate, it is a LOAD SHEDDER, and it is load-bearing. Under
-// three concurrent browsers this hub reaches a ~250 B low-water either way;
-// the difference is that refusing here stops the bleeding, and a build that
-// kept serving through the same hammer PANICked. Lowering it is a memory-
-// architecture question (concurrency limiting, not a threshold tweak) and is
-// an OPEN OPERATOR DECISION in the ledger — do not "correct" this number
-// because the arithmetic looks generous.
+// Page-serve heap gates (TRAPS T19). THREE of them, because the page path has
+// two unrelated failure modes and one gate cannot see both:
 //
-// What DID change is what the floor gates: only the body path, so a
-// revalidation still answers. See handleRoot.
-static constexpr uint32_t kPageServeBlockFloor = 12288;
+//   - kPageServeBlockFloor — fragmentation, visible AT ENTRY. Only asks "can
+//     an internal allocation still happen at all": with
+//     CONFIG_SPIRAM_MALLOC_ALWAYSINTERNAL=4096 every internal allocation is
+//     under 4 KB by construction, so this is the true ceiling, not a guess.
+//     It used to be 12288, which latched: maxblock does not coalesce back on
+//     its own, so a merely-fragmented hub refused pages until reboot.
+//   - kPageServeFreeFloor — exhaustion, ALSO checked at entry, so a doomed
+//     transfer is never started.
+//   - kPageServeAbortFloor — exhaustion DURING the transfer, which is the one
+//     that actually kills. Measured 2026-07-29: three concurrent first-loads
+//     pass an entry check at ~36 KB free and then drive the heap to ~250 B
+//     while the bodies are in flight. No entry threshold can predict that, and
+//     a build that only gated at entry PANICked on this exact load. So the
+//     send loop re-checks and abandons the body instead. A truncated response
+//     is a page the browser retries; the alternative is a reboot.
+//
+// Aborting mid-body is the deliberate trade. Do not "improve" it into a wait:
+// httpTask is the thing under pressure, so blocking here starves the very
+// task that has to finish draining.
+static constexpr uint32_t kPageServeBlockFloor = 4096;
+static constexpr uint32_t kPageServeFreeFloor  = 12288;
+static constexpr uint32_t kPageServeAbortFloor = 12288;
 
 // Send buffer for the bundle. In .bss, not the heap, and deliberately so:
 // WebServer::streamFile() delegates to NetworkClient::write(Stream&), which
@@ -394,7 +405,8 @@ void WebUI::handleRoot() {
         // Under pressure the page is the right thing to drop: it is a
         // convenience surface, while the control plane (SlopSync) and any
         // e-stop already loaded elsewhere are not.
-        if (ESP.getMaxAllocHeap() < kPageServeBlockFloor) {
+        if (ESP.getFreeHeap() < kPageServeFreeFloor ||
+            ESP.getMaxAllocHeap() < kPageServeBlockFloor) {
             f.close();
             crashring::crumb("http-503");
             SLOGW_EVERY_MS(5000, "ui", "handleRoot: 503, heap pressure (free=%u maxblock=%u)",
@@ -411,6 +423,17 @@ void WebUI::handleRoot() {
         _httpServer->send(200, "text/html", "");
         NetworkClient& client = _httpServer->client();
         while (f.available() && client.connected()) {
+            // The gate that matters. Entry said yes at whatever the heap was
+            // a moment ago; the danger arrives while several bodies are in
+            // flight at once, so it is re-asked every chunk.
+            if (ESP.getFreeHeap() < kPageServeAbortFloor) {
+                crashring::crumb("http-abort");
+                SLOGW_EVERY_MS(5000, "ui", "handleRoot: body abandoned mid-send"
+                               " (free=%u maxblock=%u) — shedding load",
+                               unsigned(ESP.getFreeHeap()), unsigned(ESP.getMaxAllocHeap()));
+                client.stop();   // truncation the browser can see and retry
+                break;
+            }
             size_t n = f.read(sPageSendBuf, sizeof(sPageSendBuf));
             if (n == 0) break;
             client.write(sPageSendBuf, n);

@@ -22,9 +22,10 @@
 
 #include "config_api.h"
 
-#include "AppLog.h"
+#include "AppLog.h"          // bridge only: applogBegin/applogDrain (SlopLog sinks)
 #include "BootHeap.h"        // per-init-stage heap attribution (shared with SlopSyncHubService)
-#include "CrashRing.h"       // last-words ring: begin/crumb/heapSample          // bridge only: applogBegin/applogDrain (SlopLog sinks)
+#include "CrashRing.h"       // last-words ring: begin/crumb/heapSample
+#include "OomHook.h"        // failed-alloc hook: names the allocation, not the victim
 #include "sloplog/sloplog.h"
 #include "SystemState.h"
 #include "ConfigStore.h"
@@ -52,6 +53,9 @@
 #include "SlopSyncHubService.h"
 
 #include "WebUI.h"
+// WebUI.h only forward-declares SlopHttpServer; commsTask's stall reap calls
+// through it (abortBlockedClient), so this TU needs the complete type.
+#include "ui/SlopHttpServer.h"
 #include "OtaService.h"
 
 #if defined(FEATURE_RS485_MODBUS)
@@ -387,6 +391,7 @@ static void streamSamplerTask(void* /*param*/) {
                             slopmotion::InfeasiblePolicy::PrioritizeAmplitude; break;
                 case 4: smCfg.infeasible_policy =
                             slopmotion::InfeasiblePolicy::PrioritizeSmooth;    break;
+                case 5: smCfg.infeasible_policy = slopmotion::InfeasiblePolicy::Blend; break;
                 default: /* leave slopmotion::Config's own default in place */  break;
             }
             smCfg.infeasible_scale_margin = g_state.sm_tune_infeas_margin;
@@ -557,18 +562,88 @@ static void streamSamplerTask(void* /*param*/) {
 // cost — only two millis() reads per step, logs only when a step exceeds the
 // threshold.
 #define STALL_LOG_MS 120u
+
+// ---- Core-0 step beacon: a stall you can ACT on, not just read about -------
+// TIME_STEP only ever measured a step AFTER it returned, so an in-flight stall
+// was invisible while it mattered. httpTask now PUBLISHES the step it is
+// entering and clears it on exit; commsTask (2 ms cadence, and never blocked
+// by httpTask) watches the beacon and can cancel the offender.
+// Single writer (httpTask), single reader (commsTask), two plain atomics — no
+// lock, and nothing here may block: the whole point is that the writer is
+// already stuck when the reader acts.
+// 0 == no step in flight. millis() can legitimately BE 0 for one tick at boot,
+// so the publish floors it to 1 rather than lying about being idle.
+static std::atomic<uint32_t>     s_stepStartMs{0};
+static std::atomic<const char*>  s_stepName{nullptr};
+
 #define TIME_STEP(call, name) do {                                            \
-        uint32_t _s0 = millis(); call; uint32_t _dt = millis() - _s0;         \
+        uint32_t _s0 = millis();                                              \
+        s_stepName.store(name, std::memory_order_relaxed);                    \
+        s_stepStartMs.store(_s0 ? _s0 : 1u, std::memory_order_release);       \
+        call;                                                                 \
+        s_stepStartMs.store(0, std::memory_order_release);                    \
+        uint32_t _dt = millis() - _s0;                                        \
         if (_dt > STALL_LOG_MS) SLOGW("sys", name " blocked %lums", (unsigned long)_dt); \
     } while (0)
+
+// DISABLED (2026-07-31) — measured, does not work, and was actively harmful.
+// Set >0 to re-arm; 0 disables the reap entirely.
+//
+// WHY IT IS OFF, from the live log rather than from reasoning:
+//   [1326] Core-0 step http:ui.update blocked >800ms - canceled client fd=57
+//   [1335] http:ui.update blocked 10015ms     <- shutdown() did NOT wake it
+//   [1345] ... canceled client fd=57         <- same fd, every 800ms, forever
+// Three defects, in order of severity:
+//   1. shutdown() does not cancel the block. The premise was that
+//      handleClient() parks in a socket read; the 10 015 ms step says
+//      otherwise (two chained 5 s WebServer timeouts). The stuck client is
+//      not reachable this way.
+//   2. A LEGITIMATE full page serve measures ~900 ms of blocking, so an
+//      800 ms deadline canceled real browser loads -- GET / failed with
+//      "connection closed" every time. It cost responsiveness and bought
+//      nothing.
+//   3. The latch reset whenever the step ended, so it re-reaped the same fd
+//      indefinitely.
+// The general lesson, which outlives this code: legitimate-slow (~900 ms) and
+// stuck (~10 s) are within 10x on this server, so NO fixed deadline separates
+// them. That is why Apache's mod_reqtimeout gates on a byte RATE, and why the
+// real fix is an event-driven server that never blocks a serve slot at all.
+static constexpr uint32_t kCore0ReapMs = 0;
 static void commsTask(void* /*param*/) {
     uint32_t last_report_ms   = 0;
+    // Latches so one stall produces one reap, not one every 2 ms until the
+    // blocked step notices. Cleared when the beacon goes idle.
+    bool     reaped_this_step = false;
     while (true) {
         uint32_t now = millis();
         if (now - last_report_ms >= 1000) {
             last_report_ms = now;
             wifiLink.pollWifiLink();
             wifiLink.superviseWifi();   // re-scan + re-pin if link dropped
+        }
+
+        // ---- Reap a Core-0 step that is STILL blocked ----------------------
+        // THE HUB OUTRANKS ANY CLIENT. A connection that cannot be served must
+        // never be allowed to hold the only serve slot until the watchdog
+        // reboots the machine — it gets canceled instead. This is the half
+        // IdleGuardWebServer::dropIdleCapture() cannot reach: it runs BETWEEN
+        // handleClient() calls, and a partial request never returns to it.
+        // Fires once per stall (the beacon is republished per step, and the
+        // reap only re-arms after the step clears).
+        {
+            const uint32_t stepAt = s_stepStartMs.load(std::memory_order_acquire);
+            if (kCore0ReapMs != 0 && stepAt != 0 && (millis() - stepAt) > kCore0ReapMs) {
+                if (!reaped_this_step) {
+                    reaped_this_step = true;
+                    const char* nm = s_stepName.load(std::memory_order_relaxed);
+                    const int fd = webui.server()->abortBlockedClient();
+                    crashring::crumb("http-reap");
+                    SLOGW("sys", "Core-0 step %s blocked >%lums — canceled client fd=%d",
+                          nm ? nm : "?", (unsigned long)kCore0ReapMs, fd);
+                }
+            } else if (stepAt == 0) {
+                reaped_this_step = false;
+            }
         }
 
         if (auto* hb = slopglowCommsHeartbeat()) hb->pulse();  // SlopGlow liveness (Core 0)
@@ -629,6 +704,18 @@ static void httpTask(void* param) {
         // Crash-ring watermark: three u32 stores per tick — cheap enough for
         // 100 Hz, and the ring's post-mortem value depends on it being fresh.
         crashring::heapSample(ESP.getFreeHeap(), ESP.getMaxAllocHeap());
+        // Drain the failed-alloc hook HERE, on a task, because the hook itself
+        // may have fired in an ISR and must not log from there. One line per
+        // distinct failure; a storm collapses to its newest record plus a count.
+        oomhook::Record oom;
+        if (oomhook::take(oom)) {
+            SLOGE("heap", "ALLOC FAILED #%u: %u B caps=0x%04X task=%s fn=%s "
+                          "(free_int=%u largest_int=%u)",
+                  unsigned(oom.count), unsigned(oom.size), unsigned(oom.caps),
+                  oom.task[0] ? oom.task : "isr/unknown",
+                  oom.fn[0] ? oom.fn : "?",
+                  unsigned(oom.free_int), unsigned(oom.largest_int));
+        }
         vTaskDelay(pdMS_TO_TICKS(10));
     }
 }
@@ -711,6 +798,9 @@ void setup() {
         // recovered report lands in a readable ring, and before anything that
         // drops crumbs.
         crashring::begin(name, !expected);
+    // Immediately after the ring: the hook's only durable side effect is a
+    // crumb, so the ring must already be armed to receive it.
+    oomhook::begin();
     }
 #if SERIAL_CONTROL_MODE
     SLOGI("boot", "USB Serial is boot-log + rescue path only — SlopSync (WiFi) is the control plane.");

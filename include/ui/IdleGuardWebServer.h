@@ -3,6 +3,9 @@
 // This exists ONLY for the synchronous WebServer's single-serve-slot stall.
 // Prefer including ui/SlopHttpServer.h — that is the name call sites use.
 #include <WebServer.h>
+// shutdown()/SHUT_RDWR for abortBlockedClient(). lwIP's BSD socket header is
+// the ESP-IDF-blessed source for these (same choice SlopSyncUdpDiscovery makes).
+#include <lwip/sockets.h>
 
 // ============================================================================
 // IdleGuardWebServer — sync WebServer + speculative-socket idle guard.
@@ -42,5 +45,38 @@ public:
             // handleClient() sees !connected() next call and frees the slot.
             _currentClient.stop();
         }
+    }
+
+    // ---- Partial-request reap: THE OTHER HALF OF THE SAME STARVATION -------
+    // dropIdleCapture() above only reaps clients that sent NOTHING
+    // (!available()). A client that sends SOME bytes and never finishes the
+    // request takes the opposite branch in handleClient(): available() is
+    // true, so it calls _parseRequest(), which blocks in
+    // readStringUntil() for HTTP_MAX_SEND_WAIT (5000 ms). A between-calls
+    // guard structurally cannot catch that — httpTask never returns to run it.
+    // Reproduced 2026-07-31: five half-open connections -> TASK_WDT reboot,
+    // heap_min 40 619 B (not a memory failure). See LEDGER ACTIVE TASK 1.
+    //
+    // CALLED FROM A DIFFERENT TASK (commsTask, 2 ms cadence) while httpTask is
+    // blocked inside handleClient(). That is the whole point: the only task
+    // that can cancel the stall is one the stall does not block.
+    //
+    // WHY shutdown() AND NOT stop()/close(): close() frees the fd NUMBER while
+    // another task is blocked reading it, so a concurrent accept can reuse
+    // that number and the blocked reader wakes onto someone else's socket.
+    // shutdown() wakes the reader immediately and leaves the fd allocated;
+    // httpTask then fails its parse and closes the client through its own
+    // normal path, which is the only path that touches _currentClient.
+    //
+    // WHY READING _currentClient FROM ANOTHER TASK IS SAFE HERE: only ever
+    // called once the caller has confirmed httpTask has been inside
+    // handleClient() for longer than the reap threshold. Its owner is
+    // therefore parked in a read on this object and cannot be reassigning it.
+    // Do NOT call this speculatively.
+    int abortBlockedClient() {
+        const int fd = _currentClient.fd();
+        if (fd < 0) return -1;
+        ::shutdown(fd, SHUT_RDWR);
+        return fd;
     }
 };

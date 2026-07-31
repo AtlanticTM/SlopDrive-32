@@ -9,14 +9,18 @@
 // report what the previous life was doing when it died.
 //
 // Constraints:
-// - crashringCrumb() must stay allocation-free and lock-free: it is called
+// - crashring::crumb() must stay allocation-free and lock-free: it is called
 //   from hot paths (WS accept on the AsyncTCP task, HTTP handlers on
 //   httpTask). A torn crumb under a cross-task race costs one garbled tag in
 //   a diagnostic ring; a lock here could cost a priority inversion in the
 //   exact starvation scenarios this ring exists to record. Tolerated.
-// - This is NOT a backtrace. A real backtrace needs a core-dump flash
-//   partition, and partition tables do not change over OTA — that upgrade is
-//   a serial-reflash bench item (see ledger, 2026-07-29 incident entry).
+// - This is NOT a backtrace, and does not need to be: partitions_ota.csv
+//   already ships a `coredump` partition and /api/coredump serves the ELF
+//   core dump over the network. Use that for faulting task, PC and stacks;
+//   use this ring for what the boot was DOING, which a core dump cannot say.
+// - Crumb coverage is WS/HTTP lifecycle only. Nothing in the motion, sampler
+//   or SlopSync data path crumbs, so "last crumb" carries no information
+//   about a mid-stream death (see ledger, ACTIVE TASK 2).
 #include <stdint.h>
 
 namespace crashring {

@@ -370,6 +370,70 @@ entry is named so nobody re-opens it as separate work.
 
 ### TIER 1 — MACHINE STABILITY / DIAGNOSTICS
 
+0. **HEAP CORRUPTION ON THE HUB PLANE — REPRODUCIBLE, ISOLATED, UNFIXED
+   (2026-07-31, fw 2.2.6). This outranks everything below it and is the first
+   thing that has ever explained the operator's real-world crashes.**
+
+   **Trigger, isolated by elimination — one variable per run, all on `:82`:**
+
+   | run | motion stream | result |
+   |---|---|---|
+   | lying length field (declares 65 535 B, sends 4) x40 | off | survived |
+   | attach/RST churn x40 | off | survived |
+   | storm, 1 session, 103 565 frames in 10 s | off | survived |
+   | 12 concurrent sessions, 166 936 frames, graceful close | off | survived |
+   | 12 concurrent sessions RST together, 3 rounds | off | survived |
+   | **12 concurrent sessions, 44 769 frames** | **ON** | **REBOOT** |
+
+   Nothing about the WS plane alone breaks it. The RX path took 10 300
+   frames/sec on one session and 12 simultaneous sessions without complaint.
+   **The necessary ingredient is the MOTION DATA PLANE being active at the same
+   time.** That matches the operator's original report — crashes at random
+   intervals with the machine actively moving — which no memory work explained.
+
+   **It is CORRUPTION, not exhaustion. Everything ACTIVE TASK 1 did is
+   irrelevant to it.** Symbolized from `/api/coredump` (clean backtrace,
+   `bt_corrupted: false`), faulting task `tiT`:
+
+       panic_abort <- __assert_func
+                   <- multi_heap_free   (multi_heap_poisoning.c:279)
+                   <- free <- mem_free  (lwip/core/mem.c:236)
+                   <- do_memp_free_pool (lwip/core/memp.c:409)
+                   <- sys_check_timeouts(lwip/core/timeouts.c:401)
+                   <- tcpip_thread
+
+   `heap_min` at that panic was **28 911 B** — there was plenty of memory. The
+   heap POISONING checker caught a bad canary while lwIP freed a timeout pool
+   entry, i.e. a double-free or an overrun happened EARLIER and lwIP's timer
+   thread is merely the first to touch the damage. The panic is correct
+   behavior; without poisoning this corrupts silently, which is worse. All 15
+   recovered crumbs were `ws-attach`/`ws-detach`.
+
+   **A SECOND, DISTINCT signature appeared in the same session** and must not
+   be conflated: task `ipc0`, `heap_min` 145 171 B, dying in
+   `btdm_intr_alloc -> esp_intr_alloc -> heap_caps_malloc` with
+   `_xt_context_save`/`_frxt_int_enter` on the stack — an interrupt saving
+   context onto a task whose measured headroom is **84 B**. ACTIVE TASK 2's
+   baseline explicitly predicted this ("80 B is thin enough that any deepening
+   of an `esp_ipc_call` callback lands on it. Watch, do not yet touch"). It has
+   now landed. Whether it is independent or a downstream effect of the
+   corruption above is NOT established.
+
+   **Next steps, in order, none taken yet:**
+   * `CONFIG_HEAP_POISONING_COMPREHENSIVE` — catches the write at the moment
+     of corruption instead of at the victim's next free. One line in the
+     existing `custom_sdkconfig` block.
+   * `CONFIG_HEAP_TRACING_STANDALONE` (was ACTIVE TASK 2 step 4, now unblocked)
+     for allocation attribution.
+   * Suspect ordering: AsyncTCP/AsyncWebSocket buffer lifetime under
+     concurrent TX while the hub task is also publishing telemetry and draining
+     the pacing ring. Field bug #5 was already an AsyncTCP-task lifetime defect
+     in this exact area.
+   * Reproduction is cheap and deterministic: force-home, start
+     `slopsync_probe --stream`, then 12 concurrent WS sessions blasting
+     well-formed frames. Harness: scratch `gauntlet.py` / `isolate.py`, to be
+     promoted into the Tier-2 gigagauntlet.
+
 1. **WINDOW-EXIT BRAKING RUNAWAY — ranked first because it is the only SAFETY
    item on this list.** Measured 625 mm of travel on a 500 mm rail: the
    carriage reaches the physical end stop. Fix is measured and NOT applied

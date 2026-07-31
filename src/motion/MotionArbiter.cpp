@@ -130,8 +130,25 @@ bool MotionArbiter::submitStreamSample(float norm_pos, float norm_vel_per_s) {
         float safe_cap = _state.safeSpeedCap(speed_ceiling, now_ms);
         if (safe_cap < speed_ceiling) speed_ceiling = safe_cap;
     }
-    float accel_ceiling = entering ? fminf(_input_accel_limit_mm_s2, _user_accel_limit_mm_s2)
-                                   : _input_accel_limit_mm_s2;
+    // ACCEL IS NEVER REDUCED OUTSIDE THE WINDOW. This deliberately does NOT
+    // mirror the speed ceiling above, and the asymmetry is the whole point.
+    //
+    // `entering` is keyed on POSITION ALONE, so it is equally true for
+    //   (a) "parked outside at rest, glide in"      -- gentleness is correct
+    //   (b) "just overshot at speed, must stop NOW" -- gentleness is a runaway
+    // and in (b) the gentle set removes exactly the authority braking requires
+    // (measured 50 000 -> 200 mm/s2, a 250x collapse at the instant it is
+    // needed). Carriage 0.4 mm from a clean stop crosses the 0.5 mm threshold,
+    // loses authority in one tick, and the excursion compounds: worst measured
+    // 625 mm of travel on a 500 mm rail, i.e. into the physical end stop.
+    //
+    // Keeping the gentle SPEED ceiling preserves the "glide, don't lunge"
+    // intent in full -- the carriage still cannot travel fast on the way in.
+    // It only retains the ability to CHANGE velocity, which is what braking
+    // is. Bench sweep, 54 configs (3 windows x 3 policies x 2 curve families
+    // x 3 input speeds): runaways 11/54 -> 0/54, worst excursion
+    // 306.78 mm -> 1.06 mm (289x). See LEDGER "Pending rulings".
+    const float accel_ceiling = _input_accel_limit_mm_s2;
 
     // Safe-approach floor, capped at the active ceiling so a gentle window-entry
     // ceiling (USER limit, possibly < SAFE_APPROACH_SPEED_MM_S) isn't overridden.
@@ -384,9 +401,19 @@ PlanReport MotionArbiter::_planAndDispatch(const MotionIntent& intent, bool /*lo
     // ceiling is the "shoot to the window" lunge. Instead, cap this move at the
     // gentle USER limits so the carriage glides into the window; once it's
     // inside, subsequent intents fall back to the normal input set.
+    // SPEED ONLY — accel is deliberately NOT reduced here. Same rule and same
+    // reasoning as submitStreamSample()'s accel ceiling: this test is keyed on
+    // POSITION ALONE, so it cannot tell "parked outside at rest" from "just
+    // overshot and must stop now", and in the second case removing accel
+    // authority is what turns an overshoot into a runaway.
+    // SCOPE NOTE, stated rather than buried: the 54-config bench sweep that
+    // measured this (11/54 runaways -> 0/54) exercised the STREAM path only.
+    // Applying it here is the same defect and the same rule, but it is
+    // UNMEASURED on this path. Behavioral change to watch on the bench: a
+    // pattern/segment move re-entering the window now keeps full accel
+    // authority, so it reaches the (still gentle) speed cap sooner.
     if (intent.source != MotionSource::MANUAL && _isOutsideWindow(p0_mm)) {
         speed_ceiling = fminf(speed_ceiling, _user_speed_limit_mm_s);
-        accel_ceiling = fminf(accel_ceiling, _user_accel_limit_mm_s2);
     }
 
     // ---- Always dispatch to FAS, even for zero-distance intents -------------

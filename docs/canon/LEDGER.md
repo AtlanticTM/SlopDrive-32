@@ -27,13 +27,17 @@ commit as any change that alters it (C-3).
   2026-07-27 — git branch state]
 - Source-tree firmware version: see `FIRMWARE_VERSION` in
   `include/system/config_api.h` (its one home). [C-1 pointer]
-- Deployed firmware on the device: **2.2.2** — the `custom_sdkconfig` memory
-  batch (ACTIVE TASK 1 items 2-5) plus the task-watchdog threshold fix. What
-  each contains has its one home in ACTIVE TASK 1; do not restate it here.
+- Deployed firmware on the device: **2.3.4 — A DIAGNOSTIC BUILD, NOT A
+  SHIPPING ONE.** It carries `CONFIG_HEAP_POISONING_COMPREHENSIVE`,
+  `CONFIG_HEAP_TRACING_STANDALONE` and `-DSLOPSYNC_HEAP_BISECT=1` for the
+  corruption hunt (THE QUEUE item 0). Comprehensive poisoning memsets and
+  verifies on EVERY alloc and free, on a device with a 1 kHz motion loop — the
+  CPU cost is real. **Strip all three before any release or any performance
+  measurement.** The shipping content underneath it is the ACTIVE TASK 1 memory
+  batch, the task-watchdog threshold fix, and the window-exit braking fix.
   Flashed over HTTP `/api/ota` (espota's PBKDF2/MD5 auth still fails on this
-  host — TRAPS/OTA topology). [verified 2026-07-31 — `2.2.1 -> 2.2.2` on
-  `/api/capabilities`, then the 16-socket abuse test completing with zero
-  reboots]
+  host — TRAPS/OTA topology). [verified 2026-07-31 — `2.3.3 -> 2.3.4` on
+  `/api/capabilities`, `/api/heaptrace` answering `active:true`]
 - LIVE CONFIG TRUTH, which outranks any compiled default: the device's STORED
   `sm_tune_infeas_policy` is **3** (prio-amplitude), so `InfeasiblePolicy::Blend`
   is selectable but NOT in force. Stored values beat compiled defaults by
@@ -451,20 +455,56 @@ entry is named so nobody re-opens it as separate work.
    now landed. Whether it is independent or a downstream effect of the
    corruption above is NOT established.
 
-   **Next steps, in order, none taken yet:**
-   * `CONFIG_HEAP_POISONING_COMPREHENSIVE` — catches the write at the moment
-     of corruption instead of at the victim's next free. One line in the
-     existing `custom_sdkconfig` block.
-   * `CONFIG_HEAP_TRACING_STANDALONE` (was ACTIVE TASK 2 step 4, now unblocked)
-     for allocation attribution.
-   * Suspect ordering: AsyncTCP/AsyncWebSocket buffer lifetime under
-     concurrent TX while the hub task is also publishing telemetry and draining
-     the pacing ring. Field bug #5 was already an AsyncTCP-task lifetime defect
-     in this exact area.
-   * Reproduction is cheap and deterministic: force-home, start
-     `slopsync_probe --stream`, then 12 concurrent WS sessions blasting
-     well-formed frames. Harness: scratch `gauntlet.py` / `isolate.py`, to be
-     promoted into the Tier-2 gigagauntlet.
+   **START HERE — the next move, and the reason it is the next move.**
+
+   **A HARDWARE WATCHPOINT. Nothing above it has been tried and everything
+   below it has failed.** The S3 has built-in USB-JTAG (`debug_tool =
+   esp-builtin`, needs no rebuild) and `esp_cpu_set_watchpoint()` can arm one
+   WITHOUT a debugger attached. A watchpoint names the writing INSTRUCTION —
+   every other tool in this entry is a detector that can only say the heap is
+   already broken. **The old objection is dead:** ACTIVE TASK 2 deferred JTAG
+   because "a leak that takes hours does not yield to a breakpoint"; this
+   reproduces in SECONDS, on demand, which is exactly the regime a watchpoint
+   is for.
+
+   **Reproduction (deterministic, ~10 s):** `isolate.py many 12` against a
+   device on a `SLOPSYNC_HEAP_BISECT` build. No motion stream, no malformed
+   frames, no force-home needed. Detect reboots with `boot_seq` from
+   `/api/crash` — NEVER with `uptime_ms` (see the method warning above).
+
+   **Suspect, unchanged:** AsyncTCP / AsyncWebSocket buffer lifetime under
+   concurrent sessions. Field bug #5 was already an AsyncTCP-task lifetime
+   defect in this exact code, and WS concurrency is the whole reproduction.
+   Vendored at AsyncTCP 3.5.0 / ESPAsyncWebServer 3.12.0; this failure class is
+   well documented upstream (me-no-dev/ESPAsyncWebServer #893 and #394,
+   espressif/esp-idf #7746), so checking those against the vendored copies is
+   cheap and may simply answer it.
+
+   **DO NOT RE-TRY THE FOLLOWING. TRAPS T28 carries the full reasoning; this is
+   the index.** Every one of these was tried this session and failed:
+   1. Raising the task watchdog — unrelated to a bad write.
+   2. Canceling a blocked task from outside (the Core-0 reap) — caused the
+      reboot it was meant to prevent; TRAPS T26.
+   3. Refusing connections at capacity — the refusal ALREADY EXISTS in
+      `WS_EVT_CONNECT`; it bounds reachability, not the write.
+   4. Disabling `CONFIG_SPIRAM_TRY_ALLOCATE_WIFI_LWIP` — A/B tested, the crash
+      reproduces identically with it OFF, and turning it off costs ~8 KB free
+      and ~10 KB largest block.
+   5. Heap INTEGRITY probes at session granularity — never fired; the
+      write-to-detection window is shorter than the gap between probes. Making
+      them finer is barred by TRAPS T27.
+   6. Heap TRACING as currently wired — returns ZERO records despite config,
+      init and start all verifying clean, and despite buffer placement being
+      ruled out in both PSRAM and internal RAM. Treat as broken until proven
+      otherwise; untried leads are listed in T28.
+
+   **And a standing constraint on whoever picks this up:** any new probe on
+   this path must be justified against its CALL RATE, not just its
+   correctness. Two device-wedging instrumentation errors happened this session
+   for exactly that reason and both needed COM11 serial rescues (TRAPS T27).
+
+   **Harness:** scratch `isolate.py` / `gauntlet.py` in the session scratchpad,
+   queued for promotion into the Tier-2 gigagauntlet.
 
 1. **WINDOW-EXIT BRAKING RUNAWAY — ranked first because it is the only SAFETY
    item on this list.** Measured 625 mm of travel on a 500 mm rail: the

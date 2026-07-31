@@ -550,3 +550,87 @@ excerpt inline). The general lesson is the reusable part:
   showed "zero reboots" could not distinguish the reap from the watchdog
   raise that shipped with it. Claiming the reap worked was unfounded; it was
   actively harmful. Change one thing, or attribute nothing.
+
+## T27 — Instrumentation that is expensive enough to change what it measures
+
+**Rule:** a diagnostic on a hot path is judged by its CALL RATE, not by its
+correctness. Before adding a probe, multiply its cost by how often the
+enclosing function actually runs. If the product is a meaningful fraction of
+the budget of the task it sits on, the probe will manufacture a different
+failure and hide the one you are hunting.
+**Mechanism:** `heap_caps_check_integrity_all()` walks every block header in
+every region — milliseconds. That is nothing once per session and fatal once
+per frame. A probe that starves its own task produces a watchdog reboot, and a
+watchdog reboot looks like a finding. You then "discover" a bug you created.
+**Bit us, twice in one session (2026-07-31, hunting THE QUEUE item 0):**
+1. Probes placed in `SlopSyncAsyncWsPort::loop()`, which runs every 5 ms. The
+   hub task saturated, the device went intermittently unreachable, OTA could
+   not get through, and recovery needed a COM11 serial rescue (fw 2.3.0).
+2. A probe at `onEvent()` ENTRY — which fires for `WS_EVT_DATA`, i.e. once per
+   FRAME. ~56 000 whole-heap scans in a single test run. It watchdogged the
+   AsyncTCP task before the corruption could ever be observed, and turned a
+   reproducible PANIC into a TASK_WDT, i.e. it destroyed the evidence (2.3.1).
+**Fix:** probes live on per-SESSION paths only (connect / refuse / disconnect)
+and `loop()`'s is rate-limited to 1 Hz. Both are in
+`src/comms/SlopSyncAsyncWsTransport.cpp` behind `SLOPSYNC_HEAP_BISECT`.
+
+## T28 — Things that do NOT find a heap-corruption culprit (do not re-try these)
+
+**Rule:** this list is negative knowledge, bought at the cost of a full session
+and two serial rescues. Before reaching for any of it as a "fix" for the
+corruption in LEDGER THE QUEUE item 0, read why it already failed.
+
+**1. Raising the task watchdog does not fix corruption.** It was raised 5 -> 12 s
+for a real and separate reason (T26: the sync WebServer's own 5 s ceiling). It
+buys time for a stall; it has nothing to do with a bad write, and a corrupted
+free list will abort regardless of how patient the watchdog is.
+
+**2. Canceling a blocked task from outside is not a fix, it is a second bug.**
+Full mechanism in T26. It did not cancel the block, it killed legitimate page
+loads and OTA uploads, and it CAUSED the watchdog reboot it was written to
+prevent.
+
+**3. Refusing connections at capacity does not fix corruption — and the refusal
+already exists.** `SlopSyncAsyncWsPort::onEvent`'s `WS_EVT_CONNECT` already
+closes a client when no slot is free (`kSlots` = `kHubMaxSessions + 1` = 5).
+Admission control bounds how OFTEN the bug is reachable; it does not remove the
+bad write. Worth doing for RFC-055 reasons, never as the corruption fix.
+
+**4. `CONFIG_SPIRAM_TRY_ALLOCATE_WIFI_LWIP` is NOT the cause. Do not disable it
+again.** It was a well-formed suspect — the crash lands in `remove_free_block`
+reached via `wifi_calloc`/`heap_caps_calloc_prefer`, exactly the allocation path
+it redirects into PSRAM, and the crash signature changed the day it was enabled
+(`heap_min` 316 B genuine exhaustion -> 28-34 KB with plenty free). It was
+TESTED: built with it OFF (fw 2.2.8) and the SAME crash reproduced — same task,
+same `EXCCAUSE 29`, same frames. Turning it off also costs real headroom
+(int_free 41 967 -> 34 039, int_largest 28 660 -> 18 420).
+
+**5. Heap INTEGRITY probes are too coarse to localize this.** Placed on the
+per-session WS paths (fw 2.3.2) they never fired, while the reproduction still
+panicked. The window between the corrupting write and the allocator tripping
+over it is SHORTER than the gap between session-granularity probes — WiFi
+allocates continuously in between and always finds the damage first. Making
+them finer is barred by T27. Integrity walks answer "is the heap damaged NOW";
+they can never answer "who damaged it".
+
+**6. Heap TRACING is wired but produced ZERO records — assume it is broken until
+proven otherwise.** `include/system/HeapTrace.h` + `src/system/HeapTrace.cpp`,
+`GET /api/heaptrace`. Verified NOT to be the explanation: the generated
+sdkconfig carries `CONFIG_HEAP_TRACING=y`,
+`CONFIG_HEAP_TRACING_STANDALONE=y`, `CONFIG_HEAP_TRACING_STACK_DEPTH=8`;
+`heap_trace_init_standalone()` and `heap_trace_start(HEAP_TRACE_ALL)` both
+return `ESP_OK`; the endpoint reports `active:true`. And buffer placement is NOT
+the cause — PSRAM was tried first on the theory that records are written inside
+the allocator where the PSRAM cache is unusable, then moved to internal RAM
+(64 records, 5 632 B), and `heap_trace_get_count()` stayed 0 in both. Untried
+leads, in order: read the count with tracing STOPPED; check for a stale
+`libheap` being linked despite the sdkconfig change; confirm the allocator hooks
+actually compiled into the rebuilt component.
+
+**What has NOT been tried and is the strongest remaining move:** a hardware
+WATCHPOINT. The ledger deferred JTAG because "a leak that takes hours does not
+yield to a breakpoint" — that premise is dead, the corruption now reproduces in
+seconds on demand. The S3 has built-in USB-JTAG (`debug_tool = esp-builtin`, no
+rebuild needed) and `esp_cpu_set_watchpoint()` can arm one without a debugger
+attached. A watchpoint names the writing INSTRUCTION, which is the cause; every
+item above is a detector.

@@ -512,3 +512,41 @@ initial-value: 0% }` in style.css. The guard samples the property MID-FLIGHT
 and requires a real intermediate radius (measured 157.495% of a 165% sweep);
 asserting only that the animation is running would have passed the broken
 version.
+
+## T26 — Canceling a blocked task from outside only works if it is blocked where you think
+
+**Rule:** before canceling another task's work from a watcher task, PROVE
+where the target is blocked. If the mechanism is "wake the blocked syscall",
+and the target is not in that syscall, the cancel does nothing — and the
+attempt is not free.
+**Mechanism:** `shutdown(fd, SHUT_RDWR)` wakes a task parked in `read()` on
+that fd. It does nothing for a task spinning in a poll loop, and it can make
+things WORSE: a socket left in an error state can turn a
+`while (available())` loop that used to yield into one that returns
+immediately forever, so the task stops yielding at all and starves the idle
+task it shares a core with. The cancel then CAUSES the watchdog reboot it was
+written to prevent.
+**Bit us:** 2026-07-31, fw 2.2.3. A Core-0 beacon let `commsTask` cancel any
+`httpTask` step blocked >800 ms, aimed at half-open HTTP requests. Measured
+result, from the device's own log:
+`Core-0 step http:ui.update blocked >800ms - canceled client fd=57` followed
+by `http:ui.update blocked 10015ms` — the cancel did not unblock it — then the
+same fd re-reaped every ~800 ms forever, then `reset_reason TASK_WDT`. It also
+canceled every legitimate page load and every OTA upload, so the device could
+no longer be flashed over the network and needed a COM11 serial rescue. Three
+regressions from one unverified assumption.
+**Fix:** the reap is disabled (`kCore0ReapMs = 0`, main.cpp, with the log
+excerpt inline). The general lesson is the reusable part:
+* **A deadline cannot separate slow from stuck when they overlap.** Measured
+  on this device: legitimate full page serve **9 s** (302 KB bundle), stuck
+  half-open client **10 s**, OTA upload seconds. Any threshold that catches
+  the stall also kills the page and the flash. This is exactly why Apache's
+  `mod_reqtimeout` gates on a byte RATE (`MinRate=500`) rather than a
+  deadline — progress is separable, elapsed time is not.
+* **A one-connection-at-a-time server has no fix at this layer.** The
+  Arduino sync `WebServer` serves a single client and every long operation
+  owns the whole plane. The answer is an event-driven server, not tuning.
+* **Co-deployed changes prove nothing individually.** The 16-socket test that
+  showed "zero reboots" could not distinguish the reap from the watchdog
+  raise that shipped with it. Claiming the reap worked was unfounded; it was
+  actively harmful. Change one thing, or attribute nothing.

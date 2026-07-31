@@ -27,69 +27,1809 @@ commit as any change that alters it (C-3).
   2026-07-27 — git branch state]
 - Source-tree firmware version: see `FIRMWARE_VERSION` in
   `include/system/config_api.h` (its one home). [C-1 pointer]
-- Deployed firmware on the device: **2.1.88** (2.1.87 + the WS IDLE-RX REAP entry below; reap live-proven) — 2.1.85 + RFC-051
-  (critical-stall parks, see its entry) at 2.1.86, then the CRASH RING +
-  HEAP-PRESSURE GUARDS entry's build (2026-07-29; /api/crash live-proven on
-  first boot). [verified 2026-07-29 — deploy log `2.1.86 -> 2.1.87` +
-  /api/crash answering]. History of the 2.1.85 build's contents follows:
-  the RFC-042..050 + Phase C4 +
-  Phase E batch PLUS the `attachTransport()` STALE-slot-clobber fix + the
-  boot reset-reason log line PLUS the HEAP RELIEF pass (BLOB_CHUNK backpressure
-  reclass + WebRingSink PSRAM move — see the amended item (i) below) PLUS the
-  parked-slot safety-broadcast panic fix (TRAPS T13 — see the PARKED-SLOT
-  SAFETY BROADCAST entry below) PLUS the wire-string punctuation evolution
-  (morning ruling item 2 — see the WIRE-STRING PUNCTUATION EVOLUTION entry
-  below) PLUS the BLE advertising MSD fix (item (j) closed — see the BLE
-  ADVERTISING MSD FIX entry below) PLUS the STATE-coalescing congestion
-  wire-up (morning ruling item 1 — see its LANDED entry in the Morning
-  ruling batch), LIVE. [verified 2026-07-28 — `/api/capabilities`
-  `fw_version` = 2.1.85 post-OTA, coalescing bench session; DEPLOY + LIVE-VERIFY
-  session, `/api/capabilities` `fw_version` before/after the OTA + a natural
-  reboot + a deliberate re-flash reboot, all three confirmed `2.1.78`; see the
-  DEPLOY + LIVE-VERIFY entry below for the full checklist, the "RFC-042
-  attachTransport() clobber — FIXED" entry further down for the 2.1.78 →
-  2.1.80 follow-up fix session, the WIRE-STRING PUNCTUATION EVOLUTION entry
-  for the 2.1.82 → 2.1.83 deploy, and the BLE ADVERTISING MSD FIX entry for
-  the 2.1.83 → 2.1.84 deploy]
+- Deployed firmware on the device: **2.2.2** — the `custom_sdkconfig` memory
+  batch (ACTIVE TASK 1 items 2-5) plus the task-watchdog threshold fix. What
+  each contains has its one home in ACTIVE TASK 1; do not restate it here.
+  Flashed over HTTP `/api/ota` (espota's PBKDF2/MD5 auth still fails on this
+  host — TRAPS/OTA topology). [verified 2026-07-31 — `2.2.1 -> 2.2.2` on
+  `/api/capabilities`, then the 16-socket abuse test completing with zero
+  reboots]
+- LIVE CONFIG TRUTH, which outranks any compiled default: the device's STORED
+  `sm_tune_infeas_policy` is **3** (prio-amplitude), so `InfeasiblePolicy::Blend`
+  is selectable but NOT in force. Stored values beat compiled defaults by
+  design. [verified 2026-07-30 — `/api/slopmotion` echo]
+- Catalog etag the device serves: **94dc68dcb53577f0**, byte-identical to the
+  native pin — that identity is what proves the six-option policy select is
+  really on hardware. [verified 2026-07-30 — `slopsync_probe --no-motion` 44/0]
+- Version-by-version deploy history lives in git and in
+  `## Landed history (compacted)`. It is not restated here (C-1).
 
-## Milestones & landed state
+## ACTIVE TASK 1 — MAKE THE MACHINE UNCRASHABLE FROM MEMORY (2026-07-31, operator-ordered)
 
-- M5c landed: SlopSync is the only input/output plane; links2004 stack,
-  `:81` telemetry socket, `:55555` TCode server all removed from the build.
-  HTTP fallback *polling* remains by design. Story:
+**Operator's acceptance bar, verbatim in intent:** once this lands, an
+out-of-memory crash is a **DEFECT to be fixed, not a flaky system to be lived
+with**. That is the definition of done, and it is a stronger claim than "we fixed
+a leak" — it says the machine must survive a leak without panicking.
+
+**THE ARITHMETIC THAT EXPLAINS EVERY "RANDOM" PANIC.** Measured 2026-07-31 on
+fw 2.1.99 at idle, against the shipped Arduino sdkconfig:
+
+    CONFIG_LWIP_TCP_SND_BUF_DEFAULT  5744
+    CONFIG_LWIP_TCP_WND_DEFAULT      5760   -> ~11.5 KB INTERNAL per TCP conn
+    CONFIG_LWIP_MAX_ACTIVE_TCP         16
+    CONFIG_LWIP_MAX_SOCKETS            16
+    measured int_free              36 312
+
+**The heap backs about THREE connections; lwIP is configured to accept SIXTEEN.**
+Nothing in our code decides whether a given boot dies — the client population
+does. A browser opens 2-6 sockets to one host; add a WS client, mDNS, a socket
+that has not timed out yet, an OTA, and the line is crossed. Same firmware, same
+workload, different outcome. That IS the unpredictability, and it is a
+configuration fact, not a mystery.
+
+**Ordered by leverage. Items 2-5 are ONE deliberate `custom_sdkconfig` batch**
+(they ride the hybrid IDF rebuild and change the build lineage), with an
+`/api/tasks` reading immediately before and after so the effect is attributable.
+
+0. **LANDED fw 2.2.0 — the two lines that make the NEXT crash self-explanatory.**
+   * `oomhook` (`include/system/OomHook.h`, `src/system/OomHook.cpp`) installs
+     the IDF failed-alloc hook. ISR-SAFETY IS THE DESIGN: the hook can fire in
+     ANY context, so it writes plain statics and drops ONE crashring crumb
+     (`oom`) and nothing else — it must not log, because SlopLog is explicitly
+     not ISR-safe and logging from an ISR-context allocation failure would trade
+     a diagnosable panic for an undiagnosable one. Draining and logging happens
+     on a TASK, at the existing 10 ms heap-poll site in `main.cpp`, as
+     `ALLOC FAILED #n: N B caps=0x.. task=.. fn=.. (free_int=.. largest_int=..)`.
+     Also exposed on `/api/tasks` as `oom{}`, via `peek()` rather than `take()`
+     so a readout can never swallow the log line the failure was going to write.
+     **Live-verified 2.2.0: `oom:{"count":0}` — the hook is installed and has
+     never fired. Keeping that 0 true IS this task.**
+   * The WS shed line now carries `free_int` / `largest_int` and was raised
+     DEBUG -> WARN. Rationale: shedding means the CLIENT stopped draining, which
+     is the exact window the operator's 1-10 minute crashes cluster in. Falling
+     heap while shedding indicts that path; flat heap exonerates it. One glance,
+     no theory.
+   **THE TWO FAILURE MODES ARE PROBABLY DIFFERENT.** The `mdns` core dump
+   describes a 4.7 HOUR life; the operator's testing crashes ran 1-10 MINUTES at
+   random intervals with the machine actively moving and no client attaching.
+   Random intervals point at a JITTER-TRIGGERED failure (laptop-on-WiFi to
+   device-on-WiFi), not a fixed-rate leak — which makes the operator's original
+   network-jitter instinct correct: jitter is not the bug, it is the trigger that
+   exposes a machine with no margin. Do not assume one fix addresses both.
+1. **~~`heap_caps_register_failed_alloc_callback()`~~ — DONE, see item 0.** Plain API,
+   works on stock precompiled libs, no rebuild, ~15 lines. Fires BEFORE the
+   abort with the requested size and caps; log task name + size + caps + free +
+   largest. Converts every future OOM from an anonymous `PANIC` into
+   "mdns wanted 40 B internal, 316 free, largest 148". Highest signal per line in
+   the whole plan — it would have turned the operator's ten crashes into ten
+   diagnostic lines.
+2. **`CONFIG_SPIRAM_TRY_ALLOCATE_WIFI_LWIP=y`** (currently NOT set). **8.1 MB of
+   PSRAM is completely untouched** while WiFi and lwIP contend for 36 KB of
+   internal. Biggest single lever. Costs some throughput; irrelevant at
+   telemetry frame sizes.
+3. **`CONFIG_SPIRAM_MALLOC_RESERVE_INTERNAL` 0 -> 32768.** This may BE the panic:
+   the reserve exists so allocations that MUST be internal (mutexes, DMA
+   descriptors, ISR-safe work) cannot be starved by bulk ones, and it is
+   currently zero. The thing that died was `lock_init_generic` creating a
+   MUTEX — small, must-be-internal — failing because bulk consumers had taken
+   everything. With a reserve, the same leak degrades to a refused connection
+   instead of an abort.
+4. **`LWIP_MAX_SOCKETS` / `LWIP_MAX_ACTIVE_TCP` 16 -> 6.** Operator ruling:
+   "7 connections is an insane person problem." Refusing a 7th is a correct,
+   boring outcome; accepting it and panicking mid-stroke is not.
+5. **`LWIP_TCP_SND_BUF_DEFAULT` / `LWIP_TCP_WND_DEFAULT` 5744/5760 -> 2880.**
+   Halves per-connection internal cost.
+6. **Application-level: BOUND THE WS TX QUEUE AND DROP, NEVER ENQUEUE, FOR A
+   CLIENT THAT IS NOT DRAINING.** Telemetry is regenerated continuously, so a
+   dropped frame costs nothing and a frame queued for a backgrounded tab costs
+   everything. This is the wedged-WS-client trap with a reservation behind it.
+
+### ITEMS 2-5 LANDED (fw 2.2.1), AND ITEM 6 WAS ALREADY BUILT (2026-07-31)
+
+One `custom_sdkconfig` batch on `env:s3_main` (NOT on `sd32`/`sd32-ota`, so the
+serial-rescue and OTA images share one network stack — a rescue image whose
+lwIP differs from the image it rescues is a trap). Idle A/B, same machine,
+before -> after:
+
+| | 2.2.0 | 2.2.1 | delta |
+|---|---:|---:|---:|
+| `int_free` | 36 140 | 41 279 | **+5 139** |
+| `int_largest` | 22 516 | 28 660 | **+6 144 (+27%)** |
+| `psram_free` | 8 118 524 | 8 103 780 | **-14 744** |
+
+That PSRAM row is the proof `TRY_ALLOCATE_WIFI_LWIP` is real: 14.7 KB of
+allocation MOVED off internal. `int_largest` matters more than free-total here
+because the 2.1.99 core dump died on a small MUTEX, i.e. a contiguity failure.
+`int_min_free` is NOT comparable across this boundary (fresh boot vs hours of
+uptime) — do not quote it as a win.
+
+Two corrections to the plan as written, both from reading the code rather than
+reasoning about it:
+* **`LWIP_MAX_SOCKETS` was never the browser knob.** AsyncTCP allocates raw
+  lwIP PCBs (`tcp_new_ip_type`/`tcp_write` via `tcpip_api_call`), not BSD
+  sockets, so `LWIP_MAX_ACTIVE_TCP` is what bounds a page load; the socket cap
+  only ever governed mDNS and `SlopSyncUdpDiscovery`.
+* **The cap is 8, not the planned 6** (operator-ruled). One browser tab opens
+  up to 6 parallel connections per host plus a WebSocket = 7 from a single
+  tab, and TIME_WAIT draws from the same pool. 6 would refuse assets
+  mid-page-load and read as flaky WiFi.
+* PSRAM on this board is **OCTAL** (`memory_type qio_opi` ->
+  `CONFIG_SPIRAM_MODE_OCT`), operator-confirmed. The generic
+  `esp32s3/sdkconfig` showing QUAD is a different variant's file.
+
+**Item 6 needs no work — it was built by RFC-050.**
+`SlopSyncAsyncWsTransport::write()` already sheds STATE/STREAM above
+`kDataQueueHighWater` (3/4 depth), gates BLOB_CHUNK on the registry's
+advertised in-flight budget, refuses without tearing the session down, and
+reaps idle clients. The residual is DEPTH (32 buffers/client), not policy.
+
+**Cost of this path, recorded so the next agent is not surprised:**
+`custom_sdkconfig` stops consuming precompiled libs and builds the IDF from
+source, materializing ~440 MB of `managed_components/` into the project root
+(now gitignored; `dependencies.lock` deliberately left trackable because it
+pins the versions an IDF-from-source build resolves). It also starts
+TYPE-CHECKING Espressif's own defaults: `esp-modbus` fails its own
+`_Static_assert` because the shipped config pairs `TIMEOUT_MS_RESPOND=10000`
+with `MAX_API_BLOCKING_TIME_MS=6000`. Three separate build failures came from
+the path, none from the values.
+
+### THE SECOND FAILURE MODE, FOUND AND FIXED (fw 2.2.2) — NOT A MEMORY BUG
+
+The ledger predicted two different failure modes. There are.
+
+**Reproduced deterministically:** five HALF-OPEN HTTP connections (socket
+opens, partial request, never completes) -> `/api/tasks` unreachable ->
+`reset_reason TASK_WDT`, every round. **`heap_min` at the crash: 40 619 B.**
+The crash that opened this task died at **316 B**. This is not memory.
+Control: EIGHT *complete* keep-alive requests at the same socket count survive
+untouched, so the trigger is incomplete requests, not connection count and not
+the new cap.
+
+**Mechanism — a threshold armed against itself.** The Arduino sync `WebServer`
+serving `/api/*` on `httpTask` (Core 0) handles ONE client at a time and
+declares `HTTP_MAX_DATA_WAIT` / `HTTP_MAX_SEND_WAIT` / `HTTP_MAX_POST_WAIT` =
+5000 ms each. `CONFIG_ESP_TASK_WDT_TIMEOUT_S` was **5**, with
+`CHECK_IDLE_TASK_CPU0=y` and `PANIC=y`. The watchdog was set EXACTLY at the
+supervised code's own documented worst case, so it fires on correct-but-slow
+rather than on hung. Raised to **12 s**.
+`HTTP_MAX_DATA_WAIT` has no `#ifndef` guard, so a `-D` build flag cannot
+override it — the sdkconfig lever was the only one reachable.
+
+**Verified:** the identical 16-socket / 3-round test that rebooted in 100% of
+rounds now completes with ZERO reboots (uptime 336 697 ms across the run,
+`boot_seq` unchanged, `prev reset` = SW/the OTA itself), heap drift -224 B,
+`int_largest` 28 660 constant, `oom` 0.
+
+**THIS BOUNDS THE DAMAGE, IT IS NOT THE CURE.** A half-open client still
+monopolizes the single-client sync server for up to 5 s, and `/api/tasks` is
+genuinely unreachable while it does. The cure is getting `/api/*` off a
+one-client-at-a-time server (`docs/http-plane-retirement.md`), which is an
+architecture change and deliberately NOT bundled with a memory measurement.
+**Operator trade, stated:** recovery from a genuine hang now takes 12 s
+instead of 5. Motion safety does not depend on this watchdog (RFC-051
+critical-stall parks own that), but it is a real change.
+
+**STILL OWED:** the WS leg of the abuse harness never ran — every
+`ClientWebSocket` connect threw, which is a HARNESS bug, not a device result.
+"Backgrounded tab that stops draining" is therefore UNTESTED, and it is the
+case the operator's original mid-stream crashes point at hardest. The harness
+also drives no motion, so "machine actively moving" is untested too.
+
+**PROOF OF DONE — the machine must survive ABUSE, not just a clean run:**
+sustained stream + deliberately open more sockets than the cap + background a
+client tab mid-stream + kill clients mid-frame + **back-to-back sessions with no
+reboot between** (the standing regression for the ownership-teardown leak), all
+while `/api/tasks` is polled. Pass = no panic, and the failed-alloc callback
+either never fires or fires and is handled visibly. A leak may still EXIST after
+this and that is acceptable; a leak that PANICS is not.
+
+## ACTIVE TASK 2 — observability before the next motion change (2026-07-31, operator-agreed)
+
+**Trigger.** Operator reported ~10 panics in an hour under live streaming, plus
+random panics at idle. `/api/crash` on the surviving record: `reset_reason PANIC`,
+**`heap_min 316`**, `max_block_last 148`, and both recovered crumbs are
+`ws-attach` 286 ms apart. That is heap EXHAUSTION (316 bytes free internal), not a
+logic fault, and it points at the WS attach/teardown path — the same class as the
+"ownership teardown leak" already on record. NOT yet attributed: the crumb record
+describes a 4.7 h life, which does not match "10 crashes in an hour", so the fast
+failures may have a different signature that the single-deep ring has since
+overwritten.
+
+**Two stale beliefs corrected in the feasibility pass, both by checking rather
+than reasoning:**
+1. `CrashRing.h` says a real backtrace "needs a core-dump flash partition …
+   that upgrade is a serial-reflash bench item". WRONG NOW: `partitions_ota.csv`
+   already carries `coredump, data, coredump, 0xFF0000, 0x10000`, and the shipped
+   Arduino sdkconfig already has `CONFIG_ESP_COREDUMP_ENABLE_TO_FLASH=y`,
+   `..._DATA_FORMAT_ELF=y`, `..._MAX_TASKS_NUM=64`. Full ELF core dumps are being
+   WRITTEN today and have simply never been read.
+2. An earlier agent's claim that profiling/heap-tracing needs an ESP-IDF rebuild
+   was treated as prohibitive. Operator pushed back; research proved them right.
+   pioarduino's `custom_sdkconfig` (present in the pinned platform —
+   `builder/frameworks/arduino.py` `call_compile_libs()`) rebuilds the IDF libs
+   from source with a custom config WHILE KEEPING `framework = arduino`. It is a
+   platformio.ini block plus one long build, not a port to `framework = espidf`.
+   Basic JTAG (`debug_tool = esp-builtin`) needs no rebuild at all.
+
+**Ordering, and why.** JTAG halts the CPU, which drops WiFi and the motion loop;
+a leak that takes hours does not yield to a breakpoint. Cheap non-halting
+visibility first, and the IDF rebuild LAST so it is not confounding the crash it
+is meant to measure.
+
+1. **`/api/coredump`** — serve the coredump partition over HTTP
+   (`esp_core_dump_image_get` + `esp_partition_read`). Gives faulting task, PC,
+   registers and all 64 task stacks, with no cable and no serial. Fix the stale
+   `CrashRing.h` comment in the same commit.
+2. **Live heap + task telemetry** on `/api/status` — `heap_caps_get_info` free /
+   largest-block / PSRAM, plus per-task `uxTaskGetStackHighWaterMark` and CPU
+   share. Free today: `CONFIG_FREERTOS_USE_TRACE_FACILITY=y` and
+   `CONFIG_FREERTOS_GENERATE_RUN_TIME_STATS=y` are already set. This is the
+   BASELINE PROFILE, and it also settles whether the 2026-07-30
+   `physicalBandExcess` change (+~1.1 KB stack: `Trajectory<1>` 616 B +
+   `InputParameter<1>` 480 B, zero heap) matters on the 16 KB Sampler task.
+3. **Archive the ELF per deployed version.** A core dump is unreadable without
+   its exact matching ELF and `.pio/build/sd32-ota/firmware.elf` is overwritten
+   every build. Without this, steps 1 and 4 silently produce garbage later.
+4. **`custom_sdkconfig`: `CONFIG_HEAP_TRACING_STANDALONE` (+ apptrace).**
+   Per-allocation attribution with call stacks — the real answer to "what is
+   using what memory where". Last, because it wipes and reinstalls the framework
+   packages, so the resulting firmware is a different IDF build lineage than the
+   one that has been crashing.
+
+Then: baseline profile -> fix -> keep the fixed profile as the regression
+reference the operator compares future reports against.
+
+### Steps 1-3 LANDED (fw 2.1.98 / 2.1.99), and the first real post-mortem
+
+**`/api/coredump` (2.1.98).** A complete 42 084 B ELF core dump was ALREADY in
+flash and had never been read. Summary form needs no host tooling; `?raw=1`
+streams the partition for `espcoredump.py`. The stale `CrashRing.h` claim is
+corrected in place.
+
+**THE PANIC IS HEAP EXHAUSTION, CONFIRMED TWICE, INDEPENDENTLY.** Faulting task
+`mdns`, `exc_cause 0` (an abort, not a memory fault), and the top six frames are
+in IRAM/ROM so they symbolize correctly even against a mismatched ELF:
+`panic_abort <- esp_system_abort <- abort <- lock_init_generic (locks.c:77) <-
+lock_acquire_generic <- _lock_acquire_recursive`. locks.c:77 is newlib creating a
+lazy mutex and calling abort() when the allocation FAILS. That is the same event
+`crashring` recorded as `heap_min 316`, reached by a different route.
+**`mdns` is the VICTIM, not the culprit** — the faulting task is only whichever
+one next needed memory. The leaker is still unidentified.
+The lower ten frames symbolized incoherently (`uart_tcgetattr`, `bt_bb_gain_set`,
+`_fread_r` in one stack) — that is the ELF mismatch showing exactly as predicted,
+and is why step 3 existed.
+
+**Step 3 done:** `artifacts/elf/firmware-<version>.elf` archived from 2.1.98 on.
+
+**`/api/tasks` (2.1.99) — BASELINE PROFILE, machine IDLE, no client connected,
+not homed, no stream.** Reports raw runtime counters, not percentages: this
+endpoint has no memory of when it was last polled, so the caller diffs two
+samples and gets a real interval instead of a since-boot average.
+
+    heap    int_free 36 312   int_min_free 25 648   int_largest 22 516
+            psram_free 8 118 524 (essentially untouched)
+    CPU over 45 s (2 cores = 200 % available)
+            SlopSyncHub 6.39 %   HTTP 4.99 %   Motor 3.89 %
+            Sampler 2.59 %       wifi 2.33 %   esp_timer 1.97 %
+    stack_free_min (bytes, lowest first)
+            ipc0 80   IDLE0 244   ipc1 264   IDLE1 348   mdns 1 652
+            ... Sampler 15 232 of 16 384   SlopSyncHub 13 792 of 16 384
+
+**THREE FINDINGS FROM THE BASELINE:**
+1. **No leak at idle.** Internal free drifted +304 B over 45 s and the largest
+   block did not move at all. So the leak is triggered by ACTIVITY. Reproduce
+   with streaming, not by waiting.
+   **RETRACTED — "and the ws-attach crumbs point at the connect path".** That
+   inference was a SELECTION ARTIFACT and is withdrawn. `crashring::crumb()` has
+   exactly seven call sites, ALL of them WebSocket lifecycle or HTTP request
+   (`ws-refuse`/`ws-attach`/`ws-detach`/`ws-idlereap`,
+   `http-root`/`http-503`/`http-abort`). There is not one crumb in the motion
+   path, the sampler, the servo bus or the SlopSync data plane — so during an
+   active stream NOTHING crumbs, and the last crumb is necessarily from whenever
+   a client last attached, however long before. "Last crumb = ws-attach" carries
+   no information about where the crash was.
+   **OPERATOR OBSERVATION, which outranks it:** the crashes happened MID-STREAM,
+   machine actively moving, with no client attaching. That points at the
+   STREAMING DATA path — per-frame allocation in the async WS TX queue, the hub's
+   channel encoding, the telemetry fan-out — not the connect path. Consistent
+   with `SlopSyncHub` already burning 6.39 % of a core with ZERO clients.
+   **CONSEQUENCE: the crash ring is instrumented only where the crashes are not.**
+   Crumbs (or better, the failed-alloc callback of ACTIVE TASK 1 item 1) are
+   needed on the streaming path before the next hunt, or the next post-mortem
+   will be just as blind.
+2. **`SlopSyncHub` burns 6.39 % of a core with ZERO clients connected**, and
+   `Motor` 3.89 % while stationary. Together with HTTP that is ~24 % of one core
+   at rest. This is the operator's "code that cycles way more times than
+   necessary" and it now has a number.
+3. **`ipc0` has 80 BYTES of stack headroom** (IDLE0 244, ipc1 264). These are
+   IDF-owned tasks with fixed small stacks, but 80 B is thin enough that any
+   deepening of an `esp_ipc_call` callback lands on it. Watch, do not yet touch.
+
+**NOT YET CLEARED — the 2026-07-30 `physicalBandExcess` stack delta.** Sampler
+shows 15 232 B free of 16 384, i.e. ~1.1 KB used — but this sample was taken with
+NO motion plan running, so the waveform path never executed. The reading proves
+nothing until it is retaken under a live stream. Do that before the leak hunt.
+
+**BACK POCKET (operator, 2026-07-31; cannot flash until home).** The ESP32-C5
+coprocessor on the custom PCB is functionally obsolete since SlopSync but is
+still fitted, still a separate CPU, and still UART-connected to the S3. Proposal:
+turn it into a dedicated logging offload that ships all telemetry to a server on
+the LAN over its WiFi 6 / 5 GHz radio, so a crash stops taking its own log with
+it. Notes for whoever picks this up: SlopLog's `ISink` is already the right seam
+and the one hard constraint is that the sink must never block (the USB-CDC
+blocking-sink trap); a DMA-backed UART TX ring with drop-on-full satisfies that
+at up to 5 Mbaud. SPI with the S3 as master is the higher-headroom option and
+leaves the UART free, but is not needed first.
+
+## ⏭ THE QUEUE (operator-ordered 2026-07-31) — SUPERSEDES "NEXT STEPS" BELOW
+
+Ordering ruled by the operator: **machine stability/diagnostics -> gigagauntlet
+(short + long) -> webui -> nice to have.** Entries that were chasing the same
+goal from different sections have been MERGED here; where that happened the old
+entry is named so nobody re-opens it as separate work.
+
+### TIER 1 — MACHINE STABILITY / DIAGNOSTICS
+
+1. **WINDOW-EXIT BRAKING RUNAWAY — ranked first because it is the only SAFETY
+   item on this list.** Measured 625 mm of travel on a 500 mm rail: the
+   carriage reaches the physical end stop. Fix is measured and NOT applied
+   (runaways 11/54 -> 0/54, worst excursion 289x smaller). Full chain and the
+   proposed one-line rule are in `## Pending rulings`; this needs an operator
+   stamp, not more measurement. Everything else here is about uptime; this one
+   is about the rail hitting the end of the world while someone is on it.
+
+2. **HTTP PLANE -> EVENT-DRIVEN (`:80` async).** *MERGES three entries that
+   were the same goal:* `docs/http-plane-retirement.md`'s remaining scope,
+   "Extract `MachineCommand` from `WebUI.cpp`" (Deferred/planned), and the
+   2026-07-31 async migration. Scope: 27 routes, 76 sync-API call sites.
+   **Justification is measured, not architectural taste** (TRAPS T26):
+   legitimate full page serve **9 s**, wedged half-open client **10 s**, OTA
+   upload seconds — all on a server that handles ONE client at a time. No
+   deadline separates slow from stuck at a 10x gap, so this cannot be tuned;
+   it has to stop blocking. Do it ALONE, after a heap measurement
+   (AsyncWebServer allocates per queued message), OTA last, serial-rescue
+   window open. Sub-items that land with it:
+   * **RFC-055 admission control** (SlopSync `spec/RFC-QUEUE.md`) — needs ONE
+     connection-accounting point, which this creates.
+   * The dead Core-0 reap (`kCore0ReapMs = 0`) gets DELETED here, not left as
+     scaffolding.
+   * `CONFIG_ESP_TASK_WDT_TIMEOUT_S=12` gets re-examined: it was raised
+     because a 5 s watchdog sat exactly on the sync server's 5 s ceiling. With
+     no blocking serve slot, the original 5 s may be correct again.
+
+3. **OTA HARDENING — two independent items, both small, both do-first.**
+   * **Size the erase.** `Update.begin(UPDATE_SIZE_UNKNOWN, command)`
+     (`src/system/OtaService.cpp:181`) erases the WHOLE OTA partition every
+     flash — the documented cause of cache-disabled stalls and watchdog trips
+     (arduino-esp32 #3775). `WebServer::clientContentLength()` already has the
+     real size. Bounding the erase shrinks the hazard for every OTA regardless
+     of anything else on this list.
+   * **OTA GATES ON MOTION (operator ruling 2026-07-31).** Currently INVERTED:
+     `prepareForOta()` refuses only on the concurrent-OTA CAS, then *stops
+     motion and proceeds* — hard e-stop mid-stroke, reboot, and the machine
+     comes back UNHOMED. The ruling is refuse-the-OTA, never interrupt the
+     session. **Design constraint, non-negotiable:** gate on evidence that
+     EXPIRES (measured speed / live plan), never a latched flag — a stuck
+     latch makes the device permanently unflashable.
+
+4. **PAGE-SERVE THROUGHPUT — FIXED (fw 2.2.5), and the cause was our own
+   change.** ACTIVE TASK 1 item 5 halved `LWIP_TCP_SND_BUF_DEFAULT`/`WND`
+   5744/5760 -> 2880 on 2026-07-31. Measured A/B, same machine, same 115 970 B
+   bundle:
+
+   | | 2880 | stock 5744/5760 |
+   |---|---:|---:|
+   | cold page load | **8.99 s** | **0.98 s** |
+   | throughput | 12.9 KB/s | **119 KB/s** |
+   | `int_free` | 41 107 | 41 103 |
+   | `int_largest` | 28 660 | 28 660 |
+
+   **~9x throughput for ZERO measurable heap.** Item 5 was a pure loss: it
+   bounded a worst case that never materialized while charging the cost on
+   every single page load. The general rule, now in platformio.ini next to the
+   values: these are per-connection CEILINGS filled on demand, not
+   reservations — to bound per-connection RAM, bound the CONNECTION COUNT
+   (`LWIP_MAX_ACTIVE_TCP`), which costs nothing until the cap is reached.
+   Remaining, and NOT a defect: TTFB 0.058-0.088 s and revalidation **304 in
+   63 ms**, so warm loads were always fine; only cold load was affected.
+   **Correction, recorded because it went the wrong way:** an earlier draft of
+   this entry claimed the bundle was 302 423 B and that "115 KB" comments were
+   2.6x stale. WRONG — 302 423 is the DECOMPRESSED size reported by
+   `Invoke-WebRequest`; the wire size is 115 970 B gzipped and the existing
+   comments were right all along.
+
+5. **`canon_lint.py` CANNOT SEE UNTRACKED FILES.** `tracked_files()` shells to
+   `git ls-files`, so new work is invisible to the gate that is supposed to
+   police it — it reported "clean (0 findings)" with a British spelling sitting
+   in `sim/slopsim/src/machine/MotionCore.h:253`. Every "gate PASS" on a branch
+   with new files is a partial truth until this is fixed.
+
+6. **ACTIVE TASK 2 step 4 — heap tracing, NOW UNBLOCKED.** It was ranked last
+   because it needed an IDF-from-source rebuild. `custom_sdkconfig` is live and
+   working as of 2026-07-31, so `CONFIG_HEAP_TRACING_STANDALONE` is now a
+   one-line addition to an existing block, not a project.
+
+7. **ONE DOCTRINE FOR WEDGED PEERS.** *MERGES:* the landed WS idle-RX reap
+   (fw 2.1.88), `IdleGuardWebServer::dropIdleCapture()` (silent-socket half
+   only), the never-implemented BLE idle reap (was in Deferred/planned), and
+   the dead Core-0 reap. Four mechanisms, one goal, no shared rule. Decide the
+   rule once — what counts as wedged, who reaps, on which task — then apply it
+   per transport. TRAPS T26 is the evidence for why ad-hoc reaping is
+   dangerous.
+
+8. **Square-pulse forensics** — operator narrowed it to MANUAL tape driving
+   (patterns run clean), pointing at the move-INTENT/arbiter path. Reproduction
+   plan already written in `## Pending rulings`.
+
+9. **Clocked-logging + legacy-log audit** (operator-approved 2026-07-27, NOT
+   STARTED) — diagnostics hygiene; every periodic log earns its keep, demotes,
+   or dies. Rider: strip MotionArbiter's sediment in the same pass.
+
+### TIER 2 — GIGAGAUNTLET (replaces the ad-hoc PROOF OF DONE list)
+
+The 2026-07-31 abuse harness was a scratch script and it FOUND REAL BUGS, so it
+gets promoted to a tracked, two-mode gate. Both modes assert the operator's
+priority order: **(1) hub alive AND STILL HOMED, (2) existing sessions survive,
+(3) new clients are refused legibly.** Losing home is a FAILURE, not a recovery.
+
+* **SHORT MODE — everything that breaks fast, no waiting.** Socket flood past
+  the cap; half-open/slowloris on `:80`; **packet storm on `:82` faster than
+  the hub can drain** (never yet run — the plane the priorities are actually
+  about); malformed/truncated/oversized frames; more sessions than `kSlots`;
+  mid-frame kills with LINGER 0; rapid connect/disconnect churn; back-to-back
+  sessions with NO reboot between (the standing ownership-teardown
+  regression); OTA refused while motion is active; `/api/tasks` polled
+  throughout. Runs against a force-homed machine with the motor bus verified
+  <10 V.
+* **LONG MODE — the leak hunt, the only one that needs patience.** Sustained
+  stream for hours with `/api/tasks` sampled on an interval and DIFFED (the
+  endpoint reports raw counters precisely so a caller can do this), heap
+  watermark + largest-block tracked, `oom` count asserted 0, homed asserted
+  true throughout.
+* **Harness debt, recorded so it is not rediscovered:** the WS leg of the
+  2026-07-31 script never connected (wrong URL/subprotocol — it is
+  `ws://<ip>:82/` with subprotocol `slopsync.v1`), so "backgrounded tab that
+  stops draining" is STILL UNTESTED. `tools/slopsync_probe.py` in the sibling
+  repo is importable (`__main__`-guarded) and already has real framing,
+  `--bench-home`, and `--stream` — build on it instead of hand-rolling frames.
+
+### TIER 3 — WEBUI
+
+10. Authoring-legibility campaign Phases 2-6 (plan:
+    `~/.claude/plans/pure-crafting-thacker.md`; Phases -1/0/1a/1b DONE).
+11. SSManager v0 then v1 (schema landed, Rust half not started).
+12. UI punch list — the 4 still-open items in `## OPERATOR UI FEEDBACK QUEUE`
+    plus the rapid-fire list in `## Deferred / planned`.
+13. PLAN STRIP — scale the segment to travel (ruled 2026-07-30, NOT STARTED).
+14. `RailWidget.svelte:146` comment lies (both RFC-041 roles ARE tagged) and
+    the lo/hi/span derivation wants the shared helper — already specced.
+
+### TIER 4 — NICE TO HAVE
+
+15. The 2026-07-31 truth-scrub's remaining confirmed comment/doc fixes (27
+    findings, receipts in that session's report) — mechanical, none
+    load-bearing.
+16. SlopMotion: `positionAt()`/`velocityAt()` each re-run `sampleRaw()`, so the
+    1 kHz path computes the same p/v/a TWICE per tick, in `double` on a
+    single-precision FPU. A combined `sample(now, p, v)` halves it with zero
+    numerical change. Benefit UNMEASURED — measure before touching motion.
+17. `ServoModbus` calls `_port.flush()` after every TX (5 sites), blocking the
+    bus task until the last bit clears. With the XY-G485's hardware
+    auto-direction nothing needs that completion signal. Bench change.
+18. PSRAM-resident page bundle — **downgraded from earlier framing.** The
+    per-request malloc it would have saved is ALREADY gone (static
+    `sPageSendBuf`), and staleness is a non-issue (every fw/fs OTA reboots).
+    Remaining value is only "off the flash bus" + a contiguous buffer for
+    async chunking. Fold into item 2 if it helps there; not worth doing alone.
+19. Four probably-superseded probe scripts in `webui/test/` — never triaged.
+20. SlopLog + SlopGlow uplift — NARROWED: both already inject their clock and
+    are hardware-free, so only "tighter conformance tests" remains of the
+    original three-part description.
+21. Sim: fray-d Advanced pattern has no motion effect in `sim/slopsim`.
+22. RFC candidate — batched telemetry sub-samples per STATE push.
+23. TCode pass-through channel; native Intiface SlopSync support; C5-node
+    SlopSync transports; merge to `main`.
+
+**Deleted as redundant during this pass:** the resolved Phase-C2 fixture-regen
+entry in `## Pending operator rulings` (resolved 2026-07-28, git has it), and
+the standalone "INCIDENT: 4-CLIENT PANIC" entry's action items, which are now
+covered by items 2 and 4 above.
+
+## Async-tune bench findings (2026-07-30 session)
+
+- **RULED — default `infeasible_policy` is now `Blend`, one slider, at 0.5.**
+  The other four spend ONE axis to exhaustion before touching the other, which
+  is why an infeasible segment arrives as a straight line: `alpha` is driven to
+  1 (the chord) rather than to what it needed. Blend walks a RAY through the
+  (amplitude-loss, shape-loss) plane at an angle the slider sets and returns the
+  SMALLEST legal radius, so degradation is proportional and continuous.
+  Swept 10 recordings x 6 perturbations (window tight/wide/offset, halved speed,
+  weakened accel) = 60 cases, 42 of which exercise the policy, scored as
+  scale-free per-case regret on shape_corr + reach_ratio.
+  **THE OPTIMUM MOVES WITH THE EXCHANGE RATE** — shape weighted 10x reach -> 0.875
+  (regret 0.236); weighted equally or reach-heavy -> 0.5 (0.239 / 0.197 / 0.110).
+  0.5 is the equal-weight optimum and wins 3 of 5 weightings, so it is the
+  neutral default. NOT ambiguous: the low end is wrong — blend <= 0.25 scores
+  ~0.72 regret against ~0.24 at the top, because a small shape concession keeps
+  the plan FEASIBLE while lost reach is visible AND often still falls through to
+  the Ruckig guard. Blend at its best beats Stretch (0.226 vs 0.248) without
+  overrunning the deadline to do it.
+  [verified 2026-07-30 — 60-case sweep, native slopmotion 31/31]
+- **Fixed: a SECOND hand-written policy-name chain** in `/api/slopmotion` had
+  already drifted — it predated `blend` and reported the live default as "?".
+  Deleted; both readouts now go through the one `policyName()` switch, so the
+  compiler names the next policy added instead of a readout lying about it.
+- **SUPERSEDED — default `infeasible_policy` was briefly Stretch** (was Reshape).
+  Measured GoogleCat, 50-150 mm window, follow->c1, 1000/50000: stretch
+  0.761 rms / 14 anomalies; prio-smooth 0.747 / 50; prio-amplitude 0.765 / 40;
+  reshape 0.928 / 29; scale 1.647 / 31. Fidelity across the top three is a
+  0.02 mm tie, the anomaly count is not, and Stretch also sidesteps the soften
+  overshoot (that fires only on Reshape). `testConfig()` in the native suite now
+  PINS Reshape, because its measured numbers were all taken under it and a
+  fixture must not inherit a product default it is not testing.
+  [verified 2026-07-30 — native slopmotion 31/31]
+- **FIXED (2.1.97) — the SAME reachability bug, one layer deeper: three CLAMPS,
+  not just the name tables.** 2.1.96 widened four name/option tables and shipped;
+  the operator selected blend in the UI and watched it snap back to prio-smooth.
+  Cause: `setU(14, 0, 4, ...)` in `SlopSyncHubService.cpp` clamped the 0x0105
+  write to 4, and 4 IS prio-smooth — the symptom named the bug exactly. Two more
+  would have bitten next: `ConfigStore.cpp`'s NVS load clamped 0..4 (so it would
+  have reverted on the following boot even if the write had landed) and
+  `SystemState.h`'s stored default was still 2/Reshape while the catalog select
+  now advertised 5/Blend.
+  ROOT CAUSE, and why patching three literals was not the fix: the enum's
+  cardinality was restated as a bare `4` in every clamp. It now has ONE home,
+  `slopmotion::kInfeasiblePolicyMax`, and all three bounds plus the sim's twin
+  derive from it. `WebUI.cpp` also gained a `static_assert` tying
+  `kInfeasPolicyNames` to that constant — PROVEN to fail the build by deleting an
+  entry and watching `pio run -e sd32-ota` refuse, so the next policy addition is
+  a compile error instead of a silent clamp.
+  LESSON: grepping the enum's NAME found four sites; the bug lived in the three
+  that only mention its RANGE. Search for both.
+- **FIXED (2.1.96) — `InfeasiblePolicy::Blend` was UNREACHABLE FROM THE DEVICE.** The
+  engine has had it since 0.9.0; all four device-side tables were still five
+  wide — `main.cpp`'s per-tick boot map (no `case 5`), `WebUI.cpp`'s string map
+  and `kInfeasPolicyNames`, and the `SlopSyncCatalog.h` select's option list.
+  The boot map runs EVERY TICK, so whatever it writes IS the policy: an operator
+  selecting blend fell through `default:` and silently got whatever the engine
+  default happened to be. This is the fw 2.1.49 bug recurring, in the exact
+  place that carries a comment warning about it — the map must be widened in the
+  same commit as any InfeasiblePolicy addition. Catalog select default also
+  moved 2 -> 5 to match the engine, which moved the device etag
+  B6 9E B0 62 49 EB E7 3A -> 94 DC 68 DC B5 35 77 F0 (deliberate; pin moved with
+  its rationale in `test_slopsync_devicecatalog`). Caught by reading the device
+  before flashing, NOT by a test — the whole tuning session would have measured
+  prio-amplitude while believing it measured blend.
+- **`/api/slopmotion` now echoes `blend`, `overshoot_guard` and
+  `overshoot_chord_slack`.** All three ship non-zero as of 2.1.96 and none had a
+  readout; a load-bearing default no surface shows is the ground-truth gap the
+  doctrine forbids. They are read from a fresh `slopmotion::Config` because none
+  has a stored setting or a POST field — with the constraint stated in-place that
+  adding a setter means moving them to the `sm_eff_*` back-channel in the same
+  commit.
+- **RULED — the throbbing is a DISCONTINUITY the polynomial arcs across, and it
+  is fixed.** Mechanism, from the 1 ms trace at OvershootTestThrobbing t=61.85 s:
+  the machine is at 15.25 mm doing **+800 mm/s** when a segment says "be at 0 mm
+  in 291 ms". A fixed duration plus fixed endpoints uniquely determines the
+  Hermite curve and it must SPEND those 291 ms, so it climbs to 58.9 mm before
+  turning — **43.6 mm of excursion on a 15.25 mm move**. Jerk-limited braking
+  from 800 mm/s costs ~15 mm on this machine, so ~28 mm of that is invented by
+  the polynomial, not forced by momentum. NOT "small moves" as such and NOT
+  entry velocity alone: it is entry velocity meeting a duration far longer than
+  the move needs. Three fixes shipped, each measured separately:
+  1. **The Blend ray stopped in the INTERIOR of the box.** Losses were
+     `s*blend` and `s*(1-blend)`, so at blend 0.5 the search exhausted itself at
+     alpha 0.5 / f 0.0 with half of both budgets unspent, and everything past
+     that fell to the Ruckig guard — the flattest, latest answer available.
+     `k = 1/max(blend, 1-blend)` rescales the ray to reach the box edge.
+     OvershootTestThrobbing, window 0-500: **fallbacks 82 of 221 -> 0**, mean
+     per-segment excursion 6.23 -> 3.39 mm, flattening 40.4 % -> 36.3 %. THIS is
+     the operator's "some strokes go suddenly linear" and it was a ray bug.
+  2. **The guard's allowance was the wrong number.** `v0^2/(2*amax)` ignores the
+     jerk ceiling — 6.4 mm on paper against ~15 mm in fact — so the knob was
+     ~2.3x too strict, rejected near-physical plans into the flat fallback, and
+     scored non-monotone in its own value. Replaced by `physicalBandExcess()`,
+     the MEASURED excursion of the time-optimal plan (one Ruckig solve per
+     waveform commit). Monotone now, and asserted so in the native suite.
+  3. **`overshoot_chord_slack` 0.25 makes the guard selective.** An absolute
+     bound fires on strokes that overshoot 2 % of their own travel, and each such
+     rejection buys a straight line; throbbing is a RATIO. Measured against
+     slack 0 (C1, window 150-350): InterpTest1 flattening **35.7 % -> 5.1 %** and
+     22 fallbacks -> 0, GoogleCat 23.8 -> 20.8 % and 13 -> 2, SYN-truncated
+     30.8 -> 23.8 % and 9 -> 0, at a cost of ~0.5 mm on worst-case excursion.
+  **Defaults now `overshoot_guard = 1.0`, `overshoot_chord_slack = 0.25`** — the
+  operator's standing request, granted once the knob was worth granting.
+  THE COST, ON THE CURVE FAMILY THAT SHIPS (C1; see the fixture-lens correction
+  below): 3 of 12 recordings byte-identical to guard-off, 5 within 1.4 points of
+  flattening, and 3 paying 5-15 points for a 33-69 % cut in worst-case excursion
+  — overshoot-mini **3.67x -> 0.77x its own chord** (45.5 -> 13.9 mm, flat
+  21.3 -> 36.6 %), synth-sine 8.48 -> 3.51 mm (35.3 -> 40.4 %),
+  OvershootTestThrobbing 20.28 -> 13.69 mm (33.5 -> 39.2 %) with sender rms
+  IMPROVING 9.40 -> 8.27. Flattening is the price because bounding excursion
+  means abandoning the polynomial on those segments and Ruckig cruises at vmax
+  near saturation. One edit reverts it.
+  [verified 2026-07-30 — 12-recording shelf sweep at windows 150-350 and 0-500,
+  under both `curve=c1` and `client_curve=c1` (identical, as they must be),
+  native slopmotion 32/32 (56 doctest cases), `pio run -e sd32-ota` SUCCESS
+  (RAM 24.9 % / 81,588 B, Flash 28.6 % / 1,875,812 B), canon_lint 0 findings]
+- **RULED — C2 IS NOT THE ANSWER FOR A DISCONTINUITY; IT IS MEASURABLY WORSE.**
+  The operator's question, and the intuition is good: if the arc is the cubic
+  running out of freedom, give it more. It goes the other way. A quintic must
+  additionally match the machine's ENTRY ACCELERATION, and in exactly the
+  discontinuity case that acceleration points the wrong way — at the captured
+  t=61.85 s handoff the carriage was still accelerating through +800 mm/s when
+  the reversal landed, so the quintic is contractually obliged to travel further
+  out before it may turn. The cubic ignores `a` and turns immediately.
+  Measured (window 150-350, guard off): OvershootTestThrobbing per-segment
+  excursion mean 1.85 -> 3.23 mm, **max 20.28 -> 80.30 mm, ratio 37.7 -> 184.9**,
+  sender rms 9.40 -> 13.83; GoogleCat max 1.27 -> 7.43 mm, rms 13.82 -> 17.91.
+  An extra degree of freedom is only free when it is not also an extra
+  CONSTRAINT, and C2's two extra coefficients are spent on boundary conditions,
+  not on shape. (Jerk is not the escape either: at 800 mm/s the ramp from 0 to
+  amax takes 25 ms and costs 14.8 mm of the ~15 mm stopping distance against
+  6.4 mm for the textbook v^2/2a, so jerk IS the dominant limiter — but raising
+  it only lowers the physical FLOOR, never the ~28 mm the polynomial invents.)
+- **BENCH HAZARD — 10 of the 12 shelf recordings predate the `curve_family`
+  column, so under `FollowClient` they replay as QUINTIC, which is not what the
+  machine ships.** Only `OvershootTestThrobbing` and `overshoot-mini` carry it
+  (both family 1). MFP declares c1_cubic, so **any shelf sweep meant to describe
+  shipping behavior must pass `client_curve=c1`** — otherwise it measures a
+  family no client sends. This is not a replay bug: an old recording replaying as
+  itself is the documented and correct behavior of the appended column. It is a
+  reading hazard, and it silently inflated the first pass of the guard's measured
+  flattening cost in this same session (reported as 3-15 points on five takes;
+  under C1 it is 3 recordings unchanged, 5 within 1.4 points, 3 paying).
+- **New bench metric: PER-SEGMENT excursion** (`seg_over_mean_mm`,
+  `seg_over_max_mm`, `seg_over_ratio_max`). Take-level `pos_max` vs `cmd_max` is
+  blind to this defect class — it read 0.05 mm on the take whose worst segment
+  excursion was 38 mm, because longer strokes in the same take reach further.
+  `ratio` is excursion / that segment's own chord, which is the scale-free form
+  of the complaint: > 1 means the carriage traveled further past the target than
+  the move was ever asked to cover.
+- **REJECTED, measured, not skipped — two plausible fixes that lost.**
+  (a) Planning the guarded fallback TIME-OPTIMALLY instead of stretched to the
+  deadline: per-segment excursion came back unchanged across 12 recordings
+  (largest move 0.66 -> 0.72 mm, the wrong way) while sender rms rose on 8 of 12.
+  Arriving early and holding costs the sender's timing and buys no excursion.
+  (b) A second smoothness sweep at full amplitude (`findAlpha(1.0, 1.0)`) after
+  the Blend ray fails: it finds more legal shapes and they are worse ones —
+  InterpTest1 excursion 0.23 -> 3.42 mm max, rms 2.08 -> 4.20. Both are recorded
+  in-place at the code they would have touched.
+- **SUPERSEDED — `overshoot_guard` pending entry** (twice: by the hold, then by
+  the ruling above, which granted it). Operator asked for 1.0; held
+  back, because evidence produced later in the same session argued both ways.
+  FOR: it is the only thing that touches handoff overshoot (synth-sine 2.18 ->
+  0.22 mm past target; policy, curve family, handoff bound and safety filter all
+  measured inert). AGAINST: on that same take it costs reach (1.000 -> 0.958)
+  and RAISES flattening (flat_frac 35.3% -> 44.1%), trading an invented
+  excursion for the straight-line defect under investigation; and it fails
+  test_main.cpp:1486 and :2168, which assert a centering sag the guard removes —
+  adopting it means re-measuring those, not relaxing them.
+- **New SHAPE metrics on the bench** (`reach_ratio`, `shape_corr`, `flat_frac`),
+  because rms conflates offset, lag, amplitude and shape into one number and
+  therefore scores a FLATTENED stroke the same as a slightly late one. `flat` is
+  the share of moving time the plan held a constant velocity, which is a
+  straight line in position — the one that finds a waveform-fallback stroke.
+- **Fixture hygiene: `SYN-baseline` was a duplicate of `GoogleCat`** (identical
+  raw wire values, arrival and due times to the microsecond; only the DECODED
+  columns differed, and replay decodes from the raw ones). It replayed as
+  GoogleCat, so any "two recordings agree" conclusion drawn from the pair was
+  one recording counted twice. Moved to `retired/`. The other SYN-* fixtures are
+  genuinely distinct. **The frozen run `linear-moves-` is mislabeled**: it says
+  `recording=SYN-baseline` but rendered GoogleCat's commands.
+
+- **FIXED — the replay bench planned at the LIVE sim's normalized ceilings, not
+  the ones its own window implies, so every infeasible-policy comparison ever
+  run on it was contaminated.** The engine plans in window fractions, and the
+  machine derives `vmax = input_speed / span` on every window change
+  (`deriveEngineLimits`). The bench let the window move independently and kept
+  the inherited limits — so a 100 mm bench window still planned at the live
+  500 mm machine's **2.0/s when the real machine would have had 10.0/s**. At a
+  fifth of the true velocity authority the planner is infeasible almost
+  constantly, which is exactly when the infeasible policy engages, so the bench
+  was comparing five different ways of FAILING at content the machine would
+  have rendered cleanly. Rule moved to `MotionCore.h deriveLimits()` (one home,
+  both callers); bench `vmax`/`amax`/`jmax` now mean 0 = derive, non-zero =
+  override, mirroring the firmware's own `jovr`/sm-set semantics.
+  Measured on GoogleCat, window 50-150, curve follow+c1: whole-take sender_rms
+  fell **11.3 mm -> 1.02 mm** (stretch) and **18.1 -> 1.14** (reshape), and the
+  five policies became IDENTICAL in 9 of 12 sections — because at correct
+  limits the content is feasible and the policy never fires.
+  [verified 2026-07-30 — 12-section `/api/replay.bin` sweep before and after,
+  native slopmotion 31/31]
+- **Policy ranking, at correct limits** (GoogleCat, 50-150 window, follow+c1):
+  stretch 1.016 / prio-smooth 1.017 / prio-amplitude 1.052 / reshape 1.142 /
+  scale 1.780 mean sender_rms mm. Anomaly counts separate them more than
+  fidelity does: stretch 13, reshape 28, scale 30, prio-amplitude 43,
+  prio-smooth 56. **The default is Reshape.** The spread over it is ~0.13 mm on
+  a 100 mm window, so this is NOT yet a ruling — it is one recording.
+- **FIXED — the `sender_max` 33.95 mm was the BENCH'S OWN reference line, not
+  the machine.** `SenderCurve::note` advanced the sender frame to each
+  segment's commanded endpoint, so a segment SUPERSEDED in flight teleported
+  the reference: MFP's seek/resume path emits zero-offset re-anchor segments
+  (GoogleCat has two, 9 ms apart at t=2.87 s), and `raw` stepped 143.67 ->
+  110.00 mm in one sample while the carriage was mid-stroke and tracking its
+  command correctly. The frame now continues from where the previous curve
+  actually REACHED (`evalCurve` at the commit instant); a span that ran to
+  completion evaluates to its endpoint, so the normal chained case is
+  unchanged. That event: 33.95 -> 0.92 mm. [verified 2026-07-30 — 1 ms trace
+  across the knot + wire-log offsets, native slopmotion 31/31]
+- **PENDING RULING — `infeasible_soften` buys back shape by picking the softest
+  feasible jerk, and nothing in that search bounds OVERSHOOT PAST THE
+  SEGMENT'S OWN ENDPOINT.** `ruckigWorstRatio` scores velocity vs vmax,
+  acceleration vs amax, and position vs the stroke WINDOW (+-0.02) — a plan
+  that sails past its target and returns is inside all three and scores legal.
+  Measured on GoogleCat t=58.30 s, commanded 0.23 over 250 ms: the adopted plan
+  peaks at **75.93 mm against a 73.00 mm target (+2.93 mm, 12.7 % of the
+  stroke)** at 2.544/s where a clean profile needs 1.380/s — a spurious
+  reversal at the top of the stroke the script never asked for.
+  FIRES ON THE SHIPPING DEFAULTS: policy Reshape (default) + c1 cubic (what MFP
+  declares, RFC-030) + soften (default true). Disabling any ONE removes it —
+  soften off 12.16 -> 10.77 whole-take max, c2 -> 0.56 on that second, any
+  other policy -> 2.25. Soften off is NOT a free win: it restores the
+  flat-topped velocity-saturated straight line soften exists to fix (measured
+  here as a dead-flat 0.967/s for 200 ms of a 250 ms span).
+  Same defect class as the quintic-path backswing that `overshoot_guard`
+  prototypes, on the Ruckig path, which that knob does not cover.
+- **NOTE — the +-0.02 window grace still exists on the RUCKIG path**
+  (`ruckigWorstRatio`). The 2026-07-30 root-cause removal took it out of
+  `quinticWorstRatio` only.
+- **Policy ranking, corrected metric + correct derived limits** (GoogleCat,
+  50-150 window, follow+c1, whole take): prio-smooth 0.747 / stretch 0.761 /
+  prio-amplitude 0.765 / reshape 0.928 / scale 1.647 mean sender_rms mm.
+  Anomaly counts: stretch 14, reshape 29, scale 31, prio-amplitude 40,
+  prio-smooth 50. **Stretch is the only one that is good on both axes.**
+  Still one recording — not a ruling.
+- **FIXED — slopsim never asked the hub for the RFC-030 curve family, so every
+  MFP segment stream rendered as a quintic.** The firmware has been correct
+  since 2.1.75 (`SlopSyncHubService.cpp` calls `Hub::publishCurveFamily()` and
+  stamps each pacing entry); slopsim's `onStreamBundle` discarded `session_id`
+  and left `WaveformCommand::client_curve_family` at 0, which resolves
+  `FollowClient` to quintic. MFP declares `c1_cubic` (1) and its
+  `{target, duration, end_vel}` payload IS a cubic Hermite, so the bench was
+  rendering a different curve than the machine — the one defect a tuning tool
+  must not have. Now stamped from the hub exactly as the firmware does, plus a
+  `curve_family` column on the recording CSV (appended, so shelf fixtures made
+  before it still load and still replay as themselves).
+  Measured on GoogleCat, window 100-400: `follow` + declared c1 is byte-identical
+  to forced c1 (sender_rms 54.426 mm) and distinct from forced c2 (56.084 mm) —
+  and the cubic is the MORE accurate of the two, which is what the operator
+  predicted from the hardware. [verified 2026-07-30 — `/api/replay.bin` A/B
+  across `client_curve` and `curve`, native slopmotion 31/31]
+- The TUI's `follow(->c2)` readout was retired with it: `follow` now resolves
+  per command, so no fixed outcome can be named. Plan kind is the ground truth.
+
+- **RULED — MFP `Samples` and `Segments` carry DIFFERENT SIGNALS, not two
+  encodings of one signal.** Read from the plugin source
+  (`../SlopSync/clients/mfp/SlopSync.cs`): Segments walks `_segKeyframes` (the
+  AUTHORED SCRIPT + value transform) on the script clock; Samples reads
+  `Axis::Value` (MFP's FINAL OUTPUT — script plus motion providers, smart
+  limits, sync) on a wall clock with velocity as a finite difference.
+  `StreamMode` is an enum: they are mutually exclusive by construction, and
+  "both at once" is not merely unimplemented, it is not meaningful — it would
+  be two contradictory position streams.
+  * The red "Axis output diverges from script" box is a CORRECT DIAGNOSTIC, not
+    a defect. `CheckDivergence` compares `Axis::Value` against the keyframe
+    interpolation; a motion provider moving the axis off-script is exactly what
+    it is built to report. The plugin comment is explicit: "warn, never switch
+    modes."
+  * CONSEQUENCE: a timed move to a position IS a segment. Idle centering ships
+    as ONE 0x2101 `{target, duration_ms, end_vel=0}`, which the engine renders
+    as a jerk-limited curve arriving at rest. No dual-stream arbitration, no
+    protocol change, no machine change. `duration_ms` is u16 → 65.5 s ceiling.
+  * TWO KNOWN GOTCHAS, both plugin-side: the divergence probe still fires while
+    an off-script segment owns the reference (it compares against keyframes, not
+    against emissions) and must be paused; and an out-of-band segment must
+    SUPERSEDE pending buffered segments rather than queue among them — the
+    pacing ring pops by DUE TIME, so with preview buffering the stale script
+    segments would fire after the centering move and undo it. Implement
+    centering-as-segment BEFORE preview; the reverse order introduces that bug.
+  * Two earlier diagnoses in this session were WRONG and are retracted: there is
+    no lost TCode duration on the sample channel (Samples is a clocked position
+    stream and needs none), and the "lunge to center" was an artifact of the
+    synthetic durationless points the bench sent, not machine behavior.
+
+- **PENDING — idle centering.** "Homing" was the wrong word: the sensorless
+  cycle that establishes the zero reference is a different thing. Idle centering
+  = park at a rest position after the stream goes quiet, a natural extension of
+  the engine's existing SETTLE. Probably machine-side (works for every client
+  rather than only the one that implements it). 🚩 It is a PATH TO MOTION THAT
+  NOBODY COMMANDED — DOCTRINE §11.3 ("no unmonitored path to motion") applies.
+  Needs an explicit opt-in, a live-session gate, and a bounded speed before it
+  is built.
+
+- **PENDING — motion-planning architecture.** The five InfeasiblePolicy values
+  each win somewhere and lose somewhere because ONE mechanism is being asked to
+  solve THREE different problems. Researched direction, in the order the work
+  should happen:
+  1. **Safety filter** (braking-distance invariant, `v <= sqrt(2*a*d)` enforced
+     continuously). The inequality ALREADY EXISTS as `applyEndVelGuard` — it is
+     just applied once at plan time to the commanded end velocity instead of
+     continuously to the state. Making it continuous lets the ±0.02 legality
+     grace AND the arbiter's `entering` accel collapse be DELETED rather than
+     tuned. Jerk-exact variant is free: `lib/ruckig/src/ruckig/brake.cpp` is
+     already compiled in.
+  2. **One reference governor replacing five policies.** A scalar lambda in
+     [0,1] — the largest that stays admissible — plus a DIRECTION. The five
+     policies are one governor with different search directions: lerping the
+     target toward current position is spending AMPLITUDE (prio-amplitude),
+     lerping the end handle toward the chord is spending SMOOTHNESS
+     (prio-smooth). One scalar + a blend weight gives every intermediate that
+     does not exist today, monotone, no cliffs, and it is curve-family agnostic
+     (C1 and C2 both unchanged).
+  3. **Bad-move bridge** on `T_optimal(from ACTUAL p,v,a) / T_commanded` —
+     Reshape already computes that ratio, so the detector is free. Above the
+     threshold a command is a DISCONTINUITY, not a stroke, and belongs on a
+     jerk-limited point-to-point bridge. Threshold must sit well above 1.0:
+     measured, 13.4 % of normal GoogleCat segments already exceed 1.0x demand
+     and the max is 2.09x. Demand ratio computed from the PREVIOUS TARGET is the
+     wrong discriminator — it ignores current velocity, which is what makes a
+     mid-stroke discontinuity violent, and a synthetic 30 s seek scored only
+     1.06x (a seek in TIME is not a jump in POSITION).
+  4. **Preview / feedforward** (ZPETC, Tomizuka) — DEMOTED BY MEASUREMENT.
+     Synthesized 250/750/2000 ms sender lead against an identical due schedule:
+     the RFC-008 guard wakes up (`handoff_bounded` 0 -> 10 -> 14 -> 14,
+     saturating at 750 ms) but the rendered motion moves 39.29 -> 39.26 mm RMS.
+     0.03 mm. GoogleCat sends nearly all-zero handoff velocities, so the guard
+     has nothing to bound. Cheap and correct; not a priority for this content.
+  5. **MPC** — the general form, with the jerk weight as the smooth-vs-accurate
+     dial. Affordable (planning is ~4 Hz, not 1 kHz) but explicitly NOT where to
+     start.
+  RULED OUT with reasons: TOPP/TOPP-RA and CNC look-ahead feedrate scheduling
+  both RETIME FREELY, and the schedule here is external (the next 0x0085
+  preempts on the sender's clock); CNC additionally needs lookahead depth that
+  measured 0.3 % available. Ruckig Pro waypoints optimizes duration, is the paid
+  tier, and Community has no position limits at all.
+
+- **SIM FIDELITY — `SimStepper` is a bang-bang follower and its velocity trace
+  is not machine behavior.** Measured: 90.6 % of all ticks apply exactly
+  +/-amax*dt, and the acceleration SIGN FLIPS on 68.2 % of ticks; scaling
+  `input_accel` 50000 -> 20000 scales the jitter exactly 50 -> 20 mm/s. There is
+  no cruise state — the follower only ever commands +/-amax, so tracking a
+  setpoint moving slower than vmax chatters every tick. Real FastAccelStepper
+  plans a ramp with a cruise phase. CONSEQUENCES: the analyzer's velocity fuzz is
+  an artifact, and the `peak accel` readout is meaningless (it is always exactly
+  amax by construction). Position excursions over hundreds of ms — i.e. every
+  window finding above — are unaffected. FIXED IN THIS SESSION: the velocity
+  teleport (a hard clamp let the model shed 950 mm/s in 1 ms, 250 000 mm/s^2
+  against a 50 000 ceiling, which MASKED the window runaway by acting as a free
+  emergency brake) and a double-spend of the accel budget per step. The missing
+  cruise state is NOT fixed.
+
+## Pending rulings
+
+- **WINDOW-EXIT BRAKING RUNAWAY — three-part chain, measured on the async-tune
+  bench against the `GoogleCat` funscript recording (2026-07-30). AWAITING AN
+  OPERATOR RULING; no firmware was changed.** A carriage that overshoots the
+  stroke window by more than 0.5 mm loses ~250x of its braking authority at the
+  instant it needs it, and the excursion compounds. Worst measured: **625 mm
+  absolute travel on a 500 mm rail** — i.e. into the physical end stop.
+  The chain, each link individually defensible:
+  1. `slopmotion` `quinticWorstRatio()` grants a **±0.02 normalized window
+     grace** (`lib/slopmotion/include/slopmotion/slopmotion.hpp` ~2173) so a plan
+     may legally bulge past the rail; the comment's premise is "the sampler
+     clamp flattens tiny bulges". The clamp flattens POSITION. It does not
+     flatten VELOCITY — measured 69 samples with the setpoint pinned at the top
+     rail while the plan still drove outward, worst +217 mm/s.
+  2. `MotionArbiter::submitStreamSample` (`src/motion/MotionArbiter.cpp:133`)
+     reduces the ACCEL ceiling to the gentle user set whenever the carriage is
+     outside the window, keyed on POSITION ALONE. Written for "parked outside,
+     glide it in" (correct at v≈0); also fires for "just overshot, must stop
+     now", where it removes the authority required. 50 000 -> 200 mm/s2.
+  3. The two thresholds disagree by **12x**: the engine may plan 6 mm past the
+     rail on a 300 mm window; the arbiter calls 0.5 mm "outside".
+  Traced frame by frame: carriage 0.4 mm from a clean stop, crosses 0.5 mm,
+  authority collapses in one tick, 16 mm out -> cascade -> 225 mm out for 6.2 s.
+  PROPOSED FIX (measured, not applied): keep the gentle SPEED ceiling, never
+  reduce the ACCEL ceiling below the input set. Across 54 configs
+  (3 windows x 3 policies x 2 curve families x 3 input speeds): runaways
+  **11/54 -> 0/54**, worst excursion **306.78 mm -> 1.06 mm (289x)**. The bench
+  carries it as the `gentle_accel_outside` lab switch so it stays measurable.
+  POLICY EXPOSURE: `prio-smooth` 10/18 configs runaway (worst 306.78 mm),
+  `prio-amplitude` 1/18 (100.47 mm), `reshape` **0/18** (worst 0.44 mm) — a
+  policy that surrenders reach never drives the rail at speed.
+
+- **RFC-008 handoff guard is inert against MFP** [verified 2026-07-30 —
+  GoogleCat, 390 segments]. The guard needs a successor in the pacing ring, but
+  MFP sends each segment ~114 ms before its due time while segments are ~252 ms
+  apart, so the successor has never arrived when the current one fires:
+  lookahead available on **0.3 %** of segments, `handoff_bounded` = 0 in every
+  run. The guard written for exactly this client's pathology cannot engage.
+
+- **Four knobs live only in `slopmotion::Config`** — no wire channel, no HTTP
+  field, no CLI flag: `infeasible_soften`, `infeasible_soften_floor`,
+  `infeasible_soften_steps`, `handoff_chord_factor`. The bench tags them
+  `lab` and reaches them anyway; whether any deserves a wire surface is
+  PENDING measurement on a real funscript recording. [2026-07-30]
+- **STATE-shed floor after the coalescing wire-up — PENDING OPERATOR STAMP**
+  (2026-07-28, fw 2.1.85). Not a fully healthy floor: normal-priority STATE
+  is not shed until congestion level 2 (correct per the normative table),
+  and the 1 s sustained-congestion hysteresis means a ~2.7 s packed burst
+  can mostly complete before the signal engages. The next lever
+  (burst-aware escalation or a shorter sustain window) risks shed-flapping
+  on the hot path, so it is parked for a ruling, not chased.
+- **`Reset reason: PANIC (unexpected)` on the post-OTA boot into fw 2.1.86**
+  — this repo's documented pattern for an `ESP.restart()`-driven OTA reboot
+  is `SW`, so something on 2.1.85 crashed rather than restarting cleanly.
+  No serial/backtrace access was available (bench-only per doctrine); the
+  device came back healthy on 2.1.86 with no further anomalies. Flagged for
+  the operator to watch on the next bench session. [2026-07-28]
+- **Pairing-window bit0 (`pairing_window_open`) has never been observed on
+  air.** No plain HTTP route opens/closes the pairing window — the only
+  paths are the 3-quick-power-cycle boot gesture (needs real reboots) or a
+  signed INTENT frame over an authenticated session (which would write real
+  pairing state to NVS), so this has been deliberately skipped, not missed.
+- **RFC-042 STALE park + reattach over a hard-dropped BLE link with a WS
+  client also attached** (the T13 regression scenario, BLE side) has never
+  been run live — only the WS-side scenario is live-verified.
+- **Square-pulse forensics — still open.** Operator narrowed the trigger to
+  MANUAL tape driving (patterns run clean), pointing at the move-INTENT/
+  arbiter path rather than the pattern engine. Reproduction plan for the
+  next bench window: re-fake-home, one armed wire probe, tap-to-move
+  harness drives, correlate outlier values field-by-field. [2026-07-29]
+
+## Landed history (compacted)
+
+- **SlopSim async tune (2026-07-30)** — the analyzer can re-run a saved wire
+  recording through a fresh `slopmotion::Engine` under operator-moved settings
+  at ~35 000x realtime (10 921 samples of 1 kHz motion in 0.3 ms). New:
+  `machine/MotionCore.h` (the live/replay shared seam — PacingRing, SimStepper,
+  `decodeWireSample`, `SenderCurve`, `applyArbiter`), `machine/MotionReplay.*`,
+  `machine/RecordingStore.*`, `slopsim replay`, `rec.save`/`rec.new`/`rec.list`,
+  and `/api/{recordings,replay.bin,rec/save,run/save,run.bin}`. Usage:
+  `sim/slopsim/README.md` "Async tune". [verified 2026-07-30 — clean build, CLI
+  and HTTP replay agree to the digit (follow_rms 14.840 both), clip/run
+  save+recall round-trip, forged run-file forward/backward compatibility]
+  - **OPERATOR RULING — the sim's `HttpFacade` is DEBUG SCAFFOLDING**, outside
+    the conformant hub surface entirely (a SlopSync-compatible hub needs no
+    HTTP), so bench endpoints writing recording FILES do not widen "100 % of
+    control goes through SlopSync". The rule that binds: **no HTTP handler may
+    write MACHINE state.**
+  - A saved **run** freezes its samples instead of re-deriving them from its
+    settings — a recomputed baseline is not a baseline. Settings ride as
+    `# key=value` lines; a key a run predates reports ABSENT, never backfilled.
+  - **The shelf is `%LOCALAPPDATA%/slopsim/`, never the working directory**
+    (never next to the exe either — that is `build/`). Field-found: CWD was
+    `C:\Windows\System32`, unwritable, and the save endpoint answered
+    `{"saved":0}` with HTTP 200. A write that wrote nothing is an ERROR
+    everywhere it can be observed; the resolved path + its writability are
+    announced at boot, in `rec.list`, and in the analyzer panel.
+- **M5c** — SlopSync is the only input/output plane; links2004 stack, `:81`
+  telemetry socket, `:55555` TCode server all removed from the build. HTTP
+  fallback *polling* remains by design. Story:
   `docs/http-plane-retirement.md`. [verified 2026-07-27 — truth-scrub audit,
   platformio.ini + src grep]
-- The M5c-era "NEXT PHASES" list is stale: the servo-pane, `/api/slopmotion`
-  POST, and clear-fault HTTP control routes are ALREADY retired in
-  `src/ui/WebUI.cpp`, and the pairing ceremony (PAIR_REQ/PAIR_GRANT +
-  operator PIN pane) is ALREADY landed in `webui/src`. [verified 2026-07-27
-  — truth-scrub audit, code read]
-  - **RESOLVED:** device-defined SlopSync INTENT channels replaced the
-    retired HTTP control routes — `machine-admin` (0x30F0: clear_fault/
-    save_config/servo_scan, replacing `/api/clearfault`/`WS_OP_SAVE`/
-    `POST /api/servo {"scan":true}` respectively, per its own header
-    comment in `SlopSyncCatalog.h`), `modes-set` (0x3030, machine modes),
-    `sm-set` (0x3120, SlopMotion tuning). [verified 2026-07-28 — code read,
-    `include/comms/SlopSyncCatalog.h` addMachineAdmin()/addModesSet() +
-    ch:: constants]
-- RFC-030 `curve_family` (registry key 45) landed with fw 2.1.75 glue.
-  [verified 2026-07-27 — audit cross-check of registry + MOTION-TODO]
-- SlopSync channel 0x0002 session-roster is **reserved, NOT implemented** —
-  registry note previously lied about this; corrected in the 2026-07-27 fix
-  pass. [verified 2026-07-27 — repo-wide grep, no implementation exists]
+- **HTTP control routes → device-defined SlopSync INTENT channels** — the
+  servo pane, `POST /api/slopmotion` and the clear-fault routes are retired in
+  `src/ui/WebUI.cpp`; the pairing ceremony (PAIR_REQ/PAIR_GRANT + operator PIN
+  pane) is landed in `webui/src`. Replacements: `machine-admin` 0x30F0
+  (clear_fault/save_config/servo_scan), `modes-set` 0x3030 (machine modes),
+  `sm-set` 0x3120 (SlopMotion tuning). [verified 2026-07-28 — code read,
+  `include/comms/SlopSyncCatalog.h` addMachineAdmin()/addModesSet() +
+  `ch::` constants]
+- **RFC-030 `curve_family`** (registry key 45) landed with fw 2.1.75 glue.
+  [verified 2026-07-27 — registry + MOTION-TODO cross-check]
+- **SlopSync channel 0x0002 session-roster is reserved, NOT implemented** —
+  the registry note that claimed otherwise was corrected. [verified
+  2026-07-27 — repo-wide grep, no implementation exists]
+- **2026-07-27 truth-scrub fix pass** — `lib/slopsync` client idle-PING
+  interval bug (never switched off the idle interval; SPEC §6.5) [verified
+  2026-07-28 — native suite 31/31 exit 0]; `webui` session.js EVENT fan-out
+  (log/anomaly frames double-dispatched as sessionEvent); `platformio.ini`
+  env:esp32-c5-dev1 upload baud set to the documented-broken C5 rate; ~50
+  lying comments/stale docs across all areas; docs-site generator unbroken +
+  regenerated.
+- **Wire-visible British spellings RESPELLED** (pre-release operator ruling —
+  "that's a stain that never comes out if deferred"): all catalog strings, the
+  schema field respelled to `centering`, the `waveform_centered` token family
+  in one pass; device catalog etag changes on next deploy; frozen mini-catalog
+  untouched (contains none). [verified 2026-07-27 — canon_lint C-11 0
+  findings + native suite + sd32-ota build]
+- **Dead code DELETED** (tests green before and after): `MotionInterpolator`
+  (moved to `examples/slopmotion_traces/`); `MotionProfile.h` + its test
+  suite; `WebUI::handleApiMove/Home/Stop/Pause/Halt/Override/ClearFault`;
+  `SystemState` legacy anomaly ring; `UiProtocol.h` dead frame macros;
+  `src/s3_main/main.cpp` stub; `Kinematics::planTrapezoid()` + `PlanResult`;
+  `ServoMotionExecutor::adoptProfile()`; intiface websocket block. [verified
+  2026-07-27 — sd32-ota SUCCESS + native suite]
+- **CLAUDE.md split** — preferences only; all rules live in
+  `docs/canon/DOCTRINE.md` (engineering) + `CANON.md` (governance).
+- **Operator ruling 2026-07-27 (standing): full autonomy** — escalate only
+  HMM-grade judgment calls; agent decisions are recorded as veto-able.
+- **Phase B** — RFC-043/045/046/047 → Landed (v1.0); RFC-044 → Accepted
+  (posture landed, channel deferred). Registry: BLE identity UUIDs
+  (534C4F50-5359-4E43-…), UDP discovery port 21328/"SLOP", frames 0x1E/0x1F,
+  WELCOME keys 46 `ws_port` / 47 `ipv4`, status field on core channels. SPEC
+  §13.1 profiles, §13.8 UDP probe, §6.3 migration, §11.3 loss-policy removal
+  reconciled across 8 sections, §9.6 onramp; new docs-site `discovery.md`.
+  [verified 2026-07-27 — all generators --check green + native 31/31 +
+  sd32-ota SUCCESS + canon_lint 0]
+- **Phase C1** — RFC-048, the UI/rendering constitution: new normative
+  companion `docs/slopsync/RENDERING.md`; SPEC §19 + §6.1/§6.3/§13.8; registry
+  gains eleven frozen vocabulary sections (`ui_categories` 14, `ui_ranks` 6,
+  `value_aspects`/`value_scopes`/`value_provenance` 6/3/3, `unit_ids` 23,
+  `action_tags` 13, `ui_archetypes` 15 w/ machine-checkable `fallback:`,
+  `ui_regions` 5, `renderer_classes` 3, `widget_patterns` 13 w/ 3 `required`).
+  Resolves the Phase B veto: DISCOVER_REPLY's `hub_id` becomes
+  `hub_instance_id` (u64, `identity_keys` 5, random-once NVS-persisted; reply
+  payload 72→76 B). Riding along: RFC-045's `on_disconnect` promoted to the
+  registered `field_roles` entry `source.background_run`. [verified
+  2026-07-27 — `gen_registry_header.py`/`gen_docs_tables.py` (14 files)/
+  `gen_spec_pages.py` (20 files) --check, native 31/31, sd32-ota SUCCESS,
+  canon_lint 0]
+- **Phase C2** — the device catalog evolution: 0xCDSS renumber + new
+  vocabulary fields, one etag bump; clients (probe/MFP/webui-js/sim),
+  devicecatalog goldens, fixture re-capture. [landed — see the sim-fidelity
+  milestone entry below]
+- **Spec fresh-eyes panel (operator-ordered, 2026-07-27)** — 15 vacuum readers
+  + convergence: `docs/slopsync/reviews/spec-panel-2026-07-27.md`. 8
+  consistently-hated themes, 9 consistently-liked (core doctrines validated
+  cold: shedding table 13/15, honesty clauses 12/15, closed motion surface
+  12/15, readiness gate 11/15, ground-truth echo 10/15, RFC-045 redesign
+  9/15). Hate #2 (`source.background_run` unshipped) required no new spec work
+  — it was exactly Phase D, independently validated.
+- **Phase C3** — RFC-049 (omnibus of 7 small normative fixes, spec/registry
+  side; hub behavior deferred to Phase D per sub-item) + the RFC-044
+  correction, both appended to `RFC-QUEUE.md`; RFC-050 appended DRAFT only.
+  Numbers allocated: CBOR key `48 requested_curve_family`; NACK `0x0504
+  INVALID_NAMESPACE` (transfer band, next free after `BLOB_REFUSED` 0x0503 —
+  **judgment call, flagged for veto**: the `0x00xx` protocol band was the
+  alternative); registry `limits` gained `segment_handoff_k` (1.5, first
+  non-integer limit), `pairing_gesture_boot_count` (3),
+  `pairing_gesture_max_uptime_ms` (10000). SPEC touched: §9.6, §7.2/§12.6,
+  §8.4 + §18-8/9, §14.3, §12.3, §18-20, Appendix B (key 48) and G (3 limit
+  rows). Frozen `conformance/mini_catalog.hpp` + fixture untouched. [verified
+  2026-07-27 — `gen_registry_header.py`, `gen_docs_tables.py` (14 files, 108
+  dictionary terms), `gen_spec_pages.py` (20 files), `gen_channel_map.py` all
+  --check green + native 31/31 exit 0 + `pio run -e sd32-ota` SUCCESS (RAM
+  27.4% / 89,920 B, flash 26.1% / 1,709,528 B) + canon_lint 0]
+- **Phase D — RFC-042 session staleness, in full.** `HubSessionState::STALE`:
+  silence (deadman/idle-reap) and out-of-band transport loss
+  (`Hub::detachTransport()`) mark a session STALE via shared `Hub::markStale()`
+  instead of tearing it down — slot, `session_id`, grants, intent ring,
+  readiness all RETAINED, ownership released unconditionally, nothing
+  latched. `Hub::reviveIfStale()`/`Hub::handleReattach()` implement
+  resumption; `Hub::findEvictableStale()` implements slot-pressure reclaim
+  (best-effort GOODBYE `SLOT_RECLAIMED`). New registry: NACK `0x010D
+  SLOT_RECLAIMED`, `session_event_kinds` 4/5. RFC-046's general
+  cross-BINDING-TYPE migration is NOT implemented — this hub has one WS
+  binding and falls back to duplicate-identity eviction per §6.3's own MAY
+  clause.
+- **Phase D — RFC-045 hub behavior.** `Hub::releaseSessionSources()` runs no
+  Stop-vs-Continue policy dispatch: every release is
+  `onSourceOwnership(source, 0, reason)` and nothing else.
+  `HubDelegate::sourcePolicy()`/`onDeadmanStop()` remain declared (frozen
+  delegate interface) but are dead from the hub's side. **Judgment call,
+  flagged for veto:** SPEC §11.3's pre-Phase-D text claimed the
+  hub-autonomous `background_run=false` case still latches STOP with
+  `cause=deadman`; no public Hub API lets a delegate latch that honestly, so
+  the SPEC text was fixed to match the implemented reality instead.
+- **Phase D — `source.background_run` shipped** on `pattern-state` (0x1200,
+  settingKey 7; paired 0x3200 key 7; bit 6 of `enabled_mask`, unconditionally
+  1). NVS-persisted (`pat_bgrun`). `SlopDriveHubDelegate::onSourceOwnership()`
+  stops `PatternEngine` on release iff the flag is false. SPEC §18-21 reworded
+  from "specified, not shipped" to shipped.
+- **Phase D — RFC-049(b)** — `requested_curve_family` (CBOR key 48) echoed
+  verbatim in `granted_publishes`/WELCOME/GRANT alongside the effective
+  `curve_family` (45). **RFC-049(c) first half** — the firmware's
+  hardcoded `1.5f` now reads `slopsync::limits::segment_handoff_k`.
+- **OPEN — RFC-049(c) second half (sparse-segment scheduling-depth backstop)
+  EVALUATED AND NOT LANDED.** A `commitWaveform()` variant bounding a
+  lookahead-less handoff against its own chord was implemented, then reverted
+  after it measurably shrank `test_slopmotion`'s "Mixed feasible/infeasible
+  chain settles centered and STAYS there" regression bench's characterized
+  defect (-23.6 mm -> -9.4 mm) via an unverified interaction with the
+  centering/reshape control loop. Recorded in `slopmotion.hpp`'s
+  `commitWaveform()` comment; left open. [2026-07-28]
+- **Phase D tests** — new `test/native/test_slopsync_staleness/` (5 cases);
+  rewritten expectations across `test_slopsync_safety`, `_m3b`, `_m4b`,
+  `_m4c`, `_streamingress`, `_devicecatalog`. [verified 2026-07-28 — native
+  suite all environments PASSED (exit 0 per TRAPS T10), `pio run -e sd32-ota`
+  SUCCESS (RAM 27.4% / 89,920 B, flash 26.1% / 1,712,352 B), canon_lint 0,
+  catalog_lint OK (32 entries), all four generators --check green, webui wire
+  test ALL PASS]
+- **Phase E — BLE GATT `ITransport` + UDP discovery responder + advertising
+  (2026-07-28).** BUILD/HOST-VERIFIED ONLY at landing — live status in the
+  DEPLOY + LIVE-VERIFY entries below (C-8).
+  - NimBLE returns: `h2zero/NimBLE-Arduino@^2.3.0` (resolved 2.5.0);
+    `-DBLE_ENABLED` restored to `env:s3_main` (propagates to `sd32`/`sd32-ota`
+    by inheritance).
+  - `src/comms/SlopSyncBleTransport.{h,cpp}` — the NUS-shaped GATT
+    `ITransport` (RFC-043), UUIDs
+    `534C4F50-5359-4E43-8000-0000000000{01,02,03}` transcribed from
+    registry.yaml `ble_identity` (the codegen does not emit that section as
+    C++ constants — documented fallback, not a spec gap). Mirrors
+    `SlopSyncAsyncWsTransport`'s SPSC-ring + deferred-attach/detach pattern
+    for TRAPS T5. 2 concurrent connections (`SlopSyncBlePort::kSlots`). A
+    failed `notify()` IS the §13.1 notify-queue-depth signal. MTU 20 B
+    pre-negotiation, up to 247 (250 requested at init). Advertising: service
+    UUID + shortened name "SD32" in the primary payload, full "SlopDrive-32"
+    in the scan response, one MSD flags byte (company id `0xFFFF`) carrying
+    `ble_adv_flags` bit0 `pairing_window_open`/bit1 `ws_available`.
+  - `src/comms/SlopSyncUdpDiscovery.{h,cpp}` — the UDP responder (RFC-046
+    item 5), port 21328, built on raw lwIP sockets NOT `AsyncUDP`: this
+    project's LDF does not resolve the core-bundled `AsyncUDP.h` (confirmed
+    live — build failed with LDF's own "no local provider" message). Polls
+    non-blocking `recvfrom()` from the hub task's 5 ms tick — no foreign-task
+    callback at all, so TRAPS T5's defer discipline does not apply here.
+    `DiscoveryRateLimiter`: fixed 8-slot ring, 1 reply/source IP/s, no heap.
+  - `include/comms/SlopSyncDiscoveryWire.h` — pure byte encode/decode for
+    DISCOVER_PROBE/DISCOVER_REPLY, zero Arduino/NimBLE/socket dependency,
+    host-testable (`test/native/test_slopsync_discovery`, 8 cases) — a
+    documented fallback for the identity/port numbers a socket binds to and
+    an advertising payload builds from, not spec-gap numbers.
+  - `hub_instance_id` (RFC-048) — generated once via `esp_random()` x2,
+    persisted in NVS, fed to `slopsync::Hub::setHubInstanceId()` and the UDP
+    responder's snapshot.
+  - slopsync-core additive changes (per the CANON-frozen "extend, never
+    reshape" rule): `Hub::setHubInstanceId()`/`hubInstanceId()`,
+    `Hub::setEndpoint()`, `Hub::pairingWindowOpen()`, `Hub::catalogEtag()`;
+    `WelcomeMsg` gained `ws_port`(46)/`ipv4`(47)/`hub_instance_id`(identity
+    key 5). WELCOME's `limits.max_frame` changed from a hardcoded 512 for
+    every transport to `min(transport.properties().mtu, kFrameBufferCapacity)`
+    — a no-op for WS, honest for BLE, and a fix for a pre-existing §13.1
+    violation.
+  - Known limitation: no generic control-frame fragmentation over a small
+    BLE ATT MTU — matches SPEC §18 item 22's own "no reference
+    implementation" admission.
+  - [verified 2026-07-28 — native suite 31/31 (exit 0 per TRAPS T10); `pio
+    run -e sd32-ota` SUCCESS, **RAM 27.4%→29.4% (89,784 B→96,436 B, +6,652 B),
+    flash 26.1%→28.6% (1,710,489 B→1,876,816 B, +166,327 B)**; canon_lint 0;
+    catalog_lint OK (32 entries, unchanged); all five generators --check
+    green — registry.yaml/SPEC.md not touched this phase]
+  - **Main-loop review (2026-07-28): all three flagged judgment calls
+    ACCEPTED** (raw-lwIP responder over AsyncUDP; `max_frame = min(mtu, 512)`;
+    no BLE control-frame fragmentation).
 
-## Fixed in the 2026-07-27 truth-scrub pass
+- **DEPLOY + LIVE-VERIFY (2026-07-28 overnight bench, motor unplugged) — fw
+  2.1.77 → 2.1.78, ten-item checklist, all closed.** Build RAM 29.4% /
+  96,436 B, flash 28.6% / 1,876,816 B; firmware via `/api/ota`, web UI via
+  `/api/ota/fs`. Pre-existing drift caught by the deploy (not a regression):
+  the previously-"live" 2.1.77 was a stale build still advertising
+  `has_dongle`; post-deploy `/api/capabilities` shows no `has_dongle`,
+  `has_ble`/`slopsync_ble` true, and a new `udp_discovery_port` field.
+  [verified 2026-07-28 — `/api/capabilities` diffed before/after]
+  - **(a) MFP LiveWireTest ×2 back-to-back, no reboot — FIXED + VERIFIED**
+    (client-side C# only, fw unchanged at 2.1.81). Cause: auth enforcement
+    (fw 2.1.59) needs a `/uitoken` mint in HELLO for `control` tier;
+    `clients/mfp-slopsync/LiveWireTest.cs` never minted one, so the
+    motion-grant rate read `NaN`. Fix: `MintUiTokenAsync()` (`GET /uitoken`,
+    `Convert.FromHexString`, 3× retry on 429), token passed at both
+    `HelloAsync` call sites. `/uitoken` is self-serve for LAN clients by
+    design — no pairing, PIN, or physical gate; its only defenses are rate
+    limiting, a 60 s single-use TTL, and the deliberate absence of CORS
+    headers (documented limit, not a gap). Both runs ALL HARD CRITERIA PASS,
+    identical `boot_id=0xFA5951E1`, `granted motion-input rate == 50 Hz
+    (granted=50.00)`. [verified 2026-07-28 — two live runs vs fw 2.1.81,
+    `dotnet build -c Release` 0/0]
+  - **(b) Fake-home — PASS.** `/api/machine/homeoverride` is a 410 tombstone;
+    fake-home is in-band via `tools/slopsync_probe.py --bench-home` (INTENT
+    0x3101 op 2 `force_home`), a deliberate ROUND TRIP;
+    `--bench-home-no-revert` added to leave the override ON for a session;
+    left `homed=true home_override=true measured_stroke_mm=250`. [verified
+    2026-07-28 — `/api/status` before/after]
+  - **(c) Full probe pass — PASS, 56/0/2** (opt-in skips: `estop_assert`,
+    `bench_home`). Confirms the C4 renumber is what the live catalog serves,
+    catalog etag **`9275f578ada7d314`**, WELCOME `ws_port`(46)=82 /
+    `ipv4`(47)=192.168.1.229 / `hub_instance_id`(identity_keys 5)=
+    **`0x28F1295A0510B8E1`**. Two FALSE FAILURES were in the probe, not the
+    firmware, and fixed in `tools/slopsync_probe.py`: `FIELD_ROLES` was a
+    stale 16-entry hand-copy of registry.yaml's 32-entry `field_roles` map;
+    `pattern_mask`'s homed/estop cross-check tested the whole `enabled_mask`
+    byte, but `source.background_run` (bit 6) is unconditionally 1, so every
+    unhomed session was a guaranteed false CONTRADICTS (bit 6 now masked
+    off). [verified 2026-07-28 — probe run before (2 FAIL) and after (0
+    FAIL)]
+  - **(d) STALE/reattach live (RFC-042), the `attachTransport()` STALE-slot
+    clobber — FIXED + VERIFIED, fw 2.1.78 → 2.1.80.** Root cause
+    (`lib/slopsync/include/slopsync/hub/hub_impl.hpp`): `attachTransport()`
+    picked a slot by `slot.transport == nullptr` ALONE. A STALE parked slot
+    has a null transport by definition, so a brand-new, unrelated
+    `instance_id` was handed the parked slot before `handleHello()`'s
+    reattach-by-identity logic ever ran. **Governance ruling (main loop,
+    2026-07-28):** the CANON freeze on `hub.hpp`/`client.hpp` covers PUBLIC
+    API SHAPE (extend, never reshape) and does not shield an internal
+    `hub_impl.hpp` bug that defeats a stamped RFC — fix authorized, no
+    signature changed, frozen artifacts untouched. Fix: prefer a genuinely
+    free slot, else fall back to `findEvictableStale()` — the SAME
+    oldest-parked policy `handleHello()`'s slot-pressure branch already used
+    (RFC-042 item 5) — severing the victim's transport first. Tests:
+    STALE-05/06/07. Native suite 31/31 exit 0; `pio run -e sd32-ota` SUCCESS
+    (RAM 29.4% / 96,436 B, flash 28.7% / 1,877,624 B). Live: 2× kill+reattach
+    kept the ORIGINAL `session_id`, an interleaved third run confirmed the
+    interloper got its own `session_id` while the parked session survived,
+    and 20 rapid connect/hard-kill cycles ran 20/20 with uptime monotonic and
+    heap flat at ~13.6 KB free. [verified 2026-07-28 — live repro + code
+    read, native 31/31, live re-verification]
+  - **(e) `background_run` 0/1 disconnect behavior — PASS, both directions.**
+    With key 7 = 1 the pattern still reads `running=true` from a second
+    client after the first disconnects; with 0 it reads `running=false`.
+    [verified 2026-07-28 — scripted 2-client wire test]
+  - **(f) UDP discovery — PASS** (unicast, broadcast, rate limit). Unicast to
+    192.168.1.229:21328 returned a 76-byte DISCOVER_REPLY matching the WS
+    side. Broadcast failed only from a wildcard-bound socket on this
+    multi-homed Windows host — test-host artifact, not a device gap. 3
+    probes in ~0.1 s got exactly 1 reply (1/source/s limit). [verified
+    2026-07-28 — raw-socket scripts]
+  - **(g) `hub_instance_id` stability — PASS.** `0x28F1295A0510B8E1` across
+    the OTA reboot, a deliberate re-flash reboot, and the UDP reply.
+    [verified 2026-07-28]
+  - **(h) `requested_curve_family` (CBOR key 48) — PASS.** A HELLO publish
+    wish with `curve_family`(45)=3 (`step`) came back as `{45: 1, 48: 3}`:
+    key 48 verbatim-echoes the wish, effective key 45 shows `curve_policy`
+    downgraded it to c1_cubic — RFC-049(b) working as designed. [verified
+    2026-07-28 — hand-built HELLO wish + WELCOME decode]
+  - **(i) Heap beacon — DIAGNOSED + MITIGATED (HEAP RELIEF pass, fw 2.1.80 →
+    2.1.81).** The BLOB `ConnectionResetError` had TWO mechanisms: (1)
+    `SlopSyncAsyncWsTransport::write()` classified `BLOB_CHUNK` (0x1B) as
+    ordinary control, so a catalog transfer outrunning the client's drain
+    rate armed the control-stall-then-close timer (catalog is 24,581 B / 129
+    chunks); (2) genuine heap-exhaustion PANIC — `AsyncWebSocketClient`
+    allocates a frame copy BEFORE checking the 32-deep queue, so up to ~10 KB
+    could sit on a heap with only ~15 KB free and `maxblock` as low as
+    7,668 B (TRAPS T2). ELF inventory named the largest non-mandatory
+    internal-RAM reservation: `AppLog.cpp`'s `/api/log` `WebRingSink` (≈17.8
+    KB BSS, `httpTask`-only). **Fixes:** `BLOB_CHUNK` got its own
+    backpressure class, gated on `limits::blob_chunks_in_flight`=4 (RFC-050)
+    — a pure HOLD, never the stall timer; and `WebRingSink` moved to PSRAM
+    (`heap_caps_malloc(MALLOC_CAP_SPIRAM|MALLOC_CAP_8BIT)` + placement new).
+    **Measured:** RAM 29.4% / 96,436 B → **24.1% / 78,948 B (−17,488 B)**,
+    flash 28.7% / 1,877,776 B → 28.5% / 1,869,436 B; boot heap free
+    **15,320 B → 32,840 B (2.1x)**, `maxblock` **7,668 B → 22,516 B (2.9x)**;
+    steady state free ~31,900 B / min ~15,280 B, vs the old baseline's min
+    touching 84-528 B. The 129/129-chunk catalog BLOB now completes every
+    time; probe full run 47/0/4. [verified 2026-07-28 — live BLOB repro
+    before/after ×2 each, heap beacon before/after OTA, RAM/flash
+    before/after, native 31/31 exit 0, probe 47/0/4, canon_lint 0]
+    - **Residual (heap):** under a much heavier combined load (full catalog
+      BLOB + a 29-channel subscribe-everything batch + a bench `force_home`
+      INTENT inside ~2.7 s), fw 2.1.81's low-water mark touched **60 bytes
+      free** (steady ~31 KB, `min=60` a sharp transient, no crash). Relieved
+      to **164-216 B** by the STATE-coalescing congestion wire-up (Morning
+      ruling item 1, fw 2.1.85) and now owned by ACTIVE TASK 1.
+    - **The one PANIC reproduced on the fixed 2.1.81 was NOT a heap event** —
+      root-caused and fixed as the parked-slot safety broadcast, below.
+    - **Hardware/tooling trap (TRAPS-worthy, no TRAPS entry found for it):**
+      opening `COM11` via `pyserial` for read-only monitoring RESETS the
+      device (`Reset reason: USB`) via the ESP32-S3's native USB auto-reset
+      circuit — confirmed live twice. Serial monitoring is not passive on
+      this hardware.
+  - **(j) BLE advertising — PASS (partial), real radio, real scan.**
+    `BleakScanner.discover()` found address `20:6E:F1:31:74:6D`, name
+    **"SlopDrive-32"**, service UUID
+    `534c4f50-5359-4e43-8000-000000000001`. `manufacturer_data` came back
+    empty `{}`. **CLOSED 2026-07-28 (later session):** phone + nRF Connect
+    proved a real firmware gap, not OS filtering — the 31-byte advertisement
+    had no room for the MSD record and `addData()` failed silently
+    unchecked; MSD moved to the scan response (fw 2.1.84, see the BLE
+    ADVERTISING MSD FIX entry below, TRAPS T14). [verified 2026-07-28 — live
+    `bleak` capture]
+  - **Also from this session:** a bad manual `curl` POST to `/api/ota/fs`
+    with no multipart body wedged `WebUI::update()` for 209 s — test-harness
+    caused, not a firmware regression, never recurred. The reset-reason gap
+    it exposed is CLOSED: boot now logs `esp_reset_reason()` by enum name,
+    WARN-level for anything but POWERON/SW so it lands in the protected
+    Warn+ log sub-ring instead of the Trace/Debug/Info ring the 10 s heap
+    beacon recycles inside a minute. [verified 2026-07-28 — `Reset reason:
+    SW` in `/api/log` after the 2.1.79 → 2.1.80 reboot]
+- **PARKED-SLOT SAFETY BROADCAST — spontaneous reboots FIXED (2026-07-28
+  overnight, fw 2.1.81 → 2.1.82).** The three unexplained mid-probe reboots
+  above were ONE bug (TRAPS T13), not the heap: `Hub::broadcastSafetyNow()`
+  fanned out to a parked slot whose `detachTransport()` had already nulled
+  `slot.transport`, loading a vtable from address 0
+  (`Guru Meditation Error ... LoadProhibited`, confirmed 2× via serial dump +
+  `addr2line`). Fix (`hub_impl.hpp`, same internal-only authorization
+  precedent as (d) above): `broadcastSafetyNow()` skips null-transport slots
+  — a deliberate SKIP, not a tracked failure, since tracking would age a
+  parked session toward eviction for a send never attempted;
+  `sendFrameToTracked()`/`sendNackTracked()` also refuse a null transport.
+  Regression test STALE-08 (host `SIGSEGV` with the guards removed, PASS
+  with them). [verified 2026-07-28 — serial register dump + addr2line, host
+  regression test both polarities, `pio run -e sd32-ota` SUCCESS (RAM 24.1% /
+  78,948 B, flash 28.5% / 1,869,456 B), deployed via `POST /api/ota` +
+  `X-OTA-Token`, FIVE consecutive probe runs `--estop --bench-home
+  --bench-home-no-revert` at 50/0/3 each, zero `ConnectionResetError`, zero
+  reboots, uptime rising 64,877 → 84,620 ms]
+- **Sim fidelity (SlopDeck milestone 1) — LANDED (2026-07-28 overnight).**
+  `sim/slopsim` gained `--profile device|alien|minimal` (default `device`).
+  `device` = literally `slopdrive::buildSlopDriveCatalog()`, **44 channels
+  (12 spec-core + 32 device-range), 24,581 B, etag `9275f578ada7d314` —
+  matching the LIVE device's etag**, independent proof of byte-identical
+  fidelity; write plane restored for `move`/`home`/`config_set`/
+  `pattern_cmd`. `alien` = the prior `SlopSimCatalog.h` benchrig catalog, 21
+  channels / 4,272 B, now opt-in. `minimal` = literal device-catalog subset,
+  spec-core + `motion`/`move`/`home`, 15 channels / 2,442 B.
+  `webui/test/fixtures/slopsim-catalog.{bin,etag}` re-captured; the sim's
+  3× `[FAIL]` + write-plane `FATAL` are fixed. [verified 2026-07-28 —
+  `slopsync-wire.test.mjs` and `slopsync-sim.mjs` ALL PASS against a fresh
+  `device` sim, 3-profile connect/HELLO/catalog/write smoke ALL PASS, `npm
+  run check` ALL PASS, canon_lint 0]
+- **Sim fidelity 19-channel follow-on (2026-07-28) — LANDED, morning ruling
+  item 3.** ONE-WAY PARITY ruling executed: the machine is truth, the sim
+  conforms, the firmware is never edited to close a sim gap. The 19
+  advertised-but-inert entries (machine-modes, SlopMotion tuning, fray-d
+  pattern-advanced + 6 modifier lanes, preset roster/store/cmd,
+  machine-admin) now have real, firmware-mirrored behavior; their writes
+  previously NACKed `UNKNOWN_CHANNEL`. No catalog change — fixture re-capture
+  at etag **`b69eb06249ebe73a`**, byte-identical to the committed fixture and
+  matching the live device's post-wire-strings etag. Parity is by
+  construction where possible: the sim compiles the firmware's own
+  `advpat::Settings`/`BaseControl`/`Modifier` and `PatternPresetStore.h`
+  directly. [verified 2026-07-28 — sim rebuild clean, fixture etag match,
+  `slopsync-sim.mjs` and `slopsync-wire.test.mjs` ALL PASS, `npm run check`
+  ALL PASS, canon_lint 0]
+  - **Firmware quirks mirrored deliberately, not defects** (recorded so a
+    future client author does not "fix" either side): preset save captures
+    only speed/accel + the 6 modifier blocks, never `master` or the depth
+    pair; the six modifier-lane channel ids are NOT in `advpat::BaseId`
+    order on the wire, while the writer/preset key arithmetic both use
+    `BaseId` order; machine-modes keys 1/2 are permanent gaps on both sides.
+  - **Sim limitation, still open:** `SimPattern` does not consume `_ap` via
+    `advpat::Settings::planStroke()`, so `ap_mode` and the 6 modifier lanes
+    are wire-only in `sim/slopsim` with no motion effect — porting the
+    firmware's per-half-stroke scheduling loop was judged materially larger
+    than this pass.
 
-- `lib/slopsync` client idle-PING interval bug (never switched off the idle
-  interval; SPEC §6.5). [fix applied; verified 2026-07-28 — native suite
-  31/31 exit 0, reproduced fresh this session and in every gauntlet run
-  since Phase B]
-- `webui` session.js EVENT fan-out bug (log/anomaly frames double-dispatched
-  as sessionEvent). [fix applied]
-- `platformio.ini` env:esp32-c5-dev1 upload baud matched the documented-broken
-  rate for the C5. [fix applied]
-- ~50 confirmed lying comments/stale docs across all areas; docs-site
-  generator unbroken + regenerated. [fix pass same date]
+- **Morning ruling batch (operator, 2026-07-28, on the overnight stamp
+  list).** Sequencing ruled: Phase G close-out → (2) wire strings → (3) sim
+  parity + SlopBench → (1) coalescing → (5) comment pass; deploys serialize.
+  - **Morning ruling item 1 — STATE-coalescing congestion wire-up. Ruling:
+    COALESCE, not backpressure. LANDED (fw 2.1.84 → 2.1.85).** The
+    coalescing engine (`RetainedStore` + per-subscriber pacing +
+    `shedDecision()`) was already correct and normatively tested; the gap
+    was that `Hub::setCongestionLevel()` was never called from
+    `src/comms/SlopSyncAsyncWsTransport.{h,cpp}`, so `congestionLevel` sat
+    at 0 forever on hardware and shedding never engaged. Wired:
+    `pollCongestionLevel()` classifies 0/1/2 from `queueLen()` watermark
+    hysteresis (SPEC §10.3's 50%/1 s, 20%/5 s) plus the control-stall timer
+    for severe. Bench ×3: heap low-water **60 B → 164–216 B** (~3x), no
+    crash, 45/0/6 every run. [verified 2026-07-28 — commit `3323e44`, native
+    31/31 exit 0, sd32-ota SUCCESS (flash +840 B), canon_lint 0, 3x live
+    repro on fw 2.1.85]
+  - **Item 2 — punctuation pass:** approved, DONE (fw 2.1.82 → 2.1.83). See
+    the WIRE-STRING PUNCTUATION EVOLUTION entry below.
+  - **Item 3 — sim division of labor: `sim/slopsim` is the 1:1 DEVICE TWIN,
+    PARITY IS ONE-WAY** — the machine is the truth, the firmware is NEVER
+    edited to close a sim gap. The "be anything" role moved to
+    **SlopBench**, LANDED same date: `.bench` config-file catalog builder
+    with zero hardcoded channel knowledge, generic INTENT-clamp/echo/
+    STATE-mirror write plane, 3 example configs. [verified 2026-07-28 —
+    commit `317b19d`, build exit 0, `smoke_test.py` 12/12 PASS across all 3
+    configs, canon_lint 0]
+  - **Item 5 — comment standardization DONE.** DOCTRINE §4's comment law
+    landed, then a codebase-wide pass (~130 files) plus a follow-up: 855
+    section banners across 105 files repadded to column 80; ~23 stale
+    `CLAUDE.md §N` pointers repointed. Two law amendments: banner width is
+    column 80 (was 76), and RFC-nnn/T-nn inside a banner NAME are POINTERS,
+    not the numbering C-12 forbids. TRAPS gained T15/T16/T17.
+    `lib/SharedProtocol/SharedProtocol.h` DELETED (C-9: zero includes
+    tree-wide, never wired via lib_deps). [verified 2026-07-28 — native
+    31/31 exit 0; sd32-ota SUCCESS RAM 78,948 B byte-identical, flash
+    1,870,292 B vs a fresh-rebuild baseline of 1,870,276 B (+16 B, the one
+    deliberate log-string edit); all trees/tests green; canon_lint 0]
+- **SlopSync repo split — EXECUTED and PUSHED (2026-07-28).** SlopSync is its
+  own first-class repo (spec suite + registry/codegen, `lib/slopsync`,
+  `clients/js` + `clients/mfp`, `hub/slopbench`, verification tools,
+  `test/native/test_slopsync_*` minus devicecatalog/discovery, `docs-site`);
+  SlopDrive-32 stays the machine repo and consumes it via a pin. Ruled shape:
+  two plain side-by-side repos + a VS Code multi-root workspace, explicitly
+  NO submodules and NO subtree merges. Licensing: MIT for SlopSync code, CC-BY
+  4.0 for spec documents, a NOTICE reserving the SlopSync name for conformant
+  implementations; SlopDrive-32's own license unchanged. Mechanics that bind:
+  `platformio.ini` uses `symlink://../SlopSync/lib/slopsync`;
+  `tools/canon_lint.py` carries the PIN RULE (FAIL if `../SlopSync` missing
+  or HEAD != pin); `sim/slopsim/CMakeLists.txt` includes the sibling. Pin
+  file: `slopsync.pin` at repo root — its one home. [verified 2026-07-28 —
+  SlopSync main pushed (PRIVATE), HEAD == pin, canon_lint 0, catalog_lint OK
+  (32 entries), native 31/31 exit 0, sd32-ota SUCCESS RAM 24.1% / 78,948 B
+  flash 28.5% / 1,870,292 B, c5_waveshare SUCCESS, all webui tests ALL PASS].
+  Both repos have origins and SlopDrive-32 tracks
+  `origin/feat/cpp20-slopsync` [verified 2026-07-31 — `git status -sb`].
+- **Phase G riders — STANDING DOCS RULES (operator, 2026-07-28); all five
+  confirmed executed.** Riders 1-3 (banner hex ids gone, historical docs
+  header, CHANNEL-MAP Old-column retirement note) are one-shot and done.
+  Riders 4-5 still bind future docs work: **Rider 4** register/channel
+  reference pages follow ASD-STE100 Simplified Technical English (no em/en
+  dashes, ≤20/25 words per sentence, imperative steps, a banned-word list) —
+  scope is register/channel reference pages ONLY, wire-visible catalog
+  strings are NOT rewritten by this rider. **Rider 5** the gold-standard bar:
+  house voice (de-AI'd), legible standalone mermaid diagrams, clear per-page
+  topic scope, the LINK RULE (a named reference with a home gets linked),
+  aesthetic matching `webui/src/style.css`, and `DEMO-CANDIDATE:` markers for
+  spots agents mark but never build.
+- **Phase G LANDED (2026-07-28): docs gold-standard pass + channel-grid page
+  + close-out gauntlet.** 1 initial pass + 9 correction sub-sweeps (81
+  findings, 77 fixed, 4 left open) plus an independent close-out
+  verification round. **35** `DEMO-CANDIDATE:` markers exist across docs
+  (implementation parked — see WEBUI PHASE KICKOFF below). Truth fixes: the
+  plain-language pages now describe RFC-045's landed park-not-evict behavior
+  instead of the pre-RFC-045 deadman-forces-a-stop model; the session-roster
+  overclaim is gone; the BLE overclaim downgrade is committed. A tree-wide
+  markdown link verifier found 38 broken links (36 were RFC-heading-retitle
+  fallout), second run 0 broken. [verified 2026-07-28 — link checker 0
+  broken; `mkdocs build --strict` 0 warnings; all six generators --check
+  green; canon_lint 0; catalog_lint OK (32 entries); native 31/31 exit 0;
+  `pio run -e sd32-ota` SUCCESS **RAM 24.1% / 78,948 B, flash 28.5% /
+  1,869,456 B** — byte-identical to the PARKED-SLOT SAFETY BROADCAST build,
+  proving the catalog banner-comment strip moved zero bytes]
+- **Phase C4 LANDED (2026-07-28; execution spec was `tools/gen_channel_grid.py`'s
+  ALLOC dict, stamped 2026-07-27 via the channel-grid visual):** 22 device
+  channels renumbered onto the **family-nibble sub-slot convention** — slot =
+  [family][member], member 0 = family master; the MIRROR RULE (twin channels
+  share domain+family+member digits across class bands); family F =
+  admin/meta in every band. Per-channel moves are in
+  `docs/slopsync/CHANNEL-MAP.md` (its one home). `pattern-state` (`0x1200`)
+  did NOT move — Phase D's `background_run` field rides along untouched.
+  `gen_channel_grid.py` now PARSES the live catalog instead of an embedded
+  dict, gained `--check`. The banner-hex-id and historical-doc-header
+  follow-through this deferred to Phase G is DONE (riders 1-2 above).
+  [verified 2026-07-28 — native 31/31 exit 0 incl. `test_slopsync_staleness`;
+  `sd32-ota` SUCCESS RAM 27.4% / 89,920 B, flash 26.1% / 1,712,336 B;
+  canon_lint 0; catalog_lint OK (32 entries); all generators --check green;
+  webui wire test + MFP `WireSelfTest` ALL PASS]
+- **RFC-050 — LANDED v1.0 spec/registry side only (2026-07-28); implementation
+  deferred and still unimplemented.** New frame type `0x20 BLOB_DONE` (dir
+  any, plane raw): `blob_keys` identity fields + `status:u8` (0
+  verified-complete, 1 hash-mismatch, 2 aborted), sent by the RECEIVER,
+  idempotent like CATALOG_READY — chosen over the draft's recommendation
+  because it generalizes to the client→hub direction (a STORE import). New
+  `limits.blob_chunks_in_flight` = 4. SPEC §8.4 gained the normative
+  backpressure decision table (congested with budget→send, at budget→hold,
+  recovered→resume, sustained >5 s→abort with one NACK BUSY +
+  `retry_after_ms`); §18 item 24 records spec-landed / implementation-
+  deferred. The reference hub gates `BLOB_CHUNK` on the budget but emits no
+  `BLOB_DONE` and sends no BUSY NACK on sustained congestion.
+- **RFC-048 — LANDED 2026-07-27 (Phase C1), superseding its own narrower
+  original scope:** the well-known channel-name vocabulary shipped as
+  RENDERING.md §2's STANDARD tier + capability interfaces. Two questions are
+  formally PARKED (not forgotten), preserved verbatim in RENDERING.md §2.2:
+  multi-axis and actuator types / vibrator support.
+- **OSSM-Sauce opcodes — ruled N/A (2026-07-27):** zero OSSM protocol surface
+  remains in-tree and no emulation shim will ever be built. Opcode
+  compatibility, if wanted, is a third-party client-side adapter.
+
+- **SPEC §18 status reconcile** — all 24 known-limitations items re-checked
+  against landed state plus a direct code read; 5 were stale and reworded, 19
+  left accurate. Item 8 (blob `INVALID_NAMESPACE`) reworded from
+  "Implementation: Phase D" to "open, no phase currently owns it" —
+  `Hub::resolveBlobBytes` still answers `CHUNK_UNAVAILABLE` for an
+  unregistered `blob.ns`. Item 22 (BLE GATT / UDP discovery) marked shipped +
+  live-verified. Item 23 catalog side landed in Phase C2. Item 24's
+  hold-not-drop half shipped in fw 2.1.81. Still open (SPEC §18's own
+  tracker, not restated elsewhere): no small-MTU control-frame
+  fragmentation; cross-transport migration never exercised live across two
+  bindings; no reference client builds pages from the full
+  rank/aspect/scope/provenance derivation chain; no NACK `BUSY` and no
+  reference `BLOB_DONE` emission on sustained blob congestion. [verified
+  2026-07-28 — direct reads of `hub_impl.hpp`, `blob_req.hpp`,
+  `SlopSyncAsyncWsTransport.cpp`, `SlopSyncCatalog.h`; commit `ea072aa`]
+- **Wire-string punctuation evolution** — fw 2.1.82 → 2.1.83. Em/en dashes,
+  double-hyphens, and banned prose words purged from every wire-emitted
+  `.desc` in `SlopSyncCatalog.h` and from `registry.yaml` desc/note strings —
+  prose only, no keys/numbers/names/refs/status touched. Frozen conformance
+  artifacts were already clean and stayed untouched (C-11/T11 precedent).
+  Catalog etag `9275f578ada7d314` → `b69eb06249ebe73a`; build byte-identical
+  to pre-pass. [verified 2026-07-28 — native 31/31 exit 0; canon_lint 0;
+  catalog_lint OK (32 entries); `mkdocs build --strict` 0 warnings; OTA'd,
+  `/api/capabilities` `fw_version 2.1.83`; probe 50/0/3; BLOB 129 chunks /
+  24,585 B etag-verified; commit `274abc3`]
+- **BLE advertising MSD fix** — fw 2.1.83 → 2.1.84, closes item (j), TRAPS
+  T14. Root cause: the primary advertisement packed Flags+UUID+name+MSD = 32
+  bytes, one over `BLE_HS_ADV_MAX_SZ` (31); `addData()` silently returns
+  `false` and drops only the overflowing record (the MSD, added last) while
+  every setter's return value went unchecked. Fix: advertisement =
+  Flags+UUID+`setShortName()` = 27 B; scan response = complete name + MSD =
+  19 B — the flags byte now rides the scan response (an ACTIVE scan reads
+  it, both `bleak` and nRF Connect do this by default). Every advertising
+  return code now checked and logs on failure. [verified 2026-07-28 — live
+  active `bleak==3.0.2` scan: `manufacturer_data {65535: b'\x02'}` = company
+  `0xFFFF`, payload `0x02` = bit1 set / bit0 clear, matching bench state;
+  `/api/capabilities` `fw_version 2.1.84`; probe 55/0/2 then 45/0/6; native
+  31/31; canon_lint 0]
+## BRITISH-SPELLING TOTAL SWEEP (2026-07-28)
+
+canon_lint.py's `BRITISH_SPELLING_EXEMPT_SECTIONS` keys this exact heading
+text to exempt the illustrative bad-spelling strings quoted below from its
+own camelCase/subword check — do not rename or remove this heading without
+updating that table in the same commit (C-1/C-9).
+
+- **Total sweep** — operator ruling: "every single instance,
+  now and for good." Both linters were already codespell-backed and full-tree
+  clean going in; the gap was that codespell's word regex treats a whole
+  camelCase/PascalCase or combined snake_case token as ONE word. Closed
+  permanently by adding `run_camelcase_check()` to `tools/canon_lint.py` and
+  `tools/slopsync_lint.py`: splits every identifier/filename on case,
+  underscore, digit boundaries and checks every ≥4-char subword against
+  codespell's own dictionary. Result: SlopDrive-32 0 hits; SlopSync 1 hit —
+  `tools/slopsync_probe.py:235` `"waveform_centred"` → `"waveform_centered"`
+  (display text only), which also fixed a drift from this repo's
+  authoritative `kSmAnomalyNames[7]`. Bucket B (wire/NVS/storage keys,
+  flag-do-not-change) was EMPTY. `slopsync.pin` `aa670db3...` →
+  `6317b74e...`. Residual mechanism gap (accepted, out of scope by the
+  operator's chosen mechanism): "fibre"/"vapour"/"colonise" are not in
+  codespell's builtin dictionary at all; none are present in either tree.
+  [verified 2026-07-28 — planted-and-reverted `int colourMode` fired the
+  new check in both repos, clean after revert; SlopSync native 16/16 +
+  slopbench 43/43 + smoke 12/12 + JS/MFP ALL PASS; SlopDrive-32 all native
+  suites PASS, `pio run -e sd32-ota` RAM 24.1% / 78,948 B flash 28.5% /
+  1,870,292 B, canon_lint 0 incl. pin check]
+
+## Landed history (compacted, continued)
+
+- **First live BLE GATT session** — fw 2.1.85, NO firmware change: the Phase
+  E transport, framing, and MTU behavior worked as deployed, first try.
+  SlopSync `1993f95` (pushed) adds `--ble [ADDR]` to
+  `tools/slopsync_probe.py` (bleak 3.0.2 bridged via one background
+  asyncio-loop thread; oversized frames raise `BleFrameTooLarge` per SPEC
+  §13.4's no-fragmentation rule). Client-side bug fixed in the same commit:
+  GATT writes now carry a fixed 5 s timeout (were reusing the recv-poll's
+  decayed 0.5 s and spuriously timing out on GOODBYE). [verified 2026-07-28
+  — live against `20:6E:F1:31:74:6D`: BLE `--listen-only`/`--no-motion` both
+  44/0/6, matching the WS baseline; MTU negotiated 250 (payload 247); full
+  129-chunk / 24,585 B catalog BLOB pulled over GATT and etag-verified; STATE
+  cadence 20.8–22.5 Hz against the 20 Hz grant]
+- **RFC-051 landed: critical-stall parks the session instead of evicting it**
+  — fw 2.1.85 → 2.1.86, SlopSync `c724b25`. A vanished client's link looks
+  CONGESTED before it looks GONE, so §10.4's never-shed stall clock (2 s)
+  always outraced RFC-042's own transport-loss park and destroyed a session
+  a reconnect would otherwise have resumed. `Hub::detachTransport`'s park
+  body is factored into `Hub::parkAndDetach()`, called from the stall-timeout
+  branch instead of `evictSlot`; `SESSION_EVICTED` narrows to admin evict
+  only. Real bug fixed in the same commit: `Hub::pumpSlot`'s frame-read loop
+  assumed nothing inside `dispatchFrame()` could null `slot.transport`
+  mid-loop — `parkAndDetach()` breaks that, caught by a new native test
+  crashing with `SIGSEGV`, now re-checked every iteration. [verified
+  2026-07-28 — new + existing native tests PASS incl. a critical-stall
+  reattach case; both linters clean; `pio run -e sd32-ota` RAM 24.1% flash
+  28.5%; deployed, device confirmed `2.1.85 -> 2.1.86`; live kill-test showed
+  the new park behavior with no `session ... left` line; probe `--listen-only`
+  44/0/6 unchanged]
+- **VERIFICATION POSTURE RULING (operator, 2026-07-28) — bare minimum until
+  current task + UI complete.** Pre-release iteration regime, operator-
+  stamped: the verification floor is compile + lint (canon_lint /
+  slopsync_lint) + the native suite covering the changed area + one live
+  smoke of the actual change after deploy. Dropped until this ruling is
+  lifted: fuzz runs, full-gauntlet sweeps on every touch, sim-parity
+  re-runs when the sim was not touched, multi-round doc verification
+  passes. SlopSync CI still gates every push. Rationale: nobody is using
+  this yet, minor changes are frequent, ceremony per minor change is waste.
+  Lift at UI completion / first release — "UI complete" is scoped in the
+  WEBUI PHASE KICKOFF entry below.
+- **BLE dual-central slot test** — fw 2.1.86, `SlopSyncBlePort::kSlots=2`
+  live-verified: the operator phone (nRF Connect) held slot 0 while the host
+  probe (`--ble`, direct address) claimed slot 1 and ran a full
+  `--listen-only` session to a clean GOODBYE — 44/0/6, phone connection
+  uninterrupted throughout. Third-slot refusal remains untestable on this
+  bench (no third radio). [verified 2026-07-28 — live, both radios]
+- **BLE MSD on air confirmed** — operator observed the MSD company `0xFFFF`,
+  payload `0x02` (bit1 `ws_available` set, bit0 clear) in nRF Connect's
+  parsed AD view against live fw 2.1.85 — the same instrument that found the
+  record missing pre-fix (T14). [verified 2026-07-28 — operator phone, nRF
+  Connect]
+- **Recurring bench facts from this batch (not regressions):** every
+  firmware OTA reboots the device and clears the volatile `home_override`;
+  restore with `slopsync_probe.py --bench-home --bench-home-no-revert`.
+  Native test runs on this host need the winlibs `mingw64/bin` ahead of
+  git-bash's own `/mingw64/bin` on `PATH`, or `pio test -e native` silently
+  crashes (`STATUS_ENTRYPOINT_NOT_FOUND`, TRAPS T10). Bench end-state after
+  this batch: fw **2.1.86**, `homed=true home_override=true` (fake-homed,
+  left ON), `estopped=false`, `measured_stroke_mm=250`.
+
+- **WEBUI PHASE KICKOFF (operator + main loop, 2026-07-28) — scope rulings +
+  plan.** The phase is COMPLETION + ALIGNMENT of the existing catalog-driven
+  Svelte 5 client, NOT a rebuild; the rail/hero identity stays locked.
+  Rulings stamped: **"UI complete" (the VERIFICATION POSTURE lift milestone)
+  = embedded UI + hosted build config + Tauri 2 shell** — the operator took
+  the shell-inclusive scope over the main loop's embedded+hosted
+  recommendation; the bare-minimum verification floor holds for the whole
+  ride. Telemetry redesign PARKED; the 35 `DEMO-CANDIDATE:` markers stay a
+  separate parked pass. **Actual-is-actual:** the firmware's reported
+  position IS "actual" for UI-verification purposes; client-side
+  hardware-health inference is forbidden. Phase centerpiece finding:
+  **RFC-048 vocabulary consumption gap** — the device catalog EMITS the
+  rendering vocabulary and neither `clients/js` nor the webui model consumes
+  any of it; `roles.js`/`heroes.js` predate RFC-048 and hand-guess the chain
+  RENDERING.md later made normative. [verified 2026-07-28 — grep both trees
+  + SlopSyncCatalog.h read]
+  - **WEBUI PHASE KICKOFF plan** (order agreed, each step live-smoked per
+    DOCTRINE §3): 1 truth pass (DONE, below) · 2 Ruling-6: minimal-catalog
+    window controls + pattern gen · 3 Tier-0 RFC-048 alignment (`clients/js`
+    decodes the vocabulary) · 4 founding Tier-1 completion (SlopMotion
+    tuning + fray-d Advanced generator panels) · 5 protocol-surface catch-up
+    (RFC-042 staleness/resume UX, curve-family downgrade visibility, BLE/
+    discovery in link surfaces, knock-and-approve) · 6 widget interface
+    extraction (deliberately LAST, contract from real widgets) · 7 shell
+    tail. **RE-ORDERED (operator, 2026-07-28): the shell jumped from step 7
+    to the FRONT as a feasibility spike.** Steps 2-6 STILL OPEN; live
+    sequencing is in the NEXT STEPS section.
+- **STEP 1 — TRUTH PASS DONE (2026-07-28).** RFC-032 tap-to-move end-to-end
+  live-verified 15/15 via `webui/test/tap-to-move-live.mjs` (Playwright page
+  served FROM the device + an independent wire watcher): two taps landed
+  exactly on the wire and matched the UI cursor + numeral 3-way. **An
+  fs-only flash DOES reboot the device** (`/api/ota/fs` answers
+  `reboot_ms:500`; a stale doc claiming otherwise was fixed).
+  `WEBUI-HANDOFF-RFC-BATCH.md` DELETED (SlopSync repo) per its own
+  instruction, all items grep-verified absorbed/superseded/shipped/verified
+  here. [verified 2026-07-28 — harness ALL PASS ×2 runs, probe 48/0/4,
+  canon_lint 0]
+- **SHELL FEASIBILITY SPIKE (2026-07-28) — COMPLETE, FULL LADDER
+  LIVE-VERIFIED ON THE OPERATOR'S PHONE.** Result: discovery → BLE GATT
+  session (watch tier) → WS upgrade → control tier, with machine-log
+  evidence of the §6.3 same-identity handover. Toolchain installed: rustup,
+  Temurin JDK 17, Android cmdline-tools + platform-36 + NDK.
+  - **M0 desktop shell — LIVE-VERIFIED.** `webui/src-tauri/` (Tauri 2.11)
+    wraps the existing Vite project; a SHELL branch keyed on
+    `TAURI_ENV_PLATFORM` wires native-origin fetch, so embedded-bundle
+    purity is provable by build diff (zero Tauri/blec matches in the device
+    bundle).
+  - **M1 BLE client path.** `tauri-plugin-blec` 0.12 as a WebSocket duck
+    through `createSession({WebSocketImpl})`, a seam `session.js` already
+    had. BLE sessions land at watch tier by design (no HTTP sideband → no
+    `/uitoken`); control arrives with the WS upgrade.
+  - **M2 WS upgrade.** SlopSync `77c275d` decodes WELCOME's `ws_port`/
+    `ipv4`/`hub_instance_id` (additive); upgrade = drop BLE, reconnect WS to
+    the advertised endpoint with the SAME `instance_id` — a clean handover
+    on today's firmware via the duplicate-identity rule.
+  - **M3 Android — DEBUG APK, live on the phone.** Two blec landmines burned
+    down (commit `4fa3a9e`): Android notify/event closures ran on the binder
+    thread via JNI and used `blocking_send().expect()` — a receiver dropped
+    in a disconnect race turned that panic into a nounwind process abort
+    (T5 in Android clothes: foreign-task callbacks must fail soft);
+    write-WITH-response is structurally broken on real Android hardware (one
+    lost ATT-ack wedged the one-op-in-flight GATT queue forever) — c2h
+    writes now go withoutResponse; `subscribe_channel`'s capacity-1
+    `try_send().expect()` also panicked on the first burst — fixed by
+    vendoring the crate (warn-and-drop everywhere, capacity 1 → 64). Ruling
+    from the same round: **no baked-in host** — the shell cold-starts at
+    the discovery surface on both targets.
+  - **Desktop release builds** (first 2026-07-29, rebuilt 2026-07-30):
+    `slopdeck.exe` 16.17 MB, NSIS 3.82 MB, MSI 5.62 MB. Fixed on the way in:
+    `tauri.conf.json` shipped an 800x600 window against a 960 px rail
+    breakpoint (booted the phone layout) — now 1440x900.
+  - **Chrome stacking FIXED (2026-07-29), TRAPS T22** — ShellBar and LinkBar
+    were offset from two different origins and z-index-collided; ShellBar is
+    now topmost chrome, exactly one bar pads for the notch. Guard:
+    `webui/test/shell-chrome-geometry.test.mjs`, deliberately kept OUT of
+    `npm run check` (must not spawn a browser during a firmware build).
+  - 🚩 **STANDING TRAP, burned live twice: `npm run tauri build` REPLACES
+    `webui/dist/` with the SHELL bundle** (`TAURI_ENV_PLATFORM` survives
+    tree-shaking). The firmware path is safe (`build_webui.py` runs its own
+    `npm run build`), but anything trusting `dist/` as-is is not. Rule:
+    after any `tauri build`, run `npm run build` to put the device bundle
+    back.
+  - **Spike-scope shortcuts still owed at flesh-out:** `http://**`
+    capabilities scope; blec upstream issue + vendored-patch retirement;
+    release-build cleartext-traffic flag must be flipped before any release
+    APK; M1/M2 never live-verified on the DESKTOP shell.
+- **FLAGSHIP UI PASS (operator-directed, 2026-07-28) — desktop-shell UX,
+  first slice.** Left nav rail ≥960 px (MACHINE = catalog categories,
+  CONSOLE = Pairing/SlopSync/Log/Display), collapsible mini rail; phones keep
+  the tab strip. **RULING — reserved (wire value 0) ops are NOT rendered**
+  (RFC-034: value 0 of an `action.*` select just keeps the array
+  index-aligned, it is never an operation — these are buttons, not an
+  index-addressed listbox); real ops a session lacks access for stay GRAYED,
+  never hidden. Safety dock redesign: e-stop is an OG-language hazard chip
+  pinned OUTSIDE the scrolling op row. Terse-instruments mode hides
+  `.explain`; **settings pages never hide their descriptions — that split is
+  the ruling.** [verified 2026-07-28 — device-knowledge + settings-model
+  suites + Vite build green, canon_lint 0, render smoke passed]
+- **UX MATURITY PASS (operator-directed, 2026-07-28) — "this feels amateur,
+  not mature".** **RULING — one owner per edge:** shell transport chrome
+  moves to the top under the LinkBar, the safety dock alone owns the bottom.
+  **Desktop = OG fixed-viewport architecture:** at ≥960 px the page never
+  scrolls, the pane is the only scroll region. Rail rebuilt 1:1 to
+  `main:webui/src/features/rail.js`. **Marker jitter/lag mechanisms:**
+  constant jitter = linear interpolation over a ~25 Hz single-sample STATE
+  feed → cubic Hermite in `telebuf.sampleAt()`; intermittent lag =
+  render-clock slew + a 50 ms extrapolation ceiling losing to >100 ms hub-tick
+  gaps → EXTRAPOLATE_MS 80, SLEW_MS_PER_FRAME 4. [verified 2026-07-28 —
+  telebuf sim + Hermite assertions PASS, suites + build green, canon_lint 0,
+  render smoke 25/25]
+- **OG VISUAL LANGUAGE PASS (operator-directed, 2026-07-28) — "apply the
+  visual language everywhere".** Root cause of the amateur look: `Field.svelte`
+  — the generic renderer every settings control goes through — had NO styles
+  at all. The OG control language now lives as style.css defaults + `og-*`
+  utilities (verbatim port from `webui-prerefactor`). **Rail ticks were a
+  real bug, not styling:** the ruler SVG used an abstract 100×100 viewBox
+  with `preserveAspectRatio="none"`, stretching 1px ticks to ~7px — fixed to
+  pixel-true viewBox. **RULING — transport row returns to the top (OG
+  layout)**; e-stop stays in the fixed bottom dock below 960 px, shows in the
+  TransportBar at ≥960 px (both in the DOM, CSS decides). **JITTER ROOT
+  CAUSE FOUND AND FIXED — arrival-time stamping.** STATE frames arrive in TCP
+  clumps (71 of 393 arrivals with identical timestamps) and `telebuf.push()`
+  dropped every duplicate-stamped sample — ~18% of all motion discarded.
+  Fix: arrival time treated as a HINT, stamps reconstructed future-anchored
+  and evenly spaced by an EMA period. **LIVE CONFIRMED — operator, bench,
+  2026-07-28: "the jitter is gone."** [verified 2026-07-28 — canon_lint
+  clean, checks + build green, fs deployed to fw 2.1.86, render smoke 27/27]
+- **PIXEL FIDELITY PASS (operator-directed, 2026-07-28) — "like someone
+  explained it over the phone".** **METHOD CHANGE, standing for all future UI
+  fidelity work:** the OG is extracted from `main`, served under Vite, and
+  screenshotted as PIXEL ground truth
+  (`webui/test/og-reference-shots.mjs`); disputed details are settled by
+  zoomed crops, never memory or prose. Landed: true OG two-line transport
+  buttons from a registry-vocabulary table; zero-padded fixed-width hero
+  numerals; PatternWidget tiles = OG `.pat-grid`. [verified 2026-07-28 —
+  canon_lint clean, build green, fs deployed fw 2.1.86, render smoke 27/27,
+  side-by-side against the OG reference reviewed]
+- **AESTHETIC AUDIT + DENSITY PASS (operator-directed, 2026-07-29)** — "the
+  sliders look bad, the page looks flat". Root cause was density: Field
+  rendered a bounds caption row and every catalog description inline. RULING
+  (amends terse-mode presentation, veto-able): settings descriptions collapse
+  behind a per-field ⓘ toggle; `.field-reason`/`.field-error` stay ALWAYS
+  visible.
+- **CSS DRIFT AUDIT (operator: "honestly diff the css", 2026-07-29)** —
+  computed-style + rule-text diff, both pages live. **ROOT CAUSE of the
+  residual "off" feel: the missing root scale.** OG sets `html { font-size:
+  calc(var(--s) * 16px) }` (17.92 px); the rebuild never set it and pinned
+  body to 15 px, so every rem-based size rendered ~11% smaller uniformly.
+  Fixed. Slider thumb rule text is byte-identical to OG — **"no sliding
+  looking element" is a new design ask, not drift, awaiting operator call.**
+- **INCIDENT: HEAP-STARVED HTTP → PANIC REBOOT UNDER SESSION LOAD (2026-07-29)
+  — DIAGNOSTIC ONLY; fixed by the FW 2.1.87 entry below.** Several concurrent
+  WS sessions plus repeated 270 KB page serves left WS STATE delivery perfect
+  while HTTP crawled to 5-8 s loads and sys heap logged `min=60` bytes
+  against ~32 KB post-init headroom; ended in a PANIC — the second
+  unexplained PANIC on 2.1.86 — no backtrace existed (no crash ring yet).
+  Session hygiene lesson (standing): probe fleets against the live hub are
+  LOAD — arm ONE probe at a time, never leave harness pages half-open.
+- **FW 2.1.87 — crash ring + heap-pressure guards** (operator-stamped,
+  2026-07-29), closing the two INCIDENT work items. Crash ring
+  (`include/system/CrashRing.h`/`.cpp`): RTC_NOINIT last-words ring (boot
+  seq, heap min/last, maxblock last, 12 alloc/lock-free breadcrumb
+  checkpoints), recovered on next boot and served at `GET /api/crash` — NOT
+  a backtrace (needs a core-dump partition, does not OTA; serial-reflash
+  bench item, still queued). Heap floors: new WS sessions refused below
+  free<14336 OR maxblock<6144 (checked pre-slot-claim; existing sessions
+  never touched); page serve answers 503 below maxblock<12288. First-boot
+  proof: `/api/crash` on 2.1.87 showed two ws-refuse crumbs firing during
+  the fs-flash heap fragmentation. **Pressure snapshot under ~42 min of live
+  churn** (`webui/test/evidence/pressure-snapshot-20260729-014239`): heap
+  min touched **40 bytes**, guards held (ws-refuse, 503 at maxblock 7668, no
+  panic), heap snapped back to ~30 K free / 15 K maxblock once clients
+  detached — churn fragments transiently, does not leak. Verdict at the
+  time: 3-4 concurrent sessions is the honest ceiling of the ~32 KB
+  post-init internal headroom, with moving slopsync's ~110 KB internal-heap
+  footprint to PSRAM floated as the structural relief — **superseded by FW
+  2.1.88 below: the actual pressure was ghost sessions, not footprint
+  size**, so the PSRAM move is not currently a tracked open item. Same
+  deploy: webui LimitsWidget reuses Field (second hand-rolled slider
+  deleted). [verified 2026-07-29 — deploy 2.1.86 -> 2.1.87 + fs, render
+  smoke ALL PASS, canon_lint clean]
+- **Pairing proven end-to-end + MFP settle fix (2026-07-29).**
+  Knock-and-approve always worked — every layer (hub lib, trust NVS,
+  catalog, transports, JS client, PairingPane) was already implemented and
+  lib-tested (M4B-12..26); only PIN-mode
+  (`SlopSyncHubService::openPairing`/`closePairing`) has **no caller yet**
+  (comment-marked as a planned caller — still true, confirmed live in
+  `src/comms/SlopSyncHubService.cpp`). First full round trip recorded
+  (`webui/test/pairing-roundtrip.mjs`, both modes): push-to-pair -> first
+  knock grants `configure` on a fresh ledger -> token reconnect via the
+  trust ledger -> second joiner's knock parks (pending STATE + knocked
+  EVENT) -> operator approves over session-admin -> PAIR_GRANT -> token
+  reconnect at the approved tier. ALL PASS. Sim gap closed: slopsim's
+  `validateToken` now consults its own PairingManager first, then floats
+  bare sessions at `control` (never `configure`). MFP settle fix shipped
+  (SlopSync `540325f`, installed into MultiFunPlayer 1.34.5): segment wish
+  5->20 Hz sustained / burst 25->50 Hz — dense passages starved the
+  emitter's token bucket, eroding the 120 ms lookahead and firing the hub's
+  settle brake mid-stroke. [verified 2026-07-29 — build + WireSelfTest +
+  LiveWireTest --segments ×2 back-to-back]
+  - **Still open:** live-device PairingPane two-tab check (bench nicety,
+    not blocking); real-content MFP playback check (operator's own call).
+- **FW 2.1.88 — WS idle-RX reap: ghost sessions were the pressure
+  (2026-07-29).** Operator correction of the 2.1.87 pressure-snapshot
+  verdict: a silently dead peer (locked phone, killed tab, no FIN) never
+  goes stale at the transport level — it passes `cleanupClients()`/
+  `hasClient()` forever, holding its slot and heap, and the T19 accept
+  floor fires BEFORE HELLO processing, so ghost-held heap refused the very
+  connect whose slot-pressure path is the only other evictor (a deadlock).
+  Fix: WS idle-RX reap, `kWsIdleReapMs=20000` (ten missed ~2 s
+  proof-of-life PINGs) force-closes silent clients; the close lands as
+  RFC-042's transport-closed staleness trigger, so the session parks for
+  reattach as designed. `ws-idlereap` crumb added to the crash ring.
+  [verified 2026-07-29 — deploy 2.1.87 -> 2.1.88, Playwright session forced
+  offline reaped at 20001 ms with a clean deferred detach, `/api/log`]
 
 ## Known residuals (bench-measured, July 2026)
 
@@ -100,43 +1840,8 @@ commit as any change that alters it (C-3).
   turn points; cosmetic in position — verify feel on hardware). [bench
   2026-07]
 
-## Resolved rulings (2026-07-27, operator)
-
-- **Wire-visible British spellings: RESPELLED** (pre-release ruling — "that's
-  a stain that never comes out if deferred"). All catalog strings, the
-  schema field name respelled to `centering`, and the `waveform_centered`
-  token family (enum + label tables + device catalog + sim + test asserts +
-  evidence captures) flipped in one pass; device catalog etag changes on next
-  deploy.
-  Frozen mini-catalog untouched (contains no British spellings). canon_lint
-  C-11: 0 findings. [verified 2026-07-27 — lint + native suite + sd32-ota
-  build]
-- **Dead code: DELETED** (tests green before and after):
-  `MotionInterpolator` moved to `examples/slopmotion_traces/` (bench baseline
-  only, out of firmware); `MotionProfile.h` + its `test_motion_profile` suite;
-  `WebUI::handleApiMove/Home/Stop/Pause/Halt/Override/ClearFault`;
-  `SystemState` legacy anomaly ring; `UiProtocol.h` dead frame macros;
-  `src/s3_main/main.cpp` stub; `Kinematics::planTrapezoid()` + `PlanResult`;
-  `ServoMotionExecutor::adoptProfile()`; intiface websocket block.
-  [verified 2026-07-27 — sd32-ota SUCCESS + native suite]
-- **CLAUDE.md split**: preferences only; all rules in
-  `docs/canon/DOCTRINE.md` (engineering) + `CANON.md` (governance).
-
 ## Pending operator rulings
 
-- **RESOLVED (Phase C2, device-catalog renumber):** the prior entry here
-  flagged the fixture-regen fork as a pending ruling; Phase C2's explicit
-  instruction was to regenerate, so it was. `webui/test/fixtures/slopsim-catalog.bin`
-  is now the FRESH capture (4,272 B, 21 channels, etag `e54d5e81c589f31d`) —
-  the old 10,283 B fixture (which carried the pre-respell British field name,
-  since fixed, and mirrored the device far more fully) is superseded. `slopsync-wire.test.mjs`'s
-  one dependent assertion (0x1100 motion / `raw_10um`, was 0x0080) was moved to
-  an explicit `[SKIP-EXPECTED-GAP]` (never deleted) rather than left failing —
-  `ALL PASS`. The sim-fidelity gap this entry described is now CLOSED — see
-  "Sim fidelity (SlopDeck milestone 1) — LANDED (2026-07-28 overnight)"
-  below: the fixture is re-captured at device fidelity (44 ch, etag
-  matching the live device) and the sim [FAIL]s/FATAL are fixed.
-  [verified 2026-07-27, superseded 2026-07-28 — see milestone entry]
 - **CLAUDE.md is gitignored** — the covenant is not in version control; one
   clean checkout loses it. Track it (or an agreed public variant)?
 - ~~tools/slopsync_probe.py untracked~~ — RESOLVED by the repo split: the
@@ -148,3183 +1853,226 @@ commit as any change that alters it (C-3).
 - Design ratified 2026-07-27: `docs/slopdeck/DESIGN.md` — three tiers, the
   Prime Rule (plugins go through SlopSync, never around it), founding Tier-1
   set, sim catalog profiles (`device` default / `alien` / `minimal`),
-  sequencing (sim fidelity first). The sim-fidelity pending item above is
-  milestone 1 of this plan.
+  sequencing (sim fidelity first).
 - §8 RULED 2026-07-27: embedded UI = thin client, Tier 0+1, on hubs with the
   capability to serve it; hosted plain-http instance is the universal /
   UI-less-hub (WROOM) path; Tauri shell is the premium delivery (discovery,
   Tier 2 plugins, non-WS transports). PWA is NOT a viable delivery (https
   requirement blocks ws:// to LAN — recorded in DESIGN.md §8 so nobody
   promises it later).
-- Transport rulings CALIBRATED 2026-07-27 (second pass): hardware hub
-  profile = BLE GATT MUST (floor: infrastructure-free control, discovery,
-  provisioning) + WS SHOULD/preferred; ESP-NOW = supported-not-developed
-  peer binding; sim/hosted hubs exempt (RFC-043 recut). Client onramp
-  ladder: TCode passthrough → native segments → native samples (RFC-044
-  Draft — operator clarification on passthrough + streaming clients
-  PENDING before it firms up). Intake doctrine: SlopSync is the only way in
-  and out of THIS machine; other firmwares are never forced. NEW WORK ITEM:
-  BLE GATT `ITransport`.
-- **`OssmBleService` REMOVED 2026-07-27** (XToys ruling made the compat
-  argument moot): service files deleted; TransportManager/main.cpp/WebUI
-  unwired; `TransportMode` 4 tombstoned (never reuse); stored NVS mode 4
-  already migrates via the existing >BT clamp. `BleTransport` (TCode NUS for
-  Intiface) STAYS until RFC-044 + Intiface-native SlopSync land. [verified
-  2026-07-27 — sd32-ota SUCCESS + native suite 31/31 post-surgery]
-- FLAG (pre-existing, found during surgery): `ConfigStore.cpp` transport
-  load clamp (`> BT → default`) also swallows persisted `DONGLE` (3) — a
-  saved DONGLE selection never survives reboot. **MOOT, no ruling needed:**
-  the whole mechanism this flag was about (`TransportMode`, the NVS
-  `"transport"` key, the load clamp itself) was deleted by the later
-  "transport switch dies" surgery below — `ConfigStore.h`/`.cpp` carry no
-  `TransportMode`/transport-key symbol anymore. [verified 2026-07-28 —
-  grep for `TransportMode`/`"transport"` in include/system/ConfigStore.h +
-  src/system/ConfigStore.cpp: no matches]
-- C5 co-processor plan: DEAD AS PLANNED (operator 2026-07-27) — it existed
-  to stream TCode v3 at 333 Hz, which SlopMotion + TCode v4 obsoleted. The
-  concept may return; `c5_waveshare`/`c5_tdongle` envs + sources stay for
-  now. ESP-NOW posture: criminally easy to enable, supported, not developed.
+- Transport rulings CALIBRATED 2026-07-27 (second pass): hardware hub profile
+  = BLE GATT MUST (floor: infrastructure-free control, discovery,
+  provisioning) + WS SHOULD/preferred; ESP-NOW = supported-not-developed peer
+  binding; sim/hosted hubs exempt (RFC-043 recut). Client onramp ladder: TCode
+  passthrough → native segments → native samples (RFC-044 Draft — **operator
+  clarification on passthrough + streaming clients still PENDING** before it
+  firms up). Intake doctrine: SlopSync is the only way in and out of THIS
+  machine; other firmwares are never forced.
 - SlopDeck delivery accord + Svelte-5 framework ruling recorded in
   `docs/slopdeck/DESIGN.md` §8–9 (one kernel two faces; framework-neutral
   plugin ABI insurance).
-- RULING 2026-07-27: **the transport switch dies** — "there's nothing to
+- **`OssmBleService` REMOVED 2026-07-27** (the XToys ruling made the compat
+  argument moot): service files deleted; TransportManager/main.cpp/WebUI
+  unwired; `TransportMode` 4 tombstoned (never reuse); a stored NVS mode 4
+  migrates via the existing >BT clamp. [verified 2026-07-27 — sd32-ota SUCCESS
+  + native suite 31/31 post-surgery]
+- **RULING 2026-07-27: the transport switch dies** — "there's nothing to
   select, the only option is SlopSync." WS_OP_MODE, `TransportMode`,
-  `applyTransport`, the NVS "transport" key, and the selector UI are all
-  vestiges of the pre-SlopSync multi-protocol era. SCOPE RULED: **kill it
-  all now** — SerialTransport, BleTransport (NUS), DongleTransport,
-  TransportManager (WiFi duties extracted to a new WifiLink module),
-  TCodeParser + TCodeAxisState glue, the selector, and the NimBLE
-  dependency (zero consumers until the BLE GATT ITransport lands).
-  Intiface TCode users wait for RFC-044/native — accepted consequence.
-  **SURGERY LANDED 2026-07-27** (sonnet-executed, spec-mapped): all transport
-  files + TransportManager deleted; WiFi duties extracted to
-  `src/system/WifiLink.{h,cpp}`; TransportMode enum + NVS "transport" key +
-  WS_OP_MODE (0x06 reserved) + /api/mode + applyMode gone;
-  applogSerialDedicated gone; NimBLE dependency dropped. Wins: RAM 30.0% →
-  27.4% (89,920 B), flash 28.9% → 26.0% (−~190 KB). [verified 2026-07-27 —
-  sd32-ota SUCCESS + native 31/31 + canon_lint 0]
-  - Residual pass (sonnet-executed): commanded_raw_mm writer restored on
-    the SlopSync drain path (raw_10um telemetry regression), intiface_compat
-    deleted (zero consumers), -DBLE_ENABLED removed (stops reserving BT
-    controller memory for a stack that isn't in the build; #if machinery
-    stays for the BLE GATT transport's return), has_dongle capability advert
-    dropped, dangling c5 comment fixed. RAM/flash unchanged at 27.4%/26.0%
-    (89,920 B / 1,705,208 B) — this pass touched no linked code, only a few
-    fields and a flag. [verified 2026-07-27 — sd32-ota SUCCESS + native 31/31
-    + canon_lint 0]
+  `applyTransport`, the NVS "transport" key and the selector UI were all
+  vestiges of the pre-SlopSync multi-protocol era. SCOPE RULED kill-it-all:
+  SerialTransport, BleTransport (NUS), DongleTransport, TransportManager (WiFi
+  duties extracted to `src/system/WifiLink.{h,cpp}`), TCodeParser +
+  TCodeAxisState glue, the selector, and the NimBLE dependency (zero consumers
+  until the BLE GATT ITransport lands). Intiface TCode users wait for
+  RFC-044/native — accepted consequence. **SURGERY LANDED 2026-07-27**;
+  WS_OP_MODE 0x06 and `/api/mode` gone, `applogSerialDedicated` gone. RAM
+  30.0% → 27.4% (89,920 B), flash 28.9% → 26.0% (1,705,208 B, −~190 KB).
+  [verified 2026-07-27 — sd32-ota SUCCESS + native 31/31 + canon_lint 0]
+  - Residual pass: `commanded_raw_mm` writer restored on the SlopSync drain
+    path (raw_10um telemetry regression), `intiface_compat` deleted (zero
+    consumers), `-DBLE_ENABLED` removed (stops reserving BT controller memory
+    for a stack not in the build; the `#if` machinery stays for the BLE GATT
+    transport's return), `has_dongle` capability advert dropped. RAM/flash
+    unchanged at 27.4% / 26.0% (89,920 B / 1,705,208 B). [verified 2026-07-27
+    — sd32-ota SUCCESS + native 31/31 + canon_lint 0]
 - RULING 2026-07-27 (expanded same day): **deadman-as-safety retired
-  wholesale** (RFC-045 Draft recut): liveness stays as bookkeeping
-  (STALE/reattach/slot reclaim); source-loss forced-stop REMOVED for all
-  classes (streaming settles by physics); autonomous sources (PatternEngine,
-  generators) get explicit `on_disconnect: stop | continue` (default stop);
-  0x0005 explicit stops unchanged. Implementation follows RFC-045
-  acceptance.
+  wholesale** (RFC-045 recut): liveness stays as bookkeeping (STALE/reattach/
+  slot reclaim); source-loss forced-stop REMOVED for all classes (streaming
+  settles by physics); autonomous sources (PatternEngine, generators) get
+  explicit `on_disconnect: stop | continue` (default stop); 0x0005 explicit
+  stops unchanged. Implemented — see the Phase D entries above.
 - RFC-044 (TCode passthrough) DEPRIORITIZED by operator: "a later feature,
   parsed machine-side" — a channel alongside segments and samples, not
   near-term work.
-
-## RFC batch (operator-approved 2026-07-27: "approve and implement")
-
-- **Phase B LANDED:** RFC-043/045/046/047 → Landed (v1.0); 044 → Accepted
-  (posture landed, channel deferred). Registry: BLE identity UUIDs
-  (534C4F50-5359-4E43-…), UDP discovery port 21328/"SLOP", frames 0x1E/0x1F,
-  WELCOME keys 46 ws_port / 47 ipv4, status field on core channels. SPEC:
-  §13.1 profiles, §13.8 UDP probe, §6.3 migration, §11.3 loss-policy
-  removal reconciled across 8 sections, §9.6 onramp. New docs-site
-  discovery.md. [verified 2026-07-27 — all generators --check green +
-  native 31/31 + sd32-ota SUCCESS + lint 0]
-- **VETO on Phase B decision 1 — RESOLVED (Phase C1):** DISCOVER_REPLY's
-  `hub_id` is now `hub_instance_id` (u64, `identity_keys` 5, random-once
-  NVS-persisted) — a durable hub identity replacing the per-boot `boot_id`
-  RFC-046 had reused. Reply payload 72→76 B. [verified 2026-07-27 — see
-  Phase C1 LANDED entry below]
-- **Phase C1 LANDED:** RFC-048 (the UI/rendering constitution) — new
-  normative companion `docs/slopsync/RENDERING.md`; SPEC.md §19 (Rendering)
-  + §6.1/§6.3/§13.8 identity updates; registry gains eleven frozen
-  vocabulary sections (`ui_categories` 14, `ui_ranks` 6, `value_aspects`/
-  `value_scopes`/`value_provenance` 6/3/3, `unit_ids` 23, `action_tags` 13,
-  `ui_archetypes` 15 w/ machine-checkable `fallback:`, `ui_regions` 5,
-  `renderer_classes` 3, `widget_patterns` 13 w/ 3 `required`) plus the
-  `hub_instance_id` fix above; RFC-QUEUE.md entry appended,
-  `RFC-048-STAGING.md` deleted (content now lives in RFC-QUEUE.md +
-  RENDERING.md). Riding along: RFC-045's `on_disconnect` promoted to the
-  registered `field_roles` entry `source.background_run` (generalized to any
-  autonomous source), with rendering rules in RENDERING.md §10.1. None of
-  the eleven vocabularies are wired onto a real catalog entry yet (SPEC
-  §18-23) — that is Phase C2. [verified 2026-07-27 — gen_registry_header.py
-  --check green, gen_docs_tables.py --check green (14 files), gen_spec_pages.py
-  --check green (20 files), native 31/31, sd32-ota SUCCESS, canon_lint 0
-  findings]
-- **Phase C2:** the device catalog evolution — 0xCDSS renumber + new
-  vocabulary fields, one etag bump; clients (probe/MFP/webui-js/sim),
-  devicecatalog goldens, fixture re-capture.
-- **Phase D:** hub library — RFC-042 LANDS here too (operator ruling
-  2026-07-27: "killing clients because you haven't heard their stream is no
-  good" = 042's park-don't-kill principle stated as requirement; spec
-  Draft→Landed + STALE/reattach implementation) + RFC-045 behavior (latch
-  removal, background_run role honored) + test rewrites; §18 limitations
-  21/22 update. **Phase E:** BLE GATT ITransport + UDP responder +
-  advertising.
-- Operator ruling 2026-07-27: full autonomy from here — escalate only
-  HMM-grade judgment calls; agent decisions recorded as veto-able.
-
-## Spec fresh-eyes panel (operator-ordered, 2026-07-27)
-
-- 15 vacuum readers + convergence: `docs/slopsync/reviews/spec-panel-2026-07-27.md`.
-  8 consistently-hated themes, 9 consistently-liked (core doctrines validated
-  cold: shedding table 13/15, honesty clauses 12/15, closed motion surface
-  12/15, readiness gate 11/15, ground-truth echo 10/15, RFC-045 redesign 9/15).
-- **Phase C3 LANDED (2026-07-27):** RFC-049 (omnibus of 7 small normative
-  fixes, spec/registry side; hub behavior named Phase D per sub-item) +
-  RFC-044 correction, both appended to `RFC-QUEUE.md`; RFC-050 appended as
-  **DRAFT only** (operator stamp still required, nothing normative changed).
-  Numbers allocated: CBOR key `48 requested_curve_family` (core space, next
-  free after 47), NACK `0x0504 INVALID_NAMESPACE` (transfer band, next free
-  after `BLOB_REFUSED` 0x0503 — judgment call, flagged for veto: could
-  instead have gone in the `0x00xx` protocol band, chose transfer band for
-  thematic fit with its sibling `CHUNK_UNAVAILABLE`), registry `limits`
-  gained `segment_handoff_k` (1.5, first non-integer/non-string limit —
-  `gen_registry_header.py`'s `limits` emitter gained float support for it),
-  `pairing_gesture_boot_count` (3) and `pairing_gesture_max_uptime_ms`
-  (10000, pinning §12.3(c)'s "~10 s" hedge). `curve_families` entry 3
-  (`step`) gained `status: reserved` (number kept, never renumbered).
-  SPEC.md touched: §9.6 (curve_family honesty + requested_curve_family +
-  segment_handoff_k citation + onramp paragraph reworded for RFC-044),
-  §7.2 and §12.6 (trust-ledger SHOULD-populate + non-audit-grade + client
-  display rule), §8.4 and §18-8/9 (INVALID_NAMESPACE split from
-  CHUNK_UNAVAILABLE; the old unrepresentable "full request + chunks"
-  MALFORMED rule replaced by the two rules that ARE representable: empty
-  `chunks` array, and `ns=0` carrying `store_id`/`slot`), §14.3 (one-hop
-  rationale stated + new relay ESTOP latency budget clause, H2's index
-  entry extended to cite it), §12.3 (gesture + PIN-strike thresholds now
-  cite registry constants instead of prose hedges), §18-20 (step honesty
-  reworded), Appendix B (key 48 row) and Appendix G (3 new limit rows).
-  Frozen artifacts (`conformance/mini_catalog.hpp` + its fixture) untouched.
-  **Pre-existing drift found and fixed as a byproduct:** `docs-site/tools/
-  gen_docs_tables.py` crashed outright (`setting_categories` retired from
-  registry.yaml by an earlier, uncommitted-generator Phase C2 pass but never
-  removed from the script's `SECTION_HOMES`/catalog-vocabulary page); fixed
-  by deleting the dead section (superseded by `ui_categories` on
-  `rendering.md`). Regenerating also caught several docs-site pages
-  (`frames.md`, `channels.md`, `index.md`, `safety.md`, plus new
-  `discovery.md`/`rendering.md`) that were stale against registry.yaml from
-  before this session — RFC-046 discovery frames and RFC-047 channel-status
-  commentary had never actually been regenerated into the committed site
-  despite an earlier ledger entry claiming otherwise; now current.
-  **Gauntlet (all green):** `gen_registry_header.py --check`,
-  `gen_docs_tables.py --check` (14 files, 108 dictionary terms),
-  `gen_spec_pages.py --check` (20 files), `gen_channel_map.py --check`
-  (untouched, as expected — no core/device channel changed), native suite
-  31/31 (exit 0), `pio run -e sd32-ota` SUCCESS (RAM 27.4% / 89,920 B,
-  flash 26.1% / 1,709,528 B — both unchanged from pre-pass, as expected for
-  a spec/registry-only pass), `canon_lint.py` 0 findings. [verified
-  2026-07-27 — C-4: generator --check output + pio test -e native exit 0 +
-  pio run -e sd32-ota SUCCESS + canon_lint 0 findings, all reproduced above]
-  - Panel hate #2 (`source.background_run` unshipped) required NO new spec
-    work — it is exactly Phase D, independently validated, unchanged by
-    this pass.
-
-## Phase D LANDED (2026-07-27/28): RFC-042, RFC-045 hub behavior, source.background_run, RFC-049(b)
-
-- **RFC-042 (session staleness) landed in full.** `HubSessionState::STALE`
-  (library-internal). Silence (deadman/idle-reap) and an out-of-band
-  transport loss (`Hub::detachTransport()`) now mark a session `STALE` via
-  shared `Hub::markStale()` instead of tearing it down — slot, `session_id`,
-  grants, intent ring, readiness all RETAINED, ownership released
-  unconditionally, nothing latched. `Hub::reviveIfStale()` (path A, any
-  frame) and `Hub::handleReattach()` (path B, a fresh HELLO on a new
-  transport — same `session_id`, RETAINED grants, role re-derived) implement
-  resumption; `Hub::findEvictableStale()` implements item 5's slot-pressure
-  reclaim (best-effort GOODBYE `SLOT_RECLAIMED`). New registry: NACK
-  `0x010D SLOT_RECLAIMED`, `session_event_kinds` 4 `session_stale`/5
-  `session_resumed`. The general cross-BINDING-TYPE migration RFC-046
-  describes is NOT implemented (this hub has one binding, WS-only, so it
-  cannot safely distinguish that case from a genuine second claimant — falls
-  back to the duplicate-identity eviction rule per §6.3's own MAY clause).
-- **RFC-045 hub behavior landed.** `Hub::releaseSessionSources()` no longer
-  runs any Stop-vs-Continue policy dispatch — every release (any of the now
-  seven staleness/teardown doors) is `onSourceOwnership(source, 0, reason)`
-  and nothing else. `HubDelegate::sourcePolicy()`/`onDeadmanStop()` remain
-  declared (frozen delegate interface) but are dead from the hub's side —
-  annotated as such, not deleted. The SI-15 STREAM-bundle "clears a latched
-  STOP" workaround is deleted from `handleStream()` (moot, not merely
-  obsolete). **Judgment call, flagged for veto:** SPEC §11.3's PRE-Phase-D
-  text claimed the hub-autonomous `background_run=false` case still latches
-  STOP with `cause=deadman`; this pass found no public Hub API for a
-  delegate to latch that honestly (`latchEstop()` has no STOP sibling) and
-  the task brief's own repeated instruction was "latches NOTHING, hub stays
-  generic" — resolved by fixing the SPEC text to match the simpler, actually
-  implemented reality (an autonomous source that stops being driven settles
-  the same way a command-driven one does, no manufactured safety edge) rather
-  than adding a new public latch API to preserve the old sentence.
-- **`source.background_run` shipped** on the reference firmware's
-  `pattern-state` (0x1200, settingKey 7, paired 0x3200 `pattern-cmd` key 7;
-  bit 6 of `enabled_mask`, unconditionally 1 — a standing policy, never
-  gated by homed/estop unlike bits 0-5). NVS-persisted (`pat_bgrun`), unlike
-  the session-volatile pattern parameters on the same channel.
-  `SlopDriveHubDelegate::onSourceOwnership()` (newly implemented — was the
-  base no-op) stops `PatternEngine` on release iff the flag is false;
-  reason-agnostic (fires identically for a staleness release or a genuine
-  teardown). SPEC §18-21 reworded from "specified, not shipped" to shipped.
-- **RFC-049(b) landed:** `requested_curve_family` (CBOR key 48) echoed
-  verbatim in `granted_publishes`/WELCOME/GRANT alongside the effective
-  `curve_family` (45). **RFC-049(c) first half landed:** the firmware's
-  independently-hardcoded `1.5f` (`SystemState::sm_tune_handoff_k`) now
-  reads `slopsync::limits::segment_handoff_k`. **RFC-049(c) second half
-  (the sparse-segment scheduling-depth backstop) EVALUATED AND NOT LANDED**:
-  a `commitWaveform()` variant bounding a lookahead-less handoff against its
-  own chord was implemented, then reverted after it measurably shrank
-  `test_slopmotion`'s "Mixed feasible/infeasible chain settles centered and
-  STAYS there" regression bench's characterized defect (-23.6mm -> -9.4mm)
-  via an unverified interaction with the centering/reshape control loop.
-  Recorded in `slopmotion.hpp`'s `commitWaveform()` comment; left open.
-- Tests: new `test/native/test_slopsync_staleness/` (STALE-01..04, 5 cases);
-  rewritten expectations in `test_slopsync_safety` (S-05/S-06, two "M4a
-  RFC-022.3" cases → "RFC-045"), `test_slopsync_m3b` (MB-10/11),
-  `test_slopsync_m4b` (M4B-05), `test_slopsync_m4c` (M4C-11),
-  `test_slopsync_streamingress` (SI-08, SI-15, + new SI-23b), and
-  `test_slopsync_devicecatalog` (5 cases updated for the new catalog field).
-  **Gauntlet (all green):** native suite (all environments PASSED, doctest
-  exit 0 confirmed directly per TRAPS T10), `pio run -e sd32-ota` SUCCESS
-  (RAM 27.4% / 89,920 B, flash 26.1% / 1,712,352 B), `canon_lint.py` 0,
-  `catalog_lint.py` OK (32 entries), `gen_registry_header.py --check`,
-  `gen_docs_tables.py --check` (14 files, regenerated for the new
-  session_event_kinds/nack_codes rows), `gen_spec_pages.py --check` (20
-  files, regenerated for the SPEC.md §2.2/§6.6/§6.9/§11.3/§12.7/§16.1/§18
-  edits), `gen_channel_map.py --check` (untouched, as expected — no channel
-  id changed), `node webui/test/slopsync-wire.test.mjs` ALL PASS (sim
-  catalog fixture unaffected — the sim declares no pattern generator, so no
-  re-capture was needed). [verified 2026-07-28 — commands reproduced above,
-  each exit code checked directly per TRAPS T10]
-
-## Phase E LANDED (2026-07-28): BLE GATT ITransport + UDP discovery responder + advertising — BUILD/HOST-VERIFIED ONLY, NOT DEPLOYED
-
-- **NimBLE returns.** `h2zero/NimBLE-Arduino@^2.3.0` back in `[common_s3_libs]`
-  lib_deps (resolved 2.5.0 at build time); `-DBLE_ENABLED` restored to
-  `env:s3_main` and the frozen legacy `esp32-s3-devkitc-1` block (propagates
-  to `sd32`/`sd32-ota` via `${env:s3_main.build_flags}` inheritance — no
-  separate edit needed there). `src/main.cpp`'s `bleInUse` weak override and
-  WebUI's `has_ble` capability activate unchanged, exactly as anticipated;
-  `build_webui.py` picked up `VITE_BLE_ENABLED=true` automatically.
-- **`src/comms/SlopSyncBleTransport.{h,cpp}`** — the NUS-shaped GATT
-  `ITransport` (RFC-043), UUIDs `534C4F50-5359-4E43-8000-0000000000{01,02,03}`
-  transcribed from registry.yaml `ble_identity` (the codegen does not emit
-  this section as C++ constants — documented fallback, not a spec gap).
-  Mirrors `SlopSyncAsyncWsTransport`'s SPSC-ring + deferred-attach/detach-
-  on-hub-task pattern for TRAPS T5 (NimBLE callbacks run on the host's own
-  FreeRTOS task). 2 concurrent connections (`SlopSyncBlePort::kSlots`).
-  Congestion signal: a failed `notify()` IS the "notify queue depth" signal
-  (§13.1) — NimBLE exposes no separate depth counter to read.
-  `properties().mtu` reads `NimBLEServer::getPeerMTU()` live (20 B
-  pre-negotiation, up to 247 after — MTU 250 requested at init). Advertising:
-  service UUID + shortened name "SD32" in the primary payload, full
-  "SlopDrive-32" in the scan response, one Manufacturer-Specific-Data flags
-  byte (company id `0xFFFF`, the Bluetooth SIG's own "for testing" id —
-  SlopSync has no assigned company id) carrying `ble_adv_flags` bit0
-  `pairing_window_open`/bit1 `ws_available`; refreshed only on an actual
-  state change (`SlopSyncBlePort::updateAdvertising`, diff-gated against the
-  last-published byte — no polling of the radio itself).
-- **`src/comms/SlopSyncUdpDiscovery.{h,cpp}`** — the UDP responder (RFC-046
-  item 5), port 21328. **Judgment call, flagged for veto:** built against
-  raw lwIP sockets (`lwip/sockets.h`), NOT `AsyncUDP` as the task brief
-  anticipated. `AsyncUDP.h` is bundled with the arduino-esp32 core but this
-  project's LDF (chain mode) does not resolve it — confirmed live this
-  session: `pio run -e sd32-ota` failed `AsyncUDP.h: No such file or
-  directory` with LDF's own "check our library registry" message, meaning
-  it genuinely found no local provider for that header, not merely a
-  missing include path. Rather than add another framework-package special
-  case, the responder polls non-blocking `recvfrom()` from the hub task's
-  existing 5 ms tick. This also SIMPLIFIES the threading story versus the
-  planned design: there is no foreign-task callback at all, so TRAPS T5's
-  enqueue-and-defer discipline does not apply here (documented in the
-  header) — the identity snapshot (hub_name, hub_instance_id, fw_version,
-  catalog_etag, ws_port) is write-once at `begin()`, and the two live fields
-  (pairing_window_open, ws_available) are set by the same task that reads
-  them. `DiscoveryRateLimiter`: fixed 8-slot linear-scan ring, one reply per
-  source IP per second, no heap.
-- **`include/comms/SlopSyncDiscoveryWire.h`** — pure byte encode/decode for
-  DISCOVER_PROBE/DISCOVER_REPLY and the `ble_adv_flags` byte shared with BLE
-  advertising, zero Arduino/NimBLE/socket dependency, host-testable
-  (`test/native/test_slopsync_discovery`, 8 new cases). This is the ONLY new
-  Phase E surface with native test coverage — the NimBLE/socket glue is
-  hardware-only, per the task brief's own instruction not to fake-test it.
-- **`hub_instance_id` (RFC-048)**: generated once via `esp_random()` x2,
-  persisted in NVS (`Preferences("slopsync")`, key `hubid`, u64), fed to
-  `slopsync::Hub::setHubInstanceId()` (new additive Hub API) and to the UDP
-  responder's snapshot.
-- **slopsync-core additive changes** (hub.hpp/welcome.hpp — additive per the
-  CANON-frozen "extend, never reshape" rule for hub.hpp's public API):
-  `Hub::setHubInstanceId()`/`hubInstanceId()`, `Hub::setEndpoint(wsPort,
-  ipv4)`, `Hub::pairingWindowOpen()`, `Hub::catalogEtag()`. `WelcomeMsg`
-  gained `ws_port` (key 46) / `ipv4` (key 47) — omitted from the wire at
-  their 0/absent default, same additive-safe idiom as every prior optional
-  WELCOME key — and `IdentityInfo::hub_instance_id` (identity_keys 5).
-  **Judgment call, flagged for veto:** WELCOME's `limits.max_frame` was a
-  hardcoded `kFrameBufferCapacity` (512) for EVERY transport, including the
-  in-process conformance binding whose own default MTU is 250 — i.e. it was
-  already lying about a hub's own §13.1 rule ("MUST NOT advertise a larger
-  max_frame than the binding permits"). Changed both WELCOME-build call
-  sites to `min(transport.properties().mtu, kFrameBufferCapacity)`, a no-op
-  for WS (its `properties().mtu` already equals 512) but honest for BLE's
-  small pre-negotiation MTU. Checked for regressions: no existing test
-  asserts the literal value (only one codec-level unit test builds its own
-  hand-set `WelcomeMsg` directly), so this is correctness-neutral for every
-  prior passing test — confirmed by the full native suite staying green.
-- **New native tests:** `test/native/test_slopsync_discovery` (8 cases: adv
-  flags every bit combination, probe parse incl. bad-magic/bad-length
-  rejection, reply byte layout incl. truncation and too-small-buffer
-  honesty) + 3 new WELCOME round-trip cases in `test_slopsync_messages` —
-  the first direct unit coverage `encodeWelcome`/`decodeWelcome` has ever
-  had (previously exercised only through session-level HELLO/reconnect
-  integration tests).
-- **Gauntlet (all green), every command run directly this session:** native
-  suite 31/31 environments (mingw64 PATH prepend, exit code 0 confirmed per
-  TRAPS T10); `pio run -e sd32-ota` SUCCESS — **RAM 27.4%→29.4% (89,784 B→
-  96,436 B, +6,652 B), flash 26.1%→28.6% (1,710,489 B→1,876,816 B,
-  +166,327 B)** (pre-Phase-E byte counts back-computed from the last-verified
-  percentages, the task brief's own baseline) — the expected NimBLE-return
-  regression and the one axis this phase was told to move; `canon_lint.py` 0
-  findings; `catalog_lint.py` OK (32 entries, unchanged — no catalog channel
-  touched); all five generators `--check` green (`gen_registry_header.py`,
-  `gen_channel_grid.py`, `gen_channel_map.py`, `gen_docs_tables.py`,
-  `gen_spec_pages.py`) — registry.yaml/SPEC.md were NOT touched this phase
-  (no spec gap found; `ble_identity`/`ble_adv_flags`/`udp_discovery` numbers
-  were transcribed from the already-landed Phase B/C1 registry sections per
-  the task brief's documented fallback, not re-derived or invented).
-- **NOT done this phase (explicitly out of scope per the task brief) — DO
-  NOT read anything above as "live" or "deployed" (C-8):** no deploy, no
-  device flash, no live BLE connection from a phone/scanner, no live UDP
-  probe/reply exchanged over an actual LAN, no live advertising-payload
-  capture (nRF Connect / a BLE sniffer). Also **not implemented**: generic
-  control-frame fragmentation over a small (unnegotiated) BLE ATT MTU —
-  SPEC §18 item 22 already states BLE GATT ships "with no reference
-  implementation"; this phase's transport requests MTU≥250 pre-use so
-  WELCOME/the catalog fit unfragmented in the common case, but a control
-  frame that still does not fit after negotiation simply fails to send
-  (ordinary backpressure, not a NACK/error) rather than being split — a real
-  limitation for a client stuck at the legacy 23-byte MTU, consistent with
-  §13.4's own "static-profile clients are the expected BLE norm" text.
-  [verified 2026-07-28 — every command above run directly this session,
-  exit codes / SUCCESS banners observed firsthand]
-- **Main-loop review (2026-07-28): all three flagged judgment calls
-  ACCEPTED.** (1) raw-lwIP responder over AsyncUDP — the failed build is
-  real evidence and the no-foreign-task shape is strictly simpler than the
-  planned design (T5 never even applies); (2) `max_frame = min(mtu, 512)` —
-  corrects a pre-existing §13.1 violation, not a behavior choice; (3) no BLE
-  control-frame fragmentation — matches SPEC §18 item 22's own admission.
-  Operator veto window open on all three per the autonomy bar.
-
-## DEPLOY + LIVE-VERIFY (2026-07-28 overnight) — fw 2.1.78, motor unplugged bench session
-
-Per the OVERNIGHT BENCH AUTHORIZATION above. `FIRMWARE_VERSION` bumped
-2.1.77→2.1.78 (`include/system/config_api.h`); `pio run -e sd32-ota` SUCCESS
-(RAM 29.4% / 96,436 B, Flash 28.6% / 1,876,816 B — unchanged from Phase E's
-build-only numbers, confirming the deploy shipped exactly what Phase E built).
-Deployed both images (`deploy.ps1 -Target both`): firmware via `/api/ota`
-(`2.1.77 -> 2.1.78` confirmed), web UI via `/api/ota/fs`. **Pre-existing drift
-caught by this deploy, not a regression:** the device's PRE-deploy
-`/api/capabilities` already answered `fw_version: 2.1.77` with `has_dongle`
-still advertised true — proof the previously-"live" 2.1.77 was actually a
-stale build predating the dongle-removal/Phase-E source changes (the version
-string had not been re-bumped after those edits landed in-tree); post-deploy
-capabilities now correctly show no `has_dongle`, `has_ble`/`slopsync_ble`
-true, and a new `udp_discovery_port` field. [verified 2026-07-28 —
-`/api/capabilities` diffed before/after]
-
-**Checklist results (item letters per the task brief):**
-
-- **(a) MFP LiveWireTest ×2, back-to-back, no reboot — FIXED + VERIFIED
-  (client-side, follow-up session, same date, fw unchanged at 2.1.81).**
-  Original finding (kept verbatim): both runs behaved IDENTICALLY (same
-  `boot_id` both times, confirming no reboot occurred between them — the
-  actual T3 regression check passes: no crash, no session leak, clean GOODBYE
-  both times) but both hard-FAIL the motion-grant assertions (`granted
-  motion-input rate == 50 Hz` reads `NaN`; the three ingress-counter diffs
-  that depend on it also fail). Root cause, confirmed by reading
-  `SlopDriveHubDelegate::validateToken()` (`src/comms/SlopSyncHubService.cpp`):
-  auth enforcement ("ENFORCEMENT IS ON (fw 2.1.59)") requires a `/uitoken`
-  mint presented in HELLO's token field to get `control` tier; `clients/
-  mfp-slopsync/LiveWireTest.cs` never mints or presents one (grep confirmed
-  zero references to `uitoken` in the file at the time) and generates a fresh
-  random `instance_id` every run, so it structurally cannot match the trust
-  ledger's one paired entry either. This has been true since fw 2.1.59,
-  predating the RFC batch entirely — `tools/slopsync_probe.py` (which DOES
-  mint a `/uitoken`) is the tool that actually proves the write plane works;
-  LiveWireTest proved only the read-only wire shape.
-  **Fix (client-side C# only, no firmware touched):** `LiveWireTest.cs` builds
-  its own session directly against `SlopSync.cs`'s real `HubClient`/`HelloAsync`
-  (it does not go through the plugin's `AcquireTokenAsync`, a private instance
-  method of the plugin view-model class) — so it grew its own minimal mint-only
-  mirror, `MintUiTokenAsync(HttpClient, baseUrl)`: `GET /uitoken` (no CORS
-  headers by design, RFC-029 §4 — a native client just reads the body), decode
-  the returned hex token via `Convert.FromHexString`, retry up to 3× on `429
-  TooManyRequests`. The minted 16-byte token now rides in both `HelloAsync`
-  call sites (samples and `--segments` paths) where `null` was hardcoded
-  before. A new explicit PASS/FAIL row (`control-tier credential presented
-  (/uitoken)`) makes the tier proof visible on its own line instead of only
-  showing up as a side effect of the rate assertion. Verified `/uitoken` is
-  self-serve for LAN/HTTP clients by reading `SlopSyncUiToken.h`/`.cpp`
-  directly: `attachRoutes()` registers a plain `GET /uitoken` on the shared
-  HTTP server with **no** pairing ceremony, PIN, or physical confirmation
-  gate — its only defenses are rate-limiting, a 60 s single-use TTL, and the
-  deliberate absence of CORS headers (the mechanism is the browser's
-  same-origin policy refusing to let a hostile page READ the response; it
-  does nothing to stop a native LAN process, which is an accepted, documented
-  limit in the header comment, not a gap this fix needed to close).
-  **Live re-verification:** un-fake-homed the device first (`tools/
-  slopsync_probe.py --bench-home`, full round trip revert — mid-run the probe
-  hit an unrelated `ConnectionResetError` at its Step 5.9 safety-ops check and
-  the device rebooted; end state after the reboot was already `homed=false
-  home_override=false estopped=false`, i.e. exactly the required precondition,
-  so the run's goal was met, just not via the clean revert path — flagged as
-  an anomaly, not chased further per this task's client-side-only scope).
-  Built `dotnet build clients/mfp-slopsync/LiveWireTest.csproj -c Release`: 0
-  warnings, 0 errors. Ran twice back-to-back with no reboot between (confirmed
-  via `/api/status` uptime rising monotonically, no gap): **both runs ALL
-  HARD CRITERIA PASS**, both reporting identical `boot_id=0xFA5951E1` and
-  `granted motion-input rate == 50 Hz  (granted=50.00)` — the assertion that
-  used to NaN. Device end-state restored after verification: `--bench-home
-  --bench-home-no-revert` (leaves the override ON on purpose), confirmed
-  `homed=true home_override=true measured_stroke_mm=250 estopped=false`,
-  matching the bench baseline the rest of the overnight pipeline documented.
-  Files touched: `clients/mfp-slopsync/LiveWireTest.cs` only. [verified
-  2026-07-28 — two live runs against fw 2.1.81, transcripts captured, `dotnet
-  build -c Release` 0/0, `/api/status` before/after each phase,
-  `SlopSyncUiToken.h`/`.cpp` + `src/main.cpp` route-registration read]
-- **(b) Fake-home — PASS.** No HTTP route (`/api/machine/homeoverride` is a
-  410 tombstone pointing at the in-band replacement); used
-  `tools/slopsync_probe.py`'s `--bench-home` (INTENT 0x3101 op 2 force_home).
-  Discovered `--bench-home` is a deliberate ROUND TRIP (force_home then
-  immediately clear_override, "not a one-way door") — added a new
-  `--bench-home-no-revert` flag (skips the revert ECHO) so the override can
-  actually be left ON for a test session; used it to leave the machine
-  `homed=true home_override=true measured_stroke_mm=250` for the rest of this
-  session. [verified 2026-07-28 — `/api/status` before/after]
-- **(c) Full probe pass — PASS, 56/0/2 (2 intentionally-opt-in skips:
-  estop_assert, bench_home).** Confirms the C4 channel-id renumber is what
-  the live catalog actually serves (`subscribe_1000/1010/1020/1100/1110/1111/
-  1200/4100/0003` all present and granted), catalog etag reported
-  (`9275f578ada7d314`), HELLO→WELCOME works, and — via two probe fixes below
-  — WELCOME's `ws_port`(46)=82/`ipv4`(47)=192.168.1.229 and identity
-  `hub_instance_id`(identity_keys 5)=`0x28F1295A0510B8E1` are now decoded and
-  checked, both present and sane. **Two pre-existing FALSE FAILURES found and
-  fixed in `tools/slopsync_probe.py` itself** (not firmware bugs — the device
-  catalog was already correct; the probe's own hardcoded vocabulary copies
-  had drifted): (1) `FIELD_ROLES` was a stale 16-entry hand-copy of
-  registry.yaml's now-32-entry `field_roles` map (missing every
-  `geometry.*`/`pattern.*`/`plan.*`/`command.position`/`telemetry.target`/
-  `source.background_run` role landed since — synced to the full registry
-  list); (2) `pattern_mask`'s homed/estop cross-check compared the WHOLE
-  `enabled_mask` byte against zero, but Phase D's `source.background_run`
-  (bit 6) is unconditionally 1 regardless of homed/estop — every unhomed
-  session was a guaranteed false "CONTRADICTS" (fixed: mask off bit 6 before
-  the zero-check). Both were 100% reproducible before the fix, 0/0 after.
-  [verified 2026-07-28 — probe run before (2 FAIL) and after (0 FAIL) the
-  fix, diffs in `tools/slopsync_probe.py`]
-- **(d) STALE/reattach live (RFC-042) — FIXED + VERIFIED (2026-07-28,
-  follow-up session, fw 2.1.78 → 2.1.80).** Originally: FAIL, real bug
-  found, NOT fixed (flagged for operator) — the root-cause writeup below is
-  kept verbatim for the record. **Governance ruling (main-loop,
-  2026-07-28):** the CANON freeze on `hub.hpp`/`client.hpp` covers PUBLIC
-  API SHAPE (extend, never reshape); it does not shield an internal
-  slot-selection bug in `hub_impl.hpp` that defeats a stamped RFC. Fix
-  authorized — no public API signature changed, frozen artifacts
-  (`mini_catalog.hpp`, `mini-catalog.yaml`, golden byte arrays) untouched.
-  **Fix:** `Hub::attachTransport()` now prefers a genuinely-free slot
-  (`transport == nullptr && !session.occupied()`); if none exists, it falls
-  back to `findEvictableStale()` — the SAME oldest-parked eviction policy
-  `handleHello()`'s own slot-pressure branch already used (RFC-042 item 5),
-  not a second reclaim rule — severing the victim's transport first if one
-  is still attached (a deadman/idle-reap staleness can leave one, unlike the
-  out-of-band-detach trigger that produced this bug, which nulls it already).
-  **New native tests** in `test/native/test_slopsync_staleness/`: STALE-05
-  (the exact interleaved clobber scenario — park STALE via
-  `detachTransport()`, a DIFFERENT identity connects, the parked session
-  survives untouched and reattaches afterward by its own identity), STALE-06
-  (same-identity reattach after a `detachTransport()`-triggered staleness,
-  state intact — STALE-02 already covered the idle-silence trigger, this
-  covers the trigger the live bug actually used), STALE-07 (all
-  `kHubMaxSessions + 1` physical slots accounted for, one STALE — the new
-  `attachTransport()` eviction fallback fires, same policy STALE-03 already
-  proved at the HELLO layer). Full native suite: 31/31 environments PASSED,
-  exit 0 (TRAPS T10). `pio run -e sd32-ota` SUCCESS (RAM 29.4% / 96,436 B,
-  flash 28.7% / 1,877,624 B). **Live re-verification** (scripted directly,
-  same shape as the original repro — `tools/slopsync_probe.py` has no flag
-  for this and still can't run a full session end-to-end against this
-  device's separately-flagged heap issue, item (i) below, so a standalone
-  wire-layer script reusing `slopsync_probe.py` as a module did the honors,
-  skipping catalog BLOB adoption entirely since RFC-042 reattach identity is
-  orthogonal to it): two independent kill+reattach runs both got their
-  ORIGINAL `session_id` back, and a third INTERLEAVED run (a different
-  identity connects between the kill and the reattach — the exact clobber
-  scenario) confirmed the interloper got its own distinct `session_id` while
-  the parked session survived and reattached correctly afterward. Churn: 20
-  rapid connect/hard-kill cycles (which — with only `kHubMaxSessions + 1` = 5
-  physical slots and every cycle a fresh identity — exhausted the free-slot
-  supply by cycle ~5 and forced the NEW eviction-fallback path on every
-  cycle thereafter, live, repeatedly): 20/20 handshook, uptime rose
-  monotonically throughout (no reboot), heap stayed flat (~13.6 KB free,
-  no crisis — confirms the item (i) heap issue is specifically tied to the
-  catalog BLOB transfer, not this fix or ordinary session churn). Original
-  root-cause writeup, verbatim: Scripted directly (no probe flag exists for
-  this): open a session, `SO_LINGER{1,0}`-close it (genuine TCP RST, no
-  GOODBYE — mirrors `slopsoak.py`'s `close_rst()`), reconnect with the
-  IDENTICAL `instance_id` after both a 2 s and a 10 s gap. Both gaps FAIL
-  identically: the reconnect always gets a BRAND NEW `session_id` and the
-  device log shows the old session logged `left` (full teardown,
-  `onSessionLeft`) at the moment of reconnect, never `STALE`-then-reattached.
-  Root cause traced into `lib/slopsync/include/slopsync/hub/hub_impl.hpp`:
-  `Hub::detachTransport()` correctly calls `markStale()` (retains
-  `session_id`/grants, sets `slot.transport = nullptr`) — but
-  `Hub::attachTransport()` picks a slot for a brand-new incoming connection
-  by `slot.transport == nullptr` ALONE, with no check for
-  `slot.session.state == STALE`. A STALE slot's transport pointer is null by
-  definition, so it looks exactly like a genuinely-free slot and gets handed
-  to the FIRST new connection that shows up — including one with a totally
-  unrelated `instance_id` — before `handleHello()`'s own
-  `findSlotByInstance()`/reattach-by-identity logic ever gets a chance to
-  run. With `kHubMaxSessions = 4` and this bench session's rapid single-
-  client churn, every single reconnect during tonight's testing landed on
-  slot 0 (the first array slot, always the most recently vacated one) and
-  clobbered whatever was parked there. **Confound ruled out:** the first
-  failed attempt happened while the device also had an unrelated
-  self-inflicted HTTP stall backlog (below); re-ran on a freshly-rebooted,
-  clean device with a 10 s gap and got the identical failure, so this is
-  not a timing race or an artifact of the stall. [verified 2026-07-28 —
-  two independent live reproductions + code read, `hub_impl.hpp` lines
-  ~93-149; fix + tests + live re-verification verified 2026-07-28 same date,
-  follow-up session — native suite 31/31 exit 0, sd32-ota SUCCESS, live
-  reattach ×3 + 20-cycle churn all reproduced above]
-- **(e) background_run 0/1 disconnect behavior — PASS, both directions.**
-  Scripted directly against `pattern-cmd`(0x3200): set `background_run`(key
-  7)=1, start the pattern (`running`=1), clean-close the client, confirmed
-  from a fresh second connection that `pattern-state`(0x1200) still reads
-  `running=true` after the first client was gone. Repeated with
-  `background_run`=0: confirmed `running=false` after disconnect. Both ECHOed
-  correctly on the wire; the RFC-045/048 policy is honored in both
-  directions. Minor caveat (not a failure): in the `background_run=0` run the
-  STATE read immediately after starting the pattern (while client A was
-  still connected) already showed `running=false`, so that particular run
-  demonstrated "stays stopped" rather than "was running, then stopped on
-  disconnect" — the wire ECHO still confirms the `running=true` INTENT was
-  accepted, so this reads as a timing/read-race in the test script, not
-  firmware behavior. [verified 2026-07-28 — scripted 2-client wire test,
-  both directions]
-- **(f) UDP discovery — PASS** (unicast, broadcast, rate limiting all
-  confirmed). Hand-encoded DISCOVER_PROBE/decoded DISCOVER_REPLY per
-  `include/comms/SlopSyncDiscoveryWire.h`'s documented layout. Unicast to
-  192.168.1.229:21328 got an immediate, correctly-shaped 76-byte reply
-  (`hub_instance_id=0x28F1295A0510B8E1`, `ws_port=82`, `fw_version=2.1.78`,
-  `catalog_etag=9275f578ada7d314` — all matching the WS-side values).
-  Broadcast to 192.168.1.255 FAILED when sent from a wildcard-bound socket
-  (this Windows host is multi-homed — a WSL/virtual adapter at 172.27.224.x
-  alongside the real LAN NIC — and the broadcast went out the wrong
-  interface); binding the socket explicitly to the LAN IP fixed it
-  immediately, confirming this was a test-host routing artifact, not a
-  device-side gap. 3 probes sent within ~0.1 s from the same source got
-  exactly 1 reply, confirming the 1/source/s rate limit. [verified
-  2026-07-28 — raw-socket scripts, both interface-binding variants captured]
-- **(g) hub_instance_id stability — PASS.** `0x28F1295A0510B8E1` observed
-  identically across: the Step-2 OTA reboot, a deliberate same-binary
-  re-flash reboot (triggered specifically for this check, since no SlopSync
-  reboot-admin INTENT exists and power-cycle is unavailable), and the UDP
-  DISCOVER_REPLY path — three independent reads, one value. [verified
-  2026-07-28 — probe WELCOME identity + UDP reply, before/after the re-flash]
-- **(h) requested_curve_family (CBOR key 48) — PASS.** Hand-built a HELLO
-  publish wish for motion-segment(0x2101) carrying `curve_family`(45)=3
-  (`step`); WELCOME's `granted_publishes` entry echoed back
-  `{45: 1, 48: 3}` — key 48 verbatim-echoes the wish (3, step) exactly as
-  RFC-049(b) specifies, while the effective key 45 shows the hub's
-  `curve_policy` DOWNGRADED it to 1 (c1_cubic). This is the mechanism working
-  exactly as designed: the two keys being simultaneously present and
-  different is what makes a downgrade a visible fact instead of a client
-  inference. [verified 2026-07-28 — hand-built HELLO wish + WELCOME decode]
-- **(i) Heap beacon — DIAGNOSED + MITIGATED (HEAP RELIEF pass, follow-up
-  session, fw 2.1.80 → 2.1.81).** Original finding (kept verbatim below),
-  then root-caused and measurably relieved; a real residual is flagged at
-  the end, unfixed.
-
-  **Diagnosis, with live evidence (device 192.168.1.229, motor unplugged
-  bench session).** The BLOB `ConnectionResetError` has TWO confirmed
-  mechanisms, not one:
-  (1) **AsyncWebSocket queue-full → session close**, the majority case.
-  `SlopSyncAsyncWsTransport::write()` classified `BLOB_CHUNK` (0x1B) as
-  ordinary "control" (everything that is not STATE/STREAM), so a catalog
-  transfer that outran the client's drain rate armed the SAME
-  `kCtrlStallMs`(2000ms)-then-`_ws->close(id)` timer built for a genuinely
-  wedged control reply (GRANT/WELCOME/etc). Reproduced live with a
-  read-only wire script subscribed to `hub-status`(0x0006) while firing a
-  full catalog `BLOB_REQ`: chunks flowed for ~50-129 of 129, then silence,
-  then the serial boot log showed the exact line `client#1 control frame
-  (type 0x1B) unsendable for 2000ms — closing session` and the socket
-  closed — this device's catalog is now 24,581 B / 129 chunks (grown since
-  the file's own header comment, still quoting a 57-chunk incident, was
-  written).
-  (2) **Genuine heap-exhaustion PANIC reboot**, confirmed once directly:
-  a repro on the PRE-fix 2.1.80 build produced `Reset reason: PANIC
-  (unexpected)` and a reset `uptime_ms` (`/api/capabilities` before/after),
-  with no serial capture running at the time (ruling out the unrelated
-  COM11-open-resets-the-board artifact noted below). `AsyncWebSocketClient::
-  binary()`/`_queueMessage()` (`lib/espasyncwebserver/src/AsyncWebSocket.cpp`)
-  allocates a `std::make_shared<std::vector<uint8_t>>` copy of every frame
-  BEFORE checking whether the 32-deep queue (`WS_MAX_QUEUED_MESSAGES`) has
-  room; under sustained backpressure, up to 32 live ~250-300 B buffers can
-  sit queued at once (~8-10 KB) on a heap that had only ~15 KB free
-  post-NimBLE-return (`maxblock` as low as 7,668 B) — the exact TRAPS T2
-  mechanism, one layer up from BSS.
-  ELF inventory (`xtensa-esp32s3-elf-nm --size-sort -S` on
-  `.pio/build/sd32-ota/firmware.elf`) found the single largest
-  non-hardware-mandatory internal-RAM reservation in the whole build:
-  `AppLog.cpp`'s `/api/log` web ring (`WebRingSink`, a magic-static
-  singleton) plus its `dump()`-time snapshot copies — **_low + _high +
-  loSnap + hiSnap ≈ 17.8 KB of BSS**, touched ONLY by `httpTask` (never an
-  ISR, never DMA), dwarfing every other candidate (`g_slopmotion` 3.5 KB,
-  `g_state` 2.8 KB, `s_coredump_stack` 1.9 KB — all either already-justified
-  or mandatorily internal).
-
-  **Mitigation 1 — BLOB_CHUNK gets its own backpressure class**
-  (`src/comms/SlopSyncAsyncWsTransport.{h,cpp}`, firmware-only, no wire/
-  registry change). `write()` now gates `BLOB_CHUNK` on the registry's own
-  advertised sender pacing budget (`limits::blob_chunks_in_flight` = 4,
-  RFC-050) via the SAME `AsyncWebSocketClient::queueLen()` check the
-  STATE/STREAM shed-early path already used — holding (never arming the
-  control-stall timer, never closing the session) instead of running all
-  the way to `WS_MAX_QUEUED_MESSAGES` first. `pumpBlobTransfer()`
-  (`lib/slopsync`, untouched) already retries the same un-sent chunk index
-  next tick with no NACK/teardown of its own, so this is a pure hold, not a
-  new failure mode. New diagnostic counter `txBlobHolds()` (held-not-dropped,
-  deliberately not folded into `txDataDrops()`).
-  **Mitigation 2 — the `/api/log` web ring moves to PSRAM**
-  (`src/system/AppLog.cpp`), same `heap_caps_malloc(MALLOC_CAP_SPIRAM |
-  MALLOC_CAP_8BIT)` + placement-new idiom as `SlopSyncHubService` in
-  `main.cpp` (TRAPS T2 prior art), allocated from `applogBegin()` (runs
-  single-task, before any FreeRTOS task exists — no construction-order
-  race). The two `dump()`-local `static` snapshot buffers (comment: "far
-  too big for an HTTP stack") became instance members so they ride into
-  PSRAM with the rest of the object instead of adding a SECOND ~8.9 KB BSS
-  reservation. Every call site (`applogBegin`/`applogDump`) null-checks the
-  pointer and degrades honestly ("web log ring unavailable this boot") if
-  the one-time PSRAM allocation ever fails, rather than crashing.
-
-  **Measured deltas.** Build: RAM 29.4% / 96,436 B → 24.1% / 78,948 B
-  (**−17,488 B**, matching the ~17.8 KB estimate almost exactly), flash
-  28.7% / 1,877,776 B → 28.5% / 1,869,436 B (both builds `pio run -e
-  sd32-ota` SUCCESS). Live, fw 2.1.81 vs the pre-fix 2.1.80 baseline: boot
-  `post-slopsync heap free` 15,320 B → **32,840 B (2.1x)**, `maxblock`
-  7,668 B → **22,516 B (2.9x)**; steady-state (~15 s uptime) `free`~31,900 B
-  `min`~15,280 B `maxblock`~20,468 B, vs the old baseline's `min` touching
-  84-528 B. The catalog BLOB transfer (129/129 chunks, 24,581 B) now
-  completes cleanly every time — reproduced twice with a standalone wire
-  script (`closed_abruptly=False` both runs) and confirmed via
-  `tools/slopsync_probe.py`'s own `blob_catalog`/`blob_ns`/
-  `blob_total_bytes` checks (PASS, full 47/0/4 run). This does not reach
-  the task's own ideal ">40 KB free steady-state" bar in the ABSOLUTE
-  best case measured (~31-33 KB) but is a 2x+ structural improvement with
-  a large, comfortably-clear margin over the specific BLOB failure this
-  pass targeted; chasing the last few KB with a riskier move (e.g. moving
-  something ISR/DMA-adjacent) was not attempted, per the task's own
-  "do not chase with risky moves" guidance.
-  [verified 2026-07-28 — HEAP RELIEF pass: live BLOB repro before/after
-  (standalone wire script, twice each), `/api/log` heap beacon before/after
-  the OTA, `pio run -e sd32-ota` RAM/flash before/after, native suite 31/31
-  exit 0, `slopsync_probe.py` full run 47/0/4, `canon_lint.py` 0 findings]
-
-  **Residual, flagged not fixed:** under a MUCH heavier combined load (one
-  WS session doing the full catalog BLOB transfer + a 29-channel
-  subscribe-everything batch + a bench `force_home` INTENT, all inside
-  ~2.7 s — `tools/slopsync_probe.py --bench-home --bench-home-no-revert
-  --no-motion`), the SAME fixed 2.1.81 firmware's low-water mark touched
-  **60 bytes free** (steady free heap ~31 KB throughout, `min=60` only —
-  a sharp transient, not a sustained collapse; the device did NOT crash
-  this time). This is evidence of at least one OTHER heavy-simultaneous-
-  allocation path (subscribe-everything's per-channel GRANT/retained-STATE
-  burst, and/or the bench-admin INTENT path) that the BLOB-specific
-  mitigation above does not cover, on a heap that is much healthier but
-  still not infinite. **Separately, and apparently unrelated:** a genuine
-  `Reset reason: PANIC (unexpected)` was reproduced ONCE on the FIXED
-  2.1.81 firmware during a full `slopsync_probe.py --bench-home` run (heap
-  was healthy at the time, ~33 KB free/22.5 KB maxblock — not a heap-
-  exhaustion signature), then did NOT reproduce on two further identical
-  retries; root cause not investigated by THAT pass (different subsystem —
-  auth/bench-home/force_home, not the BLOB/heap path it targeted) and not
-  reliably reproducible in the attempts made. **Since RULED OUT as a heap
-  event and FIXED — see the PARKED-SLOT SAFETY BROADCAST entry below; the
-  "not a heap-exhaustion signature" read was right for the wrong reason, and
-  the panic was a null transport, not an allocation.** Both are recorded here as
-  new findings from this session's verification, worth a dedicated
-  follow-up pass, and are NOT regressions this pass is responsible for
-  fixing. **Also noted, not a bug:** opening `COM11` via `pyserial` for
-  read-only monitoring resets the device (`Reset reason: USB`) via the
-  ESP32-S3's native USB auto-reset circuit — confirmed live twice this
-  session; serial monitoring is not passive on this hardware, worth
-  remembering for future diagnostic sessions.
-- **(j) BLE advertising — PASS (partial), real radio, real scan.**
-  `pip install bleak` into the repo's existing `.venv` (operator-authorized
-  fallback); `BleakScanner.discover()` found the device: address
-  `20:6E:F1:31:74:6D`, advertised name **"SlopDrive-32"** (the full name,
-  correctly appearing in what Bleak surfaces — consistent with the design's
-  shortened "SD32" in the primary payload / full name in the scan response),
-  service UUID `534c4f50-5359-4e43-8000-000000000001` matching exactly.
-  **Not captured:** the manufacturer-data flags byte (`manufacturer_data`
-  came back empty `{}`) — plausibly Windows/WinRT's BLE stack filtering
-  company id `0xFFFF` (the Bluetooth SIG's own reserved "for testing only"
-  id, which some OS stacks specifically drop) rather than a firmware gap,
-  but unconfirmed either way from this host. **OPERATOR-MORNING:** a phone
-  + nRF Connect (which shows raw AD structures, not an OS-filtered summary)
-  is needed to confirm the manufacturer-data flags byte itself. [verified
-  2026-07-28 — live `bleak` scan capture]
-  **CLOSED, 2026-07-28 (later session):** the phone + nRF Connect check
-  happened, and it was a real firmware gap, not OS filtering — the
-  advertisement's own 31-byte budget had no room for the MSD record once
-  the service UUID, Flags, and name were in it; `addData()` failed silently
-  and nobody checked its return. Fixed (MSD moved to the scan response,
-  alongside the full name); see the BLE ADVERTISING MSD FIX entry further
-  down for the mechanism, the fix, and live re-verification (fw 2.1.84).
-
-**Unplanned event during this session:** the device rebooted once on its own
-(not an OTA reboot) mid-test, immediately after a `ConnectionResetError` on
-the probe's socket. No crash/panic reason is logged (the firmware does not
-log an ESP reset-reason at boot — a gap, not investigated further this
-session); the device came back healthy and `hub_instance_id` was confirmed
-unchanged across it. Originally guessed to be item (d)'s slot-reuse bug under
-the rapid connect/disconnect churn this session generated; **now identified —
-this was the parked-slot safety-broadcast panic, see the PARKED-SLOT SAFETY
-BROADCAST entry below.** The guess was in the right neighborhood: it does take
-a parked slot, just not a clobbered one. Also
-self-inflicted and resolved: an early bad manual `curl` probe (a POST to
-`/api/ota/fs` with no multipart body) wedged `WebUI::update()` for 209s and
-triggered a cascade of escalating `[STALL] http:ui.update blocked` warnings
-(up to 79s) on the synchronous page-serving path — all API/WS traffic stayed
-healthy throughout; a clean reboot cleared it and the pattern never
-recurred, confirming it was test-harness-caused, not a firmware regression.
-**Reset-reason gap CLOSED** (follow-up session, same date): boot now logs
-`esp_reset_reason()` decoded to its enum name through SlopLog (`src/main.cpp`
-`setup()`, tag `boot`) — POWERON/SW (cold boot, `esp_restart()` after an OTA)
-log at INFO; anything else logs at WARN specifically so it lands in
-`AppLog.cpp`'s `WebRingSink` protected 16-line Warn+ sub-ring instead of the
-44-line Trace/Debug/Info one the 10 s heap beacon alone recycles in well
-under a minute (confirmed live: the first cut logged at INFO and was already
-evicted by the time `/api/log` was polled ~65s post-boot; re-cut to the
-WARN-on-unexpected split after watching that happen). Verified live post-OTA:
-`Reset reason: SW` observed in `/api/log` immediately after the 2.1.79 →
-2.1.80 reboot.
-
-**Final device state (HEAP RELIEF pass, follow-up session):** fw **2.1.81**,
-reachable, `homed=true` `home_override=true` `estopped=false`
-`live_speed_mm_s=0` (fake-homed via bench override, left ON deliberately for
-any follow-up bench work — reasserted via `tools/slopsync_probe.py
---bench-home --bench-home-no-revert` after this session's reboots cleared the
-volatile override; the item (i) BLOB heap issue is now FIXED, so
-`--bench-home` runs the full probe cleanly rather than needing the lighter
-wire-layer workaround the prior session used). `measured_stroke_mm=250`.
-
-## PARKED-SLOT SAFETY BROADCAST — spontaneous reboots FIXED (2026-07-28 overnight, fw 2.1.81 -> 2.1.82)
-
-The three unexplained mid-probe reboots recorded above (the item (i) residual,
-item (a)'s `ConnectionResetError` anomaly, and the "Unplanned event" note) were
-ONE bug, and it was NOT the heap. Root cause found, fixed, host-proven and
-live-verified.
-
-**Mechanism (TRAPS T13).** `Hub::broadcastSafetyNow()` fans a critical safety
-snapshot out to EVERY subscribed slot, gated on `session.occupied()`,
-`session.ready` and the 0x0003 subscription — and on nothing else. None of
-those three is cleared when a transport dies: RFC-042 PARKS the session
-(`markStale()` flips `state` to STALE and RETAINS slot, session_id, grants and
-subscriptions) while `detachTransport()` sets `slot.transport = nullptr`.
-`update()`'s slot walk skips null-transport slots, so every per-slot pump was
-safe; the fan-out sender was not. It passed the null to
-`sendFrameToTracked()` -> `sendFrameTo(ITransport& t, ...)`, and the virtual
-`t.write()` loaded a vtable from address 0.
-
-**Evidence.** Reproduced 2 runs out of 3 with a serial monitor attached
-(COM11), identical register dump both times: `Guru Meditation Error: Core 0
-panic'ed (LoadProhibited)`, `PC 0x42057da0`, `EXCCAUSE 0x1c`, `EXCVADDR
-0x00000000`, `A2 0x00000000`. Decoded against
-`.pio/build/sd32-ota/firmware.elf` with `xtensa-esp32s3-elf-addr2line`:
-`Hub::sendFrameTo` (hub_impl.hpp:369) <- `sendFrameToTracked` (3272) <-
-`broadcastSafetyNow` (2453) <- `handleIntent` (1697) <- `dispatchFrame` (305)
-<- `pumpSlot` (271) <- `Hub::update` (203) <- `SlopSyncHubService::taskLoop`.
-The probe transcript pins the trigger exactly where the field reports put it:
-`Step 5.9: no ECHO/NACK for override_on within 5.0s` — `override_on` is a
-safety op, so it latches, publishes, and broadcasts. The victim slot is a
-session parked by a PREVIOUS probe run; that is why it needed 1-3 runs to
-show and why it always followed a `ConnectionResetError` (the reset was the
-device dying, and the parked session it left behind was the loaded gun for
-the NEXT run).
-
-**Heap is exonerated, and the earlier reasoning corrected.** The item (i)
-residual guessed these reboots might be the `min=60 B` transient. They are
-not: this is a fixed null dereference with a deterministic PC, and it
-reproduces on the HOST where the heap is a desktop heap. The `min` low-water
-readings stand as their own separate observation. Conversely the previous
-pass's "heap was healthy at the time (~33 KB free)" was read off the 10 s
-beacon, which cannot see a sub-second transient either way — neither
-direction of that inference was sound.
-
-**Fix** (`lib/slopsync/include/slopsync/hub/hub_impl.hpp`, internal only —
-no public `hub.hpp`/`client.hpp` signature touched, frozen artifacts
-untouched; same authorization precedent as the `attachTransport()` fix
-above). `broadcastSafetyNow()` skips `slot.transport == nullptr`, matching
-the guard `pumpEventDrain()` and `submitSignature()` already carried.
-Deliberately a SKIP and not a tracked failure: a parked session has no link
-to be congested on, so routing it through `trackCriticalSend()` would age it
-toward eviction for a send that was never attempted. Skipping costs the
-parked client nothing — the snapshot is retained, and §9.1 re-pushes the
-current one the instant it reattaches. `sendFrameToTracked()` and
-`sendNackTracked()` additionally refuse a null transport before
-dereferencing, so no FUTURE fan-out site can panic the device the same way
-(defense in depth, in the same spirit as `update()`'s own field-bug-#5
-re-check).
-
-**Regression test:** `test/native/test_slopsync_staleness` STALE-08 — two
-ready safety subscribers, one parked via `detachTransport()`, then both
-`latchEstop()` and `setSafetyModes()` (the probe's own Step 5.9 op); asserts
-the live subscriber gets each edge, the parked one survives un-evicted, and
-a reattach receives the current retained snapshot carrying both edges it
-slept through. Proven to catch the bug: with the three guards surgically
-removed the suite dies with exit code 3221225477 (0xC0000005,
-ACCESS_VIOLATION — the host equivalent of LoadProhibited); with them, PASS.
-
-**Gauntlet (all green):** native suite 31/31 exit 0, `pio run -e sd32-ota`
-SUCCESS (RAM 24.1% / 78,948 B, flash 28.5% / 1,869,456 B), `catalog_lint.py`
-OK (32 entries), `gen_registry_header.py --check`, `gen_docs_tables.py
---check` (14 files, 108 dictionary terms), `gen_spec_pages.py --check` (20
-files), `gen_channel_map.py --check`, `gen_channel_grid.py --check` all up to
-date. `canon_lint.py`: 0 findings in this pass's own scope — see the FLAGGED
-note at the end of this entry.
-
-**Live verification.** `FIRMWARE_VERSION` 2.1.81 -> 2.1.82, deployed via
-`POST /api/ota` with `X-OTA-Token` (DOCTRINE §6 curl path; the `deploy.ps1`
-referenced in the entry above was prior-session scratch and is not in the
-tree). `/api/capabilities` confirms `fw_version 2.1.82`. Then FIVE
-consecutive full probe runs, `--estop --bench-home --bench-home-no-revert`
-(every safety op the machine has: override on/off, e-stop assert, e-stop
-clear, force_home): **50 passed / 0 failed / 3 skipped on all five**, probe
-exit 0 on all five, **zero `ConnectionResetError`, zero reboots** — device
-uptime rose monotonically 64,877 -> 84,620 ms across the whole set. Serial
-stayed attached throughout: zero `Guru Meditation` lines after the OTA (the
-only three in the capture are the pre-fix repros), and the current boot's
-reset reason is `SW`, i.e. the OTA itself. Same shape had crashed the device
-on 2 of 3 runs immediately before the fix.
-
-**Device end-state:** fw **2.1.82**, reachable at 192.168.1.229,
-`homed=true` `home_override=true` (fake-homed, left ON for further bench
-work) `estopped=false` `paused=false` `homing=false`, not moving,
-`measured_stroke_mm=250`.
-
-**Files touched:** `lib/slopsync/include/slopsync/hub/hub_impl.hpp`,
-`test/native/test_slopsync_staleness/test_main.cpp`,
-`include/system/config_api.h` (version bump), `docs/canon/TRAPS.md` (new
-T13), `docs/canon/LEDGER.md`, `SD32-OVERNIGHT-REPORT.md`.
-
-**Lane note (resolved, recorded for the audit trail):** mid-pass
-`canon_lint.py` briefly showed one british-spelling finding
-(`sim/slopsim/src/machine/MachineSim.cpp:905`, a British-spelled word in a
-comment) — pre-existing,
-unrelated to this bug, and inside the file a PARALLEL sim agent was editing
-at the time, so it was deliberately NOT touched from this lane (concurrent
-edits to one file lose updates). That agent fixed it during this pass; the
-final `canon_lint.py` run is 0 findings across the whole tree.
-
-**Main-loop review (2026-07-28):** all judgment calls ACCEPTED — notably
-skip-not-tracked for parked-slot sends (tracking would age a parked session
-toward eviction for a send never attempted). Operator veto window open.
-
-## Sim fidelity (SlopDeck milestone 1) — LANDED (2026-07-28 overnight)
-
-- **`sim/slopsim` gained `--profile device|alien|minimal`** (default
-  `device`), closing the sim-fidelity gap the "Pending operator rulings"
-  entry flagged. Architecture finding: the sim already embedded the REAL
-  `slopsync::Hub`; only its catalog had been swapped (commit 74c6533) to a
-  deliberately-different "benchrig" catalog to prove client genericity —
-  that swap IS what DESIGN.md's `alien` profile wants, it just needed to
-  stop being the only option. No rewrite required.
-  - `device` (DEFAULT): literally `slopdrive::buildSlopDriveCatalog()` from
-    `include/comms/SlopSyncCatalog.h` (feat = current-sensor+power-monitor
-    true/true, mirroring the real hardware) — 44 channels (12 spec-core +
-    32 device-range), 24,581 B, etag `9275f578ada7d314`. **This etag
-    matches the LIVE device's own reported catalog etag** (see the
-    2026-07-28 DEPLOY + LIVE-VERIFY entry, item (c)) — independent proof of
-    byte-identical fidelity. Write-plane restored (from the pre-benchrig
-    e77bd1f reference, adapted to the current C4 channel numbers) for
-    `move`/`home`/`config_set`/`pattern_cmd`; STATE republished for motion
-    (incl. `raw_10um`), machine-config (incl. `measured_stroke`),
-    pattern-state (incl. `background_run`), plan-strip, power, odometer,
-    slopmotion-diag (all 10 anomaly kinds), and the 0x4100 motion-anomaly
-    EVENT.
-  - `alien`: unchanged benchrig catalog (`SlopSimCatalog.h`), 21 channels,
-    4,272 B — a deliberately different conformant hub, now explicitly
-    opt-in rather than the default.
-  - `minimal`: a NEW, literal subset of the real device catalog (same ids/
-    field shapes) — spec-core + `motion`/`move`/`home`, 15 channels,
-    2,442 B.
-  - **Flagged gap — RESOLVED, see "Sim fidelity 19-channel follow-on
-    (2026-07-28)" below:** 19 device-catalog entries (machine-modes/
-    `modes_set`, the 3 SlopMotion tuning cards + `sm_set`, fray-d Advanced
-    pattern + 6 modifiers + its writer, the preset roster/store/cmd trio,
-    machine-admin) were catalog-advertised with full fidelity but had no
-    live STATE publish or INTENT handling in the sim — their writes NACKed
-    `UNKNOWN_CHANNEL`. All 19 now have real, firmware-mirrored behavior.
-  - `webui/test/fixtures/slopsim-catalog.{bin,etag}` re-captured from
-    `device` (was benchrig, 21 ch / 4,272 B). `slopsync-wire.test.mjs`'s
-    `[SKIP-EXPECTED-GAP]` (0x1100 motion / `raw_10um`) is CLOSED — now a
-    plain assertion, passing. `slopsync-sim.mjs`'s pre-existing 3x `[FAIL]`
-    + write-plane `FATAL` are FIXED (config-set 0x3000 now actually applies
-    and reflects into 0x1000 machine-config).
-  [verified 2026-07-28 — `node webui/test/slopsync-wire.test.mjs` ALL PASS,
-  `node webui/test/slopsync-sim.mjs` ALL PASS against a fresh
-  `device`-profile sim (cold+warm sessions, config-set round trip, NACK
-  correlation, `--estop` path), 3-profile connect/HELLO/catalog-fetch/
-  write-round-trip smoke test ALL PASS, `npm run check` (webui/) ALL PASS,
-  `python tools/canon_lint.py` 0 findings, sim build clean (MinGW GCC
-  16.1.0 / CMake+Ninja, `sim/slopsim/build`)]
-- **Main-loop review (2026-07-28):** all three judgment calls ACCEPTED
-  (INA228 feature flags true/true — validated by the etag match; 44-channel
-  faithful build over the brief's imprecise "32"; `minimal` = spec-core +
-  motion/move/home). Operator veto window open.
-
-## Sim fidelity 19-channel follow-on (2026-07-28) — LANDED, morning ruling item 3
-
-Implements the ONE-WAY PARITY ruling (morning ruling item 3 below): the sim
-is the 1:1 device twin, so the 19 entries the milestone-1 pass flagged above
-now get REAL behavior — the machine is truth, the sim conforms to it, and
-where mirroring found a firmware quirk the sim copies the quirk rather than
-"fixing" it (the firmware is never edited to close a sim gap). No catalog
-change: `buildSlopDriveCatalog()` is shared verbatim with the firmware
-already, so the etag is unaffected by this pass — confirmed by re-capture,
-below.
-
-- **machine-modes (0x1030) / modes-set (0x3030):** `stream_speed_mode`
-  wired into the sim's pre-existing `uiSetStreamSpeedMode()`;
-  `overshoot_clamp` is plain sim state — inert on the device too (RENDERING.md
-  `ui_ranks::hidden`, no engine consumer on either side, so there is nothing
-  for it to drive in the sim either). Keys 1/2 (`blend_mode`/`transport`) are
-  mirrored as PERMANENT GAPS exactly like the firmware: the catalog declares
-  no schema field for them at all, and a write touching no recognized key
-  NACKs `INVALID_VALUE`.
-- **SlopMotion tuning — slopmotion-limits/chase/waveform (0x1120/1121/1122) +
-  sm-set (0x3120):** 17 of 20 keys write straight into the REAL embedded
-  `slopmotion::Engine`'s `Config` via one read-modify-write + `setConfig()`
-  call (the same seam the sim's existing `uiSetXxx` palette hooks use),
-  clamped to the firmware's OWN bounds — tuning takes effect on the very next
-  plan. `jmax_ovr`/`vmax_ovr`/`amax_ovr` (keys 1-3) are sim-held overrides
-  (0 = derive), mirroring `SystemState::sm_tune_{jmax,vmax,amax}_ovr`'s
-  "0 = derive from the mm limit set / window span" semantics exactly, feeding
-  `deriveEngineLimits()` (which gained the same vmax/amax override branch
-  `_jmax_norm` already had).
-- **fray-d Advanced pattern — pattern-advanced (0x1210) + 6 modifier lanes
-  (0x1211-1216) + writer pattern-advanced-cmd (0x3210):** reuses the
-  FIRMWARE's OWN `advpat::Settings`/`BaseControl`/`Modifier`
-  (`include/motion/AdvancedPattern.{h,cpp}` — pure math, zero Arduino/
-  FreeRTOS deps, now compiled into `slopsim` too) instead of re-deriving
-  equivalent sim-side structs, so clamps, depth-pair coupling
-  (`coupleDepths()`), and compile-time defaults are byte-identical to the
-  device BY CONSTRUCTION, not by transcription.
-- **Preset roster/store/cmd trio (0x1220 / 0x5220 / 0x3220):** reuses the
-  firmware's OWN `PatternPresetStore` (`include/comms/PatternPresetStore.h`,
-  header-only, zero Arduino deps) for save/load/delete/rename, plus a
-  `readBlob()` override (ns=store, store_id=2) so a real client's BLOB_REQ
-  against the STORE channel gets an honest payload — slot/name-length rules
-  and the 40-byte payload layout are byte-identical to the device.
-- **machine-admin (0x30F0):** `clear_fault`/`save_config`/`servo_scan` all
-  accept and ECHO the op; an unknown op NACKs `UNSUPPORTED_OP`.
-
-**Firmware quirks mirrored, flagged for the operator (not fixed, per the
-ONE-WAY rule):**
-1. `pattern-presets-cmd`'s `save` op captures ONLY `in_speed`/`out_speed`/
-   `in_accel`/`out_accel` + the 6 modifier blocks — NEVER `master` or the
-   depth pair (the firmware's own comment: "never depths or master speed").
-   A saved preset silently drops master speed and depth window; loading one
-   back does not restore them. Mirrored exactly; worth naming so nobody is
-   surprised the sim does the same thing the device does.
-2. The six modifier-lane channel ids are NOT in `advpat::BaseId` order: the
-   wire/channel order is speed-in/out, accel-in/out, depth-1/2, while the
-   writer's setting-key grouping (`base = 9 + 6*id`) and the preset payload
-   layout (`base = 4 + 6*id`) both use `BaseId` order (depth-max, depth-min,
-   speed-in/out, accel-in/out). The firmware's own `kModChannels` reorder
-   table is copied verbatim in the sim rather than re-derived, so both sides
-   carry the same non-obvious mapping — a client that assumed "channel id
-   order == BaseId order" would be wrong against either machine.
-   No new inconsistent clamp, wrong NACK code, or other genuine bug was found
-   while implementing this pass — both items above are documented, deliberate
-   firmware design choices, not defects.
-
-**Physics/hardware-model limitations flagged (not silently absorbed):**
-1. The fray-d Advanced pattern's write/clamp/echo/STATE-publish contract is
-   fully real, but the sim's pattern generator (`SimPattern`, a v1 stand-in:
-   stroke/tease/shallow-fast) does not yet consume `_ap` to drive the stepper
-   via `advpat::Settings::planStroke()` the way the firmware's PatternEngine
-   does — toggling `ap_mode` or dialing the 6 modifier lanes has NO motion
-   effect in the sim yet, only a wire effect. Flagged in `MachineSim.h`'s own
-   comment on `_ap`; porting the per-half-stroke scheduling loop is a
-   materially larger feature than wiring existing tuning into the existing
-   engine (the SlopMotion-tuning case above) and was not attempted this pass.
-2. `machine-admin` (0x30F0): the sim models NO fault or servo-Modbus concept
-   at all (grepped clean across `sim/slopsim/src`) — `clear_fault`/
-   `save_config`/`servo_scan` are honest no-ops (accept + echo the op) rather
-   than invented behavior. `servo_scan` can never NACK `INTERLOCK` the way
-   the firmware's async Modbus path sometimes can, because the sim has no
-   interlock condition to refuse it with.
-3. The preset STORE's `readBlob()` override was implemented (any real client
-   fetching preset names/payloads via BLOB_REQ, e.g. MFP or webui, exercises
-   it) but is NOT independently exercised by a dedicated BLOB_REQ line in
-   `slopsync-sim.mjs` this pass — a coverage gap, not a functionality gap.
-
-**Test coverage added:** `webui/test/slopsync-sim.mjs` gained one write ->
-post-clamp ECHO -> STATE-reflect round trip PLUS one invalid-write -> correct
-NACK case per family (5 families, ~33 new assertions). Two families needed
-every `waitFor` listener armed BEFORE the single write that touches more than
-one STATE channel in the same hub tick, rather than chained sequentially
-after each other — a real race (an earlier draft of this test hit it: the
-sim's WS client can deliver a tick's several STATE frames in one synchronous
-burst, and a listener registered only after an earlier `await` already
-resolved can miss a sibling frame from the SAME burst). Documented inline
-where it matters.
-
-**Gauntlet (all green):** sim rebuild (CMake+Ninja, MinGW GCC 16.1.0,
-`sim/slopsim/build`) clean, 0 new warnings from the new code (only
-pre-existing, unrelated `slopmotion.hpp`/vendored-SHA256 library warnings);
-fixture re-capture etag `b69eb06249ebe73a` — MATCHES the live device's
-post-wire-strings etag (fw 2.1.83/84) exactly, confirming the catalog itself
-needed no change, only sim behavior (byte-for-byte identical fixture to the
-one already committed — `git status` on `webui/test/fixtures/` shows no
-diff); `node webui/test/slopsync-sim.mjs` ALL PASS against a FRESH sim
-instance (a reused long-lived process can produce a false failure on a
-reflect check — re-sending an already-applied value is byte-identical to
-what is already published, so the diff-what-we-sent gate produces no new
-push to wait on; this bit an early draft of this test and is why the file's
-own "KILL ANY STALE SLOPSIM" warning is doubly true now); `node webui/test/
-slopsync-wire.test.mjs` ALL PASS; `npm run check` (webui/) ALL PASS;
-`python tools/canon_lint.py` 0 findings.
-
-**Judgment calls, flagged for veto:** (a) machine-admin's three ops treated
-as honest no-ops rather than invented fault/servo simulation (limitation 2
-above); (b) reused the firmware's own `AdvancedPattern.{h,cpp}` and
-`PatternPresetStore.h` verbatim rather than re-deriving equivalent sim-side
-structs — both are already host-clean (no Arduino/FreeRTOS deps), so this
-guarantees clamp/coupling/default parity by construction; it required one
-CMakeLists.txt include-path addition (`include/motion`) so CMake can resolve
-`AdvancedPattern.cpp`'s own unqualified `#include "AdvancedPattern.h"`
-(PlatformIO's LDF adds every `include/` subdirectory automatically; CMake
-does not); (c) fray-d motion-driving (physics limitation 1 above) deliberately
-NOT attempted this pass — flagged, not silently dropped.
-
-**Files touched:** `sim/slopsim/CMakeLists.txt` (new `AdvancedPattern.cpp`
-source + include path), `sim/slopsim/src/machine/MachineSim.h` (new state
-fields, reused firmware headers), `sim/slopsim/src/machine/MachineSim.cpp`
-(5 new `applyIntent` cases, 2 new free helper functions, 6 new STATE-publish
-blocks, `deriveEngineLimits()` vmax/amax branch), `webui/test/
-slopsync-sim.mjs` (new 19-channel write-plane section). `webui/test/
-fixtures/slopsim-catalog.{bin,etag}` re-captured (byte-identical, no diff).
-[verified 2026-07-28 — sim build clean, fixture etag match confirmed
-directly, full gauntlet commands run and exit codes/output observed above]
-
-## Morning ruling batch (operator, 2026-07-28, on the overnight stamp list)
-
-1. **STATE burst congestion: COALESCE, not backpressure — LANDED
-   (2026-07-28, fw 2.1.84 → 2.1.85).** Root cause: the coalescing engine
-   (`RetainedStore` + per-subscriber pacing + `shedDecision()`) was already
-   correct and normatively tested (S-08) — the gap was that
-   `Hub::setCongestionLevel()`, the hub's own documented choke point for a
-   real binding's native congestion signal, was never called from
-   `src/comms/SlopSyncAsyncWsTransport.{h,cpp}`; `congestionLevel` sat at 0
-   forever on hardware, so shedding never engaged. Fixed by wiring it:
-   `pollCongestionLevel()` classifies 0/1/2 from `queueLen()` watermark
-   hysteresis (§10.3's own 50%/1s, 20%/5s numbers) + the existing
-   control-stall timer for severe; `Hub` gained an additive
-   `setCongestionLevel(ITransport&, uint8_t)` overload fed from
-   `SlopSyncAsyncWsPort::loop()`. New tests: `test_slopsync_safety` S-11
-   (bit-exact last-value-wins, seq never regresses, EVENT never coalesces).
-   Bench (worst-case repro ×3 on fw 2.1.85): heap low-water **60 B →
-   164–216 B** (~3x), no crash, 45/0/6 all runs, 10 session cycles + all
-   bench runs uptime-monotonic. **Flagged residual, PENDING OPERATOR
-   STAMP:** still not a fully healthy floor — normal-priority STATE is not
-   shed until level 2 (correct per the normative table) and the 1 s
-   sustained-congestion hysteresis means a ~2.7 s packed burst can mostly
-   complete before the signal engages; the next lever (burst-aware
-   escalation or shorter sustain window) risks shed-flapping on the hot
-   path, so it is parked for a ruling, not chased. [verified 2026-07-28 —
-   commit 3323e44, native 31/31 exit 0, sd32-ota SUCCESS (flash +840 B),
-   canon_lint 0, 3x live bench repro against fw 2.1.85]
-2. **Wire-visible catalog/registry strings get the punctuation pass —
-   approved** ("do it, it's a single etag bump"). ONE atomic catalog
-   evolution: em/en dashes + banned words fixed in SlopSyncCatalog.h descs
-   + registry.yaml desc strings; fixtures/goldens regenerated once; etag
-   changes on deploy; frozen mini-catalog untouched (C-11 precedent).
-   **DONE — see the WIRE-STRING PUNCTUATION EVOLUTION entry below** (fw
-   2.1.82 → 2.1.83, etag `9275f578ada7d314` → `b69eb06249ebe73a`).
-3. **Sim division-of-labor ruling:** `sim/slopsim` is the 1:1 DEVICE TWIN —
-   the 19 advertised-but-inert entries get REAL behavior in parity with the
-   machine ("it's a 1:1 sim and it should reflect that for quality
-   testing"). PARITY IS ONE-WAY (operator, same date): the machine is the
-   truth and the sim conforms to it — the firmware is NEVER edited to close
-   a sim gap; a mismatch is always a sim work item.
-   **DONE — see the "Sim fidelity 19-channel follow-on (2026-07-28)" entry
-   above.** The "be anything" role moves to a NEW dumb test hub named
-   **SlopBench** (operator-named): config-file catalog, simple TUI showing
-   live axis/channel values, configurable fake delay on STATE echo.
-   **SlopBench LANDED (2026-07-28, host-build, verified):** `sim/slopbench/`
-   — config-file (`.bench`, custom line format, not YAML — dev-tool, no new
-   dependency) catalog builder with zero hardcoded channel knowledge,
-   generic INTENT-clamp/echo/STATE-mirror write plane, configurable fake
-   STATE-echo delay (pending-mirror queue), sine/ramp auto-animation,
-   plain-ANSI TUI (live channel table, sessions, recent-writes log, `q`
-   quits). 3 example configs: tiny-axis / alien (reserved domains) /
-   kitchen-sink. Every session gets `configure` (test double, not an auth
-   harness — deliberate). STREAM/EVENT/STORE declarable but functionally
-   inert (honest defaults), noted in its README. Verify:
-   CMake+Ninja build exit 0; `sim/slopbench/tools/smoke_test.py` (imports
-   tools/slopsync_probe.py wire layer unmodified) 12/12 PASS across all 3
-   configs — catalog-fetch-matches-config, clamped write + ECHO, measured
-   STATE-echo delay ≥ configured floor (561 ms on 400 ms config, 373 ms on
-   200 ms, 125 ms on 0); canon_lint 0. Commit 317b19d. [verified
-   2026-07-28 — smoke run + build tail observed in-session]
-4. **Internal reference docs stay out of the repo — verified already true:**
-   root tracking is LICENSE/NOTICE/README/THIRD_PARTY_LICENSES + 4 build
-   files only; zero PDFs/.diy tracked. The visible root clutter is
-   untracked-by-existing-rules local files. Nothing deleted.
-5. **Comment standardization — DONE (2026-07-28, close-out session).** DOCTRINE
-   §4's comment style law landed (own commit), then the codebase-wide pass:
-   a comment-law fleet (~130 files, src/include/lib/sim/test, each verified
-   comments-only via stripped-source hash matching) plus this session's
-   mechanical follow-up on top of it. Two law amendments stamped in the same
-   DOCTRINE commit, ratified here as main-loop rulings: banner width settled
-   at column 80 (amended from 76, normalizing to the tree's actual dominant
-   width instead of repadding against it); RFC-nnn/T-nn references inside a
-   banner NAME are POINTERS (allowed), not the numbering C-12 forbids.
-   **This session's additions:** section banners repadded to column 80
-   (855 banners, 105 files — a hand-rolled Python tokenizer threading through
-   `//`, `/* */`, string/char/raw-string literals, and C++14 digit
-   separators, gating every edit on a stripped-code-hash proof; the one
-   file where a banner-shaped line lives inside a raw-string literal,
-   `GraphPage.h`'s embedded HTML/JS page, was correctly left alone — that
-   text is page content, not a C++ comment); ~23 stale `CLAUDE.md §N`
-   pointers (predating the CANON/DOCTRINE/TRAPS split) repointed to
-   DOCTRINE.md §1/2/3/8/9, TRAPS.md T5, or this ledger's Phase E entry, each
-   target verified to exist first — one (a released-but-inert-field remark
-   in `MachineSim.h`) had no separate current home and was reworded inline
-   rather than given a guessed pointer; ~19 `plan.md` references (a
-   gitignored operator-local scratch file, dead for any repo reader)
-   reworded to carry their constraint self-contained, plus one boot-log
-   STRING LITERAL citing the same dead file, fixed as a direct content edit
-   (not claimed as comments-only, since a string literal is compiled data).
-   **TRAPS gained T15** (SlopGlow's `GlowState` priority ordering: a
-   fixed-priority display can mask a lower-priority but time-critical state
-   — recovered from commit `5106d521`, the RFC-027 pairing-window-hidden-
-   behind-Fault incident), **T16** (a stall watchdog sized for "stuck"
-   cannot tell a wedged client from a healthy bulk transfer — the
-   BLOB_CHUNK/`kCtrlStallMs` incident already narrated in
-   `SlopSyncAsyncWsTransport.h`), and **T17** (a flag reused across
-   unrelated concerns silencing a sink at compile time — the
-   `SERIAL_CONTROL_MODE`-gated serial sink incident in `AppLog.cpp`), each
-   with a code-site pointer added (comments-only, hash-proven). Evaluated
-   and left OUT of TRAPS (lean NO, recorded here not as entries): AIM
-   PWM*10/wire-sign stories (their durable home is already
-   `config_api.h`'s own constants + constraint comments, not a narrative);
-   sim-local "used to" bug notes in `MachineSim`/`MachineScreen` (sim-local
-   debugging narration, not a recurring field-trap mechanism).
-   **`lib/SharedProtocol/SharedProtocol.h` — DELETED** (own commit): zero
-   `#include`s anywhere in src/, include/, lib/, sim/, test/, or either C5
-   main (`src/c5_waveshare/main.cpp`, `src/c5_tdongle/main.cpp`); its one
-   historical includer, the `src/s3_main/main.cpp` placeholder stub, was
-   already deleted in the 2026-07-27 dead-code pass; `platformio.ini` never
-   wired it via `lib_deps`/`lib_extra_dirs` (PlatformIO's LDF auto-discovers
-   from `#include`s alone, so it was never actually compiled into any
-   environment despite stale comments claiming otherwise). `README.md` and
-   `platformio.ini`'s stale "all three environments share it" prose fixed
-   in the same commit (C-9). Both C5 envs (`c5_waveshare`, `c5_tdongle`)
-   rebuilt SUCCESS after the deletion as the before/after proof.
-   **Gauntlet (all green, every command run directly this session):**
-   native suite 31/31 exit 0 (TRAPS T10); `pio run -e sd32-ota` SUCCESS —
-   RAM 78,948 B (byte-identical to the pre-session baseline), flash
-   1,870,292 B vs a freshly-rebuilt pre-session HEAD baseline of
-   1,870,276 B (+16 B, fully attributable to the one deliberate log-string
-   edit above; comments cost nothing, confirmed by rebuilding at HEAD via a
-   stash round-trip); `c5_waveshare`/`c5_tdongle` SUCCESS; `sim/slopsim` +
-   `sim/slopbench` (CMake+Ninja) clean builds (only pre-existing, unrelated
-   `slopmotion.hpp`/vendored-SHA256 warnings); `node webui/test/
-   slopsync-sim.mjs` + `slopsync-wire.test.mjs` ALL PASS against a fresh
-   `slopsim` instance; `python sim/slopbench/tools/smoke_test.py` 12/12;
-   `npm run check` (webui/) ALL PASS; `python tools/canon_lint.py` 0
-   findings; `python tools/catalog_lint.py` OK (32 entries); all six
-   generators `--check` green (`gen_registry_header.py`,
-   `gen_channel_map.py`, `gen_channel_grid.py`, `gen_docs_tables.py`,
-   `gen_spec_pages.py`, `gen_channel_grid_page.py`); `dotnet build` clean
-   (0/0) for all three `clients/mfp-slopsync` projects (SlopSync,
-   LiveWireTest, WireSelfTest) — `WireSelfTest` NOT run against the live
-   device (build-only, per scope). [verified 2026-07-28 — every command
-   above run directly this session, exit codes / PASS-ALL / 0-findings
-   observed firsthand]
-6. **`minimal` sim profile floor — STAMPED (operator, 2026-07-28, webui
-   kickoff):** draft ratified as written — `minimal` is the smallest
-   REALISTIC machine (home, motion, move, window controls, pattern gen),
-   not an adversarially tiny catalog; the "Tier-1 widget absents itself"
-   test surface is explicitly `alien`'s job, which is already true in code
-   (`sim/slopsim/src/machine/SlopSimCatalog.h` advertises no pattern
-   channel by design — its own header states it). Implementation (window
-   controls + pattern gen added to `SlopMinimalCatalog.h`) is webui-phase
-   work, step 2 of the WEBUI PHASE KICKOFF plan below. [ruling stamped
-   2026-07-28; alien-omits-pattern verified same date — code read]
-7. **dictionary.yaml lane call — ratified.**
-   Sequencing: Phase G close-out → (2) wire strings → (3) sim parity +
-   SlopBench → (1) coalescing → (5) comment pass. Deploys serialize.
-
-## Named work items (operator-approved 2026-07-27)
-
-- **SlopSync repo split (operator direction ruling, 2026-07-28; execute
-  at/around the v1.0 tag):** SlopSync moves to its OWN repo as the
-  first-class source of truth — the spec suite (SPEC.md, RENDERING.md,
-  registry/registry.yaml + codegen, RFC-QUEUE.md, CHANNEL-MAP.md +
-  generators), lib/slopsync (C++ core), the JS reference client, SlopBench
-  (the machine-agnostic reference hub), and the verification tools
-  (slopsync_probe, slopscope, slopsoak). SlopDrive-32 stays the machine repo
-  and CONSUMES SlopSync via a pinned version; sim/slopsim stays with the
-  machine (1:1 device twin). Operator constraints: everything visible in one
-  VS Code view, and commits stay SIMPLE — main-loop recommended shape
-  (veto-able): two plain side-by-side repos + a multi-root .code-workspace;
-  explicitly NO git submodules (pointer-bump commit hell) and NO subtree
-  merges (arcane push/pull); a cross-repo change is two ordinary commits,
-  spec repo first, exactly the order the existing spec-gap ritual already
-  enforces. Known tension to solve deliberately at migration time: the
-  registry<->catalog lockstep `--check` generators assume one tree today;
-  post-split they verify against the PINNED slopsync copy. Timing rationale:
-  v1.0 tag day already carries the Old-column retirement and the
-  `(was 0x...)` comment sweep, so the split joins one clean go-public event.
-  [ruling recorded 2026-07-28 by main loop; not scheduled work yet]
-  GO RULING (operator, 2026-07-28, release discussion held): the split
-  EXECUTES NOW (supersedes the at-v1.0 timing above; the Old-column and
-  `(was 0x...)` retirements still wait for the v1.0 tag, they just no
-  longer bundle with the split). Decisions stamped as recommended:
-  (a) name KEPT, repo is **SlopSync** (capitalized, operator-specified) —
-  the three GitHub collisions are toys (2 stars max, none a protocol);
-  (b) the MFP plugin MOVES to clients/mfp as a reference client;
-  (c) FRESH history — initial commit records "extracted from
-  SlopDrive-32 @ <sha>", no filter-repo surgery;
-  (d) PRIVATE first, public (and docs-site Pages deploy, which requires a
-  public repo on the free plan) when the operator flips it.
-  New repo builds locally at ../SlopSync as a sibling checkout; operator
-  creates the empty GitHub repo whenever; FIRST PUSH ONLY AFTER OPERATOR
-  REVIEW of both trees.
-  PUSHED (operator instruction "push it to github and I'll read it
-  there", 2026-07-28): SlopSync main → github.com/AtlanticTM/SlopSync
-  (PRIVATE), HEAD 490d4b2 == slopsync.pin. [verified 2026-07-28 — git
-  push output + main...origin/main tracking clean] SlopDrive-32's own
-  ~45 local commits remain UNPUSHED — that push is a separate operator
-  call.
-  RELEASE HOLD (operator, 2026-07-28, superseded by the GO RULING above
-  for the split itself; the no-push-until-review clause still binds):
-  commits stay LOCAL and staged; no
-  repo creation, no push, no sync of any kind until the operator and main
-  loop have the release discussion. Standing agenda for that discussion:
-  (a) NAMING — "slopsync" is NOT collision-free on GitHub: three existing
-  repos (bullno1/slopsync, prestonguillot/slopsync, bullno1/cute-slopsync)
-  [verified 2026-07-28 — GitHub search API]; decide accept-collision
-  (AtlanticTM/slopsync unique as a full name) vs rename-before-public
-  (renaming after is the nightmare version); inspect what those projects
-  are first. (b) LICENSING (operator-ruled shape, files not yet written):
-  slopsync repo = MIT for all code (audit: everything destined there is
-  ours; only third-party touch is IXWebSocket, BSD-3-Clause, fetched at
-  build time, not vendored — MIT-compatible) + CC-BY 4.0 for the spec
-  documents + a NOTICE reserving the SlopSync name/mark for conformant
-  implementations (the protect-the-standard lever lives in the NAME, not
-  in copyleft — zero friction for legitimate implementers). SlopDrive-32's
-  license stays UNCHANGED (fray-d-derived code). (c) repo mechanics:
-  operator creates the empty repo (gh CLI not installed here; its auth is
-  interactive) or installs+auths gh and the main loop does the rest.
-  (d) publish timing vs the v1.0 tag-day bundle.
-
-  **SlopSync REPO SPLIT EXECUTED (sonnet-executed, 2026-07-28).** Extraction
-  side: SlopSync repo built at `../SlopSync`, 8 commits, HEAD `490d4b2`
-  ("fix(docs-site): American English in site.config.yml comment") — spec
-  suite (SPEC.md, RENDERING.md, RFC-QUEUE.md, registry/registry.yaml +
-  codegen, V1-READINESS.md, WEBUI-HANDOFF-RFC-BATCH.md), `lib/slopsync`
-  (C++ core, unchanged layering), `clients/js` + `clients/mfp` (JS + C#
-  reference clients, generalized off SlopDrive-32-specific comment paths
-  during extraction — spot-diffed against this repo's pre-removal copies,
-  doc-comment-only differences, confirmed byte-identical logic), `hub/
-  slopbench` (machine-agnostic reference hub), `tools/{slopsync_probe,
-  slopscope,slopsoak,gen_registry_header,slopsync_lint}.py`,
-  `test/native/test_slopsync_*` (minus devicecatalog/discovery),
-  `test/fuzz/**`, `docs-site/**`. Conversion side (this repo, three
-  commits `be9b08a`/`ad2da8e`/`d54cc43`): removed every extracted tree
-  (C-9 proofs in each commit message) except `docs/slopsync/CHANNEL-MAP.md`
-  (this machine's own channel allocation, stays; new `docs/slopsync/
-  README.md` points elsewhere) and `test/native/test_slopsync_
-  {devicecatalog,discovery}` (test this machine's own headers). Pin:
-  `slopsync.pin` at repo root, sha `490d4b2`. Consumption mechanics:
-  `platformio.ini` — `symlink://../SlopSync/lib/slopsync` in
-  `common_s3_libs.lib_deps` (PlatformIO resolves it as a `.pio-link`
-  reference, same as the existing vendored espasyncwebserver/asynctcp
-  pair — no manual OS symlink, no `lib_extra_dirs` fallback needed, it
-  worked on the first try); `env:native` gets an explicit
-  `-I../SlopSync/lib/slopsync/include`. `tools/canon_lint.py` gained a PIN
-  RULE (FAIL if `../SlopSync` missing or HEAD != pin; WARN on a dirty
-  sibling tree; sha256-cross-checks `mini_catalog.hpp`/`mini-catalog.yaml`
-  IN THE SIBLING against the same hashes SlopSync's own
-  `tools/slopsync_lint.py` pins) replacing the old in-tree frozen check and
-  the old registry `--check` (both moved with their targets).
-  `tools/gen_channel_map.py`'s `REGISTRY` now reads `../SlopSync/spec/
-  registry/registry.yaml`; `tools/catalog_lint.py` (untracked, gitignored
-  local tool) repointed the same way — both `--check`/lint green with NO
-  regeneration needed (moved content, unchanged bytes, unchanged hashes).
-  `sim/slopsim/CMakeLists.txt` repoints its `lib/slopsync` include to the
-  sibling; clean rebuild proved it. webui: `./core/slopsync/*` imports
-  became plain relative imports into the sibling's `clients/js/` — **not**
-  the vite-alias mechanism the task brief anticipated, and **not** a
-  package.json `imports` map either (both tried and rejected, see the
-  commit message on `ad2da8e` for why: a Vite alias is invisible to the
-  plain-node scripts under `webui/test/` that import the same `src/`
-  modules directly outside any bundler, and Node's `imports` field
-  categorically forbids a target that escapes the package via `../`,
-  which a sibling-repo path always does). Docs: ~30 markdown links into the
-  moved files converted to plain-text citations ("SlopSync SPEC §N",
-  "SlopSync RFC-NNN") across docs/canon/{CANON,DOCTRINE}.md and 6 other
-  docs files, plus in-code comment citations in 8 source files — `docs/
-  canon/LEDGER.md`'s own historical stamped entries and
-  `SD32-OVERNIGHT-REPORT.md`'s body (outside its tail) deliberately left
-  untouched as dated record (judgment call, stated in the `d54cc43` commit
-  message). `slopdrive.code-workspace` added (two folders, `.` +
-  `../SlopSync`, per the operator's one-VS-Code-view constraint).
-  **Gauntlet, all green, every command reproduced this session:**
-  `canon_lint.py` 0 findings; `catalog_lint.py` OK (32 entries); `pio test
-  -e native` 31/31 exit 0 (mingw64 PATH prepend, TRAPS T10); `pio run -e
-  sd32-ota` SUCCESS (RAM 24.1%/78,948 B, Flash 28.5%/1,870,292 B —
-  numbers reflect this branch's current state, not a regression: no `.cpp`/
-  `.h` logic changed, only include-path plumbing and comments; verified via
-  a byte-identical re-run after later comment-only edits); `pio run -e
-  c5_waveshare` SUCCESS (smoke build, unaffected by the split as expected);
-  `gen_channel_map.py --check` + `gen_channel_grid.py --check` green;
-  `sim/slopsim` clean rebuild exit 0, then machine-mode run + `npm run
-  check` ALL PASS + `node webui/test/slopsync-wire.test.mjs` ALL PASS +
-  `node webui/test/slopsync-sim.mjs` ALL PASS against it; webui production
-  build (`vite build` via `build_webui.py`'s PlatformIO pre-build hook)
-  succeeded as part of the `sd32-ota` build above. **Parked, not done this
-  pass:** the protocol-side interactive channel-grid page (`docs-site/
-  tools/gen_channel_grid_page.py`) already exists in the SlopSync repo from
-  extraction — Phase G's own remaining webui-aesthetic styling pass on it
-  is SlopSync-repo work now, out of scope here. `SlopSyncDiscoveryWire.h`
-  is a pure RFC-046 codec with zero Arduino/socket dependency and its own
-  native test (`test_slopsync_discovery`) — it is a protocol-shape
-  artifact that arguably belongs in the SlopSync repo long-term, staged
-  here for now because this machine's `SlopSyncCatalog.h`/UDP responder
-  are its only consumers; migrating it (and its test) is future work, not
-  blocked on anything. **REVIEW GATE (unchanged from the GO RULING above):
-  first push of either repo awaits operator review of both trees.** This
-  session's three commits are local only, exactly as the RELEASE HOLD
-  requires.
-
-- **Phase G (operator, 2026-07-28, runs after the live-verify + commits):**
-  sonnet fleet updates ALL docs to final post-batch state, and the channel
-  grid becomes a docs-site page — interactive like the standalone visual,
-  styled to the webui's instrument aesthetic (2px radius, chip strips,
-  status-token accents, the registration-crosshair vibe) but tuned for
-  reading: lighter density, docs typography. Aesthetic source of truth:
-  webui/src/style.css tokens.
-  STAMPED RIDERS (operator 2026-07-28, on the C4 judgment calls): (1)
-  SlopSyncCatalog.h interior section banners lose their hex ids ENTIRELY
-  (names stay; a comment quoting a wire number is a second home for one
-  fact — the C-1 disease in miniature); (2) historical docs keep old ids
-  verbatim but each gains a one-line "ids herein are historical (pre-C4);
-  current map: CHANNEL-MAP.md" header; (3) the CHANNEL-MAP Old column is
-  one-hop by design and RETIRES entirely at the v1.0 tag (noted in the
-  map's prose so it self-schedules).
-  RIDER 4 — STE REGISTER PAGES (operator 2026-07-28): the docs-site
-  REGISTER/CHANNEL REFERENCE pages are written in ASD-STE100 Simplified
-  Technical English. Binding rules for those pages: no em/en dashes or
-  double hyphens (use a period, a comma, or restructure); max 20 words per
-  procedural sentence, 25 per descriptive; simple tenses only, no
-  progressive -ing forms; imperative mood for every step; no phrasal verbs
-  (start, not turn on); banned vocabulary: delve, leverage, robust,
-  seamless, synergy, testament, tapestry, unlock, quiet, notable; banned
-  phrases: "it is worth noting", "in order to", "not just X, but Y"; no
-  intro fluff, meta-commentary, or summary conclusions. SCOPE (main-loop
-  reading, veto-able): register/channel reference pages ONLY — the rest of
-  the docs keep the house voice, and wire-visible catalog/registry
-  description strings are NOT rewritten (they ship in the live catalog and
-  feed the etag; an STE pass on wire strings requires its own ruling and a
-  deliberate etag bump). Where a generator emits register-page prose, the
-  generator's emitted text is in scope; its registry.yaml source strings
-  are not.
-  RIDER 5 — GOLD-STANDARD PASS (operator 2026-07-28): Phase G is the
-  gold-standard docs effort, not a refresh, and it is MULTI-ROUND: an
-  initial full pass, then repeated agent correction sweeps ("a good bit of
-  time" budgeted) until the bar is met. Binding rules:
-  (a) HOUSE VOICE, non-register pages: de-AI it — terse but simple, not
-  fluffy. Short declarative sentences; cut hedging, throat-clearing, and
-  decorative framing; keep the technical content dense and plain.
-  (Register pages remain STE per Rider 4.)
-  (b) MERMAID: many more diagrams, and every diagram must be legible
-  standalone — the entry point is visually marked (styled start node),
-  loops are explicit (labeled back-edges, never implied), area-to-area
-  transitions are labeled, and subgraphs name their areas. Test: a reader
-  answers "where does this start, what repeats, how does control move
-  between areas" from the picture alone. Existing diagrams get upgraded to
-  this bar, not grandfathered.
-  (c) ORGANIZATION: pages well divided and segmented; every page has a
-  clear topic scope; follow-topic links at natural exit points.
-  (d) LINK RULE: when prose references a topic, page, term, channel, or
-  tool that has a home, it LINKS to that home (~90% of references become
-  links). A named reference without a link is a finding in correction
-  sweeps.
-  (e) AESTHETIC: matches the og webui (webui/src/style.css tokens) without
-  being intrusive — instrument accents, not instrument density.
-  (f) DEMO CANDIDATES: wherever a live demo or embedded runnable/copyable
-  snippet would genuinely help, agents MARK the spot with the greppable
-  callout `> DEMO-CANDIDATE: <one line: what it would show>` and move on —
-  the operator implements demos personally; agents never build them.
-
-## Phase G LANDED (2026-07-28): docs gold-standard pass + channel-grid page + close-out gauntlet
-
-Round tally (main-loop orchestration of this effort): 1 initial build pass +
-9 correction sub-sweeps; round-2 sub-sweep totals: 81 findings, 77 fixed, 4
-deliberately left open, per Rider 5's own "multi-round, until the bar is
-met" design. This close-out session ran its own verification + fix round on
-top of that (Steps 1-2 below), independently re-proven, not merely relayed.
-
-All five STAMPED RIDERS confirmed executed: (1) `SlopSyncCatalog.h` interior
-section banners lose their hex ids entirely (`grep '// ---- 0x'
-include/comms/SlopSyncCatalog.h` — 0 hits); (2) `V1-READINESS.md`,
-`WEBUI-HANDOFF-RFC-BATCH.md`, and `RFC-QUEUE.md` each carry the one-line
-"ids herein are historical (pre-C4)" header; (3) `CHANNEL-MAP.md`'s Old
-column documents its own v1.0-tag retirement in prose; (4) STE register
-pages (`reference/channel-catalog.md`, `channel-grid.md`, `dictionary.md`,
-`reference/index.md`) carry `register: STE`, spec/registry pages keep
-`register: IEEE` — correctly scoped, the registry.yaml-generated pages are
-normative IEEE voice, not the STE "register/channel reference" pages Rider 4
-names; (5) rider text intact verbatim, gold-standard bar applied (house-voice
-de-AI pass, mermaid diagram upgrades, ~90% link-the-reference rule, webui-
-matched aesthetic). DEMO-CANDIDATE markers: **35** total, found by grepping
-docs/ + docs-site/docs/ for the greppable callout string Rider 5(f) defines
-(one hit above is that definition itself, in this ledger's own Named-work-
-items section — excluded from the 35; it names the format, it is not an
-instance of it).
-
-**Notable truth fixes landed in this pass** (spot-verified directly against
-the uncommitted `git diff`, not taken on faith):
-- **RFC-045 disconnect behavior, plain-language pages.** `docs-site/docs/
-  understand/for-everyone.md` ("If your phone dies, the machine stops" →
-  "...the machine settles" / "nothing on the machine broadcasts an emergency
-  stop on your behalf") and `understand/how-it-works.md` ("a vanished
-  streaming client stops the machine" → the hub releases ownership as
-  bookkeeping, "motion settles by physics rather than by a safety action").
-  Both now describe RFC-045's actually-landed behavior instead of the
-  pre-RFC-045 deadman-forces-a-stop model the plain-language tier had never
-  been updated to drop.
-- **Session-roster overclaim fixed.** `understand/what-it-replaces.md` and
-  `understand/security.md` no longer describe "the roster" as a feature a
-  reader can rely on today; both now say the roster snapshot is specified,
-  not built, and route the same practical claims (who's connected, kick a
-  client) through session-events + the trust ledger, which ARE implemented —
-  matching this ledger's own "0x0002 session-roster: reserved, NOT
-  implemented" entry above.
-- **"BLE overclaim downgraded" — RESOLVED: the fix exists and is
-  committed.** The close-out agent searched the wrong surface and honestly
-  recorded not-found rather than fabricate (correct C-8 instinct); the
-  main loop then verified the fix directly: `docs/REFACTOR-ROADMAP.md`
-  line 55 (module table, SlopSync row) reads "BLE GATT is deployed and its
-  advertising is confirmed by a real scan, but no client has yet held a
-  live GATT session" — the round-2 docs-root sweep's reported edit,
-  landed in the Phase G commits. [verified 2026-07-28 — grep of the
-  committed file by the main loop]
-  **Separately found, and worth its own look:** `SPEC.md` §18 item 22 ("BLE
-  GATT... specified with no reference implementation... until a BLE
-  `ITransport` and a UDP responder land") is itself stale in the OTHER
-  direction — `src/comms/SlopSyncBleTransport.{h,cpp}` and the UDP responder
-  have been committed in-tree since Phase E (commit `07a3b90`), build/host-
-  verified. Not touched this pass: a normative §18 status rewrite is bigger
-  than a docs/link close-out and deserves its own review, not a drive-by
-  edit riding on this session's scope.
-
-**Anchor-fallout fix (this session's Step 1).** An earlier sweep retitled
-`RFC-QUEUE.md` headings RFC-043..048 from bare `## RFC-043` to descriptive
-titles, breaking every bare `#rfc-04X` cross-reference into it. Wrote a
-tree-wide markdown link verifier (walks every `.md` under `docs/` +
-`docs-site/docs/`, extracts relative links, verifies the target file exists
-and, if there's an anchor, that some heading in the target slugifies to it —
-underscore-preserving, em-dash → double-hyphen, matching this repo's own
-already-working full-slug RFC links; also honors mkdocs `attr_list` explicit
-`{#id}` anchors like `spec/session.md`'s `{#s6-4}` style). First run: 38
-broken — 36 were the anchor fallout (`docs/slopdeck/DESIGN.md` ×3,
-`docs/slopsync/RENDERING.md` ×4, `docs/slopsync/SPEC.md` ×29), all fixed to
-the full slug (e.g. `#rfc-043--transport-conformance-profiles-which-
-bindings-a-hub-must-offer`); the other 2 were the `plugins.md` links below.
-`docs-site/tools/gen_spec_pages.py`'s own `SOURCE_LINKS` allowlist carried
-the same 5 stale bare anchors (would have failed its own `--check` the
-moment it ran against the corrected SPEC.md) — updated to match. Second run:
-**0 broken.**
-
-**mkdocs strict fix (this session's Step 2).** The 2 warnings were
-`docs-site/docs/build/plugins.md` linking `../cli.md#the-probe` and
-`../local-testing.md#the-pattern-that-is-mandatory` with a spurious `../` —
-`cli.md` and `local-testing.md` are `plugins.md`'s own siblings in
-`docs-site/docs/build/`, not one level up (the same page's own "Where to go
-next" section links `cli.md` bare, confirming the sibling relationship).
-Fixed both to same-directory links. `mkdocs build --strict`: exit 0, zero
-warnings.
-
-**Also found and fixed, not in the original brief:** this ledger's own
-"Morning ruling batch" item 7 still named the new test-hub tool "SlopRig"
-after item 3, two lines above it, had already ratified the name "SlopBench"
-— a rename that hadn't propagated within the same file. Corrected.
-
-**Gauntlet (all green, this session, every command run directly):**
-tree-wide link checker 0 broken; `mkdocs build --strict` exit 0, zero
-warnings; all six generators `--check` green (`gen_registry_header.py`,
-`gen_channel_map.py`, `gen_channel_grid.py`, `gen_docs_tables.py` — 14
-files/108 terms, `gen_spec_pages.py` — 20 files, `gen_channel_grid_page.py`);
-`canon_lint.py` 0 findings; `catalog_lint.py` OK (32 entries, 113 desc / 44
-role annotations); native suite 31/31 exit 0 (mingw64 PATH prepend, TRAPS
-T10); `pio run -e sd32-ota` SUCCESS, **RAM 24.1% / 78,948 B, flash 28.5% /
-1,869,456 B** — byte-identical to the last-verified PARKED-SLOT SAFETY
-BROADCAST build, confirming this phase's `SlopSyncCatalog.h` banner-comment
-strip moved zero bytes (comments-only, as expected); webui untouched this
-phase (`git status` shows 0 changes under `webui/`, confirmed before
-declaring this) and `npm run check` still ALL PASS (device-knowledge 27
-files/87 wire fields; settings-model all cases; "the renderer is
-machine-agnostic"). [verified 2026-07-28 — every command above run directly
-this session, exit codes checked; link-verifier script + both its runs,
-`mkdocs build --strict` output, all six generator outputs, `canon_lint.py`/
-`catalog_lint.py` output, native suite + `sd32-ota` build output all
-reproduced in this session]
-
-**Addendum — a lint gap this same session created and then caught.** The
-`canon_lint.py` "0 findings" run cited above ran before the `.gitignore`
-fix's rescued `docs-site/docs/build/` pages were staged; committing them
-(the first of this Phase G close-out's three commits) made canon_lint see
-those 10 pages for real for the first time ever, and the mandatory
-post-commit re-run (CANON §5: run before declaring substantive work done)
-turned up 13 genuine British-spelling findings (the British variants of
-"color", "behavior", and "honor", across `cli.md`, the four client-language
-stub pages, and `local-testing.md`) that had simply never been checked
-before. Fixed in a
-third commit, re-verified clean, no firmware/native/webui touched by that
-fix. Recorded here rather than silently folded into the number above,
-because the number above was accurate when written and would otherwise read
-as having covered ground it hadn't yet.
-
-- **Phase C4 LANDED (2026-07-28, execution spec = tools/gen_channel_grid.py's
-  ALLOC dict, stamped 2026-07-27 via the channel-grid visual):** 22 device
-  channels renumbered onto the family-nibble sub-slot convention — slot =
-  [family][member], member 0 = family master, the MIRROR RULE (twin channels
-  share domain+family+member digits across class bands), family F =
-  admin/meta in every band, named reserves (0x1011 battery, 0x1012 thermal),
-  reserved domains 3=auxiliary 4=playback 5=automation, 8-F = parked
-  multi-axis block. Moves: power→0x1010, odometer→0x1020,
-  machine-modes→0x1030, plan-strip→0x1110, slopmotion-diag→0x1111,
-  sm-limits/chase/waveform→0x1120-22, pattern-advanced→0x1210 + its six
-  modifier lanes reordered into MEMBER order speed-in/out, accel-in/out,
-  depth-1/2 →0x1211-16 (was authoring/BaseId order — `kModChannels` in
-  SlopSyncHubService.cpp still indexes by BaseId, comment corrected, array
-  contents unchanged), presets-roster→0x1220, modes-set→0x3030,
-  machine-admin→0x30F0, sm-set→0x3120, pattern-advanced-cmd→0x3210,
-  presets-cmd→0x3220, store→0x5220. `pattern-state` (0x1200) did NOT move —
-  Phase D's `background_run` field rides along untouched. Consumers updated:
-  SlopSyncCatalog.h (`ch::` constants + invocation order, still strictly
-  ascending — encodeCatalog/etag require it), SlopSyncHubService.cpp (stale
-  comments only — all call sites use `ch::` symbols, no literal ids),
-  webui (frames.js/index.js raw hex constants, session.js/shadow.svelte.js
-  comments, slopsync-modes.mjs/slopsync-tuning.mjs live-test scripts),
-  tools/slopsync_probe.py (34 literal replacements), slopscope.py,
-  slopsoak.py, docs/slopdeck/DESIGN.md, docs/webui-architecture.md.
-  `gen_channel_grid.py` now PARSES the live catalog (reuses
-  gen_channel_map.py's parsing helpers) instead of an embedded ALLOC dict,
-  keeps the named-reserve overlay, and gained `--check`; its `decode_grid`-
-  equivalent cell decode now shows `family:member` hex nibbles instead of a
-  flat decimal slot. `gen_channel_map.py` regenerated CHANNEL-MAP.md (legend
-  prose rewritten with the sub-slot convention; the false "last renumber"
-  claim corrected to explain why family-nibble runway actually makes this
-  one stick; `decode_grid()` fixed the same way). RFC-047's queue entry
-  gained the sub-slot-convention paragraph. Left untouched as pre-existing,
-  out-of-scope debt at landing time: the interior
-  `// ---- 0x0080 "motion"` -style section-banner comments inside
-  SlopSyncCatalog.h's `buildSlopDriveCatalog()` body already quoted
-  PRE-C2 ids before this pass and were not touched by C2 either; and the
-  dated historical docs (V1-READINESS.md, WEBUI-HANDOFF-RFC-BATCH.md,
-  REFACTOR-ROADMAP.md, older RFC-QUEUE.md landed-RFC entries) keep the ids
-  they had at the time they were written, matching the precedent those
-  same docs already set across the C2 renumber. **RULED, implementation
-  deferred to Phase G:** see the STAMPED RIDERS under the Phase G work item
-  above — operator ruled 2026-07-28 that the banners lose their hex ids
-  entirely and the historical docs get a one-line "historical (pre-C4)"
-  header; not yet implemented (`grep '// ---- 0x' include/comms/
-  SlopSyncCatalog.h` still shows hex ids as of 2026-07-28) — this is no
-  longer an open veto, it is queued Phase G work. [verified 2026-07-28 —
-  code read, hex ids still present]
-  **Gauntlet (all green):** native suite (mingw64 PATH prepend, exit 0,
-  31/31 cases incl. `test_slopsync_staleness`), `pio run -e sd32-ota`
-  SUCCESS (RAM 27.4% / 89,920 B, flash 26.1% / 1,712,336 B), `canon_lint.py`
-  0 findings, `catalog_lint.py` OK (32 entries, 113 desc / 44 role
-  annotations), `gen_registry_header.py` + `--check`, `gen_docs_tables.py`
-  (14 files, 2 changed) + `--check`, `gen_spec_pages.py` (20 files, 4
-  changed) + `--check`, `gen_channel_map.py` + `--check`,
-  `gen_channel_grid.py` + `--check`, `node webui/test/slopsync-wire.test.mjs`
-  ALL PASS (sim catalog fixture unaffected — confirmed the sim's own
-  `benchrig` catalog shares none of the moved ids), `npm run check` in
-  webui ALL PASS, MFP `WireSelfTest` (dotnet run, Release) ALL PASS
-  (confirms the plugin's wire touches only unmoved channels). [verified
-  2026-07-28 — every command above run directly this session, exit codes
-  checked]
-- **RFC-050 — LANDED (v1.0), spec/registry side, 2026-07-28** (operator
-  stamp on the recommendation, batched with Phase C4; implementation
-  deferred, post-batch hub work — SPEC §18-24): new frame type `0x20
-  BLOB_DONE` (dir any, plane raw) — the same identity fields as `blob_keys`
-  (namespace, store_id, slot, generation) + `status:u8` (0 verified-complete,
-  1 hash-mismatch, 2 aborted), sent by the RECEIVER of a transfer, idempotent
-  like CATALOG_READY. Operator's call was the new-frame option (b) over the
-  draft's own (a)-leaning recommendation, because it generalizes to the
-  client→hub direction (a STORE import) that CATALOG_READY's c2h-only shape
-  does not fit. New `limits.blob_chunks_in_flight` (4, advertised sender
-  pacing budget). SPEC.md §8.4 gained the normative backpressure decision
-  table keyed to §13.1's per-binding congestion signal (congested with
-  budget→send, congested at budget→hold, recovered→resume, sustained >5s→
-  abort with one NACK BUSY + retry_after_ms, reusing the existing
-  "one NACK answers one BLOB_REQ" rule) plus the BLOB_DONE completion
-  contract; the old "Pacing granularity is a hub policy and is not on the
-  wire" advisory line is reworded to point at the table. Appendix A/G rows
-  added; reserved-range comment moved `0x20–0x3F`→`0x21–0x3F` (31 slots);
-  §4.4's reserved-range prose corrected in the same pass (was already
-  stale pre-C4, said `0x1E–0x3F` when 0x1E/0x1F were already RFC-046
-  allocations). §18 gained item 24 recording spec-landed/implementation-
-  deferred status. RFC-QUEUE.md's own RFC-050 entry rewritten from DRAFT to
-  Landed. Gauntlet: same run as Phase C4 above (registry.yaml and SPEC.md
-  changes are covered by the same generator + native-suite pass).
-
-- **RFC-048 — LANDED (2026-07-27, see Phase C1 LANDED above), superseding
-  this entry's narrower scope:** the well-known channel-name vocabulary
-  landed as RENDERING.md §2's STANDARD tier + capability interfaces
-  (motion/power/odometer minima, pattern-generator + fray-d-shaped
-  advanced-generator interfaces); the two parking rulings below are
-  preserved verbatim as RENDERING.md §2.2's PARKED note. Original text,
-  kept for the rationale: well-known channel-name vocabulary (registry
-  RECOMMENDS names/semantic tags for universal channels — motion, power,
-  odometer — convention by name, layouts stay catalog-described) + formal
-  PARKING of two operator-deferred questions with their runway documented:
-  multi-axis (per-axis domain vs per-axis slots in the 0xCDSS grid — both
-  additive) and actuator types / vibrator support (self-describing catalog
-  already carries them; a units/action-vocabulary extension RFC when a real
-  second-actuator device exists). Operator explicitly does NOT want these
-  answered now — parked ≠ forgotten.
-- **OSSM-Sauce opcodes: ruled N/A 2026-07-27** — zero OSSM protocol surface
-  remains in-tree; no emulation shim ever (masquerade class). OSSM audience
-  path: SlopSync-hub firmware on their hardware + upstream SlopSync client
-  support in community apps + SlopDeck. Opcode compat, if anyone wants it,
-  is a third-party client-side adapter via the onramp.
-
-- **Discovery + BLE transport (operator 2026-07-27) — SUPERSEDED by Phase E
-  LANDED below (2026-07-28, build/host-verified only).** Original scope:
-  RFC-046 (BLE-primary discovery, pinned ecosystem UUIDs, WELCOME endpoint
-  keys, cross-transport migration via RFC-042 reattach) + the BLE GATT
-  `ITransport` implementation (NimBLE returns; T5 enqueue pattern; SPEC
-  §13.4 binding). mDNS stays as secondary. Sequencing: registry/RFC numbers
-  FIRST (spec-gap ritual — already done in Phase B/C1, so Phase E coded
-  straight against the landed registry), then firmware transport, then
-  SlopDeck shell consumes it. Runs alongside (not instead of) SlopDeck
-  milestone 1 (sim fidelity).
-
-- **Extract MachineCommand from WebUI.cpp** — `handleCommand` + the `apply*`
-  mutation family + post-clamp echo building move to their own HTTP-free
-  class; the SlopSync delegate calls it directly. What remains of WebUI is
-  honestly the HTTP plane (page serving, OTA + /uitoken hosting, read-only
-  diagnostic GETs, 410 tombstones, bench homeoverride sideband) and gets
-  named accordingly. Follow-up riding on it: migrate the extracted core to
-  TYPED intent handlers, dissolving the WS_OP/JSON shim op-by-op
-  (UiProtocol.h shrinks to nothing). Queued behind the transport-kill
-  surgery; sonnet-executable once the seam is mapped.
-
-- **Clocked-logging + legacy-log audit** (operator 2026-07-27) — inventory
-  every periodic/cadence log (heap beacon, [sys] lines, rate reports) AND
-  the MotionArbiter's logging specifically (operator: arbiter LOGGING feels
-  legacy — bring-up-era dispatch/gate narration is the suspect class).
-  Verdict each line: earns its keep / demote to SLOGD / delete. Rule:
-  clocked telemetry is legal, bring-up noise is not. (sonnet)
-- **MotionArbiter sediment note** (smaller, found during today's surgery):
-  the retired OSSM_STREAM source slot (id 3 stays reserved — wire label
-  row) and interpolator-era comment vocabulary; strip during the logging
-  audit's pass through the file.
-- **SlopLog + SlopGlow uplift pass** — bring the two elder modules up to
-  the slopmotion/slopsync core standard (injected clock, purer hardware-free
-  core, tighter conformance tests); operator explicitly opened them to
-  improvement. (sonnet, mapped by main loop first)
-
-## SPEC §18 status reconcile (2026-07-28)
-
-Every SS18 known-limitations item (1-24) checked against this ledger's
-landed state plus a direct code read; five were stale, nineteen checked out
-still accurate and were left untouched (docs commit only, no wire change).
-
-- **Item 8 (blob `INVALID_NAMESPACE`):** still NOT shipped — Phase D landed
-  without it. `Hub::resolveBlobBytes` (`hub_impl.hpp`) has no
-  `INVALID_NAMESPACE` branch; an unregistered `blob.ns` still answers
-  `CHUNK_UNAVAILABLE`. Reworded so "Implementation: Phase D" no longer reads
-  as pending work under a phase that has since closed — now "open, no phase
-  currently owns it."
-- **Item 9 (empty-chunks / `ns=0` MALFORMED grammar):** the reference hub
-  was ALREADY compliant before RFC-049 restated the rule precisely —
-  `decodeBlobReq` (`blob_req.hpp`) rejects both shapes, its own comment
-  citing the older RFC-022.6. Nothing to implement; corrected from
-  "Implementation: Phase D."
-- **Item 22 (BLE GATT / UDP discovery):** both shipped and live-verified on
-  the deployed fw 2.1.78+ reference hub (`SlopSyncBleTransport.*`,
-  `SlopSyncUdpDiscovery.*`; live UDP unicast/broadcast/rate-limit and a live
-  BLE scan both confirmed — see the DEPLOY + LIVE-VERIFY entry's items (f)
-  and (j) above). Kept true: no client has held a live GATT session, no
-  small-MTU control-frame fragmentation, and cross-transport migration —
-  mechanically in place via identity-based reattach — has never been
-  exercised across two bindings live.
-- **Item 23 (RENDERING.md vocabulary):** the catalog side landed in Phase C2
-  (entry `rank` key 16, field `rank`/`aspect`/`scope`/`provenance`/`unit_id`
-  keys 19-23, `category` repurposed for `ui_categories`; `catalog_lint` 113
-  desc / 44 role annotations). Kept true: `webui/src` decodes
-  `category`/`categoryLabel` and stops there — no reference client builds
-  pages from the full derivation chain.
-- **Item 24 (blob backpressure/completion):** the hold-not-drop half shipped
-  in the HEAP RELIEF pass (fw 2.1.81, `SlopSyncAsyncWsTransport::write()`
-  gates `BLOB_CHUNK` on `limits::blob_chunks_in_flight`). Kept true: no NACK
-  `BUSY` on sustained congestion, no reference `BLOB_DONE` emission.
-
-[verified 2026-07-28 — direct reads of `hub_impl.hpp` (resolveBlobBytes,
-handleReattach), `blob_req.hpp` (decodeBlobReq), `SlopSyncAsyncWsTransport.cpp`,
-`SlopSyncCatalog.h` (category/rank annotations), `webui/src/core/slopsync/
-catalog.js` (no rank/archetype consumption); commit `ea072aa`]
-
-## WIRE-STRING PUNCTUATION EVOLUTION (2026-07-28) — morning ruling item 2, fw 2.1.82 → 2.1.83
-
-ONE atomic catalog evolution: em/en dashes, double-hyphens, and banned prose
-words (delve/leverage/robust/seamless/synergy/testament/tapestry/unlock/
-quiet/notable) purged from every wire-emitted `.desc` string in
-`include/comms/SlopSyncCatalog.h` (3 instances, incl. the named "quiet" hit
-in a serial/settle-adjacent desc) and from `docs/slopsync/registry/
-registry.yaml`'s desc/note documentation strings (95 mechanically converted
-+ 13 hand-rewritten to avoid same-clause double punctuation + 1 named
-banned-word instance — prose only, no keys/numbers/names/refs/status
-touched). Frozen artifacts (`lib/slopsync` conformance `mini_catalog.hpp`,
-`vectors/fixtures/mini-catalog.yaml`, golden byte arrays) checked and
-confirmed to carry no dash or banned word already — untouched, C-11/T11
-precedent.
-
-Regenerated once (lockstep, all `--check` green): `gen_registry_header`,
-`gen_docs_tables` (9 of 14 pages changed), `gen_spec_pages` (0 changed —
-SPEC.md prose is independent of registry.yaml notes), `gen_channel_map`,
-`gen_channel_grid`, `gen_channel_grid_page`. `webui/test/fixtures/
-slopsim-catalog.{bin,etag}` re-captured from a fresh `sim/slopsim`
-device-profile build (44 channels, 24,585 B, etag `b69eb06249ebe73a` —
-independently matches the live device's new etag, below).
-
-**Gauntlet (all green, every command run directly this session):** native
-suite 31/31 environments PASSED exit 0 (mingw64 PATH prepend, TRAPS T10);
-`pio run -e sd32-ota` SUCCESS (RAM 24.1% / 78,948 B, flash 28.5% /
-1,869,456 B — byte-identical to the pre-pass build); `canon_lint.py` 0
-findings; `catalog_lint.py` OK (32 entries, 113 desc / 44 role annotations,
-every desc still under its byte cap); `mkdocs build --strict` exit 0, zero
-warnings; `node webui/test/slopsync-sim.mjs` (fresh device-profile slopsim)
-ALL PASS; `node webui/test/slopsync-wire.test.mjs` ALL PASS; webui `npm run
-check` ALL PASS. A standalone decode-and-scan of the served catalog bytes
-(webui's own `decodeCatalog` against the device-identical fixture): 44
-entries, 935 text fields scanned, 0 dash hits, 0 banned-word hits, 0
-British-spelling hits.
-
-**Live deploy + verify.** `FIRMWARE_VERSION` 2.1.82 → 2.1.83
-(`include/system/config_api.h`), OTA'd via `deploy.ps1`. `/api/capabilities`
-confirms `fw_version 2.1.83`. `tools/slopsync_probe.py --estop --bench-home
---bench-home-no-revert`: **50 passed / 0 failed / 3 skipped**, exit 0.
-Catalog etag CHANGED `9275f578ada7d314` → `b69eb06249ebe73a` (matches the
-sim's independently captured etag above). BLOB transfer completes: 129
-chunks, 24,585 bytes, reassembly verifies against the WELCOME etag.
-
-**Pre-existing drift found at session start, not caused by this pass:** the
-device's `home_override` was `false` on connect (the PARKED-SLOT SAFETY
-BROADCAST entry's documented end-state was `home_override=true`) — a reboot
-between sessions cleared the volatile bench override, as it always does.
-Restored via `--bench-home --bench-home-no-revert` in the same probe run
-that verified the deploy.
-
-**Device end-state:** fw **2.1.83**, reachable at 192.168.1.229,
-`homed=true` `home_override=true` (fake-homed, left ON per
-`--bench-home-no-revert`), `estopped=false`, not moving,
-`measured_stroke_mm=250`.
-
-**Files touched:** `include/comms/SlopSyncCatalog.h`,
-`docs/slopsync/registry/registry.yaml`,
-`lib/slopsync/include/slopsync/generated/registry_constants.hpp`,
-`docs/slopsync/CHANNEL-MAP.md`, 9 `docs-site/docs/reference/registry/*.md`
-pages, `include/system/config_api.h` (version bump),
-`webui/test/fixtures/slopsim-catalog.{bin,etag}`. [verified 2026-07-28 —
-every command above run directly this session, exit codes checked; commit
-`274abc3`]
-
-## BLE ADVERTISING MSD FIX (2026-07-28) — item (j) CLOSED, fw 2.1.83 → 2.1.84
-
-**Item (j) reopened by an operator phone scan (nRF Connect, hard evidence,
-2026-07-28).** The live advertisement carried Flags, Complete 128-bit
-Service UUID list, and Complete Local Name "SD32" in the primary
-advertisement, plus Complete Local Name "SlopDrive-32" in the scan
-response — but **no Manufacturer Specific Data record existed in either
-packet.** The `ble_adv_flags` byte (bit0 `pairing_window_open`, bit1
-`ws_available`) had never been on the air. This retroactively explains the
-DEPLOY + LIVE-VERIFY session's item (j) `bleak` result (`manufacturer_data`
-came back `{}`) — not Windows/WinRT company-id filtering as guessed at the
-time, but a firmware gap.
-
-**Mechanism confirmed by reading the code path and the vendored NimBLE
-source (`.pio/libdeps/sd32-ota/NimBLE-Arduino/src/NimBLEAdvertisementData.cpp`)
-— TRAPS T14, new entry.** `SlopSyncBlePort::refreshAdvertisingData()` built
-ONE `NimBLEAdvertisementData` carrying Flags(3B) + 128-bit Complete Service
-UUID(18B) + `setName(_shortName)`(6B, "SD32") + Manufacturer Specific
-Data(5B, company `0xFFFF` + the flags byte) = **32 bytes, one over
-`BLE_HS_ADV_MAX_SZ` (31)**. `NimBLEAdvertisementData::addData()` silently
-returns `false` and adds nothing once the running total would exceed the
-budget — earlier records already added still reach the radio; only the
-overflowing one (here, the MSD, added last) is dropped. `refreshAdvertisingData()`
-discarded every setter's return value, so the failure was invisible.
-**Compounding, separately-caught bug:** `setName(_shortName)` was called
-with no second argument, and `NimBLEAdvertisementData::setName()` defaults
-`isComplete=true` — so "SD32" went out as AD type 0x09 (Complete Local
-Name), matching what nRF Connect saw, not the shortened-name (0x08) design
-intent.
-
-**Fix (`src/comms/SlopSyncBleTransport.cpp`, `SlopSyncBlePort::refreshAdvertisingData`):**
-- Advertisement: Flags(3) + 128-bit Complete Service UUID(18) +
-  **shortened** name via `setShortName()` (AD 0x08, "SD32", 6B) = **27B**.
-  No MSD here — no room for it alongside the other two records.
-- Scan response: complete name "SlopDrive-32" (AD 0x09, 14B) +
-  Manufacturer Specific Data (company `0xFFFF` + flags byte, 5B) = **19B**.
-  The flags byte now rides the scan response, which requires an ACTIVE
-  scan to read (both `bleak` on Windows and nRF Connect do this by
-  default).
-- Every advertising-config return code (`setFlags`/`setCompleteServices`/
-  `setShortName`/`setName`/`setManufacturerData` on both
-  `NimBLEAdvertisementData` objects, and `NimBLEAdvertising::
-  setAdvertisementData`/`setScanResponseData` themselves) is now checked
-  and a failure logs `SLOGW` — never silently discarded again.
-- `updateAdvertising()`'s diff-gated refresh already called
-  `refreshAdvertisingData()` unconditionally on any flags change, so the
-  scan-response rewrite was already wired through that path; verified live
-  (below) that `bleak` sees the byte change on a boot-time flags publish.
-
-**SPEC/registry wording amended (spec-gap ritual, comment/prose only, no
-registry VALUE changed, no wire/etag effect):** SPEC.md §13.4's advertising-
-payload paragraph and `registry.yaml`'s `ble_adv_flags` header comment both
-previously read as if the flags byte rode the same 31-byte budget as the
-service UUID and shortened name (the design mismatch that let this bug
-ship unnoticed). Reworded both to state plainly that the flags byte rides
-the scan response, active scan required. Regenerated all six doc/spec
-generators (`gen_registry_header.py`, `gen_docs_tables.py`,
-`gen_spec_pages.py` — 1 file changed, `docs-site/docs/spec/transports.md`,
-matching the SPEC.md §13.4 wording edit — `gen_channel_map.py`,
-`gen_channel_grid.py`, `gen_channel_grid_page.py`), all `--check` green.
-
-**No native test added for the payload byte-budget arithmetic — judgment
-call, reasoning recorded rather than silently skipped.** The actual
-AD-record-length computation lives entirely inside vendored NimBLE
-(`NimBLEAdvertisementData::addData`/`setName`/`setManufacturerData`),
-compiled only under `-DBLE_ENABLED`; `[env:native]` is header-only (no
-`src/` compilation, no Arduino/NimBLE on the include path by design — see
-`SlopSyncBleTransport.h`'s own file-scope comment). Testing the REAL path
-would mean linking NimBLE on the host, which is not portable off the
-ESP32/Arduino BLE stack; writing a parallel calculation instead would test
-the test, not the code, and could drift from the real `addData()` logic
-silently. Skipped per the task brief's own escape hatch.
-
-**Host gauntlet (all green, every command run directly):** native suite
-31/31 exit 0 (mingw64 PATH prepend, TRAPS T10); `pio run -e sd32-ota`
-SUCCESS, RAM 24.1% / 78,948 B, flash 28.5% / 1,869,924 B (+468 B over the
-pre-fix build — the added return-code checks/log lines, as expected, no
-wire/catalog change); `canon_lint.py` 0 findings; `catalog_lint.py` OK (32
-entries, 113 desc / 44 role annotations — untouched, no catalog edit this
-pass); all six generators `--check` green (above).
-
-**Live deploy + verify.** `FIRMWARE_VERSION` 2.1.83 → 2.1.84
-(`include/system/config_api.h`), OTA'd via `deploy.ps1`. `/api/capabilities`
-confirms `fw_version 2.1.84`. Active `bleak` scan (repo `.venv`, package
-`bleak==3.0.2`) against the live device:
-
-```
-address: 20:6E:F1:31:74:6D
-local_name: SlopDrive-32
-service_uuids: ['534c4f50-5359-4e43-8000-000000000001']
-manufacturer_data (raw): {65535: b'\x02'}
-  company_id: 0xFFFF
-  payload bytes: 02
-```
-
-Company id `0xFFFF` matches `kBleMfgCompanyId`; payload byte `0x02` = bit1
-`ws_available` set, bit0 `pairing_window_open` clear — exactly the expected
-current bench state (WiFi up, no pairing window open). The on-device
-`/api/log` boot trace independently confirms both payload builds
-succeeded with no WARN (`BLE advertising flags -> 0x02 (pairing=0 ws=1)`
-logged, no `SLOGW` line) and shows the GATT server naming ("BLE GATT port
-up ... name 'SlopDrive-32'"). Windows/WinRT's `bleak` backend merges
-advertisement + scan-response fields into one `AdvertisementData` object
-per device and does not expose which physical packet carried which AD
-record, so the shortened-name-in-ADV-specifically claim rests on the code
-read + the successful `setAdvertisementData()` return (no WARN logged) —
-an operator phone + nRF Connect re-check (raw per-packet AD dump) remains
-the strongest confirmation and is optional follow-up, not required to close
-this item.
-
-**Pairing-window toggle (bit0) — SKIPPED, judgment call.** No plain HTTP
-route opens/closes the pairing window; the only paths are the 3-quick-
-power-cycle boot gesture (disruptive: requires actual reboots) or a signed
-SlopSync INTENT frame over an authenticated WS/BLE session (meaningfully
-more machinery than this fix's scope, and it would leave real pairing
-state written to NVS). Skipped rather than manufacture a side quest; the
-diff-gate code path (`updateAdvertising` → `refreshAdvertisingData` on any
-flags change) is unchanged by this fix and was already exercised at boot
-(the flags publish captured in `/api/log` above).
-
-**`tools/slopsync_probe.py`, two runs, motor unplugged throughout:**
-`--stream 1 --segments 1` (exercises intent/stream/segment/safety-mode
-round-trips; no `--estop`, no `--bench-home` — the OTA's own reboot had
-already cleared the volatile fake-home, see below): **55 passed / 0 failed
-/ 2 skipped** (`estop_assert`, `bench_home` — both correctly skipped,
-opt-in-only ops). A second run, `--no-motion --bench-home
---bench-home-no-revert`, to restore the bench state: **45 passed / 0
-failed / 6 skipped**, `bench_home` PASS. (Total assertion count is higher
-than the DEPLOY + LIVE-VERIFY session's "50/0/3" because that run used
-`--estop --bench-home` together in one pass and against a smaller catalog
-of subscribe checks; both runs here are 0-failed, and the higher pass
-count reflects exercising MORE of the protocol, not a different bar.)
-
-**Pre-existing, expected, not a regression:** the OTA deploy's own reboot
-cleared the volatile `home_override` (`false` immediately post-OTA) exactly
-as documented in the WIRE-STRING PUNCTUATION EVOLUTION entry above — every
-firmware OTA does this. Restored via the second probe run above.
-
-**Device end-state:** fw **2.1.84**, reachable at 192.168.1.229,
-`homed=true` `home_override=true` (fake-homed, left ON), `estopped=false`,
-not moving, `measured_stroke_mm=250`.
-
-**Files touched:** `src/comms/SlopSyncBleTransport.cpp`,
-`include/comms/SlopSyncBleTransport.h` (comment only), `docs/slopsync/SPEC.md`
-(§13.4 prose), `docs/slopsync/registry/registry.yaml` (`ble_adv_flags`
-comment only — no value changed), `docs-site/docs/spec/transports.md`
-(regenerated), `include/system/config_api.h` (version bump),
-`docs/canon/TRAPS.md` (T14), `SD32-OVERNIGHT-REPORT.md`. [verified
-2026-07-28 — every command above run directly this session, exit codes
-checked; live `bleak` scan + `/api/log` + `/api/capabilities` + `/api/status`
-all reproduced above]
-
-## BRITISH-SPELLING TOTAL SWEEP (2026-07-28, operator ruling: "every single instance, now and for good")
-
-Both linters (`tools/canon_lint.py` here, `tools/slopsync_lint.py` in
-SlopSync) were already codespell-backed and full-tree clean (0 findings)
-going into this pass — that covers prose, comments, and snake_case
-identifiers, because underscore separates words for `\b` matching. The
-KNOWN GAP this sweep closed: codespell's word regex is `[\w\-'']+`, and
-`\w` includes underscore, so it treats a whole camelCase/PascalCase token
-**or a combined snake_case token spanning two dictionary words** (e.g.
-`colourMode`, `waveform_centred`) as ONE word and never matches it against
-a dictionary key. Whole-word codespell genuinely could not see this.
-
-**Method:** built a case-aware scanner (scratchpad, not committed — its
-job ended when the linters absorbed its logic) that loads codespell's own
-`dictionary_en-GB_to_en-US.txt` straight from the installed package (never
-retyped) plus each repo's 4-word `BRITISH_SPELLING_EXTRAS` gap-list
-(travelled/travelling/traveller/travellers), then splits every identifier
-on case boundaries, underscores, and digit boundaries and checks every
-subword ≥4 chars against the dictionary. Ran it over every git-tracked
-file in both repos (filenames included), plus a plain
-`codespell --builtin en-GB_to_en-US` run per repo as a baseline cross-check
-(both: 0, confirming the existing purge held).
-
-**Totals — SlopDrive-32:** 0 hits / 0 fixed / 0 flagged / 0 false positives
-in the actively-scanned tree (this repo's own camelCase identifiers are
-already all-American). Gauntlet: green (see below).
-
-**Totals — SlopSync:** 1 hit / 1 fixed / 0 flagged / 0 false positives in
-the actively-scanned tree. Gauntlet: green (see below).
-
-**The one fix (bucket A — safe, internal-only):**
-`tools/slopsync_probe.py:235`, `ANOMALY_KINDS[7]`: `"waveform_centred"` →
-`"waveform_centered"`. Proof of internality: grepped both repos for the
-string; it exists nowhere else in either tree. It is a local
-numeric-wire-kind → human-display-string table for this Python tool's own
-console output (`decode_motion_diag`'s `by_kind`, and the probe's own
-anomaly-EVENT summary) — never serialized to the wire (the wire carries the
-numeric kind only), never a persisted key, never read back by any test or
-downstream tool. Bonus finding: this string had drifted from
-`include/system/SystemState.h`'s `kSmAnomalyNames[7]` in THIS repo, the
-firmware's own authoritative name table for the identical ordinal
-(`AnomalyType::WaveformCentered = 7`, feeding `GET /api/slopmotion`'s
-`stats.anomalies_by_kind` JSON key) — which already spelled it
-`"waveform_centered"` correctly. The probe's copy was simply wrong,
-independent of American-vs-British spelling; fixing the spelling also fixes
-the cross-repo name drift. Fixed in SlopSync commit `6317b74`.
-
-**Bucket B — FLAG, DO NOT CHANGE: NONE.** Nothing this sweep found had
-escaped either repo's boundary. No hits existed in NVS/Preferences key
-strings, CBOR/wire key strings, catalog/registry names, localStorage/
-sessionStorage keys, HTTP route strings, MFP plugin API surface, JS/C#
-public exports, or CSS class names — the one real hit (above) was pure
-internal Python tooling display text.
-
-**Bucket C — false positives / consciously out-of-scope (documented, not
-touched):**
-- `LICENSE`, `NOTICE` (both repos) — "Licence"/"licence"/"licences"/
-  "acknowledgement" throughout the Apache-2.0 text. Legal text is verbatim
-  by law, not by style (existing `BRITISH_SPELLING_SCAN_EXEMPT` policy);
-  not our call to edit either way.
-- `lib/espasyncwebserver/VENDORED.md` (SlopDrive-32) — "behaviour" in a
-  vendored third-party library's own doc (`VENDORED_PREFIXES`); out of
-  scope by the same policy that keeps the library byte-identical to
-  upstream.
-- `tools/canon_lint.py` / `tools/slopsync_lint.py` themselves — the
-  `BRITISH_SPELLING_EXTRAS` gap-list comment names its own test words
-  (favour/acknowledgement/catalogue/analyse/initialise/grey/judgement/
-  behaviour/centre/travelled) by construction; already self-exempted in
-  each file's own `BRITISH_SPELLING_SCAN_EXEMPT`, and rewriting them would
-  break the documentation of what codespell catches.
-- `docs-site/docs/assets/javascripts/mermaid.min.js` (SlopSync) — a
-  vendored, minified third-party JS bundle (colour/grey/centre/Cancelled/
-  Normalised/etc. throughout); `VENDORED_PREFIXES`, never touched.
-- Consciously swept but clean: SlopDrive-32's `lib/ruckig/`,
-  `lib/asynctcp/`, `webui/src/fonts/`, `.cache/` (vendored, zero hits); both
-  repos' `FROZEN_SHA256`(`_SIBLING`) conformance artifacts
-  (`mini_catalog.hpp`, `mini-catalog.yaml`) — zero hits, so the frozen-byte
-  rule was never actually tested by this sweep.
-- Not a scanner gap, a codespell dictionary gap (out of scope — the
-  operator's chosen mechanism is codespell's own dictionary, not a
-  supplemented one): "fibre", "vapour", "colonise" are NOT in codespell's
-  `en-GB_to_en-US` builtin dictionary at all (confirmed by direct lookup),
-  so a hit under those words wouldn't be flagged even if present — none
-  were found in either tree regardless.
-
-**"For good" — linter upgrade (both repos):** added `run_camelcase_check()`
-to `tools/canon_lint.py` and `tools/slopsync_lint.py`, using the identical
-mechanism as the scratch scanner (codespell's own dictionary file read from
-package data, no hand-rolled wordlist; same 4-word extras dict each file
-already carried) and wired into each `main()`. Filenames are checked too.
-Planted-and-reverted test in both repos: staged a scratch file containing
-`int colourMode = 0;` (force-added past `tools/*`'s gitignore), ran the
-lint, confirmed `[british-spelling-subword] ... colourMode (subword
-'colour' -> color)` fired, then unstaged and deleted it — both linters
-confirmed clean again afterward. Both linters: 0 findings, full tree, after
-the real fix landed.
-
-**Gauntlet — SlopSync (commit `6317b74`, pushed):** `pio test -e native`
-16/16 native suites PASSED (trusting exit code, not PIO's doctest summary
-line, per TRAPS T10); `hub/slopbench` CMake build (43/43 objects) +
-`tools/smoke_test.py` 12 passed/0 failed; `clients/js/test/
-slopsync-wire.test.mjs` ALL PASS; `clients/mfp/WireSelfTest.csproj`
-`dotnet build` (0 warnings/0 errors) + `dotnet run` ALL PASS;
-`tools/slopsync_lint.py` 0 findings; `tools/gen_registry_header.py --check`
-clean (folded into the lint run). mkdocs not run — no docs-site file
-touched.
-
-**Gauntlet — SlopDrive-32 (this commit, not pushed):** `pio test -e
-native` — `test_slopglow`, `test_sloplog`, `test_slopmotion` (31 cases),
-`test_slopsync_devicecatalog`, `test_slopsync_discovery` all PASSED;
-`pio run -e sd32-ota` SUCCESS in 16.9s — RAM 24.1% (78,948 / 327,680 B),
-Flash 28.5% (1,870,292 / 6,553,600 B) (delta not applicable — no
-non-comment code path changed, only two Python tools outside the firmware
-build); `tools/canon_lint.py` 0 findings including the pin check (bumped
-below); `tools/catalog_lint.py` OK (32 entries, 113 desc + 44 role
-annotations checked); channel-map/channel-grid `--check` clean (folded into
-the canon_lint run). `sim/slopsim` CMake rebuild clean (pre-existing
-`-Wmaybe-uninitialized`/`-Warray-bounds` warnings only, unrelated to this
-change); killed any stale sim, started `slopsim.exe machine --homed
---headless --duration 240 --port 82 --http 80 --no-mdns`, ran
-`webui/test/slopsync-sim.mjs` — ALL PASS (cold session, write plane, NACK
-correlation, warm back-to-back session); `npm run check`
-(`check-device-knowledge.mjs` + `settings-model.test.mjs`) ALL PASS; the
-webui production build (`npm run build` → check + `vite build`) already
-ran as part of the `sd32-ota` build's `build_webui` hook and succeeded
-(`dist/index.html`, 261,438 B / 104,395 B gzipped).
-
-**`slopsync.pin` bumped:** `aa670db3...` → `6317b74e...` (SlopSync's new
-HEAD after the commit above), read via `git -C ../SlopSync rev-parse HEAD`,
-never typed by hand. Pin check re-verified green post-bump, sibling no
-longer dirty.
-
-**Bucket A is now empty going forward by construction, not luck:** with
-`run_camelcase_check()` landed in both linters, any new camelCase/
-PascalCase/combined-snake_case British spelling fails lint at commit time —
-this sweep does not need to recur.
-
-## FIRST LIVE BLE GATT SESSION (2026-07-28) — probe gains a BLE transport, fw 2.1.85 unchanged
-
-**The BLE binding's "no client has ever held a session" gap is closed.**
-SlopSync `1993f95` (pushed) adds `--ble [ADDR]` to `tools/slopsync_probe.py`:
-a `BleTransport` duck-typed to the `websocket.WebSocket` subset the probe
-already funnels everything through, bleak 3.0.2 bridged via one background
-asyncio-loop thread. Oversized frames raise `BleFrameTooLarge` (SPEC §13.4:
-no fragmentation, a hard error by design). `--pair` errors cleanly under
-`--ble` (needs several concurrent client identities; one central↔peripheral
-ACL link cannot represent that).
-
-**Live results against fw 2.1.85 @ `20:6E:F1:31:74:6D`** (motor unplugged):
-BLE `--listen-only` and `--no-motion` both 44 passed / 0 failed / 6
-skipped — identical to the WS baseline run first. ATT_MTU negotiated 250
-(payload 247). Full 129-chunk / 24,585 B catalog BLOB pulled over GATT and
-etag-verified against WELCOME. STATE cadence 20.8–22.5 Hz observed on
-motion(0x1100) against the 20 Hz grant. Scan-connect (service-UUID filter)
-and direct-address connect both verified. Clean GOODBYE both transports.
-One client-side bug found and fixed in the same commit: GATT writes reused
-the recv-poll's decayed 0.5 s timeout and spuriously timed out on GOODBYE;
-writes now carry their own fixed 5 s timeout.
-
-**No firmware change:** the transport, framing, and MTU behavior shipped in
-Phase E worked as deployed, first try. `slopsync.pin` bumped `6317b74e...`
-→ `1993f951...` via `git -C ../SlopSync rev-parse HEAD`.
-
-**Still open on the BLE ladder (this session):** operator phone nRF Connect
-raw-AD capture (adv = Flags + 128-bit UUID; scan rsp = name + MSD
-`0xFFFF: 02`); pairing-window bit0 observed ON AIR; both `kSlots` occupied
-concurrently (needs a second central — phone GATT connect + host probe);
-RFC-042 STALE park + reattach over a hard-dropped BLE link with a WS client
-attached (the T13 regression scenario, live).
-
-## RFC-051 LANDED (2026-07-28): critical-stall parks the session instead of evicting it — fw 2.1.85 → 2.1.86
-
-**The eviction/staleness race is closed.** A vanished client's link looks
-CONGESTED before it looks GONE, so §10.4 step 4's never-shed stall clock
-(`never_shed_stall_eviction_ms`, 2 s) always outraced RFC-042's own
-transport-loss park and destroyed a session (GOODBYE `SESSION_EVICTED`, full
-§6.9 teardown) that a reconnect would otherwise have resumed. SlopSync
-`c724b25` (pushed to `main`) factors `Hub::detachTransport`'s existing park
-body into a new private `Hub::parkAndDetach(Slot&, uint32_t nowMs)` and
-switches `trackCriticalSend`'s stall-timeout branch to call it instead of
-`evictSlot`. `SESSION_EVICTED` narrows to admin evict only (duplicate-LIVE-
-instance eviction already had its own `DUPLICATE_INSTANCE` code).
-`evictSlot()` itself is unchanged and stays for admin evict. SPEC §10.4/§6.6/
-§6.9 and the registry's `SESSION_EVICTED` / `never_shed_stall_eviction_ms`
-comments updated to match (comments only — `gen_registry_header.py --check`
-confirmed no wire-emitted string moved, catalog etag unaffected).
-
-**A real bug surfaced and got fixed in the same commit, not deferred:**
-`Hub::pumpSlot`'s own frame-read loop (`while (auto fb =
-slot.transport->read())`) assumed nothing inside `dispatchFrame()` could null
-`slot.transport` mid-loop — true before this RFC, since `evictSlot()`'s
-`teardownSession()` never touches the transport pointer. `parkAndDetach()`
-breaks that assumption (a critical-stall noticed while handling the very
-frame being dispatched now nulls the transport from inside the dispatch
-call stack), so the loop now re-checks `slot.transport != nullptr` on every
-iteration rather than only on entry — caught by the new native test below
-crashing (`SIGSEGV` in `pumpSlot`), not by inspection.
-
-**Verification (bare-minimum posture, below):** `test_slopsync_safety` (the
-existing S-08 stall SUBCASE rewritten for park-not-evict, plus one new
-`TEST_CASE` proving a critical-stall park reattaches on a fresh HELLO with
-grants intact — `sessionCount()==1`, `state==STALE`, then same
-`session_id`/`roles` and a retained-grant STATE push after a same-
-`instance_id` HELLO on a brand-new transport), `test_slopsync_staleness`,
-`test_slopsync_m4b`, `test_slopsync_messages` — all four the suites
-referencing `SESSION_EVICTED`/`never_shed_stall`/`trackCriticalSend`/
-`STALE-`. All PASS. `tools/slopsync_lint.py`: clean. `tools/canon_lint.py`:
-clean. **Toolchain note for future native-test runs on this host:** git-
-bash's own `/mingw64/bin` ships a `libstdc++-6.dll` that shadows the winlibs
-GCC 16.1.0 toolchain PlatformIO actually built with — every `pio test -e
-native` run silently crashed (`STATUS_ENTRYPOINT_NOT_FOUND`) until the
-winlibs `mingw64/bin` was put ahead of it on `PATH`. Not a code issue; purely
-this machine's shell setup.
-
-`slopsync.pin` bumped `1993f951...` → `c724b252...` via `git -C ../SlopSync
-rev-parse HEAD`. `FIRMWARE_VERSION` 2.1.85 → 2.1.86. Built clean (`pio run -e
-sd32-ota`, RAM 24.1%, Flash 28.5%). Deployed via `deploy.ps1`: device
-confirmed `fw 2.1.85 -> 2.1.86`.
-
-**Live smoke, both required checks:** kill-test
-(`t13_kill.py`, WS) — probe killed mid-session at t=4.4s; `/api/log` shows
-`WS client#1 gone (slot 0) — detach deferred` with **no** `session ... left`
-line for that session, exactly the new park behavior (the OLD behavior would
-have logged a `left` line from `evictSlot`'s `teardownSession`, since
-critical-stall-via-flood is the same never-shed-queue mechanism the kill
-test's rapid disconnect stresses). Clean full probe
-(`slopsync_probe.py --listen-only`, WS): 44 passed / 0 failed / 6 skipped —
-unchanged from pre-change baseline.
-
-**One anomaly noted, NOT attributable to this change:** the post-OTA boot
-log's first line read `Reset reason: PANIC (unexpected)` rather than the
-`SW` this repo's own established pattern documents for an `ESP.restart()`-
-driven OTA reboot (see the 2.1.79→2.1.80 entry above). This reflects the
-reset that preceded THIS boot — i.e. something on the prior (2.1.85) boot
-crashed rather than cleanly restarting via `DeferredReboot`/`ESP.restart()`.
-`OtaService.cpp`'s reboot path is unchanged by this work and unrelated to
-`SlopSync`'s session-parking logic; no serial/backtrace access was available
-to investigate further (bench-only per doctrine). Device came back healthy
-and fully responsive on 2.1.86 with no further anomalies across both smoke
-runs. **Flagged for the operator to watch on the next bench session; not
-investigated further here.**
-
-## VERIFICATION POSTURE RULING (operator, 2026-07-28) — bare minimum until current task + UI complete
-
-Pre-release iteration regime, operator-stamped: **verification floor is
-compile + lint (canon_lint / slopsync_lint) + the native suite covering the
-changed area + one live smoke of the actual change after deploy.** Dropped
-until this ruling is lifted: fuzz runs, full-gauntlet sweeps on every touch,
-sim-parity re-runs when the sim was not touched, multi-round doc
-verification passes. SlopSync CI still gates every push (docs/regen drift
-stays machine-checked at zero local cost). Rationale: nobody is using this
-yet; more minor changes are expected; hours of ceremony per minor change is
-waste. Lift the ruling at UI completion / first release.
-
-## BLE DUAL-CENTRAL SLOT TEST (2026-07-28) — kSlots=2 live-verified, fw 2.1.86
-
-Operator phone (nRF Connect, GATT connect only) held BLE slot 0 while the
-host probe (`--ble`, direct address) claimed slot 1 and ran a full
-`--listen-only` session to a clean GOODBYE — 44 passed / 0 failed / 6
-skipped, phone connection uninterrupted throughout (log: conn#2 slot 0
-attached 535s with no detach; conn#1 slot 1 attached 551s, session, gone
-565s). Both `SlopSyncBlePort::kSlots` occupied concurrently. This was the
-last unexercised piece of the BLE binding; the BLE ladder (advertising
-layout, MSD on air, single session, dual central) is complete. Third-slot
-refusal remains untestable on this bench (no third radio).
-
-## BLE MSD ON-AIR CONFIRMED (operator phone, nRF Connect, 2026-07-28)
-
-The BLE ADVERTISING MSD FIX entry's one remaining open check — "an operator
-phone + nRF Connect re-check (raw per-packet AD dump) remains" — is CLOSED:
-operator observed Manufacturer Specific Data company `0xFFFF`, payload
-`0x02` (bit1 ws_available set, bit0 pairing_window_open clear) in nRF
-Connect's parsed AD view against live fw 2.1.85. Same instrument that found
-the record missing pre-fix (T14). The `ble_adv_flags` byte is verifiably on
-the air.
-
-## WEBUI PHASE KICKOFF (operator + main loop, 2026-07-28) — scope rulings + plan
-
-Alignment discussion held from the deliberate clean state (SlopDrive-32
-`84929cf`, SlopSync `c724b25`, device live on fw 2.1.86). The phase is
-COMPLETION + ALIGNMENT of the existing catalog-driven Svelte 5 client
-(`docs/webui-architecture.md`), NOT a rebuild — the rebuilt client is the
-SlopDeck kernel seed (DESIGN.md §6) and the rail/hero identity stays locked
-per the prior ruling.
-
-**Rulings stamped this session (operator):**
-
-- **Ruling-6 stamped** — see the amended morning-batch item 6 above.
-- **"UI complete" (the VERIFICATION POSTURE lift milestone) = embedded UI
-  + hosted build config + Tauri 2 shell.** Operator chose the
-  shell-inclusive scope over the main-loop recommendation (embedded +
-  hosted only), informed that it pulls client-side BLE GATT and the Tier-2
-  plugin loader into the phase. The bare-minimum verification floor stays
-  in force for the whole ride.
-- **Pairing knock-and-approve pulled IN:** `Hub::openPairing()` has no
-  firmware caller, so a machine with an existing configure-holder cannot
-  approve later clients from the UI (`PairingPane`'s honest-limits gap).
-  The firmware caller + UI approve flow are phase work — the Prime Rule's
-  own ritual (a client hitting a gap means the thing gets implemented).
-- **Telemetry redesign stays PARKED** (no stated scope; posture ruling
-  exists precisely to defer open-ended polish). Recorded in Deferred /
-  planned below.
-- The 35 `DEMO-CANDIDATE:` markers remain a separate parked pass, per the
-  kickoff brief.
-- **Actual-is-actual (operator, 2026-07-28, post-kickoff):** the motor does
-  NOT need to be plugged in for step 1's end-to-end check. The firmware's
-  reported position IS "actual" for UI-verification purposes; lag =
-  commanded − reported actual. Divergence between reported and physical
-  position is hardware failure outside any client's control — and the UI
-  doctrine already forbids client-side hardware-health inference
-  (`docs/webui-architecture.md` §7). Step 1 is fully verifiable on the
-  unplugged bench; the "partial until motor-powered" caveat is void.
-
-**Findings recorded (kickoff truth pass):**
-
-- **RFC-048 vocabulary consumption gap — the phase centerpiece.** The
-  device catalog EMITS the rendering vocabulary (`SlopSyncCatalog.h` is
-  full of `ui_ranks::hero`/`control` etc., wired by Phase C2) but the JS
-  client decoder (`../SlopSync/clients/js/catalog.js`) and the webui model
-  layer consume NONE of it — zero hits for archetype/rank/region/
-  widget_pattern in either tree. `roles.js`/`heroes.js` predate RFC-048
-  and hand-guess the derivation chain RENDERING.md then made normative.
-  Same disease the rebuild cured, one layer up. [verified 2026-07-28 —
-  grep both trees + SlopSyncCatalog.h read]
-- **WEBUI-HANDOFF-RFC-BATCH.md is substantially absorbed** (declared-size
-  decode, deadman wish, limits-key-4 batching, relative `/uitoken`,
-  PlanStrip role-first, reserved-regex gone — all confirmed by grep). The
-  ONE unverified item is the headline: rail tap-to-move end-to-end live
-  (tap → 0x3100 INTENT → post-clamp ECHO → carriage moves →
-  `telemetry.target` follows) + the commanded/lag numerals. No ledger
-  record of that check exists. Handoff file gets deleted once it passes.
-  [verified 2026-07-28 — grep `clients/js` + `webui/src`]
-
-**Plan (order agreed; each step live-smoked per DOCTRINE §3, which IS the
-posture floor's smoke):**
-
-1. Truth pass: tap-to-move + commanded/lag live verification; delete the
-   handoff doc.
-2. Ruling-6 implementation: `SlopMinimalCatalog.h` gains window controls +
-   pattern gen.
-3. Tier-0 alignment to RFC-048: `clients/js` decodes the vocabulary
-   fields; model consumes category → rank → archetype → widget pattern →
-   region; current heuristics demoted to fallback-for-roleless-hubs
-   (cross-repo: SlopSync commit first, pin bump here).
-4. Founding Tier-1 completion: SlopMotion tuning widget + fray-d Advanced
-   generator panel (the two of four founding widgets still rendering as
-   generic cards), sim-first against the 19-channel parity sim, live smoke
-   per control.
-5. Protocol-surface catch-up: RFC-042 staleness/resume UX (verify JS
-   client reattach presents the same `instance_id`, handles
-   `session_stale`/`session_resumed`), curve-family downgrade visibility
-   (key 45 ≠ key 48 shown, not buried), channel `status` field,
-   trust-ledger display rule, BLE/discovery presence in link surfaces,
-   knock-and-approve (firmware caller + PairingPane flow).
-6. Widget interface extraction (SlopDeck step 2) — deliberately LAST, so
-   the contract is extracted from four REAL widgets; `shadow.svelte.js`
-   pure-lifecycle refactor rides along.
-7. Shell tail: hosted build config, then Tauri 2 shell (mDNS discovery,
-   Tier-2 loader + dogfood plugin, client-side BLE GATT transport).
-
-Execution ladder per standing preference: main loop architects + reviews,
-sonnet executes Svelte/JS chunks, opus on hard debugging.
-
-**RE-ORDERED (operator, 2026-07-28, post-step-1):** the shell jumps from
-step 7 to the FRONT as a feasibility spike — Tauri 2 APK on the operator's
-phone + desktop build, BLE discovery → WS upgrade actually happening, the
-existing UI rendering live in the shell — THEN the flesh-out (steps 2-6
-unchanged in content, queued behind the spike). Rationale accepted by main
-loop without pushback: the shell is the highest-uncertainty work in the
-phase (new toolchain, Android packaging, client-side BLE, a transport the
-JS client core has never spoken); proving it early is de-risking, not
-scope creep.
-
-## WEBUI PHASE STEP 1 — TRUTH PASS DONE (2026-07-28): tap-to-move live-verified, handoff doc retired
-
-- **Setup:** fs image redeployed from HEAD before verifying (guarantees the
-  check ran against current webui + pinned clients/js, not archaeology about
-  the last fs deploy). Observed: an fs-only flash DOES reboot the device
-  (`/api/ota/fs` answers `reboot_ms:500`, uptime reset confirmed) — the
-  run-slopdrive-32 SKILL.md's "fs flashes don't reboot" note was drift,
-  fixed this session. Device then fake-homed via
-  `slopsync_probe.py --bench-home --bench-home-no-revert` (48/0/4), end
-  state `homed=true home_override=true measured_stroke_mm=250`.
-- **RFC-032 tap-to-move end-to-end — VERIFIED LIVE, ALL PASS (15/15).** New
-  harness `webui/test/tap-to-move-live.mjs` (Playwright page loaded FROM the
-  device + an INDEPENDENT read-only wire session watching `tgt_10um` at
-  20 Hz): input tape live (`command.position` resolved + control tier);
-  role-less fallback copy correctly absent (path kept — it is Tier-1
-  graceful absence, not stale code, resolving the old handoff item 2
-  caveat); commanded + lag numerals present (`telemetry.target` resolved);
-  TWO taps (75% → 100.0 mm, 30% → 55.0 mm of window [25,125]): each showed
-  shadow `pending → confirmed` (post-clamp ECHO), UI tape cursor
-  (aria-valuenow, device-reported) converged exactly, wire watcher saw
-  `tgt_10um` land at 100.00 / 55.00 independently of the UI, commanded
-  numeral matched, lag = commanded − actual exact. Actual-is-actual ruling
-  applied (motor unplugged; reported position is actual). Evidence
-  screenshot `webui/test/evidence/tap-to-move-live.png`.
-- **Harness bug found on first run, mechanism worth keeping:** tap 1's
-  motion expands the plan strip → page grows a scrollbar → layout shifts →
-  a CACHED bounding box aims tap 2 at the wrong fraction (commanded 59.23
-  instead of 55 — and UI cursor, wire tgt, and commanded numeral all agreed
-  on 59.23, i.e. ground truth held perfectly under a mis-aimed tap; the
-  three-way agreement is what proved it was the harness, not the page).
-  Fixed: re-acquire the rect per tap.
-- **WEBUI-HANDOFF-RFC-BATCH.md DELETED (SlopSync repo)** per its own
-  "delete this file once absorbed" instruction. C-9 proof: items 1/3/5/6/7/9
-  verified absorbed by grep this session (limits-key-4 batching, PlanStrip
-  role-first, index-0 rule replacing the reserved-regex, declared-size
-  decode, deadman wish, relative `/uitoken`), item 8 superseded by RFC-042,
-  item 4 (identity in link surface) shipped with the rebuilt LinkBar, item
-  2 live-verified above. References repointed, not dangled: RFC-QUEUE.md
-  RFC-032/034/035 status lines now record completion; CHANNEL-MAP.md's
-  historical-docs example list and webui-architecture.md §6a updated in the
-  same pass (§6a now records the live verification). `slopsync.pin` bumped
-  to the SlopSync commit carrying the deletion.
-- **Verification floor met:** canon_lint 0; the touched suite here IS the
-  new live harness (ALL PASS ×2 runs); live smoke = the verification
-  itself. [verified 2026-07-28 — harness output reproduced above, both
-  runs; probe 48/0/4; /api/status before/after]
-
-## SHELL FEASIBILITY SPIKE (2026-07-28, in flight) — M0 LIVE-VERIFIED; M1/M2 BUILT; M3 toolchain up
-
-**Desktop release build DONE (2026-07-29), first one ever — the spike had
-only been run through `tauri dev`.** `npm run tauri build` in `webui/`,
-1m20s, exit 0. Artifacts under `webui/src-tauri/target/release/`:
-`slopdeck.exe` (17 MB portable), `bundle/nsis/SlopDeck_0.1.0_x64-setup.exe`
-(3.9 MB) and `bundle/msi/SlopDeck_0.1.0_x64_en-US.msi` (5.7 MB) — the
-installers write Start Menu and desktop shortcuts themselves, so no
-launcher script is owed. Not installed and not launched; that is the
-operator's call.
-Fixed on the way in: `tauri.conf.json` shipped an **800x600** window while
-the rail breakpoint is `min-width: 960px`, so the desktop shell would have
-booted into the PHONE layout. Now 1440x900 with `minWidth` 1000 (above the
-breakpoint, not on it) so it cannot be dragged into the mobile tree.
-**Chrome stacking FIXED (2026-07-29, operator report from the first launch:
-"shell is behind the top bar and there's a gap above and below").** Not a
-safe-area bug — the insets were already `env()`-driven. It was two offsets
-measured from different origins: `.app` reserved `--shell-chrome-top` as
-padding (pushing the LinkBar down by the bar's height) while `.shellbar` ALSO
-offset itself by `--linkbar-h`, so it landed over the LinkBar's lower half,
-drew behind it (z-index 18 vs 20), and left dead space above and below.
-ShellBar is now the topmost chrome at `top: 0` / z-index 21, and the LinkBar
-sticks below it. Mechanism and the second, subtler half — a sticky offset is
-inset by the SCROLL CONTAINER's padding, so the same `top` value is correct
-on mobile and double-counts on desktop where `.app` is the scrollport — are
-**TRAPS T22**. Safe-area ownership is now explicit: `--chrome-inset-top`
-(style.css) defaults to `env(safe-area-inset-top)`, the LinkBar reads the var
-instead of `env()` directly, and ShellBar zeroes it when it mounts because
-the topmost bar owns the notch. Exactly one bar ever pads for it.
-Guard: `webui/test/shell-chrome-geometry.test.mjs` (`npm run check:shell`)
-asserts flush stacking with and without chrome, in both scroll modes, with no
-device present. Kept OUT of `npm run check` on purpose — that script runs
-inside every firmware build and must not spawn a browser.
-**Rebuild DONE (2026-07-30, operator-requested).** `npm run tauri build`,
-Rust compile 26.8s, exit 0, nothing holding the binary this time. Artifacts:
-`slopdeck.exe` 16.17 MB, `bundle/nsis/SlopDeck_0.1.0_x64-setup.exe` 3.82 MB,
-`bundle/msi/SlopDeck_0.1.0_x64_en-US.msi` 5.62 MB. This is the first exe to
-carry the T22 stacking fix AND the 2026-07-30 UI rulings. Not installed and not
-launched -- operator's call. The `dist/` trap below fired exactly as recorded
-and was cleaned up: shell bundle 319,201 B with 3 `__TAURI_INTERNALS__` and 8
-`blec` hits, restored to the device bundle at 302,162 B with zero of each.
-🚩 **TRAP, burned live: `npm run tauri build` REPLACES `webui/dist/` with
-the SHELL bundle.** `beforeBuildCommand` is `npm run build`, and the Tauri
-CLI sets `TAURI_ENV_PLATFORM` for it, so the SHELL branch survives
-tree-shaking: 313,763 B carrying `__TAURI_INTERNALS__` and 8 `blec`
-matches, vs the device bundle's 296,821 B and zero. M0's purity proof used
-`build:only` from a clean tree and does not cover this direction. The
-firmware path is SAFE — `build_webui.py` runs its own `npm run build`
-without the env var — but anything trusting `dist/` as-is is not, and the
-Phase 1b entry's offline render check (serve `webui/dist` against slopsim)
-is exactly such a consumer: it would have served Tauri IPC code to a plain
-browser. Rule: after any `tauri build`, run `npm run build` to put the
-device bundle back. `dist/` restored at the time of writing.
-
-Per the RE-ORDERED ruling above. Operator-authorized toolchain installs:
-rustup (Rust 1.97.1, existing VS 2022 MSVC), Temurin JDK 17, Android
-cmdline-tools + SDK/NDK (the 2026 cmdline-tools DEPRECATED `sdkmanager` —
-it exits 0 without installing anything; packages actually install via the
-new `android` CLI with slash-format ids, e.g. `ndk/29.0.14206865` — and
-cmd.exe eats `;` in the old-style ids, a second trap).
-
-- **M0 — desktop shell: LIVE-VERIFIED.** `webui/src-tauri/` (Tauri 2.11,
-  identifier `com.slopdeck.app`, productName SlopDeck) wraps the EXISTING
-  Vite project; the kernel's designed seam did its job: `main.js` grew a
-  SHELL branch keyed on `import.meta.env.TAURI_ENV_PLATFORM` (set only by
-  the Tauri CLI's build) that wires `setHttpGet` to `tauri-plugin-http`'s
-  Rust-side fetch. Device log evidence: `session authorized by /uitoken
-  (control tier)` from the shell window — the native-origin CORS problem
-  never materializes because the mint bypasses the webview exactly as
-  `credentials.js`'s header designed. Embedded-bundle purity PROVEN: fresh
-  `npm run build:only` emits a byte-identical-size 261,698 B bundle with
-  ZERO matches for blec/__TAURI/plugin-http (the SHELL branch dead-code
-  eliminates). `npm run check` (device-knowledge + model) ALL PASS.
-  Windows+nested-src-tauri trap recorded: vite's watcher must ignore
-  `**/src-tauri/**` or cargo's locked build artifacts EBUSY-crash the dev
-  server (fixed in vite.config.js).
-- **M1 — BLE client path: BUILT, NOT LIVE-VERIFIED (C-8 — needs an
-  operator scan/connect in the shell window).** `tauri-plugin-blec` 0.12
-  (btleplug on desktop, native Kotlin via Tauri's plugin system on
-  Android). `webui/src/shell/ble-ws.js`: SlopSync-over-GATT as a WebSocket
-  duck passed through `createSession({WebSocketImpl})` — a seam session.js
-  ALREADY had; one notification = one frame, writes chained on a promise
-  queue (frame order is protocol-critical), registry `ble_identity` UUIDs.
-  `webui/src/shell/ShellBar.svelte`: shell-chrome discovery bar (scan by
-  service UUID, connect BLE, manual WS host, upgrade button) mounted only
-  by the SHELL branch — the kernel UI is untouched. BLE sessions land at
-  watch tier by design (no HTTP sideband → no /uitoken); control arrives
-  with the WS upgrade.
-- **M2 — WS upgrade: BUILT, NOT LIVE-VERIFIED.** SlopSync `77c275d`
-  (clients/js): WELCOME keys 46 `ws_port`/47 `ipv4` + identity key 5
-  `hub_instance_id` decoded (additive), exposed as `state.endpoint`;
-  machine.svelte.js mirrors it to `machine.link.endpoint`. ShellBar's
-  upgrade = disconnect BLE, reconnect WS to the advertised endpoint with
-  the SAME `instance_id` — the hub's duplicate-identity rule makes that a
-  clean handover on TODAY'S firmware (no fw change needed for the spike;
-  state-preserving cross-binding migration stays a flesh-out item).
-- **M3 — Android: DEBUG APK BUILT** (not yet sideloaded/run on the phone —
-  that live check is the operator's). Toolchain: JDK 17, platform-36,
-  build-tools 36.0.0, NDK 29.0.14206865 stable (the first script's
-  auto-pick grabbed an rc by accident, caught and pinned), all four Rust
-  Android targets. `tauri android init` clean; manifest carries the BLE
-  permission set (BLUETOOTH_SCAN `neverForLocation` + BLUETOOTH_CONNECT,
-  legacy trio capped at API 30). Four packaging traps burned down in
-  sequence, each recorded: (1) symlinking the built `.so` into the Android
-  project requires Windows Developer Mode (operator enabled); (2)
-  tauri-plugin-blec's manifest floor is minSdk 26 vs the template's 24
-  (raised, comment in build.gradle.kts); (3) Gradle's rust plugin calls
-  back into the CLI via `npm run tauri` — package.json needs the standard
-  `"tauri": "tauri"` script; (4) debug cleartext-traffic placeholder is
-  already true in the debug buildType (LAN ws/http works), but the RELEASE
-  manifest pins it false — must be deliberately flipped per the plain-http
-  delivery doctrine before any release build. Artifact:
-  `webui/src-tauri/gen/android/app/build/outputs/apk/universal/debug/
-  app-universal-debug.apk` (216 MB — debug symbols for the whole Rust
-  stack ride in the `.so`; a release build minifies to a fraction of
-  that). Rust cross-compile for aarch64 was clean on the FIRST attempt —
-  every failure was packaging, none were code.
-- **Phone field test round 1 (operator, 2026-07-28): two findings, both
-  fixed same session (commit 4fa3a9e).** (1) HARD CRASH on the first BLE
-  notification — NOT our code: `tauri-plugin-blec` 0.12.0's Android
-  notify/event channel closures run on the binder thread via JNI
-  (`extern "C"`) and used `blocking_send().expect()`; a receiver dropped
-  in a disconnect race turns that panic into a nounwind process abort
-  (crash buffer: `PluginManager_sendChannelData` →
-  `panic_cannot_unwind` → SIGABRT). The GATT connect/subscribe/notify
-  chain itself WORKED — the app died receiving, which is the T5 lesson
-  wearing Android clothes: foreign-task callbacks must fail soft. Fixed
-  by vendoring the crate (`src-tauri/vendor/tauri-plugin-blec`,
-  `[patch.crates-io]`): both closures warn-and-drop, channel capacity
-  1 → 64 (capacity 1 also blocked the binder thread in lockstep with the
-  consumer — a throughput bug waiting for 25 Hz STATE). UPSTREAM ISSUE
-  PENDING (flesh-out item; patch marked for deletion when a fixed
-  release ships). (2) Operator ruling: **no baked-in host** — the M0
-  auto-point at the bench IP defeated discovery validation. The shell
-  now cold-starts at the discovery surface on both desktop and Android;
-  auto-connect only re-joins a host the operator explicitly connected to
-  before. Plus: stopScan before GATT connect, empty-host guard.
-- **SPIKE COMPLETE — FULL LADDER LIVE-VERIFIED ON THE PHONE (operator,
-  2026-07-28, rounds 3-5).** Round 3: GATT connect+subscribe+notify all
-  worked; app aborted receiving (the vendored-patch story above). Round 4:
-  write-WITH-response proved structurally broken on real Android hardware —
-  one lost ATT-ack completion wedged the one-op-in-flight GATT queue
-  forever (Kotlin log: the same 12-byte frame retried 45+ times); machine
-  log simultaneously proved c2h delivery (sessions joined watch-tier,
-  idle-reaped at 15 s of client silence). Fix: c2h writes go
-  withoutResponse (firmware RX char is WRITE|WRITE_NR; mirrors unacked
-  h2c NOTIFY, §13.1). Round 5 root cause of the remaining stall: blec's
-  OTHER capacity-1 landmine — `subscribe_channel`'s `try_send().expect()`
-  panicked the notify-listener task on the first notification burst
-  (WELCOME + anything), silently killing all further notifications;
-  round 3's abort was this corpse being discovered late. Patched
-  (capacity 64, warn-and-drop, forwarder soft-fail) + live rx/tx wire
-  counters on the ShellBar (on-device diagnostics without adb).
-  **RESULT: discovery → BLE GATT session (watch tier, catalog over GATT,
-  UI built) → ↑WS upgrade → control tier, all on the operator's phone.**
-  Machine-log evidence: BLE session joined → `session authorized by
-  /uitoken (control tier)` → BLE conn detached — the §6.3 same-identity
-  handover, live. [verified 2026-07-28 — operator confirmation + /api/log
-  captured in-session]
-- **NEXT PHASE (operator direction, 2026-07-28): desktop shell UX** —
-  "mostly UX, which naturally gets implemented everywhere for free" (one
-  kernel, all delivery targets). Then the parked flesh-out queue.
-- Spike-scope shortcuts, tighten at flesh-out: http scope `http://**` in
-  capabilities; blec upstream issue (now TWO fixes to offer: JNI-abort
-  paths + the subscribe_channel capacity-1 panic) + patch retirement;
-  release-build cleartext flag (recorded in the M3 entry above).
-  (ShellBar placeholder chrome: closed by the FLAGSHIP UI PASS below.)
-
-## FLAGSHIP UI PASS (operator-directed, 2026-07-28) — desktop-shell UX phase, first slice
-
-Operator brief: "intra-module visual identity and design language, but with
-the optimizations and layout customizability of a mature user interface …
-I don't love the safety bar, idk what reserved are for, build me a flagship
-ui." Interpretation applied: the instrument identity (tokens, mono numerals,
-square corners, reality/intent semantics, crosshair/heatmap/wordmark) is
-KEPT; the chassis around it grows up. One kernel — everything below lands on
-embedded, hosted, and shell builds alike; only the ShellBar item is
-shell-only.
-
-- **Desktop frame:** ≥960 px gets a left nav rail (sections: MACHINE = the
-  hub's own catalog categories, still fully generic; CONSOLE = Pairing /
-  SlopSync / Log / Display), collapsible to a two-glyph mini rail (glyphs
-  DERIVED from catalog labels — an icon table would be device knowledge).
-  Phones keep the horizontal tab strip. ONE nav model, two renderings, same
-  `active` id — resizing mid-session never loses the operator's place. The
-  machine dashboard tab is labeled "Overview". App max-width 1400 → 1680.
-- **RULING — reserved (wire value 0) ops are NOT rendered.** AMENDS the
-  earlier gray-never-hide treatment of option index 0. Mechanism: RFC-034 is
-  normative that value 0 of an `action.*` select is never an operation — it
-  exists only to keep the option array index-aligned with wire values. The
-  old bar grayed it (listbox index-completeness argument), which shipped a
-  permanently dead button labeled "reserved" to the operator's face; the
-  operator's own "idk what reserved are for" is the field evidence that
-  rendering it communicates nothing. These are buttons, not an
-  index-addressed listbox — omission loses nothing. UNCHANGED: real ops a
-  session merely lacks access for stay GRAYED, never hidden (option_access
-  doctrine untouched).
-- **Safety dock redesign:** the e-stop is an oversized OG-language hazard
-  button — quiet outline chip with the pre-refactor page's diagonal
-  red hazard-stripe wash (tag `webui-prerefactor`'s `.tbtn.estop`; a first
-  cut used a clip-path octagon, operator-rejected same session: "look at the
-  OG webui for guidance") — pinned OUTSIDE the scrolling op row, so
-  reachability is by construction, not sort order. Remaining ops are plain
-  OG outline chips in role-labeled clusters (safety / home — labels from the
-  ROLE prefix that discovered them, registry vocabulary not device
-  knowledge); the catalog's access-sort keeps stop at the head of its row.
-  Refusal-surface mechanics (global lastRefusal banner + remedy button)
-  unchanged.
-- **Edit-layout mode:** DashGrid drag/resize handles are hidden until an
-  explicit "Edit layout" toggle (Reset lives inside edit mode, with Done) —
-  the reading surface stays quiet; customization is deliberate.
-- **Measured-height chrome contract:** LinkBar publishes `--linkbar-h`, the
-  safety dock publishes `--safety-h` (both bind:clientHeight — heights are
-  VARIABLE, banners come and go). Sticky nav offsets and the page's bottom
-  clearance consume the vars; nothing hardcodes a bar height anymore. Twin of
-  the shell's `--shell-chrome-bottom` mechanism from the spike.
-- **ShellBar** restyled from placeholder chrome to the design language
-  (tokens only; behavior byte-identical — it was phone-live-verified
-  yesterday). Closes the "ShellBar visual design is placeholder" flesh-out
-  bullet in the spike section above.
-- **Terse-instruments mode (operator ask, same session):** browser preference
-  (`ui_terse`, twin of hivis) hiding the `.explain` convention class — the
-  teaching copy on hero instruments (rail usage hint, restated field
-  descriptions on the limits/pattern cards). Settings pages NEVER hide their
-  descriptions; that split is the ruling, not an accident. Toggle lives in
-  the Display pane.
-- Verification (bare-minimum floor per the 2026-07-28 posture ruling):
-  device-knowledge check + settings-model suite + Vite build green;
-  canon_lint zero findings; fs image deployed to the live device and a
-  no-motion Playwright render smoke (nav, dock, no reserved button) passed.
-  [verified 2026-07-28 — this session; details in the commit]
-
-## UX MATURITY PASS (operator-directed, 2026-07-28) — "this feels amateur, not mature"
-
-Operator verdict on the first flagship slice, four defects; mechanisms found
-by a three-agent extraction/diagnosis sweep of the OG page (`main:webui/`)
-and the current widgets, then fixed by three parallel implementation agents.
-
-- **Bottom-edge pileup:** LINK footer + safety dock + (shell) ShellBar
-  stacked three similar strips on the bottom edge. RULING — one owner per
-  edge: shell transport chrome moves to the TOP (fixed under the LinkBar —
-  it is link management, same domain; publishes `--shell-chrome-top`,
-  `--shell-chrome-bottom` retired); the safety dock alone owns the bottom;
-  the LINK strip is a quiet in-flow footer (OG-style).
-- **Desktop = OG fixed-viewport architecture:** the page never scrolls as a
-  page at ≥960 px. 100 dvh flex column — LinkBar / instrument zone / nav +
-  pane frame (flex:1, the pane is the ONLY scroll region) / LINK footer /
-  safety dock as normal rows (dock always visible by construction, fixed
-  positioning and `--safety-h` retired on desktop; mobile keeps the fixed
-  dock + scrolling page). This is also the structural fix for "the left
-  machine bar opens tabs in a section of the page that may not even be
-  visible" — the pane region starts in view by construction; mobile
-  additionally scrolls the tab strip into view on switch.
-- **Hero zone split (registry-level, not device knowledge):** heroes carry a
-  `zone` — `instrument` (rail: pinned chrome, never scrolls away) vs `card`
-  (pattern, limits: ordinary Overview dashboard cards, the OG's numbered-
-  card pattern). Kills the 500 px instrument wall that pushed panes below
-  the fold.
-- **Rail 1:1 to the OG** (operator: "pretty much 1:1 to the old one"):
-  RailWidget rebuilt to `main:webui/src/features/rail.js` + `style.css`
-  spec — tape assembly with mode/extent labels, 72 px host with endcaps/
-  ruler/ghost, clip-path-revealed hazard ribbons (never resized — stripe
-  crawl), intent window band with the `084–176 · 092mm` center label and
-  3 px glow handles, canvas marker geometry (reality stroke y16..52 + core
-  dot, intent caret y22..46, 850 ms tapered comet ribbon), OG hero numeral
-  row (clamp(54px,6.2vw,80px) glowing actual; commanded/lag/speed
-  secondaries; window numerals removed — the band label is the window
-  readout).
-- **Marker jitter/lag — the real mechanisms** (diagnosis, not guesswork):
-  the Svelte rail already carried the OG's render-clock + telebuf port
-  faithfully. (a) Constant jitter = LINEAR interpolation over the ~25 Hz
-  single-sample STATE feed — a velocity-discontinuous slope kink at every
-  ~40 ms sample boundary (the OG never had this problem because its 0x01
-  telemetry frame batched ~4.2 ms sub-samples, ~240 Hz effective). Fix:
-  cubic Hermite in `telebuf.sampleAt()` using per-sample velocities,
-  overshoot-clamped. (b) Intermittent lag = render-delay clock slew (2 ms/
-  frame) + 50 ms extrapolation ceiling losing to occasional >100 ms
-  hub-tick pacing gaps → hold-then-snap. Fix: EXTRAPOLATE_MS 80,
-  SLEW_MS_PER_FRAME 4.
-- **RFC CANDIDATE (Prime Rule ritual — client hit a protocol ceiling):**
-  batched telemetry sub-samples per STATE push for the telemetry roles
-  (several pre-spaced samples per frame, the OG 0x01 design generalized).
-  Client-side smoothing is now at the interpolation-order ceiling of a
-  25 Hz single-sample feed; if Hermite does not reach OG-grade smoothness
-  on the bench, this is the real cure. NOT implemented — queued for
-  operator stamp as an RFC.
-- Verification (bare-minimum floor): telebuf sim + new Hermite assertions
-  PASS; device-knowledge + settings-model suites + Vite build green;
-  canon_lint zero findings; fs deployed to the live device; no-motion
-  render smoke 25/25 incl. new fixed-viewport assertions (page does not
-  scroll, dock on screen, hero cards in Overview). Marker smoothness on
-  real motion NOT yet judged — that is the operator's bench call.
-  [verified 2026-07-28 — this session]
-
-## OG VISUAL LANGUAGE PASS (operator-directed, 2026-07-28) — "apply the visual language everywhere"
-
-Second operator correction of the maturity pass, same day: the OG dress had
-only reached the chrome, not the controls. Findings + fixes (one extraction
-agent, five implementation agents on disjoint files):
-
-- **Root cause of the amateur look:** Field.svelte — the generic renderer
-  every settings control goes through — had NO styles at all; every slider,
-  toggle, select, and input was bare browser-default markup. The OG control
-  language now lives as style.css global element defaults + `og-*` utility
-  classes (verbatim port from `webui-prerefactor`): rectangular
-  reality-ignite range thumbs on 2px hairline tracks, chevron selects, the
-  `.og-panel` corner-bracket card recipe, `.og-screen` recessed surfaces,
-  `.og-btn`/`.og-seg`/`.og-switch`/`.og-num` families, 4px scrollbars.
-  Deliberate deviation: `.og-btn` is width:auto (the OG's width:100% was the
-  recorded flex trap). Field/dash/log/slopsync/pairing all dressed; dash
-  cards carry the OG numbered heads (`01 ▸ TITLE`, runtime `data-pidx`
-  following reorders — a CSS counter breaks across hidden panes).
-- **Rail ticks root cause (real bug, not styling):** the ruler SVG used an
-  abstract 100×100 viewBox with `preserveAspectRatio="none"` — vertical
-  tick strokes scaled by the ~7× horizontal stretch, rendering 1px ticks as
-  ~7px slabs. Fixed: pixel-true `viewBox="0 0 w h"`; OG tick geometry
-  verbatim (majors 10 mm `--line-3`, mids 5 mm .85, minors 1 mm .5, all
-  fractions of BASE_H=72, hard 600-tick cap, baseline at 33/72).
-- **RULING — transport row returns to the top (OG layout):** pause / stop /
-  estop / home (registry op constants, labels from the catalog) render as an
-  OG `.tbtn` row top-right of the instrument zone (TransportBar.svelte,
-  fires through the same runAction path — no new write surface). The dock
-  keeps everything else. `force_home` is DEV-ONLY by ruling: stays in the
-  dock for now, to be hidden/disabled behind a dev affordance later.
-  **E-stop reachability exception (flagged, standing unless vetoed):** on
-  mobile the instrument zone scrolls, so the e-stop stays in the FIXED
-  bottom dock below 960 px; ≥960 px (fixed viewport, everything visible) it
-  shows in the TransportBar per the ruling. Both renderings exist in the
-  DOM; CSS decides. "Manual" is absent — manual mode still has no protocol
-  role (RailWidget header).
-- **NEXT WORK ITEM (operator direction, 2026-07-28): the archetype library**
-  per SlopSync RENDERING.md §8.2/§8.4 — `deriveArchetype()` implementing the
-  normative decision table + one component per frozen archetype (fifteen),
-  Field.svelte collapsing to a thin router. This IS the recorded phase
-  centerpiece (RFC-048 vocabulary consumption); today's OG dress becomes the
-  skin those components wear. Sequenced after this pass's seal.
-- **Jitter ROOT CAUSE FOUND AND FIXED (moving trace, 2026-07-28) — jitter
-  regression #5, arrival-time stamping.** The moving probe run measured:
-  rAF perfect (max dt 16.8 ms), but 107 of 719 rendered frames were snaps
-  and 17 were multi-frame freezes — because STATE frames arrive in TCP
-  clumps (71 of 393 arrivals with IDENTICAL Date.now() stamps, p95 gap
-  90 ms vs ~30 ms true period) and telebuf.push() DROPPED every
-  duplicate-stamped sample (~18% of all motion discarded), then
-  interpolated across the hole. No interpolation survives garbage
-  timestamps — this is why Hermite (#4) changed nothing visible. Fix: the
-  OG railFeed mechanism restored inside telebuf.push() — arrival time is a
-  HINT, stored timestamps are reconstructed future-anchored and evenly
-  spaced by an EMA period (bursts average out); `reschedule: false` opts
-  out for trusted stamps (tests; the future device-stamped batched frame).
-  Burst-replay regression test added to telebuf-sim (reproduces the
-  measured clump pattern): zero snaps, zero holds, mean vel 9.98 vs 10
-  true. Idle probe post-fix: zero phantom motion; the probe hook ships
-  permanently (free when unset). **LIVE CONFIRMED — operator, on the
-  bench, 2026-07-28: "the jitter is gone."** Residual found in the same
-  bench pass: a one-tick wrong position at first movement / direction
-  change. Mechanism: the reconstruction's period EMA learned from
-  IDLE/DWELL gaps (the hub sheds an unchanging channel; sensation dwell
-  strokes park the target), ballooning the estimated period, so the first
-  spans after motion resumed were garbage — and the MAX_LEAD cap could
-  still DROP a sample. Fix: the EMA only learns plausible streaming gaps
-  (< min(4×period, 200 ms)); a >500 ms gap RESYNCS the schedule to the
-  arrival; the cap clamps monotonic (+1 ms) and never drops.
-  Dwell/resume replay added to telebuf-sim (stream → 600 ms shed dwell →
-  reversed bursty resume): zero wild frames. [operator confirmation +
-  sim; live re-check on the next moving window]
-- Verification: canon_lint clean; checks + Vite build green; fs deployed to
-  fw 2.1.86; render smoke 27/27 (incl. TransportBar estop visible top /
-  dock estop hidden at desktop, dock list free of pause/stop/home).
-  [verified 2026-07-28 — this session]
-
-## PIXEL FIDELITY PASS (operator-directed, 2026-07-28) — "like someone explained it over the phone"
-
-Operator rejected the agent-paraphrase pipeline's output; METHOD CHANGE,
-standing for all future UI fidelity work: the OG is extracted from `main`
-into scratch, served under Vite (namespace-import patch in the scratch copy
-only), and screenshotted as PIXEL ground truth
-(webui/test/og-reference-shots.mjs) — implementation agents receive the
-IMAGES plus the runnable OG source, and disputed details get settled by
-zoomed crops, never memory or prose. Landed this pass (three agents +
-reconciliation):
-
-- Transport buttons: true OG two-line tbtns — icon + capitalized catalog
-  label over a muted subtitle; icons/subtitles come from a REGISTRY-
-  VOCABULARY table keyed on SAFETY_OP/HOME_OP wire values (spec op
-  semantics: estop "cut power" per RFC-010, stop "stop motion", pause
-  "hold position", home "seek home"); unknown ops render label-only.
-  Pixel-crop verification corrected two inventions: E-Stop is normal-case
-  and QUIET at rest (reddens only on interaction), and Home's subtitle is
-  plain muted (no amber). Home's armed/amber glow needs an honest homed
-  fact via a role — protocol-surface item.
-- Hero numerals: OG zero-padded fixed-width ("000.0" — pad width derived
-  from the rail's own extent, default 3; catalog precision is a FLOOR,
-  never truncated), unit folded into the label once, commanded numeral's
-  intent-purple restored (a real fidelity gap — it had been dropped
-  entirely), one shared baseline.
-- Sliders/tiles/telemetry: OG .fld row metrics on Field; readout archetype
-  gains the OG bar treatment (2px reality fill against bounds);
-  PatternWidget tiles = OG .pat-grid with INTENT-purple active (selection
-  is commanded, not measured truth; waveform glyphs deliberately absent —
-  catalog/RFC candidate, never client art) and its knobs now reuse Field
-  (duplicate slider implementation deleted); TelemetryChart legend/grid per
-  the OG DIAG (neutral text, only the swatch carries series color — the
-  verified source contradicted the paraphrase and won).
-- Cascade bug found by smoke: the dock e-stop's ≥960 px hide rule tied on
-  specificity with the new two-line `.btn` base rule and lost by source
-  order — hides are now compound selectors (`.btn.btn-estop` /
-  `.tbtn.btn-estop`), order-proof. Encoding repair: two hero widgets had
-  UTF-8 comments mangled through a PS5.1 ANSI round-trip (BOM + mojibake)
-  from an earlier automated edit — repaired, BOM-less.
-- Verification: canon_lint clean; build green; fs deployed (fw 2.1.86);
-  render smoke 27/27; side-by-side against the OG reference render
-  reviewed by the main loop. Residual deltas recorded: transport row sits
-  slightly above the OG's numeral-baseline alignment; catalog labels
-  capitalize to "Estop" (the OG's "E-Stop" spelling is the catalog's to
-  change, not the client's). [verified 2026-07-28 — this session]
-
-## AESTHETIC AUDIT + DENSITY PASS (operator-directed, 2026-07-29)
-
-Operator: "the sliders look bad, not obv a slider, the page looks flat, but
-not in an appeasing way — use all tools." Instrumented audit (zoomed crops +
-computed-style forensics, ours vs the running OG reference):
-
-- Flatness root cause was DENSITY, not chrome: Field rendered a bounds
-  caption row and every catalog description inline — walls of ghost-gray
-  paragraph text the OG never had (its .fld rows are label + recessed chip
-  + hairline slider, descriptions behind ⓘ). RULING (amends the terse-mode
-  presentation, veto-able): settings descriptions now collapse behind a
-  per-field ⓘ toggle (OG .info affordance), absent from the DOM until
-  opened; .field-reason/.field-error stay ALWAYS visible (ground truth).
-  Bounds row deleted. Value chips get the OG .num recess verbatim
-  (inset 0 2px 5px), replacing a flat 1px ring. Note: computed-style
-  probing of ::-webkit-slider-thumb is unreliable in Chromium — the crop
-  proved the thumb renders; trust pixels over pseudo-element getComputedStyle.
-
-## CSS DRIFT AUDIT (operator: "honestly diff the css", 2026-07-29)
-
-Systematic computed-style + rule-text diff, both pages LIVE (ours on the
-?hub dev loop, OG under Vite from main). Findings:
-
-- **ROOT CAUSE of the residual "off" feel: the missing root scale.** OG sets
-  `html { font-size: calc(var(--s) * 16px) }` (17.92 px) and every rem rides
-  it; the rebuild never set it AND pinned body to 15 px — every rem-based
-  size in the whole UI rendered ~11% smaller than OG, uniformly. Fixed
-  (root scale added, body hardcode removed); card titles now compute
-  identical px on both pages.
-- Slider thumb: rule text byte-identical to OG (the hollow ink-filled
-  rectangle IS the OG design; "no sliding looking element" as a complaint
-  about the OG look itself is a NEW design ask, not a drift — awaiting
-  operator call before inventing a filled/accent thumb).
-- Buttons/panels/brackets: byte-identical (two documented deliberate
-  deviations stand: og-btn width:auto flex trap; field-value recess).
-- Fixed drifts: dash numbered-prefix inherited bold (OG explicit 400 +
-  mono variation); LinkBar chips (.62rem/400/--tx-val, pins stay heavy —
-  safety reads); dock group labels to the OG .pidx-label voice (quiet
-  mono, no uppercase). Card-body padding density (12 vs OG 16-22 px)
-  recorded as a structural choice of the grid dashboard, not drift.
-- Chromium pseudo-element getComputedStyle is unreliable for form-control
-  internals — rule-text + pixels are the evidence standard (restated from
-  the aesthetic audit).
-
-## INCIDENT: HEAP-STARVED HTTP -> PANIC REBOOT UNDER SESSION LOAD (2026-07-29)
-
-Timeline (bench, fw 2.1.86, motor drive unpowered): several concurrent
-SlopSync WS sessions (operator clients + the main loop's forensics probe +
-Playwright harness pages, accumulated during square-pulse debugging) plus
-repeated 270 KB page serves. Observed: WS STATE delivery stayed PERFECT
-(25 Hz, zero gaps, probe heartbeats healthy) while HTTP crawled to 5-8 s
-page loads (operator: "something is wedging it, heartbeat is frozen");
-sys heap lines recorded `min=60` — a 60-BYTE internal-heap low-water mark.
-Post-slopsync boot headroom is only ~32 KB internal (boot log:
-143 KB free -> 32 KB after hub init). The episode ended in a PANIC reboot
-("Reset reason: PANIC (unexpected)" — the SECOND unexplained PANIC on
-2.1.86; the first is already on watch in the OTA entry above). Fake-home
-was lost with the reboot.
-
-- Evidence limitation: NO panic backtrace exists — serial is not attached
-  in normal use and the firmware has no crash ring. FIRMWARE WORK ITEM
-  (queued for operator stamp): persist panic reason + backtrace to
-  RTC/NVS and expose it via /api (the phone-side blec crash buffer proved
-  how much a persisted backtrace is worth).
-- FIRMWARE WORK ITEM (queued): graceful degradation under heap pressure —
-  a hub that sheds/refuses new sessions must never panic under N clients
-  + HTTP serving. Reproduce with heap tracing before changing anything.
-- Session hygiene lesson (main loop, standing): probe fleets against the
-  live hub are LOAD — arm ONE probe at a time, stop it before starting
-  another, and never leave harness pages half-open (a killed harness
-  leaks its WS session until reap).
-- Square-pulse forensics: STILL OPEN — operator narrowed the trigger to
-  MANUAL tape driving (patterns are clean), which points at the move-
-  INTENT/arbiter path, not the pattern engine. Reproduction plan (next
-  bench window): re-fake-home, ONE armed wire probe, tap-to-move harness
-  drives, correlate outlier values field-by-field.
-
-## FW 2.1.87 — CRASH RING + HEAP-PRESSURE GUARDS (operator-stamped, 2026-07-29)
-
-Both incident work items implemented and LIVE:
-
-- **Crash ring** (include/system/CrashRing.h + src/system/CrashRing.cpp):
-  RTC_NOINIT last-words ring — boot seq, heap min/last, maxblock last, 12
-  breadcrumb checkpoints (ws-attach/ws-detach/ws-refuse/http-root/http-503;
-  alloc- and lock-free by constraint, torn crumbs tolerated). Recovered on
-  the next boot: SLOGW dump into the Warn ring when the death was abnormal,
-  always served at GET /api/crash. NOT a backtrace — that needs a core-dump
-  partition, and partition tables do not OTA (serial-reflash bench item,
-  still queued).
-- **Heap floors**: new WS sessions refused below free<14336 OR
-  maxblock<6144 (checked before slot claim, AsyncTCP task; existing
-  sessions never touched); the page serve answers 503 below
-  maxblock<12288 instead of grinding a starved allocator.
-- **First-boot proof**: /api/crash on 2.1.87 reported the fw-flash boot's
-  life (seq 1, heap_min 26364) including TWO ws-refuse crumbs — the floor
-  fired during the fs flash while flash writes fragmented the heap. Ring,
-  endpoint, floor, and crumbs all verified live in one shot.
-- **PRESSURE SNAPSHOT UNDER LIVE CHURN (operator bench, 2026-07-29,
-  webui/test/evidence/pressure-snapshot-20260729-014239):** ~42 min of
-  deliberate client connect/disconnect churn drove heap min to 40 BYTES —
-  worse than the boot that PANICKED — and the guards HELD: ws-refuse
-  crumbs, handleRoot 503 at maxblock 7668, no panic. On three clients
-  detaching, heap snapped back to ~30 K free / 15 K maxblock (the
-  post-init baseline) — churn FRAGMENTS transiently but does NOT leak.
-  Verdict: 3-4 concurrent sessions is the honest ceiling of the ~32 KB
-  post-init internal headroom; the structural relief is moving more of the
-  slopsync service's ~110 KB internal-heap footprint to PSRAM (8 MB idle)
-  — queued as the next firmware work item, operator stamp pending.
-- Same deploy: webui LimitsWidget now reuses Field (the second hand-rolled
-  slider aesthetic deleted — operator screenshot evidence; one slider
-  language, one write path, descs behind the field's own info toggle).
-  [verified 2026-07-29 — deploy 2.1.86 -> 2.1.87 + fs, render smoke ALL
-  PASS, canon_lint clean]
-
-## PAIRING PROVEN END-TO-END + MFP SETTLE FIX (2026-07-29)
-
-- **Knock-and-approve WORKS — and always did; what was missing was proof.**
-  Recon correction to the WEBUI PHASE KICKOFF entry: the "firmware caller
-  missing" note was true ONLY of PIN-mode (SlopSyncHubService::openPairing/
-  closePairing — still uncalled, now comment-marked as a planned caller).
-  Knock-and-approve needed no caller: `_knockApproveEnabled` defaults true
-  and every layer (hub lib, trust NVS, catalog, transports, JS client,
-  PairingPane) was already implemented and lib-tested (M4B-12..26).
-- **First full round trip recorded** (webui/test/pairing-roundtrip.mjs,
-  fresh slopsim, both modes): push-to-pair window -> first knock grants
-  `configure` on a fresh ledger -> token reconnect lands configure via the
-  TRUST-LEDGER rung -> second joiner's knock parks (pending STATE + knocked
-  EVENT) -> operator approves over session-admin -> PAIR_GRANT -> token
-  reconnect at the approved tier. ALL PASS.
-- **Sim gap closed to make that provable**: slopsim's `validateToken` was a
-  control-for-all stub whose "parity with the firmware's posture" comment
-  had gone stale (the firmware enforces /uitoken -> ledger -> watch since
-  RFC-029). The sim now consults its hub's own PairingManager first, then
-  floats bare sessions at `control` (never configure — configure must be
-  earned or the admin tier gate is untestable). `--pairing-window` was
-  already fully wired.
-- Live-device PairingPane two-tab check remains a bench nicety (the device
-  runs the same lib + a stricter validateToken); queued, not blocking.
-- **MFP settle fix shipped** (SlopSync 540325f + installed into the
-  operator's MultiFunPlayer 1.34.5 Plugins folder): segment wish 5->20 Hz
-  sustained / burst 25->50 — dense passages starved the emitter's token
-  bucket, deferred segments eroded the 120 ms lookahead, and the hub's
-  settle brake fired mid-stroke. Verified: build + WireSelfTest + LiveWireTest
-  --segments twice back-to-back on one sim process (sole red check =
-  slopsim's missing /uitoken endpoint, pre-existing). Real-content MFP
-  playback check is the operator's.
-
-## FW 2.1.88 — WS IDLE-RX REAP: ghost sessions were the pressure (2026-07-29)
-
-Operator correction of the pressure-snapshot verdict: "those clients don't
-exist, we are not reaping for new clients." Confirmed: RFC-042 keeps stale
-sessions PARKED (for reattach) and evicts only under HELLO slot-pressure —
-but a silently dead peer (locked phone, killed tab; no FIN) never went
-stale at the transport level at all: it passed cleanupClients() and
-hasClient() forever, holding its slot and heap. Worse, the T19 accept
-floor fires BEFORE HELLO processing, so ghost-held heap refused the very
-connect whose slot-pressure path is the only other evictor — a deadlock.
-
-Fix: the WS transport's idle-RX reap (kWsIdleReapMs=20000 — ten missed
-~2 s proof-of-life PINGs). RX silence past
-the window force-closes the client; the close lands as RFC-042's
-transport-closed staleness trigger, the session parks for reattach as
-designed, and the slot + heap free. `ws-idlereap` crumb added to the T19
-crash ring. LIVE-PROVEN: a Playwright session forced offline (no FIN) was
-reaped at 20001 ms with a clean deferred detach.
-[verified 2026-07-29 — deploy 2.1.87 -> 2.1.88 + /api/log reap line]
+- C5 co-processor plan: DEAD AS PLANNED (operator 2026-07-27) — it existed to
+  stream TCode v3 at 333 Hz, which SlopMotion + TCode v4 obsoleted. The
+  concept may return; `c5_waveshare`/`c5_tdongle` envs + sources stay for now.
+  ESP-NOW posture: criminally easy to enable, supported, not developed.
 
 ## Deferred / planned (homes: docs/REFACTOR-ROADMAP.md, docs/MOTION-TODO.md)
 
 - TCode pass-through channel (post-MFP; parser cross-task race was the
   blocker).
 - Native Intiface SlopSync support (replaces the deleted :55555 bridge).
-- Telemetry redesign (parked by the WEBUI PHASE KICKOFF ruling below);
+- Telemetry redesign (parked by the WEBUI PHASE KICKOFF ruling above);
   C5-node SlopSync transports; merge to `main`. Tauri 2 shell moved INTO
   the webui phase by the same ruling — no longer deferred.
+- **BLE transport-level idle-RX reap — not implemented.** BLE has no
+  equivalent to the WS idle-RX reap above; a wedged-but-connected central
+  holds its GATT slot + heap indefinitely (link-layer supervision timeout
+  only reaps dead radios, T19 class). Shape when wanted: mirror the WS
+  sweep in `SlopSyncBlePort::loop()` (per-slot last-RX stamp, sweep vs a
+  `kBleIdleReapMs`, force-disconnect -> RFC-042 park); T3 back-to-back
+  live verify mandatory. [recorded 2026-07-29 — C-10 scrub]
+- **Webui rapid-fire punch list, queued behind the authoring-legibility
+  campaign:** manual slider entry box, ⓘ centering, intent/pending glow
+  redesign, power-bar max ticks + click-reset + hover-read + per-category
+  reset-all, session ms -> h:m:s (click for ms), telemetry-rate trace
+  (position vs plan-strip), reset-to-default buttons, label casing.
+  `_webui.handleCommand` WS_OP bridge collapse — future milestone. YAML
+  codegen sugar — only if tables prove insufficient. Session-gate/closeout
+  system (C-13 proposal + ledger diet + tiered canon loading) — designed
+  2026-07-29, implement after campaign Phase 0.
+- **Four probably-superseded probe scripts** in `webui/test/`
+  (`gap-probe`, `tap-probe`, `jitter-measure`,
+  `render-vs-samplerate-probe`) — left alone during the 2026-07-29 tree
+  cleanup because they are hand-written source, not output; never
+  triaged.
+- **Extract `MachineCommand` from `WebUI.cpp`** (operator-approved
+  2026-07-27, NOT STARTED) — `handleCommand` + the `apply*` mutation family
+  + post-clamp echo building move to an HTTP-free class the SlopSync
+  delegate calls directly; what remains of `WebUI` becomes honestly the
+  HTTP plane. Follow-up riding on it: migrate the extracted core to TYPED
+  intent handlers, dissolving the WS_OP/JSON shim op-by-op until
+  `UiProtocol.h` is nothing.
+- **Clocked-logging + legacy-log audit** (operator 2026-07-27, NOT STARTED)
+  — inventory every periodic/cadence log (heap beacon, `[sys]` lines, rate
+  reports) and MotionArbiter's logging specifically; verdict per line: earns
+  its keep / demote to SLOGD / delete. Rider: strip MotionArbiter's sediment
+  in the same pass (the retired OSSM_STREAM source slot's wire label row,
+  interpolator-era comment vocabulary).
+- **SlopLog + SlopGlow uplift pass** (NOT STARTED) — bring the two elder
+  modules up to the slopmotion/slopsync core standard (injected clock,
+  purer hardware-free core, tighter conformance tests).
+- **RFC CANDIDATE — batched telemetry sub-samples per STATE push** (the OG
+  0x01 design, generalized). Client-side smoothing is now at the
+  interpolation-order ceiling of a 25 Hz single-sample feed; if the Hermite
+  + arrival-stamp fixes do not reach OG smoothness, this is the real cure.
+  NOT implemented, queued for operator stamp as an RFC. [2026-07-28]
+- **Sim: fray-d Advanced pattern has no motion effect** — `SimPattern` does
+  not consume `_ap` via `advpat::Settings::planStroke()`, so the 6 modifier
+  lanes and `ap_mode` are wire-only in `sim/slopsim`. Porting the firmware
+  `PatternEngine`'s per-half-stroke scheduling loop is the work. [flagged
+  2026-07-28 — 19-channel follow-on]
 
-**LEDGER REPAIR (2026-07-28, webui kickoff session):** this section's header
-was found clobbered by a duplicate copy of the FIRST LIVE BLE GATT SESSION
-header (bad edit anchor in one of the 2.1.86-era commits), leaving these
-bullets orphaned under the wrong title. Restored from `a24c42c`'s version of
-the file; no content was lost (the BLE session entry's real body was intact
-above). [verified 2026-07-28 — `git show a24c42c:docs/canon/LEDGER.md` diffed
-against working tree]
+## Authoring-legibility campaign + C-10 scrub (2026-07-29)
 
-## AUTHORING-LEGIBILITY CAMPAIGN KICKOFF + C-10 SCRUB (2026-07-29)
-
-Operator rulings this session (chat, campaign plan approved):
-
-- **Campaign:** SlopSync authoring legibility — the catalog reads like the
-  UI it renders. Plan: `~/.claude/plans/pure-crafting-thacker.md`. Phases:
-  scrub (done, below) → etag pin (landed: `test_slopsync_devicecatalog`
-  pins `B6 9E B0 62 49 EB E7 3A`; flips ONCE, at the Phase-6 sweep) →
-  RENDERING.md §3 fix + AUTHORING.md + RFC-052 (SlopSync repo) → reference
-  client implements the §1 derivation chain → `slopsync::author` tables →
-  byte-identical catalog port → derived cold encoders + hot-path layout
-  guards → operator sweep + deploy.
-- **Ceilings ruling:** new machine maximums, operator-derived safe values:
-  **1000 mm/s speed, 60000 mm/s² accel, across the board.** Applied at the
-  Phase-6 sweep (they move catalog `.max` annotations → the one planned
-  etag bump), NOT before. May be tuned up later.
+- **Campaign (operator-approved plan):** SlopSync authoring legibility —
+  the catalog reads like the UI it renders. Phases: scrub (done, below) ->
+  etag pin (landed: `test_slopsync_devicecatalog` pins
+  `B6 9E B0 62 49 EB E7 3A`; flips ONCE, at the Phase-6 sweep) ->
+  RENDERING.md §3 fix + AUTHORING.md + RFC-052 (SlopSync repo) -> reference
+  client implements the §1 derivation chain -> `slopsync::author` tables ->
+  byte-identical catalog port -> derived cold encoders + hot-path layout
+  guards -> operator sweep + deploy. **Phases beyond the scrub are STILL
+  OPEN.**
+- **Ceilings ruling (operator-derived safe values), NOT YET APPLIED:**
+  **1000 mm/s speed, 60000 mm/s² accel, across the board.** Lands at the
+  Phase-6 sweep (moves catalog `.max` annotations, one planned etag bump).
+  Live TODO pointer: `src/motion/AIMServoDriver.cpp` `setAcceleration()`.
+  May be tuned up later.
 - **RENDERING.md §3 flag ruling:** ledger + shipped catalog win — Phase C2
-  DID wire `ui_categories` onto entries; RENDERING.md §3's "until a later
-  catalog-evolution RFC" note and clients/js frames.js's 5-entry
-  SETTING_CATEGORY_NAME are the stale halves. Fix lands in SlopSync repo
-  (Phase 0). [ruled 2026-07-29]
-- **Dead-code ruling:** scrub's dead-code batch deleted in full per C-9
-  (moveTo/streamTo interface + impls, handleApiHomeOverride, ramp fields,
-  seq counters, PIN_NEOPIXEL alias, esp32-c5-waveshare board json,
-  FanoutOutput). Proofs in the deletion commit messages.
-- **BLE ghost-reap residual:** BLE has NO transport-level idle-RX reap
-  (the WS-side comments claiming a "15 s BLE reap" were fiction — scrub
-  finding 0/18, corrected). Partial cover: BLE link-layer supervision
-  timeout reaps dead radios; a wedged-but-connected central still holds
-  its GATT slot + heap indefinitely (T19 class). Fix shape when wanted:
-  mirror the WS idle-RX sweep in `SlopSyncBlePort::loop()` — per-slot
-  last-RX stamp on every GATT write/notify-ack, sweep vs a kBleIdleReapMs,
-  force-disconnect → RFC-042 parks the session, T3 back-to-back-session
-  live verify mandatory. [recorded 2026-07-29 — scrub + operator ruling]
-- **C-10 scrub record:** 17 agents over this repo's areas; 59 raw → 55
-  deduped → 39 adversarially verified, 0 refuted, +16 lows. Coverage note:
-  sibling SlopSync repo covered only via seed findings, not swept.
-  Headliners beyond the rulings above: MotionArbiter's always-dispatch
-  rationale cites the AIM stream-stall watchdog that is DISABLED in D4
-  (comment corrected); WifiLink's "drops to serial TCode control" failure
-  log described a deleted fallback (corrected — WiFi death = no control
-  plane); README.md still described the pre-retirement transport zoo
-  (rewritten). Full digest: scrub session transcript, 2026-07-29.
-  [verified 2026-07-29 — truth-scrub wf_ac7c5f00-855, findings applied
-  this commit]
+  already wired `ui_categories` onto entries; RENDERING.md §3's stale
+  "until a later catalog-evolution RFC" note and `clients/js/frames.js`'s
+  5-entry `SETTING_CATEGORY_NAME` are the stale halves. Fix lands in the
+  SlopSync repo (campaign Phase 0).
+- **Dead-code ruling — DONE per C-9:** `moveTo`/`streamTo` interface +
+  impls, `handleApiHomeOverride`, ramp fields, seq counters,
+  `PIN_NEOPIXEL` alias, `esp32-c5-waveshare` board json, `FanoutOutput`.
+  Proofs in the deletion commit messages.
+- **C-10 scrub record:** 17 agents, 59 raw -> 55 deduped -> 39
+  adversarially verified findings, 0 refuted, +16 lows (sibling SlopSync
+  repo covered only via seed findings, not swept). Fixed as part of the
+  same pass: MotionArbiter's always-dispatch comment cited a stream-stall
+  watchdog that is disabled in D4; WifiLink's "drops to serial TCode
+  control" log described a deleted fallback; README.md still described
+  the pre-retirement transport zoo. [verified 2026-07-29 — truth-scrub
+  wf_ac7c5f00-855, findings applied this commit]
 
-**PARKED (recorded per campaign plan):** webui rapid-fire list — manual
-slider entry box, ⓘ centering, intent/pending glow redesign, power-bar max
-ticks + click-reset + hover-read + per-category reset-all, session ms →
-h:m:s (click for ms), telemetry-rate trace (position vs plan-strip),
-reset-to-default buttons, label casing. Queued behind the campaign.
-`_webui.handleCommand` WS_OP bridge collapse — future milestone. YAML
-codegen sugar — only if tables prove insufficient. Session-gate/closeout
-system (C-13 proposal + ledger diet + tiered canon loading) — designed in
-chat 2026-07-29, implement after campaign Phase 0.
+## Tree cleanup (operator: "if it doesn't spark joy get rid of it", 2026-07-29)
 
-## TREE CLEANUP (operator: "if it doesn't spark joy get rid of it", 2026-07-29)
+Repo went **13.7 GB -> 618 MB**; nothing with content was deleted outright,
+only moved. Archive home: `../SlopDrive-32-archive/2026-07-29-cleanup/`
+(48 MB, outside the repo root) — dated soak runs, simrun captures, the
+three `SD32-*.md` dated reports, root `build/`/`flashpack/`/`tools/`
+scratch, obsolete `intiface/`, retired webui evidence, pre-strip README.
+LEDGER entries citing `SD32-OVERNIGHT-REPORT.md`/soak JSONs by name still
+resolve there.
 
-Repo went **13.7 GB -> 618 MB**. Nothing was deleted outright unless it was a
-pure regenerable cache; everything with content was MOVED, not destroyed.
+- 13.1 GB was regenerable build output (`webui/src-tauri/target` 12 GB,
+  `gen/android/app/build` 1.1 GB, `gen/schemas`, `webui/dist`); 118 MB was
+  three vendored `.git` histories (`GIT_SHALLOW` never took on the
+  FetchContent clones). `sim/slopsim/build` kept `slopsim.exe` +
+  `compile_commands.json` in place (`~/bin/slopsim.cmd`/`SlopCLI.cmd`
+  launch that exact path; clangd has no other compile db for `sim/`).
+- `intiface/` retired (described the deleted NUS TCode BLE service).
+  README stripped to a stub (license/attribution kept substantive —
+  CERN-OHL-S v2 conveyance obligations are not tidyable prose).
+  `reference/` created for the AIM datasheet/PCB/`.md` reference files;
+  the four firmware pointers in `ServoModbus.{h,cpp}` repointed.
+- **Two load-bearing `.gitignore` defects fixed:** `tools/*` was excluding
+  `tools/ota_auth.py` (named `pre:` in every `-ota` env — **a fresh clone
+  could not build any OTA target**) and `tools/catalog_lint.py`
+  (DOCTRINE/TRAPS-binding). Both whitelisted now.
+- Stale claims corrected in CHANNEL-MAP.md, slopdeck/DESIGN.md,
+  REFACTOR-ROADMAP.md, ws-transport-baseline.md.
+- Kept deliberately (load-bearing in use despite historical origin):
+  `docs/ws-transport-baseline.md`, `docs/webui-legacy-diagnosis.md`,
+  `docs/http-plane-retirement.md` (~15 inbound pointers incl. five
+  firmware comments).
 
-**Archive home:** `../SlopDrive-32-archive/2026-07-29-cleanup/` (48 MB, outside
-the repo root). This is the one home for the answer to "where did that
-artifact go" — dated soak runs, simrun captures, the three `SD32-*.md` dated
-reports, root `build/`, `flashpack/`, `tools/` scratch, obsolete `intiface/`,
-retired webui evidence, and the pre-strip 720-line README. LEDGER entries that
-cite `SD32-OVERNIGHT-REPORT.md` and the soak JSONs by name still resolve —
-the evidence exists, it just lives there now (stamp-or-hearsay intact).
+**PsychicHttp retired + GLM branch deleted (operator ruling 2026-07-29):**
+"psychichttp is dead, and the glm branch, both can go." The sync
+`WebServer` + `IdleGuardWebServer` is now the only HTTP backend, permanently
+(not transitional — REFACTOR-ROADMAP §4 CLOSED). Removed:
+`[env:sd32-psychic]`/`[env:sd32-psychic-ota]`, the `USE_PSYCHIC_HTTP` B-side
+of `OtaService.{h,cpp}`, `src/ui/SlopHttpServer.cpp` entirely (C-9: its
+whole body sat inside the never-defined `#if USE_PSYCHIC_HTTP` guard, so it
+compiled to nothing in every shipping env). `SlopHttpServer` KEPT as a name
+(57 call sites across 11 files; collapsing it is a wide rename for zero
+functional gain). Branch `T2WebuiGLM` deleted (1 unmerged commit `b2db0fb`;
+recoverable via reflog: `git branch T2WebuiGLM b2db0fb`). [verified
+2026-07-29 — `pio run -e sd32-ota` SUCCESS (RAM 24.2%, flash 28.5%) and
+`-e sd32-async-ota` SUCCESS, not deployed (no shipping env ever defined
+`USE_PSYCHIC_HTTP`)]
 
-- **13.1 GB was regenerable build output**: `webui/src-tauri/target` (12 GB,
-  `cargo build`), `gen/android/app/build` (1.1 GB, `tauri android build`),
-  plus `gen/schemas` and `webui/dist` (rebuilt by `build_webui.py` on every fs
-  build). `sim/slopsim/build` went 150 MB -> 5.8 MB: **`slopsim.exe` and its
-  `compile_commands.json` were KEPT IN PLACE** because `~/bin/slopsim.cmd` and
-  `~/bin/SlopCLI.cmd` both launch that exact path, and clangd has no other
-  compile db for `sim/`. 118 MB of it was three vendored `.git` histories
-  (`GIT_SHALLOW` never took effect on the FetchContent clones).
-- **`intiface/` retired** (operator ruling): its device-config described the
-  deleted NUS TCode BLE service — nothing in it worked on current firmware.
-  README's three pointers rewritten rather than left dangling.
-- **README stripped to a stub** (operator: "empty it except the most basic
-  info"). The CERN-OHL-S v2 notice and vendored-component attribution were
-  kept substantive on purpose — that license is strongly reciprocal, so
-  conveyance obligations are not tidyable prose.
-- **`reference/` created**: AIM datasheet PDF, `PCB Layout.diy`, and
-  `AIM_servo_modbus_reference.md` moved out of root. The four firmware comment
-  pointers in `ServoModbus.{h,cpp}` were repointed in the same pass.
-- **Two `.gitignore` defects fixed, both pre-existing:** `tools/*` excluded
-  `tools/ota_auth.py`, which `platformio.ini` names as `pre:` in every `-ota`
-  env — **a fresh clone could not build ANY over-the-air target.** Same for
-  `tools/catalog_lint.py`, which DOCTRINE and TRAPS treat as binding. Both now
-  whitelisted; `ota_auth.py` holds no secret of its own (it parses
-  `include/secrets.h` at build time). Also removed a literal `$null` line left
-  by a botched PowerShell append.
-- **Stale claims corrected** in living docs: CHANNEL-MAP.md's RFC-QUEUE links
-  (file moved repos; the GENERATED block was left alone and
-  `gen_channel_map.py --check` still passes), slopdeck/DESIGN.md's "Tauri 2
-  shell still open" (the wrap landed; loader/Tier-2 remain open),
-  REFACTOR-ROADMAP's "async web server parked" heading and its
-  no-live-GATT-session line, and ws-transport-baseline.md's copy-pasteable
-  `python tools/slopsoak.py` commands (harness lives in the SlopSync repo).
-- **Kept deliberately, against a subagent's archive recommendation:**
-  `docs/ws-transport-baseline.md` and `docs/webui-legacy-diagnosis.md`.
-  `lib/espasyncwebserver/VENDORED.md` cites the baseline PROSPECTIVELY as the
-  numbers a future transport replacement must beat, and both docs supply the
-  "why" behind live comments in `WebUI.cpp` and
-  `SlopSyncAsyncWsTransport.h`. Historical in origin, load-bearing in use.
-  `docs/http-plane-retirement.md` also stays — historical by its own
-  admission, but ~15 inbound pointers including five firmware comments.
-- `webui/test/evidence/` reduced to what is actually READ: `og-ref/` (the
-  pixel ground-truth set) and `trace-{25,30}hz.json` (read by
-  `render-vs-samplerate-probe.mjs`). Everything else there was write-only
-  output, overwritten on each run.
-- Empty directories: **zero** repo-wide. `docs-site/` was a stray `mkdocs
-  build` artifact left after the split; the real one is in the SlopSync repo.
+## Agent tooling set up (2026-07-29) — clangd/LSP, playwright, ponytail scope
 
-**PSYCHICHTTP RETIRED + GLM BRANCH DELETED (operator ruling 2026-07-29).**
-"psychichttp is dead, and the glm branch, both can go."
+Operator installed frontend-design, claude-md-management, playwright,
+typescript-lsp, clangd-lsp, plus ponytail. Facts worth keeping because
+they are invisible in a fresh clone:
 
-- **The HTTP plane is now single-backend, permanently.** The sync `WebServer` +
-  `IdleGuardWebServer` is it. Removed: `[env:sd32-psychic]` and
-  `[env:sd32-psychic-ota]` plus their A/B rationale (73 lines of
-  platformio.ini), the whole `USE_PSYCHIC_HTTP` B-side of
-  `OtaService.cpp` (139 lines) and its two declarations in `OtaService.h`,
-  the B-side of `include/ui/SlopHttpServer.h`, and
-  `src/ui/SlopHttpServer.cpp` **entirely** — proof-of-no-callers (C-9): the
-  file's whole body sat between `#if defined(USE_PSYCHIC_HTTP)` at line 8 and
-  `#endif` at line 268, its last line, so it compiled to nothing in every
-  shipping env. `docs/psychic-migration.md` archived.
-- **`SlopHttpServer` KEPT as a name** — it is now a zero-member subclass with
-  one implementation, which ponytail would delete on sight. It stays: 57 call
-  sites across 11 files name it, and `WebUI.h`/`OtaService.h` forward-declare
-  it instead of including the WebServer headers. Collapsing it is a wide
-  rename for zero functional gain. Comment rewritten to say what it now IS
-  rather than the A/B it no longer is (C-12).
-- **The idle guard is now PERMANENT, not transitional.** Three places said it
-  was "scheduled demolition" at the Psychic migration — `IdleGuardWebServer.h`,
-  `webui-legacy-diagnosis.md`, REFACTOR-ROADMAP §4. All corrected. §4 is CLOSED:
-  its re-evaluation is answered, and its research shortlist is kept only so the
-  option is never re-shopped.
-- **Verified, not assumed:** `pio run -e sd32-ota` SUCCESS (RAM 24.2%, flash
-  28.5%) and `-e sd32-async-ota` SUCCESS. This touched the OTA upload path,
-  which is the only working deployment path on this host, so a compile was the
-  floor. `compile_commands.json` regenerated so clangd does not index a
-  deleted file. Not deployed — no behavior change intended for the shipping
-  envs, which never defined `USE_PSYCHIC_HTTP`.
-- **Branch `T2WebuiGLM` deleted.** It held 1 unmerged commit, `b2db0fb`
-  "webui pass test". Recovery, while the reflog lives:
-  `git branch T2WebuiGLM b2db0fb`.
-
-**Still unresolved:** four probably-superseded probe scripts in
-`webui/test/` (`gap-probe`, `tap-probe`, `jitter-measure`,
-`render-vs-samplerate-probe`) — left alone because they are hand-written
-source, not output.
-
-## AGENT TOOLING SET UP (2026-07-29) — clangd/LSP, playwright, ponytail scope
-
-Operator installed five plugins (frontend-design, claude-md-management,
-playwright, typescript-lsp, clangd-lsp) plus ponytail. Configuration landed;
-the parts worth ledgering because they are invisible in a fresh clone:
-
-- **clangd** is the Espressif fork already shipped by PlatformIO
-  (`tool-clangd-esp`, v21.1.3) — no LLVM install. Its bin dir and
-  `toolchain-xtensa-esp-elf/bin` were appended to the **user PATH** (registry
-  API, not `setx` — PATH is 1386 chars and `setx` truncates at 1024). The
-  xtensa driver must be on PATH or clangd cannot extract system includes for
-  any firmware TU.
-- **`.clangd` is gitignored in both repos** and holds absolute host paths, so
-  it does not survive a clone. Its trap comments are the only record of three
-  mechanisms: the ESP fork defaults to a riscv32 triple (kills every host
-  parse), fallback commands name a driver `clang` that is not installed, and
-  clangd *infers* a command for db-absent files from the nearest firmware TU —
-  dragging every IDF include into a host parse. Fixed via `Compiler:` and a
-  deliberately-empty `CompilationDatabase:` in the host-path fragment.
-- SlopSync had **no** `.clangd` at all; one was added there (host g++ driver,
-  `gnu++2b`, slopsync/doctest/fuzz include roots).
-- Verified with `clangd --check`: firmware TU and `examples/slopsync_demo`
-  clean; SlopSync native tests clean; SlopDrive `test/native` down to one
-  benign GCC-intrinsic-vs-clang diagnostic (`conflicting_types` on
-  `_m_prefetchw`) — deliberately NOT suppressed, since blanket-suppressing a
-  real diagnostic class to hide a header artifact is how a genuine
-  conflicting declaration slips through later.
-- **typescript-lsp** needs TypeScript **5.x**; `npm i -g typescript` now
-  installs 7.x, whose native rewrite has no `lib/tsserver.js` and which the
-  language server rejects outright. Pinned to 5.9.3.
-- **playwright MCP** defaults to the real Chrome channel, absent on this host.
-  Repo `.mcp.json` pins `--browser chromium` to use the bundled build the
-  webui evidence tooling already uses.
-- **claude-md-management DISABLED** (operator, 2026-07-29): its improver
-  rewrites CLAUDE.md against generic templates, which would inline rules that
-  belong in CANON/DOCTRINE (C-1 break) — and CLAUDE.md is gitignored, so a bad
-  rewrite is not recoverable with `git checkout`.
-- **frontend-design KEPT, scoped** — binding home is DOCTRINE §3 "House look
-  is ground truth". Short form: `webui/src/style.css` is the house look and it
-  already exists; the skill is for precedent-free surfaces, and safety colors
-  are never an aesthetic decision.
-- **Ponytail scope is an operator ruling** — binding home is DOCTRINE §4
-  "Minimalism-mode precedence", not restated here (C-1). Short form:
-  webui/docs/tools yes, firmware C++ and SlopSync no. Landed in DOCTRINE
-  rather than CLAUDE.md because CLAUDE.md is gitignored and a rule that binds
-  every agent cannot live in an untracked file.
+- **clangd** is PlatformIO's Espressif fork (`tool-clangd-esp`, v21.1.3, no
+  LLVM install); its bin dir + `toolchain-xtensa-esp-elf/bin` added to the
+  user PATH via the registry API (`setx` truncates at 1024 chars, PATH is
+  1386). `.clangd` is gitignored in both repos (absolute host paths) — its
+  trap comments are the only record of three mechanisms: the ESP fork
+  defaults to a riscv32 triple, fallback names an uninstalled `clang`
+  driver, and clangd infers a command for db-absent files from the nearest
+  firmware TU (dragging IDF includes into a host parse); fixed via
+  `Compiler:` + a deliberately-empty `CompilationDatabase:`. SlopSync
+  needed its own `.clangd` (host g++, `gnu++2b`) — had none.
+- `typescript-lsp` needs TypeScript 5.x; `npm i -g typescript` installs
+  7.x (no `lib/tsserver.js`, rejected outright) — pinned to 5.9.3.
+- Playwright MCP defaults to the real Chrome channel (absent on this
+  host); repo `.mcp.json` pins `--browser chromium`.
+- **claude-md-management DISABLED** — its improver rewrites CLAUDE.md
+  against generic templates (would inline rules that belong in
+  CANON/DOCTRINE, a C-1 break), and CLAUDE.md is gitignored so a bad
+  rewrite is not `git checkout`-recoverable.
+- frontend-design KEPT, scoped to precedent-free surfaces (DOCTRINE §3
+  binds the house look). Ponytail scope is an operator ruling, binding
+  home DOCTRINE §4, not restated here (C-1).
 
 ## OPERATOR UI FEEDBACK QUEUE (2026-07-30) -- 3 of 7 CLOSED, 4 still open
 
@@ -3757,13 +2505,32 @@ The schema is deliberately complete — reserved onboarding fields, explicit
 remote. An earlier statement this session that the split happens "around v1.0"
 was wrong; the split executed 2026-07-28.
 
-## ⏭ NEXT STEPS (restamped 2026-07-30b after the introspection + SSManager + freeze-state session — START HERE)
+## ⏭ NEXT STEPS — SUPERSEDED 2026-07-31 by "## ⏭ THE QUEUE" near the top of this file
+
+**Do not work from this section.** It is kept only because the campaign-phase
+detail below (Phases -1/0/1a/1b receipts, RFC-052 disposition, the etag pins)
+is still the one home for those facts. The ORDER it states is dead: the
+operator re-ranked everything on 2026-07-31 as stability/diagnostics ->
+gigagauntlet -> webui -> nice-to-have. Read THE QUEUE for what to do next; read
+this for what the campaign already did.
+
+## (historical ordering) NEXT STEPS (restamped 2026-07-30b after the introspection + SSManager + freeze-state session)
+
+**SUPERSEDED AT THE HEAD (operator, 2026-07-31): ACTIVE TASK 1 (memory/crash)
+AND ACTIVE TASK 2 (logging/observability) COME FIRST — everything below is
+queued behind them.** Verbatim intent: "the logging and crash fixing is the
+most important task right now, that's first up". Reason it outranks: the
+campaign's own verification runs against a machine that panics mid-stream, so
+every gate it claims to pass is a claim about an unstable substrate.
 
 **ORDER OF OPERATIONS (operator-ruled 2026-07-30, supersedes the bare item
-order below):** SSManager v0 → campaign Phase 2, registering its gates as the
+order below, itself now queued behind the ACTIVE TASKs):** SSManager v0 →
+campaign Phase 2, registering its gates as the
 first real manifest content → UI punch item 4 (card columns) → Phase 3 →
 SSManager v1 → Phases 4–6.
-**Immediate next action:** SSManager v0's Rust half — manifest parse,
+**Immediate next action:** ACTIVE TASK 1 items 2–5 (the one `custom_sdkconfig`
+batch) and item 6 (bounded WS TX queue), per the 2026-07-31 ruling above.
+**Immediate next action ONCE THE ACTIVE TASKs CLEAR:** SSManager v0's Rust half — manifest parse,
 capability probe with candidate resolution, process spawn, input-hash
 staleness. The schema it consumes is landed and verified (closeout above);
 settle `error_exit` and `group` first, both one-line decisions.

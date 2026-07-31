@@ -25,6 +25,37 @@
 #include "CrashRing.h"       // crumbs on the accept/detach path (alloc-free)
 #include "slopsync/generated/registry_constants.hpp"  // limits::blob_chunks_in_flight
 
+// ---- HEAP-CORRUPTION BISECTION — DIAGNOSTIC, REMOVE WHEN THE WRITE IS FOUND -
+// LEDGER THE QUEUE item 0: something on this path corrupts the allocator's own
+// free list (tlsf remove_free_block, EXCCAUSE 29, with ~29 KB still free).
+// Mitigations do not find a bad write; a walk of the whole heap does.
+// heap_caps_check_integrity_all() verifies every block header in every region
+// and returns false the moment one is damaged, so the FIRST probe that fails
+// names the operation that did it — bisection, not guesswork.
+// COSTS milliseconds per call: it walks the entire heap. Probes are therefore
+// placed on CONNECT/DISCONNECT (per-session, rare) and on a slow tick, never
+// per frame. Guarded so the whole thing compiles to nothing when off.
+#if defined(SLOPSYNC_HEAP_BISECT)
+#include "esp_heap_caps.h"
+namespace {
+// Latched: after the first failure every later probe would also fail, and the
+// SECOND report tells you nothing. The first one is the whole signal.
+bool s_heapDirty = false;
+void heapProbe(const char* where) {
+    if (s_heapDirty) return;
+    if (!heap_caps_check_integrity_all(true)) {
+        s_heapDirty = true;
+        crashring::crumb("heapbad");
+        SLOGE("slopsync", "*** HEAP INTEGRITY FAILED AT: %s *** (free=%u maxblock=%u)",
+              where, unsigned(ESP.getFreeHeap()), unsigned(ESP.getMaxAllocHeap()));
+    }
+}
+}  // namespace
+#define HEAP_PROBE(w) heapProbe(w)
+#else
+#define HEAP_PROBE(w) ((void)0)
+#endif
+
 // Refuse-new-sessions floors (see the WS_EVT_CONNECT comment). Raise, don't
 // lower, without re-measuring: the 2026-07-29 incident wedged with free
 // ~14-20 KB and maxblock 8-14 KB while HTTP still had to serve pages.
@@ -103,10 +134,20 @@ bool SlopSyncAsyncWsTransport::write(std::span<const std::byte> frame) {
         AsyncWebSocketClient* c = _ws->client(id);
         if (c != nullptr && c->queueLen() >= kDataQueueHighWater) {
             _txDataDrops.fetch_add(1, std::memory_order_relaxed);
-            SLOGD_EVERY_MS(5000, "slopsync",
-                           "client#%u shedding data frames (queue %u/%u)",
+            // HEAP IS LOGGED WITH IT ON PURPOSE. Shedding means the CLIENT has
+            // stopped draining, which is the exact window the operator's
+            // 1-10 minute crashes cluster in (2026-07-31: laptop-on-WiFi to
+            // device-on-WiFi, random intervals = a jitter-triggered failure, not
+            // a fixed-rate leak). Free heap printed beside the queue depth turns
+            // "was the stall the cause" from a theory into one glance: falling
+            // heap while shedding indicts this path, flat heap exonerates it.
+            SLOGW_EVERY_MS(5000, "slopsync",
+                           "client#%u shedding data frames (queue %u/%u) "
+                           "free_int=%u largest_int=%u",
                            unsigned(id), unsigned(c->queueLen()),
-                           unsigned(WS_MAX_QUEUED_MESSAGES));
+                           unsigned(WS_MAX_QUEUED_MESSAGES),
+                           unsigned(heap_caps_get_free_size(MALLOC_CAP_INTERNAL)),
+                           unsigned(heap_caps_get_largest_free_block(MALLOC_CAP_INTERNAL)));
             return false;   // honest refusal; the hub conflates and moves on
         }
     }
@@ -351,8 +392,14 @@ void SlopSyncAsyncWsPort::onEvent(AsyncWebSocket* /*server*/, AsyncWebSocketClie
     if (client == nullptr) return;
     const uint32_t id = client->id();
 
+    // NO PROBE AT FUNCTION ENTRY. onEvent fires for WS_EVT_DATA too, i.e. once
+    // per FRAME — a heap walk there is ~56 000 whole-heap scans in one test run
+    // and watchdogs the AsyncTCP task before any corruption can be observed
+    // (measured, fw 2.3.0/2.3.1). Probes live inside the per-SESSION cases
+    // only, where they fire ~12 times per round instead of ~56 000.
     switch (type) {
         case WS_EVT_CONNECT: {
+            HEAP_PROBE("connect:entry");
             // Heap floor (TRAPS T19 — 2026-07-29: N sessions + page serves starved
             // internal heap to min=60 B and ended in a PANIC). A hub under
             // memory pressure REFUSES new load; it never degrades the sessions
@@ -378,6 +425,11 @@ void SlopSyncAsyncWsPort::onEvent(AsyncWebSocket* /*server*/, AsyncWebSocketClie
                 // "connected but nothing happens" failure users report as a bug.
                 SLOGW("slopsync", "no free slot for WS client#%u — closing", unsigned(id));
                 client->close();
+                // The over-capacity refusal path is the one the 12-session
+                // reproduction hammers: 5 slots, 12 connections, so 7 of every
+                // 12 land HERE. If corruption first shows up after this probe,
+                // the refusal path itself is the bomb.
+                HEAP_PROBE("connect:refused-no-slot:after-close");
                 return;
             }
             crashring::crumb("ws-attach");
@@ -393,6 +445,7 @@ void SlopSyncAsyncWsPort::onEvent(AsyncWebSocket* /*server*/, AsyncWebSocketClie
 
         case WS_EVT_DISCONNECT:
         case WS_EVT_ERROR: {
+            HEAP_PROBE("disconnect:entry");
             const int slot = slotForClient(id);
             if (slot >= 0) {
                 crashring::crumb("ws-detach");
@@ -403,6 +456,7 @@ void SlopSyncAsyncWsPort::onEvent(AsyncWebSocket* /*server*/, AsyncWebSocketClie
                 // the hub still believes is live.
                 _wantDetach[slot].store(true, std::memory_order_release);
             }
+            HEAP_PROBE("disconnect:after-flag");
             break;
         }
 
@@ -431,7 +485,27 @@ void SlopSyncAsyncWsPort::loop() {
     // the send path never blocks and a wedged client cannot stall anything.
     // What IS still worth doing is reaping clients AsyncWebSocket has already
     // given up on, so hub slots do not leak if a disconnect event was missed.
+    // NO UNCONDITIONAL PROBE HERE. loop() runs every 5 ms and a probe walks the
+    // WHOLE heap (milliseconds), so probing here saturates the hub task and the
+    // device stops answering — measured, fw 2.3.0, device went intermittently
+    // unreachable until this was removed. Rate-limited instead: often enough to
+    // bracket cleanupClients(), rare enough to leave the tick usable.
+#if defined(SLOPSYNC_HEAP_BISECT)
+    {
+        static uint32_t s_lastProbeMs = 0;
+        const uint32_t nowMs = millis();
+        if (uint32_t(nowMs - s_lastProbeMs) >= 1000u) {
+            s_lastProbeMs = nowMs;
+            HEAP_PROBE("loop:before-cleanupClients");
+            _ws.cleanupClients(kSlots);
+            HEAP_PROBE("loop:after-cleanupClients");
+        } else {
+            _ws.cleanupClients(kSlots);
+        }
+    }
+#else
     _ws.cleanupClients(kSlots);
+#endif
 
     // ---- Deferred attach/detach (hub task only) -----------------------------
     // Field bug #5 (docs/http-plane-retirement.md): the hub must only ever be

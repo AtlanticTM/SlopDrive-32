@@ -374,22 +374,36 @@ entry is named so nobody re-opens it as separate work.
    (2026-07-31, fw 2.2.6). This outranks everything below it and is the first
    thing that has ever explained the operator's real-world crashes.**
 
-   **Trigger, isolated by elimination — one variable per run, all on `:82`:**
+   **REPRODUCTION (deterministic on fw 2.2.9): 12 concurrent WS sessions on
+   `:82` blasting well-formed frames. No motion stream needed. No malformed
+   frames needed.** Harness: scratch `isolate.py many 12`.
 
-   | run | motion stream | result |
-   |---|---|---|
-   | lying length field (declares 65 535 B, sends 4) x40 | off | survived |
-   | attach/RST churn x40 | off | survived |
-   | storm, 1 session, 103 565 frames in 10 s | off | survived |
-   | 12 concurrent sessions, 166 936 frames, graceful close | off | survived |
-   | 12 concurrent sessions RST together, 3 rounds | off | survived |
-   | **12 concurrent sessions, 44 769 frames** | **ON** | **REBOOT** |
+   **Isolation runs, all on `:82`, one variable each:**
 
-   Nothing about the WS plane alone breaks it. The RX path took 10 300
-   frames/sec on one session and 12 simultaneous sessions without complaint.
-   **The necessary ingredient is the MOTION DATA PLANE being active at the same
-   time.** That matches the operator's original report — crashes at random
-   intervals with the machine actively moving — which no memory work explained.
+   | run | poisoning | motion stream | result |
+   |---|---|---|---|
+   | lying length field (declares 65 535 B, sends 4) x40 | light | off | survived |
+   | attach/RST churn x40 | light | off | survived |
+   | storm, 1 session, 103 565 frames in 10 s | light | off | survived |
+   | 12 concurrent sessions, 166 936 frames | light | off | survived |
+   | 12 concurrent sessions RST together, 3 rounds | light | off | survived |
+   | 12 concurrent sessions, 44 769 frames | light | **ON** | **REBOOT** |
+   | **12 concurrent sessions, 40 715 frames** | **COMPREHENSIVE** | **off** | **REBOOT** |
+
+   **THE STREAM IS NOT REQUIRED — that was a wrong conclusion from the first
+   pass and it is corrected here.** The last row is the same load as row 4,
+   which "survived" under LIGHT poisoning. The difference is only the detector:
+   comprehensive poisoning turns SILENT corruption into an immediate abort. So
+   the rows marked "survived" under light poisoning were most likely corrupting
+   the heap and getting away with it, which is the worse outcome. Treat
+   "survived under light poisoning" as "not detected", never as "clean".
+
+   **METHOD WARNING, learned the expensive way:** the first harness compared
+   `uptime_ms` before/after. That gives FALSE "survived" verdicts — a device
+   that reboots at the START of a 10 s test climbs back past the pre-test
+   reading before the test ends, so `after < before` is false. Two verdicts
+   were wrong before this was caught. **Use `boot_seq` from `/api/crash`; it
+   only ever increments and cannot lie.**
 
    **It is CORRUPTION, not exhaustion. Everything ACTIVE TASK 1 did is
    irrelevant to it.** Symbolized from `/api/coredump` (clean backtrace,
@@ -409,7 +423,25 @@ entry is named so nobody re-opens it as separate work.
    behavior; without poisoning this corrupts silently, which is worse. All 15
    recovered crumbs were `ws-attach`/`ws-detach`.
 
-   **A SECOND, DISTINCT signature appeared in the same session** and must not
+   **THE ALLOCATOR'S OWN FREE LIST IS THE THING BEING DAMAGED.** Reproduced
+   three times with an identical, uncorrupted backtrace, `EXCCAUSE 29`
+   (LoadProhibited) in `remove_free_block` — TLSF following a next/prev
+   pointer into invalid memory while servicing a malloc:
+
+       remove_free_block (tlsf_control_functions.h:373)
+       block_locate_free / tlsf_malloc (tlsf.c:444)
+       multi_heap_malloc <- heap_caps_malloc_prefer
+       wifi_malloc (esp_adapter.c:74) <- esf_buf_alloc_dynamic
+
+   `heap_min` was 29 299 / 30 071 / 28 911 B across those runs — never short.
+   **WiFi is the VICTIM, not the culprit**: it is simply the most frequent
+   allocator on the device, so it is whoever trips over damage someone else
+   wrote. An overrun past a block boundary into TLSF metadata fits all three.
+   Prime suspect remains the AsyncTCP/AsyncWebSocket buffer path, because WS
+   concurrency is the reproduction and field bug #5 was already a lifetime
+   defect in that exact code.
+
+   **A THIRD, DISTINCT signature appeared in the same session** and must not
    be conflated: task `ipc0`, `heap_min` 145 171 B, dying in
    `btdm_intr_alloc -> esp_intr_alloc -> heap_caps_malloc` with
    `_xt_context_save`/`_frxt_int_enter` on the stack — an interrupt saving

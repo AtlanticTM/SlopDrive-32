@@ -26,6 +26,7 @@
 #include "BootHeap.h"        // per-init-stage heap attribution (shared with SlopSyncHubService)
 #include "CrashRing.h"       // last-words ring: begin/crumb/heapSample
 #include "OomHook.h"        // failed-alloc hook: names the allocation, not the victim
+#include "HeapTrace.h"      // DIAGNOSTIC: alloc/free history (SLOPSYNC_HEAP_BISECT only)
 #include "sloplog/sloplog.h"
 #include "SystemState.h"
 #include "ConfigStore.h"
@@ -876,6 +877,35 @@ void setup() {
         otaService.begin(MDNSServiceName, SECRET_OTA_PASSWORD);
         otaService.registerHttpRoutes(webui.server());
         SLOGI("boot", "OTA ready — hostname '%s', fw %s", MDNSServiceName, FIRMWARE_VERSION);
+#if defined(SLOPSYNC_HEAP_BISECT)
+        // DIAGNOSTIC (LEDGER THE QUEUE #0). Read by host polling during the
+        // corruption reproduction; the last good poll before the device dies is
+        // the evidence, since a panic inside the allocator runs none of our
+        // hooks and the PSRAM record buffer does not survive the reboot.
+        // 64 records, not 256: the buffer must be INTERNAL RAM (see
+        // HeapTrace.cpp) and that is the scarce resource. 64 x ~88 B is ~5.6 KB,
+        // affordable against ~41 KB free, and the host polls continuously so
+        // depth matters less than the buffer working at all.
+        heaptrace::begin(64);
+        // HTTPMethod:: qualified on purpose: this TU sees BOTH the sync
+        // WebServer's HTTPMethod and ESPAsyncWebServer's request-method enum,
+        // so a bare HTTP_GET is ambiguous here (it is not in OtaService.cpp,
+        // which only sees the sync one).
+        webui.server()->on("/api/heaptrace", HTTPMethod::HTTP_GET, [&]() {
+            // Heap-allocated on purpose: this is a diagnostic route on
+            // httpTask's 8 KB stack, and the dump is far too big for it.
+            const size_t cap = 12288;
+            char* buf = static_cast<char*>(heap_caps_malloc(cap, MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT));
+            if (buf == nullptr) {
+                webui.server()->send(503, "application/json", "{\"error\":\"no psram for dump\"}");
+                return;
+            }
+            heaptrace::dumpJson(buf, cap, 64);
+            webui.server()->send(200, "application/json", buf);
+            heap_caps_free(buf);
+        });
+        SLOGW("boot", "DIAGNOSTIC BUILD: /api/heaptrace live (heap tracing + comprehensive poisoning)");
+#endif
     } else {
         SLOGW("boot", "OTA skipped — WiFi down at boot (serial rescue path only)");
     }

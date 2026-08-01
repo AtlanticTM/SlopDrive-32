@@ -671,6 +671,29 @@ the link cannot record, and no amount of re-reading Kconfig would have said so.
 Generalize it: when a subsystem reports healthy and produces nothing, stop
 auditing configuration and go looking for the symbol.
 
+**7. Stopping the HUB TASK from initiating client teardown does NOT fix it.**
+Tested 2026-07-31, fw 2.3.19, and this one was the last first-party suspect, so
+its elimination matters. The reasoning was sound: `AsyncWebSocket::close()`
+destroys a client SYNCHRONOUSLY (T29), it runs under `_ws_clients_lock`, and the
+AsyncTCP-side callbacks (`_onData`, `_onPoll`, `_onAck`) hold only `_queue_lock`
+-- so a hub-task close can destruct a client out from under a callback executing
+on it. All four hub-task initiators were disabled at once (`write()`'s control
+stall, `loop()`'s attach-refusal and idle reap, and `cleanupClients()`'s
+over-capacity eviction, suppressed by raising the cap).
+
+Result: **4 reboots in 6 runs, against 6 in 6 with them enabled** -- load
+verified on every run (12/12 sessions, 32 000-85 000 frames), `heap_min`
+16-23 KB, so not exhaustion. At n=6 that difference is noise (Fisher's exact
+~0.45), and the surviving crash was byte-identical to the baseline:
+`remove_free_block` <- `wifi_malloc`, `EXCCAUSE 29`, `exc_vaddr 0xc2e5fef6` --
+the same -114.998 float seen since the beginning. Cross-task destroy is not the
+cause, or not the only one.
+
+The scaffolding was REVERTED rather than left behind a flag: disabling the idle
+reap is a real regression (a dead peer holds its slot forever, which is the
+deadlock `kWsIdleReapMs` exists to break), and dead scaffolding is not how this
+codebase records a tested hypothesis -- this entry is.
+
 **What has NOT been tried and is the strongest remaining move:** a hardware
 WATCHPOINT. The ledger deferred JTAG because "a leak that takes hours does not
 yield to a breakpoint" — that premise is dead, the corruption now reproduces in

@@ -399,11 +399,23 @@ entry is named so nobody re-opens it as separate work.
    member-accessed", and the offset names the member. Two of the three were
    identified from the faulting address plus `addr2line` alone, no debugger.
 
-   **CURRENT MEASURED RISK, fw 2.3.18 (shipping config, diagnostic build):
-   6 reboots in 6 runs of the 12-session reproduction, crashing with 19-27 KB
-   still free.** That is corruption, not exhaustion, and it is NOT fixed. Full
-   A/B and the exoneration of `SPIRAM_TRY_ALLOCATE_WIFI_LWIP` on 12 trials:
-   TRAPS T28 item 4.
+   **CURRENT MEASURED RISK, fw 2.3.18/2.3.20 (shipping config, diagnostic
+   build): 6 reboots in 6 runs of the 12-session reproduction, crashing with
+   19-27 KB still free.** That is corruption, not exhaustion, and it is NOT
+   fixed. Full A/B and the exoneration of `SPIRAM_TRY_ALLOCATE_WIFI_LWIP` on
+   12 trials: TRAPS T28 item 4.
+
+   **EVERY FIRST-PARTY SUSPECT IS NOW ELIMINATED.** The three real UAFs above
+   were fixed and the reproduction survived them; both watchpoint baits missed;
+   and disabling hub-task-initiated teardown -- the last of our own call
+   patterns that could destroy a client under a running AsyncTCP callback --
+   changed nothing (TRAPS T28 item 7). The remaining write is not in code this
+   repo owns, on current evidence. That does NOT make it upstream's bug by
+   elimination; it means the next move is upstream-shaped: reproduce on a
+   stripped AsyncTCP/WiFi test app with no SlopDrive code in it, and if it
+   reproduces, that is the report Espressif's own
+   `esp-idf#13906` (same config, same symptom, closed "cannot reproduce")
+   never had.
 
    **A HARDWARE WATCHPOINT WAS BUILT, PROVEN, AND CAME UP EMPTY.**
    `include/system/HeapWatch.h` + `src/system/HeapWatch.cpp`, watchpoint 0

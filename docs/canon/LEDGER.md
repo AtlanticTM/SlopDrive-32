@@ -27,7 +27,7 @@ commit as any change that alters it (C-3).
   2026-07-27 — git branch state]
 - Source-tree firmware version: see `FIRMWARE_VERSION` in
   `include/system/config_api.h` (its one home). [C-1 pointer]
-- Deployed firmware on the device: **2.3.7 — A DIAGNOSTIC BUILD, NOT A
+- Deployed firmware on the device: **2.3.20 — A DIAGNOSTIC BUILD, NOT A
   SHIPPING ONE.** It carries `CONFIG_HEAP_POISONING_COMPREHENSIVE`,
   `CONFIG_HEAP_TRACING_STANDALONE` and `-DSLOPSYNC_HEAP_BISECT=1` for the
   corruption hunt (THE QUEUE item 0). Comprehensive poisoning memsets and
@@ -36,7 +36,7 @@ commit as any change that alters it (C-3).
   measurement.** The shipping content underneath it is the ACTIVE TASK 1 memory
   batch, the task-watchdog threshold fix, and the window-exit braking fix.
   Flashed over HTTP `/api/ota` (espota's PBKDF2/MD5 auth still fails on this
-  host — TRAPS/OTA topology). [verified 2026-07-31 — `2.3.6 -> 2.3.7` on
+  host — TRAPS/OTA topology). [verified 2026-07-31 — `2.3.19 -> 2.3.20` on
   `/api/capabilities`]
 - LIVE CONFIG TRUTH, which outranks any compiled default: the device's STORED
   `sm_tune_infeas_policy` is **3** (prio-amplitude), so `InfeasiblePolicy::Blend`
@@ -374,9 +374,32 @@ entry is named so nobody re-opens it as separate work.
 
 ### TIER 1 — MACHINE STABILITY / DIAGNOSTICS
 
-0. **HEAP CORRUPTION ON THE HUB PLANE — REPRODUCIBLE, PARTLY FIXED, STILL OPEN
-   (2026-07-31, fw 2.3.7). This outranks everything below it and is the first
-   thing that has ever explained the operator's real-world crashes.**
+0. **HEAP CORRUPTION ON THE HUB PLANE — PARKED BY OPERATOR RULING 2026-07-31,
+   fw 2.3.20. Reproducible on demand, materially reduced, NOT fixed.**
+
+   **THE RULING, so nobody re-opens this by accident:** three real
+   use-after-frees are gone, the machine is markedly more stable than it was,
+   and the residual is judged unlikely to bite in ordinary use for a while. It
+   is parked, not solved. It stops outranking the rest of THE QUEUE; work below
+   it proceeds. Re-open on any field crash whose coredump shows
+   `remove_free_block` <- `wifi_malloc` with heap NOT short.
+
+   **What "parked" costs, stated plainly:** the reproduction still reboots the
+   device 6 times in 6 runs with 19-27 KB free. What makes that tolerable is
+   that the reproduction is deliberately abusive — 12 concurrent sessions
+   against 5 slots, blasting a frame type (`WELCOME`, h2c) the hub can never
+   accept, so none of them ever complete a handshake. Real use is 1-2 clients
+   that do. **The rate under realistic load has never been measured**; do not
+   read 6/6 as a field expectation, and do not read the absence of a number as
+   a small one.
+
+   **THE ONE MOVE THAT IS LEFT, and it is cheap:** reproduce on a STRIPPED app —
+   AsyncTCP plus a bare WS echo server, same sdkconfig, zero SlopDrive code. If
+   it reproduces there it is not ours and that is the report
+   `espressif/esp-idf#13906` (same chip, same PSRAM-for-WiFi config, same
+   symptom, closed "cannot reproduce") never had. If it does NOT reproduce, the
+   elimination list below has a hole and finding which item is the next task.
+   Everything needed to run it is already written down here.
 
    **THREE USE-AFTER-FREES FOUND AND FIXED, fw 2.3.5 -> 2.3.7. The reproduction
    went from reboot on EVERY run to reboot on roughly ONE RUN IN FOUR, and the
@@ -1103,6 +1126,25 @@ covered by items 2 and 4 above.
   cruise state is NOT fixed.
 
 ## Pending rulings
+
+- **STRIP THE DIAGNOSTIC BUILD, OR KEEP IT? Needs an operator stamp — parking
+  THE QUEUE item 0 is what created this question.** The device runs
+  `CONFIG_HEAP_POISONING_COMPREHENSIVE` + `CONFIG_HEAP_USE_HOOKS` +
+  `CONFIG_HEAP_TRACING_STANDALONE` + `-DSLOPSYNC_HEAP_BISECT`, which existed to
+  hunt a bug that is now parked. The tradeoff is NOT "slow vs fast":
+  * **Keep it.** Poisoning is what turns the residual corruption into an
+    immediate, diagnosable abort. Strip it and the same corruption still
+    happens — it just goes silent and resurfaces later as an unrelated crash
+    with no backtrace worth reading. Cost: a memset plus a verify on every
+    alloc and free, on a device with a 1 kHz motion loop, plus the per-session
+    integrity probes.
+  * **Strip it.** Restores real performance headroom and is required before ANY
+    performance measurement is meaningful (a benchmark on this build measures
+    the poisoner). Cost: the next field crash is mute.
+  The safety angle cuts both ways and is the reason this is not a lazy call: an
+  abort mid-session reboots the machine UNHOMED, which is its own hazard
+  (compare THE QUEUE item 1). Do not strip this silently as part of unrelated
+  work — it changes what the machine does when it is damaged.
 
 - **WINDOW-EXIT BRAKING RUNAWAY — three-part chain, measured on the async-tune
   bench against the `GoogleCat` funscript recording (2026-07-30). AWAITING AN

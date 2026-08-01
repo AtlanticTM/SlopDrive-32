@@ -27,7 +27,7 @@ commit as any change that alters it (C-3).
   2026-07-27 — git branch state]
 - Source-tree firmware version: see `FIRMWARE_VERSION` in
   `include/system/config_api.h` (its one home). [C-1 pointer]
-- Deployed firmware on the device: **2.3.4 — A DIAGNOSTIC BUILD, NOT A
+- Deployed firmware on the device: **2.3.7 — A DIAGNOSTIC BUILD, NOT A
   SHIPPING ONE.** It carries `CONFIG_HEAP_POISONING_COMPREHENSIVE`,
   `CONFIG_HEAP_TRACING_STANDALONE` and `-DSLOPSYNC_HEAP_BISECT=1` for the
   corruption hunt (THE QUEUE item 0). Comprehensive poisoning memsets and
@@ -36,8 +36,8 @@ commit as any change that alters it (C-3).
   measurement.** The shipping content underneath it is the ACTIVE TASK 1 memory
   batch, the task-watchdog threshold fix, and the window-exit braking fix.
   Flashed over HTTP `/api/ota` (espota's PBKDF2/MD5 auth still fails on this
-  host — TRAPS/OTA topology). [verified 2026-07-31 — `2.3.3 -> 2.3.4` on
-  `/api/capabilities`, `/api/heaptrace` answering `active:true`]
+  host — TRAPS/OTA topology). [verified 2026-07-31 — `2.3.6 -> 2.3.7` on
+  `/api/capabilities`]
 - LIVE CONFIG TRUTH, which outranks any compiled default: the device's STORED
   `sm_tune_infeas_policy` is **3** (prio-amplitude), so `InfeasiblePolicy::Blend`
   is selectable but NOT in force. Stored values beat compiled defaults by
@@ -374,9 +374,64 @@ entry is named so nobody re-opens it as separate work.
 
 ### TIER 1 — MACHINE STABILITY / DIAGNOSTICS
 
-0. **HEAP CORRUPTION ON THE HUB PLANE — REPRODUCIBLE, ISOLATED, UNFIXED
-   (2026-07-31, fw 2.2.6). This outranks everything below it and is the first
+0. **HEAP CORRUPTION ON THE HUB PLANE — REPRODUCIBLE, PARTLY FIXED, STILL OPEN
+   (2026-07-31, fw 2.3.7). This outranks everything below it and is the first
    thing that has ever explained the operator's real-world crashes.**
+
+   **THREE USE-AFTER-FREES FOUND AND FIXED, fw 2.3.5 -> 2.3.7. The reproduction
+   went from reboot on EVERY run to reboot on roughly ONE RUN IN FOUR, and the
+   surviving failure reverted to the original `remove_free_block` <-
+   `wifi_malloc` signature. That is a rate change, not a fix — the entry stays
+   open.** Mechanism, addresses and the reasoning that found them: TRAPS T29.
+   * `~AsyncClient()` purged the async event queue only via `_close()`, which a
+     client with a null `_pcb` never reaches (`lib/asynctcp`, LOCAL PATCH).
+   * `AsyncClient::_recv()` kept iterating a pbuf chain after a callback had
+     destroyed the client; guarded with an out-of-band `_dispatching_client`
+     (`lib/asynctcp`, LOCAL PATCH).
+   * The transport dereferenced `AsyncWebSocket::client(id)` outside
+     `_ws_clients_lock` at three sites, against its own header's stated rule;
+     replaced with a lock-held `queueLen(id)` (`lib/espasyncwebserver`, LOCAL
+     PATCH).
+
+   **METHOD THAT PAID OFF, reusable:** with comprehensive poisoning on, read
+   `exc_vaddr` FIRST. `0xfefefefe` is the free-fill pattern, so a fault at
+   `0xfefefefe + small` is "a pointer was read out of freed memory and then
+   member-accessed", and the offset names the member. Two of the three were
+   identified from the faulting address plus `addr2line` alone, no debugger.
+
+   **CURRENT MEASURED RISK, fw 2.3.18 (shipping config, diagnostic build):
+   6 reboots in 6 runs of the 12-session reproduction, crashing with 19-27 KB
+   still free.** That is corruption, not exhaustion, and it is NOT fixed. Full
+   A/B and the exoneration of `SPIRAM_TRY_ALLOCATE_WIFI_LWIP` on 12 trials:
+   TRAPS T28 item 4.
+
+   **A HARDWARE WATCHPOINT WAS BUILT, PROVEN, AND CAME UP EMPTY.**
+   `include/system/HeapWatch.h` + `src/system/HeapWatch.cpp`, watchpoint 0
+   (watchpoint 1 is the FreeRTOS stack canary), read out through
+   `/api/coredump`. `GET /api/heapwatch?selftest=1` deliberately crashes the
+   device and the backtrace lands on the offending store, so a silent
+   watchpoint means "nothing wrote there", not "the tool is broken". Two baits
+   were tried and BOTH MISSED, which is real negative knowledge:
+   * a quarantined `AsyncClient` (destructed, never released) — never written.
+   * a quarantined `_clients` list NODE via a rebinding allocator, so the
+     window covered offset 0 where TLSF keeps `next_free`/`prev_free` — never
+     written.
+   Nothing is writing into freed client memory. Do not re-run either bait.
+
+   **A DOUBLE-FREE DETECTOR WAS BUILT AND THEN DELETED — and the reason is the
+   important part.** It stamped freed pointers in a hash table and flagged a
+   second free with no allocation between. It produced a beautiful-looking
+   result (`esf_buf_recycle` freeing the same WiFi RX buffer twice) that was
+   WRONG, and the mechanism is general enough to bite any future attempt:
+   `heap_caps_free` calls the free hook AFTER `multi_heap_free`, so between the
+   real free and the stamp another task can allocate that same block; the stamp
+   then lands on live memory and the next honest free reads as a double. Two
+   unrelated owners (an Arduino `String` and an AsyncTCP event packet) reusing
+   one address is what it actually caught. **Any pointer-stamp double-free
+   detector built on these hooks has this race — do not rebuild it.** ESP-IDF's
+   own comprehensive poisoning already detects genuine double frees inside the
+   allocator lock, race-free, and that is what the entry's ORIGINAL
+   `multi_heap_free` assert signature was.
 
    **REPRODUCTION (deterministic on fw 2.2.9): 12 concurrent WS sessions on
    `:82` blasting well-formed frames. No motion stream needed. No malformed
@@ -456,6 +511,9 @@ entry is named so nobody re-opens it as separate work.
    corruption above is NOT established.
 
    **START HERE — the next move, and the reason it is the next move.**
+   *(Still true after the three fixes above, and now with the confounds those
+   fixes were adding removed. The remaining write does NOT fall out of code
+   inspection the way they did — two rounds of it found nothing further.)*
 
    **A HARDWARE WATCHPOINT. Nothing above it has been tried and everything
    below it has failed.** The S3 has built-in USB-JTAG (`debug_tool =

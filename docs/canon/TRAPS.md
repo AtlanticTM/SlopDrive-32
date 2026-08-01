@@ -597,7 +597,32 @@ Admission control bounds how OFTEN the bug is reachable; it does not remove the
 bad write. Worth doing for RFC-055 reasons, never as the corruption fix.
 
 **4. `CONFIG_SPIRAM_TRY_ALLOCATE_WIFI_LWIP` is NOT the cause. Do not disable it
-again.** It was a well-formed suspect — the crash lands in `remove_free_block`
+again. RE-TESTED 2026-07-31 ON 12 TRIALS AND IT STILL IS NOT.** Six runs per
+arm of `isolate.py many 12`, load verified on every single run (12/12 sessions
+accepted, 39 000-126 000 frames), verdict by `boot_seq`:
+
+| arm | option | runs | reboots | `heap_min` at crash |
+|---|---|---:|---:|---|
+| A | **ON** (fw 2.3.18) | 6 | 6 | 19 455 - 27 083 |
+| B | **OFF** (fw 2.3.17) | 6 | 4 | 3 219 - 7 259 |
+
+Arm A is the load-bearing row: it reboots with **19-27 KB still free**, which
+rules out exhaustion and leaves corruption. Arm B reboots too, and one of its
+crashes was `tlsf_check` faulting inside a heap-integrity probe while walking a
+damaged free list — corruption, present in both arms. Turning the option off
+also drops `int_free` 35 467 -> 27 531 and pushes `heap_min` into the 3-7 KB
+band, so the OFF arm is a starved machine as well as a corrupt one.
+
+**METHOD WARNING FROM THIS A/B, worth more than the result:** the first attempt
+at arm B reported 7 runs, 0 reboots — a clean pass that was entirely an
+artifact of the 9 KB of `.bss` a diagnostic table was holding. Removing the
+instrument changed arm B from 0/7 to 4/6. Two lessons: suppress the harness
+output and you cannot tell a survived run from a run that never applied load
+(check the "12/12 sessions accepted" line every time), and a diagnostic heavy
+enough to move `int_free` has already changed the experiment (T27, memory
+dimension).
+
+The original reasoning, still valid: It was a well-formed suspect — the crash lands in `remove_free_block`
 reached via `wifi_calloc`/`heap_caps_calloc_prefer`, exactly the allocation path
 it redirects into PSRAM, and the crash signature changed the day it was enabled
 (`heap_min` 316 B genuine exhaustion -> 28-34 KB with plenty free). It was
@@ -613,19 +638,38 @@ allocates continuously in between and always finds the damage first. Making
 them finer is barred by T27. Integrity walks answer "is the heap damaged NOW";
 they can never answer "who damaged it".
 
-**6. Heap TRACING is wired but produced ZERO records — assume it is broken until
-proven otherwise.** `include/system/HeapTrace.h` + `src/system/HeapTrace.cpp`,
-`GET /api/heaptrace`. Verified NOT to be the explanation: the generated
-sdkconfig carries `CONFIG_HEAP_TRACING=y`,
+**6. ~~Heap TRACING is wired but produced ZERO records.~~ SOLVED 2026-07-31 —
+the cause was a FOURTH sdkconfig option, and the failure was silent by
+construction.** `include/system/HeapTrace.h` + `src/system/HeapTrace.cpp`,
+`GET /api/heaptrace`. Everything previously checked really was fine: the
+generated sdkconfig carries `CONFIG_HEAP_TRACING=y`,
 `CONFIG_HEAP_TRACING_STANDALONE=y`, `CONFIG_HEAP_TRACING_STACK_DEPTH=8`;
 `heap_trace_init_standalone()` and `heap_trace_start(HEAP_TRACE_ALL)` both
-return `ESP_OK`; the endpoint reports `active:true`. And buffer placement is NOT
-the cause — PSRAM was tried first on the theory that records are written inside
-the allocator where the PSRAM cache is unusable, then moved to internal RAM
-(64 records, 5 632 B), and `heap_trace_get_count()` stayed 0 in both. Untried
-leads, in order: read the count with tracing STOPPED; check for a stale
-`libheap` being linked despite the sdkconfig change; confirm the allocator hooks
-actually compiled into the rebuilt component.
+return `ESP_OK`; the endpoint reports `active:true`; and buffer placement was
+never it (tried in PSRAM, then in internal RAM — 0 records in both).
+
+**Those three options build the tracing LIBRARY. A separate one connects it to
+the ALLOCATOR:**
+
+    CONFIG_HEAP_USE_HOOKS=y
+
+`heap_caps_base.c` records through `CALL_HOOK(esp_heap_trace_alloc_hook, ...)`,
+and `CALL_HOOK` is defined as `{}` unless `CONFIG_HEAP_USE_HOOKS` is set. Ours
+was `# CONFIG_HEAP_USE_HOOKS is not set`, so every recording site in the
+allocator compiled to nothing while every status the tracer could report stayed
+green.
+
+**The check that settles this class of question in one command** — ask the
+BINARY what it contains, not the config what it intends:
+
+    xtensa-esp32s3-elf-nm firmware.elf | grep heap_trace
+
+It listed `heap_trace_init_standalone`, `heap_trace_start`,
+`heap_trace_get_count`, `heap_trace_get` — the API — and **no
+`esp_heap_trace_alloc_hook` whatsoever**. A tool whose recorder is absent from
+the link cannot record, and no amount of re-reading Kconfig would have said so.
+Generalize it: when a subsystem reports healthy and produces nothing, stop
+auditing configuration and go looking for the symbol.
 
 **What has NOT been tried and is the strongest remaining move:** a hardware
 WATCHPOINT. The ledger deferred JTAG because "a leak that takes hours does not
@@ -634,3 +678,130 @@ seconds on demand. The S3 has built-in USB-JTAG (`debug_tool = esp-builtin`, no
 rebuild needed) and `esp_cpu_set_watchpoint()` can arm one without a debugger
 attached. A watchpoint names the writing INSTRUCTION, which is the cause; every
 item above is a detector.
+
+## T29 — A callback that can destroy its own caller's object
+
+**Rule:** before a loop calls user code, ask whether that call can free the
+object the loop is iterating on. If it can, the liveness check must live
+OUTSIDE the object — you cannot ask a freed object whether it is freed. This
+applies to every dispatch loop in an async/callback library, ours or vendored.
+
+**Mechanism:** AsyncTCP's teardown is SYNCHRONOUS IN THE CALLER'S CONTEXT.
+`AsyncClient::close()` -> `_close()` -> `_tcp_close()` and then, still on the
+caller's stack, `_discard_cb(...)`. ESPAsyncWebServer's `_discard_cb` is
+`[](void *r, AsyncClient *c) { ((AsyncWebSocketClient *)r)->_onDisconnect();
+delete c; }`, and `_onDisconnect()` reaches `_handleDisconnect()` ->
+`_clients.erase()` -> `~AsyncWebSocketClient()`. So one `close()` from inside a
+callback destroys BOTH the `AsyncWebSocketClient` and the `AsyncClient` before
+control returns. AsyncTCP 3.5.0's release notes make this explicit and call it a
+potential breaking change ("`abort()` executes... directly within the context of
+the caller task/thread, like it was already the case for `close()`").
+
+`AsyncClient::_recv()` iterates a pbuf CHAIN and invokes `_recv_cb` once per
+buffer, then touches `this` again — `_ack_pcb`, `_pcb`, `_tcp_recved(&_pcb,...)`
+— with no liveness check between iterations.
+
+**Bit us, twice, in the same reproduction (2026-07-31, `isolate.py many 12`,
+comprehensive heap poisoning, LEDGER THE QUEUE item 0):**
+
+1. fw 2.3.5, task `async_tcp`, `EXCCAUSE 28`, `vaddr 0xfefeff3a`:
+   `_recv` -> `_tcp_recved(&_pcb,...)` -> `tcp_recved` (lwip tcp.c:985). The
+   loop read `_pcb` out of an `AsyncClient` that callback #1 had already freed.
+2. fw 2.3.6, task `async_tcp`, `EXCCAUSE 28`, `vaddr 0xfefeff4e`:
+   `_recv` -> `_recv_cb` -> `_onData` -> `_handleEvent` (AsyncWebSocket.cpp:924).
+   Same loop, next buffer, stale `_recv_cb_arg` — this time the freed object was
+   the `AsyncWebSocketClient` and the poison was read as its `_server`.
+
+**Read the address, it names the bug.** `0xfefefefe` is ESP-IDF's
+comprehensive-poisoning FREE-FILL pattern. A fault at `0xfefefefe + small` is a
+pointer READ OUT OF FREED MEMORY and then member-accessed; the offset is the
+member. `0xfefeff3a` = poison + `0x3C`, `0xfefeff4e` = poison + `0x50`. This is
+the single fastest read in the whole hunt and it needs no debugger — but it only
+works because poisoning is on, which is why the diagnostic build earns its cost.
+
+**Fix:** both are LOCAL PATCHes in `lib/asynctcp/` (see its `VENDORED.md`):
+* `~AsyncClient()` purges the async event queue UNCONDITIONALLY. Upstream purged
+  only via `_close()`, which a client with a null `_pcb` never reaches — and null
+  `_pcb` is exactly what `tcp_error()` leaves behind.
+* A file-scope `_dispatching_client` that `~AsyncClient` clears and `_recv`
+  re-checks after every callback. Out-of-band ON PURPOSE: a flag stored in the
+  object would itself be freed memory. `_sent` and `_poll` return immediately
+  after their callbacks and need no guard.
+
+A third LOCAL PATCH in `lib/espasyncwebserver/` (`queueLen(uint32_t id)`) closes
+the mirror image of this on OUR side: `AsyncWebSocket::client(id)` releases
+`_ws_clients_lock` before returning its pointer, so
+`client(id)->queueLen()` from the hub task dereferences whatever the AsyncTCP
+task has since erased. The transport had three of those, under a header comment
+calling "never hold an `AsyncWebSocketClient*`" the most important rule in the
+file.
+
+**NOT THE WHOLE STORY, and that is the point of writing it down.** These three
+took the reproduction from reboot-every-run to reboot-roughly-one-run-in-four,
+and the surviving failure reverted to the ORIGINAL signature — `remove_free_block`
+<- `wifi_malloc`, `EXCCAUSE 29`, WiFi as victim, heap not short. A rate change is
+evidence a real bug was removed; it is NOT evidence the last one was. Do not
+close LEDGER THE QUEUE item 0 on the strength of a quieter reproduction.
+
+## T30 — A diagnostic is code, and it lies in its own characteristic ways
+
+**Rule:** an instrument gets the same scrutiny as the thing it measures, and it
+must be judged on THREE axes before any result from it is believed: does it
+actually run, does it cost enough to change the outcome, and can it produce the
+finding it just produced by accident? Every one of the following cost real time
+during the corruption hunt (2026-07-31, LEDGER THE QUEUE item 0).
+
+**1. "Reports healthy" is not "is running". Ask the BINARY.** Heap tracing had
+three correct sdkconfig options, returned `ESP_OK` from init and start, and
+answered `active:true` — while the allocator never called it, because the
+recorder is gated behind a FOURTH option (T28 item 6). One command settled what
+a session of config-reading could not:
+`xtensa-esp32s3-elf-nm firmware.elf | grep heap_trace`. Symbols present, hook
+absent. Generalize: when a subsystem reports healthy and produces nothing, stop
+auditing configuration and go looking for the symbol, then for the CALL to it
+(`objdump -d --disassemble=heap_caps_free` showed the `callx8` once it was real).
+
+**2. A detector whose cost moves the measurement has already changed it.**
+This is T27 in the memory dimension. A 9 KB `.bss` table for the double-free
+detector pushed `int_min_free` to **88 bytes** and turned one A/B arm from
+4-reboots-in-6 into 0-reboots-in-7. The clean-looking arm was the artifact.
+Removing the instrument restored the result. Budget a diagnostic's RAM against
+`heap_min` under load, not against total free.
+
+**3. Hardware watchpoints are aligned DOWN, so a naive arm watches the
+neighbor.** `esp_cpu_set_watchpoint` demands natural alignment, so arming a
+64-byte window on an unaligned block starts it BEFORE the block and covers the
+previous heap block's header — which TLSF rewrites on every coalesce. That is
+14 false hits in one run, every one landing in `block_absorb` and looking
+exactly like a find. Either hand the watchpoint aligned storage or refuse to arm.
+
+**4. Allocator hooks fire AFTER the fact, so pointer-stamp schemes race.**
+`heap_caps_free` calls `esp_heap_trace_free_hook` AFTER `multi_heap_free`. In
+that window another task can allocate the same block, so the stamp lands on live
+memory and that block's next honest free reads as a double free. The
+false positive is indistinguishable from the real thing by hit alone — it is
+told apart only by the two stacks belonging to unrelated owners. Full mechanism
+and the retracted conclusion it produced: LEDGER THE QUEUE item 0.
+
+**5. A diagnostic must not be able to brick the recovery path.** The
+double-free detector called `abort()` on detection. The OTA upload path tripped
+it, so the device rebooted mid-flash and could no longer be updated over the
+network — six attempts, including four timed into the first seconds after boot.
+Recovery took a COM11 serial rescue. **A detector reports; it does not
+adjudicate.** Aborting also asserts a precision the tool did not have (see 4).
+
+**6. Suppress the harness output and you cannot tell "survived" from "never
+ran".** An A/B arm reported six clean runs while the load line was piped to
+`Out-Null`. With `int_free` near the WS accept floor, refused sessions look
+exactly like a passing test. Assert the load landed — for `isolate.py` that is
+the `12/12 sessions accepted` line and a frame count — on EVERY run, not once.
+
+**7. `custom_sdkconfig` cannot express "off" as `=n`.** pioarduino substitutes
+the literal text into sdkconfig and Kconfig rejects `=n` for a bool; the build
+dies in `idf_build_process` with a CMake error that names neither the option nor
+the line. Comment the line out instead — the framework default is what you get.
+Related: editing that block wipes and reinstalls framework packages, which has
+twice left `managed_components/espressif__cjson/cJSON/` without its sources and
+once needed a second invocation to reconfigure. A failed first build after a
+`custom_sdkconfig` edit is not necessarily a real failure; run it again before
+diagnosing.

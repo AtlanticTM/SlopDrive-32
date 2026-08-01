@@ -37,8 +37,10 @@
 // - NEVER HOLD AN AsyncWebSocketClient*. The AsyncTCP task can destroy a
 //   client between lookup and use. This transport stores the client ID and
 //   calls the id-taking API (`binary(id,...)`, `availableForWrite(id)`,
-//   `close(id,...)`), which resolves the id UNDER the lock every time. This
-//   is the single most important rule in this file.
+//   `queueLen(id)`, `close(id,...)`), which resolves the id UNDER the lock
+//   every time. This is the single most important rule in this file.
+//   `client(id)` is NOT on that list and must never be used here: it releases
+//   the lock before handing the pointer back. TRAPS T29.
 //
 // ---- Backpressure: a full queue is not an error -----------------------------
 // write() returning false MEANS "not accepted right now; the caller's class

@@ -319,11 +319,19 @@ public:
 using AwsHandshakeHandler = std::function<bool(AsyncWebServerRequest *request)>;
 using AwsEventHandler = std::function<void(AsyncWebSocket *server, AsyncWebSocketClient *client, AwsEventType type, void *arg, uint8_t *data, size_t len)>;
 
+// A quarantining allocator was TRIED HERE AND RULED OUT (fw 2.3.10/2.3.11):
+// client nodes were held back instead of freed, with a hardware watchpoint over
+// each one, and nothing ever wrote to a dead node while the corruption
+// reproduced unchanged. It is also actively WRONG for the double-free detector
+// that replaced it -- a block that is never freed can never be freed twice, so
+// quarantining here suppresses the exact signal now being looked for.
+using AwsClientList = std::list<AsyncWebSocketClient>;
+
 // WebServer Handler implementation that plays the role of a socket server
 class AsyncWebSocket : public AsyncWebHandler {
 private:
   String _url;
-  std::list<AsyncWebSocketClient> _clients;
+  AwsClientList _clients;
   uint32_t _cNextId;
   AwsEventHandler _eventHandler;
   AwsHandshakeHandler _handshakeHandler;
@@ -371,6 +379,13 @@ public:
   }
   bool availableForWriteAll();
   bool availableForWrite(uint32_t id);
+  // LOCAL PATCH (SlopDrive) -- queue depth BY ID, resolved and read under
+  // _ws_clients_lock. client(id) releases that lock before returning its
+  // pointer, so `client(id)->queueLen()` from another task can dereference a
+  // client the AsyncTCP task has already erased and freed. availableForWrite()
+  // is the lock-safe BOOLEAN; this is the lock-safe COUNT, which a caller with
+  // a threshold below the queue maximum needs. 0 for an unknown client.
+  size_t queueLen(uint32_t id);
 
   size_t count() const;
   AsyncWebSocketClient *client(uint32_t id);
@@ -446,7 +461,7 @@ public:
   AsyncWebSocketMessageBuffer *makeBuffer(size_t size = 0);
   AsyncWebSocketMessageBuffer *makeBuffer(const uint8_t *data, size_t size);
 
-  std::list<AsyncWebSocketClient> &getClients() {
+  AwsClientList &getClients() {
     return _clients;
   }
 };

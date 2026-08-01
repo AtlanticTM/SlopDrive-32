@@ -1,0 +1,31 @@
+# clang-tidy — the borrow-checker substitute (memory-safety doctrine §3).
+#
+# HeaderFilterRegex is the load-bearing line. Without it clang-tidy analyzes
+# every header it can reach, which here means the Arduino core, ESP-IDF, NimBLE
+# and the two VENDORED ESP32Async libraries — tens of thousands of findings in
+# code we do not own and re-vendor from upstream. Scope is OUR code: src/,
+# include/, and the lib/slop* ecosystem libraries. lib/espasyncwebserver,
+# lib/asynctcp and lib/ruckig are deliberately NOT in it.
+#
+# Run:  pio check --tool=clangtidy --tool=cppcheck -e sd32-ota
+HeaderFilterRegex: '(src|include)/|lib/(sloplog|slopglow|slopmotion)/'
+
+Checks: >
+  bugprone-*,
+  cert-*,
+  clang-analyzer-*,
+  cppcoreguidelines-*,
+  misc-*,
+  performance-*,
+  modernize-*,
+  -modernize-use-trailing-return-type,
+  -modernize-avoid-c-arrays,
+  -misc-include-cleaner
+
+# The floor from the directive, unweakened. clang-analyzer-* is the
+# path-sensitive one that finds use-after-free and null deref; the
+# cppcoreguidelines bounds/owning checks mechanically enforce the banned-
+# construct list (raw new, C arrays, pointer arithmetic, array decay).
+WarningsAsErrors: 'bugprone-*,clang-analyzer-*,cppcoreguidelines-pro-bounds-*,cppcoreguidelines-owning-memory'
+
+FormatStyle: none

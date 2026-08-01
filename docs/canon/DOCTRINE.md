@@ -312,3 +312,96 @@ in [`LEDGER.md`](LEDGER.md), never here.
   above become pointers into it in the same commit that lands v0. Until then
   they remain the home — one fact, one home (C-1), so do not split them
   early and do not let both stand afterward.
+
+## 11. Memory safety (operator directive 2026-07-31 — binding)
+
+**Home note:** the directive that established this says to merge it into
+`CLAUDE.md`. It lives HERE instead, for the same reason the ponytail ruling does
+(§4): `CLAUDE.md` is gitignored and does not survive a clone. This section is
+the binding form; `CLAUDE.md` may restate intent, never rules. Where this
+section and older doctrine disagree on a memory-safety question, this wins.
+
+**Scope, and it is deliberate.** These rules bind `src/`, `include/`, and the
+`lib/slop*` ecosystem libraries. They do NOT bind `lib/espasyncwebserver`,
+`lib/asynctcp`, `lib/ruckig`, the Arduino core, ESP-IDF, or anything under
+`lib_deps` — that code is third-party, is re-vendored from upstream, and is full
+of constructs the safe subset rejects. Enforcing there would mean choosing
+between a permanently red build and patching code we do not own. Vendored
+include paths are `-isystem` so their warnings cannot block ours.
+
+### 11.1 The safe subset
+
+Preferred, in `src/`/`include/`/`lib/slop*`, applied opportunistically whenever
+a file is touched for any reason:
+
+| Instead of | Use |
+|---|---|
+| C arrays | `std::array<T, N>` |
+| pointer + length parameters | `std::span<T>` |
+| raw `new`/`delete`/`malloc`/`free` | fixed-capacity storage; `std::unique_ptr` only when dynamic lifetime is genuinely unavoidable |
+| heap allocation after startup | static / fixed-capacity |
+| `std::vector` / `std::string` / Arduino `String` in steady-state code | fixed-capacity containers |
+| `strcpy`/`strcat`/`sprintf` | `snprintf` at minimum |
+| null as "no value" | `std::optional<T>` |
+| `union` | `std::variant<A, B>` |
+| bool/error-code returns for fallible operations | `std::expected<T, E>` (GCC 14.2, `-std=gnu++2b`) |
+| C-style casts | `static_cast`; `reinterpret_cast` only in the hardware layer |
+| manual acquire/release | RAII; cleanup in destructors |
+
+**The rules no tool enforces — these are the ones that actually bite.** Treat a
+violation as severity-critical in review:
+* Never return a reference, `span`, or `string_view` to a local.
+* Never store a `span` or `string_view` as a class member. Parameters only;
+  members own their data.
+* **Lambdas handed to tasks, timers or callbacks capture BY VALUE.** Never `[&]`
+  for anything that outlives the enclosing scope.
+* Never mutate a container while iterating it.
+* Rule of zero: most classes declare no destructor, copy, or move at all.
+
+### 11.2 Concurrency
+
+New mutable state is owned by exactly one task and reached by message, not by
+shared memory. This does NOT mandate retrofitting what already exists: the
+SlopSync WS transport's lock-free SPSC ring and its deferred attach/detach are
+the *fix* for field bug #5 (T5), are reasoned about in-source, and stay. The
+rule binds new code — introducing shared mutable state behind a mutex needs an
+operator ruling first.
+
+### 11.3 What the toolchain enforces mechanically
+
+* `build_src_flags` in `platformio.ini` carries the warning set. It is
+  `build_src_flags`, not `build_flags`, precisely so it stops at `src/`.
+* **Ten warnings are hard errors** and the list is a floor, never weakened:
+  `dangling-reference`, `dangling-pointer`, `use-after-free`,
+  `free-nonheap-object`, `return-type`, `uninitialized`, `array-bounds`,
+  `stringop-overflow`, `nonnull`, `sizeof-pointer-memaccess`. Our code is clean
+  on all ten; keep it that way rather than widening the exemption.
+* Blanket `-Werror` is the goal, NOT yet reachable: first enable produced ~509
+  warnings, largely `-Wshadow`/`-Wconversion`, and a large share come from
+  third-party headers pulled in via `lib_deps` as `-I` (PlatformIO gives no
+  `-isystem` hook for those). Burn the backlog down per file, then widen.
+* `monitor_filters = esp32_exception_decoder` — panic backtraces decode to
+  file:line.
+
+### 11.4 Static analysis — configured, NOT yet operational
+
+`.clang-tidy` exists at repo root with the directive's `WarningsAsErrors` floor
+intact and a `HeaderFilterRegex` scoped to our code. It is **not running yet**,
+and neither route works on this host as-is:
+* `pio check` dies with `WinError 206: filename or extension is too long` — it
+  inlines every ESP-IDF include path into one clang-tidy command and blows the
+  Windows 32 KB command-line limit.
+* Invoking `clang-tidy -p .` against the root `compile_commands.json` reaches
+  the compiler but hits 5 hard errors from GCC-only flags clang rejects
+  (`-mlongcalls`, `-fno-tree-switch-conversion`, `-fstrict-volatile-bitfields`,
+  `-mdisable-hardware-atomics`) plus a missing `stddef.h`, and reports ~12 700
+  findings because the header filter is not biting.
+
+The fix shape is a sanitized `compile_commands.json` (strip GCC-only flags, add
+clang's builtin include path) — the same treatment `.clangd` already applies via
+its `Remove:` list. **Do not claim clang-tidy coverage until that lands.**
+
+**A per-edit clang-tidy hook is REFUSED as specified** (directive §6.2): on this
+host a single-file check has not completed inside ten minutes. It belongs at a
+pre-commit / on-demand gate; the fast feedback loop is the compiler, where the
+ten fatal warnings above already live.

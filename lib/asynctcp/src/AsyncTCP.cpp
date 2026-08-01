@@ -5,6 +5,8 @@
 #include "AsyncTCPLogging.h"
 #include "AsyncTCPSimpleIntrusiveList.h"
 
+#include <atomic>   // LOCAL PATCH (SlopDrive) -- _dispatching_client
+
 /**
  * LibreTiny specific configurations
  */
@@ -275,6 +277,17 @@ static inline lwip_tcp_event_packet_t *_get_async_event() {
     return e;
   }
 }
+
+// LOCAL PATCH (SlopDrive) -- re-entrancy guard for AsyncClient::_recv.
+// close() and abort() run _discard_cb in the CALLER's context (upstream 3.5.0
+// made abort() match close() here), and ESPAsyncWebServer's _discard_cb deletes
+// the AsyncClient. So a user callback invoked from inside _recv's pbuf-chain
+// loop can free the very object the loop is iterating on. `this` cannot be
+// tested after that -- the check has to live OUTSIDE the object, which is what
+// this is. ~AsyncClient clears it; _recv compares against it after every
+// callback. Written on the async task, cleared from whichever task destroys the
+// client, hence atomic. See lib/asynctcp/VENDORED.md.
+static std::atomic<AsyncClient *> _dispatching_client{nullptr};
 
 static size_t _remove_events_for_client(AsyncClient *client) {
   lwip_tcp_event_packet_t *removed_event_chain;
@@ -787,6 +800,19 @@ AsyncClient::~AsyncClient() {
   if (_pcb) {
     _close();
   }
+  // LOCAL PATCH (SlopDrive) -- MUST be unconditional. _close() purges the event
+  // queue via _reset_tcp_callbacks(), but a client whose _pcb is already null
+  // never reaches it -- and that is exactly the state tcp_error() leaves behind
+  // (it nulls _pcb before enqueuing LWIP_TCP_ERROR). Any RECV/SENT/POLL packet
+  // enqueued by the lwIP thread before that point then outlives this object,
+  // and _async_service_task dereferences a freed client. Purging twice is free;
+  // purging never is a use-after-free. See lib/asynctcp/VENDORED.md.
+  _remove_events_for_client(this);
+  // LOCAL PATCH (SlopDrive) -- the other half of the _recv re-entrancy guard.
+  // If a callback _recv invoked destroyed us, this is what tells that loop to
+  // stop, since it can no longer ask `this` anything.
+  AsyncClient *self = this;
+  _dispatching_client.compare_exchange_strong(self, nullptr, std::memory_order_relaxed);
 }
 
 /*
@@ -1079,6 +1105,13 @@ int8_t AsyncClient::_sent(tcp_pcb *pcb, uint16_t len) {
 }
 
 int8_t AsyncClient::_recv(tcp_pcb *pcb, pbuf *pb, int8_t err) {
+  // LOCAL PATCH (SlopDrive) -- see _dispatching_client. A pbuf CHAIN means the
+  // user callback below runs more than once per event, and close()/abort() run
+  // _discard_cb in the CALLER's context, so callback #1 can delete this object
+  // before callback #2. Every `this` access after the callback is guarded.
+  AsyncClient *const prev_dispatch = _dispatching_client.load(std::memory_order_relaxed);
+  _dispatching_client.store(this, std::memory_order_relaxed);
+
   while (pb != NULL) {
     _rx_last_packet = millis();
     // we should not ack before we assimilate the data
@@ -1088,9 +1121,23 @@ int8_t AsyncClient::_recv(tcp_pcb *pcb, pbuf *pb, int8_t err) {
     b->next = NULL;
     if (_pb_cb) {
       async_tcp_log_elapsed("onPacket", _pb_cb(_pb_cb_arg, this, b));
+      if (_dispatching_client.load(std::memory_order_relaxed) != this) {
+        // b is the callback's property now; only the untouched tail is ours.
+        if (pb) {
+          pbuf_free(pb);
+        }
+        return ERR_OK;
+      }
     } else {
       if (_recv_cb) {
         async_tcp_log_elapsed("onData", _recv_cb(_recv_cb_arg, this, b->payload, b->len));
+      }
+      if (_dispatching_client.load(std::memory_order_relaxed) != this) {
+        pbuf_free(b);
+        if (pb) {
+          pbuf_free(pb);
+        }
+        return ERR_OK;   // `this` is freed memory -- do not restore, do not touch
       }
       if (!_ack_pcb) {
         _rx_ack_len += b->len;
@@ -1100,6 +1147,8 @@ int8_t AsyncClient::_recv(tcp_pcb *pcb, pbuf *pb, int8_t err) {
       pbuf_free(b);
     }
   }
+
+  _dispatching_client.store(prev_dispatch, std::memory_order_relaxed);
   return ERR_OK;
 }
 

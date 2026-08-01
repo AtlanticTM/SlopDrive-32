@@ -131,8 +131,8 @@ bool SlopSyncAsyncWsTransport::write(std::span<const std::byte> frame) {
         // Shed telemetry EARLY, before the queue is full, so control frames
         // still have room behind it. If data is allowed to fill the queue then
         // classifying was pointless: the next NACK is the one that fails.
-        AsyncWebSocketClient* c = _ws->client(id);
-        if (c != nullptr && c->queueLen() >= kDataQueueHighWater) {
+        const size_t qlen = _ws->queueLen(id);
+        if (qlen >= kDataQueueHighWater) {
             _txDataDrops.fetch_add(1, std::memory_order_relaxed);
             // HEAP IS LOGGED WITH IT ON PURPOSE. Shedding means the CLIENT has
             // stopped draining, which is the exact window the operator's
@@ -144,7 +144,7 @@ bool SlopSyncAsyncWsTransport::write(std::span<const std::byte> frame) {
             SLOGW_EVERY_MS(5000, "slopsync",
                            "client#%u shedding data frames (queue %u/%u) "
                            "free_int=%u largest_int=%u",
-                           unsigned(id), unsigned(c->queueLen()),
+                           unsigned(id), unsigned(qlen),
                            unsigned(WS_MAX_QUEUED_MESSAGES),
                            unsigned(heap_caps_get_free_size(MALLOC_CAP_INTERNAL)),
                            unsigned(heap_caps_get_largest_free_block(MALLOC_CAP_INTERNAL)));
@@ -159,8 +159,7 @@ bool SlopSyncAsyncWsTransport::write(std::span<const std::byte> frame) {
         // live queued buffers regardless of how slowly the link drains. This
         // is what keeps a 129-chunk catalog from ever reaching
         // WS_MAX_QUEUED_MESSAGES in the first place.
-        AsyncWebSocketClient* c = _ws->client(id);
-        if (c != nullptr && c->queueLen() >= slopsync::limits::blob_chunks_in_flight) {
+        if (_ws->queueLen(id) >= slopsync::limits::blob_chunks_in_flight) {
             _txBlobHolds.fetch_add(1, std::memory_order_relaxed);
             return false;   // pumpBlobTransfer() retries this same index next tick
         }
@@ -230,8 +229,7 @@ uint8_t SlopSyncAsyncWsTransport::pollCongestionLevel(uint32_t nowMs) {
     }
 
     const uint32_t id = _clientId.load(std::memory_order_relaxed);
-    AsyncWebSocketClient* c = (id != 0 && _ws != nullptr) ? _ws->client(id) : nullptr;
-    const uint32_t q = c != nullptr ? uint32_t(c->queueLen()) : 0;
+    const uint32_t q = (id != 0 && _ws != nullptr) ? uint32_t(_ws->queueLen(id)) : 0;
     const uint32_t pct = (q * 100u) / uint32_t(WS_MAX_QUEUED_MESSAGES);
 
     if (pct > 50) {
@@ -485,27 +483,15 @@ void SlopSyncAsyncWsPort::loop() {
     // the send path never blocks and a wedged client cannot stall anything.
     // What IS still worth doing is reaping clients AsyncWebSocket has already
     // given up on, so hub slots do not leak if a disconnect event was missed.
-    // NO UNCONDITIONAL PROBE HERE. loop() runs every 5 ms and a probe walks the
-    // WHOLE heap (milliseconds), so probing here saturates the hub task and the
-    // device stops answering — measured, fw 2.3.0, device went intermittently
-    // unreachable until this was removed. Rate-limited instead: often enough to
-    // bracket cleanupClients(), rare enough to leave the tick usable.
-#if defined(SLOPSYNC_HEAP_BISECT)
-    {
-        static uint32_t s_lastProbeMs = 0;
-        const uint32_t nowMs = millis();
-        if (uint32_t(nowMs - s_lastProbeMs) >= 1000u) {
-            s_lastProbeMs = nowMs;
-            HEAP_PROBE("loop:before-cleanupClients");
-            _ws.cleanupClients(kSlots);
-            HEAP_PROBE("loop:after-cleanupClients");
-        } else {
-            _ws.cleanupClients(kSlots);
-        }
-    }
-#else
+    // NO HEAP PROBE HERE, not even a rate-limited one. A 1 Hz pair of
+    // heap_caps_check_integrity_all() walks used to bracket cleanupClients();
+    // each walks EVERY block header in EVERY region, and the operator could see
+    // the cost with their own eyes — the heartbeat LED stuttered once a second
+    // (2026-07-31, fw 2.3.12). The probes bought nothing: TRAPS T28 item 5
+    // records that they never once fired, because the gap between them is far
+    // longer than the window between the bad write and the allocator tripping
+    // over it. Cost with proven-zero yield, on the hub tick. Gone.
     _ws.cleanupClients(kSlots);
-#endif
 
     // ---- Deferred attach/detach (hub task only) -----------------------------
     // Field bug #5 (docs/http-plane-retirement.md): the hub must only ever be

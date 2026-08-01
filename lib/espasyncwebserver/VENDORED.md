@@ -7,7 +7,7 @@
 | **Commit** | `a008cccf07aad47e35f02c21393e3dc41688981b` (2026-07-26) |
 | **Vendored** | 2026-07-26 |
 | **Licence** | LGPL-3.0 (see `LICENSE`) |
-| **Companion** | `lib/asynctcp/` — ESP32Async/AsyncTCP 3.5.0, `fd296a703104463c841d8711de3d5f63ea8ffb14` (2026-07-24), vendored unpatched |
+| **Companion** | `lib/asynctcp/` — ESP32Async/AsyncTCP 3.5.0, `fd296a703104463c841d8711de3d5f63ea8ffb14` (2026-07-24); ALSO patched, see `lib/asynctcp/VENDORED.md` |
 
 Only `src/`, `library.json`, `LICENSE` and `README.md` are vendored. Examples,
 tests and CI are deliberately not, to keep the tree small.
@@ -30,7 +30,7 @@ of compensated for by the application.
 ## THIS COPY IS PATCHED — unlike `lib/ruckig/`
 
 `lib/ruckig/` is byte-identical to upstream and must never be patched locally.
-**This one is different**: it carries a deliberate local patch, so the two
+**This one is different**: it carries deliberate local patches, so the two
 vendoring policies are NOT the same and should not be assumed so.
 
 Every patched hunk is marked in-source with `LOCAL PATCH (SlopDrive)` — grep for
@@ -80,10 +80,33 @@ still emitting a legal single-value response, so any other consumer of this
 library does not suddenly start failing handshakes because of this patch. That
 property is what makes it upstreamable.
 
+### The patch: `queueLen(uint32_t id)`
+
+`AsyncWebSocket.cpp` / `AsyncWebSocket.h`. Added 2026-07-31.
+
+Upstream exposes queue depth only as `AsyncWebSocketClient::queueLen()`, and the
+only way to reach a client is `AsyncWebSocket::client(id)` — which takes
+`_ws_clients_lock`, resolves the id, and then **returns the raw pointer after
+releasing the lock**. Every `client(id)->queueLen()` in a multi-task program is
+therefore a use-after-free window: the AsyncTCP task can run
+`_onDisconnect -> _handleDisconnect -> _clients.erase()` and free that
+`std::list` node before the caller dereferences it.
+
+Upstream already provides the lock-safe *boolean* (`availableForWrite(id)`), and
+its own guidance in `AsyncWebSocket.h` recommends it. What is missing is the
+lock-safe *count*, which any caller with a threshold BELOW
+`WS_MAX_QUEUED_MESSAGES` needs — SlopSync sheds telemetry at 3/4 depth and gates
+blob chunks at the registry's in-flight budget, so a full/not-full boolean cannot
+express either. The patch adds the count as one function that resolves and reads
+under the same lock.
+
+Mechanism and the live failure that motivated it: TRAPS T29.
+
 ### Upstreaming
 
-This patch is intended to go upstream as a PR (it fixes a real spec violation
-and a literal `// ToDo` in upstream's own code). Until it is merged and released:
+Both patches are intended to go upstream as PRs (one fixes a real spec violation
+and a literal `// ToDo` in upstream's own code; the other closes a UAF the
+library's own comments repeatedly warn about). Until merged and released:
 
 * keep the `LOCAL PATCH (SlopDrive)` markers,
 * re-apply on every version bump — see below.

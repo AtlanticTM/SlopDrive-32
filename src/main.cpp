@@ -27,6 +27,7 @@
 #include "CrashRing.h"       // last-words ring: begin/crumb/heapSample
 #include "OomHook.h"        // failed-alloc hook: names the allocation, not the victim
 #include "HeapTrace.h"      // DIAGNOSTIC: alloc/free history (SLOPSYNC_HEAP_BISECT only)
+#include "HeapWatch.h"      // DIAGNOSTIC: hardware watchpoint 0 (SLOPSYNC_HEAP_BISECT only)
 #include "sloplog/sloplog.h"
 #include "SystemState.h"
 #include "ConfigStore.h"
@@ -904,7 +905,33 @@ void setup() {
             webui.server()->send(200, "application/json", buf);
             heap_caps_free(buf);
         });
-        SLOGW("boot", "DIAGNOSTIC BUILD: /api/heaptrace live (heap tracing + comprehensive poisoning)");
+        // Watchpoint readout + selftest. GET reports what is armed; ?selftest=1
+        // deliberately CRASHES the device (that is the pass condition — see
+        // HeapWatch.h constraint 4). httpTask is Core 0, which is the core every
+        // suspect in this hunt runs on, so the selftest proves the watchpoint on
+        // the core that matters.
+        webui.server()->on("/api/heapwatch", HTTPMethod::HTTP_GET, [&]() {
+            if (webui.server()->arg("selftest") == "1") {
+                webui.server()->send(200, "application/json",
+                                     "{\"selftest\":\"firing\",\"expect\":\"Watchpoint 0 triggered\"}");
+                delay(150);   // let the response actually leave before we panic
+                heapwatch::selftest();
+                return;
+            }
+            char buf[256];
+            snprintf(buf, sizeof(buf),
+                     "{\"armed_at\":\"0x%08x\",\"armed_size\":%u,\"arms\":%u,"
+                     "\"quarantined\":%u,\"evicted\":%u,"
+                     "\"selftest_failed\":%s,\"core\":%d}",
+                     unsigned(uintptr_t(heapwatch::armedAt())), unsigned(heapwatch::armedSize()),
+                     unsigned(heapwatch::arms()), unsigned(heapwatch::quarantined()),
+                     unsigned(heapwatch::quarantineEvicted()),
+                     heapwatch::selftestFailed() ? "true" : "false",
+                     int(xPortGetCoreID()));
+            webui.server()->send(200, "application/json", buf);
+        });
+        SLOGW("boot", "DIAGNOSTIC BUILD: /api/heaptrace + /api/heapwatch live "
+                      "(watchpoint 0, comprehensive poisoning)");
 #endif
     } else {
         SLOGW("boot", "OTA skipped — WiFi down at boot (serial rescue path only)");

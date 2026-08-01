@@ -188,6 +188,11 @@ AsyncWebSocketClient::AsyncWebSocketClient(AsyncClient *client, AsyncWebSocket *
   _client->onDisconnect(
     [](void *r, AsyncClient *c) {
       ((AsyncWebSocketClient *)(r))->_onDisconnect();
+      // Quarantining the AsyncClient here was TRIED AND RULED OUT (fw 2.3.9):
+      // the watchpoint never fired and the corruption reproduced unchanged,
+      // same signature, same exc_vaddr. The write does not land in a freed
+      // AsyncClient. The bait moved to the _clients list NODE instead --
+      // AsyncWebSocket.h, AwsQuarantineAlloc.
       delete c;
     },
     this
@@ -966,6 +971,13 @@ bool AsyncWebSocket::availableForWrite(uint32_t id) {
     return true;
   }
   return !iter->queueIsFull();
+}
+
+// LOCAL PATCH (SlopDrive) -- see the declaration for why this exists.
+size_t AsyncWebSocket::queueLen(uint32_t id) {
+  asyncsrv::lock_guard_type lock(_ws_clients_lock);
+  AsyncWebSocketClient *c = client(id);
+  return c ? c->queueLen() : 0;
 }
 
 size_t AsyncWebSocket::count() const {

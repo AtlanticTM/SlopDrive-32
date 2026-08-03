@@ -159,7 +159,7 @@ def run_camelcase_check():
     dictionary = _load_gb_dictionary()
     findings = []
 
-    all_files = list(tracked_files())
+    all_files = list(governed_files())
     for rel in all_files:
         for component in rel.split("/"):
             stem = component.rsplit(".", 1)[0] if "." in component else component
@@ -256,7 +256,11 @@ GREP_CHECKS = [
         include=("src/", "include/", "lib/sloplog/", "lib/slopglow/",
                  "lib/slopmotion/", "lib/slopsync/"),
         exempt=("src/system/AppLog.cpp",          # the serial SINK itself
-                "src/c5_tdongle/", "src/c5_waveshare/"),  # until sloplog vendored to C5s
+                # until sloplog is vendored to the C5 boards. c5_probe joined
+                # this list 2026-08-03: it was written while untracked files
+                # were invisible to the lint, so it never had to declare
+                # itself. Same board family, same reason as the other two.
+                "src/c5_tdongle/", "src/c5_waveshare/", "src/c5_probe/"),
     ),
     dict(
         name="slopsync-purity",
@@ -359,7 +363,7 @@ def run_critical_static_check():
     """
     rx_static = re.compile(r"^\s*static\s+[A-Za-z_][\w:<>]*\s+\w+\s*[;({=]", re.M)
     findings = []
-    for rel in tracked_files():
+    for rel in governed_files():
         if not rel.startswith(("src/", "include/", "lib/slop")):
             continue
         if not rel.endswith((".cpp", ".h", ".hpp")):
@@ -387,18 +391,38 @@ def run_critical_static_check():
     return findings
 
 
-def tracked_files():
-    out = subprocess.run(["git", "ls-files"], cwd=ROOT,
-                         capture_output=True, text=True, check=True).stdout
+def governed_files():
+    """Every file the lint governs: tracked PLUS untracked-but-not-ignored.
+
+    Plain `git ls-files` is a false-clean generator. A brand new file is
+    invisible to every check until someone remembers to `git add` it, which
+    is precisely the window where the checks matter most -- new code is
+    where a new violation lands. `--others --exclude-standard` adds untracked
+    files while still honoring .gitignore, so generated trees and host-local
+    scratch stay out.
+
+    Deleted-but-still-tracked paths are dropped here rather than in each
+    reader: `ls-files --cached` lists them and every consumer would otherwise
+    need its own OSError guard.
+    """
+    out = subprocess.run(
+        ["git", "ls-files", "--cached", "--others", "--exclude-standard"],
+        cwd=ROOT, capture_output=True, text=True, check=True).stdout
+    seen = set()
     for f in out.splitlines():
+        if f in seen:
+            continue          # a staged-and-modified path is listed twice
+        seen.add(f)
         if f.startswith(VENDORED_PREFIXES) or f.endswith(BINARY_SUFFIXES):
+            continue
+        if not (ROOT / f).is_file():
             continue
         yield f
 
 
 def run_grep_checks():
     findings = []
-    for rel in tracked_files():
+    for rel in governed_files():
         applicable = [c for c in GREP_CHECKS
                       if any(rel.startswith(p) for p in c["include"])
                       and not any(rel.startswith(e) for e in c["exempt"])]
@@ -426,7 +450,7 @@ def run_codespell_check():
                  "pip install codespell (>=2.4) -- the British-spelling rule "
                  "has no fallback and refuses to silently skip")]
 
-    files = [f for f in tracked_files() if not _spelling_exempt(f)]
+    files = [f for f in governed_files() if not _spelling_exempt(f)]
     if not files:
         return []
     abs_paths = [str(ROOT / f) for f in files]

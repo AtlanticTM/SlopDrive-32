@@ -8,7 +8,15 @@ CLAUDE.md
 .VSCodeCounter/
 .gitignore
 .cache/
-.claude/
+# Claude Code config is COMMITTED (hooks/rules/skills survive a clone, like
+# canon_lint). Only host/session-local state stays out.
+.claude/settings.local.json
+.claude/scheduled_tasks.lock
+.claude/.rfc-ticket
+.claude/skills/run-slopdrive-32/
+.claude/workflows/
+# Serena MCP project cache (host-local symbol index)
+.serena/
 
 # Real secrets - never commit. Use secrets.example.h as the shared template.
 include/secrets.h
@@ -48,6 +56,10 @@ tools/*
 # points at. A ledger section naming a script that does not survive a clone is
 # a dead reference, so this one is tracked. Its OUTPUT (dir_ladder.json) is not.
 !tools/dir_ladder.py
+# Spec drift detector (/drift): diffs this repo's protocol reality against
+# the pinned SlopSync sibling; its output is the RFC backlog. Tracked for the
+# same reason as canon_lint: enforcement tooling survives a clone.
+!tools/spec-drift.sh
 # CHANNEL-MAP.md table codegen — this repo's own machine-catalog lockstep
 # tool: it parses registry.yaml (now the pinned SlopSync sibling's copy) +
 # SlopSyncCatalog.h (this device's own channels) so the doc can never

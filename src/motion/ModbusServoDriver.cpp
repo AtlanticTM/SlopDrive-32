@@ -5,7 +5,7 @@
 // - Streamed 0x7B setpoints via StreamedSetpointExecutor (the "ISR" for this
 //   backend — see ServoMotionExecutor.h). Every motion entry point stays
 //   gated behind the exact same homed/enabled discipline FAS mode uses
-//   (DOCTRINE.md §2 — nothing moves spontaneously); the only way _homed
+//   (architecture.md — nothing moves spontaneously); the only way _homed
 //   becomes true this phase is the BENCH forceHomeState() path (real homing
 //   is Phase 4).
 // See: ModbusServoDriver.h for the full doctrine writeup.

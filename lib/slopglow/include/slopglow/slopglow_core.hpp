@@ -85,7 +85,7 @@ public:
 // not by severity: Fault fires on a simply-unhomed machine, the ordinary
 // state of a fresh boot, which would otherwise hide the pairing window on
 // exactly the device most likely to need it). Pairing still stays below
-// Ota and Estop. See TRAPS.md T15.
+// Ota and Estop. See logging-leds.md T15.
 enum class GlowState : uint8_t {
     Boot = 0,      // power-up until the system says otherwise
     LinkDown,      // no network/transport

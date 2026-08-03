@@ -36,8 +36,8 @@ class ServoModbus;
 //       _wire_sign is AIM_MODBUS_WIRE_SIGN (config_api.h, bench-determined).
 //     - streamToSteps() hands the target to the
 //       executor's jerk-limited tracker (track()), which integrates from
-//       its OWN live commanded pos/vel — never a stale target (DOCTRINE.md
-//       §2).
+//       its OWN live commanded pos/vel, never a stale target
+//       (architecture.md).
 //     - getPosition()/getTargetPosition() read the executor's commanded
 //       sample — "commanded = truth," open-loop, exactly like
 //       AIMServoDriver's FAS position readback (see ServoMotionExecutor.h's

@@ -433,7 +433,7 @@ float    aimStepsPerMm();
 
 
 // ---- Serial Control Mode ----------------------------------------------------
-// SlopSync (WiFi) is the only control plane (DOCTRINE.md §9). USB Serial
+// SlopSync (WiFi) is the only control plane (transport.md). USB Serial
 // is boot-log + the rescue/OTA-recovery path only. SERIAL_CONTROL_MODE just
 // gates the boot banner and the /api/status → serial_mode diagnostic field.
 #define SERIAL_CONTROL_MODE     1            // 1 = boot banner says serial-rescue, 0 = WiFi-only banner

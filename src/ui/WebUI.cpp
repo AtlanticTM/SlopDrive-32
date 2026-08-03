@@ -13,7 +13,7 @@
 //   update()/handleClient() runs on the HTTP task; the telemetry sampler runs
 //   on its own esp_timer callback at 240Hz and is the sole writer of
 //   _state.actual_position_mm (see telemetryTimerCb()).
-// See: docs/http-plane-retirement.md, docs/canon/DOCTRINE.md
+// See: docs/http-plane-retirement.md, webui.md
 
 #include "WebUI.h"
 
@@ -796,7 +796,7 @@ bool WebUI::applySettings(JsonDocument& doc, JsonDocument& resp) {
     // the mapper: SlopSyncHubService's 0x0081 machine-config STATE broadcast
     // (so the UI's ground-truth rail band always redisplayed the stale
     // boot-time window after a live edit — the Ground Truth Doctrine
-    // (docs/canon/DOCTRINE.md) was doing exactly its job, faithfully
+    // (webui.md) was doing exactly its job, faithfully
     // reporting a firmware value that was itself wrong) and
     // pumpConfigGeneration()'s change detector (so the SlopSync protocol
     // cfg_gen never advanced for a window edit either). The physical machine
@@ -864,7 +864,7 @@ bool WebUI::applyMove(JsonDocument& doc, JsonDocument& resp) {
     }
     bool stream = doc["stream"] | true;
 
-    // Sole-caller rule (docs/canon/DOCTRINE.md): the UI is an input source — it
+    // Sole-caller rule (architecture.md): the UI is an input source, it
     // must submit intents to the MotionArbiter, never call the driver
     // directly. This is also what makes a manual move honor the USER
     // speed/accel limit set: a MANUAL point move (deadline 0) plans AT the

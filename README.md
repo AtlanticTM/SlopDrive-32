@@ -17,14 +17,21 @@ This README is a stub, pending a rewrite. The authoritative docs are:
 
 | Where | What |
 |---|---|
-| `docs/canon/CANON.md` | Governance law (C-1..C-12). Read first. |
-| `docs/canon/DOCTRINE.md` | Engineering rules: architecture, motion, build/test/OTA. |
-| `docs/canon/LEDGER.md` | Current volatile truth — versions, deploy state, milestones. |
-| `docs/canon/TRAPS.md` | Field-bug mechanism lessons. |
+| `.claude/rules/governance.md` | Governance law (C-1..C-12). Read first. |
+| `.claude/rules/architecture.md` | Modularity, motion doctrine, sole-caller rule, SSManager. |
+| `.claude/rules/cpp-style.md` | Comment style law, minimalism precedence, navigation. |
+| `.claude/rules/cpp-safety.md` | Safe subset, lifetime rules, toolchain warning floor. |
+| `.claude/rules/memory-budget.md` | PSRAM placement, heap floors, diagnostic budgeting. |
+| `.claude/rules/motion-control.md` | SlopMotion, DIR-edge and MCPWM mechanism. |
+| `.claude/rules/transport.md` | SlopSync boundary, UART bridge, relay semantics. |
+| `.claude/rules/logging-leds.md` | SlopLog and SlopGlow sole paths. |
+| `.claude/rules/webui.md` | Ground Truth Doctrine, house look, render traps. |
+| `.claude/rules/build-test-deploy.md` | Build gates and OTA law. |
+| `bd` dev board | Current volatile truth: versions, deploy state, milestones. |
 | `docs/webui-architecture.md` | The catalog-driven web UI. |
-| SlopSync repo | The protocol spec, library, and clients — a sibling repo. |
+| SlopSync repo | The protocol spec, library, and clients: a sibling repo. |
 
-Build and deployment procedure lives in DOCTRINE (build/test/OTA sections);
+Build and deployment procedure lives in `.claude/rules/build-test-deploy.md`;
 `tools/canon_lint.py` must report zero findings before work is called done.
 
 ## License

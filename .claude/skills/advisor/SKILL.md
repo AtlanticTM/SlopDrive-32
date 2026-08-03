@@ -35,7 +35,7 @@ Every answer states where the decision belongs. The canonical shapes:
 - "The spec already promises this (cite section). The implementation is
   behind; that is a dev-board issue, not an RFC."
 - "These sources contradict. That is a flag, not a choice I make silently."
-  (Machine repo CANON C-5 applies; raise it, stop that thread.)
+  (Machine repo governance.md C-5 applies; raise it, stop that thread.)
 
 ## Grounding rules
 
@@ -59,4 +59,4 @@ Every answer states where the decision belongs. The canonical shapes:
 - Wire/protocol/spec change -> RFC draft in spec/RFC-QUEUE.md plus a mirror
   issue on the RFC board (spec repo, `bd`, `rfc-` prefix).
 - A ruling that contradicts existing doctrine -> the amendment ritual
-  (machine repo CANON C-7), never a quiet exception.
+  (machine repo governance.md C-7), never a quiet exception.

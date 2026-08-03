@@ -1,7 +1,7 @@
 #pragma once
 
 // LEGACY — dead on device, kept pending removal ruling; superseded by
-// lib/slopmotion, see DOCTRINE.md §8.
+// lib/slopmotion, see motion-control.md.
 
 // ============================================================================
 // MotionInterpolator — on-device cubic motion generator for TCode v0.4 (A2)

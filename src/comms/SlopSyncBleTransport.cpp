@@ -11,7 +11,7 @@
 //   detach processed before attach.
 //   notify() failure is the only congestion signal available — NimBLE
 //   exposes no separate notify-queue-depth counter.
-// See: docs/canon/TRAPS.md T14 (advertising payload budget).
+// See: transport.md T14 (advertising payload budget).
 
 #if defined(BLE_ENABLED)
 

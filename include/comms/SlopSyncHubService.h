@@ -12,7 +12,7 @@
 //   ever touching the hub. The WS transport itself is NOT single-threaded
 //   (AsyncTCP owns its own task) — see the threading model in
 //   SlopSyncAsyncWsTransport.h.
-// - The delegate NEVER commands the motor directly (DOCTRINE.md §2 sole-caller
+// - The delegate NEVER commands the motor directly (architecture.md sole-caller
 //   rule): every motion-bearing intent becomes a WebUI::handleCommand() call,
 //   exactly the path the WS UI already uses, which submits to the
 //   MotionArbiter.
@@ -32,7 +32,7 @@
 #include "SlopSyncCrypto.h"
 #include "SlopSyncPlatform.h"
 #include "SlopSyncUiToken.h"
-// THE transport (DOCTRINE.md §9) — ESP32Async is the only WS stack in the
+// THE transport (transport.md) — ESP32Async is the only WS stack in the
 // build now. History + the A/B that settled it: docs/http-plane-retirement.md.
 #include "SlopSyncAsyncWsTransport.h"
 // RFC-043 (Phase E): the second transport. Self-excludes to nothing when

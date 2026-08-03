@@ -54,7 +54,7 @@
 //
 // See:
 //   SlopSyncAsyncWsTransport.h — the WS-side twin this file mirrors throughout
-//   TRAPS.md T5 — why transport callbacks never touch hub state directly
+//   transport.md T5 — why transport callbacks never touch hub state directly
 
 #if defined(BLE_ENABLED)
 

@@ -49,7 +49,7 @@ data/index.html.gz
 # (tools/* not tools/ so specific files CAN be re-included below —
 #  git cannot re-include anything under an excluded directory.)
 tools/*
-# SlopCanon mechanical floor (docs/canon/CANON.md §5) — doctrine enforcement
+# SlopCanon mechanical floor (.claude/rules/governance.md §5) — doctrine enforcement
 # is part of the repo, not a scratch script.
 !tools/canon_lint.py
 # Reversal step-loss ladder — the instrument docs/canon/LEDGER.md "DIR LADDER"

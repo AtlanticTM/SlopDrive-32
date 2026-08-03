@@ -65,7 +65,7 @@ constants) rather than duplicating it — one wire implementation, no drift.
 
 | Scenario | What it does | What it is actually asking |
 |---|---|---|
-| `b2b` | 3 consecutive full sessions, **no reboot between**, torn down clean / RST / abandoned | [TRAPS.md](canon/TRAPS.md) T3's mandatory pattern — does source ownership leak across teardown? |
+| `b2b` | 3 consecutive full sessions, **no reboot between**, torn down clean / RST / abandoned | `transport.md` T3's mandatory pattern — does source ownership leak across teardown? |
 | `rst` | 10× full session then `SO_LINGER 0` → TCP **RST** | does the §11.4 rude‑death path release everything? |
 | `churn` | 30 rapid connect/handshake/disconnect cycles | slot leaks, handshake latency under pressure |
 | `wedge-silent` | a client completes the handshake, subscribes at high rate, then **stops reading its socket** and also stops talking | the firmware's mute‑then‑evict sweep should reclaim it |
@@ -143,7 +143,7 @@ http  499 polls, 1 failure, p50 57.9 ms, p95 116.9 ms, max 3596.4 ms
 
 **`b2b` — 3/3.** Every one of three consecutive sessions (clean / RST /
 abandoned teardown, no reboot between) was granted `motion-input (0x0084)` at
-50 Hz. No stranded source ownership. The bug [TRAPS.md](canon/TRAPS.md) T3
+50 Hz. No stranded source ownership. The bug `transport.md` T3
 records as "the third field bug for the ages" stays fixed.
 
 **`rst` — 10/10.** Ten RST teardowns; every following session established and

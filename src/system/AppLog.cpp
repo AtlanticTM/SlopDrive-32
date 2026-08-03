@@ -1,12 +1,12 @@
 // AppLog — the SlopLog sink bridge for the S3 main controller.
 //
 // Constraints:
-// - The ONLY place SlopLog sinks are registered (DOCTRINE.md §7); all
+// - The ONLY place SlopLog sinks are registered (logging-leds.md); all
 //   logging flows through SLOGx.
 // - Every sink registered here must be non-blocking and non-allocating on
-//   write() — sinks run inline on whatever task called SLOGx (TRAPS.md T6).
+//   write(): sinks run inline on whatever task called SLOGx (logging-leds T6).
 // - The web /api/log ring and its dump-time snapshot buffers are
-//   placement-new'd into PSRAM from applogBegin() (TRAPS.md T2) — never
+//   placement-new'd into PSRAM from applogBegin() (memory-budget.md T2) — never
 //   move them back to a static/BSS instance.
 // - applogBegin() runs single-task, before any FreeRTOS task exists.
 
@@ -67,7 +67,7 @@ public:
         // append can reallocate — never allocate in a critical section).
         // _loSnap/_hiSnap are instance members (not function-local statics)
         // so they ride into PSRAM with the rest of this object instead of
-        // adding a second ~8.9 KB internal-BSS reservation (TRAPS.md T2).
+        // adding a second ~8.9 KB internal-BSS reservation (memory-budget T2).
         // dump() is never reentrant (httpTask only).
         LowSub& loSnap = _loSnap;
         HighSub& hiSnap = _hiSnap;
@@ -178,7 +178,7 @@ private:
 };
 
 // ~17.8 KB total (_low + _high + _loSnap + _hiSnap). Placement-new'd into
-// PSRAM from applogBegin() (TRAPS.md T2) rather than living as a static: only
+// PSRAM from applogBegin() (memory-budget T2) rather than as a static: only
 // httpTask ever touches this ring (write() from the drain caller, dump()
 // from HTTP handlers) — no ISR, no DMA, nothing that requires internal RAM.
 // Same idiom as SlopSyncHubService in main.cpp: heap_caps_malloc +
@@ -263,7 +263,7 @@ SlopSyncSink& syncSink() {
 
 }  // namespace
 
-// Serial-sink gating is RUNTIME, not compile-time (TRAPS.md T17). One input
+// Serial-sink gating is RUNTIME, not compile-time (logging-leds T17). One
 // picks the sink's floor: handshook — the WebUI served /api/log at least
 // once -> Warn+ only; until then, full.
 static bool s_serialHandshook = false;
@@ -279,7 +279,8 @@ static SystemState* s_state = nullptr;
 
 void applogBegin(SystemState* state) {
     s_state = state;
-    // Placement-new the web ring into PSRAM (TRAPS.md T2; see webRingOrNull()'s
+    // Placement-new the web ring into PSRAM (memory-budget T2; see
+    // webRingOrNull()'s
     // comment). Runs single-task, before any other setup() work — no
     // construction-order race.
     void* mem = heap_caps_malloc(sizeof(WebRingSink), MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT);

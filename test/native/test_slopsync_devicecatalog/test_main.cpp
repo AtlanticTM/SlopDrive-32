@@ -456,7 +456,7 @@ TEST_CASE("device catalog: M5a growth is append-only on 0x0080/0x0081/0x0082/0x0
 // built by reading a STATE field's `setting_key` and writing THAT key on the
 // entry's `settingChannel`. A key that resolves to nothing produces a control
 // that renders perfectly and drives nothing — the exact defect class
-// DOCTRINE.md §3 calls a shipping-broken control.
+// webui.md calls a shipping-broken control.
 TEST_CASE("device catalog: every setting_key resolves in its declared settingChannel") {
     DeviceCatalog dc;
     int annotated = 0;

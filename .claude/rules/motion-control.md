@@ -6,7 +6,35 @@ paths:
   - "src/main.cpp"
 ---
 
-# Motion control constraints (pointers; DOCTRINE §2/§8 and TRAPS own the story)
+# Motion control constraints
+
+Architecture-level motion doctrine (one command one plan, the MotionArbiter
+sole-caller rule, dual-core separation) lives in
+`.claude/rules/architecture.md` §2. This file is the mechanism layer.
+
+## SlopMotion (`lib/slopmotion/`)
+
+Every command becomes ONE trajectory planned from the engine's actual
+(p, v, a); the 1 kHz sampler evaluates it. Event-driven, never clocked.
+
+- **Map:** header-only, hardware-free `slopmotion::Engine` wrapping vendored
+  `lib/ruckig/`, which is BYTE-IDENTICAL to upstream. Wrap, never patch; see
+  `lib/ruckig/VENDORED.md`. Tests in `test/native/test_slopmotion`; scenario
+  harness in `examples/slopmotion_traces/`, which includes the retired cubic
+  as a bench baseline and is not firmware.
+- **Division of labor (MEASURED; re-run the bench before re-litigating).**
+  Ruckig Community is a point-to-point planner, not a waveform interpolator.
+  WAVEFORM (duration-carrying segments) is C2 quintic Hermite over exactly the
+  commanded duration, ceiling and window scanned, illegal shapes falling
+  through to the Ruckig guard. CHASE (dense bare points) is Ruckig
+  replan-per-point with predictive aim. SETTLE is brake-to-rest when a plan
+  ends still-moving with no fresh command.
+- **Safety:** Ruckig Community has NO position limits and quintics can bulge,
+  so the Engine owns the window: targets clamped, end velocities bound-safe,
+  quintics legality-scanned, sampled output clamped. Exceptions are never
+  instantiated; non-finite inputs are rejected at `commit()`.
+- **The sampler task stack is 16 KB** because `commit()` nests KB-scale Ruckig
+  temporaries. Never shrink it (T1 class).
 
 ## Direction changes: the v=0 gate
 
@@ -42,18 +70,18 @@ paths:
   microsecond float math only, no heap alloc, no ISR context
   (include/motion/MotionArbiter.h:33). IRAM_ATTR appears once in the repo
   (src/system/OomHook.cpp); FAS's own ISRs are upstream's contract
-  (DOCTRINE §11 scope).
+  (cpp-safety.md scope).
 - Task map (src/main.cpp:1030-1058): motorTask C1/p3, streamSamplerTask C1/p4
   16 KB stack, commsTask C0/p2, httpTask C0/p1, servoBusTask C1/p5, FAS
   StepperTask pinned C0/p24 DELIBERATELY (on C1 it preempts the sampler into
   audible judder; unpinned it stalls behind Core-0 bursts,
-  AIMServoDriver.cpp:63-73). Core 0 = comms, Core 1 = motion (DOCTRINE §2).
+  AIMServoDriver.cpp:63-73). Core 0 = comms, Core 1 = motion (architecture.md §2).
 
 ## Stack and assignment traps (TRAPS T1, T9)
 
 - Never `obj = T{}` on big objects: the RHS temporary builds on the CURRENT
-  stack (T1, canon_lint this-assign rule). The sampler's 16 KB stack exists
+  stack (T1, cpp-safety.md; canon_lint this-assign rule). The sampler's 16 KB stack exists
   because commit() nests KB-scale Ruckig temporaries; never shrink it
-  (DOCTRINE §8).
+  (SlopMotion section above).
 - Forwarding proxies never restate base-class default args; pass sentinels
   (T9, include/motion/MotorProxy.h:52-58).

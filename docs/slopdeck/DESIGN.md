@@ -1,7 +1,7 @@
 # SlopDeck — the gold-standard SlopSync client & widget system
 
 Status: DESIGN (operator-ratified direction, 2026-07-27; §8 delivery ruling
-landed same day). This is the home ([CANON C-1](../canon/CANON.md)) for
+landed same day). This is the home (`governance.md` C-1) for
 the client/widget architecture. Wire truth stays in the SlopSync repo
 (sibling checkout, pinned by `slopsync.pin`); SlopDeck is everything above
 the wire.
@@ -34,7 +34,7 @@ Consequences, all deliberate:
   (reported state in, intents out, pending → echo-confirmed lifecycle), the
   event stream, and roles. No socket access, no side channels, no HTTP
   backdoors.
-- Ground-truth doctrine ([DOCTRINE.md](../canon/DOCTRINE.md) §3) holds
+- Ground-truth doctrine (`webui.md`) holds
   structurally: a plugin cannot
   lie about machine state because it never owns state — it renders the shadow
   store and submits intents like everyone else.
@@ -129,7 +129,7 @@ plugins. Anything a plugin "needs" beyond this is a Prime Rule event (§2).
 
 **Freeze discipline:** the moment the first external plugin exists, the
 widget API is frozen the way `hub.hpp` is frozen
-([CANON C-6](../canon/CANON.md)): additive
+(`governance.md` C-6): additive
 evolution only, versioned, never breaking. Design it small and boring.
 
 ## 5. Compliance testing — the sim modes (replaces the old approach)
@@ -295,7 +295,7 @@ matters and is transport-agnostic (SlopSync SPEC.md §13);
 every hub SHOULD expose both WS and BLE GATT on ESP32-class hardware. The
 legacy OSSM BLE masquerade is EOL — SlopSync-over-BLE replaces it, and
 SlopDeck's Shell is what speaks it client-side (browsers can't, portably).
-See [`docs/canon/DOCTRINE.md`](../canon/DOCTRINE.md) §9 (transport
+See [`.claude/rules/transport.md`](../../.claude/rules/transport.md) (transport
 doctrine) + SlopSync RFC-043.
 
 ## 9. Framework ruling — Svelte 5, with one piece of insurance

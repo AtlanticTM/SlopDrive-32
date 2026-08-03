@@ -18,7 +18,7 @@ FULL REFACTOR") was answered — the rebuilt, catalog-driven client is
 architecture. This document stays as the ruling's record and the
 evidence that made it non-negotiable, not as a live status page (status
 lives in [`docs/canon/LEDGER.md`](canon/LEDGER.md), per
-[CANON C-2](canon/CANON.md)).
+`governance.md` C-2).
 
 ---
 
@@ -750,7 +750,7 @@ rather than an adjective:
 4. **Ground truth, everywhere, provably.** Every control renders reported state,
    shows pending until ECHO, reverts on NACK/timeout, and grays from
    `enabled_mask`. No optimistic state anywhere —
-   [DOCTRINE.md](canon/DOCTRINE.md) §3 calls a UI that
+   `webui.md` calls a UI that
    lies about machine state a safety defect on this product, and it means it.
 5. **Degrades honestly.** Watch tier grays the write plane but keeps e-stop live
    (role-exempt by catalog, RFC-025b). Hub down = controls fail visibly, never

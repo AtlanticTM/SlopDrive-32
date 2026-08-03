@@ -66,7 +66,7 @@ public:
     void runMotorStep()    override { d().runMotorStep(); }
 
 protected:
-    // ---- Motion (MotionArbiter-only — sole-caller rule, DOCTRINE.md §2) -----
+    // ---- Motion (MotionArbiter-only, sole-caller rule, architecture.md) -----
     // Kept protected here too, exactly like every concrete driver — otherwise
     // holding a `MotorProxy&` instead of a `MotorDriver&` would reopen the
     // door the base class closes.

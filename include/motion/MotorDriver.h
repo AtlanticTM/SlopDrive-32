@@ -6,7 +6,7 @@
 // - Every physical hardware interaction (steppers, servos, encoders) sits
 //   behind this interface; concrete drivers (AIMServoDriver, ModbusServoDriver,
 //   future backends) implement the pure virtuals.
-// - Sole-caller rule (DOCTRINE.md §2): the motion methods (moveTo/streamTo/
+// - Sole-caller rule (architecture.md): the motion methods (moveTo/streamTo/
 //   streamToSteps/stop/hardStop) are `protected`, with `friend class
 //   MotionArbiter` as the only grant, so any call through a MotorDriver&
 //   from outside MotionArbiter is a compile error. MotorProxy also holds a
@@ -92,7 +92,7 @@ public:
     virtual void runMotorStep()    = 0;
 
 protected:
-    // ---- Motion (MotionArbiter-only — sole-caller rule, DOCTRINE.md §2) -----
+    // ---- Motion (MotionArbiter-only, sole-caller rule, architecture.md) -----
     // Protected + `friend class MotionArbiter` above: access is checked on the
     // static type (MotorDriver&), so no input source can dispatch motion
     // directly. Everything routes through MotionArbiter::submit() and its

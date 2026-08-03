@@ -8,7 +8,7 @@ agreed map; change it deliberately, not by drift.*
 > **LANDED** with an evidence pointer into
 > [`docs/canon/LEDGER.md`](canon/LEDGER.md) rather than deleted — this file
 > is a decision record, not a live status board (status lives in the
-> LEDGER, per [CANON C-2](canon/CANON.md)).
+> LEDGER, per `governance.md` C-2).
 
 ---
 
@@ -53,7 +53,7 @@ section below for what has moved since.)*
 | Module | Status |
 |---|---|
 | **SlopSync** (protocol + lib + firmware hub) | LIVE — verified on hardware end-to-end, probe 8/8. Now also carries the RFC-030..050 batch (SlopSync repo), UDP discovery is live-verified (unicast, broadcast, rate limit); BLE GATT has held a full-control live session AND a live BLE-to-WS mid-session migration, operator-verified. Firmware version and deploy state live in [LEDGER.md](canon/LEDGER.md) — its one home, never restated here. |
-| **SlopMotion** (Ruckig motion core, §1) | LIVE — `lib/slopmotion` + vendored Ruckig v0.19.4, 11 native suites green, trace bench + graphs, firmware wiring landed (see §10 below, [DOCTRINE.md](canon/DOCTRINE.md) §8) |
+| **SlopMotion** (Ruckig motion core, §1) | LIVE — `lib/slopmotion` + vendored Ruckig v0.19.4, 11 native suites green, trace bench + graphs, firmware wiring landed (see §10 below, `motion-control.md`) |
 | **SlopLog** | LIVE — all legacy sites migrated, boot narration, serial handoff |
 | **SlopGlow** | LIVE — liveness gate field-proven on day one |
 | **WebUI** | REBUILT — catalog-driven client, see [webui-architecture.md](webui-architecture.md); replaces §5 below |
@@ -186,11 +186,8 @@ laggy, takes a long time to reflect device state, and the stroke-window
 control is broken. Expected — we are mid-refactor: the browser still speaks
 the legacy UiSocket plane while every capability it needs now exists,
 verified, on the SlopSync plane. Your job is to move it over, not to patch
-the old plane. Read [DOCTRINE.md](canon/DOCTRINE.md) §3 (Ground Truth
-doctrine) and §9 (SlopSync rules) before touching anything. *(Original text
-said "CLAUDE.md §3/§8" — rule content moved to `DOCTRINE.md` in the
-CLAUDE.md split; section numbers updated to match. See
-[LEDGER.md](canon/LEDGER.md).)*
+the old plane. Read `.claude/rules/webui.md` (Ground Truth doctrine) and
+`.claude/rules/transport.md` (SlopSync rules) before touching anything.
 
 ### 5.1 What the browser does TODAY (measured map, not guesses)
 - Vanilla JS + Vite single-file bundle (`webui/src/`, entry `main.js`;
@@ -264,8 +261,7 @@ CLAUDE.md split; section numbers updated to match. See
   HTTP keeps only: static bundle, OTA, /api/log, /api/capabilities
   (bootstrap pointer to :82). The sync-WebServer question is CLOSED per §4 —
   do NOT migrate the HTTP server.
-- SlopMotion plumbing debts ride along ([DOCTRINE.md](canon/DOCTRINE.md)
-  §8): the 0x05 anomaly
+- SlopMotion plumbing debts ride along (`motion-control.md`): the 0x05 anomaly
   feed (currently deliberately silent — SlopLog only), the inert
   `interp_clamp_overshoot` toggle, and a /api/slopmotion tuning card.
   Anomalies want a proper SlopSync EVENT channel (new device channel id,
@@ -279,7 +275,7 @@ CLAUDE.md split; section numbers updated to match. See
 ### 5.4 Constraints & verification (non-negotiable)
 - Firmware-side: hub service is PSRAM-resident, ONE-TASK WS invariant,
   16 KB task stacks for a reason (see
-  [TRAPS.md](canon/TRAPS.md) T1-T3);
+  `cpp-safety.md` T1-T3);
   new STATE publishers follow the existing SlopSyncHubService publisher
   pattern; MotionArbiter sole-caller via the delegate, always. Catalog
   edits bump the etag — fine; the FROZEN conformance mini-catalog is
@@ -287,11 +283,10 @@ CLAUDE.md split; section numbers updated to match. See
 - Every migrated control: end-to-end verified against the LIVE device
   (payload sent + device state change + echo adopted) before its legacy
   path is deleted — a control that renders but drives nothing is a
-  defect; optimistic UI is prohibited ([DOCTRINE.md](canon/DOCTRINE.md)
-  §3). Page load ADOPTS device
+  defect; optimistic UI is prohibited (`webui.md`). Page load ADOPTS device
   state. Back-to-back sessions without reboot is a mandatory regression
-  pattern ([TRAPS.md](canon/TRAPS.md) T3). Version-bump + OTA deploy per
-  [DOCTRINE.md](canon/DOCTRINE.md) §6;
+  pattern (`transport.md` T3). Version-bump + OTA deploy per
+  `build-test-deploy.md`;
   `uploadfs` for UI-only changes (no reboot), verify with hard refresh.
 - Perf acceptance: first meaningful state < 1 s after page load on LAN;
   motion card latency ≤ 1 frame at granted rate; dragging the stroke

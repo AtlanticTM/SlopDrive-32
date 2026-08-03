@@ -18,7 +18,7 @@ SlopSync checkout (pinned by slopsync.pin) and groups findings by class:
   dirtiness. A stale pin makes every other class meaningless; fix first.
 - STALE GENERATED: registry.yaml newer than its codegen outputs
   (gen_registry_header.py --check).
-- HAND-TRANSCRIPTION (TRAPS T20 class): values codegen does not emit and
+- HAND-TRANSCRIPTION (T20 class, `.claude/rules/build-test-deploy.md`): values codegen does not emit and
   this repo hand-copies: udp_discovery + ble_adv_flags in
   include/comms/SlopSyncDiscoveryWire.h, ble_identity in
   include/comms/SlopSyncBleTransport.h. These drift with zero compiler

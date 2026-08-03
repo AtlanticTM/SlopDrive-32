@@ -1,7 +1,7 @@
 // WifiLink — WiFi STA bring-up, link telemetry, scan-and-pin reconnect.
 //
 // Constraints:
-// - delay() here is permitted only under the init-exception (DOCTRINE.md §2):
+// - delay() here is permitted only under the init-exception (architecture.md):
 //   boot setup() or a supervised reconnect cycle while the link is down,
 //   never the real-time motion path.
 // - Reconnection is driven manually (WiFi.setAutoReconnect(false)) so every

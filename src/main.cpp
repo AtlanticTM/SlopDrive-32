@@ -10,7 +10,7 @@
 //   arbiter (Core 0 -> Core 1 deferral queue); PatternEngine emits one
 //   intent per stroke segment; motorTask drains deferred intents on Core 1.
 //   No periodic motion tick, no chase loop — ONE COMMAND -> ONE PLAN -> FAS.
-// See: docs/canon/DOCTRINE.md (motion doctrine, sole-caller rule, dual-core
+// See: architecture.md (motion doctrine, sole-caller, dual-core
 //   task separation).
 
 #include <Arduino.h>
@@ -661,7 +661,7 @@ static void httpTask(void* param) {
     WebUI* ui = static_cast<WebUI*>(param);
     while (true) {
         TIME_STEP(ui->update(),           "http:ui.update");
-        // M5c: the :81 telemetry WebSocket is gone — see TRAPS.md T8 (never
+        // M5c: the :81 telemetry WebSocket is gone — see transport.md T8 (never
         // stream to a wedged WebSocket client under a shared lock). The
         // replacement never blocks: ESP32Async's write() queues or refuses
         // rather than waiting, so a stuck client can never delay the
@@ -1033,7 +1033,7 @@ void setup() {
     // streamSamplerTask: Core 1, priority 4 — SlopMotion sampler. 16 KB stack:
     // commit() nests Ruckig temporaries (InputParameter 328 B + Trajectory
     // 2.2 KB per frame, measured on xtensa) — the 4 KB stack that fit the
-    // cubic is exactly the TRAPS.md T1 stack-bomb class waiting to recur.
+    // cubic is exactly the cpp-safety.md T1 stack-bomb class waiting to recur.
     task_ok = xTaskCreatePinnedToCore(streamSamplerTask, "Sampler", 16384, nullptr, 4, nullptr, 1);
     configASSERT(task_ok == pdPASS);
     // 4096: measured 1,784 B peak in the fw 2.1.90 stack census (2.3x headroom).

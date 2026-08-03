@@ -17,7 +17,7 @@
 //   (encode) are fixed-offset maps that must stay byte-for-byte in step with
 //   the matching entries in SlopSyncCatalog.h.
 // See:
-//   docs/canon/TRAPS.md (T2 PSRAM placement-new, T3 session teardown, T5 single-task hub)
+//   transport.md (T3 teardown, T5 single-task hub); memory-budget.md (T2)
 //   include/comms/SlopSyncCatalog.h
 
 #include "SlopSyncHubService.h"
@@ -187,7 +187,7 @@ slopsync::AccessLevel SlopDriveHubDelegate::validateToken(std::span<const std::b
     // a page could hoard one and replay it after the posture is tightened.
     //
     // DO NOT MOVE A LAZILY-INITIALIZED ANYTHING INTO consume()'s spinlock —
-    // see docs/canon/TRAPS.md T4 (this exact mistake aborted the device on the
+    // see cpp-safety.md T4 (this exact mistake aborted the device on
     // first HELLO that ever presented a live token). See SlopSyncUiToken.cpp.
     if (hasToken && _uiTokens.consume(token)) {
         SLOGI("slopsync", "session authorized by /uitoken (control tier)");
@@ -1098,7 +1098,7 @@ static slopsync::Catalog32& initCatalog(slopsync::Catalog32& c, DeviceFeatures f
     // (its first loop refuses outright, at any buffer size). The existing
     // "DID NOT ENCODE (scratch N B)" line names only the first, so an ORDERING
     // mistake reads as a sizing problem and sends you off growing a buffer that
-    // was never the constraint (docs/canon/TRAPS.md T12).
+    // was never the constraint (build-test-deploy.md T12).
     //
     // The order is a real wire requirement (§8.1), not a style rule, so this
     // check is cheap and belongs here regardless — it turns "advertises
@@ -1141,7 +1141,7 @@ void SlopSyncHubService::init() {
 
     // A catalog that did not fit the hub's encode scratch produces ZERO bytes,
     // an etag over nothing, and an empty catalog served to every client — the
-    // machine looks healthy and advertises nothing (docs/canon/TRAPS.md T12).
+    // machine looks healthy and advertises nothing (build-test-deploy T12).
     const size_t encoded = _hub.catalogEncodedBytes();
     if (encoded == 0) {
         SLOGE("slopsync", "CATALOG DID NOT ENCODE (scratch %u B) — this hub advertises NOTHING",
@@ -1180,7 +1180,7 @@ void SlopSyncHubService::init() {
     // RFC-048: the hub's DURABLE cross-boot identity (WELCOME identity key 5,
     // also carried by DISCOVER_REPLY, §13.8) — generated ONCE with the
     // hardware RNG and persisted in NVS; every later boot just reads it back.
-    // Blocking NVS I/O here is the DOCTRINE.md §2 boot-sequence exception (this
+    // Blocking NVS I/O here is the architecture.md boot-sequence exception
     // runs once, before the hub task exists), same as checkQuickBootPairingGesture().
     {
         Preferences prefs;
@@ -1244,7 +1244,7 @@ void SlopSyncHubService::init() {
 
     // 16 KB stack: the HELLO path proved capable of several KB of frame
     // buffers + WS-handshake stack on top of baseline, and an 8 KB stack has
-    // blown its canary here before (docs/canon/TRAPS.md T1). Internal RAM is
+    // blown its canary here before (cpp-safety.md T1). Internal RAM
     // plentiful post-PSRAM-relocation (T2); this is cheap insurance on the
     // safety plane.
     BaseType_t ok = xTaskCreatePinnedToCore(&SlopSyncHubService::taskTrampoline, "SlopSyncHub", 16384, this,
@@ -2195,7 +2195,7 @@ constexpr uint32_t kQuickBootSurviveMs = 10000;  // "uptime < ~10 s" per the reg
 }  // namespace
 
 // Runs ONCE from init(), before the hub task exists — this is boot-sequence
-// work, exactly the DOCTRINE.md §2 exception that permits a blocking NVS open
+// work, exactly the architecture.md exception that permits a blocking NVS open
 // here (never in a runtime loop).
 void SlopSyncHubService::checkQuickBootPairingGesture() {
     Preferences prefs;

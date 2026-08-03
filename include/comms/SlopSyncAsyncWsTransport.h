@@ -5,7 +5,7 @@
 //
 // Constraints:
 // - Real transport adapters live in firmware, never in lib/slopsync (SPEC
-//   §13.1). THE only WS transport (DOCTRINE.md §9); every S3
+//   §13.1). THE only WS transport (transport.md); every S3
 //   main-controller env sets -DSLOPSYNC_WS_ASYNC=1 unconditionally.
 // - Replaced a synchronous, busy-wait WS server whose backed-up client
 //   socket blocked the sender until the peer drained or timed out.
@@ -54,7 +54,7 @@
 //       control frames need. Stale telemetry is worthless — conflation is
 //       already the doctrine.
 //   BLOB_CHUNK (0x1B) = bulk/resumable, its OWN third class (traffic-
-//       classification lesson: TRAPS.md T16; heap angle: TRAPS.md T2).
+//       classification lesson: transport.md T16; heap: memory-budget.md T2).
 //       Gated on the registry's OWN
 //       advertised sender pacing budget (limits::blob_chunks_in_flight,
 //       RFC-050) via the same queueLen() check the data class uses — NEVER
@@ -306,7 +306,7 @@ private:
     // pumpStatePacing(), so AsyncTCP nulling it mid-walk is a LoadProhibited
     // panic on Core 0 — rapid connect/disconnect (slopsoak's `churn`) hits it
     // reliably. So onEvent only RECORDS intent in these flags; loop() (hub
-    // task) performs the actual attach/detach. See TRAPS.md T5.
+    // task) performs the actual attach/detach. See transport.md T5.
     std::atomic<bool> _wantAttach[kSlots]{};
     std::atomic<bool> _wantDetach[kSlots]{};
 };

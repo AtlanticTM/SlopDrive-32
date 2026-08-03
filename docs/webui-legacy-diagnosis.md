@@ -257,7 +257,7 @@ staleness mechanism named in suspect #1.
    cause found. Fix direction for the refactor: either gate the visual drag
    on link health too (so a suspended UI visibly refuses to drag, matching
    ground-truth doctrine — "a control that renders but drives nothing is a
-   defect" per [DOCTRINE.md](canon/DOCTRINE.md) §3), or make `cmd.send()`'s suspended-drop
+   defect" per `webui.md`), or make `cmd.send()`'s suspended-drop
    observable at the call site instead of returning a bare `-1`.
 
 2. **"Slow to reflect device state" → the ~2s guaranteed telemetry blackout

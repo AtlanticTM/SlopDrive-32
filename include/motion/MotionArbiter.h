@@ -3,7 +3,7 @@
 // MotionArbiter — event-driven motion planner and sole caller of MotorDriver.
 //
 // Constraints:
-// - Motion doctrine (DOCTRINE.md §2): ONE intent -> ONE plan -> FAS executes.
+// - Motion doctrine (architecture.md): ONE intent -> ONE plan -> FAS executes.
 //   No clocked motion tick, no chase loop. Every intent is planned ONCE, at
 //   arrival, from the machine's ACTUAL current state (FAS position + live
 //   velocity). Speed/accel are DERIVED from what the intent requires
@@ -112,7 +112,7 @@ public:
 
     // ---- Core 1 stream-sample fast path (streamSamplerTask's Engine) --------
     // Called at ~1kHz by streamSamplerTask with a point sampled from its
-    // slopmotion::Engine (DOCTRINE.md §8). This is NOT the trapezoid planner —
+    // slopmotion::Engine (motion-control.md). NOT the trapezoid planner --
     // the Engine already shaped the curve. This path only runs the safety
     // gates (estop/homed/paused/override), maps the normalized position into the
     // stroke window, enforces the hard physical step bounds, and feeds FAS

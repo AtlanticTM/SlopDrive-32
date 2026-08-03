@@ -6,10 +6,17 @@ these checks encode only hard rules (violation classes that have actually
 bitten this project). If a check fires falsely, the fix is a C-7 amendment
 to the exemption lists in this file -- never ignoring the output.
 
-Deliberately NOT here (judgment calls belong to review, not grep):
-  - delay() outside init/calibration (init exceptions are legal, grep can't tell)
-  - digitalWrite/ledcWrite on LEDs outside SlopGlowBoard.cpp (grep can't tell
-    an LED pin from a relay pin)
+Both of the exclusions this file used to carry -- delay() and LED writes --
+were lifted 2026-08-03 by NARROWING THEIR SCOPE rather than by loosening the
+bar. "grep can't tell an init exception from a violation" is true tree-wide
+and false inside src/motion/ and src/comms/SlopSync*, where no init exception
+exists. "grep can't tell an LED pin from a relay pin" is true for
+digitalWrite and false for ledcWrite outside lib/slopglow/. A check earns its
+place by being exact on the paths it claims, never by being approximate
+everywhere.
+
+Still deliberately NOT here: lifetime rules (no ref/span to a local, lambda
+capture-by-value). Those need clang-tidy, tracked as sd-tp1.
 
 Usage:
     python tools/canon_lint.py            # all checks
@@ -244,7 +251,7 @@ BRITISH_SPELLING_KNOWN_CODE_HITS = _exempt_section_lines()
 GREP_CHECKS = [
     dict(
         name="serial-print",
-        msg="Serial.print outside the SlopLog sink (CLAUDE.md SS7.5: logging goes through SlopLog. Only.)",
+        msg="Serial.print outside the SlopLog sink (logging-leds.md: logging goes through SlopLog. Only.)",
         rx=re.compile(r"\bSerial\.print"),
         include=("src/", "include/", "lib/sloplog/", "lib/slopglow/",
                  "lib/slopmotion/", "lib/slopsync/"),
@@ -253,7 +260,7 @@ GREP_CHECKS = [
     ),
     dict(
         name="slopsync-purity",
-        msg="platform header inside hardware-free lib/slopsync (CLAUDE.md SS8: std headers only)",
+        msg="platform header inside hardware-free lib/slopsync (transport.md: hardware-free, std headers only)",
         rx=re.compile(r'#\s*include\s*[<"](?:Arduino\.h|freertos/|esp_|driver/|soc/|nvs)'),
         include=("lib/slopsync/include/",),
         exempt=(),
@@ -274,10 +281,110 @@ GREP_CHECKS = [
         include=("src/", "include/", "webui/src/", "platformio.ini"),
         exempt=(),
     ),
+    # ---- Prohibition checks promoted from rules/ prose (operator ruling ----
+    # 2026-08-03). Each was a "never do X" that only a human could enforce.
+    # Every one is verified at ZERO on the tree it scopes; a hit is a defect.
+    dict(
+        name="delay-in-realtime",
+        msg="delay() on a real-time path (architecture.md SS2: blocking is permitted "
+            "ONLY in boot/init, hardware setup, and calibration/homing)",
+        rx=re.compile(r"\bdelay\s*\((?!.*delayMicroseconds)"),
+        include=("src/motion/", "include/motion/", "src/comms/SlopSync"),
+        exempt=(),
+    ),
+    dict(
+        name="led-outside-slopglow",
+        msg="LED driven outside SlopGlow (logging-leds.md: callers speak semantics; "
+            "board wiring lives in SlopGlowBoard.cpp)",
+        rx=re.compile(r"\bledcWrite\s*\(|\bdigitalWrite\s*\(\s*\w*LED\w*"),
+        include=("src/", "include/", "lib/slopmotion/", "lib/sloplog/"),
+        exempt=("src/system/SlopGlowBoard.cpp",
+                "src/c5_probe/", "src/c5_tdongle/", "src/c5_waveshare/"),
+    ),
+    dict(
+        name="new-log-macro",
+        msg="new SLOG* macro definition (logging-leds.md: no new log macros; "
+            "SlopLog is the only logging path)",
+        rx=re.compile(r"^\s*#\s*define\s+SLOG"),
+        include=("src/", "include/"),
+        exempt=(),
+    ),
+    dict(
+        name="ws-client-held",
+        msg="AsyncWebSocketClient* stored as a member (cpp-safety.md T29: the AsyncTCP "
+            "task destroys clients synchronously; address them by id)",
+        rx=re.compile(r"AsyncWebSocketClient\s*\*\s*(?:_|m_)"),
+        include=("src/", "include/"),
+        exempt=(),
+    ),
+    dict(
+        name="sampler-stack-shrunk",
+        msg="Sampler task stack is not 16384 (motion-control.md: commit() nests "
+            "KB-scale Ruckig temporaries; never shrink it -- T1 class)",
+        rx=re.compile(r'"Sampler"\s*,\s*(?!16384\b)\d+'),
+        include=("src/",),
+        exempt=(),
+    ),
+    dict(
+        name="sole-caller",
+        msg="input source commanding the motor driver directly (architecture.md SS2: "
+            "the MotionArbiter is the ONLY caller; input sources submit intents)",
+        rx=re.compile(r"(?:\.|->)(?:moveTo|streamTo|home)\s*\("),
+        include=("src/ui/", "src/comms/", "src/patterns/"),
+        exempt=(),
+    ),
+    dict(
+        name="borrowed-member",
+        msg="span/string_view stored as a class member (cpp-safety.md: parameters "
+            "only; members own their data)",
+        rx=re.compile(r"^\s+(?:std::)?(?:span|string_view)[^;=]*\s+(?:_|m_)[A-Za-z]\w*\s*;"),
+        include=("src/", "include/", "lib/slopmotion/", "lib/sloplog/", "lib/slopglow/"),
+        exempt=(),
+    ),
     # british-spelling moved to run_codespell_check() (operator ruling
     # 2026-07-28: codespell, not a hand-rolled regex, does this job now) --
     # it does not fit the single-regex-per-check shape of this list.
+    # static-in-critical moved to run_critical_static_check() for the same
+    # reason: it needs a two-token span, not one regex.
 ]
+
+
+def run_critical_static_check():
+    """T4: a function-local static inside portENTER_CRITICAL aborts the core.
+
+    Not a GREP_CHECK because it needs the span between two tokens. The window
+    is capped at 40 lines: a critical section longer than that is its own
+    defect, and an uncapped span swallows the whole file on an unbalanced
+    match.
+    """
+    rx_static = re.compile(r"^\s*static\s+[A-Za-z_][\w:<>]*\s+\w+\s*[;({=]", re.M)
+    findings = []
+    for rel in tracked_files():
+        if not rel.startswith(("src/", "include/", "lib/slop")):
+            continue
+        if not rel.endswith((".cpp", ".h", ".hpp")):
+            continue
+        try:
+            lines = (ROOT / rel).read_text(encoding="utf-8",
+                                           errors="replace").splitlines()
+        except OSError:
+            continue
+        depth_start = None
+        for i, line in enumerate(lines):
+            if "portENTER_CRITICAL" in line:
+                depth_start = i
+            elif "portEXIT_CRITICAL" in line:
+                depth_start = None
+            elif depth_start is not None:
+                if i - depth_start > 40:
+                    depth_start = None
+                elif rx_static.match(line):
+                    findings.append((
+                        "static-in-critical", rel, i + 1, line.strip()[:70],
+                        "function-local static inside portENTER_CRITICAL "
+                        "(cpp-safety.md T4: the init guard and __cxa_atexit "
+                        "registration abort the core; hoist to file scope)"))
+    return findings
 
 
 def tracked_files():
@@ -425,7 +532,8 @@ def run_channel_map_check():
 
 
 def main(argv):
-    findings = run_grep_checks() + run_pin_check() + run_codespell_check() + run_camelcase_check()
+    findings = (run_grep_checks() + run_pin_check() + run_codespell_check()
+                + run_camelcase_check() + run_critical_static_check())
     if "--no-gen" not in argv:
         findings += run_channel_map_check()
 

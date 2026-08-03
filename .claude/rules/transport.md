@@ -94,6 +94,50 @@ restating them here would violate C-1.
   is flow control (§13.1), not an error. No per-session teardown over shared-
   wire backpressure (SlopSyncUartTransport.h:54-63).
 
+## Framing robustness -- verified 2026-08-03
+
+- **The delimiter sits BETWEEN frames, so resync costs at most one frame.**
+  The wire is `COBS(body) + 0x00` per frame, and the `0x00` is appended by the
+  transport, not the codec (`serial_cobs.hpp` header note). A COBS-encoded
+  region never contains a literal `0x00`, so after garbage, a brownout, or a
+  mid-plug the receiver discards bytes only until the next delimiter and the
+  following frame decodes normally. `_rxOverflow` implements this: it
+  suppresses accumulation until the next delimiter, so an oversized run
+  resyncs rather than poisoning the stream.
+- **There is NO general CRC, and that is the binding's declared design.**
+  Ordinary frames carry none; the serial binding declares `reliable=true`
+  because the link is a wired point-to-point trace. The ONE exception is the
+  ESTOP frame: 12 bytes, `E5 E5 E5 E5 | cause origin seq:u16 | crc32`, IEEE,
+  **over the first 8 PRE-COBS bytes** (SPEC §5.5). Verified: the CRC covers
+  the frame payload, never the encoded bytes, so a receiver validates after
+  deframing OR directly on a raw scan when the window happens to be
+  zero-free. Adding a CRC to ordinary frames is a WIRE CHANGE and rides an
+  RFC in SlopSync; it is not a local hardening decision.
+
+## RX ring sizing -- the robustness knob, because there is no flow control
+
+The link runs without RTS/CTS by design, so the RX ring is the only thing
+absorbing a burst. It is sized against the DRAIN INTERVAL, never the frame:
+`pumpRx()` runs on the hub's 5 ms tick, and 2 Mbaud delivers ~5,000 B between
+drains. `kUartLinkRxBufferBytes = 16384` gives ~80 ms of absorption at 2 Mbaud
+(~65 ms at 8/N/1 framing overhead), which is roughly 16 drain intervals of
+slack. The original 4,096 overflowed by construction. TX is 4,096.
+
+**Buffers must be sized BEFORE `begin()`.** `setRxBufferSize`/`setTxBufferSize`
+are silent no-ops once the port is running (`HardwareSerial.cpp:667-691`). The
+symptom is a size cliff, not an error: small frames pass while anything over
+the ~128 B hardware FIFO is refused forever.
+
+## Physical-layer footguns
+
+- **Common ground before signal.** On jumpered runs, connect GND first and
+  remove it last. Two boards on separate supplies with TX/RX joined and no
+  shared return will inject the return current through the signal pins.
+- **Both ends are non-inverted, idle-HIGH raw TTL.** No RS-232 transceiver, no
+  inverter, no level shifter in the path (both are 3V3). An inverting adapter
+  or a `Serial.begin()` invert flag on either end yields a link that looks
+  wired correctly and never frames.
+
 ## COBS + CRC
 
 - Wire: COBS([slot_id][slopsync frame]) + 0x00 delimiter (SPEC §13.5).

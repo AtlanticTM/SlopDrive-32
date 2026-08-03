@@ -56,6 +56,12 @@ tools/*
 # points at. A ledger section naming a script that does not survive a clone is
 # a dead reference, so this one is tracked. Its OUTPUT (dir_ladder.json) is not.
 !tools/dir_ladder.py
+# clangd/Serena compile database generator. PlatformIO's own compiledb target
+# emits zero first-party TUs for this ESP-IDF project, so without this script
+# symbol search goes silently blind (headers parse as C). Two rules files name
+# it as THE regen command, so it has to survive a clone. Its OUTPUT
+# (compile_commands.json) stays ignored.
+!tools/gen_clangd_db.py
 # Spec drift detector (/drift): diffs this repo's protocol reality against
 # the pinned SlopSync sibling; its output is the RFC backlog. Tracked for the
 # same reason as canon_lint: enforcement tooling survives a clone.

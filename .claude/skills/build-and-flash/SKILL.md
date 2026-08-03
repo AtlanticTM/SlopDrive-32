@@ -43,4 +43,12 @@ version-verified via the device API, never "upload completed" (CANON C-8).
 ## Tooling upkeep
 
 Regenerate the compile database whenever platformio.ini changes (Serena and
-clangd both eat it): `python -m platformio run -t compiledb -e s3_main`.
+clangd both eat it):
+
+```
+python tools/gen_clangd_db.py
+```
+
+Never use `pio run -t compiledb` here: it emits framework TUs only and zero
+entries for `src/`, which leaves clangd parsing our headers as C. See
+`.claude/rules/serena.md`.

@@ -22,4 +22,12 @@ case "$NORM" in
     exit 2
     ;;
 esac
+# The sibling's own protect-generated hook does NOT run from this repo: hooks
+# are not loaded across workspace roots. Its exclusive surface is covered here.
+case "$NORM" in
+  */slopsync/docs-site/site/*)
+    >&2 printf 'VENDOR-LOCK: %s is docs-site build output, regenerated from ../SlopSync/docs-site/docs. Edit the source there and rebuild; never hand-edit the built site.\n' "$FILE"
+    exit 2
+    ;;
+esac
 exit 0

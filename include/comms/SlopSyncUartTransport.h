@@ -84,6 +84,8 @@
 
 namespace slopdrive {
 
+class SlopSyncUiTokenMinter;
+
 // 4 Mbaud. The old 4-Mbaud conviction was the dead RX ISR, not the link; see
 // transport.md T33 and the RX-ring-sizing section for the retest numbers.
 // Divides both crystals exactly (40/10, 48/12); 5 Mbaud does not divide the
@@ -264,6 +266,10 @@ public:
     };
     void setDiagSource(IDiagSource* src) { _diagSource = src; }
 
+    // kOpTokenReq answers from the SAME minter as HTTP GET /uitoken -- one
+    // mint, two doors (sd-ykg.2). comms/ -> comms/, no layering wound.
+    void setUiTokenMinter(SlopSyncUiTokenMinter* m) { _tokenMinter = m; }
+
     // The hub task's ota_active guard skips this port; it MUST NOT while the
     // OTA is the one arriving here. Safe because a serial OTA's flash writes
     // run on the hub task too, so drain and write are serialized.
@@ -289,6 +295,7 @@ private:
 
     IOtaSink* _otaSink = nullptr;
     IDiagSource* _diagSource = nullptr;
+    SlopSyncUiTokenMinter* _tokenMinter = nullptr;
     // One diag batch, filled and sent whole inside one kOpDiagReq dispatch.
     // 2 KB fits the 8 KB TX buffer outright, so sendBridge never has to wait.
     // Costs PSRAM, not internal RAM: the port lives inside the PSRAM-resident

@@ -37,6 +37,11 @@ enum Op : uint8_t {
     kOpDiagReq    = 0x07,   // C5->S3  [from:u32le][tag utf8...]  tag empty = all
     kOpDiagData   = 0x08,   // S3->C5  [text bytes...]            whole lines
     kOpDiagEnd    = 0x09,   // S3->C5  [next:u32le][done]         next -> next req's from
+    // /uitoken mint (sd-ykg.2). Same auth argument as OTA: reaching the C5's
+    // LAN HTTP is the trust boundary, the wired link adds none. The S3's own
+    // HTTP mint and this one are ONE implementation behind two doors.
+    kOpTokenReq   = 0x0A,   // C5->S3  []
+    kOpTokenResp  = 0x0B,   // S3->C5  [code][json...]  code: 0 ok, 1 disabled, 2 rate-limited
 };
 
 enum OtaTarget : uint8_t {

@@ -102,10 +102,17 @@ void SlopSyncUiTokenMinter::handleGet(SlopHttpServer* server) {
     // answer. There is no legitimate reason for this endpoint to be readable
     // cross-origin, and no user-visible bug that adding a header would fix.
     // ------------------------------------------------------------------------
+    char body[128];
+    const uint8_t code = mintJson(body, sizeof(body));
+    if (code == 0) server->sendHeader("Cache-Control", "no-store");
+    server->send(code == 0 ? 200 : (code == 1 ? 403 : 429), "application/json", body);
+}
+
+uint8_t SlopSyncUiTokenMinter::mintJson(char* body, size_t cap) {
     if (!_enabled) {
         ++_refused;
-        server->send(403, "application/json", "{\"ok\":false,\"error\":\"uitoken_disabled\"}");
-        return;
+        snprintf(body, cap, "{\"ok\":false,\"error\":\"uitoken_disabled\"}");
+        return 1;
     }
 
     const uint32_t now = millis();
@@ -119,8 +126,8 @@ void SlopSyncUiTokenMinter::handleGet(SlopHttpServer* server) {
     if (_lastMintMs != 0 && (now - _lastMintMs) < kMinIntervalMs) {
         portEXIT_CRITICAL(&s_mux);
         ++_refused;
-        server->send(429, "application/json", "{\"ok\":false,\"error\":\"rate_limited\"}");
-        return;
+        snprintf(body, cap, "{\"ok\":false,\"error\":\"rate_limited\"}");
+        return 2;
     }
     _lastMintMs = now;
     counter = ++_counter;
@@ -162,13 +169,11 @@ void SlopSyncUiTokenMinter::handleGet(SlopHttpServer* server) {
 
     char hex[kTokenBytes * 2 + 1];
     hexEncode(std::span<const std::byte>(tok), hex);
-    char body[128];
     // "tier" is stated explicitly so a client never has to guess what it got,
     // and so the ceiling is documented at the point of issue.
-    snprintf(body, sizeof(body), "{\"ok\":true,\"token\":\"%s\",\"ttl_ms\":%u,\"tier\":\"control\"}",
+    snprintf(body, cap, "{\"ok\":true,\"token\":\"%s\",\"ttl_ms\":%u,\"tier\":\"control\"}",
              hex, unsigned(kTtlMs));
-    server->sendHeader("Cache-Control", "no-store");
-    server->send(200, "application/json", body);
+    return 0;
 }
 
 bool SlopSyncUiTokenMinter::consume(std::span<const std::byte> token) {

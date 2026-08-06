@@ -1302,6 +1302,10 @@ void SlopSyncHubService::init() {
     // The C5 comms bridge's serial link (docs/c5-comms-offload.md Phase 2).
     // Serial2 only — Serial1 is the Modbus servo bus.
     _uartPort.begin(&_hub);
+    // The bridge's kOpTokenReq mints from the SAME minter as GET /uitoken --
+    // one implementation, two doors (sd-ykg.2). Post-strip this is the only
+    // door left.
+    _uartPort.setUiTokenMinter(&_uiTokens);
     bootheap::mark("ss:uart");
 #endif
 

@@ -19,7 +19,6 @@
 #include <WiFi.h>
 #include <esp_wifi.h>
 #include <esp_http_server.h>
-#include <HTTPClient.h>
 #include <Update.h>
 #include <unistd.h>   // close() — close_fn takes ownership of the fd
 #include <lwip/sockets.h>
@@ -170,6 +169,12 @@ static uint32_t g_diagNext = 0;
 static volatile bool g_diagDone = false;
 static volatile bool g_diagEndSeen = false;
 
+// One token mint response, same single-threaded-by-RX-ownership contract.
+static uint8_t  g_tokBuf[160];
+static size_t   g_tokLen = 0;
+static uint8_t  g_tokCode = 0;
+static volatile bool g_tokSeen = false;
+
 static void pumpFromS3() {
     // BULK read, not byte-at-a-time: read() takes the UART mutex per call, and
     // under an OTA stream this task fell far enough behind that its own acks
@@ -256,6 +261,11 @@ static void pumpFromS3() {
                              (uint32_t(out[4]) << 16) | (uint32_t(out[5]) << 24);
                 g_diagDone = out[6] != 0;
                 g_diagEndSeen = true;   // published LAST, same rule as above
+            } else if (n >= 3 && out[1] == bridge::kOpTokenResp) {
+                g_tokCode = out[2];
+                g_tokLen = (n - 3) < sizeof(g_tokBuf) ? (n - 3) : sizeof(g_tokBuf);
+                memcpy(g_tokBuf, out + 3, g_tokLen);
+                g_tokSeen = true;       // published LAST
             }
             continue;
         }
@@ -549,35 +559,39 @@ static esp_err_t probeHandler(httpd_req_t* req) {
     return httpd_resp_send(req, j, HTTPD_RESP_USE_STRLEN);
 }
 
-// ---- /uitoken proxy ---------------------------------------------------------
-// The bridge is the front door, so it has to serve the WHOLE front door — not
-// just the socket. /uitoken is an HTTP mint on the S3 and SlopSync clients
-// fetch it from the SAME host they open the WebSocket to (slopsync_probe.py
-// calls mint_uitoken(args.ip); there is no separate flag). Without this a
-// session through the bridge silently lands at WATCH tier and every control
-// assertion correctly refuses — which reads like a transport bug and is not.
+// ---- /uitoken over the bridge (sd-ykg.2) ------------------------------------
+// The bridge is the front door, so it has to serve the WHOLE front door -- not
+// just the socket. SlopSync clients mint from the SAME host they open the
+// WebSocket to (slopsync_probe.py calls mint_uitoken(args.ip)); without this a
+// session through the bridge lands at WATCH tier and every control assertion
+// correctly refuses.
 //
-// SECURITY NOTE: this does not widen the trust model — /uitoken already mints
-// to anything on the LAN that can reach it — but it does mean the C5 must know
-// where the S3 lives. Static for now; discovery is the proper answer.
-static const char* kS3Host = "192.168.1.229";
-
+// One kOpTokenReq round trip on slot 0xFF: the S3 answers from the SAME
+// minter as its own GET /uitoken, byte-identical JSON, same rate limit. The
+// former HTTP proxy to a hardcoded S3 IP died by construction with the WiFi
+// strip; this path needs only the wire. Trust model unchanged: reaching the
+// C5's LAN HTTP is the boundary, the point-to-point trace adds nothing.
 static esp_err_t uitokenHandler(httpd_req_t* req) {
-    HTTPClient http;
-    if (!http.begin(String("http://") + kS3Host + "/uitoken")) {
-        return httpd_resp_send_500(req);
+    if (g_otaOwnsRx) {
+        httpd_resp_set_status(req, "409 Conflict");
+        return httpd_resp_sendstr(req, "an OTA owns the link; retry after it");
     }
-    const int code = http.GET();
-    if (code != 200) {
-        http.end();
+    OtaRxOwner rxOwner;   // loop() stands off; this handler drains the link
+    g_tokSeen = false;
+    const uint8_t reqf[1] = {bridge::kOpTokenReq};
+    while (!sendToS3(bridge::kSlot, reqf, sizeof(reqf))) delay(1);
+
+    const uint32_t t0 = millis();
+    while (!g_tokSeen && millis() - t0 < 2000) { pumpFromS3(); delay(1); }
+    if (!g_tokSeen) {
         httpd_resp_set_status(req, "502 Bad Gateway");
         return httpd_resp_send(req, "uitoken upstream failed", HTTPD_RESP_USE_STRLEN);
     }
-    // 16 RAW bytes, not text — must pass through byte-exact.
-    String body = http.getString();
-    http.end();
-    httpd_resp_set_type(req, "application/octet-stream");
-    return httpd_resp_send(req, body.c_str(), body.length());
+    if (g_tokCode == 1)      httpd_resp_set_status(req, "403 Forbidden");
+    else if (g_tokCode == 2) httpd_resp_set_status(req, "429 Too Many Requests");
+    httpd_resp_set_type(req, "application/json");
+    httpd_resp_set_hdr(req, "Cache-Control", "no-store");
+    return httpd_resp_send(req, (const char*)g_tokBuf, g_tokLen);
 }
 
 // ---- OTA --------------------------------------------------------------------

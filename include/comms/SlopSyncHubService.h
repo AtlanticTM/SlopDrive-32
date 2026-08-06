@@ -343,6 +343,7 @@ public:
     // service only forwards the pointer; it never touches the flash path.
     void setOtaSink(SlopSyncUartPort::IOtaSink* sink) { _uartPort.setOtaSink(sink); }
     void setDiagSource(SlopSyncUartPort::IDiagSource* src) { _uartPort.setDiagSource(src); }
+    // Called from init(): the minter is a member, so the wire-up is internal.
 #endif
 
 private:

@@ -16,6 +16,8 @@
 
 #include <cstring>
 
+#include "SlopSyncUiToken.h"   // kOpTokenReq answers from the one real minter
+
 #include "sloplog/sloplog.h"
 #include "slopsync/wire/serial_cobs.hpp"
 
@@ -162,6 +164,23 @@ void SlopSyncUartPort::handleBridgeOp(const uint8_t* body, size_t n) {
             SLOGI("slopsync", "UART slot %u closed by bridge -- detach deferred", unsigned(s));
             _wantDetach[s].store(true, std::memory_order_release);
         }
+        return;
+    }
+
+    if (op == bridge::kOpTokenReq) {
+        // One mint, two doors: byte-identical JSON to HTTP GET /uitoken,
+        // including the rate limit and the single-use slot table.
+        uint8_t resp[2 + 128];
+        resp[0] = bridge::kOpTokenResp;
+        resp[1] = _tokenMinter
+                      ? _tokenMinter->mintJson(reinterpret_cast<char*>(resp + 2),
+                                               sizeof(resp) - 2)
+                      : 1;   // no minter wired reads as "disabled"
+        if (!_tokenMinter) {
+            static constexpr char kNone[] = "{\"ok\":false,\"error\":\"uitoken_disabled\"}";
+            memcpy(resp + 2, kNone, sizeof(kNone));
+        }
+        sendBridge(resp, 2 + strlen(reinterpret_cast<const char*>(resp + 2)));
         return;
     }
 

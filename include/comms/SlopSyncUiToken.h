@@ -79,6 +79,12 @@ public:
     // true return CONSUMES it (single-use is not advisory).
     bool consume(std::span<const std::byte> token);
 
+    // THE mint, one implementation behind two doors (HTTP handleGet and the
+    // C5 bridge's kOpTokenReq). Fills `body` with the JSON answer and returns
+    // 0 ok / 1 disabled / 2 rate-limited (bridge::kOpTokenResp codes). Safe
+    // from any task: the fast passes lock, the HMAC deliberately does not.
+    uint8_t mintJson(char* body, size_t cap);
+
     uint32_t minted() const { return _minted; }
     uint32_t consumed() const { return _consumed; }
     uint32_t refused() const { return _refused; }

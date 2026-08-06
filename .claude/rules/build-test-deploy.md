@@ -19,6 +19,17 @@ LAW: scope, gates, and the traps that make a green result a lie.
 - `python tools/canon_lint.py` gates every substantive change; zero findings
   is the bar.
 
+## Headless builds (sd-4v9 Phase A, env sd32-headless)
+
+- **Deploy path is the C5 bridge ONLY:** `POST /api/ota/s3` on the C5 with the
+  sd32-headless `firmware.bin`. There is no HTTP OTA on the device.
+- **Version verification (C-8) is the boot log:** `HEADLESS build fw X` read
+  via the C5's `/api/diag/boot`. `/api/capabilities` does not exist.
+- **Every S3 HTTP instrument is gone** (`/api/servo`, `/api/status`,
+  `/api/uart`, `/api/crash`, `/api/slopmotion`): bench harnesses in `tools/`
+  that poll them need the sd32-ota rescue build flashed first, one bridge
+  flash away. Diagnostics ride the C5 `/api/diag` pull.
+
 ## Deployment (OTA)
 
 - **Scope:** OTA is the S3 main controller ONLY (`sd32`/`sd32-ota` extend

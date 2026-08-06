@@ -1,6 +1,6 @@
 ---
 paths:
-  - "platformio.ini"
+  - "**"
 ---
 
 # Serena / clangd navigation upkeep
@@ -30,7 +30,34 @@ Known tradeoff: the generated db covers first-party sources only. Reading
 ESP-IDF component sources falls back to the base `.clangd` flags. Merge the
 compiledb output in if IDF browsing ever matters more than load time.
 
-After any change here, verify against a real project symbol rather than
-assuming: `get_symbols_overview` on a header under `include/comms/` must
-report kind `Namespace` for `slopdrive`. Kind `Variable` means the C-parse
-regression is back.
+## Verify against real symbols, never by assuming
+
+Two checks, both required. They catch different failures.
+
+1. Parse health: `get_symbols_overview` on `include/comms/SlopSyncCatalog.h`
+   must report kind `Namespace` for `slopdrive`. Kind `Variable` means the
+   C-parse regression is back. Name that file specifically, not "a header
+   under include/comms/": several of them predate the namespace and correctly
+   report only classes, which reads as a failure when it is not.
+
+2. Index health: `find_referencing_symbols` on `ServoModbus/emergencyStop`
+   must include `ModbusServoDriver.cpp`. Intra-file hits with nothing
+   cross-file means the background index is off or stale, and check 1 passes
+   anyway, so the namespace check alone will not catch it.
+
+An empty reference result never proves a symbol is unused. See
+`navigation.md`: a C-9 deletion needs both Serena and Grep to agree.
+
+## Two traps that make correct output read as wrong
+
+**Line numbers are 0-BASED.** Every `body_location` and reference line is one
+less than the editor, Grep, and `file:line` links. Add 1 before citing.
+Measured 2026-08-04: Serena reported the `_bus.emergencyStop()` call site at
+147, the file has it at 148.
+
+**A cold index answers `{}`.** Serena spawns clangd at session start and the
+background index needs roughly a minute on this project before cross-file
+references resolve; the same query returned `{}` at 23 seconds and the correct
+single hit a few minutes later. Never read an early-session empty as "no
+callers": re-run it, and if it stays empty, check `Index.Background` per
+`navigation.md`.

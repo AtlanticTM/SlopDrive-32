@@ -194,14 +194,21 @@ def run_camelcase_check():
 # by construction (the extras dict above, this comment), and legal texts are
 # verbatim by law, not by style.
 BRITISH_SPELLING_SCAN_EXEMPT = ("THIRD_PARTY_LICENSES.md", "LICENSE", "NOTICE",
-                                "tools/canon_lint.py")
+                                "tools/canon_lint.py",
+                                # Same reason as this file: style_check.py holds
+                                # the en-GB fallback wordlist, so it must SPELL
+                                # the banned words to detect them. Added
+                                # 2026-08-04 (operator ruling, C-7).
+                                ".claude/hooks/style_check.py")
 
 # Directory prefixes the spelling scan must never touch: VENDORED THIRD-PARTY
 # SOURCE. C-11 governs OUR prose and identifiers; upstream API names (e.g.
 # blec's set_write_behaviour) are not ours to respell, and respelling a
 # vendored crate balloons its patch surface against upstream. Same class as
 # THIRD_PARTY_LICENSES.md above. Never put first-party code under vendor/.
-BRITISH_SPELLING_SCAN_EXEMPT_PREFIXES = ("webui/src-tauri/vendor/",)
+# .beads/ is a generated append-only log that QUOTES issue text, so closing an
+# issue about a banned spelling logs it forever. style_check already skips it.
+BRITISH_SPELLING_SCAN_EXEMPT_PREFIXES = ("webui/src-tauri/vendor/", ".beads/")
 
 
 def _spelling_exempt(rel):
@@ -260,7 +267,13 @@ GREP_CHECKS = [
                 # this list 2026-08-03: it was written while untracked files
                 # were invisible to the lint, so it never had to declare
                 # itself. Same board family, same reason as the other two.
-                "src/c5_tdongle/", "src/c5_waveshare/", "src/c5_probe/"),
+                "src/c5_tdongle/", "src/c5_waveshare/", "src/c5_probe/",
+                # quad_probe joined 2026-08-04 (operator ruling, C-7). Different
+                # reason from the C5 boards: it is a BENCH SKETCH excluded from
+                # every firmware env by build_src_filter (platformio.ini:130,222)
+                # and compiled only by [env:quad_probe]. Serial is its only
+                # output device; SlopLog governs firmware, which this is not.
+                "src/quad_probe/"),
     ),
     dict(
         name="slopsync-purity",

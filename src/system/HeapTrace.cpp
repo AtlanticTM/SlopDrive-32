@@ -2,11 +2,15 @@
 
 #include "HeapTrace.h"
 
+// Outside the guard on purpose: the disabled-path stub at the bottom of this
+// file also uses strlen/memcpy, and it had never been compiled until the heap
+// diagnostics were stripped (2026-08-01) because the flag was always on.
+#include <string.h>
+
 #if defined(SLOPSYNC_HEAP_BISECT)
 
 #include <stdarg.h>   // va_list in dumpJson's formatter
 #include <stdio.h>
-#include <string.h>
 
 #include "esp_heap_caps.h"
 #include "esp_heap_trace.h"

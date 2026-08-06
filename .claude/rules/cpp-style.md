@@ -1,12 +1,6 @@
 ---
 paths:
-  - "src/**"
-  - "include/**"
-  - "lib/slopmotion/**"
-  - "lib/sloplog/**"
-  - "lib/slopglow/**"
-  - "test/native/**"
-  - "examples/**"
+  - "**"
 ---
 
 # C++ style and navigation

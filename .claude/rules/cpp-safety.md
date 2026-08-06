@@ -1,10 +1,6 @@
 ---
 paths:
-  - "src/**"
-  - "include/**"
-  - "lib/slopmotion/**"
-  - "lib/sloplog/**"
-  - "lib/slopglow/**"
+  - "**"
 ---
 
 # Memory safety and lifetime (operator directive 2026-07-31 -- binding)

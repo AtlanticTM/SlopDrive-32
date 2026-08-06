@@ -1,9 +1,6 @@
 ---
 paths:
-  - "src/motion/**"
-  - "include/motion/**"
-  - "lib/slopmotion/**"
-  - "src/main.cpp"
+  - "**"
 ---
 
 # Motion control constraints

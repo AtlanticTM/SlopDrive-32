@@ -1,9 +1,7 @@
 # The WebUI, rebuilt: a catalog-driven client
 
 **Status:** rebuilt 2026-07-27 on `feat/cpp20-slopsync`. Replaces the hand-wired
-page recorded in [`docs/http-plane-retirement.md`](http-plane-retirement.md) §7,
-answering the refactor call in
-[`docs/REFACTOR-ROADMAP.md`](REFACTOR-ROADMAP.md) §5.
+page recorded in [`docs/http-plane-retirement.md`](http-plane-retirement.md) §7.
 **Restore point:** tag `webui-prerefactor` (commit `e77bd1f`) is the last
 hand-wired bundle that shipped and worked. `git checkout webui-prerefactor -- webui/`
 brings it back whole. Client/widget architecture beyond this device:

@@ -1,11 +1,6 @@
 ---
 paths:
-  - "src/**"
-  - "include/**"
-  - "lib/slopmotion/**"
-  - "lib/sloplog/**"
-  - "lib/slopglow/**"
-  - "platformio.ini"
+  - "**"
 ---
 
 # Architecture constraints

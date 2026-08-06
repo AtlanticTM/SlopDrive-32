@@ -32,27 +32,12 @@ uint32_t s_lastHeartMs = 0;
 bool s_heartSeeded = false;
 constexpr uint32_t kHeartPeriodMs = 3000;   // the familiar ~3 s breath
 
-// Amber activity pulse (plain GPIO — it's a discrete LED and 120ms square
-// pulses don't need PWM). 32-bit aligned store is atomic on the S3.
-volatile uint32_t s_last_activity_ms = 0;
-constexpr uint32_t kActivityPulseMs = 120;
-
 HeartbeatSource* s_hbMotor = nullptr;
 HeartbeatSource* s_hbComms = nullptr;
-
-inline void amberWrite(bool on) {
-#if LED_ACTIVE_LOW
-    digitalWrite(PIN_LED_ORANGE, on ? LOW : HIGH);
-#else
-    digitalWrite(PIN_LED_ORANGE, on ? HIGH : LOW);
-#endif
-}
 
 }  // namespace
 
 void slopglowInit() {
-    pinMode(PIN_LED_ORANGE, OUTPUT);
-    amberWrite(false);
     s_rgb.begin();        // GPIO0 strapping pin: this runs post-boot by contract
     s_heartLamp.begin();
 
@@ -71,8 +56,6 @@ void slopglowInit() {
 slopglow::HeartbeatSource* slopglowMotorHeartbeat() { return s_hbMotor; }
 slopglow::HeartbeatSource* slopglowCommsHeartbeat() { return s_hbComms; }
 slopglow::GlowEngine& slopglowEngine() { return s_engine; }
-
-void slopglowActivity() { s_last_activity_ms = millis(); }
 
 void slopglowUpdate(const SystemState& state) {
     uint32_t now = millis();
@@ -108,6 +91,4 @@ void slopglowUpdate(const SystemState& state) {
         s_heartLamp.set(0, {v, v, v});
         s_heartLamp.show();
     }
-
-    amberWrite(now - s_last_activity_ms < kActivityPulseMs);
 }

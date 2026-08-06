@@ -17,6 +17,11 @@
 #define SECRET_WIFI_SSID       "YourWiFiName"
 #define SECRET_WIFI_PASSWORD   "YourWiFiPassword"
 
+// 5 GHz / WiFi 6 band — used by ESP32-C5 builds only. The S3 has no 5 GHz
+// radio; point this at your 5 GHz SSID, which is usually a different name.
+#define SECRET_WIFI_SSID_5G     "YourWiFiName_5G"
+#define SECRET_WIFI_PASSWORD_5G "YourWiFiPassword"
+
 // ---- OTA (over-the-air firmware + web-UI updates over WiFi) -----------------
 // Shared secret guarding BOTH OTA paths:
 //   1. ArduinoOTA / espota  (pio run -e sd32-ota -t upload / -t uploadfs)

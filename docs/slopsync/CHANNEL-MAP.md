@@ -90,6 +90,7 @@ renumber history, only the id it most recently held. Full history is
 | 0x1120 | STATE·motion·2:0 | slopmotion-limits | 0x1103 | live ceilings the engine derived |
 | 0x1121 | STATE·motion·2:1 | slopmotion-chase | 0x1104 | chase-mode tuning state |
 | 0x1122 | STATE·motion·2:2 | slopmotion-waveform | 0x1105 | waveform-mode tuning state |
+| 0x1130 | STATE·motion·3:0 | drive-tune | (new) | AIM drive register state (ramp register 0x03) |
 | 0x1200 | STATE·pattern·0:0 | pattern-state | 0x0082 | generator running/pattern/speed/depth |
 | 0x1210 | STATE·pattern·1:0 | pattern-advanced | 0x1201 | fray-d Advanced mode master state |
 | 0x1211 | STATE·pattern·1:1 | pattern-adv-mod-speedin | 0x1204 | Advanced modifier lane: in-speed |
@@ -107,6 +108,7 @@ renumber history, only the id it most recently held. Full history is
 | 0x3100 | INTENT·motion·0:0 | move | 0x0100 | manual point move |
 | 0x3101 | INTENT·motion·0:1 | home | 0x0103 | begin homing |
 | 0x3120 | INTENT·motion·2:0 | slopmotion-set | 0x3102 | SlopMotion live-tuning writes |
+| 0x3130 | INTENT·motion·3:0 | drive-set | (new) | AIM drive register writes (refused while moving) |
 | 0x3200 | INTENT·pattern·0:0 | pattern-cmd | 0x0102 | run/stop/pattern-select/speed/depth |
 | 0x3210 | INTENT·pattern·1:0 | pattern-advanced-cmd | 0x3201 | shared writer behind all seven pattern-advanced STATE cards |
 | 0x3220 | INTENT·pattern·2:0 | pattern-presets-cmd | 0x3202 | save/load/delete/rename for the preset store |

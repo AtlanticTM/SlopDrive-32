@@ -1,6 +1,7 @@
 # Style gate body. Reads the hook JSON on stdin, inspects only the text the
 # tool call would ADD (new_string / content), exit 2 blocks the write.
 import json
+import os
 import re
 import shutil
 import subprocess
@@ -32,6 +33,31 @@ BRITISH_RX = re.compile(
 
 CODE_EXT = {".c", ".cc", ".cpp", ".h", ".hpp", ".js", ".mjs", ".ts", ".py", ".sh"}
 HASH_COMMENT_EXT = {".py", ".sh"}
+
+
+def governed(path):
+    # C-11/C-12 bind this repo and the sibling SlopSync checkout, nothing else.
+    # Without this, the gate fires on scratchpad temp files and agent memory
+    # outside either tree, where the canon has no jurisdiction. Fails CLOSED:
+    # no project context means check anyway.
+    root = (os.environ.get("CLAUDE_PROJECT_DIR") or "").replace("\\", "/").lower().rstrip("/")
+    if not root:
+        return True
+    sibling = root.rsplit("/", 1)[0] + "/slopsync"
+    return path.startswith(root + "/") or path.startswith(sibling + "/")
+
+
+def added_only(ti):
+    # Edit sends the whole new_string, anchor lines included, so an untouched
+    # line carrying an em dash used to fail the write. Compare against
+    # old_string and keep only lines that are genuinely new.
+    # ponytail: line-set diff, not a real diff -- a line MOVED within the hunk
+    # reads as unchanged. Upgrade to difflib if that ever hides a real hit.
+    new, old = ti.get("new_string"), ti.get("old_string")
+    if new and old:
+        seen = set(old.splitlines())
+        return ["\n".join(ln for ln in new.splitlines() if ln not in seen)]
+    return [t for t in (new, ti.get("content")) if t]
 
 
 def comment_ratio(path, text):
@@ -73,8 +99,10 @@ def main():
         return 0
     ti = data.get("tool_input", {})
     path = (ti.get("file_path") or "").replace("\\", "/").lower()
-    texts = [t for t in (ti.get("new_string"), ti.get("content")) if t]
-    if not texts or any(s in path for s in SKIP_PATHS):
+    texts = added_only(ti)
+    if not texts or not any(t.strip() for t in texts):
+        return 0
+    if not governed(path) or any(s in path for s in SKIP_PATHS):
         return 0
     text = "\n".join(texts)
 
@@ -100,5 +128,35 @@ def main():
     return 0
 
 
+def selftest():
+    # Fixtures are built from parts so this file does not trip its own gate.
+    em, gb = "\u2014", "behavi" + "our"
+    root = "c:/repo"
+    os.environ["CLAUDE_PROJECT_DIR"] = root
+    cases = [
+        ("em dash in added text blocks",
+         {"file_path": root + "/src/x.cpp", "old_string": "int a;",
+          "new_string": "int a;\n// hi " + em + " there"}, 2),
+        ("em dash only in anchor passes",
+         {"file_path": root + "/src/x.cpp", "old_string": "// k " + em + " p\nint a;",
+          "new_string": "// k " + em + " p\nint b;"}, 0),
+        ("out-of-tree path is not governed",
+         {"file_path": "c:/temp/scratch/x.py", "content": "s = '" + gb + "'"}, 0),
+        ("sibling SlopSync is governed",
+         {"file_path": "c:/slopsync/spec/RFC-QUEUE.md", "content": "draft " + em + " text"}, 2),
+        ("en-GB spelling in repo blocks",
+         {"file_path": root + "/src/y.cpp", "content": "// " + gb + " of the thing"}, 2),
+    ]
+    for name, ti, want in cases:
+        p = subprocess.run([sys.executable, __file__], input=json.dumps({"tool_input": ti}),
+                           capture_output=True, text=True)
+        assert p.returncode == want, "%s: exit %d, want %d\n%s" % (name, p.returncode, want, p.stderr)
+        print("ok  " + name)
+    print("style_check selftest: all pass")
+
+
 if __name__ == "__main__":
-    sys.exit(main())
+    if "--selftest" in sys.argv:
+        selftest()
+    else:
+        sys.exit(main())

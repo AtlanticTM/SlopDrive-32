@@ -1,6 +1,6 @@
 ---
 paths:
-  - "webui/**"
+  - "**"
 ---
 
 # WebUI integration, build chain, and render traps

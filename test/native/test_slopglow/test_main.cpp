@@ -208,20 +208,28 @@ TEST_CASE("no heartbeats registered: engine never freezes") {
     CHECK(strip.shows > 50);
 }
 
-TEST_CASE("crossfade: transition blends from old frame toward the new pair") {
+TEST_CASE("transition: double-blip announces the incoming pair, then settles") {
     FakeStrip strip(1);
     GlowEngine g(strip);
     uint32_t t = 0;
     settle(g, t, 5000);           // quiet green floor
-    Rgb before = strip.px[0];
-    CHECK(before.g > before.r);
+    CHECK(strip.px[0].g > strip.px[0].r);
 
     g.set(System::Safety, Status::Urgent);
+    const uint32_t t0 = t;        // intro elapsed = t - t0 - 10
     g.update(t += 10);
-    // Mid-fade: not yet pure red.
-    Rgb mid = strip.px[0];
-    CHECK(mid.r < 255);
-    settle(g, t);
+    // Blip 1: full-brightness incoming color, immediately.
+    CHECK(strip.px[0].r == 255);
+    CHECK(strip.px[0].g == 0);
+    // The black gap between blips (elapsed ~80 ms).
+    for (; t < t0 + 100; t += 10) g.update(t);
+    CHECK(strip.px[0].r == 0);
+    CHECK(strip.px[0].g == 0);
+    // Blip 2 (elapsed ~140 ms).
+    for (; t < t0 + 160; t += 10) g.update(t);
+    CHECK(strip.px[0].r == 255);
+    // Settled into the steady effect well after intro + fade.
+    settle(g, t, 600);
     CHECK(strip.px[0].r > 200);
     CHECK(strip.px[0].g == 0);
 }

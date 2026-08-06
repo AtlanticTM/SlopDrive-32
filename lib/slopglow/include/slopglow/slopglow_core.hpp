@@ -165,6 +165,13 @@ struct HeartbeatSource {
 inline constexpr size_t kMaxPixels = 16;
 inline constexpr size_t kMaxHeartbeats = 4;
 inline constexpr uint16_t kCrossfadeMs = 350;
+// Transition announcement (operator ruling: state changes must POP): two
+// full-brightness blips of the INCOMING pair's color with a black gap, then
+// the crossfade emerges underneath. Applies to every status, Urgent included
+// -- an estop announcing itself louder is correct. Boot rainbow is exempt.
+inline constexpr uint16_t kIntroMs = 190;
+inline constexpr uint16_t kIntroOn1End = 70;
+inline constexpr uint16_t kIntroGapEnd = 120;
 
 class GlowEngine {
 public:
@@ -226,6 +233,10 @@ public:
             _shownKey = key;
             _fadeRemainingMs = kCrossfadeMs;
             _animMs = 0;  // the new pair starts its pattern at phase 0
+            if (!booting()) {
+                _introColor = (w.st == Status::Nominal) ? kQuietColor : colorOf(w.sys);
+                _introRemainingMs = kIntroMs;
+            }
         }
 
         renderPick(w, _animMs);
@@ -245,6 +256,17 @@ public:
             _pulseRemainingMs = uint16_t(_pulseRemainingMs - step);
             if (!booting() && w.st < Status::Ceremony)
                 for (size_t i = 0; i < framePixels(); ++i) _frame[i] = _pulseColor;
+        }
+
+        // Transition announcement: the double-blip outranks everything below
+        // it, including a pending ack pulse -- it IS the new state speaking.
+        if (_introRemainingMs > 0) {
+            const uint16_t elapsed = uint16_t(kIntroMs - _introRemainingMs);
+            uint16_t step = uint16_t(dt > _introRemainingMs ? _introRemainingMs : dt);
+            _introRemainingMs = uint16_t(_introRemainingMs - step);
+            const bool on = elapsed < kIntroOn1End || elapsed >= kIntroGapEnd;
+            const Rgb c = on ? _introColor : Rgb{0, 0, 0};
+            for (size_t i = 0; i < framePixels(); ++i) _frame[i] = c;
         }
 
         for (size_t i = 0; i < framePixels(); ++i) _out.set(i, scale(_frame[i]));
@@ -354,6 +376,8 @@ private:
     Rgb _fadeFrom[kMaxPixels] = {};
     Rgb _pulseColor{};
     uint16_t _pulseRemainingMs = 0;
+    Rgb _introColor{};
+    uint16_t _introRemainingMs = 0;
     uint16_t _shownKey = 0xFFFE;   // neither a valid pair nor the boot key
     Heartbeat _hb[kMaxHeartbeats];
     size_t _hbCount = 0;

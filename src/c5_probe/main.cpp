@@ -862,9 +862,24 @@ void setup() {
     report("S0 boot");
 
     // Rainbow until WiFi is up: the C5 without its network is not booted.
+    // Pumped from an esp_timer, NOT loop(): setup blocks for seconds in the
+    // WiFi scan, and the rainbow must be the first sign of life (operator
+    // ruling). The liveness heartbeat registers in loop()'s first pass, so
+    // the gate cannot freeze the boot animation before a loop exists.
     s_glow.setBrightness(LED_BRIGHT);
     s_glow.requireReady(uint8_t(1u << uint8_t(slopglow::System::Network)));
-    s_glowHb = s_glow.addHeartbeat(500);
+    {
+        const esp_timer_create_args_t args = {
+            .callback = [](void*) { s_glow.update(millis()); },
+            .arg = nullptr,
+            .dispatch_method = ESP_TIMER_TASK,
+            .name = "glow",
+            .skip_unhandled_events = true,
+        };
+        esp_timer_handle_t th = nullptr;
+        if (esp_timer_create(&args, &th) == ESP_OK)
+            esp_timer_start_periodic(th, 33000);   // ~30 fps
+    }
     report("S1 +led");
 
     // Buffers MUST be sized BEFORE begin(). HardwareSerial refuses to resize a
@@ -987,16 +1002,18 @@ void loop() {
 
     {
         using namespace slopglow;
+        // Heartbeat registers HERE, first pass: from now on a dead loop task
+        // freezes the pixel (the timer pump obeys the gate), which is the
+        // liveness contract; during setup no source existed so the boot
+        // rainbow ran ungated.
+        if (s_glowHb == nullptr) s_glowHb = s_glow.addHeartbeat(500);
         const bool wifiUp = (WiFi.status() == WL_CONNECTED);
         if (wifiUp) s_glow.markReady(System::Network);
         s_glow.set(System::Network, wifiUp ? Status::Nominal : Status::Degraded);
         // The httpd task owns the RX during an OTA/diag pull; that is the
-        // bridge working. (The C5's own flash rides the same handler task,
-        // so the engine simply is not pumped during it -- the last frame
-        // latches, which the liveness gate calls correct.)
+        // bridge working.
         s_glow.set(System::Link, g_otaOwnsRx ? Status::Working : Status::Nominal);
         s_glowHb->pulse();
-        s_glow.update(millis());
     }
     delay(1);
 }

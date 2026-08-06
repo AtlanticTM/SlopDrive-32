@@ -654,8 +654,10 @@ static void commsTask(void* /*param*/) {
         uint32_t now = millis();
         if (now - last_report_ms >= 1000) {
             last_report_ms = now;
+#if !defined(SD32_HEADLESS)
             wifiLink.pollWifiLink();
             wifiLink.superviseWifi();   // re-scan + re-pin if link dropped
+#endif
         }
 
         // ---- Reap a Core-0 step that is STILL blocked ----------------------
@@ -672,7 +674,11 @@ static void commsTask(void* /*param*/) {
                 if (!reaped_this_step) {
                     reaped_this_step = true;
                     const char* nm = s_stepName.load(std::memory_order_relaxed);
+#if defined(SD32_HEADLESS)
+                    const int fd = -1;
+#else
                     const int fd = webui.server()->abortBlockedClient();
+#endif
                     crashring::crumb("http-reap");
                     SLOGW("sys", "Core-0 step %s blocked >%lums — canceled client fd=%d",
                           nm ? nm : "?", (unsigned long)kCore0ReapMs, fd);
@@ -908,6 +914,19 @@ void setup() {
     slopglowInit();
     bootheap::mark("slopglow");
 
+#if defined(SD32_HEADLESS)
+    // sd-4v9: no WiFi init, no HTTP OTA, no web server. Every duty they held
+    // rides the C5 bridge (OTA, diag, token mint) or SlopSync. esp_wifi_init
+    // never runs, so its runtime buffers never allocate -- that reclaim is
+    // the point, and the boot heap beacon below is the measurement.
+    // fw version in the boot log is the C-8 verification stamp now that
+    // /api/capabilities is gone -- read it via the C5's /api/diag/boot.
+    SLOGI("boot", "HEADLESS build fw %s: WiFi/HTTP/ArduinoOTA not started (sd-4v9)",
+          FIRMWARE_VERSION);
+    bootheap::mark("wifi");
+    webui.init();
+    bootheap::mark("webui");
+#else
     bool wifi_ok = wifiLink.setupWiFi();
     bootheap::mark("wifi");
 
@@ -980,6 +999,7 @@ void setup() {
     } else {
         SLOGW("boot", "OTA skipped — WiFi down at boot (serial rescue path only)");
     }
+#endif  // SD32_HEADLESS
     bootheap::mark("ota");
 
 #if defined(FEATURE_RS485_MODBUS)
@@ -1173,10 +1193,13 @@ void setup() {
             slopSyncHub->setDiagSource(&g_serialDiagSource);
 #endif
             slopSyncHub->init();
+#if !defined(SD32_HEADLESS)
             // RFC-029 §4: GET /uitoken on the SHARED WebServer — HTTP escapee #2,
             // and it has to be HTTP because its whole security property is the
-            // browser's same-origin policy, which cannot exist in-band.
+            // browser's same-origin policy, which cannot exist in-band. The
+            // headless build mints over the bridge instead (sd-ykg.2).
             slopSyncHub->attachHttpRoutes(webui.server());
+#endif
             SLOGI("slopsync", "hub service in PSRAM (%u B)",
                   unsigned(sizeof(slopdrive::SlopSyncHubService)));
         } else {

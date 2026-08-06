@@ -68,7 +68,9 @@ void OtaService::begin(const char* hostname, const char* password) {
 // ---- handle() -- service ArduinoOTA + deferred HTTP reboot (Core-0 low-prio only) --
 
 void OtaService::handle() {
+#if !defined(SD32_HEADLESS)
     ArduinoOTA.handle();
+#endif
     otaSerialTick();
     _reboot.poll();
 }

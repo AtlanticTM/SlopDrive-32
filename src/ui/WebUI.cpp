@@ -90,7 +90,9 @@ WebUI::WebUI(SystemState&        state,
     // IdleGuardWebServer (include/ui/SlopHttpServer.h): sync WebServer plus the
     // speculative-socket idle guard that kills the measured 5 s
     // HTTP_MAX_DATA_WAIT captures.
+#if !defined(SD32_HEADLESS)
     _httpServer = new SlopHttpServer(HTTP_PORT);
+#endif
 }
 
 WebUI::~WebUI() {
@@ -100,6 +102,13 @@ WebUI::~WebUI() {
 // ---- init() -----------------------------------------------------------------
 
 void WebUI::init() {
+#if defined(SD32_HEADLESS)
+    // sd-4v9: no HTTP surface, no telemetry sampler (its ring feeds HTTP
+    // polling only). handleCommand and the servo readback stay -- WebUI is
+    // still the command core until the extraction lands.
+    SLOGI("ui", "HEADLESS build: HTTP surface not constructed");
+    return;
+#else
     // WebServer only exposes request headers that were explicitly collected —
     // without this, header("If-None-Match") is always empty and the ETag
     // revalidation in handleRoot() silently never fires.
@@ -221,16 +230,19 @@ void WebUI::init() {
     SLOGI("ui", "HTTP server on port %d", HTTP_PORT);
 
     startTelemetrySampler();
+#endif
 }
 
 // ---- update() ---------------------------------------------------------------
 
 void WebUI::update() {
+#if !defined(SD32_HEADLESS)
     // This IS the request pump.
     _httpServer->handleClient();
     // Drop speculative browser sockets that hold the single serve slot while
     // sending nothing — otherwise each one deafens HTTP for 5 s (measured).
     _httpServer->dropIdleCapture();
+#endif
 
 #if defined(FEATURE_RS485_MODBUS)
     refreshServoReadback();

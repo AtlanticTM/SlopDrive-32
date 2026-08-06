@@ -1314,8 +1314,10 @@ void SlopSyncHubService::init() {
     // path for a LAN client without BLE (§13.8). Started after the WS port so
     // ws_port below is meaningful the instant the first probe can arrive;
     // hub_instance_id was resolved just above.
+#if !defined(SD32_HEADLESS)
     _udpDiscovery.begin("slopdrive-32", _hub.hubInstanceId(), SLOPSYNC_WS_PORT, FIRMWARE_VERSION,
                          _hub.catalogEtag());
+#endif
     bootheap::mark("ss:udp");
 
     // RFC-017: arm the log bridge now — from here on every SlopLog line is also
@@ -1445,7 +1447,9 @@ void SlopSyncHubService::taskLoop() {
 #if defined(UART_LINK_ENABLED)
         _uartPort.loop();             // drain Serial2 + deferred attach/detach (TRAPS T5)
 #endif
+#if !defined(SD32_HEADLESS)
         _udpDiscovery.poll();         // RFC-046: drain + answer pending DISCOVER_PROBEs
+#endif
         _hub.update(_clock.nowUs());  // pump every session: frames, pacing, deadman (fires onStreamBundle)
         drainMotionStream();          // pop due 0x0084 pacing-ring entries -> Core-1 sampler queue
         syncSafety();
@@ -2223,7 +2227,11 @@ void SlopSyncHubService::publishTelemetry() {
             std::span<std::byte> s(buf);
             slopsync::putU32(s.subspan(0, 4), uint32_t(ESP.getFreeHeap()));
             slopsync::putU32(s.subspan(4, 4), uint32_t(now / 1000u));
+#if defined(SD32_HEADLESS)
+            slopsync::putU8(s.subspan(8, 1), 0);   // no radio, no RSSI
+#else
             slopsync::putU8(s.subspan(8, 1), uint8_t(int8_t(WiFi.RSSI())));
+#endif
             slopsync::putU8(s.subspan(9, 1), uint8_t(_hub.sessionCount()));
             // §9.4: never-silent. ALL THREE loss points in the chain summed —
             // the sloplog core ring (where a flood is shed first, severity-aware),
@@ -2418,6 +2426,12 @@ void SlopSyncHubService::pumpPresencePairingWindow(uint32_t nowMs) {
 // last-published state, so a quiet second (nothing changed) costs a
 // WiFi.status() call and a couple of bool compares — no radio touch.
 void SlopSyncHubService::pumpEndpointAndRadios(uint32_t /*nowMs*/) {
+#if defined(SD32_HEADLESS)
+    // No radios: 0/0 means "no endpoint offered" on the wire (§6.3), which is
+    // the honest answer -- the C5 is the front door.
+    _hub.setEndpoint(0, 0);
+    return;
+#else
     const bool wifiUp = (WiFi.status() == WL_CONNECTED);
 
     // §6.3: "0 means absent" for BOTH keys — Hub::setEndpoint already omits
@@ -2446,6 +2460,7 @@ void SlopSyncHubService::pumpEndpointAndRadios(uint32_t /*nowMs*/) {
 #endif
     _udpDiscovery.setPairingWindowOpen(pairingOpen);
     _udpDiscovery.setWsAvailable(wifiUp);
+#endif  // SD32_HEADLESS
 }
 
 // ---- Pairing window and NVS persistence (namespace "slopsync") --------------

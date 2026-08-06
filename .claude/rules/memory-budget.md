@@ -1,8 +1,6 @@
 ---
 paths:
-  - "src/**"
-  - "include/**"
-  - "platformio.ini"
+  - "**"
 ---
 
 # Memory discipline
@@ -20,10 +18,31 @@ paths:
   SlopSyncUartTransport.h:202-206); ledger/preset blobs as members of the
   PSRAM-resident service (SlopSyncHubService.h:526-542).
 
+## Current free heap -- read this before quoting any number below
+
+**Measured 2026-08-06, fw 2.4.19+, from the boot beacon:
+`heap free=165111 min=165111 maxblock=90100`, and 137,083 free after the hub
+service loads.** Every `int_free` figure elsewhere in this file (34,039 /
+41,967 / 35,467 / 27,531 / "~36 KB" / "~13 KB") predates the 2026-08-01 NimBLE
+removal, which reclaimed ~64 KB of stack plus a 16,560 B port object. Those
+numbers are still VALID AS HISTORY for the incidents they document and must not
+be edited to match today; they are NOT valid as a current budget.
+
+Static footprint, from the ELF (`xtensa-esp32s3-elf-size`, T30 item 1's ask-the
+-binary technique): `.dram0.data` 23,261 + `.dram0.bss` 52,040 = **75,301 B of
+327,680**. Bucketed over 955 named symbols: system/other 30,288, wifi/net/http
+16,210, ours 11,263. There is no hog -- the largest single symbol in the whole
+image is `port_IntStack` at 4,192 B.
+**So stripping WiFi frees ~16 KB of STATIC, not 60+.** Its real cost is
+RUNTIME -- `esp_wifi_init` buffers, lwIP pools, per-request HTTP allocation --
+which is why removing NimBLE freed ~64 KB when its static footprint was nowhere
+near that. An ELF census answers "what is linked", never "what is allocated";
+only a live boot-heap A/B answers the second.
+
 ## PSRAM vs internal RAM
 
 - SlopSyncHubService is placement-new'd into PSRAM from main.cpp. Never move
-  it back to BSS (DOCTRINE §9, TRAPS T2: a ~100 KB static once left ~13 KB
+  it back to BSS (T2: a ~100 KB static once left ~13 KB
   free heap and killed the network stack). Measured: service 240,976 B in
   PSRAM; internal-RAM cost ~101 KB (docs/c5-comms-offload.md §4.1).
 - CONFIG_SPIRAM_TRY_ALLOCATE_WIFI_LWIP redirects WiFi/lwIP bulk to PSRAM;

@@ -1,8 +1,6 @@
 ---
 paths:
-  - "src/comms/**"
-  - "include/comms/**"
-  - "src/c5_probe/**"
+  - "**"
 ---
 
 # Transport and SlopSync boundary constraints
@@ -74,11 +72,11 @@ restating them here would violate C-1.
 
 ## UART bridge profile (S3 <-> C5, SlopSyncUartTransport)
 
-- Serial2 only, TX GPIO43 / RX GPIO44, 2 Mbaud. Serial1 is the Modbus servo
+- Serial2 only, TX GPIO43 / RX GPIO44, 4 Mbaud. Serial1 is the Modbus servo
   bus and must never be touched from here (SlopSyncUartTransport.h:16-17,86).
 - Buffers sized BEFORE begin() (HardwareSerial refuses to resize running):
   TX 4096, RX 16384. The RX buffer must outlast the 5 ms DRAIN INTERVAL, not
-  the frame: 2 Mbaud lands ~5,000 B between hub ticks; 4096 overflowed by
+  the frame: 2 Mbaud lands ~1,000 B between hub ticks; 4096 overflowed by
   construction (SlopSyncUartTransport.h:100-111, c5-comms-offload.md §4.6).
 - Bulk reads only: readBytes() into a 512 B chunk. Per-byte read() takes the
   UART mutex per call and measurably cannot keep up
@@ -118,10 +116,30 @@ restating them here would violate C-1.
 
 The link runs without RTS/CTS by design, so the RX ring is the only thing
 absorbing a burst. It is sized against the DRAIN INTERVAL, never the frame:
-`pumpRx()` runs on the hub's 5 ms tick, and 2 Mbaud delivers ~5,000 B between
-drains. `kUartLinkRxBufferBytes = 16384` gives ~80 ms of absorption at 2 Mbaud
-(~65 ms at 8/N/1 framing overhead), which is roughly 16 drain intervals of
-slack. The original 4,096 overflowed by construction. TX is 4,096.
+`pumpRx()` runs on the hub's 5 ms tick, and 2 Mbaud at 8N1 is 200 B/ms, so
+~1,000 B land between drains. `kUartLinkRxBufferBytes = 32768` is ~164 ms of
+absorption, roughly 32 drain intervals. The original 4,096 overflowed by
+construction. TX is 8,192.
+
+Corrected 2026-08-06: this section previously claimed ~5,000 B per tick and
+"16 ms of runway", both wrong by 5x. 2 Mbaud is 200 B/ms, not 1,000, and 16 KB
+was always ~82 ms. The "16" was drain INTERVALS mislabeled as milliseconds.
+Buffers were then doubled because an OTA burst -- a whole credit window sent
+back to back -- is the case that actually loses frames.
+
+**4 Mbaud, and the link was EXONERATED (retested 2026-08-06 after T33).** The
+earlier conviction -- "4 Mbaud costs 1 decode error per 9.1 KB, the cliff is
+the link" -- was measured with the RX ISR dying during every flash write. The
+loss window is TIME, so doubling the byte rate doubled the casualties, and the
+link took the blame. With the ISR in IRAM: two full 1.72 MB transfers at
+4 Mbaud, ZERO decode errors, ZERO resends, 9.6-9.8 s each, both
+version-verified. Numbers scale with the baud: 400 B/ms, so the 32 KB RX ring
+is ~82 ms / ~16 drain intervals of absorption -- still covering the worst
+80 ms lazy sector erase, which is the stall that matters.
+**Do not chase 8 Mbaud without evidence it matters:** the wire floor at 4 M is
+~4.4 s while transfers take ~9.7 s, so the bound is now flash writes and
+protocol, not bandwidth; halving wire time again buys ~2 s for real EMI risk.
+5 Mbaud stays out because it does not divide the C5's 48 MHz crystal.
 
 **Buffers must be sized BEFORE `begin()`.** `setRxBufferSize`/`setTxBufferSize`
 are silent no-ops once the port is running (`HardwareSerial.cpp:667-691`). The
@@ -171,6 +189,83 @@ the ~128 B hardware FIFO is refused forever.
   raw frames over UART; hub/session state lives on the S3. It implements the
   ESTOP raw-scan duty; it does not implement §14.1 shedding
   (docs/c5-comms-offload.md, "bridge, not relocation").
+
+## T31 -- a gate must never disable the transport carrying the thing it gates
+
+**Rule:** before a mode flag suspends work, list what ARRIVES over the paths it
+suspends. A flag raised by an operation must not stop servicing the link that
+operation is running on. When a flag is set by a request that is still in
+flight, the guard needs an exemption for that request's own transport.
+**Mechanism:** `SlopSyncHubService::taskLoop()` skipped all port servicing while
+`ota_active` was set, which is correct for an HTTP OTA (flash writes happen on
+httpTask, and touching PSRAM-resident rings while the flash cache is disabled is
+the T2/memory-budget fault). Serial OTA raises the SAME flag, but its bytes
+arrive on `_uartPort` -- so from the tick after `prepareForOta()`, nothing
+drained the UART for the rest of the transfer. The sender saw its first chunk
+accepted and everything after it vanish.
+**Why it was expensive to find:** every counter said healthy. `rxDrops` 0,
+`decodeErrors` 0, `framesRx` 0 (bridge frames never touch it), and the bytes
+were discarded by the UART DRIVER before any of our code counted them -- the
+same invisible class as a hardware FIFO overrun. The receiver was not slow and
+the wire was not lossy; the receiver was simply not running.
+**Fix:** the guard still pumps the port when a SERIAL OTA is in flight
+(`SlopSyncUartPort::otaInFlight()`), and only then.
+**Diagnostic that cracked it:** a gap probe INSIDE `pumpRx` reporting when the
+function had not been entered for >200 ms. Task-liveness has to be measured on
+the task in question -- the 10 s heap beacon looks like proof of life and is
+not, because it runs on httpTask.
+
+## T32 -- fix a two-ended link at BOTH ends, and pace retransmits on progress
+
+Two lessons from one bring-up; both are about symmetry.
+
+**Rule 1:** a performance fix on a point-to-point link belongs on both ends the
+day it lands. The S3 replaced per-byte `read()` with bulk `readBytes()` long
+ago, with a measured justification in this file. The C5 never got it, and under
+a sustained transfer its Arduino loop task fell far enough behind that its own
+acks lagged, the sender read the silence as loss, and retransmits saturated the
+link -- 26 MB moved for a 1.7 MB image. One end fixed is not the link fixed.
+
+**Rule 2:** a retransmit timer fires on LACK OF PROGRESS, never on "not yet
+acknowledged". Under any windowed protocol, being ahead of the peer's last ack
+is the normal state. Triggering on it resent a single chunk 109,421 times.
+**And the timer becomes the transfer rate.** Once every chunk needed one retry,
+throughput was exactly `chunks x resend_interval`: 512 x 150 ms = 76.8 s against
+75.1 s observed. Dropping the interval to 15 ms gave a 7.4x speedup with no
+other change. If a transfer's duration divides evenly by a timeout, the timeout
+is the design.
+
+## T33 -- ARQ halves must match, and a flash write mutes a flash-resident ISR
+
+Two lessons from one fix (sd-6kz.1, 184 s -> 12.1 s, resends 7355 -> 16).
+
+**Rule 1: a receiver that drops out-of-order frames is a GO-BACK-N receiver,
+and it demands a go-back-N sender.** The S3 rightly refuses out-of-order OTA
+chunks (a hole bricks an image); the C5 resent only the single chunk `want`
+per stall. That mismatch is a PHASE TRAP, not a slowdown: after one lost
+burst, every new send sits exactly window-ahead of `want`, is rejected
+forever, and the link degrades to one chunk per resend interval -- each chunk
+shipped once as a rejected hole, once as the lone resend that lands. The
+census signature is `got = want + (window-1)` steady-state. Fix: on stall,
+resend the WHOLE outstanding span; any entry event then heals in one interval.
+Corollary: with span recovery the resend timer's only job is "genuinely
+lost" -- set it ABOVE the receiver's worst legitimate stall (the ~80 ms lazy
+sector erase), or every stall fires a full-span resend into a healthy link.
+
+**Rule 2: a receive path that writes flash needs its RX ISR in IRAM.** Flash
+writes disable the cache; a flash-resident ISR is held off; the 128 B hardware
+FIFO overflows 0.64 ms into any write at 2 Mbaud, BELOW every driver and
+application counter -- rxDrops 0, decodeErrors 0, bytes gone. Baud changes
+nothing (the loss window is time, not bandwidth). `CONFIG_UART_ISR_IN_IRAM=y`
+(platformio.ini); verify with nm, the handler must sit at an 0x403xxxxx IRAM
+address, not 0x42xxxxxx flash. This also protects Serial1 Modbus telemetry
+during HTTP OTA writes.
+
+**Diagnosis kit that cracked both:** the permanent 1 Hz dups/holes census in
+`OtaService::otaSerialData` (T27-safe), pulled MID-TRANSFER via
+`/api/diag/ota?from=` -- the archive dies with the post-flash reboot, so
+transfer forensics are only readable live. Dups mean acks lost or a premature
+timer; holes mean chunks lost or the phase trap.
 
 ## T3 -- session teardown must be ONE funnel
 

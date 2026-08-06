@@ -95,10 +95,28 @@ bool isRegisteredRole(std::string_view r) {
 }  // namespace
 
 // ---- Etag pin ---------------------------------------------------------------
-// The byte-identity gate for the authoring-layer refactor (see the campaign
-// entry in docs/canon/LEDGER.md): a surprise change here IS an accidental wire
-// change. Update this pin only on a DELIBERATE catalog-evolution commit that
+// The byte-identity gate for the authoring-layer refactor: a surprise change
+// here IS an accidental wire change. Update this pin only on a DELIBERATE catalog-evolution commit that
 // says so. Pinned over the fully-featured {true, true} fixture build.
+//
+// MOVED 2026-08-04 (B6 03 0B 8D A7 A8 7A A8 -> AF B3 C4 DE 66 5D DB B5), fw
+// 2.4.2: 0x1030 gained `home_style` (setting key 6 on 0x3030), a fourth
+// enabled_mask bit. DELIBERATE -- machineHomeStyleStore() had NO caller, so the
+// drive's own homing cycle was unreachable from any client.
+//
+// MOVED 2026-08-04 (94 DC 68 DC B5 35 77 F0 -> B6 03 0B 8D A7 A8 7A A8), fw
+// 2.4.0: 0x1030 machine-modes gained `motion_backend` (setting key 5 on
+// 0x3030, restart_required) and its enabled_mask grew a third bit. DELIBERATE
+// -- the motion backend was only switchable over HTTP, which is not a control
+// surface (dev board sd-3l3).
+//
+// MOVED 2026-07-30 (B6 9E B0 62 49 EB E7 3A -> 94 DC 68 DC B5 35 77 F0), fw
+// 2.1.96: `infeasible_policy` gained a sixth option ("blend") and its default
+// moved 2 -> 5. DELIBERATE — the engine has had InfeasiblePolicy::Blend since
+// 0.9.0 and every device-side table was still five wide, so the policy was
+// unreachable from the machine and selecting it fell through the boot map to
+// whatever the engine default happened to be. Same shape as the fw 2.1.49 bug
+// the boot map in main.cpp carries a comment about.
 TEST_CASE("device catalog: etag pinned — accidental-wire-change tripwire") {
     DeviceCatalog dc;
     std::vector<std::byte> scratch(65536);
@@ -111,7 +129,9 @@ TEST_CASE("device catalog: etag pinned — accidental-wire-change tripwire") {
         hex += ' ';
     }
     hex.pop_back();
-    CHECK(hex == "B6 9E B0 62 49 EB E7 3A");
+    // Moved deliberately by the drive-tune/drive-set pair (0x1130 / 0x3130),
+    // then again by drive-tune's two readback fields.
+    CHECK(hex == "AE D3 61 91 9E 92 C9 FE");
 }
 
 // ---- Baseline conformance ---------------------------------------------------
@@ -147,7 +167,10 @@ TEST_CASE("device catalog: builds, sorts ascending, and passes checkCatalog") {
     // 41 -> 44 (M5): the RFC-021 `pattern.frayd` preset store — 0x0095 STORE
     // descriptor, 0x0096 its roster STATE, 0x0108 the save/load/delete/rename
     // writer. Retires POST /api/pattern/presets, the last HTTP writer.
-    CHECK(dc.c.count == 44);
+    // 44 -> 46: 0x1130 drive-tune + 0x3130 drive-set, the AIM drive's own
+    // registers. First settings pair on this machine that configures the DRIVE
+    // rather than the planner, hence its own family rather than sm_*'s.
+    CHECK(dc.c.count == 46);
     // RFC-017: the log channel must carry a replay depth, or a client that
     // connects after a fault sees nothing of what happened.
     const slopsync::CatalogEntry* logE = dc.c.find(slopsync::channels::log);
@@ -497,7 +520,10 @@ TEST_CASE("device catalog: every setting_key resolves in its declared settingCha
     // 80 -> 81 at Phase D (RFC-045/048): `background_run` on 0x0082
     // (settingKey 7, paired 0x0102 key 7) — the `source.background_run`
     // field role finally has a real setting behind it on this device.
-    CHECK(annotated == 81);
+    // 83 -> 84: `accel_reg` on drive-tune (0x1130), written through drive-set
+    // (0x3130). The AIM drive's own ramp register, the first setting on this
+    // machine that configures the DRIVE rather than the planner.
+    CHECK(annotated == 84);
 }
 
 // ---- RFC-009 ----------------------------------------------------------------

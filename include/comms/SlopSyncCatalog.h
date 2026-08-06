@@ -74,6 +74,10 @@ inline constexpr uint16_t machine_modes  = 0x1030;  // STATE·machine, family 3 
 inline constexpr uint16_t sm_limits      = 0x1120;  // STATE·motion, family 2 member 0 (master; was 0x1103)
 inline constexpr uint16_t sm_chase       = 0x1121;  // STATE·motion, family 2 member 1 (was 0x1104)
 inline constexpr uint16_t sm_waveform    = 0x1122;  // STATE·motion, family 2 member 2 (was 0x1105)
+// ---- Servo drive registers, its own family: these configure the DRIVE, not --
+// the planner. Family 2 is slopmotion's; a drive register that happens to be
+// spelled "acceleration" is a different subsystem and gets its own writer.
+inline constexpr uint16_t drive_tune     = 0x1130;  // STATE·motion, family 3 member 0 (master)
 // ---- Advanced pattern — off the dead /api/pattern HTTP surface, onto SlopSync
 // Same flattened-entry budget split as 0x008B/C/D. AdvancedPattern.h's real
 // parameter set is 8 base controls (advpat::Settings) plus a 6-field cyclic
@@ -101,6 +105,7 @@ inline constexpr uint16_t home           = 0x3101;  // INTENT·motion, family 0 
 inline constexpr uint16_t modes_set      = 0x3030;  // INTENT·machine, family 3 member 0, MIRROR of machine_modes (was 0x3001)
 inline constexpr uint16_t sm_set         = 0x3120;  // INTENT·motion, family 2 member 0, MIRROR of the sm_* family (was 0x3102)
 inline constexpr uint16_t machine_admin  = 0x30F0;  // INTENT·machine, family F member 0 = admin (was 0x3002)
+inline constexpr uint16_t drive_set      = 0x3130;  // INTENT·motion, family 3 member 0, MIRROR of drive_tune
 // Shared writer behind ALL SEVEN pattern-advanced STATE channels — same
 // "one settingChannel, many cards" pattern as sm_set. MIRROR of
 // pattern_advanced (family 1 member 0 on both sides).
@@ -1135,15 +1140,42 @@ inline bool buildSlopDriveCatalog(slopsync::Catalog32& c, DeviceFeatures feat = 
                       .hasRank = true, .rank = slopsync::ui_ranks::hidden},
                      {"off", "on"});
     // Bit i gates the i-th setting-annotated field, same rule as 0x0081.
-    // blend_mode_reserved carries no setting_key so it is NOT bit 0 anymore —
-    // stream_speed_mode and overshoot_clamp are the only two setting-
-    // annotated fields left on this layout.
+    // blend_mode_reserved carries no setting_key so it is NOT bit 0 anymore.
+    // stream_speed_mode, overshoot_clamp and motion_backend (appended after
+    // this mask byte, packed layouts being append-only) are bits 0, 1 and 2.
     c.addBitfieldField({.name = "enabled_mask", .type = PackedFieldType::bitfield8, .unit = "flag",
                         .scale = 1.0f,
                         .desc = "Which of these the machine will accept right now.",
                         .role = roles::meta_enabled_mask,
                         .hasRank = true, .rank = slopsync::ui_ranks::detail},
-                       {"stream_speed_mode", "overshoot_clamp"});
+                       {"stream_speed_mode", "overshoot_clamp", "motion_backend", "home_style"});
+    // Which path actually drives the motor. restart_required is the whole
+    // contract: the NVS key is read once in setup() before anything touches
+    // the motor reference, so a live switch is not expressible. Applying it
+    // stores the choice and changes nothing until the next boot.
+    c.addSelectField({.name = "motion_backend", .type = PackedFieldType::u8, .unit = "", .scale = 1.0f,
+                      .dflt = SettingDefault::ofInt(0),
+                      .group = "Motion behavior",
+                      .desc = "Which path drives the motor: a step/dir pulse train, or absolute "
+                              "setpoints over RS485. Takes effect at the next boot.",
+                      .settingKey = 5,
+                      .flags = uint8_t(slopsync::setting_flags::advanced |
+                                       slopsync::setting_flags::restart_required),
+                      .hasSettingKey = true,
+                      .hasRank = true, .rank = slopsync::ui_ranks::advanced},
+                     {"step-dir", "modbus"});
+    // Live-applied, no restart: read fresh at the start of every homing cycle.
+    // Only the Modbus backend honors it; step/dir mode always runs its own
+    // current-stall sweep.
+    c.addSelectField({.name = "home_style", .type = PackedFieldType::u8, .unit = "", .scale = 1.0f,
+                      .dflt = SettingDefault::ofInt(0),
+                      .group = "Motion behavior",
+                      .desc = "How the machine finds home: feel for the hard stops itself, or "
+                              "hand the whole cycle to the drive.",
+                      .settingKey = 6, .flags = slopsync::setting_flags::advanced,
+                      .hasSettingKey = true,
+                      .hasRank = true, .rank = slopsync::ui_ranks::advanced},
+                     {"sensorless sweep", "drive built-in"});
     };
 
     // ---- "slopmotion-*" — STATE, tuning -------------------------------------
@@ -1297,10 +1329,11 @@ inline bool buildSlopDriveCatalog(slopsync::Catalog32& c, DeviceFeatures feat = 
                       .settingKey = 13, .hasSettingKey = true},
                      {"follow client", "force C1", "force C2"});
     c.addSelectField({.name = "infeasible_policy", .type = PackedFieldType::u8, .unit = "", .scale = 1.0f,
-                      .dflt = SettingDefault::ofInt(2), .group = "Infeasible moves",
+                      .dflt = SettingDefault::ofInt(5), .group = "Infeasible moves",
                       .desc = "What to do when a move cannot be finished in the time it was given.",
                       .settingKey = 14, .hasSettingKey = true},
-                     {"stretch", "scale", "reshape", "prioritize amplitude", "prioritize smooth"});
+                     {"stretch", "scale", "reshape", "prioritize amplitude", "prioritize smooth",
+                      "blend"});
     c.addLayoutField({.name = "infeasible_margin", .type = PackedFieldType::f32, .unit = "", .scale = 1.0f,
                       .hasMin = true, .hasMax = true, .min = 0.5f, .max = 1.0f,
                       .dflt = SettingDefault::ofFloat(0.92f), .group = "Infeasible moves",
@@ -1337,6 +1370,46 @@ inline bool buildSlopDriveCatalog(slopsync::Catalog32& c, DeviceFeatures feat = 
                         .hasRank = true, .rank = slopsync::ui_ranks::detail},
                        {"curve_policy", "infeasible_policy", "infeasible_margin", "smooth_budget",
                         "amplitude_budget", "blend_steps", "reshape_steps", "settle_grace_ms"});
+    };
+
+    // ---- "drive-tune" -- STATE, the AIM drive's own registers ---------------
+    // Category `hardware`, not `tuning`: this writes the DRIVE, and its unit is
+    // the drive's ((r/min)/s), not the machine's mm/s2. Filing it beside the
+    // planner knobs would invite reading one as the other. Rank `control` and
+    // no advanced flag, so it is reachable without an advanced affordance.
+    //   [4 + 1 mask = 5 B]
+    auto addDriveTune = [&]() {
+    c.addEntry({.id = ch::drive_tune, .name = "drive-tune",
+                .cls = ChannelClass::STATE, .dir = Direction::h2c,
+                .access = AccessLevel::watch, .maxRateHz = 0.0f,
+                .defaultPriority = Priority::background,
+                .hasCategory = true, .category = slopsync::ui_categories::hardware,
+                .hasSettingChannel = true, .settingChannel = ch::drive_set,
+                .hasRank = true, .rank = slopsync::ui_ranks::control});
+    c.addLayoutField({.name = "accel_reg", .type = PackedFieldType::u32, .unit = "rpm/s",
+                      .scale = 1.0f,
+                      .hasMin = true, .hasMax = true, .min = 0.0f, .max = 60098.0f,
+                      .dflt = SettingDefault::ofInt(0), .group = "Servo drive",
+                      // 128 bytes exactly, which is limits::desc_max_bytes.
+                      .desc = "Drive ramp register. 0 = auto. Under 60000 the drive ramps on "
+                              "its own and lags; 60000 removes it; 60001-60098 add feedforward %.",
+                      .step = 1.0f, .settingKey = 1,
+                      .hasSettingKey = true, .hasStep = true});
+    // READBACK, no setting_key, so these render as readouts. What the DRIVE
+    // reports, never what was asked for: the request and the register can
+    // disagree, and only the drive's own answer settles it.
+    c.addLayoutField({.name = "accel_reg_actual", .type = PackedFieldType::u32, .unit = "rpm/s",
+                      .scale = 1.0f, .group = "Servo drive",
+                      .desc = "What the drive reports for 0x03 right now, read back off the bus."});
+    c.addLayoutField({.name = "ramp_limit", .type = PackedFieldType::f32, .unit = "mm/s2",
+                      .scale = 1.0f, .group = "Servo drive",
+                      .desc = "That same setting in machine units. Below your accel ceiling the "
+                              "drive, not the planner, is what limits the stroke."});
+    c.addBitfieldField({.name = "enabled_mask", .type = PackedFieldType::bitfield8, .unit = "flag",
+                        .scale = 1.0f, .desc = "Which of these the machine will accept right now.",
+                        .role = roles::meta_enabled_mask,
+                        .hasRank = true, .rank = slopsync::ui_ranks::detail},
+                       {"accel_reg"});
     };
 
     // ---- "pattern-advanced" — STATE, normal, on-change ----------------------
@@ -1765,6 +1838,10 @@ inline bool buildSlopDriveCatalog(slopsync::Catalog32& c, DeviceFeatures feat = 
                       .hasMin = true, .hasMax = true, .min = 0.0f, .max = 1.0f});
     c.addSchemaField({.key = 4, .name = "overshoot_clamp", .type = CborFieldType::uint_t, .unit = "",
                       .hasMin = true, .hasMax = true, .min = 0.0f, .max = 1.0f});
+    c.addSchemaField({.key = 5, .name = "motion_backend", .type = CborFieldType::uint_t, .unit = "",
+                      .hasMin = true, .hasMax = true, .min = 0.0f, .max = 1.0f});
+    c.addSchemaField({.key = 6, .name = "home_style", .type = CborFieldType::uint_t, .unit = "",
+                      .hasMin = true, .hasMax = true, .min = 0.0f, .max = 1.0f});
     };
 
     // ---- "slopmotion-set" — INTENT, control, 5 Hz ---------------------------
@@ -1823,6 +1900,21 @@ inline bool buildSlopDriveCatalog(slopsync::Catalog32& c, DeviceFeatures feat = 
                       .hasMin = true, .hasMax = true, .min = 0.0f, .max = 8.0f});
     c.addSchemaField({.key = 20, .name = "settle_grace_ms", .type = CborFieldType::f32_t, .unit = "ms",
                       .hasMin = true, .hasMax = true, .min = 0.0f, .max = 200.0f});
+    };
+
+    // ---- "drive-set" -- INTENT, the writer behind drive-tune ----------------
+    // 1 Hz, not 5: every accepted write reaches the drive over a shared 19200
+    // Modbus wire that the setpoint stream also uses, and in step/dir mode it
+    // costs a four-write enable/save/disable sequence. A human turning a knob
+    // is the only intended caller. The hub refuses it outright while moving.
+    auto addDriveSet = [&]() {
+    c.addEntry({.id = ch::drive_set, .name = "drive-set",
+                .cls = ChannelClass::INTENT, .dir = Direction::c2h,
+                .access = AccessLevel::control, .maxRateHz = 1.0f,
+                .defaultPriority = Priority::normal});
+    c.addSchemaField({.key = 1, .name = "accel_reg", .type = CborFieldType::uint_t,
+                      .unit = "rpm/s",
+                      .hasMin = true, .hasMax = true, .min = 0.0f, .max = 60098.0f});
     };
 
     // ---- "machine-admin" — INTENT, control ----------------------------------
@@ -1953,6 +2045,7 @@ inline bool buildSlopDriveCatalog(slopsync::Catalog32& c, DeviceFeatures feat = 
     addSmLimits();               // 0x1120 STATE·motion, family 2 member 0
     addSmChase();                // 0x1121 STATE·motion, family 2 member 1
     addSmWaveform();             // 0x1122 STATE·motion, family 2 member 2
+    addDriveTune();              // 0x1130 STATE·motion, family 3 member 0
     addPatternState();           // 0x1200 STATE·pattern, family 0 member 0
     addPatternAdvanced();        // 0x1210 STATE·pattern, family 1 member 0
     addApModifierChannel(ch::pattern_adv_mod_speedin,  "pattern-adv-mod-speedin",  "Speed in modifier",  21);  // 0x1211
@@ -1970,6 +2063,7 @@ inline bool buildSlopDriveCatalog(slopsync::Catalog32& c, DeviceFeatures feat = 
     addMove();                   // 0x3100 INTENT·motion, family 0 member 0
     addHome();                   // 0x3101 INTENT·motion, family 0 member 1
     addSmSet();                  // 0x3120 INTENT·motion, family 2 member 0
+    addDriveSet();               // 0x3130 INTENT·motion, family 3 member 0
     addPatternCmd();             // 0x3200 INTENT·pattern, family 0 member 0
     addPatternAdvancedCmd();     // 0x3210 INTENT·pattern, family 1 member 0
     addPatternPresetsCmd();      // 0x3220 INTENT·pattern, family 2 member 0

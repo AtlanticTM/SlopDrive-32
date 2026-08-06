@@ -23,6 +23,8 @@
 #include "SlopSyncHubService.h"
 
 #include "BootHeap.h"   // sub-attribution of this init()'s internal-heap cost
+#include "MachineConfig.h"   // motion_backend is NVS-backed, read/written here
+#include "ui/SlopHttpServer.h"   // attachHttpRoutes() needs the full type
 
 #include <Arduino.h>
 #include <ArduinoJson.h>
@@ -372,7 +374,15 @@ slopsync::Result<IntentValueMap, NackCode> SlopDriveHubDelegate::applyIntent(
             uint64_t op = fieldU64(findField(requested, 1), 0);
             switch (op) {
                 case 1:  // real sensorless homing
-                    if (_state.estop_latched) return Ret::err(NackCode::ESTOP_ACTIVE);
+                    // HOMING IS THE RECOVERY ACTION: refusing it while latched
+                    // leaves no way to re-enable except a separate clear.
+                    // canClearEstop() still enforces SPEC 11.2 (motion must
+                    // have genuinely stopped), and syncSafety() propagates the
+                    // drop to the hub's own latch.
+                    if (_state.estop_latched) {
+                        if (!canClearEstop()) return Ret::err(NackCode::ESTOP_ACTIVE);
+                        SLOGW("slopsync", "HOME cleared the ESTOP latch (homing is recovery)");
+                    }
                     _webui.handleCommand(WS_OP_HOME, in, out);  // always accepts
                     applied.count = 1;
                     applied.fields[0] = {1, IntentValue::ofU64(1)};
@@ -467,6 +477,32 @@ slopsync::Result<IntentValueMap, NackCode> SlopDriveHubDelegate::applyIntent(
                     {4, IntentValue::ofU64(_state.interp_clamp_overshoot ? 1u : 0u)};
                 anyApplied = true;
             }
+            if (const auto* f = findField(requested, 5)) {   // motion_backend
+                // restart_required: this ONLY writes NVS. The choice is read
+                // once in setup() before anything touches the motor, so
+                // applying it live is not expressible, and the echo is the
+                // STORED value rather than the running one.
+                uint64_t v = fieldU64(f, 0);
+                if (v > 1) return Ret::err(NackCode::INVALID_VALUE);
+                machineBackendStore(uint8_t(v));
+                _machCfgDirty = true;   // service refreshes its published cache
+                // Echoing the RE-READ value, not the request: NVS is what the
+                // next boot binds to, so that is the only honest echo.
+                applied.fields[applied.count++] =
+                    {5, IntentValue::ofU64(machineBackendLoad())};
+                anyApplied = true;
+            }
+            if (const auto* f = findField(requested, 6)) {   // home_style
+                // Live-applied, no restart: ModbusServoDriver reads it fresh at
+                // the start of every homing cycle, so the next home obeys it.
+                uint64_t v = fieldU64(f, 0);
+                if (v > 1) return Ret::err(NackCode::INVALID_VALUE);
+                machineHomeStyleStore(uint8_t(v));
+                _machCfgDirty = true;
+                applied.fields[applied.count++] =
+                    {6, IntentValue::ofU64(machineHomeStyleLoad())};
+                anyApplied = true;
+            }
             if (!anyApplied) return Ret::err(NackCode::INVALID_VALUE);
             return Ret::ok(applied);
         }
@@ -531,7 +567,11 @@ slopsync::Result<IntentValueMap, NackCode> SlopDriveHubDelegate::applyIntent(
             setU(11, 0, 1, [&](uint32_t v) { _state.sm_tune_aim_extrap = (v != 0); });
             setF(12, 0.0f, 8.0f,      _state.sm_tune_handoff_k);
             setU(13, 0, 2, [&](uint32_t v) { _state.sm_tune_curve_policy = uint8_t(v); });
-            setU(14, 0, 4, [&](uint32_t v) { _state.sm_tune_infeas_policy = uint8_t(v); });
+            // Bound from the ENGINE's enum, never a literal: this clamp read 4
+            // while the enum ran to 5, so selecting blend was silently clamped to
+            // prio-smooth (operator-reported, fw 2.1.96).
+            setU(14, 0, slopmotion::kInfeasiblePolicyMax,
+                 [&](uint32_t v) { _state.sm_tune_infeas_policy = uint8_t(v); });
             setF(15, 0.5f, 1.0f,      _state.sm_tune_infeas_margin);
             setF(16, 0.0f, 1.0f,      _state.sm_tune_smooth_budget);
             setF(17, 0.0f, 1.0f,      _state.sm_tune_amp_budget);
@@ -548,6 +588,27 @@ slopsync::Result<IntentValueMap, NackCode> SlopDriveHubDelegate::applyIntent(
             return Ret::ok(applied);
         }
 
+
+        // ---- drive-set → the AIM drive's own registers ------------------------
+        // Accepted live, at any machine state: one FC 0x06 write of a limit
+        // register. The only failure is "no drive on the bus", which is a
+        // capability answer, not an interlock.
+        case ch::drive_set: {
+            const auto* f = findField(requested, 1);
+            if (f == nullptr) return Ret::err(NackCode::INVALID_VALUE);
+            uint64_t raw = fieldU64(f, 0);
+            if (raw > 60098) raw = 60098;
+#if defined(FEATURE_RS485_MODBUS)
+            if (!_webui.setServoAccelReg(uint16_t(raw))) {
+                return Ret::err(NackCode::UNSUPPORTED_OP);
+            }
+#else
+            return Ret::err(NackCode::UNSUPPORTED_OP);
+#endif
+            applied.count = 1;
+            applied.fields[0] = {1, IntentValue::ofU64(raw)};
+            return Ret::ok(applied);
+        }
 
         // ---- 0x0106 machine-admin → the non-motion device actions -----------
         // Routed through WebUI::handleCommand like every other intent, so the
@@ -702,7 +763,10 @@ slopsync::Result<IntentValueMap, NackCode> SlopDriveHubDelegate::applyIntent(
             // actually asked for (Ground Truth without inventing values for
             // fields it never touched).
             if (out["ap_mods"].is<JsonArray>()) {
-                for (JsonObject m : out["ap_mods"].as<JsonArray>()) {
+                // Hoisted -- see loadPresets() for why (-Wdangling-reference on
+                // the MemberProxy temporary).
+                JsonArray apMods = out["ap_mods"].as<JsonArray>();
+                for (JsonObject m : apMods) {
                     int ctrl = m["ctrl"] | -1;
                     if (ctrl < 0 || ctrl >= int(kApBaseCount)) continue;
                     const uint8_t base = uint8_t(9 + 6 * ctrl);
@@ -1129,8 +1193,11 @@ SlopSyncHubService::SlopSyncHubService(SystemState& state, WebUI& webui, MotionA
       // honest answer, where a channel of permanent zeros would be a lie a
       // client cannot detect.
       _hub(initCatalog(_catalog, DeviceFeatures{motor.hasCurrentSensor(), motor.hasPowerMonitor()}),
-           _clock, _rng, _delegate, _crypto),
-      _port() {}
+           _clock, _rng, _delegate, _crypto)
+#if defined(WS_TRANSPORT_ENABLED)
+      , _port()
+#endif
+      {}
 
 void SlopSyncHubService::init() {
     // Cache what the catalog actually decided, rather than re-asking the driver
@@ -1218,8 +1285,10 @@ void SlopSyncHubService::init() {
     // moves to wherever time is acquired and every entry starts dating itself.
     _hub.setWallClockSeconds(0);
 
+#if defined(WS_TRANSPORT_ENABLED)
     _port.begin(&_hub);
     bootheap::mark("ss:ws");
+#endif
 
 #if defined(BLE_ENABLED)
     // RFC-043: the BLE GATT ITransport + advertising. "SD32" is the
@@ -1227,6 +1296,13 @@ void SlopSyncHubService::init() {
     // (§13.4); the full "SlopDrive-32" name rides the scan response.
     _blePort.begin(&_hub, "SlopDrive-32", "SD32");
     bootheap::mark("ss:ble");
+#endif
+
+#if defined(UART_LINK_ENABLED)
+    // The C5 comms bridge's serial link (docs/c5-comms-offload.md Phase 2).
+    // Serial2 only — Serial1 is the Modbus servo bus.
+    _uartPort.begin(&_hub);
+    bootheap::mark("ss:uart");
 #endif
 
     // RFC-046: the UDP discovery responder — the WS-side discovery
@@ -1307,6 +1383,30 @@ void SlopSyncHubService::init() {
 
 void SlopSyncHubService::attachHttpRoutes(SlopHttpServer* server) {
     _uiTokens.attachRoutes(server);
+
+#if defined(UART_LINK_ENABLED)
+    // Read-only link counters for the C5 bridge. This is the ONLY way to
+    // distinguish "the bridge is transmitting" from "the S3 is receiving":
+    // a UART shifts bytes out whether or not anything is listening, so the
+    // C5's own TX count cannot prove the link is wired.
+    // HTTPMethod:: qualified — esp_http_server declares its own HTTP_GET and
+    // the two are ambiguous in this translation unit.
+    server->on("/api/uart", HTTPMethod::HTTP_GET, [this, server]() {
+        const auto& s = _uartPort.stats();
+        char j[256];
+        snprintf(j, sizeof(j),
+                 "{\"framesTx\":%u,\"framesRx\":%u,\"txDrops\":%u,"
+                 "\"rxDrops\":%u,\"decodeErrors\":%u,\"rawBytesRx\":%u}",
+                 (unsigned)s.framesTx.load(std::memory_order_relaxed),
+                 (unsigned)s.framesRx.load(std::memory_order_relaxed),
+                 (unsigned)s.txDrops.load(std::memory_order_relaxed),
+                 (unsigned)s.rxDrops.load(std::memory_order_relaxed),
+                 (unsigned)s.decodeErrors.load(std::memory_order_relaxed),
+                 (unsigned)s.rawBytesRx.load(std::memory_order_relaxed));
+        server->send(200, "application/json", j);
+    });
+    SLOGI("slopsync", "HTTP route: GET /api/uart (C5 bridge link counters)");
+#endif
 }
 
 void SlopSyncHubService::taskTrampoline(void* arg) {
@@ -1319,14 +1419,26 @@ void SlopSyncHubService::taskLoop() {
     for (;;) {
         vTaskDelayUntil(&last, period);
 
-        // OTA flash-write window: skip all XIP/WS/hub work. OtaService also
-        // suspends this task outright (belt AND braces) — this flag guard
-        // covers the gap between the flag rising and the suspend landing.
-        if (_state.ota_active.load(std::memory_order_relaxed)) continue;
+        // OTA flash-write window: skip all XIP/WS/hub work, EXCEPT the port an
+        // OTA is arriving on -- skipping that starves the transfer that raised
+        // the flag. Serial only: its writes run on THIS task so drain and write
+        // are serialized (HTTP writes from httpTask, and touching PSRAM rings
+        // while that disables the flash cache is the memory-budget.md fault).
+        if (_state.ota_active.load(std::memory_order_relaxed)) {
+#if defined(UART_LINK_ENABLED)
+            if (_uartPort.otaInFlight()) _uartPort.loop();
+#endif
+            continue;
+        }
 
+#if defined(WS_TRANSPORT_ENABLED)
         _port.loop();                 // service WS: accept/read/heartbeat/stall-sweep
+#endif
 #if defined(BLE_ENABLED)
         _blePort.loop();              // service BLE: deferred attach/detach (TRAPS T5)
+#endif
+#if defined(UART_LINK_ENABLED)
+        _uartPort.loop();             // drain Serial2 + deferred attach/detach (TRAPS T5)
 #endif
         _udpDiscovery.poll();         // RFC-046: drain + answer pending DISCOVER_PROBEs
         _hub.update(_clock.nowUs());  // pump every session: frames, pacing, deadman (fires onStreamBundle)
@@ -1671,7 +1783,11 @@ void SlopSyncHubService::publishTelemetry() {
         _lastMotionMs = now;
         std::array<std::byte, 9> buf{};
         std::span<std::byte> s(buf);
-        uint16_t pos10 = clampU16(_state.actual_position_mm.load(std::memory_order_relaxed) * 100.0f);
+        // telemetry.position is DEFINED as the measured value (registry
+        // value_provenance::actual), so this is the encoder wherever one
+        // exists. It falls back to the commanded sample on an open-loop
+        // backend rather than publishing nothing.
+        uint16_t pos10 = clampU16(_state.measured_position_mm.load(std::memory_order_relaxed) * 100.0f);
         uint16_t tgt10 = clampU16(_state.commanded_target_mm * 100.0f);
         // The PRE-PLANNING demand: what the controlling input asked for, mapped
         // into the stroke window, one stage upstream of commanded_target_mm.
@@ -1773,13 +1889,26 @@ void SlopSyncHubService::publishTelemetry() {
         // SlopSyncCatalog.h's `blend_mode_reserved`. If a future mode CAN be
         // refused, drop its bit — a UI graying a control the machine would
         // accept is the same lie as one offering a control it would refuse.
-        const uint8_t mask = 0x03u;           // bits 0..1 = stream_speed_mode, overshoot_clamp
-        std::array<std::byte, 4> buf{};
+        // bits 0..3 = stream_speed_mode, overshoot_clamp, motion_backend,
+        // home_style.
+        // motion_backend is always settable: restart_required means the value
+        // lands in NVS now and binds at the next boot, never that the write is
+        // refused. Publishing the STORED choice, not the running one, is the
+        // point: a client must be able to see a pending switch.
+        const uint8_t mask = 0x0Fu;
+        std::array<std::byte, 6> buf{};
         std::span<std::byte> s(buf);
         slopsync::putU8(s.subspan(0, 1), blend);
         slopsync::putU8(s.subspan(1, 1), smode);
         slopsync::putU8(s.subspan(2, 1), oclamp);
         slopsync::putU8(s.subspan(3, 1), mask);
+        if (_backendChoice == 0xFFu || _delegate._machCfgDirty) {
+            _delegate._machCfgDirty = false;
+            _backendChoice   = machineBackendLoad();
+            _homeStyleChoice = machineHomeStyleLoad();
+        }
+        slopsync::putU8(s.subspan(4, 1), _backendChoice);
+        slopsync::putU8(s.subspan(5, 1), _homeStyleChoice);
         if (!_modesEverSent || buf != _lastModes) {
             _modesEverSent = true;
             _lastModes = buf;
@@ -1837,6 +1966,22 @@ void SlopSyncHubService::publishTelemetry() {
         if (!_smWavEverSent || wav != _lastSmWav) {
             _smWavEverSent = true; _lastSmWav = wav;
             _hub.publishState(ch::sm_waveform, w);
+        }
+
+        // 60 (r/min)/s per (mm/s2 * 60 * REDUCTION / MM_PER_REV) -- the same
+        // arithmetic ModbusServoDriver uses to derive the register, run in
+        // reverse so the readout is in the units the operator sets elsewhere.
+        std::array<std::byte, 13> drv{};
+        std::span<std::byte> d(drv);
+        const float ramp_mm_s2 = float(_state.servo_accel_reg_actual) *
+                                 (AIM_MM_PER_REV / (60.0f * AIM_REDUCTION));
+        slopsync::putU32(d.subspan(0, 4),  _state.servo_accel_reg_ovr);
+        slopsync::putU32(d.subspan(4, 4),  _state.servo_accel_reg_actual);
+        slopsync::putF32(d.subspan(8, 4),  _state.servo_accel_reg_valid ? ramp_mm_s2 : 0.0f);
+        slopsync::putU8 (d.subspan(12, 1), 0x01u);
+        if (!_driveTuneEverSent || drv != _lastDriveTune) {
+            _driveTuneEverSent = true; _lastDriveTune = drv;
+            _hub.publishState(ch::drive_tune, d);
         }
     }
 
@@ -2130,9 +2275,18 @@ void SlopSyncHubService::publishTelemetry() {
         // ConfigStore::save() happens here, on the hub's Core-0 task.
         if (_state.stroke_measured_pending) {
             _state.stroke_measured_pending = false;
-            JsonDocument in, out;
-            _webui.handleCommand(WS_OP_SAVE, in, out);
-            SLOGI("slopsync", "measured stroke persisted to NVS after home");
+            // 0 is the "not measured" sentinel, NEVER a measurement. A homing
+            // style that does not measure (the drive's own cycle) must not
+            // erase a real stored span, and neither must a driver that forgot
+            // to override the accessor. Cost us a live 267.6 mm measurement at
+            // fw 2.4.2 (dev board sd-9vc).
+            if (_motor.getMeasuredStrokeMm() > 0.0f) {
+                JsonDocument in, out;
+                _webui.handleCommand(WS_OP_SAVE, in, out);
+                SLOGI("slopsync", "measured stroke persisted to NVS after home");
+            } else {
+                SLOGI("slopsync", "home measured no stroke -- keeping the stored value");
+            }
         }
     }
 }
@@ -2503,7 +2657,14 @@ void SlopSyncHubService::loadPresets() {
             payload[base + 3] = 1;   payload[base + 4] = 0; payload[base + 5] = 0;
         }
         if (def["mods"].is<JsonArray>()) {
-            for (JsonObject m : def["mods"].as<JsonArray>()) {
+            // Hoisted, not inlined into the range-init: `def["mods"]` yields a
+            // MemberProxy TEMPORARY and -Wdangling-reference flags iterating it.
+            // ArduinoJson v7's JsonArray is a value handle into the document, so
+            // nothing actually dangles here -- but the named local costs nothing,
+            // reads better, and keeps the warning set clean instead of teaching
+            // us to ignore it.
+            JsonArray mods = def["mods"].as<JsonArray>();
+            for (JsonObject m : mods) {
                 int ctrl = m["ctrl"] | -1;
                 if (ctrl < 0 || ctrl >= int(advpat::BASE_COUNT)) continue;
                 const uint8_t base = uint8_t(4 + ctrl * 6);

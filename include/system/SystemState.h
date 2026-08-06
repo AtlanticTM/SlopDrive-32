@@ -276,6 +276,11 @@ struct SystemState {
     // memory_order_relaxed is correct — telemetry is display-only, no ordering
     // dependency with any other variable.
     std::atomic<float>     actual_position_mm{0.0f};
+    // Where the shaft PHYSICALLY is: SlopSync telemetry.position /
+    // provenance::actual. actual_position_mm above is the COMMANDED sample
+    // despite its name, and control paths keep using it so planning never
+    // chases following error. Single writer: WebUI's sampler, Core 0.
+    std::atomic<float>     measured_position_mm{0.0f};
 
     // ---- Session odometer stats (single-writer: WebUI::captureTelemetry 240Hz) --
     // Derived from the position stream: live/peak speed, cumulative distance, and
@@ -380,7 +385,7 @@ struct SystemState {
     // enum lives in main.cpp's per-tick config push, and anything out of range
     // there falls back to the ENGINE's own default rather than silently
     // picking a policy the operator never asked for.
-    volatile uint8_t       sm_tune_infeas_policy   = 2;      // default: Reshape (engine 0.4.0)
+    volatile uint8_t       sm_tune_infeas_policy   = 5;      // default: Blend (engine 0.9.0) — MUST match the catalog select default
     volatile float         sm_tune_infeas_margin   = 0.92f;  // stroke-scale margin 0.50..1.00
     // RESHAPE bisection depth: each step halves the remaining stroke interval,
     // so N steps resolve the delivered stroke to stroke/2^N. Each step costs
@@ -393,6 +398,15 @@ struct SystemState {
     // 0 = pre-0.4 behavior (brake the instant the plan expires).
     volatile uint32_t      sm_tune_settle_grace_us = 30000;  // 30 ms, slopmotion default
     volatile bool          sm_tune_aim_extrap      = true;   // 2nd-order chase aim (crest overshoot)
+
+    // Drive register 0x03 override, units (r/min)/s, NOT mm/s^2. 0 = derive
+    // from the operator's accel. See docs/drive-accel-register.md.
+    volatile uint16_t      servo_accel_reg_ovr     = 0;
+    // Ground truth from the drive itself, refreshed by WebUI::update() from the
+    // config mirror and telemetry. `_armed` 1 means the drive ignores step/dir.
+    volatile uint16_t      servo_accel_reg_actual  = 0;
+    volatile bool          servo_accel_reg_valid   = false;
+    volatile bool          servo_modbus_armed      = false;
     // DC centering of a degraded band (WAVEFORM path, Scale + Reshape policies).
     // When the machine cannot deliver the commanded amplitude on the commanded
     // clock, ON (engine default) shrinks the achieved band SYMMETRICALLY about

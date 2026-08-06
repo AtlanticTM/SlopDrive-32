@@ -4,6 +4,7 @@
 #include <atomic>
 
 #include "DeferredReboot.h"
+#include "comms/BridgeProtocol.h"
 
 // ============================================================================
 // OtaService — WiFi OTA update path (firmware + LittleFS web bundle)
@@ -67,6 +68,20 @@ public:
     // True while any OTA session (ArduinoOTA or HTTP) is in flight.
     bool isActive() const { return _active.load(); }
 
+    // ---- Serial OTA -- the C5 bridge control channel (RFC-057) --------------
+    // The C5 authenticates; the S3 trusts the link. Funnels into the SAME
+    // Update state machine as HTTP. Returns the state to report back.
+    bridge::OtaState otaSerialBegin(uint8_t target, uint32_t declared_size);
+    bridge::OtaState otaSerialData(uint16_t seq, const uint8_t* data, size_t len);
+    bridge::OtaState otaSerialEnd(uint32_t crc);
+    void             otaSerialAbort(uint8_t reason);
+    uint8_t  otaSerialAbortReason() const { return _serialAbort; }
+    uint16_t otaSerialNextSeq() const { return _serialSeq; }
+    bool     otaSerialInFlight() const { return _serialLastMs != 0; }
+    // MUST be pumped. A sender that dies mid-transfer otherwise leaves the OTA
+    // gate latched forever: NVS blocked, motion stopped, no further OTA.
+    void otaSerialTick();
+
 private:
     // Shared safety gate — stops motion + suspends telemetry + blocks NVS.
     // Returns false if an update is already in flight (concurrent refusal).
@@ -87,7 +102,9 @@ private:
     // Exactly one Update.begin/write/end/abort state machine. The WebServer
     // HTTPUpload pump funnels through these; nothing else in the class touches
     // Update.
-    void otaBeginWrite(int command);              // first chunk: gate + Update.begin
+    // declared_size bounds the erase; UPDATE_SIZE_UNKNOWN only where the
+    // transport cannot know it up front (chunked HTTP).
+    void otaBeginWrite(int command, size_t declared_size, const char* source);
     void otaWriteChunk(const uint8_t* data, size_t len);
     void otaEndWrite(size_t total);               // last chunk: Update.end(true)
     void otaAbortWrite(const char* why);          // transfer died: Update.abort()
@@ -113,6 +130,22 @@ private:
     bool    _uploadStarted = false;   // otaBeginWrite() has run for this request
     bool    _uploadFinished = false;  // otaEndWrite() has run for this request
     String  _uploadError;
+
+    // Serial-OTA scratch. Single in-flight, same as the HTTP path.
+    int      _serialCommand  = 0;
+    uint32_t _serialDeclared = 0;
+    uint32_t _serialWritten  = 0;
+    uint16_t _serialSeq      = 0;   // next chunk index expected
+    uint32_t _serialCrcState = 0;   // streaming crc32 over the plaintext image
+    uint8_t  _serialAbort    = 0;   // bridge::OtaAbortReason of the last failure
+    uint32_t _serialLastMs   = 0;   // 0 = no serial transfer in flight
+    // Off-seq census, reset at begin. Dups mean the ACK direction is lossy or
+    // the sender resends early; holes mean chunks are dying C5->S3 (sd-6kz.1).
+    uint32_t _serialDups     = 0;
+    uint32_t _serialHoles    = 0;
+    // Well above a sector erase (~40 ms) and any credit-window wait, well below
+    // the point where a stuck gate looks like a dead machine.
+    static constexpr uint32_t kSerialIdleAbortMs = 5000;
 
     // Deferred reboot after a successful HTTP flash so the JSON response flushes.
     DeferredReboot _reboot;

@@ -34,11 +34,16 @@
 #include "SlopSyncUiToken.h"
 // THE transport (transport.md) — ESP32Async is the only WS stack in the
 // build now. History + the A/B that settled it: docs/http-plane-retirement.md.
+#if defined(WS_TRANSPORT_ENABLED)
 #include "SlopSyncAsyncWsTransport.h"
+#endif
 // RFC-043 (Phase E): the second transport. Self-excludes to nothing when
 // BLE_ENABLED is not set, exactly like SlopSyncAsyncWsTransport.h does for
 // SLOPSYNC_WS_ASYNC — see that file's header note.
 #include "SlopSyncBleTransport.h"
+// The C5 comms-bridge serial link (docs/c5-comms-offload.md Phase 2). Same
+// self-exclusion idiom: nothing here exists without UART_LINK_ENABLED.
+#include "SlopSyncUartTransport.h"
 // RFC-046 (Phase E): the WS-side UDP discovery responder. Unconditional —
 // unlike BLE, this needs no extra hardware/library, just a socket, and it is
 // the canonical discovery path for a LAN client with no BLE (§13.8).
@@ -264,6 +269,11 @@ public:
     // _maxRailDirty above: a standing policy setting persists without a
     // manual WebUI save.
     bool _patternBackgroundRunDirty = false;
+    // Set by 0x3030 keys 5/6 (motion_backend, home_style) when a client writes
+    // one. Inverted sense compared to the flags above: the delegate ALREADY
+    // persisted, and this tells the service to refresh its published cache.
+    // The service must never read those NVS keys on its publish path.
+    bool _machCfgDirty = false;
 };
 
 // ---- The service ------------------------------------------------------------
@@ -321,6 +331,18 @@ public:
     void resumeTask();
 
     slopsync::Hub& hub() { return _hub; }
+
+#if defined(UART_LINK_ENABLED)
+    // Link counters for the C5 bridge, surfaced read-only at GET /api/uart.
+    // This is the only way to tell "the bridge is transmitting" apart from
+    // "the S3 is receiving" — the UART shifts bytes out whether or not
+    // anything is listening, so the C5's own TX count proves nothing.
+    const SlopSyncUartLinkStats& uartStats() const { return _uartPort.stats(); }
+
+    // Serial OTA sink, injected by the composition root (main.cpp). The hub
+    // service only forwards the pointer; it never touches the flash path.
+    void setOtaSink(SlopSyncUartPort::IOtaSink* sink) { _uartPort.setOtaSink(sink); }
+#endif
 
 private:
     static void taskTrampoline(void* arg);
@@ -385,9 +407,14 @@ private:
     PacingRing _pacingRing;
     SlopDriveHubDelegate _delegate;
     slopsync::Hub _hub;
+#if defined(WS_TRANSPORT_ENABLED)
     SlopSyncAsyncWsPort _port;
+#endif
 #if defined(BLE_ENABLED)
     SlopSyncBlePort _blePort;    // RFC-043 (Phase E): the BLE GATT ITransport
+#endif
+#if defined(UART_LINK_ENABLED)
+    SlopSyncUartPort _uartPort;  // the C5 bridge's serial ITransport (Serial2)
 #endif
     SlopSyncUdpDiscovery _udpDiscovery;  // RFC-046 (Phase E): the UDP probe/reply responder
 
@@ -456,7 +483,13 @@ private:
     // 0x008A machine-modes (M5b): the LAST PUBLISHED bytes, not the last known
     // values. Diffing what subscribers actually hold is what makes the
     // on-change trigger unable to disagree with them — see publishTelemetry.
-    std::array<std::byte, 4> _lastModes{};
+    std::array<std::byte, 6> _lastModes{};
+    // Cached "machcfg" NVS values. NEVER read machineBackendLoad() or
+    // machineHomeStyleLoad() from publishTelemetry(): each opens and closes an
+    // NVS namespace, and on the hub task at publish rate that trips the task
+    // watchdog (dev board sd-2ns). 0xFF = not read yet.
+    uint8_t _backendChoice  = 0xFFu;
+    uint8_t _homeStyleChoice = 0xFFu;
     bool _modesEverSent = false;
     // 0x008B/0x008C/0x008D slopmotion tuning — last PUBLISHED bytes, same
     // reason as _lastModes: diffing what subscribers hold cannot disagree with
@@ -467,6 +500,8 @@ private:
     bool _smLimEverSent = false;
     bool _smChaseEverSent = false;
     bool _smWavEverSent = false;
+    std::array<std::byte, 13> _lastDriveTune{};
+    bool _driveTuneEverSent = false;
     // 0x0087 is only PUBLISHED when it is also DECLARED — a publishState() to a
     // channel absent from the catalog is refused anyway, but skipping the work
     // keeps the driver reads off the tick on a machine with no sensor.

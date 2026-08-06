@@ -16,8 +16,8 @@
 //   emit `udp_discovery`/`ble_adv_flags` as C++ constants as of the RFC-046
 //   landing (they are the identity/port numbers a SOCKET binds to and an
 //   ADVERTISING PAYLOAD builds from, not CBOR wire numbers the codegen's
-//   schema covers) — a documented fallback (LEDGER.md Phase E entry), not
-//   a spec gap. The numbers below are transcribed
+//   schema covers) -- a documented fallback, not a spec gap.
+//   The numbers below are transcribed
 //   from registry.yaml verbatim and must be kept in sync by hand if that
 //   file ever changes them.
 //

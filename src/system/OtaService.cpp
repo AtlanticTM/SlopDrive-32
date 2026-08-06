@@ -17,6 +17,9 @@
 #include <ArduinoOTA.h>
 #include <Update.h>
 #include <string.h>
+#include <span>
+
+#include "slopsync/wire/crc32.hpp"   // canonical CRC-32 IEEE, same as ESTOP (SPEC 5.5)
 
 #include "sloplog/sloplog.h"
 #include "SystemState.h"
@@ -66,7 +69,7 @@ void OtaService::begin(const char* hostname, const char* password) {
 
 void OtaService::handle() {
     ArduinoOTA.handle();
-
+    otaSerialTick();
     _reboot.poll();
 }
 
@@ -171,14 +174,14 @@ bool OtaService::checkAuthTokenValue(const char* token) {
 // (rather than one copy per backend) means the operator's only working
 // deployment path never has two flash state machines that can drift apart.
 
-void OtaService::otaBeginWrite(int command) {
+void OtaService::otaBeginWrite(int command, size_t declared_size, const char* source) {
     _uploadStarted = true;
     // Safety gate — also enforces single-in-flight / refuse-if-ArduinoOTA.
-    if (!prepareForOta(command == U_FLASH ? "HTTP(app)" : "HTTP(fs)")) {
+    if (!prepareForOta(source)) {
         _uploadError = "busy";
         return;
     }
-    if (!Update.begin(UPDATE_SIZE_UNKNOWN, command)) {
+    if (!Update.begin(declared_size, command)) {
         _uploadError = String("begin failed: ") + Update.errorString();
         SLOGE("ota", "Update.begin failed: %s", Update.errorString());
         // Roll the gate back — nothing was written.
@@ -216,6 +219,143 @@ void OtaService::otaAbortWrite(const char* why) {
     if (_uploadBegun && !_uploadFinished) Update.abort();
     if (_uploadError.length() == 0) _uploadError = "aborted";
     SLOGW("ota", "HTTP upload %s — old image intact", why ? why : "aborted");
+}
+
+// ---- Serial OTA -- bridge control channel (RFC-057) -------------------------
+// Same Update state machine as HTTP; only the byte source differs. The C5
+// authenticates, so nothing here re-checks a token: _uploadAuthOk is asserted
+// on entry because the link IS the trust boundary.
+
+bridge::OtaState OtaService::otaSerialBegin(uint8_t target, uint32_t declared_size) {
+    _serialAbort = bridge::kOtaAbortHost;
+
+    // NO motion gate here. prepareForOta() already stops the pattern engine and
+    // hard-stops the motor, and that ONE shared gate is this class's whole
+    // design. A refuse-if-moving check would also lock the update path behind
+    // the very state a bad image might be causing (operator ruling 2026-08-06,
+    // amends sd-emy). kOtaAbortBusy now means only "another OTA in flight".
+    if (declared_size == 0) {
+        _serialAbort = bridge::kOtaAbortTooBig;
+        return bridge::kOtaFailed;
+    }
+
+    _uploadAuthOk   = true;      // the C5 already authenticated this transfer
+    _uploadBegun    = false;
+    _uploadStarted  = false;
+    _uploadFinished = false;
+    _uploadError    = "";
+    _serialCommand  = (target == bridge::kOtaTargetFs) ? U_SPIFFS : U_FLASH;
+    _serialDeclared = declared_size;
+    _serialWritten  = 0;
+    _serialSeq      = 0;
+    _serialCrcState = slopsync::crc32Init();
+    _serialLastMs   = millis();
+    _serialDups     = 0;
+    _serialHoles    = 0;
+
+    // Bounded erase: Update.begin refuses a size the partition cannot hold, so
+    // an oversized image fails HERE rather than part-way through the flash.
+    otaBeginWrite(_serialCommand, declared_size,
+                  _serialCommand == U_FLASH ? "serial(app)" : "serial(fs)");
+    if (_uploadError.length()) {
+        _serialAbort = (_uploadError == "busy") ? bridge::kOtaAbortBusy
+                                                : bridge::kOtaAbortTooBig;
+        return bridge::kOtaFailed;
+    }
+    SLOGI("ota", "serial OTA begun (%s, %u B declared)",
+          _serialCommand == U_FLASH ? "app" : "fs", unsigned(declared_size));
+    return bridge::kOtaReady;
+}
+
+bridge::OtaState OtaService::otaSerialData(uint16_t seq, const uint8_t* data, size_t len) {
+    if (!_uploadBegun) return bridge::kOtaIdle;
+
+    // A gap is a LOST FRAME, not a fatal error: this link measures 68-74% on
+    // frames this size (transport.md). Drop it and let the status report what
+    // we still want -- the sender holds a retransmit window. Writing a hole
+    // would brick the image, so out-of-order data is never accepted.
+    if (seq != _serialSeq) {
+        if (seq < _serialSeq) ++_serialDups; else ++_serialHoles;
+        // 1 Hz (T27). Dups vs holes is the direction diagnosis for sd-6kz.1;
+        // pull it MID-TRANSFER via /api/diag/ota -- the archive dies with the
+        // post-flash reboot.
+        SLOGW_EVERY_MS(1000, "ota", "serial rx off-seq: want %u got %u (dups %u holes %u)",
+                       unsigned(_serialSeq), unsigned(seq),
+                       unsigned(_serialDups), unsigned(_serialHoles));
+        _serialLastMs = millis();   // the peer is alive; do not idle-abort
+        return bridge::kOtaWriting;
+    }
+    if (_serialWritten + len > _serialDeclared) {
+        _serialAbort = bridge::kOtaAbortTooBig;
+        otaAbortWrite("serial overrun past declared size");
+        finishOta(false, "serial");
+        return bridge::kOtaFailed;
+    }
+
+    otaWriteChunk(data, len);
+    if (_uploadError.length()) {
+        _serialAbort = bridge::kOtaAbortWriteFail;
+        finishOta(false, "serial");
+        return bridge::kOtaFailed;
+    }
+
+    _serialCrcState = slopsync::crc32Update(
+        _serialCrcState,
+        std::span<const std::byte>(reinterpret_cast<const std::byte*>(data), len));
+    _serialWritten += uint32_t(len);
+    ++_serialSeq;
+    _serialLastMs = millis();
+    return bridge::kOtaWriting;
+}
+
+bridge::OtaState OtaService::otaSerialEnd(uint32_t crc) {
+    if (!_uploadBegun) return bridge::kOtaIdle;
+
+    // CRC BEFORE Update.end(true): end() marks the partition bootable, so a
+    // mismatch caught after it has already armed a bad image.
+    const uint32_t got = slopsync::crc32Final(_serialCrcState);
+    if (got != crc || _serialWritten != _serialDeclared) {
+        _serialAbort = bridge::kOtaAbortCrc;
+        SLOGE("ota", "serial OTA crc/len mismatch: crc %08x vs %08x, %u of %u B",
+              unsigned(got), unsigned(crc), unsigned(_serialWritten), unsigned(_serialDeclared));
+        otaAbortWrite("serial crc mismatch");
+        finishOta(false, "serial");
+        return bridge::kOtaFailed;
+    }
+
+    otaEndWrite(_serialWritten);
+    if (_uploadError.length()) {
+        _serialAbort = bridge::kOtaAbortWriteFail;
+        finishOta(false, "serial");
+        return bridge::kOtaFailed;
+    }
+
+    SLOGI("ota", "serial OTA flashed -- %u bytes, rebooting", unsigned(_serialWritten));
+    // Let the status frame reach the C5 before the reboot takes the link down.
+    _reboot.arm(500, _serialCommand == U_FLASH ? "serial OTA app image flashed"
+                                               : "serial OTA LittleFS bundle flashed");
+    finishOta(true, "serial");
+    return bridge::kOtaDone;
+}
+
+// A sender that dies mid-transfer leaves prepareForOta's gate raised with
+// nothing to lower it: NVS blocked, motion held, every later OTA refused as
+// "busy" until a power cycle. Measured 2026-08-06 -- it took an esptool reset
+// to recover. This is the only path that can end a stalled serial transfer.
+void OtaService::otaSerialTick() {
+    if (_serialLastMs == 0) return;
+    if (millis() - _serialLastMs < kSerialIdleAbortMs) return;
+    SLOGE("ota", "serial OTA stalled %u ms -- aborting, old image intact",
+          unsigned(millis() - _serialLastMs));
+    otaSerialAbort(bridge::kOtaAbortHost);
+}
+
+void OtaService::otaSerialAbort(uint8_t reason) {
+    _serialLastMs = 0;
+    if (!_uploadBegun) return;
+    _serialAbort = reason;
+    otaAbortWrite("serial abort from bridge");
+    finishOta(false, "serial");
 }
 
 // ---- sendUploadResult() -- shared final-response policy ---------------------
@@ -296,7 +436,10 @@ void OtaService::handleUpload(int command) {
             SLOGW("ota", "HTTP upload REJECTED (bad/missing X-OTA-Token) file=%s", up.filename.c_str());
             return;
         }
-        otaBeginWrite(command);
+        // Chunked HTTP does not carry a length up front, so the erase cannot
+        // be bounded on this path. The serial path does and is.
+        otaBeginWrite(command, UPDATE_SIZE_UNKNOWN,
+                      command == U_FLASH ? "HTTP(app)" : "HTTP(fs)");
         break;
     }
 

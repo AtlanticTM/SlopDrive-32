@@ -139,6 +139,25 @@ static slopdrive::SlopSyncHubService* slopSyncHub = nullptr;
 // Core-0 httpTask only — never the motion-critical core.
 static OtaService      otaService(g_state, arbiter, patternEngine);
 
+#if defined(UART_LINK_ENABLED)
+// Binds the bridge control channel's OTA ops to OtaService without the comms
+// layer including a system header. Stateless: the state lives in OtaService.
+struct SerialOtaSink final : slopdrive::SlopSyncUartPort::IOtaSink {
+    uint8_t otaBegin(uint8_t target, uint32_t size) override {
+        return otaService.otaSerialBegin(target, size);
+    }
+    uint8_t otaData(uint16_t seq, const uint8_t* d, size_t n) override {
+        return otaService.otaSerialData(seq, d, n);
+    }
+    uint8_t otaEnd(uint32_t crc) override { return otaService.otaSerialEnd(crc); }
+    void    otaAbort(uint8_t reason) override { otaService.otaSerialAbort(reason); }
+    uint8_t  otaAbortReason() const override { return otaService.otaSerialAbortReason(); }
+    uint16_t otaNextSeq() const override { return otaService.otaSerialNextSeq(); }
+    bool     otaInFlight() const override { return otaService.otaSerialInFlight(); }
+};
+static SerialOtaSink g_serialOtaSink;
+#endif
+
 // servoModbus itself is declared above the motor-driver block so
 // ModbusServoDriver can bind to it — see the comment there.
 
@@ -674,6 +693,16 @@ static void httpTask(void* param) {
         // backend 0) httpTask keeps servicing it here.
         if (g_motion_backend == 0) {
             TIME_STEP(servoModbus.update(),   "http:servoModbus");
+            // While reg 0x00 reads 1 the drive IGNORES step/dir, so FAS emits
+            // pulses into a deaf drive and the machine silently does not move.
+            // No Modbus write clears 0x00 on this drive (sd-opb) -- reporting
+            // it is the whole fix; the operator power-cycles the drive.
+            const ServoTelemetry st = servoModbus.getTelemetry();
+            if (st.valid && st.enabled) {
+                SLOGW_EVERY_MS(30000, "servobus",
+                               "drive reg 0x00 = 1: step/dir input IGNORED, motion will not "
+                               "move. POWER-CYCLE THE DRIVE, Modbus cannot clear this.");
+            }
         }
 #endif
 #if defined(FEATURE_RS485_MODBUS) && defined(DRIVER_AIM_SERVO)
@@ -945,22 +974,57 @@ void setup() {
 #if defined(DRIVER_AIM_SERVO)
     webui.setEncoderValidator(encoderValidator);
 
-    // ---- Modbus-mode baud auto-config (Phase 3) -----------------------------
-    // OSSM-RS-style: the drive boots factory-19200 every power-cycle (we NEVER
-    // save baud to its EEPROM — see ServoModbus::reprogramBaud() doc — so a
-    // power-cycle always recovers factory state no matter what we did last
-    // session). Only worth the reprogram+rebaud latency when Modbus is the
-    // ACTIVE backend — FAS mode only needs telemetry, and its dual-baud probe
-    // already finds a drive at either speed. Runs BEFORE the reg-0x0B e-gear
-    // adoption below so that read (and everything else in this boot) lands at
-    // the FINAL baud, not the ephemeral 19200 the probe started at.
-    if (g_motion_backend == 1 && servoModbus.isReady() && servoModbus.baud() == 19200) {
+    // ---- Drive baud: 115200 in BOTH backends --------------------------------
+    // Operator ruling: the drive stays at 115200 and FAS-mode telemetry runs at
+    // the same speed, so the encoder readback and the Configure pane behave
+    // identically whichever backend booted. Runs BEFORE the reg-0x0B e-gear
+    // adoption below so that read lands at the FINAL baud. reprogramBaud() is
+    // a no-op when the drive already answered at 115200.
+    if (servoModbus.isReady() && servoModbus.baud() == 19200) {
         if (servoModbus.reprogramBaud(115200)) {
-            SLOGI("boot", "Modbus mode: drive reprogrammed 19200 -> 115200 (OSSM-RS magic sequence) :3");
+            SLOGI("boot", "drive reprogrammed 19200 -> 115200 (OSSM-RS magic sequence) :3");
         } else {
-            SLOGW("boot", "Modbus mode: 19200 -> 115200 reprogram FAILED — staying at 19200 "
-                  "(motion still works, just tighter bus budget at the lower baud).");
+            SLOGW("boot", "19200 -> 115200 reprogram FAILED, staying at 19200 (everything "
+                  "still works, just a tighter bus budget).");
         }
+    }
+
+    // Reg 0x00 is VOLATILE but survives a reboot of US, so a previous Modbus
+    // session can leave the drive deaf to step/dir. The release ATTEMPT below
+    // is best-effort only: on this drive 0x00 = 1 is a one-way door that no
+    // Modbus write clears (sd-opb). The httpTask poll reports the stuck state;
+    // only a drive power cycle fixes it. Modbus mode arms it in
+    // ModbusServoDriver::init() instead.
+    if (g_motion_backend == 0 && servoModbus.isReady()) {
+        servoModbus.releaseMotionArm();
+    }
+
+    // Ramp-register reconcile. Read first, write only on a mismatch, so an
+    // unchanged setting never arms the drive. See docs/drive-accel-register.md.
+    if (servoModbus.isReady()) {
+        const uint16_t want = machineAccelRegLoad();
+        g_state.servo_accel_reg_ovr = want;
+        switch (servoModbus.reconcileAccelReg(want)) {
+            case ServoModbus::AccelCommit::AlreadyMatches:
+                break;
+            case ServoModbus::AccelCommit::SavedUnarmed:
+                SLOGI("boot", "drive ramp 0x03 -> %u, saved unarmed. step/dir still live :3",
+                      (unsigned)want);
+                break;
+            case ServoModbus::AccelCommit::SavedArmed:
+                SLOGE("boot", "drive ramp 0x03 -> %u REQUIRED ARMING. The drive now IGNORES "
+                      "step/dir and ONLY a drive power cycle fixes it. POWER-CYCLE THE 36V "
+                      "RAIL. uhoh :c", (unsigned)want);
+                break;
+            case ServoModbus::AccelCommit::Failed:
+                SLOGW("boot", "drive ramp 0x03 -> %u FAILED, drive keeps its own value.",
+                      (unsigned)want);
+                break;
+        }
+        // Populate the register mirror once at boot. Without it the 0x03
+        // readback reads 0 until the first write, and a readout showing 0 for
+        // "not measured yet" is indistinguishable from a real 0.
+        servoModbus.requestConfigScan();
     }
 
     // Re-apply the driver config now that the bus is actually up: the earlier
@@ -969,6 +1033,10 @@ void setup() {
     // state, torque clamp 0x18) were dropped by the !_ready guard. FAS mode is
     // untouched — its applyDriverConfig is a no-op either way.
     if (g_motion_backend == 1 && servoModbus.isReady()) {
+        // SAME ordering trap as applyDriverConfig, and why nothing moved at fw
+        // 2.4.3: ModbusServoDriver::init() runs BEFORE servoModbus.init(), so
+        // its arm call hit the !_ready guard and did nothing. Arm HERE.
+        servoModbus.armMotionControl();
         motor.applyDriverConfig(g_state.driver);
     }
 
@@ -1083,6 +1151,10 @@ void setup() {
             bootheap::mark("ss:ctor");
             slopSyncHub->setPatternEngine(&patternEngine);
             slopSyncHub->setMotionStreamQueue(g_interp_queue);  // 0x0084 motion-input -> Core-1 sampler
+#if defined(UART_LINK_ENABLED)
+            // OTA over the bridge control channel, NOT over SlopSync (RFC-057).
+            slopSyncHub->setOtaSink(&g_serialOtaSink);
+#endif
             slopSyncHub->init();
             // RFC-029 §4: GET /uitoken on the SHARED WebServer — HTTP escapee #2,
             // and it has to be HTTP because its whole security property is the

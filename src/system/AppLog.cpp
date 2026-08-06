@@ -192,6 +192,85 @@ static WebRingSink* s_webRing = nullptr;
 // honest degradation is "no web log ring this boot", never a crash.
 WebRingSink* webRingOrNull() { return s_webRing; }
 
+// ---- The diag archive ring --------------------------------------------------
+// A SECOND ring, deliberately dumb, and the difference from WebRingSink above is
+// the whole point. That one is a DISPLAY: 60 lines, severity-partitioned so a
+// Debug flood cannot bury an error, merged back into emission order at dump.
+// Every one of those properties is a consequence of being SMALL. This one is an
+// ARCHIVE: flat, in order, megabytes, read ONCE after something went wrong. No
+// partition, because at this depth a bench session never evicts anything.
+//
+// Constraints:
+// - PSRAM only, placement-new'd from applogBegin() (memory-budget T2). Never a
+//   static, and never touched from an ISR: PSRAM is unreachable while the flash
+//   cache is disabled.
+// - write() is non-blocking and non-allocating (logging-leds T6).
+// - NO FREEZE: the writer never stops for a reader. Slots carry a monotonic
+//   seq, so a reader detects being lapped rather than being protected from it.
+//   A read can be a remote peer over the C5 bridge taking minutes, and a gate
+//   held that long has a remote owner. See logging-leds.md.
+// - Lapping is REPORTED in the footer, never silent.
+// - Contents do NOT survive a reboot. Post-panic forensics is crashring
+//   (RTC_NOINIT, /api/crash); this ring only ever holds the CURRENT boot.
+class DiagRingSink final : public sloplog::ISink {
+public:
+    // 160 B per slot exactly. 16384 slots = 2,621,440 B of PSRAM.
+    static constexpr size_t kDiagLines = 16384;
+    struct Slot {
+        char     text[140];
+        char     tag[16];
+        uint32_t seq;
+    };
+
+    void write(const sloplog::Record& r) override {
+        Slot& s = _slots[_head];
+        int n = snprintf(s.text, sizeof(s.text), "[%5lu.%03lu %c %s] %s",
+                         (unsigned long)(r.ms / 1000u), (unsigned long)(r.ms % 1000u),
+                         sloplog::levelChar(r.level), r.tag, r.msg);
+        if (n < 0) return;
+        if (n >= int(sizeof(s.text))) n = int(sizeof(s.text)) - 1;
+        while (n > 0 && (s.text[n - 1] == '\n' || s.text[n - 1] == '\r')) s.text[--n] = '\0';
+        // Copied, never pointed at: a stored pointer into caller memory dangles
+        // for any tag that is not a string literal (cpp-safety.md).
+        strncpy(s.tag, r.tag, sizeof(s.tag) - 1);
+        s.tag[sizeof(s.tag) - 1] = '\0';
+        s.seq = _seq++;
+
+        _head = (_head + 1) % kDiagLines;
+        if (_count < kDiagLines) ++_count;
+        else                     ++_evicted;
+    }
+
+    // ---- Read side, driven by DiagRead --------------------------------------
+    size_t count() const { return _count; }
+    size_t start() const { return (_head + kDiagLines - _count) % kDiagLines; }
+    const Slot& at(size_t i) const { return _slots[i % kDiagLines]; }
+
+    // next=<seq> is the resume cursor a pager passes back as ?from=. It is the
+    // LAST line of every dump on purpose; machine consumers parse it there.
+    int footer(char* buf, size_t cap, bool lapped, uint32_t emitted, uint32_t next) const {
+        return snprintf(buf, cap,
+                        "[diag] %lu lines emitted, %lu held (%lu capacity), "
+                        "%lu evicted by wrap%s next=%lu",
+                        (unsigned long)emitted, (unsigned long)_count,
+                        (unsigned long)kDiagLines, (unsigned long)_evicted,
+                        lapped ? " -- LAPPED MID-READ, output is truncated --" : "",
+                        (unsigned long)next);
+    }
+
+private:
+    // _slots is deliberately left UNINITIALIZED: only indices below _count have
+    // ever been written, and nothing reads above it. Zeroing would cost a 2.5 MB
+    // memset in setup() to define bytes no reader can reach.
+    Slot     _slots[kDiagLines];
+    size_t   _head = 0;
+    size_t   _count = 0;
+    uint32_t _seq = 0;
+    uint32_t _evicted = 0;
+};
+
+static DiagRingSink* s_diagRing = nullptr;
+
 // ---- SlopLog -> SlopSync bridge sink ----------------------------------------
 // Every drained record is copied into the SPSC ring in SystemState; the Core-0
 // "SlopSyncHub" task drains it and turns each line into a 0x0008 log EVENT
@@ -290,6 +369,17 @@ void applogBegin(SystemState* state) {
     } else {
         SLOGE("sys", "no PSRAM block for the /api/log web ring — ring DISABLED this boot");
     }
+    // The /api/diag archive. Same PSRAM idiom, ~2.5 MB, and the same honest
+    // degradation: absent PSRAM means no archive this boot, never a crash.
+    void* dmem = heap_caps_malloc(sizeof(DiagRingSink), MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT);
+    if (dmem != nullptr) {
+        s_diagRing = new (dmem) DiagRingSink();
+        sloplog::logger().addSink(s_diagRing);
+        SLOGI("sys", "diag archive: %u lines, %u B PSRAM",
+              unsigned(DiagRingSink::kDiagLines), unsigned(sizeof(DiagRingSink)));
+    } else {
+        SLOGE("sys", "no PSRAM block for the /api/diag archive, DISABLED this boot");
+    }
     // RFC-017: the in-band log plane. Registered here (and only here) per §7.5 —
     // AppLog.cpp is the sink/bridge file. Binding a null state leaves the sink
     // registered but inert, which is what a build without SlopSync wants.
@@ -305,6 +395,71 @@ void applogBegin(SystemState* state) {
     // narrates to serial in real time (single-task phase only — main.cpp
     // flips this off right before the FreeRTOS tasks spawn).
     sloplog::logger().setImmediateDrain(true);
+}
+
+// ---- DiagRead: the lap-checked walk over the diag archive --------------------
+// Holds NO gate. A walk may be abandoned at any point, by any caller, local or
+// remote, and the ring neither knows nor cares.
+
+DiagRead::DiagRead(const char* tag, uint32_t from_seq) {
+    if (tag != nullptr) {
+        strncpy(_tag, tag, sizeof(_tag) - 1);
+        _tag[sizeof(_tag) - 1] = '\0';
+    }
+    if (s_diagRing == nullptr) return;
+    _end = s_diagRing->count();
+    _idx = s_diagRing->start();
+    if (_end == 0) { _expect = from_seq; return; }
+    _expect = s_diagRing->at(_idx).seq;
+    // Cursor fast-forward: seqs held in the ring are contiguous, so a resume
+    // point is an index offset, not a search.
+    if (from_seq > _expect) {
+        const uint32_t skip = from_seq - _expect;
+        _i = (skip >= _end) ? _end : size_t(skip);
+        _expect = from_seq;
+    }
+}
+
+size_t DiagRead::next(char* buf, size_t cap) {
+    // The caller's buffer must hold one whole line or the footer. Both are
+    // bounded by the sink's slot size; 256 is the floor with room to spare.
+    if (buf == nullptr || cap < 256) return 0;
+    if (s_diagRing == nullptr) {
+        if (_footed) return 0;
+        _footed = true;
+        const int n = snprintf(buf, cap,
+                               "[diag] archive unavailable this boot (no PSRAM at applogBegin)\n");
+        return n > 0 ? size_t(n) : 0;
+    }
+
+    size_t used = 0;
+    while (_i < _end) {
+        const auto& slot = s_diagRing->at(_idx + _i);
+        // The lap check. A mismatch means the writer overwrote the slot we were
+        // about to read, so everything from here on is a different era of the
+        // log. Stop and say so rather than emit a spliced timeline.
+        if (slot.seq != _expect) { _lapped = true; break; }
+        ++_expect;
+        if (_tag[0] != '\0' && strcmp(slot.tag, _tag) != 0) { ++_i; continue; }
+        const size_t n = strlen(slot.text);
+        if (used + n + 1 > cap) { --_expect; break; }   // resume here next call
+        memcpy(buf + used, slot.text, n);
+        used += n;
+        buf[used++] = '\n';
+        ++_emitted;
+        ++_i;
+    }
+    if ((_i >= _end || _lapped) && !_footed) {
+        char foot[224];
+        const int fn = s_diagRing->footer(foot, sizeof(foot), _lapped, _emitted, _expect);
+        if (fn > 0 && used + size_t(fn) + 1 <= cap) {
+            memcpy(buf + used, foot, size_t(fn));
+            used += size_t(fn);
+            buf[used++] = '\n';
+            _footed = true;
+        }
+    }
+    return used;
 }
 
 void applogSyncBridgeArm() { syncSink().arm(); }

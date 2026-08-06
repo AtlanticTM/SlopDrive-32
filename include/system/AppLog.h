@@ -18,6 +18,39 @@
 // Concatenate the web ring's buffered lines (oldest first) for /api/log.
 void applogDump(String& out);
 
+// ---- The /api/diag archive --------------------------------------------------
+// Lap-checked walk over the megabytes-deep PSRAM record ring. See DiagRingSink
+// in AppLog.cpp for the ring's own constraints.
+//
+// Constraints:
+// - Holds NO gate: the writer never pauses, and an abandoned walk (local or a
+//   dead bridge peer) costs the ring nothing. Being lapped mid-walk truncates
+//   the output and says so in the footer.
+// - The archive dies with its boot; post-panic forensics is /api/crash.
+class DiagRead {
+public:
+    // nullptr or "" walks everything; else only records with this exact SLOGx
+    // tag. Copied, never referenced. `from_seq` is the resume cursor: skip
+    // records older than it. The footer's next=<seq> is the value to pass on
+    // the following pull, so a remote pager needs no state of its own.
+    explicit DiagRead(const char* tag = nullptr, uint32_t from_seq = 0);
+    DiagRead(const DiagRead&) = delete;
+    DiagRead& operator=(const DiagRead&) = delete;
+
+    // Whole newline-terminated lines into `buf` (cap >= 256). 0 when finished.
+    size_t next(char* buf, size_t cap);
+
+private:
+    size_t   _i = 0;
+    size_t   _end = 0;
+    size_t   _idx = 0;
+    uint32_t _expect = 0;
+    uint32_t _emitted = 0;
+    char     _tag[16] = {};
+    bool     _lapped = false;
+    bool     _footed = false;
+};
+
 struct SystemState;
 
 // Register the SlopLog sinks (web ring + serial + the RFC-017 SlopSync bridge;

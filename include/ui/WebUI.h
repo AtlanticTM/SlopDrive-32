@@ -35,10 +35,14 @@ class SlopHttpServer;
 // local clock. No firmware-millis() dependency on the browser side, so an
 // ESP32 reboot can't desync the playback.
 struct TelemetrySample {
-    float    position_mm;   // where the shaft ACTUALLY is (motor.getPosition) — "took"
-    float    target_mm;     // where the PLANNER told it to go (post-kinematics) — "told"
-    float    raw_mm;        // rawest demand: TCode parser + RangeMapper, pre-planner — "asked"
-    uint32_t t_dev_us;      // esp_timer_get_time() truncated u32 — device clock at capture
+    float    position_mm;   // what the driver was COMMANDED to (getPosition) -- "took"
+    float    target_mm;     // where the PLANNER told it to go, post-kinematics -- "told"
+    float    raw_mm;        // rawest demand, pre-planner -- "asked"
+    // Where the shaft PHYSICALLY is, from the drive's own encoder. Equals
+    // position_mm when the backend has no feedback, so a chart never has to
+    // special-case a missing series.
+    float    encoder_mm;
+    uint32_t t_dev_us;      // esp_timer_get_time() truncated u32, device clock
 };
 
 // 64 slots × 4166µs = 266ms of buffered history at 240Hz. Sized to feed the
@@ -95,7 +99,8 @@ public:
     portMUX_TYPE      _telemetry_mux = portMUX_INITIALIZER_UNLOCKED;
 
     // Append one sample to the ring. Called from the 10ms esp_timer callback.
-    void captureTelemetry(float position_mm, float target_mm, float raw_mm);
+    void captureTelemetry(float position_mm, float target_mm, float raw_mm,
+                          float encoder_mm);
 
     // Bridge for the C-style esp_timer callback to reach the instance.
     static void telemetryTimerCb(void* arg);
@@ -110,6 +115,15 @@ public:
 #if defined(FEATURE_RS485_MODBUS)
     // Set the ServoModbus reference after construction.
     void setServoModbus(ServoModbus& modbus) { _servoModbus = &modbus; }
+
+    // Drive register 0x03 override, (r/min)/s, 0 = auto. Safe to call while
+    // moving. Returns false only when there is no drive attached.
+    bool setServoAccelReg(uint16_t value);
+
+    // Copy the drive's OWN 0x03 and armed state into SystemState for the
+    // readback. Called from update(); self-rate-limited.
+    void refreshServoReadback();
+    uint32_t _servo_readback_ms = 0;
 #endif
 
 #if defined(FEATURE_RS485_MODBUS) && defined(DRIVER_AIM_SERVO)
@@ -199,7 +213,12 @@ private:
     // localStorage and can import/export for sharing.
     void handleApiPatternPresets();
     void handleApiLog();
+    // Streams the whole diag archive. `tag` empty = every record. Owns
+    // httpTask for the duration; that is the point of a one-shot dump.
+    void handleApiDiag(const String& tag);
     void handleApiCrash();
+    void handleApiCoredump();
+    void handleApiTasks();
     // SlopMotion live-tuning rough-in (GET state+bench / POST knobs). No
     // persistence, no UI card yet — curl-driven until the WebUI refactor.
     void handleApiSlopMotion();

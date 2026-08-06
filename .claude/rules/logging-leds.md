@@ -1,10 +1,6 @@
 ---
 paths:
-  - "lib/sloplog/**"
-  - "lib/slopglow/**"
-  - "src/system/AppLog.cpp"
-  - "src/system/SlopGlowBoard.cpp"
-  - "src/**"
+  - "**"
 ---
 
 # SlopLog and SlopGlow (NON-NEGOTIABLE usage)
@@ -71,6 +67,46 @@ behind a condition still true the next time anyone looks.
 below Ota, an active flash, and Estop, which are never allowed to be masked.
 See the `GlowState` ordering comment in
 `lib/slopglow/include/slopglow/slopglow_core.hpp`.
+
+## Diagnostics are a DUMP, not a stream (operator ruling 2026-08-06)
+
+Depth beats liveness. The failure that matters is "the ring recycled before
+anyone read it", not "the ring is not fast enough", so the S3 records into a
+megabytes-deep PSRAM archive and it is read ONCE, after something goes wrong,
+over HTTP. `/api/diag` is the whole archive; `/api/diag/<tag>` filters to one
+SLOGx tag, so a new subsystem gets a route by logging under a new tag and the
+route table never changes.
+
+- **Three rings, three jobs, and they do not merge.** `/api/log` is the small
+  severity-partitioned DISPLAY (60 lines, a Debug flood can never bury an
+  error). `/api/diag` is the flat ARCHIVE. `/api/crash` is the RTC_NOINIT ring
+  that survives a panic. Every property of the display ring is a consequence of
+  being small; scaling it instead of adding a second one would have meant a
+  multi-MB memcpy under a spinlock and a multi-MB `String`.
+- **The archive dies with its boot.** PSRAM is re-allocated at `applogBegin()`.
+  Post-panic forensics stays crashring. Never cite `/api/diag` as a
+  post-reboot instrument.
+- **The writer NEVER stops for a reader; there is NO freeze.** Slots carry a
+  monotonic seq; `DiagRead` detects being lapped and truncates WITH A FOOTER
+  NOTICE instead of being protected. A read can be a remote pager over the C5
+  bridge taking minutes, and any gate held that long has a remote owner -- the
+  latched-gate class (sd-emy) that has bitten this project twice. Never
+  reintroduce a freeze, a lock, or any reader-owned state on this ring.
+- **The footer's `next=<seq>` is the resume cursor** and it is the LAST line of
+  every dump, on purpose: machine consumers parse it there and pass it back as
+  `?from=`. This is what lets a pager (the C5 relay, a browser fetch loop) pull
+  the archive in bounded requests instead of one held-open stream, and it makes
+  incremental tailing free. Verified live 2026-08-06: full dump -> `next=64`,
+  `?from=64` eleven seconds later returned exactly the 2 new lines.
+- **Blocking during a full local dump is ACCEPTED, not a defect.** It owns
+  httpTask until it finishes. This is the instrument reached for when the
+  machine is already unwell, so it carries no heap floor and no mid-body abort:
+  it must not be the first thing memory pressure switches off.
+- **This is why the C5 does NOT need a SlopSync CBOR decoder.** The S3 owns the
+  archive and its format; the C5 forwards bytes and stays a bridge. Later, the
+  handful of diagnostics worth watching LIVE become ordinary catalog elements
+  read through SlopSync. Shipping the whole archive over SlopSync would clog
+  the plane that carries motion, which is the thing the dump exists to avoid.
 
 ## T17 -- a flag reused across unrelated concerns can silence a sink for good
 

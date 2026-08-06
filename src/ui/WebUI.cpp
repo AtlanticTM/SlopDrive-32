@@ -34,6 +34,8 @@
 #endif
 #endif
 
+#include <uri/UriBraces.h>   // /api/diag/{tag} path capture
+
 #include "AppLog.h"          // bridge only: applogDump/applogSerialQuiet (/api/log)
 #include "sloplog/sloplog.h"
 #include "ConfigStore.h"
@@ -43,6 +45,11 @@
 #include "MotorDriver.h"
 
 #include "MotionArbiter.h"
+#include "slopmotion/slopmotion.hpp"   // Config defaults for the /api/slopmotion echo
+#include <esp_core_dump.h>
+#include <esp_partition.h>
+#include <esp_heap_caps.h>
+#include "OomHook.h"
 #include "config_api.h"
 #include "range_mapper.h"
 #include "slopsync/generated/registry_constants.hpp"  // limits::ws_subprotocol (single source of the proto id)
@@ -183,9 +190,17 @@ void WebUI::init() {
                           "{\"ok\":false,\"error\":\"retired\",\"use\":\"slopsync 0x0108 pattern-presets-cmd\"}");
     });
     _httpServer->on("/api/log",       HTTP_GET,  [this]() { handleApiLog(); });
+    // /api/diag dumps the whole archive; /api/diag/<tag> filters to one SLOGx
+    // tag. The tag set is whatever the firmware logs under, so a new subsystem
+    // gets a route for free and this list never needs editing.
+    _httpServer->on("/api/diag",      HTTP_GET,  [this]() { handleApiDiag(emptyString); });
+    _httpServer->on(UriBraces("/api/diag/{}"), HTTP_GET,
+                    [this]() { handleApiDiag(_httpServer->pathArg(0)); });
     // Previous boot's last words (RTC-noinit crash ring) — the post-mortem
     // surface the 2026-07-29 PANIC had nothing to answer with.
     _httpServer->on("/api/crash",     HTTP_GET,  [this]() { handleApiCrash(); });
+    _httpServer->on("/api/coredump",  HTTP_GET,  [this]() { handleApiCoredump(); });
+    _httpServer->on("/api/tasks",     HTTP_GET,  [this]() { handleApiTasks(); });
     _httpServer->on("/api/slopmotion", HTTP_GET,  [this]() { handleApiSlopMotion(); });
     // POST /api/slopmotion is RETIRED. "No controls outside SlopSync,
     // HTTP is read only" — the 20 live-tune knobs are channels 0x008B/0x008C/
@@ -199,7 +214,7 @@ void WebUI::init() {
                           "\"use\":\"slopsync 0x0105 slopmotion-set\"}");
     });
     _httpServer->on("/api/machine",        HTTP_GET,  [this]() { handleApiMachine(); });
-    _httpServer->on("/api/machine/commit", HTTP_POST, [this]() { slopglowActivity(); handleApiMachineCommit(); });
+    _httpServer->on("/api/machine/commit", HTTP_POST, [this]() { handleApiMachineCommit(); });
     _httpServer->on("/api/machine/homeoverride", HTTP_POST, [this]() {
         _httpServer->send(410, "application/json",
                           "{\"ok\":false,\"error\":\"retired\",\"use\":\"0x0103 home op=2 force_home / op=3 clear_override\"}");
@@ -219,6 +234,10 @@ void WebUI::update() {
     // Drop speculative browser sockets that hold the single serve slot while
     // sending nothing — otherwise each one deafens HTTP for 5 s (measured).
     _httpServer->dropIdleCapture();
+
+#if defined(FEATURE_RS485_MODBUS)
+    refreshServoReadback();
+#endif
 
     // Deferred reboot for the machine-backend commit: the HTTP handler arms
     // this and returns immediately so its 200 response actually flushes to
@@ -245,9 +264,18 @@ void WebUI::telemetryTimerCb(void* arg) {
     // Do NOT call getPosition() twice — one sample, both uses.
     const float actual_mm = self->_motor.getPosition();
     self->_state.actual_position_mm.store(actual_mm, std::memory_order_relaxed);
+    // Measured position. Only a backend with REAL feedback gets a second read;
+    // otherwise reuse the sample above, because the open-loop fallback IS
+    // getPosition() and calling it twice would put two different instants in
+    // one telemetry row (see the one-sample rule above).
+    const float measured_mm = self->_motor.hasActualPosition()
+                                  ? self->_motor.getActualPosition()
+                                  : actual_mm;
+    self->_state.measured_position_mm.store(measured_mm, std::memory_order_relaxed);
     self->captureTelemetry(actual_mm,
                            self->_state.commanded_target_mm,
-                           self->_state.commanded_raw_mm);
+                           self->_state.commanded_raw_mm,
+                           measured_mm);
 }
 
 void WebUI::startTelemetrySampler() {
@@ -277,7 +305,41 @@ void WebUI::resetSessionStats() {
     SLOGI("ui", "Session stats reset :3");
 }
 
-void WebUI::captureTelemetry(float position_mm, float target_mm, float raw_mm) {
+#if defined(FEATURE_RS485_MODBUS)
+// Live on purpose, no standstill gate: this is ONE FC 0x06 write of a limit
+// register the drive already re-reads every move, which is the whole point of
+// a tuning slider. The gate that used to be here guarded a 4-write arming
+// sequence that no longer exists (docs/drive-accel-register.md).
+bool WebUI::setServoAccelReg(uint16_t value) {
+    if (_servoModbus == nullptr) return false;
+    _servoModbus->setAccelRegOverride(value);
+    _state.servo_accel_reg_ovr = _servoModbus->accelRegOverride();
+    // Persist the INTENT, not the drive's register: boot reconciles the two,
+    // and only then does the value reach the drive's own EEPROM.
+    machineAccelRegStore(_state.servo_accel_reg_ovr);
+    return true;
+}
+
+// Ground truth for the readback: what the DRIVE says, not what we asked for.
+// 0x03 comes from the config mirror (rescanned after every write), 0x00 from
+// the telemetry rotation, which is live at ~0.3 Hz. Rate-limited because
+// getConfig() copies the whole mirror under the bus spinlock.
+void WebUI::refreshServoReadback() {
+    if (_servoModbus == nullptr) return;
+    const uint32_t now = millis();
+    if (now - _servo_readback_ms < 500) return;
+    _servo_readback_ms = now;
+    const ServoConfig c = _servoModbus->getConfig();
+    if (c.valid && (c.known & (1UL << 3))) {
+        _state.servo_accel_reg_actual = c.regs[3];
+        _state.servo_accel_reg_valid  = true;
+    }
+    _state.servo_modbus_armed = _servoModbus->getTelemetry().enabled;
+}
+#endif
+
+void WebUI::captureTelemetry(float position_mm, float target_mm, float raw_mm,
+                             float encoder_mm) {
     // ---- Session odometer stats (single-writer: this 240Hz timer task) ------
     // Derive live/peak speed, accumulate distance, and count strokes (direction
     // reversals) straight from the position stream. Cheap float math; publishes
@@ -326,6 +388,7 @@ void WebUI::captureTelemetry(float position_mm, float target_mm, float raw_mm) {
     _telemetry_ring[idx].position_mm = position_mm;
     _telemetry_ring[idx].target_mm   = target_mm;
     _telemetry_ring[idx].raw_mm      = raw_mm;
+    _telemetry_ring[idx].encoder_mm  = encoder_mm;
     _telemetry_ring[idx].t_dev_us    = (uint32_t)(esp_timer_get_time() & 0xFFFFFFFFu);
     _telemetry_seq = seq + 1;
     portEXIT_CRITICAL_ISR(&_telemetry_mux);
@@ -373,12 +436,14 @@ static constexpr uint32_t kPageServeAbortFloor = 12288;
 // 1460 B TCP MSS, so one chunk is one segment. Sizing it larger straddles the
 // segment boundary and buys an extra small pbuf per chunk — more allocations
 // under exactly the pressure this path is trying to survive.
-static uint8_t sPageSendBuf[1360];
+// Shared by handleRoot() and handleApiDiag(). Safe because every route handler
+// runs on httpTask, from _httpServer->handleClient() in update().
+static char sPageSendBuf[1360];
 
 void WebUI::handleRoot() {
     crashring::crumb("http-root");
     // Streaming the 115 KB bundle out of LittleFS blocks httpTask ~0.5-1 s per
-    // load under the sync WebServer (see docs/webui-legacy-diagnosis.md §4;
+    // load under the one-client sync WebServer (transport.md T26;
     // [STALL] http:ui.update names it). Until that rework: ETag + Cache-Control
     // no-cache. Every load still revalidates (ground truth — an uploadfs is
     // picked up immediately because size/mtime change the tag), but an
@@ -434,9 +499,10 @@ void WebUI::handleRoot() {
                 client.stop();   // truncation the browser can see and retry
                 break;
             }
-            size_t n = f.read(sPageSendBuf, sizeof(sPageSendBuf));
+            uint8_t* bytes = reinterpret_cast<uint8_t*>(sPageSendBuf);
+            size_t n = f.read(bytes, sizeof(sPageSendBuf));
             if (n == 0) break;
-            client.write(sPageSendBuf, n);
+            client.write(bytes, n);
         }
         f.close();
         return;
@@ -549,6 +615,7 @@ void WebUI::handleApiStatus() {
         s.add(snap[i].position_mm);
         s.add(snap[i].target_mm);
         s.add(snap[i].raw_mm);
+        s.add(snap[i].encoder_mm);
     }
 
     // Driver-health block: NO live fault readback exists on the AIM drive — it
@@ -1484,7 +1551,10 @@ bool WebUI::applyPattern(JsonDocument& doc, JsonDocument& resp) {
         if (ap_mod_ctrl >= 0 && ap_mod_ctrl < advpat::BASE_COUNT) touched[ap_mod_ctrl] = true;
     }
     if (doc["ap_mods"].is<JsonArray>()) {
-        for (JsonObject m : doc["ap_mods"].as<JsonArray>()) {
+        // Hoisted -- see SlopSyncHubService::loadPresets() for why
+        // (-Wdangling-reference on the MemberProxy temporary).
+        JsonArray apMods = doc["ap_mods"].as<JsonArray>();
+        for (JsonObject m : apMods) {
             int ctrl = applyModObject(m);
             if (ctrl >= 0 && ctrl < advpat::BASE_COUNT) touched[ctrl] = true;
         }
@@ -1571,6 +1641,30 @@ void WebUI::handleApiLog() {
     applogSerialQuiet();
 }
 
+// GET /api/diag[/<tag>] -- the whole boot's log archive, streamed.
+//
+// Constraints:
+// - Chunked, because the body is megabytes and no String can hold it. The
+//   reused page buffer means the dump allocates nothing.
+// - No heap floor and no mid-body abort, unlike handleRoot: this is the
+//   instrument you reach for when the machine is already unwell, so it must not
+//   be the first thing memory pressure switches off.
+void WebUI::handleApiDiag(const String& tag) {
+    // ?from=<seq> resumes at the footer's next= cursor, so a pager (the C5
+    // relay, a browser fetch loop) pulls in bounded requests instead of one
+    // held-open stream. No param = the whole archive, curl-style.
+    const uint32_t from = _httpServer->hasArg("from")
+        ? uint32_t(strtoul(_httpServer->arg("from").c_str(), nullptr, 10)) : 0;
+    _httpServer->setContentLength(CONTENT_LENGTH_UNKNOWN);
+    _httpServer->send(200, "text/plain", "");
+    DiagRead rd(tag.length() ? tag.c_str() : nullptr, from);
+    size_t n = 0;
+    while ((n = rd.next(sPageSendBuf, sizeof(sPageSendBuf))) > 0) {
+        _httpServer->sendContent(sPageSendBuf, n);
+    }
+    _httpServer->sendContent("");   // terminate the chunked stream
+}
+
 // GET /api/crash — the PREVIOUS boot's last words (RTC-noinit crash ring).
 // prev_valid false means the ring held no recovered data: first boot after
 // a power cycle (RTC RAM cleared) or a pre-crash-ring firmware.
@@ -1598,13 +1692,197 @@ void WebUI::handleApiCrash() {
     _httpServer->send(200, "application/json", json);
 }
 
+// ---- handleApiTasks (GET) ---------------------------------------------------
+//
+// THE LEAK HUNT'S INSTRUMENT. The 2026-07-31 core dump proved the machine dies
+// of heap exhaustion (newlib lock_init_generic -> failed mutex alloc -> abort),
+// but a post-mortem names the VICTIM, never the culprit — the faulting task is
+// whichever one next needed memory. Finding the leaker needs a trend, and a
+// trend needs a live number, which the device did not have.
+//
+// Everything here is already compiled in: CONFIG_FREERTOS_USE_TRACE_FACILITY
+// and CONFIG_FREERTOS_GENERATE_RUN_TIME_STATS are set in the Arduino sdkconfig,
+// so uxTaskGetSystemState() costs nothing but a call.
+//
+// RUNTIME IS REPORTED RAW, as the counter and its total, NOT as a percentage.
+// A percentage needs a window, this endpoint has no memory of when it was last
+// polled, and inventing "since boot" would make a task that was busy for one
+// second an hour ago look permanently busy. The caller diffs two samples and
+// gets a real answer about a real interval.
+//
+// stack_free_min is uxTaskGetStackHighWaterMark: the LOW WATER MARK in bytes,
+// i.e. the closest that task has ever come to overflowing. Small numbers here
+// are how a stack bomb announces itself before it lands.
+void WebUI::handleApiTasks() {
+    JsonDocument doc;
+
+    JsonObject h = doc["heap"].to<JsonObject>();
+    h["int_free"]      = heap_caps_get_free_size(MALLOC_CAP_INTERNAL);
+    h["int_min_free"]  = heap_caps_get_minimum_free_size(MALLOC_CAP_INTERNAL);
+    h["int_largest"]   = heap_caps_get_largest_free_block(MALLOC_CAP_INTERNAL);
+    h["dma_free"]      = heap_caps_get_free_size(MALLOC_CAP_DMA);
+    h["dma_largest"]   = heap_caps_get_largest_free_block(MALLOC_CAP_DMA);
+    h["psram_free"]    = heap_caps_get_free_size(MALLOC_CAP_SPIRAM);
+    h["psram_min_free"]= heap_caps_get_minimum_free_size(MALLOC_CAP_SPIRAM);
+    h["psram_largest"] = heap_caps_get_largest_free_block(MALLOC_CAP_SPIRAM);
+
+    // The failed-alloc record, if the hook has ever fired. `count` 0 means the
+    // machine has never once failed an allocation — which is the number this
+    // whole task is trying to keep true.
+    JsonObject o = doc["oom"].to<JsonObject>();
+    oomhook::Record r{};
+    o["count"] = oomhook::count();
+    if (oomhook::peek(r)) {
+        o["size"]        = r.size;
+        o["caps"]        = r.caps;
+        o["task"]        = r.task[0] ? r.task : "isr/unknown";
+        o["fn"]          = r.fn;
+        o["free_int"]    = r.free_int;
+        o["largest_int"] = r.largest_int;
+        o["t_ms"]        = r.t_ms;
+    }
+
+    const UBaseType_t n = uxTaskGetNumberOfTasks();
+    // Sized from the live count, capped, and allocated on the HEAP rather than
+    // the stack: TaskStatus_t is ~40 B and httpTask has 8 KB, so 40 tasks would
+    // be a fifth of the stack for a diagnostic. Freed before serialization
+    // because ArduinoJson needs room too, on the very heap being measured.
+    const UBaseType_t cap = n > 48 ? 48 : n;
+    TaskStatus_t* st = (TaskStatus_t*)malloc(cap * sizeof(TaskStatus_t));
+    if (!st) {
+        doc["tasks_error"] = "alloc failed (which is itself the finding)";
+        String j; serializeJson(doc, j);
+        _httpServer->send(200, "application/json", j);
+        return;
+    }
+    uint32_t total = 0;
+    const UBaseType_t got = uxTaskGetSystemState(st, cap, &total);
+    doc["runtime_total"] = total;
+    doc["task_count"]    = (uint32_t)n;
+    JsonArray arr = doc["tasks"].to<JsonArray>();
+    for (UBaseType_t i = 0; i < got; ++i) {
+        JsonObject t = arr.add<JsonObject>();
+        t["name"]           = st[i].pcTaskName;
+        t["stack_free_min"] = (uint32_t)st[i].usStackHighWaterMark;
+        t["runtime"]        = (uint32_t)st[i].ulRunTimeCounter;
+        t["prio"]           = (uint32_t)st[i].uxCurrentPriority;
+        t["core"]           = (int)st[i].xCoreID;
+        t["state"]          = (int)st[i].eCurrentState;
+    }
+    free(st);
+
+    String json;
+    serializeJson(doc, json);
+    _httpServer->send(200, "application/json", json);
+}
+
+// ---- handleApiCoredump (GET) ------------------------------------------------
+//
+// The post-mortem the crash ring cannot give. `crashring` records BREADCRUMBS —
+// where we had been — because it lives in 12 words of RTC RAM. This reads the
+// real ESP-IDF core dump: the faulting task, its PC, the exception cause and a
+// 16-deep backtrace, written to the `coredump` flash partition by the panic
+// handler itself.
+//
+// NOTHING HAD TO BE ENABLED FOR THIS TO WORK, which is the surprising part and
+// the reason CrashRing.h's "a real backtrace needs a core-dump flash partition
+// … that upgrade is a serial-reflash bench item" was stale: partitions_ota.csv
+// has carried `coredump` at 0xFF0000 since it was written, and the Arduino
+// sdkconfig ships CONFIG_ESP_COREDUMP_ENABLE_TO_FLASH=y with the ELF format.
+// The device has been writing complete core dumps all along and nothing could
+// read them.
+//
+// `?raw=1` streams the partition bytes for `espcoredump.py info_corefile`,
+// which resolves the whole task set rather than just the faulting one. The
+// summary is served by default because it needs no host tooling.
+//
+// ELF SHA256 IS REPORTED AND IS NOT DECORATION: a backtrace is a list of
+// addresses, and addresses only mean something against the exact binary that
+// produced them. Compare it with `esptool.py image_info` / the archived ELF
+// before believing a single symbol. A dump whose sha does not match the ELF you
+// hold is not a weaker clue, it is a wrong one.
+//
+// Deliberately has NO erase op. A new panic overwrites the region anyway
+// (CONFIG_ESP_COREDUMP_FLASH_NO_OVERWRITE is not set), so an erase button would
+// only ever destroy evidence.
+void WebUI::handleApiCoredump() {
+    size_t addr = 0, size = 0;
+    const esp_err_t present = esp_core_dump_image_get(&addr, &size);
+    if (present != ESP_OK) {
+        _httpServer->send(200, "application/json",
+                          "{\"present\":false,\"reason\":\"no core dump in flash\"}");
+        return;
+    }
+
+    if (_httpServer->hasArg("raw")) {
+        // Streamed in chunks off a SMALL stack buffer: the partition is 64 KB
+        // and this runs on httpTask, which is the task the heap-exhaustion
+        // incidents were killing. A 64 KB String here would be the bug
+        // reproducing itself inside its own diagnostic.
+        const esp_partition_t* part = esp_partition_find_first(
+            ESP_PARTITION_TYPE_DATA, ESP_PARTITION_SUBTYPE_DATA_COREDUMP, nullptr);
+        if (!part) {
+            _httpServer->send(500, "application/json",
+                              "{\"error\":\"coredump partition not found\"}");
+            return;
+        }
+        _httpServer->setContentLength(size);
+        _httpServer->send(200, "application/octet-stream", "");
+        uint8_t buf[512];
+        for (size_t off = 0; off < size; off += sizeof(buf)) {
+            const size_t n = (size - off) < sizeof(buf) ? (size - off) : sizeof(buf);
+            if (esp_partition_read(part, off, buf, n) != ESP_OK) break;
+            _httpServer->client().write(buf, n);
+        }
+        return;
+    }
+
+    JsonDocument doc;
+    doc["present"] = true;
+    doc["addr"]    = (uint32_t)addr;
+    doc["size"]    = (uint32_t)size;
+
+    esp_core_dump_summary_t s{};
+    if (esp_core_dump_get_summary(&s) == ESP_OK) {
+        char hex[12];
+        doc["task"] = s.exc_task;
+        std::snprintf(hex, sizeof(hex), "0x%08lx", (unsigned long)s.exc_pc);
+        doc["pc"] = hex;
+        std::snprintf(hex, sizeof(hex), "0x%08lx", (unsigned long)s.exc_tcb);
+        doc["tcb"] = hex;
+        doc["dump_ver"]   = s.core_dump_version;
+        doc["elf_sha256"] = (const char*)s.app_elf_sha256;
+#if CONFIG_IDF_TARGET_ARCH_XTENSA
+        doc["exc_cause"] = s.ex_info.exc_cause;
+        std::snprintf(hex, sizeof(hex), "0x%08lx", (unsigned long)s.ex_info.exc_vaddr);
+        doc["exc_vaddr"] = hex;
+        JsonArray bt = doc["backtrace"].to<JsonArray>();
+        const uint32_t depth = s.exc_bt_info.depth > 16 ? 16 : s.exc_bt_info.depth;
+        for (uint32_t i = 0; i < depth; ++i) {
+            std::snprintf(hex, sizeof(hex), "0x%08lx", (unsigned long)s.exc_bt_info.bt[i]);
+            bt.add(hex);
+        }
+        doc["bt_corrupted"] = s.exc_bt_info.corrupted;
+#endif
+    } else {
+        doc["summary"] = "unavailable (dump present but unparsable)";
+    }
+    String json;
+    serializeJson(doc, json);
+    _httpServer->send(200, "application/json", json);
+}
+
 // ---- handleApiMachine (GET) / handleApiMachineCommit (POST) -----------------
 //
 // GET  /api/machine         → {backend_active, backend_code, home_style,
 //                               bus:{...}}   (bus only when Modbus is compiled
 //                               in AND a live ServoModbus is wired)
-// POST /api/machine/commit  {backend:0|1}   → THE ONLY WRITER of the
-//   persisted "machcfg"/backend NVS key. Reboot-to-apply contract: NVS is
+// POST /api/machine/commit  {backend:0|1}
+//   LEGACY, and no longer the only writer of the persisted "machcfg" key: the
+//   conforming path is the `motion_backend` setting on 0x1030/0x3030, which
+//   carries setting_flags::restart_required and does NOT reboot. Retirement
+//   is tracked on the dev board (sd-3l3).
+//   Reboot-to-apply contract: NVS is
 //   written ONLY here, on an explicit commit — the UI's confirmation dialog
 //   writes nothing on Cancel/backdrop/Esc, and a dismissed dialog must never
 //   change what boots next. On a genuine change we respond first, THEN
@@ -1663,24 +1941,15 @@ void WebUI::handleApiMachineCommit() {
     }
 
 #if defined(FEATURE_RS485_MODBUS)
-    // Modbus -> FAS: best-effort factory-restore the drive's RUNTIME baud
-    // back to 19200 BEFORE the reboot. Why: FAS mode's own dual-baud probe
-    // would still happily find the drive at 115200, so this isn't required
-    // for FAS to work — it's here so the FAS boot path looks byte-identical
-    // to prior behavior (telemetry lands on the first probe attempt instead
-    // of the fallback one) and so power-cycling the drive later doesn't
-    // matter either way (factory 19200 is already where we left it).
-    // BEST-EFFORT + accepted race: reprogramBaud() is normally
-    // init-context-only (it bypasses ServoModbus's update() state machine
-    // and touches the port directly), but servoBusTask is still alive here —
-    // we're one commit away from ESP.restart() torching all of this state
-    // anyway, so a garbled frame or two on the way out is a non-issue. A
-    // failed restore just means the NEXT boot's probe finds 115200 and moves
-    // on — not a bricked link either way.
+    // Modbus -> FAS: ATTEMPT to hand the shaft back to its step/dir input.
+    // While reg 0x00 is 1 the drive ignores every pulse FAS emits, 0x00
+    // survives a reboot of US, and this drive refuses to clear it (sd-opb), so
+    // the switch usually needs a drive power cycle too. The reg-0x00 warn on
+    // the FAS poll path says so after the reboot below.
+    // Baud is deliberately LEFT at 115200 (operator ruling): FAS-mode
+    // telemetry runs at the same speed, so the readback behaves identically.
     if (_machine_backend == 1 && backend == 0 && _servoModbus) {
-        bool ok = _servoModbus->reprogramBaud(19200);
-        SLOGI("ui", "backend commit: best-effort baud restore to 19200 %s",
-              ok ? "OK" : "FAILED (harmless — next boot's probe finds whatever it finds)");
+        _servoModbus->releaseMotionArm();
     }
 #endif
 
@@ -1713,10 +1982,15 @@ void WebUI::handleApiSlopMotion() {
     // value must LOOK wrong, so it falls back to index 0 and the operator sees
     // a policy that plainly is not the one they set.
     static const char* kInfeasPolicyNames[] = {
-        "stretch", "scale", "reshape", "prio-amplitude", "prio-smooth"
+        "stretch", "scale", "reshape", "prio-amplitude", "prio-smooth", "blend"
     };
     static constexpr uint8_t kInfeasPolicyCount =
         uint8_t(sizeof(kInfeasPolicyNames) / sizeof(kInfeasPolicyNames[0]));
+    // TRIPWIRE: this table is a restatement of the engine's enum, and the two
+    // drifting apart is what shipped Blend unreachable. A new policy now fails
+    // the BUILD here instead of silently echoing the wrong name at runtime.
+    static_assert(kInfeasPolicyCount == slopmotion::kInfeasiblePolicyMax + 1,
+                  "kInfeasPolicyNames is out of sync with slopmotion::InfeasiblePolicy");
     // Canonical wire names for slopmotion::CurvePolicy — same table-and-bound
     // discipline, same sim parity. "follow" is FollowClient: honor the
     // sender's declared family, which with no wire signaling yet resolves to
@@ -1785,6 +2059,7 @@ void WebUI::handleApiSlopMotion() {
             else if (strcasecmp(p, "reshape") == 0) _state.sm_tune_infeas_policy = 2;
             else if (strcasecmp(p, "prio-amplitude") == 0) _state.sm_tune_infeas_policy = 3;
             else if (strcasecmp(p, "prio-smooth")    == 0) _state.sm_tune_infeas_policy = 4;
+            else if (strcasecmp(p, "blend")          == 0) _state.sm_tune_infeas_policy = 5;
         } else if (doc["infeasible_policy"].is<int>()) {
             const int p = doc["infeasible_policy"].as<int>();
             if (p >= 0 && p < (int)kInfeasPolicyCount)
@@ -1925,6 +2200,22 @@ void WebUI::handleApiSlopMotion() {
     tuning["smooth_budget"]           = _state.sm_tune_smooth_budget;
     tuning["amplitude_budget"]        = _state.sm_tune_amp_budget;
     tuning["blend_steps"]             = _state.sm_tune_blend_steps;
+    // COMPILE-TIME ONLY, and that is the whole reason this reads a fresh
+    // slopmotion::Config instead of SystemState: none of the three has a stored
+    // setting or a POST field, so the per-tick Core-1 push leaves each at the
+    // engine's own default and a default-constructed Config IS what the engine
+    // is running. Echoed at all because they ship NON-ZERO as of 2.1.96, and a
+    // load-bearing default no readout shows is the ground-truth gap the doctrine
+    // forbids.
+    // DO NOT add a setter for any of these without moving them to the sm_eff_*
+    // back-channel in the same commit — the moment one becomes writable this
+    // block starts reporting the compiled value while the machine runs another.
+    {
+        const slopmotion::Config kSmDefaults{};
+        tuning["blend"]                  = kSmDefaults.infeasible_blend;
+        tuning["overshoot_guard"]        = kSmDefaults.overshoot_guard;
+        tuning["overshoot_chord_slack"]  = kSmDefaults.overshoot_chord_slack;
+    }
     // MILLISECONDS on the wire, microseconds in the engine (see the POST side).
     tuning["settle_grace_ms"]         = _state.sm_tune_settle_grace_us / 1000.0f;
     tuning["chase_aim_accel_extrap"]  = (bool)_state.sm_tune_aim_extrap;

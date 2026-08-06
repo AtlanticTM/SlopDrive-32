@@ -33,6 +33,13 @@ public:
     // Populates state, mapper, and motor in-place.
     static void load(SystemState& state, RangeMapper& mapper, MotorDriver& motor);
 
+    // Persist ONLY the measured stroke (sd-921): a derived value must never
+    // drag the whole config to NVS -- a full save silently reverts any
+    // operator change that has not reached _state yet, and homing fires this
+    // on every cycle. Rewrites cfg_crc so load() still validates. Returns
+    // false when deferred (OTA in flight) so the caller can retry.
+    static bool saveMeasuredStroke(const SystemState& state, float stroke_mm);
+
     // ---- Secondary WiFi credentials (serial-settable fallback) --------------
     // A second SSID/password pair stored in NVS, tried by setupWiFi() when the
     // compile-time primary creds (secrets.h) fail to connect. Set over USB

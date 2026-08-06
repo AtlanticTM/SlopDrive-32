@@ -73,6 +73,35 @@ static uint32_t nvsConfigChecksum(Preferences& prefs) {
     return crc;
 }
 
+// ---- ConfigStore::saveMeasuredStroke -- ONE key, then the crc (sd-921) ------
+
+bool ConfigStore::saveMeasuredStroke(const SystemState& state, float stroke_mm) {
+    // Same OTA flash-write guard as save(); the caller keeps its pending flag
+    // on false and retries after the OTA window.
+    if (state.ota_active.load()) {
+        SLOGW("cfg", "saveMeasuredStroke: deferred - OTA update in flight");
+        return false;
+    }
+    Preferences prefs;
+    if (!prefs.begin("strokeengine", false)) {
+        SLOGE("cfg", "saveMeasuredStroke: failed to open NVS for write!");
+        return true;   // not retryable; do not loop on a broken partition
+    }
+    uint32_t fails = 0;
+    if (prefs.putFloat("stroke_mm", stroke_mm) == 0) fails++;
+    // cfg_crc covers the whole key set and load() validates it; recomputed
+    // from NVS itself so the other keys stay exactly as their last real save
+    // left them.
+    if (prefs.putUInt("cfg_crc", nvsConfigChecksum(prefs)) == 0) fails++;
+    prefs.end();
+    if (fails > 0) {
+        SLOGE("cfg", "saveMeasuredStroke: %lu NVS write(s) FAILED", (unsigned long)fails);
+    } else {
+        SLOGI("cfg", "measured stroke %.1f mm persisted (stroke_mm + crc only)", stroke_mm);
+    }
+    return true;
+}
+
 // ---- ConfigStore::save -- persist all runtime settings to NVS ---------------
 
 void ConfigStore::save(SystemState& state, RangeMapper& mapper, MotorDriver& motor) {

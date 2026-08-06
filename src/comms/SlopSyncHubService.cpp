@@ -38,6 +38,7 @@
 #include <cstring>
 
 #include "AppLog.h"          // applogSerialQuiet — the RFC-017 serial handoff
+#include "ConfigStore.h"     // saveMeasuredStroke -- the one-key persist (sd-921)
 #include "MotionArbiter.h"
 #include "MotorDriver.h"
 #include "PatternEngine.h"
@@ -2278,18 +2279,18 @@ void SlopSyncHubService::publishTelemetry() {
         // flash I/O and must never run on the real-time core, so the actual
         // ConfigStore::save() happens here, on the hub's Core-0 task.
         if (_state.stroke_measured_pending) {
-            _state.stroke_measured_pending = false;
             // 0 is the "not measured" sentinel, NEVER a measurement. A homing
             // style that does not measure (the drive's own cycle) must not
             // erase a real stored span, and neither must a driver that forgot
             // to override the accessor. Cost us a live 267.6 mm measurement at
             // fw 2.4.2 (dev board sd-9vc).
-            if (_motor.getMeasuredStrokeMm() > 0.0f) {
-                JsonDocument in, out;
-                _webui.handleCommand(WS_OP_SAVE, in, out);
-                SLOGI("slopsync", "measured stroke persisted to NVS after home");
-            } else {
+            // ONE key, never WS_OP_SAVE (sd-921: the full save clobbered
+            // operator settings on every home). False = deferred, retry.
+            if (_motor.getMeasuredStrokeMm() <= 0.0f) {
+                _state.stroke_measured_pending = false;
                 SLOGI("slopsync", "home measured no stroke -- keeping the stored value");
+            } else if (ConfigStore::saveMeasuredStroke(_state, _motor.getMeasuredStrokeMm())) {
+                _state.stroke_measured_pending = false;
             }
         }
     }

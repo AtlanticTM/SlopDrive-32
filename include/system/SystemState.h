@@ -407,6 +407,10 @@ struct SystemState {
     volatile uint16_t      servo_accel_reg_actual  = 0;
     volatile bool          servo_accel_reg_valid   = false;
     volatile bool          servo_modbus_armed      = false;
+    // RS485 probe result, refreshed by the httpTask servo poll. False means
+    // the drive is unpowered or the bus is dead -- the LED shows it as
+    // Motion/Degraded (amber slow-blink) vs Latched (solid) for plain unhomed.
+    volatile bool          servo_bus_ready         = false;
     // DC centering of a degraded band (WAVEFORM path, Scale + Reshape policies).
     // When the machine cannot deliver the commanded amplitude on the commanded
     // clock, ON (engine default) shrinks the achieved band SYMMETRICALLY about

@@ -77,8 +77,16 @@ void slopglowUpdate(const SystemState& state) {
                      (state.last_intiface_ms != 0 && (now - state.last_intiface_ms) < 500);
     // Unhomed is LATCHED (waiting on the operator to home), not a fault: the
     // T15 lesson, now expressed in the grammar instead of the enum order.
+    // Bus-unreachable outranks it as DEGRADED: an unpowered drive BLINKS
+    // amber, a machine that merely needs homing SITS solid.
+#if defined(FEATURE_RS485_MODBUS)
+    const bool busDown = !state.servo_bus_ready;
+#else
+    const bool busDown = false;   // no RS485 in this build; nothing to report
+#endif
     s_engine.set(System::Motion,
                  state.homing_in_progress                ? Status::Working
+                 : busDown                               ? Status::Degraded
                  : !state.homed                          ? Status::Latched
                  : (state.paused || state.manual_override) ? Status::Latched
                  : streaming                             ? Status::Working

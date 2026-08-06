@@ -731,6 +731,11 @@ static void httpTask(void* param) {
         TIME_STEP(encoderValidator.update(), "http:encValidator");
 #endif
         TIME_STEP(applogDrain(),          "http:logDrain");   // SlopLog ring -> web/serial sinks
+#if defined(FEATURE_RS485_MODBUS)
+        // Plain bool read, safe whichever core owns the bus. The LED renders
+        // false as Motion/Degraded: an unpowered drive blinks, unhomed sits.
+        g_state.servo_bus_ready = servoModbus.isReady();
+#endif
         slopglowUpdate(g_state);
         // Heap health beacon: free / low-water / largest-block. maxblock is
         // the one that kills big allocations (LittleFS streams, WS buffers)

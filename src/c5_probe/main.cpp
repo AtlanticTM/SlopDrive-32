@@ -39,6 +39,20 @@
 
 static constexpr uint8_t PIN_LED    = 27;
 static constexpr uint8_t LED_BRIGHT = 40;
+
+// ---- SlopGlow: the fleet LED grammar on the C5's WS2812 ---------------------
+// Same core, same colors, same effects as the S3 (logging-leds.md). The C5's
+// systems: Network (its WiFi), Link (bridge activity), Flash (its own OTA).
+#include "slopglow/slopglow_core.hpp"
+struct PixelOut final : slopglow::IGlowOutput {
+    slopglow::Rgb c{};
+    size_t pixelCount() const override { return 1; }
+    void set(size_t, slopglow::Rgb v) override { c = v; }
+    void show() override { rgbLedWrite(PIN_LED, c.r, c.g, c.b); }
+};
+static PixelOut s_pixel;
+static slopglow::GlowEngine s_glow(s_pixel);
+static slopglow::HeartbeatSource* s_glowHb = nullptr;
 // PCB-verified link to the S3 (operator, 2026-08-01):
 //   S3 TX (D1/GPIO43) -> C5 RX (IO12)
 //   C5 TX (IO11)      -> S3 RX (D0/GPIO44)
@@ -847,7 +861,10 @@ void setup() {
     Serial.printf("[c5_probe] reset reason = %d\n", (int)esp_reset_reason());
     report("S0 boot");
 
-    rgbLedWrite(PIN_LED, 0, LED_BRIGHT, 0);
+    // Rainbow until WiFi is up: the C5 without its network is not booted.
+    s_glow.setBrightness(LED_BRIGHT);
+    s_glow.requireReady(uint8_t(1u << uint8_t(slopglow::System::Network)));
+    s_glowHb = s_glow.addHeartbeat(500);
     report("S1 +led");
 
     // Buffers MUST be sized BEFORE begin(). HardwareSerial refuses to resize a
@@ -968,14 +985,18 @@ void loop() {
         connectBest();
     }
 
-    static uint32_t last = 0;
-    if (millis() - last >= 2000) {
-        last = millis();
-        static bool on = false;
-        on = !on;
-        bool linked = (WiFi.status() == WL_CONNECTED);
-        rgbLedWrite(PIN_LED, linked ? 0 : LED_BRIGHT,
-                    (linked && on) ? LED_BRIGHT : 0, 0);
+    {
+        using namespace slopglow;
+        const bool wifiUp = (WiFi.status() == WL_CONNECTED);
+        if (wifiUp) s_glow.markReady(System::Network);
+        s_glow.set(System::Network, wifiUp ? Status::Nominal : Status::Degraded);
+        // The httpd task owns the RX during an OTA/diag pull; that is the
+        // bridge working. (The C5's own flash rides the same handler task,
+        // so the engine simply is not pumped during it -- the last frame
+        // latches, which the liveness gate calls correct.)
+        s_glow.set(System::Link, g_otaOwnsRx ? Status::Working : Status::Nominal);
+        s_glowHb->pulse();
+        s_glow.update(millis());
     }
     delay(1);
 }

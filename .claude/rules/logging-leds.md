@@ -24,9 +24,48 @@ vendorable to C5 nodes, header-only via explicit `-I lib/<name>/include`.
 
 ## LEDs go through SlopGlow. Only.
 
-- Callers speak semantics: `slopglowEngine().raise/clear/set(GlowState::X)`.
-  Board wiring lives in `src/system/SlopGlowBoard.cpp`.
-- **Never `digitalWrite` or `ledcWrite` an LED anywhere else.**
+- Callers speak semantics: `slopglowEngine().set(System::X, Status::Y)`.
+  Board wiring lives in `src/system/SlopGlowBoard.cpp` (S3) and the SlopGlow
+  block in `src/c5_probe/main.cpp` (C5).
+- **Never `digitalWrite`, `ledcWrite`, or `rgbLedWrite` an LED anywhere else.**
+
+## The two-axis LED grammar (operator rulings 2026-08-06)
+
+COLOR names the SYSTEM speaking; EFFECT names that system's STATUS. One
+pixel shows one pair; the arbiter takes the highest Status (the
+time-sensitivity rank), ties to the higher System (Safety above all). The
+grammar is FLEET-WIDE: the same color is the same system on every board, so
+the UART bridge shows cyan on BOTH its ends.
+
+| color | system | speaks on |
+|---|---|---|
+| green | all quiet (every system Nominal) | both -- the floor |
+| cyan | Link: the UART bridge | both |
+| blue | Network: WiFi / WS | C5 (headless S3: never) |
+| amber | Motion plane, INCLUDING the drive/Modbus bus | S3 |
+| magenta | Session: auth, pairing ceremonies | both |
+| white | Flash: THIS device's firmware being written | both |
+| red | Safety: fault, e-stop | both |
+
+| rank | status | effect | timing |
+|---|---|---|---|
+| 6 | Urgent | fast blink | 400 ms on / 200 off |
+| 5 | Ceremony | blink | 700 ms on / 350 off |
+| 4 | Degraded | slow blink | 1200 ms on / 600 off |
+| 3 | Working | fast breathe | 1.4 s |
+| 2 | Latched | solid | waiting on the operator |
+| 1 | Nominal | slow breathe | 3 s |
+
+- **Blink ON time is the knob; OFF is always half of it** (ruling): the color
+  carries the message, the gap is the punctuation.
+- **Boot is rainbow mode** until every system the board required has reported
+  ready (`requireReady`/`markReady`). A rainbow that never ends IS the
+  diagnostic: some subsystem never came up.
+- **Pulses** (`pulse(System, ~100 ms)`) overlay the steady render as an ack
+  blip in the system's color, but NEVER cover Ceremony or Urgent (ruling:
+  severity layers).
+- Unhomed renders Motion/Latched (solid amber), NOT a red fault -- the T15
+  lesson expressed in the grammar instead of an enum ordering.
 - **The LED liveness gate is a safety feature.** Animation advances only while
   every registered heartbeat pulses (motorTask on Core 1, commsTask on Core 0;
   the pump runs on httpTask). Never defeat it. Frozen LEDs are a diagnostic.
@@ -63,10 +102,10 @@ triple power-cycling a factory-fresh and therefore UNHOMED device, landed on
 exactly the device that was ALSO showing Fault, and Fault won: red breathing
 instead of the pairing invitation, hiding a 120 s gone-if-missed ceremony
 behind a condition still true the next time anyone looks.
-**Fix:** `GlowState` reordered so Pairing outranks Warning and Fault, still
-below Ota, an active flash, and Estop, which are never allowed to be masked.
-See the `GlowState` ordering comment in
-`lib/slopglow/include/slopglow/slopglow_core.hpp`.
+**Fix (superseded by the grammar above, rule preserved):** originally a
+`GlowState` reorder so Pairing outranked Warning/Fault. The two-axis grammar
+carries it as a RULE now: Ceremony ranks above Degraded and below Urgent in
+the Status table, and unhomed is Motion/Latched rather than any fault at all.
 
 ## Diagnostics are a DUMP, not a stream (operator ruling 2026-08-06)
 

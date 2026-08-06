@@ -1,6 +1,7 @@
-// SlopGlow — hardware-free core suite. The heartbeat-gate contract is the
+// SlopGlow -- hardware-free core suite. The heartbeat-gate contract is the
 // safety-relevant part (a frozen core MUST freeze the LEDs), so it gets the
-// most coverage; state priority, crossfade, and mode math follow.
+// most coverage; the two-axis arbiter, boot rainbow, pulse layering, blink
+// timing, crossfade, and mode math follow.
 #define DOCTEST_CONFIG_IMPLEMENT_WITH_MAIN
 #include <doctest/doctest.h>
 
@@ -22,26 +23,132 @@ struct FakeStrip final : IGlowOutput {
     void show() override { ++shows; }
 };
 
+// Pump past the crossfade so px holds the steady render of the current pair.
+void settle(GlowEngine& g, uint32_t& t, uint32_t ms = kCrossfadeMs + 50) {
+    for (uint32_t end = t + ms; t < end; t += 10) g.update(t);
+}
+
 }  // namespace
 
-TEST_CASE("priority: highest active state owns the LEDs; Boot is the floor") {
+TEST_CASE("arbiter: highest Status wins; Safety wins ties; Nominal is the quiet floor") {
     FakeStrip strip(1);
     GlowEngine g(strip);
 
-    CHECK(g.current() == GlowState::Boot);
-    g.raise(GlowState::Ready);
-    g.raise(GlowState::Warning);
-    CHECK(g.current() == GlowState::Warning);
-    g.raise(GlowState::Estop);
-    CHECK(g.current() == GlowState::Estop);  // outranks everything
-    g.clear(GlowState::Estop);
-    CHECK(g.current() == GlowState::Warning);
-    g.clear(GlowState::Warning);
-    CHECK(g.current() == GlowState::Ready);
-    g.clear(GlowState::Ready);
-    CHECK(g.current() == GlowState::Boot);
-    g.clear(GlowState::Boot);                // floor never clears
-    CHECK(g.current() == GlowState::Boot);
+    CHECK(g.currentStatus() == Status::Nominal);
+    g.set(System::Motion, Status::Working);
+    CHECK(g.currentSystem() == System::Motion);
+    CHECK(g.currentStatus() == Status::Working);
+
+    // Higher Status takes the lamp regardless of system order.
+    g.set(System::Link, Status::Degraded);
+    CHECK(g.currentSystem() == System::Link);
+
+    // Tie at Urgent: Safety is the later system, so it wins the tie.
+    g.set(System::Flash, Status::Urgent);
+    g.set(System::Safety, Status::Urgent);
+    CHECK(g.currentSystem() == System::Safety);
+
+    g.set(System::Safety, Status::Nominal);
+    CHECK(g.currentSystem() == System::Flash);
+
+    g.set(System::Flash, Status::Nominal);
+    g.set(System::Link, Status::Nominal);
+    CHECK(g.currentSystem() == System::Motion);
+    g.set(System::Motion, Status::Nominal);
+    CHECK(g.currentStatus() == Status::Nominal);
+}
+
+TEST_CASE("quiet floor renders green; a speaking system renders its own color") {
+    FakeStrip strip(1);
+    GlowEngine g(strip);
+    uint32_t t = 0;
+    settle(g, t, 5000);
+    // All-Nominal: green floor (breathing, so green channel dominates always).
+    CHECK(strip.px[0].g > strip.px[0].r);
+    CHECK(strip.px[0].g > strip.px[0].b);
+
+    g.set(System::Safety, Status::Urgent);
+    settle(g, t);
+    // Red, and blink-ON at phase start after the pair change reset animMs.
+    CHECK(strip.px[0].r > 200);
+    CHECK(strip.px[0].g == 0);
+}
+
+TEST_CASE("boot rainbow holds until every required system reports ready") {
+    FakeStrip strip(1);
+    GlowEngine g(strip);
+    g.requireReady(uint8_t((1u << uint8_t(System::Motion)) |
+                           (1u << uint8_t(System::Link))));
+    CHECK(g.booting());
+
+    // Rainbow ignores asserted states entirely, even Safety.
+    g.set(System::Safety, Status::Urgent);
+    uint32_t t = 0;
+    Rgb seen[3] = {};
+    settle(g, t, 400);
+    seen[0] = strip.px[0];
+    settle(g, t, 800);
+    seen[1] = strip.px[0];
+    settle(g, t, 800);
+    seen[2] = strip.px[0];
+    // Hue moves: three samples across the cycle cannot all match.
+    const bool allSame = seen[0].r == seen[1].r && seen[1].r == seen[2].r &&
+                         seen[0].g == seen[1].g && seen[1].g == seen[2].g &&
+                         seen[0].b == seen[1].b && seen[1].b == seen[2].b;
+    CHECK(!allSame);
+
+    g.markReady(System::Motion);
+    CHECK(g.booting());          // one of two: still booting
+    g.markReady(System::Motion); // idempotent
+    CHECK(g.booting());
+    g.markReady(System::Link);
+    CHECK(!g.booting());
+
+    settle(g, t);
+    CHECK(strip.px[0].r > 200);  // the asserted Safety Urgent shows now
+    CHECK(strip.px[0].g == 0);
+}
+
+TEST_CASE("pulse overlays the steady render but never Ceremony or Urgent") {
+    FakeStrip strip(1);
+    GlowEngine g(strip);
+    uint32_t t = 0;
+    settle(g, t, 5000);
+
+    // Quiet floor: a Motion ack pulse takes the pixel (amber: r>g, b=0).
+    g.pulse(System::Motion, 100);
+    g.update(t += 10);
+    CHECK(strip.px[0].r > 200);
+    CHECK(strip.px[0].b == 0);
+    // It expires: well after 100 ms the green floor is back.
+    settle(g, t, 300);
+    CHECK(strip.px[0].g > strip.px[0].r);
+
+    // Severity layer: Urgent is never covered by a pulse.
+    g.set(System::Safety, Status::Urgent);
+    settle(g, t);
+    g.pulse(System::Motion, 100);
+    g.update(t += 10);
+    CHECK(strip.px[0].g == 0);   // still pure red, no amber leak
+}
+
+TEST_CASE("blink: ON for period_ms, OFF for half of it (operator ruling)") {
+    FakeStrip strip(1);
+    GlowEngine g(strip);
+    uint32_t t = 0;
+    settle(g, t, 1000);                        // establish the floor
+    g.set(System::Safety, Status::Degraded);   // blink on=1200, off=600
+    // The pair change resets phase to 0; skip the crossfade while staying
+    // inside the 1200 ms ON window, then count duty over one 1800 ms cycle.
+    settle(g, t, kCrossfadeMs + 10);
+    int on = 0, samples = 0;
+    for (uint32_t end = t + 1800; t < end; t += 50, ++samples) {
+        g.update(t);
+        if (strip.px[0].r > 100) ++on;
+    }
+    // 1200 of 1800 ms ON = 2/3 duty; allow slop for the sampled edges.
+    CHECK(on > samples / 2);
+    CHECK(on < samples);
 }
 
 TEST_CASE("heartbeat gate: a silent source freezes the frame exactly") {
@@ -52,7 +159,7 @@ TEST_CASE("heartbeat gate: a silent source freezes the frame exactly") {
     REQUIRE(core0 != nullptr);
     REQUIRE(core1 != nullptr);
 
-    g.raise(GlowState::Active);
+    g.set(System::Motion, Status::Working);
 
     // Both cores pulsing: animation runs, frames latch.
     uint32_t t = 0;
@@ -61,143 +168,89 @@ TEST_CASE("heartbeat gate: a silent source freezes the frame exactly") {
         core1->pulse();
         g.update(t);
     }
-    CHECK_FALSE(g.frozen());
-    int showsWhileAlive = strip.shows;
-    CHECK(showsWhileAlive > 0);
-    Rgb lastFrame = strip.px[0];
+    CHECK(!g.frozen());
 
-    // Core 1 dies. Within the stale window the engine keeps going, then
-    // freezes: no more show() calls, the strip holds whatever frame was last
-    // latched (FakeStrip.px only changes on set(), same as latching pixels).
-    for (; t < 2000; t += 10) {
-        core0->pulse();  // core 0 still happy — not good enough
-        g.update(t);
-    }
-    CHECK(g.frozen());
-    int showsAfterFreeze = strip.shows;
-    Rgb frozenFrame = strip.px[0];
-    (void)lastFrame;
-
-    for (; t < 3000; t += 10) {
+    // core1 goes silent: animation runs for up to staleMs more, then the
+    // engine freezes. Capture the frame AFTER the freeze engages -- from that
+    // point it must not move by a single count.
+    for (; t < 1400; t += 10) {
         core0->pulse();
         g.update(t);
     }
-    CHECK(strip.shows == showsAfterFreeze);  // truly no output while frozen
-    CHECK(strip.px[0] == frozenFrame);       // pixel held exactly
+    CHECK(g.frozen());
+    int showsFrozen = strip.shows;
+    Rgb frameFrozen = strip.px[0];
+    for (; t < 2000; t += 10) {
+        core0->pulse();
+        g.update(t);
+    }
+    CHECK(g.frozen());
+    CHECK(strip.px[0].r == frameFrozen.r);
+    CHECK(strip.px[0].g == frameFrozen.g);
+    CHECK(strip.px[0].b == frameFrozen.b);
+    CHECK(strip.shows == showsFrozen);       // frozen means NOTHING shown
 
-    // Core 1 recovers: animation resumes.
-    for (; t < 3500; t += 10) {
+    // Recovery: the silent core resumes, animation continues.
+    for (; t < 3000; t += 10) {
         core0->pulse();
         core1->pulse();
         g.update(t);
     }
-    CHECK_FALSE(g.frozen());
-    CHECK(strip.shows > showsAfterFreeze);
+    CHECK(!g.frozen());
+    CHECK(strip.shows > showsFrozen + 50);
 }
 
 TEST_CASE("no heartbeats registered: engine never freezes") {
     FakeStrip strip(1);
     GlowEngine g(strip);
-    g.raise(GlowState::Ready);
-    for (uint32_t t = 0; t < 2000; t += 20) g.update(t);
-    CHECK_FALSE(g.frozen());
-    CHECK(strip.shows > 0);
+    for (uint32_t t = 0; t < 1000; t += 10) g.update(t);
+    CHECK(!g.frozen());
+    CHECK(strip.shows > 50);
 }
 
-TEST_CASE("crossfade: transition blends from old frame to new state") {
+TEST_CASE("crossfade: transition blends from old frame toward the new pair") {
     FakeStrip strip(1);
     GlowEngine g(strip);
-    // Two solid specs with distinct colors so the blend is observable.
-    g.setSpec(GlowState::Ready, {{0, 255, 0}, {}, GlowMode::Solid, 1000});
-    g.setSpec(GlowState::Fault, {{255, 0, 0}, {}, GlowMode::Solid, 1000});
-    g.raise(GlowState::Ready);
-
     uint32_t t = 0;
-    for (; t < 1000; t += 10) g.update(t);
-    CHECK(strip.px[0] == Rgb{0, 255, 0});
+    settle(g, t, 5000);           // quiet green floor
+    Rgb before = strip.px[0];
+    CHECK(before.g > before.r);
 
-    g.raise(GlowState::Fault);
+    g.set(System::Safety, Status::Urgent);
     g.update(t += 10);
-    // Mid-fade: neither pure green nor pure red.
-    bool pureOld = strip.px[0] == Rgb{0, 255, 0};
-    bool pureNew = strip.px[0] == Rgb{255, 0, 0};
-    CHECK_FALSE(pureOld);
-    CHECK_FALSE(pureNew);
-
-    // Well past kCrossfadeMs: settled on the new state's color.
-    for (; t < 2000; t += 10) g.update(t);
-    CHECK(strip.px[0] == Rgb{255, 0, 0});
-}
-
-TEST_CASE("blink mode toggles at half period; breathe hits both endpoints") {
-    FakeStrip strip(1);
-    GlowEngine g(strip);
-    g.setSpec(GlowState::Ready, {{200, 0, 0}, {0, 0, 200}, GlowMode::Blink, 100});
-    g.raise(GlowState::Ready);
-    g.clear(GlowState::Boot);  // no-op (floor), but Ready outranks Boot anyway
-
-    // Settle past the boot->ready crossfade first.
-    uint32_t t = 0;
-    for (; t <= 1000; t += 10) g.update(t);
-
-    // Sample one full period aligned to the engine's own anim clock: collect
-    // colors over 100ms and expect exactly the two spec colors present.
-    bool sawA = false, sawB = false;
-    for (uint32_t k = 0; k < 10; ++k) {
-        g.update(t);
-        t += 10;
-        if (strip.px[0] == Rgb{200, 0, 0}) sawA = true;
-        if (strip.px[0] == Rgb{0, 0, 200}) sawB = true;
-    }
-    CHECK(sawA);
-    CHECK(sawB);
-}
-
-TEST_CASE("chase degrades to breathe on a single pixel, orbits on a ring") {
-    FakeStrip ring(8);
-    GlowEngine g(ring);
-    g.setSpec(GlowState::Ready, {{255, 255, 255}, {5, 5, 5}, GlowMode::Chase, 800});
-    g.raise(GlowState::Ready);
-
-    uint32_t t = 0;
-    for (; t <= 1000; t += 10) g.update(t);  // settle crossfade
-
-    // Track the bright pixel over one period: it must visit several positions.
-    std::vector<size_t> heads;
-    for (uint32_t k = 0; k < 80; ++k) {
-        g.update(t);
-        t += 10;
-        for (size_t i = 0; i < 8; ++i)
-            if (ring.px[i] == Rgb{255, 255, 255}) {
-                if (heads.empty() || heads.back() != i) heads.push_back(i);
-            }
-    }
-    CHECK(heads.size() >= 6);  // orbited most of the ring
+    // Mid-fade: not yet pure red.
+    Rgb mid = strip.px[0];
+    CHECK(mid.r < 255);
+    settle(g, t);
+    CHECK(strip.px[0].r > 200);
+    CHECK(strip.px[0].g == 0);
 }
 
 TEST_CASE("brightness ceiling scales output, zero blacks out") {
     FakeStrip strip(1);
     GlowEngine g(strip);
-    g.setSpec(GlowState::Ready, {{200, 100, 50}, {}, GlowMode::Solid, 1000});
-    g.raise(GlowState::Ready);
+    g.set(System::Safety, Status::Latched);   // solid red, no animation
     uint32_t t = 0;
-    for (; t < 1000; t += 10) g.update(t);
-    CHECK(strip.px[0] == Rgb{200, 100, 50});
+    settle(g, t);
+    CHECK(strip.px[0].r > 200);
 
-    g.setBrightness(127);
+    g.setBrightness(64);
     g.update(t += 10);
-    CHECK(strip.px[0].r < 110);
-    CHECK(strip.px[0].r > 90);
+    CHECK(strip.px[0].r < 100);
+    CHECK(strip.px[0].r > 20);
 
     g.setBrightness(0);
     g.update(t += 10);
-    CHECK(strip.px[0] == Rgb::black());
+    CHECK(strip.px[0].r == 0);
 }
 
 TEST_CASE("Rgb::lerp exact at endpoints; luma orders colors sanely") {
-    Rgb a{10, 200, 30}, b{240, 0, 90};
-    CHECK(Rgb::lerp(a, b, 0) == a);
-    CHECK(Rgb::lerp(a, b, 255) == b);
-    CHECK(Rgb{0, 255, 0}.luma() > Rgb{0, 0, 255}.luma());  // green brighter than blue
-    CHECK(Rgb{255, 255, 255}.luma() > Rgb{128, 128, 128}.luma());
+    Rgb a{0, 0, 0}, b{200, 100, 50};
+    Rgb lo = Rgb::lerp(a, b, 0), hi = Rgb::lerp(a, b, 255);
+    CHECK(lo.r == 0);
+    CHECK(hi.r == 200);
+    CHECK(hi.g == 100);
+    CHECK(hi.b == 50);
+    CHECK(Rgb{255, 255, 255}.luma() > Rgb{40, 40, 40}.luma());
+    CHECK(Rgb{0, 255, 0}.luma() > Rgb{0, 0, 255}.luma());
 }

@@ -41,9 +41,15 @@ void slopglowInit() {
     s_rgb.begin();        // GPIO0 strapping pin: this runs post-boot by contract
     s_heartLamp.begin();
 
-    // Preserve this board's established color language where the stock spec
-    // differs: paused/override has always been magenta here.
-    s_engine.setSpec(GlowState::Paused, {{255, 0, 255}, {12, 0, 12}, GlowMode::Breathe, 2600});
+    // Boot rainbow holds until these report in: Motion (motor bound,
+    // main.cpp), Session + Link (hub init). A hub that never comes up leaves
+    // the rainbow running, which is the honest "never finished booting".
+    uint8_t need = uint8_t((1u << uint8_t(System::Motion)) |
+                           (1u << uint8_t(System::Session)));
+#if defined(UART_LINK_ENABLED)
+    need |= uint8_t(1u << uint8_t(System::Link));
+#endif
+    s_engine.requireReady(need);
 
     // Generous staleness windows: a real freeze is forever, so detection
     // latency is cheap — but homing legitimately blocks motorTask for long
@@ -60,18 +66,23 @@ slopglow::GlowEngine& slopglowEngine() { return s_engine; }
 void slopglowUpdate(const SystemState& state) {
     uint32_t now = millis();
 
-    // ---- SystemState -> semantic conditions. set() is idempotent; the
-    // engine's priority order picks the winner (Estop > Ota > Fault > ...).
-    s_engine.set(GlowState::Estop, state.estop_latched);
-    s_engine.set(GlowState::Ota, state.ota_active.load(std::memory_order_relaxed));
-    s_engine.set(GlowState::Calibrating, state.homing_in_progress);
-    s_engine.set(GlowState::Fault, !state.homed && !state.homing_in_progress);
-    s_engine.set(GlowState::Paused, state.paused || state.manual_override);
-
+    // ---- SystemState -> (system, status). set() is idempotent; the arbiter
+    // shows the most time-sensitive pair (Status rank, Safety wins ties).
+    s_engine.set(System::Safety,
+                 state.estop_latched ? Status::Urgent : Status::Nominal);
+    s_engine.set(System::Flash,
+                 state.ota_active.load(std::memory_order_relaxed) ? Status::Urgent
+                                                                  : Status::Nominal);
     bool streaming = state.gen_active ||
                      (state.last_intiface_ms != 0 && (now - state.last_intiface_ms) < 500);
-    s_engine.set(GlowState::Active, state.homed && streaming);
-    s_engine.set(GlowState::Ready, state.homed);
+    // Unhomed is LATCHED (waiting on the operator to home), not a fault: the
+    // T15 lesson, now expressed in the grammar instead of the enum order.
+    s_engine.set(System::Motion,
+                 state.homing_in_progress                ? Status::Working
+                 : !state.homed                          ? Status::Latched
+                 : (state.paused || state.manual_override) ? Status::Latched
+                 : streaming                             ? Status::Working
+                                                         : Status::Nominal);
 
     s_engine.update(now);
 

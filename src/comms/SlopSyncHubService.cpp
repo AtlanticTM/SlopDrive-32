@@ -1337,6 +1337,12 @@ void SlopSyncHubService::init() {
         _task = nullptr;
     } else {
         SLOGI("slopsync", "hub service up — catalog %u channels, Core 0", unsigned(_catalog.count));
+        // Boot-rainbow ready marks: a hub that failed to spawn leaves the
+        // rainbow running, which is the honest "never finished booting".
+        slopglowEngine().markReady(slopglow::System::Session);
+#if defined(UART_LINK_ENABLED)
+        slopglowEngine().markReady(slopglow::System::Link);
+#endif
     }
     bootheap::mark("ss:hubtask");
 
@@ -2381,7 +2387,7 @@ void SlopSyncHubService::checkQuickBootPairingGesture() {
         prefs.putUChar(kQuickBootKey, 0);  // consume the gesture immediately, not on next boot
         _hub.openPresenceWindow();
         _presenceGlowOn = true;
-        slopglowEngine().set(slopglow::GlowState::Pairing, true);
+        slopglowEngine().set(slopglow::System::Session, slopglow::Status::Ceremony);
         SLOGI("slopsync", "pairing: PRESENCE WINDOW OPEN (3 quick power-cycles) — pair within %u s",
               unsigned(slopsync::limits::pairing_window_default_s));
     }
@@ -2414,7 +2420,8 @@ void SlopSyncHubService::pumpPresencePairingWindow(uint32_t nowMs) {
     const bool open = _hub.presenceWindowOpen();
     if (open != _presenceGlowOn) {
         _presenceGlowOn = open;
-        slopglowEngine().set(slopglow::GlowState::Pairing, open);
+        slopglowEngine().set(slopglow::System::Session,
+                             open ? slopglow::Status::Ceremony : slopglow::Status::Nominal);
         if (!open) SLOGI("slopsync", "pairing: presence window closed");
     }
 }
@@ -2475,13 +2482,13 @@ void SlopSyncHubService::openPairing(const char* pin) {
     _pairPin[sizeof(_pairPin) - 1] = '\0';
     size_t len = std::strlen(_pairPin);
     _hub.openPairingWindow(std::span<const char>(_pairPin, len));
-    slopglowEngine().set(slopglow::GlowState::Pairing, true);
+    slopglowEngine().set(slopglow::System::Session, slopglow::Status::Ceremony);
     SLOGI("slopsync", "pairing window OPEN (pin len %u)", unsigned(len));
 }
 
 void SlopSyncHubService::closePairing() {
     _hub.closePairingWindow();
-    slopglowEngine().set(slopglow::GlowState::Pairing, false);
+    slopglowEngine().set(slopglow::System::Session, slopglow::Status::Nominal);
     // A ceremony just ended — persist any freshly issued (or re-issued) tokens.
     savePairing();
     SLOGI("slopsync", "pairing window closed");

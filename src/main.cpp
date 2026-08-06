@@ -912,6 +912,9 @@ void setup() {
     bootheap::mark("config+motor");
 
     slopglowInit();
+    // Motor is bound and configured above; the boot rainbow drops this bit
+    // now and waits on the hub for Link + Session.
+    slopglowEngine().markReady(slopglow::System::Motion);
     bootheap::mark("slopglow");
 
 #if defined(SD32_HEADLESS)

@@ -1,12 +1,12 @@
 // SlopGlow — hardware-free status-LED core.
 //
 // Philosophy (the three rules everything here serves):
-//   1. CALLERS SPEAK SEMANTICS. Modules raise/clear conditions
-//      (glow.raise(GlowState::Fault)) and never pick colors or patterns —
-//      the engine maps the highest-priority active state onto whatever
-//      hardware the board actually has (8-pixel ring, one dumb PWM LED,
-//      RGB nano LED). That mapping is the module's job, which is what makes
-//      callers hardware-interchangeable.
+//   1. CALLERS SPEAK SEMANTICS. Modules set a system's status
+//      (glow.set(System::Motion, Status::Working)) and never pick colors or
+//      patterns -- COLOR names the system, EFFECT names the status, and the
+//      arbiter shows the most time-sensitive pair on whatever hardware the
+//      board actually has. That mapping is the module's job, which is what
+//      makes callers hardware-interchangeable.
 //   2. THE LED IS A LIVENESS ORGAN. The engine has no task and no timer:
 //      animation phase only advances inside update(), and only while every
 //      registered heartbeat source (one per monitored core/task) has pulsed
@@ -76,64 +76,73 @@ public:
     virtual void show() = 0;
 };
 
-// ---- Semantic vocabulary ----------------------------------------------------
+// ---- The two-axis grammar (operator rulings 2026-08-06) ---------------------
+// COLOR names the SYSTEM speaking; EFFECT names that system's STATUS. One
+// pixel shows one pair: the arbiter takes the highest STATUS -- the
+// time-sensitivity rank, T15 generalized from a hand-ordered enum into a
+// rule -- with ties broken toward the higher System (Safety above all).
+// All-Nominal renders the green quiet floor. During boot the pixel runs
+// Rainbow until every system the board required has reported ready.
+// PULSES overlay the steady render for ~100 ms (an ack blip in the pulsing
+// system's color) but never override Ceremony or Urgent.
 
-// Ordered by ascending priority: the highest ACTIVE state owns the LEDs.
-// Estop outranks everything; Boot is the implicit floor state.
-//
-// INVARIANT: Pairing outranks Warning/Fault (rank by what's gone if missed,
-// not by severity: Fault fires on a simply-unhomed machine, the ordinary
-// state of a fresh boot, which would otherwise hide the pairing window on
-// exactly the device most likely to need it). Pairing still stays below
-// Ota and Estop. See logging-leds.md T15.
-enum class GlowState : uint8_t {
-    Boot = 0,      // power-up until the system says otherwise
-    LinkDown,      // no network/transport
-    Ready,         // homed, idle, all good
-    Active,        // motion in progress (pattern/stream/manual)
-    Paused,
-    Calibrating,   // homing / self-measurement — exclusive, hands off
-    Warning,       // degraded but running
-    Fault,         // needs attention, motion refused
-    Pairing,       // pairing window open — visible invitation
-    Ota,           // flashing — do not power off
-    Estop,         // latched emergency stop
+enum class System : uint8_t {
+    Motion = 0,   // amber   -- motion plane INCLUDING the drive/Modbus bus
+    Link,         // cyan    -- the UART bridge; same color on BOTH ends
+    Network,      // blue    -- WiFi/WS (never speaks on a headless S3)
+    Session,      // magenta -- sessions, auth, pairing ceremonies
+    Flash,        // white   -- THIS device's firmware being written
+    Safety,       // red     -- fault / e-stop; highest tie-break
     kCount_,
 };
-inline constexpr size_t kGlowStateCount = size_t(GlowState::kCount_);
+inline constexpr size_t kSystemCount = size_t(System::kCount_);
+
+enum class Status : uint8_t {
+    Nominal = 0,  // slow breathe -- background, nothing to say
+    Latched,      // solid        -- waiting on the operator
+    Working,      // fast breathe -- actively doing its job
+    Degraded,     // slow blink   -- running but wrong
+    Ceremony,     // blink        -- gone if missed (pairing window)
+    Urgent,       // fast blink   -- exclusive, hands off
+    kCount_,
+};
+inline constexpr size_t kStatusCount = size_t(Status::kCount_);
 
 enum class GlowMode : uint8_t {
     Solid = 0,
     Breathe,    // colorA <-> colorB sine-ish lerp over period
-    Blink,      // colorA / colorB hard 50% duty over period
-    Chase,      // one colorA pixel orbits a colorB background (multi-pixel;
-                // degrades to Breathe on a single pixel)
-    Rainbow,    // hue cycle over period (colorA ignored)
+    Blink,      // period_ms is the ON time; OFF is half of it (ruling: the
+                // color stays readable, the off-gap is the punctuation)
+    Rainbow,    // hue cycle over period (boot only)
 };
 
-// How a state looks. Boards/apps may override any entry; the defaults are
-// chosen to read unambiguously on a single RGB LED.
 struct GlowSpec {
-    Rgb colorA{};
-    Rgb colorB{};
     GlowMode mode = GlowMode::Solid;
     uint16_t period_ms = 1000;
 };
 
-inline GlowSpec defaultSpec(GlowState s) {
+inline constexpr Rgb colorOf(System s) {
     switch (s) {
-        case GlowState::Boot:     return {{255, 120, 0}, {10, 4, 0}, GlowMode::Breathe, 900};
-        case GlowState::LinkDown: return {{0, 60, 255}, {0, 2, 12}, GlowMode::Breathe, 2200};
-        case GlowState::Ready:    return {{0, 255, 60}, {0, 10, 2}, GlowMode::Breathe, 3000};
-        case GlowState::Active:   return {{0, 200, 255}, {0, 8, 12}, GlowMode::Breathe, 1400};
-        case GlowState::Paused:   return {{255, 200, 0}, {12, 9, 0}, GlowMode::Breathe, 2600};
-        case GlowState::Calibrating: return {{0, 80, 255}, {0, 0, 10}, GlowMode::Blink, 500};
-        case GlowState::Pairing:  return {{180, 0, 255}, {4, 0, 8}, GlowMode::Blink, 700};
-        case GlowState::Warning:  return {{255, 140, 0}, {12, 6, 0}, GlowMode::Blink, 1000};
-        case GlowState::Ota:      return {{255, 255, 255}, {8, 8, 8}, GlowMode::Blink, 300};
-        case GlowState::Fault:    return {{255, 0, 0}, {12, 0, 0}, GlowMode::Breathe, 1200};
-        case GlowState::Estop:    return {{255, 0, 0}, {40, 0, 0}, GlowMode::Blink, 400};
-        default:                  return {};
+        case System::Motion:  return {255, 140, 0};
+        case System::Link:    return {0, 200, 255};
+        case System::Network: return {0, 60, 255};
+        case System::Session: return {255, 0, 90};
+        case System::Flash:   return {255, 255, 255};
+        case System::Safety:  return {255, 0, 0};
+        default:              return {};
+    }
+}
+inline constexpr Rgb kQuietColor{0, 255, 60};   // the all-Nominal green floor
+
+inline constexpr GlowSpec specOf(Status st) {
+    switch (st) {
+        case Status::Nominal:  return {GlowMode::Breathe, 3000};
+        case Status::Latched:  return {GlowMode::Solid, 0};
+        case Status::Working:  return {GlowMode::Breathe, 1400};
+        case Status::Degraded: return {GlowMode::Blink, 1200};   // off 600
+        case Status::Ceremony: return {GlowMode::Blink, 700};    // off 350
+        case Status::Urgent:   return {GlowMode::Blink, 400};    // off 200
+        default:               return {};
     }
 }
 
@@ -156,30 +165,28 @@ inline constexpr uint16_t kCrossfadeMs = 350;
 
 class GlowEngine {
 public:
-    explicit GlowEngine(IGlowOutput& out) : _out(out) {
-        for (size_t i = 0; i < kGlowStateCount; ++i) _specs[i] = defaultSpec(GlowState(i));
-        _active[size_t(GlowState::Boot)] = true;  // implicit floor
+    explicit GlowEngine(IGlowOutput& out) : _out(out) {}
+
+    // ---- Semantic surface (any task; single writer per system, u8 stores
+    // are atomic on every target). Each system holds exactly one Status.
+    void set(System sys, Status st) { _status[size_t(sys)] = uint8_t(st); }
+    Status status(System sys) const { return Status(_status[size_t(sys)]); }
+
+    // ---- Transient overlay (operator ruling): a short ack blip in the
+    // system's color. Overrides the steady render but NEVER Ceremony/Urgent.
+    void pulse(System sys, uint16_t ms = 100) {
+        _pulseColor = colorOf(sys);
+        _pulseRemainingMs = ms;   // u16 store; last writer wins, by design
     }
 
-    // ---- Semantic surface (callable from any task: single writer per state
-    // is the intended pattern; a bool store is atomic on every target).
-    void raise(GlowState s) { _active[size_t(s)] = true; }
-    void clear(GlowState s) {
-        if (s != GlowState::Boot) _active[size_t(s)] = false;  // floor never clears
-    }
-    void set(GlowState s, bool on) { on ? raise(s) : clear(s); }
-    bool isRaised(GlowState s) const { return _active[size_t(s)]; }
+    // ---- Boot rainbow: rainbow until every required system reported ready.
+    void requireReady(uint8_t systemsMask) { _readyPending = systemsMask; }
+    void markReady(System sys) { _readyPending &= uint8_t(~(1u << uint8_t(sys))); }
+    bool booting() const { return _readyPending != 0; }
 
-    // Highest-priority active state — what the LEDs are showing.
-    GlowState current() const {
-        for (size_t i = kGlowStateCount; i-- > 0;)
-            if (_active[i]) return GlowState(i);
-        return GlowState::Boot;
-    }
-
-    // Override how a state renders on this board.
-    void setSpec(GlowState s, const GlowSpec& spec) { _specs[size_t(s)] = spec; }
-    const GlowSpec& spec(GlowState s) const { return _specs[size_t(s)]; }
+    // What the pixel is showing (arbiter result), for tests and debug.
+    System currentSystem() const { return winner().sys; }
+    Status currentStatus() const { return winner().st; }
 
     // Global brightness ceiling, 0..255 (applied after everything else).
     void setBrightness(uint8_t b) { _brightness = b; }
@@ -207,16 +214,18 @@ public:
 
         _animMs += dt;
 
-        GlowState target = current();
-        if (target != _shownState) {
+        const Pick w = winner();
+        const uint16_t key = booting()
+            ? 0xFFFF : uint16_t((uint16_t(w.sys) << 8) | uint16_t(w.st));
+        if (key != _shownKey) {
             // Crossfade start: capture the outgoing frame as the fade origin.
             for (size_t i = 0; i < framePixels(); ++i) _fadeFrom[i] = _frame[i];
-            _shownState = target;
+            _shownKey = key;
             _fadeRemainingMs = kCrossfadeMs;
-            _animMs = 0;  // new state starts its pattern at phase 0
+            _animMs = 0;  // the new pair starts its pattern at phase 0
         }
 
-        renderState(_specs[size_t(_shownState)], _animMs);
+        renderPick(w, _animMs);
 
         if (_fadeRemainingMs > 0) {
             uint16_t step = uint16_t(dt > _fadeRemainingMs ? _fadeRemainingMs : dt);
@@ -226,11 +235,36 @@ public:
                 _frame[i] = Rgb::lerp(_fadeFrom[i], _frame[i], t);
         }
 
+        // Pulse overlay: hard flash, no fade -- punctuation, not a state.
+        // Severity-layered (operator ruling): Ceremony/Urgent never covered.
+        if (_pulseRemainingMs > 0) {
+            uint16_t step = uint16_t(dt > _pulseRemainingMs ? _pulseRemainingMs : dt);
+            _pulseRemainingMs = uint16_t(_pulseRemainingMs - step);
+            if (!booting() && w.st < Status::Ceremony)
+                for (size_t i = 0; i < framePixels(); ++i) _frame[i] = _pulseColor;
+        }
+
         for (size_t i = 0; i < framePixels(); ++i) _out.set(i, scale(_frame[i]));
         _out.show();
     }
 
 private:
+    struct Pick {
+        System sys;
+        Status st;
+    };
+
+    // Highest Status wins; ties go to the higher System (Safety is last, so
+    // it wins every tie it enters). All-Nominal is the quiet floor.
+    Pick winner() const {
+        Pick best{System::Motion, Status::Nominal};
+        for (size_t i = 0; i < kSystemCount; ++i) {
+            const Status st = Status(_status[i]);
+            if (uint8_t(st) >= uint8_t(best.st)) best = {System(i), st};
+        }
+        return best;
+    }
+
     struct Heartbeat {
         HeartbeatSource src;
         uint16_t staleMs = 150;
@@ -267,39 +301,42 @@ private:
         return uint8_t(ph < 256 ? ph : 511 - ph);
     }
 
-    void renderState(const GlowSpec& s, uint32_t animMs) {
-        size_t n = framePixels();
+    static Rgb dim(Rgb c) { return {uint8_t(c.r / 18), uint8_t(c.g / 18), uint8_t(c.b / 18)}; }
+
+    void renderPick(const Pick& w, uint32_t animMs) {
+        const size_t n = framePixels();
+        if (booting()) {  // rainbow until every required system is ready
+            const uint16_t period = 2500;
+            uint8_t h0 = uint8_t((animMs % period) * 255u / period);
+            for (size_t i = 0; i < n; ++i)
+                _frame[i] = hsv(uint8_t(h0 + (n > 1 ? i * 255 / n : 0)), 255, 255);
+            return;
+        }
+        const bool quiet = (w.st == Status::Nominal);
+        const Rgb a = quiet ? kQuietColor : colorOf(w.sys);
+        const Rgb b = dim(a);
+        const GlowSpec s = specOf(w.st);
         switch (s.mode) {
             case GlowMode::Solid:
-                for (size_t i = 0; i < n; ++i) _frame[i] = s.colorA;
+                for (size_t i = 0; i < n; ++i) _frame[i] = a;
                 break;
             case GlowMode::Breathe: {
-                Rgb c = Rgb::lerp(s.colorB, s.colorA, trianglePhase(animMs, s.period_ms));
+                Rgb c = Rgb::lerp(b, a, trianglePhase(animMs, s.period_ms));
                 for (size_t i = 0; i < n; ++i) _frame[i] = c;
                 break;
             }
             case GlowMode::Blink: {
-                bool on = s.period_ms == 0 || (animMs % s.period_ms) < (s.period_ms / 2u);
-                Rgb c = on ? s.colorA : s.colorB;
+                // ON for period_ms, OFF for half of it (operator ruling): the
+                // color carries the message, the gap is the punctuation.
+                const uint32_t cycle = uint32_t(s.period_ms) + s.period_ms / 2u;
+                bool on = cycle == 0 || (animMs % cycle) < s.period_ms;
+                Rgb c = on ? a : b;
                 for (size_t i = 0; i < n; ++i) _frame[i] = c;
                 break;
             }
-            case GlowMode::Chase: {
-                if (n < 2) {  // degrades gracefully on a lone LED
-                    Rgb c = Rgb::lerp(s.colorB, s.colorA, trianglePhase(animMs, s.period_ms));
-                    _frame[0] = c;
-                    break;
-                }
-                size_t head = s.period_ms ? (animMs % s.period_ms) * n / s.period_ms : 0;
-                for (size_t i = 0; i < n; ++i) _frame[i] = (i == head) ? s.colorA : s.colorB;
+            default:
+                for (size_t i = 0; i < n; ++i) _frame[i] = a;
                 break;
-            }
-            case GlowMode::Rainbow: {
-                uint8_t h0 = s.period_ms ? uint8_t((animMs % s.period_ms) * 255u / s.period_ms) : 0;
-                for (size_t i = 0; i < n; ++i)
-                    _frame[i] = hsv(uint8_t(h0 + (n > 1 ? i * 255 / n : 0)), 255, 255);
-                break;
-            }
         }
     }
 
@@ -309,13 +346,15 @@ private:
     }
 
     IGlowOutput& _out;
-    GlowSpec _specs[kGlowStateCount];
-    volatile bool _active[kGlowStateCount] = {};
+    volatile uint8_t _status[kSystemCount] = {};
     Rgb _frame[kMaxPixels] = {};
     Rgb _fadeFrom[kMaxPixels] = {};
-    GlowState _shownState = GlowState::Boot;
+    Rgb _pulseColor{};
+    uint16_t _pulseRemainingMs = 0;
+    uint16_t _shownKey = 0xFFFE;   // neither a valid pair nor the boot key
     Heartbeat _hb[kMaxHeartbeats];
     size_t _hbCount = 0;
+    uint8_t _readyPending = 0;
     uint32_t _animMs = 0;
     uint32_t _lastMs = 0;
     uint16_t _fadeRemainingMs = 0;

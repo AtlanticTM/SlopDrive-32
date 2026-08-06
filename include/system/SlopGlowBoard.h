@@ -1,6 +1,6 @@
 // SlopGlowBoard -- this board's wiring of the SlopGlow engine. Owns the LEDC
 // true-color RGB and the mono heartbeat lamp, maps SystemState onto the
-// semantic GlowState vocabulary, and exposes the heartbeat sources the
+// two-axis System/Status grammar, and exposes the heartbeat sources the
 // monitored tasks pulse.
 //
 // Threading: slopglowUpdate() is pumped by httpTask (Core 0) only.

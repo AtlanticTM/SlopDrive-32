@@ -31,6 +31,7 @@
 #include "sloplog/sloplog.h"
 #include "SystemState.h"
 #include "ConfigStore.h"
+#include "MotionPassthrough.h"
 #include "SlopGlowBoard.h"
 
 #include "range_mapper.h"
@@ -1219,6 +1220,14 @@ void setup() {
     g_state.homed = true;
     motor.forceHomeState(true);
     SLOGW("boot", "!!! HOMING DISABLED — bench-test build only. Remove -DHOMING_DISABLED for real hardware.");
+#endif
+
+#if defined(MOTION_PASSTHROUGH_BENCH)
+    // RP2350 loom bring-up (sd-dxy): steal the drive pins for the matrix
+    // route LAST, so no driver re-grabs them. Bench flag only; FAS still
+    // believes it owns these pins, so do not command FAS motion here.
+    motionPassthroughEnable();
+    SLOGW("boot", "!!! MOTION_PASSTHROUGH_BENCH: drive pins belong to the RP2350, FAS is a bystander.");
 #endif
 
     SLOGI("boot", "System ready — push that thick shaft all the way in to home, or use the web UI :3");

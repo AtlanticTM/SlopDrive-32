@@ -65,3 +65,22 @@ void machineHomeStyleStore(uint8_t v) {
         prefs.end();
     }
 }
+
+uint16_t machineAccelRegLoad() {
+    uint16_t v = 0;
+    Preferences prefs;
+    if (prefs.begin(MACHCFG_NS, true)) {
+        v = prefs.getUShort("accelreg", 0);
+        prefs.end();
+    }
+    return (v > 60098) ? 0 : v;   // out-of-range NVS fails safe to "leave alone"
+}
+
+void machineAccelRegStore(uint16_t v) {
+    if (v > 60098) v = 60098;
+    Preferences prefs;
+    if (prefs.begin(MACHCFG_NS, false)) {
+        prefs.putUShort("accelreg", v);
+        prefs.end();
+    }
+}

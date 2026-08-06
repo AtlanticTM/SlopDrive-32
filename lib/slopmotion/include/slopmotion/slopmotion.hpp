@@ -310,7 +310,21 @@ enum class InfeasiblePolicy : uint8_t {
     Reshape = 2,   // timing-first + machine-first: give up the shape, not the range
     PrioritizeAmplitude = 3,   // budgeted: smoothness first, then amplitude
     PrioritizeSmooth    = 4,   // budgeted: amplitude first, then smoothness
+    // ONE SLIDER instead of a choice of four. Spends BOTH axes together in the
+    // ratio `infeasible_blend` sets, and only as far as legality demands, so an
+    // infeasible segment degrades PROPORTIONALLY rather than by exhausting one
+    // axis. Reproduces PrioritizeSmooth at blend 0 and PrioritizeAmplitude at
+    // blend 1; the interior is what the other four cannot express.
+    Blend               = 5,
 };
+
+// THE ORDINAL OF THE LAST POLICY, and the ONE home for it. Every wire clamp,
+// NVS load clamp and name table off the engine is a restatement of this number,
+// and restating it is how a policy ships unreachable: 0.9.0 added Blend and left
+// four device-side tables plus three bounds at 4, so an operator selecting blend
+// (5) was CLAMPED to 4 and silently got prio-smooth. Adding a policy means
+// bumping this and letting the compiler find the rest — never editing a literal.
+inline constexpr uint8_t kInfeasiblePolicyMax = (uint8_t)InfeasiblePolicy::Blend;
 
 // Which CURVE FAMILY the waveform path reconstructs a segment with.
 //
@@ -355,10 +369,30 @@ enum class InfeasiblePolicy : uint8_t {
 // before hardware: a knot between two very differently-sloped spans commands a
 // large torque step, and how that feels is a measurement, not a derivation.
 enum class CurvePolicy : uint8_t {
-    FollowClient = 0,   // honor the sender's declared family (today: C2)
+    FollowClient = 0,   // honor the sender's declared family (RFC-030)
     ForceC1      = 1,   // cubic Hermite — reproduces the script's own spline
     ForceC2      = 2,   // quintic — curvature-continuous
 };
+
+// WaveformCommand::client_curve_family's "c1_cubic". Mirrored rather than
+// included: this header stays slopsync-free, so the registry numbering is
+// documented (see WaveformCommand) and restated here, never imported.
+inline constexpr uint8_t kClientCurveC1Cubic = 1;
+
+// policy + declaration -> reconstruction family, in ONE place. Free and public
+// because a caller can need the answer BEFORE commitWaveform adopts the command:
+// the bench's sender-curve overlay draws the client's own curve at commit time,
+// and an overlay that picks its family by a private re-derivation is how a tuner
+// ends up comparing a cubic against a quintic and blaming the planner for the
+// difference.
+constexpr bool resolveCubic(CurvePolicy policy, uint8_t client_family) {
+    switch (policy) {
+        case CurvePolicy::ForceC1: return true;
+        case CurvePolicy::ForceC2: return false;
+        case CurvePolicy::FollowClient: return client_family == kClientCurveC1Cubic;
+    }
+    return false;
+}
 
 struct Config {
     Limits limits{};
@@ -403,7 +437,22 @@ struct Config {
     uint32_t chase_stale_us    = 400000;
 
     // ---- Infeasible-segment handling (WAVEFORM path only) -------------------
-    InfeasiblePolicy infeasible_policy = InfeasiblePolicy::Reshape;
+    // OPERATOR RULING 2026-07-30, measured on the async-tune bench (GoogleCat,
+    // 50-150 mm window, curve follow -> c1, 1000 mm/s / 50000 mm/s2): Stretch
+    // wins on BOTH axes at once, which none of the other four do —
+    //   stretch 0.761 rms /  14 anomalies      prio-smooth    0.747 / 50
+    //   reshape 0.928 rms /  29 anomalies      prio-amplitude 0.765 / 40
+    //   scale   1.647 rms /  31 anomalies
+    // Fidelity across the top three is a 0.02 mm tie; the anomaly count is not,
+    // and Stretch also sidesteps the soften overshoot (LEDGER, pending ruling)
+    // because that only fires on Reshape.
+    // SUPERSEDED 2026-07-30 by Blend, which is the same decision made
+    // continuously instead of by picking a corner — see infeasible_blend for the
+    // 60-case sweep. Blend at its best setting beats Stretch on the same
+    // objective (regret 0.226 vs 0.248), and unlike Stretch it does not overrun
+    // the deadline to do it. Stretch remains selectable and remains the best of
+    // the four SEQUENTIAL policies.
+    InfeasiblePolicy infeasible_policy = InfeasiblePolicy::Blend;
     // Safety factor on the SCALE policy's stroke size estimate. The estimate
     // is a heuristic, the legality scan is the referee — the margin just
     // biases the first guess low so the scan usually accepts on an early try.
@@ -450,6 +499,35 @@ struct Config {
     // infeasible_reshape_steps. CLAMPED to [1, 10] on use. 6 resolves alpha to
     // 1/64 of the budget, well under anything perceptible.
     uint8_t infeasible_blend_steps = 6;
+
+    // ---- InfeasiblePolicy::Blend — the one slider ---------------------------
+    // WHAT AN INFEASIBLE SEGMENT GIVES UP, as a single exchange rate:
+    //   0.0  keep AMPLITUDE nothing, keep SHAPE everything — surrender reach
+    //   1.0  keep AMPLITUDE everything, surrender shape (flattens toward the chord)
+    //   0.5  both give equally
+    // Clamped [0, 1] on use; a config push is not a trusted input.
+    //
+    // 0.5 BY MEASUREMENT, and the honest version of that claim: swept over 10
+    // recordings x 6 perturbations (window tight/wide/offset, halved speed,
+    // weakened accel) = 60 cases, 42 of which actually exercise the policy.
+    // Scored as scale-free per-case regret on the operator's own objective —
+    // shape match AND amplitude, (1-shape_corr) and |1-reach_ratio|.
+    //
+    // THE OPTIMUM MOVES WITH THE EXCHANGE RATE, which is exactly why this is a
+    // slider and not a constant:
+    //   shape weighted ~10x reach -> 0.875 (regret 0.236)
+    //   weighted EQUALLY          -> 0.5   (regret 0.239)
+    //   reach weighted >= shape   -> 0.5   (regret 0.197 / 0.110)
+    // 0.5 is the equal-weight optimum and wins 3 of the 5 weightings tried, so
+    // it is the neutral default; 0.875 is the pick if shape matters much more.
+    //
+    // WHAT IS NOT AMBIGUOUS: the low end is wrong. blend <= 0.25 scores regret
+    // ~0.72 against ~0.24 at the top — surrendering AMPLITUDE first is a bad
+    // trade almost everywhere, because a small shape concession keeps the plan
+    // FEASIBLE while lost reach is both visible and often still falls through to
+    // the Ruckig guard. The two cases where 0.0 won had a spread of 0.17, i.e.
+    // they were ties.
+    float infeasible_blend = 0.5f;
 
     // ---- Sharpness-first reshaping (RESHAPE only) ---------------------------
     // "Is there a hybrid between scale and stretch where we just adjust the
@@ -555,6 +633,89 @@ struct Config {
     // (Command::has_next_chord). An engine fed no lookahead behaves exactly as
     // it did before this knob existed, whatever k says.
     float handoff_chord_factor = 1.5f;
+
+    // ---- OVERSHOOT GUARD (option A of the 2026-07-30 bench shoot-out) -------
+    // The legality scan constrains v/a/j and the WINDOW. It has never
+    // constrained "did this plan sail past the endpoint the sender asked for",
+    // so a plan may arc far beyond the commanded target and still be legal as
+    // long as it stays inside the window.
+    //
+    // MEASURED (GoogleCat, t=28.168): the machine sits at 186.8 mm doing
+    // +1000 mm/s (at vmax) when a segment says "be at 100 mm — 86.8 mm BELOW —
+    // in 875 ms". The C1 cubic that satisfies those four boundary conditions
+    // over exactly that duration peaks at 305.3 mm: 118 mm past the target,
+    // SEVEN TIMES the 16.7 mm a full-authority brake would have cost. Momentum
+    // is not the cause — the polynomial is, because a fixed duration plus fixed
+    // endpoints uniquely determines the shape and it must SPEND those 875 ms.
+    //
+    // The allowance is therefore physical, not a taste knob: a plan may pass its
+    // own endpoint by as much as STOPPING THERE WOULD CARRY IT ANYWAY, and no
+    // further. Overshoot that momentum forces is honest; overshoot the polynomial
+    // invented is not.
+    //
+    // "WOULD CARRY IT ANYWAY" IS MEASURED, NOT A FORMULA — see
+    // physicalBandExcess(). The 0.9.0 guard used the closed form v0^2/(2*amax),
+    // which ignores the JERK ceiling, and jerk is what dominates a hard stop:
+    // braking from 800 mm/s at amax 50 000 mm/s^2 costs 6.4 mm on paper and
+    // ~15 mm in fact, because reaching full deceleration takes 25 ms at jmax and
+    // the carriage covers 20 mm getting there. A guard built on the paper number
+    // is ~2.3x too strict — it rejected plans that were already near-physical and
+    // handed them to the flat Ruckig fallback, which is exactly how the knob
+    // measured WORSE THAN OFF on OvershootTestThrobbing (mean excursion 4.63 ->
+    // 7.40 mm) and non-monotone in its own value. Both were this.
+    //
+    // 0 disables (pre-guard behavior, byte for byte). Values > 1 are a slack
+    // multiplier on the physical floor for operators who want the shape back.
+    float overshoot_guard = 1.0f;
+
+    // Slack ON TOP of the physical floor, as a fraction of the segment's own
+    // commanded chord. THIS IS WHAT MAKES THE GUARD SELECTIVE, and without it the
+    // guard is not worth having.
+    //
+    // The physical floor alone is an ABSOLUTE bound, so it fires on every stroke
+    // whose excursion exceeds it — including strokes that overshoot by 2 % of
+    // their own travel, which nobody can feel and which the ceiling scan was
+    // right to pass. Each of those rejections buys a straight line, because the
+    // Ruckig fallback cruises at vmax on anything near saturation. That is how a
+    // correct bound still produced the operator's "some strokes go suddenly
+    // linear": measured on GoogleCat at the operator's window, slack 0 took the
+    // fallback on 55 segments and pushed flattening 12.2 % -> 25.7 % to remove an
+    // excursion of 7.4 mm that was 0.47x its own stroke, i.e. not a defect.
+    //
+    // Throbbing is a RATIO, not a distance — the complaint is a move that travels
+    // further past its target than the move itself was long. Allowing a quarter
+    // of the chord on top of the physical floor says exactly that. Measured
+    // against slack 0 (2026-07-30, 12 recordings, window 150-350, guard 1, the
+    // C1 family the machine actually ships): InterpTest1 flattening
+    // 35.7 % -> 5.1 % with 22 fallbacks -> 0, GoogleCat 23.8 -> 20.8 % and
+    // 13 -> 2, SYN-truncated 30.8 -> 23.8 % and 9 -> 0 — all for about 0.5 mm of
+    // worst-case excursion. The absolute bound was spending a straight line to
+    // remove excursions of 0.03x their own stroke.
+    //
+    // 0 restores the absolute-only bound. The whole guard disarms at
+    // overshoot_guard 0 regardless of this value.
+    float overshoot_chord_slack = 0.25f;
+
+    // ---- BAD-MOVE BRIDGE (option B of the same shoot-out) -------------------
+    // The other answer to the same measurement: when the machine could reach
+    // the commanded target FAR sooner than the commanded duration, the command
+    // is not a stroke that is merely hard — it is a DISCONTINUITY, and shaping
+    // a polynomial across it is what produces the arc.
+    //
+    // Detection reuses machinery Reshape already pays for: the time-optimal
+    // duration from the machine's ACTUAL (p, v, a). Above this ratio the
+    // segment is planned TIME-OPTIMALLY (arrive early, hold) instead of being
+    // stretched across its deadline.
+    //
+    // Note the guard path does NOT already do this: it calls planRuckig with
+    // minimum_duration = T, so it honors the deadline too and can arc for the
+    // same reason the quintic does.
+    //
+    // The threshold must sit well above 1.0 — measured, 13.4 % of ordinary
+    // GoogleCat segments already demand more than the velocity ceiling and the
+    // worst ordinary case is 2.09x, while the t=28.168 discontinuity scores
+    // ~5.1x. 0 disables (pre-bridge behavior, byte for byte).
+    float bridge_ratio = 0.0f;
 
     // ---- Settle grace (see maybeSettle) -------------------------------------
     // How long an expired plan may HOLD its end state before the engine
@@ -978,6 +1139,11 @@ private:
     // (legacy SHORT_MOVE_INTERVAL).
     static constexpr uint32_t kShortMoveUs  = 50000;
     static constexpr int      kScanSteps    = 64;     // quintic legality grid
+    // Overshoot-guard floor, normalized: 0.2 % of the stroke window. A plan
+    // that lands exactly on its target still shows rounding-sized excursions on
+    // a 64-point grid, and rejecting those would send perfectly good segments to
+    // the guard for nothing.
+    static constexpr double   kOvershootFloor = 0.002;
     // Slack on the Ruckig legality referee. A profile that STARTS at the
     // ceiling with adverse acceleration must overshoot it a little on the way
     // back inside — the jerk limit says so, and no planner can avoid it (swept:
@@ -1173,6 +1339,60 @@ private:
             _prev_vf_ok = false;
         }
 
+        // ---- BAD-MOVE BRIDGE (Config::bridge_ratio) -------------------------
+        // Placed AFTER the handoff/wall guards have settled vf, and BEFORE any
+        // curve is built — because the question it answers is prior to shape:
+        // "is the commanded duration a deadline, or a fiction?"
+        //
+        // When the machine could be there far sooner than it was told to be,
+        // the command is a DISCONTINUITY, not a stroke. Shaping a polynomial
+        // across it is what manufactures the arc (see the field's note): a
+        // fixed duration plus fixed endpoints uniquely determines the shape,
+        // so the excess time is spent as excursion. Planning time-optimally
+        // instead arrives early and holds — much closer to the sender's intent
+        // than a 118 mm detour it never asked for.
+        //
+        // The guard path is NOT an alternative here: it pins minimum_duration
+        // to T and therefore arcs for exactly the same reason.
+        if (_cfg.bridge_ratio > 0.0f && T > 0.0) {
+            const double t_opt = timeOptimalDuration(p, v, a, target, vf);
+            if (t_opt > 0.0 && T > (double)_cfg.bridge_ratio * t_opt) {
+                if (planRuckig(p, v, a, target, vf, 0.0, 0.0, now_us)) {
+                    _mode = Mode::Waveform;
+                    // The whole stroke is delivered, early. Nothing is owed at
+                    // this extreme; slack 0 because the machine was never the
+                    // binding constraint — the schedule was.
+                    const int8_t bdir = target >= p ? (int8_t)1 : (int8_t)-1;
+                    noteWaveformExtreme(bdir, target, target, 0.0, 0.0, now_us);
+                    // Reported as a stretched deadline with the sign reversed:
+                    // the plan is SHORTER than commanded, and detail carries the
+                    // duration actually adopted, same convention as the guard's.
+                    recordAnomaly(AnomalyType::DeadlineStretched, (float)target,
+                                  (float)t_opt, now_us);
+                    return true;
+                }
+                // Ruckig refused — fall through and shape it the old way rather
+                // than leave the segment unplanned.
+            }
+        }
+
+        // ---- ARM THE OVERSHOOT GUARD FOR THIS SEGMENT -----------------------
+        // Once per commit, before any curve exists, because every candidate the
+        // policies bisect over shares the same entry state and therefore the same
+        // physical floor. Placed AFTER the bridge so a segment the bridge takes
+        // pays nothing for it.
+        _oshoot_allow = -1.0;
+        if (_cfg.overshoot_guard > 0.0f && T > 0.0) {
+            const double floor_mm = physicalBandExcess(p, v, a, target, vf);
+            // < 0 is Ruckig declining to answer. No answer means no bound: an
+            // invented one would be the guard's original mistake in a new place.
+            if (floor_mm >= 0.0) {
+                _oshoot_allow =
+                    (double)_cfg.overshoot_guard * floor_mm + kOvershootFloor
+                    + (double)_cfg.overshoot_chord_slack * std::fabs(target - p);
+            }
+        }
+
         // Build the quintic in normalized tau; scaled boundary derivatives.
         double c[6];
         buildWaveformCurve(p, v, a, target, vf, af, T, c);
@@ -1254,7 +1474,8 @@ private:
             return true;
         }
         if ((_cfg.infeasible_policy == InfeasiblePolicy::PrioritizeAmplitude ||
-             _cfg.infeasible_policy == InfeasiblePolicy::PrioritizeSmooth) &&
+             _cfg.infeasible_policy == InfeasiblePolicy::PrioritizeSmooth ||
+             _cfg.infeasible_policy == InfeasiblePolicy::Blend) &&
             commitWaveformBudgeted(p, v, a, target, vf, af, T, dir, pull,
                                    now_us)) {
             return true;
@@ -1266,6 +1487,16 @@ private:
         // path the old cubic executed verbatim.
         recordAnomaly(AnomalyType::WaveformFallback, (float)target,
                       (float)worst, now_us);
+
+        // THE DEADLINE IS KEPT HERE, and switching the guarded case to a
+        // TIME-OPTIMAL plan instead was tried and rejected, not overlooked. The
+        // premise looked sound — a stretched profile must spend T, and spending T
+        // is what manufactures an arc — but the measurement says otherwise:
+        // whole shelf, window 50-150, guard 1, 2026-07-30, per-segment excursion
+        // came back unchanged (12 recordings, largest move 0.66 -> 0.72 mm, i.e.
+        // the wrong way) while sender rms rose on 8 of 12 (GoogleCat 1.83 ->
+        // 2.14, synth-sine 0.89 -> 1.09, SYN-mixed 2.80 -> 3.25). Arriving early
+        // and holding costs the sender's timing and buys no excursion back.
         const bool ok = planRuckig(p, v, a, target, vf, 0.0, T, now_us);
         if (ok) {
             _mode = Mode::Waveform;
@@ -1325,20 +1556,18 @@ private:
         c[5] = 0.0;
     }
 
-    // Is the WAVEFORM path reconstructing with a cubic right now? This is the
-    // ONE function that knows — and as of RFC-030 the curve_family wire
-    // signaling EXISTS, so FollowClient finally has something to follow:
-    // the family the active waveform command declared (1 = c1_cubic → cubic;
-    // 0/2/3 → quintic, i.e. the pre-RFC behavior). The machine override
-    // still outranks the declaration, exactly as the policy enum promises.
-    bool waveformIsCubic() const {
-        switch (_cfg.curve_policy) {
-            case CurvePolicy::ForceC1: return true;
-            case CurvePolicy::ForceC2: return false;
-            case CurvePolicy::FollowClient: return _client_curve_family == 1;
-        }
-        return false;
-    }
+    // policy + declaration -> reconstruction family, in ONE place. Static and
+    // public because a caller can need the answer BEFORE commitWaveform adopts
+    // the command — the bench's sender-curve overlay draws the client's own
+    // curve at commit time, and an overlay that picks its family by a private
+    // re-derivation is how a tuner ends up comparing a cubic against a quintic
+    // and calling the difference a planner error.
+    // Is the WAVEFORM path reconstructing with a cubic right now? As of RFC-030
+    // the curve_family wire signaling EXISTS, so FollowClient finally has
+    // something to follow: the family the ACTIVE waveform command declared. The
+    // machine override still outranks the declaration, exactly as the policy
+    // enum promises.
+    bool waveformIsCubic() const { return resolveCubic(_cfg.curve_policy, _client_curve_family); }
 
     // THE waveform-path curve builder. Every sizing rule (plain commit,
     // centering, Scale, the budgeted search) goes through here rather than
@@ -1521,7 +1750,86 @@ private:
             return true;
         };
 
-        if (smooth_first) {
+        // ---- InfeasiblePolicy::Blend — ONE SLIDER, BOTH AXES AT ONCE ---------
+        // The other four spend one axis to EXHAUSTION before touching the other,
+        // which is why an infeasible segment arrives as a straight line: alpha
+        // is driven to 1 (the chord) rather than to whatever it actually needed.
+        //
+        // This walks a RAY instead. A single sacrifice scalar s in [0,1] moves
+        // BOTH axes together, in a ratio the slider sets:
+        //     shape loss      alpha(s)     = s * blend * k
+        //     amplitude loss  (1 - f)/2    = s * (1 - blend) * k
+        // and the search returns the SMALLEST s that is legal. Degradation is
+        // therefore proportional and continuous — a segment that is 10% over
+        // gives up about 10% of the ray, not 100% of one axis.
+        //
+        // THE RAY MUST REACH THE BOX EDGE, AND `k` IS WHAT MAKES IT. Without it
+        // (0.9.0) the two losses were `s*blend` and `s*(1-blend)`, so s = 1 landed
+        // on the straight LINE BETWEEN the corners rather than on a corner — at
+        // blend 0.5 the search exhausted itself at alpha 0.5 / f 0.0, an interior
+        // point, with half of BOTH budgets still unspent. Everything past that
+        // point fell through to the Ruckig guard, which is the flattest, latest
+        // answer available: measured on OvershootTestThrobbing, 82 of 221
+        // segments took the guard under Blend where Reshape took it twice. That
+        // is the operator's "some strokes go suddenly linear", and it was this.
+        // k = 1 / max(blend, 1 - blend) rescales the ray so s = 1 always lands on
+        // whichever box edge the direction hits first, leaving the reachable set
+        // no smaller than a sequential policy's.
+        //
+        // The endpoints are UNCHANGED by k (it is 1 at both): blend = 1 spends
+        // only smoothness (f stays 1), blend = 0 spends only amplitude (alpha
+        // stays 0, f floors at -1, the same floor findF uses). Everything between
+        // them is new, and is the whole point of the knob.
+        if (_cfg.infeasible_policy == InfeasiblePolicy::Blend) {
+            double bl = (double)_cfg.infeasible_blend;
+            bl = bl < 0.0 ? 0.0 : (bl > 1.0 ? 1.0 : bl);
+            const double kmax = bl > 1.0 - bl ? bl : 1.0 - bl;
+            const double k    = kmax > 1e-9 ? 1.0 / kmax : 1.0;
+            const int steps = asteps > fsteps ? asteps : fsteps;
+            auto at = [&](double s, double& fo, double& ao) {
+                ao = s * bl * k;
+                if (ao > 1.0) ao = 1.0;
+                double loss = s * (1.0 - bl) * k;
+                if (loss > 1.0) loss = 1.0;
+                fo = 1.0 - 2.0 * loss;
+            };
+            double fs, as;
+            at(1.0, fs, as);
+            double tc[6], tep;
+            if (budgetedTrial(p, v, a, target, vf, af, T, fs, as, tep, tc) <= 1.0) {
+                // s=1 legal (known), s=0 assumed illegal (the caller only gets
+                // here because the full-fidelity curve failed) — bisect down.
+                double lo = 0.0, hi = 1.0;
+                for (int i = 0; i < steps; i++) {
+                    const double m = 0.5 * (lo + hi);
+                    double mf, ma, mc[6], mep;
+                    at(m, mf, ma);
+                    if (budgetedTrial(p, v, a, target, vf, af, T, mf, ma, mep, mc) <= 1.0)
+                        hi = m;
+                    else
+                        lo = m;
+                }
+                at(hi, fs, as);
+                adopted_worst = budgetedTrial(p, v, a, target, vf, af, T, fs, as, ep, c);
+                if (adopted_worst <= 1.0) {
+                    adopted_alpha = as;
+                    adopted_f     = fs;
+                    found         = true;
+                }
+            }
+            // Not found here falls through to the Ruckig guard below, exactly as
+            // the sequential policies do when both axes are spent.
+            //
+            // A SECOND SWEEP OF SMOOTHNESS AT FULL AMPLITUDE WAS TRIED HERE AND
+            // REJECTED, not merely skipped: `findAlpha(1.0, 1.0)` before
+            // conceding does find more legal shapes, and they are worse ones.
+            // Measured 2026-07-30 at window 50-150, guard 1, whole shelf —
+            // InterpTest1 per-segment excursion 0.23 -> 3.42 mm max and sender
+            // rms 2.08 -> 4.20, GoogleCat 0.16 -> 1.15 mm. A curve that satisfies
+            // the guard against its OWN band can still hand the next segment a
+            // boundary state that does not, and taking it costs the deadline
+            // honesty the guard path at least keeps.
+        } else if (smooth_first) {
             // Spend SMOOTHNESS up to the budget at full amplitude; if that is
             // not enough, hold smoothness AT the budget and spend amplitude.
             found = findAlpha(budget, 1.0);
@@ -2159,6 +2467,24 @@ private:
         const double vc = _cfg.limits.vmax, ac = _cfg.limits.amax,
                      jc = _cfg.limits.jmax;
         double worst = 0.0;
+        // ---- overshoot-guard preamble (all no-ops when the guard is off) ----
+        // The band is this trial's OWN endpoints — c[0] and the curve at tau = 1,
+        // i.e. the sum of the coefficients — so a shortened or smoothed candidate
+        // is judged against the stroke it actually draws.
+        //
+        // The ALLOWANCE is not recomputed here. It belongs to the commit, not to
+        // the trial: it is the excursion physics forces on the move from the
+        // machine's entry state, which every candidate in a bisection shares.
+        // Recomputing it per trial would also mean a Ruckig solve inside the
+        // innermost loop of three different searches. See _oshoot_allow.
+        double oshoot_lo = 0.0, oshoot_hi = 0.0;
+        const double oshoot_allow = _oshoot_allow;
+        if (oshoot_allow >= 0.0) {
+            double p_end = 0.0;
+            for (int k = 0; k < 6; k++) p_end += c[k];
+            oshoot_lo = std::fmin(c[0], p_end);
+            oshoot_hi = std::fmax(c[0], p_end);
+        }
         for (int i = 0; i <= kScanSteps; i++) {
             const double tau = (double)i / kScanSteps;
             const double pp = ((((c[5]*tau + c[4])*tau + c[3])*tau + c[2])*tau + c[1])*tau + c[0];
@@ -2168,10 +2494,37 @@ private:
             worst = std::fmax(worst, std::fabs(vv) / vc);
             worst = std::fmax(worst, std::fabs(aa) / ac);
             worst = std::fmax(worst, std::fabs(jj) / jc);
-            // window with a small grace band — the sampler clamp flattens
-            // tiny bulges; a real excursion goes to the guard
-            if (pp < -0.02) worst = std::fmax(worst, 1.0 + (-0.02 - pp));
-            if (pp >  1.02) worst = std::fmax(worst, 1.0 + (pp - 1.02));
+            // WINDOW, WITH NO GRACE BAND. This carried ±0.02 on the premise
+            // that "the sampler clamp flattens tiny bulges". The clamp flattens
+            // POSITION; it does not flatten VELOCITY, so a plan permitted to
+            // bulge past the rail arrives there still driving outward and hands
+            // the follower momentum it must then absorb. Measured on the
+            // async-tune bench (GoogleCat, 2026-07-30): 69 samples with the
+            // setpoint pinned at the top rail while the plan still drove
+            // outward, worst +217 mm/s — the first link of a chain that ended
+            // in 625 mm of travel on a 500 mm rail.
+            //
+            // 0.02 was also 12x LOOSER than MotionArbiter's own 0.5 mm
+            // definition of "outside the window", so the two halves of the
+            // machine disagreed about where the wall was.
+            if (pp < 0.0) worst = std::fmax(worst, 1.0 + (-pp));
+            if (pp > 1.0) worst = std::fmax(worst, 1.0 + (pp - 1.0));
+            // ---- OVERSHOOT GUARD (Config::overshoot_guard) ------------------
+            // The plan must stay inside the band its own endpoints describe,
+            // give or take the distance its momentum forces.
+            //
+            // BOTH SIDES, and that is the correction that made this work at
+            // all: the first cut guarded only travel PAST the endpoint in the
+            // direction of motion, and the measured pathology is the opposite
+            // — a plan starting at 186.8 mm and targeting 100 mm arcs UP to
+            // 305 mm, traveling AWAY from its target before turning. That is a
+            // backswing, not an overshoot, and a one-sided test scores it
+            // negative and waves it through.
+            if (oshoot_allow >= 0.0) {
+                const double excess = std::fmax(oshoot_lo - pp, pp - oshoot_hi);
+                if (excess > oshoot_allow)
+                    worst = std::fmax(worst, 1.0 + (excess - oshoot_allow));
+            }
         }
         return worst;
     }
@@ -2214,6 +2567,48 @@ private:
             if (pp >  1.02) worst = std::fmax(worst, 1.0 + (pp - 1.02));
         }
         return worst;
+    }
+
+    // THE OVERSHOOT GUARD'S REFERENCE: how far outside the commanded band the
+    // machine travels when it is trying its hardest not to. The TIME-OPTIMAL
+    // plan brakes with every bit of authority there is, so whatever excursion
+    // survives it is the excursion this move physically costs — jerk ceiling,
+    // velocity ceiling, requested arrival velocity and all. Anything beyond it
+    // is the polynomial's invention, and that is exactly the line the guard
+    // needs to draw.
+    //
+    // MEASURING BEATS THE CLOSED FORM because the closed form is wrong by the
+    // jerk term (see Config::overshoot_guard for the 6.4 mm vs ~15 mm case that
+    // made the old knob actively harmful). It is also self-correcting: a machine
+    // with more jerk authority gets a tighter allowance with nothing to retune.
+    //
+    // ONE Ruckig solve per waveform commit, on the same input the bad-move bridge
+    // already probes. Returns < 0 when Ruckig has no opinion, which disarms the
+    // guard for that segment rather than inventing a bound.
+    double physicalBandExcess(double p, double v, double a, double target,
+                              double vf) {
+        ruckig::InputParameter<1> in;
+        in.current_position[0]     = p;
+        in.current_velocity[0]     = v;
+        in.current_acceleration[0] = a;
+        in.target_position[0]      = target;
+        in.target_velocity[0]      = vf;
+        in.target_acceleration[0]  = 0.0;
+        in.max_velocity[0]         = _cfg.limits.vmax;
+        in.max_acceleration[0]     = _cfg.limits.amax;
+        in.max_jerk[0]             = _cfg.limits.jmax;
+        ruckig::Trajectory<1> traj;
+        if ((int)_calc.calculate(in, traj) < 0) return -1.0;
+        const double dur = traj.get_duration();
+        if (!(dur > 0.0) || !std::isfinite(dur)) return -1.0;
+        const double lo = std::fmin(p, target), hi = std::fmax(p, target);
+        double ex = 0.0;
+        for (int i = 0; i <= kScanSteps; i++) {
+            double pp, vv, aa;
+            traj.at_time(dur * (double)i / kScanSteps, pp, vv, aa);
+            ex = std::fmax(ex, std::fmax(lo - pp, pp - hi));
+        }
+        return ex;
     }
 
     // ---- CHASE (bare / short-interval points) -------------------------------
@@ -2326,6 +2721,32 @@ private:
             _cfg.limits.jmax > 0.0f ? (float)(jc / (double)_cfg.limits.jmax)
                                     : 1.0f;
         return true;
+    }
+
+    // TIME-OPTIMAL duration from the machine's ACTUAL state to a boundary
+    // condition, WITHOUT adopting anything. The bad-move bridge needs to know
+    // how long the move would really take before it decides whether the
+    // commanded duration is a deadline or a fiction, and planRuckig() commits
+    // to _traj as a side effect — so the probe gets its own trajectory.
+    //
+    // Returns a negative value when Ruckig refuses; callers must treat that as
+    // "no opinion" and fall through, never as "instant".
+    double timeOptimalDuration(double p, double v, double a, double target,
+                               double vf) {
+        ruckig::InputParameter<1> in;
+        in.current_position[0]     = p;
+        in.current_velocity[0]     = v;
+        in.current_acceleration[0] = a;
+        in.target_position[0]      = target;
+        in.target_velocity[0]      = vf;
+        in.target_acceleration[0]  = 0.0;
+        in.max_velocity[0]         = _cfg.limits.vmax;
+        in.max_acceleration[0]     = _cfg.limits.amax;
+        in.max_jerk[0]             = _cfg.limits.jmax;
+        ruckig::Trajectory<1> traj;
+        const ruckig::Result res = _calc.calculate(in, traj);
+        if ((int)res < 0) return -1.0;
+        return traj.get_duration();
     }
 
     // The jerk ceiling a plan/probe actually runs under. A positive override is
@@ -2558,6 +2979,11 @@ private:
     // curve_families numbering; 0 = undeclared). Adopted at commitWaveform so
     // every re-solve of the same plan resolves FollowClient identically.
     uint8_t               _client_curve_family = 0;
+    // Overshoot allowance for the waveform commit IN PROGRESS, in window
+    // fractions. < 0 = the guard is not armed for this segment, which is also
+    // the resting value — it is set at the top of commitWaveform and read by
+    // quinticWorstRatio, so no other path can inherit a stale bound.
+    double                _oshoot_allow = -1.0;
 
     // Stream estimator
     bool     _est_valid = false;

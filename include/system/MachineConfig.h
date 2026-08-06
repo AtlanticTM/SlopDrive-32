@@ -26,3 +26,9 @@ void    machineBackendStore(uint8_t v);
 
 uint8_t machineHomeStyleLoad();
 void    machineHomeStyleStore(uint8_t v);
+
+// "accelreg" -- desired AIM drive ramp register 0x03, (r/min)/s. 0 = leave the
+// drive alone. Reconciled against the drive at boot, never on a hot path.
+// See docs/drive-accel-register.md.
+uint16_t machineAccelRegLoad();
+void     machineAccelRegStore(uint16_t v);

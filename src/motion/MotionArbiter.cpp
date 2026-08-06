@@ -17,10 +17,10 @@
 // ---- Planning assumption: v0 = 0 --------------------------------------------
 // _planAndDispatch's trapezoid math always assumes the carriage starts each
 // plan at rest (v0 = 0), never the true in-flight velocity.
-// FAS's getCurrentSpeed() (vendored FastAccelStepper 0.34.x) returns the
-// last SET speedInHz, not instantaneous velocity, and the vendored header
-// has no getCurrentSpeedInMilliHz() equivalent — true v0 is not observable
-// through this driver's API.
+// FAS's getCurrentSpeed() returns the last SET speedInHz, not instantaneous
+// velocity. FastAccelStepper 1.2.7 DOES expose getCurrentSpeedInMilliHz(),
+// so true v0 is observable now; wiring it in is a planned change, not a
+// blocker — the v0=0 assumption below is deliberate until then.
 // Safe because FAS retargets velocity-continuously from its own internal
 // state regardless of the v0 fed to the trapezoid math, so v0=0 only
 // affects the DERIVED accel, never the actual motion: it overestimates the

@@ -59,7 +59,10 @@ public:
     void executorTick(int64_t now_us) { _executor.onTick(now_us); }
 
     // ---- Homing -------------------------------------------------------------
-    // Refuses until Phase 4 (both homing styles land there).
+    // Sensorless, on its own task, same two-wall flow AIMServoDriver uses. The
+    // wall detector is FOLLOWING ERROR (encoder behind streamed setpoint), not
+    // motor current: the drive already reports both, and following error needs
+    // no baseline, no warm-up, and no INA228.
     bool home(int32_t home_speed_steps_s = 4000) override;
     void runHomingStep()   override {}
     bool isHomed()  const  override { return _homed; }
@@ -109,6 +112,22 @@ public:
     bool  isMoving()            override { return _executor.active(); }
     float getPosition()   const override;
     float getTargetPosition() const override;
+    // Real feedback: the drive's own absolute encoder, mapped back through the
+    // same wire mapping the setpoints go out on. Only meaningful once homed,
+    // because the mapping's zero is established there.
+    float getActualPosition() const override;
+    bool  hasActualPosition() const override;
+
+    // ---- Measured stroke ----------------------------------------------------
+    // MUST be overridden, not inherited: the base returns 0 and swallows the
+    // setter, so a driver that skips this reports "not measured" forever, and
+    // effectiveCeilingMm() silently falls back to the CONFIGURED rail. Bit us
+    // live at fw 2.4.2 (dev board sd-9vc).
+    float getMeasuredStrokeMm() const override { return _measured_stroke_mm; }
+    void  setMeasuredStrokeMm(float mm) override {
+        // Sanity bound only, never a rail clamp: measurement wins.
+        if (mm > 0.0f && mm < 2000.0f) _measured_stroke_mm = mm;
+    }
 
     // ---- Driver config ------------------------------------------------------
     // Writes the MINIMAL Modbus-mode register set (output state + torque
@@ -168,6 +187,10 @@ private:
     bool _fault_freeze_logged = false;
     bool _fault_estop_logged  = false;
 
+    // Wall-to-wall travel a real home actually measured. 0 = never measured;
+    // never persist that over a stored value (see the accessors above).
+    float _measured_stroke_mm = 0.0f;
+
     float _max_speed_mm_s = MAX_SPEED_MM_S;
     float _accel_mm_s2    = DEFAULT_ACCEL_MM_S2;
     uint8_t _blend_mode   = 1;
@@ -184,6 +207,42 @@ private:
     int32_t  _last_target_steps   = 0;
     uint32_t _last_speed_steps_s  = 0;
     uint32_t _last_accel_steps_s2 = 0;
+
+    // Last speed/accel actually written to drive regs 0x02/0x03. The drive
+    // profiles to every setpoint with these, so they ARE the user's limits.
+    // Cached because limits move on operator action, never per sample.
+    uint16_t _wire_rpm   = 0;
+    uint16_t _wire_accel = 0;
+
+    // ---- Measured-position cache --------------------------------------------
+    // Refreshed in update() (motorTask, 1 ms) so the 250 Hz telemetry sampler
+    // never takes ServoModbus's spinlock, which the Core-1 setpoint path needs.
+    float _measured_mm    = 0.0f;
+    bool  _measured_valid = false;
+
+    // ---- Homing task (mirrors AIMServoDriver's own homing task) -------------
+    // Killed from emergencyStop(); never runs concurrently with itself.
+    TaskHandle_t _homing_task = nullptr;
+    int32_t      _home_speed_counts_s = 0;
+    static void  _homingTaskImpl(void* param);
+    // Kill any running homing task. MUST be called by anything that declares
+    // the machine homed or stopped: the task writes the executor directly,
+    // bypassing the _homed gate that keeps the arbiter out, so a survivor
+    // fights whatever writes next.
+    void         _killHomingTask();
+    void         _homingTask();
+    // Streams one slow constant-velocity sweep until following error latches
+    // or the search bound is exhausted. dir_sign: -1 front, +1 rear.
+    bool         _sweepToWall(int8_t dir_sign);
+    // home_style 1: hand the whole cycle to the drive (reg 0x19 = 1) and watch
+    // the encoder for start-then-settle. The executor MUST be unseeded first
+    // or its keep-alive fights the drive's own motion.
+    bool         _driveHome();
+    // Put the drive back into Modbus position mode and re-seat what setting
+    // reg 0x00 clobbers. Safe from any task: queue writes only, no delays.
+    void         _rearmModbus();
+    // Blocking point move through the executor, homing context only.
+    void         _moveAndWait(float target_counts, uint32_t timeout_ms);
 
     // ---- INA228 current sensor (identical pattern to AIMServoDriver) --------
     CurrentSensor _current;

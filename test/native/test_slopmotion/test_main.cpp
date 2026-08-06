@@ -38,6 +38,17 @@ Config testConfig() {
     cfg.limits.vmax = 2.0f;
     cfg.limits.amax = 20.0f;
     cfg.limits.jmax = 300.0f;
+    // PINNED, not inherited. Every measured number in this file was taken under
+    // Reshape, so leaving the policy at whatever the product default happens to
+    // be makes these tests re-target themselves the day that default moves —
+    // which is exactly what happened when it became Stretch (2026-07-30). A
+    // fixture must not depend on a default it is not the test of; the policy
+    // comparisons below set their own policy explicitly and are unaffected.
+    cfg.infeasible_policy = InfeasiblePolicy::Reshape;
+    // Same rule, second default: every number below predates the overshoot
+    // guard, and the guard changes which shapes are legal at all. Tests that ARE
+    // about the guard arm it themselves.
+    cfg.overshoot_guard = 0.0f;
     return cfg;
 }
 
@@ -63,6 +74,7 @@ Config operatorConfig() {
     cfg.limits.vmax = 5.0f;       // 1000 mm/s  / 200 mm
     cfg.limits.amax = 250.0f;     // 50000 mm/s² / 200 mm
     cfg.limits.jmax = 10000.0f;   // 2e6 mm/s³   / 200 mm
+    cfg.overshoot_guard = 0.0f;   // pinned — see testConfig()
     return cfg;
 }
 
@@ -166,6 +178,7 @@ Band runChain(const ChainOpts& o) {
     cfg.limits.jmax = 10000.0f;
     cfg.infeasible_policy   = o.pol;
     cfg.infeasible_soften   = o.soften;
+    cfg.overshoot_guard     = 0.0f;    // pinned — see testConfig()
     cfg.wave_centering      = o.centering;
     cfg.wave_centering_gain = o.gain;
     Engine e(cfg, (float)o.lo);
@@ -2739,4 +2752,97 @@ TEST_CASE("M7a: softened plans stay legal — the search cannot pick an illegal 
         CHECK(worstFor(InfeasiblePolicy::Reshape, ev, ms) <= kCeilTol);
         CHECK(worstFor(InfeasiblePolicy::Stretch, ev, ms) <= kCeilTol);
     }
+}
+
+// ---- OVERSHOOT GUARD (Config::overshoot_guard) -------------------------------
+// The defect: a segment whose commanded duration is long relative to what the
+// move needs, entered at speed. A fixed duration plus fixed endpoints uniquely
+// determines a Hermite curve, so the excess time is spent as EXCURSION — the
+// carriage sails far past the target and comes back. Nothing in the ceiling scan
+// sees it: the plan is inside vmax, amax, jmax and the stroke window the whole
+// way.
+
+// Excursion outside [p_start, target] over the segment's own life, in window
+// fractions. The bench's seg_over_* metric, in the one place a unit test can
+// hold the whole thing still.
+double bandExcursion(Engine& e, double p_start, double target, uint64_t t0_us,
+                     uint64_t t1_us) {
+    const double lo = std::min(p_start, target), hi = std::max(p_start, target);
+    double ex = 0.0;
+    for (uint64_t t = t0_us; t <= t1_us; t += kMs) {
+        const double p = e.positionAt(t);
+        ex = std::max(ex, std::max(lo - p, p - hi));
+    }
+    return ex;
+}
+
+TEST_CASE("Overshoot guard: a long deadline on a short move must not arc") {
+    // 0.30 -> 0.72 at speed, then "be at 0.70 in 900 ms" — 0.02 of travel with
+    // the carriage still moving. Unguarded, the only curve satisfying those
+    // boundary conditions over 900 ms leaves the band by a wide margin.
+    auto runOne = [](float guard, double& ex_out, double& reach_out) {
+        auto cfg = operatorConfig();
+        cfg.overshoot_guard = guard;
+        Engine e(cfg, 0.30f);
+        Command a;
+        a.target = 0.72f; a.duration_us = 120 * (uint32_t)kMs; a.has_duration = true;
+        a.end_vel = 1.0f; a.has_end_vel = true;
+        REQUIRE(e.commit(a, 0));
+        const double p0 = e.positionAt(120 * kMs);
+        Command b;
+        b.target = 0.70f; b.duration_us = 900 * (uint32_t)kMs; b.has_duration = true;
+        REQUIRE(e.commit(b, 120 * kMs));
+        ex_out = bandExcursion(e, p0, 0.70, 120 * kMs, 1020 * kMs);
+        reach_out = e.positionAt(1020 * kMs);
+    };
+
+    double ex_off = 0, ex_on = 0, reach_off = 0, reach_on = 0;
+    runOne(0.0f, ex_off, reach_off);
+    runOne(1.0f, ex_on, reach_on);
+    MESSAGE("overshoot guard: off " << ex_off * kSpanMm << " mm excursion, on "
+            << ex_on * kSpanMm << " mm");
+
+    // The defect is present and large without the guard.
+    CHECK(ex_off > 0.05);                     // > 10 mm on the 200 mm window
+    // ...and the guard cuts it by more than half, without losing the endpoint.
+    CHECK(ex_on < ex_off * 0.5);
+    CHECK(reach_on == doctest::Approx(0.70).epsilon(0.02));
+}
+
+TEST_CASE("Overshoot guard: MONOTONE in its own value, and inert at 0") {
+    // The 0.9.0 guard was not: it sized its allowance with v0^2/(2*amax), a
+    // closed form that ignores the jerk ceiling, so it was ~2.3x too strict and
+    // scored WORSE at 1 than at 2. The allowance is measured now
+    // (physicalBandExcess), and a looser slack factor must never buy a tighter
+    // excursion.
+    auto excursionAt = [](float guard) {
+        auto cfg = operatorConfig();
+        cfg.overshoot_guard = guard;
+        Engine e(cfg, 0.30f);
+        Command a;
+        a.target = 0.72f; a.duration_us = 120 * (uint32_t)kMs; a.has_duration = true;
+        a.end_vel = 1.0f; a.has_end_vel = true;
+        REQUIRE(e.commit(a, 0));
+        const double p0 = e.positionAt(120 * kMs);
+        Command b;
+        b.target = 0.70f; b.duration_us = 900 * (uint32_t)kMs; b.has_duration = true;
+        REQUIRE(e.commit(b, 120 * kMs));
+        return bandExcursion(e, p0, 0.70, 120 * kMs, 1020 * kMs);
+    };
+    double prev = -1.0;
+    for (float g : {0.5f, 1.0f, 2.0f, 4.0f, 8.0f}) {
+        const double ex = excursionAt(g);
+        CHECK(ex >= prev - 1e-9);             // never tightens as slack grows
+        prev = ex;
+    }
+    // 0 is off, byte for byte: the same plan the pre-guard engine adopted.
+    auto cfg = operatorConfig();
+    Engine a(cfg, 0.30f), b(cfg, 0.30f);
+    cfg.overshoot_guard = 0.0f;
+    Command c;
+    c.target = 0.90f; c.duration_us = 200 * (uint32_t)kMs; c.has_duration = true;
+    REQUIRE(a.commit(c, 0));
+    REQUIRE(b.commit(c, 0));
+    for (uint64_t t = 0; t <= 200 * kMs; t += kMs)
+        CHECK(a.positionAt(t) == doctest::Approx(b.positionAt(t)).epsilon(1e-12));
 }

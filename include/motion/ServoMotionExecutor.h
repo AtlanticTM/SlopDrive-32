@@ -13,8 +13,8 @@ class ServoModbus;
 // Constraints:
 //   The executor is the "ISR" for Modbus-mode motion: callers move a target
 //   via track(), and onTick() integrates its own (pos, vel, acc) state
-//   toward that target every tick under vmax/amax/jmax, streaming FC 0x10
-//   incremental deltas.
+//   toward that target every tick under vmax/amax/jmax, streaming FC 0x7B
+//   absolute setpoints.
 class IServoExecutor {
 public:
     virtual ~IServoExecutor() = default;
@@ -55,10 +55,10 @@ public:
 // ---- StreamedSetpointExecutor -----------------------------------------------
 // track() moves the target; onTick() (every servoBusTask tick, 2ms) integrates
 // this executor's own (pos, vel, acc) toward it under vmax/amax/jmax and
-// streams the result as FC 0x10 incremental position deltas via
-// ServoModbus::sendPositionDelta(). Idle (done or frozen) drops to a
-// keep-alive cadence, re-sending a zero delta — both "the drive holds last
-// commanded position if we stop talking" and a passive bus-liveness probe.
+// streams the result as FC 0x7B ABSOLUTE setpoints via
+// ServoModbus::sendSetpoint(). Idle (done or frozen) drops to a keep-alive
+// cadence that re-states the SAME absolute position, so a lost frame costs
+// latency and never position.
 //
 // Deadline-scheduled, not a fixed-phase timer: onTick() only advances its
 // "last sent" mark on an ACTUAL send, so a busy bus never drifts the schedule
@@ -77,11 +77,17 @@ public:
     void freeze() override;
     void seed(float cmd_pos) override;
 
+    // Stop transmitting entirely, back to the pre-seed state. freeze() is NOT
+    // this: it keeps re-asserting the held position on the keep-alive cadence,
+    // which would fight the drive during its own internal homing cycle. The
+    // next seed() re-establishes the mapping from wherever the shaft ended up.
+    void unseed();
+
     // ---- Jerk-limited target tracker ----------------------------------------
     // OSSM-RS parity architecture: every motion source just MOVES THE TARGET;
     // this executor glides toward it under vmax/amax/jmax limits, integrating
     // its own (pos, vel, acc) state every servoBusTask tick and streaming the
-    // result as FC 0x10 deltas. Trapezoid-per-intent sampling is not used here:
+    // result as absolute setpoints. Trapezoid-per-intent sampling is not used:
     // trapezoids carry jerk spikes at every accel transition, and a 1kHz
     // stream path re-planning a fresh trapezoid toward every interpolator
     // waypoint produces the "clocked waypoint" roughness. Doctrine framing:

@@ -8,12 +8,10 @@
 //   (OSSM-RS style). init() probes both at boot; the not-ready reprobe loop
 //   in update() keeps alternating baud so a drive appearing later at either
 //   speed is still found. baud() reports which one landed.
-// - DRIVER_AIM_SERVO builds: sendPositionDelta() (FC 0x10 incremental writes)
-//   IS the Core-1 real-time motion path, called every servoBusTask tick from
-//   ServoMotionExecutor. On the FastAccelStepper step/dir variant this module
-//   is telemetry/config-only — Modbus never touches real-time motion there.
-//   sendSetpoint() (the proprietary 0x7B absolute-setpoint frame) is plumbed
-//   in but has no caller on this device.
+// - Modbus motion backend: sendSetpoint() (FC 0x7B, absolute) IS the Core-1
+//   real-time motion path, called every servoBusTask tick from
+//   ServoMotionExecutor, and only after armMotionControl(). In FAS step/dir
+//   mode this module is telemetry/config-only and reg 0x00 MUST stay 0.
 // - Frame format per reference/AIM_servo_modbus_reference.md: 8N1 @ 19200 or 115200,
 //   slave addr 1, values 16-bit two's-complement for signed fields, CRC16
 //   polynomial 0xA001.
@@ -27,6 +25,7 @@
 #include <HardwareSerial.h>
 #include <algorithm>
 
+#include "config_api.h"     // arm-sequence register values only
 #include "sloplog/sloplog.h"
 
 // ---- Constructor / destructor -----------------------------------------------
@@ -244,43 +243,33 @@ bool ServoModbus::sendSetpoint(int32_t pos_counts) {
     return true;
 }
 
-bool ServoModbus::sendPositionDelta(int32_t delta_counts) {
-    if (!_ready || _rx_state != RxState::IDLE) return false;
+// ---- Modbus motion arming (reg 0x00) ----------------------------------------
+// BLOCKING. Sequence and settle time are OSSM-RS's, confirmed on this drive:
+// reg 0x00 = 1 hands position control to Modbus and RESETS 0x02 and 0x18 to
+// defaults, so an armed-but-never-re-seated drive accepts 0x7B frames and does
+// not move. That is exactly how 0x7B got recorded as bench-dead.
 
-    while (_port.available()) _port.read();
+void ServoModbus::armMotionControl() {
+    if (!_ready) return;
+    sendWriteCommand(0x00, 1);
+    delay(800);                       // init context only; drive settle time
+    sendWriteCommand(0x02, AIM_MODBUS_ARM_SPEED_RPM);   delay(20);
+    sendWriteCommand(0x03, _accel_ovr ? _accel_ovr : AIM_MODBUS_ARM_ACCEL);
+    delay(20);
+    sendWriteCommand(0x05, AIM_MODBUS_ARM_SPEED_P);     delay(20);
+    sendWriteCommand(0x07, AIM_MODBUS_ARM_POS_P);       delay(20);
+    sendWriteCommand(0x18, AIM_MODBUS_STANDSTILL_MAX);  delay(20);
+    SLOGI("servobus", "ServoModbus: motion ARMED (0x00=1, gains re-seated) :3");
+}
 
-    // FC 0x10, start 0x000C, 2 registers, 4 data bytes: low word then high
-    // word — the byte order the drive expects for this register pair.
-    uint32_t d  = (uint32_t)delta_counts;
-    uint16_t lw = (uint16_t)(d & 0xFFFF);
-    uint16_t hw = (uint16_t)((d >> 16) & 0xFFFF);
-
-    uint8_t req[13];
-    req[0]  = _addr;
-    req[1]  = 0x10;
-    req[2]  = 0x00; req[3]  = 0x0C;        // start reg
-    req[4]  = 0x00; req[5]  = 0x02;        // count 2
-    req[6]  = 0x04;                        // byte count
-    req[7]  = (lw >> 8) & 0xFF; req[8]  = lw & 0xFF;
-    req[9]  = (hw >> 8) & 0xFF; req[10] = hw & 0xFF;
-    uint16_t crc = crc16(req, 11);
-    req[11] = crc & 0xFF;
-    req[12] = (crc >> 8) & 0xFF;
-
-    _port.write(req, 13);
-    _port.flush();
-
-    _sp_sent++;
-    _sp_last_fc = 0x10;
-
-    if (_sp_noecho) return true;           // no-echo mode still honored
-
-    // Standard FC 0x10 reply: [addr][0x10][startHi][startLo][cntHi][cntLo][crc]
-    _rx_expected  = 8;
-    _pending_kind = PendingKind::SETPOINT;
-    _rx_start_ms  = millis();
-    _rx_state     = RxState::WAITING;
-    return true;
+// BEST-EFFORT, never a guarantee: this drive ACKS 0x00 = 0 and keeps reading 1
+// (sd-opb, measured). Only a drive power cycle clears it. Callers must not
+// treat a return from here as proof that step/dir is live; the reg-0x00 poll in
+// main.cpp's httpTask loop is what reports the truth.
+void ServoModbus::releaseMotionArm() {
+    if (!_ready) return;
+    sendWriteCommand(0x00, 0);
+    SLOGI("servobus", "ServoModbus: 0x00 = 0 write sent (release attempt, not confirmed).");
 }
 
 // ---- Lifecycle --------------------------------------------------------------
@@ -428,6 +417,18 @@ void ServoModbus::update() {
         //    the count under the mux; if there's work AND spacing allows,
         //    snapshot the head op + advance/pop under the mux, THEN do the
         //    wire write outside it — never hold the spinlock across UART.
+        // 0. Pending reg 0x03 override. ONE write, no arming, either backend.
+        //    NEVER precede this with 0x00 = 1: that makes the drive ignore step
+        //    pulses and cannot be undone over Modbus (sd-opb).
+        //    See docs/drive-accel-register.md.
+        if (_accel_ovr_req) {
+            _accel_ovr_req = false;
+            const uint16_t v = _accel_ovr;
+            queueWrite(0x03, v, 2);
+            requestConfigScan();      // verify by readback, never by the echo
+            SLOGI("servobus", "ServoModbus: reg 0x03 -> %u :3", (unsigned)v);
+        }
+
         portENTER_CRITICAL(&_mux);
         size_t wq_count = _wq_count;
         portEXIT_CRITICAL(&_mux);
@@ -479,7 +480,27 @@ void ServoModbus::update() {
         //    fallback mode with slot 9 as the HI half).
         if (now - _last_poll_ms < POLL_INTERVAL_MS) return;
         _last_poll_ms = now;
-        if (_reg_idx < POLL_REG_COUNT) {
+        // On-demand distance-to-go, ahead of the rotation and cleared on send:
+        // homing needs it promptly, and nothing else asks for it at all.
+        if (_rem_req) {
+            _rem_req      = false;
+            _rx_expected  = sendReadRequest(REG_REM_LO, 2);
+            _pending_kind = PendingKind::REMAINING;
+            _rx_start_ms  = now;
+            _rx_state     = RxState::WAITING;
+            return;
+        }
+        // Modbus motion backend: the encoder is the feedback plane, so it takes
+        // every other slot instead of one in nine. _reg_idx is left alone on
+        // those reads, so the telemetry cycle still completes at half rate.
+        // Pair mode only; the single-read fallback uses _reg_idx as its own
+        // LO/HI state and cannot be interleaved.
+        bool enc_slot = (_reg_idx >= POLL_REG_COUNT);
+        if (!enc_slot && _enc_fast && !_enc_single_mode) {
+            _enc_alt = !_enc_alt;
+            enc_slot = _enc_alt;
+        }
+        if (!enc_slot) {
             _rx_expected  = sendReadRequest(POLL_REGS[_reg_idx], 1);
             _pending_kind = PendingKind::TELE;
         } else if (!_enc_single_mode) {
@@ -538,7 +559,8 @@ void ServoModbus::update() {
                         _enc_single_mode = true;
                         SLOGW("servobus", "ServoModbus: drive ignores 2-reg reads — encoder falls back to single-register LO/HI");
                     }
-                    _reg_idx = 0;   // skip the encoder this cycle
+                    // Only the end-of-cycle slot wraps (see the success path).
+                    if (_reg_idx >= POLL_REG_COUNT) _reg_idx = 0;
                 } else if (_pending_kind == PendingKind::ENC_LO ||
                            _pending_kind == PendingKind::ENC_HI) {
                     _reg_idx = 0;   // abort — never pair a stale LO with a late HI
@@ -571,6 +593,17 @@ void ServoModbus::update() {
             break;
         }
 
+        // Distance-to-go pair. Never touches _reg_idx: it is an out-of-band
+        // read, not a rotation slot, so it must not disturb the cycle.
+        if (_pending_kind == PendingKind::REMAINING) {
+            uint16_t pair[2] = {0, 0};
+            if (tryReadResponse(pair, 2)) {
+                _commitRemaining((int32_t)(((uint32_t)pair[1] << 16) | pair[0]), now);
+            }
+            _rx_state = RxState::IDLE;
+            break;
+        }
+
         // Encoder pair (count=2) responses carry two registers — handle first.
         if (_pending_kind == PendingKind::ENC_PAIR) {
             uint16_t pair[2] = {0, 0};
@@ -578,8 +611,11 @@ void ServoModbus::update() {
                 _enc_pair_fails = 0;
                 _commitEncoder((int32_t)(((uint32_t)pair[1] << 16) | pair[0]), now);
             }
-            // Garbled frame: just skip — the next cycle retries in ~25ms.
-            _reg_idx  = 0;
+            // Garbled frame: just skip, the next cycle retries in ~25ms.
+            // Only the END-OF-CYCLE encoder slot wraps the rotation; an
+            // interleaved priority read must leave _reg_idx mid-cycle or the
+            // telemetry registers past index 0 are never polled again.
+            if (_reg_idx >= POLL_REG_COUNT) _reg_idx = 0;
             _rx_state = RxState::IDLE;
             break;
         }
@@ -674,6 +710,14 @@ void ServoModbus::_commitEncoder(int32_t counts, uint32_t now) {
     portEXIT_CRITICAL(&_mux);
 }
 
+void ServoModbus::_commitRemaining(int32_t counts, uint32_t now) {
+    portENTER_CRITICAL(&_mux);
+    _telemetry.rem_valid    = true;
+    _telemetry.rem_counts   = counts;
+    _telemetry.rem_stamp_ms = now;
+    portEXIT_CRITICAL(&_mux);
+}
+
 // ---- reprogramBaud() — OSSM-RS magic sequence, blocking, init-context only --
 // Same "no RTOS tasks yet" exception as init()/readRegisterBlocking(): this
 // touches the port and the low-level send/receive helpers directly, bypassing
@@ -698,14 +742,13 @@ bool ServoModbus::reprogramBaud(uint32_t target_baud) {
     SLOGI("servobus", "ServoModbus: reprogramBaud() — %lu -> %lu via OSSM-RS magic sequence...",
           (unsigned long)previous_baud, (unsigned long)target_baud);
 
-    // OSSM-RS magic sequence — fire-and-forget FC 0x06 writes, ~30ms gaps.
-    // NEVER write reg 0x14 (the EEPROM save flag) here — this must stay a
-    // VOLATILE runtime change so a drive power-cycle always recovers factory
-    // 19200; a botched rebaud can never permanently brick the link. Reg 0x03
-    // doubles as the magic sequence's baud-code carrier — it's normally the
-    // drive's ACCEL register, so whatever real accel value lived there may
-    // need rewriting afterward (owned by the Configure pane / handleApiServo,
-    // not this function).
+    // OSSM-RS magic sequence: fire-and-forget FC 0x06 writes, ~30ms gaps.
+    // NEVER write reg 0x14 (the EEPROM save flag) here. MEASURED, and it
+    // falsifies the older comment: a rebaud SURVIVES drive power cycles even
+    // without 0x14, so this is not a get-out-of-jail card. If the link is ever
+    // stranded, recovery is the magic sequence at the OTHER baud, not a power
+    // cycle. Reg 0x03 carries the baud code and is normally ACCEL, so the real
+    // accel value must be rewritten afterward by whoever owns it.
     sendWriteCommand(0x00, 1);
     delay(30);
     sendWriteCommand(0x03, baud_code);
@@ -910,6 +953,45 @@ void ServoModbus::setSpeed(uint16_t rpm) {
 void ServoModbus::setAccel(uint16_t rpm_s) {
     if (!_ready) return;
     sendWriteCommand(0x03, rpm_s);
+}
+
+// Clamped to the register's own documented range (manual v2.55 p11). Dropping
+// to 0 hands 0x03 back to the motion path, which rewrites it on its next
+// limit change, so no restore write is issued here.
+void ServoModbus::setAccelRegOverride(uint16_t value) {
+    _accel_ovr     = (value > 60098) ? 60098 : value;
+    _accel_ovr_req = (_accel_ovr != 0);
+}
+
+// Reg 0x14 is the drive's own save flag: 0 idle, 1 saving, 2 done. So a save
+// reports its own completion and needs no power cycle to verify.
+ServoModbus::AccelCommit ServoModbus::reconcileAccelReg(uint16_t desired) {
+    if (!_ready || desired == 0) return AccelCommit::AlreadyMatches;
+    if (desired > 60098) desired = 60098;
+
+    uint16_t cur = 0;
+    if (!readRegisterBlocking(0x03, cur)) return AccelCommit::Failed;
+    if (cur == desired) return AccelCommit::AlreadyMatches;
+
+    // Unarmed first. 0x03 takes a write with 0x00 = 0 (measured), and if 0x14
+    // does too then nothing ever has to arm, which is the whole point.
+    sendWriteCommand(0x03, desired);  delay(120);
+    sendWriteCommand(0x14, 1);        delay(2500);
+    uint16_t sav = 0, back = 0;
+    readRegisterBlocking(0x14, sav);
+    readRegisterBlocking(0x03, back);
+    if (back == desired && sav == 2) return AccelCommit::SavedUnarmed;
+
+    // Fallback. 0x00 = 1 is a ONE-WAY DOOR on this drive (sd-opb): it cannot be
+    // cleared over Modbus and the drive ignores step/dir until a POWER CYCLE.
+    // Taken only because the operator asked for the value to persist.
+    sendWriteCommand(0x00, 1);        delay(300);
+    sendWriteCommand(0x03, desired);  delay(120);
+    sendWriteCommand(0x14, 1);        delay(2500);
+    readRegisterBlocking(0x14, sav);
+    readRegisterBlocking(0x03, back);
+    if (back != desired) return AccelCommit::Failed;
+    return AccelCommit::SavedArmed;
 }
 
 void ServoModbus::setDirPolarity(bool invert) {

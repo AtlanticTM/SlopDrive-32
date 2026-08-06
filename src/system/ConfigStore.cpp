@@ -10,6 +10,7 @@
 //   regardless of the checksum result.
 
 #include "ConfigStore.h"
+#include "slopmotion/slopmotion.hpp"   // kInfeasiblePolicyMax: the clamp bound has one home
 
 #include <Preferences.h>
 #include "sloplog/sloplog.h"
@@ -315,7 +316,7 @@ void ConfigStore::load(SystemState& state, RangeMapper& mapper, MotorDriver& mot
         state.sm_tune_aim_extrap  = prefs.getUChar("sm_aim",   state.sm_tune_aim_extrap ? 1 : 0) != 0;
         state.sm_tune_handoff_k   = clf(prefs.getFloat("sm_hk", state.sm_tune_handoff_k), 0.0f, 8.0f);
         state.sm_tune_curve_policy  = (uint8_t)clu(prefs.getUChar("sm_curve", state.sm_tune_curve_policy), 0, 2);
-        state.sm_tune_infeas_policy = (uint8_t)clu(prefs.getUChar("sm_ipol",  state.sm_tune_infeas_policy), 0, 4);
+        state.sm_tune_infeas_policy = (uint8_t)clu(prefs.getUChar("sm_ipol",  state.sm_tune_infeas_policy), 0, slopmotion::kInfeasiblePolicyMax);
         state.sm_tune_infeas_margin = clf(prefs.getFloat("sm_imarg", state.sm_tune_infeas_margin), 0.5f, 1.0f);
         state.sm_tune_smooth_budget = clf(prefs.getFloat("sm_sbud",  state.sm_tune_smooth_budget), 0.0f, 1.0f);
         state.sm_tune_amp_budget    = clf(prefs.getFloat("sm_abud",  state.sm_tune_amp_budget), 0.0f, 1.0f);

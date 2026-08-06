@@ -93,6 +93,8 @@ public:
     bool  isMoving()            override { return d().isMoving(); }
     float getPosition()   const override { return d().getPosition(); }
     float getTargetPosition() const override { return d().getTargetPosition(); }
+    float getActualPosition() const override { return d().getActualPosition(); }
+    bool  hasActualPosition() const override { return d().hasActualPosition(); }
 
     // ---- Driver config ------------------------------------------------------
     void applyDriverConfig(const DriverConfig& cfg) override { d().applyDriverConfig(cfg); }

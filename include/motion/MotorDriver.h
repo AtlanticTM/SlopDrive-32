@@ -131,6 +131,12 @@ public:
     virtual float getPosition()   const = 0;
     virtual float getTargetPosition() const = 0;
 
+    // Where the shaft PHYSICALLY is, mm, for backends with real feedback.
+    // Default is the commanded position: an open-loop backend has nothing
+    // else, and returning a lie is worse than returning the known model.
+    virtual float getActualPosition() const { return getPosition(); }
+    virtual bool  hasActualPosition() const { return false; }
+
     // ---- Driver config ------------------------------------------------------
     virtual void applyDriverConfig(const DriverConfig& cfg) = 0;
 

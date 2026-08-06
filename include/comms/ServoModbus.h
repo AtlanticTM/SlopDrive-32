@@ -54,6 +54,16 @@ struct ServoTelemetry {
     bool     enc_valid    = false;
     int32_t  enc_counts   = 0;
     uint32_t enc_stamp_ms = 0;    // millis() when this sample committed
+
+    // ---- Distance-to-go (regs 0x0C/0x0D) ------------------------------------
+    // Signed 32-bit STEPS REMAINING to the drive's current target: its own
+    // following error, and the arrival signal ossm-rs polls
+    // (|remaining| < threshold == move complete). NOT a stale move target,
+    // which is what this pair was documented as here until 2026-08-04.
+    // On-demand only, via requestRemaining().
+    bool     rem_valid    = false;
+    int32_t  rem_counts   = 0;
+    uint32_t rem_stamp_ms = 0;
 };
 
 // ---- Full config-register mirror (regs 0x00..0x19) --------------------------
@@ -154,6 +164,24 @@ public:
     void setDirPolarity(bool invert); // reg 0x09 (0=active-low, 1=active-high)
     void saveToFlash();            // reg 0x14
 
+    // Reg 0x03 override in (r/min)/s. 0 = auto; nonzero PINS the register and
+    // every other 0x03 writer must defer to it. Applied from update(), so it
+    // is safe to call from any task, and it is ONE write on either backend:
+    // never arm the drive to set it. See docs/drive-accel-register.md.
+    void     setAccelRegOverride(uint16_t value);
+    uint16_t accelRegOverride() const { return _accel_ovr; }
+
+    // Make the drive's PERSISTED 0x03 match `desired`. BLOCKING, init-context
+    // only (same exception as init()). No-op when they already agree, so an
+    // unchanged setting costs one register read and never arms anything.
+    enum class AccelCommit : uint8_t {
+        AlreadyMatches,   // nothing written
+        SavedUnarmed,     // 0x03 + 0x14 with 0x00 untouched -- step/dir still live
+        SavedArmed,       // fallback: 0x00 = 1 was needed. DRIVE IS NOW DEAF.
+        Failed,
+    };
+    AccelCommit reconcileAccelReg(uint16_t desired);
+
     // ---- Configure-pane plumbing (async, drained by update()) ---------------
     static constexpr size_t CFG_REG_COUNT = 0x1A;   // regs 0x00..0x19
 
@@ -177,13 +205,10 @@ public:
 
     uint8_t address() const { return _addr; }
 
-    // ---- Absolute-position setpoint (motion path, framing bench-tunable) ----
-    // Frame: [addr][FC][pos32][CRC16-LE], echo-validated. Default FC 0x78
-    // (OUR datasheet's "Write Target Position"); OSSM-RS's 57AIMxx generation
-    // uses 0x7B/BE — this drive ignores that entirely (bench, fw 2.1.21).
-    // Framing is runtime-tunable so the bench can find the variant's true
-    // shape without reflashing. Returns false unless the bus is ready and
-    // idle (never steps on an in-flight poll/scan/write).
+    // ---- Absolute-position setpoint: THE MOTION PATH ------------------------
+    // Frame: [addr][FC][pos32][CRC16-LE]. Absolute, so an unfinished move is
+    // corrected by the next frame instead of banked forever. Returns false
+    // unless the bus is ready and idle.
     bool sendSetpoint(int32_t pos_counts);
     void setSetpointFraming(uint8_t fc, bool le);
     void setSetpointNoEcho(bool noecho);   // BENCH ONLY — see _sp_noecho
@@ -198,18 +223,28 @@ public:
     // Drains through the ordinary write queue.
     bool queuePositionPair(int32_t counts, bool low_first = true);
 
-    // THE MOTION PATH (bench-proven fw 2.1.26): one atomic FC 0x10 write of a
-    // signed INCREMENTAL delta (encoder counts, low word in 0x0C) — the only
-    // position command this drive variant accepts (0x7B/0x78 absent, single-
-    // register 0x0C/0x0D writes rejected as torn halves). Echo-validated like
-    // sendSetpoint (standard FC 0x10 8-byte reply) so the sp_* health counters
-    // and the watchdog work. Only callable from the bus-owner task, bus IDLE.
-    bool sendPositionDelta(int32_t delta_counts);
+    // ---- Modbus motion arming (reg 0x00) ------------------------------------
+    // BLOCKING, init-context only. 0x00=1 clobbers regs 0x02 and 0x18 and needs
+    // ~800ms to settle, so gains are re-seated after. Without it the drive
+    // ACCEPTS 0x7B and does not move.
+    // ONE-WAY DOOR (sd-opb, measured): the drive acks 0x00 = 0 and keeps
+    // reading 1, so releaseMotionArm() is a best-effort write that cannot be
+    // relied on. Never arm on the step/dir backend; only a drive power cycle
+    // gets step/dir back.
+    void armMotionControl();
+    void releaseMotionArm();
 
-    // BENCH-TUNABLE setpoint stream period. Lives here (not the executor)
-    // only because the bus object is what WebUI's bench knobs can already
-    // reach — the executor reads it each tick. Clamped 4..50ms: below ~4ms
-    // the delta transaction (~4ms round-trip at 115200) can't complete.
+    // Ask for one distance-to-go sample (0x0C/0x0D). Serviced ahead of the
+    // telemetry rotation, one transaction, then cleared. Homing polls this;
+    // the steady-state motion path never does, so it costs nothing there.
+    void requestRemaining() { _rem_req = true; }
+
+    // Give the encoder pair every other poll slot instead of one in nine.
+    // Costs telemetry rate; buys a ~20Hz feedback readback. Pair mode only.
+    void setEncoderPriority(bool on) { _enc_fast = on; }
+
+    // Setpoint stream period, ms. Clamped 4..50; below 4ms the frame cannot
+    // clear the wire alongside the telemetry rotation.
     void    setSpPeriodMs(uint8_t ms) { _sp_period_ms = (ms < 4) ? 4 : (ms > 50 ? 50 : ms); }
     uint8_t spPeriodMs() const        { return _sp_period_ms; }
 
@@ -269,7 +304,7 @@ private:
     // Which kind of read is in flight — a WAITING response routes to the
     // telemetry stager, the config-scan stager, the encoder assembler, or the
     // 0x7B setpoint echo validator.
-    enum class PendingKind : uint8_t { TELE, SCAN, ENC_PAIR, ENC_LO, ENC_HI, SETPOINT };
+    enum class PendingKind : uint8_t { TELE, SCAN, ENC_PAIR, ENC_LO, ENC_HI, SETPOINT, REMAINING };
     PendingKind _pending_kind = PendingKind::TELE;
 
     // ---- Encoder position read (regs 0x16/0x17) -----------------------------
@@ -285,6 +320,13 @@ private:
     bool     _enc_single_mode = false;
     uint8_t  _enc_pair_fails  = 0;
     uint16_t _enc_lo_staged   = 0;
+    bool     _enc_fast        = false;   // see setEncoderPriority()
+    bool     _enc_alt         = false;
+
+    // ---- Distance-to-go (0x0C/0x0D), on demand ------------------------------
+    static constexpr uint16_t REG_REM_LO = 0x0C;
+    bool     _rem_req = false;   // set by requestRemaining(), cleared on send
+    void _commitRemaining(int32_t counts, uint32_t now);
 
     // Commit a freshly assembled encoder sample under the spinlock.
     void _commitEncoder(int32_t counts, uint32_t now);
@@ -301,20 +343,14 @@ private:
     uint32_t _sp_ok   = 0;
     uint16_t _sp_fail_streak = 0;
 
-    // Setpoint framing knobs (bench-tunable via setSetpointFraming()).
-    // Default: FC 0x78 = our datasheet's "Write Target Position", big-endian
-    // payload. BENCH RESULT (fw 2.1.22, live drive): 0x78 BE/LE and 0x7B
-    // BE/LE are ALL silently ignored at both bauds — this drive variant only
-    // implements FC 0x03/0x06, so the ABS framing is dead plumbing kept for
-    // other variants; the real motion path is INC mode below.
-    uint8_t _sp_fc = 0x78;
+    // FC 0x7B big-endian, proven live (docs/reversal-drift.md). Frames are
+    // only obeyed once reg 0x00 = 1; arming is ModbusServoDriver's job.
+    uint8_t _sp_fc = 0x7B;
     bool    _sp_le = false;
 
-    // FC of the setpoint transaction currently awaiting its echo — 0x10 for
-    // the delta path (the real one), _sp_fc for the legacy ABS frame. The
-    // WAITING/SETPOINT validator compares against THIS, not _sp_fc, so both
-    // senders share one echo pipeline.
-    uint8_t _sp_last_fc = 0x78;
+    // FC awaiting its echo. The validator compares THIS, never _sp_fc, which
+    // a bench knob can change while a frame is in flight.
+    uint8_t _sp_last_fc = 0x7B;
 
     // Bench-tunable stream period (see setSpPeriodMs above). Default mirrors
     // AIM_SP_PERIOD_MS in config_api.h (kept as a literal — this header stays
@@ -371,6 +407,12 @@ private:
     WriteOp  _wq[WRITE_Q_LEN];
     size_t   _wq_head = 0, _wq_count = 0;
     uint32_t _last_write_ms = 0;
+
+    // Set from any task, drained by update(). Writing config needs reg
+    // 0x00 = 1, which makes step/dir input invalid (manual v2.55 p16), so the
+    // step/dir apply is enable-set-save-disable and callers gate on standstill.
+    volatile uint16_t _accel_ovr     = 0;
+    volatile bool     _accel_ovr_req = false;
 
     // ---- Modbus primitives --------------------------------------------------
     uint16_t crc16(const uint8_t* buf, size_t len) const;

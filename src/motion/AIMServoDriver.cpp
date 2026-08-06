@@ -12,12 +12,21 @@
 #include "freertos/FreeRTOS.h"
 #include "freertos/task.h"
 #include "sloplog/sloplog.h"
+#include "soc/mcpwm_struct.h"   // MCPWM0 — prescaler repair, see init()
+#include "soc/pcnt_struct.h"    // PCNT — step-edge retime, see init()
 
 // FastAccelStepperEngine — background pulse-generation engine on ESP32. One
 // static instance shared across the whole driver. Named _fas_engine to avoid
-// shadowing MotorDriver::_engine. Runs on Core 1; generates step pulses in
-// hardware timer ISRs.
+// shadowing MotorDriver::_engine. Its task is deliberately unpinned — see
+// init(). Generates step pulses in hardware timer ISRs.
 static FastAccelStepperEngine _fas_engine;
+
+// DIR must stay a plain internal pin. FAS only takes its race-free direction
+// path -- a direct digitalWrite with nothing in flight -- when the pin is NOT
+// flagged external AND the queue is empty and stopped (fas_queue/
+// stepper_queue.cpp). The external-pin path instead hardcodes its own 500us
+// pause pair and clears the repeat flag from StepperTask while the step ISR
+// advances read_idx, which races and emits a malformed dwell.
 
 // Endstop is active LOW — the optocoupler pulls the pin LOW when the carriage
 // reaches home. HIGH = clear, LOW = triggered. Only relevant on the LEGACY
@@ -54,18 +63,119 @@ void AIMServoDriver::init() {
 
     // Initialize FastAccelStepperEngine — creates the background timer task
     // on ESP32 that generates step pulses in hardware, off the CPU.
-    _fas_engine.init();
+    // Pin StepperTask to Core 0. It runs at configMAX_PRIORITIES-1 (24), so
+    // placement is not cosmetic:
+    //   Core 1 -> preempts streamSamplerTask (prio 4) every task period, which
+    //             clumps the 1 kHz micro-targets into audible judder.
+    //   unpinned -> floats, and gets delayed behind Core 0 WiFi/BLE/WS bursts,
+    //             which shows up as intermittent motion hiccups.
+    //   Core 0 -> only outranks httpTask/comms, both jitter-tolerant, and stays
+    //             off the sampler's core. This one.
+    _fas_engine.init(0);
 
-    // Connect the stepper to the PUL pin. stepperConnectToPin() takes ONLY
-    // the step pin — direction is set separately via setDirectionPin(). A
-    // (STEP, DIR) two-arg call is NOT a valid overload; passing DIR there
-    // silently leaves the DIR pin unset and the motor can only move one way.
-    _stepper = _fas_engine.stepperConnectToPin(AIM_PIN_STEP);
+    // Refill cadence for the command queue. The library default is 4 ms, which
+    // decimates streamSamplerTask's 1 kHz micro-targets to 250 Hz before FAS
+    // ever sees them. See AIM_FAS_TASK_RATE_MS for the constraint tying this to
+    // the plan-ahead window below — the two only make sense as a pair.
+    // This is NOT the reversal dwell. That does not live in this task, and
+    // lowering the task rate will not shorten it.
+    _fas_engine.task_rate(AIM_FAS_TASK_RATE_MS);
+
+    // Connect the stepper to the PUL pin. Second arg selects the pulse backend.
+    // Both were bench-measured on this machine:
+    //   RMT   - renders ~24 entries of pulses into the peripheral ahead of
+    //           time, so a late refill ISR costs nothing. Price: DIR is written
+    //           by the CPU from that refill ISR while the already-buffered
+    //           pulses are still clocking out, so the edge lands mid-pulse on
+    //           roughly 1 reversal in 12. Nothing reachable from config closes
+    //           that window — the ISR runs ahead of the peripheral by design.
+    //   MCPWM - one command programmed at a time, nothing buffered ahead, so
+    //           the DIR edge is deterministic and can be placed. Price: zero
+    //           latency tolerance — the next command cannot start until the
+    //           completion IRQ, and every late ISR is dead air on the step pin.
+    //           That was disqualifying while the S3 also carried the network
+    //           stack; the C5 comms offload removed the jitter source.
+    // MCPWM is NOT clean out of the box — see the PCNT retime below, without
+    // which its DIR edge lands inside the widest pulse of the whole move.
+    // stepperConnectToPin() takes ONLY the step pin — direction is set
+    // separately via setDirectionPin(). A (STEP, DIR) two-arg call is NOT a
+    // valid overload; passing DIR there silently leaves the DIR pin unset and
+    // the motor can only move one way.
+    _stepper = _fas_engine.stepperConnectToPin(
+        AIM_PIN_STEP, AIM_FAS_BACKEND ? DRIVER_RMT : DRIVER_MCPWM_PCNT);
+
+    // ---- MCPWM prescaler repair (FastAccelStepper 1.2.7 + IDF 5.5, S3) ------
+    // Upstream bug, not a local misconfiguration. FAS asks mcpwm_new_timer()
+    // for resolution_hz = TICKS_PER_S, so IDF sizes the TIMER prescaler against
+    // ITS OWN group resolution -- then FAS overwrites the GROUP prescaler
+    // directly (clk_cfg.clk_prescale = 4). The two halves no longer compose and
+    // the timer base is wrong, which is uniformly slow motion (bench 2.3.28).
+    //
+    // Required: 160 MHz PLL / (clk_prescale+1) / (timer_prescale+1) = 32 MHz.
+    // 32 and not 16 because the timer runs COUNT_MODE_UP_DOWN, which halves it
+    // to the 16 MHz that TICKS_PER_S assumes.
+    //
+    // One stepper => FAS allocates group 0 / timer 0. Revisit if a second
+    // stepper is ever connected. Remove once upstream composes these correctly.
+    if (_stepper && _stepper->driverType() == FasDriver::MCPWM_PCNT) {
+        const uint32_t clk_div   = MCPWM0.clk_cfg.clk_prescale + 1u;
+        const uint32_t tmr_div   = MCPWM0.timer[0].timer_cfg0.timer_prescale + 1u;
+        const uint32_t want_tmr  = 160000000u / 32000000u / clk_div;   // = 1 when clk_div == 5
+        SLOGW("aim", "MCPWM prescale before: clk=%u timer=%u -> timer base %u Hz (want 32000000)",
+              (unsigned)clk_div, (unsigned)tmr_div, (unsigned)(160000000u / clk_div / tmr_div));
+        if (want_tmr >= 1u && want_tmr != tmr_div) {
+            MCPWM0.timer[0].timer_cfg0.timer_prescale = (uint32_t)(want_tmr - 1u);
+            SLOGW("aim", "MCPWM prescale repaired: timer %u -> %u, base now %u Hz",
+                  (unsigned)tmr_div, (unsigned)want_tmr,
+                  (unsigned)(160000000u / clk_div / want_tmr));
+        }
+
+        // ---- PCNT step-edge retime — this is what places the DIR edge -------
+        // The MCPWM step pulse is 50% DUTY, not a narrow blip: HIGH at compare
+        // A on the up-count, LOW at the peak, under COUNT_MODE_UP_DOWN. PCNT's
+        // high-limit IRQ is what advances the queue, and that IRQ's first act
+        // is LL_TOGGLE_PIN(dirPin). Counting RISING edges therefore flips DIR
+        // while the last pulse of the OLD direction is still high — and a
+        // reversal is the slowest point of the ramp, so that pulse is the
+        // widest in the entire move (hundreds of us to ~2 ms of exposure).
+        // Counting FALLING edges fires the same IRQ half a period later, with
+        // the step line already idle, so DIR flips into the pause that
+        // AIM_DIR_CHANGE_DELAY_US buys. That pause is load-bearing now: it is
+        // the far side of the window the edge sits in.
+        //
+        // Not compensated for elsewhere: _getPerformedPulses now reports
+        // completed pulses rather than started ones, which is what the queue
+        // bookkeeping already assumes.
+        //
+        // Unit 0 — one stepper, and nothing else in this firmware allocates a
+        // PCNT unit. Revisit if either changes.
+        if (AIM_MCPWM_PCNT_RETIME) {
+            PCNT.conf_unit[0].conf0.ch0_pos_mode_un = 0;   // rising edge: no count
+            PCNT.conf_unit[0].conf0.ch0_neg_mode_un = 1;   // falling edge: increment
+        }
+        // WARN for the same reason as the backend line below: this is the
+        // variable the DIR ladder's rungs 2 and 3 differ by, and an INFO line
+        // is evicted from the web ring by the boot burst before a host can
+        // read it. A rung whose setting cannot be read back is unattributable.
+        SLOGW("aim", "MCPWM: PCNT step edge = %s",
+              AIM_MCPWM_PCNT_RETIME ? "FALLING (DIR flips into the dwell)"
+                                    : "rising (library default)");
+    }
 
     if (_stepper) {
+        // How far ahead the ramp generator commits the queue. The library
+        // default is 20 ms, which is 20 ms of staleness on a 1 kHz stream.
+        // On MCPWM that depth buys NOTHING: the backend programs one command
+        // at a time, so a queued backlog cannot absorb a late ISR the way RMT's
+        // peripheral buffer does. Depth is pure lag here. Must stay above
+        // AIM_FAS_TASK_RATE_MS — see that macro. Safe to call: not running yet.
+        _stepper->setForwardPlanningTimeInMs(AIM_FAS_PLAN_AHEAD_MS);
+
         // Direction pin — true = invert. Flip here (not by rewiring) if a
-        // motor swap reverses polarity again.
-        _stepper->setDirectionPin(AIM_PIN_DIR, true);
+        // motor swap reverses polarity again. Do NOT or-in PIN_EXTERNAL_FLAG —
+        // see the DIR note at the top of this file. Third arg holds DIR steady
+        // before the first step of a reversal — see AIM_DIR_CHANGE_DELAY_US.
+        _stepper->setDirectionPin(AIM_PIN_DIR, true, AIM_DIR_CHANGE_DELAY_US);
 
         // No enable pin on the 57AIM30 — always energized when powered, so
         // no enable pin is registered with FAS at all.
@@ -82,7 +192,22 @@ void AIMServoDriver::init() {
         _enabled = true;
         _stepper->setCurrentPosition(0);
 
-        SLOGI("aim", "AIMServo: FastAccelStepper initialized (PUL/DIR registered)");
+        // Report the pulse backend that FAS actually handed us. Ground truth,
+        // not intent: the PCNT retime above only applies to MCPWM_PCNT, and
+        // "it built" is not evidence that it is the one running.
+        const char* backend = "UNKNOWN";
+        switch (_stepper->driverType()) {
+            case FasDriver::MCPWM_PCNT: backend = "MCPWM_PCNT"; break;
+            case FasDriver::RMT:        backend = "RMT";        break;
+            default:                    backend = "OTHER";      break;
+        }
+        // SLOGW, not SLOGI, and the level is load-bearing: the boot INFO burst
+        // evicts this line from the web ring before a host can read it (seen
+        // live -- `webring evicted I:51`, no `aim` line left at 28 s uptime).
+        // tools/dir_ladder.py reads `backend=` from /api/log as its proof of
+        // which backend is actually flashed, so this line has to outlive the
+        // ring's INFO pressure. WARN is not evicted.
+        SLOGW("aim", "AIMServo: FastAccelStepper initialized (PUL/DIR registered), backend=%s", backend);
         SLOGI("aim", "AIMServo: PUL=GPIO%d DIR=GPIO%d ENDSTOP=GPIO%d",
               AIM_PIN_STEP, AIM_PIN_DIR, AIM_PIN_ENDSTOP);
         SLOGI("aim", "AIMServo: %u steps/rev, %.1f mm/rev, %.1f steps/mm, %.1f mm max rail",

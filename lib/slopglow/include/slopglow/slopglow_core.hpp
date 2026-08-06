@@ -132,7 +132,10 @@ inline constexpr Rgb colorOf(System s) {
         default:              return {};
     }
 }
-inline constexpr Rgb kQuietColor{0, 255, 60};   // the all-Nominal green floor
+// PURE green on purpose: the old {0,255,60} tint read as teal on a WS2812,
+// too close to cyan=Link (operator eyeball, 2026-08-06). Hue separation is
+// the product; aesthetics lost.
+inline constexpr Rgb kQuietColor{0, 255, 0};
 
 inline constexpr GlowSpec specOf(Status st) {
     switch (st) {

@@ -171,7 +171,9 @@ struct PixelOut final : slopglow::IGlowOutput {
     size_t pixelCount() const override { return 1; }
     void set(size_t, slopglow::Rgb v) override { c = v; }
     void show() override {
-        s_px.setPixelColor(0, c.r, c.g, c.b);
+        // gamma8 at the output, same contract as every other board's driver.
+        s_px.setPixelColor(0, slopglow::gamma8(c.r), slopglow::gamma8(c.g),
+                           slopglow::gamma8(c.b));
         s_px.show();
     }
 };

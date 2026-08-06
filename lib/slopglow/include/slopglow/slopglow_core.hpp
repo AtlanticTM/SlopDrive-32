@@ -45,6 +45,31 @@ struct Rgb {
     }
 };
 
+// Perceptual transfer (^2.2): LED radiance is linear in duty, the eye is
+// logarithmic; every OUTPUT DRIVER applies this inverse curve while the
+// core's shapes stay perceptual (ruling 2026-08-06). x^2.2 = x^2 * fifth
+// root of x, Newton, so the hardware-free core needs no <cmath>. Not T4:
+// first call is task context, no critical section.
+inline uint8_t gamma8(uint8_t v) {
+    static const uint8_t* table = [] {
+        static uint8_t t[256];
+        for (int i = 0; i < 256; ++i) {
+            const double x = double(i) / 255.0;
+            double r = 0.0;
+            if (x > 0.0) {
+                r = 0.5 + 0.5 * x;
+                for (int k = 0; k < 24; ++k) {
+                    const double r4 = r * r * r * r;
+                    r = r - (r * r4 - x) / (5.0 * r4);  // r -> x^(1/5)
+                }
+            }
+            t[i] = uint8_t(x * x * r * 255.0 + 0.5);
+        }
+        return t;
+    }();
+    return table[v];
+}
+
 // HSV→RGB for the rainbow/cycle mode. h in [0,255] wraps; s,v in [0,255].
 inline Rgb hsv(uint8_t h, uint8_t s, uint8_t v) {
     if (s == 0) return {v, v, v};
@@ -326,6 +351,14 @@ private:
         return uint8_t(ph < 256 ? ph : 511 - ph);
     }
 
+    // Smoothstep (3t^2 - 2t^3) of the triangle: zero slope at both turns, so
+    // the breathe dwells at floor and crest (the linear triangle read harsh,
+    // ruling 2026-08-06). Shape is perceptual; drivers' gamma8 does the rest.
+    static uint8_t easedPhase(uint32_t animMs, uint16_t period) {
+        const uint32_t t = trianglePhase(animMs, period);
+        return uint8_t((t * t * (765u - 2u * t)) / 65025u);
+    }
+
     static Rgb dim(Rgb c) { return {uint8_t(c.r / 18), uint8_t(c.g / 18), uint8_t(c.b / 18)}; }
 
     void renderPick(const Pick& w, uint32_t animMs) {
@@ -340,13 +373,18 @@ private:
         const bool quiet = (w.st == Status::Nominal);
         const Rgb a = quiet ? kQuietColor : colorOf(w.sys);
         const Rgb b = dim(a);
-        const GlowSpec s = specOf(w.st);
+        GlowSpec s = specOf(w.st);
+        // Flash blinks TWICE as fast as its status tempo (ruling 2026-08-06):
+        // white is the do-not-power-off veto, and its urgency reads in the
+        // rate. Same on/off ratio, half the scale.
+        if (w.sys == System::Flash && s.mode == GlowMode::Blink)
+            s.period_ms = uint16_t(s.period_ms / 2u);
         switch (s.mode) {
             case GlowMode::Solid:
                 for (size_t i = 0; i < n; ++i) _frame[i] = a;
                 break;
             case GlowMode::Breathe: {
-                Rgb c = Rgb::lerp(b, a, trianglePhase(animMs, s.period_ms));
+                Rgb c = Rgb::lerp(b, a, easedPhase(animMs, s.period_ms));
                 for (size_t i = 0; i < n; ++i) _frame[i] = c;
                 break;
             }

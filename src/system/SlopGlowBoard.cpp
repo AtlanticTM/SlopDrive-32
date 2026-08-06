@@ -30,7 +30,11 @@ GlowEngine s_engine(s_rgb);
 uint32_t s_heartPhaseMs = 0;
 uint32_t s_lastHeartMs = 0;
 bool s_heartSeeded = false;
-constexpr uint32_t kHeartPeriodMs = 3000;   // the familiar ~3 s breath
+// 120 BPM cardiac throb (ruling 2026-08-06): sin^2 attack, cos^2 release,
+// dark rest between beats. Shape is perceptual; the driver's gamma8 maps it.
+constexpr uint32_t kHeartPeriodMs  = 500;   // 120 BPM
+constexpr uint32_t kHeartAttackMs  = 70;
+constexpr uint32_t kHeartReleaseMs = 180;   // rest = the remaining 250 ms
 
 HeartbeatSource* s_hbMotor = nullptr;
 HeartbeatSource* s_hbComms = nullptr;
@@ -94,9 +98,9 @@ void slopglowUpdate(const SystemState& state) {
 
     s_engine.update(now);
 
-    // Yellow heartbeat: independent triangle breathe, gamma'd via luma. Phase
-    // advances only while the liveness gate is happy — a dead core (or a
-    // stalled httpTask, which stops this very call) freezes the breath.
+    // Yellow heartbeat: 120 BPM throb. Phase advances only while the liveness
+    // gate is happy; a dead core (or a stalled httpTask, which stops this
+    // very call) freezes the beat mid-frame, same contract as before.
     if (!s_heartSeeded) {
         s_heartSeeded = true;
         s_lastHeartMs = now;
@@ -105,9 +109,20 @@ void slopglowUpdate(const SystemState& state) {
     s_lastHeartMs = now;
     if (!s_engine.frozen()) {
         s_heartPhaseMs = (s_heartPhaseMs + dt) % kHeartPeriodMs;
-        uint32_t ph = s_heartPhaseMs * 512u / kHeartPeriodMs;   // 0..511 triangle
-        uint8_t v = uint8_t(ph < 256 ? ph : 511 - ph);
-        s_heartLamp.set(0, {v, v, v});
+        float v = 0.0f;
+        if (s_heartPhaseMs < kHeartAttackMs) {
+            // Systole: sin^2 rise, zero slope leaving dark, sharp swell.
+            float x = sinf(1.5707963f * float(s_heartPhaseMs) / float(kHeartAttackMs));
+            v = x * x;
+        } else if (s_heartPhaseMs < kHeartAttackMs + kHeartReleaseMs) {
+            // Diastole: cos^2 decay, slower than the rise; the "throb".
+            float x = cosf(1.5707963f * float(s_heartPhaseMs - kHeartAttackMs) /
+                           float(kHeartReleaseMs));
+            v = x * x;
+        }
+        // else: dark rest until the next beat.
+        uint8_t lum = uint8_t(v * 255.0f + 0.5f);
+        s_heartLamp.set(0, {lum, lum, lum});
         s_heartLamp.show();
     }
 }

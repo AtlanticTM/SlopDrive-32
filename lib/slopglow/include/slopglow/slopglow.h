@@ -15,18 +15,7 @@
 
 namespace slopglow {
 
-// Perceptual gamma (^2.2) lookup so PWM brightness ramps linearly to the eye.
-inline uint8_t gamma8(uint8_t v) {
-    static const uint8_t* table = [] {
-        static uint8_t t[256];
-        for (int i = 0; i < 256; ++i) {
-            float f = powf(float(i) / 255.0f, 2.2f);
-            t[i] = uint8_t(f * 255.0f + 0.5f);
-        }
-        return t;
-    }();
-    return table[v];
-}
+// gamma8 moved into slopglow_core.hpp (hardware-free, all boards share it).
 
 // One true-color pixel on three LEDC PWM pins (discrete RGB LED). Handles
 // active-low (current-sinking) LEDs by inverting duty.

@@ -48,7 +48,12 @@ struct PixelOut final : slopglow::IGlowOutput {
     slopglow::Rgb c{};
     size_t pixelCount() const override { return 1; }
     void set(size_t, slopglow::Rgb v) override { c = v; }
-    void show() override { rgbLedWrite(PIN_LED, c.r, c.g, c.b); }
+    void show() override {
+        // gamma8 at the OUTPUT (core shapes are perceptual): without it the
+        // WS2812's linear duty made breathes read harsh and tints loud.
+        rgbLedWrite(PIN_LED, slopglow::gamma8(c.r), slopglow::gamma8(c.g),
+                    slopglow::gamma8(c.b));
+    }
 };
 static PixelOut s_pixel;
 static slopglow::GlowEngine s_glow(s_pixel);

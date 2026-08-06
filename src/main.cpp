@@ -101,8 +101,8 @@ static ServoModbus     servoModbus(Serial1, /* addr */ 1);
 
 // 0 = FAS step/dir (default), 1 = Modbus direct drive. Set once, early in
 // setup(), from machineBackendLoad() — read-only after that point until the
-// next reboot (backend switch is strict reboot-to-apply, see WebUI.cpp
-// POST /api/machine/commit). AIM servo backend only.
+// next reboot (backend switch is strict reboot-to-apply; written by the
+// motion_backend setting, 0x3030 key 5). AIM servo backend only.
 static uint8_t g_motion_backend = 0;
 
 static SystemState        g_state;

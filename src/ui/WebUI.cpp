@@ -213,12 +213,9 @@ void WebUI::init() {
                           "{\"ok\":false,\"error\":\"retired\","
                           "\"use\":\"slopsync 0x0105 slopmotion-set\"}");
     });
-    _httpServer->on("/api/machine",        HTTP_GET,  [this]() { handleApiMachine(); });
-    _httpServer->on("/api/machine/commit", HTTP_POST, [this]() { handleApiMachineCommit(); });
-    _httpServer->on("/api/machine/homeoverride", HTTP_POST, [this]() {
-        _httpServer->send(410, "application/json",
-                          "{\"ok\":false,\"error\":\"retired\",\"use\":\"0x0103 home op=2 force_home / op=3 clear_override\"}");
-    });
+    // The /api/machine admin surface is GONE (sd-3l3): backend and home_style
+    // ride 0x1030/0x3030 keys 5/6, homing overrides ride 0x0103 ops 2/3, and
+    // bus health lives on GET /api/servo. SlopSync is the only control plane.
 
     _httpServer->begin();
     SLOGI("ui", "HTTP server on port %d", HTTP_PORT);
@@ -242,7 +239,6 @@ void WebUI::update() {
     // Deferred reboot for the machine-backend commit: the HTTP handler arms
     // this and returns immediately so its 200 response actually flushes to
     // the browser before the device goes down.
-    _machineReboot.poll();
 }
 
 // ---- Dedicated telemetry sampler --------------------------------------------
@@ -1870,94 +1866,6 @@ void WebUI::handleApiCoredump() {
     String json;
     serializeJson(doc, json);
     _httpServer->send(200, "application/json", json);
-}
-
-// ---- handleApiMachine (GET) / handleApiMachineCommit (POST) -----------------
-//
-// GET  /api/machine         → {backend_active, backend_code, home_style,
-//                               bus:{...}}   (bus only when Modbus is compiled
-//                               in AND a live ServoModbus is wired)
-// POST /api/machine/commit  {backend:0|1}
-//   LEGACY, and no longer the only writer of the persisted "machcfg" key: the
-//   conforming path is the `motion_backend` setting on 0x1030/0x3030, which
-//   carries setting_flags::restart_required and does NOT reboot. Retirement
-//   is tracked on the dev board (sd-3l3).
-//   Reboot-to-apply contract: NVS is
-//   written ONLY here, on an explicit commit — the UI's confirmation dialog
-//   writes nothing on Cancel/backdrop/Esc, and a dismissed dialog must never
-//   change what boots next. On a genuine change we respond first, THEN
-//   schedule ESP.restart() ~500ms later (WebUI::update(), same deferred
-//   pattern OtaService uses for its post-response reboot) so the 200 actually
-//   reaches the browser before the device drops off the network.
-
-void WebUI::handleApiMachine() {
-    JsonDocument doc;
-    doc["backend_active"] = (_machine_backend == 1) ? "modbus" : "fas";
-    doc["backend_code"]   = _machine_backend;
-    doc["home_style"]     = machineHomeStyleLoad();
-
-#if defined(FEATURE_RS485_MODBUS)
-    if (_servoModbus) {
-        ServoBusHealth bus = _servoModbus->getBusHealth();
-        JsonObject busObj = doc["bus"].to<JsonObject>();
-        busObj["baud"]           = bus.baud;
-        busObj["sp_fail_streak"] = bus.sp_fail_streak;
-        busObj["sp_sent"]        = bus.sp_sent;
-        busObj["sp_ok"]          = bus.sp_ok;
-        busObj["sp_fc"]          = _servoModbus->setpointFc();
-        busObj["sp_le"]          = _servoModbus->setpointLe();
-        busObj["sp_noecho"]      = _servoModbus->setpointNoEcho();
-    }
-#endif
-
-    String json;
-    serializeJson(doc, json);
-    _httpServer->send(200, "application/json", json);
-}
-
-void WebUI::handleApiMachineCommit() {
-    JsonDocument doc;
-    if (deserializeJson(doc, _httpServer->arg("plain")) || !doc["backend"].is<int>()) {
-        _httpServer->send(400, "application/json", "{\"ok\":false,\"error\":\"backend (0|1) required\"}");
-        return;
-    }
-    int backend = doc["backend"].as<int>();
-
-    if (backend < 0 || backend > 1) {
-        _httpServer->send(400, "application/json", "{\"ok\":false,\"error\":\"backend out of range\"}");
-        return;
-    }
-#if !defined(FEATURE_RS485_MODBUS)
-    if (backend == 1) {
-        _httpServer->send(400, "application/json", "{\"ok\":false,\"error\":\"modbus backend not compiled into this build\"}");
-        return;
-    }
-#endif
-
-    if ((uint8_t)backend == _machine_backend) {
-        // No-op commit — nothing to persist, nothing to reboot for.
-        _httpServer->send(200, "application/json", "{\"ok\":true,\"rebooting\":false,\"unchanged\":true}");
-        return;
-    }
-
-#if defined(FEATURE_RS485_MODBUS)
-    // Modbus -> FAS: ATTEMPT to hand the shaft back to its step/dir input.
-    // While reg 0x00 is 1 the drive ignores every pulse FAS emits, 0x00
-    // survives a reboot of US, and this drive refuses to clear it (sd-opb), so
-    // the switch usually needs a drive power cycle too. The reg-0x00 warn on
-    // the FAS poll path says so after the reboot below.
-    // Baud is deliberately LEFT at 115200 (operator ruling): FAS-mode
-    // telemetry runs at the same speed, so the readback behaves identically.
-    if (_machine_backend == 1 && backend == 0 && _servoModbus) {
-        _servoModbus->releaseMotionArm();
-    }
-#endif
-
-    machineBackendStore((uint8_t)backend);
-    SLOGI("ui", "backend commit: %u -> %d — rebooting to apply", _machine_backend, backend);
-    _httpServer->send(200, "application/json", "{\"ok\":true,\"rebooting\":true}");
-
-    _machineReboot.arm(500, "motion-backend change commit");
 }
 
 // ---- handleApiSlopMotion (HTTP GET + POST) ----------------------------------

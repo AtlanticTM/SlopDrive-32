@@ -16,8 +16,8 @@
 //
 // Two keys, two independent settings:
 //   "backend"   — 0 = FAS step/dir (default), 1 = Modbus direct drive.
-//                 Written ONLY by POST /api/machine/commit (WebUI.cpp) —
-//                 reboot-to-apply, see the doctrine comment there.
+//                 Written ONLY by the motion_backend setting (0x3030 key 5,
+//                 restart_required), reboot-to-apply.
 //   "homestyle" — 0 = sensorless current-stall sweep (default),
 //                 1 = drive built-in homing (0x19). Live-applied, no reboot
 //                 needed (Phase 4 wires the actual behavior switch).

@@ -20,6 +20,8 @@
 #include "common/HostPlatform.h"
 #include "common/SessionLog.h"
 #include "machine/MachineSim.h"
+#include "machine/MotionReplay.h"
+#include "machine/RecordingStore.h"
 #include "net/HttpFacade.h"
 #include "net/MdnsAdvertiser.h"
 #include "tui/MachineScreen.h"
@@ -73,10 +75,16 @@ int main(int argc, char** argv) {
     // benchrig, a deliberately different conformant hub. `minimal` is a subset
     // of the real device catalog — the potato-client floor.
     std::string profileArg = "device";
+    // Async-tune shelf (RecordingStore). Empty = `slopsim-recordings` in cwd.
+    std::string recordingsDir;
+    // `slopsim replay` only: where to write the resulting 1 kHz samples. Empty =
+    // print the metrics and nothing else, which is the scripted-A/B shape.
+    std::string replayEmit;
 
     // claude-CLI shape: a bare `slopsim` (or `SlopCLI`) drops straight into the
     // machine TUI; subcommands stay for scripting. Flags may follow either way.
     std::string mode = "machine";
+    std::string positional;   // `slopsim replay <recording>`
     int flagStart = 1;
     if (argc > 1 && argv[1][0] != '-') {
         mode = argv[1];
@@ -105,6 +113,9 @@ int main(int argc, char** argv) {
         else if (!std::strcmp(argv[i], "--centering-gain") && i + 1 < argc) centeringGain = float(atof(argv[++i]));
         else if (!std::strcmp(argv[i], "--no-timer-boost")) noTimerBoost = true;
         else if (!std::strcmp(argv[i], "--profile") && i + 1 < argc) profileArg = argv[++i];
+        else if (!std::strcmp(argv[i], "--recordings") && i + 1 < argc) recordingsDir = argv[++i];
+        else if (!std::strcmp(argv[i], "--emit") && i + 1 < argc) replayEmit = argv[++i];
+        else if (argv[i][0] != '-' && positional.empty()) positional = argv[i];
     }
 
     if (profileArg != "device" && profileArg != "alien" && profileArg != "minimal") {
@@ -161,7 +172,7 @@ int main(int argc, char** argv) {
                              "machine mode is live, point clients at it.\n");
         return 2;
     }
-    if (mode != "machine") {
+    if (mode != "machine" && mode != "replay") {
         std::fprintf(stderr,
                      "usage:\n"
                      "  slopsim                     launch the machine TUI (/ opens the palette)\n"
@@ -198,6 +209,11 @@ int main(int argc, char** argv) {
                      "                                        real SlopDrive-32 catalog, byte-for-byte;\n"
                      "                                        alien = benchrig, deliberately different;\n"
                      "                                        minimal = a subset of device)\n"
+                     "  slopsim replay <recording.csv> [--emit out.csv] [tuning flags]\n"
+                     "                              re-run a saved wire recording offline and\n"
+                     "                              print the metrics — the scripted half of the\n"
+                     "                              analyzer's async-tune bench. Same flags as\n"
+                     "                              machine mode; nothing binds a port.\n"
                      "  slopsim client <host>       (not yet)\n");
         return 2;
     }
@@ -287,6 +303,78 @@ int main(int argc, char** argv) {
     }
     log.logf(timerRes.held() ? 'I' : 'W', "sim: host timer tick %s",
              timerRes.held() ? "1 ms (timeBeginPeriod)" : "OS DEFAULT (~15.6 ms on Windows)");
+    // ---- `slopsim replay` — the scripted half of the async-tune bench -------
+    // Deliberately placed AFTER every flag has been applied through the same
+    // uiSet* setters machine mode uses, and BEFORE begin(): it reads its config
+    // out of the constructed sim exactly the way /api/replay.bin seeds itself,
+    // so a CLI A/B and a browser A/B cannot disagree about what "the defaults"
+    // are. Nothing binds a port and no thread starts.
+    if (mode == "replay") {
+        if (positional.empty()) {
+            std::fprintf(stderr, "slopsim replay: needs a recording (a name on the shelf, or a path)\n");
+            return 2;
+        }
+        RecordingStore store(recordingsDir);
+        // A bare name resolves on the shelf; anything with a separator or a
+        // readable path is taken literally, so a one-off CSV need not be filed.
+        std::string path = store.pathFor(positional, false);
+        {
+            std::FILE* probe = std::fopen(positional.c_str(), "r");
+            if (probe) {
+                std::fclose(probe);
+                path = positional;
+            }
+        }
+        Recording rec;
+        std::string err;
+        if (path.empty() || !loadRecording(path, rec, err)) {
+            std::fprintf(stderr, "slopsim replay: %s\n", err.empty() ? "bad recording name" : err.c_str());
+            return 1;
+        }
+        if (!err.empty()) std::fprintf(stderr, "slopsim replay: warning — %s\n", err.c_str());
+
+        // begin() is what normally derives the engine's normalized ceilings, and
+        // this path deliberately never calls it (nothing should bind a port to
+        // replay a file). Without this the bench would run at slopmotion's
+        // compile-time defaults instead of the machine's own limits.
+        sim.deriveEngineLimits();
+        ReplayConfig cfg;
+        cfg.engine = sim.engineConfig();
+        cfg.geom   = sim.arbiterGeometry();
+        const ReplayResult r = replay(rec, cfg);
+
+        std::printf("recording %s — %u segments, %u samples, %u rejected, span %.3f s\n",
+                    rec.name.c_str(), unsigned(rec.segments), unsigned(rec.samples),
+                    unsigned(rec.rejected), rec.span_s);
+        std::printf("replayed %u samples in %.1f ms (%.0fx realtime)\n", unsigned(r.m.samples),
+                    double(r.m.compute_ms),
+                    r.m.compute_ms > 0 ? double(r.m.samples) / double(r.m.compute_ms) : 0.0);
+        std::printf("  follow  rms %.3f mm  max %.3f mm   (what the MACHINE could not track)\n",
+                    double(r.m.follow_rms_mm), double(r.m.follow_max_mm));
+        std::printf("  sender  rms %.3f mm  max %.3f mm   (what the CHAIN could not deliver)\n",
+                    double(r.m.sender_rms_mm), double(r.m.sender_max_mm));
+        std::printf("  band center err %+.3f mm   travel %.1f-%.1f mm (commanded %.1f-%.1f)\n",
+                    double(r.m.band_center_err_mm), double(r.m.pos_min_mm), double(r.m.pos_max_mm),
+                    double(r.m.cmd_min_mm), double(r.m.cmd_max_mm));
+        std::printf("  peak vel %.0f mm/s  peak acc %.0f mm/s^2\n", double(r.m.peak_vel_mm_s),
+                    double(r.m.peak_acc_mm_s2));
+        std::printf("  plans %u  rejected %u  anomalies %u:", unsigned(r.m.plans),
+                    unsigned(r.m.plan_rejected), unsigned(r.m.anomalies));
+        // Every kind, zeros included — "no waveform_scaled" is an answer, and a
+        // name missing from the list would read as a stale build.
+        for (size_t k = 1; k < kSmAnomalyNameCount; ++k)
+            std::printf(" %s %u", kSmAnomalyNames[k], unsigned(r.m.anom_kind[k]));
+        std::printf("\n");
+
+        if (!replayEmit.empty()) {
+            RunSettings st;
+            st.set("recording", rec.name);
+            const size_t n = writeRun(store, replayEmit, st, r.trace);
+            std::printf("wrote %zu samples -> %s\n", n, store.pathFor(replayEmit, true).c_str());
+        }
+        return 0;
+    }
+
     if (pairingWindow) {
         // Factory-fresh (no configure token in the ledger yet) means the first
         // knock in this window gets `configure` — physical possession is root.
@@ -300,7 +388,8 @@ int main(int argc, char** argv) {
     }
 
     HttpFacade http;
-    http.begin(&sim, httpPort, port, &log, webuiPath);  // bind failure is non-fatal (logged)
+    // bind failure is non-fatal (logged)
+    http.begin(&sim, httpPort, port, &log, webuiPath, recordingsDir);
 
     MdnsAdvertiser mdns;
     if (!noMdns) mdns.begin(port, &log);  // discovery parity with the firmware
@@ -326,7 +415,7 @@ int main(int argc, char** argv) {
             }
         }
     } else {
-        rc = runMachineScreen(sim, log, port, httpPort);
+        rc = runMachineScreen(sim, log, port, httpPort, recordingsDir);
     }
 
     mdns.stop();

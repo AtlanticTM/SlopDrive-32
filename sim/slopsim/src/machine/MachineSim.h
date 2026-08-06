@@ -29,6 +29,7 @@
 #include <string>
 #include <vector>
 
+#include "MotionCore.h"
 #include "SlopMinimalCatalog.h"
 #include "SlopSimCatalog.h"
 #include "comms/PatternPresetStore.h"
@@ -93,111 +94,10 @@ inline constexpr size_t kSmAnomalyKinds = 10;
 static_assert(kSmAnomalyNameCount <= kSmAnomalyKinds,
               "kSmAnomalyNames outgrew the counter array — bump kSmAnomalyKinds");
 
-// ---- PacingRing -------------------------------------------------------------
-// Verbatim host copy of the firmware's (SlopSyncHubService.h). Same
-// single-thread producer/consumer (onStreamBundle fires inside
-// hub.update() on the sim thread; drain runs on the sim thread), so it stays
-// lock-free for the same structural reason.
-struct PacingEntry {
-    uint64_t due_us = 0;
-    float    target = 0.0f;
-    float    vel    = 0.0f;
-    uint32_t duration_us  = 0;
-    bool     has_duration = false;
-    bool     has_end_vel  = false;
-};
-
-class PacingRing {
-public:
-    static constexpr size_t kCapacity = 64;
-
-    bool push(const PacingEntry& e) {
-        bool overwrote = false;
-        if (_count == kCapacity) {
-            _tail = (_tail + 1) % kCapacity;
-            overwrote = true;
-        } else {
-            ++_count;
-        }
-        _buf[_head] = e;
-        _head = (_head + 1) % kCapacity;
-        return overwrote;
-    }
-
-    bool popDue(uint64_t now_us, PacingEntry& out) {
-        if (_count == 0 || _buf[_tail].due_us > now_us) return false;
-        out = _buf[_tail];
-        _tail = (_tail + 1) % kCapacity;
-        --_count;
-        return true;
-    }
-
-    // RFC-008 one-segment lookahead — see the firmware's own peekOldest().
-    const PacingEntry* peekOldest() const {
-        return _count == 0 ? nullptr : &_buf[_tail];
-    }
-
-private:
-    std::array<PacingEntry, kCapacity> _buf{};
-    size_t _head = 0, _tail = 0, _count = 0;
-};
-
-// ---- SimStepper -------------------------------------------------------------
-// FastAccelStepper modeled at the MotorDriver seam. The firmware's 1 kHz
-// sampler path ends in streamToSteps(target, speed,
-// accel) -> FAS re-ramps from CURRENT velocity toward the micro-target under
-// those ceilings. FAS's ramp generator is a trapezoidal follower; this is that
-// follower in the mm domain (step quantization is 1/AIM_STEPS_PER_MM =
-// 1/20.372 = 0.0491 mm — below anything the UI shows or the operator feels, so
-// steps are not modeled). NOT modeled: RMT jitter, driver electrical behavior
-// — roadmap §6 explicitly scopes those out.
-class SimStepper {
-public:
-    void reset(float pos_mm) { _pos = pos_mm; _vel = 0.0f; _target = pos_mm; }
-
-    // streamToSteps()/moveTo() seam: retarget with ceilings. Non-blocking,
-    // replans from current velocity — exactly FAS's moveTo contract.
-    void command(float target_mm, float speed_mm_s, float accel_mm_s2) {
-        _target = target_mm;
-        _vmax = speed_mm_s > 1.0f ? speed_mm_s : 1.0f;
-        _amax = accel_mm_s2 > 1.0f ? accel_mm_s2 : 1.0f;
-    }
-
-    void hardStop() { _vel = 0.0f; _target = _pos; }  // forceStop seam (e-stop)
-
-    // One integration step (dt in seconds; sim runs 1 ms substeps like the
-    // firmware sampler). Classic trapezoidal servo: decelerate when the
-    // stopping distance reaches the remaining distance, else run at vmax.
-    void step(float dt) {
-        const float dist = _target - _pos;
-        const float adist = dist < 0 ? -dist : dist;
-        if (adist < 0.005f && _vel * _vel < 2.0f * _amax * 0.005f) {
-            _pos = _target;
-            _vel = 0.0f;
-            return;
-        }
-        const float dir = dist < 0 ? -1.0f : 1.0f;
-        const float stopDist = (_vel * _vel) / (2.0f * _amax);
-        float a;
-        if (_vel * dir > 0 && stopDist >= adist) {
-            a = -dir * _amax;                       // braking into the target
-        } else {
-            a = dir * _amax;                        // accelerate toward target
-        }
-        _vel += a * dt;
-        if (_vel > _vmax) _vel = _vmax;
-        if (_vel < -_vmax) _vel = -_vmax;
-        _pos += _vel * dt;
-    }
-
-    float positionMm() const { return _pos; }
-    float velocityMmS() const { return _vel; }
-    float targetMm() const { return _target; }
-
-private:
-    float _pos = 0.0f, _vel = 0.0f, _target = 0.0f;
-    float _vmax = 100.0f, _amax = 1000.0f;
-};
+// PacingRing, SimStepper, the arbiter clamp, the wire decode and the sender
+// curve all live in MotionCore.h — the offline replayer (MotionReplay.h) runs
+// the same ones, which is the only way a tuning session can be trusted to
+// render what the machine renders.
 
 // ---- SimPattern -------------------------------------------------------------
 // Stand-in generators — PatternEngine is FreeRTOS-tainted, so it cannot run
@@ -337,6 +237,31 @@ public:
     // Read-back for the `motion` palette command (engine is ground truth).
     const slopmotion::Config& engineConfig() const { return _engine.config(); }
     float windowSpanMm() const { return windowSpan(); }
+    // The live window/limit set the arbiter clamp runs under, so the analyzer's
+    // replay tuner can OPEN on what the machine is actually doing rather than on
+    // compile-time defaults. Read unlocked from the HTTP thread, exactly like
+    // engineConfig() above: both are a defaults seed for a page, never a control
+    // path, and a torn float would cost one stale slider position.
+    ArbiterGeometry arbiterGeometry() const;
+    // The two ARBITER-side rules the 2026-07-30 bench session changed. Held as
+    // sim state (not left to ArbiterGeometry's in-class defaults) so the LIVE
+    // path states them explicitly: a field added to the struct and forgotten
+    // here is exactly how the live and replay paths drift, which is the one
+    // thing MotionCore.h exists to prevent.
+    bool  uiSetSafetyFilter(bool on);
+    bool  uiSetGentleAccelOutside(bool on);
+    bool  safetyFilter() const { return _safety_filter; }
+    bool  gentleAccelOutside() const { return _gentle_accel_outside; }
+    float inputSpeedMmS() const { return _input_speed; }
+    float inputAccelMmS2() const { return _input_accel; }
+    // Recompute the engine's normalized ceilings from the mm-domain limit set
+    // and the window span. begin() calls it, and so must any caller that reads
+    // engineConfig() WITHOUT starting the machine — `slopsim replay` does
+    // exactly that, and without this it would replay under slopmotion's
+    // compile-time defaults (vmax 3 / amax 30 / jmax 500) instead of the
+    // derived ones, silently answering a different question than the browser
+    // bench answers. Idempotent.
+    void deriveEngineLimits();
 
     // ---- Motion trace (sim thread; recorded at the 1 ms substep rate) -------
     struct TraceSample {
@@ -369,6 +294,13 @@ public:
         //   tgt vs pos : what the machine could not track (following error)
         // -1 until the first timed segment of the session.
         float raw_norm = -1.0f;
+        // slopmotion::PlanKind of the plan being evaluated, and the ENGINE's own
+        // normalized velocity (before the arbiter's speed feed). Together they
+        // answer "was the PLAN still driving outward when the carriage left the
+        // window", which is the question that separates an engine defect from a
+        // follower one.
+        float plan_kind = 0.0f;
+        float eng_vel_norm = 0.0f;
     };
     size_t traceCount() const { return _traceCount; }
     // i = 0 is the OLDEST retained sample.
@@ -407,6 +339,12 @@ public:
         float    due_delta_ms = 0;    // due − now: the sender's timestamp skew
         float    gap_ms = 0;          // arrival Δ from the previous record on
                                       // the SAME channel (−1 = first)
+        // RFC-030 EFFECTIVE curve family of the grant (0 on the chase channel,
+        // and on any recording made before this column existed). Recorded
+        // because FollowClient resolution depends on it: a replay that could
+        // not read it would render a c1 client's take as a quintic, which is
+        // the exact defect this column was added to stop reproducing.
+        uint8_t  curve_family = 0;
     };
 
     // Derived red-flag aggregates. These are the numbers that expose a SENDER
@@ -474,11 +412,8 @@ public:
     // {t_s,pos,tgt,vel,cmd_norm,raw_norm} for samples with t_s > since_s, plus the
     // geometry the page needs for its axes. The sim thread appends under the
     // same mutex (bulk, once per tick).
-    // 6 since the sender-curve ("raw") line: {t,pos,tgt,vel,cmd_norm,raw_norm}.
-    // The analyzer reads the stride out of the 20-byte header rather than
-    // assuming it, so an older page against a newer sim degrades to the
-    // columns it knows instead of misreading every row.
-    static constexpr uint32_t kTraceStride = 6;
+    // The stride constant is slopsim::kTraceStride (MotionCore.h) — the offline
+    // replayer emits the same layout, so the two cannot disagree about it.
     std::vector<float> copyTraceSince(float since_s, float& max_rail, float& win_min,
                                       float& win_max) const;
 
@@ -584,17 +519,10 @@ private:
     void tickPattern(uint64_t now64);
     void syncSafety();
     void publishTelemetry(uint32_t nowMs);
-    void deriveEngineLimits();
     float windowSpan() const { return _win_max_mm > _win_min_mm ? _win_max_mm - _win_min_mm : 1.0f; }
     float normToMm(float n) const { return _win_min_mm + n * windowSpan(); }
     float mmToNorm(float mm) const { return (mm - _win_min_mm) / windowSpan(); }
 
-    // Verbatim SystemState::safeSpeedCap (include/system/SystemState.h ~403):
-    // the ceiling ramps SAFE_APPROACH_SPEED_MM_S -> configured_max over
-    // SAFE_RESUME_RAMP_MS from the last _resume_start_ms stamp.
-    float safeSpeedCap(float configured_max, uint32_t now_ms) const;
-    // MotionArbiter::_isOutsideWindow — 0.5 mm slack, edge-chatter proof.
-    bool isOutsideWindow(float p0_mm) const;
     // RangeMapper::setRange legality: swap, clamp to [0, rail], span >= 5 mm.
     void applyWindowLegality(float min_mm, float max_mm);
 
@@ -672,30 +600,20 @@ private:
     // This slot answers a different question — "what was the machine last told
     // to do, in the units it was told in" — and feeds TraceSample::cmd_norm.
     float _trace_cmd_norm = -1.0f;
-    // ---- Sender-curve shadow (the analyzer's "raw" line) --------------------
-    // A second, parallel curve carrying what the CLIENT described. It is
-    // advanced entirely in the SENDER'S frame: each segment starts where the
-    // PREVIOUS SEGMENT'S CURVE ENDED, not where the machine got to. That is the
-    // whole point — if it chased the machine it would silently absorb the
-    // planner's shortfalls and the raw-vs-planned gap would always read zero.
-    // Anchored to the machine's position once, at the first segment, because
-    // the two frames have to agree somewhere.
-    void noteSenderCurve(const slopmotion::Command& cmd, uint64_t now64);
-    double   _raw_c[6] = {0, 0, 0, 0, 0, 0};
-    double   _raw_T = 0.0;
-    uint64_t _raw_start_us = 0;
-    double   _raw_p = -1.0;        // sender-frame position; <0 = not anchored yet
-    double   _raw_v = 0.0;         // sender-frame velocity at the last knot
-    double   _raw_prev_vf = 0.0;   // for the af backward difference
-    uint64_t _raw_prev_us = 0;
-    bool     _raw_prev_ok = false;
-    float    _trace_raw_norm = -1.0f;
+    // The analyzer's "raw" line — what the CLIENT described, rebuilt from the
+    // client's own boundary conditions. See MotionCore.h for why it is advanced
+    // in the sender's frame and never chases the machine.
+    SenderCurve _sender;
     // MEASURED stroke (MotorDriver::getMeasuredStrokeMm). 0 = never measured ->
     // effectiveCeilingMm() falls back to the configured rail. The fake homing
     // cycle sets it, exactly like a real sensorless cycle would.
     float _measured_stroke_mm = 0.0f;
     // SystemState::stream_speed_mode — DEVICE DEFAULT SPEED_CEILING_PEGGED (0).
     uint8_t _stream_speed_mode = 0;
+    // Defaults MIRROR ArbiterGeometry's (safety filter on, gentle-accel off).
+    // Both are bench-tunable so a live take can be A/B'd against the old rule.
+    bool _safety_filter = true;
+    bool _gentle_accel_outside = false;
     // machine-modes (0x1030) key 4 — RENDERING.md ui_ranks::hidden on the
     // device too: SystemState::interp_clamp_overshoot has no live consumer on
     // the engine. Held as plain

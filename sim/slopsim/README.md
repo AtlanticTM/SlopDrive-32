@@ -200,6 +200,174 @@ the native Windows responder (DnsServiceRegister) — discovery-capable clients
 find the sim like hardware. Instance name is deliberately `slopsim`, never
 `slopdrive32`, so the sim can't impersonate the real machine.
 
+## Async tune — recompute a whole take under settings you are moving
+
+Live mode follows the machine at 1:1. **Async tune** stops following and instead
+re-runs a *saved recording* through a fresh `slopmotion::Engine` as fast as the
+host allows, with every knob under your hand. It is a **laboratory, not a remote
+control**: nothing it does goes over SlopSync, nothing it does touches the
+running sim, and there is no "apply to the machine" button anywhere in it. The
+output of a session is *knowledge* — the numbers that become compile-time
+defaults, and the list of knobs that turned out to be worth exposing on the real
+machine.
+
+The sim keeps running the whole time, which is how you record in the first place.
+It is a toggle in the analyzer (`async tune` in the header), not a launch flag.
+
+**Measured: ~35 000x realtime** (10 921 samples of 1 kHz motion in 0.3 ms), so a
+400-second take re-renders in ~12 ms — a slider drag repaints the whole script.
+
+### The two things on the shelf, and why the difference matters
+
+| | what it holds | on recall |
+|---|---|---|
+| **recording** `<name>.csv` | the wire log: 0x0084/0x0085 commands exactly as they arrived | **replays** — re-runs under whatever the engine does *today* |
+| **run** `<name>.run.csv` | the settings used, plus the samples they produced | **recalls** — draws the stored points, no engine involved |
+
+A run freezes its samples rather than re-deriving them from its settings, and
+that is the whole point: *a recomputed baseline is not a baseline*. If recall
+re-ran the engine, any later change to slopmotion or to a default would silently
+move the reference line and the regression check would pass forever by
+construction.
+
+Run files are `# key=value` comment lines above a plain CSV, so **adding
+settings never breaks old runs**. A key the run predates is reported as *not
+recorded in that run* — deliberately never backfilled with today's value, since
+that would make an old run claim it was taken under a setting that did not exist
+yet. A key from a newer build loads and displays fine. No schema version, no
+migration.
+
+### Making one
+
+```bash
+# 1. record: the wire recorder is ALWAYS on. Clear it, stream your script in
+#    over SlopSync, then keep the take.
+/rec.new                       # palette: start a clean take
+/rec.save my-scene             # palette: keep the ring as a recording
+/rec.list                      # what is on the shelf
+
+# 2. tune: press `a` for the analyzer, hit `async tune`, pick the recording.
+#    Or do it from a script, which reads the SAME defaults the browser does:
+slopsim replay my-scene --policy amp --smooth-budget 0.7
+slopsim replay my-scene --emit run-a          # freeze the result as a run
+```
+
+**`save clip`** in the analyzer header is the fastest route in, and it works in
+*both* modes: it stores the commands in the visible range as a new recording,
+then selects and loads it. In live mode that clips what the machine just did
+(stream a scene in, zoom to the good part, keep it) and drops you straight into
+tune mode on it — no TUI round trip. In tune mode it re-clips the recording being
+replayed, so you can narrow a take down stroke by stroke. That is the
+fixture-making gesture: come back next month, replay it, confirm nothing
+regressed.
+
+Pick a saved run as the **baseline** and it draws dashed under the live line, so
+you see what a change *did* rather than only where it ended up.
+
+Two feedback details that exist because their absence made a working tool look
+broken: a replay in flight dims the panel and shows `recomputing...`, and when an
+edit produces **byte-identical output** the panel says so outright. That is a
+real finding, not a failure — most waveform knobs only bite on segments the
+planner cannot meet, so a take with no infeasible segment is genuinely immune to
+them, and silence could not tell you which of the two you were looking at.
+
+**The picker watches the shelf** — it polls while tune mode is open and refreshes
+on window focus, so a recording saved from *anywhere* shows up on its own: the
+TUI's `/rec.save`, a `slopsim replay --emit`, or a file dropped in the folder.
+It says so when one arrives, keeps your current selection, and will not rebuild
+the list while you have the dropdown open. (It used to be a snapshot taken when
+the panel opened, which made "save in the TUI, alt-tab to the analyzer" look
+exactly like a failed save.)
+
+### Where the shelf lives
+
+`%LOCALAPPDATA%\slopsim\slopsim-recordings` on Windows (`$HOME/slopsim/...`
+elsewhere), overridable with `--recordings <dir>`. The resolved absolute path is
+printed at boot, shown under the recording picker, and returned by
+`GET /api/recordings`.
+
+It is deliberately **not** the working directory and **not** next to the exe:
+
+* The working directory is whatever you launched from, and the `SlopCLI` shim
+  does not `cd` — from a shortcut, the Run dialog or an elevated shell that is
+  `C:\Windows\System32`, which is unwritable. Every save failed there while the
+  picker still offered the name back.
+* Next to the exe means inside `build/`, and these files are regression fixtures
+  whose whole value is still being there in a month. A clean rebuild must not
+  delete them.
+
+If the shelf cannot be written, that is reported at boot, in `rec.list`, and in
+the analyzer panel — **before** you record a take, not after. A save that writes
+nothing is an error everywhere it can be observed (`rec.save`, HTTP 500, and the
+page's own toast); it used to return `{"saved":0}` with HTTP 200, which let the
+page select a recording that had never been created and then fail to replay its
+own file.
+
+### First findings (2026-07-30, GoogleCat funscript take)
+
+The bench earned itself in its first session. All four are in
+`docs/canon/LEDGER.md`; the headline is a **three-part window-exit braking
+runaway** that reaches 625 mm of travel on a 500 mm rail:
+
+* `slopmotion`'s legality scan grants a ±0.02 normalized window grace, on the
+  premise that "the sampler clamp flattens tiny bulges". It flattens *position*,
+  not *velocity* — 69 samples measured with the setpoint pinned at the rail and
+  the plan still driving outward at up to +217 mm/s.
+* `MotionArbiter` then drops the ACCEL ceiling to the gentle user set the moment
+  the carriage is 0.5 mm outside the window — keyed on position alone, so it
+  fires for "just overshot, must stop" as readily as for "parked outside, glide
+  in". 50 000 → 200 mm/s², a 250× loss of braking authority, in one tick.
+* The two thresholds disagree by 12×.
+
+Proposed fix (measured on the bench, **not** applied to firmware): keep the
+gentle *speed* ceiling, never reduce the *accel* ceiling. Runaways 11/54 → 0/54,
+worst excursion 306.78 mm → 1.06 mm. It lives as the `gentle_accel_outside` lab
+switch so it stays measurable.
+
+Policy exposure, same 54-config sweep: `prio-smooth` 10/18 configs runaway,
+`prio-amplitude` 1/18, **`reshape` 0/18** — a policy that surrenders reach never
+drives the rail at speed.
+
+Also found: the RFC-008 handoff guard is **inert against MFP**. It needs a
+successor in the pacing ring, but MFP sends ~114 ms ahead while segments are
+~252 ms apart, so lookahead exists on 0.3 % of segments and `handoff_bounded` is
+0 in every run.
+
+### Reach tags — the other deliverable
+
+Every control is tagged with whether you could actually set it on hardware:
+
+* **wire** — reachable today over SlopSync.
+* **lab** — exists in `slopmotion::Config` and **nowhere else**: no wire channel,
+  no HTTP field, no CLI flag. As of this writing that is `infeasible_soften`,
+  `infeasible_soften_floor`, `infeasible_soften_steps` and
+  `handoff_chord_factor`. If one of these turns out to matter, *that finding is
+  the deliverable* — it is a knob that needs exposing.
+* **bench** — a property of the replay itself (`p0`, `tail_s`). Never ships.
+
+### What a replay does and does not reproduce
+
+It runs the **same** `PacingRing`, `SimStepper`, wire decode, arbiter clamp and
+sender curve as the live path — all of them shared in `machine/MotionCore.h`
+precisely so a tuner cannot render something the machine would not. Differences,
+stated plainly:
+
+* The substep grid is **synthetic** (instant *i* is exactly *i* x 1 ms), so host
+  jitter cannot enter the result the way it can live, where missed substeps are
+  replayed against a real clock. A replay is bit-reproducible; a live take is not.
+* A recording replays as a **homed, running** machine. The homed/paused/override
+  gates are not modeled — a take made through closed gates has no motion to tune.
+* Simulation **always starts at the recording's first command**, even when you
+  scope the emit window to the view. Most engine state decays within a segment,
+  but the *centering debt* accumulates across strokes, so seeking into the middle
+  would render a centering behavior the machine never had.
+* The carriage starts at the **first commanded target** unless `p0` says
+  otherwise: a recording carries no record of where the machine happened to be
+  sitting, and any other choice invents an opening lunge that never happened and
+  then charges its overshoot to whatever config is under test.
+* The wire recorder ring holds **~4096 commands** (roughly 400 s of segments at a
+  typical script rate), so a long scene keeps its END, not its beginning.
+
 ## Stream speed feed: ceiling-pegged vs velocity-matched
 
 `SystemState::stream_speed_mode` has two branches and **the device default is

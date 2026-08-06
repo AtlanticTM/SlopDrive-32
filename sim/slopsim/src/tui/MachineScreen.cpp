@@ -23,6 +23,7 @@
 
 #include "common/HostPlatform.h"
 #include "common/OpenBrowser.h"
+#include "machine/RecordingStore.h"
 
 namespace slopsim {
 
@@ -76,16 +77,18 @@ const char* kInfeasPolicyName(slopmotion::InfeasiblePolicy p) {
         case slopmotion::InfeasiblePolicy::Reshape: return "reshape";
         case slopmotion::InfeasiblePolicy::PrioritizeAmplitude: return "prio-amplitude";
         case slopmotion::InfeasiblePolicy::PrioritizeSmooth:    return "prio-smooth";
+        case slopmotion::InfeasiblePolicy::Blend:   return "blend";
     }
     return "?";
 }
 
 // Canonical wire names for slopmotion::CurvePolicy — same string the sim's
-// /api/slopmotion echoes. "follow" resolves to c2 until the curve_family wire
-// signaling lands, and the readout says so rather than pretending otherwise.
+// /api/slopmotion echoes. "follow" resolves PER COMMAND from the sender's
+// declared family (RFC-030), so the readout no longer names a fixed outcome:
+// what it actually rendered is the plan-kind field, which is ground truth.
 const char* kCurvePolicyName(slopmotion::CurvePolicy p) {
     switch (p) {
-        case slopmotion::CurvePolicy::FollowClient: return "follow(->c2)";
+        case slopmotion::CurvePolicy::FollowClient: return "follow";
         case slopmotion::CurvePolicy::ForceC1:      return "c1-cubic";
         case slopmotion::CurvePolicy::ForceC2:      return "c2-quintic";
     }
@@ -161,7 +164,11 @@ struct Command {
 
 }  // namespace
 
-int runMachineScreen(MachineSim& sim, SessionLog& log, uint16_t wsPort, uint16_t httpPort) {
+int runMachineScreen(MachineSim& sim, SessionLog& log, uint16_t wsPort, uint16_t httpPort,
+                     std::string recordingsDir) {
+    // The same shelf the HTTP bench writes to, so a take saved from the TUI
+    // shows up in the analyzer picker without a restart.
+    RecordingStore recStore(std::move(recordingsDir));
     auto screen = ScreenInteractive::Fullscreen();
     // Never enable mouse reporting. This TUI is entirely keyboard-driven, and
     // FTXUI turns SGR mouse tracking ON by default — which the terminal only
@@ -434,6 +441,63 @@ int runMachineScreen(MachineSim& sim, SessionLog& log, uint16_t wsPort, uint16_t
              const size_t n = sim.exportIngress(path);
              return n ? fmt("exported %zu wire records -> %s", n, path.c_str())
                       : fmt("export FAILED: %s", path.c_str());
+         }},
+        // ---- async-tune shelf ----------------------------------------------
+        // Recording needs no start/stop verb: the wire recorder is ALWAYS on
+        // (MachineSim's ingress ring). `rec.new` is the "start a clean take"
+        // gesture and `rec.save` is the only thing that has to exist. The ring
+        // holds ~4096 commands — roughly 400 s of segments at a typical script
+        // rate — so a long scene keeps its END, not its beginning.
+        {"rec.save", "<name>", "save the wire recorder ring as a replayable recording",
+         [&](auto& a) {
+             if (a.empty()) return std::string("usage: rec.save <name>");
+             const std::string safe = RecordingStore::sanitizeName(a[0]);
+             if (safe.empty()) return std::string("rec.save: unusable name");
+             std::vector<std::string> lines;
+             char buf[256];
+             for (const auto& r : sim.copyIngressSince(-1.0f)) {
+                 MachineSim::formatIngressCsvRow(buf, sizeof(buf), r);
+                 lines.emplace_back(buf);
+             }
+             if (lines.empty()) return std::string("rec.save: nothing recorded — stream into the sim first");
+             const size_t n = recStore.write(safe, false, MachineSim::ingressCsvHeader(), lines);
+             if (n) return fmt("saved %zu commands -> %s", n, recStore.pathFor(safe, false).c_str());
+             return fmt("rec.save FAILED: cannot write %s%s", recStore.dir().c_str(),
+                        recStore.writable() ? "" : " (directory is NOT WRITABLE — relaunch "
+                                                   "elsewhere or pass --recordings <dir>)");
+         }},
+        {"rec.new", "", "clear the wire recorder — start a clean take",
+         [&](auto&) {
+             sim.resetIngress();
+             return std::string("wire recorder cleared — the next stream is the take");
+         }},
+        {"rec.list", "", "what is on the async-tune shelf",
+         [&](auto&) {
+             const auto items = recStore.list();
+             if (items.empty())
+                 return fmt("shelf empty (%s)%s", recStore.dir().c_str(),
+                            recStore.writable() ? "" : " — NOT WRITABLE");
+             std::string out = fmt("%zu on the shelf:", items.size());
+             for (const auto& i : items)
+                 out += fmt(" %s[%s,%u]", i.name.c_str(), i.is_run ? "run" : "rec", unsigned(i.rows));
+             return out;
+         }},
+        // ---- the 2026-07-30 arbiter rulings, live-switchable for A/B ------
+        // Both default to the FIXED behavior. They exist as toggles because the
+        // whole point of a bench is being able to put the old rule back and
+        // measure it, not because either is a matter of taste.
+        {"motion.safety", "<on|off>", "braking-distance safety filter (default ON)",
+         [&](auto& a) {
+             const bool on = a.empty() || a[0] != "off";
+             return fmt("safety filter %s", sim.uiSetSafetyFilter(on) ? "ON — the window is "
+                        "forward-invariant" : "OFF — plans may overshoot the window");
+         }},
+        {"motion.gentleaccel", "<on|off>", "OLD RULE: gentle ACCEL outside the window (default OFF)",
+         [&](auto& a) {
+             const bool on = !a.empty() && a[0] == "on";
+             return fmt("gentle accel outside window %s", sim.uiSetGentleAccelOutside(on)
+                        ? "ON — braking authority is withdrawn outside the window (the "
+                          "pre-fix firmware rule)" : "OFF — braking authority is never withdrawn");
          }},
         {"graph", "", "open the rendered graph/analyzer in the browser",
          [&](auto&) { openBrowser(analyzeUrl); return "graph popped out -> " + analyzeUrl; }},
@@ -713,6 +777,15 @@ int runMachineScreen(MachineSim& sim, SessionLog& log, uint16_t wsPort, uint16_t
             kv("amp bud", fmt("%.2f", double(c.infeasible_amplitude_budget))),
             kv("blend steps", fmt("%u", unsigned(c.infeasible_blend_steps))),
             kv("reshape st", fmt("%u", unsigned(c.infeasible_reshape_steps))),
+            // Arbiter-side, not slopmotion::Config — but this is the panel the
+            // operator reads before a take, and a safety rule that is off needs
+            // to be visible there, loudly.
+            // Color::Default and Color::Red are DIFFERENT palette enums, so a
+            // bare ternary between them has no common type — construct Color.
+            kv("safety filt", sim.safetyFilter() ? "on" : "OFF",
+               sim.safetyFilter() ? Color(Color::Default) : Color(Color::Red)),
+            kv("gentle acc", sim.gentleAccelOutside() ? "ON (old rule)" : "off",
+               sim.gentleAccelOutside() ? Color(Color::Red) : Color(Color::Default)),
             kv("scale margin", fmt("%.2f", double(c.infeasible_scale_margin))),
             kv("soften", fmt("%s  floor %.3f", onoff(c.infeasible_soften),
                              double(c.infeasible_soften_floor))),

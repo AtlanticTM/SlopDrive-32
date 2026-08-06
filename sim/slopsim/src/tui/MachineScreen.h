@@ -11,7 +11,10 @@
 namespace slopsim {
 
 // Blocks until the user quits (q / Ctrl-C). Returns process exit code.
-// httpPort feeds the /graph analyzer URL the `analyze` command opens.
-int runMachineScreen(MachineSim& sim, SessionLog& log, uint16_t wsPort, uint16_t httpPort);
+// httpPort feeds the /graph analyzer URL the `analyze` command opens;
+// recordingsDir is the async-tune shelf the rec.* palette commands write to
+// (empty = RecordingStore's default).
+int runMachineScreen(MachineSim& sim, SessionLog& log, uint16_t wsPort, uint16_t httpPort,
+                     std::string recordingsDir = {});
 
 }  // namespace slopsim

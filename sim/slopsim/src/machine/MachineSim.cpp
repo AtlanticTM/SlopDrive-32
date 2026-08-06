@@ -42,21 +42,9 @@ constexpr float kAccelCeiling = 100000.0f;   // mm/s^2   — EXPERT_MAX_ACCEL_MM
 constexpr float kJerkCeiling  = 50000000.0f; // mm/s^3   — EXPERT_MAX_JERK_MM_S3
                                              // (NORMAL is 10000000; same
                                              // expert-wide posture as above.)
-// Soft-start on the stream feed. Two DIFFERENT, opposite quantities, both from
-// include/system/config_api.h (~409-410):
-//   kSafeApproachSpeed — a FLOOR under the speed the sampler feeds FAS, so a
-//                        gentle ceiling never collapses to a crawl.
-//   kSafeResumeRampMs  — the window over which SystemState::safeSpeedCap ramps
-//                        the CEILING up from kSafeApproachSpeed after a
-//                        discontinuity (un-pause, new stream, homing done).
-constexpr float kSafeApproachSpeed = 100.0f; // mm/s   SAFE_APPROACH_SPEED_MM_S
-constexpr uint32_t kSafeResumeRampMs = 1200; // ms     SAFE_RESUME_RAMP_MS
-// SystemState::StreamSpeedMode. 0 is the DEVICE DEFAULT.
-constexpr uint8_t kSpeedCeilingPegged = 0;
-constexpr uint8_t kSpeedVelocityMatched = 1;
-// RangeMapper::setRange minimum window span (src/motion/range_mapper.cpp:27).
-constexpr float kMinWindowSpanMm = 5.0f;
-constexpr int16_t kSegNoEndVel = -32768;    // 0x0085 sentinel (SlopSyncCatalog)
+// kSafeApproachSpeed / kSafeResumeRampMs / kSpeedCeilingPegged /
+// kSpeedVelocityMatched / kMinWindowSpanMm / kSegNoEndVel are in MotionCore.h —
+// the replayer clamps by the same numbers.
 constexpr uint64_t kHomingDurationUs = 3'000'000;  // fake sensorless homing time
 
 // Arbiter sources (MotionSource enum values, MotionArbiter.h).
@@ -117,7 +105,7 @@ std::string_view fieldTstr(const IntentValueField* f, std::string_view dflt) {
     return dflt;
 }
 
-float clampf(float v, float lo, float hi) { return v < lo ? lo : (v > hi ? hi : v); }
+// clampf lives in MotionCore.h (slopsim::clampf) — shared with the replayer.
 
 // ---- fray-d Advanced pattern setters -- mirror PatternEngine::setApBase/
 // setApModifier (src/motion/PatternEngine.cpp) exactly, minus the Arduino
@@ -319,40 +307,40 @@ MachineSim::FacadeStats MachineSim::facadeStats() const {
 void MachineSim::deriveEngineLimits() {
     // Firmware glue derives the engine's normalized ceilings from the mm-domain
     // INPUT limit set across the stroke-window span.
-    slopmotion::Limits l;
-    const float span = windowSpan();
-    // v/a follow jerk's own "override wins when > 0" rule (main.cpp's
-    // smCfg.limits.vmax/amax derivation) via sm-set (0x3120) keys 2/3 —
-    // _vmax_norm/_amax_norm are sim-held for the SAME reason _jmax_norm is:
-    // this rebuild runs on every window/limit change and would otherwise
-    // clobber a standing override.
-    l.vmax = _vmax_norm > 0.0f ? _vmax_norm : _input_speed / span;
-    l.amax = _amax_norm > 0.0f ? _amax_norm : _input_accel / span;
-    // Jerk derives the SAME way as v/a now (mm-domain limit ÷ span). The
-    // normalized override (uiSetJmax / --jmax / motion.jmax) is sim-held so
-    // this rebuild can't clobber it, and wins when > 0 — firmware `jovr`.
-    l.jmax = _jmax_norm > 0.0f ? _jmax_norm : _input_jerk / span;
-    _engine.setLimits(l);
+    // The rule itself lives in MotionCore.h deriveLimits() so the replayer
+    // derives identically; the overrides (uiSetJmax / --jmax / sm-set keys 2/3)
+    // are sim-held so this rebuild — which runs on every window/limit change —
+    // cannot clobber a standing one.
+    _engine.setLimits(deriveLimits(arbiterGeometry(), _vmax_norm, _amax_norm, _jmax_norm));
 }
 
 // ---- Machine physics --------------------------------------------------------
 // Homing, pattern, the 1 ms sampler/stepper substep loop.
 
-// SystemState::safeSpeedCap, transcribed verbatim (SystemState.h ~403-412).
-float MachineSim::safeSpeedCap(float configured_max, uint32_t now_ms) const {
-    const uint32_t t0 = _resume_start_ms;
-    if (t0 == 0) return configured_max;
-    const uint32_t dt = now_ms - t0;
-    if (dt >= kSafeResumeRampMs) return configured_max;
-    if (configured_max <= kSafeApproachSpeed) return configured_max;
-    const float f = float(dt) / float(kSafeResumeRampMs);
-    return kSafeApproachSpeed + f * (configured_max - kSafeApproachSpeed);
+// safeSpeedCap and isOutsideWindow are in MotionCore.h next to applyArbiter,
+// which is their only caller on both the live and the replay path.
+ArbiterGeometry MachineSim::arbiterGeometry() const {
+    ArbiterGeometry g;
+    g.win_min_mm = _win_min_mm;
+    g.win_max_mm = _win_max_mm;
+    g.ceiling_mm = effectiveCeilingMm();
+    g.input_speed = _input_speed;
+    g.input_accel = _input_accel;
+    g.input_jerk = _input_jerk;
+    g.user_speed = _user_speed;
+    g.user_accel = _user_accel;
+    g.stream_speed_mode = _stream_speed_mode;
+    // Stated explicitly rather than inherited from the struct defaults — see the
+    // note on the setters in MachineSim.h.
+    g.safety_filter = _safety_filter;
+    g.gentle_accel_outside = _gentle_accel_outside;
+    return g;
 }
 
-// MotionArbiter::_isOutsideWindow (MotionArbiter.cpp ~315).
-bool MachineSim::isOutsideWindow(float p0_mm) const {
-    const float eps = 0.5f;  // sub-safety-zone slack, avoids edge chatter
-    return (p0_mm < _win_min_mm - eps) || (p0_mm > _win_max_mm + eps);
+bool MachineSim::uiSetSafetyFilter(bool on) { _safety_filter = on; return _safety_filter; }
+bool MachineSim::uiSetGentleAccelOutside(bool on) {
+    _gentle_accel_outside = on;
+    return _gentle_accel_outside;
 }
 
 void MachineSim::tickMachine(uint64_t now64) {
@@ -425,40 +413,20 @@ void MachineSim::tickMachine(uint64_t now64) {
             // the arbiter path is bypassed on the firmware too.
             _stepper.command(0.0f, 40.0f, 500.0f);
         } else if (_homed && !_paused && !_override && !_estop_latched) {
-            // ---- MotionArbiter::submitStreamSample, transcribed -------------
-            const float norm = clampf(_engine.positionAt(t), 0.0f, 1.0f);
+            // MotionArbiter::submitStreamSample — MotionCore.h applyArbiter().
+            // The two engine samples are pulled into NAMED LOCALS, in this
+            // order, deliberately: both positionAt() and velocityAt() run
+            // maybeSettle() and can therefore transition the engine, and C++
+            // leaves the evaluation order of call arguments UNSPECIFIED. Passing
+            // them inline would hand the compiler permission to sample velocity
+            // first — which is not what the machine did before this seam was
+            // extracted, and determinism here is the whole product.
+            const float norm     = _engine.positionAt(t);
             const float vel_norm = _engine.velocityAt(t);
-            // Window clamp, then the HARD machine envelope: measured stroke
-            // once homed, else the configured rail (effectiveCeilingMm).
-            float target_mm = clampf(normToMm(norm), _win_min_mm, _win_max_mm);
-            target_mm = clampf(target_mm, 0.0f, effectiveCeilingMm());
-
-            // Window-entry gentleness: a carriage OUTSIDE the window glides in
-            // on the USER (gentle) set, both speed AND accel.
-            const bool entering = isOutsideWindow(_stepper.positionMm());
-            float speed_ceiling = entering ? std::min(_input_speed, _user_speed) : _input_speed;
-            // Safe-approach soft start ramps the CEILING back up after a
-            // discontinuity — applied BEFORE the floor clamp below.
-            const float safe_cap = safeSpeedCap(speed_ceiling, uint32_t(t / 1000));
-            if (safe_cap < speed_ceiling) speed_ceiling = safe_cap;
-            const float accel_ceiling =
-                entering ? std::min(_input_accel, _user_accel) : _input_accel;
-            const float speed_floor = std::min(kSafeApproachSpeed, speed_ceiling);
-
-            float speed_mm_s;
-            if (_stream_speed_mode == kSpeedVelocityMatched) {
-                // FAS coasts the curve's own instantaneous speed.
-                speed_mm_s = std::fabs(vel_norm) * windowSpan();
-                if (speed_mm_s > speed_ceiling) speed_mm_s = speed_ceiling;
-                if (speed_mm_s < speed_floor) speed_mm_s = speed_floor;
-            } else {
-                // DEVICE DEFAULT — ceiling-pegged: constant speed, the 1 ms
-                // micro-target deltas shape the velocity. The follower keeps
-                // full authority, so it can actually recover lag.
-                speed_mm_s = speed_ceiling;
-                if (speed_mm_s < speed_floor) speed_mm_s = speed_floor;
-            }
-            _stepper.command(target_mm, speed_mm_s, accel_ceiling);
+            const auto sc = applyArbiter(arbiterGeometry(), norm, vel_norm,
+                                         _stepper.positionMm(), _resume_start_ms,
+                                         uint32_t(t / 1000));
+            _stepper.command(sc.target_mm, sc.speed_mm_s, sc.accel_mm_s2);
         }
         _stepper.step(0.001f);
 
@@ -469,19 +437,12 @@ void MachineSim::tickMachine(uint64_t now64) {
         if (_lastOdoVel <= -15.0f && v >= 15.0f) ++_strokes;  // bottom reversal = one stroke
         if (std::fabs(v) > 15.0f) _lastOdoVel = v;
 
-        // Sender-curve shadow, advanced on the SIM clock (not the machine's
-        // progress) and held at its endpoint once the span expires, which is
-        // what makes an overrun visible as raw-flat-while-planned-still-moving.
-        if (_raw_T > 0.0 && t >= _raw_start_us) {
-            double rt = double(t - _raw_start_us) * 1e-6;
-            if (rt > _raw_T) rt = _raw_T;
-            double rp, rv, ra;
-            slopmotion::Engine::evalCurve(_raw_c, _raw_T, rt / _raw_T, rp, rv, ra);
-            _trace_raw_norm = float(rp < 0.0 ? 0.0 : (rp > 1.0 ? 1.0 : rp));
-        }
-        // Motion trace (1 kHz): the graph pane + CSV export read this ring.
+        // Motion trace (1 kHz): the graph pane + CSV export read this ring. The
+        // sender curve is advanced on the SIM clock here, not on the machine's
+        // progress — see SenderCurve.
         _trace[_traceHead] = {float(double(t) / 1e6), _stepper.positionMm(), _stepper.targetMm(), v,
-                              _trace_cmd_norm, _trace_raw_norm};
+                              _trace_cmd_norm, _sender.sampleAt(t),
+                              float(uint8_t(_engine.planKind())), _engine.velocityAt(t)};
         _traceHead = (_traceHead + 1) % kTraceCap;
         if (_traceCount < kTraceCap) ++_traceCount;
     }
@@ -560,44 +521,6 @@ void MachineSim::applyWindowLegality(float min_mm, float max_mm) {
 // ---- Stream drain -----------------------------------------------------------
 // Transcription of SlopSyncHubService::drainMotionStream.
 
-// Rebuild the sender's own curve for this segment. See the state block in
-// MachineSim.h for why it is advanced in the sender's frame and never chases
-// the machine.
-void MachineSim::noteSenderCurve(const slopmotion::Command& cmd, uint64_t now64) {
-    // Chase points carry no span, so there is no curve to draw through them —
-    // leave the previous one to finish rather than inventing a shape.
-    if (!cmd.has_duration || cmd.duration_us == 0) return;
-    const double T = double(cmd.duration_us) * 1e-6;
-    const double target = cmd.target < 0.0f ? 0.0
-                        : (cmd.target > 1.0f ? 1.0 : double(cmd.target));
-    if (_raw_p < 0.0) {                       // anchor the sender frame once
-        _raw_p = double(_engine.snapshot(now64).pos);
-        _raw_v = 0.0;
-    }
-    const double vf = cmd.has_end_vel ? double(cmd.end_vel) : 0.0;
-    // af mirrors the engine's OWN backward-difference estimator (commitWaveform)
-    // so that raw and planned differ by FEASIBILITY only, never because the two
-    // lines guessed the sender's curvature differently. Ignored outright in C1,
-    // where a cubic takes no end acceleration.
-    double af = 0.0;
-    if (cmd.has_end_vel && _raw_prev_ok && now64 > _raw_prev_us) {
-        const double gap = double(now64 - _raw_prev_us) * 1e-6;
-        if (gap < 3.0 * T) af = (vf - _raw_prev_vf) / gap;
-    }
-    // Start acceleration is 0 in the sender's frame: the wire carries no such
-    // field, and a C1 cubic ignores it entirely. It only shades the C2 line.
-    slopmotion::Engine::senderCurve(
-        _engine.config().curve_policy == slopmotion::CurvePolicy::ForceC1,
-        _raw_p, _raw_v, 0.0, target, vf, af, T, _raw_c);
-    _raw_T         = T;
-    _raw_start_us  = now64;
-    _raw_p         = target;   // the sender's frame advances to ITS endpoint
-    _raw_v         = vf;
-    _raw_prev_vf   = vf;
-    _raw_prev_us   = now64;
-    _raw_prev_ok   = cmd.has_end_vel;
-}
-
 void MachineSim::drainMotionStream(uint64_t now64) {
     PacingEntry entry;
     while (_pacingRing.popDue(now64, entry)) {
@@ -641,6 +564,7 @@ void MachineSim::drainMotionStream(uint64_t now64) {
         cmd.has_end_vel = entry.has_end_vel;
         cmd.duration_us = entry.duration_us;
         cmd.has_duration = entry.has_duration;
+        cmd.client_curve_family = entry.curve_family;  // RFC-030: FollowClient's input
 
         // RFC-008 one-segment LOOKAHEAD — verbatim mirror of the firmware's
         // drainMotionStream. The engine owns the bound; ingress owns only "a
@@ -666,7 +590,13 @@ void MachineSim::drainMotionStream(uint64_t now64) {
         // window clamp the substep loop applies. Recorded on the accepted path
         // only — a sample the gates dropped above never became a command.
         _trace_cmd_norm = cmd.target;
-        noteSenderCurve(cmd, now64);
+        // The snapshot is behind the ternary on purpose — see SenderCurve::
+        // anchored(). Only the FIRST timed segment of a session may sample the
+        // engine here.
+        _sender.note(cmd, now64,
+                     slopmotion::resolveCubic(_engine.config().curve_policy,
+                                              cmd.client_curve_family),
+                     _sender.anchored() ? 0.0f : _engine.snapshot(now64).pos);
         if (!_engine.commit(cmd, now64)) ++_plan_rejected;
     }
 }
@@ -1564,7 +1494,7 @@ slopsync::Result<IntentValueMap, NackCode> MachineSim::applyIntent(uint16_t chan
             }
             if (const auto* f = findField(requested, 14)) {  // infeasible_policy
                 uint64_t v = fieldU64(f, uint64_t(cfg.infeasible_policy));
-                if (v > 4) v = 4;
+                if (v > slopmotion::kInfeasiblePolicyMax) v = slopmotion::kInfeasiblePolicyMax;
                 cfg.infeasible_policy = slopmotion::InfeasiblePolicy(v);
                 applied.fields[applied.count++] = {14, IntentValue::ofU64(v)};
                 any = true; touchedCfg = true;
@@ -1869,10 +1799,16 @@ void MachineSim::onSessionLeft(uint32_t session_id) {
 
 // Transcription of SlopDriveHubDelegate::onStreamBundle (fixed-offset decode,
 // nearest-window timestamp resolve, far-future clamp, 0x0085 sentinel).
-void MachineSim::onStreamBundle(uint16_t channel_id, uint32_t /*session_id*/,
+void MachineSim::onStreamBundle(uint16_t channel_id, uint32_t session_id,
                                 const slopsync::BundleView& bundle) {
     const bool isSegment = (channel_id == benchrig::ch::motion_segment || channel_id == ch::motion_segment);
     if (channel_id != benchrig::ch::motion_input && channel_id != ch::motion_input && !isSegment) return;
+
+    // RFC-030: the session's GRANTED (effective, post-curve_policy) family,
+    // looked up once per bundle and stamped on every segment entry below.
+    // Chase points never carry one — the family is a waveform-reconstruction
+    // concept and the engine only reads it on that path.
+    const uint8_t curveFamily = isSegment ? _hub.publishCurveFamily(session_id, channel_id) : 0;
 
     const int64_t now64 = int64_t(_clock.nowUs64());
     const uint32_t now32 = uint32_t(now64 & 0xFFFFFFFFll);
@@ -1898,9 +1834,15 @@ void MachineSim::onStreamBundle(uint16_t channel_id, uint32_t /*session_id*/,
         const auto sample = bundle.sample(i);
         const uint16_t rawTarget = slopsync::getU16(sample.subspan(0, 2));
 
+        // The scaling rule itself lives in MotionCore.h decodeWireSample(), so a
+        // saved recording replays through the identical arithmetic the wire got.
+        const uint16_t rawDurMs = isSegment ? slopsync::getU16(sample.subspan(2, 2)) : 0;
+        const int16_t  rawEndV  = int16_t(slopsync::getU16(sample.subspan(isSegment ? 4 : 2, 2)));
+
         PacingEntry e{};
+        const bool ok = decodeWireSample(isSegment, rawTarget, rawDurMs, rawEndV, e);
         e.due_us = uint64_t(now64 + int64_t(delta));
-        e.target = float(rawTarget) / 10000.0f;
+        e.curve_family = curveFamily;   // already 0 on the chase channel
 
         // ---- recorder row: RAW wire values first, decoded values after ------
         IngressRecord& r = recs[recN];
@@ -1908,45 +1850,26 @@ void MachineSim::onStreamBundle(uint16_t channel_id, uint32_t /*session_id*/,
         r.t_s = float(double(now64) / 1e6);
         r.channel_id = channel_id;
         r.raw_target = rawTarget;
+        r.raw_dur_ms = rawDurMs;
+        r.raw_end_vel = rawEndV;
         r.target = e.target;
         r.ts_clamped = clamped;
         r.wire_t_us = wireT;
         r.wire_t_off_us = wireT - bundle.tBase();
         r.due_us = e.due_us;
         r.due_delta_ms = float(double(int64_t(e.due_us) - now64) / 1000.0);
-
-        if (isSegment) {
-            const uint16_t rawDurMs = slopsync::getU16(sample.subspan(2, 2));
-            const int16_t rawEndV = int16_t(slopsync::getU16(sample.subspan(4, 2)));
-            r.raw_dur_ms = rawDurMs;
-            r.raw_end_vel = rawEndV;
-            if (rawDurMs == 0) {
-                ++badDuration;
-                r.accepted = false;   // recorded ANYWAY — a refused segment is
-                ++recN;               // exactly the kind of sender bug we hunt
-                continue;
-            }
-            e.has_duration = true;
-            e.duration_us = uint32_t(rawDurMs) * 1000u;
-            if (rawEndV == kSegNoEndVel) {
-                e.has_end_vel = false;
-            } else {
-                e.vel = float(rawEndV) / 1000.0f;
-                e.has_end_vel = true;
-            }
-            r.has_duration = true;
-            r.duration_us = e.duration_us;
-            r.has_end_vel = e.has_end_vel;
-            r.end_vel = e.has_end_vel ? e.vel : 0.0f;
-        } else {
-            const int16_t rawVel = int16_t(slopsync::getU16(sample.subspan(2, 2)));
-            e.vel = float(rawVel) / 1000.0f;
-            e.has_end_vel = (e.vel != 0.0f);
-            r.raw_end_vel = rawVel;
-            r.end_vel = e.vel;
-            r.has_end_vel = e.has_end_vel;
-        }
+        r.curve_family = curveFamily;
         ++recN;
+
+        if (!ok) {                // 0 ms segment duration: refused at decode
+            ++badDuration;
+            r.accepted = false;   // recorded ANYWAY — a refused segment is
+            continue;             // exactly the kind of sender bug we hunt
+        }
+        r.has_duration = e.has_duration;
+        r.duration_us = e.duration_us;
+        r.has_end_vel = e.has_end_vel;
+        r.end_vel = e.has_end_vel ? e.vel : 0.0f;
 
         if (_pacingRing.push(e)) ++ringDrops;
     }
@@ -2188,6 +2111,8 @@ std::vector<float> MachineSim::copyTraceSince(float since_s, float& max_rail, fl
         out.push_back(s.vel_mm_s);
         out.push_back(s.cmd_norm);
         out.push_back(s.raw_norm);
+        out.push_back(s.plan_kind);
+        out.push_back(s.eng_vel_norm);
     }
     return out;
 }
@@ -2271,21 +2196,26 @@ MachineSim::IngressStats MachineSim::ingressStats() const {
 }
 
 const char* MachineSim::ingressCsvHeader() {
+    // APPEND ONLY. loadRecording() reads columns positionally and ignores
+    // anything past the last one it knows, so a new column at the END keeps
+    // every recording already on the shelf replayable — which is the whole
+    // "adding more settings must not break previous runs" contract.
     return "t_s,ch,kind,raw_target,raw_dur_ms,raw_end_vel,target_norm,duration_ms,"
            "end_vel_norm,has_end_vel,accepted,ts_clamped,wire_t_off_us,wire_t_us,"
-           "due_us,due_delta_ms,gap_ms\n";
+           "due_us,due_delta_ms,gap_ms,curve_family\n";
 }
 
 void MachineSim::formatIngressCsvRow(char* buf, size_t cap, const IngressRecord& r) {
     const bool seg = (r.channel_id == benchrig::ch::motion_segment || r.channel_id == ch::motion_segment);
     std::snprintf(buf, cap,
-                  "%.6f,0x%04X,%s,%u,%u,%d,%.4f,%.3f,%.4f,%d,%d,%d,%u,%u,%llu,%.3f,%.3f\n",
+                  "%.6f,0x%04X,%s,%u,%u,%d,%.4f,%.3f,%.4f,%d,%d,%d,%u,%u,%llu,%.3f,%.3f,%u\n",
                   double(r.t_s), unsigned(r.channel_id), seg ? "segment" : "sample",
                   unsigned(r.raw_target), unsigned(r.raw_dur_ms), int(r.raw_end_vel),
                   double(r.target), double(r.duration_us) / 1000.0, double(r.end_vel),
                   r.has_end_vel ? 1 : 0, r.accepted ? 1 : 0, r.ts_clamped ? 1 : 0,
                   unsigned(r.wire_t_off_us), unsigned(r.wire_t_us),
-                  (unsigned long long)(r.due_us), double(r.due_delta_ms), double(r.gap_ms));
+                  (unsigned long long)(r.due_us), double(r.due_delta_ms), double(r.gap_ms),
+                  unsigned(r.curve_family));
 }
 
 size_t MachineSim::exportIngress(const std::string& path) const {

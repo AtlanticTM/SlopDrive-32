@@ -50,6 +50,8 @@ add_executable(slopsim
     src/net/MdnsAdvertiser.cpp
     src/common/OpenBrowser.cpp
     src/machine/MachineSim.cpp
+    src/machine/MotionReplay.cpp
+    src/machine/RecordingStore.cpp
     src/tui/MachineScreen.cpp
     # The firmware's own fray-d port — pure math (math.h only), no Arduino/
     # FreeRTOS deps, already host-tested. MachineSim reuses advpat::Settings

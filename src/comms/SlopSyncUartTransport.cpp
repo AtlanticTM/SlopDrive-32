@@ -132,23 +132,23 @@ void SlopSyncUartTransport::pushRx(const uint8_t* data, size_t len) {
 // ---- Bridge control channel -------------------------------------------------
 
 void SlopSyncUartPort::sendBridge(const uint8_t* payload, size_t len) {
-    uint8_t src[16];
-    uint8_t enc[24];
-    if (len + 1 > sizeof(src)) return;
-    src[0] = bridge::kSlot;
-    std::memcpy(src + 1, payload, len);
+    // Member scratch, not stack: diag data frames are 241 B (kOpDiagData) and
+    // the hub task's stack is not where 500 B of transient belongs (T1).
+    if (len + 1 > sizeof(_bridgeSrc)) return;
+    _bridgeSrc[0] = bridge::kSlot;
+    std::memcpy(_bridgeSrc + 1, payload, len);
 
     const size_t n = slopsync::cobsEncode(
-        std::span<const std::byte>(reinterpret_cast<const std::byte*>(src), len + 1),
-        std::span<std::byte>(reinterpret_cast<std::byte*>(enc), sizeof(enc)));
+        std::span<const std::byte>(reinterpret_cast<const std::byte*>(_bridgeSrc), len + 1),
+        std::span<std::byte>(reinterpret_cast<std::byte*>(_bridgeEnc), sizeof(_bridgeEnc)));
     if (n == 0) return;
-    enc[n] = 0x00;
+    _bridgeEnc[n] = 0x00;
     // Same refuse-never-block discipline as the per-slot path: a status frame
     // is a diagnostic, and stalling the hub tick to deliver one is worse than
     // losing it. The C5 re-reads state from the next status anyway.
     const int room = Serial2.availableForWrite();
     if (room < 0 || size_t(room) < n + 1) return;
-    Serial2.write(enc, n + 1);
+    Serial2.write(_bridgeEnc, n + 1);
 }
 
 void SlopSyncUartPort::handleBridgeOp(const uint8_t* body, size_t n) {
@@ -162,6 +162,38 @@ void SlopSyncUartPort::handleBridgeOp(const uint8_t* body, size_t n) {
             SLOGI("slopsync", "UART slot %u closed by bridge -- detach deferred", unsigned(s));
             _wantDetach[s].store(true, std::memory_order_release);
         }
+        return;
+    }
+
+    if (op == bridge::kOpDiagReq) {
+        // One bounded batch per request; the C5 paces by not asking again
+        // until its HTTP client drained the last one, so no flow control.
+        // Nothing here logs: a log line would append to the very archive
+        // being read.
+        uint32_t next = 0;
+        bool done = true;
+        size_t got = 0;
+        if (_diagSource && n >= 6) {
+            const uint32_t from = uint32_t(body[2]) | (uint32_t(body[3]) << 8) |
+                                  (uint32_t(body[4]) << 16) | (uint32_t(body[5]) << 24);
+            char tag[16] = {};
+            const size_t tlen = (n - 6) < sizeof(tag) - 1 ? (n - 6) : sizeof(tag) - 1;
+            memcpy(tag, body + 6, tlen);
+            got = _diagSource->diagRead(from, tag, _diagBuf, sizeof(_diagBuf), next, done);
+        }
+        // 240 B data frames, the bridge's proven sizing (kOtaChunkBytes note).
+        uint8_t frame[241];
+        frame[0] = bridge::kOpDiagData;
+        for (size_t off = 0; off < got; off += 240) {
+            const size_t len = (got - off) < 240 ? (got - off) : 240;
+            memcpy(frame + 1, _diagBuf + off, len);
+            sendBridge(frame, len + 1);
+        }
+        const uint8_t end[6] = {bridge::kOpDiagEnd,
+                                uint8_t(next), uint8_t(next >> 8),
+                                uint8_t(next >> 16), uint8_t(next >> 24),
+                                uint8_t(done ? 1 : 0)};
+        sendBridge(end, sizeof(end));
         return;
     }
 

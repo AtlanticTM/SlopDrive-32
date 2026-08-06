@@ -252,6 +252,18 @@ public:
     };
     void setOtaSink(IOtaSink* sink) { _otaSink = sink; }
 
+    // Diag archive pull source (kOpDiagReq), same injection pattern as
+    // IOtaSink: comms/ never reaches into system/.
+    struct IDiagSource {
+        virtual ~IDiagSource() = default;
+        // Fill buf with whole lines starting at cursor `from`, tag-filtered
+        // (empty tag = all). Sets next (the following request's from) and done.
+        virtual size_t diagRead(uint32_t from, const char* tag,
+                                char* buf, size_t cap,
+                                uint32_t& next, bool& done) = 0;
+    };
+    void setDiagSource(IDiagSource* src) { _diagSource = src; }
+
     // The hub task's ota_active guard skips this port; it MUST NOT while the
     // OTA is the one arriving here. Safe because a serial OTA's flash writes
     // run on the hub task too, so drain and write are serialized.
@@ -276,6 +288,16 @@ private:
     void handleBridgeOp(const uint8_t* body, size_t n);
 
     IOtaSink* _otaSink = nullptr;
+    IDiagSource* _diagSource = nullptr;
+    // One diag batch, filled and sent whole inside one kOpDiagReq dispatch.
+    // 2 KB fits the 8 KB TX buffer outright, so sendBridge never has to wait.
+    // Costs PSRAM, not internal RAM: the port lives inside the PSRAM-resident
+    // hub service.
+    char _diagBuf[2048]{};
+    // sendBridge encode scratch. Sized for the largest bridge frame (241 B
+    // kOpDiagData) plus COBS expansion; PSRAM with the rest of this object.
+    uint8_t _bridgeSrc[256]{};
+    uint8_t _bridgeEnc[264]{};
     slopsync::Hub* _hub = nullptr;
     SlopSyncUartTransport _slots[kSlots];
 

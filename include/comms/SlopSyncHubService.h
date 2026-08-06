@@ -342,6 +342,7 @@ public:
     // Serial OTA sink, injected by the composition root (main.cpp). The hub
     // service only forwards the pointer; it never touches the flash path.
     void setOtaSink(SlopSyncUartPort::IOtaSink* sink) { _uartPort.setOtaSink(sink); }
+    void setDiagSource(SlopSyncUartPort::IDiagSource* src) { _uartPort.setDiagSource(src); }
 #endif
 
 private:

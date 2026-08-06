@@ -40,6 +40,11 @@ public:
     // Whole newline-terminated lines into `buf` (cap >= 256). 0 when finished.
     size_t next(char* buf, size_t cap);
 
+    // Resume cursor (same value the footer prints as next=) and walk state,
+    // for machine consumers like the C5 bridge pull that must not parse text.
+    uint32_t cursor() const { return _expect; }
+    bool     finished() const { return _footed; }
+
 private:
     size_t   _i = 0;
     size_t   _end = 0;

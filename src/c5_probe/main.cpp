@@ -161,6 +161,15 @@ static volatile uint8_t  g_s3OtaReason = 0;
 static volatile uint16_t g_s3OtaSeq    = 0;
 static volatile uint32_t g_s3OtaStamp  = 0;
 
+// One diag batch (sd-0gy). Filled by pumpFromS3, consumed by diagS3Handler,
+// single-threaded because the handler owns the RX for the whole pull. 3 KB
+// holds the S3's 2 KB batch with framing slack.
+static uint8_t  g_diagBuf[3072];
+static size_t   g_diagLen = 0;
+static uint32_t g_diagNext = 0;
+static volatile bool g_diagDone = false;
+static volatile bool g_diagEndSeen = false;
+
 static void pumpFromS3() {
     // BULK read, not byte-at-a-time: read() takes the UART mutex per call, and
     // under an OTA stream this task fell far enough behind that its own acks
@@ -223,9 +232,9 @@ static void pumpFromS3() {
         if (n < 2) { g_rxDrops++; continue; }
         uint8_t slot = out[0];
 
-        // Bridge control coming BACK from the S3. Only OTA status uses this
-        // direction today. Cross-task: written here on the Arduino loop task,
-        // read by the httpd task in otaS3Handler.
+        // Bridge control coming BACK from the S3. Cross-task: written here on
+        // whichever task owns the RX (loop task, or the httpd task during an
+        // OTA/diag pull), read by the httpd handler.
         if (slot == bridge::kSlot) {
             if (n >= 6 && out[1] == bridge::kOpOtaStatus) {
                 g_s3OtaReason = out[3];
@@ -234,6 +243,19 @@ static void pumpFromS3() {
                 // Published LAST: the waiter spins on this changing, so every
                 // field above must already be visible when it does.
                 g_s3OtaStamp  = millis();
+            } else if (out[1] == bridge::kOpDiagData && n > 2) {
+                // Single-threaded by RX ownership: only the diag handler's own
+                // pumping reaches here while a pull is in flight.
+                const size_t len = n - 2;
+                if (g_diagLen + len <= sizeof(g_diagBuf)) {
+                    memcpy(g_diagBuf + g_diagLen, out + 2, len);
+                    g_diagLen += len;
+                }
+            } else if (n >= 7 && out[1] == bridge::kOpDiagEnd) {
+                g_diagNext = uint32_t(out[2]) | (uint32_t(out[3]) << 8) |
+                             (uint32_t(out[4]) << 16) | (uint32_t(out[5]) << 24);
+                g_diagDone = out[6] != 0;
+                g_diagEndSeen = true;   // published LAST, same rule as above
             }
             continue;
         }
@@ -750,6 +772,53 @@ static esp_err_t otaS3Handler(httpd_req_t* req) {
     return httpd_resp_sendstr(req, ok);
 }
 
+// ---- /api/diag[/<tag>] -- S3 diag archive over the bridge (sd-0gy) ----------
+// PULL loop: one bounded kOpDiagReq batch per round trip, forwarded to the
+// HTTP client before the next request goes out. Backpressure is the loop
+// itself; a dead client just stops the loop, and the S3 holds no state.
+// No auth on purpose: read-only diagnostics, same posture as the S3's own
+// /api/diag. The bridge stays a byte pipe -- nothing here parses the text.
+static esp_err_t diagS3Handler(httpd_req_t* req) {
+    if (g_otaOwnsRx) {
+        httpd_resp_set_status(req, "409 Conflict");
+        return httpd_resp_sendstr(req, "an OTA owns the link; retry after it");
+    }
+    // Tag = whatever follows "/api/diag/"; empty = the whole archive.
+    const char* tag = req->uri + strlen("/api/diag");
+    if (*tag == '/') ++tag;
+
+    OtaRxOwner rxOwner;   // loop() stands off; this handler drains the link
+    httpd_resp_set_type(req, "text/plain");
+
+    uint32_t from = 0;
+    for (;;) {
+        g_diagLen = 0;
+        g_diagEndSeen = false;
+        uint8_t reqf[5 + 15];
+        reqf[0] = bridge::kOpDiagReq;
+        reqf[1] = uint8_t(from);       reqf[2] = uint8_t(from >> 8);
+        reqf[3] = uint8_t(from >> 16); reqf[4] = uint8_t(from >> 24);
+        size_t tlen = strlen(tag); if (tlen > 15) tlen = 15;
+        memcpy(reqf + 5, tag, tlen);
+        while (!sendToS3(bridge::kSlot, reqf, 5 + tlen)) delay(1);
+
+        const uint32_t t0 = millis();
+        while (!g_diagEndSeen && millis() - t0 < 3000) { pumpFromS3(); delay(1); }
+        if (!g_diagEndSeen) {
+            httpd_resp_send_chunk(req, "\n[diag] S3 stopped answering mid-pull\n",
+                                  HTTPD_RESP_USE_STRLEN);
+            break;
+        }
+        if (g_diagLen != 0) {
+            if (httpd_resp_send_chunk(req, (const char*)g_diagBuf, g_diagLen) != ESP_OK)
+                break;   // client went away; the S3 holds nothing to clean up
+        }
+        if (g_diagDone) break;
+        from = g_diagNext;
+    }
+    return httpd_resp_send_chunk(req, nullptr, 0);
+}
+
 void setup() {
     Serial.begin(115200);
     delay(1500);
@@ -832,6 +901,9 @@ void setup() {
     http.ctrl_port        = 32770;   // distinct from the :82 instance
     http.max_open_sockets = 4;
     http.lru_purge_enable = true;
+    // Wildcard matcher for /api/diag*. Every other pattern here is
+    // wildcard-free, which under this matcher means exact-match -- unchanged.
+    http.uri_match_fn = httpd_uri_match_wildcard;
     if (httpd_start(&g_http80, &http) == ESP_OK) {
         httpd_uri_t pr{"/probe", HTTP_GET, probeHandler, nullptr, false, false, nullptr};
         httpd_register_uri_handler(g_http80, &pr);
@@ -845,6 +917,9 @@ void setup() {
         httpd_register_uri_handler(g_http80, &s3a);
         httpd_uri_t s3f{"/api/ota/s3/fs", HTTP_POST, otaS3Handler, nullptr, false, false, nullptr};
         httpd_register_uri_handler(g_http80, &s3f);
+        // S3 diag archive over the bridge; the * also matches the bare route.
+        httpd_uri_t dg{"/api/diag*", HTTP_GET, diagS3Handler, nullptr, false, false, nullptr};
+        httpd_register_uri_handler(g_http80, &dg);
     }
     report("S5 +httpd+ws");
 

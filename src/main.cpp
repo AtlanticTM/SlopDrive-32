@@ -156,6 +156,21 @@ struct SerialOtaSink final : slopdrive::SlopSyncUartPort::IOtaSink {
     bool     otaInFlight() const override { return otaService.otaSerialInFlight(); }
 };
 static SerialOtaSink g_serialOtaSink;
+
+// Diag-archive pull for the C5 bridge (sd-0gy): one bounded batch per request,
+// stateless -- the cursor rides the wire, so an abandoned pull costs nothing.
+struct SerialDiagSource final : slopdrive::SlopSyncUartPort::IDiagSource {
+    size_t diagRead(uint32_t from, const char* tag, char* buf, size_t cap,
+                    uint32_t& next, bool& done) override {
+        DiagRead rd(tag, from);
+        size_t used = 0, n = 0;
+        while (used < cap && (n = rd.next(buf + used, cap - used)) > 0) used += n;
+        next = rd.cursor();
+        done = rd.finished();
+        return used;
+    }
+};
+static SerialDiagSource g_serialDiagSource;
 #endif
 
 // servoModbus itself is declared above the motor-driver block so
@@ -1154,6 +1169,8 @@ void setup() {
 #if defined(UART_LINK_ENABLED)
             // OTA over the bridge control channel, NOT over SlopSync (RFC-057).
             slopSyncHub->setOtaSink(&g_serialOtaSink);
+            // Diag archive pull, same channel, same reasoning (sd-0gy).
+            slopSyncHub->setDiagSource(&g_serialDiagSource);
 #endif
             slopSyncHub->init();
             // RFC-029 §4: GET /uitoken on the SHARED WebServer — HTTP escapee #2,

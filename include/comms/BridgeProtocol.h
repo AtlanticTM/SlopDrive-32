@@ -30,6 +30,13 @@ enum Op : uint8_t {
     kOpOtaEnd     = 0x04,   // C5->S3  [crc32:u32le]          IEEE, over the plaintext image
     kOpOtaAbort   = 0x05,   // either  [reason]
     kOpOtaStatus  = 0x06,   // S3->C5  [state][detail][seq:u16le]
+    // Diag archive pull (sd-0gy). PULL-based on purpose: the C5 requests ONE
+    // bounded batch per round trip and does not ask again until its HTTP
+    // client took the last one, so the link needs no flow control and a dead
+    // client stalls nothing.
+    kOpDiagReq    = 0x07,   // C5->S3  [from:u32le][tag utf8...]  tag empty = all
+    kOpDiagData   = 0x08,   // S3->C5  [text bytes...]            whole lines
+    kOpDiagEnd    = 0x09,   // S3->C5  [next:u32le][done]         next -> next req's from
 };
 
 enum OtaTarget : uint8_t {

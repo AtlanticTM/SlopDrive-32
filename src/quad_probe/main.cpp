@@ -1054,7 +1054,70 @@ void setup() {
     }
     if (!linked) Serial.print("drive: NO MODBUS ANSWER at 19200 or 115200 -- check the RS485 link");
     Serial.println("");
-    Serial.println("READY -- 'd' dump, 'r' restore e-gear, 'w'/'W' save (W keeps 0x00=1), 'v' verified commit, 'z' back to pulse+dir, 'x' save-with-2, 'g' tests, 'q' full enable, 'm' MODBUS MOTION, 'n'/'N' MODBUS STREAM (N=fast+noecho), 'b' rebaud 115200, 'a' RAMP BURST (measure only), 'k'/'j' commit 0x03=60000/50000 to EEPROM (power-cycle after), 'S' accel sweep, 'F' FRAME-RATE sweep.");
+    Serial.println("READY -- 'd' dump, 'e' ENVELOPE 0x19=2 (sd-z05), 'u' 0x00=506 release (sd-opb), 'E' e-gear 4/1, 'r' restore e-gear, 'w'/'W' save (W keeps 0x00=1), 'v' verified commit, 'z' back to pulse+dir, 'x' save-with-2, 'g' tests, 'q' full enable, 'm' MODBUS MOTION, 'n'/'N' MODBUS STREAM (N=fast+noecho), 'b' rebaud 115200, 'a' RAMP BURST (measure only), 'k'/'j' commit 0x03=60000/50000 to EEPROM (power-cycle after), 'S' accel sweep, 'F' FRAME-RATE sweep.");
+}
+
+// ---- Rebaud envelope with 0x19=2 as payload (sd-z05 operator ruling) --------
+// The 129/506 pair is the only write path on this drive proven to reach
+// non-volatile storage (a rebaud survives power cycles with no 0x14). Same
+// sequence, mode register as payload. Also answers sd-opb: the sequence ENDS
+// with 0x00=506, so the post-read shows whether 506 exits the one-way door.
+void envelopeMode2() {
+    Serial.println("");
+    Serial.println("--- ENVELOPE 0x19=2 (rebaud sequence, mode as payload) ---");
+    uint16_t v = 0;
+    readRegs(0x19, 1, &v); Serial.printf("before: 0x19=%u", v); Serial.println("");
+    readRegs(0x04, 1, &v); Serial.printf("before: 0x04=%u (envelope stomps it with 129)", v); Serial.println("");
+    writeReg(0x00, 1);   delay(30);
+    writeReg(0x19, 2);   delay(30);
+    writeReg(0x04, 129); delay(30);
+    writeReg(0x00, 506); delay(100);
+    uint16_t m = 0, f = 0;
+    readRegs(0x00, 1, &m);
+    readRegs(0x19, 1, &f);
+    Serial.printf("after: 0x00=%u 0x19=%u", m, f);
+    Serial.println("");
+    Serial.println(m == 0 ? "0x00 reads 0 after 506 -- the door has an exit (sd-opb)"
+                          : "0x00 still nonzero after 506");
+    Serial.println("POWER-CYCLE THE DRIVE now, then 'd' -- 0x19=2 surviving is the pass.");
+    Serial.println("Then 'g' with the STOCK e-gear: quadrature reads ~6400, step/dir ~1600.");
+    Serial.println("Only after that pass, 'E' for the 4/1 gear (1600 is ambiguous at 4:1).");
+}
+
+// ---- 0x00=506 alone (sd-opb: is 506 the door's exit code?) ------------------
+void release506() {
+    Serial.println("");
+    Serial.println("--- 0x00=506 ALONE (door-exit candidate) ---");
+    uint16_t v = 0;
+    readRegs(0x00, 1, &v); Serial.printf("before: 0x00=%u", v); Serial.println("");
+    const bool ok = writeReg(0x00, 506);
+    delay(100);
+    readRegs(0x00, 1, &v);
+    Serial.printf("ack=%d | after: 0x00=%u", ok, v);
+    Serial.println("");
+    Serial.println(v == 0 ? "CLEARED -- releaseMotionArm() fix is one write (sd-opb)"
+                          : "not cleared -- fall through to sd-opb's other candidates");
+}
+
+// ---- Quadrature-resolution e-gear: 4/1, i.e. 32768/8192 REDUCED -------------
+// Live follow ratio in encoder mode; the manual warns a large NUMERATOR
+// degrades following, so the reduced fraction is the point. 2/1 is the next
+// rung (16384 counts/rev). RAM write; boot rewrites it if it does not persist.
+// NEVER 0x0A=0: that flips the drive into Modbus position mode.
+void egearQuad() {
+    Serial.println("");
+    Serial.println("--- E-GEAR 4/1 (8192 counts/rev on the 32768-count encoder) ---");
+    const bool a = writeReg(0x0A, 4);
+    delay(50);
+    const bool b = writeReg(0x0B, 1);
+    delay(50);
+    uint16_t ra = 0, rb = 0;
+    readRegs(0x0A, 1, &ra);
+    readRegs(0x0B, 1, &rb);
+    Serial.printf("acked %d/%d | readback 0x0A=%u 0x0B=%u", a, b, ra, rb);
+    Serial.println("");
+    Serial.println(ra == 4 && rb == 1 ? "SET -- run the Gray test with STOCK gear first; 'r' restores 32768/2048"
+                                      : "NOT set");
 }
 
 // Trigger-on-demand rather than run-at-boot: the banner is gone by the time a
@@ -1067,6 +1130,9 @@ void loop() {
     const int key = Serial.read();
     while (Serial.available()) Serial.read();
     if (key == 'd' || key == 'D') { dumpRegs(); return; }
+    if (key == 'e') { envelopeMode2(); return; }
+    if (key == 'E') { egearQuad(); return; }
+    if (key == 'u' || key == 'U') { release506(); return; }
     if (key == 'r' || key == 'R') { restoreEgear(); return; }
     if (key == 'w') { saveSpecialFn(false); return; }
     if (key == 'W') { saveSpecialFn(true);  return; }

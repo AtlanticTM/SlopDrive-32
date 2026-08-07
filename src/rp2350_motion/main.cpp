@@ -165,6 +165,10 @@ static bool stepperTick(struct repeating_timer*) {
             s_pos = s_rtTarget;
             s_vel = 0.0f;
             s_state = kStateIdle;
+            // Un-latch on landing: a latched retarget keeps the full trapezoid
+            // + emitter running every tick forever, and that load starves the
+            // SPI IRQ into ~20% torn frames (measured 2026-08-07).
+            s_rtActive = false;
         } else {
             const float vBrake = sqrtf(2.0f * s_rtAccel * adist);
             float vLim = (s_rtVmax < vBrake) ? s_rtVmax : vBrake;
@@ -402,6 +406,11 @@ static void spiSlaveBegin() {
     preloadStatus();
     txFlushAndArm();   // full block config; byte 0 of the first answer is real
     irq_set_exclusive_handler(SPI1_IRQ, spi1Irq);
+    // Above the alarm tick (default 0x80): a busy stepperTick otherwise blocks
+    // frame collection past the PL022's 8-byte FIFO and tears the frame. The
+    // tick tolerates the <=30 us preemption; the FIFO does not tolerate the
+    // reverse.
+    irq_set_priority(SPI1_IRQ, 0x40);
     irq_set_enabled(SPI1_IRQ, true);
 }
 

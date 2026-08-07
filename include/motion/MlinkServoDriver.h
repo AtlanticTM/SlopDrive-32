@@ -57,6 +57,8 @@ protected:
     void streamToSteps(int32_t target_steps,
                        uint32_t speed_steps_s,
                        uint32_t accel_steps_s2) override;
+    void streamSample(int32_t target_steps, float vel_steps_s,
+                      uint32_t speed_steps_s, uint32_t accel_steps_s2) override;
     void stop() override;
     void hardStop() override;
 
@@ -65,6 +67,7 @@ private:
               uint8_t (&in)[motionlink::kFrameBytes]);
     void sendOp(uint8_t op);
     void sendRetarget();
+    void sendSegment();
 
     // Link state (motorTask only)
     uint8_t  _seq = 0;
@@ -85,6 +88,27 @@ private:
     float _rt_a = 0.0f;
     bool  _rt_valid = false;
     bool  _rt_dirty = false;
+
+    // Segment-stream shadow (curve chase rides kOpSegment; retarget stays the
+    // point-move path). Writers: streamSample() on the sampler task, update()
+    // on motorTask -- both Core 1, so torn state is a preemption between two
+    // statements, never true concurrency. streamSample() orders its stores so
+    // _seg_mode reads true only after the chain fields are coherent.
+    bool     _seg_mode = false;
+    float    _chain_p = 0.0f;      // last shipped segment endpoint
+    float    _chain_v = 0.0f;
+    uint32_t _chain_ms = 0;
+    float    _samp_p = 0.0f;       // freshest arbiter sample
+    float    _samp_v = 0.0f;
+    uint32_t _samp_ms = 0;
+    uint8_t  _seg_frame[motionlink::kFrameBytes] = {};  // resend copy
+    uint8_t  _seg_seq = 0;
+    bool     _seg_unacked = false;
+
+    // Credit fields from the last CRC-valid status
+    uint16_t _runway_ms = 0;
+    uint8_t  _depth = 0;
+    uint8_t  _seq_echo = 0;
 
     bool _estop_pending = false;
     bool _clear_pending = false;

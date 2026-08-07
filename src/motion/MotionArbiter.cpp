@@ -155,11 +155,11 @@ bool MotionArbiter::submitStreamSample(float norm_pos, float norm_vel_per_s) {
     float speed_floor = fminf(SAFE_APPROACH_SPEED_MM_S, speed_ceiling);
 
     // ---- Speed feed — mode dependent ----------------------------------------
+    const float span_mm = _mapper.getMaxMm() - _mapper.getMinMm();
     float speed_mm_s;
     if (_state.stream_speed_mode == SystemState::SPEED_VELOCITY_MATCHED) {
         // Convert the interpolator's normalized units/second into mm/s across
         // the window span, so FAS coasts the cubic's exact instantaneous speed.
-        float span_mm = _mapper.getMaxMm() - _mapper.getMinMm();
         speed_mm_s = fabsf(norm_vel_per_s) * span_mm;
         if (speed_mm_s > speed_ceiling)  speed_mm_s = speed_ceiling;
         if (speed_mm_s < speed_floor)    speed_mm_s = speed_floor;
@@ -199,11 +199,15 @@ bool MotionArbiter::submitStreamSample(float norm_pos, float norm_vel_per_s) {
         }
     }
 
-    // ---- Dispatch to FAS ----------------------------------------------------
+    // ---- Dispatch to the driver ---------------------------------------------
     // Lockless, matching _planAndDispatch: all motor callers are Core-1 tasks
     // and streamToSteps() owns its own grit-cache statics. During active
     // streaming the sampler is the primary caller; pattern is gated off.
-    _motor.streamToSteps(target_steps, speed_steps_s, accel_steps_s2);
+    // Signed curve velocity in the native step frame (negated like
+    // target_steps above): remote-trajectory backends rebuild curve segments
+    // from it; the FAS default ignores it and chases position.
+    const float vel_native_s = -(norm_vel_per_s * span_mm) * _motor.nativePerMm();
+    _motor.streamSample(target_steps, vel_native_s, speed_steps_s, accel_steps_s2);
 
     // ---- Telemetry ----------------------------------------------------------
     _state.commanded_target_mm = target_mm;

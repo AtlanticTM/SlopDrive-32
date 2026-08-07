@@ -26,6 +26,7 @@ constexpr int8_t kSck = 7, kMiso = 10, kMosi = 38, kCs = 48, kIrq = 4;
 SPIClass s_spi(FSPI);
 constexpr uint32_t kTickMs = 10;
 constexpr uint32_t kRefreshMs = 100;
+constexpr uint32_t kStreamGapMs = 100;   // stream silence before re-anchoring
 }  // namespace
 
 void MlinkServoDriver::xfer(uint8_t (&out)[kFrameBytes],
@@ -60,6 +61,29 @@ void MlinkServoDriver::sendRetarget() {
     _last_cmd_ms = millis();
 }
 
+void MlinkServoDriver::sendSegment() {
+    // Hermite chunk covering [chain, sample]: the slave renders it over its
+    // wire duration, which is what preserves the stream's timeline.
+    uint8_t out[kFrameBytes] = {kOpSegment, ++_seq};
+    const uint32_t dur_us = (_samp_ms - _chain_ms) * 1000u;
+    memcpy(&out[2], &dur_us, 4);
+    memcpy(&out[6], &_chain_p, 4);
+    memcpy(&out[10], &_chain_v, 4);
+    memcpy(&out[14], &_samp_p, 4);
+    memcpy(&out[18], &_samp_v, 4);
+    uint8_t in[kFrameBytes] = {};
+    xfer(out, in);
+    // Keep the exact frame for loss recovery: same seq on resend, so the
+    // slave's dedup can drop the copy when only the ack was lost.
+    memcpy(_seg_frame, out, kFrameBytes);
+    _seg_seq = _seq;
+    _seg_unacked = true;
+    _chain_p = _samp_p;
+    _chain_v = _samp_v;
+    _chain_ms = _samp_ms;
+    _last_cmd_ms = millis();
+}
+
 void MlinkServoDriver::init() {
     pinMode(kCs, OUTPUT);
     digitalWrite(kCs, HIGH);
@@ -89,6 +113,9 @@ void MlinkServoDriver::update() {
     if (sane) {
         _state = in[0];
         _slave_flags = in[1];
+        _runway_ms = uint16_t(in[2]) | uint16_t(uint16_t(in[3]) << 8);
+        _depth = in[4];
+        _seq_echo = in[5];
         memcpy(&_pos_counts, &in[6], 4);
         memcpy(&_vel_counts, &in[10], 4);
         _status_fresh = true;
@@ -104,6 +131,31 @@ void MlinkServoDriver::update() {
         else if (sane) _clear_pending = false;
         return;
     }
+
+    if (_seg_mode) {
+        // This tick's ping reply was preloaded after the slave processed last
+        // tick's FINAL frame, so a landed segment echoes its seq here. On a
+        // miss, resend the SAME frame: the slave dedups by segment seq, so a
+        // lost-ack duplicate is dropped. (After ~256 straight losses the ping
+        // seq wraps onto the segment's; the link is long dead before that.)
+        if (_seg_unacked) {
+            if (sane && _seq_echo == _seg_seq) {
+                _seg_unacked = false;
+            } else {
+                uint8_t rein[kFrameBytes] = {};
+                xfer(_seg_frame, rein);
+                return;
+            }
+        }
+        // Credit contract: ship only into fresh status, spare ring depth, and
+        // runway below target -- the 10-20 ms standing cushion this maintains
+        // is what keeps segment boundaries off the underrun knife edge.
+        if (sane && _samp_ms != _chain_ms &&
+            _depth < kSegmentDepth && _runway_ms < kRunwayTargetMs)
+            sendSegment();
+        return;                       // segment mode never refreshes retargets
+    }
+
     if (_rt_valid && (_rt_dirty || now - _last_cmd_ms >= kRefreshMs))
         sendRetarget();
 }
@@ -111,6 +163,8 @@ void MlinkServoDriver::update() {
 void MlinkServoDriver::emergencyStop() {
     _estop_pending = true;
     _rt_valid = false;
+    _seg_mode = false;
+    _seg_unacked = false;
     if (_begun) sendOp(kOpEstop);     // motorTask context: safe, immediate
 }
 
@@ -134,6 +188,8 @@ void MlinkServoDriver::streamToSteps(int32_t target_steps,
     if (v < 1.0f) v = 1.0f;
     float a = float(accel_steps_s2);
     if (a < 1.0f) a = 1.0f;
+    _seg_mode = false;                // point move: retarget reclaims the wire
+    _seg_unacked = false;
     _rt_target = float(target_steps);
     _rt_v = v;
     _rt_a = a;
@@ -142,9 +198,44 @@ void MlinkServoDriver::streamToSteps(int32_t target_steps,
     _rt_dirty = true;
 }
 
+void MlinkServoDriver::streamSample(int32_t target_steps, float vel_steps_s,
+                                    uint32_t /*speed_steps_s*/,
+                                    uint32_t accel_steps_s2) {
+    // Curve chase rides kOpSegment: the slave renders Hermite chunks over
+    // their real durations, so the stream's own timeline IS the speed. The
+    // ceiling params are already baked into the sampled curve upstream
+    // (slopmotion Config); feeding them to a land-at-v=0 retarget instead is
+    // the sd-ar3 sprint-and-stop failure.
+    if (!_homed) return;
+    float v = vel_steps_s;
+    if (v >  kMaxCountsPerSec) v =  kMaxCountsPerSec;
+    if (v < -kMaxCountsPerSec) v = -kMaxCountsPerSec;
+    const uint32_t now = millis();
+    // (Re-)anchor at the live rendered position on entry or after a stream
+    // gap; a stale chain tail would ship one giant segment spanning the idle.
+    // Store order matters: update() may preempt between statements (same
+    // core), so _seg_mode flips true only after the chain is coherent.
+    if (!_seg_mode || now - _samp_ms > kStreamGapMs) {
+        _rt_valid = false;
+        _rt_dirty = false;
+        _seg_unacked = false;
+        _chain_p = _pos_counts;
+        _chain_v = 0.0f;
+        _chain_ms = now;
+        _samp_ms = now;
+        _seg_mode = true;
+    }
+    _samp_p = float(target_steps);
+    _samp_v = v;
+    _samp_ms = now;
+    _last_accel_native = accel_steps_s2;
+}
+
 void MlinkServoDriver::stop() {
     // Full stop clears homed (interface contract). Land where we are.
     _homed = false;
+    _seg_mode = false;
+    _seg_unacked = false;
     _rt_target = _pos_counts;
     _rt_v = kMaxCountsPerSec;
     if (_rt_a < 1.0f) _rt_a = 100000.0f;
@@ -153,6 +244,8 @@ void MlinkServoDriver::stop() {
 }
 
 void MlinkServoDriver::hardStop() {
+    _seg_mode = false;
+    _seg_unacked = false;
     _rt_target = _pos_counts;
     _rt_v = kMaxCountsPerSec;
     if (_rt_a < 1.0f) _rt_a = 100000.0f;
@@ -161,11 +254,15 @@ void MlinkServoDriver::hardStop() {
 }
 
 float MlinkServoDriver::getPosition() const {
-    return _pos_counts / AIM_STEPS_PER_MM;
+    // Native frame is NEGATED vs mm (endstop 0, front negative), same as
+    // every driver: report nativeToMm(-native), or the arbiter plans every
+    // move from a mirror-image p0 (the sd-ar3 phantom-distance bug).
+    return -_pos_counts / AIM_STEPS_PER_MM;
 }
 
 float MlinkServoDriver::getTargetPosition() const {
-    return (_rt_valid ? _rt_target : _pos_counts) / AIM_STEPS_PER_MM;
+    const float t = _seg_mode ? _samp_p : (_rt_valid ? _rt_target : _pos_counts);
+    return -t / AIM_STEPS_PER_MM;
 }
 
 int32_t MlinkServoDriver::mmToNative(float mm) const {

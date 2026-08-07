@@ -260,6 +260,10 @@ static void preloadStatus() {
 // ---- Frame processor (SPI IRQ context: short, no allocation) ----------------
 static uint32_t s_badCrc = 0;
 static uint32_t s_torn = 0;
+// Segment dedup: the master resends a segment with the SAME seq until the
+// status seq echo acks it, so a lost-ack resend of a segment that DID land
+// must be dropped here, not queued twice. >255 = none seen.
+static volatile uint16_t s_lastSegSeq = 0xFFFF;
 
 static void processFrame(uint8_t* data, size_t len) {
     // Whole verified frames only: a torn or corrupted frame is DROPPED, never
@@ -276,6 +280,7 @@ static void processFrame(uint8_t* data, size_t len) {
             s_estop = true;
             s_rtActive = false;
             s_head = s_tail = 0;
+            s_lastSegSeq = 0xFFFF;
             break;
         case kOpClear:
             s_estop = false;
@@ -283,9 +288,11 @@ static void processFrame(uint8_t* data, size_t len) {
             s_head = s_tail = 0;
             s_flags = 0;
             s_state = kStateIdle;
+            s_lastSegSeq = 0xFFFF;
             break;
         case kOpSegment: {
             if (len < 2 + kSegmentWireBytes) break;
+            if (data[1] == s_lastSegSeq) break;   // lost-ack resend duplicate
             if (ringDepth() >= kSegmentDepth) { s_flags |= kFlagOverflow; break; }
             Segment seg;
             memcpy(&seg.duration_us, data + 2, 4);
@@ -295,6 +302,7 @@ static void processFrame(uint8_t* data, size_t len) {
             memcpy(&seg.v1, data + 18, 4);
             s_ring[s_head % kSegmentDepth] = seg;
             s_head = uint8_t(s_head + 1);
+            s_lastSegSeq = data[1];               // only a QUEUED seq dedups
             s_flags &= uint8_t(~kFlagUnderran);
             s_rtActive = false;   // segments reclaim the renderer
             break;

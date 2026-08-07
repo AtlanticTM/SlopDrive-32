@@ -105,6 +105,16 @@ protected:
                                uint32_t speed_steps_s,
                                uint32_t accel_steps_s2)            = 0;
 
+    // Streamed-curve sample fast path. vel_steps_s = SIGNED curve velocity in
+    // the native step frame. Default = position chase via streamToSteps();
+    // remote-trajectory backends (mlink) MUST override -- chase micro-targets
+    // through a land-at-v=0 planner become sprint-and-stop (sd-ar3).
+    virtual void streamSample(int32_t target_steps, float vel_steps_s,
+                              uint32_t speed_steps_s, uint32_t accel_steps_s2) {
+        (void)vel_steps_s;
+        streamToSteps(target_steps, speed_steps_s, accel_steps_s2);
+    }
+
     virtual void stop()      = 0;    // full stop + cut power (also clears homed)
 
     virtual void hardStop()  = 0;    // immediate stop, motor stays powered

@@ -75,6 +75,10 @@ protected:
                        uint32_t accel_steps_s2) override {
         d().streamToSteps(target_steps, speed_steps_s, accel_steps_s2);
     }
+    void streamSample(int32_t target_steps, float vel_steps_s,
+                      uint32_t speed_steps_s, uint32_t accel_steps_s2) override {
+        d().streamSample(target_steps, vel_steps_s, speed_steps_s, accel_steps_s2);
+    }
     void stop()      override { d().stop(); }
     void hardStop()  override { d().hardStop(); }
 

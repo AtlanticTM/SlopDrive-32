@@ -174,6 +174,66 @@ struct SerialDiagSource final : slopdrive::SlopSyncUartPort::IDiagSource {
 static SerialDiagSource g_serialDiagSource;
 #endif
 
+#if defined(MOTION_PASSTHROUGH_BENCH)
+// ---- RP2350 bench SPI master (sd-dxy bring-up) ------------------------------
+// Drop-in pinout (docs/rp2350-wiring.md): the matrix remaps roles, the silk
+// lies. Manual CS; the slave answers each transaction with the status it
+// preloaded after the PREVIOUS one, so the first read is discarded.
+#include <SPI.h>
+#include "comms/MotionLinkProtocol.h"
+namespace mlink {
+constexpr int8_t kSck = 7, kMiso = 10, kMosi = 38, kCs = 48, kIrq = 4;
+SPIClass s_spi(FSPI);
+uint8_t s_seq = 0;
+bool s_begun = false;
+
+void begin() {
+    pinMode(kCs, OUTPUT);
+    digitalWrite(kCs, HIGH);
+    pinMode(kIrq, INPUT_PULLDOWN);
+    s_spi.begin(kSck, kMiso, kMosi, -1);
+    s_begun = true;
+    SLOGI("mlink", "bench SPI master up: SCK=%d MISO=%d MOSI=%d CS=%d IRQ=%d, %lu Hz",
+          kSck, kMiso, kMosi, kCs, kIrq, (unsigned long)motionlink::kSpiHz);
+}
+
+// One fixed-size transaction: send a frame, read back the slave's preload.
+void xfer(const uint8_t* out, uint8_t* in) {
+    static_assert(motionlink::kSpiMode == 1, "PL022 slave needs CPHA=1");
+    s_spi.beginTransaction(SPISettings(motionlink::kSpiHz, MSBFIRST, SPI_MODE1));
+    digitalWrite(kCs, LOW);
+    s_spi.transferBytes(out, in, motionlink::kFrameBytes);
+    digitalWrite(kCs, HIGH);
+    s_spi.endTransaction();
+}
+
+// 10 Hz ping; 0.5 Hz status line into the diag archive (tag mlink).
+void tick() {
+    if (!s_begun) return;
+    static uint32_t lastMs = 0;
+    const uint32_t now = millis();
+    if (now - lastMs < 100) return;
+    lastMs = now;
+
+    uint8_t out[motionlink::kFrameBytes] = {motionlink::kOpPing, ++s_seq};
+    uint8_t in[motionlink::kFrameBytes] = {};
+    xfer(out, in);
+
+    uint16_t runway = uint16_t(in[2]) | uint16_t(uint16_t(in[3]) << 8);
+    float pos = 0, vel = 0;
+    memcpy(&pos, &in[6], 4);
+    memcpy(&vel, &in[10], 4);
+    SLOGI_EVERY_MS(2000, "mlink",
+                   "rp2350 hex[0..15]: %02x %02x %02x %02x %02x %02x %02x %02x "
+                   "%02x %02x %02x %02x %02x %02x %02x %02x irq=%d",
+                   in[0], in[1], in[2], in[3], in[4], in[5], in[6], in[7],
+                   in[8], in[9], in[10], in[11], in[12], in[13], in[14], in[15],
+                   int(digitalRead(kIrq)));
+    (void)runway; (void)pos; (void)vel;
+}
+}  // namespace mlink
+#endif
+
 // servoModbus itself is declared above the motor-driver block so
 // ModbusServoDriver can bind to it — see the comment there.
 
@@ -731,6 +791,9 @@ static void httpTask(void* param) {
         TIME_STEP(encoderValidator.update(), "http:encValidator");
 #endif
         TIME_STEP(applogDrain(),          "http:logDrain");   // SlopLog ring -> web/serial sinks
+#if defined(MOTION_PASSTHROUGH_BENCH)
+        mlink::tick();   // 10 Hz ping; status lands in /api/diag/mlink
+#endif
 #if defined(FEATURE_RS485_MODBUS)
         // Plain bool read, safe whichever core owns the bus. The LED renders
         // false as Motion/Degraded: an unpowered drive blinks, unhomed sits.
@@ -1232,6 +1295,7 @@ void setup() {
     // route LAST, so no driver re-grabs them. Bench flag only; FAS still
     // believes it owns these pins, so do not command FAS motion here.
     motionPassthroughEnable();
+    mlink::begin();
     SLOGW("boot", "!!! MOTION_PASSTHROUGH_BENCH: drive pins belong to the RP2350, FAS is a bystander.");
 #endif
 

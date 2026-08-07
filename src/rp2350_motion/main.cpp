@@ -10,7 +10,10 @@
 //   generator is a PIO program clocked from the interpolator; the stub exists
 //   so the link, ring, credit, and settle logic are testable before PIO lands.
 #include <Arduino.h>
-#include <SPISlave.h>
+
+#include "hardware/gpio.h"
+#include "hardware/irq.h"
+#include "hardware/spi.h"
 
 #include "comms/MotionLinkProtocol.h"
 #include "slopglow/slopglow_core.hpp"
@@ -126,13 +129,14 @@ static void preloadStatus() {
     s_statusBuf[5] = s_lastSeq;
     memcpy(&s_statusBuf[6], (const void*)&s_pos, 4);
     memcpy(&s_statusBuf[10], (const void*)&s_vel, 4);
-    SPISlave1.setData(s_statusBuf, sizeof(s_statusBuf));
+    s_statusBuf[14] = 0xA5;          // alignment signature (bench)
+    s_statusBuf[15] = s_lastSeq;     // seq duplicate for offset hunting
     // Feed-me line: the producer paces on this, not on polling cadence.
     digitalWrite(PIN_IRQ, (rw < kRunwayLowMs && !s_estop) ? HIGH : LOW);
 }
 
-// ---- SPI callbacks (IRQ context: short, no allocation) ----------------------
-static void onRecv(uint8_t* data, size_t len) {
+// ---- Frame processor (SPI IRQ context: short, no allocation) ----------------
+static void processFrame(uint8_t* data, size_t len) {
     if (len < 2) return;
     s_lastSeq = data[1];
     switch (data[0]) {
@@ -165,7 +169,77 @@ static void onRecv(uint8_t* data, size_t len) {
     }
 }
 
-static void onSent() { preloadStatus(); }
+// ---- Raw PL022 slave (arduino-pico's SPISlave never fires on RP2350 --
+// proven by the wire probe: cs/sck/mosi all arriving, zero callbacks) --------
+// The IRQ drains RX into a frame buffer and keeps TX fed from the status
+// snapshot; loop() resyncs byte counters whenever CS idles high (readable
+// via SIO regardless of the pin's SPI funcsel).
+static uint8_t s_rxFrame[kFrameBytes];
+static volatile uint8_t s_rxCount = 0;
+static volatile uint8_t s_txIdx = 0;
+
+static void feedTx() {
+    while (spi_is_writable(spi1) && s_txIdx < kFrameBytes)
+        spi_get_hw(spi1)->dr = s_statusBuf[s_txIdx++];
+}
+
+// SSE-cycle TX flush, then arm a fresh reply from byte 0. Re-establishes
+// alignment BY CONSTRUCTION every frame: leftovers in the TX FIFO shifted
+// every reply by one FIFO depth (measured: seq at byte 13, +8 from home).
+static void txFlushAndArm() {
+    hw_clear_bits(&spi_get_hw(spi1)->cr1, SPI_SSPCR1_SSE_BITS);
+    hw_set_bits(&spi_get_hw(spi1)->cr1, SPI_SSPCR1_SSE_BITS);
+    s_txIdx = 0;
+    feedTx();
+}
+
+static volatile uint32_t s_irqCount = 0;
+static volatile uint32_t s_bytesDrained = 0;
+static volatile uint8_t s_maxRx = 0;
+
+static void spi1Irq() {
+    s_irqCount = s_irqCount + 1;
+    // Collect the WHOLE frame inside this one entry: bytes land 1 us apart at
+    // 8 MHz, and the level-IRQ refire proved unreliable mid-burst (one
+    // delivery per transaction, measured) -- so spin out the remaining ~30 us
+    // here, interleaving TX refill so the full 32 B status answers. Bail when
+    // CS rises with the frame short (torn transaction; resync handles it).
+    uint32_t idle = 0;
+    while (s_rxCount < kFrameBytes) {
+        if (spi_is_readable(spi1)) {
+            s_rxFrame[s_rxCount] = uint8_t(spi_get_hw(spi1)->dr);
+            s_rxCount = uint8_t(s_rxCount + 1);
+            s_bytesDrained = s_bytesDrained + 1;
+            if (s_rxCount > s_maxRx) s_maxRx = s_rxCount;
+            idle = 0;
+        } else {
+            if (gpio_get(PIN_SPI_CS) || ++idle > 4000) break;
+        }
+        feedTx();
+    }
+    if (s_rxCount >= kFrameBytes) {
+        processFrame(s_rxFrame, kFrameBytes);
+        preloadStatus();
+        s_rxCount = 0;
+        txFlushAndArm();   // aligned answer for the next transaction
+    }
+}
+
+static void spiSlaveBegin() {
+    spi_init(spi1, kSpiHz);
+    spi_set_slave(spi1, true);
+    static_assert(kSpiMode == 1, "PL022 slave needs CPHA=1 for held-low CS");
+    spi_set_format(spi1, 8, SPI_CPOL_0, SPI_CPHA_1, SPI_MSB_FIRST);
+    gpio_set_function(PIN_SPI_RX, GPIO_FUNC_SPI);
+    gpio_set_function(PIN_SPI_SCK, GPIO_FUNC_SPI);
+    gpio_set_function(PIN_SPI_TX, GPIO_FUNC_SPI);
+    gpio_set_function(PIN_SPI_CS, GPIO_FUNC_SPI);
+    preloadStatus();
+    txFlushAndArm();   // byte 0 of the very first answer is real
+    spi_get_hw(spi1)->imsc = SPI_SSPIMSC_RXIM_BITS | SPI_SSPIMSC_RTIM_BITS;
+    irq_set_exclusive_handler(SPI1_IRQ, spi1Irq);
+    irq_set_enabled(SPI1_IRQ, true);
+}
 
 // ---- SlopGlow on the onboard WS2812 -----------------------------------------
 static Adafruit_NeoPixel s_px(1, PIN_WS2812, NEO_GRB + NEO_KHZ800);
@@ -189,7 +263,44 @@ static PixelOut s_pixel;
 static slopglow::GlowEngine s_glow(s_pixel);
 static slopglow::HeartbeatSource* s_glowHb = nullptr;
 
+
+#if defined(MLINK_WIRE_PROBE)
+// ---- Wire probe (no scope on the bench): counts what actually arrives -------
+// SPI is NOT initialized in this build; the pads are plain inputs. CS falls
+// are counted by interrupt (10 Hz, easy); SCK/MOSI are 8 MHz bursts, so a
+// tight poll just answers "any activity this second".
+static volatile uint32_t s_csFalls = 0;
+static void csIsr() { s_csFalls = s_csFalls + 1; }
+
 void setup() {
+    Serial.begin(115200);
+    pinMode(PIN_SPI_CS, INPUT);
+    pinMode(PIN_SPI_SCK, INPUT);
+    pinMode(PIN_SPI_RX, INPUT);
+    pinMode(PIN_IRQ, OUTPUT);
+    digitalWrite(PIN_IRQ, HIGH);   // keep the S3's irq=1 liveness tell
+    attachInterrupt(digitalPinToInterrupt(PIN_SPI_CS), csIsr, FALLING);
+    s_px.begin();
+}
+
+void loop() {
+    const uint32_t c0 = s_csFalls;
+    bool sck = false, mosi = false;
+    const uint32_t t0 = millis();
+    while (millis() - t0 < 1000) {
+        if (digitalRead(PIN_SPI_SCK)) sck = true;
+        if (digitalRead(PIN_SPI_RX)) mosi = true;
+    }
+    const uint32_t falls = s_csFalls - c0;
+    Serial.printf("[probe] cs_falls=%lu/s sck_activity=%d mosi_activity=%d\n",
+                  (unsigned long)falls, int(sck), int(mosi));
+    // Pixel verdict: green = CS arriving, red = silent bus.
+    s_px.setPixelColor(0, falls ? 0 : 40, falls ? 40 : 0, 0);
+    s_px.show();
+}
+#else
+void setup() {
+    Serial.begin(115200);   // USB CDC status; printf is the Zero's only log
     pinMode(PIN_IRQ, OUTPUT);
     digitalWrite(PIN_IRQ, LOW);
     pinMode(PIN_STEP, OUTPUT);
@@ -201,14 +312,7 @@ void setup() {
     s_glow.requireReady(uint8_t(1u << uint8_t(slopglow::System::Link)));
     s_glowHb = s_glow.addHeartbeat(500);
 
-    SPISlave1.setRX(PIN_SPI_RX);
-    SPISlave1.setCS(PIN_SPI_CS);
-    SPISlave1.setSCK(PIN_SPI_SCK);
-    SPISlave1.setTX(PIN_SPI_TX);
-    SPISlave1.onDataRecv(onRecv);
-    SPISlave1.onDataSent(onSent);
-    preloadStatus();
-    SPISlave1.begin(SPISettings(kSpiHz, MSBFIRST, SPI_MODE0));
+    spiSlaveBegin();
 
     add_repeating_timer_us(-int32_t(kTickUs), stepperTick, nullptr, &s_tick);
 }
@@ -221,8 +325,32 @@ void loop() {
                s_state == kStateRunning   ? Status::Working
                : (s_flags & kFlagUnderran) ? Status::Degraded
                                            : Status::Nominal);
+    // CS idle-high resync, TORN RX ONLY (txIdx>0 with a loaded FIFO is the
+    // normal between-transaction state; re-zeroing it here served duplicate
+    // bytes). A tear flushes BOTH FIFOs: SSE cycle is the only TX flush.
+    if (gpio_get(PIN_SPI_CS) && s_rxCount != 0) {
+        irq_set_enabled(SPI1_IRQ, false);
+        while (spi_is_readable(spi1)) (void)spi_get_hw(spi1)->dr;
+        s_rxCount = 0;
+        preloadStatus();
+        txFlushAndArm();
+        irq_set_enabled(SPI1_IRQ, true);
+    }
     preloadStatus();   // refresh runway/IRQ even between transactions
+    static uint32_t lastPrint = 0;
+    if (millis() - lastPrint >= 1000) {
+        lastPrint = millis();
+        Serial.printf("[mlink] lastSeq=%u irqs=%lu drained=%lu maxRx=%u "
+                      "imsc=0x%02lx ris=0x%02lx sspsr=0x%02lx cs=%d\n",
+                      unsigned(s_lastSeq), (unsigned long)s_irqCount,
+                      (unsigned long)s_bytesDrained, unsigned(s_maxRx),
+                      (unsigned long)spi_get_hw(spi1)->imsc,
+                      (unsigned long)spi_get_hw(spi1)->ris,
+                      (unsigned long)spi_get_hw(spi1)->sr,
+                      int(gpio_get(PIN_SPI_CS)));
+    }
     s_glowHb->pulse();
     s_glow.update(millis());
     delay(2);
 }
+#endif  // MLINK_WIRE_PROBE

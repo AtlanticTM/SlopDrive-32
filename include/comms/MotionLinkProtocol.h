@@ -13,6 +13,7 @@
 // See: dev board sd-dxy (wiring, buffer rulings), .claude/rules/transport.md.
 #pragma once
 
+#include <cstddef>
 #include <cstdint>
 
 namespace motionlink {
@@ -20,6 +21,12 @@ namespace motionlink {
 // Fixed-size transactions keep the SPI slave trivial: every master transfer
 // is kFrameBytes out, kFrameBytes back (the slave's preloaded status).
 inline constexpr uint32_t kSpiHz = 8000000;   // clean /10 of the S3's 80 MHz APB
+// MODE 1 (CPHA=1) IS LOAD-BEARING: the RP2350's PL022 slave in mode 0
+// requires CS to pulse between EVERY word, so a continuous-CS 32-byte burst
+// delivers exactly one byte (measured 2026-08-06: maxRx=1 per transaction).
+// CPHA=1 latches on the trailing edge and survives held-low CS. Both ends
+// read this constant; changing it on one side kills the link.
+inline constexpr uint8_t kSpiMode = 1;
 inline constexpr size_t kFrameBytes = 32;
 
 // Master -> slave: [op:u8][seq:u8][payload...]

@@ -59,12 +59,8 @@ static struct repeating_timer s_tick;
 static constexpr uint32_t kTickUs = 50;   // 20 kHz stub cadence
 
 static bool stepperTick(struct repeating_timer*) {
-    // STEP falls here, one tick after it rose: ~50 us high with ZERO stall in
-    // this ISR. Never busy-wait here: a 20 us wait held off the SPI IRQ past
-    // the PL022's 8-byte RX FIFO (8 us at 8 MHz) and tore frames.
-    // ponytail: at the 20 kstep/s stub cap the low gap shrinks toward the
-    // drive's 1.2 us floor -- the PIO stepgen (sd-dxy) replaces this.
-    digitalWrite(PIN_STEP, LOW);
+    // Never busy-wait in this ISR: a 20 us wait held off the SPI IRQ past the
+    // PL022's 8-byte RX FIFO (8 us at 8 MHz) and tore frames.
     if (s_estop) { s_state = kStateEstop; return true; }   // hold: no motion
 
     if (ringDepth() == 0) {
@@ -108,8 +104,13 @@ static bool stepperTick(struct repeating_timer*) {
     // caps the stub at 20 kstep/s -- fine for bring-up, PIO removes the cap.
     const float delta = s_pos - s_emitted;
     if (delta >= 1.0f || delta <= -1.0f) {
-        digitalWrite(PIN_DIR, delta > 0 ? HIGH : LOW);
-        digitalWrite(PIN_STEP, HIGH);   // cleared at the next tick's entry
+        // QUADRATURE A/B levels (drive saved in encoder-follow, 0x19=2):
+        // one Gray transition per count, A leads B = forward. Step/dir no
+        // longer drives the motor. ponytail: 20 k counts/s cap, PIO replaces.
+        static uint8_t s_phase = 0;
+        s_phase = uint8_t((s_phase + ((delta > 0) ? 1u : 3u)) & 3u);
+        digitalWrite(PIN_STEP, (s_phase == 1 || s_phase == 2) ? HIGH : LOW);  // A
+        digitalWrite(PIN_DIR,  (s_phase == 2 || s_phase == 3) ? HIGH : LOW);  // B
         s_emitted += (delta > 0) ? 1.0f : -1.0f;
     }
 

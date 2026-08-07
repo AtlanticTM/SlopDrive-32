@@ -19,12 +19,15 @@
 
 using namespace motionlink;
 
-// ---- Pins (RP2350-Zero; SPI0's canonical GP0..3 set) ------------------------
-static constexpr uint8_t PIN_SPI_RX  = 0;   // S3 MOSI (GPIO38) -> here
-static constexpr uint8_t PIN_SPI_CS  = 1;   // S3 CS   (GPIO4)
-static constexpr uint8_t PIN_SPI_SCK = 2;   // S3 SCK  (GPIO48)
-static constexpr uint8_t PIN_SPI_TX  = 3;   // -> S3 MISO (GPIO10)
-static constexpr uint8_t PIN_IRQ     = 4;   // -> S3 IRQ (GPIO7), active HIGH
+// ---- Pins (RP2350-Zero) -----------------------------------------------------
+// SPI1 corner cluster (operator loom preference). RP2350 pins carry FIXED
+// SPI roles by position (mod 4: RX, CSn, SCK, TX), so within GP26..29+15 the
+// legal set is exactly this; SCK cannot land on 29 nor CS on 15.
+static constexpr uint8_t PIN_SPI_RX  = 28;  // S3 MOSI (GPIO38) -> here
+static constexpr uint8_t PIN_SPI_CS  = 29;  // S3 CS   (GPIO4)
+static constexpr uint8_t PIN_SPI_SCK = 26;  // S3 SCK  (GPIO48)
+static constexpr uint8_t PIN_SPI_TX  = 27;  // -> S3 MISO (GPIO10)
+static constexpr uint8_t PIN_IRQ     = 15;  // -> S3 IRQ (GPIO7), active HIGH
 static constexpr uint8_t PIN_STEP    = 7;   // -> S3 GPIO1 (matrix -> drive PUL)
 static constexpr uint8_t PIN_DIR     = 8;   // -> S3 GPIO2 (matrix -> drive DIR)
 static constexpr uint8_t PIN_WS2812  = 16;  // RP2350-Zero onboard pixel
@@ -123,7 +126,7 @@ static void preloadStatus() {
     s_statusBuf[5] = s_lastSeq;
     memcpy(&s_statusBuf[6], (const void*)&s_pos, 4);
     memcpy(&s_statusBuf[10], (const void*)&s_vel, 4);
-    SPISlave.setData(s_statusBuf, sizeof(s_statusBuf));
+    SPISlave1.setData(s_statusBuf, sizeof(s_statusBuf));
     // Feed-me line: the producer paces on this, not on polling cadence.
     digitalWrite(PIN_IRQ, (rw < kRunwayLowMs && !s_estop) ? HIGH : LOW);
 }
@@ -198,14 +201,14 @@ void setup() {
     s_glow.requireReady(uint8_t(1u << uint8_t(slopglow::System::Link)));
     s_glowHb = s_glow.addHeartbeat(500);
 
-    SPISlave.setRX(PIN_SPI_RX);
-    SPISlave.setCS(PIN_SPI_CS);
-    SPISlave.setSCK(PIN_SPI_SCK);
-    SPISlave.setTX(PIN_SPI_TX);
-    SPISlave.onDataRecv(onRecv);
-    SPISlave.onDataSent(onSent);
+    SPISlave1.setRX(PIN_SPI_RX);
+    SPISlave1.setCS(PIN_SPI_CS);
+    SPISlave1.setSCK(PIN_SPI_SCK);
+    SPISlave1.setTX(PIN_SPI_TX);
+    SPISlave1.onDataRecv(onRecv);
+    SPISlave1.onDataSent(onSent);
     preloadStatus();
-    SPISlave.begin(SPISettings(kSpiHz, MSBFIRST, SPI_MODE0));
+    SPISlave1.begin(SPISettings(kSpiHz, MSBFIRST, SPI_MODE0));
 
     add_repeating_timer_us(-int32_t(kTickUs), stepperTick, nullptr, &s_tick);
 }

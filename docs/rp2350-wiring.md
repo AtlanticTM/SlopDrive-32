@@ -6,17 +6,22 @@ onto the S3's two unpopulated JSTs. The RP2350 pin choices are the Zero's
 constants in [`src/rp2350_motion/main.cpp`](../src/rp2350_motion/main.cpp)
 exactly -- solder to this table and the firmware needs no edits.
 
+The link rides the **SPI1 corner cluster** (GP26-29 + GP15). RP2350 pins
+carry fixed SPI roles by position (pin mod 4: RX, CSn, SCK, TX), so within
+that cluster the legal assignment is exactly the one below: SCK cannot land
+on GP29, CS cannot land on GP15, and the IRQ (plain GPIO) takes GP15.
+
 ## S3DISP -- JST-XH 7p (power + SPI link)
 
 | pin | S3 net | S3 GPIO | wire to RP2350-Zero | role |
 |----:|--------|--------:|---------------------|------|
 | 1 | GND | - | **GND** | common ground -- connect FIRST, remove LAST |
 | 2 | 3V3 | - | **3V3** | powers the Zero from the S3 (see the USB note) |
-| 3 | SCK | 48 | **GP2** (SPI0 SCK) | SPI clock, S3 master |
-| 4 | MOSI | 38 | **GP0** (SPI0 RX) | S3 -> RP data (segments, ops) |
-| 5 | RST | 10 | **GP3** (SPI0 TX) | RP -> S3 data (status/runway) = S3's MISO |
-| 6 | DC | 7 | **GP4** | IRQ, RP -> S3, active HIGH ("feed me" under 4 ms runway) |
-| 7 | CS | 4 | **GP1** (SPI0 CSn) | chip select, S3 master |
+| 3 | SCK | 48 | **GP26** (SPI1 SCK) | SPI clock, S3 master |
+| 4 | MOSI | 38 | **GP28** (SPI1 RX) | S3 -> RP data (segments, ops) |
+| 5 | RST | 10 | **GP27** (SPI1 TX) | RP -> S3 data (status/runway) = S3's MISO |
+| 6 | DC | 7 | **GP15** | IRQ, RP -> S3, active HIGH ("feed me" under 4 ms runway) |
+| 7 | CS | 4 | **GP29** (SPI1 CSn) | chip select, S3 master |
 
 ## S3BTN -- JST-XH 5p (pulse return)
 
@@ -41,19 +46,19 @@ graph LR
     end
 
     subgraph RP["Waveshare RP2350-Zero"]
-        SPI0["SPI0 slave<br/>GP0 RX / GP1 CS / GP2 SCK / GP3 TX"]
-        IRQ["GP4 IRQ out"]
+        SPI1["SPI1 slave<br/>GP28 RX / GP29 CS / GP26 SCK / GP27 TX"]
+        IRQ["GP15 IRQ out"]
         STEP["GP7 STEP out"]
         DIRO["GP8 DIR out"]
         PX["GP16 WS2812<br/>(onboard, fleet grammar)"]
     end
 
     DISP -- "1 GND / 2 3V3" --> RP
-    DISP -- "3 SCK(48) -> GP2" --> SPI0
-    DISP -- "4 MOSI(38) -> GP0" --> SPI0
-    SPI0 -- "GP3 -> 5 RST(10) = MISO" --> DISP
-    IRQ -- "GP4 -> 6 DC(7)" --> DISP
-    DISP -- "7 CS(4) -> GP1" --> SPI0
+    DISP -- "3 SCK(48) -> GP26" --> SPI1
+    DISP -- "4 MOSI(38) -> GP28" --> SPI1
+    SPI1 -- "GP27 -> 5 RST(10) = MISO" --> DISP
+    IRQ -- "GP15 -> 6 DC(7)" --> DISP
+    DISP -- "7 CS(4) -> GP29" --> SPI1
 
     STEP -- "GP7 -> 2 CLICK(GPIO1)" --> BTN
     DIRO -- "GP8 -> 3 BACK(GPIO2)" --> BTN

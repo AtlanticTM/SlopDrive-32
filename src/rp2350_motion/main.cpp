@@ -93,7 +93,10 @@ static bool stepperTick(struct repeating_timer*) {
     if (delta >= 1.0f || delta <= -1.0f) {
         digitalWrite(PIN_DIR, delta > 0 ? HIGH : LOW);
         digitalWrite(PIN_STEP, HIGH);
-        busy_wait_us_32(2);   // drive input wants >1.2 us high time
+        // 20 us high: drive needs >1.2 us; the width exists for bench LEDs on
+        // the step line. ponytail: busy-wait eats 40% of the tick at the
+        // 20 kstep/s stub cap -- the PIO stepgen (sd-dxy) deletes this.
+        busy_wait_us_32(20);
         digitalWrite(PIN_STEP, LOW);
         s_emitted += (delta > 0) ? 1.0f : -1.0f;
     }

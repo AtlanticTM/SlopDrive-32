@@ -230,6 +230,26 @@ void tick() {
                    in[8], in[9], in[10], in[11], in[12], in[13], in[14], in[15],
                    int(digitalRead(kIrq)));
     (void)runway; (void)pos; (void)vel;
+
+    // Bench wiggle: keep two segments queued so STEP/DIR actually move.
+    // 4000 steps out, 4000 back, 2 s each, zero end velocities (smoothstep,
+    // ~3 kstep/s peak). Drive stays UNPOWERED under this image until the
+    // frame checksum lands (sd-dxy): a corrupted motion byte has no guard yet.
+    if (in[0] != motionlink::kStateEstop && in[4] < 2) {
+        static bool outward = true;
+        motionlink::Segment seg{2000000u,
+                                outward ? 0.0f : 4000.0f, 0.0f,
+                                outward ? 4000.0f : 0.0f, 0.0f};
+        outward = !outward;
+        uint8_t sout[motionlink::kFrameBytes] = {motionlink::kOpSegment, ++s_seq};
+        memcpy(&sout[2], &seg.duration_us, 4);
+        memcpy(&sout[6], &seg.p0, 4);
+        memcpy(&sout[10], &seg.v0, 4);
+        memcpy(&sout[14], &seg.p1, 4);
+        memcpy(&sout[18], &seg.v1, 4);
+        uint8_t back[motionlink::kFrameBytes] = {};
+        xfer(sout, back);
+    }
 }
 }  // namespace mlink
 #endif

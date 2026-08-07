@@ -112,6 +112,18 @@ void MlinkServoDriver::update() {
     const bool sane = crcOk(in);
     if (sane) {
         _state = in[0];
+        // Rising-edge fault surfacing: JUMPED means the renderer teleported
+        // its reference (physical position now differs from calculated until
+        // re-home -- the encoder delta names the size); OVERFLOW is a credit-
+        // gate bug; UNDERRUN mid-stream is starvation (normal at stream end).
+        const uint8_t rising = uint8_t(in[1] & uint8_t(~_slave_flags));
+        if (rising & kFlagJumped)
+            SLOGW("mlink", "RP JUMPED: renderer teleported its reference -- "
+                  "calculated vs physical diverged, re-home to reconcile");
+        if (rising & kFlagOverflow)
+            SLOGW("mlink", "RP segment ring OVERFLOW: credit gate failed, a curve chunk was dropped");
+        if (rising & kFlagUnderran)
+            SLOGI_EVERY_MS(5000, "mlink", "RP underran -> SETTLE (normal at stream end)");
         _slave_flags = in[1];
         _runway_ms = uint16_t(in[2]) | uint16_t(uint16_t(in[3]) << 8);
         _depth = in[4];

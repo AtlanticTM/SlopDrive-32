@@ -126,6 +126,13 @@ void EncoderValidator::update() {
     _v.dev_mm   = dev;
     _v.have_dev = true;
 
+    // Bench-observable delta heartbeat (dev_mm is timing-skewed while moving;
+    // dev_steady is the trustworthy number). Readable via /api/diag/enc.
+    SLOGI_EVERY_MS(10000, "enc",
+                   "EncoderValidator: dev=%+.2fmm steady=%+.2fmm max=%.2fmm age=%lums",
+                   _v.dev_mm, _v.dev_steady_mm, _v.max_steady_mm,
+                   (unsigned long)_v.sample_age_ms);
+
     if (!anchored) return;   // verdicts only from skew-free standstill samples
 
     _v.dev_steady_mm = dev;

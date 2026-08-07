@@ -451,6 +451,19 @@ static void motorTask(void* /*param*/) {
             }
         }
         motor.update();
+#if defined(SD32_HEADLESS)
+        // Headless sole writer of the position atomics: WebUI's 240 Hz sampler
+        // (the normal owner, see WebUI::telemetryTimerCb) never starts here,
+        // and SlopSync 0x0080 + the stream rising-edge seed read them. One
+        // sample, both uses (same rule as the sampler).
+        {
+            const float actual_mm = motor.getPosition();
+            g_state.actual_position_mm.store(actual_mm, std::memory_order_relaxed);
+            g_state.measured_position_mm.store(
+                motor.hasActualPosition() ? motor.getActualPosition() : actual_mm,
+                std::memory_order_relaxed);
+        }
+#endif
         // D4: process any Core 0 -> Core 1 deferred intents
         arbiter.processDeferred();
         // SlopGlow liveness: this pulse is what keeps the status LEDs

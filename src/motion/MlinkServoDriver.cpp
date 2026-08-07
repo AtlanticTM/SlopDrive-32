@@ -182,8 +182,10 @@ void MlinkServoDriver::update() {
         }
         // Underrun settle: re-anchor one tick BEHIND the hold, dropping slip.
         // Never ahead: chain past hold underflows the u32 duration (the
-        // 71-minute wedge segment, 2026-08-07).
-        if (sane && _state == kStateSettled && !_seg_unacked) {
+        // 71-minute wedge segment, 2026-08-07). Only while samples ADVANCE:
+        // a settled stream end otherwise loops hold-segments forever.
+        if (sane && _state == kStateSettled && !_seg_unacked &&
+            _samp_ms != _hold_ms) {
             _chain_p = _pos_counts;
             _chain_v = 0.0f;
             _chain_ms = (_hold_ms > kTickMs) ? _hold_ms - kTickMs : 0;
@@ -195,8 +197,9 @@ void MlinkServoDriver::update() {
             _chain_v = 0.0f;
             _chain_ms = (_hold_ms > kTickMs) ? _hold_ms - kTickMs : 0;
         }
-        // Gate compensates the one-tick-stale runway report. Depth 0 (entry
-        // or just-underran): split-ship to prime the 2-segment cushion.
+        // Gate compensates the one-tick-stale runway report. Split ONLY at
+        // depth 0: sustained multi-frame ticks exceed the slave's per-frame-
+        // reset budget (2.4.87: torn 83k, qdrops 607); deeper waits on sd-dxy.
         const int32_t span_ms = int32_t(_hold_ms - _chain_ms);
         if (sane && span_ms > 0 && _depth < kSegmentDepth &&
             _runway_ms < kRunwayTargetMs + 2 * kTickMs) {

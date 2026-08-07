@@ -135,13 +135,23 @@ static void preloadStatus() {
     memcpy(&s_statusBuf[10], (const void*)&s_vel, 4);
     s_statusBuf[14] = 0xA5;          // alignment signature (bench)
     s_statusBuf[15] = s_lastSeq;     // seq duplicate for offset hunting
+    crcStamp(s_statusBuf);
     // Feed-me line: the producer paces on this, not on polling cadence.
     digitalWrite(PIN_IRQ, (rw < kRunwayLowMs && !s_estop) ? HIGH : LOW);
 }
 
 // ---- Frame processor (SPI IRQ context: short, no allocation) ----------------
+static uint32_t s_badCrc = 0;
+
 static void processFrame(uint8_t* data, size_t len) {
-    if (len < 2) return;
+    // Whole verified frames only: a torn or corrupted frame is DROPPED, never
+    // partially parsed. The master's credit loop re-sends what the status
+    // never acknowledged; estop is repeated until the echoed state confirms.
+    if (len != kFrameBytes ||
+        !crcOk(std::span<const uint8_t, kFrameBytes>(data, kFrameBytes))) {
+        ++s_badCrc;
+        return;
+    }
     s_lastSeq = data[1];
     switch (data[0]) {
         case kOpEstop:   // ahead of the ring, by design
@@ -187,12 +197,23 @@ static void feedTx() {
         spi_get_hw(spi1)->dr = s_statusBuf[s_txIdx++];
 }
 
-// SSE-cycle TX flush, then arm a fresh reply from byte 0. Re-establishes
-// alignment BY CONSTRUCTION every frame: leftovers in the TX FIFO shifted
-// every reply by one FIFO depth (measured: seq at byte 13, +8 from home).
+// spi_init's RESETS-block reset is the ONLY thing that clears a PL022 TX
+// FIFO -- an SSE cycle does not (measured 2026-08-07: +8 reply shift,
+// self-sustaining). Never revert this to an SSE toggle.
+static void spiConfigure() {
+    spi_init(spi1, kSpiHz);
+    spi_set_slave(spi1, true);
+    static_assert(kSpiMode == 1, "PL022 slave needs CPHA=1 for held-low CS");
+    spi_set_format(spi1, 8, SPI_CPOL_0, SPI_CPHA_1, SPI_MSB_FIRST);
+    spi_get_hw(spi1)->imsc = SPI_SSPIMSC_RXIM_BITS | SPI_SSPIMSC_RTIM_BITS;
+}
+
+// Flush by block reset, then arm from byte 0. A master clocking into the
+// reset window tears that frame; CRC drops it, the credit loop re-sends.
+// Master keeps >=60 us between transactions to make that rare.
+// ponytail: per-frame reset is crude -- PIO/DMA rework (sd-dxy) owns it.
 static void txFlushAndArm() {
-    hw_clear_bits(&spi_get_hw(spi1)->cr1, SPI_SSPCR1_SSE_BITS);
-    hw_set_bits(&spi_get_hw(spi1)->cr1, SPI_SSPCR1_SSE_BITS);
+    spiConfigure();
     s_txIdx = 0;
     feedTx();
 }
@@ -230,17 +251,12 @@ static void spi1Irq() {
 }
 
 static void spiSlaveBegin() {
-    spi_init(spi1, kSpiHz);
-    spi_set_slave(spi1, true);
-    static_assert(kSpiMode == 1, "PL022 slave needs CPHA=1 for held-low CS");
-    spi_set_format(spi1, 8, SPI_CPOL_0, SPI_CPHA_1, SPI_MSB_FIRST);
     gpio_set_function(PIN_SPI_RX, GPIO_FUNC_SPI);
     gpio_set_function(PIN_SPI_SCK, GPIO_FUNC_SPI);
     gpio_set_function(PIN_SPI_TX, GPIO_FUNC_SPI);
     gpio_set_function(PIN_SPI_CS, GPIO_FUNC_SPI);
     preloadStatus();
-    txFlushAndArm();   // byte 0 of the very first answer is real
-    spi_get_hw(spi1)->imsc = SPI_SSPIMSC_RXIM_BITS | SPI_SSPIMSC_RTIM_BITS;
+    txFlushAndArm();   // full block config; byte 0 of the first answer is real
     irq_set_exclusive_handler(SPI1_IRQ, spi1Irq);
     irq_set_enabled(SPI1_IRQ, true);
 }
@@ -340,13 +356,16 @@ void loop() {
         txFlushAndArm();
         irq_set_enabled(SPI1_IRQ, true);
     }
-    preloadStatus();   // refresh runway/IRQ even between transactions
+    // statusBuf has ONE writer, the SPI IRQ (preloadStatus after each frame).
+    // A loop()-side refresh raced feedTx mid-transaction: half-updated
+    // replies failed the master's CRC and starved the feed (2026-08-07).
     static uint32_t lastPrint = 0;
     if (millis() - lastPrint >= 1000) {
         lastPrint = millis();
-        Serial.printf("[mlink] lastSeq=%u irqs=%lu drained=%lu maxRx=%u "
+        Serial.printf("[mlink] lastSeq=%u badCrc=%lu irqs=%lu drained=%lu maxRx=%u "
                       "imsc=0x%02lx ris=0x%02lx sspsr=0x%02lx cs=%d\n",
-                      unsigned(s_lastSeq), (unsigned long)s_irqCount,
+                      unsigned(s_lastSeq), (unsigned long)s_badCrc,
+                      (unsigned long)s_irqCount,
                       (unsigned long)s_bytesDrained, unsigned(s_maxRx),
                       (unsigned long)spi_get_hw(spi1)->imsc,
                       (unsigned long)spi_get_hw(spi1)->ris,

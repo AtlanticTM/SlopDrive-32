@@ -198,13 +198,29 @@ void begin() {
 }
 
 // One fixed-size transaction: send a frame, read back the slave's preload.
-void xfer(const uint8_t* out, uint8_t* in) {
+// Stamps the outgoing CRC; the caller never does.
+void xfer(uint8_t (&out)[motionlink::kFrameBytes],
+          uint8_t (&in)[motionlink::kFrameBytes]) {
     static_assert(motionlink::kSpiMode == 1, "PL022 slave needs CPHA=1");
+    // >=60 us since the last transaction: the slave block-resets its SPI to
+    // flush TX after every frame, and clocking into that window tears frames.
+    static uint32_t s_lastEndUs = 0;
+    const uint32_t sinceUs = micros() - s_lastEndUs;
+    if (sinceUs < 60) delayMicroseconds(60 - sinceUs);
+    motionlink::crcStamp(out);
     s_spi.beginTransaction(SPISettings(motionlink::kSpiHz, MSBFIRST, SPI_MODE1));
     digitalWrite(kCs, LOW);
     s_spi.transferBytes(out, in, motionlink::kFrameBytes);
     digitalWrite(kCs, HIGH);
     s_spi.endTransaction();
+    s_lastEndUs = micros();
+}
+
+// Build-and-send for payloadless ops (estop, clear, ping).
+void sendOp(uint8_t op) {
+    uint8_t out[motionlink::kFrameBytes] = {op, ++s_seq};
+    uint8_t back[motionlink::kFrameBytes] = {};
+    xfer(out, back);
 }
 
 // 10 Hz ping; 0.5 Hz status line into the diag archive (tag mlink).
@@ -231,19 +247,35 @@ void tick() {
                    int(digitalRead(kIrq)));
     (void)runway; (void)pos; (void)vel;
 
-    // Bench wiggle: keep two segments queued so STEP/DIR actually move.
-    // 4000 steps out, 4000 back, 2 s each, zero end velocities (smoothstep,
-    // ~3 kstep/s peak). Drive stays UNPOWERED under this image until the
-    // frame checksum lands (sd-dxy): a corrupted motion byte has no guard yet.
-    // Feed only on a PROVEN status frame: signature + seq echo. A rebooting
-    // or torn slave reads as depth 0, and blind-feeding on that overfilled
-    // the ring to overflow twice (2026-08-06).
-    const bool frameSane = (in[14] == 0xA5) && (in[15] == in[5]);
-    if (frameSane && in[0] != motionlink::kStateEstop && in[4] < 2) {
+    // Trust = CRC: act only on a proven status frame. A rebooting or torn
+    // slave reads as depth 0, and blind-feeding on that overfilled the ring
+    // twice (2026-08-06).
+    const bool frameSane = motionlink::crcOk(in);
+
+    // Machine estop punches through the bench path. Repeat kOpEstop until the
+    // echoed state confirms it (repetition survives a dropped frame); leave
+    // the hold only after the machine unlatches.
+    if (g_state.estop_latched) {
+        if (!frameSane || in[0] != motionlink::kStateEstop)
+            sendOp(motionlink::kOpEstop);
+        return;
+    }
+    if (frameSane && in[0] == motionlink::kStateEstop) {
+        sendOp(motionlink::kOpClear);
+        return;
+    }
+
+    // Bench wiggle: keep two segments queued so the motor visibly moves.
+    // SMALL ON PURPOSE: this path bypasses the MotionArbiter (no homed gate,
+    // no limit clamp), so the amplitude must be safe from ANY carriage
+    // position. Scale only at the bench, drive supervised.
+    constexpr float kWiggleSteps = 600.0f;
+    constexpr uint32_t kWiggleUs = 2000000u;
+    if (frameSane && in[4] < 2) {
         static bool outward = true;
-        motionlink::Segment seg{2000000u,
-                                outward ? 0.0f : 4000.0f, 0.0f,
-                                outward ? 4000.0f : 0.0f, 0.0f};
+        motionlink::Segment seg{kWiggleUs,
+                                outward ? 0.0f : kWiggleSteps, 0.0f,
+                                outward ? kWiggleSteps : 0.0f, 0.0f};
         outward = !outward;
         uint8_t sout[motionlink::kFrameBytes] = {motionlink::kOpSegment, ++s_seq};
         memcpy(&sout[2], &seg.duration_us, 4);

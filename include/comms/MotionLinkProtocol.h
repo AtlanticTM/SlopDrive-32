@@ -15,6 +15,7 @@
 
 #include <cstddef>
 #include <cstdint>
+#include <span>
 
 namespace motionlink {
 
@@ -69,5 +70,33 @@ enum Flags : uint8_t {
 inline constexpr uint16_t kRunwayTargetMs = 10;   // operator-ruled band
 inline constexpr uint16_t kRunwayLowMs = 4;
 inline constexpr size_t kSegmentDepth = 8;
+
+// Every frame, BOTH directions, carries CRC-16/CCITT-FALSE over bytes
+// [0, kCrcOffset) stored LE at [kCrcOffset]. A frame that fails the check is
+// DROPPED whole: no partial parse, no estop from garbage. Recovery is the
+// credit contract itself -- the master re-sends what the status never
+// acknowledged. Ops that must not be lost (kOpEstop) are repeated by the
+// master until the echoed state confirms them.
+inline constexpr size_t kCrcOffset = 30;
+inline constexpr uint16_t crc16(std::span<const uint8_t> d) {
+    uint16_t c = 0xFFFF;
+    for (uint8_t byte : d) {
+        c ^= uint16_t(uint16_t(byte) << 8);
+        for (int b = 0; b < 8; ++b)
+            c = (c & 0x8000u) ? uint16_t(uint16_t(c << 1) ^ 0x1021u)
+                              : uint16_t(c << 1);
+    }
+    return c;
+}
+inline void crcStamp(std::span<uint8_t, kFrameBytes> frame) {
+    const uint16_t c = crc16(frame.first(kCrcOffset));
+    frame[kCrcOffset] = uint8_t(c);
+    frame[kCrcOffset + 1] = uint8_t(c >> 8);
+}
+inline bool crcOk(std::span<const uint8_t, kFrameBytes> frame) {
+    const uint16_t c = crc16(frame.first(kCrcOffset));
+    return frame[kCrcOffset] == uint8_t(c) &&
+           frame[kCrcOffset + 1] == uint8_t(c >> 8);
+}
 
 }  // namespace motionlink

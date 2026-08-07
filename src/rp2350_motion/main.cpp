@@ -78,6 +78,17 @@ static bool stepperTick(struct repeating_timer*) {
     }
 
     const Segment& seg = s_ring[s_tail % kSegmentDepth];
+    // First tick of a segment: a p0 far from the emitted position would slew
+    // the whole gap at the 20 kstep/s cap (motor shoots). Teleport the
+    // reference instead -- zero pulses -- and report it. Small offsets slew
+    // legitimately.
+    if (s_segElapsedUs == 0) {
+        const float jump = seg.p0 - s_emitted;
+        if (jump > 32.0f || jump < -32.0f) {
+            s_emitted += jump;
+            s_flags |= kFlagJumped;
+        }
+    }
     s_state = kStateRunning;
     s_segElapsedUs += kTickUs;
     const float T = float(seg.duration_us);
@@ -142,6 +153,7 @@ static void preloadStatus() {
 
 // ---- Frame processor (SPI IRQ context: short, no allocation) ----------------
 static uint32_t s_badCrc = 0;
+static uint32_t s_torn = 0;
 
 static void processFrame(uint8_t* data, size_t len) {
     // Whole verified frames only: a torn or corrupted frame is DROPPED, never
@@ -349,6 +361,7 @@ void loop() {
     // normal between-transaction state; re-zeroing it here served duplicate
     // bytes). A tear flushes BOTH FIFOs: SSE cycle is the only TX flush.
     if (gpio_get(PIN_SPI_CS) && s_rxCount != 0) {
+        ++s_torn;   // frames discarded HERE never reach the badCrc counter
         irq_set_enabled(SPI1_IRQ, false);
         while (spi_is_readable(spi1)) (void)spi_get_hw(spi1)->dr;
         s_rxCount = 0;
@@ -362,10 +375,10 @@ void loop() {
     static uint32_t lastPrint = 0;
     if (millis() - lastPrint >= 1000) {
         lastPrint = millis();
-        Serial.printf("[mlink] lastSeq=%u badCrc=%lu irqs=%lu drained=%lu maxRx=%u "
+        Serial.printf("[mlink] lastSeq=%u badCrc=%lu torn=%lu irqs=%lu drained=%lu maxRx=%u "
                       "imsc=0x%02lx ris=0x%02lx sspsr=0x%02lx cs=%d\n",
                       unsigned(s_lastSeq), (unsigned long)s_badCrc,
-                      (unsigned long)s_irqCount,
+                      (unsigned long)s_torn, (unsigned long)s_irqCount,
                       (unsigned long)s_bytesDrained, unsigned(s_maxRx),
                       (unsigned long)spi_get_hw(spi1)->imsc,
                       (unsigned long)spi_get_hw(spi1)->ris,

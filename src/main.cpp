@@ -271,13 +271,25 @@ void tick() {
     // position. Scale only at the bench, drive supervised.
     constexpr float kWiggleSteps = 600.0f;
     constexpr uint32_t kWiggleUs = 2000000u;
-    if (frameSane && in[4] < 2) {
-        static bool outward = true;
+    // Ack-gated alternation: the endpoint flip commits only when the slave
+    // echoes the segment's seq (a torn frame leaves the echo on the ping's
+    // seq). Flipping at send time desynced the pattern on every silent drop
+    // and the next leg started 600 steps from the machine -- the
+    // burst-to-reversal bug (2026-08-07).
+    static bool outward = true;
+    static bool pending = false;
+    static uint8_t pendingSeq = 0;
+    if (pending && frameSane) {
+        if (in[5] == pendingSeq) outward = !outward;
+        pending = false;   // no echo: dropped, the same leg goes out again
+    }
+    if (frameSane && in[4] < 2 && !pending) {
         motionlink::Segment seg{kWiggleUs,
                                 outward ? 0.0f : kWiggleSteps, 0.0f,
                                 outward ? kWiggleSteps : 0.0f, 0.0f};
-        outward = !outward;
         uint8_t sout[motionlink::kFrameBytes] = {motionlink::kOpSegment, ++s_seq};
+        pendingSeq = s_seq;
+        pending = true;
         memcpy(&sout[2], &seg.duration_us, 4);
         memcpy(&sout[6], &seg.p0, 4);
         memcpy(&sout[10], &seg.v0, 4);

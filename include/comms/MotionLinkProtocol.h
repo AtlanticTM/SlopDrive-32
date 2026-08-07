@@ -62,6 +62,10 @@ enum State : uint8_t {
 enum Flags : uint8_t {
     kFlagOverflow = 0x01,   // a segment arrived with the ring full (producer bug)
     kFlagUnderran = 0x02,   // sticky until the next segment lands
+    // A segment started far from the emitted position; the renderer TELEPORTED
+    // its reference instead of slewing the gap at max rate (producer
+    // discontinuity, e.g. a leg fed twice after a dropped frame). Sticky.
+    kFlagJumped   = 0x04,
 };
 
 // The credit contract: the S3 sends a segment only while runway_ms is below

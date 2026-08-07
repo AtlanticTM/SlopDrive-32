@@ -57,6 +57,8 @@ void MlinkServoDriver::sendRetarget() {
     memcpy(&out[10], &_rt_a, 4);
     uint8_t in[kFrameBytes] = {};
     xfer(out, in);
+    _rt_seq = _seq;
+    _rt_unacked = true;
     _rt_dirty = false;
     _last_cmd_ms = millis();
 }
@@ -230,8 +232,14 @@ void MlinkServoDriver::update() {
         return;                       // segment mode never refreshes retargets
     }
 
-    if (_rt_valid && (_rt_dirty || now - _last_cmd_ms >= kRefreshMs))
-        sendRetarget();
+    if (_rt_valid) {
+        // Retargets are idempotent/last-wins, so a resend needs no dedup: on
+        // a missed seq echo just send again (fresh seq) next tick.
+        const bool lost = _rt_unacked && sane && _seq_echo != _rt_seq;
+        if (_rt_unacked && sane && _seq_echo == _rt_seq) _rt_unacked = false;
+        if (_rt_dirty || lost || now - _last_cmd_ms >= kRefreshMs)
+            sendRetarget();
+    }
 }
 
 void MlinkServoDriver::emergencyStop() {

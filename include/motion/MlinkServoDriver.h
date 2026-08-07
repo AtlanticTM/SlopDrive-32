@@ -96,6 +96,10 @@ private:
     float _rt_a = 0.0f;
     bool  _rt_valid = false;
     bool  _rt_dirty = false;
+    // Seq-echo ack, same scheme as segments: a torn retarget otherwise waits
+    // out the full 100 ms refresh (felt as a mid-stroke stall under EMI).
+    uint8_t _rt_seq = 0;
+    bool    _rt_unacked = false;
 
     // Segment-stream shadow (curve chase rides kOpSegment; retarget stays the
     // point-move path). Writers: streamSample() on the sampler task, update()

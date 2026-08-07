@@ -1082,6 +1082,32 @@ void baudHunt() {
     Serial.println("no answer at any candidate -- back at 19200. Check drive power/link.");
 }
 
+// ---- The R&D recipe: output-disable save (THE gate, proven 2026-08-07) ------
+// 0x00=1, 0x01=0, [values + 0x14=1] x3, 0x01=1. Persists everything incl.
+// 0x19. Payload here: accel 60000, gear 4/1 (8192 counts/rev quadrature).
+void recipeWrite() {
+    Serial.println("");
+    Serial.println("--- RECIPE WRITE: accel 60000, gear 4/1 (output-disable save) ---");
+    writeReg(0x00, 1); delay(30);
+    writeReg(0x01, 0); delay(30);
+    for (int i = 0; i < 3; ++i) {
+        writeReg(0x03, 60000); delay(30);
+        writeReg(0x0A, 4);     delay(30);
+        writeReg(0x0B, 1);     delay(30);
+        writeReg(0x14, 1);     delay(200);
+    }
+    writeReg(0x01, 1); delay(30);
+    uint16_t a = 0, n = 0, d2 = 0, m = 0;
+    readRegs(0x03, 1, &a);
+    readRegs(0x0A, 1, &n);
+    readRegs(0x0B, 1, &d2);
+    readRegs(0x00, 1, &m);
+    Serial.printf("readback: 0x03=%u 0x0A=%u 0x0B=%u 0x00=%u", a, n, d2, m);
+    Serial.println("");
+    Serial.println("Note 0x00 reads 1 -- pulse input deaf until releaseMotionArm's");
+    Serial.println("506-then-0 or a drive power cycle. Power-cycle, then 'd' to verify persist.");
+}
+
 // ---- Unarmed save: 0x19=2 with NO 0x00 write at all, then 0x14=1 ------------
 // OSSM-RS home() writes 0x19 without arming and it functions. Every recorded
 // save attempt armed first; the armed state may be what the save excludes.
@@ -1242,7 +1268,8 @@ void loop() {
     if (key == 'Y') { saveLongSilence(); return; }
     if (key == 'E') { egearQuad(); return; }
     if (key == 'u' || key == 'U') { release506(); return; }
-    if (key == 'r' || key == 'R') { restoreEgear(); return; }
+    if (key == 'r') { restoreEgear(); return; }
+    if (key == 'R') { recipeWrite(); return; }
     if (key == 'w') { saveSpecialFn(false); return; }
     if (key == 'W') { saveSpecialFn(true);  return; }
     if (key == 'v' || key == 'V') { verifiedCommit(); return; }

@@ -269,9 +269,9 @@ void tick() {
     // SMALL ON PURPOSE: this path bypasses the MotionArbiter (no homed gate,
     // no limit clamp), so the amplitude must be safe from ANY carriage
     // position. Scale only at the bench, drive supervised.
-    // Units are DRIVE INPUT COUNTS: quadrature at gear 32768/800 (0x19=2
-    // saved 2026-08-07), so 800 counts/motor-rev. 200 counts is ~10 mm.
-    constexpr float kWiggleSteps = 200.0f;
+    // Units are DRIVE INPUT COUNTS: quadrature at gear 4/1 (0x19=2 saved
+    // 2026-08-07), so 8192 counts/motor-rev. 2048 counts is ~10 mm.
+    constexpr float kWiggleSteps = 2048.0f;
     constexpr uint32_t kWiggleUs = 2000000u;
     // Ack-gated alternation: the endpoint flip commits only when the slave
     // echoes the segment's seq (a torn frame leaves the echo on the ping's

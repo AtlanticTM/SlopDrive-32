@@ -64,8 +64,20 @@ void MlinkServoDriver::sendRetarget() {
 void MlinkServoDriver::sendSegmentTo(float p1, float v1, uint32_t t1_ms) {
     // Hermite chunk covering [chain, (p1,v1,t1)]: the slave renders it over
     // its wire duration, which is what preserves the stream's timeline.
+    uint32_t dur_ms = t1_ms - _chain_ms;
+    // Catch-up sweep after a re-anchor: stretch to the arbiter's ceiling so
+    // the gap GLIDES closed instead of shooting at the render cap (the
+    // ungoverned lunge cost 28.8 mm of drive-follow sync, 2026-08-08). The
+    // extra render time lands as transient runway; the gate drains it.
+    if (_sweep_pending) {
+        _sweep_pending = false;
+        if (_samp_vcap > 1.0f) {
+            const float need_ms = fabsf(p1 - _chain_p) / _samp_vcap * 1000.0f;
+            if (need_ms > float(dur_ms)) dur_ms = uint32_t(need_ms);
+        }
+    }
     uint8_t out[kFrameBytes] = {kOpSegment, ++_seq};
-    const uint32_t dur_us = (t1_ms - _chain_ms) * 1000u;
+    const uint32_t dur_us = dur_ms * 1000u;
     memcpy(&out[2], &dur_us, 4);
     memcpy(&out[6], &_chain_p, 4);
     memcpy(&out[10], &_chain_v, 4);
@@ -189,6 +201,7 @@ void MlinkServoDriver::update() {
             _chain_p = _pos_counts;
             _chain_v = 0.0f;
             _chain_ms = (_hold_ms > kTickMs) ? _hold_ms - kTickMs : 0;
+            _sweep_pending = true;
         }
         // Blocked-interval re-base; unsigned compare also catches any
         // chain-ahead-of-hold ordering bug as a huge gap.
@@ -196,6 +209,7 @@ void MlinkServoDriver::update() {
             _chain_p = _pos_counts;
             _chain_v = 0.0f;
             _chain_ms = (_hold_ms > kTickMs) ? _hold_ms - kTickMs : 0;
+            _sweep_pending = true;
         }
         // Gate compensates the one-tick-stale runway report. Split ONLY at
         // depth 0: sustained multi-frame ticks exceed the slave's per-frame-
@@ -203,7 +217,9 @@ void MlinkServoDriver::update() {
         const int32_t span_ms = int32_t(_hold_ms - _chain_ms);
         if (sane && span_ms > 0 && _depth < kSegmentDepth &&
             _runway_ms < kRunwayTargetMs + 2 * kTickMs) {
-            if (_depth == 0 && span_ms >= 4) sendSegmentSplit();
+            // A governed sweep never splits: it is one stretched glide.
+            if (_depth == 0 && span_ms >= 4 && !_sweep_pending)
+                sendSegmentSplit();
             else sendSegment();
         }
         // Holdback advances AFTER the ship attempt: a fresh chunk always
@@ -257,7 +273,7 @@ void MlinkServoDriver::streamToSteps(int32_t target_steps,
 }
 
 void MlinkServoDriver::streamSample(int32_t target_steps, float vel_steps_s,
-                                    uint32_t /*speed_steps_s*/,
+                                    uint32_t speed_steps_s,
                                     uint32_t accel_steps_s2) {
     // Curve chase rides kOpSegment: the slave renders Hermite chunks over
     // their real durations, so the stream's own timeline IS the speed. The
@@ -284,11 +300,13 @@ void MlinkServoDriver::streamSample(int32_t target_steps, float vel_steps_s,
         _hold_v = 0.0f;
         _hold_ms = now;
         _samp_ms = now;
+        _sweep_pending = true;
         _seg_mode = true;
     }
     _samp_p = float(target_steps);
     _samp_v = v;
     _samp_ms = now;
+    _samp_vcap = float(speed_steps_s);
     _last_accel_native = accel_steps_s2;
 }
 

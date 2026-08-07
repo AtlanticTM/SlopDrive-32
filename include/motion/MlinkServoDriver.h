@@ -115,6 +115,11 @@ private:
     float    _hold_p = 0.0f;
     float    _hold_v = 0.0f;
     uint32_t _hold_ms = 0;
+    // Sweep governance: a re-anchored chain has no upstream speed limit (the
+    // curve's governance lives in sample spacing, which a re-anchor discards),
+    // so the catch-up segment stretches to the arbiter's active ceiling.
+    float    _samp_vcap = 0.0f;    // arbiter dispatch ceiling, counts/s
+    bool     _sweep_pending = false;
     uint8_t  _seg_frame[motionlink::kFrameBytes] = {};  // resend copy
     uint8_t  _seg_seq = 0;
     bool     _seg_unacked = false;

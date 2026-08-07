@@ -123,13 +123,15 @@ void MlinkServoDriver::update() {
         if (rising & kFlagOverflow)
             SLOGW("mlink", "RP segment ring OVERFLOW: credit gate failed, a curve chunk was dropped");
         if (rising & kFlagUnderran)
-            SLOGI_EVERY_MS(5000, "mlink", "RP underran -> SETTLE (normal at stream end)");
+            SLOGI_EVERY_MS(5000, "mlink", "RP underran -> SETTLE (expected at stream "
+                           "end; mid-stream = ring starved, each one adds latency)");
         _slave_flags = in[1];
         _runway_ms = uint16_t(in[2]) | uint16_t(uint16_t(in[3]) << 8);
         _depth = in[4];
         _seq_echo = in[5];
         memcpy(&_pos_counts, &in[6], 4);
         memcpy(&_vel_counts, &in[10], 4);
+        _status_ms = now;
         _status_fresh = true;
     }
 
@@ -159,11 +161,20 @@ void MlinkServoDriver::update() {
                 return;
             }
         }
-        // Credit contract: ship only into fresh status, spare ring depth, and
-        // runway below target -- the 10-20 ms standing cushion this maintains
-        // is what keeps segment boundaries off the underrun knife edge.
-        if (sane && _samp_ms != _chain_ms &&
-            _depth < kSegmentDepth && _runway_ms < kRunwayTargetMs)
+        // Settled mid-stream = playback slipped behind (underrun). Re-anchor
+        // at the settled point and NOW so slip is dropped, never compounded;
+        // the next segment sweeps the gap in one tick.
+        if (sane && _state == kStateSettled && !_seg_unacked &&
+            _samp_ms != _chain_ms) {
+            _chain_p = _pos_counts;
+            _chain_v = 0.0f;
+            _chain_ms = (_samp_ms > kTickMs) ? _samp_ms - kTickMs : _samp_ms;
+        }
+        // Reported runway is one tick STALE (reply preloaded last tick), so
+        // gate at target+tick: the bare target shipped into an already-dry
+        // ring (measured mid-stream underruns 2026-08-07).
+        if (sane && _samp_ms != _chain_ms && _depth < kSegmentDepth &&
+            _runway_ms < kRunwayTargetMs + kTickMs)
             sendSegment();
         return;                       // segment mode never refreshes retargets
     }
@@ -269,7 +280,12 @@ float MlinkServoDriver::getPosition() const {
     // Native frame is NEGATED vs mm (endstop 0, front negative), same as
     // every driver: report nativeToMm(-native), or the arbiter plans every
     // move from a mirror-image p0 (the sd-ar3 phantom-distance bug).
-    return -_pos_counts / AIM_STEPS_PER_MM;
+    // Dead-reckon the one-tick-stale status by reported velocity: the raw
+    // 100 Hz staircase beats vs the ~20 ms 0x0080 cadence (trail zigzag).
+    // Capped so a dead link freezes; v=0 at rest keeps standstill raw.
+    uint32_t age = millis() - _status_ms + kTickMs;
+    if (age > 3 * kTickMs) age = 3 * kTickMs;
+    return -(_pos_counts + _vel_counts * (float(age) * 1e-3f)) / AIM_STEPS_PER_MM;
 }
 
 float MlinkServoDriver::getTargetPosition() const {

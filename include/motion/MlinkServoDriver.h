@@ -109,6 +109,7 @@ private:
     uint16_t _runway_ms = 0;
     uint8_t  _depth = 0;
     uint8_t  _seq_echo = 0;
+    uint32_t _status_ms = 0;   // millis() at the last CRC-valid status
 
     bool _estop_pending = false;
     bool _clear_pending = false;

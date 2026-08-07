@@ -171,9 +171,14 @@ struct PixelOut final : slopglow::IGlowOutput {
     size_t pixelCount() const override { return 1; }
     void set(size_t, slopglow::Rgb v) override { c = v; }
     void show() override {
-        // gamma8 at the output, same contract as every other board's driver.
-        s_px.setPixelColor(0, slopglow::gamma8(c.r), slopglow::gamma8(c.g),
-                           slopglow::gamma8(c.b));
+        // Core gamma (ONE curve fleet-wide, not Adafruit's near-twin), then
+        // brightness in DUTY space: pre-gamma dimming quantizes to a handful
+        // of codes (measured on the C5, 2026-08-06). Adafruit setBrightness
+        // is that same pre-gamma trap, which is why it goes unused.
+        auto s = [](uint8_t v) {
+            return uint8_t((uint16_t(slopglow::gamma8(v)) * 41u) >> 8);   // 40/255
+        };
+        s_px.setPixelColor(0, s(c.r), s(c.g), s(c.b));
         s_px.show();
     }
 };
@@ -188,7 +193,7 @@ void setup() {
     pinMode(PIN_DIR, OUTPUT);
 
     s_px.begin();
-    s_glow.setBrightness(40);
+    // Engine brightness stays 255; the adapter dims post-gamma in duty space.
     // Rainbow until the S3 speaks: an unwired or dead link never fakes ready.
     s_glow.requireReady(uint8_t(1u << uint8_t(slopglow::System::Link)));
     s_glowHb = s_glow.addHeartbeat(500);

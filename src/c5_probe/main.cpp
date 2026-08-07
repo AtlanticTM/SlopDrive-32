@@ -49,10 +49,14 @@ struct PixelOut final : slopglow::IGlowOutput {
     size_t pixelCount() const override { return 1; }
     void set(size_t, slopglow::Rgb v) override { c = v; }
     void show() override {
-        // gamma8 at the OUTPUT (core shapes are perceptual): without it the
-        // WS2812's linear duty made breathes read harsh and tints loud.
-        rgbLedWrite(PIN_LED, slopglow::gamma8(c.r), slopglow::gamma8(c.g),
-                    slopglow::gamma8(c.b));
+        // ORDER MATTERS: gamma first (perceptual -> duty), THEN the fixed
+        // brightness as a duty multiplier. Scaling before gamma quantized
+        // every animation into gamma8(40) = 5 visible codes (operator count,
+        // 2026-08-06); this order keeps ~41 codes at the same brightness.
+        auto s = [](uint8_t v) {
+            return uint8_t((uint16_t(slopglow::gamma8(v)) * (LED_BRIGHT + 1u)) >> 8);
+        };
+        rgbLedWrite(PIN_LED, s(c.r), s(c.g), s(c.b));
     }
 };
 static PixelOut s_pixel;
@@ -871,7 +875,8 @@ void setup() {
     // WiFi scan, and the rainbow must be the first sign of life (operator
     // ruling). The liveness heartbeat registers in loop()'s first pass, so
     // the gate cannot freeze the boot animation before a loop exists.
-    s_glow.setBrightness(LED_BRIGHT);
+    // Engine brightness stays 255: the adapter dims in DUTY space post-gamma
+    // (see PixelOut::show). Engine-side dimming is pre-gamma and quantizes.
     s_glow.requireReady(uint8_t(1u << uint8_t(slopglow::System::Network)));
     {
         const esp_timer_create_args_t args = {

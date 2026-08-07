@@ -32,10 +32,15 @@ inline constexpr size_t kFrameBytes = 32;
 
 // Master -> slave: [op:u8][seq:u8][payload...]
 enum Op : uint8_t {
-    kOpPing    = 0x01,   // payload empty; slave answers with Status
-    kOpSegment = 0x02,   // payload = Segment (packed LE, 20 B)
-    kOpEstop   = 0x03,   // flush the schedule NOW, hold position
-    kOpClear   = 0x04,   // leave the estop hold; schedule is empty after
+    kOpPing     = 0x01,   // payload empty; slave answers with Status
+    kOpSegment  = 0x02,   // payload = Segment (packed LE, 20 B)
+    kOpEstop    = 0x03,   // flush the schedule NOW, hold position
+    kOpClear    = 0x04,   // leave the estop hold; schedule is empty after
+    // Trapezoid retarget: [target:f32][vmax:f32][accel:f32] counts, counts/s,
+    // counts/s^2. The slave seeks target from its LIVE (p, v) -- idempotent,
+    // re-sendable, last one wins; switches the renderer out of segment mode.
+    // This is streamToSteps() on the wire; segments remain the native-plan path.
+    kOpRetarget = 0x05,
 };
 
 // One C1 motion segment: cubic Hermite from (p0, v0) to (p1, v1) over
@@ -74,6 +79,12 @@ enum Flags : uint8_t {
 inline constexpr uint16_t kRunwayTargetMs = 10;   // operator-ruled band
 inline constexpr uint16_t kRunwayLowMs = 4;
 inline constexpr size_t kSegmentDepth = 8;
+
+// Renderer emit ceiling: the 20 kHz stub outputs at most one quadrature
+// transition per tick. Plans are clamped BELOW it so the emitter never falls
+// behind the trajectory (falling behind trips the teleport guard = lost
+// motion). The PIO stepgen (sd-dxy) lifts this to the drive's 500 kHz input.
+inline constexpr float kMaxCountsPerSec = 18000.0f;
 
 // Every frame, BOTH directions, carries CRC-16/CCITT-FALSE over bytes
 // [0, kCrcOffset) stored LE at [kCrcOffset]. A frame that fails the check is

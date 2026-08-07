@@ -41,6 +41,7 @@
 
 #if defined(DRIVER_AIM_SERVO)
 #include "AIMServoDriver.h"
+#include "MlinkServoDriver.h"
 #include "MotorProxy.h"
 #include "MachineConfig.h"
 #if defined(FEATURE_RS485_MODBUS)
@@ -95,6 +96,10 @@ static ServoModbus     servoModbus(Serial1, /* addr */ 1);
 #if defined(FEATURE_RS485_MODBUS)
   ModbusServoDriver mbMotor(servoModbus);
 #endif
+  // The drive is SAVED in quadrature (0x19=2, 2026-08-07): the RP2350 is the
+  // only pulse source, so the pulse backend (0) binds mlink, not FAS. FAS
+  // stays compiled for a future step/dir drive; it cannot move THIS one.
+  MlinkServoDriver  mlinkMotor;
   MotorProxy        motor;
 #else
   #error "No motor driver selected. Define DRIVER_AIM_SERVO in platformio.ini build_flags."
@@ -1014,15 +1019,19 @@ void setup() {
         motor.bind(mbMotor);
         SLOGI("boot", "Motion backend: MODBUS direct-drive (skeleton mode — no motion until Phase 3)");
     } else {
+#if defined(MOTION_PASSTHROUGH_BENCH)
+        // Bench wiggle owns the SPI link; two masters would fight. Arbiter
+        // motion is inert on this env and that is the point of the bench.
         motor.bind(fasMotor);
-        SLOGI("boot", "Motion backend: FAS step/dir");
+        SLOGI("boot", "Motion backend: FAS bound but INERT (bench wiggle owns the mlink)");
+#else
+        motor.bind(mlinkMotor);
+        SLOGI("boot", "Motion backend: mlink -> RP2350 quadrature (drive saved 0x19=2)");
+#endif
     }
 #else
-    // Modbus feature not compiled into this build at all — always FAS,
-    // regardless of what a stale NVS value might say (machineBackendLoad()
-    // already clamps to 0 in this case too — belt and suspenders).
-    motor.bind(fasMotor);
-    SLOGI("boot", "Motion backend: FAS step/dir (FEATURE_RS485_MODBUS not compiled)");
+    motor.bind(mlinkMotor);
+    SLOGI("boot", "Motion backend: mlink -> RP2350 quadrature (FEATURE_RS485_MODBUS not compiled)");
 #endif
     webui.setMachineBackend(g_motion_backend);
 

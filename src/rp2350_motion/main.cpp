@@ -55,6 +55,29 @@ static float s_emitted = 0.0f;    // steps actually pulsed out
 static uint32_t s_segElapsedUs = 0;
 static volatile uint8_t s_state = kStateIdle;
 
+// ---- Retarget state (kOpRetarget: trapezoid seek from live p,v) -------------
+// All volatile: SPI IRQ writes, alarm IRQ reads; volatile-to-volatile order
+// is preserved and single-word float stores are atomic on the M33.
+static volatile bool  s_rtActive = false;
+static volatile float s_rtTarget = 0.0f;
+static volatile float s_rtVmax   = 0.0f;
+static volatile float s_rtAccel  = 0.0f;
+
+// Advance the quadrature output one transition toward s_pos (one per tick max).
+static inline void emitTowardPos() {
+    const float delta = s_pos - s_emitted;
+    if (delta >= 1.0f || delta <= -1.0f) {
+        // QUADRATURE A/B levels (drive saved in encoder-follow, 0x19=2):
+        // one Gray transition per count, A leads B = forward. Step/dir no
+        // longer drives the motor. ponytail: 20 k counts/s cap, PIO replaces.
+        static uint8_t s_phase = 0;
+        s_phase = uint8_t((s_phase + ((delta > 0) ? 1u : 3u)) & 3u);
+        digitalWrite(PIN_STEP, (s_phase == 1 || s_phase == 2) ? HIGH : LOW);  // A
+        digitalWrite(PIN_DIR,  (s_phase == 2 || s_phase == 3) ? HIGH : LOW);  // B
+        s_emitted += (delta > 0) ? 1.0f : -1.0f;
+    }
+}
+
 static struct repeating_timer s_tick;
 static constexpr uint32_t kTickUs = 50;   // 20 kHz stub cadence
 
@@ -62,6 +85,31 @@ static bool stepperTick(struct repeating_timer*) {
     // Never busy-wait in this ISR: a 20 us wait held off the SPI IRQ past the
     // PL022's 8-byte RX FIFO (8 us at 8 MHz) and tore frames.
     if (s_estop) { s_state = kStateEstop; return true; }   // hold: no motion
+
+    if (s_rtActive) {
+        // Trapezoid seek from live (p, v): accelerate toward the target,
+        // capped at vmax AND at the brake parabola so it lands at v=0.
+        constexpr float dt = 1e-6f * float(kTickUs);
+        const float dist = s_rtTarget - s_pos;
+        const float dir = (dist >= 0.0f) ? 1.0f : -1.0f;
+        const float adist = dist * dir;
+        float vTo = s_vel * dir;   // signed velocity TOWARD the target
+        if (adist <= 1.0f && vTo <= s_rtAccel * dt * 4.0f) {
+            s_pos = s_rtTarget;
+            s_vel = 0.0f;
+            s_state = kStateIdle;
+        } else {
+            const float vBrake = sqrtf(2.0f * s_rtAccel * adist);
+            float vLim = (s_rtVmax < vBrake) ? s_rtVmax : vBrake;
+            vTo += s_rtAccel * dt;
+            if (vTo > vLim) vTo = vLim;
+            s_vel = dir * vTo;
+            s_pos += s_vel * dt;
+            s_state = kStateRunning;
+        }
+        emitTowardPos();
+        return true;
+    }
 
     if (ringDepth() == 0) {
         if (s_state == kStateRunning) {
@@ -100,19 +148,7 @@ static bool stepperTick(struct repeating_timer*) {
     s_pos = h00 * seg.p0 + h10 * Ts * seg.v0 + h01 * seg.p1 + h11 * Ts * seg.v1;
     s_vel = seg.v0 + (seg.v1 - seg.v0) * u;   // display-grade estimate only
 
-    // Emit whole steps toward s_pos. Stub: one edge per tick maximum, which
-    // caps the stub at 20 kstep/s -- fine for bring-up, PIO removes the cap.
-    const float delta = s_pos - s_emitted;
-    if (delta >= 1.0f || delta <= -1.0f) {
-        // QUADRATURE A/B levels (drive saved in encoder-follow, 0x19=2):
-        // one Gray transition per count, A leads B = forward. Step/dir no
-        // longer drives the motor. ponytail: 20 k counts/s cap, PIO replaces.
-        static uint8_t s_phase = 0;
-        s_phase = uint8_t((s_phase + ((delta > 0) ? 1u : 3u)) & 3u);
-        digitalWrite(PIN_STEP, (s_phase == 1 || s_phase == 2) ? HIGH : LOW);  // A
-        digitalWrite(PIN_DIR,  (s_phase == 2 || s_phase == 3) ? HIGH : LOW);  // B
-        s_emitted += (delta > 0) ? 1.0f : -1.0f;
-    }
+    emitTowardPos();
 
     if (s_segElapsedUs >= seg.duration_us) {
         s_tail = uint8_t(s_tail + 1);
@@ -169,10 +205,12 @@ static void processFrame(uint8_t* data, size_t len) {
     switch (data[0]) {
         case kOpEstop:   // ahead of the ring, by design
             s_estop = true;
+            s_rtActive = false;
             s_head = s_tail = 0;
             break;
         case kOpClear:
             s_estop = false;
+            s_rtActive = false;   // never resume a pre-estop target
             s_head = s_tail = 0;
             s_flags = 0;
             s_state = kStateIdle;
@@ -189,6 +227,22 @@ static void processFrame(uint8_t* data, size_t len) {
             s_ring[s_head % kSegmentDepth] = seg;
             s_head = uint8_t(s_head + 1);
             s_flags &= uint8_t(~kFlagUnderran);
+            s_rtActive = false;   // segments reclaim the renderer
+            break;
+        }
+        case kOpRetarget: {
+            if (len < 2 + 12) break;
+            float t = 0, v = 0, a = 0;
+            memcpy(&t, data + 2, 4);
+            memcpy(&v, data + 6, 4);
+            memcpy(&a, data + 10, 4);
+            if (!(a > 0.0f) || !(v > 0.0f)) break;   // rejects NaN too
+            if (v > kMaxCountsPerSec) v = kMaxCountsPerSec;
+            s_rtTarget = t;
+            s_rtVmax   = v;
+            s_rtAccel  = a;
+            s_head = s_tail;        // last command wins: drop queued segments
+            s_rtActive = true;
             break;
         }
         default:   // kOpPing and future ops: status answers regardless

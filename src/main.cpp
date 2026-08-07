@@ -1164,15 +1164,11 @@ void setup() {
         }
     }
 
-    // Reg 0x00 is VOLATILE but survives a reboot of US, so a previous Modbus
-    // session can leave the drive deaf to step/dir. The release ATTEMPT below
-    // is best-effort only: on this drive 0x00 = 1 is a one-way door that no
-    // Modbus write clears (sd-opb). The httpTask poll reports the stuck state;
-    // only a drive power cycle fixes it. Modbus mode arms it in
-    // ModbusServoDriver::init() instead.
-    if (g_motion_backend == 0 && servoModbus.isReady()) {
-        servoModbus.releaseMotionArm();
-    }
+    // NEVER write reg 0x00 on the step/dir backend, not even 0. Measured live
+    // 2026-08-07: the boot-time releaseMotionArm() wrote 0, the drive latched
+    // 1, and the machine booted deaf to step/dir every time (sd-opb one-way
+    // door -- ANY write arms it; only a drive power cycle clears it). The
+    // httpTask poll warns while 0x00 reads 1; that is the whole handling.
 
     // Ramp-register reconcile. Read first, write only on a mismatch, so an
     // unchanged setting never arms the drive. See docs/drive-accel-register.md.

@@ -6,13 +6,16 @@
 //   faster (sd-dxy ruling). Underrun -> SETTLE at the last endpoint, never
 //   extrapolation. ESTOP is handled in the SPI receive IRQ, ahead of the ring.
 // - Pin choices here are solder-defined; change them WITH the loom, not before.
-// - TODO(sd-dxy): the 20 kHz timer stepper below is a bring-up stub. The real
-//   generator is a PIO program clocked from the interpolator; the stub exists
-//   so the link, ring, credit, and settle logic are testable before PIO lands.
+// - Output stage is a PIO stepgen: a one-instruction SM (out pins, 2) streams
+//   absolute A/B levels at kStateHz; the 20 kHz tick renders trajectory into
+//   states. Production and consumption share the crystal, so the joined TX
+//   FIFO (8 words = 320 us) never drifts; an underrun HOLDS pins.
 #include <Arduino.h>
 
+#include "hardware/clocks.h"
 #include "hardware/gpio.h"
 #include "hardware/irq.h"
+#include "hardware/pio.h"
 #include "hardware/spi.h"
 
 #include "comms/MotionLinkProtocol.h"
@@ -63,23 +66,87 @@ static volatile float s_rtTarget = 0.0f;
 static volatile float s_rtVmax   = 0.0f;
 static volatile float s_rtAccel  = 0.0f;
 
-// Advance the quadrature output one transition toward s_pos (one per tick max).
+// ---- PIO quadrature stepgen -------------------------------------------------
+// One-instruction SM (out pins, 2) streams ABSOLUTE A/B levels at kStateHz;
+// the tick renders trajectory into 2-bit states, Bresenham-spread. Max one
+// transition per state = kStateHz counts/s ceiling (drive input roof 500 kHz).
+static constexpr uint32_t kTickUs = 50;   // 20 kHz trajectory tick
+static PIO s_qpio = pio0;
+static int s_qsm = -1;
+static uint8_t  s_qphase = 0;
+static uint32_t s_qword = 0;        // 16 states, LSB-first (shift-right OSR)
+static uint8_t  s_qbits = 0;
+static uint8_t  s_qphaseAtWord = 0; // rollback snapshot: FIFO-full drops a
+static float    s_qemitAtWord = 0;  //   whole word, so un-count its motion
+static uint32_t s_qdrops = 0;
+static constexpr uint32_t kStateHz = 400000;
+static constexpr uint32_t kStatesPerTick = (kTickUs * kStateHz) / 1000000u;
+
+static inline uint8_t phasePins(uint8_t ph) {
+    // bit0 = A (GPIO7), bit1 = B (GPIO8); Gray 00, 01, 11, 10.
+    constexpr uint8_t lut[4] = {0b00, 0b01, 0b11, 0b10};
+    return lut[ph & 3u];
+}
+
+// Render this tick's owed transitions into pin states and feed the FIFO.
+// Production (20 states / 50 us) equals consumption exactly and both clock
+// from the crystal, so FIFO-full is a fault counter, not a design state.
 static inline void emitTowardPos() {
-    const float delta = s_pos - s_emitted;
-    if (delta >= 1.0f || delta <= -1.0f) {
-        // QUADRATURE A/B levels (drive saved in encoder-follow, 0x19=2):
-        // one Gray transition per count, A leads B = forward. Step/dir no
-        // longer drives the motor. ponytail: 20 k counts/s cap, PIO replaces.
-        static uint8_t s_phase = 0;
-        s_phase = uint8_t((s_phase + ((delta > 0) ? 1u : 3u)) & 3u);
-        digitalWrite(PIN_STEP, (s_phase == 1 || s_phase == 2) ? HIGH : LOW);  // A
-        digitalWrite(PIN_DIR,  (s_phase == 2 || s_phase == 3) ? HIGH : LOW);  // B
-        s_emitted += (delta > 0) ? 1.0f : -1.0f;
+    float delta = s_pos - s_emitted;
+    const int dirStep = (delta >= 0.0f) ? 1 : -1;
+    unsigned n = (unsigned)((delta >= 0.0f) ? delta : -delta);
+    if (n > kStatesPerTick) n = kStatesPerTick;
+    unsigned acc = 0;
+    for (unsigned i = 0; i < kStatesPerTick; ++i) {
+        acc += n;
+        if (acc >= kStatesPerTick) {
+            acc -= kStatesPerTick;
+            s_qphase = uint8_t((s_qphase + ((dirStep > 0) ? 1u : 3u)) & 3u);
+            s_emitted += (float)dirStep;
+        }
+        s_qword |= (uint32_t)phasePins(s_qphase) << s_qbits;
+        s_qbits = uint8_t(s_qbits + 2);
+        if (s_qbits == 32u) {
+            if (!pio_sm_is_tx_fifo_full(s_qpio, (uint)s_qsm)) {
+                pio_sm_put(s_qpio, (uint)s_qsm, s_qword);
+            } else {
+                ++s_qdrops;
+                s_qphase = s_qphaseAtWord;   // those transitions never left
+                s_emitted = s_qemitAtWord;
+            }
+            s_qword = 0;
+            s_qbits = 0;
+            s_qphaseAtWord = s_qphase;
+            s_qemitAtWord = s_emitted;
+        }
     }
 }
 
+static void quadPioInit() {
+    static const uint16_t prog[] = {
+        (uint16_t)pio_encode_out(pio_pins, 2),
+    };
+    static const struct pio_program p = {prog, 1, -1, 0};
+    const uint off = pio_add_program(s_qpio, &p);
+    s_qsm = (int)pio_claim_unused_sm(s_qpio, true);
+    pio_sm_config c = pio_get_default_sm_config();
+    sm_config_set_wrap(&c, off, off);
+    sm_config_set_out_pins(&c, PIN_STEP, 2);   // GPIO7 = A, GPIO8 = B
+    sm_config_set_set_pins(&c, PIN_STEP, 2);
+    sm_config_set_out_shift(&c, true, true, 32);
+    sm_config_set_fifo_join(&c, PIO_FIFO_JOIN_TX);
+    sm_config_set_clkdiv(&c, (float)clock_get_hz(clk_sys) / (float)kStateHz);
+    pio_sm_init(s_qpio, (uint)s_qsm, off, &c);
+    pio_sm_set_consecutive_pindirs(s_qpio, (uint)s_qsm, PIN_STEP, 2, true);
+    // Glitch-free handover: park the pins at the current phase BEFORE the
+    // funcsel switch, or the drive sees a spurious Gray jump to 00.
+    pio_sm_exec(s_qpio, (uint)s_qsm, pio_encode_set(pio_pins, phasePins(s_qphase)));
+    pio_gpio_init(s_qpio, PIN_STEP);
+    pio_gpio_init(s_qpio, PIN_DIR);
+    pio_sm_set_enabled(s_qpio, (uint)s_qsm, true);
+}
+
 static struct repeating_timer s_tick;
-static constexpr uint32_t kTickUs = 50;   // 20 kHz stub cadence
 
 static bool stepperTick(struct repeating_timer*) {
     // Never busy-wait in this ISR: a 20 us wait held off the SPI IRQ past the
@@ -127,8 +194,10 @@ static bool stepperTick(struct repeating_timer*) {
     // reference instead -- zero pulses -- and report it. Small offsets slew
     // legitimately.
     if (s_segElapsedUs == 0) {
+        // Threshold sits above kStatesPerTick so a legit full-rate tick's
+        // in-flight delta can never read as a discontinuity.
         const float jump = seg.p0 - s_emitted;
-        if (jump > 32.0f || jump < -32.0f) {
+        if (jump > 64.0f || jump < -64.0f) {
             s_emitted += jump;
             s_flags |= kFlagJumped;
         }
@@ -390,8 +459,7 @@ void setup() {
     Serial.begin(115200);   // USB CDC status; printf is the Zero's only log
     pinMode(PIN_IRQ, OUTPUT);
     digitalWrite(PIN_IRQ, LOW);
-    pinMode(PIN_STEP, OUTPUT);
-    pinMode(PIN_DIR, OUTPUT);
+    quadPioInit();   // owns PIN_STEP/PIN_DIR from here on (A/B via PIO)
 
     s_px.begin();
     // Engine brightness stays 255; the adapter dims post-gamma in duty space.
@@ -430,10 +498,11 @@ void loop() {
     static uint32_t lastPrint = 0;
     if (millis() - lastPrint >= 1000) {
         lastPrint = millis();
-        Serial.printf("[mlink] lastSeq=%u badCrc=%lu torn=%lu irqs=%lu drained=%lu maxRx=%u "
+        Serial.printf("[mlink] lastSeq=%u badCrc=%lu torn=%lu qdrops=%lu irqs=%lu drained=%lu maxRx=%u "
                       "imsc=0x%02lx ris=0x%02lx sspsr=0x%02lx cs=%d\n",
                       unsigned(s_lastSeq), (unsigned long)s_badCrc,
-                      (unsigned long)s_torn, (unsigned long)s_irqCount,
+                      (unsigned long)s_torn, (unsigned long)s_qdrops,
+                      (unsigned long)s_irqCount,
                       (unsigned long)s_bytesDrained, unsigned(s_maxRx),
                       (unsigned long)spi_get_hw(spi1)->imsc,
                       (unsigned long)spi_get_hw(spi1)->ris,

@@ -80,11 +80,11 @@ inline constexpr uint16_t kRunwayTargetMs = 10;   // operator-ruled band
 inline constexpr uint16_t kRunwayLowMs = 4;
 inline constexpr size_t kSegmentDepth = 8;
 
-// Renderer emit ceiling: the 20 kHz stub outputs at most one quadrature
-// transition per tick. Plans are clamped BELOW it so the emitter never falls
+// Renderer emit ceiling. The PIO stepgen streams pin states at 400 kHz (one
+// transition per state max); plans clamp BELOW it so the emitter never falls
 // behind the trajectory (falling behind trips the teleport guard = lost
-// motion). The PIO stepgen (sd-dxy) lifts this to the drive's 500 kHz input.
-inline constexpr float kMaxCountsPerSec = 18000.0f;
+// motion). The drive's own input limit is 500 kHz -- the hard roof.
+inline constexpr float kMaxCountsPerSec = 300000.0f;
 
 // Every frame, BOTH directions, carries CRC-16/CCITT-FALSE over bytes
 // [0, kCrcOffset) stored LE at [kCrcOffset]. A frame that fails the check is

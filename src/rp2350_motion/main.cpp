@@ -59,6 +59,12 @@ static struct repeating_timer s_tick;
 static constexpr uint32_t kTickUs = 50;   // 20 kHz stub cadence
 
 static bool stepperTick(struct repeating_timer*) {
+    // STEP falls here, one tick after it rose: ~50 us high with ZERO stall in
+    // this ISR. Never busy-wait here: a 20 us wait held off the SPI IRQ past
+    // the PL022's 8-byte RX FIFO (8 us at 8 MHz) and tore frames.
+    // ponytail: at the 20 kstep/s stub cap the low gap shrinks toward the
+    // drive's 1.2 us floor -- the PIO stepgen (sd-dxy) replaces this.
+    digitalWrite(PIN_STEP, LOW);
     if (s_estop) { s_state = kStateEstop; return true; }   // hold: no motion
 
     if (ringDepth() == 0) {
@@ -92,12 +98,7 @@ static bool stepperTick(struct repeating_timer*) {
     const float delta = s_pos - s_emitted;
     if (delta >= 1.0f || delta <= -1.0f) {
         digitalWrite(PIN_DIR, delta > 0 ? HIGH : LOW);
-        digitalWrite(PIN_STEP, HIGH);
-        // 20 us high: drive needs >1.2 us; the width exists for bench LEDs on
-        // the step line. ponytail: busy-wait eats 40% of the tick at the
-        // 20 kstep/s stub cap -- the PIO stepgen (sd-dxy) deletes this.
-        busy_wait_us_32(20);
-        digitalWrite(PIN_STEP, LOW);
+        digitalWrite(PIN_STEP, HIGH);   // cleared at the next tick's entry
         s_emitted += (delta > 0) ? 1.0f : -1.0f;
     }
 

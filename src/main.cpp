@@ -235,7 +235,11 @@ void tick() {
     // 4000 steps out, 4000 back, 2 s each, zero end velocities (smoothstep,
     // ~3 kstep/s peak). Drive stays UNPOWERED under this image until the
     // frame checksum lands (sd-dxy): a corrupted motion byte has no guard yet.
-    if (in[0] != motionlink::kStateEstop && in[4] < 2) {
+    // Feed only on a PROVEN status frame: signature + seq echo. A rebooting
+    // or torn slave reads as depth 0, and blind-feeding on that overfilled
+    // the ring to overflow twice (2026-08-06).
+    const bool frameSane = (in[14] == 0xA5) && (in[15] == in[5]);
+    if (frameSane && in[0] != motionlink::kStateEstop && in[4] < 2) {
         static bool outward = true;
         motionlink::Segment seg{2000000u,
                                 outward ? 0.0f : 4000.0f, 0.0f,

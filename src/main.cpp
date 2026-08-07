@@ -1167,8 +1167,9 @@ void setup() {
     // NEVER write reg 0x00 on the step/dir backend, not even 0. Measured live
     // 2026-08-07: the boot-time releaseMotionArm() wrote 0, the drive latched
     // 1, and the machine booted deaf to step/dir every time (sd-opb one-way
-    // door -- ANY write arms it; only a drive power cycle clears it). The
-    // httpTask poll warns while 0x00 reads 1; that is the whole handling.
+    // door -- a bare write arms it). The exit is 506-then-0, now inside
+    // releaseMotionArm(); the httpTask poll warns while 0x00 reads 1. Nothing
+    // arms the door on this backend, so nothing here needs to release it.
 
     // Ramp-register reconcile. Read first, write only on a mismatch, so an
     // unchanged setting never arms the drive. See docs/drive-accel-register.md.

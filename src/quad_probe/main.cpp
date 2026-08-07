@@ -1057,6 +1057,110 @@ void setup() {
     Serial.println("READY -- 'd' dump, 'e' ENVELOPE 0x19=2 (sd-z05), 'u' 0x00=506 release (sd-opb), 'E' e-gear 4/1, 'r' restore e-gear, 'w'/'W' save (W keeps 0x00=1), 'v' verified commit, 'z' back to pulse+dir, 'x' save-with-2, 'g' tests, 'q' full enable, 'm' MODBUS MOTION, 'n'/'N' MODBUS STREAM (N=fast+noecho), 'b' rebaud 115200, 'a' RAMP BURST (measure only), 'k'/'j' commit 0x03=60000/50000 to EEPROM (power-cycle after), 'S' accel sweep, 'F' FRAME-RATE sweep.");
 }
 
+// ---- Baud hunt: which speed is the drive actually listening at? -------------
+// Reads 0x0E (alarm) at each candidate. Leaves Serial1 at the answering baud
+// so every other key works from there; restores 19200 if nothing answers.
+void baudHunt() {
+    Serial.println("");
+    Serial.println("--- BAUD HUNT (reads 0x0E at each candidate) ---");
+    const uint32_t cands[] = {19200, 115200, 9600, 38400, 57600, 4800, 2400};
+    for (uint32_t b : cands) {
+        Serial1.updateBaudRate(b);
+        delay(30);
+        uint16_t v = 0;
+        bool ok = readRegs(0x0E, 1, &v);
+        if (!ok) ok = readRegs(0x0E, 1, &v);   // one retry, first frame can tear
+        Serial.printf("  %6lu : %s", (unsigned long)b, ok ? "ANSWERS" : "-");
+        if (ok) {
+            Serial.printf("  (alarm=0x%04X) -- staying at this baud", v);
+            Serial.println("");
+            return;
+        }
+        Serial.println("");
+    }
+    Serial1.updateBaudRate(19200);
+    Serial.println("no answer at any candidate -- back at 19200. Check drive power/link.");
+}
+
+// ---- Unarmed save: 0x19=2 with NO 0x00 write at all, then 0x14=1 ------------
+// OSSM-RS home() writes 0x19 without arming and it functions. Every recorded
+// save attempt armed first; the armed state may be what the save excludes.
+void unarmedSave() {
+    Serial.println("");
+    Serial.println("--- UNARMED SAVE: 0x19=2 (no 0x00 touch), 0x14=1 ---");
+    uint16_t v = 0;
+    const bool a = writeReg(0x19, 2);
+    delay(120);
+    readRegs(0x19, 1, &v);
+    Serial.printf("0x19 write ack=%d readback=%u %s", a, v,
+                  v == 2 ? "(takes WITHOUT the arm)" : "(did not take unarmed)");
+    Serial.println("");
+    if (v != 2) { Serial.println("stopping -- unarmed write refused"); return; }
+    writeReg(0x14, 1);
+    Serial.println("committing (silent 5 s)...");
+    delay(5000);
+    readRegs(0x00, 1, &v); Serial.printf("0x00=%u ", v);
+    readRegs(0x19, 1, &v); Serial.printf("0x19=%u ", v);
+    readRegs(0x14, 1, &v); Serial.printf("0x14=%u", v);
+    Serial.println("");
+    Serial.println("POWER-CYCLE THE DRIVE, then 'd' -- 0x19=2 surviving is the pass.");
+}
+
+// ---- Operator sequence: 0x00=1, 0x19=2, 0x00=506, 0x00=0, reboot ------------
+void operatorSeq() {
+    Serial.println("");
+    Serial.println("--- OPERATOR SEQ: 0x00=1, 0x19=2, 0x00=506, 0x00=0 ---");
+    uint16_t v = 0;
+    writeReg(0x00, 1);   delay(30);
+    writeReg(0x19, 2);   delay(30);
+    writeReg(0x00, 506); delay(30);
+    writeReg(0x00, 0);   delay(100);
+    readRegs(0x00, 1, &v); Serial.printf("0x00=%u ", v);
+    readRegs(0x19, 1, &v); Serial.printf("0x19=%u", v);
+    Serial.println("");
+    Serial.println("POWER-CYCLE THE DRIVE, then 'd' -- 0x19=2 surviving is the pass.");
+}
+
+// ---- Save from the 506 state: 0x00=1, 0x19=2, 0x00=506, 0x14=1 --------------
+// The 506 write is the closing move of the ONLY proven persistence path (the
+// baud ritual, manual sec 6 "internal parameter"). Never combined with the
+// documented 0x14 save before. Power-cycle after, then 'd'.
+void save506() {
+    Serial.println("");
+    Serial.println("--- SAVE FROM 506 STATE: 0x00=1, 0x19=2, 0x00=506, 0x14=1 ---");
+    uint16_t v = 0;
+    writeReg(0x00, 1);   delay(30);
+    writeReg(0x19, 2);   delay(30);
+    writeReg(0x00, 506); delay(30);
+    writeReg(0x14, 1);   delay(100);
+    Serial.println("committing (silent 5 s, no bus traffic)...");
+    delay(5000);
+    readRegs(0x00, 1, &v); Serial.printf("0x00=%u ", v);
+    readRegs(0x19, 1, &v); Serial.printf("0x19=%u ", v);
+    readRegs(0x14, 1, &v); Serial.printf("0x14=%u", v);
+    Serial.println("");
+    Serial.println("POWER-CYCLE THE DRIVE, then 'd' -- 0x19=2 surviving is the pass.");
+}
+
+// ---- Long-silence save: 0x14=1 then TEN seconds of radio silence ------------
+// The 2026-08-03 arms waited 3 s. An EEPROM commit interrupted by polling is
+// a candidate for every recorded failure; this rung removes the variable.
+void saveLongSilence() {
+    Serial.println("");
+    Serial.println("--- LONG-SILENCE SAVE: 0x00=1, 0x19=2, 0x14=1, 10 s quiet ---");
+    uint16_t v = 0;
+    writeReg(0x00, 1);  delay(80);
+    writeReg(0x19, 2);  delay(80);
+    writeReg(0x14, 1);
+    Serial.println("committing (silent 10 s, no bus traffic, 0x00 stays 1)...");
+    delay(10000);
+    readRegs(0x00, 1, &v); Serial.printf("0x00=%u ", v);
+    readRegs(0x19, 1, &v); Serial.printf("0x19=%u ", v);
+    readRegs(0x14, 1, &v); Serial.printf("0x14=%u", v);
+    Serial.println("");
+    Serial.println("POWER-CYCLE THE DRIVE, then 'd' -- 0x19=2 surviving is the pass.");
+}
+
 // ---- Rebaud envelope with 0x19=2 as payload (sd-z05 operator ruling) --------
 // The 129/506 pair is the only write path on this drive proven to reach
 // non-volatile storage (a rebaud survives power cycles with no 0x14). Same
@@ -1131,6 +1235,11 @@ void loop() {
     while (Serial.available()) Serial.read();
     if (key == 'd' || key == 'D') { dumpRegs(); return; }
     if (key == 'e') { envelopeMode2(); return; }
+    if (key == 'H' || key == 'h') { baudHunt(); return; }
+    if (key == 'y') { save506(); return; }
+    if (key == 'o' || key == 'O') { operatorSeq(); return; }
+    if (key == 'p' || key == 'P') { unarmedSave(); return; }
+    if (key == 'Y') { saveLongSilence(); return; }
     if (key == 'E') { egearQuad(); return; }
     if (key == 'u' || key == 'U') { release506(); return; }
     if (key == 'r' || key == 'R') { restoreEgear(); return; }

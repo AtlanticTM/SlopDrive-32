@@ -262,14 +262,19 @@ void ServoModbus::armMotionControl() {
     SLOGI("servobus", "ServoModbus: motion ARMED (0x00=1, gains re-seated) :3");
 }
 
-// BEST-EFFORT, never a guarantee: this drive ACKS 0x00 = 0 and keeps reading 1
-// (sd-opb, measured). Only a drive power cycle clears it. Callers must not
-// treat a return from here as proof that step/dir is live; the reg-0x00 poll in
-// main.cpp's httpTask loop is what reports the truth.
+// A bare 0x00=0 is acked and latches 1 (sd-opb); the 506-then-0 pair below is
+// the measured exit. Callers still must not treat a return from here as proof
+// that step/dir is live; the reg-0x00 poll in main.cpp's httpTask loop is what
+// reports the truth.
 void ServoModbus::releaseMotionArm() {
     if (!_ready) return;
+    // 506 THEN 0 is the door's exit (measured 2026-08-07, sd-opb): a bare
+    // 0x00=0 is acked and latches 1; after 506 the 0 sticks and the drive
+    // provably counts pulses again (16.00/pulse across 1 us..2 ms widths).
+    sendWriteCommand(0x00, 506);
+    delay(30);
     sendWriteCommand(0x00, 0);
-    SLOGI("servobus", "ServoModbus: 0x00 = 0 write sent (release attempt, not confirmed).");
+    SLOGI("servobus", "ServoModbus: motion arm released (0x00: 506 then 0 -- the measured exit).");
 }
 
 // ---- Lifecycle --------------------------------------------------------------

@@ -341,7 +341,18 @@ float MlinkServoDriver::getPosition() const {
     // Capped so a dead link freezes; v=0 at rest keeps standstill raw.
     uint32_t age = millis() - _status_ms + kTickMs;
     if (age > 3 * kTickMs) age = 3 * kTickMs;
-    return -(_pos_counts + _vel_counts * (float(age) * 1e-3f)) / AIM_STEPS_PER_MM;
+    float ext = _pos_counts + _vel_counts * (float(age) * 1e-3f);
+    // The renderer never passes its active target: clamp the extrapolation
+    // to it, or a reversal-edge read lands past the window and trips the
+    // arbiter's outside-window gentle cap (pattern pinned to USER speed,
+    // self-reinforcing late strokes -- 2026-08-08). Idle: target==pos, so
+    // extrapolation is disabled at rest by construction.
+    const float tgt = _seg_mode ? _samp_p : (_rt_valid ? _rt_target : _pos_counts);
+    const float lo = (_pos_counts < tgt) ? _pos_counts : tgt;
+    const float hi = (_pos_counts < tgt) ? tgt : _pos_counts;
+    if (ext < lo) ext = lo;
+    if (ext > hi) ext = hi;
+    return -ext / AIM_STEPS_PER_MM;
 }
 
 float MlinkServoDriver::getTargetPosition() const {

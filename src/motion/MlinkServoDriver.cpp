@@ -61,35 +61,46 @@ void MlinkServoDriver::sendRetarget() {
     _last_cmd_ms = millis();
 }
 
-void MlinkServoDriver::sendSegment() {
-    // A chain tail older than the stream-gap window means shipping was
-    // blocked (estop hold, full ring): re-base to one tick so the segment
-    // renders NOW instead of replaying the whole blockage as one duration.
-    if (_samp_ms - _chain_ms > kStreamGapMs) {
-        _chain_p = _pos_counts;
-        _chain_v = 0.0f;
-        _chain_ms = (_samp_ms > kTickMs) ? _samp_ms - kTickMs : _samp_ms;
-    }
-    // Hermite chunk covering [chain, sample]: the slave renders it over its
-    // wire duration, which is what preserves the stream's timeline.
+void MlinkServoDriver::sendSegmentTo(float p1, float v1, uint32_t t1_ms) {
+    // Hermite chunk covering [chain, (p1,v1,t1)]: the slave renders it over
+    // its wire duration, which is what preserves the stream's timeline.
     uint8_t out[kFrameBytes] = {kOpSegment, ++_seq};
-    const uint32_t dur_us = (_samp_ms - _chain_ms) * 1000u;
+    const uint32_t dur_us = (t1_ms - _chain_ms) * 1000u;
     memcpy(&out[2], &dur_us, 4);
     memcpy(&out[6], &_chain_p, 4);
     memcpy(&out[10], &_chain_v, 4);
-    memcpy(&out[14], &_samp_p, 4);
-    memcpy(&out[18], &_samp_v, 4);
+    memcpy(&out[14], &p1, 4);
+    memcpy(&out[18], &v1, 4);
     uint8_t in[kFrameBytes] = {};
     xfer(out, in);
     // Keep the exact frame for loss recovery: same seq on resend, so the
-    // slave's dedup can drop the copy when only the ack was lost.
+    // slave's dedup can drop the copy when only the ack was lost. Tracks the
+    // LAST frame of a tick; a torn first-of-pair costs a half-chunk slew.
     memcpy(_seg_frame, out, kFrameBytes);
     _seg_seq = _seq;
     _seg_unacked = true;
-    _chain_p = _samp_p;
-    _chain_v = _samp_v;
-    _chain_ms = _samp_ms;
+    _chain_p = p1;
+    _chain_v = v1;
+    _chain_ms = t1_ms;
     _last_cmd_ms = millis();
+}
+
+void MlinkServoDriver::sendSegment() {
+    sendSegmentTo(_hold_p, _hold_v, _hold_ms);
+}
+
+void MlinkServoDriver::sendSegmentSplit() {
+    // Two halves of the same cubic, evaluated at u=0.5, so an empty ring is
+    // primed to depth 2 in one tick -- production is real-time-capped, so
+    // steady one-per-tick shipping can never deepen the ring by itself.
+    const float Ts = float(_hold_ms - _chain_ms) * 1e-3f;
+    const float p0 = _chain_p, v0 = _chain_v;
+    const float p1 = _hold_p, v1 = _hold_v;
+    const float mid_p = 0.5f * (p0 + p1) + 0.125f * Ts * (v0 - v1);
+    const float mid_v = 1.5f * (p1 - p0) / Ts - 0.25f * (v0 + v1);
+    const uint32_t mid_ms = _chain_ms + (_hold_ms - _chain_ms) / 2u;
+    sendSegmentTo(mid_p, mid_v, mid_ms);
+    sendSegmentTo(_hold_p, _hold_v, _hold_ms);
 }
 
 void MlinkServoDriver::init() {
@@ -169,21 +180,34 @@ void MlinkServoDriver::update() {
                 return;
             }
         }
-        // Settled mid-stream = playback slipped behind (underrun). Re-anchor
-        // at the settled point and NOW so slip is dropped, never compounded;
-        // the next segment sweeps the gap in one tick.
-        if (sane && _state == kStateSettled && !_seg_unacked &&
-            _samp_ms != _chain_ms) {
+        // Underrun settle: re-anchor one tick BEHIND the hold, dropping slip.
+        // Never ahead: chain past hold underflows the u32 duration (the
+        // 71-minute wedge segment, 2026-08-07).
+        if (sane && _state == kStateSettled && !_seg_unacked) {
             _chain_p = _pos_counts;
             _chain_v = 0.0f;
-            _chain_ms = (_samp_ms > kTickMs) ? _samp_ms - kTickMs : _samp_ms;
+            _chain_ms = (_hold_ms > kTickMs) ? _hold_ms - kTickMs : 0;
         }
-        // Reported runway is one tick STALE (reply preloaded last tick), so
-        // gate at target+tick: the bare target shipped into an already-dry
-        // ring (measured mid-stream underruns 2026-08-07).
-        if (sane && _samp_ms != _chain_ms && _depth < kSegmentDepth &&
-            _runway_ms < kRunwayTargetMs + kTickMs)
-            sendSegment();
+        // Blocked-interval re-base; unsigned compare also catches any
+        // chain-ahead-of-hold ordering bug as a huge gap.
+        if (_hold_ms - _chain_ms > kStreamGapMs) {
+            _chain_p = _pos_counts;
+            _chain_v = 0.0f;
+            _chain_ms = (_hold_ms > kTickMs) ? _hold_ms - kTickMs : 0;
+        }
+        // Gate compensates the one-tick-stale runway report. Depth 0 (entry
+        // or just-underran): split-ship to prime the 2-segment cushion.
+        const int32_t span_ms = int32_t(_hold_ms - _chain_ms);
+        if (sane && span_ms > 0 && _depth < kSegmentDepth &&
+            _runway_ms < kRunwayTargetMs + 2 * kTickMs) {
+            if (_depth == 0 && span_ms >= 4) sendSegmentSplit();
+            else sendSegment();
+        }
+        // Holdback advances AFTER the ship attempt: a fresh chunk always
+        // exists to ship into a draining ring next tick.
+        _hold_p = _samp_p;
+        _hold_v = _samp_v;
+        _hold_ms = _samp_ms;
         return;                       // segment mode never refreshes retargets
     }
 
@@ -253,6 +277,9 @@ void MlinkServoDriver::streamSample(int32_t target_steps, float vel_steps_s,
         _chain_p = _pos_counts;
         _chain_v = 0.0f;
         _chain_ms = now;
+        _hold_p = _pos_counts;
+        _hold_v = 0.0f;
+        _hold_ms = now;
         _samp_ms = now;
         _seg_mode = true;
     }

@@ -74,6 +74,8 @@ private:
     void sendOp(uint8_t op);
     void sendRetarget();
     void sendSegment();
+    void sendSegmentTo(float p1, float v1, uint32_t t1_ms);
+    void sendSegmentSplit();
 
     // Link state (motorTask only)
     uint8_t  _seq = 0;
@@ -107,6 +109,12 @@ private:
     float    _samp_p = 0.0f;       // freshest arbiter sample
     float    _samp_v = 0.0f;
     uint32_t _samp_ms = 0;
+    // One-tick holdback: ship to LAST tick's sample so a tick of produced
+    // curve stays in reserve (production is real-time-capped, so without it
+    // ring depth never exceeds 1 and jitter lands on the underrun edge).
+    float    _hold_p = 0.0f;
+    float    _hold_v = 0.0f;
+    uint32_t _hold_ms = 0;
     uint8_t  _seg_frame[motionlink::kFrameBytes] = {};  // resend copy
     uint8_t  _seg_seq = 0;
     bool     _seg_unacked = false;

@@ -25,8 +25,8 @@ static constexpr uint8_t PIN_SPI_CS  = 1;   // S3 CS   (GPIO4)
 static constexpr uint8_t PIN_SPI_SCK = 2;   // S3 SCK  (GPIO48)
 static constexpr uint8_t PIN_SPI_TX  = 3;   // -> S3 MISO (GPIO10)
 static constexpr uint8_t PIN_IRQ     = 4;   // -> S3 IRQ (GPIO7), active HIGH
-static constexpr uint8_t PIN_STEP    = 6;   // -> S3 GPIO1 (matrix -> drive PUL)
-static constexpr uint8_t PIN_DIR     = 7;   // -> S3 GPIO2 (matrix -> drive DIR)
+static constexpr uint8_t PIN_STEP    = 7;   // -> S3 GPIO1 (matrix -> drive PUL)
+static constexpr uint8_t PIN_DIR     = 8;   // -> S3 GPIO2 (matrix -> drive DIR)
 static constexpr uint8_t PIN_WS2812  = 16;  // RP2350-Zero onboard pixel
 
 // ---- Segment ring (SPSC: SPI IRQ produces, stepper ISR consumes) ------------

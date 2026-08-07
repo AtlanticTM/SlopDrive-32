@@ -23,8 +23,8 @@ exactly -- solder to this table and the firmware needs no edits.
 | pin | S3 net | S3 GPIO | wire to RP2350-Zero | role |
 |----:|--------|--------:|---------------------|------|
 | 1 | GND | - | **GND** | second ground return for the pulse pair |
-| 2 | CLICK | 1 | **GP6** | STEP, RP -> S3 -> matrix -> drive PUL (GPIO5) |
-| 3 | BACK | 2 | **GP7** | DIR, RP -> S3 -> matrix -> drive DIR (GPIO6) |
+| 2 | CLICK | 1 | **GP7** | STEP, RP -> S3 -> matrix -> drive PUL (GPIO5) |
+| 3 | BACK | 2 | **GP8** | DIR, RP -> S3 -> matrix -> drive DIR (GPIO6) |
 | 4 | TOGGLE | 3 | *(spare)* | unused, leave free |
 | 5 | NC | - | - | - |
 
@@ -43,8 +43,8 @@ graph LR
     subgraph RP["Waveshare RP2350-Zero"]
         SPI0["SPI0 slave<br/>GP0 RX / GP1 CS / GP2 SCK / GP3 TX"]
         IRQ["GP4 IRQ out"]
-        STEP["GP6 STEP out"]
-        DIRO["GP7 DIR out"]
+        STEP["GP7 STEP out"]
+        DIRO["GP8 DIR out"]
         PX["GP16 WS2812<br/>(onboard, fleet grammar)"]
     end
 
@@ -55,8 +55,8 @@ graph LR
     IRQ -- "GP4 -> 6 DC(7)" --> DISP
     DISP -- "7 CS(4) -> GP1" --> SPI0
 
-    STEP -- "GP6 -> 2 CLICK(GPIO1)" --> BTN
-    DIRO -- "GP7 -> 3 BACK(GPIO2)" --> BTN
+    STEP -- "GP7 -> 2 CLICK(GPIO1)" --> BTN
+    DIRO -- "GP8 -> 3 BACK(GPIO2)" --> BTN
     BTN --> MTX
     MTX --> PUL
     MTX --> DIR

@@ -62,6 +62,14 @@ void MlinkServoDriver::sendRetarget() {
 }
 
 void MlinkServoDriver::sendSegment() {
+    // A chain tail older than the stream-gap window means shipping was
+    // blocked (estop hold, full ring): re-base to one tick so the segment
+    // renders NOW instead of replaying the whole blockage as one duration.
+    if (_samp_ms - _chain_ms > kStreamGapMs) {
+        _chain_p = _pos_counts;
+        _chain_v = 0.0f;
+        _chain_ms = (_samp_ms > kTickMs) ? _samp_ms - kTickMs : _samp_ms;
+    }
     // Hermite chunk covering [chain, sample]: the slave renders it over its
     // wire duration, which is what preserves the stream's timeline.
     uint8_t out[kFrameBytes] = {kOpSegment, ++_seq};

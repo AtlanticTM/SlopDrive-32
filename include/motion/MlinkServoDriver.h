@@ -24,7 +24,13 @@ public:
     void runHomingStep() override {}
     bool isHomed()  const override { return _homed; }
     bool isHoming() const override { return false; }
-    void forceHomeState(bool homed) override { _homed = homed; }
+    // Bench force-home also un-latches a slave-side estop: the S3 clears its
+    // own latch, and without kOpClear the RP holds position forever while
+    // every command silently queues (2026-08-07: frozen pos, zero flags).
+    void forceHomeState(bool homed) override {
+        _homed = homed;
+        if (homed && _state == motionlink::kStateEstop) _clear_pending = true;
+    }
     bool checkPushToHome() override { return false; }
     void runMotorStep() override {}
 

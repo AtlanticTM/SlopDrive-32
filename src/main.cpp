@@ -462,6 +462,15 @@ static void motorTask(void* /*param*/) {
             g_state.measured_position_mm.store(
                 motor.hasActualPosition() ? motor.getActualPosition() : actual_mm,
                 std::memory_order_relaxed);
+            // Speed EMA, the WebUI sampler's other duty: ~16 ms time constant
+            // at this loop's ~1 ms tick; jitter in the tick washes into the EMA.
+            static float last_pos = actual_mm;
+            static float spd_ema = 0.0f;
+            spd_ema += 0.06f * (fabsf(actual_mm - last_pos) * 1000.0f - spd_ema);
+            last_pos = actual_mm;
+            g_state.live_speed_mm_s.store(spd_ema, std::memory_order_relaxed);
+            if (spd_ema > g_state.max_speed_mm_s.load(std::memory_order_relaxed))
+                g_state.max_speed_mm_s.store(spd_ema, std::memory_order_relaxed);
         }
 #endif
         // D4: process any Core 0 -> Core 1 deferred intents

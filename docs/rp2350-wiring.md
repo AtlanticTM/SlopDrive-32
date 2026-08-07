@@ -1,27 +1,28 @@
 # RP2350-Zero loom -- wiring reference (sd-dxy)
 
-Bench reference for soldering the Waveshare RP2350-Zero motion coprocessor
-onto the S3's two unpopulated JSTs. The RP2350 pin choices are the Zero's
-**canonical SPI0 pinset** (GP0-GP3) plus plain GPIO, and they match the
-constants in [`src/rp2350_motion/main.cpp`](../src/rp2350_motion/main.cpp)
-exactly -- solder to this table and the firmware needs no edits.
-
-The link rides the **SPI1 corner cluster** (GP26-29 + GP15). RP2350 pins
-carry fixed SPI roles by position (pin mod 4: RX, CSn, SCK, TX), so within
-that cluster the legal assignment is exactly the one below: SCK cannot land
-on GP29, CS cannot land on GP15, and the IRQ (plain GPIO) takes GP15.
+The Zero DROPS STRAIGHT IN between the two parallel JSTs, stepstick-style:
+its width bridges S3DISP and S3BTN, so every connection is connector pin to
+the RP pad that physically meets it -- no jumpers. The RP2350's SPI mux is
+fixed (pin mod 4: RX, CSn, SCK, TX), so the ROLES are chosen to be legal at
+those pads, and the S3's GPIO matrix remaps its side to match (the matrix
+routes FSPI anywhere; ~40 MHz ceiling, we run 8). The old silk names (SCK/
+DC/CS) described a display that was never fitted -- trust the role column,
+not the silk. RP pins match `src/rp2350_motion/main.cpp` exactly.
 
 ## S3DISP -- JST-XH 7p (power + SPI link)
 
-| pin | S3 net | S3 GPIO | wire to RP2350-Zero | role |
-|----:|--------|--------:|---------------------|------|
+| pin | silk | S3 GPIO | RP pad it meets | role on the wire |
+|----:|------|--------:|-----------------|------------------|
 | 1 | GND | - | **GND** | common ground -- connect FIRST, remove LAST |
 | 2 | 3V3 | - | **3V3** | powers the Zero from the S3 (see the USB note) |
-| 3 | SCK | 48 | **GP26** (SPI1 SCK) | SPI clock, S3 master |
-| 4 | MOSI | 38 | **GP28** (SPI1 RX) | S3 -> RP data (segments, ops) |
-| 5 | RST | 10 | **GP27** (SPI1 TX) | RP -> S3 data (status/runway) = S3's MISO |
-| 6 | DC | 7 | **GP15** | IRQ, RP -> S3, active HIGH ("feed me" under 4 ms runway) |
-| 7 | CS | 4 | **GP29** (SPI1 CSn) | chip select, S3 master |
+| 3 | SCK | 48 | **GP29** (SPI1 CSn) | **CS** -- S3 emits chip-select on GPIO48 |
+| 4 | MOSI | 38 | **GP28** (SPI1 RX) | MOSI, S3 -> RP (segments, ops) |
+| 5 | RST | 10 | **GP27** (SPI1 TX) | MISO, RP -> S3 (status/runway) |
+| 6 | DC | 7 | **GP26** (SPI1 SCK) | **SCK** -- S3 emits clock on GPIO7 |
+| 7 | CS | 4 | **GP15** (plain GPIO) | **IRQ**, RP -> S3, active HIGH (feed me) |
+
+S3-side master pinout that follows (for the driver, not yet written):
+**SCK = GPIO7, CS = GPIO48, MOSI = GPIO38, MISO = GPIO10, IRQ in = GPIO4.**
 
 ## S3BTN -- JST-XH 5p (pulse return)
 
@@ -54,11 +55,11 @@ graph LR
     end
 
     DISP -- "1 GND / 2 3V3" --> RP
-    DISP -- "3 SCK(48) -> GP26" --> SPI1
-    DISP -- "4 MOSI(38) -> GP28" --> SPI1
-    SPI1 -- "GP27 -> 5 RST(10) = MISO" --> DISP
-    IRQ -- "GP15 -> 6 DC(7)" --> DISP
-    DISP -- "7 CS(4) -> GP29" --> SPI1
+    DISP -- "3: CS (GPIO48) -> GP29" --> SPI1
+    DISP -- "4: MOSI (GPIO38) -> GP28" --> SPI1
+    SPI1 -- "GP27 -> 5: MISO (GPIO10)" --> DISP
+    DISP -- "6: SCK (GPIO7) -> GP26" --> SPI1
+    IRQ -- "GP15 -> 7: IRQ (GPIO4)" --> DISP
 
     STEP -- "GP7 -> 2 CLICK(GPIO1)" --> BTN
     DIRO -- "GP8 -> 3 BACK(GPIO2)" --> BTN

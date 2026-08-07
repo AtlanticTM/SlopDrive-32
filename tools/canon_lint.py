@@ -273,7 +273,12 @@ GREP_CHECKS = [
                 # every firmware env by build_src_filter (platformio.ini:130,222)
                 # and compiled only by [env:quad_probe]. Serial is its only
                 # output device; SlopLog governs firmware, which this is not.
-                "src/quad_probe/"),
+                "src/quad_probe/",
+                # rp2350_motion joined 2026-08-06: standalone coprocessor
+                # sketch (own env, excluded from ESP envs by build_src_filter),
+                # different silicon, no SlopLog port -- USB CDC is its only
+                # log surface, same standing as the C5 nodes above.
+                "src/rp2350_motion/"),
     ),
     dict(
         name="slopsync-purity",

@@ -410,44 +410,48 @@ bool MlinkServoDriver::home(int32_t) {
 
     const float scale = AIM_STEPS_PER_MM;
     const float rail  = getMaxRailMm();
-    float w = 0.0f;
+    float wf = 0.0f;
+    float wr = 0.0f;
 
-    // Rear wall (+ = toward home): rough find, back off, accurate re-probe.
-    if (!sweepToStall(+1.0f, kHomeFastMmS, 1.2f * rail, w))
+    // FRONT wall first (- = away from home), REAR second: the ritual then
+    // ENDS 5 mm from home, so the park is a glide instead of a full-rail
+    // return trip (operator order: cut the wasted move).
+    if (!sweepToStall(-1.0f, kHomeFastMmS, 1.2f * rail, wf))
+        return homingAbort("front wall not found (fast sweep)");
+    glideTo(wf + kHomeReprobeBackMm * scale, kHomeFastMmS, 4000u);
+    if (!sweepToStall(-1.0f, kHomeSlowMmS, kHomeReprobeBackMm + 10.0f, wf))
+        return homingAbort("front wall not confirmed (slow probe)");
+
+    // Rear wall (+ = toward home): rough across the rail, back off, accurate.
+    if (!sweepToStall(+1.0f, kHomeFastMmS, 1.2f * rail, wr))
         return homingAbort("rear wall not found (fast sweep)");
-    glideTo(w - kHomeReprobeBackMm * scale, kHomeFastMmS, 4000u);
-    if (!sweepToStall(+1.0f, kHomeSlowMmS, kHomeReprobeBackMm + 10.0f, w))
+    glideTo(wr - kHomeReprobeBackMm * scale, kHomeFastMmS, 4000u);
+    if (!sweepToStall(+1.0f, kHomeSlowMmS, kHomeReprobeBackMm + 10.0f, wr))
         return homingAbort("rear wall not confirmed (slow probe)");
 
-    // Zero: the accurate rear wall sits kHomeMarginMm behind home. The
-    // refresh dies first -- it would seek an old-frame target after the set.
+    // Both walls measured in the same pre-zero frame; a margin comes off
+    // each end of the usable window.
+    const float span_mm = (wr - wf) / scale;
+    const float usable  = span_mm - 2.0f * kHomeMarginMm;
+    if (usable < 50.0f)
+        return homingAbort("measured stroke implausibly short");
+
+    // Zero: we are AT the accurate rear wall, which sits kHomeMarginMm
+    // behind home. The refresh dies first -- it would seek an old-frame
+    // target after the set.
     _rt_valid = false;
     _rt_dirty = false;
     if (!sendSetPos(kHomeMarginMm * scale))
         return homingAbort("kOpSetPos never confirmed");
-
-    // Front wall (- = away from home): rough across the rail, back off,
-    // accurate re-probe.
-    if (!sweepToStall(-1.0f, kHomeFastMmS, 1.2f * rail, w))
-        return homingAbort("front wall not found (fast sweep)");
-    glideTo(w + kHomeReprobeBackMm * scale, kHomeFastMmS, 4000u);
-    if (!sweepToStall(-1.0f, kHomeSlowMmS, kHomeReprobeBackMm + 10.0f, w))
-        return homingAbort("front wall not confirmed (slow probe)");
-
-    const float front_mm = -w / scale;              // mm frame: front positive
-    const float usable   = front_mm - kHomeMarginMm;
-    if (usable < 50.0f)
-        return homingAbort("measured stroke implausibly short");
     setMeasuredStrokeMm(usable);
 
-    // Park at home.
-    glideTo(0.0f, kHomeFastMmS,
-            uint32_t(front_mm / kHomeFastMmS * 1000.0f) + 4000u);
+    // Home is one margin away.
+    glideTo(0.0f, kHomeSlowMmS, 3000u);
     _homing = false;
     _homed = true;
-    SLOGI("mlink", "homed :3 both walls probed, usable stroke %.1f mm "
+    SLOGI("mlink", "homed :3 wall-to-wall %.1f mm, usable %.1f mm "
           "(%.0f mm margin per wall, slow probe %.0f mm/s)",
-          usable, (float)kHomeMarginMm, (float)kHomeSlowMmS);
+          span_mm, usable, (float)kHomeMarginMm, (float)kHomeSlowMmS);
     return true;
 }
 

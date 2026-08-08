@@ -304,6 +304,20 @@ bool MlinkServoDriver::home(int32_t) {
         SLOGW("mlink", "homing refused: INA228 not answering -- no stall sense");
         return false;
     }
+    // A latched slave estop holds the renderer through the whole sweep (no
+    // motion, no spike, clean-looking timeout) -- clear it first, exactly as
+    // forceHomeState() does for the bench path.
+    if (_state == kStateEstop) {
+        _clear_pending = true;
+        for (int i = 0; i < 50 && _state == kStateEstop; i++) {
+            update();
+            vTaskDelay(pdMS_TO_TICKS(10));
+        }
+        if (_state == kStateEstop) {
+            SLOGW("mlink", "homing refused: slave estop will not clear");
+            return false;
+        }
+    }
     _current.resetPeaks();
     _homing = true;
     _homed = false;

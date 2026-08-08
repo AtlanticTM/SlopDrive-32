@@ -426,7 +426,9 @@ struct PixelOut final : slopglow::IGlowOutput {
         // of codes (measured on the C5, 2026-08-06). Adafruit setBrightness
         // is that same pre-gamma trap, which is why it goes unused.
         auto s = [](uint8_t v) {
-            return uint8_t((uint16_t(slopglow::gamma8(v)) * 41u) >> 8);   // 40/255
+            // 9/256 ~ 3.5% duty: the pixel sits in the operator's peripheral
+            // vision at bench distance; 40/255 read as a strobe (2026-08-08).
+            return uint8_t((uint16_t(slopglow::gamma8(v)) * 9u) >> 8);
         };
         s_px.setPixelColor(0, s(c.r), s(c.g), s(c.b));
         s_px.show();

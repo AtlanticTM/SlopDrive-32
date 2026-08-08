@@ -643,6 +643,18 @@ static void streamSamplerTask(void* /*param*/) {
             g_state.sm_plan_us_avg = g_state.sm_plan_us_avg <= 0.0f
                 ? (float)dt
                 : 0.9f * g_state.sm_plan_us_avg + 0.1f * (float)dt;
+            // Joint census (sd-ar3 notch hunt): gap = this commit vs the
+            // previous chord's plan expiry. gap>0 = the engine sat PLANLESS
+            // between chords (sampler feeds a flat spot mid-stream).
+            static uint64_t s_prevEndUs = 0;
+            const int64_t gap_us = s_prevEndUs
+                ? int64_t(nowUs) - int64_t(s_prevEndUs) : 0;
+            s_prevEndUs = nowUs + cmd.duration_us;
+            SLOGI("smplan", "tgt=%.3f T=%lums G=%c vf=%.3f gap=%+ld us",
+                  (double)cmd.target,
+                  (unsigned long)(cmd.duration_us / 1000u),
+                  cmd.has_end_vel ? 'y' : 'n', (double)cmd.end_vel,
+                  (long)gap_us);
         }
 
         if (streamActive) {

@@ -1192,6 +1192,9 @@ private:
     // 1.5 intervals: one whole interval of lateness is normal transport
     // scheduling, half of another is the margin before it means something.
     static constexpr double   kSettleGraceMult = 1.5;
+    // Coast-past-expiry bound (sampleRaw): 2× the grace cap, so the coast
+    // always outlives the window in which settle takes over.
+    static constexpr double   kCoastCapS = 0.060;
 
     static double clamp01(double x) {
         return x < 0.0 ? 0.0 : (x > 1.0 ? 1.0 : x);
@@ -1225,6 +1228,11 @@ private:
 
     // Raw kinematic state (UNCLAMPED position — planning continuity must see
     // the true polynomial state even during a transient wall excursion).
+    // Past expiry the state COASTS at the end velocity, capped at kCoastCapS:
+    // freezing here stamped a flat spot into every chord join whose successor
+    // arrived after plan expiry (the 5 ms pacing-drain beat guarantees ~half
+    // do), felt as speed-scaled notching; a plan ending at rest coasts
+    // nowhere, and maybeSettle stays the stop authority.
     void sampleRaw(uint64_t now_us, double& p, double& v, double& a) const {
         if (_kind == PlanKind::None) {
             p = _hold_pos; v = 0.0; a = 0.0;
@@ -1232,9 +1240,15 @@ private:
         }
         double t = elapsedS(now_us);
         const double dur = planDuration();
-        if (t >= dur) t = dur;   // hold the end state; settle handles vf≠0
+        double over = 0.0;
+        if (t >= dur) {
+            over = t - dur;
+            if (over > kCoastCapS) over = kCoastCapS;
+            t = dur;
+        }
         if (isHermite()) quinticAt(dur > 0 ? t / dur : 1.0, p, v, a);
         else                            _traj.at_time(t, p, v, a);
+        if (over > 0.0) { p += v * over; a = 0.0; }
     }
 
     // Quintic evaluation at normalized tau ∈ [0,1] (real-time derivatives).
@@ -2887,19 +2901,19 @@ private:
             return;
         }
 
-        // Grace: hold the plan's end state (sampleRaw already freezes the
-        // polynomial at t = duration, exactly as legacy handleTimeout froze at
-        // its endpoint) and give the stream its own cadence to catch up. The
-        // window is measured from PLAN EXPIRY and never re-arms, so a stream
-        // that stays dead brakes at most `grace` late, once.
+        // Grace: the state COASTS at the end velocity (sampleRaw); measured
+        // from PLAN EXPIRY, never re-arms.
         const double grace = settleGraceS(now_us);
         if (elapsedS(now_us) - dur < grace) return;
 
+        // Brake from the coasted state at the anchor instant (plan end +
+        // grace); grace = 0 keeps the pre-0.9 start state exactly.
+        const double coast = grace > kCoastCapS ? kCoastCapS : grace;
         ruckig::InputParameter<1> in;
         in.control_interface       = ruckig::ControlInterface::Velocity;
-        in.current_position[0]     = p;
+        in.current_position[0]     = p + v * coast;
         in.current_velocity[0]     = v;
-        in.current_acceleration[0] = a;
+        in.current_acceleration[0] = coast > 0.0 ? 0.0 : a;
         in.target_velocity[0]      = 0.0;
         in.target_acceleration[0]  = 0.0;
         in.max_velocity[0]         = _cfg.limits.vmax;
@@ -2908,8 +2922,8 @@ private:
 
         ruckig::Trajectory<1> traj;
         const ruckig::Result res = _calc.calculate(in, traj);
-        // Anchor the settle at the moment the HOLD ended (plan end + grace),
-        // not at this sample's clock — the brake follows the held end state
+        // Anchor the settle at the moment the COAST ended (plan end + grace),
+        // not at this sample's clock, so the brake follows the coasted state
         // seamlessly. Anchoring at plan end alone would be a bug once a grace
         // exists: the brake profile would be entered `grace` seconds deep, and
         // the very first sample would JUMP up to vmax·grace (30 mm on the

@@ -2105,11 +2105,11 @@ TEST_CASE("Snapshot::sharpness reports the plan's real peak jerk") {
 // ---- Settle grace -----------------------------------------------------------
 // transport jitter is not starvation
 
-TEST_CASE("Settle grace holds the end state, then brakes when the stream is really gone") {
+TEST_CASE("Settle grace coasts at the end velocity, then brakes when the stream is really gone") {
     // Two paced segments establish a cadence estimate, the second ends MOVING,
-    // then the stream stops. Inside the grace the engine must HOLD (legacy
-    // handleTimeout behavior); past it, the brake must engage as it always
-    // did.
+    // then the stream stops. Inside the grace the engine must COAST at the
+    // end velocity (a freeze stamps a flat spot into every late-successor
+    // chord join, the sd-ar3 notch); past it, the brake engages as always.
     auto run = [](uint32_t grace_us) {
         auto cfg = operatorConfig();
         cfg.settle_grace_us = grace_us;
@@ -2126,20 +2126,22 @@ TEST_CASE("Settle grace holds the end state, then brakes when the stream is real
         return e;
     };
 
-    SUBCASE("grace on: expiry+10 ms is still frozen at the plan's end state") {
+    SUBCASE("grace on: the grace window coasts at the end velocity") {
         Engine e = run(30000);
         const double p_end = e.positionAt(200 * kMs);
         const double v_end = e.velocityAt(200 * kMs);
         REQUIRE(std::fabs(v_end) > 0.5);          // genuinely ends moving
-        // Sample forward through the grace on the 1 ms grid.
+        // Sample forward through the grace on the 1 ms grid: motion continues
+        // at v_end, each step bounded by one ms of it.
         double max_jump = 0.0, prev = p_end;
         for (uint64_t t = 200 * kMs; t <= 229 * kMs; t += kMs) {
             const double p = e.positionAt(t);
             max_jump = std::max(max_jump, std::fabs(p - prev));
             prev = p;
         }
-        CHECK(e.positionAt(229 * kMs) == doctest::Approx(p_end).epsilon(1e-9));
-        CHECK(max_jump == doctest::Approx(0.0).epsilon(1e-9));
+        CHECK(e.positionAt(229 * kMs) ==
+              doctest::Approx(p_end + v_end * 0.029).epsilon(1e-6));
+        CHECK(max_jump <= std::fabs(v_end) * 1e-3 * 1.05);
         CHECK(e.mode() == Mode::Waveform);        // NOT Settle
         CHECK(e.planKind() == slopmotion::PlanKind::Quintic);
         CHECK(drainFor(e, AnomalyType::SettleEngaged).seen == false);

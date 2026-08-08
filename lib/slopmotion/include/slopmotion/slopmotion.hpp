@@ -1217,6 +1217,9 @@ private:
     // Anchored-commit lateness bound; MUST stay under kCoastCapS (see
     // commit()).
     static constexpr uint64_t kAnchorMaxLateUs = 50000;
+    // Below this span a timed segment is a DWELL (see the dwell rule in
+    // commitWaveform); 2% of the window, under any real stroke.
+    static constexpr double   kDwellSpanNorm = 0.02;
 
     static double clamp01(double x) {
         return x < 0.0 ? 0.0 : (x > 1.0 ? 1.0 : x);
@@ -1297,6 +1300,22 @@ private:
                   : (_cfg.chase_feedforward && _est_ema_ok && streamIsDense())
                         ? _est_v_ema * (double)_cfg.chase_ff_gain
                         : 0.0;
+
+        // DWELL RULE: the SAME target re-commanded is a hold; honoring its
+        // declared vf whips the machine through the hold point on every
+        // re-send, and each whip displaces p, which is why this tests the
+        // TARGET, never position (2026-08-09: cost 54 mm of dropped steps).
+        // Strokes alternate targets, so the RFC-049c centering regime never
+        // matches.
+        const bool dwell = _prev_wave_tgt_ok &&
+            std::fabs(target - _prev_wave_tgt) < kDwellSpanNorm;
+        _prev_wave_tgt = target;
+        _prev_wave_tgt_ok = true;
+        if (dwell && cmd.has_end_vel && vf != 0.0) {
+            recordAnomaly(AnomalyType::HandoffBounded, (float)target, 0.0f,
+                          now_us);
+            vf = 0.0;
+        }
 
         // ---- RFC-008 HANDOFF SANITY GUARD (one-segment lookahead) -----------
         // Runs FIRST, ahead of every other treatment of vf, because it is the
@@ -3042,6 +3061,11 @@ private:
     bool     _prev_vf_ok = false;
     double   _prev_vf = 0.0;
     uint64_t _prev_vf_us = 0;
+    // Previous waveform TARGET (dwell rule): a hold is the same target
+    // re-commanded, never just "happens to be near" -- a centering-clipped
+    // chain lands near its NEXT target legitimately (the RFC-049c regime).
+    bool     _prev_wave_tgt_ok = false;
+    double   _prev_wave_tgt = 0.0;
 
     // Counters + anomaly ring
     uint32_t _plans = 0;

@@ -2180,6 +2180,24 @@ TEST_CASE("Settle grace coasts at the end velocity, then brakes when the stream 
     }
 }
 
+TEST_CASE("Dwell rule: a re-commanded hold's declared arrival velocity is ignored") {
+    // The measured pathology: a client re-sends its hold point ~1 Hz with a
+    // stale spline tangent. Honoring vf whips through the hold at 3.4 norm/s.
+    auto cfg = operatorConfig();
+    Engine e(cfg, 0.60f);
+    Command c;
+    c.target = 0.60f; c.duration_us = 132 * (uint32_t)kMs;
+    c.has_duration = true; c.end_vel = 0.0f; c.has_end_vel = true;
+    REQUIRE(e.commit(c, 0));                // arms the previous-target latch
+    c.end_vel = -3.4f;
+    REQUIRE(e.commit(c, 1000 * kMs));       // the poisoned re-send
+    double vpk = 0.0;
+    for (uint64_t t = 1000 * kMs; t <= 1132 * kMs; t += kMs)
+        vpk = std::max(vpk, (double)std::fabs(e.velocityAt(t)));
+    CHECK(vpk < 0.2);                       // a hold stays held
+    CHECK(drainFor(e, AnomalyType::HandoffBounded).seen);
+}
+
 TEST_CASE("Anchored commit: a late-released segment renders the wire timeline") {
     // Same chain twice: reference committed exactly on time, candidate's
     // second segment released 4 ms late but anchored at its due time. The

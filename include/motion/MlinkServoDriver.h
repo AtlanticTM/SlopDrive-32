@@ -78,6 +78,10 @@ private:
     void sendSegmentTo(float p1, float v1, uint32_t t1_ms);
     void sendSegmentSplit();
     bool sendSetPos(float counts);
+    bool sweepToStall(float dir, float speed_mm_s, float bound_mm,
+                      float& pos_out);
+    void glideTo(float counts, float speed_mm_s, uint32_t max_ms);
+    bool homingAbort(const char* what);
 
     // Link state (motorTask only)
     uint8_t  _seq = 0;

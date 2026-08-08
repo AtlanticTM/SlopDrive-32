@@ -272,8 +272,11 @@ void MlinkServoDriver::enable() {
 // path's 3 A margin and 29.5 mm/s crawl are both far too timid here. Local to
 // this backend on purpose: the AIM_* constants stay tuned for the FAS path.
 namespace {
-constexpr float kHomeSpeedMmS = 60.0f;
-constexpr float kHomeMarginA  = 0.4f;
+constexpr float kHomeFastMmS       = 60.0f;  // rough wall find
+constexpr float kHomeSlowMmS       = 12.0f;  // accurate re-probe (rope settles)
+constexpr float kHomeMarginA       = 0.4f;
+constexpr float kHomeMarginMm      = 5.0f;   // usable window ends here, each wall
+constexpr float kHomeReprobeBackMm = 15.0f;  // back off past the rope slack
 }  // namespace
 
 bool MlinkServoDriver::sendSetPos(float counts) {
@@ -290,9 +293,90 @@ bool MlinkServoDriver::sendSetPos(float counts) {
     return false;
 }
 
-// Current-stall sensorless homing, the AIM recipe over the mlink: crawl
-// rearward, watch the INA226 for the wall's current spike, plant the zero via
-// kOpSetPos, glide off. Runs BLOCKING on motorTask (sanctioned for homing);
+bool MlinkServoDriver::homingAbort(const char* what) {
+    _rt_valid = false;
+    _rt_dirty = false;
+    _homing = false;
+    SLOGW("mlink", "homing FAILED: %s", what);
+    return false;
+}
+
+// One stall probe: sweep `dir` (+1 = toward the home wall) at `speed_mm_s`,
+// bounded by `bound_mm` of travel. pos_out = where the carriage stopped.
+// False = no stall inside the bound, or a stall riding the bound (a fault,
+// not a wall -- the AIM_HOME_STALL_PLAUSIBLE_FRAC rule).
+bool MlinkServoDriver::sweepToStall(float dir, float speed_mm_s, float bound_mm,
+                                    float& pos_out) {
+    const float scale = AIM_STEPS_PER_MM;
+    const float start = _pos_counts;
+    _rt_target = start + dir * bound_mm * scale;
+    _rt_v = speed_mm_s * scale;
+    _rt_a = 8.0f * _rt_v;
+    _rt_valid = true;
+    _rt_dirty = true;
+
+    const uint32_t poll_ms = 1000u / AIM_HOME_POLL_HZ;
+    // Spin-up, then a MOVING free-run baseline (start transients settle out).
+    for (int i = 0; i < 40; i++) {
+        update();
+        vTaskDelay(pdMS_TO_TICKS(poll_ms));
+    }
+    float base = 0.0f;
+    for (int i = 0; i < AIM_HOME_BASELINE_SAMPLES; i++) {
+        base += fabsf(_current.readCurrentA());
+        update();
+        vTaskDelay(pdMS_TO_TICKS(poll_ms));
+    }
+    base /= float(AIM_HOME_BASELINE_SAMPLES);
+
+    const uint32_t t0 = millis();
+    const uint32_t timeout_ms =
+        uint32_t(bound_mm / speed_mm_s * 1000.0f) + 4000u;
+    int  consec = 0;
+    bool wall   = false;
+    while (millis() - t0 < timeout_ms) {
+        update();
+        if (fabsf(_current.readCurrentA()) > base + kHomeMarginA) {
+            if (++consec >= AIM_HOME_STALL_CONSEC) { wall = true; break; }
+        } else {
+            consec = 0;
+        }
+        vTaskDelay(pdMS_TO_TICKS(poll_ms));
+    }
+    // Brake where we are, whatever happened.
+    _rt_target = _pos_counts;
+    _rt_dirty = true;
+    for (int i = 0; i < 60 && fabsf(_vel_counts) > 50.0f; i++) {
+        update();
+        vTaskDelay(pdMS_TO_TICKS(10));
+    }
+    pos_out = _pos_counts;
+    if (!wall) return false;
+    const float swept_mm = fabsf(pos_out - start) / scale;
+    return swept_mm < AIM_HOME_STALL_PLAUSIBLE_FRAC * bound_mm;
+}
+
+void MlinkServoDriver::glideTo(float counts, float speed_mm_s,
+                               uint32_t max_ms) {
+    _rt_target = counts;
+    _rt_v = speed_mm_s * AIM_STEPS_PER_MM;
+    _rt_a = 8.0f * _rt_v;
+    _rt_valid = true;
+    _rt_dirty = true;
+    const uint32_t t0 = millis();
+    while (millis() - t0 < max_ms) {
+        update();
+        if (fabsf(_pos_counts - counts) < 8.0f && fabsf(_vel_counts) < 50.0f)
+            break;
+        vTaskDelay(pdMS_TO_TICKS(10));
+    }
+}
+
+// Both-ends current-stall homing (operator spec 2026-08-08): each wall gets a
+// FAST rough find then a SLOW re-probe from a backed-off start -- the rope
+// slacks at the stops, so the fast contact position lies by that slack. The
+// usable window keeps kHomeMarginMm off each wall; the measured stroke rides
+// the existing homed-edge NVS persist. BLOCKING on motorTask (sanctioned);
 // update() inside every wait keeps the link serviced. No Modbus anywhere.
 bool MlinkServoDriver::home(int32_t) {
     if (!_begun || !_status_fresh) {
@@ -324,98 +408,46 @@ bool MlinkServoDriver::home(int32_t) {
     _seg_mode = false;
     _seg_unacked = false;
 
-    const float scale    = AIM_STEPS_PER_MM;
-    const float sweep_mm = 1.2f * getMaxRailMm();
-    const float v        = kHomeSpeedMmS * scale;
-    const float start    = _pos_counts;
-    // Rearward = counts increasing (home 0, front negative).
-    _rt_target = start + sweep_mm * scale;
-    _rt_v = v;
-    _rt_a = 8.0f * v;
-    _rt_valid = true;
-    _rt_dirty = true;
+    const float scale = AIM_STEPS_PER_MM;
+    const float rail  = getMaxRailMm();
+    float w = 0.0f;
 
-    const uint32_t poll_ms = 1000u / AIM_HOME_POLL_HZ;
-    // Spin-up before the baseline: residual start transients settle out.
-    for (int i = 0; i < 50; i++) {
-        update();
-        vTaskDelay(pdMS_TO_TICKS(poll_ms));
-    }
-    float base = 0.0f;
-    for (int i = 0; i < AIM_HOME_BASELINE_SAMPLES; i++) {
-        base += fabsf(_current.readCurrentA());
-        update();
-        vTaskDelay(pdMS_TO_TICKS(poll_ms));
-    }
-    base /= float(AIM_HOME_BASELINE_SAMPLES);
+    // Rear wall (+ = toward home): rough find, back off, accurate re-probe.
+    if (!sweepToStall(+1.0f, kHomeFastMmS, 1.2f * rail, w))
+        return homingAbort("rear wall not found (fast sweep)");
+    glideTo(w - kHomeReprobeBackMm * scale, kHomeFastMmS, 4000u);
+    if (!sweepToStall(+1.0f, kHomeSlowMmS, kHomeReprobeBackMm + 10.0f, w))
+        return homingAbort("rear wall not confirmed (slow probe)");
 
-    const uint32_t t0 = millis();
-    const uint32_t timeout_ms =
-        uint32_t(sweep_mm / kHomeSpeedMmS * 1000.0f) + 5000u;
-    int  consec = 0;
-    bool wall   = false;
-    while (millis() - t0 < timeout_ms) {
-        update();
-        if (fabsf(_current.readCurrentA()) > base + kHomeMarginA) {
-            if (++consec >= AIM_HOME_STALL_CONSEC) { wall = true; break; }
-        } else {
-            consec = 0;
-        }
-        vTaskDelay(pdMS_TO_TICKS(poll_ms));
-    }
-
-    // Brake where we are, whatever happened.
-    _rt_target = _pos_counts;
-    _rt_dirty = true;
-    for (int i = 0; i < 60 && fabsf(_vel_counts) > 50.0f; i++) {
-        update();
-        vTaskDelay(pdMS_TO_TICKS(10));
-    }
-    const float swept_mm = fabsf(_pos_counts - start) / scale;
-    if (!wall) {
-        _rt_valid = false;
-        _homing = false;
-        SLOGW("mlink", "homing FAILED: no current spike in %.0f mm of sweep "
-              "(base %.2f A) -- check drive power/torque", sweep_mm, base);
-        return false;
-    }
-    // A stall debounced at the far end of the sweep is a fault, not a wall
-    // (AIM_HOME_STALL_PLAUSIBLE_FRAC rule, same reasoning as the FAS path).
-    if (swept_mm >= AIM_HOME_STALL_PLAUSIBLE_FRAC * sweep_mm) {
-        _rt_valid = false;
-        _homing = false;
-        SLOGW("mlink", "homing FAILED: stall at %.0f mm rides the sweep bound "
-              "-- rejecting as implausible", swept_mm);
-        return false;
-    }
-
-    // Plant the zero: the wall sits BACKOFF behind home in the count frame.
-    // Kill the retarget refresh FIRST -- a refresh after the set would seek an
-    // old-frame target.
+    // Zero: the accurate rear wall sits kHomeMarginMm behind home. The
+    // refresh dies first -- it would seek an old-frame target after the set.
     _rt_valid = false;
     _rt_dirty = false;
-    if (!sendSetPos(AIM_HOMING_BACKOFF_MM * scale)) {
-        _homing = false;
-        SLOGW("mlink", "homing FAILED: kOpSetPos never confirmed");
-        return false;
-    }
-    // Glide off the wall to home = 0.
-    _rt_target = 0.0f;
-    _rt_v = v;
-    _rt_a = 8.0f * v;
-    _rt_valid = true;
-    _rt_dirty = true;
-    const uint32_t t1 = millis();
-    while (millis() - t1 < 5000u) {
-        update();
-        if (fabsf(_pos_counts) < 4.0f && fabsf(_vel_counts) < 50.0f) break;
-        vTaskDelay(pdMS_TO_TICKS(10));
-    }
+    if (!sendSetPos(kHomeMarginMm * scale))
+        return homingAbort("kOpSetPos never confirmed");
+
+    // Front wall (- = away from home): rough across the rail, back off,
+    // accurate re-probe.
+    if (!sweepToStall(-1.0f, kHomeFastMmS, 1.2f * rail, w))
+        return homingAbort("front wall not found (fast sweep)");
+    glideTo(w + kHomeReprobeBackMm * scale, kHomeFastMmS, 4000u);
+    if (!sweepToStall(-1.0f, kHomeSlowMmS, kHomeReprobeBackMm + 10.0f, w))
+        return homingAbort("front wall not confirmed (slow probe)");
+
+    const float front_mm = -w / scale;              // mm frame: front positive
+    const float usable   = front_mm - kHomeMarginMm;
+    if (usable < 50.0f)
+        return homingAbort("measured stroke implausibly short");
+    setMeasuredStrokeMm(usable);
+
+    // Park at home.
+    glideTo(0.0f, kHomeFastMmS,
+            uint32_t(front_mm / kHomeFastMmS * 1000.0f) + 4000u);
     _homing = false;
     _homed = true;
-    SLOGI("mlink", "homed :3 wall at %.1f mm of sweep, free-run base %.2f A, "
-          "zero planted, backed off %.1f mm",
-          swept_mm, base, (float)AIM_HOMING_BACKOFF_MM);
+    SLOGI("mlink", "homed :3 both walls probed, usable stroke %.1f mm "
+          "(%.0f mm margin per wall, slow probe %.0f mm/s)",
+          usable, (float)kHomeMarginMm, (float)kHomeSlowMmS);
     return true;
 }
 

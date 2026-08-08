@@ -101,7 +101,10 @@ static inline void emitTowardPos() {
         acc += n;
         if (acc >= kStatesPerTick) {
             acc -= kStatesPerTick;
-            s_qphase = uint8_t((s_qphase + ((dirStep > 0) ? 1u : 3u)) & 3u);
+            // Inverted pair order = operator direction ruling 2026-08-08:
+            // counts-increasing walks toward the HOME wall on this rig. The
+            // full software mirror is a separate planned feature (sd-dxy).
+            s_qphase = uint8_t((s_qphase + ((dirStep > 0) ? 3u : 1u)) & 3u);
             s_emitted += (float)dirStep;
         }
         s_qword |= (uint32_t)phasePins(s_qphase) << s_qbits;

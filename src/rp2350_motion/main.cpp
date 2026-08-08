@@ -23,6 +23,7 @@
 #include "slopglow/slopglow_core.hpp"
 
 #include <Adafruit_NeoPixel.h>
+#include <array>
 
 using namespace motionlink;
 
@@ -51,12 +52,17 @@ static volatile uint8_t s_lastSeq = 0;
 static inline uint8_t ringDepth() { return uint8_t(s_head - s_tail); }
 
 // ---- Stepper stub: 20 kHz alarm evaluating the schedule ---------------------
-// Renders the active segment's cubic Hermite, emits step edges from a float
+// Renders the active segment's quintic Hermite, emits step edges from a float
 // accumulator. Position unit = steps at the drive input.
 static float s_pos = 0.0f;        // rendered position (steps)
 static float s_vel = 0.0f;
 static float s_emitted = 0.0f;    // steps actually pulsed out
 static uint32_t s_segElapsedUs = 0;
+// Segment-entry edge. NOT elapsed==0: the advance carries a sub-tick
+// remainder, and a retarget interlude leaves stale elapsed.
+static bool s_segFresh = true;
+static std::array<float, 6> s_qc{};  // active segment's quintic, normalized u
+static float s_segTs = 0.0f;         // active segment duration, seconds
 static volatile uint8_t s_state = kStateIdle;
 
 // ---- Retarget state (kOpRetarget: trapezoid seek from live p,v) -------------
@@ -195,43 +201,58 @@ static bool stepperTick(struct repeating_timer*) {
             s_state = kStateSettled;
             s_flags |= kFlagUnderran;
             s_vel = 0.0f;
+            s_segElapsedUs = 0;
+            s_segFresh = true;
         }
         return true;
     }
 
     const Segment& seg = s_ring[s_tail % kSegmentDepth];
-    // First tick of a segment: a p0 far from the emitted position would slew
-    // the whole gap at the 20 kstep/s cap (motor shoots). Teleport the
-    // reference instead -- zero pulses -- and report it. Small offsets slew
-    // legitimately.
-    if (s_segElapsedUs == 0) {
-        // Threshold sits above kStatesPerTick so a legit full-rate tick's
-        // in-flight delta can never read as a discontinuity.
+    if (s_segFresh) {
+        s_segFresh = false;
+        // A p0 far from the emitted position would slew the whole gap at the
+        // render cap (motor shoots). Teleport the reference instead -- zero
+        // pulses -- and report it. Threshold sits above kStatesPerTick so a
+        // legit full-rate tick's in-flight delta never reads as one.
         const float jump = seg.p0 - s_emitted;
         if (jump > 64.0f || jump < -64.0f) {
             s_emitted += jump;
             s_flags |= kFlagJumped;
         }
+        // Quintic Hermite coefficients over normalized u. Accel knots ride
+        // kOpSegment2 (a C1 chain steps accel at every knot: a 100 Hz torque
+        // notch the servo renders as texture); legacy kOpSegment lands a=0.
+        s_segTs = float(seg.duration_us) * 1e-6f;
+        const float V0 = seg.v0 * s_segTs, V1 = seg.v1 * s_segTs;
+        const float A0 = seg.a0 * s_segTs * s_segTs;
+        const float A1 = seg.a1 * s_segTs * s_segTs;
+        const float R1 = seg.p1 - seg.p0 - V0 - 0.5f * A0;
+        const float R2 = V1 - V0 - A0;
+        const float R3 = A1 - A0;
+        s_qc = {seg.p0, V0, 0.5f * A0,
+                10.0f * R1 - 4.0f * R2 + 0.5f * R3,
+                -15.0f * R1 + 7.0f * R2 - R3,
+                6.0f * R1 - 3.0f * R2 + 0.5f * R3};
     }
     s_state = kStateRunning;
     s_segElapsedUs += kTickUs;
     const float T = float(seg.duration_us);
     float t = float(s_segElapsedUs);
     if (t >= T) t = T;
-
-    // Cubic Hermite in normalized time.
     const float u = (T > 0.0f) ? (t / T) : 1.0f;
-    const float u2 = u * u, u3 = u2 * u;
-    const float h00 = 2 * u3 - 3 * u2 + 1, h10 = u3 - 2 * u2 + u;
-    const float h01 = -2 * u3 + 3 * u2, h11 = u3 - u2;
-    const float Ts = T * 1e-6f;
-    s_pos = h00 * seg.p0 + h10 * Ts * seg.v0 + h01 * seg.p1 + h11 * Ts * seg.v1;
-    s_vel = seg.v0 + (seg.v1 - seg.v0) * u;   // display-grade estimate only
+    s_pos = ((((s_qc[5] * u + s_qc[4]) * u + s_qc[3]) * u + s_qc[2]) * u +
+             s_qc[1]) * u + s_qc[0];
+    s_vel = (s_segTs > 0.0f)
+                ? ((((5.0f * s_qc[5] * u + 4.0f * s_qc[4]) * u +
+                     3.0f * s_qc[3]) * u + 2.0f * s_qc[2]) * u + s_qc[1]) /
+                      s_segTs
+                : 0.0f;
 
     emitTowardPos();
 
     if (s_segElapsedUs >= seg.duration_us) {
         s_tail = uint8_t(s_tail + 1);
+        s_segFresh = true;
         // Carry the sub-tick remainder into the next segment: durations are
         // arbitrary us now, and zeroing here would leak up to one tick of
         // timeline per segment boundary.
@@ -297,12 +318,16 @@ static void processFrame(uint8_t* data, size_t len) {
             s_estop = true;
             s_rtActive = false;
             s_head = s_tail = 0;
+            s_segElapsedUs = 0;
+            s_segFresh = true;
             s_lastSegSeq = 0xFFFF;
             break;
         case kOpClear:
             s_estop = false;
             s_rtActive = false;   // never resume a pre-estop target
             s_head = s_tail = 0;
+            s_segElapsedUs = 0;
+            s_segFresh = true;
             s_flags = 0;
             s_state = kStateIdle;
             s_lastSegSeq = 0xFFFF;
@@ -317,6 +342,27 @@ static void processFrame(uint8_t* data, size_t len) {
             memcpy(&seg.v0, data + 10, 4);
             memcpy(&seg.p1, data + 14, 4);
             memcpy(&seg.v1, data + 18, 4);
+            seg.a0 = 0.0f;
+            seg.a1 = 0.0f;
+            s_ring[s_head % kSegmentDepth] = seg;
+            s_head = uint8_t(s_head + 1);
+            s_lastSegSeq = data[1];               // only a QUEUED seq dedups
+            s_flags &= uint8_t(~kFlagUnderran);
+            s_rtActive = false;   // segments reclaim the renderer
+            break;
+        }
+        case kOpSegment2: {
+            if (len < 2 + kSegment2WireBytes) break;
+            if (data[1] == s_lastSegSeq) break;   // lost-ack resend duplicate
+            if (ringDepth() >= kSegmentDepth) { s_flags |= kFlagOverflow; break; }
+            Segment seg;
+            memcpy(&seg.duration_us, data + 2, 4);
+            memcpy(&seg.p0, data + 6, 4);
+            memcpy(&seg.v0, data + 10, 4);
+            memcpy(&seg.a0, data + 14, 4);
+            memcpy(&seg.p1, data + 18, 4);
+            memcpy(&seg.v1, data + 22, 4);
+            memcpy(&seg.a1, data + 26, 4);
             s_ring[s_head % kSegmentDepth] = seg;
             s_head = uint8_t(s_head + 1);
             s_lastSegSeq = data[1];               // only a QUEUED seq dedups
@@ -331,6 +377,7 @@ static void processFrame(uint8_t* data, size_t len) {
             s_rtActive = false;
             s_head = s_tail = 0;
             s_segElapsedUs = 0;
+            s_segFresh = true;
             s_pos = np;
             s_emitted = np;
             // Rollback snapshots too, or a later FIFO-full rollback would
@@ -353,6 +400,8 @@ static void processFrame(uint8_t* data, size_t len) {
             s_rtVmax   = v;
             s_rtAccel  = a;
             s_head = s_tail;        // last command wins: drop queued segments
+            s_segElapsedUs = 0;
+            s_segFresh = true;
             s_rtActive = true;
             break;
         }

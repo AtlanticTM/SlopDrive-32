@@ -75,9 +75,19 @@ void MlinkServoDriver::sendRetarget() {
     _last_cmd_ms = millis();
 }
 
-void MlinkServoDriver::sendSegmentTo(float p1, float v1, uint32_t t1_us) {
-    // Hermite chunk covering [chain, (p1,v1,t1)]: the slave renders it over
-    // its wire duration, which is what preserves the stream's timeline.
+// Hold-knot accel by centered difference across [chain, samp] -- both
+// velocities come off the analytic curve, so the estimate is clean. The
+// shipped a1 is reused verbatim as the next segment's a0 (exact C2 chain).
+float MlinkServoDriver::holdKnotAccel() const {
+    const uint32_t dt_us = _samp_us - _chain_us;
+    if (dt_us == 0 || dt_us > 200000u) return 0.0f;
+    return (_samp_v - _chain_v) / (float(dt_us) * 1e-6f);
+}
+
+void MlinkServoDriver::sendSegmentTo(float p1, float v1, float a1,
+                                     uint32_t t1_us) {
+    // Hermite chunk covering [chain, (p1,v1,a1,t1)]: the slave renders it
+    // over its wire duration, which is what preserves the stream's timeline.
     uint32_t dur_us = t1_us - _chain_us;
     // Catch-up sweep after a re-anchor: stretch to the arbiter's ceiling so
     // the gap GLIDES closed instead of shooting at the render cap (the
@@ -100,13 +110,17 @@ void MlinkServoDriver::sendSegmentTo(float p1, float v1, uint32_t t1_us) {
             if (v1 >  vcap) v1 =  vcap;
             if (v1 < -vcap) v1 = -vcap;
         }
+        // A clamped v1 makes the passed a1 inconsistent; land the sweep flat.
+        a1 = 0.0f;
     }
-    uint8_t out[kFrameBytes] = {kOpSegment, ++_seq};
+    uint8_t out[kFrameBytes] = {kOpSegment2, ++_seq};
     memcpy(&out[2], &dur_us, 4);
     memcpy(&out[6], &_chain_p, 4);
     memcpy(&out[10], &_chain_v, 4);
-    memcpy(&out[14], &p1, 4);
-    memcpy(&out[18], &v1, 4);
+    memcpy(&out[14], &_chain_a, 4);
+    memcpy(&out[18], &p1, 4);
+    memcpy(&out[22], &v1, 4);
+    memcpy(&out[26], &a1, 4);
     uint8_t in[kFrameBytes] = {};
     xfer(out, in);
     // Keep the exact frame for loss recovery: same seq on resend, so the
@@ -117,26 +131,42 @@ void MlinkServoDriver::sendSegmentTo(float p1, float v1, uint32_t t1_us) {
     _seg_unacked = true;
     _chain_p = p1;
     _chain_v = v1;
+    _chain_a = a1;
     _chain_us = t1_us;
     _last_cmd_ms = millis();
 }
 
 void MlinkServoDriver::sendSegment() {
-    sendSegmentTo(_hold_p, _hold_v, _hold_us);
+    sendSegmentTo(_hold_p, _hold_v, holdKnotAccel(), _hold_us);
 }
 
 void MlinkServoDriver::sendSegmentSplit() {
-    // Two halves of the same cubic, evaluated at u=0.5, so an empty ring is
+    // Two halves of the same quintic, evaluated at u=0.5, so an empty ring is
     // primed to depth 2 in one tick -- production is real-time-capped, so
     // steady one-per-tick shipping can never deepen the ring by itself.
-    const float Ts = float(_hold_us - _chain_us) * 1e-6f;
-    const float p0 = _chain_p, v0 = _chain_v;
-    const float p1 = _hold_p, v1 = _hold_v;
-    const float mid_p = 0.5f * (p0 + p1) + 0.125f * Ts * (v0 - v1);
-    const float mid_v = 1.5f * (p1 - p0) / Ts - 0.25f * (v0 + v1);
+    const float T = float(_hold_us - _chain_us) * 1e-6f;
+    const float a1 = holdKnotAccel();
+    const float V0 = _chain_v * T, V1 = _hold_v * T;
+    const float A0 = _chain_a * T * T, A1 = a1 * T * T;
+    const float R1 = _hold_p - _chain_p - V0 - 0.5f * A0;
+    const float R2 = V1 - V0 - A0;
+    const float R3 = A1 - A0;
+    const float c2 = 0.5f * A0;
+    const float c3 = 10.0f * R1 - 4.0f * R2 + 0.5f * R3;
+    const float c4 = -15.0f * R1 + 7.0f * R2 - R3;
+    const float c5 = 6.0f * R1 - 3.0f * R2 + 0.5f * R3;
+    const float u = 0.5f;
+    const float mid_p =
+        ((((c5 * u + c4) * u + c3) * u + c2) * u + V0) * u + _chain_p;
+    const float mid_v =
+        ((((5.0f * c5 * u + 4.0f * c4) * u + 3.0f * c3) * u + 2.0f * c2) * u +
+         V0) / T;
+    const float mid_a =
+        (((20.0f * c5 * u + 12.0f * c4) * u + 6.0f * c3) * u + 2.0f * c2) /
+        (T * T);
     const uint32_t mid_us = _chain_us + (_hold_us - _chain_us) / 2u;
-    sendSegmentTo(mid_p, mid_v, mid_us);
-    sendSegmentTo(_hold_p, _hold_v, _hold_us);
+    sendSegmentTo(mid_p, mid_v, mid_a, mid_us);
+    sendSegmentTo(_hold_p, _hold_v, a1, _hold_us);
 }
 
 void MlinkServoDriver::init() {
@@ -224,6 +254,7 @@ void MlinkServoDriver::update() {
             _samp_us != _hold_us) {
             _chain_p = _pos_counts;
             _chain_v = 0.0f;
+            _chain_a = 0.0f;
             _chain_us = _hold_us - kTickMs * 1000u;
             _sweep_pending = true;
         }
@@ -232,6 +263,7 @@ void MlinkServoDriver::update() {
         if (_hold_us - _chain_us > kStreamGapMs * 1000u) {
             _chain_p = _pos_counts;
             _chain_v = 0.0f;
+            _chain_a = 0.0f;
             _chain_us = _hold_us - kTickMs * 1000u;
             _sweep_pending = true;
         }
@@ -507,6 +539,7 @@ void MlinkServoDriver::streamSample(int32_t target_steps, float vel_steps_s,
         _seg_unacked = false;
         _chain_p = _pos_counts;
         _chain_v = 0.0f;
+        _chain_a = 0.0f;
         _chain_us = now_us;
         _hold_p = _pos_counts;
         _hold_v = 0.0f;

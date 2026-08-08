@@ -75,8 +75,9 @@ private:
     void sendOp(uint8_t op);
     void sendRetarget();
     void sendSegment();
-    void sendSegmentTo(float p1, float v1, uint32_t t1_us);
+    void sendSegmentTo(float p1, float v1, float a1, uint32_t t1_us);
     void sendSegmentSplit();
+    float holdKnotAccel() const;
     bool sendSetPos(float counts);
     bool sweepToStall(float dir, float speed_mm_s, float bound_mm,
                       float& pos_out);
@@ -119,6 +120,9 @@ private:
     bool     _seg_mode = false;
     float    _chain_p = 0.0f;      // last shipped segment endpoint
     float    _chain_v = 0.0f;
+    // Shipped endpoint accel, reused verbatim as the next segment's a0 so the
+    // kOpSegment2 chain is exactly C2 (accel steps at knots read as texture).
+    float    _chain_a = 0.0f;
     uint32_t _chain_us = 0;
     float    _samp_p = 0.0f;       // freshest arbiter sample
     float    _samp_v = 0.0f;

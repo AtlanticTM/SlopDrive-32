@@ -44,6 +44,11 @@ enum Op : uint8_t {
     // Standstill position set: [pos:f32] counts. Flushes schedule + retarget,
     // zeroes velocity -- the homing ritual's "the wall is HERE" write.
     kOpSetPos   = 0x06,
+    // C2 segment: [dur:u32][p0 v0 a0 p1 v1 a1 :f32] -- quintic Hermite with
+    // ACCELERATION knots, so chained segments are torque-continuous (the C1
+    // cubic stepped accel at every knot: a 100 Hz notch the servo renders as
+    // texture). 28 payload bytes: fills the frame to the CRC exactly.
+    kOpSegment2 = 0x07,
 };
 
 // One C1 motion segment: cubic Hermite from (p0, v0) to (p1, v1) over
@@ -56,8 +61,13 @@ struct Segment {
     float v0;
     float p1;
     float v1;
+    // Acceleration knots (kOpSegment2); kOpSegment leaves them 0 and renders
+    // as the zero-curvature quintic.
+    float a0;
+    float a1;
 };
-inline constexpr size_t kSegmentWireBytes = 20;
+inline constexpr size_t kSegmentWireBytes  = 20;
+inline constexpr size_t kSegment2WireBytes = 28;
 
 // Slave -> master, preloaded before every transaction:
 // [state:u8][flags:u8][runway_ms:u16le][depth:u8][seq_echo:u8][pos:f32le][vel:f32le]

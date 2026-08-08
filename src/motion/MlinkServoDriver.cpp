@@ -267,34 +267,13 @@ void MlinkServoDriver::enable() {
     if (_state == kStateEstop) _clear_pending = true;
 }
 
-// ---- INA226 (carrier board, 5 mOhm shunt behind the ISO1640) ----------------
+// ---- mlink homing tunables --------------------------------------------------
+// This motor free-runs at ~0.03 A (operator-measured 2026-08-08), so the AIM
+// path's 3 A margin and 29.5 mm/s crawl are both far too timid here. Local to
+// this backend on purpose: the AIM_* constants stay tuned for the FAS path.
 namespace {
-constexpr float    kShuntOhms  = 0.005f;
-constexpr uint16_t kInaDieId   = 0x2260;   // reg 0xFF on every INA226
-constexpr float    kInaAmpsPerLsb = 2.5e-6f / kShuntOhms;  // shunt reg 0x01
-
-bool inaRead16(uint8_t addr, uint8_t reg, uint16_t& out) {
-    Wire.beginTransmission(addr);
-    Wire.write(reg);
-    if (Wire.endTransmission(false) != 0) return false;
-    if (Wire.requestFrom((int)addr, 2) != 2) return false;
-    out = uint16_t((Wire.read() << 8) | Wire.read());
-    return true;
-}
-
-uint8_t inaFind() {
-    for (uint8_t a = 0x40; a <= 0x4F; a++) {
-        uint16_t id = 0;
-        if (inaRead16(a, 0xFF, id) && id == kInaDieId) return a;
-    }
-    return 0;
-}
-
-float inaAmps(uint8_t addr, bool& ok) {
-    uint16_t raw = 0;
-    ok = inaRead16(addr, 0x01, raw);
-    return float(int16_t(raw)) * kInaAmpsPerLsb;
-}
+constexpr float kHomeSpeedMmS = 60.0f;
+constexpr float kHomeMarginA  = 0.4f;
 }  // namespace
 
 bool MlinkServoDriver::sendSetPos(float counts) {
@@ -320,11 +299,12 @@ bool MlinkServoDriver::home(int32_t) {
         SLOGW("mlink", "homing refused: mlink link not up");
         return false;
     }
-    if (_ina_addr == 0) _ina_addr = inaFind();
-    if (_ina_addr == 0) {
-        SLOGW("mlink", "homing refused: no INA226 found on I2C 0x40-0x4F");
+    if (!_current.isReady()) _current.init();
+    if (!_current.isReady()) {
+        SLOGW("mlink", "homing refused: INA228 not answering -- no stall sense");
         return false;
     }
+    _current.resetPeaks();
     _homing = true;
     _homed = false;
     _seg_mode = false;
@@ -332,7 +312,7 @@ bool MlinkServoDriver::home(int32_t) {
 
     const float scale    = AIM_STEPS_PER_MM;
     const float sweep_mm = 1.2f * getMaxRailMm();
-    const float v        = AIM_HOMING_SPEED_MM_S * scale;
+    const float v        = kHomeSpeedMmS * scale;
     const float start    = _pos_counts;
     // Rearward = counts increasing (home 0, front negative).
     _rt_target = start + sweep_mm * scale;
@@ -348,32 +328,21 @@ bool MlinkServoDriver::home(int32_t) {
         vTaskDelay(pdMS_TO_TICKS(poll_ms));
     }
     float base = 0.0f;
-    int   got  = 0;
     for (int i = 0; i < AIM_HOME_BASELINE_SAMPLES; i++) {
-        bool ok = false;
-        const float a = inaAmps(_ina_addr, ok);
-        if (ok) { base += fabsf(a); got++; }
+        base += fabsf(_current.readCurrentA());
         update();
         vTaskDelay(pdMS_TO_TICKS(poll_ms));
     }
-    if (got < AIM_HOME_BASELINE_SAMPLES / 2) {
-        _rt_valid = false;
-        _homing = false;
-        SLOGW("mlink", "homing FAILED: INA226 went quiet during baseline");
-        return false;
-    }
-    base /= float(got);
+    base /= float(AIM_HOME_BASELINE_SAMPLES);
 
     const uint32_t t0 = millis();
     const uint32_t timeout_ms =
-        uint32_t(sweep_mm / AIM_HOMING_SPEED_MM_S * 1000.0f) + 5000u;
+        uint32_t(sweep_mm / kHomeSpeedMmS * 1000.0f) + 5000u;
     int  consec = 0;
     bool wall   = false;
     while (millis() - t0 < timeout_ms) {
         update();
-        bool ok = false;
-        const float a = inaAmps(_ina_addr, ok);
-        if (ok && fabsf(a) > base + AIM_HOME_STALL_MARGIN_A) {
+        if (fabsf(_current.readCurrentA()) > base + kHomeMarginA) {
             if (++consec >= AIM_HOME_STALL_CONSEC) { wall = true; break; }
         } else {
             consec = 0;

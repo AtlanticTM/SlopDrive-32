@@ -12,6 +12,7 @@
 
 #include <cstdint>
 #include "MotorDriver.h"
+#include "CurrentSensor.h"
 #include "comms/MotionLinkProtocol.h"
 
 class MlinkServoDriver final : public MotorDriver {
@@ -140,7 +141,7 @@ private:
 
     bool     _homed = false;
     bool     _homing = false;
-    uint8_t  _ina_addr = 0;    // INA226 on the carrier, found by die-id scan
+    CurrentSensor _current;    // INA228 on the carrier (behind the ISO1640)
     uint8_t  _blend = 1;
     float    _max_speed_mm_s = 0.0f;
     float    _accel_mm_s2 = 0.0f;

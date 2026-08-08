@@ -37,9 +37,16 @@ void MlinkServoDriver::xfer(uint8_t (&out)[kFrameBytes],
     if (sinceUs < 60) delayMicroseconds(60 - sinceUs);
     crcStamp(out);
     s_spi.beginTransaction(SPISettings(kSpiHz, MSBFIRST, SPI_MODE1));
+    // Scheduler lock for the ~40 us transaction: the sampler (prio 4, same
+    // core) otherwise preempts mid-frame -- CS low, clock frozen -- and the
+    // slave's IRQ spin bails at ~300 us of silence, tearing the frame. Worst
+    // during slopmotion commit() (ms-scale Ruckig planning), which is why
+    // tears landed exactly on command boundaries. ISRs stay enabled.
+    vTaskSuspendAll();
     digitalWrite(kCs, LOW);
     s_spi.transferBytes(out, in, kFrameBytes);
     digitalWrite(kCs, HIGH);
+    xTaskResumeAll();
     s_spi.endTransaction();
     s_lastEndUs = micros();
 }

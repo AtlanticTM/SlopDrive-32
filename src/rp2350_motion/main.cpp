@@ -255,6 +255,9 @@ static void preloadStatus() {
     const uint16_t rw = runwayMs();
     s_statusBuf[0] = s_state;
     s_statusBuf[1] = s_flags;
+    // JUMPED self-clears once reported: sticky, it logged only the FIRST
+    // teleport of a session and hid every later one (2026-08-09 drift hunt).
+    s_flags &= uint8_t(~kFlagJumped);
     s_statusBuf[2] = uint8_t(rw);
     s_statusBuf[3] = uint8_t(rw >> 8);
     s_statusBuf[4] = ringDepth();

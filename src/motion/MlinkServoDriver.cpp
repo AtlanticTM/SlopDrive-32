@@ -89,6 +89,17 @@ void MlinkServoDriver::sendSegmentTo(float p1, float v1, uint32_t t1_ms) {
             const float need_ms = fabsf(p1 - _chain_p) / _samp_vcap * 1000.0f;
             if (need_ms > float(dur_ms)) dur_ms = uint32_t(need_ms);
         }
+        // A stretched sweep from v0=0 that still ARRIVES at the curve's full
+        // velocity is a Hermite bulge: the polynomial overshoots hard and
+        // whips back (the sharp-jitter + silent-teleport drift chain,
+        // 2026-08-09). Fritsch-Carlson bound: |v1| <= 1.5x the chord slope.
+        if (dur_ms > 0) {
+            const float chord =
+                fabsf(p1 - _chain_p) / (float(dur_ms) * 1e-3f);
+            const float vcap = 1.5f * chord;
+            if (v1 >  vcap) v1 =  vcap;
+            if (v1 < -vcap) v1 = -vcap;
+        }
     }
     uint8_t out[kFrameBytes] = {kOpSegment, ++_seq};
     const uint32_t dur_us = dur_ms * 1000u;

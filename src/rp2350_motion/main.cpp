@@ -311,6 +311,23 @@ static void processFrame(uint8_t* data, size_t len) {
             s_rtActive = false;   // segments reclaim the renderer
             break;
         }
+        case kOpSetPos: {   // standstill zero-set (homing)
+            if (len < 2 + 4) break;
+            float np;
+            memcpy(&np, data + 2, 4);
+            s_rtActive = false;
+            s_head = s_tail = 0;
+            s_segElapsedUs = 0;
+            s_pos = np;
+            s_emitted = np;
+            // Rollback snapshots too, or a later FIFO-full rollback would
+            // restore a pre-home reference.
+            s_qemitAtWord = np;
+            s_qphaseAtWord = s_qphase;
+            s_vel = 0.0f;
+            s_state = kStateIdle;
+            break;
+        }
         case kOpRetarget: {
             if (len < 2 + 12) break;
             float t = 0, v = 0, a = 0;
@@ -426,9 +443,8 @@ struct PixelOut final : slopglow::IGlowOutput {
         // of codes (measured on the C5, 2026-08-06). Adafruit setBrightness
         // is that same pre-gamma trap, which is why it goes unused.
         auto s = [](uint8_t v) {
-            // 9/256 ~ 3.5% duty: the pixel sits in the operator's peripheral
-            // vision at bench distance; 40/255 read as a strobe (2026-08-08).
-            return uint8_t((uint16_t(slopglow::gamma8(v)) * 9u) >> 8);
+            // 77/256 ~ 30% duty (operator-tuned 2026-08-08).
+            return uint8_t((uint16_t(slopglow::gamma8(v)) * 77u) >> 8);
         };
         s_px.setPixelColor(0, s(c.r), s(c.g), s(c.b));
         s_px.show();

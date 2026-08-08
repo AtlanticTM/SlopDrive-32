@@ -41,6 +41,9 @@ enum Op : uint8_t {
     // re-sendable, last one wins; switches the renderer out of segment mode.
     // This is streamToSteps() on the wire; segments remain the native-plan path.
     kOpRetarget = 0x05,
+    // Standstill position set: [pos:f32] counts. Flushes schedule + retarget,
+    // zeroes velocity -- the homing ritual's "the wall is HERE" write.
+    kOpSetPos   = 0x06,
 };
 
 // One C1 motion segment: cubic Hermite from (p0, v0) to (p1, v1) over

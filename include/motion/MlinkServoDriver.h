@@ -23,7 +23,7 @@ public:
     bool home(int32_t home_speed_steps_s = 4000) override;
     void runHomingStep() override {}
     bool isHomed()  const override { return _homed; }
-    bool isHoming() const override { return false; }
+    bool isHoming() const override { return _homing; }
     // Bench force-home also un-latches a slave-side estop: the S3 clears its
     // own latch, and without kOpClear the RP holds position forever while
     // every command silently queues (2026-08-07: frozen pos, zero flags).
@@ -76,6 +76,7 @@ private:
     void sendSegment();
     void sendSegmentTo(float p1, float v1, uint32_t t1_ms);
     void sendSegmentSplit();
+    bool sendSetPos(float counts);
 
     // Link state (motorTask only)
     uint8_t  _seq = 0;
@@ -138,6 +139,8 @@ private:
     bool _clear_pending = false;
 
     bool     _homed = false;
+    bool     _homing = false;
+    uint8_t  _ina_addr = 0;    // INA226 on the carrier, found by die-id scan
     uint8_t  _blend = 1;
     float    _max_speed_mm_s = 0.0f;
     float    _accel_mm_s2 = 0.0f;

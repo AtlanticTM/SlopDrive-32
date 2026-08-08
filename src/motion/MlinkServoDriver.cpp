@@ -12,6 +12,7 @@
 
 #include <Arduino.h>
 #include <SPI.h>
+#include <Wire.h>
 #include <cstring>
 
 #include "system/config_api.h"
@@ -34,7 +35,11 @@ void MlinkServoDriver::xfer(uint8_t (&out)[kFrameBytes],
     static_assert(kSpiMode == 1, "PL022 slave needs CPHA=1");
     static uint32_t s_lastEndUs = 0;
     const uint32_t sinceUs = micros() - s_lastEndUs;
-    if (sinceUs < 60) delayMicroseconds(60 - sinceUs);
+    // 200 us gap: the slave's 20 kHz tick (50 us period) ALWAYS fires inside
+    // any inter-frame gap, and at 60 us a heavy render tick plus the per-frame
+    // SPI re-arm did not reliably fit before the next frame's clocks arrived
+    // (measured ~1 torn frame per 4-8 s under motor load, 2026-08-08).
+    if (sinceUs < 200) delayMicroseconds(200 - sinceUs);
     crcStamp(out);
     s_spi.beginTransaction(SPISettings(kSpiHz, MSBFIRST, SPI_MODE1));
     // Scheduler lock for the ~40 us transaction: the sampler (prio 4, same
@@ -262,10 +267,173 @@ void MlinkServoDriver::enable() {
     if (_state == kStateEstop) _clear_pending = true;
 }
 
-bool MlinkServoDriver::home(int32_t) {
-    SLOGW("mlink", "homing not implemented on the mlink backend yet -- "
-          "use HOME_OVERRIDE (sd-dxy owns real homing)");
+// ---- INA226 (carrier board, 5 mOhm shunt behind the ISO1640) ----------------
+namespace {
+constexpr float    kShuntOhms  = 0.005f;
+constexpr uint16_t kInaDieId   = 0x2260;   // reg 0xFF on every INA226
+constexpr float    kInaAmpsPerLsb = 2.5e-6f / kShuntOhms;  // shunt reg 0x01
+
+bool inaRead16(uint8_t addr, uint8_t reg, uint16_t& out) {
+    Wire.beginTransmission(addr);
+    Wire.write(reg);
+    if (Wire.endTransmission(false) != 0) return false;
+    if (Wire.requestFrom((int)addr, 2) != 2) return false;
+    out = uint16_t((Wire.read() << 8) | Wire.read());
+    return true;
+}
+
+uint8_t inaFind() {
+    for (uint8_t a = 0x40; a <= 0x4F; a++) {
+        uint16_t id = 0;
+        if (inaRead16(a, 0xFF, id) && id == kInaDieId) return a;
+    }
+    return 0;
+}
+
+float inaAmps(uint8_t addr, bool& ok) {
+    uint16_t raw = 0;
+    ok = inaRead16(addr, 0x01, raw);
+    return float(int16_t(raw)) * kInaAmpsPerLsb;
+}
+}  // namespace
+
+bool MlinkServoDriver::sendSetPos(float counts) {
+    // Idempotent absolute set: repeat until the echoed position confirms.
+    for (int i = 0; i < 10; i++) {
+        uint8_t out[kFrameBytes] = {kOpSetPos, ++_seq};
+        memcpy(&out[2], &counts, 4);
+        uint8_t in[kFrameBytes] = {};
+        xfer(out, in);
+        vTaskDelay(pdMS_TO_TICKS(15));
+        update();
+        if (fabsf(_pos_counts - counts) < 4.0f) return true;
+    }
     return false;
+}
+
+// Current-stall sensorless homing, the AIM recipe over the mlink: crawl
+// rearward, watch the INA226 for the wall's current spike, plant the zero via
+// kOpSetPos, glide off. Runs BLOCKING on motorTask (sanctioned for homing);
+// update() inside every wait keeps the link serviced. No Modbus anywhere.
+bool MlinkServoDriver::home(int32_t) {
+    if (!_begun || !_status_fresh) {
+        SLOGW("mlink", "homing refused: mlink link not up");
+        return false;
+    }
+    if (_ina_addr == 0) _ina_addr = inaFind();
+    if (_ina_addr == 0) {
+        SLOGW("mlink", "homing refused: no INA226 found on I2C 0x40-0x4F");
+        return false;
+    }
+    _homing = true;
+    _homed = false;
+    _seg_mode = false;
+    _seg_unacked = false;
+
+    const float scale    = AIM_STEPS_PER_MM;
+    const float sweep_mm = 1.2f * getMaxRailMm();
+    const float v        = AIM_HOMING_SPEED_MM_S * scale;
+    const float start    = _pos_counts;
+    // Rearward = counts increasing (home 0, front negative).
+    _rt_target = start + sweep_mm * scale;
+    _rt_v = v;
+    _rt_a = 8.0f * v;
+    _rt_valid = true;
+    _rt_dirty = true;
+
+    const uint32_t poll_ms = 1000u / AIM_HOME_POLL_HZ;
+    // Spin-up before the baseline: residual start transients settle out.
+    for (int i = 0; i < 50; i++) {
+        update();
+        vTaskDelay(pdMS_TO_TICKS(poll_ms));
+    }
+    float base = 0.0f;
+    int   got  = 0;
+    for (int i = 0; i < AIM_HOME_BASELINE_SAMPLES; i++) {
+        bool ok = false;
+        const float a = inaAmps(_ina_addr, ok);
+        if (ok) { base += fabsf(a); got++; }
+        update();
+        vTaskDelay(pdMS_TO_TICKS(poll_ms));
+    }
+    if (got < AIM_HOME_BASELINE_SAMPLES / 2) {
+        _rt_valid = false;
+        _homing = false;
+        SLOGW("mlink", "homing FAILED: INA226 went quiet during baseline");
+        return false;
+    }
+    base /= float(got);
+
+    const uint32_t t0 = millis();
+    const uint32_t timeout_ms =
+        uint32_t(sweep_mm / AIM_HOMING_SPEED_MM_S * 1000.0f) + 5000u;
+    int  consec = 0;
+    bool wall   = false;
+    while (millis() - t0 < timeout_ms) {
+        update();
+        bool ok = false;
+        const float a = inaAmps(_ina_addr, ok);
+        if (ok && fabsf(a) > base + AIM_HOME_STALL_MARGIN_A) {
+            if (++consec >= AIM_HOME_STALL_CONSEC) { wall = true; break; }
+        } else {
+            consec = 0;
+        }
+        vTaskDelay(pdMS_TO_TICKS(poll_ms));
+    }
+
+    // Brake where we are, whatever happened.
+    _rt_target = _pos_counts;
+    _rt_dirty = true;
+    for (int i = 0; i < 60 && fabsf(_vel_counts) > 50.0f; i++) {
+        update();
+        vTaskDelay(pdMS_TO_TICKS(10));
+    }
+    const float swept_mm = fabsf(_pos_counts - start) / scale;
+    if (!wall) {
+        _rt_valid = false;
+        _homing = false;
+        SLOGW("mlink", "homing FAILED: no current spike in %.0f mm of sweep "
+              "(base %.2f A) -- check drive power/torque", sweep_mm, base);
+        return false;
+    }
+    // A stall debounced at the far end of the sweep is a fault, not a wall
+    // (AIM_HOME_STALL_PLAUSIBLE_FRAC rule, same reasoning as the FAS path).
+    if (swept_mm >= AIM_HOME_STALL_PLAUSIBLE_FRAC * sweep_mm) {
+        _rt_valid = false;
+        _homing = false;
+        SLOGW("mlink", "homing FAILED: stall at %.0f mm rides the sweep bound "
+              "-- rejecting as implausible", swept_mm);
+        return false;
+    }
+
+    // Plant the zero: the wall sits BACKOFF behind home in the count frame.
+    // Kill the retarget refresh FIRST -- a refresh after the set would seek an
+    // old-frame target.
+    _rt_valid = false;
+    _rt_dirty = false;
+    if (!sendSetPos(AIM_HOMING_BACKOFF_MM * scale)) {
+        _homing = false;
+        SLOGW("mlink", "homing FAILED: kOpSetPos never confirmed");
+        return false;
+    }
+    // Glide off the wall to home = 0.
+    _rt_target = 0.0f;
+    _rt_v = v;
+    _rt_a = 8.0f * v;
+    _rt_valid = true;
+    _rt_dirty = true;
+    const uint32_t t1 = millis();
+    while (millis() - t1 < 5000u) {
+        update();
+        if (fabsf(_pos_counts) < 4.0f && fabsf(_vel_counts) < 50.0f) break;
+        vTaskDelay(pdMS_TO_TICKS(10));
+    }
+    _homing = false;
+    _homed = true;
+    SLOGI("mlink", "homed :3 wall at %.1f mm of sweep, free-run base %.2f A, "
+          "zero planted, backed off %.1f mm",
+          swept_mm, base, (float)AIM_HOMING_BACKOFF_MM);
+    return true;
 }
 
 void MlinkServoDriver::streamToSteps(int32_t target_steps,

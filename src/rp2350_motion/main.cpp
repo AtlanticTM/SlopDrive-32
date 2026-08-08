@@ -232,7 +232,10 @@ static bool stepperTick(struct repeating_timer*) {
 
     if (s_segElapsedUs >= seg.duration_us) {
         s_tail = uint8_t(s_tail + 1);
-        s_segElapsedUs = 0;
+        // Carry the sub-tick remainder into the next segment: durations are
+        // arbitrary us now, and zeroing here would leak up to one tick of
+        // timeline per segment boundary.
+        s_segElapsedUs -= seg.duration_us;
     }
     return true;
 }

@@ -75,7 +75,7 @@ private:
     void sendOp(uint8_t op);
     void sendRetarget();
     void sendSegment();
-    void sendSegmentTo(float p1, float v1, uint32_t t1_ms);
+    void sendSegmentTo(float p1, float v1, uint32_t t1_us);
     void sendSegmentSplit();
     bool sendSetPos(float counts);
     bool sweepToStall(float dir, float speed_mm_s, float bound_mm,
@@ -112,19 +112,23 @@ private:
     // on motorTask -- both Core 1, so torn state is a preemption between two
     // statements, never true concurrency. streamSample() orders its stores so
     // _seg_mode reads true only after the chain fields are coherent.
+    // All segment timeline stamps are MICROSECONDS (micros(), wrap-safe via
+    // unsigned diffs): ms quantization put +/-10% speed error on a 10 ms
+    // chunk, which at speed exceeded the slave's 64-count jump guard at
+    // every boundary -- the fast-chord teleport drift (2026-08-09).
     bool     _seg_mode = false;
     float    _chain_p = 0.0f;      // last shipped segment endpoint
     float    _chain_v = 0.0f;
-    uint32_t _chain_ms = 0;
+    uint32_t _chain_us = 0;
     float    _samp_p = 0.0f;       // freshest arbiter sample
     float    _samp_v = 0.0f;
-    uint32_t _samp_ms = 0;
+    uint32_t _samp_us = 0;
     // One-tick holdback: ship to LAST tick's sample so a tick of produced
     // curve stays in reserve (production is real-time-capped, so without it
     // ring depth never exceeds 1 and jitter lands on the underrun edge).
     float    _hold_p = 0.0f;
     float    _hold_v = 0.0f;
-    uint32_t _hold_ms = 0;
+    uint32_t _hold_us = 0;
     // Sweep governance: a re-anchored chain has no upstream speed limit (the
     // curve's governance lives in sample spacing, which a re-anchor discards),
     // so the catch-up segment stretches to the arbiter's active ceiling.

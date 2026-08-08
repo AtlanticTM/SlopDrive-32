@@ -75,10 +75,10 @@ void MlinkServoDriver::sendRetarget() {
     _last_cmd_ms = millis();
 }
 
-void MlinkServoDriver::sendSegmentTo(float p1, float v1, uint32_t t1_ms) {
+void MlinkServoDriver::sendSegmentTo(float p1, float v1, uint32_t t1_us) {
     // Hermite chunk covering [chain, (p1,v1,t1)]: the slave renders it over
     // its wire duration, which is what preserves the stream's timeline.
-    uint32_t dur_ms = t1_ms - _chain_ms;
+    uint32_t dur_us = t1_us - _chain_us;
     // Catch-up sweep after a re-anchor: stretch to the arbiter's ceiling so
     // the gap GLIDES closed instead of shooting at the render cap (the
     // ungoverned lunge cost 28.8 mm of drive-follow sync, 2026-08-08). The
@@ -86,23 +86,22 @@ void MlinkServoDriver::sendSegmentTo(float p1, float v1, uint32_t t1_ms) {
     if (_sweep_pending) {
         _sweep_pending = false;
         if (_samp_vcap > 1.0f) {
-            const float need_ms = fabsf(p1 - _chain_p) / _samp_vcap * 1000.0f;
-            if (need_ms > float(dur_ms)) dur_ms = uint32_t(need_ms);
+            const float need_us = fabsf(p1 - _chain_p) / _samp_vcap * 1e6f;
+            if (need_us > float(dur_us)) dur_us = uint32_t(need_us);
         }
         // A stretched sweep from v0=0 that still ARRIVES at the curve's full
         // velocity is a Hermite bulge: the polynomial overshoots hard and
         // whips back (the sharp-jitter + silent-teleport drift chain,
         // 2026-08-09). Fritsch-Carlson bound: |v1| <= 1.5x the chord slope.
-        if (dur_ms > 0) {
+        if (dur_us > 0) {
             const float chord =
-                fabsf(p1 - _chain_p) / (float(dur_ms) * 1e-3f);
+                fabsf(p1 - _chain_p) / (float(dur_us) * 1e-6f);
             const float vcap = 1.5f * chord;
             if (v1 >  vcap) v1 =  vcap;
             if (v1 < -vcap) v1 = -vcap;
         }
     }
     uint8_t out[kFrameBytes] = {kOpSegment, ++_seq};
-    const uint32_t dur_us = dur_ms * 1000u;
     memcpy(&out[2], &dur_us, 4);
     memcpy(&out[6], &_chain_p, 4);
     memcpy(&out[10], &_chain_v, 4);
@@ -118,26 +117,26 @@ void MlinkServoDriver::sendSegmentTo(float p1, float v1, uint32_t t1_ms) {
     _seg_unacked = true;
     _chain_p = p1;
     _chain_v = v1;
-    _chain_ms = t1_ms;
+    _chain_us = t1_us;
     _last_cmd_ms = millis();
 }
 
 void MlinkServoDriver::sendSegment() {
-    sendSegmentTo(_hold_p, _hold_v, _hold_ms);
+    sendSegmentTo(_hold_p, _hold_v, _hold_us);
 }
 
 void MlinkServoDriver::sendSegmentSplit() {
     // Two halves of the same cubic, evaluated at u=0.5, so an empty ring is
     // primed to depth 2 in one tick -- production is real-time-capped, so
     // steady one-per-tick shipping can never deepen the ring by itself.
-    const float Ts = float(_hold_ms - _chain_ms) * 1e-3f;
+    const float Ts = float(_hold_us - _chain_us) * 1e-6f;
     const float p0 = _chain_p, v0 = _chain_v;
     const float p1 = _hold_p, v1 = _hold_v;
     const float mid_p = 0.5f * (p0 + p1) + 0.125f * Ts * (v0 - v1);
     const float mid_v = 1.5f * (p1 - p0) / Ts - 0.25f * (v0 + v1);
-    const uint32_t mid_ms = _chain_ms + (_hold_ms - _chain_ms) / 2u;
-    sendSegmentTo(mid_p, mid_v, mid_ms);
-    sendSegmentTo(_hold_p, _hold_v, _hold_ms);
+    const uint32_t mid_us = _chain_us + (_hold_us - _chain_us) / 2u;
+    sendSegmentTo(mid_p, mid_v, mid_us);
+    sendSegmentTo(_hold_p, _hold_v, _hold_us);
 }
 
 void MlinkServoDriver::init() {
@@ -222,28 +221,28 @@ void MlinkServoDriver::update() {
         // 71-minute wedge segment, 2026-08-07). Only while samples ADVANCE:
         // a settled stream end otherwise loops hold-segments forever.
         if (sane && _state == kStateSettled && !_seg_unacked &&
-            _samp_ms != _hold_ms) {
+            _samp_us != _hold_us) {
             _chain_p = _pos_counts;
             _chain_v = 0.0f;
-            _chain_ms = (_hold_ms > kTickMs) ? _hold_ms - kTickMs : 0;
+            _chain_us = _hold_us - kTickMs * 1000u;
             _sweep_pending = true;
         }
         // Blocked-interval re-base; unsigned compare also catches any
         // chain-ahead-of-hold ordering bug as a huge gap.
-        if (_hold_ms - _chain_ms > kStreamGapMs) {
+        if (_hold_us - _chain_us > kStreamGapMs * 1000u) {
             _chain_p = _pos_counts;
             _chain_v = 0.0f;
-            _chain_ms = (_hold_ms > kTickMs) ? _hold_ms - kTickMs : 0;
+            _chain_us = _hold_us - kTickMs * 1000u;
             _sweep_pending = true;
         }
         // Gate compensates the one-tick-stale runway report. Split ONLY at
         // depth 0: sustained multi-frame ticks exceed the slave's per-frame-
         // reset budget (2.4.87: torn 83k, qdrops 607); deeper waits on sd-dxy.
-        const int32_t span_ms = int32_t(_hold_ms - _chain_ms);
-        if (sane && span_ms > 0 && _depth < kSegmentDepth &&
+        const int32_t span_us = int32_t(_hold_us - _chain_us);
+        if (sane && span_us > 0 && _depth < kSegmentDepth &&
             _runway_ms < kRunwayTargetMs + 2 * kTickMs) {
             // A governed sweep never splits: it is one stretched glide.
-            if (_depth == 0 && span_ms >= 4 && !_sweep_pending)
+            if (_depth == 0 && span_us >= 4000 && !_sweep_pending)
                 sendSegmentSplit();
             else sendSegment();
         }
@@ -251,7 +250,7 @@ void MlinkServoDriver::update() {
         // exists to ship into a draining ring next tick.
         _hold_p = _samp_p;
         _hold_v = _samp_v;
-        _hold_ms = _samp_ms;
+        _hold_us = _samp_us;
         return;                       // segment mode never refreshes retargets
     }
 
@@ -497,28 +496,28 @@ void MlinkServoDriver::streamSample(int32_t target_steps, float vel_steps_s,
     float v = vel_steps_s;
     if (v >  kMaxCountsPerSec) v =  kMaxCountsPerSec;
     if (v < -kMaxCountsPerSec) v = -kMaxCountsPerSec;
-    const uint32_t now = millis();
+    const uint32_t now_us = micros();
     // (Re-)anchor at the live rendered position on entry or after a stream
     // gap; a stale chain tail would ship one giant segment spanning the idle.
     // Store order matters: update() may preempt between statements (same
     // core), so _seg_mode flips true only after the chain is coherent.
-    if (!_seg_mode || now - _samp_ms > kStreamGapMs) {
+    if (!_seg_mode || now_us - _samp_us > kStreamGapMs * 1000u) {
         _rt_valid = false;
         _rt_dirty = false;
         _seg_unacked = false;
         _chain_p = _pos_counts;
         _chain_v = 0.0f;
-        _chain_ms = now;
+        _chain_us = now_us;
         _hold_p = _pos_counts;
         _hold_v = 0.0f;
-        _hold_ms = now;
-        _samp_ms = now;
+        _hold_us = now_us;
+        _samp_us = now_us;
         _sweep_pending = true;
         _seg_mode = true;
     }
     _samp_p = float(target_steps);
     _samp_v = v;
-    _samp_ms = now;
+    _samp_us = now_us;
     _samp_vcap = float(speed_steps_s);
     _last_accel_native = accel_steps_s2;
 }

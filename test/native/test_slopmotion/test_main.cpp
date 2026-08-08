@@ -2180,6 +2180,33 @@ TEST_CASE("Settle grace coasts at the end velocity, then brakes when the stream 
     }
 }
 
+TEST_CASE("Anchored commit: a late-released segment renders the wire timeline") {
+    // Same chain twice: reference committed exactly on time, candidate's
+    // second segment released 4 ms late but anchored at its due time. The
+    // rendered curves must be identical -- release jitter never becomes
+    // geometry.
+    auto cfg = operatorConfig();
+    Engine ref(cfg, 0.30f);
+    Engine late(cfg, 0.30f);
+
+    Command c1;
+    c1.target = 0.45f; c1.duration_us = 100 * (uint32_t)kMs;
+    c1.has_duration = true; c1.end_vel = 1.5f; c1.has_end_vel = true;
+    REQUIRE(ref.commit(c1, 0));
+    REQUIRE(late.commit(c1, 0));
+
+    Command c2;
+    c2.target = 0.60f; c2.duration_us = 100 * (uint32_t)kMs;
+    c2.has_duration = true; c2.end_vel = 0.0f; c2.has_end_vel = true;
+    REQUIRE(ref.commit(c2, 100 * kMs));
+    c2.anchor_us = 100 * kMs; c2.has_anchor = true;
+    REQUIRE(late.commit(c2, 104 * kMs));
+
+    for (uint64_t t = 105 * kMs; t <= 200 * kMs; t += kMs)
+        CHECK(late.positionAt(t) ==
+              doctest::Approx(ref.positionAt(t)).epsilon(1e-9));
+}
+
 TEST_CASE("Segment chain with 5 ms arrival jitter: no settle storm, no mode flap") {
     // The measured defect: the firmware's 5 ms SlopSync pacing drain makes
     // segment arrivals jitter around their scheduled instant, so plans expire

@@ -1742,6 +1742,11 @@ void SlopSyncHubService::drainMotionStream() {
         cmd.duration_us  = entry.duration_us;
         cmd.has_duration = entry.has_duration;
         cmd.client_curve_family = entry.curve_family;  // RFC-030: FollowClient's input
+        // Anchored commit: the engine plans at the SCHEDULED start, so the
+        // 5 ms drain quantization (and any queue-crossing lag) never lands
+        // in the rendered timeline. Same esp_timer domain as the sampler.
+        cmd.anchor_us  = entry.due_us;
+        cmd.has_anchor = true;
 
         // ---- RFC-008 one-segment LOOKAHEAD ----------------------------------
         // The whole hub-side handoff sanity guard reduces, here, to answering

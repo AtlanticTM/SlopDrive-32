@@ -756,6 +756,14 @@ struct Command {
     float    next_chord     = 0.0f;
     bool     has_next_chord = false;
 
+    // ---- Scheduled start (anchored commit) ----------------------------------
+    // The command's due time in the engine's own clock domain. When set,
+    // commit() anchors the plan here rather than at arrival, so release
+    // jitter between the pacing schedule and the commit never becomes
+    // rendered geometry. false = plan at arrival (pre-0.9 behavior).
+    uint64_t anchor_us  = 0;
+    bool     has_anchor = false;
+
     // ---- RFC-030: the sender's DECLARED curve family ------------------------
     // Values mirror the SlopSync registry's `curve_families` table verbatim
     // (this header stays slopsync-free, so the numbering is documented, not
@@ -1031,22 +1039,33 @@ public:
             return false;
         }
 
+        // Anchor at the command's SCHEDULED start when the caller carries one
+        // (Command::anchor_us): the engine executes the wire timeline, not the
+        // arrival timeline, so release jitter never becomes rendered geometry
+        // (sd-ar3 chord-join notch). kAnchorMaxLateUs < kCoastCapS keeps the
+        // sampled coast state uncapped inside the bound.
+        uint64_t t0 = now_us;
+        if (cmd.has_anchor && cmd.anchor_us < now_us) {
+            t0 = cmd.anchor_us;
+            if (now_us - t0 > kAnchorMaxLateUs) t0 = now_us - kAnchorMaxLateUs;
+        }
+
         double p, v, a;
-        sampleRaw(now_us, p, v, a);
+        sampleRaw(t0, p, v, a);
 
         const double target = clamp01(cmd.target);
-        // Stream estimator feeds BOTH modes (chase aim + waveform af/vf
-        // estimates), so update it on every commit.
-        updateEstimator(target, now_us);
+        // Estimator feeds BOTH modes; anchored time on purpose (due spacing
+        // is the stream's true cadence, arrival spacing carries the jitter).
+        updateEstimator(target, t0);
 
         const bool waveform =
             cmd.has_duration && cmd.duration_us >= kShortMoveUs;
 
         bool ok;
         if (waveform) {
-            ok = commitWaveform(cmd, p, v, a, target, now_us);
+            ok = commitWaveform(cmd, p, v, a, target, t0);
         } else {
-            ok = commitChase(cmd, p, v, a, target, now_us);
+            ok = commitChase(cmd, p, v, a, target, t0);
         }
         if (ok) _plans++;
         return ok;
@@ -1195,6 +1214,9 @@ private:
     // Coast-past-expiry bound (sampleRaw): 2× the grace cap, so the coast
     // always outlives the window in which settle takes over.
     static constexpr double   kCoastCapS = 0.060;
+    // Anchored-commit lateness bound; MUST stay under kCoastCapS (see
+    // commit()).
+    static constexpr uint64_t kAnchorMaxLateUs = 50000;
 
     static double clamp01(double x) {
         return x < 0.0 ? 0.0 : (x > 1.0 ? 1.0 : x);

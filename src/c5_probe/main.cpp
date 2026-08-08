@@ -27,6 +27,7 @@
 #include <span>
 
 #include "comms/BridgeProtocol.h"          // ONE vocabulary, two ends (T20)
+#include "logview_gz.h"                    // GENERATED; the /logs page in flash
 #include "slopsync/wire/crc32.hpp"
 #include "slopsync/wire/serial_cobs.hpp"
 #include "slopsync/wire/estop_frame.hpp"   // SPEC §13.5 raw ESTOP scan
@@ -618,7 +619,27 @@ static esp_err_t uitokenHandler(httpd_req_t* req) {
 }
 
 // ---- OTA --------------------------------------------------------------------
+// The ONE gate for every flash this device can perform, its own and the S3's.
+// The S3 does not re-check (RFC-057: it trusts the link), so a weakness here is
+// the whole product's OTA security.
+static bool otaTokenOk(httpd_req_t* req) {
+    char tok[64] = {0};
+    if (httpd_req_get_hdr_value_str(req, "X-OTA-Token", tok, sizeof(tok)) != ESP_OK) return false;
+    // Constant time: length-independent accumulate, same as the S3's own check.
+    const char* want = SECRET_OTA_PASSWORD;
+    uint8_t diff = uint8_t(strlen(tok) ^ strlen(want));
+    for (size_t i = 0; tok[i] && want[i]; ++i) diff |= uint8_t(tok[i] ^ want[i]);
+    return diff == 0;
+}
+
+// Flashes THIS device. Gated by the same token as the S3 forwarder below: an
+// unauthenticated route here let any LAN host overwrite the bridge, which also
+// owns the only remote path to the S3's flash.
 static esp_err_t otaHandler(httpd_req_t* req) {
+    if (!otaTokenOk(req)) {
+        httpd_resp_set_status(req, "401 Unauthorized");
+        return httpd_resp_sendstr(req, "{\"ok\":false,\"error\":\"unauthorized\"}");
+    }
     if (!Update.begin(UPDATE_SIZE_UNKNOWN)) return httpd_resp_send_500(req);
     char buf[1024];
     int remaining = req->content_len;
@@ -637,18 +658,8 @@ static esp_err_t otaHandler(httpd_req_t* req) {
 
 // ---- Serial OTA forward: HTTP here -> bridge ops -> the S3's flash ----------
 // RFC-057: OTA is a duty of the composite hub, not of the chip holding the
-// flash. This is the ONLY auth on the path -- the S3 trusts the link and does
-// not re-check, so a weak comparison here is the whole product's OTA security.
-
-static bool otaTokenOk(httpd_req_t* req) {
-    char tok[64] = {0};
-    if (httpd_req_get_hdr_value_str(req, "X-OTA-Token", tok, sizeof(tok)) != ESP_OK) return false;
-    // Constant time: length-independent accumulate, same as the S3's own check.
-    const char* want = SECRET_OTA_PASSWORD;
-    uint8_t diff = uint8_t(strlen(tok) ^ strlen(want));
-    for (size_t i = 0; tok[i] && want[i]; ++i) diff |= uint8_t(tok[i] ^ want[i]);
-    return diff == 0;
-}
+// flash. Auth is otaTokenOk() above, shared with this device's own /api/ota --
+// the S3 trusts the link and does not re-check.
 
 // Blocks until the S3 publishes a fresh status. Returns false on timeout.
 // delay() is acceptable here: the C5 carries no motion path, and an OTA is an
@@ -820,14 +831,30 @@ static esp_err_t diagS3Handler(httpd_req_t* req) {
         httpd_resp_set_status(req, "409 Conflict");
         return httpd_resp_sendstr(req, "an OTA owns the link; retry after it");
     }
-    // Tag = whatever follows "/api/diag/"; empty = the whole archive.
-    const char* tag = req->uri + strlen("/api/diag");
-    if (*tag == '/') ++tag;
+    // Tag = the path segment after "/api/diag/", STOPPING at '?'. Taking the
+    // whole remainder made "?from=N" a tag filter that matches no record, so
+    // every paged pull answered "0 lines emitted" and follow-tail could not
+    // work through this door at all (sd-a14).
+    char tag[16] = {};
+    {
+        const char* p = req->uri + strlen("/api/diag");
+        if (*p == '/') ++p;
+        size_t i = 0;
+        while (p[i] != '\0' && p[i] != '?' && i < sizeof(tag) - 1) { tag[i] = p[i]; ++i; }
+    }
+    // ?from=<seq> is the archive's own resume cursor, echoed back from the
+    // previous dump's footer (logging-leds.md). Absent = the whole archive.
+    uint32_t from = 0;
+    {
+        char query[64], val[16];
+        if (httpd_req_get_url_query_str(req, query, sizeof(query)) == ESP_OK &&
+            httpd_query_key_value(query, "from", val, sizeof(val)) == ESP_OK)
+            from = strtoul(val, nullptr, 10);
+    }
 
     OtaRxOwner rxOwner;   // loop() stands off; this handler drains the link
     httpd_resp_set_type(req, "text/plain");
 
-    uint32_t from = 0;
     for (;;) {
         g_diagLen = 0;
         g_diagEndSeen = false;
@@ -854,6 +881,18 @@ static esp_err_t diagS3Handler(httpd_req_t* req) {
         from = g_diagNext;
     }
     return httpd_resp_send_chunk(req, nullptr, 0);
+}
+
+// ---- /logs -- the diag viewer page (sd-a14) ---------------------------------
+// One gzip'd self-contained page from flash; the C5 mounts no filesystem. It
+// reads /api/diag above and parses it IN THE BROWSER, so the bridge keeps its
+// byte-pipe property: nothing here learns the archive's line format.
+// Unauthenticated on purpose, same read-only posture as /api/diag itself.
+static esp_err_t logsHandler(httpd_req_t* req) {
+    httpd_resp_set_type(req, "text/html");
+    httpd_resp_set_hdr(req, "Content-Encoding", "gzip");
+    httpd_resp_set_hdr(req, "Cache-Control", "no-cache");
+    return httpd_resp_send(req, reinterpret_cast<const char*>(kLogviewGz), kLogviewGzLen);
 }
 
 void setup() {
@@ -976,6 +1015,10 @@ void setup() {
         // S3 diag archive over the bridge; the * also matches the bare route.
         httpd_uri_t dg{"/api/diag*", HTTP_GET, diagS3Handler, nullptr, false, false, nullptr};
         httpd_register_uri_handler(g_http80, &dg);
+        // The viewer for it. Registered AFTER /api/diag* so the wildcard above
+        // keeps first claim on its own prefix.
+        httpd_uri_t lg{"/logs", HTTP_GET, logsHandler, nullptr, false, false, nullptr};
+        httpd_register_uri_handler(g_http80, &lg);
     }
     report("S5 +httpd+ws");
 

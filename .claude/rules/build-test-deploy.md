@@ -29,12 +29,25 @@ LAW: scope, gates, and the traps that make a green result a lie.
   `/api/uart`, `/api/crash`, `/api/slopmotion`): bench harnesses in `tools/`
   that poll them need the sd32-ota rescue build flashed first, one bridge
   flash away. Diagnostics ride the C5 `/api/diag` pull.
+- **Read the archive at the C5's `/logs`, not with `curl`.** One gzip'd page
+  from C5 flash (`tools/logview/logview.html`, baked in by
+  `tools/gen_logview_header.py` as a c5_probe pre-script). It parses `/api/diag`
+  in the BROWSER, so the bridge keeps its byte-pipe property. `curl` still works
+  and stays the machine path. `?from=<seq>` and `/api/diag/<tag>` compose.
 
 ## Deployment (OTA)
 
-- **Scope:** OTA is the S3 main controller ONLY (`sd32`/`sd32-ota` extend
-  `s3_main`). The C5 nodes have no web server or UI image and flash over
-  USB-JTAG serial only.
+- **Scope:** the S3 main controller (`sd32`/`sd32-ota` extend `s3_main`) and
+  the C5 bridge. The C5 carries no UI image, so it has no `uploadfs` half.
+  Corrected 2026-08-08: this row said the C5 had no web server and flashed over
+  USB-JTAG only. It serves httpd on 80 and 82, and `POST /api/ota` on the C5
+  flashes the C5 itself -- proven three times back to back, version-verified by
+  `uptime_ms` and `reset_reason 3` from `/probe`. USB-JTAG is the C5's RESCUE
+  path, same standing as serial on the S3, not its only one.
+- **Both C5 OTA routes are gated by `X-OTA-Token`** (`otaTokenOk`, one gate for
+  its own flash and the S3 forwarder's). `/api/ota` was unauthenticated until
+  2026-08-08, which let any LAN host overwrite the bridge that owns the only
+  remote path to the S3's flash.
 - **OTA is the default path.** No USB hunting, no serial fallback unless OTA
   is confirmed unavailable.
 - **Firmware and web UI are separate images.** `-t upload` ships

@@ -137,6 +137,13 @@ route table never changes.
   the archive in bounded requests instead of one held-open stream, and it makes
   incremental tailing free. Verified live 2026-08-06: full dump -> `next=64`,
   `?from=64` eleven seconds later returned exactly the 2 new lines.
+  **That was the S3's own HTTP route, which the headless build does not
+  compile.** The C5 forwarder took the whole URI after `/api/diag` as the tag
+  filter, so `?from=N` filtered on a tag named `?from=N`, matched nothing, and
+  every paged pull answered `0 lines emitted` -- the cursor was dead through the
+  only door a headless machine has. Fixed 2026-08-08 (sd-a14); re-verified
+  through the bridge: `?from=4270` returned 9 records against a 4,279-record
+  archive, and `/api/diag/sys?from=4270` composes tag with cursor.
 - **Blocking during a full local dump is ACCEPTED, not a defect.** It owns
   httpTask until it finishes. This is the instrument reached for when the
   machine is already unwell, so it carries no heap floor and no mid-body abort:

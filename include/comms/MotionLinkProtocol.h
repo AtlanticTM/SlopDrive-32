@@ -8,8 +8,8 @@
 //   segments at their own pace, NEVER drains faster to catch up. Overflow is
 //   the producer's fault; the S3 paces on the reported runway. Underrun gets
 //   SETTLE (hold at the last endpoint), never extrapolation.
-// - ESTOP punches through on its own op, handled in the receive IRQ, never
-//   queued behind buffered motion.
+// - ESTOP punches through on its own op, pumped by the slave's 20 kHz tick
+//   (<=50 us to act), never queued behind buffered motion.
 // See: dev board sd-dxy (wiring, buffer rulings), .claude/rules/transport.md.
 #pragma once
 

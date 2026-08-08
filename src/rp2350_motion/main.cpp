@@ -13,6 +13,7 @@
 #include <Arduino.h>
 
 #include "hardware/clocks.h"
+#include "hardware/dma.h"
 #include "hardware/gpio.h"
 #include "hardware/irq.h"
 #include "hardware/pio.h"
@@ -151,9 +152,12 @@ static void quadPioInit() {
 
 static struct repeating_timer s_tick;
 
+static void pumpSpiFrames();   // defined with the DMA slave section below
+
 static bool stepperTick(struct repeating_timer*) {
-    // Never busy-wait in this ISR: a 20 us wait held off the SPI IRQ past the
-    // PL022's 8-byte RX FIFO (8 us at 8 MHz) and tore frames.
+    // Frame pump FIRST, and unconditionally: an ESTOP frame must act this
+    // tick, and a latched estop must still process its kOpClear.
+    pumpSpiFrames();
     if (s_estop) { s_state = kStateEstop; return true; }   // hold: no motion
 
     if (s_rtActive) {
@@ -351,19 +355,18 @@ static void processFrame(uint8_t* data, size_t len) {
     }
 }
 
-// ---- Raw PL022 slave (arduino-pico's SPISlave never fires on RP2350 --
-// proven by the wire probe: cs/sck/mosi all arriving, zero callbacks) --------
-// The IRQ drains RX into a frame buffer and keeps TX fed from the status
-// snapshot; loop() resyncs byte counters whenever CS idles high (readable
-// via SIO regardless of the pin's SPI funcsel).
+// ---- Raw PL022 slave, DMA-drained -------------------------------------------
+// The IRQ collector raced an 8-byte FIFO with an ~8 us entry budget; any rare
+// us-scale latency source overran it silently (~1 torn frame per kiloframe
+// under motion load, every mitigation tried). DMA lands bytes in a ring with
+// no latency budget at all; the 20 kHz tick pumps completed frames, so ESTOP
+// still acts within 50 us. TX is a per-frame 32-byte DMA paced by the DREQ.
 static uint8_t s_rxFrame[kFrameBytes];
-static volatile uint8_t s_rxCount = 0;
-static volatile uint8_t s_txIdx = 0;
-
-static void feedTx() {
-    while (spi_is_writable(spi1) && s_txIdx < kFrameBytes)
-        spi_get_hw(spi1)->dr = s_statusBuf[s_txIdx++];
-}
+static int s_dmaRx = -1;
+static int s_dmaTx = -1;
+static uint8_t __attribute__((aligned(256))) s_rxRing[256];
+static uint32_t s_rxRead = 0;      // ring offset of the next unparsed byte
+static uint32_t s_frames = 0;
 
 // spi_init's RESETS-block reset is the ONLY thing that clears a PL022 TX
 // FIFO -- an SSE cycle does not (measured 2026-08-07: +8 reply shift,
@@ -373,48 +376,57 @@ static void spiConfigure() {
     spi_set_slave(spi1, true);
     static_assert(kSpiMode == 1, "PL022 slave needs CPHA=1 for held-low CS");
     spi_set_format(spi1, 8, SPI_CPOL_0, SPI_CPHA_1, SPI_MSB_FIRST);
-    spi_get_hw(spi1)->imsc = SPI_SSPIMSC_RXIM_BITS | SPI_SSPIMSC_RTIM_BITS;
 }
 
-// Flush by block reset, then arm from byte 0. A master clocking into the
-// reset window tears that frame; CRC drops it, the credit loop re-sends.
-// Master keeps >=60 us between transactions to make that rare.
-// ponytail: per-frame reset is crude -- PIO/DMA rework (sd-dxy) owns it.
-static void txFlushAndArm() {
-    spiConfigure();
-    s_txIdx = 0;
-    feedTx();
+static void armRx() {
+    dma_channel_abort(s_dmaRx);
+    s_rxRead = 0;
+    dma_channel_set_write_addr(s_dmaRx, s_rxRing, false);
+    dma_channel_set_trans_count(s_dmaRx, 0x0FFFFFFFu, true);
 }
 
-static volatile uint32_t s_irqCount = 0;
-static volatile uint32_t s_bytesDrained = 0;
-static volatile uint8_t s_maxRx = 0;
+static void armTx() {
+    dma_channel_abort(s_dmaTx);
+    dma_channel_set_read_addr(s_dmaTx, s_statusBuf, false);
+    dma_channel_set_trans_count(s_dmaTx, kFrameBytes, true);
+}
 
-static void spi1Irq() {
-    s_irqCount = s_irqCount + 1;
-    // Collect the WHOLE frame inside this one entry: bytes land 1 us apart at
-    // 8 MHz, and the level-IRQ refire proved unreliable mid-burst (one
-    // delivery per transaction, measured) -- so spin out the remaining ~30 us
-    // here, interleaving TX refill so the full 32 B status answers. Bail when
-    // CS rises with the frame short (torn transaction; resync handles it).
-    uint32_t idle = 0;
-    while (s_rxCount < kFrameBytes) {
-        if (spi_is_readable(spi1)) {
-            s_rxFrame[s_rxCount] = uint8_t(spi_get_hw(spi1)->dr);
-            s_rxCount = uint8_t(s_rxCount + 1);
-            s_bytesDrained = s_bytesDrained + 1;
-            if (s_rxCount > s_maxRx) s_maxRx = s_rxCount;
-            idle = 0;
-        } else {
-            if (gpio_get(PIN_SPI_CS) || ++idle > 4000) break;
-        }
-        feedTx();
-    }
-    if (s_rxCount >= kFrameBytes) {
+static inline uint32_t rxWriteOff() {
+    return (uint32_t)dma_channel_hw_addr(s_dmaRx)->write_addr
+         - (uint32_t)s_rxRing;
+}
+
+// Frame pump -- called ONLY from stepperTick (single consumer of s_rxRead).
+// A clean 32/32 exchange leaves the TX FIFO drained by the master, so the
+// happy path re-arms both DMAs with NO block reset; the reset survives only
+// in the tear path, where stale TX bytes genuinely need flushing.
+static void pumpSpiFrames() {
+    const uint32_t avail = (rxWriteOff() - s_rxRead) & 255u;
+    if (avail >= kFrameBytes) {
+        for (uint32_t i = 0; i < kFrameBytes; i++)
+            s_rxFrame[i] = s_rxRing[(s_rxRead + i) & 255u];
+        s_rxRead = (s_rxRead + kFrameBytes) & 255u;
         processFrame(s_rxFrame, kFrameBytes);
+        s_frames++;
         preloadStatus();
-        s_rxCount = 0;
-        txFlushAndArm();   // aligned answer for the next transaction
+        armTx();
+        // Refill the RX count during the >=200 us inter-frame gap, long
+        // before its 268 MB budget runs dry. Only with no partial pending:
+        // armRx resets the read pointer.
+        if (dma_channel_hw_addr(s_dmaRx)->transfer_count < (1u << 16) &&
+            ((rxWriteOff() - s_rxRead) & 255u) == 0) {
+            armRx();
+        }
+    } else if (avail != 0 && gpio_get(PIN_SPI_CS)) {
+        // CS idle-high with a partial frame = torn. Discard it, flush the
+        // stale TX reply by block reset, re-arm both sides.
+        ++s_torn;
+        dma_channel_abort(s_dmaTx);
+        dma_channel_abort(s_dmaRx);
+        spiConfigure();
+        preloadStatus();
+        armRx();
+        armTx();
     }
 }
 
@@ -423,15 +435,31 @@ static void spiSlaveBegin() {
     gpio_set_function(PIN_SPI_SCK, GPIO_FUNC_SPI);
     gpio_set_function(PIN_SPI_TX, GPIO_FUNC_SPI);
     gpio_set_function(PIN_SPI_CS, GPIO_FUNC_SPI);
+    spiConfigure();
+    s_dmaRx = dma_claim_unused_channel(true);
+    {
+        dma_channel_config c = dma_channel_get_default_config(s_dmaRx);
+        channel_config_set_transfer_data_size(&c, DMA_SIZE_8);
+        channel_config_set_read_increment(&c, false);
+        channel_config_set_write_increment(&c, true);
+        channel_config_set_ring(&c, true, 8);     // 256-byte write ring
+        channel_config_set_dreq(&c, spi_get_dreq(spi1, false));
+        dma_channel_configure(s_dmaRx, &c, s_rxRing,
+                              &spi_get_hw(spi1)->dr, 0, false);
+    }
+    s_dmaTx = dma_claim_unused_channel(true);
+    {
+        dma_channel_config c = dma_channel_get_default_config(s_dmaTx);
+        channel_config_set_transfer_data_size(&c, DMA_SIZE_8);
+        channel_config_set_read_increment(&c, true);
+        channel_config_set_write_increment(&c, false);
+        channel_config_set_dreq(&c, spi_get_dreq(spi1, true));
+        dma_channel_configure(s_dmaTx, &c, &spi_get_hw(spi1)->dr,
+                              s_statusBuf, 0, false);
+    }
     preloadStatus();
-    txFlushAndArm();   // full block config; byte 0 of the first answer is real
-    irq_set_exclusive_handler(SPI1_IRQ, spi1Irq);
-    // Above the alarm tick (default 0x80): a busy stepperTick otherwise blocks
-    // frame collection past the PL022's 8-byte FIFO and tears the frame. The
-    // tick tolerates the <=30 us preemption; the FIFO does not tolerate the
-    // reverse.
-    irq_set_priority(SPI1_IRQ, 0x40);
-    irq_set_enabled(SPI1_IRQ, true);
+    armRx();
+    armTx();
 }
 
 // ---- SlopGlow on the onboard WS2812 -----------------------------------------
@@ -519,32 +547,17 @@ void loop() {
                s_state == kStateRunning   ? Status::Working
                : (s_flags & kFlagUnderran) ? Status::Degraded
                                            : Status::Nominal);
-    // CS idle-high resync, TORN RX ONLY (txIdx>0 with a loaded FIFO is the
-    // normal between-transaction state; re-zeroing it here served duplicate
-    // bytes). A tear flushes BOTH FIFOs: SSE cycle is the only TX flush.
-    if (gpio_get(PIN_SPI_CS) && s_rxCount != 0) {
-        ++s_torn;   // frames discarded HERE never reach the badCrc counter
-        irq_set_enabled(SPI1_IRQ, false);
-        while (spi_is_readable(spi1)) (void)spi_get_hw(spi1)->dr;
-        s_rxCount = 0;
-        preloadStatus();
-        txFlushAndArm();
-        irq_set_enabled(SPI1_IRQ, true);
-    }
-    // statusBuf has ONE writer, the SPI IRQ (preloadStatus after each frame).
-    // A loop()-side refresh raced feedTx mid-transaction: half-updated
-    // replies failed the master's CRC and starved the feed (2026-08-07).
+    // Frames, tears and the status snapshot are ALL the tick pump's business
+    // now: one consumer, IRQ context, 50 us cadence. loop() only observes.
     static uint32_t lastPrint = 0;
     if (millis() - lastPrint >= 1000) {
         lastPrint = millis();
-        Serial.printf("[mlink] lastSeq=%u badCrc=%lu torn=%lu qdrops=%lu irqs=%lu drained=%lu maxRx=%u "
-                      "imsc=0x%02lx ris=0x%02lx sspsr=0x%02lx cs=%d\n",
+        Serial.printf("[mlink] lastSeq=%u badCrc=%lu torn=%lu qdrops=%lu "
+                      "frames=%lu dmaRemain=%lu sspsr=0x%02lx cs=%d\n",
                       unsigned(s_lastSeq), (unsigned long)s_badCrc,
                       (unsigned long)s_torn, (unsigned long)s_qdrops,
-                      (unsigned long)s_irqCount,
-                      (unsigned long)s_bytesDrained, unsigned(s_maxRx),
-                      (unsigned long)spi_get_hw(spi1)->imsc,
-                      (unsigned long)spi_get_hw(spi1)->ris,
+                      (unsigned long)s_frames,
+                      (unsigned long)dma_channel_hw_addr(s_dmaRx)->transfer_count,
                       (unsigned long)spi_get_hw(spi1)->sr,
                       int(gpio_get(PIN_SPI_CS)));
     }

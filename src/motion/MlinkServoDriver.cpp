@@ -28,6 +28,10 @@ SPIClass s_spi(FSPI);
 constexpr uint32_t kTickMs = 10;
 constexpr uint32_t kRefreshMs = 100;
 constexpr uint32_t kStreamGapMs = 100;   // stream silence before re-anchoring
+// Chain gaps above this re-seed the engine instead of sweeping: a stretched
+// sweep is PERMANENT added latency on a renderer that never drains faster
+// (operator ruling). Below it, a gentle glide is imperceptible.
+constexpr float kReseedGapMm = 8.0f;
 }  // namespace
 
 void MlinkServoDriver::xfer(uint8_t (&out)[kFrameBytes],
@@ -54,6 +58,27 @@ void MlinkServoDriver::xfer(uint8_t (&out)[kFrameBytes],
     xTaskResumeAll();
     s_spi.endTransaction();
     s_lastEndUs = micros();
+}
+
+void MlinkServoDriver::setRenderCeiling(float mm_s) {
+    if (!_begun || !(mm_s > 0.0f)) return;
+    _ceiling_mm_s = mm_s;
+    const float cps = mm_s * AIM_STEPS_PER_MM;
+    uint8_t out[kFrameBytes] = {kOpSetLimits, ++_seq};
+    memcpy(&out[2], &cps, 4);
+    uint8_t in[kFrameBytes] = {};
+    xfer(out, in);
+    SLOGI("mlink", "render ceiling -> %.0f mm/s (%.0f counts/s)",
+          (double)mm_s, (double)cps);
+}
+
+float MlinkServoDriver::liveCounts() const {
+    // Same extrapolation getPosition() applies, in the raw count frame and
+    // without the target clamp (an anchor wants the best estimate, not a
+    // display value). v=0 at rest keeps standstill exact.
+    uint32_t age = millis() - _status_ms + kTickMs;
+    if (age > 3 * kTickMs) age = 3 * kTickMs;
+    return _pos_counts + _vel_counts * (float(age) * 1e-3f);
 }
 
 void MlinkServoDriver::sendOp(uint8_t op) {
@@ -95,8 +120,38 @@ void MlinkServoDriver::sendSegmentTo(float p1, float v1, float a1,
     // extra render time lands as transient runway; the gate drains it.
     if (_sweep_pending) {
         _sweep_pending = false;
-        if (_samp_vcap > 1.0f) {
-            const float need_us = fabsf(p1 - _chain_p) / _samp_vcap * 1e6f;
+        // Too far to glide: ship NOTHING and request an engine re-seed at
+        // the live position -- the gap becomes a COLD-start plan through the
+        // engine's own feasibility machinery instead of wire-duration debt
+        // the slave can never drain (sd-d77). ONE attempt per episode: a
+        // reseed cannot converge when the live position is outside the
+        // window (the engine's frame clamps), so a surviving gap falls
+        // through to the gentle sweep below -- the window-entry glide.
+        // Never mutate the chain here: a future-stamped hold once collided
+        // with the sample clock and shipped a 317 us / 42 mm chunk.
+        if (fabsf(p1 - _chain_p) > kReseedGapMm * AIM_STEPS_PER_MM &&
+            !_reseed_tried) {
+            _reseed_tried = true;
+            _reseed_req = true;
+            _sweep_pending = true;   // re-run this decision after the reset
+            return;
+        }
+        _reseed_tried = false;
+        // A sweep is RECOVERY, not content: cap it at the gentle USER limit
+        // (same rule as window-entry and window glide). Content never sweeps,
+        // so feel is untouched -- a 838 mm/s from-rest restart dart was the
+        // last grit class standing (sd-d77, 2026-08-10).
+        float vsweep = _samp_vcap;
+        if (_recovery_mm_s > 0.0f)
+            vsweep = fminf(vsweep, _recovery_mm_s * AIM_STEPS_PER_MM);
+        if (vsweep > 1.0f) {
+            // Stretch for the quintic's interior PEAK, not its chord: a
+            // from-rest quintic peaks at ~1.875x its mean, so a chord-governed
+            // sweep whips at nearly 2x the ceiling (mchunk census 2026-08-09:
+            // vpk 1230-1278 mm/s against a 950 ceiling on every re-anchor --
+            // the grit). Peak-governed, the same sweep glides.
+            const float need_us =
+                1.875f * fabsf(p1 - _chain_p) / vsweep * 1e6f;
             if (need_us > float(dur_us)) dur_us = uint32_t(need_us);
         }
         // A stretched sweep from v0=0 that still ARRIVES at the curve's full
@@ -112,6 +167,50 @@ void MlinkServoDriver::sendSegmentTo(float p1, float v1, float a1,
         }
         // A clamped v1 makes the passed a1 inconsistent; land the sweep flat.
         a1 = 0.0f;
+    }
+    // Interior-velocity scan of the EXACT polynomial the slave will render
+    // (sd-ar3.1 grit hunt): chunks with clean endpoints carry >1900 mm/s
+    // interior spikes ~100/s in fast content, and no upstream census sees
+    // inside a chunk. Worst chunk per second, with the parameters that
+    // built it, so the guilty term names itself. 9 derivative evals per
+    // chunk at ~100/s: T27-negligible next to the SPI xfer below.
+    {
+        const float T = float(dur_us) * 1e-6f;
+        if (T > 0.0f) {
+            const float V0 = _chain_v * T, V1 = v1 * T;
+            const float A0 = _chain_a * T * T, A1 = a1 * T * T;
+            const float R1 = p1 - _chain_p - V0 - 0.5f * A0;
+            const float R2 = V1 - V0 - A0;
+            const float R3 = A1 - A0;
+            const float c2 = 0.5f * A0;
+            const float c3 = 10.0f * R1 - 4.0f * R2 + 0.5f * R3;
+            const float c4 = -15.0f * R1 + 7.0f * R2 - R3;
+            const float c5 = 6.0f * R1 - 3.0f * R2 + 0.5f * R3;
+            float vpk = 0.0f;
+            for (int k = 0; k <= 8; k++) {
+                const float u = float(k) * 0.125f;
+                const float v = ((((5.0f * c5 * u + 4.0f * c4) * u + 3.0f * c3)
+                                  * u + 2.0f * c2) * u + V0) / T;
+                if (fabsf(v) > vpk) vpk = fabsf(v);
+            }
+            if (vpk > _mc_vpk) {
+                _mc_vpk = vpk;
+                _mc_dur = dur_us;
+                _mc_v0 = _chain_v; _mc_v1 = v1;
+                _mc_a0 = _chain_a; _mc_a1 = a1;
+                _mc_dp = p1 - _chain_p;
+            }
+            const uint32_t mnow = millis();
+            if (mnow - _mc_ms >= 1000u && _mc_vpk > 0.0f) {
+                _mc_ms = mnow;
+                SLOGI("mchunk", "worst/s: vpk=%.0f c/s dur=%luus dp=%.1f "
+                      "v0=%.0f v1=%.0f a0=%.0f a1=%.0f",
+                      (double)_mc_vpk, (unsigned long)_mc_dur, (double)_mc_dp,
+                      (double)_mc_v0, (double)_mc_v1,
+                      (double)_mc_a0, (double)_mc_a1);
+                _mc_vpk = 0.0f;
+            }
+        }
     }
     uint8_t out[kFrameBytes] = {kOpSegment2, ++_seq};
     memcpy(&out[2], &dur_us, 4);
@@ -179,6 +278,9 @@ void MlinkServoDriver::init() {
     if (aimMotorStepsPerRev() != 8192) aimSetMotorStepsPerRev(8192, true);
     motionPassthroughEnable();
     _begun = true;
+    // Seed the ceiling immediately: an RP that has not been told a limit
+    // renders unlimited, which is the state that cost 84 mm.
+    setRenderCeiling(_max_speed_mm_s);
     SLOGI("mlink", "MlinkServoDriver up: RP2350 quadrature backend, "
           "%.1f counts/mm, speed cap %.0f counts/s",
           (double)AIM_STEPS_PER_MM, (double)kMaxCountsPerSec);
@@ -216,6 +318,53 @@ void MlinkServoDriver::update() {
         _seq_echo = in[5];
         memcpy(&_pos_counts, &in[6], 4);
         memcpy(&_vel_counts, &in[10], 4);
+        memcpy(&_emitted_counts, &in[kStatusOffEmitted], 4);
+        uint16_t qd = 0, ov = 0, lt = 0, vc = 0;
+        memcpy(&qd, &in[kStatusOffQDrops], 2);
+        memcpy(&ov, &in[kStatusOffEmitOverrun], 2);
+        memcpy(&lt, &in[kStatusOffLateTicks], 2);
+        memcpy(&vc, &in[kStatusOffVelClamped], 2);
+        // T27: these are MONOTONIC counters, so "changed since last poll" is
+        // true on every poll -- that is a level, not an edge, and it floods the
+        // ring at the poll rate. Census the deltas, emit at most once a second,
+        // and only when something actually moved. Residue rides along because
+        // a counter without it is not evidence (sd-dxy.1.1).
+        // The first sane frame SEEDS (the RP's counters predate this boot),
+        // and any decrease is an RP restart: counters saturate, never wrap
+        // (sd-dxy.3 -- an unseeded first delta manufactured a false P0, and a
+        // restart read as deltas is two's-complement garbage). A restarted RP
+        // also lost its RAM ceiling: re-push it before trusting any motion.
+        const bool rp_restart = _rc_primed &&
+            (qd < _qdrops || ov < _emit_overrun ||
+             lt < _late_ticks || vc < _vel_clamped);
+        if (!_rc_primed || rp_restart) {
+            if (rp_restart) {
+                SLOGW("mlink", "RP RESTARTED (telemetry counters reset); "
+                      "re-pushing render ceiling %.0f mm/s",
+                      (double)_ceiling_mm_s);
+                if (_ceiling_mm_s > 0.0f) setRenderCeiling(_ceiling_mm_s);
+            }
+            _rc_primed = true;
+        } else {
+            _rc_qd += uint16_t(qd - _qdrops);
+            _rc_ov += uint16_t(ov - _emit_overrun);
+            _rc_lt += uint16_t(lt - _late_ticks);
+            _rc_vc += uint16_t(vc - _vel_clamped);
+        }
+        _qdrops = qd; _emit_overrun = ov; _late_ticks = lt; _vel_clamped = vc;
+        const float residue = _pos_counts - _emitted_counts;
+        if (fabsf(residue) > fabsf(_rc_res_max)) _rc_res_max = residue;
+        if (now - _rc_ms >= 1000u) {
+            _rc_ms = now;
+            if (_rc_qd || _rc_ov || _rc_lt || _rc_vc || fabsf(_rc_res_max) >= 1.0f) {
+                SLOGW("mlink", "RP renderer/s: qdrops=%u overrun=%u late=%u clamped=%u "
+                      "residue_max=%.1f counts",
+                      unsigned(_rc_qd), unsigned(_rc_ov), unsigned(_rc_lt),
+                      unsigned(_rc_vc), (double)_rc_res_max);
+            }
+            _rc_qd = _rc_ov = _rc_lt = _rc_vc = 0;
+            _rc_res_max = 0.0f;
+        }
         _status_ms = now;
         _status_fresh = true;
     }
@@ -252,7 +401,7 @@ void MlinkServoDriver::update() {
         // a settled stream end otherwise loops hold-segments forever.
         if (sane && _state == kStateSettled && !_seg_unacked &&
             _samp_us != _hold_us) {
-            _chain_p = _pos_counts;
+            _chain_p = liveCounts();
             _chain_v = 0.0f;
             _chain_a = 0.0f;
             _chain_us = _hold_us - kTickMs * 1000u;
@@ -261,7 +410,7 @@ void MlinkServoDriver::update() {
         // Blocked-interval re-base; unsigned compare also catches any
         // chain-ahead-of-hold ordering bug as a huge gap.
         if (_hold_us - _chain_us > kStreamGapMs * 1000u) {
-            _chain_p = _pos_counts;
+            _chain_p = liveCounts();
             _chain_v = 0.0f;
             _chain_a = 0.0f;
             _chain_us = _hold_us - kTickMs * 1000u;
@@ -271,7 +420,7 @@ void MlinkServoDriver::update() {
         // depth 0: sustained multi-frame ticks exceed the slave's per-frame-
         // reset budget (2.4.87: torn 83k, qdrops 607); deeper waits on sd-dxy.
         const int32_t span_us = int32_t(_hold_us - _chain_us);
-        if (sane && span_us > 0 && _depth < kSegmentDepth &&
+        if (sane && !_reseed_req && span_us > 0 && _depth < kSegmentDepth &&
             _runway_ms < kRunwayTargetMs + 2 * kTickMs) {
             // A governed sweep never splits: it is one stretched glide.
             if (_depth == 0 && span_us >= 4000 && !_sweep_pending)
@@ -537,15 +686,16 @@ void MlinkServoDriver::streamSample(int32_t target_steps, float vel_steps_s,
         _rt_valid = false;
         _rt_dirty = false;
         _seg_unacked = false;
-        _chain_p = _pos_counts;
+        _chain_p = liveCounts();
         _chain_v = 0.0f;
         _chain_a = 0.0f;
         _chain_us = now_us;
-        _hold_p = _pos_counts;
+        _hold_p = _chain_p;
         _hold_v = 0.0f;
         _hold_us = now_us;
         _samp_us = now_us;
         _sweep_pending = true;
+        _reseed_tried = false;
         _seg_mode = true;
     }
     _samp_p = float(target_steps);

@@ -734,8 +734,8 @@ void WebUI::handleApiCapabilities() {
 
 void WebUI::handleApiSettings() {
     JsonDocument doc;
-    doc["range_min"] = _mapper.getMinMm();
-    doc["range_max"] = _mapper.getMaxMm();
+    doc["range_min"] = _mapper.getGoalMinMm();
+    doc["range_max"] = _mapper.getGoalMaxMm();
     // Ground truth: speed + accel read back from the DRIVER (post its
     // internal clamps), never the raw config request.
     doc["max_speed"] = (uint32_t)_motor.getMaxSpeed();
@@ -772,8 +772,8 @@ bool WebUI::applySettings(JsonDocument& doc, JsonDocument& resp) {
     // (with no_persist). Handle it up front so a reset-only POST works.
     if (doc["reset_stats"] | false) resetSessionStats();
 
-    float rmin = doc["range_min"] | _mapper.getMinMm();
-    float rmax = doc["range_max"] | _mapper.getMaxMm();
+    float rmin = doc["range_min"] | _mapper.getGoalMinMm();
+    float rmax = doc["range_max"] | _mapper.getGoalMaxMm();
     uint32_t speed = doc["max_speed"] | (uint32_t)_state.config.max_speed_mm_s;
     uint32_t accel = doc["accel"] | (uint32_t)_state.config.acceleration_mm_s2;
 
@@ -786,6 +786,8 @@ bool WebUI::applySettings(JsonDocument& doc, JsonDocument& resp) {
         _state.config.user_max_speed_mm_s = us;
         _state.config.user_max_accel_mm_s2 = ua;
         if (_arbiter) { _arbiter->setUserSpeedLimit(us); _arbiter->setUserAccelLimit(ua); }
+        _motor.setRenderCeiling(fmaxf(us, _state.config.input_max_speed_mm_s));
+        _motor.setRecoverySpeed(us);
     }
     // INPUT set — speed/accel go to the arbiter AND (via config) to SlopMotion's
     // derived ceilings; jerk is planner-only (the arbiter has no jerk concept),
@@ -805,6 +807,8 @@ bool WebUI::applySettings(JsonDocument& doc, JsonDocument& resp) {
         _state.config.input_max_accel_mm_s2 = ia;
         _state.config.input_max_jerk_mm_s3 = ij;
         if (_arbiter) { _arbiter->setInputSpeedLimit(is); _arbiter->setInputAccelLimit(ia); }
+        // Max of both sets: manual moves run at USER limits (main.cpp seed).
+        _motor.setRenderCeiling(fmaxf(is, _state.config.user_max_speed_mm_s));
     }
 
     if (rmin >= rmax) {
@@ -876,8 +880,8 @@ bool WebUI::applySettings(JsonDocument& doc, JsonDocument& resp) {
     // pumpConfigGeneration()'s change detector (so the SlopSync protocol
     // cfg_gen never advanced for a window edit either). The physical machine
     // was never the bug; its own STATE channel lying about itself was.
-    _state.config.min_position_mm = _mapper.getMinMm();
-    _state.config.max_position_mm = _mapper.getMaxMm();
+    _state.config.min_position_mm = _mapper.getGoalMinMm();
+    _state.config.max_position_mm = _mapper.getGoalMaxMm();
 
     _state.config.max_speed_mm_s = (float)speed;
     _state.config.acceleration_mm_s2 = (float)accel;
@@ -893,8 +897,8 @@ bool WebUI::applySettings(JsonDocument& doc, JsonDocument& resp) {
     // (100000); echoing the config value here reported a number the motor was
     // never going to run at. Ground Truth Doctrine: echo what was APPLIED.
     resp["ok"] = true;
-    resp["range_min"] = _mapper.getMinMm();
-    resp["range_max"] = _mapper.getMaxMm();
+    resp["range_min"] = _mapper.getGoalMinMm();
+    resp["range_max"] = _mapper.getGoalMaxMm();
     resp["max_rail"] = _state.config.max_rail_mm;   // post-clamp rail length echo
     resp["max_speed"] = (uint32_t)_motor.getMaxSpeed();
     resp["accel"] = (uint32_t)_motor.getAcceleration();
@@ -2376,8 +2380,8 @@ bool WebUI::handleCommand(uint8_t op, JsonDocument& payload_in,
     // ---- Read-only: get_cfg snapshot ----------------------------------------
     case WS_OP_GET_CFG: {
         // Full config snapshot — same shape as /api/settings GET
-        payload_out["range_min"] = _mapper.getMinMm();
-        payload_out["range_max"] = _mapper.getMaxMm();
+        payload_out["range_min"] = _mapper.getGoalMinMm();
+        payload_out["range_max"] = _mapper.getGoalMaxMm();
         // Ground truth: read back from the driver (post-internal-clamp), same
         // as the applySettings echo.
         payload_out["max_speed"] = (uint32_t)_motor.getMaxSpeed();

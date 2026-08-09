@@ -39,6 +39,16 @@ public:
     void disable() override {}
 
     void  setMaxSpeed(float mm_s) override { _max_speed_mm_s = mm_s; }
+    // Push the renderer's speed ceiling to the RP (kOpSetLimits). The
+    // coprocessor is OPEN LOOP: without a ceiling it commands whatever the
+    // trajectory asks and the drive silently drops what it cannot follow.
+    // Call whenever the INPUT limit set changes, not the user set -- the RP
+    // only ever renders machine-driven motion.
+    void  setRenderCeiling(float mm_s) override;
+    void  setRecoverySpeed(float mm_s) override { _recovery_mm_s = mm_s; }
+    bool  consumeReseedRequest() override {
+        const bool r = _reseed_req; _reseed_req = false; return r;
+    }
     void  setAcceleration(float mm_s2) override { _accel_mm_s2 = mm_s2; }
     float getMaxSpeed() const override { return _max_speed_mm_s; }
     float getAcceleration() const override { return _accel_mm_s2; }
@@ -93,6 +103,44 @@ private:
     // Slave status from the last CRC-valid frame
     float   _pos_counts = 0.0f;
     float   _vel_counts = 0.0f;
+    // Renderer truth from the RP (sd-dxy.1.1). _pos_counts is COMMANDED;
+    // _emitted_counts is what was actually pulsed. Their difference is the
+    // residue -- the number that separates "the coprocessor dropped it" from
+    // "the drive did not follow it". Never read one without the other.
+    float    _emitted_counts = 0.0f;
+    uint16_t _qdrops = 0;
+    uint16_t _emit_overrun = 0;
+    uint16_t _late_ticks = 0;
+    uint16_t _vel_clamped = 0;
+    // Per-second census accumulators -- see the T27 note at the read site.
+    uint16_t _rc_qd = 0, _rc_ov = 0, _rc_lt = 0, _rc_vc = 0;
+    float    _rc_res_max = 0.0f;
+    uint32_t _rc_ms = 0;
+    // Counters are monotonic per RP boot (they saturate, never wrap), so the
+    // first sane frame SEEDS and any decrease is an RP restart (sd-dxy.3).
+    bool     _rc_primed = false;
+    // Dead-reckoned RP position in counts: the raw report is up to ~2 ticks
+    // stale, and staleness x velocity is exactly the chain-start gap that
+    // made re-anchors teleport (2026-08-09). Use for every chain re-base.
+    float    liveCounts() const;
+    // Worst-chunk interior-velocity census (grit hunt, see sendSegmentTo).
+    float    _mc_vpk = 0.0f;
+    uint32_t _mc_dur = 0;
+    float    _mc_v0 = 0.0f, _mc_v1 = 0.0f, _mc_a0 = 0.0f, _mc_a1 = 0.0f;
+    float    _mc_dp = 0.0f;
+    uint32_t _mc_ms = 0;
+    // Last ceiling pushed via kOpSetLimits; re-pushed when an RP restart is
+    // detected -- the RP holds it in RAM and boots unlimited without it.
+    float    _ceiling_mm_s = 0.0f;
+    // USER (gentle) limit; caps recovery sweeps only, never content.
+    float    _recovery_mm_s = 0.0f;
+    // Chain gap exceeded kReseedGapMm: hold the wire, ask for an engine
+    // re-seed at the live position instead of gliding the gap.
+    bool     _reseed_req = false;
+    // One reseed per episode: if the gap SURVIVES a reseed the live position
+    // is outside the window (the engine's frame clamps and cannot converge --
+    // the 42 mm phantom loop, 2026-08-10); fall back to the gentle sweep.
+    bool     _reseed_tried = false;
     uint8_t _state = 0;
     uint8_t _slave_flags = 0;
     bool    _status_fresh = false;

@@ -237,7 +237,7 @@ void ConfigStore::load(SystemState& state, RangeMapper& mapper, MotorDriver& mot
     // any ranges, so the no-NVS path is still rail-length aware.
     motor.setMaxRailMm(state.config.max_rail_mm);
     mapper.setMaxRailMm(state.config.max_rail_mm);
-    mapper.setRange(state.config.min_position_mm, state.config.max_position_mm);
+    mapper.setRangeImmediate(state.config.min_position_mm, state.config.max_position_mm);
 
     Preferences prefs;
 
@@ -422,7 +422,7 @@ void ConfigStore::load(SystemState& state, RangeMapper& mapper, MotorDriver& mot
             state.driver.run_current_ma = DRIVER_DEFAULT_RUN_CURRENT_MA;
         if (state.driver.toff < 1 || state.driver.toff > 15) state.driver.toff = DRIVER_DEFAULT_TOFF;
 
-        mapper.setRange(rmin, rmax);
+        mapper.setRangeImmediate(rmin, rmax);
         // Write the resolved range back into state.config too: SystemState.h
         // documents config as cross-core-read state, and config_api.h's
         // mapToPosition/mapFromPosition/getUsableRange helpers consume these

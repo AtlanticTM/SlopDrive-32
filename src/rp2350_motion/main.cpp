@@ -86,6 +86,26 @@ static uint8_t  s_qbits = 0;
 static uint8_t  s_qphaseAtWord = 0; // rollback snapshot: FIFO-full drops a
 static float    s_qemitAtWord = 0;  //   whole word, so un-count its motion
 static uint32_t s_qdrops = 0;
+// The tick owed more steps than one tick can pass. Plans clamp below
+// kMaxCountsPerSec against a faster emitter, so a legal plan can never
+// reach this: nonzero means an illegal plan, a late tick, or a
+// discontinuous reference. Count it, never swallow it (sd-dxy.1.3).
+static uint32_t s_emitOverrun = 0;
+// Trajectory ticks that arrived late. Plan time advances by tick COUNT,
+// so a late tick stretches the timeline while still hitting the
+// endpoint -- correct position, wrong tempo (sd-dxy.1.5).
+static uint32_t s_lateTicks = 0;
+// Renderer speed ceiling in counts per TICK, 0 = unlimited (pre-handshake).
+// Pushed as counts/s via kOpSetLimits; consumed ONLY by the emitter as a
+// slew cap (emitTowardPos), never by the reference (note above renderTick).
+static float    s_maxCountsPerTick = 0.0f;
+static uint32_t s_velClamped = 0;   // emitter slew cap engagements
+// Margin above the ceiling is unproven drive speed (sd-ar3 layer 3): only
+// discontinuity recovery runs there (~1.4 ms per 64-count deficit).
+static constexpr float kEmitCatchupMargin = 1.25f;
+// Largest chain-start gap the emitter walks instead of teleporting; drains
+// in <=100 ms at a 400 mm/s ceiling. Larger = a reference redefinition.
+static constexpr float kJumpWalkMaxCounts = 4096.0f;
 static constexpr uint32_t kStateHz = 400000;
 static constexpr uint32_t kStatesPerTick = (kTickUs * kStateHz) / 1000000u;
 
@@ -102,7 +122,17 @@ static inline void emitTowardPos() {
     float delta = s_pos - s_emitted;
     const int dirStep = (delta >= 0.0f) ? 1 : -1;
     unsigned n = (unsigned)((delta >= 0.0f) ? delta : -delta);
-    if (n > kStatesPerTick) n = kStatesPerTick;
+    if (n > kStatesPerTick) { n = kStatesPerTick; ++s_emitOverrun; }
+    // Slew cap: a reference discontinuity (settle re-anchor, sub-jump-guard
+    // step) must not slew at the 400 kHz roof the drive drops counts at
+    // (-108.75 mm, 2026-08-09). Caps the PULSE RATE only; s_pos stays honest,
+    // so the trapezoid and jump guard are untouched -- this is NOT the
+    // reverted reference clamp.
+    if (s_maxCountsPerTick > 0.0f) {
+        const unsigned cap =
+            (unsigned)(s_maxCountsPerTick * kEmitCatchupMargin) + 1u;
+        if (n > cap) { n = cap; ++s_velClamped; }
+    }
     unsigned acc = 0;
     for (unsigned i = 0; i < kStatesPerTick; ++i) {
         acc += n;
@@ -160,11 +190,19 @@ static struct repeating_timer s_tick;
 
 static void pumpSpiFrames();   // defined with the DMA slave section below
 
-static bool stepperTick(struct repeating_timer*) {
+// REVERTED 2026-08-09. A rate limit on the RENDERED position is NOT a safety
+// net -- it sits in the path of every move. Clamping s_pos makes it lag its own
+// trajectory, and the lag then feeds two mechanisms that assume it does not:
+// the retarget trapezoid keeps accelerating because dist never shrinks, and the
+// segment-start teleport guard sees a reference that drifted for a legitimate
+// reason. Live result: audible mechanical cracking. The REFERENCE is never
+// rate-limited. The EMITTER is (emitTowardPos slew cap, 2026-08-09): capping
+// pulse rate leaves s_pos honest and both mechanisms above intact, and lag
+// shows up as counted residue instead of lost drive counts.
+static void renderTick() {
     // Frame pump FIRST, and unconditionally: an ESTOP frame must act this
     // tick, and a latched estop must still process its kOpClear.
     pumpSpiFrames();
-    if (s_estop) { s_state = kStateEstop; return true; }   // hold: no motion
 
     if (s_rtActive) {
         // Trapezoid seek from live (p, v): accelerate toward the target,
@@ -191,8 +229,7 @@ static bool stepperTick(struct repeating_timer*) {
             s_pos += s_vel * dt;
             s_state = kStateRunning;
         }
-        emitTowardPos();
-        return true;
+        return;
     }
 
     if (ringDepth() == 0) {
@@ -204,20 +241,26 @@ static bool stepperTick(struct repeating_timer*) {
             s_segElapsedUs = 0;
             s_segFresh = true;
         }
-        return true;
+        return;
     }
 
     const Segment& seg = s_ring[s_tail % kSegmentDepth];
     if (s_segFresh) {
         s_segFresh = false;
-        // A p0 far from the emitted position would slew the whole gap at the
-        // render cap (motor shoots). Teleport the reference instead -- zero
-        // pulses -- and report it. Threshold sits above kStatesPerTick so a
-        // legit full-rate tick's in-flight delta never reads as one.
+        // A p0 off the emitted position: WALK it under the emitter slew cap
+        // (counted in s_velClamped, visible as residue) -- a teleport here is
+        // permanent calc/physical divergence, and re-anchor staleness x speed
+        // produced exactly the 2-13 mm "drift" events (2026-08-09). Teleport
+        // only when the gap is too big to drain quickly (a genuine reference
+        // redefinition) or no ceiling has been pushed (uncapped slew shoots).
         const float jump = seg.p0 - s_emitted;
         if (jump > 64.0f || jump < -64.0f) {
-            s_emitted += jump;
-            s_flags |= kFlagJumped;
+            const bool walkable = s_maxCountsPerTick > 0.0f &&
+                jump < kJumpWalkMaxCounts && jump > -kJumpWalkMaxCounts;
+            if (!walkable) {
+                s_emitted += jump;
+                s_flags |= kFlagJumped;
+            }
         }
         // Quintic Hermite coefficients over normalized u. Accel knots ride
         // kOpSegment2 (a C1 chain steps accel at every knot: a 100 Hz torque
@@ -248,7 +291,6 @@ static bool stepperTick(struct repeating_timer*) {
                       s_segTs
                 : 0.0f;
 
-    emitTowardPos();
 
     if (s_segElapsedUs >= seg.duration_us) {
         s_tail = uint8_t(s_tail + 1);
@@ -258,6 +300,31 @@ static bool stepperTick(struct repeating_timer*) {
         // timeline per segment boundary.
         s_segElapsedUs -= seg.duration_us;
     }
+    return;
+}
+
+// ONE emit call site, on purpose. emitTowardPos() used to be called only from
+// the ticks that RENDERED, so every other exit -- ring empty, settle, retarget
+// landing -- silently abandoned whatever (s_pos - s_emitted) the emitter still
+// owed. That was unflagged, uncounted step loss, once per stroke (sd-dxy.1.2).
+// Do NOT push this call back down into the branches: a fourth branch will be
+// added one day and it will not get one.
+static bool stepperTick(struct repeating_timer*) {
+    // Tick lateness census. Plan time advances by tick COUNT, not wall clock,
+    // so a tick that never ran is trajectory that silently never happened.
+    static uint32_t s_lastTickUs = 0;
+    const uint32_t tnow = time_us_32();
+    if (s_lastTickUs != 0 && (tnow - s_lastTickUs) > (kTickUs + kTickUs / 2u))
+        ++s_lateTicks;
+    s_lastTickUs = tnow;
+
+    // Frame pump FIRST, and unconditionally: an ESTOP frame must act this
+    // tick, and a latched estop must still process its kOpClear.
+    pumpSpiFrames();
+    if (s_estop) { s_state = kStateEstop; return true; }   // hold: no motion
+
+    renderTick();
+    emitTowardPos();
     return true;
 }
 
@@ -290,6 +357,18 @@ static void preloadStatus() {
     memcpy(&s_statusBuf[10], (const void*)&s_vel, 4);
     s_statusBuf[14] = 0xA5;          // alignment signature (bench)
     s_statusBuf[15] = s_lastSeq;     // seq duplicate for offset hunting
+    // Renderer truth (sd-dxy.1.1). `pos` above is COMMANDED; these say what the
+    // emitter actually did. Offsets come from MotionLinkProtocol.h -- both ends
+    // read the same constants, neither transcribes a number (T20).
+    const float emitted = s_emitted;
+    memcpy(&s_statusBuf[kStatusOffEmitted], &emitted, 4);
+    const uint16_t qd = sat16(s_qdrops), ov = sat16(s_emitOverrun),
+                   lt = sat16(s_lateTicks);
+    memcpy(&s_statusBuf[kStatusOffQDrops], &qd, 2);
+    memcpy(&s_statusBuf[kStatusOffEmitOverrun], &ov, 2);
+    memcpy(&s_statusBuf[kStatusOffLateTicks], &lt, 2);
+    const uint16_t vc = sat16(s_velClamped);
+    memcpy(&s_statusBuf[kStatusOffVelClamped], &vc, 2);
     crcStamp(s_statusBuf);
     // Feed-me line: the producer paces on this, not on polling cadence.
     digitalWrite(PIN_IRQ, (rw < kRunwayLowMs && !s_estop) ? HIGH : LOW);
@@ -386,6 +465,18 @@ static void processFrame(uint8_t* data, size_t len) {
             s_qphaseAtWord = s_qphase;
             s_vel = 0.0f;
             s_state = kStateIdle;
+            break;
+        }
+        case kOpSetLimits: {
+            if (len < 2 + 4) break;
+            float cps;
+            memcpy(&cps, data + 2, 4);
+            // Reject nonsense rather than latching it: a bad ceiling here
+            // silently throttles every move the machine will ever make.
+            // Enforced at the EMITTER only (slew cap in emitTowardPos);
+            // the reference stays unclamped -- REVERTED note above renderTick.
+            if (cps > 0.0f && cps < 2.0e6f)
+                s_maxCountsPerTick = cps * (float(kTickUs) * 1e-6f);
             break;
         }
         case kOpRetarget: {

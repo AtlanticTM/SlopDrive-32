@@ -49,6 +49,17 @@ enum Op : uint8_t {
     // cubic stepped accel at every knot: a 100 Hz notch the servo renders as
     // texture). 28 payload bytes: fills the frame to the CRC exactly.
     kOpSegment2 = 0x07,
+    // Renderer speed ceiling: [max_counts_per_s:f32]. The RP is open loop --
+    // it emits exactly what the trajectory asks for and the drive either
+    // follows or silently loses steps. Measured: emit_overrun climbing while
+    // residue stayed under one count, i.e. the renderer faithfully commanded
+    // >400,000 counts/s against a 900 mm/s operator ceiling, and the motor lost
+    // 84 mm. A ceiling HERE converts silent physical loss into visible,
+    // counted lag. Enforced by the slave as an EMITTER slew cap only, never
+    // on the reference. Sent at init, whenever either limit set changes, and
+    // again when the master detects a slave restart (RAM-held, boots to 0 =
+    // unlimited).
+    kOpSetLimits = 0x08,
 };
 
 // One C1 motion segment: cubic Hermite from (p0, v0) to (p1, v1) over
@@ -71,6 +82,37 @@ inline constexpr size_t kSegment2WireBytes = 28;
 
 // Slave -> master, preloaded before every transaction:
 // [state:u8][flags:u8][runway_ms:u16le][depth:u8][seq_echo:u8][pos:f32le][vel:f32le]
+//   ...bench signature at 14, seq duplicate at 15...
+// [emitted:f32le][qdrops:u16le][emit_overrun:u16le][late_ticks:u16le]
+// [vel_clamped:u16le] (28..29 spare)
+//
+// WHY `emitted` IS ON THE WIRE (sd-dxy.1.1). `pos` is the COMMANDED position,
+// recomputed from the segment polynomial every tick -- the number that cannot
+// be wrong. `emitted` is what was actually PULSED. Their difference is the
+// renderer's residue, and shipping only the first made lost motion invisible
+// to the master by construction. Read them as a pair or neither is evidence.
+//   qdrops       PIO TX FIFO was full: a whole 16-state word was dropped and
+//                phase+count rolled back. Production == consumption off one
+//                crystal, so ANY nonzero value is a fault, not a design state.
+//   emit_overrun the tick owed more steps than the emitter can pass in one
+//                tick. With plans clamped below kMaxCountsPerSec this is
+//                unreachable, so nonzero means an illegal plan, a late tick,
+//                or a discontinuous reference -- all defects.
+//   late_ticks   trajectory ticks that arrived >1.5x kTickUs after the last.
+//                Plan time advances by tick COUNT, so a late tick stretches
+//                the timeline while still landing on the endpoint.
+// Offsets are named here and read by BOTH ends. Never transcribe a number.
+// Only 14 bytes exist between the seq duplicate and the CRC, so the three
+// counters are u16 and SATURATE at 0xFFFF rather than wrap: a pinned counter
+// honestly reads "lots", a wrapped one reads "healthy" and lies.
+inline constexpr size_t kStatusOffEmitted     = 16;
+inline constexpr size_t kStatusOffQDrops      = 20;
+inline constexpr size_t kStatusOffEmitOverrun = 22;
+inline constexpr size_t kStatusOffLateTicks   = 24;
+inline constexpr size_t kStatusOffVelClamped = 26;   // ticks the ceiling bit
+inline constexpr uint16_t sat16(uint32_t v) {
+    return v > 0xFFFFu ? uint16_t(0xFFFFu) : uint16_t(v);
+}
 enum State : uint8_t {
     kStateIdle    = 0x00,   // schedule empty, settled
     kStateRunning = 0x01,
@@ -106,6 +148,8 @@ inline constexpr float kMaxCountsPerSec = 300000.0f;
 // acknowledged. Ops that must not be lost (kOpEstop) are repeated by the
 // master until the echoed state confirms them.
 inline constexpr size_t kCrcOffset = 30;
+static_assert(kStatusOffVelClamped + 2 <= kCrcOffset,
+              "status telemetry overruns the CRC field");
 inline constexpr uint16_t crc16(std::span<const uint8_t> d) {
     uint16_t c = 0xFFFF;
     for (uint8_t byte : d) {

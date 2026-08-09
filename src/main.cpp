@@ -451,6 +451,24 @@ static void motorTask(void* /*param*/) {
             }
         }
         motor.update();
+        // Window glide (sd-ey0): runtime window edits slew at the USER
+        // (gentle) limit instead of re-mapping every target in one sample.
+        // Goal writes race in from Core 0 (applySettings); a one-tick torn
+        // min/max pair only mis-aims the glide for 1 ms and self-corrects.
+        {
+            static uint32_t s_lastTickMs = millis();
+            const uint32_t nowMs = millis();
+            const bool gliding = mapper.getMinMm() != mapper.getGoalMinMm() ||
+                                 mapper.getMaxMm() != mapper.getGoalMaxMm();
+            mapper.tick(float(nowMs - s_lastTickMs) * 1e-3f,
+                        fmaxf(20.0f, g_state.config.user_max_speed_mm_s));
+            s_lastTickMs = nowMs;
+            // Glide completion bumps cfg_gen for the 0x0081 broadcast (the
+            // engine's limits push is per-tick and tracks the glide itself).
+            if (gliding && mapper.getMinMm() == mapper.getGoalMinMm() &&
+                mapper.getMaxMm() == mapper.getGoalMaxMm())
+                g_state.cfg_gen.fetch_add(1, std::memory_order_relaxed);
+        }
 #if defined(SD32_HEADLESS)
         // Headless sole writer of the position atomics: WebUI's 240 Hz sampler
         // (the normal owner, see WebUI::telemetryTimerCb) never starts here,
@@ -545,6 +563,21 @@ static void streamSamplerTask(void* /*param*/) {
             g_slopmotion.resetAt(constrain(norm, 0.0f, 1.0f), nowUs);
         }
 
+        // Driver-requested re-seed: a chain gap too big to glide. A stretched
+        // sweep is unpayable latency on a renderer that never drains faster
+        // (operator ruling); drop the slip, replan from the LIVE position.
+        // The next commit is a COLD start, so the traverse runs at the
+        // recovery (USER) limit through the engine's own feasibility
+        // machinery (sd-d77).
+        if (motor.consumeReseedRequest()) {
+            const float rspan = mapper.getMaxMm() - mapper.getMinMm();
+            const float ractual =
+                g_state.actual_position_mm.load(std::memory_order_relaxed);
+            const float rnorm =
+                (rspan > 0.01f) ? (ractual - mapper.getMinMm()) / rspan : 0.5f;
+            g_slopmotion.resetAt(constrain(rnorm, 0.0f, 1.0f), nowUs);
+        }
+
         // Push the live tuning (POST /api/slopmotion, Core 0) into the engine.
         // Ceilings derive from the mm-domain INPUT limit set over the stroke
         // window (1 normalized unit == the window span), overridable for bench
@@ -561,6 +594,10 @@ static void streamSamplerTask(void* /*param*/) {
             const float jovr = g_state.sm_tune_jmax_ovr;
             smCfg.limits.vmax = vovr > 0.0f ? vovr
                 : (span > 1.0f ? g_state.config.input_max_speed_mm_s  / span : 3.0f);
+            // Cold-start plans run at the USER (gentle) limit: the opening
+            // move of a stream is positioning, not content (sd-d77).
+            smCfg.recovery_vmax =
+                span > 1.0f ? g_state.config.user_max_speed_mm_s / span : 0.0f;
             smCfg.limits.amax = aovr > 0.0f ? aovr
                 : (span > 1.0f ? g_state.config.input_max_accel_mm_s2 / span : 30.0f);
             smCfg.limits.jmax = jovr > 0.0f ? jovr
@@ -647,16 +684,43 @@ static void streamSamplerTask(void* /*param*/) {
             // the previous chord's due+duration: sender-schedule contiguity,
             // now that anchored commits absorb release jitter. late = arrival
             // behind due; growth here means the client's send lead eroding.
+            // T27: this loop runs once per streamed segment (~30 Hz) on CORE 1.
+            // A formatted log line here costs two float conversions plus a
+            // sloplog spinlock the Core-0 drain also takes, so reading the log
+            // perturbed the motion it was measuring. Census into counters,
+            // summary at 1 Hz -- the same shape OtaService's dups/holes census
+            // uses. Never restore a per-segment SLOG on this path.
             static uint64_t s_prevEndUs = 0;
             const uint64_t due = cmd.has_anchor ? cmd.anchor_us : nowUs;
             const int64_t gap_us = s_prevEndUs
                 ? int64_t(due) - int64_t(s_prevEndUs) : 0;
             s_prevEndUs = due + cmd.duration_us;
-            SLOGI("smplan", "tgt=%.3f T=%lums G=%c vf=%.3f gap=%+ld late=%ld us",
-                  (double)cmd.target,
-                  (unsigned long)(cmd.duration_us / 1000u),
-                  cmd.has_end_vel ? 'y' : 'n', (double)cmd.end_vel,
-                  (long)gap_us, (long)(int64_t(nowUs) - int64_t(due)));
+            const int64_t late_us = int64_t(nowUs) - int64_t(due);
+
+            static uint32_t s_censusN = 0, s_censusVf = 0;
+            static int64_t  s_gapMin = 0, s_gapMax = 0, s_lateMin = 0, s_lateMax = 0;
+            static uint32_t s_censusMs = 0;
+            if (s_censusN == 0) {
+                s_gapMin = s_gapMax = gap_us;
+                s_lateMin = s_lateMax = late_us;
+            } else {
+                if (gap_us  < s_gapMin)  s_gapMin  = gap_us;
+                if (gap_us  > s_gapMax)  s_gapMax  = gap_us;
+                if (late_us < s_lateMin) s_lateMin = late_us;
+                if (late_us > s_lateMax) s_lateMax = late_us;
+            }
+            ++s_censusN;
+            if (cmd.has_end_vel && cmd.end_vel != 0.0f) ++s_censusVf;
+
+            const uint32_t censusNow = millis();
+            if (censusNow - s_censusMs >= 1000u) {
+                s_censusMs = censusNow;
+                SLOGI("smplan", "n=%lu vf!=0:%lu gap=[%+ld,%+ld] late=[%ld,%ld] us",
+                      (unsigned long)s_censusN, (unsigned long)s_censusVf,
+                      (long)s_gapMin, (long)s_gapMax,
+                      (long)s_lateMin, (long)s_lateMax);
+                s_censusN = 0; s_censusVf = 0;
+            }
         }
 
         if (streamActive) {
@@ -1290,6 +1354,14 @@ void setup() {
     arbiter.setUserSpeedLimit(g_state.config.user_max_speed_mm_s);
     arbiter.setUserAccelLimit(g_state.config.user_max_accel_mm_s2);
     arbiter.setInputSpeedLimit(g_state.config.input_max_speed_mm_s);
+    // The offboard renderer gets the SAME ceiling the arbiter clamps to. Kept
+    // adjacent on purpose: two ceilings that can disagree is how the RP ended
+    // up commanding >1900 mm/s against a 900 mm/s setting. Max of BOTH sets:
+    // manual point moves run at USER limits, and a ceiling below any legal
+    // plan pins the emitter slew cap into steady-state lag.
+    motor.setRenderCeiling(fmaxf(g_state.config.user_max_speed_mm_s,
+                                 g_state.config.input_max_speed_mm_s));
+    motor.setRecoverySpeed(g_state.config.user_max_speed_mm_s);
     arbiter.setInputAccelLimit(g_state.config.input_max_accel_mm_s2);
 
     // Wire PatternEngine to the arbiter so it submits intents instead of

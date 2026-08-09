@@ -88,6 +88,9 @@ public:
 
     // ---- Speed & Acceleration -----------------------------------------------
     void     setMaxSpeed(float speed_mm_s)      override { d().setMaxSpeed(speed_mm_s); }
+    void     setRenderCeiling(float mm_s)       override { d().setRenderCeiling(mm_s); }
+    void     setRecoverySpeed(float mm_s)       override { d().setRecoverySpeed(mm_s); }
+    bool     consumeReseedRequest()             override { return d().consumeReseedRequest(); }
     void     setAcceleration(float accel_mm_s2) override { d().setAcceleration(accel_mm_s2); }
     float    getMaxSpeed()          const       override { return d().getMaxSpeed(); }
     float    getAcceleration()      const       override { return d().getAcceleration(); }

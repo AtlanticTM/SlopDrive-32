@@ -125,6 +125,17 @@ public:
 
     // ---- Speed & Acceleration -----------------------------------------------
     virtual void     setMaxSpeed(float speed_mm_s)      = 0;
+    // Renderer speed ceiling for a coprocessor that generates its own pulses.
+    // Default no-op: only an open-loop offboard renderer needs one -- an
+    // onboard stepper is already bounded by the planner that feeds it.
+    virtual void setRenderCeiling(float /*mm_s*/) {}
+    // Gentle cap for RECOVERY moves (re-anchor catch-up sweeps): content
+    // plays at input limits, getting BACK to content runs at people limits.
+    // Default no-op; only the offboard chain builder sweeps.
+    virtual void setRecoverySpeed(float /*mm_s*/) {}
+    // True once when the driver wants the motion engine re-seeded at the
+    // live position (chain gap too big to glide). Cleared by the read.
+    virtual bool consumeReseedRequest() { return false; }
     virtual void     setAcceleration(float accel_mm_s2)  = 0;
     virtual float    getMaxSpeed()          const        = 0;
     // Acceleration ACTUALLY applied by the driver (mm/s², post-internal-clamp).

@@ -404,8 +404,10 @@ struct Config {
     // tangents are zero at reversals (arrive at rest, overshoot impossible)
     // and Fritsch-Carlson bounded on runs. Gaps > chase_stale_us restart via
     // plain chase, so sparse streams never pay the holdback.
-    // Lock-in span (kSynthLockInUs) unwinds hot chase entry; near-ceiling
-    // streams still fall back to chase by design (no boundary headroom).
+    // Hot chase entries fall back to chase for a knot and re-lock at a
+    // benign one; near-ceiling streams chase by design (no headroom). A
+    // longer first span is NOT the fix: any span whose duration differs
+    // from the knot cadence desynchronizes the chain and corrupts pace.
     bool sample_synthesis = true;
     // Chase jerk scales with the MOVE's own demand: a replan corner spends
     // jerk proportional to demand/vmax (kneed at kChaseJerkKneeFrac) instead
@@ -1150,13 +1152,10 @@ public:
         // Coalesce to the knot pitch: samples inside the pitch are decimated
         // (the samples contract); the first sample at/past it becomes the
         // next knot.
-        const uint64_t pitch = _syn_vf_ok ? kSynthSpanUs : kSynthLockInUs;
-        if (stamp - _syn_us < pitch) {
-            // While the holdback is priming (and through the lock-in span),
-            // keep chasing at sample rate so tracking converges at 50 Hz,
-            // not knot pitch.
-            if (!_syn_prev_ok || !_syn_vf_ok)
-                return commitChase(cmd, p, v, a, target, t0);
+        if (stamp - _syn_us < kSynthSpanUs) {
+            // While the holdback is still priming, keep chasing at sample
+            // rate so a catch-up converges at 50 Hz, not knot pitch.
+            if (!_syn_prev_ok) return commitChase(cmd, p, v, a, target, t0);
             return true;
         }
         // The first mature pair only rotates the buffer: a span needs the
@@ -1171,14 +1170,18 @@ public:
             _syn_us = stamp;
             return true;
         }
-        const double T = double(stamp - _syn_us) * 1e-6;
-        const double c_out = (target - _syn_p) / T;
+        // Span duration is the CONTENT interval it renders ([prev -> cur]
+        // knots); the incoming sample's spacing shapes ONLY the end tangent.
+        // Borrowing the out-interval as T plays uneven knot cadences at the
+        // wrong speed (field report 2026-08-09: "some moves way too fast").
+        const double T = double(_syn_us - _syn_prev_us) * 1e-6;
+        const double t_out = double(stamp - _syn_us) * 1e-6;
+        const double c_out = (target - _syn_p) / t_out;
         // PCHIP knot tangent at the buffered point: zero at reversals,
         // Fritsch-Carlson bounded on runs -- monotone by construction.
         double vf;
         {
-            const double Tin = double(_syn_us - _syn_prev_us) * 1e-6;
-            const double c_in = Tin > 0.0 ? (_syn_p - _syn_prev_p) / Tin : 0.0;
+            const double c_in = T > 0.0 ? (_syn_p - _syn_prev_p) / T : 0.0;
             vf = (c_in * c_out <= 0.0)
                      ? 0.0
                      : (double)boundHandoffVelocity(
@@ -1420,9 +1423,6 @@ private:
     // 60 ms knots give 27x the headroom and the quintic interior does the
     // between-knot smoothing, which is the point of synthesis.
     static constexpr uint64_t kSynthSpanUs = 60000;
-    // Lock-in: an episode's FIRST span doubles the pitch. Entry state is a
-    // hot chase plan; 2x T buys 8x jerk headroom to unwind its accel.
-    static constexpr uint64_t kSynthLockInUs = 2 * kSynthSpanUs;
     // Chase jerk-scale knee: demand fraction of vmax at which full jerk
     // authority returns (see commitChase).
     static constexpr double   kChaseJerkKneeFrac = 0.5;

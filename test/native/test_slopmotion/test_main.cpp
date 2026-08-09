@@ -585,13 +585,64 @@ TEST_CASE("Sample synthesis: 50 Hz bare points render smooth, tracking, and "
     CHECK(an[1] <= 3);
     CHECK(an[2] == 0);                  // SettleEngaged
     CHECK(an[4] == 0);                  // DeadlineStretched: debt cascades
-    // Lock-in span (2x pitch first span) unwinds hot chase entry; fallbacks
-    // are isolated re-lock events at extremes (measured 8), not a duty cycle.
-    CHECK(an[5] <= 10);
+    // Near-ceiling regime: hot chase entries re-lock at benign knots, so
+    // fallbacks stay a bounded re-lock census (measured 16), not the ~50%
+    // duty cycle the pre-fix code showed. Chase is the correct absorber
+    // here; the generous-machine pace case below is where lock must hold.
+    CHECK(an[5] <= 20);
     CHECK(an[6] == 0);
     CHECK(pmax <= mid + amp + 0.03);   // bounded crest bulge
     CHECK(pmin >= mid - amp - 0.03);
     CHECK(err < 0.06);                  // tracks the delayed source
+}
+
+TEST_CASE("Sample synthesis pace: on a generous machine the source tempo is "
+          "the speed ceiling, and the engine never teleports") {
+    // The OPERATOR regime: content ~31% of vmax, every span legal, every span
+    // PLAYS. The tight-limit case above masks pace bugs by rejecting fast
+    // spans into chase; this one exposes them (field report 2026-08-09:
+    // smooth, but "some moves way too fast").
+    Config cfg = operatorConfig();
+    cfg.sample_synthesis = true;   // default; forced so the pin outlives it
+    Engine e(cfg, 0.5f);
+    const double f = 1.0, amp = 0.25, mid = 0.5;
+    const uint64_t dt = 20 * kMs;   // 50 Hz
+    auto src = [&](uint64_t t_us) {
+        return mid + amp * std::sin(2.0 * 3.14159265358979 * f *
+                                    (double(t_us) * 1e-6));
+    };
+    const double src_vpk = 2.0 * 3.14159265358979 * f * amp;
+    double vpk = 0.0, step_pk = 0.0, err = 0.0, prev_p = 0.5;
+    for (uint64_t t = 0; t <= 2 * kS; t += dt) {
+        Command c;
+        c.target = (float)src(t);
+        c.has_anchor = true;
+        c.anchor_us = t;
+        (void)e.commit(c, t);
+        for (uint64_t q = t; q < t + dt; q += kMs) {
+            const double pos = (double)e.positionAt(q);
+            if (q > 100 * kMs)
+                step_pk = std::max(step_pk, std::fabs(pos - prev_p));
+            prev_p = pos;
+            if (q > 400 * kMs) {
+                vpk = std::max(vpk, std::fabs((double)e.velocityAt(q)));
+                // Pipeline latency is TWO knots (one holdback + one tangent
+                // lookahead = 120 ms); the reference is the source delayed
+                // by exactly that, so err measures tracking, not offset.
+                err = std::max(err, std::fabs(pos - src(q - 6 * dt)));
+            }
+        }
+    }
+    MESSAGE("pace census: vpk " << vpk << " (src " << src_vpk << ", ratio "
+            << vpk / src_vpk << ")  worst 1 ms step " << step_pk << "  err "
+            << err);
+    // No teleports: the sampled position may never move faster than vmax
+    // between 1 ms samples.
+    CHECK(step_pk <= (double)cfg.limits.vmax * 1e-3 * 1.05);
+    // Pace: the machine may never play content faster than the source's own
+    // peak tempo (margin covers aim/priming overshoot, never a 2x span).
+    CHECK(vpk <= src_vpk * 1.35);
+    CHECK(err < 0.06);
 }
 
 TEST_CASE("Chase jerk scales with move demand: slow streams plan soft, fast "

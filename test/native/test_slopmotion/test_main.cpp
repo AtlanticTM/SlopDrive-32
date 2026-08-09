@@ -542,7 +542,7 @@ TEST_CASE("Sample synthesis: 50 Hz bare points render smooth, tracking, and "
     // must track the sine one interval late and NEVER pass its extremes
     // (PCHIP tangents are zero at reversals).
     auto cfg = testConfig();
-    cfg.sample_synthesis = true;   // experimental: default-off until lock-in lands
+    cfg.sample_synthesis = true;   // default; forced so the pin outlives it
     Engine e(cfg, 0.5f);
     // Representative content: ~52% of vmax peak. Near-ceiling sample streams
     // (no headroom for boundary estimates) deliberately fall back to chase --
@@ -578,13 +578,16 @@ TEST_CASE("Sample synthesis: 50 Hz bare points render smooth, tracking, and "
     int an[16] = {0};
     slopmotion::Anomaly ev;
     while (e.popAnomaly(ev)) an[(int)ev.kind & 15]++;
+    MESSAGE("synthesis census: planfails " << planfails << "  fallbacks an[5] "
+            << an[5] << "  err " << err << "  band [" << pmin << ", " << pmax
+            << "]");
     CHECK(planfails <= 3);              // isolated PlanFailed tolerated
     CHECK(an[1] <= 3);
     CHECK(an[2] == 0);                  // SettleEngaged
     CHECK(an[4] == 0);                  // DeadlineStretched: debt cascades
-    // CURRENT-BEHAVIOR pin (experimental path, default-off): ~50% synthesis
-    // duty on this content; the chase absorber covers the rest.
-    CHECK(an[5] <= 25);
+    // Lock-in span (2x pitch first span) unwinds hot chase entry; fallbacks
+    // are isolated re-lock events at extremes (measured 8), not a duty cycle.
+    CHECK(an[5] <= 10);
     CHECK(an[6] == 0);
     CHECK(pmax <= mid + amp + 0.03);   // bounded crest bulge
     CHECK(pmin >= mid - amp - 0.03);
@@ -599,7 +602,7 @@ TEST_CASE("Chase jerk scales with move demand: slow streams plan soft, fast "
         cfg.limits.amax = 30.0f;
         cfg.limits.jmax = 500.0f;
         cfg.sample_synthesis = false;   // chase path under test
-        cfg.chase_jerk_scale = true;    // experimental: default-off (sd-d77.1)
+        cfg.chase_jerk_scale = true;    // default; forced so the pin outlives it
         Engine e(cfg, 0.5f);
         float sharp = 1.0f;
         for (uint64_t t = 0; t <= 800 * kMs; t += 20 * kMs) {

@@ -404,18 +404,15 @@ struct Config {
     // tangents are zero at reversals (arrive at rest, overshoot impossible)
     // and Fritsch-Carlson bounded on runs. Gaps > chase_stale_us restart via
     // plain chase, so sparse streams never pay the holdback.
-    // DEFAULT OFF: bench-proven for content under ~60% of vmax; hot-entry
-    // spans (chase-state accel into a 60 ms quintic) still cycle back to
-    // chase ~50% of the time on ceiling-adjacent content. The missing piece
-    // is a lock-in span (see the board); flip on when it lands.
-    bool sample_synthesis = false;
+    // Lock-in span (kSynthLockInUs) unwinds hot chase entry; near-ceiling
+    // streams still fall back to chase by design (no boundary headroom).
+    bool sample_synthesis = true;
     // Chase jerk scales with the MOVE's own demand: a replan corner spends
-    // jerk proportional to max(|v|, |vf|)/vmax instead of the mechanical
-    // ceiling, so slow content stops carrying a 50 Hz notch train while fast
-    // content keeps full authority. Softer-only by construction (jerkCeil).
-    // DEFAULT OFF: the demand estimator under-converges on fast content
-    // (measured: 60 Hz chase err 0.10 -> 0.23) -- bench-tune with sd-d77.1.
-    bool  chase_jerk_scale = false;
+    // jerk proportional to demand/vmax (kneed at kChaseJerkKneeFrac) instead
+    // of the mechanical ceiling, so slow content stops carrying a 50 Hz notch
+    // train while fast content keeps full authority. Softer-only by
+    // construction (jerkCeil).
+    bool  chase_jerk_scale = true;
     float chase_jerk_floor = 0.15f;   // never below this fraction of jmax
     // Cold-start governor. The FIRST plan out of rest (Idle/Settle, v~0) is a
     // POSITIONING move -- park to the stream's opening position -- not
@@ -1153,10 +1150,13 @@ public:
         // Coalesce to the knot pitch: samples inside the pitch are decimated
         // (the samples contract); the first sample at/past it becomes the
         // next knot.
-        if (stamp - _syn_us < kSynthSpanUs) {
-            // While the holdback is still priming, keep chasing at sample
-            // rate so a catch-up converges at 50 Hz, not knot pitch.
-            if (!_syn_prev_ok) return commitChase(cmd, p, v, a, target, t0);
+        const uint64_t pitch = _syn_vf_ok ? kSynthSpanUs : kSynthLockInUs;
+        if (stamp - _syn_us < pitch) {
+            // While the holdback is priming (and through the lock-in span),
+            // keep chasing at sample rate so tracking converges at 50 Hz,
+            // not knot pitch.
+            if (!_syn_prev_ok || !_syn_vf_ok)
+                return commitChase(cmd, p, v, a, target, t0);
             return true;
         }
         // The first mature pair only rotates the buffer: a span needs the
@@ -1420,6 +1420,14 @@ private:
     // 60 ms knots give 27x the headroom and the quintic interior does the
     // between-knot smoothing, which is the point of synthesis.
     static constexpr uint64_t kSynthSpanUs = 60000;
+    // Lock-in: an episode's FIRST span doubles the pitch. Entry state is a
+    // hot chase plan; 2x T buys 8x jerk headroom to unwind its accel.
+    static constexpr uint64_t kSynthLockInUs = 2 * kSynthSpanUs;
+    // Chase jerk-scale knee: demand fraction of vmax at which full jerk
+    // authority returns (see commitChase).
+    static constexpr double   kChaseJerkKneeFrac = 0.5;
+    // Release time constant of the demand peak-hold (updateEstimator).
+    static constexpr double   kSpPeakReleaseS = 0.7;
     // Command silence that makes the next from-rest commit a COLD start.
     // Above the sparsest legitimate content cadence (~1 s point spacing).
     static constexpr uint64_t kColdStartGapUs = 2000000;
@@ -2920,12 +2928,14 @@ private:
         double j_ovr = 0.0;
         if (_cfg.chase_jerk_scale) {
             const double vm = (double)_cfg.limits.vmax;
-            // The MOVE ceiling is the stream's character, not the instant:
-            // 1.57 = sine mean-to-peak, so a sinusoid keeps ~full authority
-            // at its own tempo while slow content plans soft.
+            // The MOVE ceiling is the stream's recent PEAK speed, never a
+            // local average: an EMA dips at every crest and de-claws the
+            // turn exactly where authority is needed (sd-d77.1 bench).
             double dem = std::fmax(std::fabs(v), std::fabs(vf));
-            if (_est_ema_ok) dem = std::fmax(dem, 1.57 * _est_sp_ema);
-            double r = dem / (vm > 1e-9 ? vm : 1.0);
+            if (_est_ema_ok) dem = std::fmax(dem, _est_sp_pk);
+            // Knee: full authority at kChaseJerkKneeFrac of vmax -- tracking
+            // jerk follows content jerk (~omega^3), not the velocity fraction.
+            double r = dem / (vm > 1e-9 ? kChaseJerkKneeFrac * vm : 1.0);
             const double fl = (double)_cfg.chase_jerk_floor;
             if (r < fl) r = fl;
             if (r > 1.0) r = 1.0;
@@ -3081,10 +3091,13 @@ private:
                 const double raw = (target - _est_last_target) / dt;
                 if (_est_ema_ok) {
                     const double v_prev = _est_v_ema;
-                    // Rectified speed EMA: the stream's CHARACTER (for the
-                    // chase jerk scale) as opposed to the signed instant --
-                    // signed velocity is ~0 at every reversal of fast content.
-                    _est_sp_ema += 0.25 * (std::fabs(raw) - _est_sp_ema);
+                    // Peak-hold speed with first-order release (chase jerk
+                    // scale): instant attack, decays toward the local speed
+                    // over kSpPeakReleaseS. Never an EMA (crest-dip trap).
+                    const double sp = std::fabs(raw);
+                    if (sp > _est_sp_pk) _est_sp_pk = sp;
+                    else _est_sp_pk += (dt / kSpPeakReleaseS) *
+                                       (sp - _est_sp_pk);
                     _est_v_ema  += 0.35 * (raw - _est_v_ema);
                     _est_dt_ema += 0.30 * (dt - _est_dt_ema);
                     // Stream curvature: differentiate the (already smoothed)
@@ -3094,7 +3107,7 @@ private:
                     _est_a_ema += 0.25 * (a_raw - _est_a_ema);
                 } else {
                     _est_v_ema  = raw;
-                    _est_sp_ema = std::fabs(raw);
+                    _est_sp_pk  = std::fabs(raw);
                     _est_dt_ema = dt;
                     _est_a_ema  = 0.0;
                     _est_ema_ok = true;
@@ -3274,7 +3287,7 @@ private:
     bool     _est_valid = false;
     bool     _est_ema_ok = false;
     double   _est_v_ema = 0.0;
-    double   _est_sp_ema = 0.0;   // rectified |chord speed| EMA
+    double   _est_sp_pk = 0.0;    // peak-hold |chord speed|, released
     double   _est_a_ema = 0.0;
     double   _est_dt_ema = 0.0;
     double   _est_last_target = 0.5;

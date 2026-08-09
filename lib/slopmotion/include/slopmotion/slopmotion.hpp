@@ -396,6 +396,25 @@ constexpr bool resolveCubic(CurvePolicy policy, uint8_t client_family) {
 
 struct Config {
     Limits limits{};
+    // Bare-point synthesis: hold back ONE sample and render [buffered ->
+    // incoming] as a full waveform segment (duration = stamp spacing, end_vel
+    // = PCHIP knot tangent, successor chord armed). Samples inherit the whole
+    // waveform machine -- C2 chain, anchored commits, dwell/RFC-008/wall
+    // guards, feasibility policies -- for one interval of latency. PCHIP
+    // tangents are zero at reversals (arrive at rest, overshoot impossible)
+    // and Fritsch-Carlson bounded on runs. Gaps > chase_stale_us restart via
+    // plain chase, so sparse streams never pay the holdback.
+    // DEFAULT OFF: bench-proven for content under ~60% of vmax; hot-entry
+    // spans (chase-state accel into a 60 ms quintic) still cycle back to
+    // chase ~50% of the time on ceiling-adjacent content. The missing piece
+    // is a lock-in span (see the board); flip on when it lands.
+    bool sample_synthesis = false;
+    // Cold-start governor. The FIRST plan out of rest (Idle/Settle, v~0) is a
+    // POSITIONING move -- park to the stream's opening position -- not
+    // content; planned at limits.vmax it shoots across the window (the
+    // script-start dart, sd-d77). That one commit clamps vmax here; the
+    // deadline guards then stretch duration instead. 0 = disabled.
+    float recovery_vmax = 0.0f;
 
     // CHASE feedforward + predictive aim (dense streams only, see gate
     // below): the engine differentiates the incoming point stream, aims
@@ -1000,6 +1019,10 @@ public:
     // Hard-reset to a static hold at `pos`. Used on home/estop/resume/stream
     // rising-edge (seed at the machine's actual position).
     void resetAt(float pos, uint64_t now_us) {
+        _syn_ok = false;
+        _syn_prev_ok = false;
+        _syn_vf_ok = false;
+        _syn_chain_ok = false;
         _hold_pos   = clamp01(pos);
         _mode       = Mode::Idle;
         _kind       = PlanKind::None;
@@ -1061,14 +1084,176 @@ public:
         const bool waveform =
             cmd.has_duration && cmd.duration_us >= kShortMoveUs;
 
+        // Cold-start governor (Config::recovery_vmax): the opening plan out
+        // of rest traverses park->content at positioning gentleness. COLD
+        // requires rest AND a real command gap: normal stroke content arrives
+        // at rest between every action (explicit-rest handoffs), and keying
+        // on rest alone clamped nearly every stroke to the user limit
+        // (2026-08-10). The clamp is transient and covers every planner this
+        // commit reaches. Single-task engine: no concurrent reader of _cfg.
+        const bool cold = _cfg.recovery_vmax > 0.0f &&
+                          _cfg.recovery_vmax < _cfg.limits.vmax &&
+                          (_mode == Mode::Idle || _mode == Mode::Settle) &&
+                          std::fabs(v) < 1e-3 &&
+                          (_last_commit_us == 0 ||
+                           now_us - _last_commit_us > kColdStartGapUs);
+        _last_commit_us = now_us;
+        const float vmax_full = _cfg.limits.vmax;
+        if (cold) _cfg.limits.vmax = _cfg.recovery_vmax;
         bool ok;
         if (waveform) {
+            _syn_ok = false;   // real segments preempt the synthesis buffer
+            _syn_prev_ok = false;
             ok = commitWaveform(cmd, p, v, a, target, t0);
+        } else if (_cfg.sample_synthesis) {
+            ok = commitSampleSynth(cmd, p, v, a, target, t0, now_us);
         } else {
             ok = commitChase(cmd, p, v, a, target, t0);
         }
+        _cfg.limits.vmax = vmax_full;
         if (ok) _plans++;
         return ok;
+    }
+
+    // ---- Bare-point synthesis (Config::sample_synthesis) --------------------
+    // Renders the BUFFERED point's span now that its far end is known. Calls
+    // commitWaveform directly, below commit()'s kShortMoveUs gate: that gate
+    // exists to stop CLIENT micro-segments; these spans are our own
+    // construction with honest stamp-derived durations.
+    bool commitSampleSynth(const Command& cmd, double p, double v, double a,
+                           double target, uint64_t t0, uint64_t now_us) {
+        const uint64_t stamp = cmd.has_anchor ? cmd.anchor_us : now_us;
+        if (_syn_ok && stamp - _syn_us > (uint64_t)_cfg.chase_stale_us) {
+            _syn_ok = false;   // stream gap: restart the holdback
+            _syn_prev_ok = false;
+            _syn_vf_ok = false;
+            _syn_chain_ok = false;
+        }
+        if (!_syn_ok) {
+            // First point of a (re)started stream: plain chase positions to
+            // it (the cold governor gentles a genuine opening); synthesis
+            // primes behind it.
+            _syn_ok = true;
+            _syn_p = target;
+            _syn_us = stamp;
+            return commitChase(cmd, p, v, a, target, t0);
+        }
+        if (stamp <= _syn_us) {   // duplicate/regressive stamp: keep newest
+            _syn_p = target;
+            return true;
+        }
+        // Coalesce to the knot pitch: samples inside the pitch are decimated
+        // (the samples contract); the first sample at/past it becomes the
+        // next knot.
+        if (stamp - _syn_us < kSynthSpanUs) {
+            // While the holdback is still priming, keep chasing at sample
+            // rate so a catch-up converges at 50 Hz, not knot pitch.
+            if (!_syn_prev_ok) return commitChase(cmd, p, v, a, target, t0);
+            return true;
+        }
+        // The first mature pair only rotates the buffer: a span needs the
+        // 3-point tangent at its END knot, and emitting [here -> here, vf]
+        // before one exists launches the machine the WRONG WAY (arrive-in-
+        // place-moving means approach from behind).
+        if (!_syn_prev_ok) {
+            _syn_prev_p = _syn_p;
+            _syn_prev_us = _syn_us;
+            _syn_prev_ok = true;
+            _syn_p = target;
+            _syn_us = stamp;
+            return true;
+        }
+        const double T = double(stamp - _syn_us) * 1e-6;
+        const double c_out = (target - _syn_p) / T;
+        // PCHIP knot tangent at the buffered point: zero at reversals,
+        // Fritsch-Carlson bounded on runs -- monotone by construction.
+        double vf;
+        {
+            const double Tin = double(_syn_us - _syn_prev_us) * 1e-6;
+            const double c_in = Tin > 0.0 ? (_syn_p - _syn_prev_p) / Tin : 0.0;
+            vf = (c_in * c_out <= 0.0)
+                     ? 0.0
+                     : (double)boundHandoffVelocity(
+                           (float)(0.5 * (c_in + c_out)),
+                           (float)std::fabs(c_in), (float)std::fabs(c_out),
+                           1.5f);
+        }
+        // End-accel estimate from our own knot tangent series.
+        double af = 0.0;
+        if (_syn_vf_ok) af = (vf - _syn_vf) / T;
+        // CHAIN TIME: the holdback is a fixed-latency pipeline, so anchors
+        // tile (previous anchor + previous duration), starting at first
+        // emission's now. Anchoring at the knot STAMPS renders every span
+        // late by the holdback and re-samples a lagging entry -- permanent
+        // schedule debt (measured: every span guard-bound, ratios 90-470).
+        if (!_syn_chain_ok) {
+            _syn_chain_us = now_us;
+            _syn_chain_ok = true;
+        }
+        uint64_t tw = _syn_chain_us;
+        if (now_us > kAnchorMaxLateUs + tw) tw = now_us - kAnchorMaxLateUs;
+        _syn_chain_us = tw + (uint64_t)(T * 1e6);
+        double pw, vw, aw;
+        sampleRaw(tw, pw, vw, aw);
+        if (std::fabs(clamp01(_syn_p) - pw) / T >
+            0.9 * (double)_cfg.limits.vmax) {
+            // The span's schedule already saturates the machine: catch-up
+            // authority is zero, so slip is DROPPED, never financed (the
+            // samples contract is decimation). Re-prime at the freshest
+            // point and chase it; synthesis resumes on the next mature pair.
+            _syn_p = target;
+            _syn_us = stamp;
+            _syn_prev_ok = false;
+            _syn_vf_ok = false;
+            _syn_chain_ok = false;
+            return commitChase(cmd, p, v, a, target, t0);
+        }
+        bool ok = commitSynthSpan(pw, vw, aw, clamp01(_syn_p), vf, af, T, tw);
+        if (!ok) {
+            // Hot-entry span: chase the FRESHEST point instead and re-prime;
+            // synthesis re-locks on the next mature pair from a clean entry.
+            _syn_p = target;
+            _syn_us = stamp;
+            _syn_prev_ok = false;
+            _syn_vf_ok = false;
+            _syn_chain_ok = false;
+            return commitChase(cmd, p, v, a, target, t0);
+        }
+        _syn_vf = vf;
+        _syn_vf_ok = true;
+        _syn_prev_p = _syn_p;
+        _syn_prev_us = _syn_us;
+        _syn_prev_ok = true;
+        _syn_p = target;
+        _syn_us = stamp;
+        return ok;
+    }
+
+    // Dedicated adoption for synthesized spans. The stroke machinery
+    // (debt/centering/extremes, bridge, dwell, feasibility policies) assumes
+    // commands END at stroke extremes; mid-curve knots trip it. Build the
+    // quintic, scan it, DEGRADE boundary estimates (af first, then vf) until
+    // legal -- estimates are ours to soften -- and only then fall back to the
+    // Ruckig guard. Schedule is held; amplitude of a knot is never shaved.
+    bool commitSynthSpan(double p, double v, double a, double knot, double vf,
+                         double af, double T, uint64_t t0) {
+        if (!(T > 0.0)) return false;
+        double c[6];
+        buildWaveformCurve(p, v, a, knot, vf, af, T, c);
+        if (quinticWorstRatio(c, T) > 1.0) {
+            buildWaveformCurve(p, v, a, knot, vf, 0.0, T, c);
+            if (quinticWorstRatio(c, T) > 1.0) {
+                // Still illegal (hot entry, ceiling reversal): report and let
+                // the caller drop to CHASE for one knot -- an in-chain Ruckig
+                // guard overruns its span and mints local schedule debt.
+                recordAnomaly(AnomalyType::WaveformFallback, (float)knot,
+                              (float)quinticWorstRatio(c, T), t0);
+                return false;
+            }
+        }
+        adoptQuintic(c, T, t0);
+        _mode = Mode::Waveform;
+        return true;
     }
 
     // ---- Evaluation (Core 1, ~1 kHz hot path) -------------------------------
@@ -1220,6 +1405,16 @@ private:
     // Below this span a timed segment is a DWELL (see the dwell rule in
     // commitWaveform); 2% of the window, under any real stroke.
     static constexpr double   kDwellSpanNorm = 0.02;
+    // Sample-synthesis knot pitch: bare points coalesce into spans at least
+    // this long. Jerk scales as 1/T^3, so 20 ms micro-spans turn tiny
+    // boundary-estimate errors into ceiling breaks at every curvature
+    // extreme (measured: 8 guard-stretches = the test sine's 8 extremes);
+    // 60 ms knots give 27x the headroom and the quintic interior does the
+    // between-knot smoothing, which is the point of synthesis.
+    static constexpr uint64_t kSynthSpanUs = 60000;
+    // Command silence that makes the next from-rest commit a COLD start.
+    // Above the sparsest legitimate content cadence (~1 s point spacing).
+    static constexpr uint64_t kColdStartGapUs = 2000000;
 
     static double clamp01(double x) {
         return x < 0.0 ? 0.0 : (x > 1.0 ? 1.0 : x);
@@ -2742,6 +2937,10 @@ private:
         ruckig::Trajectory<1> traj;
         const ruckig::Result res = _calc.calculate(in, traj);
         if ((int)res < 0) {
+#ifdef SLOPMOTION_SYNTH_DEBUG
+            std::printf("PLANFAIL res=%d p=%.4f v=%.3f a=%.2f tgt=%.4f vf=%.3f af=%.2f mind=%.4f jc=%.1f\n",
+                        (int)res, p, v, a, target, vf, af, min_dur, jc);
+#endif
             _failures++;
             recordAnomaly(AnomalyType::PlanFailed, (float)target,
                           (float)(int)res, now_us);
@@ -3061,6 +3260,19 @@ private:
     bool     _prev_vf_ok = false;
     double   _prev_vf = 0.0;
     uint64_t _prev_vf_us = 0;
+    // Last commit arrival (cold-start gap test); 0 = never.
+    uint64_t _last_commit_us = 0;
+    // Sample-synthesis holdback (see Config::sample_synthesis).
+    bool     _syn_ok = false;       // a buffered point exists
+    double   _syn_p = 0.0;
+    uint64_t _syn_us = 0;
+    bool     _syn_prev_ok = false;  // a knot BEHIND the buffer exists
+    double   _syn_prev_p = 0.0;
+    uint64_t _syn_prev_us = 0;
+    bool     _syn_vf_ok = false;    // previous knot tangent (af estimate)
+    double   _syn_vf = 0.0;
+    bool     _syn_chain_ok = false; // chain-time anchor established
+    uint64_t _syn_chain_us = 0;
     // Previous waveform TARGET (dwell rule): a hold is the same target
     // re-commanded, never just "happens to be near" -- a centering-clipped
     // chain lands near its NEXT target legitimately (the RFC-049c regime).

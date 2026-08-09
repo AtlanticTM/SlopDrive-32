@@ -385,7 +385,7 @@ struct SystemState {
     // enum lives in main.cpp's per-tick config push, and anything out of range
     // there falls back to the ENGINE's own default rather than silently
     // picking a policy the operator never asked for.
-    volatile uint8_t       sm_tune_infeas_policy   = 5;      // default: Blend (engine 0.9.0) — MUST match the catalog select default
+    volatile uint8_t       sm_tune_infeas_policy   = 0;      // default: Stretch (range-first; operator ruling 2026-08-10, the scale-family 'seatbelt' feel) — MUST match the catalog select default
     volatile float         sm_tune_infeas_margin   = 0.92f;  // stroke-scale margin 0.50..1.00
     // RESHAPE bisection depth: each step halves the remaining stroke interval,
     // so N steps resolve the delivered stroke to stroke/2^N. Each step costs

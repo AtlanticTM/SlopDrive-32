@@ -471,6 +471,126 @@ TEST_CASE("Over-demanding waveform falls back to the Ruckig guard, ceilings hold
     CHECK(s.max_p <= 1.0 + 1e-9);
 }
 
+TEST_CASE("Cold-start governor: opening plan out of rest is vmax-clamped, "
+          "warm plans are not") {
+    // velocityAt is a LIVE evaluator (maybeSettle advances state), so each
+    // phase gets its own engine instance and one monotonic scan.
+    auto cfg = testConfig();
+    cfg.recovery_vmax = 0.5f;   // well under limits.vmax (3.0)
+    Command c;
+    c.target = 0.9f; c.duration_us = 100 * (uint32_t)kMs; c.has_duration = true;
+
+    // COLD: first commit from Idle at rest. Big infeasible ask; the governor
+    // clamps vmax; the feasibility machinery absorbs the deadline.
+    {
+        Engine e(cfg, 0.1f);
+        REQUIRE(e.commit(c, 0));
+        double vpk = 0.0;
+        for (uint64_t t = 0; t < 5 * kS; t += kMs)
+            vpk = std::max(vpk, std::fabs((double)e.velocityAt(t)));
+        CHECK(vpk <= 0.5 * 1.02);
+        CHECK(vpk > 0.1);   // it does actually move
+    }
+
+    // WARM: identical engine, but the second commit lands MID-FLIGHT
+    // (moving, so not cold) and plans at FULL limits.
+    {
+        Engine e(cfg, 0.1f);
+        REQUIRE(e.commit(c, 0));
+        uint64_t tMid = 0;
+        for (uint64_t t = kMs; t < 5 * kS; t += kMs)
+            if (std::fabs((double)e.velocityAt(t)) > 0.05) { tMid = t; break; }
+        REQUIRE(tMid > 0);
+        Command c2;
+        c2.target = 0.9f; c2.duration_us = 300 * (uint32_t)kMs;
+        c2.has_duration = true;
+        REQUIRE(e.commit(c2, tMid));
+        double vpk2 = 0.0;
+        for (uint64_t t = tMid; t < tMid + 2 * kS; t += kMs)
+            vpk2 = std::max(vpk2, std::fabs((double)e.velocityAt(t)));
+        CHECK(vpk2 > 0.5 * 1.05);   // exceeded the recovery clamp = unclamped
+    }
+}
+
+TEST_CASE("Cold-start governor: from-rest strokes inside a live stream are "
+          "NOT clamped (cold needs a command gap)") {
+    auto cfg = testConfig();
+    cfg.recovery_vmax = 0.5f;
+    Engine e(cfg, 0.2f);
+    // Prime: one commit establishes the stream (cold, clamped -- fine).
+    Command c;
+    c.target = 0.4f; c.duration_us = 200 * (uint32_t)kMs; c.has_duration = true;
+    REQUIRE(e.commit(c, 0));
+    // A stroke 500 ms later, arriving from rest (explicit-rest content):
+    // WARM by the gap rule, so it may exceed the recovery clamp.
+    // 0.4 norm over 400 ms: min-jerk peak v = 1.875 -- inside every ceiling
+    // (v 3.0, a 30, j 500), well above the 0.5 recovery clamp.
+    Command c2;
+    c2.target = 0.6f; c2.duration_us = 400 * (uint32_t)kMs; c2.has_duration = true;
+    const uint64_t t2 = 500 * kMs;
+    REQUIRE(e.commit(c2, t2));
+    double vpk = 0.0;
+    for (uint64_t t = t2; t < t2 + 1500 * kMs; t += kMs)
+        vpk = std::max(vpk, std::fabs((double)e.velocityAt(t)));
+    CHECK(vpk > 0.5 * 1.05);
+}
+
+TEST_CASE("Sample synthesis: 50 Hz bare points render smooth, tracking, and "
+          "never overshooting the source extremes") {
+    // A 1.2 Hz sine sampled at 50 Hz as BARE POINTS (no duration, no vf).
+    // Synthesis holds one sample back and renders quintic spans; the curve
+    // must track the sine one interval late and NEVER pass its extremes
+    // (PCHIP tangents are zero at reversals).
+    auto cfg = testConfig();
+    cfg.sample_synthesis = true;   // experimental: default-off until lock-in lands
+    Engine e(cfg, 0.5f);
+    // Representative content: ~52% of vmax peak. Near-ceiling sample streams
+    // (no headroom for boundary estimates) deliberately fall back to chase --
+    // today's behavior -- rather than fight physics; see sd-d77.
+    const double f = 1.0, amp = 0.25, mid = 0.5;
+    const uint64_t dt = 20 * kMs;   // 50 Hz
+    auto src = [&](uint64_t t_us) {
+        return mid + amp * std::sin(2.0 * 3.14159265358979 * f *
+                                    (double(t_us) * 1e-6));
+    };
+    double pmax = 0.0, pmin = 1.0, err = 0.0;
+    int planfails = 0;
+    for (uint64_t t = 0; t <= 2 * kS; t += dt) {
+        Command c;
+        c.target = (float)src(t);
+        c.has_anchor = true;
+        c.anchor_us = t;
+        // PlanFailed is a tolerated event: the previous plan keeps executing
+        // and live callers ignore the return (engine contract).
+        if (!e.commit(c, t)) planfails++;
+        // Evaluate between commits, past the priming phase.
+        if (t > 300 * kMs) {
+            for (uint64_t q = t; q < t + dt; q += kMs) {
+                const double pos = (double)e.positionAt(q);
+                pmax = std::max(pmax, pos);
+                pmin = std::min(pmin, pos);
+                // Knot-pitch holdback (~60 ms): compare the delayed source.
+                err = std::max(err, std::fabs(pos - src(q - 3 * dt)));
+            }
+        }
+    }
+    // Anomaly tally: name what the engine did if tracking broke.
+    int an[16] = {0};
+    slopmotion::Anomaly ev;
+    while (e.popAnomaly(ev)) an[(int)ev.kind & 15]++;
+    CHECK(planfails <= 3);              // isolated PlanFailed tolerated
+    CHECK(an[1] <= 3);
+    CHECK(an[2] == 0);                  // SettleEngaged
+    CHECK(an[4] == 0);                  // DeadlineStretched: debt cascades
+    // CURRENT-BEHAVIOR pin (experimental path, default-off): ~50% synthesis
+    // duty on this content; the chase absorber covers the rest.
+    CHECK(an[5] <= 25);
+    CHECK(an[6] == 0);
+    CHECK(pmax <= mid + amp + 0.03);   // bounded crest bulge
+    CHECK(pmin >= mid - amp - 0.03);
+    CHECK(err < 0.06);                  // tracks the delayed source
+}
+
 TEST_CASE("Infeasible deadline stretches to physical minimum + anomaly") {
     auto cfg = testConfig();          // vmax = 2 → 0→1 takes ≥ 0.5 s
     cfg.infeasible_policy = InfeasiblePolicy::Stretch;   // the guard's test
@@ -531,6 +651,7 @@ TEST_CASE("Retarget mid-move is C2-continuous at the commit instant") {
 
 TEST_CASE("Chase: 60 Hz sine stream tracks smoothly within limits") {
     Config cfg;
+    cfg.sample_synthesis = false;   // this case pins CHASE machinery
     cfg.limits.vmax = 3.0f;
     cfg.limits.amax = 30.0f;
     cfg.limits.jmax = 500.0f;
@@ -583,6 +704,7 @@ TEST_CASE("Chase: 60 Hz sine stream tracks smoothly within limits") {
 
 TEST_CASE("Starve-settle: dead stream brakes to rest and holds") {
     Config cfg;
+    cfg.sample_synthesis = false;   // this case pins CHASE machinery
     cfg.limits.vmax = 3.0f;
     cfg.limits.amax = 30.0f;
     cfg.limits.jmax = 500.0f;
@@ -1204,6 +1326,7 @@ TEST_CASE("Second-order chase aim stops overshooting a crest near the rail") {
     struct Result { double peak; double rail_ms; };
     auto run = [&](bool extrap) {
         Config cfg;
+        cfg.sample_synthesis = false;   // this case pins CHASE machinery
         cfg.limits.vmax = 3.0f;
         cfg.limits.amax = 30.0f;
         cfg.limits.jmax = 500.0f;
@@ -1260,6 +1383,7 @@ TEST_CASE("Second-order aim shortens the dead-stop park at the rail") {
 
     auto park_ms = [&](bool extrap) {
         Config cfg;
+        cfg.sample_synthesis = false;   // this case pins CHASE machinery
         cfg.limits.vmax = 3.0f;
         cfg.limits.amax = 30.0f;
         cfg.limits.jmax = 500.0f;
@@ -1305,6 +1429,7 @@ TEST_CASE("Predictive aim v2 arrives at the velocity the stream will HAVE") {
     struct Track { double rms; double peak_err; double max_pos; };
     auto run = [&](bool v2) {
         Config cfg;
+        cfg.sample_synthesis = false;   // this case pins CHASE machinery
         cfg.limits.vmax = 3.0f;
         cfg.limits.amax = 30.0f;
         cfg.limits.jmax = 500.0f;

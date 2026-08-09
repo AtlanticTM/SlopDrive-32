@@ -1329,7 +1329,7 @@ inline bool buildSlopDriveCatalog(slopsync::Catalog32& c, DeviceFeatures feat = 
                       .settingKey = 13, .hasSettingKey = true},
                      {"follow client", "force C1", "force C2"});
     c.addSelectField({.name = "infeasible_policy", .type = PackedFieldType::u8, .unit = "", .scale = 1.0f,
-                      .dflt = SettingDefault::ofInt(5), .group = "Infeasible moves",
+                      .dflt = SettingDefault::ofInt(0), .group = "Infeasible moves",
                       .desc = "What to do when a move cannot be finished in the time it was given.",
                       .settingKey = 14, .hasSettingKey = true},
                      {"stretch", "scale", "reshape", "prioritize amplitude", "prioritize smooth",

@@ -305,8 +305,8 @@ own file.
 
 ### First findings (2026-07-30, GoogleCat funscript take)
 
-The bench earned itself in its first session. All four are in
-`docs/canon/LEDGER.md`; the headline is a **three-part window-exit braking
+The bench earned itself in its first session. All four are on the dev
+board; the headline is a **three-part window-exit braking
 runaway** that reaches 625 mm of travel on a 500 mm rail:
 
 * `slopmotion`'s legality scan grants a ±0.02 normalized window grace, on the

@@ -138,7 +138,7 @@ History: the sim's catalog was previously reduced/diverged from the device
 specifically to exercise the UI's generic rendering. Ruling: that was the
 wrong mechanism — it left the primary test surface permanently degraded and
 let the committed fixture drift from reality
-([`docs/canon/LEDGER.md`](../canon/LEDGER.md), 2026-07-27).
+(dev board, 2026-07-27).
 
 The replacement — **catalog profiles as a sim flag**:
 - `--profile device` (DEFAULT): full device fidelity — the complete
@@ -156,8 +156,7 @@ Test mapping: fixture + Tier-1 tests ↔ `device`; genericity/compliance tests
 ↔ `alien` + `minimal`. **LANDED (2026-07-28 overnight):** this was milestone
 1 of the sequencing below (§7) — all three profiles exist, the fixture is
 re-captured at full device fidelity, and the sim's prior `[FAIL]`s are
-fixed. See [`docs/canon/LEDGER.md`](../canon/LEDGER.md), "Sim fidelity
-(SlopDeck milestone 1)."
+fixed. See the dev board (SlopDeck milestone 1).
 
 **Known gap (unfixed):** 19 device-catalog entries — machine-modes,
 SlopMotion tuning + `sm-set`, fray-d Advanced pattern + its six modifiers,
@@ -188,8 +187,7 @@ building/testing the SlopMotion-tuning and fray-d-Advanced Tier-1 widgets
 1. **Sim fidelity** — `--profile device` at full catalog; re-capture the
    fixture (respelled labels ride along); `alien`/`minimal` profiles;
    un-FATAL `slopsync-sim.mjs` against `device`.
-   **LANDED 2026-07-28** — see §5 above and
-   [`docs/canon/LEDGER.md`](../canon/LEDGER.md).
+   **LANDED 2026-07-28** -- see §5 above.
 2. **Widget interface extraction** — formalize the contract from the four
    founding widgets; Tier 0/1 split becomes explicit in the codebase.
    **Still open** as of 2026-07-28.
@@ -229,9 +227,8 @@ Svelte client kernel, three delivery vehicles, tiers orthogonal to delivery:
 
   **Truth check (2026-07-28): the firmware half of this landed.**
   SlopSync-over-BLE-GATT (the hub-side `ITransport`) plus UDP discovery
-  shipped and are live on fw 2.1.82 — see
-  [`docs/canon/LEDGER.md`](../canon/LEDGER.md), Phase E + the DEPLOY +
-  LIVE-VERIFY session. What's still open is purely client-side: the Shell
+  shipped and are live on fw 2.1.82 -- see the dev board (Phase E, plus
+  the DEPLOY + LIVE-VERIFY session). What's still open is purely client-side: the Shell
   is what SPEAKS BLE GATT from the client end (browsers can't, portably),
   and that client work has not started. "Not load-bearing for the core
   promise" still holds — WS-only clients keep working against this same

@@ -17,7 +17,7 @@ FULL REFACTOR") was answered — the rebuilt, catalog-driven client is
 [webui-architecture.md](webui-architecture.md); read that for current
 architecture. This document stays as the ruling's record and the
 evidence that made it non-negotiable, not as a live status page (status
-lives in [`docs/canon/LEDGER.md`](canon/LEDGER.md), per
+lives on the dev board (`bd`), per
 `governance.md` C-2).
 
 ---
@@ -523,7 +523,7 @@ only intended differences are widget choice and layout.
 **Truth check (2026-07-28): every row below marked ❌ has since closed.**
 `machine-admin` (0x30F0, device-defined INTENT: `clear_fault`/
 `save_config`/`servo_scan`) replaced the retired HTTP control routes; see
-[`docs/canon/LEDGER.md`](canon/LEDGER.md). The table is kept as the
+the dev board (`bd`). The table is kept as the
 original asymmetry snapshot that justified the work, not as current
 status.
 

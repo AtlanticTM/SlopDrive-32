@@ -362,7 +362,7 @@ script-playback smoothness on a quiet S3.
 
 The bridge came up working and then dropped WebSocket sessions for a full
 evening. Six defects; five fixed. Status and rulings live in
-[`docs/canon/LEDGER.md`](canon/LEDGER.md) § "C5 BRIDGE — HARDENING PASS"; the
+the dev board (`bd`, epic sd-6kz and its children); the
 mechanisms are here.
 
 ### 9.1 The one that mattered — unsolicited PONG reset the connection

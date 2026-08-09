@@ -74,10 +74,9 @@ restating them here would violate C-1.
 
 - Serial2 only, TX GPIO43 / RX GPIO44, 4 Mbaud. Serial1 is the Modbus servo
   bus and must never be touched from here (SlopSyncUartTransport.h:16-17,86).
-- Buffers sized BEFORE begin() (HardwareSerial refuses to resize running):
-  TX 4096, RX 16384. The RX buffer must outlast the 5 ms DRAIN INTERVAL, not
-  the frame: 2 Mbaud lands ~1,000 B between hub ticks; 4096 overflowed by
-  construction (SlopSyncUartTransport.h:100-111, c5-comms-offload.md §4.6).
+- Buffers sized BEFORE begin() (HardwareSerial refuses to resize running).
+  Current values and the reasoning are in "RX ring sizing" below; never
+  restate them here (SlopSyncUartTransport.h:100-111).
 - Bulk reads only: readBytes() into a 512 B chunk. Per-byte read() takes the
   UART mutex per call and measurably cannot keep up
   (src/comms/SlopSyncUartTransport.cpp:149-157).

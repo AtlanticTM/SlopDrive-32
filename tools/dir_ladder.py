@@ -7,7 +7,7 @@ per reversal on a given firmware build? Run it once per rung, change exactly
 one thing between rungs, diff the rows.
 
 The full experiment design -- what the rungs are, what order they go in, and
-what each rung is supposed to prove -- lives in docs/canon/LEDGER.md under
+what each rung is supposed to prove -- lives on the dev board under
 "DIR LADDER". Read that first. This file is the instrument, not the plan.
 
 WIRE FORMAT: NOT REIMPLEMENTED HERE.

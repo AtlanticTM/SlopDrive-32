@@ -219,21 +219,16 @@ def _spelling_exempt(rel):
 # a MECHANISM, not a list: adding an entry here requires an operator-visible
 # justification in the commit that adds it, never a silent exemption.
 #
-# Justification for the docs/canon/LEDGER.md section below (2026-07-28
-# BRITISH-SPELLING TOTAL SWEEP entry): that entry is an audit record, and
-# quotes the actual banned strings it found/fixed/flagged/false-positived
-# (the same reason this file's own BRITISH_SPELLING_EXTRAS comment above is
-# exempt) -- not a live comment or prose defect. Never add a section here
-# for an ordinary hit; fix it instead.
+# Never add a section here for an ordinary hit; fix it instead. The only
+# entry that ever qualified was an AUDIT RECORD quoting the banned strings it
+# had just fixed, the same standing as this file's own wordlist.
 #
 # Anchored to the SECTION HEADER, never line numbers: the ledger is a living
 # document and line-pinned exemptions break on any edit above the section
 # (proven 2026-07-28 -- a 6-line insertion shifted the sweep entry and
 # produced 18 false findings). A section runs from its `## ` header to the
 # next `## ` header.
-BRITISH_SPELLING_EXEMPT_SECTIONS = {
-    "docs/canon/LEDGER.md": ("## BRITISH-SPELLING TOTAL SWEEP",),
-}
+BRITISH_SPELLING_EXEMPT_SECTIONS: dict[str, tuple[str, ...]] = {}
 
 
 def _exempt_section_lines():

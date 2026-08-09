@@ -1142,7 +1142,7 @@ void setup() {
         // WebServer's HTTPMethod and ESPAsyncWebServer's request-method enum,
         // so a bare HTTP_GET is ambiguous here (it is not in OtaService.cpp,
         // which only sees the sync one).
-        webui.server()->on("/api/heaptrace", HTTPMethod::HTTP_GET, [&]() {
+        webui.server()->on("/api/heaptrace", HTTPMethod::HTTP_GET, []() {
             // Heap-allocated on purpose: this is a diagnostic route on
             // httpTask's 8 KB stack, and the dump is far too big for it.
             const size_t cap = 12288;
@@ -1160,7 +1160,7 @@ void setup() {
         // HeapWatch.h constraint 4). httpTask is Core 0, which is the core every
         // suspect in this hunt runs on, so the selftest proves the watchpoint on
         // the core that matters.
-        webui.server()->on("/api/heapwatch", HTTPMethod::HTTP_GET, [&]() {
+        webui.server()->on("/api/heapwatch", HTTPMethod::HTTP_GET, []() {
             if (webui.server()->arg("selftest") == "1") {
                 webui.server()->send(200, "application/json",
                                      "{\"selftest\":\"firing\",\"expect\":\"Watchpoint 0 triggered\"}");

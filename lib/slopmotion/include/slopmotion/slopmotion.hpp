@@ -409,6 +409,14 @@ struct Config {
     // chase ~50% of the time on ceiling-adjacent content. The missing piece
     // is a lock-in span (see the board); flip on when it lands.
     bool sample_synthesis = false;
+    // Chase jerk scales with the MOVE's own demand: a replan corner spends
+    // jerk proportional to max(|v|, |vf|)/vmax instead of the mechanical
+    // ceiling, so slow content stops carrying a 50 Hz notch train while fast
+    // content keeps full authority. Softer-only by construction (jerkCeil).
+    // DEFAULT OFF: the demand estimator under-converges on fast content
+    // (measured: 60 Hz chase err 0.10 -> 0.23) -- bench-tune with sd-d77.1.
+    bool  chase_jerk_scale = false;
+    float chase_jerk_floor = 0.15f;   // never below this fraction of jmax
     // Cold-start governor. The FIRST plan out of rest (Idle/Settle, v~0) is a
     // POSITIONING move -- park to the stream's opening position -- not
     // content; planned at limits.vmax it shoots across the window (the
@@ -2909,7 +2917,25 @@ private:
         } else if (cmd.has_end_vel) {
             vf = applyEndVelGuard((double)cmd.end_vel, aim, now_us);
         }
-        const bool ok = planRuckig(p, v, a, aim, vf, af, 0.0, now_us);
+        double j_ovr = 0.0;
+        if (_cfg.chase_jerk_scale) {
+            const double vm = (double)_cfg.limits.vmax;
+            // The MOVE ceiling is the stream's character, not the instant:
+            // 1.57 = sine mean-to-peak, so a sinusoid keeps ~full authority
+            // at its own tempo while slow content plans soft.
+            double dem = std::fmax(std::fabs(v), std::fabs(vf));
+            if (_est_ema_ok) dem = std::fmax(dem, 1.57 * _est_sp_ema);
+            double r = dem / (vm > 1e-9 ? vm : 1.0);
+            const double fl = (double)_cfg.chase_jerk_floor;
+            if (r < fl) r = fl;
+            if (r > 1.0) r = 1.0;
+            j_ovr = (double)_cfg.limits.jmax * r;
+        }
+        bool ok = planRuckig(p, v, a, aim, vf, af, 0.0, now_us, j_ovr);
+        // A softened plan may be DECLINED (legality recheck); the mechanical
+        // ceiling is always available as the hard fallback.
+        if (!ok && j_ovr > 0.0)
+            ok = planRuckig(p, v, a, aim, vf, af, 0.0, now_us);
         if (ok) _mode = Mode::Chase;
         return ok;
     }
@@ -3055,6 +3081,10 @@ private:
                 const double raw = (target - _est_last_target) / dt;
                 if (_est_ema_ok) {
                     const double v_prev = _est_v_ema;
+                    // Rectified speed EMA: the stream's CHARACTER (for the
+                    // chase jerk scale) as opposed to the signed instant --
+                    // signed velocity is ~0 at every reversal of fast content.
+                    _est_sp_ema += 0.25 * (std::fabs(raw) - _est_sp_ema);
                     _est_v_ema  += 0.35 * (raw - _est_v_ema);
                     _est_dt_ema += 0.30 * (dt - _est_dt_ema);
                     // Stream curvature: differentiate the (already smoothed)
@@ -3064,6 +3094,7 @@ private:
                     _est_a_ema += 0.25 * (a_raw - _est_a_ema);
                 } else {
                     _est_v_ema  = raw;
+                    _est_sp_ema = std::fabs(raw);
                     _est_dt_ema = dt;
                     _est_a_ema  = 0.0;
                     _est_ema_ok = true;
@@ -3243,6 +3274,7 @@ private:
     bool     _est_valid = false;
     bool     _est_ema_ok = false;
     double   _est_v_ema = 0.0;
+    double   _est_sp_ema = 0.0;   // rectified |chord speed| EMA
     double   _est_a_ema = 0.0;
     double   _est_dt_ema = 0.0;
     double   _est_last_target = 0.5;

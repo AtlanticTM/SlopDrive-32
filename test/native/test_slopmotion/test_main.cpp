@@ -591,6 +591,38 @@ TEST_CASE("Sample synthesis: 50 Hz bare points render smooth, tracking, and "
     CHECK(err < 0.06);                  // tracks the delayed source
 }
 
+TEST_CASE("Chase jerk scales with move demand: slow streams plan soft, fast "
+          "streams keep authority") {
+    auto run = [](double f, double amp) {
+        Config cfg;
+        cfg.limits.vmax = 3.0f;
+        cfg.limits.amax = 30.0f;
+        cfg.limits.jmax = 500.0f;
+        cfg.sample_synthesis = false;   // chase path under test
+        cfg.chase_jerk_scale = true;    // experimental: default-off (sd-d77.1)
+        Engine e(cfg, 0.5f);
+        float sharp = 1.0f;
+        for (uint64_t t = 0; t <= 800 * kMs; t += 20 * kMs) {
+            Command c;
+            c.target = (float)(0.5 + amp * std::sin(2.0 * 3.14159265 * f *
+                                                    (double(t) * 1e-6)));
+            e.commit(c, t);
+            if (t >= 400 * kMs) sharp = std::min(sharp, e.snapshot(t).sharpness);
+        }
+        return sharp;
+    };
+    // ~10% of vmax demand vs ~85%: the soft plan must be well under the
+    // sharp one, and the sharp one keeps most of the ceiling.
+    const float soft = run(0.3, 0.15);
+    const float sharp = run(1.3, 0.31);
+    // CURRENT-BEHAVIOR pin (experimental): the scale is MONOTONE in demand
+    // and floored; absolute authority on fast content is the open tuning
+    // item (sd-d77.1).
+    CHECK(soft < 0.35f);
+    CHECK(sharp > soft + 0.1f);
+    CHECK(soft >= 0.15f - 1e-3f);   // floor holds
+}
+
 TEST_CASE("Infeasible deadline stretches to physical minimum + anomaly") {
     auto cfg = testConfig();          // vmax = 2 → 0→1 takes ≥ 0.5 s
     cfg.infeasible_policy = InfeasiblePolicy::Stretch;   // the guard's test

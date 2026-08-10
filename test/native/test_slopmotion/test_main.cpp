@@ -655,6 +655,9 @@ TEST_CASE("Sample synthesis pace: 60 Hz stamps make every knot interval "
     // 66.7/83.3 ms -- VARIABLE spacing at every knot. Field report
     // 2026-08-09 ("every knot is dramatically wrong"): without a pending
     // slot, every span adopted off its chain anchor teleports.
+    // Arrivals additionally ride a wandering 0..30 ms transport delay
+    // (stamps stay clean -- TCP preserves order, queueing varies): the
+    // stutter regime of the 2026-08-09 field reports.
     Config cfg = operatorConfig();
     cfg.sample_synthesis = true;   // default; forced so the pin outlives it
     Engine e(cfg, 0.5f);
@@ -664,36 +667,50 @@ TEST_CASE("Sample synthesis pace: 60 Hz stamps make every knot interval "
         return mid + amp * std::sin(2.0 * 3.14159265358979 * f *
                                     (double(t_us) * 1e-6));
     };
+    auto arrival = [&](int k) {
+        return (uint64_t)k * dt +
+               (uint64_t)((15.0 + 15.0 * std::sin(0.7 * k)) * 1000.0);
+    };
     const double src_vpk = 2.0 * 3.14159265358979 * f * amp;
-    double vpk = 0.0, step_pk = 0.0, err = 0.0, prev_p = 0.5;
-    for (uint64_t t = 0; t <= 2 * kS; t += dt) {
-        Command c;
-        c.target = (float)src(t);
-        c.has_anchor = true;
-        c.anchor_us = t;
-        (void)e.commit(c, t);
-        for (uint64_t q = t; q < t + dt; q += kMs) {
-            const double pos = (double)e.positionAt(q);
-            if (q > 100 * kMs)
-                step_pk = std::max(step_pk, std::fabs(pos - prev_p));
-            prev_p = pos;
-            if (q > 400 * kMs) {
-                vpk = std::max(vpk, std::fabs((double)e.velocityAt(q)));
-                err = std::max(err, std::fabs(pos - src(q - 8 * dt)));
-            }
+    double vpk = 0.0, step_pk = 0.0, vstep_pk = 0.0, err = 0.0;
+    double prev_p = 0.5, prev_v = 0.0;
+    int i = 0;
+    for (uint64_t q = 0; q <= 2 * kS; q += kMs) {
+        while ((uint64_t)i * dt <= 2 * kS && arrival(i) <= q) {
+            Command c;
+            c.target = (float)src((uint64_t)i * dt);
+            c.has_anchor = true;
+            c.anchor_us = (uint64_t)i * dt;
+            (void)e.commit(c, q);
+            i++;
+        }
+        const double pos = (double)e.positionAt(q);
+        const double v = (double)e.velocityAt(q);
+        if (q > 100 * kMs) {
+            step_pk = std::max(step_pk, std::fabs(pos - prev_p));
+            vstep_pk = std::max(vstep_pk, std::fabs(v - prev_v));
+        }
+        prev_p = pos;
+        prev_v = v;
+        if (q > 400 * kMs) {
+            vpk = std::max(vpk, std::fabs(v));
+            err = std::max(err, std::fabs(pos - src(q - 12 * dt)));
         }
     }
     int an[16] = {0};
     slopmotion::Anomaly ev;
     while (e.popAnomaly(ev)) an[(int)ev.kind & 15]++;
-    MESSAGE("uneven-knot census: vpk " << vpk << " (src " << src_vpk
+    MESSAGE("jittered-knot census: vpk " << vpk << " (src " << src_vpk
             << ", ratio " << vpk / src_vpk << ")  worst 1 ms step " << step_pk
-            << "  err " << err << "  an[1.." << 6 << "] " << an[1] << "/"
-            << an[2] << "/" << an[3] << "/" << an[4] << "/" << an[5] << "/"
-            << an[6]);
+            << "  worst 1 ms v-step " << vstep_pk << "  err " << err
+            << "  an[1..6] " << an[1] << "/" << an[2] << "/" << an[3] << "/"
+            << an[4] << "/" << an[5] << "/" << an[6]);
     CHECK(step_pk <= (double)cfg.limits.vmax * 1e-3 * 1.05);
+    // Stutter IS a velocity discontinuity: adjacent 1 ms samples may differ
+    // by at most one accel-ceiling step.
+    CHECK(vstep_pk <= (double)cfg.limits.amax * 1e-3 * 1.5 + 1e-6);
     CHECK(vpk <= src_vpk * 1.35);
-    CHECK(err < 0.08);
+    CHECK(err < 0.10);
 }
 
 TEST_CASE("Chase jerk scales with move demand: slow streams plan soft, fast "

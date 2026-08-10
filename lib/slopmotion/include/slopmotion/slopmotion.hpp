@@ -1213,7 +1213,13 @@ public:
         // late by the holdback and re-samples a lagging entry -- permanent
         // schedule debt (measured: every span guard-bound, ratios 90-470).
         if (!_syn_chain_ok) {
-            _syn_chain_us = now_us;
+            // Jitter buffer: seed the schedule AHEAD of real time so span
+            // arrivals land EARLY and promote exactly on anchor (pending
+            // slot). Seeded at arrival, half of all spans land late, and a
+            // late adoption enters mid-span off a linear coast -- a velocity
+            // kink at every jitter burst (field report 2026-08-09). MUST
+            // stay under one knot pitch: the pending slot is one deep.
+            _syn_chain_us = now_us + kSynthJitterUs;
             _syn_chain_ok = true;
         }
         uint64_t tw = _syn_chain_us;
@@ -1327,6 +1333,9 @@ public:
             // Emitted ahead of its chain anchor (uneven knot cadence): the
             // active plan keeps playing; maybeSettle promotes at t0. Adopting
             // now would clamp to the span start and teleport.
+            // Slot occupied = successor beat the pending's anchor: promote it
+            // early rather than drop its knot (the bigger jump).
+            if (_pend_ok) adoptQuintic(_pend_c, _pend_T, _pend_start);
             for (int i = 0; i < 6; i++) _pend_c[i] = c[i];
             _pend_T     = T;
             _pend_start = t0;
@@ -1494,6 +1503,10 @@ private:
     // 60 ms knots give 27x the headroom and the quintic interior does the
     // between-knot smoothing, which is the point of synthesis.
     static constexpr uint64_t kSynthSpanUs = 60000;
+    // Synthesis jitter buffer: the chain schedule leads real time by this
+    // margin so transport jitter lands spans EARLY (pending slot), never
+    // mid-flight. MUST stay under kSynthSpanUs (one pending slot).
+    static constexpr uint64_t kSynthJitterUs = 40000;
     // Chase jerk-scale knee: demand fraction of vmax at which full jerk
     // authority returns (see commitChase).
     static constexpr double   kChaseJerkKneeFrac = 0.5;

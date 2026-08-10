@@ -118,6 +118,15 @@ static void report(const char* s) {
 }
 
 static volatile uint32_t g_framesToS3 = 0, g_framesFromS3 = 0;
+// g_rxDrops is a SUM over nine unrelated failure paths, which makes a climbing
+// total unattributable -- the census below names which one is firing. Kept
+// alongside the total rather than replacing it: /probe consumers read rx_drops.
+static volatile uint32_t g_dropOverflow = 0;   // RX ring overrun, resync pending
+static volatile uint32_t g_dropCobs = 0;       // COBS decode failed
+static volatile uint32_t g_dropShort = 0;      // decoded frame under 2 bytes
+static volatile uint32_t g_dropSlotRange = 0;  // slot byte outside the table
+static volatile uint32_t g_dropSlotFree = 0;   // slot not claimed / fd closed
+static volatile uint32_t g_dropSend = 0;       // httpd_ws_send_frame_async failed
 static volatile uint32_t g_rxDrops    = 0, g_txDrops      = 0;
 static volatile uint32_t g_bytesToS3  = 0;
 static volatile uint32_t g_estopSeen  = 0;   // SPEC §13.5 raw-scan hits
@@ -220,7 +229,7 @@ static void pumpFromS3() {
         if (b != 0x00) {
             if (g_rxOverflow) continue;                  // wait for the delimiter
             if (g_rxLen < sizeof(g_rxAcc)) g_rxAcc[g_rxLen++] = b;
-            else { g_rxOverflow = true; g_rxLen = 0; g_rxDrops++; }
+            else { g_rxOverflow = true; g_rxLen = 0; g_rxDrops++; g_dropOverflow++; }
             continue;
         }
         if (g_rxOverflow) { g_rxOverflow = false; g_rxLen = 0; continue; }
@@ -255,10 +264,10 @@ static void pumpFromS3() {
             std::span<const std::byte>(reinterpret_cast<const std::byte*>(g_rxAcc), g_rxLen),
             std::span<std::byte>(reinterpret_cast<std::byte*>(out), sizeof(out)));
         g_rxLen = 0;
-        if (!r.isOk()) { g_rxDrops++; continue; }
+        if (!r.isOk()) { g_rxDrops++; g_dropCobs++; continue; }
 
         size_t n = r.value();
-        if (n < 2) { g_rxDrops++; continue; }
+        if (n < 2) { g_rxDrops++; g_dropShort++; continue; }
         uint8_t slot = out[0];
 
         // Bridge control coming BACK from the S3. Cross-task: written here on
@@ -294,20 +303,20 @@ static void pumpFromS3() {
             continue;
         }
 
-        if (slot >= kSlots) { g_rxDrops++; continue; }
+        if (slot >= kSlots) { g_rxDrops++; g_dropSlotRange++; continue; }
 
         {
             // Lock spans the validity check AND the send: without it
             // onSockClose can free the slot and close(fd) in between, and the
             // fd number is immediately reusable.
             SlotLock lk;
-            if (!g_wsUsed[slot] || g_wsFd[slot] < 0) { g_rxDrops++; continue; }
+            if (!g_wsUsed[slot] || g_wsFd[slot] < 0) { g_rxDrops++; g_dropSlotFree++; continue; }
             httpd_ws_frame_t f{};
             f.type    = HTTPD_WS_TYPE_BINARY;
             f.payload = out + 1;
             f.len     = n - 1;
             if (httpd_ws_send_frame_async(g_srv, g_wsFd[slot], &f) == ESP_OK) g_framesFromS3++;
-            else g_rxDrops++;
+            else { g_rxDrops++; g_dropSend++; }
         }
         }
     }
@@ -488,7 +497,14 @@ static esp_err_t wsHandler(httpd_req_t* req) {
     // expected." Ignoring it is the conforming behavior; resetting never is.
     httpd_ws_frame_t f{};
     esp_err_t e = httpd_ws_recv_frame(req, &f, 0);
-    if (e != ESP_OK) { g_rxDrops++; return ESP_OK; }
+    // ESP_FAIL, NOT ESP_OK. The return value is what tells esp_http_server
+    // whether to KEEP the session: ESP_OK means "handled, socket healthy", so
+    // a peer that vanished without a close handshake gets its handler
+    // re-invoked immediately, fails again, and spins -- measured at ~5.5k
+    // iterations/s, which starves the httpd task, never reaches close_fn, and
+    // so never frees the slot or tells the S3. ESP_FAIL closes the session,
+    // which runs onSockClose: the one teardown funnel.
+    if (e != ESP_OK) { g_rxDrops++; return ESP_FAIL; }
 
     // CONSUME THE PAYLOAD FOR EVERY TYPE, control frames included. A frame
     // whose bytes are not read stays in the TCP stream and desyncs the parser
@@ -496,11 +512,13 @@ static esp_err_t wsHandler(httpd_req_t* req) {
     // PONG was not enough: it turned an immediate reset into a reset a dozen
     // frames later, which is harder to diagnose, not better.
     uint8_t buf[kMaxFrame];
-    if (f.len > kMaxFrame) { g_rxDrops++; return ESP_OK; }
+    // Oversized: the payload cannot be consumed, so the stream is desynced for
+    // everything after it. Close rather than parse garbage (see the note above).
+    if (f.len > kMaxFrame) { g_rxDrops++; return ESP_FAIL; }
     if (f.len > 0) {
         f.payload = buf;
         e = httpd_ws_recv_frame(req, &f, f.len);
-        if (e != ESP_OK) { g_rxDrops++; return ESP_OK; }
+        if (e != ESP_OK) { g_rxDrops++; return ESP_FAIL; }
     }
 
     // Control frames are OURS now (handle_ws_control_frames is true on the URI
@@ -564,7 +582,10 @@ static esp_err_t probeHandler(httpd_req_t* req) {
         "\"heap_total\":%u,\"free\":%u,\"min_free\":%u,\"largest\":%u,"
         "\"rssi\":%d,\"ch\":%u,\"bssid\":\"%s\",\"ws_slots_used\":%d,\"reset_reason\":%d,"
         "\"tx_frames\":%u,\"tx_bytes\":%u,\"tx_drops\":%u,"
-        "\"rx_frames\":%u,\"rx_drops\":%u,\"uptime_ms\":%u,\"stages\":[",
+        "\"rx_frames\":%u,\"rx_drops\":%u,"
+        "\"drops\":{\"overflow\":%u,\"cobs\":%u,\"short\":%u,\"slot_range\":%u,"
+        "\"slot_free\":%u,\"send\":%u},"
+        "\"uptime_ms\":%u,\"stages\":[",
         ESP.getChipModel(), (unsigned)ESP.getChipCores(),
         (unsigned)ESP.getFlashChipSize(), (unsigned)ESP.getPsramSize(),
         (unsigned)ESP.getHeapSize(), (unsigned)ESP.getFreeHeap(),
@@ -572,7 +593,10 @@ static esp_err_t probeHandler(httpd_req_t* req) {
         WiFi.RSSI(), (unsigned)WiFi.channel(), WiFi.BSSIDstr().c_str(),
         used, (int)esp_reset_reason(),
         (unsigned)g_framesToS3, (unsigned)g_bytesToS3, (unsigned)g_txDrops,
-        (unsigned)g_framesFromS3, (unsigned)g_rxDrops, (unsigned)millis());
+        (unsigned)g_framesFromS3, (unsigned)g_rxDrops,
+        (unsigned)g_dropOverflow, (unsigned)g_dropCobs, (unsigned)g_dropShort,
+        (unsigned)g_dropSlotRange, (unsigned)g_dropSlotFree, (unsigned)g_dropSend,
+        (unsigned)millis());
     for (uint8_t i = 0; i < g_stageCount && p < (int)sizeof(j) - 120; i++) {
         p += snprintf(j + p, sizeof(j) - p, "%s{\"n\":\"%s\",\"free\":%u,\"largest\":%u}",
                       i ? "," : "", g_stages[i].name,

@@ -1030,6 +1030,9 @@ public:
         _syn_prev_ok = false;
         _syn_vf_ok = false;
         _syn_chain_ok = false;
+        _pend_ok = false;
+        _synr_n = 0;
+        _synr_w = 0;
         _hold_pos   = clamp01(pos);
         _mode       = Mode::Idle;
         _kind       = PlanKind::None;
@@ -1135,7 +1138,19 @@ public:
             _syn_prev_ok = false;
             _syn_vf_ok = false;
             _syn_chain_ok = false;
+            _synr_n = 0;
+            _synr_w = 0;
         }
+        // Every priming/fallback chase targets the sample ~2 knots BEHIND
+        // the head -- the same delayed timeline the chain renders -- so a
+        // span's entry state is already ON that timeline. Chasing the head
+        // made every first span a yank-back reversal: illegal, re-prime,
+        // churn (bench trace 2026-08-09: five failed locks in 800 ms).
+        _synr_us[_synr_w] = stamp;
+        _synr_p[_synr_w]  = (float)target;
+        _synr_w = (uint8_t)((_synr_w + 1) % kSynRingN);
+        if (_synr_n < kSynRingN) _synr_n++;
+        const double tgt_d = synthDelayedTarget(stamp, target);
         if (!_syn_ok) {
             // First point of a (re)started stream: plain chase positions to
             // it (the cold governor gentles a genuine opening); synthesis
@@ -1143,7 +1158,7 @@ public:
             _syn_ok = true;
             _syn_p = target;
             _syn_us = stamp;
-            return commitChase(cmd, p, v, a, target, t0);
+            return commitChase(cmd, p, v, a, tgt_d, t0);
         }
         if (stamp <= _syn_us) {   // duplicate/regressive stamp: keep newest
             _syn_p = target;
@@ -1155,7 +1170,7 @@ public:
         if (stamp - _syn_us < kSynthSpanUs) {
             // While the holdback is still priming, keep chasing at sample
             // rate so a catch-up converges at 50 Hz, not knot pitch.
-            if (!_syn_prev_ok) return commitChase(cmd, p, v, a, target, t0);
+            if (!_syn_prev_ok) return commitChase(cmd, p, v, a, tgt_d, t0);
             return true;
         }
         // The first mature pair only rotates the buffer: a span needs the
@@ -1205,30 +1220,42 @@ public:
         if (now_us > kAnchorMaxLateUs + tw) tw = now_us - kAnchorMaxLateUs;
         _syn_chain_us = tw + (uint64_t)(T * 1e6);
         double pw, vw, aw;
-        sampleRaw(tw, pw, vw, aw);
+        // Entry state at the chain anchor: from the PENDING span's end when
+        // one is outstanding (the active plan knows nothing past it), else
+        // from the live plan.
+        if (_pend_ok) evalCurve(_pend_c, _pend_T, 1.0, pw, vw, aw);
+        else          sampleRaw(tw, pw, vw, aw);
+#ifdef SLOPMOTION_SYNTH_DEBUG
+        if (std::fabs(clamp01(_syn_p) - pw) / T > 0.9 * (double)_cfg.limits.vmax)
+            std::printf("SYNSLIP now=%llu tw=%llu T=%.4f pw=%.4f knot=%.4f\n",
+                        (unsigned long long)now_us, (unsigned long long)tw, T,
+                        pw, clamp01(_syn_p));
+#endif
         if (std::fabs(clamp01(_syn_p) - pw) / T >
             0.9 * (double)_cfg.limits.vmax) {
             // The span's schedule already saturates the machine: catch-up
             // authority is zero, so slip is DROPPED, never financed (the
             // samples contract is decimation). Re-prime at the freshest
-            // point and chase it; synthesis resumes on the next mature pair.
+            // point and chase the delayed timeline; synthesis resumes on the
+            // next mature pair.
             _syn_p = target;
             _syn_us = stamp;
             _syn_prev_ok = false;
             _syn_vf_ok = false;
             _syn_chain_ok = false;
-            return commitChase(cmd, p, v, a, target, t0);
+            return commitChase(cmd, p, v, a, tgt_d, t0);
         }
-        bool ok = commitSynthSpan(pw, vw, aw, clamp01(_syn_p), vf, af, T, tw);
+        bool ok = commitSynthSpan(pw, vw, aw, clamp01(_syn_p), vf, af, T, tw,
+                                  now_us);
         if (!ok) {
-            // Hot-entry span: chase the FRESHEST point instead and re-prime;
-            // synthesis re-locks on the next mature pair from a clean entry.
+            // Hot-entry span: chase the delayed timeline instead and
+            // re-prime; synthesis re-locks on the next mature pair.
             _syn_p = target;
             _syn_us = stamp;
             _syn_prev_ok = false;
             _syn_vf_ok = false;
             _syn_chain_ok = false;
-            return commitChase(cmd, p, v, a, target, t0);
+            return commitChase(cmd, p, v, a, tgt_d, t0);
         }
         _syn_vf = vf;
         _syn_vf_ok = true;
@@ -1246,8 +1273,30 @@ public:
     // quintic, scan it, DEGRADE boundary estimates (af first, then vf) until
     // legal -- estimates are ours to soften -- and only then fall back to the
     // Ruckig guard. Schedule is held; amplitude of a knot is never shaved.
+    // Newest held sample at least 2 knots behind `stamp`; the oldest held
+    // one when the stream is younger than the delay (opening park point).
+    double synthDelayedTarget(uint64_t stamp, double fallback) const {
+        if (_synr_n == 0) return fallback;
+        const uint64_t want =
+            stamp > 2 * kSynthSpanUs ? stamp - 2 * kSynthSpanUs : 0;
+        int best = -1, oldest = 0;
+        uint64_t best_us = 0, oldest_us = ~0ULL;
+        for (int i = 0; i < _synr_n; i++) {
+            const uint64_t us = _synr_us[i];
+            if (us <= want && (best < 0 || us > best_us)) {
+                best = i;
+                best_us = us;
+            }
+            if (us < oldest_us) {
+                oldest = i;
+                oldest_us = us;
+            }
+        }
+        return (double)_synr_p[best >= 0 ? best : oldest];
+    }
+
     bool commitSynthSpan(double p, double v, double a, double knot, double vf,
-                         double af, double T, uint64_t t0) {
+                         double af, double T, uint64_t t0, uint64_t now_us) {
         if (!(T > 0.0)) return false;
         double c[6];
         buildWaveformCurve(p, v, a, knot, vf, af, T, c);
@@ -1257,13 +1306,34 @@ public:
                 // Still illegal (hot entry, ceiling reversal): report and let
                 // the caller drop to CHASE for one knot -- an in-chain Ruckig
                 // guard overruns its span and mints local schedule debt.
+#ifdef SLOPMOTION_SYNTH_DEBUG
+                std::printf("SYNFAIL t0=%llu now=%llu T=%.4f p=%.4f v=%.3f "
+                            "a=%.2f knot=%.4f vf=%.3f ratio=%.2f\n",
+                            (unsigned long long)t0, (unsigned long long)now_us,
+                            T, p, v, a, knot, vf, quinticWorstRatio(c, T));
+#endif
                 recordAnomaly(AnomalyType::WaveformFallback, (float)knot,
                               (float)quinticWorstRatio(c, T), t0);
                 return false;
             }
         }
+#ifdef SLOPMOTION_SYNTH_DEBUG
+        std::printf("SYNSPAN t0=%llu now=%llu T=%.4f p=%.4f v=%.3f a=%.2f "
+                    "knot=%.4f vf=%.3f pend=%d\n",
+                    (unsigned long long)t0, (unsigned long long)now_us, T, p,
+                    v, a, knot, vf, (int)(t0 > now_us));
+#endif
+        if (t0 > now_us) {
+            // Emitted ahead of its chain anchor (uneven knot cadence): the
+            // active plan keeps playing; maybeSettle promotes at t0. Adopting
+            // now would clamp to the span start and teleport.
+            for (int i = 0; i < 6; i++) _pend_c[i] = c[i];
+            _pend_T     = T;
+            _pend_start = t0;
+            _pend_ok    = true;
+            return true;
+        }
         adoptQuintic(c, T, t0);
-        _mode = Mode::Waveform;
         return true;
     }
 
@@ -1295,6 +1365,7 @@ public:
     // sampler gates on this exactly as it did on the cubic's isBusy(). A
     // trajectory pending SETTLE still counts as busy (it is still moving).
     bool isBusy(uint64_t now_us) const {
+        if (_pend_ok) return true;   // a scheduled successor is motion to come
         if (_kind == PlanKind::None) return false;
         if (elapsedS(now_us) < planDuration()) return true;
         double p, v, a;
@@ -1846,6 +1917,7 @@ private:
     }
 
     void adoptQuintic(const double* c, double T, uint64_t now_us) {
+        _pend_ok = false;   // any adoption supersedes a scheduled successor
         for (int i = 0; i < 6; i++) _q_c[i] = c[i];
         _q_T        = T;
         _kind       = waveformIsCubic() ? PlanKind::Cubic : PlanKind::Quintic;
@@ -3004,6 +3076,7 @@ private:
                 return false;
             }
         }
+        _pend_ok    = false;   // a point plan supersedes a scheduled successor
         _traj       = traj;
         _kind       = PlanKind::Ruckig;
         _plan_start = now_us;
@@ -3141,7 +3214,15 @@ private:
             return 0.0;                                // the stream really is gone
         }
         const double cap = (double)_cfg.settle_grace_us * 1e-6;
-        return std::fmin(kSettleGraceMult * _est_dt_ema, cap);
+        double g = std::fmin(kSettleGraceMult * _est_dt_ema, cap);
+        // A locked synthesis chain PRODUCES at knot pitch, not sample pitch:
+        // starvation is judged against the chain's own cadence, or uneven
+        // knots brake the machine mid-stream (field report 2026-08-09). A
+        // dead stream still zeroes the grace via the staleness check above.
+        if (_syn_chain_ok) {
+            g = std::fmax(g, 1.5 * (double)kSynthSpanUs * 1e-6);
+        }
+        return g;
     }
 
     // ---- Starve-settle ------------------------------------------------------
@@ -3166,6 +3247,15 @@ private:
     // authority; this window only stops the engine from panicking on ms-scale
     // pacing noise.
     void maybeSettle(uint64_t now_us) {
+        if (_pend_ok) {
+            // A scheduled successor exists: promote it at its anchor, and
+            // never settle ahead of it -- the stream is alive by definition.
+            if (now_us >= _pend_start) {
+                _pend_ok = false;
+                adoptQuintic(_pend_c, _pend_T, _pend_start);
+            }
+            return;
+        }
         if (_kind == PlanKind::None || _mode == Mode::Settle) {
             settleToIdle(now_us);
             return;
@@ -3318,6 +3408,21 @@ private:
     double   _syn_vf = 0.0;
     bool     _syn_chain_ok = false; // chain-time anchor established
     uint64_t _syn_chain_us = 0;
+    // Recent raw samples: the priming/fallback chase target rides ~2 knots
+    // behind the head (see commitSampleSynth).
+    static constexpr int kSynRingN = 8;
+    uint64_t _synr_us[kSynRingN] = {};
+    float    _synr_p[kSynRingN] = {};
+    uint8_t  _synr_n = 0;
+    uint8_t  _synr_w = 0;
+    // Pending synthesized span: committed AHEAD of its chain anchor (uneven
+    // knot cadence) and promoted at the anchor by maybeSettle. Without this
+    // slot an early adoption clamps to the span START (elapsedS) and every
+    // uneven knot teleports (field report 2026-08-09).
+    bool     _pend_ok = false;
+    double   _pend_c[6] = {};
+    double   _pend_T = 0.0;
+    uint64_t _pend_start = 0;
     // Previous waveform TARGET (dwell rule): a hold is the same target
     // re-commanded, never just "happens to be near" -- a centering-clipped
     // chain lands near its NEXT target legitimately (the RFC-049c regime).

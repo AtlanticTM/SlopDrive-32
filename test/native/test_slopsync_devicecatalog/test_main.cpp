@@ -117,6 +117,11 @@ bool isRegisteredRole(std::string_view r) {
 // unreachable from the machine and selecting it fell through the boot map to
 // whatever the engine default happened to be. Same shape as the fw 2.1.49 bug
 // the boot map in main.cpp carries a comment about.
+// MOVED 2026-09-02 (AE D3 61 91 9E 92 C9 FE -> 17 A6 F6 02 01 8C 52 6D):
+// commit 837069f (cold-start governor, Stretch default, bare-point
+// synthesis knobs) changed the catalog without re-pinning here, a C-3
+// miss found by the 2026-09-02 census. Additive entries, no protocol
+// break: clients re-fetch on etag mismatch by design.
 TEST_CASE("device catalog: etag pinned — accidental-wire-change tripwire") {
     DeviceCatalog dc;
     std::vector<std::byte> scratch(65536);
@@ -131,7 +136,7 @@ TEST_CASE("device catalog: etag pinned — accidental-wire-change tripwire") {
     hex.pop_back();
     // Moved deliberately by the drive-tune/drive-set pair (0x1130 / 0x3130),
     // then again by drive-tune's two readback fields.
-    CHECK(hex == "AE D3 61 91 9E 92 C9 FE");
+    CHECK(hex == "17 A6 F6 02 01 8C 52 6D");
 }
 
 // ---- Baseline conformance ---------------------------------------------------

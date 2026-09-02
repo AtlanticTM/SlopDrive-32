@@ -572,9 +572,15 @@
   let dragStartMin = 0;
   let dragStartMax = 0;
 
+  /** The gate for one drag mode. Asked at grab AND on every move: a handle the
+      machine disables mid-gesture (mask, link loss, tier change) must stop
+      writing, the same re-check onBandKey/onHandleKey/requestMove already do. */
+  function dragAllowed(mode) {
+    return mode === 'min' ? minEnabled : mode === 'max' ? maxEnabled : bandEnabled;
+  }
+
   function startDrag(mode, e) {
-    const ok = mode === 'min' ? minEnabled : mode === 'max' ? maxEnabled : bandEnabled;
-    if (!ok) return;
+    if (!dragAllowed(mode)) return;
     dragMode = mode;
     dragStartX = e.clientX;
     dragStartMin = minVal ?? lo;
@@ -585,6 +591,9 @@
 
   function onDragMove(e) {
     if (!dragMode || !hostEl) return;
+    // Ending the drag rather than merely skipping the write: a gesture resumed
+    // from a stale dragStartX would jump the window on re-enable.
+    if (!dragAllowed(dragMode)) { dragMode = null; return; }
     const rect = hostEl.getBoundingClientRect();
     if (!rect.width) return;
     const dv = ((e.clientX - dragStartX) / rect.width) * span;

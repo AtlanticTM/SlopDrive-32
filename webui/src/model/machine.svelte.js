@@ -102,6 +102,41 @@ const EVT_MAX = 120;
 const NACK_MAX = 60;
 
 /**
+ * The device-reported half of the state, in its no-connection shape. These are
+ * FUNCTIONS, not constants, because forgetDevice() below installs a fresh copy:
+ * one home for "what the page knows before any hub has spoken", used both to
+ * seed the state and to return to it.
+ */
+function blankCatalog() {
+  return {
+    ready: false,
+    entries: [],
+    etag: '',               // hex, ready to display
+    verified: false,        // etag matched what the hub declared (SPEC 8.3)
+    bytes: 0,
+    cached: false,          // served from the local cache, not re-fetched
+    model: null,            // buildSettingsModel() output
+  };
+}
+
+function blankEvents() {
+  return { log: [], anomaly: [], session: [], nacks: [] };
+}
+
+function blankStats() {
+  return {
+    framesIn: 0,
+    framesOut: 0,
+    bytesIn: 0,
+    statePushes: 0,
+    lastRxMs: 0,
+    clockOffsetUs: null,
+    clockRttUs: null,
+    reconnects: 0,
+  };
+}
+
+/**
  * THE reactive machine state. One object, deeply proxied by Svelte.
  */
 export const machine = $state({
@@ -122,15 +157,7 @@ export const machine = $state({
   },
 
   /** Catalog + everything derived from it. Replaced wholesale on adoption. */
-  catalog: {
-    ready: false,
-    entries: [],
-    etag: '',               // hex, ready to display
-    verified: false,        // etag matched what the hub declared (SPEC 8.3)
-    bytes: 0,
-    cached: false,          // served from the local cache, not re-fetched
-    model: null,            // buildSettingsModel() output
-  },
+  catalog: blankCatalog(),
 
   /** channelId -> last decoded STATE sample. The ONLY source of device values. */
   samples: {},
@@ -140,24 +167,10 @@ export const machine = $state({
   grants: {},
 
   /** Bounded event rings, newest last. */
-  events: {
-    log: [],
-    anomaly: [],
-    session: [],
-    nacks: [],
-  },
+  events: blankEvents(),
 
   /** Link quality counters for the SlopSync pane. */
-  stats: {
-    framesIn: 0,
-    framesOut: 0,
-    bytesIn: 0,
-    statePushes: 0,
-    lastRxMs: 0,
-    clockOffsetUs: null,
-    clockRttUs: null,
-    reconnects: 0,
-  },
+  stats: blankStats(),
 });
 
 let session = null;
@@ -304,7 +317,12 @@ function push(ring, item, max) {
  */
 export function connect(opts = {}) {
   if (session) return session;
-  _host = opts.host || (typeof location !== 'undefined' ? location.hostname : '');
+  const host = opts.host || (typeof location !== 'undefined' ? location.hostname : '');
+  // A different hub is a different machine. Whatever the last one reported is
+  // not evidence about this one, and rendering it while the new session is
+  // still connecting is the UI stating a value the device never sent.
+  if (host !== _host) forgetDevice();
+  _host = host;
 
   machine.link.phase = 'connecting';
   machine.link.since = Date.now();
@@ -499,10 +517,30 @@ function installVisibilityRecovery() {
   });
 }
 
+/**
+ * Drop everything the hub told us, back to the pre-connection shape.
+ *
+ * GROUND TRUTH: with no session there is no device truth, so the page must
+ * read "unknown", never the previous machine's catalog, samples, grants or
+ * counters still rendering as current.
+ */
+function forgetDevice() {
+  machine.catalog = blankCatalog();
+  machine.samples = {};
+  machine.sampleTs = {};
+  machine.grants = {};
+  machine.events = blankEvents();
+  machine.stats = blankStats();
+  machine.link.hubIdentity = null;
+  machine.link.limits = {};
+  machine.link.subsDropped = 0;
+}
+
 /** Tear down (used by tests and by the Tauri shell on host change). */
 export function disconnect() {
   if (!session) return;
   try { session.close(); } catch (e) { /* ignore */ }
   session = null;
   machine.link.phase = 'idle';
+  forgetDevice();
 }

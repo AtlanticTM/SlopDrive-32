@@ -14,8 +14,10 @@
  * Also carries deterministic pass/fail assertions (below the simulation) for
  * sampleAt()'s cubic-Hermite interpolation: velocity continuity across a
  * shared sample boundary, the linear fallback for a tangent-less first span,
- * and the overshoot clamp on a bad velocity estimate. Exits nonzero on any
- * assertion failure.
+ * the overshoot clamp on a bad velocity estimate, and — under clumped arrivals
+ * — that the stored tangent is measured against the RECONSTRUCTED schedule
+ * rather than arrival time (webui.md T18). Exits nonzero on any assertion
+ * failure.
  *
  * Run: node webui/test/telebuf-sim.mjs
  */
@@ -264,6 +266,65 @@ console.log('\ntelebuf.js — Hermite continuity and clamp assertions\n');
   const wild = vels.filter((v) => v > 2 * 20).length;
   ok('dwell/resume replay: no wild frame after motion resumes', wild === 0,
      'wild=' + wild + '/' + vels.length + ' maxVel=' + Math.max(...vels).toFixed(1) + 'mm/s');
+}
+
+// ---------------------------------------------------------------------------
+// Clumped arrivals — the stored TANGENT must come from the reconstructed
+// schedule, not the arrival delta (webui.md T18).
+//
+// The hub samples evenly; TCP delivers clumps that share ONE arrival stamp,
+// then a gap. push() reschedules the STORED timestamps onto an even,
+// future-anchored timeline, so a tangent measured against arrival time sits in
+// a different time base than the span sampleAt() divides it by: inside a clump
+// the arrival delta is zero or negative (the schedule already leads arrival by
+// LEAD_MS), which yields no usable tangent at all — the interpolator silently
+// drops to linear and the extrapolation velocity stays stale at whatever it
+// was before the clumping started. Neither symptom shows on a still frame, so
+// assert on the numbers: every tangent finite, and the extrapolation velocity
+// consistent with the spacing the ring actually stored.
+// ---------------------------------------------------------------------------
+{
+  const tele = createTelebuf();
+  const VEL = 10 / 1000;                 // 10 mm/s, in mm per ms
+  const HUB_PERIOD = 30, PER_CLUMP = 3, CLUMP_EVERY = 90;
+
+  let arrive = 0;
+  let sampled = 0;
+  // Steady clumped delivery: three evenly-sampled points share one arrival.
+  for (; arrive < 3000; arrive += CLUMP_EVERY) {
+    for (let k = 0; k < PER_CLUMP; k++) {
+      tele.push(VEL * sampled, arrive);
+      sampled += HUB_PERIOD;
+    }
+  }
+  // ...then a real gap (a shed channel), then clumped delivery resumes.
+  arrive += 250; sampled += 250;
+  for (let n = 0; n < 10; n++, arrive += CLUMP_EVERY) {
+    for (let k = 0; k < PER_CLUMP; k++) {
+      tele.push(VEL * sampled, arrive);
+      sampled += HUB_PERIOD;
+    }
+  }
+
+  // The curve's own average slope across the newest buffered span, in the
+  // ring's stored time base — this is what the tangents must agree with.
+  const probe = [];
+  for (let t = arrive - 400; t <= arrive + 40; t += 5) {
+    const r = tele.sampleAt(t);
+    if (r.value != null) probe.push({ t, v: r.value, vel: r.velPerMs, extra: r.extrapolating });
+  }
+  ok('clumped arrivals: every interpolated value and tangent is finite',
+     probe.every((x) => isFinite(x.v) && isFinite(x.vel)), 'probes=' + probe.length);
+
+  const first = probe[0], last = probe[probe.length - 1];
+  const curveVel = (last.v - first.v) / (last.t - first.t);   // mm per ms, stored time base
+  const tail = probe.filter((x) => x.extra);
+  const extrapVel = tail.length ? tail[tail.length - 1].vel : NaN;
+  ok('clumped arrivals: the extrapolation tangent is finite and non-zero',
+     isFinite(extrapVel) && Math.abs(extrapVel) > 1e-6, 'velPerMs=' + extrapVel);
+  ok('clumped arrivals: the tangent matches the reconstructed spacing, not the arrival delta',
+     isFinite(extrapVel) && Math.abs(extrapVel - curveVel) <= 0.3 * Math.abs(curveVel),
+     'tangent=' + extrapVel.toFixed(5) + ' curve=' + curveVel.toFixed(5) + ' mm/ms');
 }
 
 console.log('\n' + (fails ? 'FAILURES: ' + fails : 'ALL PASS'));

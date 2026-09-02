@@ -119,11 +119,6 @@
   });
 
   const tierName = $derived(ACCESS_NAME[liveRoles] || String(liveRoles));
-  const modesOffered = $derived(
-    [PAIRING_MODE.knock_approve, PAIRING_MODE.pin_proof, PAIRING_MODE.push_to_pair]
-      .filter((bit) => (pairingModes & bit) !== 0)
-      .map((bit) => PAIRING_MODE_NAME[bit])
-  );
 
   const canAdminister = $derived(
     adminEntry ? liveRoles >= (adminEntry.access | 0) : false
@@ -135,6 +130,18 @@
   // pane exists to serve).
   const windowOpenFromRoster = $derived(!!(sample && sample.flags_bits && sample.flags_bits.window_open));
   const windowOpen = $derived(windowOpenFromRoster || liveWindowOpen);
+
+  // push_to_pair is a WINDOW, not a standing capability: WELCOME's bitmask is
+  // only its value at connect time, and the window auto-expires after 120 s.
+  // Take that one bit from `windowOpen` — the same live signal the badge
+  // renders — so the list, the note below it and the badge cannot disagree
+  // once the window closes. The other two modes are standing hub capability
+  // and WELCOME is their only source.
+  const modesOffered = $derived(
+    [PAIRING_MODE.knock_approve, PAIRING_MODE.pin_proof, PAIRING_MODE.push_to_pair]
+      .filter((bit) => (bit === PAIRING_MODE.push_to_pair ? windowOpen : (pairingModes & bit) !== 0))
+      .map((bit) => PAIRING_MODE_NAME[bit])
+  );
 
   /** The op-select field and its option labels, read off the catalog. */
   const opField = $derived(adminEntry && adminEntry.schema
@@ -349,7 +356,7 @@
       {:else}
         <span class="note">nothing right now</span>
       {/if}
-      {#if !modesOffered.includes('push_to_pair')}
+      {#if !windowOpen}
         <span class="note"> — no physical-presence window is currently open.</span>
       {/if}
     </p>

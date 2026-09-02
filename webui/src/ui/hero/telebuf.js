@@ -122,7 +122,8 @@ export function createTelebuf(opts = {}) {
   const bufT = new Float64Array(CAP);
   const bufV = new Float64Array(CAP);
   // Per-sample INCOMING velocity (value units/ms, from the previous real
-  // sample to this one), stored at push time so sampleAt() can Hermite-
+  // sample to this one across the RECONSTRUCTED schedule — the same bufT
+  // timeline sampleAt() interpolates on), stored at push time so it can Hermite-
   // interpolate rather than linearly interpolate. NaN means "no prior
   // sample" (the first push ever, or the first after reset()) — sampleAt()
   // must fall back to linear for any span touching such an entry. Reusing
@@ -191,7 +192,11 @@ export function createTelebuf(opts = {}) {
     len++;
 
     if (newestIdx >= 0) {
-      const dt = tsMs - bufT[newestIdx];
+      // Against the RECONSTRUCTED schedule (both ends bufT), never the arrival
+      // stamps: sampleAt() divides this tangent by a bufT span, and a clump
+      // shares one arrival, so an arrival-delta tangent is both in the wrong
+      // time base and undefined inside a clump (webui.md T18).
+      const dt = ts - bufT[newestIdx];
       bufVel[idx] = dt > 0 ? (value - bufV[newestIdx]) / dt : NaN;
       if (dt > 0) lastVelPerMs = bufVel[idx];
     } else {

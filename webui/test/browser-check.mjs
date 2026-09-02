@@ -15,9 +15,19 @@
  *   1. the page reaches LIVE and adopts the catalog
  *   2. tabs appear that were built from the catalog, not from our source
  *   3. controls render, with the widget kinds the model predicted
- *   4. GROUND TRUTH: writing a setting drives data-shadow through
- *      pending -> confirmed, and the displayed value ends up equal to the
- *      device's APPLIED value rather than what we asked for
+ *   4. GROUND TRUTH round trip (groundTruthRoundTrip() below): nudge ONE
+ *      writable numeric field by one step inside its own published bounds,
+ *      assert `data-shadow` goes pending and then confirmed, then RELOAD and
+ *      assert the freshly adopted value equals what the confirmed control was
+ *      displaying. The reload is the independent read: a page load adopts
+ *      device state with no shadow record in play, so agreement proves the
+ *      control was showing the APPLIED value and not the request. The original
+ *      value is written back and re-confirmed before it returns.
+ *      SAFETY: config only, ONE step, restored. It sends nothing else - no
+ *      move, no home, no pattern, no safety op.
+ *      It prints [SKIP] and asserts nothing when this session has no enabled
+ *      writable numeric field (a `watch`-tier run, or a machine whose whole
+ *      settings surface is claimed by hero widgets). A SKIP is not a pass.
  *   5. it looks right at phone width and desktop width
  *
  * Run: node webui/test/browser-check.mjs [host]
@@ -38,6 +48,7 @@ const ok = (name, cond, extra) => {
   console.log('  [' + (cond ? 'PASS' : 'FAIL') + '] ' + name + (extra ? '  — ' + extra : ''));
   if (!cond) fails++;
 };
+const skip = (name, why) => console.log('  [SKIP] ' + name + '  — ' + why);
 
 const browser = await chromium.launch();
 
@@ -113,6 +124,138 @@ await run('phone (iPhone 13)', { ...devices['iPhone 13'] },
 // Narrow edge case: 360px is the floor the layout must survive
 await run('narrow 360x740', { viewport: { width: 360, height: 740 }, isMobile: true, hasTouch: true },
   [['ui-narrow.png', { fullPage: true }]]);
+
+// ---- GROUND TRUTH: write -> pending -> confirmed -> displayed == applied ---
+//
+// The one check here that needs the WRITE plane, which is why this whole file
+// runs against the device (see the header): a page served from anywhere else
+// gets `watch` tier and every control below is correctly disabled.
+async function groundTruthRoundTrip() {
+  console.log('\n--- ground truth round trip ---');
+  const WRITABLE = '.field:not(.disabled):not(.readonly) input[type=number]:not([disabled])';
+  const ANY_NUM = '.field input[type=number]';
+  const ctx = await browser.newContext({ viewport: { width: 1280, height: 900 } });
+  const page = await ctx.newPage();
+
+  // The landing view is telemetry; settings live on the first catalog-built tab.
+  async function openSettings() {
+    await page.goto(PAGE_URL, { waitUntil: 'domcontentloaded', timeout: 20000 });
+    await page.waitForSelector('nav.tabs button', { timeout: 25000 });
+    const names = await page.$$eval('nav.tabs button', (b) => b.map((x) => x.textContent.trim()));
+    const i = names.findIndex((t) => !['Machine', 'Pairing', 'SlopSync', 'Log', 'Display'].includes(t));
+    if (i >= 0) {
+      await page.$$eval('nav.tabs button', (b, n) => b[n].click(), i);
+      await page.waitForTimeout(500);
+    }
+  }
+
+  const shadowOfLabel = (label) => page.evaluate(([sel, want]) => {
+    for (const el of document.querySelectorAll(sel)) {
+      const f = el.closest('.field');
+      if (f.querySelector('.field-label').textContent.trim() === want) return f.dataset.shadow;
+    }
+    return null;
+  }, [ANY_NUM, label]);
+
+  const valueOfLabel = (label) => page.evaluate(([sel, want]) => {
+    for (const el of document.querySelectorAll(sel)) {
+      const f = el.closest('.field');
+      if (f.querySelector('.field-label').textContent.trim() === want) return Number(el.value);
+    }
+    return null;
+  }, [ANY_NUM, label]);
+
+  const writeLabel = (label, v) => page.evaluate(([sel, want, val]) => {
+    for (const el of document.querySelectorAll(sel)) {
+      const f = el.closest('.field');
+      if (f.querySelector('.field-label').textContent.trim() === want) {
+        el.value = String(val);
+        el.dispatchEvent(new Event('change', { bubbles: true }));
+        return true;
+      }
+    }
+    return false;
+  }, [ANY_NUM, label, v]);
+
+  /** Poll this field's data-shadow until it reaches one of `states`. */
+  async function awaitShadow(label, states, timeout) {
+    const deadline = Date.now() + timeout;
+    let seen = null;
+    while (Date.now() < deadline) {
+      seen = await shadowOfLabel(label);
+      if (states.includes(seen)) return seen;
+      await page.waitForTimeout(20);
+    }
+    return seen;
+  }
+
+  await openSettings();
+  const pick = await page.evaluate((sel) => {
+    const el = document.querySelector(sel);
+    if (!el) return null;
+    const f = el.closest('.field');
+    return {
+      label: f.querySelector('.field-label').textContent.trim(),
+      value: Number(el.value),
+      min: el.min === '' ? null : Number(el.min),
+      max: el.max === '' ? null : Number(el.max),
+      step: Number(el.step) || 1,
+    };
+  }, WRITABLE);
+
+  if (!pick || !isFinite(pick.value)) {
+    skip('GROUND TRUTH round trip', 'no enabled writable numeric field on this session'
+         + ' (watch tier, or every setting claimed by a hero widget)');
+    await ctx.close();
+    return;
+  }
+
+  // One step, inside the field's own published bounds, in whichever direction
+  // fits - the same size move the field's own +/- button makes.
+  let want = pick.value + pick.step;
+  if (pick.max != null && want > pick.max) want = pick.value - pick.step;
+  if (pick.min != null && want < pick.min) want = null;
+  if (want == null || want === pick.value) {
+    skip('GROUND TRUTH round trip', 'no in-bounds step available on "' + pick.label + '"');
+    await ctx.close();
+    return;
+  }
+  want = Math.round(want * 1e6) / 1e6;
+  console.log('        field "' + pick.label + '": ' + pick.value + ' -> ' + want
+              + ' (step ' + pick.step + '), restored afterwards');
+
+  await writeLabel(pick.label, want);
+  const pending = await awaitShadow(pick.label, ['pending', 'overdue'], 600);
+  ok('write drives data-shadow to pending', pending === 'pending' || pending === 'overdue',
+     'data-shadow=' + pending);
+
+  const settled = await awaitShadow(pick.label, ['confirmed', 'fault'], 4000);
+  ok('the echo confirms the write (no fault, no timeout)', settled === 'confirmed',
+     'data-shadow=' + settled);
+  const applied = await valueOfLabel(pick.label);
+  ok('the confirmed control displays a value', applied != null,
+     'displayed=' + applied + ' requested=' + want);
+
+  // The independent read: a fresh page load adopts device state with no shadow
+  // record in play, so whatever it renders is the APPLIED value by definition.
+  await openSettings();
+  const adopted = await valueOfLabel(pick.label);
+  ok('displayed value equals the device APPLIED value (survives a reload)',
+     adopted != null && applied != null && Math.abs(adopted - applied) < 1e-6,
+     'adopted=' + adopted + ' displayed=' + applied
+     + (adopted !== want ? ' (device clamped our ' + want + ')' : ''));
+
+  // ---- restore -------------------------------------------------------------
+  await writeLabel(pick.label, pick.value);
+  const restored = await awaitShadow(pick.label, ['confirmed', 'fault'], 4000);
+  const back = await valueOfLabel(pick.label);
+  ok('original value restored', restored === 'confirmed' && back != null
+     && Math.abs(back - pick.value) < 1e-6, 'value=' + back + ' was=' + pick.value);
+
+  await ctx.close();
+}
+
+await groundTruthRoundTrip();
 
 // ---- horizontal overflow: a control page must never scroll sideways -------
 {

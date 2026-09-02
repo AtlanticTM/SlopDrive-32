@@ -4,6 +4,7 @@
 #include <atomic>
 
 #include "DeferredReboot.h"
+#include "RpFlashLink.h"
 #include "comms/BridgeProtocol.h"
 
 // ============================================================================
@@ -78,6 +79,13 @@ public:
     uint8_t  otaSerialAbortReason() const { return _serialAbort; }
     uint16_t otaSerialNextSeq() const { return _serialSeq; }
     bool     otaSerialInFlight() const { return _serialLastMs != 0; }
+    // True while the SPI link belongs to an RP2350 image write. motorTask
+    // reads this to stand off the link, so exactly one owner drives the bus.
+    bool     rpFlashActive() const { return _rp.active(); }
+    // The coprocessor's firmware string, for a C-8 stamp on the RP image.
+    // Empty until the RP has answered kOpFlashVersion at least once.
+    const char* rpVersion() const { return _rp.version(); }
+    bool        readRpVersion() { return _rp.readVersion(); }
     // MUST be pumped. A sender that dies mid-transfer otherwise leaves the OTA
     // gate latched forever: NVS blocked, motion stopped, no further OTA.
     void otaSerialTick();
@@ -130,6 +138,15 @@ private:
     bool    _uploadStarted = false;   // otaBeginWrite() has run for this request
     bool    _uploadFinished = false;  // otaEndWrite() has run for this request
     String  _uploadError;
+
+    // Success on the RP path does NOT reboot this device, so it needs its own
+    // exit from the gate: clear the in-flight flags, leave motion stopped.
+    void finishRpOta(bool success);
+
+    // The RP2350 image path (sd-4k1.3): a THIRD target inside this class, never
+    // a second service, so prepareForOta() stays the one gate.
+    RpFlashLink _rp;
+    bool        _serialToRp = false;
 
     // Serial-OTA scratch. Single in-flight, same as the HTTP path.
     int      _serialCommand  = 0;

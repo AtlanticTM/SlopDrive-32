@@ -47,6 +47,11 @@ enum Op : uint8_t {
 enum OtaTarget : uint8_t {
     kOtaTargetApp = 0x00,   // U_FLASH
     kOtaTargetFs  = 0x01,   // U_SPIFFS (LittleFS bundle)
+    // The RP2350 motion coprocessor, reached over the SPI link BEHIND the S3
+    // (sd-4k1.3). A target byte, not a second op family: the C5 authenticates
+    // and streams bytes identically, and only the S3's sink differs. The chunk
+    // seq, the window, the acks and the crc32 are the same contract.
+    kOtaTargetRp  = 0x02,
 };
 
 enum OtaState : uint8_t {

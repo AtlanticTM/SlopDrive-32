@@ -241,6 +241,30 @@ bridge::OtaState OtaService::otaSerialBegin(uint8_t target, uint32_t declared_si
         return bridge::kOtaFailed;
     }
 
+    _serialToRp = (target == bridge::kOtaTargetRp);
+    if (_serialToRp) {
+        // The gate the S3's own images already run under: motion stopped, NVS
+        // deferred, concurrent updates refused. The RP writes its own flash;
+        // this side only forwards, and this device never reboots for it.
+        if (!prepareForOta("serial(rp)")) {
+            _serialAbort = bridge::kOtaAbortBusy;
+            return bridge::kOtaFailed;
+        }
+        _serialDeclared = declared_size;
+        _serialWritten  = 0;
+        _serialSeq      = 0;
+        _serialCrcState = slopsync::crc32Init();
+        _serialLastMs   = millis();
+        _serialDups     = 0;
+        _serialHoles    = 0;
+        if (!_rp.begin(declared_size)) {
+            _serialAbort = bridge::kOtaAbortTooBig;
+            finishRpOta(false);
+            return bridge::kOtaFailed;
+        }
+        return bridge::kOtaReady;
+    }
+
     _uploadAuthOk   = true;      // the C5 already authenticated this transfer
     _uploadBegun    = false;
     _uploadStarted  = false;
@@ -270,7 +294,8 @@ bridge::OtaState OtaService::otaSerialBegin(uint8_t target, uint32_t declared_si
 }
 
 bridge::OtaState OtaService::otaSerialData(uint16_t seq, const uint8_t* data, size_t len) {
-    if (!_uploadBegun) return bridge::kOtaIdle;
+    if (_serialToRp && !_rp.active()) return bridge::kOtaIdle;
+    if (!_serialToRp && !_uploadBegun) return bridge::kOtaIdle;
 
     // A gap is a LOST FRAME, not a fatal error: this link measures 68-74% on
     // frames this size (transport.md). Drop it and let the status report what
@@ -294,11 +319,22 @@ bridge::OtaState OtaService::otaSerialData(uint16_t seq, const uint8_t* data, si
         return bridge::kOtaFailed;
     }
 
-    otaWriteChunk(data, len);
-    if (_uploadError.length()) {
-        _serialAbort = bridge::kOtaAbortWriteFail;
-        finishOta(false, "serial");
-        return bridge::kOtaFailed;
+    if (_serialToRp) {
+        // Blocks this task for one chunk. Motion is already stopped and the
+        // RP writes flash in sector-sized stalls, so a chunk costs a few ms
+        // and a sector boundary costs one erase.
+        if (!_rp.push(_serialWritten, data, uint32_t(len))) {
+            _serialAbort = bridge::kOtaAbortWriteFail;
+            finishRpOta(false);
+            return bridge::kOtaFailed;
+        }
+    } else {
+        otaWriteChunk(data, len);
+        if (_uploadError.length()) {
+            _serialAbort = bridge::kOtaAbortWriteFail;
+            finishOta(false, "serial");
+            return bridge::kOtaFailed;
+        }
     }
 
     _serialCrcState = slopsync::crc32Update(
@@ -311,6 +347,18 @@ bridge::OtaState OtaService::otaSerialData(uint16_t seq, const uint8_t* data, si
 }
 
 bridge::OtaState OtaService::otaSerialEnd(uint32_t crc) {
+    if (_serialToRp) {
+        // The RP verifies by READING THE SLOT BACK, not by trusting the
+        // streaming crc: the question is whether the slot holds the image.
+        const bool ok = _rp.end(crc);
+        SLOGI("ota", "RP image %s -- %u of %u B, %u link rewinds",
+              ok ? "flashed and entered" : "REFUSED",
+              unsigned(_serialWritten), unsigned(_serialDeclared),
+              unsigned(_rp.rewinds()));
+        if (!ok) _serialAbort = bridge::kOtaAbortCrc;
+        finishRpOta(ok);
+        return ok ? bridge::kOtaDone : bridge::kOtaFailed;
+    }
     if (!_uploadBegun) return bridge::kOtaIdle;
 
     // CRC BEFORE Update.end(true): end() marks the partition bootable, so a
@@ -352,7 +400,25 @@ void OtaService::otaSerialTick() {
     otaSerialAbort(bridge::kOtaAbortHost);
 }
 
+// The RP path never reboots this device, so success must hand the gate back
+// here. Motion stays stopped either way: the coprocessor that owns the pulse
+// train has just been replaced or has just refused to be.
+void OtaService::finishRpOta(bool success) {
+    SLOGI("ota", "RP image update %s -- motion stays stopped until the "
+          "machine is re-homed", success ? "complete" : "FAILED");
+    _serialToRp   = false;
+    _serialLastMs = 0;
+    _state.ota_active.store(false);
+    _active.store(false);
+}
+
 void OtaService::otaSerialAbort(uint8_t reason) {
+    if (_serialToRp) {
+        _serialAbort = reason;
+        _rp.abort();
+        finishRpOta(false);
+        return;
+    }
     _serialLastMs = 0;
     if (!_uploadBegun) return;
     _serialAbort = reason;

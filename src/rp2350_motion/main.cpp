@@ -19,7 +19,12 @@
 #include "hardware/pio.h"
 #include "hardware/spi.h"
 
+#include "hardware/flash.h"
+#include "hardware/watchdog.h"
+#include "pico/bootrom.h"
+
 #include "comms/MotionLinkProtocol.h"
+#include "comms/RpFlashCore.h"
 #include "slopglow/slopglow_core.hpp"
 
 #include <Adafruit_NeoPixel.h>
@@ -32,10 +37,10 @@ using namespace motionlink;
 // SPI roles by position (mod 4: RX, CSn, SCK, TX), so within GP26..29+15 the
 // legal set is exactly this; SCK cannot land on 29 nor CS on 15.
 static constexpr uint8_t PIN_SPI_RX  = 28;  // S3 MOSI (GPIO38) -> here
-static constexpr uint8_t PIN_SPI_CS  = 29;  // S3 CS   (GPIO4)
-static constexpr uint8_t PIN_SPI_SCK = 26;  // S3 SCK  (GPIO48)
+static constexpr uint8_t PIN_SPI_CS  = 29;  // S3 CS   (GPIO48)
+static constexpr uint8_t PIN_SPI_SCK = 26;  // S3 SCK  (GPIO7)
 static constexpr uint8_t PIN_SPI_TX  = 27;  // -> S3 MISO (GPIO10)
-static constexpr uint8_t PIN_IRQ     = 15;  // -> S3 IRQ (GPIO7), active HIGH
+static constexpr uint8_t PIN_IRQ     = 15;  // -> S3 IRQ (GPIO4), active HIGH
 static constexpr uint8_t PIN_STEP    = 7;   // -> S3 GPIO1 (matrix -> drive PUL)
 static constexpr uint8_t PIN_DIR     = 8;   // -> S3 GPIO2 (matrix -> drive DIR)
 static constexpr uint8_t PIN_WS2812  = 16;  // RP2350-Zero onboard pixel
@@ -309,6 +314,10 @@ static void renderTick() {
 // owed. That was unflagged, uncounted step loss, once per stroke (sd-dxy.1.2).
 // Do NOT push this call back down into the branches: a fourth branch will be
 // added one day and it will not get one.
+// Tick liveness for the watchdog feed in loop(): a tick that stops advancing
+// must reboot the coprocessor, not leave the motor frozen mid-plan.
+static volatile uint32_t s_tickCount = 0;
+
 static bool stepperTick(struct repeating_timer*) {
     // Tick lateness census. Plan time advances by tick COUNT, not wall clock,
     // so a tick that never ran is trajectory that silently never happened.
@@ -317,6 +326,7 @@ static bool stepperTick(struct repeating_timer*) {
     if (s_lastTickUs != 0 && (tnow - s_lastTickUs) > (kTickUs + kTickUs / 2u))
         ++s_lateTicks;
     s_lastTickUs = tnow;
+    ++s_tickCount;
 
     // Frame pump FIRST, and unconditionally: an ESTOP frame must act this
     // tick, and a latched estop must still process its kOpClear.
@@ -327,6 +337,125 @@ static bool stepperTick(struct repeating_timer*) {
     emitTowardPos();
     return true;
 }
+
+// ---- Firmware update over the link (sd-4k1.3) -------------------------------
+// A/B slot write fed by the S3, which is fed by the C5 bridge's OTA surface.
+// Rollback is the RP2350 bootrom's TRY BEFORE YOU BUY, not ours: the freshly
+// written slot is entered with a FLASH UPDATE boot, which runs it ONCE, and an
+// image that never calls rom_explicit_buy() is abandoned at the next ordinary
+// boot. A hand-rolled two-slot loader would put the one component that cannot
+// be updated over the link on the link's critical path; this puts nothing
+// there. See include/comms/RpFlashCore.h and dev board sd-4k1.3.
+// The TBYB bit lives in the IMAGE_DEF and only the -tbyb build variant carries
+// it (tools/rp2350_tbyb.py): the bootrom SKIPS a TBYB image on a normal boot,
+// so the plain image is the USB rescue image and the variant is link-only.
+// Rollback triggers on a REBOOT of an unbought image, never on a hang, which
+// is what the watchdog below is for: a hung loop or a hung tick reboots, and
+// an image that never proved the link reverts.
+//
+// The RP image version. This constant is its ONE home (C-1); the S3 reads it
+// with kOpFlashVersion, which is what makes C-8 verification possible without
+// a bench trip. Bump it with every image that goes out over the link.
+static constexpr char kRpFwVersion[] = "0.1.0-rp";
+static constexpr uint32_t kWatchdogMs = 8000;   // hardware max is 8388
+static_assert(sizeof(kRpFwVersion) <= kFlashVersionBytes,
+              "version string does not fit the status tail");
+
+// The inactive half of the A/B pair, resolved from the bootrom's partition
+// table. capacity() == 0 is the honest report when no partition table has been
+// written yet (the one-time picotool step in build-test-deploy.md): the S3
+// then reports kFlashDetailNoSlot instead of erasing something.
+struct BootromSlot final : rpflash::IFlashSink {
+    uint32_t base  = 0;   // flash storage offset of the target slot
+    uint32_t bytes = 0;
+
+    // Layout assumption, guaranteed by the documented picotool command: the
+    // A/B pair is partitions 0 and 1. Anything else reports "no slot" rather
+    // than guessing which region is safe to erase.
+    void resolve() {
+        base = bytes = 0;
+        boot_info_t info;
+        if (!rom_get_boot_info(&info) || info.partition < 0) return;
+        const int b = rom_get_b_partition(0);
+        if (b < 0) return;
+        int target;
+        if (info.partition == 0) target = b;
+        else if (info.partition == b) target = 0;
+        else return;
+        uint32_t buf[4] = {};
+        const int rc = rom_get_partition_table_info(
+            buf, 4,
+            PT_INFO_PARTITION_LOCATION_AND_FLAGS | PT_INFO_SINGLE_PARTITION |
+                (uint32_t(target) << 24));
+        if (rc != 3) return;
+        // PICOBIN partition-location word: first sector in bits 12:0, last
+        // sector in bits 25:13, both inclusive and sector-granular. The
+        // defining header (pico-sdk common/boot_picobin_headers/include/boot/
+        // picobin.h, PICOBIN_PARTITION_LOCATION_*) is NOT on the arduino-pico
+        // include path (lib/core_inc.txt carries boot_bootrom_headers only), so
+        // the two shifts are restated here rather than reached for through a
+        // relative path into the framework package.
+        const uint32_t loc = buf[1];
+        const uint32_t first = (loc & 0x1FFFu) * FLASH_SECTOR_SIZE;
+        const uint32_t last = (((loc >> 13) & 0x1FFFu) + 1) * FLASH_SECTOR_SIZE;
+        if (last <= first) return;
+        base = first;
+        bytes = last - first;
+    }
+
+    uint32_t capacity() const override { return bytes; }
+
+    // Interrupts off and the other core parked for the erase and the program:
+    // the framework's own EEPROM commit uses exactly this sequence, and
+    // idleOtherCore() is a no-op when core 1 was never started. The 20 kHz tick
+    // stops for the duration, which is the BACKPRESSURE the master paces on --
+    // `want` cannot advance while a write is owed, so a stalled ack means
+    // "busy", never "lost" (T33 rule 2 wears this shape here).
+    bool writeSector(uint32_t off, const uint8_t* data, uint32_t n) override {
+        if (bytes == 0 || n == 0 || off + FLASH_SECTOR_SIZE > bytes) return false;
+        const uint32_t whole = n & ~(FLASH_PAGE_SIZE - 1u);
+        noInterrupts();
+        rp2040.idleOtherCore();
+        flash_range_erase(base + off, FLASH_SECTOR_SIZE);
+        if (whole != 0) flash_range_program(base + off, data, whole);
+        rp2040.resumeOtherCore();
+        interrupts();
+        if (n > whole) {
+            // flash_range_program takes whole pages only; pad the tail with
+            // the erased value so the unwritten remainder reads back as 0xFF.
+            static uint8_t tail[FLASH_PAGE_SIZE];
+            memset(tail, 0xFF, sizeof(tail));
+            memcpy(tail, data + whole, n - whole);
+            noInterrupts();
+            rp2040.idleOtherCore();
+            flash_range_program(base + off + whole, tail, FLASH_PAGE_SIZE);
+            rp2040.resumeOtherCore();
+            interrupts();
+        }
+        return true;
+    }
+
+    // Read back through the NON-CACHED XIP window: the cache still holds the
+    // pre-erase contents of anything just written, and a verify that reads the
+    // cache is a verify of nothing.
+    bool read(uint32_t off, uint8_t* out, uint32_t n) override {
+        if (bytes == 0 || off + n > bytes) return false;
+        memcpy(out,
+               (const void*)(XIP_NOCACHE_NOALLOC_NOTRANSLATE_BASE + base + off),
+               n);
+        return true;
+    }
+};
+
+static BootromSlot s_flashSlot;
+static rpflash::Receiver s_flashRx(s_flashSlot);
+static volatile bool s_flashMode = false;
+// end() reads the whole slot back, so it runs in loop(), never in the frame
+// path. The frame only records the request.
+static volatile bool s_flashEndReq = false;
+static volatile uint32_t s_flashEndCrc = 0;
+static volatile bool s_flashVerReq = false;
+static uint32_t s_flashLastMs = 0;
 
 // ---- Status frame, preloaded before every transaction -----------------------
 static uint8_t s_statusBuf[kFrameBytes];
@@ -342,7 +471,34 @@ static uint16_t runwayMs() {
     return ms > 0xFFFF ? 0xFFFF : uint16_t(ms);
 }
 
+// The version string overlays the telemetry tail for ONE reply, on request.
+// Motion telemetry is meaningless while the S3 is asking what image this is,
+// and the frame has no spare bytes to grow into.
+static void stampVersion() {
+    memset(&s_statusBuf[kFlashStatusOffVersion], 0, kFlashVersionBytes);
+    memcpy(&s_statusBuf[kFlashStatusOffVersion], kRpFwVersion,
+           sizeof(kRpFwVersion) - 1);
+}
+
+// Flash-mode overlay: `pos` and `vel` carry no meaning with motion held, so
+// the flash fields reuse their bytes (offsets from MotionLinkProtocol.h --
+// neither end transcribes a number, T20).
+static void preloadFlashStatus() {
+    memset(s_statusBuf, 0, kFrameBytes);
+    s_statusBuf[0] = kStateFlash;
+    s_statusBuf[1] = s_flags;
+    s_statusBuf[5] = s_lastSeq;
+    rpflash::writeFlashStatus(s_statusBuf, s_flashRx.want(), s_flashRx.result(),
+                              s_flashRx.detail());
+    s_statusBuf[14] = 0xA5;
+    s_statusBuf[15] = s_lastSeq;
+    stampVersion();
+    crcStamp(s_statusBuf);
+    digitalWrite(PIN_IRQ, LOW);
+}
+
 static void preloadStatus() {
+    if (s_flashMode) { preloadFlashStatus(); return; }
     const uint16_t rw = runwayMs();
     s_statusBuf[0] = s_state;
     s_statusBuf[1] = s_flags;
@@ -369,6 +525,7 @@ static void preloadStatus() {
     memcpy(&s_statusBuf[kStatusOffLateTicks], &lt, 2);
     const uint16_t vc = sat16(s_velClamped);
     memcpy(&s_statusBuf[kStatusOffVelClamped], &vc, 2);
+    if (s_flashVerReq) { s_flashVerReq = false; stampVersion(); }
     crcStamp(s_statusBuf);
     // Feed-me line: the producer paces on this, not on polling cadence.
     digitalWrite(PIN_IRQ, (rw < kRunwayLowMs && !s_estop) ? HIGH : LOW);
@@ -392,6 +549,10 @@ static void processFrame(uint8_t* data, size_t len) {
         return;
     }
     s_lastSeq = data[1];
+    // A firmware write owns the board. Every motion op is refused for its
+    // duration, so a stale master frame cannot start a move into a half-
+    // written slot; the estop latched by kOpFlashBegin holds the pins.
+    if (s_flashMode && data[0] < kOpFlashBegin) return;
     switch (data[0]) {
         case kOpEstop:   // ahead of the ring, by design
             s_estop = true;
@@ -496,6 +657,54 @@ static void processFrame(uint8_t* data, size_t len) {
             s_rtActive = true;
             break;
         }
+        case kOpFlashBegin: {
+            if (len < 2 + 4) break;
+            uint32_t sz = 0;
+            memcpy(&sz, data + 2, 4);
+            // ONE gate, the same one estop uses: motion is held for the whole
+            // transfer rather than a second flash-only interlock.
+            s_estop = true;
+            s_rtActive = false;
+            s_head = s_tail = 0;
+            s_segElapsedUs = 0;
+            s_segFresh = true;
+            s_lastSegSeq = 0xFFFF;
+            s_state = kStateEstop;
+            s_flashSlot.resolve();
+            s_flashRx.begin(sz);
+            s_flashEndReq = false;
+            s_flashLastMs = millis();
+            s_flashMode = true;
+            break;
+        }
+        case kOpFlashData: {
+            if (!s_flashMode || len < kFlashChunkOffset) break;
+            const uint32_t off = uint32_t(data[2]) |
+                                 (uint32_t(data[3]) << 8) |
+                                 (uint32_t(data[4]) << 16);
+            // Staging only. The erase and the program happen in loop(): a
+            // receive path that writes flash cannot also service the link.
+            s_flashRx.data(off, data + kFlashChunkOffset, data[5]);
+            break;
+        }
+        case kOpFlashEnd: {
+            if (!s_flashMode || len < 2 + 4) break;
+            uint32_t crc = 0;
+            memcpy(&crc, data + 2, 4);
+            s_flashEndCrc = crc;
+            s_flashEndReq = true;   // loop() verifies: end() reads the slot
+            break;
+        }
+        case kOpFlashAbort:
+            s_flashRx.abort();
+            s_flashEndReq = false;
+            s_flashMode = false;
+            break;
+        case kOpFlashStatus:
+            break;                  // the preloaded status is the whole answer
+        case kOpFlashVersion:
+            s_flashVerReq = true;
+            break;
         default:   // kOpPing and future ops: status answers regardless
             break;
     }
@@ -632,6 +841,79 @@ static PixelOut s_pixel;
 static slopglow::GlowEngine s_glow(s_pixel);
 static slopglow::HeartbeatSource* s_glowHb = nullptr;
 
+// ---- Firmware update: the task-context half (sd-4k1.3) ----------------------
+
+// TRY BEFORE YOU BUY. A flash-update boot runs this image ONCE; unless it buys
+// itself, the next ordinary boot returns to the other slot. The proof required
+// is the LINK -- one CRC-valid frame from the S3 means this image can be
+// commanded. An image that cannot be commanded must not be able to keep
+// itself, and that is the whole of the rollback.
+static void flashBuyIfProven() {
+    static bool s_bought = false;
+    if (s_bought || s_frames == 0) return;
+    s_bought = true;
+    if (rom_get_last_boot_type() != BOOT_TYPE_FLASH_UPDATE) return;
+    // rom_explicit_buy erases and rewrites the sector holding the flag, so it
+    // needs 4 KiB of word-aligned scratch. Called under the same
+    // interrupts-off, other-core-parked window every flash write here uses
+    // rather than through flash_safe_execute: this sketch never starts core 1,
+    // so the SDK helper's multicore lockout has nothing to hand off to.
+    static uint8_t __attribute__((aligned(4))) s_buyScratch[4096];
+    rom_explicit_buy_fn buy =
+        (rom_explicit_buy_fn)rom_func_lookup(ROM_FUNC_EXPLICIT_BUY);
+    if (buy == nullptr) return;
+    noInterrupts();
+    rp2040.idleOtherCore();
+    const int rc = buy(s_buyScratch, sizeof(s_buyScratch));
+    rp2040.resumeOtherCore();
+    interrupts();
+    Serial.printf("[flash] tbyb buy rc=%d fw=%s\n", rc, kRpFwVersion);
+}
+
+// A master that dies mid-transfer must not latch motion off forever: that is
+// the latched-gate class this project has been bitten by twice (sd-emy). The
+// running image is untouched by an abort, so timing out costs nothing.
+static constexpr uint32_t kFlashIdleAbortMs = 10000;
+
+static void flashServiceLoop() {
+    using namespace slopglow;
+    // The receiver's task-context half. The write parks the tick and with it
+    // the frame pump, so `want` stops advancing and the master backs off --
+    // that stall IS the flow control on this hop, not a symptom.
+    const uint32_t want = s_flashRx.want();
+    if (s_flashRx.pending()) s_flashRx.service();
+    if (s_flashEndReq && !s_flashRx.pending()) {
+        s_flashEndReq = false;
+        if (s_flashRx.end(s_flashEndCrc)) {
+            preloadStatus();   // the master reads kFlashDone before the reboot
+            Serial.printf("[flash] verified %u B at 0x%06lx, entering it\n",
+                          unsigned(s_flashRx.size()),
+                          (unsigned long)s_flashSlot.base);
+            // BOOT_TYPE_FLASH_UPDATE is the same value as the picoboot
+            // REBOOT2_FLAG_REBOOT_TYPE_FLASH_UPDATE (bootrom_constants.h says
+            // so in as many words); that header is the one of the pair on the
+            // arduino-pico include path. The reboot is asynchronous, so the
+            // return code is the only report of a refusal, and 200 ms of delay
+            // is what lets the master read kFlashDone first.
+            if (rom_reboot(BOOT_TYPE_FLASH_UPDATE, 200, s_flashSlot.base, 0) != 0)
+                s_flashRx.fail(kFlashDetailBuyFail);   // the running image stands
+        }
+    }
+    // Flash mode is left by the master's abort, never on our own success:
+    // a self-clear here would swap the status overlay out from under the very
+    // read that reports the result.
+    if (want != s_flashRx.want() || s_flashRx.pending()) s_flashLastMs = millis();
+    if (millis() - s_flashLastMs > kFlashIdleAbortMs) {
+        Serial.printf("[flash] idle %u ms -- aborting, running image intact\n",
+                      unsigned(millis() - s_flashLastMs));
+        s_flashRx.abort();
+        s_flashMode = false;
+    }
+    s_glow.set(System::Flash, Status::Working);
+    s_glowHb->pulse();
+    s_glow.update(millis());
+}
+
 
 #if defined(MLINK_WIRE_PROBE)
 // ---- Wire probe (no scope on the bench): counts what actually arrives -------
@@ -683,10 +965,21 @@ void setup() {
     spiSlaveBegin();
 
     add_repeating_timer_us(-int32_t(kTickUs), stepperTick, nullptr, &s_tick);
+    // Hardware watchdog, fed from loop() only while the tick advances. Every
+    // legitimate stall sits far under 8 s: a 4 KB sector erase+program is
+    // ~50 ms and rom_explicit_buy rewrites one sector.
+    watchdog_enable(kWatchdogMs, true);
 }
 
 void loop() {
     using namespace slopglow;
+    {
+        static uint32_t s_fedAt = 0;
+        const uint32_t t = s_tickCount;
+        if (t != s_fedAt) { s_fedAt = t; watchdog_update(); }
+    }
+    flashBuyIfProven();
+    if (s_flashMode) { flashServiceLoop(); return; }
     if (s_lastSeq != 0 || s_state != kStateIdle) s_glow.markReady(System::Link);
     s_glow.set(System::Safety, s_estop ? Status::Urgent : Status::Nominal);
     s_glow.set(System::Motion,

@@ -711,6 +711,10 @@ static esp_err_t otaS3Handler(httpd_req_t* req) {
         return httpd_resp_sendstr(req, "{\"ok\":false,\"error\":\"unauthorized\"}");
     }
     const bool isFs = (strstr(req->uri, "/fs") != nullptr);
+    // /api/ota/rp forwards to the RP2350 BEHIND the S3 (sd-4k1.3). Only the
+    // target byte changes here: the chunking, the window, the acks, the crc32
+    // and this token gate are the same contract the S3's own image rides.
+    const bool isRp = (strstr(req->uri, "/rp") != nullptr);
     const uint32_t total = uint32_t(req->content_len);
     if (total == 0) {
         httpd_resp_set_status(req, "400 Bad Request");
@@ -721,7 +725,9 @@ static esp_err_t otaS3Handler(httpd_req_t* req) {
     g_s3OtaState = bridge::kOtaIdle;   // else last transfer's terminal state
                                        // satisfies the begin-wait instantly
     uint8_t begin[6] = {bridge::kOpOtaBegin,
-                        uint8_t(isFs ? bridge::kOtaTargetFs : bridge::kOtaTargetApp),
+                        uint8_t(isRp   ? bridge::kOtaTargetRp
+                                : isFs ? bridge::kOtaTargetFs
+                                       : bridge::kOtaTargetApp),
                         uint8_t(total), uint8_t(total >> 8),
                         uint8_t(total >> 16), uint8_t(total >> 24)};
     sendToS3(bridge::kSlot, begin, sizeof(begin));
@@ -839,8 +845,9 @@ static esp_err_t otaS3Handler(httpd_req_t* req) {
     // chunks it means every first send was lost (see sd-6kz.1).
     char ok[96];
     snprintf(ok, sizeof(ok),
-             "{\"ok\":true,\"target\":\"s3\",\"chunks\":%lu,\"resends\":%lu,\"reboot_ms\":500}",
-             (unsigned long)totalChunks, (unsigned long)resends);
+             "{\"ok\":true,\"target\":\"%s\",\"chunks\":%lu,\"resends\":%lu,\"reboot_ms\":%d}",
+             isRp ? "rp" : "s3", (unsigned long)totalChunks,
+             (unsigned long)resends, isRp ? 200 : 500);
     return httpd_resp_sendstr(req, ok);
 }
 
@@ -1036,6 +1043,9 @@ void setup() {
         httpd_register_uri_handler(g_http80, &s3a);
         httpd_uri_t s3f{"/api/ota/s3/fs", HTTP_POST, otaS3Handler, nullptr, false, false, nullptr};
         httpd_register_uri_handler(g_http80, &s3f);
+        // The RP2350 coprocessor, two hops out: C5 -> S3 -> SPI link.
+        httpd_uri_t rp{"/api/ota/rp", HTTP_POST, otaS3Handler, nullptr, false, false, nullptr};
+        httpd_register_uri_handler(g_http80, &rp);
         // S3 diag archive over the bridge; the * also matches the bare route.
         httpd_uri_t dg{"/api/diag*", HTTP_GET, diagS3Handler, nullptr, false, false, nullptr};
         httpd_register_uri_handler(g_http80, &dg);

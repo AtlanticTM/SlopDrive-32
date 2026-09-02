@@ -90,6 +90,12 @@ tools/*
 # so it is load-bearing build machinery, not a scratch instrument.
 !tools/gen_logview_header.py
 !tools/logview/
+# The RP2350 A/B partition table (sd-4k1.3). Not an instrument: the firmware's
+# slot resolver assumes exactly this layout, so a clone that lost it cannot
+# reproduce a board the link update works on.
+!tools/rp2350-partitions.json
+# Post-build step of env rp2350_motion (platformio.ini extra_scripts).
+!tools/rp2350_tbyb.py
 .clangd
 # clangd's index cache — 844 files that get rewritten on every parse. It was
 # tracked until 2026-07-29, which is why the repo showed 1249 tracked files

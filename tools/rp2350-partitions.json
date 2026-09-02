@@ -1,0 +1,37 @@
+{
+    "_comment": "RP2350-Zero A/B image slots for the over-the-link update (sd-4k1.3). Written ONCE over USB with picotool; the exact commands live in .claude/rules/build-test-deploy.md. A is partition 0 and B links to it -- src/rp2350_motion/main.cpp BootromSlot::resolve assumes exactly that pairing and reports kFlashDetailNoSlot for anything else. 2016K each leaves the first sectors for the partition table itself on a 4 MB part.",
+    "version": [1, 0],
+    "unpartitioned": {
+        "families": ["absolute"],
+        "permissions": {
+            "secure": "rw",
+            "nonsecure": "rw",
+            "bootloader": "rw"
+        }
+    },
+    "partitions": [
+        {
+            "name": "A",
+            "id": 0,
+            "size": "2016K",
+            "families": ["rp2350-arm-s"],
+            "permissions": {
+                "secure": "rw",
+                "nonsecure": "rw",
+                "bootloader": "rw"
+            }
+        },
+        {
+            "name": "B",
+            "id": 1,
+            "size": "2016K",
+            "link": ["a", 0],
+            "families": ["rp2350-arm-s"],
+            "permissions": {
+                "secure": "rw",
+                "nonsecure": "rw",
+                "bootloader": "rw"
+            }
+        }
+    ]
+}

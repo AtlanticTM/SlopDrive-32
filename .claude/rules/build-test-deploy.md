@@ -87,6 +87,75 @@ C5's resend-one sender against the S3's drop-out-of-order receiver was a
 phase trap (transport.md T33). A transfer near 110 s means the trap is back;
 pull `/api/diag/ota` MID-TRANSFER and read the dups/holes census.
 
+## RP2350 update over the link -- UNVERIFIED ON HARDWARE (sd-4k1.3)
+
+Built and compiled, host-tested, **never run against a board**. Nothing here
+carries a C-4 stamp; treat every number below as arithmetic, not measurement.
+
+**Route:** `POST /api/ota/rp` on the **C5**, RAW body, same shape as
+`/api/ota/s3` (`curl --data-binary @firmware.bin -H "Expect:"`). Same
+`X-OTA-Token` gate (`otaTokenOk`), checked on the C5 and nowhere else. The
+image is `.pio/build/rp2350_motion/firmware.bin`. Two hops: the C5 streams
+240 B bridge chunks to the S3 exactly as it does for the S3's own image
+(`bridge::kOtaTargetRp` is a target byte, not a second op family), and the S3
+forwards each chunk over the SPI link as 24-byte `kOpFlashData` frames.
+
+**The S3 raises the ONE shared OTA gate** (`OtaService::prepareForOta`), so
+motion is stopped for the duration and NVS writes defer. The S3 does not
+reboot for an RP image; motion stays stopped until the machine is re-homed.
+
+**Transfer time, computed not measured.** 24 B of image per 32-byte frame; the
+master's proven 200 us inter-frame floor plus 32 us of clocking at 8 MHz gives
+232 us per frame, so the wire ceiling is ~103 kB/s. The RP stages a 4 KB sector
+in RAM (171 frames, ~40 ms) then erases and programs it with interrupts off,
+which stalls the frame pump for a typical ~50 ms -- so ~44 percent duty,
+~45 kB/s effective. Today's `rp2350_motion` image is 51,804 B: 13 sectors,
+**about 1.2 s**. A full 2 MB slot would be ~47 s. Both are far under the
+two-minute bar, and the bound is flash erase rather than framing, which is why
+the flash mode does NOT renegotiate a wider frame (T33's own lesson).
+
+**A/B and rollback.** Slot selection is the RP2350 bootrom's:
+`rom_get_boot_info` names the running partition, `rom_get_b_partition` its
+pair, `rom_get_partition_table_info` its extent, and
+`rom_reboot(BOOT_TYPE_FLASH_UPDATE, ...)` enters the freshly written one. An
+image that fails the read-back CRC is never entered at all. **Try-before-you-buy
+is the rollback, and it needs two things the plain build does not carry.**
+(1) The TBYB bit in the image's IMAGE_DEF. pico-sdk sets it from
+`PICO_CRT0_IMAGE_TYPE_TBYB=1` inside arduino-pico's prebuilt `libpico.a`, out
+of reach of `build_flags`, so `tools/rp2350_tbyb.py` (post script on
+`rp2350_motion`) sets the bit after the link and emits `firmware-tbyb.bin` and
+`firmware-tbyb.uf2` beside the plain image. Unsigned blocks carry no hash, which
+is what makes the byte patch legal; the script refuses a hashed block. **The
+link ships the `-tbyb` variant; USB rescue ships the plain image.** The bootrom
+skips a TBYB image on a normal boot by design, so a plain `picotool load` of the
+variant would never start. (2) A reboot. The bootrom reverts only when an
+unbought image reboots, and a hung image never does, so the RP arms its
+hardware watchdog (8 s) and feeds it only while the 20 kHz tick is advancing. A
+corrupt image is never entered, a crashing one reverts, a hanging one reverts
+through the watchdog, and the firmware buys once the link has proven live. All
+of this is arithmetic plus the bootrom documentation, not measurement: the
+first link update on hardware, followed by a deliberately broken image, is the
+stamp.
+
+**One-time operator step, over USB, before any of this works.** The board has
+no partition table from the factory. Hold BOOTSEL, then, with
+`picotool` = `%USERPROFILE%\.platformio\packages\tool-picotool-rp2040-earlephilhower\picotool.exe`:
+
+```
+picotool partition create tools/rp2350-partitions.json artifacts/rp-pt.uf2
+picotool load artifacts/rp-pt.uf2
+picotool load -p 0 .pio/build/rp2350_motion/firmware.uf2
+picotool partition info
+```
+
+`partition info` must list two partitions with B linked to A; without that the
+S3 reports `kFlashDetailNoSlot` and erases nothing.
+
+**Version verification (C-8) is `kOpFlashVersion`.** The RP answers with
+`kRpFwVersion` from `src/rp2350_motion/main.cpp`, which is that string's one
+home; the S3 logs it under the `rpflash` tag, readable through the C5's
+`/api/diag/rpflash`.
+
 ## T10 -- PIO's native test runner misreports doctest
 
 **Two additions measured 2026-08-06, each of which cost a cycle:**

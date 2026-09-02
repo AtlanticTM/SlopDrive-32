@@ -450,7 +450,11 @@ static void motorTask(void* /*param*/) {
                 }
             }
         }
-        motor.update();
+        // The SPI link has exactly one owner. While an RP2350 image is being
+        // written the OTA path drives the bus from commsTask, and motion is
+        // stopped by the same gate, so this tick's poll would be noise into a
+        // slave that refuses every motion op anyway (sd-4k1.3).
+        if (!otaService.rpFlashActive()) motor.update();
         // Window glide (sd-ey0): runtime window edits slew at the USER
         // (gentle) limit instead of re-mapping every target in one sample.
         // Goal writes race in from Core 0 (applySettings); a one-tick torn

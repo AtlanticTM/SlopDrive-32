@@ -24,6 +24,7 @@
 
 #include "BootHeap.h"   // sub-attribution of this init()'s internal-heap cost
 #include "MachineConfig.h"   // motion_backend is NVS-backed, read/written here
+#include "SlopSyncTokenPolicy.h"   // validateToken()'s rung order, host-tested
 #include "ui/SlopHttpServer.h"   // attachHttpRoutes() needs the full type
 
 #include <Arduino.h>
@@ -183,39 +184,36 @@ slopsync::AccessLevel SlopDriveHubDelegate::validateToken(std::span<const std::b
     // lockdown posture is setUiTokenEnabled(false) plus paired tokens, and this
     // function already implements it: rung 1 simply stops answering.
 
-    // ---- Rung 1: RFC-029 §4, the browser-borne credential -------------------
-    // A /uitoken mint grants CONTROL and never configure. It is consumed here
-    // (single-use), which is why this check comes FIRST: a valid token must be
-    // burned even if a later branch would have granted the same tier anyway, or
-    // a page could hoard one and replay it after the posture is tightened.
+    // ---- The three rungs ----------------------------------------------------
+    // Rung order lives in SlopSyncTokenPolicy.h (host-tested); this function
+    // owns only the probes and the audit lines.
     //
-    // DO NOT MOVE A LAZILY-INITIALIZED ANYTHING INTO consume()'s spinlock —
-    // see cpp-safety.md T4 (this exact mistake aborted the device on
-    // first HELLO that ever presented a live token). See SlopSyncUiToken.cpp.
-    if (hasToken && _uiTokens.consume(token)) {
+    // Rung 1, RFC-029 §4: a /uitoken mint grants CONTROL and never configure,
+    // and is CONSUMED on match. DO NOT MOVE A LAZILY-INITIALIZED ANYTHING INTO
+    // consume()'s spinlock, see cpp-safety.md T4 (this exact mistake aborted
+    // the device on the first HELLO that ever presented a live token).
+    // Rung 2: validate() is constant-time (RFC-028.3) and answers `watch` for
+    // BOTH an unknown device and a recognized-but-suspended one, so it can
+    // never be used as an instance-id oracle.
+    const TokenGrant grant = decideTokenGrant(
+        hasToken,
+        [&] { return _uiTokens.consume(token); },
+        [&] {
+            return _pairing != nullptr ? _pairing->validate(instance_id, token)
+                                       : slopsync::AccessLevel::watch;
+        });
+
+    if (grant.uitoken_burned) {
         SLOGI("slopsync", "session authorized by /uitoken (control tier)");
-        return slopsync::AccessLevel::control;
+    } else if (grant.granted > slopsync::AccessLevel::watch) {
+        SLOGI("slopsync", "session authorized by paired token (tier %u)", unsigned(grant.granted));
+    } else {
+        // WARN: a client silently losing its write plane is the most confusing
+        // failure this path can produce, and it must be visible in /api/log.
+        SLOGW("slopsync", "session UNAUTHORIZED -> watch tier (token %s)",
+              hasToken ? "present but not recognized" : "absent");
     }
-
-    // ---- Rung 2: the persisted trust ledger (§12.2) -------------------------
-    // validate() is constant-time (RFC-028.3) and answers `watch` for BOTH an
-    // unknown device and a recognized-but-suspended one — deliberately
-    // indistinguishable, so this can never be used as an instance-id oracle.
-    if (hasToken && _pairing != nullptr) {
-        const auto role = _pairing->validate(instance_id, token);
-        if (role > slopsync::AccessLevel::watch) {
-            SLOGI("slopsync", "session authorized by paired token (tier %u)", unsigned(role));
-            return role;
-        }
-    }
-
-    // ---- Rung 3: default deny (to `watch`, not to a closed door) ------------
-    // Logged at WARN because a client silently losing its write plane is the
-    // single most confusing failure this change can produce, and the operator
-    // should be able to see it in /api/log without instrumenting anything.
-    SLOGW("slopsync", "session UNAUTHORIZED -> watch tier (token %s)",
-          hasToken ? "present but not recognized" : "absent");
-    return slopsync::AccessLevel::watch;
+    return grant.granted;
 }
 
 slopsync::Result<IntentValueMap, NackCode> SlopDriveHubDelegate::applyIntent(
@@ -451,8 +449,8 @@ slopsync::Result<IntentValueMap, NackCode> SlopDriveHubDelegate::applyIntent(
         // setting left to write; see the field comment on 0x008A's
         // `blend_mode_reserved` in SlopSyncCatalog.h. A client that still
         // sends key 1 falls through unhandled below, same as key 2 always
-        // has — if it is the ONLY key present the call NACKs INVALID_VALUE
-        // (anyApplied stays false).
+        // has: with no key this case understands, the call NACKs INVALID_VALUE
+        // before touching anything.
         //
         // GROUND TRUTH, and it is not decoration here: these clamp or
         // reinterpret their input somewhere downstream. So the echo is
@@ -460,51 +458,54 @@ slopsync::Result<IntentValueMap, NackCode> SlopDriveHubDelegate::applyIntent(
         // the request — otherwise a rejected switch would leave every
         // client's dropdown showing a mode the machine is not in.
         case ch::modes_set: {
-            applied.count = 0;
-            bool anyApplied = false;
+            // VALIDATE EVERY KEY, THEN APPLY (SPEC 9.3, sd-tki.2). Keys 3 and 4
+            // are immediate mutations that bump cfg_gen, so a range check on a
+            // later key must never be able to NACK an intent whose earlier keys
+            // already landed. A NACK from this case means NOTHING changed.
+            const auto* f3 = findField(requested, 3);   // stream_speed_mode
+            const auto* f4 = findField(requested, 4);   // overshoot_clamp
+            const auto* f5 = findField(requested, 5);   // motion_backend
+            const auto* f6 = findField(requested, 6);   // home_style
+            if (!f3 && !f4 && !f5 && !f6) return Ret::err(NackCode::INVALID_VALUE);
+            const uint64_t v5 = fieldU64(f5, 0);
+            const uint64_t v6 = fieldU64(f6, 0);
+            if (f5 && v5 > 1) return Ret::err(NackCode::INVALID_VALUE);
+            if (f6 && v6 > 1) return Ret::err(NackCode::INVALID_VALUE);
 
-            if (const auto* f = findField(requested, 3)) {   // stream_speed_mode
+            applied.count = 0;
+            if (f3) {
                 in.clear(); out.clear();
-                in["mode"] = uint8_t(fieldU64(f, 0));
+                in["mode"] = uint8_t(fieldU64(f3, 0));
                 _webui.handleCommand(WS_OP_STREAM_MODE, in, out);
                 applied.fields[applied.count++] = {3, IntentValue::ofU64(_state.stream_speed_mode)};
-                anyApplied = true;
             }
-            if (const auto* f = findField(requested, 4)) {   // overshoot_clamp
+            if (f4) {
                 in.clear(); out.clear();
-                in["on"] = fieldU64(f, 0) != 0;
+                in["on"] = fieldU64(f4, 0) != 0;
                 _webui.handleCommand(WS_OP_OVERSHOOT, in, out);
                 applied.fields[applied.count++] =
                     {4, IntentValue::ofU64(_state.interp_clamp_overshoot ? 1u : 0u)};
-                anyApplied = true;
             }
-            if (const auto* f = findField(requested, 5)) {   // motion_backend
+            if (f5) {
                 // restart_required: this ONLY writes NVS. The choice is read
                 // once in setup() before anything touches the motor, so
                 // applying it live is not expressible, and the echo is the
                 // STORED value rather than the running one.
-                uint64_t v = fieldU64(f, 0);
-                if (v > 1) return Ret::err(NackCode::INVALID_VALUE);
-                machineBackendStore(uint8_t(v));
+                machineBackendStore(uint8_t(v5));
                 _machCfgDirty = true;   // service refreshes its published cache
                 // Echoing the RE-READ value, not the request: NVS is what the
                 // next boot binds to, so that is the only honest echo.
                 applied.fields[applied.count++] =
                     {5, IntentValue::ofU64(machineBackendLoad())};
-                anyApplied = true;
             }
-            if (const auto* f = findField(requested, 6)) {   // home_style
+            if (f6) {
                 // Live-applied, no restart: ModbusServoDriver reads it fresh at
                 // the start of every homing cycle, so the next home obeys it.
-                uint64_t v = fieldU64(f, 0);
-                if (v > 1) return Ret::err(NackCode::INVALID_VALUE);
-                machineHomeStyleStore(uint8_t(v));
+                machineHomeStyleStore(uint8_t(v6));
                 _machCfgDirty = true;
                 applied.fields[applied.count++] =
                     {6, IntentValue::ofU64(machineHomeStyleLoad())};
-                anyApplied = true;
             }
-            if (!anyApplied) return Ret::err(NackCode::INVALID_VALUE);
             return Ret::ok(applied);
         }
 
@@ -712,13 +713,21 @@ slopsync::Result<IntentValueMap, NackCode> SlopDriveHubDelegate::applyIntent(
                 "amplitude", "in_step", "in_wait", "out_step", "out_wait", "offset",
             };
 
-            if (const auto* f = findField(requested, 1)) in["ap_mode"] = fieldBool(f, false);
-            if (const auto* f = findField(requested, 2)) in["ap_speed"] = int(fieldU64(f, 0));
+            // VALIDATE THEN APPLY (SPEC 9.3, sd-tki.2): handleCommand below is
+            // a real mutation that bumps the generation even for an empty doc,
+            // so "did this request carry a key we understand" is settled BEFORE
+            // it runs, never by NACKing an empty echo afterwards.
+            bool anyKey = false;
+
+            if (const auto* f = findField(requested, 1)) { in["ap_mode"] = fieldBool(f, false); anyKey = true; }
+            if (const auto* f = findField(requested, 2)) { in["ap_speed"] = int(fieldU64(f, 0)); anyKey = true; }
             // Key = 3 + advpat::BaseId: 3 max_depth, 4 min_depth, 5 in_speed,
             // 6 out_speed, 7 in_accel, 8 out_accel — exactly 0x008E's layout.
             for (uint8_t id = 0; id < kApBaseCount; ++id) {
-                if (const auto* f = findField(requested, uint8_t(3 + id)))
+                if (const auto* f = findField(requested, uint8_t(3 + id))) {
                     in[kBaseJsonKeys[id]] = int(fieldU64(f, 0));
+                    anyKey = true;
+                }
             }
             // Modifier cycles: keys 9..44, base = 9 + 6*id, sub-offsets
             // amplitude+0 in_step+1 in_wait+2 out_step+3 out_wait+4 offset+5 —
@@ -740,9 +749,11 @@ slopsync::Result<IntentValueMap, NackCode> SlopDriveHubDelegate::applyIntent(
                         any = true;
                     }
                     m[kModJsonKeys[sub]] = int(fieldU64(f, 0));
+                    anyKey = true;
                 }
             }
 
+            if (!anyKey) return Ret::err(NackCode::INVALID_VALUE);
             if (!_webui.handleCommand(WS_OP_GEN_CFG, in, out)) {
                 return Ret::err(NackCode::INVALID_VALUE);
             }
@@ -780,7 +791,6 @@ slopsync::Result<IntentValueMap, NackCode> SlopDriveHubDelegate::applyIntent(
                 }
             }
 
-            if (applied.count == 0) return Ret::err(NackCode::INVALID_VALUE);
             cfgChanged = false;  // session-volatile, same as classic pattern-cmd
             return Ret::ok(applied);
         }

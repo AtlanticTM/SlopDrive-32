@@ -1494,6 +1494,18 @@ void WebUI::handleApiPatternPresets() {
 // POST /api/pattern is retired (see the 410 stub in init()).
 
 bool WebUI::applyPattern(JsonDocument& doc, JsonDocument& resp) {
+    // Refuse BEFORE any field is applied: every setter below is a real,
+    // immediate mutation, and a NACK after them would lie about what
+    // landed (SPEC 9.3, ECHO is key-complete over what was applied;
+    // sd-tki.2 class). The only refusal this handler can issue is
+    // "start while not homed", so it is decided first.
+    if (doc["running"].is<bool>() && bool(doc["running"]) &&
+        !_patternEngine.isRunning() && !_state.homed) {
+        resp["ok"] = false;
+        resp["error"] = "Not homed";
+        return false;
+    }
+
     // gen_rate_tick_hz is the ONLY field this handler touches that ConfigStore
     // persists, and only when it actually changes: applyPattern is also the
     // hot path for live speed/depth/stroke slider streaming while a pattern
@@ -1575,11 +1587,7 @@ bool WebUI::applyPattern(JsonDocument& doc, JsonDocument& resp) {
     if (doc["running"].is<bool>()) {
         bool want = doc["running"];
         if (want && !_patternEngine.isRunning()) {
-            if (!_state.homed) {
-                resp["ok"] = false;
-                resp["error"] = "Not homed";
-                return false;
-            }
+            // Homed gate already passed at the top of this function.
             _state.resume_start_ms = millis();
             _patternEngine.start();
             SLOGI("ui", "PatternEngine started");

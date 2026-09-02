@@ -36,6 +36,7 @@
 #include "config_api.h"
 #include "MotorDriver.h"
 #include "CurrentSensor.h"
+#include <atomic>
 
 // Forward-declared: only the FAS type is needed here, the full header stays
 // in the .cpp.
@@ -141,7 +142,16 @@ private:
     // current spike says we've buried the carriage against a hard stop.
     // Returns true on stall, false if the full sweep ran with no wall.
     bool        _sweepToStall(int8_t dir_sign);
-    TaskHandle_t _homingTaskHandle = nullptr;
+    // Homing-task lifecycle. The handle is written by xTaskCreate before the
+    // task can run and cleared ONLY by the task itself at exit; every other
+    // task reads it through std::atomic_ref. Nothing ever vTaskDeletes another
+    // task here: a killer sets _homingAbort and waits for the task to exit on
+    // its own (cross-core, and mid-I2C, an external delete is a double free
+    // on the TCB or a wedged Wire bus -- sd-tki.1).
+    TaskHandle_t      _homingTaskHandle = nullptr;
+    std::atomic<bool> _homingAbort{false};
+    void              _requestHomingAbort(const char* who);
+    [[noreturn]] void _homingExit();
 
 
     FastAccelStepper* _stepper = nullptr;

@@ -7,6 +7,7 @@
 #include "config_api.h"
 #include "ServoMotionExecutor.h"
 #include "CurrentSensor.h"
+#include <atomic>
 
 class ServoModbus;
 
@@ -221,11 +222,17 @@ private:
     bool  _measured_valid = false;
 
     // ---- Homing task (mirrors AIMServoDriver's own homing task) -------------
-    // Killed from emergencyStop(); never runs concurrently with itself.
-    TaskHandle_t _homing_task = nullptr;
+    // Never runs concurrently with itself. The handle is written by
+    // xTaskCreate before the task can run and cleared ONLY by the task at
+    // exit; other tasks read it through std::atomic_ref. Nothing vTaskDeletes
+    // another task: _killHomingTask() requests _homing_abort and waits for
+    // the task to exit on its own (sd-tki.1).
+    TaskHandle_t      _homing_task = nullptr;
+    std::atomic<bool> _homing_abort{false};
+    [[noreturn]] void _homingExit();
     int32_t      _home_speed_counts_s = 0;
     static void  _homingTaskImpl(void* param);
-    // Kill any running homing task. MUST be called by anything that declares
+    // Abort any running homing task and wait for it to exit. MUST be called by anything that declares
     // the machine homed or stopped: the task writes the executor directly,
     // bypassing the _homed gate that keeps the arbiter out, so a survivor
     // fights whatever writes next.

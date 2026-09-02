@@ -128,14 +128,38 @@ void ModbusServoDriver::update() {
 // keeps the arbiter out. Any path that declares the machine homed or stopped
 // must therefore kill it first, or two writers fight over _target and the
 // carriage oscillates between them. Bit us live at fw 2.4.6 via force_home.
+static constexpr uint32_t kHomingAbortWaitMs = 200;
 void ModbusServoDriver::_killHomingTask() {
-    if (_homing_task != nullptr) {
-        vTaskDelete(_homing_task);
-        _homing_task = nullptr;
-        SLOGW("servo", "ModbusServoDriver: homing task killed -- it owns the executor and "
-              "must never run alongside another writer.");
+    std::atomic_ref<TaskHandle_t> h(_homing_task);
+    if (h.load(std::memory_order_acquire) != nullptr) {
+        // Cooperative: the task polls _homing_abort at every wait and exits
+        // through _homingExit(); wait, bounded, so no second writer overlaps
+        // it on the executor. Task context only (vTaskDelay).
+        _homing_abort.store(true, std::memory_order_release);
+        const uint32_t t0 = millis();
+        while (h.load(std::memory_order_acquire) != nullptr &&
+               millis() - t0 < kHomingAbortWaitMs) {
+            vTaskDelay(pdMS_TO_TICKS(2));
+        }
+        if (h.load(std::memory_order_acquire) == nullptr) {
+            SLOGW("servo", "ModbusServoDriver: homing task aborted (%lu ms) -- it owns the "
+                  "executor and must never run alongside another writer.",
+                  (unsigned long)(millis() - t0));
+        } else {
+            SLOGE("servo", "ModbusServoDriver: homing task did not exit within %lu ms; "
+                  "executor unseeded, task left to unwind. uhoh :C",
+                  (unsigned long)kHomingAbortWaitMs);
+        }
     }
     _homing = false;
+}
+
+// The ONE exit of the homing task. Clears the handle last (release).
+void ModbusServoDriver::_homingExit() {
+    _homing_abort.store(false, std::memory_order_relaxed);
+    std::atomic_ref<TaskHandle_t>(_homing_task).store(nullptr, std::memory_order_release);
+    vTaskDelete(nullptr);
+    for (;;) {}
 }
 
 void ModbusServoDriver::emergencyStop() {
@@ -181,7 +205,9 @@ void ModbusServoDriver::_rearmModbus() {
 // stop, back off, and call THAT home (0mm). The only difference is the wall
 // detector. See the header.
 bool ModbusServoDriver::home(int32_t home_speed_steps_s) {
-    if (_homing || _homing_task != nullptr) return false;
+    if (_homing || std::atomic_ref<TaskHandle_t>(_homing_task).load(std::memory_order_acquire) != nullptr)
+        return false;
+    _homing_abort.store(false, std::memory_order_release);
     ServoTelemetry t = _bus.getTelemetry();
     if (!t.enc_valid) {
         SLOGW("servo", "ModbusServoDriver: home() REFUSED -- no encoder sample, so no way "
@@ -245,6 +271,7 @@ void ModbusServoDriver::_moveAndWait(float target_counts, uint32_t timeout_ms) {
     uint32_t deadline = millis() + timeout_ms;
     uint32_t stamp = 0;
     while (millis() < deadline) {
+        if (_homing_abort.load(std::memory_order_acquire)) return;
         _bus.requestRemaining();
         vTaskDelay(pdMS_TO_TICKS(30));
         ServoTelemetry t = _bus.getTelemetry();
@@ -287,6 +314,7 @@ bool ModbusServoDriver::_sweepToWall(int8_t dir_sign) {
     uint32_t deadline = started +
         (uint32_t)(1000.0f * (_max_rail_mm * 1.2f) / (AIM_HOMING_SPEED_MM_S * 0.5f)) + 4000;
     while (millis() < deadline) {
+        if (_homing_abort.load(std::memory_order_acquire)) return false;
         vTaskDelay(pdMS_TO_TICKS(poll_ms));
         ServoTelemetry t = _bus.getTelemetry();
         if (!t.enc_valid) continue;
@@ -373,6 +401,7 @@ bool ModbusServoDriver::_driveHome() {
     const uint32_t t_start = millis();
     bool moved = false;
     while (millis() - t_start < AIM_DRIVE_HOME_START_MS) {
+        if (_homing_abort.load(std::memory_order_acquire)) return false;
         vTaskDelay(pdMS_TO_TICKS(20));
         ServoTelemetry t = _bus.getTelemetry();
         if (!t.enc_valid || t.enc_stamp_ms == last_stamp) continue;
@@ -396,6 +425,7 @@ bool ModbusServoDriver::_driveHome() {
     uint32_t rem_stamp    = 0;
     bool     rem_seen     = false;
     while (millis() - t_start < AIM_DRIVE_HOME_TIMEOUT_MS) {
+        if (_homing_abort.load(std::memory_order_acquire)) return false;
         _bus.requestRemaining();
         vTaskDelay(pdMS_TO_TICKS(40));
         ServoTelemetry t = _bus.getTelemetry();
@@ -429,6 +459,7 @@ bool ModbusServoDriver::_driveHome() {
 }
 
 void ModbusServoDriver::_homingTask() {
+    if (_homing_abort.load(std::memory_order_acquire)) { _homing = false; _homed = false; _homingExit(); }
     // ---- home_style 1: the drive homes itself ------------------------------
     // Preferred on this machine (operator: the built-in cycle works well), and
     // it never runs at boot: nothing calls home() until an operator or the
@@ -462,9 +493,7 @@ void ModbusServoDriver::_homingTask() {
                     _executor.unseed();
                     _homing = false;
                     _homed  = false;
-                    _homing_task = nullptr;
-                    vTaskDelete(nullptr);
-                    return;
+                    _homingExit();
                 }
 
                 _wire_offset = t.enc_counts;
@@ -487,9 +516,7 @@ void ModbusServoDriver::_homingTask() {
                 SLOGI("servo", "ModbusServo Homing: COMPLETE (drive built-in) -- home = 0mm, "
                       "%.1f mm off the stop, stroke %.1f mm. yippie! :3",
                       AIM_HOMING_BACKOFF_MM, (double)getMeasuredStrokeMm());
-                _homing_task = nullptr;
-                vTaskDelete(nullptr);
-                return;
+                _homingExit();
             }
             SLOGW("servo", "ModbusServo Homing: drive finished but no encoder sample to adopt "
                   "as zero -- refusing to declare homed. uhoh :C");
@@ -497,23 +524,23 @@ void ModbusServoDriver::_homingTask() {
         _executor.freeze();
         _homing = false;
         _homed  = false;
-        _homing_task = nullptr;
-        vTaskDelete(nullptr);
-        return;
+        _homingExit();
     }
 
     SLOGI("servo", "ModbusServo Homing: START (following-error detector) %.1f mm/s",
           (float)_home_speed_counts_s / AIM_ENC_COUNTS_PER_MM);
 
+    if (_homing_abort.load(std::memory_order_acquire)) {
+        SLOGW("servo", "ModbusServo Homing: ABORTED during the front sweep.");
+        _executor.unseed(); _homing = false; _homed = false; _homingExit();
+    }
     if (!_sweepToWall(-1)) {
         SLOGW("servo", "ModbusServo Homing: FAILED -- no wall on the front sweep. Check "
               "AIM_MODBUS_HOME_STALL_MM, the rail length, and that output is energized.");
         _executor.freeze();
         _homing = false;
         _homed  = false;
-        _homing_task = nullptr;
-        vTaskDelete(nullptr);
-        return;
+        _homingExit();
     }
     const float front_counts = _executor.commandedPos();
     SLOGI("servo", "ModbusServo Homing: front wall at %.1f mm", nativeToMm((int32_t)-front_counts));
@@ -524,14 +551,16 @@ void ModbusServoDriver::_homingTask() {
     _moveAndWait(front_counts + (float)mmToNative(AIM_HOMING_BACKOFF_MM), 8000);
     vTaskDelay(pdMS_TO_TICKS(150));
 
+    if (_homing_abort.load(std::memory_order_acquire)) {
+        SLOGW("servo", "ModbusServo Homing: ABORTED during the rear sweep.");
+        _executor.unseed(); _homing = false; _homed = false; _homingExit();
+    }
     if (!_sweepToWall(+1)) {
         SLOGW("servo", "ModbusServo Homing: FAILED -- no wall on the rear sweep.");
         _executor.freeze();
         _homing = false;
         _homed  = false;
-        _homing_task = nullptr;
-        vTaskDelete(nullptr);
-        return;
+        _homingExit();
     }
     const float rear_counts = _executor.commandedPos();
 
@@ -565,8 +594,7 @@ void ModbusServoDriver::_homingTask() {
     _homed  = true;
     _homing = false;
     SLOGI("servo", "ModbusServo Homing: COMPLETE -- homed at 0mm. yippie! :3");
-    _homing_task = nullptr;
-    vTaskDelete(nullptr);
+    _homingExit();
 }
 
 // BENCH PATH (HOME_OVERRIDE) — see the header's Constraints note.

@@ -254,16 +254,11 @@ void AIMServoDriver::update() {
 }
 
 void AIMServoDriver::emergencyStop() {
-    // Kill the homing task FIRST — mid-sweep it would just see its wait loop
-    // end, roll into the next sweep, and later re-assert _homed = true,
-    // resuming motion right after the E-stop (same kill stop() does). THEN
-    // cut the pulse train; the 57AIM30 decelerates on its own internal ramp,
-    // this just stops commanding it.
-    if (_homingTaskHandle != nullptr) {
-        vTaskDelete(_homingTaskHandle);
-        _homingTaskHandle = nullptr;
-        SLOGW("aim", "AIMServo E-stop: homing task killed mid-sweep.");
-    }
+    // Abort the homing task FIRST and wait for it to exit: left running it
+    // would roll into the next sweep and re-assert _homed = true right after
+    // the E-stop. Never vTaskDelete it (sd-tki.1). THEN cut the pulse train;
+    // the 57AIM30 decelerates on its own internal ramp.
+    _requestHomingAbort("E-stop");
     hardStop();
     _homed  = false;
     _homing = false;
@@ -299,6 +294,39 @@ void AIMServoDriver::disable() {
 // back off AIM_HOMING_BACKOFF_MM (10mm), re-zero. The task blocks internally
 // with vTaskDelay(20ms) between endstop polls. When done (success or failure)
 // the task sets _homed/_homing and deletes itself.
+
+// Cooperative cancel. The homing task polls _homingAbort at every wait point
+// and exits through _homingExit(); the requester waits, bounded, for the
+// handle to clear so no second writer can overlap the unwinding task (the
+// fight the old external kill was preventing). Task context only: it
+// vTaskDelays. Motion itself is stopped by the caller, not here.
+static constexpr uint32_t kHomingAbortWaitMs = 200;
+void AIMServoDriver::_requestHomingAbort(const char* who) {
+    std::atomic_ref<TaskHandle_t> h(_homingTaskHandle);
+    if (h.load(std::memory_order_acquire) == nullptr) return;
+    _homingAbort.store(true, std::memory_order_release);
+    const uint32_t t0 = millis();
+    while (h.load(std::memory_order_acquire) != nullptr &&
+           millis() - t0 < kHomingAbortWaitMs) {
+        vTaskDelay(pdMS_TO_TICKS(2));
+    }
+    if (h.load(std::memory_order_acquire) == nullptr) {
+        SLOGW("aim", "AIMServo %s: homing task aborted mid-sweep (%lu ms).", who,
+              (unsigned long)(millis() - t0));
+    } else {
+        SLOGE("aim", "AIMServo %s: homing task did not exit within %lu ms; motion is "
+              "stopped, task left to unwind. uhoh :C", who, (unsigned long)kHomingAbortWaitMs);
+    }
+}
+
+// The ONE exit of the homing task. Clears the handle last (release), so a
+// requester that observes nullptr knows every write above it has landed.
+void AIMServoDriver::_homingExit() {
+    _homingAbort.store(false, std::memory_order_relaxed);
+    std::atomic_ref<TaskHandle_t>(_homingTaskHandle).store(nullptr, std::memory_order_release);
+    vTaskDelete(nullptr);
+    for (;;) {}
+}
 
 // Static trampoline — FreeRTOS needs a plain C function pointer, so we bounce
 // through this into the member function. The `this` pointer rides in as param.
@@ -362,6 +390,10 @@ bool AIMServoDriver::_sweepToStall(int8_t dir_sign) {
     uint16_t over_count      = 0;
 
     while (_stepper->isRunning()) {
+        if (_homingAbort.load(std::memory_order_acquire)) {
+            _stepper->forceStop();
+            return false;
+        }
         float amps = fabsf(_current.readCurrentA());
 
         // Build the free-run baseline from the FIRST N samples — while the
@@ -440,6 +472,7 @@ bool AIMServoDriver::_sweepToStall(int8_t dir_sign) {
 }
 
 void AIMServoDriver::_homingTask() {
+    if (_homingAbort.load(std::memory_order_acquire)) { _homing = false; _homed = false; _homingExit(); }
     SLOGI("aim", "AIMServo Homing: START (SENSORLESS via INA228) speed=%u steps/s (%.1f mm/s)",
           (uint32_t)_home_speed_steps_s,
           (float)_home_speed_steps_s / AIM_STEPS_PER_MM);
@@ -451,21 +484,21 @@ void AIMServoDriver::_homingTask() {
         SLOGW("aim", "AIMServo Homing: ABORT — INA228 not ready, cannot sense stalls. uhoh :C");
         _homing = false;
         _homed  = false;
-        _homingTaskHandle = nullptr;
-        vTaskDelete(nullptr);
-        return;
+        _homingExit();
     }
 
     // --- Stall #1: find the FRONT hard stop first — sweeps toward the out end
     SLOGI("aim", "AIMServo Homing: sweeping toward FRONT hard stop...");
+    if (_homingAbort.load(std::memory_order_acquire)) {
+        SLOGW("aim", "AIMServo Homing: ABORTED during the front sweep.");
+        _homing = false; _homed = false; _homingExit();
+    }
     if (!_sweepToStall(-1)) {
         SLOGW("aim", "AIMServo Homing: FAILED — no stall on front sweep. Check current");
         SLOGW("aim", "  threshold (AIM_HOME_STALL_MARGIN_A), wiring, and travel distance.");
         _homing = false;
         _homed  = false;
-        _homingTaskHandle = nullptr;
-        vTaskDelete(nullptr);
-        return;
+        _homingExit();
     }
 
     // Record the front stall position before zeroing at the rear.
@@ -489,20 +522,29 @@ void AIMServoDriver::_homingTask() {
     _stepper->move((int32_t)mmToNative(AIM_HOMING_BACKOFF_MM));  // + = toward rear
     {
         uint32_t free_to = millis() + 5000;
-        while (_stepper->isRunning() && millis() < free_to) vTaskDelay(pdMS_TO_TICKS(10));
+        while (_stepper->isRunning() && millis() < free_to) {
+            if (_homingAbort.load(std::memory_order_acquire)) break;
+            vTaskDelay(pdMS_TO_TICKS(10));
+        }
     }
     vTaskDelay(pdMS_TO_TICKS(250));  // drain the stall spike out of the INA228 average
+    if (_homingAbort.load(std::memory_order_acquire)) {
+        SLOGW("aim", "AIMServo Homing: ABORTED between sweeps.");
+        _homing = false; _homed = false; _homingExit();
+    }
 
     // --- Stall #2: sweep back to the REAR hard stop (becomes home / 0mm) ---
     SLOGI("aim", "AIMServo Homing: sweeping toward REAR hard stop to establish home...");
+    if (_homingAbort.load(std::memory_order_acquire)) {
+        SLOGW("aim", "AIMServo Homing: ABORTED during the rear sweep.");
+        _homing = false; _homed = false; _homingExit();
+    }
     if (!_sweepToStall(+1)) {
         SLOGW("aim", "AIMServo Homing: FAILED — no stall on rear sweep. Check current");
         SLOGW("aim", "  threshold (AIM_HOME_STALL_MARGIN_A), wiring, and travel distance.");
         _homing = false;
         _homed  = false;
-        _homingTaskHandle = nullptr;
-        vTaskDelete(nullptr);
-        return;
+        _homingExit();
     }
 
     // Capture the rear stall position BEFORE zeroing — the true rail span is
@@ -520,7 +562,14 @@ void AIMServoDriver::_homingTask() {
     int32_t backoff_steps = (int32_t)mmToNative(AIM_HOMING_BACKOFF_MM);
     _stepper->move(-backoff_steps);   // negative = away from rear, toward front
     uint32_t to = millis() + 30000;
-    while (_stepper->isRunning() && millis() < to) vTaskDelay(pdMS_TO_TICKS(20));
+    while (_stepper->isRunning() && millis() < to) {
+        if (_homingAbort.load(std::memory_order_acquire)) break;
+        vTaskDelay(pdMS_TO_TICKS(20));
+    }
+    if (_homingAbort.load(std::memory_order_acquire)) {
+        SLOGW("aim", "AIMServo Homing: ABORTED during the back-off; NOT homed.");
+        _homing = false; _homed = false; _homingExit();
+    }
     _stepper->forceStopAndNewPosition(0);   // re-zero: THIS is home (0mm)
     _current_position_mm = 0.0f;
     SLOGI("aim", "AIMServo Homing: rear found, backed off %.1fmm — HOME set at 0mm :3",
@@ -574,13 +623,16 @@ void AIMServoDriver::_homingTask() {
     _homing = false;
     SLOGI("aim", "AIMServo Homing: COMPLETE — homed at 0mm, usable stroke %.1fmm. yippie! :3",
           _measured_stroke_mm > 0.0f ? _measured_stroke_mm : _max_rail_mm);
-    _homingTaskHandle = nullptr;
-    vTaskDelete(nullptr);
+    _homingExit();
 }
 
 
 bool AIMServoDriver::home(int32_t home_speed_steps_s) {
-    if (_homing) return false;
+    // A handle still set after a kill means the old task is unwinding: two
+    // homing tasks would fight over FAS.
+    if (_homing || std::atomic_ref<TaskHandle_t>(_homingTaskHandle).load(std::memory_order_acquire) != nullptr)
+        return false;
+    _homingAbort.store(false, std::memory_order_release);
 
     SLOGI("aim", "AIMServo Homing: Starting...");
     _homing = true;
@@ -619,7 +671,7 @@ bool AIMServoDriver::home(int32_t home_speed_steps_s) {
         4096,                   // stack (bytes)
         this,                   // param = this pointer
         20,                     // priority — same as StrokeEngine
-        &_homingTaskHandle,     // handle so we can kill it on E-stop
+        &_homingTaskHandle,     // written before the task can run; cleared by the task
         1                       // Core 1 — same core as FAS engine
     );
     if (created != pdPASS) {
@@ -651,6 +703,7 @@ void AIMServoDriver::runHomingStep() {
 // its final step, so the first move has a valid 0mm reference.
 // Do NOT call on real hardware that must not move without a genuine home.
 void AIMServoDriver::forceHomeState(bool homed) {
+    _requestHomingAbort("forceHomeState");
     if (homed) {
         if (_stepper) {
             _stepper->enableOutputs();               // pulse train can now go out
@@ -813,15 +866,11 @@ float AIMServoDriver::getTargetPosition() const {
 // ---- Stop / HardStop --------------------------------------------------------
 
 void AIMServoDriver::stop() {
-    // E-stop: halt the pulse train, kill the homing task if it's running,
+    // E-stop: halt the pulse train, abort the homing task if it's running,
     // disable outputs via FAS, and clear all state. No ambiguity, no stale
     // flags left behind.
 
-    // Kill the homing task first if it's mid-sweep.
-    if (_homingTaskHandle != nullptr) {
-        vTaskDelete(_homingTaskHandle);
-        _homingTaskHandle = nullptr;
-    }
+    _requestHomingAbort("stop");
 
     if (_stepper) {
         _stepper->forceStop();

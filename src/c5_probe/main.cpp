@@ -131,6 +131,49 @@ static volatile uint32_t g_rxDrops    = 0, g_txDrops      = 0;
 static volatile uint32_t g_bytesToS3  = 0;
 static volatile uint32_t g_estopSeen  = 0;   // SPEC §13.5 raw-scan hits
 
+// ---- UART ownership: one owner per direction --------------------------------
+// Three tasks reach this link: the :82 WebSocket httpd instance, the :80 HTTP
+// httpd instance (distinct ctrl ports, so distinct tasks), and the Arduino
+// loop task. Nothing in the hardware serializes them.
+// TX is held only across encode-and-write, microseconds, so a bounded take
+// never queues; a take that times out is FLOW CONTROL (SPEC 13.1) and counts
+// as a tx drop exactly like a full ring, never an error.
+// RX is held for as long as one caller owns the drain -- a whole OTA or diag
+// pull -- so it is RECURSIVE: such a handler calls pumpFromS3() inside its own
+// ownership. loop() takes it with ZERO wait and skips the pass, which is what
+// "loop() stands off" means now; a flag read on one task and cleared by
+// another put two tasks inside the COBS accumulator.
+// LOCK ORDER is rx -> tx, never the reverse: a failing send inside pumpFromS3
+// re-enters onSockClose, which sends. sendToS3 never drains.
+static SemaphoreHandle_t g_txMx = nullptr;
+static SemaphoreHandle_t g_rxMx = nullptr;
+
+// Far above the microsecond hold; only a take that cannot happen at all fails.
+static constexpr uint32_t kTxWaitMs = 5;
+// Long enough to outlast one loop() drain (a wedged peer costs SO_SNDTIMEO),
+// short enough that a request arriving mid-OTA refuses instead of hanging.
+static constexpr uint32_t kRxOwnerWaitMs = 250;
+
+struct UartTxLock {
+    const bool held;
+    UartTxLock()
+        : held(g_txMx == nullptr ||
+               xSemaphoreTake(g_txMx, pdMS_TO_TICKS(kTxWaitMs)) == pdTRUE) {}
+    ~UartTxLock() { if (held && g_txMx) xSemaphoreGive(g_txMx); }
+    UartTxLock(const UartTxLock&) = delete;
+    UartTxLock& operator=(const UartTxLock&) = delete;
+};
+
+struct UartRxLock {
+    const bool held;
+    explicit UartRxLock(uint32_t waitMs)
+        : held(g_rxMx == nullptr ||
+               xSemaphoreTakeRecursive(g_rxMx, pdMS_TO_TICKS(waitMs)) == pdTRUE) {}
+    ~UartRxLock() { if (held && g_rxMx) xSemaphoreGiveRecursive(g_rxMx); }
+    UartRxLock(const UartRxLock&) = delete;
+    UartRxLock& operator=(const UartRxLock&) = delete;
+};
+
 // ---- UART TX ----------------------------------------------------------------
 // MUST NOT block (ITransport §9/§13.1). HardwareSerial::write() blocks when the
 // TX buffer is full, so free space is checked FIRST and the frame is refused
@@ -140,8 +183,13 @@ static bool sendToS3(uint8_t slot, const uint8_t* frame, size_t len) {
 
     // STATIC, not locals: this runs deep inside the httpd task's 4096-byte
     // stack, under wsHandler's own 512-byte frame buffer. ~1 KB of extra
-    // locals down there is not free. Safe because esp_http_server serves from
-    // a single task, so there is exactly one producer.
+    // locals down there is not free. The scratch below and the write that
+    // follows are therefore SHARED: two httpd instances call this from two
+    // tasks, and an interleaved write splits one COBS run across another,
+    // corrupting both frames. The lock covers encode AND write for that reason.
+    UartTxLock lk;
+    if (!lk.held) { g_txDrops++; return false; }
+
     static uint8_t src[1 + kMaxFrame];
     src[0] = slot;
     memcpy(src + 1, frame, len);
@@ -180,10 +228,14 @@ static bool    g_rxOverflow = false;
 // undrained and the sender saw ~7/s instead of hundreds. During a transfer the
 // handler drains the link itself and loop() stands off -- exactly one caller of
 // pumpFromS3 at any moment, so the accumulator stays single-threaded.
+// Ownership IS the RX mutex; g_otaOwnsRx only reports it (the Link LED).
+// Never gate on the flag: a handler whose ok() is false owns nothing.
 static volatile bool g_otaOwnsRx = false;
 struct OtaRxOwner {
-    OtaRxOwner()  { g_otaOwnsRx = true; }
-    ~OtaRxOwner() { g_otaOwnsRx = false; }
+    UartRxLock lk;
+    OtaRxOwner() : lk(kRxOwnerWaitMs) { if (lk.held) g_otaOwnsRx = true; }
+    ~OtaRxOwner() { if (lk.held) g_otaOwnsRx = false; }
+    bool ok() const { return lk.held; }
     OtaRxOwner(const OtaRxOwner&) = delete;
     OtaRxOwner& operator=(const OtaRxOwner&) = delete;
 };
@@ -209,6 +261,13 @@ static uint8_t  g_tokCode = 0;
 static volatile bool g_tokSeen = false;
 
 static void pumpFromS3() {
+    // Whoever owns the drain keeps it. Recursive, so an owning handler's own
+    // calls pass straight through; every other caller returns rather than
+    // sharing g_rxAcc. The ESTOP raw scan below stays inside this drain and is
+    // never queued: the owner runs it on its own task, at its own pace.
+    UartRxLock rxLk(0);
+    if (!rxLk.held) return;
+
     // BULK read, not byte-at-a-time: read() takes the UART mutex per call, and
     // under an OTA stream this task fell far enough behind that its own acks
     // lagged, the sender read that as loss, and retransmits saturated the link
@@ -620,11 +679,11 @@ static esp_err_t probeHandler(httpd_req_t* req) {
 // strip; this path needs only the wire. Trust model unchanged: reaching the
 // C5's LAN HTTP is the boundary, the point-to-point trace adds nothing.
 static esp_err_t uitokenHandler(httpd_req_t* req) {
-    if (g_otaOwnsRx) {
-        httpd_resp_set_status(req, "409 Conflict");
-        return httpd_resp_sendstr(req, "an OTA owns the link; retry after it");
-    }
     OtaRxOwner rxOwner;   // loop() stands off; this handler drains the link
+    if (!rxOwner.ok()) {
+        httpd_resp_set_status(req, "409 Conflict");
+        return httpd_resp_sendstr(req, "another transfer owns the link; retry after it");
+    }
     g_tokSeen = false;
     const uint8_t reqf[1] = {bridge::kOpTokenReq};
     while (!sendToS3(bridge::kSlot, reqf, sizeof(reqf))) delay(1);
@@ -696,8 +755,9 @@ static bool waitS3State(uint8_t a, uint8_t b, uint32_t timeout_ms) {
     const uint32_t t0 = millis();
     while (millis() - t0 < timeout_ms) {
         // loop() stands off for the whole handler, so this MUST drain or the
-        // status it is waiting for can never arrive.
-        if (g_otaOwnsRx) pumpFromS3();
+        // status it is waiting for can never arrive. Reached only from the
+        // handler that already owns the RX, so the drain is its own.
+        pumpFromS3();
         const uint8_t st = g_s3OtaState;
         if (st == a || st == b) return true;
         delay(2);
@@ -722,6 +782,10 @@ static esp_err_t otaS3Handler(httpd_req_t* req) {
     }
 
     OtaRxOwner rxOwner;   // loop() stands off for the whole transfer
+    if (!rxOwner.ok()) {
+        httpd_resp_set_status(req, "409 Conflict");
+        return httpd_resp_sendstr(req, "{\"ok\":false,\"error\":\"link busy\"}");
+    }
     g_s3OtaState = bridge::kOtaIdle;   // else last transfer's terminal state
                                        // satisfies the begin-wait instantly
     uint8_t begin[6] = {bridge::kOpOtaBegin,
@@ -858,10 +922,6 @@ static esp_err_t otaS3Handler(httpd_req_t* req) {
 // No auth on purpose: read-only diagnostics, same posture as the S3's own
 // /api/diag. The bridge stays a byte pipe -- nothing here parses the text.
 static esp_err_t diagS3Handler(httpd_req_t* req) {
-    if (g_otaOwnsRx) {
-        httpd_resp_set_status(req, "409 Conflict");
-        return httpd_resp_sendstr(req, "an OTA owns the link; retry after it");
-    }
     // Tag = the path segment after "/api/diag/", STOPPING at '?'. Taking the
     // whole remainder made "?from=N" a tag filter that matches no record, so
     // every paged pull answered "0 lines emitted" and follow-tail could not
@@ -884,6 +944,10 @@ static esp_err_t diagS3Handler(httpd_req_t* req) {
     }
 
     OtaRxOwner rxOwner;   // loop() stands off; this handler drains the link
+    if (!rxOwner.ok()) {
+        httpd_resp_set_status(req, "409 Conflict");
+        return httpd_resp_sendstr(req, "another transfer owns the link; retry after it");
+    }
     httpd_resp_set_type(req, "text/plain");
 
     for (;;) {
@@ -933,6 +997,10 @@ void setup() {
     // SlotLock is a no-op while this is null, which would silently restore the
     // race it exists to close.
     g_slotMx = xSemaphoreCreateRecursiveMutex();
+    // Same rule for the link: both are no-ops while null, so neither Serial1
+    // nor either httpd instance may exist before this point.
+    g_txMx   = xSemaphoreCreateMutex();
+    g_rxMx   = xSemaphoreCreateRecursiveMutex();
     for (size_t i = 0; i < kSlots; i++) { g_wsFd[i] = -1; g_wsUsed[i] = false; }
     // Why the last boot happened. A bridge that dies mid-stream reboots and
     // looks identical to one that was power-cycled; without this the only
@@ -1073,7 +1141,7 @@ void setup() {
 }
 
 void loop() {
-    if (!g_otaOwnsRx) pumpFromS3();
+    pumpFromS3();   // no-ops while a handler owns the drain; see UartRxLock
 
     // Supervised reconnect. There was NO reconnect path here at all — the loop
     // only blinked an LED at the link state — so a dropped association was

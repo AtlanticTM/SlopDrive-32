@@ -32,7 +32,11 @@ platform on the ESP32-S3 ecosystem. Hardware-agnostic, community-extensible.
 - **Non-blocking runtime.** Operational loops and real-time motion paths never
   block. `delay()` is PROHIBITED during regular runtime; short blocking delays
   are permitted ONLY in boot/init, module hardware setup, and isolated
-  slow-speed calibration/homing cycles.
+  slow-speed calibration/homing cycles. The ban means millisecond-scale
+  sleeps that stall a task's other duties. A bounded busy-wait under one
+  millisecond with a measured hardware reason (the 200 us inter-frame gap
+  the RP2350 SPI slave needs) is not a delay in this sense (operator ruling
+  2026-09-02).
 - **Motion doctrine, event-driven and never clocked.** ONE COMMAND, ONE PLAN,
   the motion engine executes. Plans are computed at intent arrival from the
   machine's ACTUAL state (live position plus velocity); speed and accel are

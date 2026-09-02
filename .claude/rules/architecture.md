@@ -41,15 +41,37 @@ platform on the ESP32-S3 ecosystem. Hardware-agnostic, community-extensible.
   ceilings. A loop computing positions on a clock is rebuilding a disease this
   project already cured. Segmentation follows commands and waveform structure
   only.
+- **Three-board split (operator-ratified 2026-09-02).** The RP2350 OWNS
+  MOTION: it runs slopmotion and pulse generation, holds the plan, and its
+  rendered position is the machine's position truth. The S3 is the SlopSync
+  hub and the policy owner. The C5 is the network peripheral. Motion commands
+  (samples, C1/C2 segments, point moves, estop) cross the S3-RP link as
+  INTENTS with anchor times, never as rendered chunks: the RP evaluates the
+  plan at its own tick, so there is no runway to starve and no re-render.
+  Commands are sent the moment they arrive, never on a tick (the link is a
+  bus, not a schedule); only status polling may be periodic. Any planner that
+  speaks the link vocabulary is a valid motion processor; the vocabulary
+  carries an axis id from day one (multi-axis is a parked goal, no effort
+  now). The encoder is the AUDITOR of that truth: the drive follows quadrature
+  exactly unless asked for the impossible, so a calc-vs-encoder deviation
+  means an infeasible demand reached the motor. Ceilings are therefore
+  measured and enforced in the engine; the RP emitter cap is a fault
+  detector, never a shaper. Landing state on the dev board (sd-4k1). Until
+  the port lands, the S3-side driver and its segment path remain the live
+  implementation.
 - **MotionArbiter sole-caller rule.** The MotionArbiter is the ONLY component
-  that commands the motor driver for positioning. Input sources (manual UI,
-  TCode transports, PatternEngine, SlopSync) never call the driver: they
-  submit intents. The arbiter owns arbitration, limit-set selection (user set
-  for manual, input set for machine-driven), and every safety gate -- homed,
-  paused, e-stop, window clamping, soft-start.
+  that commands the motion processor. Input sources (manual UI, TCode
+  transports, PatternEngine, SlopSync) never touch the link: they submit
+  intents. The arbiter owns arbitration, limit-set selection (user set for
+  manual, input set for machine-driven), and every safety gate -- homed,
+  paused, e-stop, window clamping, soft-start. Under the three-board split the
+  gates are POLICY on the S3, pushed to the RP as config and ENFORCED there,
+  where the curve is evaluated.
 - **Dual-core separation.** Core 0 is system and comms (networking, LittleFS,
   WebSockets, transport parsing, monitoring). Core 1 is motion real-time
-  (arbiter dispatch, plan submission, step timing).
+  (arbiter dispatch, plan submission, step timing). PLANNED CHANGE (sd-4k1):
+  after the port, Core 1 hosts the link driver, Modbus and homing only; the
+  real-time path lives on the RP.
 - **Cross-core data.** Anything shared between cores uses FreeRTOS primitives
   (atomics, mutexes, `xQueue`). Async-library callbacks run on the library's
   own task: enqueue, never mutate owner state. See `.claude/rules/transport.md`

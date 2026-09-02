@@ -356,7 +356,7 @@ static bool stepperTick(struct repeating_timer*) {
 // The RP image version. This constant is its ONE home (C-1); the S3 reads it
 // with kOpFlashVersion, which is what makes C-8 verification possible without
 // a bench trip. Bump it with every image that goes out over the link.
-static constexpr char kRpFwVersion[] = "0.1.0-rp";
+static constexpr char kRpFwVersion[] = "0.1.1-rp";
 static constexpr uint32_t kWatchdogMs = 8000;   // hardware max is 8388
 static_assert(sizeof(kRpFwVersion) <= kFlashVersionBytes,
               "version string does not fit the status tail");
@@ -618,6 +618,8 @@ static void processFrame(uint8_t* data, size_t len) {
             s_head = s_tail = 0;
             s_segElapsedUs = 0;
             s_segFresh = true;
+            // Flush forgets the seq, else the next real segment reads as a dup.
+            s_lastSegSeq = 0xFFFF;
             s_pos = np;
             s_emitted = np;
             // Rollback snapshots too, or a later FIFO-full rollback would
@@ -654,6 +656,8 @@ static void processFrame(uint8_t* data, size_t len) {
             s_head = s_tail;        // last command wins: drop queued segments
             s_segElapsedUs = 0;
             s_segFresh = true;
+            // Flush forgets the seq, else the next real segment reads as a dup.
+            s_lastSegSeq = 0xFFFF;
             s_rtActive = true;
             break;
         }

@@ -16,6 +16,7 @@ public:
     void arm(uint32_t delay_ms, const char* why) {
         _why = why;
         _at_ms = millis() + delay_ms;
+        _flushing = false;
         _pending = true;
     }
 
@@ -23,18 +24,27 @@ public:
     bool pending() const { return _pending; }
 
     // Call from the owning task's loop. Fires at most once per arm().
+    // Runtime path (httpTask via OtaService::handle), so it NEVER blocks: the
+    // post-drain settling window is a second deadline, never a delay().
     void poll() {
-        if (_pending && (int32_t)(millis() - _at_ms) >= 0) {
-            _pending = false;
+        if (!_pending || (int32_t)(millis() - _at_ms) < 0) return;
+        if (!_flushing) {
             SLOGW("reboot", "deferred restart: %s", _why ? _why : "?");
             applogDrain();  // give the web ring/serial one last flush
-            delay(50);      // let the sink writes land (boot path: delay OK)
-            ESP.restart();
+            // Sink writes need wall-clock to land before the core resets.
+            _at_ms = millis() + kSinkSettleMs;
+            _flushing = true;
+            return;
         }
+        _pending = false;
+        ESP.restart();
     }
 
 private:
+    static constexpr uint32_t kSinkSettleMs = 50;
+
     const char* _why = nullptr;
     uint32_t _at_ms = 0;
     bool _pending = false;
+    bool _flushing = false;
 };

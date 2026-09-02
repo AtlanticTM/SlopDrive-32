@@ -66,9 +66,8 @@ static slopglow::HeartbeatSource* s_glowHb = nullptr;
 // PCB-verified link to the S3 (operator, 2026-08-01):
 //   S3 TX (D1/GPIO43) -> C5 RX (IO12)
 //   C5 TX (IO11)      -> S3 RX (D0/GPIO44)
-// NOT 7/8 — those are src/c5_waveshare's PIN_RELAY_TX/RX for the ESP-NOW relay
-// node, a different board and a different link. Using them measured zero raw
-// bytes in both directions across two S3 pin orders.
+// NOT 7/8: measured zero raw bytes in both directions on those pins across
+// two S3 pin orders (fw 2.3.36/37).
 static constexpr int8_t  PIN_S3_TX  = 11;
 static constexpr int8_t  PIN_S3_RX  = 12;
 
@@ -231,9 +230,14 @@ static bool    g_rxOverflow = false;
 // Ownership IS the RX mutex; g_otaOwnsRx only reports it (the Link LED).
 // Never gate on the flag: a handler whose ok() is false owns nothing.
 static volatile bool g_otaOwnsRx = false;
+// Non-OTA handlers (token, diag) wait only long enough for one loop() drain
+// pass; behind a live OTA they refuse at once instead of queueing on the
+// link the transfer owns (operator ruling 2026-09-02).
+static constexpr uint32_t kRxHandlerWaitMs = 50;
 struct OtaRxOwner {
     UartRxLock lk;
-    OtaRxOwner() : lk(kRxOwnerWaitMs) { if (lk.held) g_otaOwnsRx = true; }
+    explicit OtaRxOwner(uint32_t waitMs = kRxOwnerWaitMs)
+        : lk(g_otaOwnsRx ? 0u : waitMs) { if (lk.held) g_otaOwnsRx = true; }
     ~OtaRxOwner() { if (lk.held) g_otaOwnsRx = false; }
     bool ok() const { return lk.held; }
     OtaRxOwner(const OtaRxOwner&) = delete;
@@ -679,7 +683,7 @@ static esp_err_t probeHandler(httpd_req_t* req) {
 // strip; this path needs only the wire. Trust model unchanged: reaching the
 // C5's LAN HTTP is the boundary, the point-to-point trace adds nothing.
 static esp_err_t uitokenHandler(httpd_req_t* req) {
-    OtaRxOwner rxOwner;   // loop() stands off; this handler drains the link
+    OtaRxOwner rxOwner(kRxHandlerWaitMs);   // refuses at once behind an OTA
     if (!rxOwner.ok()) {
         httpd_resp_set_status(req, "409 Conflict");
         return httpd_resp_sendstr(req, "another transfer owns the link; retry after it");
@@ -943,7 +947,7 @@ static esp_err_t diagS3Handler(httpd_req_t* req) {
             from = strtoul(val, nullptr, 10);
     }
 
-    OtaRxOwner rxOwner;   // loop() stands off; this handler drains the link
+    OtaRxOwner rxOwner(kRxHandlerWaitMs);   // refuses at once behind an OTA
     if (!rxOwner.ok()) {
         httpd_resp_set_status(req, "409 Conflict");
         return httpd_resp_sendstr(req, "another transfer owns the link; retry after it");

@@ -28,6 +28,7 @@
 #if defined(FEATURE_RS485_MODBUS)
 
 #include <Arduino.h>
+#include <atomic>
 #include <freertos/FreeRTOS.h>
 #include <freertos/semphr.h>
 
@@ -35,7 +36,11 @@ class HardwareSerial;
 
 // ---- Servo telemetry snapshot (updated by update(), read by /api/status) ----
 struct ServoTelemetry {
-    bool     valid      = false;   // true when we've had at least one good poll
+    // false means UNKNOWN, never zero: set on the first good poll and cleared
+    // again when the drive goes silent (see LINK_STALE_MISSES). Consumers must
+    // hold their last known state or show nothing, never render the zeroed
+    // fields as a reading.
+    bool     valid      = false;
     bool     enabled    = false;   // Modbus enable flag (reg 0x00)
     bool     output_on  = false;   // driver output enable (reg 0x01)
     uint16_t alarm      = 0;      // raw alarm register bitfield (reg 0x0E)
@@ -143,6 +148,8 @@ public:
     bool reprogramBaud(uint32_t target_baud);
 
     // ---- Status -------------------------------------------------------------
+    // Drops back to false after LINK_DEAD_MISSES silent polls, which re-arms
+    // the dual-baud reprobe in update(). Never latched true for the run.
     bool isReady() const { return _ready; }
 
     // Baud the link is currently running at (19200 or 115200) — settles once
@@ -169,7 +176,9 @@ public:
     // is safe to call from any task, and it is ONE write on either backend:
     // never arm the drive to set it. See docs/drive-accel-register.md.
     void     setAccelRegOverride(uint16_t value);
-    uint16_t accelRegOverride() const { return _accel_ovr; }
+    uint16_t accelRegOverride() const {
+        return (uint16_t)(_accel_ovr.load(std::memory_order_acquire) & ACCEL_OVR_VALUE_MASK);
+    }
 
     // Make the drive's PERSISTED 0x03 match `desired`. BLOCKING, init-context
     // only (same exception as init()). No-op when they already agree, so an
@@ -411,8 +420,38 @@ private:
     // Set from any task, drained by update(). Writing config needs reg
     // 0x00 = 1, which makes step/dir input invalid (manual v2.55 p16), so the
     // step/dir apply is enable-set-save-disable and callers gate on standstill.
-    volatile uint16_t _accel_ovr     = 0;
-    volatile bool     _accel_ovr_req = false;
+    // Value and pending-request flag are ONE atomic word: they are written on
+    // the UI task and consumed by update() (Core 1 on the Modbus backend), and
+    // a pair that must agree is published together or not at all. Bit 16 is
+    // the request; the low 16 bits are the clamped register value.
+    static constexpr uint32_t ACCEL_OVR_VALUE_MASK = 0x0000FFFFu;
+    static constexpr uint32_t ACCEL_OVR_PENDING    = 0x00010000u;
+    std::atomic<uint32_t> _accel_ovr{0};
+
+    // ---- Link liveness ------------------------------------------------------
+    // Consecutive TIMED-OUT rotation reads. A drive that goes silent -- power
+    // cycle, or the baud revert the OSSM-RS magic sequence takes on the drive's
+    // NEXT power-on -- must stop being reported live, or stale telemetry flows
+    // to the encoder validator and the UI forever.
+    // Counted in MISSES, not wall time: a poll that never gets a wire slot is
+    // not a miss, and during a streamed move the setpoint frame owns the state
+    // machine for long stretches, so a wall-clock deadline would go stale on a
+    // healthy busy bus. One timed-out read costs the 80 ms response window
+    // (which dominates POLL_INTERVAL_MS), so 8 misses is ~0.65 s of silence and
+    // 32 is ~2.6 s -- inside REPROBE_INTERVAL_MS either way.
+    // Only TELE and ENC_* reads count. SETPOINT has its own watchdog
+    // (_sp_fail_streak) and may legitimately never echo; SCAN and REMAINING
+    // read registers a drive variant need not implement, so their silence is
+    // not evidence of a dead link. ANY valid decode clears the counter --
+    // asymmetric on purpose, since one good frame is proof of life.
+    static constexpr uint8_t LINK_STALE_MISSES = 8;    // clears telemetry.valid
+    static constexpr uint8_t LINK_DEAD_MISSES  = 32;   // drops _ready -> reprobe
+    uint8_t _poll_miss  = 0;
+    bool    _link_stale = false;   // edge latch: log once each way (T27)
+
+    // Account one timed-out rotation read: clear telemetry at the stale
+    // threshold, drop _ready at the dead one.
+    void _pollMissed();
 
     // ---- Modbus primitives --------------------------------------------------
     uint16_t crc16(const uint8_t* buf, size_t len) const;

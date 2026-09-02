@@ -116,6 +116,13 @@ bool ServoModbus::tryReadResponse(uint16_t* out, size_t count) {
     for (size_t i = 0; i < count; i++) {
         out[i] = (_rx_buf[3 + 2 * i] << 8) | _rx_buf[3 + 2 * i + 1];
     }
+    // One CRC-valid frame is proof of life, whatever kind of read asked for it
+    // -- including the init probe and the not-ready reprobe.
+    _poll_miss = 0;
+    if (_link_stale) {
+        _link_stale = false;
+        SLOGI("servobus", "ServoModbus: drive answering again -- telemetry recovered :3");
+    }
     return true;
 }
 
@@ -254,7 +261,8 @@ void ServoModbus::armMotionControl() {
     sendWriteCommand(0x00, 1);
     delay(800);                       // init context only; drive settle time
     sendWriteCommand(0x02, AIM_MODBUS_ARM_SPEED_RPM);   delay(20);
-    sendWriteCommand(0x03, _accel_ovr ? _accel_ovr : AIM_MODBUS_ARM_ACCEL);
+    const uint16_t arm_accel_ovr = accelRegOverride();
+    sendWriteCommand(0x03, arm_accel_ovr ? arm_accel_ovr : AIM_MODBUS_ARM_ACCEL);
     delay(20);
     sendWriteCommand(0x05, AIM_MODBUS_ARM_SPEED_P);     delay(20);
     sendWriteCommand(0x07, AIM_MODBUS_ARM_POS_P);       delay(20);
@@ -426,9 +434,15 @@ void ServoModbus::update() {
         //    NEVER precede this with 0x00 = 1: that makes the drive ignore step
         //    pulses and cannot be undone over Modbus (sd-opb).
         //    See docs/drive-accel-register.md.
-        if (_accel_ovr_req) {
-            _accel_ovr_req = false;
-            const uint16_t v = _accel_ovr;
+        uint32_t ovr = _accel_ovr.load(std::memory_order_acquire);
+        if ((ovr & ACCEL_OVR_PENDING) &&
+            _accel_ovr.compare_exchange_strong(ovr, ovr & ~ACCEL_OVR_PENDING,
+                                               std::memory_order_acq_rel,
+                                               std::memory_order_relaxed)) {
+            // A setAccelRegOverride() that lands between the load and the swap
+            // fails the CAS, so the NEWER intent survives and is picked up on
+            // the next tick -- never half-consumed.
+            const uint16_t v = (uint16_t)(ovr & ACCEL_OVR_VALUE_MASK);
             queueWrite(0x03, v, 2);
             requestConfigScan();      // verify by readback, never by the echo
             SLOGI("servobus", "ServoModbus: reg 0x03 -> %u :3", (unsigned)v);
@@ -566,9 +580,13 @@ void ServoModbus::update() {
                     }
                     // Only the end-of-cycle slot wraps (see the success path).
                     if (_reg_idx >= POLL_REG_COUNT) _reg_idx = 0;
+                    _pollMissed();
                 } else if (_pending_kind == PendingKind::ENC_LO ||
                            _pending_kind == PendingKind::ENC_HI) {
                     _reg_idx = 0;   // abort — never pair a stale LO with a late HI
+                    _pollMissed();
+                } else if (_pending_kind == PendingKind::TELE) {
+                    _pollMissed();
                 }
                 _rx_state = RxState::IDLE;
             }
@@ -702,6 +720,39 @@ void ServoModbus::_scanAdvance(uint32_t now) {
     _scan_active  = false;
     portEXIT_CRITICAL(&_mux);
     SLOGI("servobus", "ServoModbus: config scan complete (known=0x%08lX) :3", (unsigned long)_scan_known);
+}
+
+// ---- Link liveness ----------------------------------------------------------
+// Reached only from a timed-out rotation read (see the header for why SCAN,
+// REMAINING and SETPOINT are excluded). Two thresholds, so a brief silence
+// costs only the freshness claim while a sustained one re-opens the probe.
+void ServoModbus::_pollMissed() {
+    if (_poll_miss < 255) _poll_miss++;
+
+    if (_poll_miss == LINK_STALE_MISSES && !_link_stale) {
+        _link_stale = true;
+        // valid/enc_valid/rem_valid all mean UNKNOWN now, not zero -- the
+        // fields keep their last values so nothing reads a fresh 0 A / 0 mm.
+        portENTER_CRITICAL(&_mux);
+        _telemetry.valid     = false;
+        _telemetry.enc_valid = false;
+        _telemetry.rem_valid = false;
+        portEXIT_CRITICAL(&_mux);
+        SLOGW("servobus", "ServoModbus: drive silent for %u polls -- telemetry STALE, "
+              "readings are no longer live. uhoh :c", (unsigned)_poll_miss);
+    }
+
+    if (_poll_miss >= LINK_DEAD_MISSES && _ready) {
+        _ready     = false;
+        _poll_miss = 0;
+        // Re-probe on the very next update() rather than one interval later:
+        // a drive that just power-cycled is back at factory 19200 and the
+        // reprobe alternation is the only thing that finds it there.
+        _last_poll_ms = millis() - REPROBE_INTERVAL_MS;
+        SLOGW("servobus", "ServoModbus: link DEAD after %u silent polls @%lu baud -- re-probing "
+              "both bauds (a drive power cycle reverts to factory 19200).",
+              (unsigned)LINK_DEAD_MISSES, (unsigned long)_baud);
+    }
 }
 
 // Commit a freshly assembled encoder sample. Separate from the 8-reg snapshot
@@ -964,8 +1015,8 @@ void ServoModbus::setAccel(uint16_t rpm_s) {
 // to 0 hands 0x03 back to the motion path, which rewrites it on its next
 // limit change, so no restore write is issued here.
 void ServoModbus::setAccelRegOverride(uint16_t value) {
-    _accel_ovr     = (value > 60098) ? 60098 : value;
-    _accel_ovr_req = (_accel_ovr != 0);
+    const uint32_t v = (value > 60098) ? 60098u : (uint32_t)value;
+    _accel_ovr.store(v ? (v | ACCEL_OVR_PENDING) : 0u, std::memory_order_release);
 }
 
 // Reg 0x14 is the drive's own save flag: 0 idle, 1 saving, 2 done. So a save

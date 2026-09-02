@@ -273,7 +273,12 @@ GREP_CHECKS = [
                 # sketch (own env, excluded from ESP envs by build_src_filter),
                 # different silicon, no SlopLog port -- USB CDC is its only
                 # log surface, same standing as the C5 nodes above.
-                "src/rp2350_motion/"),
+                "src/rp2350_motion/",
+                # rp2350_bench joined 2026-09-02 (sd-4k1.1): same standing as
+                # rp2350_motion -- standalone commit()-timing bench sketch,
+                # own env, excluded from every other env's build_src_filter,
+                # USB CDC is its only output surface.
+                "src/rp2350_bench/"),
     ),
     dict(
         name="slopsync-purity",

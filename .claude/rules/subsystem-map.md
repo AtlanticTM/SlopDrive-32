@@ -20,11 +20,12 @@ slowly. For anything finer, ask codebase-memory (`get_architecture`,
 | `src/system` + `include/system` | Config store, OTA, logging, app state, encoder validator |
 | `src/ui` + `include/ui` | `WebUI.cpp`, the HTTP/API surface |
 | `lib/sloplog`, `lib/slopglow`, `lib/slopmotion` | FIRST-PARTY libraries |
-| `lib/ruckig`, `lib/asynctcp`, `lib/espasyncwebserver`, `lib/lcd_st7735`, `lib/StrokeEnginePatterns` | VENDORED. Do not restyle or respell (C-11 carve-out) |
+| `lib/ruckig`, `lib/asynctcp`, `lib/espasyncwebserver`, `lib/StrokeEnginePatterns` | VENDORED. Do not restyle or respell (C-11 carve-out) |
 | `lib/slopsync` | Symlink to the sibling SlopSync repo, pinned by `slopsync.pin`. READ-ONLY from here |
 | `webui/` | Svelte frontend, built into the LittleFS image by `build_webui.py` |
 | `sim/slopsim/` | Host simulator. Separate CMake build, appears NOWHERE in `platformio.ini` |
-| `src/quad_probe`, `src/c5_probe`, `src/c5_tdongle`, `src/c5_waveshare` | Standalone bench sketches, each excluded from the firmware envs by `build_src_filter` and built only by its own env |
+| `src/c5_probe` | The C5 bridge firmware (network peripheral: WS, OTA surface, diag relay). Misnamed; rename tracked as sd-9nm |
+| `src/quad_probe` | Standalone bench sketch, excluded from the firmware envs by `build_src_filter` and built only by its own env |
 | `test/native/` | Host doctest suites (`pio test -e native`) |
 | `tools/` | Instruments. Mostly gitignored; the tracked ones are named in `.gitignore` |
 

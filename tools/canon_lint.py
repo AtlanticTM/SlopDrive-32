@@ -262,7 +262,7 @@ GREP_CHECKS = [
                 # this list 2026-08-03: it was written while untracked files
                 # were invisible to the lint, so it never had to declare
                 # itself. Same board family, same reason as the other two.
-                "src/c5_tdongle/", "src/c5_waveshare/", "src/c5_probe/",
+                "src/c5_probe/",
                 # quad_probe joined 2026-08-04 (operator ruling, C-7). Different
                 # reason from the C5 boards: it is a BENCH SKETCH excluded from
                 # every firmware env by build_src_filter (platformio.ini:130,222)
@@ -321,7 +321,7 @@ GREP_CHECKS = [
         rx=re.compile(r"\bledcWrite\s*\(|\bdigitalWrite\s*\(\s*\w*LED\w*"),
         include=("src/", "include/", "lib/slopmotion/", "lib/sloplog/"),
         exempt=("src/system/SlopGlowBoard.cpp",
-                "src/c5_probe/", "src/c5_tdongle/", "src/c5_waveshare/"),
+                "src/c5_probe/"),
     ),
     dict(
         name="new-log-macro",

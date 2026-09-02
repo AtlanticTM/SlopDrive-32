@@ -249,9 +249,9 @@ S3 TX  D1 / GPIO 43  ->  C5 RX  IO12
 C5 TX  IO11          ->  S3 RX  D0 / GPIO 44
 ```
 
-`main`'s 43/44 for the S3 were correct; the C5 side was NOT 7/8 — those are
-`src/c5_waveshare`'s `PIN_RELAY_TX/RX` for the ESP-NOW relay node, a different
-board and a different link. Using them measured zero raw bytes in both
+`main`'s 43/44 for the S3 were correct; the C5 side was NOT 7/8 — those were
+the ESP-NOW relay node's relay pins (that node and its sketch were retired
+2026-09-02), a different board and a different link. Using them measured zero raw bytes in both
 directions across both S3 pin orders (fw 2.3.36 / 2.3.37).
 
 ### Measured

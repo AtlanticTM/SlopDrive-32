@@ -12,7 +12,7 @@ SKIP_PATHS = (
     "/.beads/", "/node_modules/", "/managed_components/", "/site/",
     "license", "/vectors/",
     # vendored third-party trees (machine repo); inert in the spec repo
-    "/lib/asynctcp/", "/lib/espasyncwebserver/", "/lib/lcd_st7735/",
+    "/lib/asynctcp/", "/lib/espasyncwebserver/",
     "/lib/ruckig/", "/lib/strokeenginepatterns/",
 )
 

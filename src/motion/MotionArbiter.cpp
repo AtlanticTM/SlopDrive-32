@@ -29,6 +29,31 @@
 // the gap between true and assumed v0 is at most one 10ms segment's worth
 // of velocity, ≤1% of the machine's speed range.
 
+// ---- Dispatch guard ---------------------------------------------------------
+// Bounded RAII take of the driver dispatch lock. Rationale for the lock, for
+// its bound, and for what it deliberately does NOT cover: MotionArbiter.h,
+// _dispatch_lock. 2 ms is ~1000x the expected hold; reaching it means a
+// real-time task is already wedged, so the dispatch is dropped, never awaited.
+namespace {
+constexpr TickType_t kDispatchLockTicks = pdMS_TO_TICKS(2);
+
+class DispatchGuard {
+public:
+    explicit DispatchGuard(SemaphoreHandle_t h)
+        : _h(h), _held(h != nullptr && xSemaphoreTake(h, kDispatchLockTicks) == pdTRUE) {}
+    ~DispatchGuard() { if (_held) xSemaphoreGive(_h); }
+    DispatchGuard(const DispatchGuard&) = delete;
+    DispatchGuard& operator=(const DispatchGuard&) = delete;
+    // Safe to touch the driver: holding the lock, or there is no lock to hold
+    // (init() never ran -- a boot-order bug, not a reason to refuse motion).
+    bool mayDispatch() const { return _held || _h == nullptr; }
+
+private:
+    SemaphoreHandle_t _h;
+    bool              _held;
+};
+}  // namespace
+
 MotionArbiter::MotionArbiter(SystemState& state, RangeMapper& mapper, MotorDriver& motor)
     : _state(state), _mapper(mapper), _motor(motor)
 {}
@@ -36,6 +61,8 @@ MotionArbiter::MotionArbiter(SystemState& state, RangeMapper& mapper, MotorDrive
 void MotionArbiter::init() {
     _defer_queue = xQueueCreate(DEFER_QUEUE_DEPTH, sizeof(MotionIntent));
     configASSERT(_defer_queue != nullptr);
+    _dispatch_lock = xSemaphoreCreateMutex();   // priority-inheriting, task level
+    configASSERT(_dispatch_lock != nullptr);
     SLOGI("arbiter", "MotionArbiter: initialized — D4, %u-slot defer queue active", DEFER_QUEUE_DEPTH);
 }
 
@@ -155,7 +182,8 @@ bool MotionArbiter::submitStreamSample(float norm_pos, float norm_vel_per_s) {
     float speed_floor = fminf(SAFE_APPROACH_SPEED_MM_S, speed_ceiling);
 
     // ---- Speed feed — mode dependent ----------------------------------------
-    const float span_mm = _mapper.getMaxMm() - _mapper.getMinMm();
+    const Window win_mm = _mapper.effectiveWindow();
+    const float span_mm = win_mm.max_mm - win_mm.min_mm;
     float speed_mm_s;
     if (_state.stream_speed_mode == SystemState::SPEED_VELOCITY_MATCHED) {
         // Convert the interpolator's normalized units/second into mm/s across
@@ -200,14 +228,24 @@ bool MotionArbiter::submitStreamSample(float norm_pos, float norm_vel_per_s) {
     }
 
     // ---- Dispatch to the driver ---------------------------------------------
-    // Lockless, matching _planAndDispatch: all motor callers are Core-1 tasks
-    // and streamToSteps() owns its own grit-cache statics. During active
-    // streaming the sampler is the primary caller; pattern is gated off.
+    // Serialized against _planAndDispatch's dispatch: motorTask (prio 3) can be
+    // mid-streamToSteps() when this task (prio 4) preempts it, and the two write
+    // overlapping driver chain state.
     // Signed curve velocity in the native step frame (negated like
     // target_steps above): remote-trajectory backends rebuild curve segments
     // from it; the FAS default ignores it and chases position.
     const float vel_native_s = -(norm_vel_per_s * span_mm) * _motor.nativePerMm();
-    _motor.streamSample(target_steps, vel_native_s, speed_steps_s, accel_steps_s2);
+    {
+        DispatchGuard guard(_dispatch_lock);
+        if (!guard.mayDispatch()) {
+            _rejected_count = _rejected_count + 1;
+            SLOGW_EVERY_MS(2000, "arbiter",
+                           "MotionArbiter DROP: dispatch lock timeout (stream sample): "
+                           "a Core-1 motion task is wedged");
+            return false;
+        }
+        _motor.streamSample(target_steps, vel_native_s, speed_steps_s, accel_steps_s2);
+    }
 
     // ---- Telemetry ----------------------------------------------------------
     _state.commanded_target_mm = target_mm;
@@ -249,8 +287,8 @@ PlanReport MotionArbiter::submit(const MotionIntent& intent) {
         return rpt;
     }
 
-    // Plan + dispatch under spinlock — microcritical section
-    PlanReport report = _planAndDispatch(intent, false);
+    // Plan unlocked; only the driver call inside is serialized.
+    PlanReport report = _planAndDispatch(intent);
 
     // Update telemetry atomically
     portENTER_CRITICAL(&_telemetry_mux);
@@ -311,9 +349,11 @@ float MotionArbiter::_clampToWindow(float mm, MotionSource source) {
         // (measured stroke once homed, else the configured max rail length).
         return constrain(mm, 0.0f, _motor.effectiveCeilingMm());
     }
-    // Stream/pattern/OSSM moves are clamped to the user's configured range window
-    float lo = _mapper.getMinMm(), hi = _mapper.getMaxMm();
-    return constrain(mm, lo, hi);
+    // Stream/pattern/OSSM moves are clamped to the user's configured range
+    // window. The pair is read as ONE value: half of an in-flight window edit
+    // would clamp against a min and a max that never coexisted (sd-tki.5).
+    const Window win = _mapper.effectiveWindow();
+    return constrain(mm, win.min_mm, win.max_mm);
 }
 
 // ---- Window-entry detection -------------------------------------------------
@@ -321,12 +361,13 @@ float MotionArbiter::_clampToWindow(float mm, MotionSource source) {
 
 bool MotionArbiter::_isOutsideWindow(float p0_mm) const {
     const float eps = 0.5f;  // 0.5mm slack — sub-safety-zone, avoids edge chatter
-    float lo = _mapper.getMinMm(), hi = _mapper.getMaxMm();
-    return (p0_mm < lo - eps) || (p0_mm > hi + eps);
+    const Window win = _mapper.effectiveWindow();
+    return (p0_mm < win.min_mm - eps) || (p0_mm > win.max_mm + eps);
 }
 
 // ---- _planAndDispatch -------------------------------------------------------
-// The heart of D4; runs under _dispatch_mux on Core 1.
+// The heart of D4; Core 1 only. Planning is unlocked and preemptible; the
+// driver call at the bottom is not (MotionArbiter.h, _dispatch_lock).
 //
 // Algorithm: trapezoid with initial velocity v0 = 0 (see the top-of-file
 // rationale). Given distance d = |p1 - p0| and deadline T (seconds):
@@ -346,7 +387,7 @@ bool MotionArbiter::_isOutsideWindow(float p0_mm) const {
 //   A slow command plans gentle; a tight deadline plans fast but never
 //   exceeds ceilings — the ceiling only activates when the command
 //   genuinely demands more than is safe.
-PlanReport MotionArbiter::_planAndDispatch(const MotionIntent& intent, bool /*locked*/) {
+PlanReport MotionArbiter::_planAndDispatch(const MotionIntent& intent) {
     uint32_t start_us = micros();
     PlanReport report = {};
 
@@ -382,10 +423,11 @@ PlanReport MotionArbiter::_planAndDispatch(const MotionIntent& intent, bool /*lo
     // This tells us whether the TCode stream is producing targets outside the
     // configured window (RangeMapper issue) or the window changed mid-stream.
     if (intent.source != MotionSource::MANUAL && target_mm != intent.target_mm) {
-        float lo = _mapper.getMinMm(), hi = _mapper.getMaxMm();
+        const Window win = _mapper.effectiveWindow();
         SLOGW_EVERY_MS(2000, "arbiter",
                        "MotionArbiter WINDOW CLAMP: intent=%.1f clamped to %.1f window=[%.1f,%.1f] src=%u",
-                       intent.target_mm, target_mm, lo, hi, (unsigned)intent.source);
+                       intent.target_mm, target_mm, win.min_mm, win.max_mm,
+                       (unsigned)intent.source);
     }
 
     // ---- Read actual machine state ------------------------------------------
@@ -568,18 +610,35 @@ PlanReport MotionArbiter::_planAndDispatch(const MotionIntent& intent, bool /*lo
     if (speed_steps_s < 1)   speed_steps_s  = 1;
     if (accel_steps_s2 < 10) accel_steps_s2 = 10;
 
-    // ---- Raise-only acceleration guard (D4, same as OSSM exact) -------------
-    uint32_t final_accel = accel_steps_s2;
-    if (_motor.isMoving()) {
-        uint32_t live_accel = _motor.getLiveAcceleration();
-        if (live_accel > final_accel) final_accel = live_accel;
-    }
-
+    // ---- Raise-only acceleration guard + dispatch, serialized ---------------
+    // The live-accel read and the dispatch it feeds are ONE transaction: the
+    // sampler (prio 4) preempting between them would have this task write a
+    // raise-only decision taken against a driver state that no longer holds.
+    // Everything above stays outside the lock.
     // Single FAS dispatch — streamToSteps handles its own grit-fix caching
     // internally. DO NOT call _motor.setMaxSpeed / setAcceleration here —
     // those add a redundant FAS path that conflicts with streamToSteps'
     // internal statics and causes jitter at 333Hz.
-    _motor.streamToSteps(target_steps, speed_steps_s, final_accel);
+    {
+        DispatchGuard guard(_dispatch_lock);
+        if (!guard.mayDispatch()) {
+            _rejected_count = _rejected_count + 1;
+            SLOGW_EVERY_MS(2000, "arbiter",
+                           "MotionArbiter DROP: dispatch lock timeout (src=%u): "
+                           "a Core-1 motion task is wedged",
+                           (unsigned)intent.source);
+            report.deadline_feasible = false;
+            report.deadline_late     = true;
+            report.plan_us           = micros() - start_us;
+            return report;
+        }
+        uint32_t final_accel = accel_steps_s2;
+        if (_motor.isMoving()) {
+            uint32_t live_accel = _motor.getLiveAcceleration();
+            if (live_accel > final_accel) final_accel = live_accel;
+        }
+        _motor.streamToSteps(target_steps, speed_steps_s, final_accel);
+    }
 
     report.dispatched_steps = target_steps;
 

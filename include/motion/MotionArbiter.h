@@ -28,13 +28,13 @@
 //   (moveTo/streamTo/streamToSteps/stop/hardStop) are protected with
 //   `friend class MotionArbiter` (MotorDriver.h), so only this class can call
 //   them; every other caller submits an intent via submit()/submitDeferred().
-// - submit() runs from Core 0 transport callbacks AND Core 1 tasks; dispatch
-//   is serialized under one portMUX_TYPE spinlock (sub-microsecond float math
-//   only — no heap alloc, no ISR context). FAS itself is only ever called
-//   from Core 1 (same core as the FAS engine): Core 0 callers enqueue via
-//   submitDeferred() into a DEFER_QUEUE_DEPTH-slot FreeRTOS queue, drained in
-//   full, in arrival order, by processDeferred() on motorTask (Core 1) every
-//   tick.
+// - submit() and submitStreamSample() run on Core 1 ONLY; Core 0 callers
+//   enqueue via submitDeferred() into a DEFER_QUEUE_DEPTH-slot FreeRTOS queue,
+//   drained in full, in arrival order, by processDeferred() on motorTask
+//   (Core 1) every tick. Same core is not the same task: the sampler
+//   (streamSamplerTask, prio 4) preempts motorTask (prio 3), so the DRIVER
+//   CALL -- and only the driver call -- is serialized under _dispatch_lock.
+//   Planning is deliberately outside it (see the field comment).
 
 #include <cstdint>
 #include <freertos/FreeRTOS.h>
@@ -165,8 +165,27 @@ private:
     float _input_speed_limit_mm_s  = DEFAULT_MAX_SPEED_MM_S;
     float _input_accel_limit_mm_s2 = DEFAULT_ACCEL_MM_S2;
 
-    // ---- Dispatch lock (microcritical — protects FAS calls on Core 1) -------
-    mutable portMUX_TYPE _dispatch_mux = portMUX_INITIALIZER_UNLOCKED;
+    // ---- Driver dispatch lock (Core 1, task level) --------------------------
+    // Serializes the DRIVER CALL only, never the planning around it.
+    // WHY IT EXISTS: submit() dispatches from motorTask (prio 3) and
+    // submitStreamSample() from streamSamplerTask (prio 4) on the same core,
+    // and a MANUAL WebUI point move raises no gate that stops the sampler, so
+    // the sampler preempts a dispatch in progress. The two paths write
+    // OVERLAPPING driver state (MlinkServoDriver's _seg_mode / _rt_* / _chain_*
+    // chain), so the interleave tears a real command, not a statistic.
+    // WHY NOT A portMUX CRITICAL SECTION: dispatch reaches the driver's wire
+    // path, which suspends the scheduler for a ~40 us SPI frame and honors a
+    // 200 us inter-frame gap. Interrupts off across that breaks the slave's
+    // 20 kHz link and the 1 kHz sampler (cpp-safety.md, T27 class).
+    // WHY A BOUNDED TAKE: the hold is microseconds and FreeRTOS mutexes inherit
+    // priority, so a timeout means something is already badly wrong. Count and
+    // drop rather than stall a real-time task -- a dropped stream sample is
+    // re-sent in 1 ms, a dropped point move is one lost operator tap.
+    // NOT TAKEN by emergencyStop()/stopMotion()/hardStopMotion(): the stop path
+    // never waits on a lock.
+    // TODO(sd-tki.4): new shared mutable state behind a mutex, pending the
+    // operator ruling cpp-safety.md "Concurrency" requires.
+    SemaphoreHandle_t _dispatch_lock = nullptr;   // created by init()
 
     // ---- Core 0 → Core 1 deferral queue (DEFER_QUEUE_DEPTH slots, non-blocking
     // push) — see DEFER_QUEUE_DEPTH below for the actual depth. Handles 333Hz
@@ -185,10 +204,11 @@ private:
     mutable portMUX_TYPE _telemetry_mux = portMUX_INITIALIZER_UNLOCKED;
 
     // ---- Core planner (the heart — D4) --------------------------------------
-    // Executed under _dispatch_mux on Core 1. Reads actual machine state from
-    // FAS, derives the trapezoidal profile, clamps at the source's limit set,
-    // dispatches to FAS.
-    PlanReport _planAndDispatch(const MotionIntent& intent, bool locked);
+    // Core 1 only. Reads actual machine state from the driver, derives the
+    // trapezoidal profile, clamps at the source's limit set, dispatches. Only
+    // the dispatch itself is locked; the planning above it runs unlocked and
+    // may be preempted.
+    PlanReport _planAndDispatch(const MotionIntent& intent);
 
     // ---- Gate evaluation ----------------------------------------------------
     // Returns true if the intent should proceed. MANUAL bypasses all gates

@@ -1304,11 +1304,15 @@ public:
     bool commitSynthSpan(double p, double v, double a, double knot, double vf,
                          double af, double T, uint64_t t0, uint64_t now_us) {
         if (!(T > 0.0)) return false;
+        // This span's OWN overshoot bound, from its OWN entry state. Never the
+        // member: a waveform commit's bound belongs to a different curve on a
+        // different path, and reading it here judged this span by that one.
+        const double allow = armOvershootAllow(p, v, a, knot, vf, T);
         double c[6];
         buildWaveformCurve(p, v, a, knot, vf, af, T, c);
-        if (quinticWorstRatio(c, T) > 1.0) {
+        if (quinticWorstRatio(c, T, allow) > 1.0) {
             buildWaveformCurve(p, v, a, knot, vf, 0.0, T, c);
-            if (quinticWorstRatio(c, T) > 1.0) {
+            if (quinticWorstRatio(c, T, allow) > 1.0) {
                 // Still illegal (hot entry, ceiling reversal): report and let
                 // the caller drop to CHASE for one knot -- an in-chain Ruckig
                 // guard overruns its span and mints local schedule debt.
@@ -1316,10 +1320,10 @@ public:
                 std::printf("SYNFAIL t0=%llu now=%llu T=%.4f p=%.4f v=%.3f "
                             "a=%.2f knot=%.4f vf=%.3f ratio=%.2f\n",
                             (unsigned long long)t0, (unsigned long long)now_us,
-                            T, p, v, a, knot, vf, quinticWorstRatio(c, T));
+                            T, p, v, a, knot, vf, quinticWorstRatio(c, T, allow));
 #endif
                 recordAnomaly(AnomalyType::WaveformFallback, (float)knot,
-                              (float)quinticWorstRatio(c, T), t0);
+                              (float)quinticWorstRatio(c, T, allow), t0);
                 return false;
             }
         }
@@ -1588,6 +1592,10 @@ private:
         // re-solves in the SAME family the sender declared.
         _client_curve_family = cmd.client_curve_family;
         const double T = (double)cmd.duration_us * 1e-6;
+        // Disarmed before ANY referee can run on this commit: the bad-move
+        // bridge below plans through Ruckig, and the previous segment's bound
+        // is not this one's. Armed for real from this entry state further down.
+        _oshoot_allow = -1.0;
 
         // End velocity: wire G when present, else the stream estimate (an
         // I-only stream shouldn't come to rest at every point).
@@ -1731,17 +1739,7 @@ private:
         // policies bisect over shares the same entry state and therefore the same
         // physical floor. Placed AFTER the bridge so a segment the bridge takes
         // pays nothing for it.
-        _oshoot_allow = -1.0;
-        if (_cfg.overshoot_guard > 0.0f && T > 0.0) {
-            const double floor_mm = physicalBandExcess(p, v, a, target, vf);
-            // < 0 is Ruckig declining to answer. No answer means no bound: an
-            // invented one would be the guard's original mistake in a new place.
-            if (floor_mm >= 0.0) {
-                _oshoot_allow =
-                    (double)_cfg.overshoot_guard * floor_mm + kOvershootFloor
-                    + (double)_cfg.overshoot_chord_slack * std::fabs(target - p);
-            }
-        }
+        _oshoot_allow = armOvershootAllow(p, v, a, target, vf, T);
 
         // Build the quintic in normalized tau; scaled boundary derivatives.
         double c[6];
@@ -1758,7 +1756,7 @@ private:
         const double adist = std::fabs(target - p);
         const double pull  = wavePull(dir, adist, now_us);
 
-        double worst = quinticWorstRatio(c, T);
+        double worst = quinticWorstRatio(c, T, _oshoot_allow);
         if (worst <= 1.0) {
             // The commanded segment is LEGAL — the machine can deliver all of
             // it, on the clock, as the sender's own spline.
@@ -1778,7 +1776,7 @@ private:
                 const double gvf  = applyEndVelGuard(vf, goal, now_us);
                 double gc[6];
                 buildWaveformCurve(p, v, a, goal, gvf, af, T, gc);
-                if (quinticWorstRatio(gc, T) <= 1.0) {
+                if (quinticWorstRatio(gc, T, _oshoot_allow) <= 1.0) {
                     adoptQuintic(gc, T, now_us);
                     // Machine shortfall 0: the machine could have reached the
                     // commanded target. That zero is the signal that lets the
@@ -2010,7 +2008,7 @@ private:
         blendEndTowardChord(p, ep, T, alpha, tvf, taf);
         buildWaveformCurve(p, v, a, ep, tvf, taf, T, out_c);
         out_ep = ep;
-        return quinticWorstRatio(out_c, T);
+        return quinticWorstRatio(out_c, T, _oshoot_allow);
     }
 
     // ---- InfeasiblePolicy::PrioritizeAmplitude / PrioritizeSmooth -----------
@@ -2333,7 +2331,7 @@ private:
             // wall the machine must be able to brake before moved with it.
             const double svf = applyEndVelGuard(vf, st, now_us);
             buildWaveformCurve(p, v, a, st, svf, af, T, sc);
-            if (quinticWorstRatio(sc, T) <= 1.0) { sized = true; break; }
+            if (quinticWorstRatio(sc, T, _oshoot_allow) <= 1.0) { sized = true; break; }
             d *= kScaleShrink;
         }
         if (!sized) return false;   // scan never accepted → guard takes it
@@ -2352,7 +2350,7 @@ private:
                 const double cvf = applyEndVelGuard(vf, ct, now_us);
                 double cc[6];
                 buildWaveformCurve(p, v, a, ct, cvf, af, T, cc);
-                if (quinticWorstRatio(cc, T) <= 1.0) {
+                if (quinticWorstRatio(cc, T, _oshoot_allow) <= 1.0) {
                     for (int i = 0; i < 6; i++) sc[i] = cc[i];
                     st = ct;
                     centered = centeringArmed();   // see the note in Reshape
@@ -2808,28 +2806,65 @@ private:
         const ruckig::Result res = _calc.calculate(in, traj);
         if ((int)res < 0) return false;
         dur_out = traj.get_duration();
-        if (worst_out) *worst_out = ruckigWorstRatio(traj);
+        if (worst_out) *worst_out = ruckigWorstRatio(traj, _oshoot_allow);
         return std::isfinite(dur_out);
+    }
+
+    // ---- ONE definition of legal, shared by both referees --------------------
+    // Public because the native suite pins the two referees to a single answer
+    // on curves both planners can draw; pure queries, they adopt nothing.
+public:
+    // Scores one sampled point: v/a ceilings, stroke window, overshoot band.
+    // `lo`/`hi` are the judged curve's OWN endpoints; `allow` < 0 disarms the
+    // band; > 1.0 = illegal. Jerk is the quintic referee's own term (Ruckig
+    // cannot violate it, see ruckigWorstRatio). Window grace and band are
+    // spelled ONCE here so the two planners cannot disagree about legality.
+    //
+    // WINDOW, WITH NO GRACE BAND. A plan permitted to bulge past the rail
+    // arrives there still DRIVING OUTWARD and hands the follower momentum to
+    // absorb (async-tune bench 2026-07-30: 69 samples pinned at the top rail,
+    // worst +217 mm/s, 625 mm of travel on a 500 mm rail). The retired 0.02
+    // was also 12x looser than MotionArbiter's own 0.5 mm wall.
+    //
+    // The BAND is two-sided: the measured pathology is a backswing AWAY from
+    // the target (a move from 186.8 mm to 100 mm arcing up to 305 mm), which
+    // a one-sided test scores negative and waves through.
+    double pointWorst(double pp, double vv, double aa, double lo, double hi,
+                      double allow) const {
+        const double vc = _cfg.limits.vmax, ac = _cfg.limits.amax;
+        double worst = 0.0;
+        if (vc > 0.0) worst = std::fmax(worst, std::fabs(vv) / vc);
+        if (ac > 0.0) worst = std::fmax(worst, std::fabs(aa) / ac);
+        if (pp < 0.0) worst = std::fmax(worst, 1.0 + (-pp));
+        if (pp > 1.0) worst = std::fmax(worst, 1.0 + (pp - 1.0));
+        if (allow >= 0.0) {
+            const double excess = std::fmax(lo - pp, pp - hi);
+            if (excess > allow)
+                worst = std::fmax(worst, 1.0 + (excess - allow));
+        }
+        return worst;
     }
 
     // Worst (peak / ceiling) ratio across v/a/j ceilings AND window bounds,
     // scanned on a fixed tau grid. > 1.0 = illegal quintic.
-    double quinticWorstRatio(const double* c, double T) const {
-        const double vc = _cfg.limits.vmax, ac = _cfg.limits.amax,
-                     jc = _cfg.limits.jmax;
+    // The allowance is a PARAMETER, never ambient state: waveform commits and
+    // synthesis spans plan different curves from different entry states, and a
+    // member read here judged one path's span with the other's bound.
+    double quinticWorstRatio(const double* c, double T,
+                             double oshoot_allow) const {
+        const double jc = _cfg.limits.jmax;
         double worst = 0.0;
         // ---- overshoot-guard preamble (all no-ops when the guard is off) ----
-        // The band is this trial's OWN endpoints — c[0] and the curve at tau = 1,
-        // i.e. the sum of the coefficients — so a shortened or smoothed candidate
+        // The band is this trial's OWN endpoints, c[0] and the curve at tau = 1
+        // (the sum of the coefficients), so a shortened or smoothed candidate
         // is judged against the stroke it actually draws.
         //
         // The ALLOWANCE is not recomputed here. It belongs to the commit, not to
         // the trial: it is the excursion physics forces on the move from the
-        // machine's entry state, which every candidate in a bisection shares.
+        // caller's entry state, which every candidate in a bisection shares.
         // Recomputing it per trial would also mean a Ruckig solve inside the
         // innermost loop of three different searches. See _oshoot_allow.
         double oshoot_lo = 0.0, oshoot_hi = 0.0;
-        const double oshoot_allow = _oshoot_allow;
         if (oshoot_allow >= 0.0) {
             double p_end = 0.0;
             for (int k = 0; k < 6; k++) p_end += c[k];
@@ -2842,47 +2877,18 @@ private:
             const double vv = ((((5*c[5]*tau + 4*c[4])*tau + 3*c[3])*tau + 2*c[2])*tau + c[1]) / T;
             const double aa = (((20*c[5]*tau + 12*c[4])*tau + 6*c[3])*tau + 2*c[2]) / (T*T);
             const double jj = ((60*c[5]*tau + 24*c[4])*tau + 6*c[3]) / (T*T*T);
-            worst = std::fmax(worst, std::fabs(vv) / vc);
-            worst = std::fmax(worst, std::fabs(aa) / ac);
             worst = std::fmax(worst, std::fabs(jj) / jc);
-            // WINDOW, WITH NO GRACE BAND. This carried ±0.02 on the premise
-            // that "the sampler clamp flattens tiny bulges". The clamp flattens
-            // POSITION; it does not flatten VELOCITY, so a plan permitted to
-            // bulge past the rail arrives there still driving outward and hands
-            // the follower momentum it must then absorb. Measured on the
-            // async-tune bench (GoogleCat, 2026-07-30): 69 samples with the
-            // setpoint pinned at the top rail while the plan still drove
-            // outward, worst +217 mm/s — the first link of a chain that ended
-            // in 625 mm of travel on a 500 mm rail.
-            //
-            // 0.02 was also 12x LOOSER than MotionArbiter's own 0.5 mm
-            // definition of "outside the window", so the two halves of the
-            // machine disagreed about where the wall was.
-            if (pp < 0.0) worst = std::fmax(worst, 1.0 + (-pp));
-            if (pp > 1.0) worst = std::fmax(worst, 1.0 + (pp - 1.0));
-            // ---- OVERSHOOT GUARD (Config::overshoot_guard) ------------------
-            // The plan must stay inside the band its own endpoints describe,
-            // give or take the distance its momentum forces.
-            //
-            // BOTH SIDES, and that is the correction that made this work at
-            // all: the first cut guarded only travel PAST the endpoint in the
-            // direction of motion, and the measured pathology is the opposite
-            // — a plan starting at 186.8 mm and targeting 100 mm arcs UP to
-            // 305 mm, traveling AWAY from its target before turning. That is a
-            // backswing, not an overshoot, and a one-sided test scores it
-            // negative and waves it through.
-            if (oshoot_allow >= 0.0) {
-                const double excess = std::fmax(oshoot_lo - pp, pp - oshoot_hi);
-                if (excess > oshoot_allow)
-                    worst = std::fmax(worst, 1.0 + (excess - oshoot_allow));
-            }
+            worst = std::fmax(worst, pointWorst(pp, vv, aa, oshoot_lo,
+                                                oshoot_hi, oshoot_allow));
         }
         return worst;
     }
 
     // The SAME referee, for a Ruckig profile. Deliberately identical in shape
-    // and in what it calls legal (v/a ceilings + the ±0.02 window grace) so the
-    // two planners cannot disagree about what "legal" means.
+    // and in what it calls legal: it scores every sample through the SAME
+    // pointWorst predicate, with the same window and the same band allowance,
+    // so the two planners cannot disagree about what "legal" means. Pinned by
+    // the coincident-curve sweep in test/native/test_slopmotion.
     //
     // WHY THIS HAS TO EXIST — RUCKIG IS NOT A LEGALITY ORACLE. `max_velocity`
     // is an input to Ruckig's profile SEARCH, not a postcondition of its
@@ -2904,22 +2910,29 @@ private:
     // the ceiling it was handed, so the sample grid would only ever rediscover
     // that ceiling. Velocity, acceleration and the window are the properties it
     // can actually miss.
-    double ruckigWorstRatio(const ruckig::Trajectory<1>& traj) const {
-        const double vc = _cfg.limits.vmax, ac = _cfg.limits.amax;
+    double ruckigWorstRatio(const ruckig::Trajectory<1>& traj,
+                            double oshoot_allow) const {
         const double dur = traj.get_duration();
         if (!(dur > 0.0) || !std::isfinite(dur)) return 0.0;
+        double oshoot_lo = 0.0, oshoot_hi = 0.0;
+        if (oshoot_allow >= 0.0) {
+            double p0, p1, vv, aa;
+            traj.at_time(0.0, p0, vv, aa);
+            traj.at_time(dur, p1, vv, aa);
+            oshoot_lo = std::fmin(p0, p1);
+            oshoot_hi = std::fmax(p0, p1);
+        }
         double worst = 0.0;
         for (int i = 0; i <= kScanSteps; i++) {
             double pp, vv, aa;
             traj.at_time(dur * (double)i / kScanSteps, pp, vv, aa);
-            if (vc > 0.0) worst = std::fmax(worst, std::fabs(vv) / vc);
-            if (ac > 0.0) worst = std::fmax(worst, std::fabs(aa) / ac);
-            if (pp < -0.02) worst = std::fmax(worst, 1.0 + (-0.02 - pp));
-            if (pp >  1.02) worst = std::fmax(worst, 1.0 + (pp - 1.02));
+            worst = std::fmax(worst, pointWorst(pp, vv, aa, oshoot_lo,
+                                                oshoot_hi, oshoot_allow));
         }
         return worst;
     }
 
+private:
     // THE OVERSHOOT GUARD'S REFERENCE: how far outside the commanded band the
     // machine travels when it is trying its hardest not to. The TIME-OPTIMAL
     // plan brakes with every bit of authority there is, so whatever excursion
@@ -2933,9 +2946,10 @@ private:
     // made the old knob actively harmful). It is also self-correcting: a machine
     // with more jerk authority gets a tighter allowance with nothing to retune.
     //
-    // ONE Ruckig solve per waveform commit, on the same input the bad-move bridge
-    // already probes. Returns < 0 when Ruckig has no opinion, which disarms the
-    // guard for that segment rather than inventing a bound.
+    // ONE Ruckig solve per commit that arms the guard (a waveform segment, or a
+    // synthesis span from its own entry state), on the same input the bad-move
+    // bridge already probes. Returns < 0 when Ruckig has no opinion, which
+    // disarms the guard for that curve rather than inventing a bound.
     double physicalBandExcess(double p, double v, double a, double target,
                               double vf) {
         ruckig::InputParameter<1> in;
@@ -2962,9 +2976,25 @@ private:
         return ex;
     }
 
+    // The overshoot bound for ONE commit, from THAT commit's entry state.
+    // Returns < 0 when the guard is off or Ruckig declines to answer: no
+    // answer means no bound, an invented one was the guard's original mistake.
+    double armOvershootAllow(double p, double v, double a, double target,
+                             double vf, double T) {
+        if (!(_cfg.overshoot_guard > 0.0f) || !(T > 0.0)) return -1.0;
+        const double floor_mm = physicalBandExcess(p, v, a, target, vf);
+        if (floor_mm < 0.0) return -1.0;
+        return (double)_cfg.overshoot_guard * floor_mm + kOvershootFloor
+               + (double)_cfg.overshoot_chord_slack * std::fabs(target - p);
+    }
+
     // ---- CHASE (bare / short-interval points) -------------------------------
     bool commitChase(const Command& cmd, double p, double v, double a,
                      double target, uint64_t now_us) {
+        // A bare point declares no band, so there is nothing for the guard to
+        // measure excursion against. Disarmed explicitly: the softened-plan
+        // legality recheck in planRuckig reads this member.
+        _oshoot_allow = -1.0;
         double aim = target;
         double vf  = 0.0;
         double af  = 0.0;
@@ -3082,7 +3112,7 @@ private:
         // there is no harder plan to fall back to, so rejecting there would
         // trade a slightly-over profile for no profile at all.
         if (j_ovr > 0.0 && jc < (double)_cfg.limits.jmax) {
-            const double worst = ruckigWorstRatio(traj);
+            const double worst = ruckigWorstRatio(traj, _oshoot_allow);
             if (worst > 1.0 + kRuckigLegalEps) {
                 recordAnomaly(AnomalyType::WaveformFallback, (float)target,
                               (float)worst, now_us);
@@ -3380,10 +3410,11 @@ private:
     // curve_families numbering; 0 = undeclared). Adopted at commitWaveform so
     // every re-solve of the same plan resolves FollowClient identically.
     uint8_t               _client_curve_family = 0;
-    // Overshoot allowance for the waveform commit IN PROGRESS, in window
-    // fractions. < 0 = the guard is not armed for this segment, which is also
-    // the resting value — it is set at the top of commitWaveform and read by
-    // quinticWorstRatio, so no other path can inherit a stale bound.
+    // Overshoot allowance for the commit IN PROGRESS, in window fractions.
+    // < 0 = not armed, which is also the resting value. INVARIANT: every commit
+    // path writes it before any referee runs (commitWaveform disarms at entry
+    // and arms after the bridge, commitChase disarms), and the referees take it
+    // as a PARAMETER. Synthesis spans arm their own local and never touch it.
     double                _oshoot_allow = -1.0;
 
     // Stream estimator

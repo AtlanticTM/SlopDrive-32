@@ -3172,3 +3172,169 @@ TEST_CASE("Overshoot guard: MONOTONE in its own value, and inert at 0") {
     for (uint64_t t = 0; t <= 200 * kMs; t += kMs)
         CHECK(a.positionAt(t) == doctest::Approx(b.positionAt(t)).epsilon(1e-12));
 }
+
+// ---- The two legality referees agree (sd-tki.8) ------------------------------
+
+TEST_CASE("Both referees call the SAME curve legal (coincident-curve sweep)") {
+    // The premise that makes this comparable: a pure COAST is drawn identically
+    // by both planners. Boundary conditions (p, v, 0) -> (p + v*T, v, 0) make
+    // the min-jerk quintic exactly the straight line c = {p, v*T, 0, 0, 0, 0},
+    // and Ruckig handed max_velocity = |v| cannot arrive any sooner, so its
+    // time-optimal profile is that same line over the same duration. Same
+    // samples, same grid: any difference in the verdict is a difference in the
+    // DEFINITION of legal, which is the bug this pins (a window grace on one
+    // side only).
+    auto cfg = testConfig();
+    Engine e(cfg, 0.5f);
+    ruckig::Ruckig<1> calc;
+    int compared = 0, illegal = 0;
+    for (double p0 : {-0.03, -0.01, 0.0, 0.2, 0.5, 0.9, 0.99, 1.01, 1.04}) {
+        for (double vf : {-2.4, -1.0, -0.4, 0.4, 1.0, 2.4}) {
+            for (double T : {0.05, 0.2, 0.6}) {
+                const double p1 = p0 + vf * T;
+                ruckig::InputParameter<1> in;
+                in.current_position[0]     = p0;
+                in.current_velocity[0]     = vf;
+                in.current_acceleration[0] = 0.0;
+                in.target_position[0]      = p1;
+                in.target_velocity[0]      = vf;
+                in.target_acceleration[0]  = 0.0;
+                in.max_velocity[0]         = std::fabs(vf);
+                in.max_acceleration[0]     = cfg.limits.amax;
+                in.max_jerk[0]             = cfg.limits.jmax;
+                ruckig::Trajectory<1> traj;
+                if ((int)calc.calculate(in, traj) < 0) continue;
+                // Coincidence check, not decoration: a stretched or re-shaped
+                // Ruckig answer would make the comparison meaningless.
+                REQUIRE(traj.get_duration() == doctest::Approx(T).epsilon(1e-9));
+                const double c[6] = {p0, vf * T, 0.0, 0.0, 0.0, 0.0};
+                for (double allow : {-1.0, 0.0, 0.02, 0.2}) {
+                    const double wq = e.quinticWorstRatio(c, T, allow);
+                    const double wr = e.ruckigWorstRatio(traj, allow);
+                    CHECK(wq == doctest::Approx(wr).epsilon(1e-9));
+                    CHECK((wq > 1.0) == (wr > 1.0));
+                    compared++;
+                    if (wq > 1.0) illegal++;
+                }
+            }
+        }
+    }
+    // The sweep has to contain both verdicts, or "they never disagree" is
+    // satisfied by never asking a hard question.
+    MESSAGE("referee sweep: " << compared << " comparisons, " << illegal
+            << " illegal");
+    CHECK(compared > 300);
+    CHECK(illegal > 0);
+    CHECK(illegal < compared);
+}
+
+TEST_CASE("The window grace is gone from BOTH referees (rail-grazing coast)") {
+    // The exact disagreement that was live: a plan grazing 0.01 outside the
+    // rail scored 1.01 (illegal) as a quintic and 0.0 (legal) as a Ruckig
+    // profile, because only the Ruckig side still carried the +-0.02 grace.
+    auto cfg = testConfig();
+    Engine e(cfg, 0.5f);
+    ruckig::Ruckig<1> calc;
+    const double v = 0.4, T = 0.1, p0 = -0.01;
+    ruckig::InputParameter<1> in;
+    in.current_position[0]     = p0;
+    in.current_velocity[0]     = v;
+    in.current_acceleration[0] = 0.0;
+    in.target_position[0]      = p0 + v * T;
+    in.target_velocity[0]      = v;
+    in.target_acceleration[0]  = 0.0;
+    in.max_velocity[0]         = v;
+    in.max_acceleration[0]     = cfg.limits.amax;
+    in.max_jerk[0]             = cfg.limits.jmax;
+    ruckig::Trajectory<1> traj;
+    REQUIRE((int)calc.calculate(in, traj) >= 0);
+    const double c[6] = {p0, v * T, 0.0, 0.0, 0.0, 0.0};
+    CHECK(e.quinticWorstRatio(c, T, -1.0) > 1.0);
+    CHECK(e.ruckigWorstRatio(traj, -1.0) > 1.0);
+}
+
+// ---- commit() clamps every commanded target to [0,1] (sd-tki.13) ------------
+
+TEST_CASE("Out-of-window targets are clamped on EVERY command kind") {
+    const double kOut[] = {1.7, 2.5, -0.9, -0.05, 1.05};
+    SUBCASE("waveform (has_duration)") {
+        // 1200 ms is a deadline the full clamped stroke MEETS, so the plan's
+        // endpoint is the clamped target itself. On a demanding deadline the
+        // endpoint is legitimately the reshaped one (measured 0.961 at 400 ms),
+        // which is a policy answer, not a clamp answer -- the window sweep
+        // below covers that case instead.
+        for (double t : kOut) {
+            auto cfg = testConfig();
+            Engine e(cfg, 0.5f);
+            Command c;
+            c.target = (float)t;
+            c.duration_us = 1200 * (uint32_t)kMs;
+            c.has_duration = true;
+            REQUIRE(e.commit(c, 0));
+            const auto s = e.snapshot(0);
+            CHECK(s.target == doctest::Approx(t > 1.0 ? 1.0 : (t < 0.0 ? 0.0 : t))
+                                  .epsilon(1e-6));
+            const auto sw = sweep(e, 0, 1400 * kMs);
+            CHECK(sw.min_p >= -1e-9);
+            CHECK(sw.max_p <= 1.0 + 1e-9);
+        }
+    }
+    SUBCASE("waveform on a demanding deadline stays in the window") {
+        for (double t : kOut) {
+            auto cfg = testConfig();
+            Engine e(cfg, 0.5f);
+            Command c;
+            c.target = (float)t;
+            c.duration_us = 400 * (uint32_t)kMs;
+            c.has_duration = true;
+            REQUIRE(e.commit(c, 0));
+            const auto s = e.snapshot(0);
+            CHECK(s.target >= -1e-6);
+            CHECK(s.target <= 1.0 + 1e-6);
+            const auto sw = sweep(e, 0, 600 * kMs);
+            CHECK(sw.min_p >= -1e-9);
+            CHECK(sw.max_p <= 1.0 + 1e-9);
+        }
+    }
+    SUBCASE("bare point (chase)") {
+        for (double t : kOut) {
+            auto cfg = testConfig();
+            cfg.sample_synthesis = false;   // the plain chase path
+            Engine e(cfg, 0.5f);
+            Command c;
+            c.target = (float)t;
+            REQUIRE(e.commit(c, 0));
+            const auto s = e.snapshot(0);
+            CHECK(s.target == doctest::Approx(t > 1.0 ? 1.0 : (t < 0.0 ? 0.0 : t))
+                                  .epsilon(1e-6));
+            const auto sw = sweep(e, 0, 2 * kS);
+            CHECK(sw.min_p >= -1e-9);
+            CHECK(sw.max_p <= 1.0 + 1e-9);
+        }
+    }
+    SUBCASE("sample synthesis: a stream that runs off both rails") {
+        // 50 Hz bare points on a sine of amplitude 0.8 about the midpoint:
+        // roughly a third of every cycle is commanded outside the window.
+        auto cfg = testConfig();
+        cfg.sample_synthesis = true;
+        Engine e(cfg, 0.5f);
+        const uint64_t dt = 20 * kMs;
+        double pmin = 1e9, pmax = -1e9;
+        for (uint64_t t = 0; t <= 2 * kS; t += dt) {
+            Command c;
+            c.target = (float)(0.5 + 0.8 * std::sin(2.0 * 3.14159265358979 *
+                                                    0.8 * (double(t) * 1e-6)));
+            c.has_anchor = true;
+            c.anchor_us  = t;
+            e.commit(c, t);   // PlanFailed is tolerated (engine contract)
+            for (uint64_t q = t; q < t + dt; q += kMs) {
+                const double p = e.positionAt(q);
+                pmin = std::min(pmin, p);
+                pmax = std::max(pmax, p);
+            }
+        }
+        MESSAGE("clamped synthesis band [" << pmin << ", " << pmax << "]");
+        CHECK(pmin >= -1e-9);
+        CHECK(pmax <= 1.0 + 1e-9);
+    }
+}

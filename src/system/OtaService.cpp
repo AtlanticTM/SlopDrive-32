@@ -81,6 +81,10 @@ void OtaService::handle() {
 // (both paths compete for the same _active CAS).
 // See: .clinerules §2, OTA §2/§3.
 
+// Two MlinkServoDriver ticks (kTickMs = 10): long enough for a posted
+// kOpEstop to ship, short enough to be invisible in an OTA.
+static constexpr uint32_t kPostedEstopSettleMs = 20;
+
 bool OtaService::prepareForOta(const char* source) {
     bool expected = false;
     if (!_active.compare_exchange_strong(expected, true)) {
@@ -257,6 +261,11 @@ bridge::OtaState OtaService::otaSerialBegin(uint8_t target, uint32_t declared_si
         _serialLastMs   = millis();
         _serialDups     = 0;
         _serialHoles    = 0;
+        // The e-stop prepareForOta() raised is POSTED to the link owner
+        // (motorTask) from this task, not sent; give it two motor ticks to
+        // ship before begin() takes the bus and motorTask stands off
+        // (sd-tki.7). httpTask context: a short delay is legal here.
+        vTaskDelay(pdMS_TO_TICKS(kPostedEstopSettleMs));
         if (!_rp.begin(declared_size)) {
             _serialAbort = bridge::kOtaAbortTooBig;
             finishRpOta(false);

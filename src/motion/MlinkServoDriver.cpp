@@ -1,7 +1,8 @@
 // MlinkServoDriver -- MotorDriver over the RP2350 SPI motion link.
 // Constraints:
-// - motorTask (Core 1) only. update() is the single send point; commands set
-//   flags that the next tick ships. The 10 ms tick is the command latency.
+// - ONE OWNER TASK, captured on the first update() (motorTask, Core 1). Only
+//   the owner runs xfer(); every other task posts an atomic flag and update()
+//   ships it. The 10 ms tick is the command latency. See the header.
 // - Frame trust = CRC both directions; a dropped retarget heals via the
 //   100 ms idempotent refresh, estop/clear by repetition until the echoed
 //   state confirms.
@@ -60,8 +61,12 @@ void MlinkServoDriver::xfer(uint8_t (&out)[kFrameBytes],
     s_lastEndUs = micros();
 }
 
-void MlinkServoDriver::setRenderCeiling(float mm_s) {
-    if (!_begun || !(mm_s > 0.0f)) return;
+bool MlinkServoDriver::isOwner() const {
+    return _owner.load(std::memory_order_acquire) ==
+           (void*)xTaskGetCurrentTaskHandle();
+}
+
+void MlinkServoDriver::pushCeiling(float mm_s) {
     _ceiling_mm_s = mm_s;
     const float cps = mm_s * AIM_STEPS_PER_MM;
     uint8_t out[kFrameBytes] = {kOpSetLimits, ++_seq};
@@ -70,6 +75,14 @@ void MlinkServoDriver::setRenderCeiling(float mm_s) {
     xfer(out, in);
     SLOGI("mlink", "render ceiling -> %.0f mm/s (%.0f counts/s)",
           (double)mm_s, (double)cps);
+}
+
+void MlinkServoDriver::setRenderCeiling(float mm_s) {
+    if (!(mm_s > 0.0f)) return;
+    // Reached from httpTask (WebUI settings) and from setup() before the owner
+    // exists: only the owner may drive the bus, so everyone else posts.
+    if (_begun && isOwner()) { pushCeiling(mm_s); return; }
+    _ceiling_req.store(mm_s, std::memory_order_release);
 }
 
 float MlinkServoDriver::liveCounts() const {
@@ -278,8 +291,10 @@ void MlinkServoDriver::init() {
     if (aimMotorStepsPerRev() != 8192) aimSetMotorStepsPerRev(8192, true);
     motionPassthroughEnable();
     _begun = true;
-    // Seed the ceiling immediately: an RP that has not been told a limit
-    // renders unlimited, which is the state that cost 84 mm.
+    // Seed the ceiling: an RP that has not been told a limit renders
+    // unlimited, which is the state that cost 84 mm. init() is not the owner
+    // task, so this posts and the first update() tick ships it -- still long
+    // before the arbiter will dispatch anything (homing gates motion).
     setRenderCeiling(_max_speed_mm_s);
     SLOGI("mlink", "MlinkServoDriver up: RP2350 quadrature backend, "
           "%.1f counts/mm, speed cap %.0f counts/s",
@@ -288,6 +303,11 @@ void MlinkServoDriver::init() {
 
 void MlinkServoDriver::update() {
     if (!_begun) return;
+    // First tick claims the link. init() runs on the setup task, so the claim
+    // cannot live there; every poster before this point ships on this tick.
+    if (!_owner.load(std::memory_order_relaxed))
+        _owner.store((void*)xTaskGetCurrentTaskHandle(),
+                     std::memory_order_release);
     const uint32_t now = millis();
     if (now - _last_tick_ms < kTickMs) return;
     _last_tick_ms = now;
@@ -369,16 +389,20 @@ void MlinkServoDriver::update() {
         _status_fresh = true;
     }
 
-    if (_estop_pending) {
+    if (_estop_pending.load(std::memory_order_acquire)) {
         if (!sane || _state != kStateEstop) sendOp(kOpEstop);
-        else _estop_pending = false;
+        else _estop_pending.store(false, std::memory_order_relaxed);
         return;                       // nothing else while stopping
     }
-    if (_clear_pending) {
+    if (_clear_pending.load(std::memory_order_acquire)) {
         if (sane && _state == kStateEstop) sendOp(kOpClear);
-        else if (sane) _clear_pending = false;
+        else if (sane) _clear_pending.store(false, std::memory_order_relaxed);
         return;
     }
+    // Ceiling posted by another task. After the stop paths on purpose: a
+    // pending estop owns the wire until the slave echoes it.
+    const float req = _ceiling_req.exchange(0.0f, std::memory_order_acquire);
+    if (req > 0.0f) pushCeiling(req);
 
     if (_seg_mode) {
         // This tick's ping reply was preloaded after the slave processed last
@@ -446,16 +470,19 @@ void MlinkServoDriver::update() {
 }
 
 void MlinkServoDriver::emergencyStop() {
-    _estop_pending = true;
     _rt_valid = false;
     _seg_mode = false;
     _seg_unacked = false;
-    if (_begun) sendOp(kOpEstop);     // motorTask context: safe, immediate
+    // Flag first: a non-owner caller (OtaService::prepareForOta -> arbiter, on
+    // httpTask) must leave the bus alone, and the next update() tick ships it.
+    _estop_pending.store(true, std::memory_order_release);
+    if (_begun && isOwner()) sendOp(kOpEstop);   // owner: immediate
 }
 
 void MlinkServoDriver::enable() {
     // Leaving an estop hold needs the explicit clear; harmless otherwise.
-    if (_state == kStateEstop) _clear_pending = true;
+    if (_state == kStateEstop)
+        _clear_pending.store(true, std::memory_order_release);
 }
 
 // ---- mlink homing tunables --------------------------------------------------
@@ -583,7 +610,7 @@ bool MlinkServoDriver::home(int32_t) {
     // motion, no spike, clean-looking timeout) -- clear it first, exactly as
     // forceHomeState() does for the bench path.
     if (_state == kStateEstop) {
-        _clear_pending = true;
+        _clear_pending.store(true, std::memory_order_release);
         for (int i = 0; i < 50 && _state == kStateEstop; i++) {
             update();
             vTaskDelay(pdMS_TO_TICKS(10));
@@ -705,25 +732,29 @@ void MlinkServoDriver::streamSample(int32_t target_steps, float vel_steps_s,
     _last_accel_native = accel_steps_s2;
 }
 
+// Both stops are reachable from httpTask (WebUI -> arbiter), so they fill the
+// retarget shadow BEFORE leaving segment mode: the owner must never find
+// _seg_mode false next to a stale target. Same store-order rule streamSample
+// documents. Neither touches the bus.
 void MlinkServoDriver::stop() {
     // Full stop clears homed (interface contract). Land where we are.
     _homed = false;
-    _seg_mode = false;
-    _seg_unacked = false;
     _rt_target = _pos_counts;
     _rt_v = kMaxCountsPerSec;
     if (_rt_a < 1.0f) _rt_a = 100000.0f;
     _rt_valid = true;
+    _seg_unacked = false;
+    _seg_mode = false;
     _rt_dirty = true;
 }
 
 void MlinkServoDriver::hardStop() {
-    _seg_mode = false;
-    _seg_unacked = false;
     _rt_target = _pos_counts;
     _rt_v = kMaxCountsPerSec;
     if (_rt_a < 1.0f) _rt_a = 100000.0f;
     _rt_valid = true;
+    _seg_unacked = false;
+    _seg_mode = false;
     _rt_dirty = true;
 }
 

@@ -15,6 +15,7 @@
 //      .claude/rules/build-test-deploy.md, dev board sd-4k1.3.
 #pragma once
 
+#include <atomic>
 #include <cstddef>
 #include <cstdint>
 
@@ -39,7 +40,8 @@ public:
 
     void abort();
 
-    bool     active()   const { return _active; }
+    // Cross-core flag: written on commsTask, read by motorTask to stay off the bus.
+    bool     active()   const { return _active.load(std::memory_order_acquire); }
     uint32_t want()     const { return _want; }
     uint8_t  detail()   const { return _detail; }
     uint32_t rewinds()  const { return _tx.rewinds(); }
@@ -59,7 +61,7 @@ private:
 
     rpflash::Sender _tx;
     bool     _busUp   = false;
-    bool     _active  = false;
+    std::atomic<bool> _active{false};
     uint32_t _want    = 0;
     uint8_t  _seq     = 0;
     uint8_t  _result  = motionlink::kFlashIdle;

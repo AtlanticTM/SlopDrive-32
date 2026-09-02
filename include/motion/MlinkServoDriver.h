@@ -2,15 +2,27 @@
 // Constraints:
 // - The drive is SAVED in encoder-follow (0x19=2, gear 4/1, 8192 counts/rev);
 //   the RP2350 is the only pulse source. FAS step/dir never drives it again.
-// - Single-task by construction: every entry point runs on motorTask (Core 1)
-//   through MotionArbiter/MotorProxy, and update() owns the SPI link.
+// - The link has ONE OWNER TASK: whichever task first runs update(), which is
+//   motorTask (Core 1). ONLY the owner may drive the SPI bus. Entry points
+//   that other tasks can reach (emergencyStop and setRenderCeiling from
+//   httpTask, forceHomeState/enable from the web API) POST an atomic flag and
+//   return; update() ships it on the next tick. Never a mutex -- a bus with
+//   two owners is the thing this rule forbids, and sd-4k1.4 keeps this shape.
+// - Cost of that deferral is ONE kTickMs tick (10 ms) of added estop latency,
+//   which SPEC H1 already covers: the protocol ESTOP is a software convenience
+//   above the hardware e-stop path, never the guarantee.
+// - Motion state (retarget shadow, chain) is written by motorTask and the
+//   sampler task, both Core 1; cross-task posters order their stores so the
+//   flag the owner tests is the LAST one written.
 // - Native unit = drive input counts, scaled by the runtime geometry
 //   (aimStepsPerMm at 8192 steps/rev). Speed clamps to kMaxCountsPerSec.
 // - Homing v1 = HOME_OVERRIDE only (forceHomeState); real homing rides sd-dxy.
 // See: include/comms/MotionLinkProtocol.h, dev board sd-dxy.
 #pragma once
 
+#include <atomic>
 #include <cstdint>
+
 #include "MotorDriver.h"
 #include "CurrentSensor.h"
 #include "comms/MotionLinkProtocol.h"
@@ -30,7 +42,8 @@ public:
     // every command silently queues (2026-08-07: frozen pos, zero flags).
     void forceHomeState(bool homed) override {
         _homed = homed;
-        if (homed && _state == motionlink::kStateEstop) _clear_pending = true;
+        if (homed && _state == motionlink::kStateEstop)
+            _clear_pending.store(true, std::memory_order_release);
     }
     bool checkPushToHome() override { return false; }
     void runMotorStep() override {}
@@ -80,6 +93,10 @@ protected:
     void hardStop() override;
 
 private:
+    // True only on the owner task; false before the first update() too, so
+    // the setup-task seed defers to the first tick like any other poster.
+    bool isOwner() const;
+    void pushCeiling(float mm_s);
     void xfer(uint8_t (&out)[motionlink::kFrameBytes],
               uint8_t (&in)[motionlink::kFrameBytes]);
     void sendOp(uint8_t op);
@@ -94,7 +111,9 @@ private:
     void glideTo(float counts, float speed_mm_s, uint32_t max_ms);
     bool homingAbort(const char* what);
 
-    // Link state (motorTask only)
+    // Link state (owner task only)
+    // TaskHandle_t as void*: keeps the FreeRTOS headers out of this header.
+    std::atomic<void*> _owner{nullptr};
     uint8_t  _seq = 0;
     bool     _begun = false;
     uint32_t _last_tick_ms = 0;
@@ -132,6 +151,9 @@ private:
     // Last ceiling pushed via kOpSetLimits; re-pushed when an RP restart is
     // detected -- the RP holds it in RAM and boots unlimited without it.
     float    _ceiling_mm_s = 0.0f;
+    // Ceiling posted by a non-owner task (WebUI settings, Core 0); >0 means
+    // the owner owes it a kOpSetLimits on its next tick.
+    std::atomic<float> _ceiling_req{0.0f};
     // USER (gentle) limit; caps recovery sweeps only, never content.
     float    _recovery_mm_s = 0.0f;
     // Chain gap exceeded kReseedGapMm: hold the wire, ask for an engine
@@ -196,8 +218,9 @@ private:
     uint8_t  _seq_echo = 0;
     uint32_t _status_ms = 0;   // millis() at the last CRC-valid status
 
-    bool _estop_pending = false;
-    bool _clear_pending = false;
+    // Posted from any task, shipped by the owner (see the header note).
+    std::atomic<bool> _estop_pending{false};
+    std::atomic<bool> _clear_pending{false};
 
     bool     _homed = false;
     bool     _homing = false;

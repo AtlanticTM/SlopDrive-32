@@ -111,7 +111,7 @@ bool RpFlashLink::begin(uint32_t size) {
     _want   = 0;
     _result = kFlashIdle;
     _detail = kFlashDetailNone;
-    _active = true;
+    _active.store(true, std::memory_order_release);
 
     uint8_t out[kFrameBytes] = {kOpFlashBegin, ++_seq};
     memcpy(&out[2], &size, 4);
@@ -119,7 +119,7 @@ bool RpFlashLink::begin(uint32_t size) {
     if (!pollUntilReady(kReadyTimeoutMs)) {
         SLOGE("rpflash", "RP refused the update (result %u detail %u)",
               unsigned(_result), unsigned(_detail));
-        _active = false;
+        _active.store(false, std::memory_order_release);
         return false;
     }
     SLOGI("rpflash", "RP in flash mode for %u B, running fw '%s'",
@@ -128,7 +128,7 @@ bool RpFlashLink::begin(uint32_t size) {
 }
 
 bool RpFlashLink::push(uint32_t base, const uint8_t* data, uint32_t len) {
-    if (!_active) return false;
+    if (!active()) return false;
     const uint32_t deadline = millis() + kChunkTimeoutMs;
     for (;;) {
         uint8_t out[kFrameBytes] = {};
@@ -144,14 +144,14 @@ bool RpFlashLink::push(uint32_t base, const uint8_t* data, uint32_t len) {
             SLOGE("rpflash", "RP rewound to %u behind chunk base %u -- the "
                   "upstream body is forward-only, so this cannot be served",
                   unsigned(_want), unsigned(base));
-            _active = false;
+            _active.store(false, std::memory_order_release);
             return false;
         }
         transact(out);
         if (_result == kFlashFailed) {
             SLOGE("rpflash", "RP failed mid-image at %u (detail %u)",
                   unsigned(_want), unsigned(_detail));
-            _active = false;
+            _active.store(false, std::memory_order_release);
             return false;
         }
         // Backpressure, not loss: the RP stops advancing `want` while a sector
@@ -160,14 +160,14 @@ bool RpFlashLink::push(uint32_t base, const uint8_t* data, uint32_t len) {
         if (int32_t(millis() - deadline) > 0) {
             SLOGE("rpflash", "RP stalled at %u for %u ms (%u resends)",
                   unsigned(_want), unsigned(kChunkTimeoutMs), unsigned(rewinds()));
-            _active = false;
+            _active.store(false, std::memory_order_release);
             return false;
         }
     }
 }
 
 bool RpFlashLink::end(uint32_t crc) {
-    if (!_active) return false;
+    if (!active()) return false;
     uint8_t out[kFrameBytes] = {kOpFlashEnd, ++_seq};
     memcpy(&out[2], &crc, 4);
     (void)transact(out);
@@ -181,20 +181,20 @@ bool RpFlashLink::end(uint32_t crc) {
                 SLOGI("rpflash", "RP verified the slot and is booting it "
                       "(%u rewinds; ~2 per 4 KB sector is backpressure, the "
                       "excess is wire loss)", unsigned(rewinds()));
-                _active = false;
+                _active.store(false, std::memory_order_release);
                 return true;
             }
             if (_result == kFlashFailed) {
                 SLOGE("rpflash", "RP verify FAILED (detail %u) -- slot not "
                       "bought, running image intact", unsigned(_detail));
-                _active = false;
+                _active.store(false, std::memory_order_release);
                 return false;
             }
         }
         delay(5);
     }
     SLOGE("rpflash", "RP never reported a verify result");
-    _active = false;
+    _active.store(false, std::memory_order_release);
     return false;
 }
 
@@ -203,7 +203,7 @@ void RpFlashLink::abort() {
     uint8_t out[kFrameBytes] = {kOpFlashAbort, ++_seq};
     uint8_t in[kFrameBytes] = {};
     xfer(out, in);
-    _active = false;
+    _active.store(false, std::memory_order_release);
     _result = kFlashIdle;
 }
 

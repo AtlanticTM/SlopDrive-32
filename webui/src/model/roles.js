@@ -110,8 +110,8 @@ export const ROLE = {
  * label keyed off it is not device knowledge any more than the role string
  * itself is. This is the ONLY place a field's wire NAME may be overridden for
  * display; see `labelFor()` in format.js for the resolution order (role label
- * first, `humanize(field.name)` fallback otherwise — never a per-device name
- * table).
+ * first, then the catalog desc's leading clause, then `humanize(field.name)`;
+ * never a per-device name table).
  *
  * Wording prefers the pre-refactor UI's own choices where it had one
  * (`git show webui-prerefactor:webui/index.html` / `style.css` — "User

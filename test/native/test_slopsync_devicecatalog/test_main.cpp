@@ -158,7 +158,13 @@ TEST_CASE("device catalog: etag pinned — accidental-wire-change tripwire") {
     // `stream_speed_reserved` with no setting_key and modes-set key 3 became a
     // permanent gap. Deliberate wire evolution, no protocol break: clients
     // re-fetch on etag mismatch by design.
-    CHECK(hex == "53 B1 F3 F7 EE 2D DB 4C");
+    // MOVED 2026-09-03 (53 B1 F3 F7 EE 2D DB 4C -> DB F5 FF 13 63 B3 DF B0):
+    // sd-dlq. 0x1100 raw_10um's desc was reworded so its LEADING CLAUSE reads
+    // as the field's label ("Asked position"): no registry role fits a
+    // demand-provenance position on a STATE channel, and the field NAME is
+    // wire content that must not be renamed (transport.md T11). Metadata only,
+    // no layout change: clients re-fetch on etag mismatch by design.
+    CHECK(hex == "DB F5 FF 13 63 B3 DF B0");
 }
 
 // ---- Baseline conformance ---------------------------------------------------

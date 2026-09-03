@@ -272,9 +272,9 @@ static volatile bool g_diagEndSeen = false;
 // loop task. No lock: the worst a torn read can produce is one discovery reply
 // carrying a mixed name and etag, which the next probe corrects. A lock here
 // would be a third mutex on a board that has exactly two by ruling.
-// TODO(sd-cd8): SlopSyncUartPort::handleBridgeOp must answer kOpIdentity; until
-// it does, g_identSeen stays false and every reply carries the bridge's own
-// hostname with zeros for the hub fields.
+// The S3 answers kOpIdentity from SlopSyncUartPort::handleBridgeOp (fw 2.5.3+).
+// Against an older S3 g_identSeen stays false and every reply carries the
+// bridge's own hostname with zeros for the hub fields: degraded, never a stall.
 static uint8_t g_ident[bridge::kIdentBytes] = {};
 static volatile bool g_identSeen = false;
 

@@ -270,6 +270,15 @@ public:
     // mint, two doors (sd-ykg.2). comms/ -> comms/, no layering wound.
     void setUiTokenMinter(SlopSyncUiTokenMinter* m) { _tokenMinter = m; }
 
+    // kOpIdentity (sd-cd8): the C5 answers SPEC 13.8 probes with the HUB's
+    // identity. Instance id, catalog etag and the pairing flag are read live
+    // from the hub at answer time; only the two strings the hub does not own
+    // are injected, as pointers to literals with static lifetime.
+    void setIdentityStrings(const char* hub_name, const char* fw_version) {
+        _identName = hub_name ? hub_name : "";
+        _identFw = fw_version ? fw_version : "";
+    }
+
     // The hub task's ota_active guard skips this port; it MUST NOT while the
     // OTA is the one arriving here. Safe because a serial OTA's flash writes
     // run on the hub task too, so drain and write are serialized.
@@ -296,6 +305,8 @@ private:
     IOtaSink* _otaSink = nullptr;
     IDiagSource* _diagSource = nullptr;
     SlopSyncUiTokenMinter* _tokenMinter = nullptr;
+    const char* _identName = "";
+    const char* _identFw = "";
     // One diag batch, filled and sent whole inside one kOpDiagReq dispatch.
     // 2 KB fits the 8 KB TX buffer outright, so sendBridge never has to wait.
     // Costs PSRAM, not internal RAM: the port lives inside the PSRAM-resident

@@ -1314,6 +1314,9 @@ void SlopSyncHubService::init() {
     // one implementation, two doors (sd-ykg.2). Post-strip this is the only
     // door left.
     _uartPort.setUiTokenMinter(&_uiTokens);
+    // The bridge answers SPEC 13.8 probes with this hub's identity (sd-cd8);
+    // the same two literals the S3's own responder uses below.
+    _uartPort.setIdentityStrings("slopdrive-32", FIRMWARE_VERSION);
     bootheap::mark("ss:uart");
 #endif
 

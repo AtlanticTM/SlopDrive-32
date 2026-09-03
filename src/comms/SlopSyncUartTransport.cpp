@@ -184,6 +184,30 @@ void SlopSyncUartPort::handleBridgeOp(const uint8_t* body, size_t n) {
         return;
     }
 
+    if (op == bridge::kOpIdentity) {
+        // Fixed-width answer, zero-padded strings (SPEC 5.4 str32/str16), the
+        // layout BridgeProtocol.h pins for both ends. Live fields come from
+        // the hub so a re-pair or a catalog change is never stale here.
+        uint8_t resp[1 + bridge::kIdentBytes] = {};
+        resp[0] = bridge::kOpIdentity;
+        uint8_t* id = resp + 1;
+        strncpy(reinterpret_cast<char*>(id + bridge::kIdentNameOff), _identName,
+                bridge::kIdentNameLen);
+        const uint64_t hid = _hub ? _hub->hubInstanceId() : 0;
+        for (size_t i = 0; i < 8; ++i) id[bridge::kIdentIdOff + i] = uint8_t(hid >> (8 * i));
+        strncpy(reinterpret_cast<char*>(id + bridge::kIdentFwOff), _identFw,
+                bridge::kIdentFwLen);
+        if (_hub) {
+            const auto etag = _hub->catalogEtag();
+            const size_t n_etag = etag.size() < bridge::kIdentEtagLen ? etag.size()
+                                                                       : bridge::kIdentEtagLen;
+            memcpy(id + bridge::kIdentEtagOff, etag.data(), n_etag);
+            id[bridge::kIdentFlagsOff] = _hub->pairingWindowOpen() ? 0x01 : 0x00;
+        }
+        sendBridge(resp, sizeof(resp));
+        return;
+    }
+
     if (op == bridge::kOpDiagReq) {
         // One bounded batch per request; the C5 paces by not asking again
         // until its HTTP client drained the last one, so no flow control.

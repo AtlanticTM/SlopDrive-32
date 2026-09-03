@@ -136,6 +136,12 @@ public:
     // True once when the driver wants the motion engine re-seeded at the
     // live position (chain gap too big to glide). Cleared by the read.
     virtual bool consumeReseedRequest() { return false; }
+    // The HOST already seeded the engine at the live position for this stream
+    // entry. ONE RESET OWNER: a driver that would otherwise ask for its own
+    // re-seed on the same entry must suppress it, or one connect costs two
+    // cold starts ~10 ms apart from the same stale position (sd-6b2.12).
+    // Default no-op; only the offboard chain builder tracks entries.
+    virtual void noteEngineSeeded() {}
     virtual void     setAcceleration(float accel_mm_s2)  = 0;
     virtual float    getMaxSpeed()          const        = 0;
     // Acceleration ACTUALLY applied by the driver (mm/s², post-internal-clamp).

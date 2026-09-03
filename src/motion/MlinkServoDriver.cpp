@@ -751,7 +751,13 @@ void MlinkServoDriver::streamSample(int32_t target_steps, float vel_steps_s,
         _samp_us = now_us;
         _sweep_pending = true;
         _reseed_tried = false;
-        _reseed_armed = true;
+        // ONE RESET OWNER (sd-6b2.12): the host's stream rising edge already
+        // seeded the engine at the live position earlier in THIS tick, so
+        // arming here would cost a second cold start ~10 ms later from the
+        // same stale position. Arm only when nobody else owned the reset,
+        // which is the 100 ms-silence re-entry inside a live stream.
+        _reseed_armed = !_engine_seeded;
+        _engine_seeded = false;
         _seg_mode = true;
     }
     _samp_p = float(target_steps);

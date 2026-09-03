@@ -1354,6 +1354,13 @@ inline bool buildSlopDriveCatalog(slopsync::Catalog32& c, DeviceFeatures feat = 
                       .dflt = SettingDefault::ofInt(6), .group = "Infeasible moves",
                       .desc = "How gradually a budget is spent. More steps is smoother, slower to settle.",
                       .settingKey = 18, .hasSettingKey = true});
+    // TODO(sd-6b2.4): `infeasible_blend` (SystemState::sm_tune_infeas_blend,
+    // f32, 0..1, default 0.5, group "Infeasible moves") belongs here and in the
+    // schema block below on the next free setting key. It is Blend's ONE
+    // slider and Blend is the shipped policy, so it is the last unreachable
+    // knob. Held out of this commit because a new catalog element is a WIRE
+    // change: it moves the packed layout and the catalog etag, so it rides a
+    // registry key allocation, not a firmware edit.
     c.addLayoutField({.name = "reshape_steps", .type = PackedFieldType::u8, .unit = "", .scale = 1.0f,
                       .hasMin = true, .hasMax = true, .min = 0.0f, .max = 8.0f,
                       .dflt = SettingDefault::ofInt(6), .group = "Infeasible moves",

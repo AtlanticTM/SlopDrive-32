@@ -1093,6 +1093,15 @@ void SlopDriveHubDelegate::onStreamBundle(uint16_t channel_id, uint32_t session_
                 e.vel         = float(rawEndV) / 1000.0f;  // catalog scale 1000
                 e.has_end_vel = true;
             }
+            // Input-side trace (diagnosis, sd-tki): the segment exactly as the
+            // client sent it, pre-planning. `lead` is how far ahead of now it is
+            // scheduled (the client's lookahead; 0 = arrived late and was
+            // clamped to now). Joined to the `plan` tag by `due`. Hub task,
+            // one line per segment at the stream's own rate.
+            SLOGI("segin", "due=%llu lead=%ld tgt=%.4f dur=%u vf=%s%.3f fam=%u",
+                  (unsigned long long)due, (long)delta, (double)e.target,
+                  unsigned(rawDurMs), e.has_end_vel ? "" : "S",
+                  e.has_end_vel ? (double)e.vel : 0.0, unsigned(curveFamily));
         } else {
             // 4-B layout: {target_norm u16, vel_norm i16}. 0 velocity = no
             // handoff (the pre-segment-channel convention, preserved verbatim).

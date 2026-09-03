@@ -125,6 +125,28 @@ static MotionArbiter      arbiter(g_state, mapper, motor);
 static slopmotion::Engine g_slopmotion({}, 0.5f);
 static constexpr size_t   INTERP_QUEUE_DEPTH     = 16;
 static QueueHandle_t      g_interp_queue         = nullptr;
+// Per-commit planner trace (diagnosis, sd-tki). Core 1 queues a POD record
+// per commit -- never a formatted log on the motion core (see the T27 note at
+// the commit site) -- and httpTask formats it into the `plan` tag. Drop-if-
+// full; the drop count rides the line so a gap is visible.
+struct PlanTrace {
+    uint64_t due_us;
+    int32_t  late_us;
+    float    target;
+    uint32_t duration_us;
+    float    end_vel;
+    float    next_chord;
+    uint32_t plan_us;
+    uint8_t  has_end_vel;
+    uint8_t  has_next_chord;
+    uint8_t  kind_after;
+    uint8_t  mode_after;
+    uint8_t  ok;
+    uint8_t  family;
+};
+static constexpr size_t   kPlanTraceDepth = 64;
+static QueueHandle_t      g_plan_trace_queue     = nullptr;
+static uint32_t           g_plan_trace_drops     = 0;   // Core 1 writes, httpTask reads
 // After this idle gap with no L0 command the sampler stops feeding FAS and
 // yields the motor back to PatternEngine / manual moves.
 static constexpr uint32_t STREAM_IDLE_TIMEOUT_MS = 500;
@@ -677,8 +699,27 @@ static void streamSamplerTask(void* /*param*/) {
         slopmotion::Command cmd;
         while (xQueueReceive(g_interp_queue, &cmd, 0) == pdTRUE) {
             const uint32_t t0 = (uint32_t)esp_timer_get_time();
-            g_slopmotion.commit(cmd, nowUs);
+            const bool committed = g_slopmotion.commit(cmd, nowUs);
             const uint32_t dt = (uint32_t)esp_timer_get_time() - t0;
+            {
+                // POD only, no formatting on Core 1 (T27 note below).
+                PlanTrace tr{};
+                tr.due_us         = cmd.has_anchor ? cmd.anchor_us : nowUs;
+                tr.late_us        = (int32_t)(int64_t(nowUs) - int64_t(tr.due_us));
+                tr.target         = cmd.target;
+                tr.duration_us    = cmd.duration_us;
+                tr.end_vel        = cmd.end_vel;
+                tr.next_chord     = cmd.next_chord;
+                tr.plan_us        = dt;
+                tr.has_end_vel    = cmd.has_end_vel;
+                tr.has_next_chord = cmd.has_next_chord;
+                tr.kind_after     = (uint8_t)g_slopmotion.planKind();
+                tr.mode_after     = (uint8_t)g_slopmotion.mode();
+                tr.ok             = committed;
+                tr.family         = cmd.client_curve_family;
+                if (g_plan_trace_queue && xQueueSend(g_plan_trace_queue, &tr, 0) != pdTRUE)
+                    ++g_plan_trace_drops;
+            }
             g_state.sm_plan_us_last = dt;
             if (dt > g_state.sm_plan_us_max) g_state.sm_plan_us_max = dt;
             g_state.sm_plan_us_avg = g_state.sm_plan_us_avg <= 0.0f
@@ -970,6 +1011,29 @@ static void httpTask(void* param) {
         TIME_STEP(encoderValidator.update(), "http:encValidator");
 #endif
         TIME_STEP(applogDrain(),          "http:logDrain");   // SlopLog ring -> web/serial sinks
+        // Planner trace consumer: format Core 1's POD records here, bounded per
+        // tick so a burst cannot own httpTask. Kind/mode names index the enums
+        // in slopmotion.hpp (append-only there).
+        if (g_plan_trace_queue) {
+            static const char* const kKind[] = {"none", "quintic", "ruckig", "cubic"};
+            static const char* const kMode[] = {"idle", "waveform", "chase", "settle"};
+            PlanTrace tr;
+            for (int n = 0; n < 8 && xQueueReceive(g_plan_trace_queue, &tr, 0) == pdTRUE; ++n) {
+                SLOGI("plan", "due=%llu late=%ld tgt=%.4f dur=%u vf=%s%.3f next=%s%.3f -> %s/%s plan=%uus%s",
+                      (unsigned long long)tr.due_us, (long)tr.late_us, (double)tr.target,
+                      unsigned(tr.duration_us / 1000u),
+                      tr.has_end_vel ? "" : "S", tr.has_end_vel ? (double)tr.end_vel : 0.0,
+                      tr.has_next_chord ? "" : "-", tr.has_next_chord ? (double)tr.next_chord : 0.0,
+                      kKind[tr.kind_after < 4 ? tr.kind_after : 0],
+                      kMode[tr.mode_after < 4 ? tr.mode_after : 0],
+                      unsigned(tr.plan_us), tr.ok ? "" : " REFUSED");
+            }
+            static uint32_t s_dropsSeen = 0;
+            if (g_plan_trace_drops != s_dropsSeen) {
+                s_dropsSeen = g_plan_trace_drops;
+                SLOGW("plan", "trace queue dropped %lu records", (unsigned long)s_dropsSeen);
+            }
+        }
 #if defined(MOTION_PASSTHROUGH_BENCH)
         mlink::tick();   // 10 Hz ping; status lands in /api/diag/mlink
 #endif
@@ -1379,6 +1443,8 @@ void setup() {
     // SlopMotion command queue — Core 0 (SlopSync ingress) → Core 1 sampler
     g_interp_queue = xQueueCreate(INTERP_QUEUE_DEPTH, sizeof(slopmotion::Command));
     configASSERT(g_interp_queue != nullptr);
+    g_plan_trace_queue = xQueueCreate(kPlanTraceDepth, sizeof(PlanTrace));
+    configASSERT(g_plan_trace_queue != nullptr);
 
     // Create FreeRTOS tasks. Every creation is checked — a boot-critical task
     // that fails to spin up under heap pressure (motorTask IS the homing +

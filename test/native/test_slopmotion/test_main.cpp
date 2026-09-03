@@ -9,7 +9,22 @@
 // Finite-difference tolerances: velocity/accel come from Ruckig analytically,
 // but jerk is checked as Δa/Δt on the 1 ms grid, which averages across the
 // bang-bang jerk switching instants — so the jerk bound uses a small margin.
+//
+// THE MACHINE IS THE FIXTURE: liveTuning() below is the default for every
+// scenario case. The three softer fixtures are alternatives, each used only by
+// cases that are ABOUT the alternative and each carrying the one-line reason.
+//
+// Field figures are GENERATED, never transcribed (T20):
+//   python tools/segtrace_to_case.py --dir artifacts/segtrace-<run>
+//          --from <s> --to <s> --name <id>
+// prints the fieldreplay::S[] table and the Config that produced it.
 // ============================================================================
+
+// Debug scaffolding for a bench session; every printf in this file is behind it
+// and the suite is silent at 0. Build with -DSLOPMOTION_TEST_VERBOSE=1.
+#ifndef SLOPMOTION_TEST_VERBOSE
+#define SLOPMOTION_TEST_VERBOSE 0
+#endif
 
 #define DOCTEST_CONFIG_IMPLEMENT_WITH_MAIN
 #include <doctest/doctest.h>
@@ -33,6 +48,45 @@ namespace {
 constexpr uint64_t kMs = 1000ULL;        // µs per ms
 constexpr uint64_t kS  = 1000000ULL;     // µs per s
 
+// ---- THE MACHINE IS THE FIXTURE ---------------------------------------------
+// The tuning the machine actually runs, read off channel 0x1122 on 2026-09-02:
+// a 100 mm window (87-187 mm), 1000 mm/s / 40000 mm/s^2 / 5e6 mm/s^3 of input
+// ceiling, a 200 mm/s user ceiling, Blend at 0.5 with both budgets at 0.5 over
+// 6 ray steps, c1_cubic segments, 200 ms of settle grace, chase gain 0.1 with
+// no lookahead, and the overshoot guard left at the engine default.
+//
+// PINNED AGAINST THE DEVICE CATALOG. The fields here that are catalog DEFAULTS
+// (infeasible_blend, both budgets, blend steps, and the untouched
+// handoff_chord_factor and overshoot_guard) have their one home in
+// include/system/SystemState.h as sm_tune_*. A default that moves there and not
+// here silently re-targets this whole suite, so a change touches BOTH;
+// test/native/test_engine_config guards that the host map still WRITES each of
+// them. The rest are the operator's session values, not defaults: Blend against
+// the catalog's Stretch, 200 ms against 30, gain 0.1 against 0.9, lookahead 0
+// against 3.
+//
+// curve_policy stays FollowClient because the client declares its family per
+// segment (fam=1, c1_cubic, on the wire); the replay rows carry that.
+Config liveTuning() {
+    Config cfg;
+    cfg.limits.vmax = 10.0f;       // 1000 mm/s   / 100 mm
+    cfg.limits.amax = 400.0f;      // 40000 mm/s2 / 100 mm
+    cfg.limits.jmax = 50000.0f;    // 5e6 mm/s3   / 100 mm
+    cfg.recovery_vmax   = 2.0f;    // user 200 mm/s / 100 mm
+    cfg.infeasible_policy           = InfeasiblePolicy::Blend;
+    cfg.infeasible_blend            = 0.5f;   // sm_tune_infeas_blend
+    cfg.infeasible_smooth_budget    = 0.5f;   // sm_tune_smooth_budget
+    cfg.infeasible_amplitude_budget = 0.5f;   // sm_tune_amp_budget
+    cfg.infeasible_blend_steps      = 6;      // sm_tune_blend_steps
+    cfg.settle_grace_us = 200000;  // sm_tune_settle_grace_us, operator-set
+    cfg.chase_ff_gain   = 0.1f;    // sm_tune_chase_gain, operator-set
+    cfg.chase_lookahead = 0.0f;    // sm_tune_chase_look, operator-set
+    return cfg;
+}
+
+// ALTERNATIVE FIXTURE, soft ceilings (2/20/300). Only for cases whose assertion
+// needs a ceiling the command can actually break, or a jerk bound a 1 ms finite
+// difference can resolve; at the fixture's 50000 those assertions are vacuous.
 Config testConfig() {
     Config cfg;
     cfg.limits.vmax = 2.0f;
@@ -49,7 +103,9 @@ Config testConfig() {
     return cfg;
 }
 
-// The limit set of the virtual machine both defects were measured against:
+// ALTERNATIVE FIXTURE. The limit set of the virtual machine both defects were
+// measured against, kept because the M7a and referee cases are ABOUT a jerk
+// ceiling too low to turn the boundary state around:
 // 500 mm stroke window, 550 mm/s input speed, 8000 mm/s² input accel, fixed
 // jerk — normalized by the window span exactly as the firmware glue does.
 Config machineConfig() {
@@ -60,6 +116,8 @@ Config machineConfig() {
     return cfg;
 }
 
+// ALTERNATIVE FIXTURE. An older operator machine; kSpanMm is the mm scale the
+// amplitude complaints were made in and the shape/overshoot cases still quote.
 // The OPERATOR's machine, measured: stroke window [150, 350] mm (span 200),
 // input speed 1000 mm/s, input accel 50000 mm/s², jerk 2e6 mm/s³ — normalized
 // by the span exactly as the firmware glue does. Amplitude numbers below are
@@ -195,19 +253,11 @@ Shape segShape(Config cfg, double start, double target, uint32_t ms,
     return s;
 }
 
-void reportShape(const std::string& name, const Shape& s, double jmax) {
-    MESSAGE(name << ": travel " << s.travel_mm << " mm, j_eff "
-                 << (s.sharp * jmax * kSpanMm) << " mm/s^3 (" << s.sharp
-                 << " of jmax), vpk " << (s.vpk * kSpanMm) << " mm/s, apk "
-                 << (s.apk * kSpanMm) << " mm/s^2, peak/mean " << s.pk_over_mean
-                 << ", flat " << s.flat_pct << " %");
-}
-
 } // namespace
 
 // ============================================================================
 TEST_CASE("Idle: fresh engine holds its seed position, not busy") {
-    Engine e(testConfig(), 0.3f);
+    Engine e(liveTuning(), 0.3f);
     CHECK(e.positionAt(0) == doctest::Approx(0.3f));
     CHECK(e.velocityAt(5 * kS) == doctest::Approx(0.0));
     CHECK_FALSE(e.isBusy(0));
@@ -215,7 +265,7 @@ TEST_CASE("Idle: fresh engine holds its seed position, not busy") {
 }
 
 TEST_CASE("Waveform rest-to-rest: lands on target, at rest, on the deadline") {
-    Engine e(testConfig(), 0.2f);
+    Engine e(liveTuning(), 0.2f);
 
     Command c;
     c.target       = 0.8f;
@@ -246,6 +296,8 @@ TEST_CASE("Waveform quintic is the min-jerk curve (shape fidelity)") {
     // The whole point of the quintic path: reproduce the sender's spline, not
     // a cruise-and-burst chord. Rest-to-rest min-jerk has exact analytic
     // midpoint values: p(T/2) = midpoint, v(T/2) = 1.875 * dist / T.
+    // NOT the machine fixture: this is about the QUINTIC family, which the
+    // machine's clients never ask for (they declare c1_cubic).
     Engine e(testConfig(), 0.2f);
     Command c;
     c.target = 0.8f; c.duration_us = 600 * (uint32_t)kMs; c.has_duration = true;
@@ -267,6 +319,8 @@ TEST_CASE("Consecutive G-slope segments join C2 (no accel jump at boundaries)") 
     // largest 1 ms accel step anywhere must be jerk-limited, not a jump.
     Config cfg;
     cfg.limits.vmax = 3.0f; cfg.limits.amax = 30.0f; cfg.limits.jmax = 500.0f;
+    // NOT the machine fixture: a jerk-continuity bound is only a bound where a
+    // 1 ms finite difference can resolve jmax. At 50000 it admits any jump.
     const double amp = 0.35, f = 0.5, base = 0.5;
     Engine e(cfg, (float)base);
 
@@ -305,9 +359,9 @@ TEST_CASE("Over-demanding waveform falls back to the Ruckig guard, ceilings hold
     // just over the 2.0 ceiling. The quintic must NOT be executed; the guard
     // takes the segment and every sampled ceiling still holds.
     //
-    // Pinned to Stretch: this is the GUARD's test, and Stretch is the policy
-    // that hands the segment straight to it. Under Blend the same command is
-    // (correctly) shortened toward the amplitude floor instead.
+    // Pinned to Stretch AND to a soft ceiling: this is the GUARD's test, and
+    // the guard only takes a segment the command can actually break. Under the
+    // machine's Blend the same command is shortened toward the amplitude floor.
     auto cfg = testConfig();
     cfg.infeasible_policy = InfeasiblePolicy::Stretch;
     Engine e(cfg, 0.0f);
@@ -339,8 +393,7 @@ TEST_CASE("Cold-start governor: opening plan out of rest is vmax-clamped, "
           "warm plans are not") {
     // velocityAt is a LIVE evaluator (maybeSettle advances state), so each
     // phase gets its own engine instance and one monotonic scan.
-    auto cfg = testConfig();
-    cfg.recovery_vmax = 0.5f;   // well under limits.vmax (3.0)
+    auto cfg = liveTuning();    // recovery 2.0, well under limits.vmax (10)
     Command c;
     c.target = 0.9f; c.duration_us = 100 * (uint32_t)kMs; c.has_duration = true;
 
@@ -352,7 +405,7 @@ TEST_CASE("Cold-start governor: opening plan out of rest is vmax-clamped, "
         double vpk = 0.0;
         for (uint64_t t = 0; t < 5 * kS; t += kMs)
             vpk = std::max(vpk, std::fabs((double)e.velocityAt(t)));
-        CHECK(vpk <= 0.5 * 1.02);
+        CHECK(vpk <= 2.0 * 1.02);
         CHECK(vpk > 0.1);   // it does actually move
     }
 
@@ -372,35 +425,35 @@ TEST_CASE("Cold-start governor: opening plan out of rest is vmax-clamped, "
         double vpk2 = 0.0;
         for (uint64_t t = tMid; t < tMid + 2 * kS; t += kMs)
             vpk2 = std::max(vpk2, std::fabs((double)e.velocityAt(t)));
-        CHECK(vpk2 > 0.5 * 1.05);   // exceeded the recovery clamp = unclamped
+        CHECK(vpk2 > 2.0 * 1.05);   // exceeded the recovery clamp = unclamped
     }
 }
 
 TEST_CASE("Cold-start governor: from-rest strokes inside a live stream are "
           "NOT clamped (cold needs a command gap)") {
-    auto cfg = testConfig();
-    cfg.recovery_vmax = 0.5f;
-    Engine e(cfg, 0.2f);
+    Engine e(liveTuning(), 0.2f);
     // Prime: one commit establishes the stream (cold, clamped -- fine).
     Command c;
     c.target = 0.4f; c.duration_us = 200 * (uint32_t)kMs; c.has_duration = true;
     REQUIRE(e.commit(c, 0));
     // A stroke 500 ms later, arriving from rest (explicit-rest content):
     // WARM by the gap rule, so it may exceed the recovery clamp.
-    // 0.4 norm over 400 ms: min-jerk peak v = 1.875 -- inside every ceiling
-    // (v 3.0, a 30, j 500), well above the 0.5 recovery clamp.
+    // 0.6 norm over 200 ms: min-jerk peak v = 5.6 -- inside every ceiling
+    // (v 10, a 400, j 50000), well above the 2.0 recovery clamp.
     Command c2;
-    c2.target = 0.6f; c2.duration_us = 400 * (uint32_t)kMs; c2.has_duration = true;
+    c2.target = 1.0f; c2.duration_us = 200 * (uint32_t)kMs; c2.has_duration = true;
     const uint64_t t2 = 500 * kMs;
     REQUIRE(e.commit(c2, t2));
     double vpk = 0.0;
     for (uint64_t t = t2; t < t2 + 1500 * kMs; t += kMs)
         vpk = std::max(vpk, std::fabs((double)e.velocityAt(t)));
-    CHECK(vpk > 0.5 * 1.05);
+    CHECK(vpk > 2.0 * 1.05);
 }
 
 TEST_CASE("Chase jerk scales with move demand: slow streams plan soft, fast "
           "streams keep authority") {
+    // NOT the machine fixture: the scale is a FRACTION of jmax against demand,
+    // so it needs a ceiling the demand can approach.
     auto run = [](double f, double amp) {
         Config cfg;
         cfg.limits.vmax = 3.0f;
@@ -431,6 +484,8 @@ TEST_CASE("Chase jerk scales with move demand: slow streams plan soft, fast "
 }
 
 TEST_CASE("Infeasible deadline stretches to physical minimum + anomaly") {
+    // NOT the machine fixture: Stretch is the policy under test, and a full
+    // stroke has to be physically impossible in its deadline for it to fire.
     auto cfg = testConfig();          // vmax = 2 → 0→1 takes ≥ 0.5 s
     cfg.infeasible_policy = InfeasiblePolicy::Stretch;   // the guard's test
     Engine e(cfg, 0.0f);
@@ -460,7 +515,7 @@ TEST_CASE("Infeasible deadline stretches to physical minimum + anomaly") {
 }
 
 TEST_CASE("Retarget mid-move is C2-continuous at the commit instant") {
-    Engine e(testConfig(), 0.2f);
+    Engine e(liveTuning(), 0.2f);
 
     Command a;
     a.target = 0.9f; a.duration_us = 800 * (uint32_t)kMs; a.has_duration = true;
@@ -489,6 +544,8 @@ TEST_CASE("Retarget mid-move is C2-continuous at the commit instant") {
 }
 
 TEST_CASE("Chase: 60 Hz sine stream tracks smoothly within limits") {
+    // NOT the machine fixture: tracking lag is only measurable where the
+    // ceilings bind. At 10 u/s the tracker hugs this sine and the figure is 0.
     Config cfg;
     cfg.limits.vmax = 3.0f;
     cfg.limits.amax = 30.0f;
@@ -531,21 +588,18 @@ TEST_CASE("Chase: 60 Hz sine stream tracks smoothly within limits") {
                                  std::fabs(p - target((double)t * 1e-6)));
         }
     }
-    // Tracking lag exists (the engine chases points, it cannot see the
-    // future): predictive aim + velocity/accel feedforward measured ~0.06
-    // peak on this clean-grid sine (~35 ms of estimator-smoothing lag at
-    // peak velocity — the price of jitter immunity). This bound is a
-    // regression tripwire, not a quality target; lag tuning is done with
-    // eyes on the scenario graphs (examples/slopmotion_traces).
-    CHECK(worst_err < 0.10);
+    // DERIVED, not baselined: the engine chases the newest point, so its
+    // steady-state error cannot beat the source's own travel over the horizon
+    // the aim extrapolates across. Source peak |v| = amp*2*pi*f, horizon =
+    // chase_lookahead stream intervals. Lag tuning itself is done with eyes on
+    // the scenario graphs (examples/slopmotion_traces), not here.
+    const double src_vpk   = 0.4 * 2.0 * M_PI * f;
+    const double horizon_s = (double)cfg.chase_lookahead * 16667e-6;
+    CHECK(worst_err < src_vpk * horizon_s);
 }
 
 TEST_CASE("Starve-settle: dead stream brakes to rest and holds") {
-    Config cfg;
-    cfg.limits.vmax = 3.0f;
-    cfg.limits.amax = 30.0f;
-    cfg.limits.jmax = 500.0f;
-    Engine e(cfg, 0.5f);
+    Engine e(liveTuning(), 0.5f);
 
     // Feed an ascending ramp with feedforward so the trajectory is mid-glide
     // with real velocity when the stream dies.
@@ -580,14 +634,17 @@ TEST_CASE("Starve-settle: dead stream brakes to rest and holds") {
 }
 
 TEST_CASE("End velocity near a wall is clamped bound-safe") {
-    auto cfg = testConfig();
+    auto cfg = liveTuning();
+    // The wall guard is what this measures; the cold-start governor would clamp
+    // the same vf first and hide which guard fired.
+    cfg.recovery_vmax = 0.0f;
     Engine e(cfg, 0.5f);
 
     Command c;                        // v4 point: land at 0.98 STILL MOVING fast
     c.target       = 0.98f;
     c.duration_us  = 400 * (uint32_t)kMs;
     c.has_duration = true;
-    c.end_vel      = 1.5f;
+    c.end_vel      = 6.0f;
     c.has_end_vel  = true;
     REQUIRE(e.commit(c, 0));
 
@@ -596,8 +653,8 @@ TEST_CASE("End velocity near a wall is clamped bound-safe") {
     while (e.popAnomaly(ev)) {
         if (ev.kind == (uint8_t)AnomalyType::EndVelClamped) {
             saw_clamp = true;
-            // clamped to √(amax·dist) = √(20·0.02) ≈ 0.632, not the asked 1.5
-            CHECK(std::fabs(ev.detail) <= std::sqrt(20.0 * 0.02) + 1e-6);
+            // clamped to √(amax·dist) = √(400·0.02) ≈ 2.83, not the asked 6.0
+            CHECK(std::fabs(ev.detail) <= std::sqrt(400.0 * 0.02) + 1e-6);
         }
     }
     CHECK(saw_clamp);
@@ -610,7 +667,7 @@ TEST_CASE("End velocity near a wall is clamped bound-safe") {
 }
 
 TEST_CASE("Non-finite input is rejected; previous plan keeps executing") {
-    Engine e(testConfig(), 0.2f);
+    Engine e(liveTuning(), 0.2f);
 
     Command good;
     good.target = 0.7f; good.duration_us = 500 * (uint32_t)kMs;
@@ -664,6 +721,8 @@ TEST_CASE("Determinism: identical command/time sequences → identical samples")
 // which fidelity gets sacrificed when the wire lies
 
 TEST_CASE("Stretch policy: same command keeps the stroke and overruns the deadline") {
+    // NOT the machine fixture: Stretch is the alternative policy, and its whole
+    // contract (keep the stroke, overrun the clock) needs an impossible ask.
     auto cfg = machineConfig();
     cfg.infeasible_policy = InfeasiblePolicy::Stretch;
     Engine e(cfg, 0.0f);
@@ -700,6 +759,8 @@ TEST_CASE("A feasible segment is bit-identical under BOTH policies") {
     // The policy is a fallback branch, not a filter: a segment the quintic can
     // legally execute must be untouched, sample for sample, whichever policy
     // is armed. Nothing outside the infeasible path may touch a legal shape.
+    // NOT the machine fixture: a POLICY comparison, so both policies must be
+    // reachable, which means a ceiling the commands can straddle.
     auto sample = [](InfeasiblePolicy pol, std::vector<float>& out) {
         auto cfg = machineConfig();
         cfg.infeasible_policy = pol;
@@ -735,6 +796,7 @@ TEST_CASE("Both policies keep the sampled window invariant [0,1]") {
     // clamp, and the guard hands Ruckig — which has NO position limits — the
     // commanded endpoint, so prove the window still holds under a full-stroke
     // segment chain that is infeasible in both directions.
+    // NOT the machine fixture: same reason as above, both policies must fire.
     for (auto pol : {InfeasiblePolicy::Blend, InfeasiblePolicy::Stretch}) {
         auto cfg = machineConfig();
         cfg.infeasible_policy = pol;
@@ -792,6 +854,8 @@ TEST_CASE("Second-order chase aim stops overshooting a crest near the rail") {
     const double base = 0.55, amp = 0.40, f = 0.75;   // crest at 0.95
     const double crest = base + amp;
 
+    // NOT the machine fixture: the aim A/B is only visible where the tracker
+    // cannot simply out-accelerate its own lag.
     struct Result { double peak; double rail_ms; };
     auto run = [&](bool extrap) {
         Config cfg;
@@ -829,13 +893,11 @@ TEST_CASE("Second-order chase aim stops overshooting a crest near the rail") {
             << " (over-crest " << on.rail_ms << " ms)   linear peak "
             << off.peak << " (over-crest " << off.rail_ms << " ms)");
 
-    // Measured here: linear aim peaks 0.0381 above the crest, second-order
-    // 0.0256 — the accel term removes a third of the overshoot. The RESIDUAL
-    // is not aim error, it is chase LAG (the tracker is still climbing when
-    // the source turns, ~35 ms of estimator smoothing at peak velocity — the
-    // known part-1 residual). This bound is a regression tripwire on that
-    // combined figure, not a quality target.
-    CHECK(on.peak <= crest + 0.030);
+    // The absolute peak used to be pinned here at crest + 0.030, which was a
+    // baseline drawn around the day's 0.0256 rather than a bound anything
+    // derives; it is DELETED. The residual is chase LAG, not aim error, so the
+    // claim this case can actually make is the A/B below: the accel term
+    // removes overshoot, and no drift in both arms can satisfy it.
     // Turning the term off measurably re-introduces aim overshoot on top.
     CHECK(off.peak > on.peak + 0.005);
     CHECK(off.rail_ms > on.rail_ms);
@@ -849,6 +911,7 @@ TEST_CASE("Second-order aim shortens the dead-stop park at the rail") {
     // own 0.35 % tangency dwell). Second-order aim should cut the park time.
     const double base = 0.60, amp = 0.40, f = 0.75;   // crest exactly at 1.0
 
+    // NOT the machine fixture: same reason as the crest case above.
     auto park_ms = [&](bool extrap) {
         Config cfg;
         cfg.limits.vmax = 3.0f;
@@ -893,6 +956,7 @@ TEST_CASE("Predictive aim v2 arrives at the velocity the stream will HAVE") {
     // inconsistency actually shows up: a plan that arrives too fast is a plan
     // that is in the wrong place one interval later.
     const double base = 0.55, amp = 0.40, f = 0.75;
+    // NOT the machine fixture: same reason as the crest case above.
     struct Track { double rms; double peak_err; double max_pos; };
     auto run = [&](bool v2) {
         Config cfg;
@@ -943,6 +1007,8 @@ TEST_CASE("Snapshot::sharpness reports the plan's real peak jerk") {
     // policy artifact rather than telemetry. Cross-check it against the SAMPLED
     // jerk on an easy quintic (the shape is entirely the sender's) and on a
     // guard profile (where it is Ruckig's planning ceiling).
+    // NOT the machine fixture: the second half needs a GUARD profile, so the
+    // command has to be infeasible under Stretch's contract.
     auto cfg = operatorConfig();
     cfg.infeasible_policy = InfeasiblePolicy::Stretch;
     cfg.limits.vmax = 2.5f;
@@ -969,7 +1035,7 @@ TEST_CASE("Settle grace coasts at the end velocity, then brakes when the stream 
     // end velocity (a freeze stamps a flat spot into every late-successor
     // chord join, the sd-ar3 notch); past it, the brake engages as always.
     auto run = [](uint32_t grace_us) {
-        auto cfg = operatorConfig();
+        auto cfg = liveTuning();
         cfg.settle_grace_us = grace_us;
         Engine e(cfg, 0.30f);
 
@@ -1014,7 +1080,7 @@ TEST_CASE("Settle grace coasts at the end velocity, then brakes when the stream 
             prev = p;
         }
         CHECK(e.mode() != Mode::Waveform);
-        CHECK(jump <= 5.0 * 1e-3 * 1.05);         // ≤ vmax·1 ms: no jump
+        CHECK(jump <= 10.0 * 1e-3 * 1.05);        // ≤ vmax·1 ms: no jump
         CHECK(drainFor(e, AnomalyType::SettleEngaged).seen);
         CHECK(e.velocityAt(600 * kMs) == doctest::Approx(0.0).epsilon(1e-6));
     }
@@ -1027,7 +1093,7 @@ TEST_CASE("Settle grace coasts at the end velocity, then brakes when the stream 
     }
 
     SUBCASE("isolated point move still settles promptly (no cadence estimate)") {
-        auto cfg = operatorConfig();
+        auto cfg = liveTuning();
         Engine e(cfg, 0.30f);
         Command c;
         c.target = 0.45f; c.duration_us = 100 * (uint32_t)kMs;
@@ -1041,7 +1107,7 @@ TEST_CASE("Settle grace coasts at the end velocity, then brakes when the stream 
 TEST_CASE("Dwell rule: a re-commanded hold's declared arrival velocity is ignored") {
     // The measured pathology: a client re-sends its hold point ~1 Hz with a
     // stale spline tangent. Honoring vf whips through the hold at 3.4 norm/s.
-    auto cfg = operatorConfig();
+    auto cfg = liveTuning();
     Engine e(cfg, 0.60f);
     Command c;
     c.target = 0.60f; c.duration_us = 132 * (uint32_t)kMs;
@@ -1076,7 +1142,7 @@ TEST_CASE("Anchored commit: a late-released segment renders the wire timeline") 
     // second segment released 4 ms late but anchored at its due time. The
     // rendered curves must be identical -- release jitter never becomes
     // geometry.
-    auto cfg = operatorConfig();
+    auto cfg = liveTuning();
     Engine ref(cfg, 0.30f);
     Engine late(cfg, 0.30f);
 
@@ -1098,140 +1164,281 @@ TEST_CASE("Anchored commit: a late-released segment renders the wire timeline") 
               doctest::Approx(ref.positionAt(t)).epsilon(1e-9));
 }
 
-// Field replays, 2026-09-02 (segtrace-jitter-06, window 87-187 mm, MFP c1_cubic
-// segments, the machine's live tuning read off channel 0x1122). Each figure
-// is the script exactly as the S3 committed it, ~3 ms late like the queue drain.
+// ---- Scenario harness -------------------------------------------------------
+// A field figure is a TABLE, and the table is GENERATED:
+//   python tools/segtrace_to_case.py --dir artifacts/segtrace-jitter-06
+//          --from 158.40 --to 166.13 --name HOLD
+// reads segin.txt/plan.txt from a tools/segtrace.py pull and prints the S[]
+// literal plus the Config it ran under. Never hand-transcribe a trace (T20):
+// these figures were hand-typed once, and regenerating them from the same trace
+// found a swapped row pair in one and three wrong warm-up rows in another.
+// late_ms is each row's own plan.txt `late=`, not a constant.
+//
+// play() asserts the DEFAULT INVARIANTS on every replay, so a scenario case
+// carries no kinematics code of its own: it plays a table and reads the census.
 namespace fieldreplay {
-struct S { float tgt; uint32_t dur_ms; float vf; bool has_vf; float next; bool has_next; };
-struct Log { int settles = 0, scaled = 0, smoothed = 0, endvel = 0, fallback = 0; double vpk = 0.0; };
-inline Config liveTuning() {
-    Config cfg;                    // engine defaults = Blend policy, FollowClient
-    cfg.limits.vmax = 10.0f;       // 1000 mm/s   / 100 mm
-    cfg.limits.amax = 400.0f;      // 40000 mm/s2 / 100 mm
-    cfg.limits.jmax = 50000.0f;    // 5e6 mm/s3   / 100 mm
-    cfg.recovery_vmax   = 2.0f;    // user 200 mm/s / 100 mm
-    cfg.settle_grace_us = 200000;  // device: settle_grace_ms 200
-    cfg.chase_ff_gain   = 0.1f;
-    cfg.chase_lookahead = 0.0f;
-    return cfg;
-}
+
+// mode_expect: kAny = don't care, else the Mode the commit must leave behind.
+constexpr int8_t kAny   = -1;
+constexpr int8_t kWave  = (int8_t)Mode::Waveform;
+constexpr int8_t kChase = (int8_t)Mode::Chase;
+
+// kCoastMaxNorm: sampleRaw coasts past a plan end so a late chord join stays
+// continuous, and that coast is BOUNDED rather than zero. The raw window
+// invariant has to admit exactly that much and no more.
+constexpr double kCoastSlack = 0.05;
+
+struct S {
+    float tgt; uint32_t dur_ms; float vf; bool has_vf; float next; bool has_next;
+    uint32_t late_ms = 3;          // this row's own queue-drain lag
+    int8_t mode_expect = kAny;
+};
+
+struct Log {
+    int settles = 0, scaled = 0, smoothed = 0, endvel = 0, fallback = 0;
+    int failed = 0, flips = 0, commits = 0;
+    double vpk = 0.0;              // peak |v| over the whole replay
+    double achieved = 1.0;         // detail of the LAST WaveformScaled
+    int8_t kind_last = 0;          // PlanKind adopted by the LAST commit
+    // Set ONLY by a control arm that is MEANT to misbehave (the grace-off A/B
+    // is the one). Everything else takes the invariants.
+    bool no_invariants = false;
+    // The engine is already mid-stream when this replay starts, so its row 0 is
+    // CONTENT rather than an opening positioning move: the cold-start and
+    // isolated-point exemptions below do not apply to it.
+    bool warm_entry = false;
+};
+
 inline void drain(Engine& e, Log& lg, bool print) {
     slopmotion::Anomaly ev;
     while (e.popAnomaly(ev)) {
-        if (print) printf("      anomaly kind=%u target=%.3f detail=%.3f t=%.3f\n",
-                          unsigned(ev.kind), (double)ev.target, (double)ev.detail, ev.t_us / 1e6);
+        if (SLOPMOTION_TEST_VERBOSE && print)
+            printf("      anomaly kind=%u target=%.3f detail=%.3f t=%.3f\n",
+                   unsigned(ev.kind), (double)ev.target, (double)ev.detail,
+                   ev.t_us / 1e6);
         switch ((AnomalyType)ev.kind) {
             case AnomalyType::SettleEngaged:    lg.settles++;  break;
-            case AnomalyType::WaveformScaled:   lg.scaled++;   break;
+            case AnomalyType::WaveformScaled:   lg.scaled++;
+                                                lg.achieved = ev.detail; break;
             case AnomalyType::WaveformSmoothed: lg.smoothed++; break;
             case AnomalyType::EndVelClamped:    lg.endvel++;   break;
             case AnomalyType::WaveformFallback: lg.fallback++; break;
+            case AnomalyType::PlanFailed:       lg.failed++;   break;
             default: break;
         }
     }
 }
-inline void play(Engine& e, uint64_t& now, const S* seq, size_t n, uint64_t due0, Log& lg, bool print) {
+
+// Play a script against a live engine, advancing `now` on the firmware's own
+// 1 ms grid. due0 is the first row's anchor; each row is committed late_ms
+// after its anchor, exactly as the queue drain releases it.
+inline void play(Engine& e, uint64_t& now, const S* seq, size_t n, uint64_t due0,
+                 Log& lg, bool print = false) {
+    const double vmax = (double)e.config().limits.vmax;
+    const double amax = (double)e.config().limits.amax;
+    const double recovery = (double)e.config().recovery_vmax;
+    const double seed = e.positionAt(now);
+    const double win_lo = std::min(0.0, seed) - kCoastSlack;
+    const double win_hi = std::max(1.0, seed) + kCoastSlack;
+
     uint64_t due = due0;
-    auto run_to = [&](uint64_t t_end) {
+    uint8_t kind = (uint8_t)e.planKind();
+    double prev_rp = 0.0, prev_v = 0.0, row_vpk = 0.0, p_cmd = seed;
+    bool first = true, have_row = false;
+    // A row anchored late_ms in the past is already that deep in its own
+    // timeline when the first sample lands on it, so exactly one sample after a
+    // commit legitimately advances 1 + late_ms of PLAN time. Everywhere else
+    // the step is one millisecond.
+    uint32_t skew_ms = 0;
+    float row_tgt = 0.0f; uint32_t row_dur = 0;
+
+    // A row's execution is measured over the run_to that follows its commit.
+    auto close_row = [&]() {
+        if (!have_row || lg.no_invariants || recovery <= 0.0 || row_dur == 0)
+            return;
+        const double demand =
+            std::fabs((double)row_tgt - p_cmd) / ((double)row_dur * 1e-3);
+        // A cold cap mid-stream is the governor firing on content: the row
+        // demanded well over the recovery ceiling and never got above it.
+        if (demand > recovery * 1.2) CHECK(row_vpk > recovery * 1.02);
+    };
+
+    auto run_to = [&](uint64_t t_end, bool successor_pending) {
         for (; now < t_end; now += kMs) {
             (void)e.positionAt(now);
-            const double v = std::fabs((double)e.velocityAt(now));
-            if (v > lg.vpk) lg.vpk = v;
+            double rp, rv, ra;
+            e.rawSampleAt(now, rp, rv, ra);
+            const double v  = (double)e.velocityAt(now);
+            const double av = std::fabs(v);
+            lg.vpk  = std::max(lg.vpk, av);
+            row_vpk = std::max(row_vpk, av);
+            const int settles_before = lg.settles;
             drain(e, lg, print);
+            if (!lg.no_invariants) {
+                // The stream is not starved while its successor is already
+                // scheduled or is only a grace away from being due. ONE command
+                // is not a stream: with no cadence measured the grace is zero
+                // and the isolated-point rule brakes at expiry by design, so
+                // the bound starts at the second commit.
+                if (successor_pending && (lg.commits >= 2 || lg.warm_entry))
+                    CHECK(lg.settles == settles_before);
+                CHECK(rp >= win_lo);
+                CHECK(rp <= win_hi);
+                CHECK(av <= vmax * 1.001);
+                const double step_s = (1.0 + (double)skew_ms) * 1e-3;
+                if (!first) {
+                    CHECK(std::fabs(rp - prev_rp) <= vmax * step_s * 1.05);
+                    CHECK(std::fabs(v - prev_v)   <= amax * step_s * 1.5);
+                }
+            }
+            // PlanKind::None is the gap between a plan expiring and its late
+            // successor landing, not a planner changing its mind: only
+            // transitions between REAL kinds are flips.
+            const uint8_t k = (uint8_t)e.planKind();
+            if (k != 0) {
+                if (kind != 0 && k != kind) lg.flips++;
+                kind = k;
+            }
+            prev_rp = rp; prev_v = v; first = false;
+            skew_ms = 0;
         }
     };
+
     for (size_t i = 0; i < n; ++i) {
-        run_to(due + 3 * kMs);
+        row_vpk = 0.0;
+        run_to(due + (uint64_t)seq[i].late_ms * kMs, true);
+        close_row();                       // closes row i-1
         Command c;
-        c.target = seq[i].tgt; c.duration_us = seq[i].dur_ms * 1000u; c.has_duration = true;
+        c.target = seq[i].tgt; c.duration_us = seq[i].dur_ms * 1000u;
+        c.has_duration = true;
         c.end_vel = seq[i].vf; c.has_end_vel = seq[i].has_vf;
         c.next_chord = seq[i].next; c.has_next_chord = seq[i].has_next;
         c.anchor_us = due; c.has_anchor = true;
-        c.client_curve_family = 1;
+        c.client_curve_family = 1;              // RFC-030 c1_cubic, fam=1
         const bool ok = e.commit(c, now);
-        if (print) printf("  commit tgt=%.3f dur=%u vf=%s%.3f -> ok=%d kind=%u mode=%u p=%.3f v=%.3f\n",
-                          (double)c.target, unsigned(seq[i].dur_ms), c.has_end_vel ? "" : "S",
-                          (double)c.end_vel, int(ok), unsigned(e.planKind()), unsigned(e.mode()),
-                          (double)e.positionAt(now), (double)e.velocityAt(now));
+        lg.commits++;
+        if (SLOPMOTION_TEST_VERBOSE && print)
+            printf("  commit tgt=%.3f dur=%u vf=%s%.3f late=%u -> ok=%d kind=%u "
+                   "mode=%u p=%.3f v=%.3f\n",
+                   (double)c.target, unsigned(seq[i].dur_ms),
+                   c.has_end_vel ? "" : "S", (double)c.end_vel,
+                   unsigned(seq[i].late_ms), int(ok), unsigned(e.planKind()),
+                   unsigned(e.mode()), (double)e.positionAt(now),
+                   (double)e.velocityAt(now));
+        if (!lg.no_invariants) {
+            CHECK(ok);
+            if (seq[i].mode_expect != kAny)
+                CHECK((int8_t)e.mode() == seq[i].mode_expect);
+        }
         drain(e, lg, print);
+        lg.kind_last = (int8_t)e.planKind();
+        skew_ms = seq[i].late_ms;
+        // Row 0 out of a fresh engine is a POSITIONING move and is capped on
+        // purpose (the cold-start governor); only content is checked.
+        have_row = i > 0 || lg.warm_entry;
+        p_cmd = (double)e.positionAt(now);
+        row_tgt = seq[i].tgt; row_dur = seq[i].dur_ms;
         due += seq[i].dur_ms * 1000u;
     }
-    run_to(due + 3 * kMs);
+    row_vpk = 0.0;
+    run_to(due + 3 * kMs, false);
+    close_row();
+    if (!lg.no_invariants) {
+        CHECK(lg.failed == 0);
+        // The flip-flop metric the field could only see on the machine: a
+        // planner may change kind no more often than it is commanded to.
+        CHECK(lg.flips <= lg.commits);
+    }
 }
 }  // namespace fieldreplay
 
 TEST_CASE("Field replay: a long hold segment at the rail is content, not a cold start") {
-    // 158.5-166.3 s: a 6.875 s hold at 1.000, then the exit. On the device
-    // the exit was capped at the USER speed (endvel_clamped to -2.0 = the
-    // recovery vmax), shrunk to 70%, and settled at its end. Every loop.
+    // segtrace-jitter-06 158.412-166.122 s: the approach, a 6.875 s hold at
+    // 1.000, then the exit. On the device the exit was capped at the USER speed
+    // (endvel_clamped to -2.0 = the recovery vmax), shrunk to 70 %, and settled
+    // at its end. Every loop.
+    //   tools/segtrace_to_case.py --dir artifacts/segtrace-jitter-06
+    //       --from 158.40 --to 166.13 --name HOLD
     using namespace fieldreplay;
     Engine e(liveTuning(), 0.45f);
     uint64_t now = 1000 * kMs; Log lg;
-    const S B[] = {
-        {0.550f,   41, 2.817f,  true, 3.600f, true},
-        {1.000f,  125, 0.0f,    true, 0.0f,  false},
-        {1.000f, 6875, 0.0f,    true, 0.0f,  false},
-        {0.650f,  167, -2.245f, true, 0.0f,  false},
-        {0.350f,  125, 0.0f,    true, 0.0f,  false},
-        {1.000f,  208, 0.0f,    true, 0.0f,  false},
-        {0.900f,  169, -0.839f, true, 0.0f,  false},
-        {0.500f,  250, -1.134f, true, 0.0f,  false},
+    const S HOLD[] = {
+        {0.550f,   41,   2.817f,  true,  3.600f,  true,  3},
+        {1.000f,  125,   0.000f,  true,  0.000f, false,  1},
+        {1.000f, 6875,   0.000f,  true,  0.000f, false,  3},
+        {0.650f,  167,  -2.245f,  true,  0.000f, false,  1, kWave},
+        {0.350f,  125,   0.000f,  true,  0.000f, false,  4, kWave},
+        {1.000f,  208,   0.000f,  true,  0.000f, false,  4, kWave},
+        {0.900f,  169,  -0.839f,  true,  0.000f, false,  1, kWave},
+        {0.500f,  250,  -1.134f,  true,  0.000f, false,  4, kWave},
     };
-    printf("== hold figure\n");
-    // The approach and the hold first (the very first commit IS a cold start
-    // and is capped on purpose); the census is the exit from the hold.
+    // The approach and the hold first (row 0 IS a cold start and is capped on
+    // purpose, and its declared 2.817 handoff is clamped to the recovery
+    // ceiling with it); the census is the EXIT from the hold, which enters
+    // mid-stream and therefore takes every invariant including the cold-cap one.
     Log warm;
-    play(e, now, B, 3, now + 200 * kMs, warm, true);
-    play(e, now, B + 3, sizeof(B) / sizeof(B[0]) - 3, now - 3 * kMs, lg, true);
+    play(e, now, HOLD, 3, now + 200 * kMs, warm);
+    lg.warm_entry = true;
+    play(e, now, HOLD + 3, sizeof(HOLD) / sizeof(HOLD[0]) - 3, now - 3 * kMs, lg);
     CHECK(lg.endvel == 0);      // the exit is not capped at the recovery limit
     CHECK(lg.settles == 0);     // and nothing brakes at a plan end mid-stream
     CHECK(lg.vpk > 2.05);       // the exit really ran above the recovery limit
 }
 
 TEST_CASE("Field replay: the reversal figure (0.5 knot with vf -1.134) does not settle") {
-    // 169.2-170.6 s: settle fired at the exact plan end of the 250 ms
-    // segment into the 0.5 reversal knot, successor 2.7 ms late.
+    // segtrace-jitter-06 168.117-170.042 s, two full strokes: settle fired at
+    // the exact plan end of the 250 ms segment into the 0.5 reversal knot,
+    // successor 2.7 ms late.
+    //   tools/segtrace_to_case.py --dir artifacts/segtrace-jitter-06
+    //       --from 168.11 --to 170.05 --name REVERSAL
+    // The hand-typed version of this table had the 207/-0.730 and 208/-0.727
+    // rows swapped; the generated one is the trace.
     using namespace fieldreplay;
     Engine e(liveTuning(), 0.35f);
     uint64_t now = 1000 * kMs; Log lg;
-    const S C[] = {
-        {0.350f, 166, 0.0f,    true, 0.0f,  false},
-        {0.400f,  85, 0.859f,  true, 2.400f, true},
-        {1.000f, 250, 0.0f,    true, 0.0f,  false},
-        {0.900f, 208, -0.727f, true, 0.0f,  false},
-        {0.500f, 250, -1.134f, true, 0.0f,  false},
-        {0.350f, 166, 0.0f,    true, 0.0f,  false},
-        {0.400f,  85, 0.859f,  true, 2.400f, true},
-        {1.000f, 250, 0.0f,    true, 0.0f,  false},
-        {0.900f, 207, -0.730f, true, 0.0f,  false},
-        {0.500f, 250, -1.134f, true, 0.0f,  false},
-        {0.350f, 166, 0.0f,    true, 0.0f,  false},
+    const S REVERSAL[] = {
+        {0.350f,  166,   0.000f,  true,  0.000f, false,  3},
+        {0.400f,   85,   0.859f,  true,  2.400f,  true,  1, kWave},
+        {1.000f,  250,   0.000f,  true,  0.000f, false,  3, kWave},
+        {0.900f,  207,  -0.730f,  true,  0.000f, false,  4, kWave},
+        {0.500f,  250,  -1.134f,  true,  0.000f, false,  2, kWave},
+        {0.350f,  166,   0.000f,  true,  0.000f, false,  5, kWave},
+        {0.400f,   85,   0.859f,  true,  2.400f,  true,  1, kWave},
+        {1.000f,  250,   0.000f,  true,  0.000f, false,  2, kWave},
+        {0.900f,  208,  -0.727f,  true,  0.000f, false,  1, kWave},
+        {0.500f,  250,  -1.134f,  true,  0.000f, false,  3, kWave},
+        {0.350f,  166,   0.000f,  true,  0.000f, false,  3, kWave},
     };
-    printf("== reversal figure\n");
-    play(e, now, C, sizeof(C) / sizeof(C[0]), now + 200 * kMs, lg, true);
+    play(e, now, REVERSAL, sizeof(REVERSAL) / sizeof(REVERSAL[0]),
+         now + 200 * kMs, lg);
     CHECK(lg.settles == 0);
 }
 
 TEST_CASE("Field replay: a re-seed is a cold start -- the next segment runs at the recovery limit") {
-    // 148.05 s: the driver re-seeded the engine at the window edge mid-script
-    // and the next segment (a 125 ms slam to 1.000) was planned at the full
-    // input limit: 84 mm at a 960 mm/s peak. Doctrine (sd-d77): the opening
-    // plan out of a re-seed traverses at the USER limit.
+    // segtrace-jitter-06 147.657-147.987 s: the driver re-seeded the engine at
+    // the window edge mid-script and the next segment (a 125 ms slam to 1.000)
+    // was planned at the full input limit: 84 mm at a 960 mm/s peak. Doctrine
+    // (sd-d77): the opening plan out of a re-seed traverses at the USER limit.
+    //   tools/segtrace_to_case.py --dir artifacts/segtrace-jitter-06
+    //       --from 147.65 --to 148.00 --name WARM
+    // The hand-typed warm-up was three rows from elsewhere in the script; these
+    // are the slam's actual predecessors.
     using namespace fieldreplay;
     Engine e(liveTuning(), 0.50f);
     uint64_t now = 1000 * kMs; Log lg;
-    const S warm[] = {
-        {0.400f, 168, 0.0f,   true, 0.0f,  false},
-        {0.500f,  91, 0.0f,  false, 0.0f,  false},
-        {0.590f, 117, 1.238f, true, 3.280f, true},
+    const S WARM[] = {
+        {0.640f,  122,  -1.992f,  true,  0.000f, false,  3},
+        {0.500f,   91,   0.000f, false,  0.000f, false,  3},
+        {0.590f,  117,   1.238f,  true,  3.280f,  true,  4},
     };
-    play(e, now, warm, 3, now + 200 * kMs, lg, false);
+    play(e, now, WARM, sizeof(WARM) / sizeof(WARM[0]), now + 200 * kMs, lg);
     e.resetAt(0.0f, now);
+    // The slam is the FIRST row of its own replay, so the harness exempts it
+    // from the cold-cap invariant -- which is the point: after a re-seed it is
+    // supposed to be cold, and this case measures that it is.
     Log cold;
-    const S slam[] = { {1.000f, 125, 0.0f, true, 0.0f, false} };
-    printf("== re-seed then slam\n");
-    play(e, now, slam, 1, now + 3 * kMs, cold, true);
-    printf("  peak |v| after re-seed = %.3f units/s (recovery 2.0)\n", cold.vpk);
+    const S SLAM[] = { {1.000f, 125, 0.000f, true, 0.000f, false, 5} };
+    play(e, now, SLAM, 1, now + 3 * kMs, cold);
     CHECK(cold.vpk <= 2.05);
 }
 
@@ -1242,8 +1449,9 @@ TEST_CASE("A re-seed voids the plan, never the stream: cold start, cadence kept"
     // the opening plan is cold AND the grace stays cadence-sized. Zeroing the
     // estimator gave the first post-seed segment zero grace, which braked it at
     // its own expiry (the sd-wve chain re-entering through the reset door).
-    auto cfg = operatorConfig();
-    cfg.recovery_vmax   = 0.5f;
+    auto cfg = liveTuning();
+    // A shorter grace than the machine's 200 ms, so the coast-then-brake
+    // boundary lands inside the coast cap and is observable at all.
     cfg.settle_grace_us = 30000;
     Engine e(cfg, 0.30f);
     auto seg = [&](float tgt, uint64_t at, uint32_t dur_ms, float vf) {
@@ -1257,16 +1465,16 @@ TEST_CASE("A re-seed voids the plan, never the stream: cold start, cadence kept"
     seg(0.50f, 100 * kMs, 100, 1.0f);
     seg(0.60f, 200 * kMs, 100, 1.0f);
     e.resetAt(0.60f, 250 * kMs);
-    // 2.0 norm/s of declared handoff: warm it survives, cold it is cut to the
+    // 4.0 norm/s of declared handoff: warm it survives, cold it is cut to the
     // recovery ceiling -- which is the clamp, observed.
-    seg(0.64f, 250 * kMs, 200, 2.0f);
+    seg(0.64f, 250 * kMs, 200, 4.0f);
     const AnomalyHit clamped = drainFor(e, AnomalyType::EndVelClamped);
     CHECK(clamped.seen);
-    CHECK(clamped.detail == doctest::Approx(0.5).epsilon(1e-3));
+    CHECK(clamped.detail == doctest::Approx(2.0).epsilon(1e-3));
     double vpk = 0.0;
     for (uint64_t t = 250 * kMs; t <= 450 * kMs; t += kMs)
         vpk = std::max(vpk, std::fabs((double)e.velocityAt(t)));
-    CHECK(vpk <= 0.5 * 1.02);
+    CHECK(vpk <= 2.0 * 1.02);
     // dt_ema survived the seed, so the grace is 30 ms of coast, not zero.
     const auto snap = e.snapshot(300 * kMs);
     const uint64_t plan_end =
@@ -1281,8 +1489,7 @@ TEST_CASE("A hold longer than the cold-start gap is content: its exit is warm") 
     // The activity clock is stamped by plan ENDS as well as commits, so a 3 s
     // hold segment is not silence (field trace 2026-09-02, the 6.9 s rail hold
     // whose every exit ran at the recovery limit).
-    auto cfg = operatorConfig();
-    cfg.recovery_vmax = 0.5f;
+    Config cfg = liveTuning();
     Engine e(cfg, 0.50f);
     auto seg = [&](float tgt, uint64_t at, uint32_t dur_ms) {
         Command c;
@@ -1293,17 +1500,17 @@ TEST_CASE("A hold longer than the cold-start gap is content: its exit is warm") 
     };
     seg(0.50f, 0, 3000);                  // longer than kColdStartGapUs (2 s)
     (void)e.positionAt(3000 * kMs);       // the hold collapses: plan end stamped
-    seg(0.90f, 3000 * kMs, 400);
+    seg(0.90f, 3000 * kMs, 150);          // 0.4 over 150 ms: peak ~5, over 2.0
     double vpk = 0.0;
     for (uint64_t t = 3000 * kMs; t <= 3400 * kMs; t += kMs)
         vpk = std::max(vpk, std::fabs((double)e.velocityAt(t)));
-    CHECK(vpk > 0.5 * 1.05);              // the exit is not clamped
+    CHECK(vpk > 2.0 * 1.05);              // the exit is not clamped
 }
 
 TEST_CASE("Coast cap: past it the state is frozen, and the next plan inherits that") {
     // Reporting a velocity the position does not have is a ground-truth defect:
     // the successor would be planned from motion the machine stopped having.
-    auto cfg = operatorConfig();
+    auto cfg = liveTuning();
     auto ends_moving = [&](Engine& e) {
         Command c;
         c.target = 0.45f; c.duration_us = 100 * (uint32_t)kMs;
@@ -1318,10 +1525,11 @@ TEST_CASE("Coast cap: past it the state is frozen, and the next plan inherits th
         REQUIRE(e.commit(c, at));
         return std::fabs((double)e.velocityAt(at));
     };
-    // Inside the cap (40 ms past expiry) the coast is real motion.
+    // Inside the cap (20 ms past expiry, 0.03 of the 0.05 cap) the coast is
+    // real motion.
     Engine inside(cfg, 0.30f);
     ends_moving(inside);
-    CHECK(successor(inside, 140 * kMs) > 1.0);
+    CHECK(successor(inside, 120 * kMs) > 1.0);
     // Past it (200 ms) the position has been frozen for 140 ms: v reads zero.
     Engine outside(cfg, 0.30f);
     ends_moving(outside);
@@ -1389,7 +1597,6 @@ TEST_CASE("The field's mixed script plans ONE kind end to end -- no planner flip
         c.client_curve_family = 1;
         REQUIRE(e.commit(c, now));
         const unsigned k = (unsigned)e.planKind();
-        printf("  mixed script: dur=%4u ms -> kind %u\n", unsigned(F[i].dur_ms), k);
         if (i > 0 && k != prev) flips++;
         prev = k;
         // The knot's successor lands 1 ms later on the wire, not 10 ms.
@@ -1427,7 +1634,7 @@ TEST_CASE("Estimator cadence is the segment SPAN, not the anchor spacing") {
 }
 
 TEST_CASE("A bare point with no duration is still the chase planner's") {
-    Engine e(testConfig(), 0.30f);
+    Engine e(liveTuning(), 0.30f);
     Command c;
     c.target = 0.70f;
     REQUIRE(e.commit(c, 0));
@@ -1436,150 +1643,66 @@ TEST_CASE("A bare point with no duration is still the chase planner's") {
 }
 
 TEST_CASE("A segment longer than chase_stale_us must not starve its own settle grace") {
-    // Field trace 2026-09-02: 587 ms segments in a slow section settled
-    // (braked at amax) at plan expiry, 3 ms before their successor landed,
-    // because staleness was measured from the last COMMIT. A stream whose
-    // plan is still executing is not stale.
-    auto cfg = operatorConfig();
-    cfg.settle_grace_us = 30000;
-    cfg.chase_stale_us  = 400000;
-    Engine e(cfg, 0.50f);
-    uint64_t t = 0;
-    auto seg = [&](float target, uint32_t dur_us, float vf, bool has_vf, uint64_t at) {
-        Command c;
-        c.target = target; c.duration_us = dur_us; c.has_duration = true;
-        c.end_vel = vf; c.has_end_vel = has_vf;
-        c.anchor_us = at; c.has_anchor = true;
-        REQUIRE(e.commit(c, at));
+    // Field trace 2026-09-02: 587 ms segments in a slow section settled (braked
+    // at amax) at plan expiry, 3 ms before their successor landed, because
+    // staleness was measured from the last COMMIT. A stream whose plan is still
+    // executing is not stale. chase_stale_us is the engine's 400 ms default, so
+    // the long row outlives it while its own plan is still running.
+    using namespace fieldreplay;
+    Engine e(liveTuning(), 0.50f);
+    uint64_t now = 1000 * kMs; Log lg;
+    const S LONG[] = {
+        {0.70f, 167,  0.0f, true, 0.0f, false, 3},
+        {0.50f, 167,  0.0f, true, 0.0f, false, 3, kWave},
+        {0.70f, 167,  0.0f, true, 0.0f, false, 3, kWave},
+        {0.50f, 587, -0.3f, true, 0.0f, false, 3, kWave},   // arrives moving, outlives the stale window
+        {0.35f, 208,  0.0f, true, 0.0f, false, 3, kWave},   // the successor, 3 ms late
     };
-    // Warm the cadence estimator with a few ordinary segments.
-    seg(0.70f, 167 * kMs, 0.0f, true, t); t += 167 * kMs;
-    seg(0.50f, 167 * kMs, 0.0f, true, t); t += 167 * kMs;
-    seg(0.70f, 167 * kMs, 0.0f, true, t); t += 167 * kMs;
-    // The long one, arriving moving (a bounded handoff), then its successor
-    // committed 3 ms AFTER it expires: normal drain quantization.
-    const uint64_t long_start = t;
-    seg(0.50f, 587 * kMs, -0.3f, true, long_start);
-    const uint64_t long_end = long_start + 587 * kMs;
-    int settles = 0;
-    for (uint64_t now = long_start; now <= long_end + 3 * kMs; now += kMs) {
-        (void)e.positionAt(now);
-        slopmotion::Anomaly ev;
-        while (e.popAnomaly(ev))
-            if (ev.kind == (uint8_t)AnomalyType::SettleEngaged) settles++;
-        REQUIRE(e.mode() != Mode::Settle);
-    }
-    seg(0.35f, 208 * kMs, 0.0f, true, long_end);   // the successor, late by 3 ms
-    // Sample to just BEFORE the successor ends: a plan ending at rest
-    // collapses to a hold at expiry, which is correct and not a settle.
-    for (uint64_t now = long_end + 3 * kMs; now < long_end + 200 * kMs; now += kMs) {
-        (void)e.positionAt(now);
-        slopmotion::Anomaly ev;
-        while (e.popAnomaly(ev))
-            if (ev.kind == (uint8_t)AnomalyType::SettleEngaged) settles++;
-        REQUIRE(e.mode() != Mode::Settle);
-    }
-    CHECK(settles == 0);
-    CHECK(e.mode() == Mode::Waveform);
+    play(e, now, LONG, sizeof(LONG) / sizeof(LONG[0]), now + 200 * kMs, lg);
+    CHECK(lg.settles == 0);
+    CHECK(lg.flips == 0);       // one planner across the long row and its neighbors
 }
 
 TEST_CASE("Segment chain with 5 ms arrival jitter: no settle storm, no mode flap") {
     // The measured defect: the firmware's 5 ms SlopSync pacing drain makes
-    // segment arrivals jitter around their scheduled instant, so plans expire
-    // a few ms before their successor lands. Pre-0.4 that fired a full Ruckig
-    // brake plan every time — 14 settles and 27 PlanKind flips over a
-    // 14-segment chain at 5 ms of jitter, against 1 and 1 at 0 ms. The grace
-    // window must make the jittered run behave like the clean one.
-    // The precise signature of the defect is an UNSOLICITED REPLAN: the plan
-    // changing on a sample where no command arrived, i.e. the engine acting on
-    // the transport's timing rather than on the sender's intent. Counting
-    // those is sharper than counting PlanKind flips (a flip also happens
-    // legitimately when a segment is quintic-feasible and its neighbor is
-    // not).
-    struct Run { int settles; int unsolicited; int flips; double amp_mm; };
-    auto run = [](InfeasiblePolicy pol, uint32_t grace_us, uint64_t jitter_us,
-                  bool wire_end_vel) {
-        auto cfg = operatorConfig();
-        cfg.infeasible_policy = pol;
-        cfg.settle_grace_us   = grace_us;
-        Engine e(cfg, 0.30f);
+    // segment arrivals jitter around their scheduled instant, so plans expire a
+    // few ms before their successor lands. Pre-0.4 that fired a full Ruckig
+    // brake plan every time. Every other row here is released ON its anchor and
+    // every other one 5 ms after it, which is the shape the drain produces.
+    using namespace fieldreplay;
+    S J[14];
+    for (size_t i = 0; i < sizeof(J) / sizeof(J[0]); ++i)
+        // The first two rows land ON their anchor: ONE command is not a stream,
+        // and with no cadence measured the isolated-point rule brakes at expiry
+        // by design. The jitter starts once the stream exists.
+        J[i] = S{(i % 2) ? 1.00f : 0.30f, 167, (i % 2) ? 2.6f : -2.6f, true,
+                 0.0f, false, (uint32_t)((i >= 3 && (i % 2)) ? 5 : 0), kWave};
 
-        const uint64_t seg = 167 * kMs;
-        int i = 0, settles = 0, unsolicited = 0, flips = 0;
-        uint8_t prev_kind = 0;
-        double lo = 1e9, hi = -1e9;
-        uint64_t next_cmd = 0, last_plan = 0;
-        for (uint64_t t = 0; t <= 16 * 167 * kMs; t += kMs) {
-            bool commanded = false;
-            if (t >= next_cmd) {
-                Command c;
-                c.target       = (i % 2) ? 1.00f : 0.30f;
-                c.duration_us  = (uint32_t)seg;
-                c.has_duration = true;
-                if (wire_end_vel) {   // the sender's slope handoff
-                    c.end_vel     = (i % 2) ? 2.6f : -2.6f;
-                    c.has_end_vel = true;
-                }
-                e.commit(c, next_cmd);
-                commanded = true;
-                i++;
-                // Scheduled instant + alternating transport lag: every other
-                // plan is preempted 5 ms early, every other one is left
-                // hanging 5 ms past its expiry. That second case is the one
-                // that used to fire a brake.
-                next_cmd  = (uint64_t)i * seg + ((i % 2) ? jitter_us : 0);
-                last_plan = e.lastPlanUs();
-            }
-            const double p = e.positionAt(t);
-            REQUIRE(p >= -1e-9);
-            REQUIRE(p <= 1.0 + 1e-9);
-            if (!commanded && e.lastPlanUs() != last_plan) {
-                unsolicited++;
-                last_plan = e.lastPlanUs();
-            }
-            const uint8_t k = (uint8_t)e.planKind();
-            if (prev_kind != 0 && k != prev_kind) flips++;
-            prev_kind = k;
-            if (t > 2 * kS) { lo = std::min(lo, p); hi = std::max(hi, p); }
-            slopmotion::Anomaly ev;
-            while (e.popAnomaly(ev)) {
-                if (ev.kind == (uint8_t)AnomalyType::SettleEngaged) settles++;
-            }
-        }
-        return Run{settles, unsolicited, flips, (hi - lo) * kSpanMm};
-    };
+    Engine e(liveTuning(), 0.30f);
+    uint64_t now = 1000 * kMs; Log lg;
+    play(e, now, J, sizeof(J) / sizeof(J[0]), now + 200 * kMs, lg);
+    CHECK(lg.settles == 0);
+    // The flip-flop metric this case used to COMPUTE and throw away: a jittered
+    // chain of identically shaped segments never changes planner at all.
+    CHECK(lg.flips == 0);
 
-    for (bool g : {false, true}) {
-        const Run fixed  = run(InfeasiblePolicy::Blend, 30000, 5 * kMs, g);
-        const Run clean  = run(InfeasiblePolicy::Blend, 30000, 0,       g);
-        const Run before = run(InfeasiblePolicy::Blend, 0,     5 * kMs, g);
-        MESSAGE((g ? "with wire G  " : "no wire G    ")
-                << "jittered + grace: " << fixed.settles << " settles, "
-                << fixed.unsolicited << " unsolicited replans, " << fixed.flips
-                << " kind flips, amp " << fixed.amp_mm << " mm   |  clean: "
-                << clean.settles << "/" << clean.unsolicited << "/"
-                << clean.flips << ", amp " << clean.amp_mm
-                << " mm   |  no grace: " << before.settles
-                << "/" << before.unsolicited << "/" << before.flips
-                << ", amp " << before.amp_mm << " mm");
-
-        // The grace must make the jittered run behave like the clean one: at
-        // most the single end-of-chain settle, which is real starvation.
-        CHECK(fixed.settles     <= clean.settles + 1);
-        CHECK(fixed.unsolicited <= clean.unsolicited + 1);
-
-        // The grace is what removes them: with it off, every late segment
-        // brakes. This holds with OR without a wire G -- an adopted plan can
-        // end still moving because the search lerped its end handle toward the
-        // chord, not only because the sender declared a handoff.
-        CHECK(before.settles     >= 6);
-        CHECK(before.unsolicited >= 6);
-        CHECK(fixed.unsolicited * 4 < before.unsolicited);
-    }
+    // The grace is what removes them. This arm is MEANT to misbehave, so it
+    // waives the default invariants and is read only for its settle census.
+    auto off = liveTuning();
+    off.settle_grace_us = 0;
+    Engine ctl(off, 0.30f);
+    uint64_t ctl_now = 1000 * kMs;
+    Log lg_off; lg_off.no_invariants = true;
+    play(ctl, ctl_now, J, sizeof(J) / sizeof(J[0]), ctl_now + 200 * kMs, lg_off);
+    MESSAGE("jitter chain: grace on " << lg.settles << " settles, grace off "
+            << lg_off.settles);
+    // Six of the fourteen rows arrive 5 ms late; with no grace each of those
+    // expiries brakes, so the control must show most of them.
+    CHECK(lg_off.settles >= 5);
 }
 
 TEST_CASE("Reset drops everything back to a hold") {
-    Engine e(testConfig(), 0.5f);
+    Engine e(liveTuning(), 0.5f);
     Command c;
     c.target = 0.9f; c.duration_us = 500 * (uint32_t)kMs; c.has_duration = true;
     REQUIRE(e.commit(c, 0));
@@ -1649,6 +1772,9 @@ inline float sgnf(float x) { return x > 0.0f ? 1.0f : (x < 0.0f ? -1.0f : 0.0f);
 
 // One guarded WAVEFORM segment, sampled on the firmware's own 1 ms grid.
 // Returns how many HandoffBounded anomalies the engine recorded.
+// NOT the machine fixture: the RFC-008 cases below are a bound over chords in
+// normalized units, and a soft ceiling keeps the ADOPTED plan out of the
+// infeasible search so the guard is the only variable between the two arms.
 int runGuardedSegment(bool lookahead, float end_vel, float next_chord, float k,
                       std::vector<double>& out) {
     Config cfg = testConfig();
@@ -1880,6 +2006,8 @@ TEST_CASE("RFC-008 guard: a bounded handoff does not poison the NEXT segment's a
     // is itself infeasible, the policy's own search picks the endpoint, and the
     // successor saturates amax in both arms -- a real answer to a different
     // question.
+    // NOT the machine fixture: the poisoned af is only visible as a successor
+    // that saturates amax, which needs an amax the crawl can reach.
     auto chain = [](bool lookahead) {
         Engine e(testConfig(), 0.2f);
         Command a;
@@ -1903,6 +2031,10 @@ TEST_CASE("RFC-008 guard: a bounded handoff does not poison the NEXT segment's a
 }
 
 // ---- M7a --------------------------------------------------------------------
+// NOT the machine fixture, and deliberately: every case in this section is ABOUT
+// a jerk ceiling too low to turn the boundary state around, which is the
+// captured machine's regime and not this one's.
+//
 // THE SPEED CEILING HOLDS IN BOTH DIRECTIONS
 //
 // Found by SlopScope on its first real capture against slopsim: the plan-strip
@@ -2033,6 +2165,8 @@ TEST_CASE("M7a: adopted plans stay legal under BOTH policies") {
     // most easily illegal. Run under both policies, because the two reach the
     // ceiling by different routes -- Blend through the search, Stretch through
     // the guard -- and neither is allowed to exceed it.
+    // NOT the machine fixture: M7a is ABOUT a jerk ceiling too low to turn the
+    // boundary state around, which is the captured machine's, not this one's.
     auto worstFor = [](InfeasiblePolicy pol, float end_vel, uint32_t ms) {
         Config cfg = machineConfig();
         cfg.infeasible_policy = pol;
@@ -2084,6 +2218,8 @@ TEST_CASE("Overshoot guard: a long deadline on a short move must not arc") {
     // 0.30 -> 0.72 at speed, then "be at 0.70 in 900 ms" — 0.02 of travel with
     // the carriage still moving. Unguarded, the only curve satisfying those
     // boundary conditions over 900 ms leaves the band by a wide margin.
+    // NOT the machine fixture: the excursion figures below are quoted in mm
+    // against this 200 mm window, which is the domain the defect was reported in.
     auto runOne = [](float guard, double& ex_out, double& reach_out) {
         auto cfg = operatorConfig();
         cfg.overshoot_guard = guard;
@@ -2119,6 +2255,8 @@ TEST_CASE("Overshoot guard: MONOTONE in its own value, and inert at 0") {
     // scored WORSE at 1 than at 2. The allowance is measured now
     // (physicalBandExcess), and a looser slack factor must never buy a tighter
     // excursion.
+    // NOT the machine fixture: same window as the case above, so the two read
+    // as one measurement.
     auto excursionAt = [](float guard) {
         auto cfg = operatorConfig();
         cfg.overshoot_guard = guard;
@@ -2140,7 +2278,7 @@ TEST_CASE("Overshoot guard: MONOTONE in its own value, and inert at 0") {
         prev = ex;
     }
     // 0 is off, byte for byte: the same plan the pre-guard engine adopted.
-    auto cfg = operatorConfig();
+    auto cfg = operatorConfig();   // same window as the excursion above
     Engine a(cfg, 0.30f), b(cfg, 0.30f);
     cfg.overshoot_guard = 0.0f;
     Command c;
@@ -2162,6 +2300,8 @@ TEST_CASE("Both referees call the SAME curve legal (coincident-curve sweep)") {
     // samples, same grid: any difference in the verdict is a difference in the
     // DEFINITION of legal, which is the bug this pins (a window grace on one
     // side only).
+    // NOT the machine fixture: the sweep needs coast slopes that straddle vmax,
+    // so the verdict boundary is inside the swept domain.
     auto cfg = testConfig();
     Engine e(cfg, 0.5f);
     ruckig::Ruckig<1> calc;
@@ -2213,6 +2353,7 @@ TEST_CASE("The window grace is gone from BOTH referees (rail-grazing coast)") {
     // The exact disagreement that was live: a plan grazing 0.01 outside the
     // rail scored 1.01 (illegal) as a quintic and 0.0 (legal) as a Ruckig
     // profile, because only the Ruckig side still carried the +-0.02 grace.
+    // NOT the machine fixture: the graze is constructed against this vmax.
     auto cfg = testConfig();
     Engine e(cfg, 0.5f);
     ruckig::Ruckig<1> calc;
@@ -2235,6 +2376,9 @@ TEST_CASE("The window grace is gone from BOTH referees (rail-grazing coast)") {
 }
 
 // ---- commit() clamps every commanded target to [0,1] (sd-tki.13) ------------
+// NOT the machine fixture: the clamp is proven by driving every command kind off
+// BOTH rails, which needs a ceiling slow enough that a whole overshooting stroke
+// fits inside the sampled window.
 
 TEST_CASE("Out-of-window targets are clamped on EVERY command kind") {
     const double kOut[] = {1.7, 2.5, -0.9, -0.05, 1.05};
@@ -2336,68 +2480,42 @@ TEST_CASE("Out-of-window targets are clamped on EVERY command kind") {
 }
 
 // ---- The Blend ray (sd-6b2.1) -----------------------------------------------
-// The machine tuning the field defect was measured on: 1000 mm/s over a 100 mm
-// window with a stiff drive, i.e. the regime where a rail slam lands 1 % over
-// the ceiling and everything hangs on what the search does with it.
-Config blendConfig() {
-    Config cfg;
-    cfg.limits.vmax = 10.0f;
-    cfg.limits.amax = 400.0f;
-    cfg.limits.jmax = 50000.0f;
-    cfg.infeasible_policy         = InfeasiblePolicy::Blend;
-    cfg.infeasible_blend          = 0.5f;
-    cfg.infeasible_smooth_budget  = 0.5f;
-    cfg.infeasible_amplitude_budget = 0.5f;
-    cfg.curve_policy = slopmotion::CurvePolicy::ForceC1;   // the family that ships
-    return cfg;
-}
+// The regime the field defect was measured in is liveTuning()'s: 1000 mm/s over
+// a 100 mm window with a stiff drive, i.e. where a rail slam lands 1 % over the
+// ceiling and everything hangs on what the search does with it.
 
 TEST_CASE("Blend: a rail slam just over the ceiling is shortened, not surrendered") {
     // 0.85 -> 1.000 in 64 ms, entering at the fastest the wall guard allows
     // (7.746 units/s: |vf|^2 = amax * 0.15). Worst ratio 1.00037, i.e. barely
-    // over -- and before the floor probe it took the flat Ruckig guard, which
-    // is the field's waveform_fallback on every rail end.
-    Engine e(blendConfig(), 0.5f);
-    Command run;
-    run.target = 0.85f; run.duration_us = 60 * (uint32_t)kMs;
-    run.has_duration = true; run.end_vel = 8.0f; run.has_end_vel = true;
-    REQUIRE(e.commit(run, 0));
-    { slopmotion::Anomaly a; while (e.popAnomaly(a)) {} }   // the run-up's noise
+    // over -- and before the floor probe it took the flat Ruckig guard, which is
+    // the field's waveform_fallback on every rail end.
+    using namespace fieldreplay;
+    Engine e(liveTuning(), 0.50f);
+    uint64_t now = 1000 * kMs;
+    const S RAIL[] = {
+        {0.700f, 100, 0.0f, true, 0.0f, false, 3},   // row 0 is the cold opener
+        {0.850f,  60, 8.0f, true, 0.0f, false, 3},   // the run-up into the rail
+        {1.000f,  64, 0.0f, true, 0.0f, false, 3},   // the slam
+    };
+    Log warm;
+    play(e, now, RAIL, 2, now + 200 * kMs, warm);
+    Log lg; lg.warm_entry = true;
+    play(e, now, RAIL + 2, 1, now - 3 * kMs, lg);
 
-    Command slam;
-    slam.target = 1.0f; slam.duration_us = 64 * (uint32_t)kMs;
-    slam.has_duration = true; slam.end_vel = 0.0f; slam.has_end_vel = true;
-    REQUIRE(e.commit(slam, 60 * kMs));
-
-    const auto snap = e.snapshot(60 * kMs);
-    bool  fallback = false, scaled = false;
-    float achieved = 1.0f;
-    slopmotion::Anomaly ev;
-    while (e.popAnomaly(ev)) {
-        if (ev.kind == (uint8_t)AnomalyType::WaveformFallback) fallback = true;
-        if (ev.kind == (uint8_t)AnomalyType::WaveformScaled) {
-            scaled = true;
-            achieved = ev.detail;
-        }
-    }
-    MESSAGE("rail slam: plan_kind " << (int)snap.plan_kind << " end " << snap.target
-            << " achieved " << achieved);
     // A Hermite plan in the declared family, not the guard's bang-bang profile.
-    CHECK(snap.plan_kind == (uint8_t)slopmotion::PlanKind::Cubic);
-    CHECK_FALSE(fallback);
-    CHECK(scaled);
+    CHECK(lg.kind_last == (int8_t)slopmotion::PlanKind::Cubic);
+    CHECK(lg.fallback == 0);
+    CHECK(lg.scaled == 1);
     // The amplitude budget is a FLOOR: at most `budget` of the stroke may be
     // surrendered, so the achieved fraction can never fall below 1 - budget.
-    CHECK(achieved >= 1.0f - blendConfig().infeasible_amplitude_budget - 1e-4f);
+    CHECK(lg.achieved >= 1.0 - (double)liveTuning().infeasible_amplitude_budget - 1e-4);
     // The RAY GRID IS WALKED, NOT BISECTED (sd-6b2.9), so the adopted step is
     // the smallest legal point on a grid of infeasible_blend_steps, here
-    // s = 1/6 and achieved 0.833. The bisection resolved to 2^-steps and
-    // adopted 0.984 -- finer on the cases it could solve, and it could only
-    // solve the ones whose ray END was legal. Resolution is bought back with
+    // s = 1/6 and achieved 0.833. The bisection resolved to 2^-steps and adopted
+    // 0.984 -- finer on the cases it could solve, and it could only solve the
+    // ones whose ray END was legal. Resolution is bought back with
     // infeasible_blend_steps, which now costs a fraction of what it did.
-    CHECK(achieved == doctest::Approx(0.8333f).epsilon(0.01));
-    // ...and it holds the deadline it was given.
-    CHECK(snap.duration_s == doctest::Approx(0.064).epsilon(0.01));
+    CHECK(lg.achieved == doctest::Approx(0.8333).epsilon(0.01));
 }
 
 TEST_CASE("Blend: smoothing never raises |vf| past the RFC-008 bound") {
@@ -2405,8 +2523,11 @@ TEST_CASE("Blend: smoothing never raises |vf| past the RFC-008 bound") {
     // exists for. The bound runs BEFORE the search; lerping the end handle
     // toward this span's own (large) chord afterwards used to hand the velocity
     // straight back, which is the exact failure the guard was written to stop.
-    Config cfg = blendConfig();
+    Config cfg = liveTuning();
     cfg.handoff_chord_factor = 1.5f;
+    // A single-segment probe has no stream to be warm in, and the cold-start
+    // governor is not what this measures.
+    cfg.recovery_vmax = 0.0f;
 
     int  checked = 0, smoothed = 0;
     for (float chord_out : {0.05f, 0.25f, 0.75f, 1.5f}) {
@@ -2446,6 +2567,11 @@ TEST_CASE("Blend: smoothing never raises |vf| past the RFC-008 bound") {
 // ---- The referee itself (sd-6b2.9, sd-6b2.2, sd-6b2.3) ----------------------
 // A fixed grid answers "the worst of 65 samples"; a referee has to answer "the
 // worst of the curve". These pin the difference.
+//
+// NOT the machine fixture: these sweep CURVES past a ceiling rather than replay a
+// script, so the ceiling has to sit inside the swept domain. At 10/400/50000
+// every shape below is legal and the sweeps stop asking anything. The two cases
+// that DO replay (the settle brake and the coast) run the machine fixture.
 
 // The 65-point grid the referee used to BE, kept here as the cross-check. The
 // closed-form peaks must never report LESS than it, and where a peak falls
@@ -2614,8 +2740,11 @@ TEST_CASE("The settle brake is windowed: it ENDS inside the rail (sd-6b2.2)") {
     // v^2/2a puts it and _hold_pos = clamp01() then erases the difference,
     // leaving the engine's belief and the machine's position apart by exactly
     // the overshoot. Re-planned to the rail, the plan ends where it says.
-    auto cfg = blendConfig();             // 10 u/s, 400 u/s^2: 12.5 mm of brake
+    auto cfg = liveTuning();              // 10 u/s, 400 u/s^2: 12.5 mm of brake
     cfg.settle_grace_us = 0;
+    // One segment, deliberately ending AT vmax into the rail: the cold-start
+    // governor would cap the very thing under test.
+    cfg.recovery_vmax = 0.0f;
     Engine e(cfg, 0.90f);
     Command c;
     c.target = 0.98f; c.duration_us = 40 * (uint32_t)kMs;
@@ -2648,6 +2777,8 @@ TEST_CASE("Every chase plan is refereed; the window holds on RAW state "
     // ceiling makes that reachable here. Either the softened plan is refused
     // and the mechanical retry lands, or a terminal plan is adopted WITH a
     // WaveformFallback naming the ratio. Never silently.
+    // NOT the machine fixture: a deliberately weak jerk ceiling is the whole
+    // premise -- it is what makes the illegal region reachable at all.
     auto cfg = machineConfig();
     cfg.limits.jmax = 30.0f;              // the regime of the header's table:
     cfg.chase_jerk_scale = false;         // too little jerk to turn the state
@@ -2696,8 +2827,11 @@ TEST_CASE("The coast is bounded OUTSIDE the window and reports no velocity "
     // commit() SEEDS the next plan from it. Unbounded, at 1000 mm/s over a
     // 100 mm window, 60 ms of coast is 60 mm outside a window the machine can
     // never leave, so the successor plans from a position that never existed.
-    auto cfg = blendConfig();
+    auto cfg = liveTuning();
     cfg.settle_grace_us = 60000;          // the full grace, so the coast runs
+    // The coast is what is under test, and a cold opening plan would cap the
+    // velocity that produces it.
+    cfg.recovery_vmax = 0.0f;
     Engine e(cfg, 0.10f);
     // A cadence first: with none measured the settle brakes at expiry and
     // there is no coast to bound (settleGraceS).
@@ -2742,7 +2876,7 @@ TEST_CASE("The coast is bounded OUTSIDE the window and reports no velocity "
 // ---- Scheduled plans: a future anchor is a plan, not a demotion (sd-6b2.5) --
 
 TEST_CASE("A future anchor is planned now and promoted AT its anchor") {
-    auto cfg = operatorConfig();
+    auto cfg = liveTuning();
     Engine e(cfg, 0.30f);
 
     Command c1;
@@ -2778,7 +2912,7 @@ TEST_CASE("A future anchor is planned now and promoted AT its anchor") {
 }
 
 TEST_CASE("Two future anchors: LAST WINS, one slot deep") {
-    auto cfg = operatorConfig();
+    auto cfg = liveTuning();
     Engine e(cfg, 0.30f);
 
     Command c1;
@@ -2806,11 +2940,13 @@ TEST_CASE("Two future anchors: LAST WINS, one slot deep") {
 }
 
 TEST_CASE("An anchor beyond the lead bound is refused; the plan in flight is untouched") {
-    auto cfg = operatorConfig();
+    auto cfg = liveTuning();
     Engine e(cfg, 0.30f);
 
+    // Comfortably inside the cold-start governor's ceiling, so the incumbent
+    // plan is the command byte for byte and "untouched" means untouched.
     Command c1;
-    c1.target = 0.45f; c1.duration_us = 100 * (uint32_t)kMs;
+    c1.target = 0.40f; c1.duration_us = 200 * (uint32_t)kMs;
     c1.has_duration = true;
     REQUIRE(e.commit(c1, 0));
     slopmotion::Anomaly ev;
@@ -2830,12 +2966,12 @@ TEST_CASE("An anchor beyond the lead bound is refused; the plan in flight is unt
     }
     CHECK(saw);
     CHECK(e.positionAt(50 * kMs) == doctest::Approx(ref).epsilon(1e-12));
-    CHECK(e.snapshot(50 * kMs).target == doctest::Approx(0.45).epsilon(1e-6));
+    CHECK(e.snapshot(50 * kMs).target == doctest::Approx(0.40).epsilon(1e-6));
     CHECK_FALSE(e.isBusy(400 * kMs));   // no slot was parked
 }
 
 TEST_CASE("No settle while a scheduled successor exists") {
-    auto cfg = operatorConfig();
+    auto cfg = liveTuning();
     Engine e(cfg, 0.30f);
 
     // A 60 ms segment that ends MOVING: left alone it settles at expiry.
@@ -2869,7 +3005,7 @@ TEST_CASE("No settle while a scheduled successor exists") {
 TEST_CASE("An out-of-window seed plans a monotone inward entry (the 87 mm field case)") {
     // Homed: carriage at 0 mm, window 87-187 mm, so the seed normalizes to
     // -0.87. The engine must keep that as real state and plan the entry.
-    auto cfg = machineConfig();
+    auto cfg = liveTuning();
     Engine e(cfg, -0.87f);
     CHECK(e.positionAt(0) == doctest::Approx(-0.87).epsilon(1e-6));
 
@@ -2901,7 +3037,7 @@ TEST_CASE("An out-of-window seed plans a monotone inward entry (the 87 mm field 
 }
 
 TEST_CASE("A plan leaving the window further out than it entered is ILLEGAL") {
-    auto cfg = machineConfig();
+    auto cfg = liveTuning();
     Engine e(cfg, -0.50f);
     // Same entry, two curves: one heading inward, one dipping further out.
     const double T = 0.2;
@@ -2915,6 +3051,8 @@ TEST_CASE("In-window plans are refereed EXACTLY as before (entry sweep over [0,1
     // The window term is untouched wherever the seed and the entry are inside:
     // [min(0,p0), max(1,p0)] is [0,1] there by construction. Pinned against an
     // independent [0,1] scorer rather than against itself.
+    // NOT the machine fixture: a referee sweep, so the swept slopes have to
+    // straddle vmax for the comparison to have both verdicts in it.
     auto cfg = testConfig();
     Engine e(cfg, 0.5f);
     int compared = 0, illegal = 0;

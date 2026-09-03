@@ -213,3 +213,9 @@ src/c5_probe/logview_gz.h
 /CMakeLists.txt
 # Segment-trace reader for the segin/plan/motion diag tags (sd-tki jitter hunt).
 !tools/segtrace.py
+# Turns a segtrace pull into the native suite's fieldreplay::S[] literal. Tracked
+# because test/native/test_slopmotion names it as THE way a field figure becomes
+# a case (T20: never hand-transcribe a trace), so a clone without it can only
+# regress to typing tables by hand. Its OUTPUT goes to artifacts/ like every
+# other instrument's.
+!tools/segtrace_to_case.py

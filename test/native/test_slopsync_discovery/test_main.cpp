@@ -131,3 +131,63 @@ TEST_CASE("buildReply: an all-default ReplyFields still produces exactly kReplyB
     CHECK(uint8_t(buf[0]) == 'S');
     CHECK(uint8_t(buf[75]) == 0);
 }
+
+// ---- kOpIdentity -> DISCOVER_REPLY (sd-cd8) ---------------------------------
+// The C5 answers probes on the headless machine's behalf, but every reply
+// field except ws_port is the HUB's and arrives over the bridge as one
+// fixed-width blob. This asserts the two layouts line up, which is the only
+// place the bridge and the wire can silently disagree.
+#include "BridgeProtocol.h"
+
+TEST_CASE("kOpIdentity: the bridge blob maps field-for-field onto DISCOVER_REPLY") {
+    static_assert(bridge::kIdentNameLen == kHubNameMaxBytes);
+    static_assert(bridge::kIdentFwLen == kFwVersionMaxBytes);
+    static_assert(bridge::kIdentEtagLen == kEtagBytes);
+    static_assert(bridge::kIdentBytes ==
+                  bridge::kIdentNameLen + 8 + bridge::kIdentFwLen + bridge::kIdentEtagLen + 1);
+
+    std::array<uint8_t, bridge::kIdentBytes> ident{};
+    std::memcpy(ident.data() + bridge::kIdentNameOff, "slopdrive-32", 12);
+    for (size_t b = 0; b < 8; ++b) ident[bridge::kIdentIdOff + b] = uint8_t(0x11 * (b + 1));
+    std::memcpy(ident.data() + bridge::kIdentFwOff, "2.5.2", 5);
+    for (size_t b = 0; b < 8; ++b) ident[bridge::kIdentEtagOff + b] = uint8_t(0xA0 + b);
+    ident[bridge::kIdentFlagsOff] = kFlagPairingWindowOpen;
+
+    // Exactly what the C5's discoveryPoll() does with it.
+    auto view = [&](size_t off, size_t width) {
+        const char* s = reinterpret_cast<const char*>(ident.data() + off);
+        return std::string_view(s, strnlen(s, width));
+    };
+    ReplyFields f;
+    f.nonce = 0xCAFEBABEu;
+    f.proto_ver = 1;
+    f.ws_port = 82;
+    f.hub_name = view(bridge::kIdentNameOff, bridge::kIdentNameLen);
+    f.fw_version = view(bridge::kIdentFwOff, bridge::kIdentFwLen);
+    for (size_t b = 0; b < 8; ++b)
+        f.hub_instance_id |= uint64_t(ident[bridge::kIdentIdOff + b]) << (8 * b);
+    std::memcpy(f.catalog_etag.data(), ident.data() + bridge::kIdentEtagOff,
+                bridge::kIdentEtagLen);
+    f.flags = buildFlags((ident[bridge::kIdentFlagsOff] & kFlagPairingWindowOpen) != 0, true);
+
+    std::array<std::byte, kReplyBytes> buf{};
+    REQUIRE(buildReply(f, buf) == kReplyBytes);
+    CHECK(std::memcmp(&buf[8], "slopdrive-32", 12) == 0);
+    CHECK(uint8_t(buf[40]) == 0x11);   // hub_instance_id, little-endian
+    CHECK(uint8_t(buf[47]) == 0x88);
+    CHECK(uint8_t(buf[49]) == 82);     // ws_port is the BRIDGE's, never the S3's
+    CHECK(std::memcmp(&buf[51], "2.5.2", 5) == 0);
+    CHECK(uint8_t(buf[67]) == 0xA0);
+    CHECK(uint8_t(buf[74]) == 0xA7);
+    CHECK(uint8_t(buf[75]) == (kFlagPairingWindowOpen | kFlagWsAvailable));
+}
+
+// A name that exactly fills str32 carries no NUL; the view must stop at the
+// field width and never run into hub_instance_id.
+TEST_CASE("kOpIdentity: a hub_name filling str32 does not overrun into the next field") {
+    std::array<uint8_t, bridge::kIdentBytes> ident{};
+    std::memset(ident.data() + bridge::kIdentNameOff, 'x', bridge::kIdentNameLen);
+    ident[bridge::kIdentIdOff] = 0x7F;
+    const char* s = reinterpret_cast<const char*>(ident.data() + bridge::kIdentNameOff);
+    CHECK(strnlen(s, bridge::kIdentNameLen) == bridge::kIdentNameLen);
+}

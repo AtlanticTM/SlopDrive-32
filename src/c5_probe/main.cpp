@@ -26,8 +26,17 @@
 
 #include <span>
 
+#include <cstring>
+#include <string_view>
+
 #include "comms/BridgeProtocol.h"          // ONE vocabulary, two ends (T20)
+// Shared with the S3's own responder: the wire encoder (host-tested in
+// test/native/test_slopsync_discovery) and the pure DiscoveryRateLimiter. Its
+// responder CLASS is not reused; that snapshots identity write-once at
+// begin(), and the bridge's arrives over the link later and refreshes.
+#include "comms/SlopSyncUdpDiscovery.h"
 #include "logview_gz.h"                    // GENERATED; the /logs page in flash
+#include "webui_gz.h"                      // GENERATED; the UI bundle in flash
 #include "slopsync/wire/crc32.hpp"
 #include "slopsync/wire/serial_cobs.hpp"
 #include "slopsync/wire/estop_frame.hpp"   // SPEC §13.5 raw ESTOP scan
@@ -258,6 +267,17 @@ static uint32_t g_diagNext = 0;
 static volatile bool g_diagDone = false;
 static volatile bool g_diagEndSeen = false;
 
+// ---- Discovery identity, learned from the S3 over slot 0xFF (sd-cd8) -------
+// Written by whichever task owns the RX drain, read by discoveryPoll() on the
+// loop task. No lock: the worst a torn read can produce is one discovery reply
+// carrying a mixed name and etag, which the next probe corrects. A lock here
+// would be a third mutex on a board that has exactly two by ruling.
+// TODO(sd-cd8): SlopSyncUartPort::handleBridgeOp must answer kOpIdentity; until
+// it does, g_identSeen stays false and every reply carries the bridge's own
+// hostname with zeros for the hub fields.
+static uint8_t g_ident[bridge::kIdentBytes] = {};
+static volatile bool g_identSeen = false;
+
 // One token mint response, same single-threaded-by-RX-ownership contract.
 static uint8_t  g_tokBuf[160];
 static size_t   g_tokLen = 0;
@@ -362,6 +382,9 @@ static void pumpFromS3() {
                 g_tokLen = (n - 3) < sizeof(g_tokBuf) ? (n - 3) : sizeof(g_tokBuf);
                 memcpy(g_tokBuf, out + 3, g_tokLen);
                 g_tokSeen = true;       // published LAST
+            } else if (out[1] == bridge::kOpIdentity && n >= 2 + bridge::kIdentBytes) {
+                memcpy(g_ident, out + 2, bridge::kIdentBytes);
+                g_identSeen = true;     // published LAST
             }
             continue;
         }
@@ -382,6 +405,84 @@ static void pumpFromS3() {
             else { g_rxDrops++; g_dropSend++; }
         }
         }
+    }
+}
+
+// ---- SPEC 13.8 UDP discovery responder (sd-cd8) ------------------------------
+// The headless S3 compiles its own responder out (no radio), so the machine is
+// discoverable only from here. Read-only, no control surface, one reply per
+// source per second. Manual address entry stays the always-valid entry point.
+static int g_discoSock = -1;
+static slopdrive::DiscoveryRateLimiter g_discoLimiter;
+static uint32_t g_discoReplies = 0, g_discoThrottled = 0, g_discoRejected = 0;
+
+// The identity blob's str32/str16 fields are zero-padded and carry no
+// guaranteed NUL when the text exactly fills them (SPEC 5.4).
+static std::string_view fixedView(const uint8_t* p, size_t width) {
+    const char* s = reinterpret_cast<const char*>(p);
+    return std::string_view(s, strnlen(s, width));
+}
+
+static void discoveryBegin() {
+    g_discoSock = socket(AF_INET, SOCK_DGRAM, IPPROTO_UDP);
+    if (g_discoSock < 0) return;
+    sockaddr_in a{};
+    a.sin_family = AF_INET;
+    a.sin_addr.s_addr = htonl(INADDR_ANY);
+    a.sin_port = htons(slopdrive::discovery::kPort);
+    if (bind(g_discoSock, reinterpret_cast<sockaddr*>(&a), sizeof(a)) != 0) {
+        close(g_discoSock);
+        g_discoSock = -1;
+    }
+}
+
+// Bounded per call and MSG_DONTWAIT throughout, so a probe storm cannot turn
+// one loop pass into a reply burst and an empty socket costs one syscall.
+static void discoveryPoll() {
+    if (g_discoSock < 0) return;
+    namespace disco = slopdrive::discovery;
+    for (int i = 0; i < 4; ++i) {
+        std::byte in[32];
+        sockaddr_in from{};
+        socklen_t fromLen = sizeof(from);
+        const int n = recvfrom(g_discoSock, in, sizeof(in), MSG_DONTWAIT,
+                               reinterpret_cast<sockaddr*>(&from), &fromLen);
+        if (n <= 0) break;
+        auto probe = disco::parseProbe(std::span<const std::byte>(in, size_t(n)));
+        if (!probe.has_value()) { ++g_discoRejected; continue; }
+        if (!g_discoLimiter.allow(ntohl(from.sin_addr.s_addr), millis(),
+                                  disco::kReplyRateLimitPerSourceS * 1000u)) {
+            ++g_discoThrottled;
+            continue;
+        }
+
+        disco::ReplyFields f;
+        f.nonce = probe->nonce;
+        f.proto_ver = probe->proto_ver;   // echoed, as the S3's responder does
+        f.ws_port = 82;                   // this bridge's listener, not the S3's
+        bool pairing = false;
+        if (g_identSeen) {
+            f.hub_name = fixedView(g_ident + bridge::kIdentNameOff, bridge::kIdentNameLen);
+            f.fw_version = fixedView(g_ident + bridge::kIdentFwOff, bridge::kIdentFwLen);
+            for (size_t b = 0; b < 8; ++b)
+                f.hub_instance_id |= uint64_t(g_ident[bridge::kIdentIdOff + b]) << (8 * b);
+            memcpy(f.catalog_etag.data(), g_ident + bridge::kIdentEtagOff,
+                   bridge::kIdentEtagLen);
+            pairing = (g_ident[bridge::kIdentFlagsOff] & disco::kFlagPairingWindowOpen) != 0;
+        } else {
+            // The S3 has not answered kOpIdentity yet. Answer with the bridge's
+            // own name and zeros: a discoverable machine with a blank hub
+            // identity beats an undiscoverable one, and the refresh fills it in.
+            const char* host = WiFi.getHostname();
+            f.hub_name = (host != nullptr) ? std::string_view(host) : std::string_view();
+        }
+        f.flags = disco::buildFlags(pairing, WiFi.status() == WL_CONNECTED);
+
+        std::byte out[disco::kReplyBytes];
+        if (disco::buildReply(f, out) == 0) continue;
+        sendto(g_discoSock, out, sizeof(out), 0,
+               reinterpret_cast<sockaddr*>(&from), fromLen);
+        ++g_discoReplies;
     }
 }
 
@@ -637,7 +738,7 @@ static esp_err_t wsHandler(httpd_req_t* req) {
 
 // ---- Diagnostics endpoint ---------------------------------------------------
 static esp_err_t probeHandler(httpd_req_t* req) {
-    char j[1024];
+    char j[1152];
     int used = 0;
     { SlotLock lk; for (size_t i = 0; i < kSlots; i++) if (g_wsUsed[i]) used++; }
     int p = snprintf(j, sizeof(j),
@@ -648,6 +749,7 @@ static esp_err_t probeHandler(httpd_req_t* req) {
         "\"rx_frames\":%u,\"rx_drops\":%u,"
         "\"drops\":{\"overflow\":%u,\"cobs\":%u,\"short\":%u,\"slot_range\":%u,"
         "\"slot_free\":%u,\"send\":%u},"
+        "\"disco\":{\"ident\":%d,\"replies\":%u,\"throttled\":%u,\"rejected\":%u},"
         "\"uptime_ms\":%u,\"stages\":[",
         ESP.getChipModel(), (unsigned)ESP.getChipCores(),
         (unsigned)ESP.getFlashChipSize(), (unsigned)ESP.getPsramSize(),
@@ -659,6 +761,8 @@ static esp_err_t probeHandler(httpd_req_t* req) {
         (unsigned)g_framesFromS3, (unsigned)g_rxDrops,
         (unsigned)g_dropOverflow, (unsigned)g_dropCobs, (unsigned)g_dropShort,
         (unsigned)g_dropSlotRange, (unsigned)g_dropSlotFree, (unsigned)g_dropSend,
+        g_identSeen ? 1 : 0, (unsigned)g_discoReplies,
+        (unsigned)g_discoThrottled, (unsigned)g_discoRejected,
         (unsigned)millis());
     for (uint8_t i = 0; i < g_stageCount && p < (int)sizeof(j) - 120; i++) {
         p += snprintf(j + p, sizeof(j) - p, "%s{\"n\":\"%s\",\"free\":%u,\"largest\":%u}",
@@ -994,6 +1098,28 @@ static esp_err_t logsHandler(httpd_req_t* req) {
     return httpd_resp_send(req, reinterpret_cast<const char*>(kLogviewGz), kLogviewGzLen);
 }
 
+// ---- / -- the WebUI bundle (sd-e0m) -----------------------------------------
+// The S3 is headless and serves nothing, so the bridge is the UI's only door.
+// Same flash-array delivery as /logs. The page talks SlopSync over :82 and
+// mints at /uitoken on :80, both same-host, so nothing here needs CORS.
+// Strong ETag over the baked bytes plus no-cache: the browser may keep the
+// bundle but must revalidate, and a firmware carrying a different bundle
+// carries a different ETag, so a stale UI cannot survive a flash.
+static esp_err_t indexHandler(httpd_req_t* req) {
+    char inm[32] = {};
+    if (httpd_req_get_hdr_value_str(req, "If-None-Match", inm, sizeof(inm)) == ESP_OK &&
+        strcmp(inm, kWebuiEtag) == 0) {
+        httpd_resp_set_status(req, "304 Not Modified");
+        httpd_resp_set_hdr(req, "ETag", kWebuiEtag);
+        return httpd_resp_send(req, nullptr, 0);
+    }
+    httpd_resp_set_type(req, "text/html");
+    httpd_resp_set_hdr(req, "Content-Encoding", "gzip");
+    httpd_resp_set_hdr(req, "ETag", kWebuiEtag);
+    httpd_resp_set_hdr(req, "Cache-Control", "no-cache");
+    return httpd_resp_send(req, reinterpret_cast<const char*>(kWebuiGz), kWebuiGzLen);
+}
+
 void setup() {
     Serial.begin(115200);
     delay(1500);
@@ -1125,7 +1251,15 @@ void setup() {
         // keeps first claim on its own prefix.
         httpd_uri_t lg{"/logs", HTTP_GET, logsHandler, nullptr, false, false, nullptr};
         httpd_register_uri_handler(g_http80, &lg);
+        // The UI itself. Wildcard-free, so exact-match under the matcher above.
+        httpd_uri_t ix{"/", HTTP_GET, indexHandler, nullptr, false, false, nullptr};
+        httpd_register_uri_handler(g_http80, &ix);
+        httpd_uri_t ixh{"/index.html", HTTP_GET, indexHandler, nullptr, false, false, nullptr};
+        httpd_register_uri_handler(g_http80, &ixh);
     }
+    // Bound before WiFi is up on purpose: INADDR_ANY takes the port regardless
+    // of link state, so no reconnect path has to remember to rebind.
+    discoveryBegin();
     report("S5 +httpd+ws");
 
     for (uint8_t i = 0; i < g_stageCount; i++) {
@@ -1146,6 +1280,17 @@ void setup() {
 
 void loop() {
     pumpFromS3();   // no-ops while a handler owns the drain; see UartRxLock
+
+    // Ask the S3 who it is, then re-ask periodically so a hub reboot, a
+    // firmware bump or a catalog change reaches discovery without a bridge
+    // restart. Fire and forget: the answer lands in pumpFromS3's 0xFF branch
+    // whenever it arrives, and a send refused behind an OTA retries next tick.
+    static uint32_t nextIdentAsk = 0;
+    if (int32_t(millis() - nextIdentAsk) >= 0) {
+        const uint8_t req[1] = {bridge::kOpIdentity};
+        if (sendToS3(bridge::kSlot, req, sizeof(req))) nextIdentAsk = millis() + 30000;
+    }
+    discoveryPoll();
 
     // Supervised reconnect. There was NO reconnect path here at all — the loop
     // only blinked an LED at the link state — so a dropped association was

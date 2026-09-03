@@ -42,7 +42,25 @@ enum Op : uint8_t {
     // HTTP mint and this one are ONE implementation behind two doors.
     kOpTokenReq   = 0x0A,   // C5->S3  []
     kOpTokenResp  = 0x0B,   // S3->C5  [code][json...]  code: 0 ok, 1 disabled, 2 rate-limited
+    // Discovery identity (sd-cd8). ONE op, both directions: an EMPTY payload
+    // asks, a kIdentBytes payload answers. The C5 owns the radio that answers
+    // SPEC 13.8 probes; every reply field but the port is the HUB's.
+    kOpIdentity   = 0x0C,   // C5->S3  []  /  S3->C5  [identity, kIdentBytes]
 };
+
+// kOpIdentity answer layout -- one home, both ends (T20). Fixed width, no
+// length prefixes: these land straight into a DISCOVER_REPLY, whose str32/str16
+// fields are zero-padded the same way (SPEC 5.4). proto_ver is absent (the
+// reply echoes the probe's) and so is ws_port (the listener is the bridge's).
+inline constexpr size_t kIdentNameOff  = 0;    // hub_name, str32
+inline constexpr size_t kIdentNameLen  = 32;
+inline constexpr size_t kIdentIdOff    = 32;   // hub_instance_id, u64 LE
+inline constexpr size_t kIdentFwOff    = 40;   // fw_version, str16
+inline constexpr size_t kIdentFwLen    = 16;
+inline constexpr size_t kIdentEtagOff  = 56;   // catalog_etag, 8 raw bytes
+inline constexpr size_t kIdentEtagLen  = 8;
+inline constexpr size_t kIdentFlagsOff = 64;   // bit0 pairing_window_open only
+inline constexpr size_t kIdentBytes    = 65;
 
 enum OtaTarget : uint8_t {
     kOtaTargetApp = 0x00,   // U_FLASH

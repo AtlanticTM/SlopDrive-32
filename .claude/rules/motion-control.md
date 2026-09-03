@@ -21,11 +21,26 @@ Every command becomes ONE trajectory planned from the engine's actual
   as a bench baseline and is not firmware.
 - **Division of labor (MEASURED; re-run the bench before re-litigating).**
   Ruckig Community is a point-to-point planner, not a waveform interpolator.
-  WAVEFORM (duration-carrying segments) is C2 quintic Hermite over exactly the
-  commanded duration, ceiling and window scanned, illegal shapes falling
-  through to the Ruckig guard. CHASE (dense bare points) is Ruckig
-  replan-per-point with predictive aim. SETTLE is brake-to-rest when a plan
-  ends still-moving with no fresh command.
+  WAVEFORM (every duration-carrying segment, with NO duration floor: a 10 ms
+  knot is a 10 ms span with its authored tangent) is a Hermite curve in the
+  client's declared family over exactly the commanded duration, ceiling and
+  window scanned. An illegal shape is first shortened toward a legal stroke
+  that still holds the deadline (the Blend policy; the amplitude budget is a
+  FLOOR the search must honor, never cross), and only a shape still illegal at
+  that floor falls through to the Ruckig guard. Stretch (keep the stroke,
+  overrun the deadline) is the one alternative contract. Amplitude is the one
+  quantity a ceiling may shape; this is the operator-ratified exception
+  (2026-09-02) to "ceilings are clamps, never targets". CHASE (bare points,
+  no duration) is Ruckig replan-per-point. Sample synthesis is gone
+  (2026-09-02): no client sends bare points at a rate that needs a holdback.
+  SETTLE is brake-to-rest when a plan ends still-moving with no fresh command.
+- **One activity clock (operator ruling 2026-09-02).** Every "is the stream
+  alive" question in the engine (settle grace, cold start, staleness) keys on
+  ONE reference stamped by every commit and every plan end, in the engine's
+  own clock. A reset voids the plan and the pipeline; it never erases the
+  stream's cadence. Two mechanisms answering the same question from different
+  references is the defect class that produced every field hitch of
+  2026-09-02 (docs/reviews/slopmotion-2026-09-02).
 - **Safety:** Ruckig Community has NO position limits and quintics can bulge,
   so the Engine owns the window: targets clamped, end velocities bound-safe,
   quintics legality-scanned, sampled output clamped. Exceptions are never

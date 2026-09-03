@@ -133,6 +133,17 @@ void MlinkServoDriver::sendSegmentTo(float p1, float v1, float a1,
     // extra render time lands as transient runway; the gate drains it.
     if (_sweep_pending) {
         _sweep_pending = false;
+        // Anchor at SHIP time, never at detect time: the runway gate can
+        // hold a sweep for the whole chunk already rendering, and a chain
+        // anchored when the gap was noticed is that far behind the RP when
+        // it finally ships. Measured 2026-09-02: an anchor 0.8 s old put p0
+        // 63 mm behind the rendered position and the RP walked the
+        // difference backward at the 1000 mm/s ceiling (mlink census
+        // overrun=1349 residue=13238 counts). Live velocity keeps the
+        // handoff C1 when the RP is still moving; the v-cap below bounds it.
+        _chain_p = liveCounts();
+        _chain_v = _vel_counts;
+        _chain_a = 0.0f;
         // Too far to glide: ship NOTHING and request an engine re-seed at
         // the live position -- the gap becomes a COLD-start plan through the
         // engine's own feasibility machinery instead of wire-duration debt
@@ -177,6 +188,8 @@ void MlinkServoDriver::sendSegmentTo(float p1, float v1, float a1,
             const float vcap = 1.5f * chord;
             if (v1 >  vcap) v1 =  vcap;
             if (v1 < -vcap) v1 = -vcap;
+            if (_chain_v >  vcap) _chain_v =  vcap;
+            if (_chain_v < -vcap) _chain_v = -vcap;
         }
         // A clamped v1 makes the passed a1 inconsistent; land the sweep flat.
         a1 = 0.0f;

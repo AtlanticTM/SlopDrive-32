@@ -1207,6 +1207,13 @@ struct Log {
     // CONTENT rather than an opening positioning move: the cold-start and
     // isolated-point exemptions below do not apply to it.
     bool warm_entry = false;
+    // ARRIVAL MODE (sd-4k1.19). 0 = each row commits late_ms AFTER its anchor,
+    // the drain-on-due timeline. Non-zero = each row commits that many ms
+    // BEFORE its anchor, the forward-on-arrival timeline, so the rows pile up
+    // in the engine's schedule queue. The cold-start demand census is off in
+    // lead mode: it measures a row against the position at COMMIT, which in
+    // lead mode is a whole lookahead before the row starts.
+    uint32_t lead_ms = 0;
 };
 
 inline void drain(Engine& e, Log& lg, bool print) {
@@ -1306,7 +1313,11 @@ inline void play(Engine& e, uint64_t& now, const S* seq, size_t n, uint64_t due0
 
     for (size_t i = 0; i < n; ++i) {
         row_vpk = 0.0;
-        run_to(due + (uint64_t)seq[i].late_ms * kMs, true);
+        const uint64_t commit_at =
+            lg.lead_ms != 0
+                ? (due > (uint64_t)lg.lead_ms * kMs ? due - (uint64_t)lg.lead_ms * kMs : 0)
+                : due + (uint64_t)seq[i].late_ms * kMs;
+        run_to(commit_at, true);
         close_row();                       // closes row i-1
         Command c;
         c.target = seq[i].tgt; c.duration_us = seq[i].dur_ms * 1000u;
@@ -1332,10 +1343,10 @@ inline void play(Engine& e, uint64_t& now, const S* seq, size_t n, uint64_t due0
         }
         drain(e, lg, print);
         lg.kind_last = (int8_t)e.planKind();
-        skew_ms = seq[i].late_ms;
+        skew_ms = lg.lead_ms != 0 ? 0 : seq[i].late_ms;
         // Row 0 out of a fresh engine is a POSITIONING move and is capped on
         // purpose (the cold-start governor); only content is checked.
-        have_row = i > 0 || lg.warm_entry;
+        have_row = (i > 0 || lg.warm_entry) && lg.lead_ms == 0;
         p_cmd = (double)e.positionAt(now);
         row_tgt = seq[i].tgt; row_dur = seq[i].dur_ms;
         due += seq[i].dur_ms * 1000u;
@@ -1383,6 +1394,19 @@ TEST_CASE("Field replay: a long hold segment at the rail is content, not a cold 
     CHECK(lg.endvel == 0);      // the exit is not capped at the recovery limit
     CHECK(lg.settles == 0);     // and nothing brakes at a plan end mid-stream
     CHECK(lg.vpk > 2.05);       // the exit really ran above the recovery limit
+
+    // sd-4k1.19: the SAME figure with every row committed 110 ms BEFORE its
+    // anchor, which is what the hub forwards now. Same census.
+    Engine el(liveTuning(), 0.45f);
+    uint64_t nowl = 1000 * kMs;
+    Log warm_l; warm_l.lead_ms = 110;
+    play(el, nowl, HOLD, 3, nowl + 200 * kMs, warm_l);
+    Log lead; lead.lead_ms = 110; lead.warm_entry = true;
+    play(el, nowl, HOLD + 3, sizeof(HOLD) / sizeof(HOLD[0]) - 3, nowl - 3 * kMs,
+         lead);
+    CHECK(lead.endvel == 0);
+    CHECK(lead.settles == 0);
+    CHECK(lead.vpk > 2.05);
 }
 
 TEST_CASE("Field replay: the reversal figure (0.5 knot with vf -1.134) does not settle") {
@@ -1412,6 +1436,14 @@ TEST_CASE("Field replay: the reversal figure (0.5 knot with vf -1.134) does not 
     play(e, now, REVERSAL, sizeof(REVERSAL) / sizeof(REVERSAL[0]),
          now + 200 * kMs, lg);
     CHECK(lg.settles == 0);
+
+    // sd-4k1.19: committed 110 ms early, the whole figure sits in the schedule
+    // queue and the census must not move.
+    Engine el(liveTuning(), 0.35f);
+    uint64_t nowl = 1000 * kMs; Log lead; lead.lead_ms = 110;
+    play(el, nowl, REVERSAL, sizeof(REVERSAL) / sizeof(REVERSAL[0]),
+         nowl + 200 * kMs, lead);
+    CHECK(lead.settles == 0);
 }
 
 TEST_CASE("Field replay: a re-seed is a cold start -- the next segment runs at the recovery limit") {
@@ -1440,6 +1472,18 @@ TEST_CASE("Field replay: a re-seed is a cold start -- the next segment runs at t
     const S SLAM[] = { {1.000f, 125, 0.000f, true, 0.000f, false, 5} };
     play(e, now, SLAM, 1, now + 3 * kMs, cold);
     CHECK(cold.vpk <= 2.05);
+
+    // sd-4k1.19: the same re-seed with the rows committed 110 ms early. A
+    // re-seed is still a cold start.
+    Engine el(liveTuning(), 0.50f);
+    uint64_t nowl = 1000 * kMs;
+    Log warm_l; warm_l.lead_ms = 110;
+    play(el, nowl, WARM, sizeof(WARM) / sizeof(WARM[0]), nowl + 200 * kMs,
+         warm_l);
+    el.resetAt(0.0f, nowl);
+    Log cold_l; cold_l.lead_ms = 110;
+    play(el, nowl, SLAM, 1, nowl + 3 * kMs, cold_l);
+    CHECK(cold_l.vpk <= 2.05);
 }
 
 // ---- The one activity clock (sd-6b2.6) --------------------------------------
@@ -2911,7 +2955,12 @@ TEST_CASE("A future anchor is planned now and promoted AT its anchor") {
     CHECK(std::fabs(va - vb) < 1e-3);
 }
 
-TEST_CASE("Two future anchors: LAST WINS, one slot deep") {
+TEST_CASE("Two future anchors: both are kept, in anchor order") {
+    // sd-4k1.19 CHANGED THIS EXPECTATION. It read "LAST WINS, one slot deep":
+    // the later anchor replaced the parked plan and only it ever ran. With the
+    // schedule queue a LATER anchor is a successor, not a replacement, so both
+    // promote at their own instants. Last-wins survives only where it is still
+    // true, in the earlier-anchor case below.
     auto cfg = liveTuning();
     Engine e(cfg, 0.30f);
 
@@ -2929,14 +2978,55 @@ TEST_CASE("Two future anchors: LAST WINS, one slot deep") {
     c3.target = 0.80f; c3.anchor_us = 140 * kMs;
     REQUIRE(e.commit(c3, 30 * kMs));
 
-    // The replaced slot never runs: nothing is promoted at 120 ms.
     e.positionAt(130 * kMs);
-    CHECK(e.lastPlanUs() == 0);
+    CHECK(e.lastPlanUs() == 120 * kMs);      // the second command promoted
     e.positionAt(140 * kMs);
-    CHECK(e.lastPlanUs() == 140 * kMs);
-    // The promoted plan is the THIRD command's, not the replaced second's
-    // (Blend may shorten the stroke, so this is the target it aimed past).
+    CHECK(e.lastPlanUs() == 140 * kMs);      // ...and then the third
     CHECK(e.snapshot(140 * kMs).target > 0.70);
+}
+
+TEST_CASE("An EARLIER anchor drops the plans queued behind it") {
+    // Last wins where it still means something (sd-4k1.19): a command anchored
+    // before a queued plan invalidates that plan's start state, so it and
+    // everything behind it go and the new one is planned from the survivor.
+    auto cfg = liveTuning();
+    Engine e(cfg, 0.30f);
+
+    Command c1;
+    c1.target = 0.45f; c1.duration_us = 100 * (uint32_t)kMs;
+    c1.has_duration = true; c1.end_vel = 1.5f; c1.has_end_vel = true;
+    REQUIRE(e.commit(c1, 0));
+
+    Command c2;
+    c2.target = 0.60f; c2.duration_us = 60 * (uint32_t)kMs;
+    c2.has_duration = true; c2.anchor_us = 120 * kMs; c2.has_anchor = true;
+    REQUIRE(e.commit(c2, 20 * kMs));
+    Command c3 = c2;
+    c3.target = 0.75f; c3.anchor_us = 180 * kMs;
+    REQUIRE(e.commit(c3, 25 * kMs));
+    Command c4 = c2;
+    c4.target = 0.90f; c4.anchor_us = 240 * kMs;
+    REQUIRE(e.commit(c4, 30 * kMs));
+
+    // A revision anchored at 150 ms: c3 (180) and c4 (240) never ran, so they
+    // are dropped and this plan starts from c2's end state.
+    Command c5 = c2;
+    c5.target = 0.20f; c5.anchor_us = 150 * kMs; c5.duration_us = 90 * (uint32_t)kMs;
+    REQUIRE(e.commit(c5, 40 * kMs));
+
+    // Continuous across BOTH promotions, and the geometry after 150 ms is the
+    // revision's, not the dropped chain's.
+    double prev = e.positionAt(50 * kMs);
+    for (uint64_t t = 51 * kMs; t <= 300 * kMs; t += kMs) {
+        const double p = e.positionAt(t);
+        CHECK(std::fabs(p - prev) < 0.02);   // vmax * 1 ms, with margin
+        prev = p;
+        if (t == 130 * kMs) CHECK(e.lastPlanUs() == 120 * kMs);
+        // Nothing promotes at 180 or 240: those plans were dropped.
+        if (t >= 155 * kMs && t <= 239 * kMs)
+            CHECK(e.lastPlanUs() == 150 * kMs);
+        if (t == 239 * kMs) CHECK(p < 0.45);
+    }
 }
 
 TEST_CASE("An anchor beyond the lead bound is refused; the plan in flight is untouched") {
@@ -2998,6 +3088,97 @@ TEST_CASE("No settle while a scheduled successor exists") {
     CHECK(e.mode() != Mode::Settle);
     e.positionAt(300 * kMs);
     CHECK(e.lastPlanUs() == 300 * kMs);
+}
+
+TEST_CASE("A 110 ms lookahead of segments renders every anchor, continuously") {
+    // sd-4k1.19: the hub forwards on arrival, so the whole lookahead is parked
+    // in the engine at once. Twenty segments of 41 to 250 ms, each committed
+    // 110 ms before its anchor, must render at their own anchors with no
+    // settle and no discontinuity.
+    auto cfg = liveTuning();
+    Engine e(cfg, 0.30f);
+
+    constexpr uint64_t kLead = 110 * kMs;
+    const uint32_t durs[4] = {41, 60, 41, 250};
+    struct Row { uint64_t at, anchor; Command c; };
+    std::vector<Row> rows;
+    uint64_t due = 200 * kMs;
+    for (int i = 0; i < 20; ++i) {
+        Command c;
+        c.target = (i % 2 == 0) ? 0.70f : 0.30f;
+        c.duration_us = durs[i % 4] * (uint32_t)kMs;
+        c.has_duration = true;
+        c.end_vel = 0.0f; c.has_end_vel = true;
+        c.anchor_us = due; c.has_anchor = true;
+        rows.push_back({due - kLead, due, c});
+        due += durs[i % 4] * kMs;
+    }
+
+    const double vmax = cfg.limits.vmax, amax = cfg.limits.amax;
+    size_t next_row = 0, next_anchor = 0;
+    int settles = 0, failed = 0;
+    double prev_p = e.positionAt(0), prev_v = 0.0;
+    slopmotion::Anomaly ev;
+    for (uint64_t t = kMs; t <= due + 50 * kMs; t += kMs) {
+        while (next_row < rows.size() && rows[next_row].at <= t) {
+            CHECK(e.commit(rows[next_row].c, t));
+            ++next_row;
+        }
+        const double p = e.positionAt(t), v = e.velocityAt(t);
+        CHECK(std::fabs(p - prev_p) <= vmax * 1e-3 * 1.05);
+        CHECK(std::fabs(v - prev_v) <= amax * 1e-3 * 1.5);
+        CHECK(p >= -0.05);
+        CHECK(p <= 1.05);
+        prev_p = p; prev_v = v;
+        if (next_anchor < rows.size() && t >= rows[next_anchor].anchor) {
+            CHECK(e.lastPlanUs() == rows[next_anchor].anchor);
+            ++next_anchor;
+        }
+        while (e.popAnomaly(ev)) {
+            if (ev.kind == (uint8_t)AnomalyType::SettleEngaged) settles++;
+            if (ev.kind == (uint8_t)AnomalyType::PlanFailed) failed++;
+        }
+    }
+    CHECK(next_anchor == rows.size());   // every anchor promoted, in order
+    CHECK(settles == 0);
+    CHECK(failed == 0);
+}
+
+TEST_CASE("A full schedule queue refuses with -96 and keeps what it holds") {
+    auto cfg = liveTuning();
+    Engine e(cfg, 0.30f);
+
+    Command c;
+    c.duration_us = 40 * (uint32_t)kMs;
+    c.has_duration = true; c.end_vel = 0.0f; c.has_end_vel = true;
+    c.has_anchor = true;
+    for (int i = 0; i < 8; ++i) {                 // kScheduleDepth
+        c.target = (i % 2 == 0) ? 0.60f : 0.40f;
+        c.anchor_us = uint32_t((100 + 40 * i) * kMs);
+        REQUIRE(e.commit(c, 10 * kMs));
+    }
+    slopmotion::Anomaly ev;
+    while (e.popAnomaly(ev)) {}
+
+    Command over = c;
+    over.target = 0.95f;
+    over.anchor_us = uint32_t(420 * kMs);         // behind all eight
+    CHECK_FALSE(e.commit(over, 10 * kMs));
+    bool saw = false;
+    while (e.popAnomaly(ev))
+        if (ev.kind == (uint8_t)AnomalyType::PlanFailed &&
+            ev.detail == doctest::Approx(-96.0f)) saw = true;
+    CHECK(saw);
+
+    // The eight it holds still run, at their own anchors, and the refused one
+    // never appears.
+    for (int i = 0; i < 8; ++i) {
+        const uint64_t at = (100 + 40 * i) * kMs;
+        e.positionAt(at);
+        CHECK(e.lastPlanUs() == at);
+    }
+    for (uint64_t t = 420 * kMs; t <= 500 * kMs; t += kMs)
+        CHECK(e.positionAt(t) < 0.80);
 }
 
 // ---- The honest seed and the entry-relative window (sd-6b2.10) --------------

@@ -609,7 +609,8 @@ enum class AnomalyType : uint8_t {
     None              = 0,
     // Plan rejected; previous plan kept. detail = (float)ruckig::Result, or a
     // local sentinel: -99 non-finite command input, -98 non-finite trajectory
-    // duration, -97 anchor beyond the scheduled-lead bound.
+    // duration, -97 anchor beyond the scheduled-lead bound, -96 schedule queue
+    // full (kScheduleDepth anchored plans already parked).
     PlanFailed        = 1,
     SettleEngaged     = 2,  // stream starved mid-glide → brake plan. detail = end velocity
     EndVelClamped     = 3,  // requested vf cut by wall/vmax guard. detail = clamped vf
@@ -712,13 +713,18 @@ struct PlanPiece {
     double   hold       = 0.0;  // PlanKind::None: the position held
 };
 
-// The plan in flight, its scheduled successor, and the bounds the sampler
+// The plan in flight, its NEXT scheduled successor, and the bounds the sampler
 // applies to both. `next` is meaningful only while `next_ok`, and it takes over
 // at its own `start_us` -- the same instant the engine promotes it.
+// CONSTRAINT: the view carries ONE successor even when several are queued
+// (`queued` says how many), because a renderer needs the next boundary and
+// nothing past it. A renderer whose horizon can span two anchors must
+// republish on promotion rather than read further ahead here.
 struct PlanView {
     PlanPiece active;
     PlanPiece next;
     bool      next_ok        = false;
+    uint8_t   queued         = 0;     // anchored plans parked, `next` included
     double    lo             = 0.0;   // window backstop, sampleClampedNoSettle
     double    hi             = 1.0;
     double    coast_cap_s    = 0.0;   // past-expiry coast bounds, see evalPiece
@@ -782,7 +788,7 @@ public:
         _seed_hi    = windowHi(_hold_pos);
         _mode       = Mode::Idle;
         _kind       = PlanKind::None;
-        _next_ok    = false;
+        _sched_n    = 0;
         _plan_start = now_us;
         _prev_vf_ok = false;
         // The dwell rule compares against the PREVIOUS segment's target; a
@@ -822,8 +828,8 @@ public:
             recordAnomaly(AnomalyType::PlanFailed, 0.0f, -99.0f, now_us);
             return false;
         }
-        // A scheduled slot whose anchor has passed IS the plan in flight, so it
-        // is promoted before anything below reads the active plan.
+        // A queued plan whose anchor has passed IS the plan in flight, so the
+        // queue is promoted before anything below reads the active plan.
         promoteDue(now_us);
 
         // Anchor at the command's SCHEDULED start when the caller carries one
@@ -833,9 +839,12 @@ public:
         // sampled coast state uncapped inside the bound.
         //
         // A FUTURE anchor is a SCHEDULED PLAN, planned now from the state the
-        // active plan will have at that instant and parked in `_next` until it
-        // starts (architecture.md section 2: intents cross the link with anchor
-        // times precisely so the motion processor evaluates them ahead of time).
+        // machine will have at that instant and parked in the schedule queue
+        // until it starts (architecture.md section 2: intents cross the link
+        // with anchor times precisely so the motion processor evaluates them
+        // ahead of time). That state is the END of the last plan queued before
+        // it, so a whole client lookahead is planned in arrival order without
+        // any of it waiting on the machine.
         uint64_t t0 = now_us;
         bool sched  = false;
         if (cmd.has_anchor && cmd.anchor_us < now_us) {
@@ -852,14 +861,22 @@ public:
             sched = true;
         }
 
-        // LAST WINS, one slot. A command whose anchor precedes the parked one
-        // replans from the plan actually in flight; a later one is planned from
-        // the same predicted state, because the parked plan it replaces never
-        // ran. Either way the slot is dropped BEFORE the state is read.
-        _next_ok = false;
+        // A command OWNS its anchor onward: every queued plan starting at or
+        // after t0 was planned from a state that no longer holds. Dropped
+        // BEFORE the state is read, so an equal anchor is a replacement and an
+        // immediate command clears the queue.
+        dropScheduledFrom(t0);
+        if (sched && _sched_n == kScheduleDepth) {
+            _failures++;
+            recordAnomaly(AnomalyType::PlanFailed, cmd.target,
+                          kDetailScheduleFull, now_us);
+            return false;
+        }
 
+        // Predecessor state: the queue tail's end when queued, else the plan in
+        // flight.
         double p, v, a;
-        sampleRaw(t0, p, v, a);
+        sampleScheduleTail(t0, p, v, a);
 
         const double target = clamp01(cmd.target);
         // Estimator feeds BOTH planners, on anchored time (due spacing is the
@@ -879,9 +896,13 @@ public:
         // well as commits: a hold segment is content), or the re-seed flag.
         // Keying on rest alone, or on commits alone, clamped ordinary strokes
         // to the user limit (2026-08-10; the 6.9 s rail hold, 2026-09-02).
+        // The mode read here is the PREDECESSOR's, for the same reason (p,v,a)
+        // is: a queued plan's start state is the tail's end state.
+        const Mode pred_mode =
+            _sched_n > 0 ? schedAt(_sched_n - 1).mode : _mode;
         const bool cold = _cfg.recovery_vmax > 0.0f &&
                           _cfg.recovery_vmax < _cfg.limits.vmax &&
-                          (_mode == Mode::Idle || _mode == Mode::Settle) &&
+                          (pred_mode == Mode::Idle || pred_mode == Mode::Settle) &&
                           std::fabs(v) < 1e-3 &&
                           (_reset_cold ||
                            (now_us > _last_activity_us &&
@@ -899,15 +920,16 @@ public:
         // mid-stroke. A zero or absurd duration is rejected by the legality
         // referee, never by a routing floor. Bare points are chase's.
         // A scheduled command runs the SAME path into the SAME active slot:
-        // the incumbent trades places with `_next` for the plan and trades
-        // back, so no planner or adopter knows a plan can be scheduled.
-        if (sched) swapPlan(_next);
+        // the incumbent trades places with the queue's free slot for the plan
+        // and trades back, so no planner or adopter knows a plan can be
+        // scheduled.
+        if (sched) swapPlan(schedAt(_sched_n));
         const bool ok = cmd.has_duration
                             ? commitWaveform(cmd, p, v, a, target, t0)
                             : commitChase(cmd, p, v, a, target, t0);
         if (sched) {
-            swapPlan(_next);
-            _next_ok = ok;   // a rejected plan leaves _next holding scratch
+            swapPlan(schedAt(_sched_n));
+            if (ok) ++_sched_n;   // a rejected plan leaves the slot as scratch
         }
         if (ok) _plans++;
         return ok;
@@ -953,8 +975,9 @@ public:
     PlanView planView() const {
         PlanView pv;
         pv.active = activePiece();
-        if (_next_ok) {
-            pv.next = scheduledPiece();
+        pv.queued = (uint8_t)_sched_n;
+        if (_sched_n > 0) {
+            pv.next = slotPiece(schedAt(0));
             pv.next_ok = true;
         }
         pv.lo = windowLo(planEntry());
@@ -1009,7 +1032,7 @@ public:
     // sampler gates on this exactly as it did on the cubic's isBusy(). A
     // trajectory pending SETTLE still counts as busy (it is still moving).
     bool isBusy(uint64_t now_us) const {
-        if (_next_ok) return true;   // a scheduled successor is motion to come
+        if (_sched_n > 0) return true;   // scheduled plans are motion to come
         if (_kind == PlanKind::None) return false;
         if (elapsedS(now_us) < planDuration()) return true;
         double p, v, a;
@@ -1119,6 +1142,30 @@ private:
     // `max_future_schedule_ms` (250 ms, SlopSync registry), never under it.
     static constexpr uint64_t kAnchorMaxLeadUs = 500000;
     static constexpr float    kDetailAnchorLead = -97.0f;   // see PlanFailed
+    // Anchored plans parked at once. The bound that matters is the registry's
+    // `max_future_schedule_ms` (250 ms) over the shortest segment a client
+    // streams: the field's 41 ms cadence needs 7, so 8 covers the hub's own
+    // ceiling with a slot to spare, and a client's 110 ms lookahead needs 3.
+    // CEILING: a chain of segments under ~31 ms streamed at the full 250 ms
+    // schedule window overflows and is refused (kDetailScheduleFull), which is
+    // countable, unlike the silent eviction a shallower queue performs.
+    static constexpr size_t   kScheduleDepth = 8;
+    static constexpr float    kDetailScheduleFull = -96.0f;  // see PlanFailed
+
+    // A complete plan, off to one side. A queued slot holds a command
+    // committed AHEAD of its anchor, planned from the state its predecessor
+    // ends in, so promotion at the anchor is continuous in p and v by
+    // construction and never renders a piece from tau = 0 at the wrong time.
+    struct PlanSlot {
+        ruckig::Trajectory<1> traj;
+        double   q_c[6] = {};
+        double   q_T = 0.0;
+        double   p0 = 0.0;
+        uint64_t start = 0;
+        PlanKind kind = PlanKind::None;
+        Mode     mode = Mode::Idle;
+        float    jerk_frac = 1.0f;
+    };
     // Below this span a timed segment is a DWELL (see the dwell rule in
     // commitWaveform); 2% of the window, under any real stroke.
     static constexpr double   kDwellSpanNorm = 0.02;
@@ -1218,20 +1265,28 @@ private:
         return pc;
     }
 
-    PlanPiece scheduledPiece() const {
+    PlanPiece slotPiece(const PlanSlot& s) const {
         PlanPiece pc;
-        pc.kind     = _next.kind;
-        pc.start_us = _next.start;
+        pc.kind     = s.kind;
+        pc.start_us = s.start;
         pc.hold     = _hold_pos;
-        if (_next.kind == PlanKind::Quintic || _next.kind == PlanKind::Cubic) {
-            for (int i = 0; i < 6; i++) pc.c[i] = _next.q_c[i];
-            pc.T          = _next.q_T;
-            pc.duration_s = _next.q_T;
-        } else if (_next.kind == PlanKind::Ruckig) {
-            pc.traj       = &_next.traj;
-            pc.duration_s = _next.traj.get_duration();
+        if (s.kind == PlanKind::Quintic || s.kind == PlanKind::Cubic) {
+            for (int i = 0; i < 6; i++) pc.c[i] = s.q_c[i];
+            pc.T          = s.q_T;
+            pc.duration_s = s.q_T;
+        } else if (s.kind == PlanKind::Ruckig) {
+            pc.traj       = &s.traj;
+            pc.duration_s = s.traj.get_duration();
         }
         return pc;
+    }
+
+    // The state a plan anchored at t_us starts from: the queue tail evaluated
+    // there (its own bounded coast past expiry), else the plan in flight.
+    void sampleScheduleTail(uint64_t t_us, double& p, double& v,
+                            double& a) const {
+        if (_sched_n == 0) { sampleRaw(t_us, p, v, a); return; }
+        evalPiece(slotPiece(schedAt(_sched_n - 1)), t_us, p, v, a);
     }
 
     // THE ONE CLAMPED SAMPLER. The window clamp is the hard backstop, and a
@@ -2392,7 +2447,7 @@ private:
         // it was planned from the coasted state the sampler will actually
         // render: a settle here would both lie about starvation and break the
         // join. Bounded by kAnchorMaxLeadUs.
-        if (_next_ok) return;
+        if (_sched_n > 0) return;
         if (_kind == PlanKind::None) return;        // nothing in flight to end
         if (_mode == Mode::Settle) {
             settleToIdle(now_us);
@@ -2509,22 +2564,15 @@ private:
         _mode     = Mode::Idle;
     }
 
-    // ---- The scheduled plan slot --------------------------------------------
-    // A complete plan, off to one side. `_next` holds a command committed
-    // AHEAD of its anchor; it is planned from the state the active plan will
-    // have at that instant, so promotion at the anchor is continuous in p and
-    // v by construction and never renders a piece from tau = 0 at the wrong
-    // time. Bounded by kAnchorMaxLeadUs, one slot deep, last commit wins.
-    struct PlanSlot {
-        ruckig::Trajectory<1> traj;
-        double   q_c[6] = {};
-        double   q_T = 0.0;
-        double   p0 = 0.0;
-        uint64_t start = 0;
-        PlanKind kind = PlanKind::None;
-        Mode     mode = Mode::Idle;
-        float    jerk_frac = 1.0f;
-    };
+    // ---- The schedule queue -------------------------------------------------
+    // Anchored plans in strictly increasing anchor order, a ring so promotion
+    // and refusal cost no copies. Slots at or past _sched_n are scratch.
+    PlanSlot&       schedAt(size_t i)       { return _sched[(_sched_head + i) % kScheduleDepth]; }
+    const PlanSlot& schedAt(size_t i) const { return _sched[(_sched_head + i) % kScheduleDepth]; }
+
+    void dropScheduledFrom(uint64_t t_us) {
+        while (_sched_n > 0 && schedAt(_sched_n - 1).start >= t_us) --_sched_n;
+    }
 
     void swapPlan(PlanSlot& s) {
         std::swap(_traj, s.traj);
@@ -2539,13 +2587,16 @@ private:
 
     // Promotion is IN PLACE at the anchor the slot was planned for, so the
     // geometry joins with no jump. The activity clock is stamped here, at that
-    // anchor, and not when the command arrived.
+    // anchor, and not when the command arrived. Loops: a service pass that
+    // straddles two anchors promotes both, in order.
     void promoteDue(uint64_t now_us) {
-        if (!_next_ok || now_us < _next.start) return;
-        const uint64_t at = _next.start;
-        swapPlan(_next);
-        _next_ok = false;
-        noteActivity(at);
+        while (_sched_n > 0 && now_us >= schedAt(0).start) {
+            const uint64_t at = schedAt(0).start;
+            swapPlan(schedAt(0));
+            _sched_head = (_sched_head + 1) % kScheduleDepth;
+            --_sched_n;
+            noteActivity(at);
+        }
     }
 
     void recordAnomaly(AnomalyType kind, float target, float detail,
@@ -2578,8 +2629,9 @@ private:
     double                _seed_lo = 0.0;
     double                _seed_hi = 1.0;
     Mode                  _mode = Mode::Idle;
-    PlanSlot              _next;          // scheduled successor (promoteDue)
-    bool                  _next_ok = false;
+    PlanSlot              _sched[kScheduleDepth];   // schedule queue, ring
+    size_t                _sched_head = 0;
+    size_t                _sched_n = 0;
     // Peak jerk of the ACTIVE plan as a fraction of limits.jmax (see
     // Snapshot::sharpness). Telemetry only — nothing in the sample path reads
     // it; the plan is already an immutable polynomial.

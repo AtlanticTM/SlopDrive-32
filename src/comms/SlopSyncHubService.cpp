@@ -559,8 +559,6 @@ slopsync::Result<IntentValueMap, NackCode> SlopDriveHubDelegate::applyIntent(
             setF(1, 0.0f, 2000000.0f, _state.sm_tune_jmax_ovr);
             setF(2, 0.0f, 20.0f,      _state.sm_tune_vmax_ovr);
             setF(3, 0.0f, 500.0f,     _state.sm_tune_amax_ovr);
-            setU(4, 0, 1, [&](uint32_t v) { _state.sm_tune_centering = (v != 0); });
-            setF(5, 0.0f, 1.0f,       _state.sm_tune_centering_gain);
             setU(6, 0, 1, [&](uint32_t v) { _state.sm_tune_chase_ff = (v != 0); });
             setU(7, 0, 1, [&](uint32_t v) { _state.sm_tune_chase_aff = (v != 0); });
             setF(8, 0.0f, 1.5f,       _state.sm_tune_chase_gain);
@@ -569,16 +567,17 @@ slopsync::Result<IntentValueMap, NackCode> SlopDriveHubDelegate::applyIntent(
             setU(11, 0, 1, [&](uint32_t v) { _state.sm_tune_aim_extrap = (v != 0); });
             setF(12, 0.0f, 8.0f,      _state.sm_tune_handoff_k);
             setU(13, 0, 2, [&](uint32_t v) { _state.sm_tune_curve_policy = uint8_t(v); });
-            // Bound from the ENGINE's enum, never a literal: this clamp read 4
-            // while the enum ran to 5, so selecting blend was silently clamped to
-            // prio-smooth (operator-reported, fw 2.1.96).
-            setU(14, 0, slopmotion::kInfeasiblePolicyMax,
+            // The SELECT's own range, which is the stored ordinal's: 0 stretch,
+            // 1 blend (see the catalog's note -- a select's wire value is its
+            // index, and the engine's sparse enum is the host map's business).
+            // Never a literal in a second place: it was 4 while the enum ran to
+            // 5 once, and selecting blend was silently clamped to something else
+            // (operator-reported, fw 2.1.96).
+            setU(14, 0, 1,
                  [&](uint32_t v) { _state.sm_tune_infeas_policy = uint8_t(v); });
-            setF(15, 0.5f, 1.0f,      _state.sm_tune_infeas_margin);
             setF(16, 0.0f, 1.0f,      _state.sm_tune_smooth_budget);
             setF(17, 0.0f, 1.0f,      _state.sm_tune_amp_budget);
             setU(18, 1, 10, [&](uint32_t v) { _state.sm_tune_blend_steps = uint8_t(v); });
-            setU(19, 0, 8,  [&](uint32_t v) { _state.sm_tune_reshape_steps = uint8_t(v); });
             setMs(20, 0.0f, 200.0f,   _state.sm_tune_settle_grace_us);
 
             if (!any) return Ret::err(NackCode::INVALID_VALUE);
@@ -1966,14 +1965,12 @@ void SlopSyncHubService::publishTelemetry() {
     // card. Comparing the bytes subscribers actually hold cannot disagree with
     // them.
     {
-        std::array<std::byte, 18> lim{};
+        std::array<std::byte, 13> lim{};
         std::span<std::byte> l(lim);
         slopsync::putF32(l.subspan(0, 4),  _state.sm_tune_jmax_ovr);
         slopsync::putF32(l.subspan(4, 4),  _state.sm_tune_vmax_ovr);
         slopsync::putF32(l.subspan(8, 4),  _state.sm_tune_amax_ovr);
-        slopsync::putU8 (l.subspan(12, 1), _state.sm_tune_centering ? 1u : 0u);
-        slopsync::putF32(l.subspan(13, 4), _state.sm_tune_centering_gain);
-        slopsync::putU8 (l.subspan(17, 1), 0x1Fu);   // all 5 always settable
+        slopsync::putU8 (l.subspan(12, 1), 0x07u);   // all 3 always settable
         if (!_smLimEverSent || lim != _lastSmLim) {
             _smLimEverSent = true; _lastSmLim = lim;
             _hub.publishState(ch::sm_limits, l);
@@ -1994,17 +1991,15 @@ void SlopSyncHubService::publishTelemetry() {
             _hub.publishState(ch::sm_chase, h);
         }
 
-        std::array<std::byte, 21> wav{};
+        std::array<std::byte, 16> wav{};
         std::span<std::byte> w(wav);
         slopsync::putU8 (w.subspan(0, 1),  _state.sm_tune_curve_policy);
         slopsync::putU8 (w.subspan(1, 1),  _state.sm_tune_infeas_policy);
-        slopsync::putF32(w.subspan(2, 4),  _state.sm_tune_infeas_margin);
-        slopsync::putF32(w.subspan(6, 4),  _state.sm_tune_smooth_budget);
-        slopsync::putF32(w.subspan(10, 4), _state.sm_tune_amp_budget);
-        slopsync::putU8 (w.subspan(14, 1), _state.sm_tune_blend_steps);
-        slopsync::putU8 (w.subspan(15, 1), _state.sm_tune_reshape_steps);
-        slopsync::putU32(w.subspan(16, 4), _state.sm_tune_settle_grace_us);
-        slopsync::putU8 (w.subspan(20, 1), 0xFFu);   // all 8 always settable
+        slopsync::putF32(w.subspan(2, 4),  _state.sm_tune_smooth_budget);
+        slopsync::putF32(w.subspan(6, 4),  _state.sm_tune_amp_budget);
+        slopsync::putU8 (w.subspan(10, 1), _state.sm_tune_blend_steps);
+        slopsync::putU32(w.subspan(11, 4), _state.sm_tune_settle_grace_us);
+        slopsync::putU8 (w.subspan(15, 1), 0x3Fu);   // all 6 always settable
         if (!_smWavEverSent || wav != _lastSmWav) {
             _smWavEverSent = true; _lastSmWav = wav;
             _hub.publishState(ch::sm_waveform, w);
@@ -2211,7 +2206,7 @@ void SlopSyncHubService::publishTelemetry() {
             _hub.publishState(ch::odometer, s);
         }
 
-        {  // 0x0088 slopmotion-diag — 88 B, the /api/slopmotion stats+sync blocks
+        {  // 0x0088 slopmotion-diag — 92 B, the /api/slopmotion stats+sync blocks
             // This layout has grown from the MIDDLE before — new per-kind
             // counters inserted into the per-kind block, shifting every field
             // after it. That is a layout CHANGE, not an append — legal here
@@ -2222,15 +2217,17 @@ void SlopSyncHubService::publishTelemetry() {
             // ruling. After that tag this same growth would need a new
             // channel id.
             //
-            // The offsets below are NOT independent constants: the per-kind
-            // loop ends at 14 + SM_ANOM_KINDS*4 and everything after starts
-            // there. Byte map (SM_ANOM_KINDS = 10):
+            // The offsets below are NOT independent constants and are no longer
+            // written as if they were: everything after the per-kind block is
+            // measured from kAnomEnd, so a new engine kind moves the whole tail
+            // by itself. Byte map (SM_ANOM_KINDS = 11):
             //   0 plans, 4 failures, 8 anomalies, 12 mode, 13 plan_kind,
-            //   14..53 the ten u32 per-kind counters,
-            //   54 plan_us_last, 58 plan_us_max, 62 plan_us_avg,
-            //   66 sync_bundles, 70 sync_samples, 74 sync_enqueued,
-            //   78 sync_dropped, 82 sync_seg_bundles, 86 reset_gen (u16) = 88.
-            std::array<std::byte, 88> buf{};
+            //   14..57 the eleven u32 per-kind counters,
+            //   58 plan_us_last, 62 plan_us_max, 66 plan_us_avg,
+            //   70 sync_bundles, 74 sync_samples, 78 sync_enqueued,
+            //   82 sync_dropped, 86 sync_seg_bundles, 90 reset_gen (u16) = 92.
+            constexpr size_t kAnomEnd = 14 + size_t(SystemState::SM_ANOM_KINDS) * 4;
+            std::array<std::byte, kAnomEnd + 34> buf{};
             std::span<std::byte> s(buf);
             slopsync::putU32(s.subspan(0, 4), _state.sm_plans);
             slopsync::putU32(s.subspan(4, 4), _state.sm_failures);
@@ -2243,15 +2240,15 @@ void SlopSyncHubService::publishTelemetry() {
             // moves both together or neither.
             for (uint8_t k = 0; k < SystemState::SM_ANOM_KINDS; ++k)
                 slopsync::putU32(s.subspan(14 + size_t(k) * 4, 4), _state.sm_anom_kind[k]);
-            slopsync::putU32(s.subspan(54, 4), _state.sm_plan_us_last);
-            slopsync::putU32(s.subspan(58, 4), _state.sm_plan_us_max);
-            slopsync::putF32(s.subspan(62, 4), _state.sm_plan_us_avg);
-            slopsync::putU32(s.subspan(66, 4), _state.sm_sync_bundles);
-            slopsync::putU32(s.subspan(70, 4), _state.sm_sync_samples);
-            slopsync::putU32(s.subspan(74, 4), _state.sm_sync_enqueued);
-            slopsync::putU32(s.subspan(78, 4), _state.sm_sync_dropped);
-            slopsync::putU32(s.subspan(82, 4), _state.sm_sync_seg_bundles);
-            slopsync::putU16(s.subspan(86, 2), _state.sm_reset_gen);
+            slopsync::putU32(s.subspan(kAnomEnd +  0, 4), _state.sm_plan_us_last);
+            slopsync::putU32(s.subspan(kAnomEnd +  4, 4), _state.sm_plan_us_max);
+            slopsync::putF32(s.subspan(kAnomEnd +  8, 4), _state.sm_plan_us_avg);
+            slopsync::putU32(s.subspan(kAnomEnd + 12, 4), _state.sm_sync_bundles);
+            slopsync::putU32(s.subspan(kAnomEnd + 16, 4), _state.sm_sync_samples);
+            slopsync::putU32(s.subspan(kAnomEnd + 20, 4), _state.sm_sync_enqueued);
+            slopsync::putU32(s.subspan(kAnomEnd + 24, 4), _state.sm_sync_dropped);
+            slopsync::putU32(s.subspan(kAnomEnd + 28, 4), _state.sm_sync_seg_bundles);
+            slopsync::putU16(s.subspan(kAnomEnd + 32, 2), _state.sm_reset_gen);
             _hub.publishState(ch::motion_diag, s);
         }
 

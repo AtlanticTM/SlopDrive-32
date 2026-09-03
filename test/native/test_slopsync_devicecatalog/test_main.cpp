@@ -117,6 +117,12 @@ bool isRegisteredRole(std::string_view r) {
 // unreachable from the machine and selecting it fell through the boot map to
 // whatever the engine default happened to be. Same shape as the fw 2.1.49 bug
 // the boot map in main.cpp carries a comment about.
+// MOVED 2026-09-03 (17 A6 F6 02 01 8C 52 6D -> 77 3B 00 2C EC DB 9B 1F):
+// sd-6b2.8 deleted the four infeasible policies and their knobs, so
+// 0x1120/0x1122 lost centering, centering_gain, infeasible_margin and
+// reshape_steps, the infeasible_policy select lost four options, and
+// 0x1111 gained anom_dwell_zeroed. A device catalog etag change is never a
+// protocol break: clients re-fetch on mismatch by design.
 // MOVED 2026-09-02 (AE D3 61 91 9E 92 C9 FE -> 17 A6 F6 02 01 8C 52 6D):
 // commit 837069f (cold-start governor, Stretch default, bare-point
 // synthesis knobs) changed the catalog without re-pinning here, a C-3
@@ -136,7 +142,7 @@ TEST_CASE("device catalog: etag pinned — accidental-wire-change tripwire") {
     hex.pop_back();
     // Moved deliberately by the drive-tune/drive-set pair (0x1130 / 0x3130),
     // then again by drive-tune's two readback fields.
-    CHECK(hex == "17 A6 F6 02 01 8C 52 6D");
+    CHECK(hex == "77 3B 00 2C EC DB 9B 1F");
 }
 
 // ---- Baseline conformance ---------------------------------------------------
@@ -436,7 +442,7 @@ TEST_CASE("device catalog: published layout sizes match the firmware's encoders"
         {slopdrive::ch::odometer,       20},  // + energy_wh, session_ms (M5a)
         {slopdrive::ch::plan_strip,     18},
         {slopdrive::ch::power,           8},  // 6 without a power monitor
-        {slopdrive::ch::motion_diag,    88},   // + anom_waveform_smoothed (slopmotion 0.8.0)
+        {slopdrive::ch::motion_diag,    92},   // + anom_dwell_zeroed (sd-6b2.1)
         {slopsync::channels::hub_status, 14}, // + log_dropped (M5b, RFC-017 §9.4)
     };
     for (auto& x : expect) {
@@ -528,7 +534,11 @@ TEST_CASE("device catalog: every setting_key resolves in its declared settingCha
     // 83 -> 84: `accel_reg` on drive-tune (0x1130), written through drive-set
     // (0x3130). The AIM drive's own ramp register, the first setting on this
     // machine that configures the DRIVE rather than the planner.
-    CHECK(annotated == 84);
+    // 84 -> 80 (sd-6b2.8): the four knobs of the deleted infeasible policies --
+    // centering, centering_gain, infeasible_margin, reshape_steps -- are gone
+    // from 0x1120/0x1122 and their setting keys (4, 5, 15, 19) are RELEASED,
+    // never reused.
+    CHECK(annotated == 80);
 }
 
 // ---- RFC-009 ----------------------------------------------------------------

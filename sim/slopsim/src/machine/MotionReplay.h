@@ -102,11 +102,11 @@ struct ReplayConfig {
     // SIMULATION ALWAYS STARTS AT THE RECORDING'S FIRST COMMAND, never at emit_t0,
     // and that is not laziness — it is the only correct choice. Most engine state
     // decays within a segment (each plan is rebuilt from actual state), but the
-    // CENTERING DEBT does not: Config::wave_centering accumulates a running
-    // shortfall across strokes, so a window entered mid-take inherits a debt that
-    // a cold start would not have. Seeking into the middle would silently render
-    // a DIFFERENT centering behavior than the machine's, which is precisely the
-    // class of lie this whole tool exists to expose.
+    // handoff series and the stream estimator do not: a window entered mid-take
+    // would carry boundary conditions and a cadence estimate a cold start would
+    // not have. Seeking into the middle would silently render DIFFERENT motion
+    // than the machine's, which is precisely the class of lie this whole tool
+    // exists to expose.
     // <0 on either bound = "no limit on that side".
     double emit_t0 = -1.0, emit_t1 = -1.0;
 };
@@ -130,7 +130,8 @@ struct ReplayMetrics {
     // curve (pos vs the raw line). THIS is the number a curve/policy A/B moves.
     float sender_rms_mm = 0, sender_max_mm = 0;
     // DC offset of achieved vs commanded position — the "band walked off center"
-    // measurement the centering debt exists to hold at zero.
+    // measurement. A shortened stroke is midpoint-anchored by construction (the
+    // search's own geometry), so a nonzero value here is a real asymmetry.
     float band_center_err_mm = 0;
     float pos_min_mm = 0, pos_max_mm = 0;   // achieved travel
     float cmd_min_mm = 0, cmd_max_mm = 0;   // commanded travel, same window

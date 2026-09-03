@@ -650,17 +650,24 @@ static void streamSamplerTask(void* /*param*/) {
             tune.chase_look      = g_state.sm_tune_chase_look;
             tune.dense_us        = g_state.sm_tune_dense_us;
             tune.infeas_policy   = g_state.sm_tune_infeas_policy;
-            tune.infeas_margin   = g_state.sm_tune_infeas_margin;
             tune.infeas_blend    = g_state.sm_tune_infeas_blend;
-            tune.reshape_steps   = g_state.sm_tune_reshape_steps;
             tune.smooth_budget   = g_state.sm_tune_smooth_budget;
             tune.amp_budget      = g_state.sm_tune_amp_budget;
             tune.blend_steps     = g_state.sm_tune_blend_steps;
             tune.curve_policy    = g_state.sm_tune_curve_policy;
-            tune.centering       = g_state.sm_tune_centering;
-            tune.centering_gain  = g_state.sm_tune_centering_gain;
             tune.handoff_k       = g_state.sm_tune_handoff_k;
             tune.settle_grace_us = g_state.sm_tune_settle_grace_us;
+
+            // A stored ordinal from a policy deleted 2026-09-02 runs as Blend
+            // (see EngineConfigMap). Said ONCE, on the tick that first sees it:
+            // the operator's stored choice no longer exists, and a silent remap
+            // is the kind of thing that gets rediscovered on hardware.
+            static bool s_retired_said = false;
+            if (!s_retired_said && tune.infeas_policy >= 2) {
+                s_retired_said = true;
+                SLOGW("motion", "infeasible_policy %u is retired; running blend",
+                      (unsigned)tune.infeas_policy);
+            }
 
             static slopdrive::EngineTuning s_pushed{};
             static bool s_pushed_valid = false;

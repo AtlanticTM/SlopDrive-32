@@ -912,14 +912,12 @@ void MachineSim::publishTelemetry(uint32_t nowMs) {
             {
                 const slopmotion::Config& cfg = _engine.config();
 
-                std::array<std::byte, 18> lim{};
+                std::array<std::byte, 13> lim{};
                 std::span<std::byte> l(lim);
                 slopsync::putF32(l.subspan(0, 4),  _jmax_norm);
                 slopsync::putF32(l.subspan(4, 4),  _vmax_norm);
                 slopsync::putF32(l.subspan(8, 4),  _amax_norm);
-                slopsync::putU8 (l.subspan(12, 1), cfg.wave_centering ? 1u : 0u);
-                slopsync::putF32(l.subspan(13, 4), cfg.wave_centering_gain);
-                slopsync::putU8 (l.subspan(17, 1), 0x1Fu);
+                slopsync::putU8 (l.subspan(12, 1), 0x07u);
                 if (!_smLimEverSent || lim != _lastSmLim) {
                     _smLimEverSent = true;
                     _lastSmLim = lim;
@@ -942,17 +940,20 @@ void MachineSim::publishTelemetry(uint32_t nowMs) {
                     _hub.publishState(ch::sm_chase, h);
                 }
 
-                std::array<std::byte, 21> wav{};
+                std::array<std::byte, 16> wav{};
                 std::span<std::byte> w(wav);
                 slopsync::putU8 (w.subspan(0, 1),  uint8_t(cfg.curve_policy));
-                slopsync::putU8 (w.subspan(1, 1),  uint8_t(cfg.infeasible_policy));
-                slopsync::putF32(w.subspan(2, 4),  cfg.infeasible_scale_margin);
-                slopsync::putF32(w.subspan(6, 4),  cfg.infeasible_smooth_budget);
-                slopsync::putF32(w.subspan(10, 4), cfg.infeasible_amplitude_budget);
-                slopsync::putU8 (w.subspan(14, 1), cfg.infeasible_blend_steps);
-                slopsync::putU8 (w.subspan(15, 1), cfg.infeasible_reshape_steps);
-                slopsync::putU32(w.subspan(16, 4), cfg.settle_grace_us);
-                slopsync::putU8 (w.subspan(20, 1), 0xFFu);
+                // The stored ORDINAL, which the select indexes: 0 stretch,
+                // 1 blend. The engine's enum is sparse (Blend = 5) and the map
+                // between them is the host's, never the wire's.
+                slopsync::putU8 (w.subspan(1, 1),
+                                 cfg.infeasible_policy == slopmotion::InfeasiblePolicy::Stretch
+                                     ? 0u : 1u);
+                slopsync::putF32(w.subspan(2, 4),  cfg.infeasible_smooth_budget);
+                slopsync::putF32(w.subspan(6, 4),  cfg.infeasible_amplitude_budget);
+                slopsync::putU8 (w.subspan(10, 1), cfg.infeasible_blend_steps);
+                slopsync::putU32(w.subspan(11, 4), cfg.settle_grace_us);
+                slopsync::putU8 (w.subspan(15, 1), 0x3Fu);
                 if (!_smWavEverSent || wav != _lastSmWav) {
                     _smWavEverSent = true;
                     _lastSmWav = wav;
@@ -1049,7 +1050,10 @@ void MachineSim::publishTelemetry(uint32_t nowMs) {
         // ---- 0x1111 slopmotion-diag — the /api/slopmotion stats+sync blocks
         {
             const slopmotion::Snapshot d = _engine.snapshot(_clock.nowUs64());
-            std::array<std::byte, 88> buf{};   // slopmotion 0.8.0: + waveform_smoothed
+            // Tail offsets ride the per-kind block; a new engine kind moves
+            // them by itself (same shape as the firmware's encoder).
+            constexpr size_t kAnomEnd = 14 + kSmAnomalyKinds * 4;
+            std::array<std::byte, kAnomEnd + 34> buf{};
             std::span<std::byte> s(buf);
             slopsync::putU32(s.subspan(0, 4), d.plans);
             slopsync::putU32(s.subspan(4, 4), d.failures);
@@ -1060,15 +1064,15 @@ void MachineSim::publishTelemetry(uint32_t nowMs) {
                 slopsync::putU32(s.subspan(14 + k * 4, 4), _anom_kind[k]);
             // No honest host analog of the xtensa plan-time bench; zero rather
             // than invent a number an operator might compare.
-            slopsync::putU32(s.subspan(54, 4), 0);
-            slopsync::putU32(s.subspan(58, 4), 0);
-            slopsync::putF32(s.subspan(62, 4), 0.0f);
-            slopsync::putU32(s.subspan(66, 4), _sync_bundles);
-            slopsync::putU32(s.subspan(70, 4), _sync_samples);
-            slopsync::putU32(s.subspan(74, 4), _sync_enqueued);
-            slopsync::putU32(s.subspan(78, 4), _sync_dropped);
-            slopsync::putU32(s.subspan(82, 4), _sync_seg_bundles);
-            slopsync::putU16(s.subspan(86, 2), _reset_gen);
+            slopsync::putU32(s.subspan(kAnomEnd +  0, 4), 0);
+            slopsync::putU32(s.subspan(kAnomEnd +  4, 4), 0);
+            slopsync::putF32(s.subspan(kAnomEnd +  8, 4), 0.0f);
+            slopsync::putU32(s.subspan(kAnomEnd + 12, 4), _sync_bundles);
+            slopsync::putU32(s.subspan(kAnomEnd + 16, 4), _sync_samples);
+            slopsync::putU32(s.subspan(kAnomEnd + 20, 4), _sync_enqueued);
+            slopsync::putU32(s.subspan(kAnomEnd + 24, 4), _sync_dropped);
+            slopsync::putU32(s.subspan(kAnomEnd + 28, 4), _sync_seg_bundles);
+            slopsync::putU16(s.subspan(kAnomEnd + 32, 2), _reset_gen);
             _hub.publishState(ch::motion_diag, s);
         }
     }
@@ -1439,16 +1443,6 @@ slopsync::Result<IntentValueMap, NackCode> MachineSim::applyIntent(uint16_t chan
             setNorm(2, 0.0f, 20.0f,      _vmax_norm);
             setNorm(3, 0.0f, 500.0f,     _amax_norm);
 
-            if (const auto* f = findField(requested, 4)) {   // centering
-                cfg.wave_centering = fieldU64(f, cfg.wave_centering ? 1 : 0) != 0;
-                applied.fields[applied.count++] = {4, IntentValue::ofU64(cfg.wave_centering ? 1u : 0u)};
-                any = true; touchedCfg = true;
-            }
-            if (const auto* f = findField(requested, 5)) {   // centering_gain
-                cfg.wave_centering_gain = clampf(fieldF32(f, cfg.wave_centering_gain), 0.0f, 1.0f);
-                applied.fields[applied.count++] = {5, IntentValue::ofF32(cfg.wave_centering_gain)};
-                any = true; touchedCfg = true;
-            }
             if (const auto* f = findField(requested, 6)) {   // chase_ff
                 cfg.chase_feedforward = fieldU64(f, cfg.chase_feedforward ? 1 : 0) != 0;
                 applied.fields[applied.count++] = {6, IntentValue::ofU64(cfg.chase_feedforward ? 1u : 0u)};
@@ -1494,14 +1488,10 @@ slopsync::Result<IntentValueMap, NackCode> MachineSim::applyIntent(uint16_t chan
             }
             if (const auto* f = findField(requested, 14)) {  // infeasible_policy
                 uint64_t v = fieldU64(f, uint64_t(cfg.infeasible_policy));
-                if (v > slopmotion::kInfeasiblePolicyMax) v = slopmotion::kInfeasiblePolicyMax;
-                cfg.infeasible_policy = slopmotion::InfeasiblePolicy(v);
+                if (v > 1) v = 1;
+                cfg.infeasible_policy = v == 0 ? slopmotion::InfeasiblePolicy::Stretch
+                                               : slopmotion::InfeasiblePolicy::Blend;
                 applied.fields[applied.count++] = {14, IntentValue::ofU64(v)};
-                any = true; touchedCfg = true;
-            }
-            if (const auto* f = findField(requested, 15)) {  // infeasible_margin
-                cfg.infeasible_scale_margin = clampf(fieldF32(f, cfg.infeasible_scale_margin), 0.5f, 1.0f);
-                applied.fields[applied.count++] = {15, IntentValue::ofF32(cfg.infeasible_scale_margin)};
                 any = true; touchedCfg = true;
             }
             if (const auto* f = findField(requested, 16)) {  // smooth_budget
@@ -1520,13 +1510,6 @@ slopsync::Result<IntentValueMap, NackCode> MachineSim::applyIntent(uint16_t chan
                 if (v > 10) v = 10;
                 cfg.infeasible_blend_steps = uint8_t(v);
                 applied.fields[applied.count++] = {18, IntentValue::ofU64(v)};
-                any = true; touchedCfg = true;
-            }
-            if (const auto* f = findField(requested, 19)) {  // reshape_steps
-                uint64_t v = fieldU64(f, cfg.infeasible_reshape_steps);
-                if (v > 8) v = 8;
-                cfg.infeasible_reshape_steps = uint8_t(v);
-                applied.fields[applied.count++] = {19, IntentValue::ofU64(v)};
                 any = true; touchedCfg = true;
             }
             if (const auto* f = findField(requested, 20)) {  // settle_grace_ms (wire ms, engine us)
@@ -2009,20 +1992,6 @@ slopmotion::InfeasiblePolicy MachineSim::uiSetInfeasiblePolicy(slopmotion::Infea
     return _engine.config().infeasible_policy;
 }
 
-float MachineSim::uiSetInfeasibleMargin(float margin) {
-    slopmotion::Config c = _engine.config();
-    c.infeasible_scale_margin = clampf(margin, 0.50f, 1.00f);
-    _engine.setConfig(c);
-    return _engine.config().infeasible_scale_margin;
-}
-
-uint8_t MachineSim::uiSetReshapeSteps(uint8_t steps) {
-    slopmotion::Config c = _engine.config();
-    c.infeasible_reshape_steps = steps > 8 ? uint8_t(8) : steps;
-    _engine.setConfig(c);
-    return _engine.config().infeasible_reshape_steps;
-}
-
 slopmotion::CurvePolicy MachineSim::uiSetCurvePolicy(slopmotion::CurvePolicy p) {
     slopmotion::Config c = _engine.config();
     c.curve_policy = p;
@@ -2074,22 +2043,6 @@ bool MachineSim::uiSetChaseAimAccelExtrap(bool on) {
     c.chase_aim_accel_extrap = on;
     _engine.setConfig(c);
     return _engine.config().chase_aim_accel_extrap;
-}
-
-bool MachineSim::uiSetWaveCentering(bool on) {
-    slopmotion::Config c = _engine.config();
-    c.wave_centering = on;
-    _engine.setConfig(c);
-    return _engine.config().wave_centering;
-}
-
-float MachineSim::uiSetWaveCenteringGain(float gain) {
-    // The engine clamps on USE; clamping at the seam too keeps the readouts and
-    // the /api/slopmotion echo showing the value that is actually in force.
-    slopmotion::Config c = _engine.config();
-    c.wave_centering_gain = clampf(gain, 0.0f, 1.0f);
-    _engine.setConfig(c);
-    return _engine.config().wave_centering_gain;
 }
 
 std::vector<float> MachineSim::copyTraceSince(float since_s, float& max_rail, float& win_min,

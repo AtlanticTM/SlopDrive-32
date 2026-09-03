@@ -66,17 +66,10 @@ std::string nameOf(const char* const (&tbl)[N], unsigned i) {
 
 // Canonical wire names for slopmotion::InfeasiblePolicy — the SAME strings the
 // device's /api/slopmotion echoes, so a TUI readout and an API response say the
-// same word about the same state. FIVE policies since slopmotion 0.8.0 — the
-// two budgeted ones subsume scale/reshape (which are exactly themselves with
-// the budget pinned at 100 %), kept alongside so the old behavior stays
-// A/B-able against the new.
+// same word about the same state.
 const char* kInfeasPolicyName(slopmotion::InfeasiblePolicy p) {
     switch (p) {
         case slopmotion::InfeasiblePolicy::Stretch: return "stretch";
-        case slopmotion::InfeasiblePolicy::Scale:   return "scale";
-        case slopmotion::InfeasiblePolicy::Reshape: return "reshape";
-        case slopmotion::InfeasiblePolicy::PrioritizeAmplitude: return "prio-amplitude";
-        case slopmotion::InfeasiblePolicy::PrioritizeSmooth:    return "prio-smooth";
         case slopmotion::InfeasiblePolicy::Blend:   return "blend";
     }
     return "?";
@@ -98,7 +91,7 @@ const char* kCurvePolicyName(slopmotion::CurvePolicy p) {
 std::string fmt(const char* f, ...) {
     // 512: the `motion` readout is one long line of engine config and the
     // middot separators are 3 bytes each in UTF-8 — 160 truncated it SILENTLY
-    // the moment reshape-steps + settle-grace joined the line.
+    // the moment settle-grace joined the line.
     char buf[512];
     va_list ap;
     va_start(ap, f);
@@ -272,36 +265,22 @@ int runMachineScreen(MachineSim& sim, SessionLog& log, uint16_t wsPort, uint16_t
                         : fmt("measured stroke cleared -> rail %.1f mm is the ceiling",
                               double(sim.effectiveCeilingMm()));
          }},
-        {"motion.policy", "<stretch|scale|reshape|amp|smooth>", "infeasible segment: what gives — shape, range, or timing",
+        {"motion.policy", "<stretch|blend>", "infeasible segment: what gives — shape and range, or timing",
          [&](auto& a) {
-             static const char* kUsage =
-                 "usage: motion.policy <stretch|scale|reshape|amp|smooth>  "
-                 "(amp = prioritize amplitude, smooth = prioritize smooth)";
+             static const char* kUsage = "usage: motion.policy <stretch|blend>";
              if (a.empty()) return std::string(kUsage);
              const std::string v = lower(a[0]);
              slopmotion::InfeasiblePolicy want;
              if      (v == "stretch") want = slopmotion::InfeasiblePolicy::Stretch;
-             else if (v == "scale")   want = slopmotion::InfeasiblePolicy::Scale;
-             else if (v == "reshape") want = slopmotion::InfeasiblePolicy::Reshape;
-             else if (v == "amp" || v == "prio-amplitude")
-                 want = slopmotion::InfeasiblePolicy::PrioritizeAmplitude;
-             else if (v == "smooth" || v == "prio-smooth")
-                 want = slopmotion::InfeasiblePolicy::PrioritizeSmooth;
+             else if (v == "blend")   want = slopmotion::InfeasiblePolicy::Blend;
              else return std::string(kUsage);
-             switch (sim.uiSetInfeasiblePolicy(want)) {
-                 case slopmotion::InfeasiblePolicy::Scale:
-                     return std::string("infeasible policy -> scale (keep the deadline + the spline, shrink the stroke)");
-                 case slopmotion::InfeasiblePolicy::Reshape:
-                     return std::string("infeasible policy -> reshape (keep the deadline + the range, give up the spline shape)");
-                 case slopmotion::InfeasiblePolicy::PrioritizeAmplitude:
-                     return fmt("infeasible policy -> prio-amplitude (spend smooth to %.0f%%, then amplitude)",
-                                double(sim.engineConfig().infeasible_smooth_budget) * 100.0);
-                 case slopmotion::InfeasiblePolicy::PrioritizeSmooth:
-                     return fmt("infeasible policy -> prio-smooth (spend amplitude to %.0f%%, then smooth)",
-                                double(sim.engineConfig().infeasible_amplitude_budget) * 100.0);
-                 default:
-                     return std::string("infeasible policy -> stretch (keep the stroke, overrun the deadline)");
+             if (sim.uiSetInfeasiblePolicy(want) == slopmotion::InfeasiblePolicy::Blend) {
+                 return fmt("infeasible policy -> blend (keep the deadline; spend shape to %.0f%% "
+                            "and amplitude to %.0f%%)",
+                            double(sim.engineConfig().infeasible_smooth_budget) * 100.0,
+                            double(sim.engineConfig().infeasible_amplitude_budget) * 100.0);
              }
+             return std::string("infeasible policy -> stretch (keep the stroke, overrun the deadline)");
          }},
         {"motion.curve", "<follow|c1|c2>", "waveform curve family: c1 reproduces the script's own cubic spline",
          [&](auto& a) {
@@ -342,16 +321,6 @@ int runMachineScreen(MachineSim& sim, SessionLog& log, uint16_t wsPort, uint16_t
              return fmt("blend steps -> %u (alpha resolved to 1/%u of the budget)",
                         unsigned(applied), unsigned(1u << applied));
          }},
-        {"motion.margin", "<0.5-1.0>", "stroke-scale margin under the scale policy",
-         [&](auto& a) { return fmt("infeasible margin -> %.2f", double(sim.uiSetInfeasibleMargin(num(a, 0, 0.92f)))); }},
-        {"motion.reshapesteps", "<0-8>", "reshape bisection depth (plan-time budget; 0 = no bisection)",
-         [&](auto& a) {
-             const float raw = num(a, 0, 6.0f);
-             const uint8_t applied = sim.uiSetReshapeSteps(
-                 uint8_t(raw < 0.0f ? 0.0f : (raw > 255.0f ? 255.0f : raw)));
-             return fmt("reshape steps -> %u (stroke resolved to 1/%u of the commanded amplitude)",
-                        unsigned(applied), unsigned(1u << applied));
-         }},
         {"motion.settlegrace", "<ms>", "grace an expired plan may hold before braking to rest (0 = pre-0.4)",
          [&](auto& a) {
              const float applied = sim.uiSetSettleGraceMs(num(a, 0, 30.0f));
@@ -375,24 +344,6 @@ int runMachineScreen(MachineSim& sim, SessionLog& log, uint16_t wsPort, uint16_t
              return sim.uiSetChaseAimAccelExtrap(v == "on")
                         ? std::string("chase aim accel-extrap -> on")
                         : std::string("chase aim accel-extrap -> off");
-         }},
-        {"motion.centering", "<on|off>", "midpoint-anchored stroke shortening when the machine can't reach",
-         [&](auto& a) {
-             if (a.empty()) return std::string("usage: motion.centering <on|off>");
-             const std::string v = lower(a[0]);
-             if (v != "on" && v != "off") return std::string("usage: motion.centering <on|off>");
-             return sim.uiSetWaveCentering(v == "on")
-                        ? std::string("waveform centering -> on (degraded band stays symmetric "
-                                      "about the commanded midpoint; reported as waveform_centered)")
-                        : std::string("waveform centering -> off (slopmotion 0.4.0 contract: the "
-                                      "band is free to walk off one end)");
-         }},
-        {"motion.centeringgain", "<0-1>", "centering strength (1 = full; a FEEL dial, not monotone)",
-         [&](auto& a) {
-             const float applied = sim.uiSetWaveCenteringGain(num(a, 0, 1.0f));
-             return applied > 0.0f
-                        ? fmt("centering gain -> %.2f", double(applied))
-                        : std::string("centering gain -> 0.00 (same effect as motion.centering off)");
          }},
         {"pattern", "<0|1|2|off>", "run a built-in pattern / stop",
          [&](auto& a) {
@@ -529,7 +480,7 @@ int runMachineScreen(MachineSim& sim, SessionLog& log, uint16_t wsPort, uint16_t
 
     // Palette column geometry, derived from the table itself so a longer command
     // can never silently clip the column again (motion.smoothbudget /
-    // motion.centeringgain / the 34-char motion.policy hint all landed after the
+    // the 34-char motion.policy hint landed after the
     // old fixed width was chosen).
     size_t nameW = 0, hintW = 0;
     for (const auto& c : commands) {
@@ -776,7 +727,6 @@ int runMachineScreen(MachineSim& sim, SessionLog& log, uint16_t wsPort, uint16_t
             kv("smooth bud", fmt("%.2f", double(c.infeasible_smooth_budget))),
             kv("amp bud", fmt("%.2f", double(c.infeasible_amplitude_budget))),
             kv("blend steps", fmt("%u", unsigned(c.infeasible_blend_steps))),
-            kv("reshape st", fmt("%u", unsigned(c.infeasible_reshape_steps))),
             // Arbiter-side, not slopmotion::Config — but this is the panel the
             // operator reads before a take, and a safety rule that is off needs
             // to be visible there, loudly.
@@ -786,10 +736,6 @@ int runMachineScreen(MachineSim& sim, SessionLog& log, uint16_t wsPort, uint16_t
                sim.safetyFilter() ? Color(Color::Default) : Color(Color::Red)),
             kv("gentle acc", sim.gentleAccelOutside() ? "ON (old rule)" : "off",
                sim.gentleAccelOutside() ? Color(Color::Red) : Color(Color::Default)),
-            kv("scale margin", fmt("%.2f", double(c.infeasible_scale_margin))),
-            kv("soften", fmt("%s  floor %.3f", onoff(c.infeasible_soften),
-                             double(c.infeasible_soften_floor))),
-            kv("soften steps", fmt("%u", unsigned(c.infeasible_soften_steps))),
             // 0 is the documented "guard disabled" value, not a small factor —
             // say so rather than printing a bare 0.00 that reads like a setting.
             kv("handoff k", c.handoff_chord_factor > 0.0f
@@ -836,9 +782,6 @@ int runMachineScreen(MachineSim& sim, SessionLog& log, uint16_t wsPort, uint16_t
             kv("dense if <=", fmt("%.0f ms", double(c.chase_dense_us) / 1000.0)),
             kv("stale after", fmt("%.0f ms", double(c.chase_stale_us) / 1000.0)),
             text(""),
-            head("centering"),
-            kv("wave center", onoff(c.wave_centering)),
-            kv("center gain", fmt("%.2f", double(c.wave_centering_gain))),
         };
 
         // Column widths are the longest label (13) + the longest value each

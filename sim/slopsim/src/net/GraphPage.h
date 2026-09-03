@@ -847,11 +847,11 @@ window.__growForBench=__growForBench;
 //
 // WHY THE WHOLE SCRIPT RE-RUNS ON EVERY EDIT rather than seeking to the visible
 // region: engine state is not memoryless. Most of it decays within a segment
-// (each plan is rebuilt from actual state), but the CENTERING DEBT accumulates
-// across strokes, so a window entered mid-take would render a centering
-// behavior the machine would never have had. Measured at ~35000x realtime, so
-// simulating from the top and emitting only the window costs nothing worth
-// saving.
+// (each plan is rebuilt from actual state), but the handoff series and the
+// stream estimator carry across, so a window entered mid-take would render
+// boundary conditions the machine would never have had. Measured at ~35000x
+// realtime, so simulating from the top and emitting only the window costs
+// nothing worth saving.
 //
 // TWO KINDS OF THING ON THE SHELF, and the difference is load-bearing:
 //   recording - a wire log. REPLAYS: re-runs under whatever the engine does now.
@@ -886,29 +886,19 @@ const TUNE = [
   {k:"client_curve", lab:"client declared (follow only)", t:"sel",
    o:["recording","unspecified","c1","c2","step"], reach:"bench"},
   {k:"policy", lab:"infeasible policy", t:"sel",
-   o:["blend","reshape","scale","stretch","prio-amplitude","prio-smooth"], reach:"wire"},
+   o:["blend","stretch"], reach:"wire"},
   // THE one slider: what an infeasible segment gives up. 0 = surrender reach and
   // keep the sender's shape, 1 = keep reach and flatten toward the chord. Only
-  // bites under policy `blend`; the other four spend one axis to exhaustion.
+  // bites under policy `blend`.
   {k:"blend", lab:"amplitude ↔ shape (blend only)", t:"rng", min:0, max:1, step:0.025, reach:"wire"},
-  {k:"scale_margin", lab:"scale margin", t:"num", min:0.5, max:1, step:0.01, reach:"wire"},
-  {k:"reshape_steps", lab:"reshape steps", t:"num", min:0, max:8, step:1, reach:"wire"},
   {k:"smooth_budget", lab:"smooth budget", t:"rng", min:0, max:1, step:0.01, reach:"wire"},
   {k:"amplitude_budget", lab:"amplitude budget", t:"rng", min:0, max:1, step:0.01, reach:"wire"},
   {k:"blend_steps", lab:"blend steps", t:"num", min:1, max:10, step:1, reach:"wire"}
  ]],
- ["Sharpness", [
-  {k:"soften", lab:"soften", t:"chk", reach:"lab"},
-  {k:"soften_floor", lab:"soften floor", t:"num", min:0.001, max:1, step:0.001, reach:"lab"},
-  {k:"soften_steps", lab:"soften steps", t:"num", min:0, max:10, step:1, reach:"lab"}
- ]],
- ["Handoff &amp; centering", [
+ ["Handoff", [
   {k:"handoff_chord", lab:"handoff chord k", t:"num", min:0, max:8, step:0.1, reach:"lab"},
   {k:"overshoot_guard", lab:"overshoot guard (0=off)", t:"num", min:0, max:20, step:0.1, reach:"lab"},
   {k:"chord_slack", lab:"overshoot chord slack", t:"num", min:0, max:5, step:0.05, reach:"lab"},
-  {k:"bridge_ratio", lab:"bad-move bridge ratio (0=off)", t:"num", min:0, max:50, step:0.5, reach:"lab"},
-  {k:"wave_centering", lab:"centering", t:"chk", reach:"wire"},
-  {k:"wave_centering_gain", lab:"centering gain", t:"rng", min:0, max:1, step:0.01, reach:"wire"},
   {k:"settle_grace_ms", lab:"settle grace ms", t:"num", min:0, max:200, step:1, reach:"wire"}
  ]],
  ["Chase", [
@@ -962,7 +952,7 @@ function buildPanel(){
         + 'shelf: <span id="shelfdir"></span></div>'
         + '<div class="bar"><button id="reload">refresh</button>'
         + '<button id="scope" title="emit and measure only the visible range. '
-        + 'The whole script is always SIMULATED - see the centering-debt note.">scope: all</button></div>'
+        + 'The whole script is always SIMULATED - see the re-run note.">scope: all</button></div>'
         + '<h3>baseline</h3><select id="basesel" class="wide"></select>'
         + '<div class="hint">a saved run drawn under the live line, so you can see '
         + 'what a change did rather than only where it ended up.</div>'
@@ -1023,8 +1013,8 @@ function applyVals(){
 // documented defaults, and the panel says which is which via the tag rather
 // than pretending the machine reported them.
 async function seedFromSim(){
-  const d = {soften:1, soften_floor:0.02, soften_steps:6, handoff_chord:1.5,
-             chase_stale_ms:400, p0:-1, tail_s:1, overshoot_guard:1, chord_slack:0.25, bridge_ratio:0,
+  const d = {handoff_chord:1.5,
+             chase_stale_ms:400, p0:-1, tail_s:1, overshoot_guard:1, chord_slack:0.25,
              client_curve:"recording", blend:0.5,
              // 0 = derive from the window, which is what the machine does.
              vmax:0, amax:0, jmax:0, input_jerk:2000000,
@@ -1036,13 +1026,11 @@ async function seedFromSim(){
     const t = j.tuning || {};
     Object.assign(d, {
       curve:t.curve_policy, policy:t.infeasible_policy,
-      scale_margin:t.infeasible_scale_margin, reshape_steps:t.reshape_steps,
       smooth_budget:t.smooth_budget, amplitude_budget:t.amplitude_budget,
       blend_steps:t.blend_steps, settle_grace_ms:t.settle_grace_ms,
       chase_ff:t.chase_ff?1:0, chase_gain:t.chase_gain,
       chase_lookahead:t.chase_lookahead, chase_accel_ff:t.chase_accel_ff?1:0,
       chase_aim_extrap:t.chase_aim_accel_extrap?1:0, chase_dense_ms:t.chase_dense_ms,
-      wave_centering:t.wave_centering?1:0, wave_centering_gain:t.wave_centering_gain,
       matched:(j.simstats&&j.simstats.stream_speed_mode)===1?1:0});
   }catch(e){ /* sim offline: the documented defaults above still give a panel */ }
   // The ARBITER GEOMETRY comes from the machine itself (/api/recordings carries

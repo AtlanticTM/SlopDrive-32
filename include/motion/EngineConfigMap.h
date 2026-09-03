@@ -42,16 +42,12 @@ struct EngineTuning {
     float    chase_gain         = 0.9f;
     float    chase_look         = 3.0f;
     uint32_t dense_us           = 60000;
-    uint8_t  infeas_policy      = 0;      // slopmotion::InfeasiblePolicy ordinal
-    float    infeas_margin      = 0.92f;
+    uint8_t  infeas_policy      = 0;      // stored ordinal, see the map below
     float    infeas_blend       = 0.5f;
-    uint8_t  reshape_steps      = 6;
     float    smooth_budget      = 0.5f;
     float    amp_budget         = 0.5f;
     uint8_t  blend_steps        = 6;
     uint8_t  curve_policy       = 0;      // slopmotion::CurvePolicy ordinal
-    bool     centering          = true;
-    float    centering_gain     = 1.0f;
     float    handoff_k          = 1.5f;
     uint32_t settle_grace_us    = 30000;
 
@@ -65,8 +61,7 @@ inline slopmotion::Config buildEngineConfig(const EngineTuning& t) {
     // these, so the engine's own value is the policy. Adding a knob means
     // moving a name off this list, never writing the field somewhere else:
     //   chase_jerk_scale, chase_jerk_floor, chase_stale_us,
-    //   overshoot_guard, overshoot_chord_slack, infeasible_soften,
-    //   infeasible_soften_floor, infeasible_soften_steps, bridge_ratio.
+    //   overshoot_guard, overshoot_chord_slack.
 
     // Ceilings derive from the mm-domain INPUT limit set over the stroke
     // window (1 normalized unit == the window span), overridable for bench
@@ -91,29 +86,29 @@ inline slopmotion::Config buildEngineConfig(const EngineTuning& t) {
     c.chase_dense_us         = t.dense_us;
     c.chase_aim_accel_extrap = t.aim_extrap;
 
-    // Infeasible-segment policy: a 3-WAY map, not a boolean. An out-of-range
-    // stored value falls through to the ENGINE default, never to an arbitrary
-    // policy (fw 2.1.49: a boolean map could only produce Scale or Stretch, so
-    // Reshape was unreachable).
+    // Infeasible-segment policy. TWO policies, but the stored ordinal runs
+    // 0..5: the catalog select's wire value is 0 = stretch / 1 = blend, and
+    // 2..5 are ORDINALS OF POLICIES DELETED 2026-09-02 that an older NVS or an
+    // older client may still hold. Every one of them ran a timing-first
+    // amplitude/shape trade, which is what Blend is, so they map there rather
+    // than silently reverting an operator to Stretch. Out of range falls
+    // through to the ENGINE default (also Blend), never to an arbitrary policy
+    // (fw 2.1.49: a boolean map could only produce two of three, so the third
+    // was unreachable). The host logs the retired case once; the engine stays
+    // log-free.
     switch (t.infeas_policy) {
         case 0: c.infeasible_policy = slopmotion::InfeasiblePolicy::Stretch; break;
-        case 1: c.infeasible_policy = slopmotion::InfeasiblePolicy::Scale;   break;
-        case 2: c.infeasible_policy = slopmotion::InfeasiblePolicy::Reshape; break;
-        case 3: c.infeasible_policy =
-                    slopmotion::InfeasiblePolicy::PrioritizeAmplitude;       break;
-        case 4: c.infeasible_policy =
-                    slopmotion::InfeasiblePolicy::PrioritizeSmooth;          break;
-        case 5: c.infeasible_policy = slopmotion::InfeasiblePolicy::Blend;   break;
-        default: break;
+        case 1: c.infeasible_policy = slopmotion::InfeasiblePolicy::Blend;   break;
+        default:
+            if (t.infeas_policy <= slopmotion::kInfeasiblePolicyMax)
+                c.infeasible_policy = slopmotion::InfeasiblePolicy::Blend;
+            break;
     }
-    c.infeasible_scale_margin  = t.infeas_margin;
-    c.infeasible_reshape_steps = t.reshape_steps;
     c.settle_grace_us          = t.settle_grace_us;
-    // Budgeted-policy spend limits + alpha-search depth. Inert unless
-    // infeasible_policy is one of the budgeted ones; the engine clamps both
-    // budgets to [0,1] and the step count to [1,10] itself, so pushing what the
-    // host stored is safe -- the clamp on the intake side keeps the echo
-    // honest, it does not protect the engine.
+    // The two spend budgets + the ray's step depth. Inert under Stretch; the
+    // engine clamps both budgets to [0,1] and the step count to [1,10] itself,
+    // so pushing what the host stored is safe -- the clamp on the intake side
+    // keeps the echo honest, it does not protect the engine.
     c.infeasible_smooth_budget    = t.smooth_budget;
     c.infeasible_amplitude_budget = t.amp_budget;
     c.infeasible_blend_steps      = t.blend_steps;
@@ -130,12 +125,10 @@ inline slopmotion::Config buildEngineConfig(const EngineTuning& t) {
         default: break;
     }
 
-    // DC centering of a degraded band, and the RFC-008 handoff sanity guard
-    // (0 = off). The guard only engages when the INGRESS supplied a
-    // one-segment lookahead, so this knob is the aggressiveness dial plus off
-    // switch, never the arming condition. Both are engine-clamped.
-    c.wave_centering       = t.centering;
-    c.wave_centering_gain  = t.centering_gain;
+    // The RFC-008 handoff sanity guard (0 = off). The guard only engages when
+    // the INGRESS supplied a one-segment lookahead, so this knob is the
+    // aggressiveness dial plus off switch, never the arming condition.
+    // Engine-clamped.
     c.handoff_chord_factor = t.handoff_k;
 
     return c;

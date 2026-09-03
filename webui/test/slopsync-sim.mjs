@@ -286,7 +286,7 @@ async function main() {
     // the SAME burst (a real race, not a hypothetical one — this is exactly
     // what an earlier draft of this test hit).
     const limP = waitFor(s1, 'state',
-      (ch, sm) => ch === CH19.SM_LIMITS && sm.centering === 0 && Math.abs(sm.vmax_ovr - 20) < 0.01,
+      (ch, sm) => ch === CH19.SM_LIMITS && Math.abs(sm.vmax_ovr - 20) < 0.01,
       2000, 'sm-limits reflect').then(() => true).catch(() => false);
     const chaseP = waitFor(s1, 'state',
       (ch, sm) => ch === CH19.SM_CHASE && Math.abs(sm.handoff_k - 2.5) < 0.01,
@@ -295,20 +295,19 @@ async function main() {
       (ch, sm) => ch === CH19.SM_WAVEFORM && sm.blend_steps === 3,
       2000, 'sm-waveform reflect').then(() => true).catch(() => false);
 
-    const echo = await s1.sendIntent(CH19.SM_SET, { 2: 999, 4: 0, 5: 0.5, 12: 2.5, 18: 3 });
+    const echo = await s1.sendIntent(CH19.SM_SET, { 2: 999, 12: 2.5, 18: 3 });
     ok('sm-set ECHO carries post-clamp APPLIED values',
-      echo.applied[4] === 0 && Math.abs(echo.applied[5] - 0.5) < 0.01 &&
       Math.abs(echo.applied[12] - 2.5) < 0.01 && echo.applied[18] === 3,
       JSON.stringify(echo.applied));
     ok('sm-set CLAMPS an out-of-range override (vmax_ovr=999 -> 20, the catalog\'s own max)',
       Math.abs(echo.applied[2] - 20) < 0.01, 'applied[2]=' + echo.applied[2]);
 
     const [reflectedLim, reflectedChase, reflectedWav] = await Promise.all([limP, chaseP, wavP]);
-    ok('0x1120 slopmotion-limits STATE reflects centering + the clamped vmax_ovr', reflectedLim);
+    ok('0x1120 slopmotion-limits STATE reflects the clamped vmax_ovr', reflectedLim);
     ok('0x1121 slopmotion-chase STATE reflects handoff_k', reflectedChase);
     ok('0x1122 slopmotion-waveform STATE reflects blend_steps', reflectedWav);
 
-    await s1.sendIntent(CH19.SM_SET, { 2: 0, 4: 1, 5: 1.0, 12: 1.5, 18: 6 }); // restore factory defaults
+    await s1.sendIntent(CH19.SM_SET, { 2: 0, 12: 1.5, 18: 6 }); // restore factory defaults
 
     let nacked = null;
     try { await s1.sendIntent(CH19.SM_SET, {}); } catch (e) { nacked = e; }

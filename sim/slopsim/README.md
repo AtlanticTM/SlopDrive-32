@@ -36,7 +36,7 @@ SlopCLI                       # bare launch = machine TUI (shims in ~/bin)
 slopsim machine --homed --headless --duration 60   # scripted / CI
 # flags: --port 82 (WS) --http 80 --homed --headless --duration S
 #        --webui <dist/index.html> --no-mdns
-#        --policy <scale|stretch>                     (engine knobs at launch)
+#        --policy <stretch|blend>                     (engine knobs at launch)
 #        --jerk <mm/s3>     INPUT-set jerk ceiling (default 2000000; /span -> jmax)
 #        --jmax <units/s3>  NORMALIZED jerk override; wins over --jerk when > 0
 #        --speedmode <pegged|matched>   stream speed feed (device default: pegged)
@@ -57,12 +57,12 @@ complete command runs it. Commands: `home unhome estop clear pause resume
 override`, `window <min> <max>`, `speed.user/input <mm/s>`,
 `accel.user/input <mm/s2>`, `jerk.input <mm/s3>` (all clamped exactly like
 0x0101 config-set — jerk is key 7, ceiling 50 000 000 — applied
-value echoed in the toast), `motion` + `motion.policy <scale|stretch>` /
-`motion.margin <0.5-1.0>` / `motion.aimff <on|off>` / `motion.jmax <units/s3>` /
+value echoed in the toast), `motion` + `motion.policy <stretch|blend>` /
+`motion.aimff <on|off>` / `motion.jmax <units/s3>` /
 `motion.speedmode <pegged|matched>` (SlopMotion + arbiter knobs —
 the palette twin of the device's `POST /api/slopmotion`; bare `motion`, or `m`,
 toggles the **engine config panel** — the applied `slopmotion::Config` grouped
-into policy / limits / chase / centering, read from the engine itself so it shows
+into policy / limits / chase, read from the engine itself so it shows
 the same numbers as `GET /api/slopmotion`), `machine.stroke <mm|0>` (measured-stroke ceiling;
 0 = fall back to the max rail), `pattern <0|1|2|off>` + `pattern.speed/depth/
 stroke/sensation`, `graph freeze zoom export [file.csv]`,
@@ -248,7 +248,7 @@ migration.
 
 # 2. tune: press `a` for the analyzer, hit `async tune`, pick the recording.
 #    Or do it from a script, which reads the SAME defaults the browser does:
-slopsim replay my-scene --policy amp --smooth-budget 0.7
+slopsim replay my-scene --policy blend --smooth-budget 0.7
 slopsim replay my-scene --emit run-a          # freeze the result as a run
 ```
 
@@ -324,9 +324,10 @@ gentle *speed* ceiling, never reduce the *accel* ceiling. Runaways 11/54 → 0/5
 worst excursion 306.78 mm → 1.06 mm. It lives as the `gentle_accel_outside` lab
 switch so it stays measurable.
 
-Policy exposure, same 54-config sweep: `prio-smooth` 10/18 configs runaway,
-`prio-amplitude` 1/18, **`reshape` 0/18** — a policy that surrenders reach never
-drives the rail at speed.
+Policy exposure, same 54-config sweep (measured against the five policies of
+2026-08, of which only Stretch and Blend survive): a policy that surrenders
+reach never drives the rail at speed, and the ones that spent smoothness first
+ran away in 10 of 18 configs.
 
 Also found: the RFC-008 handoff guard is **inert against MFP**. It needs a
 successor in the pacing ring, but MFP sends ~114 ms ahead while segments are
@@ -339,10 +340,9 @@ Every control is tagged with whether you could actually set it on hardware:
 
 * **wire** — reachable today over SlopSync.
 * **lab** — exists in `slopmotion::Config` and **nowhere else**: no wire channel,
-  no HTTP field, no CLI flag. As of this writing that is `infeasible_soften`,
-  `infeasible_soften_floor`, `infeasible_soften_steps` and
-  `handoff_chord_factor`. If one of these turns out to matter, *that finding is
-  the deliverable* — it is a knob that needs exposing.
+  no HTTP field, no CLI flag. As of this writing that is `handoff_chord_factor`,
+  `overshoot_guard` and `overshoot_chord_slack`. If one of these turns out to
+  matter, *that finding is the deliverable* — it is a knob that needs exposing.
 * **bench** — a property of the replay itself (`p0`, `tail_s`). Never ships.
 
 ### What a replay does and does not reproduce
@@ -359,8 +359,8 @@ stated plainly:
   gates are not modeled — a take made through closed gates has no motion to tune.
 * Simulation **always starts at the recording's first command**, even when you
   scope the emit window to the view. Most engine state decays within a segment,
-  but the *centering debt* accumulates across strokes, so seeking into the middle
-  would render a centering behavior the machine never had.
+  but the handoff series and the stream estimator carry across, so seeking into
+  the middle would render boundary conditions the machine never had.
 * The carriage starts at the **first commanded target** unless `p0` says
   otherwise: a recording carries no record of where the machine happened to be
   sitting, and any other choice invents an opening lunge that never happened and
@@ -475,36 +475,27 @@ When a commanded segment is physically impossible in its commanded duration,
 something has to give. The full policy set and their semantics are owned by
 `InfeasiblePolicy` in `lib/slopmotion/include/slopmotion/slopmotion.hpp` — this
 section is a summary for sim users, not the source of truth; read the enum's
-own doc comment for the derivation. The engine default is **Reshape**, not
-Scale — the sim only overrides it if you pass `--policy`/`motion.policy`.
+own doc comment for the derivation. The engine default is **Blend** — the sim
+only overrides it if you pass `--policy`/`motion.policy`.
 
-Five policies, in registry order:
+Two policies:
 
 * **Stretch** — range-first: keeps the full stroke, overruns the deadline
   (what a "go here" manual point move wants).
-* **Scale** — timing-first + shape-first: keeps the deadline, shrinks the
-  stroke around the current position, keeping a quintic shape.
-* **Reshape** (engine default) — timing-first + machine-first: keeps the
-  deadline AND the full stroke's shape as far as the machine allows, giving up
-  shape fidelity before range. `motion.reshape` / `--reshape-steps 0-8` sets
-  the bisection depth (0 = no bisection).
-* **PrioritizeAmplitude** (`amp` on the CLI) — budgeted: spends a smoothness
-  budget before touching amplitude. `--smooth-budget 0-1` caps how far a
-  handle may shorten toward the chord.
-* **PrioritizeSmooth** (`smooth` on the CLI) — budgeted: spends an amplitude
-  budget before touching smoothness. `--amplitude-budget 0-1` caps how much
-  stroke may be surrendered.
+* **Blend** (engine default) — timing-first: keeps the deadline and spends the
+  two axes an infeasible segment has, amplitude and shape, together in the ratio
+  `--blend 0-1` sets. `--smooth-budget 0-1` caps how far a handle may shorten
+  toward the chord; `--amplitude-budget 0-1` caps how much stroke may be
+  surrendered. Both are FLOORS the search probes at, not suggestions.
 
-`motion.margin` is how much of the physically-achievable stroke Scale/Reshape
-actually ask for (headroom against the ceilings); `motion.aimff` makes the
-chase-mode predictive aim second-order so it stops overshooting the
-stroke-window rails at crests. `motion.curve` / `--curve follow|c1|c2` selects
-the waveform curve family (`CurvePolicy`, same header) independently of the
-infeasible policy. `--settle-grace <ms>` and `--centering on|off` /
-`--centering-gain 0-1` are separate engine knobs also set at launch — see
-`slopsim machine --help` for their current defaults.
+`motion.aimff` makes the chase-mode predictive aim second-order so it stops
+overshooting the stroke-window rails at crests. `motion.curve` /
+`--curve follow|c1|c2` selects the waveform curve family (`CurvePolicy`, same
+header) independently of the infeasible policy. `--settle-grace <ms>` is a
+separate engine knob also set at launch — see `slopsim machine --help` for its
+current default.
 
-`--policy <scale|stretch|reshape|amp|smooth>`, `--jerk <mm/s3>` and `--jmax
+`--policy <stretch|blend>`, `--jerk <mm/s3>` and `--jmax
 <units/s3>` set these knobs at launch, before the first segment is planned.
 They exist as FLAGS because comparing engine behavior is a scripted job
 (headless run → drive the wire → read `/api/trace.bin`) and the palette needs

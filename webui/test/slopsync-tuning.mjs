@@ -109,13 +109,13 @@ async function main() {
   ok('setting_keys unique across the shared writer', new Set(keys).size === keys.length,
      keys.length + ' keys: ' + keys.join(','));
 
-  info('limits:   ' + JSON.stringify({ jmax: lim.jmax_ovr, centering: lim.centering, gain: lim.centering_gain }));
+  info('limits:   ' + JSON.stringify({ jmax: lim.jmax_ovr, vmax: lim.vmax_ovr, amax: lim.amax_ovr }));
   info('chase:    ' + JSON.stringify({ ff: chase.chase_ff, gain: chase.chase_gain, dense_ms: chase.chase_dense_ms }));
   info('waveform: ' + JSON.stringify({ curve: wav.curve_policy, policy: wav.infeasible_policy, settle_ms: wav.settle_grace_ms }));
 
   // ---- round-trips, one per card, covering f32 / select / ms-scaled ------
   console.log('\n--- limits (f32) ---');
-  await roundTrip(s, CH_LIMITS, 5, 'centering_gain', lim.centering_gain, lim.centering_gain > 0.5 ? 0.25 : 0.75);
+  await roundTrip(s, CH_LIMITS, 2, 'vmax_ovr', lim.vmax_ovr, lim.vmax_ovr > 1 ? 0 : 2.5);
   console.log('\n--- chase (ms-scaled u32) ---');
   await roundTrip(s, CH_CHASE, 10, 'chase_dense_ms', chase.chase_dense_ms, chase.chase_dense_ms > 100 ? 40 : 120);
   console.log('\n--- waveform (select) ---');

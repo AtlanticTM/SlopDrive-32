@@ -76,21 +76,16 @@ inline constexpr const char* kSmAnomalyNames[] = {
     "waveform_centered",    //                        ::WaveformCentered   = 7
     "handoff_bounded",     //                        ::HandoffBounded    = 8
     "waveform_smoothed",   //                        ::WaveformSmoothed  = 9
+    "dwell_zeroed",        //                        ::DwellZeroed       = 10
 };
-// Counter array width: as of slopmotion 0.8.0 the enum ends at WaveformSmoothed
-// = 9, so this array is EXACTLY FULL again — there is no spare slot. A kind 10
+// Counter array width: as of slopmotion 0.8.0 the enum ends at DwellZeroed = 10,
+// so this array is EXACTLY FULL again — there is no spare slot. A kind 11
 // REQUIRES bumping kSmAnomalyKinds (here AND on the device) in the same change
 // as the name append; until then out-of-range kinds are dropped by the drain,
-// never written, and log as "?10".
-//
-// DEVICE SIDE IS DELIBERATELY STILL AT 9 (sim-first prototype): the firmware's
-// SystemState::SM_ANOM_KINDS, its own kSmAnomalyNames, and the per-kind field
-// list on the 0x0088 slopmotion-diag channel all move together when the
-// budgeted policies go to hardware — and that last one is an ETAG CHANGE, so it
-// lands as one deliberate commit rather than drifting in ahead of the test.
+// never written, and log as "?11".
 inline constexpr size_t kSmAnomalyNameCount =
     sizeof(kSmAnomalyNames) / sizeof(kSmAnomalyNames[0]);
-inline constexpr size_t kSmAnomalyKinds = 10;
+inline constexpr size_t kSmAnomalyKinds = 11;
 static_assert(kSmAnomalyNameCount <= kSmAnomalyKinds,
               "kSmAnomalyNames outgrew the counter array — bump kSmAnomalyKinds");
 
@@ -187,14 +182,11 @@ public:
     // engine via the same setConfig() path deriveEngineLimits() uses. Not
     // persisted — a sim restart restores the engine's compile-time defaults,
     // exactly like the device.
-    // THREE policies since slopmotion 0.4.0 (Stretch/Scale/Reshape) — Reshape
-    // is the engine default. Never map this from a bool.
+    // TWO policies since 2026-09-02 (Stretch/Blend) — Blend is the engine
+    // default. Never map this from a bool: the enum is sparse.
     slopmotion::InfeasiblePolicy uiSetInfeasiblePolicy(slopmotion::InfeasiblePolicy p);
-    float uiSetInfeasibleMargin(float margin);        // clamped [0.50 .. 1.00]
-    // RESHAPE bisection depth — plan-time budget dial, clamped [0 .. 8].
-    uint8_t uiSetReshapeSteps(uint8_t steps);
-    // BUDGETED policies (slopmotion 0.8.0). Each policy uses exactly ONE of
-    // these: the cap on the axis it spends FIRST to protect the other.
+    // Blend's two spend budgets: how far down the ray the search may go in each
+    // axis. The search probes AT this corner.
     //   smooth budget    — prio-amplitude: max alpha (handle reduction toward
     //                      the chord). 1.0 reaches a straight line, which is C0
     //                      at the knots. Clamped [0 .. 1].
@@ -207,7 +199,7 @@ public:
     slopmotion::CurvePolicy uiSetCurvePolicy(slopmotion::CurvePolicy p);
     float   uiSetSmoothBudget(float budget);
     float   uiSetAmplitudeBudget(float budget);
-    // Alpha-search bisection depth. Cheaper per step than the reshape search
+    // Ray bisection depth. One curve build + one legality scan per step
     // (one quintic build + one scan, no Ruckig call). Clamped [1 .. 10].
     uint8_t uiSetBlendSteps(uint8_t steps);
     // Settle grace in MILLISECONDS (the operator-facing unit, matching the
@@ -215,13 +207,6 @@ public:
     // conversion happens in the setter. Clamped [0 .. 200] ms; returns APPLIED ms.
     float uiSetSettleGraceMs(float ms);
     bool  uiSetChaseAimAccelExtrap(bool on);
-    // DC centering of a degraded band (slopmotion 0.5.0, WAVEFORM path): keep the
-    // achieved stroke symmetric about the COMMANDED midpoint when the machine
-    // cannot deliver the full amplitude on the clock. ON is the engine default;
-    // OFF restores the 0.4.0 contract. Gain is a feel dial clamped [0 .. 1] and
-    // deliberately NOT monotone — see the engine header. Return APPLIED.
-    bool  uiSetWaveCentering(bool on);
-    float uiSetWaveCenteringGain(float gain);   // clamped [0.0 .. 1.0]
     // NORMALIZED jerk OVERRIDE (units/s^3 over the stroke window — multiply by
     // the window span for mm/s^3). Held as sim state, NOT written straight to
     // the engine, because deriveEngineLimits() rebuilds the whole Limits struct
@@ -779,11 +764,11 @@ private:
     bool _modesEverSent = false;
     std::array<std::byte, 4> _lastModes{};
     bool _smLimEverSent = false;
-    std::array<std::byte, 18> _lastSmLim{};
+    std::array<std::byte, 13> _lastSmLim{};
     bool _smChaseEverSent = false;
     std::array<std::byte, 20> _lastSmChase{};
     bool _smWavEverSent = false;
-    std::array<std::byte, 21> _lastSmWav{};
+    std::array<std::byte, 16> _lastSmWav{};
     bool _apBaseEverSent = false;
     std::array<std::byte, 9> _lastApBase{};
     static constexpr uint8_t kApBaseCount = advpat::BASE_COUNT;

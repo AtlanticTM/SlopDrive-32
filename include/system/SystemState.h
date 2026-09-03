@@ -101,6 +101,7 @@ inline constexpr const char* kSmAnomalyNames[] = {
     "waveform_centered",    //              ::WaveformCentered   = 7
     "handoff_bounded",     //              ::HandoffBounded    = 8
     "waveform_smoothed",   //              ::WaveformSmoothed  = 9
+    "dwell_zeroed",        //              ::DwellZeroed       = 10
 };
 inline constexpr uint8_t kSmAnomalyNameCount =
     uint8_t(sizeof(kSmAnomalyNames) / sizeof(kSmAnomalyNames[0]));
@@ -375,23 +376,15 @@ struct SystemState {
     volatile uint32_t      sm_tune_dense_us    = 60000;  // dense-stream gate (mean interval)
     // Infeasible-segment policy: what gives when a commanded stroke cannot
     // physically happen in its commanded duration. 0 = Stretch (range-first:
-    // keep the full stroke, overrun the deadline), 1 = Scale (timing-first +
-    // shape-first: keep the deadline, shrink the stroke to a legal quintic),
-    // 2 = Reshape (timing-first + machine-first: keep the deadline AND as much
-    // range as the machine can physically deliver, giving up the SHAPE — a
-    // Ruckig time-optimal move, bisected toward the midpoint only if even that
-    // does not fit). Mirrors slopmotion::InfeasiblePolicy — kept as a plain
-    // uint8_t so SystemState.h stays engine-header-free; the mapping to the
-    // enum lives in main.cpp's per-tick config push, and anything out of range
-    // there falls back to the ENGINE's own default rather than silently
-    // picking a policy the operator never asked for.
-    volatile uint8_t       sm_tune_infeas_policy   = 0;      // default: Stretch (range-first; operator ruling 2026-08-10, the scale-family 'seatbelt' feel) — MUST match the catalog select default
-    volatile float         sm_tune_infeas_margin   = 0.92f;  // stroke-scale margin 0.50..1.00
-    // RESHAPE bisection depth: each step halves the remaining stroke interval,
-    // so N steps resolve the delivered stroke to stroke/2^N. Each step costs
-    // ONE Ruckig calculate() — this is a direct plan-time budget dial, clamped
-    // [0, 8] (0 = no bisection: full amplitude when it fits, guard when not).
-    volatile uint8_t       sm_tune_reshape_steps   = 6;      // slopmotion default
+    // keep the full stroke, overrun the deadline), 1 = Blend (timing-first:
+    // keep the deadline, spend amplitude and shape together to the budgets
+    // below). Ordinals 2..5 named policies deleted 2026-09-02 and an older NVS
+    // may still hold one; the map runs those as Blend. Kept as a plain uint8_t
+    // so SystemState.h stays engine-header-free; the mapping to
+    // slopmotion::InfeasiblePolicy lives in include/motion/EngineConfigMap.h,
+    // where anything out of range falls back to the ENGINE's own default rather
+    // than silently picking a policy the operator never asked for.
+    volatile uint8_t       sm_tune_infeas_policy   = 0;      // default: Stretch (range-first; operator ruling 2026-08-10, the 'seatbelt' feel) — MUST match the catalog select default
     // Settle grace: how long an expired plan may HOLD its end state before the
     // engine concludes the stream is starved and brakes to rest. Microseconds
     // here (engine units); the /api/slopmotion surface talks MILLISECONDS.
@@ -411,18 +404,6 @@ struct SystemState {
     // the drive is unpowered or the bus is dead -- the LED shows it as
     // Motion/Degraded (amber slow-blink) vs Latched (solid) for plain unhomed.
     volatile bool          servo_bus_ready         = false;
-    // DC centering of a degraded band (WAVEFORM path, Scale + Reshape policies).
-    // When the machine cannot deliver the commanded amplitude on the commanded
-    // clock, ON (engine default) shrinks the achieved band SYMMETRICALLY about
-    // the commanded midpoint instead of letting it walk off one end — every such
-    // stroke is reported as a WaveformCentered anomaly, so the deviation is
-    // visible, never silent. OFF restores the slopmotion 0.4.0 contract.
-    volatile bool          sm_tune_centering        = true;   // slopmotion wave_centering
-    // Correction strength 0..1 (clamped both here and in the engine). 1 = full
-    // centering, 0 = same as the bool off. A FEEL dial, not a calibration, and
-    // deliberately not monotone — the debt loop closes around the pull it
-    // actually applied, so the mid settings are for experimenting only.
-    volatile float         sm_tune_centering_gain   = 1.0f;   // slopmotion wave_centering_gain
     // RFC-008 handoff sanity guard: the Fritsch-Carlson chord factor k applied
     // to an inbound segment's end velocity against the FOLLOWING segment's
     // chord. limits::segment_handoff_k (RFC-049c) = the shape-preserving bound
@@ -446,10 +427,8 @@ struct SystemState {
     // where an out-of-range value falls back to the ENGINE's own default rather
     // than silently picking a family the operator never asked for.
     volatile uint8_t       sm_tune_curve_policy    = 0;      // default: FollowClient (engine 0.8.0)
-    // Budgeted-policy spend limits (PrioritizeAmplitude / PrioritizeSmooth
-    // only — inert under the other three). Both are FRACTIONS in [0, 1] of how
-    // much of one axis the policy may spend before it starts spending the
-    // other:
+    // Blend's two spend budgets (inert under Stretch). Both are FRACTIONS in
+    // [0, 1] bounding how far down the ray the search may go in each axis:
     //   smooth budget    — max alpha, i.e. how far the span's END HANDLE may be
     //                      lerped toward its own chord slope. 0 = never touch
     //                      the sender's curve; 1 = the flattest quintic
@@ -457,14 +436,16 @@ struct SystemState {
     //                      NOT the same thing as a straight line.
     //   amplitude budget — max fraction of the COMMANDED stroke that may be
     //                      surrendered. 0.5 = may shrink to the segment
-    //                      midpoint; 1.0 = may decline to move at all.
+    //                      midpoint; 1.0 = may decline to move at all. The
+    //                      search probes AT this floor and hands anything still
+    //                      illegal there to the Ruckig guard.
     // 0.5/0.5 are the engine's defaults, so a fresh boot changes nothing.
     volatile float         sm_tune_smooth_budget   = 0.5f;   // slopmotion infeasible_smooth_budget
     volatile float         sm_tune_amp_budget      = 0.5f;   // slopmotion infeasible_amplitude_budget
-    // Bisection depth on the alpha search. Each step costs ONE quintic build +
-    // one legality scan (no Ruckig call), so it is far cheaper per step than
-    // sm_tune_reshape_steps. Clamped [1, 10] here AND in the engine; 6 resolves
-    // alpha to 1/64 of the budget, well under anything perceptible.
+    // Bisection depth on the ray. Each step costs ONE curve build + one
+    // legality scan and no Ruckig call, which is what makes it the cheap
+    // plan-time dial. Clamped [1, 10] here AND in the engine; 6 resolves the
+    // sacrifice scalar to 1/64, well under anything perceptible.
     volatile uint8_t       sm_tune_blend_steps     = 6;      // slopmotion infeasible_blend_steps
     // Blend's ONE SLIDER: what an infeasible segment gives up, as a single
     // exchange rate. 0 = surrender reach, keep the shape; 1 = keep the reach,
@@ -485,20 +466,20 @@ struct SystemState {
     // above stays for back-compat; this is the diagnostic surface — "42
     // anomalies" told an investigation nothing, "40 waveform_scaled + 2
     // endvel_clamped" tells it everything.
-    // WHY 10: the enum ends at WaveformSmoothed = 9 (10 values, 0..9) as of
+    // WHY 11: the enum ends at DwellZeroed = 10 (11 values, 0..10) as of
     // slopmotion 0.8.0, so this array is EXACTLY FULL again — there is no spare
-    // slot. A kind 10 REQUIRES bumping this constant, appending to
+    // slot. A kind 11 REQUIRES bumping this constant, appending to
     // kSmAnomalyNames, appending a per-kind field to the 0x0088 slopmotion-diag
     // layout (SlopSyncCatalog.h) and mirroring both in sim/slopsim, all in the
     // same change; until they move, the Core-1 drain loop bounds-checks against
     // kSmAnomalyNames and DROPS the kind rather than making a stray write, and
-    // the log prints it as "?10".
+    // the log prints it as "?11".
     //
     // The 0x0088 half of that list is an ETAG CHANGE, not an append: the
-    // per-kind block sits in the MIDDLE of that layout, so a tenth counter
-    // shifts every field after it (the ninth already moved plan_us_*/sync_*/
-    // reset_gen by 4 B at M4d, and the tenth moved them another 4 — 84 -> 88).
-    static constexpr uint8_t SM_ANOM_KINDS = 10;
+    // per-kind block sits in the MIDDLE of that layout, so a new counter
+    // shifts every field after it (the ninth moved plan_us_*/sync_*/reset_gen
+    // by 4 B at M4d, the tenth another 4 — 84 -> 88, the eleventh 88 -> 92).
+    static constexpr uint8_t SM_ANOM_KINDS = 11;
     static_assert(kSmAnomalyNameCount <= SM_ANOM_KINDS,
                   "kSmAnomalyNames outgrew sm_anom_kind — bump SM_ANOM_KINDS");
     volatile uint32_t      sm_anom_kind[SM_ANOM_KINDS] = {};

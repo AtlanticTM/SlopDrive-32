@@ -38,16 +38,12 @@ EngineTuning sentinelTuning() {
     t.chase_gain      = 0.4f;        // default 0.9
     t.chase_look      = 5.0f;        // default 3
     t.dense_us        = 33000;       // default 60000
-    t.infeas_policy   = 2;           // Reshape (default Blend)
-    t.infeas_margin   = 0.71f;       // default 0.92
+    t.infeas_policy   = 0;           // Stretch (engine default Blend)
     t.infeas_blend    = 0.875f;      // default 0.5
-    t.reshape_steps   = 4;           // default 6
     t.smooth_budget   = 0.31f;       // default 0.5
     t.amp_budget      = 0.77f;       // default 0.5
     t.blend_steps     = 9;           // default 6
     t.curve_policy    = 1;           // ForceC1 (default FollowClient)
-    t.centering       = false;       // default true
-    t.centering_gain  = 0.25f;       // default 1.0
     t.handoff_k       = 2.75f;       // default 1.5
     t.settle_grace_us = 200000;      // default 30000
     return t;
@@ -70,15 +66,11 @@ TEST_CASE("every mapped Config field leaves its engine default") {
     CHECK(c.chase_lookahead != def.chase_lookahead);
     CHECK(c.chase_dense_us != def.chase_dense_us);
     CHECK(c.infeasible_policy != def.infeasible_policy);
-    CHECK(c.infeasible_scale_margin != def.infeasible_scale_margin);
     CHECK(c.infeasible_blend != def.infeasible_blend);
-    CHECK(c.infeasible_reshape_steps != def.infeasible_reshape_steps);
     CHECK(c.infeasible_smooth_budget != def.infeasible_smooth_budget);
     CHECK(c.infeasible_amplitude_budget != def.infeasible_amplitude_budget);
     CHECK(c.infeasible_blend_steps != def.infeasible_blend_steps);
     CHECK(c.curve_policy != def.curve_policy);
-    CHECK(c.wave_centering != def.wave_centering);
-    CHECK(c.wave_centering_gain != def.wave_centering_gain);
     CHECK(c.handoff_chord_factor != def.handoff_chord_factor);
     CHECK(c.settle_grace_us != def.settle_grace_us);
 }
@@ -94,16 +86,12 @@ TEST_CASE("the unmapped list is exactly the set still at the engine default") {
     CHECK(c.chase_stale_us == def.chase_stale_us);
     CHECK(c.overshoot_guard == def.overshoot_guard);
     CHECK(c.overshoot_chord_slack == def.overshoot_chord_slack);
-    CHECK(c.infeasible_soften == def.infeasible_soften);
-    CHECK(c.infeasible_soften_floor == def.infeasible_soften_floor);
-    CHECK(c.infeasible_soften_steps == def.infeasible_soften_steps);
-    CHECK(c.bridge_ratio == def.bridge_ratio);
 
-    // 22 mapped (Limits' three included) + 9 unmapped is the whole struct. A
+    // 19 mapped (Limits' three included) + 5 unmapped is the whole struct. A
     // changed size means the engine grew or dropped a field: classify it into
     // one of the two lists above, then update this number. Host-only (the
     // native env has one toolchain), never a wire fact.
-    static_assert(sizeof(slopmotion::Config) == 112,
+    static_assert(sizeof(slopmotion::Config) == 84,
                   "slopmotion::Config changed shape -- re-census the two lists above");
 }
 
@@ -115,6 +103,22 @@ TEST_CASE("out-of-range enum ordinals fall through to the engine default") {
     const slopmotion::Config c = buildEngineConfig(t);
     CHECK(c.infeasible_policy == def.infeasible_policy);
     CHECK(c.curve_policy == def.curve_policy);
+}
+
+TEST_CASE("a retired policy ordinal runs as Blend, never as Stretch") {
+    // Ordinals 2..5 named policies deleted 2026-09-02 and an older NVS still
+    // holds one. Every one of them was a timing-first amplitude/shape trade,
+    // so the honest remap is Blend -- reverting the operator to Stretch would
+    // silently change the CONTRACT (deadline kept vs stroke kept).
+    EngineTuning t;
+    t.infeas_policy = 0;
+    CHECK(buildEngineConfig(t).infeasible_policy ==
+          slopmotion::InfeasiblePolicy::Stretch);
+    for (uint8_t ord = 1; ord <= slopmotion::kInfeasiblePolicyMax; ++ord) {
+        t.infeas_policy = ord;
+        CHECK(buildEngineConfig(t).infeasible_policy ==
+              slopmotion::InfeasiblePolicy::Blend);
+    }
 }
 
 TEST_CASE("no usable window keeps the engine's own ceilings") {

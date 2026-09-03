@@ -942,7 +942,7 @@ inline bool buildSlopDriveCatalog(slopsync::Catalog32& c, DeviceFeatures feat = 
     // Plan counts, the per-kind anomaly breakdown, the on-device plan-time
     // bench, and the SlopSync stream-ingress counters.
     //
-    // The per-kind counters are ten NAMED fields rather than one array: a
+    // The per-kind counters are eleven NAMED fields rather than one array: a
     // generic client renders named fields with no per-device knowledge.
     // Their order is slopmotion::AnomalyType's own, which is APPEND-ONLY
     // upstream, so a new engine kind appends a field to the END OF THIS
@@ -955,7 +955,7 @@ inline bool buildSlopDriveCatalog(slopsync::Catalog32& c, DeviceFeatures feat = 
     // increments it, so EVERY subscriber sees the reset happened, not only
     // the session that asked for it. Without it a client watching the
     // counters cannot tell a reset from a reboot from a wrap.
-    //   [3*4 + 10*4 + 12 + 5*4 + 2 + 1 + 1 = 88 B]
+    //   [3*4 + 11*4 + 12 + 5*4 + 2 + 1 + 1 = 92 B]
     auto addMotionDiag = [&]() {
     c.addEntry({.id = ch::motion_diag, .name = "slopmotion-diag",
                 .cls = ChannelClass::STATE, .dir = Direction::h2c,
@@ -1005,6 +1005,10 @@ inline bool buildSlopDriveCatalog(slopsync::Catalog32& c, DeviceFeatures feat = 
                       .group = "Anomalies",
                       .desc = "A curve was flattened toward a straight line so the machine "
                               "could keep the timing without losing the stroke."});
+    c.addLayoutField({.name = "anom_dwell_zeroed", .type = PackedFieldType::u32, .unit = "", .scale = 1.0f,
+                      .group = "Anomalies",
+                      .desc = "A hold was re-sent carrying a stale arrival speed; the machine "
+                              "ignored it and stayed put."});
     c.addLayoutField({.name = "plan_us_last", .type = PackedFieldType::u32, .unit = "us", .scale = 1.0f,
                       .group = "Plan time", .desc = "Time the most recent plan took to compute."});
     c.addLayoutField({.name = "plan_us_max",  .type = PackedFieldType::u32, .unit = "us", .scale = 1.0f,
@@ -1187,7 +1191,7 @@ inline bool buildSlopDriveCatalog(slopsync::Catalog32& c, DeviceFeatures feat = 
     // setting of ITS layout — a WIRE limit the user never sees: SPEC §8.8
     // ("a category spans channels; two channels in the same category merge
     // into one tab") lets all three carry category = tuning and differ only
-    // by `group`. 20 knobs, one Tuning tab, three cards, nothing dropped.
+    // by `group`. One Tuning tab, three cards, nothing dropped.
     //
     // ONE SHARED WRITER (0x0105). `settingChannel` is per-entry and
     // `setting_key` is a key WITHIN that writer, so several STATE channels
@@ -1225,21 +1229,11 @@ inline bool buildSlopDriveCatalog(slopsync::Catalog32& c, DeviceFeatures feat = 
                       .desc = "Acceleration ceiling override, normalized. 0 derives it from the mm limits.",
                       .settingKey = 3, .flags = slopsync::setting_flags::advanced,
                       .hasSettingKey = true});
-    c.addSelectField({.name = "centering", .type = PackedFieldType::u8, .unit = "", .scale = 1.0f,
-                      .dflt = SettingDefault::ofInt(1), .group = "Centering",
-                      .desc = "Pulls a drifting waveform back toward the middle of the stroke window.",
-                      .settingKey = 4, .hasSettingKey = true},
-                     {"off", "on"});
-    c.addLayoutField({.name = "centering_gain", .type = PackedFieldType::f32, .unit = "", .scale = 1.0f,
-                      .hasMin = true, .hasMax = true, .min = 0.0f, .max = 1.0f,
-                      .dflt = SettingDefault::ofFloat(1.0f), .group = "Centering",
-                      .desc = "How hard centering pulls. Higher recenters faster and follows the script less.",
-                      .step = 0.05f, .settingKey = 5, .hasSettingKey = true, .hasStep = true});
     c.addBitfieldField({.name = "enabled_mask", .type = PackedFieldType::bitfield8, .unit = "flag",
                         .scale = 1.0f, .desc = "Which of these the machine will accept right now.",
                         .role = roles::meta_enabled_mask,
                         .hasRank = true, .rank = slopsync::ui_ranks::detail},
-                       {"jmax_ovr", "vmax_ovr", "amax_ovr", "centering", "centering_gain"});
+                       {"jmax_ovr", "vmax_ovr", "amax_ovr"});
     };
 
     // BOTH INPUT PATHS ARE LIVE AND IN USE. These knobs steer the CHASE path
@@ -1328,17 +1322,16 @@ inline bool buildSlopDriveCatalog(slopsync::Catalog32& c, DeviceFeatures feat = 
                       .desc = "Rebuild the sender's curve as sent, or force one smoothness family.",
                       .settingKey = 13, .hasSettingKey = true},
                      {"follow client", "force C1", "force C2"});
+    // A SELECT'S WIRE VALUE IS ITS INDEX (SPEC, catalog.hpp addSelectField), so
+    // this list is the stored ordinal: 0 = stretch, 1 = blend. The engine's own
+    // enum keeps Blend = 5 and the host maps between them
+    // (include/motion/EngineConfigMap.h), which is also what runs the four
+    // ordinals of policies deleted 2026-09-02 as blend.
     c.addSelectField({.name = "infeasible_policy", .type = PackedFieldType::u8, .unit = "", .scale = 1.0f,
                       .dflt = SettingDefault::ofInt(0), .group = "Infeasible moves",
                       .desc = "What to do when a move cannot be finished in the time it was given.",
                       .settingKey = 14, .hasSettingKey = true},
-                     {"stretch", "scale", "reshape", "prioritize amplitude", "prioritize smooth",
-                      "blend"});
-    c.addLayoutField({.name = "infeasible_margin", .type = PackedFieldType::f32, .unit = "", .scale = 1.0f,
-                      .hasMin = true, .hasMax = true, .min = 0.5f, .max = 1.0f,
-                      .dflt = SettingDefault::ofFloat(0.92f), .group = "Infeasible moves",
-                      .desc = "How much of the stroke a scaled-down move keeps.",
-                      .step = 0.01f, .settingKey = 15, .hasSettingKey = true, .hasStep = true});
+                     {"stretch", "blend"});
     c.addLayoutField({.name = "smooth_budget", .type = PackedFieldType::f32, .unit = "", .scale = 1.0f,
                       .hasMin = true, .hasMax = true, .min = 0.0f, .max = 1.0f,
                       .dflt = SettingDefault::ofFloat(0.5f), .group = "Infeasible moves",
@@ -1358,14 +1351,8 @@ inline bool buildSlopDriveCatalog(slopsync::Catalog32& c, DeviceFeatures feat = 
     // f32, 0..1, default 0.5, group "Infeasible moves") belongs here and in the
     // schema block below on the next free setting key. It is Blend's ONE
     // slider and Blend is the shipped policy, so it is the last unreachable
-    // knob. Held out of this commit because a new catalog element is a WIRE
-    // change: it moves the packed layout and the catalog etag, so it rides a
-    // registry key allocation, not a firmware edit.
-    c.addLayoutField({.name = "reshape_steps", .type = PackedFieldType::u8, .unit = "", .scale = 1.0f,
-                      .hasMin = true, .hasMax = true, .min = 0.0f, .max = 8.0f,
-                      .dflt = SettingDefault::ofInt(6), .group = "Infeasible moves",
-                      .desc = "Attempts allowed when reshaping a move to fit its deadline.",
-                      .settingKey = 19, .hasSettingKey = true});
+    // knob. Keys 4, 5, 15 and 19 are FREE but are not reused for it: released
+    // keys stay released.
     c.addLayoutField({.name = "settle_grace_ms", .type = PackedFieldType::u32, .unit = "ms", .scale = 1000.0f,
                       .hasMin = true, .hasMax = true, .min = 0.0f, .max = 200.0f,
                       .dflt = SettingDefault::ofFloat(30.0f), .group = "Settling",
@@ -1375,8 +1362,8 @@ inline bool buildSlopDriveCatalog(slopsync::Catalog32& c, DeviceFeatures feat = 
                         .scale = 1.0f, .desc = "Which of these the machine will accept right now.",
                         .role = roles::meta_enabled_mask,
                         .hasRank = true, .rank = slopsync::ui_ranks::detail},
-                       {"curve_policy", "infeasible_policy", "infeasible_margin", "smooth_budget",
-                        "amplitude_budget", "blend_steps", "reshape_steps", "settle_grace_ms"});
+                       {"curve_policy", "infeasible_policy", "smooth_budget",
+                        "amplitude_budget", "blend_steps", "settle_grace_ms"});
     };
 
     // ---- "drive-tune" -- STATE, the AIM drive's own registers ---------------
@@ -1855,7 +1842,8 @@ inline bool buildSlopDriveCatalog(slopsync::Catalog32& c, DeviceFeatures feat = 
     // The single writer behind all three slopmotion-* cards. Keys 1..20 are
     // allocated across those cards and never collide; every key optional, only
     // the keys PRESENT are applied, and each echoes the value the machine
-    // actually took after its own clamp.
+    // actually took after its own clamp. Keys 4, 5, 15 and 19 were RELEASED
+    // 2026-09-02 with the knobs they wrote and are never reused.
     //
     // Bounds mirror WebUI::applySlopMotion's clamps exactly, so a client that
     // validates locally gets the same answer the hub would NACK with. Times are
@@ -1873,10 +1861,6 @@ inline bool buildSlopDriveCatalog(slopsync::Catalog32& c, DeviceFeatures feat = 
                       .hasMin = true, .hasMax = true, .min = 0.0f, .max = 20.0f});
     c.addSchemaField({.key = 3, .name = "amax_ovr", .type = CborFieldType::f32_t, .unit = "1/s2",
                       .hasMin = true, .hasMax = true, .min = 0.0f, .max = 500.0f});
-    c.addSchemaField({.key = 4, .name = "centering", .type = CborFieldType::uint_t, .unit = "",
-                      .hasMin = true, .hasMax = true, .min = 0.0f, .max = 1.0f});
-    c.addSchemaField({.key = 5, .name = "centering_gain", .type = CborFieldType::f32_t, .unit = "",
-                      .hasMin = true, .hasMax = true, .min = 0.0f, .max = 1.0f});
     c.addSchemaField({.key = 6, .name = "chase_ff", .type = CborFieldType::uint_t, .unit = "",
                       .hasMin = true, .hasMax = true, .min = 0.0f, .max = 1.0f});
     c.addSchemaField({.key = 7, .name = "chase_accel_ff", .type = CborFieldType::uint_t, .unit = "",
@@ -1894,17 +1878,13 @@ inline bool buildSlopDriveCatalog(slopsync::Catalog32& c, DeviceFeatures feat = 
     c.addSchemaField({.key = 13, .name = "curve_policy", .type = CborFieldType::uint_t, .unit = "",
                       .hasMin = true, .hasMax = true, .min = 0.0f, .max = 2.0f});
     c.addSchemaField({.key = 14, .name = "infeasible_policy", .type = CborFieldType::uint_t, .unit = "",
-                      .hasMin = true, .hasMax = true, .min = 0.0f, .max = 4.0f});
-    c.addSchemaField({.key = 15, .name = "infeasible_margin", .type = CborFieldType::f32_t, .unit = "",
-                      .hasMin = true, .hasMax = true, .min = 0.5f, .max = 1.0f});
+                      .hasMin = true, .hasMax = true, .min = 0.0f, .max = 1.0f});
     c.addSchemaField({.key = 16, .name = "smooth_budget", .type = CborFieldType::f32_t, .unit = "",
                       .hasMin = true, .hasMax = true, .min = 0.0f, .max = 1.0f});
     c.addSchemaField({.key = 17, .name = "amplitude_budget", .type = CborFieldType::f32_t, .unit = "",
                       .hasMin = true, .hasMax = true, .min = 0.0f, .max = 1.0f});
     c.addSchemaField({.key = 18, .name = "blend_steps", .type = CborFieldType::uint_t, .unit = "",
                       .hasMin = true, .hasMax = true, .min = 1.0f, .max = 10.0f});
-    c.addSchemaField({.key = 19, .name = "reshape_steps", .type = CborFieldType::uint_t, .unit = "",
-                      .hasMin = true, .hasMax = true, .min = 0.0f, .max = 8.0f});
     c.addSchemaField({.key = 20, .name = "settle_grace_ms", .type = CborFieldType::f32_t, .unit = "ms",
                       .hasMin = true, .hasMax = true, .min = 0.0f, .max = 200.0f});
     };

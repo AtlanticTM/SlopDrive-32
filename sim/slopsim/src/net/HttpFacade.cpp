@@ -55,10 +55,6 @@ uint8_t qsteps(const httplib::Request& r, const char* k, uint8_t dflt, uint8_t l
 const char* policyName(slopmotion::InfeasiblePolicy p) {
     switch (p) {
         case slopmotion::InfeasiblePolicy::Stretch: return "stretch";
-        case slopmotion::InfeasiblePolicy::Scale:   return "scale";
-        case slopmotion::InfeasiblePolicy::Reshape: return "reshape";
-        case slopmotion::InfeasiblePolicy::PrioritizeAmplitude: return "prio-amplitude";
-        case slopmotion::InfeasiblePolicy::PrioritizeSmooth:    return "prio-smooth";
         case slopmotion::InfeasiblePolicy::Blend:   return "blend";
     }
     return "?";
@@ -85,12 +81,6 @@ ReplayConfig replayConfigFrom(const httplib::Request& r, MachineSim* sim) {
 
     const std::string pol = r.has_param("policy") ? r.get_param_value("policy") : "";
     if (pol == "stretch") cfg.engine.infeasible_policy = slopmotion::InfeasiblePolicy::Stretch;
-    else if (pol == "scale")   cfg.engine.infeasible_policy = slopmotion::InfeasiblePolicy::Scale;
-    else if (pol == "reshape") cfg.engine.infeasible_policy = slopmotion::InfeasiblePolicy::Reshape;
-    else if (pol == "prio-amplitude" || pol == "amp")
-        cfg.engine.infeasible_policy = slopmotion::InfeasiblePolicy::PrioritizeAmplitude;
-    else if (pol == "prio-smooth" || pol == "smooth")
-        cfg.engine.infeasible_policy = slopmotion::InfeasiblePolicy::PrioritizeSmooth;
     else if (pol == "blend")
         cfg.engine.infeasible_policy = slopmotion::InfeasiblePolicy::Blend;
 
@@ -109,28 +99,20 @@ ReplayConfig replayConfigFrom(const httplib::Request& r, MachineSim* sim) {
     else if (cf == "step") cfg.client_curve_family = 3;
 
     auto& e = cfg.engine;
-    e.infeasible_scale_margin = clampf(qf(r, "scale_margin", e.infeasible_scale_margin), 0.50f, 1.0f);
-    e.infeasible_reshape_steps = qsteps(r, "reshape_steps", e.infeasible_reshape_steps, 0, 8);
     e.infeasible_smooth_budget = clampf(qf(r, "smooth_budget", e.infeasible_smooth_budget), 0.0f, 1.0f);
     e.infeasible_amplitude_budget =
         clampf(qf(r, "amplitude_budget", e.infeasible_amplitude_budget), 0.0f, 1.0f);
     e.infeasible_blend_steps = qsteps(r, "blend_steps", e.infeasible_blend_steps, 1, 10);
     e.infeasible_blend = clampf(qf(r, "blend", e.infeasible_blend), 0.0f, 1.0f);
-    // The three sharpness knobs and the handoff factor have NO live setter on
-    // the sim or the device — they exist in Config and nowhere else. Reaching
-    // them is one of the reasons this bench exists (see the panel's `lab` tags).
-    e.infeasible_soften = qb(r, "soften", e.infeasible_soften);
-    e.infeasible_soften_floor = clampf(qf(r, "soften_floor", e.infeasible_soften_floor), 0.001f, 1.0f);
-    e.infeasible_soften_steps = qsteps(r, "soften_steps", e.infeasible_soften_steps, 0, 10);
+    // The handoff factor has NO live setter on the sim or the device — it
+    // exists in Config and nowhere else. Reaching it is one of the reasons this
+    // bench exists (see the panel's `lab` tags).
     e.handoff_chord_factor = clampf(qf(r, "handoff_chord", e.handoff_chord_factor), 0.0f, 8.0f);
     // The overshoot guard: a physical floor (guard) plus a share of the
-    // segment's own chord (chord_slack), and the bad-move bridge beside it.
+    // segment's own chord (chord_slack).
     e.overshoot_guard = clampf(qf(r, "overshoot_guard", e.overshoot_guard), 0.0f, 20.0f);
-    e.bridge_ratio    = clampf(qf(r, "bridge_ratio", e.bridge_ratio), 0.0f, 50.0f);
     e.overshoot_chord_slack = clampf(qf(r, "chord_slack", e.overshoot_chord_slack), 0.0f, 5.0f);
 
-    e.wave_centering = qb(r, "wave_centering", e.wave_centering);
-    e.wave_centering_gain = clampf(qf(r, "wave_centering_gain", e.wave_centering_gain), 0.0f, 1.0f);
     e.settle_grace_us =
         uint32_t(clampf(qf(r, "settle_grace_ms", float(e.settle_grace_us) / 1000.0f), 0.0f, 200.0f) *
                  1000.0f);
@@ -207,21 +189,13 @@ RunSettings settingsFor(const ReplayConfig& cfg, const std::string& recording) {
           : cfg.client_curve_family == 2 ? "c2"
           : cfg.client_curve_family == 3 ? "step" : "unspecified");
     s.set("policy", policyName(e.infeasible_policy));
-    s.set("scale_margin", e.infeasible_scale_margin, 3);
-    s.set("reshape_steps", double(e.infeasible_reshape_steps), 0);
     s.set("smooth_budget", e.infeasible_smooth_budget, 3);
     s.set("amplitude_budget", e.infeasible_amplitude_budget, 3);
     s.set("blend_steps", double(e.infeasible_blend_steps), 0);
     s.set("blend", e.infeasible_blend, 3);
-    s.set("soften", e.infeasible_soften ? "1" : "0");
-    s.set("soften_floor", e.infeasible_soften_floor, 4);
-    s.set("soften_steps", double(e.infeasible_soften_steps), 0);
     s.set("handoff_chord", e.handoff_chord_factor, 3);
     s.set("overshoot_guard", e.overshoot_guard, 3);
     s.set("chord_slack", e.overshoot_chord_slack, 3);
-    s.set("bridge_ratio", e.bridge_ratio, 3);
-    s.set("wave_centering", e.wave_centering ? "1" : "0");
-    s.set("wave_centering_gain", e.wave_centering_gain, 3);
     s.set("settle_grace_ms", double(e.settle_grace_us) / 1000.0, 1);
     s.set("chase_ff", e.chase_feedforward ? "1" : "0");
     s.set("chase_gain", e.chase_ff_gain, 3);
@@ -378,19 +352,16 @@ bool HttpFacade::begin(MachineSim* sim, uint16_t httpPort, uint16_t wsPort, Sess
         std::snprintf(tuningBuf, sizeof(tuningBuf),
                       "\"tuning\":{\"curve_policy\":\"%s\","
                       "\"infeasible_policy\":\"%s\","
-                      "\"infeasible_scale_margin\":%.3f,\"reshape_steps\":%u,"
                       "\"smooth_budget\":%.3f,\"amplitude_budget\":%.3f,\"blend\":%.3f,"
                       "\"blend_steps\":%u,"
                       "\"overshoot_guard\":%.3f,\"overshoot_chord_slack\":%.3f,"
                       "\"settle_grace_ms\":%.1f,\"chase_ff\":%s,"
                       "\"chase_accel_ff\":%s,\"chase_aim_accel_extrap\":%s,"
                       "\"chase_gain\":%.3f,\"chase_lookahead\":%.2f,"
-                      "\"chase_dense_ms\":%.1f,\"wave_centering\":%s,"
-                      "\"wave_centering_gain\":%.3f,"
+                      "\"chase_dense_ms\":%.1f,"
                       "\"vmax\":%.4f,\"amax\":%.3f,"
                       "\"jmax\":%.1f}",
-                      curveName, polName, double(ec.infeasible_scale_margin),
-                      unsigned(ec.infeasible_reshape_steps),
+                      curveName, polName,
                       double(ec.infeasible_smooth_budget),
                       double(ec.infeasible_amplitude_budget), double(ec.infeasible_blend),
                       unsigned(ec.infeasible_blend_steps),
@@ -401,8 +372,6 @@ bool HttpFacade::begin(MachineSim* sim, uint16_t httpPort, uint16_t wsPort, Sess
                       ec.chase_aim_accel_extrap ? "true" : "false",
                       double(ec.chase_ff_gain), double(ec.chase_lookahead),
                       double(ec.chase_dense_us) / 1000.0,
-                      ec.wave_centering ? "true" : "false",
-                      double(ec.wave_centering_gain),
                       double(ec.limits.vmax), double(ec.limits.amax),
                       double(ec.limits.jmax));
 

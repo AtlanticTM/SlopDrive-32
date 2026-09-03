@@ -1913,14 +1913,18 @@ void WebUI::handleApiSlopMotion() {
     // PlanKind::Cubic (=3) as "no active plan" mid-stroke. An out-of-range
     // value must LOOK wrong, so it falls back to index 0 and the operator sees
     // a policy that plainly is not the one they set.
+    // INDEXED BY THE STORED ORDINAL, which is not the policy count: ordinals
+    // 2..5 named policies deleted 2026-09-02 and the host map runs every one of
+    // them as Blend, so the echo names what the machine ACTUALLY runs rather
+    // than a policy that no longer exists.
     static const char* kInfeasPolicyNames[] = {
-        "stretch", "scale", "reshape", "prio-amplitude", "prio-smooth", "blend"
+        "stretch", "blend", "blend", "blend", "blend", "blend"
     };
     static constexpr uint8_t kInfeasPolicyCount =
         uint8_t(sizeof(kInfeasPolicyNames) / sizeof(kInfeasPolicyNames[0]));
-    // TRIPWIRE: this table is a restatement of the engine's enum, and the two
-    // drifting apart is what shipped Blend unreachable. A new policy now fails
-    // the BUILD here instead of silently echoing the wrong name at runtime.
+    // TRIPWIRE: this table is a restatement of the engine's ORDINAL BOUND, and
+    // the two drifting apart is what shipped Blend unreachable. A new policy now
+    // fails the BUILD here instead of silently echoing the wrong name.
     static_assert(kInfeasPolicyCount == slopmotion::kInfeasiblePolicyMax + 1,
                   "kInfeasPolicyNames is out of sync with slopmotion::InfeasiblePolicy");
     // Canonical wire names for slopmotion::CurvePolicy — same table-and-bound
@@ -1987,11 +1991,7 @@ void WebUI::handleApiSlopMotion() {
         if (doc["infeasible_policy"].is<const char*>()) {
             const char* p = doc["infeasible_policy"];
             if      (strcasecmp(p, "stretch") == 0) _state.sm_tune_infeas_policy = 0;
-            else if (strcasecmp(p, "scale")   == 0) _state.sm_tune_infeas_policy = 1;
-            else if (strcasecmp(p, "reshape") == 0) _state.sm_tune_infeas_policy = 2;
-            else if (strcasecmp(p, "prio-amplitude") == 0) _state.sm_tune_infeas_policy = 3;
-            else if (strcasecmp(p, "prio-smooth")    == 0) _state.sm_tune_infeas_policy = 4;
-            else if (strcasecmp(p, "blend")          == 0) _state.sm_tune_infeas_policy = 5;
+            else if (strcasecmp(p, "blend")   == 0) _state.sm_tune_infeas_policy = 1;
         } else if (doc["infeasible_policy"].is<int>()) {
             const int p = doc["infeasible_policy"].as<int>();
             if (p >= 0 && p < (int)kInfeasPolicyCount)
@@ -2024,14 +2024,6 @@ void WebUI::handleApiSlopMotion() {
         if (doc["blend_steps"].is<int>())
             _state.sm_tune_blend_steps =
                 (uint8_t)(int)clampf((float)doc["blend_steps"].as<int>(), 1.0f, 10.0f);
-        if (doc["infeasible_scale_margin"].is<float>())
-            _state.sm_tune_infeas_margin =
-                clampf(doc["infeasible_scale_margin"], 0.50f, 1.00f);
-        // RESHAPE bisection depth — a plan-time BUDGET dial (one Ruckig
-        // calculate() per step), clamped to the engine's own [0, 8].
-        if (doc["reshape_steps"].is<int>())
-            _state.sm_tune_reshape_steps =
-                (uint8_t)(int)clampf((float)doc["reshape_steps"].as<int>(), 0.0f, 8.0f);
         // Settle grace. The ENGINE field is MICROSECONDS; this API talks
         // MILLISECONDS because that is the unit an operator thinks in (same
         // convention as chase_dense_ms above) — convert at the boundary, here,
@@ -2043,18 +2035,6 @@ void WebUI::handleApiSlopMotion() {
                 (uint32_t)(clampf(doc["settle_grace_ms"], 0.0f, 200.0f) * 1000.0f);
         if (doc["chase_aim_accel_extrap"].is<bool>())
             _state.sm_tune_aim_extrap = doc["chase_aim_accel_extrap"].as<bool>();
-        // DC centering of a degraded band: keep the achieved stroke symmetric
-        // about the COMMANDED midpoint when the machine cannot deliver the full
-        // amplitude on the clock. ON is the engine default; OFF restores the
-        // original (no-centering) contract. The gain is a feel dial (0..1,
-        // and NOT monotone — see SystemState) clamped to the engine's own
-        // range here so the GET echo below is the value Core 1 will actually
-        // push.
-        if (doc["wave_centering"].is<bool>())
-            _state.sm_tune_centering = doc["wave_centering"].as<bool>();
-        if (doc["wave_centering_gain"].is<float>())
-            _state.sm_tune_centering_gain =
-                clampf(doc["wave_centering_gain"], 0.0f, 1.0f);
         // RFC-008 handoff sanity guard — the Fritsch-Carlson chord factor k
         // used to bound an inbound segment's end velocity against the FOLLOWING
         // segment's chord. 1.5 is the shape-preserving bound (engine default);
@@ -2079,20 +2059,15 @@ void WebUI::handleApiSlopMotion() {
             _state.sm_reset_gen = (uint16_t)(_state.sm_reset_gen + 1);
         }
         SLOGI("ui", "slopmotion tuning: jmax_ovr=%.0f gain=%.2f look=%.2f ff=%d aff=%d "
-                    "policy=%s margin=%.2f steps=%u grace=%.0fms aimx=%d "
-                    "centering=%d@%.2f handoff_k=%.2f curve=%s "
+                    "policy=%s grace=%.0fms aimx=%d handoff_k=%.2f curve=%s "
                     "smooth_bud=%.2f amp_bud=%.2f blend=%u",
               (double)_state.sm_tune_jmax_ovr, (double)_state.sm_tune_chase_gain,
               (double)_state.sm_tune_chase_look,
               (int)_state.sm_tune_chase_ff, (int)_state.sm_tune_chase_aff,
               kInfeasPolicyNames[_state.sm_tune_infeas_policy < kInfeasPolicyCount
                                      ? _state.sm_tune_infeas_policy : 0],
-              (double)_state.sm_tune_infeas_margin,
-              (unsigned)_state.sm_tune_reshape_steps,
               (double)_state.sm_tune_settle_grace_us / 1000.0,
               (int)_state.sm_tune_aim_extrap,
-              (int)_state.sm_tune_centering,
-              (double)_state.sm_tune_centering_gain,
               (double)_state.sm_tune_handoff_k,
               kCurvePolicyNames[_state.sm_tune_curve_policy < kCurvePolicyCount
                                     ? _state.sm_tune_curve_policy : 0],
@@ -2120,15 +2095,13 @@ void WebUI::handleApiSlopMotion() {
     tuning["infeasible_policy"]       = kInfeasPolicyNames[
         _state.sm_tune_infeas_policy < kInfeasPolicyCount
             ? _state.sm_tune_infeas_policy : 0];
-    tuning["infeasible_scale_margin"] = _state.sm_tune_infeas_margin;
-    tuning["reshape_steps"]           = _state.sm_tune_reshape_steps;
     // Curve family, same string vocabulary as the sim's echo ("follow"/"c1"/"c2").
     tuning["curve_policy"]            = kCurvePolicyNames[
         _state.sm_tune_curve_policy < kCurvePolicyCount
             ? _state.sm_tune_curve_policy : 0];
-    // Budgeted-policy spend limits + the alpha-search depth. APPLIED values,
-    // post-clamp — inert unless infeasible_policy is one of the two budgeted
-    // ones, but always echoed so the operator can set them up before switching.
+    // Blend's two spend budgets + the ray's step depth. APPLIED values,
+    // post-clamp — inert under Stretch, but always echoed so the operator can
+    // set them up before switching.
     tuning["smooth_budget"]           = _state.sm_tune_smooth_budget;
     tuning["amplitude_budget"]        = _state.sm_tune_amp_budget;
     tuning["blend_steps"]             = _state.sm_tune_blend_steps;
@@ -2151,10 +2124,6 @@ void WebUI::handleApiSlopMotion() {
     // MILLISECONDS on the wire, microseconds in the engine (see the POST side).
     tuning["settle_grace_ms"]         = _state.sm_tune_settle_grace_us / 1000.0f;
     tuning["chase_aim_accel_extrap"]  = (bool)_state.sm_tune_aim_extrap;
-    // Centering: the APPLIED pair (post-clamp), i.e. exactly what the per-tick
-    // Core-1 push writes into slopmotion::Config.
-    tuning["wave_centering"]          = (bool)_state.sm_tune_centering;
-    tuning["wave_centering_gain"]     = _state.sm_tune_centering_gain;
     // RFC-008 handoff guard strength (0 = off). APPLIED value, post-clamp.
     tuning["handoff_k"]               = _state.sm_tune_handoff_k;
     // "effective" is what Core 1 ACTUALLY pushed into the engine last tick —

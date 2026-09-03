@@ -190,8 +190,6 @@ void ConfigStore::save(SystemState& state, RangeMapper& mapper, MotorDriver& mot
     ck(prefs.putFloat("sm_jmax",   state.sm_tune_jmax_ovr));
     ck(prefs.putFloat("sm_vmax",   state.sm_tune_vmax_ovr));
     ck(prefs.putFloat("sm_amax",   state.sm_tune_amax_ovr));
-    ck(prefs.putUChar("sm_cent",   state.sm_tune_centering ? 1 : 0));
-    ck(prefs.putFloat("sm_cgain",  state.sm_tune_centering_gain));
     ck(prefs.putUChar("sm_cff",    state.sm_tune_chase_ff ? 1 : 0));
     ck(prefs.putUChar("sm_caff",   state.sm_tune_chase_aff ? 1 : 0));
     ck(prefs.putFloat("sm_cgn",    state.sm_tune_chase_gain));
@@ -200,13 +198,15 @@ void ConfigStore::save(SystemState& state, RangeMapper& mapper, MotorDriver& mot
     ck(prefs.putUChar("sm_aim",    state.sm_tune_aim_extrap ? 1 : 0));
     ck(prefs.putFloat("sm_hk",     state.sm_tune_handoff_k));
     ck(prefs.putUChar("sm_curve",  state.sm_tune_curve_policy));
+    // Keys sm_cent/sm_cgain/sm_imarg/sm_rstep are no longer written (their
+    // knobs are gone). An old device still holding them reads nothing: load()
+    // asks only for the keys that exist, so a stale key is inert, not a
+    // migration.
     ck(prefs.putUChar("sm_ipol",   state.sm_tune_infeas_policy));
-    ck(prefs.putFloat("sm_imarg",  state.sm_tune_infeas_margin));
     ck(prefs.putFloat("sm_sbud",   state.sm_tune_smooth_budget));
     ck(prefs.putFloat("sm_abud",   state.sm_tune_amp_budget));
     ck(prefs.putUChar("sm_bstep",  state.sm_tune_blend_steps));
     ck(prefs.putFloat("sm_iblnd",  state.sm_tune_infeas_blend));
-    ck(prefs.putUChar("sm_rstep",  state.sm_tune_reshape_steps));
     ck(prefs.putUInt ("sm_settle", state.sm_tune_settle_grace_us));
 
 
@@ -336,8 +336,6 @@ void ConfigStore::load(SystemState& state, RangeMapper& mapper, MotorDriver& mot
         state.sm_tune_jmax_ovr    = clf(prefs.getFloat("sm_jmax",  state.sm_tune_jmax_ovr), 0.0f, 2000000.0f);
         state.sm_tune_vmax_ovr    = clf(prefs.getFloat("sm_vmax",  state.sm_tune_vmax_ovr), 0.0f, 20.0f);
         state.sm_tune_amax_ovr    = clf(prefs.getFloat("sm_amax",  state.sm_tune_amax_ovr), 0.0f, 500.0f);
-        state.sm_tune_centering    = prefs.getUChar("sm_cent",  state.sm_tune_centering ? 1 : 0) != 0;
-        state.sm_tune_centering_gain = clf(prefs.getFloat("sm_cgain", state.sm_tune_centering_gain), 0.0f, 1.0f);
         state.sm_tune_chase_ff    = prefs.getUChar("sm_cff",   state.sm_tune_chase_ff ? 1 : 0) != 0;
         state.sm_tune_chase_aff   = prefs.getUChar("sm_caff",  state.sm_tune_chase_aff ? 1 : 0) != 0;
         state.sm_tune_chase_gain  = clf(prefs.getFloat("sm_cgn", state.sm_tune_chase_gain), 0.0f, 1.5f);
@@ -347,12 +345,10 @@ void ConfigStore::load(SystemState& state, RangeMapper& mapper, MotorDriver& mot
         state.sm_tune_handoff_k   = clf(prefs.getFloat("sm_hk", state.sm_tune_handoff_k), 0.0f, 8.0f);
         state.sm_tune_curve_policy  = (uint8_t)clu(prefs.getUChar("sm_curve", state.sm_tune_curve_policy), 0, 2);
         state.sm_tune_infeas_policy = (uint8_t)clu(prefs.getUChar("sm_ipol",  state.sm_tune_infeas_policy), 0, slopmotion::kInfeasiblePolicyMax);
-        state.sm_tune_infeas_margin = clf(prefs.getFloat("sm_imarg", state.sm_tune_infeas_margin), 0.5f, 1.0f);
         state.sm_tune_smooth_budget = clf(prefs.getFloat("sm_sbud",  state.sm_tune_smooth_budget), 0.0f, 1.0f);
         state.sm_tune_amp_budget    = clf(prefs.getFloat("sm_abud",  state.sm_tune_amp_budget), 0.0f, 1.0f);
         state.sm_tune_blend_steps   = (uint8_t)clu(prefs.getUChar("sm_bstep", state.sm_tune_blend_steps), 1, 10);
         state.sm_tune_infeas_blend  = clf(prefs.getFloat("sm_iblnd", state.sm_tune_infeas_blend), 0.0f, 1.0f);
-        state.sm_tune_reshape_steps = (uint8_t)clu(prefs.getUChar("sm_rstep", state.sm_tune_reshape_steps), 0, 8);
         state.sm_tune_settle_grace_us = clu(prefs.getUInt("sm_settle", state.sm_tune_settle_grace_us), 0u, 200000u);
         state.config.input_max_jerk_mm_s3  = inp_jrk;
 

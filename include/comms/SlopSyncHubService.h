@@ -496,9 +496,9 @@ private:
     // 0x008B/0x008C/0x008D slopmotion tuning — last PUBLISHED bytes, same
     // reason as _lastModes: diffing what subscribers hold cannot disagree with
     // what they hold.
-    std::array<std::byte, 18> _lastSmLim{};
+    std::array<std::byte, 13> _lastSmLim{};
     std::array<std::byte, 20> _lastSmChase{};
-    std::array<std::byte, 21> _lastSmWav{};
+    std::array<std::byte, 16> _lastSmWav{};
     bool _smLimEverSent = false;
     bool _smChaseEverSent = false;
     bool _smWavEverSent = false;

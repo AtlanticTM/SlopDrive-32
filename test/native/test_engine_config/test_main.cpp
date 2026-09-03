@@ -1,14 +1,12 @@
-// test_engine_config -- host suite for the tuning-to-slopmotion::Config map.
+// test_engine_config -- host suite for the tuning-to-kOpConfig-tag census.
 // Constraints:
-// - Guards sd-6b2.4: a field the host means to expose but forgets to write is
-//   silently the engine default forever. Every mapped field is asserted to
-//   MOVE off its default under a sentinel input, and every deliberately
-//   unmapped field is asserted to STAY on it. The two lists together are the
-//   whole struct; the sizeof tripwire at the bottom fails when the engine
-//   grows a field so the census gets revisited instead of silently rotting.
-// - Pure float math, no clock, no hardware: deterministic, and must stay that
-//   way. slopmotion.hpp is included first so the native env's LDF resolves
-//   lib/slopmotion from this directory.
+// - Guards sd-6b2.4 in its post-port form: a field the host means to expose
+//   but forgets to emit is silently the slave's default forever. Every mapped
+//   field is asserted to MOVE its tag off the boot value under a sentinel
+//   input, and every deliberately unmapped ConfigTag is asserted to be ABSENT.
+//   The two lists together are the whole vocabulary.
+// - Pure integer/float math, no clock, no hardware: deterministic, and must
+//   stay that way.
 #define DOCTEST_CONFIG_IMPLEMENT_WITH_MAIN
 #include <doctest/doctest.h>
 
@@ -18,134 +16,186 @@
 
 #include <cstdint>
 
+using motionlink::ConfigField;
 using slopdrive::EngineTuning;
-using slopdrive::buildEngineConfig;
+using slopdrive::buildConfigTags;
+using slopdrive::kEngineConfigTagCount;
 
 namespace {
 
-// Every input at a value the engine default is NOT, so "field moved" is a
-// clean signal. Span is 100 mm, so a mm-domain ceiling divides by 100.
+// Every input at a value the boot tuning is NOT, so "tag moved" is a clean
+// signal. Span is 100 mm, so a mm-domain ceiling divides by 100.
 EngineTuning sentinelTuning() {
     EngineTuning t;
     t.span_mm         = 100.0f;
-    t.input_max_speed = 700.0f;      // -> vmax 7 (default 3)
-    t.input_max_accel = 9000.0f;     // -> amax 90 (default 30)
-    t.input_max_jerk  = 120000.0f;   // -> jmax 1200 (default 500)
-    t.user_max_speed  = 250.0f;      // -> recovery_vmax 2.5 (default 0)
-    t.chase_ff        = false;       // default true
-    t.chase_aff       = false;       // default true
-    t.aim_extrap      = false;       // default true
-    t.chase_gain      = 0.4f;        // default 0.9
-    t.chase_look      = 5.0f;        // default 3
-    t.dense_us        = 33000;       // default 60000
-    t.infeas_policy   = 0;           // Stretch (engine default Blend)
-    t.infeas_blend    = 0.875f;      // default 0.5
-    t.smooth_budget   = 0.31f;       // default 0.5
-    t.amp_budget      = 0.77f;       // default 0.5
-    t.blend_steps     = 9;           // default 6
-    t.curve_policy    = 1;           // ForceC1 (default FollowClient)
-    t.handoff_k       = 2.75f;       // default 1.5
-    t.settle_grace_us = 200000;      // default 30000
+    t.input_max_speed = 700.0f;      // -> vmax 7
+    t.input_max_accel = 9000.0f;     // -> amax 90
+    t.input_max_jerk  = 120000.0f;   // -> jmax 1200
+    t.user_max_speed  = 250.0f;      // -> user vmax 2.5
+    t.user_max_accel  = 800.0f;      // -> user amax 8
+    t.chase_ff        = false;       // boot true
+    t.chase_aff       = false;       // boot true
+    t.aim_extrap      = false;       // boot true
+    t.chase_gain      = 0.4f;        // boot 0.9
+    t.chase_look      = 5.0f;        // boot 3
+    t.dense_us        = 33000;       // boot 60000
+    t.infeas_policy   = 0;           // Stretch (boot ordinal 0 too, see below)
+    t.infeas_blend    = 0.875f;      // boot 0.5
+    t.smooth_budget   = 0.31f;       // boot 0.5
+    t.amp_budget      = 0.77f;       // boot 0.5
+    t.blend_steps     = 9;           // boot 6
+    t.curve_policy    = 1;           // ForceC1 (boot FollowClient)
+    t.handoff_k       = 2.75f;       // boot 1.5
+    t.settle_grace_us = 200000;      // boot 30000
     return t;
+}
+
+bool hasTag(const std::array<ConfigField, kEngineConfigTagCount>& tags,
+            uint8_t tag) {
+    for (const ConfigField& f : tags)
+        if (f.tag == tag) return true;
+    return false;
+}
+
+uint32_t rawOf(const std::array<ConfigField, kEngineConfigTagCount>& tags,
+               uint8_t tag) {
+    for (const ConfigField& f : tags)
+        if (f.tag == tag) return f.raw;
+    return 0xDEADBEEFu;
+}
+
+float fOf(const std::array<ConfigField, kEngineConfigTagCount>& tags,
+          uint8_t tag) {
+    return motionlink::bitsF32(rawOf(tags, tag));
 }
 
 }  // namespace
 
-TEST_CASE("every mapped Config field leaves its engine default") {
-    const slopmotion::Config def;
-    const slopmotion::Config c = buildEngineConfig(sentinelTuning());
+TEST_CASE("every mapped tuning field moves its own tag") {
+    using namespace motionlink;
+    const auto boot = buildConfigTags(EngineTuning{});
+    const auto s = buildConfigTags(sentinelTuning());
 
-    CHECK(c.limits.vmax != def.limits.vmax);
-    CHECK(c.limits.amax != def.limits.amax);
-    CHECK(c.limits.jmax != def.limits.jmax);
-    CHECK(c.recovery_vmax != def.recovery_vmax);
-    CHECK(c.chase_feedforward != def.chase_feedforward);
-    CHECK(c.chase_accel_ff != def.chase_accel_ff);
-    CHECK(c.chase_aim_accel_extrap != def.chase_aim_accel_extrap);
-    CHECK(c.chase_ff_gain != def.chase_ff_gain);
-    CHECK(c.chase_lookahead != def.chase_lookahead);
-    CHECK(c.chase_dense_us != def.chase_dense_us);
-    CHECK(c.infeasible_policy != def.infeasible_policy);
-    CHECK(c.infeasible_blend != def.infeasible_blend);
-    CHECK(c.infeasible_smooth_budget != def.infeasible_smooth_budget);
-    CHECK(c.infeasible_amplitude_budget != def.infeasible_amplitude_budget);
-    CHECK(c.infeasible_blend_steps != def.infeasible_blend_steps);
-    CHECK(c.curve_policy != def.curve_policy);
-    CHECK(c.handoff_chord_factor != def.handoff_chord_factor);
-    CHECK(c.settle_grace_us != def.settle_grace_us);
+    CHECK(rawOf(s, kCfgInputVmax) != rawOf(boot, kCfgInputVmax));
+    CHECK(rawOf(s, kCfgInputAmax) != rawOf(boot, kCfgInputAmax));
+    CHECK(rawOf(s, kCfgInputJmax) != rawOf(boot, kCfgInputJmax));
+    CHECK(rawOf(s, kCfgUserVmax) != rawOf(boot, kCfgUserVmax));
+    CHECK(rawOf(s, kCfgUserAmax) != rawOf(boot, kCfgUserAmax));
+    CHECK(rawOf(s, kCfgSettleGraceUs) != rawOf(boot, kCfgSettleGraceUs));
+    CHECK(rawOf(s, kCfgInfeasibleBlend) != rawOf(boot, kCfgInfeasibleBlend));
+    CHECK(rawOf(s, kCfgCurvePolicy) != rawOf(boot, kCfgCurvePolicy));
+    CHECK(rawOf(s, kCfgHandoffChordFactor) != rawOf(boot, kCfgHandoffChordFactor));
+    CHECK(rawOf(s, kCfgBlendSteps) != rawOf(boot, kCfgBlendSteps));
+    CHECK(rawOf(s, kCfgSmoothBudget) != rawOf(boot, kCfgSmoothBudget));
+    CHECK(rawOf(s, kCfgAmplitudeBudget) != rawOf(boot, kCfgAmplitudeBudget));
+    CHECK(rawOf(s, kCfgChaseFeedforward) != rawOf(boot, kCfgChaseFeedforward));
+    CHECK(rawOf(s, kCfgChaseAccelFf) != rawOf(boot, kCfgChaseAccelFf));
+    CHECK(rawOf(s, kCfgChaseFfGain) != rawOf(boot, kCfgChaseFfGain));
+    CHECK(rawOf(s, kCfgChaseDenseUs) != rawOf(boot, kCfgChaseDenseUs));
+    CHECK(rawOf(s, kCfgChaseLookahead) != rawOf(boot, kCfgChaseLookahead));
+    CHECK(rawOf(s, kCfgChaseAimExtrap) != rawOf(boot, kCfgChaseAimExtrap));
+    // infeas_policy is the one field whose boot value IS the sentinel value
+    // (both ordinal 0); its own cases below cover it.
+    CHECK(hasTag(s, kCfgInfeasiblePolicy));
 }
 
-TEST_CASE("the unmapped list is exactly the set still at the engine default") {
-    const slopmotion::Config def;
-    const slopmotion::Config c = buildEngineConfig(sentinelTuning());
+TEST_CASE("the unmapped list is exactly the set of tags never emitted") {
+    using namespace motionlink;
+    const auto s = buildConfigTags(sentinelTuning());
 
-    // ENGINE-DEFAULT BY DECISION. This list and the CHECK-!= list above are
-    // the whole of Config; a field in neither is a field nobody decided about.
-    CHECK(c.chase_jerk_scale == def.chase_jerk_scale);
-    CHECK(c.chase_jerk_floor == def.chase_jerk_floor);
-    CHECK(c.chase_stale_us == def.chase_stale_us);
-    CHECK(c.overshoot_guard == def.overshoot_guard);
-    CHECK(c.overshoot_chord_slack == def.overshoot_chord_slack);
+    // ENGINE-DEFAULT BY DECISION. This list and the CHECKs above are the whole
+    // ConfigTag vocabulary the ENGINE owns; a tag in neither is a tag nobody
+    // decided about. The four here plus the 19 emitted is that whole set.
+    CHECK_FALSE(hasTag(s, kCfgOvershootGuard));
+    CHECK_FALSE(hasTag(s, kCfgOvershootChordSlack));
+    CHECK_FALSE(hasTag(s, kCfgChaseStaleUs));
+    // RETIRED: synthesis left the engine 2026-09-03. Emitting it would be a
+    // host telling a slave about a knob that no longer exists.
+    CHECK_FALSE(hasTag(s, kCfgSampleSynthesis));
 
-    // 19 mapped (Limits' three included) + 5 unmapped is the whole struct. A
-    // changed size means the engine grew or dropped a field: classify it into
-    // one of the two lists above, then update this number. Host-only (the
-    // native env has one toolchain), never a wire fact.
-    static_assert(sizeof(slopmotion::Config) == 84,
-                  "slopmotion::Config changed shape -- re-census the two lists above");
+    // The ARBITER owns these four (window, gates, soft start); this map must
+    // never emit them or two producers would fight over one tag.
+    CHECK_FALSE(hasTag(s, kCfgWindowMinCounts));
+    CHECK_FALSE(hasTag(s, kCfgWindowMaxCounts));
+    CHECK_FALSE(hasTag(s, kCfgGates));
+    CHECK_FALSE(hasTag(s, kCfgSoftStartCap));
+
+    CHECK(s.size() == 19);
+}
+
+TEST_CASE("no tag is emitted twice") {
+    const auto s = buildConfigTags(sentinelTuning());
+    for (size_t i = 0; i < s.size(); ++i)
+        for (size_t j = i + 1; j < s.size(); ++j)
+            CHECK(s[i].tag != s[j].tag);
 }
 
 TEST_CASE("out-of-range enum ordinals fall through to the engine default") {
+    using namespace motionlink;
     const slopmotion::Config def;
     EngineTuning t = sentinelTuning();
     t.infeas_policy = 200;
     t.curve_policy  = 200;
-    const slopmotion::Config c = buildEngineConfig(t);
-    CHECK(c.infeasible_policy == def.infeasible_policy);
-    CHECK(c.curve_policy == def.curve_policy);
+    const auto s = buildConfigTags(t);
+    CHECK(rawOf(s, kCfgInfeasiblePolicy) == uint32_t(def.infeasible_policy));
+    CHECK(rawOf(s, kCfgCurvePolicy) == uint32_t(def.curve_policy));
 }
 
 TEST_CASE("a retired policy ordinal runs as Blend, never as Stretch") {
-    // Ordinals 2..5 named policies deleted 2026-09-02 and an older NVS still
-    // holds one. Every one of them was a timing-first amplitude/shape trade,
-    // so the honest remap is Blend -- reverting the operator to Stretch would
-    // silently change the CONTRACT (deadline kept vs stroke kept).
+    using namespace motionlink;
+    // Ordinals 1..kInfeasiblePolicyMax name policies deleted 2026-09-02 that an
+    // older NVS still holds. Every one was a timing-first amplitude/shape
+    // trade, so the honest remap is Blend -- reverting the operator to Stretch
+    // would silently change the CONTRACT (deadline kept vs stroke kept).
     EngineTuning t;
     t.infeas_policy = 0;
-    CHECK(buildEngineConfig(t).infeasible_policy ==
-          slopmotion::InfeasiblePolicy::Stretch);
+    CHECK(rawOf(buildConfigTags(t), kCfgInfeasiblePolicy) ==
+          uint32_t(slopmotion::InfeasiblePolicy::Stretch));
     for (uint8_t ord = 1; ord <= slopmotion::kInfeasiblePolicyMax; ++ord) {
         t.infeas_policy = ord;
-        CHECK(buildEngineConfig(t).infeasible_policy ==
-              slopmotion::InfeasiblePolicy::Blend);
+        CHECK(rawOf(buildConfigTags(t), kCfgInfeasiblePolicy) ==
+              uint32_t(slopmotion::InfeasiblePolicy::Blend));
     }
 }
 
-TEST_CASE("no usable window keeps the engine's own ceilings") {
-    const slopmotion::Config def;
+TEST_CASE("no usable window emits zero ceilings, which the slave gates on") {
+    using namespace motionlink;
     EngineTuning t = sentinelTuning();
     t.span_mm = 0.0f;
-    const slopmotion::Config c = buildEngineConfig(t);
-    CHECK(c.limits.vmax == def.limits.vmax);
-    CHECK(c.limits.amax == def.limits.amax);
-    CHECK(c.limits.jmax == def.limits.jmax);
-    CHECK(c.recovery_vmax == 0.0f);
+    const auto s = buildConfigTags(t);
+    // A zero vmax means the set was never usefully pushed; the slave treats
+    // that as unconfigured and gates the command rather than planning at zero
+    // (MotionLinkProtocol.h, SelectedLimits).
+    CHECK(fOf(s, kCfgInputVmax) == 0.0f);
+    CHECK(fOf(s, kCfgInputAmax) == 0.0f);
+    CHECK(fOf(s, kCfgInputJmax) == 0.0f);
+    CHECK(fOf(s, kCfgUserVmax) == 0.0f);
+    CHECK(fOf(s, kCfgUserAmax) == 0.0f);
 }
 
 TEST_CASE("an override beats the mm-derived ceiling; the map stays pure") {
+    using namespace motionlink;
     EngineTuning t = sentinelTuning();
     t.vmax_ovr = 4.25f;
     t.amax_ovr = 44.0f;
     t.jmax_ovr = 640.0f;
-    const slopmotion::Config c = buildEngineConfig(t);
-    CHECK(c.limits.vmax == doctest::Approx(4.25f));
-    CHECK(c.limits.amax == doctest::Approx(44.0f));
-    CHECK(c.limits.jmax == doctest::Approx(640.0f));
+    const auto s = buildConfigTags(t);
+    CHECK(fOf(s, kCfgInputVmax) == doctest::Approx(4.25f));
+    CHECK(fOf(s, kCfgInputAmax) == doctest::Approx(44.0f));
+    CHECK(fOf(s, kCfgInputJmax) == doctest::Approx(640.0f));
+    // The same three values the host publishes as sm_eff_*: ONE derivation.
+    const slopdrive::NormalizedLimits lim = slopdrive::normalizedLimits(t);
+    CHECK(lim.vmax == doctest::Approx(4.25f));
+    CHECK(lim.amax == doctest::Approx(44.0f));
+    CHECK(lim.jmax == doctest::Approx(640.0f));
 
-    // Purity is what lets the caller compare TUNINGS instead of Configs.
+    // Purity is what lets the DRIVER own change detection: equal tuning in,
+    // byte-equal tags out, so an unchanged field never ships a frame.
     CHECK(sentinelTuning() == sentinelTuning());
     CHECK_FALSE(sentinelTuning() == t);
-    const slopmotion::Config again = buildEngineConfig(t);
-    CHECK(again.limits.vmax == c.limits.vmax);
-    CHECK(again.infeasible_blend == c.infeasible_blend);
+    const auto again = buildConfigTags(t);
+    for (size_t i = 0; i < s.size(); ++i) {
+        CHECK(again[i].tag == s[i].tag);
+        CHECK(again[i].raw == s[i].raw);
+    }
 }

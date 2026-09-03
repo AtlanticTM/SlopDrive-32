@@ -1,40 +1,23 @@
 #pragma once
 
-// MotionArbiter — event-driven motion planner and sole caller of MotorDriver.
+// MotionArbiter -- the COMMAND GATE and sole caller of MotorDriver.
 //
 // Constraints:
-// - Motion doctrine (architecture.md): ONE intent -> ONE plan -> FAS executes.
-//   No clocked motion tick, no chase loop. Every intent is planned ONCE, at
-//   arrival, from the machine's ACTUAL current state (FAS position + live
-//   velocity). Speed/accel are DERIVED from what the intent requires
-//   (distance, deadline, ramp shape) and CLAMPED at the source's limit-set
-//   ceilings — ceilings are never targets.
-// - Retarget-while-moving is the normal case, not an edge case: a new intent
-//   for the same source replans from live (p, v) via FAS's velocity-continuous
-//   moveTo() retarget. This is what lets a 100-333 Hz host stream dense points
-//   without a chase loop — each point becomes a retarget intent whose
-//   deadline is the measured inter-command interval.
-// - Depends on this much of FastAccelStepper's contract: getCurrentPosition()
-//   is the open-loop commanded position; moveTo() is non-blocking and
-//   retargets velocity-continuously from the current state; there is no
-//   native asymmetric entry/exit accel. Ramp shaping is therefore a single
-//   symmetric accel scaled by min(entryRamp, exitRamp) — true asymmetric
-//   ramps would need two-segment dispatch with FAS completion awareness, not
-//   implemented.
-// - Blend/reversal policy: only "allow" is implemented (FAS retarget handles
-//   reversals natively). "let-it-land" and "hybrid" are accepted but aliased
-//   to "allow", logged as deprecated.
-// - Sole-caller enforcement is compile-time: MotorDriver's motion methods
-//   (moveTo/streamTo/streamToSteps/stop/hardStop) are protected with
-//   `friend class MotionArbiter` (MotorDriver.h), so only this class can call
-//   them; every other caller submits an intent via submit()/submitDeferred().
-// - submit() and submitStreamSample() run on Core 1 ONLY; Core 0 callers
-//   enqueue via submitDeferred() into a DEFER_QUEUE_DEPTH-slot FreeRTOS queue,
-//   drained in full, in arrival order, by processDeferred() on motorTask
-//   (Core 1) every tick. Same core is not the same task: the sampler
-//   (streamSamplerTask, prio 4) preempts motorTask (prio 3), so the DRIVER
-//   CALL -- and only the driver call -- is serialized under _dispatch_lock.
-//   Planning is deliberately outside it (see the field comment).
+// - The RP2350 holds the plan (docs/rp-motion-port.md). This class does not
+//   plan: it arbitrates sources, runs every safety gate, clamps to the stroke
+//   window, picks the ceiling SET, and forwards ONE LinkCommand per accepted
+//   intent. Ceilings, window, gates, soft-start value and engine tuning go
+//   out as kOpConfig tags, on change.
+// - ONE DOOR OUT: every accepted intent leaves through _dispatchCommand().
+//   A denied intent is counted in rejectedIntents() and never reaches the
+//   driver.
+// - Commands are forwarded ON ARRIVAL, never on a tick (architecture.md
+//   section 2). processDeferred() exists only to cross the core boundary.
+// - submit()/submitSegment() run on Core 1 ONLY; Core 0 enqueues through
+//   submitDeferred()/submitSegmentDeferred(), drained in arrival order by
+//   processDeferred() on motorTask.
+// - Anchors leave here in S3 esp_timer microseconds; the DRIVER converts to
+//   slave time, because it owns the clock estimate.
 
 #include <cstdint>
 #include <freertos/FreeRTOS.h>
@@ -42,187 +25,157 @@
 #include "MotorDriver.h"
 #include "SystemState.h"
 #include "config_api.h"
+#include "MotionLinkProtocol.h"
 
 class RangeMapper;
 
 // ---- MotionSource -----------------------------------------------------------
-// Tags the origin of an intent so the arbiter can pick the right limit set
-// and gating (MANUAL always wins the safety gates).
+// Origin of an intent: picks the limit set and the gating.
 enum class MotionSource : uint8_t {
-    MANUAL      = 0,   // WebUI rail tap, nudge, slider, move-to point
-    TCODE_STREAM = 1,  // TCode L0 commands from any transport (Serial/WS/BLE/Dongle)
-    PATTERN      = 2,  // Internal PatternEngine stroke segments
+    MANUAL       = 0,  // WebUI rail tap, nudge, slider, move-to point
+    TCODE_STREAM = 1,  // TCode L0 from any transport
+    PATTERN      = 2,  // internal PatternEngine stroke segments
     OSSM_STREAM  = 3   // OSSM BLE streaming position commands
 };
 
 // ---- MotionIntent -----------------------------------------------------------
-// The single entry point into the motion system.
+// A POINT MOVE in machine millimeters: manual taps, pattern strokes, TCode.
 struct MotionIntent {
     MotionSource source;
     float        target_mm;         // post window-mapping, pre-clamp
-    uint32_t     deadline_ms;       // 0 = none (point move: plan at ceilings)
-    float        speed_hint_mm_s;   // from S-extension when present, else 0
-    // Pattern-derived accel demand (Advanced pattern mode). When BOTH hints are
-    // present the planner takes them as the derived dynamics verbatim — the
-    // pattern already derived them from its own stroke geometry — and the
-    // ceiling clamps still apply. 0 = absent: accel is derived from distance +
-    // deadline as before.
+    uint32_t     deadline_ms;       // 0 = none: kCmdPoint at the set's ceilings
+    float        speed_hint_mm_s;
     float        accel_hint_mm_s2 = 0.0f;
     uint16_t     seq;               // per-source monotonic, telemetry attribution
 };
 
+// ---- SegmentIntent ----------------------------------------------------------
+// A WAVEFORM SPAN in normalized window units, what the SlopSync motion-stream
+// channels carry. Fields map one for one onto motionlink::LinkCommand.
+struct SegmentIntent {
+    MotionSource source = MotionSource::TCODE_STREAM;
+    float    target = 0.5f;         // normalized 0..1 over the stroke window
+    uint32_t duration_us = 0;       // 0 = bare point, rendered as kCmdPoint
+    float    end_vel = 0.0f;        // normalized units/s
+    // FALSE is the sentinel "no handoff given"; TRUE with 0 is arrive-at-rest.
+    bool     has_end_vel = false;
+    float    next_chord = 0.0f;     // magnitude, normalized units/s
+    bool     has_next_chord = false;
+    uint32_t anchor_us = 0;         // S3 esp_timer microseconds
+    bool     has_anchor = false;
+    uint8_t  curve_family = 0;      // RFC-030 declared family
+};
+
 // ---- PlanReport -------------------------------------------------------------
-// Telemetry emitted by the planner after each dispatch.
+// What the last accepted command runs UNDER. The derivation lives on the
+// slave, so this reports ceilings and the dispatched target, never a profile.
 struct PlanReport {
-    float    derived_speed_mm_s;   // what the planner computed (before clamp)
-    float    derived_accel_mm_s2;  // what the planner computed (before clamp)
-    float    clamped_speed_mm_s;   // speed after applying limit set
-    float    clamped_accel_mm_s2;  // accel after applying limit set
-    int32_t  dispatched_steps;     // the final FAS target in native steps
-    bool     deadline_feasible;    // true if the plan met the deadline
-    bool     deadline_late;        // true if deadline was infeasible — arrived at ceilings
-    uint32_t plan_us;              // microseconds spent in the planner (diagnostic)
+    float    derived_speed_mm_s;
+    float    derived_accel_mm_s2;
+    float    clamped_speed_mm_s;   // selected set's speed, post soft-start
+    float    clamped_accel_mm_s2;  // selected set's accel
+    int32_t  dispatched_steps;
+    bool     deadline_feasible;
+    bool     deadline_late;
+    uint32_t plan_us;              // microseconds spent in the gate
 };
 
 // ---- MotionArbiter ----------------------------------------------------------
-// Sole caller of MotorDriver for positioning.
 class MotionArbiter {
 public:
     MotionArbiter(SystemState& state, RangeMapper& mapper, MotorDriver& motor);
 
-    // ---- Initialization (call after motor.init()) ---------------------------
     void init();
 
-    // ---- Core 0 → Core 1 deferral (ring buffer queue) -----------------------
-    // Pushes the intent into a FreeRTOS queue (non-blocking — drops if full,
-    // correct for retarget semantics where the latest command wins at high Hz).
-    // Replaces the old single-slot atomic which dropped frames at >100Hz.
+    // ---- Core 0 -> Core 1 deferral ------------------------------------------
+    // Non-blocking, drops if full: the latest command wins at high Hz.
     void submitDeferred(const MotionIntent& intent);
+    void submitSegmentDeferred(const SegmentIntent& seg);
 
-    // ---- Core 1 direct dispatch (called from Core 1 tasks only) -------------
-    // PatternEngine and this class's own processDeferred() call this directly.
-    // Plans and dispatches to FAS immediately. All FAS interaction stays on
-    // Core 1. Returns the plan report for telemetry.
+    // ---- Core 1 direct dispatch ---------------------------------------------
     PlanReport submit(const MotionIntent& intent);
+    bool submitSegment(const SegmentIntent& seg);
 
-    // ---- Core 1 deferred-intent consumer ------------------------------------
-    // Called periodically from motorTask (Core 1). Drains the defer queue in
-    // full, planning each intent via submit() in arrival order.
+    // ---- Core 1 deferred consumer plus policy push --------------------------
+    // Every motorTask tick: drains both queues in arrival order, then
+    // refreshes pushed policy. The driver's change detection turns that into
+    // one frame per actual change.
     void processDeferred();
 
-    // ---- Core 1 stream-sample fast path (streamSamplerTask's Engine) --------
-    // Called at ~1kHz by streamSamplerTask with a point sampled from its
-    // slopmotion::Engine (motion-control.md). NOT the trapezoid planner --
-    // the Engine already shaped the curve. This path only runs the safety
-    // gates (estop/homed/paused/override), maps the normalized position into the
-    // stroke window, enforces the hard physical step bounds, and feeds FAS
-    // directly via streamToSteps(). Accel is the constant input ceiling (kept
-    // constant so the driver grit-cache stays quiet); speed depends on
-    // SystemState::stream_speed_mode (ceiling-pegged vs velocity-matched).
-    //   norm_pos        : 0..1 position within the configured stroke window
-    //   norm_vel_per_s  : signed normalized units/second (VELOCITY_MATCHED only)
-    // Returns true if a sample was dispatched, false if gated off.
-    bool submitStreamSample(float norm_pos, float norm_vel_per_s);
-
-    // ---- Emergency / gate helpers (Core 0 or Core 1) ------------------------
+    // ---- Emergency / gate helpers (either core) -----------------------------
     void emergencyStop();
-    void stopMotion();     // full stop: halts pulse train, cuts power, clears homed (MotorDriver::stop())
-    void hardStopMotion(); // immediate stop, motor stays powered (MotorDriver::hardStop())
+    void stopMotion();     // cuts power, clears homed (MotorDriver::stop())
+    void hardStopMotion(); // immediate stop, motor stays powered
     void pause();
     void resume();
 
-    // ---- Source gating (Core 1 read, Core 0 write via SystemState) ----------
-    // Pause/override flags are read from SystemState on submit().
-
-    // ---- Limit sets — updated by ConfigStore/API ----------------------------
-    // USER set: manual moves, UI controls
+    // ---- Limit sets, updated by ConfigStore/API -----------------------------
+    // USER set: manual moves, UI controls, and every RP-initiated maneuver
+    // (settle, recovery, window entry), which are recovery and never content.
     void setUserSpeedLimit(float mm_s);
     void setUserAccelLimit(float mm_s2);
-    // INPUT set: TCode, PatternEngine, OSSM
+    // INPUT set: TCode, PatternEngine, OSSM.
     void setInputSpeedLimit(float mm_s);
     void setInputAccelLimit(float mm_s2);
 
-    // ---- Telemetry — last plan report (atomic, any core) --------------------
+    // ---- Telemetry ----------------------------------------------------------
     PlanReport lastReport() const;
     uint32_t   totalIntents() const { return _intent_count; }
-    // Intents rejected by a gate (not-homed / e-stop / paused / override /
-    // Intiface-recency). Surfaced in /api/status so a gated-off stream is
-    // distinguishable from "no commands arrived" in the diagnostics.
+    // Denied by a gate. Distinguishes a gated-off stream from silence.
     uint32_t   rejectedIntents() const { return _rejected_count; }
-
-    // ---- Blend/reversal policy (stored, but currently all alias to "allow") --
-    void setBlendMode(uint8_t mode);   // 1=let-it-land 2=allow 3=hybrid
-    uint8_t getBlendMode() const { return _blend_mode; }
 
 private:
     SystemState&  _state;
     RangeMapper&  _mapper;
     MotorDriver&  _motor;
 
-    // ---- Limit sets ---------------------------------------------------------
-    float _user_speed_limit_mm_s  = DEFAULT_USER_MAX_SPEED_MM_S;   // gentle (50)
-    float _user_accel_limit_mm_s2 = DEFAULT_USER_ACCEL_MM_S2;      // gentle (200)
+    float _user_speed_limit_mm_s  = DEFAULT_USER_MAX_SPEED_MM_S;
+    float _user_accel_limit_mm_s2 = DEFAULT_USER_ACCEL_MM_S2;
     float _input_speed_limit_mm_s  = DEFAULT_MAX_SPEED_MM_S;
     float _input_accel_limit_mm_s2 = DEFAULT_ACCEL_MM_S2;
 
     // ---- Driver dispatch lock (Core 1, task level) --------------------------
-    // Serializes the DRIVER CALL only, never the planning around it.
-    // WHY IT EXISTS: submit() dispatches from motorTask (prio 3) and
-    // submitStreamSample() from streamSamplerTask (prio 4) on the same core,
-    // and a MANUAL WebUI point move raises no gate that stops the sampler, so
-    // the sampler preempts a dispatch in progress. The two paths write
-    // OVERLAPPING driver state (MlinkServoDriver's _seg_mode / _rt_* / _chain_*
-    // chain), so the interleave tears a real command, not a statistic.
-    // WHY NOT A portMUX CRITICAL SECTION: dispatch reaches the driver's wire
-    // path, which suspends the scheduler for a ~40 us SPI frame and honors a
-    // 200 us inter-frame gap. Interrupts off across that breaks the slave's
-    // 20 kHz link and the 1 kHz sampler (cpp-safety.md, T27 class).
-    // WHY A BOUNDED TAKE: the hold is microseconds and FreeRTOS mutexes inherit
-    // priority, so a timeout means something is already badly wrong. Count and
-    // drop rather than stall a real-time task -- a dropped stream sample is
-    // re-sent in 1 ms, a dropped point move is one lost operator tap.
-    // NOT TAKEN by emergencyStop()/stopMotion()/hardStopMotion(): the stop path
-    // never waits on a lock.
-    // TODO(sd-tki.4): new shared mutable state behind a mutex, pending the
-    // operator ruling cpp-safety.md "Concurrency" requires.
-    SemaphoreHandle_t _dispatch_lock = nullptr;   // created by init()
+    // Serializes the DRIVER CALL only. processDeferred() dispatches from
+    // motorTask while PatternEngine dispatches from its own Core-1 task, and
+    // the driver's cross-task post ring is single-producer by contract.
+    // NOT a portMUX critical section: dispatch reaches the wire path, which
+    // suspends the scheduler for a ~40 us frame; interrupts off across that
+    // breaks the slave's 20 kHz link (T27 class).
+    // Bounded take: a timeout means a real-time task is already wedged, so
+    // count and drop rather than stall one.
+    // NOT taken by the stop paths: a stop never waits on a lock.
+    // TODO(sd-tki.4): pending the operator ruling cpp-safety.md requires.
+    SemaphoreHandle_t _dispatch_lock = nullptr;
 
-    // ---- Core 0 → Core 1 deferral queue (DEFER_QUEUE_DEPTH slots, non-blocking
-    // push) — see DEFER_QUEUE_DEPTH below for the actual depth. Handles 333Hz
-    // streams: Core 0 pushes intents at 3ms intervals, Core 1 drains the entire
-    // queue each loop tick. Drop-if-full. Created by init().
     QueueHandle_t     _defer_queue = nullptr;
+    QueueHandle_t     _segment_queue = nullptr;
     static constexpr uint8_t DEFER_QUEUE_DEPTH = 16;
+    static constexpr uint8_t SEGMENT_QUEUE_DEPTH = 16;
 
-    // ---- Blend policy -------------------------------------------------------
-    uint8_t _blend_mode = 2;   // "allow" — FAS retarget handles reversals
-
-    // ---- Telemetry ----------------------------------------------------------
     PlanReport           _last_report = {};
     volatile uint32_t    _intent_count = 0;
     volatile uint32_t    _rejected_count = 0;
     mutable portMUX_TYPE _telemetry_mux = portMUX_INITIALIZER_UNLOCKED;
 
-    // ---- Core planner (the heart — D4) --------------------------------------
-    // Core 1 only. Reads actual machine state from the driver, derives the
-    // trapezoidal profile, clamps at the source's limit set, dispatches. Only
-    // the dispatch itself is locked; the planning above it runs unlocked and
-    // may be preempted.
-    PlanReport _planAndDispatch(const MotionIntent& intent);
+    // Policy refresh cadence. The window glide is the only fast-moving input
+    // and the driver drops unchanged tags, so this costs compares, not frames.
+    static constexpr uint32_t kPolicyPushMs = 20;
+    uint32_t _policy_ms = 0;
 
-    // ---- Gate evaluation ----------------------------------------------------
-    // Returns true if the intent should proceed. MANUAL bypasses all gates
-    // except E-stop; stream/pattern sources honor homed/paused/override/window.
-    bool _gatesPass(const MotionIntent& intent);
+    // The one door out: picks the ceiling set, takes the lock, forwards.
+    // False = lock timeout (counted, never awaited).
+    bool _dispatchCommand(motionlink::LinkCommand& cmd, MotionSource source);
 
-    // ---- Window clamping ----------------------------------------------------
+    void _pushPolicy();
+
+    // MANUAL bypasses every source gate except e-stop.
+    bool _gatesPass(MotionSource source);
+    // Absolute gates, e-stop included; counts its own rejection.
+    bool _absoluteGatesPass(MotionSource source);
+
     float _clampToWindow(float mm, MotionSource source);
 
-    // ---- Window-entry detection ---------------------------------------------
-    // True when p0_mm is currently OUTSIDE the configured stroke window (with a
-    // small epsilon). Machine-driven sources (stream/pattern/OSSM) honor the
-    // gentle USER limits on the move that carries the carriage from outside the
-    // window into it, so it glides in instead of lunging to the edge at the
-    // input ceiling. Once inside, the normal INPUT set resumes.
+    // Outside the window a machine-driven source honors the gentle USER
+    // speed so it glides in instead of lunging to the edge.
     bool _isOutsideWindow(float p0_mm) const;
 };

@@ -9,9 +9,9 @@
 //   request from whichever end has room; it never pushes past the rail.
 // - Each window travels as ONE value (WindowSlot), never as two floats: the goal
 //   pair is published on Core 0 (settings apply) and the effective pair on
-//   Core 1 (motorTask tick), and streamSamplerTask (prio 4) preempts motorTask
-//   (prio 3), so a field-at-a-time read can pair a min from one edit with a max
-//   from another. Callers needing both halves to agree take effectiveWindow().
+//   Core 1 (motorTask tick), and PatternEngine's own Core-1 task preempts
+//   motorTask, so a field-at-a-time read can pair a min from one edit with a
+//   max from another. Callers needing both halves take effectiveWindow().
 // - tick() and every getter are lock-free and stay that way: tick() runs at
 //   ~1 kHz on the motion core (.claude/rules/cpp-safety.md, Concurrency).
 // See: .claude/rules/motion-control.md, docs/board-review-motion-pipeline.md D2

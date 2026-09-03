@@ -147,12 +147,18 @@ TEST_CASE("device catalog: etag pinned — accidental-wire-change tripwire") {
     hex.pop_back();
     // Moved deliberately by the drive-tune/drive-set pair (0x1130 / 0x3130),
     // then again by drive-tune's two readback fields.
+    // MOVED 2026-09-03 (29 1F D8 04 66 EE 7D 66 -> 53 B1 F3 F7 EE 2D DB 4C):
+    // sd-uxh and sd-djg. The 0x4100 anomaly kind select gained its eleventh
+    // option, dwell_zeroed (the engine's kind 10 had no name on the wire and
+    // rendered as a bare number), and 0x1111's retired anom_waveform_centered
+    // counter is ranked hidden so no renderer draws a permanent zero. Metadata
+    // only; no layout change.
     // MOVED 2026-09-03 (A1 FD AE 20 4C 45 33 85 -> 29 1F D8 04 66 EE 7D 66):
     // sd-4k1.9 retired `stream_speed_mode` on 0x008A. The byte stays as
     // `stream_speed_reserved` with no setting_key and modes-set key 3 became a
     // permanent gap. Deliberate wire evolution, no protocol break: clients
     // re-fetch on etag mismatch by design.
-    CHECK(hex == "29 1F D8 04 66 EE 7D 66");
+    CHECK(hex == "53 B1 F3 F7 EE 2D DB 4C");
 }
 
 // ---- Baseline conformance ---------------------------------------------------
@@ -898,7 +904,8 @@ TEST_CASE("device catalog: 0x0088 carries the per-kind breakdown and a reset_gen
                            "anom_waveform_scaled",
                            "anom_waveform_centered",
                            "anom_handoff_bounded",
-                           "anom_waveform_smoothed"};
+                           "anom_waveform_smoothed",
+                           "anom_dwell_zeroed"};
     for (const char* nm : kinds) {
         CAPTURE(nm);
         const LayoutField* f = layoutFieldByName(dc.c, *e, nm);
@@ -942,7 +949,7 @@ TEST_CASE("device catalog: 0x0089 motion-anomaly is a device-authored EVENT chan
     CHECK(kind->name == "kind");
     auto labels = dc.c.optionLabels(*kind);
     // Index-aligned with slopmotion::AnomalyType, which is append-only.
-    REQUIRE(labels.size() == 10);
+    REQUIRE(labels.size() == 11);
     CHECK(labels[0] == "none");
     CHECK(labels[1] == "plan_failed");
     CHECK(labels[2] == "settle");
@@ -1038,7 +1045,7 @@ TEST_CASE("device catalog: annotations survive encode -> decode") {
     REQUIRE(anom != nullptr);
     const SchemaField* kind = schemaFieldByKey(back, *anom, slopdrive::anom_body::kind);
     REQUIRE(kind != nullptr);
-    CHECK(back.optionLabels(*kind).size() == 10);
+    CHECK(back.optionLabels(*kind).size() == 11);
 
     // Deterministic re-encode: the etag is a function of CONTENT (§8.3), and
     // an annotation that round-trips lossily would break that quietly.

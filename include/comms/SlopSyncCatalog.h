@@ -998,8 +998,12 @@ inline bool buildSlopDriveCatalog(slopsync::Catalog32& c, DeviceFeatures feat = 
                       .group = "Anomalies", .desc = "The sender's curve broke a limit; the machine reshaped it."});
     c.addLayoutField({.name = "anom_waveform_scaled",    .type = PackedFieldType::u32, .unit = "", .scale = 1.0f,
                       .group = "Anomalies", .desc = "A stroke was shortened to finish on time."});
+    // Retired kind (centering left the engine 2026-09-03); the counter stays
+    // in the layout so the per-kind table keeps its positions, and hidden so
+    // no renderer draws a permanent zero (sd-djg).
     c.addLayoutField({.name = "anom_waveform_centered",   .type = PackedFieldType::u32, .unit = "", .scale = 1.0f,
-                      .group = "Anomalies", .desc = "A shortened stroke was re-centered on its midpoint."});
+                      .group = "Anomalies", .desc = "A shortened stroke was re-centered on its midpoint.",
+                      .hasRank = true, .rank = slopsync::ui_ranks::hidden});
     c.addLayoutField({.name = "anom_handoff_bounded",    .type = PackedFieldType::u32, .unit = "", .scale = 1.0f,
                       .group = "Anomalies",
                       .desc = "A sender asked to arrive at a speed the next segment could not "
@@ -1069,7 +1073,7 @@ inline bool buildSlopDriveCatalog(slopsync::Catalog32& c, DeviceFeatures feat = 
                             .desc = "What the motion core had to do differently, and why."},
                            {"none", "plan_failed", "settle", "endvel_clamped", "deadline_stretched",
                             "waveform_fallback", "waveform_scaled", "waveform_centered",
-                            "handoff_bounded", "waveform_smoothed"});
+                            "handoff_bounded", "waveform_smoothed", "dwell_zeroed"});
     c.addSchemaField({.key = anom_body::seq, .name = "seq", .type = CborFieldType::uint_t, .unit = "",
                       .desc = "Rolling event id from the motion core; wraps."});
     c.addSchemaField({.key = anom_body::target, .name = "target", .type = CborFieldType::f32_t,

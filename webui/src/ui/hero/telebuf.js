@@ -210,22 +210,26 @@ export function createTelebuf(opts = {}) {
    * @returns {{value: number|null, velPerMs: number, fresh: boolean, extrapolating: boolean}}
    */
   function sampleAt(tMs) {
-    if (len === 0) return { value: null, velPerMs: 0, fresh: false, extrapolating: false };
+    if (len === 0) return { value: null, velPerMs: 0, fresh: false, extrapolating: false, holding: false };
 
     const fresh = (tMs - lastPushTs) < HOLD_MS;
     const newestIdx = (head + len - 1) % CAP;
     const newestT = bufT[newestIdx];
 
     if (len === 1 || tMs <= bufT[head]) {
-      return { value: bufV[head], velPerMs: 0, fresh, extrapolating: false };
+      return { value: bufV[head], velPerMs: 0, fresh, extrapolating: false, holding: false };
     }
 
     if (tMs >= newestT) {
       const pastMs = tMs - newestT;
       if (pastMs <= EXTRAPOLATE_MS) {
-        return { value: bufV[newestIdx] + lastVelPerMs * pastMs, velPerMs: lastVelPerMs, fresh, extrapolating: true };
+        return { value: bufV[newestIdx] + lastVelPerMs * pastMs, velPerMs: lastVelPerMs, fresh, extrapolating: true, holding: false };
       }
-      return { value: bufV[newestIdx], velPerMs: 0, fresh, extrapolating: false };
+      // `holding` IS the stutter: the render instant has outrun the newest
+      // sample past the extrapolate window, so this frame repeats the last
+      // value and the next arrival snaps forward. Counted, never smoothed
+      // over: a rising hold rate is the measurement, not a symptom to hide.
+      return { value: bufV[newestIdx], velPerMs: 0, fresh, extrapolating: false, holding: true };
     }
 
     // Linear scan for the bracketing pair. The ring is small (a couple hundred
@@ -275,7 +279,7 @@ export function createTelebuf(opts = {}) {
       // or a degenerate zero-length span): fall back to linear.
       value = p0 + (p1 - p0) * frac;
     }
-    return { value, velPerMs: lastVelPerMs, fresh, extrapolating: false };
+    return { value, velPerMs: lastVelPerMs, fresh, extrapolating: false, holding: false };
   }
 
   /** Reset to empty — call when the bound field's channel/uid changes identity. */

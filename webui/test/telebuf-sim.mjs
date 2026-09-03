@@ -46,17 +46,21 @@ function mulberry32(seed) {
   };
 }
 
-function simulate(useDelay) {
+// `frameGap` is the FRAME clock, separate from the arrival clock above: a
+// webview with its own rAF cadence is the only thing that differs between the
+// device-served page and the Tauri shell. Defaults to a steady 60 fps.
+function simulate(useDelay, frameGap, arrivalGap) {
   const rng = mulberry32(42);
   const tele = createTelebuf();
   const clock = createRenderClock();
+  const gapOf = frameGap || (() => RAF_DT);
+  const arriveOf = arrivalGap || nextGapMs;
 
   let simT = 0;       // "true" clock, ms
   let nextPushAt = 0;
   let pos = 0;
 
   const framePositions = [];
-  let rafT = 0;
   let lastFrameDt = RAF_DT;
 
   while (simT < SIM_MS) {
@@ -65,16 +69,17 @@ function simulate(useDelay) {
       pos = TRUE_VEL_MM_S * (nextPushAt / 1000);
       tele.push(pos, nextPushAt);
       clock.noteArrival(nextPushAt);
-      nextPushAt += nextGapMs(rng);
+      nextPushAt += arriveOf(rng);
     }
 
     clock.update(lastFrameDt);
     const sampleAtT = useDelay ? clock.stableRenderTime(simT) : simT;
     const r = tele.sampleAt(sampleAtT);
-    framePositions.push({ t: simT, v: r.value });
+    framePositions.push({ t: simT, v: r.value, holding: r.holding });
 
-    simT += RAF_DT;
-    lastFrameDt = RAF_DT;
+    const dt = gapOf(rng, simT);
+    simT += dt;
+    lastFrameDt = dt;
   }
   return framePositions;
 }
@@ -325,6 +330,51 @@ console.log('\ntelebuf.js — Hermite continuity and clamp assertions\n');
   ok('clumped arrivals: the tangent matches the reconstructed spacing, not the arrival delta',
      isFinite(extrapVel) && Math.abs(extrapVel - curveVel) <= 0.3 * Math.abs(curveVel),
      'tangent=' + extrapVel.toFixed(5) + ' curve=' + curveVel.toFixed(5) + ' mm/ms');
+}
+
+// ---------------------------------------------------------------------------
+// FRAME-CLOCK cadence, against the reported "position telemetry jitters in the
+// Tauri shell but not the device-served page".
+//
+// Both shells run the same WS, the same decode and the same one-epoch
+// stamping, so arrivals were not obviously the variable and the webview's
+// frame clock was the suspect. This falsifies that: `holding` (the render
+// instant outran the newest sample past the extrapolate window, so the frame
+// repeats a value and the next arrival snaps) is a function of the ARRIVAL
+// gap against the render delay, not of how fast or how evenly frames land.
+// A late frame samples a buffer that took the intervening arrivals with it.
+//
+// So a shell that jitters more is either receiving a different arrival
+// cadence or reading a different clock. Neither is measurable from here:
+// LinkBar's `render` chip reports fps, buffer delay, held percentage and
+// epoch skew off a live shell, and its position-rate heatmap row reports the
+// arrival cadence. Read those, do not guess.
+// ---------------------------------------------------------------------------
+{
+  const heldPct = (frames) => {
+    const warm = frames.filter((f) => f.t > 400 && f.v != null);
+    return 100 * warm.filter((f) => f.holding).length / Math.max(1, warm.length);
+  };
+  const steady60 = heldPct(simulate(true));
+  const steady30 = heldPct(simulate(true, () => 33.333));
+  // A webview that pauses compositing (unfocused, occluded, a busy main
+  // thread) delivers the same average frame count, off the beat.
+  const stalling = heldPct(simulate(true, (rng) => (rng() < 0.02 ? 250 : 16.667)));
+  // The variable that DOES move it: arrivals stopping while frames continue.
+  const starved = heldPct(simulate(true, null, (rng) => (rng() < 0.05 ? 400 : nextGapMs(rng))));
+
+  console.log('\nheld frames vs the two candidate variables');
+  console.log('  steady 60 fps:              ' + steady60.toFixed(1) + '% held');
+  console.log('  steady 30 fps:              ' + steady30.toFixed(1) + '% held');
+  console.log('  60 fps with 250 ms stalls:  ' + stalling.toFixed(1) + '% held');
+  console.log('  60 fps, arrivals starved:   ' + starved.toFixed(1) + '% held');
+
+  ok('a slower frame clock does not add held frames',
+     Math.abs(steady30 - steady60) < 2, steady30.toFixed(1) + '% vs ' + steady60.toFixed(1) + '%');
+  ok('a stalling frame clock does not add them either (the frame-cadence hypothesis fails)',
+     Math.abs(stalling - steady60) < 2, stalling.toFixed(1) + '% vs ' + steady60.toFixed(1) + '%');
+  ok('starved ARRIVALS do, which is what the held counter is for',
+     starved > steady60 + 2, starved.toFixed(1) + '% vs ' + steady60.toFixed(1) + '%');
 }
 
 console.log('\n' + (fails ? 'FAILURES: ' + fails : 'ALL PASS'));

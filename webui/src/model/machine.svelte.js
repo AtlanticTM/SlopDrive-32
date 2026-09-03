@@ -121,6 +121,14 @@ function blankStats() {
     framesOut: 0,
     bytesIn: 0,
     statePushes: 0,
+    // Per-channel arrival counts. A cadence problem is per-CHANNEL: the hub
+    // sheds and paces each one separately, so a single total cannot tell
+    // "position is stuttering" from "the plan channel is quiet".
+    pushesByChannel: {},
+    // Published once a second by whatever widget owns the rAF loop, so the
+    // link bar can separate a render-cadence problem (the shell's webview)
+    // from an arrival-cadence one (the wire). Nulls until a loop runs.
+    render: { fps: null, delayMs: null, heldPct: null, skewMs: null },
     lastRxMs: 0,
     clockOffsetUs: null,
     clockRttUs: null,
@@ -403,6 +411,7 @@ export function connect(opts = {}) {
     machine.samples[channelId] = sample;
     machine.sampleTs[channelId] = tsMs || Date.now();
     machine.stats.statePushes++;
+    machine.stats.pushesByChannel[channelId] = (machine.stats.pushesByChannel[channelId] || 0) + 1;
     machine.stats.lastRxMs = Date.now();
   });
 

@@ -77,6 +77,23 @@
     rxTone === 'good' ? 'flowing' : rxTone === 'warn' ? 'gapping' : rxTone === 'bad' ? 'stalled' : 'no data'
   );
 
+  // Render health, published by whichever widget owns the rAF loop. This is
+  // the instrument for "position telemetry jitters in one shell but not the
+  // other": fps is the WEBVIEW's frame cadence, held% is how often the render
+  // instant outran the newest sample. Low fps blames the shell, a high held%
+  // at a healthy fps blames arrivals, which the position-rate heatmap row
+  // then shows directly. `--` until a rail is on screen and drawing.
+  const render = $derived(machine.stats.render);
+  const renderLabel = $derived(
+    render.fps == null ? '--'
+      : render.fps + ' fps · ' + render.delayMs + ' ms · ' + render.heldPct + '% held'
+        + (Math.abs(render.skewMs || 0) > 2 ? ' · skew ' + render.skewMs + ' ms' : '')
+  );
+  const renderTone = $derived(
+    render.fps == null ? 'dim'
+      : (render.heldPct > 10 || render.fps < 30 || Math.abs(render.skewMs || 0) > 2) ? 'warn' : 'good'
+  );
+
   // ===========================================================================
   // Activity heatmap — rows = live telemetry series discovered by ROLE, plus a
   // link-activity row derived from protocol stats (never device knowledge:
@@ -88,6 +105,14 @@
     const rows = [];
     const byRole = machine.catalog.model && machine.catalog.model.byRole;
     if (byRole) {
+      // Two RATE rows before the magnitude rows: telemetry cadence is per
+      // channel, and "position stutters" is answered by seeing the position
+      // channel's own arrival rate next to another live channel's. Both
+      // decline when the machine does not publish the role.
+      const pos = byRole.get(ROLE.telemetryPosition);
+      if (pos && pos.length) rows.push({ key: 'pos-rate', kind: 'rate', label: 'position rate', field: pos[0] });
+      const plan = byRole.get(ROLE.planCurrent) || byRole.get(ROLE.planStart);
+      if (plan && plan.length) rows.push({ key: 'plan-rate', kind: 'rate', label: 'plan rate', field: plan[0] });
       const vel = byRole.get(ROLE.telemetryVelocity);
       if (vel && vel.length) rows.push({ key: 'vel', label: 'velocity', field: vel[0] });
       const cur = byRole.get(ROLE.telemetryCurrent);
@@ -95,7 +120,7 @@
       const pwr = byRole.get(ROLE.telemetryPowerBus);
       if (pwr && pwr.length) rows.push({ key: 'pwr', label: 'bus power', field: pwr[0] });
     }
-    rows.push({ key: 'link', label: 'link activity', field: null });
+    rows.push({ key: 'link', kind: 'rate', label: 'link activity', field: null });
     return rows;
   });
 
@@ -147,15 +172,25 @@
     // untrack: see the note on the first paint below. This seed read is in the
     // effect body itself, so tracking it re-runs the whole effect on every
     // telemetry frame and the history buffer above never survives a tick.
-    let lastPushes = untrack(() => machine.stats.statePushes);
+    const lastCount = untrack(() => {
+      const seed = {};
+      for (const r of rows) {
+        seed[r.key] = r.field
+          ? (machine.stats.pushesByChannel[r.field.channelId] || 0)
+          : machine.stats.statePushes;
+      }
+      return seed;
+    });
 
     function sampleFrac(row) {
-      if (row.key === 'link') {
-        const cur = machine.stats.statePushes;
-        const delta = Math.max(0, cur - lastPushes);
-        lastPushes = cur;
-        const ceiling = Math.max((peaks.link || 1) * 0.995, delta, 1);
-        peaks.link = ceiling;
+      if (row.kind === 'rate') {
+        const cur = row.field
+          ? (machine.stats.pushesByChannel[row.field.channelId] || 0)
+          : machine.stats.statePushes;
+        const delta = Math.max(0, cur - (lastCount[row.key] || 0));
+        lastCount[row.key] = cur;
+        const ceiling = Math.max((peaks[row.key] || 1) * 0.995, delta, 1);
+        peaks[row.key] = ceiling;
         return Math.min(1, delta / ceiling);
       }
       const sample = machine.samples[row.field.channelId];
@@ -243,6 +278,11 @@
       </span>
       <span class="chip chip-opt">
         <span class="chip-lbl">catalog</span>{catalogLabel}
+      </span>
+      <span class="chip chip-opt tone-{renderTone}"
+            title="frames per second · telemetry jitter buffer · frames that outran the newest sample · rAF-vs-sample-stamp clock skew">
+        <span class="chip-lbl">render</span>
+        <span class="mono">{renderLabel}</span>
       </span>
       <span class="chip chip-opt-last tone-{rxTone}">
         <span class="chip-lbl">rx</span>

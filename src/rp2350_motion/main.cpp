@@ -105,12 +105,11 @@ static uint32_t s_lateTicks = 0;
 // slew cap (emitTowardPos), never by the reference (note above renderTick).
 static float    s_maxCountsPerTick = 0.0f;
 static uint32_t s_velClamped = 0;   // emitter slew cap engagements
-// Margin above the ceiling is unproven drive speed (sd-ar3 layer 3): only
-// discontinuity recovery runs there (~1.4 ms per 64-count deficit).
-static constexpr float kEmitCatchupMargin = 1.25f;
-// Largest chain-start gap the emitter walks instead of teleporting; drains
-// in <=100 ms at a 400 mm/s ceiling. Larger = a reference redefinition.
-static constexpr float kJumpWalkMaxCounts = 4096.0f;
+// NO margin above the ceiling: the 1.25x walk lost 20.5 mm of encoder
+// agreement in one recovery on 2026-09-02 (the drive follows 1000 mm/s
+// content with 0.01 mm deviation and does not follow 1250). Recovery walks
+// at the ceiling, however long the gap takes.
+static constexpr float kEmitCatchupMargin = 1.0f;
 static constexpr uint32_t kStateHz = 400000;
 static constexpr uint32_t kStatesPerTick = (kTickUs * kStateHz) / 1000000u;
 
@@ -252,16 +251,16 @@ static void renderTick() {
     const Segment& seg = s_ring[s_tail % kSegmentDepth];
     if (s_segFresh) {
         s_segFresh = false;
-        // A p0 off the emitted position: WALK it under the emitter slew cap
-        // (counted in s_velClamped, visible as residue) -- a teleport here is
-        // permanent calc/physical divergence, and re-anchor staleness x speed
-        // produced exactly the 2-13 mm "drift" events (2026-08-09). Teleport
-        // only when the gap is too big to drain quickly (a genuine reference
-        // redefinition) or no ceiling has been pushed (uncapped slew shoots).
+        // A p0 off the emitted position is WALKED at the ceiling, whatever its
+        // size (counted in s_velClamped, visible as residue). A teleport is a
+        // permanent calc/physical divergence: the 4096-count walk limit
+        // teleported a 20 mm gap after a script seek on 2026-09-02 and the
+        // encoder validator logged exactly that as lost steps (sd-dxy.1.7).
+        // The only teleport left is the one with no ceiling to walk under
+        // (nothing pushed yet), because an uncapped slew shoots.
         const float jump = seg.p0 - s_emitted;
         if (jump > 64.0f || jump < -64.0f) {
-            const bool walkable = s_maxCountsPerTick > 0.0f &&
-                jump < kJumpWalkMaxCounts && jump > -kJumpWalkMaxCounts;
+            const bool walkable = s_maxCountsPerTick > 0.0f;
             if (!walkable) {
                 s_emitted += jump;
                 s_flags |= kFlagJumped;
@@ -356,7 +355,7 @@ static bool stepperTick(struct repeating_timer*) {
 // The RP image version. This constant is its ONE home (C-1); the S3 reads it
 // with kOpFlashVersion, which is what makes C-8 verification possible without
 // a bench trip. Bump it with every image that goes out over the link.
-static constexpr char kRpFwVersion[] = "0.1.1-rp";
+static constexpr char kRpFwVersion[] = "0.1.2-rp";
 static constexpr uint32_t kWatchdogMs = 8000;   // hardware max is 8388
 static_assert(sizeof(kRpFwVersion) <= kFlashVersionBytes,
               "version string does not fit the status tail");

@@ -2504,6 +2504,54 @@ TEST_CASE("Anchored commit: a late-released segment renders the wire timeline") 
               doctest::Approx(ref.positionAt(t)).epsilon(1e-9));
 }
 
+TEST_CASE("A segment longer than chase_stale_us must not starve its own settle grace") {
+    // Field trace 2026-09-02: 587 ms segments in a slow section settled
+    // (braked at amax) at plan expiry, 3 ms before their successor landed,
+    // because staleness was measured from the last COMMIT. A stream whose
+    // plan is still executing is not stale.
+    auto cfg = operatorConfig();
+    cfg.settle_grace_us = 30000;
+    cfg.chase_stale_us  = 400000;
+    Engine e(cfg, 0.50f);
+    uint64_t t = 0;
+    auto seg = [&](float target, uint32_t dur_us, float vf, bool has_vf, uint64_t at) {
+        Command c;
+        c.target = target; c.duration_us = dur_us; c.has_duration = true;
+        c.end_vel = vf; c.has_end_vel = has_vf;
+        c.anchor_us = at; c.has_anchor = true;
+        REQUIRE(e.commit(c, at));
+    };
+    // Warm the cadence estimator with a few ordinary segments.
+    seg(0.70f, 167 * kMs, 0.0f, true, t); t += 167 * kMs;
+    seg(0.50f, 167 * kMs, 0.0f, true, t); t += 167 * kMs;
+    seg(0.70f, 167 * kMs, 0.0f, true, t); t += 167 * kMs;
+    // The long one, arriving moving (a bounded handoff), then its successor
+    // committed 3 ms AFTER it expires: normal drain quantization.
+    const uint64_t long_start = t;
+    seg(0.50f, 587 * kMs, -0.3f, true, long_start);
+    const uint64_t long_end = long_start + 587 * kMs;
+    int settles = 0;
+    for (uint64_t now = long_start; now <= long_end + 3 * kMs; now += kMs) {
+        (void)e.positionAt(now);
+        slopmotion::Anomaly ev;
+        while (e.popAnomaly(ev))
+            if (ev.kind == (uint8_t)AnomalyType::SettleEngaged) settles++;
+        REQUIRE(e.mode() != Mode::Settle);
+    }
+    seg(0.35f, 208 * kMs, 0.0f, true, long_end);   // the successor, late by 3 ms
+    // Sample to just BEFORE the successor ends: a plan ending at rest
+    // collapses to a hold at expiry, which is correct and not a settle.
+    for (uint64_t now = long_end + 3 * kMs; now < long_end + 200 * kMs; now += kMs) {
+        (void)e.positionAt(now);
+        slopmotion::Anomaly ev;
+        while (e.popAnomaly(ev))
+            if (ev.kind == (uint8_t)AnomalyType::SettleEngaged) settles++;
+        REQUIRE(e.mode() != Mode::Settle);
+    }
+    CHECK(settles == 0);
+    CHECK(e.mode() == Mode::Waveform);
+}
+
 TEST_CASE("Segment chain with 5 ms arrival jitter: no settle storm, no mode flap") {
     // The measured defect: the firmware's 5 ms SlopSync pacing drain makes
     // segment arrivals jitter around their scheduled instant, so plans expire

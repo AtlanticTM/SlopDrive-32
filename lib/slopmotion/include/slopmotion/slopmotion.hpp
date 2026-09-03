@@ -19,7 +19,7 @@
 // accel. Handing Ruckig perfect boundary conditions (af = source) does not
 // change the shape. Hence:
 //
-//   * WAVEFORM (TCode v4 / any point carrying I<ms> ≥ 50 ms): a QUINTIC
+//   * WAVEFORM (TCode v4 / any point carrying I<ms> ≥ 20 ms): a QUINTIC
 //     Hermite segment from the current (p,v,a) to (target, G-velocity,
 //     af-estimate) over exactly the commanded duration. C2 where the old
 //     cubic was C1 — the boundary accel spike class is gone — and it
@@ -48,7 +48,7 @@
 //     limit of the segment that FOLLOWS, so an infeasible handoff is caught
 //     BEFORE it forces the shape/amplitude/deadline sacrifices above. See
 //     boundHandoffVelocity.
-//   * CHASE (TCode v3 bare high-rate points, or I < 50 ms): the future is
+//   * CHASE (TCode v3 bare high-rate points, or I < 20 ms): the future is
 //     unknown → Ruckig chases the point stream under the ceilings, replanning
 //     per point from the sampled state (C2-continuous, retarget-while-moving
 //     is the normal case). For DENSE streams (mean interval ≤ 60 ms, the
@@ -759,7 +759,7 @@ struct Command {
     uint32_t duration_us  = 0;      // I<ms> * 1000 when present
     float    end_vel      = 0.0f;   // units/s — TCode G wire value / 1000
     bool     has_end_vel  = false;  // true → v4 gradient handoff velocity
-    bool     has_duration = false;  // true + duration ≥ 50 ms → WAVEFORM
+    bool     has_duration = false;  // true + duration ≥ kShortMoveUs → WAVEFORM
 
     // ---- ONE-SEGMENT LOOKAHEAD (RFC-008 handoff sanity guard) ---------------
     // The mean speed (|Δtarget| / duration, same normalized units/s as
@@ -1434,9 +1434,14 @@ public:
 private:
     static constexpr double   kRestVel      = 1e-4;   // units/s: "stopped"
     static constexpr uint8_t  kAnomalyDepth = 16;
-    // I<ms> below this is a dense-stream point, not a plannable segment
-    // (legacy SHORT_MOVE_INTERVAL).
-    static constexpr uint32_t kShortMoveUs  = 50000;
+    // I<ms> below this is a dense-stream point, not a plannable segment.
+    // 20 ms, not the legacy 50: a scripted mid-stroke knot arrives as a
+    // 41 ms segment with an authored tangent, and demoting it to a chase
+    // point threw its duration and handoff away and switched planners twice
+    // per stroke (measured 2026-09-02, 25 of 427 segments, four planner
+    // switches per 0.6 s cycle). The legality referee, not this floor, is
+    // what rejects a span that is too short to render.
+    static constexpr uint32_t kShortMoveUs  = 20000;
     static constexpr int      kScanSteps    = 64;     // quintic legality grid
     // Overshoot-guard floor, normalized: 0.2 % of the stroke window. A plan
     // that lands exactly on its target still shows rounding-sized excursions on
@@ -3252,8 +3257,18 @@ private:
     double settleGraceS(uint64_t now_us) const {
         if (_cfg.settle_grace_us == 0) return 0.0;
         if (!_est_ema_ok || !_est_valid) return 0.0;   // isolated point move
-        if (now_us > _est_last_us &&
-            (now_us - _est_last_us) > _cfg.chase_stale_us) {
+        // Staleness is judged from whichever is later: the last commit or
+        // the END of the plan in flight. Measured from the last commit alone,
+        // a segment longer than chase_stale_us starved its own grace: a
+        // 587 ms segment expired, this read "stream gone", and the engine
+        // slammed to rest 3 ms before its successor landed, every cycle
+        // (field trace 2026-09-02, the periodic hitch).
+        uint64_t ref = _est_last_us;
+        if (_kind != PlanKind::None) {
+            const uint64_t plan_end = _plan_start + (uint64_t)(planDuration() * 1e6 + 0.5);
+            if (plan_end > ref) ref = plan_end;
+        }
+        if (now_us > ref && (now_us - ref) > _cfg.chase_stale_us) {
             return 0.0;                                // the stream really is gone
         }
         const double cap = (double)_cfg.settle_grace_us * 1e-6;

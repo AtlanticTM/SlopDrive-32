@@ -28,6 +28,8 @@
   import TelemetryChart from './ui/widgets/TelemetryChart.svelte';
   import DashGrid from './ui/dash/DashGrid.svelte';
   import { machine } from './model/machine.svelte.js';
+  import { isFieldEnabled } from './model/settings.js';
+  import { writeSetting } from './model/shadow.svelte.js';
   import { withoutClaimed } from './model/roles.js';
   import { heroClaims } from './ui/heroes.js';
 
@@ -163,6 +165,35 @@
   });
 
   /**
+   * RESET THIS PAGE TO DEFAULTS.
+   *
+   * Writes each field's OWN catalog-declared default as an ordinary intent,
+   * one per field, and lets every echo confirm separately. Never a bulk
+   * "restore factory" verb the machine did not advertise, and never a
+   * client-side guess: a field whose catalog published no default is not
+   * touched, and neither is one the mask, the tier or the link has closed.
+   * Two-click arm because it moves many settings at once.
+   */
+  let resetArmed = $state(false);
+  let resetTimer = null;
+  const resettable = $derived(
+    visibleGroups.groups
+      .flatMap((g) => g.fields)
+      .filter((f) => !f.readOnly && f.dflt != null
+                     && isFieldEnabled(f, machine.samples[f.channelId]))
+  );
+  function resetCategory() {
+    clearTimeout(resetTimer);
+    if (!resetArmed) {
+      resetArmed = true;
+      resetTimer = setTimeout(() => { resetArmed = false; }, 4000);
+      return;
+    }
+    resetArmed = false;
+    for (const f of resettable) writeSetting(f, f.dflt);
+  }
+
+  /**
    * Dashboard items.
    *
    * `id` is a STABLE STRING built from the machine's own category id and group
@@ -222,6 +253,16 @@
             Hide advanced settings
           {:else}
             Show {visibleGroups.hidden} advanced setting{visibleGroups.hidden === 1 ? '' : 's'}
+          {/if}
+        </button>
+      {/if}
+      {#if resettable.length && machine.link.phase === 'live'}
+        <button class="adv-toggle reset-cat" type="button" onclick={resetCategory}
+                class:armed={resetArmed}>
+          {#if resetArmed}
+            Confirm: reset {resettable.length} setting{resettable.length === 1 ? '' : 's'} to defaults
+          {:else}
+            Reset this page to defaults
           {/if}
         </button>
       {/if}
@@ -522,4 +563,7 @@
     letter-spacing: .04em;
   }
   .adv-toggle:hover { color: var(--ink); border-color: var(--line-3); }
+  /* Armed wears --warn, the hazard token every theme keeps identical: this
+     click moves many machine settings at once. */
+  .reset-cat.armed { color: var(--warn); border-color: var(--warn); }
 </style>

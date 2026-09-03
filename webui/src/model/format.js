@@ -142,6 +142,15 @@ export function since(ms) {
   return Math.floor(s / 3600) + 'h ' + Math.floor((s % 3600) / 60) + 'm';
 }
 
+/** Elapsed ms -> h:mm:ss, or h:mm:ss.mmm when `withMs`. */
+export function clock(ms, withMs) {
+  if (ms == null || !isFinite(ms) || ms < 0) return '--';
+  const t = Math.floor(ms / 1000);
+  const two = (n) => String(n).padStart(2, '0');
+  const base = Math.floor(t / 3600) + ':' + two(Math.floor((t % 3600) / 60)) + ':' + two(t % 60);
+  return withMs ? base + '.' + String(Math.floor(ms % 1000)).padStart(3, '0') : base;
+}
+
 /** Seconds -> compact uptime. */
 export function uptime(sec) {
   if (sec == null || !isFinite(sec)) return '--';

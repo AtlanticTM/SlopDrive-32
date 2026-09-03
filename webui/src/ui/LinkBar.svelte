@@ -293,7 +293,7 @@
 
   {#if !isLive}
     <div class="banner tone-{phaseInfo.tone}" role="alert">
-      <strong>{phaseInfo.label.toUpperCase()}</strong>
+      <strong>{phaseInfo.label}</strong>
       — no hub link: nothing on this page can drive the machine right now.
       {#if machine.link.closeReason}<span class="reason">({machine.link.closeReason})</span>{/if}
     </div>
@@ -305,7 +305,7 @@
          NACK table — it means a client bug, and burying it in a list of
          routine NACKs is how it goes unnoticed. -->
     <div class="banner tone-bad" role="alert">
-      <strong>LINK ERROR</strong> — {machine.link.error}
+      <strong>Link error</strong> — {machine.link.error}
     </div>
   {/if}
 </header>
@@ -489,6 +489,7 @@
     border-color: var(--line);
     color: var(--ink-dim);
   }
+  .banner strong { text-transform: uppercase; }
   .reason { color: var(--ink-faint); }
 
   /* rem, never px: the wordmark tracks --s instead of pinning to one scale. */

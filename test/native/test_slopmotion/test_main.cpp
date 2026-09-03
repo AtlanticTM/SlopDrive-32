@@ -2290,7 +2290,22 @@ TEST_CASE("Dwell rule: a re-commanded hold's declared arrival velocity is ignore
     for (uint64_t t = 1000 * kMs; t <= 1132 * kMs; t += kMs)
         vpk = std::max(vpk, (double)std::fabs(e.velocityAt(t)));
     CHECK(vpk < 0.2);                       // a hold stays held
-    CHECK(drainFor(e, AnomalyType::HandoffBounded).seen);
+    // Its OWN kind, not the RFC-008 knot bound: two different referees, and
+    // sharing one kind made the anomaly census unreadable (sd-6b2.1). ONE
+    // drain -- drainFor empties the ring, so a second call always reads clean.
+    bool  dwell_seen = false, handoff_seen = false;
+    float dropped = 0.0f;
+    slopmotion::Anomaly ev;
+    while (e.popAnomaly(ev)) {
+        if (ev.kind == (uint8_t)AnomalyType::DwellZeroed) {
+            dwell_seen = true;
+            dropped = ev.detail;
+        }
+        if (ev.kind == (uint8_t)AnomalyType::HandoffBounded) handoff_seen = true;
+    }
+    CHECK(dwell_seen);
+    CHECK(dropped == doctest::Approx(-3.4f));   // the vf that was dropped
+    CHECK_FALSE(handoff_seen);
 }
 
 TEST_CASE("Anchored commit: a late-released segment renders the wire timeline") {
@@ -3537,4 +3552,105 @@ TEST_CASE("Out-of-window targets are clamped on EVERY command kind") {
         CHECK(pmin >= -1e-9);
         CHECK(pmax <= 1.0 + 1e-9);
     }
+}
+
+// ---- The Blend ray (sd-6b2.1) -----------------------------------------------
+// The machine tuning the field defect was measured on: 1000 mm/s over a 100 mm
+// window with a stiff drive, i.e. the regime where a rail slam lands 1 % over
+// the ceiling and everything hangs on what the search does with it.
+Config blendConfig() {
+    Config cfg;
+    cfg.limits.vmax = 10.0f;
+    cfg.limits.amax = 400.0f;
+    cfg.limits.jmax = 50000.0f;
+    cfg.infeasible_policy         = InfeasiblePolicy::Blend;
+    cfg.infeasible_blend          = 0.5f;
+    cfg.infeasible_smooth_budget  = 0.5f;
+    cfg.infeasible_amplitude_budget = 0.5f;
+    cfg.curve_policy = slopmotion::CurvePolicy::ForceC1;   // the family that ships
+    return cfg;
+}
+
+TEST_CASE("Blend: a rail slam just over the ceiling is shortened, not surrendered") {
+    // 0.85 -> 1.000 in 64 ms, entering at the fastest the wall guard allows
+    // (7.746 units/s: |vf|^2 = amax * 0.15). Worst ratio 1.00037, i.e. barely
+    // over -- and before the floor probe it took the flat Ruckig guard, which
+    // is the field's waveform_fallback on every rail end.
+    Engine e(blendConfig(), 0.5f);
+    Command run;
+    run.target = 0.85f; run.duration_us = 60 * (uint32_t)kMs;
+    run.has_duration = true; run.end_vel = 8.0f; run.has_end_vel = true;
+    REQUIRE(e.commit(run, 0));
+    { slopmotion::Anomaly a; while (e.popAnomaly(a)) {} }   // the run-up's noise
+
+    Command slam;
+    slam.target = 1.0f; slam.duration_us = 64 * (uint32_t)kMs;
+    slam.has_duration = true; slam.end_vel = 0.0f; slam.has_end_vel = true;
+    REQUIRE(e.commit(slam, 60 * kMs));
+
+    const auto snap = e.snapshot(60 * kMs);
+    bool  fallback = false, scaled = false;
+    float achieved = 1.0f;
+    slopmotion::Anomaly ev;
+    while (e.popAnomaly(ev)) {
+        if (ev.kind == (uint8_t)AnomalyType::WaveformFallback) fallback = true;
+        if (ev.kind == (uint8_t)AnomalyType::WaveformScaled) {
+            scaled = true;
+            achieved = ev.detail;
+        }
+    }
+    MESSAGE("rail slam: plan_kind " << (int)snap.plan_kind << " end " << snap.target
+            << " achieved " << achieved);
+    // A Hermite plan in the declared family, not the guard's bang-bang profile.
+    CHECK(snap.plan_kind == (uint8_t)slopmotion::PlanKind::Cubic);
+    CHECK_FALSE(fallback);
+    CHECK(scaled);
+    // The amplitude budget is a FLOOR: at most `budget` of the stroke may be
+    // surrendered, so the achieved fraction can never fall below 1 - budget.
+    CHECK(achieved >= 1.0f - blendConfig().infeasible_amplitude_budget - 1e-4f);
+    // ...and it holds the deadline it was given.
+    CHECK(snap.duration_s == doctest::Approx(0.064).epsilon(0.01));
+}
+
+TEST_CASE("Blend: smoothing never raises |vf| past the RFC-008 bound") {
+    // A long own-chord into a short successor chord is the geometry RFC-008
+    // exists for. The bound runs BEFORE the search; lerping the end handle
+    // toward this span's own (large) chord afterwards used to hand the velocity
+    // straight back, which is the exact failure the guard was written to stop.
+    Config cfg = blendConfig();
+    cfg.handoff_chord_factor = 1.5f;
+
+    int  checked = 0, smoothed = 0;
+    for (float chord_out : {0.05f, 0.25f, 0.75f, 1.5f}) {
+        for (uint32_t ms : {60u, 80u, 110u}) {
+            Engine e(cfg, 0.10f);
+            Command c;
+            c.target         = 0.90f;               // a long stroke...
+            c.duration_us    = ms * (uint32_t)kMs;  // ...in far too little time
+            c.has_duration   = true;
+            c.end_vel        = 12.0f;               // and a wire handoff to match
+            c.has_end_vel    = true;
+            c.has_next_chord = true;
+            c.next_chord     = chord_out;
+            REQUIRE(e.commit(c, 0));
+
+            const auto snap = e.snapshot(0);
+            bool is_hermite = snap.plan_kind == (uint8_t)slopmotion::PlanKind::Cubic ||
+                              snap.plan_kind == (uint8_t)slopmotion::PlanKind::Quintic;
+            slopmotion::Anomaly ev;
+            while (e.popAnomaly(ev))
+                if (ev.kind == (uint8_t)AnomalyType::WaveformSmoothed) smoothed++;
+            if (!is_hermite) continue;   // the guard's plan is not this test's
+
+            const double v_end = e.velocityAt((uint64_t)ms * kMs);
+            const double bound = (double)cfg.handoff_chord_factor * (double)chord_out;
+            INFO("chord_out ", chord_out, " T ", ms, " ms  v_end ", v_end);
+            CHECK(std::fabs(v_end) <= bound + 1e-3);
+            checked++;
+        }
+    }
+    MESSAGE("RFC-008 after smoothing: " << checked << " adopted plans, "
+            << smoothed << " smoothed");
+    CHECK(checked > 0);      // never vacuous
+    CHECK(smoothed > 0);     // and the smoothness axis really was spent
 }

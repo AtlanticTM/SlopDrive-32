@@ -882,7 +882,8 @@ enum class AnomalyType : uint8_t {
     WaveformScaled    = 6,  // the stroke was shrunk to hold the deadline. detail = achieved fraction 0..1, target = the shortened target
     WaveformCentered   = 7,  // the stroke was shrunk to hold the MIDPOINT (the machine could have gone further). detail = achieved fraction 0..1, target = the shortened endpoint
     HandoffBounded    = 8,  // RFC-008: a wire end velocity was cut to the Fritsch-Carlson knot bound of the FOLLOWING segment. detail = the accepted (bounded) vf
-    WaveformSmoothed  = 9   // the span's END handle was lerped toward the chord to make the shape legal. detail = alpha spent, 0..1 (1 = straight line)
+    WaveformSmoothed  = 9,  // the span's END handle was lerped toward the chord to make the shape legal. detail = alpha spent, 0..1 (1 = straight line)
+    DwellZeroed       = 10  // the SAME target was re-commanded (a hold) so its declared arrival velocity was zeroed. detail = the vf that was dropped
 };
 // APPEND-ONLY. Existing values are pinned: the firmware (SystemState::
 // sm_anom_kind + kSmAnomalyNames) and the sim (MachineSim.h mirror) index
@@ -896,6 +897,8 @@ enum class AnomalyType : uint8_t {
 // per-kind field list on the 0x0088 slopmotion-diag channel.
 // WaveformSmoothed = 9 SPENT the next slot: SM_ANOM_KINDS went 9 -> 10, same
 // three-place update (names, sim mirror, 0x0088 field list).
+// DwellZeroed = 10 SPENT the next: SM_ANOM_KINDS went 10 -> 11, same three
+// places again.
 
 // ANOMALY VOCABULARY FOR THE INFEASIBLE PATHS (one event per infeasible
 // segment, so the counts read as a diagnosis rather than a pile):
@@ -1384,7 +1387,9 @@ private:
         _prev_wave_tgt = target;
         _prev_wave_tgt_ok = true;
         if (dwell && cmd.has_end_vel && vf != 0.0) {
-            recordAnomaly(AnomalyType::HandoffBounded, (float)target, 0.0f,
+            // Its OWN kind: a dwell zeroing is not the RFC-008 knot bound, and
+            // sharing that kind made the anomaly census unreadable.
+            recordAnomaly(AnomalyType::DwellZeroed, (float)target, (float)vf,
                           now_us);
             vf = 0.0;
         }
@@ -1424,10 +1429,16 @@ private:
         // Engages only on an EXPLICIT wire handoff. When has_end_vel is false
         // vf is the engine's OWN stream estimate, which is already conservative
         // and is not the sender's claim to sanity-check.
-        if (cmd.has_end_vel && cmd.has_next_chord && T > 0.0) {
+        // NEGATIVE means "no lookahead" (boundHandoffVelocity's own unknown
+        // sentinel); the infeasible search re-applies the bound with it, so the
+        // smoothness axis cannot hand back the velocity this guard just took.
+        const float bound_chord =
+            (cmd.has_end_vel && cmd.has_next_chord && T > 0.0) ? cmd.next_chord
+                                                               : -1.0f;
+        if (bound_chord >= 0.0f) {
             const float chord_in = (float)(std::fabs(target - p) / T);
             const float bounded  = boundHandoffVelocity(
-                (float)vf, chord_in, cmd.next_chord, _cfg.handoff_chord_factor);
+                (float)vf, chord_in, bound_chord, _cfg.handoff_chord_factor);
             if (bounded != (float)vf) {
                 // NEVER silent. detail = the ACCEPTED velocity, matching the
                 // EndVelClamped convention ("what you actually got").
@@ -1545,13 +1556,17 @@ private:
                 const double gvf  = applyEndVelGuard(vf, goal, now_us);
                 double gc[6];
                 buildWaveformCurve(p, v, a, goal, gvf, af, T, gc);
-                if (quinticWorstRatio(gc, T, _oshoot_allow) <= 1.0) {
+                // The ADOPTED curve's own ratio: `worst` belongs to the full
+                // stroke this branch is rejecting, and slack is a statement
+                // about the plan that runs.
+                const double gworst = quinticWorstRatio(gc, T, _oshoot_allow);
+                if (gworst <= 1.0) {
                     adoptQuintic(gc, T, now_us);
                     // Machine shortfall 0: the machine could have reached the
                     // commanded target. That zero is the signal that lets the
                     // OTHER extreme relax again (see the centering note) — it
                     // is why the band converges instead of ratcheting shut.
-                    noteWaveformExtreme(dir, target, goal, 0.0, 1.0 - worst,
+                    noteWaveformExtreme(dir, target, goal, 0.0, 1.0 - gworst,
                                         now_us);
                     recordAnomaly(AnomalyType::WaveformCentered, (float)goal,
                                   (float)(std::fabs(goal - p) /
@@ -1594,7 +1609,7 @@ private:
              _cfg.infeasible_policy == InfeasiblePolicy::PrioritizeSmooth ||
              _cfg.infeasible_policy == InfeasiblePolicy::Blend) &&
             commitWaveformBudgeted(p, v, a, target, vf, af, T, dir, pull,
-                                   now_us)) {
+                                   bound_chord, now_us)) {
             return true;
         }
 
@@ -1766,16 +1781,30 @@ private:
     // The end velocity is scaled by the same (1+f)/2 as the travel: a shortened
     // stroke that still demanded the full handoff velocity would be annihilated
     // by applyEndVelGuard at the wall anyway.
+    // `chord_out` is the successor chord that arms RFC-008, or NEGATIVE for
+    // "no lookahead" (boundHandoffVelocity's own unknown sentinel). The bound
+    // is RE-APPLIED after the blend, measured against THIS trial's own chord:
+    // lerping the end handle toward the chord raises |vf| again, and a bound
+    // that only ran before the smoothing axis is a bound the smoothing axis
+    // can undo. `out_vf` reports the end velocity the trial actually adopted,
+    // which is what the next segment's af series must be built from.
     double budgetedTrial(double p, double v, double a, double target, double vf,
                          double af, double T, double f, double alpha,
-                         double& out_ep, double* out_c) const {
+                         double& out_ep, double* out_c, float chord_out = -1.0f,
+                         double* out_vf = nullptr) const {
         const double mid = 0.5 * (p + target);
         const double ep  = clamp01(mid + f * (target - mid));
         double tvf = vf * 0.5 * (1.0 + f);
         double taf = af;
         blendEndTowardChord(p, ep, T, alpha, tvf, taf);
+        if (chord_out >= 0.0f && T > 0.0) {
+            tvf = (double)boundHandoffVelocity(
+                (float)tvf, (float)(std::fabs(ep - p) / T), chord_out,
+                _cfg.handoff_chord_factor);
+        }
         buildWaveformCurve(p, v, a, ep, tvf, taf, T, out_c);
         out_ep = ep;
+        if (out_vf != nullptr) *out_vf = tvf;
         return quinticWorstRatio(out_c, T, _oshoot_allow);
     }
 
@@ -1792,7 +1821,7 @@ private:
     // not a nicer plan, it is the guard.
     bool commitWaveformBudgeted(double p, double v, double a, double target,
                                 double vf, double af, double T, int8_t dir,
-                                double pull, uint64_t now_us) {
+                                double pull, float chord_out, uint64_t now_us) {
         if (!(T > 0.0)) return false;
         const bool smooth_first =
             _cfg.infeasible_policy == InfeasiblePolicy::PrioritizeAmplitude;
@@ -1809,6 +1838,7 @@ private:
 
         double c[6], ep = target;
         double adopted_alpha = 0.0, adopted_f = 1.0, adopted_worst = 0.0;
+        double adopted_vf = vf;
         bool   found = false;
 
         // Smallest legal alpha in [0, cap] at a fixed amplitude. Invariant:
@@ -1897,37 +1927,66 @@ private:
         // only smoothness (f stays 1), blend = 0 spends only amplitude (alpha
         // stays 0, f floors at -1, the same floor findF uses). Everything between
         // them is new, and is the whole point of the knob.
+        // THE RAY ENDS AT THE BUDGETS, and that is the amplitude budget's whole
+        // job: `infeasible_amplitude_budget` is the max FRACTION of the stroke
+        // that may be surrendered, and surrendered(f) = (1-f)/2, so the FLOOR is
+        // f = 1 - 2*budget. Without the caps s = 1 reached f = -1 -- endpoint =
+        // p, zero travel, a curve that must brake, reverse and return, whose
+        // peak accel on a rail slam is ~4v/T. That probe failed, and its failure
+        // discarded the WHOLE search: a segment 1 % over its ceiling fell
+        // straight to the flat Ruckig guard (the field's waveform_fallback at
+        // ratio 1.001). Probe AT the floor instead; a shape still illegal there
+        // is the guard's honest business.
+        //
+        // FEASIBILITY IS NOT MONOTONE IN f. A shortened span carries the same
+        // boundary conditions over less travel, so it curves harder and can
+        // break a ceiling the longer one did not. The bisection therefore does
+        // NOT return "the boundary": `hi` starts at the known-legal floor and is
+        // only ever moved to a probe that was legal, so what it returns is the
+        // SMALLEST LEGAL GRID POINT THE SEARCH ACTUALLY SAW. That is a weaker
+        // claim than a boundary and it is the true one.
         if (_cfg.infeasible_policy == InfeasiblePolicy::Blend) {
             double bl = (double)_cfg.infeasible_blend;
             bl = bl < 0.0 ? 0.0 : (bl > 1.0 ? 1.0 : bl);
             const double kmax = bl > 1.0 - bl ? bl : 1.0 - bl;
             const double k    = kmax > 1e-9 ? 1.0 / kmax : 1.0;
-            const int steps = asteps > fsteps ? asteps : fsteps;
+            // blend_steps is Blend's own step count. It used to be
+            // max of two knobs, one of which belonged to another policy and
+            // set this one's plan-time cost.
+            const int steps = asteps;
+            double acap = (double)_cfg.infeasible_smooth_budget;
+            acap = acap < 0.0 ? 0.0 : (acap > 1.0 ? 1.0 : acap);
+            double lcap = (double)_cfg.infeasible_amplitude_budget;
+            lcap = lcap < 0.0 ? 0.0 : (lcap > 1.0 ? 1.0 : lcap);
             auto at = [&](double s, double& fo, double& ao) {
                 ao = s * bl * k;
-                if (ao > 1.0) ao = 1.0;
+                if (ao > acap) ao = acap;
                 double loss = s * (1.0 - bl) * k;
-                if (loss > 1.0) loss = 1.0;
+                if (loss > lcap) loss = lcap;
                 fo = 1.0 - 2.0 * loss;
             };
             double fs, as;
             at(1.0, fs, as);
             double tc[6], tep;
-            if (budgetedTrial(p, v, a, target, vf, af, T, fs, as, tep, tc) <= 1.0) {
-                // s=1 legal (known), s=0 assumed illegal (the caller only gets
-                // here because the full-fidelity curve failed) — bisect down.
+            if (budgetedTrial(p, v, a, target, vf, af, T, fs, as, tep, tc,
+                              chord_out) <= 1.0) {
+                // The floor is legal (just proved), s = 0 is illegal (the caller
+                // only gets here because the full-fidelity curve failed) --
+                // bisect for the least the segment can get away with spending.
                 double lo = 0.0, hi = 1.0;
                 for (int i = 0; i < steps; i++) {
                     const double m = 0.5 * (lo + hi);
                     double mf, ma, mc[6], mep;
                     at(m, mf, ma);
-                    if (budgetedTrial(p, v, a, target, vf, af, T, mf, ma, mep, mc) <= 1.0)
+                    if (budgetedTrial(p, v, a, target, vf, af, T, mf, ma, mep,
+                                      mc, chord_out) <= 1.0)
                         hi = m;
                     else
                         lo = m;
                 }
                 at(hi, fs, as);
-                adopted_worst = budgetedTrial(p, v, a, target, vf, af, T, fs, as, ep, c);
+                adopted_worst = budgetedTrial(p, v, a, target, vf, af, T, fs, as,
+                                              ep, c, chord_out, &adopted_vf);
                 if (adopted_worst <= 1.0) {
                     adopted_alpha = as;
                     adopted_f     = fs;
@@ -1992,6 +2051,13 @@ private:
         }
 
         adoptQuintic(c, T, now_us);
+        // The af series is a backward difference of the velocities the machine
+        // ACTUALLY ended at. The search moved this one (amplitude scaling, the
+        // blend, the re-applied RFC-008 bound), so feeding the pre-search value
+        // forward would derive the next segment's af from a velocity this plan
+        // never reaches. Only when the sender declared a handoff at all: with
+        // no wire vf the series is not armed (see commitWaveform).
+        if (_prev_vf_ok) _prev_vf = adopted_vf;
 
         // ---- Telemetry: one event per axis actually spent -------------------
         // Never silent, and never a lie about WHICH axis paid.
@@ -2627,17 +2693,24 @@ public:
         // (the sum of the coefficients), so a shortened or smoothed candidate
         // is judged against the stroke it actually draws.
         //
-        // The ALLOWANCE is not recomputed here. It belongs to the commit, not to
-        // the trial: it is the excursion physics forces on the move from the
-        // caller's entry state, which every candidate in a bisection shares.
-        // Recomputing it per trial would also mean a Ruckig solve inside the
-        // innermost loop of three different searches. See _oshoot_allow.
-        double oshoot_lo = 0.0, oshoot_hi = 0.0;
+        // The PHYSICAL floor is not recomputed here. It belongs to the commit,
+        // not to the trial: it is the excursion physics forces on the move from
+        // the caller's entry state, which every candidate in a bisection shares,
+        // and measuring it means a Ruckig solve inside the innermost loop of
+        // two searches. See _oshoot_allow.
+        //
+        // THE CHORD SLACK IS PER-TRIAL and must stay that way: it is a fraction
+        // of the stroke THIS candidate draws (overshoot_chord_slack is a ratio,
+        // "further past its target than the move itself was long"). Carrying the
+        // full commanded chord's slack into a shortened trial makes the guard
+        // weakest on the shortest candidates, which are the ones that bulge.
+        double oshoot_lo = 0.0, oshoot_hi = 0.0, allow = oshoot_allow;
         if (oshoot_allow >= 0.0) {
             double p_end = 0.0;
             for (int k = 0; k < 6; k++) p_end += c[k];
             oshoot_lo = std::fmin(c[0], p_end);
             oshoot_hi = std::fmax(c[0], p_end);
+            allow += (double)_cfg.overshoot_chord_slack * (oshoot_hi - oshoot_lo);
         }
         for (int i = 0; i <= kScanSteps; i++) {
             const double tau = (double)i / kScanSteps;
@@ -2647,7 +2720,7 @@ public:
             const double jj = ((60*c[5]*tau + 24*c[4])*tau + 6*c[3]) / (T*T*T);
             worst = std::fmax(worst, std::fabs(jj) / jc);
             worst = std::fmax(worst, pointWorst(pp, vv, aa, oshoot_lo,
-                                                oshoot_hi, oshoot_allow));
+                                                oshoot_hi, allow));
         }
         return worst;
     }
@@ -2682,20 +2755,21 @@ public:
                             double oshoot_allow) const {
         const double dur = traj.get_duration();
         if (!(dur > 0.0) || !std::isfinite(dur)) return 0.0;
-        double oshoot_lo = 0.0, oshoot_hi = 0.0;
+        double oshoot_lo = 0.0, oshoot_hi = 0.0, allow = oshoot_allow;
         if (oshoot_allow >= 0.0) {
             double p0, p1, vv, aa;
             traj.at_time(0.0, p0, vv, aa);
             traj.at_time(dur, p1, vv, aa);
             oshoot_lo = std::fmin(p0, p1);
             oshoot_hi = std::fmax(p0, p1);
+            allow += (double)_cfg.overshoot_chord_slack * (oshoot_hi - oshoot_lo);
         }
         double worst = 0.0;
         for (int i = 0; i <= kScanSteps; i++) {
             double pp, vv, aa;
             traj.at_time(dur * (double)i / kScanSteps, pp, vv, aa);
             worst = std::fmax(worst, pointWorst(pp, vv, aa, oshoot_lo,
-                                                oshoot_hi, oshoot_allow));
+                                                oshoot_hi, allow));
         }
         return worst;
     }
@@ -2752,8 +2826,10 @@ private:
         if (!(_cfg.overshoot_guard > 0.0f) || !(T > 0.0)) return -1.0;
         const double floor_mm = physicalBandExcess(p, v, a, target, vf);
         if (floor_mm < 0.0) return -1.0;
-        return (double)_cfg.overshoot_guard * floor_mm + kOvershootFloor
-               + (double)_cfg.overshoot_chord_slack * std::fabs(target - p);
+        // The PHYSICAL floor only. The chord-slack term is a fraction of the
+        // stroke a candidate actually draws, so it is added per trial by the
+        // two worst-ratio referees, never here from the commanded chord.
+        return (double)_cfg.overshoot_guard * floor_mm + kOvershootFloor;
     }
 
     // ---- CHASE (bare / short-interval points) -------------------------------

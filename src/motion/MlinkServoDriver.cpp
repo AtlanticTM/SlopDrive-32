@@ -159,11 +159,16 @@ void MlinkServoDriver::sendSegmentTo(float p1, float v1, float a1,
         // place -> settle at its end -> long plan -> starved ring -> underrun
         // again. Seven resets in ten seconds on ordinary content (field
         // trace 2026-09-02, sd-wve). Mid-stream the gap is SWEPT, below.
+        const bool entry_ship = _reseed_armed;
+        _reseed_armed = false;   // one decision per entry, then only sweeps
         if (fabsf(p1 - _chain_p) > kReseedGapMm * AIM_STEPS_PER_MM &&
-            !_reseed_tried && _reseed_armed) {
+            !_reseed_tried && entry_ship) {
+            SLOGI("mlink", "re-seed requested at stream entry: chain gap %.1f mm",
+                  (double)(fabsf(p1 - _chain_p) / AIM_STEPS_PER_MM));
             _reseed_tried = true;
             _reseed_req = true;
             _sweep_pending = true;   // re-run this decision after the reset
+            _reseed_armed = true;    // the post-reset ship is still the entry
             return;
         }
         _reseed_tried = false;
@@ -349,8 +354,10 @@ void MlinkServoDriver::update() {
         if (rising & kFlagOverflow)
             SLOGW("mlink", "RP segment ring OVERFLOW: credit gate failed, a curve chunk was dropped");
         if (rising & kFlagUnderran)
-            SLOGI_EVERY_MS(5000, "mlink", "RP underran -> SETTLE (expected at stream "
-                           "end; mid-stream = ring starved, each one adds latency)");
+            SLOGI("mlink", "RP underran -> SETTLE: runway=%u ms depth=%u seg_mode=%d "
+                  "(expected at stream end; mid-stream = ring starved)",
+                  unsigned(uint16_t(in[2]) | uint16_t(uint16_t(in[3]) << 8)),
+                  unsigned(in[4]), int(_seg_mode));
         _slave_flags = in[1];
         _runway_ms = uint16_t(in[2]) | uint16_t(uint16_t(in[3]) << 8);
         _depth = in[4];

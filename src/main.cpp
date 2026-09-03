@@ -587,6 +587,12 @@ static void streamSamplerTask(void* /*param*/) {
             float actual_mm = g_state.actual_position_mm.load(std::memory_order_relaxed);
             float norm      = (span > 0.01f) ? (actual_mm - mapper.getMinMm()) / span : 0.5f;
             g_slopmotion.resetAt(constrain(norm, 0.0f, 1.0f), nowUs);
+            // Diagnosis (sd-wve): every engine reset names its cause. Rare
+            // by construction (stream edges), so an unthrottled line is fine.
+            SLOGI("smreset", "stream rising edge: engine seeded at %.3f (%.1f mm) "
+                  "gates=%d busy=%d pkt=%d hold=%d",
+                  (double)constrain(norm, 0.0f, 1.0f), (double)actual_mm,
+                  int(gatesOk), int(interpBusy), int(recentPacket), int(postMoveHold));
         }
 
         // Driver-requested re-seed: a chain gap too big to glide. A stretched
@@ -602,6 +608,8 @@ static void streamSamplerTask(void* /*param*/) {
             const float rnorm =
                 (rspan > 0.01f) ? (ractual - mapper.getMinMm()) / rspan : 0.5f;
             g_slopmotion.resetAt(constrain(rnorm, 0.0f, 1.0f), nowUs);
+            SLOGI("smreset", "driver re-seed: engine seeded at %.3f (%.1f mm)",
+                  (double)constrain(rnorm, 0.0f, 1.0f), (double)ractual);
         }
 
         // Push the live tuning (POST /api/slopmotion, Core 0) into the engine.

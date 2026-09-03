@@ -89,7 +89,6 @@ TEST_CASE("the unmapped list is exactly the set still at the engine default") {
 
     // ENGINE-DEFAULT BY DECISION. This list and the CHECK-!= list above are
     // the whole of Config; a field in neither is a field nobody decided about.
-    CHECK(c.sample_synthesis == def.sample_synthesis);
     CHECK(c.chase_jerk_scale == def.chase_jerk_scale);
     CHECK(c.chase_jerk_floor == def.chase_jerk_floor);
     CHECK(c.chase_stale_us == def.chase_stale_us);
@@ -100,7 +99,7 @@ TEST_CASE("the unmapped list is exactly the set still at the engine default") {
     CHECK(c.infeasible_soften_steps == def.infeasible_soften_steps);
     CHECK(c.bridge_ratio == def.bridge_ratio);
 
-    // 22 mapped (Limits' three included) + 10 unmapped is the whole struct. A
+    // 22 mapped (Limits' three included) + 9 unmapped is the whole struct. A
     // changed size means the engine grew or dropped a field: classify it into
     // one of the two lists above, then update this number. Host-only (the
     // native env has one toolchain), never a wire fact.

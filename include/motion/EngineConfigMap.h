@@ -64,7 +64,7 @@ inline slopmotion::Config buildEngineConfig(const EngineTuning& t) {
     // ENGINE-DEFAULT BY DECISION -- the host deliberately does not expose
     // these, so the engine's own value is the policy. Adding a knob means
     // moving a name off this list, never writing the field somewhere else:
-    //   sample_synthesis, chase_jerk_scale, chase_jerk_floor, chase_stale_us,
+    //   chase_jerk_scale, chase_jerk_floor, chase_stale_us,
     //   overshoot_guard, overshoot_chord_slack, infeasible_soften,
     //   infeasible_soften_floor, infeasible_soften_steps, bridge_ratio.
 

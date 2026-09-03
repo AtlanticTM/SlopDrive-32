@@ -1,8 +1,11 @@
+mod discovery;
+
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
   tauri::Builder::default()
     .plugin(tauri_plugin_http::init())
     .plugin(tauri_plugin_blec::init())
+    .invoke_handler(tauri::generate_handler![discovery::discover_hubs])
     .setup(|app| {
       if cfg!(debug_assertions) {
         app.handle().plugin(

@@ -115,6 +115,36 @@ for bit, meta in adv.items():
     else:
         say(f"  ok: ble_adv_flags.{name} = bit{n}")
 
+# The SlopDeck shell's Rust half is a THIRD copy of the same numbers (Cargo
+# cannot consume a C++ header). Port/magic/flag come from the registry, the
+# field widths from the C++ header, which is this repo's home for the layout.
+rs = "webui/src-tauri/src/discovery.rs"
+rs_port = grab(rs, r"PORT:\s*u16\s*=\s*(\d+)", int)
+if rs_port != udp.get("port"):
+    finding(f"udp port: rust {rs_port} vs registry {udp.get('port')} ({rs})")
+else:
+    say(f"  ok: rust udp_discovery.port {rs_port}")
+rs_magic = grab(rs, r"MAGIC:\s*\[u8;\s*4\]\s*=\s*\[([^\]]*)\]")
+rs_magic = "".join(chr(int(b, 16)) for b in re.findall(r"0x([0-9A-Fa-f]{2})", rs_magic or ""))
+if rs_magic != magic_reg:
+    finding(f"udp magic: rust '{rs_magic}' vs registry '{magic_reg}' ({rs})")
+else:
+    say(f"  ok: rust udp_discovery.magic '{rs_magic}'")
+rs_pair = grab(rs, r"FLAG_PAIRING_WINDOW_OPEN:\s*u8\s*=\s*0x([0-9A-Fa-f]+)", lambda s: int(s, 16))
+if rs_pair != 1:
+    finding(f"ble_adv_flags pairing_window_open: rust 0x{rs_pair:02X} vs bit0 ({rs})")
+else:
+    say("  ok: rust ble_adv_flags.pairing_window_open = bit0")
+for cname, rname in (("kHubNameMaxBytes", "HUB_NAME_BYTES"), ("kFwVersionMaxBytes", "FW_VERSION_BYTES"),
+                     ("kEtagBytes", "ETAG_BYTES")):
+    c = grab(disco, cname + r"\s*=\s*(\d+)", int)
+    r_ = grab(rs, rname + r":\s*usize\s*=\s*(\d+)", int)
+    if c is None or r_ is None or c != r_:
+        finding(f"reply layout {rname}: rust {r_} vs {cname} {c} ({rs})")
+    else:
+        say(f"  ok: rust {rname} {r_}")
+say("")
+
 ble_h = "include/comms/SlopSyncBleTransport.h"
 ident = reg.get("ble_identity") or {}
 pairs = [("service_uuid", "kBleServiceUuid"), ("write_char_uuid", "kBleWriteCharUuid"),

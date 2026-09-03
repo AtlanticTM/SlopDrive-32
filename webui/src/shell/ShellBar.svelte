@@ -12,12 +12,15 @@
    * - BLE sessions have no HTTP sideband, so no /uitoken: they land at watch
    *   tier by design. Control arrives with the WS upgrade.
    */
+  import { invoke } from '@tauri-apps/api/core';
   import { startScan, stopScan, checkPermissions } from '@mnlphlp/plugin-blec';
   import { machine, connect, disconnect } from '../model/machine.svelte.js';
   import { makeBleWebSocket, ipv4ToString, BLE_SERVICE, bleStats } from './ble-ws.js';
 
   let scanning = $state(false);
   let hubs = $state([]);
+  let finding = $state(false);
+  let found = $state([]);
   // The bar publishes its own MEASURED height as --shell-chrome-top so the
   // page reserves exactly that much top padding (style.css's .app) and the
   // LinkBar sticks below it. clientHeight includes padding, so the notch
@@ -61,6 +64,28 @@
   const canUpgrade = $derived(
     mode === 'ble' && phase === 'live' && endpoint && endpoint.ipv4 && endpoint.wsPort
   );
+
+  // SPEC 13.8 UDP discovery, the WS-side front door (DESIGN.md; operator
+  // ruling 2026-07-28). The Rust command owns the socket and the nonce match;
+  // this only renders candidates and hands a click to connectWs.
+  const DISCOVERY_PORT = 21328; // for the empty-result line only; discovery.rs is the home
+  async function findHubs() {
+    if (finding) return;
+    finding = true;
+    note = '';
+    found = [];
+    try {
+      found = await invoke('discover_hubs', { timeoutMs: 2500 });
+      if (found.length === 0) note = 'no hubs answered on UDP ' + DISCOVERY_PORT;
+    } catch (e) {
+      note = 'discovery failed: ' + e;
+    } finally {
+      finding = false;
+    }
+  }
+  // Discovery is the front door: with no remembered hub there is nothing else
+  // to try, so probe once at mount.
+  if (!manualHost) findHubs();
 
   async function scan() {
     if (scanning) { await stopScan().catch(() => {}); scanning = false; return; }
@@ -120,6 +145,18 @@
   {#if expanded}
     <span class="sb-mode mono" data-mode={mode}>{mode.toUpperCase()}</span>
     <span class="sb-phase mono">{phase}</span>
+
+    <button class="sb-btn" onclick={findHubs} disabled={finding}>
+      {finding ? 'finding…' : 'find hubs'}
+    </button>
+    {#each found as f (f.hub_instance_id)}
+      <button class="sb-hub ws mono" onclick={() => connectWs(f.ip, f.ws_port)}>
+        <span class="hub-name">{f.hub_name || 'hub'}</span>
+        <span class="hub-addr">{f.ip}:{f.ws_port}</span>
+        <span class="hub-fw">{f.fw_version || '?'}</span>
+        {#if f.pairing_window_open}<span class="hub-pair">pairing</span>{/if}
+      </button>
+    {/each}
 
     <button class="sb-btn" onclick={scan}>{scanning ? 'stop' : 'scan BLE'}</button>
     {#each hubs as h (h.address)}
@@ -233,6 +270,10 @@
   .sb-hub .hub-name { font-weight: 600; }
   .sb-hub .hub-addr { color: var(--ink-dim); }
   .sb-hub .hub-rssi { color: var(--ink-faint); }
+  .sb-hub .hub-fw { color: var(--ink-faint); }
+  .sb-hub .hub-pair { color: var(--reality); font-weight: 600; }
+  /* Solid border: a WS candidate from UDP discovery, not a BLE scan hit. */
+  .sb-hub.ws { border-style: solid; }
   .sb-host {
     width: 130px;
     min-height: 36px;

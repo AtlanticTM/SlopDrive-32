@@ -3,13 +3,13 @@
 //   All logic lives in system/, motion/, comms/, ui/. This file only declares
 //   module instances, wires them in setup(), creates FreeRTOS tasks with
 //   correct core pinning, and idles in loop().
-//   Core 1 (real-time): motorTask, streamSamplerTask, PatternEngine's own
-//   task, servoBusTask (Modbus backend only).
-//   Core 0 (system): commsTask, httpTask.
-//   D4 event-driven: SlopSync callbacks submit MotionIntent via the
-//   arbiter (Core 0 -> Core 1 deferral queue); PatternEngine emits one
-//   intent per stroke segment; motorTask drains deferred intents on Core 1.
-//   No periodic motion tick, no chase loop — ONE COMMAND -> ONE PLAN -> FAS.
+//   Core 1 (real-time): motorTask, PatternEngine's own task, servoBusTask
+//   (Modbus backend only). Core 0 (system): commsTask, httpTask.
+//   Event-driven: SlopSync callbacks submit intents via the arbiter (Core 0
+//   -> Core 1 deferral queues); PatternEngine emits one intent per stroke
+//   segment; motorTask drains them and forwards over the motion link.
+//   No periodic motion tick, no chase loop, no S3-side sampler: the RP2350
+//   holds the plan (docs/rp-motion-port.md).
 // See: architecture.md (motion doctrine, sole-caller, dual-core
 //   task separation).
 
@@ -50,8 +50,10 @@
 #endif
 
 #include "MotionArbiter.h"
+// Engine ENUM ORDINALS only (Mode, PlanKind): the RP holds the engine, and
+// the ordinals ride the status frame verbatim. Transcribing them here would
+// be the T20 hand-copied vocabulary.
 #include <slopmotion/slopmotion.hpp>
-#include "EngineConfigMap.h"
 #include "PatternEngine.h"
 
 #include "WifiLink.h"
@@ -111,46 +113,32 @@ static ServoModbus     servoModbus(Serial1, /* addr */ 1);
 // next reboot (backend switch is strict reboot-to-apply; written by the
 // motion_backend setting, 0x3030 key 5). AIM servo backend only.
 static uint8_t g_motion_backend = 0;
+// True once motor.bind() picked MlinkServoDriver. The link telemetry drain
+// below reaches the concrete driver (status, events, plan), which the proxy
+// deliberately does not forward, so it must know the backend answered.
+static bool g_mlink_bound = false;
 
 static SystemState        g_state;
 static RangeMapper        mapper;
 static PatternEngine      patternEngine(g_state, mapper, motor);
 static MotionArbiter      arbiter(g_state, mapper, motor);
 
-// SlopMotion — Core-1-owned jerk-limited motion core (docs/canon doctrine
-// §SlopMotion). The SlopSync ingress (Core 0) builds slopmotion::Commands
-// and hands them across via g_interp_queue; streamSamplerTask (Core 1)
-// plans them (quintic waveform / Ruckig chase + guard) and samples the plan
-// at ~1kHz into arbiter.submitStreamSample().
-// ~3.4 KB object — plain BSS static is fine (measured on xtensa).
-static slopmotion::Engine g_slopmotion({}, 0.5f);
-static constexpr size_t   INTERP_QUEUE_DEPTH     = 16;
-static QueueHandle_t      g_interp_queue         = nullptr;
-// Per-commit planner trace (diagnosis, sd-tki). Core 1 queues a POD record
-// per commit -- never a formatted log on the motion core (see the T27 note at
-// the commit site) -- and httpTask formats it into the `plan` tag. Drop-if-
-// full; the drop count rides the line so a gap is visible.
+// Plan-adoption trace (diagnosis, sd-tki), rebuilt on kEvtPlanAdopted. Core 1
+// queues a POD record per adopted plan -- never a formatted log on the motion
+// core (T27) -- and httpTask formats it into the `plan` tag. Drop-if-full;
+// the drop count rides the line so a gap is visible.
 struct PlanTrace {
-    uint64_t due_us;
-    int32_t  late_us;
-    float    target;
-    uint32_t duration_us;
-    float    end_vel;
-    float    next_chord;
-    uint32_t plan_us;
-    uint8_t  has_end_vel;
-    uint8_t  has_next_chord;
+    uint32_t due_us;       // MASTER microseconds, converted by the driver
+    int32_t  late_us;      // pull time behind the anchor
+    float    target;       // normalized plan end
+    uint32_t duration_us;  // 0 = a hold
+    uint8_t  cmd_seq;      // frame that caused it, 0 = the slave's own settle
     uint8_t  kind_after;
     uint8_t  mode_after;
-    uint8_t  ok;
-    uint8_t  family;
 };
 static constexpr size_t   kPlanTraceDepth = 64;
 static QueueHandle_t      g_plan_trace_queue     = nullptr;
 static uint32_t           g_plan_trace_drops     = 0;   // Core 1 writes, httpTask reads
-// After this idle gap with no L0 command the sampler stops feeding FAS and
-// yields the motor back to PatternEngine / manual moves.
-static constexpr uint32_t STREAM_IDLE_TIMEOUT_MS = 500;
 
 static WifiLink           wifiLink(g_state);
 
@@ -428,7 +416,119 @@ static void dumpTaskStacks() {
 
 // ---- FreeRTOS Tasks ---------------------------------------------------------
 
-// Core 1 — real-time: homing + D4 deferred-intent consumer
+// ---- Motion-link return path (Core 1) --------------------------------------
+// Pulled events become the anomaly feed and the plan strip; status becomes
+// the interp_* telemetry. Engine anomaly kinds ride below kEvtLinkBase and
+// index kSmAnomalyNames by ordinal; link kinds get their own names.
+// See docs/rp-motion-port.md, "Telemetry after the port".
+static const char* const kLinkEventNames[] = {
+    "cmd_gated", "cfg_tag_unknown", "clock_step", "plan_adopted",
+};
+static constexpr uint8_t kLinkEventNameCount =
+    uint8_t(sizeof(kLinkEventNames) / sizeof(kLinkEventNames[0]));
+
+static void drainMotionLink() {
+    if (!g_mlink_bound) return;
+    const motionlink::StatusV2& st = mlinkMotor.status();
+    const Window win = mapper.effectiveWindow();
+    const float span_mm = win.max_mm - win.min_mm;
+    const float span_counts = span_mm * AIM_STEPS_PER_MM;
+
+    // ---- events ------------------------------------------------------------
+    motionlink::EventRecord ev;
+    char nmbuf[8];
+    while (mlinkMotor.popEvent(ev)) {
+        if (ev.kind == motionlink::kEvtPlanAdopted) {
+            const MlinkServoDriver::PlanEvent p = mlinkMotor.lastPlan();
+            PlanTrace tr{};
+            tr.due_us      = p.due_master_us;
+            tr.late_us     = p.late_us;
+            tr.target      = ev.target;
+            tr.duration_us = p.duration_us;
+            tr.cmd_seq     = ev.cmd_seq;
+            tr.kind_after  = st.plan_kind;
+            tr.mode_after  = st.mode;
+            if (g_plan_trace_queue && xQueueSend(g_plan_trace_queue, &tr, 0) != pdTRUE)
+                ++g_plan_trace_drops;
+            // The strip's start is the position the plan was adopted FROM.
+            // Sampled here rather than at t_us: the pull is within one poll of
+            // the adoption, and the alternative is a second position history.
+            if (span_mm > 0.01f) {
+                const float pos_mm = motor.getPosition();
+                g_state.interp_start_pos = (pos_mm - win.min_mm) / span_mm;
+            }
+            g_state.interp_end_pos     = ev.target;
+            g_state.interp_duration_us = p.duration_us;
+            continue;
+        }
+
+        // COUNT FIRST, UNCONDITIONALLY: the log line below is throttled, so
+        // the counters are the only lossless record.
+        g_state.sm_anomalies = g_state.sm_anomalies + 1;
+        if (ev.kind < SystemState::SM_ANOM_KINDS)
+            g_state.sm_anom_kind[ev.kind] = g_state.sm_anom_kind[ev.kind] + 1;
+        // Hand the EDGE to Core 0 for the 0x0089 EVENT channel: the SlopSync
+        // hub is single-task by invariant and that task is on Core 0, so an
+        // anomaly crosses as data and the hub turns it into a frame.
+        {
+            SystemState::SmAnomalyRec rec;
+            rec.t_us   = ev.t_us;
+            rec.seq    = ev.seq;
+            rec.kind   = ev.kind;
+            rec.target = ev.target;
+            rec.detail = ev.detail;
+            g_state.smAnomalyPush(rec);
+        }
+        // Bound from each table's own size, never a literal. An unknown kind
+        // prints its ORDINAL so a stale table names the number to add.
+        const char* nm;
+        if (ev.kind >= motionlink::kEvtLinkBase) {
+            const uint8_t li = uint8_t(ev.kind - motionlink::kEvtLinkBase);
+            if (li < kLinkEventNameCount) nm = kLinkEventNames[li];
+            else { snprintf(nmbuf, sizeof(nmbuf), "?L%u", unsigned(li)); nm = nmbuf; }
+        } else if (ev.kind < kSmAnomalyNameCount) {
+            nm = kSmAnomalyNames[ev.kind];
+        } else {
+            snprintf(nmbuf, sizeof(nmbuf), "?%u", (unsigned)ev.kind);
+            nm = nmbuf;
+        }
+        // Log the KIND CHANGING, not every event: a stream that outruns the
+        // engine emits one kind continuously, and a flat throttle turns that
+        // into a permanent drip that says nothing new after the first line.
+        static uint8_t last_kind = 0xFF;
+        static uint32_t last_kind_ms = 0;
+        const uint32_t anom_now = millis();
+        if (ev.kind != last_kind || (anom_now - last_kind_ms) >= 10000u) {
+            last_kind = ev.kind;
+            last_kind_ms = anom_now;
+            SLOGI("motion", "rp %s target=%.3f detail=%.3f (total %lu)",
+                  nm, (double)ev.target, (double)ev.detail,
+                  (unsigned long)g_state.sm_anomalies);
+        }
+    }
+
+    // ---- status -> plan strip ---------------------------------------------
+    if (span_mm > 0.01f) {
+        const float pos_mm = motor.getPosition();
+        g_state.interp_cur_pos = (pos_mm - win.min_mm) / span_mm;
+        // Native counts are NEGATED vs mm, so the reported velocity flips
+        // sign on the way into the normalized frame.
+        g_state.interp_cur_vel =
+            span_counts > 1.0f ? -st.vel / span_counts : 0.0f;
+    }
+    const MlinkServoDriver::PlanEvent p = mlinkMotor.lastPlan();
+    g_state.interp_elapsed_us = p.valid ? uint32_t(micros() - p.due_master_us) : 0;
+    g_state.interp_active   = st.state == motionlink::kStateRunning;
+    g_state.interp_style    = st.mode;
+    g_state.interp_live_mode = st.mode == uint8_t(slopmotion::Mode::Chase);
+    g_state.interp_grad_mode =
+        st.plan_kind == uint8_t(slopmotion::PlanKind::Quintic) ||
+        st.plan_kind == uint8_t(slopmotion::PlanKind::Cubic);
+    g_state.sm_mode      = st.mode;
+    g_state.sm_plan_kind = st.plan_kind;
+}
+
+// Core 1 — real-time: homing, deferred-intent consumer, motion-link service
 static void motorTask(void* /*param*/) {
     bool homing_started = false;
     while (true) {
@@ -475,9 +575,12 @@ static void motorTask(void* /*param*/) {
         }
         // The SPI link has exactly one owner. While an RP2350 image is being
         // written the OTA path drives the bus from commsTask, and motion is
-        // stopped by the same gate, so this tick's poll would be noise into a
-        // slave that refuses every motion op anyway (sd-4k1.3).
-        if (!otaService.rpFlashActive()) motor.update();
+        // stopped by the same gate, so nothing on this task may touch the wire
+        // (sd-4k1.3). That covers the arbiter's config push and the event pull
+        // below too: both reach the bus through this task, which IS the link's
+        // owner, so they would ship frames into a second master.
+        const bool rp_flashing = otaService.rpFlashActive();
+        if (!rp_flashing) motor.update();
         // Window glide (sd-ey0): runtime window edits slew at the USER
         // (gentle) limit instead of re-mapping every target in one sample.
         // Goal writes race in from Core 0 (applySettings); a one-tick torn
@@ -518,363 +621,15 @@ static void motorTask(void* /*param*/) {
                 g_state.max_speed_mm_s.store(spd_ema, std::memory_order_relaxed);
         }
 #endif
-        // D4: process any Core 0 -> Core 1 deferred intents
-        arbiter.processDeferred();
+        // Core 0 -> Core 1 deferred intents, then the link's return path.
+        if (!rp_flashing) {
+            arbiter.processDeferred();
+            drainMotionLink();
+        }
         // SlopGlow liveness: this pulse is what keeps the status LEDs
         // animating. If this loop dies, the lights freeze — by design.
         if (auto* hb = slopglowMotorHeartbeat()) hb->pulse();
         vTaskDelay(pdMS_TO_TICKS(1));
-    }
-}
-
-// Core 1 — real-time: SlopMotion sampler. Plans Core-0 commands on the
-// slopmotion::Engine (quintic waveform / Ruckig chase + guard, docs/canon
-// doctrine §SlopMotion), samples the plan at ~1kHz, and feeds the arbiter's
-// stream fast-path (submitStreamSample). Publishes telemetry for the WebUI
-// overlay. Only drives motion while a SlopSync motion-input stream is
-// recently active — otherwise it yields the motor to PatternEngine / manual
-// moves.
-static void streamSamplerTask(void* /*param*/) {
-    TickType_t lastWake     = xTaskGetTickCount();
-    bool       wasActive    = false;
-    uint32_t   lastMotionMs = 0;   // wall-clock of the last tick the curve was gliding
-    while (true) {
-        uint64_t nowUs  = (uint64_t)esp_timer_get_time();
-        uint32_t now_ms = millis();
-
-        bool gatesOk = g_state.homed && !g_state.paused && !g_state.manual_override &&
-                       !g_state.estop_requested.load(std::memory_order_relaxed);
-        // A stream is "active" if a packet arrived recently OR the interpolator
-        // still has an in-flight segment to render. The second clause is the fix
-        // for the sparse-v4 freeze: v4 lands points ~700-1000 ms apart — longer
-        // than STREAM_IDLE_TIMEOUT_MS — so a packet-cadence-only gate declared
-        // the stream idle BETWEEN every point and froze motion partway through a
-        // move (e.g. ~499 ms into a 933 ms stroke). Gating on interp.isBusy()
-        // lets the SEGMENT decide when a move is done: we keep sampling through
-        // the whole cubic, and only start the idle countdown once the curve has
-        // genuinely settled to a hold. The recent-packet clause still holds the
-        // motor for the timeout AFTER the last move completes so a same-position
-        // re-command doesn't drop-then-reacquire.
-        bool recentPacket = g_state.last_intiface_ms != 0 &&
-                            (now_ms - g_state.last_intiface_ms < STREAM_IDLE_TIMEOUT_MS);
-        bool interpBusy   = g_slopmotion.isBusy(nowUs);
-
-        // Trailing hold measured from MOVE-END, not packet arrival. While the
-        // curve is gliding we keep stamping lastMotionMs; once it settles to a
-        // hold we keep the motor for one more STREAM_IDLE_TIMEOUT_MS window.
-        // This is the "finish the move, THEN hold ~500 ms" requirement — a
-        // long final segment (e.g. 933 ms) no longer releases with 0 ms trailing
-        // hold just because the last packet arrived >500 ms ago. recentPacket
-        // still covers the between-packets case on a live stream.
-        if (interpBusy) lastMotionMs = now_ms;
-        bool postMoveHold = lastMotionMs != 0 &&
-                            (now_ms - lastMotionMs < STREAM_IDLE_TIMEOUT_MS);
-
-        // Pattern reclaim: a USER-STARTED pattern takes the machine back once
-        // the stream stops actually driving (no target movement for 1.5s and
-        // no in-flight curve). Keep-alive packets alone no longer pin the
-        // sampler — last active driver wins, both directions.
-        bool intifaceDriving = g_state.last_intiface_move_ms != 0 &&
-                               (now_ms - g_state.last_intiface_move_ms < 1500);
-        bool patternClaims = g_state.pattern_running && !intifaceDriving && !interpBusy;
-
-        bool streamActive = gatesOk && !patternClaims &&
-                            (interpBusy || recentPacket || postMoveHold);
-
-        // Rising edge: seed the engine at the actual current position so a
-        // new stream starts from where the shaft really is (no stale plan).
-        if (streamActive && !wasActive) {
-            float span      = mapper.getMaxMm() - mapper.getMinMm();
-            float actual_mm = g_state.actual_position_mm.load(std::memory_order_relaxed);
-            float norm      = (span > 0.01f) ? (actual_mm - mapper.getMinMm()) / span : 0.5f;
-            // THE SEED IS HONEST (sd-6b2.10): a carriage parked outside the
-            // stroke window seeds a norm outside 0..1, and the engine plans
-            // the entry from there. Clamping made every entry plan start from
-            // a position the machine is not at.
-            g_slopmotion.resetAt(norm, nowUs);
-            // ONE RESET OWNER (sd-6b2.12): the host owns THIS entry's reset,
-            // so the driver must not raise its own re-seed for the same entry.
-            // Without this the connect cost two cold starts ~10 ms apart from
-            // the same stale actual_position_mm. Must precede the tick's
-            // submitStreamSample, which is where the driver consumes it.
-            motor.noteEngineSeeded();
-            // Diagnosis (sd-wve): every engine reset names its cause. Rare
-            // by construction (stream edges), so an unthrottled line is fine.
-            SLOGI("smreset", "stream rising edge: engine seeded at %.3f (%.1f mm) "
-                  "gates=%d busy=%d pkt=%d hold=%d",
-                  (double)norm, (double)actual_mm,
-                  int(gatesOk), int(interpBusy), int(recentPacket), int(postMoveHold));
-        }
-
-        // Driver-requested re-seed: a chain gap too big to glide. A stretched
-        // sweep is unpayable latency on a renderer that never drains faster
-        // (operator ruling); drop the slip, replan from the LIVE position.
-        // The next commit is a COLD start, so the traverse runs at the
-        // recovery (USER) limit through the engine's own feasibility
-        // machinery (sd-d77).
-        // Consumed UNCONDITIONALLY, acted on only while the stream is active:
-        // a request left pending when a stream drops would otherwise reset an
-        // idle engine on some later tick (sd-6b2.12). Dropping it is correct,
-        // because the gap it described belongs to a chain that is gone.
-        if (motor.consumeReseedRequest() && streamActive) {
-            const float rspan = mapper.getMaxMm() - mapper.getMinMm();
-            const float ractual =
-                g_state.actual_position_mm.load(std::memory_order_relaxed);
-            const float rnorm =
-                (rspan > 0.01f) ? (ractual - mapper.getMinMm()) / rspan : 0.5f;
-            g_slopmotion.resetAt(rnorm, nowUs);
-            SLOGI("smreset", "driver re-seed: engine seeded at %.3f (%.1f mm)",
-                  (double)rnorm, (double)ractual);
-        }
-
-        // Push the live tuning into the engine, ON CHANGE ONLY. setConfig is a
-        // wholesale struct copy, so a per-tick push of a freshly built Config
-        // resets every field the map does not name to the engine default every
-        // millisecond, which is what made Blend's one slider unreachable
-        // (sd-6b2.4). The TUNING is what gets compared, never the Config:
-        // buildEngineConfig is pure, so equal inputs mean an equal Config, and
-        // EngineTuning is an aggregate of scalars whose defaulted operator== is
-        // a memberwise compare with no padding in it. Same-core with commit(),
-        // no lock. The first tick always pushes, so the engine is configured
-        // before the first commit below.
-        {
-            slopdrive::EngineTuning tune;
-            tune.span_mm         = mapper.getMaxMm() - mapper.getMinMm();
-            tune.input_max_speed = g_state.config.input_max_speed_mm_s;
-            tune.input_max_accel = g_state.config.input_max_accel_mm_s2;
-            tune.input_max_jerk  = g_state.config.input_max_jerk_mm_s3;
-            tune.user_max_speed  = g_state.config.user_max_speed_mm_s;
-            tune.vmax_ovr        = g_state.sm_tune_vmax_ovr;
-            tune.amax_ovr        = g_state.sm_tune_amax_ovr;
-            tune.jmax_ovr        = g_state.sm_tune_jmax_ovr;
-            tune.chase_ff        = g_state.sm_tune_chase_ff;
-            tune.chase_aff       = g_state.sm_tune_chase_aff;
-            tune.aim_extrap      = g_state.sm_tune_aim_extrap;
-            tune.chase_gain      = g_state.sm_tune_chase_gain;
-            tune.chase_look      = g_state.sm_tune_chase_look;
-            tune.dense_us        = g_state.sm_tune_dense_us;
-            tune.infeas_policy   = g_state.sm_tune_infeas_policy;
-            tune.infeas_blend    = g_state.sm_tune_infeas_blend;
-            tune.smooth_budget   = g_state.sm_tune_smooth_budget;
-            tune.amp_budget      = g_state.sm_tune_amp_budget;
-            tune.blend_steps     = g_state.sm_tune_blend_steps;
-            tune.curve_policy    = g_state.sm_tune_curve_policy;
-            tune.handoff_k       = g_state.sm_tune_handoff_k;
-            tune.settle_grace_us = g_state.sm_tune_settle_grace_us;
-
-            // A stored ordinal from a policy deleted 2026-09-02 runs as Blend
-            // (see EngineConfigMap). Said ONCE, on the tick that first sees it:
-            // the operator's stored choice no longer exists, and a silent remap
-            // is the kind of thing that gets rediscovered on hardware.
-            static bool s_retired_said = false;
-            if (!s_retired_said && tune.infeas_policy >= 2) {
-                s_retired_said = true;
-                SLOGW("motion", "infeasible_policy %u is retired; running blend",
-                      (unsigned)tune.infeas_policy);
-            }
-
-            static slopdrive::EngineTuning s_pushed{};
-            static bool s_pushed_valid = false;
-            if (!s_pushed_valid || !(tune == s_pushed)) {
-                const slopmotion::Config smCfg = slopdrive::buildEngineConfig(tune);
-                g_slopmotion.setConfig(smCfg);
-                g_state.sm_eff_vmax = smCfg.limits.vmax;
-                g_state.sm_eff_amax = smCfg.limits.amax;
-                g_state.sm_eff_jmax = smCfg.limits.jmax;
-                s_pushed = tune;
-                s_pushed_valid = true;
-            }
-        }
-
-        // Drain the Core-0 -> Core-1 command handoff; each commit is ONE plan.
-        // Plan time is the software-double cost — benched right here, where it
-        // runs, and surfaced via GET /api/slopmotion (docs/canon doctrine
-        // §SlopMotion part-2 gate).
-        // TODO(sd-4k1): the ring releases a command only when it is DUE, so
-        // nothing here hands the engine a future anchor yet. commit() now
-        // schedules one instead of demoting it; under the port the link hands
-        // intents over on arrival and this drain stops pacing entirely.
-        slopmotion::Command cmd;
-        while (xQueueReceive(g_interp_queue, &cmd, 0) == pdTRUE) {
-            // ONE TIMESTAMP PER OPERATION (sd-6b2.12). commit() is O(ms) -- up
-            // to 17.6 ms for a budgeted Blend -- so the tick-entry stamp is
-            // already stale for the SECOND command of a drain, and it is what
-            // late_us is measured against. Re-read per commit.
-            const uint64_t commitUs = (uint64_t)esp_timer_get_time();
-            const bool committed = g_slopmotion.commit(cmd, commitUs);
-            const uint32_t dt = (uint32_t)((uint64_t)esp_timer_get_time() - commitUs);
-            {
-                // POD only, no formatting on Core 1 (T27 note below).
-                PlanTrace tr{};
-                tr.due_us         = cmd.has_anchor ? cmd.anchor_us : commitUs;
-                tr.late_us        = (int32_t)(int64_t(commitUs) - int64_t(tr.due_us));
-                tr.target         = cmd.target;
-                tr.duration_us    = cmd.duration_us;
-                tr.end_vel        = cmd.end_vel;
-                tr.next_chord     = cmd.next_chord;
-                tr.plan_us        = dt;
-                tr.has_end_vel    = cmd.has_end_vel;
-                tr.has_next_chord = cmd.has_next_chord;
-                tr.kind_after     = (uint8_t)g_slopmotion.planKind();
-                tr.mode_after     = (uint8_t)g_slopmotion.mode();
-                tr.ok             = committed;
-                tr.family         = cmd.client_curve_family;
-                if (g_plan_trace_queue && xQueueSend(g_plan_trace_queue, &tr, 0) != pdTRUE)
-                    ++g_plan_trace_drops;
-            }
-            g_state.sm_plan_us_last = dt;
-            if (dt > g_state.sm_plan_us_max) g_state.sm_plan_us_max = dt;
-            g_state.sm_plan_us_avg = g_state.sm_plan_us_avg <= 0.0f
-                ? (float)dt
-                : 0.9f * g_state.sm_plan_us_avg + 0.1f * (float)dt;
-            // Joint census (sd-ar3 notch hunt). gap = this chord's DUE time vs
-            // the previous chord's due+duration: sender-schedule contiguity,
-            // now that anchored commits absorb release jitter. late = arrival
-            // behind due; growth here means the client's send lead eroding.
-            // T27: this loop runs once per streamed segment (~30 Hz) on CORE 1.
-            // A formatted log line here costs two float conversions plus a
-            // sloplog spinlock the Core-0 drain also takes, so reading the log
-            // perturbed the motion it was measuring. Census into counters,
-            // summary at 1 Hz -- the same shape OtaService's dups/holes census
-            // uses. Never restore a per-segment SLOG on this path.
-            static uint64_t s_prevEndUs = 0;
-            const uint64_t due = cmd.has_anchor ? cmd.anchor_us : commitUs;
-            const int64_t gap_us = s_prevEndUs
-                ? int64_t(due) - int64_t(s_prevEndUs) : 0;
-            s_prevEndUs = due + cmd.duration_us;
-            const int64_t late_us = int64_t(commitUs) - int64_t(due);
-
-            static uint32_t s_censusN = 0, s_censusVf = 0;
-            static int64_t  s_gapMin = 0, s_gapMax = 0, s_lateMin = 0, s_lateMax = 0;
-            static uint32_t s_censusMs = 0;
-            if (s_censusN == 0) {
-                s_gapMin = s_gapMax = gap_us;
-                s_lateMin = s_lateMax = late_us;
-            } else {
-                if (gap_us  < s_gapMin)  s_gapMin  = gap_us;
-                if (gap_us  > s_gapMax)  s_gapMax  = gap_us;
-                if (late_us < s_lateMin) s_lateMin = late_us;
-                if (late_us > s_lateMax) s_lateMax = late_us;
-            }
-            ++s_censusN;
-            if (cmd.has_end_vel && cmd.end_vel != 0.0f) ++s_censusVf;
-
-            const uint32_t censusNow = millis();
-            if (censusNow - s_censusMs >= 1000u) {
-                s_censusMs = censusNow;
-                SLOGI("smplan", "n=%lu vf!=0:%lu gap=[%+ld,%+ld] late=[%ld,%ld] us",
-                      (unsigned long)s_censusN, (unsigned long)s_censusVf,
-                      (long)s_gapMin, (long)s_gapMax,
-                      (long)s_lateMin, (long)s_lateMax);
-                s_censusN = 0; s_censusVf = 0;
-            }
-        }
-
-        // The sample's OWN clock, re-read after the drain (sd-6b2.12): the
-        // tick-entry stamp can be 17 ms old here, and the driver stamps what
-        // arrives with a fresh micros().
-        const uint64_t sampleUs = (uint64_t)esp_timer_get_time();
-
-        if (streamActive) {
-            float pos = g_slopmotion.positionAt(sampleUs);
-            float vel = g_slopmotion.velocityAt(sampleUs);
-            arbiter.submitStreamSample(pos, vel);
-
-            // Publish telemetry for the WebUI planned-path overlay. Field
-            // mapping onto the legacy interp_* slots (honest approximations;
-            // proper SlopMotion telemetry lands with the WebUI refactor):
-            // live_mode = chasing, grad_mode = quintic plan, style = Mode.
-            slopmotion::Snapshot d = g_slopmotion.snapshot(sampleUs);
-            g_state.interp_start_pos   = d.start;
-            g_state.interp_end_pos     = d.target;
-            g_state.interp_cur_pos     = d.pos;
-            g_state.interp_cur_vel     = d.vel;
-            g_state.interp_duration_us = (uint32_t)(d.duration_s * 1e6f);
-            g_state.interp_elapsed_us  = (uint32_t)(d.elapsed_s * 1e6f);
-            g_state.interp_live_mode   = (d.mode == (uint8_t)slopmotion::Mode::Chase);
-            g_state.interp_grad_mode   = (d.plan_kind == (uint8_t)slopmotion::PlanKind::Quintic ||
-                                          d.plan_kind == (uint8_t)slopmotion::PlanKind::Cubic);
-            g_state.interp_style       = d.mode;
-            g_state.interp_active      = true;
-            g_state.sm_mode      = d.mode;
-            g_state.sm_plan_kind = d.plan_kind;
-            g_state.sm_plans     = d.plans;
-            g_state.sm_failures  = d.failures;
-        } else if (wasActive) {
-            g_state.interp_active = false;
-        }
-
-        // Drain the engine's anomaly ring: count (lossless), log (throttled),
-        // and forward each edge to Core 0 for the SlopSync 0x0089 EVENT feed.
-        {
-            slopmotion::Anomaly ev;
-            char nmbuf[8];
-            while (g_slopmotion.popAnomaly(ev)) {
-                // COUNT FIRST, UNCONDITIONALLY. The human log line below is
-                // throttled (a 14-event replan burst would otherwise spam the
-                // ring), so the counters are the only lossless record — they
-                // must never sit behind a throttle or a log-level gate.
-                g_state.sm_anomalies = g_state.sm_anomalies + 1;
-                if (ev.kind < SystemState::SM_ANOM_KINDS)
-                    g_state.sm_anom_kind[ev.kind] = g_state.sm_anom_kind[ev.kind] + 1;
-                // Hand the EDGE to Core 0 for the 0x0089 motion-anomaly EVENT
-                // channel. We cannot publish from here: the slopsync Hub is
-                // single-task by invariant and that task is on Core 0, so the
-                // anomaly crosses as data (SPSC ring in SystemState) and the
-                // SlopSyncHub task turns it into a frame. Bounded, non-
-                // blocking, allocation-free — safe on the 1 kHz sampler.
-                // UNGATED by the ring's own name table on purpose: an unknown
-                // kind still deserves to reach a subscriber (the catalog's
-                // option labels stop at the last named kind, so a client shows
-                // the ordinal — the same self-identifying behavior the log
-                // line's "?<n>" gives, rather than silence).
-                {
-                    SystemState::SmAnomalyRec rec;
-                    rec.t_us   = (uint32_t)(ev.t_us & 0xFFFFFFFFull);
-                    rec.seq    = ev.seq;
-                    rec.kind   = ev.kind;
-                    rec.target = ev.target;
-                    rec.detail = ev.detail;
-                    g_state.smAnomalyPush(rec);
-                }
-                // Bound from the shared table's own size, never a literal — an
-                // engine that grows a kind must not silently become "?" again.
-                const char* nm;
-                if (ev.kind < kSmAnomalyNameCount) {
-                    nm = kSmAnomalyNames[ev.kind];
-                } else {
-                    // Unknown kind prints its ORDINAL ("?6"), so a stale table
-                    // names the number to add rather than swallowing it.
-                    snprintf(nmbuf, sizeof(nmbuf), "?%u", (unsigned)ev.kind);
-                    nm = nmbuf;
-                }
-                // Info, not Debug: Debug sits below the default
-                // SLOPLOG_COMPILE_LEVEL floor, so this line compiled out of
-                // every stock build — the anomaly feed was invisible on the
-                // device by construction.
-                //
-                // Log the KIND CHANGING, not every anomaly. A stream that
-                // outruns the engine emits the same kind continuously, and the
-                // old flat 1 Hz throttle turned that into a permanent 1/s
-                // drip that said nothing new after the first line. The full
-                // per-event feed lives on channel 0x0089 and in the
-                // sm_anom_kind[] counters — this is the human mirror, so it
-                // fires on transitions plus a 10 s "still happening" pulse.
-                static uint8_t last_kind = 0xFF;
-                static uint32_t last_kind_ms = 0;
-                const uint32_t anom_now = millis();
-                if (ev.kind != last_kind || (anom_now - last_kind_ms) >= 10000u) {
-                    last_kind = ev.kind;
-                    last_kind_ms = anom_now;
-                    SLOGI("motion", "slopmotion %s target=%.3f detail=%.3f (total %lu)",
-                          nm, (double)ev.target, (double)ev.detail,
-                          (unsigned long)g_state.sm_anomalies);
-                }
-            }
-        }
-
-        wasActive = streamActive;
-        vTaskDelayUntil(&lastWake, pdMS_TO_TICKS(1));
     }
 }
 
@@ -1026,14 +781,12 @@ static void httpTask(void* param) {
             static const char* const kMode[] = {"idle", "waveform", "chase", "settle"};
             PlanTrace tr;
             for (int n = 0; n < 8 && xQueueReceive(g_plan_trace_queue, &tr, 0) == pdTRUE; ++n) {
-                SLOGI("plan", "due=%llu late=%ld tgt=%.4f dur=%u vf=%s%.3f next=%s%.3f -> %s/%s plan=%uus%s",
-                      (unsigned long long)tr.due_us, (long)tr.late_us, (double)tr.target,
-                      unsigned(tr.duration_us / 1000u),
-                      tr.has_end_vel ? "" : "S", tr.has_end_vel ? (double)tr.end_vel : 0.0,
-                      tr.has_next_chord ? "" : "-", tr.has_next_chord ? (double)tr.next_chord : 0.0,
+                SLOGI("plan", "due=%lu late=%ld tgt=%.4f dur=%ums seq=%u -> %s/%s%s",
+                      (unsigned long)tr.due_us, (long)tr.late_us, (double)tr.target,
+                      unsigned(tr.duration_us / 1000u), unsigned(tr.cmd_seq),
                       kKind[tr.kind_after < 4 ? tr.kind_after : 0],
                       kMode[tr.mode_after < 4 ? tr.mode_after : 0],
-                      unsigned(tr.plan_us), tr.ok ? "" : " REFUSED");
+                      tr.cmd_seq ? "" : " (slave-initiated)");
             }
             static uint32_t s_dropsSeen = 0;
             if (g_plan_trace_drops != s_dropsSeen) {
@@ -1201,11 +954,13 @@ void setup() {
         SLOGI("boot", "Motion backend: FAS bound but INERT (bench wiggle owns the mlink)");
 #else
         motor.bind(mlinkMotor);
+        g_mlink_bound = true;
         SLOGI("boot", "Motion backend: mlink -> RP2350 quadrature (drive saved 0x19=2)");
 #endif
     }
 #else
     motor.bind(mlinkMotor);
+    g_mlink_bound = true;
     SLOGI("boot", "Motion backend: mlink -> RP2350 quadrature (FEATURE_RS485_MODBUS not compiled)");
 #endif
     webui.setMachineBackend(g_motion_backend);
@@ -1436,7 +1191,6 @@ void setup() {
     // plan pins the emitter slew cap into steady-state lag.
     motor.setRenderCeiling(fmaxf(g_state.config.user_max_speed_mm_s,
                                  g_state.config.input_max_speed_mm_s));
-    motor.setRecoverySpeed(g_state.config.user_max_speed_mm_s);
     arbiter.setInputAccelLimit(g_state.config.input_max_accel_mm_s2);
 
     // Wire PatternEngine to the arbiter so it submits intents instead of
@@ -1447,9 +1201,6 @@ void setup() {
     // live limit-set updates directly through the sole caller.
     webui.setArbiter(&arbiter);
 
-    // SlopMotion command queue — Core 0 (SlopSync ingress) → Core 1 sampler
-    g_interp_queue = xQueueCreate(INTERP_QUEUE_DEPTH, sizeof(slopmotion::Command));
-    configASSERT(g_interp_queue != nullptr);
     g_plan_trace_queue = xQueueCreate(kPlanTraceDepth, sizeof(PlanTrace));
     configASSERT(g_plan_trace_queue != nullptr);
 
@@ -1465,12 +1216,6 @@ void setup() {
     BaseType_t task_ok;
     // motorTask: Core 1, priority 3 — homing + D4 deferred-intent consumer
     task_ok = xTaskCreatePinnedToCore(motorTask, "Motor", 4096, nullptr, 3, nullptr, 1);
-    configASSERT(task_ok == pdPASS);
-    // streamSamplerTask: Core 1, priority 4 — SlopMotion sampler. 16 KB stack:
-    // commit() nests Ruckig temporaries (InputParameter 328 B + Trajectory
-    // 2.2 KB per frame, measured on xtensa) — the 4 KB stack that fit the
-    // cubic is exactly the cpp-safety.md T1 stack-bomb class waiting to recur.
-    task_ok = xTaskCreatePinnedToCore(streamSamplerTask, "Sampler", 16384, nullptr, 4, nullptr, 1);
     configASSERT(task_ok == pdPASS);
     // 4096: measured 1,784 B peak in the fw 2.1.90 stack census (2.3x headroom).
     // Safe to size from that census specifically because this task's whole job —
@@ -1518,7 +1263,6 @@ void setup() {
             // to be distinguishable from the transports' (see LEDGER's 110 KB).
             bootheap::mark("ss:ctor");
             slopSyncHub->setPatternEngine(&patternEngine);
-            slopSyncHub->setMotionStreamQueue(g_interp_queue);  // 0x0084 motion-input -> Core-1 sampler
 #if defined(UART_LINK_ENABLED)
             // OTA over the bridge control channel, NOT over SlopSync (RFC-057).
             slopSyncHub->setOtaSink(&g_serialOtaSink);

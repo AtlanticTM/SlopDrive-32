@@ -319,9 +319,10 @@ float    aimStepsPerMm();
 #define AIM_MCPWM_PCNT_RETIME   1
 
 // ---- FAS pipeline depth â€” how stale a stream sample is when it lands --------
-// streamSamplerTask produces a micro-target every ~1 ms. FAS consumes on its
-// own cadence, and both library defaults are sized for discrete moves, not for
-// a stream:
+// Applies to the FAS step/dir backend only, which no longer carries motion on
+// this machine (the RP2350 does, docs/rp-motion-port.md). Kept tuned for a
+// future step/dir drive: a ~1 kHz micro-target producer against FAS's own
+// cadence, whose library defaults are sized for discrete moves, not a stream:
 //   task_rate       4 ms  -> the 1 kHz sample stream is decimated to 250 Hz
 //   forward plan   20 ms  -> the queue is committed 20 ms ahead of the target
 // So the machine executes a plan built from a sample up to 20 ms old, refilled

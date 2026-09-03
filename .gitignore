@@ -211,3 +211,5 @@ src/c5_probe/logview_gz.h
 # lock, CMake entry). Not build inputs here; platformio.ini is the entry.
 /dependencies.lock
 /CMakeLists.txt
+# Segment-trace reader for the segin/plan/motion diag tags (sd-tki jitter hunt).
+!tools/segtrace.py

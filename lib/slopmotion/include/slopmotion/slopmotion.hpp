@@ -1025,6 +1025,12 @@ public:
     // ---- Lifecycle ----------------------------------------------------------
     // Hard-reset to a static hold at `pos`. Used on home/estop/resume/stream
     // rising-edge (seed at the machine's actual position).
+    // CONSTRAINT: a reset voids the PLAN and the PIPELINE, never the STREAM.
+    // The re-seed door fires precisely because the stream is alive, so the
+    // cadence estimate survives (it is a property of the sender, not of the
+    // plan) and `_reset_cold` carries the one thing a re-seed does mean: the
+    // next plan is a cold start. See "One activity clock",
+    // .claude/rules/motion-control.md.
     void resetAt(float pos, uint64_t now_us) {
         _syn_ok = false;
         _syn_prev_ok = false;
@@ -1037,23 +1043,27 @@ public:
         _mode       = Mode::Idle;
         _kind       = PlanKind::None;
         _plan_start = now_us;
-        _est_valid  = false;
-        _est_ema_ok = false;
-        _est_had_cadence = false;
         _prev_vf_ok = false;
+        // The dwell rule compares against the PREVIOUS segment's target; a
+        // re-seed has no previous segment, and inheriting one turns the first
+        // post-seed stroke into a dwell (its handoff velocity forced to 0).
+        _prev_wave_tgt_ok = false;
         _wave_dir     = 0;
         _wave_owed    = 0.0;
         _wave_last_us = 0;
         _plan_jerk_frac = 1.0f;
         _plans      = 0;
         _failures   = 0;
-        _last_commit_us   = 0;      // the next plan is a cold start
-        _last_plan_end_us = 0;
+        _last_activity_us = now_us;   // the seed itself is activity
+        _reset_cold = true;
+        _plan_lim   = _cfg.limits;
     }
 
     // Ceiling updates take effect at the NEXT plan (an in-flight trajectory
     // is an immutable polynomial planned under the limits of its time).
-    void setLimits(const Limits& l) { _cfg.limits = l; }
+    // `_plan_lim` follows so the public referees judge against the configured
+    // ceilings between commits; commit() re-derives it per plan.
+    void setLimits(const Limits& l) { _cfg.limits = l; _plan_lim = l; }
     const Config& config() const { return _cfg; }
     void setChaseFeedforward(bool on, float gain) {
         _cfg.chase_feedforward = on;
@@ -1061,7 +1071,7 @@ public:
     }
     // Wholesale live-tuning update (firmware pushes the WebUI/API-tuned
     // config every sampler tick — same-core with commit(), no lock needed).
-    void setConfig(const Config& c) { _cfg = c; }
+    void setConfig(const Config& c) { _cfg = c; _plan_lim = c.limits; }
 
     // ---- Command entry (Core 1, after queue drain) --------------------------
     // Plan a new trajectory NOW from the current sampled state. Returns false
@@ -1098,29 +1108,22 @@ public:
             cmd.has_duration && cmd.duration_us >= kShortMoveUs;
 
         // Cold-start governor (Config::recovery_vmax): the opening plan out
-        // of rest traverses park->content at positioning gentleness. COLD
-        // requires rest AND a real command gap: normal stroke content arrives
-        // at rest between every action (explicit-rest handoffs), and keying
-        // on rest alone clamped nearly every stroke to the user limit
-        // (2026-08-10). The clamp is transient and covers every planner this
-        // commit reaches. Single-task engine: no concurrent reader of _cfg.
-        // The gap is measured from the later of the last commit and the
-        // last PLAN END: a hold segment is content, and measuring from its
-        // commit alone made every exit from a long hold a "cold start"
-        // capped at the user limit (field trace 2026-09-02: 6.9 s hold at
-        // the rail, exit shrunk to 70% and settled, every loop of the
-        // script). resetAt() zeroes the clock, so a re-seed IS cold.
-        uint64_t last_activity = _last_commit_us;
-        if (_last_plan_end_us > last_activity) last_activity = _last_plan_end_us;
+        // of rest traverses park->content at positioning gentleness. COLD is
+        // rest AND silence on the ONE activity clock (stamped by plan ends as
+        // well as commits: a hold segment is content), or the re-seed flag.
+        // Keying on rest alone, or on commits alone, clamped ordinary strokes
+        // to the user limit (2026-08-10; the 6.9 s rail hold, 2026-09-02).
         const bool cold = _cfg.recovery_vmax > 0.0f &&
                           _cfg.recovery_vmax < _cfg.limits.vmax &&
                           (_mode == Mode::Idle || _mode == Mode::Settle) &&
                           std::fabs(v) < 1e-3 &&
-                          (_last_commit_us == 0 ||
-                           now_us - last_activity > kColdStartGapUs);
-        _last_commit_us = now_us;
-        const float vmax_full = _cfg.limits.vmax;
-        if (cold) _cfg.limits.vmax = _cfg.recovery_vmax;
+                          (_reset_cold ||
+                           (now_us > _last_activity_us &&
+                            now_us - _last_activity_us > kColdStartGapUs));
+        _reset_cold = false;
+        noteActivity(t0);
+        _plan_lim = _cfg.limits;
+        if (cold) _plan_lim.vmax = _cfg.recovery_vmax;
         bool ok;
         if (waveform) {
             _syn_ok = false;   // real segments preempt the synthesis buffer
@@ -1131,7 +1134,6 @@ public:
         } else {
             ok = commitChase(cmd, p, v, a, target, t0);
         }
-        _cfg.limits.vmax = vmax_full;
         if (ok) _plans++;
         return ok;
     }
@@ -1144,7 +1146,10 @@ public:
     bool commitSampleSynth(const Command& cmd, double p, double v, double a,
                            double target, uint64_t t0, uint64_t now_us) {
         const uint64_t stamp = cmd.has_anchor ? cmd.anchor_us : now_us;
-        if (_syn_ok && stamp - _syn_us > (uint64_t)_cfg.chase_stale_us) {
+        // Guarded subtraction: a regressive stamp underflows u64 and tears the
+        // holdback down, which is the drop the branch below exists for.
+        if (_syn_ok && stamp > _syn_us &&
+            stamp - _syn_us > (uint64_t)_cfg.chase_stale_us) {
             _syn_ok = false;   // stream gap: restart the holdback
             _syn_prev_ok = false;
             _syn_vf_ok = false;
@@ -1243,13 +1248,13 @@ public:
         if (_pend_ok) evalCurve(_pend_c, _pend_T, 1.0, pw, vw, aw);
         else          sampleRaw(tw, pw, vw, aw);
 #ifdef SLOPMOTION_SYNTH_DEBUG
-        if (std::fabs(clamp01(_syn_p) - pw) / T > 0.9 * (double)_cfg.limits.vmax)
+        if (std::fabs(clamp01(_syn_p) - pw) / T > 0.9 * (double)_plan_lim.vmax)
             std::printf("SYNSLIP now=%llu tw=%llu T=%.4f pw=%.4f knot=%.4f\n",
                         (unsigned long long)now_us, (unsigned long long)tw, T,
                         pw, clamp01(_syn_p));
 #endif
         if (std::fabs(clamp01(_syn_p) - pw) / T >
-            0.9 * (double)_cfg.limits.vmax) {
+            0.9 * (double)_plan_lim.vmax) {
             // The span's schedule already saturates the machine: catch-up
             // authority is zero, so slip is DROPPED, never financed (the
             // samples contract is decimation). Re-prime at the freshest
@@ -1545,6 +1550,12 @@ private:
                                      : (double)(now_us - _plan_start) * 1e-6;
     }
 
+    // The activity clock only ever moves forward: a late anchor is evidence
+    // about the past, never a retraction of what has already been rendered.
+    void noteActivity(uint64_t t_us) {
+        if (t_us > _last_activity_us) _last_activity_us = t_us;
+    }
+
     // ---- Active-plan evaluation ---------------------------------------------
     // Is the active plan one of the Hermite families (evaluated by quinticAt,
     // a cubic being a quintic with two zero high-order terms)? See PlanKind:
@@ -1588,7 +1599,13 @@ private:
         }
         if (isHermite()) quinticAt(dur > 0 ? t / dur : 1.0, p, v, a);
         else                            _traj.at_time(t, p, v, a);
-        if (over > 0.0) { p += v * over; a = 0.0; }
+        if (over > 0.0) {
+            p += v * over;
+            a = 0.0;
+            // At the cap the position stops advancing, so the reported
+            // velocity must stop too: one state, one story.
+            if (over >= kCoastCapS) v = 0.0;
+        }
     }
 
     // Quintic evaluation at normalized tau ∈ [0,1] (real-time derivatives).
@@ -2311,9 +2328,9 @@ private:
     bool commitWaveformScaled(double p, double v, double a, double target,
                               double vf, double af, double T, int8_t dir,
                               double pull, uint64_t now_us) {
-        const double vc = (double)_cfg.limits.vmax;
-        const double ac = (double)_cfg.limits.amax;
-        const double jc = (double)_cfg.limits.jmax;
+        const double vc = (double)_plan_lim.vmax;
+        const double ac = (double)_plan_lim.amax;
+        const double jc = (double)_plan_lim.jmax;
         if (!(vc > 0.0) || !(ac > 0.0) || !(jc > 0.0) || !(T > 0.0)) return false;
 
         const double margin =
@@ -2607,7 +2624,7 @@ private:
         // construction (that is what the bisection converged on) and the
         // search would spend its whole budget to return ~jmax. Skipping it
         // there keeps the expensive branch at exactly its 0.5.0 cost.
-        double j_eff = (double)_cfg.limits.jmax;
+        double j_eff = (double)_plan_lim.jmax;
         if (full_fits || pull_binds) {
             j_eff = softestFeasibleJerk(p, v, a, ep, ev, T);
         }
@@ -2622,7 +2639,7 @@ private:
             // calculate() on a path that has already failed once; never
             // observed firing on any bench chain or sweep, which is exactly the
             // kind of claim that stops being true the moment nobody guards it.
-            if (j_eff >= (double)_cfg.limits.jmax) return false;
+            if (j_eff >= (double)_plan_lim.jmax) return false;
             if (!planRuckig(p, v, a, ep, ev, 0.0, T, now_us)) return false;
         }
         _mode = Mode::Waveform;
@@ -2756,7 +2773,7 @@ private:
     // marginal, where the answer is jmax by construction.
     double softestFeasibleJerk(double p, double v, double a, double ep,
                                double ev, double T) {
-        const double jc = (double)_cfg.limits.jmax;
+        const double jc = (double)_plan_lim.jmax;
         if (!_cfg.infeasible_soften || !(jc > 0.0) || !(T > 0.0)) return jc;
         const int steps = _cfg.infeasible_soften_steps > 10
                               ? 10 : (int)_cfg.infeasible_soften_steps;
@@ -2814,8 +2831,8 @@ private:
         in.target_position[0]      = target;
         in.target_velocity[0]      = vf;
         in.target_acceleration[0]  = 0.0;
-        in.max_velocity[0]         = _cfg.limits.vmax;
-        in.max_acceleration[0]     = _cfg.limits.amax;
+        in.max_velocity[0]         = _plan_lim.vmax;
+        in.max_acceleration[0]     = _plan_lim.amax;
         in.max_jerk[0]             = jerkCeil(j_ovr);
 
         ruckig::Trajectory<1> traj;
@@ -2847,7 +2864,7 @@ public:
     // a one-sided test scores negative and waves through.
     double pointWorst(double pp, double vv, double aa, double lo, double hi,
                       double allow) const {
-        const double vc = _cfg.limits.vmax, ac = _cfg.limits.amax;
+        const double vc = _plan_lim.vmax, ac = _plan_lim.amax;
         double worst = 0.0;
         if (vc > 0.0) worst = std::fmax(worst, std::fabs(vv) / vc);
         if (ac > 0.0) worst = std::fmax(worst, std::fabs(aa) / ac);
@@ -2868,7 +2885,7 @@ public:
     // member read here judged one path's span with the other's bound.
     double quinticWorstRatio(const double* c, double T,
                              double oshoot_allow) const {
-        const double jc = _cfg.limits.jmax;
+        const double jc = _plan_lim.jmax;
         double worst = 0.0;
         // ---- overshoot-guard preamble (all no-ops when the guard is off) ----
         // The band is this trial's OWN endpoints, c[0] and the curve at tau = 1
@@ -2975,9 +2992,9 @@ private:
         in.target_position[0]      = target;
         in.target_velocity[0]      = vf;
         in.target_acceleration[0]  = 0.0;
-        in.max_velocity[0]         = _cfg.limits.vmax;
-        in.max_acceleration[0]     = _cfg.limits.amax;
-        in.max_jerk[0]             = _cfg.limits.jmax;
+        in.max_velocity[0]         = _plan_lim.vmax;
+        in.max_acceleration[0]     = _plan_lim.amax;
+        in.max_jerk[0]             = _plan_lim.jmax;
         ruckig::Trajectory<1> traj;
         if ((int)_calc.calculate(in, traj) < 0) return -1.0;
         const double dur = traj.get_duration();
@@ -3026,7 +3043,7 @@ private:
             // anywhere: the accel estimate is a second difference of a jittery
             // signal, and it feeds both the arrival acceleration and (below)
             // the aim POSITION, where an unlimited spike would fling the aim.
-            const double acap  = 0.5 * (double)_cfg.limits.amax;
+            const double acap  = 0.5 * (double)_plan_lim.amax;
             const double a_est = _est_a_ema < -acap ? -acap
                                : _est_a_ema >  acap ?  acap : _est_a_ema;
             // Second-order aim: a straight-line extrapolation is wrong exactly
@@ -3058,7 +3075,7 @@ private:
         }
         double j_ovr = 0.0;
         if (_cfg.chase_jerk_scale) {
-            const double vm = (double)_cfg.limits.vmax;
+            const double vm = (double)_plan_lim.vmax;
             // The MOVE ceiling is the stream's recent PEAK speed, never a
             // local average: an EMA dips at every crest and de-claws the
             // turn exactly where authority is needed (sd-d77.1 bench).
@@ -3070,7 +3087,7 @@ private:
             const double fl = (double)_cfg.chase_jerk_floor;
             if (r < fl) r = fl;
             if (r > 1.0) r = 1.0;
-            j_ovr = (double)_cfg.limits.jmax * r;
+            j_ovr = (double)_plan_lim.jmax * r;
         }
         bool ok = planRuckig(p, v, a, aim, vf, af, 0.0, now_us, j_ovr);
         // A softened plan may be DECLINED (legality recheck); the mechanical
@@ -3096,8 +3113,8 @@ private:
         in.target_position[0]      = target;
         in.target_velocity[0]      = vf;
         in.target_acceleration[0]  = af;
-        in.max_velocity[0]         = _cfg.limits.vmax;
-        in.max_acceleration[0]     = _cfg.limits.amax;
+        in.max_velocity[0]         = _plan_lim.vmax;
+        in.max_acceleration[0]     = _plan_lim.amax;
         in.max_jerk[0]             = jc;
         if (min_dur > 0.0) in.minimum_duration = min_dur;
 
@@ -3127,7 +3144,7 @@ private:
         // Gated on a genuinely SOFTENED ceiling: at the mechanical ceiling
         // there is no harder plan to fall back to, so rejecting there would
         // trade a slightly-over profile for no profile at all.
-        if (j_ovr > 0.0 && jc < (double)_cfg.limits.jmax) {
+        if (j_ovr > 0.0 && jc < (double)_plan_lim.jmax) {
             const double worst = ruckigWorstRatio(traj, _oshoot_allow);
             if (worst > 1.0 + kRuckigLegalEps) {
                 recordAnomaly(AnomalyType::WaveformFallback, (float)target,
@@ -3140,7 +3157,7 @@ private:
         _kind       = PlanKind::Ruckig;
         _plan_start = now_us;
         _plan_jerk_frac =
-            _cfg.limits.jmax > 0.0f ? (float)(jc / (double)_cfg.limits.jmax)
+            _plan_lim.jmax > 0.0f ? (float)(jc / (double)_plan_lim.jmax)
                                     : 1.0f;
         return true;
     }
@@ -3162,9 +3179,9 @@ private:
         in.target_position[0]      = target;
         in.target_velocity[0]      = vf;
         in.target_acceleration[0]  = 0.0;
-        in.max_velocity[0]         = _cfg.limits.vmax;
-        in.max_acceleration[0]     = _cfg.limits.amax;
-        in.max_jerk[0]             = _cfg.limits.jmax;
+        in.max_velocity[0]         = _plan_lim.vmax;
+        in.max_acceleration[0]     = _plan_lim.amax;
+        in.max_jerk[0]             = _plan_lim.jmax;
         ruckig::Trajectory<1> traj;
         const ruckig::Result res = _calc.calculate(in, traj);
         if ((int)res < 0) return -1.0;
@@ -3177,7 +3194,7 @@ private:
     // hand Ruckig a jerk the machine cannot survive. Non-positive = "use the
     // configured ceiling" (every pre-0.6.0 caller).
     double jerkCeil(double j_ovr) const {
-        const double jc = (double)_cfg.limits.jmax;
+        const double jc = (double)_plan_lim.jmax;
         if (!(j_ovr > 0.0)) return jc;
         return j_ovr < jc ? j_ovr : jc;
     }
@@ -3199,12 +3216,12 @@ private:
     // callers (Reshape's bisection) need to ask the guard's question about
     // endpoints they may never adopt.
     double endVelBound(double vf, double target) const {
-        const double vcap = _cfg.limits.vmax;
+        const double vcap = _plan_lim.vmax;
         if (vf >  vcap) vf =  vcap;
         if (vf < -vcap) vf = -vcap;
         const double dist = vf > 0.0 ? (1.0 - target) : target;
         const double vmax_wall =
-            std::sqrt((double)_cfg.limits.amax * std::fmax(dist, 0.0));
+            std::sqrt((double)_plan_lim.amax * std::fmax(dist, 0.0));
         if (std::fabs(vf) > vmax_wall) {
             vf = vf > 0.0 ? vmax_wall : -vmax_wall;
         }
@@ -3243,7 +3260,6 @@ private:
                     _est_dt_ema = dt;
                     _est_a_ema  = 0.0;
                     _est_ema_ok = true;
-                    _est_had_cadence = true;
                 }
             } else {
                 _est_ema_ok = false;   // stale stream → forget the dynamics
@@ -3268,26 +3284,18 @@ private:
     // stream, or knob disabled) restores the pre-0.4 brake-on-expiry.
     double settleGraceS(uint64_t now_us) const {
         if (_cfg.settle_grace_us == 0) return 0.0;
-        if (!_est_valid) return 0.0;                   // never streamed
-        // ONE command and nothing after it is an isolated point move: brake
-        // promptly. A cadence that EXISTED and was forgotten by a long hold
-        // is a live stream between actions and coasts the cap (below).
-        if (!_est_ema_ok && !_est_had_cadence) return 0.0;
-        // Staleness is judged from whichever is later: the last commit or
-        // the END of the plan in flight. Measured from the last commit alone,
-        // a segment longer than chase_stale_us starved its own grace: a
-        // 587 ms segment expired, this read "stream gone", and the engine
-        // slammed to rest 3 ms before its successor landed, every cycle
-        // (field trace 2026-09-02, the periodic hitch).
-        uint64_t ref = _est_last_us;
-        if (_kind != PlanKind::None) {
-            const uint64_t plan_end = _plan_start + (uint64_t)(planDuration() * 1e6 + 0.5);
-            if (plan_end > ref) ref = plan_end;
-        }
-        if (now_us > ref && (now_us - ref) > _cfg.chase_stale_us) {
+        // A cadence NEVER measured is an isolated point move: brake promptly.
+        if (_est_dt_ema <= 0.0) return 0.0;
+        // Staleness reads the ONE activity clock, which plan ends stamp too:
+        // from commits alone a segment longer than chase_stale_us starved its
+        // own grace (field trace 2026-09-02, the periodic hitch).
+        if (now_us > _last_activity_us &&
+            (now_us - _last_activity_us) > _cfg.chase_stale_us) {
             return 0.0;                                // the stream really is gone
         }
-        const double cap = (double)_cfg.settle_grace_us * 1e-6;
+        // CONSTRAINT: grace never outlives the coast (kCoastCapS).
+        const double cap = std::fmin((double)_cfg.settle_grace_us * 1e-6,
+                                     kCoastCapS);
         // A cadence forgotten by a hold longer than chase_stale_us is not a
         // dead stream (the staleness check above already said alive): coast
         // the full cap rather than braking at the first plan end after the
@@ -3298,7 +3306,8 @@ private:
         // knots brake the machine mid-stream (field report 2026-08-09). A
         // dead stream still zeroes the grace via the staleness check above.
         if (_syn_chain_ok) {
-            g = std::fmax(g, 1.5 * (double)kSynthSpanUs * 1e-6);
+            g = std::fmax(g, std::fmin(kSettleGraceMult * (double)kSynthSpanUs * 1e-6,
+                                       kCoastCapS));
         }
         return g;
     }
@@ -3334,12 +3343,16 @@ private:
             }
             return;
         }
-        if (_kind == PlanKind::None || _mode == Mode::Settle) {
+        if (_kind == PlanKind::None) return;        // nothing in flight to end
+        if (_mode == Mode::Settle) {
             settleToIdle(now_us);
             return;
         }
         const double dur = planDuration();
         if (elapsedS(now_us) < dur) return;
+        // A plan END is activity: the machine rendered content up to this
+        // instant, whatever happens next (see noteActivity).
+        noteActivity(_plan_start + (uint64_t)(dur * 1e6 + 0.5));
 
         double p, v, a;
         planEndState(p, v, a);
@@ -3350,7 +3363,6 @@ private:
             _hold_pos = clamp01(p);
             _kind     = PlanKind::None;
             _mode     = Mode::Idle;
-            _last_plan_end_us = _plan_start + (uint64_t)(dur * 1e6 + 0.5);
             return;
         }
 
@@ -3411,10 +3423,10 @@ private:
         if (elapsedS(now_us) < planDuration()) return;
         double p, v, a;
         planEndState(p, v, a);
+        noteActivity(_plan_start + (uint64_t)(planDuration() * 1e6 + 0.5));
         _hold_pos = clamp01(p);
         _kind     = PlanKind::None;
         _mode     = Mode::Idle;
-        _last_plan_end_us = _plan_start + (uint64_t)(planDuration() * 1e6 + 0.5);
     }
 
     void recordAnomaly(AnomalyType kind, float target, float detail,
@@ -3457,7 +3469,6 @@ private:
     // Stream estimator
     bool     _est_valid = false;
     bool     _est_ema_ok = false;
-    bool     _est_had_cadence = false;   // an EMA existed at some point since reset
     double   _est_v_ema = 0.0;
     double   _est_sp_pk = 0.0;    // peak-hold |chord speed|, released
     double   _est_a_ema = 0.0;
@@ -3477,9 +3488,13 @@ private:
     bool     _prev_vf_ok = false;
     double   _prev_vf = 0.0;
     uint64_t _prev_vf_us = 0;
-    // Last commit arrival (cold-start gap test); 0 = never.
-    uint64_t _last_commit_us = 0;
-    uint64_t _last_plan_end_us = 0;   // last plan that ended at rest (hold or settle)
+    // THE activity clock: the last instant the machine was known to be
+    // executing content, engine clock. Stamped by every commit (at its
+    // anchor) and every plan end; EVERY "is the stream alive" test reads
+    // this one member (docs/reviews/slopmotion-2026-09-02).
+    uint64_t _last_activity_us = 0;
+    bool     _reset_cold = true;   // resetAt: the next plan is a cold start
+    Limits   _plan_lim;            // ceilings of the plan in flight (commit())
     // Sample-synthesis holdback (see Config::sample_synthesis).
     bool     _syn_ok = false;       // a buffered point exists
     double   _syn_p = 0.0;

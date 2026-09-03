@@ -658,6 +658,13 @@ TEST_CASE("Sample synthesis pace: 60 Hz stamps make every knot interval "
     // Arrivals additionally ride a wandering 0..30 ms transport delay
     // (stamps stay clean -- TCP preserves order, queueing varies): the
     // stutter regime of the 2026-08-09 field reports.
+    // sd-6b2.6 loosened three bounds here on purpose: this is the one regime
+    // whose chain stalls outrun kCoastCapS, so the coast freezes the position
+    // and the engine now REPORTS the v = 0 it really has -- the chase after a
+    // stall plans from that standstill, not from a stale span end velocity.
+    // Cost: step 0.0045 -> 0.0084, v-step 0.30 -> 0.68, err 0.042 -> 0.129,
+    // settles 1 -> 3. The freeze is not new (review 2.4/2.7), the honest
+    // report of it is. Synthesis, and this case, are deleted in sd-6b2.7.
     Config cfg = operatorConfig();
     cfg.sample_synthesis = true;   // default; forced so the pin outlives it
     Engine e(cfg, 0.5f);
@@ -705,12 +712,11 @@ TEST_CASE("Sample synthesis pace: 60 Hz stamps make every knot interval "
             << "  worst 1 ms v-step " << vstep_pk << "  err " << err
             << "  an[1..6] " << an[1] << "/" << an[2] << "/" << an[3] << "/"
             << an[4] << "/" << an[5] << "/" << an[6]);
-    CHECK(step_pk <= (double)cfg.limits.vmax * 1e-3 * 1.05);
-    // Stutter IS a velocity discontinuity: adjacent 1 ms samples may differ
-    // by at most one accel-ceiling step.
-    CHECK(vstep_pk <= (double)cfg.limits.amax * 1e-3 * 1.5 + 1e-6);
+    CHECK(step_pk <= (double)cfg.limits.vmax * 1e-3 * 1.75);
+    // Stutter IS a velocity discontinuity; the coast-cap edge is one of them.
+    CHECK(vstep_pk <= (double)cfg.limits.amax * 1e-3 * 3.0 + 1e-6);
     CHECK(vpk <= src_vpk * 1.35);
-    CHECK(err < 0.10);
+    CHECK(err < 0.14);
 }
 
 TEST_CASE("Chase jerk scales with move demand: slow streams plan soft, fast "
@@ -2640,6 +2646,121 @@ TEST_CASE("Field replay: a re-seed is a cold start -- the next segment runs at t
     play(e, now, slam, 1, now + 3 * kMs, cold, true);
     printf("  peak |v| after re-seed = %.3f units/s (recovery 2.0)\n", cold.vpk);
     CHECK(cold.vpk <= 2.05);
+}
+
+// ---- The one activity clock (sd-6b2.6) --------------------------------------
+
+TEST_CASE("A re-seed voids the plan, never the stream: cold start, cadence kept") {
+    // The driver's re-seed door fires BECAUSE the stream is alive (sd-wve), so
+    // the opening plan is cold AND the grace stays cadence-sized. Zeroing the
+    // estimator gave the first post-seed segment zero grace, which braked it at
+    // its own expiry (the sd-wve chain re-entering through the reset door).
+    auto cfg = operatorConfig();
+    cfg.recovery_vmax   = 0.5f;
+    cfg.settle_grace_us = 30000;
+    Engine e(cfg, 0.30f);
+    auto seg = [&](float tgt, uint64_t at, uint32_t dur_ms, float vf) {
+        Command c;
+        c.target = tgt; c.duration_us = dur_ms * (uint32_t)kMs;
+        c.has_duration = true; c.end_vel = vf; c.has_end_vel = true;
+        c.anchor_us = at; c.has_anchor = true;
+        REQUIRE(e.commit(c, at));
+    };
+    seg(0.40f,          0, 100, 1.0f);
+    seg(0.50f, 100 * kMs, 100, 1.0f);
+    seg(0.60f, 200 * kMs, 100, 1.0f);
+    e.resetAt(0.60f, 250 * kMs);
+    // 2.0 norm/s of declared handoff: warm it survives, cold it is cut to the
+    // recovery ceiling -- which is the clamp, observed.
+    seg(0.64f, 250 * kMs, 200, 2.0f);
+    const AnomalyHit clamped = drainFor(e, AnomalyType::EndVelClamped);
+    CHECK(clamped.seen);
+    CHECK(clamped.detail == doctest::Approx(0.5).epsilon(1e-3));
+    double vpk = 0.0;
+    for (uint64_t t = 250 * kMs; t <= 450 * kMs; t += kMs)
+        vpk = std::max(vpk, std::fabs((double)e.velocityAt(t)));
+    CHECK(vpk <= 0.5 * 1.02);
+    // dt_ema survived the seed, so the grace is 30 ms of coast, not zero.
+    const auto snap = e.snapshot(300 * kMs);
+    const uint64_t plan_end =
+        e.lastPlanUs() + (uint64_t)(snap.duration_s * 1e6 + 0.5);
+    (void)e.positionAt(plan_end + 20 * kMs);
+    CHECK(e.mode() != Mode::Settle);
+    (void)e.positionAt(plan_end + 45 * kMs);
+    CHECK(e.mode() == Mode::Settle);
+}
+
+TEST_CASE("A hold longer than the cold-start gap is content: its exit is warm") {
+    // The activity clock is stamped by plan ENDS as well as commits, so a 3 s
+    // hold segment is not silence (field trace 2026-09-02, the 6.9 s rail hold
+    // whose every exit ran at the recovery limit).
+    auto cfg = operatorConfig();
+    cfg.recovery_vmax = 0.5f;
+    Engine e(cfg, 0.50f);
+    auto seg = [&](float tgt, uint64_t at, uint32_t dur_ms) {
+        Command c;
+        c.target = tgt; c.duration_us = dur_ms * (uint32_t)kMs;
+        c.has_duration = true; c.end_vel = 0.0f; c.has_end_vel = true;
+        c.anchor_us = at; c.has_anchor = true;
+        REQUIRE(e.commit(c, at));
+    };
+    seg(0.50f, 0, 3000);                  // longer than kColdStartGapUs (2 s)
+    (void)e.positionAt(3000 * kMs);       // the hold collapses: plan end stamped
+    seg(0.90f, 3000 * kMs, 400);
+    double vpk = 0.0;
+    for (uint64_t t = 3000 * kMs; t <= 3400 * kMs; t += kMs)
+        vpk = std::max(vpk, std::fabs((double)e.velocityAt(t)));
+    CHECK(vpk > 0.5 * 1.05);              // the exit is not clamped
+}
+
+TEST_CASE("Coast cap: past it the state is frozen, and the next plan inherits that") {
+    // Reporting a velocity the position does not have is a ground-truth defect:
+    // the successor would be planned from motion the machine stopped having.
+    auto cfg = operatorConfig();
+    auto ends_moving = [&](Engine& e) {
+        Command c;
+        c.target = 0.45f; c.duration_us = 100 * (uint32_t)kMs;
+        c.has_duration = true; c.end_vel = 1.5f; c.has_end_vel = true;
+        REQUIRE(e.commit(c, 0));
+        CHECK(std::fabs((double)e.velocityAt(99 * kMs)) > 1.0);
+    };
+    auto successor = [&](Engine& e, uint64_t at) {
+        Command c;
+        c.target = 0.70f; c.duration_us = 200 * (uint32_t)kMs;
+        c.has_duration = true;
+        REQUIRE(e.commit(c, at));
+        return std::fabs((double)e.velocityAt(at));
+    };
+    // Inside the cap (40 ms past expiry) the coast is real motion.
+    Engine inside(cfg, 0.30f);
+    ends_moving(inside);
+    CHECK(successor(inside, 140 * kMs) > 1.0);
+    // Past it (200 ms) the position has been frozen for 140 ms: v reads zero.
+    Engine outside(cfg, 0.30f);
+    ends_moving(outside);
+    CHECK(successor(outside, 300 * kMs) == doctest::Approx(0.0).epsilon(1e-9));
+}
+
+TEST_CASE("Sample synthesis: a regressive stamp is dropped, not a chain re-prime") {
+    // stamp - _syn_us on u64 wrapped, so an out-of-order segment always read
+    // as a stream gap and tore the holdback down: the drop branch below it was
+    // reachable only for stamp == _syn_us.
+    auto cfg = operatorConfig();
+    cfg.sample_synthesis = true;
+    Engine e(cfg, 0.30f);
+    auto pt = [&](float tgt, uint64_t stamp, uint64_t now) {
+        Command c;
+        c.target = tgt; c.has_anchor = true; c.anchor_us = stamp;
+        REQUIRE(e.commit(c, now));
+    };
+    pt(0.30f,         0,   1 * kMs);
+    pt(0.40f,  60 * kMs,  61 * kMs);
+    pt(0.50f, 120 * kMs, 121 * kMs);
+    const uint64_t plan = e.lastPlanUs();
+    const auto     kind = e.planKind();
+    pt(0.45f,  90 * kMs, 130 * kMs);   // older than the buffered knot
+    CHECK(e.lastPlanUs() == plan);
+    CHECK(e.planKind() == kind);
 }
 
 TEST_CASE("A segment longer than chase_stale_us must not starve its own settle grace") {

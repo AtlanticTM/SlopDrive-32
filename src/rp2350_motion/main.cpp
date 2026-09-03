@@ -1,15 +1,27 @@
-// rp2350_motion -- motion-coprocessor skeleton for the Waveshare RP2350-Zero.
+// rp2350_motion -- the motion processor: it OWNS the plan (Waveshare RP2350-Zero).
 // Constraints:
-// - SPI SLAVE only; the S3 is the master and paces on the reported runway
-//   (comms/MotionLinkProtocol.h is the one vocabulary, both ends -- T20).
-// - The schedule is time-indexed: segments render at their own pace, never
-//   faster (sd-dxy ruling). Underrun -> SETTLE at the last endpoint, never
-//   extrapolation. ESTOP is handled in the SPI receive IRQ, ahead of the ring.
+// - GLUE ONLY. The engine, the config image, the command queue, the event ring
+//   and the render hand-off live in include/comms/RpMotionCore.h, which is
+//   hardware-free and host-tested. This file is the SPI DMA slave, the PIO
+//   stepgen, the flash receiver, the watchdog and the LEDs.
+// - SPI SLAVE only; comms/MotionLinkProtocol.h is the one vocabulary, both
+//   ends (T20). Commands arrive as ANCHORED INTENTS and are evaluated here
+//   (architecture.md section 2, three-board split); nothing is pre-rendered on
+//   the S3 and there is no runway to starve.
+// - CORE SPLIT. Core 0 runs the 20 kHz tick: it pumps frames, evaluates the
+//   PUBLISHED render plan and feeds the emitter. Core 1 runs the engine:
+//   commit() is milliseconds and must never sit in the tick's way. The SPI IRQ
+//   only decodes and enqueues.
+// - The emitter slew cap is a FAULT DETECTOR: it counts (s_velClamped) and
+//   never shapes the reference. The reference is never rate-limited.
+// - ESTOP is handled in the frame path, ahead of everything, and acts within
+//   one 50 us tick.
 // - Pin choices here are solder-defined; change them WITH the loom, not before.
 // - Output stage is a PIO stepgen: a one-instruction SM (out pins, 2) streams
-//   absolute A/B levels at kStateHz; the 20 kHz tick renders trajectory into
-//   states. Production and consumption share the crystal, so the joined TX
-//   FIFO (8 words = 320 us) never drifts; an underrun HOLDS pins.
+//   absolute A/B levels at kStateHz; the tick renders trajectory into states.
+//   Production and consumption share the crystal, so the joined TX FIFO
+//   (8 words = 320 us) never drifts; an underrun HOLDS pins.
+// See: docs/rp-motion-port.md, dev board sd-4k1.4.
 #include <Arduino.h>
 
 #include "hardware/clocks.h"
@@ -22,9 +34,11 @@
 #include "hardware/flash.h"
 #include "hardware/watchdog.h"
 #include "pico/bootrom.h"
+#include "pico/multicore.h"
 
 #include "comms/MotionLinkProtocol.h"
 #include "comms/RpFlashCore.h"
+#include "comms/RpMotionCore.h"
 #include "slopglow/slopglow_core.hpp"
 
 #include <Adafruit_NeoPixel.h>
@@ -45,38 +59,18 @@ static constexpr uint8_t PIN_STEP    = 7;   // -> S3 GPIO1 (matrix -> drive PUL)
 static constexpr uint8_t PIN_DIR     = 8;   // -> S3 GPIO2 (matrix -> drive DIR)
 static constexpr uint8_t PIN_WS2812  = 16;  // RP2350-Zero onboard pixel
 
-// ---- Segment ring (SPSC: SPI IRQ produces, stepper ISR consumes) ------------
-// Indices are u8 and each side writes only its own; the ring never blocks.
-static Segment s_ring[kSegmentDepth];
-static volatile uint8_t s_head = 0;   // producer (SPI IRQ)
-static volatile uint8_t s_tail = 0;   // consumer (stepper)
-static volatile bool s_estop = false;
-static volatile uint8_t s_flags = 0;
-static volatile uint8_t s_lastSeq = 0;
+// ---- The motion core --------------------------------------------------------
+// Two slopmotion engines (the live one and republish()'s shadow) plus the
+// queue and the rings, in .bss. The RP2350's 520 KB of SRAM carries it; nothing
+// here allocates after construction.
+static rpmotion::Core s_core;
 
-static inline uint8_t ringDepth() { return uint8_t(s_head - s_tail); }
-
-// ---- Stepper stub: 20 kHz alarm evaluating the schedule ---------------------
-// Renders the active segment's quintic Hermite, emits step edges from a float
-// accumulator. Position unit = steps at the drive input.
-static float s_pos = 0.0f;        // rendered position (steps)
-static float s_vel = 0.0f;
-static float s_emitted = 0.0f;    // steps actually pulsed out
-static uint32_t s_segElapsedUs = 0;
-// Segment-entry edge. NOT elapsed==0: the advance carries a sub-tick
-// remainder, and a retarget interlude leaves stale elapsed.
-static bool s_segFresh = true;
-static std::array<float, 6> s_qc{};  // active segment's quintic, normalized u
-static float s_segTs = 0.0f;         // active segment duration, seconds
-static volatile uint8_t s_state = kStateIdle;
-
-// ---- Retarget state (kOpRetarget: trapezoid seek from live p,v) -------------
-// All volatile: SPI IRQ writes, alarm IRQ reads; volatile-to-volatile order
-// is preserved and single-word float stores are atomic on the M33.
-static volatile bool  s_rtActive = false;
-static volatile float s_rtTarget = 0.0f;
-static volatile float s_rtVmax   = 0.0f;
-static volatile float s_rtAccel  = 0.0f;
+// Rendered reference and what the emitter actually pulsed. `s_pos` is written
+// by the tick and read by the status preload, both on core 0.
+static float s_pos = 0.0f;        // counts, evaluated from the published plan
+static float s_vel = 0.0f;        // counts/s
+static float s_emitted = 0.0f;    // counts actually pulsed out
+static uint8_t s_lastState = kStateIdle;
 
 // ---- PIO quadrature stepgen -------------------------------------------------
 // One-instruction SM (out pins, 2) streams ABSOLUTE A/B levels at kStateHz;
@@ -96,13 +90,15 @@ static uint32_t s_qdrops = 0;
 // reach this: nonzero means an illegal plan, a late tick, or a
 // discontinuous reference. Count it, never swallow it (sd-dxy.1.3).
 static uint32_t s_emitOverrun = 0;
-// Trajectory ticks that arrived late. Plan time advances by tick COUNT,
-// so a late tick stretches the timeline while still hitting the
-// endpoint -- correct position, wrong tempo (sd-dxy.1.5).
+// Trajectory ticks that arrived late. Plan time is read from the clock, so a
+// late tick is a sample that never happened rather than a stretched timeline.
 static uint32_t s_lateTicks = 0;
 // Renderer speed ceiling in counts per TICK, 0 = unlimited (pre-handshake).
-// Pushed as counts/s via kOpSetLimits; consumed ONLY by the emitter as a
-// slew cap (emitTowardPos), never by the reference (note above renderTick).
+// Pushed as counts/s via kOpSetLimits; consumed ONLY by the emitter as a slew
+// cap, never by the reference. A rate limit on the RENDERED position is not a
+// safety net: it sits in the path of every move and makes the reference lag its
+// own trajectory (audible mechanical cracking, 2026-08-09). Capping the PULSE
+// RATE leaves the reference honest and shows lag as counted residue instead.
 static float    s_maxCountsPerTick = 0.0f;
 static uint32_t s_velClamped = 0;   // emitter slew cap engagements
 // NO margin above the ceiling: the 1.25x walk lost 20.5 mm of encoder
@@ -127,11 +123,6 @@ static inline void emitTowardPos() {
     const int dirStep = (delta >= 0.0f) ? 1 : -1;
     unsigned n = (unsigned)((delta >= 0.0f) ? delta : -delta);
     if (n > kStatesPerTick) { n = kStatesPerTick; ++s_emitOverrun; }
-    // Slew cap: a reference discontinuity (settle re-anchor, sub-jump-guard
-    // step) must not slew at the 400 kHz roof the drive drops counts at
-    // (-108.75 mm, 2026-08-09). Caps the PULSE RATE only; s_pos stays honest,
-    // so the trapezoid and jump guard are untouched -- this is NOT the
-    // reverted reference clamp.
     if (s_maxCountsPerTick > 0.0f) {
         const unsigned cap =
             (unsigned)(s_maxCountsPerTick * kEmitCatchupMargin) + 1u;
@@ -194,132 +185,14 @@ static struct repeating_timer s_tick;
 
 static void pumpSpiFrames();   // defined with the DMA slave section below
 
-// REVERTED 2026-08-09. A rate limit on the RENDERED position is NOT a safety
-// net -- it sits in the path of every move. Clamping s_pos makes it lag its own
-// trajectory, and the lag then feeds two mechanisms that assume it does not:
-// the retarget trapezoid keeps accelerating because dist never shrinks, and the
-// segment-start teleport guard sees a reference that drifted for a legitimate
-// reason. Live result: audible mechanical cracking. The REFERENCE is never
-// rate-limited. The EMITTER is (emitTowardPos slew cap, 2026-08-09): capping
-// pulse rate leaves s_pos honest and both mechanisms above intact, and lag
-// shows up as counted residue instead of lost drive counts.
-static void renderTick() {
-    // Frame pump FIRST, and unconditionally: an ESTOP frame must act this
-    // tick, and a latched estop must still process its kOpClear.
-    pumpSpiFrames();
-
-    if (s_rtActive) {
-        // Trapezoid seek from live (p, v): accelerate toward the target,
-        // capped at vmax AND at the brake parabola so it lands at v=0.
-        constexpr float dt = 1e-6f * float(kTickUs);
-        const float dist = s_rtTarget - s_pos;
-        const float dir = (dist >= 0.0f) ? 1.0f : -1.0f;
-        const float adist = dist * dir;
-        float vTo = s_vel * dir;   // signed velocity TOWARD the target
-        if (adist <= 1.0f && vTo <= s_rtAccel * dt * 4.0f) {
-            s_pos = s_rtTarget;
-            s_vel = 0.0f;
-            s_state = kStateIdle;
-            // Un-latch on landing: a latched retarget keeps the full trapezoid
-            // + emitter running every tick forever, and that load starves the
-            // SPI IRQ into ~20% torn frames (measured 2026-08-07).
-            s_rtActive = false;
-        } else {
-            const float vBrake = sqrtf(2.0f * s_rtAccel * adist);
-            float vLim = (s_rtVmax < vBrake) ? s_rtVmax : vBrake;
-            vTo += s_rtAccel * dt;
-            if (vTo > vLim) vTo = vLim;
-            s_vel = dir * vTo;
-            s_pos += s_vel * dt;
-            s_state = kStateRunning;
-        }
-        return;
-    }
-
-    if (ringDepth() == 0) {
-        if (s_state == kStateRunning) {
-            // Underrun: SETTLE. Hold the last endpoint; never extrapolate.
-            s_state = kStateSettled;
-            s_flags |= kFlagUnderran;
-            s_vel = 0.0f;
-            s_segElapsedUs = 0;
-            s_segFresh = true;
-        }
-        return;
-    }
-
-    const Segment& seg = s_ring[s_tail % kSegmentDepth];
-    if (s_segFresh) {
-        s_segFresh = false;
-        // A p0 off the emitted position is WALKED at the ceiling, whatever its
-        // size (counted in s_velClamped, visible as residue). A teleport is a
-        // permanent calc/physical divergence: the 4096-count walk limit
-        // teleported a 20 mm gap after a script seek on 2026-09-02 and the
-        // encoder validator logged exactly that as lost steps (sd-dxy.1.7).
-        // The only teleport left is the one with no ceiling to walk under
-        // (nothing pushed yet), because an uncapped slew shoots.
-        const float jump = seg.p0 - s_emitted;
-        if (jump > 64.0f || jump < -64.0f) {
-            const bool walkable = s_maxCountsPerTick > 0.0f;
-            if (!walkable) {
-                s_emitted += jump;
-                s_flags |= kFlagJumped;
-            }
-        }
-        // Quintic Hermite coefficients over normalized u. Accel knots ride
-        // kOpSegment2 (a C1 chain steps accel at every knot: a 100 Hz torque
-        // notch the servo renders as texture); legacy kOpSegment lands a=0.
-        s_segTs = float(seg.duration_us) * 1e-6f;
-        const float V0 = seg.v0 * s_segTs, V1 = seg.v1 * s_segTs;
-        const float A0 = seg.a0 * s_segTs * s_segTs;
-        const float A1 = seg.a1 * s_segTs * s_segTs;
-        const float R1 = seg.p1 - seg.p0 - V0 - 0.5f * A0;
-        const float R2 = V1 - V0 - A0;
-        const float R3 = A1 - A0;
-        s_qc = {seg.p0, V0, 0.5f * A0,
-                10.0f * R1 - 4.0f * R2 + 0.5f * R3,
-                -15.0f * R1 + 7.0f * R2 - R3,
-                6.0f * R1 - 3.0f * R2 + 0.5f * R3};
-    }
-    s_state = kStateRunning;
-    s_segElapsedUs += kTickUs;
-    const float T = float(seg.duration_us);
-    float t = float(s_segElapsedUs);
-    if (t >= T) t = T;
-    const float u = (T > 0.0f) ? (t / T) : 1.0f;
-    s_pos = ((((s_qc[5] * u + s_qc[4]) * u + s_qc[3]) * u + s_qc[2]) * u +
-             s_qc[1]) * u + s_qc[0];
-    s_vel = (s_segTs > 0.0f)
-                ? ((((5.0f * s_qc[5] * u + 4.0f * s_qc[4]) * u +
-                     3.0f * s_qc[3]) * u + 2.0f * s_qc[2]) * u + s_qc[1]) /
-                      s_segTs
-                : 0.0f;
-
-
-    if (s_segElapsedUs >= seg.duration_us) {
-        s_tail = uint8_t(s_tail + 1);
-        s_segFresh = true;
-        // Carry the sub-tick remainder into the next segment: durations are
-        // arbitrary us now, and zeroing here would leak up to one tick of
-        // timeline per segment boundary.
-        s_segElapsedUs -= seg.duration_us;
-    }
-    return;
-}
-
-// ONE emit call site, on purpose. emitTowardPos() used to be called only from
-// the ticks that RENDERED, so every other exit -- ring empty, settle, retarget
-// landing -- silently abandoned whatever (s_pos - s_emitted) the emitter still
-// owed. That was unflagged, uncounted step loss, once per stroke (sd-dxy.1.2).
-// Do NOT push this call back down into the branches: a fourth branch will be
-// added one day and it will not get one.
 // Tick liveness for the watchdog feed in loop(): a tick that stops advancing
 // must reboot the coprocessor, not leave the motor frozen mid-plan.
 static volatile uint32_t s_tickCount = 0;
 
 static bool stepperTick(struct repeating_timer*) {
-    // Tick lateness census. Plan time advances by tick COUNT, not wall clock,
-    // so a tick that never ran is trajectory that silently never happened.
+    // Tick lateness census. A tick that never ran is a sample that never
+    // happened; the plan is a function of TIME, so the position after a late
+    // tick is still correct and only the emitter had less runway.
     static uint32_t s_lastTickUs = 0;
     const uint32_t tnow = time_us_32();
     if (s_lastTickUs != 0 && (tnow - s_lastTickUs) > (kTickUs + kTickUs / 2u))
@@ -330,9 +203,12 @@ static bool stepperTick(struct repeating_timer*) {
     // Frame pump FIRST, and unconditionally: an ESTOP frame must act this
     // tick, and a latched estop must still process its kOpClear.
     pumpSpiFrames();
-    if (s_estop) { s_state = kStateEstop; return true; }   // hold: no motion
+    if (s_core.estopped()) return true;   // hold: the reference stops advancing
 
-    renderTick();
+    s_core.sampleCounts(tnow, s_pos, s_vel);
+    // ONE emit call site, on purpose. Every other exit used to abandon whatever
+    // (s_pos - s_emitted) the emitter still owed: unflagged, uncounted step
+    // loss, once per stroke (sd-dxy.1.2).
     emitTowardPos();
     return true;
 }
@@ -355,7 +231,7 @@ static bool stepperTick(struct repeating_timer*) {
 // The RP image version. This constant is its ONE home (C-1); the S3 reads it
 // with kOpFlashVersion, which is what makes C-8 verification possible without
 // a bench trip. Bump it with every image that goes out over the link.
-static constexpr char kRpFwVersion[] = "0.1.2-rp";
+static constexpr char kRpFwVersion[] = "0.2.0-rp";
 static constexpr uint32_t kWatchdogMs = 8000;   // hardware max is 8388
 static_assert(sizeof(kRpFwVersion) <= kFlashVersionBytes,
               "version string does not fit the status tail");
@@ -405,10 +281,9 @@ struct BootromSlot final : rpflash::IFlashSink {
     uint32_t capacity() const override { return bytes; }
 
     // Interrupts off and the other core parked for the erase and the program:
-    // the framework's own EEPROM commit uses exactly this sequence, and
-    // idleOtherCore() is a no-op when core 1 was never started. The 20 kHz tick
-    // stops for the duration, which is the BACKPRESSURE the master paces on --
-    // `want` cannot advance while a write is owed, so a stalled ack means
+    // the framework's own EEPROM commit uses exactly this sequence. The 20 kHz
+    // tick stops for the duration, which is the BACKPRESSURE the master paces
+    // on -- `want` cannot advance while a write is owed, so a stalled ack means
     // "busy", never "lost" (T33 rule 2 wears this shape here).
     bool writeSector(uint32_t off, const uint8_t* data, uint32_t n) override {
         if (bytes == 0 || n == 0 || off + FLASH_SECTOR_SIZE > bytes) return false;
@@ -458,21 +333,18 @@ static uint32_t s_flashLastMs = 0;
 
 // ---- Status frame, preloaded before every transaction -----------------------
 static uint8_t s_statusBuf[kFrameBytes];
-
-static uint16_t runwayMs() {
-    // Remaining time in the active segment plus every queued one.
-    uint32_t us = 0;
-    const uint8_t depth = ringDepth();
-    for (uint8_t i = 0; i < depth; ++i)
-        us += s_ring[uint8_t(s_tail + i) % kSegmentDepth].duration_us;
-    if (depth != 0 && us >= s_segElapsedUs) us -= s_segElapsedUs;
-    uint32_t ms = us / 1000u;
-    return ms > 0xFFFF ? 0xFFFF : uint16_t(ms);
-}
+static uint32_t s_badCrc = 0;      // per-interval, folded into link_errs
+static uint32_t s_torn = 0;        // per-interval
+static uint32_t s_badCrcTotal = 0; // lifetime, for the serial census only
+static uint32_t s_tornTotal = 0;
+// kOpEventPull records the request; the reply is preloaded like any other.
+static volatile bool s_eventReq = false;
+static volatile uint8_t s_eventAck = 0;
 
 // The version string overlays the telemetry tail for ONE reply, on request.
 // Motion telemetry is meaningless while the S3 is asking what image this is,
-// and the frame has no spare bytes to grow into.
+// and the frame has no spare bytes to grow into. It stops at byte 27 so the
+// reply can never forge a status variant.
 static void stampVersion() {
     memset(&s_statusBuf[kFlashStatusOffVersion], 0, kFlashVersionBytes);
     memcpy(&s_statusBuf[kFlashStatusOffVersion], kRpFwVersion,
@@ -485,12 +357,10 @@ static void stampVersion() {
 static void preloadFlashStatus() {
     memset(s_statusBuf, 0, kFrameBytes);
     s_statusBuf[0] = kStateFlash;
-    s_statusBuf[1] = s_flags;
-    s_statusBuf[5] = s_lastSeq;
+    s_statusBuf[5] = s_core.lastSeq();
     rpflash::writeFlashStatus(s_statusBuf, s_flashRx.want(), s_flashRx.result(),
                               s_flashRx.detail());
-    s_statusBuf[14] = 0xA5;
-    s_statusBuf[15] = s_lastSeq;
+    s_statusBuf[15] = s_core.lastSeq();
     stampVersion();
     crcStamp(s_statusBuf);
     digitalWrite(PIN_IRQ, LOW);
@@ -498,181 +368,100 @@ static void preloadFlashStatus() {
 
 static void preloadStatus() {
     if (s_flashMode) { preloadFlashStatus(); return; }
-    const uint16_t rw = runwayMs();
-    s_statusBuf[0] = s_state;
-    s_statusBuf[1] = s_flags;
-    // JUMPED self-clears once reported: sticky, it logged only the FIRST
-    // teleport of a session and hid every later one (2026-08-09 drift hunt).
-    s_flags &= uint8_t(~kFlagJumped);
-    s_statusBuf[2] = uint8_t(rw);
-    s_statusBuf[3] = uint8_t(rw >> 8);
-    s_statusBuf[4] = ringDepth();
-    s_statusBuf[5] = s_lastSeq;
-    memcpy(&s_statusBuf[6], (const void*)&s_pos, 4);
-    memcpy(&s_statusBuf[10], (const void*)&s_vel, 4);
-    s_statusBuf[14] = 0xA5;          // alignment signature (bench)
-    s_statusBuf[15] = s_lastSeq;     // seq duplicate for offset hunting
-    // Renderer truth (sd-dxy.1.1). `pos` above is COMMANDED; these say what the
-    // emitter actually did. Offsets come from MotionLinkProtocol.h -- both ends
-    // read the same constants, neither transcribes a number (T20).
-    const float emitted = s_emitted;
-    memcpy(&s_statusBuf[kStatusOffEmitted], &emitted, 4);
-    const uint16_t qd = sat16(s_qdrops), ov = sat16(s_emitOverrun),
-                   lt = sat16(s_lateTicks);
-    memcpy(&s_statusBuf[kStatusOffQDrops], &qd, 2);
-    memcpy(&s_statusBuf[kStatusOffEmitOverrun], &ov, 2);
-    memcpy(&s_statusBuf[kStatusOffLateTicks], &lt, 2);
-    const uint16_t vc = sat16(s_velClamped);
-    memcpy(&s_statusBuf[kStatusOffVelClamped], &vc, 2);
-    if (s_flashVerReq) { s_flashVerReq = false; stampVersion(); }
-    crcStamp(s_statusBuf);
-    // Feed-me line: the producer paces on this, not on polling cadence.
-    digitalWrite(PIN_IRQ, (rw < kRunwayLowMs && !s_estop) ? HIGH : LOW);
+    if (s_eventReq) {
+        s_eventReq = false;
+        EventRecord rec;
+        if (s_core.nextEvent(s_eventAck, rec)) {
+            encodeEvent(std::span<uint8_t, kFrameBytes>(s_statusBuf, kFrameBytes),
+                        rec);
+            s_lastState = rec.state;
+            digitalWrite(PIN_IRQ, rec.remaining != 0 ? HIGH : LOW);
+            return;
+        }
+        // Nothing queued after the ack: an ordinary status is the honest reply.
+    }
+    StatusV2 st;
+    s_core.fillStatus(st);
+    // Renderer truth (sd-dxy.1.1). `pos` is COMMANDED; residue says what the
+    // emitter actually managed. Read them as a pair or neither is evidence.
+    st.residue = satResidue(s_pos - s_emitted);
+    // PER-INTERVAL, reset here: v1 shipped saturating LIFETIME totals while the
+    // master read deltas, so the only content the extra width carried was the
+    // part that pins (MotionLinkProtocol.h, StatusV2).
+    st.qdrops = sat16(s_qdrops);
+    st.emit_overrun = sat16(s_emitOverrun);
+    st.late_ticks = s_lateTicks > 0xFFu ? 0xFFu : uint8_t(s_lateTicks);
+    const uint32_t errs = s_badCrc + s_torn;
+    st.link_errs = errs > 0xFFu ? 0xFFu : uint8_t(errs);
+    st.vel_clamped = s_velClamped > 0xFFu ? 0xFFu : uint8_t(s_velClamped);
+    s_qdrops = s_emitOverrun = s_lateTicks = 0;
+    s_badCrc = s_torn = s_velClamped = 0;
+    s_lastState = st.state;
+    encodeStatusV2(std::span<uint8_t, kFrameBytes>(s_statusBuf, kFrameBytes), st);
+    if (s_flashVerReq) {
+        s_flashVerReq = false;
+        stampVersion();
+        crcStamp(s_statusBuf);
+    }
+    // Look-at-me line: an unpulled event or a latched estop. There is no runway
+    // to be low on any more -- the plan lives here.
+    digitalWrite(PIN_IRQ, s_core.eventsPending() ? HIGH : LOW);
 }
 
 // ---- Frame processor (SPI IRQ context: short, no allocation) ----------------
-static uint32_t s_badCrc = 0;
-static uint32_t s_torn = 0;
-// Segment dedup: the master resends a segment with the SAME seq until the
-// status seq echo acks it, so a lost-ack resend of a segment that DID land
-// must be dropped here, not queued twice. >255 = none seen.
-static volatile uint16_t s_lastSegSeq = 0xFFFF;
-
 static void processFrame(uint8_t* data, size_t len) {
     // Whole verified frames only: a torn or corrupted frame is DROPPED, never
-    // partially parsed. The master's credit loop re-sends what the status
-    // never acknowledged; estop is repeated until the echoed state confirms.
-    if (len != kFrameBytes ||
-        !crcOk(std::span<const uint8_t, kFrameBytes>(data, kFrameBytes))) {
+    // partially parsed. The master re-sends what the status never acknowledged;
+    // estop is repeated until the echoed state confirms it.
+    const std::span<const uint8_t, kFrameBytes> f(data, kFrameBytes);
+    if (len != kFrameBytes || !crcOk(f)) {
         ++s_badCrc;
+        ++s_badCrcTotal;
         return;
     }
-    s_lastSeq = data[1];
+    const uint32_t now = time_us_32();
     // A firmware write owns the board. Every motion op is refused for its
     // duration, so a stale master frame cannot start a move into a half-
     // written slot; the estop latched by kOpFlashBegin holds the pins.
     if (s_flashMode && data[0] < kOpFlashBegin) return;
-    switch (data[0]) {
-        case kOpEstop:   // ahead of the ring, by design
-            s_estop = true;
-            s_rtActive = false;
-            s_head = s_tail = 0;
-            s_segElapsedUs = 0;
-            s_segFresh = true;
-            s_lastSegSeq = 0xFFFF;
-            break;
-        case kOpClear:
-            s_estop = false;
-            s_rtActive = false;   // never resume a pre-estop target
-            s_head = s_tail = 0;
-            s_segElapsedUs = 0;
-            s_segFresh = true;
-            s_flags = 0;
-            s_state = kStateIdle;
-            s_lastSegSeq = 0xFFFF;
-            break;
-        case kOpSegment: {
-            if (len < 2 + kSegmentWireBytes) break;
-            if (data[1] == s_lastSegSeq) break;   // lost-ack resend duplicate
-            if (ringDepth() >= kSegmentDepth) { s_flags |= kFlagOverflow; break; }
-            Segment seg;
-            memcpy(&seg.duration_us, data + 2, 4);
-            memcpy(&seg.p0, data + 6, 4);
-            memcpy(&seg.v0, data + 10, 4);
-            memcpy(&seg.p1, data + 14, 4);
-            memcpy(&seg.v1, data + 18, 4);
-            seg.a0 = 0.0f;
-            seg.a1 = 0.0f;
-            s_ring[s_head % kSegmentDepth] = seg;
-            s_head = uint8_t(s_head + 1);
-            s_lastSegSeq = data[1];               // only a QUEUED seq dedups
-            s_flags &= uint8_t(~kFlagUnderran);
-            s_rtActive = false;   // segments reclaim the renderer
-            break;
-        }
-        case kOpSegment2: {
-            if (len < 2 + kSegment2WireBytes) break;
-            if (data[1] == s_lastSegSeq) break;   // lost-ack resend duplicate
-            if (ringDepth() >= kSegmentDepth) { s_flags |= kFlagOverflow; break; }
-            Segment seg;
-            memcpy(&seg.duration_us, data + 2, 4);
-            memcpy(&seg.p0, data + 6, 4);
-            memcpy(&seg.v0, data + 10, 4);
-            memcpy(&seg.a0, data + 14, 4);
-            memcpy(&seg.p1, data + 18, 4);
-            memcpy(&seg.v1, data + 22, 4);
-            memcpy(&seg.a1, data + 26, 4);
-            s_ring[s_head % kSegmentDepth] = seg;
-            s_head = uint8_t(s_head + 1);
-            s_lastSegSeq = data[1];               // only a QUEUED seq dedups
-            s_flags &= uint8_t(~kFlagUnderran);
-            s_rtActive = false;   // segments reclaim the renderer
-            break;
-        }
-        case kOpSetPos: {   // standstill zero-set (homing)
-            if (len < 2 + 4) break;
-            float np;
-            memcpy(&np, data + 2, 4);
-            s_rtActive = false;
-            s_head = s_tail = 0;
-            s_segElapsedUs = 0;
-            s_segFresh = true;
-            // Flush forgets the seq, else the next real segment reads as a dup.
-            s_lastSegSeq = 0xFFFF;
+
+    // The motion vocabulary belongs to the core, which decodes and enqueues
+    // without ever touching the engine.
+    if (s_core.ingestFrame(f, now)) {
+        if (data[0] == kOpSetPos) {
+            // The emitter is glue, so the core cannot re-seed it: the homing
+            // ritual's standstill write moves the reference AND what has been
+            // pulsed, including the rollback snapshots, or a later FIFO-full
+            // rollback would restore a pre-home reference.
+            const float np = getF32(f, 2);
             s_pos = np;
+            s_vel = 0.0f;
             s_emitted = np;
-            // Rollback snapshots too, or a later FIFO-full rollback would
-            // restore a pre-home reference.
             s_qemitAtWord = np;
             s_qphaseAtWord = s_qphase;
-            s_vel = 0.0f;
-            s_state = kStateIdle;
-            break;
         }
+        return;
+    }
+
+    switch (data[0]) {
+        case kOpEventPull:
+            s_eventAck = data[2];
+            s_eventReq = true;
+            break;
         case kOpSetLimits: {
-            if (len < 2 + 4) break;
-            float cps;
-            memcpy(&cps, data + 2, 4);
+            const float cps = getF32(f, 2);
             // Reject nonsense rather than latching it: a bad ceiling here
             // silently throttles every move the machine will ever make.
-            // Enforced at the EMITTER only (slew cap in emitTowardPos);
-            // the reference stays unclamped -- REVERTED note above renderTick.
+            // Enforced at the EMITTER only, as a fault detector.
             if (cps > 0.0f && cps < 2.0e6f)
                 s_maxCountsPerTick = cps * (float(kTickUs) * 1e-6f);
             break;
         }
-        case kOpRetarget: {
-            if (len < 2 + 12) break;
-            float t = 0, v = 0, a = 0;
-            memcpy(&t, data + 2, 4);
-            memcpy(&v, data + 6, 4);
-            memcpy(&a, data + 10, 4);
-            if (!(a > 0.0f) || !(v > 0.0f)) break;   // rejects NaN too
-            if (v > kMaxCountsPerSec) v = kMaxCountsPerSec;
-            s_rtTarget = t;
-            s_rtVmax   = v;
-            s_rtAccel  = a;
-            s_head = s_tail;        // last command wins: drop queued segments
-            s_segElapsedUs = 0;
-            s_segFresh = true;
-            // Flush forgets the seq, else the next real segment reads as a dup.
-            s_lastSegSeq = 0xFFFF;
-            s_rtActive = true;
-            break;
-        }
         case kOpFlashBegin: {
-            if (len < 2 + 4) break;
-            uint32_t sz = 0;
-            memcpy(&sz, data + 2, 4);
+            uint32_t sz = getU32(f, 2);
             // ONE gate, the same one estop uses: motion is held for the whole
             // transfer rather than a second flash-only interlock.
-            s_estop = true;
-            s_rtActive = false;
-            s_head = s_tail = 0;
-            s_segElapsedUs = 0;
-            s_segFresh = true;
-            s_lastSegSeq = 0xFFFF;
-            s_state = kStateEstop;
+            s_core.estop(now);
             s_flashSlot.resolve();
             s_flashRx.begin(sz);
             s_flashEndReq = false;
@@ -681,7 +470,7 @@ static void processFrame(uint8_t* data, size_t len) {
             break;
         }
         case kOpFlashData: {
-            if (!s_flashMode || len < kFlashChunkOffset) break;
+            if (!s_flashMode) break;
             const uint32_t off = uint32_t(data[2]) |
                                  (uint32_t(data[3]) << 8) |
                                  (uint32_t(data[4]) << 16);
@@ -690,14 +479,11 @@ static void processFrame(uint8_t* data, size_t len) {
             s_flashRx.data(off, data + kFlashChunkOffset, data[5]);
             break;
         }
-        case kOpFlashEnd: {
-            if (!s_flashMode || len < 2 + 4) break;
-            uint32_t crc = 0;
-            memcpy(&crc, data + 2, 4);
-            s_flashEndCrc = crc;
+        case kOpFlashEnd:
+            if (!s_flashMode) break;
+            s_flashEndCrc = getU32(f, 2);
             s_flashEndReq = true;   // loop() verifies: end() reads the slot
             break;
-        }
         case kOpFlashAbort:
             s_flashRx.abort();
             s_flashEndReq = false;
@@ -779,6 +565,7 @@ static void pumpSpiFrames() {
         // CS idle-high with a partial frame = torn. Discard it, flush the
         // stale TX reply by block reset, re-arm both sides.
         ++s_torn;
+        ++s_tornTotal;
         dma_channel_abort(s_dmaTx);
         dma_channel_abort(s_dmaRx);
         spiConfigure();
@@ -844,6 +631,51 @@ static PixelOut s_pixel;
 static slopglow::GlowEngine s_glow(s_pixel);
 static slopglow::HeartbeatSource* s_glowHb = nullptr;
 
+// ---- Core 1: the engine -----------------------------------------------------
+// Raise core 1's stack past the framework's 2 KB default. This OVERRIDES the
+// weak default in cores/rp2040/main.cpp, which then mallocs a HARDCODED 0x2000
+// (8 KB, not configurable through this switch). commit() nests KB-scale Ruckig
+// temporaries, so the depth is measured rather than assumed (T1 class): the
+// paint-and-scan high-water mark below rides the once-a-second census, and the
+// next step if it approaches the ceiling is bypassing setup1()/loop1() for
+// multicore_launch_core1_with_stack() with a bigger buffer.
+bool core1_separate_stack = true;
+
+namespace core1 {
+
+constexpr size_t kStackBytes = 0x2000;   // hardcoded by cores/rp2040/main.cpp
+constexpr uint8_t kCanary = 0xA5;
+constexpr uint32_t kServiceUs = 100;     // the contract's "at least every ms"
+constexpr uint32_t kScanUs = 100000;     // the scan walks the untouched span
+
+static uint32_t s_highWater = 0;
+static volatile uint32_t s_serviceCount = 0;
+// Core 1 publishes the render plan and Core::reset() is the only other writer
+// of it, so core 1 stays parked until setup() has run that reset.
+static volatile bool s_armed = false;
+
+void paintStack() {
+    // Leave a margin below the CURRENT sp so setup1()'s own live locals and
+    // return address are not overwritten mid-function.
+    const uint32_t sp = rp2040.getStackPointer();
+    uint8_t* base = (uint8_t*)core1_separate_stack_address;
+    uint8_t* top = (uint8_t*)(uintptr_t)(sp - 64u);
+    if (top > base) memset(base, kCanary, (size_t)(top - base));
+}
+
+// rp2040.getFreeStack() reports CURRENT headroom only; it cannot see how deep a
+// call that already returned went, which is exactly what commit() needs
+// measured. Same technique as uxTaskGetStackHighWaterMark.
+void scanHighWater() {
+    const uint8_t* base = (const uint8_t*)core1_separate_stack_address;
+    size_t untouched = 0;
+    while (untouched < kStackBytes && base[untouched] == kCanary) untouched++;
+    const uint32_t used = (uint32_t)(kStackBytes - untouched);
+    if (used > s_highWater) s_highWater = used;
+}
+
+}  // namespace core1
+
 // ---- Firmware update: the task-context half (sd-4k1.3) ----------------------
 
 // TRY BEFORE YOU BUY. A flash-update boot runs this image ONCE; unless it buys
@@ -859,8 +691,7 @@ static void flashBuyIfProven() {
     // rom_explicit_buy erases and rewrites the sector holding the flag, so it
     // needs 4 KiB of word-aligned scratch. Called under the same
     // interrupts-off, other-core-parked window every flash write here uses
-    // rather than through flash_safe_execute: this sketch never starts core 1,
-    // so the SDK helper's multicore lockout has nothing to hand off to.
+    // rather than through flash_safe_execute.
     static uint8_t __attribute__((aligned(4))) s_buyScratch[4096];
     rom_explicit_buy_fn buy =
         (rom_explicit_buy_fn)rom_func_lookup(ROM_FUNC_EXPLICIT_BUY);
@@ -952,12 +783,17 @@ void loop() {
     s_px.setPixelColor(0, falls ? 0 : 40, falls ? 40 : 0, 0);
     s_px.show();
 }
+
+void setup1() {}
+void loop1() {}
 #else
 void setup() {
     Serial.begin(115200);   // USB CDC status; printf is the Zero's only log
     pinMode(PIN_IRQ, OUTPUT);
     digitalWrite(PIN_IRQ, LOW);
     quadPioInit();   // owns PIN_STEP/PIN_DIR from here on (A/B via PIO)
+
+    s_core.reset(time_us_32());
 
     s_px.begin();
     // Engine brightness stays 255; the adapter dims post-gamma in duty space.
@@ -967,40 +803,73 @@ void setup() {
 
     spiSlaveBegin();
 
+    core1::s_armed = true;   // the engine may run now: the plan exists
     add_repeating_timer_us(-int32_t(kTickUs), stepperTick, nullptr, &s_tick);
-    // Hardware watchdog, fed from loop() only while the tick advances. Every
-    // legitimate stall sits far under 8 s: a 4 KB sector erase+program is
-    // ~50 ms and rom_explicit_buy rewrites one sector.
+    // Hardware watchdog, fed from loop() only while BOTH the tick and core 1
+    // advance. A frozen core 1 would leave the tick rendering a stale plan
+    // forever, which looks alive and is not. Every legitimate stall sits far
+    // under 8 s: a 4 KB sector erase+program is ~50 ms.
     watchdog_enable(kWatchdogMs, true);
+}
+
+void setup1() { core1::paintStack(); }
+
+// Core 1 owns the engine and nothing else. It is DELIBERATELY not the tick:
+// commit() is milliseconds and the 20 kHz tick cannot wait for it, which is the
+// whole reason the render plan is published rather than sampled in place.
+void loop1() {
+    if (!core1::s_armed) return;
+    if (s_flashMode) return;   // a firmware write owns the board
+    const uint32_t now = time_us_32();
+    static uint32_t s_nextService = 0;
+    static uint32_t s_nextScan = 0;
+    if (int32_t(now - s_nextService) < 0) return;
+    s_nextService = now + core1::kServiceUs;
+    s_core.service(now);
+    core1::s_serviceCount = core1::s_serviceCount + 1;
+    if (int32_t(now - s_nextScan) >= 0) {
+        s_nextScan = now + core1::kScanUs;
+        core1::scanHighWater();
+    }
 }
 
 void loop() {
     using namespace slopglow;
     {
-        static uint32_t s_fedAt = 0;
+        static uint32_t s_fedTick = 0;
+        static uint32_t s_fedService = 0;
         const uint32_t t = s_tickCount;
-        if (t != s_fedAt) { s_fedAt = t; watchdog_update(); }
+        const uint32_t c = core1::s_serviceCount;
+        if (t != s_fedTick && c != s_fedService) {
+            s_fedTick = t;
+            s_fedService = c;
+            watchdog_update();
+        }
     }
     flashBuyIfProven();
     if (s_flashMode) { flashServiceLoop(); return; }
-    if (s_lastSeq != 0 || s_state != kStateIdle) s_glow.markReady(System::Link);
-    s_glow.set(System::Safety, s_estop ? Status::Urgent : Status::Nominal);
+    if (s_core.lastSeq() != 0) s_glow.markReady(System::Link);
+    s_glow.set(System::Safety,
+               s_core.estopped() ? Status::Urgent : Status::Nominal);
     s_glow.set(System::Motion,
-               s_state == kStateRunning   ? Status::Working
-               : (s_flags & kFlagUnderran) ? Status::Degraded
-                                           : Status::Nominal);
-    // Frames, tears and the status snapshot are ALL the tick pump's business
-    // now: one consumer, IRQ context, 50 us cadence. loop() only observes.
+               s_lastState == kStateRunning  ? Status::Working
+               : s_lastState == kStateSettled ? Status::Degraded
+                                              : Status::Nominal);
+    // Frames, tears and the status snapshot are ALL the tick pump's business:
+    // one consumer, IRQ context, 50 us cadence. loop() only observes.
     static uint32_t lastPrint = 0;
     if (millis() - lastPrint >= 1000) {
         lastPrint = millis();
         Serial.printf("[mlink] lastSeq=%u badCrc=%lu torn=%lu qdrops=%lu "
-                      "frames=%lu dmaRemain=%lu sspsr=0x%02lx cs=%d\n",
-                      unsigned(s_lastSeq), (unsigned long)s_badCrc,
-                      (unsigned long)s_torn, (unsigned long)s_qdrops,
-                      (unsigned long)s_frames,
-                      (unsigned long)dma_channel_hw_addr(s_dmaRx)->transfer_count,
-                      (unsigned long)spi_get_hw(spi1)->sr,
+                      "frames=%lu pos=%.1f cfgfp=0x%04x core1HW=%lu/%luB "
+                      "engine=%luB cs=%d\n",
+                      unsigned(s_core.lastSeq()),
+                      (unsigned long)s_badCrcTotal, (unsigned long)s_tornTotal,
+                      (unsigned long)s_qdrops, (unsigned long)s_frames,
+                      (double)s_pos, unsigned(s_core.configFingerprint()),
+                      (unsigned long)core1::s_highWater,
+                      (unsigned long)core1::kStackBytes,
+                      (unsigned long)rpmotion::Core::engineBytes(),
                       int(gpio_get(PIN_SPI_CS)));
     }
     s_glowHb->pulse();

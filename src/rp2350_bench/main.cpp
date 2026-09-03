@@ -5,10 +5,11 @@
 //   USB serial (COM port, 115200). This bead stays open until that happens
 //   (C-4/C-8) -- the flash+read recipe lives on the bd issue, not here.
 // - Core 0: a 20 kHz repeating timer running a SYNTHETIC load whose
-//   arithmetic is COPIED from src/rp2350_motion/main.cpp's renderTick() /
-//   emitTowardPos() (read-only, never edited here) -- same quintic Horner
-//   eval and Bresenham emit-state walk, no PIO/GPIO, so it burns the same
-//   cycles the real coprocessor tick would without needing hardware. The
+//   arithmetic mirrors the coprocessor's own tick: the same quintic Horner
+//   eval the published render plan is read with (rpmotion::Core::
+//   sampleCounts) and the same Bresenham emit-state walk
+//   (src/rp2350_motion/main.cpp emitTowardPos, read-only, never edited here),
+//   no PIO/GPIO, so it burns the same cycles without needing hardware. The
 //   late-tick census uses the identical >1.5x-tick-period rule.
 // - Core 1 (setup1/loop1): owns the slopmotion::Engine and replays, in REAL
 //   wall time via time_us_64(), the "uneven-knot" case from
@@ -66,7 +67,7 @@ using namespace slopmotion;
 bool core1_separate_stack = true;
 
 // ---- Core 0: synthetic 20 kHz tick load -------------------------------------
-// Arithmetic shape copied from src/rp2350_motion/main.cpp (read-only, never
+// Arithmetic shape mirrors src/rp2350_motion/main.cpp (read-only, never
 // edited): same constants, same Horner quintic eval, same Bresenham
 // emit-state walk. No PIO, no GPIO -- the word is folded into a checksum
 // sink instead of a hardware FIFO, since only the CPU cost is being timed.
@@ -93,8 +94,8 @@ volatile uint32_t s_lateTicks = 0;
 volatile uint32_t s_tickCount = 0;
 
 // Quintic coefficients for a fixed 0->1 rest-to-rest span -- same algebra as
-// rp2350_motion::renderTick()'s knot build. Content doesn't matter here, only
-// the per-tick Horner evaluation COST, which is identical for any span.
+// the render plan's own slice build. Content doesn't matter here, only the
+// per-tick Horner evaluation COST, which is identical for any span.
 void primeQuintic() {
     constexpr float V0 = 0.0f, V1 = 0.0f, A0 = 0.0f, A1 = 0.0f;
     const float R1 = 1.0f - 0.0f - V0 - 0.5f * A0;

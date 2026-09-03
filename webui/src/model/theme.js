@@ -198,7 +198,7 @@ export function initThemeUI() {
   wrap.className = 'theme-custom';
   wrap.innerHTML =
     '<button type="button" class="theme-chip' + (cur === 'custom' ? ' active' : '') + '" data-theme="custom" ' +
-    'data-tip="Your own accent pair — left picker = reality (measured truth), right = intent (commanded)">CUSTOM</button>' +
+    'data-tip="Your own accent pair — left picker = reality (what the machine reports), right = intent (what it was asked for)">CUSTOM</button>' +
     '<input type="color" id="themeCustReality" value="' + c.reality + '" data-tip="Reality accent — live position, active controls">' +
     '<input type="color" id="themeCustIntent" value="' + c.intent + '" data-tip="Intent accent — commanded / window band">';
   host.appendChild(wrap);

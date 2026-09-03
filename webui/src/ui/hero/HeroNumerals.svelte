@@ -2,17 +2,23 @@
   /**
    * HeroNumerals.svelte — the big glowing readout row above the rail.
    *
-   * A faithful port of the pre-refactor rail's hero numerals (actual /
-   * commanded / lag / speed). Commanded and lag were dropped in the first
-   * pass of this refactor because nothing in `field_roles` named "the live
-   * setpoint" — rendering it off window bounds or a locally-remembered
-   * request would have been exactly the optimistic-UI lie CLAUDE.md forbids.
-   * RFC-032 registered `telemetry.target` for exactly this (the machine's own
-   * commanded position, as opposed to `telemetry.position`'s measured truth),
-   * so both numerals are back — still entirely ground-truth: `targetVal` is
-   * whatever the device actually reported, and `lag` is target - position,
-   * computed client-side here (still no THIRD role for that subtraction —
-   * see roles.js's note on `telemetry.target`).
+   * A faithful port of the pre-refactor rail's hero numerals (position /
+   * target / lag / speed). Target and lag were dropped in the first pass of
+   * this refactor because nothing in `field_roles` named "the live setpoint"
+   * — rendering it off window bounds or a locally-remembered request would
+   * have been exactly the optimistic-UI lie CLAUDE.md forbids. RFC-032
+   * registered `telemetry.target` for exactly this (the machine's own
+   * setpoint, as opposed to `telemetry.position`), so both numerals are back
+   * — still entirely ground-truth: `targetVal` is whatever the device
+   * actually reported, and `lag` is target - position, computed client-side
+   * here (still no THIRD role for that subtraction — see roles.js's note on
+   * `telemetry.target`).
+   *
+   * EVERY LABEL COMES FROM labelFor(), WHICH CARRIES THE FIELD'S PROVENANCE.
+   * The reference read "actual" over the big numeral; that word is now the
+   * catalog's to choose, because a machine whose planner renders position
+   * publishes it as `planned` and the numeral must say so. Never restate a
+   * provenance word as a literal here.
    *
    * NOT a hero registered in heroes.js — HeroStrip only knows {id, component,
    * fields} entries from that registry, and this widget has no roles of its
@@ -90,7 +96,7 @@
   // The label carries the unit once ("actual · mm", matching the reference) —
   // no separate unit span rides next to the numeral itself.
   const posLabel = $derived(
-    posField ? labelFor(posField).toLowerCase() + (posUnit ? ' · ' + posUnit : '') : 'actual'
+    posField ? labelFor(posField).toLowerCase() + (posUnit ? ' · ' + posUnit : '') : 'position'
   );
 
   // Speed has no field descriptor of its own when derived (no telemetry.velocity

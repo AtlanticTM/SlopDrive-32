@@ -276,6 +276,15 @@ function makeField(entry, f, settingIndex, maskField) {
     rank: f.rank,
     rankName: f.rankName,
     aspect: f.aspect,
+    // RFC-048 key 22. Which pipeline stage this number is: demand / planned /
+    // actual. Absent on the wire means `actual` (the codec resolves that), so
+    // this is always set and labelFor() can qualify a label without asking
+    // whether the device bothered to say. Load-bearing here: this machine's
+    // position field is PLANNED (the motion coprocessor's rendered position),
+    // and a label reading "actual" over it would be the UI asserting a
+    // measurement nobody made.
+    provenance: f.provenance,
+    provenanceName: f.provenanceName,
     // §8.2 row 1's override. Nothing sets it yet — no catalog key carries an
     // archetype — but the derivation honors it the moment one does.
     archetypeHint: f.archetype,

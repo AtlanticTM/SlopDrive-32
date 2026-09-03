@@ -102,11 +102,11 @@
         <span class="name">Custom</span>
       </button>
       <label class="color-input">
-        <span class="sr-only">Custom reality accent color — measured truth</span>
+        <span class="sr-only">Custom reality accent color — what the machine reports</span>
         <input type="color" value={custom.reality} oninput={setRealityColor} aria-label="Reality accent color" />
       </label>
       <label class="color-input">
-        <span class="sr-only">Custom intent accent color — commanded / window band</span>
+        <span class="sr-only">Custom intent accent color — what it was asked for, and the window band</span>
         <input type="color" value={custom.intent} oninput={setIntentColor} aria-label="Intent accent color" />
       </label>
     </div>

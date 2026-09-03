@@ -33,6 +33,27 @@
    * would necessarily share, so it fails the registry's own inclusion test)
    * — see `isActive` below for the role-agnostic substitute this uses instead
    * of reading a bit by name.
+   *
+   * ── WHAT THE ROLES DO NOT PROMISE ─────────────────────────────────────
+   *
+   * A hub may rebuild plan.* from plan-adoption EVENTS rather than sampling a
+   * planner it owns, and then:
+   *   1. `plan.start` is a position sampled when the plan was adopted, not a
+   *      replayable curve endpoint.
+   *   2. `plan.elapsed` runs against the plan's ANCHOR, so it can sit before
+   *      the start of a scheduled plan or past `plan.duration` on an overrun.
+   *      See `progressFrac` for why the bar declines rather than clamps.
+   *   3. A plan can be in flight while the NEXT one is already adopted and
+   *      parked, so the span may jump ahead of the sweep head. That is drawn
+   *      as it arrives: the head is placed from `plan.current` alone and is
+   *      never constrained to the span, and the superseded span becomes a
+   *      ghost.
+   * None of that is device knowledge. It is the shape of the roles once you
+   * stop assuming one planner ticking one curve. Do not add a heuristic that
+   * "corrects" any of it; the numbers on screen are the hub's to state.
+   *
+   * `plan.style` renders through optionLabel() off the catalog's own option
+   * list, so a planner that gains or retires a style needs no change here.
    */
   import { machine } from '../../model/machine.svelte.js';
   import { formatValue, unitOf, optionLabel } from '../../model/format.js';
@@ -85,10 +106,28 @@
   const velVal = $derived(fields && fields.velocity ? fieldValue(fields.velocity) : undefined);
   const durVal = $derived(fields && fields.duration ? fieldValue(fields.duration) : undefined);
   const elapsedVal = $derived(fields && fields.elapsed ? fieldValue(fields.elapsed) : undefined);
+  /**
+   * Elapsed over duration, ONLY while that ratio is a progress fraction.
+   *
+   * `plan.elapsed` is measured against the plan's own ANCHOR, and a hub is
+   * free to adopt a plan whose anchor has not arrived yet (a scheduled
+   * successor parked behind the plan in flight) or to run one past its
+   * nominal duration. Both land outside 0..1, and neither of them means
+   * "complete". Clamping either into a full bar would put a progress on
+   * screen that the device never reported, which is the optimistic-UI lie in
+   * miniature. So the bar declines outside the range and the raw
+   * elapsed/duration numerals, the device's own words, stand alone. A zero or
+   * absent duration (a hold) declines the same way, for the same reason.
+   */
   const progressFrac = $derived.by(() => {
     if (durVal == null || elapsedVal == null || !isFinite(durVal) || durVal <= 0) return null;
-    return clamp(elapsedVal / durVal, 0, 1);
+    if (!isFinite(elapsedVal)) return null;
+    const f = elapsedVal / durVal;
+    return f >= 0 && f <= 1 ? f : null;
   });
+  /** Both numerals stay reportable even when the ratio between them is not. */
+  const haveTiming = $derived(
+    !!(fields && fields.elapsed && fields.duration) && elapsedVal != null && durVal != null);
 
   const styleVal = $derived(fields && fields.style ? fieldValue(fields.style) : undefined);
 
@@ -293,9 +332,11 @@
         {#if fields.velocity}
           <output class="chip mono">{formatValue(fields.velocity, velVal)}<span class="unit">{unitOf(fields.velocity)}</span></output>
         {/if}
-        {#if progressFrac != null}
+        {#if haveTiming}
           <span class="chip progress">
-            <span class="progress-track"><span class="progress-fill" style="width:{progressFrac * 100}%"></span></span>
+            {#if progressFrac != null}
+              <span class="progress-track"><span class="progress-fill" style="width:{progressFrac * 100}%"></span></span>
+            {/if}
             <output class="mono">{formatValue(fields.elapsed, elapsedVal)}<span class="unit">{unitOf(fields.elapsed)}</span> / {formatValue(fields.duration, durVal)}<span class="unit">{unitOf(fields.duration)}</span></output>
           </span>
         {:else if fields.elapsed}

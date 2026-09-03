@@ -17,6 +17,7 @@
 
 import { buildSettingsModel, isFieldEnabled, WIDGET, resolveWidget } from '../src/model/settings.js';
 import { claimRoles, withoutClaimed, ROLE } from '../src/model/roles.js';
+import { labelFor } from '../src/model/format.js';
 import {
   PACKED, CHANNEL_CLASS, UI_CATEGORY, UI_RANK, UI_ARCHETYPE,
 } from '../../../SlopSync/clients/js/index.js';
@@ -31,8 +32,11 @@ const ok = (name, cond, extra) => {
 // A machine we have never met.
 // ---------------------------------------------------------------------------
 
+// `provenanceName` mirrors the decoder, which resolves RFC-048 key 22 for
+// EVERY field and falls back to `actual` when the catalog omits it.
 const lf = (name, type, extra = {}) => ({
-  name, type, typeName: String(type), unit: '', scale: 1, ...extra,
+  name, type, typeName: String(type), unit: '', scale: 1,
+  provenanceName: 'actual', ...extra,
 });
 
 const CATALOG = [
@@ -41,7 +45,13 @@ const CATALOG = [
     id: 0x0210, name: 'carriage', cls: CHANNEL_CLASS.STATE, dir: 0, access: 0,
     maxRateHz: 50, priority: 2, category: null, settingChannel: null,
     layout: [
-      lf('carriage_mm', PACKED.u16, { unit: 'mm', scale: 100, role: ROLE.telemetryPosition }),
+      // PLANNED, not measured: this fixture machine's position is whatever its
+      // planner rendered. The label must say so; see the provenance block at
+      // the end of this file.
+      lf('carriage_mm', PACKED.u16, {
+        unit: 'mm', scale: 100, role: ROLE.telemetryPosition,
+        provenanceName: 'planned',
+      }),
       lf('carriage_rate', PACKED.i16, { unit: 'mm/s', scale: 10, role: ROLE.telemetryVelocity }),
     ],
     schema: null,
@@ -290,6 +300,23 @@ ok('a field of an unknown packed type still renders (fallback widget)',
 ok('an unlabeled device category gets a generated label',
    weird.categories[0] && /250/.test(weird.categories[0].label), weird.categories[0].label);
 ok('an unknown role is carried, not rejected', weird.fields[0].role === 'some.future.role');
+
+// ---- provenance decides the wording, never a guess about which field ------
+// A label that says "actual" over a planner-rendered position is the UI
+// asserting a measurement nobody made. The word comes from RFC-048 key 22,
+// so it is right on a machine nobody here has met.
+{
+  const posF = model.byRole.get(ROLE.telemetryPosition)[0];
+  const velF = model.byRole.get(ROLE.telemetryVelocity)[0];
+  const minF = model.byRole.get(ROLE.windowMin)[0];
+  ok('provenance survives into the settings model', posF.provenanceName === 'planned');
+  ok('a planned position is labeled planned, never actual',
+     labelFor(posF) === 'Planned position', labelFor(posF));
+  ok('an actual-provenance field takes NO qualifier (the wire default)',
+     labelFor(velF) === 'Speed', labelFor(velF));
+  ok('a setting is untouched by the provenance pass',
+     labelFor(minF) === 'Window min', labelFor(minF));
+}
 
 console.log('\n' + (fails ? 'FAILURES: ' + fails : 'ALL PASS — the renderer is machine-agnostic.'));
 process.exit(fails ? 1 : 0);

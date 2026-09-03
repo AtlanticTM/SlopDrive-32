@@ -16,6 +16,8 @@
    * STATE snapshot (settings.js) — never a locally-remembered write, never a
    * synthesized zero. A channel that has not reported yet contributes NaN to
    * its ring, which the tracer renders as a gap rather than a false zero.
+   * Lane labels go through labelFor(), so a lane whose field is `planned` or
+   * `demand` says so in the legend instead of reading as a measurement.
    *
    * Sampling / drawing is entirely internal state (plain closures, not runes)
    * because it is imperative animation machinery, not UI state a template
@@ -26,7 +28,7 @@
   import { machine } from '../../model/machine.svelte.js';
   import { ROLE } from '../../model/roles.js';
   import { reportedValue } from '../../model/settings.js';
-  import { formatValue, unitOf } from '../../model/format.js';
+  import { formatValue, unitOf, labelFor } from '../../model/format.js';
 
   let { roles = [ROLE.telemetryPosition, ROLE.telemetryVelocity] } = $props();
 
@@ -250,7 +252,7 @@
       {#each resolvedSeries as f, i (f.uid)}
         <span class="leg">
           <i class="swatch" style="background: var({paletteVarFor(f)})" aria-hidden="true"></i>
-          <span class="leg-label">{f.label}</span>
+          <span class="leg-label">{labelFor(f)}</span>
           <output class="mono leg-val">{formatValue(f, legendVals[i])}<span class="unit">{unitOf(f)}</span></output>
         </span>
       {/each}

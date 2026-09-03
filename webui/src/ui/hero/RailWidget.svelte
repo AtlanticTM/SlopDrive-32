@@ -33,11 +33,23 @@
    *    the honest fallback per hard rule 3, not a placeholder waiting on a
    *    role that does not exist.
    *
-   * 2. "COMMANDED" AND "LAG" hero numerals are back. RFC-032 registered
+   * 2. THE "TARGET" AND "LAG" hero numerals are back. RFC-032 registered
    *    `telemetry.target` (the machine's live setpoint, as opposed to
-   *    `telemetry.position`'s measured truth) precisely to unblock this.
-   *    Lag is still not its own role — it is target - position, computed
-   *    client-side in HeroNumerals — see that file's header.
+   *    `telemetry.position`) precisely to unblock this. Lag is still not its
+   *    own role — it is target - position, computed client-side in
+   *    HeroNumerals — see that file's header.
+   *
+   * ── THE COMET IS THE POSITION FIELD, WHATEVER ITS PROVENANCE ──────────────
+   *
+   * The comet trail and the primary numeral both draw `telemetry.position`.
+   * That field is NOT necessarily a measurement: a hub whose planner renders
+   * position publishes it with provenance `planned` (RFC-048 key 22), and on
+   * this machine it is exactly that. So nothing here may call it actual or
+   * measured — the word is composed onto the label by labelFor(). If a hub
+   * ALSO grants a second, `actual`-provenance position (an encoder audit on
+   * its own channel), that is a SEPARATE role claim and would get its own
+   * marker; none is claimed today, so the rail draws one trace and says
+   * nothing about a second.
    *
    * 3. Manual mode (tape spans full travel, Set-Min/Max-here buttons with
    *    yielding-bounds) depended on a client-side "bypass limits" toggle that
@@ -315,10 +327,9 @@
     }
   });
 
-  // Same treatment for the commanded setpoint, so the "commanded" numeral and
-  // the tape's own live cursor never disagree about "now" with each other or
-  // with the actual-position comet — all three are sampled from the same rAF
-  // instant below.
+  // Same treatment for the setpoint, so the target numeral and the tape's own
+  // live cursor never disagree about "now" with each other or with the
+  // position comet — all three are sampled from the same rAF instant below.
   const targetTele = createTelebuf();
   let targetTeleChannel = null;
 

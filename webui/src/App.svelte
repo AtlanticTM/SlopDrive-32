@@ -432,7 +432,8 @@
     border-color: var(--line-1);
   }
   /* Active marker: a reality-blue tick on the leading edge — the same accent
-     that means "measured truth" everywhere else marks "you are here". */
+     that means "what the machine reports" everywhere else marks "you are
+     here". */
   .rail-tab.on .rail-glyph { color: var(--reality); }
 
   .rail-glyph {

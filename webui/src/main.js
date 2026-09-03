@@ -25,20 +25,32 @@ try {
   if (localStorage.getItem('ui_terse') === '1') document.documentElement.classList.add('terse');
 } catch (e) { /* private mode: preferences are an optimization, never a requirement */ }
 
-// The device serves this bundle, so it IS the machine — except inside the
-// Tauri shell, where the host is the operator's choice and /uitoken minting
-// runs through the shell's Rust-side fetch (no browser same-origin rules).
-// TAURI_ENV_PLATFORM is set only by the Tauri CLI's build, so the embedded
-// bundle compiles this branch away entirely.
+// Whatever served this bundle IS the machine's front door — today the C5
+// bridge, which hosts this page and /uitoken on port 80 and the SlopSync WS
+// on port 82 of the SAME host. So both URLs derive from `location`: the host
+// from location.hostname here, the WS port from connect()'s default 82, and
+// the mint from a SAME-ORIGIN relative /uitoken (the protocol client's
+// mintUrl() picks the relative form whenever host === location.hostname,
+// which is exactly this case). Nothing about a particular device is baked in
+// — a literal IP here would work on one bench and nowhere else.
+//
+// Except inside the Tauri shell, where the host is the operator's choice and
+// /uitoken minting runs through the shell's Rust-side fetch (no browser
+// same-origin rules). TAURI_ENV_PLATFORM is set only by the Tauri CLI's
+// build, so the embedded bundle compiles this branch away entirely.
 const SHELL = !!import.meta.env.TAURI_ENV_PLATFORM;
 
 async function boot() {
-  // ?hub=<ip> points THIS page at a hub other than its own origin — the dev
-  // loop (vite dev against the live machine; /uitoken stays same-origin-only
-  // so such a session lands at watch tier, which is honest). Harmless on the
-  // embedded page: absent parameter, origin rules as always.
+  // ?hub=<host> points THIS page at a hub other than its own origin. It is
+  // the DEV override and the only one: `vite dev` serves from localhost, so
+  // `?hub=<device>` is how a dev session reaches a real machine (/uitoken
+  // stays same-origin-only, so such a session lands at watch tier, which is
+  // honest). Harmless on the served page: absent parameter, origin rules as
+  // always. No fallback host — an empty hostname means the page was opened
+  // from a file:// URL with no hub to talk to, and connecting to a
+  // hardcoded address would be a guess about someone else's network.
   const hubOverride = new URLSearchParams(location.search).get('hub');
-  let host = hubOverride || location.hostname || '192.168.1.229';
+  let host = hubOverride || location.hostname;
   if (SHELL) {
     const { fetch: tauriFetch } = await import('@tauri-apps/plugin-http');
     const { setHttpGet } = await import('../../../SlopSync/clients/js/index.js');

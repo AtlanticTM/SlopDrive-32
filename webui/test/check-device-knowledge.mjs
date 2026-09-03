@@ -36,6 +36,31 @@ const WEBUI = join(HERE, '..');
 const SRC = join(WEBUI, 'src');
 const CATALOG_H = join(WEBUI, '..', 'include', 'comms', 'SlopSyncCatalog.h');
 
+/**
+ * Names the device has RETIRED, guarded forever.
+ *
+ * The harvest below reads the LIVE catalog header, so a name the firmware
+ * deleted stops being guarded the moment it is deleted — exactly backwards.
+ * A retired knob is the most tempting kind of device knowledge to leave
+ * behind: it compiled once, nothing errors when the field stops arriving,
+ * and the control just renders `--` forever (T20's "a retired vocabulary
+ * lies" wearing a UI hat). So retirements are pinned here by hand and the
+ * check keeps failing on them after the firmware has forgotten they existed.
+ *
+ * Add a row when a wire name is retired; never remove one.
+ */
+const RETIRED_NAMES = [
+  // sd-4k1.14: motion-modes knobs that became reserved bytes or vanished.
+  'blend_mode', 'stream_speed_mode', 'motion_backend', 'home_style',
+  // sd-4k1: settings deleted with the RP2350 motion port.
+  'centering', 'reshape', 'soften',
+  // Retired infeasibility policies — the select is {stretch, blend} now, and
+  // an option LABEL is as much device knowledge as a field name.
+  'recenter', 'truncate',
+  // Retired anomaly kind (never emitted; its counter slot stays for layout).
+  'waveform_centered',
+];
+
 /** Paths exempt from the check, and why. */
 const EXEMPT = [
   join('src', 'model', 'roles.js'),  // registry vocabulary, not device facts
@@ -91,6 +116,8 @@ const files = walk(SRC).filter((p) => {
 });
 
 const fieldNames = deviceFieldNames();
+const harvestedCount = fieldNames.size;
+for (const n of RETIRED_NAMES) fieldNames.add(n);
 const findings = [];
 
 /**
@@ -138,7 +165,9 @@ for (const file of files) {
 
 console.log('device-knowledge check');
 console.log('  scanned  : ' + files.length + ' files under src/ (excluding ' + EXEMPT.length + ' exempt paths)');
-console.log('  guarding : ' + fieldNames.size + ' wire field names harvested from the device catalog');
+console.log('  guarding : ' + fieldNames.size + ' wire field names ('
+  + harvestedCount + ' harvested from the device catalog, '
+  + RETIRED_NAMES.length + ' pinned as retired)');
 
 if (!findings.length) {
   console.log('\nPASS — the rendering layer knows nothing about this particular machine.');

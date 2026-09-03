@@ -2,6 +2,9 @@ import { defineConfig } from 'vite';
 import { svelte } from '@sveltejs/vite-plugin-svelte';
 import { viteSingleFile } from 'vite-plugin-singlefile';
 import { execSync } from 'node:child_process';
+import { readFileSync, writeFileSync, statSync } from 'node:fs';
+import { gzipSync } from 'node:zlib';
+import { resolve } from 'node:path';
 
 /**
  * Vite builds the single-file HTML bundle (JS/CSS/fonts inlined).
@@ -13,7 +16,12 @@ import { execSync } from 'node:child_process';
  * (~21KB for MartianMono.woff2) so Vite emits them inline rather than as
  * separate files. 100KB gives comfortable headroom.
  *
- * Gzipping is handled by build_webui.py (PlatformIO pre-build script).
+ * `npm run build` emits BOTH dist/index.html and dist/index.html.gz. The gz is
+ * what gets served: the C5 bridge sends it with Content-Encoding: gzip, and
+ * the LittleFS path (build_webui.py, which gzips into data/ for its own
+ * upload) is the other consumer. Producing it here means a plain `npm run
+ * build` is enough for anything that wants the shipped artifact, with no
+ * PlatformIO in the loop.
  *
  * SVELTE 5: the plugin is pinned to the v4 line because it is the last one that
  * peers against Vite 5, and both vite-plugin-singlefile and build_webui.py are
@@ -33,8 +41,28 @@ function uiBuildId() {
   }
 }
 
+/**
+ * Emit dist/index.html.gz beside the bundle. `writeBundle` rather than
+ * `closeBundle` so the HTML is on disk already; singlefile inlines everything
+ * into that one file, so there is nothing else to compress.
+ */
+function emitGzip() {
+  return {
+    name: 'emit-index-gzip',
+    apply: 'build',
+    writeBundle(options) {
+      const dir = options.dir || resolve(__dirname, 'dist');
+      const html = resolve(dir, 'index.html');
+      const gz = html + '.gz';
+      writeFileSync(gz, gzipSync(readFileSync(html), { level: 9 }));
+      const raw = statSync(html).size, small = statSync(gz).size;
+      console.log(`index.html.gz  ${small} B (${Math.round((small * 100) / raw)}% of ${raw} B)`);
+    },
+  };
+}
+
 export default defineConfig({
-  plugins: [svelte(), viteSingleFile()],
+  plugins: [svelte(), viteSingleFile(), emitGzip()],
   define: {
     __UI_BUILD__: JSON.stringify(uiBuildId()),
   },

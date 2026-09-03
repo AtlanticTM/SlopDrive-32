@@ -9,12 +9,32 @@
 import { ROLE_LABEL } from './roles.js';
 
 /**
+ * PROVENANCE (RFC-048 key 22) -> the adjective that goes in front of a label.
+ *
+ * Registry vocabulary, so this is protocol wording, not device knowledge:
+ * `demand` is what was asked for, `planned` is what the planner is aiming at,
+ * `actual` is what was measured. `actual` maps to NOTHING on purpose — it is
+ * the wire default, so qualifying every unannotated field with "actual" would
+ * put a measurement claim on machines that never made one, which is the exact
+ * lie this table exists to prevent in the other direction.
+ */
+const PROVENANCE_QUALIFIER = { demand: 'Demand', planned: 'Planned' };
+
+/**
  * The display label for ANY field, anywhere in the UI. Resolution order:
  *   1. ROLE_LABEL[field.role] when the field carries a known registry role
  *      (roles.js) — a human-standardized label for machine vocabulary.
  *   2. field.label, which buildSettingsModel already set to
  *      humanize(field.name) at construction time — the honest fallback for a
  *      field this project has no opinion about.
+ * then, in both cases, the field's own PROVENANCE is composed on front.
+ *
+ * The provenance half is not decoration. A hub whose planner renders position
+ * publishes `telemetry.position` with provenance `planned`, and a label that
+ * read "Actual" over it would be the UI asserting a measurement nobody made —
+ * a ground-truth defect, not a wording preference. The word comes from the
+ * catalog every time; nothing here assumes anything about which field is
+ * measured on which machine.
  *
  * This is the ONLY function in the UI layer that may special-case a role for
  * display text; every component reads through it rather than field.label
@@ -24,8 +44,11 @@ import { ROLE_LABEL } from './roles.js';
  */
 export function labelFor(field) {
   if (!field) return '';
-  if (field.role && ROLE_LABEL[field.role]) return ROLE_LABEL[field.role];
-  return field.label != null ? field.label : '';
+  const base = (field.role && ROLE_LABEL[field.role])
+    || (field.label != null ? field.label : '');
+  const q = PROVENANCE_QUALIFIER[field.provenanceName];
+  if (!q || !base) return base;
+  return q + ' ' + base.charAt(0).toLowerCase() + base.slice(1);
 }
 
 /** Decimal places implied by a step. step 0.05 -> 2, step 1 -> 0, absent -> 2. */

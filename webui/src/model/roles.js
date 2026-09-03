@@ -62,8 +62,11 @@ export const ROLE = {
   telemetryTemp: 'telemetry.temp',
   telemetryUptime: 'telemetry.uptime',
   // RFC-032: where the machine is currently COMMANDED to, as opposed to
-  // telemetryPosition (measured truth). Lag is deliberately not its own
-  // role — a hero widget computes target - position client-side.
+  // telemetryPosition (where it is). Neither role says whether its number was
+  // measured or computed — that is `provenance` (RFC-048 key 22), per FIELD,
+  // and it is the only thing allowed to decide the wording. Lag is
+  // deliberately not its own role — a hero widget computes target - position
+  // client-side.
   telemetryTarget: 'telemetry.target',
 
   // identity
@@ -111,9 +114,16 @@ export const ROLE = {
  * table).
  *
  * Wording prefers the pre-refactor UI's own choices where it had one
- * (`git show webui-prerefactor:webui/index.html` / `style.css` —
- * "actual"/"commanded" for the hero numerals, "User speed"/"Input jerk" etc
- * for the limit sliders) so this reads as a relabel, not a redesign.
+ * (`git show webui-prerefactor:webui/index.html` / `style.css` — "User
+ * speed"/"Input jerk" etc for the limit sliders) so this reads as a relabel,
+ * not a redesign.
+ *
+ * A LABEL HERE NAMES THE QUANTITY AND NOTHING ELSE. It must never assert
+ * where the number came from: `telemetry.position` is "Position", never
+ * "Actual", because on a machine whose planner renders position the reported
+ * value is PLANNED and calling it actual is the UI claiming a measurement
+ * nobody made. The demand/planned/actual word comes from the field's own
+ * `provenance` and is composed onto this label in format.js's labelFor().
  *
  * Every entry in ROLE above SHOULD have a mapping here — a role with no label
  * just falls through to humanize(), which is a safe, correct default, not a
@@ -133,8 +143,8 @@ export const ROLE_LABEL = {
   [ROLE.geometryMaxTravel]: 'Max travel',
   [ROLE.geometryMeasuredTravel]: 'Measured travel',
 
-  [ROLE.telemetryPosition]: 'Actual',
-  [ROLE.telemetryTarget]: 'Commanded',
+  [ROLE.telemetryPosition]: 'Position',
+  [ROLE.telemetryTarget]: 'Target',
   [ROLE.telemetryVelocity]: 'Speed',
   [ROLE.telemetryCurrent]: 'Current',
   [ROLE.telemetryPowerBus]: 'Bus power',

@@ -371,6 +371,9 @@ static void drainMotionLink() {
 // Core 1 — real-time: homing, deferred-intent consumer, motion-link service
 static void motorTask(void* /*param*/) {
     bool homing_started = false;
+    // Deferred intents wake this task instead of waiting out the 1 ms poll:
+    // the poll still runs the homing, link and glide duties below.
+    arbiter.setConsumerTask(xTaskGetCurrentTaskHandle());
     while (true) {
         // E-stop
         if (g_state.estop_requested.exchange(false)) {
@@ -469,7 +472,9 @@ static void motorTask(void* /*param*/) {
         // SlopGlow liveness: this pulse is what keeps the status LEDs
         // animating. If this loop dies, the lights freeze — by design.
         if (auto* hb = slopglowMotorHeartbeat()) hb->pulse();
-        vTaskDelay(pdMS_TO_TICKS(1));
+        // Yields exactly like the 1 ms delay it replaces, minus the wait when
+        // a Core-0 intent is already queued (MotionArbiter::setConsumerTask).
+        ulTaskNotifyTake(pdTRUE, pdMS_TO_TICKS(1));
     }
 }
 

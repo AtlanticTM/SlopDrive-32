@@ -276,8 +276,9 @@ void MlinkServoDriver::pollStatus() {
     }
 }
 
+// Callers decide THAT there is something to pull (the IRQ line, or a status
+// event_seq that moved); this only pulls.
 void MlinkServoDriver::pumpEvents() {
-    if (_status.event_seq == _evt_acked) return;
     for (uint8_t n = 0; n < kEventPullPerTick; ++n) {
         uint8_t out[kFrameBytes] = {};
         encodeEventPull(std::span<uint8_t, kFrameBytes>(out, kFrameBytes),
@@ -378,13 +379,22 @@ void MlinkServoDriver::update() {
     // Posted intents and config ship on ARRIVAL, not on the tick.
     drainPosts();
 
+    // The RP holds IRQ high while an event is unpulled, so events ride the
+    // owner's own pass (sub-millisecond) instead of the status cadence. Only
+    // the poll below is clocked.
+    const bool irq = digitalRead(kIrq) == HIGH;
+    if (irq) pumpEvents();
+
     if (!tick) return;
 
     const float req = _ceiling_req.exchange(0.0f, std::memory_order_acquire);
     if (req > 0.0f) pushCeiling(req);
 
     if (_status_fresh) {
-        pumpEvents();
+        // The IRQ pull above already covers the common case; this is the
+        // backstop for a line that never rose (a slave that predates it, or a
+        // pull that raced the last event out of the ring).
+        if (!irq && _status.event_seq != _evt_acked) pumpEvents();
 
         // THE LOST-MIDDLE-FRAME DETECTOR. A counter cannot see a dropped
         // MIDDLE frame of a multi-frame set (the last frame still bumps it);

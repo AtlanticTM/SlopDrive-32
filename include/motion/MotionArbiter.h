@@ -19,9 +19,11 @@
 // - Anchors leave here in S3 esp_timer microseconds; the DRIVER converts to
 //   slave time, because it owns the clock estimate.
 
+#include <atomic>
 #include <cstdint>
 #include <freertos/FreeRTOS.h>
 #include <freertos/semphr.h>
+#include <freertos/task.h>
 #include "MotorDriver.h"
 #include "SystemState.h"
 #include "config_api.h"
@@ -91,6 +93,11 @@ public:
     // Non-blocking, drops if full: the latest command wins at high Hz.
     void submitDeferred(const MotionIntent& intent);
     void submitSegmentDeferred(const SegmentIntent& seg);
+    // The Core-1 consumer, registered by the task that calls processDeferred().
+    // Both deferred submitters notify it, so a command crosses the cores at
+    // once instead of waiting out the consumer's poll (architecture.md
+    // section 2: on arrival, never on a tick). Null = poll only.
+    void setConsumerTask(TaskHandle_t t);
 
     // ---- Core 1 direct dispatch ---------------------------------------------
     PlanReport submit(const MotionIntent& intent);
@@ -147,6 +154,8 @@ private:
     // TODO(sd-tki.4): pending the operator ruling cpp-safety.md requires.
     SemaphoreHandle_t _dispatch_lock = nullptr;
 
+    std::atomic<TaskHandle_t> _consumer{nullptr};
+
     QueueHandle_t     _defer_queue = nullptr;
     QueueHandle_t     _segment_queue = nullptr;
     static constexpr uint8_t DEFER_QUEUE_DEPTH = 16;
@@ -167,6 +176,8 @@ private:
     bool _dispatchCommand(motionlink::LinkCommand& cmd, MotionSource source);
 
     void _pushPolicy();
+
+    void _wakeConsumer();
 
     // MANUAL bypasses every source gate except e-stop.
     bool _gatesPass(MotionSource source);

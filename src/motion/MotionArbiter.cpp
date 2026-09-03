@@ -58,22 +58,38 @@ void MotionArbiter::init() {
 
 // ---- Core 0 -> Core 1 handoff -----------------------------------------------
 
+void MotionArbiter::setConsumerTask(TaskHandle_t t) {
+    _consumer.store(t, std::memory_order_release);
+}
+
+// Wakes the consumer. A notification that arrives while it is already running
+// is not lost: the count survives to the next take, so the queue is drained
+// again rather than one command late.
+void MotionArbiter::_wakeConsumer() {
+    TaskHandle_t t = _consumer.load(std::memory_order_acquire);
+    if (t != nullptr) xTaskNotifyGive(t);
+}
+
 void MotionArbiter::submitDeferred(const MotionIntent& intent) {
     if (xQueueSend(_defer_queue, &intent, 0) != pdTRUE) {
         SLOGW_EVERY_MS(2000, "arbiter",
                        "DROP: point defer queue full -- Core 1 consumer stalled");
+        return;
     }
+    _wakeConsumer();
 }
 
 void MotionArbiter::submitSegmentDeferred(const SegmentIntent& seg) {
     if (xQueueSend(_segment_queue, &seg, 0) != pdTRUE) {
         SLOGW_EVERY_MS(2000, "arbiter",
                        "DROP: segment defer queue full -- Core 1 consumer stalled");
+        return;
     }
+    _wakeConsumer();
 }
 
 void MotionArbiter::processDeferred() {
-    // Drain both queues in full each tick. Segments first: a stream carries
+    // Drain both queues in full on every wake. Segments first: a stream carries
     // anchors and a point move does not, so a segment held one tick behind a
     // burst of point moves is the one that renders late.
     SegmentIntent seg;

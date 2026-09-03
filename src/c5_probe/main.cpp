@@ -1222,6 +1222,10 @@ void setup() {
     // transport fault and is not. Mirror the S3's layout exactly.
     httpd_config_t http = HTTPD_DEFAULT_CONFIG();
     http.server_port      = 80;
+    // Ten routes ride this server now (/, /index.html joined 2026-09-03); the
+    // default of 8 refused the last two SILENTLY (404 with no log). Never below
+    // the count of httpd_register_uri_handler(g_http80, ...) calls.
+    http.max_uri_handlers = 16;
     http.ctrl_port        = 32770;   // distinct from the :82 instance
     http.max_open_sockets = 4;
     http.lru_purge_enable = true;
@@ -1253,9 +1257,11 @@ void setup() {
         httpd_register_uri_handler(g_http80, &lg);
         // The UI itself. Wildcard-free, so exact-match under the matcher above.
         httpd_uri_t ix{"/", HTTP_GET, indexHandler, nullptr, false, false, nullptr};
-        httpd_register_uri_handler(g_http80, &ix);
+        if (httpd_register_uri_handler(g_http80, &ix) != ESP_OK)
+            Serial.printf("[c5] webui route %s REFUSED: raise max_uri_handlers\n", ix.uri);
         httpd_uri_t ixh{"/index.html", HTTP_GET, indexHandler, nullptr, false, false, nullptr};
-        httpd_register_uri_handler(g_http80, &ixh);
+        if (httpd_register_uri_handler(g_http80, &ixh) != ESP_OK)
+            Serial.printf("[c5] webui route %s REFUSED: raise max_uri_handlers\n", ixh.uri);
     }
     // Bound before WiFi is up on purpose: INADDR_ANY takes the port regardless
     // of link state, so no reconnect path has to remember to rebind.

@@ -492,7 +492,14 @@
 
   .pane { padding: var(--gap) 0; min-width: 0; }
 
-  .card-body { display: grid; gap: 14px; }
+  /* Columns capped at the reading measure, never one stretched row: a
+     full-width card is 1180px of pane at 1440 and 1420px at 1920, which is
+     140 and 169 characters of label-to-value travel. */
+  .card-body {
+    display: grid;
+    grid-template-columns: repeat(auto-fill, min(100%, var(--measure)));
+    gap: 14px var(--gap);
+  }
 
   .boot {
     display: grid;

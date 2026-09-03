@@ -99,6 +99,12 @@
   --slider-thumb-w: calc(var(--s) * 11px);
   --slider-thumb-h: calc(var(--s) * 18px);
   --gap: 12px;
+  /* Reading measure: the widest a column of labelled values may get before
+     the eye stops tracking a row left to right. 48ch of Chakra Petch at the
+     root scale is ~64 characters of real text (its `0` is wider than its
+     average glyph), so a card reflows into columns instead of stretching one
+     across a 1920 pane. */
+  --measure: 48ch;
 
   --font: 'Chakra Petch', system-ui, sans-serif;
   --mono: 'Martian Mono', ui-monospace, monospace;

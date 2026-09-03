@@ -12,6 +12,7 @@
     "check:generic": "node test/check-device-knowledge.mjs",
     "check:model": "node test/settings-model.test.mjs",
     "check:shell": "node test/shell-chrome-geometry.test.mjs",
+    "check:dash": "node test/dash-measure.test.mjs",
     "tauri": "tauri"
   },
   "devDependencies": {

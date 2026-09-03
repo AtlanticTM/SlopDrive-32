@@ -321,6 +321,43 @@ TEST_CASE("A segment released 110 ms early renders at its anchor, not at arrival
     CHECK(s.pos == doctest::Approx(0.75f).epsilon(0.01));
 }
 
+TEST_CASE("Twenty segments forwarded on arrival render the whole stream") {
+    // sd-4k1.19: the hub forwards every segment the moment it arrives and the
+    // engine's schedule queue holds the client's lookahead. Measured before
+    // the queue existed, same script: unbounded forwarding rendered span 0.000
+    // (every parked plan evicted before it promoted), held-until-due 0.493,
+    // release-depth-one 0.600.
+    Slave s;
+    s.pushConfig(liveTags());
+    s.run(kServiceUs * 2);
+
+    constexpr uint32_t kSeg = 60 * kMs, kLead = 120 * kMs, kN = 20;
+    const uint32_t base = s.now + kLead;
+    const uint32_t end = base + kN * kSeg + 100 * kMs;
+    uint32_t sent = 0;
+    float lo = 2.0f, hi = -1.0f;
+    while (int32_t(s.now - end) < 0) {
+        while (sent < kN &&
+               int32_t(s.now - (base + sent * kSeg - kLead)) >= 0) {
+            ml::LinkCommand c = wave(sent % 2 == 0 ? 0.8f : 0.2f, 60, 0.0f, true);
+            c.flags |= ml::kCmdHasAnchor;
+            c.anchor_us = base + sent * kSeg;
+            s.command(c);
+            ++sent;
+        }
+        s.run(kTickUs);
+        // The first segment leaves the seed at 0.0 and is a cold start, so the
+        // span is measured over the STREAM, from the second anchor on.
+        if (int32_t(s.now - (base + kSeg)) >= 0) {
+            if (s.pos < lo) lo = s.pos;
+            if (s.pos > hi) hi = s.pos;
+        }
+    }
+    CHECK(sent == kN);
+    MESSAGE("rendered span " << (hi - lo));
+    CHECK(hi - lo > 0.55f);
+}
+
 TEST_CASE("The render table tracks the engine through a promotion and a settle") {
     // The table is read off the LIVE PLAN rather than a copy of the engine
     // (RpMotionCore republish), so the three things the accessor has to carry

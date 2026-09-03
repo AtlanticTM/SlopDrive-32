@@ -25,45 +25,37 @@ PacingEntry seg(uint64_t due_us, float target, uint32_t dur_ms) {
 }
 }  // namespace
 
-TEST_CASE("A segment is released before its due time, not at it") {
+TEST_CASE("A segment is released on arrival, with its anchor intact") {
     PacingRing r;
     PacingEntry out;
     const uint64_t now = 1000 * kMs;
 
     r.push(seg(now + 120 * kMs, 0.8f, 60));
-    REQUIRE(r.popReleased(now, out));
+    REQUIRE(r.pop(out));
     CHECK(out.due_us == now + 120 * kMs);   // the anchor rides along untouched
     CHECK(r.size() == 0);
 }
 
-TEST_CASE("Release depth is one: the successor waits for the anchor, not for its own due") {
+TEST_CASE("A whole client lookahead leaves in ONE drain") {
     PacingRing r;
     PacingEntry out;
-    uint64_t now = 1000 * kMs;
+    const uint64_t now = 1000 * kMs;
 
-    // A client running 120 ms ahead with 60 ms segments: both are in the ring
-    // long before either starts.
+    // A client running 120 ms ahead with 60 ms segments. Both go out now: the
+    // RP's schedule queue parks them in anchor order (sd-4k1.19), so holding
+    // either back would only move planning INTO its own span.
     r.push(seg(now + 120 * kMs, 0.8f, 60));
     r.push(seg(now + 180 * kMs, 0.2f, 60));
 
-    REQUIRE(r.popReleased(now, out));
+    REQUIRE(r.pop(out));
     CHECK(out.target == doctest::Approx(0.8f));
-
-    // The second one may NOT go out while the first is still parked on the
-    // engine's one scheduled slot: releasing it there evicts a plan that never
-    // ran (PacingRing.h, release depth).
-    CHECK_FALSE(r.popReleased(now + 60 * kMs, out));
-    CHECK_FALSE(r.popReleased(now + 119 * kMs, out));
-
-    // It goes out the moment the first segment's anchor passes -- 60 ms before
-    // its own start, which is the whole point.
-    now += 120 * kMs;
-    REQUIRE(r.popReleased(now, out));
+    REQUIRE(r.pop(out));
     CHECK(out.target == doctest::Approx(0.2f));
-    CHECK(out.due_us == 1000 * kMs + 180 * kMs);
+    CHECK(out.due_us == now + 180 * kMs);
+    CHECK_FALSE(r.pop(out));
 }
 
-TEST_CASE("Arrival order is release order, and a late anchor never holds anything back") {
+TEST_CASE("Arrival order is release order, whatever the anchors say") {
     PacingRing r;
     PacingEntry out;
     const uint64_t now = 1000 * kMs;
@@ -74,13 +66,13 @@ TEST_CASE("Arrival order is release order, and a late anchor never holds anythin
     r.push(seg(now - 10 * kMs, 0.2f, 20));
     r.push(seg(now, 0.3f, 20));
 
-    REQUIRE(r.popReleased(now, out));
+    REQUIRE(r.pop(out));
     CHECK(out.target == doctest::Approx(0.1f));
-    REQUIRE(r.popReleased(now, out));
+    REQUIRE(r.pop(out));
     CHECK(out.target == doctest::Approx(0.2f));
-    REQUIRE(r.popReleased(now, out));
+    REQUIRE(r.pop(out));
     CHECK(out.target == doctest::Approx(0.3f));
-    CHECK_FALSE(r.popReleased(now, out));
+    CHECK_FALSE(r.pop(out));
 }
 
 TEST_CASE("The lookahead pairs a released segment with the one behind it") {
@@ -91,7 +83,7 @@ TEST_CASE("The lookahead pairs a released segment with the one behind it") {
     r.push(seg(now + 100 * kMs, 0.8f, 50));
     r.push(seg(now + 150 * kMs, 0.2f, 50));
 
-    REQUIRE(r.popReleased(now, out));
+    REQUIRE(r.pop(out));
     const PacingEntry* next = r.peekOldest();
     REQUIRE(next != nullptr);
     // RFC-008: the chord the engine bounds the released segment's end velocity
@@ -103,7 +95,7 @@ TEST_CASE("The lookahead pairs a released segment with the one behind it") {
     // At the tail there is no successor and the engine plans exactly as it did
     // before the guard existed.
     PacingEntry last;
-    REQUIRE(r.popReleased(now + 100 * kMs, last));
+    REQUIRE(r.pop(last));
     CHECK(r.peekOldest() == nullptr);
 }
 

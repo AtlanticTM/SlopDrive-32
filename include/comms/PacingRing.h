@@ -8,12 +8,11 @@
 //   guard a race that structurally cannot happen. Native-testable
 //   (test/native/test_pacing_ring).
 // - Entries are pushed in non-decreasing due_us order and leave in ARRIVAL
-//   order; the ring never reorders and never drops for age.
-// - RELEASE DEPTH IS ONE. The engine on the RP parks exactly one scheduled
-//   plan (slopmotion _next, last commit wins), so a second future-anchored
-//   segment released before the first promotes EVICTS it. Releasing the head
-//   only once the previously released anchor has passed is what keeps a
-//   client's lookahead from erasing its own stream.
+//   order; the ring never reorders, never drops for age, and never holds an
+//   entry back. The lookahead is the RP's to hold: its engine parks
+//   kScheduleDepth anchored plans in anchor order (slopmotion, sd-4k1.19), so
+//   forwarding on arrival is what buys the plan, the frame and the commit
+//   their time BEFORE the span the operator sees.
 // See: include/comms/SlopSyncHubService.h, docs/rp-motion-port.md.
 
 #include <array>
@@ -59,23 +58,20 @@ public:
         return overwrote;
     }
 
-    // Releases the oldest entry, with its own anchor intact, as soon as the
-    // receiver's single scheduled-plan slot is free. The slot frees when the
-    // previously released entry's anchor passes, so a segment leaves here one
-    // segment BEFORE it has to start, never at its due time. Callers loop this
-    // until it returns false.
-    bool popReleased(uint64_t now_us, PacingEntry& out) {
-        if (_count == 0 || now_us < _released_due_us) return false;
+    // Releases the oldest entry, with its own anchor intact. FIFO on arrival:
+    // nothing here is a function of the clock. Callers loop it until it
+    // returns false.
+    bool pop(PacingEntry& out) {
+        if (_count == 0) return false;
         out = _buf[_tail];
         _tail = (_tail + 1) % kCapacity;
         --_count;
-        _released_due_us = out.due_us;
         return true;
     }
 
     // The oldest entry still in the ring, WITHOUT regard to its due time --
     // nullptr when empty. This is the RFC-008 one-segment LOOKAHEAD: call it
-    // straight after popReleased() and it hands back the segment that FOLLOWS
+    // straight after pop() and it hands back the segment that FOLLOWS
     // the one just released, which is what the handoff sanity guard needs to
     // bound the released segment's end velocity.
     //
@@ -90,7 +86,6 @@ public:
 private:
     std::array<PacingEntry, kCapacity> _buf{};
     size_t   _head = 0, _tail = 0, _count = 0;
-    uint64_t _released_due_us = 0;
 };
 
 }  // namespace slopdrive

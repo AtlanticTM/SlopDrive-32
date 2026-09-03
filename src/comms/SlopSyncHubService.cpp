@@ -1682,17 +1682,18 @@ void SlopSyncHubService::syncSafety() {
     _hub.setSafetyModes(_state.manual_override, bool(_state.bypass_limits));
 }
 
-// Segments leave here ON ARRIVAL, carrying their own anchor: the RP plans a
-// segment one segment before it has to start, so the Core-0 hop, the SPI frame
-// and commit() all land OUTSIDE the rendered span. Release depth is one and
-// why is PacingRing.h's constraint. A segment whose anchor is already past is
+// Segments leave here ON ARRIVAL, carrying their own anchor and unbounded in
+// number: the RP plans a whole client lookahead ahead of time, so the Core-0
+// hop, the SPI frame and commit() all land OUTSIDE the rendered span. A
+// segment whose anchor is already past is
 // forwarded with that past anchor; the engine back-samples up to its late
 // bound and answers a PlanFailed event beyond it, which is the honest report.
 void SlopSyncHubService::drainMotionStream() {
     PacingEntry entry;
-    const uint64_t now64 = uint64_t(esp_timer_get_time());
 
-    while (_pacingRing.popReleased(now64, entry)) {
+    // Every entry, every drain: the ring holds nothing back and the RP's
+    // schedule queue holds the client's lookahead (PacingRing.h).
+    while (_pacingRing.pop(entry)) {
         // ---- Gates: standard motion-command early-outs ----------------------
         if (!_state.homed) {
             _state.sm_sync_dropped = _state.sm_sync_dropped + 1;

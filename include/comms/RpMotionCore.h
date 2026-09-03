@@ -778,6 +778,9 @@ class Core {
 
     // Promotion, on the render side: past the successor's anchor the successor
     // is the plan. One branch, and it is the same test promoteDue makes.
+    // The view carries ONE successor however many are queued, which covers the
+    // kRenderHorizonUs table as long as two anchors are not closer than that;
+    // a closer pair renders from the republish that follows the promotion.
     static void evalPlanAt(const slopmotion::PlanView& pv, uint64_t t_us,
                            double& p, double& v, double& a) {
         const slopmotion::PlanPiece& pc =

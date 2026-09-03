@@ -117,6 +117,11 @@ bool isRegisteredRole(std::string_view r) {
 // unreachable from the machine and selecting it fell through the boot map to
 // whatever the engine default happened to be. Same shape as the fw 2.1.49 bug
 // the boot map in main.cpp carries a comment about.
+// MOVED 2026-09-03 (77 3B 00 2C EC DB 9B 1F -> A1 FD AE 20 4C 45 33 85):
+// sd-4k1.4, the RP2350 motion port. 0x0080's pos_10um provenance moved from
+// `actual` to `planned` (the coprocessor's rendered position is the machine's
+// position truth) and its desc says so. One field's metadata, no layout
+// change: clients re-fetch on mismatch by design.
 // MOVED 2026-09-03 (17 A6 F6 02 01 8C 52 6D -> 77 3B 00 2C EC DB 9B 1F):
 // sd-6b2.8 deleted the four infeasible policies and their knobs, so
 // 0x1120/0x1122 lost centering, centering_gain, infeasible_margin and
@@ -142,7 +147,7 @@ TEST_CASE("device catalog: etag pinned — accidental-wire-change tripwire") {
     hex.pop_back();
     // Moved deliberately by the drive-tune/drive-set pair (0x1130 / 0x3130),
     // then again by drive-tune's two readback fields.
-    CHECK(hex == "77 3B 00 2C EC DB 9B 1F");
+    CHECK(hex == "A1 FD AE 20 4C 45 33 85");
 }
 
 // ---- Baseline conformance ---------------------------------------------------

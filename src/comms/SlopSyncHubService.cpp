@@ -49,7 +49,6 @@
 #include "WebUI.h"
 #include "config_api.h"
 #include "sloplog/sloplog.h"
-#include "slopmotion/slopmotion.hpp"
 #include "slopsync/util/byte_io.hpp"
 #include "slopsync/wire/messages/event.hpp"
 
@@ -1751,28 +1750,29 @@ void SlopSyncHubService::drainMotionStream() {
 
         // Both stream channels land here; the ingress decode already resolved
         // has_end_vel (0x0084: vel≠0; 0x0085: sentinel) and has_duration/
-        // duration_us (0x0085 waveform segments only), so the Command is a
+        // duration_us (0x0085 waveform segments only), so the intent is a
         // straight copy — the drain is channel-agnostic by construction.
-        slopmotion::Command cmd;
-        cmd.target       = entry.target;
-        cmd.end_vel      = entry.vel;
-        cmd.has_end_vel  = entry.has_end_vel;
-        cmd.duration_us  = entry.duration_us;
-        cmd.has_duration = entry.has_duration;
-        cmd.client_curve_family = entry.curve_family;  // RFC-030: FollowClient's input
-        // Anchored commit: the engine plans at the SCHEDULED start, so the
-        // 5 ms drain quantization (and any queue-crossing lag) never lands
-        // in the rendered timeline. Same esp_timer domain as the sampler.
-        cmd.anchor_us  = entry.due_us;
-        cmd.has_anchor = true;
+        SegmentIntent seg;
+        seg.source       = MotionSource::TCODE_STREAM;
+        seg.target       = entry.target;
+        seg.end_vel      = entry.vel;
+        seg.has_end_vel  = entry.has_end_vel;
+        seg.duration_us  = entry.has_duration ? entry.duration_us : 0;
+        seg.curve_family = entry.curve_family;  // RFC-030: FollowClient's input
+        // ANCHORED: the RP plans at the SCHEDULED start, so the 5 ms drain
+        // quantization (and any queue-crossing lag) never lands in the
+        // rendered timeline. esp_timer microseconds; the driver converts to
+        // slave time once, at send.
+        seg.anchor_us  = uint32_t(entry.due_us);
+        seg.has_anchor = true;
 
         // ---- RFC-008 one-segment LOOKAHEAD ----------------------------------
         // The whole hub-side handoff sanity guard reduces, here, to answering
         // ONE question: "how fast does the segment AFTER this one move, on
-        // average?" The engine does the bounding (slopmotion::
-        // boundHandoffVelocity — it also owns the chord of the segment being
-        // planned, measured from the machine's real position); ingress owns
-        // only the fact that a successor exists and what its chord is.
+        // average?" The engine on the RP does the bounding (it also owns the
+        // chord of the segment being planned, measured from the machine's real
+        // position); ingress owns only the fact that a successor exists and
+        // what its chord is.
         //
         // WHY HERE AND NOT EARLIER: this is the LAST possible moment before the
         // command crosses to Core 1, so it is the moment with the MOST
@@ -1801,16 +1801,15 @@ void SlopSyncHubService::drainMotionStream() {
             const PacingEntry* next = _pacingRing.peekOldest();
             if (next && next->has_duration && next->duration_us > 0) {
                 const float next_dur_s = float(next->duration_us) * 1e-6f;
-                cmd.next_chord     = fabsf(next->target - entry.target) / next_dur_s;
-                cmd.has_next_chord = true;
+                seg.next_chord     = fabsf(next->target - entry.target) / next_dur_s;
+                seg.has_next_chord = true;
             }
         }
 
-        if (_motionStreamQueue && xQueueSend(_motionStreamQueue, &cmd, 0) == pdTRUE) {
-            _state.sm_sync_enqueued = _state.sm_sync_enqueued + 1;
-        } else {
-            _state.sm_sync_dropped = _state.sm_sync_dropped + 1;
-        }
+        // The arbiter is the sole caller of the motion processor: this is a
+        // Core-0 task, so the intent crosses to Core 1 through its queue.
+        _arbiter.submitSegmentDeferred(seg);
+        _state.sm_sync_enqueued = _state.sm_sync_enqueued + 1;
     }
 }
 
@@ -2132,10 +2131,10 @@ void SlopSyncHubService::publishTelemetry() {
     }
 
     // ---- 0x0086 plan-strip — ≥22 ms (≤~45 Hz) -------------------------------
-    // The planner's CURRENT SEGMENT. Fed from the interp_* SystemState slots
-    // that Core 1's streamSamplerTask fills from slopmotion::Snapshot each
-    // tick — the same source the legacy :81 0x04 INTERP frame reads, so this
-    // is a re-home of an existing feed and not a new measurement.
+    // The plan the RP2350 is CURRENTLY RENDERING. Fed from the interp_*
+    // SystemState slots that Core 1's link drain fills from the status frame
+    // plus the last kEvtPlanAdopted — the same source the legacy :81 0x04
+    // INTERP frame reads, so this is a re-home and not a new measurement.
     //
     // A torn read across those scalars is visually harmless at 45 Hz (they are
     // aligned 32-bit stores from a single writer) — the same judgment the
@@ -2337,9 +2336,9 @@ void SlopSyncHubService::publishTelemetry() {
 // ---- 0x0089 motion-anomaly: the Core-1 anomaly ring, as EVENTs --------------
 //
 // Runs on the SlopSyncHub task (Core 0) like every other publisher here. The
-// engine's own anomaly ring lives on Core 1 and MUST be drained there (that is
-// where slopmotion runs), so main.cpp's sampler forwards each edge into the
-// SPSC ring in SystemState and this is the consumer half.
+// engine's anomaly ring lives on the RP2350 and is PULLED on Core 1 (that is
+// where the link driver's owner task runs), so main.cpp's link drain forwards
+// each edge into the SPSC ring in SystemState and this is the consumer half.
 //
 // BOUNDED PER TICK. A pathological replan burst could otherwise turn one 5 ms
 // tick into dozens of encodes + fan-outs on the task that also pumps the WS

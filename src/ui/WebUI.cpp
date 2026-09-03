@@ -787,7 +787,6 @@ bool WebUI::applySettings(JsonDocument& doc, JsonDocument& resp) {
         _state.config.user_max_accel_mm_s2 = ua;
         if (_arbiter) { _arbiter->setUserSpeedLimit(us); _arbiter->setUserAccelLimit(ua); }
         _motor.setRenderCeiling(fmaxf(us, _state.config.input_max_speed_mm_s));
-        _motor.setRecoverySpeed(us);
     }
     // INPUT set — speed/accel go to the arbiter AND (via config) to SlopMotion's
     // derived ceilings; jerk is planner-only (the arbiter has no jerk concept),
@@ -2246,10 +2245,10 @@ bool WebUI::handleCommand(uint8_t op, JsonDocument& payload_in,
             _state.resume_start_ms = millis();   // soft-start guard like a real home
             // CRITICAL: flip the DRIVER'S own _homed flag too — setting
             // _state.homed alone only opens the MotionArbiter gate; the driver's
-            // moveTo()/streamTo()/streamToSteps() all bail on `if (!_homed)`, so
-            // no pulses ever leave the board. forceHomeState() energizes the FAS
-            // outputs and zeroes position so a bench move genuinely drives step/
-            // dir out to a (possibly disconnected) motor.
+            // own dispatch bails on `if (!_homed)`, so no motion ever leaves
+            // the board. forceHomeState() flips that flag (and, on the link
+            // backend, un-latches a slave-side estop) so a bench move genuinely
+            // reaches the motor.
             _motor.forceHomeState(true);
             SLOGI("ui", "WS Home-Override: faking homed for bench test — no motor required :3");
             payload_out["measured_stroke"] = stroke;
@@ -2331,8 +2330,8 @@ bool WebUI::handleCommand(uint8_t op, JsonDocument& payload_in,
 
     case WS_OP_STREAM_MODE: {
         // Stream speed-feed mode: 0=ceiling-pegged, 1=velocity-matched.
-        // Core 1's streamSamplerTask reads _state.stream_speed_mode each cruise
-        // feed; a plain volatile write is sufficient (single producer here).
+        // INERT since sd-4k1.4 (SystemState.h names why); still stored and
+        // echoed because the wire carries it. Single producer, plain write.
         uint8_t m = (uint8_t)(payload_in["mode"] | (int)_state.stream_speed_mode);
         if (m > SystemState::SPEED_VELOCITY_MATCHED) m = SystemState::SPEED_VELOCITY_MATCHED;
         _state.stream_speed_mode = m;
@@ -2343,9 +2342,9 @@ bool WebUI::handleCommand(uint8_t op, JsonDocument& payload_in,
     }
 
     case WS_OP_OVERSHOOT: {
-        // Monotone (Fritsch–Carlson) tangent clamp on the gradient cubic.
-        // Core 1's streamSamplerTask pushes _state.interp_clamp_overshoot into
-        // the interpolator each tick; a plain volatile write is sufficient.
+        // Monotone (Fritsch-Carlson) tangent clamp on the gradient cubic.
+        // INERT (SystemState.h names why); still stored and echoed because the
+        // wire carries it. Single producer, plain write.
         bool on = payload_in["on"] | (bool)_state.interp_clamp_overshoot;
         _state.interp_clamp_overshoot = on;
         payload_out["ok"] = true;

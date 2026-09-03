@@ -588,6 +588,12 @@ static void streamSamplerTask(void* /*param*/) {
             float actual_mm = g_state.actual_position_mm.load(std::memory_order_relaxed);
             float norm      = (span > 0.01f) ? (actual_mm - mapper.getMinMm()) / span : 0.5f;
             g_slopmotion.resetAt(constrain(norm, 0.0f, 1.0f), nowUs);
+            // ONE RESET OWNER (sd-6b2.12): the host owns THIS entry's reset,
+            // so the driver must not raise its own re-seed for the same entry.
+            // Without this the connect cost two cold starts ~10 ms apart from
+            // the same stale actual_position_mm. Must precede the tick's
+            // submitStreamSample, which is where the driver consumes it.
+            motor.noteEngineSeeded();
             // Diagnosis (sd-wve): every engine reset names its cause. Rare
             // by construction (stream edges), so an unthrottled line is fine.
             SLOGI("smreset", "stream rising edge: engine seeded at %.3f (%.1f mm) "
@@ -602,7 +608,11 @@ static void streamSamplerTask(void* /*param*/) {
         // The next commit is a COLD start, so the traverse runs at the
         // recovery (USER) limit through the engine's own feasibility
         // machinery (sd-d77).
-        if (motor.consumeReseedRequest()) {
+        // Consumed UNCONDITIONALLY, acted on only while the stream is active:
+        // a request left pending when a stream drops would otherwise reset an
+        // idle engine on some later tick (sd-6b2.12). Dropping it is correct,
+        // because the gap it described belongs to a chain that is gone.
+        if (motor.consumeReseedRequest() && streamActive) {
             const float rspan = mapper.getMaxMm() - mapper.getMinMm();
             const float ractual =
                 g_state.actual_position_mm.load(std::memory_order_relaxed);
@@ -671,14 +681,18 @@ static void streamSamplerTask(void* /*param*/) {
         // §SlopMotion part-2 gate).
         slopmotion::Command cmd;
         while (xQueueReceive(g_interp_queue, &cmd, 0) == pdTRUE) {
-            const uint32_t t0 = (uint32_t)esp_timer_get_time();
-            const bool committed = g_slopmotion.commit(cmd, nowUs);
-            const uint32_t dt = (uint32_t)esp_timer_get_time() - t0;
+            // ONE TIMESTAMP PER OPERATION (sd-6b2.12). commit() is O(ms) -- up
+            // to 17.6 ms for a budgeted Blend -- so the tick-entry stamp is
+            // already stale for the SECOND command of a drain, and it is what
+            // late_us is measured against. Re-read per commit.
+            const uint64_t commitUs = (uint64_t)esp_timer_get_time();
+            const bool committed = g_slopmotion.commit(cmd, commitUs);
+            const uint32_t dt = (uint32_t)((uint64_t)esp_timer_get_time() - commitUs);
             {
                 // POD only, no formatting on Core 1 (T27 note below).
                 PlanTrace tr{};
-                tr.due_us         = cmd.has_anchor ? cmd.anchor_us : nowUs;
-                tr.late_us        = (int32_t)(int64_t(nowUs) - int64_t(tr.due_us));
+                tr.due_us         = cmd.has_anchor ? cmd.anchor_us : commitUs;
+                tr.late_us        = (int32_t)(int64_t(commitUs) - int64_t(tr.due_us));
                 tr.target         = cmd.target;
                 tr.duration_us    = cmd.duration_us;
                 tr.end_vel        = cmd.end_vel;
@@ -709,11 +723,11 @@ static void streamSamplerTask(void* /*param*/) {
             // summary at 1 Hz -- the same shape OtaService's dups/holes census
             // uses. Never restore a per-segment SLOG on this path.
             static uint64_t s_prevEndUs = 0;
-            const uint64_t due = cmd.has_anchor ? cmd.anchor_us : nowUs;
+            const uint64_t due = cmd.has_anchor ? cmd.anchor_us : commitUs;
             const int64_t gap_us = s_prevEndUs
                 ? int64_t(due) - int64_t(s_prevEndUs) : 0;
             s_prevEndUs = due + cmd.duration_us;
-            const int64_t late_us = int64_t(nowUs) - int64_t(due);
+            const int64_t late_us = int64_t(commitUs) - int64_t(due);
 
             static uint32_t s_censusN = 0, s_censusVf = 0;
             static int64_t  s_gapMin = 0, s_gapMax = 0, s_lateMin = 0, s_lateMax = 0;
@@ -741,16 +755,21 @@ static void streamSamplerTask(void* /*param*/) {
             }
         }
 
+        // The sample's OWN clock, re-read after the drain (sd-6b2.12): the
+        // tick-entry stamp can be 17 ms old here, and the driver stamps what
+        // arrives with a fresh micros().
+        const uint64_t sampleUs = (uint64_t)esp_timer_get_time();
+
         if (streamActive) {
-            float pos = g_slopmotion.positionAt(nowUs);
-            float vel = g_slopmotion.velocityAt(nowUs);
+            float pos = g_slopmotion.positionAt(sampleUs);
+            float vel = g_slopmotion.velocityAt(sampleUs);
             arbiter.submitStreamSample(pos, vel);
 
             // Publish telemetry for the WebUI planned-path overlay. Field
             // mapping onto the legacy interp_* slots (honest approximations;
             // proper SlopMotion telemetry lands with the WebUI refactor):
             // live_mode = chasing, grad_mode = quintic plan, style = Mode.
-            slopmotion::Snapshot d = g_slopmotion.snapshot(nowUs);
+            slopmotion::Snapshot d = g_slopmotion.snapshot(sampleUs);
             g_state.interp_start_pos   = d.start;
             g_state.interp_end_pos     = d.target;
             g_state.interp_cur_pos     = d.pos;

@@ -62,6 +62,11 @@ public:
     bool  consumeReseedRequest() override {
         const bool r = _reseed_req; _reseed_req = false; return r;
     }
+    // ONE RESET OWNER (sd-6b2.12). The host seeds the engine on the stream's
+    // rising edge, and streamSample's entry re-anchor lands LATER in the same
+    // tick, so this is a sticky latch the entry block consumes rather than a
+    // direct clear of _reseed_armed. Sampler task, same core as update().
+    void  noteEngineSeeded() override { _engine_seeded = true; }
     void  setAcceleration(float mm_s2) override { _accel_mm_s2 = mm_s2; }
     float getMaxSpeed() const override { return _max_speed_mm_s; }
     float getAcceleration() const override { return _accel_mm_s2; }
@@ -166,6 +171,9 @@ private:
     // True only between a stream-entry re-anchor and its first ship: the
     // one place a re-seed is allowed (see sendSegmentTo).
     bool     _reseed_armed = false;
+    // Set by noteEngineSeeded(), consumed by streamSample's entry re-anchor:
+    // the host already owns this entry's reset, so do not arm a second one.
+    bool     _engine_seeded = false;
     uint8_t _state = 0;
     uint8_t _slave_flags = 0;
     bool    _status_fresh = false;

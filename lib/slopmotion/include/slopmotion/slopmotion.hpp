@@ -693,6 +693,38 @@ struct Snapshot {
     float    sharpness  = 1.0f;
 };
 
+// ---- The plan as DATA -------------------------------------------------------
+// One piece of a plan: everything a caller needs to evaluate it and nothing
+// about the engine that produced it. This is what lets a SECOND CORE render the
+// plan with no engine of its own to mutate.
+// Constraints:
+// - `traj` is BORROWED. It points into the Engine and is valid only until the
+//   next call that changes the plan. Evaluate and drop it; never a member.
+// - Evaluate through Engine::evalPiece, the one home for the past-expiry coast
+//   rule. A renderer that reimplements it will disagree with the engine.
+struct PlanPiece {
+    PlanKind kind       = PlanKind::None;
+    uint64_t start_us   = 0;    // this piece's time origin
+    double   duration_s = 0.0;
+    double   c[6]       = {};   // Hermite kinds: quintic in normalized tau
+    double   T          = 0.0;  // Hermite kinds: duration, seconds
+    const ruckig::Trajectory<1>* traj = nullptr;   // PlanKind::Ruckig only
+    double   hold       = 0.0;  // PlanKind::None: the position held
+};
+
+// The plan in flight, its scheduled successor, and the bounds the sampler
+// applies to both. `next` is meaningful only while `next_ok`, and it takes over
+// at its own `start_us` -- the same instant the engine promotes it.
+struct PlanView {
+    PlanPiece active;
+    PlanPiece next;
+    bool      next_ok        = false;
+    double    lo             = 0.0;   // window backstop, sampleClampedNoSettle
+    double    hi             = 1.0;
+    double    coast_cap_s    = 0.0;   // past-expiry coast bounds, see evalPiece
+    double    coast_max_norm = 0.0;
+};
+
 // ---- Engine -----------------------------------------------------------------
 class Engine {
 public:
@@ -910,6 +942,69 @@ public:
         sampleRaw(now_us, p, v, a);
     }
 
+    // ---- The plan as data, for a renderer on another core -------------------
+    // The plan in flight and its scheduled successor, WITH NO SIDE EFFECTS: it
+    // does not settle, promote, or advance anything. That is the whole point --
+    // a renderer needs the plan, not a mutable engine, and every other sampler
+    // here mutates. A caller that wants promotion and settle calls positionAt
+    // or snapshot instead.
+    // Evaluate the pieces with evalPiece; `next` takes over at its own
+    // start_us. Borrowed Ruckig pointer, see PlanPiece.
+    PlanView planView() const {
+        PlanView pv;
+        pv.active = activePiece();
+        if (_next_ok) {
+            pv.next = scheduledPiece();
+            pv.next_ok = true;
+        }
+        pv.lo = windowLo(planEntry());
+        pv.hi = windowHi(planEntry());
+        pv.coast_cap_s = kCoastCapS;
+        pv.coast_max_norm = kCoastMaxNorm;
+        return pv;
+    }
+
+    // Evaluate one piece at an absolute instant, UNCLAMPED. THE one home for
+    // the past-expiry coast: sampleRaw is a call to this function, so a
+    // renderer built on a PlanPiece and the engine's own sampler cannot
+    // disagree about what a plan does after it expires.
+    static void evalPiece(const PlanPiece& pc, uint64_t now_us, double& p,
+                          double& v, double& a) {
+        if (pc.kind == PlanKind::None) {
+            p = pc.hold; v = 0.0; a = 0.0;
+            return;
+        }
+        double t = now_us <= pc.start_us
+                       ? 0.0
+                       : (double)(now_us - pc.start_us) * 1e-6;
+        const double dur = pc.duration_s;
+        double over = 0.0;
+        if (t >= dur) {
+            over = t - dur;
+            if (over > kCoastCapS) over = kCoastCapS;
+            t = dur;
+        }
+        if (pc.kind == PlanKind::Ruckig) pc.traj->at_time(t, p, v, a);
+        else evalCurve(pc.c, pc.T, dur > 0 ? t / dur : 1.0, p, v, a);
+        if (over > 0.0) {
+            bool capped = over >= kCoastCapS;
+            if (std::fabs(v) > 1e-9) {
+                const double wall = v > 0.0 ? 1.0 + kCoastMaxNorm
+                                            : -kCoastMaxNorm;
+                const double room = (wall - p) / v;
+                if (room < over) {
+                    over   = room > 0.0 ? room : 0.0;
+                    capped = true;
+                }
+            }
+            p += v * over;
+            a = 0.0;
+            // At EITHER cap the position stops advancing, so the reported
+            // velocity must stop too: one state, one story.
+            if (capped) v = 0.0;
+        }
+    }
+
     // Time-aware "does the plan still have motion left to render?" — the
     // sampler gates on this exactly as it did on the cubic's isBusy(). A
     // trajectory pending SETTLE still counts as busy (it is still moving).
@@ -1102,37 +1197,41 @@ private:
     // do), felt as speed-scaled notching; a plan ending at rest coasts
     // nowhere, and maybeSettle stays the stop authority.
     void sampleRaw(uint64_t now_us, double& p, double& v, double& a) const {
-        if (_kind == PlanKind::None) {
-            p = _hold_pos; v = 0.0; a = 0.0;
-            return;
+        evalPiece(activePiece(), now_us, p, v, a);
+    }
+
+    // The active plan and the scheduled successor AS DATA. Cheap by design (six
+    // doubles and a borrowed pointer), which is what lets sampleRaw route
+    // through evalPiece rather than hold a second copy of the coast rule.
+    PlanPiece activePiece() const {
+        PlanPiece pc;
+        pc.kind       = _kind;
+        pc.start_us   = _plan_start;
+        pc.duration_s = planDuration();
+        pc.hold       = _hold_pos;
+        if (isHermite()) {
+            for (int i = 0; i < 6; i++) pc.c[i] = _q_c[i];
+            pc.T = _q_T;
+        } else if (_kind == PlanKind::Ruckig) {
+            pc.traj = &_traj;
         }
-        double t = elapsedS(now_us);
-        const double dur = planDuration();
-        double over = 0.0;
-        if (t >= dur) {
-            over = t - dur;
-            if (over > kCoastCapS) over = kCoastCapS;
-            t = dur;
+        return pc;
+    }
+
+    PlanPiece scheduledPiece() const {
+        PlanPiece pc;
+        pc.kind     = _next.kind;
+        pc.start_us = _next.start;
+        pc.hold     = _hold_pos;
+        if (_next.kind == PlanKind::Quintic || _next.kind == PlanKind::Cubic) {
+            for (int i = 0; i < 6; i++) pc.c[i] = _next.q_c[i];
+            pc.T          = _next.q_T;
+            pc.duration_s = _next.q_T;
+        } else if (_next.kind == PlanKind::Ruckig) {
+            pc.traj       = &_next.traj;
+            pc.duration_s = _next.traj.get_duration();
         }
-        if (isHermite()) quinticAt(dur > 0 ? t / dur : 1.0, p, v, a);
-        else                            _traj.at_time(t, p, v, a);
-        if (over > 0.0) {
-            bool capped = over >= kCoastCapS;
-            if (std::fabs(v) > 1e-9) {
-                const double wall = v > 0.0 ? 1.0 + kCoastMaxNorm
-                                            : -kCoastMaxNorm;
-                const double room = (wall - p) / v;
-                if (room < over) {
-                    over   = room > 0.0 ? room : 0.0;
-                    capped = true;
-                }
-            }
-            p += v * over;
-            a = 0.0;
-            // At EITHER cap the position stops advancing, so the reported
-            // velocity must stop too: one state, one story.
-            if (capped) v = 0.0;
-        }
+        return pc;
     }
 
     // THE ONE CLAMPED SAMPLER. The window clamp is the hard backstop, and a

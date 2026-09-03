@@ -349,7 +349,8 @@ class Core {
     uint16_t configFingerprint() const {
         return _config_fp.load(std::memory_order_relaxed);
     }
-    // The emitter sets kFlagJumped; preload self-clears it after reporting.
+    // The sticky link flags (MotionLinkProtocol.h, Flags); the master reports
+    // each bit's rising edge, so a bit must stay set until the condition ends.
     void setFlags(uint8_t bits) {
         _flags.fetch_or(bits, std::memory_order_relaxed);
     }
@@ -463,12 +464,16 @@ class Core {
 
     void applyCommand(const QueueItem& it) {
         const LinkCommand& lc = it.cmd;
-        // Axis 0 is the only carriage this slave has; anything else is dropped
-        // rather than rendered on the wrong one (sd-xvc).
-        const uint32_t deny = lc.axis != 0 ? 0u : denyingGates();
         const SelectedLimits lim =
             motionlink::selectedLimits(_cfg_img, lc.limit_set);
-        if (lc.axis != 0 || deny != 0 || !(lim.vmax > 0.0f)) {
+        uint32_t deny = denyingGates();
+        // Axis 0 is the only carriage this slave has; anything else is dropped
+        // rather than rendered on the wrong one (sd-xvc).
+        if (lc.axis != 0) deny |= motionlink::kGateAxis;
+        // A zero vmax means the set was never pushed: gate it rather than plan
+        // at zero, and NAME it, because "gated with detail 0" is unreadable.
+        if (!(lim.vmax > 0.0f)) deny |= motionlink::kGateUnconfigured;
+        if (deny != 0) {
             emit(motionlink::kEvtCommandGated, lc.target, float(deny),
                  uint32_t(_now64), it.seq);
             return;
@@ -497,7 +502,12 @@ class Core {
     // pause, plans at the USER set, and takes its own commanded ceilings as a
     // further min() so a slow glide stays a slow glide.
     void applyRetarget(const QueueItem& it) {
-        if (!(it.rt_vmax > 0.0f) || !(it.rt_accel > 0.0f)) return;
+        if (!(it.rt_vmax > 0.0f) || !(it.rt_accel > 0.0f)) {
+            emit(motionlink::kEvtCommandGated, countsToNorm(it.counts),
+                 float(motionlink::kGateUnconfigured), uint32_t(_now64),
+                 it.seq);
+            return;
+        }
         if (_cfg_img.get(motionlink::kCfgGates) & motionlink::kGatePaused) {
             emit(motionlink::kEvtCommandGated, countsToNorm(it.counts),
                  float(motionlink::kGatePaused), uint32_t(_now64), it.seq);

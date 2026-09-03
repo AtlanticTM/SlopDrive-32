@@ -364,6 +364,41 @@ TEST_CASE("A gated command is dropped, reported, and moves nothing") {
             seen = true;
         }
     CHECK(seen);
+
+    // An axis this slave does not have, and a ceiling set that was never
+    // pushed, each name their own bit instead of reporting a bare 0.
+    Slave a;
+    a.pushConfig(liveTags(ml::kGateHomed));
+    a.run(kServiceUs * 2);
+    ml::LinkCommand bad = wave(0.9f, 200, 0.0f, true);
+    bad.axis = 1;
+    a.command(bad);
+    a.run(20 * kMs);
+    a.drainEvents();
+    bool axis_named = false;
+    for (const auto& e : a.pulled)
+        if (e.kind == ml::kEvtCommandGated) {
+            CHECK((uint32_t(e.detail) & ml::kGateAxis) != 0);
+            axis_named = true;
+        }
+    CHECK(axis_named);
+
+    Slave u;
+    u.pushConfig(liveTags(ml::kGateHomed));
+    u.run(kServiceUs * 2);
+    // The USER set is what a manual move plans under; zero it and the command
+    // is gated as unconfigured rather than planned at zero speed.
+    u.pushConfig({{ml::kCfgUserVmax, ml::f32Bits(0.0f)}});
+    u.command(wave(0.9f, 200, 0.0f, true, ml::kLimitUser));
+    u.run(20 * kMs);
+    u.drainEvents();
+    bool unconf_named = false;
+    for (const auto& e : u.pulled)
+        if (e.kind == ml::kEvtCommandGated) {
+            CHECK((uint32_t(e.detail) & ml::kGateUnconfigured) != 0);
+            unconf_named = true;
+        }
+    CHECK(unconf_named);
 }
 
 TEST_CASE("kOpSetPos re-seeds honestly outside the window and the first plan moves inward") {

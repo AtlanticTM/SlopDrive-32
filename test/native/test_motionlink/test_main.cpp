@@ -368,20 +368,16 @@ TEST_CASE("status v2 round trips and is self-describing") {
     CHECK(d.vel_clamped == s.vel_clamped);
 }
 
-TEST_CASE("a v1 status reports variant 0 without writing the byte") {
-    // Exactly what the v1 preload writes, and nothing else.
+TEST_CASE("a reply that never writes the variant byte declares itself pre-v2") {
+    // A slave older than this vocabulary fills its own telemetry and leaves
+    // byte 28 alone, so it declares itself for free.
     Frame f{};
     f[0] = kStateRunning;
-    f[1] = 0;
-    f[2] = 10;
-    f[3] = 0;
-    f[4] = 2;
-    f[5] = 0x33;
-    for (size_t at = 6; at < kStatusOffVelClamped + 2; ++at) f[at] = 0xAB;
+    for (size_t at = 1; at < kStatusOffVariant; ++at) f[at] = 0xAB;
     crcStamp(f);
 
     CHECK(crcOk(f));
-    CHECK(f[kStatusOffVariant] == kStatusV1);
+    CHECK(f[kStatusOffVariant] == kStatusPreV2);
 }
 
 TEST_CASE("residue saturates instead of wrapping") {
@@ -532,13 +528,42 @@ TEST_CASE("the clock filter is exact across the 32-bit wrap") {
     CHECK(int32_t(anchor_slave - (anchor_master + sim.offset)) >= 0);
 }
 
+TEST_CASE("the gate bits name every reason a command is dropped, distinctly") {
+    // One u32 field carries the whole set, so every bit must be its own power
+    // of two and the union must round trip through kEvtCommandGated's f32
+    // detail (all of these are exactly representable).
+    const std::array<uint32_t, 5> bits{{kGateHomed, kGatePaused, kGateSoftStart,
+                                        kGateAxis, kGateUnconfigured}};
+    uint32_t all = 0;
+    for (uint32_t b : bits) {
+        CHECK(b != 0);
+        CHECK((b & (b - 1)) == 0);   // one bit each
+        CHECK((all & b) == 0);       // and no two share one
+        all |= b;
+    }
+    CHECK(uint32_t(float(all)) == all);
+
+    // The two reported-only bits are what a bad axis and an unpushed ceiling
+    // set look like on the wire, and neither can be mistaken for a gate the
+    // master pushed.
+    CHECK((kGateAxis & (kGateHomed | kGatePaused)) == 0);
+    CHECK((kGateUnconfigured & (kGateHomed | kGatePaused)) == 0);
+
+    EventRecord e;
+    e.kind = kEvtCommandGated;
+    e.detail = float(kGateAxis | kGateUnconfigured);
+    Frame f{};
+    encodeEvent(f, e);
+    CHECK(crcOk(f));
+    CHECK(uint32_t(decodeEvent(f).detail) == (kGateAxis | kGateUnconfigured));
+}
+
 TEST_CASE("every v2 payload ends before the CRC field") {
     CHECK(kCommandWireEnd <= kCrcOffset);
     CHECK(kConfigWireEnd <= kCrcOffset);
     CHECK(kEventWireEnd <= kCrcOffset);
     CHECK(kStatusV2WireEnd == kCrcOffset);
     CHECK(kStatusOffVariant < kCrcOffset);
-    CHECK(kStatusOffVelClamped + 2 <= kStatusOffVariant);
     // Ops are append-only and the v2 block sits above every v1 number.
     CHECK(kOpCommand > kOpSetLimits);
     CHECK(kOpConfig > kOpCommand);

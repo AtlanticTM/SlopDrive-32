@@ -19,13 +19,17 @@
    *   <FootStrip />
    */
   import { machine } from '../model/machine.svelte.js';
-  import { since } from '../model/format.js';
+  import { since, clock } from '../model/format.js';
 
   // A page full of "since" readouts needs its own clock, or the age freezes
   // the instant this component last happened to re-render.
+  let sessionMs = $state(false);
   let nowTick = $state(Date.now());
   $effect(() => {
-    const id = setInterval(() => { nowTick = Date.now(); }, 1000);
+    // Reading sessionMs here is deliberate: it makes this effect re-run on
+    // the toggle and re-install the interval. A millisecond digit stepping
+    // once a second would be a readout that lies about its own resolution.
+    const id = setInterval(() => { nowTick = Date.now(); }, sessionMs ? 50 : 1000);
     return () => clearInterval(id);
   });
   function ageLabel(ms, _tick) { return since(ms); }
@@ -37,6 +41,15 @@
   const clockOffset = $derived(machine.stats.clockOffsetUs != null ? machine.stats.clockOffsetUs + ' µs' : '--');
   const clockRtt = $derived(machine.stats.clockRttUs != null ? machine.stats.clockRttUs + ' µs' : '--');
   const rxAge = $derived(ageLabel(machine.stats.lastRxMs, nowTick));
+
+  // Session age off machine.link.since, which the link sets when the phase
+  // last changed. Milliseconds are behind a click: the digit changes 1000x a
+  // second and is only wanted when someone is timing something.
+  const sessionAge = $derived(
+    machine.link.phase === 'live' && machine.link.since
+      ? clock(nowTick - machine.link.since, sessionMs)
+      : '--'
+  );
 
   // Vite global (vite.config.js `define`) — short git hash, or a UTC build
   // timestamp in a repo-less checkout. Never a hand-maintained literal.
@@ -54,6 +67,10 @@
     <span class="fact"><span class="k">catalog etag</span><span class="v mono" title={machine.catalog.etag || '--'}>{etagShort}</span></span>
     <span class="fact"><span class="k">deadman</span><span class="v mono">{deadman}</span></span>
     <span class="fact"><span class="k">last rx</span><span class="v mono">{rxAge}</span></span>
+    <button type="button" class="fact fact-btn" onclick={() => (sessionMs = !sessionMs)}
+            title={sessionMs ? 'Hide milliseconds' : 'Show milliseconds'}>
+      <span class="k">session</span><span class="v mono">{sessionAge}</span>
+    </button>
     <span class="fact"><span class="k">ui build</span><span class="v mono">{buildId}</span></span>
   </div>
 </footer>
@@ -92,6 +109,17 @@
     gap: 5px;
     white-space: nowrap;
   }
+  /* A fact that happens to be clickable stays a fact: same metrics, no button
+     chrome, so the strip does not grow a control that looks like a control. */
+  .fact-btn {
+    padding: 0;
+    border: none;
+    background: none;
+    font: inherit;
+    color: inherit;
+  }
+  .fact-btn:hover .v { color: var(--ink); }
+
   .k {
     color: var(--ink-faint);
     text-transform: uppercase;

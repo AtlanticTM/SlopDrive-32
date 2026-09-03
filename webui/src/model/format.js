@@ -24,10 +24,14 @@ const PROVENANCE_QUALIFIER = { demand: 'Demand', planned: 'Planned' };
  * The display label for ANY field, anywhere in the UI. Resolution order:
  *   1. ROLE_LABEL[field.role] when the field carries a known registry role
  *      (roles.js) — a human-standardized label for machine vocabulary.
- *   2. field.label, which buildSettingsModel already set to
+ *   2. descLabel(field): the catalog author's own words, used VERBATIM.
+ *   3. field.label, which buildSettingsModel already set to
  *      humanize(field.name) at construction time — the honest fallback for a
  *      field this project has no opinion about.
- * then, in both cases, the field's own PROVENANCE is composed on front.
+ * The field's own PROVENANCE is composed onto a ROLE label only. A role label
+ * names a generic quantity, so demand/planned is what says which pipeline
+ * stage the number is; a desc label already carries the author's wording, and
+ * qualifying it reads "Demand asked position".
  *
  * The provenance half is not decoration. A hub whose planner renders position
  * publishes `telemetry.position` with provenance `planned`, and a label that
@@ -44,11 +48,28 @@ const PROVENANCE_QUALIFIER = { demand: 'Demand', planned: 'Planned' };
  */
 export function labelFor(field) {
   if (!field) return '';
-  const base = (field.role && ROLE_LABEL[field.role])
-    || (field.label != null ? field.label : '');
+  const role = field.role && ROLE_LABEL[field.role];
+  if (!role) return descLabel(field) || (field.label != null ? field.label : '');
   const q = PROVENANCE_QUALIFIER[field.provenanceName];
-  if (!q || !base) return base;
-  return q + ' ' + base.charAt(0).toLowerCase() + base.slice(1);
+  if (!q) return role;
+  return q + ' ' + role.charAt(0).toLowerCase() + role.slice(1);
+}
+
+/**
+ * A wire name is machine vocabulary: `raw_10um` humanizes to "Raw 10um",
+ * which names nothing a human asked about. A catalog `desc` is written for a
+ * human, so its leading clause (everything before the first `.,;:`) is
+ * preferred, but only while it is shaped like a label: 2-3 words, at most 30
+ * characters. Longer is prose, and prose in a label column is worse than the
+ * raw name. Never a per-device name table: the catalog author owns the words.
+ */
+function descLabel(field) {
+  if (!field.desc) return '';
+  const clause = String(field.desc).split(/[.,;:]/)[0].trim();
+  if (!clause || clause.length > 30) return '';
+  const words = clause.split(/\s+/);
+  if (words.length < 2 || words.length > 3) return '';
+  return clause.charAt(0).toUpperCase() + clause.slice(1);
 }
 
 /** Decimal places implied by a step. step 0.05 -> 2, step 1 -> 0, absent -> 2. */
@@ -119,6 +140,15 @@ export function since(ms) {
   if (s < 60) return s + 's';
   if (s < 3600) return Math.floor(s / 60) + 'm ' + (s % 60) + 's';
   return Math.floor(s / 3600) + 'h ' + Math.floor((s % 3600) / 60) + 'm';
+}
+
+/** Elapsed ms -> h:mm:ss, or h:mm:ss.mmm when `withMs`. */
+export function clock(ms, withMs) {
+  if (ms == null || !isFinite(ms) || ms < 0) return '--';
+  const t = Math.floor(ms / 1000);
+  const two = (n) => String(n).padStart(2, '0');
+  const base = Math.floor(t / 3600) + ':' + two(Math.floor((t % 3600) / 60)) + ':' + two(t % 60);
+  return withMs ? base + '.' + String(Math.floor(ms % 1000)).padStart(3, '0') : base;
 }
 
 /** Seconds -> compact uptime. */

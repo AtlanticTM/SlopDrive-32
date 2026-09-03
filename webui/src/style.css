@@ -15,6 +15,14 @@
  * old page works — except that it must use `--bg` where it used to say
  * `--ink`. Getting this wrong renders dark text on a dark panel.
  *
+ * CASING IS A CSS DECISION, NEVER BAKED INTO A STRING. Every label is written
+ * in sentence case in the markup and dressed by `text-transform` where a
+ * surface wants uppercase (chrome, card heads, footer keys) or lowercase
+ * (hero numeral labels). A literal ALL-CAPS string cannot be re-cased by a
+ * theme, breaks a screen reader's pronunciation, and drifts from the surface
+ * next to it. Device strings are the machine's own wording and are dressed
+ * the same way, never rewritten.
+ *
  * Components carry their own scoped <style>. This file holds only what must be
  * global: tokens, the reset, and the [data-shadow] states — because "has the
  * machine confirmed this?" is a safety property and must look identical on
@@ -99,6 +107,12 @@
   --slider-thumb-w: calc(var(--s) * 11px);
   --slider-thumb-h: calc(var(--s) * 18px);
   --gap: 12px;
+  /* Reading measure: the widest a column of labeled values may get before
+     the eye stops tracking a row left to right. 48ch of Chakra Petch at the
+     root scale is ~64 characters of real text (its `0` is wider than its
+     average glyph), so a card reflows into columns instead of stretching one
+     across a 1920 pane. */
+  --measure: 48ch;
 
   --font: 'Chakra Petch', system-ui, sans-serif;
   --mono: 'Martian Mono', ui-monospace, monospace;

@@ -3,16 +3,11 @@
    * HeroNumerals.svelte — the big glowing readout row above the rail.
    *
    * A faithful port of the pre-refactor rail's hero numerals (position /
-   * target / lag / speed). Target and lag were dropped in the first pass of
-   * this refactor because nothing in `field_roles` named "the live setpoint"
-   * — rendering it off window bounds or a locally-remembered request would
-   * have been exactly the optimistic-UI lie CLAUDE.md forbids. RFC-032
-   * registered `telemetry.target` for exactly this (the machine's own
-   * setpoint, as opposed to `telemetry.position`), so both numerals are back
-   * — still entirely ground-truth: `targetVal` is whatever the device
-   * actually reported, and `lag` is target - position, computed client-side
-   * here (still no THIRD role for that subtraction — see roles.js's note on
-   * `telemetry.target`).
+   * target / lag / speed). `targetVal` is RFC-032 `telemetry.target`, the
+   * machine's own reported setpoint; `lag` is target - position, computed
+   * client-side here because that subtraction has no role of its own (see
+   * roles.js on `telemetry.target`). Never render a setpoint off window
+   * bounds or a locally-remembered request: that is the optimistic-UI lie.
    *
    * EVERY LABEL COMES FROM labelFor(), WHICH CARRIES THE FIELD'S PROVENANCE.
    * The reference read "actual" over the big numeral; that word is now the
@@ -55,11 +50,9 @@
     moving = false,
     fresh = false,
     targetFresh = false,
-    // Optional: the widget's own travel extent (upper bound, same physical
-    // domain as posField) — sizes the zero-pad width below. No caller wires
-    // this yet (RailWidget.svelte computes an equivalent `hi` internally but
-    // does not forward it); absent, this falls back to the OG's own
-    // hardcoded assumption of a 0-999 rail.
+    // The widget's own travel extent (upper bound, same physical domain as
+    // posField): sizes the zero-pad width below. RailWidget forwards its
+    // derived `hi`; absent, pad width falls back to 3 integer digits.
     extentHi = null,
   } = $props();
 

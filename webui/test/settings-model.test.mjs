@@ -318,5 +318,17 @@ ok('an unknown role is carried, not rejected', weird.fields[0].role === 'some.fu
      labelFor(minF) === 'Window min', labelFor(minF));
 }
 
+// ---- an un-roled field is labeled from its DESC, never its wire name ------
+{
+  const named = (name, desc) => ({ name, label: name, desc });
+  ok('a label-shaped desc clause becomes the label',
+     labelFor(named('raw_10um', 'Asked position, as the input sent it.')) === 'Asked position',
+     labelFor(named('raw_10um', 'Asked position, as the input sent it.')));
+  ok('a prose desc leaves the humanized name alone',
+     labelFor(named('log_dropped', 'Log lines dropped since boot.')) === 'log_dropped');
+  ok('a one-word desc clause is not a label',
+     labelFor(named('blend_mode_reserved', 'Retired. Unused padding now.')) === 'blend_mode_reserved');
+}
+
 console.log('\n' + (fails ? 'FAILURES: ' + fails : 'ALL PASS — the renderer is machine-agnostic.'));
 process.exit(fails ? 1 : 0);

@@ -445,8 +445,13 @@ inline bool buildSlopDriveCatalog(slopsync::Catalog32& c, DeviceFeatures feat = 
                         .hasRank = true, .rank = slopsync::ui_ranks::detail},
                        {"homed", "homing", "gen_running", "paused", "override", "estop", "stream"});
     c.addLayoutField({.name = "raw_10um", .type = PackedFieldType::u16, .unit = "mm",   .scale = 100.0f,
-                      .desc = "What the controlling input ASKED for, mapped into the stroke "
-                              "window, before the planner shaped it.",
+                      // No registry role fits a demand-provenance position on a
+                      // STATE channel (command.position is an INTENT role), so
+                      // this desc's LEADING CLAUSE is the field's human label:
+                      // clients read it instead of the wire name (webui
+                      // model/format.js labelFor).
+                      .desc = "Asked position, as the controlling input sent it, mapped into "
+                              "the stroke window before the planner shaped it.",
                       .hasRank = true, .rank = slopsync::ui_ranks::diagnostic,
                       .hasProvenance = true, .provenance = slopsync::value_provenance::demand,
                       .hasUnitId = true, .unitId = slopsync::unit_ids::mm});

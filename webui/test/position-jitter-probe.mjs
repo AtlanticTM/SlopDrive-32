@@ -29,8 +29,7 @@
  * proves draw rate does NOT fix jitter on its own.
  *
  * Bound by ROLE (roles.js), never a hardcoded channel id, per CLAUDE.md's
- * SlopSync layering rule and this repo's existing probe convention
- * (telemetry-latency-probe.mjs).
+ * SlopSync layering rule.
  *
  * Commands a real sweep (session.sendMove) across a caller-given set of
  * waypoints inside the stroke window, so the machine is actually glide-moving
@@ -192,8 +191,8 @@ await new Promise((r) => setTimeout(r, 300));
 // is silently discarded, so it never reaches the renderer) — but a naive 2nd
 // finite-difference blows up on a tiny positive dt (h0/h1 near zero dividing
 // the formula), which is a measurement artifact, not real machine jerk: the
-// firmware's own accel ceiling (20000 mm/s^2 normal tier, per
-// /api/capabilities) bounds what real motion can produce. DUPE_FLOOR_MS
+// firmware's own accel ceiling (the catalog's published max for the accel
+// limit setting) bounds what real motion can produce. DUPE_FLOOR_MS
 // excludes any second-difference whose EITHER half-interval is too small to
 // trust — same floor telebuf effectively applies by dropping dt<=0 outright.
 const DUPE_FLOOR_MS = 3;

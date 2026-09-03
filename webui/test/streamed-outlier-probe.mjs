@@ -67,10 +67,6 @@ if (typeof WebSocket === 'undefined') {
   process.exit(1);
 }
 
-const caps = await fetch('http://' + HOST + '/api/capabilities').then((r) => r.json());
-const EXPERT_SPEED_CEIL = caps.speed_ceiling_mm_s?.expert || 10000;
-console.log('device expert speed ceiling: ' + EXPERT_SPEED_CEIL + ' mm/s (most permissive tier — the outer bound for "impossible")');
-
 const s = createSession({
   host: HOST, port: PORT, clientKind: 'webui', clientName: 'streamed-outlier-probe',
   autoReconnect: false, WebSocketImpl: WebSocket,
@@ -89,8 +85,15 @@ const model = buildSettingsModel(entries);
 
 const claim = claimRoles(model.byRole, {
   require: { move: ROLE.commandPosition },
-  optional: { pos: ROLE.telemetryPosition, target: ROLE.telemetryTarget, vel: ROLE.telemetryVelocity },
+  optional: {
+    pos: ROLE.telemetryPosition, target: ROLE.telemetryTarget, vel: ROLE.telemetryVelocity,
+    speedCeil: ROLE.limitUserSpeed, accelCeil: ROLE.limitUserAccel,
+  },
 });
+// The outer bound for "impossible", off the catalog's own published max for
+// the speed ceiling setting. The S3 has no HTTP surface to ask.
+const SPEED_CEIL = (claim && claim.speedCeil && claim.speedCeil.max) || 10000;
+console.log('catalog speed ceiling: ' + SPEED_CEIL + ' mm/s');
 if (!claim || !claim.pos || !claim.move) {
   console.error('Missing telemetry.position or command.position role — cannot run. Aborting.');
   s.close();
@@ -211,12 +214,12 @@ function characterizeSpeed(samples, label) {
     if (dt <= 0) continue;
     const dv = samples[i].v - samples[i - 1].v;
     const impliedSpeed = Math.abs(dv) / (dt / 1000);
-    if (impliedSpeed > EXPERT_SPEED_CEIL) {
+    if (impliedSpeed > SPEED_CEIL) {
       hits.push({ i, t: samples[i].t, dtMs: dt, dv, impliedSpeed });
     }
   }
-  console.log('\n(a) ' + label + ' samples whose raw implied speed exceeds the device\'s own advertised EXPERT ceiling (' +
-    EXPERT_SPEED_CEIL + ' mm/s, informational only): ' + hits.length);
+  console.log('\n(a) ' + label + ' samples whose raw implied speed exceeds the catalog speed ceiling (' +
+    SPEED_CEIL + ' mm/s, informational only): ' + hits.length);
   for (const h of hits.slice(0, 15)) {
     console.log('    i=' + h.i + '  dt=' + h.dtMs + 'ms  dv=' + h.dv.toFixed(3) + 'mm  implied=' + h.impliedSpeed.toFixed(1) + 'mm/s');
   }
@@ -245,12 +248,11 @@ checkOrdering(targetSamples, 'target');
 // neighbors plausible, the one BETWEEN them isn't) rarely trips a raw-speed
 // figure (implies a modest speed either side on a ~40ms grid) but shows up
 // clearly here, because both the excursion AND the snap-back have to fit
-// inside two adjacent ~40ms gaps. Reported against the device's own
-// advertised accel ceilings purely as a magnitude yardstick for the firmware
-// report — NOT a pass/fail test this script (or anything downstream) acts on.
+// inside two adjacent ~40ms gaps. Reported against the catalog's own accel
+// ceiling purely as a magnitude yardstick for the firmware report, NOT a
+// pass/fail test this script (or anything downstream) acts on.
 // =====================================================================
-const ACCEL_NORMAL = caps.accel_ceiling_mm_s2?.normal || 20000;
-const ACCEL_EXPERT = caps.accel_ceiling_mm_s2?.expert || 100000;
+const ACCEL_CEIL = (claim && claim.accelCeil && claim.accelCeil.max) || 20000;
 const DUPE_FLOOR_MS = 3; // measurement-artifact floor, same rationale as position-jitter-probe.mjs
 
 function characterizeAccel(samples, label) {
@@ -262,17 +264,14 @@ function characterizeAccel(samples, label) {
     if (h0 * 1000 < DUPE_FLOOR_MS || h1 * 1000 < DUPE_FLOOR_MS) continue;
     const a = 2 * (h0 * v2 - (h0 + h1) * v1 + h1 * v0) / (h0 * h1 * (h0 + h1));
     if (!isFinite(a)) continue;
-    if (Math.abs(a) > ACCEL_NORMAL) {
-      hits.push({ i, t: samples[i].t, v0, v1, v2, h0Ms: h0 * 1000, h1Ms: h1 * 1000, accel: a,
-        exceedsExpert: Math.abs(a) > ACCEL_EXPERT });
+    if (Math.abs(a) > ACCEL_CEIL) {
+      hits.push({ i, t: samples[i].t, v0, v1, v2, h0Ms: h0 * 1000, h1Ms: h1 * 1000, accel: a });
     }
   }
-  console.log('(a2) ' + label + ' raw samples whose 2nd-difference exceeds the NORMAL accel ceiling (' + ACCEL_NORMAL + ' mm/s^2, informational): ' + hits.length +
-    '  [' + hits.filter((h) => h.exceedsExpert).length + ' of those also exceed EXPERT (' + ACCEL_EXPERT + ' mm/s^2)]');
+  console.log('(a2) ' + label + ' raw samples whose 2nd-difference exceeds the catalog accel ceiling (' + ACCEL_CEIL + ' mm/s^2, informational): ' + hits.length);
   for (const h of hits.slice(0, 15)) {
     console.log('    i=' + h.i + '  t+' + (h.t - samples[0].t) + 'ms  ' + h.v0.toFixed(2) + ' -> ' + h.v1.toFixed(2) + ' -> ' + h.v2.toFixed(2) +
-      'mm  (gaps ' + h.h0Ms.toFixed(0) + '/' + h.h1Ms.toFixed(0) + 'ms)  implied accel=' + h.accel.toFixed(0) + 'mm/s^2' +
-      (h.exceedsExpert ? '  [also beyond EXPERT]' : ''));
+      'mm  (gaps ' + h.h0Ms.toFixed(0) + '/' + h.h1Ms.toFixed(0) + 'ms)  implied accel=' + h.accel.toFixed(0) + 'mm/s^2');
   }
   return hits;
 }
@@ -414,7 +413,7 @@ for (const sp of posSpikes.slice(0, 3)) {
 const dumpPath = 'test/evidence/streamed-outlier-trace.json';
 writeFileSync(dumpPath, JSON.stringify({
   host: HOST, durationMs: DURATION_MS, telemetryHz: TELEMETRY_HZ,
-  expertSpeedCeiling: EXPERT_SPEED_CEIL, accelNormal: ACCEL_NORMAL, accelExpert: ACCEL_EXPERT,
+  speedCeiling: SPEED_CEIL, accelCeiling: ACCEL_CEIL,
   window: { winMin, winMax },
   posSamples, targetSamples, posSpikes, posAccelImpossible,
 }));
@@ -422,8 +421,7 @@ console.log('\nraw trace + spikes dumped -> ' + dumpPath);
 
 console.log('\n=== SUMMARY (characterization only — nothing here filters or judges the machine) ===');
 console.log('raw-speed outliers (a):    pos=' + posImpossible.length + ' target=' + targetImpossible.length);
-console.log('raw-accel outliers (a2):   pos=' + posAccelImpossible.length +
-  (posAccelImpossible.length ? '  (' + posAccelImpossible.filter((h) => h.exceedsExpert).length + ' also beyond the EXPERT figure)' : ''));
+console.log('raw-accel outliers (a2):   pos=' + posAccelImpossible.length);
 console.log('OUR bookkeeping (b):       see out-of-order/duplicate/zero-ts counts above — ' +
   'nonzero here would mean OUR code, not the wire, is at fault');
 console.log('tiny-dt pairs (c input):   pos dt<5ms pairs=' + posTinyDt.length);

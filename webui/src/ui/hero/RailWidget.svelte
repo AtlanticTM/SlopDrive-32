@@ -33,11 +33,10 @@
    *    the honest fallback per hard rule 3, not a placeholder waiting on a
    *    role that does not exist.
    *
-   * 2. THE "TARGET" AND "LAG" hero numerals are back. RFC-032 registered
+   * 2. THE "TARGET" AND "LAG" hero numerals ride RFC-032's
    *    `telemetry.target` (the machine's live setpoint, as opposed to
-   *    `telemetry.position`) precisely to unblock this. Lag is still not its
-   *    own role — it is target - position, computed client-side in
-   *    HeroNumerals — see that file's header.
+   *    `telemetry.position`). Lag is not its own role: it is
+   *    target - position, computed client-side in HeroNumerals.
    *
    * ── THE COMET IS THE POSITION FIELD, WHATEVER ITS PROVENANCE ──────────────
    *
@@ -67,6 +66,7 @@
   import { writeSetting, sendCommand, displayValue, statusOf, shadowOf, STATUS } from '../../model/shadow.svelte.js';
   import { formatValue, unitOf, labelFor } from '../../model/format.js';
   import { ACCENT, ac } from '../../model/theme.js';
+  import { norm, travelBounds } from '../../model/bounds.js';
   import { createTelebuf, createTrail, createRenderClock } from './telebuf.js';
   import HeroNumerals from './HeroNumerals.svelte';
   import PlanStrip from '../widgets/PlanStrip.svelte';
@@ -86,8 +86,8 @@
   const move = $derived(fields.move);
   const target = $derived(fields.target);
   // RFC-041 optional claims: the machine's ACTUAL travel extent, as opposed
-  // to `min`/`max`'s own static catalog bounds (see the `hi` derivation
-  // below). Both null on any hub that has not tagged these roles yet.
+  // to `min`/`max`'s own static catalog bounds. Both null on a hub that does
+  // not tag these roles; bounds.js owns what happens then.
   const extentMeasured = $derived(fields.extentMeasured);
   const extentMax = $derived(fields.extentMax);
 
@@ -139,44 +139,23 @@
   }
 
   // Rail extent: the whole travel, not the current window — the rail must
-  // show the full extent even when the window is small.
-  //
-  // `lo` is the window fields' own catalog `min` annotation (the legal FLOOR
-  // a window edge may be set to — on this protocol that is always 0, the
-  // near hard stop). `hi` is where it gets interesting: `max.max` is that
-  // same kind of fact for the far edge, but it is the window SETTING's legal
-  // ceiling, not the rail's physical length — on a machine with a generous
-  // ceiling and a short rail (this device: window.max caps at 2000mm, the
-  // rail is ~500mm) using it draws a rail four times too long, and a
-  // successful home changes nothing because home doesn't touch that
-  // annotation at all. RFC-041 registers two roles for the fact this
-  // actually needs — `geometry.measured_travel` (what homing just measured,
-  // when it did) and `geometry.max_travel` (the configured ceiling homing
-  // searches within) — preferring the MEASUREMENT over the configured
-  // ceiling because it is ground truth from this session's own home, not a
-  // number the operator typed in. Both are OPTIONAL claims: no catalog has
-  // tagged them yet (RFC-041 is filed, not landed), so `hi` falls back to
-  // `max.max` exactly as before on every hub live today — that fallback is
-  // the documented, permanent behavior for an unroled hub, not a stopgap.
-  const lo = $derived(min.min ?? 0);
+  // show the full extent even when the window is small. `lo` is the window
+  // fields' own catalog `min` (the legal FLOOR a window edge may be set to);
+  // the preference order behind `hi` lives in model/bounds.js, which is its
+  // one home. Using `max.max` when a travel role is available draws a rail
+  // four times too long on this device (window.max caps at 2000mm, the rail
+  // is ~500mm) and a successful home never changes it.
   const measuredTravel = $derived(
     extentMeasured ? displayValue(extentMeasured, sampleOf(extentMeasured)) : null);
   const maxTravel = $derived(
     extentMax ? displayValue(extentMax, sampleOf(extentMax)) : null);
-  const hi = $derived.by(() => {
-    if (typeof measuredTravel === 'number' && isFinite(measuredTravel) && measuredTravel > 0) {
-      return lo + measuredTravel;
-    }
-    if (typeof maxTravel === 'number' && isFinite(maxTravel) && maxTravel > 0) {
-      return lo + maxTravel;
-    }
-    return max.max ?? (lo + 1);
-  });
-  const span = $derived(Math.max(hi - lo, 1e-9));
+  const extent = $derived(travelBounds(min.min ?? 0, measuredTravel, maxTravel, max.max));
+  const lo = $derived(extent.lo);
+  const hi = $derived(extent.hi);
+  const span = $derived(extent.span);
 
   function pct(v) {
-    if (v == null || !isFinite(v)) return null;
-    return Math.min(1, Math.max(0, (v - lo) / span));
+    return norm(v, lo, hi);
   }
 
   const minPct = $derived(pct(minVal));
@@ -197,22 +176,11 @@
   }
 
   // ---------------------------------------------------------------------------
-  // Ruler ticks — a faithful port of the pre-refactor rail's ruler
-  // (`drawStaticLayer` in `webui-prerefactor`'s rail.js), NOT the "nice
-  // numbers" scheme this port originally replaced it with, and NOT the
-  // 0-100 abstract viewBox this port temporarily regressed to either (see the
-  // FAT TICKS note below — that regression is what the operator flagged as
-  // "the ticks on the rail look wrong").
-  //
-  // The original ticked every WHOLE UNIT of the reported span (1mm on every
-  // hub live today — nothing here hardcodes "mm", it is just whatever unit
-  // the catalog's `min`/`max` fields report), major every 10 units, mid
-  // every 5, and only coarsened the minor step when the host was physically
-  // too narrow to draw one line per unit without them smearing together.
-  // That density check is measured against the WIDGET's own pixel width
-  // (`railWidthPx` below), same as the original measured against its own
-  // host — the generalization is real (any span/unit gets sane ticks), the
-  // visual RESULT for an integer-unit rail is unchanged.
+  // Ruler ticks: one line per WHOLE UNIT of the reported span, major every
+  // 10 units, mid every 5, coarsened only when the host is physically too
+  // narrow to draw one line per unit without smearing. Nothing here
+  // hardcodes a unit; the span comes from the catalog's own bounds, and the
+  // density check measures the WIDGET's pixel width (`railWidthPx` below).
   //
   // FAT TICKS BUG: this widget used to render into `viewBox="0 0 100 100"`
   // with `preserveAspectRatio="none"`. That viewBox is square, but the host
@@ -376,6 +344,14 @@
     let speedEma = 0;
     let velSmoothPxPerMs = 0;
     let prevPx = null;
+    // Render-health census, published to machine.stats.render once a second.
+    // Which half is ragged is not guessable: a low or lumpy fps means the
+    // WEBVIEW's frame cadence (the Tauri shell has its own), a high held
+    // percentage at a healthy fps means ARRIVALS outran the buffer. One
+    // second is a T27 rate limit, not a display preference.
+    let censusStart = 0;
+    let censusFrames = 0;
+    let censusHeld = 0;
     const trail = createTrail();
 
     function sizeCanvas() {
@@ -479,10 +455,28 @@
       const tRender = renderClock.stableRenderTime(nowEpochMs);
 
       // Pull ground truth through the telebufs at THIS instant.
+      censusFrames++;
+      if (!censusStart) censusStart = nowMs;
+      if (nowMs - censusStart >= 1000) {
+        const secs = (nowMs - censusStart) / 1000;
+        machine.stats.render = {
+          fps: Math.round(censusFrames / secs),
+          delayMs: Math.round(renderClock.getDelayMs()),
+          heldPct: Math.round((censusHeld / Math.max(1, censusFrames)) * 100),
+          // The rAF clock converted into the sample-stamp epoch, minus that
+          // epoch. Zero on a browser that agrees with itself; a webview whose
+          // two clocks disagree renders at an instant no sample was ever
+          // stamped at, which reads as constant lag or constant snapping.
+          skewMs: Math.round(nowEpochMs - Date.now()),
+        };
+        censusStart = nowMs; censusFrames = 0; censusHeld = 0;
+      }
+
       if (pos) {
         const r = posTele.sampleAt(tRender);
         posDisplay = r.value;
         fresh = r.fresh;
+        if (r.holding) censusHeld++;
         let speedPerSec = null;
         if (vel) {
           const rv = velTele.sampleAt(tRender);

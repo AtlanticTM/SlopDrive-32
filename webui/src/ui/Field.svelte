@@ -85,6 +85,13 @@
 
   const step = $derived(field.step || (precisionFor(field) === 0 ? 1 : 0.01));
 
+  // Reset-to-default writes the catalog's OWN declared default as an ordinary
+  // intent and waits for the echo, so the machine still decides. Never a
+  // client-side guess at what a default should be, and never offered on a
+  // field whose catalog published none.
+  const hasDefault = $derived(field.dflt != null && !field.readOnly);
+  const atDefault = $derived(hasDefault && String(value) === String(field.dflt));
+
   // A control that prints its own value owns the whole row; a chip repeating it
   // is the duplicate-truth the density pass killed. So the chip is a WHITELIST,
   // not an exclusion list — it has to earn the row by carrying something the
@@ -193,6 +200,15 @@
           </button>
           <span class="tip" id={descId} role="tooltip">{field.desc}</span>
         </span>
+      {/if}
+      {#if hasDefault}
+        <button type="button" class="info reset" disabled={!enabled || atDefault}
+                title={atDefault ? 'Already at the machine default'
+                       : 'Reset to the machine default (' + formatValue(field, field.dflt) + unitOf(field) + ')'}
+                onclick={() => commit(field.dflt)}>
+          <span class="glyph" aria-hidden="true">&#8635;</span>
+          <span class="sr-only">Reset {labelFor(field)} to default</span>
+        </button>
       {/if}
     </span>
     {#if typeableChip}
@@ -551,6 +567,17 @@
   .info[aria-expanded='true'] {
     border-color: var(--reality);
     color: var(--reality);
+  }
+
+  /* The reset affordance shares the ⓘ box so the two never disagree about
+     size or alignment, but it is NOT terse-gated: a default is a value the
+     operator may want back at any density. Disabled while the field already
+     sits at its default, which is also how the control says so. */
+  .reset { display: inline-grid; }
+  .reset:disabled {
+    opacity: .35;
+    cursor: default;
+    border-color: var(--line-1);
   }
 
   /* A lowercase Martian Mono `i` — the typeface this UI already uses for

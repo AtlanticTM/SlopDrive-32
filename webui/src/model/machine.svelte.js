@@ -35,14 +35,6 @@
  * OTHER direction too — see TELEMETRY_HZ below: the fastest available rate
  * (the catalog's 60 Hz ceiling) measured WORSE than a slower one, because the
  * hub can't pace it evenly.
- *
- * The old name here was `DRAW_HZ`, reasoning "subscribe at the rate we draw"
- * (SPEC 10.2's intent, but SPEC 10.2 is about not over-asking a channel's
- * ceiling for no reason — it never said the two rates should be numerically
- * equal). That name is what led this policy to cap subscriptions at 30
- * because the page draws at ~60: a readout drawn at 60+ fps does not need
- * 60+ Hz of NEW data to look smooth, it needs EVENLY spaced data it can
- * interpolate between. Renamed to say what it actually bounds.
  */
 
 import {
@@ -129,6 +121,14 @@ function blankStats() {
     framesOut: 0,
     bytesIn: 0,
     statePushes: 0,
+    // Per-channel arrival counts. A cadence problem is per-CHANNEL: the hub
+    // sheds and paces each one separately, so a single total cannot tell
+    // "position is stuttering" from "the plan channel is quiet".
+    pushesByChannel: {},
+    // Published once a second by whatever widget owns the rAF loop, so the
+    // link bar can separate a render-cadence problem (the shell's webview)
+    // from an arrival-cadence one (the wire). Nulls until a loop runs.
+    render: { fps: null, delayMs: null, heldPct: null, skewMs: null },
     lastRxMs: 0,
     clockOffsetUs: null,
     clockRttUs: null,
@@ -411,6 +411,7 @@ export function connect(opts = {}) {
     machine.samples[channelId] = sample;
     machine.sampleTs[channelId] = tsMs || Date.now();
     machine.stats.statePushes++;
+    machine.stats.pushesByChannel[channelId] = (machine.stats.pushesByChannel[channelId] || 0) + 1;
     machine.stats.lastRxMs = Date.now();
   });
 

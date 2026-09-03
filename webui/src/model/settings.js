@@ -1,14 +1,7 @@
 /**
  * settings.js — the catalog -> renderable model transform (RFC-009).
  *
- * THIS FILE IS THE WHOLE POINT OF THE REFACTOR. Everything above
- * the SlopSync protocol client used to know what a SlopDrive-32 is: which channel held the
- * stroke window, which CBOR key wrote the user speed, what the blend-mode
- * options were called. That knowledge is what made our UI privileged and every
- * third-party client second-class, and it is why shipping 20 annotated tuning
- * settings on the wire produced exactly zero UI.
- *
- * So: NOTHING HERE KNOWS ANY DEVICE. No channel id, no field name, no option
+ * NOTHING HERE KNOWS ANY DEVICE. No channel id, no field name, no option
  * label appears below. The input is a decoded catalog; the output is a tree of
  * tabs -> cards -> fields with a widget already chosen for each. Point it at a
  * machine that does not exist yet and it produces that machine's settings page.
@@ -285,8 +278,7 @@ function makeField(entry, f, settingIndex, maskField) {
     // measurement nobody made.
     provenance: f.provenance,
     provenanceName: f.provenanceName,
-    // §8.2 row 1's override. Nothing sets it yet — no catalog key carries an
-    // archetype — but the derivation honors it the moment one does.
+    // §8.2 row 1's override; see resolveArchetype().
     archetypeHint: f.archetype,
     // ONE truth for the disclosure affordance. RENDERING.md §4 calls ui_ranks
     // `advanced` the migration of the setting_flags.advanced BIT into the rank

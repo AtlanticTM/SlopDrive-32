@@ -75,7 +75,7 @@
             data-shadow={statusOf(running)}
             onclick={toggleRunning}>
       <span class="run-dot" aria-hidden="true"></span>
-      <span class="run-text">{isRunning ? 'STOP PATTERN' : 'START PATTERN'}</span>
+      <span class="run-text">{isRunning ? 'Stop pattern' : 'Start pattern'}</span>
     </button>
   </div>
 
@@ -157,6 +157,7 @@
     gap: 10px;
     padding: 12px;
     letter-spacing: .14em;
+    text-transform: uppercase;
   }
 
   .run-dot {

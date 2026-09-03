@@ -77,11 +77,6 @@ static_assert(factory::max_rail    == DEFAULT_MAX_RAIL_MM,         "catalog defa
 static_assert(ceiling::speed_max   == MAX_SPEED_MM_S,              "catalog speed ceiling drifted from MAX_SPEED_MM_S");
 static_assert(ceiling::accel_max   == MAX_ACCEL_MM_S2,             "catalog accel ceiling drifted from MAX_ACCEL_MM_S2");
 static_assert(ceiling::jerk_max    == MAX_JERK_MM_S3,              "catalog jerk ceiling drifted from MAX_JERK_MM_S3");
-// Mode defaults (0x008A). Same contract: this TU sees both the catalog's
-// mirrored table and the real source, so drift fails the build here rather than
-// shipping a catalog that advertises a factory default the machine never had.
-static_assert(factory::stream_speed_mode == SystemState::SPEED_CEILING_PEGGED,
-              "catalog default stream_speed_mode drifted from SystemState");
 // kApBaseCount mirrors advpat::BASE_COUNT (see SlopSyncCatalog.h's comment on
 // why the catalog header can't include AdvancedPattern.h directly) — this TU
 // includes PatternEngine.h (and therefore AdvancedPattern.h), so it is where
@@ -442,14 +437,15 @@ slopsync::Result<IntentValueMap, NackCode> SlopDriveHubDelegate::applyIntent(
         // Every key optional; only the keys PRESENT are applied, and each one
         // echoes the value the handler actually took.
         //
-        // KEY 1 (blend_mode) IS NOW A PERMANENT GAP, same treatment as key 2
-        // (transport) below. MotionArbiter has aliased every blend mode to
-        // "allow" since before this channel existed, so there was no live
-        // setting left to write; see the field comment on 0x008A's
-        // `blend_mode_reserved` in SlopSyncCatalog.h. A client that still
-        // sends key 1 falls through unhandled below, same as key 2 always
-        // has: with no key this case understands, the call NACKs INVALID_VALUE
-        // before touching anything.
+        // KEYS 1, 2 AND 3 ARE PERMANENT GAPS. Key 1 (blend_mode) and key 3
+        // (stream_speed_mode) both lost the behavior they wrote -- the
+        // arbiter aliases every blend mode to "allow", and the S3-side stream
+        // speed feed went with the motion port -- and key 2 (transport) was
+        // retired outright. See the field comments on 0x008A's
+        // `blend_mode_reserved` and `stream_speed_reserved` in
+        // SlopSyncCatalog.h. A client that still sends any of them falls
+        // through unhandled below: with no key this case understands, the
+        // call NACKs INVALID_VALUE before touching anything.
         //
         // GROUND TRUTH, and it is not decoration here: these clamp or
         // reinterpret their input somewhere downstream. So the echo is
@@ -457,27 +453,20 @@ slopsync::Result<IntentValueMap, NackCode> SlopDriveHubDelegate::applyIntent(
         // the request — otherwise a rejected switch would leave every
         // client's dropdown showing a mode the machine is not in.
         case ch::modes_set: {
-            // VALIDATE EVERY KEY, THEN APPLY (SPEC 9.3, sd-tki.2). Keys 3 and 4
-            // are immediate mutations that bump cfg_gen, so a range check on a
+            // VALIDATE EVERY KEY, THEN APPLY (SPEC 9.3, sd-tki.2). Key 4 is an
+            // immediate mutation that bumps cfg_gen, so a range check on a
             // later key must never be able to NACK an intent whose earlier keys
             // already landed. A NACK from this case means NOTHING changed.
-            const auto* f3 = findField(requested, 3);   // stream_speed_mode
             const auto* f4 = findField(requested, 4);   // overshoot_clamp
             const auto* f5 = findField(requested, 5);   // motion_backend
             const auto* f6 = findField(requested, 6);   // home_style
-            if (!f3 && !f4 && !f5 && !f6) return Ret::err(NackCode::INVALID_VALUE);
+            if (!f4 && !f5 && !f6) return Ret::err(NackCode::INVALID_VALUE);
             const uint64_t v5 = fieldU64(f5, 0);
             const uint64_t v6 = fieldU64(f6, 0);
             if (f5 && v5 > 1) return Ret::err(NackCode::INVALID_VALUE);
             if (f6 && v6 > 1) return Ret::err(NackCode::INVALID_VALUE);
 
             applied.count = 0;
-            if (f3) {
-                in.clear(); out.clear();
-                in["mode"] = uint8_t(fieldU64(f3, 0));
-                _webui.handleCommand(WS_OP_STREAM_MODE, in, out);
-                applied.fields[applied.count++] = {3, IntentValue::ofU64(_state.stream_speed_mode)};
-            }
             if (f4) {
                 in.clear(); out.clear();
                 in["on"] = fieldU64(f4, 0) != 0;
@@ -1914,29 +1903,30 @@ void SlopSyncHubService::publishTelemetry() {
         // echoes it, so publishing the arbiter's copy could report a value no
         // write ever produced. One source of truth per field.
         //
-        // `blend` (byte 0, "blend_mode_reserved") is RETIRED — still read from
-        // _motor.getBlendMode() only because that is the smaller diff, not
-        // because the value means anything anymore. It
-        // is excluded from `mask` below and no client should render it.
+        // Bytes 0 and 1 are the two RETIRED reserved bytes. `blend` is still
+        // read from _motor.getBlendMode() only because that is the smaller
+        // diff; byte 1 is a literal 0 because nothing stores that value any
+        // more. Both are excluded from `mask` below and no client renders
+        // them.
         const uint8_t blend  = _motor.getBlendMode();
-        const uint8_t smode  = _state.stream_speed_mode;
+        const uint8_t smode  = 0u;
         const uint8_t oclamp = _state.interp_clamp_overshoot ? 1u : 0u;
         // ALL, ALWAYS — and, as on 0x0081, that is the honest publish rather
         // than a stub. Each takes effect on the NEXT move; none reshapes one
         // already in flight, and none is refused while latched, paused or
         // driven. `transport` was retired rather than gated (SlopSync is the
         // only way in now; the hub listens on WS and BLE by default), and
-        // `blend_mode` was retired outright — see the field comment on
-        // SlopSyncCatalog.h's `blend_mode_reserved`. If a future mode CAN be
-        // refused, drop its bit — a UI graying a control the machine would
-        // accept is the same lie as one offering a control it would refuse.
-        // bits 0..3 = stream_speed_mode, overshoot_clamp, motion_backend,
-        // home_style.
+        // `blend_mode` and `stream_speed_mode` were retired outright — see the
+        // field comments on SlopSyncCatalog.h's two `*_reserved` bytes. If a
+        // future mode CAN be refused, drop its bit — a UI graying a control
+        // the machine would accept is the same lie as one offering a control
+        // it would refuse.
+        // bits 0..2 = overshoot_clamp, motion_backend, home_style.
         // motion_backend is always settable: restart_required means the value
         // lands in NVS now and binds at the next boot, never that the write is
         // refused. Publishing the STORED choice, not the running one, is the
         // point: a client must be able to see a pending switch.
-        const uint8_t mask = 0x0Fu;
+        const uint8_t mask = 0x07u;
         std::array<std::byte, 6> buf{};
         std::span<std::byte> s(buf);
         slopsync::putU8(s.subspan(0, 1), blend);

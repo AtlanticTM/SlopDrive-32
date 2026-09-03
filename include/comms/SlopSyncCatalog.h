@@ -191,10 +191,9 @@ inline constexpr float input_jerk  = 2000000.0f;  // DEFAULT_INPUT_MAX_JERK_MM_S
 inline constexpr float max_rail    = 500.0f;      // DEFAULT_MAX_RAIL_MM
 // Mode defaults (0x008A). Same forced-duplication rule as above — each one
 // is static_assert'd against its real source in SlopSyncHubService.cpp.
-// `blend_mode` has no `.dflt` here: the setting it defaulted was retired from
-// 0x008A (see the field comment there). Do not re-add without re-adding the
-// field's setting_key first.
-inline constexpr uint8_t stream_speed_mode = 0;   // SystemState::SPEED_CEILING_PEGGED
+// `blend_mode` and `stream_speed_mode` have no `.dflt` here: the settings they
+// defaulted were retired from 0x008A (see the field comments there). Do not
+// re-add either without re-adding the field's setting_key first.
 inline constexpr uint8_t overshoot_clamp   = 0;   // SystemState::interp_clamp_overshoot = false
 }  // namespace factory
 
@@ -1084,9 +1083,10 @@ inline bool buildSlopDriveCatalog(slopsync::Catalog32& c, DeviceFeatures feat = 
     };
 
     // ---- "machine-modes" — STATE, elevated, on-change -----------------------
-    // Three MODE settings: blend_mode_reserved (retired, see below),
-    // stream_speed_mode, overshoot_clamp. `transport` (WS_OP_MODE) is a
-    // PERMANENT GAP at INTENT key 2 — see ch::modes_set's note.
+    // One MODE setting left: overshoot_clamp. blend_mode_reserved and
+    // stream_speed_reserved are retired bytes (see below), and
+    // `transport` (WS_OP_MODE) is a PERMANENT GAP at INTENT key 2 — see
+    // ch::modes_set's note.
     //
     // `blend_mode` is RETIRED: MotionArbiter::setBlendMode() aliases every
     // mode to "allow", and the driver-level stream dispatch
@@ -1098,6 +1098,12 @@ inline bool buildSlopDriveCatalog(slopsync::Catalog32& c, DeviceFeatures feat = 
     // client renders a control for it. The paired INTENT key (0x0104 key 1)
     // is retired too — see the modes_set case in SlopSyncHubService.cpp —
     // a SECOND permanent gap alongside key 2's `transport`.
+    //
+    // `stream_speed_mode` is RETIRED the same way and for the same reason:
+    // the S3-side stream speed feed it chose between went with the motion
+    // port (docs/rp-motion-port.md), so nothing reads it to make a decision.
+    // BYTE STAYS as `stream_speed_reserved` at byte 1 so bytes 2..3 keep
+    // their offsets; INTENT key 3 is retired with a permanent gap.
     //
     // They are MODES, not limits: each one changes what the machine DOES
     // with a command rather than how far or how fast it may go — their own
@@ -1124,15 +1130,11 @@ inline bool buildSlopDriveCatalog(slopsync::Catalog32& c, DeviceFeatures feat = 
     c.addLayoutField({.name = "blend_mode_reserved", .type = PackedFieldType::u8, .unit = "", .scale = 1.0f,
                       .desc = "Retired. Unused padding now, the motion policy it once set is gone. "
                               "Motion always behaves as 'allow'."});
-    c.addSelectField({.name = "stream_speed_mode", .type = PackedFieldType::u8, .unit = "", .scale = 1.0f,
-                      .dflt = SettingDefault::ofInt(factory::stream_speed_mode),
-                      .group = "Motion behavior",
-                      .desc = "How a streamed point picks its speed: the machine's ceiling, "
-                              "or the speed the sender asked for.",
-                      .settingKey = 3, .flags = slopsync::setting_flags::advanced,
-                      .hasSettingKey = true,
-                      .hasRank = true, .rank = slopsync::ui_ranks::advanced},
-                     {"ceiling-pegged", "velocity-matched"});
+    // RETIRED — see the entry comment above. Plain reserved byte, no
+    // options/group/default/setting_key: nothing should render this.
+    c.addLayoutField({.name = "stream_speed_reserved", .type = PackedFieldType::u8, .unit = "", .scale = 1.0f,
+                      .desc = "Retired. Unused padding now, the speed feed it selected between "
+                              "is gone. A streamed point takes the speed its plan derives."});
     // rank = hidden. INERT: `interp_clamp_overshoot` is consumed by nothing
     // on the live engine; this is the released-but-inert-field case
     // ui_ranks::hidden exists for (RENDERING.md §4), overriding the
@@ -1148,15 +1150,15 @@ inline bool buildSlopDriveCatalog(slopsync::Catalog32& c, DeviceFeatures feat = 
                       .hasRank = true, .rank = slopsync::ui_ranks::hidden},
                      {"off", "on"});
     // Bit i gates the i-th setting-annotated field, same rule as 0x0081.
-    // blend_mode_reserved carries no setting_key so it is NOT bit 0 anymore.
-    // stream_speed_mode, overshoot_clamp and motion_backend (appended after
-    // this mask byte, packed layouts being append-only) are bits 0, 1 and 2.
+    // Neither reserved byte carries a setting_key, so overshoot_clamp,
+    // motion_backend and home_style (the last two appended after this mask
+    // byte, packed layouts being append-only) are bits 0, 1 and 2.
     c.addBitfieldField({.name = "enabled_mask", .type = PackedFieldType::bitfield8, .unit = "flag",
                         .scale = 1.0f,
                         .desc = "Which of these the machine will accept right now.",
                         .role = roles::meta_enabled_mask,
                         .hasRank = true, .rank = slopsync::ui_ranks::detail},
-                       {"stream_speed_mode", "overshoot_clamp", "motion_backend", "home_style"});
+                       {"overshoot_clamp", "motion_backend", "home_style"});
     // Which path actually drives the motor. restart_required is the whole
     // contract: the NVS key is read once in setup() before anything touches
     // the motor reference, so a live switch is not expressible. Applying it
@@ -1828,12 +1830,16 @@ inline bool buildSlopDriveCatalog(slopsync::Catalog32& c, DeviceFeatures feat = 
     // and BLE by default, and OSSM-BLE is gone. The C5 dongle may return one
     // day, but as a transport the hub simply HAS, not a mode an operator picks.
     //
-    // Both numbers are skipped rather than recycled. This channel never left
-    // the branch so reuse would technically be safe, but "released keys are
-    // never reused" is only a reliable habit if it does not get relitigated
-    // per case, and a gap costs nothing.
-    c.addSchemaField({.key = 3, .name = "stream_speed_mode", .type = CborFieldType::uint_t, .unit = "",
-                      .hasMin = true, .hasMax = true, .min = 0.0f, .max = 1.0f});
+    // KEY 3 IS NOW A PERMANENT GAP TOO. It held "stream_speed_mode" until the
+    // motion port took the S3-side speed feed it chose between; see the field
+    // comment on 0x008A's `stream_speed_reserved`. The modes_set case in
+    // SlopSyncHubService.cpp no longer recognizes it, so a client that still
+    // sends it gets NACK(INVALID_VALUE).
+    //
+    // All three numbers are skipped rather than recycled. This channel never
+    // left the branch so reuse would technically be safe, but "released keys
+    // are never reused" is only a reliable habit if it does not get
+    // relitigated per case, and a gap costs nothing.
     c.addSchemaField({.key = 4, .name = "overshoot_clamp", .type = CborFieldType::uint_t, .unit = "",
                       .hasMin = true, .hasMax = true, .min = 0.0f, .max = 1.0f});
     c.addSchemaField({.key = 5, .name = "motion_backend", .type = CborFieldType::uint_t, .unit = "",

@@ -312,17 +312,6 @@ struct SystemState {
     volatile uint8_t       buf_depth    = 2;    // 1..5 samples of look-behind
     volatile uint16_t      buf_tick_hz  = 100;   // local interpolation rate (Hz)
 
-    // ---- Stream sampler speed-feed mode (cross-core) ------------------------
-    // INERT since sd-4k1.4: the S3-side sampler it selected between is gone
-    // (the RP2350 holds the plan and derives its own velocity), so nothing
-    // reads this to make a decision. Kept because the 0x008A machine-modes
-    // channel and the 0x0101 key-3 setting carry it (released wire fields);
-    // retiring it is a wire evolution and an operator ruling, exactly like
-    // interp_clamp_overshoot below -- never a silent repurpose.
-    //   0 = CEILING_PEGGED (default), 1 = VELOCITY_MATCHED.
-    enum StreamSpeedMode : uint8_t { SPEED_CEILING_PEGGED = 0, SPEED_VELOCITY_MATCHED = 1 };
-    volatile uint8_t       stream_speed_mode = SPEED_CEILING_PEGGED;
-
     // ---- Interpolator overshoot clamp (cross-core) --------------------------
     // WebUI toggle, INERT on the current engine: slopmotion's quintic legality
     // scan owns overshoot handling and nothing consumes this flag yet. Kept

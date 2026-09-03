@@ -85,18 +85,17 @@ async function roundTrip(s, key, name, current, alt) {
 async function main() {
   console.log('slopsync modes live test → ws://' + HOST + ':' + PORT + '/  (0x1030 / 0x3030)');
   const { s, modes } = await open();
-  ok('WELCOME + retained 0x1030 adopted', typeof modes.blend_mode === 'number',
-     'roles=' + s._roles + ' blend=' + modes.blend_mode +
-     ' stream=' + modes.stream_speed_mode + ' overshoot=' + modes.overshoot_clamp);
-  ok('all three mode fields decoded from the catalog',
-     typeof modes.stream_speed_mode === 'number' && typeof modes.overshoot_clamp === 'number');
+  ok('WELCOME + retained 0x1030 adopted', typeof modes.overshoot_clamp === 'number',
+     'roles=' + s._roles + ' overshoot=' + modes.overshoot_clamp);
   ok('retired `transport` field is GONE from the channel', modes.transport === undefined);
+  // Retired bytes keep their offsets but carry no setting_key, so a generic
+  // client sees padding, never a control.
+  ok('retired `blend_mode` renders as a reserved byte', modes.blend_mode === undefined);
+  ok('retired `stream_speed_mode` renders as a reserved byte',
+     modes.stream_speed_mode === undefined);
   ok('enabled_mask decoded as a bitfield', modes.enabled_mask_bits != null,
      JSON.stringify(modes.enabled_mask_bits));
 
-  // blend is 1..3; pick any legal value that is not the current one.
-  await roundTrip(s, 1, 'blend_mode', modes.blend_mode, modes.blend_mode === 1 ? 2 : 1);
-  await roundTrip(s, 3, 'stream_speed_mode', modes.stream_speed_mode, modes.stream_speed_mode ? 0 : 1);
   await roundTrip(s, 4, 'overshoot_clamp', modes.overshoot_clamp, modes.overshoot_clamp ? 0 : 1);
 
   s.close();

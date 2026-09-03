@@ -745,7 +745,6 @@ void WebUI::handleApiSettings() {
     doc["default_range_min"] = _state.default_range_min;
     doc["default_range_max"] = _state.default_range_max;
     doc["expert_mode"] = _state.expert_mode;
-    doc["stream_speed_mode"] = (uint8_t)_state.stream_speed_mode;
     // max_travel = pre-homing rail scale (= configured max rail length);
     // max_rail is the explicit setting the WebUI edits.
     doc["max_travel"] = _state.config.max_rail_mm;
@@ -826,11 +825,6 @@ bool WebUI::applySettings(JsonDocument& doc, JsonDocument& resp) {
     // Stream speed-feed mode + overshoot clamp — accepted here too so the WS
     // ops (WS_OP_STREAM_MODE / WS_OP_OVERSHOOT) have a working HTTP-fallback
     // route. Session-only volatile state, same semantics as the WS ops.
-    if (doc["stream_speed_mode"].is<int>()) {
-        uint8_t m = (uint8_t)(doc["stream_speed_mode"] | (int)_state.stream_speed_mode);
-        if (m > SystemState::SPEED_VELOCITY_MATCHED) m = SystemState::SPEED_VELOCITY_MATCHED;
-        _state.stream_speed_mode = m;
-    }
     if (doc["overshoot_clamp"].is<bool>()) {
         _state.interp_clamp_overshoot = (bool)(doc["overshoot_clamp"] | (bool)_state.interp_clamp_overshoot);
     }
@@ -905,7 +899,6 @@ bool WebUI::applySettings(JsonDocument& doc, JsonDocument& resp) {
     resp["expert_mode"] = _state.expert_mode;
     resp["default_range_min"] = _state.default_range_min;
     resp["default_range_max"] = _state.default_range_max;
-    resp["stream_speed_mode"] = (uint8_t)_state.stream_speed_mode;
     resp["overshoot_clamp"] = (bool)_state.interp_clamp_overshoot;
 
     _bumpGen();
@@ -2322,19 +2315,6 @@ bool WebUI::handleCommand(uint8_t op, JsonDocument& payload_in,
         return true;
     }
 
-    case WS_OP_STREAM_MODE: {
-        // Stream speed-feed mode: 0=ceiling-pegged, 1=velocity-matched.
-        // INERT since sd-4k1.4 (SystemState.h names why); still stored and
-        // echoed because the wire carries it. Single producer, plain write.
-        uint8_t m = (uint8_t)(payload_in["mode"] | (int)_state.stream_speed_mode);
-        if (m > SystemState::SPEED_VELOCITY_MATCHED) m = SystemState::SPEED_VELOCITY_MATCHED;
-        _state.stream_speed_mode = m;
-        payload_out["ok"] = true;
-        payload_out["stream_speed_mode"] = m;
-        _bumpGen();
-        return true;
-    }
-
     case WS_OP_OVERSHOOT: {
         // Monotone (Fritsch-Carlson) tangent clamp on the gradient cubic.
         // INERT (SystemState.h names why); still stored and echoed because the
@@ -2376,7 +2356,6 @@ bool WebUI::handleCommand(uint8_t op, JsonDocument& payload_in,
         payload_out["paused"] = _state.paused;
         payload_out["manual_override"] = _state.manual_override;
         payload_out["homed"] = _state.homed;
-        payload_out["stream_speed_mode"] = (uint8_t)_state.stream_speed_mode;
         payload_out["overshoot_clamp"] = (bool)_state.interp_clamp_overshoot;
         payload_out["bypass_limits"] = (bool)_state.bypass_limits;
         payload_out["ok"] = true;

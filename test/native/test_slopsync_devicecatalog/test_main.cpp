@@ -147,7 +147,12 @@ TEST_CASE("device catalog: etag pinned — accidental-wire-change tripwire") {
     hex.pop_back();
     // Moved deliberately by the drive-tune/drive-set pair (0x1130 / 0x3130),
     // then again by drive-tune's two readback fields.
-    CHECK(hex == "A1 FD AE 20 4C 45 33 85");
+    // MOVED 2026-09-03 (A1 FD AE 20 4C 45 33 85 -> 29 1F D8 04 66 EE 7D 66):
+    // sd-4k1.9 retired `stream_speed_mode` on 0x008A. The byte stays as
+    // `stream_speed_reserved` with no setting_key and modes-set key 3 became a
+    // permanent gap. Deliberate wire evolution, no protocol break: clients
+    // re-fetch on etag mismatch by design.
+    CHECK(hex == "29 1F D8 04 66 EE 7D 66");
 }
 
 // ---- Baseline conformance ---------------------------------------------------
@@ -543,7 +548,9 @@ TEST_CASE("device catalog: every setting_key resolves in its declared settingCha
     // centering, centering_gain, infeasible_margin, reshape_steps -- are gone
     // from 0x1120/0x1122 and their setting keys (4, 5, 15, 19) are RELEASED,
     // never reused.
-    CHECK(annotated == 80);
+    // 80 -> 79 (sd-4k1.9): `stream_speed_mode` retired from 0x008A, setting
+    // key 3 on modes-set RELEASED and never reused.
+    CHECK(annotated == 79);
 }
 
 // ---- RFC-009 ----------------------------------------------------------------

@@ -12,6 +12,14 @@ platform on the ESP32-S3 ecosystem. Hardware-agnostic, community-extensible.
 
 - **Driver polymorphism.** All physical hardware interaction (motors, sensors,
   inputs) sits behind C++ interface classes, ABCs with pure virtuals.
+- **One motion backend (operator ruling 2026-09-03).** The only thing that
+  moves the motor is the RP2350 over the link, driven by quadrature. The
+  Modbus and step-and-direction motion drivers are retired: no S3 backend
+  renders motion, because none can match quadrature and a second renderer
+  on the S3 is the seam the three-board split deleted. The Modbus bus stays
+  for motor configuration and the encoder audit only, behind a build switch
+  a production build may omit; the drive is programmed once from the web
+  flasher, the way the original OSSM is.
 - **Build configuration.** Conditional-compilation flags (`#if defined(...)`)
   isolate hardware driver implementations; unused driver objects are not
   compiled.

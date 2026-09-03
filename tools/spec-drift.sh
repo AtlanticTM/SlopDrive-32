@@ -133,14 +133,29 @@ for rkey, cname in pairs:
 say("")
 
 say("[INTERNAL VOCAB (C5 bridge, two-ended constants)]")
-a = grab("include/comms/SlopSyncUartTransport.h", r"kBridgeOpSlotClosed\s*=\s*0x([0-9A-Fa-f]+)", lambda s: int(s, 16))
-b = grab("src/c5_probe/main.cpp", r"kBridgeOpSlotClosed\s*=\s*0x([0-9A-Fa-f]+)", lambda s: int(s, 16))
-if a is None or b is None:
-    finding(f"kBridgeOpSlotClosed missing on one end (S3={a}, C5={b}); one vocabulary, two ends")
-elif a != b:
-    finding(f"kBridgeOpSlotClosed: S3 0x{a:02X} vs C5 0x{b:02X}")
+# This check used to compare a kBridgeOpSlotClosed constant declared separately
+# on each end. That drift class is gone by construction: the vocabulary moved
+# into ONE header both ends include (include/comms/BridgeProtocol.h), which is
+# what T20 asks for. So the check is now the invariant that keeps it true --
+# the header exists, both ends include it, and neither end re-declares an op.
+BP = "include/comms/BridgeProtocol.h"
+ENDS = {"S3": ["include/comms/SlopSyncUartTransport.h", "src/comms/SlopSyncUartTransport.cpp"],
+        "C5": ["src/c5_probe/main.cpp"]}
+if grab(BP, r"(kOpSlotClosed)\s*=\s*0x[0-9A-Fa-f]+") is None:
+    finding(f"{BP} does not define kOpSlotClosed; the shared vocabulary moved or shrank")
 else:
-    say(f"  ok: kBridgeOpSlotClosed 0x{a:02X} on both ends")
+    ops = re.findall(r"(kOp\w+)\s*=\s*0x([0-9A-Fa-f]+)", (root / BP).read_text(encoding="utf-8"))
+    say(f"  ok: {BP} is the one home ({len(ops)} ops)")
+    for end, paths in ENDS.items():
+        texts = {p: (root / p).read_text(encoding="utf-8", errors="replace") for p in paths}
+        inc = [p for p, t in texts.items() if re.search(r'#include\s+"(?:comms/)?BridgeProtocol\.h"', t)]
+        copies = [p for p, t in texts.items() if re.search(r"\bk(?:Bridge)?Op\w+\s*=\s*0x[0-9A-Fa-f]+", t)]
+        if not inc:
+            finding(f"{end} does not include BridgeProtocol.h ({', '.join(paths)}); one vocabulary, two ends")
+        elif copies:
+            finding(f"{end} declares its own bridge op constant in {copies[0]}; that is the T20 copy")
+        else:
+            say(f"  ok: {end} includes it ({inc[0]}) and declares no local copy")
 say("")
 
 say("[SYMBOL DRIFT (used here, absent from pinned generated header)]")

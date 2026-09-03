@@ -25,7 +25,6 @@
 #include <cmath>
 #include <cstddef>
 #include <cstdint>
-#include <new>
 #include <span>
 
 #include "MotionLinkProtocol.h"
@@ -349,7 +348,8 @@ class Core {
     uint16_t configFingerprint() const {
         return _config_fp.load(std::memory_order_relaxed);
     }
-    // The emitter sets kFlagJumped; preload self-clears it after reporting.
+    // The sticky link flags (MotionLinkProtocol.h, Flags); the master reports
+    // each bit's rising edge, so a bit must stay set until the condition ends.
     void setFlags(uint8_t bits) {
         _flags.fetch_or(bits, std::memory_order_relaxed);
     }
@@ -385,8 +385,8 @@ class Core {
         emit(motionlink::kEvtClockStep, 0.0f, 0.0f, now_us, 0);
     }
 
-    // Sizing evidence for the glue's once-a-second report; two engines because
-    // the render table is built from a shadow (see republish()).
+    // Sizing evidence for the glue's once-a-second report. ONE engine: the
+    // render table is read off the live plan (see republish()).
     static constexpr size_t engineBytes() { return sizeof(slopmotion::Engine); }
 
   private:
@@ -463,12 +463,16 @@ class Core {
 
     void applyCommand(const QueueItem& it) {
         const LinkCommand& lc = it.cmd;
-        // Axis 0 is the only carriage this slave has; anything else is dropped
-        // rather than rendered on the wrong one (sd-xvc).
-        const uint32_t deny = lc.axis != 0 ? 0u : denyingGates();
         const SelectedLimits lim =
             motionlink::selectedLimits(_cfg_img, lc.limit_set);
-        if (lc.axis != 0 || deny != 0 || !(lim.vmax > 0.0f)) {
+        uint32_t deny = denyingGates();
+        // Axis 0 is the only carriage this slave has; anything else is dropped
+        // rather than rendered on the wrong one (sd-xvc).
+        if (lc.axis != 0) deny |= motionlink::kGateAxis;
+        // A zero vmax means the set was never pushed: gate it rather than plan
+        // at zero, and NAME it, because "gated with detail 0" is unreadable.
+        if (!(lim.vmax > 0.0f)) deny |= motionlink::kGateUnconfigured;
+        if (deny != 0) {
             emit(motionlink::kEvtCommandGated, lc.target, float(deny),
                  uint32_t(_now64), it.seq);
             return;
@@ -497,7 +501,12 @@ class Core {
     // pause, plans at the USER set, and takes its own commanded ceilings as a
     // further min() so a slow glide stays a slow glide.
     void applyRetarget(const QueueItem& it) {
-        if (!(it.rt_vmax > 0.0f) || !(it.rt_accel > 0.0f)) return;
+        if (!(it.rt_vmax > 0.0f) || !(it.rt_accel > 0.0f)) {
+            emit(motionlink::kEvtCommandGated, countsToNorm(it.counts),
+                 float(motionlink::kGateUnconfigured), uint32_t(_now64),
+                 it.seq);
+            return;
+        }
         if (_cfg_img.get(motionlink::kCfgGates) & motionlink::kGatePaused) {
             emit(motionlink::kEvtCommandGated, countsToNorm(it.counts),
                  float(motionlink::kGatePaused), uint32_t(_now64), it.seq);
@@ -727,46 +736,37 @@ class Core {
     }
 
     // ---- The render hand-off -----------------------------------------------
-    // THE ENGINE EXPOSES NO ACCESSOR FOR THE PLAN IN FLIGHT and its public
-    // forward samplers MUTATE (rawSampleAt runs maybeSettle, which promotes and
-    // settles), so the table is built from a SHADOW COPY: promotion, settle and
-    // coast all happen in the throwaway, and because they are deterministic
-    // functions of state and clock the table renders exactly what the real
-    // engine will render when core 1 next reaches that instant.
+    // The plan comes off the engine AS DATA (slopmotion::PlanView) and is
+    // sampled with no side effects: the accessor does not settle, promote or
+    // coast, so building the table cannot disturb the engine core 1 owns.
+    // The scheduled successor is in the view too, and it takes over at its own
+    // anchor exactly where the engine promotes it, which is what keeps a
+    // promotion inside the horizon continuous.
     //
     // A quintic through (p, v, a) at both ends of a slice reproduces a Hermite
     // plan exactly and a single Ruckig jerk phase exactly, so error exists only
     // on a slice that straddles a phase switch and scales as |dj| * h^3; at
     // h = 1 ms it is orders below one count.
     //
-    // Copy-ASSIGNMENT is deleted (ruckig::Ruckig carries const members), and an
-    // assignment would be a stack bomb anyway (T1): destroy in place, then
-    // placement-new the copy.
+    // What the view CANNOT show is a settle that has not been planned yet: a
+    // brake is a Ruckig solve and belongs to core 1. Until core 1 reaches it
+    // the table renders the engine's own bounded coast, and core 1 republishes
+    // on the plan change, which it detects within one service pass.
     void republish() {
-        _shadow.~Engine();
-        new (&_shadow) slopmotion::Engine(_engine);
-
-        // The clamp the engine itself would apply: its window widened to take
-        // in the plan's entry, never further out than the seed's
-        // (slopmotion.hpp, windowEntry).
-        const slopmotion::Snapshot snap = _engine.snapshot(_now64);
-        const float seed_lo = _seed < 0.0f ? _seed : 0.0f;
-        const float seed_hi = _seed > 1.0f ? _seed : 1.0f;
-        float entry = snap.start;
-        if (entry < seed_lo) entry = seed_lo;
-        if (entry > seed_hi) entry = seed_hi;
-
+        const slopmotion::PlanView pv = _engine.planView();
         RenderPlan next;
         next.t0_us = uint32_t(_now64);
         next.slice_us = kRenderSliceUs;
-        next.lo = entry < 0.0f ? entry : 0.0f;
-        next.hi = entry > 1.0f ? entry : 1.0f;
+        // The engine's own backstop for the plan in flight, carried across so
+        // the tick's clamp cannot drift from the plan it guards.
+        next.lo = float(pv.lo);
+        next.hi = float(pv.hi);
         const double T = double(kRenderSliceUs) * 1e-6;
         double p0, v0, a0, p1, v1, a1, c[6];
-        _shadow.rawSampleAt(_now64, p0, v0, a0);
+        evalPlanAt(pv, _now64, p0, v0, a0);
         for (size_t k = 0; k < kRenderSlices; ++k) {
-            _shadow.rawSampleAt(_now64 + uint64_t(k + 1) * kRenderSliceUs, p1,
-                                v1, a1);
+            evalPlanAt(pv, _now64 + uint64_t(k + 1) * kRenderSliceUs, p1, v1,
+                       a1);
             slopmotion::Engine::senderCurve(false, p0, v0, a0, p1, v1, a1, T, c);
             for (size_t i = 0; i < 6; ++i) next.c[k][i] = float(c[i]);
             p0 = p1;
@@ -774,6 +774,15 @@ class Core {
             a0 = a1;
         }
         commitPlan(next);
+    }
+
+    // Promotion, on the render side: past the successor's anchor the successor
+    // is the plan. One branch, and it is the same test promoteDue makes.
+    static void evalPlanAt(const slopmotion::PlanView& pv, uint64_t t_us,
+                           double& p, double& v, double& a) {
+        const slopmotion::PlanPiece& pc =
+            (pv.next_ok && t_us >= pv.next.start_us) ? pv.next : pv.active;
+        slopmotion::Engine::evalPiece(pc, t_us, p, v, a);
     }
 
     // A constant plan: the machine is held here, so every slice is the same
@@ -817,7 +826,6 @@ class Core {
 
     // ---- State -------------------------------------------------------------
     slopmotion::Engine _engine{};
-    slopmotion::Engine _shadow{};   // republish() scratch, never commanded
     ConfigImage _cfg_img{};
     slopmotion::Config _cfg_user{};
     slopmotion::Config _cfg_input{};

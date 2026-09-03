@@ -3080,3 +3080,73 @@ TEST_CASE("In-window plans are refereed EXACTLY as before (entry sweep over [0,1
     CHECK(illegal > 0);
     CHECK(illegal < compared);
 }
+
+TEST_CASE("planView hands out the plan without touching it") {
+    // The accessor is what a renderer on another core reads instead of holding
+    // its own engine, so its whole contract is two claims: calling it changes
+    // nothing, and the piece it returns evaluates to what the engine's own raw
+    // sampler evaluates.
+    Engine e(liveTuning(), 0.2f);
+    e.resetAt(0.2f, 0);
+    Command c;
+    c.target = 0.8f;
+    c.has_duration = true;
+    c.duration_us = 300000;
+    c.has_end_vel = true;
+    c.end_vel = 0.0f;
+    REQUIRE(e.commit(c, 1000));
+
+    // NO STATE CHANGE ACROSS A CALL, and none from asking about instants past
+    // expiry either, where every mutating sampler here would settle.
+    const uint64_t t_mid = 1000 + 150000;
+    const auto kind0 = e.planKind();
+    const uint64_t start0 = e.lastPlanUs();
+    const auto mode0 = e.mode();
+    double p0, v0, a0;
+    e.rawSampleAt(t_mid, p0, v0, a0);
+
+    slopmotion::PlanView pv = e.planView();
+    for (int k = 0; k < 3; ++k) pv = e.planView();
+
+    CHECK(e.planKind() == kind0);
+    CHECK(e.lastPlanUs() == start0);
+    CHECK(e.mode() == mode0);
+    double p1, v1, a1;
+    e.rawSampleAt(t_mid, p1, v1, a1);
+    CHECK(p1 == doctest::Approx(p0));
+    CHECK(v1 == doctest::Approx(v0));
+
+    CHECK(pv.active.kind == kind0);
+    CHECK(pv.active.start_us == start0);
+    CHECK(pv.next_ok == false);
+    CHECK(pv.lo <= 0.0);
+    CHECK(pv.hi >= 1.0);
+    CHECK(pv.coast_cap_s > 0.0);
+    CHECK(pv.coast_max_norm > 0.0);
+
+    // The piece IS the plan: three instants inside the span, where rawSampleAt
+    // is a pure read of the same polynomial.
+    for (uint64_t t : {uint64_t(1000 + 20000), uint64_t(1000 + 150000),
+                       uint64_t(1000 + 290000)}) {
+        double ep, ev, ea, rp, rv, ra;
+        slopmotion::Engine::evalPiece(pv.active, t, ep, ev, ea);
+        e.rawSampleAt(t, rp, rv, ra);
+        CHECK(ep == doctest::Approx(rp).epsilon(1e-9));
+        CHECK(ev == doctest::Approx(rv).epsilon(1e-9));
+        CHECK(ea == doctest::Approx(ra).epsilon(1e-9));
+    }
+
+    // A scheduled successor shows up as its own piece, at its own anchor.
+    Command later;
+    later.target = 0.4f;
+    later.has_duration = true;
+    later.duration_us = 200000;
+    later.has_anchor = true;
+    later.anchor_us = 1000 + 250000;
+    REQUIRE(e.commit(later, t_mid));
+    const slopmotion::PlanView sched = e.planView();
+    CHECK(sched.next_ok == true);
+    CHECK(sched.next.start_us == later.anchor_us);
+    CHECK(sched.next.kind != slopmotion::PlanKind::None);
+    CHECK(sched.active.start_us == start0);
+}

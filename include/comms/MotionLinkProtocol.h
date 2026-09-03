@@ -3,17 +3,15 @@
 // - ONE definition, BOTH ends include it (T20). Never copy a constant out.
 // - Link machinery between two boards of one product, like BridgeProtocol.h:
 //   NOT SlopSync, no conformance duty, invisible to clients.
-// - Ops are append-only: the two boards flash independently.
-// - The schedule is TIME-INDEXED (operator ruling, sd-dxy): the RP2350 renders
-//   segments at their own pace, NEVER drains faster to catch up. Overflow is
-//   the producer's fault; the S3 paces on the reported runway. Underrun gets
-//   SETTLE (hold at the last endpoint), never extrapolation.
+// - Ops are append-only and an op NUMBER IS NEVER REUSED: the two boards flash
+//   independently, so a gap in the numbering is a retired op, not a free slot.
 // - ESTOP punches through on its own op, pumped by the slave's 20 kHz tick
-//   (<=50 us to act), never queued behind buffered motion.
+//   (<=50 us to act), never queued behind anything.
 // - Commands are sent THE MOMENT THEY ARRIVE, never on a tick
 //   (operator-ratified 2026-09-02, architecture.md section 2): the link is a
 //   bus, not a schedule. Only status polling may be periodic.
-// See: dev board sd-dxy (wiring, buffer rulings), .claude/rules/transport.md.
+// See: docs/rp-motion-port.md (the port contract),
+//      .claude/rules/architecture.md section 2, .claude/rules/transport.md.
 #pragma once
 
 #include <array>
@@ -38,22 +36,19 @@ inline constexpr size_t kFrameBytes = 32;
 // Master -> slave: [op:u8][seq:u8][payload...]
 enum Op : uint8_t {
     kOpPing     = 0x01,   // payload empty; slave answers with Status
-    kOpSegment  = 0x02,   // payload = Segment (packed LE, 20 B)
-    kOpEstop    = 0x03,   // flush the schedule NOW, hold position
-    kOpClear    = 0x04,   // leave the estop hold; schedule is empty after
-    // Trapezoid retarget: [target:f32][vmax:f32][accel:f32] counts, counts/s,
-    // counts/s^2. The slave seeks target from its LIVE (p, v) -- idempotent,
-    // re-sendable, last one wins; switches the renderer out of segment mode.
-    // This is streamToSteps() on the wire; segments remain the native-plan path.
+    kOpEstop    = 0x03,   // stop rendering NOW, hold the rendered position
+    kOpClear    = 0x04,   // leave the estop hold; a hold is the plan after
+    // The homing ritual's point move, at the USER set:
+    // [target:f32][vmax:f32][accel:f32] counts, counts/s, counts/s^2. It
+    // BYPASSES the homed gate on purpose (homing is what makes the machine
+    // homed), still obeys pause, and takes its commanded ceilings as a further
+    // min() so a slow glide stays slow. The slave seeks target from its LIVE
+    // (p, v): idempotent, re-sendable, last one wins.
     kOpRetarget = 0x05,
-    // Standstill position set: [pos:f32] counts. Flushes schedule + retarget,
-    // zeroes velocity -- the homing ritual's "the wall is HERE" write.
+    // Standstill position set: [pos:f32] counts. Re-seeds the engine at the
+    // declared position and zeroes velocity -- the homing ritual's
+    // "the wall is HERE" write.
     kOpSetPos   = 0x06,
-    // C2 segment: [dur:u32][p0 v0 a0 p1 v1 a1 :f32] -- quintic Hermite with
-    // ACCELERATION knots, so chained segments are torque-continuous (the C1
-    // cubic stepped accel at every knot: a 100 Hz notch the servo renders as
-    // texture). 28 payload bytes: fills the frame to the CRC exactly.
-    kOpSegment2 = 0x07,
     // Renderer speed ceiling: [max_counts_per_s:f32]. The RP is open loop --
     // it emits exactly what the trajectory asks for and the drive either
     // follows or silently loses steps. Measured: emit_overrun climbing while
@@ -86,94 +81,46 @@ enum Op : uint8_t {
     kOpFlashVersion = 0x45,   // [] reply carries the RP fw string (C-8)
 };
 
-// One C1 motion segment: cubic Hermite from (p0, v0) to (p1, v1) over
-// duration_us. Positions in STEPS at the drive's input, velocities in
-// steps/s. 10 ms of runway is one to three of these; the RP2350 interpolates
-// (the whole reason it exists -- pre-rendered pulses are not sent).
-struct Segment {
-    uint32_t duration_us;
-    float p0;
-    float v0;
-    float p1;
-    float v1;
-    // Acceleration knots (kOpSegment2); kOpSegment leaves them 0 and renders
-    // as the zero-curvature quintic.
-    float a0;
-    float a1;
-};
-inline constexpr size_t kSegmentWireBytes  = 20;
-inline constexpr size_t kSegment2WireBytes = 28;
-
-// Slave -> master, preloaded before every transaction:
-// [state:u8][flags:u8][runway_ms:u16le][depth:u8][seq_echo:u8][pos:f32le][vel:f32le]
-//   ...bench signature at 14, seq duplicate at 15...
-// [emitted:f32le][qdrops:u16le][emit_overrun:u16le][late_ticks:u16le]
-// [vel_clamped:u16le] (28..29 spare)
+// Slave -> master. The slave chooses the reply LAYOUT and the master parses on
+// the variant byte, never on what it sent (see StatusVariant). Every field of
+// every layout is reached through the codecs at the tail of this file.
 //
-// WHY `emitted` IS ON THE WIRE (sd-dxy.1.1). `pos` is the COMMANDED position,
-// recomputed from the segment polynomial every tick -- the number that cannot
-// be wrong. `emitted` is what was actually PULSED. Their difference is the
-// renderer's residue, and shipping only the first made lost motion invisible
-// to the master by construction. Read them as a pair or neither is evidence.
-//   qdrops       PIO TX FIFO was full: a whole 16-state word was dropped and
-//                phase+count rolled back. Production == consumption off one
-//                crystal, so ANY nonzero value is a fault, not a design state.
-//   emit_overrun the tick owed more steps than the emitter can pass in one
-//                tick. With plans clamped below kMaxCountsPerSec this is
-//                unreachable, so nonzero means an illegal plan, a late tick,
-//                or a discontinuous reference -- all defects.
-//   late_ticks   trajectory ticks that arrived >1.5x kTickUs after the last.
-//                Plan time advances by tick COUNT, so a late tick stretches
-//                the timeline while still landing on the endpoint.
-// Offsets are named here and read by BOTH ends. Never transcribe a number.
-// Only 14 bytes exist between the seq duplicate and the CRC, so the three
-// counters are u16 and SATURATE at 0xFFFF rather than wrap: a pinned counter
-// honestly reads "lots", a wrapped one reads "healthy" and lies.
-inline constexpr size_t kStatusOffEmitted     = 16;
-inline constexpr size_t kStatusOffQDrops      = 20;
-inline constexpr size_t kStatusOffEmitOverrun = 22;
-inline constexpr size_t kStatusOffLateTicks   = 24;
-inline constexpr size_t kStatusOffVelClamped = 26;   // ticks the ceiling bit
+// Counters saturate at their wire width rather than wrap: a pinned counter
+// honestly reads "lots", while a wrapped one reads "healthy" and lies.
 inline constexpr uint16_t sat16(uint32_t v) {
     return v > 0xFFFFu ? uint16_t(0xFFFFu) : uint16_t(v);
 }
 enum State : uint8_t {
-    kStateIdle    = 0x00,   // schedule empty, settled
+    kStateIdle    = 0x00,   // no plan in flight, at rest
     kStateRunning = 0x01,
-    kStateSettled = 0x02,   // underran and braked to rest at the last endpoint
+    kStateSettled = 0x02,   // braked to rest with no command to follow
     kStateEstop   = 0x03,   // holding; only kOpClear leaves this
 };
+// Sticky conditions `state` cannot carry. Reported whole in every status; the
+// master reports each bit's RISING edge.
 enum Flags : uint8_t {
-    kFlagOverflow = 0x01,   // a segment arrived with the ring full (producer bug)
-    kFlagUnderran = 0x02,   // sticky until the next segment lands
-    // A segment started far from the emitted position; the renderer TELEPORTED
-    // its reference instead of slewing the gap at max rate (producer
-    // discontinuity, e.g. a leg fed twice after a dropped frame). Sticky.
-    kFlagJumped   = 0x04,
+    // The command queue was full when a frame arrived: a producer bug, because
+    // the link sends on arrival and the slave drains far faster than the wire
+    // delivers.
+    kFlagOverflow = 0x01,
+    // The plan ran out with no command to follow and the engine braked to
+    // rest. Sticky until the next accepted command.
+    kFlagUnderran = 0x02,
 };
-
-// The credit contract: the S3 sends a segment only while runway_ms is below
-// kRunwayTargetMs and depth is below kSegmentDepth. The IRQ line asserts when
-// runway falls under kRunwayLowMs (feed me) or on estop/underrun (look at me).
-inline constexpr uint16_t kRunwayTargetMs = 10;   // operator-ruled band
-inline constexpr uint16_t kRunwayLowMs = 4;
-inline constexpr size_t kSegmentDepth = 8;
 
 // Renderer emit ceiling. The PIO stepgen streams pin states at 400 kHz (one
 // transition per state max); plans clamp BELOW it so the emitter never falls
-// behind the trajectory (falling behind trips the teleport guard = lost
-// motion). The drive's own input limit is 500 kHz -- the hard roof.
+// behind the trajectory, and what lag remains reads as counted residue rather
+// than as lost motion. The drive's own input limit is 500 kHz -- the hard roof.
 inline constexpr float kMaxCountsPerSec = 300000.0f;
 
 // Every frame, BOTH directions, carries CRC-16/CCITT-FALSE over bytes
 // [0, kCrcOffset) stored LE at [kCrcOffset]. A frame that fails the check is
-// DROPPED whole: no partial parse, no estop from garbage. Recovery is the
-// credit contract itself -- the master re-sends what the status never
-// acknowledged. Ops that must not be lost (kOpEstop) are repeated by the
-// master until the echoed state confirms them.
+// DROPPED whole: no partial parse, no estop from garbage. Recovery is the SEQ
+// ECHO -- the master re-sends whatever status never acknowledged. Ops that must
+// not be lost (kOpEstop) are repeated by the master until the echoed state
+// confirms them.
 inline constexpr size_t kCrcOffset = 30;
-static_assert(kStatusOffVelClamped + 2 <= kCrcOffset,
-              "status telemetry overruns the CRC field");
 inline constexpr uint16_t crc16(std::span<const uint8_t> d) {
     uint16_t c = 0xFFFF;
     for (uint8_t byte : d) {
@@ -197,10 +144,9 @@ inline bool crcOk(std::span<const uint8_t, kFrameBytes> frame) {
 
 // ---- v2 vocabulary: anchored intents, config push, clock (sd-4k1.2) ---------
 // The RP2350 HOLDS THE PLAN (architecture.md section 2, three-board split), so
-// v2 carries INTENTS with anchor times, never rendered chunks. Every v1 op and
-// the whole v1 status layout stay byte-for-byte: the boards flash
-// independently, so a v1 slave answering a v2 master is a supported state and
-// the status variant byte is how the master finds out.
+// v2 carries INTENTS with anchor times, never rendered chunks. The boards flash
+// independently, so a slave older than this vocabulary answering a v2 master is
+// a supported state and the status variant byte is how the master finds out.
 // v2 fields are reached through the CODECS below, never by offset arithmetic.
 // One encoder and one decoder that both ends call is the named-offset rule
 // taken one step further: there is no second call site to transcribe into.
@@ -477,7 +423,8 @@ enum ConfigTag : uint8_t {
     // kEvtCommandGated. E-stop is NOT here: it keeps kOpEstop so it can punch
     // through in one 50 us tick.
     kCfgGates = 0x40,              // u32 bitfield, see GateBits
-    // Window in the slave's native unit. Normalized 0..1 spans exactly
+    // Window in the slave's native unit, VALUE ENCODED AS f32 BITS (f32Bits /
+    // bitsF32, the ConfigImage setF/getF pair). Normalized 0..1 spans exactly
     // [min, max], so the slave derives its counts/s ceilings from this span
     // and whichever vmax the command selected. The EMITTER cap stays on
     // kOpSetLimits: it is a hardware fault detector, not engine config, and it
@@ -485,10 +432,16 @@ enum ConfigTag : uint8_t {
     kCfgWindowMinCounts = 0x60,
     kCfgWindowMaxCounts = 0x61,
 };
+// APPEND-ONLY: the two boards flash independently, so a bit's meaning is
+// pinned once it ships. kGateHomed and kGatePaused are the only bits kCfgGates
+// carries FROM the master; the rest are only ever reported back, in
+// kEvtCommandGated's detail, to name why a command was dropped.
 enum GateBits : uint32_t {
     kGateHomed = 0x01,
     kGatePaused = 0x02,
     kGateSoftStart = 0x04,   // informational; the cap is kCfgSoftStartCap
+    kGateAxis = 0x08,        // the command named an axis this slave does not have
+    kGateUnconfigured = 0x10,   // the ceiling set the command selected is zero
 };
 
 struct ConfigField {
@@ -574,9 +527,8 @@ class ConfigImage {
         return std::span<const ConfigField>(_f.data(), _n);
     }
     // 0 means EMPTY, never a checksum, so a slave that has applied nothing
-    // reads as a mismatch the master cannot miss. That is also the restart
-    // detector, which is why the v1 counter-decrease heuristic does not need
-    // to be carried into v2.
+    // reads as a mismatch the master cannot miss. That is also the RESTART
+    // DETECTOR: a rebooted slave reports 0 and the master re-pushes.
     uint16_t fingerprint() const {
         if (_n == 0) return 0;
         std::array<uint8_t, kConfigImageSlots * 5> buf{};
@@ -617,30 +569,27 @@ inline SelectedLimits selectedLimits(const ConfigImage& cfg,
 
 // ---- Status v2 and the event record -----------------------------------------
 // The slave chooses the reply layout; the master parses on the VARIANT BYTE
-// and never on what it sent. Offset 28 is the discriminator because the v1
-// path never writes bytes 28 or 29, so a v1 slave reports variant 0 for free.
-// Never write byte 28 in the v1 path.
+// and never on what it sent. Variant 0 is therefore "a slave older than this
+// vocabulary": it leaves byte 28 alone, so it declares itself for free and the
+// master REJECTS the reply rather than reading counts out of the wrong bytes.
 // ONE PRECEDENCE RULE: state (byte 0) is read FIRST and is never overloaded.
 // kStateFlash claims the whole reply for the flash family, whose version
 // string legitimately covers byte 28 (see kFlashStatusOffVersion above); the
 // variant byte means nothing while that state is reported.
 inline constexpr size_t kStatusOffVariant = 28;
-static_assert(kStatusOffVelClamped + 2 <= kStatusOffVariant,
-              "v1 telemetry would collide with the variant discriminator");
 enum StatusVariant : uint8_t {
-    kStatusV1 = 0x00,
+    kStatusPreV2 = 0x00,
     kStatusV2 = 0x02,
     kStatusEvent = 0x03,
 };
 
-// COUNTERS ARE PER-INTERVAL AND RESET ON PRELOAD. That is the v2 fix for the
-// blind counter: v1 shipped saturating LIFETIME totals while the master read
-// DELTAS, so the only content the extra width carried was the part that pins
-// (overrun 61191 in one second, then 0xFFFF forever and every later delta 0).
-// Widening postpones that; per-interval removes it, because a full u16 inside
-// one 10 ms poll needs 6.5 million events per second and the next interval
-// starts clean regardless. The LIFETIME total moves to the master, which
-// already accumulates the deltas and can hold u32 there.
+// COUNTERS ARE PER-INTERVAL AND RESET ON PRELOAD, and never lifetime totals: a
+// saturating lifetime total read as a DELTA pins at its width and then reports
+// zero forever (measured: overrun 61191 in one second, then 0xFFFF and every
+// later delta 0). Widening postpones that, per-interval removes it, because a
+// full u16 inside one 10 ms poll needs 6.5 million events per second and the
+// next interval starts clean regardless. The LIFETIME total belongs to the
+// master, which already accumulates the deltas and can hold u32 there.
 // The cost, stated: a torn or bad-CRC reply loses one interval of census.
 // These are rate diagnostics rather than accounting, and link_errs counts the
 // losses, so the gap is visible instead of silent.
@@ -706,9 +655,10 @@ inline StatusV2 decodeStatusV2(std::span<const uint8_t, kFrameBytes> f) {
     s.vel_clamped = f[29];
     return s;
 }
-// Residue is the ONE number worth its bytes out of the (pos, emitted) pair the
-// v1 status shipped whole: their difference is the diagnostic, and shipping it
-// directly cannot be read as evidence by itself.
+// `pos` is the COMMANDED position, evaluated from the plan -- the number that
+// cannot be wrong. Residue is that minus what the emitter actually PULSED, and
+// it is the diagnostic: shipping only the commanded position would make lost
+// motion invisible to the master by construction.
 inline int16_t satResidue(float counts) {
     if (counts > 32767.0f) return 32767;
     if (counts < -32768.0f) return -32768;

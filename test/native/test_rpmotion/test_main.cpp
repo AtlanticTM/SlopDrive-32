@@ -276,6 +276,77 @@ TEST_CASE("A future anchor is not rendered before its time and is continuous at 
     CHECK(s.pos == doctest::Approx(0.9f).epsilon(0.01));
 }
 
+TEST_CASE("The render table tracks the engine through a promotion and a settle") {
+    // The table is read off the LIVE PLAN rather than a copy of the engine
+    // (RpMotionCore republish), so the three things the accessor has to carry
+    // are checked in one run: a waveform span, a SCHEDULED successor promoting
+    // mid-horizon, and a SETTLE the renderer only learns about once core 1 has
+    // planned the brake.
+    Slave s;
+    s.pushConfig(liveTags());
+    s.run(kServiceUs * 2);
+
+    Engine ref(liveTuning(), 0.0f);
+    ref.resetAt(0.0f, s.now);
+
+    auto refCommand = [&](const ml::LinkCommand& c, uint64_t at) {
+        Command rc;
+        rc.target = c.target;
+        rc.duration_us = c.duration_us;
+        rc.has_duration = c.kind == ml::kCmdWaveform && c.duration_us != 0;
+        rc.has_end_vel = (c.flags & ml::kCmdHasEndVel) != 0;
+        rc.end_vel = c.end_vel;
+        rc.has_anchor = (c.flags & ml::kCmdHasAnchor) != 0;
+        rc.anchor_us = c.anchor_us;
+        rc.client_curve_family = c.curve_family;
+        REQUIRE(ref.commit(rc, at));
+    };
+
+    double worst = 0.0;
+    auto advance = [&](uint32_t us) {
+        const uint32_t end = s.now + us;
+        while (s.now < end) {
+            if (int32_t(s.now - s.next_service) >= 0) {
+                s.core.service(s.now);
+                s.next_service = s.now + kServiceUs;
+            }
+            s.core.sampleCounts(s.now, s.pos, s.vel);
+            const double d =
+                std::fabs(double(s.pos) - double(ref.positionAt(s.now)));
+            if (d > worst) worst = d;
+            s.now += kTickUs;
+        }
+    };
+
+    // 1. a waveform span, arriving mid-flight at a nonzero handoff velocity.
+    ml::LinkCommand first = wave(0.6f, 300, 1.0f, true);
+    s.command(first);
+    s.core.service(s.now);
+    refCommand(first, s.now);
+    advance(200 * kMs);
+
+    // 2. a scheduled successor anchored 30 ms out, so it promotes INSIDE the
+    // render horizon -- the case the accessor's `next` piece exists for.
+    ml::LinkCommand sched = wave(0.15f, 300, 0.0f, true);
+    sched.flags |= ml::kCmdHasAnchor;
+    sched.anchor_us = s.now + 30 * kMs;
+    s.command(sched);
+    s.core.service(s.now);
+    refCommand(sched, s.now);
+    advance(360 * kMs);
+
+    // 3. and then nothing follows: the plan expires, coasts through the grace,
+    // and the engine brakes to rest.
+    advance(500 * kMs);
+
+    CHECK(worst < 1e-4);
+    CHECK(s.pos == doctest::Approx(ref.positionAt(s.now)).epsilon(0.0001));
+    CHECK(std::fabs(s.vel) < 1e-3f);
+    // ...and it really moved, both ways, so the parity is not two engines
+    // agreeing on a standstill.
+    CHECK(s.pos < 0.5f);
+}
+
 TEST_CASE("Both limit sets select per command and the soft-start cap folds in") {
     // A POINT move is time-optimal under the ceilings it was planned with, so
     // its peak speed reads the selected set directly instead of through the
@@ -364,6 +435,41 @@ TEST_CASE("A gated command is dropped, reported, and moves nothing") {
             seen = true;
         }
     CHECK(seen);
+
+    // An axis this slave does not have, and a ceiling set that was never
+    // pushed, each name their own bit instead of reporting a bare 0.
+    Slave a;
+    a.pushConfig(liveTags(ml::kGateHomed));
+    a.run(kServiceUs * 2);
+    ml::LinkCommand bad = wave(0.9f, 200, 0.0f, true);
+    bad.axis = 1;
+    a.command(bad);
+    a.run(20 * kMs);
+    a.drainEvents();
+    bool axis_named = false;
+    for (const auto& e : a.pulled)
+        if (e.kind == ml::kEvtCommandGated) {
+            CHECK((uint32_t(e.detail) & ml::kGateAxis) != 0);
+            axis_named = true;
+        }
+    CHECK(axis_named);
+
+    Slave u;
+    u.pushConfig(liveTags(ml::kGateHomed));
+    u.run(kServiceUs * 2);
+    // The USER set is what a manual move plans under; zero it and the command
+    // is gated as unconfigured rather than planned at zero speed.
+    u.pushConfig({{ml::kCfgUserVmax, ml::f32Bits(0.0f)}});
+    u.command(wave(0.9f, 200, 0.0f, true, ml::kLimitUser));
+    u.run(20 * kMs);
+    u.drainEvents();
+    bool unconf_named = false;
+    for (const auto& e : u.pulled)
+        if (e.kind == ml::kEvtCommandGated) {
+            CHECK((uint32_t(e.detail) & ml::kGateUnconfigured) != 0);
+            unconf_named = true;
+        }
+    CHECK(unconf_named);
 }
 
 TEST_CASE("kOpSetPos re-seeds honestly outside the window and the first plan moves inward") {

@@ -217,8 +217,8 @@ void MlinkServoDriver::pollStatus() {
     xfer(out, in);
     const std::span<const uint8_t, kFrameBytes> reply(in, kFrameBytes);
     if (!crcOk(reply)) return;
-    // PARSE ON THE VARIANT BYTE, never on what we sent: a v1 slave answering a
-    // v2 master is a supported state and reports variant 0 for free.
+    // PARSE ON THE VARIANT BYTE, never on what we sent: a slave older than
+    // this vocabulary is a supported state and reports variant 0 for free.
     if (in[0] == kStateFlash) return;          // the flash family owns the reply
     if (in[kStatusOffVariant] != kStatusV2) {
         SLOGW_EVERY_MS(10000, "mlink",
@@ -233,13 +233,9 @@ void MlinkServoDriver::pollStatus() {
     const Stamp& st = _stamp[s.seq_echo & 3u];
     if (st.ok && st.seq == s.seq_echo) _clock.push(st.t0, st.t3, s.clock_t1);
 
-    // Rising-edge fault surfacing: JUMPED means the renderer teleported its
-    // reference (physical position now differs from rendered until re-home);
-    // UNDERRAN mid-stream is starvation, expected at stream end.
+    // Rising-edge fault surfacing: UNDERRAN mid-stream is starvation, expected
+    // at stream end.
     const uint8_t rising = uint8_t(s.flags & uint8_t(~_slave_flags));
-    if (rising & kFlagJumped)
-        SLOGW("mlink", "RP JUMPED: renderer teleported its reference -- "
-              "rendered vs physical diverged, re-home to reconcile");
     if (rising & kFlagOverflow)
         SLOGW("mlink", "RP command ring OVERFLOW: an intent was dropped");
     if (rising & kFlagUnderran)

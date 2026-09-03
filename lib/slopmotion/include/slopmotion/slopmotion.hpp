@@ -1039,6 +1039,7 @@ public:
         _plan_start = now_us;
         _est_valid  = false;
         _est_ema_ok = false;
+        _est_had_cadence = false;
         _prev_vf_ok = false;
         _wave_dir     = 0;
         _wave_owed    = 0.0;
@@ -1046,6 +1047,8 @@ public:
         _plan_jerk_frac = 1.0f;
         _plans      = 0;
         _failures   = 0;
+        _last_commit_us   = 0;      // the next plan is a cold start
+        _last_plan_end_us = 0;
     }
 
     // Ceiling updates take effect at the NEXT plan (an in-flight trajectory
@@ -1101,12 +1104,20 @@ public:
         // on rest alone clamped nearly every stroke to the user limit
         // (2026-08-10). The clamp is transient and covers every planner this
         // commit reaches. Single-task engine: no concurrent reader of _cfg.
+        // The gap is measured from the later of the last commit and the
+        // last PLAN END: a hold segment is content, and measuring from its
+        // commit alone made every exit from a long hold a "cold start"
+        // capped at the user limit (field trace 2026-09-02: 6.9 s hold at
+        // the rail, exit shrunk to 70% and settled, every loop of the
+        // script). resetAt() zeroes the clock, so a re-seed IS cold.
+        uint64_t last_activity = _last_commit_us;
+        if (_last_plan_end_us > last_activity) last_activity = _last_plan_end_us;
         const bool cold = _cfg.recovery_vmax > 0.0f &&
                           _cfg.recovery_vmax < _cfg.limits.vmax &&
                           (_mode == Mode::Idle || _mode == Mode::Settle) &&
                           std::fabs(v) < 1e-3 &&
                           (_last_commit_us == 0 ||
-                           now_us - _last_commit_us > kColdStartGapUs);
+                           now_us - last_activity > kColdStartGapUs);
         _last_commit_us = now_us;
         const float vmax_full = _cfg.limits.vmax;
         if (cold) _cfg.limits.vmax = _cfg.recovery_vmax;
@@ -3232,6 +3243,7 @@ private:
                     _est_dt_ema = dt;
                     _est_a_ema  = 0.0;
                     _est_ema_ok = true;
+                    _est_had_cadence = true;
                 }
             } else {
                 _est_ema_ok = false;   // stale stream → forget the dynamics
@@ -3256,7 +3268,11 @@ private:
     // stream, or knob disabled) restores the pre-0.4 brake-on-expiry.
     double settleGraceS(uint64_t now_us) const {
         if (_cfg.settle_grace_us == 0) return 0.0;
-        if (!_est_ema_ok || !_est_valid) return 0.0;   // isolated point move
+        if (!_est_valid) return 0.0;                   // never streamed
+        // ONE command and nothing after it is an isolated point move: brake
+        // promptly. A cadence that EXISTED and was forgotten by a long hold
+        // is a live stream between actions and coasts the cap (below).
+        if (!_est_ema_ok && !_est_had_cadence) return 0.0;
         // Staleness is judged from whichever is later: the last commit or
         // the END of the plan in flight. Measured from the last commit alone,
         // a segment longer than chase_stale_us starved its own grace: a
@@ -3272,7 +3288,11 @@ private:
             return 0.0;                                // the stream really is gone
         }
         const double cap = (double)_cfg.settle_grace_us * 1e-6;
-        double g = std::fmin(kSettleGraceMult * _est_dt_ema, cap);
+        // A cadence forgotten by a hold longer than chase_stale_us is not a
+        // dead stream (the staleness check above already said alive): coast
+        // the full cap rather than braking at the first plan end after the
+        // hold (field trace 2026-09-02, the settle after every long hold).
+        double g = _est_ema_ok ? std::fmin(kSettleGraceMult * _est_dt_ema, cap) : cap;
         // A locked synthesis chain PRODUCES at knot pitch, not sample pitch:
         // starvation is judged against the chain's own cadence, or uneven
         // knots brake the machine mid-stream (field report 2026-08-09). A
@@ -3330,6 +3350,7 @@ private:
             _hold_pos = clamp01(p);
             _kind     = PlanKind::None;
             _mode     = Mode::Idle;
+            _last_plan_end_us = _plan_start + (uint64_t)(dur * 1e6 + 0.5);
             return;
         }
 
@@ -3393,6 +3414,7 @@ private:
         _hold_pos = clamp01(p);
         _kind     = PlanKind::None;
         _mode     = Mode::Idle;
+        _last_plan_end_us = _plan_start + (uint64_t)(planDuration() * 1e6 + 0.5);
     }
 
     void recordAnomaly(AnomalyType kind, float target, float detail,
@@ -3435,6 +3457,7 @@ private:
     // Stream estimator
     bool     _est_valid = false;
     bool     _est_ema_ok = false;
+    bool     _est_had_cadence = false;   // an EMA existed at some point since reset
     double   _est_v_ema = 0.0;
     double   _est_sp_pk = 0.0;    // peak-hold |chord speed|, released
     double   _est_a_ema = 0.0;
@@ -3456,6 +3479,7 @@ private:
     uint64_t _prev_vf_us = 0;
     // Last commit arrival (cold-start gap test); 0 = never.
     uint64_t _last_commit_us = 0;
+    uint64_t _last_plan_end_us = 0;   // last plan that ended at rest (hold or settle)
     // Sample-synthesis holdback (see Config::sample_synthesis).
     bool     _syn_ok = false;       // a buffered point exists
     double   _syn_p = 0.0;

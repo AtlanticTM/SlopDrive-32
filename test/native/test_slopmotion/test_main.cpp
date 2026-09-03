@@ -2504,6 +2504,144 @@ TEST_CASE("Anchored commit: a late-released segment renders the wire timeline") 
               doctest::Approx(ref.positionAt(t)).epsilon(1e-9));
 }
 
+// Field replays, 2026-09-02 (segtrace-jitter-06, window 87-187 mm, MFP c1_cubic
+// segments, the machine's live tuning read off channel 0x1122). Each figure
+// is the script exactly as the S3 committed it, ~3 ms late like the queue drain.
+namespace fieldreplay {
+struct S { float tgt; uint32_t dur_ms; float vf; bool has_vf; float next; bool has_next; };
+struct Log { int settles = 0, scaled = 0, smoothed = 0, endvel = 0, fallback = 0; double vpk = 0.0; };
+inline Config liveTuning() {
+    Config cfg;                    // engine defaults = Blend policy, FollowClient
+    cfg.limits.vmax = 10.0f;       // 1000 mm/s   / 100 mm
+    cfg.limits.amax = 400.0f;      // 40000 mm/s2 / 100 mm
+    cfg.limits.jmax = 50000.0f;    // 5e6 mm/s3   / 100 mm
+    cfg.recovery_vmax   = 2.0f;    // user 200 mm/s / 100 mm
+    cfg.settle_grace_us = 200000;  // device: settle_grace_ms 200
+    cfg.chase_ff_gain   = 0.1f;
+    cfg.chase_lookahead = 0.0f;
+    cfg.wave_centering  = false;
+    return cfg;
+}
+inline void drain(Engine& e, Log& lg, bool print) {
+    slopmotion::Anomaly ev;
+    while (e.popAnomaly(ev)) {
+        if (print) printf("      anomaly kind=%u target=%.3f detail=%.3f t=%.3f\n",
+                          unsigned(ev.kind), (double)ev.target, (double)ev.detail, ev.t_us / 1e6);
+        switch ((AnomalyType)ev.kind) {
+            case AnomalyType::SettleEngaged:    lg.settles++;  break;
+            case AnomalyType::WaveformScaled:   lg.scaled++;   break;
+            case AnomalyType::WaveformSmoothed: lg.smoothed++; break;
+            case AnomalyType::EndVelClamped:    lg.endvel++;   break;
+            case AnomalyType::WaveformFallback: lg.fallback++; break;
+            default: break;
+        }
+    }
+}
+inline void play(Engine& e, uint64_t& now, const S* seq, size_t n, uint64_t due0, Log& lg, bool print) {
+    uint64_t due = due0;
+    auto run_to = [&](uint64_t t_end) {
+        for (; now < t_end; now += kMs) {
+            (void)e.positionAt(now);
+            const double v = std::fabs((double)e.velocityAt(now));
+            if (v > lg.vpk) lg.vpk = v;
+            drain(e, lg, print);
+        }
+    };
+    for (size_t i = 0; i < n; ++i) {
+        run_to(due + 3 * kMs);
+        Command c;
+        c.target = seq[i].tgt; c.duration_us = seq[i].dur_ms * 1000u; c.has_duration = true;
+        c.end_vel = seq[i].vf; c.has_end_vel = seq[i].has_vf;
+        c.next_chord = seq[i].next; c.has_next_chord = seq[i].has_next;
+        c.anchor_us = due; c.has_anchor = true;
+        c.client_curve_family = 1;
+        const bool ok = e.commit(c, now);
+        if (print) printf("  commit tgt=%.3f dur=%u vf=%s%.3f -> ok=%d kind=%u mode=%u p=%.3f v=%.3f\n",
+                          (double)c.target, unsigned(seq[i].dur_ms), c.has_end_vel ? "" : "S",
+                          (double)c.end_vel, int(ok), unsigned(e.planKind()), unsigned(e.mode()),
+                          (double)e.positionAt(now), (double)e.velocityAt(now));
+        drain(e, lg, print);
+        due += seq[i].dur_ms * 1000u;
+    }
+    run_to(due + 3 * kMs);
+}
+}  // namespace fieldreplay
+
+TEST_CASE("Field replay: a long hold segment at the rail is content, not a cold start") {
+    // 158.5-166.3 s: a 6.875 s hold at 1.000, then the exit. On the device
+    // the exit was capped at the USER speed (endvel_clamped to -2.0 = the
+    // recovery vmax), shrunk to 70%, and settled at its end. Every loop.
+    using namespace fieldreplay;
+    Engine e(liveTuning(), 0.45f);
+    uint64_t now = 1000 * kMs; Log lg;
+    const S B[] = {
+        {0.550f,   41, 2.817f,  true, 3.600f, true},
+        {1.000f,  125, 0.0f,    true, 0.0f,  false},
+        {1.000f, 6875, 0.0f,    true, 0.0f,  false},
+        {0.650f,  167, -2.245f, true, 0.0f,  false},
+        {0.350f,  125, 0.0f,    true, 0.0f,  false},
+        {1.000f,  208, 0.0f,    true, 0.0f,  false},
+        {0.900f,  169, -0.839f, true, 0.0f,  false},
+        {0.500f,  250, -1.134f, true, 0.0f,  false},
+    };
+    printf("== hold figure\n");
+    // The approach and the hold first (the very first commit IS a cold start
+    // and is capped on purpose); the census is the exit from the hold.
+    Log warm;
+    play(e, now, B, 3, now + 200 * kMs, warm, true);
+    play(e, now, B + 3, sizeof(B) / sizeof(B[0]) - 3, now - 3 * kMs, lg, true);
+    CHECK(lg.endvel == 0);      // the exit is not capped at the recovery limit
+    CHECK(lg.settles == 0);     // and nothing brakes at a plan end mid-stream
+    CHECK(lg.vpk > 2.05);       // the exit really ran above the recovery limit
+}
+
+TEST_CASE("Field replay: the reversal figure (0.5 knot with vf -1.134) does not settle") {
+    // 169.2-170.6 s: settle fired at the exact plan end of the 250 ms
+    // segment into the 0.5 reversal knot, successor 2.7 ms late.
+    using namespace fieldreplay;
+    Engine e(liveTuning(), 0.35f);
+    uint64_t now = 1000 * kMs; Log lg;
+    const S C[] = {
+        {0.350f, 166, 0.0f,    true, 0.0f,  false},
+        {0.400f,  85, 0.859f,  true, 2.400f, true},
+        {1.000f, 250, 0.0f,    true, 0.0f,  false},
+        {0.900f, 208, -0.727f, true, 0.0f,  false},
+        {0.500f, 250, -1.134f, true, 0.0f,  false},
+        {0.350f, 166, 0.0f,    true, 0.0f,  false},
+        {0.400f,  85, 0.859f,  true, 2.400f, true},
+        {1.000f, 250, 0.0f,    true, 0.0f,  false},
+        {0.900f, 207, -0.730f, true, 0.0f,  false},
+        {0.500f, 250, -1.134f, true, 0.0f,  false},
+        {0.350f, 166, 0.0f,    true, 0.0f,  false},
+    };
+    printf("== reversal figure\n");
+    play(e, now, C, sizeof(C) / sizeof(C[0]), now + 200 * kMs, lg, true);
+    CHECK(lg.settles == 0);
+}
+
+TEST_CASE("Field replay: a re-seed is a cold start -- the next segment runs at the recovery limit") {
+    // 148.05 s: the driver re-seeded the engine at the window edge mid-script
+    // and the next segment (a 125 ms slam to 1.000) was planned at the full
+    // input limit: 84 mm at a 960 mm/s peak. Doctrine (sd-d77): the opening
+    // plan out of a re-seed traverses at the USER limit.
+    using namespace fieldreplay;
+    Engine e(liveTuning(), 0.50f);
+    uint64_t now = 1000 * kMs; Log lg;
+    const S warm[] = {
+        {0.400f, 168, 0.0f,   true, 0.0f,  false},
+        {0.500f,  91, 0.0f,  false, 0.0f,  false},
+        {0.590f, 117, 1.238f, true, 3.280f, true},
+    };
+    play(e, now, warm, 3, now + 200 * kMs, lg, false);
+    e.resetAt(0.0f, now);
+    Log cold;
+    const S slam[] = { {1.000f, 125, 0.0f, true, 0.0f, false} };
+    printf("== re-seed then slam\n");
+    play(e, now, slam, 1, now + 3 * kMs, cold, true);
+    printf("  peak |v| after re-seed = %.3f units/s (recovery 2.0)\n", cold.vpk);
+    CHECK(cold.vpk <= 2.05);
+}
+
 TEST_CASE("A segment longer than chase_stale_us must not starve its own settle grace") {
     // Field trace 2026-09-02: 587 ms segments in a slow section settled
     // (braked at amax) at plan expiry, 3 ms before their successor landed,

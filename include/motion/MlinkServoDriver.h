@@ -163,6 +163,9 @@ private:
     // is outside the window (the engine's frame clamps and cannot converge --
     // the 42 mm phantom loop, 2026-08-10); fall back to the gentle sweep.
     bool     _reseed_tried = false;
+    // True only between a stream-entry re-anchor and its first ship: the
+    // one place a re-seed is allowed (see sendSegmentTo).
+    bool     _reseed_armed = false;
     uint8_t _state = 0;
     uint8_t _slave_flags = 0;
     bool    _status_fresh = false;

@@ -153,8 +153,14 @@ void MlinkServoDriver::sendSegmentTo(float p1, float v1, float a1,
         // through to the gentle sweep below -- the window-entry glide.
         // Never mutate the chain here: a future-stamped hold once collided
         // with the sample clock and shipped a 317 us / 42 mm chunk.
+        // A re-seed is a STREAM-ENTRY act (the sample-path and silence
+        // re-anchors arm it). Mid-stream, after an RP underrun, it is the
+        // disease: reset engine -> cadence forgotten -> plan from the wrong
+        // place -> settle at its end -> long plan -> starved ring -> underrun
+        // again. Seven resets in ten seconds on ordinary content (field
+        // trace 2026-09-02, sd-wve). Mid-stream the gap is SWEPT, below.
         if (fabsf(p1 - _chain_p) > kReseedGapMm * AIM_STEPS_PER_MM &&
-            !_reseed_tried) {
+            !_reseed_tried && _reseed_armed) {
             _reseed_tried = true;
             _reseed_req = true;
             _sweep_pending = true;   // re-run this decision after the reset
@@ -443,6 +449,7 @@ void MlinkServoDriver::update() {
             _chain_a = 0.0f;
             _chain_us = _hold_us - kTickMs * 1000u;
             _sweep_pending = true;
+            _reseed_armed = false;   // mid-stream: rejoin the curve, never reset
         }
         // Blocked-interval re-base; unsigned compare also catches any
         // chain-ahead-of-hold ordering bug as a huge gap.
@@ -452,6 +459,7 @@ void MlinkServoDriver::update() {
             _chain_a = 0.0f;
             _chain_us = _hold_us - kTickMs * 1000u;
             _sweep_pending = true;
+            _reseed_armed = true;    // stream silence: the next chunk is an entry
         }
         // Gate compensates the one-tick-stale runway report. Split ONLY at
         // depth 0: sustained multi-frame ticks exceed the slave's per-frame-
@@ -736,6 +744,7 @@ void MlinkServoDriver::streamSample(int32_t target_steps, float vel_steps_s,
         _samp_us = now_us;
         _sweep_pending = true;
         _reseed_tried = false;
+        _reseed_armed = true;
         _seg_mode = true;
     }
     _samp_p = float(target_steps);

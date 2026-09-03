@@ -12,11 +12,20 @@ Also runs as a PlatformIO pre-script (env:c5_probe). A missing or unbuilt
 webui/dist is a HARD FAILURE in both modes: baking an empty page would flash a
 bridge that serves a blank UI and reports success. Standalone invocation must
 keep working: SSManager doctrine, .claude/rules/architecture.md section 4.
+
+THE BROWSER BUILD, ALWAYS. webui/dist holds whichever variant was built last,
+and a Tauri build leaves the desktop variant there (TAURI_ENV_* selects the
+desktop shell in main.js; the bundle is ~17 KB larger). The bridge must serve
+the browser variant, so this script runs `npm run build:only` in webui/ before
+baking unless --no-build is given. --check builds too: a check that can be
+fooled by a stale dist is not a check.
 """
 import argparse
 import gzip
 import hashlib
+import os
 import pathlib
+import subprocess
 import sys
 
 # PlatformIO exec()s an extra script with no __file__ bound, so the repo root
@@ -44,6 +53,21 @@ BANNER = """// webui_gz.h -- the WebUI bundle, gzip'd, as flash bytes. GENERATED
 """
 
 
+def build_browser_bundle() -> None:
+    """`npm run build:only` in webui/, with every TAURI_ENV_* variable removed so
+    the bundle is the browser variant even when a Tauri build invoked us."""
+    env = {k: v for k, v in os.environ.items() if not k.startswith("TAURI_ENV_")}
+    npm = "npm.cmd" if os.name == "nt" else "npm"
+    r = subprocess.run([npm, "run", "build:only"], cwd=str(ROOT / "webui"),
+                       env=env, capture_output=True, text=True)
+    if r.returncode != 0:
+        print("FATAL: the browser bundle did not build; refusing to bake a stale "
+              "or desktop-variant dist.", file=sys.stderr)
+        print(r.stdout[-2000:], file=sys.stderr)
+        print(r.stderr[-2000:], file=sys.stderr)
+        sys.exit(1)
+
+
 def render() -> str:
     if not SRC.exists():
         print(f"FATAL: {SRC} is missing. Build the UI first "
@@ -69,8 +93,12 @@ def main(argv=None) -> int:
     ap = argparse.ArgumentParser(description=__doc__)
     ap.add_argument("--check", action="store_true",
                     help="exit 1 if the header does not match the source")
+    ap.add_argument("--no-build", action="store_true",
+                    help="bake webui/dist as it is (never from a Tauri build)")
     args = ap.parse_args(argv)
 
+    if not args.no_build:
+        build_browser_bundle()
     want = render()
     have = OUT.read_text(encoding="utf-8") if OUT.exists() else None
     if args.check:

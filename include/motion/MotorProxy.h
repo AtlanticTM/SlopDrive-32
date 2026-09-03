@@ -17,8 +17,8 @@
 //   setup() which concrete driver that address actually forwards to.
 //
 //   `MotorDriver` grants `friend class MotorProxy;` (see MotorDriver.h) so
-//   this class can reach the PROTECTED motion methods (moveTo/streamTo/
-//   streamToSteps/stop/hardStop) on whichever concrete driver `_impl` points
+//   this class can reach the PROTECTED motion methods (sendCommand/
+//   pushConfig/stop/hardStop) on whichever concrete driver `_impl` points
 //   at. That grant is load-bearing: friendship is not inherited, so without
 //   it a MotorProxy holding a `MotorDriver&` to a sibling object could not
 //   call its protected members at all — same rule that makes the sole-caller
@@ -70,14 +70,11 @@ protected:
     // Kept protected here too, exactly like every concrete driver — otherwise
     // holding a `MotorProxy&` instead of a `MotorDriver&` would reopen the
     // door the base class closes.
-    void streamToSteps(int32_t target_steps,
-                       uint32_t speed_steps_s,
-                       uint32_t accel_steps_s2) override {
-        d().streamToSteps(target_steps, speed_steps_s, accel_steps_s2);
+    void sendCommand(const motionlink::LinkCommand& c) override {
+        d().sendCommand(c);
     }
-    void streamSample(int32_t target_steps, float vel_steps_s,
-                      uint32_t speed_steps_s, uint32_t accel_steps_s2) override {
-        d().streamSample(target_steps, vel_steps_s, speed_steps_s, accel_steps_s2);
+    void pushConfig(uint8_t tag, uint32_t raw) override {
+        d().pushConfig(tag, raw);
     }
     void stop()      override { d().stop(); }
     void hardStop()  override { d().hardStop(); }
@@ -89,9 +86,6 @@ public:
     // ---- Speed & Acceleration -----------------------------------------------
     void     setMaxSpeed(float speed_mm_s)      override { d().setMaxSpeed(speed_mm_s); }
     void     setRenderCeiling(float mm_s)       override { d().setRenderCeiling(mm_s); }
-    void     setRecoverySpeed(float mm_s)       override { d().setRecoverySpeed(mm_s); }
-    bool     consumeReseedRequest()             override { return d().consumeReseedRequest(); }
-    void     noteEngineSeeded()                 override { d().noteEngineSeeded(); }
     void     setAcceleration(float accel_mm_s2) override { d().setAcceleration(accel_mm_s2); }
     float    getMaxSpeed()          const       override { return d().getMaxSpeed(); }
     float    getAcceleration()      const       override { return d().getAcceleration(); }

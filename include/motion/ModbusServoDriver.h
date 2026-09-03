@@ -85,9 +85,11 @@ public:
 
 protected:
     // ---- Motion (MotionArbiter-only — sole-caller rule, see MotorDriver.h) --
+    // NOT an override: see AIMServoDriver.h. This backend does not speak the
+    // motion link, so the arbiter's dispatch lands on MotorDriver's default.
     void streamToSteps(int32_t target_steps,
                        uint32_t speed_steps_s,
-                       uint32_t accel_steps_s2) override;
+                       uint32_t accel_steps_s2);
     void stop()      override;
     void hardStop()  override;
 

@@ -6,8 +6,8 @@
 // - Every physical hardware interaction (steppers, servos, encoders) sits
 //   behind this interface; concrete drivers (AIMServoDriver, ModbusServoDriver,
 //   future backends) implement the pure virtuals.
-// - Sole-caller rule (architecture.md): the motion methods (moveTo/streamTo/
-//   streamToSteps/stop/hardStop) are `protected`, with `friend class
+// - Sole-caller rule (architecture.md): the motion methods (sendCommand/
+//   pushConfig/stop/hardStop) are `protected`, with `friend class
 //   MotionArbiter` as the only grant, so any call through a MotorDriver&
 //   from outside MotionArbiter is a compile error. MotorProxy also holds a
 //   friend grant so it can forward to whichever concrete driver main.cpp
@@ -27,6 +27,13 @@
 //   being buried inside a driver-specific #if block.
 
 #include <cstdint>
+
+#include "sloplog/sloplog.h"
+
+// Declaration only: the link vocabulary is a two-board detail, and pulling
+// MotionLinkProtocol.h in here would put it in every translation unit that
+// merely holds a MotorDriver&.
+namespace motionlink { struct LinkCommand; }
 
 class FastAccelStepperEngine;
 class FastAccelStepper;
@@ -76,8 +83,8 @@ public:
     // homing cycle, so HOME_OVERRIDE can actually drive step/dir pulses out to a
     // (possibly disconnected) motor for bench testing. Setting _state.homed
     // alone only opens the MotionArbiter gate — the concrete driver's own
-    // moveTo()/streamTo()/streamToSteps() still refuse every command while their
-    // internal _homed is false. This hook flips that flag (and enables outputs)
+    // own dispatch still refuses every command while its internal _homed is
+    // false. This hook flips that flag (and enables outputs)
     // so pulses genuinely go out. Default no-op: drivers that don't support a
     // fake-home are simply unaffected. Do NOT call on real hardware you don't
     // want to move without homing first.
@@ -97,22 +104,27 @@ protected:
     // static type (MotorDriver&), so no input source can dispatch motion
     // directly. Everything routes through MotionArbiter::submit() and its
     // stop/hardStop/emergencyStop helpers, which own every safety gate.
-    // Dispatch a pre-planned move in native steps — the ONLY motion dispatch
-    // entry point. Speed and accel are already in steps/s and steps/s²
-    // (converted by the arbiter before calling). No unit conversion happens
-    // inside this function — it goes straight to FAS.
-    virtual void streamToSteps(int32_t target_steps,
-                               uint32_t speed_steps_s,
-                               uint32_t accel_steps_s2)            = 0;
+    // The ONLY motion dispatch entry point: one gated intent, forwarded to
+    // whatever holds the plan. Normalized over the stroke window, anchored in
+    // the target's own clock domain by the driver (docs/rp-motion-port.md).
+    // Default drops: a backend that does not speak the link cannot move, and
+    // saying so once beats a silent no-op.
+    virtual void sendCommand(const motionlink::LinkCommand&) {
+        static bool warned = false;
+        if (!warned) {
+            warned = true;
+            SLOGW("motor", "backend cannot accept motion commands: no motion link");
+        }
+    }
 
-    // Streamed-curve sample fast path. vel_steps_s = SIGNED curve velocity in
-    // the native step frame. Default = position chase via streamToSteps();
-    // remote-trajectory backends (mlink) MUST override -- chase micro-targets
-    // through a land-at-v=0 planner become sprint-and-stop (sd-ar3).
-    virtual void streamSample(int32_t target_steps, float vel_steps_s,
-                              uint32_t speed_steps_s, uint32_t accel_steps_s2) {
-        (void)vel_steps_s;
-        streamToSteps(target_steps, speed_steps_s, accel_steps_s2);
+    // Field-tagged policy push (ceilings, window, gates, soft-start cap,
+    // engine tuning). Same default and the same reason.
+    virtual void pushConfig(uint8_t /*tag*/, uint32_t /*raw*/) {
+        static bool warned = false;
+        if (!warned) {
+            warned = true;
+            SLOGW("motor", "backend cannot accept config pushes: no motion link");
+        }
     }
 
     virtual void stop()      = 0;    // full stop + cut power (also clears homed)
@@ -129,19 +141,6 @@ public:
     // Default no-op: only an open-loop offboard renderer needs one -- an
     // onboard stepper is already bounded by the planner that feeds it.
     virtual void setRenderCeiling(float /*mm_s*/) {}
-    // Gentle cap for RECOVERY moves (re-anchor catch-up sweeps): content
-    // plays at input limits, getting BACK to content runs at people limits.
-    // Default no-op; only the offboard chain builder sweeps.
-    virtual void setRecoverySpeed(float /*mm_s*/) {}
-    // True once when the driver wants the motion engine re-seeded at the
-    // live position (chain gap too big to glide). Cleared by the read.
-    virtual bool consumeReseedRequest() { return false; }
-    // The HOST already seeded the engine at the live position for this stream
-    // entry. ONE RESET OWNER: a driver that would otherwise ask for its own
-    // re-seed on the same entry must suppress it, or one connect costs two
-    // cold starts ~10 ms apart from the same stale position (sd-6b2.12).
-    // Default no-op; only the offboard chain builder tracks entries.
-    virtual void noteEngineSeeded() {}
     virtual void     setAcceleration(float accel_mm_s2)  = 0;
     virtual float    getMaxSpeed()          const        = 0;
     // Acceleration ACTUALLY applied by the driver (mm/s², post-internal-clamp).

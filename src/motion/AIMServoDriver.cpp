@@ -65,8 +65,8 @@ void AIMServoDriver::init() {
     // on ESP32 that generates step pulses in hardware, off the CPU.
     // Pin StepperTask to Core 0. It runs at configMAX_PRIORITIES-1 (24), so
     // placement is not cosmetic:
-    //   Core 1 -> preempts streamSamplerTask (prio 4) every task period, which
-    //             clumps the 1 kHz micro-targets into audible judder.
+    //   Core 1 -> preempts the higher-priority motion tasks every task period,
+    //             which clumps micro-targets into audible judder.
     //   unpinned -> floats, and gets delayed behind Core 0 WiFi/BLE/WS bursts,
     //             which shows up as intermittent motion hiccups.
     //   Core 0 -> only outranks httpTask/comms, both jitter-tolerant, and stays
@@ -74,8 +74,8 @@ void AIMServoDriver::init() {
     _fas_engine.init(0);
 
     // Refill cadence for the command queue. The library default is 4 ms, which
-    // decimates streamSamplerTask's 1 kHz micro-targets to 250 Hz before FAS
-    // ever sees them. See AIM_FAS_TASK_RATE_MS for the constraint tying this to
+    // decimates a ~1 kHz micro-target producer to 250 Hz before FAS ever sees
+    // them. See AIM_FAS_TASK_RATE_MS for the constraint tying this to
     // the plan-ahead window below — the two only make sense as a pair.
     // This is NOT the reversal dwell. That does not live in this task, and
     // lowering the task rate will not shorten it.
@@ -785,11 +785,11 @@ bool AIMServoDriver::checkPushToHome() {
 
 
 // ---- streamToSteps() — pre-planned native-step dispatch ---------------------
-// Called exclusively from Core 1, via MotionArbiter::submit() (motorTask) or
-// ::submitStreamSample() (streamSamplerTask). Speed and accel arrive already
-// converted to steps/s and steps/s² by the arbiter, including the arbiter's
-// own raise-only acceleration clamp — no unit math or accel policy here,
-// straight to FAS. No stall watchdog by design: intents are event-driven, so
+// UNREACHABLE on this machine: the arbiter dispatches through the motion link
+// (docs/rp-motion-port.md) and this backend does not speak it, so nothing
+// calls this. Kept intact for a future step/dir drive. Speed and accel would
+// arrive already converted to steps/s and steps/s^2 -- no unit math or accel
+// policy here, straight to FAS. No stall watchdog by design: intents are event-driven, so
 // quiet is a valid resting state (SETTLE is SlopMotion's job, not this
 // driver's).
 void AIMServoDriver::streamToSteps(int32_t target_steps,

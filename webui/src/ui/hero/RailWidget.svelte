@@ -67,6 +67,7 @@
   import { writeSetting, sendCommand, displayValue, statusOf, shadowOf, STATUS } from '../../model/shadow.svelte.js';
   import { formatValue, unitOf, labelFor } from '../../model/format.js';
   import { ACCENT, ac } from '../../model/theme.js';
+  import { norm, travelBounds } from '../../model/bounds.js';
   import { createTelebuf, createTrail, createRenderClock } from './telebuf.js';
   import HeroNumerals from './HeroNumerals.svelte';
   import PlanStrip from '../widgets/PlanStrip.svelte';
@@ -86,8 +87,8 @@
   const move = $derived(fields.move);
   const target = $derived(fields.target);
   // RFC-041 optional claims: the machine's ACTUAL travel extent, as opposed
-  // to `min`/`max`'s own static catalog bounds (see the `hi` derivation
-  // below). Both null on any hub that has not tagged these roles yet.
+  // to `min`/`max`'s own static catalog bounds. Both null on a hub that does
+  // not tag these roles; bounds.js owns what happens then.
   const extentMeasured = $derived(fields.extentMeasured);
   const extentMax = $derived(fields.extentMax);
 
@@ -139,44 +140,23 @@
   }
 
   // Rail extent: the whole travel, not the current window — the rail must
-  // show the full extent even when the window is small.
-  //
-  // `lo` is the window fields' own catalog `min` annotation (the legal FLOOR
-  // a window edge may be set to — on this protocol that is always 0, the
-  // near hard stop). `hi` is where it gets interesting: `max.max` is that
-  // same kind of fact for the far edge, but it is the window SETTING's legal
-  // ceiling, not the rail's physical length — on a machine with a generous
-  // ceiling and a short rail (this device: window.max caps at 2000mm, the
-  // rail is ~500mm) using it draws a rail four times too long, and a
-  // successful home changes nothing because home doesn't touch that
-  // annotation at all. RFC-041 registers two roles for the fact this
-  // actually needs — `geometry.measured_travel` (what homing just measured,
-  // when it did) and `geometry.max_travel` (the configured ceiling homing
-  // searches within) — preferring the MEASUREMENT over the configured
-  // ceiling because it is ground truth from this session's own home, not a
-  // number the operator typed in. Both are OPTIONAL claims: no catalog has
-  // tagged them yet (RFC-041 is filed, not landed), so `hi` falls back to
-  // `max.max` exactly as before on every hub live today — that fallback is
-  // the documented, permanent behavior for an unroled hub, not a stopgap.
-  const lo = $derived(min.min ?? 0);
+  // show the full extent even when the window is small. `lo` is the window
+  // fields' own catalog `min` (the legal FLOOR a window edge may be set to);
+  // the preference order behind `hi` lives in model/bounds.js, which is its
+  // one home. Using `max.max` when a travel role is available draws a rail
+  // four times too long on this device (window.max caps at 2000mm, the rail
+  // is ~500mm) and a successful home never changes it.
   const measuredTravel = $derived(
     extentMeasured ? displayValue(extentMeasured, sampleOf(extentMeasured)) : null);
   const maxTravel = $derived(
     extentMax ? displayValue(extentMax, sampleOf(extentMax)) : null);
-  const hi = $derived.by(() => {
-    if (typeof measuredTravel === 'number' && isFinite(measuredTravel) && measuredTravel > 0) {
-      return lo + measuredTravel;
-    }
-    if (typeof maxTravel === 'number' && isFinite(maxTravel) && maxTravel > 0) {
-      return lo + maxTravel;
-    }
-    return max.max ?? (lo + 1);
-  });
-  const span = $derived(Math.max(hi - lo, 1e-9));
+  const extent = $derived(travelBounds(min.min ?? 0, measuredTravel, maxTravel, max.max));
+  const lo = $derived(extent.lo);
+  const hi = $derived(extent.hi);
+  const span = $derived(extent.span);
 
   function pct(v) {
-    if (v == null || !isFinite(v)) return null;
-    return Math.min(1, Math.max(0, (v - lo) / span));
+    return norm(v, lo, hi);
   }
 
   const minPct = $derived(pct(minVal));

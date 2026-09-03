@@ -58,8 +58,7 @@
   import { machine } from '../../model/machine.svelte.js';
   import { formatValue, unitOf, optionLabel } from '../../model/format.js';
   import { ROLE, claimRoles } from '../../model/roles.js';
-
-  function clamp(v, lo, hi) { return Math.min(hi, Math.max(lo, v)); }
+  import { norm } from '../../model/bounds.js';
 
   /** Per-field sample lookup — every role-claimed field carries its own
       channelId, so a claim spread across multiple channels still reads the
@@ -74,9 +73,8 @@
   function pct(f) {
     if (!f) return null;
     const v = fieldValue(f);
-    if (v == null || !isFinite(v)) return null;
-    if (f.min != null && f.max != null && f.max > f.min) return clamp((v - f.min) / (f.max - f.min), 0, 1);
-    return clamp(v, 0, 1);
+    if (f.min != null && f.max != null && f.max > f.min) return norm(v, f.min, f.max);
+    return norm(v, 0, 1);
   }
 
   // ---- discovery: ROLE, and ONLY role — see this file's header --------------

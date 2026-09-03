@@ -29,6 +29,7 @@
   import { ROLE } from '../../model/roles.js';
   import { reportedValue } from '../../model/settings.js';
   import { formatValue, unitOf, labelFor } from '../../model/format.js';
+  import { norm } from '../../model/bounds.js';
 
   let { roles = [ROLE.telemetryPosition, ROLE.telemetryVelocity] } = $props();
 
@@ -180,8 +181,7 @@
         if (!ring) return;
         const laneY = i * laneH;
         const [lo, hi] = laneScale(f, ring, now);
-        const span = hi - lo || 1;
-        const y = (v) => laneY + (1 - Math.min(1, Math.max(0, (v - lo) / span))) * (laneH - 4) + 2;
+        const y = (v) => laneY + (1 - norm(v, lo, hi)) * (laneH - 4) + 2;
 
         ctx.strokeStyle = line;
         ctx.strokeRect(x0, laneY + 1, x1 - x0, laneH - 2);

@@ -455,6 +455,20 @@ enum ConfigTag : uint8_t {
     kCfgHandoffChordFactor = 0x0C,
     kCfgOvershootGuard = 0x0D,
     kCfgOvershootChordSlack = 0x0E,
+    // The rest of the engine tuning the S3 exposes (EngineConfigMap.h is
+    // the S3 census of these; a tuning field without a tag is engine-
+    // default-by-decision and named there). kCfgSampleSynthesis (0x08) is
+    // RETIRED: synthesis left the engine 2026-09-03; a slave ignores it.
+    kCfgBlendSteps = 0x0F,          // u32, infeasible_blend_steps
+    kCfgSmoothBudget = 0x10,        // f32, infeasible_smooth_budget
+    kCfgAmplitudeBudget = 0x11,     // f32, infeasible_amplitude_budget
+    kCfgChaseFeedforward = 0x12,    // u32 bool
+    kCfgChaseAccelFf = 0x13,        // u32 bool
+    kCfgChaseFfGain = 0x14,         // f32
+    kCfgChaseDenseUs = 0x15,        // u32 us
+    kCfgChaseLookahead = 0x16,      // f32, intervals
+    kCfgChaseAimExtrap = 0x17,      // u32 bool
+    kCfgChaseStaleUs = 0x18,        // u32 us
     // Safety gates. ONE tag, because the slave enforces ONE predicate (homed
     // and not paused) and the bits exist so telemetry can name WHICH gate is
     // closed without a second field to disagree with it. Motion denied
@@ -715,6 +729,13 @@ enum LinkEvent : uint8_t {
     kEvtCommandGated = 0x80,       // detail = the gate bits that denied it
     kEvtConfigTagUnknown = 0x81,   // detail = the tag
     kEvtClockStep = 0x82,          // the slave time base restarted
+    // A plan was adopted (commit, scheduled promotion, settle, hold): the
+    // S3 rebuilds its plan strip from these. t_us = plan start (slave us),
+    // target = the plan's end position (normalized), detail = duration in
+    // seconds (0 = a hold), cmd_seq = the frame that caused it (0 = the
+    // slave's own settle or hold). Start position is the status pos at
+    // t_us; velocity rides status. Rate is the commit rate, never a tick.
+    kEvtPlanAdopted = 0x83,
 };
 struct EventRecord {
     uint8_t state = 0;      // State, so byte 0 means one thing in every reply

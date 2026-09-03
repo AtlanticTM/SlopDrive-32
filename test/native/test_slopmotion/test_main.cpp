@@ -103,6 +103,10 @@ struct SweepStats {
     double max_abs_a = 0.0;
     double max_abs_j = 0.0;   // finite-difference of accel on the grid
     double min_p = 1e9, max_p = -1e9;
+    // The same excursion on the UNCLAMPED state. Asserting a window on
+    // positionAt asserts on the clamp itself and can never fail; these are
+    // what a plan leaving [0,1] actually shows up in.
+    double min_raw = 1e9, max_raw = -1e9;
     double max_dv = 0.0;      // largest velocity step between adjacent samples
 };
 
@@ -122,6 +126,10 @@ SweepStats sweep(Engine& e, uint64_t t0_us, uint64_t t1_us) {
         s.max_abs_a = std::max(s.max_abs_a, std::fabs(a));
         s.min_p = std::min(s.min_p, p);
         s.max_p = std::max(s.max_p, p);
+        double rp, rv, ra;
+        e.rawSampleAt(t, rp, rv, ra);
+        s.min_raw = std::min(s.min_raw, rp);
+        s.max_raw = std::max(s.max_raw, rp);
         if (!first) {
             s.max_abs_j = std::max(s.max_abs_j, std::fabs(a - prev_a) / 1e-3);
             s.max_dv    = std::max(s.max_dv, std::fabs(v - prev_v));
@@ -736,6 +744,7 @@ TEST_CASE("Both policies keep the sampled window invariant [0,1]") {
         uint64_t next_cmd = 0;
         int i = 0;
         double min_p = 1e9, max_p = -1e9;
+        double min_raw = 1e9, max_raw = -1e9;
         for (uint64_t t = 0; t <= 6 * kS; t += kMs) {
             if (t >= next_cmd) {
                 Command c;
@@ -755,9 +764,20 @@ TEST_CASE("Both policies keep the sampled window invariant [0,1]") {
             REQUIRE(p <= 1.0 + 1e-9);
             CHECK(std::fabs(v) <= cfg.limits.vmax * 1.001);
             min_p = std::min(min_p, p); max_p = std::max(max_p, p);
+            // THE ASSERTION THAT CAN ACTUALLY FAIL. The two above ride the
+            // sampler clamp, so they hold whatever the planner does; these
+            // are the raw polynomial state, and the bound is what the two
+            // referees actually permit -- kRuckigLegalEps of ratio slack on
+            // an adopted profile, plus the coast's own kCoastMaxNorm.
+            double rp, rv, ra;
+            e.rawSampleAt(t, rp, rv, ra);
+            min_raw = std::min(min_raw, rp); max_raw = std::max(max_raw, rp);
         }
-        MESSAGE("policy " << (int)pol << ": excursion ["
-                          << min_p << ", " << max_p << "]");
+        MESSAGE("policy " << (int)pol << ": excursion [" << min_p << ", "
+                          << max_p << "]  RAW [" << min_raw << ", " << max_raw
+                          << "]");
+        CHECK(min_raw >= -0.10);
+        CHECK(max_raw <= 1.10);
     }
 }
 
@@ -2238,6 +2258,9 @@ TEST_CASE("Out-of-window targets are clamped on EVERY command kind") {
             const auto sw = sweep(e, 0, 1400 * kMs);
             CHECK(sw.min_p >= -1e-9);
             CHECK(sw.max_p <= 1.0 + 1e-9);
+            // Not the clamp's own output: a plan leaving the window fails here.
+            CHECK(sw.min_raw >= -1e-6);
+            CHECK(sw.max_raw <= 1.0 + 1e-6);
         }
     }
     SUBCASE("waveform on a demanding deadline stays in the window") {
@@ -2255,6 +2278,8 @@ TEST_CASE("Out-of-window targets are clamped on EVERY command kind") {
             const auto sw = sweep(e, 0, 600 * kMs);
             CHECK(sw.min_p >= -1e-9);
             CHECK(sw.max_p <= 1.0 + 1e-9);
+            CHECK(sw.min_raw >= -1e-6);
+            CHECK(sw.max_raw <= 1.0 + 1e-6);
         }
     }
     SUBCASE("bare point (chase)") {
@@ -2270,6 +2295,8 @@ TEST_CASE("Out-of-window targets are clamped on EVERY command kind") {
             const auto sw = sweep(e, 0, 2 * kS);
             CHECK(sw.min_p >= -1e-9);
             CHECK(sw.max_p <= 1.0 + 1e-9);
+            CHECK(sw.min_raw >= -1e-6);
+            CHECK(sw.max_raw <= 1.0 + 1e-6);
         }
     }
     SUBCASE("dense bare-point stream that runs off both rails (chase)") {
@@ -2279,6 +2306,7 @@ TEST_CASE("Out-of-window targets are clamped on EVERY command kind") {
         Engine e(cfg, 0.5f);
         const uint64_t dt = 20 * kMs;
         double pmin = 1e9, pmax = -1e9;
+        double rmin = 1e9, rmax = -1e9;
         for (uint64_t t = 0; t <= 2 * kS; t += dt) {
             Command c;
             c.target = (float)(0.5 + 0.8 * std::sin(2.0 * 3.14159265358979 *
@@ -2290,11 +2318,20 @@ TEST_CASE("Out-of-window targets are clamped on EVERY command kind") {
                 const double p = e.positionAt(q);
                 pmin = std::min(pmin, p);
                 pmax = std::max(pmax, p);
+                double rp, rv, ra;
+                e.rawSampleAt(q, rp, rv, ra);
+                rmin = std::min(rmin, rp);
+                rmax = std::max(rmax, rp);
             }
         }
-        MESSAGE("clamped chase band [" << pmin << ", " << pmax << "]");
+        MESSAGE("clamped chase band [" << pmin << ", " << pmax << "]  RAW ["
+                << rmin << ", " << rmax << "]");
         CHECK(pmin >= -1e-9);
         CHECK(pmax <= 1.0 + 1e-9);
+        // Every chase plan is refereed now (sd-6b2.2), so the RAW band is
+        // bounded too: kRuckigLegalEps of slack plus the coast's own cap.
+        CHECK(rmin >= -0.10);
+        CHECK(rmax <= 1.10);
     }
 }
 
@@ -2523,4 +2560,181 @@ TEST_CASE("A peak BETWEEN grid points flips the verdict (sd-6b2.9)") {
     CHECK(closed > 1.0);        // the curve breaks the ceiling...
     CHECK(grid   < 1.0);        // ...and the grid it used to be scored on says
                                 //    it does not. That is the safety hole.
+}
+
+TEST_CASE("jmax = 0 reports ILLEGAL, never legal (sd-6b2.3)") {
+    // 0/0 is NaN and fmax drops a NaN, so the scan used to report the curve
+    // LEGAL and the whole quintic referee was off. A zero jerk ceiling reaches
+    // the engine from NVS through the host's input_max_jerk / span.
+    auto cfg = machineConfig();
+    cfg.limits.jmax = 0.0f;
+    Engine e(cfg, 0.5f);
+    // A dead-straight coast: zero jerk, zero accel, well inside every other
+    // ceiling, which is the curve most likely to sail through.
+    const double c[6] = {0.5, 0.05, 0.0, 0.0, 0.0, 0.0};
+    CHECK(e.quinticWorstRatio(c, 0.1, -1.0) > 1.0);
+    // ...and no waveform command is adopted as a Hermite plan under it.
+    Command cmd;
+    cmd.target = 0.7f; cmd.duration_us = 200 * (uint32_t)kMs;
+    cmd.has_duration = true;
+    e.commit(cmd, 0);
+    const auto s = e.snapshot(0);
+    CHECK(s.plan_kind != (uint8_t)slopmotion::PlanKind::Quintic);
+    CHECK(s.plan_kind != (uint8_t)slopmotion::PlanKind::Cubic);
+}
+
+TEST_CASE("A 1 ms due gap does not blow up the af estimate (sd-6b2.3)") {
+    // af = (vf - prev_vf)/gap, and the field's 10 ms segments can land anchors
+    // 1 ms apart. Unfloored, a 1 ms gap against a 20 ms span scaled the
+    // arrival acceleration by 1000x and sent the curve to the guard.
+    auto run = [](uint64_t gap_us) {
+        auto cfg = machineConfig();
+        Engine e(cfg, 0.5f);
+        Command a;
+        a.target = 0.55f; a.duration_us = 20 * (uint32_t)kMs;
+        a.has_duration = true; a.end_vel = 0.2f; a.has_end_vel = true;
+        REQUIRE(e.commit(a, 0));
+        Command b;
+        b.target = 0.60f; b.duration_us = 20 * (uint32_t)kMs;
+        b.has_duration = true; b.end_vel = 0.9f; b.has_end_vel = true;
+        REQUIRE(e.commit(b, gap_us));
+        return sweep(e, gap_us, gap_us + 20 * kMs);
+    };
+    const auto tight = run(1 * kMs);      // the pathological gap
+    const auto sane  = run(20 * kMs);     // the same knots, honestly spaced
+    MESSAGE("af gap: 1 ms peak |a| " << tight.max_abs_a << "   20 ms peak |a| "
+            << sane.max_abs_a);
+    // Same order, not 1000x apart, and inside the ceiling either way.
+    CHECK(tight.max_abs_a <= sane.max_abs_a * 4.0 + 1.0);
+    CHECK(tight.max_abs_a <= machineConfig().limits.amax * 1.05);
+}
+
+TEST_CASE("The settle brake is windowed: it ENDS inside the rail (sd-6b2.2)") {
+    // A velocity-interface brake has no position target, so it lands wherever
+    // v^2/2a puts it and _hold_pos = clamp01() then erases the difference,
+    // leaving the engine's belief and the machine's position apart by exactly
+    // the overshoot. Re-planned to the rail, the plan ends where it says.
+    auto cfg = blendConfig();             // 10 u/s, 400 u/s^2: 12.5 mm of brake
+    cfg.settle_grace_us = 0;
+    Engine e(cfg, 0.90f);
+    Command c;
+    c.target = 0.98f; c.duration_us = 40 * (uint32_t)kMs;
+    c.has_duration = true;
+    c.end_vel = 10.0f; c.has_end_vel = true;   // ends at vmax, into the rail
+    REQUIRE(e.commit(c, 0));
+    double last_p = 0.0, max_raw = -1e9;
+    for (uint64_t t = 0; t <= 2 * kS; t += kMs) {
+        double rp, rv, ra;
+        e.rawSampleAt(t, rp, rv, ra);
+        max_raw = std::max(max_raw, rp);
+        last_p  = rp;
+    }
+    MESSAGE("settle: raw peak " << max_raw << "  rest at " << last_p);
+    // It comes to REST, and it rests INSIDE the window -- the plan's own end,
+    // not the clamp's opinion of where the plan ended.
+    CHECK(last_p <= 1.0 + 1e-6);
+    CHECK(last_p >= -1e-6);
+    CHECK(std::fabs((double)e.velocityAt(2 * kS)) < 1e-3);
+    // The transient IS physics (you cannot stop in less than v^2/2a), but it
+    // is now bounded by that rather than by nothing.
+    CHECK(max_raw <= 0.98 + 0.5 * 10.0 * 10.0 / 400.0 + 0.02);
+}
+
+TEST_CASE("Every chase plan is refereed; the window holds on RAW state "
+          "(sd-6b2.2)") {
+    // Chase at full authority never reached ruckigWorstRatio, and Ruckig is
+    // not a legality oracle: the header's own table has it spanning
+    // [-0.605, 0.853] at a low jerk ceiling. A deliberately weak softened
+    // ceiling makes that reachable here. Either the softened plan is refused
+    // and the mechanical retry lands, or a terminal plan is adopted WITH a
+    // WaveformFallback naming the ratio. Never silently.
+    auto cfg = machineConfig();
+    cfg.limits.jmax = 30.0f;              // the regime of the header's table:
+    cfg.chase_jerk_scale = false;         // too little jerk to turn the state
+    Engine e(cfg, 0.5f);                  // around inside the ceilings
+    int fallbacks = 0;
+    double max_raw = -1e9, min_raw = 1e9;
+    const uint64_t dt = 20 * kMs;
+    for (uint64_t t = 0; t <= 1500 * kMs; t += dt) {
+        Command c;
+        c.target = (float)(0.5 + 0.85 * std::sin(2.0 * 3.14159265358979 * 1.5
+                                                 * (double)t * 1e-6));
+        c.has_anchor = true; c.anchor_us = t;
+        e.commit(c, t);
+        slopmotion::Anomaly ev;
+        while (e.popAnomaly(ev))
+            if (ev.kind == (uint8_t)AnomalyType::WaveformFallback) fallbacks++;
+        for (uint64_t q = t; q < t + dt; q += kMs) {
+            double rp, rv, ra;
+            e.rawSampleAt(q, rp, rv, ra);
+            max_raw = std::max(max_raw, rp);
+            min_raw = std::min(min_raw, rp);
+        }
+    }
+    MESSAGE("refereed chase: " << fallbacks << " fallbacks, RAW band ["
+            << min_raw << ", " << max_raw << "]");
+    CHECK(fallbacks > 0);                 // never vacuous: the referee bit
+    // Bounded by what the referee itself permits (kRuckigLegalEps of ratio
+    // slack) plus the coast's own cap -- not by the sampler clamp.
+    CHECK(max_raw <= 1.10);
+    CHECK(min_raw >= -0.10);
+    // ...and the clamped channel never reports outward velocity at a wall it
+    // says the machine is parked against (F4).
+    for (uint64_t q = 0; q <= 1500 * kMs; q += kMs) {
+        const double p = e.positionAt(q);
+        const double v = e.velocityAt(q);
+        REQUIRE(p >= -1e-9);
+        REQUIRE(p <= 1.0 + 1e-9);
+        if (p >= 1.0 - 1e-12) CHECK(v <= 1e-9);
+        if (p <= 1e-12)       CHECK(v >= -1e-9);
+    }
+}
+
+TEST_CASE("The coast is bounded OUTSIDE the window and reports no velocity "
+          "there (sd-6b2.2)") {
+    // sampleRaw coasts past plan expiry so a chord join stays continuous, and
+    // commit() SEEDS the next plan from it. Unbounded, at 1000 mm/s over a
+    // 100 mm window, 60 ms of coast is 60 mm outside a window the machine can
+    // never leave, so the successor plans from a position that never existed.
+    auto cfg = blendConfig();
+    cfg.settle_grace_us = 60000;          // the full grace, so the coast runs
+    Engine e(cfg, 0.10f);
+    // A cadence first: with none measured the settle brakes at expiry and
+    // there is no coast to bound (settleGraceS).
+    uint64_t at = 0;
+    for (int i = 1; i <= 3; i++) {
+        Command w;
+        w.target = (float)(0.10 + 0.20 * i);
+        w.duration_us = 100 * (uint32_t)kMs;
+        w.has_duration = true;
+        REQUIRE(e.commit(w, at));
+        at += 100 * kMs;
+    }
+    Command c;
+    c.target = 0.80f; c.duration_us = 100 * (uint32_t)kMs;
+    c.has_duration = true;
+    c.end_vel = 5.0f; c.has_end_vel = true;   // ends fast, aimed at the rail
+    REQUIRE(e.commit(c, at));
+    double max_raw = -1e9;
+    bool   moving_while_capped = false;
+    for (uint64_t t = at; t <= at + 200 * kMs; t += kMs) {
+        double rp, rv, ra;
+        e.rawSampleAt(t, rp, rv, ra);
+        max_raw = std::max(max_raw, rp);
+        // At the cap the position stops advancing, so the velocity it reports
+        // must stop too: one state, one story.
+        if (rp >= 1.05 - 1e-6 && std::fabs(rv) > 1e-9) moving_while_capped = true;
+    }
+    // The PLAN itself is legal and stays in the window; everything past 1.0
+    // here is the coast, which is the thing under test.
+    {
+        double pp, vv, aa;
+        e.rawSampleAt(at + 100 * kMs, pp, vv, aa);
+        CHECK(pp <= 1.0 + 1e-6);
+    }
+    MESSAGE("coast: raw peak " << max_raw);
+    // 60 ms of coast at 5 u/s is 0.30, which unbounded lands at 1.10.
+    CHECK(max_raw <= 1.05 + 1e-6);     // 1.0 + kCoastMaxNorm, and no further
+    CHECK(max_raw > 1.0);              // and it really did coast out
+    CHECK_FALSE(moving_while_capped);
 }

@@ -837,24 +837,29 @@ public:
     // May engage the SETTLE transition when the clock runs past a trajectory
     // that ends moving.
     float positionAt(uint64_t now_us) {
-        maybeSettle(now_us);
         double p, v, a;
-        sampleRaw(now_us, p, v, a);
-        return (float)clamp01(p);
+        sampleClamped(now_us, p, v, a);
+        return (float)p;
     }
 
     float velocityAt(uint64_t now_us) {
-        maybeSettle(now_us);
         double p, v, a;
-        sampleRaw(now_us, p, v, a);
+        sampleClamped(now_us, p, v, a);
         return (float)v;
     }
 
     float accelerationAt(uint64_t now_us) {
-        maybeSettle(now_us);
         double p, v, a;
-        sampleRaw(now_us, p, v, a);
+        sampleClamped(now_us, p, v, a);
         return (float)a;
+    }
+
+    // The UNCLAMPED sampled state: the same path the sampler takes, minus the
+    // backstop. A window regression asserted on positionAt's output asserts on
+    // the clamp itself and can never fail.
+    void rawSampleAt(uint64_t now_us, double& p, double& v, double& a) {
+        maybeSettle(now_us);
+        sampleRaw(now_us, p, v, a);
     }
 
     // Time-aware "does the plan still have motion left to render?" — the
@@ -879,8 +884,8 @@ public:
         maybeSettle(now_us);
         Snapshot s;
         double p, v, a;
-        sampleRaw(now_us, p, v, a);
-        s.pos = (float)clamp01(p);
+        sampleClampedNoSettle(now_us, p, v, a);
+        s.pos = (float)p;
         s.vel = (float)v;
         s.acc = (float)a;
         if (_kind != PlanKind::None) {
@@ -933,6 +938,10 @@ private:
     // be mistaken for one. The pathology this referee exists to catch is 1.4x
     // and up, nowhere near this band.
     static constexpr double   kRuckigLegalEps = 0.05;
+    // What a referee reports when the question itself is degenerate (no jerk
+    // authority, no duration): illegal, and FINITE so a telemetry consumer
+    // averaging anomaly details does not inherit an inf.
+    static constexpr double   kIllegalRatio = 1e6;
     // ROUNDING, NOT GRACE. The window term steps from 0 to 1.0 the instant a
     // sample leaves [0,1], so a curve commanded to land EXACTLY on a rail is
     // scored by whichever side of zero its last coefficient sum rounds to: the
@@ -949,6 +958,15 @@ private:
     // Coast-past-expiry bound (sampleRaw): 2× the grace cap, so the coast
     // always outlives the window in which settle takes over.
     static constexpr double   kCoastCapS = 0.060;
+    // ...and bounded in DISTANCE too, because the time cap alone permits
+    // vmax * kCoastCapS, which on the machine's 100 mm window at 1000 mm/s is
+    // 60 mm of extrapolated position that commit() then seeds the next plan
+    // from. The bound is how far OUTSIDE the window the coast may reach, not
+    // how far it may travel: extrapolating a plausible 60 mm INSIDE the window
+    // is the chord-join continuity the coast exists for, while 60 mm outside it
+    // is a position the machine can never have been at. 5 % of the window is
+    // 5 mm, an order above MotionArbiter's own 0.5 mm wall.
+    static constexpr double   kCoastMaxNorm = 0.05;
     // Anchored-commit lateness bound; MUST stay under kCoastCapS (see
     // commit()).
     static constexpr uint64_t kAnchorMaxLateUs = 50000;
@@ -1023,12 +1041,45 @@ private:
         if (isHermite()) quinticAt(dur > 0 ? t / dur : 1.0, p, v, a);
         else                            _traj.at_time(t, p, v, a);
         if (over > 0.0) {
+            bool capped = over >= kCoastCapS;
+            if (std::fabs(v) > 1e-9) {
+                const double wall = v > 0.0 ? 1.0 + kCoastMaxNorm
+                                            : -kCoastMaxNorm;
+                const double room = (wall - p) / v;
+                if (room < over) {
+                    over   = room > 0.0 ? room : 0.0;
+                    capped = true;
+                }
+            }
             p += v * over;
             a = 0.0;
-            // At the cap the position stops advancing, so the reported
+            // At EITHER cap the position stops advancing, so the reported
             // velocity must stop too: one state, one story.
-            if (over >= kCoastCapS) v = 0.0;
+            if (capped) v = 0.0;
         }
+    }
+
+    // THE ONE CLAMPED SAMPLER. The window clamp is the hard backstop, and a
+    // clamped position that still reports outward velocity tells the follower
+    // to keep driving into a rail whose position channel says "stopped" -- on
+    // the RP2350 that channel becomes step rate, not telemetry. Velocity and
+    // acceleration are zeroed only while the position term is SATURATED AND
+    // pointing outward: at the wall on the way back in, the motion is real.
+    void sampleClampedNoSettle(uint64_t now_us, double& p, double& v,
+                               double& a) const {
+        sampleRaw(now_us, p, v, a);
+        if (p < 0.0) {
+            p = 0.0;
+            if (v < 0.0) { v = 0.0; a = 0.0; }
+        } else if (p > 1.0) {
+            p = 1.0;
+            if (v > 0.0) { v = 0.0; a = 0.0; }
+        }
+    }
+
+    void sampleClamped(uint64_t now_us, double& p, double& v, double& a) {
+        maybeSettle(now_us);
+        sampleClampedNoSettle(now_us, p, v, a);
     }
 
     // Quintic evaluation at normalized tau ∈ [0,1] (real-time derivatives).
@@ -1144,7 +1195,11 @@ private:
         double af = 0.0;
         if (cmd.has_end_vel && _prev_vf_ok && now_us > _prev_vf_us) {
             const double gap = (double)(now_us - _prev_vf_us) * 1e-6;
-            if (gap < 3.0 * T) af = (vf_handoff - _prev_vf) / gap;
+            // FLOORED AT THE SEGMENT'S OWN SPAN. The gap is the sender's knot
+            // spacing, and a 1 ms gap against a 20 ms span scaled af by 1000x
+            // -- an estimate of the sender's curvature cannot be sharper than
+            // the segment it is a boundary condition for (sd-6b2.3).
+            if (gap < 3.0 * T) af = (vf_handoff - _prev_vf) / std::fmax(gap, T);
         }
         if (cmd.has_end_vel) {
             _prev_vf = vf_handoff;   // accepted handoff, pre wall/vmax guard
@@ -1278,6 +1333,9 @@ private:
     }
 
     void adoptQuintic(const double* c, double T, uint64_t now_us) {
+        // quinticAt divides by _q_T; a zero span is not a plan. Structural,
+        // matching quinticPeakJerk right below.
+        if (!(T > 0.0)) return;
         for (int i = 0; i < 6; i++) _q_c[i] = c[i];
         _q_T        = T;
         _kind       = waveformIsCubic() ? PlanKind::Cubic : PlanKind::Quintic;
@@ -1664,7 +1722,13 @@ public:
     // scan whose ratio becomes the WaveformFallback detail, need the number.
     double quinticWorstRatio(const double* c, double T, double oshoot_allow,
                              bool early_exit = false) const {
+        if (!(T > 0.0)) return kIllegalRatio;
         const float jc = _plan_lim.jmax;
+        // A ZERO JERK CEILING IS NOT "no jerk limit", it is NO JERK AUTHORITY:
+        // nothing a planner can draw is legal under it. Dividing instead gave
+        // 0/0 = NaN on a curve whose high-order terms are zero, and fmax drops
+        // a NaN, so the scan reported LEGAL and the referee was off (sd-6b2.3).
+        if (!(jc > 0.0f)) return kIllegalRatio;
         // PLAN-TIME ALGEBRA IS DOUBLE, THE SCAN IS FLOAT: the coefficients are
         // converted once, here. A threshold test already carrying
         // kRuckigLegalEps does not need 15 digits, and neither the S3's FPU nor
@@ -1949,27 +2013,38 @@ private:
                           (float)(int)res, now_us);
             return false;
         }
-        // ---- A SOFTENED PLAN MAY ONLY EVER BE GENTLER, NEVER ILLEGAL --------
-        // A caller asking for a softer ceiling has only its own reason to think
-        // that ceiling legal, and the plan adopted here additionally pins
-        // minimum_duration, and Ruckig's stretched profile families are not the
-        // time-optimal ones — the same mismatch the caller's existing
-        // belt-and-braces retry already guards against for outright refusals.
-        // Illegality is that same class of surprise and gets the same answer:
-        // refuse to adopt, and let the caller re-plan at the mechanical ceiling
-        // it already knows is available. NOT counted as a plan failure —
-        // nothing failed, this shape was simply declined — but never silent.
+        // Ruckig reports ErrorTrajectoryDuration rather than a non-finite
+        // duration, so this is belt and braces -- and it is the check
+        // probeRuckigDuration already made while the ADOPTER did not.
+        if (!std::isfinite(traj.get_duration())) {
+            _failures++;
+            recordAnomaly(AnomalyType::PlanFailed, (float)target, -98.0f,
+                          now_us);
+            return false;
+        }
+        // ---- EVERY ADOPTED TRAJECTORY IS SCORED -----------------------------
+        // Ruckig is not a legality oracle (see ruckigWorstRatio): max_velocity
+        // is an input to its profile SEARCH, not a postcondition of its output.
+        // This score used to run only for a softened ceiling, so every TERMINAL
+        // adoption -- chase at full authority, the chase hard fallback, the
+        // waveform guard -- was adopted unrefereed, and the only surviving
+        // defense was the output clamp (sd-6b2.2).
         //
-        // Gated on a genuinely SOFTENED ceiling: at the mechanical ceiling
-        // there is no harder plan to fall back to, so rejecting there would
-        // trade a slightly-over profile for no profile at all.
-        if (j_ovr > 0.0 && jc < (double)_plan_lim.jmax) {
-            const double worst = ruckigWorstRatio(traj, _oshoot_allow);
-            if (worst > 1.0 + kRuckigLegalEps) {
-                recordAnomaly(AnomalyType::WaveformFallback, (float)target,
-                              (float)worst, now_us);
-                return false;
-            }
+        // A SOFTENED plan is REFUSED: the caller asked for a gentler ceiling on
+        // its own authority, it additionally pins minimum_duration, and
+        // Ruckig's stretched profile families are not the time-optimal ones --
+        // so the caller re-plans at the mechanical ceiling it already knows is
+        // available (chase's retry). NOT a plan failure: nothing failed, this
+        // shape was declined.
+        //
+        // A TERMINAL plan is ADOPTED and REPORTED, detail = the worst ratio.
+        // There is no harder plan to fall back to, and a stream left with no
+        // plan at all is worse than one whose excursion is named in the census.
+        const double worst = ruckigWorstRatio(traj, _oshoot_allow);
+        if (worst > 1.0 + kRuckigLegalEps) {
+            recordAnomaly(AnomalyType::WaveformFallback, (float)target,
+                          (float)worst, now_us);
+            if (j_ovr > 0.0 && jc < (double)_plan_lim.jmax) return false;
         }
         _traj       = traj;
         _kind       = PlanKind::Ruckig;
@@ -2155,12 +2230,23 @@ private:
 
         // Brake from the coasted state at the anchor instant (plan end +
         // grace); grace = 0 keeps the pre-0.9 start state exactly.
-        const double coast = grace > kCoastCapS ? kCoastCapS : grace;
+        //
+        // READ that state from sampleRaw rather than recomputing it. The two
+        // used to be separate copies of "position plus end velocity times
+        // elapsed", so the coast's own caps applied to what the SAMPLER
+        // reported and not to what the brake was PLANNED FROM: the brake
+        // entered kCoastCapS * vmax outside the window on a state the sampler
+        // had already stopped advancing. One coast, one definition.
+        const uint64_t coast_end_us =
+            _plan_start + (uint64_t)(dur * 1e6 + 0.5)
+                        + (uint64_t)(grace * 1e6 + 0.5);
+        double cp, cv, ca;
+        sampleRaw(coast_end_us, cp, cv, ca);
         ruckig::InputParameter<1> in;
         in.control_interface       = ruckig::ControlInterface::Velocity;
-        in.current_position[0]     = p + v * coast;
-        in.current_velocity[0]     = v;
-        in.current_acceleration[0] = coast > 0.0 ? 0.0 : a;
+        in.current_position[0]     = cp;
+        in.current_velocity[0]     = cv;
+        in.current_acceleration[0] = ca;
         in.target_velocity[0]      = 0.0;
         in.target_acceleration[0]  = 0.0;
         in.max_velocity[0]         = _cfg.limits.vmax;
@@ -2176,8 +2262,7 @@ private:
         // the very first sample would JUMP up to vmax·grace (30 mm on the
         // operator's 200 mm window at a 30 ms grace). With grace = 0 this is
         // byte-identical to the pre-0.4 anchor.
-        const uint64_t end_us = _plan_start + (uint64_t)(dur * 1e6 + 0.5)
-                                            + (uint64_t)(grace * 1e6 + 0.5);
+        const uint64_t end_us = coast_end_us;
         if ((int)res < 0) {
             // Should be unreachable: a brake from a legal state is always
             // feasible — hard-hold the end position.
@@ -2188,6 +2273,25 @@ private:
             _kind     = PlanKind::None;
             _mode     = Mode::Idle;
             return;
+        }
+        // WINDOW THE BRAKE. A velocity-interface brake has no position target,
+        // so it lands wherever braking lands: at field limits v^2/2a is 12.5 mm
+        // past the rail on a 100 mm window, and _hold_pos = clamp01(...) then
+        // erases the discrepancy, leaving the engine's belief and the machine's
+        // position different by exactly the overshoot (sd-6b2.2). Re-planned as
+        // a POSITION move to the rail it would cross, arriving at rest, the
+        // plan ENDS where the machine ends. The transient excursion that is
+        // physics (you cannot stop in less than v^2/2a) survives either way;
+        // the false belief does not. One extra solve, only when the brake needs
+        // it.
+        if (ruckigWorstRatio(traj, -1.0) > 1.0 + kRuckigLegalEps) {
+            in.control_interface  = ruckig::ControlInterface::Position;
+            in.target_position[0] = cv > 0.0 ? 1.0 : 0.0;
+            in.target_velocity[0] = 0.0;
+            ruckig::Trajectory<1> railed;
+            if ((int)_calc.calculate(in, railed) >= 0 &&
+                std::isfinite(railed.get_duration()))
+                traj = railed;
         }
         recordAnomaly(AnomalyType::SettleEngaged, (float)clamp01(p),
                       (float)v, end_us);

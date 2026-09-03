@@ -1464,7 +1464,7 @@ void SlopSyncHubService::taskLoop() {
         _udpDiscovery.poll();         // RFC-046: drain + answer pending DISCOVER_PROBEs
 #endif
         _hub.update(_clock.nowUs());  // pump every session: frames, pacing, deadman (fires onStreamBundle)
-        drainMotionStream();          // pop due 0x0084 pacing-ring entries -> Core-1 sampler queue
+        drainMotionStream();          // release pacing-ring entries -> the arbiter, same pass
         syncSafety();
         publishTelemetry();
         // AFTER publishTelemetry, per hub.hpp's contract: bump the generation
@@ -1682,11 +1682,17 @@ void SlopSyncHubService::syncSafety() {
     _hub.setSafetyModes(_state.manual_override, bool(_state.bypass_limits));
 }
 
+// Segments leave here ON ARRIVAL, carrying their own anchor: the RP plans a
+// segment one segment before it has to start, so the Core-0 hop, the SPI frame
+// and commit() all land OUTSIDE the rendered span. Release depth is one and
+// why is PacingRing.h's constraint. A segment whose anchor is already past is
+// forwarded with that past anchor; the engine back-samples up to its late
+// bound and answers a PlanFailed event beyond it, which is the honest report.
 void SlopSyncHubService::drainMotionStream() {
     PacingEntry entry;
     const uint64_t now64 = uint64_t(esp_timer_get_time());
 
-    while (_pacingRing.popDue(now64, entry)) {
+    while (_pacingRing.popReleased(now64, entry)) {
         // ---- Gates: standard motion-command early-outs ----------------------
         if (!_state.homed) {
             _state.sm_sync_dropped = _state.sm_sync_dropped + 1;
@@ -1769,10 +1775,9 @@ void SlopSyncHubService::drainMotionStream() {
         // information. Bounding at push time (onStreamBundle) would see less of
         // the future, not more.
         //
-        // WHY HERE AND NOT LATER: the Core-1 sampler queue is not a lookahead —
-        // the ring releases entries only as they come DUE, so the queue holds
-        // 0-1 commands. The schedule-ahead knowledge lives in the ring and
-        // nowhere else, and it dies the moment an entry is popped.
+        // WHY HERE AND NOT LATER: the arbiter's defer queue is not a lookahead,
+        // it is the core crossing. The schedule-ahead knowledge lives in the
+        // ring and nowhere else, and it dies the moment an entry is released.
         //
         // Both segments must be real timed segments: a durationless 0x0084
         // chase point has no chord (no duration to divide by). ONE CHANNEL,
@@ -1783,9 +1788,9 @@ void SlopSyncHubService::drainMotionStream() {
         // a long segment's. No successor -> has_next_chord stays false and
         // the engine plans exactly as it did before the guard existed. That
         // TAIL CASE is a deliberate accept-unchanged: guessing a chord that is
-        // not available would trim well-behaved senders, and the segment is DUE, so
-        // deferring it to wait for its successor would trade a shape problem
-        // for a deadline problem. The legality scan + Ruckig guard remain the
+        // not available would trim well-behaved senders, and holding the segment
+        // back to wait for its successor would trade a shape problem for a
+        // deadline problem. The legality scan + Ruckig guard remain the
         // backstop they have always been, so nothing is less safe.
         if (entry.has_duration && entry.has_end_vel) {
             const PacingEntry* next = _pacingRing.peekOldest();

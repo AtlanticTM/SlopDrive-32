@@ -276,6 +276,51 @@ TEST_CASE("A future anchor is not rendered before its time and is continuous at 
     CHECK(s.pos == doctest::Approx(0.9f).epsilon(0.01));
 }
 
+TEST_CASE("A segment released 110 ms early renders at its anchor, not at arrival") {
+    // The hub forwards on arrival with the anchor intact (PacingRing.h): the
+    // whole point is that the plan, the frame and the commit are PAID before
+    // the span the operator sees. What lands on the machine must be the wire
+    // timeline, not the arrival timeline.
+    Slave s;
+    s.pushConfig(liveTags());
+    s.run(kServiceUs * 2);
+
+    s.command(wave(0.3f, 200, 0.0f, true));
+    s.run(260 * kMs);
+    const float parked = s.pos;
+
+    const uint32_t lead = 110 * kMs, dur = 150 * kMs;
+    const uint32_t anchor = s.now + lead;
+    ml::LinkCommand c = wave(0.75f, 150, 0.0f, true);
+    c.flags |= ml::kCmdHasAnchor;
+    c.anchor_us = anchor;
+    s.command(c);
+    s.core.service(s.now);           // committed AT ARRIVAL: planning is done here
+    CHECK(s.core.serviced() > 0);
+
+    // Held: the whole lead renders the parked position, to the tick.
+    while (int32_t(s.now - anchor) < -int32_t(kTickUs)) {
+        if (int32_t(s.now - s.next_service) >= 0) {
+            s.core.service(s.now);
+            s.next_service = s.now + kServiceUs;
+        }
+        s.core.sampleCounts(s.now, s.pos, s.vel);
+        CHECK(std::fabs(s.pos - parked) < 1e-4f);
+        s.now += kTickUs;
+    }
+
+    // Moving right after the anchor: the span starts when the wire said it
+    // would, with none of the release path inside it. 10 ms, not 1, because a
+    // quintic leaves rest at zero velocity AND zero acceleration, so the first
+    // millisecond of a 150 ms span is legitimately sub-micron.
+    s.run(10 * kMs);
+    CHECK(std::fabs(s.pos - parked) > 1e-4f);
+
+    // ...and it is the WHOLE span that fits between anchor and anchor+duration.
+    s.run(dur - 10 * kMs);
+    CHECK(s.pos == doctest::Approx(0.75f).epsilon(0.01));
+}
+
 TEST_CASE("The render table tracks the engine through a promotion and a settle") {
     // The table is read off the LIVE PLAN rather than a copy of the engine
     // (RpMotionCore republish), so the three things the accessor has to carry

@@ -27,6 +27,7 @@
 #include <optional>
 #include <span>
 
+#include "PacingRing.h"
 #include "PatternPresetStore.h"
 #include "SlopSyncCatalog.h"
 #include "SlopSyncCrypto.h"
@@ -60,87 +61,6 @@ class MotorDriver;
 class SlopHttpServer;
 
 namespace slopdrive {
-
-// ---- Motion-input pacing ring (SlopSync STREAM 0x0084 -> Core-1 sampler) ----
-// Roadmap backlog #5 rough-in. Bridges onStreamBundle() — which fires inside
-// _hub.update(), i.e. ON the SlopSyncHub task — to taskLoop's own 5 ms tick,
-// which drains due entries into the Core-1 sampler queue. Both the producer
-// (onStreamBundle) and the consumer (taskLoop) run on the SAME FreeRTOS task
-// (see SlopSyncHubService::taskLoop's one-task invariant), so this is
-// deliberately lock-free: a mutex here would guard a race that structurally
-// cannot happen, and would just be dead weight on the stream hot path.
-struct PacingEntry {
-    uint64_t due_us = 0;   // device µs, esp_timer_get_time() domain (unwrapped 64-bit)
-    float    target = 0.0f;
-    float    vel    = 0.0f;
-    // WAVEFORM (0x0085 motion-segment) carries a commanded duration + an
-    // EXPLICIT end-velocity presence flag; CHASE (0x0084 motion-input) leaves
-    // has_duration false and derives has_end_vel from vel≠0 at push time. Both
-    // channels share this ring — the drain builds the SegmentIntent straight
-    // from these fields, so the two paths differ ONLY here at ingress.
-    uint32_t duration_us  = 0;
-    bool     has_duration = false;
-    bool     has_end_vel  = false;
-    // RFC-030: the EFFECTIVE curve family of the grant that produced this
-    // entry (registry curve_families; 0 = unspecified), stamped per-entry at
-    // ingress because entries from different sessions could interleave in the
-    // ring — a drain-time "current family" cache would mis-attribute them.
-    uint8_t  curve_family = 0;
-};
-
-class PacingRing {
-public:
-    static constexpr size_t kCapacity = 64;
-
-    // Pushes one entry. Returns true if the ring was already full and the
-    // oldest entry was overwritten to make room (newest wins) — the caller
-    // counts that as a drop.
-    bool push(const PacingEntry& e) {
-        bool overwrote = false;
-        if (_count == kCapacity) {
-            _tail = (_tail + 1) % kCapacity;  // evict oldest
-            overwrote = true;
-        } else {
-            ++_count;
-        }
-        _buf[_head] = e;
-        _head = (_head + 1) % kCapacity;
-        return overwrote;
-    }
-
-    // Pops the oldest entry into `out` iff its due_us <= now_us. Entries are
-    // pushed in non-decreasing due_us order (STREAM t_off is strictly
-    // increasing within a bundle, §5.4, and bundles arrive in order over a
-    // stream-ordered WS connection), so checking only the ring's head is
-    // sufficient — callers loop this until it returns false to drain
-    // everything due on a given tick.
-    bool popDue(uint64_t now_us, PacingEntry& out) {
-        if (_count == 0 || _buf[_tail].due_us > now_us) return false;
-        out = _buf[_tail];
-        _tail = (_tail + 1) % kCapacity;
-        --_count;
-        return true;
-    }
-
-    // The oldest entry still in the ring, WITHOUT regard to its due time —
-    // nullptr when empty. This is the RFC-008 one-segment LOOKAHEAD: call it
-    // straight after a popDue() and it hands back the segment that FOLLOWS the
-    // one just popped, which is exactly what the handoff sanity guard needs to
-    // bound the popped segment's end velocity. It exists at all because the
-    // ring is a SCHEDULER, not a queue: a 0x0085 client sends each segment
-    // ~120 ms before its start, so the successor is usually already sitting
-    // here when its predecessor comes due.
-    //
-    // Read-only and non-consuming by design. Nothing about the guard may
-    // change what the ring delivers or when.
-    const PacingEntry* peekOldest() const {
-        return _count == 0 ? nullptr : &_buf[_tail];
-    }
-
-private:
-    std::array<PacingEntry, kCapacity> _buf{};
-    size_t _head = 0, _tail = 0, _count = 0;
-};
 
 // ---- The application delegate -----------------------------------------------
 // Translates the hub's role-layer callbacks into device actions. Applies +
@@ -346,7 +266,7 @@ private:
 
     void syncSafety();          // firmware estop latch <-> hub safety word
     void publishTelemetry();    // cadenced STATE pushes
-    void drainMotionStream();   // pop due PacingRing entries -> Core-1 sampler queue
+    void drainMotionStream();   // release PacingRing entries -> the arbiter, on arrival
     void publishAnomalies();    // Core-1 anomaly ring -> 0x0089 motion-anomaly EVENTs
     void drainLogBridge();      // RFC-017: SlopLog SPSC ring -> 0x0008 log EVENTs
     void pumpSigning();         // M4c: hub <-> signing task, both directions

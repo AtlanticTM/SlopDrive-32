@@ -2468,7 +2468,7 @@ double gridWorstRatio(const Engine& e, const double* c, double T, double allow) 
         const double aa = (((20*c[5]*t + 12*c[4])*t + 6*c[3])*t + 2*c[2]) / (T*T);
         const double jj = ((60*c[5]*t + 24*c[4])*t + 6*c[3]) / (T*T*T);
         if (jc > 0.0) worst = std::max(worst, std::fabs(jj) / jc);
-        worst = std::max(worst, e.pointWorst(pp, vv, aa, lo, hi, band));
+        worst = std::max(worst, e.pointWorst(pp, vv, aa, c[0], lo, hi, band));
     }
     return worst;
 }
@@ -2862,4 +2862,83 @@ TEST_CASE("No settle while a scheduled successor exists") {
     CHECK(e.mode() != Mode::Settle);
     e.positionAt(300 * kMs);
     CHECK(e.lastPlanUs() == 300 * kMs);
+}
+
+// ---- The honest seed and the entry-relative window (sd-6b2.10) --------------
+
+TEST_CASE("An out-of-window seed plans a monotone inward entry (the 87 mm field case)") {
+    // Homed: carriage at 0 mm, window 87-187 mm, so the seed normalizes to
+    // -0.87. The engine must keep that as real state and plan the entry.
+    auto cfg = machineConfig();
+    Engine e(cfg, -0.87f);
+    CHECK(e.positionAt(0) == doctest::Approx(-0.87).epsilon(1e-6));
+
+    Command c;
+    c.target = 0.40f; c.duration_us = 168 * (uint32_t)kMs;
+    c.has_duration = true;
+    REQUIRE(e.commit(c, 0));
+
+    double prev = -1e9, min_raw = 1e9, max_raw = -1e9;
+    double min_p = 1e9, max_p = -1e9;
+    bool monotone = true;
+    for (uint64_t t = 0; t <= 400 * kMs; t += kMs) {
+        double rp, rv, ra;
+        e.rawSampleAt(t, rp, rv, ra);
+        min_raw = std::min(min_raw, rp);
+        max_raw = std::max(max_raw, rp);
+        const double p = e.positionAt(t);
+        min_p = std::min(min_p, p);
+        max_p = std::max(max_p, p);
+        if (rp < prev - 1e-9) monotone = false;
+        prev = rp;
+    }
+    MESSAGE("entry from -0.87: raw [" << min_raw << ", " << max_raw
+            << "]  clamped [" << min_p << ", " << max_p << "]");
+    CHECK(monotone);                     // inward, never further out
+    CHECK(min_raw >= -0.87 - 1e-6);
+    CHECK(min_p >= -0.87 - 1e-6);
+    CHECK(max_p <= 1.0 + 1e-9);
+}
+
+TEST_CASE("A plan leaving the window further out than it entered is ILLEGAL") {
+    auto cfg = machineConfig();
+    Engine e(cfg, -0.50f);
+    // Same entry, two curves: one heading inward, one dipping further out.
+    const double T = 0.2;
+    const double inward[6]  = {-0.5,  0.15, 0.0, 0.0, 0.0, 0.0};
+    const double outward[6] = {-0.5, -0.15, 0.0, 0.0, 0.0, 0.0};
+    CHECK(e.quinticWorstRatio(inward, T, -1.0) <= 1.0);
+    CHECK(e.quinticWorstRatio(outward, T, -1.0) > 1.0);
+}
+
+TEST_CASE("In-window plans are refereed EXACTLY as before (entry sweep over [0,1])") {
+    // The window term is untouched wherever the seed and the entry are inside:
+    // [min(0,p0), max(1,p0)] is [0,1] there by construction. Pinned against an
+    // independent [0,1] scorer rather than against itself.
+    auto cfg = testConfig();
+    Engine e(cfg, 0.5f);
+    int compared = 0, illegal = 0;
+    for (double p0 = 0.0; p0 <= 1.0001; p0 += 0.05) {
+        for (double dp : {-0.9, -0.3, 0.0, 0.3, 0.9}) {
+            for (double T : {0.05, 0.2, 0.6}) {
+                const double c[6] = {p0, dp, 0.0, 0.0, 0.0, 0.0};
+                const double got = e.quinticWorstRatio(c, T, -1.0);
+                double want = std::fabs((float)(dp / T)) /
+                              (double)cfg.limits.vmax;
+                for (int i = 0; i <= 64; i++) {
+                    const double pp = p0 + dp * ((double)i / 64.0);
+                    if (pp < -1e-6) want = std::max(want, 1.0 + (-pp));
+                    if (pp > 1.0 + 1e-6) want = std::max(want, 1.0 + (pp - 1.0));
+                }
+                CHECK(got == doctest::Approx(want).epsilon(1e-5));
+                compared++;
+                if (got > 1.0) illegal++;
+            }
+        }
+    }
+    MESSAGE("in-window referee sweep: " << compared << " curves, " << illegal
+            << " illegal");
+    CHECK(compared > 300);
+    CHECK(illegal > 0);
+    CHECK(illegal < compared);
 }

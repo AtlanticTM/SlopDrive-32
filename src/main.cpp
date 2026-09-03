@@ -587,7 +587,11 @@ static void streamSamplerTask(void* /*param*/) {
             float span      = mapper.getMaxMm() - mapper.getMinMm();
             float actual_mm = g_state.actual_position_mm.load(std::memory_order_relaxed);
             float norm      = (span > 0.01f) ? (actual_mm - mapper.getMinMm()) / span : 0.5f;
-            g_slopmotion.resetAt(constrain(norm, 0.0f, 1.0f), nowUs);
+            // THE SEED IS HONEST (sd-6b2.10): a carriage parked outside the
+            // stroke window seeds a norm outside 0..1, and the engine plans
+            // the entry from there. Clamping made every entry plan start from
+            // a position the machine is not at.
+            g_slopmotion.resetAt(norm, nowUs);
             // ONE RESET OWNER (sd-6b2.12): the host owns THIS entry's reset,
             // so the driver must not raise its own re-seed for the same entry.
             // Without this the connect cost two cold starts ~10 ms apart from
@@ -598,7 +602,7 @@ static void streamSamplerTask(void* /*param*/) {
             // by construction (stream edges), so an unthrottled line is fine.
             SLOGI("smreset", "stream rising edge: engine seeded at %.3f (%.1f mm) "
                   "gates=%d busy=%d pkt=%d hold=%d",
-                  (double)constrain(norm, 0.0f, 1.0f), (double)actual_mm,
+                  (double)norm, (double)actual_mm,
                   int(gatesOk), int(interpBusy), int(recentPacket), int(postMoveHold));
         }
 
@@ -618,9 +622,9 @@ static void streamSamplerTask(void* /*param*/) {
                 g_state.actual_position_mm.load(std::memory_order_relaxed);
             const float rnorm =
                 (rspan > 0.01f) ? (ractual - mapper.getMinMm()) / rspan : 0.5f;
-            g_slopmotion.resetAt(constrain(rnorm, 0.0f, 1.0f), nowUs);
+            g_slopmotion.resetAt(rnorm, nowUs);
             SLOGI("smreset", "driver re-seed: engine seeded at %.3f (%.1f mm)",
-                  (double)constrain(rnorm, 0.0f, 1.0f), (double)ractual);
+                  (double)rnorm, (double)ractual);
         }
 
         // Push the live tuning into the engine, ON CHANGE ONLY. setConfig is a

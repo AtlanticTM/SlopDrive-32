@@ -740,7 +740,14 @@ public:
     // next plan is a cold start. See "One activity clock",
     // .claude/rules/motion-control.md.
     void resetAt(float pos, uint64_t now_us) {
-        _hold_pos   = clamp01(pos);
+        // THE SEED IS HONEST, in or out of the window (sd-6b2.10): clamping it
+        // does not make the state safe, it makes it false, and every entry plan
+        // then starts from a position the carriage is not at. The window is
+        // enforced by the referees and the output clamp, both of which judge
+        // against the plan's own entry.
+        _hold_pos   = (double)pos;
+        _seed_lo    = windowLo(_hold_pos);
+        _seed_hi    = windowHi(_hold_pos);
         _mode       = Mode::Idle;
         _kind       = PlanKind::None;
         _next_ok    = false;
@@ -933,11 +940,11 @@ public:
         if (_kind != PlanKind::None) {
             double pe, ve, ae;
             planEndState(pe, ve, ae);
-            s.target     = (float)clamp01(pe);
+            s.target     = (float)pe;
             double ps, vs, as;
             if (isHermite()) quinticAt(0.0, ps, vs, as);
             else                            _traj.at_time(0.0, ps, vs, as);
-            s.start      = (float)clamp01(ps);
+            s.start      = (float)ps;
             s.duration_s = (float)planDuration();
             const double el = elapsedS(now_us);
             s.elapsed_s  = (float)(el < planDuration() ? el : planDuration());
@@ -1033,6 +1040,28 @@ private:
         return x < 0.0 ? 0.0 : (x > 1.0 ? 1.0 : x);
     }
 
+    // THE WINDOW A PLAN ANSWERS TO: the stroke window widened to take in the
+    // plan's own entry position, [min(0, p0), max(1, p0)]. An in-window plan is
+    // judged and clamped exactly as it was; an out-of-window one may never get
+    // further out than it started, which is what makes an entry move plannable
+    // instead of a lie (sd-6b2.10).
+    static double windowLo(double p0) { return p0 < 0.0 ? p0 : 0.0; }
+    static double windowHi(double p0) { return p0 > 1.0 ? p0 : 1.0; }
+    // The entry the window is taken FROM, never further out than the SEED's:
+    // a chain may only ever get closer to the window, and a plan's transient
+    // rail excursion must not widen the backstop for the plans after it.
+    double windowEntry(double p0) const {
+        return p0 < _seed_lo ? _seed_lo : (p0 > _seed_hi ? _seed_hi : p0);
+    }
+    // Entry position of the plan in flight; a hold IS its own entry.
+    double planEntry() const {
+        return windowEntry(_kind == PlanKind::None ? _hold_pos : _plan_p0);
+    }
+    double clampWindow(double x) const {
+        const double lo = windowLo(planEntry()), hi = windowHi(planEntry());
+        return x < lo ? lo : (x > hi ? hi : x);
+    }
+
     double elapsedS(uint64_t now_us) const {
         return now_us <= _plan_start ? 0.0
                                      : (double)(now_us - _plan_start) * 1e-6;
@@ -1115,11 +1144,12 @@ private:
     void sampleClampedNoSettle(uint64_t now_us, double& p, double& v,
                                double& a) const {
         sampleRaw(now_us, p, v, a);
-        if (p < 0.0) {
-            p = 0.0;
+        const double lo = windowLo(planEntry()), hi = windowHi(planEntry());
+        if (p < lo) {
+            p = lo;
             if (v < 0.0) { v = 0.0; a = 0.0; }
-        } else if (p > 1.0) {
-            p = 1.0;
+        } else if (p > hi) {
+            p = hi;
             if (v > 0.0) { v = 0.0; a = 0.0; }
         }
     }
@@ -1385,6 +1415,7 @@ private:
         if (!(T > 0.0)) return;
         for (int i = 0; i < 6; i++) _q_c[i] = c[i];
         _q_T        = T;
+        _plan_p0    = c[0];
         _kind       = waveformIsCubic() ? PlanKind::Cubic : PlanKind::Quintic;
         _mode       = Mode::Waveform;
         _plan_start = now_us;
@@ -1627,12 +1658,16 @@ private:
     // FPU a divide costs an order more than a multiply. A ZERO reciprocal
     // disarms its axis, which is the vc > 0 / ac > 0 guard as arithmetic.
     template <typename R>
-    static R pointWorstR(R pp, R vv, R aa, R lo, R hi, R allow, R rvc, R rac) {
+    static R pointWorstR(R pp, R vv, R aa, R p0, R lo, R hi, R allow, R rvc,
+                         R rac) {
         R worst = std::fabs(vv) * rvc;
         worst = std::fmax(worst, std::fabs(aa) * rac);
-        if (pp < -(R)kWindowRoundEps) worst = std::fmax(worst, (R)1 + (-pp));
-        if (pp > (R)1 + (R)kWindowRoundEps)
-            worst = std::fmax(worst, (R)1 + (pp - (R)1));
+        const R wlo = p0 < (R)0 ? p0 : (R)0;
+        const R whi = p0 > (R)1 ? p0 : (R)1;
+        if (pp < wlo - (R)kWindowRoundEps)
+            worst = std::fmax(worst, (R)1 + (wlo - pp));
+        if (pp > whi + (R)kWindowRoundEps)
+            worst = std::fmax(worst, (R)1 + (pp - whi));
         if (allow >= (R)0) {
             const R excess = std::fmax(lo - pp, pp - hi);
             if (excess > allow)
@@ -1733,7 +1768,9 @@ private:
     // on curves both planners can draw; pure queries, they adopt nothing.
 public:
     // Scores one sampled point: v/a ceilings, stroke window, overshoot band.
-    // `lo`/`hi` are the judged curve's OWN endpoints; `allow` < 0 disarms the
+    // `p0` is the judged curve's ENTRY position and sets the window
+    // [min(0, p0), max(1, p0)] (see windowLo/windowHi); `lo`/`hi` are that
+    // curve's own endpoints, the overshoot band; `allow` < 0 disarms the
     // band; > 1.0 = illegal. Jerk is the quintic referee's own term (Ruckig
     // cannot violate it, see ruckigWorstRatio). Window grace and band are
     // spelled ONCE here so the two planners cannot disagree about legality.
@@ -1750,10 +1787,10 @@ public:
     // The BAND is two-sided: the measured pathology is a backswing AWAY from
     // the target (a move from 186.8 mm to 100 mm arcing up to 305 mm), which
     // a one-sided test scores negative and waves through.
-    double pointWorst(double pp, double vv, double aa, double lo, double hi,
-                      double allow) const {
+    double pointWorst(double pp, double vv, double aa, double p0, double lo,
+                      double hi, double allow) const {
         const double vc = _plan_lim.vmax, ac = _plan_lim.amax;
-        return pointWorstR(pp, vv, aa, lo, hi, allow,
+        return pointWorstR(pp, vv, aa, windowEntry(p0), lo, hi, allow,
                            vc > 0.0 ? 1.0 / vc : 0.0,
                            ac > 0.0 ? 1.0 / ac : 0.0);
     }
@@ -1782,6 +1819,7 @@ public:
         // the RP2350's has double at all (cpp-style.md).
         float fc[6];
         for (int i = 0; i < 6; i++) fc[i] = (float)c[i];
+        const float p0f = (float)windowEntry(c[0]);
         // Reciprocals hoisted out of the scan: the same six divisors at every
         // candidate, and a soft-float divide costs an order more than a
         // multiply.
@@ -1824,7 +1862,7 @@ public:
             const float aa = ((20*fc[5]*t + 12*fc[4])*t + 6*fc[3])*t + 2*fc[2];
             const float jj = (60*fc[5]*t + 24*fc[4])*t + 6*fc[3];
             worst = std::fmax(worst, std::fabs(jj) * rT3 * rjc);
-            worst = std::fmax(worst, pointWorstR(pp, vv * rT, aa * rT2,
+            worst = std::fmax(worst, pointWorstR(pp, vv * rT, aa * rT2, p0f,
                                                  oshoot_lo, oshoot_hi, allow,
                                                  rvc, rac));
             if (early_exit && worst > 1.0f) break;
@@ -1866,13 +1904,15 @@ public:
                             double oshoot_allow, bool early_exit = false) const {
         const double dur = traj.get_duration();
         if (!(dur > 0.0) || !std::isfinite(dur)) return 0.0;
+        double entry, ev, ea;
+        traj.at_time(0.0, entry, ev, ea);
+        const float p0f = (float)windowEntry(entry);
         float oshoot_lo = 0.0f, oshoot_hi = 0.0f, allow = (float)oshoot_allow;
         if (oshoot_allow >= 0.0) {
-            double p0, p1, vv, aa;
-            traj.at_time(0.0, p0, vv, aa);
+            double p1, vv, aa;
             traj.at_time(dur, p1, vv, aa);
-            oshoot_lo = (float)std::fmin(p0, p1);
-            oshoot_hi = (float)std::fmax(p0, p1);
+            oshoot_lo = (float)std::fmin(entry, p1);
+            oshoot_hi = (float)std::fmax(entry, p1);
             allow += _cfg.overshoot_chord_slack * (oshoot_hi - oshoot_lo);
         }
         const float rvc = _plan_lim.vmax > 0.0f ? 1.0f / _plan_lim.vmax : 0.0f;
@@ -1882,8 +1922,8 @@ public:
             double pp, vv, aa;
             traj.at_time(dur * (double)i / kScanSteps, pp, vv, aa);
             worst = std::fmax(worst, pointWorstR((float)pp, (float)vv, (float)aa,
-                                                 oshoot_lo, oshoot_hi, allow,
-                                                 rvc, rac));
+                                                 p0f, oshoot_lo, oshoot_hi,
+                                                 allow, rvc, rac));
             if (early_exit && worst > 1.0f) break;
         }
         return (double)worst;
@@ -2096,6 +2136,7 @@ private:
         _traj       = traj;
         _kind       = PlanKind::Ruckig;
         _plan_start = now_us;
+        _plan_p0    = p;
         _plan_jerk_frac =
             _plan_lim.jmax > 0.0f ? (float)(jc / (double)_plan_lim.jmax)
                                     : 1.0f;
@@ -2270,7 +2311,7 @@ private:
             // Ended at rest — collapse to a plain hold. (No grace needed: a
             // hold IS the end state, and a fresh command replans from it
             // identically whether we collapsed or not.)
-            _hold_pos = clamp01(p);
+            _hold_pos = clampWindow(p);
             _kind     = PlanKind::None;
             _mode     = Mode::Idle;
             return;
@@ -2320,18 +2361,18 @@ private:
             // Should be unreachable: a brake from a legal state is always
             // feasible — hard-hold the end position.
             _failures++;
-            recordAnomaly(AnomalyType::PlanFailed, (float)clamp01(p),
+            recordAnomaly(AnomalyType::PlanFailed, (float)p,
                           (float)(int)res, end_us);
-            _hold_pos = clamp01(p);
+            _hold_pos = clampWindow(p);
             _kind     = PlanKind::None;
             _mode     = Mode::Idle;
             return;
         }
         // WINDOW THE BRAKE. A velocity-interface brake has no position target,
         // so it lands wherever braking lands: at field limits v^2/2a is 12.5 mm
-        // past the rail on a 100 mm window, and _hold_pos = clamp01(...) then
-        // erases the discrepancy, leaving the engine's belief and the machine's
-        // position different by exactly the overshoot (sd-6b2.2). Re-planned as
+        // past the rail on a 100 mm window, and the hold clamp then erases the
+        // discrepancy, leaving the engine's belief and the machine's position
+        // different by exactly the overshoot (sd-6b2.2). Re-planned as
         // a POSITION move to the rail it would cross, arriving at rest, the
         // plan ENDS where the machine ends. The transient excursion that is
         // physics (you cannot stop in less than v^2/2a) survives either way;
@@ -2346,11 +2387,12 @@ private:
                 std::isfinite(railed.get_duration()))
                 traj = railed;
         }
-        recordAnomaly(AnomalyType::SettleEngaged, (float)clamp01(p),
+        recordAnomaly(AnomalyType::SettleEngaged, (float)p,
                       (float)v, end_us);
         _traj       = traj;
         _kind       = PlanKind::Ruckig;
         _plan_start = end_us;
+        _plan_p0    = cp;
         _mode       = Mode::Settle;
         _plan_jerk_frac = 1.0f;   // a brake is planned at the full ceiling
         _plans++;
@@ -2363,7 +2405,7 @@ private:
         double p, v, a;
         planEndState(p, v, a);
         noteActivity(_plan_start + (uint64_t)(planDuration() * 1e6 + 0.5));
-        _hold_pos = clamp01(p);
+        _hold_pos = clampWindow(p);
         _kind     = PlanKind::None;
         _mode     = Mode::Idle;
     }
@@ -2378,6 +2420,7 @@ private:
         ruckig::Trajectory<1> traj;
         double   q_c[6] = {};
         double   q_T = 0.0;
+        double   p0 = 0.0;
         uint64_t start = 0;
         PlanKind kind = PlanKind::None;
         Mode     mode = Mode::Idle;
@@ -2388,6 +2431,7 @@ private:
         std::swap(_traj, s.traj);
         for (int i = 0; i < 6; i++) std::swap(_q_c[i], s.q_c[i]);
         std::swap(_q_T, s.q_T);
+        std::swap(_plan_p0, s.p0);
         std::swap(_plan_start, s.start);
         std::swap(_kind, s.kind);
         std::swap(_mode, s.mode);
@@ -2426,6 +2470,14 @@ private:
     PlanKind              _kind = PlanKind::None;
     uint64_t              _plan_start = 0;
     double                _hold_pos = 0.5;
+    // Entry position of the active plan. The window the referees and the
+    // output clamp judge against is [min(0, p0), max(1, p0)] (sd-6b2.10), so
+    // an out-of-window plan may only move inward and an in-window one is
+    // judged exactly as it was.
+    double                _plan_p0 = 0.5;
+    // Widest window this chain may answer to, from the seed (windowEntry).
+    double                _seed_lo = 0.0;
+    double                _seed_hi = 1.0;
     Mode                  _mode = Mode::Idle;
     PlanSlot              _next;          // scheduled successor (promoteDue)
     bool                  _next_ok = false;

@@ -205,6 +205,7 @@ void ConfigStore::save(SystemState& state, RangeMapper& mapper, MotorDriver& mot
     ck(prefs.putFloat("sm_sbud",   state.sm_tune_smooth_budget));
     ck(prefs.putFloat("sm_abud",   state.sm_tune_amp_budget));
     ck(prefs.putUChar("sm_bstep",  state.sm_tune_blend_steps));
+    ck(prefs.putFloat("sm_iblnd",  state.sm_tune_infeas_blend));
     ck(prefs.putUChar("sm_rstep",  state.sm_tune_reshape_steps));
     ck(prefs.putUInt ("sm_settle", state.sm_tune_settle_grace_us));
 
@@ -350,6 +351,7 @@ void ConfigStore::load(SystemState& state, RangeMapper& mapper, MotorDriver& mot
         state.sm_tune_smooth_budget = clf(prefs.getFloat("sm_sbud",  state.sm_tune_smooth_budget), 0.0f, 1.0f);
         state.sm_tune_amp_budget    = clf(prefs.getFloat("sm_abud",  state.sm_tune_amp_budget), 0.0f, 1.0f);
         state.sm_tune_blend_steps   = (uint8_t)clu(prefs.getUChar("sm_bstep", state.sm_tune_blend_steps), 1, 10);
+        state.sm_tune_infeas_blend  = clf(prefs.getFloat("sm_iblnd", state.sm_tune_infeas_blend), 0.0f, 1.0f);
         state.sm_tune_reshape_steps = (uint8_t)clu(prefs.getUChar("sm_rstep", state.sm_tune_reshape_steps), 0, 8);
         state.sm_tune_settle_grace_us = clu(prefs.getUInt("sm_settle", state.sm_tune_settle_grace_us), 0u, 200000u);
         state.config.input_max_jerk_mm_s3  = inp_jrk;

@@ -51,6 +51,7 @@
 
 #include "MotionArbiter.h"
 #include <slopmotion/slopmotion.hpp>
+#include "EngineConfigMap.h"
 #include "PatternEngine.h"
 
 #include "WifiLink.h"
@@ -612,92 +613,56 @@ static void streamSamplerTask(void* /*param*/) {
                   (double)constrain(rnorm, 0.0f, 1.0f), (double)ractual);
         }
 
-        // Push the live tuning (POST /api/slopmotion, Core 0) into the engine.
-        // Ceilings derive from the mm-domain INPUT limit set over the stroke
-        // window (1 normalized unit == the window span), overridable for bench
-        // tuning. ALL THREE derive the same way as of fw 2.1.47 — jerk used to
-        // be a bare normalized constant, which made the PHYSICAL jerk ceiling
-        // shrink as the operator narrowed the window and silently bound fast
-        // segments. It is a persisted mm-domain limit now, like its siblings.
-        // Same-core with commit() — no lock. Runs every tick: 12 scalar copies.
+        // Push the live tuning into the engine, ON CHANGE ONLY. setConfig is a
+        // wholesale struct copy, so a per-tick push of a freshly built Config
+        // resets every field the map does not name to the engine default every
+        // millisecond, which is what made Blend's one slider unreachable
+        // (sd-6b2.4). The TUNING is what gets compared, never the Config:
+        // buildEngineConfig is pure, so equal inputs mean an equal Config, and
+        // EngineTuning is an aggregate of scalars whose defaulted operator== is
+        // a memberwise compare with no padding in it. Same-core with commit(),
+        // no lock. The first tick always pushes, so the engine is configured
+        // before the first commit below.
         {
-            slopmotion::Config smCfg;
-            const float span = mapper.getMaxMm() - mapper.getMinMm();
-            const float vovr = g_state.sm_tune_vmax_ovr;
-            const float aovr = g_state.sm_tune_amax_ovr;
-            const float jovr = g_state.sm_tune_jmax_ovr;
-            smCfg.limits.vmax = vovr > 0.0f ? vovr
-                : (span > 1.0f ? g_state.config.input_max_speed_mm_s  / span : 3.0f);
-            // Cold-start plans run at the USER (gentle) limit: the opening
-            // move of a stream is positioning, not content (sd-d77).
-            smCfg.recovery_vmax =
-                span > 1.0f ? g_state.config.user_max_speed_mm_s / span : 0.0f;
-            smCfg.limits.amax = aovr > 0.0f ? aovr
-                : (span > 1.0f ? g_state.config.input_max_accel_mm_s2 / span : 30.0f);
-            smCfg.limits.jmax = jovr > 0.0f ? jovr
-                : (span > 1.0f ? g_state.config.input_max_jerk_mm_s3  / span : 500.0f);
-            smCfg.chase_feedforward = g_state.sm_tune_chase_ff;
-            smCfg.chase_accel_ff    = g_state.sm_tune_chase_aff;
-            smCfg.chase_ff_gain     = g_state.sm_tune_chase_gain;
-            smCfg.chase_lookahead   = g_state.sm_tune_chase_look;
-            smCfg.chase_dense_us    = g_state.sm_tune_dense_us;
-            // Infeasible-segment policy: a 3-WAY map, not a boolean. This runs
-            // every tick, so whatever it writes IS the engine's policy — a
-            // narrower map here silently overrides the engine's own default
-            // (that was the fw 2.1.49 bug: Reshape was unreachable because the
-            // boolean map could only produce Scale or Stretch). An out-of-range
-            // stored value falls through to the ENGINE default (smCfg is a
-            // fresh default-constructed Config), never to an arbitrary policy.
-            switch (g_state.sm_tune_infeas_policy) {
-                case 0: smCfg.infeasible_policy = slopmotion::InfeasiblePolicy::Stretch; break;
-                case 1: smCfg.infeasible_policy = slopmotion::InfeasiblePolicy::Scale;   break;
-                case 2: smCfg.infeasible_policy = slopmotion::InfeasiblePolicy::Reshape; break;
-                case 3: smCfg.infeasible_policy =
-                            slopmotion::InfeasiblePolicy::PrioritizeAmplitude; break;
-                case 4: smCfg.infeasible_policy =
-                            slopmotion::InfeasiblePolicy::PrioritizeSmooth;    break;
-                case 5: smCfg.infeasible_policy = slopmotion::InfeasiblePolicy::Blend; break;
-                default: /* leave slopmotion::Config's own default in place */  break;
+            slopdrive::EngineTuning tune;
+            tune.span_mm         = mapper.getMaxMm() - mapper.getMinMm();
+            tune.input_max_speed = g_state.config.input_max_speed_mm_s;
+            tune.input_max_accel = g_state.config.input_max_accel_mm_s2;
+            tune.input_max_jerk  = g_state.config.input_max_jerk_mm_s3;
+            tune.user_max_speed  = g_state.config.user_max_speed_mm_s;
+            tune.vmax_ovr        = g_state.sm_tune_vmax_ovr;
+            tune.amax_ovr        = g_state.sm_tune_amax_ovr;
+            tune.jmax_ovr        = g_state.sm_tune_jmax_ovr;
+            tune.chase_ff        = g_state.sm_tune_chase_ff;
+            tune.chase_aff       = g_state.sm_tune_chase_aff;
+            tune.aim_extrap      = g_state.sm_tune_aim_extrap;
+            tune.chase_gain      = g_state.sm_tune_chase_gain;
+            tune.chase_look      = g_state.sm_tune_chase_look;
+            tune.dense_us        = g_state.sm_tune_dense_us;
+            tune.infeas_policy   = g_state.sm_tune_infeas_policy;
+            tune.infeas_margin   = g_state.sm_tune_infeas_margin;
+            tune.infeas_blend    = g_state.sm_tune_infeas_blend;
+            tune.reshape_steps   = g_state.sm_tune_reshape_steps;
+            tune.smooth_budget   = g_state.sm_tune_smooth_budget;
+            tune.amp_budget      = g_state.sm_tune_amp_budget;
+            tune.blend_steps     = g_state.sm_tune_blend_steps;
+            tune.curve_policy    = g_state.sm_tune_curve_policy;
+            tune.centering       = g_state.sm_tune_centering;
+            tune.centering_gain  = g_state.sm_tune_centering_gain;
+            tune.handoff_k       = g_state.sm_tune_handoff_k;
+            tune.settle_grace_us = g_state.sm_tune_settle_grace_us;
+
+            static slopdrive::EngineTuning s_pushed{};
+            static bool s_pushed_valid = false;
+            if (!s_pushed_valid || !(tune == s_pushed)) {
+                const slopmotion::Config smCfg = slopdrive::buildEngineConfig(tune);
+                g_slopmotion.setConfig(smCfg);
+                g_state.sm_eff_vmax = smCfg.limits.vmax;
+                g_state.sm_eff_amax = smCfg.limits.amax;
+                g_state.sm_eff_jmax = smCfg.limits.jmax;
+                s_pushed = tune;
+                s_pushed_valid = true;
             }
-            smCfg.infeasible_scale_margin = g_state.sm_tune_infeas_margin;
-            smCfg.infeasible_reshape_steps = g_state.sm_tune_reshape_steps;
-            smCfg.settle_grace_us          = g_state.sm_tune_settle_grace_us;
-            smCfg.chase_aim_accel_extrap  = g_state.sm_tune_aim_extrap;
-            // Budgeted-policy spend limits + alpha-search depth (slopmotion
-            // 0.8.0). Inert unless infeasible_policy is one of the two budgeted
-            // ones; the engine clamps both budgets to [0,1] and the step count
-            // to [1,10] itself, so pushing whatever the HTTP side stored is
-            // safe — the clamp on the POST side exists to keep the echo honest,
-            // not to protect the engine.
-            smCfg.infeasible_smooth_budget    = g_state.sm_tune_smooth_budget;
-            smCfg.infeasible_amplitude_budget = g_state.sm_tune_amp_budget;
-            smCfg.infeasible_blend_steps      = g_state.sm_tune_blend_steps;
-            // Curve family for waveform-segment reconstruction. Same shape as
-            // the policy map above and for the same reason: this runs EVERY
-            // TICK, so whatever it writes IS the engine's policy, and an
-            // out-of-range stored value must fall through to slopmotion's own
-            // default (smCfg is freshly default-constructed) rather than being
-            // cast blindly into a family nobody selected.
-            switch (g_state.sm_tune_curve_policy) {
-                case 0: smCfg.curve_policy = slopmotion::CurvePolicy::FollowClient; break;
-                case 1: smCfg.curve_policy = slopmotion::CurvePolicy::ForceC1;      break;
-                case 2: smCfg.curve_policy = slopmotion::CurvePolicy::ForceC2;      break;
-                default: /* leave slopmotion::Config's own default in place */      break;
-            }
-            // DC centering of a degraded band (slopmotion 0.5.0). The engine
-            // clamps the gain itself; clamping on the POST side too just keeps
-            // the /api/slopmotion echo honest about what Core 1 pushed.
-            smCfg.wave_centering      = g_state.sm_tune_centering;
-            smCfg.wave_centering_gain = g_state.sm_tune_centering_gain;
-            // RFC-008 handoff sanity guard (0 = off). The guard itself only
-            // engages when the INGRESS supplied a one-segment lookahead
-            // (SlopSyncHubService::drainMotionStream), so this knob is the
-            // aggressiveness dial + off switch, never the arming condition.
-            smCfg.handoff_chord_factor = g_state.sm_tune_handoff_k;
-            g_slopmotion.setConfig(smCfg);
-            g_state.sm_eff_vmax = smCfg.limits.vmax;
-            g_state.sm_eff_amax = smCfg.limits.amax;
-            g_state.sm_eff_jmax = smCfg.limits.jmax;
         }
 
         // Drain the Core-0 -> Core-1 command handoff; each commit is ONE plan.

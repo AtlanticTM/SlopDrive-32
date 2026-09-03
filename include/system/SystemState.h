@@ -466,6 +466,13 @@ struct SystemState {
     // sm_tune_reshape_steps. Clamped [1, 10] here AND in the engine; 6 resolves
     // alpha to 1/64 of the budget, well under anything perceptible.
     volatile uint8_t       sm_tune_blend_steps     = 6;      // slopmotion infeasible_blend_steps
+    // Blend's ONE SLIDER: what an infeasible segment gives up, as a single
+    // exchange rate. 0 = surrender reach, keep the shape; 1 = keep the reach,
+    // flatten toward the chord; 0.5 = both give equally. Clamped [0, 1] here
+    // AND in the engine. 0.5 is the equal-weight optimum of the engine's own
+    // 60-case sweep; blend <= 0.25 measured ~3x worse regret, so the low end is
+    // not a taste setting. Inert unless sm_tune_infeas_policy selects Blend.
+    volatile float         sm_tune_infeas_blend    = 0.5f;   // slopmotion infeasible_blend
 
     // ---- SlopMotion telemetry back-channel (Core 1 writes, Core 0 reads) ----
     volatile float         sm_eff_vmax    = 0.0f;  // applied normalized ceilings

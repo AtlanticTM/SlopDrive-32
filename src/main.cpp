@@ -686,6 +686,10 @@ static void streamSamplerTask(void* /*param*/) {
         // Plan time is the software-double cost — benched right here, where it
         // runs, and surfaced via GET /api/slopmotion (docs/canon doctrine
         // §SlopMotion part-2 gate).
+        // TODO(sd-4k1): the ring releases a command only when it is DUE, so
+        // nothing here hands the engine a future anchor yet. commit() now
+        // schedules one instead of demoting it; under the port the link hands
+        // intents over on arrival and this drain stops pacing entirely.
         slopmotion::Command cmd;
         while (xQueueReceive(g_interp_queue, &cmd, 0) == pdTRUE) {
             // ONE TIMESTAMP PER OPERATION (sd-6b2.12). commit() is O(ms) -- up

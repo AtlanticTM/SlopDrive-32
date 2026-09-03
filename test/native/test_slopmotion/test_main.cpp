@@ -2738,3 +2738,128 @@ TEST_CASE("The coast is bounded OUTSIDE the window and reports no velocity "
     CHECK(max_raw > 1.0);              // and it really did coast out
     CHECK_FALSE(moving_while_capped);
 }
+
+// ---- Scheduled plans: a future anchor is a plan, not a demotion (sd-6b2.5) --
+
+TEST_CASE("A future anchor is planned now and promoted AT its anchor") {
+    auto cfg = operatorConfig();
+    Engine e(cfg, 0.30f);
+
+    Command c1;
+    c1.target = 0.45f; c1.duration_us = 100 * (uint32_t)kMs;
+    c1.has_duration = true; c1.end_vel = 1.5f; c1.has_end_vel = true;
+    REQUIRE(e.commit(c1, 0));
+
+    const uint64_t anchor = 120 * kMs;
+    Command c2;
+    c2.target = 0.60f; c2.duration_us = 100 * (uint32_t)kMs;
+    c2.has_duration = true; c2.end_vel = 0.0f; c2.has_end_vel = true;
+    c2.anchor_us = anchor; c2.has_anchor = true;
+    REQUIRE(e.commit(c2, 20 * kMs));
+
+    // Not promoted before its anchor: the plan in flight is still the first
+    // one, so its own end state is what the sampler renders up to the anchor.
+    CHECK(e.lastPlanUs() == 0);
+    for (uint64_t t = 20 * kMs; t < anchor; t += kMs) CHECK(e.isBusy(t));
+
+    double pb, vb, ab, pa, va, aa;
+    e.rawSampleAt(anchor - 1, pb, vb, ab);
+    CHECK(e.lastPlanUs() == 0);            // still the incumbent one sample out
+    e.rawSampleAt(anchor, pa, va, aa);
+    CHECK(e.lastPlanUs() == anchor);       // promoted exactly at the anchor
+    CHECK(e.isBusy(anchor));
+
+    // Continuous by construction: the successor was planned FROM the state the
+    // incumbent has at the anchor, and starts there.
+    // The two samples are ONE MICROSECOND apart, so the whole permitted gap
+    // is a microsecond of motion at the joining velocity.
+    CHECK(std::fabs(pa - pb) < 1e-5);
+    CHECK(std::fabs(va - vb) < 1e-3);
+}
+
+TEST_CASE("Two future anchors: LAST WINS, one slot deep") {
+    auto cfg = operatorConfig();
+    Engine e(cfg, 0.30f);
+
+    Command c1;
+    c1.target = 0.45f; c1.duration_us = 100 * (uint32_t)kMs;
+    c1.has_duration = true; c1.end_vel = 1.5f; c1.has_end_vel = true;
+    REQUIRE(e.commit(c1, 0));
+
+    Command c2;
+    c2.target = 0.60f; c2.duration_us = 100 * (uint32_t)kMs;
+    c2.has_duration = true; c2.anchor_us = 120 * kMs; c2.has_anchor = true;
+    REQUIRE(e.commit(c2, 20 * kMs));
+
+    Command c3 = c2;
+    c3.target = 0.80f; c3.anchor_us = 140 * kMs;
+    REQUIRE(e.commit(c3, 30 * kMs));
+
+    // The replaced slot never runs: nothing is promoted at 120 ms.
+    e.positionAt(130 * kMs);
+    CHECK(e.lastPlanUs() == 0);
+    e.positionAt(140 * kMs);
+    CHECK(e.lastPlanUs() == 140 * kMs);
+    // The promoted plan is the THIRD command's, not the replaced second's
+    // (Blend may shorten the stroke, so this is the target it aimed past).
+    CHECK(e.snapshot(140 * kMs).target > 0.70);
+}
+
+TEST_CASE("An anchor beyond the lead bound is refused; the plan in flight is untouched") {
+    auto cfg = operatorConfig();
+    Engine e(cfg, 0.30f);
+
+    Command c1;
+    c1.target = 0.45f; c1.duration_us = 100 * (uint32_t)kMs;
+    c1.has_duration = true;
+    REQUIRE(e.commit(c1, 0));
+    slopmotion::Anomaly ev;
+    while (e.popAnomaly(ev)) {}
+    const double ref = e.positionAt(50 * kMs);
+
+    Command c2 = c1;
+    c2.target = 0.90f;
+    c2.anchor_us = 600 * kMs;   // past kAnchorMaxLeadUs (500 ms)
+    c2.has_anchor = true;
+    CHECK_FALSE(e.commit(c2, 10 * kMs));
+
+    bool saw = false;
+    while (e.popAnomaly(ev)) {
+        if (ev.kind == (uint8_t)AnomalyType::PlanFailed &&
+            ev.detail == doctest::Approx(-97.0f)) saw = true;
+    }
+    CHECK(saw);
+    CHECK(e.positionAt(50 * kMs) == doctest::Approx(ref).epsilon(1e-12));
+    CHECK(e.snapshot(50 * kMs).target == doctest::Approx(0.45).epsilon(1e-6));
+    CHECK_FALSE(e.isBusy(400 * kMs));   // no slot was parked
+}
+
+TEST_CASE("No settle while a scheduled successor exists") {
+    auto cfg = operatorConfig();
+    Engine e(cfg, 0.30f);
+
+    // A 60 ms segment that ends MOVING: left alone it settles at expiry.
+    Command c1;
+    c1.target = 0.50f; c1.duration_us = 60 * (uint32_t)kMs;
+    c1.has_duration = true; c1.end_vel = 1.2f; c1.has_end_vel = true;
+    REQUIRE(e.commit(c1, 0));
+
+    Command c2;
+    c2.target = 0.70f; c2.duration_us = 100 * (uint32_t)kMs;
+    c2.has_duration = true;
+    c2.anchor_us = 300 * kMs; c2.has_anchor = true;
+    REQUIRE(e.commit(c2, 5 * kMs));
+
+    slopmotion::Anomaly ev;
+    int settles = 0;
+    for (uint64_t t = 5 * kMs; t < 300 * kMs; t += kMs) {
+        e.positionAt(t);
+        CHECK(e.isBusy(t));
+        while (e.popAnomaly(ev))
+            if (ev.kind == (uint8_t)AnomalyType::SettleEngaged) settles++;
+    }
+    CHECK(settles == 0);
+    CHECK(e.mode() != Mode::Settle);
+    e.positionAt(300 * kMs);
+    CHECK(e.lastPlanUs() == 300 * kMs);
+}

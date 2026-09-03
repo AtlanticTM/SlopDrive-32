@@ -419,11 +419,15 @@ inline bool buildSlopDriveCatalog(slopsync::Catalog32& c, DeviceFeatures feat = 
                 .defaultPriority = Priority::elevated,
                 .hasCategory = true, .category = slopsync::ui_categories::motion,
                 .hasRank = true, .rank = slopsync::ui_ranks::hero});
+    // PLANNED, not actual, since the RP2350 took the plan (sd-4k1.4): this is
+    // the coprocessor's RENDERED position, which IS the machine's position
+    // truth (docs/rp-motion-port.md). The drive encoder is its AUDITOR and
+    // reaches clients through the encoder-deviation channel, not this field.
     c.addLayoutField({.name = "pos_10um", .type = PackedFieldType::u16, .unit = "mm",   .scale = 100.0f,
-                      .desc = "Where the carriage actually is.",
+                      .desc = "Where the carriage is, as the motion processor rendered it.",
                       .role = roles::telemetry_position,
                       .hasRank = true, .rank = slopsync::ui_ranks::hero,
-                      .hasProvenance = true, .provenance = slopsync::value_provenance::actual,
+                      .hasProvenance = true, .provenance = slopsync::value_provenance::planned,
                       .hasUnitId = true, .unitId = slopsync::unit_ids::mm});
     c.addLayoutField({.name = "tgt_10um", .type = PackedFieldType::u16, .unit = "mm",   .scale = 100.0f,
                       .desc = "Where the motion planner is currently driving to.",

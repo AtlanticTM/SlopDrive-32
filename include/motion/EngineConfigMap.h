@@ -1,22 +1,29 @@
-// EngineConfigMap -- the SystemState tuning set to slopmotion::Config, one home.
+// EngineConfigMap -- the SystemState tuning set to kOpConfig tags, one home.
 // Constraints:
 // - Hardware-free and clock-free: no Arduino, no globals, no SystemState
 //   reference. The caller snapshots the volatile sm_tune_* fields into an
 //   EngineTuning and hands it in, which is what lets test/native/
 //   test_engine_config compile this on the host.
-// - buildEngineConfig is PURE: equal EngineTuning in, equal Config out. That
-//   is what makes comparing the TUNING enough to decide whether to push, so
-//   the caller never memcmps a Config (padding is not part of its value).
-// - Every Config field this function does not write is engine-default BY
-//   DECISION; the list is enumerated once, in the body, and nowhere else.
+// - buildConfigTags is PURE: equal EngineTuning in, equal tags out. The
+//   DRIVER owns change detection (one tag ships once per change), so this
+//   function is called freely and repeatedly.
+// - Every tuning field here becomes exactly ONE tag. A ConfigTag this
+//   function does not emit is engine-default BY DECISION; the list is
+//   enumerated once, in the body, and nowhere else.
+// - slopmotion.hpp is included for the ENUM ORDINALS only, which ride the
+//   wire verbatim (MotionLinkProtocol.h, ConfigTag). Transcribing them here
+//   would be the T20 hand-copied vocabulary; nothing else in this file
+//   touches the engine, and no Engine is instantiated on the S3.
 // - Out-of-range enum ordinals fall through to the engine's own default,
 //   never to an arbitrary policy.
-// See: docs/reviews/slopmotion-2026-09-02/05-engine-host-contract.md section 1,
-//      dev board sd-6b2.4.
+// See: docs/rp-motion-port.md, include/comms/MotionLinkProtocol.h,
+//      dev board sd-4k1.4.
 #pragma once
 
+#include <array>
 #include <cstdint>
 
+#include "MotionLinkProtocol.h"
 #include "slopmotion/slopmotion.hpp"
 
 namespace slopdrive {
@@ -26,13 +33,15 @@ namespace slopdrive {
 // Defaults mirror SystemState's sm_tune_* so EngineTuning{} is the boot set.
 struct EngineTuning {
     // Stroke window span in mm. 1 normalized engine unit == this span, so the
-    // three mm-domain ceilings divide by it. <= 1.0 means "no usable window":
-    // the engine's own Limits defaults stand instead of a divide by nothing.
+    // four mm-domain ceilings divide by it. <= 1.0 means "no usable window":
+    // the tags then carry 0, which the slave reads as unconfigured and gates
+    // rather than planning at zero.
     float    span_mm            = 0.0f;
     float    input_max_speed    = 0.0f;   // mm/s
     float    input_max_accel    = 0.0f;   // mm/s^2
     float    input_max_jerk     = 0.0f;   // mm/s^3
-    float    user_max_speed     = 0.0f;   // mm/s, the cold-start (recovery) ceiling
+    float    user_max_speed     = 0.0f;   // mm/s, the gentle (recovery) ceiling
+    float    user_max_accel     = 0.0f;   // mm/s^2
     float    vmax_ovr           = 0.0f;   // >0 overrides the derived normalized ceiling
     float    amax_ovr           = 0.0f;
     float    jmax_ovr           = 0.0f;
@@ -54,37 +63,53 @@ struct EngineTuning {
     bool operator==(const EngineTuning&) const = default;
 };
 
-inline slopmotion::Config buildEngineConfig(const EngineTuning& t) {
-    slopmotion::Config c;   // engine defaults; anything left alone below is one
-
-    // ENGINE-DEFAULT BY DECISION -- the host deliberately does not expose
-    // these, so the engine's own value is the policy. Adding a knob means
-    // moving a name off this list, never writing the field somewhere else:
-    //   chase_jerk_scale, chase_jerk_floor, chase_stale_us,
-    //   overshoot_guard, overshoot_chord_slack.
-
-    // Ceilings derive from the mm-domain INPUT limit set over the stroke
-    // window (1 normalized unit == the window span), overridable for bench
-    // tuning. ALL THREE derive the same way: a bare normalized jerk constant
-    // made the PHYSICAL jerk ceiling shrink as the operator narrowed the
-    // window and silently bound fast segments.
+// The three INPUT ceilings in normalized units, which is what the wire and
+// the engine speak. ONE home: buildConfigTags emits these and the host's
+// sm_eff_* readout reads the same call rather than repeating the arithmetic.
+// ALL THREE derive the same way: a bare normalized jerk constant made the
+// PHYSICAL jerk ceiling shrink as the operator narrowed the window and
+// silently bound fast segments.
+struct NormalizedLimits {
+    float vmax = 0.0f;
+    float amax = 0.0f;
+    float jmax = 0.0f;
+};
+inline NormalizedLimits normalizedLimits(const EngineTuning& t) {
     const bool span_ok = t.span_mm > 1.0f;
-    c.limits.vmax = t.vmax_ovr > 0.0f ? t.vmax_ovr
-                  : (span_ok ? t.input_max_speed / t.span_mm : c.limits.vmax);
-    c.limits.amax = t.amax_ovr > 0.0f ? t.amax_ovr
-                  : (span_ok ? t.input_max_accel / t.span_mm : c.limits.amax);
-    c.limits.jmax = t.jmax_ovr > 0.0f ? t.jmax_ovr
-                  : (span_ok ? t.input_max_jerk / t.span_mm : c.limits.jmax);
-    // Cold-start plans run at the USER (gentle) limit: the opening move of a
-    // stream is positioning, not content (sd-d77).
-    c.recovery_vmax = span_ok ? t.user_max_speed / t.span_mm : 0.0f;
+    NormalizedLimits l;
+    l.vmax = t.vmax_ovr > 0.0f ? t.vmax_ovr
+           : (span_ok ? t.input_max_speed / t.span_mm : 0.0f);
+    l.amax = t.amax_ovr > 0.0f ? t.amax_ovr
+           : (span_ok ? t.input_max_accel / t.span_mm : 0.0f);
+    l.jmax = t.jmax_ovr > 0.0f ? t.jmax_ovr
+           : (span_ok ? t.input_max_jerk / t.span_mm : 0.0f);
+    return l;
+}
 
-    c.chase_feedforward      = t.chase_ff;
-    c.chase_accel_ff         = t.chase_aff;
-    c.chase_ff_gain          = t.chase_gain;
-    c.chase_lookahead        = t.chase_look;
-    c.chase_dense_us         = t.dense_us;
-    c.chase_aim_accel_extrap = t.aim_extrap;
+// Every tag this map emits. Growing the tuning grows this number, which is
+// what makes the host-side census (test/native/test_engine_config) a census.
+inline constexpr size_t kEngineConfigTagCount = 19;
+
+inline std::array<motionlink::ConfigField, kEngineConfigTagCount>
+buildConfigTags(const EngineTuning& t) {
+    using namespace motionlink;
+
+    // ENGINE-DEFAULT BY DECISION -- tags the vocabulary defines and this host
+    // deliberately does not drive, so the slave's own value is the policy.
+    // Exposing a knob means moving a name off this list, never writing the
+    // tag somewhere else:
+    //   kCfgOvershootGuard, kCfgOvershootChordSlack, kCfgChaseStaleUs.
+    // RETIRED and never emitted: kCfgSampleSynthesis (synthesis left the
+    // engine 2026-09-03; a slave ignores it).
+
+    const NormalizedLimits lim = normalizedLimits(t);
+    const bool span_ok = t.span_mm > 1.0f;
+
+    // The USER set is the gentle pair and it has NO jerk of its own, because
+    // the UI has none to offer: user-set plans take the INPUT jerk ceiling,
+    // so jerk stays one fact with one home (MotionLinkProtocol.h, ConfigTag).
+    const float user_v = span_ok ? t.user_max_speed / t.span_mm : 0.0f;
+    const float user_a = span_ok ? t.user_max_accel / t.span_mm : 0.0f;
 
     // Infeasible-segment policy. TWO policies, but the stored ordinal runs
     // 0..5: the catalog select's wire value is 0 = stretch / 1 = blend, and
@@ -94,44 +119,50 @@ inline slopmotion::Config buildEngineConfig(const EngineTuning& t) {
     // than silently reverting an operator to Stretch. Out of range falls
     // through to the ENGINE default (also Blend), never to an arbitrary policy
     // (fw 2.1.49: a boolean map could only produce two of three, so the third
-    // was unreachable). The host logs the retired case once; the engine stays
-    // log-free.
-    switch (t.infeas_policy) {
-        case 0: c.infeasible_policy = slopmotion::InfeasiblePolicy::Stretch; break;
-        case 1: c.infeasible_policy = slopmotion::InfeasiblePolicy::Blend;   break;
-        default:
-            if (t.infeas_policy <= slopmotion::kInfeasiblePolicyMax)
-                c.infeasible_policy = slopmotion::InfeasiblePolicy::Blend;
-            break;
-    }
-    c.settle_grace_us          = t.settle_grace_us;
-    // The two spend budgets + the ray's step depth. Inert under Stretch; the
-    // engine clamps both budgets to [0,1] and the step count to [1,10] itself,
-    // so pushing what the host stored is safe -- the clamp on the intake side
-    // keeps the echo honest, it does not protect the engine.
-    c.infeasible_smooth_budget    = t.smooth_budget;
-    c.infeasible_amplitude_budget = t.amp_budget;
-    c.infeasible_blend_steps      = t.blend_steps;
-    // Blend's one slider: what an infeasible segment gives up, as an exchange
-    // rate between amplitude and shape. Clamped [0,1] by the engine.
-    c.infeasible_blend            = t.infeas_blend;
+    // was unreachable). The host logs the retired case once; the engine and
+    // this map stay log-free.
+    uint8_t policy = uint8_t(slopmotion::InfeasiblePolicy::Blend);
+    if (t.infeas_policy == 0) policy = uint8_t(slopmotion::InfeasiblePolicy::Stretch);
+    else if (t.infeas_policy > slopmotion::kInfeasiblePolicyMax)
+        policy = uint8_t(slopmotion::Config{}.infeasible_policy);
 
-    // Curve family for waveform-segment reconstruction. Same fall-through rule
-    // as the policy map above.
+    // Curve family for waveform-segment reconstruction. Same fall-through.
+    uint8_t curve = uint8_t(slopmotion::Config{}.curve_policy);
     switch (t.curve_policy) {
-        case 0: c.curve_policy = slopmotion::CurvePolicy::FollowClient; break;
-        case 1: c.curve_policy = slopmotion::CurvePolicy::ForceC1;      break;
-        case 2: c.curve_policy = slopmotion::CurvePolicy::ForceC2;      break;
+        case 0: curve = uint8_t(slopmotion::CurvePolicy::FollowClient); break;
+        case 1: curve = uint8_t(slopmotion::CurvePolicy::ForceC1);      break;
+        case 2: curve = uint8_t(slopmotion::CurvePolicy::ForceC2);      break;
         default: break;
     }
 
-    // The RFC-008 handoff sanity guard (0 = off). The guard only engages when
-    // the INGRESS supplied a one-segment lookahead, so this knob is the
-    // aggressiveness dial plus off switch, never the arming condition.
-    // Engine-clamped.
-    c.handoff_chord_factor = t.handoff_k;
-
-    return c;
+    return {{
+        {kCfgInputVmax,          f32Bits(lim.vmax)},
+        {kCfgInputAmax,          f32Bits(lim.amax)},
+        {kCfgInputJmax,          f32Bits(lim.jmax)},
+        {kCfgUserVmax,           f32Bits(user_v)},
+        {kCfgUserAmax,           f32Bits(user_a)},
+        {kCfgSettleGraceUs,      t.settle_grace_us},
+        {kCfgInfeasiblePolicy,   policy},
+        // The engine clamps both budgets to [0,1], the step count to [1,10]
+        // and the blend slider to [0,1] itself, so pushing what the host
+        // stored is safe: the intake clamp keeps the ECHO honest, it does not
+        // protect the slave.
+        {kCfgInfeasibleBlend,    f32Bits(t.infeas_blend)},
+        {kCfgCurvePolicy,        curve},
+        // The RFC-008 handoff sanity guard (0 = off). The guard only engages
+        // when the INGRESS supplied a one-segment lookahead, so this knob is
+        // the aggressiveness dial plus off switch, never the arming condition.
+        {kCfgHandoffChordFactor, f32Bits(t.handoff_k)},
+        {kCfgBlendSteps,         t.blend_steps},
+        {kCfgSmoothBudget,       f32Bits(t.smooth_budget)},
+        {kCfgAmplitudeBudget,    f32Bits(t.amp_budget)},
+        {kCfgChaseFeedforward,   uint32_t(t.chase_ff)},
+        {kCfgChaseAccelFf,       uint32_t(t.chase_aff)},
+        {kCfgChaseFfGain,        f32Bits(t.chase_gain)},
+        {kCfgChaseDenseUs,       t.dense_us},
+        {kCfgChaseLookahead,     f32Bits(t.chase_look)},
+        {kCfgChaseAimExtrap,     uint32_t(t.aim_extrap)},
+    }};
 }
 
 }  // namespace slopdrive

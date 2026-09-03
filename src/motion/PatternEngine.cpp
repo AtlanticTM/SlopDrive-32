@@ -349,8 +349,8 @@ void PatternEngine::run() {
         // ---- Gate checks — yield to stream MOTION, not stream packets -------
         // Packet recency (last_intiface_ms) let keep-alive-only hosts pin the
         // pattern off forever. The pattern now yields only while the stream is
-        // actually driving the target (moved within 1.5s) — matching the
-        // sampler's reclaim window in streamSamplerTask.
+        // actually driving the target (moved within 1.5s) — the same window
+        // MotionArbiter::_gatesPass applies to a PATTERN intent.
         bool intiface_driving = (_state.last_intiface_move_ms != 0) &&
                                 (millis() - _state.last_intiface_move_ms < 1500);
         bool user_has_control = _state.paused || _state.manual_override;

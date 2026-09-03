@@ -75,12 +75,15 @@ protected:
     // Kept protected in the derived class too so the compile-time lock can't be
     // bypassed by holding a concrete AIMServoDriver& instead of a MotorDriver&.
 
-    // Pre-planned native-step dispatch — called from Core 1 via MotionArbiter.
-    // Speed and accel arrive already converted to steps/s and steps/s².
-    // Fires straight to FAS — no unit math here.
+    // Pre-planned native-step dispatch. Speed and accel arrive already
+    // converted to steps/s and steps/s^2. NOT an override: the motion link is
+    // the dispatch interface now (docs/rp-motion-port.md), and this backend
+    // does not speak it, so nothing reaches this path. Kept intact for a
+    // future step/dir drive; MotorDriver::sendCommand's default is what an
+    // arbiter dispatch against this backend actually hits.
     void streamToSteps(int32_t target_steps,
                        uint32_t speed_steps_s,
-                       uint32_t accel_steps_s2) override;
+                       uint32_t accel_steps_s2);
 
     void stop() override;
     void hardStop() override;

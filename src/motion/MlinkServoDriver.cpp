@@ -1,13 +1,15 @@
 // MlinkServoDriver -- MotorDriver over the RP2350 SPI motion link.
 // Constraints:
 // - ONE OWNER TASK, captured on the first update() (motorTask, Core 1). Only
-//   the owner runs xfer(); every other task posts an atomic flag and update()
-//   ships it. The 10 ms tick is the command latency. See the header.
-// - Frame trust = CRC both directions; a dropped retarget heals via the
-//   100 ms idempotent refresh, estop/clear by repetition until the echoed
-//   state confirms.
-// - >=60 us between transactions: the slave block-resets its SPI per frame.
-// See: include/motion/MlinkServoDriver.h, dev board sd-dxy.
+//   the owner runs xfer(); every other task posts and the owner ships. See
+//   the header for the whole ownership rule.
+// - Commands ship ON ARRIVAL from the owner; kTickMs paces the status poll
+//   and nothing else (architecture.md section 2).
+// - Frame trust = CRC both directions. Config heals through the fingerprint
+//   compare, homing retargets through the idempotent refresh, estop/clear by
+//   repetition until the echoed state confirms.
+// - >=200 us between transactions: the slave block-resets its SPI per frame.
+// See: include/motion/MlinkServoDriver.h, docs/rp-motion-port.md.
 
 #include "motion/MlinkServoDriver.h"
 
@@ -26,14 +28,18 @@ using namespace motionlink;
 namespace {
 constexpr int8_t kSck = 7, kMiso = 10, kMosi = 38, kCs = 48, kIrq = 4;
 SPIClass s_spi(FSPI);
+// Status poll only. Nothing else in this file is clocked.
 constexpr uint32_t kTickMs = 10;
 constexpr uint32_t kRefreshMs = 100;
-constexpr uint32_t kStreamGapMs = 100;   // stream silence before re-anchoring
-// Chain gaps above this re-seed the engine instead of sweeping: a stretched
-// sweep is PERMANENT added latency on a renderer that never drains faster
-// (operator ruling). Below it, a gentle glide is imperceptible.
-constexpr float kReseedGapMm = 8.0f;
+// A config push is legitimately unacknowledged for one poll, so the
+// fingerprint compare debounces before it resends anything.
+constexpr uint32_t kConfigResyncMs = 250;
+// Event frames pulled per tick. 8 x ~232 us is under 2 ms on the motion core;
+// the rest ride the next tick, and `remaining` says they are there.
+constexpr uint8_t kEventPullPerTick = 8;
 }  // namespace
+
+// ---- wire ------------------------------------------------------------------
 
 void MlinkServoDriver::xfer(uint8_t (&out)[kFrameBytes],
                             uint8_t (&in)[kFrameBytes]) {
@@ -46,24 +52,37 @@ void MlinkServoDriver::xfer(uint8_t (&out)[kFrameBytes],
     // (measured ~1 torn frame per 4-8 s under motor load, 2026-08-08).
     if (sinceUs < 200) delayMicroseconds(200 - sinceUs);
     crcStamp(out);
+    const uint32_t t0 = micros();
     s_spi.beginTransaction(SPISettings(kSpiHz, MSBFIRST, SPI_MODE1));
-    // Scheduler lock for the ~40 us transaction: the sampler (prio 4, same
-    // core) otherwise preempts mid-frame -- CS low, clock frozen -- and the
-    // slave's IRQ spin bails at ~300 us of silence, tearing the frame. Worst
-    // during slopmotion commit() (ms-scale Ruckig planning), which is why
-    // tears landed exactly on command boundaries. ISRs stay enabled.
+    // Scheduler lock for the ~40 us transaction: a same-core task otherwise
+    // preempts mid-frame -- CS low, clock frozen -- and the slave's IRQ spin
+    // bails at ~300 us of silence, tearing the frame. ISRs stay enabled.
     vTaskSuspendAll();
     digitalWrite(kCs, LOW);
     s_spi.transferBytes(out, in, kFrameBytes);
     digitalWrite(kCs, HIGH);
     xTaskResumeAll();
     s_spi.endTransaction();
-    s_lastEndUs = micros();
+    const uint32_t t3 = micros();
+    s_lastEndUs = t3;
+    // Stamp EVERY outgoing frame: the reply that carries this frame's
+    // clock_t1 arrives one transaction later and is paired by seq.
+    Stamp& st = _stamp[out[1] & 3u];
+    st.t0 = t0;
+    st.t3 = t3;
+    st.seq = out[1];
+    st.ok = true;
 }
 
 bool MlinkServoDriver::isOwner() const {
     return _owner.load(std::memory_order_acquire) ==
            (void*)xTaskGetCurrentTaskHandle();
+}
+
+void MlinkServoDriver::sendOp(uint8_t op) {
+    uint8_t out[kFrameBytes] = {op, ++_seq};
+    uint8_t in[kFrameBytes] = {};
+    xfer(out, in);
 }
 
 void MlinkServoDriver::pushCeiling(float mm_s) {
@@ -85,21 +104,6 @@ void MlinkServoDriver::setRenderCeiling(float mm_s) {
     _ceiling_req.store(mm_s, std::memory_order_release);
 }
 
-float MlinkServoDriver::liveCounts() const {
-    // Same extrapolation getPosition() applies, in the raw count frame and
-    // without the target clamp (an anchor wants the best estimate, not a
-    // display value). v=0 at rest keeps standstill exact.
-    uint32_t age = millis() - _status_ms + kTickMs;
-    if (age > 3 * kTickMs) age = 3 * kTickMs;
-    return _pos_counts + _vel_counts * (float(age) * 1e-3f);
-}
-
-void MlinkServoDriver::sendOp(uint8_t op) {
-    uint8_t out[kFrameBytes] = {op, ++_seq};
-    uint8_t in[kFrameBytes] = {};
-    xfer(out, in);
-}
-
 void MlinkServoDriver::sendRetarget() {
     uint8_t out[kFrameBytes] = {kOpRetarget, ++_seq};
     memcpy(&out[2], &_rt_target, 4);
@@ -113,197 +117,215 @@ void MlinkServoDriver::sendRetarget() {
     _last_cmd_ms = millis();
 }
 
-// Hold-knot accel by centered difference across [chain, samp] -- both
-// velocities come off the analytic curve, so the estimate is clean. The
-// shipped a1 is reused verbatim as the next segment's a0 (exact C2 chain).
-float MlinkServoDriver::holdKnotAccel() const {
-    const uint32_t dt_us = _samp_us - _chain_us;
-    if (dt_us == 0 || dt_us > 200000u) return 0.0f;
-    return (_samp_v - _chain_v) / (float(dt_us) * 1e-6f);
-}
+// ---- command and config forwarding -----------------------------------------
 
-void MlinkServoDriver::sendSegmentTo(float p1, float v1, float a1,
-                                     uint32_t t1_us) {
-    // Hermite chunk covering [chain, (p1,v1,a1,t1)]: the slave renders it
-    // over its wire duration, which is what preserves the stream's timeline.
-    uint32_t dur_us = t1_us - _chain_us;
-    // Catch-up sweep after a re-anchor: stretch to the arbiter's ceiling so
-    // the gap GLIDES closed instead of shooting at the render cap (the
-    // ungoverned lunge cost 28.8 mm of drive-follow sync, 2026-08-08). The
-    // extra render time lands as transient runway; the gate drains it.
-    if (_sweep_pending) {
-        _sweep_pending = false;
-        // Anchor at SHIP time, never at detect time: the runway gate can
-        // hold a sweep for the whole chunk already rendering, and a chain
-        // anchored when the gap was noticed is that far behind the RP when
-        // it finally ships. Measured 2026-09-02: an anchor 0.8 s old put p0
-        // 63 mm behind the rendered position and the RP walked the
-        // difference backward at the 1000 mm/s ceiling (mlink census
-        // overrun=1349 residue=13238 counts). Live velocity keeps the
-        // handoff C1 when the RP is still moving; the v-cap below bounds it.
-        _chain_p = liveCounts();
-        _chain_v = _vel_counts;
-        _chain_a = 0.0f;
-        // Too far to glide: ship NOTHING and request an engine re-seed at
-        // the live position -- the gap becomes a COLD-start plan through the
-        // engine's own feasibility machinery instead of wire-duration debt
-        // the slave can never drain (sd-d77). ONE attempt per episode: a
-        // reseed cannot converge when the live position is outside the
-        // window (the engine's frame clamps), so a surviving gap falls
-        // through to the gentle sweep below -- the window-entry glide.
-        // Never mutate the chain here: a future-stamped hold once collided
-        // with the sample clock and shipped a 317 us / 42 mm chunk.
-        // A re-seed is a STREAM-ENTRY act (the sample-path and silence
-        // re-anchors arm it). Mid-stream, after an RP underrun, it is the
-        // disease: reset engine -> cadence forgotten -> plan from the wrong
-        // place -> settle at its end -> long plan -> starved ring -> underrun
-        // again. Seven resets in ten seconds on ordinary content (field
-        // trace 2026-09-02, sd-wve). Mid-stream the gap is SWEPT, below.
-        const bool entry_ship = _reseed_armed;
-        _reseed_armed = false;   // one decision per entry, then only sweeps
-        if (fabsf(p1 - _chain_p) > kReseedGapMm * AIM_STEPS_PER_MM &&
-            !_reseed_tried && entry_ship) {
-            SLOGI("mlink", "re-seed requested at stream entry: chain gap %.1f mm",
-                  (double)(fabsf(p1 - _chain_p) / AIM_STEPS_PER_MM));
-            _reseed_tried = true;
-            _reseed_req = true;
-            _sweep_pending = true;   // re-run this decision after the reset
-            _reseed_armed = true;    // the post-reset ship is still the entry
-            return;
-        }
-        _reseed_tried = false;
-        // A sweep is RECOVERY, not content: cap it at the gentle USER limit
-        // (same rule as window-entry and window glide). Content never sweeps,
-        // so feel is untouched -- a 838 mm/s from-rest restart dart was the
-        // last grit class standing (sd-d77, 2026-08-10).
-        float vsweep = _samp_vcap;
-        if (_recovery_mm_s > 0.0f)
-            vsweep = fminf(vsweep, _recovery_mm_s * AIM_STEPS_PER_MM);
-        if (vsweep > 1.0f) {
-            // Stretch for the quintic's interior PEAK, not its chord: a
-            // from-rest quintic peaks at ~1.875x its mean, so a chord-governed
-            // sweep whips at nearly 2x the ceiling (mchunk census 2026-08-09:
-            // vpk 1230-1278 mm/s against a 950 ceiling on every re-anchor --
-            // the grit). Peak-governed, the same sweep glides.
-            const float need_us =
-                1.875f * fabsf(p1 - _chain_p) / vsweep * 1e6f;
-            if (need_us > float(dur_us)) dur_us = uint32_t(need_us);
-        }
-        // A stretched sweep from v0=0 that still ARRIVES at the curve's full
-        // velocity is a Hermite bulge: the polynomial overshoots hard and
-        // whips back (the sharp-jitter + silent-teleport drift chain,
-        // 2026-08-09). Fritsch-Carlson bound: |v1| <= 1.5x the chord slope.
-        if (dur_us > 0) {
-            const float chord =
-                fabsf(p1 - _chain_p) / (float(dur_us) * 1e-6f);
-            const float vcap = 1.5f * chord;
-            if (v1 >  vcap) v1 =  vcap;
-            if (v1 < -vcap) v1 = -vcap;
-            if (_chain_v >  vcap) _chain_v =  vcap;
-            if (_chain_v < -vcap) _chain_v = -vcap;
-        }
-        // A clamped v1 makes the passed a1 inconsistent; land the sweep flat.
-        a1 = 0.0f;
+void MlinkServoDriver::shipCommand(const LinkCommand& in_cmd) {
+    LinkCommand c = in_cmd;
+    // ONE conversion, HERE, because the master owns the offset estimate. An
+    // unconverged filter is a rendered position error, so the anchor is
+    // dropped rather than guessed: the slave then plans at arrival.
+    if (c.flags & kCmdHasAnchor) {
+        if (_clock.converged()) c.anchor_us = _clock.toSlave(c.anchor_us);
+        else c.flags = uint8_t(c.flags & ~uint8_t(kCmdHasAnchor));
     }
-    // Interior-velocity scan of the EXACT polynomial the slave will render
-    // (sd-ar3.1 grit hunt): chunks with clean endpoints carry >1900 mm/s
-    // interior spikes ~100/s in fast content, and no upstream census sees
-    // inside a chunk. Worst chunk per second, with the parameters that
-    // built it, so the guilty term names itself. 9 derivative evals per
-    // chunk at ~100/s: T27-negligible next to the SPI xfer below.
-    {
-        const float T = float(dur_us) * 1e-6f;
-        if (T > 0.0f) {
-            const float V0 = _chain_v * T, V1 = v1 * T;
-            const float A0 = _chain_a * T * T, A1 = a1 * T * T;
-            const float R1 = p1 - _chain_p - V0 - 0.5f * A0;
-            const float R2 = V1 - V0 - A0;
-            const float R3 = A1 - A0;
-            const float c2 = 0.5f * A0;
-            const float c3 = 10.0f * R1 - 4.0f * R2 + 0.5f * R3;
-            const float c4 = -15.0f * R1 + 7.0f * R2 - R3;
-            const float c5 = 6.0f * R1 - 3.0f * R2 + 0.5f * R3;
-            float vpk = 0.0f;
-            for (int k = 0; k <= 8; k++) {
-                const float u = float(k) * 0.125f;
-                const float v = ((((5.0f * c5 * u + 4.0f * c4) * u + 3.0f * c3)
-                                  * u + 2.0f * c2) * u + V0) / T;
-                if (fabsf(v) > vpk) vpk = fabsf(v);
-            }
-            if (vpk > _mc_vpk) {
-                _mc_vpk = vpk;
-                _mc_dur = dur_us;
-                _mc_v0 = _chain_v; _mc_v1 = v1;
-                _mc_a0 = _chain_a; _mc_a1 = a1;
-                _mc_dp = p1 - _chain_p;
-            }
-            const uint32_t mnow = millis();
-            if (mnow - _mc_ms >= 1000u && _mc_vpk > 0.0f) {
-                _mc_ms = mnow;
-                SLOGI("mchunk", "worst/s: vpk=%.0f c/s dur=%luus dp=%.1f "
-                      "v0=%.0f v1=%.0f a0=%.0f a1=%.0f",
-                      (double)_mc_vpk, (unsigned long)_mc_dur, (double)_mc_dp,
-                      (double)_mc_v0, (double)_mc_v1,
-                      (double)_mc_a0, (double)_mc_a1);
-                _mc_vpk = 0.0f;
-            }
-        }
-    }
-    uint8_t out[kFrameBytes] = {kOpSegment2, ++_seq};
-    memcpy(&out[2], &dur_us, 4);
-    memcpy(&out[6], &_chain_p, 4);
-    memcpy(&out[10], &_chain_v, 4);
-    memcpy(&out[14], &_chain_a, 4);
-    memcpy(&out[18], &p1, 4);
-    memcpy(&out[22], &v1, 4);
-    memcpy(&out[26], &a1, 4);
+    uint8_t out[kFrameBytes] = {};
+    encodeCommand(std::span<uint8_t, kFrameBytes>(out, kFrameBytes), ++_seq, c);
     uint8_t in[kFrameBytes] = {};
     xfer(out, in);
-    // Keep the exact frame for loss recovery: same seq on resend, so the
-    // slave's dedup can drop the copy when only the ack was lost. Tracks the
-    // LAST frame of a tick; a torn first-of-pair costs a half-chunk slew.
-    memcpy(_seg_frame, out, kFrameBytes);
-    _seg_seq = _seq;
-    _seg_unacked = true;
-    _chain_p = p1;
-    _chain_v = v1;
-    _chain_a = a1;
-    _chain_us = t1_us;
     _last_cmd_ms = millis();
 }
 
-void MlinkServoDriver::sendSegment() {
-    sendSegmentTo(_hold_p, _hold_v, holdKnotAccel(), _hold_us);
+void MlinkServoDriver::shipConfig(uint8_t tag, uint32_t raw) {
+    const ConfigField f{tag, raw};
+    uint8_t out[kFrameBytes] = {};
+    encodeConfig(std::span<uint8_t, kFrameBytes>(out, kFrameBytes), ++_seq,
+                 std::span<const ConfigField>(&f, 1));
+    uint8_t in[kFrameBytes] = {};
+    xfer(out, in);
 }
 
-void MlinkServoDriver::sendSegmentSplit() {
-    // Two halves of the same quintic, evaluated at u=0.5, so an empty ring is
-    // primed to depth 2 in one tick -- production is real-time-capped, so
-    // steady one-per-tick shipping can never deepen the ring by itself.
-    const float T = float(_hold_us - _chain_us) * 1e-6f;
-    const float a1 = holdKnotAccel();
-    const float V0 = _chain_v * T, V1 = _hold_v * T;
-    const float A0 = _chain_a * T * T, A1 = a1 * T * T;
-    const float R1 = _hold_p - _chain_p - V0 - 0.5f * A0;
-    const float R2 = V1 - V0 - A0;
-    const float R3 = A1 - A0;
-    const float c2 = 0.5f * A0;
-    const float c3 = 10.0f * R1 - 4.0f * R2 + 0.5f * R3;
-    const float c4 = -15.0f * R1 + 7.0f * R2 - R3;
-    const float c5 = 6.0f * R1 - 3.0f * R2 + 0.5f * R3;
-    const float u = 0.5f;
-    const float mid_p =
-        ((((c5 * u + c4) * u + c3) * u + c2) * u + V0) * u + _chain_p;
-    const float mid_v =
-        ((((5.0f * c5 * u + 4.0f * c4) * u + 3.0f * c3) * u + 2.0f * c2) * u +
-         V0) / T;
-    const float mid_a =
-        (((20.0f * c5 * u + 12.0f * c4) * u + 6.0f * c3) * u + 2.0f * c2) /
-        (T * T);
-    const uint32_t mid_us = _chain_us + (_hold_us - _chain_us) / 2u;
-    sendSegmentTo(mid_p, mid_v, mid_a, mid_us);
-    sendSegmentTo(_hold_p, _hold_v, a1, _hold_us);
+void MlinkServoDriver::sendCommand(const LinkCommand& c) {
+    if (!_begun) return;
+    if (isOwner()) { shipCommand(c); return; }
+    // Non-owner (Core 0 has none today; the arbiter runs on motorTask). Post
+    // and let the owner ship: NEWEST WINS is wrong for a queue of distinct
+    // intents, so a full ring drops the arrival and says so.
+    const uint8_t head = _cmd_head.load(std::memory_order_relaxed);
+    const uint8_t next = uint8_t((head + 1u) % kPostDepth);
+    if (next == _cmd_tail.load(std::memory_order_acquire)) {
+        SLOGW_EVERY_MS(2000, "mlink", "command post queue full -- intent dropped");
+        return;
+    }
+    _cmd_post[head] = c;
+    _cmd_head.store(next, std::memory_order_release);
 }
+
+void MlinkServoDriver::pushConfig(uint8_t tag, uint32_t raw) {
+    if (!_begun) return;
+    // CHANGE DETECTION: one tag ships once per change. The image is the
+    // master's record of what it BELIEVES the slave holds; the fingerprint
+    // compare in update() is what catches a push that never landed.
+    if (_cfg.has(tag) && _cfg.get(tag) == raw) return;
+    _cfg.set(tag, raw);
+    if (isOwner()) { shipConfig(tag, raw); return; }
+    const uint8_t head = _cfgp_head.load(std::memory_order_relaxed);
+    const uint8_t next = uint8_t((head + 1u) % kPostDepth);
+    if (next == _cfgp_tail.load(std::memory_order_acquire)) {
+        // Not lost: the image already holds the value, so the fingerprint
+        // mismatch resync ships it within kConfigResyncMs.
+        SLOGW_EVERY_MS(2000, "mlink", "config post queue full -- resync will carry it");
+        return;
+    }
+    _cfg_post[head] = ConfigField{tag, raw};
+    _cfgp_head.store(next, std::memory_order_release);
+}
+
+void MlinkServoDriver::drainPosts() {
+    while (_cmd_tail.load(std::memory_order_relaxed) !=
+           _cmd_head.load(std::memory_order_acquire)) {
+        const uint8_t tail = _cmd_tail.load(std::memory_order_relaxed);
+        shipCommand(_cmd_post[tail]);
+        _cmd_tail.store(uint8_t((tail + 1u) % kPostDepth),
+                        std::memory_order_release);
+    }
+    while (_cfgp_tail.load(std::memory_order_relaxed) !=
+           _cfgp_head.load(std::memory_order_acquire)) {
+        const uint8_t tail = _cfgp_tail.load(std::memory_order_relaxed);
+        shipConfig(_cfg_post[tail].tag, _cfg_post[tail].raw);
+        _cfgp_tail.store(uint8_t((tail + 1u) % kPostDepth),
+                         std::memory_order_release);
+    }
+}
+
+// ---- status, clock, events --------------------------------------------------
+
+uint32_t MlinkServoDriver::statusAgeMs() const {
+    return millis() - _status_ms;
+}
+
+bool MlinkServoDriver::popEvent(EventRecord& out) {
+    const uint8_t tail = _evt_tail.load(std::memory_order_relaxed);
+    if (tail == _evt_head.load(std::memory_order_acquire)) return false;
+    out = _evt_ring[tail];
+    _evt_tail.store(uint8_t((tail + 1u) % kEventDepth), std::memory_order_release);
+    return true;
+}
+
+void MlinkServoDriver::pollStatus() {
+    uint8_t out[kFrameBytes] = {kOpPing, ++_seq};
+    uint8_t in[kFrameBytes] = {};
+    xfer(out, in);
+    const std::span<const uint8_t, kFrameBytes> reply(in, kFrameBytes);
+    if (!crcOk(reply)) return;
+    // PARSE ON THE VARIANT BYTE, never on what we sent: a v1 slave answering a
+    // v2 master is a supported state and reports variant 0 for free.
+    if (in[0] == kStateFlash) return;          // the flash family owns the reply
+    if (in[kStatusOffVariant] != kStatusV2) {
+        SLOGW_EVERY_MS(10000, "mlink",
+                       "slave answers status variant %u, not v2 -- flash the RP",
+                       unsigned(in[kStatusOffVariant]));
+        return;
+    }
+    const StatusV2 s = decodeStatusV2(reply);
+
+    // Clock: every frame is a probe, paired BY SEQ (a mispaired sample is
+    // biased early and the minimum filter would latch onto it forever).
+    const Stamp& st = _stamp[s.seq_echo & 3u];
+    if (st.ok && st.seq == s.seq_echo) _clock.push(st.t0, st.t3, s.clock_t1);
+
+    // Rising-edge fault surfacing: JUMPED means the renderer teleported its
+    // reference (physical position now differs from rendered until re-home);
+    // UNDERRAN mid-stream is starvation, expected at stream end.
+    const uint8_t rising = uint8_t(s.flags & uint8_t(~_slave_flags));
+    if (rising & kFlagJumped)
+        SLOGW("mlink", "RP JUMPED: renderer teleported its reference -- "
+              "rendered vs physical diverged, re-home to reconcile");
+    if (rising & kFlagOverflow)
+        SLOGW("mlink", "RP command ring OVERFLOW: an intent was dropped");
+    if (rising & kFlagUnderran)
+        SLOGI("mlink", "RP underran -> SETTLE (expected at stream end)");
+    _slave_flags = s.flags;
+    _state = s.state;
+
+    // Counters are PER-INTERVAL and reset on preload, so the lifetime total
+    // lives here and nowhere else (MotionLinkProtocol.h, StatusV2).
+    _tot_qdrops  += s.qdrops;
+    _tot_overrun += s.emit_overrun;
+    _tot_late    += s.late_ticks;
+    _tot_clamped += s.vel_clamped;
+    _tot_link_errs += s.link_errs;
+    _rc_qd += s.qdrops;
+    _rc_ov += s.emit_overrun;
+    _rc_lt += s.late_ticks;
+    _rc_vc += s.vel_clamped;
+    _rc_le += s.link_errs;
+    if (abs(int(s.residue)) > abs(int(_rc_res_max))) _rc_res_max = s.residue;
+
+    _status = s;
+    _status_ms = millis();
+    _status_fresh = true;
+
+    const uint32_t now = _status_ms;
+    if (now - _rc_ms >= 1000u) {
+        _rc_ms = now;
+        if (_rc_qd || _rc_ov || _rc_lt || _rc_vc || _rc_le || _rc_res_max) {
+            SLOGW("mlink", "RP renderer/s: qdrops=%lu overrun=%lu late=%lu "
+                  "clamped=%lu linkerr=%lu residue_max=%d counts",
+                  (unsigned long)_rc_qd, (unsigned long)_rc_ov,
+                  (unsigned long)_rc_lt, (unsigned long)_rc_vc,
+                  (unsigned long)_rc_le, int(_rc_res_max));
+        }
+        _rc_qd = _rc_ov = _rc_lt = _rc_vc = _rc_le = 0;
+        _rc_res_max = 0;
+    }
+}
+
+void MlinkServoDriver::pumpEvents() {
+    if (_status.event_seq == _evt_acked) return;
+    for (uint8_t n = 0; n < kEventPullPerTick; ++n) {
+        uint8_t out[kFrameBytes] = {};
+        encodeEventPull(std::span<uint8_t, kFrameBytes>(out, kFrameBytes),
+                        ++_seq, _evt_acked);
+        uint8_t in[kFrameBytes] = {};
+        xfer(out, in);
+        const std::span<const uint8_t, kFrameBytes> reply(in, kFrameBytes);
+        if (!crcOk(reply)) return;                       // retry next tick
+        if (in[kStatusOffVariant] != kStatusEvent) return;
+        const EventRecord e = decodeEvent(reply);
+        _evt_acked = e.seq;
+
+        if (e.kind == kEvtPlanAdopted) {
+            // The plan strip's whole feed. Slave -> master is the filter's
+            // inverse; elapsed is then measured in the clock the UI holds.
+            PlanEvent p;
+            p.due_master_us = e.t_us - _clock.offsetUs();
+            p.late_us = int32_t(micros() - p.due_master_us);
+            p.target = e.target;
+            p.duration_us = uint32_t(e.detail * 1e6f);
+            p.valid = true;
+            _last_plan = p;
+        } else if (e.kind == kEvtClockStep) {
+            SLOGW("mlink", "RP time base restarted -- clock filter reset");
+            _clock.reset();
+            for (auto& st : _stamp) st.ok = false;
+        } else if (e.kind == kEvtConfigTagUnknown) {
+            SLOGW("mlink", "RP does not know config tag 0x%02X (firmware skew)",
+                  unsigned(uint32_t(e.detail)));
+        }
+
+        // Every event reaches the ring, including kEvtPlanAdopted: the
+        // anomaly drain classifies by kind and the plan strip reads _last_plan.
+        const uint8_t head = _evt_head.load(std::memory_order_relaxed);
+        const uint8_t next = uint8_t((head + 1u) % kEventDepth);
+        if (next != _evt_tail.load(std::memory_order_acquire)) {
+            _evt_ring[head] = e;
+            _evt_head.store(next, std::memory_order_release);
+        }
+        if (e.remaining == 0) return;
+    }
+}
+
+// ---- lifecycle --------------------------------------------------------------
 
 void MlinkServoDriver::init() {
     pinMode(kCs, OUTPUT);
@@ -320,8 +342,8 @@ void MlinkServoDriver::init() {
     // task, so this posts and the first update() tick ships it -- still long
     // before the arbiter will dispatch anything (homing gates motion).
     setRenderCeiling(_max_speed_mm_s);
-    SLOGI("mlink", "MlinkServoDriver up: RP2350 quadrature backend, "
-          "%.1f counts/mm, speed cap %.0f counts/s",
+    SLOGI("mlink", "MlinkServoDriver up: RP2350 motion coprocessor, "
+          "%.1f counts/mm, emitter cap %.0f counts/s",
           (double)AIM_STEPS_PER_MM, (double)kMaxCountsPerSec);
 }
 
@@ -332,175 +354,94 @@ void MlinkServoDriver::update() {
     if (!_owner.load(std::memory_order_relaxed))
         _owner.store((void*)xTaskGetCurrentTaskHandle(),
                      std::memory_order_release);
+
     const uint32_t now = millis();
-    if (now - _last_tick_ms < kTickMs) return;
-    _last_tick_ms = now;
-
-    // Status poll; every reply is CRC-gated before anything trusts it.
-    uint8_t out[kFrameBytes] = {kOpPing, ++_seq};
-    uint8_t in[kFrameBytes] = {};
-    xfer(out, in);
-    const bool sane = crcOk(in);
-    if (sane) {
-        _state = in[0];
-        // Rising-edge fault surfacing: JUMPED means the renderer teleported
-        // its reference (physical position now differs from calculated until
-        // re-home -- the encoder delta names the size); OVERFLOW is a credit-
-        // gate bug; UNDERRUN mid-stream is starvation (normal at stream end).
-        const uint8_t rising = uint8_t(in[1] & uint8_t(~_slave_flags));
-        if (rising & kFlagJumped)
-            SLOGW("mlink", "RP JUMPED: renderer teleported its reference -- "
-                  "calculated vs physical diverged, re-home to reconcile");
-        if (rising & kFlagOverflow)
-            SLOGW("mlink", "RP segment ring OVERFLOW: credit gate failed, a curve chunk was dropped");
-        if (rising & kFlagUnderran)
-            SLOGI("mlink", "RP underran -> SETTLE: runway=%u ms depth=%u seg_mode=%d "
-                  "(expected at stream end; mid-stream = ring starved)",
-                  unsigned(uint16_t(in[2]) | uint16_t(uint16_t(in[3]) << 8)),
-                  unsigned(in[4]), int(_seg_mode));
-        _slave_flags = in[1];
-        _runway_ms = uint16_t(in[2]) | uint16_t(uint16_t(in[3]) << 8);
-        _depth = in[4];
-        _seq_echo = in[5];
-        memcpy(&_pos_counts, &in[6], 4);
-        memcpy(&_vel_counts, &in[10], 4);
-        memcpy(&_emitted_counts, &in[kStatusOffEmitted], 4);
-        uint16_t qd = 0, ov = 0, lt = 0, vc = 0;
-        memcpy(&qd, &in[kStatusOffQDrops], 2);
-        memcpy(&ov, &in[kStatusOffEmitOverrun], 2);
-        memcpy(&lt, &in[kStatusOffLateTicks], 2);
-        memcpy(&vc, &in[kStatusOffVelClamped], 2);
-        // T27: these are MONOTONIC counters, so "changed since last poll" is
-        // true on every poll -- that is a level, not an edge, and it floods the
-        // ring at the poll rate. Census the deltas, emit at most once a second,
-        // and only when something actually moved. Residue rides along because
-        // a counter without it is not evidence (sd-dxy.1.1).
-        // The first sane frame SEEDS (the RP's counters predate this boot),
-        // and any decrease is an RP restart: counters saturate, never wrap
-        // (sd-dxy.3 -- an unseeded first delta manufactured a false P0, and a
-        // restart read as deltas is two's-complement garbage). A restarted RP
-        // also lost its RAM ceiling: re-push it before trusting any motion.
-        const bool rp_restart = _rc_primed &&
-            (qd < _qdrops || ov < _emit_overrun ||
-             lt < _late_ticks || vc < _vel_clamped);
-        if (!_rc_primed || rp_restart) {
-            if (rp_restart) {
-                SLOGW("mlink", "RP RESTARTED (telemetry counters reset); "
-                      "re-pushing render ceiling %.0f mm/s",
-                      (double)_ceiling_mm_s);
-                if (_ceiling_mm_s > 0.0f) setRenderCeiling(_ceiling_mm_s);
-            }
-            _rc_primed = true;
-        } else {
-            _rc_qd += uint16_t(qd - _qdrops);
-            _rc_ov += uint16_t(ov - _emit_overrun);
-            _rc_lt += uint16_t(lt - _late_ticks);
-            _rc_vc += uint16_t(vc - _vel_clamped);
-        }
-        _qdrops = qd; _emit_overrun = ov; _late_ticks = lt; _vel_clamped = vc;
-        const float residue = _pos_counts - _emitted_counts;
-        if (fabsf(residue) > fabsf(_rc_res_max)) _rc_res_max = residue;
-        if (now - _rc_ms >= 1000u) {
-            _rc_ms = now;
-            if (_rc_qd || _rc_ov || _rc_lt || _rc_vc || fabsf(_rc_res_max) >= 1.0f) {
-                SLOGW("mlink", "RP renderer/s: qdrops=%u overrun=%u late=%u clamped=%u "
-                      "residue_max=%.1f counts",
-                      unsigned(_rc_qd), unsigned(_rc_ov), unsigned(_rc_lt),
-                      unsigned(_rc_vc), (double)_rc_res_max);
-            }
-            _rc_qd = _rc_ov = _rc_lt = _rc_vc = 0;
-            _rc_res_max = 0.0f;
-        }
-        _status_ms = now;
-        _status_fresh = true;
+    const bool tick = (now - _last_tick_ms) >= kTickMs;
+    if (tick) {
+        _last_tick_ms = now;
+        _status_fresh = false;
+        pollStatus();
     }
 
+    // Stop paths own the wire: nothing else ships while one is outstanding.
     if (_estop_pending.load(std::memory_order_acquire)) {
-        if (!sane || _state != kStateEstop) sendOp(kOpEstop);
-        else _estop_pending.store(false, std::memory_order_relaxed);
-        return;                       // nothing else while stopping
-    }
-    if (_clear_pending.load(std::memory_order_acquire)) {
-        if (sane && _state == kStateEstop) sendOp(kOpClear);
-        else if (sane) _clear_pending.store(false, std::memory_order_relaxed);
+        if (tick) {
+            if (!_status_fresh || _state != kStateEstop) sendOp(kOpEstop);
+            else _estop_pending.store(false, std::memory_order_relaxed);
+        }
         return;
     }
-    // Ceiling posted by another task. After the stop paths on purpose: a
-    // pending estop owns the wire until the slave echoes it.
+    if (_clear_pending.load(std::memory_order_acquire)) {
+        if (tick) {
+            if (_status_fresh && _state == kStateEstop) sendOp(kOpClear);
+            else if (_status_fresh) _clear_pending.store(false, std::memory_order_relaxed);
+        }
+        return;
+    }
+
+    // Posted intents and config ship on ARRIVAL, not on the tick.
+    drainPosts();
+
+    if (!tick) return;
+
     const float req = _ceiling_req.exchange(0.0f, std::memory_order_acquire);
     if (req > 0.0f) pushCeiling(req);
 
-    if (_seg_mode) {
-        // This tick's ping reply was preloaded after the slave processed last
-        // tick's FINAL frame, so a landed segment echoes its seq here. On a
-        // miss, resend the SAME frame: the slave dedups by segment seq, so a
-        // lost-ack duplicate is dropped. (After ~256 straight losses the ping
-        // seq wraps onto the segment's; the link is long dead before that.)
-        if (_seg_unacked) {
-            if (sane && _seq_echo == _seg_seq) {
-                _seg_unacked = false;
-            } else {
-                uint8_t rein[kFrameBytes] = {};
-                xfer(_seg_frame, rein);
-                return;
+    if (_status_fresh) {
+        pumpEvents();
+
+        // THE LOST-MIDDLE-FRAME DETECTOR. A counter cannot see a dropped
+        // MIDDLE frame of a multi-frame set (the last frame still bumps it);
+        // a checksum of the whole applied image can. fp 0 also means "the
+        // slave has applied nothing", which is the restart detector.
+        const uint16_t want = _cfg.fingerprint();
+        if (_status.config_fp != want && _cfg.size() > 0) {
+            if (_fp_mismatch_ms == 0) _fp_mismatch_ms = now;
+            else if (now - _fp_mismatch_ms >= kConfigResyncMs) {
+                _fp_mismatch_ms = now;
+                if (_status.config_fp == 0 && _ceiling_mm_s > 0.0f) {
+                    SLOGW("mlink", "RP restarted (config image empty); "
+                          "re-pushing ceiling %.0f mm/s", (double)_ceiling_mm_s);
+                    pushCeiling(_ceiling_mm_s);
+                    _resync_at = 0;
+                }
+                // One frame of the image per resync interval, cycling: the
+                // whole set is re-sent within a few intervals and the
+                // fingerprint agreeing is what ends it.
+                const auto fields = _cfg.fields();
+                if (_resync_at >= fields.size()) _resync_at = 0;
+                const size_t n = fields.size() - _resync_at < kConfigFieldsPerFrame
+                                     ? fields.size() - _resync_at
+                                     : kConfigFieldsPerFrame;
+                uint8_t out[kFrameBytes] = {};
+                encodeConfig(std::span<uint8_t, kFrameBytes>(out, kFrameBytes),
+                             ++_seq, fields.subspan(_resync_at, n));
+                uint8_t in[kFrameBytes] = {};
+                xfer(out, in);
+                _resync_at = uint8_t(_resync_at + n);
+                SLOGW_EVERY_MS(5000, "mlink",
+                               "config fingerprint mismatch (slave %u, image %u) "
+                               "-- re-shipping %u of %u tags",
+                               unsigned(_status.config_fp), unsigned(want),
+                               unsigned(n), unsigned(fields.size()));
             }
+        } else {
+            _fp_mismatch_ms = 0;
         }
-        // Underrun settle: re-anchor one tick BEHIND the hold, dropping slip.
-        // Never ahead: chain past hold underflows the u32 duration (the
-        // 71-minute wedge segment, 2026-08-07). Only while samples ADVANCE:
-        // a settled stream end otherwise loops hold-segments forever.
-        if (sane && _state == kStateSettled && !_seg_unacked &&
-            _samp_us != _hold_us) {
-            _chain_p = liveCounts();
-            _chain_v = 0.0f;
-            _chain_a = 0.0f;
-            _chain_us = _hold_us - kTickMs * 1000u;
-            _sweep_pending = true;
-            _reseed_armed = false;   // mid-stream: rejoin the curve, never reset
-        }
-        // Blocked-interval re-base; unsigned compare also catches any
-        // chain-ahead-of-hold ordering bug as a huge gap.
-        if (_hold_us - _chain_us > kStreamGapMs * 1000u) {
-            _chain_p = liveCounts();
-            _chain_v = 0.0f;
-            _chain_a = 0.0f;
-            _chain_us = _hold_us - kTickMs * 1000u;
-            _sweep_pending = true;
-            _reseed_armed = true;    // stream silence: the next chunk is an entry
-        }
-        // Gate compensates the one-tick-stale runway report. Split ONLY at
-        // depth 0: sustained multi-frame ticks exceed the slave's per-frame-
-        // reset budget (2.4.87: torn 83k, qdrops 607); deeper waits on sd-dxy.
-        const int32_t span_us = int32_t(_hold_us - _chain_us);
-        if (sane && !_reseed_req && span_us > 0 && _depth < kSegmentDepth &&
-            _runway_ms < kRunwayTargetMs + 2 * kTickMs) {
-            // A governed sweep never splits: it is one stretched glide.
-            if (_depth == 0 && span_us >= 4000 && !_sweep_pending)
-                sendSegmentSplit();
-            else sendSegment();
-        }
-        // Holdback advances AFTER the ship attempt: a fresh chunk always
-        // exists to ship into a draining ring next tick.
-        _hold_p = _samp_p;
-        _hold_v = _samp_v;
-        _hold_us = _samp_us;
-        return;                       // segment mode never refreshes retargets
     }
 
+    // Homing point moves only (see the header): idempotent, last wins, so a
+    // missed seq echo just resends next tick.
     if (_rt_valid) {
-        // Retargets are idempotent/last-wins, so a resend needs no dedup: on
-        // a missed seq echo just send again (fresh seq) next tick.
-        const bool lost = _rt_unacked && sane && _seq_echo != _rt_seq;
-        if (_rt_unacked && sane && _seq_echo == _rt_seq) _rt_unacked = false;
-        if (_rt_dirty || lost || now - _last_cmd_ms >= kRefreshMs)
-            sendRetarget();
+        const bool lost = _rt_unacked && _status_fresh && _status.seq_echo != _rt_seq;
+        if (_rt_unacked && _status_fresh && _status.seq_echo == _rt_seq)
+            _rt_unacked = false;
+        if (_rt_dirty || lost || now - _last_cmd_ms >= kRefreshMs) sendRetarget();
     }
 }
 
 void MlinkServoDriver::emergencyStop() {
     _rt_valid = false;
-    _seg_mode = false;
-    _seg_unacked = false;
     // Flag first: a non-owner caller (OtaService::prepareForOta -> arbiter, on
     // httpTask) must leave the bus alone, and the next update() tick ships it.
     _estop_pending.store(true, std::memory_order_release);
@@ -513,7 +454,7 @@ void MlinkServoDriver::enable() {
         _clear_pending.store(true, std::memory_order_release);
 }
 
-// ---- mlink homing tunables --------------------------------------------------
+// ---- homing -----------------------------------------------------------------
 // This motor free-runs at ~0.03 A (operator-measured 2026-08-08), so the AIM
 // path's 3 A margin and 29.5 mm/s crawl are both far too timid here. Local to
 // this backend on purpose: the AIM_* constants stay tuned for the FAS path.
@@ -527,6 +468,7 @@ constexpr float kHomeReprobeBackMm = 15.0f;  // back off past the rope slack
 
 bool MlinkServoDriver::sendSetPos(float counts) {
     // Idempotent absolute set: repeat until the echoed position confirms.
+    // Also re-seeds the RP's engine at the honest normalized position.
     for (int i = 0; i < 10; i++) {
         uint8_t out[kFrameBytes] = {kOpSetPos, ++_seq};
         memcpy(&out[2], &counts, 4);
@@ -534,7 +476,7 @@ bool MlinkServoDriver::sendSetPos(float counts) {
         xfer(out, in);
         vTaskDelay(pdMS_TO_TICKS(15));
         update();
-        if (fabsf(_pos_counts - counts) < 4.0f) return true;
+        if (fabsf(_status.pos - counts) < 4.0f) return true;
     }
     return false;
 }
@@ -554,7 +496,7 @@ bool MlinkServoDriver::homingAbort(const char* what) {
 bool MlinkServoDriver::sweepToStall(float dir, float speed_mm_s, float bound_mm,
                                     float& pos_out) {
     const float scale = AIM_STEPS_PER_MM;
-    const float start = _pos_counts;
+    const float start = _status.pos;
     _rt_target = start + dir * bound_mm * scale;
     _rt_v = speed_mm_s * scale;
     _rt_a = 8.0f * _rt_v;
@@ -590,13 +532,13 @@ bool MlinkServoDriver::sweepToStall(float dir, float speed_mm_s, float bound_mm,
         vTaskDelay(pdMS_TO_TICKS(poll_ms));
     }
     // Brake where we are, whatever happened.
-    _rt_target = _pos_counts;
+    _rt_target = _status.pos;
     _rt_dirty = true;
-    for (int i = 0; i < 60 && fabsf(_vel_counts) > 50.0f; i++) {
+    for (int i = 0; i < 60 && fabsf(_status.vel) > 50.0f; i++) {
         update();
         vTaskDelay(pdMS_TO_TICKS(10));
     }
-    pos_out = _pos_counts;
+    pos_out = _status.pos;
     if (!wall) return false;
     const float swept_mm = fabsf(pos_out - start) / scale;
     return swept_mm < AIM_HOME_STALL_PLAUSIBLE_FRAC * bound_mm;
@@ -612,7 +554,7 @@ void MlinkServoDriver::glideTo(float counts, float speed_mm_s,
     const uint32_t t0 = millis();
     while (millis() - t0 < max_ms) {
         update();
-        if (fabsf(_pos_counts - counts) < 8.0f && fabsf(_vel_counts) < 50.0f)
+        if (fabsf(_status.pos - counts) < 8.0f && fabsf(_status.vel) < 50.0f)
             break;
         vTaskDelay(pdMS_TO_TICKS(10));
     }
@@ -625,7 +567,10 @@ void MlinkServoDriver::glideTo(float counts, float speed_mm_s,
 // the existing homed-edge NVS persist. BLOCKING on motorTask (sanctioned);
 // update() inside every wait keeps the link serviced. No Modbus anywhere.
 bool MlinkServoDriver::home(int32_t) {
-    if (!_begun || !_status_fresh) {
+    // _status_ms, not _status_fresh: the question is "has the link ever
+    // answered", and _status_fresh reports only the LAST poll, so one bad CRC
+    // frame would otherwise refuse homing.
+    if (!_begun || _status_ms == 0) {
         SLOGW("mlink", "homing refused: mlink link not up");
         return false;
     }
@@ -651,8 +596,6 @@ bool MlinkServoDriver::home(int32_t) {
     _current.resetPeaks();
     _homing = true;
     _homed = false;
-    _seg_mode = false;
-    _seg_unacked = false;
 
     const float scale = AIM_STEPS_PER_MM;
     const float rail  = getMaxRailMm();
@@ -701,97 +644,29 @@ bool MlinkServoDriver::home(int32_t) {
     return true;
 }
 
-void MlinkServoDriver::streamToSteps(int32_t target_steps,
-                                     uint32_t speed_steps_s,
-                                     uint32_t accel_steps_s2) {
-    if (!_homed) return;
-    float v = float(speed_steps_s);
-    if (v > kMaxCountsPerSec) v = kMaxCountsPerSec;
-    if (v < 1.0f) v = 1.0f;
-    float a = float(accel_steps_s2);
-    if (a < 1.0f) a = 1.0f;
-    _seg_mode = false;                // point move: retarget reclaims the wire
-    _seg_unacked = false;
-    _rt_target = float(target_steps);
-    _rt_v = v;
-    _rt_a = a;
-    _last_accel_native = accel_steps_s2;
-    _rt_valid = true;
-    _rt_dirty = true;
-}
+// ---- stops ------------------------------------------------------------------
+// Both are reachable from httpTask (WebUI -> arbiter). Neither touches the
+// bus: they fill the homing retarget shadow and the owner ships it.
 
-void MlinkServoDriver::streamSample(int32_t target_steps, float vel_steps_s,
-                                    uint32_t speed_steps_s,
-                                    uint32_t accel_steps_s2) {
-    // Curve chase rides kOpSegment: the slave renders Hermite chunks over
-    // their real durations, so the stream's own timeline IS the speed. The
-    // ceiling params are already baked into the sampled curve upstream
-    // (slopmotion Config); feeding them to a land-at-v=0 retarget instead is
-    // the sd-ar3 sprint-and-stop failure.
-    if (!_homed) return;
-    float v = vel_steps_s;
-    if (v >  kMaxCountsPerSec) v =  kMaxCountsPerSec;
-    if (v < -kMaxCountsPerSec) v = -kMaxCountsPerSec;
-    const uint32_t now_us = micros();
-    // (Re-)anchor at the live rendered position on entry or after a stream
-    // gap; a stale chain tail would ship one giant segment spanning the idle.
-    // Store order matters: update() may preempt between statements (same
-    // core), so _seg_mode flips true only after the chain is coherent.
-    if (!_seg_mode || now_us - _samp_us > kStreamGapMs * 1000u) {
-        _rt_valid = false;
-        _rt_dirty = false;
-        _seg_unacked = false;
-        _chain_p = liveCounts();
-        _chain_v = 0.0f;
-        _chain_a = 0.0f;
-        _chain_us = now_us;
-        _hold_p = _chain_p;
-        _hold_v = 0.0f;
-        _hold_us = now_us;
-        _samp_us = now_us;
-        _sweep_pending = true;
-        _reseed_tried = false;
-        // ONE RESET OWNER (sd-6b2.12): the host's stream rising edge already
-        // seeded the engine at the live position earlier in THIS tick, so
-        // arming here would cost a second cold start ~10 ms later from the
-        // same stale position. Arm only when nobody else owned the reset,
-        // which is the 100 ms-silence re-entry inside a live stream.
-        _reseed_armed = !_engine_seeded;
-        _engine_seeded = false;
-        _seg_mode = true;
-    }
-    _samp_p = float(target_steps);
-    _samp_v = v;
-    _samp_us = now_us;
-    _samp_vcap = float(speed_steps_s);
-    _last_accel_native = accel_steps_s2;
-}
-
-// Both stops are reachable from httpTask (WebUI -> arbiter), so they fill the
-// retarget shadow BEFORE leaving segment mode: the owner must never find
-// _seg_mode false next to a stale target. Same store-order rule streamSample
-// documents. Neither touches the bus.
 void MlinkServoDriver::stop() {
     // Full stop clears homed (interface contract). Land where we are.
     _homed = false;
-    _rt_target = _pos_counts;
+    _rt_target = _status.pos;
     _rt_v = kMaxCountsPerSec;
     if (_rt_a < 1.0f) _rt_a = 100000.0f;
     _rt_valid = true;
-    _seg_unacked = false;
-    _seg_mode = false;
     _rt_dirty = true;
 }
 
 void MlinkServoDriver::hardStop() {
-    _rt_target = _pos_counts;
+    _rt_target = _status.pos;
     _rt_v = kMaxCountsPerSec;
     if (_rt_a < 1.0f) _rt_a = 100000.0f;
     _rt_valid = true;
-    _seg_unacked = false;
-    _seg_mode = false;
     _rt_dirty = true;
 }
+
+// ---- readouts ---------------------------------------------------------------
 
 float MlinkServoDriver::getPosition() const {
     // Native frame is NEGATED vs mm (endstop 0, front negative), same as
@@ -802,22 +677,14 @@ float MlinkServoDriver::getPosition() const {
     // Capped so a dead link freezes; v=0 at rest keeps standstill raw.
     uint32_t age = millis() - _status_ms + kTickMs;
     if (age > 3 * kTickMs) age = 3 * kTickMs;
-    float ext = _pos_counts + _vel_counts * (float(age) * 1e-3f);
-    // The renderer never passes its active target: clamp the extrapolation
-    // to it, or a reversal-edge read lands past the window and trips the
-    // arbiter's outside-window gentle cap (pattern pinned to USER speed,
-    // self-reinforcing late strokes -- 2026-08-08). Idle: target==pos, so
-    // extrapolation is disabled at rest by construction.
-    const float tgt = _seg_mode ? _samp_p : (_rt_valid ? _rt_target : _pos_counts);
-    const float lo = (_pos_counts < tgt) ? _pos_counts : tgt;
-    const float hi = (_pos_counts < tgt) ? tgt : _pos_counts;
-    if (ext < lo) ext = lo;
-    if (ext > hi) ext = hi;
+    const float ext = _status.pos + _status.vel * (float(age) * 1e-3f);
     return -ext / AIM_STEPS_PER_MM;
 }
 
 float MlinkServoDriver::getTargetPosition() const {
-    const float t = _seg_mode ? _samp_p : (_rt_valid ? _rt_target : _pos_counts);
+    // Homing owns the only target this side still holds; a streamed plan's
+    // target lives on the RP and rides lastPlan() as a NORMALIZED value.
+    const float t = _rt_valid ? _rt_target : _status.pos;
     return -t / AIM_STEPS_PER_MM;
 }
 

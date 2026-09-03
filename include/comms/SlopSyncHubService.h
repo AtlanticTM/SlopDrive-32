@@ -76,8 +76,8 @@ struct PacingEntry {
     // WAVEFORM (0x0085 motion-segment) carries a commanded duration + an
     // EXPLICIT end-velocity presence flag; CHASE (0x0084 motion-input) leaves
     // has_duration false and derives has_end_vel from vel≠0 at push time. Both
-    // channels share this ring — the drain builds the slopmotion::Command
-    // straight from these fields, so the two paths differ ONLY here at ingress.
+    // channels share this ring — the drain builds the SegmentIntent straight
+    // from these fields, so the two paths differ ONLY here at ingress.
     uint32_t duration_us  = 0;
     bool     has_duration = false;
     bool     has_end_vel  = false;
@@ -310,14 +310,6 @@ public:
     // build regardless of whether it wires a PatternEngine at all.
     void setPatternEngine(PatternEngine* pe) { _patternEngine = pe; _delegate.bindPatternEngine(pe); }
 
-    // Optional (additive): wire the Core-1 sampler's command queue so drained
-    // 0x0084 motion-input pacing-ring entries can reach it (mirrors
-    // setPatternEngine). Without it, onStreamBundle still fills the ring but
-    // taskLoop has nowhere to send drained commands, so they're just dropped
-    // (counted). Call once from setup(), after both g_interp_queue and this
-    // service exist.
-    void setMotionStreamQueue(QueueHandle_t q) { _motionStreamQueue = q; }
-
     // Pairing window control (app-facing). openPairing copies the PIN (the hub
     // holds a view of it while the window is open) and lights the SlopGlow
     // Pairing state; closePairing clears both and persists any new tokens.
@@ -396,7 +388,6 @@ private:
     MotionArbiter& _arbiter;
     MotorDriver& _motor;   // power/thermal/energy telemetry + the 0x0087 feature gate
     PatternEngine* _patternEngine = nullptr;
-    QueueHandle_t _motionStreamQueue = nullptr;  // Core-1 SlopMotion sampler queue (g_interp_queue)
 
     // ---- Owned (declaration order == construction order: catalog/clock/rng/
     //      pacing ring/delegate MUST precede _hub, which binds them by

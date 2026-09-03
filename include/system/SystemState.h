@@ -209,8 +209,7 @@ struct SystemState {
 
     // Timestamp of last streamed motion command (cross-core!). Written on
     // Core 0 (SlopSyncHubService::drainMotionStream), read on Core 1
-    // in hot gating paths (streamSamplerTask's recent-packet gate and the
-    // arbiter's Intiface-recency gate in _gatesPass). 32-bit aligned store is
+    // in the arbiter's Intiface-recency gate (_gatesPass). 32-bit aligned store is
     // hardware-atomic on the S3; volatile keeps the Core-1 reads fresh. The
     // old "Core 1 only" comment here was factually wrong.
     volatile uint32_t      last_intiface_ms = 0;
@@ -270,9 +269,7 @@ struct SystemState {
     // point move lands) — NOT by the arbiter/planner or the telemetry sampler;
     // MotionArbiter deliberately never writes this from motion dispatch (see
     // the D4 comments in MotionArbiter.cpp/PatternEngine.cpp), and the live
-    // position readout goes through _motor.getPosition() directly. Read by
-    // Core 1's streamSamplerTask (main.cpp) on a stream's rising edge, to seed
-    // the interpolator from the last known manual endpoint.
+    // position readout goes through _motor.getPosition() directly.
     // std::atomic<float> gives the no-tear guarantee with zero overhead on S3.
     // memory_order_relaxed is correct — telemetry is display-only, no ordering
     // dependency with any other variable.
@@ -316,15 +313,13 @@ struct SystemState {
     volatile uint16_t      buf_tick_hz  = 100;   // local interpolation rate (Hz)
 
     // ---- Stream sampler speed-feed mode (cross-core) ------------------------
-    // Selects how the Core-1 streamSamplerTask feeds FAS speed each tick while
-    // sampling the slopmotion::Engine plan. Written by Core 0 (WebUI toggle),
-    // read by Core 1 (sampler). 32-bit read/write is hardware-atomic on the S3.
-    //   0 = CEILING_PEGGED  (default): feed a constant high speed; the 1kHz
-    //       micro-target position deltas themselves shape velocity. Keeps the
-    //       57AIM grit-cache quiet (speed/accel steady → no FAS ramp re-plan).
-    //   1 = VELOCITY_MATCHED: feed |plan velocity| each tick so FAS coasts the
-    //       exact planned speed. Truer curve, but rewrites setSpeedInHz per tick.
-    // Exposed as a live A/B toggle so it can be felt on real hardware.
+    // INERT since sd-4k1.4: the S3-side sampler it selected between is gone
+    // (the RP2350 holds the plan and derives its own velocity), so nothing
+    // reads this to make a decision. Kept because the 0x008A machine-modes
+    // channel and the 0x0101 key-3 setting carry it (released wire fields);
+    // retiring it is a wire evolution and an operator ruling, exactly like
+    // interp_clamp_overshoot below -- never a silent repurpose.
+    //   0 = CEILING_PEGGED (default), 1 = VELOCITY_MATCHED.
     enum StreamSpeedMode : uint8_t { SPEED_CEILING_PEGGED = 0, SPEED_VELOCITY_MATCHED = 1 };
     volatile uint8_t       stream_speed_mode = SPEED_CEILING_PEGGED;
 
@@ -336,10 +331,10 @@ struct SystemState {
     // evolution — never silently repurpose.
     volatile bool          interp_clamp_overshoot = false;
 
-    // ---- Interpolator telemetry (cross-core, display-only) ------------------
-    // Written by Core 1 (streamSamplerTask) once per tick from the live
-    // slopmotion::Engine snapshot; read by Core 0 telemetry for the WebUI's
-    // high-refresh planned-path / interp-state overlay. Each field is an
+    // ---- Plan-strip telemetry (cross-core, display-only) --------------------
+    // Written by Core 1 (main.cpp's drainMotionLink) each tick from the RP2350
+    // status frame plus the last kEvtPlanAdopted; read by Core 0 telemetry for
+    // the WebUI's high-refresh planned-path overlay. Each field is an
     // independently-readable aligned scalar — no lock needed for a display feed
     // (a torn set across fields is visually harmless at UI refresh rates).
     volatile float         interp_start_pos   = 0.5f;  // segment start (0..1)
@@ -510,9 +505,9 @@ struct SystemState {
     volatile uint16_t      sm_reset_gen = 0;
 
     // ---- SlopMotion anomaly EVENT hand-off: Core 1 -> Core 0 ----------------
-    // The 0x0089 motion-anomaly EVENT channel's feed. Core 1's streamSamplerTask
-    // drains slopmotion's own ring (it must — the engine lives there), but it
-    // may NEVER publish: the slopsync Hub is touched by exactly one task, the
+    // The 0x0089 motion-anomaly EVENT channel's feed. Core 1's link drain
+    // PULLS the engine's ring off the RP2350 (it must -- that task owns the
+    // SPI link), but it may NEVER publish: the slopsync Hub is touched by exactly one task, the
     // Core-0 "SlopSyncHub" task (the one-task invariant SlopSyncWsTransport.h
     // documents), so an anomaly has to cross cores as DATA before it can become
     // a frame.

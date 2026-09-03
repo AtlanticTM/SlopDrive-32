@@ -1,25 +1,30 @@
 // MlinkServoDriver -- MotorDriver over the RP2350 SPI motion link.
 // Constraints:
+// - The RP2350 HOLDS THE PLAN (docs/rp-motion-port.md). This class FORWARDS:
+//   gated intents out as kOpCommand, policy out as kOpConfig, position and
+//   events back in. It never plans, never renders, never re-anchors.
 // - The drive is SAVED in encoder-follow (0x19=2, gear 4/1, 8192 counts/rev);
 //   the RP2350 is the only pulse source. FAS step/dir never drives it again.
 // - The link has ONE OWNER TASK: whichever task first runs update(), which is
-//   motorTask (Core 1). ONLY the owner may drive the SPI bus. Entry points
-//   that other tasks can reach (emergencyStop and setRenderCeiling from
-//   httpTask, forceHomeState/enable from the web API) POST an atomic flag and
-//   return; update() ships it on the next tick. Never a mutex -- a bus with
-//   two owners is the thing this rule forbids, and sd-4k1.4 keeps this shape.
-// - Cost of that deferral is ONE kTickMs tick (10 ms) of added estop latency,
-//   which SPEC H1 already covers: the protocol ESTOP is a software convenience
-//   above the hardware e-stop path, never the guarantee.
-// - Motion state (retarget shadow, chain) is written by motorTask and the
-//   sampler task, both Core 1; cross-task posters order their stores so the
-//   flag the owner tests is the LAST one written.
+//   motorTask (Core 1). ONLY the owner may drive the SPI bus. A non-owner
+//   caller POSTS -- an atomic flag for estop/clear/ceiling, a fixed-capacity
+//   queue for commands and config -- and update() ships it on the next tick.
+//   Never a mutex: a bus with two owners is the thing this rule forbids.
+// - Commands are shipped ON ARRIVAL from the owner task, never on a tick
+//   (architecture.md section 2). kTickMs paces the STATUS POLL only.
+// - Cost of the non-owner deferral is ONE kTickMs tick (10 ms) of added estop
+//   latency, which SPEC H1 already covers: the protocol ESTOP is a software
+//   convenience above the hardware e-stop path, never the guarantee.
 // - Native unit = drive input counts, scaled by the runtime geometry
-//   (aimStepsPerMm at 8192 steps/rev). Speed clamps to kMaxCountsPerSec.
-// - Homing v1 = HOME_OVERRIDE only (forceHomeState); real homing rides sd-dxy.
-// See: include/comms/MotionLinkProtocol.h, dev board sd-dxy.
+//   (aimStepsPerMm at 8192 steps/rev). Wire commands are NORMALIZED over the
+//   stroke window; the arbiter owns that conversion, this class owns time.
+// - Anchors convert master -> slave ONCE, at send, through ClockFilter. An
+//   unconverged filter ships has_anchor false (plan at arrival), which is the
+//   honest degradation.
+// See: include/comms/MotionLinkProtocol.h, docs/rp-motion-port.md, sd-4k1.4.
 #pragma once
 
+#include <array>
 #include <atomic>
 #include <cstdint>
 
@@ -55,24 +60,18 @@ public:
     // Push the renderer's speed ceiling to the RP (kOpSetLimits). The
     // coprocessor is OPEN LOOP: without a ceiling it commands whatever the
     // trajectory asks and the drive silently drops what it cannot follow.
-    // Call whenever the INPUT limit set changes, not the user set -- the RP
-    // only ever renders machine-driven motion.
+    // A FAULT DETECTOR, never a shaper -- the engine's ceilings ride kOpConfig.
     void  setRenderCeiling(float mm_s) override;
-    void  setRecoverySpeed(float mm_s) override { _recovery_mm_s = mm_s; }
-    bool  consumeReseedRequest() override {
-        const bool r = _reseed_req; _reseed_req = false; return r;
-    }
-    // ONE RESET OWNER (sd-6b2.12). The host seeds the engine on the stream's
-    // rising edge, and streamSample's entry re-anchor lands LATER in the same
-    // tick, so this is a sticky latch the entry block consumes rather than a
-    // direct clear of _reseed_armed. Sampler task, same core as update().
-    void  noteEngineSeeded() override { _engine_seeded = true; }
     void  setAcceleration(float mm_s2) override { _accel_mm_s2 = mm_s2; }
     float getMaxSpeed() const override { return _max_speed_mm_s; }
     float getAcceleration() const override { return _accel_mm_s2; }
     uint32_t getLiveAcceleration() const override { return _last_accel_native; }
 
     bool  isMoving() override { return _state == motionlink::kStateRunning; }
+    // The RP's rendered position IS the machine's position (docs/rp-motion-
+    // port.md). There is no second model to disagree with it, so getPosition
+    // and the base's getActualPosition are one number; EncoderValidator is
+    // what audits it against the drive encoder.
     float getPosition() const override;
     float getTargetPosition() const override;
 
@@ -88,12 +87,29 @@ public:
     float getMeasuredStrokeMm() const override { return _stroke_mm; }
     void  setMeasuredStrokeMm(float mm) override { _stroke_mm = mm; }
 
+    // ---- Link telemetry, for the S3-side publishers -------------------------
+    // Status fields the hub and the plan strip read. All owner-written, read
+    // by Core 0 as aligned scalars: a torn set across fields is a display
+    // artifact, never a control input.
+    const motionlink::StatusV2& status() const { return _status; }
+    uint32_t statusAgeMs() const;
+    // Last kEvtPlanAdopted, in MASTER microseconds (the filter's inverse), so
+    // the plan strip's elapsed is measured in the clock the UI already uses.
+    struct PlanEvent {
+        uint32_t due_master_us = 0;
+        int32_t  late_us = 0;
+        float    target = 0.0f;
+        uint32_t duration_us = 0;
+        bool     valid = false;
+    };
+    PlanEvent lastPlan() const { return _last_plan; }
+    // Pulled engine/link events, drained by the Core-1 caller into the
+    // SlopSync anomaly feed. Returns false when the ring is empty.
+    bool popEvent(motionlink::EventRecord& out);
+
 protected:
-    void streamToSteps(int32_t target_steps,
-                       uint32_t speed_steps_s,
-                       uint32_t accel_steps_s2) override;
-    void streamSample(int32_t target_steps, float vel_steps_s,
-                      uint32_t speed_steps_s, uint32_t accel_steps_s2) override;
+    void sendCommand(const motionlink::LinkCommand& c) override;
+    void pushConfig(uint8_t tag, uint32_t raw) override;
     void stop() override;
     void hardStop() override;
 
@@ -106,10 +122,13 @@ private:
               uint8_t (&in)[motionlink::kFrameBytes]);
     void sendOp(uint8_t op);
     void sendRetarget();
-    void sendSegment();
-    void sendSegmentTo(float p1, float v1, float a1, uint32_t t1_us);
-    void sendSegmentSplit();
-    float holdKnotAccel() const;
+    // Ships one command frame and files it against the config image; anchors
+    // are already in slave time by the time this runs.
+    void shipCommand(const motionlink::LinkCommand& c);
+    void shipConfig(uint8_t tag, uint32_t raw);
+    void drainPosts();
+    void pumpEvents();
+    void pollStatus();
     bool sendSetPos(float counts);
     bool sweepToStall(float dir, float speed_mm_s, float bound_mm,
                       float& pos_out);
@@ -124,110 +143,76 @@ private:
     uint32_t _last_tick_ms = 0;
     uint32_t _last_cmd_ms = 0;
 
-    // Slave status from the last CRC-valid frame
-    float   _pos_counts = 0.0f;
-    float   _vel_counts = 0.0f;
-    // Renderer truth from the RP (sd-dxy.1.1). _pos_counts is COMMANDED;
-    // _emitted_counts is what was actually pulsed. Their difference is the
-    // residue -- the number that separates "the coprocessor dropped it" from
-    // "the drive did not follow it". Never read one without the other.
-    float    _emitted_counts = 0.0f;
-    uint16_t _qdrops = 0;
-    uint16_t _emit_overrun = 0;
-    uint16_t _late_ticks = 0;
-    uint16_t _vel_clamped = 0;
-    // Per-second census accumulators -- see the T27 note at the read site.
-    uint16_t _rc_qd = 0, _rc_ov = 0, _rc_lt = 0, _rc_vc = 0;
-    float    _rc_res_max = 0.0f;
+    // Last CRC-valid v2 status. A v1 slave never writes the variant byte, so
+    // a v1 reply parses as variant 0 and is DISCARDED rather than misread.
+    motionlink::StatusV2 _status{};
+    uint32_t _status_ms = 0;   // millis() at the last CRC-valid v2 status
+    bool     _status_fresh = false;
+    uint8_t  _state = 0;
+    uint8_t  _slave_flags = 0;
+    // Per-interval counters accumulate into lifetime totals HERE: the v2
+    // status resets them on preload, so the master is the only place a total
+    // can live (MotionLinkProtocol.h, StatusV2).
+    uint32_t _tot_qdrops = 0, _tot_overrun = 0, _tot_late = 0, _tot_clamped = 0;
+    uint32_t _tot_link_errs = 0;
+    int16_t  _rc_res_max = 0;
     uint32_t _rc_ms = 0;
-    // Counters are monotonic per RP boot (they saturate, never wrap), so the
-    // first sane frame SEEDS and any decrease is an RP restart (sd-dxy.3).
-    bool     _rc_primed = false;
-    // Dead-reckoned RP position in counts: the raw report is up to ~2 ticks
-    // stale, and staleness x velocity is exactly the chain-start gap that
-    // made re-anchors teleport (2026-08-09). Use for every chain re-base.
-    float    liveCounts() const;
-    // Worst-chunk interior-velocity census (grit hunt, see sendSegmentTo).
-    float    _mc_vpk = 0.0f;
-    uint32_t _mc_dur = 0;
-    float    _mc_v0 = 0.0f, _mc_v1 = 0.0f, _mc_a0 = 0.0f, _mc_a1 = 0.0f;
-    float    _mc_dp = 0.0f;
-    uint32_t _mc_ms = 0;
+    uint32_t _rc_qd = 0, _rc_ov = 0, _rc_lt = 0, _rc_vc = 0, _rc_le = 0;
+
+    // Master-side clock estimate; every reply feeds it (no clock op exists).
+    motionlink::ClockFilter _clock;
+    // Clock samples are paired BY SEQ, never by position: the slave preloads
+    // its reply after processing a frame, so a reply is one transaction behind
+    // its request (MotionLinkProtocol.h, ClockFilter). Four slots cover that
+    // lag with room for the flash and event frames that interleave.
+    struct Stamp { uint32_t t0 = 0; uint32_t t3 = 0; uint8_t seq = 0; bool ok = false; };
+    std::array<Stamp, 4> _stamp{};
+
+    // The applied-config image. Its fingerprint against status config_fp is
+    // the LOST-MIDDLE-FRAME detector: a counter cannot see a dropped middle
+    // push, a checksum of the whole set can.
+    motionlink::ConfigImage _cfg;
+    uint32_t _fp_mismatch_ms = 0;
+    uint8_t  _resync_at = 0;   // index of the next tag to re-ship on mismatch
+
+    // Event pull bookkeeping.
+    uint8_t _evt_acked = 0;
+    bool    _evt_more = false;
+    PlanEvent _last_plan{};
+
+    // Cross-task post queues. Fixed capacity, drop-oldest-caller (the newest
+    // command wins under retarget semantics), drained by the owner in arrival
+    // order. Never a mutex: see the header note.
+    // TaskHandle_t-free: plain arrays plus atomic indices, SPSC per producer
+    // core, which is what the estop/ceiling posts already do.
+    static constexpr uint8_t kPostDepth = 8;
+    std::array<motionlink::LinkCommand, kPostDepth> _cmd_post{};
+    std::atomic<uint8_t> _cmd_head{0}, _cmd_tail{0};
+    std::array<motionlink::ConfigField, kPostDepth> _cfg_post{};
+    std::atomic<uint8_t> _cfgp_head{0}, _cfgp_tail{0};
+
+    // Pulled events, owner writes, Core-1 caller drains.
+    static constexpr uint8_t kEventDepth = 16;
+    std::array<motionlink::EventRecord, kEventDepth> _evt_ring{};
+    std::atomic<uint8_t> _evt_head{0}, _evt_tail{0};
+
     // Last ceiling pushed via kOpSetLimits; re-pushed when an RP restart is
     // detected -- the RP holds it in RAM and boots unlimited without it.
     float    _ceiling_mm_s = 0.0f;
     // Ceiling posted by a non-owner task (WebUI settings, Core 0); >0 means
     // the owner owes it a kOpSetLimits on its next tick.
     std::atomic<float> _ceiling_req{0.0f};
-    // USER (gentle) limit; caps recovery sweeps only, never content.
-    float    _recovery_mm_s = 0.0f;
-    // Chain gap exceeded kReseedGapMm: hold the wire, ask for an engine
-    // re-seed at the live position instead of gliding the gap.
-    bool     _reseed_req = false;
-    // One reseed per episode: if the gap SURVIVES a reseed the live position
-    // is outside the window (the engine's frame clamps and cannot converge --
-    // the 42 mm phantom loop, 2026-08-10); fall back to the gentle sweep.
-    bool     _reseed_tried = false;
-    // True only between a stream-entry re-anchor and its first ship: the
-    // one place a re-seed is allowed (see sendSegmentTo).
-    bool     _reseed_armed = false;
-    // Set by noteEngineSeeded(), consumed by streamSample's entry re-anchor:
-    // the host already owns this entry's reset, so do not arm a second one.
-    bool     _engine_seeded = false;
-    uint8_t _state = 0;
-    uint8_t _slave_flags = 0;
-    bool    _status_fresh = false;
 
-    // Retarget shadow (idempotent; refreshed every 100 ms as drop insurance)
+    // Retarget shadow. HOMING ONLY: the sweeps and glides are S3-driven point
+    // moves in counts, below the engine, and they stay that way (the port
+    // contract's homing row). Refreshed every kRefreshMs as drop insurance.
     float _rt_target = 0.0f;
     float _rt_v = 0.0f;
     float _rt_a = 0.0f;
     bool  _rt_valid = false;
     bool  _rt_dirty = false;
-    // Seq-echo ack, same scheme as segments: a torn retarget otherwise waits
-    // out the full 100 ms refresh (felt as a mid-stroke stall under EMI).
     uint8_t _rt_seq = 0;
     bool    _rt_unacked = false;
-
-    // Segment-stream shadow (curve chase rides kOpSegment; retarget stays the
-    // point-move path). Writers: streamSample() on the sampler task, update()
-    // on motorTask -- both Core 1, so torn state is a preemption between two
-    // statements, never true concurrency. streamSample() orders its stores so
-    // _seg_mode reads true only after the chain fields are coherent.
-    // All segment timeline stamps are MICROSECONDS (micros(), wrap-safe via
-    // unsigned diffs): ms quantization put +/-10% speed error on a 10 ms
-    // chunk, which at speed exceeded the slave's 64-count jump guard at
-    // every boundary -- the fast-chord teleport drift (2026-08-09).
-    bool     _seg_mode = false;
-    float    _chain_p = 0.0f;      // last shipped segment endpoint
-    float    _chain_v = 0.0f;
-    // Shipped endpoint accel, reused verbatim as the next segment's a0 so the
-    // kOpSegment2 chain is exactly C2 (accel steps at knots read as texture).
-    float    _chain_a = 0.0f;
-    uint32_t _chain_us = 0;
-    float    _samp_p = 0.0f;       // freshest arbiter sample
-    float    _samp_v = 0.0f;
-    uint32_t _samp_us = 0;
-    // One-tick holdback: ship to LAST tick's sample so a tick of produced
-    // curve stays in reserve (production is real-time-capped, so without it
-    // ring depth never exceeds 1 and jitter lands on the underrun edge).
-    float    _hold_p = 0.0f;
-    float    _hold_v = 0.0f;
-    uint32_t _hold_us = 0;
-    // Sweep governance: a re-anchored chain has no upstream speed limit (the
-    // curve's governance lives in sample spacing, which a re-anchor discards),
-    // so the catch-up segment stretches to the arbiter's active ceiling.
-    float    _samp_vcap = 0.0f;    // arbiter dispatch ceiling, counts/s
-    bool     _sweep_pending = false;
-    uint8_t  _seg_frame[motionlink::kFrameBytes] = {};  // resend copy
-    uint8_t  _seg_seq = 0;
-    bool     _seg_unacked = false;
-
-    // Credit fields from the last CRC-valid status
-    uint16_t _runway_ms = 0;
-    uint8_t  _depth = 0;
-    uint8_t  _seq_echo = 0;
-    uint32_t _status_ms = 0;   // millis() at the last CRC-valid status
 
     // Posted from any task, shipped by the owner (see the header note).
     std::atomic<bool> _estop_pending{false};

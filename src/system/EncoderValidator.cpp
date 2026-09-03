@@ -13,7 +13,7 @@
 
 #include "EncoderValidator.h"
 
-#if defined(FEATURE_RS485_MODBUS) && defined(DRIVER_AIM_SERVO)
+#if defined(SD32_MODBUS_TOOLS) && defined(DRIVER_AIM_SERVO)
 
 #include "ServoModbus.h"
 #include "MotorDriver.h"
@@ -154,4 +154,4 @@ void EncoderValidator::update() {
     }
 }
 
-#endif // FEATURE_RS485_MODBUS && DRIVER_AIM_SERVO
+#endif // SD32_MODBUS_TOOLS && DRIVER_AIM_SERVO

@@ -16,7 +16,7 @@ static const char* MACHCFG_NS = "machcfg";
 
 uint8_t machineBackendLoad() {
     uint8_t v = 0;
-#if defined(FEATURE_RS485_MODBUS)
+#if defined(SD32_MODBUS_TOOLS)
     Preferences prefs;
     if (prefs.begin(MACHCFG_NS, true)) {   // true = read-only
         v = prefs.getUChar("backend", 0);
@@ -34,7 +34,7 @@ uint8_t machineBackendLoad() {
 }
 
 void machineBackendStore(uint8_t v) {
-#if defined(FEATURE_RS485_MODBUS)
+#if defined(SD32_MODBUS_TOOLS)
     if (v > 1) v = 0;
     Preferences prefs;
     if (prefs.begin(MACHCFG_NS, false)) {   // false = read-write

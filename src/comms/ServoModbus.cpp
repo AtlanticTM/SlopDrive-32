@@ -8,10 +8,9 @@
 //   (OSSM-RS style). init() probes both at boot; the not-ready reprobe loop
 //   in update() keeps alternating baud so a drive appearing later at either
 //   speed is still found. baud() reports which one landed.
-// - Modbus motion backend: sendSetpoint() (FC 0x7B, absolute) IS the Core-1
-//   real-time motion path, called every servoBusTask tick from
-//   ServoMotionExecutor, and only after armMotionControl(). In FAS step/dir
-//   mode this module is telemetry/config-only and reg 0x00 MUST stay 0.
+// - NEVER a motion path: the RP2350 owns motion (architecture.md section 1).
+//   This module is telemetry and configuration only, and reg 0x00 MUST stay 0
+//   or the drive goes deaf to the quadrature the RP2350 clocks into it.
 // - Frame format per reference/AIM_servo_modbus_reference.md: 8N1 @ 19200 or 115200,
 //   slave addr 1, values 16-bit two's-complement for signed fields, CRC16
 //   polynomial 0xA001.
@@ -19,7 +18,7 @@
 
 #include "ServoModbus.h"
 
-#if defined(FEATURE_RS485_MODBUS)
+#if defined(SD32_MODBUS_TOOLS)
 
 #include <Arduino.h>
 #include <HardwareSerial.h>
@@ -1061,4 +1060,4 @@ void ServoModbus::saveToFlash() {
     SLOGI("servobus", "ServoModbus: saved config to drive flash — will survive a power cycle. :3");
 }
 
-#endif // defined(FEATURE_RS485_MODBUS)
+#endif // defined(SD32_MODBUS_TOOLS)

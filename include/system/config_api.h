@@ -286,58 +286,15 @@ float    aimStepsPerMm();
 // ---- AIMServo build (DRIVER_AIM_SERVO) -- Nano ESP32 v0.0 controller --------
 // New board routes the servo drive through an SN74AHCT125 buffer -> opto inputs.
 // PUL â†’ GPIO 5 (D2), DIR â†’ GPIO 6 (D3). No endstop on this board â€” homing is
-// sensorless via the INA228 current sensor (see below). The old GPIO12 endstop
-// is kept only for the legacy HOMING_USE_ENDSTOP fallback.
+// sensorless via the INA228 current sensor (see below), and
+// the board matrix carries the RP2350's quadrature out on these pins.
 //
 // The AHCT125's output-enable is tied LOW (always on), so ANY boot glitch on
 // PUL/DIR squirts straight through to the motor's opto inputs â€” pull both LOW
 // as early as possible in setup(), before any premature motion.
 #define AIM_PIN_STEP            5    // PUL â€” pulse train to the servo drive (D2)
 #define AIM_PIN_DIR             6    // DIR â€” direction signal (D3) [was GPIO4 on old PCB]
-#define AIM_PIN_ENDSTOP         12   // Legacy endstop (only used if HOMING_USE_ENDSTOP)
 
-// Quiet pause FAS inserts between the DIR toggle and the first step of a
-// reversal (FAS dir_change_delay_us). On the MCPWM backend this is the ONLY
-// pause at a reversal â€” FAS's own pre-toggle quiet is zero there â€” so it is
-// the whole window the DIR edge has to sit in, together with the PCNT step-edge
-// retime in AIMServoDriver::init(). Do not set to 0; 200 covers the drive's 5us
-// setup spec with margin. Do not set 1..199 either: ESP32's MIN_DIR_DELAY_US is
-// 200 and FAS clamps up to it silently. Only 200..4095 are real values.
-#define AIM_DIR_CHANGE_DELAY_US 200
-
-// ---- Step-pulse backend + PCNT retime â€” the DIR ladder's two switches -------
-// One token each, so a ladder rung is a single edit and a rebuild. The rungs
-// and what each one proves live on the dev board (dir-ladder issues).
-//   AIM_FAS_BACKEND      0 = MCPWM_PCNT, 1 = RMT. Matches FasDriver's own
-//                        numbering; AIMServoDriver logs which one FAS actually
-//                        handed back, and that log is the ground truth.
-//   AIM_MCPWM_PCNT_RETIME 1 = count FALLING step edges so the DIR toggle lands
-//                        in the reversal dwell instead of inside the last
-//                        pulse. 0 = library behavior (rising edges). Ignored
-//                        entirely on the RMT backend.
-#define AIM_FAS_BACKEND         0
-#define AIM_MCPWM_PCNT_RETIME   1
-
-// ---- FAS pipeline depth â€” how stale a stream sample is when it lands --------
-// Applies to the FAS step/dir backend only, which no longer carries motion on
-// this machine (the RP2350 does, docs/rp-motion-port.md). Kept tuned for a
-// future step/dir drive: a ~1 kHz micro-target producer against FAS's own
-// cadence, whose library defaults are sized for discrete moves, not a stream:
-//   task_rate       4 ms  -> the 1 kHz sample stream is decimated to 250 Hz
-//   forward plan   20 ms  -> the queue is committed 20 ms ahead of the target
-// So the machine executes a plan built from a sample up to 20 ms old, refilled
-// 250 times a second. Match the consumer to the producer instead.
-//
-// CONSTRAINT: plan-ahead must stay comfortably ABOVE the task rate or the queue
-// runs dry mid-move and the motor stops dead â€” FastAccelStepperEngine.h states
-// this outright. Keep the 4:1 ratio the library ships if these get swept.
-//
-// NOT FREE ON MCPWM: a shorter task rate runs `addQueueEntry`'s
-// fasDisableInterrupts() window more often, and that is the exact thing that
-// delays the PCNT ISR (motion-control.md, MCPWM traps) -- sweep these and the
-// DIR ladder separately or neither result means anything.
-#define AIM_FAS_TASK_RATE_MS    1
-#define AIM_FAS_PLAN_AHEAD_MS   4
 
 // ---- I2C bus -- INA228 current sensor @ 0x40, AS5600 encoder (deferred) -----
 // Nano ESP32 does NOT default I2C to these pins â€” call Wire.begin(SDA, SCL)

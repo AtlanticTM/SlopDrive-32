@@ -3,24 +3,21 @@
 #include <cstdint>
 
 // ============================================================================
-// MachineConfig — tiny NVS accessor pair for the runtime motion backend
+// MachineConfig — tiny NVS accessors for the machine-modes settings
 // ============================================================================
 //
 // Namespace "machcfg" is DELIBERATELY SEPARATE from the main settings
 // namespace ("strokeengine", see ConfigStore.cpp) so it's readable
-// first-thing in setup() — before ConfigStore::load(), before aimGeometryInit(),
-// before ANY motor.* call. The backend choice decides WHICH concrete driver
-// MotorProxy binds to, so it has to be known before anything else touches the
-// motor reference. A shared namespace would tangle this read with the rest of
-// DeviceConfig's load order for no benefit.
+// first-thing in setup() — before ConfigStore::load(), before
+// aimGeometryInit(), before ANY motor.* call. A shared namespace would tangle
+// this read with the rest of DeviceConfig's load order for no benefit.
 //
-// Two keys, two independent settings:
-//   "backend"   — 0 = FAS step/dir (default), 1 = Modbus direct drive.
-//                 Written ONLY by the motion_backend setting (0x3030 key 5,
-//                 restart_required), reboot-to-apply.
-//   "homestyle" — 0 = sensorless current-stall sweep (default),
-//                 1 = drive built-in homing (0x19). Live-applied, no reboot
-//                 needed (Phase 4 wires the actual behavior switch).
+// Two keys, both INERT since the one-motion-backend ruling (architecture.md
+// section 1): nothing reads either to make a decision. They are still stored
+// and echoed so the released 0x3030 keys 5 and 6 are not silently
+// repurposed; retiring them is a wire evolution and an operator ruling.
+//   "backend"   — written by the motion_backend setting (0x3030 key 5).
+//   "homestyle" — written by the home_style setting (0x3030 key 6).
 uint8_t machineBackendLoad();
 void    machineBackendStore(uint8_t v);
 

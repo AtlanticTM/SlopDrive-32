@@ -45,10 +45,26 @@ Every command becomes ONE trajectory planned from the engine's actual
   so the Engine owns the window: targets clamped, end velocities bound-safe,
   quintics legality-scanned, sampled output clamped. Exceptions are never
   instantiated; non-finite inputs are rejected at `commit()`.
-- **The sampler task stack is 16 KB** because `commit()` nests KB-scale Ruckig
-  temporaries. Never shrink it (T1 class).
+- **Whichever task calls `commit()` needs a deep stack** because it nests
+  KB-scale Ruckig temporaries. Never size one down without a measured
+  high-water mark under a real motion workload (T1 class, T21).
 
 ## Direction changes: the v=0 gate
+
+**DEPRECATED 2026-09-03 (sd-4k1.8).** The step-and-direction backend this
+section describes was deleted with the one-motion-backend ruling
+(`architecture.md` section 1). The drive is saved in encoder-follow and the
+RP2350 clocks quadrature; there is no DIR pin to race any more. The bullets
+below are kept as the record of what the step/dir path cost, and are NOT a
+description of the running machine.
+
+**The general rule that survives the backend, and binds the RP2350:** a
+reversal must land while the output line is IDLE. Any renderer that flips
+direction while pulses are still in flight rewrites the widest pulse of the
+move, and a pre-rendered pipeline cannot fix it after the fact. Quadrature has
+no separate direction line, so the class is gone by construction rather than
+by tuning.
+
 
 - FAS performs the race-free DIR write only when the step queue is empty AND
   stopped; any other state uses a paused-dwell path that can race. Never
@@ -68,6 +84,15 @@ Every command becomes ONE trajectory planned from the engine's actual
 
 ## MCPWM traps
 
+**DEPRECATED 2026-09-03 (sd-4k1.8).** No S3 peripheral generates steps any
+more; the library these bullets describe is out of `lib_deps`. Kept as record.
+
+**The general rule that survives:** a renderer that buffers nothing ahead
+turns every late refill into dead air on the output. That is why pulse
+generation moved to a board with nothing else to do, and why the S3 must never
+take back a real-time render duty.
+
+
 - FAS 1.2.7 + IDF 5.5 prescaler composition bug: init() rewrites
   timer_prescale against the 32 MHz target (halved for COUNT_MODE_UP_DOWN).
   Group 0 / timer 0 hardcoded; revisit if a second stepper ever exists
@@ -81,19 +106,20 @@ Every command becomes ONE trajectory planned from the engine's actual
 - Our motion code uses portMUX microcritical sections, not ISRs: sub-
   microsecond float math only, no heap alloc, no ISR context
   (include/motion/MotionArbiter.h:33). IRAM_ATTR appears once in the repo
-  (src/system/OomHook.cpp); FAS's own ISRs are upstream's contract
-  (cpp-safety.md scope).
-- Task map (src/main.cpp:1030-1058): motorTask C1/p3, streamSamplerTask C1/p4
-  16 KB stack, commsTask C0/p2, httpTask C0/p1, servoBusTask C1/p5, FAS
-  StepperTask pinned C0/p24 DELIBERATELY (on C1 it preempts the sampler into
-  audible judder; unpinned it stalls behind Core-0 bursts,
-  AIMServoDriver.cpp:63-73). Core 0 = comms, Core 1 = motion (architecture.md §2).
+  (src/system/OomHook.cpp).
+- Task map (src/main.cpp): motorTask C1/p3, PatternEngine's own task C1/p2,
+  commsTask C0/p2, httpTask C0/p1. Core 0 = comms, Core 1 = motion
+  (architecture.md §2). motorTask owns the SPI link: it is the link's single
+  owner, and no other task may drive that bus (MlinkServoDriver.h).
 
 ## Stack and assignment traps (TRAPS T1, T9)
 
 - Never `obj = T{}` on big objects: the RHS temporary builds on the CURRENT
-  stack (T1, cpp-safety.md; canon_lint this-assign rule). The sampler's 16 KB stack exists
-  because commit() nests KB-scale Ruckig temporaries; never shrink it
-  (SlopMotion section above).
-- Forwarding proxies never restate base-class default args; pass sentinels
-  (T9, include/motion/MotorProxy.h:52-58).
+  stack (T1, cpp-safety.md; canon_lint this-assign rule). A task that calls
+  `commit()` needs stack for KB-scale Ruckig temporaries; that is why the
+  engine's host lives on the RP2350 and why its stack sizing is its own issue
+  (sd-4k1.11).
+- T9 stands as a rule with no live instance: a forwarding proxy never restates
+  a base class's default argument, because defaults bind to the STATIC type.
+  There is no proxy in this tree today (one motion backend, bound directly);
+  the rule binds the next one.

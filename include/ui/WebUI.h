@@ -11,11 +11,11 @@ class RangeMapper;
 class PatternEngine;
 class MotionArbiter;
 
-#if defined(FEATURE_RS485_MODBUS)
+#if defined(SD32_MODBUS_TOOLS)
 class ServoModbus;
 #endif
 
-#if defined(FEATURE_RS485_MODBUS) && defined(DRIVER_AIM_SERVO)
+#if defined(SD32_MODBUS_TOOLS) && defined(DRIVER_AIM_SERVO)
 class EncoderValidator;
 #endif
 
@@ -85,12 +85,6 @@ public:
     SlopHttpServer* server() { return _httpServer; }
 
 
-    // Tell WebUI which motion backend is actually bound (0=FAS, 1=Modbus).
-    // Called once from setup() right after main.cpp's motor.bind() — this is
-    // what /api/capabilities echoes as ground truth. Not itself a mutator:
-    // the persisted choice is written by the `motion_backend` setting on
-    // 0x1030/0x3030 (restart_required -- NVS only, next boot binds).
-    void setMachineBackend(uint8_t active) { _machine_backend = active; }
 
     // ---- Batched telemetry ring buffer (Core 0) -----------------------------
     TelemetrySample _telemetry_ring[TELEMETRY_RING_SIZE];
@@ -111,7 +105,7 @@ public:
     // control (POST /api/settings {reset_stats:true}).
     void resetSessionStats();
 
-#if defined(FEATURE_RS485_MODBUS)
+#if defined(SD32_MODBUS_TOOLS)
     // Set the ServoModbus reference after construction.
     void setServoModbus(ServoModbus& modbus) { _servoModbus = &modbus; }
 
@@ -125,7 +119,7 @@ public:
     uint32_t _servo_readback_ms = 0;
 #endif
 
-#if defined(FEATURE_RS485_MODBUS) && defined(DRIVER_AIM_SERVO)
+#if defined(SD32_MODBUS_TOOLS) && defined(DRIVER_AIM_SERVO)
     // Set the FAS-vs-encoder validator reference after construction.
     void setEncoderValidator(EncoderValidator& v) { _encValidator = &v; }
 #endif
@@ -165,11 +159,11 @@ private:
     SlopHttpServer*     _httpServer = nullptr;
 
 
-#if defined(FEATURE_RS485_MODBUS)
+#if defined(SD32_MODBUS_TOOLS)
     ServoModbus*        _servoModbus = nullptr;
 #endif
 
-#if defined(FEATURE_RS485_MODBUS) && defined(DRIVER_AIM_SERVO)
+#if defined(SD32_MODBUS_TOOLS) && defined(DRIVER_AIM_SERVO)
     EncoderValidator*   _encValidator = nullptr;
 #endif
 
@@ -182,11 +176,6 @@ public:
     void setArbiter(MotionArbiter* arb) { _arbiter = arb; }
 private:
 
-    // ---- Machine backend ----------------------------------------------------
-    // Mirrors what main.cpp actually bound the MotorProxy to (set via
-    // setMachineBackend() above). The live echo only; the persisted NVS value
-    // is written by 0x3030 key 5.
-    uint8_t  _machine_backend        = 0;
 
     // ---- HTTP handler methods (one per route) -------------------------------
     void handleRoot();

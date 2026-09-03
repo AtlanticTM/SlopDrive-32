@@ -27,7 +27,7 @@
 #include <WiFi.h>
 #include <esp_timer.h>
 
-#if defined(FEATURE_RS485_MODBUS)
+#if defined(SD32_MODBUS_TOOLS)
 #include "ServoModbus.h"
 #if defined(DRIVER_AIM_SERVO)
 #include "EncoderValidator.h"
@@ -244,7 +244,7 @@ void WebUI::update() {
     _httpServer->dropIdleCapture();
 #endif
 
-#if defined(FEATURE_RS485_MODBUS)
+#if defined(SD32_MODBUS_TOOLS)
     refreshServoReadback();
 #endif
 
@@ -313,7 +313,7 @@ void WebUI::resetSessionStats() {
     SLOGI("ui", "Session stats reset :3");
 }
 
-#if defined(FEATURE_RS485_MODBUS)
+#if defined(SD32_MODBUS_TOOLS)
 // Live on purpose, no standstill gate: this is ONE FC 0x06 write of a limit
 // register the drive already re-reads every move, which is the whole point of
 // a tuning slider. The gate that used to be here guarded a 4-write arming
@@ -673,7 +673,7 @@ void WebUI::handleApiCapabilities() {
     JsonObject feat = doc["features"].to<JsonObject>();
     feat["has_current_sensor"] = _motor.hasCurrentSensor();
     feat["has_power_monitor"]  = _motor.hasPowerMonitor();
-#if defined(FEATURE_RS485_MODBUS)
+#if defined(SD32_MODBUS_TOOLS)
     feat["has_rs485"] = true;
 #else
     feat["has_rs485"] = false;
@@ -706,19 +706,13 @@ void WebUI::handleApiCapabilities() {
     // always advertised once SlopSync itself is.
     doc["udp_discovery_port"] = (uint16_t)slopdrive::discovery::kPort;
 
-    // Runtime motion backend. _machine_backend mirrors whatever main.cpp
-    // actually bound the MotorProxy to (Ground Truth: NOT re-read from NVS
-    // here — this is the live-applied value, which for the FIRST read after
-    // a commit is intentionally the pre-reboot value until the device
-    // actually restarts). available_backends tells the UI whether the toggle
-    // should even be offered. home_style is read live from NVS since it is
-    // not reboot-gated (its actual effect is not yet wired up).
-    feat["motion_backend"] = (_machine_backend == 1) ? "modbus" : "fas";
+    // One motion backend (architecture.md section 1). available_backends keeps
+    // its shape so a client rendering a toggle sees a single option rather
+    // than a missing key. home_style is INERT: its consumer went with the
+    // Modbus motion driver.
+    feat["motion_backend"] = "mlink";
     JsonArray backends = feat["available_backends"].to<JsonArray>();
-    backends.add("fas");
-#if defined(FEATURE_RS485_MODBUS)
-    backends.add("modbus");
-#endif
+    backends.add("mlink");
     feat["home_style"] = machineHomeStyleLoad();
 
     String json;
@@ -1045,7 +1039,7 @@ bool WebUI::applyDriverConfig(JsonDocument& doc, JsonDocument& resp) {
 // firmware's steps/mm LIVE and forces a re-home: the step<->mm meaning of the
 // position reference is void across an electronic-gear change. No reboot.
 
-#if defined(FEATURE_RS485_MODBUS)
+#if defined(SD32_MODBUS_TOOLS)
 // Live-tunable while running: speed/accel ceilings, loop gains, feed-forward,
 // max output. These never move the motor and don't touch the gear train.
 static bool servoIsLiveReg(uint16_t r) {
@@ -1062,7 +1056,7 @@ static bool servoIsProgReg(uint16_t r) {
 #endif
 
 void WebUI::handleApiServo() {
-#if !defined(FEATURE_RS485_MODBUS)
+#if !defined(SD32_MODBUS_TOOLS)
     _httpServer->send(404, "application/json", "{\"error\":\"no_rs485\"}");
 #else
     if (!_servoModbus) {
@@ -1305,7 +1299,7 @@ void WebUI::handleApiServo() {
     String json;
     serializeJson(resp, json);
     _httpServer->send(200, "application/json", json);
-#endif // FEATURE_RS485_MODBUS
+#endif // SD32_MODBUS_TOOLS
 }
 
 // ---- handleApiPattern -------------------------------------------------------

@@ -498,8 +498,9 @@ slopsync::Result<IntentValueMap, NackCode> SlopDriveHubDelegate::applyIntent(
                     {5, IntentValue::ofU64(machineBackendLoad())};
             }
             if (f6) {
-                // Live-applied, no restart: ModbusServoDriver reads it fresh at
-                // the start of every homing cycle, so the next home obeys it.
+                // INERT: the homing cycle that read this went with the Modbus
+                // motion driver. Still stored and echoed so the value is not
+                // silently repurposed; retiring the key is a wire evolution.
                 machineHomeStyleStore(uint8_t(v6));
                 _machCfgDirty = true;
                 applied.fields[applied.count++] =
@@ -598,7 +599,7 @@ slopsync::Result<IntentValueMap, NackCode> SlopDriveHubDelegate::applyIntent(
             if (f == nullptr) return Ret::err(NackCode::INVALID_VALUE);
             uint64_t raw = fieldU64(f, 0);
             if (raw > 60098) raw = 60098;
-#if defined(FEATURE_RS485_MODBUS)
+#if defined(SD32_MODBUS_TOOLS)
             if (!_webui.setServoAccelReg(uint16_t(raw))) {
                 return Ret::err(NackCode::UNSUPPORTED_OP);
             }
@@ -2004,8 +2005,7 @@ void SlopSyncHubService::publishTelemetry() {
             _hub.publishState(ch::sm_waveform, w);
         }
 
-        // 60 (r/min)/s per (mm/s2 * 60 * REDUCTION / MM_PER_REV) -- the same
-        // arithmetic ModbusServoDriver uses to derive the register, run in
+        // 60 (r/min)/s per (mm/s2 * 60 * REDUCTION / MM_PER_REV), run in
         // reverse so the readout is in the units the operator sets elsewhere.
         std::array<std::byte, 13> drv{};
         std::span<std::byte> d(drv);

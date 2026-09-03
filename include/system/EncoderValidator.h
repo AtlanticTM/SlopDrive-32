@@ -37,7 +37,7 @@
 
 #include "config_api.h"
 
-#if defined(FEATURE_RS485_MODBUS) && defined(DRIVER_AIM_SERVO)
+#if defined(SD32_MODBUS_TOOLS) && defined(DRIVER_AIM_SERVO)
 
 #include <Arduino.h>
 
@@ -91,4 +91,4 @@ private:
     void _reset();
 };
 
-#endif // FEATURE_RS485_MODBUS && DRIVER_AIM_SERVO
+#endif // SD32_MODBUS_TOOLS && DRIVER_AIM_SERVO

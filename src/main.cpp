@@ -3,8 +3,8 @@
 //   All logic lives in system/, motion/, comms/, ui/. This file only declares
 //   module instances, wires them in setup(), creates FreeRTOS tasks with
 //   correct core pinning, and idles in loop().
-//   Core 1 (real-time): motorTask, PatternEngine's own task, servoBusTask
-//   (Modbus backend only). Core 0 (system): commsTask, httpTask.
+//   Core 1 (real-time): motorTask and PatternEngine's own task.
+//   Core 0 (system): commsTask, httpTask.
 //   Event-driven: SlopSync callbacks submit intents via the arbiter (Core 0
 //   -> Core 1 deferral queues); PatternEngine emits one intent per stroke
 //   segment; motorTask drains them and forwards over the motion link.
@@ -40,13 +40,8 @@
 #include <esp_timer.h>
 
 #if defined(DRIVER_AIM_SERVO)
-#include "AIMServoDriver.h"
 #include "MlinkServoDriver.h"
-#include "MotorProxy.h"
 #include "MachineConfig.h"
-#if defined(FEATURE_RS485_MODBUS)
-#include "ModbusServoDriver.h"
-#endif
 #endif
 
 #include "MotionArbiter.h"
@@ -65,11 +60,11 @@
 #include "ui/SlopHttpServer.h"
 #include "OtaService.h"
 
-#if defined(FEATURE_RS485_MODBUS)
+#if defined(SD32_MODBUS_TOOLS)
 #include "ServoModbus.h"
 #endif
 
-#if defined(FEATURE_RS485_MODBUS) && defined(DRIVER_AIM_SERVO)
+#if defined(SD32_MODBUS_TOOLS) && defined(DRIVER_AIM_SERVO)
 #include "EncoderValidator.h"
 #endif
 
@@ -80,43 +75,22 @@ extern "C" bool bleInUse(void) { return true; }
 
 // ---- Module instances -------------------------------------------------------
 
-// ServoModbus must be declared above the motor-driver block: ModbusServoDriver
-// takes it by reference at construction, so the reference must already exist.
-// The transport object itself has no ordering requirement of its own.
-#if defined(FEATURE_RS485_MODBUS)
+// The Modbus bus carries motor configuration and the encoder audit only
+// (architecture.md section 1); SD32_MODBUS_TOOLS drops both from the image.
+#if defined(SD32_MODBUS_TOOLS)
 static ServoModbus     servoModbus(Serial1, /* addr */ 1);
 #endif
 
-// Runtime-selectable motion backend (Phase 2, via MotorProxy indirection).
-// g_motion_backend (below) picks FAS vs. Modbus; the pick is read from NVS as
-// early as possible in setup() and applied via motor.bind() before ANY other
-// module touches `motor`. Every other module (patternEngine, arbiter, webui,
-// encoderValidator) still captures MotorDriver& motor — the proxy — at
-// static-init time exactly as before; only the bind target is now runtime-
-// selectable instead of compile-time-fixed.
+// The ONE motion backend (architecture.md section 1): the RP2350 over the SPI
+// link, driven by quadrature. The drive is saved in encoder-follow (0x19=2),
+// so nothing on the S3 renders pulses.
+// TODO(sd-pln): one-time drive programming moves to the web flasher, which is
+// what a production build without the Modbus bus needs.
 #if defined(DRIVER_AIM_SERVO)
-  AIMServoDriver    fasMotor;
-#if defined(FEATURE_RS485_MODBUS)
-  ModbusServoDriver mbMotor(servoModbus);
-#endif
-  // The drive is SAVED in quadrature (0x19=2, 2026-08-07): the RP2350 is the
-  // only pulse source, so the pulse backend (0) binds mlink, not FAS. FAS
-  // stays compiled for a future step/dir drive; it cannot move THIS one.
-  MlinkServoDriver  mlinkMotor;
-  MotorProxy        motor;
+  MlinkServoDriver  motor;
 #else
   #error "No motor driver selected. Define DRIVER_AIM_SERVO in platformio.ini build_flags."
 #endif
-
-// 0 = FAS step/dir (default), 1 = Modbus direct drive. Set once, early in
-// setup(), from machineBackendLoad() — read-only after that point until the
-// next reboot (backend switch is strict reboot-to-apply; written by the
-// motion_backend setting, 0x3030 key 5). AIM servo backend only.
-static uint8_t g_motion_backend = 0;
-// True once motor.bind() picked MlinkServoDriver. The link telemetry drain
-// below reaches the concrete driver (status, events, plan), which the proxy
-// deliberately does not forward, so it must know the backend answered.
-static bool g_mlink_bound = false;
 
 static SystemState        g_state;
 static RangeMapper        mapper;
@@ -190,142 +164,9 @@ struct SerialDiagSource final : slopdrive::SlopSyncUartPort::IDiagSource {
 static SerialDiagSource g_serialDiagSource;
 #endif
 
-#if defined(MOTION_PASSTHROUGH_BENCH)
-// ---- RP2350 bench SPI master (sd-dxy bring-up) ------------------------------
-// Drop-in pinout (docs/rp2350-wiring.md): the matrix remaps roles, the silk
-// lies. Manual CS; the slave answers each transaction with the status it
-// preloaded after the PREVIOUS one, so the first read is discarded.
-#include <SPI.h>
-#include "comms/MotionLinkProtocol.h"
-namespace mlink {
-constexpr int8_t kSck = 7, kMiso = 10, kMosi = 38, kCs = 48, kIrq = 4;
-SPIClass s_spi(FSPI);
-uint8_t s_seq = 0;
-bool s_begun = false;
-
-void begin() {
-    pinMode(kCs, OUTPUT);
-    digitalWrite(kCs, HIGH);
-    pinMode(kIrq, INPUT_PULLDOWN);
-    s_spi.begin(kSck, kMiso, kMosi, -1);
-    s_begun = true;
-    SLOGI("mlink", "bench SPI master up: SCK=%d MISO=%d MOSI=%d CS=%d IRQ=%d, %lu Hz",
-          kSck, kMiso, kMosi, kCs, kIrq, (unsigned long)motionlink::kSpiHz);
-}
-
-// One fixed-size transaction: send a frame, read back the slave's preload.
-// Stamps the outgoing CRC; the caller never does.
-void xfer(uint8_t (&out)[motionlink::kFrameBytes],
-          uint8_t (&in)[motionlink::kFrameBytes]) {
-    static_assert(motionlink::kSpiMode == 1, "PL022 slave needs CPHA=1");
-    // >=60 us since the last transaction: the slave block-resets its SPI to
-    // flush TX after every frame, and clocking into that window tears frames.
-    static uint32_t s_lastEndUs = 0;
-    const uint32_t sinceUs = micros() - s_lastEndUs;
-    if (sinceUs < 60) delayMicroseconds(60 - sinceUs);
-    motionlink::crcStamp(out);
-    s_spi.beginTransaction(SPISettings(motionlink::kSpiHz, MSBFIRST, SPI_MODE1));
-    digitalWrite(kCs, LOW);
-    s_spi.transferBytes(out, in, motionlink::kFrameBytes);
-    digitalWrite(kCs, HIGH);
-    s_spi.endTransaction();
-    s_lastEndUs = micros();
-}
-
-// Build-and-send for payloadless ops (estop, clear, ping).
-void sendOp(uint8_t op) {
-    uint8_t out[motionlink::kFrameBytes] = {op, ++s_seq};
-    uint8_t back[motionlink::kFrameBytes] = {};
-    xfer(out, back);
-}
-
-// 10 Hz ping; 0.5 Hz status line into the diag archive (tag mlink).
-void tick() {
-    if (!s_begun) return;
-    static uint32_t lastMs = 0;
-    const uint32_t now = millis();
-    if (now - lastMs < 100) return;
-    lastMs = now;
-
-    uint8_t out[motionlink::kFrameBytes] = {motionlink::kOpPing, ++s_seq};
-    uint8_t in[motionlink::kFrameBytes] = {};
-    xfer(out, in);
-
-    uint16_t runway = uint16_t(in[2]) | uint16_t(uint16_t(in[3]) << 8);
-    float pos = 0, vel = 0;
-    memcpy(&pos, &in[6], 4);
-    memcpy(&vel, &in[10], 4);
-    SLOGI_EVERY_MS(2000, "mlink",
-                   "rp2350 hex[0..15]: %02x %02x %02x %02x %02x %02x %02x %02x "
-                   "%02x %02x %02x %02x %02x %02x %02x %02x irq=%d",
-                   in[0], in[1], in[2], in[3], in[4], in[5], in[6], in[7],
-                   in[8], in[9], in[10], in[11], in[12], in[13], in[14], in[15],
-                   int(digitalRead(kIrq)));
-    (void)runway; (void)pos; (void)vel;
-
-    // Trust = CRC: act only on a proven status frame. A rebooting or torn
-    // slave reads as depth 0, and blind-feeding on that overfilled the ring
-    // twice (2026-08-06).
-    const bool frameSane = motionlink::crcOk(in);
-
-    // Machine estop punches through the bench path. Repeat kOpEstop until the
-    // echoed state confirms it (repetition survives a dropped frame); leave
-    // the hold only after the machine unlatches.
-    if (g_state.estop_latched) {
-        if (!frameSane || in[0] != motionlink::kStateEstop)
-            sendOp(motionlink::kOpEstop);
-        return;
-    }
-    if (frameSane && in[0] == motionlink::kStateEstop) {
-        sendOp(motionlink::kOpClear);
-        return;
-    }
-
-    // Bench wiggle: keep two segments queued so the motor visibly moves.
-    // SMALL ON PURPOSE: this path bypasses the MotionArbiter (no homed gate,
-    // no limit clamp), so the amplitude must be safe from ANY carriage
-    // position. Scale only at the bench, drive supervised.
-    // Units are DRIVE INPUT COUNTS: quadrature at gear 4/1 (0x19=2 saved
-    // 2026-08-07), so 8192 counts/motor-rev. 2048 counts is ~10 mm.
-    constexpr float kWiggleSteps = 2048.0f;
-    constexpr uint32_t kWiggleUs = 2000000u;
-    // Ack-gated alternation: the endpoint flip commits only when the slave
-    // echoes the segment's seq (a torn frame leaves the echo on the ping's
-    // seq). Flipping at send time desynced the pattern on every silent drop
-    // and the next leg started 600 steps from the machine -- the
-    // burst-to-reversal bug (2026-08-07).
-    static bool outward = true;
-    static bool pending = false;
-    static uint8_t pendingSeq = 0;
-    if (pending && frameSane) {
-        if (in[5] == pendingSeq) outward = !outward;
-        pending = false;   // no echo: dropped, the same leg goes out again
-    }
-    if (frameSane && in[4] < 2 && !pending) {
-        motionlink::Segment seg{kWiggleUs,
-                                outward ? 0.0f : kWiggleSteps, 0.0f,
-                                outward ? kWiggleSteps : 0.0f, 0.0f};
-        uint8_t sout[motionlink::kFrameBytes] = {motionlink::kOpSegment, ++s_seq};
-        pendingSeq = s_seq;
-        pending = true;
-        memcpy(&sout[2], &seg.duration_us, 4);
-        memcpy(&sout[6], &seg.p0, 4);
-        memcpy(&sout[10], &seg.v0, 4);
-        memcpy(&sout[14], &seg.p1, 4);
-        memcpy(&sout[18], &seg.v1, 4);
-        uint8_t back[motionlink::kFrameBytes] = {};
-        xfer(sout, back);
-    }
-}
-}  // namespace mlink
-#endif
-
-// servoModbus itself is declared above the motor-driver block so
-// ModbusServoDriver can bind to it — see the comment there.
-
-#if defined(FEATURE_RS485_MODBUS) && defined(DRIVER_AIM_SERVO)
-// Report-only FAS-vs-encoder cross-check — reads servoModbus telemetry + the
-// motor's step counter, never commands anything. Lives on httpTask Core 0.
+#if defined(SD32_MODBUS_TOOLS) && defined(DRIVER_AIM_SERVO)
+// Report-only encoder audit: reads servoModbus telemetry against the link's
+// rendered position, never commands anything. Lives on httpTask Core 0.
 static EncoderValidator encoderValidator(servoModbus, motor);
 #endif
 
@@ -428,8 +269,7 @@ static constexpr uint8_t kLinkEventNameCount =
     uint8_t(sizeof(kLinkEventNames) / sizeof(kLinkEventNames[0]));
 
 static void drainMotionLink() {
-    if (!g_mlink_bound) return;
-    const motionlink::StatusV2& st = mlinkMotor.status();
+    const motionlink::StatusV2& st = motor.status();
     const Window win = mapper.effectiveWindow();
     const float span_mm = win.max_mm - win.min_mm;
     const float span_counts = span_mm * AIM_STEPS_PER_MM;
@@ -437,9 +277,9 @@ static void drainMotionLink() {
     // ---- events ------------------------------------------------------------
     motionlink::EventRecord ev;
     char nmbuf[8];
-    while (mlinkMotor.popEvent(ev)) {
+    while (motor.popEvent(ev)) {
         if (ev.kind == motionlink::kEvtPlanAdopted) {
-            const MlinkServoDriver::PlanEvent p = mlinkMotor.lastPlan();
+            const MlinkServoDriver::PlanEvent p = motor.lastPlan();
             PlanTrace tr{};
             tr.due_us      = p.due_master_us;
             tr.late_us     = p.late_us;
@@ -516,7 +356,7 @@ static void drainMotionLink() {
         g_state.interp_cur_vel =
             span_counts > 1.0f ? -st.vel / span_counts : 0.0f;
     }
-    const MlinkServoDriver::PlanEvent p = mlinkMotor.lastPlan();
+    const MlinkServoDriver::PlanEvent p = motor.lastPlan();
     g_state.interp_elapsed_us = p.valid ? uint32_t(micros() - p.due_master_us) : 0;
     g_state.interp_active   = st.state == motionlink::kStateRunning;
     g_state.interp_style    = st.mode;
@@ -750,17 +590,17 @@ static void httpTask(void* param) {
         // rather than waiting, so a stuck client can never delay the
         // heartbeat, HTTP, or OTA that share this task.
         TIME_STEP(otaService.handle(),    "http:ota.handle");
-#if defined(FEATURE_RS485_MODBUS)
-        // In Modbus motion-backend mode the bus is serviced from Core 1
-        // (servoBusTask) instead — single-owner rule, ServoModbus is not
-        // thread-safe to poll from two tasks. In FAS mode (the default,
-        // backend 0) httpTask keeps servicing it here.
-        if (g_motion_backend == 0) {
+#if defined(SD32_MODBUS_TOOLS)
+        // Sole owner of the bus: ServoModbus is not thread-safe to poll from
+        // two tasks, and configuration plus the encoder audit have no realtime
+        // deadline, so Core 0 carries them.
+        {
             TIME_STEP(servoModbus.update(),   "http:servoModbus");
-            // While reg 0x00 reads 1 the drive IGNORES step/dir, so FAS emits
-            // pulses into a deaf drive and the machine silently does not move.
-            // No Modbus write clears 0x00 on this drive (sd-opb) -- reporting
-            // it is the whole fix; the operator power-cycles the drive.
+            // While reg 0x00 reads 1 the drive IGNORES its pulse input, so the
+            // RP2350 clocks quadrature into a deaf drive and the machine
+            // silently does not move. No Modbus write clears 0x00 on this
+            // drive (sd-opb): reporting it is the whole fix, the operator
+            // power-cycles the drive.
             const ServoTelemetry st = servoModbus.getTelemetry();
             if (st.valid && st.enabled) {
                 SLOGW_EVERY_MS(30000, "servobus",
@@ -769,7 +609,7 @@ static void httpTask(void* param) {
             }
         }
 #endif
-#if defined(FEATURE_RS485_MODBUS) && defined(DRIVER_AIM_SERVO)
+#if defined(SD32_MODBUS_TOOLS) && defined(DRIVER_AIM_SERVO)
         TIME_STEP(encoderValidator.update(), "http:encValidator");
 #endif
         TIME_STEP(applogDrain(),          "http:logDrain");   // SlopLog ring -> web/serial sinks
@@ -794,10 +634,7 @@ static void httpTask(void* param) {
                 SLOGW("plan", "trace queue dropped %lu records", (unsigned long)s_dropsSeen);
             }
         }
-#if defined(MOTION_PASSTHROUGH_BENCH)
-        mlink::tick();   // 10 Hz ping; status lands in /api/diag/mlink
-#endif
-#if defined(FEATURE_RS485_MODBUS)
+#if defined(SD32_MODBUS_TOOLS)
         // Plain bool read, safe whichever core owns the bus. The LED renders
         // false as Motion/Degraded: an unpowered drive blinks, unhomed sits.
         g_state.servo_bus_ready = servoModbus.isReady();
@@ -843,33 +680,6 @@ static void httpTask(void* param) {
         vTaskDelay(pdMS_TO_TICKS(10));
     }
 }
-
-#if defined(FEATURE_RS485_MODBUS) && defined(DRIVER_AIM_SERVO)
-// Core 1 — Modbus bus service task, ONLY created when g_motion_backend == 1.
-// Guarded on DRIVER_AIM_SERVO too (not just FEATURE_RS485_MODBUS) because the
-// body below now calls mbMotor.executorTick() — mbMotor only EXISTS inside
-// the DRIVER_AIM_SERVO branch above. g_motion_backend can only ever be 1
-// there too, so this doesn't lose any real configuration, just keeps a
-// hypothetical FEATURE_RS485_MODBUS-without-DRIVER_AIM_SERVO build compiling.
-// Phase 3: setpoint-first priority. Every 2ms
-// tick, mbMotor.executorTick() runs FIRST — it only sends a setpoint from an
-// IDLE bus (StreamedSetpointExecutor::onTick), so a setpoint due this tick
-// always gets first crack at the wire. servoModbus.update() runs SECOND and
-// spends whatever's left of the tick on Configure write-queue drain / config
-// scan / telemetry-and-encoder poll rotation — its own internal spacing
-// constants (POLL_INTERVAL_MS etc.) already keep that traffic from hogging
-// the bus. A poll already in flight when a setpoint comes due can delay that
-// setpoint by up to ~1 transaction (~4ms @19200, less @115200) — acceptable
-// jitter for this phase; reprogramBaud(115200) below shrinks it.
-static void servoBusTask(void* /*param*/) {
-    while (true) {
-        mbMotor.executorTick(esp_timer_get_time());
-        servoModbus.update();
-        vTaskDelay(pdMS_TO_TICKS(2));
-    }
-}
-#endif
-
 
 // Decodes esp_reset_reason()'s enum to its name for the boot log — the only
 // diagnostic a spontaneous, unlogged-cause reboot leaves behind.
@@ -931,40 +741,8 @@ void setup() {
 #endif
 
 #if defined(DRIVER_AIM_SERVO)
-    // Runtime motion-backend selection (Phase 2 — see MotorProxy.h's static-init-trap note).
-    // Read NVS ("machcfg"/backend) and bind the proxy to a concrete driver as
-    // early as physically possible — BEFORE aimGeometryInit(), BEFORE
-    // ConfigStore::load(), BEFORE motor.init()/applyDriverConfig(), before
-    // ANY call through `motor` at all. Every one of those eventually reaches
-    // MotorProxy::d(), which configASSERTs non-null — an unbound proxy is a
-    // boot-order bug that must halt loudly, not limp along silently. NVS
-    // itself is safe to read this early: the Arduino core's own startup
-    // brings up nvs_flash_init() before setup() ever runs, well before
-    // LittleFS.begin() below.
-    g_motion_backend = machineBackendLoad();
-#if defined(FEATURE_RS485_MODBUS)
-    if (g_motion_backend == 1) {
-        motor.bind(mbMotor);
-        SLOGI("boot", "Motion backend: MODBUS direct-drive (skeleton mode — no motion until Phase 3)");
-    } else {
-#if defined(MOTION_PASSTHROUGH_BENCH)
-        // Bench wiggle owns the SPI link; two masters would fight. Arbiter
-        // motion is inert on this env and that is the point of the bench.
-        motor.bind(fasMotor);
-        SLOGI("boot", "Motion backend: FAS bound but INERT (bench wiggle owns the mlink)");
-#else
-        motor.bind(mlinkMotor);
-        g_mlink_bound = true;
-        SLOGI("boot", "Motion backend: mlink -> RP2350 quadrature (drive saved 0x19=2)");
-#endif
-    }
-#else
-    motor.bind(mlinkMotor);
-    g_mlink_bound = true;
-    SLOGI("boot", "Motion backend: mlink -> RP2350 quadrature (FEATURE_RS485_MODBUS not compiled)");
-#endif
-    webui.setMachineBackend(g_motion_backend);
-
+    // No backend to select: one motion backend, bound at construction.
+    // TODO(sd-pln): the web flasher is where one-time drive programming goes.
     pinMode(AIM_PIN_STEP, OUTPUT); digitalWrite(AIM_PIN_STEP, LOW);
     pinMode(AIM_PIN_DIR,  OUTPUT); digitalWrite(AIM_PIN_DIR,  LOW);
     Wire.begin(PIN_I2C_SDA, PIN_I2C_SCL);
@@ -1083,7 +861,7 @@ void setup() {
 #endif  // SD32_HEADLESS
     bootheap::mark("ota");
 
-#if defined(FEATURE_RS485_MODBUS)
+#if defined(SD32_MODBUS_TOOLS)
     Serial1.begin(19200, SERIAL_8N1, AIM_PIN_485_RX, AIM_PIN_485_TX);
     servoModbus.init();
     webui.setServoModbus(servoModbus);
@@ -1138,19 +916,6 @@ void setup() {
         // readback reads 0 until the first write, and a readout showing 0 for
         // "not measured yet" is indistinguishable from a real 0.
         servoModbus.requestConfigScan();
-    }
-
-    // Re-apply the driver config now that the bus is actually up: the earlier
-    // motor.applyDriverConfig() call (right after motor.init()) ran BEFORE
-    // servoModbus.init(), so in Modbus mode its queued register writes (output
-    // state, torque clamp 0x18) were dropped by the !_ready guard. FAS mode is
-    // untouched — its applyDriverConfig is a no-op either way.
-    if (g_motion_backend == 1 && servoModbus.isReady()) {
-        // SAME ordering trap as applyDriverConfig, and why nothing moved at fw
-        // 2.4.3: ModbusServoDriver::init() runs BEFORE servoModbus.init(), so
-        // its arm call hit the !_ready guard and did nothing. Arm HERE.
-        servoModbus.armMotionControl();
-        motor.applyDriverConfig(g_state.driver);
     }
 
     // Ground Truth for geometry: the drive's own e-gear register (0x0B, saved
@@ -1226,21 +991,6 @@ void setup() {
     configASSERT(task_ok == pdPASS);
     task_ok = xTaskCreatePinnedToCore(httpTask, "HTTP", 8192, &webui, 1, nullptr, 0);
     configASSERT(task_ok == pdPASS);
-#if defined(FEATURE_RS485_MODBUS) && defined(DRIVER_AIM_SERVO)
-    // servoBusTask: Core 1, priority 5 — ONLY when Modbus is the active
-    // backend. Boot-order note: servoModbus.init() already ran earlier in
-    // setup() (in the FEATURE_RS485_MODBUS block above, well before we get
-    // here), so the bus is already probed/ready before this task starts
-    // polling it — verified by reading through setup() top to bottom, not
-    // assumed. In FAS mode (g_motion_backend == 0, the default) this task is
-    // never created at all; httpTask keeps servicing servoModbus as it always
-    // has (see the guard in httpTask above).
-    if (g_motion_backend == 1) {
-        task_ok = xTaskCreatePinnedToCore(servoBusTask, "ServoBus", 4096, nullptr, 5, nullptr, 1);
-        configASSERT(task_ok == pdPASS);
-    }
-#endif
-
     patternEngine.init();    // creates its own Core 1 task
     // Covers every task stack above plus patternEngine's own: 38,912 B of
     // declared stack for our five, and the stack census names the slack.
@@ -1293,15 +1043,6 @@ void setup() {
     g_state.homed = true;
     motor.forceHomeState(true);
     SLOGW("boot", "!!! HOMING DISABLED — bench-test build only. Remove -DHOMING_DISABLED for real hardware.");
-#endif
-
-#if defined(MOTION_PASSTHROUGH_BENCH)
-    // RP2350 loom bring-up (sd-dxy): steal the drive pins for the matrix
-    // route LAST, so no driver re-grabs them. Bench flag only; FAS still
-    // believes it owns these pins, so do not command FAS motion here.
-    motionPassthroughEnable();
-    mlink::begin();
-    SLOGW("boot", "!!! MOTION_PASSTHROUGH_BENCH: drive pins belong to the RP2350, FAS is a bystander.");
 #endif
 
     SLOGI("boot", "System ready — push that thick shaft all the way in to home, or use the web UI :3");

@@ -39,7 +39,6 @@ public:
     void emergencyStop() override;
 
     bool home(int32_t home_speed_steps_s = 4000) override;
-    void runHomingStep() override {}
     bool isHomed()  const override { return _homed; }
     bool isHoming() const override { return _homing; }
     // Bench force-home also un-latches a slave-side estop: the S3 clears its
@@ -51,7 +50,6 @@ public:
             _clear_pending.store(true, std::memory_order_release);
     }
     bool checkPushToHome() override { return false; }
-    void runMotorStep() override {}
 
     void enable() override;
     void disable() override {}
@@ -76,8 +74,6 @@ public:
     float getTargetPosition() const override;
 
     void applyDriverConfig(const DriverConfig&) override {}
-    uint16_t getCurrentmA()  override { return 0; }
-    uint8_t  getMicrosteps() override { return 1; }
     void     setBlendMode(uint8_t m) override { _blend = m; }
     uint8_t  getBlendMode() const override { return _blend; }
 

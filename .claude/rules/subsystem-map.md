@@ -15,7 +15,7 @@ slowly. For anything finer, ask codebase-memory (`get_architecture`,
 
 | Path | What lives there |
 |---|---|
-| `src/motion` + `include/motion` | Drivers (Modbus, AIM), arbiter, executor, pattern engine, proxy |
+| `src/motion` + `include/motion` | The one motion backend (`MlinkServoDriver`, the RP2350 over the SPI link), arbiter, pattern engine |
 | `src/comms` + `include/comms` | SlopSync hub service, catalog, transports (UART/WS/BLE), ServoModbus |
 | `src/system` + `include/system` | Config store, OTA, logging, app state, encoder validator |
 | `src/ui` + `include/ui` | `WebUI.cpp`, the HTTP/API surface |
@@ -36,8 +36,6 @@ blocking call in the wrong place freezes the UI or drops motion.
 
 | Task | Core | Priority | Stack | Role |
 |---|---|---|---|---|
-| `ServoBus` | 1 | 5 | 4096 | Modbus servo bus, highest priority, created conditionally |
-| `Sampler` | 1 | 4 | 16384 | Stream sampling. Largest stack; its deep path is motion, so an idle-boot high-water reading means nothing |
 | `Motor` | 1 | 3 | 4096 | Motion stepping |
 | `Comms` | 0 | 2 | 4096 | SlopSync hub update |
 | `HTTP` | 0 | 1 | 8192 | Web server and API. Lowest priority, so it starves first under load |

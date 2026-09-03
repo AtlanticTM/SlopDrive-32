@@ -83,7 +83,7 @@ void slopglowUpdate(const SystemState& state) {
     // T15 lesson, now expressed in the grammar instead of the enum order.
     // Bus-unreachable outranks it as DEGRADED: an unpowered drive BLINKS
     // amber, a machine that merely needs homing SITS solid.
-#if defined(FEATURE_RS485_MODBUS)
+#if defined(SD32_MODBUS_TOOLS)
     const bool busDown = !state.servo_bus_ready;
 #else
     const bool busDown = false;   // no RS485 in this build; nothing to report

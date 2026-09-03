@@ -2,7 +2,7 @@
 
 // ServoModbus — RS485 / Modbus RTU telemetry & config for the AIM servo drive
 // Constraints:
-//   Build-guarded behind FEATURE_RS485_MODBUS; compiles to nothing until the
+//   Build-guarded behind SD32_MODBUS_TOOLS; compiles to nothing until the
 //   RS485 transceiver is wired and the flag is set in platformio.ini
 //   build_flags.
 //   Modbus RTU 8N1 @ 19200 (factory) or 115200 (OSSM-RS-style reprogrammed
@@ -25,7 +25,7 @@
 //   only, never that backend's motion path.
 // See: reference/AIM_servo_modbus_reference.md (datasheet).
 
-#if defined(FEATURE_RS485_MODBUS)
+#if defined(SD32_MODBUS_TOOLS)
 
 #include <Arduino.h>
 #include <atomic>
@@ -353,7 +353,7 @@ private:
     uint16_t _sp_fail_streak = 0;
 
     // FC 0x7B big-endian, proven live (docs/reversal-drift.md). Frames are
-    // only obeyed once reg 0x00 = 1; arming is ModbusServoDriver's job.
+    // only obeyed once reg 0x00 = 1, which nothing arms any more.
     uint8_t _sp_fc = 0x7B;
     bool    _sp_le = false;
 
@@ -475,4 +475,4 @@ private:
     void _scanAdvance(uint32_t now);
 };
 
-#endif // defined(FEATURE_RS485_MODBUS)
+#endif // defined(SD32_MODBUS_TOOLS)

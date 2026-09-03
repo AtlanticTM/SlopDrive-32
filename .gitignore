@@ -212,6 +212,7 @@ src/c5_probe/logview_gz.h
 /dependencies.lock
 /CMakeLists.txt
 /src/idf_component.yml
+/src/idf_component.yml.orig
 # Segment-trace reader for the segin/plan/motion diag tags (sd-tki jitter hunt).
 !tools/segtrace.py
 # Turns a segtrace pull into the native suite's fieldreplay::S[] literal. Tracked

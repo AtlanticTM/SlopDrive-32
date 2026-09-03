@@ -2169,7 +2169,10 @@ TEST_CASE("Both referees call the SAME curve legal (coincident-curve sweep)") {
                 for (double allow : {-1.0, 0.0, 0.02, 0.2}) {
                     const double wq = e.quinticWorstRatio(c, T, allow);
                     const double wr = e.ruckigWorstRatio(traj, allow);
-                    CHECK(wq == doctest::Approx(wr).epsilon(1e-9));
+                    // 1e-6, not 1e-9: both referees scan in float now, and one
+                    // rounds coefficients while the other rounds Ruckig's
+                    // double samples. The VERDICT below is the invariant.
+                    CHECK(wq == doctest::Approx(wr).epsilon(1e-6));
                     CHECK((wq > 1.0) == (wr > 1.0));
                     compared++;
                     if (wq > 1.0) illegal++;
@@ -2349,6 +2352,13 @@ TEST_CASE("Blend: a rail slam just over the ceiling is shortened, not surrendere
     // The amplitude budget is a FLOOR: at most `budget` of the stroke may be
     // surrendered, so the achieved fraction can never fall below 1 - budget.
     CHECK(achieved >= 1.0f - blendConfig().infeasible_amplitude_budget - 1e-4f);
+    // The RAY GRID IS WALKED, NOT BISECTED (sd-6b2.9), so the adopted step is
+    // the smallest legal point on a grid of infeasible_blend_steps, here
+    // s = 1/6 and achieved 0.833. The bisection resolved to 2^-steps and
+    // adopted 0.984 -- finer on the cases it could solve, and it could only
+    // solve the ones whose ray END was legal. Resolution is bought back with
+    // infeasible_blend_steps, which now costs a fraction of what it did.
+    CHECK(achieved == doctest::Approx(0.8333f).epsilon(0.01));
     // ...and it holds the deadline it was given.
     CHECK(snap.duration_s == doctest::Approx(0.064).epsilon(0.01));
 }
@@ -2394,4 +2404,123 @@ TEST_CASE("Blend: smoothing never raises |vf| past the RFC-008 bound") {
             << smoothed << " smoothed");
     CHECK(checked > 0);      // never vacuous
     CHECK(smoothed > 0);     // and the smoothness axis really was spent
+}
+
+// ---- The referee itself (sd-6b2.9, sd-6b2.2, sd-6b2.3) ----------------------
+// A fixed grid answers "the worst of 65 samples"; a referee has to answer "the
+// worst of the curve". These pin the difference.
+
+// The 65-point grid the referee used to BE, kept here as the cross-check. The
+// closed-form peaks must never report LESS than it, and where a peak falls
+// between two samples they report more.
+double gridWorstRatio(const Engine& e, const double* c, double T, double allow) {
+    double lo = 0.0, hi = 0.0, band = allow;
+    if (allow >= 0.0) {
+        double p_end = 0.0;
+        for (int k = 0; k < 6; k++) p_end += c[k];
+        lo = std::min(c[0], p_end);
+        hi = std::max(c[0], p_end);
+        band += (double)e.config().overshoot_chord_slack * (hi - lo);
+    }
+    const double jc = e.config().limits.jmax;
+    double worst = 0.0;
+    for (int i = 0; i <= 64; i++) {
+        const double t = (double)i / 64.0;
+        const double pp = ((((c[5]*t + c[4])*t + c[3])*t + c[2])*t + c[1])*t + c[0];
+        const double vv = ((((5*c[5]*t + 4*c[4])*t + 3*c[3])*t + 2*c[2])*t + c[1]) / T;
+        const double aa = (((20*c[5]*t + 12*c[4])*t + 6*c[3])*t + 2*c[2]) / (T*T);
+        const double jj = ((60*c[5]*t + 24*c[4])*t + 6*c[3]) / (T*T*T);
+        if (jc > 0.0) worst = std::max(worst, std::fabs(jj) / jc);
+        worst = std::max(worst, e.pointWorst(pp, vv, aa, lo, hi, band));
+    }
+    return worst;
+}
+
+TEST_CASE("Closed-form peaks never report less than the 65-point grid") {
+    auto cfg = machineConfig();
+    Engine e(cfg, 0.5f);
+    int shapes = 0, strictly_more = 0;
+    double worst_under = 0.0, most_over = 0.0;
+    // The boundary-condition domain the waveform path can hand the referee:
+    // both directions, feasible to absurd, spans from 12 ms to 400 ms.
+    for (double p0 : {0.05, 0.3, 0.5, 0.72, 0.95}) {
+        for (double v0 : {-2.0, -0.5, 0.0, 0.9, 2.4}) {
+            for (double a0 : {-20.0, 0.0, 14.0, 40.0}) {
+                for (double tgt : {0.0, 0.25, 0.6, 1.0}) {
+                    for (double vf : {-1.6, 0.0, 1.6}) {
+                        for (double T : {0.012, 0.08, 0.4}) {
+                            double c[6];
+                            Engine::senderCurve(false, p0, v0, a0, tgt, vf,
+                                                a0 * 0.5, T, c);
+                            for (double allow : {-1.0, 0.05}) {
+                                const double closed =
+                                    e.quinticWorstRatio(c, T, allow);
+                                const double grid =
+                                    gridWorstRatio(e, c, T, allow);
+                                // RELATIVE, because the ratio itself spans
+                                // five decades on this domain and the scan is
+                                // float: 1e-7 of relative rounding on a ratio
+                                // of 1e5 is 0.01 in absolute terms and means
+                                // nothing. The grid SAMPLES; the closed form
+                                // finds the extremum, so anything materially
+                                // BELOW the grid is the safety hole.
+                                const double rel = grid > 1e-9
+                                                     ? (grid - closed) / grid
+                                                     : grid - closed;
+                                CHECK(rel <= 1e-5);
+                                worst_under = std::max(worst_under, rel);
+                                if (closed > grid * (1.0 + 1e-4)) {
+                                    strictly_more++;
+                                    most_over = std::max(
+                                        most_over, (closed - grid) / grid);
+                                }
+                                shapes++;
+                            }
+                        }
+                    }
+                }
+            }
+        }
+    }
+    MESSAGE("peak sweep: " << shapes << " shapes, " << strictly_more
+            << " the grid understated (worst by " << most_over * 100.0
+            << " %), worst relative shortfall " << worst_under);
+    CHECK(shapes >= 2000);
+    CHECK(worst_under <= 1e-5);
+    CHECK(strictly_more > 0);
+}
+
+TEST_CASE("A peak BETWEEN grid points flips the verdict (sd-6b2.9)") {
+    // Constructed, because the hole is precise. It is not a narrow spike -- a
+    // quintic cannot draw one -- it is a MISALIGNED crest: the acceleration
+    // peaks midway between samples 32/64 and 33/64, the grid reads both
+    // shoulders, and the shoulders are lower than the peak. The shape is the
+    // degree-3 Chebyshev polynomial in tau, which is the cubic with the most
+    // curvature per unit of its own height, mapped so its interior extremum
+    // lands at that midpoint.
+    const double T  = 0.1;
+    const double M  = 0.01;                 // peak of a(tau) * T^2
+    const double ts = 0.5078125;            // exactly (32/64 + 33/64) / 2
+    const double A  = 0.95;                 // x = A*tau + B, and T3 peaks at
+    const double B  = -0.5 - A * ts;        // x = -0.5, i.e. tau = ts
+    // a(tau) * T^2 = M * T3(A tau + B) = M * (4x^3 - 3x), matched term by term
+    // against 2c2 + 6c3 tau + 12c4 tau^2 + 20c5 tau^3.
+    double c[6];
+    c[0] = 0.5;
+    c[1] = 0.0;
+    c[2] = M * (4.0 * B * B * B - 3.0 * B) / 2.0;
+    c[3] = M * A * (4.0 * B * B - 1.0) / 2.0;
+    c[4] = M * A * A * B;
+    c[5] = M * A * A * A / 5.0;
+
+    Config cfg = machineConfig();           // v, j and the window stay far
+    cfg.limits.amax = (float)(M / (T * T) / 1.0002);   // inside; a peaks 1.0002
+    Engine e(cfg, 0.5f);
+
+    const double closed = e.quinticWorstRatio(c, T, -1.0);
+    const double grid   = gridWorstRatio(e, c, T, -1.0);
+    MESSAGE("misaligned crest: closed " << closed << "  grid " << grid);
+    CHECK(closed > 1.0);        // the curve breaks the ceiling...
+    CHECK(grid   < 1.0);        // ...and the grid it used to be scored on says
+                                //    it does not. That is the safety hole.
 }

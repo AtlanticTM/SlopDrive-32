@@ -933,6 +933,14 @@ private:
     // be mistaken for one. The pathology this referee exists to catch is 1.4x
     // and up, nowhere near this band.
     static constexpr double   kRuckigLegalEps = 0.05;
+    // ROUNDING, NOT GRACE. The window term steps from 0 to 1.0 the instant a
+    // sample leaves [0,1], so a curve commanded to land EXACTLY on a rail is
+    // scored by whichever side of zero its last coefficient sum rounds to: the
+    // same rail-to-rail segment reads legal or illegal on nothing. 1e-6
+    // normalized is 0.1 um on the machine's 100 mm window, four orders under
+    // MotionArbiter's 0.5 mm wall and under one microstep. The retired 0.02
+    // window GRACE is not coming back (see the note in pointWorst).
+    static constexpr double   kWindowRoundEps = 1e-6;
     static constexpr double   kAimCapS      = 0.060;  // predictive aim ceiling
     // Settle grace = min(this × estimated stream interval, settle_grace_us).
     // 1.5 intervals: one whole interval of lateness is normal transport
@@ -1349,7 +1357,8 @@ private:
     double budgetedTrial(double p, double v, double a, double target, double vf,
                          double af, double T, double f, double alpha,
                          double& out_ep, double* out_c, float chord_out = -1.0f,
-                         double* out_vf = nullptr) const {
+                         double* out_vf = nullptr,
+                         bool early_exit = false) const {
         const double mid = 0.5 * (p + target);
         const double ep  = clamp01(mid + f * (target - mid));
         double tvf = vf * 0.5 * (1.0 + f);
@@ -1363,7 +1372,7 @@ private:
         buildWaveformCurve(p, v, a, ep, tvf, taf, T, out_c);
         out_ep = ep;
         if (out_vf != nullptr) *out_vf = tvf;
-        return quinticWorstRatio(out_c, T, _oshoot_allow);
+        return quinticWorstRatio(out_c, T, _oshoot_allow, early_exit);
     }
 
     // ---- InfeasiblePolicy::Blend -- the one search --------------------------
@@ -1382,7 +1391,7 @@ private:
                             : (int)_cfg.infeasible_blend_steps);
 
         double c[6], ep = target;
-        double adopted_alpha = 0.0, adopted_f = 1.0, adopted_worst = 0.0;
+        double adopted_alpha = 0.0, adopted_f = 1.0;
         double adopted_vf = vf;
         bool   found = false;
 
@@ -1417,21 +1426,24 @@ private:
         // THE RAY ENDS AT THE BUDGETS, and that is the amplitude budget's whole
         // job: `infeasible_amplitude_budget` is the max FRACTION of the stroke
         // that may be surrendered, and surrendered(f) = (1-f)/2, so the FLOOR is
-        // f = 1 - 2*budget. Without the caps s = 1 reached f = -1 -- endpoint =
-        // p, zero travel, a curve that must brake, reverse and return, whose
-        // peak accel on a rail slam is ~4v/T. That probe failed, and its failure
-        // discarded the WHOLE search: a segment 1 % over its ceiling fell
-        // straight to the flat Ruckig guard (the field's waveform_fallback at
-        // ratio 1.001). Probe AT the floor instead; a shape still illegal there
-        // is the guard's honest business.
+        // f = 1 - 2*budget. Without the caps s = 1 reaches f = -1: endpoint = p,
+        // zero travel, a curve that must brake, reverse and return, whose peak
+        // accel on a rail slam is ~4v/T. A shape still illegal at the budget
+        // floor is the Ruckig guard's honest business.
         //
-        // FEASIBILITY IS NOT MONOTONE IN f. A shortened span carries the same
-        // boundary conditions over less travel, so it curves harder and can
-        // break a ceiling the longer one did not. The bisection therefore does
-        // NOT return "the boundary": `hi` starts at the known-legal floor and is
-        // only ever moved to a probe that was legal, so what it returns is the
-        // SMALLEST LEGAL GRID POINT THE SEARCH ACTUALLY SAW. That is a weaker
-        // claim than a boundary and it is the true one.
+        // FEASIBILITY IS NOT MONOTONE IN f, SO THE GRID IS WALKED, NOT
+        // BISECTED. A shortened span carries the same boundary conditions over
+        // less travel, so it curves harder and can break a ceiling the longer
+        // one did not. A bisection's invariant assumes monotonicity: it needs a
+        // known-legal end to start from, so an illegal ray END discarded a
+        // search whose interior was legal, and what it returned was only "the
+        // smallest legal point this particular descent happened to land on".
+        // Walking i/steps upward returns the SMALLEST LEGAL POINT ON THE GRID,
+        // full stop, needs no end probe, and costs the same `steps` scans in
+        // the worst case (measured on the review corpus: adoptions 107 -> 702
+        // at identical worst-case cost). Every probe exits at its first
+        // over-ceiling candidate, and the loop leaves the ADOPTED trial's
+        // coefficients in `c` -- there is no confirming re-trial to pay for.
         if (_cfg.infeasible_policy == InfeasiblePolicy::Blend) {
             double bl = (double)_cfg.infeasible_blend;
             bl = bl < 0.0 ? 0.0 : (bl > 1.0 ? 1.0 : bl);
@@ -1452,32 +1464,15 @@ private:
                 if (loss > lcap) loss = lcap;
                 fo = 1.0 - 2.0 * loss;
             };
-            double fs, as;
-            at(1.0, fs, as);
-            double tc[6], tep;
-            if (budgetedTrial(p, v, a, target, vf, af, T, fs, as, tep, tc,
-                              chord_out) <= 1.0) {
-                // The floor is legal (just proved), s = 0 is illegal (the caller
-                // only gets here because the full-fidelity curve failed) --
-                // bisect for the least the segment can get away with spending.
-                double lo = 0.0, hi = 1.0;
-                for (int i = 0; i < steps; i++) {
-                    const double m = 0.5 * (lo + hi);
-                    double mf, ma, mc[6], mep;
-                    at(m, mf, ma);
-                    if (budgetedTrial(p, v, a, target, vf, af, T, mf, ma, mep,
-                                      mc, chord_out) <= 1.0)
-                        hi = m;
-                    else
-                        lo = m;
-                }
-                at(hi, fs, as);
-                adopted_worst = budgetedTrial(p, v, a, target, vf, af, T, fs, as,
-                                              ep, c, chord_out, &adopted_vf);
-                if (adopted_worst <= 1.0) {
+            for (int i = 1; i <= steps; i++) {
+                double fs, as;
+                at((double)i / steps, fs, as);
+                if (budgetedTrial(p, v, a, target, vf, af, T, fs, as, ep, c,
+                                  chord_out, &adopted_vf, true) <= 1.0) {
                     adopted_alpha = as;
                     adopted_f     = fs;
                     found         = true;
+                    break;
                 }
             }
             // Not found here falls through to the Ruckig guard below.
@@ -1521,6 +1516,113 @@ private:
         return true;
     }
 
+    // The predicate itself, in whatever precision the caller scans in. `rvc`
+    // and `rac` are the RECIPROCAL ceilings, hoisted by the caller: a scan
+    // divides by the same two numbers at every point, and on a single-precision
+    // FPU a divide costs an order more than a multiply. A ZERO reciprocal
+    // disarms its axis, which is the vc > 0 / ac > 0 guard as arithmetic.
+    template <typename R>
+    static R pointWorstR(R pp, R vv, R aa, R lo, R hi, R allow, R rvc, R rac) {
+        R worst = std::fabs(vv) * rvc;
+        worst = std::fmax(worst, std::fabs(aa) * rac);
+        if (pp < -(R)kWindowRoundEps) worst = std::fmax(worst, (R)1 + (-pp));
+        if (pp > (R)1 + (R)kWindowRoundEps)
+            worst = std::fmax(worst, (R)1 + (pp - (R)1));
+        if (allow >= (R)0) {
+            const R excess = std::fmax(lo - pp, pp - hi);
+            if (excess > allow)
+                worst = std::fmax(worst, (R)1 + (excess - allow));
+        }
+        return worst;
+    }
+
+    // ---- Extremum candidates: where a polynomial referee must look ----------
+    // A FIXED GRID STEPS OVER A NARROW PEAK, and on the axes this referee
+    // polices that is a silent safety hole. Every extremum of p, v, a and j on
+    // [0,1] sits at a root of its OWN derivative, and the chain is p' = v,
+    // v' = a, a' = j, so one descent down the chain brackets every peak.
+    //
+    // Roots come from BISECTION INSIDE MONOTONE INTERVALS, not from the cubic
+    // and quartic radical forms: the shipping family is a cubic (c[4] = c[5] =
+    // 0), so the leading coefficient is zero on the hot path and every radical
+    // form needs a degree dispatch to survive that. A sign change on an
+    // interval where the polynomial is monotone cannot hide a root, and a
+    // tangential root is not an extremum, so nothing is missed.
+
+    // Horner over `deg` + 1 ascending coefficients.
+    static float polyAt(const float* k, int deg, float t) {
+        float r = k[deg];
+        for (int i = deg - 1; i >= 0; i--) r = r * t + k[i];
+        return r;
+    }
+
+    // Roots of `k` (degree `deg`) in (0,1), given `brk`, the ascending roots of
+    // its derivative, which cut [0,1] into intervals it is monotone on. Writes
+    // at most `deg` roots, ascending.
+    static int rootsIn01(const float* k, int deg, const float* brk, int nbrk,
+                         float* out) {
+        float x[6];
+        int n = 0;
+        x[n++] = 0.0f;
+        for (int i = 0; i < nbrk && n < 5; i++) x[n++] = brk[i];
+        x[n++] = 1.0f;
+        int found = 0;
+        float fa = polyAt(k, deg, x[0]);
+        for (int i = 0; i + 1 < n; i++) {
+            float lo = x[i], hi = x[i + 1];
+            const float fb = polyAt(k, deg, hi);
+            // A root ON an interval end is already a candidate tau (the ends
+            // are the endpoints and the derivative's own roots), so only a
+            // strict sign change needs bracketing.
+            if (hi > lo && fa != 0.0f && fb != 0.0f &&
+                ((fa < 0.0f) != (fb < 0.0f))) {
+                const bool neg_lo = fa < 0.0f;
+                // 20 halvings of an interval no wider than 1 is 1e-6 in tau,
+                // and a peak is flat in its own neighborhood.
+                for (int s = 0; s < 20; s++) {
+                    const float m = 0.5f * (lo + hi);
+                    if ((polyAt(k, deg, m) < 0.0f) == neg_lo) lo = m;
+                    else                                      hi = m;
+                }
+                out[found++] = 0.5f * (lo + hi);
+            }
+            fa = fb;
+        }
+        return found;
+    }
+
+    // 0, 1 and every extremum of p/v/a/j for the curve `c`; returns the count,
+    // at most 12. These are tau-polynomial coefficients, so the derivatives
+    // carry the T powers the caller divides out.
+    static int extremumTaus(const float* c, float* taus) {
+        int n = 0;
+        taus[n++] = 0.0f;
+        taus[n++] = 1.0f;
+        // dj/dtau = 24c4 + 120c5 tau: the |j| extremum, exact.
+        float rj1[1];
+        int nj1 = 0;
+        if (std::fabs(c[5]) > 1e-30f) {
+            const float t = -c[4] / (5.0f * c[5]);
+            if (t > 0.0f && t < 1.0f) rj1[nj1++] = t;
+        }
+        const float kj[3] = {6.0f * c[3], 24.0f * c[4], 60.0f * c[5]};
+        float rj[2];
+        const int nj = rootsIn01(kj, 2, rj1, nj1, rj);          // |a| extrema
+        const float ka[4] = {2.0f * c[2], 6.0f * c[3], 12.0f * c[4],
+                             20.0f * c[5]};
+        float ra[3];
+        const int na = rootsIn01(ka, 3, rj, nj, ra);            // |v| extrema
+        const float kv[5] = {c[1], 2.0f * c[2], 3.0f * c[3], 4.0f * c[4],
+                             5.0f * c[5]};
+        float rv[4];
+        const int nv = rootsIn01(kv, 4, ra, na, rv);            // p extrema
+        for (int i = 0; i < nj1; i++) taus[n++] = rj1[i];
+        for (int i = 0; i < nj;  i++) taus[n++] = rj[i];
+        for (int i = 0; i < na;  i++) taus[n++] = ra[i];
+        for (int i = 0; i < nv;  i++) taus[n++] = rv[i];
+        return n;
+    }
+
     // ---- ONE definition of legal, shared by both referees --------------------
     // Public because the native suite pins the two referees to a single answer
     // on curves both planners can draw; pure queries, they adopt nothing.
@@ -1536,6 +1638,9 @@ public:
     // absorb (async-tune bench 2026-07-30: 69 samples pinned at the top rail,
     // worst +217 mm/s, 625 mm of travel on a 500 mm rail). The retired 0.02
     // was also 12x looser than MotionArbiter's own 0.5 mm wall.
+    // kWindowRoundEps is not that band coming back: it is four orders smaller
+    // and exists because the term is a STEP, so a curve landing exactly on a
+    // rail was scored by which side of zero it rounded to.
     //
     // The BAND is two-sided: the measured pathology is a backswing AWAY from
     // the target (a move from 186.8 mm to 100 mm arcing up to 305 mm), which
@@ -1543,28 +1648,38 @@ public:
     double pointWorst(double pp, double vv, double aa, double lo, double hi,
                       double allow) const {
         const double vc = _plan_lim.vmax, ac = _plan_lim.amax;
-        double worst = 0.0;
-        if (vc > 0.0) worst = std::fmax(worst, std::fabs(vv) / vc);
-        if (ac > 0.0) worst = std::fmax(worst, std::fabs(aa) / ac);
-        if (pp < 0.0) worst = std::fmax(worst, 1.0 + (-pp));
-        if (pp > 1.0) worst = std::fmax(worst, 1.0 + (pp - 1.0));
-        if (allow >= 0.0) {
-            const double excess = std::fmax(lo - pp, pp - hi);
-            if (excess > allow)
-                worst = std::fmax(worst, 1.0 + (excess - allow));
-        }
-        return worst;
+        return pointWorstR(pp, vv, aa, lo, hi, allow,
+                           vc > 0.0 ? 1.0 / vc : 0.0,
+                           ac > 0.0 ? 1.0 / ac : 0.0);
     }
 
     // Worst (peak / ceiling) ratio across v/a/j ceilings AND window bounds,
-    // scanned on a fixed tau grid. > 1.0 = illegal quintic.
+    // evaluated at every extremum of the curve. > 1.0 = illegal quintic.
     // The allowance is a PARAMETER, never ambient state: consecutive commits
     // plan different curves from different entry states, and a member read
     // here judged one commit's span with another's bound.
-    double quinticWorstRatio(const double* c, double T,
-                             double oshoot_allow) const {
-        const double jc = _plan_lim.jmax;
-        double worst = 0.0;
+    //
+    // `early_exit` returns at the first candidate over 1.0. A search probe only
+    // needs the VERDICT; only a trial about to be adopted, and the commit-entry
+    // scan whose ratio becomes the WaveformFallback detail, need the number.
+    double quinticWorstRatio(const double* c, double T, double oshoot_allow,
+                             bool early_exit = false) const {
+        const float jc = _plan_lim.jmax;
+        // PLAN-TIME ALGEBRA IS DOUBLE, THE SCAN IS FLOAT: the coefficients are
+        // converted once, here. A threshold test already carrying
+        // kRuckigLegalEps does not need 15 digits, and neither the S3's FPU nor
+        // the RP2350's has double at all (cpp-style.md).
+        float fc[6];
+        for (int i = 0; i < 6; i++) fc[i] = (float)c[i];
+        // Reciprocals hoisted out of the scan: the same six divisors at every
+        // candidate, and a soft-float divide costs an order more than a
+        // multiply.
+        const float rT  = 1.0f / (float)T;
+        const float rT2 = rT * rT, rT3 = rT2 * rT;
+        const float rjc = 1.0f / jc;
+        const float rvc = _plan_lim.vmax > 0.0f ? 1.0f / _plan_lim.vmax : 0.0f;
+        const float rac = _plan_lim.amax > 0.0f ? 1.0f / _plan_lim.amax : 0.0f;
+        float worst = 0.0f;
         // ---- overshoot-guard preamble (all no-ops when the guard is off) ----
         // The band is this trial's OWN endpoints, c[0] and the curve at tau = 1
         // (the sum of the coefficients), so a shortened or smoothed candidate
@@ -1581,25 +1696,29 @@ public:
         // "further past its target than the move itself was long"). Carrying the
         // full commanded chord's slack into a shortened trial makes the guard
         // weakest on the shortest candidates, which are the ones that bulge.
-        double oshoot_lo = 0.0, oshoot_hi = 0.0, allow = oshoot_allow;
+        float oshoot_lo = 0.0f, oshoot_hi = 0.0f, allow = (float)oshoot_allow;
         if (oshoot_allow >= 0.0) {
-            double p_end = 0.0;
-            for (int k = 0; k < 6; k++) p_end += c[k];
-            oshoot_lo = std::fmin(c[0], p_end);
-            oshoot_hi = std::fmax(c[0], p_end);
-            allow += (double)_cfg.overshoot_chord_slack * (oshoot_hi - oshoot_lo);
+            float p_end = 0.0f;
+            for (int k = 0; k < 6; k++) p_end += fc[k];
+            oshoot_lo = std::fmin(fc[0], p_end);
+            oshoot_hi = std::fmax(fc[0], p_end);
+            allow += _cfg.overshoot_chord_slack * (oshoot_hi - oshoot_lo);
         }
-        for (int i = 0; i <= kScanSteps; i++) {
-            const double tau = (double)i / kScanSteps;
-            const double pp = ((((c[5]*tau + c[4])*tau + c[3])*tau + c[2])*tau + c[1])*tau + c[0];
-            const double vv = ((((5*c[5]*tau + 4*c[4])*tau + 3*c[3])*tau + 2*c[2])*tau + c[1]) / T;
-            const double aa = (((20*c[5]*tau + 12*c[4])*tau + 6*c[3])*tau + 2*c[2]) / (T*T);
-            const double jj = ((60*c[5]*tau + 24*c[4])*tau + 6*c[3]) / (T*T*T);
-            worst = std::fmax(worst, std::fabs(jj) / jc);
-            worst = std::fmax(worst, pointWorst(pp, vv, aa, oshoot_lo,
-                                                oshoot_hi, allow));
+        float taus[12];
+        const int n = extremumTaus(fc, taus);
+        for (int i = 0; i < n; i++) {
+            const float t  = taus[i];
+            const float pp = ((((fc[5]*t + fc[4])*t + fc[3])*t + fc[2])*t + fc[1])*t + fc[0];
+            const float vv = (((5*fc[5]*t + 4*fc[4])*t + 3*fc[3])*t + 2*fc[2])*t + fc[1];
+            const float aa = ((20*fc[5]*t + 12*fc[4])*t + 6*fc[3])*t + 2*fc[2];
+            const float jj = (60*fc[5]*t + 24*fc[4])*t + 6*fc[3];
+            worst = std::fmax(worst, std::fabs(jj) * rT3 * rjc);
+            worst = std::fmax(worst, pointWorstR(pp, vv * rT, aa * rT2,
+                                                 oshoot_lo, oshoot_hi, allow,
+                                                 rvc, rac));
+            if (early_exit && worst > 1.0f) break;
         }
-        return worst;
+        return (double)worst;
     }
 
     // The SAME referee, for a Ruckig profile. Deliberately identical in shape
@@ -1628,27 +1747,35 @@ public:
     // the ceiling it was handed, so the sample grid would only ever rediscover
     // that ceiling. Velocity, acceleration and the window are the properties it
     // can actually miss.
+    // A Ruckig profile is PIECEWISE, so it keeps the fixed grid: there is no
+    // single polynomial whose derivative roots would name its extrema. The
+    // predicate, the reciprocal hoist and the float scan are the quintic
+    // referee's, so "legal" still means exactly one thing.
     double ruckigWorstRatio(const ruckig::Trajectory<1>& traj,
-                            double oshoot_allow) const {
+                            double oshoot_allow, bool early_exit = false) const {
         const double dur = traj.get_duration();
         if (!(dur > 0.0) || !std::isfinite(dur)) return 0.0;
-        double oshoot_lo = 0.0, oshoot_hi = 0.0, allow = oshoot_allow;
+        float oshoot_lo = 0.0f, oshoot_hi = 0.0f, allow = (float)oshoot_allow;
         if (oshoot_allow >= 0.0) {
             double p0, p1, vv, aa;
             traj.at_time(0.0, p0, vv, aa);
             traj.at_time(dur, p1, vv, aa);
-            oshoot_lo = std::fmin(p0, p1);
-            oshoot_hi = std::fmax(p0, p1);
-            allow += (double)_cfg.overshoot_chord_slack * (oshoot_hi - oshoot_lo);
+            oshoot_lo = (float)std::fmin(p0, p1);
+            oshoot_hi = (float)std::fmax(p0, p1);
+            allow += _cfg.overshoot_chord_slack * (oshoot_hi - oshoot_lo);
         }
-        double worst = 0.0;
+        const float rvc = _plan_lim.vmax > 0.0f ? 1.0f / _plan_lim.vmax : 0.0f;
+        const float rac = _plan_lim.amax > 0.0f ? 1.0f / _plan_lim.amax : 0.0f;
+        float worst = 0.0f;
         for (int i = 0; i <= kScanSteps; i++) {
             double pp, vv, aa;
             traj.at_time(dur * (double)i / kScanSteps, pp, vv, aa);
-            worst = std::fmax(worst, pointWorst(pp, vv, aa, oshoot_lo,
-                                                oshoot_hi, allow));
+            worst = std::fmax(worst, pointWorstR((float)pp, (float)vv, (float)aa,
+                                                 oshoot_lo, oshoot_hi, allow,
+                                                 rvc, rac));
+            if (early_exit && worst > 1.0f) break;
         }
-        return worst;
+        return (double)worst;
     }
 
 private:

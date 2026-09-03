@@ -78,9 +78,7 @@ export const ROLE = {
   // writeSetting (it is not a RFC-009 setting).
   commandPosition: 'command.position',
 
-  // RFC-035: in-flight motion-plan telemetry. No registered role existed
-  // when PlanStrip.svelte was first written, so it discovered its channel
-  // and fields by name/prose regex; these are the durable fix.
+  // RFC-035: in-flight motion-plan telemetry.
   planStart: 'plan.start',
   planEnd: 'plan.end',
   planCurrent: 'plan.current',

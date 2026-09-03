@@ -19,14 +19,11 @@
    * channelId — so a hub is free to spread plan telemetry across more than
    * one channel and this still draws correctly.
    *
-   * This component used to also carry a NAME-HEURISTIC fallback (find an h2c
-   * STATE channel whose catalog name matched /plan/i, then classify its
-   * layout fields by regex over name+desc) for a hub that had not tagged the
-   * roles yet. That fallback is DELETED, not demoted — this is the reference
-   * SlopSync client, and shipping a name-guessing example teaches every
-   * third-party client the exact technique the role catalog exists to make
-   * unnecessary. A hub that has not tagged plan.* renders nothing here; its
-   * fields still show up as ordinary generic controls elsewhere on the page.
+   * NEVER add a name/prose heuristic for a hub that has not tagged plan.*:
+   * this is the reference SlopSync client, and a name-guessing example
+   * teaches every third-party client the technique the role catalog exists to
+   * make unnecessary. An untagged hub renders nothing here; its fields still
+   * show up as ordinary generic controls elsewhere on the page.
    *
    * "Is a plan actually running right now" also has no role (a device-
    * specific status bitfield is not something a DIFFERENT machine's planner

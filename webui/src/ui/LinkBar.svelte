@@ -451,9 +451,7 @@
   }
   .reason { color: var(--ink-faint); }
 
-  /* The chip metrics this used to restate here are now the base .chip rule
-     (OG values), so only the wordmark still needs narrowing. Kept in rem so it
-     still tracks --s instead of pinning to a literal px at one scale. */
+  /* rem, never px: the wordmark tracks --s instead of pinning to one scale. */
   @media (max-width: 400px) {
     .wordmark { font-size: .82rem; }
   }

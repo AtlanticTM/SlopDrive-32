@@ -33,11 +33,10 @@
    *    the honest fallback per hard rule 3, not a placeholder waiting on a
    *    role that does not exist.
    *
-   * 2. THE "TARGET" AND "LAG" hero numerals are back. RFC-032 registered
+   * 2. THE "TARGET" AND "LAG" hero numerals ride RFC-032's
    *    `telemetry.target` (the machine's live setpoint, as opposed to
-   *    `telemetry.position`) precisely to unblock this. Lag is still not its
-   *    own role — it is target - position, computed client-side in
-   *    HeroNumerals — see that file's header.
+   *    `telemetry.position`). Lag is not its own role: it is
+   *    target - position, computed client-side in HeroNumerals.
    *
    * ── THE COMET IS THE POSITION FIELD, WHATEVER ITS PROVENANCE ──────────────
    *
@@ -177,22 +176,11 @@
   }
 
   // ---------------------------------------------------------------------------
-  // Ruler ticks — a faithful port of the pre-refactor rail's ruler
-  // (`drawStaticLayer` in `webui-prerefactor`'s rail.js), NOT the "nice
-  // numbers" scheme this port originally replaced it with, and NOT the
-  // 0-100 abstract viewBox this port temporarily regressed to either (see the
-  // FAT TICKS note below — that regression is what the operator flagged as
-  // "the ticks on the rail look wrong").
-  //
-  // The original ticked every WHOLE UNIT of the reported span (1mm on every
-  // hub live today — nothing here hardcodes "mm", it is just whatever unit
-  // the catalog's `min`/`max` fields report), major every 10 units, mid
-  // every 5, and only coarsened the minor step when the host was physically
-  // too narrow to draw one line per unit without them smearing together.
-  // That density check is measured against the WIDGET's own pixel width
-  // (`railWidthPx` below), same as the original measured against its own
-  // host — the generalization is real (any span/unit gets sane ticks), the
-  // visual RESULT for an integer-unit rail is unchanged.
+  // Ruler ticks: one line per WHOLE UNIT of the reported span, major every
+  // 10 units, mid every 5, coarsened only when the host is physically too
+  // narrow to draw one line per unit without smearing. Nothing here
+  // hardcodes a unit; the span comes from the catalog's own bounds, and the
+  // density check measures the WIDGET's pixel width (`railWidthPx` below).
   //
   // FAT TICKS BUG: this widget used to render into `viewBox="0 0 100 100"`
   // with `preserveAspectRatio="none"`. That viewBox is square, but the host

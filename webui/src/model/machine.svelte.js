@@ -35,14 +35,6 @@
  * OTHER direction too — see TELEMETRY_HZ below: the fastest available rate
  * (the catalog's 60 Hz ceiling) measured WORSE than a slower one, because the
  * hub can't pace it evenly.
- *
- * The old name here was `DRAW_HZ`, reasoning "subscribe at the rate we draw"
- * (SPEC 10.2's intent, but SPEC 10.2 is about not over-asking a channel's
- * ceiling for no reason — it never said the two rates should be numerically
- * equal). That name is what led this policy to cap subscriptions at 30
- * because the page draws at ~60: a readout drawn at 60+ fps does not need
- * 60+ Hz of NEW data to look smooth, it needs EVENLY spaced data it can
- * interpolate between. Renamed to say what it actually bounds.
  */
 
 import {

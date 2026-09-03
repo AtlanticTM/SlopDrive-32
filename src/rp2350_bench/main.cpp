@@ -253,7 +253,6 @@ void setup1() {
         c.limits.amax = 250.0f;
         c.limits.jmax = 10000.0f;
         c.overshoot_guard = 0.0f;
-        c.sample_synthesis = true;
         return c;
     }();
     static Engine engine(cfg, 0.5f);

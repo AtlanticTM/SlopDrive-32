@@ -535,190 +535,6 @@ TEST_CASE("Cold-start governor: from-rest strokes inside a live stream are "
     CHECK(vpk > 0.5 * 1.05);
 }
 
-TEST_CASE("Sample synthesis: 50 Hz bare points render smooth, tracking, and "
-          "never overshooting the source extremes") {
-    // A 1.2 Hz sine sampled at 50 Hz as BARE POINTS (no duration, no vf).
-    // Synthesis holds one sample back and renders quintic spans; the curve
-    // must track the sine one interval late and NEVER pass its extremes
-    // (PCHIP tangents are zero at reversals).
-    auto cfg = testConfig();
-    cfg.sample_synthesis = true;   // default; forced so the pin outlives it
-    Engine e(cfg, 0.5f);
-    // Representative content: ~52% of vmax peak. Near-ceiling sample streams
-    // (no headroom for boundary estimates) deliberately fall back to chase --
-    // today's behavior -- rather than fight physics; see sd-d77.
-    const double f = 1.0, amp = 0.25, mid = 0.5;
-    const uint64_t dt = 20 * kMs;   // 50 Hz
-    auto src = [&](uint64_t t_us) {
-        return mid + amp * std::sin(2.0 * 3.14159265358979 * f *
-                                    (double(t_us) * 1e-6));
-    };
-    double pmax = 0.0, pmin = 1.0, err = 0.0;
-    int planfails = 0;
-    for (uint64_t t = 0; t <= 2 * kS; t += dt) {
-        Command c;
-        c.target = (float)src(t);
-        c.has_anchor = true;
-        c.anchor_us = t;
-        // PlanFailed is a tolerated event: the previous plan keeps executing
-        // and live callers ignore the return (engine contract).
-        if (!e.commit(c, t)) planfails++;
-        // Evaluate between commits, past the priming phase.
-        if (t > 300 * kMs) {
-            for (uint64_t q = t; q < t + dt; q += kMs) {
-                const double pos = (double)e.positionAt(q);
-                pmax = std::max(pmax, pos);
-                pmin = std::min(pmin, pos);
-                // The whole pipeline (chase and chain) rides ~2 knots
-                // behind the head: compare the 120 ms-delayed source.
-                err = std::max(err, std::fabs(pos - src(q - 6 * dt)));
-            }
-        }
-    }
-    // Anomaly tally: name what the engine did if tracking broke.
-    int an[16] = {0};
-    slopmotion::Anomaly ev;
-    while (e.popAnomaly(ev)) an[(int)ev.kind & 15]++;
-    MESSAGE("synthesis census: planfails " << planfails << "  fallbacks an[5] "
-            << an[5] << "  err " << err << "  band [" << pmin << ", " << pmax
-            << "]");
-    CHECK(planfails <= 3);              // isolated PlanFailed tolerated
-    CHECK(an[1] <= 3);
-    CHECK(an[2] == 0);                  // SettleEngaged
-    CHECK(an[4] == 0);                  // DeadlineStretched: debt cascades
-    // Near-ceiling regime: hot chase entries re-lock at benign knots, so
-    // fallbacks stay a bounded re-lock census (measured 16), not the ~50%
-    // duty cycle the pre-fix code showed. Chase is the correct absorber
-    // here; the generous-machine pace case below is where lock must hold.
-    CHECK(an[5] <= 20);
-    CHECK(an[6] == 0);
-    CHECK(pmax <= mid + amp + 0.03);   // bounded crest bulge
-    CHECK(pmin >= mid - amp - 0.03);
-    // Lag tripwire only (measured 0.157): near-ceiling content re-locks
-    // often and the tight vmax bounds every catch-up, so transient lag runs
-    // deeper here than on the generous machine the pace cases pin.
-    CHECK(err < 0.20);
-}
-
-TEST_CASE("Sample synthesis pace: on a generous machine the source tempo is "
-          "the speed ceiling, and the engine never teleports") {
-    // The OPERATOR regime: content ~31% of vmax, every span legal, every span
-    // PLAYS. The tight-limit case above masks pace bugs by rejecting fast
-    // spans into chase; this one exposes them (field report 2026-08-09:
-    // smooth, but "some moves way too fast").
-    Config cfg = operatorConfig();
-    cfg.sample_synthesis = true;   // default; forced so the pin outlives it
-    Engine e(cfg, 0.5f);
-    const double f = 1.0, amp = 0.25, mid = 0.5;
-    const uint64_t dt = 20 * kMs;   // 50 Hz
-    auto src = [&](uint64_t t_us) {
-        return mid + amp * std::sin(2.0 * 3.14159265358979 * f *
-                                    (double(t_us) * 1e-6));
-    };
-    const double src_vpk = 2.0 * 3.14159265358979 * f * amp;
-    double vpk = 0.0, step_pk = 0.0, err = 0.0, prev_p = 0.5;
-    for (uint64_t t = 0; t <= 2 * kS; t += dt) {
-        Command c;
-        c.target = (float)src(t);
-        c.has_anchor = true;
-        c.anchor_us = t;
-        (void)e.commit(c, t);
-        for (uint64_t q = t; q < t + dt; q += kMs) {
-            const double pos = (double)e.positionAt(q);
-            if (q > 100 * kMs)
-                step_pk = std::max(step_pk, std::fabs(pos - prev_p));
-            prev_p = pos;
-            if (q > 400 * kMs) {
-                vpk = std::max(vpk, std::fabs((double)e.velocityAt(q)));
-                // Pipeline latency is TWO knots (one holdback + one tangent
-                // lookahead = 120 ms); the reference is the source delayed
-                // by exactly that, so err measures tracking, not offset.
-                err = std::max(err, std::fabs(pos - src(q - 6 * dt)));
-            }
-        }
-    }
-    MESSAGE("pace census: vpk " << vpk << " (src " << src_vpk << ", ratio "
-            << vpk / src_vpk << ")  worst 1 ms step " << step_pk << "  err "
-            << err);
-    // No teleports: the sampled position may never move faster than vmax
-    // between 1 ms samples.
-    CHECK(step_pk <= (double)cfg.limits.vmax * 1e-3 * 1.05);
-    // Pace: the machine may never play content faster than the source's own
-    // peak tempo (margin covers aim/priming overshoot, never a 2x span).
-    CHECK(vpk <= src_vpk * 1.35);
-    CHECK(err < 0.08);
-}
-
-TEST_CASE("Sample synthesis pace: 60 Hz stamps make every knot interval "
-          "uneven, and the chain must still play clean") {
-    // MFP stamps at its OWN tick (~16.7 ms), so knot acceptance lands at
-    // 66.7/83.3 ms -- VARIABLE spacing at every knot. Field report
-    // 2026-08-09 ("every knot is dramatically wrong"): without a pending
-    // slot, every span adopted off its chain anchor teleports.
-    // Arrivals additionally ride a wandering 0..30 ms transport delay
-    // (stamps stay clean -- TCP preserves order, queueing varies): the
-    // stutter regime of the 2026-08-09 field reports.
-    // sd-6b2.6 loosened three bounds here on purpose: this is the one regime
-    // whose chain stalls outrun kCoastCapS, so the coast freezes the position
-    // and the engine now REPORTS the v = 0 it really has -- the chase after a
-    // stall plans from that standstill, not from a stale span end velocity.
-    // Cost: step 0.0045 -> 0.0084, v-step 0.30 -> 0.68, err 0.042 -> 0.129,
-    // settles 1 -> 3. The freeze is not new (review 2.4/2.7), the honest
-    // report of it is. Synthesis, and this case, are deleted in sd-6b2.7.
-    Config cfg = operatorConfig();
-    cfg.sample_synthesis = true;   // default; forced so the pin outlives it
-    Engine e(cfg, 0.5f);
-    const double f = 1.0, amp = 0.25, mid = 0.5;
-    const uint64_t dt = 16667;   // ~60 Hz
-    auto src = [&](uint64_t t_us) {
-        return mid + amp * std::sin(2.0 * 3.14159265358979 * f *
-                                    (double(t_us) * 1e-6));
-    };
-    auto arrival = [&](int k) {
-        return (uint64_t)k * dt +
-               (uint64_t)((15.0 + 15.0 * std::sin(0.7 * k)) * 1000.0);
-    };
-    const double src_vpk = 2.0 * 3.14159265358979 * f * amp;
-    double vpk = 0.0, step_pk = 0.0, vstep_pk = 0.0, err = 0.0;
-    double prev_p = 0.5, prev_v = 0.0;
-    int i = 0;
-    for (uint64_t q = 0; q <= 2 * kS; q += kMs) {
-        while ((uint64_t)i * dt <= 2 * kS && arrival(i) <= q) {
-            Command c;
-            c.target = (float)src((uint64_t)i * dt);
-            c.has_anchor = true;
-            c.anchor_us = (uint64_t)i * dt;
-            (void)e.commit(c, q);
-            i++;
-        }
-        const double pos = (double)e.positionAt(q);
-        const double v = (double)e.velocityAt(q);
-        if (q > 100 * kMs) {
-            step_pk = std::max(step_pk, std::fabs(pos - prev_p));
-            vstep_pk = std::max(vstep_pk, std::fabs(v - prev_v));
-        }
-        prev_p = pos;
-        prev_v = v;
-        if (q > 400 * kMs) {
-            vpk = std::max(vpk, std::fabs(v));
-            err = std::max(err, std::fabs(pos - src(q - 12 * dt)));
-        }
-    }
-    int an[16] = {0};
-    slopmotion::Anomaly ev;
-    while (e.popAnomaly(ev)) an[(int)ev.kind & 15]++;
-    MESSAGE("jittered-knot census: vpk " << vpk << " (src " << src_vpk
-            << ", ratio " << vpk / src_vpk << ")  worst 1 ms step " << step_pk
-            << "  worst 1 ms v-step " << vstep_pk << "  err " << err
-            << "  an[1..6] " << an[1] << "/" << an[2] << "/" << an[3] << "/"
-            << an[4] << "/" << an[5] << "/" << an[6]);
-    CHECK(step_pk <= (double)cfg.limits.vmax * 1e-3 * 1.75);
-    // Stutter IS a velocity discontinuity; the coast-cap edge is one of them.
-    CHECK(vstep_pk <= (double)cfg.limits.amax * 1e-3 * 3.0 + 1e-6);
-    CHECK(vpk <= src_vpk * 1.35);
-    CHECK(err < 0.14);
-}
-
 TEST_CASE("Chase jerk scales with move demand: slow streams plan soft, fast "
           "streams keep authority") {
     auto run = [](double f, double amp) {
@@ -726,7 +542,6 @@ TEST_CASE("Chase jerk scales with move demand: slow streams plan soft, fast "
         cfg.limits.vmax = 3.0f;
         cfg.limits.amax = 30.0f;
         cfg.limits.jmax = 500.0f;
-        cfg.sample_synthesis = false;   // chase path under test
         cfg.chase_jerk_scale = true;    // default; forced so the pin outlives it
         Engine e(cfg, 0.5f);
         float sharp = 1.0f;
@@ -811,7 +626,6 @@ TEST_CASE("Retarget mid-move is C2-continuous at the commit instant") {
 
 TEST_CASE("Chase: 60 Hz sine stream tracks smoothly within limits") {
     Config cfg;
-    cfg.sample_synthesis = false;   // this case pins CHASE machinery
     cfg.limits.vmax = 3.0f;
     cfg.limits.amax = 30.0f;
     cfg.limits.jmax = 500.0f;
@@ -864,7 +678,6 @@ TEST_CASE("Chase: 60 Hz sine stream tracks smoothly within limits") {
 
 TEST_CASE("Starve-settle: dead stream brakes to rest and holds") {
     Config cfg;
-    cfg.sample_synthesis = false;   // this case pins CHASE machinery
     cfg.limits.vmax = 3.0f;
     cfg.limits.amax = 30.0f;
     cfg.limits.jmax = 500.0f;
@@ -1486,7 +1299,6 @@ TEST_CASE("Second-order chase aim stops overshooting a crest near the rail") {
     struct Result { double peak; double rail_ms; };
     auto run = [&](bool extrap) {
         Config cfg;
-        cfg.sample_synthesis = false;   // this case pins CHASE machinery
         cfg.limits.vmax = 3.0f;
         cfg.limits.amax = 30.0f;
         cfg.limits.jmax = 500.0f;
@@ -1543,7 +1355,6 @@ TEST_CASE("Second-order aim shortens the dead-stop park at the rail") {
 
     auto park_ms = [&](bool extrap) {
         Config cfg;
-        cfg.sample_synthesis = false;   // this case pins CHASE machinery
         cfg.limits.vmax = 3.0f;
         cfg.limits.amax = 30.0f;
         cfg.limits.jmax = 500.0f;
@@ -1589,7 +1400,6 @@ TEST_CASE("Predictive aim v2 arrives at the velocity the stream will HAVE") {
     struct Track { double rms; double peak_err; double max_pos; };
     auto run = [&](bool v2) {
         Config cfg;
-        cfg.sample_synthesis = false;   // this case pins CHASE machinery
         cfg.limits.vmax = 3.0f;
         cfg.limits.amax = 30.0f;
         cfg.limits.jmax = 500.0f;
@@ -2741,26 +2551,111 @@ TEST_CASE("Coast cap: past it the state is frozen, and the next plan inherits th
     CHECK(successor(outside, 300 * kMs) == doctest::Approx(0.0).epsilon(1e-9));
 }
 
-TEST_CASE("Sample synthesis: a regressive stamp is dropped, not a chain re-prime") {
-    // stamp - _syn_us on u64 wrapped, so an out-of-order segment always read
-    // as a stream gap and tore the holdback down: the drop branch below it was
-    // reachable only for stamp == _syn_us.
-    auto cfg = operatorConfig();
-    cfg.sample_synthesis = true;
-    Engine e(cfg, 0.30f);
-    auto pt = [&](float tgt, uint64_t stamp, uint64_t now) {
-        Command c;
-        c.target = tgt; c.has_anchor = true; c.anchor_us = stamp;
-        REQUIRE(e.commit(c, now));
+// ---- One planner per channel (sd-6b2.7) -------------------------------------
+
+TEST_CASE("A 10 ms segment is a 10 ms span with its authored tangent") {
+    // Ruling 2026-09-02 (.claude/rules/motion-control.md, "Division of
+    // labor"): WAVEFORM carries every duration-carrying segment, at any
+    // duration. A short knot arrives with a real duration and a real end_vel,
+    // and a routing floor threw both away.
+    using namespace fieldreplay;
+    Engine e(liveTuning(), 0.50f);
+    Command c;
+    c.target       = 0.502f;
+    c.duration_us  = 10 * (uint32_t)kMs;
+    c.has_duration = true;
+    c.end_vel      = 0.30f;
+    c.has_end_vel  = true;
+    c.client_curve_family = 1;   // RFC-030 c1_cubic
+    REQUIRE(e.commit(c, 0));
+    // Read the plan BEFORE sampling its far end: the first sample past expiry
+    // is what engages the settle brake, and that is a different plan.
+    const auto   kind = e.planKind();
+    const double dur  = (double)e.snapshot(0).duration_s;
+    const double vT   = (double)e.velocityAt(10 * kMs);
+    const double pT   = (double)e.positionAt(10 * kMs);
+    MESSAGE("10 ms knot: kind " << unsigned(kind) << ", dur " << dur
+            << ", v(T) " << vT << ", p(T) " << pT);
+    CHECK((kind == slopmotion::PlanKind::Cubic ||
+           kind == slopmotion::PlanKind::Quintic));
+    CHECK(dur == doctest::Approx(0.010).epsilon(1e-6));
+    // The authored tangent is the point of the ruling: it is rendered, not
+    // replaced by a chase arrival estimate.
+    CHECK(vT == doctest::Approx(0.30).epsilon(0.02));
+    CHECK(pT == doctest::Approx(0.502).epsilon(0.01));
+}
+
+TEST_CASE("The field's mixed script plans ONE kind end to end -- no planner flips") {
+    // 2026-09-02 field trace: a 10 ms knot between 85-250 ms segments routed
+    // to chase, so the plan kind flipped cubic/ruckig/cubic twice per stroke.
+    // Every command here carries a duration, so every commit is waveform.
+    using namespace fieldreplay;
+    Engine e(liveTuning(), 0.35f);
+    const S F[] = {
+        {0.400f,  85, 0.859f,  true, 2.400f, true},
+        {1.000f, 250, 0.0f,    true, 0.0f,  false},
+        {1.000f,  10, 0.0f,    true, 0.0f,  false},
+        {0.900f, 248, -0.644f, true, 0.0f,  false},
+        {0.500f, 250, -1.134f, true, 0.0f,  false},
     };
-    pt(0.30f,         0,   1 * kMs);
-    pt(0.40f,  60 * kMs,  61 * kMs);
-    pt(0.50f, 120 * kMs, 121 * kMs);
-    const uint64_t plan = e.lastPlanUs();
-    const auto     kind = e.planKind();
-    pt(0.45f,  90 * kMs, 130 * kMs);   // older than the buffered knot
-    CHECK(e.lastPlanUs() == plan);
-    CHECK(e.planKind() == kind);
+    uint64_t now = 1000 * kMs, due = now + 200 * kMs;
+    int flips = 0;
+    unsigned prev = 0;
+    for (size_t i = 0; i < sizeof(F) / sizeof(F[0]); ++i) {
+        for (; now < due + 3 * kMs; now += kMs) (void)e.positionAt(now);
+        Command c;
+        c.target = F[i].tgt; c.duration_us = F[i].dur_ms * 1000u;
+        c.has_duration = true;
+        c.end_vel = F[i].vf; c.has_end_vel = F[i].has_vf;
+        c.next_chord = F[i].next; c.has_next_chord = F[i].has_next;
+        c.anchor_us = due; c.has_anchor = true;
+        c.client_curve_family = 1;
+        REQUIRE(e.commit(c, now));
+        const unsigned k = (unsigned)e.planKind();
+        printf("  mixed script: dur=%4u ms -> kind %u\n", unsigned(F[i].dur_ms), k);
+        if (i > 0 && k != prev) flips++;
+        prev = k;
+        // The knot's successor lands 1 ms later on the wire, not 10 ms.
+        due += (F[i].dur_ms == 10) ? 1 * kMs : F[i].dur_ms * 1000u;
+    }
+    CHECK(flips == 0);
+}
+
+TEST_CASE("Estimator cadence is the segment SPAN, not the anchor spacing") {
+    // A segment's target is where the machine will be at anchor + T, so anchor
+    // spacing is not that segment's rate. Burst-released anchors 1 ms apart
+    // used to teach the estimator a 1 ms cadence (and a chord rate two orders
+    // of magnitude over vmax), which pinned the chase jerk scale at the
+    // ceiling and shrank the settle grace to nothing.
+    using namespace fieldreplay;
+    const uint32_t dur_ms[] = {166, 208, 250, 248, 166, 250, 208, 250};
+    const size_t n = sizeof(dur_ms) / sizeof(dur_ms[0]);
+    double mean = 0.0;
+    for (size_t i = 0; i < n; ++i) mean += dur_ms[i] * 1e-3;
+    mean /= (double)n;
+
+    Engine e(liveTuning(), 0.40f);
+    for (size_t i = 0; i < n; ++i) {
+        Command c;
+        c.target = (i % 2) ? 0.80f : 0.40f;
+        c.duration_us  = dur_ms[i] * (uint32_t)kMs;
+        c.has_duration = true;
+        c.anchor_us = 1000 * kMs + (uint64_t)i * kMs;   // 1 ms apart
+        c.has_anchor = true;
+        REQUIRE(e.commit(c, 1000 * kMs + (uint64_t)i * kMs));
+    }
+    MESSAGE("dt_ema " << e.streamIntervalS() << " s against a " << mean
+            << " s content cadence");
+    CHECK(std::fabs(e.streamIntervalS() - mean) / mean < 0.20);
+}
+
+TEST_CASE("A bare point with no duration is still the chase planner's") {
+    Engine e(testConfig(), 0.30f);
+    Command c;
+    c.target = 0.70f;
+    REQUIRE(e.commit(c, 0));
+    CHECK(e.mode() == Mode::Chase);
+    CHECK(e.planKind() == slopmotion::PlanKind::Ruckig);
 }
 
 TEST_CASE("A segment longer than chase_stale_us must not starve its own settle grace") {
@@ -3606,7 +3501,6 @@ TEST_CASE("Out-of-window targets are clamped on EVERY command kind") {
     SUBCASE("bare point (chase)") {
         for (double t : kOut) {
             auto cfg = testConfig();
-            cfg.sample_synthesis = false;   // the plain chase path
             Engine e(cfg, 0.5f);
             Command c;
             c.target = (float)t;
@@ -3619,11 +3513,10 @@ TEST_CASE("Out-of-window targets are clamped on EVERY command kind") {
             CHECK(sw.max_p <= 1.0 + 1e-9);
         }
     }
-    SUBCASE("sample synthesis: a stream that runs off both rails") {
+    SUBCASE("dense bare-point stream that runs off both rails (chase)") {
         // 50 Hz bare points on a sine of amplitude 0.8 about the midpoint:
         // roughly a third of every cycle is commanded outside the window.
         auto cfg = testConfig();
-        cfg.sample_synthesis = true;
         Engine e(cfg, 0.5f);
         const uint64_t dt = 20 * kMs;
         double pmin = 1e9, pmax = -1e9;
@@ -3640,7 +3533,7 @@ TEST_CASE("Out-of-window targets are clamped on EVERY command kind") {
                 pmax = std::max(pmax, p);
             }
         }
-        MESSAGE("clamped synthesis band [" << pmin << ", " << pmax << "]");
+        MESSAGE("clamped chase band [" << pmin << ", " << pmax << "]");
         CHECK(pmin >= -1e-9);
         CHECK(pmax <= 1.0 + 1e-9);
     }

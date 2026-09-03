@@ -1786,9 +1786,12 @@ void SlopSyncHubService::drainMotionStream() {
         // nowhere else, and it dies the moment an entry is popped.
         //
         // Both segments must be real timed segments: a durationless 0x0084
-        // chase point has no chord (no duration to divide by) and a mixed
-        // stream cannot happen anyway (§11.4 source ownership gives one client
-        // one motion source). No successor -> has_next_chord stays false and
+        // chase point has no chord (no duration to divide by). ONE CHANNEL,
+        // ONE PLANNER (.claude/rules/motion-control.md, 2026-09-02): every
+        // duration-carrying segment on 0x0085 is a waveform span at any
+        // duration, so a short knot is a segment like any other and this
+        // lookahead bounds its pair with the successor exactly as it bounds
+        // a long segment's. No successor -> has_next_chord stays false and
         // the engine plans exactly as it did before the guard existed. That
         // TAIL CASE is a deliberate accept-unchanged: guessing a chord that is
         // not available would trim well-behaved senders, and the segment is DUE, so

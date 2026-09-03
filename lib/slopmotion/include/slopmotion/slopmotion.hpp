@@ -396,19 +396,6 @@ constexpr bool resolveCubic(CurvePolicy policy, uint8_t client_family) {
 
 struct Config {
     Limits limits{};
-    // Bare-point synthesis: hold back ONE sample and render [buffered ->
-    // incoming] as a full waveform segment (duration = stamp spacing, end_vel
-    // = PCHIP knot tangent, successor chord armed). Samples inherit the whole
-    // waveform machine -- C2 chain, anchored commits, dwell/RFC-008/wall
-    // guards, feasibility policies -- for one interval of latency. PCHIP
-    // tangents are zero at reversals (arrive at rest, overshoot impossible)
-    // and Fritsch-Carlson bounded on runs. Gaps > chase_stale_us restart via
-    // plain chase, so sparse streams never pay the holdback.
-    // Hot chase entries fall back to chase for a knot and re-lock at a
-    // benign one; near-ceiling streams chase by design (no headroom). A
-    // longer first span is NOT the fix: any span whose duration differs
-    // from the knot cadence desynchronizes the chain and corrupts pace.
-    bool sample_synthesis = true;
     // Chase jerk scales with the MOVE's own demand: a replan corner spends
     // jerk proportional to demand/vmax (kneed at kChaseJerkKneeFrac) instead
     // of the mechanical ceiling, so slow content stops carrying a 50 Hz notch
@@ -759,7 +746,7 @@ struct Command {
     uint32_t duration_us  = 0;      // I<ms> * 1000 when present
     float    end_vel      = 0.0f;   // units/s — TCode G wire value / 1000
     bool     has_end_vel  = false;  // true → v4 gradient handoff velocity
-    bool     has_duration = false;  // true + duration ≥ kShortMoveUs → WAVEFORM
+    bool     has_duration = false;  // true → WAVEFORM, at any duration
 
     // ---- ONE-SEGMENT LOOKAHEAD (RFC-008 handoff sanity guard) ---------------
     // The mean speed (|Δtarget| / duration, same normalized units/s as
@@ -1032,13 +1019,6 @@ public:
     // next plan is a cold start. See "One activity clock",
     // .claude/rules/motion-control.md.
     void resetAt(float pos, uint64_t now_us) {
-        _syn_ok = false;
-        _syn_prev_ok = false;
-        _syn_vf_ok = false;
-        _syn_chain_ok = false;
-        _pend_ok = false;
-        _synr_n = 0;
-        _synr_w = 0;
         _hold_pos   = clamp01(pos);
         _mode       = Mode::Idle;
         _kind       = PlanKind::None;
@@ -1100,12 +1080,16 @@ public:
         sampleRaw(t0, p, v, a);
 
         const double target = clamp01(cmd.target);
-        // Estimator feeds BOTH modes; anchored time on purpose (due spacing
-        // is the stream's true cadence, arrival spacing carries the jitter).
-        updateEstimator(target, t0);
-
-        const bool waveform =
-            cmd.has_duration && cmd.duration_us >= kShortMoveUs;
+        // Estimator feeds BOTH planners, on anchored time (due spacing is the
+        // stream's true cadence, arrival spacing carries the jitter). A
+        // duration-carrying segment's rate is its own chord over its own span:
+        // its target is where the machine will be at anchor + T, so anchor
+        // spacing is not that segment's rate and reading it as one poisons
+        // every consumer whenever two anchors sit close together.
+        const double seg_T = cmd.has_duration
+                                 ? (double)cmd.duration_us * 1e-6 : 0.0;
+        updateEstimator(target, t0,
+                        seg_T > 0.0 ? (target - p) / seg_T : 0.0, seg_T);
 
         // Cold-start governor (Config::recovery_vmax): the opening plan out
         // of rest traverses park->content at positioning gentleness. COLD is
@@ -1124,246 +1108,15 @@ public:
         noteActivity(t0);
         _plan_lim = _cfg.limits;
         if (cold) _plan_lim.vmax = _cfg.recovery_vmax;
-        bool ok;
-        if (waveform) {
-            _syn_ok = false;   // real segments preempt the synthesis buffer
-            _syn_prev_ok = false;
-            ok = commitWaveform(cmd, p, v, a, target, t0);
-        } else if (_cfg.sample_synthesis) {
-            ok = commitSampleSynth(cmd, p, v, a, target, t0, now_us);
-        } else {
-            ok = commitChase(cmd, p, v, a, target, t0);
-        }
+        // ONE CHANNEL, ONE PLANNER: every duration-carrying command is a
+        // waveform span at ANY duration, so a stream never switches planners
+        // mid-stroke. A zero or absurd duration is rejected by the legality
+        // referee, never by a routing floor. Bare points are chase's.
+        const bool ok = cmd.has_duration
+                            ? commitWaveform(cmd, p, v, a, target, t0)
+                            : commitChase(cmd, p, v, a, target, t0);
         if (ok) _plans++;
         return ok;
-    }
-
-    // ---- Bare-point synthesis (Config::sample_synthesis) --------------------
-    // Renders the BUFFERED point's span now that its far end is known. Calls
-    // commitWaveform directly, below commit()'s kShortMoveUs gate: that gate
-    // exists to stop CLIENT micro-segments; these spans are our own
-    // construction with honest stamp-derived durations.
-    bool commitSampleSynth(const Command& cmd, double p, double v, double a,
-                           double target, uint64_t t0, uint64_t now_us) {
-        const uint64_t stamp = cmd.has_anchor ? cmd.anchor_us : now_us;
-        // Guarded subtraction: a regressive stamp underflows u64 and tears the
-        // holdback down, which is the drop the branch below exists for.
-        if (_syn_ok && stamp > _syn_us &&
-            stamp - _syn_us > (uint64_t)_cfg.chase_stale_us) {
-            _syn_ok = false;   // stream gap: restart the holdback
-            _syn_prev_ok = false;
-            _syn_vf_ok = false;
-            _syn_chain_ok = false;
-            _synr_n = 0;
-            _synr_w = 0;
-        }
-        // Every priming/fallback chase targets the sample ~2 knots BEHIND
-        // the head -- the same delayed timeline the chain renders -- so a
-        // span's entry state is already ON that timeline. Chasing the head
-        // made every first span a yank-back reversal: illegal, re-prime,
-        // churn (bench trace 2026-08-09: five failed locks in 800 ms).
-        _synr_us[_synr_w] = stamp;
-        _synr_p[_synr_w]  = (float)target;
-        _synr_w = (uint8_t)((_synr_w + 1) % kSynRingN);
-        if (_synr_n < kSynRingN) _synr_n++;
-        const double tgt_d = synthDelayedTarget(stamp, target);
-        if (!_syn_ok) {
-            // First point of a (re)started stream: plain chase positions to
-            // it (the cold governor gentles a genuine opening); synthesis
-            // primes behind it.
-            _syn_ok = true;
-            _syn_p = target;
-            _syn_us = stamp;
-            return commitChase(cmd, p, v, a, tgt_d, t0);
-        }
-        if (stamp <= _syn_us) {   // duplicate/regressive stamp: keep newest
-            _syn_p = target;
-            return true;
-        }
-        // Coalesce to the knot pitch: samples inside the pitch are decimated
-        // (the samples contract); the first sample at/past it becomes the
-        // next knot.
-        if (stamp - _syn_us < kSynthSpanUs) {
-            // While the holdback is still priming, keep chasing at sample
-            // rate so a catch-up converges at 50 Hz, not knot pitch.
-            if (!_syn_prev_ok) return commitChase(cmd, p, v, a, tgt_d, t0);
-            return true;
-        }
-        // The first mature pair only rotates the buffer: a span needs the
-        // 3-point tangent at its END knot, and emitting [here -> here, vf]
-        // before one exists launches the machine the WRONG WAY (arrive-in-
-        // place-moving means approach from behind).
-        if (!_syn_prev_ok) {
-            _syn_prev_p = _syn_p;
-            _syn_prev_us = _syn_us;
-            _syn_prev_ok = true;
-            _syn_p = target;
-            _syn_us = stamp;
-            return true;
-        }
-        // Span duration is the CONTENT interval it renders ([prev -> cur]
-        // knots); the incoming sample's spacing shapes ONLY the end tangent.
-        // Borrowing the out-interval as T plays uneven knot cadences at the
-        // wrong speed (field report 2026-08-09: "some moves way too fast").
-        const double T = double(_syn_us - _syn_prev_us) * 1e-6;
-        const double t_out = double(stamp - _syn_us) * 1e-6;
-        const double c_out = (target - _syn_p) / t_out;
-        // PCHIP knot tangent at the buffered point: zero at reversals,
-        // Fritsch-Carlson bounded on runs -- monotone by construction.
-        double vf;
-        {
-            const double c_in = T > 0.0 ? (_syn_p - _syn_prev_p) / T : 0.0;
-            vf = (c_in * c_out <= 0.0)
-                     ? 0.0
-                     : (double)boundHandoffVelocity(
-                           (float)(0.5 * (c_in + c_out)),
-                           (float)std::fabs(c_in), (float)std::fabs(c_out),
-                           1.5f);
-        }
-        // End-accel estimate from our own knot tangent series.
-        double af = 0.0;
-        if (_syn_vf_ok) af = (vf - _syn_vf) / T;
-        // CHAIN TIME: the holdback is a fixed-latency pipeline, so anchors
-        // tile (previous anchor + previous duration), starting at first
-        // emission's now. Anchoring at the knot STAMPS renders every span
-        // late by the holdback and re-samples a lagging entry -- permanent
-        // schedule debt (measured: every span guard-bound, ratios 90-470).
-        if (!_syn_chain_ok) {
-            // Jitter buffer: seed the schedule AHEAD of real time so span
-            // arrivals land EARLY and promote exactly on anchor (pending
-            // slot). Seeded at arrival, half of all spans land late, and a
-            // late adoption enters mid-span off a linear coast -- a velocity
-            // kink at every jitter burst (field report 2026-08-09). MUST
-            // stay under one knot pitch: the pending slot is one deep.
-            _syn_chain_us = now_us + kSynthJitterUs;
-            _syn_chain_ok = true;
-        }
-        uint64_t tw = _syn_chain_us;
-        if (now_us > kAnchorMaxLateUs + tw) tw = now_us - kAnchorMaxLateUs;
-        _syn_chain_us = tw + (uint64_t)(T * 1e6);
-        double pw, vw, aw;
-        // Entry state at the chain anchor: from the PENDING span's end when
-        // one is outstanding (the active plan knows nothing past it), else
-        // from the live plan.
-        if (_pend_ok) evalCurve(_pend_c, _pend_T, 1.0, pw, vw, aw);
-        else          sampleRaw(tw, pw, vw, aw);
-#ifdef SLOPMOTION_SYNTH_DEBUG
-        if (std::fabs(clamp01(_syn_p) - pw) / T > 0.9 * (double)_plan_lim.vmax)
-            std::printf("SYNSLIP now=%llu tw=%llu T=%.4f pw=%.4f knot=%.4f\n",
-                        (unsigned long long)now_us, (unsigned long long)tw, T,
-                        pw, clamp01(_syn_p));
-#endif
-        if (std::fabs(clamp01(_syn_p) - pw) / T >
-            0.9 * (double)_plan_lim.vmax) {
-            // The span's schedule already saturates the machine: catch-up
-            // authority is zero, so slip is DROPPED, never financed (the
-            // samples contract is decimation). Re-prime at the freshest
-            // point and chase the delayed timeline; synthesis resumes on the
-            // next mature pair.
-            _syn_p = target;
-            _syn_us = stamp;
-            _syn_prev_ok = false;
-            _syn_vf_ok = false;
-            _syn_chain_ok = false;
-            return commitChase(cmd, p, v, a, tgt_d, t0);
-        }
-        bool ok = commitSynthSpan(pw, vw, aw, clamp01(_syn_p), vf, af, T, tw,
-                                  now_us);
-        if (!ok) {
-            // Hot-entry span: chase the delayed timeline instead and
-            // re-prime; synthesis re-locks on the next mature pair.
-            _syn_p = target;
-            _syn_us = stamp;
-            _syn_prev_ok = false;
-            _syn_vf_ok = false;
-            _syn_chain_ok = false;
-            return commitChase(cmd, p, v, a, tgt_d, t0);
-        }
-        _syn_vf = vf;
-        _syn_vf_ok = true;
-        _syn_prev_p = _syn_p;
-        _syn_prev_us = _syn_us;
-        _syn_prev_ok = true;
-        _syn_p = target;
-        _syn_us = stamp;
-        return ok;
-    }
-
-    // Dedicated adoption for synthesized spans. The stroke machinery
-    // (debt/centering/extremes, bridge, dwell, feasibility policies) assumes
-    // commands END at stroke extremes; mid-curve knots trip it. Build the
-    // quintic, scan it, DEGRADE boundary estimates (af first, then vf) until
-    // legal -- estimates are ours to soften -- and only then fall back to the
-    // Ruckig guard. Schedule is held; amplitude of a knot is never shaved.
-    // Newest held sample at least 2 knots behind `stamp`; the oldest held
-    // one when the stream is younger than the delay (opening park point).
-    double synthDelayedTarget(uint64_t stamp, double fallback) const {
-        if (_synr_n == 0) return fallback;
-        const uint64_t want =
-            stamp > 2 * kSynthSpanUs ? stamp - 2 * kSynthSpanUs : 0;
-        int best = -1, oldest = 0;
-        uint64_t best_us = 0, oldest_us = ~0ULL;
-        for (int i = 0; i < _synr_n; i++) {
-            const uint64_t us = _synr_us[i];
-            if (us <= want && (best < 0 || us > best_us)) {
-                best = i;
-                best_us = us;
-            }
-            if (us < oldest_us) {
-                oldest = i;
-                oldest_us = us;
-            }
-        }
-        return (double)_synr_p[best >= 0 ? best : oldest];
-    }
-
-    bool commitSynthSpan(double p, double v, double a, double knot, double vf,
-                         double af, double T, uint64_t t0, uint64_t now_us) {
-        if (!(T > 0.0)) return false;
-        // This span's OWN overshoot bound, from its OWN entry state. Never the
-        // member: a waveform commit's bound belongs to a different curve on a
-        // different path, and reading it here judged this span by that one.
-        const double allow = armOvershootAllow(p, v, a, knot, vf, T);
-        double c[6];
-        buildWaveformCurve(p, v, a, knot, vf, af, T, c);
-        if (quinticWorstRatio(c, T, allow) > 1.0) {
-            buildWaveformCurve(p, v, a, knot, vf, 0.0, T, c);
-            if (quinticWorstRatio(c, T, allow) > 1.0) {
-                // Still illegal (hot entry, ceiling reversal): report and let
-                // the caller drop to CHASE for one knot -- an in-chain Ruckig
-                // guard overruns its span and mints local schedule debt.
-#ifdef SLOPMOTION_SYNTH_DEBUG
-                std::printf("SYNFAIL t0=%llu now=%llu T=%.4f p=%.4f v=%.3f "
-                            "a=%.2f knot=%.4f vf=%.3f ratio=%.2f\n",
-                            (unsigned long long)t0, (unsigned long long)now_us,
-                            T, p, v, a, knot, vf, quinticWorstRatio(c, T, allow));
-#endif
-                recordAnomaly(AnomalyType::WaveformFallback, (float)knot,
-                              (float)quinticWorstRatio(c, T, allow), t0);
-                return false;
-            }
-        }
-#ifdef SLOPMOTION_SYNTH_DEBUG
-        std::printf("SYNSPAN t0=%llu now=%llu T=%.4f p=%.4f v=%.3f a=%.2f "
-                    "knot=%.4f vf=%.3f pend=%d\n",
-                    (unsigned long long)t0, (unsigned long long)now_us, T, p,
-                    v, a, knot, vf, (int)(t0 > now_us));
-#endif
-        if (t0 > now_us) {
-            // Emitted ahead of its chain anchor (uneven knot cadence): the
-            // active plan keeps playing; maybeSettle promotes at t0. Adopting
-            // now would clamp to the span start and teleport.
-            // Slot occupied = successor beat the pending's anchor: promote it
-            // early rather than drop its knot (the bigger jump).
-            if (_pend_ok) adoptQuintic(_pend_c, _pend_T, _pend_start);
-            for (int i = 0; i < 6; i++) _pend_c[i] = c[i];
-            _pend_T     = T;
-            _pend_start = t0;
-            _pend_ok    = true;
-            return true;
-        }
-        adoptQuintic(c, T, t0);
-        return true;
     }
 
     // ---- Evaluation (Core 1, ~1 kHz hot path) -------------------------------
@@ -1394,7 +1147,6 @@ public:
     // sampler gates on this exactly as it did on the cubic's isBusy(). A
     // trajectory pending SETTLE still counts as busy (it is still moving).
     bool isBusy(uint64_t now_us) const {
-        if (_pend_ok) return true;   // a scheduled successor is motion to come
         if (_kind == PlanKind::None) return false;
         if (elapsedS(now_us) < planDuration()) return true;
         double p, v, a;
@@ -1405,6 +1157,9 @@ public:
     Mode     mode() const { return _mode; }
     PlanKind planKind() const { return _kind; }
     uint64_t lastPlanUs() const { return _plan_start; }
+    // The stream estimator's cadence, seconds; 0 = never measured. Read-only:
+    // nothing in the plan path reads it back through here.
+    double   streamIntervalS() const { return _est_dt_ema; }
 
     Snapshot snapshot(uint64_t now_us) {
         maybeSettle(now_us);
@@ -1450,14 +1205,6 @@ public:
 private:
     static constexpr double   kRestVel      = 1e-4;   // units/s: "stopped"
     static constexpr uint8_t  kAnomalyDepth = 16;
-    // I<ms> below this is a dense-stream point, not a plannable segment.
-    // 20 ms, not the legacy 50: a scripted mid-stroke knot arrives as a
-    // 41 ms segment with an authored tangent, and demoting it to a chase
-    // point threw its duration and handoff away and switched planners twice
-    // per stroke (measured 2026-09-02, 25 of 427 segments, four planner
-    // switches per 0.6 s cycle). The legality referee, not this floor, is
-    // what rejects a span that is too short to render.
-    static constexpr uint32_t kShortMoveUs  = 20000;
     static constexpr int      kScanSteps    = 64;     // quintic legality grid
     // Overshoot-guard floor, normalized: 0.2 % of the stroke window. A plan
     // that lands exactly on its target still shows rounding-sized excursions on
@@ -1521,17 +1268,6 @@ private:
     // Below this span a timed segment is a DWELL (see the dwell rule in
     // commitWaveform); 2% of the window, under any real stroke.
     static constexpr double   kDwellSpanNorm = 0.02;
-    // Sample-synthesis knot pitch: bare points coalesce into spans at least
-    // this long. Jerk scales as 1/T^3, so 20 ms micro-spans turn tiny
-    // boundary-estimate errors into ceiling breaks at every curvature
-    // extreme (measured: 8 guard-stretches = the test sine's 8 extremes);
-    // 60 ms knots give 27x the headroom and the quintic interior does the
-    // between-knot smoothing, which is the point of synthesis.
-    static constexpr uint64_t kSynthSpanUs = 60000;
-    // Synthesis jitter buffer: the chain schedule leads real time by this
-    // margin so transport jitter lands spans EARLY (pending slot), never
-    // mid-flight. MUST stay under kSynthSpanUs (one pending slot).
-    static constexpr uint64_t kSynthJitterUs = 40000;
     // Chase jerk-scale knee: demand fraction of vmax at which full jerk
     // authority returns (see commitChase).
     static constexpr double   kChaseJerkKneeFrac = 0.5;
@@ -1961,7 +1697,6 @@ private:
     }
 
     void adoptQuintic(const double* c, double T, uint64_t now_us) {
-        _pend_ok = false;   // any adoption supersedes a scheduled successor
         for (int i = 0; i < 6; i++) _q_c[i] = c[i];
         _q_T        = T;
         _kind       = waveformIsCubic() ? PlanKind::Cubic : PlanKind::Quintic;
@@ -2880,9 +2615,9 @@ public:
 
     // Worst (peak / ceiling) ratio across v/a/j ceilings AND window bounds,
     // scanned on a fixed tau grid. > 1.0 = illegal quintic.
-    // The allowance is a PARAMETER, never ambient state: waveform commits and
-    // synthesis spans plan different curves from different entry states, and a
-    // member read here judged one path's span with the other's bound.
+    // The allowance is a PARAMETER, never ambient state: consecutive commits
+    // plan different curves from different entry states, and a member read
+    // here judged one commit's span with another's bound.
     double quinticWorstRatio(const double* c, double T,
                              double oshoot_allow) const {
         const double jc = _plan_lim.jmax;
@@ -2979,9 +2714,9 @@ private:
     // made the old knob actively harmful). It is also self-correcting: a machine
     // with more jerk authority gets a tighter allowance with nothing to retune.
     //
-    // ONE Ruckig solve per commit that arms the guard (a waveform segment, or a
-    // synthesis span from its own entry state), on the same input the bad-move
-    // bridge already probes. Returns < 0 when Ruckig has no opinion, which
+    // ONE Ruckig solve per commit that arms the guard (a waveform segment,
+    // from its own entry state), on the same input the bad-move bridge
+    // already probes. Returns < 0 when Ruckig has no opinion, which
     // disarms the guard for that curve rather than inventing a bound.
     double physicalBandExcess(double p, double v, double a, double target,
                               double vf) {
@@ -3028,6 +2763,10 @@ private:
         // measure excursion against. Disarmed explicitly: the softened-plan
         // legality recheck in planRuckig reads this member.
         _oshoot_allow = -1.0;
+        // RFC-030: a bare point declares no family either, and inheriting the
+        // last segment's would re-solve a later plan in a family this command
+        // never named.
+        _client_curve_family = 0;
         double aim = target;
         double vf  = 0.0;
         double af  = 0.0;
@@ -3069,7 +2808,11 @@ private:
                                       ? v_est + a_est * look
                                       : v_est;
             vf  = applyEndVelGuard(vf_req, aim, now_us);
-            if (_cfg.chase_accel_ff) af = a_est;
+            // Same damping as the arrival velocity: arriving at
+            // chase_ff_gain of the stream's speed but at ALL of its
+            // acceleration is two incompatible requests, and the accel one
+            // undoes the other inside the plan.
+            if (_cfg.chase_accel_ff) af = a_est * (double)_cfg.chase_ff_gain;
         } else if (cmd.has_end_vel) {
             vf = applyEndVelGuard((double)cmd.end_vel, aim, now_us);
         }
@@ -3121,10 +2864,6 @@ private:
         ruckig::Trajectory<1> traj;
         const ruckig::Result res = _calc.calculate(in, traj);
         if ((int)res < 0) {
-#ifdef SLOPMOTION_SYNTH_DEBUG
-            std::printf("PLANFAIL res=%d p=%.4f v=%.3f a=%.2f tgt=%.4f vf=%.3f af=%.2f mind=%.4f jc=%.1f\n",
-                        (int)res, p, v, a, target, vf, af, min_dur, jc);
-#endif
             _failures++;
             recordAnomaly(AnomalyType::PlanFailed, (float)target,
                           (float)(int)res, now_us);
@@ -3152,7 +2891,6 @@ private:
                 return false;
             }
         }
-        _pend_ok    = false;   // a point plan supersedes a scheduled successor
         _traj       = traj;
         _kind       = PlanKind::Ruckig;
         _plan_start = now_us;
@@ -3232,12 +2970,20 @@ private:
     // Fed by every commit; consumed by chase aim and waveform vf/af fill-ins.
     // EMAs are deliberately calm (the ±ms arrival jitter of real transports
     // otherwise buzzes straight into the acceleration trace — bench-measured).
-    void updateEstimator(double target, uint64_t now_us) {
+    // `span` > 0 (a duration-carrying segment) supplies the CONTENT timeline:
+    // that segment's rate is `chord` over `span`, never the anchor difference,
+    // because its target is where the machine will be at anchor + span. `span`
+    // == 0 (a bare point) differences the anchors. Staleness and the
+    // differencing base stay on the anchor clock either way.
+    void updateEstimator(double target, uint64_t now_us, double chord,
+                         double span) {
         if (_est_valid && now_us > _est_last_us) {
             const uint64_t gap = now_us - _est_last_us;
             if (gap <= _cfg.chase_stale_us) {
-                const double dt  = (double)gap * 1e-6;
-                const double raw = (target - _est_last_target) / dt;
+                const double dt  = span > 0.0 ? span : (double)gap * 1e-6;
+                const double raw = span > 0.0
+                                       ? chord
+                                       : (target - _est_last_target) / dt;
                 if (_est_ema_ok) {
                     const double v_prev = _est_v_ema;
                     // Peak-hold speed with first-order release (chase jerk
@@ -3301,14 +3047,6 @@ private:
         // the full cap rather than braking at the first plan end after the
         // hold (field trace 2026-09-02, the settle after every long hold).
         double g = _est_ema_ok ? std::fmin(kSettleGraceMult * _est_dt_ema, cap) : cap;
-        // A locked synthesis chain PRODUCES at knot pitch, not sample pitch:
-        // starvation is judged against the chain's own cadence, or uneven
-        // knots brake the machine mid-stream (field report 2026-08-09). A
-        // dead stream still zeroes the grace via the staleness check above.
-        if (_syn_chain_ok) {
-            g = std::fmax(g, std::fmin(kSettleGraceMult * (double)kSynthSpanUs * 1e-6,
-                                       kCoastCapS));
-        }
         return g;
     }
 
@@ -3334,15 +3072,6 @@ private:
     // authority; this window only stops the engine from panicking on ms-scale
     // pacing noise.
     void maybeSettle(uint64_t now_us) {
-        if (_pend_ok) {
-            // A scheduled successor exists: promote it at its anchor, and
-            // never settle ahead of it -- the stream is alive by definition.
-            if (now_us >= _pend_start) {
-                _pend_ok = false;
-                adoptQuintic(_pend_c, _pend_T, _pend_start);
-            }
-            return;
-        }
         if (_kind == PlanKind::None) return;        // nothing in flight to end
         if (_mode == Mode::Settle) {
             settleToIdle(now_us);
@@ -3463,7 +3192,7 @@ private:
     // < 0 = not armed, which is also the resting value. INVARIANT: every commit
     // path writes it before any referee runs (commitWaveform disarms at entry
     // and arms after the bridge, commitChase disarms), and the referees take it
-    // as a PARAMETER. Synthesis spans arm their own local and never touch it.
+    // as a PARAMETER.
     double                _oshoot_allow = -1.0;
 
     // Stream estimator
@@ -3495,32 +3224,6 @@ private:
     uint64_t _last_activity_us = 0;
     bool     _reset_cold = true;   // resetAt: the next plan is a cold start
     Limits   _plan_lim;            // ceilings of the plan in flight (commit())
-    // Sample-synthesis holdback (see Config::sample_synthesis).
-    bool     _syn_ok = false;       // a buffered point exists
-    double   _syn_p = 0.0;
-    uint64_t _syn_us = 0;
-    bool     _syn_prev_ok = false;  // a knot BEHIND the buffer exists
-    double   _syn_prev_p = 0.0;
-    uint64_t _syn_prev_us = 0;
-    bool     _syn_vf_ok = false;    // previous knot tangent (af estimate)
-    double   _syn_vf = 0.0;
-    bool     _syn_chain_ok = false; // chain-time anchor established
-    uint64_t _syn_chain_us = 0;
-    // Recent raw samples: the priming/fallback chase target rides ~2 knots
-    // behind the head (see commitSampleSynth).
-    static constexpr int kSynRingN = 8;
-    uint64_t _synr_us[kSynRingN] = {};
-    float    _synr_p[kSynRingN] = {};
-    uint8_t  _synr_n = 0;
-    uint8_t  _synr_w = 0;
-    // Pending synthesized span: committed AHEAD of its chain anchor (uneven
-    // knot cadence) and promoted at the anchor by maybeSettle. Without this
-    // slot an early adoption clamps to the span START (elapsedS) and every
-    // uneven knot teleports (field report 2026-08-09).
-    bool     _pend_ok = false;
-    double   _pend_c[6] = {};
-    double   _pend_T = 0.0;
-    uint64_t _pend_start = 0;
     // Previous waveform TARGET (dwell rule): a hold is the same target
     // re-commanded, never just "happens to be near" -- a centering-clipped
     // chain lands near its NEXT target legitimately (the RFC-049c regime).

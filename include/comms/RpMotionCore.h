@@ -513,11 +513,21 @@ class Core {
             return;
         }
         slopmotion::Config c = configFor(motionlink::kLimitUser);
-        const float span = _span.load(std::memory_order_relaxed);
+        // Ceilings are magnitudes. The span carries the frame's sign (native
+        // counts run negative for positive mm), so dividing by it signed
+        // handed Ruckig a negative vmax: ErrorInvalidInput, -100, the first
+        // live homing on the port (2026-09-03).
+        const float span = fabsf(_span.load(std::memory_order_relaxed));
         const float vn = it.rt_vmax / span;
         const float an = it.rt_accel / span;
         if (!(c.limits.vmax > 0.0f) || vn < c.limits.vmax) c.limits.vmax = vn;
         if (!(c.limits.amax > 0.0f) || an < c.limits.amax) c.limits.amax = an;
+        // Homing runs before any policy push may have landed, and a retarget
+        // carries speed and accel but no jerk. Ruckig refuses a zero limit
+        // (ErrorInvalidInput, -100: the first live boot, 2026-09-03), so an
+        // unpushed jerk ceiling falls back to reaching the commanded accel in
+        // 20 ms, which is a positioning glide's shape, never content.
+        if (!(c.limits.jmax > 0.0f)) c.limits.jmax = c.limits.amax * 50.0f;
         // A homing glide is a positioning move by definition, so the cold-start
         // governor has nothing left to soften and would only fight the ceilings
         // this command carried.

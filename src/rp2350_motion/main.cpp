@@ -29,6 +29,7 @@
 #include "hardware/gpio.h"
 #include "hardware/irq.h"
 #include "hardware/pio.h"
+#include "hardware/resets.h"
 #include "hardware/spi.h"
 
 #include "hardware/flash.h"
@@ -183,7 +184,6 @@ static void quadPioInit() {
 
 static struct repeating_timer s_tick;
 
-static void pumpSpiFrames();   // defined with the DMA slave section below
 
 // Tick liveness for the watchdog feed in loop(): a tick that stops advancing
 // must reboot the coprocessor, not leave the motor frozen mid-plan.
@@ -200,9 +200,10 @@ static bool stepperTick(struct repeating_timer*) {
     s_lastTickUs = tnow;
     ++s_tickCount;
 
-    // Frame pump FIRST, and unconditionally: an ESTOP frame must act this
-    // tick, and a latched estop must still process its kOpClear.
-    pumpSpiFrames();
+    // Frames are pumped from the CS rising-edge ISR (csRiseIsr), which sits
+    // BELOW this timer's priority: frame processing is longer than a tick
+    // slot and cost one late tick per frame when it lived here (2026-09-03,
+    // late=100/s at the 10 ms poll; the gate wants 0).
     if (s_core.estopped()) return true;   // hold: the reference stops advancing
 
     s_core.sampleCounts(tnow, s_pos, s_vel);
@@ -231,7 +232,7 @@ static bool stepperTick(struct repeating_timer*) {
 // The RP image version. This constant is its ONE home (C-1); the S3 reads it
 // with kOpFlashVersion, which is what makes C-8 verification possible without
 // a bench trip. Bump it with every image that goes out over the link.
-static constexpr char kRpFwVersion[] = "0.2.0-rp";
+static constexpr char kRpFwVersion[] = "0.2.3-rp";
 static constexpr uint32_t kWatchdogMs = 8000;   // hardware max is 8388
 static_assert(sizeof(kRpFwVersion) <= kFlashVersionBytes,
               "version string does not fit the status tail");
@@ -522,6 +523,23 @@ static void spiConfigure() {
     spi_set_format(spi1, 8, SPI_CPOL_0, SPI_CPHA_1, SPI_MSB_FIRST);
 }
 
+// The per-frame reset. spi_init() is tens of microseconds (baud-rate search,
+// reset waits) and the master's next frame can start 200 us after CS rises;
+// a frame clocked into a block mid-init is torn and answered with zeros
+// (measured 2026-09-03: linkerr ~100/s whenever the S3 paired a poll with a
+// retarget). This is the same RESETS pulse with the four registers restored
+// by hand: about a microsecond, FIFOs and shift registers cleared.
+static void spiBlockReset() {
+    spi_hw_t* hw = spi_get_hw(spi1);
+    const uint32_t cr0 = hw->cr0, cpsr = hw->cpsr, cr1 = hw->cr1, dmacr = hw->dmacr;
+    reset_block_num(RESET_SPI1);
+    unreset_block_num_wait_blocking(RESET_SPI1);
+    hw->cr0 = cr0;
+    hw->cpsr = cpsr;
+    hw->dmacr = dmacr;
+    hw->cr1 = cr1;   // SSE last: the block comes up configured
+}
+
 static void armRx() {
     dma_channel_abort(s_dmaRx);
     s_rxRead = 0;
@@ -540,39 +558,54 @@ static inline uint32_t rxWriteOff() {
          - (uint32_t)s_rxRing;
 }
 
-// Frame pump -- called ONLY from stepperTick (single consumer of s_rxRead).
-// A clean 32/32 exchange leaves the TX FIFO drained by the master, so the
-// happy path re-arms both DMAs with NO block reset; the reset survives only
-// in the tear path, where stale TX bytes genuinely need flushing.
+// Frame pump -- called ONLY from csRiseIsr (single consumer of s_rxRead).
 static void pumpSpiFrames() {
-    const uint32_t avail = (rxWriteOff() - s_rxRead) & 255u;
-    if (avail >= kFrameBytes) {
+    uint32_t avail = (rxWriteOff() - s_rxRead) & 255u;
+    if (avail % kFrameBytes != 0) {
+        // CS delimits exchanges, so anything that is not whole frames is
+        // garbage (a master reboot clocks stray bytes with CS floating).
+        // Drop the lot; the master refreshes every intent it cares about.
+        ++s_torn;
+        ++s_tornTotal;
+        avail = 0;
+    }
+    // Every whole frame, not one: an IRQ-off window (flash write) can leave
+    // several queued behind one CS edge, and a one-per-edge pump would lag
+    // the reply by that many frames for good.
+    while (avail >= kFrameBytes) {
         for (uint32_t i = 0; i < kFrameBytes; i++)
             s_rxFrame[i] = s_rxRing[(s_rxRead + i) & 255u];
         s_rxRead = (s_rxRead + kFrameBytes) & 255u;
         processFrame(s_rxFrame, kFrameBytes);
         s_frames++;
-        preloadStatus();
-        armTx();
-        // Refill the RX count during the >=200 us inter-frame gap, long
-        // before its 268 MB budget runs dry. Only with no partial pending:
-        // armRx resets the read pointer.
-        if (dma_channel_hw_addr(s_dmaRx)->transfer_count < (1u << 16) &&
-            ((rxWriteOff() - s_rxRead) & 255u) == 0) {
-            armRx();
-        }
-    } else if (avail != 0 && gpio_get(PIN_SPI_CS)) {
-        // CS idle-high with a partial frame = torn. Discard it, flush the
-        // stale TX reply by block reset, re-arm both sides.
-        ++s_torn;
-        ++s_tornTotal;
-        dma_channel_abort(s_dmaTx);
-        dma_channel_abort(s_dmaRx);
-        spiConfigure();
-        preloadStatus();
-        armRx();
-        armTx();
+        avail -= kFrameBytes;
     }
+    // BLOCK RESET EVERY FRAME. A reply that the master clocked short, or a
+    // stray clock while it rebooted, leaves bytes in the PL022 TX FIFO that
+    // offset every later reply for good (measured 2026-09-03: status frames
+    // byte-shifted, CRC-bad at 2750/s, the RX side perfectly aligned). The
+    // reset is the only thing that empties that FIFO, it costs microseconds
+    // inside the 200 us inter-frame gap, and the reply is re-armed anyway.
+    dma_channel_abort(s_dmaTx);
+    dma_channel_abort(s_dmaRx);
+    spiBlockReset();
+    preloadStatus();
+    armRx();
+    armTx();
+}
+
+// CS rising = frame end. The pump runs here, BELOW the tick's priority, so
+// the reply is armed microseconds after every frame (the master's 200 us
+// inter-frame floor is the budget) and the tick still preempts it. The last
+// byte reaches the ring by DMA a hair after CS rises: wait for it, bounded,
+// or a whole frame reads as torn.
+static void csRiseIsr() {
+    if (!(gpio_get_irq_event_mask(PIN_SPI_CS) & GPIO_IRQ_EDGE_RISE)) return;
+    gpio_acknowledge_irq(PIN_SPI_CS, GPIO_IRQ_EDGE_RISE);
+    const uint32_t t0 = time_us_32();
+    while (((rxWriteOff() - s_rxRead) & 255u) % kFrameBytes != 0 &&
+           time_us_32() - t0 < 10u) {}
+    pumpSpiFrames();
 }
 
 static void spiSlaveBegin() {
@@ -605,6 +638,10 @@ static void spiSlaveBegin() {
     preloadStatus();
     armRx();
     armTx();
+    gpio_add_raw_irq_handler(PIN_SPI_CS, csRiseIsr);
+    gpio_set_irq_enabled(PIN_SPI_CS, GPIO_IRQ_EDGE_RISE, true);
+    irq_set_priority(IO_IRQ_BANK0, 0xC0);   // below the tick's 0x80
+    irq_set_enabled(IO_IRQ_BANK0, true);
 }
 
 // ---- SlopGlow on the onboard WS2812 -----------------------------------------
@@ -632,18 +669,19 @@ static slopglow::GlowEngine s_glow(s_pixel);
 static slopglow::HeartbeatSource* s_glowHb = nullptr;
 
 // ---- Core 1: the engine -----------------------------------------------------
-// Raise core 1's stack past the framework's 2 KB default. This OVERRIDES the
-// weak default in cores/rp2040/main.cpp, which then mallocs a HARDCODED 0x2000
-// (8 KB, not configurable through this switch). commit() nests KB-scale Ruckig
-// temporaries, so the depth is measured rather than assumed (T1 class): the
-// paint-and-scan high-water mark below rides the once-a-second census, and the
-// next step if it approaches the ceiling is bypassing setup1()/loop1() for
-// multicore_launch_core1_with_stack() with a bigger buffer.
+// core1_separate_stack makes cores/rp2040/main.cpp launch core 1 through
+// multicore_launch_core1_with_stack() with a HARDCODED 8 KB malloc. commit()
+// nests KB-scale Ruckig temporaries and the first live homing measured 7268 B
+// of that 8 KB used (2026-09-03), so the launch is wrapped (-Wl,--wrap in
+// platformio.ini): the framework's buffer is ignored and core 1 runs on the
+// 16 KB below. The framework's main1() loop and its FIFO protocol are kept,
+// which is what the flash writes' park-the-other-core window relies on.
 bool core1_separate_stack = true;
 
 namespace core1 {
 
-constexpr size_t kStackBytes = 0x2000;   // hardcoded by cores/rp2040/main.cpp
+constexpr size_t kStackBytes = 16384;
+static uint32_t s_stack[kStackBytes / 4] __attribute__((aligned(8)));
 constexpr uint8_t kCanary = 0xA5;
 constexpr uint32_t kServiceUs = 100;     // the contract's "at least every ms"
 constexpr uint32_t kScanUs = 100000;     // the scan walks the untouched span
@@ -675,6 +713,16 @@ void scanHighWater() {
 }
 
 }  // namespace core1
+
+extern "C" void __real_multicore_launch_core1_with_stack(void (*entry)(void),
+                                                          uint32_t* stack_bottom,
+                                                          size_t stack_size_bytes);
+extern "C" void __wrap_multicore_launch_core1_with_stack(void (*entry)(void),
+                                                          uint32_t*, size_t) {
+    core1_separate_stack_address = core1::s_stack;   // paint/scan base
+    __real_multicore_launch_core1_with_stack(entry, core1::s_stack,
+                                             sizeof(core1::s_stack));
+}
 
 // ---- Firmware update: the task-context half (sd-4k1.3) ----------------------
 
@@ -805,6 +853,11 @@ void setup() {
 
     core1::s_armed = true;   // the engine may run now: the plan exists
     add_repeating_timer_us(-int32_t(kTickUs), stepperTick, nullptr, &s_tick);
+    // The tick outranks everything else on core 0: the frame ISR (0xC0) and
+    // USB (default 0x80) both yield to it, so a frame in flight costs the
+    // renderer nothing.
+    for (uint32_t irq = TIMER0_IRQ_0; irq <= TIMER0_IRQ_3; irq++) irq_set_priority(irq, 0x40);
+    for (uint32_t irq = TIMER1_IRQ_0; irq <= TIMER1_IRQ_3; irq++) irq_set_priority(irq, 0x40);
     // Hardware watchdog, fed from loop() only while BOTH the tick and core 1
     // advance. A frozen core 1 would leave the tick rendering a stale plan
     // forever, which looks alive and is not. Every legitimate stall sits far

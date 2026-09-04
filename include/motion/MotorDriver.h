@@ -58,6 +58,8 @@ public:
     // ---- Homing -------------------------------------------------------------
     virtual bool home(int32_t home_speed_steps_s = 4000) = 0;
     virtual bool isHomed()  const  = 0;
+    // True once the processor has answered at all; position is hearsay before.
+    virtual bool isLinkUp() const { return true; }
     virtual bool isHoming() const  = 0;
 
     // Bench/test override: force the backend's internal homed flag WITHOUT a

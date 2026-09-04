@@ -122,7 +122,28 @@ void MotionArbiter::processDeferred() {
 // CHOICE, which rides each command's limit_set byte.
 
 void MotionArbiter::_pushPolicy() {
-    const Window win = _mapper.effectiveWindow();
+    Window win = _mapper.effectiveWindow();
+    if (!_state.homed) {
+        // Before zeroing, the persisted window is a number in a frame that
+        // does not exist yet, and the engine clamps every target to it: a
+        // homing sweep stops at its edge and the rear wall is unreachable
+        // (first live homing on the port, 2026-09-03). Unhomed, the window is
+        // the whole rail both ways around wherever the carriage booted; the
+        // real one ships on the tick after `homed` rises.
+        // Centered on where the carriage IS when the link first answers, not
+        // on the processor's count zero: after a failed ritual the counter can
+        // sit hundreds of mm from the rail, and an S3 reboot does not reset
+        // it. Latched per boot so the window never moves under a sweep.
+        static bool  s_centered = false;
+        static float s_center_mm = 0.0f;
+        if (!s_centered && _motor.isLinkUp()) {
+            s_centered = true;
+            s_center_mm = _motor.getPosition();
+        }
+        const float r = _mapper.getMaxRailMm();
+        win.min_mm = s_center_mm - 1.5f * r;
+        win.max_mm = s_center_mm + 1.5f * r;
+    }
     const float span_mm = win.max_mm - win.min_mm;
 
     slopdrive::EngineTuning tune;

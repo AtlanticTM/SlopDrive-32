@@ -215,18 +215,35 @@ void MlinkServoDriver::pollStatus() {
     uint8_t out[kFrameBytes] = {kOpPing, ++_seq};
     uint8_t in[kFrameBytes] = {};
     xfer(out, in);
-    const std::span<const uint8_t, kFrameBytes> reply(in, kFrameBytes);
-    if (!crcOk(reply)) return;
-    // PARSE ON THE VARIANT BYTE, never on what we sent: a slave older than
-    // this vocabulary is a supported state and reports variant 0 for free.
-    if (in[0] == kStateFlash) return;          // the flash family owns the reply
-    if (in[kStatusOffVariant] != kStatusV2) {
-        SLOGW_EVERY_MS(10000, "mlink",
-                       "slave answers status variant %u, not v2 -- flash the RP",
-                       unsigned(in[kStatusOffVariant]));
+    consumeReply(std::span<const uint8_t, kFrameBytes>(in, kFrameBytes));
+}
+
+// EVERY reply is the slave's preload from the PREVIOUS frame, whatever this
+// frame asked. A ping after an event pull receives the event; a pull after a
+// ping receives the status. Parse on the variant byte, never on what we sent:
+// pairing by op deadlocked the link on the first live boot (2026-09-03, an
+// unacked event rode every ping reply and the pull path never saw it).
+void MlinkServoDriver::consumeReply(std::span<const uint8_t, kFrameBytes> reply) {
+    if (!crcOk(reply)) {
+        ++_reply_crc_bad;
+        SLOGW_EVERY_MS(5000, "mlink",
+                       "reply CRC bad (%lu total) -- link out of sync: "
+                       "%02X %02X %02X %02X %02X %02X %02X %02X .. [28]=%02X",
+                       (unsigned long)_reply_crc_bad, reply[0], reply[1], reply[2],
+                       reply[3], reply[4], reply[5], reply[6], reply[7],
+                       reply[kStatusOffVariant]);
         return;
     }
-    const StatusV2 s = decodeStatusV2(reply);
+    if (reply[0] == kStateFlash) return;       // the flash family owns the reply
+    const uint8_t variant = reply[kStatusOffVariant];
+    if (variant == kStatusV2) { applyStatus(decodeStatusV2(reply)); return; }
+    if (variant == kStatusEvent) { applyEvent(decodeEvent(reply)); return; }
+    SLOGW_EVERY_MS(10000, "mlink",
+                   "slave answers status variant %u, not v2 -- flash the RP",
+                   unsigned(variant));
+}
+
+void MlinkServoDriver::applyStatus(const StatusV2& s) {
 
     // Clock: every frame is a probe, paired BY SEQ (a mispaired sample is
     // biased early and the minimum filter would latch onto it forever).
@@ -279,46 +296,54 @@ void MlinkServoDriver::pollStatus() {
 // Callers decide THAT there is something to pull (the IRQ line, or a status
 // event_seq that moved); this only pulls.
 void MlinkServoDriver::pumpEvents() {
+    // Each pull's reply lands on the NEXT transaction (consumeReply), so the
+    // loop keys on the slave's own line, which it refreshes per preload, and
+    // never on the reply it just received.
     for (uint8_t n = 0; n < kEventPullPerTick; ++n) {
         uint8_t out[kFrameBytes] = {};
         encodeEventPull(std::span<uint8_t, kFrameBytes>(out, kFrameBytes),
                         ++_seq, _evt_acked);
         uint8_t in[kFrameBytes] = {};
         xfer(out, in);
-        const std::span<const uint8_t, kFrameBytes> reply(in, kFrameBytes);
-        if (!crcOk(reply)) return;                       // retry next tick
-        if (in[kStatusOffVariant] != kStatusEvent) return;
-        const EventRecord e = decodeEvent(reply);
-        _evt_acked = e.seq;
+        consumeReply(std::span<const uint8_t, kFrameBytes>(in, kFrameBytes));
+        if (digitalRead(kIrq) == LOW) return;
+    }
+}
 
-        if (e.kind == kEvtPlanAdopted) {
-            // The plan strip's whole feed. Slave -> master is the filter's
-            // inverse; elapsed is then measured in the clock the UI holds.
-            PlanEvent p;
-            p.due_master_us = e.t_us - _clock.offsetUs();
-            p.late_us = int32_t(micros() - p.due_master_us);
-            p.target = e.target;
-            p.duration_us = uint32_t(e.detail * 1e6f);
-            p.valid = true;
-            _last_plan = p;
-        } else if (e.kind == kEvtClockStep) {
-            SLOGW("mlink", "RP time base restarted -- clock filter reset");
-            _clock.reset();
-            for (auto& st : _stamp) st.ok = false;
-        } else if (e.kind == kEvtConfigTagUnknown) {
-            SLOGW("mlink", "RP does not know config tag 0x%02X (firmware skew)",
-                  unsigned(uint32_t(e.detail)));
-        }
+void MlinkServoDriver::applyEvent(const EventRecord& e) {
+    _evt_acked = e.seq;
+    _evt_acked = e.seq;
 
-        // Every event reaches the ring, including kEvtPlanAdopted: the
-        // anomaly drain classifies by kind and the plan strip reads _last_plan.
-        const uint8_t head = _evt_head.load(std::memory_order_relaxed);
-        const uint8_t next = uint8_t((head + 1u) % kEventDepth);
-        if (next != _evt_tail.load(std::memory_order_acquire)) {
-            _evt_ring[head] = e;
-            _evt_head.store(next, std::memory_order_release);
-        }
-        if (e.remaining == 0) return;
+    if (e.kind == kEvtPlanAdopted) {
+        // The plan strip's whole feed. Slave -> master is the filter's
+        // inverse; elapsed is then measured in the clock the UI holds.
+        PlanEvent p;
+        p.due_master_us = e.t_us - _clock.offsetUs();
+        p.late_us = int32_t(micros() - p.due_master_us);
+        p.target = e.target;
+        p.duration_us = uint32_t(e.detail * 1e6f);
+        p.valid = true;
+        _last_plan = p;
+    } else if (e.kind == kEvtClockStep) {
+        _clock.reset();
+        for (auto& st : _stamp) st.ok = false;
+        // A restarted slave counts from zero: its position is no longer the
+        // machine's, so homed is a lie until the ritual runs again.
+        if (_homed) SLOGW("mlink", "RP time base restarted -- clock filter reset, HOMED DROPPED");
+        else SLOGW("mlink", "RP time base restarted -- clock filter reset");
+        _homed = false;
+    } else if (e.kind == kEvtConfigTagUnknown) {
+        SLOGW("mlink", "RP does not know config tag 0x%02X (firmware skew)",
+              unsigned(uint32_t(e.detail)));
+    }
+
+    // Every event reaches the ring, including kEvtPlanAdopted: the
+    // anomaly drain classifies by kind and the plan strip reads _last_plan.
+    const uint8_t head = _evt_head.load(std::memory_order_relaxed);
+    const uint8_t next = uint8_t((head + 1u) % kEventDepth);
+    if (next != _evt_tail.load(std::memory_order_acquire)) {
+        _evt_ring[head] = e;
+        _evt_head.store(next, std::memory_order_release);
     }
 }
 
@@ -407,7 +432,9 @@ void MlinkServoDriver::update() {
                 _fp_mismatch_ms = now;
                 if (_status.config_fp == 0 && _ceiling_mm_s > 0.0f) {
                     SLOGW("mlink", "RP restarted (config image empty); "
-                          "re-pushing ceiling %.0f mm/s", (double)_ceiling_mm_s);
+                          "re-pushing ceiling %.0f mm/s%s", (double)_ceiling_mm_s,
+                          _homed ? " -- HOMED DROPPED" : "");
+                    _homed = false;
                     pushCeiling(_ceiling_mm_s);
                     _resync_at = 0;
                 }
@@ -439,10 +466,16 @@ void MlinkServoDriver::update() {
     // Homing point moves only (see the header): idempotent, last wins, so a
     // missed seq echo just resends next tick.
     if (_rt_valid) {
-        const bool lost = _rt_unacked && _status_fresh && _status.seq_echo != _rt_seq;
-        if (_rt_unacked && _status_fresh && _status.seq_echo == _rt_seq)
+        // seq_echo names the LAST FRAME the slave processed, any op (it is
+        // also the clock tag), so "acked" is "the slave is at or past this
+        // seq", never equality: the poll after a retarget already moves it
+        // on. Equality made every tick a resend and paired a retarget with
+        // each poll for good (2026-09-03: linkerr ~100/s, late ticks 50/s at
+        // idle). A retarget torn in flight is what the refresh is for.
+        if (_rt_unacked && _status_fresh &&
+            int8_t(uint8_t(_status.seq_echo - _rt_seq)) >= 0)
             _rt_unacked = false;
-        if (_rt_dirty || lost || now - _last_cmd_ms >= kRefreshMs) sendRetarget();
+        if (_rt_dirty || now - _last_cmd_ms >= kRefreshMs) sendRetarget();
     }
 }
 
@@ -468,8 +501,9 @@ namespace {
 constexpr float kHomeFastMmS       = 60.0f;  // rough wall find
 constexpr float kHomeSlowMmS       = 12.0f;  // accurate re-probe (rope settles)
 constexpr float kHomeMarginA       = 0.4f;
+constexpr float kHomePressedA      = 1.0f;   // free run is ~0.1 A; a wall is amps
 constexpr float kHomeMarginMm      = 5.0f;   // usable window ends here, each wall
-constexpr float kHomeReprobeBackMm = 15.0f;  // back off past the rope slack
+constexpr float kHomeReprobeBackMm = 30.0f;  // past rope slack AND fast-find overrun
 }  // namespace
 
 bool MlinkServoDriver::sendSetPos(float counts) {
@@ -500,7 +534,7 @@ bool MlinkServoDriver::homingAbort(const char* what) {
 // False = no stall inside the bound, or a stall riding the bound (a fault,
 // not a wall -- the AIM_HOME_STALL_PLAUSIBLE_FRAC rule).
 bool MlinkServoDriver::sweepToStall(float dir, float speed_mm_s, float bound_mm,
-                                    float& pos_out) {
+                                    float& pos_out, bool retry_once) {
     const float scale = AIM_STEPS_PER_MM;
     const float start = _status.pos;
     _rt_target = start + dir * bound_mm * scale;
@@ -522,6 +556,31 @@ bool MlinkServoDriver::sweepToStall(float dir, float speed_mm_s, float bound_mm,
         vTaskDelay(pdMS_TO_TICKS(poll_ms));
     }
     base /= float(AIM_HOME_BASELINE_SAMPLES);
+    if (base > kHomePressedA) {
+        // Already stalled: the carriage sits against a wall (a previous
+        // sweep's demand overran it). A baseline taken pressed can never
+        // show a rise, and sweeping on would run the demand the whole bound
+        // past the wall (measured 2026-09-03: 437 mm, drive at 3.2 A). Back
+        // off once and retry; still pressed means the drive is holding a
+        // following error only its own reset clears.
+        _rt_target = _status.pos;
+        _rt_a = 40.0f * _rt_v;
+        _rt_dirty = true;
+        for (int i = 0; i < 60 && fabsf(_status.vel) > 50.0f; i++) {
+            update();
+            vTaskDelay(pdMS_TO_TICKS(10));
+        }
+        if (!retry_once) {
+            SLOGW("mlink", "sweep start pressed (%.2f A): backing off %.0f mm and retrying",
+                  (double)base, (double)kHomeReprobeBackMm);
+            glideTo(_status.pos - dir * kHomeReprobeBackMm * scale, kHomeFastMmS, 4000u);
+            return sweepToStall(dir, speed_mm_s, bound_mm, pos_out, true);
+        }
+        SLOGW("mlink", "sweep start still pressed (%.2f A) after back-off -- "
+              "drive holds a following error; power-cycle the drive", (double)base);
+        pos_out = _status.pos;
+        return false;
+    }
 
     const uint32_t t0 = millis();
     const uint32_t timeout_ms =
@@ -530,6 +589,16 @@ bool MlinkServoDriver::sweepToStall(float dir, float speed_mm_s, float bound_mm,
     bool wall   = false;
     while (millis() - t0 < timeout_ms) {
         update();
+        // Homing forensics: the only per-second view of what the slave is
+        // doing with the retarget (readable at /api/diag/mlink after a fail).
+        SLOGI_EVERY_MS(1000, "mlink",
+                       "sweep pos=%.0f vel=%.0f state=%u fp=0x%04x echo=%u/%u "
+                       "I=%.2f base=%.2f tgt=%.0f",
+                       (double)_status.pos, (double)_status.vel,
+                       unsigned(_state), unsigned(_status.config_fp),
+                       unsigned(_status.seq_echo), unsigned(_rt_seq),
+                       (double)fabsf(_current.readCurrentA()), (double)base,
+                       (double)_rt_target);
         if (fabsf(_current.readCurrentA()) > base + kHomeMarginA) {
             if (++consec >= AIM_HOME_STALL_CONSEC) { wall = true; break; }
         } else {
@@ -537,14 +606,27 @@ bool MlinkServoDriver::sweepToStall(float dir, float speed_mm_s, float bound_mm,
         }
         vTaskDelay(pdMS_TO_TICKS(poll_ms));
     }
-    // Brake where we are, whatever happened.
-    _rt_target = _status.pos;
+    // THE STALL REACTION IS THE REVERSAL (operator ruling 2026-09-03): one
+    // retarget straight to the back-off point at hard accel, planned from the
+    // live velocity, so the demand turns around the instant the wall shows.
+    // A brake-hold-then-glide left the drive pushing at 8 A for the hold and
+    // tripped it. No wall found means brake where we are.
+    pos_out = _status.pos;
+    _rt_target = wall ? pos_out - dir * kHomeReprobeBackMm * scale : pos_out;
+    _rt_a = 40.0f * _rt_v;
     _rt_dirty = true;
-    for (int i = 0; i < 60 && fabsf(_status.vel) > 50.0f; i++) {
+    if (wall)
+        SLOGI("mlink", "stall at pos=%.0f (%.1f mm in, %lu ms) I=%.2f -> reversing %.0f mm",
+              (double)pos_out, (double)(fabsf(pos_out - start) / scale),
+              (unsigned long)(millis() - t0), (double)fabsf(_current.readCurrentA()),
+              (double)kHomeReprobeBackMm);
+    const uint32_t t1 = millis();
+    while (millis() - t1 < 4000u) {
         update();
+        if (fabsf(_status.pos - _rt_target) < 8.0f && fabsf(_status.vel) < 50.0f)
+            break;
         vTaskDelay(pdMS_TO_TICKS(10));
     }
-    pos_out = _status.pos;
     if (!wall) return false;
     const float swept_mm = fabsf(pos_out - start) / scale;
     return swept_mm < AIM_HOME_STALL_PLAUSIBLE_FRAC * bound_mm;
@@ -567,8 +649,9 @@ void MlinkServoDriver::glideTo(float counts, float speed_mm_s,
 }
 
 // Both-ends current-stall homing (operator spec 2026-08-08): each wall gets a
-// FAST rough find then a SLOW re-probe from a backed-off start -- the rope
-// slacks at the stops, so the fast contact position lies by that slack. The
+// FAST rough find then a SLOW re-probe -- the rope slacks at the stops, so
+// the fast contact position lies by that slack. Every stall ends backed off
+// by kHomeReprobeBackMm (sweepToStall), so the next probe starts free. The
 // usable window keeps kHomeMarginMm off each wall; the measured stroke rides
 // the existing homed-edge NVS persist. BLOCKING on motorTask (sanctioned);
 // update() inside every wait keeps the link serviced. No Modbus anywhere.
@@ -613,14 +696,12 @@ bool MlinkServoDriver::home(int32_t) {
     // return trip (operator order: cut the wasted move).
     if (!sweepToStall(-1.0f, kHomeFastMmS, 1.2f * rail, wf))
         return homingAbort("front wall not found (fast sweep)");
-    glideTo(wf + kHomeReprobeBackMm * scale, kHomeFastMmS, 4000u);
     if (!sweepToStall(-1.0f, kHomeSlowMmS, kHomeReprobeBackMm + 10.0f, wf))
         return homingAbort("front wall not confirmed (slow probe)");
 
     // Rear wall (+ = toward home): rough across the rail, back off, accurate.
     if (!sweepToStall(+1.0f, kHomeFastMmS, 1.2f * rail, wr))
         return homingAbort("rear wall not found (fast sweep)");
-    glideTo(wr - kHomeReprobeBackMm * scale, kHomeFastMmS, 4000u);
     if (!sweepToStall(+1.0f, kHomeSlowMmS, kHomeReprobeBackMm + 10.0f, wr))
         return homingAbort("rear wall not confirmed (slow probe)");
 
@@ -631,17 +712,22 @@ bool MlinkServoDriver::home(int32_t) {
     if (usable < 50.0f)
         return homingAbort("measured stroke implausibly short");
 
-    // Zero: we are AT the accurate rear wall, which sits kHomeMarginMm
+    // Zero: the carriage sits kHomeReprobeBackMm off the accurate rear wall
+    // (every stall ends backed off), and the wall itself is kHomeMarginMm
     // behind home. The refresh dies first -- it would seek an old-frame
     // target after the set.
     _rt_valid = false;
     _rt_dirty = false;
-    if (!sendSetPos(kHomeMarginMm * scale))
+    if (!sendSetPos((kHomeMarginMm - kHomeReprobeBackMm) * scale))
         return homingAbort("kOpSetPos never confirmed");
     setMeasuredStrokeMm(usable);
 
-    // Home is one margin away.
+    // Home is one margin away. The refresh dies with the ritual: the slave
+    // holds position on its own, and a homing retarget outliving homing
+    // would fight the first real command.
     glideTo(0.0f, kHomeSlowMmS, 3000u);
+    _rt_valid = false;
+    _rt_dirty = false;
     _homing = false;
     _homed = true;
     SLOGI("mlink", "homed :3 wall-to-wall %.1f mm, usable %.1f mm "

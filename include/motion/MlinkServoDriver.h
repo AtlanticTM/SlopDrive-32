@@ -40,6 +40,7 @@ public:
 
     bool home(int32_t home_speed_steps_s = 4000) override;
     bool isHomed()  const override { return _homed; }
+    bool isLinkUp() const override { return _status_ms != 0; }
     bool isHoming() const override { return _homing; }
     // Bench force-home also un-latches a slave-side estop: the S3 clears its
     // own latch, and without kOpClear the RP holds position forever while
@@ -125,9 +126,13 @@ private:
     void drainPosts();
     void pumpEvents();
     void pollStatus();
+    // One parse for every reply, by variant byte (see consumeReply).
+    void consumeReply(std::span<const uint8_t, motionlink::kFrameBytes> reply);
+    void applyStatus(const motionlink::StatusV2& s);
+    void applyEvent(const motionlink::EventRecord& e);
     bool sendSetPos(float counts);
     bool sweepToStall(float dir, float speed_mm_s, float bound_mm,
-                      float& pos_out);
+                      float& pos_out, bool retry_once = false);
     void glideTo(float counts, float speed_mm_s, uint32_t max_ms);
     bool homingAbort(const char* what);
 
@@ -144,6 +149,7 @@ private:
     motionlink::StatusV2 _status{};
     uint32_t _status_ms = 0;   // millis() at the last CRC-valid v2 status
     bool     _status_fresh = false;
+    uint32_t _reply_crc_bad = 0;
     uint8_t  _state = 0;
     uint8_t  _slave_flags = 0;
     // Per-interval counters accumulate into lifetime totals HERE: the v2

@@ -60,7 +60,13 @@ inline constexpr size_t kEventDepth = 32;
 // only reconstruction error lives on a slice that straddles a Ruckig jerk
 // switch and scales as |dj| * h^3, which at h = 1 ms is orders under one count
 // (see republish()).
-inline constexpr size_t   kRenderSlices    = 8;
+// 32 ms of table, republished at 16: a commit() can hold core 1 for several
+// ms (Ruckig, a Blend search), and the table MUST outlast it or the tick runs
+// off its end and holds, then jumps to the curve when the next table lands.
+// Measured on the quadrature wire 2026-09-13 (artifacts/scope/quad-mfp-a):
+// 3 ms holds mid-stroke followed by catch-up at 1000+ mm/s, with the old 8 ms
+// table and republish after the drain.
+inline constexpr size_t   kRenderSlices    = 32;
 inline constexpr uint32_t kRenderSliceUs   = 1000;
 inline constexpr uint32_t kRenderHorizonUs = kRenderSliceUs * kRenderSlices;
 
@@ -213,6 +219,9 @@ class Core {
     // or the tick has eaten half the horizon.
     void service(uint32_t now_us) {
         advanceClock(now_us);
+        // Fresh table BEFORE the drain: whatever commit() costs, the tick has a
+        // full horizon to eat while core 1 is inside it.
+        if (renderStale(now_us)) republish();
         drainQueue();
 
         const slopmotion::Snapshot snap = _engine.snapshot(_now64);

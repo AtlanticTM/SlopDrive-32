@@ -429,7 +429,11 @@ static void motorTask(void* /*param*/) {
         // (sd-4k1.3). That covers the arbiter's config push and the event pull
         // below too: both reach the bus through this task, which IS the link's
         // owner, so they would ship frames into a second master.
-        const bool rp_flashing = otaService.rpFlashActive();
+        const bool rp_flashing = otaService.rpFlashActive() ||
+                                 MlinkServoDriver::standoffRequested();
+        // Acknowledge here, BEFORE any bus use in this pass: the flash path
+        // waits for this before its first frame (RpFlashLink::ensureBus).
+        MlinkServoDriver::ackStandoff(rp_flashing);
         if (!rp_flashing) motor.update();
         // Window glide (sd-ey0): runtime window edits slew at the USER
         // (gentle) limit instead of re-mapping every target in one sample.

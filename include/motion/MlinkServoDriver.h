@@ -34,6 +34,16 @@
 
 class MlinkServoDriver final : public MotorDriver {
 public:
+    // THE ONE BUS. Every frame on the link, motion or flash, goes through
+    // busXfer: one SPIClass, one lock, one 200 us gap. The flash path may call
+    // it only while the owner task stands off (standoff(true) posted by the
+    // OTA path, standingOff() acknowledged from the owner's loop).
+    static void busXfer(uint8_t (&out)[motionlink::kFrameBytes],
+                        uint8_t (&in)[motionlink::kFrameBytes]);
+    static void standoff(bool on) { s_standoff.store(on, std::memory_order_release); }
+    static bool standoffRequested() { return s_standoff.load(std::memory_order_acquire); }
+    static void ackStandoff(bool off) { s_standing_off.store(off, std::memory_order_release); }
+    static bool standingOff() { return s_standing_off.load(std::memory_order_acquire); }
     void init() override;
     void update() override;
     void emergencyStop() override;
@@ -114,6 +124,9 @@ private:
     // True only on the owner task; false before the first update() too, so
     // the setup-task seed defers to the first tick like any other poster.
     bool isOwner() const;
+    // Owner-task only: ask the RP its firmware string; answered on the next poll.
+    void requestVersion();
+    const char* rpFirmware() const { return _rp_fw; }
     void pushCeiling(float mm_s);
     void xfer(uint8_t (&out)[motionlink::kFrameBytes],
               uint8_t (&in)[motionlink::kFrameBytes]);
@@ -139,6 +152,8 @@ private:
     // Link state (owner task only)
     // TaskHandle_t as void*: keeps the FreeRTOS headers out of this header.
     std::atomic<void*> _owner{nullptr};
+    static inline std::atomic<bool> s_standoff{false};
+    static inline std::atomic<bool> s_standing_off{false};
     uint8_t  _seq = 0;
     bool     _begun = false;
     uint32_t _last_tick_ms = 0;
@@ -150,6 +165,11 @@ private:
     uint32_t _status_ms = 0;   // millis() at the last CRC-valid v2 status
     bool     _status_fresh = false;
     uint32_t _reply_crc_bad = 0;
+    // kOpFlashVersion was sent; the NEXT reply carries the RP fw string over
+    // the status tail (kFlashStatusOffVersion). The C-8 instrument for the
+    // coprocessor, logged under mlink so the deploy script can read it.
+    bool     _ver_pending = false;
+    char     _rp_fw[motionlink::kFlashVersionBytes + 1] = {};
     uint8_t  _state = 0;
     uint8_t  _slave_flags = 0;
     // Per-interval counters accumulate into lifetime totals HERE: the v2

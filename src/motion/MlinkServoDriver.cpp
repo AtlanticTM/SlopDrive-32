@@ -41,10 +41,11 @@ constexpr uint8_t kEventPullPerTick = 8;
 
 // ---- wire ------------------------------------------------------------------
 
-void MlinkServoDriver::xfer(uint8_t (&out)[kFrameBytes],
-                            uint8_t (&in)[kFrameBytes]) {
+static uint32_t s_lastEndUs = 0;   // busXfer's gap clock, both callers
+
+void MlinkServoDriver::busXfer(uint8_t (&out)[kFrameBytes],
+                               uint8_t (&in)[kFrameBytes]) {
     static_assert(kSpiMode == 1, "PL022 slave needs CPHA=1");
-    static uint32_t s_lastEndUs = 0;
     const uint32_t sinceUs = micros() - s_lastEndUs;
     // 200 us gap: the slave's 20 kHz tick (50 us period) ALWAYS fires inside
     // any inter-frame gap, and at 60 us a heavy render tick plus the per-frame
@@ -52,7 +53,6 @@ void MlinkServoDriver::xfer(uint8_t (&out)[kFrameBytes],
     // (measured ~1 torn frame per 4-8 s under motor load, 2026-08-08).
     if (sinceUs < 200) delayMicroseconds(200 - sinceUs);
     crcStamp(out);
-    const uint32_t t0 = micros();
     s_spi.beginTransaction(SPISettings(kSpiHz, MSBFIRST, SPI_MODE1));
     // Scheduler lock for the ~40 us transaction: a same-core task otherwise
     // preempts mid-frame -- CS low, clock frozen -- and the slave's IRQ spin
@@ -63,8 +63,14 @@ void MlinkServoDriver::xfer(uint8_t (&out)[kFrameBytes],
     digitalWrite(kCs, HIGH);
     xTaskResumeAll();
     s_spi.endTransaction();
-    const uint32_t t3 = micros();
-    s_lastEndUs = t3;
+    s_lastEndUs = micros();
+}
+
+void MlinkServoDriver::xfer(uint8_t (&out)[kFrameBytes],
+                            uint8_t (&in)[kFrameBytes]) {
+    const uint32_t t0 = micros();
+    busXfer(out, in);
+    const uint32_t t3 = s_lastEndUs;
     // Stamp EVERY outgoing frame: the reply that carries this frame's
     // clock_t1 arrives one transaction later and is paired by seq.
     Stamp& st = _stamp[out[1] & 3u];
@@ -223,7 +229,28 @@ void MlinkServoDriver::pollStatus() {
 // ping receives the status. Parse on the variant byte, never on what we sent:
 // pairing by op deadlocked the link on the first live boot (2026-09-03, an
 // unacked event rode every ping reply and the pull path never saw it).
+void MlinkServoDriver::requestVersion() {
+    uint8_t out[kFrameBytes] = {kOpFlashVersion, ++_seq};
+    uint8_t in[kFrameBytes] = {};
+    xfer(out, in);
+    consumeReply(std::span<const uint8_t, kFrameBytes>(in, kFrameBytes));
+    _ver_pending = true;
+}
+
 void MlinkServoDriver::consumeReply(std::span<const uint8_t, kFrameBytes> reply) {
+    if (_ver_pending) {
+        // The version overlays the status tail and its last byte may cover the
+        // variant slot, so this reply is a version reply, never a status.
+        _ver_pending = false;
+        if (crcOk(reply)) {
+            memcpy(_rp_fw, &reply[kFlashStatusOffVersion], kFlashVersionBytes);
+            _rp_fw[kFlashVersionBytes] = ' ';
+            SLOGI("mlink", "RP fw '%s'", _rp_fw);
+        } else {
+            SLOGW("mlink", "RP fw version reply failed CRC");
+        }
+        return;
+    }
     if (!crcOk(reply)) {
         ++_reply_crc_bad;
         SLOGW_EVERY_MS(5000, "mlink",
@@ -414,6 +441,7 @@ void MlinkServoDriver::update() {
 
     const float req = _ceiling_req.exchange(0.0f, std::memory_order_acquire);
     if (req > 0.0f) pushCeiling(req);
+    if (_status_fresh && _rp_fw[0] == ' ' && !_ver_pending) requestVersion();
 
     if (_status_fresh) {
         // The IRQ pull above already covers the common case; this is the
@@ -435,6 +463,7 @@ void MlinkServoDriver::update() {
                           "re-pushing ceiling %.0f mm/s%s", (double)_ceiling_mm_s,
                           _homed ? " -- HOMED DROPPED" : "");
                     _homed = false;
+                    requestVersion();
                     pushCeiling(_ceiling_mm_s);
                     _resync_at = 0;
                 }

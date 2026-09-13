@@ -53,6 +53,7 @@ public:
 
 private:
     void ensureBus();
+    void release();   // bus back to the owner; every exit path
     void xfer(uint8_t* out, uint8_t* in);
     // One transaction whose reply is parsed as a flash status. False = the
     // reply was not a CRC-valid flash status.

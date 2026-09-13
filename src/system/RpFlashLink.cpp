@@ -11,7 +11,8 @@
 #include "system/RpFlashLink.h"
 
 #include <Arduino.h>
-#include <SPI.h>
+#include "motion/MlinkServoDriver.h"
+#include "system/CrashRing.h"
 #include <cstring>
 
 #include "sloplog/sloplog.h"
@@ -26,14 +27,11 @@ namespace {
 // only borrows it while motion is stopped.
 // TODO(sd-4k1.3): one home for these once the driver and this file can move in
 // the same commit -- two copies of a pin map is the T20 class.
-constexpr int8_t kSck = 7, kMiso = 10, kMosi = 38, kCs = 48;
-SPIClass s_spi(FSPI);
 
 // The slave block-resets its SPI per frame and its 20 kHz tick must fire
 // inside the gap; 200 us is the value measured to stop tearing under load
 // (MlinkServoDriver.cpp). Not shortened for the flash path: an unproven faster
 // gap would be a second variable in an already hardware-unverified feature.
-constexpr uint32_t kFrameGapUs = 200;
 // Consecutive resends of one offset before backing off. Four frames is under
 // the RP's 8-frame RX ring, so the ring never wraps during a stall.
 constexpr uint32_t kStallBackoff = 4;
@@ -48,32 +46,26 @@ constexpr uint32_t kEndTimeoutMs = 15000;
 }  // namespace
 
 void RpFlashLink::ensureBus() {
-    if (_busUp) return;
-    // Lazy on purpose: in the normal life of the device this object never
-    // touches the peripheral. esp32-hal keeps ONE bus record per bus number, so
-    // this SPIClass and the driver's share the same lock and the same pins;
-    // begin() here re-attaches identical pins rather than claiming new ones.
-    pinMode(kCs, OUTPUT);
-    digitalWrite(kCs, HIGH);
-    s_spi.begin(kSck, kMiso, kMosi, -1);
-    _busUp = true;
+    // The bus belongs to MlinkServoDriver's owner task. Post the stand-off and
+    // WAIT for its acknowledgment: a second SPIClass on the same bus from the
+    // other core took the S3 down with a task watchdog on the first live
+    // attempt (2026-09-13). One bus object, one lock, one caller at a time.
+    MlinkServoDriver::standoff(true);
+    for (int i = 0; i < 200 && !MlinkServoDriver::standingOff(); ++i)
+        vTaskDelay(pdMS_TO_TICKS(1));
+    _busUp = MlinkServoDriver::standingOff();
+    if (!_busUp) SLOGE("rpflash", "link owner never stood off; refusing the bus");
+}
+
+void RpFlashLink::release() {
+    _active.store(false, std::memory_order_release);
+    MlinkServoDriver::standoff(false);
+    _busUp = false;
 }
 
 void RpFlashLink::xfer(uint8_t* out, uint8_t* in) {
-    static uint32_t s_lastEndUs = 0;
-    const uint32_t sinceUs = micros() - s_lastEndUs;
-    if (sinceUs < kFrameGapUs) delayMicroseconds(kFrameGapUs - sinceUs);
-    crcStamp(std::span<uint8_t, kFrameBytes>(out, kFrameBytes));
-    s_spi.beginTransaction(SPISettings(kSpiHz, MSBFIRST, SPI_MODE1));
-    // Same scheduler lock the motion path uses: a preemption mid-frame leaves
-    // CS low with the clock frozen and the slave tears the frame.
-    vTaskSuspendAll();
-    digitalWrite(kCs, LOW);
-    s_spi.transferBytes(out, in, kFrameBytes);
-    digitalWrite(kCs, HIGH);
-    xTaskResumeAll();
-    s_spi.endTransaction();
-    s_lastEndUs = micros();
+    MlinkServoDriver::busXfer(*reinterpret_cast<uint8_t (*)[kFrameBytes]>(out),
+                              *reinterpret_cast<uint8_t (*)[kFrameBytes]>(in));
 }
 
 bool RpFlashLink::transact(uint8_t* out) {
@@ -106,22 +98,30 @@ bool RpFlashLink::pollUntilReady(uint32_t timeout_ms) {
 }
 
 bool RpFlashLink::begin(uint32_t size) {
+    crashring::crumb("rpf-begin");
+    _active.store(true, std::memory_order_release);   // the owner's stand-off cue
     ensureBus();
+    if (!_busUp) {
+        release();
+        _detail = kFlashDetailNone;
+        return false;
+    }
     _tx.begin(size);
     _want   = 0;
     _result = kFlashIdle;
     _detail = kFlashDetailNone;
-    _active.store(true, std::memory_order_release);
 
     uint8_t out[kFrameBytes] = {kOpFlashBegin, ++_seq};
     memcpy(&out[2], &size, 4);
     (void)transact(out);
+    crashring::crumb("rpf-poll");
     if (!pollUntilReady(kReadyTimeoutMs)) {
         SLOGE("rpflash", "RP refused the update (result %u detail %u)",
               unsigned(_result), unsigned(_detail));
-        _active.store(false, std::memory_order_release);
+        release();
         return false;
     }
+    crashring::crumb("rpf-ready");
     SLOGI("rpflash", "RP in flash mode for %u B, running fw '%s'",
           unsigned(size), _version);
     return true;
@@ -144,14 +144,14 @@ bool RpFlashLink::push(uint32_t base, const uint8_t* data, uint32_t len) {
             SLOGE("rpflash", "RP rewound to %u behind chunk base %u -- the "
                   "upstream body is forward-only, so this cannot be served",
                   unsigned(_want), unsigned(base));
-            _active.store(false, std::memory_order_release);
+            release();
             return false;
         }
         transact(out);
         if (_result == kFlashFailed) {
             SLOGE("rpflash", "RP failed mid-image at %u (detail %u)",
                   unsigned(_want), unsigned(_detail));
-            _active.store(false, std::memory_order_release);
+            release();
             return false;
         }
         // Backpressure, not loss: the RP stops advancing `want` while a sector
@@ -160,7 +160,7 @@ bool RpFlashLink::push(uint32_t base, const uint8_t* data, uint32_t len) {
         if (int32_t(millis() - deadline) > 0) {
             SLOGE("rpflash", "RP stalled at %u for %u ms (%u resends)",
                   unsigned(_want), unsigned(kChunkTimeoutMs), unsigned(rewinds()));
-            _active.store(false, std::memory_order_release);
+            release();
             return false;
         }
     }
@@ -181,20 +181,20 @@ bool RpFlashLink::end(uint32_t crc) {
                 SLOGI("rpflash", "RP verified the slot and is booting it "
                       "(%u rewinds; ~2 per 4 KB sector is backpressure, the "
                       "excess is wire loss)", unsigned(rewinds()));
-                _active.store(false, std::memory_order_release);
+                release();
                 return true;
             }
             if (_result == kFlashFailed) {
                 SLOGE("rpflash", "RP verify FAILED (detail %u) -- slot not "
                       "bought, running image intact", unsigned(_detail));
-                _active.store(false, std::memory_order_release);
+                release();
                 return false;
             }
         }
         delay(5);
     }
     SLOGE("rpflash", "RP never reported a verify result");
-    _active.store(false, std::memory_order_release);
+    release();
     return false;
 }
 
@@ -203,7 +203,7 @@ void RpFlashLink::abort() {
     uint8_t out[kFrameBytes] = {kOpFlashAbort, ++_seq};
     uint8_t in[kFrameBytes] = {};
     xfer(out, in);
-    _active.store(false, std::memory_order_release);
+    release();
     _result = kFlashIdle;
 }
 

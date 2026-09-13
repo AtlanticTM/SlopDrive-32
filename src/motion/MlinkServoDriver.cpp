@@ -479,7 +479,7 @@ void MlinkServoDriver::update() {
                     _rt_valid = false;
                     _rt_dirty = false;
                     _rt_oneshot = false;
-                    _rp_fw[0] = ' ';   // a restarted slave may run another image
+                    _rp_fw[0] = '\0';   // a restarted slave may run another image
                     _ver_tries = 0;
                     pushCeiling(_ceiling_mm_s);
                     _resync_at = 0;

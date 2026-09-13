@@ -31,6 +31,7 @@
 #include "hardware/pio.h"
 #include "hardware/resets.h"
 #include "hardware/spi.h"
+#include "hardware/timer.h"
 
 #include "hardware/flash.h"
 #include "hardware/watchdog.h"
@@ -119,7 +120,7 @@ static inline uint8_t phasePins(uint8_t ph) {
 // Render this tick's owed transitions into pin states and feed the FIFO.
 // Production (20 states / 50 us) equals consumption exactly and both clock
 // from the crystal, so FIFO-full is a fault counter, not a design state.
-static inline void emitTowardPos() {
+static inline void __not_in_flash_func(emitTowardPos)() {
     float delta = s_pos - s_emitted;
     const int dirStep = (delta >= 0.0f) ? 1 : -1;
     unsigned n = (unsigned)((delta >= 0.0f) ? delta : -delta);
@@ -182,14 +183,13 @@ static void quadPioInit() {
     pio_sm_set_enabled(s_qpio, (uint)s_qsm, true);
 }
 
-static struct repeating_timer s_tick;
 
 
 // Tick liveness for the watchdog feed in loop(): a tick that stops advancing
 // must reboot the coprocessor, not leave the motor frozen mid-plan.
 static volatile uint32_t s_tickCount = 0;
 
-static bool stepperTick(struct repeating_timer*) {
+static void __not_in_flash_func(stepperTick)() {
     // Tick lateness census. A tick that never ran is a sample that never
     // happened; the plan is a function of TIME, so the position after a late
     // tick is still correct and only the emitter had less runway.
@@ -204,14 +204,14 @@ static bool stepperTick(struct repeating_timer*) {
     // BELOW this timer's priority: frame processing is longer than a tick
     // slot and cost one late tick per frame when it lived here (2026-09-03,
     // late=100/s at the 10 ms poll; the gate wants 0).
-    if (s_core.estopped()) return true;   // hold: the reference stops advancing
+    if (s_core.estopped()) return;   // hold: the reference stops advancing
 
     s_core.sampleCounts(tnow, s_pos, s_vel);
     // ONE emit call site, on purpose. Every other exit used to abandon whatever
     // (s_pos - s_emitted) the emitter still owed: unflagged, uncounted step
     // loss, once per stroke (sd-dxy.1.2).
     emitTowardPos();
-    return true;
+    return;
 }
 
 // ---- Firmware update over the link (sd-4k1.3) -------------------------------
@@ -232,7 +232,7 @@ static bool stepperTick(struct repeating_timer*) {
 // The RP image version. This constant is its ONE home (C-1); the S3 reads it
 // with kOpFlashVersion, which is what makes C-8 verification possible without
 // a bench trip. Bump it with every image that goes out over the link.
-static constexpr char kRpFwVersion[] = "0.2.3-rp";
+static constexpr char kRpFwVersion[] = "0.2.6-rp";
 static constexpr uint32_t kWatchdogMs = 8000;   // hardware max is 8388
 static_assert(sizeof(kRpFwVersion) <= kFlashVersionBytes,
               "version string does not fit the status tail");
@@ -367,7 +367,7 @@ static void preloadFlashStatus() {
     digitalWrite(PIN_IRQ, LOW);
 }
 
-static void preloadStatus() {
+static void __not_in_flash_func(preloadStatus)() {
     if (s_flashMode) { preloadFlashStatus(); return; }
     if (s_eventReq) {
         s_eventReq = false;
@@ -409,8 +409,42 @@ static void preloadStatus() {
     digitalWrite(PIN_IRQ, s_core.eventsPending() ? HIGH : LOW);
 }
 
+// ---- The tick's own alarm ---------------------------------------------------
+// NOT the SDK alarm pool: its IRQ dispatch lives in flash, and with core 1
+// running Ruckig the XIP cache belongs to core 1 (measured 2026-09-13: ~45
+// late ticks/s whenever the machine moved, unchanged by moving stepperTick
+// itself into RAM). Hardware alarm 1 of timer 0, handler in RAM, re-armed
+// from the previous deadline so drift never accumulates. Priority 0x40: above
+// the frame ISR (0xC0) and USB (0x80).
+static constexpr uint kTickAlarm = 1;
+static uint32_t s_tickDue = 0;
+static uint32_t s_tickRearmed = 0;   // deadlines that had already passed
+static void __not_in_flash_func(tickIsr)() {
+    // INTR is write-1-to-clear: the atomic CLR alias writes ~mask and leaves
+    // the bit set (the IRQ then re-enters forever). Plain write, SDK idiom.
+    timer0_hw->intr = 1u << kTickAlarm;
+    s_tickDue += kTickUs;
+    // The alarm fires on EQUALITY; a deadline already behind the counter
+    // would never fire again. Re-anchor and count it (it is a late tick).
+    if (int32_t(s_tickDue - timer0_hw->timerawl) <= 2) {
+        s_tickDue = timer0_hw->timerawl + kTickUs;
+        ++s_tickRearmed;
+    }
+    timer0_hw->alarm[kTickAlarm] = s_tickDue;
+    stepperTick();
+}
+static void tickBegin() {
+    hardware_alarm_claim(kTickAlarm);
+    irq_set_exclusive_handler(TIMER0_IRQ_1, tickIsr);
+    irq_set_priority(TIMER0_IRQ_1, 0x40);
+    hw_set_bits(&timer0_hw->inte, 1u << kTickAlarm);
+    s_tickDue = timer0_hw->timerawl + kTickUs;
+    timer0_hw->alarm[kTickAlarm] = s_tickDue;
+    irq_set_enabled(TIMER0_IRQ_1, true);
+}
+
 // ---- Frame processor (SPI IRQ context: short, no allocation) ----------------
-static void processFrame(uint8_t* data, size_t len) {
+static void __not_in_flash_func(processFrame)(uint8_t* data, size_t len) {
     // Whole verified frames only: a torn or corrupted frame is DROPPED, never
     // partially parsed. The master re-sends what the status never acknowledged;
     // estop is repeated until the echoed state confirms it.
@@ -529,7 +563,7 @@ static void spiConfigure() {
 // (measured 2026-09-03: linkerr ~100/s whenever the S3 paired a poll with a
 // retarget). This is the same RESETS pulse with the four registers restored
 // by hand: about a microsecond, FIFOs and shift registers cleared.
-static void spiBlockReset() {
+static void __not_in_flash_func(spiBlockReset)() {
     spi_hw_t* hw = spi_get_hw(spi1);
     const uint32_t cr0 = hw->cr0, cpsr = hw->cpsr, cr1 = hw->cr1, dmacr = hw->dmacr;
     reset_block_num(RESET_SPI1);
@@ -540,26 +574,26 @@ static void spiBlockReset() {
     hw->cr1 = cr1;   // SSE last: the block comes up configured
 }
 
-static void armRx() {
+static void __not_in_flash_func(armRx)() {
     dma_channel_abort(s_dmaRx);
     s_rxRead = 0;
     dma_channel_set_write_addr(s_dmaRx, s_rxRing, false);
     dma_channel_set_trans_count(s_dmaRx, 0x0FFFFFFFu, true);
 }
 
-static void armTx() {
+static void __not_in_flash_func(armTx)() {
     dma_channel_abort(s_dmaTx);
     dma_channel_set_read_addr(s_dmaTx, s_statusBuf, false);
     dma_channel_set_trans_count(s_dmaTx, kFrameBytes, true);
 }
 
-static inline uint32_t rxWriteOff() {
+static inline uint32_t __not_in_flash_func(rxWriteOff)() {
     return (uint32_t)dma_channel_hw_addr(s_dmaRx)->write_addr
          - (uint32_t)s_rxRing;
 }
 
 // Frame pump -- called ONLY from csRiseIsr (single consumer of s_rxRead).
-static void pumpSpiFrames() {
+static void __not_in_flash_func(pumpSpiFrames)() {
     uint32_t avail = (rxWriteOff() - s_rxRead) & 255u;
     if (avail % kFrameBytes != 0) {
         // CS delimits exchanges, so anything that is not whole frames is
@@ -594,12 +628,20 @@ static void pumpSpiFrames() {
     armTx();
 }
 
+// EVERY function on the frame path and the tick path lives in RAM
+// (__not_in_flash_func). Measured on the scope 2026-09-13: with core 1 running
+// Ruckig, a flash-resident pump armed the reply 237-241 us after CS rose, and
+// the S3's second frame of a 225 us pair clocked 12-16 zero bytes before the
+// status began. The XIP cache is shared; core 1's flash traffic during a
+// commit starves core 0's instruction fetches.
 // CS rising = frame end. The pump runs here, BELOW the tick's priority, so
 // the reply is armed microseconds after every frame (the master's 200 us
 // inter-frame floor is the budget) and the tick still preempts it. The last
 // byte reaches the ring by DMA a hair after CS rises: wait for it, bounded,
 // or a whole frame reads as torn.
-static void csRiseIsr() {
+static void __not_in_flash_func(csRiseIsr)() {
+    // Exclusive IO_IRQ_BANK0 handler in RAM: the SDK's gpio dispatcher is
+    // flash-resident (same XIP starvation as the tick, see tickBegin).
     if (!(gpio_get_irq_event_mask(PIN_SPI_CS) & GPIO_IRQ_EDGE_RISE)) return;
     gpio_acknowledge_irq(PIN_SPI_CS, GPIO_IRQ_EDGE_RISE);
     const uint32_t t0 = time_us_32();
@@ -638,9 +680,9 @@ static void spiSlaveBegin() {
     preloadStatus();
     armRx();
     armTx();
-    gpio_add_raw_irq_handler(PIN_SPI_CS, csRiseIsr);
+    irq_set_exclusive_handler(IO_IRQ_BANK0, csRiseIsr);
     gpio_set_irq_enabled(PIN_SPI_CS, GPIO_IRQ_EDGE_RISE, true);
-    irq_set_priority(IO_IRQ_BANK0, 0xC0);   // below the tick's 0x80
+    irq_set_priority(IO_IRQ_BANK0, 0xC0);   // below the tick's 0x40
     irq_set_enabled(IO_IRQ_BANK0, true);
 }
 
@@ -852,12 +894,7 @@ void setup() {
     spiSlaveBegin();
 
     core1::s_armed = true;   // the engine may run now: the plan exists
-    add_repeating_timer_us(-int32_t(kTickUs), stepperTick, nullptr, &s_tick);
-    // The tick outranks everything else on core 0: the frame ISR (0xC0) and
-    // USB (default 0x80) both yield to it, so a frame in flight costs the
-    // renderer nothing.
-    for (uint32_t irq = TIMER0_IRQ_0; irq <= TIMER0_IRQ_3; irq++) irq_set_priority(irq, 0x40);
-    for (uint32_t irq = TIMER1_IRQ_0; irq <= TIMER1_IRQ_3; irq++) irq_set_priority(irq, 0x40);
+    tickBegin();
     // Hardware watchdog, fed from loop() only while BOTH the tick and core 1
     // advance. A frozen core 1 would leave the tick rendering a stale plan
     // forever, which looks alive and is not. Every legitimate stall sits far
@@ -914,12 +951,13 @@ void loop() {
     if (millis() - lastPrint >= 1000) {
         lastPrint = millis();
         Serial.printf("[mlink] lastSeq=%u badCrc=%lu torn=%lu qdrops=%lu "
-                      "frames=%lu pos=%.1f cfgfp=0x%04x core1HW=%lu/%luB "
-                      "engine=%luB cs=%d\n",
+                      "frames=%lu pos=%ld ticks=%lu rearm=%lu cfgfp=0x%04x "
+                      "core1HW=%lu/%luB engine=%luB cs=%d\n",
                       unsigned(s_core.lastSeq()),
                       (unsigned long)s_badCrcTotal, (unsigned long)s_tornTotal,
                       (unsigned long)s_qdrops, (unsigned long)s_frames,
-                      (double)s_pos, unsigned(s_core.configFingerprint()),
+                      (long)s_pos, (unsigned long)s_tickCount,
+                      (unsigned long)s_tickRearmed, unsigned(s_core.configFingerprint()),
                       (unsigned long)core1::s_highWater,
                       (unsigned long)core1::kStackBytes,
                       (unsigned long)rpmotion::Core::engineBytes(),

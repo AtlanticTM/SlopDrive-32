@@ -409,6 +409,13 @@ static void motorTask(void* /*param*/) {
             }
         } else {
             homing_started = false;
+            // The driver drops homed on its own (an RP restart re-zeroes the
+            // count); the system flag follows it, or policy keeps a window in
+            // a frame that no longer exists.
+            if (g_state.homed && !motor.isHomed()) {
+                g_state.homed = false;
+                SLOGW("sys", "homed dropped by the motion processor -- re-home");
+            }
             if (!g_state.homed) {
                 if (motor.checkPushToHome()) {
                     g_state.homed = true;

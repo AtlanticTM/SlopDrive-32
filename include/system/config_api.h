@@ -57,7 +57,7 @@
 // Bumped by hand on each firmware change so an OTA can be verified as landed
 // (surfaced via /api/capabilities â†’ "fw_version" and the boot log). This is
 // the single source of truth for "which build is actually running."
-#define FIRMWARE_VERSION        "2.5.13"
+#define FIRMWARE_VERSION        "2.5.14"
 
 // ---- WiFi Configuration (values come from secrets.h) ------------------------
 #define WIFI_SSID      SECRET_WIFI_SSID
@@ -316,7 +316,7 @@ float    aimStepsPerMm();
 
 // ---- Status LEDs ------------------------------------------------------------
 // Discrete LEDs, not a NeoPixel. ACTIVE-LOW: drive the pin LOW to light it.
-// GPIO48 is NOT an LED here. It is S3_DISP_SCK, owned by the RP2350 SPI clock
+// GPIO48 is NOT an LED here. It is the RP2350 link CS (MlinkServoDriver.cpp kCs)
 // (sd-dxy); the module's own D13 LED on that pin now reads as bus activity.
 #define PIN_LED_R               46
 #define PIN_LED_G               0    // strapping pin â€” init after boot

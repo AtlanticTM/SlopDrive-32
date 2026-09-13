@@ -30,6 +30,14 @@
 #include "MotionLinkProtocol.h"
 #include "slopmotion/slopmotion.hpp"
 
+// IRQ-path and tick-path methods are placed in RAM on the RP2350 (the pico
+// linker script collects .time_critical.*); a no-op on the host build.
+#if defined(PICO_RP2350) || defined(PICO_RP2040) || defined(ARDUINO_ARCH_RP2040)
+#define RPMOTION_RAM __attribute__((section(".time_critical.rpmotion")))
+#else
+#define RPMOTION_RAM
+#endif
+
 namespace rpmotion {
 
 using motionlink::ConfigField;
@@ -114,7 +122,7 @@ class Core {
     // Decode one CRC-checked frame. Returns true when this core owns the op;
     // false leaves it to the caller (the flash family, the emitter cap, ping).
     // NEVER calls the engine: commit() is milliseconds and belongs to core 1.
-    bool ingestFrame(std::span<const uint8_t, motionlink::kFrameBytes> f,
+    RPMOTION_RAM bool ingestFrame(std::span<const uint8_t, motionlink::kFrameBytes> f,
                      uint32_t now_us) {
         // Every frame is a clock probe (MotionLinkProtocol.h, "Time"): stamp
         // the receipt instant against the seq the master will pair it with.
@@ -175,7 +183,7 @@ class Core {
     // E-stop acts in the IRQ that carried it: the tick reads `estopped()` and
     // stops rendering this tick, and the queued item re-seeds the engine at the
     // held position whenever core 1 gets there.
-    void estop(uint32_t now_us) {
+    RPMOTION_RAM void estop(uint32_t now_us) {
         _estop.store(true, std::memory_order_release);
         QueueItem it;
         it.op = motionlink::kOpEstop;
@@ -236,7 +244,7 @@ class Core {
     // ---- 20 kHz tick, core 0 -----------------------------------------------
     // Evaluate the published table and convert to counts. Never blocks, never
     // touches the engine.
-    void sampleCounts(uint32_t now_us, float& pos, float& vel) {
+    RPMOTION_RAM void sampleCounts(uint32_t now_us, float& pos, float& vel) {
         float p = _last_norm;
         float v = 0.0f;
         if (_pinned.load(std::memory_order_acquire)) {
@@ -299,7 +307,7 @@ class Core {
     // Fills what this core owns. The emitter's own census (residue, qdrops,
     // emit_overrun, late_ticks, link_errs, vel_clamped) belongs to the glue and
     // is filled there; those counters are per-interval and reset on preload.
-    void fillStatus(StatusV2& s) const {
+    RPMOTION_RAM void fillStatus(StatusV2& s) const {
         s.state = state();
         s.flags = _flags.load(std::memory_order_relaxed);
         s.seq_echo = _last_seq.load(std::memory_order_relaxed);
@@ -315,7 +323,7 @@ class Core {
     // Pop through everything the master has acknowledged, then preload the next
     // record. `remaining` counts what still sits behind it, which is how the
     // master knows to pull again without waiting for another status.
-    bool nextEvent(uint8_t ack_seq, EventRecord& out) {
+    RPMOTION_RAM bool nextEvent(uint8_t ack_seq, EventRecord& out) {
         while (_ev_read != _ev_write) {
             const Event& head = _ev[_ev_read % kEventDepth];
             if (ack_seq == 0 || int8_t(uint8_t(head.seq - ack_seq)) > 0) break;
@@ -406,7 +414,7 @@ class Core {
     }
 
     // ---- Command queue (SPSC: SPI IRQ produces, core 1 consumes) -----------
-    void push(const QueueItem& it) {
+    RPMOTION_RAM void push(const QueueItem& it) {
         const uint8_t head = _q_head.load(std::memory_order_relaxed);
         if (uint8_t(head - _q_tail.load(std::memory_order_acquire)) >=
             kQueueDepth) {

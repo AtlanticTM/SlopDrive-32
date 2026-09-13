@@ -123,27 +123,24 @@ void MotionArbiter::processDeferred() {
 
 void MotionArbiter::_pushPolicy() {
     Window win = _mapper.effectiveWindow();
-    if (!_state.homed) {
-        // Before zeroing, the persisted window is a number in a frame that
-        // does not exist yet, and the engine clamps every target to it: a
-        // homing sweep stops at its edge and the rear wall is unreachable
-        // (first live homing on the port, 2026-09-03). Unhomed, the window is
-        // the whole rail both ways around wherever the carriage booted; the
-        // real one ships on the tick after `homed` rises.
-        // Centered on where the carriage IS when the link first answers, not
-        // on the processor's count zero: after a failed ritual the counter can
-        // sit hundreds of mm from the rail, and an S3 reboot does not reset
-        // it. Latched per boot so the window never moves under a sweep.
-        static bool  s_centered = false;
-        static float s_center_mm = 0.0f;
-        if (!s_centered && _motor.isLinkUp()) {
-            s_centered = true;
-            s_center_mm = _motor.getPosition();
-        }
+    // Before zeroing, the persisted window is a number in a frame that does
+    // not exist yet, and the engine clamps every target to it: a homing sweep
+    // stops at its edge (first live homing on the port, 2026-09-03; again on
+    // 2026-09-13 when the driver dropped homed on an RP restart while the
+    // system flag stayed up). The driver's own flags decide, not the system
+    // mirror. Unhomed or homing, the window is the whole rail both ways
+    // around where the carriage sits, re-centered at every ritual start and
+    // every homed drop, and never moved under a running sweep.
+    const bool free = !_motor.isHomed() || _motor.isHoming();
+    static bool  s_free_last = false;
+    static float s_center_mm = 0.0f;
+    if (free) {
+        if (!s_free_last && _motor.isLinkUp()) s_center_mm = _motor.getPosition();
         const float r = _mapper.getMaxRailMm();
-        win.min_mm = s_center_mm - 1.5f * r;
-        win.max_mm = s_center_mm + 1.5f * r;
+        win.min_mm = s_center_mm - 2.0f * r;
+        win.max_mm = s_center_mm + 2.0f * r;
     }
+    s_free_last = free;
     const float span_mm = win.max_mm - win.min_mm;
 
     slopdrive::EngineTuning tune;

@@ -370,6 +370,17 @@ bool ServoModbus::readRegisterBlocking(uint16_t reg, uint16_t& out, uint32_t tim
 
 void ServoModbus::update() {
     uint32_t now = millis();
+    // Drive health once a second under its own tag (/api/diag/drive): the
+    // instrument the 2026-09-13 stall had none of. T27-safe at 1 Hz.
+    if (_ready) {
+        const ServoTelemetry t = getTelemetry();
+        if (t.valid)
+            SLOGI_EVERY_MS(1000, "drive",
+                           "I=%.2fA speed=%.0frpm temp=%.0fC V=%.1f alarm=0x%04X en=%d out=%d",
+                           (double)t.current_a, (double)t.speed_rpm, (double)t.temp_c,
+                           (double)t.voltage_v, unsigned(t.alarm), int(t.enabled),
+                           int(t.output_on));
+    }
 
     // ---- Not ready? Keep knocking. ------------------------------------------
     // The boot probe can fail for boring reasons (36V rail off at flash time,

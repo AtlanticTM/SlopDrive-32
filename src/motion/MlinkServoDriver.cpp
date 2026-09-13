@@ -613,6 +613,10 @@ bool MlinkServoDriver::sweepToStall(float dir, float speed_mm_s, float bound_mm,
     // tripped it. No wall found means brake where we are.
     pos_out = _status.pos;
     _rt_target = wall ? pos_out - dir * kHomeReprobeBackMm * scale : pos_out;
+    // The back-off is a positioning move, not a probe: it runs at the fast
+    // speed whatever the sweep ran at (a 12 mm/s slow probe backing off 30 mm
+    // at 12 mm/s cost 2.5 s per wall, operator 2026-09-13).
+    _rt_v = kHomeFastMmS * scale;
     _rt_a = 40.0f * _rt_v;
     _rt_dirty = true;
     if (wall)
@@ -722,10 +726,11 @@ bool MlinkServoDriver::home(int32_t) {
         return homingAbort("kOpSetPos never confirmed");
     setMeasuredStrokeMm(usable);
 
-    // Home is one margin away. The refresh dies with the ritual: the slave
-    // holds position on its own, and a homing retarget outliving homing
-    // would fight the first real command.
-    glideTo(0.0f, kHomeSlowMmS, 3000u);
+    // Home is a back-off plus a margin away, a positioning move at the fast
+    // speed. The refresh dies with the ritual: the slave holds position on its
+    // own, and a homing retarget outliving homing would fight the first real
+    // command.
+    glideTo(0.0f, kHomeFastMmS, 3000u);
     _rt_valid = false;
     _rt_dirty = false;
     _homing = false;

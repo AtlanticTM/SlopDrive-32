@@ -34,6 +34,7 @@
 
 class MlinkServoDriver final : public MotorDriver {
 public:
+    void setActualSource(const IActualPosition* src) { _actual = src; }
     // THE ONE BUS. Every frame on the link, motion or flash, goes through
     // busXfer: one SPIClass, one lock, one 200 us gap. The flash path may call
     // it only while the owner task stands off (standoff(true) posted by the
@@ -165,10 +166,18 @@ private:
     uint32_t _status_ms = 0;   // millis() at the last CRC-valid v2 status
     bool     _status_fresh = false;
     uint32_t _reply_crc_bad = 0;
+    // Stall guard (sd-4k1.29): sustained bus current with no commanded motion
+    // is the drive pushing into something. Encoder-fed when available.
+    const IActualPosition* _actual = nullptr;
+    uint32_t _stall_since_ms = 0;
+    bool     _stall_tripped = false;
+    uint8_t  _guard_div = 0;
+    void stallGuard(uint32_t now);
     // kOpFlashVersion was sent; the NEXT reply carries the RP fw string over
     // the status tail (kFlashStatusOffVersion). The C-8 instrument for the
     // coprocessor, logged under mlink so the deploy script can read it.
     bool     _ver_pending = false;
+    uint8_t  _ver_tries = 0;
     char     _rp_fw[motionlink::kFlashVersionBytes + 1] = {};
     uint8_t  _state = 0;
     uint8_t  _slave_flags = 0;
@@ -235,6 +244,11 @@ private:
     bool  _rt_dirty = false;
     uint8_t _rt_seq = 0;
     bool    _rt_unacked = false;
+    // stop()/hardStop() land ONE retarget: refreshed until acked, then dropped.
+    // A standing refresh outlives the frame it was aimed in: an RP restart
+    // zeroes the count and the refresh becomes a real move (2026-09-13
+    // incident, sd-4k1.28).
+    bool     _rt_oneshot = false;
 
     // Posted from any task, shipped by the owner (see the header note).
     std::atomic<bool> _estop_pending{false};

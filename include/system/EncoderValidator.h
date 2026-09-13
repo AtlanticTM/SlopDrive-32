@@ -40,6 +40,9 @@
 #if defined(SD32_MODBUS_TOOLS) && defined(DRIVER_AIM_SERVO)
 
 #include <Arduino.h>
+#include <atomic>
+
+#include "motion/MotorDriver.h"
 
 class ServoModbus;
 class MotorDriver;
@@ -58,8 +61,18 @@ struct EncoderValidation {
     bool     have_dev       = false;  // dev_mm/dev_steady_mm carry real data
 };
 
-class EncoderValidator {
+class EncoderValidator final : public IActualPosition {
 public:
+    // Where the drive says the shaft is, mm in the machine frame, while
+    // tracking (state 2) and the sample is fresh. False otherwise. Read from
+    // motorTask by the stall guard; written on httpTask in update().
+    bool actualMm(float& mm) const override {
+        const uint32_t stamp = _act_stamp.load(std::memory_order_acquire);
+        if (stamp == 0 || millis() - stamp > 1500u) return false;
+        mm = _act_mm.load(std::memory_order_relaxed);
+        return true;
+    }
+
     EncoderValidator(ServoModbus& bus, MotorDriver& motor);
 
     // ---- Lifecycle ----------------------------------------------------------
@@ -77,6 +90,8 @@ private:
     MotorDriver& _motor;
 
     EncoderValidation _v;
+    std::atomic<float>    _act_mm{0.0f};
+    std::atomic<uint32_t> _act_stamp{0};
 
     // Reference pair latched at the first post-home standstill (never the
     // homed edge itself — see the file header)

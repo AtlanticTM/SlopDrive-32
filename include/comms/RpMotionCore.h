@@ -355,6 +355,9 @@ class Core {
 
     // ---- Observers the glue needs ------------------------------------------
     bool estopped() const { return _estop.load(std::memory_order_acquire); }
+    bool pinned() const { return _pinned.load(std::memory_order_acquire); }
+    float windowLo() const { return _win_lo.load(std::memory_order_relaxed); }
+    float windowSpan() const { return _span.load(std::memory_order_relaxed); }
     uint8_t lastSeq() const { return _last_seq.load(std::memory_order_relaxed); }
     // The look-at-me line: an event the master has not pulled yet. There is no
     // runway to be low on any more, so this is what the IRQ pin carries.
@@ -604,9 +607,18 @@ class Core {
     void adoptWindow(float lo, float hi) {
         const float counts = _pos_counts;
         const float span = (hi - lo) != 0.0f ? (hi - lo) : 1.0f;
+        // PIN THROUGH THE SWITCH. The tick renders base + p * span; a new base
+        // and span with the OLD table's p is a position a window's width
+        // away, and the emitter chases it at the cap until the new table
+        // lands (measured 2026-09-13: 0 -> 208607 counts the tick the window
+        // tags arrived, sd-4k1.28). Pinned, the tick renders `counts`
+        // unchanged until the frame and the table agree.
+        _pin_counts = counts;
+        _pinned.store(true, std::memory_order_release);
         _win_lo.store(lo, std::memory_order_relaxed);
         _span.store(span, std::memory_order_relaxed);
         seedAt((counts - lo) / span);
+        _pinned.store(false, std::memory_order_release);
     }
 
     void seedAt(float norm) {

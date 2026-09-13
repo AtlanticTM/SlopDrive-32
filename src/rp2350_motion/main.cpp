@@ -95,6 +95,14 @@ static uint32_t s_emitOverrun = 0;
 // Trajectory ticks that arrived late. Plan time is read from the clock, so a
 // late tick is a sample that never happened rather than a stretched timeline.
 static uint32_t s_lateTicks = 0;
+// Reference jump guard state (stepperTick). 2000 counts = 9.6 mm per tick,
+// 200x any legal plan and 1/100 of the 2026-09-13 incident's jump.
+static constexpr float kMaxRefJumpCounts = 2000.0f;
+static float    s_refPrev = 0.0f;
+static bool     s_refValid = false;
+static uint32_t s_refJumps = 0;
+static float    s_jumpFrom = 0.0f, s_jumpTo = 0.0f;   // forensics for the serial line
+static uint32_t s_jumpTickUs = 0;
 // Renderer speed ceiling in counts per TICK, 0 = unlimited (pre-handshake).
 // Pushed as counts/s via kOpSetLimits; consumed ONLY by the emitter as a slew
 // cap, never by the reference. A rate limit on the RENDERED position is not a
@@ -207,6 +215,27 @@ static void __not_in_flash_func(stepperTick)() {
     if (s_core.estopped()) return;   // hold: the reference stops advancing
 
     s_core.sampleCounts(tnow, s_pos, s_vel);
+    // REFERENCE JUMP GUARD (sd-4k1.28). No legal plan moves the reference
+    // more than a few counts per tick (1000 mm/s is 10 counts); a jump of a
+    // window's width is a frame change the emitter must never chase into a
+    // wall. Pin where the reference WAS, re-seed there, and hold in e-stop
+    // until the master clears it: the S3 sees kStateEstop and logs it. A
+    // declared position (kOpSetPos, the pin) is a relabel, never a jump.
+    if (s_core.pinned()) {
+        s_refValid = false;
+    } else if (s_refValid && fabsf(s_pos - s_refPrev) > kMaxRefJumpCounts) {
+        ++s_refJumps;
+        s_jumpFrom = s_refPrev;
+        s_jumpTo = s_pos;
+        s_jumpTickUs = tnow;
+        s_core.setPositionCounts(s_refPrev, 0, tnow);
+        s_core.sampleCounts(tnow, s_pos, s_vel);   // the pinned value
+        s_core.estop(tnow);
+        return;
+    } else {
+        s_refPrev = s_pos;
+        s_refValid = true;
+    }
     // ONE emit call site, on purpose. Every other exit used to abandon whatever
     // (s_pos - s_emitted) the emitter still owed: unflagged, uncounted step
     // loss, once per stroke (sd-dxy.1.2).
@@ -232,7 +261,7 @@ static void __not_in_flash_func(stepperTick)() {
 // The RP image version. This constant is its ONE home (C-1); the S3 reads it
 // with kOpFlashVersion, which is what makes C-8 verification possible without
 // a bench trip. Bump it with every image that goes out over the link.
-static constexpr char kRpFwVersion[] = "0.2.7-rp";
+static constexpr char kRpFwVersion[] = "0.2.13-rp";
 static constexpr uint32_t kWatchdogMs = 8000;   // hardware max is 8388
 static_assert(sizeof(kRpFwVersion) <= kFlashVersionBytes,
               "version string does not fit the status tail");
@@ -773,6 +802,11 @@ extern "C" void __wrap_multicore_launch_core1_with_stack(void (*entry)(void),
 // is the LINK -- one CRC-valid frame from the S3 means this image can be
 // commanded. An image that cannot be commanded must not be able to keep
 // itself, and that is the whole of the rollback.
+// How the bootrom launched this image: boot type (4 = flash update, the TBYB
+// run), partition, and the TBYB/update flags. The C-8 tell for a link update,
+// on the serial line once a second.
+static boot_info_t s_bootInfo{};
+
 static void flashBuyIfProven() {
     static bool s_bought = false;
     if (s_bought || s_frames == 0) return;
@@ -884,6 +918,7 @@ void setup() {
     quadPioInit();   // owns PIN_STEP/PIN_DIR from here on (A/B via PIO)
 
     s_core.reset(time_us_32());
+    if (rom_get_boot_info(&s_bootInfo) == 0) s_bootInfo.partition = -1;
 
     s_px.begin();
     // Engine brightness stays 255; the adapter dims post-gamma in duty space.
@@ -952,7 +987,7 @@ void loop() {
         lastPrint = millis();
         Serial.printf("[mlink] lastSeq=%u badCrc=%lu torn=%lu qdrops=%lu "
                       "frames=%lu pos=%ld ticks=%lu rearm=%lu cfgfp=0x%04x "
-                      "core1HW=%lu/%luB engine=%luB cs=%d\n",
+                      "core1HW=%lu/%luB engine=%luB cs=%d boot=%d/p%d tbyb=0x%02x fw=%s refjumps=%lu\n",
                       unsigned(s_core.lastSeq()),
                       (unsigned long)s_badCrcTotal, (unsigned long)s_tornTotal,
                       (unsigned long)s_qdrops, (unsigned long)s_frames,
@@ -961,7 +996,15 @@ void loop() {
                       (unsigned long)core1::s_highWater,
                       (unsigned long)core1::kStackBytes,
                       (unsigned long)rpmotion::Core::engineBytes(),
-                      int(gpio_get(PIN_SPI_CS)));
+                      int(gpio_get(PIN_SPI_CS)),
+                      int(s_bootInfo.boot_type), int(s_bootInfo.partition),
+                      unsigned(s_bootInfo.tbyb_and_update_info), kRpFwVersion,
+                      (unsigned long)s_refJumps);
+        if (s_refJumps != 0)
+            Serial.printf("[guard] ref jump %ld -> %ld counts at t=%lu us; win_lo=%ld span=%ld cfgfp=0x%04x\n",
+                          (long)s_jumpFrom, (long)s_jumpTo, (unsigned long)s_jumpTickUs,
+                          (long)s_core.windowLo(), (long)s_core.windowSpan(),
+                          unsigned(s_core.configFingerprint()));
     }
     s_glowHb->pulse();
     s_glow.update(millis());

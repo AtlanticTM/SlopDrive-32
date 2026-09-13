@@ -780,6 +780,9 @@ void setup() {
     ConfigStore::load(g_state, mapper, motor);
 
     motor.init();
+#if defined(SD32_MODBUS_TOOLS) && defined(DRIVER_AIM_SERVO)
+    motor.setActualSource(&encoderValidator);   // the stall guard's honest position
+#endif
     motor.applyDriverConfig(g_state.driver);
     bootheap::mark("config+motor");
 

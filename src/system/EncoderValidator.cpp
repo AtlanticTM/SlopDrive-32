@@ -125,6 +125,8 @@ void EncoderValidator::update() {
     float dev    = enc_mm - (fas_mm - _fas0);
     _v.dev_mm   = dev;
     _v.have_dev = true;
+    _act_mm.store(_fas0 + enc_mm, std::memory_order_relaxed);
+    _act_stamp.store(t.enc_stamp_ms ? t.enc_stamp_ms : 1u, std::memory_order_release);
 
     // Bench-observable delta heartbeat (dev_mm is timing-skewed while moving;
     // dev_steady is the trustworthy number). Readable via /api/diag/enc.

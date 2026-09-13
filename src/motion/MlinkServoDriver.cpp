@@ -242,12 +242,20 @@ void MlinkServoDriver::consumeReply(std::span<const uint8_t, kFrameBytes> reply)
         // The version overlays the status tail and its last byte may cover the
         // variant slot, so this reply is a version reply, never a status.
         _ver_pending = false;
-        if (crcOk(reply)) {
-            memcpy(_rp_fw, &reply[kFlashStatusOffVersion], kFlashVersionBytes);
-            _rp_fw[kFlashVersionBytes] = ' ';
+        char v[kFlashVersionBytes + 1] = {};
+        bool printable = crcOk(reply);
+        if (printable) {
+            memcpy(v, &reply[kFlashStatusOffVersion], kFlashVersionBytes);
+            for (char c : v) if (c != '\0' && (c < 0x20 || c > 0x7e)) printable = false;
+        }
+        // A reply that is not the version (the slave was mid-resync) reads as
+        // binary; leave the string empty so the tick asks again, a few times.
+        if (printable && v[0] != '\0') {
+            memcpy(_rp_fw, v, sizeof(v));
             SLOGI("mlink", "RP fw '%s'", _rp_fw);
-        } else {
-            SLOGW("mlink", "RP fw version reply failed CRC");
+        } else if (++_ver_tries >= 5) {
+            SLOGW("mlink", "RP fw version unreadable after %u tries", unsigned(_ver_tries));
+            memcpy(_rp_fw, "?", 2);   // stop asking
         }
         return;
     }
@@ -354,6 +362,11 @@ void MlinkServoDriver::applyEvent(const EventRecord& e) {
     } else if (e.kind == kEvtClockStep) {
         _clock.reset();
         for (auto& st : _stamp) st.ok = false;
+        // A restarted slave counts from zero: any retarget aimed in the old
+        // frame is a move in the new one. Drop it, never refresh it.
+        _rt_valid = false;
+        _rt_dirty = false;
+        _rt_oneshot = false;
         // A restarted slave counts from zero: its position is no longer the
         // machine's, so homed is a lie until the ritual runs again.
         if (_homed) SLOGW("mlink", "RP time base restarted -- clock filter reset, HOMED DROPPED");
@@ -441,7 +454,7 @@ void MlinkServoDriver::update() {
 
     const float req = _ceiling_req.exchange(0.0f, std::memory_order_acquire);
     if (req > 0.0f) pushCeiling(req);
-    if (_status_fresh && _rp_fw[0] == ' ' && !_ver_pending) requestVersion();
+    if (_status_fresh && _rp_fw[0] == '\0' && !_ver_pending) requestVersion();
 
     if (_status_fresh) {
         // The IRQ pull above already covers the common case; this is the
@@ -463,7 +476,11 @@ void MlinkServoDriver::update() {
                           "re-pushing ceiling %.0f mm/s%s", (double)_ceiling_mm_s,
                           _homed ? " -- HOMED DROPPED" : "");
                     _homed = false;
-                    requestVersion();
+                    _rt_valid = false;
+                    _rt_dirty = false;
+                    _rt_oneshot = false;
+                    _rp_fw[0] = ' ';   // a restarted slave may run another image
+                    _ver_tries = 0;
                     pushCeiling(_ceiling_mm_s);
                     _resync_at = 0;
                 }
@@ -504,8 +521,14 @@ void MlinkServoDriver::update() {
         if (_rt_unacked && _status_fresh &&
             int8_t(uint8_t(_status.seq_echo - _rt_seq)) >= 0)
             _rt_unacked = false;
-        if (_rt_dirty || now - _last_cmd_ms >= kRefreshMs) sendRetarget();
+        if (!_rt_unacked && !_rt_dirty && _rt_oneshot) {
+            _rt_valid = false;
+            _rt_oneshot = false;
+        } else if (_rt_dirty || now - _last_cmd_ms >= kRefreshMs) {
+            sendRetarget();
+        }
     }
+    if (tick) stallGuard(now);
 }
 
 void MlinkServoDriver::emergencyStop() {
@@ -770,6 +793,71 @@ bool MlinkServoDriver::home(int32_t) {
     return true;
 }
 
+// ---- stall guard (sd-4k1.29) ------------------------------------------------
+// The drive follows quadrature into anything, at full current, forever. On
+// 2026-09-13 a demand 1000 mm past a wall did exactly that for minutes and
+// melted a print; nothing outside the homing ritual read the INA228. This
+// does, at 10 Hz: bus current above kStallA for kStallMs with the RP reporting
+// no motion is a standing push. The relief is to make the demand EQUAL the
+// actual (kOpSetPos at the encoder's position, the drive then rests), then
+// back off a little the way the push came from, and drop homed. Without an
+// encoder reading there is no honest position: e-stop and drop homed.
+namespace {
+constexpr float    kStallA         = 2.5f;    // free run 0.05-0.10 A, a wall 3-8 A
+constexpr uint32_t kStallMs        = 1500;
+constexpr float    kStallStillCps  = 200.0f;  // ~1 mm/s: "the demand is not moving"
+constexpr float    kStallBackoffMm = 10.0f;
+}  // namespace
+
+void MlinkServoDriver::stallGuard(uint32_t now) {
+    if (++_guard_div < 10) return;   // 10 Hz on the 10 ms tick
+    _guard_div = 0;
+    if (_homing || !_status_fresh || _state == kStateEstop) { _stall_since_ms = 0; return; }
+    if (!_current.isReady()) _current.init();
+    if (!_current.isReady()) return;
+    const float amps = fabsf(_current.readCurrentA());
+    if (_stall_tripped) {
+        if (amps < kStallA * 0.5f) _stall_tripped = false;   // re-arm once it rests
+        return;
+    }
+    const bool still = fabsf(_status.vel) < kStallStillCps;
+    if (!(amps > kStallA && still)) { _stall_since_ms = 0; return; }
+    if (_stall_since_ms == 0) { _stall_since_ms = now; return; }
+    if (now - _stall_since_ms < kStallMs) return;
+
+    _stall_tripped = true;
+    _stall_since_ms = 0;
+    float actual_mm = 0.0f;
+    const bool have_actual = _actual != nullptr && _actual->actualMm(actual_mm);
+    SLOGE("mlink", "STALL: %.2f A for %u ms with the demand still (pos=%.0f) -- "
+          "the drive is pushing into something; %s", (double)amps, unsigned(kStallMs),
+          (double)_status.pos,
+          have_actual ? "re-seeding to the encoder and backing off" : "no encoder reading, e-stop");
+    _homed = false;
+    if (!have_actual) {
+        emergencyStop();
+        return;
+    }
+    const float scale = AIM_STEPS_PER_MM;
+    const float counts_act = -actual_mm * scale;   // the mm frame is the negated native
+    const float push_dir = (_status.pos - counts_act) >= 0.0f ? 1.0f : -1.0f;
+    _rt_valid = false;
+    _rt_dirty = false;
+    if (!sendSetPos(counts_act)) {
+        SLOGE("mlink", "STALL: kOpSetPos to the encoder position never confirmed; e-stop");
+        emergencyStop();
+        return;
+    }
+    _rt_target = counts_act - push_dir * kStallBackoffMm * scale;
+    _rt_v = kHomeFastMmS * scale;
+    _rt_a = 40.0f * _rt_v;
+    _rt_valid = true;
+    _rt_dirty = true;
+    _rt_oneshot = true;
+    SLOGW("mlink", "STALL relief: demand re-seeded at %.1f mm (was %.1f mm past it), backing off %.0f mm",
+          (double)actual_mm, (double)(fabsf(_status.pos - counts_act) / scale), (double)kStallBackoffMm);
+}
+
 // ---- stops ------------------------------------------------------------------
 // Both are reachable from httpTask (WebUI -> arbiter). Neither touches the
 // bus: they fill the homing retarget shadow and the owner ships it.
@@ -782,6 +870,7 @@ void MlinkServoDriver::stop() {
     if (_rt_a < 1.0f) _rt_a = 100000.0f;
     _rt_valid = true;
     _rt_dirty = true;
+    _rt_oneshot = true;
 }
 
 void MlinkServoDriver::hardStop() {
@@ -790,6 +879,7 @@ void MlinkServoDriver::hardStop() {
     if (_rt_a < 1.0f) _rt_a = 100000.0f;
     _rt_valid = true;
     _rt_dirty = true;
+    _rt_oneshot = true;
 }
 
 // ---- readouts ---------------------------------------------------------------

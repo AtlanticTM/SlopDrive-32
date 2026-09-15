@@ -803,20 +803,30 @@ bool MlinkServoDriver::home(int32_t) {
 // pulses shrink that. So the relief is the homing reversal: unwind against
 // the last motion direction until the current drops, then land. Needs the
 // INA228 only, never the Modbus bus, so it holds on a production build.
+// Operator rulings 2026-09-15: a body pressed against the toy for a moment is
+// use, not a fault, so the trip is seconds; the unwind walks slowly so nothing
+// is flung when the pressure comes off. Measured that day against a wall:
+// 9 A at impact, 4.1-4.5 A pinned (drive), 3.67 A at the INA228.
 namespace {
-constexpr float    kStallA         = 2.5f;    // free run 0.05-0.10 A, a wall 3-8 A
-constexpr uint32_t kStallMs        = 1500;
+constexpr float    kStallA         = 2.5f;    // free run 0.05-0.10 A, pinned 3.7-4.5 A
+constexpr uint32_t kStallMs        = 5000;
 constexpr float    kStallStillCps  = 200.0f;  // ~1 mm/s: "the demand is not moving"
+constexpr float    kStallUnwindMmS = 10.0f;
 }  // namespace
 
 void MlinkServoDriver::stallGuard(uint32_t now) {
     if (++_guard_div < 10) return;   // 10 Hz on the 10 ms tick
     _guard_div = 0;
-    if (_homing || !_status_fresh || _state == kStateEstop) {
+    if (_homing || _state == kStateEstop) {
         _stall_since_ms = 0;
-        _relieving = false;
+        if (_relieving) {   // the unwind retarget dies with the relief
+            _relieving = false;
+            _rt_valid = false;
+            _rt_dirty = false;
+        }
         return;
     }
+    if (!_status_fresh) return;   // one stale poll: judge on the next tick
     if (!_current.isReady()) _current.init();
     if (!_current.isReady()) return;
     const float amps  = fabsf(_current.readCurrentA());
@@ -826,7 +836,7 @@ void MlinkServoDriver::stallGuard(uint32_t now) {
 
     if (_relieving) {
         const float unwound_mm = fabsf(_status.pos - _relief_from) / scale;
-        const uint32_t relief_ms = uint32_t(getMaxRailMm() / kHomeFastMmS * 1000.0f) + 2000u;
+        const uint32_t relief_ms = uint32_t(getMaxRailMm() / kStallUnwindMmS * 1000.0f) + 10000u;
         if (amps < kStallA * 0.5f) {
             _relieving = false;
             stop();
@@ -865,8 +875,8 @@ void MlinkServoDriver::stallGuard(uint32_t now) {
     // Refreshed, not one-shot: the homed drop re-centers the window on the
     // arbiter's next tick and the refresh re-clamps the target into it.
     _rt_target  = _status.pos - _move_dir * getMaxRailMm() * scale;
-    _rt_v       = kHomeFastMmS * scale;
-    _rt_a       = 40.0f * _rt_v;
+    _rt_v       = kStallUnwindMmS * scale;
+    _rt_a       = 40.0f * kHomeFastMmS * scale;   // sharp stop when it lands
     _rt_valid   = true;
     _rt_dirty   = true;
     _rt_oneshot = false;

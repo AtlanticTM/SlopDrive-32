@@ -115,6 +115,11 @@ void MotionArbiter::processDeferred() {
     }
 }
 
+void MotionArbiter::armHoming(bool on) {
+    _home_arm = on;
+    if (on) _pushPolicy();
+}
+
 // ---- Policy push ------------------------------------------------------------
 // The slave holds BOTH ceiling sets, the window, the gate bits and the engine
 // tuning, because it must be self-sufficient for the maneuvers it starts on
@@ -131,7 +136,7 @@ void MotionArbiter::_pushPolicy() {
     // mirror. Unhomed or homing, the window is the whole rail both ways
     // around where the carriage sits, re-centered at every ritual start and
     // every homed drop, and never moved under a running sweep.
-    const bool free = !_motor.isHomed() || _motor.isHoming();
+    const bool free = _home_arm || !_motor.isHomed() || _motor.isHoming();
     static bool  s_free_last = false;
     static float s_center_mm = 0.0f;
     if (free) {

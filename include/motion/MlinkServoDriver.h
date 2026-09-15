@@ -34,7 +34,6 @@
 
 class MlinkServoDriver final : public MotorDriver {
 public:
-    void setActualSource(const IActualPosition* src) { _actual = src; }
     // THE ONE BUS. Every frame on the link, motion or flash, goes through
     // busXfer: one SPIClass, one lock, one 200 us gap. The flash path may call
     // it only while the owner task stands off (standoff(true) posted by the
@@ -167,10 +166,13 @@ private:
     bool     _status_fresh = false;
     uint32_t _reply_crc_bad = 0;
     // Stall guard (sd-4k1.29): sustained bus current with no commanded motion
-    // is the drive pushing into something. Encoder-fed when available.
-    const IActualPosition* _actual = nullptr;
+    // is the drive pushing into something. Relief is an unwind against the
+    // last motion direction until the current drops; no bus, no encoder.
     uint32_t _stall_since_ms = 0;
-    bool     _stall_tripped = false;
+    bool     _relieving = false;
+    uint32_t _relief_t0 = 0;
+    float    _relief_from = 0.0f;
+    float    _move_dir = 0.0f;   // sign of the last demand motion, 0 = none yet
     uint8_t  _guard_div = 0;
     void stallGuard(uint32_t now);
     // kOpFlashVersion was sent; the NEXT reply carries the RP fw string over

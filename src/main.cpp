@@ -386,7 +386,9 @@ static void motorTask(void* /*param*/) {
         // Homing
         else if (g_state.homing_in_progress) {
             if (!motor.isHoming() && !homing_started) {
+                arbiter.armHoming(true);   // free window on the wire first
                 motor.home();
+                arbiter.armHoming(false);
                 homing_started = true;
             }
             if (!motor.isHoming() && homing_started) {
@@ -780,9 +782,6 @@ void setup() {
     ConfigStore::load(g_state, mapper, motor);
 
     motor.init();
-#if defined(SD32_MODBUS_TOOLS) && defined(DRIVER_AIM_SERVO)
-    motor.setActualSource(&encoderValidator);   // the stall guard's honest position
-#endif
     motor.applyDriverConfig(g_state.driver);
     bootheap::mark("config+motor");
 

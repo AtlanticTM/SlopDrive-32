@@ -41,14 +41,6 @@ struct DriverConfig {
     int8_t   hend             = 1;
 };
 
-// Where the shaft PHYSICALLY is, from a backend that has feedback (the drive
-// encoder over Modbus). Read cross-task: implementations publish atomically.
-struct IActualPosition {
-    virtual bool actualMm(float& mm) const = 0;
-protected:
-    ~IActualPosition() = default;
-};
-
 class MotorDriver {
 public:
     virtual ~MotorDriver() = default;

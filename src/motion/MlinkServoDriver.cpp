@@ -798,64 +798,78 @@ bool MlinkServoDriver::home(int32_t) {
 // 2026-09-13 a demand 1000 mm past a wall did exactly that for minutes and
 // melted a print; nothing outside the homing ritual read the INA228. This
 // does, at 10 Hz: bus current above kStallA for kStallMs with the RP reporting
-// no motion is a standing push. The relief is to make the demand EQUAL the
-// actual (kOpSetPos at the encoder's position, the drive then rests), then
-// back off a little the way the push came from, and drop homed. Without an
-// encoder reading there is no honest position: e-stop and drop homed.
+// no motion is a standing push. A relabel (kOpSetPos) cannot relieve it: the
+// drive holds the pulses it was SENT minus where it IS, and only reverse
+// pulses shrink that. So the relief is the homing reversal: unwind against
+// the last motion direction until the current drops, then land. Needs the
+// INA228 only, never the Modbus bus, so it holds on a production build.
 namespace {
 constexpr float    kStallA         = 2.5f;    // free run 0.05-0.10 A, a wall 3-8 A
 constexpr uint32_t kStallMs        = 1500;
 constexpr float    kStallStillCps  = 200.0f;  // ~1 mm/s: "the demand is not moving"
-constexpr float    kStallBackoffMm = 10.0f;
 }  // namespace
 
 void MlinkServoDriver::stallGuard(uint32_t now) {
     if (++_guard_div < 10) return;   // 10 Hz on the 10 ms tick
     _guard_div = 0;
-    if (_homing || !_status_fresh || _state == kStateEstop) { _stall_since_ms = 0; return; }
-    if (!_current.isReady()) _current.init();
-    if (!_current.isReady()) return;
-    const float amps = fabsf(_current.readCurrentA());
-    if (_stall_tripped) {
-        if (amps < kStallA * 0.5f) _stall_tripped = false;   // re-arm once it rests
+    if (_homing || !_status_fresh || _state == kStateEstop) {
+        _stall_since_ms = 0;
+        _relieving = false;
         return;
     }
+    if (!_current.isReady()) _current.init();
+    if (!_current.isReady()) return;
+    const float amps  = fabsf(_current.readCurrentA());
+    const float scale = AIM_STEPS_PER_MM;
+    if (fabsf(_status.vel) >= kStallStillCps)
+        _move_dir = (_status.vel > 0.0f) ? 1.0f : -1.0f;
+
+    if (_relieving) {
+        const float unwound_mm = fabsf(_status.pos - _relief_from) / scale;
+        const uint32_t relief_ms = uint32_t(getMaxRailMm() / kHomeFastMmS * 1000.0f) + 2000u;
+        if (amps < kStallA * 0.5f) {
+            _relieving = false;
+            stop();
+            SLOGW("mlink", "STALL relieved: %.2f A after %.1f mm of unwind; homed dropped, re-home",
+                  (double)amps, (double)unwound_mm);
+        } else if ((now - _relief_t0 > 300u && _state != kStateRunning) ||
+                   now - _relief_t0 > relief_ms) {
+            _relieving = false;
+            SLOGE("mlink", "STALL not relieved: %.2f A after %.1f mm of unwind (%s); e-stop",
+                  (double)amps, (double)unwound_mm,
+                  _state != kStateRunning ? "renderer idle" : "timeout");
+            emergencyStop();
+        }
+        return;
+    }
+
     const bool still = fabsf(_status.vel) < kStallStillCps;
     if (!(amps > kStallA && still)) { _stall_since_ms = 0; return; }
     if (_stall_since_ms == 0) { _stall_since_ms = now; return; }
     if (now - _stall_since_ms < kStallMs) return;
 
-    _stall_tripped = true;
     _stall_since_ms = 0;
-    float actual_mm = 0.0f;
-    const bool have_actual = _actual != nullptr && _actual->actualMm(actual_mm);
-    SLOGE("mlink", "STALL: %.2f A for %u ms with the demand still (pos=%.0f) -- "
-          "the drive is pushing into something; %s", (double)amps, unsigned(kStallMs),
-          (double)_status.pos,
-          have_actual ? "re-seeding to the encoder and backing off" : "no encoder reading, e-stop");
-    _homed = false;
-    if (!have_actual) {
+    _homed = false;   // the arbiter refuses commands from here; re-home is the exit
+    if (_move_dir == 0.0f) {
+        SLOGE("mlink", "STALL: %.2f A for %u ms with the demand still at %.0f and no motion "
+              "on record to unwind; e-stop", (double)amps, unsigned(kStallMs), (double)_status.pos);
         emergencyStop();
         return;
     }
-    const float scale = AIM_STEPS_PER_MM;
-    const float counts_act = -actual_mm * scale;   // the mm frame is the negated native
-    const float push_dir = (_status.pos - counts_act) >= 0.0f ? 1.0f : -1.0f;
-    _rt_valid = false;
-    _rt_dirty = false;
-    if (!sendSetPos(counts_act)) {
-        SLOGE("mlink", "STALL: kOpSetPos to the encoder position never confirmed; e-stop");
-        emergencyStop();
-        return;
-    }
-    _rt_target = counts_act - push_dir * kStallBackoffMm * scale;
-    _rt_v = kHomeFastMmS * scale;
-    _rt_a = 40.0f * _rt_v;
-    _rt_valid = true;
-    _rt_dirty = true;
-    _rt_oneshot = true;
-    SLOGW("mlink", "STALL relief: demand re-seeded at %.1f mm (was %.1f mm past it), backing off %.0f mm",
-          (double)actual_mm, (double)(fabsf(_status.pos - counts_act) / scale), (double)kStallBackoffMm);
+    SLOGE("mlink", "STALL: %.2f A for %u ms with the demand still at %.0f -- unwinding %s "
+          "until the current drops", (double)amps, unsigned(kStallMs), (double)_status.pos,
+          _move_dir > 0.0f ? "-" : "+");
+    _relieving   = true;
+    _relief_t0   = now;
+    _relief_from = _status.pos;
+    // Refreshed, not one-shot: the homed drop re-centers the window on the
+    // arbiter's next tick and the refresh re-clamps the target into it.
+    _rt_target  = _status.pos - _move_dir * getMaxRailMm() * scale;
+    _rt_v       = kHomeFastMmS * scale;
+    _rt_a       = 40.0f * _rt_v;
+    _rt_valid   = true;
+    _rt_dirty   = true;
+    _rt_oneshot = false;
 }
 
 // ---- stops ------------------------------------------------------------------

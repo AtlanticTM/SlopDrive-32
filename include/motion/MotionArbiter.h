@@ -109,6 +109,11 @@ public:
     // one frame per actual change.
     void processDeferred();
 
+    // Homing runs ON the consumer task and blocks it, so the policy tick
+    // cannot push the free window once the ritual has started. The call site
+    // arms this around home(): on = push the free window now.
+    void armHoming(bool on);
+
     // ---- Emergency / gate helpers (either core) -----------------------------
     void emergencyStop();
     void stopMotion();     // cuts power, clears homed (MotorDriver::stop())
@@ -176,6 +181,7 @@ private:
     bool _dispatchCommand(motionlink::LinkCommand& cmd, MotionSource source);
 
     void _pushPolicy();
+    bool _home_arm = false;
 
     void _wakeConsumer();
 

@@ -170,9 +170,15 @@ private:
     // last motion direction until the current drops; no bus, no encoder.
     uint32_t _stall_since_ms = 0;
     bool     _relieving = false;
+    bool     _relief_flipped = false;
     uint32_t _relief_t0 = 0;
     float    _relief_from = 0.0f;
-    float    _move_dir = 0.0f;   // sign of the last demand motion, 0 = none yet
+    float    _relief_dir = 0.0f;
+    // Where the demand was when the current first crossed the trip level: the
+    // shaft is pinned somewhere along the demand's path since then, so the
+    // unwind goes back toward that point. Tracked through homing too.
+    bool     _press_on = false;
+    float    _press_from = 0.0f;
     uint8_t  _guard_div = 0;
     void stallGuard(uint32_t now);
     // kOpFlashVersion was sent; the NEXT reply carries the RP fw string over

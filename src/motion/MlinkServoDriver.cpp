@@ -574,8 +574,10 @@ bool MlinkServoDriver::sendSetPos(float counts) {
 }
 
 bool MlinkServoDriver::homingAbort(const char* what) {
-    _rt_valid = false;
-    _rt_dirty = false;
+    // Land the demand where it is: a sweep target left in the slave would keep
+    // pushing. Whatever following error the ritual built is the stall guard's
+    // from here (it tracks the press through homing).
+    stop();
     _homing = false;
     SLOGW("mlink", "homing FAILED: %s", what);
     return false;
@@ -624,8 +626,8 @@ bool MlinkServoDriver::sweepToStall(float dir, float speed_mm_s, float bound_mm,
         }
         if (!retry_once) {
             SLOGW("mlink", "sweep start pressed (%.2f A): backing off %.0f mm and retrying",
-                  (double)base, (double)kHomeReprobeBackMm);
-            glideTo(_status.pos - dir * kHomeReprobeBackMm * scale, kHomeFastMmS, 4000u);
+                  (double)base, (double)(2.0f * kHomeReprobeBackMm));
+            glideTo(_status.pos - dir * 2.0f * kHomeReprobeBackMm * scale, kHomeFastMmS, 6000u);
             return sweepToStall(dir, speed_mm_s, bound_mm, pos_out, true);
         }
         SLOGW("mlink", "sweep start still pressed (%.2f A) after back-off -- "
@@ -812,11 +814,28 @@ constexpr float    kStallA         = 2.5f;    // free run 0.05-0.10 A, pinned 3.
 constexpr uint32_t kStallMs        = 5000;
 constexpr float    kStallStillCps  = 200.0f;  // ~1 mm/s: "the demand is not moving"
 constexpr float    kStallUnwindMmS = 10.0f;
+constexpr float    kStallMinErrMm   = 2.0f;   // less: a load on a held position
+constexpr float    kStallOvershootMm = 30.0f; // past the onset point = wrong way
 }  // namespace
 
 void MlinkServoDriver::stallGuard(uint32_t now) {
     if (++_guard_div < 10) return;   // 10 Hz on the 10 ms tick
     _guard_div = 0;
+    if (!_status_fresh) return;   // one stale poll: judge on the next tick
+    if (!_current.isReady()) _current.init();
+    if (!_current.isReady()) return;
+    const float amps  = fabsf(_current.readCurrentA());
+    const float scale = AIM_STEPS_PER_MM;
+
+    // Press onset, tracked ALWAYS: the homing ritual is where the demand most
+    // often runs into a wall, and a ritual that aborts pressed hands the
+    // following error to this guard.
+    if (amps > kStallA) {
+        if (!_press_on) { _press_on = true; _press_from = _status.pos; }
+    } else {
+        _press_on = false;
+    }
+
     if (_homing || _state == kStateEstop) {
         _stall_since_ms = 0;
         if (_relieving) {   // the unwind retarget dies with the relief
@@ -826,28 +845,36 @@ void MlinkServoDriver::stallGuard(uint32_t now) {
         }
         return;
     }
-    if (!_status_fresh) return;   // one stale poll: judge on the next tick
-    if (!_current.isReady()) _current.init();
-    if (!_current.isReady()) return;
-    const float amps  = fabsf(_current.readCurrentA());
-    const float scale = AIM_STEPS_PER_MM;
-    if (fabsf(_status.vel) >= kStallStillCps)
-        _move_dir = (_status.vel > 0.0f) ? 1.0f : -1.0f;
 
     if (_relieving) {
         const float unwound_mm = fabsf(_status.pos - _relief_from) / scale;
+        const float owed_mm    = fabsf(_relief_from - _press_from) / scale;
         const uint32_t relief_ms = uint32_t(getMaxRailMm() / kStallUnwindMmS * 1000.0f) + 10000u;
         if (amps < kStallA * 0.5f) {
             _relieving = false;
             stop();
             SLOGW("mlink", "STALL relieved: %.2f A after %.1f mm of unwind; homed dropped, re-home",
                   (double)amps, (double)unwound_mm);
+        } else if (!_relief_flipped && unwound_mm > owed_mm + kStallOvershootMm) {
+            // Past the onset point by a margin with the current still up: the
+            // shaft is on the other side. Turn around once, with the error the
+            // wrong way added to what is owed.
+            _relief_flipped = true;
+            _relief_dir  = -_relief_dir;
+            _press_from  = _relief_from;
+            _relief_from = _status.pos;
+            _rt_target   = _status.pos + _relief_dir * getMaxRailMm() * scale;
+            _rt_dirty    = true;
+            SLOGE("mlink", "STALL unwind: %.2f A after %.1f mm the wrong way; reversing",
+                  (double)amps, (double)unwound_mm);
         } else if ((now - _relief_t0 > 300u && _state != kStateRunning) ||
-                   now - _relief_t0 > relief_ms) {
+                   now - _relief_t0 > relief_ms ||
+                   (_relief_flipped && unwound_mm > owed_mm + kStallOvershootMm)) {
             _relieving = false;
-            SLOGE("mlink", "STALL not relieved: %.2f A after %.1f mm of unwind (%s); e-stop",
+            SLOGE("mlink", "STALL not relieved: %.2f A after %.1f mm of unwind (%s); e-stop, "
+                  "CUT MOTOR POWER: an e-stop holds the following error",
                   (double)amps, (double)unwound_mm,
-                  _state != kStateRunning ? "renderer idle" : "timeout");
+                  _state != kStateRunning ? "renderer idle" : "both directions tried");
             emergencyStop();
         }
         return;
@@ -859,22 +886,28 @@ void MlinkServoDriver::stallGuard(uint32_t now) {
     if (now - _stall_since_ms < kStallMs) return;
 
     _stall_since_ms = 0;
-    _homed = false;   // the arbiter refuses commands from here; re-home is the exit
-    if (_move_dir == 0.0f) {
-        SLOGE("mlink", "STALL: %.2f A for %u ms with the demand still at %.0f and no motion "
-              "on record to unwind; e-stop", (double)amps, unsigned(kStallMs), (double)_status.pos);
-        emergencyStop();
+    const float err_mm = (_press_from - _status.pos) / scale;
+    if (fabsf(err_mm) < kStallMinErrMm) {
+        // The demand has not moved since the current rose: a load leaning on a
+        // held position, not a following error. Nothing to unwind. Reported,
+        // not acted on (operator ruling 2026-09-15: a user fighting is use).
+        SLOGW_EVERY_MS(5000, "mlink", "load: %.2f A holding at %.0f with the demand unmoved "
+                       "since the current rose; not a stall", (double)amps, (double)_status.pos);
         return;
     }
-    SLOGE("mlink", "STALL: %.2f A for %u ms with the demand still at %.0f -- unwinding %s "
-          "until the current drops", (double)amps, unsigned(kStallMs), (double)_status.pos,
-          _move_dir > 0.0f ? "-" : "+");
-    _relieving   = true;
-    _relief_t0   = now;
-    _relief_from = _status.pos;
+    _homed = false;   // the arbiter refuses commands from here; re-home is the exit
+    _relieving      = true;
+    _relief_flipped = false;
+    _relief_t0      = now;
+    _relief_from    = _status.pos;
+    _relief_dir     = err_mm > 0.0f ? 1.0f : -1.0f;
+    SLOGE("mlink", "STALL: %.2f A for %u ms with the demand still at %.0f, %.1f mm past where "
+          "the current rose -- unwinding %s until the current drops", (double)amps,
+          unsigned(kStallMs), (double)_status.pos, (double)fabsf(err_mm),
+          _relief_dir > 0.0f ? "+" : "-");
     // Refreshed, not one-shot: the homed drop re-centers the window on the
     // arbiter's next tick and the refresh re-clamps the target into it.
-    _rt_target  = _status.pos - _move_dir * getMaxRailMm() * scale;
+    _rt_target  = _status.pos + _relief_dir * getMaxRailMm() * scale;
     _rt_v       = kStallUnwindMmS * scale;
     _rt_a       = 40.0f * kHomeFastMmS * scale;   // sharp stop when it lands
     _rt_valid   = true;

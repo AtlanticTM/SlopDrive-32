@@ -849,7 +849,10 @@ void MlinkServoDriver::stallGuard(uint32_t now) {
     if (_relieving) {
         const float unwound_mm = fabsf(_status.pos - _relief_from) / scale;
         const float owed_mm    = fabsf(_relief_from - _press_from) / scale;
-        const uint32_t relief_ms = uint32_t(getMaxRailMm() / kStallUnwindMmS * 1000.0f) + 10000u;
+        // Two rail lengths: the first way plus the turnaround. There is no
+        // motor power cut on the product, so the unwind is the ONLY release;
+        // it runs to the rail ends before giving up.
+        const uint32_t relief_ms = uint32_t(2.0f * getMaxRailMm() / kStallUnwindMmS * 1000.0f) + 10000u;
         if (amps < kStallA * 0.5f) {
             _relieving = false;
             stop();
@@ -868,13 +871,14 @@ void MlinkServoDriver::stallGuard(uint32_t now) {
             SLOGE("mlink", "STALL unwind: %.2f A after %.1f mm the wrong way; reversing",
                   (double)amps, (double)unwound_mm);
         } else if ((now - _relief_t0 > 300u && _state != kStateRunning) ||
-                   now - _relief_t0 > relief_ms ||
-                   (_relief_flipped && unwound_mm > owed_mm + kStallOvershootMm)) {
+                   now - _relief_t0 > relief_ms) {
+            // Rail end reached (or two rails of time) with the current still
+            // up: nothing on the demand side releases this. Mechanical.
             _relieving = false;
-            SLOGE("mlink", "STALL not relieved: %.2f A after %.1f mm of unwind (%s); e-stop, "
-                  "CUT MOTOR POWER: an e-stop holds the following error",
-                  (double)amps, (double)unwound_mm,
-                  _state != kStateRunning ? "renderer idle" : "both directions tried");
+            SLOGE("mlink", "STALL not relieved: %.2f A after %.1f mm of unwind%s (%s); "
+                  "nothing left to unwind, e-stop", (double)amps, (double)unwound_mm,
+                  _relief_flipped ? " both ways" : "",
+                  _state != kStateRunning ? "renderer idle" : "timeout");
             emergencyStop();
         }
         return;

@@ -61,6 +61,12 @@ public:
             _clear_pending.store(true, std::memory_order_release);
     }
     bool checkPushToHome() override { return false; }
+    // 0x1020 energy: the INA228's hardware accumulator, refreshed at 1 Hz by
+    // the stall guard's cadence (one I2C read on motorTask).
+    float getBusEnergyWh() const override { return _current.cachedEnergyWh(); }
+    void  resetPowerStats() override { _current.resetPeaks(); }
+    const SessionOdometer* odometer() const override { return &_odo; }
+    void  resetOdometer() override { _odo.reset(); }
 
     void enable() override;
     void disable() override {}
@@ -180,6 +186,7 @@ private:
     bool     _press_on = false;
     float    _press_from = 0.0f;
     uint8_t  _guard_div = 0;
+    uint8_t  _energy_div = 0;
     void stallGuard(uint32_t now);
     // kOpFlashVersion was sent; the NEXT reply carries the RP fw string over
     // the status tail (kFlashStatusOffVersion). The C-8 instrument for the
@@ -265,6 +272,7 @@ private:
     bool     _homed = false;
     bool     _homing = false;
     CurrentSensor _current;    // INA228 on the carrier (behind the ISO1640)
+    SessionOdometer _odo;      // fed once per RP status in applyStatus()
     uint8_t  _blend = 1;
     float    _max_speed_mm_s = 0.0f;
     float    _accel_mm_s2 = 0.0f;

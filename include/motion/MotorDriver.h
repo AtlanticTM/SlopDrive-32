@@ -18,6 +18,7 @@
 //   counts); nativePerMm() derives from mmToNative().
 
 #include <cstdint>
+#include "SessionOdometer.h"
 
 #include "sloplog/sloplog.h"
 
@@ -211,6 +212,10 @@ public:
     // accumulator — back to zero. Called on home and by the reset-session
     // control. No-op on drivers without a monitor.
     virtual void    resetPowerStats()   {}
+    // Session odometer (0x1020), fed by the backend from its own position
+    // samples; null when the backend has none. Glue mirrors it into state.
+    virtual const SessionOdometer* odometer() const { return nullptr; }
+    virtual void    resetOdometer()     {}
 
 
 

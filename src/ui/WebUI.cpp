@@ -309,6 +309,7 @@ void WebUI::resetSessionStats() {
     _state.session_distance_mm.store(0.0f, std::memory_order_relaxed);
     _state.stroke_count.store(0, std::memory_order_relaxed);
     _state.session_start_ms = millis();
+    _motor.resetOdometer();
     _motor.resetPowerStats();   // zero the INA228 Wh accumulator + software peaks
     SLOGI("ui", "Session stats reset :3");
 }
@@ -348,46 +349,11 @@ void WebUI::refreshServoReadback() {
 
 void WebUI::captureTelemetry(float position_mm, float target_mm, float raw_mm,
                              float encoder_mm) {
-    // ---- Session odometer stats (single-writer: this 240Hz timer task) ------
-    // Derive live/peak speed, accumulate distance, and count strokes (direction
-    // reversals) straight from the position stream. Cheap float math; publishes
-    // to SystemState atomics that the 0x06 STATS frame + SESSION card read.
-    {
-        static float    last_pos_mm = position_mm;
-        static uint32_t last_us     = (uint32_t)(esp_timer_get_time() & 0xFFFFFFFFu);
-        static float    spd_ema     = 0.0f;
-        static int8_t   last_dir    = 0;
-        uint32_t now_us = (uint32_t)(esp_timer_get_time() & 0xFFFFFFFFu);
-        float dt = (float)(now_us - last_us) * 1e-6f;      // seconds
-        if (dt > 1e-4f && dt < 1.0f) {                     // ignore stalls/wraps
-            float dpos  = position_mm - last_pos_mm;
-            float adpos = fabsf(dpos);
-            if (adpos > 0.002f) {                          // ignore sub-2µm jitter
-                _state.session_distance_mm.store(
-                    _state.session_distance_mm.load(std::memory_order_relaxed) + adpos,
-                    std::memory_order_relaxed);
-            }
-            // Speed only on full-width ticks: when the esp_timer fires late and
-            // then bursts, the catch-up callback arrives with a sub-ms dt while
-            // dpos stays step-quantized (~0.049mm/step) — inst comes out 10%+
-            // high and the session PEAK ratchets above the real dispatch
-            // ceiling (a stat the UI must never overstate). Nominal tick is
-            // 4.17ms; anything under ~2.5ms is a burst artifact, skip it.
-            if (dt > 2.5e-3f) {
-                float inst = adpos / dt;                    // instantaneous mm/s
-                spd_ema += 0.25f * (inst - spd_ema);        // ~17ms time constant
-                _state.live_speed_mm_s.store(spd_ema, std::memory_order_relaxed);
-                if (spd_ema > _state.max_speed_mm_s.load(std::memory_order_relaxed))
-                    _state.max_speed_mm_s.store(spd_ema, std::memory_order_relaxed);
-                // A "stroke" = a direction reversal with meaningful travel.
-                int8_t dir = (dpos > 0.05f) ? 1 : (dpos < -0.05f) ? -1 : last_dir;
-                if (dir != 0 && last_dir != 0 && dir != last_dir)
-                    _state.stroke_count.fetch_add(1, std::memory_order_relaxed);
-                last_dir = dir;
-            }
-        }
-        last_pos_mm = position_mm;
-        last_us     = now_us;
+    if (const SessionOdometer* o = _motor.odometer()) {
+        _state.session_distance_mm.store(o->distanceMm(), std::memory_order_relaxed);
+        _state.stroke_count.store(o->strokes(), std::memory_order_relaxed);
+        _state.live_speed_mm_s.store(o->liveMmS(), std::memory_order_relaxed);
+        _state.max_speed_mm_s.store(o->peakMmS(), std::memory_order_relaxed);
     }
 
     portENTER_CRITICAL_ISR(&_telemetry_mux);

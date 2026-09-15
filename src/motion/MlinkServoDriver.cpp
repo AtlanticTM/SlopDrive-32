@@ -294,6 +294,9 @@ void MlinkServoDriver::applyStatus(const StatusV2& s) {
         SLOGI("mlink", "RP underran -> SETTLE (expected at stream end)");
     _slave_flags = s.flags;
     _state = s.state;
+    // The RP's own stamp: receipt time on this side jitters by the poll
+    // cadence, which is 10 percent of a 20 ms speed window.
+    _odo.feed(-s.pos / AIM_STEPS_PER_MM, s.clock_t1);
 
     // Counters are PER-INTERVAL and reset on preload, so the lifetime total
     // lives here and nowhere else (MotionLinkProtocol.h, StatusV2).
@@ -826,6 +829,7 @@ void MlinkServoDriver::stallGuard(uint32_t now) {
     if (!_current.isReady()) return;
     const float amps  = fabsf(_current.readCurrentA());
     const float scale = AIM_STEPS_PER_MM;
+    if (++_energy_div >= 10) { _energy_div = 0; _current.readEnergyWh(); }   // 1 Hz
 
     // Press onset, tracked ALWAYS: the homing ritual is where the demand most
     // often runs into a wall, and a ritual that aborts pressed hands the

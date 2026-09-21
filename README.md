@@ -1,5 +1,16 @@
 # SlopDrive-32
 
+> **ARCHIVED 2026-09-21 -- the ESP32-S3 era reference implementation.** The
+> ecosystem was renamed and moved on: the protocol is **Valence**
+> (`../Valence`, formerly SlopSync), the machine firmware is **Valence Drive**
+> (`../ValenceDrive`, ESP32-P4 on the OSSM Flagship board), and the client is
+> **Phosphor** (`../Phosphor`, formerly the `webui/` here). This repo is kept
+> as history and as the S3-era reference the Valence Drive doctrine cites. Its
+> `lib/slopsync` symlink and `slopsync.pin` point at a library that no longer
+> exists under that name, so it does not build from a fresh checkout by
+> design; check out the Valence repo at the pinned sha under a folder named
+> `SlopSync` if you need to.
+
 Open-source ESP32-S3 / ESP32-C5 firmware for a capstan-drum linear stroke
 machine. The custom controller PCB carries a main ESP32-S3 brain plus an
 onboard ESP32-C5-Zero coprocessor. Clients drive it over **SlopSync**, this

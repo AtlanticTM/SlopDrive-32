@@ -2,10 +2,10 @@
 
 > **ARCHIVED 2026-09-21 -- the ESP32-S3 era reference implementation.** The
 > ecosystem was renamed and moved on: the protocol is **Valence**
-> (`../Valence`, formerly SlopSync), the machine firmware is **Valence Drive**
-> (`../ValenceDrive`, ESP32-P4 on the OSSM Flagship board), and the client is
+> (`../Valence`, formerly SlopSync), the machine firmware is **Nucleus**
+> (`../Nucleus`, ESP32-P4 on the OSSM Flagship board), and the client is
 > **Phosphor** (`../Phosphor`, formerly the `webui/` here). This repo is kept
-> as history and as the S3-era reference the Valence Drive doctrine cites. It
+> as history and as the S3-era reference the Nucleus doctrine cites. It
 > is self-contained: `lib/slopsync` is a vendored snapshot of the protocol
 > library at the sha in `slopsync.pin`, so the archive builds with no sibling
 > checkout [verified 2026-09-21 -- pio test -e native exit 0, pio run -e

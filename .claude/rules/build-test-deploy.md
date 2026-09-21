@@ -224,3 +224,18 @@ reinstalls framework packages, which has twice left
 needed a second invocation to reconfigure. A failed first build after a
 `custom_sdkconfig` edit is not necessarily a real failure. Run it again before
 diagnosing.
+
+**Corrected 2026-09-20 (flagship_p4 bring-up, sd-1bi.3):** off CAN be expressed,
+in Kconfig's own spelling. `espidf.py`'s `extract_flag_name` parses
+`# CONFIG_X is not set` as flag `X` and REPLACES the source line with it (log:
+`Replace: CONFIG_COMPILER_OPTIMIZATION_SIZE=y with: # ... is not set`). The
+line cannot sit in `platformio.ini`, where a leading `#` opens a comment; it
+rides in through `custom_sdkconfig = file://<path>`. Needed for a Kconfig
+CHOICE (two `=y` members left standing resolve to the default, measured:
+`PERF=y` added, `SIZE` kept winning). **The trap behind the trap:** the
+corrected `sdkconfig.defaults` is still ignored while a stale
+`sdkconfig.<env>` exists, because IDF only takes a default for a key the real
+sdkconfig lacks, and pioarduino deletes that file only on the framework
+REINSTALL path (`arduino.py:453`). Delete `sdkconfig.<env>` (generated,
+gitignored) and rebuild. None of this applies to a pure `framework = espidf`
+project, where `sdkconfig.defaults` is the native home.

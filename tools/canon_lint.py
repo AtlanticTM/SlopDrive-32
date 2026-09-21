@@ -525,9 +525,15 @@ def run_pin_check():
     except OSError:
         return [("pin-missing", "slopsync.pin", 0, "", "slopsync.pin is missing")]
 
+    # ARCHIVED 2026-09-21: the sibling was renamed to Valence and this repo
+    # consumes a vendored snapshot of lib/slopsync at the pinned sha instead
+    # (platformio.ini). The snapshot's presence is the whole check; the
+    # sibling, whatever it is called now, is no longer consulted.
+    if (ROOT / "lib" / "slopsync" / "library.json").is_file():
+        return []
     if not SIBLING.is_dir():
         return [("pin-sibling-missing", "../SlopSync", 0, "",
-                 "sibling checkout not found next to this repo -- clone SlopSync alongside SlopDrive-32")]
+                 "neither the sibling checkout nor the vendored lib/slopsync snapshot is present")]
 
     r = subprocess.run(["git", "rev-parse", "HEAD"], cwd=SIBLING,
                        capture_output=True, text=True)
